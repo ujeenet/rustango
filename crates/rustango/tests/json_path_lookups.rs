@@ -70,11 +70,13 @@ fn single_key_emits_json_extract_on_sqlite_and_mysql() {
     let my = my(&e).unwrap();
     let lite = sqlite(&e).unwrap();
     assert!(
-        my.contains("JSON_UNQUOTE(NULLIF(JSON_EXTRACT(`data`, '$.city'), CAST('null' AS JSON)))"),
+        my.contains(
+            r#"JSON_UNQUOTE(NULLIF(JSON_EXTRACT(`data`, '$."city"'), CAST('null' AS JSON)))"#
+        ),
         "MySQL JSON_UNQUOTE form: {my}"
     );
     assert!(
-        lite.contains(r#"json_extract("data", '$.city')"#),
+        lite.contains(r#"json_extract("data", '$."city"')"#),
         "SQLite json_extract: {lite}"
     );
 }
@@ -96,12 +98,12 @@ fn multi_key_chain_emits_dotted_path_on_mysql_and_sqlite() {
     let lite = sqlite(&e).unwrap();
     assert!(
         my.contains(
-            "JSON_UNQUOTE(NULLIF(JSON_EXTRACT(`data`, '$.address.city'), CAST('null' AS JSON)))"
+            r#"JSON_UNQUOTE(NULLIF(JSON_EXTRACT(`data`, '$."address"."city"'), CAST('null' AS JSON)))"#
         ),
         "MySQL: {my}"
     );
     assert!(
-        lite.contains(r#"json_extract("data", '$.address.city')"#),
+        lite.contains(r#"json_extract("data", '$."address"."city"')"#),
         "SQLite: {lite}"
     );
 }
@@ -127,9 +129,9 @@ fn array_index_step_emits_per_dialect_form() {
         pg.contains(r#""data" -> $1 -> 0 ->> $2"#),
         "PG indexed: {pg}"
     );
-    // MySQL/SQLite use `$.items[0].name`.
-    assert!(my.contains("'$.items[0].name'"), "MySQL indexed: {my}");
-    assert!(lite.contains("'$.items[0].name'"), "SQLite indexed: {lite}");
+    // MySQL/SQLite use `$."items"[0]."name"`.
+    assert!(my.contains(r#"'$."items"[0]."name"'"#), "MySQL indexed: {my}");
+    assert!(lite.contains(r#"'$."items"[0]."name"'"#), "SQLite indexed: {lite}");
 }
 
 #[test]

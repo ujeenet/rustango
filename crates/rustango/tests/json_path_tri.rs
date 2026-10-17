@@ -309,9 +309,23 @@ async fn json_object_numbers_compare_by_value(pool: &Pool) {
     }
 }
 
+/// A key starting with a digit is a valid path step on every backend (#1436).
+async fn a_digit_led_key_matches(pool: &Pool) {
+    Demo {
+        id: Auto::Unset,
+        data: serde_json::json!({"2fa": "on", "e1": "x"}),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("seed");
+    assert_eq!(count_text_eq(pool, "2fa", "on").await, 1);
+    assert_eq!(count_text_eq(pool, "e1", "x").await, 1);
+}
+
 tri_dialect_test! {
     setup: seeded,
     scenarios: [
+        a_digit_led_key_matches,
         json_object_numbers_compare_by_value,
         json_path_equals_null_and_reordered_object,
         json_as_text_compares_with_a_number,

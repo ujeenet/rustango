@@ -2093,7 +2093,7 @@ fn write_pg_utc_arg(b: &mut Sql<'_>, arg: &crate::core::Expr) -> Result<(), SqlE
 /// and binds each key as a parameter.
 ///
 /// MySQL and SQLite use one `json_extract` call with a path string
-/// like `$.k1.k2[0]`. Both require a literal there, so the path is
+/// like `$."k1"."k2"[0]`. Both require a literal there, so the path is
 /// inlined. To keep that safe, keys must match `[A-Za-z0-9_]`;
 /// anything else returns `OpNotSupportedInDialect`.
 fn write_json_path(
@@ -2199,7 +2199,7 @@ fn check_json_path(
     Ok(())
 }
 
-/// The checked MySQL / SQLite `$.<k>.<k>[<n>]` path string.
+/// The checked MySQL / SQLite `$."<k>"."<k>"[<n>]` path string.
 fn json_path_text(
     path: &[crate::core::JsonPathStep],
     dialect: &'static str,
@@ -2209,9 +2209,11 @@ fn json_path_text(
     let mut json_path = String::from("$");
     for step in path {
         match step {
+            // Quoted: MySQL rejects a bare `$.2fa` (#1436). The safe set keeps `"` out.
             JsonPathStep::Key(k) => {
-                json_path.push('.');
+                json_path.push_str(".\"");
                 json_path.push_str(k);
+                json_path.push('"');
             }
             JsonPathStep::Index(n) => {
                 if *n < 0 {

@@ -158,6 +158,10 @@ A key absent from a fixture entry now takes the column default instead of NULL. 
 
 `has_key("a.b")` now looks for the key `a.b`, as on PostgreSQL, not for `b` under `a`; `*` no longer matches any key.
 
+### MySQL / SQLite JSON paths are quoted (#1436)
+
+`json_path` emits `'$."a"."b"'` instead of `'$.a.b'`. Rows are the same; only tests that match the SQL text need updating.
+
 ### `auto_now` fields change in memory on save (#1173)
 
 After `save` / `save_pool` / `save_on` / `save_tx` the `auto_now` field holds the stored timestamp, not the value it had before. `upsert` / `upsert_on` now do the same, and no longer write a hand-set `auto_now` value (#1438).

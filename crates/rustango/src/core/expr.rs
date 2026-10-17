@@ -222,8 +222,8 @@ pub enum Expr {
         ty: super::field_type::FieldType,
     },
     /// JSON path extraction — `<source> -> 'k1' -> 'k2' ->> 'k3'` on
-    /// PG, `JSON_UNQUOTE(JSON_EXTRACT(<source>, '$.k1.k2.k3'))` on
-    /// MySQL, `json_extract(<source>, '$.k1.k2.k3')` on SQLite.
+    /// PG, `JSON_UNQUOTE(JSON_EXTRACT(<source>, '$."k1"."k2"."k3"'))` on
+    /// MySQL, `json_extract(<source>, '$."k1"."k2"."k3"')` on SQLite.
     /// `as_text = true` asks for the unwrapped text form; `false`
     /// keeps the JSON-typed form for further chaining.
     /// With `as_text`, a JSON null reads as SQL NULL on every backend.
@@ -246,7 +246,7 @@ pub enum Expr {
 pub enum JsonPathStep {
     /// Object key lookup. Emitted as a quoted SQL literal on PG
     /// (`-> 'name'`) and inside the path string on MySQL / SQLite
-    /// (`$.name`). A key may only hold ASCII letters, digits and `_`.
+    /// (`$."name"`). A key may only hold ASCII letters, digits and `_`.
     /// The writer rejects anything else, because the path is inlined
     /// and must stay injection-safe.
     Key(String),

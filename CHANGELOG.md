@@ -12,6 +12,10 @@ On a saved row it bound the old in-memory timestamp, so the conflict UPDATE wrot
 
 The text key was type-checked against the JSON column and refused with `TypeMismatch`.
 
+### Fixed — MySQL JSON paths accept a key that starts with a digit (#1436)
+
+MySQL / SQLite path keys are quoted (`$."2fa"`), so `json_path(F("data"), &["2fa"], ..)` no longer fails with MySQL error 3143.
+
 ### Fixed — `annotate_count_children` keeps the parent queryset (#1415, #1288)
 
 It counts children in a correlated subquery, so a filtered, joined or limited parent queryset no longer fails with GROUP BY before WHERE, and a child pk not named `id` works.
