@@ -12,6 +12,10 @@ It counts children in a correlated subquery, so a filtered, joined or limited pa
 
 A missing `pk` or field is left out of the INSERT instead of bound as NULL, so PostgreSQL assigns the id and a column default applies.
 
+### Fixed — MySQL JSON `has_key` / `has_any_keys` / `has_all_keys` match a literal key (#1228)
+
+The key is quoted into the path, so `first-name` or `2fa` no longer fail with error 3143 and `a.b` or `*` no longer match nested or any keys.
+
 ## [0.60.9] — 2026-10-18
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

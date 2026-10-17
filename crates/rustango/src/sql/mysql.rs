@@ -617,14 +617,9 @@ impl Dialect for MySql {
     }
 
     fn write_json_has_key(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {
-        // `JSON_CONTAINS_PATH(col, 'one', '$.key')` is MySQL's
-        // top-level key check. `CONCAT('$.', ?)` builds the path
-        // from the bound value.
-        sql.push_str("JSON_CONTAINS_PATH(");
-        sql.push_str(qualified_col);
-        sql.push_str(", 'one', CONCAT('$.', ");
-        sql.push_str(placeholder);
-        sql.push_str("))");
+        // `JSON_CONTAINS_PATH(col, 'one', '$."key"')` is MySQL's
+        // top-level key check.
+        write_my_json_has_keys(sql, qualified_col, &[placeholder], "one");
     }
 
     fn write_json_has_any_keys(
@@ -876,10 +871,10 @@ fn write_my_set_insert_id(sql: &mut String, id: &str, value: &str) {
 /// Shared body of [`MySql::write_json_has_any_keys`] /
 /// [`MySql::write_json_has_all_keys`]. `mode` is `"one"` for "any key
 /// matches" or `"all"` for "every key matches".
-fn write_my_json_has_keys(
+fn write_my_json_has_keys<P: AsRef<str>>(
     sql: &mut String,
     qualified_col: &str,
-    placeholders: &[String],
+    placeholders: &[P],
     mode: &'static str,
 ) {
     sql.push_str("JSON_CONTAINS_PATH(");
@@ -887,10 +882,12 @@ fn write_my_json_has_keys(
     sql.push_str(", '");
     sql.push_str(mode);
     sql.push('\'');
+    // `JSON_QUOTE` makes the bound key one literal member, as PG's `?`
+    // reads it; bare, `a.b` or `*` is a path and `2fa` a syntax error (#1228).
     for p in placeholders {
-        sql.push_str(", CONCAT('$.', ");
-        sql.push_str(p);
-        sql.push(')');
+        sql.push_str(", CONCAT('$.', JSON_QUOTE(");
+        sql.push_str(p.as_ref());
+        sql.push_str("))");
     }
     sql.push(')');
 }
@@ -1522,7 +1519,7 @@ mod tests {
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt
             .sql
-            .contains("JSON_CONTAINS_PATH(`meta`, 'one', CONCAT('$.', ?))"));
+            .contains("JSON_CONTAINS_PATH(`meta`, 'one', CONCAT('$.', JSON_QUOTE(?)))"));
     }
 
     #[test]
@@ -1557,7 +1554,7 @@ mod tests {
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt
             .sql
-            .contains("JSON_CONTAINS_PATH(`meta`, 'one', CONCAT('$.', ?), CONCAT('$.', ?))"));
+            .contains("JSON_CONTAINS_PATH(`meta`, 'one', CONCAT('$.', JSON_QUOTE(?)), CONCAT('$.', JSON_QUOTE(?)))"));
         assert_eq!(stmt.params.len(), 2);
     }
 
@@ -1593,7 +1590,7 @@ mod tests {
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt
             .sql
-            .contains("JSON_CONTAINS_PATH(`meta`, 'all', CONCAT('$.', ?), CONCAT('$.', ?))"));
+            .contains("JSON_CONTAINS_PATH(`meta`, 'all', CONCAT('$.', JSON_QUOTE(?)), CONCAT('$.', JSON_QUOTE(?)))"));
     }
 
     #[test]

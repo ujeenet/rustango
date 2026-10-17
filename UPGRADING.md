@@ -154,6 +154,10 @@ untouched.
 
 A key absent from a fixture entry now takes the column default instead of NULL. Write `"field": null` to store NULL.
 
+### MySQL JSON key checks are literal (#1228)
+
+`has_key("a.b")` now looks for the key `a.b`, as on PostgreSQL, not for `b` under `a`; `*` no longer matches any key.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more (#1411)

@@ -89,6 +89,39 @@ mod scenarios {
         assert_eq!(ids(rows), vec![1]);
     }
 
+    /// `has_key` and friends match a literal top-level key, not a path (#1228).
+    #[allow(dead_code)] // SQLite has no JSON key operators
+    pub async fn check_has_key_is_literal(pool: &Pool) {
+        Doc {
+            id: 4,
+            data: serde_json::json!({"first-name": 1, "2fa": 2, "a": {"b": 3}, "q\"x": 4}),
+            created: chrono::Utc::now(),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed");
+        let keys = |ks: &[&str]| SqlValue::List(ks.iter().map(|k| SqlValue::String((*k).into())).collect());
+        let cases = [
+            (Op::JsonHasKey, SqlValue::String("2fa".into()), vec![4]),
+            (Op::JsonHasKey, SqlValue::String("q\"x".into()), vec![4]),
+            (Op::JsonHasKey, SqlValue::String("a.b".into()), vec![]),
+            (Op::JsonHasKey, SqlValue::String("*".into()), vec![]),
+            (Op::JsonHasAnyKey, keys(&["first-name", "zz"]), vec![4]),
+            (Op::JsonHasAnyKey, keys(&["*"]), vec![]),
+            (Op::JsonHasAllKeys, keys(&["first-name", "2fa"]), vec![4]),
+            (Op::JsonHasAllKeys, keys(&["first-name", "a.b"]), vec![]),
+        ];
+        for (op, value, want) in cases {
+            let label = format!("{op:?} {value:?}");
+            let rows: Vec<Doc> = Doc::objects()
+                .filter_op("data", op, value)
+                .fetch(pool)
+                .await
+                .unwrap_or_else(|e| panic!("{label}: {e}"));
+            assert_eq!(ids(rows), want, "{label}");
+        }
+    }
+
     /// JSON array length — docs with at least two tags.
     pub async fn check_json_array_length(pool: &Pool) {
         let rows: Vec<Doc> = Doc::objects()
@@ -290,6 +323,7 @@ mod pg_live {
     pg_case!(check_quarter_dialect_matrix);
     pg_case!(check_dates_truncation);
     pg_case!(check_datetimes_truncation);
+    pg_case!(check_has_key_is_literal);
 }
 
 // --------------------------------------------------------------- SQLite
@@ -398,4 +432,5 @@ mod mysql_live {
     mysql_case!(check_quarter_dialect_matrix);
     mysql_case!(check_dates_truncation);
     mysql_case!(check_datetimes_truncation);
+    mysql_case!(check_has_key_is_literal);
 }
