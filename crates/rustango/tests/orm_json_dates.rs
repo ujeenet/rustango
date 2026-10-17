@@ -89,6 +89,38 @@ mod scenarios {
         assert_eq!(ids(rows), vec![1]);
     }
 
+    /// `has_key` and friends match a literal top-level key, not a path (#1228).
+    #[allow(dead_code)] // SQLite has no JSON key operators
+    pub async fn check_has_key_is_literal(pool: &Pool) {
+        Doc {
+            id: 4,
+            data: serde_json::json!({"first-name": 1, "2fa": 2, "a": {"b": 3}, "q\"x": 4}),
+            created: chrono::Utc::now(),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed");
+        use rustango::core::Column as _;
+        let cases = [
+            ("has 2fa", Doc::data.json_has_key("2fa"), vec![4]),
+            ("has q\"x", Doc::data.json_has_key("q\"x"), vec![4]),
+            ("has a.b", Doc::data.json_has_key("a.b"), vec![]),
+            ("has *", Doc::data.json_has_key("*"), vec![]),
+            ("any", Doc::data.json_has_any_key(["first-name", "zz"]), vec![4]),
+            ("any *", Doc::data.json_has_any_key(["*"]), vec![]),
+            ("all", Doc::data.json_has_all_keys(["first-name", "2fa"]), vec![4]),
+            ("all a.b", Doc::data.json_has_all_keys(["first-name", "a.b"]), vec![]),
+        ];
+        for (label, filter, want) in cases {
+            let rows: Vec<Doc> = Doc::objects()
+                .where_(filter)
+                .fetch(pool)
+                .await
+                .unwrap_or_else(|e| panic!("{label}: {e}"));
+            assert_eq!(ids(rows), want, "{label}");
+        }
+    }
+
     /// JSON array length — docs with at least two tags.
     pub async fn check_json_array_length(pool: &Pool) {
         let rows: Vec<Doc> = Doc::objects()
@@ -290,6 +322,7 @@ mod pg_live {
     pg_case!(check_quarter_dialect_matrix);
     pg_case!(check_dates_truncation);
     pg_case!(check_datetimes_truncation);
+    pg_case!(check_has_key_is_literal);
 }
 
 // --------------------------------------------------------------- SQLite
@@ -398,4 +431,5 @@ mod mysql_live {
     mysql_case!(check_quarter_dialect_matrix);
     mysql_case!(check_dates_truncation);
     mysql_case!(check_datetimes_truncation);
+    mysql_case!(check_has_key_is_literal);
 }

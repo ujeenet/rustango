@@ -4320,11 +4320,11 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         let mut values: Vec<crate::core::SqlValue> = Vec::new();
         let mut row_err: Option<String> = None;
         for f in schema.scalar_fields() {
-            let raw = fields_obj
-                .get(f.name)
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-            match json_to_sql_value(&raw, f) {
+            // An absent key takes the column default, not NULL (#1227).
+            let Some(raw) = fields_obj.get(f.name) else {
+                continue;
+            };
+            match json_to_sql_value(raw, f) {
                 Ok(v) => {
                     columns.push(f.column);
                     values.push(v);

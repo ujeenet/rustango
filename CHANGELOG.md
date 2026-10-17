@@ -4,6 +4,30 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `annotate_count_children` keeps the parent queryset (#1415, #1288)
+
+It counts children in a correlated subquery, so a filtered, joined or limited parent queryset no longer fails with GROUP BY before WHERE, and a child pk not named `id` works.
+
+### Fixed — `loaddata` leaves keys a fixture omits to the column default (#1227)
+
+A missing `pk` or field is left out of the INSERT instead of bound as NULL, so PostgreSQL assigns the id and a column default applies.
+
+### Fixed — MySQL JSON `has_key` / `has_any_keys` / `has_all_keys` match a literal key (#1228)
+
+The key is quoted into the path, so `first-name` or `2fa` no longer fail with error 3143 and `a.b` or `*` no longer match nested or any keys.
+
+### Fixed — `save` writes the `auto_now` stamp back into the struct (#1173)
+
+Every save path sets the field to the timestamp it binds, so a returned row carries the stored `updated_at`; `save_partial` stamps it only when named.
+
+### Fixed — a typed `ForeignKey<T>` takes `on_delete` (#1172)
+
+`#[rustango(on_delete = "cascade")] author: ForeignKey<Author>` now compiles and renders `ON DELETE CASCADE`; before, only a raw `fk = ".."` column could declare an action.
+
+### Fixed — `inspectdb` emits models that compile, with the right MySQL types (#1230)
+
+Defaults are Rust-escaped and lose only a top-level PG cast; MySQL literal defaults are quoted and expressions parenthesised. Mixed-case or keyword columns get a snake-case field plus `column = ".."`. MySQL types come from `COLUMN_TYPE`: only `tinyint(1)` is `bool`, unsigned ints widen with a TODO.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

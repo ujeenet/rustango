@@ -341,11 +341,10 @@ pub(crate) use row_to_json::{select_one_row_as_json_tx, select_rows_as_json_tx};
 /// N + 1:
 ///
 /// ```text
-///   SELECT parent.<every-column>, COUNT(child.<pk>) AS __annotated_count
-///   FROM parent
-///   LEFT JOIN child ON child.<fk_column> = parent.<pk>
-///   GROUP BY parent.<every-column>
-///   [WHERE / ORDER BY clauses from `parent_qs` apply]
+///   SELECT parent.<every-column>,
+///     (SELECT COUNT(*) FROM child WHERE child.<fk_column> = parent.<pk>)
+///       AS __annotated_count
+///   FROM parent [WHERE / ORDER BY / LIMIT from `parent_qs`]
 /// ```
 ///
 /// Handles one Count over one reverse-FK relation. For `Sum`, `Avg`
@@ -422,51 +421,21 @@ fn annotate_count_statement<P: Model>(
     child_table: &'static str,
     child_fk_column: &'static str,
 ) -> Result<super::CompiledStatement, ExecError> {
-    use std::fmt::Write as _;
     let select = parent_qs.compile()?;
-    let parent = select.model;
-    let pk_field = parent.primary_key().ok_or(ExecError::MissingPrimaryKey {
-        table: parent.table,
-    })?;
-    let q = |name: &str| d.quote_ident(name);
-
-    // Hand-built SQL: compile_select emits no GROUP BY or aggregate
-    // columns. Follows its conventions (qualified columns).
-    let cols: Vec<String> = parent
-        .scalar_fields()
-        .map(|f| format!("{}.{}", q(parent.table), q(f.column)))
-        .collect();
-    let cols = cols.join(", ");
-    let (parent_t, child_t) = (q(parent.table), q(child_table));
-    let mut sql = String::new();
-    let _ = write!(
-        sql,
-        "SELECT {cols}, COUNT({child_t}.{child_pk}) AS {count} FROM {parent_t} LEFT JOIN {child_t} ON {child_t}.{child_fk} = {parent_t}.{parent_pk}",
-        child_pk = q("id"),
-        count = q("__annotated_count"),
-        child_fk = q(child_fk_column),
-        parent_pk = q(pk_field.column),
-    );
-
-    // Forward WHERE / ORDER BY / LIMIT / OFFSET from the parent queryset.
-    let tail = super::writers::compile_where_order_tail(
-        d,
-        &select.where_clause,
-        select.search.as_ref(),
-        &select.order_by,
-        select.limit,
-        select.offset,
-        Some(parent.table),
-        Some(parent),
-    )?;
-
-    // GROUP BY before the WHERE tail.
-    let _ = write!(sql, " GROUP BY {cols}");
-    sql.push_str(&tail.sql);
-    Ok(super::CompiledStatement {
-        sql,
-        params: tail.params,
-    })
+    let pk_field = select
+        .model
+        .primary_key()
+        .ok_or(ExecError::MissingPrimaryKey {
+            table: select.model.table,
+        })?;
+    let child = super::writers::ChildCount {
+        child_table,
+        fk_column: child_fk_column,
+        parent_pk: pk_field.column,
+    };
+    Ok(super::writers::compile_select_with_child_count(
+        d, &select, child,
+    )?)
 }
 
 /// Prefetch children: fetch parents and, for each one,

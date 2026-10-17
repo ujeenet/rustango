@@ -150,6 +150,22 @@ untouched.
 
 ## Unreleased
 
+### `loaddata` omits missing fixture keys (#1227)
+
+A key absent from a fixture entry now takes the column default instead of NULL. Write `"field": null` to store NULL.
+
+### MySQL JSON key checks are literal (#1228)
+
+`has_key("a.b")` now looks for the key `a.b`, as on PostgreSQL, not for `b` under `a`; `*` no longer matches any key.
+
+### `auto_now` fields change in memory on save (#1173)
+
+After `save` / `save_pool` / `save_on` / `save_tx` the `auto_now` field holds the stored timestamp, not the value it had before.
+
+### `inspectdb` output changes (#1230)
+
+On MySQL a plain `tinyint` is now `i16` (only `tinyint(1)` is `bool`) and `int unsigned` is `i64`. A column that is not a lower-case identifier becomes a lower-case field with `column = ".."`. Re-run it rather than diffing old output.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more (#1411)
