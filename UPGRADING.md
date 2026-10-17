@@ -172,7 +172,7 @@ After `save` / `save_pool` / `save_on` / `save_tx` the `auto_now` field holds th
 
 ### `inspectdb` output changes (#1230)
 
-On MySQL a plain `tinyint` is now `i16` (only `tinyint(1)` is `bool`) and `int unsigned` is `i64`. A column that is not a lower-case identifier becomes a lower-case field with `column = ".."`. Re-run it rather than diffing old output.
+On MySQL a plain `tinyint` is now `i16` (only `tinyint(1)` is `bool`) and `int unsigned` is `i64`. A column that is not a lower-case identifier becomes a lower-case field with `column = ".."`. Re-run it rather than diffing old output. A repeated field name gets a `_2` suffix, and a `model` / `auto` table a `_` (#1439).
 
 ## 0.60.9
 

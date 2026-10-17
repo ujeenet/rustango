@@ -181,3 +181,38 @@ async fn inspectdb_emits_compiling_models_for_awkward_names_on_sqlite() {
     let squash = |s: &str| s.split_whitespace().collect::<String>();
     assert_eq!(squash(&out[start..end]), squash(ORDER_ITEMS), "got:\n{out}");
 }
+
+// What inspectdb must emit for the `model` table below (#1439).
+compiled_with_text! { MODEL_TABLE;
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "model")]
+    pub struct Model_ {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        pub name: String,
+    }
+}
+
+/// A `model` table does not shadow the derive it is emitted with (#1439).
+#[tokio::test]
+async fn inspectdb_renames_a_model_table_on_sqlite() {
+    let pool = make_pool().await;
+    sqlx::query(r#"CREATE TABLE "model" (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"#)
+        .execute(pool.as_sqlite().expect("sqlite"))
+        .await
+        .unwrap();
+    let mut buf: Vec<u8> = Vec::new();
+    rustango::migrate::manage::run_with_writer(
+        &pool,
+        std::path::Path::new("./migrations"),
+        vec!["inspectdb".into(), "--table".into(), "model".into()],
+        &mut buf,
+    )
+    .await
+    .expect("inspectdb_cmd");
+    let out = String::from_utf8(buf).expect("utf8 output");
+    let start = out.find("\n#[derive(Model").expect("a model") + 1;
+    let end = start + out[start..].find("\n}").expect("struct end") + 2;
+    let squash = |s: &str| s.split_whitespace().collect::<String>();
+    assert_eq!(squash(&out[start..end]), squash(MODEL_TABLE), "got:\n{out}");
+}

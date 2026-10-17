@@ -24,6 +24,10 @@ Tables made on first use, such as `rustango_admin_totp`, failed a full dump (and
 
 A set-operation parent failed with a column-count mismatch; off PostgreSQL a `distinct_on` parent lost the count column.
 
+### Fixed — `inspectdb` emits unique field names and no `struct Model` (#1439)
+
+Columns that map to one field name (`Name`, `name`) get `_2`, `_3`; tables named `model` or `auto` become `Model_` / `Auto_` so they don't shadow the imports.
+
 ### Fixed — `annotate_count_children` keeps the parent queryset (#1415, #1288)
 
 It counts children in a correlated subquery, so a filtered, joined or limited parent queryset no longer fails with GROUP BY before WHERE, and a child pk not named `id` works.

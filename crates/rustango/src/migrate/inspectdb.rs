@@ -1294,10 +1294,30 @@ pub(super) fn table_to_struct_name(table: &str) -> String {
         out.push_str("Unnamed");
     } else if out.starts_with(|c: char| c.is_ascii_digit()) {
         out.insert(0, 'T');
-    } else if out == "Self" {
+    } else if matches!(out.as_str(), "Self" | "Model" | "Auto") {
+        // `Model` / `Auto` would shadow the header's imports (#1439).
         out.push('_');
     }
     out
+}
+
+/// A field name per column; one that `sanitize_field_name` gave an
+/// earlier column takes the first free `_N` suffix (#1439).
+fn field_names(columns: &[ColumnRow]) -> Vec<String> {
+    let mut used = std::collections::HashSet::new();
+    columns
+        .iter()
+        .map(|col| {
+            let base = sanitize_field_name(&col.name);
+            let mut name = base.clone();
+            let mut n = 2;
+            while !used.insert(name.clone()) {
+                name = format!("{}_{n}", base.trim_start_matches("r#"));
+                n += 1;
+            }
+            name
+        })
+        .collect()
 }
 
 /// `s` as a Rust string literal, for the attribute values inspectdb writes.
@@ -1379,8 +1399,8 @@ fn write_view_model_with_dialect<W: Write>(
     writeln!(w, "#[derive(Model, Debug, Clone)]")?;
     writeln!(w, "#[rustango(table = {}, view)]", rust_str(view))?;
     writeln!(w, "pub struct {struct_name} {{")?;
-    for col in columns {
-        emit_field(w, col, None, &[], dialect)?;
+    for (col, name) in columns.iter().zip(field_names(columns)) {
+        emit_field_as(w, col, &name, None, &[], dialect)?;
     }
     writeln!(w, "}}")?;
     Ok(())
@@ -1407,16 +1427,29 @@ fn write_model_with_dialect<W: Write>(
     writeln!(w, "#[rustango(table = {})]", rust_str(table))?;
     writeln!(w, "pub struct {struct_name} {{")?;
     let pk_first = pk_columns.first().cloned();
-    for col in columns {
-        emit_field(w, col, pk_first.as_deref(), fks, dialect)?;
+    for (col, name) in columns.iter().zip(field_names(columns)) {
+        emit_field_as(w, col, &name, pk_first.as_deref(), fks, dialect)?;
     }
     writeln!(w, "}}")?;
     Ok(())
 }
 
+/// [`emit_field_as`] under the column's own sanitized name.
+#[cfg(test)]
 fn emit_field<W: Write>(
     w: &mut W,
     col: &ColumnRow,
+    pk_column: Option<&str>,
+    fks: &[(String, String)],
+    dialect: &str,
+) -> std::io::Result<()> {
+    emit_field_as(w, col, &sanitize_field_name(&col.name), pk_column, fks, dialect)
+}
+
+fn emit_field_as<W: Write>(
+    w: &mut W,
+    col: &ColumnRow,
+    field_name: &str,
     pk_column: Option<&str>,
     fks: &[(String, String)],
     dialect: &str,
@@ -1428,7 +1461,6 @@ fn emit_field<W: Write>(
         .find(|(local, _)| local == &col.name)
         .map(|(_, target)| target.as_str());
 
-    let field_name = sanitize_field_name(&col.name);
     let mut attrs: Vec<String> = Vec::new();
     if field_name.trim_start_matches("r#") != col.name {
         attrs.push(format!("column = {}", rust_str(&col.name)));
@@ -1715,6 +1747,28 @@ mod tests {
     }
 
     #[test]
+    fn field_names_never_repeat() {
+        let col = |name: &str| ColumnRow {
+            name: name.into(),
+            udt_name: "text".into(),
+            nullable: false,
+            max_length: None,
+            default: None,
+            is_auto: false,
+        };
+        let cols = [col("Name"), col("name"), col("name_2"), col("type"), col("TYPE")];
+        let mut buf: Vec<u8> = Vec::new();
+        write_model(&mut buf, "people", &cols, &[], &[]).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        let fields: Vec<&str> = out
+            .lines()
+            .filter_map(|l| l.strip_prefix("    pub ")?.split(':').next())
+            .collect();
+        assert_eq!(fields, ["name", "name_2", "name_2_2", "r#type", "type_2"], "{out}");
+        assert!(out.contains(r#"column = "TYPE""#), "{out}");
+    }
+
+    #[test]
     fn table_to_struct_name_pascalcases() {
         assert_eq!(table_to_struct_name("user"), "User");
         assert_eq!(table_to_struct_name("user_profile"), "UserProfile");
@@ -1724,6 +1778,8 @@ mod tests {
         assert_eq!(table_to_struct_name("order.items$2"), "OrderItems2");
         assert_eq!(table_to_struct_name("2fa_codes"), "T2faCodes");
         assert_eq!(table_to_struct_name("self"), "Self_");
+        assert_eq!(table_to_struct_name("model"), "Model_");
+        assert_eq!(table_to_struct_name("auto"), "Auto_");
     }
 
     #[test]
