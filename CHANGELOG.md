@@ -26,7 +26,7 @@ Deleting a row other rows still point at is a 409 from ViewSet `destroy`, `Delet
 
 ### Fixed — an untouched admin edit keeps what was stored (#1273)
 
-The edit form shows PG array, range, hstore, vector and geometry values, a nullable JSON `{}`, and a stored value outside `choices`; a field submitted as it was shown is not rewritten. The dynamic JSON rows (viewset, admin) now carry those PG values instead of `null`.
+The edit form shows PG array, range, hstore, vector and geometry values, a nullable JSON `{}`, and a stored value outside `choices`; such a field submitted as it was shown is not rewritten. The dynamic JSON rows (viewset, admin) now carry those PG values instead of `null`.
 
 ## [0.60.9] — 2026-10-16
 

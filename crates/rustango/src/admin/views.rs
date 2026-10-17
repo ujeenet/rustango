@@ -2142,9 +2142,23 @@ fn default_locked_flags(
     }
 }
 
-/// On update: a value the form echoed back as it was shown is not
-/// rewritten, so a lossy prefill cannot change it (#1273); `auto_now`
-/// columns are restamped.
+/// Whether `shown`, the prefill of `f`, may parse back to another value
+/// than the stored one (#1273).
+fn prefill_is_lossy(f: &FieldSchema, shown: &str) -> bool {
+    use crate::core::FieldType as T;
+    match f.ty {
+        T::DateTime | T::Array(_) | T::Range(_) | T::HStore | T::Vector(_) | T::Geometry(_) => true,
+        // `{}` and JSON null both show empty.
+        T::Json => shown.is_empty(),
+        _ => f
+            .choices
+            .is_some_and(|c| !shown.is_empty() && !c.iter().any(|(v, _)| *v == shown)),
+    }
+}
+
+/// On update: a lossy prefill the form echoed back as it was shown is not
+/// rewritten (#1273); other fields are, so a stale form still wins.
+/// `auto_now` columns are restamped.
 fn keep_unchanged(
     model: &'static crate::core::ModelSchema,
     form: &HashMap<String, String>,
@@ -2155,6 +2169,9 @@ fn keep_unchanged(
         let submitted = form.get(f.name).map(String::as_str);
         let unchanged = before.zip(submitted).is_some_and(|(row, sent)| {
             let shown = render::render_value_for_input_json(row, f);
+            if !prefill_is_lossy(f, &shown) {
+                return false;
+            }
             // A textarea submits CRLF line breaks.
             let sent = sent.replace("\r\n", "\n");
             sent == shown

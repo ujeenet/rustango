@@ -162,9 +162,9 @@ Inline panels stop at 100 rows and the audit trail at 20 entries; a custom `deta
 
 ViewSet `destroy`, `DeleteView` and `delete_selected` answer an FK refusal with 409 (was 500, or 400 for `delete_selected`). `CreateView` / `UpdateView` answer FK / NOT NULL / CHECK refusals with the form and 422 (was 500).
 
-### Admin edit writes only changed fields (#1273)
+### Admin edit keeps untouched lossy fields (#1273)
 
-A field the form sends back as shown is left out of the UPDATE, so a concurrent change to it is no longer overwritten. Dynamic JSON rows now hold PG array/range/hstore/vector/point values where they held `null`.
+A PG array/range/hstore/vector/geometry field, an empty-looking JSON field or an out-of-`choices` value that the form sends back as shown is left out of the UPDATE. Dynamic JSON rows now hold PG array/range/hstore/vector/point values where they held `null`.
 
 ## 0.60.9
 
