@@ -312,16 +312,22 @@ pub async fn render_for_parent(
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
 ) -> Result<Vec<InlinePanel>, ExecError> {
-    render_for_parent_in(pool, parent_model, parent_pk, None).await
+    let panels = render_for_parent_in(pool, parent_model, parent_pk, None, None).await?;
+    Ok(panels.into_iter().map(|(p, _)| p).collect())
 }
 
-/// [`render_for_parent`] limited to child rows the request's queryset hooks allow.
+/// Child rows an admin detail page lists per inline (#1339).
+pub(crate) const DETAIL_ROWS: usize = 100;
+
+/// [`render_for_parent`] limited to child rows the request's queryset hooks
+/// allow and, with `cap`, to that many rows plus the child-list query for the rest.
 pub(crate) async fn render_for_parent_in(
     pool: &Pool,
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
     parts: Option<&Parts>,
-) -> Result<Vec<InlinePanel>, ExecError> {
+    cap: Option<usize>,
+) -> Result<Vec<(InlinePanel, Option<String>)>, ExecError> {
     let registrations = for_parent_table(parent_model.table);
     if registrations.is_empty() {
         return Ok(Vec::new());
@@ -348,18 +354,28 @@ pub(crate) async fn render_for_parent_in(
             .into_iter()
             .collect();
 
-        // #562 — by_pk constructor + struct-update for order_by and
-        // limit=None.
-        let (rows, _) = visible_child_rows(
+        // One row past `cap` tells whether any are left out.
+        let (mut rows, fetched) = visible_child_rows(
             pool,
             SelectQuery {
                 order_by: order_pk,
-                limit: None,
+                limit: cap.map(|c| c as i64 + 1),
                 ..SelectQuery::by_pk(child_model, inline.fk_column, parent_pk.clone())
             },
             parts,
         )
         .await?;
+        let fk_name = child_model
+            .field_by_column(inline.fk_column)
+            .map_or(inline.fk_column, |f| f.name);
+        let more = cap.and_then(|c| {
+            cut_rows(
+                &mut rows,
+                fetched,
+                c,
+                &[(fk_name, parent_pk.to_display_string())],
+            )
+        });
 
         let field_labels = display_fields.iter().map(|f| f.name.to_owned()).collect();
         let pk_column = pk_field.map(|p| p.column).unwrap_or("id");
@@ -397,7 +413,7 @@ pub(crate) async fn render_for_parent_in(
         };
         let empty = rendered_rows.is_empty();
 
-        panels.push(InlinePanel {
+        let panel = InlinePanel {
             label,
             child_table: child_model.table.to_owned(),
             kind: match inline.kind {
@@ -407,7 +423,8 @@ pub(crate) async fn render_for_parent_in(
             field_labels,
             rows: rendered_rows,
             empty,
-        });
+        };
+        panels.push((panel, more));
     }
     Ok(panels)
 }
@@ -429,16 +446,18 @@ pub async fn render_generic_for_parent(
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
 ) -> Result<Vec<InlinePanel>, ExecError> {
-    render_generic_for_parent_in(pool, parent_model, parent_pk, None).await
+    let panels = render_generic_for_parent_in(pool, parent_model, parent_pk, None, None).await?;
+    Ok(panels.into_iter().map(|(p, _)| p).collect())
 }
 
-/// [`render_generic_for_parent`] limited to child rows the request's queryset hooks allow.
+/// [`render_generic_for_parent`] limited as [`render_for_parent_in`] is.
 pub(crate) async fn render_generic_for_parent_in(
     pool: &Pool,
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
     parts: Option<&Parts>,
-) -> Result<Vec<InlinePanel>, ExecError> {
+    cap: Option<usize>,
+) -> Result<Vec<(InlinePanel, Option<String>)>, ExecError> {
     let registrations = generic_for_parent_table(parent_model.table);
     if registrations.is_empty() {
         return Ok(Vec::new());
@@ -485,7 +504,7 @@ pub(crate) async fn render_generic_for_parent_in(
             .collect();
 
         // #562 — composite AND (ct + pk); struct-update over ::new.
-        let (rows, _) = visible_child_rows(
+        let (mut rows, fetched) = visible_child_rows(
             pool,
             SelectQuery {
                 where_clause: WhereExpr::And(vec![
@@ -501,11 +520,28 @@ pub(crate) async fn render_generic_for_parent_in(
                     }),
                 ]),
                 order_by: order_pk,
+                limit: cap.map(|c| c as i64 + 1),
                 ..SelectQuery::new(child_model)
             },
             parts,
         )
         .await?;
+        let name_of = |column: &'static str| {
+            child_model
+                .field_by_column(column)
+                .map_or(column, |f| f.name)
+        };
+        let more = cap.and_then(|c| {
+            cut_rows(
+                &mut rows,
+                fetched,
+                c,
+                &[
+                    (name_of(inline.ct_column), ct_id.to_string()),
+                    (name_of(inline.pk_column), parent_pk_i64.to_string()),
+                ],
+            )
+        });
 
         let field_labels = display_fields.iter().map(|f| f.name.to_owned()).collect();
         let pk_column = pk_field.map(|p| p.column).unwrap_or("id");
@@ -543,7 +579,7 @@ pub(crate) async fn render_generic_for_parent_in(
         };
         let empty = rendered_rows.is_empty();
 
-        panels.push(InlinePanel {
+        let panel = InlinePanel {
             label,
             child_table: child_model.table.to_owned(),
             kind: match inline.kind {
@@ -553,7 +589,8 @@ pub(crate) async fn render_generic_for_parent_in(
             field_labels,
             rows: rendered_rows,
             empty,
-        });
+        };
+        panels.push((panel, more));
     }
     Ok(panels)
 }

@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Admin detail page shows fewer rows (#1339)
+
+Inline panels stop at 100 rows and the audit trail at 20 entries; a custom `detail.html` / `_inline_panels.html` can show `panel.more_rows_filter` as the link to the rest.
+
 ### Admin signals fire for inline child rows (#1324)
 
 `admin_pre_save` / `admin_post_save` / `admin_pre_delete` / `admin_post_delete` receivers now also see the child tables of inline rows; filter on `ctx.table` if a receiver assumed only top-level models.

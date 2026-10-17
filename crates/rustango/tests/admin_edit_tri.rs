@@ -97,6 +97,51 @@ async fn setup(pool: &Pool) {
     fresh_table::<SLine>(pool).await;
 }
 
+/// The detail page lists the first 100 inline rows and 20 audit entries,
+/// with links to the rest (#1339).
+async fn detail_page_bounds_inline_rows_and_history(pool: &Pool) {
+    let mut o = SOrder {
+        id: Auto::default(),
+        name: "o".into(),
+    };
+    o.insert_pool(pool).await.expect("order");
+    let o = *o.id.get().expect("pk");
+    for qty in 0..101 {
+        let mut l = SLine {
+            id: Auto::default(),
+            order_id: o,
+            qty,
+        };
+        l.insert_pool(pool).await.expect("line");
+    }
+    rustango::audit::ensure_table_pool(pool)
+        .await
+        .expect("audit table");
+    rustango::audit::AuditLog::delete_where("entity_table", "aed_sorder", pool)
+        .await
+        .expect("clear audit rows");
+    for i in 0..21 {
+        let mut e = rustango::audit::AuditLog {
+            id: Auto::default(),
+            entity_table: "aed_sorder".into(),
+            entity_pk: o.to_string(),
+            operation: "update".into(),
+            source: "test".into(),
+            changes: serde_json::json!({ "n": i }),
+            occurred_at: chrono::Utc::now(),
+        };
+        e.insert_pool(pool).await.expect("audit row");
+    }
+    let (status, html) = send(pool, "GET", &format!("/aed_sorder/{o}"), "").await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert_eq!(html.matches(r#"href="/aed_sline/"#).count(), 100, "inline rows");
+    assert!(
+        html.contains(&format!(r#"href="/aed_sline?order_id={o}""#)),
+        "no link to the other rows"
+    );
+    assert_eq!(html.matches(r#"class="audit-changes""#).count(), 20, "audit rows");
+}
+
 /// Signal receivers are process-global; the SQLite arm takes no live lock.
 fn signal_lock() -> &'static tokio::sync::Mutex<()> {
     static M: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -327,6 +372,7 @@ tri_dialect_test! {
         untouched_json_and_unknown_choice_are_kept,
         inline_rows_take_no_auto_or_generated_input,
         inline_child_writes_send_admin_signals,
+        detail_page_bounds_inline_rows_and_history,
     ],
 }
 

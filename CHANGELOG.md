@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Performance — the admin detail page bounds inline rows and history (#1339)
+
+Each inline panel lists its first 100 rows with a link to the child list for the rest, and the audit trail shows the newest 20 entries beside its "View full history" link.
+
 ### Fixed — admin inline child writes send admin signals (#1324)
 
 Each inline row an edit adds, changes or deletes sends `admin_pre_*` before the write and `admin_post_*` after the commit, after the parent's. A new row's `admin_post_save` carries its PK.

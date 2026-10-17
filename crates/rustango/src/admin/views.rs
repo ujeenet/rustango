@@ -1773,25 +1773,48 @@ pub(crate) async fn detail_view(
     // registration order. Best-effort: a fetch error, such as a
     // child table missing on this tenant, drops the panels to empty
     // instead of failing the page.
-    let mut inline_panels =
-        super::inlines::render_for_parent_in(&state.pool, model, pk_value.clone(), Some(&parts))
-            .await
-            .unwrap_or_default();
-    let generic_panels =
-        super::inlines::render_generic_for_parent_in(&state.pool, model, pk_value, Some(&parts))
-            .await
-            .unwrap_or_default();
+    // Each panel lists its first rows and links the child list for the rest (#1339).
+    let cap = Some(super::inlines::DETAIL_ROWS);
+    let mut inline_panels = super::inlines::render_for_parent_in(
+        &state.pool,
+        model,
+        pk_value.clone(),
+        Some(&parts),
+        cap,
+    )
+    .await
+    .unwrap_or_default();
+    let generic_panels = super::inlines::render_generic_for_parent_in(
+        &state.pool,
+        model,
+        pk_value,
+        Some(&parts),
+        cap,
+    )
+    .await
+    .unwrap_or_default();
     inline_panels.extend(generic_panels);
-    inline_panels.retain(|p| lookup_model(&state, &p.child_table).is_some());
+    inline_panels.retain(|(p, _)| lookup_model(&state, &p.child_table).is_some());
     let inline_panels_ctx: Vec<serde_json::Value> = inline_panels
         .into_iter()
-        .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null))
+        .map(|(p, more)| {
+            let mut v = serde_json::to_value(p).unwrap_or(serde_json::Value::Null);
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("more_rows_filter".to_owned(), more.into());
+            }
+            v
+        })
         .collect();
 
     // Audit-trail panel for this row, only for users who may read the
-    // log. Best-effort: a missing audit table renders no panel.
+    // log. Best-effort: a missing audit table renders no panel. The
+    // newest entries only; the full history is one link away (#1339).
     let audit_entries = match state.audit_reader() {
-        Some(reader) => reader.for_entity(model.table, &pk_raw).await,
+        Some(reader) => {
+            reader
+                .recent_for_entity(model.table, &pk_raw, super::audit::DETAIL_ROWS)
+                .await
+        }
         None => Ok(Vec::new()),
     };
     let audit_entries_ctx: Vec<serde_json::Value> = match audit_entries {

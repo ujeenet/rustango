@@ -8,6 +8,12 @@
         <section class="admin-inline admin-inline-{{ panel.kind }}"
                  data-child-table="{{ panel.child_table }}">
             <h2>{{ panel.label }}</h2>
+            {% if panel.more_rows_filter %}
+                <p class="inline-more">
+                    Showing the first {{ panel.rows | length }} rows.
+                    <a href="{{ admin_prefix }}/{{ panel.child_table }}?{{ panel.more_rows_filter }}">See all in the list</a>.
+                </p>
+            {% endif %}
             {% if panel.empty %}
                 <p>
                     <em>No related rows.</em>

@@ -25,6 +25,9 @@ use crate::audit::AuditPerm;
 /// admin list views (50 by default).
 const AUDIT_PAGE_SIZE: i64 = 50;
 
+/// Audit entries a row's detail page shows; the feed has the rest (#1339).
+pub(crate) const DETAIL_ROWS: i64 = 20;
+
 /// Cap on facet values rendered per column on `/__audit`. Same knob as
 /// `FACET_TRUNCATE` in the per-table list views. Opt out for one column
 /// with `?facet_show_all=<col>`.
@@ -55,14 +58,20 @@ impl AuditReader<'_> {
         crate::audit::count_in(self.pool, filter, self.tables.as_deref()).await
     }
 
-    /// One row's history. The caller already checked `{table}.view` and
-    /// the row's scope and `view` hook.
-    pub(crate) async fn for_entity(
+    /// The newest `limit` entries of one row's history. The caller already
+    /// checked `{table}.view` and the row's scope and `view` hook.
+    pub(crate) async fn recent_for_entity(
         &self,
         table: &str,
         pk: &str,
+        limit: i64,
     ) -> Result<Vec<crate::audit::AuditEntry>, sqlx::Error> {
-        crate::audit::fetch_for_entity_pool(self.pool, table, pk).await
+        let filter = crate::audit::AuditFilter {
+            entity_table: Some(table.to_owned()),
+            entity_pk: Some(pk.to_owned()),
+            ..Default::default()
+        };
+        crate::audit::list_in(self.pool, &filter, None, limit, 0).await
     }
 
     pub(crate) async fn facet_counts(
