@@ -175,7 +175,8 @@ async fn inspectdb_emits_compiling_models_for_awkward_names_on_sqlite() {
     .await
     .expect("inspectdb_cmd");
     let out = String::from_utf8(buf).expect("utf8 output");
-    let start = out.find("#[derive(Model").expect("a model");
+    // At a line start: the header comment names `#[derive(Model)]` too.
+    let start = out.find("\n#[derive(Model").expect("a model") + 1;
     let end = start + out[start..].find("\n}").expect("struct end") + 2;
     let squash = |s: &str| s.split_whitespace().collect::<String>();
     assert_eq!(squash(&out[start..end]), squash(ORDER_ITEMS), "got:\n{out}");
