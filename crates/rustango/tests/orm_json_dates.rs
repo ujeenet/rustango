@@ -100,21 +100,20 @@ mod scenarios {
         .insert_pool(pool)
         .await
         .expect("seed");
-        let keys = |ks: &[&str]| SqlValue::List(ks.iter().map(|k| SqlValue::String((*k).into())).collect());
+        use rustango::core::Column as _;
         let cases = [
-            (Op::JsonHasKey, SqlValue::String("2fa".into()), vec![4]),
-            (Op::JsonHasKey, SqlValue::String("q\"x".into()), vec![4]),
-            (Op::JsonHasKey, SqlValue::String("a.b".into()), vec![]),
-            (Op::JsonHasKey, SqlValue::String("*".into()), vec![]),
-            (Op::JsonHasAnyKey, keys(&["first-name", "zz"]), vec![4]),
-            (Op::JsonHasAnyKey, keys(&["*"]), vec![]),
-            (Op::JsonHasAllKeys, keys(&["first-name", "2fa"]), vec![4]),
-            (Op::JsonHasAllKeys, keys(&["first-name", "a.b"]), vec![]),
+            ("has 2fa", Doc::data.json_has_key("2fa"), vec![4]),
+            ("has q\"x", Doc::data.json_has_key("q\"x"), vec![4]),
+            ("has a.b", Doc::data.json_has_key("a.b"), vec![]),
+            ("has *", Doc::data.json_has_key("*"), vec![]),
+            ("any", Doc::data.json_has_any_key(["first-name", "zz"]), vec![4]),
+            ("any *", Doc::data.json_has_any_key(["*"]), vec![]),
+            ("all", Doc::data.json_has_all_keys(["first-name", "2fa"]), vec![4]),
+            ("all a.b", Doc::data.json_has_all_keys(["first-name", "a.b"]), vec![]),
         ];
-        for (op, value, want) in cases {
-            let label = format!("{op:?} {value:?}");
+        for (label, filter, want) in cases {
             let rows: Vec<Doc> = Doc::objects()
-                .filter_op("data", op, value)
+                .where_(filter)
                 .fetch(pool)
                 .await
                 .unwrap_or_else(|e| panic!("{label}: {e}"));
