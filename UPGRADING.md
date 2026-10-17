@@ -162,6 +162,10 @@ A key absent from a fixture entry now takes the column default instead of NULL. 
 
 After `save` / `save_pool` / `save_on` / `save_tx` the `auto_now` field holds the stored timestamp, not the value it had before.
 
+### `inspectdb` output changes (#1230)
+
+On MySQL a plain `tinyint` is now `i16` (only `tinyint(1)` is `bool`) and `int unsigned` is `i64`. A column that is not a lower-case identifier becomes a lower-case field with `column = ".."`. Re-run it rather than diffing old output.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more (#1411)

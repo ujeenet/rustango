@@ -24,6 +24,10 @@ Every save path sets the field to the timestamp it binds, so a returned row carr
 
 `#[rustango(on_delete = "cascade")] author: ForeignKey<Author>` now compiles and renders `ON DELETE CASCADE`; before, only a raw `fk = ".."` column could declare an action.
 
+### Fixed — `inspectdb` emits models that compile, with the right MySQL types (#1230)
+
+Defaults are Rust-escaped and lose only a top-level PG cast; MySQL literal defaults are quoted and expressions parenthesised. Mixed-case or keyword columns get a snake-case field plus `column = ".."`. MySQL types come from `COLUMN_TYPE`: only `tinyint(1)` is `bool`, unsigned ints widen with a TODO.
+
 ## [0.60.9] — 2026-10-18
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.
