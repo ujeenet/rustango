@@ -3758,6 +3758,10 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
     for entry in selected {
         let schema = entry.schema;
         let dotted_name = dotted_model_name(entry);
+        // Unmanaged tables such as TOTP are made on first use: none yet, no rows (#1429).
+        if !schema.managed && !runner::try_table_resolves(pool, schema.table).await? {
+            continue;
+        }
 
         // These decode as `null`, so a reload would wipe them (#1911).
         if let Some(f) = schema.scalar_fields().find(|f| !dumpable(f.ty)) {

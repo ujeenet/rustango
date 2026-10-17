@@ -16,6 +16,10 @@ The text key was type-checked against the JSON column and refused with `TypeMism
 
 MySQL / SQLite path keys are quoted (`$."2fa"`), so `json_path(F("data"), &["2fa"], ..)` no longer fails with MySQL error 3143.
 
+### Fixed — `dumpdata` skips an unmanaged table that is not created yet (#1429)
+
+Tables made on first use, such as `rustango_admin_totp`, failed a full dump (and every `--tenant` dump) until then; a missing one now has no rows.
+
 ### Fixed — `annotate_count_children` keeps the parent queryset (#1415, #1288)
 
 It counts children in a correlated subquery, so a filtered, joined or limited parent queryset no longer fails with GROUP BY before WHERE, and a child pk not named `id` works.

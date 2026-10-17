@@ -617,27 +617,17 @@ async fn data_verbs_stay_in_their_tenant(pool: &Pool) {
     assert!(!a.contains("carol"), "the load reached another tenant: {a}");
 
     // No --model: only that side's models. Unmanaged tables (TOTP and the
-    // like) are made on first use, so they are left out.
-    let full = |tenant: Option<&'static str>| {
-        let mut args = vec!["dumpdata", "--indent", "0"];
-        args.extend(tenant.map(|s| ["--tenant", s]).into_iter().flatten());
-        let scope = match tenant {
-            Some(_) => rustango::core::ModelScope::Tenant,
-            None => rustango::core::ModelScope::Registry,
-        };
-        for m in rustango::migrate::registered_models() {
-            if !m.managed && m.scope == scope {
-                args.extend(["--exclude", m.name]);
-            }
-        }
-        let env = &env;
-        let dir = dir.clone();
-        async move { env.run_out(&dir, &args).await }
-    };
-    let all = full(Some("mt-a")).await.expect("full tenant dump");
+    // like) are made on first use; a missing one is skipped (#1429).
+    let all = env
+        .run_out(&dir, &["dumpdata", "--tenant", "mt-a", "--indent", "0"])
+        .await
+        .expect("full tenant dump");
     assert!(all.contains("alice"), "{all}");
     assert!(!all.contains("mt-b") && !all.contains("bob"), "{all}");
-    let reg = full(None).await.expect("full registry dump");
+    let reg = env
+        .run_out(&dir, &["dumpdata", "--indent", "0"])
+        .await
+        .expect("full registry dump");
     assert!(reg.contains("mt-b") && !reg.contains("alice"), "{reg}");
 }
 
