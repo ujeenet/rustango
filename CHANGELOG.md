@@ -4,7 +4,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-## [0.60.9] — 2026-10-18
+## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.
 
@@ -78,7 +78,7 @@ A correlated subquery over another table runs as a plain `IN` again instead of a
 
 Unticking `active` on a `rustango_users` row stamps `sessions_revoked_at`, as for operators, so cookies and JWT refresh tokens stop working at once and stay dead after a reactivation.
 
-## [0.60.8] — 2026-10-17
+## [0.60.8] — 2026-10-16
 
 **Breaking:** `Dialect::write_conflict_clause` takes the bound column list; `InsertQuery`/`BulkInsertQuery` gain a `generated` field (both `#[non_exhaustive]`). See UPGRADING.
 
