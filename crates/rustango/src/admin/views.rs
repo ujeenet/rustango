@@ -2336,6 +2336,10 @@ pub(crate) async fn update_submit(
         change: true,
     })
     .await;
+    // One signal per inline row too, as for bulk actions (#1324).
+    for row in inline_plan.planned_rows() {
+        row.send(true).await;
+    }
     // "Before" is the locked row, "after" the form. The per-request
     // `with_source(User { id })` gives a "who changed what" trail. An
     // `audit(...)` model's entry commits with the UPDATE (#2060); others
@@ -2369,15 +2373,18 @@ pub(crate) async fn update_submit(
             return Ok(refused(write_error(model, &e)).into_response());
         }
     };
-    if let Err(e) = super::inlines::apply_plan_tx(&mut tx, &state.pool, inline_plan).await {
-        use super::inlines::InlineApplyError as E;
-        rollback_quietly(tx, model.table).await;
-        let why = match e {
-            E::Write { child, error } => write_error(child, &error),
-            E::MaxNum { child } => format!("{} allows no more rows here.", child.name),
-        };
-        return Ok(refused(format!("Nothing was saved: {why}")).into_response());
-    }
+    let child_rows = match super::inlines::apply_plan_tx(&mut tx, &state.pool, inline_plan).await {
+        Ok((_, rows)) => rows,
+        Err(e) => {
+            use super::inlines::InlineApplyError as E;
+            rollback_quietly(tx, model.table).await;
+            let why = match e {
+                E::Write { child, error } => write_error(child, &error),
+                E::MaxNum { child } => format!("{} allows no more rows here.", child.name),
+            };
+            return Ok(refused(format!("Nothing was saved: {why}")).into_response());
+        }
+    };
     if let Err(e) = tx.commit().await {
         return Ok(refused(write_error(model, &e.into())).into_response());
     }
@@ -2392,6 +2399,9 @@ pub(crate) async fn update_submit(
         change: true,
     })
     .await;
+    for row in child_rows {
+        row.send(false).await;
+    }
 
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_raw, &form);
     Ok(Redirect::to(&target).into_response())

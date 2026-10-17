@@ -1188,12 +1188,87 @@ enum InlineWrite {
     Update {
         query: crate::core::UpdateQuery,
         audit: Option<ChildAudit>,
+        pk: String,
     },
     Delete {
         query: InlineRemove,
         /// The entity PK the snapshot is filed under.
         audit: Option<String>,
+        pk: String,
     },
+}
+
+/// One child row an inline write touches, for its admin signals (#1324).
+pub(crate) enum ChildSignal {
+    Save {
+        table: &'static str,
+        pk: String,
+        change: bool,
+    },
+    Delete {
+        table: &'static str,
+        pk: String,
+    },
+}
+
+impl ChildSignal {
+    /// `admin_pre_*` when `pre`, else `admin_post_*`.
+    pub(crate) async fn send(self, pre: bool) {
+        use crate::signals::admin::{self as sig, AdminDeleteContext, AdminSaveContext};
+        match (self, pre) {
+            (Self::Save { table, pk, change }, true) => {
+                sig::send_admin_pre_save(AdminSaveContext { table, pk, change }).await;
+            }
+            (Self::Save { table, pk, change }, false) => {
+                sig::send_admin_post_save(AdminSaveContext { table, pk, change }).await;
+            }
+            (Self::Delete { table, pk }, true) => {
+                sig::send_admin_pre_delete(AdminDeleteContext { table, pk }).await;
+            }
+            (Self::Delete { table, pk }, false) => {
+                sig::send_admin_post_delete(AdminDeleteContext { table, pk }).await;
+            }
+        }
+    }
+}
+
+impl InlinePlan {
+    /// The rows this plan will write, for `admin_pre_*`; a new row's PK is
+    /// empty unless the form typed it.
+    pub(crate) fn planned_rows(&self) -> Vec<ChildSignal> {
+        let mut out = Vec::new();
+        for t in &self.targets {
+            let table = t.child.table;
+            for w in &t.existing {
+                out.push(match w {
+                    InlineWrite::Update { pk, .. } => ChildSignal::Save {
+                        table,
+                        pk: pk.clone(),
+                        change: true,
+                    },
+                    InlineWrite::Delete { pk, .. } => ChildSignal::Delete {
+                        table,
+                        pk: pk.clone(),
+                    },
+                });
+            }
+            for i in &t.inserts {
+                let pk = i
+                    .query
+                    .columns
+                    .iter()
+                    .position(|c| *c == t.pk.column)
+                    .map(|n| i.query.values[n].to_display_string())
+                    .unwrap_or_default();
+                out.push(ChildSignal::Save {
+                    table,
+                    pk,
+                    change: false,
+                });
+            }
+        }
+        out
+    }
 }
 
 /// A `soft_delete` child is stamped, as the main delete does (#2453).
@@ -1439,8 +1514,10 @@ async fn plan_target(
                 }
                 super::audit::audit_form(target.child, &cfg, &row, &written)
             });
+            // The new PK feeds the audit entry and `admin_post_save` (#1324).
+            let pk_readable = audited || target.pk.is_serial() || columns.contains(&target.pk.column);
             let mut query = crate::core::InsertQuery::new(target.child, columns, sql_values);
-            if audited {
+            if pk_readable {
                 query.returning = vec![target.pk.column];
             }
             out.inserts.push(InlineInsert { query, audit });
@@ -1465,6 +1542,7 @@ async fn plan_target(
             }
             // `row_where` holds the live-rows scope, so a stamp lands once.
             let audit = audited.then(|| pk.to_display_string());
+            let pk_text = pk.to_display_string();
             let query = match target.child.soft_delete_column {
                 Some(col) => {
                     let stamp = SqlValue::DateTime(chrono::Utc::now());
@@ -1480,7 +1558,11 @@ async fn plan_target(
                     target.row_where(pk),
                 )),
             };
-            out.existing.push(InlineWrite::Delete { query, audit });
+            out.existing.push(InlineWrite::Delete {
+                query,
+                audit,
+                pk: pk_text,
+            });
             continue;
         }
 
@@ -1511,6 +1593,7 @@ async fn plan_target(
             .map(|(column, value)| crate::core::Assignment::new(column, value))
             .collect();
         out.existing.push(InlineWrite::Update {
+            pk: pk.to_display_string(),
             query: crate::core::UpdateQuery::new(target.child, set, target.row_where(pk)),
             audit,
         });
@@ -1564,11 +1647,14 @@ pub(crate) async fn apply_plan_tx(
     tx: &mut crate::sql::PoolTx<'_>,
     pool: &Pool,
     plan: InlinePlan,
-) -> Result<InlineApplyOutcome, InlineApplyError> {
+) -> Result<(InlineApplyOutcome, Vec<ChildSignal>), InlineApplyError> {
     use crate::audit::{AuditOp, DiffEmit, RowDiffWrite};
     let mut outcome = InlineApplyOutcome::default();
+    // The rows written, for `admin_post_*` after the commit (#1324).
+    let mut written_rows = Vec::new();
     for target in plan.targets {
         let child = target.child;
+        let table = child.table;
         let refused = |error| InlineApplyError::Write { child, error };
         let fields: Vec<&'static FieldSchema> = child.scalar_fields().collect();
         // Locked in `tx`, so an entry records the row the write changes.
@@ -1584,13 +1670,24 @@ pub(crate) async fn apply_plan_tx(
         let mut deleted = 0usize;
         for write in target.existing {
             match write {
-                InlineWrite::Update { query, audit: None } => {
-                    crate::sql::update_tx(tx, &query).await.map_err(refused)?;
+                InlineWrite::Update {
+                    query,
+                    audit: None,
+                    pk,
+                } => {
+                    if crate::sql::update_tx(tx, &query).await.map_err(refused)? > 0 {
+                        written_rows.push(ChildSignal::Save {
+                            table,
+                            pk,
+                            change: true,
+                        });
+                    }
                     outcome.updated += 1;
                 }
                 InlineWrite::Update {
                     query,
                     audit: Some(audit),
+                    pk,
                 } => {
                     let written = crate::audit::update_one_with_row_diff_tx(
                         tx,
@@ -1605,16 +1702,18 @@ pub(crate) async fn apply_plan_tx(
                     )
                     .await
                     .map_err(refused)?;
-                    if let RowDiffWrite::Written {
-                        deferred: Some(entry),
-                    } = written
-                    {
-                        entries.push(entry);
+                    if let RowDiffWrite::Written { deferred } = written {
+                        entries.extend(deferred);
+                        written_rows.push(ChildSignal::Save {
+                            table,
+                            pk,
+                            change: true,
+                        });
                     }
                     outcome.updated += 1;
                 }
                 // 0 rows: deleted or moved since the plan was checked.
-                InlineWrite::Delete { query, audit } => {
+                InlineWrite::Delete { query, audit, pk } => {
                     let before = match &audit {
                         Some(_) => {
                             let select = locked(query.where_clause());
@@ -1628,6 +1727,7 @@ pub(crate) async fn apply_plan_tx(
                         continue;
                     }
                     deleted += 1;
+                    written_rows.push(ChildSignal::Delete { table, pk });
                     if let (Some(pk), Some(row)) = (audit, before) {
                         let entry = super::audit::admin_row_snapshot_entry(
                             child,
@@ -1647,12 +1747,23 @@ pub(crate) async fn apply_plan_tx(
             return Err(InlineApplyError::MaxNum { child });
         }
         for insert in target.inserts {
-            match insert.audit {
-                None => crate::sql::insert_tx(tx, &insert.query)
-                    .await
-                    .map_err(refused)?,
+            let pk = match insert.audit {
+                None if insert.query.returning.is_empty() => {
+                    crate::sql::insert_tx(tx, &insert.query)
+                        .await
+                        .map_err(refused)?;
+                    String::new()
+                }
+                None => {
+                    let returning = crate::sql::insert_returning_tx(tx, &insert.query)
+                        .await
+                        .map_err(refused)?;
+                    crate::sql::inserted_pk(&insert.query, &returning, target.pk)
+                        .map(|pk| pk.to_display_string())
+                        .unwrap_or_default()
+                }
                 Some(form) => {
-                    let (_, entry) = crate::audit::insert_one_with_entry_tx(
+                    let (pk, entry) = crate::audit::insert_one_with_entry_tx(
                         tx,
                         pool,
                         &insert.query,
@@ -1666,8 +1777,14 @@ pub(crate) async fn apply_plan_tx(
                     .await
                     .map_err(refused)?;
                     entries.extend(entry);
+                    pk.to_display_string()
                 }
-            }
+            };
+            written_rows.push(ChildSignal::Save {
+                table,
+                pk,
+                change: false,
+            });
             outcome.inserted += 1;
         }
         if !entries.is_empty() {
@@ -1676,7 +1793,7 @@ pub(crate) async fn apply_plan_tx(
                 .map_err(refused)?;
         }
     }
-    Ok(outcome)
+    Ok((outcome, written_rows))
 }
 
 // ============================================================ Editable generic rendering (issue #243)

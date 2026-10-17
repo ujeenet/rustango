@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Admin signals fire for inline child rows (#1324)
+
+`admin_pre_save` / `admin_post_save` / `admin_pre_delete` / `admin_post_delete` receivers now also see the child tables of inline rows; filter on `ctx.table` if a receiver assumed only top-level models.
+
 ### Refused deletes are 409, refused CBV writes 422 (#1134)
 
 ViewSet `destroy`, `DeleteView` and `delete_selected` answer an FK refusal with 409 (was 500, or 400 for `delete_selected`). `CreateView` / `UpdateView` answer FK / NOT NULL / CHECK refusals with the form and 422 (was 500).

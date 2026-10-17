@@ -58,12 +58,134 @@ rustango::register_admin_inline!(
     extra = 1,
 );
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_sorder")]
+#[allow(dead_code)]
+pub struct SOrder {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_sline")]
+#[allow(dead_code)]
+pub struct SLine {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "aed_sorder", on = "id")]
+    pub order_id: i64,
+    pub qty: i64,
+}
+
+rustango::register_admin_inline!(
+    parent = "aed_sorder",
+    child = "aed_sline",
+    fk = "order_id",
+    fields = &["qty"],
+);
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     fresh_table::<Doc>(pool).await;
     drop_table(pool, "aed_line").await;
+    drop_table(pool, "aed_sline").await;
     fresh_table::<Order>(pool).await;
     fresh_table::<Line>(pool).await;
+    fresh_table::<SOrder>(pool).await;
+    fresh_table::<SLine>(pool).await;
+}
+
+/// Signal receivers are process-global; the SQLite arm takes no live lock.
+fn signal_lock() -> &'static tokio::sync::Mutex<()> {
+    static M: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Inline child writes send one admin signal per row, pre and post (#1324).
+async fn inline_child_writes_send_admin_signals(pool: &Pool) {
+    use rustango::signals::admin as sig;
+    use std::sync::{Arc, Mutex};
+    let mut o = SOrder {
+        id: Auto::default(),
+        name: "o".into(),
+    };
+    o.insert_pool(pool).await.expect("order");
+    let o = *o.id.get().expect("pk");
+    let mut ids = Vec::new();
+    for qty in [1, 2] {
+        let mut l = SLine {
+            id: Auto::default(),
+            order_id: o,
+            qty,
+        };
+        l.insert_pool(pool).await.expect("line");
+        ids.push(*l.id.get().expect("pk"));
+    }
+    let _guard = signal_lock().lock().await;
+    sig::clear_all();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log = |tag: &'static str| {
+        let seen = seen.clone();
+        move |table: &'static str, pk: String, extra: &str| {
+            if table == "aed_sline" {
+                seen.lock().unwrap().push(format!("{tag} {pk}{extra}"));
+            }
+        }
+    };
+    let (a, b, c, d) = (
+        log("pre_save"),
+        log("post_save"),
+        log("pre_delete"),
+        log("post_delete"),
+    );
+    sig::connect_admin_pre_save(move |x| {
+        a(x.table, x.pk, if x.change { " change" } else { " add" });
+        async {}
+    });
+    sig::connect_admin_post_save(move |x| {
+        b(x.table, x.pk, if x.change { " change" } else { " add" });
+        async {}
+    });
+    sig::connect_admin_pre_delete(move |x| {
+        c(x.table, x.pk, "");
+        async {}
+    });
+    sig::connect_admin_post_delete(move |x| {
+        d(x.table, x.pk, "");
+        async {}
+    });
+    let form = format!(
+        "name=o&aed_sline-TOTAL_FORMS=3&aed_sline-INITIAL_FORMS=2\
+         &aed_sline-0-id={}&aed_sline-0-qty=5\
+         &aed_sline-1-id={}&aed_sline-1-qty=2&aed_sline-1-DELETE=on\
+         &aed_sline-2-qty=9",
+        ids[0], ids[1]
+    );
+    let (status, body) = send(pool, "POST", &format!("/aed_sorder/{o}"), &form).await;
+    sig::clear_all();
+    assert!(status.is_redirection(), "{status}: {body}");
+    let added = SLine::objects()
+        .fetch(pool)
+        .await
+        .expect("lines")
+        .into_iter()
+        .find(|l| l.qty == 9)
+        .expect("added row");
+    let added = *added.id.get().expect("pk");
+    let mut seen = seen.lock().unwrap().clone();
+    seen.sort();
+    let mut want = vec![
+        format!("pre_save {} change", ids[0]),
+        format!("pre_delete {}", ids[1]),
+        "pre_save  add".to_owned(),
+        format!("post_save {} change", ids[0]),
+        format!("post_delete {}", ids[1]),
+        format!("post_save {added} add"),
+    ];
+    want.sort();
+    assert_eq!(seen, want);
 }
 
 async fn seed_order(pool: &Pool) -> i64 {
@@ -204,6 +326,7 @@ tri_dialect_test! {
     scenarios: [
         untouched_json_and_unknown_choice_are_kept,
         inline_rows_take_no_auto_or_generated_input,
+        inline_child_writes_send_admin_signals,
     ],
 }
 
