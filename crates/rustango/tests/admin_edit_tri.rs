@@ -385,17 +385,22 @@ fn encode(pairs: &[(&str, String)]) -> String {
         .join("&")
 }
 
-/// A nullable `{}` and a value outside `choices` survive a save that
-/// only renames the row (#1273).
-async fn untouched_json_and_unknown_choice_are_kept(pool: &Pool) {
+/// Seed one doc, then rename it through the edit form as a browser would.
+async fn rename_through_the_form(pool: &Pool, meta: Option<serde_json::Value>, legacy: bool) -> Doc {
     let mut d = Doc {
         id: Auto::default(),
         name: "a".into(),
-        meta: Some(serde_json::json!({})),
-        status: "legacy".into(),
+        meta,
+        status: "draft".into(),
     };
     d.insert_pool(pool).await.expect("insert");
     let id = *d.id.get().expect("pk");
+    if legacy {
+        // Written before `choices` dropped it; the ORM refuses it now.
+        rustango::sql::raw_execute_pool(pool, "UPDATE aed_doc SET status = 'legacy'", Vec::new())
+            .await
+            .expect("legacy status");
+    }
     let (status, html) = send(pool, "GET", &format!("/aed_doc/{id}/edit"), "").await;
     assert_eq!(status, StatusCode::OK, "{html}");
     let form = encode(&[
@@ -407,14 +412,27 @@ async fn untouched_json_and_unknown_choice_are_kept(pool: &Pool) {
     assert!(status.is_redirection(), "{status}: {body}");
     let row = Doc::objects().fetch(pool).await.expect("fetch").remove(0);
     assert_eq!(row.name, "renamed");
+    row
+}
+
+/// A nullable `{}` survives a save that only renames the row (#1273).
+async fn untouched_nullable_json_object_is_kept(pool: &Pool) {
+    let row = rename_through_the_form(pool, Some(serde_json::json!({})), false).await;
     assert_eq!(row.meta, Some(serde_json::json!({})), "nullable {{}} lost");
+}
+
+/// A stored value outside `choices` survives a rename (#1273).
+async fn untouched_unknown_choice_is_kept(pool: &Pool) {
+    let row = rename_through_the_form(pool, None, true).await;
     assert_eq!(row.status, "legacy", "unknown choice overwritten");
+    assert_eq!(row.meta, None);
 }
 
 tri_dialect_test! {
     setup: setup,
     scenarios: [
-        untouched_json_and_unknown_choice_are_kept,
+        untouched_nullable_json_object_is_kept,
+        untouched_unknown_choice_is_kept,
         inline_rows_take_no_auto_or_generated_input,
         inline_child_writes_send_admin_signals,
         detail_page_bounds_inline_rows_and_history,
