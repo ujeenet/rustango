@@ -428,11 +428,52 @@ async fn untouched_unknown_choice_is_kept(pool: &Pool) {
     assert_eq!(row.meta, None);
 }
 
+/// A plain field sent as shown still overwrites a change made after the
+/// form loaded: only lossy prefills are left out of the UPDATE.
+async fn stale_form_still_wins(pool: &Pool) {
+    use rustango::signals::admin as sig;
+    let mut d = Doc {
+        id: Auto::default(),
+        name: "a".into(),
+        meta: None,
+        status: "draft".into(),
+    };
+    d.insert_pool(pool).await.expect("insert");
+    let id = *d.id.get().expect("pk");
+    let (status, html) = send(pool, "GET", &format!("/aed_doc/{id}/edit"), "").await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    let form = encode(&[
+        ("name", shown(&html, "name")),
+        ("meta", shown(&html, "meta")),
+        ("status", shown(&html, "status")),
+    ]);
+    let _guard = signal_lock().lock().await;
+    sig::clear_all();
+    // Another writer renames the row between the form's read and its UPDATE.
+    let other = pool.clone();
+    sig::connect_admin_pre_save(move |x| {
+        let other = other.clone();
+        async move {
+            if x.table == "aed_doc" {
+                let mut row = Doc::objects().fetch(&other).await.expect("fetch").remove(0);
+                row.name = "z".into();
+                row.save_pool(&other).await.expect("concurrent edit");
+            }
+        }
+    });
+    let (status, body) = send(pool, "POST", &format!("/aed_doc/{id}"), &form).await;
+    sig::clear_all();
+    assert!(status.is_redirection(), "{status}: {body}");
+    let row = Doc::objects().fetch(pool).await.expect("fetch").remove(0);
+    assert_eq!(row.name, "a", "the submitted value lost to a later write");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         untouched_nullable_json_object_is_kept,
         untouched_unknown_choice_is_kept,
+        stale_form_still_wins,
         inline_rows_take_no_auto_or_generated_input,
         inline_child_writes_send_admin_signals,
         detail_page_bounds_inline_rows_and_history,
