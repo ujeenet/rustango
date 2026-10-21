@@ -316,7 +316,7 @@ pub async fn render_for_parent(
     Ok(panels.into_iter().map(|(p, _)| p).collect())
 }
 
-/// Child rows an admin detail page lists per inline (#1339).
+/// Child rows an admin detail page lists per inline.
 pub(crate) const DETAIL_ROWS: usize = 100;
 
 /// [`render_for_parent`] limited to child rows the request's queryset hooks
@@ -942,7 +942,7 @@ fn render_prefixed_input(
     value: &str,
     (prefix, idx, kind): (&str, usize, crate::core::WriteKind),
 ) -> String {
-    // An auto or generated column is shown, never input (#1271).
+    // An auto or generated column is shown, never input.
     if !field.accepts_input(kind) {
         return format!(r#"<span class="readonly">{}</span>"#, html_escape(value));
     }
@@ -1122,7 +1122,7 @@ impl InlineTarget {
             .collect()
     }
 
-    /// The stored rows for `pks` in two reads at most (#1340): those under
+    /// The stored rows for `pks` in two reads at most: those under
     /// this parent, then which of the rest exist under another.
     async fn fetch_own_many(
         &self,
@@ -1278,7 +1278,7 @@ enum InlineWrite {
     },
 }
 
-/// One child row an inline write touches, for its admin signals (#1324).
+/// One child row an inline write touches, for its admin signals.
 pub(crate) enum ChildSignal {
     Save {
         table: &'static str,
@@ -1534,7 +1534,7 @@ async fn plan_target(
         deletes_needed: 0,
     };
     let is_new = |idx: usize, raw_pk: &str| initial.map_or(raw_pk.trim().is_empty(), |n| idx >= n);
-    // Every existing row's stored state in one read, not one per row (#1340).
+    // Every existing row's stored state in one read, not one per row.
     let existing_pks: Vec<SqlValue> = (0..total_forms)
         .filter_map(|idx| {
             let row = crate::forms::formset::row_payload(form, table, idx);
@@ -1609,7 +1609,7 @@ async fn plan_target(
                 }
                 super::audit::audit_form(target.child, &cfg, &row, &written)
             });
-            // The new PK feeds the audit entry and `admin_post_save` (#1324).
+            // The new PK feeds the audit entry and `admin_post_save`.
             let pk_readable = audited || target.pk.is_serial() || columns.contains(&target.pk.column);
             let mut query = crate::core::InsertQuery::new(target.child, columns, sql_values);
             if pk_readable {
@@ -1745,7 +1745,7 @@ pub(crate) async fn apply_plan_tx(
 ) -> Result<(InlineApplyOutcome, Vec<ChildSignal>), InlineApplyError> {
     use crate::audit::{AuditOp, DiffEmit, RowDiffWrite};
     let mut outcome = InlineApplyOutcome::default();
-    // The rows written, for `admin_post_*` after the commit (#1324).
+    // The rows written, for `admin_post_*` after the commit.
     let mut written_rows = Vec::new();
     for target in plan.targets {
         let child = target.child;

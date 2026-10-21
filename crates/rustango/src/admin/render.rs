@@ -100,7 +100,7 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
             }
         }
         FieldType::Json => {
-            // A nullable field saves "" as NULL, so its `{}` must show (#1273).
+            // A nullable field saves "" as NULL, so its `{}` must show.
             if !field.nullable && v == &serde_json::Value::Object(serde_json::Map::new()) {
                 String::new()
             } else {
@@ -110,7 +110,7 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
         // Decimal round-trips as a string via `row_to_json` to
         // preserve precision; Binary likewise (hex-encoded).
         FieldType::Decimal | FieldType::Binary => v.as_str().unwrap_or("").to_owned(),
-        // #341 — PG array: the comma list the form parser splits (#1273).
+        // #341 — PG array: the comma list the form parser splits.
         FieldType::Array(_) => v.as_array().map_or_else(
             || v.to_string(),
             |items| {
@@ -280,7 +280,7 @@ fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> St
         if field.nullable {
             out.push_str(r#"<option value=""></option>"#);
         }
-        // A stored value outside `choices` stays selected, so a save keeps it (#1273).
+        // A stored value outside `choices` stays selected, so a save keeps it.
         if !value.is_empty() && !choices.iter().any(|(v, _)| *v == value) {
             let _ = write!(out, r#"<option value="{val}" selected>{val}</option>"#);
         }

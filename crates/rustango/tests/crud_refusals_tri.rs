@@ -1,5 +1,5 @@
 //! ViewSet and template views answer FK / NOT NULL / CHECK refusals with
-//! a 409 or 422, never a 500 (#1134); a bulk create reads back in one select (#1340).
+//! a 409 or 422, never a 500; a bulk create reads back in one select.
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -38,7 +38,7 @@ pub struct Post {
     pub title: String,
 }
 
-const CSRF: &str = "crf1134-csrf-token-crf1134-csrf-token-crf11";
+const CSRF: &str = "crfcrfc-csrf-token-crfcrfc-csrf-token-crfcr";
 
 async fn setup(pool: &Pool) {
     rustango::testkit::matrix::drop_table(pool, Post::SCHEMA.table).await;
@@ -188,7 +188,7 @@ async fn bulk_create(pool: &Pool, names: &[&str]) -> (StatusCode, String, usize)
     .await
 }
 
-/// A bulk create reads its rows back in one select, in order (#1340).
+/// A bulk create reads its rows back in one select, in order.
 async fn bulk_create_reads_back_in_one_select(pool: &Pool) {
     let (s1, _, one) = bulk_create(pool, &["a"]).await;
     let (s5, body, five) = bulk_create(pool, &["b", "c", "d", "e", "f"]).await;

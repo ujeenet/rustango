@@ -25,7 +25,7 @@ use crate::audit::AuditPerm;
 /// admin list views (50 by default).
 const AUDIT_PAGE_SIZE: i64 = 50;
 
-/// Audit entries a row's detail page shows; the feed has the rest (#1339).
+/// Audit entries a row's detail page shows; the feed has the rest.
 pub(crate) const DETAIL_ROWS: i64 = 20;
 
 /// Cap on facet values rendered per column on `/__audit`. Same knob as

@@ -1,5 +1,5 @@
 //! Admin edit forms on every backend: an untouched save keeps what was
-//! stored (#1273); inline rows take no auto or generated input (#1271).
+//! stored; inline rows take no auto or generated input.
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -98,7 +98,7 @@ async fn setup(pool: &Pool) {
 }
 
 /// The detail page lists the first 100 inline rows and 20 audit entries,
-/// with links to the rest (#1339).
+/// with links to the rest.
 async fn detail_page_bounds_inline_rows_and_history(pool: &Pool) {
     let mut o = SOrder {
         id: Auto::default(),
@@ -152,7 +152,7 @@ async fn post_counting(pool: &Pool, uri: &str, form: &str) -> (StatusCode, usize
     .await
 }
 
-/// Saving K unchanged inline rows reads them in one select, not K (#1340).
+/// Saving K unchanged inline rows reads them in one select, not K.
 async fn inline_save_reads_children_in_one_select(pool: &Pool) {
     let mut o = SOrder {
         id: Auto::default(),
@@ -193,7 +193,7 @@ fn signal_lock() -> &'static tokio::sync::Mutex<()> {
     M.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-/// Inline child writes send one admin signal per row, pre and post (#1324).
+/// Inline child writes send one admin signal per row, pre and post.
 async fn inline_child_writes_send_admin_signals(pool: &Pool) {
     use rustango::signals::admin as sig;
     use std::sync::{Arc, Mutex};
@@ -292,7 +292,7 @@ async fn lines(pool: &Pool) -> Vec<Line> {
 }
 
 /// Inline rows render no input for auto and generated fields, and a
-/// row added or edited without them saves (#1271).
+/// row added or edited without them saves.
 async fn inline_rows_take_no_auto_or_generated_input(pool: &Pool) {
     let o = seed_order(pool).await;
     let add = "name=o&aed_line-TOTAL_FORMS=1&aed_line-INITIAL_FORMS=0&aed_line-0-qty=3";
@@ -415,13 +415,13 @@ async fn rename_through_the_form(pool: &Pool, meta: Option<serde_json::Value>, l
     row
 }
 
-/// A nullable `{}` survives a save that only renames the row (#1273).
+/// A nullable `{}` survives a save that only renames the row.
 async fn untouched_nullable_json_object_is_kept(pool: &Pool) {
     let row = rename_through_the_form(pool, Some(serde_json::json!({})), false).await;
     assert_eq!(row.meta, Some(serde_json::json!({})), "nullable {{}} lost");
 }
 
-/// A stored value outside `choices` survives a rename (#1273).
+/// A stored value outside `choices` survives a rename.
 async fn untouched_unknown_choice_is_kept(pool: &Pool) {
     let row = rename_through_the_form(pool, None, true).await;
     assert_eq!(row.status, "legacy", "unknown choice overwritten");
@@ -463,7 +463,7 @@ mod pg_only {
     }
 
     /// Array, range, hstore and vector columns show their value and
-    /// survive an untouched save (#1273).
+    /// survive an untouched save.
     #[tokio::test]
     async fn untouched_pg_types_are_kept() {
         use rustango::testkit::matrix::{live_lock, Backend};

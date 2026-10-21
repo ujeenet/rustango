@@ -150,19 +150,19 @@ untouched.
 
 ## Unreleased
 
-### Admin detail page shows fewer rows (#1339)
+### Admin detail page shows fewer rows
 
 Inline panels stop at 100 rows and the audit trail at 20 entries; a custom `detail.html` / `_inline_panels.html` can show `panel.more_rows_filter` as the link to the rest.
 
-### Admin signals fire for inline child rows (#1324)
+### Admin signals fire for inline child rows
 
 `admin_pre_save` / `admin_post_save` / `admin_pre_delete` / `admin_post_delete` receivers now also see the child tables of inline rows; filter on `ctx.table` if a receiver assumed only top-level models.
 
-### Refused deletes are 409, refused CBV writes 422 (#1134)
+### Refused deletes are 409, refused CBV writes 422
 
 ViewSet `destroy`, `DeleteView` and `delete_selected` answer an FK refusal with 409 (was 500, or 400 for `delete_selected`). `CreateView` / `UpdateView` answer FK / NOT NULL / CHECK refusals with the form and 422 (was 500).
 
-### Admin edit keeps untouched lossy fields (#1273)
+### Admin edit keeps untouched lossy fields
 
 A PG array/range/hstore/vector/geometry field, an empty-looking JSON field or an out-of-`choices` value that the form sends back as shown is left out of the UPDATE. Dynamic JSON rows now hold PG array/range/hstore/vector/point values where they held `null`.
 

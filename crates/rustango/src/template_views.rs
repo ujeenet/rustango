@@ -1944,20 +1944,20 @@ async fn handle_create_post(
 /// Why a CreateView INSERT or UpdateView UPDATE did not redirect.
 enum WriteFailed {
     /// The database refused a value (a taken unique, a missing FK target,
-    /// NOT NULL, CHECK): errors for the form (#2033, #1134).
+    /// NOT NULL, CHECK): errors for the form (#2033).
     Refused(HashMap<String, String>),
     /// Anything else: an opaque 500.
     Error(Response),
 }
 
-/// Form errors for a refusal other than a taken unique (#1134).
+/// Form errors for a refusal other than a taken unique.
 fn refused_errors(r: crate::sql::Refusal, e: &crate::sql::ExecError) -> WriteFailed {
     tracing::warn!(target: "rustango::template_views", error = %e, "write refused");
     WriteFailed::Refused(HashMap::from([("__all__".to_owned(), r.message().to_owned())]))
 }
 
 /// A DELETE the database refused: rows still pointing at it are a 409,
-/// anything else a logged 500 (#1134).
+/// anything else a logged 500.
 fn delete_failed(e: &crate::sql::ExecError) -> Response {
     if e.is_still_referenced() {
         return (StatusCode::CONFLICT, crate::sql::STILL_REFERENCED).into_response();

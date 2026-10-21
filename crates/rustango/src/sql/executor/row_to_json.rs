@@ -149,7 +149,7 @@ where
                 .try_get::<chrono::NaiveTime, _>(field.column)
                 .map(|t| json!(t.to_string()))
                 .unwrap_or(Value::Null),
-            // #341 / #343 / #342 / #824 / #443 — PG-only column types.
+            // PG-only column types.
             FieldType::Array(_)
             | FieldType::Range(_)
             | FieldType::HStore
@@ -175,7 +175,7 @@ pub fn row_to_json(
     )
 }
 
-/// A PG-only column as the JSON the admin form parser reads back (#1273):
+/// A PG-only column as the JSON the admin form parser reads back:
 /// arrays and vectors as arrays, hstore and points as objects, a range as
 /// its literal.
 #[cfg(feature = "postgres")]

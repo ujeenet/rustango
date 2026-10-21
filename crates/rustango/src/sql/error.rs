@@ -366,13 +366,13 @@ impl Refusal {
     }
 }
 
-/// The body of a 409 for a delete the database refused on an FK (#1134).
+/// The body of a 409 for a delete the database refused on an FK.
 #[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
 pub(crate) const STILL_REFERENCED: &str =
     "This row is still referenced by other rows; delete or change those first.";
 
 impl ExecError {
-    /// A delete refused because other rows still point at the row (#1134).
+    /// A delete refused because other rows still point at the row.
     #[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
     pub(crate) fn is_still_referenced(&self) -> bool {
         self.refusal() == Some(Refusal::ForeignKey)

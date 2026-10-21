@@ -1773,7 +1773,7 @@ pub(crate) async fn detail_view(
     // registration order. Best-effort: a fetch error, such as a
     // child table missing on this tenant, drops the panels to empty
     // instead of failing the page.
-    // Each panel lists its first rows and links the child list for the rest (#1339).
+    // Each panel lists its first rows and links the child list for the rest.
     let cap = Some(super::inlines::DETAIL_ROWS);
     let mut inline_panels = super::inlines::render_for_parent_in(
         &state.pool,
@@ -1808,7 +1808,7 @@ pub(crate) async fn detail_view(
 
     // Audit-trail panel for this row, only for users who may read the
     // log. Best-effort: a missing audit table renders no panel. The
-    // newest entries only; the full history is one link away (#1339).
+    // newest entries only; the full history is one link away.
     let audit_entries = match state.audit_reader() {
         Some(reader) => {
             reader
@@ -2143,7 +2143,7 @@ fn default_locked_flags(
 }
 
 /// Whether `shown`, the prefill of `f`, may parse back to another value
-/// than the stored one (#1273).
+/// than the stored one.
 fn prefill_is_lossy(f: &FieldSchema, shown: &str) -> bool {
     use crate::core::FieldType as T;
     match f.ty {
@@ -2157,7 +2157,7 @@ fn prefill_is_lossy(f: &FieldSchema, shown: &str) -> bool {
 }
 
 /// On update: a lossy prefill the form echoed back as it was shown is not
-/// rewritten (#1273); other fields are, so a stale form still wins.
+/// rewritten; other fields are, so a stale form still wins.
 /// `auto_now` columns are restamped.
 fn keep_unchanged(
     model: &'static crate::core::ModelSchema,
@@ -2376,7 +2376,7 @@ pub(crate) async fn update_submit(
         change: true,
     })
     .await;
-    // One signal per inline row too, as for bulk actions (#1324).
+    // One signal per inline row too, as for bulk actions.
     for row in inline_plan.planned_rows() {
         row.send(true).await;
     }

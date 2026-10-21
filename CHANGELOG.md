@@ -4,27 +4,27 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-### Performance — admin inline saves and ViewSet bulk create read rows in one select (#1340)
+### Performance — admin inline saves and ViewSet bulk create read rows in one select
 
 An inline save reads every submitted child row in one `pk IN` select (plus one for PKs not under the parent), not one or two per row. A ViewSet bulk create reads its rows back in one `pk IN` select per 500, in submission order.
 
-### Performance — the admin detail page bounds inline rows and history (#1339)
+### Performance — the admin detail page bounds inline rows and history
 
 Each inline panel lists its first 100 rows with a link to the child list for the rest, and the audit trail shows the newest 20 entries beside its "View full history" link.
 
-### Fixed — admin inline child writes send admin signals (#1324)
+### Fixed — admin inline child writes send admin signals
 
 Each inline row an edit adds, changes or deletes sends `admin_pre_*` before the write and `admin_post_*` after the commit, after the parent's. A new row's `admin_post_save` carries its PK.
 
-### Fixed — admin inline rows take no auto or generated input (#1271)
+### Fixed — admin inline rows take no auto or generated input
 
 `auto_now_add` / `auto_now` / `auto_uuid` and `generated_as` columns, and an existing row's PK, show as text in inline rows and are never written from them. Adding a child no longer fails on an empty timestamp, and editing one no longer truncates it to whole seconds.
 
-### Fixed — ViewSet and template views answer refused writes without a 500 (#1134)
+### Fixed — ViewSet and template views answer refused writes without a 500
 
 Deleting a row other rows still point at is a 409 from ViewSet `destroy`, `DeleteView` and `delete_selected`. A missing FK target, NOT NULL or CHECK refusal on `CreateView` / `UpdateView` re-renders the form (422) with a plain `__all__` error. `delete_selected` no longer shows the driver's text.
 
-### Fixed — an untouched admin edit keeps what was stored (#1273)
+### Fixed — an untouched admin edit keeps what was stored
 
 The edit form shows PG array, range, hstore, vector and geometry values, a nullable JSON `{}`, and a stored value outside `choices`; such a field submitted as it was shown is not rewritten. The dynamic JSON rows (viewset, admin) now carry those PG values instead of `null`.
 

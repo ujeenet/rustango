@@ -3422,7 +3422,7 @@ async fn create_many(
 const READ_BACK_CHUNK: usize = 500;
 
 /// [`fetch_by_pk_scoped`] for many rows: one `pk IN` select per chunk, in
-/// `pks` order (#1340). Per row when a rendered row does not carry its pk.
+/// `pks` order. Per row when a rendered row does not carry its pk.
 async fn fetch_many_by_pk_scoped(
     state: &ViewSetState,
     acq: &mut AcquiredConn,
@@ -3650,7 +3650,7 @@ async fn handle_destroy(
     match deleted {
         Ok(0) => json_error(StatusCode::NOT_FOUND, "not found"),
         Ok(_) => no_content(),
-        // Rows still pointing at it: the client's conflict, not a 500 (#1134).
+        // Rows still pointing at it: the client's conflict, not a 500.
         Err(e) if e.is_still_referenced() => {
             tracing::warn!(target: "rustango::viewset", error = %e, "destroy refused");
             json_error(StatusCode::CONFLICT, crate::sql::STILL_REFERENCED)
