@@ -248,8 +248,8 @@ pub(crate) fn end_type(target: &ModelSchema) -> Option<FieldType> {
     target.primary_key().map(|pk| junction_column_type(pk.ty))
 }
 
-/// A junction column's type for a pk of type `pk`: integers widen to BIGINT
-/// (#1404). The one rule for the runtime and the migration writer.
+/// A junction column's type for a pk of type `pk`: integers widen to BIGINT.
+/// The one rule for the runtime and the migration writer.
 pub(crate) fn junction_column_type(pk: FieldType) -> FieldType {
     match pk {
         FieldType::I16 | FieldType::I32 => FieldType::I64,
@@ -258,7 +258,7 @@ pub(crate) fn junction_column_type(pk: FieldType) -> FieldType {
 }
 
 /// `column`'s type in an auto-created junction `through`: its end's pk type,
-/// `I64` when that model is not registered (#1405). `None` for no such column.
+/// `I64` when that model is not registered. `None` for no such column.
 fn auto_column_type(through: &str, column: &str) -> Option<FieldType> {
     inventory::iter::<crate::core::ModelEntry>
         .into_iter()

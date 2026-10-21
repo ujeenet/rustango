@@ -1,5 +1,5 @@
 //! `dumpdata` / `loaddata` in a tenancy project: registry models on the
-//! registry, tenant models on the `--tenant` pool (#1424).
+//! registry, tenant models on the `--tenant` pool.
 
 use std::io::Write;
 

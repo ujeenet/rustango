@@ -327,7 +327,7 @@ where
         "audit-cleanup" => audit::audit_cleanup_cmd(pools, &args[1..], writer).await,
         // The fall-through flush is scope-blind and ran on the registry pool (#2284).
         "flush" => flush::flush_cmd(pools, &args[1..], writer).await,
-        // The fall-through read and wrote every model on the registry pool (#1424).
+        // The fall-through read and wrote every model on the registry pool.
         "dumpdata" => data::data_cmd(pools, data::Verb::Dump, &args[1..], writer).await,
         "loaddata" => data::data_cmd(pools, data::Verb::Load, &args[1..], writer).await,
         // `public` holds the registry here; --clean would drop every org with it.

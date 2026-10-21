@@ -317,7 +317,7 @@ async fn you_cannot_deactivate_yourself() {
     assert!(me.active, "and must still be active");
 }
 
-/// #1342 — a reset of your own password goes through change-password,
+/// A reset of your own password goes through change-password,
 /// which asks for the current one.
 #[tokio::test]
 async fn you_cannot_reset_your_own_password_here() {
@@ -336,7 +336,7 @@ async fn you_cannot_reset_your_own_password_here() {
     assert_eq!(b.find(&b.me).await.unwrap().password_hash, before);
 }
 
-/// #1342 — a deactivation ends the sessions for good: reactivating the
+/// A deactivation ends the sessions for good: reactivating the
 /// operator does not revive a cookie from before.
 #[tokio::test]
 async fn reactivating_does_not_revive_old_sessions() {
@@ -373,7 +373,7 @@ fn payload_of(b: &Booted, cookie: &str) -> rustango::tenancy::session::SessionPa
     rustango::tenancy::session::decode(&b.secret, cookie.split_once('=').unwrap().1).unwrap()
 }
 
-/// #1344 — a console login ends after half an hour unused, not a week.
+/// A console login ends after half an hour unused, not a week.
 #[tokio::test]
 async fn a_console_session_has_an_idle_deadline() {
     let b = boot().await;
@@ -386,7 +386,7 @@ async fn a_console_session_has_an_idle_deadline() {
     );
 }
 
-/// #1344 — each request slides the idle deadline with a fresh cookie.
+/// Each request slides the idle deadline with a fresh cookie.
 #[tokio::test]
 async fn a_request_slides_the_idle_deadline() {
     use rustango::tenancy::session::{encode, PasswordFingerprint, SessionPayload};

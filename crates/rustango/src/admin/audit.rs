@@ -612,7 +612,7 @@ mod tests {
         assert!(!out.contains_key("sessions_revoked_at"), "{out:?}");
     }
 
-    /// #1158 — a typed password is never audited, even without the widget.
+    /// A typed password is never audited, even without the widget.
     #[test]
     fn the_audit_form_masks_a_password_without_the_widget() {
         use crate::core::Model as _;

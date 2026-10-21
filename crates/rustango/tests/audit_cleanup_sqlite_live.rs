@@ -201,7 +201,7 @@ async fn naming_a_tenant_leaves_the_registry_alone() {
 
 /// A sweep that aborts on the first bad tenant leaves every later one
 /// untrimmed — which defeats retention exactly when it matters. The
-/// loop collects outcomes instead, and then exits non-zero (#1312).
+/// loop collects outcomes instead, and then exits non-zero.
 #[tokio::test]
 async fn one_broken_tenant_does_not_stop_the_sweep() {
     let b = boot().await;

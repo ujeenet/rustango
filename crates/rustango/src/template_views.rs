@@ -6182,7 +6182,7 @@ mod tests {
     }
 
     /// An outer layer's `exempt_prefix` does not switch off a CBV's own
-    /// guard (#1669).
+    /// guard.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn an_outer_exempt_prefix_keeps_the_cbv_guard() {

@@ -183,7 +183,7 @@ async fn bulk_writes_fill_the_pk(pool: &Pool) {
     assert_eq!(distinct_ids(pool).await, 3);
 }
 
-/// A caller-set id that exists clashes on the PK, not the target: no backend may update that row (#1407).
+/// A caller-set id that exists clashes on the PK, not the target: no backend may update that row.
 async fn bulk_upsert_of_a_set_existing_id_updates_no_row(pool: &Pool) {
     let mut a = item("a", 1);
     a.insert_pool(pool).await.expect("insert");

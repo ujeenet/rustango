@@ -2179,7 +2179,7 @@ fn m2m_fk_sql(
     )
 }
 
-/// A junction column's type and the pk it references in `table` (#1404).
+/// A junction column's type and the pk it references in `table`.
 /// Typed by [`crate::sql::m2m::junction_column_type`], the runtime's rule; a table outside
 /// `current` keeps the old `BIGINT` to `id`. Also the `(type, max_length)` its key counts.
 fn m2m_end<'a>(

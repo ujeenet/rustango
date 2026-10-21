@@ -1000,7 +1000,7 @@ mod tests {
             main.contains(".nest_with(\"/admin\", urls::admin_router)"),
             "{main}"
         );
-        // #1335: the admin key survives a restart and fails closed on prod.
+        // The admin key survives a restart and fails closed on prod.
         assert!(urls.contains("load_session_secret_for_tier("), "{urls}");
         assert!(!urls.contains("from_env_or_random"), "{urls}");
         // #1216: no verb may need DATABASE_URL before `Cli::run`.

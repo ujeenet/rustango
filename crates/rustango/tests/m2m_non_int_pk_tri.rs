@@ -176,7 +176,7 @@ const ITEM_TAG: &rustango::core::ModelSchema = &{
     s
 };
 
-/// Text keys on both ends of a junction that is no model (#1405).
+/// Text keys on both ends of a junction that is no model.
 #[derive(Model, Debug, Clone)]
 #[rustango(
     table = "m2m1926_author",
@@ -296,7 +296,7 @@ async fn unregistered_junction_round_trips(pool: &Pool) {
     assert!(a.tags_m2m().all(pool).await.expect("all").is_empty());
 }
 
-/// The junction's ends take the models' pk types, so text keys bind (#1405).
+/// The junction's ends take the models' pk types, so text keys bind.
 async fn text_keys_on_an_unregistered_junction(pool: &Pool) {
     let (ann, bob) = (Author { code: "ann".into() }, Author { code: "bob".into() });
     ann.genres_m2m().add("poetry", pool).await.expect("add");

@@ -193,7 +193,7 @@ impl Gate {
 
 /// MySQL rolls the whole transaction back on a deadlock (1213) and may on a
 /// lock-wait timeout (1205); a lost connection ends it everywhere. A PG
-/// FATAL or PANIC (e.g. 57P01, terminated backend) ends the session (#1403).
+/// FATAL or PANIC (e.g. 57P01, terminated backend) ends the session.
 fn ends_transaction(e: &sqlx::Error) -> bool {
     match e {
         sqlx::Error::Io(_) | sqlx::Error::PoolClosed | sqlx::Error::WorkerCrashed => true,

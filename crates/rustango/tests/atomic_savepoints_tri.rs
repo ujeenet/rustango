@@ -746,8 +746,7 @@ async fn join_lock_during_background_settle_is_refused(pool: &Pool) {
 }
 
 /// `_on` reads pass the atomic gate: once the server ended the block's
-/// transaction they refuse, and a read that ends it is recorded
-/// (rel-0608 tests-001).
+/// transaction they refuse, and a read that ends it is recorded.
 async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
     use rustango::sql::{raw_execute_tx, transaction_pool};
     Note {
@@ -802,7 +801,7 @@ async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
             _ => {}
         }
         // PG: the first read meets the terminated backend (FATAL 57P01)
-        // and is recorded as ending the transaction (#1403).
+        // and is recorded as ending the transaction.
         let first = Note::objects().fetch_on(&mut *guard).await;
         if dialect(&registry) == "postgres" {
             assert!(matches!(first, Err(ExecError::Driver(_))), "got {first:?}");

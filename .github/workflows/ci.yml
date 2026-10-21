@@ -800,7 +800,7 @@ jobs:
           - mysql,tenancy,config,email
           # `_tower` without `_axum` broke `i18n::middleware` (#2329).
           - sqlite,_tower
-          # `--features tenancy[,sso]` on the defaults: tests left dead code here (#1414).
+          # `--features tenancy[,sso]` on the defaults: tests left dead code here.
           - postgres,batteries,tenancy
           - postgres,batteries,tenancy,sso
     steps:

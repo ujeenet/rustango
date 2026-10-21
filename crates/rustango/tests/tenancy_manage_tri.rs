@@ -555,7 +555,7 @@ async fn provision_releases_its_schema_on_a_failed_insert(pool: &Pool) {
     }
 }
 
-/// #1424 — dumpdata / loaddata run on the `--tenant` pool and touch only
+/// `dumpdata` / `loaddata` run on the `--tenant` pool and touch only
 /// that tenant; without it they cover registry models only.
 async fn data_verbs_stay_in_their_tenant(pool: &Pool) {
     let mut env = Env::new(pool).await;

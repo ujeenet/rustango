@@ -2396,7 +2396,7 @@ pub(crate) enum MigrationState {
 }
 
 /// Each of `all` with its state: the one reading `migrate`, `showmigrations`
-/// and `--dry-run` share (#1311).
+/// and `--dry-run` share.
 pub(crate) fn migration_states<'a>(
     all: &'a [Migration],
     applied: &'a HashSet<String>,
@@ -2435,7 +2435,7 @@ pub(crate) async fn applied_or_empty(
 }
 
 /// The SQL `migrate` would run for `all`'s `scope` files under `ledger`:
-/// its pending set and reconcile verdicts, read without writing (#1311).
+/// its pending set and reconcile verdicts, read without writing.
 /// `owned` tables are left out, as the system chain leaves the project's.
 ///
 /// # Errors

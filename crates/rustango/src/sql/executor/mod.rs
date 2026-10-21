@@ -964,7 +964,7 @@ mod tx;
 pub(crate) use tx::write_transaction_pool;
 pub use tx::{transaction_pool, PoolTx};
 
-// One executor for every `_on` method (#2675).
+// One executor for every `_on` method.
 mod on;
 use on::RowRef;
 pub use on::{PoolConn, SqlExecutor};
@@ -2400,7 +2400,7 @@ where
 }
 
 // `_on` twins of the pool methods: run on a held `PoolConn`, a `PoolTx`,
-// or any Postgres sqlx executor (#2675).
+// or any Postgres sqlx executor.
 impl<T> QuerySet<T>
 where
     T: Model

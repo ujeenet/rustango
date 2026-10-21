@@ -147,7 +147,7 @@ pub async fn set_active(
         .await?;
     target.active = active;
     if !active {
-        // So a later reactivation does not revive today's cookies (#1342).
+        // So a later reactivation does not revive today's cookies.
         crate::session::revoke_sessions::<Operator>(registry, id, target.sessions_revoked_at, 0)
             .await?;
     }
@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(now.password_hash, "NEW", "deactivate undid the reset");
     }
 
-    /// rel-0608 — an admin edit that deactivates an operator ends its
+    /// An admin edit that deactivates an operator ends its
     /// sessions, as `set_active` does; other edits leave them alone.
     #[cfg(feature = "admin")]
     #[tokio::test]
@@ -227,7 +227,7 @@ mod tests {
             .unwrap();
         assert_eq!(values.len(), 1, "{values:?}");
 
-        // An int bool (SQLite/MySQL rows) counts; an inactive row is not re-stamped (pr-1408-r2 tests-004).
+        // An int bool (SQLite/MySQL rows) counts; an inactive row is not re-stamped.
         for (was, stamps) in [
             (serde_json::json!(1), true),
             (serde_json::json!(false), false),

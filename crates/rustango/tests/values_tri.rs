@@ -384,7 +384,7 @@ async fn pluck_pairs_null_needs_an_option(pool: &Pool) {
     assert_eq!(scores, vec![Some(7), None, None, Some(9)]);
 }
 
-/// Each values-family read is one counted query (#1303).
+/// Each values-family read is one counted query.
 async fn values_reads_are_counted(pool: &Pool) {
     use rustango::test_assertions::QueryCounter;
     QueryCounter::scope(async {
@@ -658,7 +658,7 @@ mod decimal {
             .expect("sum");
         assert_eq!(sum[0]["s"], SqlValue::Decimal(v));
 
-        // The executor path decodes NUMERIC too (#1215).
+        // The executor path decodes NUMERIC too.
         #[cfg(feature = "postgres")]
         if let Some(pg) = pool.as_postgres() {
             let on = Money::objects()

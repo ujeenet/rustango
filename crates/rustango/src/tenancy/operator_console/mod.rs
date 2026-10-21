@@ -1004,7 +1004,7 @@ async fn require_session(
             }
             req.extensions_mut().insert(op);
             let mut resp = next.run(req).await;
-            // Activity slides the idle deadline (#1344).
+            // Activity slides the idle deadline.
             if let Some(renewed) = payload.renewed() {
                 resp.headers_mut().append(
                     header::SET_COOKIE,
@@ -1325,7 +1325,7 @@ fn session_cookie(secret: &SessionSecret, payload: &SessionPayload) -> HeaderVal
 }
 
 /// The signed-in, active operator: the check every console request and
-/// each poll of a long-lived stream runs (#1344).
+/// each poll of a long-lived stream runs.
 async fn active_session(
     state: &ConsoleState,
     headers: &axum::http::HeaderMap,

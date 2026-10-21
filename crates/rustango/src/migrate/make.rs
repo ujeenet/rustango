@@ -237,7 +237,7 @@ pub fn make_migrations_system(
 }
 
 /// The step [`make_migrations_system`] would write after `prior`, unwritten,
-/// so a `--dry-run` can show it (#1411).
+/// so a `--dry-run` can show it.
 ///
 /// # Errors
 /// As [`make_migrations_system`], minus the write.

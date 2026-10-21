@@ -850,7 +850,7 @@ async fn migrate<W: Write>(
 }
 
 /// The framework chain `migrate` runs beside the project's, read from disk
-/// as is: a preview never generates it (#1311).
+/// as is: a preview never generates it.
 pub(crate) struct SystemView {
     dir: std::path::PathBuf,
     scope: super::MigrationScope,
@@ -882,7 +882,7 @@ impl SystemView {
     }
 
     /// The chain as `migrate` runs it: the files, then the steps it would
-    /// generate from today's models, unwritten (#1411).
+    /// generate from today's models, unwritten.
     fn planned(&self, files: Option<Vec<Migration>>) -> Result<Vec<Migration>, MigrateError> {
         let mut all = files.unwrap_or_default();
         for &scope in self.generates {
@@ -935,7 +935,7 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
     previews.extend(steps.into_iter().map(|p| (p, "system, ")));
     let project = runner::migrate_dry_run_pool(pool, dir).await?;
     previews.extend(project.into_iter().map(|p| (p, "")));
-    // What `migrate` runs after both chains (#1411).
+    // What `migrate` runs after both chains.
     let mut after = Vec::new();
     let converge = super::chains::converge_preview(pool, &all, system.scope, dir).await?;
     if !converge.is_empty() {
@@ -1091,7 +1091,7 @@ type EnsureFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>;
 
 /// A bootstrap table: how `migrate` ensures it, and the DDL that creates it,
-/// which `--dry-run` shows while the table is missing (#1411).
+/// which `--dry-run` shows while the table is missing.
 struct Bootstrap {
     table: &'static str,
     ensure: for<'a> fn(&'a Pool) -> EnsureFuture<'a>,
@@ -1118,7 +1118,7 @@ fn shared_bootstrap() -> Vec<Bootstrap> {
             ensure: audit,
             ddl: |d| super::ensure::idempotent_ddl(&crate::audit::bootstrap_snapshot(), d),
         },
-        // The admin login fails closed on a missing TOTP table (#1644), so a
+        // The admin login fails closed on a missing TOTP table, so a
         // fresh install needs it before the first login, not at enrollment.
         #[cfg(all(feature = "admin", feature = "totp"))]
         Bootstrap {
@@ -1128,7 +1128,7 @@ fn shared_bootstrap() -> Vec<Bootstrap> {
                 super::ensure::idempotent_ddl(&crate::admin::totp_store::bootstrap_snapshot(), d)
             },
         },
-        // The admin lists translations wherever they live (#2360).
+        // The admin lists translations wherever they live.
         Bootstrap {
             table: crate::i18n::db::Translation::SCHEMA.table,
             ensure: i18n,
@@ -1151,7 +1151,7 @@ fn tenant_bootstrap() -> Vec<Bootstrap> {
         Box::pin(crate::passkey::ensure_table(pool))
     }
     vec![
-        // Passkey sign-in reads it from the first login (#2364).
+        // Passkey sign-in reads it from the first login.
         #[cfg(feature = "passkey")]
         Bootstrap {
             table: {
@@ -1367,7 +1367,7 @@ fn sqlmigrate_cmd<W: Write>(
     }
     let name = positional
         .ok_or_else(|| MigrateError::Validation("sqlmigrate requires a migration name".into()))?;
-    // A framework migration lives in the system chain's dir (#1311).
+    // A framework migration lives in the system chain's dir.
     let system = super::make::SystemChain::dir_for(dir);
     let in_system = !file::list_dir(dir)?.iter().any(|m| m.name == name)
         && system.is_dir()
@@ -1404,7 +1404,7 @@ pub(crate) struct TenantChains<'a> {
 }
 
 /// `showmigrations` as `migrate` reads the ledgers: squashed files count as
-/// applied, and `system`'s chain is listed too (#1311). With `tenants`,
+/// applied, and `system`'s chain is listed too. With `tenants`,
 /// tenant-scoped files of both chains are marked from their ledgers.
 ///
 /// # Errors
@@ -2058,7 +2058,7 @@ pub(crate) async fn check_cmd_with<W: Write>(
     w: &mut W,
     extra: impl std::future::Future<Output = DeployAuditFindings>,
 ) -> Result<(), MigrateError> {
-    // `--deplyo` once ran the plain check and reported all clear (#1312).
+    // `--deplyo` once ran the plain check and reported all clear.
     if let Some(other) = args.iter().find(|a| *a != "--deploy") {
         return Err(MigrateError::Validation(format!(
             "check: unknown argument `{other}` (usage: check [--deploy])"
@@ -3675,7 +3675,7 @@ fn parse_dumpdata_args(args: &[String]) -> Result<DumpdataArgs, MigrateError> {
     Ok(out)
 }
 
-/// `dumpdata` over every model, or only those of `scope` (#1424).
+/// `dumpdata` over every model, or only those of `scope`.
 pub(crate) async fn dumpdata_cmd<W: Write>(
     pool: &Pool,
     args: &[String],
@@ -3722,7 +3722,7 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
     }
     let model_filters = &parsed.model_filters;
     let indent = parsed.indent;
-    // A typo would otherwise dump `[]` and exit 0 (#1312).
+    // A typo would otherwise dump `[]` and exit 0.
     for name in model_filters.iter().chain(&parsed.excludes) {
         let mut named = inventory::iter::<crate::core::ModelEntry>()
             .filter(|e| model_matches(name, &dotted_model_name(e), e.schema))
@@ -3772,7 +3772,7 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
         // Identify the PK column for fixture `pk` extraction.
         let pk_field = schema.primary_key();
         let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
-        // Pages in pk order, so neither rows nor links are held whole (#1399).
+        // Pages in pk order, so neither rows nor links are held whole.
         // `pk > last` skips ties, so only a real one-column key pages.
         let paged = match pk_field {
             Some(pk) => is_sole_pk(pool, schema.table, pk.column).await?,
@@ -3860,7 +3860,7 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
 /// Rows per dumpdata page.
 const DUMP_PAGE: i64 = 500;
 
-/// Which models `dumpdata` / `loaddata` cover (#1424).
+/// Which models `dumpdata` / `loaddata` cover.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum DataScope<'a> {
     /// Every model: single-tenant `manage`.
@@ -4038,7 +4038,7 @@ fn junction_of(
 }
 
 /// Each auto-created M2M relation of `schema` and the links of `src_pks`.
-/// Those junctions are no model, so the links ride on the source rows (#1226).
+/// Those junctions are no model, so the links ride on the source rows.
 async fn m2m_links(
     pool: &Pool,
     schema: &'static crate::core::ModelSchema,
@@ -4195,7 +4195,7 @@ fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
 ///   Time / Uuid / Binary [hex] / String)
 /// - null → `SqlValue::Null`
 /// - object / array → `SqlValue::Json`
-/// `loaddata` into every model, or only those of `scope` (#1424).
+/// `loaddata` into every model, or only those of `scope`.
 pub(crate) async fn loaddata_cmd<W: Write>(
     pool: &Pool,
     args: &[String],
@@ -4270,7 +4270,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
     // `--fail-fast` stops here, but the rows already in still need their
     // sequences moved, so the error is raised after the reset.
     let mut abort: Option<String> = None;
-    // M2M links load after every row, so both ends exist (#1226), one
+    // M2M links load after every row, so both ends exist, one
     // batched insert per relation.
     let mut links: Vec<(
         &'static crate::core::ModelSchema,
@@ -6740,7 +6740,7 @@ mod gen_tests {
         }
     }
 
-    /// The streamed fixture is byte for byte what `serde_json` writes whole (#1399).
+    /// The streamed fixture is byte for byte what `serde_json` writes whole.
     #[test]
     fn fixture_writer_matches_serde_json() {
         let entries = vec![
@@ -7640,7 +7640,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         assert!(s.contains("[info]    account lockout"), "{s}");
     }
 
-    /// #1312 — a misspelt flag fails instead of running the plain check.
+    /// A misspelt flag fails instead of running the plain check.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn check_refuses_an_unknown_argument() {
@@ -7688,7 +7688,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         Ok(String::from_utf8(buf).unwrap())
     }
 
-    /// #1311 — dry-run, showmigrations and sqlmigrate see the system chain
+    /// Dry-run, showmigrations and sqlmigrate see the system chain
     /// `migrate` runs.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
@@ -7726,7 +7726,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         assert!(out.expect("sqlmigrate").contains(&step.name));
     }
 
-    /// rel-0608 — a system table the project chain creates is previewed
+    /// A system table the project chain creates is previewed
     /// once, under the project, as `migrate` creates it.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
@@ -7768,7 +7768,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         assert!(out.contains("(system,"), "{out}");
     }
 
-    /// #1411 — dry-run shows the bootstrap DDL `migrate` runs for a missing table.
+    /// Dry-run shows the bootstrap DDL `migrate` runs for a missing table.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn dry_run_shows_bootstrap_ddl() {
@@ -7801,7 +7801,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         assert!(out.contains("nothing to migrate"), "{out}");
     }
 
-    /// #1411 — dry-run shows the system step `migrate` would generate first.
+    /// Dry-run shows the system step `migrate` would generate first.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn dry_run_shows_the_system_step_migrate_generates() {
@@ -7819,7 +7819,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         );
     }
 
-    /// #1411 — dry-run shows the columns `migrate` adds to a framework table
+    /// Dry-run shows the columns `migrate` adds to a framework table
     /// the project chain created.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
@@ -7959,7 +7959,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         assert_eq!(srcs, ["1"], "read links of rows outside the page");
     }
 
-    /// #1311 — once a squash is applied, the file it replaced is not pending.
+    /// Once a squash is applied, the file it replaced is not pending.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn a_squashed_file_is_not_pending() {
@@ -8867,7 +8867,7 @@ mod db_cmd_tests {
             eprintln!("DATABASE_URL not set — skipping");
             return;
         };
-        // `$RUSTANGO_TEST_PSQL`, else `psql` on PATH; CI must have one (#1413).
+        // `$RUSTANGO_TEST_PSQL`, else `psql` on PATH; CI must have one.
         let runs = |p: &str| {
             std::process::Command::new(p)
                 .arg("--version")

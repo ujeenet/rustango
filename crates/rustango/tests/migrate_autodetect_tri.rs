@@ -615,7 +615,7 @@ async fn m2m_drops_before_its_tables(pool: &Pool) {
         .expect("the junction drops first");
 }
 
-/// Junction columns take the type and name of the pk they reference (#1404).
+/// Junction columns take the type and name of the pk they reference.
 async fn m2m_follows_non_integer_pks(pool: &Pool) {
     let (a, b, c) = ("mad_mk_label", "mad_mk_badge", "mad_mk_shelf");
     let (ab, cb) = ("mad_mk_label_badge", "mad_mk_shelf_label");
@@ -2181,7 +2181,7 @@ async fn legacy_pg_runner_body(pool: &Pool, pg: &rustango::sql::sqlx::PgPool, wh
     );
 }
 
-// ---------------------------------------------------------------- #1311
+// ---------------------------------------------------------------- squash dry-run
 
 /// `--dry-run` previews what `migrate` does with a squash: recorded, not
 /// re-run, while its history is applied; and nothing for the file it replaced.

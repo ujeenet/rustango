@@ -102,7 +102,7 @@ mod scenarios {
         assert_eq!(names(rows), vec!["Ada", "Bob", "Dan"]);
     }
 
-    /// #1409 — an `OuterRef` in a set-operation branch binds to the
+    /// An `OuterRef` in a set-operation branch binds to the
     /// enclosing query, not the head branch.
     pub async fn check_outer_ref_in_a_union_branch(pool: &Pool) {
         use rustango::core::Column as _;
@@ -123,7 +123,7 @@ mod scenarios {
             .expect("EXISTS (union) fetch");
         assert_eq!(names(rows), vec!["Bob", "Dan"]);
 
-        // Branches over the enclosing table alias it, like the head (#1287).
+        // Branches over the enclosing table alias it, like the head.
         let named = |n: &str| {
             Author::objects()
                 .where_(Author::id.eq_expr(outer_ref("id")))

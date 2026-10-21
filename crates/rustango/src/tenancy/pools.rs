@@ -1236,7 +1236,7 @@ pub(crate) fn scoped_pool_options(config: &TenantPoolsConfig) -> PgPoolOptions {
 }
 
 /// The one place a tenant pool's options are made, so none skips
-/// `checkout_check` (rel-0608 tenancy-001).
+/// `checkout_check`.
 pub(crate) fn tenant_pool_options<DB: Database>(
     config: &TenantPoolsConfig,
     max: u32,

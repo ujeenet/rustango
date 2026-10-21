@@ -232,7 +232,7 @@ async fn editing_a_user_keeps_or_rotates_the_password(pool: &Pool) {
     );
 }
 
-/// #1412 — deactivating a user in the admin ends its sessions and JWT refresh.
+/// Deactivating a user in the admin ends its sessions and JWT refresh.
 async fn deactivating_a_user_ends_its_sessions(pool: &Pool) {
     let name = unique("off");
     create_user(pool, &name, "pw-1412").await;
@@ -268,7 +268,7 @@ async fn deactivating_a_user_ends_its_sessions(pool: &Pool) {
     assert_eq!(user.sessions_revoked_at, Some(stamp));
 }
 
-/// #1158 — the registry admin shows neither an operator's hash nor a
+/// The registry admin shows neither an operator's hash nor a
 /// tenant's database URL; neither model has a `password` widget.
 async fn registry_admin_hides_credentials(pool: &Pool) {
     use rustango::tenancy::{Operator, Org};

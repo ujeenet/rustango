@@ -1,5 +1,5 @@
 //! [`PoolConn`] and [`SqlExecutor`]: run a request's queries on one
-//! pooled connection, on any backend (#2675).
+//! pooled connection, on any backend.
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::{BoxStream, TryStreamExt as _};
@@ -20,10 +20,10 @@ use crate::sql::Pool;
 ///
 /// Session state set on it (`SET …`, MySQL `@vars`, SQLite `PRAGMA`) stays
 /// with the connection when it goes back to the pool, so the next borrower
-/// gets it: call [`Self::close_on_drop`] after changing any (#1397).
+/// gets it: call [`Self::close_on_drop`] after changing any.
 ///
 /// Do not call a `&Pool` method while holding one: that takes a second
-/// connection, and `max_connections` such requests deadlock the pool (#1396).
+/// connection, and `max_connections` such requests deadlock the pool.
 #[non_exhaustive]
 pub enum PoolConn {
     #[cfg(feature = "postgres")]
@@ -107,7 +107,7 @@ pub enum RowRef<'r> {
     Sqlite(&'r sqlx::sqlite::SqliteRow),
 }
 
-/// Decode each row as it arrives, so raw rows are never all held (rel-0608).
+/// Decode each row as it arrives, so raw rows are never all held.
 async fn drain<R, U>(
     mut rows: BoxStream<'_, Result<R, sqlx::Error>>,
     mut decode: impl FnMut(&R) -> Result<U, sqlx::Error>,

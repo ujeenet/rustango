@@ -1095,7 +1095,7 @@ async fn invalidate_purges_the_cached_page() {
     assert_eq!(hits.load(Ordering::SeqCst), 2);
 }
 
-/// An `InMemoryCache` that counts the text and bytes calls (#2656).
+/// An `InMemoryCache` that counts the text and bytes calls.
 #[derive(Default)]
 struct Counting {
     inner: InMemoryCache,
@@ -1164,7 +1164,7 @@ fn bytes_app(cache: Arc<Counting>, hits: Arc<AtomicU32>) -> Router {
         .layer(CachePageLayer::new(cache).tenant_agnostic(true))
 }
 
-/// #2656: a page is stored and served through the bytes API only, and a
+/// A page is stored and served through the bytes API only, and a
 /// non-UTF-8 body comes back byte for byte.
 #[tokio::test]
 async fn pages_use_the_bytes_api_only() {
@@ -1190,7 +1190,7 @@ async fn pages_use_the_bytes_api_only() {
     assert_eq!(cache.bytes_calls.load(Ordering::SeqCst), 3, "get, set, get");
 }
 
-/// #2656: an entry in the old JSON format is a miss, then overwritten.
+/// An entry in the old JSON format is a miss, then overwritten.
 #[tokio::test]
 async fn an_old_json_entry_is_a_miss_then_replaced() {
     let cache = Arc::new(Counting::default());

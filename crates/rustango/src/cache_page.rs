@@ -98,7 +98,7 @@ use crate::cache::{BoxedCache, CacheError};
 // ---------------------------------------------------------------- Wire format
 
 /// A stored page, written with [`Cache::set_bytes`](crate::cache::Cache::set_bytes)
-/// as one binary frame (#2656): no JSON or base64 on a hit.
+/// as one binary frame: no JSON or base64 on a hit.
 ///
 /// Frame: `[FRAME_V1][status u16][count u32]`, then per header
 /// `[name_len u32][name][value_len u32][value]`, then the raw body.
@@ -1151,7 +1151,7 @@ mod tests {
         }
     }
 
-    /// #2656: the frame round-trips status, every header (duplicates and
+    /// The frame round-trips status, every header (duplicates and
     /// non-UTF-8 too) and a non-UTF-8 body, minus `x-cache-status`.
     #[test]
     fn a_page_frame_round_trips() {

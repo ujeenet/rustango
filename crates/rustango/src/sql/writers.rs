@@ -48,16 +48,16 @@ pub(super) struct Sql<'d> {
     pub join_types: Vec<(usize, &'static str, &'static ModelSchema)>,
     /// Count the next SELECT body writes as its `__rustango_total` column.
     pub total: Option<CountQuery>,
-    /// A MySQL `GROUP_CONCAT` was written: lift its 1024-byte cap (#1358).
+    /// A MySQL `GROUP_CONCAT` was written: lift its 1024-byte cap.
     pub group_concat: bool,
-    /// The UPDATE/DELETE target being written, if any (#1361).
+    /// The UPDATE/DELETE target being written, if any.
     pub dml_target: Option<&'static str>,
     /// A FROM or JOIN item named [`Self::dml_target`] since the flag was last cleared.
     pub read_dml_target: bool,
 }
 
 /// The FROM name of a correlated subquery over its enclosing query's
-/// table, so the inner table does not hide the outer row (#1287).
+/// table, so the inner table does not hide the outer row.
 const SELF_ALIAS: &str = "__rustango_self";
 
 /// One open query: its model and the name its FROM exposes.
@@ -438,7 +438,7 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
         b.sql.push_str(branch.op.keyword());
         b.sql.push(' ');
         // A branch is the head's sibling: its frame replaces the head's,
-        // so its own `OuterRef` reaches the enclosing query (#1409).
+        // so its own `OuterRef` reaches the enclosing query.
         let head_frame = b.scope_stack.pop();
         let frame = b.correlated_scope(branch.query.model);
         b.scope_stack.push(frame);
@@ -1664,7 +1664,7 @@ pub(super) fn write_insert_rows(b: &mut Sql<'_>, query: &InsertQuery) -> Result<
     Ok(())
 }
 
-/// The bound columns whose value the caller chose, not the writer (#1407).
+/// The bound columns whose value the caller chose, not the writer.
 fn caller_set(columns: &[&'static str], generated: &[&str]) -> Vec<&'static str> {
     columns
         .iter()
@@ -2233,7 +2233,7 @@ fn json_path_text(
 
 /// SQLite `json_path = <JSON null, object or array>` by value, as PG's
 /// `jsonb` compares: `json_extract` gives NULL for a JSON null and the
-/// stored text for an object, key order included (#1398). `Ok(false)`
+/// stored text for an object, key order included. `Ok(false)`
 /// when the comparison is not one of those.
 fn write_sqlite_json_value_eq(
     b: &mut Sql<'_>,
@@ -2632,7 +2632,7 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            // PG has `NOW()`; MySQL needs `NOW(6)` to keep microseconds (#1359).
+            // PG has `NOW()`; MySQL needs `NOW(6)` to keep microseconds.
             //
             // SQLite must use the same format as every other write
             // path. Its datetime columns are TEXT compared as text,
@@ -4094,7 +4094,7 @@ fn write_rel_correlation(
         }
     };
     b.write_table(table);
-    // A self relation must not hide the outer row (#1287).
+    // A self relation must not hide the outer row.
     let table = if table == outer_table {
         b.sql.push_str(" AS ");
         b.write_ident(SELF_ALIAS);
@@ -4340,7 +4340,7 @@ fn write_expr_compare(
 
 /// The right side of `<lhs> <op> <rhs>`. SQLite's `json_extract` gives an
 /// SQL value, so a JSON literal is unwrapped the same way; its as-text path
-/// has no affinity, so a number gets NUMERIC to compare as one (#1346).
+/// has no affinity, so a number gets NUMERIC to compare as one.
 fn write_compare_rhs(
     b: &mut Sql<'_>,
     lhs: &crate::core::Expr,

@@ -109,13 +109,13 @@ pub use executor::row_to_json;
 /// calls `select_rows_on` for its BEFORE read.
 ///
 /// These are **PostgreSQL only**, typed `E: sqlx::Executor<Database =
-/// Postgres>`; see #1293.
+/// Postgres>`.
 #[cfg(feature = "postgres")]
 pub use executor::{
     annotate_count_children, bulk_insert_on, fetch_with_prefetch, insert_on, select_rows_on,
     update_on,
 };
-/// Take any [`SqlExecutor`] (#1395).
+/// Take any [`SqlExecutor`].
 pub use executor::{annotate_count_children_on, fetch_aggregate_on};
 
 /// Hidden path for the `#[derive(Model)]` macro's generic-executor

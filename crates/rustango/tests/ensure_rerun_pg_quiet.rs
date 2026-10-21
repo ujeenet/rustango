@@ -1,5 +1,5 @@
 //! A re-run of the idempotent bootstrap sends Postgres nothing that fails, so
-//! the server logs no ERROR per existing FK (#1406).
+//! the server logs no ERROR per existing FK.
 //!
 //! Every failed statement aborts its transaction, which `pg_stat_database`
 //! counts in `xact_rollback`; one deliberate failure marks the stats flushed.

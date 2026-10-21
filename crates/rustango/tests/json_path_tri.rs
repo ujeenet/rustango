@@ -202,7 +202,7 @@ async fn seed_counts(pool: &Pool) {
     }
 }
 
-/// #1346: SQLite compared the as_text path with a number as text vs integer.
+/// SQLite compared the as_text path with a number as text vs integer.
 async fn json_as_text_compares_with_a_number(pool: &Pool) {
     if pool.dialect().name() == "postgres" {
         return; // PG has no `text > bigint`.
@@ -222,7 +222,7 @@ async fn json_as_text_compares_with_a_number(pool: &Pool) {
     );
 }
 
-/// #1346: SQLite compared the extracted SQL value with the JSON text.
+/// SQLite compared the extracted SQL value with the JSON text.
 async fn json_path_equals_a_json_scalar(pool: &Pool) {
     seed_counts(pool).await;
     for (key, v) in [
@@ -235,7 +235,7 @@ async fn json_path_equals_a_json_scalar(pool: &Pool) {
     }
 }
 
-/// #1398: SQLite matched no JSON null and compared objects as text.
+/// SQLite matched no JSON null and compared objects as text.
 async fn json_path_equals_null_and_reordered_object(pool: &Pool) {
     for data in [
         serde_json::json!({"z": null, "o": {"a": 1, "b": [1, 2]}}),

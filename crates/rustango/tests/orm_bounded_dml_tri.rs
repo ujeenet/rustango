@@ -228,7 +228,7 @@ async fn anti_join_delete(pool: &Pool) {
     assert_eq!(left.iter().map(|l| l.id).collect::<Vec<_>>(), vec![1, 3]);
 }
 
-/// #1361 — `IN (SELECT … FROM <target>)` in a write; MySQL raised 1093.
+/// `IN (SELECT … FROM <target>)` in a write; MySQL raised 1093.
 async fn same_table_in_subquery_dml(pool: &Pool) {
     let high = || {
         Item::objects()

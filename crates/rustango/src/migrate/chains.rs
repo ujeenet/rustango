@@ -490,7 +490,7 @@ async fn finish_groups(
             );
             remade.insert(t.clone());
         } else if let Some(m2m) = snap.m2m_table(t).filter(|_| claimed.contains(t) && !exists) {
-            // After the tables, which its FKs name (#2084).
+            // After the tables, which its FKs name.
             junctions.push(vec![super::diff::create_m2m(m2m)]);
         }
     }
@@ -537,7 +537,7 @@ pub(crate) async fn pending_creates(
 }
 
 /// The SQL `migrate` converges framework tables with after both chains, for
-/// a `--dry-run` (#1411), planned as [`ensure::converge_groups`] plans it.
+/// a `--dry-run`, planned as [`ensure::converge_groups`] plans it.
 /// `steps` is the system chain as `migrate` runs it.
 ///
 /// # Errors

@@ -570,7 +570,7 @@ async fn flush_clears_auto_m2m_junctions(pool: &Pool) {
     assert_eq!((left, links.len()), ([0, 0], 0), "rows left behind");
 }
 
-/// dumpdata → loaddata keeps auto-created M2M links (#1226).
+/// dumpdata → loaddata keeps auto-created M2M links.
 async fn dump_and_load_keeps_m2m_links(pool: &Pool) {
     fresh_m2m(pool).await;
     let mut post = M2mPost {
@@ -616,7 +616,7 @@ async fn dump_and_load_keeps_m2m_links(pool: &Pool) {
     assert_eq!(links, want, "the reload lost the M2M links: {dumped}");
 }
 
-/// Empty shelf and label tables and the text-keyed junction migrations build (#1404).
+/// Empty shelf and label tables and the text-keyed junction migrations build.
 async fn fresh_text_m2m(pool: &Pool) {
     use rustango::migrate::{render_changes_split_with_dialect, SchemaChange, SchemaSnapshot};
     use rustango::testkit::matrix::{drop_table, fresh_table};
@@ -639,7 +639,7 @@ async fn fresh_text_m2m(pool: &Pool) {
     }
 }
 
-/// dumpdata reads rows and their links a page at a time (#1399).
+/// dumpdata reads rows and their links a page at a time.
 async fn dumpdata_pages_rows_and_links(pool: &Pool) {
     fresh_m2m(pool).await;
     let mut tag = M2mTag {
@@ -716,7 +716,7 @@ async fn dumpdata_keeps_rows_tied_on_a_partial_pk(pool: &Pool) {
     assert_eq!(rows.as_array().expect("array").len(), 501, "rows dropped");
 }
 
-/// Text pks keep their M2M links through dumpdata → loaddata (rel-0608).
+/// Text pks keep their M2M links through dumpdata → loaddata.
 async fn dump_and_load_keeps_text_pk_m2m_links(pool: &Pool) {
     fresh_text_m2m(pool).await;
     let fixture = serde_json::json!([
@@ -744,7 +744,7 @@ async fn dump_and_load_keeps_text_pk_m2m_links(pool: &Pool) {
     );
 }
 
-/// One bad link skips only its own row's links (pr-1408-r2 correctness-002).
+/// One bad link skips only its own row's links.
 async fn a_bad_m2m_link_skips_only_its_row(pool: &Pool) {
     fresh_text_m2m(pool).await;
     let fixture = serde_json::json!([
@@ -848,7 +848,7 @@ async fn dumpdata_refuses_columns_it_cannot_read(pool: &Pool) {
     assert_eq!(out.trim(), "[]");
 }
 
-/// A misspelt `--model` / `--exclude` fails rather than dumping `[]` (#1312).
+/// A misspelt `--model` / `--exclude` fails rather than dumping `[]`.
 async fn dumpdata_refuses_an_unknown_model_name(pool: &Pool) {
     for flag in ["--model", "--exclude"] {
         let err = manage(pool, &["dumpdata", flag, "cli1911.Psot"])

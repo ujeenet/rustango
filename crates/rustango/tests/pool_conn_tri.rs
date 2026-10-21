@@ -1,5 +1,5 @@
 //! `pool.acquire()` holds one connection and every builder's `_on`
-//! method runs on it, on each backend (#2675).
+//! method runs on it, on each backend.
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
@@ -242,7 +242,7 @@ async fn on_tx_sees_its_writes(pool: &Pool) {
 }
 
 /// The `_on` methods that took only a Postgres executor run on a held
-/// connection on every backend (#1395), one counted query each.
+/// connection on every backend, one counted query each.
 async fn former_pg_only_on_methods_run_on_a_held_conn(pool: &Pool) {
     use rustango::sql::{
         annotate_count_children_on, explain_pool, fetch_aggregate_on, ExplainOptions,
@@ -425,7 +425,7 @@ async fn session_setting(conn: &mut PoolConn, set: bool) -> String {
 }
 
 /// Session state set on a held connection reaches the next borrower,
-/// unless the connection is closed on drop (#1397).
+/// unless the connection is closed on drop.
 async fn close_on_drop_keeps_session_state_out_of_the_pool(pool: &Pool) {
     let p = one_conn(pool).await;
     let mut conn = p.acquire().await.unwrap();

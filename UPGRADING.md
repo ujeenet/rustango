@@ -152,119 +152,119 @@ untouched.
 
 ## 0.60.9
 
-### `migrate --dry-run` prints more (#1411)
+### `migrate --dry-run` prints more
 
 A fresh project's dry-run now lists the framework's system tables and the bootstrap tables, under `-- … (system, …)` and `-- bootstrap <table> (idempotent)` headers. Scripts that took "nothing to migrate" for granted on a new database will see SQL instead.
 
-### `dumpdata` writes rows in pk order (#1399)
+### `dumpdata` writes rows in pk order
 
 Entries of each model now come sorted by pk; the JSON is otherwise unchanged.
 
-### Tenancy `dumpdata` / `loaddata` are scoped (#1424)
+### Tenancy `dumpdata` / `loaddata` are scoped
 
 In a tenancy project they cover registry models only; pass `--tenant <slug>` for a tenant's models. A fixture entry for a model of the other scope is refused, not written to the registry. A PG schema-mode tenant missing one of the tables refuses the whole verb; migrate it first.
 
-### M2M junction DDL follows the target pk (#1404)
+### M2M junction DDL follows the target pk
 
 New auto-created junctions to a text or UUID pk get that column type, and every junction FK names the real pk column. Snapshots are unchanged, so existing junctions get no new migration.
 
 On MySQL, an auto-created junction whose two pk columns exceed 3072 bytes (4 per VARCHAR char) is refused when the migration renders; shorten the string pks' `max_length`.
 
-### SQLite JSON-path equality with null or an object (#1398)
+### SQLite JSON-path equality with null or an object
 
 `json_path(..) = Json(null)` now matches stored JSON nulls, and object literals match whatever their key order. Such filters return more rows on SQLite than before; they no longer use an index on `json_extract`.
 
-### Session state on a `PoolConn` reaches the next borrower (#1397)
+### Session state on a `PoolConn` reaches the next borrower
 
 Nothing resets it on release. If you `SET` anything on a held connection, call `conn.close_on_drop()` before dropping it.
 
-### PG FATAL errors end an `atomic` block (#1403)
+### PG FATAL errors end an `atomic` block
 
 After a FATAL/PANIC error (terminated backend, `idle_in_transaction_session_timeout`) later statements in the block return `ExecError::AtomicAborted`, not a driver I/O error.
 
-### More `_on` methods work on every backend (#1395)
+### More `_on` methods work on every backend
 
 `fetch_paginated_on`, `in_bulk_on`, `annotate_count_children_on`, `explain_on`, `QuerySet::delete_on`, `UpdateBuilder::execute_on`, `ForeignKey::get_on` and `fetch_aggregate_on` take a `SqlExecutor`; Postgres executors still work. With more than one backend feature on, `fetch_paginated_on` and `annotate_count_children_on` need the model's MySQL/SQLite `FromRow` (`#[derive(Model)]` has it). These, `explain_pool`, `delete_on` and `execute_on` now count in `assert_num_queries`. `select_rows_on` and the free `insert_on` / `update_on` stay Postgres-only. This corrects the 0.60.8 note that the other `_on` methods stay Postgres-only.
 
-### MySQL `dbshell` refuses unknown URL options (#1410)
+### MySQL `dbshell` refuses unknown URL options
 
 `manage dbshell` now fails on a MySQL `DATABASE_URL` option it cannot pass to the `mysql` client (anything but the sqlx ones); it used to drop them all, `ssl-mode` included.
 
-### Tenant-user deactivation in the admin signs out (#1412)
+### Tenant-user deactivation in the admin signs out
 
 A user deactivated in the admin must sign in again after reactivation; old cookies and refresh tokens no longer come back.
 
 ## 0.60.8
 
-### Pools no longer ping before every checkout (#2674)
+### Pools no longer ping before every checkout
 
 `test_before_acquire` is now off, tenant pools included; only a connection idle 30 s or more (`RUSTANGO_DB_IDLE_PING_SECS`) is pinged before checkout. Set `pool_test_before_acquire = true` or `RUSTANGO_DB_TEST_BEFORE_ACQUIRE=true` to ping every checkout. `PoolTuning` gains `test_before_acquire` and `idle_ping_after`, `DatabaseSettings` gains `pool_test_before_acquire` and `pool_idle_ping_secs`, so struct literals need them or `..Default::default()`.
 
-### Page-cache entries change format (#2656)
+### Page-cache entries change format
 
 `CachePageLayer` writes a binary frame through the new `Cache::set_bytes`; entries in the old JSON format are a miss and get overwritten, so the first request per page after the deploy recomputes (during a rolling deploy, old and new replicas each see the other's entries as misses). `get` on a key written with `set_bytes` is an error when the bytes are not UTF-8. A custom `Cache` backend keeps compiling (the new methods have base64 defaults); override them to store raw bytes.
 
-### `fetch_on` / `count_on` reads work on every backend (#2675)
+### `fetch_on` / `count_on` reads work on every backend
 
-Other `_on` methods stay Postgres-only (#1395). `fetch_on`, `count_on` and the `values` / `aggregate` `fetch_on` now take a `SqlExecutor`; any Postgres sqlx executor still works. With more than one backend feature on, `fetch_on`, `ForeignKey::get_on`, `in_bulk_on` and `fetch_with_prefetch` need the model's MySQL/SQLite `FromRow`, which `#[derive(Model)]` provides.
+Other `_on` methods stay Postgres-only. `fetch_on`, `count_on` and the `values` / `aggregate` `fetch_on` now take a `SqlExecutor`; any Postgres sqlx executor still works. With more than one backend feature on, `fetch_on`, `ForeignKey::get_on`, `in_bulk_on` and `fetch_with_prefetch` need the model's MySQL/SQLite `FromRow`, which `#[derive(Model)]` provides.
 
-### Admin treats credential columns as secret (#1158)
+### Admin treats credential columns as secret
 
 Columns named `password_hash`, `password` or `database_url` now behave like a `password` widget in the admin: shown only as set/unset, rendered empty on edit (empty keeps the stored value), and not searchable or filterable.
 
-### Operator console sessions are shorter (#1344)
+### Operator console sessions are shorter
 
 Console sessions now end after 30 minutes idle or 12 hours after sign-in (`tenancy::session::SESSION_TTL_SECS` was 7 days). `session::decode` refuses a cookie older than that cap whatever its `exp`, so cookies issued before the upgrade more than 12 hours ago need a fresh sign-in.
 
-### Operator deactivation signs out; self-reset moved (#1342)
+### Operator deactivation signs out; self-reset moved
 
 Deactivating an operator (console, CLI or registry admin) now ends their sessions for good; after reactivation they sign in again. The console's reset-password form no longer works on your own account; use change-password.
 
-### The JWT claims hook runs on refresh too (#1150)
+### The JWT claims hook runs on refresh too
 
 `Config::extra_claims` is now called on `/refresh` as well as `/login`, with the user's current row. A hook with side effects runs once per refresh.
 
-### CSRF exempt prefixes match by segment (#1128)
+### CSRF exempt prefixes match by segment
 
 `CsrfConfig::exempt_prefix("/beacon")` no longer exempts `/beacon-admin`. A prefix meant to cover sibling paths must list each one.
 
-### MySQL upsert checks its target (#1357)
+### MySQL upsert checks its target
 
 On MySQL, `ConflictClause::DoUpdate` / `bulk_upsert_pool` now return `SqlError::ConflictNotSupportedInDialect` when the model has another unique key (PK, `unique`, unique index) without an `Auto` column. Upsert on that key, or split the write.
 
-### `Dialect::write_conflict_clause` takes the insert's columns (rel-0608)
+### `Dialect::write_conflict_clause` takes the insert's columns
 
-A custom `Dialect` adds a `caller_set: &[&str]` argument after `model`: the bound columns minus `InsertQuery::generated`. On MySQL, a `DoUpdate` insert whose caller set an `Auto` PK (a `default_uuid_v7` one too) counts the PK as a key that can clash, so a target other than the PK is refused (#1407). A hand-built query with a fresh id marks it with `.generated(vec!["id"])`.
+A custom `Dialect` adds a `caller_set: &[&str]` argument after `model`: the bound columns minus `InsertQuery::generated`. On MySQL, a `DoUpdate` insert whose caller set an `Auto` PK (a `default_uuid_v7` one too) counts the PK as a key that can clash, so a target other than the PK is refused. A hand-built query with a fresh id marks it with `.generated(vec!["id"])`.
 
-### Self-table subqueries are aliased (#1287)
+### Self-table subqueries are aliased
 
 A subquery over the same table as its outer query now reads `FROM "t" AS "__rustango_self"`. Raw SQL snapshots of such queries change; results of self `where_has` / `annotate_*` are now correct.
 
-### `assert_num_queries` counts values and aggregate reads (#1303)
+### `assert_num_queries` counts values and aggregate reads
 
 `values()`, `pluck`, `value`, `pluck_pairs` and `aggregate()` reads now count one each. Raise the expected count in tests that run them inside the block.
 
-### `dbshell` hands `psql` the URL (#1310)
+### `dbshell` hands `psql` the URL
 
 `psql` now runs as `psql --dbname <url>` with the password in `PGPASSWORD`, so libpq reads every URL option; an option libpq does not know (a sqlx-only one) now fails the shell. `command_for` is unchanged.
 
 `dbshell`, `db:dump`, `db:restore` and `migrate-tenant-storage` refuse a Postgres URL with a raw `@` after a `?` or `#`: it could be the password or a query value. Percent-encode it (`%40`, `%3F`, `%23`).
 
-### CLI verbs that used to pass now fail (#1312)
+### CLI verbs that used to pass now fail
 
 `prewarm-pools` and `audit-cleanup` exit non-zero when any tenant fails; `check` with any argument but `--deploy`, and `dumpdata --model` / `--exclude` with a name no model has, are errors.
 
-### `dumpdata` fixtures carry M2M links (#1226)
+### `dumpdata` fixtures carry M2M links
 
 Rows of a model with an auto-created M2M relation get a `"<relation>": [pk, ...]` field. Older fixtures still load; a tool that reads fixtures should ignore the new keys.
 
-### `showmigrations` and `migrate --dry-run` output (#1311)
+### `showmigrations` and `migrate --dry-run` output
 
 Both also list the framework's system chain, and `--dry-run` labels its steps `(system, …)`. A file replaced by an applied squash shows `[X] … (replaced by a squash)`. Tenancy `showmigrations` shows tenant-scoped files as `[X]` / `[~]` / `[ ]` with a `(k/n tenants)` count.
 
 The framework's tenant steps now show the same `(d/n tenants)` count. With zero tenants a tenant-scoped file prints `[-] name (no tenants)`; scripts that parse the output need both forms.
 
-### Fullstack admin session key (#1335)
+### Fullstack admin session key
 
 Projects generated with `--template fullstack` signed admin cookies with a new random key per process. Copy the new `admin_router` from `docs/getting-started.md`; on `RUSTANGO_ENV=prod` it refuses to start without `RUSTANGO_SESSION_SECRET`.
 

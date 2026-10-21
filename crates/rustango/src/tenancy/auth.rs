@@ -178,7 +178,7 @@ inventory::submit! {
     }
 }
 
-// The registry admin serves operators too; never store their password raw (#1158).
+// The registry admin serves operators too; never store their password raw.
 #[cfg(feature = "admin")]
 inventory::submit! {
     crate::admin::derived_fields::AdminDerivedField {
@@ -225,7 +225,7 @@ inventory::submit! {
     }
 }
 
-// Tenant users too (#1412).
+// Tenant users too.
 #[cfg(feature = "admin")]
 inventory::submit! {
     crate::admin::derived_fields::AdminDerivedField {
@@ -591,7 +591,7 @@ pub fn parse_basic_auth(header_value: Option<&str>) -> Option<(String, String)> 
 mod tests {
     use super::*;
 
-    /// #1158 — an operator password typed into the registry admin is hashed.
+    /// An operator password typed into the registry admin is hashed.
     #[cfg(feature = "admin")]
     #[tokio::test]
     async fn the_admin_hashes_an_operator_password() {

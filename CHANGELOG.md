@@ -8,27 +8,27 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.
 
-### Fixed — `migrate --dry-run` shows everything `migrate` runs (#1411)
+### Fixed — `migrate --dry-run` shows everything `migrate` runs
 
 The preview now includes the system step `migrate` would generate from changed framework models, the columns and indexes it converges on framework tables the project created, and the bootstrap DDL for each missing `managed = false` table that no pending migration creates. The converge part uses `migrate`'s own planner, so it shows its NOT NULL refusals, and names a table pending migrations change instead of guessing its SQL.
 
-### Fixed — tenancy `dumpdata` / `loaddata` take `--tenant <slug>` (#1424)
+### Fixed — tenancy `dumpdata` / `loaddata` take `--tenant <slug>`
 
 With `--tenant` they run on that tenant's pool over tenant models; without it, on the registry over registry models. They used to send every model to the registry. On a PostgreSQL schema-mode tenant, a table missing from the tenant's schema is refused instead of read from or written to `public`.
 
-### Performance — `dumpdata` streams rows and M2M links by page (#1399)
+### Performance — `dumpdata` streams rows and M2M links by page
 
 Rows are read 500 at a time in pk order, with only those rows' junction links, and written as they come; a dump no longer holds a whole table or junction in memory. A table whose marked pk is not its whole key (an inspectdb composite key, a view) is read in one ordered select, as before. PostgreSQL reads the pk from `pg_catalog`, so a SELECT-only role (and `inspectdb` run by one) sees it too.
 
-### Fixed — re-running the bootstrap DDL logs no ERROR on PostgreSQL (#1406)
+### Fixed — re-running the bootstrap DDL logs no ERROR on PostgreSQL
 
 The idempotent `ensure_*` and testkit paths send `ADD CONSTRAINT` inside a `DO` block that catches the duplicate, so an existing FK no longer writes an ERROR to the server log on every boot.
 
-### Fixed — M2M `add` takes text keys on a junction that is no model (#1405)
+### Fixed — M2M `add` takes text keys on a junction that is no model
 
 The manager types an auto-created junction's columns by each end's pk, so a `String` or `Uuid` key no longer fails with `TypeMismatch`.
 
-### Fixed — auto-created M2M junctions follow the pk they reference (#1404)
+### Fixed — auto-created M2M junctions follow the pk they reference
 
 A junction column takes the target pk's type (text, UUID) and its FK names the pk column, not `id`, so it applies on PostgreSQL and MySQL. Integer pks stay `BIGINT`.
 
@@ -36,37 +36,37 @@ A junction column takes the target pk's type (text, UUID) and its FK names the p
 
 Two long string pks gave ERROR 1071 at migrate time; rendering now fails with an error that names the junction and the limit.
 
-### Fixed — SQLite `json_path = <JSON null / object / array>` matches like PG and MySQL (#1398)
+### Fixed — SQLite `json_path = <JSON null / object / array>` matches like PG and MySQL
 
 A JSON `null` literal matched nothing, and objects compared as text, so key order mattered. They now compare by value; arrays keep their order.
 
 ### Fixed — SQLite `json_path = <object>` treats 1 and 1.0 as equal, as PG and MySQL do
 
-### Documentation — a held `PoolConn` plus a `&Pool` call can exhaust the pool (#1396)
+### Documentation — a held `PoolConn` plus a `&Pool` call can exhaust the pool
 
 `docs/orm.md` and the `PoolConn` docs say to pass the held connection to every query in the handler.
 
-### Added — `PoolConn::close_on_drop` keeps session state out of the pool (#1397)
+### Added — `PoolConn::close_on_drop` keeps session state out of the pool
 
 sqlx returns a connection with its `SET` state intact; call it after changing session state so the next borrower gets a fresh connection.
 
-### Fixed — a terminated PG backend aborts the `atomic` block at once (#1403)
+### Fixed — a terminated PG backend aborts the `atomic` block at once
 
 A FATAL or PANIC error (e.g. 57P01 from `pg_terminate_backend`) marks the block ended, so the next statement returns `AtomicAborted` instead of an I/O error.
 
-### Fixed — more `_on` query methods run on every backend (#1395)
+### Fixed — more `_on` query methods run on every backend
 
 `fetch_paginated_on`, `in_bulk_on`, `annotate_count_children_on`, `explain_on`, `delete_on`, `execute_on`, `ForeignKey::get_on` and `fetch_aggregate_on` take a `PoolConn`, `PoolTx` or `&Pool` like `fetch_on`.
 
-### Fixed — MySQL `dbshell` keeps URL options like `ssl-mode` (#1410)
+### Fixed — MySQL `dbshell` keeps URL options like `ssl-mode`
 
 `ssl-mode`, `ssl-ca`, `ssl-cert`, `ssl-key`, `charset`, `socket`, `timezone` and `collation` become `mysql` client flags; any other option is refused with its name instead of being dropped.
 
-### Fixed — `OuterRef` in a set-operation branch points at the enclosing query (#1409)
+### Fixed — `OuterRef` in a set-operation branch points at the enclosing query
 
 It used to bind to the head branch, so the branch matched the wrong rows or failed with an unknown column.
 
-### Fixed — MySQL `update()` / `delete()` with an `IN` subquery on the same table (#1361)
+### Fixed — MySQL `update()` / `delete()` with an `IN` subquery on the same table
 
 The subquery is now wrapped in a derived table inside any UPDATE/DELETE on MySQL, so it no longer fails with error 1093.
 
@@ -74,7 +74,7 @@ The subquery is now wrapped in a derived table inside any UPDATE/DELETE on MySQL
 
 A correlated subquery over another table runs as a plain `IN` again instead of a derived table rebuilt per row (240x slower on 50k rows). Nested `IN`s wrap only the level that reads the target.
 
-### Fixed — deactivating a tenant user in the admin ends their sessions (#1412)
+### Fixed — deactivating a tenant user in the admin ends their sessions
 
 Unticking `active` on a `rustango_users` row stamps `sessions_revoked_at`, as for operators, so cookies and JWT refresh tokens stop working at once and stay dead after a reactivation.
 
@@ -82,97 +82,97 @@ Unticking `active` on a `rustango_users` row stamps `sessions_revoked_at`, as fo
 
 **Breaking:** `Dialect::write_conflict_clause` takes the bound column list; `InsertQuery`/`BulkInsertQuery` gain a `generated` field (both `#[non_exhaustive]`). See UPGRADING.
 
-### Performance — pools skip sqlx's ping before every checkout (#2674)
+### Performance — pools skip sqlx's ping before every checkout
 
 The ping cost 8–16% of request CPU. New `[database].pool_test_before_acquire` / `RUSTANGO_DB_TEST_BEFORE_ACQUIRE` turns it back on; the default is off on all three backends, tenant pools included. A connection idle 30 s or more (`pool_idle_ping_secs` / `RUSTANGO_DB_IDLE_PING_SECS`) is still pinged.
 
-### Performance — `CachePageLayer` stores pages as a binary frame (#2656)
+### Performance — `CachePageLayer` stores pages as a binary frame
 
 A hit no longer parses JSON or decodes base64. New `Cache::get_bytes` / `set_bytes` default to base64 over `get`/`set`; `InMemoryCache`, `FileCache`, `RedisCache` and `ScopedCache` store raw bytes.
 
-### Added — `pool.acquire()` runs a request's queries on one connection (#2675)
+### Added — `pool.acquire()` runs a request's queries on one connection
 
 `PoolConn` holds one pooled connection; `fetch_on` / `first_on` / `count_on` / `exists_on` and the `values` / `values_list` / `values_list_flat` / `aggregate` `fetch_on` take it (or a `PoolTx`) on every backend through the sealed `SqlExecutor` trait. `values` and `aggregate` reads now count in `assert_num_queries`.
 
-### Fixed — the admin never shows password hashes or database URLs (#1158)
+### Fixed — the admin never shows password hashes or database URLs
 
 `password_hash`, `password` and `database_url` columns are secret in the admin whatever the model's widgets: not shown in list, detail, search or filters, and audited as `[changed]`. The registry admin hashes an operator password typed into it.
 
-### Fixed — console sessions idle out; run streams end with the session (#1344)
+### Fixed — console sessions idle out; run streams end with the session
 
 An operator console session ends after `SESSION_IDLE_SECS` (30 min) unused and `SESSION_TTL_SECS` (now 12 h, was 7 days) after sign-in; each request re-issues the cookie. The provisioning SSE stream re-checks the session on every poll. New `session::SESSION_IDLE_SECS`, `SessionPayload::renewed`.
 
-### Fixed — deactivating an operator ends their sessions; no self-reset in the console (#1342)
+### Fixed — deactivating an operator ends their sessions; no self-reset in the console
 
 `tenancy::operators::set_active(false)`, and unticking `active` in the registry admin, stamp `sessions_revoked_at`, so a reactivation does not revive old console cookies. `POST /operators/{own id}/reset-password` is refused: your own password goes through `/change-password`, which checks the current one.
 
-### Fixed — JWT `/refresh` re-runs the claims hook (#1150)
+### Fixed — JWT `/refresh` re-runs the claims hook
 
 `auth_routes::Config::extra_claims` runs on every refresh against the user's current row, so a demoted user's next pair drops the old role claims.
 
-### Fixed — CSRF `exempt_prefix` matches whole path segments (#1128)
+### Fixed — CSRF `exempt_prefix` matches whole path segments
 
 `.exempt_prefix("/beacon")` covers `/beacon` and `/beacon/…`, no longer `/beacon-admin/…`.
 
-### Fixed — MySQL upsert no longer updates a row of another unique key (#1357)
+### Fixed — MySQL upsert no longer updates a row of another unique key
 
-`ON DUPLICATE KEY UPDATE` fires on any unique key, so a `DoUpdate` whose target is not the only unique key a row can hit is refused with `ConflictNotSupportedInDialect`. Keys with an `Auto` column the caller left unset don't count; a set id, `default_uuid_v7` included, does (#1407). `Dialect::write_conflict_clause` takes the caller-set columns; new `InsertQuery::generated` / `BulkInsertQuery::generated`.
+`ON DUPLICATE KEY UPDATE` fires on any unique key, so a `DoUpdate` whose target is not the only unique key a row can hit is refused with `ConflictNotSupportedInDialect`. Keys with an `Auto` column the caller left unset don't count; a set id, `default_uuid_v7` included, does. `Dialect::write_conflict_clause` takes the caller-set columns; new `InsertQuery::generated` / `BulkInsertQuery::generated`.
 
-### Fixed — MySQL `string_agg` is no longer cut at 1024 bytes (#1358)
+### Fixed — MySQL `string_agg` is no longer cut at 1024 bytes
 
 A statement with `GROUP_CONCAT` carries a `SET_VAR(group_concat_max_len = …)` hint, so no pool or session setup is needed.
 
-### Fixed — MySQL `now()` and casts to DateTime / Time keep microseconds (#1359)
+### Fixed — MySQL `now()` and casts to DateTime / Time keep microseconds
 
 They emit `NOW(6)`, `DATETIME(6)` and `TIME(6)`, as PG and SQLite already kept the fraction.
 
-### Fixed — SQLite compares a Decimal with an expression as a number (#1217)
+### Fixed — SQLite compares a Decimal with an expression as a number
 
 A Decimal placeholder is `CAST(? AS NUMERIC)`, so `HAVING SUM(x) > Decimal` or `x * 2 > Decimal` no longer compares a number with text. New provided method `Dialect::write_decimal_param`.
 
-### Fixed — SQLite `json_path` comparisons match PG and MySQL (#1346)
+### Fixed — SQLite `json_path` comparisons match PG and MySQL
 
 An as-text path compared with a number compares as a number, as on MySQL, and a JSON path equals a `SqlValue::Json` scalar (`"foo"`, `5`, `true`).
 
-### Fixed — self-referential relation subqueries correlate to the outer row (#1287)
+### Fixed — self-referential relation subqueries correlate to the outer row
 
 A subquery over its enclosing query's table reads it as `__rustango_self`, so `where_has`, `annotate_count` and the M2M aggregates on a self FK or self M2M no longer compare a row with itself.
 
-### Fixed — `assert_num_queries` counts values, pluck and aggregate reads (#1303)
+### Fixed — `assert_num_queries` counts values, pluck and aggregate reads
 
 `values()`, `values_list()`, `pluck`, `pks`, `value`, `pluck_pairs` and `aggregate()` / `annotate()` each count one query; they counted none.
 
-### Fixed — docs no longer say saving sends model signals (#1323)
+### Fixed — docs no longer say saving sends model signals
 
 No ORM write sends `pre_save` / `post_save` / `pre_delete` / `post_delete`; the ORM and caching guides now say to call `send_*` after the write.
 
-### Fixed — `dbshell` opens the database sqlx opens (#1310)
+### Fixed — `dbshell` opens the database sqlx opens
 
 `sqlite3` gets the path without its `?query` and percent-decoded, so `sqlite://./app.db?mode=rwc` no longer opens a new empty `app.db?mode=rwc`. `psql` gets the URL, so `sslmode` and friends survive; `mysql` credentials and database names are percent-decoded. A URL with a raw `@` after `?`/`#` is refused rather than guessed, so a password never goes to the wrong host.
 
-### Fixed — `prewarm-pools`, `audit-cleanup`, `check` and `dumpdata` fail loudly (#1312)
+### Fixed — `prewarm-pools`, `audit-cleanup`, `check` and `dumpdata` fail loudly
 
 `prewarm-pools` and `audit-cleanup` exit non-zero when a tenant fails. `check` refuses an unknown argument (`--deplyo`), and `dumpdata --model` / `--exclude` refuse an unknown model name instead of dumping `[]`.
 
-### Fixed — `dumpdata` / `loaddata` keep auto-created M2M links (#1226)
+### Fixed — `dumpdata` / `loaddata` keep auto-created M2M links
 
 Each row carries its links as `"<relation>": [pk, ...]` in `fields`; `loaddata` inserts them after every row, so both ends exist.
 
-### Fixed — `showmigrations`, `migrate --dry-run` and `sqlmigrate` match `migrate` (#1311)
+### Fixed — `showmigrations`, `migrate --dry-run` and `sqlmigrate` match `migrate`
 
 They read the ledgers as `migrate` does: a file replaced by an applied squash counts as applied, a squash `migrate` would only record previews no DDL, and the framework's system chain is listed and previewed. `--dry-run` no longer creates the ledger. Under tenancy, `showmigrations` marks tenant-scoped files from the tenant ledgers. New `migrate_dry_run_pool_with_ledger` re-export.
 
 Tenancy `showmigrations` lists the framework's tenant steps as `(d/n tenants)` too, and prints `[-] name (no tenants)` when there are no tenants.
 
-### Fixed — the translation editor form carries a CSRF token (#1259)
+### Fixed — the translation editor form carries a CSRF token
 
 Every Save, add and delete was refused with 403 under session auth.
 
-### Fixed — the admin 403 page's Sign-out form carries a CSRF token (#1260)
+### Fixed — the admin 403 page's Sign-out form carries a CSRF token
 
 A non-superuser could not sign out from it: `/logout` refused the tokenless POST.
 
-### Fixed — the fullstack template's admin keeps its session key across restarts (#1335)
+### Fixed — the fullstack template's admin keeps its session key across restarts
 
 `admin_router` loads the key with `load_session_secret_for_tier`: `./var/` in dev, and a refused boot on prod without `RUSTANGO_SESSION_SECRET`.
 

@@ -2121,7 +2121,7 @@ struct CollectedFields {
     /// Rust-filled `Auto` fields (`default_uuid_v7`, `auto_now(_add)`), reset when `insert_or_ignore` skips (#1937).
     rust_filled_idents: Vec<syn::Ident>,
     /// `default_uuid_v7` fields: an `Unset` one gets a fresh id, so the
-    /// upsert marks it `generated` for the MySQL key guard (#1407).
+    /// upsert marks it `generated` for the MySQL key guard.
     uuid_v7_fields: Vec<(syn::Ident, String)>,
     /// `let _i_unset_<n> = matches!(rows[0].<auto_field>, Auto::Unset);`
     /// + the loop that asserts every row matches. One pair per Auto

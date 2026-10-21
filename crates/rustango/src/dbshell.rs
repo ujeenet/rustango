@@ -99,7 +99,7 @@ where
     // Drop any `?query`: the CLI clients do not take URL options.
     let body = rest.split_once('?').map_or(rest, |(b, _)| b);
     // Split auth from host on the last '@' first, so an '@' or '/' in the
-    // password does not break it (#2109).
+    // password does not break it.
     let (auth, host_db) = match body.rsplit_once('@') {
         Some((a, hd)) => (Some(a), hd),
         None => (None, body),
@@ -110,7 +110,7 @@ where
         Some((hp, _)) => (hp, None),
         None => (host_db, None),
     };
-    // Percent-decoded as sqlx does, or `p%40ss` reaches the server as is (#1310).
+    // Percent-decoded as sqlx does, or `p%40ss` reaches the server as is.
     use crate::url_codec::percent_decode_path as decode;
     let database = database.map(|db| decode(&db));
     let (user, password) = match auth {
@@ -138,7 +138,7 @@ where
 
 fn parse_sqlite_path(rest: &str) -> String {
     // As sqlx reads it: the `?query` is options, not part of the file name,
-    // and the path is percent-decoded (#1310). The leading `/` of
+    // and the path is percent-decoded. The leading `/` of
     // `sqlite:///abs/path` is part of the path and must stay.
     let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
     let in_memory = query.split('&').any(|kv| kv == "mode=memory");
@@ -256,7 +256,7 @@ pub fn run(url: &str) -> Result<std::convert::Infallible, Box<dyn std::error::Er
 }
 
 /// The client `run` starts for `url`. `psql` gets the URL itself, so libpq
-/// keeps options like `sslmode` that its flags cannot carry (#1310).
+/// keeps options like `sslmode` that its flags cannot carry.
 fn shell_command(url: &str) -> Result<(&'static str, Command), String> {
     let target = parse_target(url)?;
     if let DbTarget::Postgres { .. } = target {
@@ -276,7 +276,7 @@ fn shell_command(url: &str) -> Result<(&'static str, Command), String> {
     Ok((program, cmd))
 }
 
-/// `mysql` flags for the URL options sqlx reads (#1410). Any other option
+/// `mysql` flags for the URL options sqlx reads. Any other option
 /// is refused, so the shell never connects differently from the app.
 fn mysql_option_flags(url: &str) -> Result<Vec<OsString>, String> {
     use crate::url_codec::url_decode as decode;
@@ -427,7 +427,7 @@ mod tests {
         assert!(!argv.iter().any(|a| a.to_string_lossy().contains("pw")));
     }
 
-    /// pr-1408-r2 security-001/002: an `@` after a raw `?`/`#` could be
+    /// An `@` after a raw `?`/`#` could be
     /// userinfo or a query value, so it is refused, never guessed.
     #[test]
     fn conn_refuses_an_at_after_a_query_or_fragment() {
@@ -445,7 +445,7 @@ mod tests {
         assert_eq!(c.password.as_deref(), Some("pa#ss"));
     }
 
-    /// #1310 — sqlite3 opens the file sqlx opens, not `app.db?mode=rwc`.
+    /// sqlite3 opens the file sqlx opens, not `app.db?mode=rwc`.
     #[test]
     fn sqlite_path_drops_the_query_and_decodes() {
         let path = |url| match parse_target(url).unwrap() {
@@ -458,7 +458,7 @@ mod tests {
         assert_eq!(path("sqlite://?mode=memory"), ":memory:");
     }
 
-    /// #1310 — credentials reach the client decoded, as sqlx sends them.
+    /// Credentials reach the client decoded, as sqlx sends them.
     #[test]
     fn credentials_are_percent_decoded() {
         assert_eq!(
@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(password.as_deref(), Some("p/w"));
     }
 
-    /// #1310 — psql gets the URL, so `sslmode` survives and the password
+    /// psql gets the URL, so `sslmode` survives and the password
     /// is decoded into `PGPASSWORD`, not argv.
     #[test]
     fn psql_keeps_url_options() {
@@ -507,7 +507,7 @@ mod tests {
             .collect()
     }
 
-    /// #1410 — sqlx's MySQL URL options reach the `mysql` client as flags.
+    /// sqlx's MySQL URL options reach the `mysql` client as flags.
     #[test]
     fn mysql_keeps_url_options() {
         let (prog, cmd) = shell_command(
@@ -538,7 +538,7 @@ mod tests {
         );
     }
 
-    /// #1410 — an option the client cannot honour is refused, not dropped.
+    /// An option the client cannot honour is refused, not dropped.
     #[test]
     fn mysql_refuses_unknown_or_unsafe_options() {
         for (url, needle) in [
@@ -624,7 +624,7 @@ mod tests {
 
     #[test]
     fn parse_mysql_strips_query_string() {
-        // `shell_command` turns `?ssl-mode=…` into client flags (#1410).
+        // `shell_command` turns `?ssl-mode=…` into client flags.
         assert_eq!(
             parse_target("mysql://localhost/db?ssl-mode=REQUIRED").unwrap(),
             DbTarget::Mysql {

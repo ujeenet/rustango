@@ -83,7 +83,7 @@ pub(crate) fn is_already_exists(e: &crate::sql::ExecError, dialect: &str, stmt: 
 ///
 /// `ALTER TABLE … ADD COLUMN` gets `IF NOT EXISTS` the same way.
 /// `ADD CONSTRAINT` has no `IF NOT EXISTS`, so PG runs it in a `DO` block
-/// that catches the duplicate, which logs nothing (#1406). A statement
+/// that catches the duplicate, which logs nothing. A statement
 /// holding the tag runs bare, and the client-side check catches it.
 fn idempotent<'a>(stmt: &'a str, dialect: &str) -> std::borrow::Cow<'a, str> {
     if dialect != "postgres" {
@@ -129,7 +129,7 @@ pub(crate) async fn apply_idempotent(
 }
 
 /// The statements [`apply_idempotent`] runs for `snapshot`, guards
-/// included, FK targets unqualified, for a `--dry-run` (#1411).
+/// included, FK targets unqualified, for a `--dry-run`.
 ///
 /// # Errors
 /// A render failure.

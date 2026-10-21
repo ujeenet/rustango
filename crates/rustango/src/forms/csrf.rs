@@ -135,7 +135,7 @@ pub struct CsrfConfig {
     /// `X-CSRF-Token` header and — when the page is served from a CDN
     /// cache that strips `Set-Cookie` — may have no CSRF cookie at all.
     /// Each entry matches by path segment: `/beacon` covers `/beacon` and
-    /// `/beacon/x`, not `/beacon-admin` (#1128). Keep prefixes narrow and
+    /// `/beacon/x`, not `/beacon-admin`. Keep prefixes narrow and
     /// only exempt append-only endpoints that read/write no auth state.
     pub exempt_prefixes: Vec<String>,
     /// Enforce CSRF on the HTTP `QUERY` method (RFC 10008). Default
@@ -609,7 +609,7 @@ where
 const BODY_BUFFER_LIMIT: usize = 2 * 1024 * 1024;
 
 /// `true` when `path` is under any configured exempt prefix, by whole
-/// segment, so `/beacon` does not exempt `/beacon-admin` (#1128).
+/// segment, so `/beacon` does not exempt `/beacon-admin`.
 fn path_is_exempt(path: &str, prefixes: &[String]) -> bool {
     prefixes.iter().any(|p| {
         path.strip_prefix(p.as_str())
@@ -1114,7 +1114,7 @@ mod tests {
         assert!(!path_is_exempt("/__cms__/collect", &[]));
     }
 
-    /// #1128 — a prefix matches whole path segments only.
+    /// A prefix matches whole path segments only.
     #[test]
     fn exempt_prefix_matches_by_segment() {
         let prefixes = vec!["/beacon".to_owned(), "/hook/".to_owned()];

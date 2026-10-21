@@ -90,7 +90,7 @@ reach every tenant, so this list is the console's access control.</p>
       </td>
       {% endif %}
     </tr>
-    {#- Your own password goes through change-password (#1342). -#}
+    {#- Your own password goes through change-password. -#}
     {% if manage_enabled and not op.is_self %}
     <tr id="reset-{{ op.id }}" class="reset-row">
       <td colspan="6">

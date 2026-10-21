@@ -71,7 +71,7 @@ impl Dialect for MySql {
     }
 
     /// A materialized derived table also lifts error 1093, so the
-    /// subquery of an UPDATE/DELETE may read the target table (#1361).
+    /// subquery of an UPDATE/DELETE may read the target table.
     fn in_subquery_limit_needs_derived_table(&self) -> bool {
         true
     }
@@ -123,7 +123,7 @@ impl Dialect for MySql {
     /// MySQL's CAST targets differ from the ANSI names: integers
     /// cast to `SIGNED`, floats to `FLOAT` or `DOUBLE`, booleans to
     /// `UNSIGNED`, strings to `CHAR`, and timestamps to `DATETIME(6)`
-    /// (bare `DATETIME` / `TIME` drop the microseconds, #1359).
+    /// (bare `DATETIME` / `TIME` drop the microseconds).
     ///
     /// UUID has no CAST target, so it returns `None`; cast a
     /// string-shaped value to `CHAR` yourself.
@@ -682,7 +682,7 @@ impl Dialect for MySql {
                     return Err(SqlError::EmptyUpdateSet);
                 }
                 // The clause fires on every unique key, so another key
-                // that can clash would update the wrong row (#1357).
+                // that can clash would update the wrong row.
                 if !my_target_is_only_unique_key(model, caller_set, target) {
                     return Err(SqlError::ConflictNotSupportedInDialect {
                         shape: "DO UPDATE on a target that is not the only unique key",
@@ -810,7 +810,7 @@ fn write_my_ident(sql: &mut String, name: &str) {
 
 /// True when every unique key a new row can clash on is `target`. A key
 /// with an `Auto` column the caller did not set holds a generated value,
-/// so it never clashes; a caller-set one can (rel-0608 correctness-003, #1407).
+/// so it never clashes; a caller-set one can.
 fn my_target_is_only_unique_key(model: &ModelSchema, caller_set: &[&str], target: &[&str]) -> bool {
     let fits = |cols: &[&str]| {
         let generated = cols.iter().any(|c| {
@@ -1213,7 +1213,7 @@ mod tests {
         assert_eq!(sql, " ON DUPLICATE KEY UPDATE `a` = VALUES(`a`)");
     }
 
-    /// rel-0608 correctness-003: a bound `Auto` PK can clash like any key.
+    /// A bound `Auto` PK can clash like any key.
     #[test]
     fn conflict_do_update_refuses_a_bound_auto_pk() {
         use crate::core::{InsertQuery, SqlValue};
@@ -1258,7 +1258,7 @@ mod tests {
         );
     }
 
-    /// A bound uuid PK clashes unless the writer marks it generated (#1407).
+    /// A bound uuid PK clashes unless the writer marks it generated.
     #[test]
     fn conflict_do_update_trusts_only_a_generated_uuid_pk() {
         use crate::core::{InsertQuery, SqlValue};
