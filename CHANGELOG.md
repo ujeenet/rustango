@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — a cold tenant pool is built once
 
-Concurrent requests to a tenant with no cached pool now wait for one secret lookup and connect instead of each making their own, in database mode, schema mode and `DatabasePools`.
+Concurrent requests to a tenant with no cached pool now wait for one secret lookup and connect instead of each making their own, in database mode, schema mode and `DatabasePools`. If that build fails, every waiting request gets its error at once. With the pool cache cap at 0, builds still run side by side.
 
 ### Fixed — `dispatch` inside `atomic` joins the block
 
