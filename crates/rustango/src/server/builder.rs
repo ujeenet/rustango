@@ -101,6 +101,10 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     allowed_hosts: Option<crate::host_validation::AllowedHostsLayer>,
     #[cfg(feature = "admin")]
     ssl_redirect: Option<crate::ssl_redirect::SslRedirectLayer>,
+    /// The api router's own cap, also put on the tenant admin and the
+    /// operator console, which it never covered.
+    #[cfg(feature = "_http_layers")]
+    body_limit: Option<crate::body_limit::BodyLimitLayer>,
     /// Outermost, so the access log and every throttle see its
     /// `TrustedRealIp` (#1745).
     #[cfg(feature = "_http_layers")]
@@ -181,6 +185,8 @@ impl<DB: Database> Builder<DB> {
             #[cfg(feature = "admin")]
             ssl_redirect: None,
             #[cfg(feature = "_http_layers")]
+            body_limit: None,
+            #[cfg(feature = "_http_layers")]
             real_ip: None,
             header_resolver: None,
             _phantom: PhantomData,
@@ -215,6 +221,16 @@ impl<DB: Database> Builder<DB> {
     #[must_use]
     pub fn ssl_redirect(mut self, layer: crate::ssl_redirect::SslRedirectLayer) -> Self {
         self.ssl_redirect = Some(layer);
+        self
+    }
+
+    /// Cap request bodies on the tenant admin and operator console.
+    /// The api router keeps its own layer, inside its CORS. `Cli` calls
+    /// this from `[server] max_body_bytes`.
+    #[cfg(feature = "_http_layers")]
+    #[must_use]
+    pub fn body_limit(mut self, layer: crate::body_limit::BodyLimitLayer) -> Self {
+        self.body_limit = Some(layer);
         self
     }
 
@@ -775,6 +791,8 @@ impl<DB: Database> Builder<DB> {
         // routes, the user's API router fallback is free to take
         // every URL the admin doesn't claim.
         let admin_routes = build_admin_routes(&tenant_admin, &self.routes);
+        #[cfg(feature = "_http_layers")]
+        let admin_routes = with_body_limit(admin_routes, self.body_limit.clone());
         let tenant_app = match api {
             Some(router) => router.layer(Extension(ctx.clone())).merge(admin_routes),
             None => admin_routes,
@@ -847,6 +865,8 @@ impl<DB: Database> Builder<DB> {
             Some(health) => operator_admin.merge(health),
             None => operator_admin,
         };
+        #[cfg(feature = "_http_layers")]
+        let operator_admin = with_body_limit(operator_admin, self.body_limit);
         // With an outer access log, it logs the console (#1788).
         let operator_admin = if self.access_log.is_some() {
             operator_admin
@@ -987,6 +1007,15 @@ impl<DB: Database> Builder<DB> {
         let app = tag_listener_port(app, &listener)?;
         crate::shutdown::serve_until_drained(listener, app, drain).await?;
         Ok(())
+    }
+}
+
+#[cfg(feature = "_http_layers")]
+fn with_body_limit(r: Router, layer: Option<crate::body_limit::BodyLimitLayer>) -> Router {
+    use crate::body_limit::BodyLimitRouterExt as _;
+    match layer {
+        Some(l) => r.body_limit(l),
+        None => r,
     }
 }
 

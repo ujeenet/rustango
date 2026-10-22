@@ -942,6 +942,8 @@ use on::RowRef;
 pub use on::{PoolConn, SqlExecutor};
 
 mod atomic;
+#[cfg(feature = "jobs")]
+pub(crate) use atomic::in_any_block;
 #[cfg(feature = "jobs-postgres")]
 pub(crate) use atomic::in_block;
 pub(crate) use atomic::rolled_back;

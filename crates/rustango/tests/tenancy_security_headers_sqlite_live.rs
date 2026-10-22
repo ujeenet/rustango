@@ -206,3 +206,41 @@ async fn health_is_served_on_both_branches() {
         }
     }
 }
+
+async fn post_status(app: &axum::Router, host: &str, uri: &str, len: usize) -> StatusCode {
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("host", host)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("content-length", len.to_string())
+        .body(Body::from(vec![b'a'; len]))
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+/// `[server] max_body_bytes` reaches the operator console and the tenant
+/// admin, not only the api router.
+#[tokio::test]
+async fn the_body_limit_covers_the_console_and_tenant_admin() {
+    use rustango::body_limit::BodyLimitLayer;
+    let (app, _tmp) = build(|b| b.body_limit(BodyLimitLayer::new(64))).await;
+    for (host, uri) in [("localhost", "/login"), ("acme.localhost", "/login")] {
+        assert_eq!(
+            post_status(&app, host, uri, 1000).await,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{host}{uri} must carry the cap"
+        );
+    }
+}
+
+/// A raised cap lets the console read a form over axum's 2 MiB default.
+#[tokio::test]
+async fn a_raised_body_limit_reaches_the_console_form() {
+    use rustango::body_limit::BodyLimitLayer;
+    let (app, _tmp) = build(|b| b.body_limit(BodyLimitLayer::new(8 << 20))).await;
+    assert_ne!(
+        post_status(&app, "localhost", "/login", 3 << 20).await,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+}

@@ -62,6 +62,26 @@ Saving or filtering with an array, range, hstore, vector or geometry value on My
 
 Snapshots record `vector(N)` / `geometry(SRID)`, so migrations create `vector(1536)` / `geometry(Point,4326)` like live DDL, a dimension or SRID change is diffed, and MySQL gets `TEXT` instead of the `VECTOR` it rejects.
 
+### Added — `TenantScope` extractor
+
+`extractors::TenantScope` gives the request's org and tenant pool with no held connection, on every backend. Use it for handlers that only call `t.pool()`.
+
+### Fixed — `[server] max_body_bytes` covers the tenant admin and operator console
+
+Under tenancy they kept axum's 2 MiB. `server::Builder::body_limit` sets it; `Cli` passes the setting.
+
+### Fixed — `InMemoryJobQueue::dispatch` inside `atomic` waits for the commit
+
+As on the DB queue, the job is queued on commit and dropped on rollback.
+
+### Security — a dead-lettered older webhook row no longer passes its signing secret
+
+The dead-letter callback gets the payload in the current shape of the job type.
+
+### Fixed — the stuck-job sweep no longer deadlocks with heartbeats on MySQL
+
+`reclaim_stuck_jobs_pool` unlocks rows one at a time by key instead of one range `UPDATE`.
+
 ### Security — admin create and edit stay inside the row scope
 
 The written row, parent and inline children alike, is re-read in the write transaction through the queryset hooks (and the `add` hook after a create); a form that would put a row outside the scope is refused with 403 and the whole edit rolled back.

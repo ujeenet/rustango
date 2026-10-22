@@ -744,6 +744,49 @@ mod tests {
         q.shutdown().await;
     }
 
+    /// A dead-lettered row an older release queued reaches the callback
+    /// in the current shape, without the signing secret it stored.
+    #[tokio::test]
+    async fn an_older_row_dead_letters_without_its_secret() {
+        #[derive(Serialize, Deserialize)]
+        #[serde(transparent)]
+        struct OlderRow(serde_json::Value);
+        #[async_trait::async_trait]
+        impl Job for OlderRow {
+            const NAME: &'static str = WebhookEvent::NAME;
+            async fn run(&self) -> Result<(), JobError> {
+                unreachable!("WebhookEvent's handler runs it")
+            }
+        }
+        let (url, srv) = start_server(404, Arc::default()).await;
+        let q = InMemoryJobQueue::with_workers(1);
+        WebhookSubscription::register(&q).await;
+        let dead = Arc::new(Mutex::new(Vec::new()));
+        let d = dead.clone();
+        q.on_dead_letter(move |dl| {
+            let d = d.clone();
+            async move { d.lock().unwrap().push(dl.payload) }
+        })
+        .await;
+        q.start().await;
+        let old = serde_json::json!({
+            "id": "id", "event": "ping", "target_url": url,
+            "signing_secret": "s3cret-older", "signature_format": "HexSha256WithPrefix",
+            "payload": {"a": 1}, "headers": {}, "timeout_secs": 5,
+            "retry_status_codes": [], "allow_private_targets": true,
+        });
+        q.dispatch(&OlderRow(old)).await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while dead.lock().unwrap().is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let payload = dead.lock().unwrap().first().expect("dead-lettered").clone();
+        assert!(!payload.to_string().contains("s3cret-older"), "{payload}");
+        assert_eq!(payload["body"], r#"{"a":1}"#, "{payload}");
+        srv.abort();
+        q.shutdown().await;
+    }
+
     /// #2116 — `{:?}` in a log must not print the signing secret.
     #[test]
     fn debug_redacts_the_secret_and_header_values() {

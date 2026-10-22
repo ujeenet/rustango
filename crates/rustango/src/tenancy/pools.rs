@@ -150,13 +150,12 @@ pub struct TenantPoolsConfig {
     /// Per-pool `max_connections` for schema-mode scoped pools.
     ///
     /// Was a hardcoded 2 while these pools were per-call throwaways.
-    /// Caching them (#1235) made every caller for a given tenant share
-    /// one pool, which makes 2 actively dangerous: the `Tenant`
-    /// extractor pins a connection for the handler's whole lifetime,
-    /// so a handler that also uses `t.pool()` needs a second slot, and
-    /// a long-lived per-tenant job worker built on `scoped_pool_dyn`
-    /// (see `docs/jobs.md`) holds one more or less permanently. At 2
-    /// those three uses deadlock each other. This is the same
+    /// Caching them made every caller for a given tenant share one
+    /// pool, which makes 2 actively dangerous: concurrent `t.pool()`
+    /// handlers share it, and a long-lived per-tenant job worker built
+    /// on `scoped_pool_dyn` (see `docs/jobs.md`) holds one slot more or
+    /// less permanently. The `Tenant` extractor's held connection comes
+    /// from the registry pool, not this one. This is the same
     /// reasoning that puts `database_pool_max_connections` at 16.
     ///
     /// Still smaller than the database-mode figure, because every
@@ -1273,6 +1272,10 @@ impl TenantPools<sqlx::Postgres> {
     /// used scoped pool to make room — see that field for the
     /// connection arithmetic.
     ///
+    /// Its connections are never reset on release: a handler that runs
+    /// its own `SET search_path` (or other session `SET`) on one leaks it
+    /// to the next borrower. Use [`Self::acquire`] for session state.
+    ///
     /// # Errors
     /// As [`Self::pool_for_org`] plus [`TenancyError::Driver`] for
     /// the schema-mode dedicated pool build.
@@ -1554,9 +1557,9 @@ mod ensure_sqlite_creates_tests {
 
 /// A connection scoped to a tenant. Generic over the backend
 /// (`DB = sqlx::Postgres` default — keeps existing call sites
-/// compiling). For schema mode the connection was returned from the
-/// shared registry pool with `search_path` pre-set (PG-only); for
-/// database mode it came from the tenant's dedicated pool.
+/// compiling). For schema mode the connection comes from the shared
+/// registry pool with `search_path` set, and reset on drop (PG-only);
+/// for database mode it comes from the tenant's dedicated pool.
 ///
 /// Implements `Deref` to the inner [`sqlx::pool::PoolConnection`] for
 /// use as a sqlx executor.

@@ -520,6 +520,32 @@ async fn a_heartbeat_keeps_a_long_job_leased(pool: &Pool) {
     assert_eq!(counts(&slow).0, 1, "ran once");
 }
 
+/// A reclaim sweep beside busy heartbeats never fails on a lock cycle.
+async fn a_reclaim_beside_heartbeats_does_not_fail(pool: &Pool) {
+    let tok = token(pool, "reclaim_storm");
+    let q = queue(pool, 3, Duration::from_millis(2)).await;
+    for _ in 0..3 {
+        q.dispatch(&Slow {
+            token: tok.clone(),
+            first_ms: 3000,
+            later_ms: 3000,
+        })
+        .await
+        .unwrap();
+    }
+    q.start().await;
+    wait_for("the runs to start", || counts(&tok).0 == 3).await;
+    let mut sweeps = 0;
+    while counts(&tok).1 < 3 {
+        PgJobQueue::reclaim_stuck_jobs_pool(pool, Duration::from_millis(500))
+            .await
+            .unwrap_or_else(|e| panic!("sweep {sweeps} failed: {e}"));
+        sweeps += 1;
+    }
+    q.shutdown().await;
+    assert_eq!(counts(&tok).0, 3, "each ran once");
+}
+
 async fn a_lost_lease_does_not_finish_the_new_holders_row(pool: &Pool) {
     let slow = token(pool, "lease");
     let q = queue(pool, 2, Duration::from_secs(60)).await;
@@ -966,6 +992,7 @@ tri_dialect_test! {
         a_dead_workers_row_is_reclaimed_at_boot,
         the_sweep_does_not_reclaim_a_live_job,
         a_heartbeat_keeps_a_long_job_leased,
+        a_reclaim_beside_heartbeats_does_not_fail,
         a_lost_lease_does_not_finish_the_new_holders_row,
         a_job_without_a_handler_spends_no_attempts,
         a_lost_lease_fires_no_dead_letter,
