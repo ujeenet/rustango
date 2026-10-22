@@ -1266,6 +1266,18 @@ impl Cli {
                     .into(),
             );
         }
+        // axum panics on a root nest; `[admin] url_prefix = "/"` reaches here as "".
+        if let Some((path, _)) = self
+            .nested
+            .iter()
+            .find(|(p, _)| p.trim_end_matches('/').is_empty())
+        {
+            return Err(format!(
+                "Cli::nest_with({path:?}) cannot mount at the root; use a prefix \
+                 such as \"/admin\" (for the admin, set `[admin] url_prefix`)"
+            )
+            .into());
+        }
         #[cfg(feature = "tenancy")]
         if self.tenancy {
             return self.runserver_tenancy().await;
@@ -3113,6 +3125,23 @@ mod observability_without_admin_tests {
                 res.status(),
                 axum::http::StatusCode::OK,
                 "{path} not mounted"
+            );
+        }
+    }
+
+    /// A root `nest_with` (`[admin] url_prefix = "/"`) is a boot error, not an axum panic.
+    #[tokio::test]
+    async fn nest_with_at_the_root_is_refused() {
+        let _serial = serialized();
+        for path in ["", "/"] {
+            let err = Cli::new()
+                .nest_with(path, |_| Router::new())
+                .runserver()
+                .await
+                .expect_err("a root nest must not serve");
+            assert!(
+                err.to_string().contains("cannot mount at the root"),
+                "{err}"
             );
         }
     }

@@ -284,6 +284,7 @@ impl Builder {
 
     /// The mount prefix `settings` asks for, without a trailing slash:
     /// `admin.url_prefix`, else `routes.admin_url`. Nest the admin router here.
+    /// `"/"` gives `""`, the root, which `Cli::nest_with` refuses at boot.
     #[cfg(feature = "config")]
     #[must_use]
     pub fn settings_prefix(settings: &crate::config::Settings) -> Option<&str> {

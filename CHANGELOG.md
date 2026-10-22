@@ -8,7 +8,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — the fullstack scaffold mounts its admin at `[admin] url_prefix`
 
-`main.rs` loads the settings once, passes them to the server (via the now-public `Cli::with_loaded_settings`, so a missing `config/` still only warns) and to `admin::Builder::from_settings`, and nests the admin at the new `admin::Builder::settings_prefix` (default `/admin`).
+`main.rs` loads the settings once, passes them to the server (via the now-public `Cli::with_loaded_settings`, so a missing `config/` still only warns) and to `admin::Builder::from_settings`, and nests the admin at the new `admin::Builder::settings_prefix` (default `/admin`). `url_prefix = "/"` stops boot with an error: `Cli::nest_with` refuses a root path, which axum would panic on.
 
 ### Fixed — SQLite migrations see columns another pooled connection added
 
