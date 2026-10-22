@@ -468,6 +468,32 @@ async fn an_undecodable_payload_is_retried(pool: &Pool) {
     assert_eq!(job_rows(pool).await, 1, "the row is kept for a retry");
 }
 
+/// A job dispatched in an `atomic` block wakes an idle worker once the
+/// block commits, not before; the poll is too slow to pick it up.
+async fn a_dispatch_in_a_block_wakes_the_worker_after_commit(pool: &Pool) {
+    let q = Arc::new(
+        PgJobQueue::with_workers_pool(pool.clone(), 1).poll_interval(Duration::from_secs(600)),
+    );
+    q.register::<Tick>().await;
+    q.start().await;
+    // Let the worker finish its first, empty claim and go idle.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let tok = token(pool, "woken");
+    let (q2, t2) = (q.clone(), tok.clone());
+    rustango::sql::atomic(pool, move |_tx| {
+        Box::pin(async move {
+            q2.dispatch(&Tick { token: t2.clone() }).await.expect("dispatch");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(counts(&t2).0, 0, "the job ran before its block committed");
+            Ok(())
+        })
+    })
+    .await
+    .expect("commit");
+    wait_for("the woken worker", || counts(&tok).1 == 1).await;
+    q.shutdown().await;
+}
+
 async fn a_heartbeat_keeps_a_long_job_leased(pool: &Pool) {
     let slow = token(pool, "heartbeat");
     let q = queue(pool, 2, Duration::from_millis(100)).await;
@@ -950,5 +976,6 @@ tri_dialect_test! {
         a_dispatch_rolls_back_with_its_atomic_block,
         a_dispatch_after_a_write_commits_with_its_block,
         an_undecodable_payload_is_retried,
+        a_dispatch_in_a_block_wakes_the_worker_after_commit,
     ],
 }
