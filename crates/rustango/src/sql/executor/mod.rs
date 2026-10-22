@@ -1247,8 +1247,8 @@ pub(crate) async fn stored_keys(
                 .iter()
                 .flat_map(|(k, raw)| [k.clone(), SqlValue::String((*raw).to_owned())])
                 .collect();
-            let query = SelectQuery::by_pk_in(model, field.column, binds)
-                .projection(vec![field.column]);
+            let query =
+                SelectQuery::by_pk_in(model, field.column, binds).projection(vec![field.column]);
             crate::test_assertions::query_counter::bump();
             let stmt = pool.dialect().compile_select(&query)?;
             let mut q = sqlx::query(&stmt.sql);
@@ -1264,7 +1264,11 @@ pub(crate) async fn stored_keys(
         }
         return Ok(keys
             .into_iter()
-            .map(|(k, _)| uuid_of(&k).and_then(|u| stored.get(&u).cloned()).unwrap_or(k))
+            .map(|(k, _)| {
+                uuid_of(&k)
+                    .and_then(|u| stored.get(&u).cloned())
+                    .unwrap_or(k)
+            })
             .collect());
     }
     let _ = (pool, model, field);

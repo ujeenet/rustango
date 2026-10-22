@@ -279,7 +279,12 @@ fn current_shape<T: Job>(payload: serde_json::Value) -> serde_json::Value {
 
 impl Registered {
     /// The dead letter for a job of this type, its payload in the current shape.
-    fn dead_letter(&self, payload: serde_json::Value, attempts: u32, error: String) -> JobDeadLetter {
+    fn dead_letter(
+        &self,
+        payload: serde_json::Value,
+        attempts: u32,
+        error: String,
+    ) -> JobDeadLetter {
         JobDeadLetter {
             name: self.name,
             payload: (self.current_shape)(payload),
@@ -696,7 +701,14 @@ async fn worker_loop(w: InMemoryWorker) {
             Err(e @ (JobError::Fatal(_) | JobError::Queue(_))) => {
                 pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 let attempts = envelope.attempt + 1;
-                dead_letter_job(&dead_letter, Some(&entry), envelope, attempts, e.to_string()).await;
+                dead_letter_job(
+                    &dead_letter,
+                    Some(&entry),
+                    envelope,
+                    attempts,
+                    e.to_string(),
+                )
+                .await;
             }
         }
     }
@@ -1017,7 +1029,11 @@ mod tests {
         .await
         .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(RUNS.load(Ordering::SeqCst), 1, "the committed dispatch runs once");
+        assert_eq!(
+            RUNS.load(Ordering::SeqCst),
+            1,
+            "the committed dispatch runs once"
+        );
         q.shutdown().await;
     }
 

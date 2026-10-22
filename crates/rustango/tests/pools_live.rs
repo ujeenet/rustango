@@ -831,13 +831,12 @@ async fn schema_mode_tenants_using_pool_do_not_starve_it() {
             let mut parts = tenant_parts(pools.clone(), schema_org("acme_tp_many"));
             let barrier = barrier.clone();
             tokio::spawn(async move {
-                let mut t =
-                    rustango::extractors::Tenant::<sqlx::Postgres>::from_request_parts(
-                        &mut parts,
-                        &(),
-                    )
-                    .await
-                    .map_err(|_| "extractor rejected".to_owned())?;
+                let mut t = rustango::extractors::Tenant::<sqlx::Postgres>::from_request_parts(
+                    &mut parts,
+                    &(),
+                )
+                .await
+                .map_err(|_| "extractor rejected".to_owned())?;
                 barrier.wait().await;
                 let rustango::sql::Pool::Postgres(pg) = t.pool().clone() else {
                     panic!("a Postgres pool");
@@ -878,8 +877,12 @@ async fn tenant_scope_holds_no_connection() {
     };
     let pools = TenantPools::new(admin.clone()).config(cfg);
     let mut parts = tenant_parts(std::sync::Arc::new(pools), schema_org("acme_tp_scope"));
-    let first = TenantScope::from_request_parts(&mut parts, &()).await.unwrap();
-    let second = TenantScope::from_request_parts(&mut parts, &()).await.unwrap();
+    let first = TenantScope::from_request_parts(&mut parts, &())
+        .await
+        .unwrap();
+    let second = TenantScope::from_request_parts(&mut parts, &())
+        .await
+        .unwrap();
     assert_eq!(first.org.slug, "acme_tp_scope");
     let rustango::sql::Pool::Postgres(pg) = second.pool() else {
         panic!("a Postgres pool");

@@ -548,8 +548,7 @@ mod sqlite_only {
             .await
             .expect("read name");
         assert_eq!(names, ["b"], "the edit did not reach the row");
-        let (status, body) =
-            send(&pool, "POST", &format!("/aed_textkey/{key}/delete"), "").await;
+        let (status, body) = send(&pool, "POST", &format!("/aed_textkey/{key}/delete"), "").await;
         assert!(status.is_redirection(), "delete: {status} {body}");
         let left = column("id")
             .fetch::<String>(&pool)
@@ -615,7 +614,10 @@ mod sqlite_only {
         let form = format!("action=delete_selected&_selected={key}");
         let (status, body) = send(&pool, "POST", "/aed_textkey/__action", &form).await;
         assert!(status.is_redirection(), "bulk delete: {status} {body}");
-        assert!(keys(&pool).await.is_empty(), "delete_selected missed the row");
+        assert!(
+            keys(&pool).await.is_empty(),
+            "delete_selected missed the row"
+        );
 
         let mut parent = TParent {
             id: Auto::default(),

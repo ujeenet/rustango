@@ -1636,7 +1636,9 @@ async fn plan_target(
 
         let pk = match stored.get(raw_pk.as_str()) {
             Some(key) => key.clone(),
-            None => crate::forms::parse_pk_string(target.pk, &raw_pk).map_err(|e| bad_row(idx, e))?,
+            None => {
+                crate::forms::parse_pk_string(target.pk, &raw_pk).map_err(|e| bad_row(idx, e))?
+            }
         };
 
         if delete_flag {

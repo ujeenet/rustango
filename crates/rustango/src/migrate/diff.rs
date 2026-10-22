@@ -2266,7 +2266,12 @@ fn table_indexes<'a>(current: &'a SchemaSnapshot, table: &str) -> Vec<(&'a str, 
         .indexes
         .iter()
         .filter(|i| i.table == table)
-        .map(|i| (i.name.as_str(), i.columns.iter().map(String::as_str).collect()))
+        .map(|i| {
+            (
+                i.name.as_str(),
+                i.columns.iter().map(String::as_str).collect(),
+            )
+        })
         .collect();
     if !snap.is_empty() {
         return snap;
@@ -3410,9 +3415,8 @@ mod sql_type_tests {
         };
         let create = [SchemaChange::CreateTable("t".into())];
         for ty in ["string", "binary"] {
-            let err =
-                render_changes_split_with_dialect(&create, &snap(ty), &crate::sql::MySql)
-                    .unwrap_err();
+            let err = render_changes_split_with_dialect(&create, &snap(ty), &crate::sql::MySql)
+                .unwrap_err();
             assert!(err.contains("cannot index"), "{ty}: {err}");
             render_changes_split_with_dialect(&create, &snap(ty), &crate::sql::Postgres).unwrap();
             render_changes_split_with_dialect(&create, &snap(ty), &crate::sql::Sqlite).unwrap();

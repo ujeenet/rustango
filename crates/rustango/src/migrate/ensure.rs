@@ -139,7 +139,11 @@ pub(crate) fn idempotent_ddl(
 ) -> Result<Vec<String>, String> {
     let changes = super::detect_changes(&super::SchemaSnapshot::default(), snapshot);
     let batch = super::diff::render_changes_split_in_schema(&changes, snapshot, dialect, None)?;
-    Ok(as_run(batch.immediate.iter().chain(&batch.deferred_fks), dialect.name()).collect())
+    Ok(as_run(
+        batch.immediate.iter().chain(&batch.deferred_fks),
+        dialect.name(),
+    )
+    .collect())
 }
 
 /// `stmts` as [`run_statements`] sends them, for a `--dry-run`.

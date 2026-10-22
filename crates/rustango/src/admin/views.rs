@@ -17,8 +17,8 @@ use super::errors::AdminError;
 use super::forms;
 use super::helpers::{
     admin_config_or_default, build_fk_joins, chrome_context, fk_display_targets,
-    fk_map_from_joined_rows_json, is_secret_field, lookup_model, parse_pk,
-    primary_key_or_internal, render_cell_json, render_form, render_secret_cell, resolve_model, resolve_model_and_pk,
+    fk_map_from_joined_rows_json, is_secret_field, lookup_model, parse_pk, primary_key_or_internal,
+    render_cell_json, render_form, render_secret_cell, resolve_model, resolve_model_and_pk,
     search_columns, url_filterable, FormLayout, ListQuery,
 };
 use super::object_permissions::AdminWrite;
@@ -3088,8 +3088,10 @@ fn rows_with_pk(
     pk_field: &FieldSchema,
     selected: &[SqlValue],
 ) -> Vec<SqlValue> {
-    let selected: HashMap<String, &SqlValue> =
-        selected.iter().map(|k| (k.to_display_string(), k)).collect();
+    let selected: HashMap<String, &SqlValue> = selected
+        .iter()
+        .map(|k| (k.to_display_string(), k))
+        .collect();
     let mut pks = Vec::with_capacity(rows.len());
     rows.retain(|row| {
         let pk = render::read_value_as_string_json(row, pk_field).and_then(|raw| {
