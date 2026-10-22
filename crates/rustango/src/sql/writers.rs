@@ -4091,6 +4091,11 @@ pub(super) fn write_where_expr(
     match expr {
         WhereExpr::Predicate(filter) => write_filter(b, filter, model),
         WhereExpr::ColumnCompare(cf) => write_column_compare(b, cf, model),
+        // A nested empty AND is TRUE; the top level skips WHERE instead.
+        WhereExpr::And(items) if items.is_empty() => {
+            b.sql.push_str("1 = 1");
+            Ok(())
+        }
         WhereExpr::And(items) => write_joined(b, items, " AND ", model),
         WhereExpr::Or(items) => {
             if items.is_empty() {

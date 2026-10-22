@@ -6,6 +6,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`; `RequestIdLayer` no longer echoes an untrusted client's `X-Request-Id`; a SQLite UUID key stored both as BLOB and TEXT is now a 404 in ViewSets and template views. See UPGRADING.
 
+### Fixed — a nested empty `WhereExpr::And` is TRUE
+
+`where_raw(WhereExpr::And(vec![]))` next to other filters, or inside an `Or` / `Not`, writes `1 = 1`; it wrote `()`, a syntax error on every backend.
+
 ### Fixed — `Q!` on a keyword field
 
 `Q!(Post.r#type = …)` and `Q!(Post.type__in = …)` expand to `Post::r#type`; the first panicked in the macro, the second wrote `Post::type`.

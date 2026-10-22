@@ -178,6 +178,23 @@ async fn citext_filter_ignores_case(pool: &Pool) {
     assert_eq!(ids("name__ne", "BOB".into()).await, Vec::<i64>::new(), "<>");
 }
 
+/// An empty `And` is TRUE wherever it nests.
+async fn nested_empty_and_is_true(pool: &Pool) {
+    seed(pool, &[("a", "apple"), ("b", "banana")]).await;
+    let slug = |s: &str| WhereExpr::Predicate(Filter::new("slug", Op::Eq, s));
+    let count = |e: WhereExpr| async move {
+        let qs = Post::objects().filter("title__ne", "x").where_raw(e);
+        qs.count(pool).await.expect("count")
+    };
+    assert_eq!(count(WhereExpr::And(vec![])).await, 2, "AND ()");
+    let or = WhereExpr::Or(vec![WhereExpr::And(vec![]), slug("zz")]);
+    assert_eq!(count(or).await, 2, "TRUE OR x");
+    let and = WhereExpr::And(vec![slug("a"), WhereExpr::And(vec![])]);
+    assert_eq!(count(and).await, 1, "x AND TRUE");
+    let not = WhereExpr::Not(Box::new(WhereExpr::And(vec![])));
+    assert_eq!(count(not).await, 0, "NOT TRUE");
+}
+
 async fn setup(pool: &Pool) {
     fresh_table::<Code>(pool).await;
     fresh_table::<Post>(pool).await;
@@ -998,6 +1015,7 @@ tri_dialect_test! {
         relation_date_lookup,
         citext_keeps_accents_and_spaces,
         citext_filter_ignores_case,
+        nested_empty_and_is_true,
     ],
 }
 
