@@ -741,13 +741,17 @@ impl<DB: Database> Builder<DB> {
         // router so static / health mounts still work without a
         // user-supplied API.
         let had_api = self.api.is_some();
-        let api = if had_api || self.health_endpoints || !self.static_dirs.is_empty() {
+        // Both Host branches serve it: the apex goes to the console.
+        let health = self
+            .health_endpoints
+            .then(|| crate::health::health_router(self.registry.clone()));
+        let api = if had_api || health.is_some() || !self.static_dirs.is_empty() {
             let mut r = self.api.unwrap_or_default();
             for (prefix, files) in &self.static_dirs {
                 r = r.nest(prefix, crate::static_files::static_router(files.clone()));
             }
-            if self.health_endpoints {
-                r = r.merge(crate::health::health_router(self.registry.clone()));
+            if let Some(health) = &health {
+                r = r.merge(health.clone());
             }
             Some(r)
         } else {
@@ -839,6 +843,10 @@ impl<DB: Database> Builder<DB> {
             // console.
             self.routes.impersonation_handoff_url.clone(),
         );
+        let operator_admin = match health {
+            Some(health) => operator_admin.merge(health),
+            None => operator_admin,
+        };
         // With an outer access log, it logs the console (#1788).
         let operator_admin = if self.access_log.is_some() {
             operator_admin

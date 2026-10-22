@@ -195,3 +195,14 @@ async fn the_console_login_passes_a_strict_csp() {
     let resp = app.oneshot(req).await.unwrap();
     rustango::testkit::assert_strict_csp_page(resp, "console /login").await;
 }
+
+/// `with_health` answers `/health` and `/ready` on the apex too, not only on tenant hosts.
+#[tokio::test]
+async fn health_is_served_on_both_branches() {
+    let (app, _tmp) = build(Builder::with_health).await;
+    for host in ["localhost", "acme.localhost"] {
+        for uri in ["/health", "/ready"] {
+            assert_eq!(status(&app, host, uri).await, StatusCode::OK, "{host}{uri}");
+        }
+    }
+}

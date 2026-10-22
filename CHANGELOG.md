@@ -16,6 +16,10 @@ A non-finite q is ignored like an unparsable one, and qualities sort as integers
 
 Two nests of one cached router no longer serve each other's pages.
 
+### Fixed — health probes under load and on the tenancy apex
+
+`cache_probe` uses a fresh key per run, so overlapping `/ready` calls on a shared cache no longer fail each other. `server::Builder::with_health` also serves `/health` and `/ready` on the apex host.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

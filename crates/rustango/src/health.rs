@@ -210,13 +210,10 @@ impl HealthRouter {
             let cache = cache.clone();
             let probe_name = probe_name.clone();
             async move {
-                let key = format!("rustango:health:{probe_name}");
-                let value = format!(
-                    "{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |d| d.as_nanos())
-                );
+                // One key per probe run: overlapping probes on a shared
+                // cache (replicas, k8s + LB) must not read each other's.
+                let value = uuid::Uuid::new_v4().simple().to_string();
+                let key = format!("rustango:health:{probe_name}:{value}");
                 cache
                     .set(&key, &value, Some(Duration::from_secs(10)))
                     .await
@@ -669,6 +666,58 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let v = body_json(resp).await;
         assert_eq!(v["checks"]["memory"]["status"], "ok");
+    }
+
+    /// An `InMemoryCache` that yields inside `get`, so probes interleave.
+    #[cfg(feature = "cache")]
+    struct Yielding(crate::cache::InMemoryCache);
+
+    #[cfg(feature = "cache")]
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for Yielding {
+        async fn get(&self, key: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            tokio::task::yield_now().await;
+            self.0.get(key).await
+        }
+        async fn set(
+            &self,
+            key: &str,
+            value: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            self.0.set(key, value, ttl).await
+        }
+        async fn delete(&self, key: &str) -> Result<(), crate::cache::CacheError> {
+            self.0.delete(key).await
+        }
+        async fn exists(&self, key: &str) -> Result<bool, crate::cache::CacheError> {
+            self.0.exists(key).await
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.0.clear().await
+        }
+    }
+
+    /// Overlapping probes on one cache do not read each other's value.
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn concurrent_cache_probes_do_not_collide() {
+        let cache: crate::cache::BoxedCache =
+            Arc::new(Yielding(crate::cache::InMemoryCache::new()));
+        let app = HealthRouter::new(lazy_pool())
+            .skip_db_probe()
+            .show_errors()
+            .cache_probe("shared", cache)
+            .into_router();
+        let ready = || {
+            app.clone()
+                .oneshot(Request::get("/ready").body(Body::empty()).unwrap())
+        };
+        let (a, b, c) = tokio::join!(ready(), ready(), ready());
+        for resp in [a, b, c] {
+            let resp = resp.unwrap();
+            assert_eq!(resp.status(), 200, "{}", body_json(resp).await);
+        }
     }
 
     #[test]
