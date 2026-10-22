@@ -1061,6 +1061,16 @@ mod tests {
     /// for a long time the only Dockerfile installed a toolchain and
     /// waited for a bind mount, so a project could be developed in
     /// Docker but not shipped in it.
+    /// The deploy image probes `/health`, so every template must mount it.
+    #[test]
+    fn every_template_mounts_the_dockerfile_health_path() {
+        assert!(templates::dockerfile_prod("myapp").contains("8080/health "));
+        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
+            let main = templates::main_rs(template, "myapp");
+            assert!(main.contains(".with_health()"), "{template:?}: {main}");
+        }
+    }
+
     #[test]
     fn dockerfile_builds_a_release_binary_and_drops_root() {
         let body = templates::dockerfile_prod("myapp");

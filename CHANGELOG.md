@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `--template api` image passes its healthcheck
+
+The api `main.rs` now calls `.with_health()`, so the Dockerfile's `/health` probe gets 200 instead of 404 and the container turns healthy.
+
 ### Fixed — CSRF reads a form body up to the body limit
 
 Under a `BodyLimitLayer` (or `[server] max_body_bytes`) the CSRF layer buffers form-encoded bodies up to that cap, not a fixed 2 MiB, so a large form no longer gets 403.

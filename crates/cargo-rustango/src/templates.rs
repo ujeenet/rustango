@@ -663,6 +663,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rustango::manage::Cli::new()
         .api(urls::api())
         .with_welcome() // friendly `/` on first run; drop once you have a root handler
+        .with_health() // /health + /ready; the Dockerfile HEALTHCHECK probes /health
         // NOTE: no .with_settings_from_env() here. It is gated on the
         // config feature, and this template is deliberately bare: ORM +
         // axum + the manage dispatcher. Adding config alone does not
