@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.60.9
+
 ### Idle connections close after 30 s
 
 The built-in server closes a connection that sends no complete request head for 30 s, including idle keep-alive. Clients or proxies that keep idle sockets longer reconnect; the limit is fixed for now.
@@ -194,7 +196,21 @@ After `save` / `save_pool` / `save_on` / `save_tx` the `auto_now` field holds th
 
 On MySQL a plain `tinyint` is now `i16` (only `tinyint(1)` is `bool`) and `int unsigned` is `i64`. A column that is not a lower-case identifier becomes a lower-case field with `column = ".."`. Re-run it rather than diffing old output. A repeated field name gets a `_2` suffix, and a `model` / `auto` table a `_`.
 
-## 0.60.9
+### Admin detail page shows fewer rows
+
+Inline panels stop at 100 rows and the audit trail at 20 entries; a custom `detail.html` / `_inline_panels.html` can show `panel.more_rows_filter` as the link to the rest.
+
+### Admin signals fire for inline child rows
+
+`admin_pre_save` / `admin_post_save` / `admin_pre_delete` / `admin_post_delete` receivers now also see the child tables of inline rows; filter on `ctx.table` if a receiver assumed only top-level models.
+
+### Refused deletes are 409, refused CBV writes 422
+
+ViewSet `destroy`, `DeleteView` and `delete_selected` answer an FK refusal with 409 (was 500, or 400 for `delete_selected`). `CreateView` / `UpdateView` answer FK / NOT NULL / CHECK refusals with the form and 422 (was 500).
+
+### Admin edit keeps untouched lossy fields
+
+A PG array/range/hstore/vector/geometry field, an empty-looking JSON field or an out-of-`choices` value that the form sends back as shown is left out of the UPDATE. Dynamic JSON rows now hold PG array/range/hstore/vector/point values where they held `null`.
 
 ### `migrate --dry-run` prints more
 

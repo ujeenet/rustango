@@ -353,7 +353,31 @@ pub(crate) enum Refusal {
     Check,
 }
 
+#[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
+impl Refusal {
+    /// A plain message for the refused write; never the driver's text.
+    pub(crate) const fn message(self) -> &'static str {
+        match self {
+            Self::Unique => "A row with these values already exists.",
+            Self::ForeignKey => "A related object it points to does not exist.",
+            Self::NotNull => "A required value is missing.",
+            Self::Check => "A value is outside what this table allows.",
+        }
+    }
+}
+
+/// The body of a 409 for a delete the database refused on an FK.
+#[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
+pub(crate) const STILL_REFERENCED: &str =
+    "This row is still referenced by other rows; delete or change those first.";
+
 impl ExecError {
+    /// A delete refused because other rows still point at the row.
+    #[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
+    pub(crate) fn is_still_referenced(&self) -> bool {
+        self.refusal() == Some(Refusal::ForeignKey)
+    }
+
     /// Which constraint refused the write, read from sqlx's `ErrorKind`.
     #[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
     pub(crate) fn refusal(&self) -> Option<Refusal> {

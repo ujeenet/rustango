@@ -46,7 +46,7 @@
 
 use crate::core::{
     FieldSchema, Filter, ModelEntry, ModelSchema, NullsOrder, Op, OrderItem, SelectQuery, SqlValue,
-    WhereExpr,
+    WhereExpr, WriteKind,
 };
 use crate::sql::{select_rows_as_json, ExecError, Pool};
 use std::collections::{HashMap, HashSet};
@@ -312,16 +312,22 @@ pub async fn render_for_parent(
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
 ) -> Result<Vec<InlinePanel>, ExecError> {
-    render_for_parent_in(pool, parent_model, parent_pk, None).await
+    let panels = render_for_parent_in(pool, parent_model, parent_pk, None, None).await?;
+    Ok(panels.into_iter().map(|(p, _)| p).collect())
 }
 
-/// [`render_for_parent`] limited to child rows the request's queryset hooks allow.
+/// Child rows an admin detail page lists per inline.
+pub(crate) const DETAIL_ROWS: usize = 100;
+
+/// [`render_for_parent`] limited to child rows the request's queryset hooks
+/// allow and, with `cap`, to that many rows plus the child-list query for the rest.
 pub(crate) async fn render_for_parent_in(
     pool: &Pool,
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
     parts: Option<&Parts>,
-) -> Result<Vec<InlinePanel>, ExecError> {
+    cap: Option<usize>,
+) -> Result<Vec<(InlinePanel, Option<String>)>, ExecError> {
     let registrations = for_parent_table(parent_model.table);
     if registrations.is_empty() {
         return Ok(Vec::new());
@@ -348,18 +354,28 @@ pub(crate) async fn render_for_parent_in(
             .into_iter()
             .collect();
 
-        // #562 — by_pk constructor + struct-update for order_by and
-        // limit=None.
-        let (rows, _) = visible_child_rows(
+        // One row past `cap` tells whether any are left out.
+        let (mut rows, fetched) = visible_child_rows(
             pool,
             SelectQuery {
                 order_by: order_pk,
-                limit: None,
+                limit: cap.map(|c| c as i64 + 1),
                 ..SelectQuery::by_pk(child_model, inline.fk_column, parent_pk.clone())
             },
             parts,
         )
         .await?;
+        let fk_name = child_model
+            .field_by_column(inline.fk_column)
+            .map_or(inline.fk_column, |f| f.name);
+        let more = cap.and_then(|c| {
+            cut_rows(
+                &mut rows,
+                fetched,
+                c,
+                &[(fk_name, parent_pk.to_display_string())],
+            )
+        });
 
         let field_labels = display_fields.iter().map(|f| f.name.to_owned()).collect();
         let pk_column = pk_field.map(|p| p.column).unwrap_or("id");
@@ -397,7 +413,7 @@ pub(crate) async fn render_for_parent_in(
         };
         let empty = rendered_rows.is_empty();
 
-        panels.push(InlinePanel {
+        let panel = InlinePanel {
             label,
             child_table: child_model.table.to_owned(),
             kind: match inline.kind {
@@ -407,7 +423,8 @@ pub(crate) async fn render_for_parent_in(
             field_labels,
             rows: rendered_rows,
             empty,
-        });
+        };
+        panels.push((panel, more));
     }
     Ok(panels)
 }
@@ -429,16 +446,18 @@ pub async fn render_generic_for_parent(
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
 ) -> Result<Vec<InlinePanel>, ExecError> {
-    render_generic_for_parent_in(pool, parent_model, parent_pk, None).await
+    let panels = render_generic_for_parent_in(pool, parent_model, parent_pk, None, None).await?;
+    Ok(panels.into_iter().map(|(p, _)| p).collect())
 }
 
-/// [`render_generic_for_parent`] limited to child rows the request's queryset hooks allow.
+/// [`render_generic_for_parent`] limited as [`render_for_parent_in`] is.
 pub(crate) async fn render_generic_for_parent_in(
     pool: &Pool,
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
     parts: Option<&Parts>,
-) -> Result<Vec<InlinePanel>, ExecError> {
+    cap: Option<usize>,
+) -> Result<Vec<(InlinePanel, Option<String>)>, ExecError> {
     let registrations = generic_for_parent_table(parent_model.table);
     if registrations.is_empty() {
         return Ok(Vec::new());
@@ -485,7 +504,7 @@ pub(crate) async fn render_generic_for_parent_in(
             .collect();
 
         // #562 — composite AND (ct + pk); struct-update over ::new.
-        let (rows, _) = visible_child_rows(
+        let (mut rows, fetched) = visible_child_rows(
             pool,
             SelectQuery {
                 where_clause: WhereExpr::And(vec![
@@ -501,11 +520,28 @@ pub(crate) async fn render_generic_for_parent_in(
                     }),
                 ]),
                 order_by: order_pk,
+                limit: cap.map(|c| c as i64 + 1),
                 ..SelectQuery::new(child_model)
             },
             parts,
         )
         .await?;
+        let name_of = |column: &'static str| {
+            child_model
+                .field_by_column(column)
+                .map_or(column, |f| f.name)
+        };
+        let more = cap.and_then(|c| {
+            cut_rows(
+                &mut rows,
+                fetched,
+                c,
+                &[
+                    (name_of(inline.ct_column), ct_id.to_string()),
+                    (name_of(inline.pk_column), parent_pk_i64.to_string()),
+                ],
+            )
+        });
 
         let field_labels = display_fields.iter().map(|f| f.name.to_owned()).collect();
         let pk_column = pk_field.map(|p| p.column).unwrap_or("id");
@@ -543,7 +579,7 @@ pub(crate) async fn render_generic_for_parent_in(
         };
         let empty = rendered_rows.is_empty();
 
-        panels.push(InlinePanel {
+        let panel = InlinePanel {
             label,
             child_table: child_model.table.to_owned(),
             kind: match inline.kind {
@@ -553,7 +589,8 @@ pub(crate) async fn render_generic_for_parent_in(
             field_labels,
             rows: rendered_rows,
             empty,
-        });
+        };
+        panels.push((panel, more));
     }
     Ok(panels)
 }
@@ -812,7 +849,12 @@ pub(crate) async fn render_form_for_parent_in(
                     // `value_as_form_string` clone left e.g. a `DateTime`'s
                     // `+00:00` offset in place, which `datetime-local` rejects.
                     let raw_str = crate::admin::render::render_value_for_input_json(row, f);
-                    let input_html = render_prefixed_input(&child_cfg, f, &raw_str, &prefix, idx);
+                    let input_html = render_prefixed_input(
+                        &child_cfg,
+                        f,
+                        &raw_str,
+                        (&prefix, idx, WriteKind::Update),
+                    );
                     serde_json::json!({
                         "label": f.display_label(),
                         "input_html": input_html,
@@ -847,7 +889,8 @@ pub(crate) async fn render_form_for_parent_in(
             let cells: Vec<serde_json::Value> = display_fields
                 .iter()
                 .map(|f| {
-                    let input_html = render_prefixed_input(&child_cfg, f, "", &prefix, idx);
+                    let input_html =
+                        render_prefixed_input(&child_cfg, f, "", (&prefix, idx, WriteKind::Insert));
                     serde_json::json!({
                         "label": f.display_label(),
                         "input_html": input_html,
@@ -897,9 +940,12 @@ fn render_prefixed_input(
     cfg: &crate::core::AdminConfig,
     field: &FieldSchema,
     value: &str,
-    prefix: &str,
-    idx: usize,
+    (prefix, idx, kind): (&str, usize, crate::core::WriteKind),
 ) -> String {
+    // An auto or generated column is shown, never input.
+    if !field.accepts_input(kind) {
+        return format!(r#"<span class="readonly">{}</span>"#, html_escape(value));
+    }
     // The child's widget overrides apply; a secret is never echoed (#1861).
     let base = if is_secret_field(cfg, field.name) {
         crate::admin::render::render_secret_input(field, false, false)
@@ -1031,7 +1077,8 @@ impl InlineTarget {
             .iter()
             .copied()
             .filter(|f| {
-                f.column != pk.column
+                f.accepts_input(WriteKind::Update)
+                    && f.column != pk.column
                     && !scope.pins(f.column)
                     && !inline_readonly.contains(&f.name)
                     && !add.contains(f.name)
@@ -1075,45 +1122,47 @@ impl InlineTarget {
             .collect()
     }
 
-    /// The child row under this parent; `None` when no row has this PK.
-    ///
-    /// # Errors
-    /// [`AdminError::RowNotFound`] when the PK belongs to another parent
-    /// or the `view` hook refuses the row.
-    async fn fetch_own(
+    /// The stored rows for `pks` in two reads at most: those under
+    /// this parent, then which of the rest exist under another.
+    async fn fetch_own_many(
         &self,
         pool: &Pool,
         parts: &Parts,
-        pk: &SqlValue,
-        raw_pk: &str,
-    ) -> Result<Option<serde_json::Value>, AdminError> {
-        let not_found = || AdminError::RowNotFound {
-            table: self.child.table.to_owned(),
-            pk: raw_pk.to_owned(),
-        };
+        pks: Vec<SqlValue>,
+    ) -> Result<OwnRows, ExecError> {
+        let mut out = OwnRows(HashMap::new());
+        if pks.is_empty() {
+            return Ok(out);
+        }
+        let in_pks = |pks: Vec<SqlValue>| Filter::new(self.pk.column, Op::In, SqlValue::List(pks));
+        let mut filters = vec![in_pks(pks.clone())];
+        filters.extend(self.scope.filters());
         let fields: Vec<&'static FieldSchema> = self.child.scalar_fields().collect();
         let query = SelectQuery {
-            where_clause: self.row_where(pk.clone()),
+            where_clause: self.rows.constrain(WhereExpr::and_predicates(filters)),
             ..SelectQuery::new(self.child)
         };
-        if let Some(row) = crate::sql::select_one_row_as_json(pool, &query, &fields).await? {
-            let visible = crate::admin::object_permissions::is_allowed(
-                self.child.table,
-                "view",
-                parts,
-                Some(&row),
-            );
-            return if visible {
-                Ok(Some(row))
-            } else {
-                Err(not_found())
-            };
+        for row in select_rows_as_json(pool, &query, &fields).await? {
+            let visible =
+                crate::admin::object_permissions::is_allowed(self.child.table, "view", parts, Some(&row));
+            let key = pk_key(&row, self.pk);
+            out.0.insert(key, if visible { Own::Row(row) } else { Own::Foreign });
         }
-        let any_parent = SelectQuery::by_pk(self.child, self.pk.column, pk.clone());
-        match crate::sql::select_one_row_as_json(pool, &any_parent, &[self.pk]).await? {
-            Some(_) => Err(not_found()),
-            None => Ok(None),
+        let rest: Vec<SqlValue> = pks
+            .into_iter()
+            .filter(|pk| !out.0.contains_key(&pk.to_display_string()))
+            .collect();
+        if rest.is_empty() {
+            return Ok(out);
         }
+        let any_parent = SelectQuery {
+            where_clause: WhereExpr::Predicate(in_pks(rest)),
+            ..SelectQuery::new(self.child)
+        };
+        for row in select_rows_as_json(pool, &any_parent, &[self.pk]).await? {
+            out.0.insert(pk_key(&row, self.pk), Own::Foreign);
+        }
+        Ok(out)
     }
 
     /// `true` when every submitted value equals the stored one, read
@@ -1131,6 +1180,47 @@ impl InlineTarget {
             crate::forms::parse_form_value(f, Some(&stored)).is_ok_and(|v| v == *submitted)
         })
     }
+}
+
+/// A child PK's stored row as [`InlineTarget::fetch_own_many`] read it.
+enum Own {
+    Row(serde_json::Value),
+    /// Under another parent, or hidden by the `view` hook.
+    Foreign,
+}
+
+/// Prefetched child rows keyed by PK text; an absent key is a gone row.
+struct OwnRows(HashMap<String, Own>);
+
+impl OwnRows {
+    /// The child row under this parent; `None` when no row has this PK.
+    ///
+    /// # Errors
+    /// [`AdminError::RowNotFound`] when the PK belongs to another parent
+    /// or the `view` hook refuses the row.
+    fn get(
+        &self,
+        child: &'static ModelSchema,
+        pk: &SqlValue,
+        raw_pk: &str,
+    ) -> Result<Option<serde_json::Value>, AdminError> {
+        match self.0.get(&pk.to_display_string()) {
+            Some(Own::Row(row)) => Ok(Some(row.clone())),
+            Some(Own::Foreign) => Err(AdminError::RowNotFound {
+                table: child.table.to_owned(),
+                pk: raw_pk.to_owned(),
+            }),
+            None => Ok(None),
+        }
+    }
+}
+
+/// A fetched row's PK as [`SqlValue::to_display_string`] spells it.
+fn pk_key(row: &serde_json::Value, pk: &FieldSchema) -> String {
+    row.get(pk.name)
+        .or_else(|| row.get(pk.column))
+        .map(stringify_pk)
+        .unwrap_or_default()
 }
 
 /// Why [`plan_post`] refused the inline rows.
@@ -1178,12 +1268,87 @@ enum InlineWrite {
     Update {
         query: crate::core::UpdateQuery,
         audit: Option<ChildAudit>,
+        pk: String,
     },
     Delete {
         query: InlineRemove,
         /// The entity PK the snapshot is filed under.
         audit: Option<String>,
+        pk: String,
     },
+}
+
+/// One child row an inline write touches, for its admin signals.
+pub(crate) enum ChildSignal {
+    Save {
+        table: &'static str,
+        pk: String,
+        change: bool,
+    },
+    Delete {
+        table: &'static str,
+        pk: String,
+    },
+}
+
+impl ChildSignal {
+    /// `admin_pre_*` when `pre`, else `admin_post_*`.
+    pub(crate) async fn send(self, pre: bool) {
+        use crate::signals::admin::{self as sig, AdminDeleteContext, AdminSaveContext};
+        match (self, pre) {
+            (Self::Save { table, pk, change }, true) => {
+                sig::send_admin_pre_save(AdminSaveContext { table, pk, change }).await;
+            }
+            (Self::Save { table, pk, change }, false) => {
+                sig::send_admin_post_save(AdminSaveContext { table, pk, change }).await;
+            }
+            (Self::Delete { table, pk }, true) => {
+                sig::send_admin_pre_delete(AdminDeleteContext { table, pk }).await;
+            }
+            (Self::Delete { table, pk }, false) => {
+                sig::send_admin_post_delete(AdminDeleteContext { table, pk }).await;
+            }
+        }
+    }
+}
+
+impl InlinePlan {
+    /// The rows this plan will write, for `admin_pre_*`; a new row's PK is
+    /// empty unless the form typed it.
+    pub(crate) fn planned_rows(&self) -> Vec<ChildSignal> {
+        let mut out = Vec::new();
+        for t in &self.targets {
+            let table = t.child.table;
+            for w in &t.existing {
+                out.push(match w {
+                    InlineWrite::Update { pk, .. } => ChildSignal::Save {
+                        table,
+                        pk: pk.clone(),
+                        change: true,
+                    },
+                    InlineWrite::Delete { pk, .. } => ChildSignal::Delete {
+                        table,
+                        pk: pk.clone(),
+                    },
+                });
+            }
+            for i in &t.inserts {
+                let pk = i
+                    .query
+                    .columns
+                    .iter()
+                    .position(|c| *c == t.pk.column)
+                    .map(|n| i.query.values[n].to_display_string())
+                    .unwrap_or_default();
+                out.push(ChildSignal::Save {
+                    table,
+                    pk,
+                    change: false,
+                });
+            }
+        }
+        out
+    }
 }
 
 /// A `soft_delete` child is stamped, as the main delete does (#2453).
@@ -1368,6 +1533,21 @@ async fn plan_target(
         inserts: Vec::new(),
         deletes_needed: 0,
     };
+    let is_new = |idx: usize, raw_pk: &str| initial.map_or(raw_pk.trim().is_empty(), |n| idx >= n);
+    // Every existing row's stored state in one read, not one per row.
+    let existing_pks: Vec<SqlValue> = (0..total_forms)
+        .filter_map(|idx| {
+            let row = crate::forms::formset::row_payload(form, table, idx);
+            let raw_pk = row.get(target.pk.name)?;
+            if is_new(idx, raw_pk) {
+                return None;
+            }
+            crate::forms::parse_pk_string(target.pk, raw_pk).ok()
+        })
+        .collect();
+    let own = target
+        .fetch_own_many(&state.pool, parts, existing_pks)
+        .await?;
     // Distinct PKs: a repeated DELETE slot removes one row (#1717).
     let mut deleted: HashSet<String> = HashSet::new();
     for idx in 0..total_forms {
@@ -1377,7 +1557,7 @@ async fn plan_target(
             .get("DELETE")
             .is_some_and(|s| s == "on" || s == "true" || s == "1");
 
-        if initial.map_or(raw_pk.trim().is_empty(), |n| idx >= n) {
+        if is_new(idx, &raw_pk) {
             // Blank extra rows stay blank.
             let has_content = target
                 .writable
@@ -1429,8 +1609,10 @@ async fn plan_target(
                 }
                 super::audit::audit_form(target.child, &cfg, &row, &written)
             });
+            // The new PK feeds the audit entry and `admin_post_save`.
+            let pk_readable = audited || target.pk.is_serial() || columns.contains(&target.pk.column);
             let mut query = crate::core::InsertQuery::new(target.child, columns, sql_values);
-            if audited {
+            if pk_readable {
                 query.returning = vec![target.pk.column];
             }
             out.inserts.push(InlineInsert { query, audit });
@@ -1446,7 +1628,7 @@ async fn plan_target(
             if !deleted.insert(pk.to_display_string()) {
                 continue;
             }
-            let Some(before) = target.fetch_own(&state.pool, parts, &pk, &raw_pk).await? else {
+            let Some(before) = own.get(target.child, &pk, &raw_pk)? else {
                 continue;
             };
             if !crate::admin::object_permissions::is_allowed(table, "delete", parts, Some(&before))
@@ -1455,6 +1637,7 @@ async fn plan_target(
             }
             // `row_where` holds the live-rows scope, so a stamp lands once.
             let audit = audited.then(|| pk.to_display_string());
+            let pk_text = pk.to_display_string();
             let query = match target.child.soft_delete_column {
                 Some(col) => {
                     let stamp = SqlValue::DateTime(chrono::Utc::now());
@@ -1470,7 +1653,11 @@ async fn plan_target(
                     target.row_where(pk),
                 )),
             };
-            out.existing.push(InlineWrite::Delete { query, audit });
+            out.existing.push(InlineWrite::Delete {
+                query,
+                audit,
+                pk: pk_text,
+            });
             continue;
         }
 
@@ -1478,7 +1665,7 @@ async fn plan_target(
         if values.is_empty() {
             continue;
         }
-        let Some(before) = target.fetch_own(&state.pool, parts, &pk, &raw_pk).await? else {
+        let Some(before) = own.get(target.child, &pk, &raw_pk)? else {
             return Err(InlinePlanError::Rejected(format!(
                 "{name} row {raw_pk} was deleted after this page loaded. Reload the page and try again."
             )));
@@ -1501,6 +1688,7 @@ async fn plan_target(
             .map(|(column, value)| crate::core::Assignment::new(column, value))
             .collect();
         out.existing.push(InlineWrite::Update {
+            pk: pk.to_display_string(),
             query: crate::core::UpdateQuery::new(target.child, set, target.row_where(pk)),
             audit,
         });
@@ -1554,11 +1742,14 @@ pub(crate) async fn apply_plan_tx(
     tx: &mut crate::sql::PoolTx<'_>,
     pool: &Pool,
     plan: InlinePlan,
-) -> Result<InlineApplyOutcome, InlineApplyError> {
+) -> Result<(InlineApplyOutcome, Vec<ChildSignal>), InlineApplyError> {
     use crate::audit::{AuditOp, DiffEmit, RowDiffWrite};
     let mut outcome = InlineApplyOutcome::default();
+    // The rows written, for `admin_post_*` after the commit.
+    let mut written_rows = Vec::new();
     for target in plan.targets {
         let child = target.child;
+        let table = child.table;
         let refused = |error| InlineApplyError::Write { child, error };
         let fields: Vec<&'static FieldSchema> = child.scalar_fields().collect();
         // Locked in `tx`, so an entry records the row the write changes.
@@ -1574,13 +1765,24 @@ pub(crate) async fn apply_plan_tx(
         let mut deleted = 0usize;
         for write in target.existing {
             match write {
-                InlineWrite::Update { query, audit: None } => {
-                    crate::sql::update_tx(tx, &query).await.map_err(refused)?;
+                InlineWrite::Update {
+                    query,
+                    audit: None,
+                    pk,
+                } => {
+                    if crate::sql::update_tx(tx, &query).await.map_err(refused)? > 0 {
+                        written_rows.push(ChildSignal::Save {
+                            table,
+                            pk,
+                            change: true,
+                        });
+                    }
                     outcome.updated += 1;
                 }
                 InlineWrite::Update {
                     query,
                     audit: Some(audit),
+                    pk,
                 } => {
                     let written = crate::audit::update_one_with_row_diff_tx(
                         tx,
@@ -1595,16 +1797,18 @@ pub(crate) async fn apply_plan_tx(
                     )
                     .await
                     .map_err(refused)?;
-                    if let RowDiffWrite::Written {
-                        deferred: Some(entry),
-                    } = written
-                    {
-                        entries.push(entry);
+                    if let RowDiffWrite::Written { deferred } = written {
+                        entries.extend(deferred);
+                        written_rows.push(ChildSignal::Save {
+                            table,
+                            pk,
+                            change: true,
+                        });
                     }
                     outcome.updated += 1;
                 }
                 // 0 rows: deleted or moved since the plan was checked.
-                InlineWrite::Delete { query, audit } => {
+                InlineWrite::Delete { query, audit, pk } => {
                     let before = match &audit {
                         Some(_) => {
                             let select = locked(query.where_clause());
@@ -1618,6 +1822,7 @@ pub(crate) async fn apply_plan_tx(
                         continue;
                     }
                     deleted += 1;
+                    written_rows.push(ChildSignal::Delete { table, pk });
                     if let (Some(pk), Some(row)) = (audit, before) {
                         let entry = super::audit::admin_row_snapshot_entry(
                             child,
@@ -1637,12 +1842,23 @@ pub(crate) async fn apply_plan_tx(
             return Err(InlineApplyError::MaxNum { child });
         }
         for insert in target.inserts {
-            match insert.audit {
-                None => crate::sql::insert_tx(tx, &insert.query)
-                    .await
-                    .map_err(refused)?,
+            let pk = match insert.audit {
+                None if insert.query.returning.is_empty() => {
+                    crate::sql::insert_tx(tx, &insert.query)
+                        .await
+                        .map_err(refused)?;
+                    String::new()
+                }
+                None => {
+                    let returning = crate::sql::insert_returning_tx(tx, &insert.query)
+                        .await
+                        .map_err(refused)?;
+                    crate::sql::inserted_pk(&insert.query, &returning, target.pk)
+                        .map(|pk| pk.to_display_string())
+                        .unwrap_or_default()
+                }
                 Some(form) => {
-                    let (_, entry) = crate::audit::insert_one_with_entry_tx(
+                    let (pk, entry) = crate::audit::insert_one_with_entry_tx(
                         tx,
                         pool,
                         &insert.query,
@@ -1656,8 +1872,14 @@ pub(crate) async fn apply_plan_tx(
                     .await
                     .map_err(refused)?;
                     entries.extend(entry);
+                    pk.to_display_string()
                 }
-            }
+            };
+            written_rows.push(ChildSignal::Save {
+                table,
+                pk,
+                change: false,
+            });
             outcome.inserted += 1;
         }
         if !entries.is_empty() {
@@ -1666,7 +1888,7 @@ pub(crate) async fn apply_plan_tx(
                 .map_err(refused)?;
         }
     }
-    Ok(outcome)
+    Ok((outcome, written_rows))
 }
 
 // ============================================================ Editable generic rendering (issue #243)
@@ -1792,7 +2014,12 @@ pub(crate) async fn render_form_generic_for_parent_in(
                     // `value_as_form_string` clone left e.g. a `DateTime`'s
                     // `+00:00` offset in place, which `datetime-local` rejects.
                     let raw_str = crate::admin::render::render_value_for_input_json(row, f);
-                    let input_html = render_prefixed_input(&child_cfg, f, &raw_str, &prefix, idx);
+                    let input_html = render_prefixed_input(
+                        &child_cfg,
+                        f,
+                        &raw_str,
+                        (&prefix, idx, WriteKind::Update),
+                    );
                     serde_json::json!({
                         "label": f.display_label(),
                         "input_html": input_html,
@@ -1823,7 +2050,8 @@ pub(crate) async fn render_form_generic_for_parent_in(
             let cells: Vec<serde_json::Value> = display_fields
                 .iter()
                 .map(|f| {
-                    let input_html = render_prefixed_input(&child_cfg, f, "", &prefix, idx);
+                    let input_html =
+                        render_prefixed_input(&child_cfg, f, "", (&prefix, idx, WriteKind::Insert));
                     serde_json::json!({
                         "label": f.display_label(),
                         "input_html": input_html,
