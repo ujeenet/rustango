@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### CSRF skips the token for browser report bodies (#1212)
+
+A same-origin POST with `Content-Type: application/csp-report` or `application/reports+json` passes `CsrfLayer` without a token, on any path. A handler that takes a raw body (`String`, `Bytes`) and changes state should check the content type.
+
 ### `BodyLimitLayer` sets the extractor limit (#1210)
 
 On POST, PUT, PATCH and QUERY its `max_bytes` is now the only body cap; axum's 2 MiB default no longer applies there. A route that wants less adds its own `DefaultBodyLimit::max` inside the layer.

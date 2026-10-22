@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `csp_report_router` takes real browser reports (#1212)
+
+It reads `application/csp-report` and `application/reports+json` bodies up to 64 KiB; they were refused with 415. The CSRF layer lets these two types through without a token (no form or no-cors fetch can send them), and still checks the Origin.
+
 ### Fixed — `server.max_body_bytes` can raise the limit above 2 MiB (#1210)
 
 `BodyLimitLayer` now replaces axum's 2 MiB `DefaultBodyLimit` on the methods it checks, so a 10 MB cap lets a 5 MB upload reach `Bytes`, `Json`, `Form` or `Multipart`.

@@ -532,7 +532,10 @@ where
                     .get(&cfg.header_name)
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_owned);
-                if let Some(h) = header_value {
+                if is_browser_report(&req) {
+                    // Reports carry no token; the Origin check above still ran.
+                    req
+                } else if let Some(h) = header_value {
                     // Header path — short-circuit, no body buffering.
                     if !tokens_match(cookie_value.as_deref(), Some(&h)) {
                         return Ok(forbid_response("CSRF token missing or mismatched"));
@@ -675,21 +678,32 @@ fn read_csrf_cookie_from_headers(headers: &axum::http::HeaderMap, name: &str) ->
 /// `_csrf` field. Multipart uploads use a different MIME and are
 /// expected to send the token via the `X-CSRF-Token` header.
 fn is_form_encoded(req: &Request<Body>) -> bool {
-    let Some(ct) = req
+    media_type(req).as_deref() == Some("application/x-www-form-urlencoded")
+}
+
+/// A browser violation report. No form or no-cors fetch can send these
+/// types, so like `QUERY` they carry no ambient-credential CSRF (#1212).
+fn is_browser_report(req: &Request<Body>) -> bool {
+    matches!(
+        media_type(req).as_deref(),
+        Some("application/csp-report" | "application/reports+json")
+    )
+}
+
+/// The lowercased `Content-Type` without its parameters.
+fn media_type(req: &Request<Body>) -> Option<String> {
+    let ct = req
         .headers()
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-    else {
-        return false;
-    };
-    // Strip any `; charset=...` suffix and lowercase-compare.
-    let head = ct
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    head == "application/x-www-form-urlencoded"
+        .get(axum::http::header::CONTENT_TYPE)?
+        .to_str()
+        .ok()?;
+    Some(
+        ct.split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase(),
+    )
 }
 
 /// Tiny form-encoded parser scoped to extracting one named field.
