@@ -41,7 +41,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, Weak};
 
 #[cfg(feature = "postgres")]
 use crate::sql::sqlx::postgres::{PgPool, PgPoolOptions};
@@ -402,6 +402,29 @@ impl<DB: Database> CachedPool<DB> {
     }
 }
 
+/// One build at a time per slug, so a cold tenant hit by many requests
+/// resolves its secret and connects once; the rest wait, then hit the cache.
+#[derive(Default)]
+pub(super) struct BuildGates(std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>);
+
+impl BuildGates {
+    /// Hold the slug's build gate. Gates nobody holds are pruned here.
+    pub(super) async fn enter(&self, slug: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let gate = {
+            let mut map = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            map.retain(|_, g| g.strong_count() > 0);
+            if let Some(g) = map.get(slug).and_then(Weak::upgrade) {
+                g
+            } else {
+                let g = Arc::new(tokio::sync::Mutex::new(()));
+                map.insert(slug.to_owned(), Arc::downgrade(&g));
+                g
+            }
+        };
+        gate.lock_owned().await
+    }
+}
+
 /// Drop least-recently-used entries until one more fits under `cap`,
 /// returning the evicted slugs to log. Evicting only drops this map's
 /// handle; sqlx pools are ref-counted, so a live holder keeps theirs.
@@ -443,6 +466,10 @@ pub struct TenantPools<DB: Database = DefaultTenantDb> {
     /// this file still builds under `--no-default-features --features
     /// sqlite,tenancy`; only the Postgres impl ever populates it.
     scoped_cache: RwLock<HashMap<String, CachedPool<DB>>>,
+    /// Single-flight for `cache` and `scoped_cache` misses.
+    building: BuildGates,
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    building_scoped: BuildGates,
 }
 
 impl<DB: Database> TenantPools<DB> {
@@ -469,6 +496,8 @@ impl<DB: Database> TenantPools<DB> {
             warned_near_cap: std::sync::atomic::AtomicBool::new(false),
             cache: RwLock::new(HashMap::new()),
             scoped_cache: RwLock::new(HashMap::new()),
+            building: BuildGates::default(),
+            building_scoped: BuildGates::default(),
         }
     }
 
@@ -813,16 +842,28 @@ impl<DB: Database> TenantPools<DB> {
         self.scoped_cache.read().await.len()
     }
 
+    /// A cache hit. Recording it needs only `&`, so the LRU stamp costs
+    /// no write lock.
+    async fn cached_database_pool(
+        &self,
+        slug: &str,
+        source: &PoolSource,
+    ) -> Option<Arc<sqlx::Pool<DB>>> {
+        let cache = self.cache.read().await;
+        let entry = CachedPool::lookup(&cache, slug, source)?;
+        entry.touch(self.next_tick());
+        Some(Arc::clone(&entry.pool))
+    }
+
     async fn pool_for_database_mode(&self, org: &Org) -> Result<Arc<sqlx::Pool<DB>>, TenancyError> {
-        // Fast path: cache hit. Recording the hit needs only `&`, so
-        // the LRU stamp costs no write lock here.
         let source = PoolSource::database(org);
-        {
-            let cache = self.cache.read().await;
-            if let Some(entry) = CachedPool::lookup(&cache, &org.slug, &source) {
-                entry.touch(self.next_tick());
-                return Ok(Arc::clone(&entry.pool));
-            }
+        if let Some(pool) = self.cached_database_pool(&org.slug, &source).await {
+            return Ok(pool);
+        }
+        let _gate = self.building.enter(&org.slug).await;
+        // A request that waited at the gate gets the pool the first one built.
+        if let Some(pool) = self.cached_database_pool(&org.slug, &source).await {
+            return Ok(pool);
         }
         // Cache miss — instrument so the cold path is visible in
         // tracing output. (#60, v0.27.7)
@@ -1149,14 +1190,14 @@ impl TenantPools<sqlx::Postgres> {
     pub async fn scoped_pool(&self, org: &Org) -> Result<PgPool, TenancyError> {
         match self.pool_for_org(org).await? {
             TenantPool::Schema { schema, registry } => {
-                // Fast path: cache hit. Mirrors `pool_for_database_mode`.
+                // Fast path and single-flight, as in `pool_for_database_mode`.
                 let source = PoolSource::Schema(schema.clone());
-                {
-                    let cache = self.scoped_cache.read().await;
-                    if let Some(entry) = CachedPool::lookup(&cache, &org.slug, &source) {
-                        entry.touch(self.next_tick());
-                        return Ok((*entry.pool).clone());
-                    }
+                if let Some(pool) = self.cached_scoped_pool(&org.slug, &source).await {
+                    return Ok(pool);
+                }
+                let _gate = self.building_scoped.enter(&org.slug).await;
+                if let Some(pool) = self.cached_scoped_pool(&org.slug, &source).await {
+                    return Ok(pool);
                 }
 
                 let span =
@@ -1211,6 +1252,13 @@ impl TenantPools<sqlx::Postgres> {
             }
             TenantPool::Database { pool } => Ok((*pool).clone()),
         }
+    }
+
+    async fn cached_scoped_pool(&self, slug: &str, source: &PoolSource) -> Option<PgPool> {
+        let cache = self.scoped_cache.read().await;
+        let entry = CachedPool::lookup(&cache, slug, source)?;
+        entry.touch(self.next_tick());
+        Some((*entry.pool).clone())
     }
 
     /// Build one `search_path`-scoped pool against the registry
@@ -1558,6 +1606,102 @@ fn search_path_option(schema: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Counts lookups and parks each one briefly, so concurrent misses overlap.
+    #[cfg(feature = "sqlite")]
+    struct CountingSecrets(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[cfg(feature = "sqlite")]
+    #[async_trait::async_trait]
+    impl SecretsResolver for CountingSecrets {
+        async fn resolve(&self, r: &str) -> Result<String, super::super::secrets::SecretsError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            Ok(r.to_owned())
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn cold_sqlite_org() -> Org {
+        Org {
+            slug: "cold".into(),
+            storage_mode: "database".into(),
+            backend_kind: "sqlite".into(),
+            database_url: Some("sqlite::memory:".into()),
+            ..crate::testkit::org()
+        }
+    }
+
+    /// A cold tenant hit by many requests at once resolves and connects once.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_cold_tenant_builds_its_pool_once() {
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pools: TenantPools<sqlx::Sqlite> = TenantPools::with_secrets(
+            sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy"),
+            CountingSecrets(n.clone()),
+        );
+        let org = cold_sqlite_org();
+        let got =
+            futures_util::future::join_all((0..32).map(|_| pools.pool_for_database_mode(&org))).await;
+        assert!(got.iter().all(Result::is_ok));
+        assert_eq!(n.load(Ordering::SeqCst), 1, "one build for 32 cold requests");
+    }
+
+    /// The same for the database-only registry.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_cold_tenant_builds_its_pool_once_in_database_pools() {
+        use super::super::{BackendKind, DatabasePools};
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pools: DatabasePools<sqlx::Sqlite> =
+            DatabasePools::with_secrets(BackendKind::Sqlite, CountingSecrets(n.clone()));
+        let org = cold_sqlite_org();
+        let got = futures_util::future::join_all((0..32).map(|_| pools.pool_for_org(&org))).await;
+        assert!(got.iter().all(Result::is_ok));
+        assert_eq!(n.load(Ordering::SeqCst), 1, "one build for 32 cold requests");
+    }
+
+    /// Schema mode too: a server that never answers sees one connect,
+    /// not one per waiting request.
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn a_cold_schema_tenant_connects_once() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = accepted.clone();
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                n.fetch_add(1, Ordering::SeqCst);
+                held.push(sock);
+            }
+        });
+        let reg = PgPoolOptions::new()
+            .connect_lazy(&format!("postgres://u:p@{addr}/db"))
+            .unwrap();
+        let pools = Arc::new(TenantPools::new(reg));
+        let org = Org {
+            slug: "cold".into(),
+            storage_mode: "schema".into(),
+            schema_name: Some("cold".into()),
+            ..crate::testkit::org()
+        };
+        let calls: Vec<_> = (0..16)
+            .map(|_| {
+                let (p, o) = (pools.clone(), org.clone());
+                tokio::spawn(async move { p.scoped_pool(&o).await })
+            })
+            .collect();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let seen = accepted.load(Ordering::SeqCst);
+        for c in calls {
+            c.abort();
+        }
+        server.abort();
+        assert_eq!(seen, 1, "16 cold requests opened {seen} connections");
+    }
 
     /// The near-cap warning fires on the crossing, not on every
     /// insert. A cache sitting at its cap inserts on every miss, so an
