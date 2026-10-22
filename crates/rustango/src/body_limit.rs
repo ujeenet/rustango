@@ -140,6 +140,12 @@ async fn handle(cfg: Arc<BodyLimitLayer>, mut req: Request<Body>, next: Next) ->
 #[derive(Clone, Copy)]
 struct StreamCap(usize);
 
+/// Whether a `BodyLimitLayer` already caps this request's body stream.
+#[cfg_attr(not(feature = "csrf"), allow(dead_code))]
+pub(crate) fn stream_capped(extensions: &axum::http::Extensions) -> bool {
+    extensions.get::<StreamCap>().is_some()
+}
+
 /// Record the smaller of `own` and any outer `DefaultBodyLimit` (an outer
 /// `BodyLimitLayer` sets one) as the extractor limit, and return it. Every
 /// extractor and CSRF's form read go by it, so they all stop at one cap.

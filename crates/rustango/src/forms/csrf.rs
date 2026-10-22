@@ -570,6 +570,7 @@ where
                     let (parts, body) = req.into_parts();
                     let mut limited = Request::new(body);
                     *limited.extensions_mut() = parts.extensions.clone();
+                    cap_an_unbounded_read(&mut limited);
                     let bytes =
                         match axum::RequestExt::extract::<axum::body::Bytes, _>(limited).await {
                             Ok(b) => b,
@@ -627,6 +628,30 @@ where
             }
             Ok(response)
         })
+    }
+}
+
+/// The form read's cap when nothing outside bounds it.
+const UNBOUNDED_FORM_CAP: usize = 2 * 1024 * 1024;
+
+/// An outer `DefaultBodyLimit::disable()` with no `BodyLimitLayer` leaves
+/// the read unbounded, before any auth: cap it at [`UNBOUNDED_FORM_CAP`].
+fn cap_an_unbounded_read(req: &mut Request) {
+    use axum::RequestExt as _;
+    #[cfg(feature = "_http_layers")]
+    if crate::body_limit::stream_capped(req.extensions()) {
+        return;
+    }
+    // axum keeps the limit private: read it as the bound it puts on an unsized body.
+    let empty = futures_util::stream::empty::<Result<axum::body::Bytes, Infallible>>();
+    let mut probe = Request::new(Body::from_stream(empty));
+    *probe.extensions_mut() = req.extensions().clone();
+    let probe = probe.with_limited_body();
+    if axum::body::HttpBody::size_hint(probe.body())
+        .upper()
+        .is_none()
+    {
+        axum::extract::DefaultBodyLimit::max(UNBOUNDED_FORM_CAP).apply(req);
     }
 }
 
@@ -1679,6 +1704,22 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let read = read.load(std::sync::atomic::Ordering::SeqCst);
         assert!(read <= (1 << 20) + (64 << 10), "CSRF read {read} bytes");
+    }
+
+    /// With every limit disabled outside, CSRF still stops at 2 MiB.
+    #[cfg(feature = "_http_layers")]
+    #[tokio::test]
+    async fn a_disabled_outer_limit_keeps_the_2_mib_csrf_cap() {
+        use tower::ServiceExt as _;
+        let app = axum::Router::new()
+            .route("/save", axum::routing::post(form_handler))
+            .layer(with_config(CsrfConfig::default().allow_insecure_for_dev()))
+            .layer(axum::extract::DefaultBodyLimit::disable());
+        let (req, read) = counted_form(3 << 20, 64 << 10);
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let read = read.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(read <= (2 << 20) + (64 << 10), "CSRF read {read} bytes");
     }
 
     /// Nested body limits keep the smaller cap: the form gets 413, not a CSRF 403.
