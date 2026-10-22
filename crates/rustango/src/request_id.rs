@@ -2,8 +2,9 @@
 //!
 //! It sets an `X-Request-Id` response header and exposes the value
 //! through the [`RequestId`] extractor. By default an inbound
-//! `X-Request-Id` is reused, so an ID can follow a call across
-//! services. [`RequestIdLayer::always_generate`] ignores it.
+//! `X-Request-Id` is reused only from a proxy named in
+//! [`crate::real_ip::RealIpLayer::trust_proxies`], so an ID can follow a
+//! call across services. [`RequestIdLayer::always_generate`] ignores it.
 //!
 //! ## Getting the id into your logs
 //!
@@ -52,8 +53,7 @@ const HEADER_NAME: &str = "x-request-id";
 /// Settings for the request-ID middleware.
 #[derive(Clone)]
 pub struct RequestIdLayer {
-    /// Generate a fresh ID even when the client sent one. Use this
-    /// when you do not trust client values.
+    /// Generate a fresh ID even when a trusted proxy sent one.
     pub always_generate: bool,
 }
 
@@ -64,7 +64,7 @@ impl Default for RequestIdLayer {
 }
 
 impl RequestIdLayer {
-    /// Reuse an inbound `X-Request-Id`, or generate one if absent.
+    /// Reuse an inbound `X-Request-Id` from a trusted proxy, else generate one.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -117,7 +117,12 @@ impl<S: Send + Sync> FromRequestParts<S> for RequestId {
 }
 
 async fn handle(cfg: Arc<RequestIdLayer>, mut req: Request<Body>, next: Next) -> Response<Body> {
-    let id = if cfg.always_generate {
+    // Any client can send the header, so only a trusted proxy's is kept.
+    let trusted = req
+        .extensions()
+        .get::<crate::real_ip::TrustedRealIp>()
+        .is_some();
+    let id = if cfg.always_generate || !trusted {
         generate_id()
     } else {
         req.headers()
@@ -158,12 +163,10 @@ fn generate_id() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Reject inbound IDs that are too long or hold control characters
-/// or line breaks. This blocks header injection via `X-Request-Id`.
+/// Accept at most 128 visible ASCII characters, no quote or backslash,
+/// so an inbound id cannot inject a header or a log field.
 fn is_safe(s: &str) -> bool {
-    s.len() <= 128
-        && s.chars()
-            .all(|c| !c.is_control() && c != '\n' && c != '\r' && c != '\0')
+    s.len() <= 128 && s.chars().all(|c| c.is_ascii_graphic() && c != '"' && c != '\\')
 }
 
 #[cfg(test)]
@@ -205,6 +208,35 @@ mod tests {
     #[test]
     fn is_safe_rejects_null_bytes() {
         assert!(!is_safe("abc\0def"));
+    }
+
+    async fn served_id(id: &str, via_trusted_proxy: bool) -> String {
+        use tower::ServiceExt as _;
+        let app = Router::new()
+            .route("/", axum::routing::get(|| async { "ok" }))
+            .request_id(RequestIdLayer::default());
+        let mut req = Request::builder()
+            .uri("/")
+            .header(HEADER_NAME, id)
+            .body(Body::empty())
+            .unwrap();
+        if via_trusted_proxy {
+            let ip = std::net::IpAddr::from([10, 0, 0, 1]);
+            req.extensions_mut()
+                .insert(crate::real_ip::TrustedRealIp(ip));
+        }
+        let resp = app.oneshot(req).await.unwrap();
+        resp.headers()[HEADER_NAME].to_str().unwrap().to_owned()
+    }
+
+    /// Any client can send the header; only a trusted proxy's is kept.
+    #[tokio::test]
+    async fn inbound_id_is_kept_only_from_a_trusted_proxy() {
+        assert_ne!(served_id("client-chosen", false).await, "client-chosen");
+        assert_eq!(served_id("edge-1:abc", true).await, "edge-1:abc");
+        let spaced = "a request_id=forged";
+        assert_ne!(served_id(spaced, true).await, spaced);
+        assert_ne!(served_id("a\"b", true).await, "a\"b");
     }
 
     #[test]

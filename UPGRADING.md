@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Inbound `X-Request-Id` needs a trusted proxy
+
+`RequestIdLayer::default()` keeps a client's `X-Request-Id` only when the request came through a proxy named in `with_trusted_proxies` (`RealIpLayer::trust_proxies`). Elsewhere each request gets a fresh id; list your ingress or calling services there to keep cross-service ids.
+
 ## 0.60.10
 
 ### New `TenantScope` extractor

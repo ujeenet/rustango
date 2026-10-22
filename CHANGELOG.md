@@ -12,6 +12,10 @@ Retrieve, update, delete and bulk actions bind the key as the row stores it, as 
 
 The tenancy `run-server` verb rebuilt its pools with defaults, dropping `Cli::with_tenant_pools` sizing and `media_storage`.
 
+### Fixed — `X-Request-Id` is reused only from a trusted proxy
+
+`RequestIdLayer::default()` used to echo any client's id. It now keeps one only behind `with_trusted_proxies`, and only visible ASCII without quotes. A `[logging] level` of `warning`, `critical` or `fatal` now reads as a level instead of silencing every log.
+
 ## [0.60.10] — 2026-10-22
 
 **Breaking:** `ModelFormFor::from_json` refuses unknown keys; an oversized CSRF form gets 413, not 403; undecodable job payloads are retried; the first `makemigrations` on PostgreSQL rewrites each table with a sized `vector` or `geometry` column; MySQL migrations with a key over 3072 bytes or on unbounded text, binary or JSON fail at render time; `InMemoryJobQueue::dispatch` inside `atomic` waits for the commit. See UPGRADING.
