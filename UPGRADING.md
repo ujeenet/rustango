@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### MCP audit hides more arguments
+
+Tool-call audit rows now redact any argument whose key contains `key`, `session`, `cookie`, `jwt`, `bearer`, `credential(s)`, `passphrase`, `pwd` or `pin` as a word (for example `cache_key`).
+
 ### Admin returns 503 when it cannot read the user
 
 The bare admin's login and session gate now answer 503 on a database error (for example before the system migration ran) instead of failing open. Run `migrate` before serving.

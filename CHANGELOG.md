@@ -6,6 +6,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`; `RequestIdLayer` no longer echoes an untrusted client's `X-Request-Id`; a SQLite UUID key stored both as BLOB and TEXT is now a 404 in ViewSets and template views. See UPGRADING.
 
+### Fixed — MCP audit redacts more secret-looking arguments
+
+Keys naming a JWT, bearer, cookie, session, credential, passphrase, PIN or any `*_key` are now scrubbed from tool-call audit rows.
+
 ### Fixed — fewer secrets in logs
 
 CSP reports log URLs without query or fragment, `EnvSecretsResolver` errors no longer echo the reference, and an undecodable OAuth2 response no longer quotes its body.
