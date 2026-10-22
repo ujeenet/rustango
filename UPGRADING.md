@@ -162,6 +162,10 @@ The job runs after the commit and never on rollback. `pending_count()` counts it
 
 `JobDeadLetter::payload` is the payload decoded and re-encoded as the job type; one that does not decode is passed as stored.
 
+### MySQL: oversized keys fail at render
+
+A migration whose pk, unique column or index exceeds 3072 bytes (utf8mb4 counts 4 per `max_length` char) now errors before any statement runs; it failed with `ERROR 1071` before. Shorten the `max_length`. Widening a column inside an existing index is checked too, and a key on unbounded text, binary or JSON (`ERROR 1170`) is refused.
+
 ### New projects: dev server on loopback
 
 Only new scaffolds change. To match in an existing project, drop `RUSTANGO_BIND` from `.env`, add `RUSTANGO_BIND: 0.0.0.0:8080` under the compose `rust` service's `environment:`, and publish `"127.0.0.1:8080:8080"`.

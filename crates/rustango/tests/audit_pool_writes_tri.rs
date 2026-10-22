@@ -386,8 +386,8 @@ async fn pg_macro_save(pool: &Pool) {
     assert_eq!(updated, 0, "the UPDATE ran without its audit row");
 }
 
-/// A macro `save(&PgPool)` whose COMMIT fails leaves the pk unset, so a
-/// retry inserts instead of updating a row that was rolled back.
+/// A macro `save(&PgPool)` or `insert(&PgPool)` whose COMMIT fails leaves the
+/// pk unset, so a retry inserts instead of updating a row that was rolled back.
 async fn pg_macro_save_retries_after_failed_commit(pool: &Pool) {
     #[cfg(not(feature = "postgres"))]
     let _ = pool;
@@ -415,6 +415,11 @@ async fn pg_macro_save_retries_after_failed_commit(pool: &Pool) {
             note.id.get().is_none(),
             "pk kept after a rolled-back insert"
         );
+        assert!(note.insert(pg).await.is_err(), "the COMMIT must fail");
+        assert!(
+            note.id.get().is_none(),
+            "insert kept the pk of a rolled-back row"
+        );
         note.title = "retried".into();
         assert_eq!(note.save(pg).await.expect("retry"), 1);
         let written = Note::objects()
@@ -424,6 +429,51 @@ async fn pg_macro_save_retries_after_failed_commit(pool: &Pool) {
             .expect("count");
         assert_eq!(written, 1, "the retry wrote no row");
     }
+}
+
+/// The macro `insert(&PgPool)` / `delete(&PgPool)` roll the write back when
+/// its audit row fails.
+async fn pg_macro_insert_and_delete_are_atomic(pool: &Pool) {
+    #[cfg(not(feature = "postgres"))]
+    let _ = pool;
+    #[cfg(feature = "postgres")]
+    pg_macro_atomic(pool).await;
+}
+
+#[cfg(feature = "postgres")]
+async fn pg_macro_atomic(pool: &Pool) {
+    let Some(pg) = pool.as_postgres() else {
+        return;
+    };
+    let kept = insert_note(pool).await;
+    // Refuse audit rows for this table only; other suites share the log.
+    let ddl = |sql: &'static str| rustango::sql::raw_execute_pool(pool, sql, Vec::new());
+    ddl(r#"ALTER TABLE "rustango_audit_log" DROP CONSTRAINT IF EXISTS "audit_atomic_refuse""#)
+        .await
+        .unwrap();
+    ddl(r#"ALTER TABLE "rustango_audit_log" ADD CONSTRAINT "audit_atomic_refuse" CHECK (entity_table <> 'audit1675_note') NOT VALID"#)
+        .await
+        .unwrap();
+    let mut note = Note {
+        id: Auto::default(),
+        title: "unaudited".into(),
+        deleted_at: None,
+    };
+    let inserted = note.insert(pg).await;
+    let deleted = kept.delete(pg).await;
+    ddl(r#"ALTER TABLE "rustango_audit_log" DROP CONSTRAINT "audit_atomic_refuse""#)
+        .await
+        .unwrap();
+    assert!(inserted.is_err(), "insert ran unaudited");
+    assert!(deleted.is_err(), "delete ran unaudited");
+    let titles: Vec<String> = Note::objects()
+        .fetch(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|n| n.title)
+        .collect();
+    assert_eq!(titles, ["hello"], "a write committed without its audit row");
 }
 
 /// Polls for the note titled `title`; returns its newest audit source.
@@ -675,6 +725,7 @@ tri_dialect_test! {
         pg_macro_saves_queue_behind_each_other,
         pg_macro_save_skips_noop_and_fails_on_pre_read,
         pg_macro_save_retries_after_failed_commit,
+        pg_macro_insert_and_delete_are_atomic,
         job_audits_as_its_enqueuer,
         job_dispatched_in_atomic_does_not_join_it,
         scheduled_task_audits_as_its_registration,

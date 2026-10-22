@@ -3127,10 +3127,7 @@ fn inherent_impl_tokens(
                 _E: #root::sql::sqlx::Executor<'_c, Database = #root::sql::sqlx::Postgres>,
         }
     };
-    // For audited models the `_on` methods take `&mut PgConnection`, so
-    // the &PgPool convenience wrappers (`save`, `insert`, `delete`)
-    // must acquire a connection first. Non-audited models keep the
-    // direct delegation since `&PgPool` IS an Executor.
+    // Audited `_on` methods take `&mut PgConnection`; `&PgPool` is an Executor for the rest.
     // One transaction: the before-image's FOR UPDATE must hold through
     // the UPDATE and its audit row.
     let pool_to_save_on = if audited_fields.is_some() {
@@ -3161,18 +3158,34 @@ fn inherent_impl_tokens(
     } else {
         quote!(self.save_on(pool).await)
     };
+    // One transaction so the write and its audit row commit together.
     let pool_to_insert_on = if audited_fields.is_some() {
-        quote! {
-            let mut _conn = pool.acquire().await?;
-            self.insert_on(&mut *_conn).await
-        }
+        // A failed COMMIT leaves the RETURNING values on `self`; put them back.
+        let assigned: Vec<syn::Ident> = fields
+            .auto_field_idents
+            .iter()
+            .map(|(ident, _)| ident.clone())
+            .collect();
+        restore_auto_now_unless(
+            &assigned,
+            &quote!(::core::result::Result<(), #root::sql::ExecError>),
+            &quote!(_saved.is_ok()),
+            &quote! {
+                let mut _tx = pool.begin().await?;
+                self.insert_on(&mut *_tx).await?;
+                _tx.commit().await?;
+                ::core::result::Result::Ok(())
+            },
+        )
     } else {
         quote!(self.insert_on(pool).await)
     };
     let pool_to_delete_on = if audited_fields.is_some() {
         quote! {
-            let mut _conn = pool.acquire().await?;
-            self.delete_on(&mut *_conn).await
+            let mut _tx = pool.begin().await?;
+            let _affected = self.delete_on(&mut *_tx).await?;
+            _tx.commit().await?;
+            ::core::result::Result::Ok(_affected)
         }
     } else {
         quote!(self.delete_on(pool).await)

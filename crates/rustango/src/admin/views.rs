@@ -17,8 +17,8 @@ use super::errors::AdminError;
 use super::forms;
 use super::helpers::{
     admin_config_or_default, build_fk_joins, chrome_context, fk_display_targets,
-    fk_map_from_joined_rows_json, is_secret_field, lookup_model, primary_key_or_internal,
-    render_cell_json, render_form, render_secret_cell, resolve_model, resolve_model_and_pk,
+    fk_map_from_joined_rows_json, is_secret_field, lookup_model, parse_pk,
+    primary_key_or_internal, render_cell_json, render_form, render_secret_cell, resolve_model, resolve_model_and_pk,
     search_columns, url_filterable, FormLayout, ListQuery,
 };
 use super::object_permissions::AdminWrite;
@@ -1196,10 +1196,12 @@ async fn fk_map_for_rows(
             .collect();
         raws.sort();
         raws.dedup();
-        let keys: Vec<SqlValue> = raws
-            .iter()
-            .filter_map(|raw| forms::parse_pk_string(on_field, raw).ok())
-            .collect();
+        let keys: Vec<SqlValue> =
+            super::helpers::parse_keys(state, t.target, on_field, raws.iter().map(String::as_str))
+                .await?
+                .into_iter()
+                .map(|(_, key)| key)
+                .collect();
         let names =
             fk_display_names(state, parts, t.target, on_field, t.display_field, keys).await?;
         for (raw, name) in names {
@@ -1697,7 +1699,7 @@ pub(crate) async fn detail_view(
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
-    let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw)?;
+    let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw).await?;
 
     let detail_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     // Single PK lookup, plus LEFT JOINs that carry the FK display
@@ -2218,7 +2220,7 @@ pub(crate) async fn edit_form(
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
-    let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw)?;
+    let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw).await?;
 
     let edit_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let row = crate::sql::select_one_row_as_json(
@@ -2300,7 +2302,7 @@ pub(crate) async fn update_submit(
         });
     }
     let pk_field = primary_key_or_internal(model)?;
-    let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
+    let pk_value = parse_pk(&state, model, pk_field, &pk_raw).await?;
 
     // `has_change_permission(request, obj)`. Fetch the row first so
     // the hook sees the state before the update. A select error is
@@ -2562,7 +2564,7 @@ pub(crate) async fn delete_submit(
         });
     }
     let pk_field = primary_key_or_internal(model)?;
-    let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
+    let pk_value = parse_pk(&state, model, pk_field, &pk_raw).await?;
 
     // Read the row before deleting it, so the audit entry records
     // what was removed. A row missing or outside the queryset hooks'
@@ -2789,10 +2791,16 @@ pub(crate) async fn action_submit(
 
     let pk_field = primary_key_or_internal(model)?;
 
-    let pk_values: Vec<SqlValue> = selected_raw
-        .iter()
-        .filter_map(|raw| forms::parse_pk_string(pk_field, raw).ok())
-        .collect();
+    let pk_values: Vec<SqlValue> = super::helpers::parse_keys(
+        &state,
+        model,
+        pk_field,
+        selected_raw.iter().map(String::as_str),
+    )
+    .await?
+    .into_iter()
+    .map(|(_, key)| key)
+    .collect();
     if pk_values.is_empty() {
         return back();
     }
@@ -2830,7 +2838,7 @@ pub(crate) async fn action_submit(
         });
     }
     // Write only the rows that were checked, and audit exactly those.
-    let pk_values = rows_with_pk(&mut before_rows, pk_field);
+    let pk_values = rows_with_pk(&mut before_rows, pk_field, &pk_values);
     if pk_values.is_empty() {
         return back();
     }
@@ -3048,7 +3056,7 @@ impl BuiltinWrite {
                 ..SelectQuery::new(model)
             };
             let mut rows = crate::sql::select_rows_as_json_tx(tx, &select, &[pk_field]).await?;
-            let keys = rows_with_pk(&mut rows, pk_field);
+            let keys = rows_with_pk(&mut rows, pk_field, chunk);
             if keys.is_empty() {
                 continue;
             }
@@ -3074,11 +3082,22 @@ impl BuiltinWrite {
 
 /// Keep the rows whose PK round-trips and return those PKs, so the rows
 /// a bulk action writes and the rows it audits are the same list.
-fn rows_with_pk(rows: &mut Vec<serde_json::Value>, pk_field: &FieldSchema) -> Vec<SqlValue> {
+/// A PK in `selected` (the keys the rows were read by) keeps its stored form.
+fn rows_with_pk(
+    rows: &mut Vec<serde_json::Value>,
+    pk_field: &FieldSchema,
+    selected: &[SqlValue],
+) -> Vec<SqlValue> {
+    let selected: HashMap<String, &SqlValue> =
+        selected.iter().map(|k| (k.to_display_string(), k)).collect();
     let mut pks = Vec::with_capacity(rows.len());
     rows.retain(|row| {
-        let pk = render::read_value_as_string_json(row, pk_field)
-            .and_then(|raw| forms::parse_pk_string(pk_field, &raw).ok());
+        let pk = render::read_value_as_string_json(row, pk_field).and_then(|raw| {
+            selected.get(&raw).map_or_else(
+                || forms::parse_pk_string(pk_field, &raw).ok(),
+                |k| Some((*k).clone()),
+            )
+        });
         pks.extend(pk.clone());
         pk.is_some()
     });
@@ -3097,7 +3116,7 @@ mod tests {
             serde_json::json!({"id": null}),
             serde_json::json!({"id": 3}),
         ];
-        let pks = rows_with_pk(&mut rows, &pk);
+        let pks = rows_with_pk(&mut rows, &pk, &[]);
         assert_eq!(pks, vec![SqlValue::I64(1), SqlValue::I64(3)]);
         assert_eq!(
             rows,

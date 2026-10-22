@@ -4,7 +4,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-**Breaking:** `ModelFormFor::from_json` refuses unknown keys; an oversized CSRF form gets 413, not 403; undecodable job payloads are retried; the first `makemigrations` on PostgreSQL rewrites each table with a sized `vector` or `geometry` column. See UPGRADING.
+**Breaking:** `ModelFormFor::from_json` refuses unknown keys; an oversized CSRF form gets 413, not 403; undecodable job payloads are retried; the first `makemigrations` on PostgreSQL rewrites each table with a sized `vector` or `geometry` column; MySQL migrations with a key over 3072 bytes or on unbounded text, binary or JSON fail at render time; `InMemoryJobQueue::dispatch` inside `atomic` waits for the commit. See UPGRADING.
 
 ### Fixed — the fullstack scaffold mounts its admin at `[admin] url_prefix`
 
@@ -81,6 +81,26 @@ The dead-letter callback gets the payload in the current shape of the job type.
 ### Fixed — the stuck-job sweep no longer deadlocks with heartbeats on MySQL
 
 `reclaim_stuck_jobs_pool` unlocks rows one at a time by key instead of one range `UPDATE`.
+
+### Fixed — SQLite `migrate --dry-run` shows the filled-table ADD COLUMN
+
+After an ADD COLUMN with a `now()` or UUID DEFAULT, it shows the fixed-default or backfill form `migrate` runs on a table with rows.
+
+### Fixed — `migrate --dry-run` prints the converge SQL with its guards
+
+The converge step shows `IF NOT EXISTS` and the Postgres `DO` block, as it runs.
+
+### Fixed — MySQL key-size check covers model tables
+
+A primary key, unique column or index over MySQL's 3072-byte key limit is refused when the migration renders, not with `ERROR 1071` mid-run. Widening a column re-checks the indexes it is in, and a key on unbounded text, binary or JSON is refused (`ERROR 1170`).
+
+### Fixed — SQLite admin finds a UUID key a column default wrote as TEXT
+
+Detail, edit, delete, bulk actions, inline rows and FK display names bind the key as the row stores it, not always as a BLOB.
+
+### Fixed — audited `insert(&PgPool)` and `delete(&PgPool)` are atomic
+
+Each runs in one transaction, so a failed audit row rolls the write back; a failed `insert` also clears the pk it read back.
 
 ### Security — admin create and edit stay inside the row scope
 
