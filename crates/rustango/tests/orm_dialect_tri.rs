@@ -178,6 +178,58 @@ async fn citext_filter_ignores_case(pool: &Pool) {
     assert_eq!(ids("name__ne", "BOB".into()).await, Vec::<i64>::new(), "<>");
 }
 
+/// A PK whose SQL column differs from its field name.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_acct")]
+#[rustango(app = "orm_dialect_tri")]
+pub struct Acct {
+    #[rustango(primary_key, column = "acct_no")]
+    pub number: i64,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_entry")]
+#[rustango(app = "orm_dialect_tri")]
+pub struct Entry {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(on = "acct_no")]
+    pub acct: rustango::sql::ForeignKey<Acct>,
+}
+
+/// PK lookups name the field, not the renamed column.
+async fn pk_lookups_on_a_renamed_pk_column(pool: &Pool) {
+    for (number, name) in [(1, "a"), (2, "b")] {
+        Acct {
+            number,
+            name: name.into(),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed acct");
+    }
+    use rustango::sql::ExistsPool as _;
+    assert!(Acct::objects().contains_pk(pool, 2_i64).await.expect("contains_pk"));
+    let first = Acct::objects().first(pool).await.expect("first");
+    assert_eq!(first.map(|a| a.number), Some(1));
+    let by_no = Acct::objects()
+        .in_bulk(Acct::number, [1_i64, 2], |a| a.number, pool)
+        .await
+        .expect("in_bulk");
+    assert_eq!(by_no.len(), 2);
+    #[cfg(feature = "postgres")]
+    {
+        let mut e = Entry {
+            id: Auto::default(),
+            acct: rustango::sql::ForeignKey::unloaded(2),
+        };
+        e.insert_pool(pool).await.expect("seed entry");
+        assert_eq!(e.acct.get_pool(pool).await.expect("fk get").name, "b");
+    }
+}
+
 /// An empty `And` is TRUE wherever it nests.
 async fn nested_empty_and_is_true(pool: &Pool) {
     seed(pool, &[("a", "apple"), ("b", "banana")]).await;
@@ -245,6 +297,9 @@ async fn setup(pool: &Pool) {
     fresh_table::<Reading>(pool).await;
     fresh_table::<Noted>(pool).await;
     fresh_table::<Account>(pool).await;
+    rustango::testkit::matrix::drop_table(pool, Entry::SCHEMA.table).await;
+    fresh_table::<Acct>(pool).await;
+    fresh_table::<Entry>(pool).await;
 }
 
 async fn posts(pool: &Pool) -> Vec<Post> {
@@ -1056,6 +1111,7 @@ tri_dialect_test! {
         relation_date_lookup,
         citext_keeps_accents_and_spaces,
         citext_filter_ignores_case,
+        pk_lookups_on_a_renamed_pk_column,
         nested_empty_and_is_true,
         distinct_on_keeps_join_columns_and_order,
     ],
