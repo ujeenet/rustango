@@ -12,7 +12,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — PK lookups on a PK with its own `column`
 
-`ForeignKey::get` / `get_on` / `get_pool`, `contains_pk`, `in_bulk` / `in_bulk_on` and the PK order of `first` / `last` filter by the field name; with `#[rustango(primary_key, column = "…")]` they failed with `UnknownField`.
+`ForeignKey::get` / `get_on` / `get_pool`, `contains_pk`, `in_bulk` / `in_bulk_on`, `contenttypes::prefetch_generic` and the PK order of `first` / `last` filter by the field name; with `#[rustango(primary_key, column = "…")]` they failed with `UnknownField`.
 
 ### Fixed — MySQL / SQLite `distinct_on` keeps joins and relation order
 

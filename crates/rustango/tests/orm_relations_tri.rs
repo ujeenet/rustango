@@ -246,6 +246,16 @@ pub struct Badge {
     pub label: String,
 }
 
+/// A PK whose SQL column differs from its field name.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rel_ledger", app = "rel2293")]
+pub struct Ledger {
+    #[rustango(primary_key, column = "ledger_no")]
+    pub number: i64,
+    #[rustango(max_length = 40)]
+    pub label: String,
+}
+
 /// `rel2293_article` without its FK constraint, so a row can point nowhere.
 const LOOSE_ARTICLE: &ModelSchema = &{
     const FIELDS: &[FieldSchema] = &[
@@ -292,6 +302,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Uniq>(pool).await;
     fresh_table::<PostTag>(pool).await;
     fresh_table::<Badge>(pool).await;
+    fresh_table::<Ledger>(pool).await;
     fresh_table::<Note>(pool).await;
     fresh_table::<Crew>(pool).await;
     fresh_table::<Shift>(pool).await;
@@ -1313,6 +1324,33 @@ async fn prefetch_generic_keeps_i32_pks(pool: &Pool) {
     );
 }
 
+/// A generic-FK prefetch filters by the PK field, not its renamed column.
+async fn prefetch_generic_on_a_renamed_pk_column(pool: &Pool) {
+    use rustango::contenttypes::{self, ContentType};
+    contenttypes::ensure_seeded(pool)
+        .await
+        .expect("seed content types");
+    Ledger {
+        number: 7,
+        label: "seven".into(),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("ledger");
+    let ct = ContentType::for_model::<Ledger>(pool)
+        .await
+        .unwrap()
+        .expect("ledger ct");
+    let ct_id = *ct.id.get().expect("ct id");
+    let map = contenttypes::prefetch_generic::<Ledger>(pool, &[(ct_id, 7)])
+        .await
+        .expect("prefetch_generic");
+    assert_eq!(
+        map.get(&(ct_id, 7)).map(|l| l.label.as_str()),
+        Some("seven")
+    );
+}
+
 /// `prefetch_reverse_generic_for` splits its parent keys too (#2318).
 async fn prefetch_reverse_generic_past_the_bind_cap(pool: &Pool) {
     use rustango::contenttypes::{self, ContentType};
@@ -1381,6 +1419,7 @@ tri_dialect_test! {
         generic_m2m_rows_go_with_their_owner,
         generic_m2m_rows_go_with_truncate,
         prefetch_generic_keeps_i32_pks,
+        prefetch_generic_on_a_renamed_pk_column,
         prefetch_reverse_generic_past_the_bind_cap,
     ],
 }
