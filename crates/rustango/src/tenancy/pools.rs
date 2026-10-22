@@ -1260,6 +1260,10 @@ impl TenantPools<sqlx::Postgres> {
     /// used scoped pool to make room — see that field for the
     /// connection arithmetic.
     ///
+    /// Its connections are never reset on release: a handler that runs
+    /// its own `SET search_path` (or other session `SET`) on one leaks it
+    /// to the next borrower. Use [`Self::acquire`] for session state.
+    ///
     /// # Errors
     /// As [`Self::pool_for_org`] plus [`TenancyError::Driver`] for
     /// the schema-mode dedicated pool build.
@@ -1279,26 +1283,6 @@ impl TenantPools<sqlx::Postgres> {
             }
             TenantPool::Database { pool } => Ok((*pool).clone()),
         }
-    }
-
-    /// A connection from [`Self::scoped_pool`], plus that pool. Schema mode
-    /// never borrows from the shared registry pool, so one busy tenant
-    /// cannot starve the others.
-    pub(crate) async fn scoped_acquire(
-        &self,
-        org: &Org,
-    ) -> Result<(TenantConn<sqlx::Postgres>, PgPool), TenancyError> {
-        let pool = self.scoped_pool(org).await?;
-        let conn = pool.acquire().await?;
-        // `search_path` is a startup option of this pool: nothing to reset.
-        let schema = matches!(StorageMode::parse(&org.storage_mode), Ok(StorageMode::Schema))
-            .then(|| org.effective_schema().to_owned());
-        let conn = TenantConn {
-            inner: Some(conn),
-            schema,
-            reset: None,
-        };
-        Ok((conn, pool))
     }
 
     async fn build_schema_mode(
@@ -1561,9 +1545,9 @@ mod ensure_sqlite_creates_tests {
 
 /// A connection scoped to a tenant. Generic over the backend
 /// (`DB = sqlx::Postgres` default — keeps existing call sites
-/// compiling). For schema mode the connection was returned from the
-/// shared registry pool with `search_path` pre-set (PG-only); for
-/// database mode it came from the tenant's dedicated pool.
+/// compiling). For schema mode the connection comes from the shared
+/// registry pool with `search_path` set, and reset on drop (PG-only);
+/// for database mode it comes from the tenant's dedicated pool.
 ///
 /// Implements `Deref` to the inner [`sqlx::pool::PoolConnection`] for
 /// use as a sqlx executor.

@@ -4,9 +4,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-### Fixed — a schema-mode `Tenant` no longer holds a registry connection
+### Added — `TenantScope` extractor
 
-`Tenant<Postgres>` takes its connection from the tenant's scoped pool, so one busy tenant cannot use up the shared registry pool. New `extractors::TenantScope` gives the org and pool with no held connection.
+`extractors::TenantScope` gives the request's org and tenant pool with no held connection, on every backend. Use it for handlers that only call `t.pool()`.
 
 ### Fixed — `[server] max_body_bytes` covers the tenant admin and operator console
 

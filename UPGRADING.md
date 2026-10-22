@@ -150,9 +150,9 @@ untouched.
 
 ## Unreleased
 
-### Schema-mode `Tenant` connections come from the scoped pool
+### New `TenantScope` extractor
 
-A request now uses `scoped_pool_max_connections` (default 8) of its tenant, not the registry pool. Handlers that hold `Tenant` and also use `t.pool()` under high per-tenant load may need a larger value, or `TenantScope`.
+A Postgres `Tenant` still holds a registry connection for the whole request. Handlers that only use `t.pool()` can take `TenantScope` instead and hold none.
 
 ### `InMemoryJobQueue` dispatch inside `atomic`
 
