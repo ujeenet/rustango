@@ -1462,9 +1462,12 @@ mod tests {
             negotiate_language("de;q=0.5,fr;q=0.5,en;q=0.5", &["en", "fr"]).as_deref(),
             Some("fr")
         );
-        // Long enough that an unstable sort would reorder the ties.
+        // A shape an unstable sort reorders (measured on rustc 1.88).
         let header: Vec<String> = std::iter::once("fr".to_owned())
-            .chain((0..60).map(|i| format!("x{i};q=0.{}", 1 + i % 9)))
+            .chain((0..34).map(|i| match i % 3 {
+                0 => format!("x{i}"),
+                _ => format!("x{i};q=0.5"),
+            }))
             .chain(["en".to_owned()])
             .collect();
         let lang = negotiate_language(&header.join(","), &["en", "fr"]);

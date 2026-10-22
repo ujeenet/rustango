@@ -2023,7 +2023,7 @@ pub(crate) async fn create_submit(
             return Ok(refused(write_error(model, &e)).into_response());
         }
     };
-    match admits_written(&mut tx, &parts, model, pk_field, pk.clone(), Written::Created).await {
+    match admits_written(&mut tx, &parts, model, pk_field, pk.clone(), "add").await {
         Ok(true) => {}
         Ok(false) => {
             rollback_quietly(tx, model.table).await;
@@ -2383,7 +2383,7 @@ pub(crate) async fn update_submit(
             return Ok(refused(write_error(model, &e)).into_response());
         }
     };
-    match admits_written(&mut tx, &parts, model, pk_field, pk_value, Written::Edited).await {
+    match admits_written(&mut tx, &parts, model, pk_field, pk_value, "change").await {
         Ok(true) => {}
         Ok(false) => {
             rollback_quietly(tx, model.table).await;
@@ -2397,19 +2397,12 @@ pub(crate) async fn update_submit(
             return Ok(refused(write_error(model, &e)).into_response());
         }
     }
-    if let Err(e) = super::inlines::apply_plan_tx(&mut tx, &state.pool, &parts, inline_plan).await
-    {
+    if let Err(e) = super::inlines::apply_plan_tx(&mut tx, &state.pool, inline_plan).await {
         use super::inlines::InlineApplyError as E;
         rollback_quietly(tx, model.table).await;
         let why = match e {
             E::Write { child, error } => write_error(child, &error),
             E::MaxNum { child } => format!("{} allows no more rows here.", child.name),
-            E::Forbidden { child, action } => {
-                return Err(AdminError::Forbidden {
-                    table: child.table.to_owned(),
-                    action,
-                })
-            }
         };
         return Ok(refused(format!("Nothing was saved: {why}")).into_response());
     }
@@ -2432,50 +2425,21 @@ pub(crate) async fn update_submit(
     Ok(Redirect::to(&target).into_response())
 }
 
-/// How a written row was made, which picks its re-check.
-#[derive(Clone, Copy)]
-pub(super) enum Written {
-    /// Scope and the `add` hook: no row existed before.
-    Created,
-    /// Scope only: `change` already judged the row before the edit.
-    Edited,
-}
-
-impl Written {
-    /// The action a refusal reports.
-    pub(super) fn action(self) -> &'static str {
-        match self {
-            Self::Created => "add",
-            Self::Edited => "change",
-        }
-    }
-
-    /// The hook to run on the written row, if any.
-    fn hook(self) -> Option<&'static str> {
-        match self {
-            Self::Created => Some("add"),
-            Self::Edited => None,
-        }
-    }
-}
-
 /// Whether the row just written in `tx` is still in the request's scope
-/// (and, for a create, passes the `add` hook); a form must not move a row outside it.
-pub(super) async fn admits_written(
+/// and passes the `action` hook; a form must not move a row outside it.
+async fn admits_written(
     tx: &mut crate::sql::PoolTx<'_>,
     parts: &axum::http::request::Parts,
     model: &'static crate::core::ModelSchema,
     pk_field: &'static FieldSchema,
     pk: SqlValue,
-    written: Written,
+    action: &'static str,
 ) -> Result<bool, crate::sql::ExecError> {
     let fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let select = RowScope::of(model, parts).by_pk(model, pk_field.column, pk);
     let row = crate::sql::select_one_row_as_json_tx(tx, &select, &fields).await?;
     Ok(row.is_some_and(|row| {
-        written.hook().is_none_or(|action| {
-            crate::admin::object_permissions::is_allowed(model.table, action, parts, Some(&row))
-        })
+        crate::admin::object_permissions::is_allowed(model.table, action, parts, Some(&row))
     }))
 }
 
