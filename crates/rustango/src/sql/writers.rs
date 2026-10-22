@@ -2203,7 +2203,7 @@ fn check_json_path(
     Ok(())
 }
 
-/// The checked MySQL / SQLite `$."<k>"."<k>"[<n>]` path string.
+/// The checked MySQL `$."<k>"[<n>]` / SQLite `$.<k>[<n>]` path string.
 fn json_path_text(
     path: &[crate::core::JsonPathStep],
     dialect: &'static str,
@@ -2213,11 +2213,15 @@ fn json_path_text(
     let mut json_path = String::from("$");
     for step in path {
         match step {
-            // Quoted: MySQL rejects a bare `$.2fa`. The safe set keeps `"` out.
-            JsonPathStep::Key(k) => {
+            // MySQL rejects a bare `$.2fa`; SQLite takes it. The safe set keeps `"` out.
+            JsonPathStep::Key(k) if dialect == "mysql" => {
                 json_path.push_str(".\"");
                 json_path.push_str(k);
                 json_path.push('"');
+            }
+            JsonPathStep::Key(k) => {
+                json_path.push('.');
+                json_path.push_str(k);
             }
             JsonPathStep::Index(n) => {
                 if *n < 0 {
@@ -2286,9 +2290,9 @@ fn write_sqlite_json_value_eq(
     // Same (relative key, type, atom) rows both ways; arrays keep order.
     // integer and real are one type, so 1 = 1.0 as on PG and MySQL.
     let ty = "CASE WHEN type IN ('integer', 'real') THEN 'number' ELSE type END";
+    // Cut at the root row's fullkey: SQLite < 3.45 rewrites it, so `p` can differ.
     let col = format!(
-        "SELECT substr(fullkey, {}), {ty}, atom FROM json_tree(",
-        p.len() + 1
+        "SELECT substr(fullkey, min(length(fullkey)) OVER () + 1), {ty}, atom FROM json_tree("
     );
     let lit = format!("SELECT substr(fullkey, 2), {ty}, atom FROM json_tree(");
     b.sql.push_str(&format!(", '{p}') IS NOT NULL AND "));

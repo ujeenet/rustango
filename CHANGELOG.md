@@ -42,7 +42,7 @@ The text key was type-checked against the JSON column and refused with `TypeMism
 
 ### Fixed — MySQL JSON paths accept a key that starts with a digit
 
-MySQL / SQLite path keys are quoted (`$."2fa"`), so `json_path(F("data"), &["2fa"], ..)` no longer fails with MySQL error 3143.
+MySQL path keys are quoted (`$."2fa"`), so `json_path(F("data"), &["2fa"], ..)` no longer fails with MySQL error 3143. SQLite keeps bare keys, and its JSON object/array equality no longer depends on how SQLite < 3.45 spells `json_tree` keys.
 
 ### Fixed — `dumpdata` skips an unmanaged table that is not created yet
 

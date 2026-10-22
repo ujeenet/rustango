@@ -76,7 +76,7 @@ fn single_key_emits_json_extract_on_sqlite_and_mysql() {
         "MySQL JSON_UNQUOTE form: {my}"
     );
     assert!(
-        lite.contains(r#"json_extract("data", '$."city"')"#),
+        lite.contains(r#"json_extract("data", '$.city')"#),
         "SQLite json_extract: {lite}"
     );
 }
@@ -103,7 +103,7 @@ fn multi_key_chain_emits_dotted_path_on_mysql_and_sqlite() {
         "MySQL: {my}"
     );
     assert!(
-        lite.contains(r#"json_extract("data", '$."address"."city"')"#),
+        lite.contains(r#"json_extract("data", '$.address.city')"#),
         "SQLite: {lite}"
     );
 }
@@ -129,15 +129,43 @@ fn array_index_step_emits_per_dialect_form() {
         pg.contains(r#""data" -> $1 -> 0 ->> $2"#),
         "PG indexed: {pg}"
     );
-    // MySQL/SQLite use `$."items"[0]."name"`.
+    // MySQL quotes keys: `$."items"[0]."name"`; SQLite does not.
     assert!(
         my.contains(r#"'$."items"[0]."name"'"#),
         "MySQL indexed: {my}"
     );
     assert!(
-        lite.contains(r#"'$."items"[0]."name"'"#),
+        lite.contains(r#"'$.items[0].name'"#),
         "SQLite indexed: {lite}"
     );
+}
+
+/// SQLite takes a bare digit-led key; only MySQL needs it quoted.
+#[test]
+fn digit_led_key_is_quoted_on_mysql_only() {
+    let e = json_path(F("data"), &["2fa"], false);
+    assert!(my(&e).unwrap().contains(r#"'$."2fa"'"#));
+    let lite = sqlite(&e).unwrap();
+    assert!(
+        lite.contains("'$.2fa'") && !lite.contains(r#"$."2fa""#),
+        "{lite}"
+    );
+}
+
+/// SQLite before 3.45 rewrites `json_tree` fullkeys (`$."k"` to `$.k`,
+/// `$.2fa` to `$."2fa"`), so the relative key is cut at the root row's
+/// fullkey, not at the path text's length.
+#[test]
+fn sqlite_object_equality_cuts_keys_at_the_root_fullkey() {
+    use rustango::core::{Op, SqlValue, WhereExpr};
+    let qs = rustango::query::QuerySet::<NoModel>::default().where_raw(WhereExpr::ExprCompare {
+        lhs: json_path(F("data"), &["2fa"], false),
+        op: Op::Eq,
+        rhs: Expr::Literal(SqlValue::Json(serde_json::json!({"a": 1}))),
+    });
+    let lite = Sqlite.compile_select(&qs.compile().unwrap()).unwrap().sql;
+    assert!(!lite.contains("substr(fullkey, 7)"), "{lite}");
+    assert!(lite.contains("min(length(fullkey)) OVER ()"), "{lite}");
 }
 
 #[test]
