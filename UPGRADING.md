@@ -156,7 +156,7 @@ The error lists each outside object and what it uses; drop or move them, then pu
 
 ### Vector and geometry columns get one `makemigrations` step
 
-Snapshots now carry the dimension / SRID, so the first `makemigrations` emits an `AlterColumnType` for each sized `vector` or `geometry` column, fixing columns earlier file migrations created without it.
+Snapshots now carry the dimension / SRID, so on PostgreSQL the first `makemigrations` emits an `AlterColumnType` for each sized `vector` or `geometry` column; MySQL and SQLite get nothing (both stay `TEXT`). The cast fails on rows with another dimension, or with an SRID other than 0 or the model's; SRID-0 rows take the model's SRID.
 
 ## 0.60.9
 
