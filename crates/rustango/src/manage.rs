@@ -2911,14 +2911,14 @@ mod assemble_app_tests {
         .expect("request");
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response
-                .headers()
-                .get("x-request-id")
-                .and_then(|v| v.to_str().ok()),
-            Some(sent),
-            "the inbound id should be echoed back"
-        );
+        // No trusted proxy, so the client's id is replaced.
+        let served = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .expect("an id is served");
+        assert_ne!(served, sent, "an untrusted inbound id was echoed");
+        let sent = served;
 
         let out = buf.contents();
         assert!(
@@ -3159,10 +3159,11 @@ mod observability_without_admin_tests {
             )
         })
         .expect("request");
-        assert!(
-            res.headers().contains_key("x-request-id"),
-            "no X-Request-Id on the assembled router: observability is gated off"
-        );
+        let sent = res
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .expect("no X-Request-Id on the assembled router: observability is gated off");
         let out = buf.contents();
         let handler_line = out.lines().find(|l| l.contains("handler ran"));
         assert!(

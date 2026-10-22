@@ -72,6 +72,11 @@ pub enum HeaderStrategy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrustedRealIp(pub IpAddr);
 
+/// The connecting socket matched [`RealIpLayer::trust_proxies`], even when
+/// it sent no forwarding header (so no [`TrustedRealIp`] is set).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TrustedPeer;
+
 /// The first value of forwarding header `name`, only when the peer is a
 /// trusted proxy (a [`TrustedRealIp`] is set); any client can send it.
 #[cfg(any(
@@ -217,9 +222,13 @@ impl<S: Clone + Send + Sync + 'static> RealIpRouterExt for Router<S> {
                         .get::<ConnectInfo<std::net::SocketAddr>>()
                         .map(|ci| ci.ip());
                     // Trusted form, only if the peer is a named proxy.
-                    let trusted = peer
-                        .filter(|p| cfg.trusts(*p))
-                        .and_then(|_| cfg.resolve_trusted(&req));
+                    let trusted_peer = peer.is_some_and(|p| cfg.trusts(p));
+                    if trusted_peer {
+                        req.extensions_mut().insert(TrustedPeer);
+                    }
+                    let trusted = trusted_peer
+                        .then(|| cfg.resolve_trusted(&req))
+                        .flatten();
                     if let Some(ip) = trusted {
                         req.extensions_mut().insert(RealIp(ip));
                         req.extensions_mut().insert(TrustedRealIp(ip));

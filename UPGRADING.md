@@ -182,6 +182,14 @@ Such a migration commits in steps, so a failure can return `MigrateError::Partia
 
 It is logged and the later callbacks run. Code that caught that panic around `atomic` should watch the `rustango::error` log instead.
 
+### Inbound `X-Request-Id` needs a trusted proxy
+
+`RequestIdLayer::default()` keeps a client's `X-Request-Id` only when the request came through a proxy named in `with_trusted_proxies` (`RealIpLayer::trust_proxies`). Elsewhere each request gets a fresh id; list your ingress or calling services there to keep cross-service ids.
+
+### SQLite: a UUID key stored twice is a 404
+
+ViewSets and template views refuse a UUID that matches one row as BLOB and another as TEXT (404, or skipped in a bulk action). Remove the duplicate row to reach it.
+
 ## 0.60.10
 
 ### New `TenantScope` extractor

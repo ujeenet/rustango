@@ -1211,28 +1211,69 @@ fn sqlite_uuid_key(row: &sqlx::sqlite::SqliteRow, c: &str) -> Result<SqlValue, s
     }
 }
 
+/// `field` of every row `query` selects, as each row stores it.
+#[cfg(all(
+    feature = "sqlite",
+    any(feature = "admin", feature = "tenancy", feature = "template_views")
+))]
+async fn sqlite_stored_column(
+    sq: &sqlx::SqlitePool,
+    query: &SelectQuery,
+    field: &'static crate::core::FieldSchema,
+) -> Result<Vec<SqlValue>, ExecError> {
+    let query = query.clone().projection(vec![field.column]);
+    crate::test_assertions::query_counter::bump();
+    let stmt = crate::sql::Dialect::compile_select(crate::sql::sqlite::DIALECT, &query)?;
+    let mut q = sqlx::query(&stmt.sql);
+    for v in stmt.params {
+        q = bind_query_sqlite(q, v);
+    }
+    let rows = q.fetch_all(sq).await?;
+    Ok(rows
+        .iter()
+        .map(|row| sqlite_uuid_key(row, field.column))
+        .collect::<Result<_, _>>()?)
+}
+
+/// The UUID keys of the rows `query` selects, as stored; `None` where the
+/// parsed form is the stored form (every backend but SQLite).
+#[cfg(feature = "template_views")]
+pub(crate) async fn select_stored_uuids(
+    pool: &Pool,
+    query: &SelectQuery,
+    field: &'static crate::core::FieldSchema,
+) -> Result<Option<Vec<SqlValue>>, ExecError> {
+    #[cfg(feature = "sqlite")]
+    if let (Pool::Sqlite(sq), crate::core::FieldType::Uuid) = (pool, field.ty) {
+        return sqlite_stored_column(sq, query, field).await.map(Some);
+    }
+    let _ = (pool, query, field);
+    Ok(None)
+}
+
 /// `key` (parsed from `raw`) as the row stores it. Only a SQLite UUID key
 /// differs: BLOB when bound, TEXT when a column default wrote it.
-#[cfg(feature = "admin")]
+/// `None` when the UUID is stored in more than one form, i.e. names several rows.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "template_views"))]
 pub(crate) async fn stored_key(
     pool: &Pool,
     model: &'static crate::core::ModelSchema,
     pk_field: &'static crate::core::FieldSchema,
     key: SqlValue,
     raw: &str,
-) -> Result<SqlValue, ExecError> {
+) -> Result<Option<SqlValue>, ExecError> {
     let mut keys = stored_keys(pool, model, pk_field, vec![(key, raw)]).await?;
     Ok(keys.remove(0))
 }
 
 /// [`stored_key`] for many `(key, raw)` pairs of `field`, in one read per chunk.
-#[cfg(feature = "admin")]
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "template_views"))]
 pub(crate) async fn stored_keys(
     pool: &Pool,
     model: &'static crate::core::ModelSchema,
     field: &'static crate::core::FieldSchema,
     keys: Vec<(SqlValue, &str)>,
-) -> Result<Vec<SqlValue>, ExecError> {
+) -> Result<Vec<Option<SqlValue>>, ExecError> {
     #[cfg(feature = "sqlite")]
     if let (Pool::Sqlite(sq), crate::core::FieldType::Uuid) = (pool, field.ty) {
         let uuid_of = |v: &SqlValue| match v {
@@ -1240,39 +1281,43 @@ pub(crate) async fn stored_keys(
             SqlValue::String(s) => uuid::Uuid::parse_str(s).ok(),
             _ => None,
         };
-        let mut stored = std::collections::HashMap::new();
-        // Two binds per key, well under SQLite's 32766.
+        let mut stored: std::collections::HashMap<uuid::Uuid, Vec<SqlValue>> =
+            std::collections::HashMap::new();
+        // Four binds per key, well under SQLite's 32766.
         for chunk in keys.chunks(4096) {
+            // The raw spelling, plus the canonical text forms a default may write.
             let binds = chunk
                 .iter()
-                .flat_map(|(k, raw)| [k.clone(), SqlValue::String((*raw).to_owned())])
+                .flat_map(|(k, raw)| {
+                    let mut b = vec![k.clone(), SqlValue::String((*raw).to_owned())];
+                    if let Some(u) = uuid_of(k) {
+                        b.push(SqlValue::String(u.hyphenated().to_string()));
+                        b.push(SqlValue::String(u.simple().to_string()));
+                    }
+                    b
+                })
                 .collect();
-            let query =
-                SelectQuery::by_pk_in(model, field.column, binds).projection(vec![field.column]);
-            crate::test_assertions::query_counter::bump();
-            let stmt = pool.dialect().compile_select(&query)?;
-            let mut q = sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_sqlite(q, v);
-            }
-            for row in q.fetch_all(sq).await? {
-                let v = sqlite_uuid_key(&row, field.column)?;
+            let query = SelectQuery::by_pk_in(model, field.column, binds);
+            for v in sqlite_stored_column(sq, &query, field).await? {
                 if let Some(u) = uuid_of(&v) {
-                    stored.entry(u).or_insert(v);
+                    let forms = stored.entry(u).or_default();
+                    if !forms.contains(&v) {
+                        forms.push(v);
+                    }
                 }
             }
         }
         return Ok(keys
             .into_iter()
-            .map(|(k, _)| {
-                uuid_of(&k)
-                    .and_then(|u| stored.get(&u).cloned())
-                    .unwrap_or(k)
+            .map(|(k, _)| match uuid_of(&k).and_then(|u| stored.get(&u)) {
+                Some(forms) if forms.len() > 1 => None,
+                Some(forms) => forms.first().cloned(),
+                None => Some(k),
             })
             .collect());
     }
     let _ = (pool, model, field);
-    Ok(keys.into_iter().map(|(k, _)| k).collect())
+    Ok(keys.into_iter().map(|(k, _)| Some(k)).collect())
 }
 
 /// `UPDATE` against either backend; returns rows affected.

@@ -690,7 +690,7 @@ pub mod totp;
 pub mod text;
 
 /// Request ID middleware — assign per-request correlation IDs,
-/// honor inbound `X-Request-Id` for end-to-end propagation. See
+/// honor a trusted proxy's `X-Request-Id` for end-to-end propagation. See
 /// [`request_id::RequestIdLayer`].
 #[cfg(feature = "_http_layers")]
 pub mod request_id;

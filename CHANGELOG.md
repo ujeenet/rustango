@@ -4,7 +4,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-**Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`. See UPGRADING.
+**Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`; `RequestIdLayer` no longer echoes an untrusted client's `X-Request-Id`; a SQLite UUID key stored both as BLOB and TEXT is now a 404 in ViewSets and template views. See UPGRADING.
 
 ### Fixed — `[security] csrf_trusted_origins` is applied
 
@@ -57,6 +57,18 @@ After COMMIT each callback runs under `catch_unwind`; a panic is logged on `rust
 ### Fixed — a grouped aggregate with joins names the base table
 
 `WHERE`, `SUM(…)` and the other aggregate columns of `.join(…).values(…).annotate(…)` are qualified with the model's table, as `fetch()` does; a column the join shares (a self-join, two soft-delete scopes) was ambiguous. `HAVING` and `ORDER BY` too; a column only the join has stays bare.
+
+### Fixed — ViewSets and template views find a TEXT-stored UUID key on SQLite
+
+Retrieve, update, delete and bulk actions bind the key as the row stores it, as the admin does; a key a column default wrote as TEXT used to 404. A UUID stored both as BLOB and as TEXT names no single row, so it is refused (404, or left out of a bulk action). Any spelling `uuid` parses (uppercase, braced, no hyphens) finds a TEXT key.
+
+### Fixed — `run-server` keeps the app's `TenantPoolsConfig`
+
+The tenancy `run-server` verb rebuilt its pools with defaults, dropping `Cli::with_tenant_pools` sizing and `media_storage`.
+
+### Fixed — `X-Request-Id` is reused only from a trusted proxy
+
+`RequestIdLayer::default()` used to echo any client's id. It now keeps one only behind `with_trusted_proxies` (whether or not that hop sends `X-Forwarded-For`), and only visible ASCII without quotes. A `[logging] level` of `warning`, `critical` or `fatal` now reads as a level instead of silencing every log.
 
 ## [0.60.10] — 2026-10-22
 

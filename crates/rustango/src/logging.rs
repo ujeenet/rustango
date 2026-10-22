@@ -418,7 +418,7 @@ impl Setup {
     #[must_use = "the returned WorkerGuard must outlive the process so file writes flush"]
     pub fn install(self) -> Option<tracing_appender::non_blocking::WorkerGuard> {
         let env_filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new(&self.default_filter));
+            .unwrap_or_else(|_| default_env_filter(&self.default_filter));
 
         // Colour is a stdout-only decision, resolved once so every
         // branch agrees and `Auto` asks about the terminal once.
@@ -533,9 +533,45 @@ pub fn setup_for_env() {
     let _ = s.install();
 }
 
+/// `spec` with `warning`/`critical`/`fatal` read as levels; tracing
+/// would take a bare one as a target and silence everything else.
+#[cfg(feature = "runtime")]
+fn default_env_filter(spec: &str) -> EnvFilter {
+    let alias = |level: &str| match level.to_ascii_lowercase().as_str() {
+        "warning" => Some("warn"),
+        "critical" | "fatal" => Some("error"),
+        _ => None,
+    };
+    let directives: Vec<String> = spec
+        .split(',')
+        .map(|d| match d.rsplit_once('=') {
+            Some((target, level)) => alias(level.trim())
+                .map_or_else(|| d.to_owned(), |l| format!("{target}={l}")),
+            None => alias(d.trim()).map_or_else(|| d.to_owned(), str::to_owned),
+        })
+        .collect();
+    EnvFilter::new(directives.join(","))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `warning` is not a tracing level: as a bare word it is a target,
+    /// which silences every other event.
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn level_aliases_keep_their_level() {
+        use tracing_subscriber::filter::LevelFilter;
+        let hint = |s: &str| default_env_filter(s).max_level_hint();
+        assert_eq!(hint("warning"), Some(LevelFilter::WARN));
+        assert_eq!(hint("WARNING"), Some(LevelFilter::WARN));
+        assert_eq!(hint("critical"), Some(LevelFilter::ERROR));
+        assert_eq!(hint("info,sqlx=warning"), Some(LevelFilter::INFO));
+        let f = default_env_filter("error,app=warning").to_string();
+        assert!(f.contains("app=warn"), "{f}");
+        assert_eq!(hint("info,sqlx=warn"), Some(LevelFilter::INFO));
+    }
 
     /// The suite-wide env lock, shared with `error` and
     /// `template_debug`. Lib tests share one process, so a private
