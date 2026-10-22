@@ -3110,10 +3110,7 @@ fn inherent_impl_tokens(
                 _E: #root::sql::sqlx::Executor<'_c, Database = #root::sql::sqlx::Postgres>,
         }
     };
-    // For audited models the `_on` methods take `&mut PgConnection`, so
-    // the &PgPool convenience wrappers (`save`, `insert`, `delete`)
-    // must acquire a connection first. Non-audited models keep the
-    // direct delegation since `&PgPool` IS an Executor.
+    // Audited `_on` methods take `&mut PgConnection`; `&PgPool` is an Executor for the rest.
     let pool_to_save_on = if audited_fields.is_some() {
         quote! {
             let mut _conn = pool.acquire().await?;
