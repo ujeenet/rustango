@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.60.10
+
 ### New `TenantScope` extractor
 
 A Postgres `Tenant` still holds a registry connection for the whole request. Handlers that only use `t.pool()` can take `TenantScope` instead and hold none.

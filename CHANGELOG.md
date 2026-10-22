@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.60.10] — 2026-10-22
+
 **Breaking:** `ModelFormFor::from_json` refuses unknown keys; an oversized CSRF form gets 413, not 403; undecodable job payloads are retried; the first `makemigrations` on PostgreSQL rewrites each table with a sized `vector` or `geometry` column; MySQL migrations with a key over 3072 bytes or on unbounded text, binary or JSON fail at render time; `InMemoryJobQueue::dispatch` inside `atomic` waits for the commit. See UPGRADING.
 
 ### Fixed — the fullstack scaffold mounts its admin at `[admin] url_prefix`
