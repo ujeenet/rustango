@@ -35,6 +35,12 @@ fn owner_one(_: &axum::http::request::Parts) -> Vec<Filter> {
 }
 rustango::register_admin_queryset!("rowscope_item", owner_one);
 
+fn not_locked_title(_: &axum::http::request::Parts, row: Option<&serde_json::Value>) -> bool {
+    row.and_then(|r| r.get("title")) != Some(&serde_json::json!("locked"))
+}
+rustango::register_admin_object_permission!("rowscope_item", "add", not_locked_title);
+rustango::register_admin_object_permission!("rowscope_item", "change", not_locked_title);
+
 /// An FK facet onto `rowscope_item`, whose hook hides owner 77.
 #[derive(Model, Debug, Clone)]
 #[rustango(
@@ -229,6 +235,38 @@ async fn hidden_rows_are_404_and_uncounted(pool: &Pool) {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("owner_id=1"), "own facet: {body}");
     assert!(!body.contains("owner_id=77"), "scoped facet: {body}");
+}
+
+async fn items(pool: &Pool) -> Vec<(String, i64)> {
+    let mut rows = Item::objects().fetch(pool).await.expect("fetch items");
+    rows.sort_by_key(|i| *i.id.get().expect("pk"));
+    rows.into_iter().map(|i| (i.title, i.owner_id)).collect()
+}
+
+/// A create outside the scope, or one the `add` hook refuses, writes nothing.
+async fn create_outside_scope_is_refused(pool: &Pool) {
+    let (status, body) = post(pool, "/rowscope_item", "title=t&owner_id=77").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, body) = post(pool, "/rowscope_item", "title=locked&owner_id=1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(items(pool).await.is_empty(), "row written");
+    let (status, body) = post(pool, "/rowscope_item", "title=ok&owner_id=1").await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(items(pool).await, [("ok".to_owned(), 1)]);
+}
+
+/// An edit that moves a row out of scope, or that the `change` hook refuses, writes nothing.
+async fn update_out_of_scope_is_refused(pool: &Pool) {
+    let mine = seed(pool, "mine", 1).await;
+    let uri = format!("/rowscope_item/{mine}");
+    let (status, body) = post(pool, &uri, "title=moved&owner_id=77").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, body) = post(pool, &uri, "title=locked&owner_id=1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(items(pool).await, [("mine".to_owned(), 1)]);
+    let (status, body) = post(pool, &uri, "title=renamed&owner_id=1").await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(items(pool).await, [("renamed".to_owned(), 1)]);
 }
 
 /// An FK facet labels a hidden target by its key, not its title (#2029).
@@ -552,6 +590,8 @@ tri_dialect_test! {
         nullable_bool_round_trips_in_admin_form,
         nullable_bool_round_trips_in_inline,
         hidden_rows_are_404_and_uncounted,
+        create_outside_scope_is_refused,
+        update_out_of_scope_is_refused,
         fk_facet_hides_a_hidden_targets_name,
         fk_cell_shows_a_visible_targets_name,
         view_links_encode_the_pk,

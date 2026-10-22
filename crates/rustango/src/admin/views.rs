@@ -1999,7 +1999,13 @@ pub(crate) async fn create_submit(
     .await;
     // An `audit(...)` model's entry commits with the INSERT, as on edit (#2101).
     let emit = crate::audit::DiffEmit::for_model(model);
-    let written = crate::audit::insert_one_with_entry(
+    let refused = |msg: String| Html(render_form(&state, model, Some(&form), false, Some(&msg)));
+    let mut tx = match crate::sql::write_transaction_pool(&state.pool).await {
+        Ok(tx) => tx,
+        Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
+    };
+    let written = crate::audit::insert_one_with_entry_tx(
+        &mut tx,
         &state.pool,
         &query,
         pk_field,
@@ -2010,24 +2016,34 @@ pub(crate) async fn create_submit(
         emit,
     )
     .await;
-    let pk_value = match written {
-        Ok((pk, deferred)) => {
-            if let Some(entry) = deferred {
-                super::audit::emit_best_effort(&state, &entry).await;
-            }
-            pk.to_display_string()
-        }
+    let (pk, deferred) = match written {
+        Ok(w) => w,
         Err(e) => {
-            let html = render_form(
-                &state,
-                model,
-                Some(&form),
-                false,
-                Some(&write_error(model, &e)),
-            );
-            return Ok(Html(html).into_response());
+            rollback_quietly(tx, model.table).await;
+            return Ok(refused(write_error(model, &e)).into_response());
         }
     };
+    match admits_written(&mut tx, &parts, model, pk_field, pk.clone(), "add").await {
+        Ok(true) => {}
+        Ok(false) => {
+            rollback_quietly(tx, model.table).await;
+            return Err(AdminError::Forbidden {
+                table: model.table.to_owned(),
+                action: "add",
+            });
+        }
+        Err(e) => {
+            rollback_quietly(tx, model.table).await;
+            return Ok(refused(write_error(model, &e)).into_response());
+        }
+    }
+    if let Err(e) = tx.commit().await {
+        return Ok(refused(write_error(model, &e.into())).into_response());
+    }
+    if let Some(entry) = deferred {
+        super::audit::emit_best_effort(&state, &entry).await;
+    }
+    let pk_value = pk.to_display_string();
     // `save_model` hook. It fires only on admin writes, not on every
     // ORM insert, so it is a seam for admin-only side effects.
     crate::signals::admin::send_admin_post_save(crate::signals::admin::AdminSaveContext {
@@ -2325,7 +2341,7 @@ pub(crate) async fn update_submit(
         where_clause: WhereExpr::Predicate(Filter {
             column: pk_field.column,
             op: Op::Eq,
-            value: pk_value,
+            value: pk_value.clone(),
         }),
     };
     crate::signals::admin::send_admin_pre_save(crate::signals::admin::AdminSaveContext {
@@ -2367,6 +2383,20 @@ pub(crate) async fn update_submit(
             return Ok(refused(write_error(model, &e)).into_response());
         }
     };
+    match admits_written(&mut tx, &parts, model, pk_field, pk_value, "change").await {
+        Ok(true) => {}
+        Ok(false) => {
+            rollback_quietly(tx, model.table).await;
+            return Err(AdminError::Forbidden {
+                table: model.table.to_owned(),
+                action: "change",
+            });
+        }
+        Err(e) => {
+            rollback_quietly(tx, model.table).await;
+            return Ok(refused(write_error(model, &e)).into_response());
+        }
+    }
     if let Err(e) = super::inlines::apply_plan_tx(&mut tx, &state.pool, inline_plan).await {
         use super::inlines::InlineApplyError as E;
         rollback_quietly(tx, model.table).await;
@@ -2393,6 +2423,24 @@ pub(crate) async fn update_submit(
 
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_raw, &form);
     Ok(Redirect::to(&target).into_response())
+}
+
+/// Whether the row just written in `tx` is still in the request's scope
+/// and passes the `action` hook; a form must not move a row outside it.
+async fn admits_written(
+    tx: &mut crate::sql::PoolTx<'_>,
+    parts: &axum::http::request::Parts,
+    model: &'static crate::core::ModelSchema,
+    pk_field: &'static FieldSchema,
+    pk: SqlValue,
+    action: &'static str,
+) -> Result<bool, crate::sql::ExecError> {
+    let fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    let select = RowScope::of(model, parts).by_pk(model, pk_field.column, pk);
+    let row = crate::sql::select_one_row_as_json_tx(tx, &select, &fields).await?;
+    Ok(row.is_some_and(|row| {
+        crate::admin::object_permissions::is_allowed(model.table, action, parts, Some(&row))
+    }))
 }
 
 /// A failed ROLLBACK must not replace the refusal with a 500; dropping
