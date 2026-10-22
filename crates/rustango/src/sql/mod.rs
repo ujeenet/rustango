@@ -47,6 +47,7 @@ pub use compiled::CompiledStatement;
 pub use connect_diagnosis::{ConnectDiagnosis, ConnectFault};
 pub(crate) use dialect::is_uuid_expr;
 pub use dialect::Dialect;
+pub(crate) use dialect::refuse_pg_only_values;
 #[cfg(feature = "admin")]
 pub(crate) use error::Refusal;
 pub use error::{is_mysql_dup_index_error, is_pg_dup_object_error, ExecError, SqlError};

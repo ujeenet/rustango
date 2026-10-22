@@ -1415,6 +1415,7 @@ pub async fn raw_execute_pool(
     sql: &str,
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
+    crate::sql::refuse_pg_only_values(pool.dialect(), &binds)?;
     execute_pool(pool, sql, binds).await
 }
 
@@ -1428,6 +1429,7 @@ pub async fn raw_execute_tx(
     sql: &str,
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
+    crate::sql::refuse_pg_only_values(tx.dialect(), &binds)?;
     let gate = atomic::gate(tx)?;
     gate.check(
         async {
@@ -2037,6 +2039,7 @@ pub async fn raw_query_pool<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
+    crate::sql::refuse_pg_only_values(pool.dialect(), &binds)?;
     crate::test_assertions::query_counter::bump();
     match pool {
         #[cfg(feature = "postgres")]
@@ -2086,6 +2089,7 @@ pub async fn raw_query_tx<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
+    crate::sql::refuse_pg_only_values(tx.dialect(), &binds)?;
     let gate = atomic::gate(tx)?;
     gate.check(
         async {

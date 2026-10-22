@@ -61,6 +61,23 @@ pub(crate) fn quote_with(name: &str, q: char) -> String {
     out
 }
 
+/// Refuse a Postgres-only bind on a dialect whose bind arm for it can only panic.
+pub(crate) fn refuse_pg_only_values(
+    d: &dyn Dialect,
+    params: &[crate::core::SqlValue],
+) -> Result<(), SqlError> {
+    if d.binds_pg_only_values() {
+        return Ok(());
+    }
+    match params.iter().find_map(crate::core::SqlValue::pg_only_kind) {
+        Some(value) => Err(SqlError::ValueNotSupportedInDialect {
+            value,
+            dialect: d.name(),
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Turns the dialect-neutral query IR into a parameterized statement,
 /// and supplies the DDL primitives the migration runner needs.
 ///
@@ -288,10 +305,10 @@ pub trait Dialect: Send + Sync {
         false
     }
 
-    /// `true` if a `WITH` may hold a `DELETE` (Postgres only), so an owner
-    /// delete and its junction cleanup run as one statement.
-    fn supports_dml_in_cte(&self) -> bool {
-        false
+    /// `true` if arrays, ranges, hstore, vectors and geometries bind.
+    /// Postgres only; elsewhere the writer refuses them.
+    fn binds_pg_only_values(&self) -> bool {
+        true
     }
 
     /// `true` if `ORDER BY … NULLS FIRST|LAST` is understood. MySQL
@@ -321,6 +338,12 @@ pub trait Dialect: Send + Sync {
     /// (MySQL 1235), so the writer wraps it in a derived table. Inside an
     /// UPDATE/DELETE it also wraps one that reads the target (1093).
     fn in_subquery_limit_needs_derived_table(&self) -> bool {
+        false
+    }
+
+    /// `true` if a `WITH` may hold a `DELETE` (Postgres only), so an owner
+    /// delete and its junction cleanup run as one statement.
+    fn supports_dml_in_cte(&self) -> bool {
         false
     }
 

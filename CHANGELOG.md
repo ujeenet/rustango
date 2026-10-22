@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — raw SQL helpers refuse Postgres-only binds instead of panicking
+
+`raw_execute_pool`/`_tx` and `raw_query_pool`/`_tx` return `SqlError::ValueNotSupportedInDialect` for an array, range, hstore, vector or geometry bind on MySQL or SQLite.
+
 ### Fixed — deleting a model removes its generic M2M links
 
 Every delete path (instance, `delete_where`, `QuerySet::delete_on`, transaction, audited, admin) also deletes the owner's `generic_m2m` junction rows, in the same transaction; PostgreSQL does it in one statement.

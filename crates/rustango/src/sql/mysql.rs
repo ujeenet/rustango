@@ -49,6 +49,10 @@ impl Dialect for MySql {
         "mysql"
     }
 
+    fn binds_pg_only_values(&self) -> bool {
+        false
+    }
+
     fn default_values_clause(&self) -> &'static str {
         " () VALUES ()"
     }

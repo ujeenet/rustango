@@ -202,6 +202,10 @@ impl Dialect for Sqlite {
         true
     }
 
+    fn binds_pg_only_values(&self) -> bool {
+        false
+    }
+
     /// Translate a Postgres `DEFAULT` expression into SQLite's
     /// spelling.
     ///

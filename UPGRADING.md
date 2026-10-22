@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### New `SqlError::ValueNotSupportedInDialect`
+
+Raw SQL helpers return it for a Postgres-only bind on MySQL/SQLite, where they used to panic. `SqlError` is `#[non_exhaustive]`, so matches keep compiling.
+
 ### Deletes clear generic M2M junction rows
 
 Deleting a model that declares `generic_m2m(...)` now also deletes its junction rows. On MySQL and SQLite this runs as two statements in one transaction.
