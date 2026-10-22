@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the fullstack scaffold mounts its admin at `[admin] url_prefix`
+
+`main.rs` loads the settings once, passes them to the server and to `admin::Builder::from_settings`, and nests the admin at the new `admin::Builder::settings_prefix` (default `/admin`).
+
 ### Fixed — SQLite migrations see columns another pooled connection added
 
 A migration on a connection that sat idle while another one ran DDL could fail a `RenameColumn` with `no such column`; each migration transaction now reloads the schema first.

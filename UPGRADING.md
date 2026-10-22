@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### New fullstack projects need their config files
+
+A freshly scaffolded fullstack `main.rs` calls `Settings::load_from_env()?`, so a missing `config/default.toml` stops boot instead of warning. Existing projects are unchanged.
+
 ### New `SqlError::ValueNotSupportedInDialect`
 
 Raw SQL helpers return it for a Postgres-only bind on MySQL/SQLite, where they used to panic. `SqlError` is `#[non_exhaustive]`, so matches keep compiling.

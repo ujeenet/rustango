@@ -682,8 +682,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 const MAIN_RS_FULLSTACK: &str = "//! Project entrypoint — `Cli::run()` is the unified dispatcher
 //! that handles `cargo run` (runserver) AND `cargo run -- migrate` /
 //! `makemigrations` / `startapp` / etc. from one binary. No
-//! `src/bin/manage.rs` needed. The auto-admin is at `/admin`, behind
-//! a login: `cargo run -- create-admin <username>` makes the account.
+//! `src/bin/manage.rs` needed. The auto-admin is at `/admin` (or
+//! `[admin] url_prefix`), behind a login: `cargo run -- create-admin
+//! <username>` makes the account.
 //!
 //! Logging is auto-configured by `#[rustango::main]` —
 //! `tracing_subscriber::fmt` with env-filter, default
@@ -698,16 +699,19 @@ use {crate_name}::urls;
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
+    // config/*.toml for the RUSTANGO_ENV tier (default `dev`), then
+    // RUSTANGO__* env overrides; loaded once for the server and the admin.
+    let settings = rustango::config::Settings::load_from_env()?;
+    let admin_settings = settings.clone();
     rustango::manage::Cli::new()
         .api(urls::api())
         // Built from the server's own pool, so other verbs need no database.
-        .nest_with(\"/admin\", urls::admin_router)
+        .nest_with(urls::admin_prefix(&settings), move |pool| {
+            urls::admin_router(pool, &admin_settings)
+        })
         .with_welcome() // friendly `/` on first run; drop once you have a root handler
         .with_health() // /health + /ready endpoints for load balancers
-        // Loads config/*.toml for the RUSTANGO_ENV tier (default `dev`),
-        // then RUSTANGO__* env overrides. Without it the files the
-        // scaffolder writes are inert.
-        .with_settings_from_env()
+        .with_settings(&settings)
         .run()
         .await
 }
@@ -849,6 +853,7 @@ pub fn api() -> Router<()> {
 use axum::routing::get;
 use axum::Router;
 use rustango::admin;
+use rustango::config::Settings;
 use rustango::session::{load_session_secret_for_tier, tier_from_env};
 use rustango::sql::Pool;
 
@@ -860,18 +865,25 @@ pub fn api() -> Router<()> {
         .route(\"/healthz\", get(views::healthz))
 }
 
+/// Where the admin mounts: `[admin] url_prefix` (or `[routes] admin_url`), else `/admin`.
+pub fn admin_prefix(settings: &Settings) -> String {
+    admin::Builder::settings_prefix(settings)
+        .unwrap_or(\"/admin\")
+        .to_owned()
+}
+
 /// The auto-admin, behind a login. Create the first account with
 /// `cargo run -- create-admin <username>`.
 ///
 /// The signing key comes from `RUSTANGO_SESSION_SECRET`, else (off the
 /// prod tier) from `./var/`, so a restart keeps you signed in.
-pub fn admin_router(pool: Pool) -> Router {
+pub fn admin_router(pool: Pool, settings: &Settings) -> Router {
     let secret = load_session_secret_for_tier(
         &tier_from_env(),
         std::path::Path::new(\"./var/.rustango_session.key\"),
     );
-    admin::Builder::new(pool)
-        .admin_prefix(\"/admin\") // must match the `.nest_with(\"/admin\", …)` in main.rs
+    admin::Builder::from_settings(pool, settings)
+        .admin_prefix(admin_prefix(settings)) // the path main.rs nests it at
         .with_session_auth(secret)
         .build()
 }
