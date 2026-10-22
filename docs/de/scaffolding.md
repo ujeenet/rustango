@@ -147,6 +147,7 @@ Eine Vorlage schaltet einen sinnvollen Satz ein; `--features` ergänzt die Opt-i
 | `scheduler` | Hintergrundaufgaben in festen Intervallen |
 | `email-smtp` | SMTP-Transport für das E-Mail-Framework |
 | `mcp` | Model-Context-Protocol-Server für KI-Agenten |
+| `http2` | Klartext-HTTP/2 (h2c) neben HTTP/1 bereitstellen |
 | `testkit` / `test_utils` | Nur-Test-Schema-Builder, Factories und Konstruktoren |
 
 `cargo rustango new --help` gibt diese Liste aus. Backends sind hier **nicht** gültig — nimm dafür `--backend`. Eines als Feature zu nennen wird abgelehnt, weil es das Backend des Frameworks festnageln würde, während das eigene Feature des Projekts aus bliebe, und `#[derive(Model)]` seine Ausgaben an den Features des Projekts ausrichtet.

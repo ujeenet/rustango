@@ -228,6 +228,7 @@ pub const OPTIONAL_FEATURES: &[(&str, &str)] = &[
     ("scheduler", "fixed-interval background tasks"),
     ("email-smtp", "SMTP transport for the email framework"),
     ("mcp", "Model Context Protocol server for AI agents"),
+    ("http2", "serve cleartext HTTP/2 (h2c) next to HTTP/1"),
     ("testkit", "test-only schema builders and model factories"),
     ("test_utils", "test-only constructors for downstream crates"),
 ];
@@ -1000,7 +1001,7 @@ mod tests {
             main.contains(".nest_with(\"/admin\", urls::admin_router)"),
             "{main}"
         );
-        // #1335: the admin key survives a restart and fails closed on prod.
+        // The admin key survives a restart and fails closed on prod.
         assert!(urls.contains("load_session_secret_for_tier("), "{urls}");
         assert!(!urls.contains("from_env_or_random"), "{urls}");
         // #1216: no verb may need DATABASE_URL before `Cli::run`.

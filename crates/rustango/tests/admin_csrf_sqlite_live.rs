@@ -408,7 +408,7 @@ async fn get_form(app: &axum::Router, cookie: &str, uri: &str) -> (StatusCode, S
     (status, cookie, token)
 }
 
-/// #1260 — a non-superuser can sign out from the 403 page: the form
+/// A non-superuser can sign out from the 403 page: the form
 /// carries the token, and posting it as rendered logs out.
 #[tokio::test]
 async fn the_forbidden_page_sign_out_form_works() {
@@ -430,7 +430,7 @@ async fn the_forbidden_page_sign_out_form_works() {
     assert_eq!(resp.status(), StatusCode::SEE_OTHER, "signed out");
 }
 
-/// #1259 — the translation editor form carries the token, so a save
+/// The translation editor form carries the token, so a save
 /// posted as rendered is stored, not refused.
 #[tokio::test]
 async fn the_translation_editor_saves_with_its_rendered_token() {

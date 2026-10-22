@@ -625,7 +625,7 @@ pub(super) async fn provision_run_stream(
                     .data("stream timed out; the run is still unfinished"));
                 return;
             }
-            // A logout, deactivation or idle expiry ends the stream too (#1344).
+            // A logout, deactivation or idle expiry ends the stream too.
             match super::active_session(&state, &headers).await {
                 Ok(Some(_)) => {}
                 Ok(None) => {

@@ -82,8 +82,8 @@ pub struct Config {
     /// a Redis- or database-backed store for a real deployment.
     pub jti_store: Option<Arc<dyn crate::jti_store::JtiStore>>,
     /// Extra claims baked into both tokens at login, on top of the
-    /// `tenant` claim the router always sets (#1190). Every refresh runs
-    /// it again on the user's current row (#1150).
+    /// `tenant` claim the router always sets. Every refresh runs
+    /// it again on the user's current row.
     ///
     /// Returning a reserved name (`sub`, `exp`, `jti`, `typ`) fails the
     /// login with a 500 rather than silently dropping it, and so does
@@ -508,7 +508,7 @@ fn issue_login_pair(
 }
 
 /// Claims for a pair of `session`, from `user`'s current row: login and
-/// every refresh run the hook, so a demotion reaches the next refresh (#1150).
+/// every refresh run the hook, so a demotion reaches the next refresh.
 fn session_claims(
     auth: &JwtAuth,
     user: &crate::tenancy::auth::User,
@@ -1581,7 +1581,7 @@ mod tests {
         assert!(issue_login_pair(&auth, &user, 1, "acme").is_err());
     }
 
-    /// #1150 — a refresh re-runs the hook on the current row, so a demoted
+    /// A refresh re-runs the hook on the current row, so a demoted
     /// user's new pair drops the old role.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
@@ -1627,7 +1627,7 @@ mod tests {
         assert!(rotate(&auth, &pool, &pair.refresh).await.is_some());
     }
 
-    /// rel-0608 — a hook that turns to a reserved claim fails the refresh
+    /// A hook that turns to a reserved claim fails the refresh
     /// before it redeems the token, so a retry is no reuse.
     #[cfg(feature = "sqlite")]
     #[tokio::test]

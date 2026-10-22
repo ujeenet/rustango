@@ -938,7 +938,12 @@ async fn handle_list_action(
             }
         }
     } else if action == BUILTIN_DELETE_SELECTED {
-        run_delete_selected_pool(state.vs.schema, pk_field, &state.pool, &pks).await
+        if let Err(resp) =
+            run_delete_selected_pool(state.vs.schema, pk_field, &state.pool, &pks).await
+        {
+            return resp;
+        }
+        Ok(())
     } else {
         return (
             StatusCode::BAD_REQUEST,
@@ -1261,7 +1266,7 @@ async fn handle_delete_submit(
             let target = substitute_pk(&state.vs.success_url, &pk);
             axum::response::Redirect::to(&target).into_response()
         }
-        Err(e) => template_error(&format!("delete row: {e}")),
+        Err(e) => delete_failed(&e),
     }
 }
 
@@ -1931,7 +1936,7 @@ async fn handle_create_post(
     .await
     {
         Ok(url) => axum::response::Redirect::to(&url).into_response(),
-        Err(WriteFailed::Duplicate(errors)) => {
+        Err(WriteFailed::Refused(errors)) => {
             rerender_form(&state, &form, &errors, /*is_update=*/ false, &csrf)
         }
         Err(WriteFailed::Error(resp)) => resp,
@@ -1940,10 +1945,29 @@ async fn handle_create_post(
 
 /// Why a CreateView INSERT or UpdateView UPDATE did not redirect.
 enum WriteFailed {
-    /// A unique value is taken: field errors for the form (#2033).
-    Duplicate(HashMap<String, String>),
+    /// The database refused a value (a taken unique, a missing FK target,
+    /// NOT NULL, CHECK): errors for the form.
+    Refused(HashMap<String, String>),
     /// Anything else: an opaque 500.
     Error(Response),
+}
+
+/// Form errors for a refusal other than a taken unique.
+fn refused_errors(r: crate::sql::Refusal, e: &crate::sql::ExecError) -> WriteFailed {
+    tracing::warn!(target: "rustango::template_views", error = %e, "write refused");
+    WriteFailed::Refused(HashMap::from([(
+        "__all__".to_owned(),
+        r.message().to_owned(),
+    )]))
+}
+
+/// A DELETE the database refused: rows still pointing at it are a 409,
+/// anything else a logged 500.
+fn delete_failed(e: &crate::sql::ExecError) -> Response {
+    if e.is_still_referenced() {
+        return (StatusCode::CONFLICT, crate::sql::STILL_REFERENCED).into_response();
+    }
+    template_error(&format!("delete row: {e}"))
 }
 
 /// The CreateView INSERT shared by the static and tenant routers; returns
@@ -1990,7 +2014,7 @@ async fn create_insert(
     match result {
         Ok(Ok(url)) => Ok(url),
         Ok(Err(e)) => Err(WriteFailed::Error(template_error(&e))),
-        Err(e) if e.is_unique_violation() => Err(WriteFailed::Duplicate(
+        Err(e) if e.is_unique_violation() => Err(WriteFailed::Refused(
             duplicate_errors(
                 pool,
                 schema,
@@ -1999,9 +2023,10 @@ async fn create_insert(
             )
             .await,
         )),
-        Err(e) => Err(WriteFailed::Error(template_error(&format!(
-            "insert row: {e}"
-        )))),
+        Err(e) => Err(match e.refusal() {
+            Some(r) => refused_errors(r, &e),
+            None => WriteFailed::Error(template_error(&format!("insert row: {e}"))),
+        }),
     }
 }
 
@@ -2031,7 +2056,7 @@ async fn update_row(
     match crate::audit::update(pool, &update_q).await {
         Ok(n) => Ok(n),
         // A taken unique value is a form error, as on create (#2073).
-        Err(e) if e.is_unique_violation() => Err(WriteFailed::Duplicate(
+        Err(e) if e.is_unique_violation() => Err(WriteFailed::Refused(
             duplicate_errors(
                 pool,
                 schema,
@@ -2040,9 +2065,10 @@ async fn update_row(
             )
             .await,
         )),
-        Err(e) => Err(WriteFailed::Error(template_error(&format!(
-            "update row: {e}"
-        )))),
+        Err(e) => Err(match e.refusal() {
+            Some(r) => refused_errors(r, &e),
+            None => WriteFailed::Error(template_error(&format!("update row: {e}"))),
+        }),
     }
 }
 
@@ -2171,7 +2197,7 @@ async fn handle_update_post(
             let target = substitute_pk(&state.success_url, &pk);
             axum::response::Redirect::to(&target).into_response()
         }
-        Err(WriteFailed::Duplicate(errors)) => {
+        Err(WriteFailed::Refused(errors)) => {
             rerender_form(&state, &form, &errors, /*is_update=*/ true, &csrf)
         }
         Err(WriteFailed::Error(resp)) => resp,
@@ -3089,13 +3115,13 @@ async fn run_delete_selected_pool(
     pk_field: &'static crate::core::FieldSchema,
     pool: &Pool,
     pks: &[SqlValue],
-) -> Result<(), String> {
+) -> Result<(), Response> {
     // #810 — `DeleteQuery::by_pk_in` for the DELETE … WHERE pk IN (...) shape.
     let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks.to_vec());
     delete_rows(pool, q)
         .await
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| delete_failed(&e))
 }
 
 // v0.38 — `run_delete_selected_conn` removed; tenant handlers now
@@ -3715,7 +3741,12 @@ mod tenant {
                 }
             }
         } else if action == super::BUILTIN_DELETE_SELECTED {
-            super::run_delete_selected_pool(state.vs.schema, pk_field, &pool, &pks).await
+            if let Err(resp) =
+                super::run_delete_selected_pool(state.vs.schema, pk_field, &pool, &pks).await
+            {
+                return resp;
+            }
+            Ok(())
         } else {
             return (
                 StatusCode::BAD_REQUEST,
@@ -3829,7 +3860,7 @@ mod tenant {
                 let target = super::substitute_pk(&state.vs.success_url, &pk);
                 axum::response::Redirect::to(&target).into_response()
             }
-            Err(e) => template_error(&format!("delete row: {e}")),
+            Err(e) => super::delete_failed(&e),
         }
     }
 
@@ -3892,7 +3923,7 @@ mod tenant {
             super::create_insert(t.pool(), state.schema, &state.success_url, columns, values);
         match insert.await {
             Ok(url) => axum::response::Redirect::to(&url).into_response(),
-            Err(super::WriteFailed::Duplicate(errors)) => {
+            Err(super::WriteFailed::Refused(errors)) => {
                 rerender_form_tenant(&state, &form, &errors, /*is_update=*/ false, &csrf)
             }
             Err(super::WriteFailed::Error(resp)) => resp,
@@ -3987,7 +4018,7 @@ mod tenant {
                 let target = super::substitute_pk(&state.success_url, &pk);
                 axum::response::Redirect::to(&target).into_response()
             }
-            Err(super::WriteFailed::Duplicate(errors)) => {
+            Err(super::WriteFailed::Refused(errors)) => {
                 rerender_form_tenant(&state, &form, &errors, /*is_update=*/ true, &csrf)
             }
             Err(super::WriteFailed::Error(resp)) => resp,
@@ -6182,7 +6213,7 @@ mod tests {
     }
 
     /// An outer layer's `exempt_prefix` does not switch off a CBV's own
-    /// guard (#1669).
+    /// guard.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn an_outer_exempt_prefix_keeps_the_cbv_guard() {

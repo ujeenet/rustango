@@ -132,11 +132,12 @@ impl TableRebuild {
                 dialect.quote_ident(old)
             ),
         ];
-        let autoincrement =
-            dialect.serial_type_includes_primary_key()
-                && self.target.fields.iter().any(|f| {
-                    f.auto && f.primary_key && matches!(f.ty.as_str(), "i16" | "i32" | "i64")
-                });
+        let autoincrement = dialect.serial_type_includes_primary_key()
+            && self
+                .target
+                .fields
+                .iter()
+                .any(|f| f.auto && f.primary_key && super::snapshot::is_integer_ty(&f.ty));
         if autoincrement {
             // Keep the high-water mark, or ids of deleted rows come back.
             let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));

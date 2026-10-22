@@ -2100,7 +2100,7 @@ mod bound_tests {
     }
 }
 
-/// #2656: the bytes API, native on the built-in backends.
+/// The bytes API, native on the built-in backends.
 #[cfg(test)]
 mod bytes_tests {
     use super::*;

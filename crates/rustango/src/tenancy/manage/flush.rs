@@ -6,7 +6,6 @@ use sqlx::Database;
 
 use crate::migrate::manage::FlushScope;
 use crate::tenancy::error::TenancyError;
-use crate::tenancy::org::StorageMode;
 use crate::tenancy::pools::TenantPools;
 
 use super::args::next_value;
@@ -51,11 +50,7 @@ where
         .ok_or_else(|| TenancyError::Validation(format!("tenant `{slug}` not found")))?;
     let scoped = pools.scoped_pool_dyn(&org).await?;
     // Same name the scoped pool's `search_path` uses.
-    let schema = matches!(
-        StorageMode::parse(&org.storage_mode),
-        Ok(StorageMode::Schema)
-    )
-    .then(|| org.schema_name.as_deref().unwrap_or(&org.slug));
+    let schema = org.own_schema();
     crate::migrate::manage::flush_cmd(&scoped, &rest, FlushScope::Tenant { schema }, w)
         .await
         .map_err(TenancyError::Migrate)

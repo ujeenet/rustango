@@ -143,6 +143,7 @@ Una plantilla enciende un conjunto razonable; `--features` añade las opciones q
 | `scheduler` | Tareas en segundo plano a intervalos fijos |
 | `email-smtp` | Transporte SMTP para el framework de email |
 | `mcp` | Servidor Model Context Protocol para agentes de IA |
+| `http2` | Servir HTTP/2 sin cifrar (h2c) junto a HTTP/1 |
 | `testkit` / `test_utils` | Constructores de esquema, factorías y constructores solo para tests |
 
 `cargo rustango new --help` imprime esta lista. Los backends **no** son válidos aquí — usa `--backend`. Nombrar uno como funcionalidad se rechaza, porque fijaría el backend del framework mientras la funcionalidad propia del proyecto quedaría apagada, y `#[derive(Model)]` alinea lo que emite con las funcionalidades del proyecto.

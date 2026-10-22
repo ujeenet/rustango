@@ -45,9 +45,9 @@ pub use compiled::CompiledStatement;
 pub use connect_diagnosis::{ConnectDiagnosis, ConnectFault};
 pub(crate) use dialect::is_uuid_expr;
 pub use dialect::Dialect;
-#[cfg(feature = "admin")]
-pub(crate) use error::Refusal;
 pub use error::{is_mysql_dup_index_error, is_pg_dup_object_error, ExecError, SqlError};
+#[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
+pub(crate) use error::{Refusal, STILL_REFERENCED};
 pub use geometry::{Point, SRID_WGS84};
 pub use hstore::HStore;
 pub use range::Range;
@@ -105,18 +105,18 @@ pub use executor::row_to_json;
 /// aggregate or a prefetch against a specific connection. The guard in
 /// `macro_internals_stays_internal` now walks `src/` as well (#1516).
 ///
-/// The macro never emits `fetch_aggregate_on` or
-/// `annotate_count_children{,_on}`. Audited `save_on` calls
-/// `select_rows_on` for its BEFORE read.
+/// The macro never emits `annotate_count_children`. Audited `save_on`
+/// calls `select_rows_on` for its BEFORE read.
 ///
-/// **PostgreSQL only.** They are typed `E: sqlx::Executor<Database =
-/// Postgres>`, so unlike the rest of the query surface they are not
-/// tri-dialect. That is a real gap, not a design choice; see #1293.
+/// These are **PostgreSQL only**, typed `E: sqlx::Executor<Database =
+/// Postgres>`.
 #[cfg(feature = "postgres")]
 pub use executor::{
-    annotate_count_children, annotate_count_children_on, bulk_insert_on, fetch_aggregate_on,
-    fetch_with_prefetch, insert_on, select_rows_on, update_on,
+    annotate_count_children, bulk_insert_on, fetch_with_prefetch, insert_on, select_rows_on,
+    update_on,
 };
+/// Take any [`SqlExecutor`].
+pub use executor::{annotate_count_children_on, fetch_aggregate_on};
 
 /// Hidden path for the `#[derive(Model)]` macro's generic-executor
 /// emissions. The functions inside are PG-typed (`E: sqlx::Executor<

@@ -143,6 +143,7 @@ A template turns on a sensible set; `--features` adds the opt-ins none of them r
 | `scheduler` | Fixed-interval background tasks |
 | `email-smtp` | SMTP transport for the email framework |
 | `mcp` | Model Context Protocol server for AI agents |
+| `http2` | Serve cleartext HTTP/2 (h2c) next to HTTP/1 |
 | `testkit` / `test_utils` | Test-only schema builders, factories, and constructors |
 
 `cargo rustango new --help` prints this list. Backends are **not** valid here — pass `--backend` instead; naming one as a feature is refused, because it would pin the framework's backend while the project's own feature stayed off, and `#[derive(Model)]` gates its emissions on the project's features.

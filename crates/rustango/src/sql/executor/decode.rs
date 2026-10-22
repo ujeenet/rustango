@@ -91,7 +91,7 @@ impl RowPlan {
             .map(move |(i, &cell)| row.decode_cell(i, cell))
     }
 
-    /// The public type needs an owned key per cell; each map is sized up front (#2661).
+    /// The public type needs an owned key per cell; each map is sized up front.
     fn dict<R: DecodeRow>(&self, row: &R) -> HashMap<String, SqlValue> {
         let mut map = HashMap::with_capacity(self.names.len());
         for (name, v) in self.names.iter().zip(self.row(row)) {

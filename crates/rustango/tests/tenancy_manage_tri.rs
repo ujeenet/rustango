@@ -185,9 +185,14 @@ impl Env {
     }
 
     async fn run(&self, dir: &Path, args: &[&str]) -> Result<(), TenancyError> {
+        self.run_out(dir, args).await.map(drop)
+    }
+
+    async fn run_out(&self, dir: &Path, args: &[&str]) -> Result<String, TenancyError> {
         let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
         let mut out = Vec::new();
-        typed!(self.registry, p => rustango::tenancy::manage::run_with_writer(&p, &self.url, dir, args, &mut out).await)
+        typed!(self.registry, p => rustango::tenancy::manage::run_with_writer(&p, &self.url, dir, args, &mut out).await)?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
     }
 }
 
@@ -550,10 +555,148 @@ async fn provision_releases_its_schema_on_a_failed_insert(pool: &Pool) {
     }
 }
 
+/// `dumpdata` / `loaddata` run on the `--tenant` pool and touch only
+/// that tenant; without it they cover registry models only.
+async fn data_verbs_stay_in_their_tenant(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("migrations");
+    for (tag, user) in [("a", "alice"), ("b", "bob")] {
+        let opts = env.tenant_opts(tag).await;
+        let slug = format!("mt-{tag}");
+        env.create(&dir, &slug, opts).await.expect("tenant");
+        env.run(
+            &dir,
+            &[
+                "create-user",
+                &slug,
+                user,
+                "--skip-validation",
+                "--password",
+                "pw",
+            ],
+        )
+        .await
+        .expect("user");
+    }
+    let dump = |slug: Option<&'static str>, model: &'static str| {
+        let mut args = vec!["dumpdata", "--model", model, "--indent", "0"];
+        args.extend(slug.map(|s| ["--tenant", s]).into_iter().flatten());
+        let env = &env;
+        let dir = dir.clone();
+        async move { env.run_out(&dir, &args).await }
+    };
+
+    let a = dump(Some("mt-a"), "User").await.expect("dump mt-a");
+    assert!(a.contains("alice") && !a.contains("bob"), "{a}");
+    let orgs = dump(None, "Org").await.expect("registry dump");
+    assert!(orgs.contains("mt-a") && orgs.contains("mt-b"), "{orgs}");
+    let err = dump(None, "User")
+        .await
+        .expect_err("a tenant model on the registry");
+    assert!(err.to_string().contains("--tenant"), "{err}");
+
+    // Alice's row, renamed, into mt-b only.
+    let mut rows: serde_json::Value = serde_json::from_str(a.trim()).unwrap();
+    let row = &mut rows[0];
+    row["pk"] = 99.into();
+    row["fields"]["username"] = "carol".into();
+    let fixture = env.tmp.path().join("carol.json");
+    std::fs::write(&fixture, serde_json::to_string(&rows).unwrap()).unwrap();
+    let fixture = fixture.to_str().unwrap();
+    let err = env
+        .run(&dir, &["loaddata", fixture, "--fail-fast"])
+        .await
+        .expect_err("a tenant fixture on the registry");
+    assert!(err.to_string().contains("--tenant"), "{err}");
+    env.run(&dir, &["loaddata", fixture, "--tenant", "mt-b"])
+        .await
+        .expect("load into mt-b");
+    let b = dump(Some("mt-b"), "User").await.expect("dump mt-b");
+    assert!(b.contains("carol") && b.contains("bob"), "{b}");
+    let a = dump(Some("mt-a"), "User").await.expect("dump mt-a");
+    assert!(!a.contains("carol"), "the load reached another tenant: {a}");
+
+    // No --model: only that side's models. Unmanaged tables (TOTP and the
+    // like) are made on first use; a missing one is skipped.
+    let all = env
+        .run_out(&dir, &["dumpdata", "--tenant", "mt-a", "--indent", "0"])
+        .await
+        .expect("full tenant dump");
+    assert!(all.contains("alice"), "{all}");
+    assert!(!all.contains("mt-b") && !all.contains("bob"), "{all}");
+    let reg = env
+        .run_out(&dir, &["dumpdata", "--indent", "0"])
+        .await
+        .expect("full registry dump");
+    assert!(reg.contains("mt-b") && !reg.contains("alice"), "{reg}");
+}
+
+/// PG schema mode: a table missing from the tenant schema is refused, not
+/// read from or written to `public`.
+async fn schema_mode_data_verbs_skip_public(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    if env.backend() != BackendKind::Postgres {
+        return;
+    }
+    let dir = env.dir("migrations");
+    for tag in ["a", "b"] {
+        let opts = env.tenant_opts(tag).await;
+        env.create(&dir, &format!("mt-{tag}"), opts)
+            .await
+            .expect("tenant");
+    }
+    let user = [
+        "create-user",
+        "mt-b",
+        "bob",
+        "--skip-validation",
+        "--password",
+        "pw",
+    ];
+    env.run(&dir, &user).await.expect("user");
+    let b = env
+        .run_out(
+            &dir,
+            &[
+                "dumpdata", "--tenant", "mt-b", "--model", "User", "--indent", "0",
+            ],
+        )
+        .await
+        .expect("dump mt-b");
+    let fixture = env.tmp.path().join("bob.json");
+    std::fs::write(&fixture, b.trim()).unwrap();
+    rustango::sql::raw_execute_pool(
+        &env.registry,
+        "DROP TABLE mt_a.rustango_users CASCADE",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+
+    for args in [
+        &["dumpdata", "--tenant", "mt-a", "--model", "User"][..],
+        &["dumpdata", "--tenant", "mt-a"][..],
+        &["loaddata", fixture.to_str().unwrap(), "--tenant", "mt-a"][..],
+    ] {
+        let err = env
+            .run(&dir, args)
+            .await
+            .expect_err("fell through to public");
+        assert!(err.to_string().contains("mt_a"), "{args:?}: {err}");
+    }
+    let public: Vec<rustango::tenancy::auth::User> = rustango::tenancy::auth::User::objects()
+        .fetch(&env.registry)
+        .await
+        .unwrap();
+    assert!(public.is_empty(), "loaddata wrote to public");
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
     scenarios: [
+        data_verbs_stay_in_their_tenant,
+        schema_mode_data_verbs_skip_public,
         create_tenant_returns_a_failed_migration,
         create_tenant_if_missing_finishes_a_failed_create,
         create_tenant_if_missing_leaves_a_suspended_tenant,

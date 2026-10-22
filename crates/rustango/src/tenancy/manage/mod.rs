@@ -44,6 +44,7 @@
 mod agents;
 mod args;
 mod audit;
+mod data;
 mod edit;
 mod flush;
 mod hosts;
@@ -326,6 +327,9 @@ where
         "audit-cleanup" => audit::audit_cleanup_cmd(pools, &args[1..], writer).await,
         // The fall-through flush is scope-blind and ran on the registry pool (#2284).
         "flush" => flush::flush_cmd(pools, &args[1..], writer).await,
+        // The fall-through read and wrote every model on the registry pool.
+        "dumpdata" => data::data_cmd(pools, data::Verb::Dump, &args[1..], writer).await,
+        "loaddata" => data::data_cmd(pools, data::Verb::Load, &args[1..], writer).await,
         // `public` holds the registry here; --clean would drop every org with it.
         "db:restore" if args[1..].iter().any(|a| a == "--clean") => Err(TenancyError::Validation(
             "db:restore --clean is refused in a tenancy project: schema `public` is the registry"
@@ -828,6 +832,10 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "  flush --tenant <s> [--yes]   Wipe one tenant's tables; the registry is never flushed."
+    )?;
+    writeln!(
+        w,
+        "  dumpdata | loaddata [--tenant <s>]  One tenant's models, or the registry's without it."
     )?;
     writeln!(w)?;
     writeln!(w, "SERVER:")?;

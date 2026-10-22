@@ -1,5 +1,5 @@
 //! `fetch` decodes each row as it arrives instead of buffering the whole
-//! raw result set first (+68% peak memory, rel-0608 performance-001).
+//! raw result set first (+68% peak memory).
 //! Row 1 fails to decode and row 2 fails in SQLite's `ABS` overflow: a
 //! streaming read reports row 1's decode error, a buffering one row 2's.
 

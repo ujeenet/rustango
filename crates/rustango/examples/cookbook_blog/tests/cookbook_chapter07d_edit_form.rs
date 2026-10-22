@@ -66,6 +66,36 @@ async fn wait_ready() {
     panic!("server didn't bind within 20s");
 }
 
+const USER: &str = "editor";
+const PASS: &str = "editor-pass-123";
+
+/// A browser-like client: keeps cookies, does not follow redirects.
+fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .cookie_store(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build().unwrap()
+}
+
+/// The `_csrf` value a rendered form carries.
+fn form_token(html: &str) -> String {
+    html.split(r#"name="_csrf" value=""#)
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Sign `client` in through the tenant `/login` form.
+async fn log_in(client: &reqwest::Client, host: &str) {
+    let html = client.get(format!("http://{BIND}/login")).header("Host", host)
+        .send().await.unwrap().text().await.unwrap();
+    let resp = client.post(format!("http://{BIND}/login")).header("Host", host)
+        .form(&[("username", USER), ("password", PASS), ("_csrf", &form_token(&html))])
+        .send().await.unwrap();
+    assert!(resp.status().is_redirection(), "login: {}", resp.status());
+}
+
 #[tokio::test]
 async fn open_then_edit_existing_record_with_unique_rejection() {
     let Some(db) = db_url().await else { return };
@@ -76,19 +106,30 @@ async fn open_then_edit_existing_record_with_unique_rejection() {
         &["acme", "--display-name", "acme", "--host-pattern", &format!("acme.{APEX}")], &db,
     ).status.success());
 
+    assert!(manage("create-user", &["acme", USER, "--password", PASS], &db).status.success());
+
     let mut server = spawn_server(&db);
     wait_ready().await;
 
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build().unwrap();
     let host = "acme.localhost";
+    // Anonymous: the edit form sends you to /login.
+    let resp = client()
+        .get(format!("http://{BIND}/authors/1/edit")).header("Host", host)
+        .send().await.unwrap();
+    assert!(resp.status().is_redirection(), "anonymous edit GET: {}", resp.status());
+
+    let client = client();
+    log_in(&client, host).await;
+    let html = client
+        .get(format!("http://{BIND}/authors/new")).header("Host", host)
+        .send().await.unwrap().text().await.unwrap();
+    let token = form_token(&html);
 
     // §7d.1 — seed two rows via the create form.
     for (name, email) in [("ada", "ada@example.com"), ("grace", "grace@example.com")] {
         let resp = client
             .post(format!("http://{BIND}/authors/new")).header("Host", host)
-            .form(&[("name", name), ("email", email), ("bio", "")])
+            .form(&[("name", name), ("email", email), ("bio", ""), ("_csrf", &token)])
             .send().await.unwrap();
         assert_eq!(resp.status().as_u16(), 303, "create {name}: {}", resp.status());
     }
@@ -98,6 +139,7 @@ async fn open_then_edit_existing_record_with_unique_rejection() {
         .get(format!("http://{BIND}/authors/1/edit")).header("Host", host)
         .send().await.unwrap().text().await.unwrap();
     assert!(html.contains("Edit Author #1"), "edit page title; html head:\n{}", &html[..html.len().min(400)]);
+    assert_eq!(form_token(&html), token, "the edit form carries the same token");
     // Pre-fill: input value attributes carry the existing row's values.
     assert!(html.contains(r#"value="ada""#), "name pre-filled");
     assert!(html.contains(r#"value="ada@example.com""#), "email pre-filled");
@@ -111,7 +153,7 @@ async fn open_then_edit_existing_record_with_unique_rejection() {
     // §7d.3 — POST the edit form with new values → redirect to retrieve.
     let resp = client
         .post(format!("http://{BIND}/authors/1/edit")).header("Host", host)
-        .form(&[("name", "ada lovelace"), ("email", "ada.l@example.com"), ("bio", "first programmer")])
+        .form(&[("name", "ada lovelace"), ("email", "ada.l@example.com"), ("bio", "first programmer"), ("_csrf", &token)])
         .send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 303, "edit POST status: {}", resp.status());
     let location = resp.headers().get("location").and_then(|v| v.to_str().ok()).unwrap_or("");
@@ -129,13 +171,14 @@ async fn open_then_edit_existing_record_with_unique_rejection() {
     // #2's existing email; form re-renders with the DB error preserved.
     let resp = client
         .post(format!("http://{BIND}/authors/1/edit")).header("Host", host)
-        .form(&[("name", "ada"), ("email", "grace@example.com"), ("bio", "")])
+        .form(&[("name", "ada"), ("email", "grace@example.com"), ("bio", ""), ("_csrf", &token)])
         .send().await.unwrap();
     assert!(resp.status().is_success(),
         "duplicate UPDATE should re-render form (200), not 5xx; got {}", resp.status());
     let body = resp.text().await.unwrap();
-    assert!(body.to_lowercase().contains("unique") || body.to_lowercase().contains("duplicate"),
-        "expected UNIQUE error banner; body head:\n{}", &body[..body.len().min(400)]);
+    assert!(body.contains("already exists"),
+        "expected the duplicate-email banner; body head:\n{}", &body[..body.len().min(400)]);
+    assert!(!body.to_lowercase().contains("constraint"), "raw DB error leaked:\n{body}");
 
     // §7d.5 — original row #1 still has its (different) email.
     let body: serde_json::Value = client

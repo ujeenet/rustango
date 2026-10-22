@@ -1216,7 +1216,7 @@ pub struct InsertQuery {
     /// fails on a constraint violation.
     pub on_conflict: Option<ConflictClause>,
     /// Bound `Auto` columns whose value the writer just generated
-    /// (a fresh `default_uuid_v7`), so they cannot clash (#1407).
+    /// (a fresh `default_uuid_v7`), so they cannot clash.
     pub generated: Vec<&'static str>,
 }
 

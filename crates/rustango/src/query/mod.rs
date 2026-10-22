@@ -3228,8 +3228,9 @@ fn resolve_filter(model: &'static ModelSchema, raw: RawFilter) -> Result<Filter,
 
     // `IsNull` carries a Bool flag, not a value to compare with the
     // field, so skip the type check. `In` carries a List, whose
-    // elements are not checked one by one.
-    let skip_type_check = matches!(raw.op, Op::IsNull | Op::In);
+    // elements are not checked one by one. `JsonHasKey` binds a text key
+    // against a JSON column.
+    let skip_type_check = matches!(raw.op, Op::IsNull | Op::In | Op::JsonHasKey);
 
     if !skip_type_check {
         if let Some(value_ty) = raw.value.field_type() {

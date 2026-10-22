@@ -147,49 +147,11 @@ pub async fn set_active(
         .await?;
     target.active = active;
     if !active {
-        // So a later reactivation does not revive today's cookies (#1342).
+        // So a later reactivation does not revive today's cookies.
         crate::session::revoke_sessions::<Operator>(registry, id, target.sessions_revoked_at, 0)
             .await?;
     }
     Ok(Outcome::Changed)
-}
-
-/// The registry admin writes `active` itself; a deactivation there ends the
-/// operator's sessions in the same UPDATE, at `set_active`'s cut-off.
-#[cfg(feature = "admin")]
-fn admin_revoke_on_deactivate<'a>(
-    values: &'a mut Vec<(&'static str, crate::core::SqlValue)>,
-    before: Option<&'a serde_json::Value>,
-) -> crate::admin::derived_fields::DeriveFuture<'a> {
-    use crate::core::SqlValue;
-    use crate::session::SESSIONS_REVOKED_AT;
-    Box::pin(async move {
-        let was_active = before
-            .and_then(|r| r.get("active"))
-            .is_some_and(|v| v.as_bool() == Some(true) || v.as_i64().is_some_and(|n| n != 0));
-        let deactivates = values
-            .iter()
-            .any(|(c, v)| *c == "active" && matches!(v, SqlValue::Bool(false)));
-        if !(was_active && deactivates) {
-            return Ok(());
-        }
-        let prev = before
-            .and_then(|r| r.get(SESSIONS_REVOKED_AT)?.as_str())
-            .and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
-        let cutoff = crate::session::logout_cutoff(prev, 0);
-        let cutoff = chrono::DateTime::from_timestamp(cutoff, 0).unwrap_or_else(chrono::Utc::now);
-        values.retain(|(c, _)| *c != SESSIONS_REVOKED_AT);
-        values.push((SESSIONS_REVOKED_AT, SqlValue::DateTime(cutoff)));
-        Ok::<(), String>(())
-    })
-}
-
-#[cfg(feature = "admin")]
-inventory::submit! {
-    crate::admin::derived_fields::AdminDerivedField {
-        table: "rustango_operators",
-        derive: admin_revoke_on_deactivate,
-    }
 }
 
 #[cfg(all(test, feature = "sqlite", feature = "testkit"))]
@@ -242,7 +204,7 @@ mod tests {
         assert_eq!(now.password_hash, "NEW", "deactivate undid the reset");
     }
 
-    /// rel-0608 — an admin edit that deactivates an operator ends its
+    /// An admin edit that deactivates an operator ends its
     /// sessions, as `set_active` does; other edits leave them alone.
     #[cfg(feature = "admin")]
     #[tokio::test]
@@ -265,7 +227,7 @@ mod tests {
             .unwrap();
         assert_eq!(values.len(), 1, "{values:?}");
 
-        // An int bool (SQLite/MySQL rows) counts; an inactive row is not re-stamped (pr-1408-r2 tests-004).
+        // An int bool (SQLite/MySQL rows) counts; an inactive row is not re-stamped.
         for (was, stamps) in [
             (serde_json::json!(1), true),
             (serde_json::json!(false), false),

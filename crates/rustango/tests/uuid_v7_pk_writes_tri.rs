@@ -183,7 +183,7 @@ async fn bulk_writes_fill_the_pk(pool: &Pool) {
     assert_eq!(distinct_ids(pool).await, 3);
 }
 
-/// A caller-set id that exists clashes on the PK, not the target: no backend may update that row (#1407).
+/// A caller-set id that exists clashes on the PK, not the target: no backend may update that row.
 async fn bulk_upsert_of_a_set_existing_id_updates_no_row(pool: &Pool) {
     let mut a = item("a", 1);
     a.insert_pool(pool).await.expect("insert");
@@ -277,6 +277,119 @@ async fn pg_bulk_insert_set_pk_fills_unset_timestamps(pool: &Pool) {
     let _ = pool;
 }
 
+/// `save_pool` writes the `auto_now` stamp back into `self`; a
+/// `save_partial` that leaves it out stamps neither.
+async fn save_writes_the_auto_now_stamp_back(pool: &Pool) {
+    let mut b = Badge {
+        id: Auto::Unset,
+        name: "b".into(),
+        created_at: Auto::Unset,
+        updated_at: Auto::Unset,
+    };
+    b.insert_pool(pool).await.expect("insert");
+    let old = chrono::DateTime::from_timestamp(1_600_000_000, 0).expect("ts");
+    let id = *b.id.get().expect("id");
+    let stored = |pool: &Pool| {
+        let qs = Badge::objects().filter("id", id);
+        let pool = pool.clone();
+        async move {
+            *qs.fetch(&pool).await.expect("fetch")[0]
+                .updated_at
+                .get()
+                .expect("stored stamp")
+        }
+    };
+    // The row keeps microseconds; memory keeps the clock's nanoseconds.
+    let same = |a: chrono::DateTime<chrono::Utc>, b: chrono::DateTime<chrono::Utc>| {
+        a.timestamp_micros() == b.timestamp_micros()
+    };
+
+    b.updated_at = Auto::Set(old);
+    b.save_pool(pool).await.expect("save_pool");
+    let mem = *b.updated_at.get().expect("stamp");
+    assert_ne!(mem, old, "save_pool left the stale stamp in memory");
+    assert!(same(mem, stored(pool).await), "memory {mem} vs row");
+
+    b.updated_at = Auto::Set(old);
+    b.name = "c".into();
+    b.save_partial(&["name"], pool).await.expect("save_partial");
+    assert_eq!(
+        b.updated_at.get(),
+        Some(&old),
+        "unnamed auto_now was stamped"
+    );
+    assert!(same(mem, stored(pool).await), "the row's stamp moved");
+
+    // A refused UPDATE (unique name) and one that hits no row keep the old stamp.
+    let mut other = Badge {
+        id: Auto::Unset,
+        name: "taken".into(),
+        created_at: Auto::Unset,
+        updated_at: Auto::Unset,
+    };
+    other.insert_pool(pool).await.expect("insert other");
+    b.name = "taken".into();
+    b.save_pool(pool).await.expect_err("duplicate name");
+    assert_eq!(b.updated_at.get(), Some(&old), "a failed save stamped");
+    b.save_partial(&["name", "updated_at"], pool)
+        .await
+        .expect_err("duplicate name");
+    assert_eq!(
+        b.updated_at.get(),
+        Some(&old),
+        "a failed save_partial stamped"
+    );
+    b.name = "c".into();
+    b.delete_pool(pool).await.expect("delete");
+    assert_eq!(b.save_pool(pool).await.expect("save_pool"), 0);
+    assert_eq!(b.updated_at.get(), Some(&old), "a save of no row stamped");
+}
+
+/// `upsert` on a saved row stamps `auto_now` instead of sending the old value.
+async fn pg_upsert_stamps_auto_now(pool: &Pool) {
+    #[cfg(feature = "postgres")]
+    if let Some(pg) = pool.as_postgres() {
+        let mut b = Badge {
+            id: Auto::Unset,
+            name: "u".into(),
+            created_at: Auto::Unset,
+            updated_at: Auto::Unset,
+        };
+        b.insert_pool(pool).await.expect("insert");
+        let old = chrono::DateTime::from_timestamp(1_600_000_000, 0).expect("ts");
+        b.updated_at = Auto::Set(old);
+        b.upsert(pg).await.expect("upsert");
+        let mem = *b.updated_at.get().expect("stamp");
+        assert_ne!(mem, old, "upsert sent the stale stamp");
+        let id = *b.id.get().expect("id");
+        let row = Badge::objects()
+            .filter("id", id)
+            .fetch(pool)
+            .await
+            .expect("fetch");
+        let stored = *row[0].updated_at.get().expect("stored stamp");
+        assert_eq!(
+            stored.timestamp_micros(),
+            mem.timestamp_micros(),
+            "{stored} vs {mem}"
+        );
+
+        // A refused upsert (unique name) keeps the old stamp.
+        let mut other = Badge {
+            id: Auto::Unset,
+            name: "v".into(),
+            created_at: Auto::Unset,
+            updated_at: Auto::Unset,
+        };
+        other.insert_pool(pool).await.expect("insert other");
+        b.updated_at = Auto::Set(old);
+        b.name = "v".into();
+        b.upsert(pg).await.expect_err("duplicate name");
+        assert_eq!(b.updated_at.get(), Some(&old), "a failed upsert stamped");
+    }
+    let _ = pool;
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -288,5 +401,7 @@ tri_dialect_test! {
         pg_bulk_insert_writes_ids_back,
         db_pk_is_read_back_beside_a_rust_filled_auto,
         pg_bulk_insert_set_pk_fills_unset_timestamps,
+        save_writes_the_auto_now_stamp_back,
+        pg_upsert_stamps_auto_now,
     ],
 }

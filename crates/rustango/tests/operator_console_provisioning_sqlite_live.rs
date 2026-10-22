@@ -1302,7 +1302,7 @@ async fn a_failed_connection_check_withholds_the_driver_text() {
     }
 }
 
-/// #1344 — a run stream ends when its session does, not after 30 minutes.
+/// A run stream ends when its session does, not after 30 minutes.
 #[tokio::test]
 async fn the_stream_ends_when_the_session_does() {
     let b = boot().await;
@@ -1356,7 +1356,7 @@ async fn the_stream_ends_when_the_session_does() {
     assert!(body.contains("session ended"), "{body}");
 }
 
-/// rel-0608 — a failed session lookup skips a poll; it does not end the stream.
+/// A failed session lookup skips a poll; it does not end the stream.
 #[tokio::test]
 async fn a_registry_blip_does_not_end_the_stream() {
     use rustango::sql::raw_execute_pool;

@@ -702,7 +702,7 @@ async fn a_console_logout_that_cannot_read_fails(pool: &Pool) {
     );
 }
 
-/// #1342 — a deactivation stamps the cut-off, so reactivating the
+/// A deactivation stamps the cut-off, so reactivating the
 /// operator does not revive a cookie from before it.
 async fn deactivating_an_operator_ends_their_console_sessions(pool: &Pool) {
     use rustango::tenancy::operators::set_active;

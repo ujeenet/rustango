@@ -99,7 +99,7 @@ where
     // Drop any `?query`: the CLI clients do not take URL options.
     let body = rest.split_once('?').map_or(rest, |(b, _)| b);
     // Split auth from host on the last '@' first, so an '@' or '/' in the
-    // password does not break it (#2109).
+    // password does not break it.
     let (auth, host_db) = match body.rsplit_once('@') {
         Some((a, hd)) => (Some(a), hd),
         None => (None, body),
@@ -110,7 +110,7 @@ where
         Some((hp, _)) => (hp, None),
         None => (host_db, None),
     };
-    // Percent-decoded as sqlx does, or `p%40ss` reaches the server as is (#1310).
+    // Percent-decoded as sqlx does, or `p%40ss` reaches the server as is.
     use crate::url_codec::percent_decode_path as decode;
     let database = database.map(|db| decode(&db));
     let (user, password) = match auth {
@@ -138,7 +138,7 @@ where
 
 fn parse_sqlite_path(rest: &str) -> String {
     // As sqlx reads it: the `?query` is options, not part of the file name,
-    // and the path is percent-decoded (#1310). The leading `/` of
+    // and the path is percent-decoded. The leading `/` of
     // `sqlite:///abs/path` is part of the path and must stay.
     let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
     let in_memory = query.split('&').any(|kv| kv == "mode=memory");
@@ -153,8 +153,8 @@ fn parse_sqlite_path(rest: &str) -> String {
 /// The password never goes in `args`, because argv is readable by any
 /// user running `ps aux`. It goes in `env_vars` instead: `PGPASSWORD`
 /// for `psql`, `MYSQL_PWD` for `mysql`. SQLite has no auth, so it gets
-/// neither. The Postgres flags carry no URL options; [`run`] hands `psql`
-/// the URL instead.
+/// neither. The flags carry no URL options: [`run`] hands `psql` the URL
+/// instead and adds MySQL's options as `mysql` flags.
 #[must_use]
 pub fn command_for(target: &DbTarget) -> (&'static str, Vec<OsString>, Vec<(String, String)>) {
     match target {
@@ -256,19 +256,80 @@ pub fn run(url: &str) -> Result<std::convert::Infallible, Box<dyn std::error::Er
 }
 
 /// The client `run` starts for `url`. `psql` gets the URL itself, so libpq
-/// keeps options like `sslmode` that its flags cannot carry (#1310).
+/// keeps options like `sslmode` that its flags cannot carry.
 fn shell_command(url: &str) -> Result<(&'static str, Command), String> {
     let target = parse_target(url)?;
     if let DbTarget::Postgres { .. } = target {
         return Ok(("psql", LibpqConn::new(url.trim())?.command("psql")));
     }
-    let (program, args, env) = command_for(&target);
+    let (program, mut args, env) = command_for(&target);
+    if let DbTarget::Mysql { database, .. } = &target {
+        // Options go before the positional database name.
+        let at = args.len() - usize::from(database.is_some());
+        args.splice(at..at, mysql_option_flags(url.trim())?);
+    }
     let mut cmd = Command::new(program);
     cmd.args(&args);
     for (k, v) in &env {
         cmd.env(k, v);
     }
     Ok((program, cmd))
+}
+
+/// `mysql` flags for the URL options sqlx reads. Any other option
+/// is refused, so the shell never connects differently from the app.
+fn mysql_option_flags(url: &str) -> Result<Vec<OsString>, String> {
+    use crate::url_codec::url_decode as decode;
+    let query = url.split_once('?').map_or("", |(_, q)| q);
+    let query = query.split_once('#').map_or(query, |(q, _)| q);
+    let safe = |v: &str, extra: &str| {
+        !v.is_empty()
+            && v.chars()
+                .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
+    };
+    let mut flags: Vec<OsString> = Vec::new();
+    let mut init: Vec<String> = Vec::new();
+    for kv in query.split('&').filter(|kv| !kv.is_empty()) {
+        let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+        let (key, value) = (decode(k), decode(v));
+        let bad = |what: &str| format!("dbshell: DATABASE_URL option `{key}` {what}");
+        match key.as_str() {
+            "sslmode" | "ssl-mode" => {
+                let mode = value.to_ascii_uppercase();
+                let known = [
+                    "DISABLED",
+                    "PREFERRED",
+                    "REQUIRED",
+                    "VERIFY_CA",
+                    "VERIFY_IDENTITY",
+                ];
+                if !known.contains(&mode.as_str()) {
+                    return Err(bad("is not a MySQL ssl mode"));
+                }
+                flags.push(format!("--ssl-mode={mode}").into());
+            }
+            "sslca" | "ssl-ca" => flags.push(format!("--ssl-ca={value}").into()),
+            "sslcert" | "ssl-cert" => flags.push(format!("--ssl-cert={value}").into()),
+            "sslkey" | "ssl-key" => flags.push(format!("--ssl-key={value}").into()),
+            "charset" => flags.push(format!("--default-character-set={value}").into()),
+            "socket" => flags.push(format!("--socket={value}").into()),
+            // Session settings with no client flag; checked, as they become SQL.
+            "timezone" | "time-zone" if safe(&value, "+-:/_") => {
+                init.push(format!("time_zone = '{value}'"));
+            }
+            "collation" if safe(&value, "_") => {
+                init.push(format!("collation_connection = {value}"))
+            }
+            "timezone" | "time-zone" | "collation" => return Err(bad("has an unsafe value")),
+            // sqlx's client-side statement cache; nothing for the shell.
+            "statement-cache-capacity" => {}
+            _ => return Err(bad("has no mysql client flag; remove it to open the shell")),
+        }
+    }
+    if !init.is_empty() {
+        flags.push(format!("--init-command=SET {}", init.join(", ")).into());
+    }
+    Ok(flags)
 }
 
 /// A libpq connection: the URL for argv, the password for `PGPASSWORD`,
@@ -366,7 +427,7 @@ mod tests {
         assert!(!argv.iter().any(|a| a.to_string_lossy().contains("pw")));
     }
 
-    /// pr-1408-r2 security-001/002: an `@` after a raw `?`/`#` could be
+    /// An `@` after a raw `?`/`#` could be
     /// userinfo or a query value, so it is refused, never guessed.
     #[test]
     fn conn_refuses_an_at_after_a_query_or_fragment() {
@@ -384,7 +445,7 @@ mod tests {
         assert_eq!(c.password.as_deref(), Some("pa#ss"));
     }
 
-    /// #1310 — sqlite3 opens the file sqlx opens, not `app.db?mode=rwc`.
+    /// sqlite3 opens the file sqlx opens, not `app.db?mode=rwc`.
     #[test]
     fn sqlite_path_drops_the_query_and_decodes() {
         let path = |url| match parse_target(url).unwrap() {
@@ -397,7 +458,7 @@ mod tests {
         assert_eq!(path("sqlite://?mode=memory"), ":memory:");
     }
 
-    /// #1310 — credentials reach the client decoded, as sqlx sends them.
+    /// Credentials reach the client decoded, as sqlx sends them.
     #[test]
     fn credentials_are_percent_decoded() {
         assert_eq!(
@@ -418,7 +479,7 @@ mod tests {
         assert_eq!(password.as_deref(), Some("p/w"));
     }
 
-    /// #1310 — psql gets the URL, so `sslmode` survives and the password
+    /// psql gets the URL, so `sslmode` survives and the password
     /// is decoded into `PGPASSWORD`, not argv.
     #[test]
     fn psql_keeps_url_options() {
@@ -438,6 +499,57 @@ mod tests {
             .find(|(k, _)| *k == "PGPASSWORD")
             .and_then(|(_, v)| v);
         assert_eq!(pw.and_then(|v| v.to_str()), Some("p@ss"));
+    }
+
+    fn argv(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// sqlx's MySQL URL options reach the `mysql` client as flags.
+    #[test]
+    fn mysql_keeps_url_options() {
+        let (prog, cmd) = shell_command(
+            "mysql://al:pw@h:3307/app?ssl-mode=verify_identity&sslca=/etc/my%20ca.pem\
+             &ssl-cert=/c.pem&sslkey=/k.pem&charset=utf8mb4&socket=/tmp/m.sock\
+             &timezone=%2B02:00&collation=utf8mb4_bin&statement-cache-capacity=10",
+        )
+        .unwrap();
+        assert_eq!(prog, "mysql");
+        assert_eq!(
+            argv(&cmd),
+            [
+                "-h",
+                "h",
+                "-P",
+                "3307",
+                "-u",
+                "al",
+                "--ssl-mode=VERIFY_IDENTITY",
+                "--ssl-ca=/etc/my ca.pem",
+                "--ssl-cert=/c.pem",
+                "--ssl-key=/k.pem",
+                "--default-character-set=utf8mb4",
+                "--socket=/tmp/m.sock",
+                "--init-command=SET time_zone = '+02:00', collation_connection = utf8mb4_bin",
+                "app",
+            ]
+        );
+    }
+
+    /// An option the client cannot honour is refused, not dropped.
+    #[test]
+    fn mysql_refuses_unknown_or_unsafe_options() {
+        for (url, needle) in [
+            ("mysql://h/app?pool_size=5", "pool_size"),
+            ("mysql://h/app?ssl-mode=sometimes", "ssl-mode"),
+            ("mysql://h/app?timezone=x'%3B%20DROP", "timezone"),
+            ("mysql://h/app?collation=utf8%20x", "collation"),
+        ] {
+            let err = shell_command(url).map(|_| ()).unwrap_err();
+            assert!(err.contains(needle), "{url}: {err}");
+        }
     }
 
     #[test]
@@ -512,8 +624,7 @@ mod tests {
 
     #[test]
     fn parse_mysql_strips_query_string() {
-        // sqlx options like `?ssl-mode=REQUIRED` mean nothing to the
-        // mysql CLI, so they are dropped.
+        // `shell_command` turns `?ssl-mode=…` into client flags.
         assert_eq!(
             parse_target("mysql://localhost/db?ssl-mode=REQUIRED").unwrap(),
             DbTarget::Mysql {

@@ -211,7 +211,8 @@ fn write_header<W: Write>(
 pub(super) struct ColumnRow {
     pub name: String,
     /// The backend's own type token: `udt_name` on PG, `data_type`
-    /// on MySQL, the declared type on SQLite.
+    /// (or `bool` / `<type> unsigned` from `column_type`) on MySQL, the
+    /// declared type on SQLite.
     ///
     /// SQLite returns the declaration verbatim, such as
     /// `VARCHAR(80)`, so match it case-insensitively and strip the
@@ -219,6 +220,7 @@ pub(super) struct ColumnRow {
     pub udt_name: String,
     pub nullable: bool,
     pub max_length: Option<i32>,
+    /// The default as a SQL expression, PG casts included.
     pub default: Option<String>,
     /// `true` when the column auto-increments. Each backend signals
     /// this differently: `is_identity` or `nextval(...)` on PG,
@@ -235,7 +237,7 @@ pub(super) struct ColumnRow {
     not(any(feature = "postgres", feature = "mysql")),
     allow(unused_variables)
 )]
-async fn list_tables(
+pub(super) async fn list_tables(
     pool: &Pool,
     schema: &str,
     only: Option<&str>,
@@ -273,7 +275,7 @@ pub(super) async fn list_columns(
     not(any(feature = "postgres", feature = "mysql")),
     allow(unused_variables)
 )]
-async fn list_pk_columns(
+pub(super) async fn list_pk_columns(
     pool: &Pool,
     schema: &str,
     table: &str,
@@ -530,15 +532,16 @@ async fn list_pk_columns_pg(
     table: &str,
 ) -> Result<Vec<String>, MigrateError> {
     use sqlx::Row as _;
+    // pg_catalog: information_schema hides constraints from a SELECT-only role.
     let rows = sqlx::query(
-        r#"SELECT kcu.column_name
-           FROM information_schema.table_constraints tc
-           JOIN information_schema.key_column_usage kcu
-             ON tc.constraint_name = kcu.constraint_name
-            AND tc.table_schema = kcu.table_schema
-           WHERE tc.constraint_type = 'PRIMARY KEY'
-             AND tc.table_schema = $1 AND tc.table_name = $2
-           ORDER BY kcu.ordinal_position"#,
+        r#"SELECT a.attname::text AS column_name
+           FROM pg_index x
+           JOIN pg_class t ON t.oid = x.indrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+           CROSS JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord)
+           JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+           WHERE x.indisprimary AND n.nspname = $1 AND t.relname = $2
+           ORDER BY k.ord"#,
     )
     .bind(schema)
     .bind(table)
@@ -694,6 +697,7 @@ async fn list_columns_my(
     let sql = if use_default {
         r#"SELECT CAST(COLUMN_NAME AS CHAR)    AS COLUMN_NAME,
                   CAST(DATA_TYPE AS CHAR)      AS DATA_TYPE,
+                  CAST(COLUMN_TYPE AS CHAR)    AS COLUMN_TYPE,
                   CAST(IS_NULLABLE AS CHAR)    AS IS_NULLABLE,
                   CHARACTER_MAXIMUM_LENGTH,
                   CAST(COLUMN_DEFAULT AS CHAR) AS COLUMN_DEFAULT,
@@ -704,6 +708,7 @@ async fn list_columns_my(
     } else {
         r#"SELECT CAST(COLUMN_NAME AS CHAR)    AS COLUMN_NAME,
                   CAST(DATA_TYPE AS CHAR)      AS DATA_TYPE,
+                  CAST(COLUMN_TYPE AS CHAR)    AS COLUMN_TYPE,
                   CAST(IS_NULLABLE AS CHAR)    AS IS_NULLABLE,
                   CHARACTER_MAXIMUM_LENGTH,
                   CAST(COLUMN_DEFAULT AS CHAR) AS COLUMN_DEFAULT,
@@ -722,6 +727,7 @@ async fn list_columns_my(
     for r in rows {
         let name: String = r.try_get("COLUMN_NAME").unwrap_or_default();
         let data_type: String = r.try_get("DATA_TYPE").unwrap_or_default();
+        let column_type: String = r.try_get("COLUMN_TYPE").unwrap_or_default();
         let nullable: String = r.try_get("IS_NULLABLE").unwrap_or_else(|_| "NO".into());
         // `CHARACTER_MAXIMUM_LENGTH` is u64, so read it as i64 and
         // narrow. Real column lengths fit easily.
@@ -733,9 +739,10 @@ async fn list_columns_my(
         let default: Option<String> = r.try_get("COLUMN_DEFAULT").ok().flatten();
         let extra: String = r.try_get("EXTRA").unwrap_or_default();
         let is_auto = extra.eq_ignore_ascii_case("auto_increment");
+        let default = default.map(|d| mysql_default_sql(&d, &data_type, &extra));
         out.push(ColumnRow {
             name,
-            udt_name: data_type,
+            udt_name: mysql_udt(&data_type, &column_type),
             nullable: nullable.eq_ignore_ascii_case("YES"),
             max_length,
             default,
@@ -1127,14 +1134,68 @@ pub(super) fn pg_type_to_rust(udt_name: &str) -> (&'static str, Option<&'static 
     }
 }
 
-/// Map a MySQL `data_type` to a `(rust_type, notes)` tuple.
+/// The MySQL type token [`mysql_type_to_rust`] maps: `bool` for
+/// `tinyint(1)`, `<type> unsigned` for an unsigned integer.
+#[cfg(any(feature = "mysql", test))]
+fn mysql_udt(data_type: &str, column_type: &str) -> String {
+    let column_type = column_type.to_ascii_lowercase();
+    if column_type.starts_with("tinyint(1)") {
+        "bool".to_owned()
+    } else if column_type.contains("unsigned") {
+        format!("{data_type} unsigned")
+    } else {
+        data_type.to_owned()
+    }
+}
+
+/// A MySQL `COLUMN_DEFAULT` as SQL. MySQL reports a literal unquoted
+/// (`pending`) and an expression bare (`uuid()`), which DDL needs in parens.
+#[cfg(any(feature = "mysql", test))]
+fn mysql_default_sql(default: &str, data_type: &str, extra: &str) -> String {
+    let numeric = matches!(
+        data_type.to_ascii_lowercase().as_str(),
+        "tinyint"
+            | "smallint"
+            | "mediumint"
+            | "int"
+            | "integer"
+            | "bigint"
+            | "decimal"
+            | "numeric"
+            | "float"
+            | "double"
+            | "real"
+    );
+    if extra.to_ascii_uppercase().contains("DEFAULT_GENERATED") {
+        if default
+            .to_ascii_uppercase()
+            .starts_with("CURRENT_TIMESTAMP")
+        {
+            default.to_owned()
+        } else {
+            format!("({default})")
+        }
+    } else if numeric {
+        default.to_owned()
+    } else {
+        format!("'{}'", default.replace('\\', "\\\\").replace('\'', "''"))
+    }
+}
+
+/// Map a MySQL type token (see [`mysql_udt`]) to a `(rust_type, notes)` tuple.
 pub(super) fn mysql_type_to_rust(data_type: &str) -> (&'static str, Option<&'static str>) {
+    const UNSIGNED: &str = "// TODO: unsigned column mapped to a signed type; sqlx decodes \
+                            it only into an unsigned one, which rustango lacks";
     let t = data_type.to_ascii_lowercase();
     match t.as_str() {
-        "tinyint" | "bool" | "boolean" => ("bool", None),
-        "smallint" => ("i16", None),
+        "bool" | "boolean" => ("bool", None),
+        "tinyint" | "smallint" => ("i16", None),
         "mediumint" | "int" | "integer" => ("i32", None),
         "bigint" => ("i64", None),
+        "tinyint unsigned" | "smallint unsigned" => ("i32", Some(UNSIGNED)),
+        "mediumint unsigned" | "int unsigned" | "integer unsigned" | "bigint unsigned" => {
+            ("i64", Some(UNSIGNED))
+        }
         "float" => ("f32", None),
         "double" | "real" => ("f64", None),
         "decimal" | "numeric" => (
@@ -1150,6 +1211,8 @@ pub(super) fn mysql_type_to_rust(data_type: &str) -> (&'static str, Option<&'sta
             "Vec<u8>",
             Some("// TODO: binary types are not first-class rustango FieldType yet"),
         ),
+        // A deprecated unsigned `decimal` / `double` maps as the signed type.
+        _ if t.ends_with(" unsigned") => mysql_type_to_rust(t.trim_end_matches(" unsigned")),
         _ => (
             "String",
             Some(
@@ -1222,12 +1285,13 @@ fn dialect_type_to_rust(dialect: &str, udt: &str) -> (&'static str, Option<&'sta
 // Emit
 // ====================================================================
 
-/// PascalCase the table name into a Rust type identifier.
+/// PascalCase the table name into a Rust type identifier; any character
+/// an identifier cannot hold starts a new word.
 pub(super) fn table_to_struct_name(table: &str) -> String {
     let mut out = String::with_capacity(table.len());
     let mut next_upper = true;
     for c in table.chars() {
-        if c == '_' || c == '-' || c == ' ' {
+        if !c.is_alphanumeric() {
             next_upper = true;
             continue;
         }
@@ -1240,8 +1304,59 @@ pub(super) fn table_to_struct_name(table: &str) -> String {
     }
     if out.is_empty() {
         out.push_str("Unnamed");
+    } else if out.starts_with(|c: char| c.is_ascii_digit()) {
+        out.insert(0, 'T');
+    } else if matches!(out.as_str(), "Self" | "Model" | "Auto") {
+        // `Model` / `Auto` would shadow the header's imports.
+        out.push('_');
     }
     out
+}
+
+/// A field name per column; one that `sanitize_field_name` gave an
+/// earlier column takes the first free `_N` suffix.
+fn field_names(columns: &[ColumnRow]) -> Vec<String> {
+    let mut used = std::collections::HashSet::new();
+    columns
+        .iter()
+        .map(|col| {
+            let base = sanitize_field_name(&col.name);
+            let mut name = base.clone();
+            let mut n = 2;
+            while !used.insert(name.clone()) {
+                name = format!("{}_{n}", base.trim_start_matches("r#"));
+                n += 1;
+            }
+            name
+        })
+        .collect()
+}
+
+/// `s` as a Rust string literal, for the attribute values inspectdb writes.
+fn rust_str(s: &str) -> String {
+    format!("{s:?}")
+}
+
+/// `default` minus the casts PostgreSQL appends (`'{}'::jsonb`), cut only
+/// outside quotes and parentheses so `'a::b'` survives.
+fn strip_pg_cast(default: &str) -> &str {
+    let (mut depth, mut quoted, mut cut) = (0_i32, false, None);
+    let bytes = default.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => quoted = !quoted,
+            b'(' if !quoted => depth += 1,
+            b')' if !quoted => depth -= 1,
+            b':' if !quoted && depth == 0 && bytes.get(i + 1) == Some(&b':') => {
+                cut.get_or_insert(i);
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    default[..cut.unwrap_or(default.len())].trim()
 }
 
 /// Emit one `#[derive(Model)]` block for a table.
@@ -1272,7 +1387,9 @@ fn write_view_model_with_dialect<W: Write>(
     dialect: &str,
 ) -> std::io::Result<()> {
     let struct_name = table_to_struct_name(view);
-    writeln!(w, "/// Auto-emitted from view `{view}` by `inspectdb`.")?;
+    // A quoted identifier may hold a newline, which would end the comment.
+    let view_doc = escape_for_comment(view);
+    writeln!(w, "/// Auto-emitted from view `{view_doc}` by `inspectdb`.")?;
     writeln!(w, "///")?;
     writeln!(
         w,
@@ -1294,10 +1411,10 @@ fn write_view_model_with_dialect<W: Write>(
         }
     }
     writeln!(w, "#[derive(Model, Debug, Clone)]")?;
-    writeln!(w, r#"#[rustango(table = "{view}", view)]"#)?;
+    writeln!(w, "#[rustango(table = {}, view)]", rust_str(view))?;
     writeln!(w, "pub struct {struct_name} {{")?;
-    for col in columns {
-        emit_field(w, col, None, &[], dialect)?;
+    for (col, name) in columns.iter().zip(field_names(columns)) {
+        emit_field_as(w, col, &name, None, &[], dialect)?;
     }
     writeln!(w, "}}")?;
     Ok(())
@@ -1312,28 +1429,52 @@ fn write_model_with_dialect<W: Write>(
     dialect: &str,
 ) -> std::io::Result<()> {
     let struct_name = table_to_struct_name(table);
-    writeln!(w, "/// Auto-emitted from `{table}` by `inspectdb`.")?;
+    writeln!(
+        w,
+        "/// Auto-emitted from `{}` by `inspectdb`.",
+        escape_for_comment(table)
+    )?;
     if pk_columns.len() > 1 {
         writeln!(
             w,
             "/// NOTE: composite primary key — `inspectdb` picked `{}`. Adjust as needed.",
-            pk_columns.first().map(String::as_str).unwrap_or("(none)")
+            escape_for_comment(pk_columns.first().map(String::as_str).unwrap_or("(none)"))
         )?;
     }
     writeln!(w, "#[derive(Model, Debug, Clone)]")?;
-    writeln!(w, r#"#[rustango(table = "{table}")]"#)?;
+    writeln!(w, "#[rustango(table = {})]", rust_str(table))?;
     writeln!(w, "pub struct {struct_name} {{")?;
     let pk_first = pk_columns.first().cloned();
-    for col in columns {
-        emit_field(w, col, pk_first.as_deref(), fks, dialect)?;
+    for (col, name) in columns.iter().zip(field_names(columns)) {
+        emit_field_as(w, col, &name, pk_first.as_deref(), fks, dialect)?;
     }
     writeln!(w, "}}")?;
     Ok(())
 }
 
+/// [`emit_field_as`] under the column's own sanitized name.
+#[cfg(test)]
 fn emit_field<W: Write>(
     w: &mut W,
     col: &ColumnRow,
+    pk_column: Option<&str>,
+    fks: &[(String, String)],
+    dialect: &str,
+) -> std::io::Result<()> {
+    emit_field_as(
+        w,
+        col,
+        &sanitize_field_name(&col.name),
+        pk_column,
+        fks,
+        dialect,
+    )
+}
+
+fn emit_field_as<W: Write>(
+    w: &mut W,
+    col: &ColumnRow,
+    field_name: &str,
     pk_column: Option<&str>,
     fks: &[(String, String)],
     dialect: &str,
@@ -1346,11 +1487,14 @@ fn emit_field<W: Write>(
         .map(|(_, target)| target.as_str());
 
     let mut attrs: Vec<String> = Vec::new();
+    if field_name.trim_start_matches("r#") != col.name {
+        attrs.push(format!("column = {}", rust_str(&col.name)));
+    }
     if is_pk {
         attrs.push("primary_key".into());
     }
     if let Some(target) = fk_target {
-        attrs.push(format!(r#"fk = "{target}""#));
+        attrs.push(format!("fk = {}", rust_str(target)));
     }
     if let Some(max) = col.max_length {
         let lower = col.udt_name.to_ascii_lowercase();
@@ -1360,10 +1504,9 @@ fn emit_field<W: Write>(
     }
     if !col.is_auto {
         if let Some(default) = &col.default {
-            // Strip the typecast suffix Postgres adds (`'pending'::varchar`).
-            let cleaned = default.split("::").next().unwrap_or(default).trim();
+            let cleaned = strip_pg_cast(default);
             if !cleaned.is_empty() {
-                attrs.push(format!(r#"default = "{cleaned}""#));
+                attrs.push(format!("default = {}", rust_str(cleaned)));
             }
         }
     }
@@ -1382,27 +1525,49 @@ fn emit_field<W: Write>(
     if !attrs.is_empty() {
         writeln!(w, "    #[rustango({})]", attrs.join(", "))?;
     }
-    writeln!(w, "    pub {}: {final_ty},", sanitize_field_name(&col.name))?;
+    writeln!(w, "    pub {field_name}: {final_ty},")?;
     Ok(())
 }
 
+/// A field identifier for column `name`: lower-cased, other characters
+/// as `_`, a leading digit prefixed; `emit_field` adds `column = ".."`
+/// when it differs. The derive refuses a column like `Order-Date`
+/// there, naming it, instead of failing to parse the field.
 fn sanitize_field_name(name: &str) -> String {
     const RUST_KEYWORDS: &[&str] = &[
-        "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
-        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
-        "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
-        "use", "where", "while", "async", "await", "dyn", "abstract", "become", "box", "do",
-        "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
+        "as", "break", "const", "continue", "else", "enum", "extern", "false", "fn", "for", "if",
+        "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+        "static", "struct", "trait", "true", "type", "unsafe", "use", "where", "while", "async",
+        "await", "dyn", "abstract", "become", "box", "do", "final", "macro", "override", "priv",
+        "typeof", "unsized", "virtual", "yield", "try",
     ];
-    if RUST_KEYWORDS.iter().any(|k| *k == name) {
-        format!("r#{name}")
-    } else {
-        name.to_owned()
+    let mut s: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.chars().all(|c| c == '_') {
+        s.push_str("field");
     }
+    if s.starts_with(|c: char| c.is_ascii_digit()) {
+        s.insert(0, '_');
+    }
+    if matches!(s.as_str(), "self" | "super" | "crate") {
+        // No raw form exists for these.
+        s.push('_');
+    } else if RUST_KEYWORDS.contains(&s.as_str()) {
+        s.insert_str(0, "r#");
+    }
+    s
 }
 
 fn escape_for_comment(s: &str) -> String {
-    s.replace('\n', " ").replace("*/", "* /")
+    s.replace(['\n', '\r'], " ").replace("*/", "* /")
 }
 
 #[cfg(test)]
@@ -1519,7 +1684,75 @@ mod tests {
             "chrono::DateTime<chrono::Utc>"
         );
         assert_eq!(mysql_type_to_rust("BOOLEAN").0, "bool");
-        assert_eq!(mysql_type_to_rust("tinyint").0, "bool");
+        assert_eq!(mysql_type_to_rust("tinyint").0, "i16");
+    }
+
+    /// Only `tinyint(1)` is a bool; unsigned ints widen.
+    #[test]
+    fn mysql_column_type_picks_bool_and_unsigned() {
+        let ty = |d: &str, c: &str| mysql_type_to_rust(&mysql_udt(d, c));
+        assert_eq!(ty("tinyint", "tinyint(1)").0, "bool");
+        assert_eq!(ty("tinyint", "tinyint").0, "i16");
+        assert_eq!(
+            ty("int", "int unsigned"),
+            ("i64", ty("int", "int unsigned").1)
+        );
+        assert!(
+            ty("int", "int unsigned").1.is_some(),
+            "unsigned carries a TODO"
+        );
+        assert_eq!(ty("smallint", "smallint unsigned").0, "i32");
+        assert_eq!(ty("int", "int").0, "i32");
+        assert_eq!(ty("double", "double unsigned").0, "f64");
+    }
+
+    /// MySQL literals are quoted, expressions parenthesised.
+    #[test]
+    fn mysql_default_becomes_sql() {
+        assert_eq!(mysql_default_sql("pending", "varchar", ""), "'pending'");
+        assert_eq!(mysql_default_sql(r"it's \x", "varchar", ""), r"'it''s \\x'");
+        assert_eq!(mysql_default_sql("0", "tinyint", ""), "0");
+        assert_eq!(
+            mysql_default_sql("uuid()", "char", "DEFAULT_GENERATED"),
+            "(uuid())"
+        );
+        assert_eq!(
+            mysql_default_sql("CURRENT_TIMESTAMP", "datetime", "DEFAULT_GENERATED"),
+            "CURRENT_TIMESTAMP"
+        );
+    }
+
+    /// Only a top-level PG cast is cut.
+    #[test]
+    fn strip_pg_cast_keeps_quoted_and_nested_colons() {
+        assert_eq!(strip_pg_cast(r#"'{"a":1}'::jsonb"#), r#"'{"a":1}'"#);
+        assert_eq!(strip_pg_cast("'a::b'::text"), "'a::b'");
+        assert_eq!(strip_pg_cast("'it''s'::character varying"), "'it''s'");
+        assert_eq!(
+            strip_pg_cast("(now() + '1 day'::interval)"),
+            "(now() + '1 day'::interval)"
+        );
+        assert_eq!(strip_pg_cast("now()"), "now()");
+    }
+
+    /// Attribute values are Rust literals, so quotes cannot end them.
+    #[test]
+    fn emit_field_escapes_default_for_rust() {
+        let mut buf: Vec<u8> = Vec::new();
+        let col = ColumnRow {
+            name: "meta".into(),
+            udt_name: "jsonb".into(),
+            nullable: false,
+            max_length: None,
+            default: Some(r#"'{"a":"\"}'::jsonb"#.into()),
+            is_auto: false,
+        };
+        emit_field(&mut buf, &col, None, &[], "postgres").unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains(r#"default = "'{\"a\":\"\\\"}'""#),
+            "got: {out}"
+        );
     }
 
     #[test]
@@ -1548,11 +1781,49 @@ mod tests {
     }
 
     #[test]
+    fn field_names_never_repeat() {
+        let col = |name: &str| ColumnRow {
+            name: name.into(),
+            udt_name: "text".into(),
+            nullable: false,
+            max_length: None,
+            default: None,
+            is_auto: false,
+        };
+        let cols = [
+            col("Name"),
+            col("name"),
+            col("name_2"),
+            col("type"),
+            col("TYPE"),
+        ];
+        let mut buf: Vec<u8> = Vec::new();
+        write_model(&mut buf, "people", &cols, &[], &[]).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        let fields: Vec<&str> = out
+            .lines()
+            .filter_map(|l| l.strip_prefix("    pub ")?.split(':').next())
+            .collect();
+        assert_eq!(
+            fields,
+            ["name", "name_2", "name_2_2", "r#type", "type_2"],
+            "{out}"
+        );
+        assert!(out.contains(r#"column = "TYPE""#), "{out}");
+    }
+
+    #[test]
     fn table_to_struct_name_pascalcases() {
         assert_eq!(table_to_struct_name("user"), "User");
         assert_eq!(table_to_struct_name("user_profile"), "UserProfile");
         assert_eq!(table_to_struct_name("audit_log_entry"), "AuditLogEntry");
         assert_eq!(table_to_struct_name(""), "Unnamed");
+        assert_eq!(table_to_struct_name("Order-Items"), "OrderItems");
+        assert_eq!(table_to_struct_name("order.items$2"), "OrderItems2");
+        assert_eq!(table_to_struct_name("2fa_codes"), "T2faCodes");
+        assert_eq!(table_to_struct_name("self"), "Self_");
+        assert_eq!(table_to_struct_name("model"), "Model_");
+        assert_eq!(table_to_struct_name("auto"), "Auto_");
     }
 
     #[test]
@@ -1560,6 +1831,17 @@ mod tests {
         assert_eq!(sanitize_field_name("type"), "r#type");
         assert_eq!(sanitize_field_name("match"), "r#match");
         assert_eq!(sanitize_field_name("normal"), "normal");
+    }
+
+    /// Any column name becomes an identifier.
+    #[test]
+    fn sanitize_field_name_makes_identifiers() {
+        assert_eq!(sanitize_field_name("Order-Date"), "order_date");
+        assert_eq!(sanitize_field_name("2fa_code"), "_2fa_code");
+        assert_eq!(sanitize_field_name("self"), "self_");
+        assert_eq!(sanitize_field_name("Self"), "self_");
+        assert_eq!(sanitize_field_name("-"), "_field");
+        assert_eq!(sanitize_field_name("Type"), "r#type");
     }
 
     #[test]
@@ -1655,6 +1937,30 @@ mod tests {
             "expected composite-PK warning, got: {out}"
         );
         assert!(out.contains("pub struct UserRoles"));
+    }
+
+    /// A newline in a table, PK or view name cannot end the `///` line.
+    #[test]
+    fn doc_comments_escape_identifier_newlines() {
+        let col = |name: &str| ColumnRow {
+            name: name.into(),
+            udt_name: "int8".into(),
+            nullable: false,
+            max_length: None,
+            default: None,
+            is_auto: false,
+        };
+        let evil = "t\npub fn injected() {}\r\n//";
+        let pk = vec![evil.to_owned(), "b".to_owned()];
+        let mut buf: Vec<u8> = Vec::new();
+        write_model(&mut buf, evil, &[col("a"), col("b")], &pk, &[]).unwrap();
+        write_view_model_with_dialect(&mut buf, evil, &[col("a")], None, "postgres").unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            !out.lines().any(|l| l.starts_with("pub fn injected")),
+            "{out}"
+        );
+        assert!(!out.contains('\r'), "{out}");
     }
 
     #[test]

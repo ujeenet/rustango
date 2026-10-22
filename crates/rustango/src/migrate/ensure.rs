@@ -82,11 +82,21 @@ pub(crate) fn is_already_exists(e: &crate::sql::ExecError, dialect: &str, stmt: 
 /// 165 -> 568 us, to silence a log line MySQL never wrote.
 ///
 /// `ALTER TABLE … ADD COLUMN` gets `IF NOT EXISTS` the same way.
-/// `ADD CONSTRAINT` is left alone everywhere: no backend has
-/// `IF NOT EXISTS` for it, so those still rely on [`is_already_exists`].
+/// `ADD CONSTRAINT` has no `IF NOT EXISTS`, so PG runs it in a `DO` block
+/// that catches the duplicate, which logs nothing. A statement
+/// holding the tag runs bare, and the client-side check catches it.
 fn idempotent<'a>(stmt: &'a str, dialect: &str) -> std::borrow::Cow<'a, str> {
     if dialect != "postgres" {
         return std::borrow::Cow::Borrowed(stmt);
+    }
+    if stmt.starts_with("ALTER TABLE ")
+        && stmt.contains(" ADD CONSTRAINT ")
+        && !stmt.contains("$rustango$")
+    {
+        return std::borrow::Cow::Owned(format!(
+            "DO $rustango$ BEGIN {stmt}; \
+             EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $rustango$"
+        ));
     }
     if let Some(rest) = stmt.strip_prefix("CREATE TABLE ") {
         if !rest.starts_with("IF NOT EXISTS") {
@@ -116,6 +126,25 @@ pub(crate) async fn apply_idempotent(
 ) -> Result<(), sqlx::Error> {
     let changes = super::detect_changes(&super::SchemaSnapshot::default(), snapshot);
     apply_changes_idempotent(pool, snapshot, &changes).await
+}
+
+/// The statements [`apply_idempotent`] runs for `snapshot`, guards
+/// included, FK targets unqualified, for a `--dry-run`.
+///
+/// # Errors
+/// A render failure.
+pub(crate) fn idempotent_ddl(
+    snapshot: &super::SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Result<Vec<String>, String> {
+    let changes = super::detect_changes(&super::SchemaSnapshot::default(), snapshot);
+    let batch = super::diff::render_changes_split_in_schema(&changes, snapshot, dialect, None)?;
+    Ok(batch
+        .immediate
+        .iter()
+        .chain(&batch.deferred_fks)
+        .map(|s| idempotent(s, dialect.name()).into_owned())
+        .collect())
 }
 
 /// Add each `(table, column)` of `snapshot` that a table created by an
@@ -236,49 +265,13 @@ pub(crate) async fn converge_groups(
     };
     let mut failed = Vec::new();
     let mut fks = Vec::new();
-    for group in groups {
-        let label = match group.first() {
-            Some(SC::AddColumn { table, column }) => format!("column `{table}.{column}`"),
-            Some(SC::CreateTable(t) | SC::CreateM2MTable { through: t, .. }) => {
-                format!("table `{t}`")
-            }
-            Some(SC::CreateIndex { name, .. }) => format!("index `{name}`"),
-            Some(SC::AlterFkOnDelete { table, column, .. }) => {
-                format!("foreign key `{table}.{column}`")
-            }
-            Some(SC::AddCompositeFk { table, name, .. }) => format!("foreign key `{table}.{name}`"),
-            _ => continue,
-        };
-        let mut no_rows = false;
-        if let Some(SC::AddColumn { table, column }) = group.first() {
-            let f = snapshot.table(table).and_then(|t| t.field(column));
-            if f.is_some_and(|f| !f.nullable && f.default.is_none() && !f.primary_key) {
-                // An empty table has no rows to fill (#2066).
-                no_rows = is_empty(pool, table).await?;
-                if !no_rows {
-                    failed.push(format!(
-                        "{label}: NOT NULL with no default, so rows have no value"
-                    ));
-                    continue;
-                }
-            }
-        }
-        let rendered = if no_rows {
-            super::diff::render_changes_split_for_empty(
-                group,
-                snapshot,
-                pool.dialect(),
-                schema.as_deref(),
-            )
-        } else {
-            render(group, snapshot)
-        };
-        let batch = match rendered {
-            // Only the runner can rebuild a table; say so rather than skip it.
-            Ok(b) if b.rebuild.is_some() => {
-                failed.push(format!("{label}: needs a table rebuild"));
-                continue;
-            }
+    for Planned {
+        label,
+        group,
+        batch,
+    } in plan_groups(pool, snapshot, groups, schema.as_deref()).await?
+    {
+        let batch = match batch {
             Ok(b) => b,
             Err(e) => {
                 failed.push(format!("{label}: {e}"));
@@ -305,6 +298,75 @@ pub(crate) async fn converge_groups(
         }
     }
     Ok(failed)
+}
+
+/// One group [`converge_groups`] runs: its SQL, or why `migrate` refuses it.
+pub(crate) struct Planned<'g> {
+    pub(crate) label: String,
+    group: &'g [super::SchemaChange],
+    pub(crate) batch: Result<super::diff::RenderedBatch, String>,
+}
+
+/// How [`converge_groups`] renders `groups` into `schema`; reads only, so a
+/// `--dry-run` prints the same plan.
+///
+/// # Errors
+/// Only the row probe for a NOT NULL column.
+pub(crate) async fn plan_groups<'g>(
+    pool: &Pool,
+    snapshot: &super::SchemaSnapshot,
+    groups: &'g [Vec<super::SchemaChange>],
+    schema: Option<&str>,
+) -> Result<Vec<Planned<'g>>, sqlx::Error> {
+    use super::SchemaChange as SC;
+    let mut out = Vec::new();
+    for group in groups {
+        let label = match group.first() {
+            Some(SC::AddColumn { table, column }) => format!("column `{table}.{column}`"),
+            Some(SC::CreateTable(t) | SC::CreateM2MTable { through: t, .. }) => {
+                format!("table `{t}`")
+            }
+            Some(SC::CreateIndex { name, .. }) => format!("index `{name}`"),
+            Some(SC::AlterFkOnDelete { table, column, .. }) => {
+                format!("foreign key `{table}.{column}`")
+            }
+            Some(SC::AddCompositeFk { table, name, .. }) => format!("foreign key `{table}.{name}`"),
+            _ => continue,
+        };
+        let mut no_rows = false;
+        if let Some(SC::AddColumn { table, column }) = group.first() {
+            let f = snapshot.table(table).and_then(|t| t.field(column));
+            if f.is_some_and(|f| !f.nullable && f.default.is_none() && !f.primary_key) {
+                // An empty table has no rows to fill (#2066).
+                no_rows = is_empty(pool, table).await?;
+                if !no_rows {
+                    let batch = Err("NOT NULL with no default, so rows have no value".to_owned());
+                    out.push(Planned {
+                        label,
+                        group,
+                        batch,
+                    });
+                    continue;
+                }
+            }
+        }
+        let render = if no_rows {
+            super::diff::render_changes_split_for_empty
+        } else {
+            super::diff::render_changes_split_in_schema
+        };
+        let batch = match render(group, snapshot, pool.dialect(), schema) {
+            // Only the runner can rebuild a table; say so rather than skip it.
+            Ok(b) if b.rebuild.is_some() => Err("needs a table rebuild".to_owned()),
+            r => r,
+        };
+        out.push(Planned {
+            label,
+            group,
+            batch,
+        });
+    }
+    Ok(out)
 }
 
 /// Whether `table` has no rows.
@@ -461,13 +523,52 @@ mod tests {
 
     #[test]
     fn non_create_table_statements_are_untouched() {
-        // No backend has `ADD CONSTRAINT IF NOT EXISTS`, so this one
-        // still reaches the server and still relies on the code check.
+        // PG catches a duplicate constraint in a `DO` block; the others
+        // still rely on the code check.
         let s =
             r#"ALTER TABLE "a" ADD CONSTRAINT "a_b_fkey" FOREIGN KEY ("b") REFERENCES "b" ("id")"#;
-        assert_eq!(idempotent(s, "postgres"), s);
+        let wrapped = idempotent(s, "postgres");
+        assert!(
+            wrapped.starts_with("DO $rustango$ BEGIN ALTER TABLE"),
+            "{wrapped}"
+        );
+        // Exactly the duplicate codes: a broader catch hides real failures.
+        assert!(
+            wrapped.ends_with(
+                "EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $rustango$"
+            ),
+            "{wrapped}"
+        );
+        assert_eq!(idempotent(s, "mysql"), s);
         let idx = r#"CREATE UNIQUE INDEX "i" ON "t" ("a")"#;
         assert_eq!(idempotent(idx, "postgres"), idx);
+    }
+
+    /// A statement holding the tag would end the `DO` body early.
+    #[test]
+    fn a_statement_holding_the_do_tag_runs_bare() {
+        let s = r#"ALTER TABLE "a" ADD CONSTRAINT "ck" CHECK ("b" <> '$rustango$')"#;
+        assert_eq!(idempotent(s, "postgres"), s);
+    }
+
+    /// The dry-run prints the statements as they run, guards included.
+    #[test]
+    fn dry_run_ddl_is_the_rewritten_ddl() {
+        use crate::core::Model as _;
+        let snapshot = crate::migrate::SchemaSnapshot::from_models(&[
+            crate::contenttypes::ContentType::SCHEMA,
+        ]);
+        let ddl = super::idempotent_ddl(&snapshot, &crate::sql::Postgres).unwrap();
+        let creates: Vec<_> = ddl.iter().filter(|s| s.contains("CREATE TABLE")).collect();
+        assert!(!creates.is_empty());
+        for s in creates {
+            assert!(s.starts_with("CREATE TABLE IF NOT EXISTS"), "{s}");
+        }
+        let mysql = super::idempotent_ddl(&snapshot, &crate::sql::MySql).unwrap();
+        assert!(
+            mysql.iter().all(|s| !s.contains("IF NOT EXISTS")),
+            "{mysql:?}"
+        );
     }
 
     #[test]

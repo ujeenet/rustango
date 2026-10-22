@@ -181,7 +181,7 @@ async fn delete_prefix_on_no_matches_is_a_noop() {
     redis.clear().await.ok();
 }
 
-/// #2656: bytes go to Redis raw, not base64, through a scope too.
+/// Bytes go to Redis raw, not base64, through a scope too.
 #[tokio::test]
 async fn bytes_are_stored_raw() {
     let _g = live_lock().lock().await;

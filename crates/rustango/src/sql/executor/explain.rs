@@ -6,18 +6,7 @@
 //! still live in mod.rs since they're impls on the QuerySet inherent
 //! surface; they consume `ExplainOptions` / `ExplainFormat` from here.
 
-#[cfg(feature = "postgres")]
-use sqlx::postgres::PgArguments;
-#[cfg(feature = "postgres")]
-use sqlx::query::Query;
-
-#[cfg(feature = "postgres")]
-use super::bind_query;
-#[cfg(feature = "mysql")]
-use super::bind_query_my;
-#[cfg(feature = "sqlite")]
-use super::bind_query_sqlite;
-use super::ExecError;
+use super::{run_on, ExecError, RowRef, SqlExecutor};
 use crate::core::SelectQuery;
 use crate::sql::Pool;
 
@@ -54,15 +43,11 @@ pub enum ExplainFormat {
     Xml,
 }
 
-#[cfg(feature = "postgres")]
 impl ExplainOptions {
     /// Render the parenthesized option list (e.g. `(ANALYZE,
-    /// BUFFERS, FORMAT JSON)`). Empty when every option is at its
-    /// default. Used by both the PG-typed `QuerySet::explain_on` and
-    /// the tri-dialect [`explain_pool`] PG branch — the latter
-    /// inherits the same `postgres`-feature gating so MySQL / SQLite
-    /// builds don't drag this in.
-    pub(super) fn to_clause(&self) -> String {
+    /// BUFFERS, FORMAT JSON)`) for PostgreSQL. Empty when every option
+    /// is at its default.
+    fn to_clause(&self) -> String {
         let mut bits: Vec<&'static str> = Vec::new();
         if self.analyze {
             bits.push("ANALYZE");
@@ -131,111 +116,70 @@ pub async fn explain_pool(
     query: &SelectQuery,
     options: ExplainOptions,
 ) -> Result<String, ExecError> {
-    let stmt = pool.dialect().compile_select(query)?;
-    match pool {
+    Ok(explain_lines_on(pool, query, &options).await?.join("\n"))
+}
+
+/// The plan of `query` on `exec`, one entry per plan row ([`explain_pool`]
+/// joins them). SQLite's JSON plan is one entry.
+pub(super) async fn explain_lines_on<'c, E: SqlExecutor<'c>>(
+    exec: E,
+    query: &SelectQuery,
+    options: &ExplainOptions,
+) -> Result<Vec<String>, ExecError> {
+    let d = exec.dialect();
+    let stmt = d.compile_select(query)?;
+    let json = options.format == ExplainFormat::Json;
+    let prefix = match d.name() {
+        // `EXPLAIN ANALYZE` (8.0.18+) runs the query and wins over
+        // `format`; `FORMAT=JSON|TREE` (8.0.16+) is plan-only.
+        "mysql" if options.analyze => "EXPLAIN ANALYZE ".to_owned(),
+        "mysql" if json => "EXPLAIN FORMAT=JSON ".to_owned(),
+        "mysql" => "EXPLAIN FORMAT=TREE ".to_owned(),
+        // Plan-only, so analyze/buffers/verbose no-op. Columns: id,
+        // parent, notused, detail.
+        "sqlite" => "EXPLAIN QUERY PLAN ".to_owned(),
+        _ => match options.to_clause() {
+            c if c.is_empty() => "EXPLAIN ".to_owned(),
+            c => format!("EXPLAIN {c} "),
+        },
+    };
+    let sql = format!("{prefix}{}", stmt.sql);
+    let lines = run_on(exec, &sql, stmt.params, |row| match row {
         #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            let mut sql = String::with_capacity(stmt.sql.len() + 32);
-            sql.push_str("EXPLAIN ");
-            let clause = options.to_clause();
-            if !clause.is_empty() {
-                sql.push_str(&clause);
-                sql.push(' ');
-            }
-            sql.push_str(&stmt.sql);
-            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&sql);
-            for v in stmt.params {
-                q = bind_query(q, v);
-            }
-            let rows = q.fetch_all(pg).await?;
-            let mut parts = Vec::with_capacity(rows.len());
-            for row in &rows {
-                let line: String = match options.format {
-                    ExplainFormat::Json => {
-                        let v: serde_json::Value = sqlx::Row::try_get(row, 0)?;
-                        v.to_string()
-                    }
-                    ExplainFormat::Text | ExplainFormat::Yaml | ExplainFormat::Xml => {
-                        sqlx::Row::try_get(row, 0)?
-                    }
-                };
-                parts.push(line);
-            }
-            Ok(parts.join("\n"))
-        }
+        RowRef::Postgres(r) => first_cell(r, json),
+        // MySQL's ANALYZE output is text whatever the format.
         #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            // MySQL's `EXPLAIN` keyword family is unique per shape:
-            // `EXPLAIN ANALYZE` (8.0.18+) actually runs the query and
-            // reports real timings; `EXPLAIN FORMAT=JSON|TREE` is plan-
-            // only. `analyze` wins over `format` — ANALYZE implicitly
-            // uses TREE format on text and JSON on `FORMAT=JSON` was
-            // never standardized for ANALYZE in MySQL 8.x.
-            let prefix = if options.analyze {
-                "EXPLAIN ANALYZE "
-            } else {
-                match options.format {
-                    ExplainFormat::Json => "EXPLAIN FORMAT=JSON ",
-                    _ => "EXPLAIN FORMAT=TREE ",
-                }
-            };
-            let mut sql = String::with_capacity(stmt.sql.len() + prefix.len());
-            sql.push_str(prefix);
-            sql.push_str(&stmt.sql);
-            let mut q = sqlx::query(&sql);
-            for v in stmt.params {
-                q = bind_query_my(q, v);
-            }
-            let rows = q.fetch_all(my).await?;
-            let mut parts = Vec::with_capacity(rows.len());
-            for row in &rows {
-                let line: String = match options.format {
-                    ExplainFormat::Json if !options.analyze => {
-                        let v: serde_json::Value = sqlx::Row::try_get(row, 0)?;
-                        v.to_string()
-                    }
-                    _ => sqlx::Row::try_get(row, 0)?,
-                };
-                parts.push(line);
-            }
-            Ok(parts.join("\n"))
-        }
+        RowRef::Mysql(r) => first_cell(r, json && !options.analyze),
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            // SQLite's EXPLAIN QUERY PLAN is plan-only (never runs the
-            // query), so analyze/buffers/verbose flags silently no-op
-            // per the issue spec. Returns 4 columns: id, parent, notused,
-            // detail.
-            let sql = format!("EXPLAIN QUERY PLAN {}", stmt.sql);
-            let mut q = sqlx::query(&sql);
-            for v in stmt.params {
-                q = bind_query_sqlite(q, v);
+        RowRef::Sqlite(r) => {
+            use sqlx::Row as _;
+            let detail: String = r.try_get(3)?;
+            if !json {
+                return Ok(detail);
             }
-            let rows = q.fetch_all(sq).await?;
-            match options.format {
-                ExplainFormat::Json => {
-                    let mut arr = Vec::with_capacity(rows.len());
-                    for row in &rows {
-                        let id: i64 = sqlx::Row::try_get(row, 0)?;
-                        let parent: i64 = sqlx::Row::try_get(row, 1)?;
-                        let detail: String = sqlx::Row::try_get(row, 3)?;
-                        arr.push(serde_json::json!({
-                            "id": id,
-                            "parent": parent,
-                            "detail": detail,
-                        }));
-                    }
-                    Ok(serde_json::Value::Array(arr).to_string())
-                }
-                ExplainFormat::Text | ExplainFormat::Yaml | ExplainFormat::Xml => {
-                    let mut parts = Vec::with_capacity(rows.len());
-                    for row in &rows {
-                        let detail: String = sqlx::Row::try_get(row, 3)?;
-                        parts.push(detail);
-                    }
-                    Ok(parts.join("\n"))
-                }
-            }
+            let (id, parent): (i64, i64) = (r.try_get(0)?, r.try_get(1)?);
+            Ok(serde_json::json!({"id": id, "parent": parent, "detail": detail}).to_string())
         }
+    })
+    .await?;
+    if json && d.name() == "sqlite" {
+        return Ok(vec![format!("[{}]", lines.join(","))]);
+    }
+    Ok(lines)
+}
+
+/// Column 0 of a plan row, as text or as JSON rendered to text.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+fn first_cell<R>(row: &R, json: bool) -> Result<String, sqlx::Error>
+where
+    R: sqlx::Row,
+    usize: sqlx::ColumnIndex<R>,
+    String: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    serde_json::Value: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
+    if json {
+        Ok(row.try_get::<serde_json::Value, _>(0)?.to_string())
+    } else {
+        row.try_get(0)
     }
 }

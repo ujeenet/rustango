@@ -341,7 +341,7 @@ pub(super) async fn operator_reset_password(
     Path(id): Path<i64>,
     Form(form): Form<ResetForm>,
 ) -> Response<Body> {
-    // Your own password needs the current one, and the login throttle (#1342).
+    // Your own password needs the current one, and the login throttle.
     if id == id_of(&op) {
         return back_err(
             &state,

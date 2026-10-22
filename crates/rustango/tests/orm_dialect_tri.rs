@@ -775,7 +775,7 @@ async fn relation_date_lookup(pool: &Pool) {
     }
 }
 
-/// #1357: MySQL's upsert fired on any unique key, so a username clash
+/// MySQL's upsert fired on any unique key, so a username clash
 /// updated another row.
 async fn upsert_never_updates_a_row_of_another_unique_key(pool: &Pool) {
     for (email, username) in [("a@x", "alice"), ("b@x", "bob")] {
@@ -812,7 +812,7 @@ async fn upsert_never_updates_a_row_of_another_unique_key(pool: &Pool) {
     assert_eq!((bob[0].email.as_str(), bob[0].note.as_str()), ("b@x", ""));
 }
 
-/// #1358: MySQL cut `GROUP_CONCAT` at 1024 bytes.
+/// MySQL cut `GROUP_CONCAT` at 1024 bytes.
 async fn string_agg_is_not_capped(pool: &Pool) {
     let title = "t".repeat(60);
     for i in 0..30 {
@@ -836,7 +836,7 @@ async fn string_agg_is_not_capped(pool: &Pool) {
     assert_eq!(s.len(), 30 * 60 + 29);
 }
 
-/// #1359: MySQL's `NOW()` and `CAST(.. AS DATETIME/TIME)` dropped the fraction.
+/// MySQL's `NOW()` and `CAST(.. AS DATETIME/TIME)` dropped the fraction.
 async fn now_and_casts_keep_fractional_seconds(pool: &Pool) {
     use chrono::Timelike as _;
     use rustango::core::{funcs::now, Expr, FieldType};
@@ -883,7 +883,7 @@ async fn now_and_casts_keep_fractional_seconds(pool: &Pool) {
     );
 }
 
-/// #1217: SQLite bound a Decimal as text, which no number ever exceeds.
+/// SQLite bound a Decimal as text, which no number ever exceeds.
 async fn decimal_compares_with_expressions(pool: &Pool) {
     use rust_decimal::Decimal;
     use rustango::core::{BinOp, Expr};

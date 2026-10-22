@@ -982,8 +982,8 @@ async fn bulk_update_is_all_or_none(pool: &Pool) {
     assert_eq!(moved, 0, "earlier batches rolled back");
 }
 
-/// A self relation's subquery correlates to the outer row, not its own
-/// (#1287). Cat 1 has children 2 and 3; 2 has child 4. Links: 1->2,
+/// A self relation's subquery correlates to the outer row, not its own.
+/// Cat 1 has children 2 and 3; 2 has child 4. Links: 1->2,
 /// 1->3, 2->4.
 async fn self_relation_correlates_to_the_outer_row(pool: &Pool) {
     for (id, parent_id) in [(1, None), (2, Some(1)), (3, Some(1)), (4, Some(2))] {

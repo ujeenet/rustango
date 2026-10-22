@@ -202,6 +202,15 @@ pub struct TextLabel {
     pub code: String,
 }
 
+/// One column of a two-column key marked, as inspectdb writes it.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli1399_line", app = "cli1399")]
+pub struct Line {
+    #[rustango(primary_key)]
+    pub order_id: i64,
+    pub line_no: i64,
+}
+
 // Two tables that reference each other through nullable links.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "cli2318_a", app = "cli2318")]
@@ -219,6 +228,40 @@ pub struct CycB {
     pub id: Auto<i64>,
     #[rustango(fk = "cli2318_a", on = "id")]
     pub a_id: Option<i64>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "mdv_counter", app = "mdv")]
+pub struct Counter {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+    #[rustango(default = "5")]
+    pub hits: i64,
+}
+
+/// A fixture key that is absent takes the column default, pk included.
+async fn loaddata_leaves_missing_keys_to_the_column_default(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<Counter>(pool).await;
+    let fixture = serde_json::json!([
+        {"model": "mdv.Counter", "fields": {"name": "a"}},
+        {"model": "mdv.Counter", "pk": 9, "fields": {"name": "b", "hits": 1}},
+    ]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("partial.json");
+    std::fs::write(&path, fixture.to_string()).unwrap();
+    let out = manage(pool, &["loaddata", path.to_str().unwrap(), "--fail-fast"]).await;
+    assert!(out.is_ok(), "loaddata: {out:?}");
+    let mut rows: Vec<(String, i64)> = Counter::objects()
+        .fetch(pool)
+        .await
+        .expect("fetch")
+        .into_iter()
+        .map(|c| (c.name, c.hits))
+        .collect();
+    rows.sort();
+    assert_eq!(rows, [("a".to_owned(), 5), ("b".to_owned(), 1)]);
 }
 
 async fn fresh_parent_child(pool: &Pool) {
@@ -561,7 +604,7 @@ async fn flush_clears_auto_m2m_junctions(pool: &Pool) {
     assert_eq!((left, links.len()), ([0, 0], 0), "rows left behind");
 }
 
-/// dumpdata → loaddata keeps auto-created M2M links (#1226).
+/// dumpdata → loaddata keeps auto-created M2M links.
 async fn dump_and_load_keeps_m2m_links(pool: &Pool) {
     fresh_m2m(pool).await;
     let mut post = M2mPost {
@@ -607,24 +650,107 @@ async fn dump_and_load_keeps_m2m_links(pool: &Pool) {
     assert_eq!(links, want, "the reload lost the M2M links: {dumped}");
 }
 
-/// Empty shelf and label tables and a text-keyed junction. Written by
-/// hand: the migration DDL types every auto junction BIGINT.
+/// Empty shelf and label tables and the text-keyed junction migrations build.
 async fn fresh_text_m2m(pool: &Pool) {
+    use rustango::migrate::{render_changes_split_with_dialect, SchemaChange, SchemaSnapshot};
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, "cli1393_shelf_labels").await;
     fresh_table::<TextShelf>(pool).await;
     fresh_table::<TextLabel>(pool).await;
+    let create = SchemaChange::CreateM2MTable {
+        through: "cli1393_shelf_labels".into(),
+        src_table: TextShelf::SCHEMA.table.into(),
+        src_col: "shelf_code".into(),
+        dst_table: TextLabel::SCHEMA.table.into(),
+        dst_col: "label_code".into(),
+    };
+    let snap = SchemaSnapshot::from_models(&[TextShelf::SCHEMA, TextLabel::SCHEMA]);
+    let ddl = render_changes_split_with_dialect(&[create], &snap, pool.dialect()).expect("ddl");
+    for sql in ddl.immediate.iter().chain(&ddl.deferred_fks) {
+        raw_execute_pool(pool, sql, vec![])
+            .await
+            .expect("junction ddl");
+    }
+}
+
+/// dumpdata reads rows and their links a page at a time.
+async fn dumpdata_pages_rows_and_links(pool: &Pool) {
+    fresh_m2m(pool).await;
+    let mut tag = M2mTag {
+        id: Auto::default(),
+        n: 1,
+    };
+    tag.insert_pool(pool).await.expect("tag");
+    let tag_id = tag.id.get().copied().expect("pk");
+    // Scans come back out of pk order unless sorted: PG in heap (insert)
+    // order, MySQL through the covering index on `n`.
     raw_execute_pool(
         pool,
-        "CREATE TABLE cli1393_shelf_labels (shelf_code VARCHAR(32) NOT NULL, \
-         label_code VARCHAR(32) NOT NULL, PRIMARY KEY (shelf_code, label_code))",
+        "CREATE INDEX cli2317_post_n ON cli2317_post (n)",
         vec![],
     )
     .await
-    .expect("junction ddl");
+    .expect("index");
+    // One past the 500-row page: two pages.
+    for id in (1..=501).rev() {
+        let mut post = M2mPost {
+            id: Auto::from(id),
+            n: 1000 - id,
+        };
+        post.insert_pool(pool).await.expect("post");
+        post.tags_m2m().add(tag_id, pool).await.expect("link");
+    }
+    let args = ["dumpdata", "--model", "cli2317.M2mPost", "--indent", "0"];
+    // Per page: one select of posts, one of their links.
+    let dumped = rustango::test_assertions::assert_num_queries(4, manage(pool, &args)).await;
+    rustango::testkit::matrix::drop_table(pool, "cli2317_post_tags").await;
+    let dumped = dumped.expect("dumpdata");
+    let rows: serde_json::Value = serde_json::from_str(dumped.trim()).expect("json");
+    let rows = rows.as_array().expect("array");
+    let pks: Vec<i64> = rows.iter().filter_map(|r| r["pk"].as_i64()).collect();
+    assert_eq!(
+        pks,
+        (1..=501).collect::<Vec<_>>(),
+        "rows skipped or repeated"
+    );
+    assert!(
+        rows.iter()
+            .all(|r| r["fields"]["tags"] == serde_json::json!([tag_id])),
+        "a row lost its link"
+    );
 }
 
-/// Text pks keep their M2M links through dumpdata → loaddata (rel-0608).
+/// A marked pk that is only part of the key does not page: `pk > last`
+/// would drop the rows tied on it.
+async fn dumpdata_keeps_rows_tied_on_a_partial_pk(pool: &Pool) {
+    use rustango::testkit::matrix::drop_table;
+    drop_table(pool, Line::SCHEMA.table).await;
+    raw_execute_pool(
+        pool,
+        "CREATE TABLE cli1399_line (order_id BIGINT NOT NULL, line_no BIGINT NOT NULL, \
+         PRIMARY KEY (order_id, line_no))",
+        vec![],
+    )
+    .await
+    .expect("table");
+    for line_no in 0..501 {
+        let l = Line {
+            order_id: 7,
+            line_no,
+        };
+        l.insert_pool(pool).await.expect("line");
+    }
+    let out = manage(
+        pool,
+        &["dumpdata", "--model", "cli1399.Line", "--indent", "0"],
+    )
+    .await;
+    drop_table(pool, Line::SCHEMA.table).await;
+    let rows: serde_json::Value = serde_json::from_str(out.expect("dumpdata").trim()).unwrap();
+    assert_eq!(rows.as_array().expect("array").len(), 501, "rows dropped");
+}
+
+/// Text pks keep their M2M links through dumpdata → loaddata.
 async fn dump_and_load_keeps_text_pk_m2m_links(pool: &Pool) {
     fresh_text_m2m(pool).await;
     let fixture = serde_json::json!([
@@ -652,7 +778,7 @@ async fn dump_and_load_keeps_text_pk_m2m_links(pool: &Pool) {
     );
 }
 
-/// One bad link skips only its own row's links (pr-1408-r2 correctness-002).
+/// One bad link skips only its own row's links.
 async fn a_bad_m2m_link_skips_only_its_row(pool: &Pool) {
     fresh_text_m2m(pool).await;
     let fixture = serde_json::json!([
@@ -756,7 +882,7 @@ async fn dumpdata_refuses_columns_it_cannot_read(pool: &Pool) {
     assert_eq!(out.trim(), "[]");
 }
 
-/// A misspelt `--model` / `--exclude` fails rather than dumping `[]` (#1312).
+/// A misspelt `--model` / `--exclude` fails rather than dumping `[]`.
 async fn dumpdata_refuses_an_unknown_model_name(pool: &Pool) {
     for flag in ["--model", "--exclude"] {
         let err = manage(pool, &["dumpdata", flag, "cli1911.Psot"])
@@ -780,8 +906,11 @@ tri_dialect_test! {
         self_fk_child_before_parent_loads,
         fail_fast_still_resets_sequences,
         dumpdata_refuses_an_unknown_model_name,
+        dumpdata_pages_rows_and_links,
+        dumpdata_keeps_rows_tied_on_a_partial_pk,
         dump_and_load_keeps_m2m_links,
         dump_and_load_keeps_text_pk_m2m_links,
         a_bad_m2m_link_skips_only_its_row,
+        loaddata_leaves_missing_keys_to_the_column_default,
     ],
 }

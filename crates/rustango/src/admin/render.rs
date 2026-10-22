@@ -100,7 +100,8 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
             }
         }
         FieldType::Json => {
-            if v == &serde_json::Value::Object(serde_json::Map::new()) {
+            // A nullable field saves "" as NULL, so its `{}` must show.
+            if !field.nullable && v == &serde_json::Value::Object(serde_json::Map::new()) {
                 String::new()
             } else {
                 serde_json::to_string_pretty(v).unwrap_or_default()
@@ -109,8 +110,17 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
         // Decimal round-trips as a string via `row_to_json` to
         // preserve precision; Binary likewise (hex-encoded).
         FieldType::Decimal | FieldType::Binary => v.as_str().unwrap_or("").to_owned(),
-        // #341 — PG array: render the JSON form compactly.
-        FieldType::Array(_) => v.to_string(),
+        // PG array: the comma list the form parser splits.
+        FieldType::Array(_) => v.as_array().map_or_else(
+            || v.to_string(),
+            |items| {
+                items
+                    .iter()
+                    .map(|i| i.as_str().map_or_else(|| i.to_string(), str::to_owned))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+        ),
         // #343 — PG range: literal string (or compact JSON fallback).
         FieldType::Range(_) => v.as_str().map_or_else(|| v.to_string(), str::to_owned),
         // #342 — PG hstore: compact JSON object form.
@@ -269,6 +279,10 @@ fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> St
         let mut out = format!(r#"<select name="{name}" id="{name}"{required}{disabled}>"#);
         if field.nullable {
             out.push_str(r#"<option value=""></option>"#);
+        }
+        // A stored value outside `choices` stays selected, so a save keeps it.
+        if !value.is_empty() && !choices.iter().any(|(v, _)| *v == value) {
+            let _ = write!(out, r#"<option value="{val}" selected>{val}</option>"#);
         }
         for (v, label) in choices {
             let v_esc = escape(v);

@@ -710,8 +710,8 @@ pub mod host_validation;
 pub mod ssl_redirect;
 
 /// Request body size limit middleware — fast `Content-Length` rejection
-/// returning structured `413 Payload Too Large` JSON. Complements
-/// axum's per-extractor `DefaultBodyLimit`. See [`body_limit::BodyLimitLayer`].
+/// returning structured `413 Payload Too Large` JSON. Replaces axum's
+/// per-extractor `DefaultBodyLimit`. See [`body_limit::BodyLimitLayer`].
 #[cfg(feature = "_http_layers")]
 pub mod body_limit;
 
