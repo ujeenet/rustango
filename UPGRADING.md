@@ -150,6 +150,120 @@ untouched.
 
 ## Unreleased
 
+## 0.60.10
+
+### New `TenantScope` extractor
+
+A Postgres `Tenant` still holds a registry connection for the whole request. Handlers that only use `t.pool()` can take `TenantScope` instead and hold none.
+
+### `InMemoryJobQueue` dispatch inside `atomic`
+
+The job runs after the commit and never on rollback. `pending_count()` counts it only from the commit.
+
+### Dead letters carry the current payload shape
+
+`JobDeadLetter::payload` is the payload decoded and re-encoded as the job type; one that does not decode is passed as stored.
+
+### MySQL: oversized keys fail at render
+
+A migration whose pk, unique column or index exceeds 3072 bytes (utf8mb4 counts 4 per `max_length` char) now errors before any statement runs; it failed with `ERROR 1071` before. Shorten the `max_length`. Widening a column inside an existing index is checked too, and a key on unbounded text, binary or JSON (`ERROR 1170`) is refused.
+
+### New projects: dev server on loopback
+
+Only new scaffolds change. To match in an existing project, drop `RUSTANGO_BIND` from `.env`, add `RUSTANGO_BIND: 0.0.0.0:8080` under the compose `rust` service's `environment:`, and publish `"127.0.0.1:8080:8080"`.
+
+### `make:*` verbs check features
+
+`make:viewset` and `make:test` need `admin` (`make:viewset --tenant` needs `tenancy` instead), `make:serializer` needs `serializer`, `make:form` `forms`, `make:job` / `make:worker` `jobs`, `make:scheduled` `scheduler`, `make:notification` `notifications`. Without it the verb now errors instead of writing a file that does not compile.
+
+### `Cli::with_csrf` cookie follows `secure_cookies`
+
+With `[security] secure_cookies = false`, or on a non-prod tier with it unset, the CSRF cookie is no longer `Secure`. A `Cli` without `with_settings_from_env` is `Secure` only when `RUSTANGO_ENV` is `prod`, so an HTTPS staging host loses the flag; load settings or use `with_csrf_config` to force it.
+
+### New fullstack projects: a bad config stops boot
+
+`main.rs` loads settings once and passes them to `admin_router(pool, &settings)`; a config that fails to load stops `Cli::run` instead of dropping `[admin]` table restrictions (a missing `config/` only warns). Existing projects are unchanged.
+
+### `Settings::load` inside `with_overridden` returns the overlay
+
+A test that loaded `config/` inside the scope now gets the overlay instead. `Settings::load_from(dir, _)` still reads the files.
+
+### Unknown settings keys warn
+
+Loading settings prints one stderr line per key nothing reads. Fix or remove those keys; `RUSTANGO_CONFIG_STRICT=1` refuses them.
+
+### CSRF answers an oversized form with 413
+
+A form-encoded POST over the body limit now gets axum's 413 from `CsrfLayer` instead of a 403. Without a `BodyLimitLayer` the CSRF read follows the app's `DefaultBodyLimit` (2 MiB unless set; still 2 MiB under `DefaultBodyLimit::disable()`).
+
+### `embed_migrations!` on a missing directory warns
+
+The build still succeeds, with a `deprecated` warning; `-D warnings` builds fail. Create the directory or fix the path. Add a `build.rs` with `println!("cargo:rerun-if-changed=migrations");` so new files are embedded without a clean build.
+
+### Fewer `m2m_changed` signals
+
+`set` with the current set and `clear` on an empty relation no longer send `m2m_changed`. A receiver that counted them will see fewer calls.
+
+### Bound attributes must match the field type
+
+`#[serializer(max_length / min_length)]` and `#[form(...)]` length bounds need a string field; `min` / `max` need a numeric one. A mismatch, which never had an effect, no longer compiles: drop the attribute.
+
+### `ModelFormFor::from_json` refuses unknown keys
+
+A JSON key that names no model field is now a per-key `FormErrors` entry. `parse` (form-encoded) still ignores such keys.
+
+### `dispatch` inside `atomic` is transactional
+
+`DatabaseJobQueue::dispatch` inside an `atomic` block on the queue's pool now commits or rolls back with the block. Code that relied on the job surviving a rollback must dispatch outside the block. Holding the block's `TxGuard` across `dispatch` makes it fail with a `NestedAtomic` queue error.
+
+### Undecodable job payloads retry
+
+A payload that fails to decode is `Retryable` (spends attempts, then dead-letters) instead of dead-lettering at once.
+
+### Admin `add` hooks also see the new row
+
+After a create, the written row (parent or inline child) must be inside `register_admin_queryset!` and pass the `add` hook, now called again with `Some(&row)`; a hook that refuses every `Some` now refuses every create. After an edit, the written row is checked against the queryset scope only; the `change` hook still sees only the row before the edit. A refusal returns 403 and rolls back the whole edit.
+
+### `PageKey` takes the full path
+
+Under `Router::nest`, pass `CachePageLayer::invalidate` the path with the nest prefix (`/en/about`, not `/about`). Old entries expire on their timeout.
+
+### `RedisCache` calls time out
+
+A command now fails after 2 s and a connect attempt after 5 s. Build with `RedisCache::with_timeouts` if a slow link needs more.
+
+### Schema-tenant purge refuses a schema other schemas depend on
+
+The error lists each outside object and what it uses; drop or move them, then purge again. An extension only the tenant uses is dropped with its schema.
+
+### Vector and geometry columns get one `makemigrations` step
+
+Snapshots now carry the dimension / SRID, so on PostgreSQL the first `makemigrations` emits an `AlterColumnType` for each sized `vector` or `geometry` column, which rewrites the table under an exclusive lock: plan it for large tables. MySQL and SQLite get nothing (both stay `TEXT`). The cast fails on rows with another dimension, or with an SRID other than 0 or the model's; SRID-0 rows take the model's SRID.
+
+### Template views merge processors and `ExtraContext` everywhere
+
+All class-based views now add the registered context processors' keys, and every view (not only `ListView`) merges `ExtraContext`. A template that relied on such a key being undefined sees a value now.
+
+### Media refuses dead collections
+
+`move_to_collection`, `save_bytes` and `begin_upload` now return `MediaError::Other("collection N is missing or deleted")` where they used to succeed.
+
+### Number and currency output changed for some locales
+
+`format_number` / `format_currency` now emit U+00A0 / U+202F instead of ASCII spaces, and move `€` for de, nl and most European locales. Code or tests that compare these strings need the new forms.
+
+### Translation lookup order
+
+A base-language override (`pt`) no longer hides a region file entry (`pt-BR`), and a flat entry in an earlier locale of the chain now beats a plural entry in a later one.
+
+### New `SqlError::ValueNotSupportedInDialect`
+
+Raw SQL helpers return it for a Postgres-only bind on MySQL/SQLite, or a `SqlValue::List` bind on any backend, where they used to panic. `SqlError` is `#[non_exhaustive]`, so matches keep compiling.
+
+### Deletes clear generic M2M junction rows
+
+Deleting a model that declares `generic_m2m(...)` now also deletes its junction rows; so does `Model::truncate`. On MySQL and SQLite this runs as two statements in one transaction.
+
 ## 0.60.9
 
 ### Idle connections close after 75 s

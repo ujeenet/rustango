@@ -1756,6 +1756,36 @@ pub fn infer_app_label_from_module_path(path: &'static str) -> Option<&'static s
 
 inventory::collect!(ModelEntry);
 
+/// One `#[rustango(generic_m2m(...))]` relation, so a delete of the owner
+/// can clear its junction rows. Registered by the derive.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct GenericM2MEntry {
+    pub(crate) owner: &'static ModelSchema,
+    pub(crate) through: &'static str,
+    pub(crate) pk_col: &'static str,
+    pub(crate) ct_col: &'static str,
+}
+
+impl GenericM2MEntry {
+    #[must_use]
+    pub const fn new(
+        owner: &'static ModelSchema,
+        through: &'static str,
+        pk_col: &'static str,
+        ct_col: &'static str,
+    ) -> Self {
+        Self {
+            owner,
+            through,
+            pk_col,
+            ct_col,
+        }
+    }
+}
+
+inventory::collect!(GenericM2MEntry);
+
 /// Every [`FieldSchema`] field, for the derive to build as a literal.
 ///
 /// Exhaustive on purpose: a new schema field is a compile error in the

@@ -122,7 +122,8 @@ pub async fn delete_on<'c, E>(executor: E, query: &DeleteQuery) -> Result<u64, E
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
 {
-    let stmt = Postgres.compile_delete(query)?;
+    // Postgres folds the junction cleanup into this one statement.
+    let stmt = crate::sql::compile_delete_plan(&Postgres, query)?.owner;
     let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
     for value in stmt.params {
         q = bind_query(q, value);

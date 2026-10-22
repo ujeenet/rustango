@@ -260,7 +260,11 @@ impl<'d> Sql<'d> {
         self.push_param_typed(value, None);
     }
 
-    pub(super) fn finish(mut self) -> CompiledStatement {
+    /// # Errors
+    /// [`SqlError::ValueNotSupportedInDialect`] for a bind whose bind arm
+    /// can only panic, as [`super::refuse_unbindable_values`] decides.
+    pub(super) fn finish(mut self) -> Result<CompiledStatement, SqlError> {
+        super::refuse_unbindable_values(self.d, &self.params)?;
         if self.group_concat {
             // A statement-level hint: it covers the GROUP_CONCAT in any block.
             let start = self.sql.len() - self.sql.trim_start_matches('(').len();
@@ -274,10 +278,10 @@ impl<'d> Sql<'d> {
                 );
             }
         }
-        CompiledStatement {
+        Ok(CompiledStatement {
             sql: self.sql,
             params: self.params,
-        }
+        })
     }
 }
 
@@ -3784,6 +3788,50 @@ pub(super) fn write_delete(b: &mut Sql<'_>, query: &DeleteQuery) -> Result<(), S
     r
 }
 
+/// An owner `DELETE` and the junction deletes that must run before it,
+/// in one transaction. Empty `links` when the dialect folded them in.
+#[doc(hidden)]
+pub struct DeletePlan {
+    pub(crate) links: Vec<CompiledStatement>,
+    pub(crate) owner: CompiledStatement,
+}
+
+/// Compile `query` with its generic M2M junction cleanup: one statement
+/// with data-modifying CTEs where the dialect has them, else a list.
+pub(crate) fn compile_delete_plan(
+    d: &dyn Dialect,
+    query: &DeleteQuery,
+) -> Result<DeletePlan, SqlError> {
+    let links = super::m2m::generic_m2m_links(query);
+    if links.is_empty() || !d.supports_dml_in_cte() {
+        return Ok(DeletePlan {
+            links: links
+                .iter()
+                .map(|l| d.compile_delete(l))
+                .collect::<Result<_, _>>()?,
+            owner: d.compile_delete(query)?,
+        });
+    }
+    // Every CTE reads the same snapshot, so each sees the owner rows.
+    let mut b = Sql::new(d);
+    b.sql.push_str("WITH ");
+    for (i, link) in links.iter().enumerate() {
+        if i > 0 {
+            b.sql.push_str(", ");
+        }
+        b.write_ident(&format!("_rustango_link{i}"));
+        b.sql.push_str(" AS (");
+        write_delete(&mut b, link)?;
+        b.sql.push(')');
+    }
+    b.sql.push(' ');
+    write_delete(&mut b, query)?;
+    Ok(DeletePlan {
+        links: Vec::new(),
+        owner: b.finish()?,
+    })
+}
+
 // ---- BULK UPDATE ----
 //
 // Postgres uses `UPDATE … FROM (VALUES …)`. MySQL has no equivalent
@@ -5002,7 +5050,7 @@ pub(crate) fn compile_select_with_child_count(
     if select.compound.is_empty() {
         b.child_count = Some(child);
         write_select(&mut b, select)?;
-        return Ok(b.finish());
+        return b.finish();
     }
     // A set operation counts over its merged rows, or only the head would
     // carry the column.
@@ -5028,7 +5076,7 @@ pub(crate) fn compile_select_with_child_count(
         select.compound_limit,
         select.compound_offset,
     )?;
-    Ok(b.finish())
+    b.finish()
 }
 
 /// The children a SELECT counts per row: `child_table.fk_column = parent.parent_pk`.
@@ -5091,7 +5139,7 @@ pub(crate) fn compile_date_buckets(
     b.sql.push_str(" ORDER BY ");
     b.write_ident("rs_bucket");
     b.sql.push_str(if descending { " DESC" } else { " ASC" });
-    Ok(b.finish())
+    b.finish()
 }
 
 /// Truncate `col_quoted` to a date bucket, typed as a `DATE`.

@@ -102,16 +102,7 @@ pub fn run_pool_free<W: Write>(
         "db:info" => db_info_cmd(writer),
         // Code generators: they read the model registry and write files.
         "startapp" => startapp(&args[1..], writer),
-        "make:viewset" => make_viewset_cmd(&args[1..], writer),
-        "make:api_routes" => make_api_routes_cmd(&args[1..], writer),
-        "make:serializer" => make_serializer_cmd(&args[1..], writer),
-        "make:form" => make_form_cmd(&args[1..], writer),
-        "make:job" => make_job_cmd(&args[1..], writer),
-        "make:scheduled" => make_scheduled_cmd(&args[1..], writer),
-        "make:worker" => make_worker_cmd(&args[1..], writer),
-        "make:notification" => make_notification_cmd(&args[1..], writer),
-        "make:middleware" => make_middleware_cmd(&args[1..], writer),
-        "make:test" => make_test_cmd(&args[1..], writer),
+        c if MAKE_VERBS.contains(&c) => make_cmd(c, &args[1..], writer, compiled_feature),
         "showurls" => showurls_cmd(&args[1..], writer),
         "showmodels" => showmodels_cmd(&args[1..], writer),
         _ => return None,
@@ -147,16 +138,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "forget-pending" => forget_pending_cmd(pool, dir, &args[1..], writer).await,
         "startapp" => startapp(&args[1..], writer),
         "add-data-op" => add_data_op_cmd(dir, &args[1..], writer),
-        "make:viewset" => make_viewset_cmd(&args[1..], writer),
-        "make:api_routes" => make_api_routes_cmd(&args[1..], writer),
-        "make:serializer" => make_serializer_cmd(&args[1..], writer),
-        "make:form" => make_form_cmd(&args[1..], writer),
-        "make:job" => make_job_cmd(&args[1..], writer),
-        "make:scheduled" => make_scheduled_cmd(&args[1..], writer),
-        "make:worker" => make_worker_cmd(&args[1..], writer),
-        "make:notification" => make_notification_cmd(&args[1..], writer),
-        "make:middleware" => make_middleware_cmd(&args[1..], writer),
-        "make:test" => make_test_cmd(&args[1..], writer),
+        c if MAKE_VERBS.contains(&c) => make_cmd(c, &args[1..], writer, compiled_feature),
         "about" => about_cmd(pool, writer).await,
         "check" => check_cmd(pool, dir, &args[1..], writer).await,
         "docs" => docs_cmd(writer),
@@ -2440,7 +2422,153 @@ fn write_generated<W: Write>(
     Ok(())
 }
 
-fn make_viewset_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+const MAKE_VERBS: &[&str] = &[
+    "make:viewset",
+    "make:api_routes",
+    "make:serializer",
+    "make:form",
+    "make:job",
+    "make:scheduled",
+    "make:worker",
+    "make:notification",
+    "make:middleware",
+    "make:test",
+];
+
+/// Run a `make:*` verb, refusing one whose output needs a rustango feature
+/// this build lacks: the file would not compile.
+fn make_cmd<W: Write>(
+    cmd: &str,
+    args: &[String],
+    w: &mut W,
+    has_feature: impl Fn(&str) -> bool,
+) -> Result<(), MigrateError> {
+    if let Some(feature) = missing_make_feature(cmd, &has_feature) {
+        return Err(missing_feature_error(cmd, feature));
+    }
+    match cmd {
+        "make:viewset" => make_viewset_cmd(args, w, has_feature),
+        "make:api_routes" => make_api_routes_cmd(args, w),
+        "make:serializer" => make_serializer_cmd(args, w),
+        "make:form" => make_form_cmd(args, w),
+        "make:job" => make_job_cmd(args, w),
+        "make:scheduled" => make_scheduled_cmd(args, w),
+        "make:worker" => make_worker_cmd(args, w),
+        "make:notification" => make_notification_cmd(args, w),
+        "make:middleware" => make_middleware_cmd(args, w),
+        "make:test" => make_test_cmd(args, w),
+        other => Err(MigrateError::Validation(format!("unknown verb `{other}`"))),
+    }
+}
+
+fn missing_feature_error(cmd: &str, feature: &str) -> MigrateError {
+    MigrateError::Validation(format!(
+        "{cmd}: the code it writes needs rustango's `{feature}` feature, which this \
+         project does not enable; add it to the rustango dependency's features"
+    ))
+}
+
+/// The feature a verb's output needs, when `has_feature` says it is off.
+/// `make:viewset` checks its own, once it knows which template it writes.
+fn missing_make_feature(cmd: &str, has_feature: impl Fn(&str) -> bool) -> Option<&'static str> {
+    let feature = match cmd {
+        // `make:test` writes a `test_client` test, which is `admin`-gated.
+        "make:test" => "admin",
+        "make:serializer" => "serializer",
+        "make:form" => "forms",
+        "make:job" | "make:worker" => "jobs",
+        "make:scheduled" => "scheduler",
+        "make:notification" => "notifications",
+        _ => return None,
+    };
+    (!has_feature(feature)).then_some(feature)
+}
+
+/// Whether this build of rustango, i.e. the project's, has `feature`.
+fn compiled_feature(feature: &str) -> bool {
+    match feature {
+        "admin" => cfg!(feature = "admin"),
+        "tenancy" => cfg!(feature = "tenancy"),
+        "serializer" => cfg!(feature = "serializer"),
+        "forms" => cfg!(feature = "forms"),
+        "jobs" => cfg!(feature = "jobs"),
+        "scheduler" => cfg!(feature = "scheduler"),
+        "notifications" => cfg!(feature = "notifications"),
+        _ => false,
+    }
+}
+
+/// Where a `--model` lives: `use {path};` imports it, `{name}` names it.
+struct ModelRef {
+    path: String,
+    name: String,
+}
+
+impl ModelRef {
+    fn bare(name: &str) -> Self {
+        Self {
+            path: format!("crate::models::{name}"),
+            name: name.to_owned(),
+        }
+    }
+
+    /// `blog::models::Post` is taken as written; a bare `Post` is looked up
+    /// in `src/models.rs`, then in each `src/<app>/models.rs`.
+    fn resolve(arg: &str, src: &std::path::Path) -> Self {
+        let rel = arg.strip_prefix("crate::").unwrap_or(arg);
+        if let Some((_, name)) = rel.rsplit_once("::") {
+            return Self {
+                path: format!("crate::{rel}"),
+                name: name.to_owned(),
+            };
+        }
+        let declares = |dir: &std::path::Path| {
+            [dir.join("models.rs"), dir.join("models").join("mod.rs")]
+                .iter()
+                .filter_map(|f| std::fs::read_to_string(f).ok())
+                .any(|text| declares_struct(&text, arg))
+        };
+        if declares(src) {
+            return Self::bare(arg);
+        }
+        let mut apps: Vec<std::path::PathBuf> = std::fs::read_dir(src)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        apps.sort();
+        for app in apps {
+            let Some(app_name) = app.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if declares(&app) {
+                return Self {
+                    path: format!("crate::{app_name}::models::{arg}"),
+                    name: arg.to_owned(),
+                };
+            }
+        }
+        Self::bare(arg)
+    }
+}
+
+/// Whether `text` has a line `pub struct {name}` (then a non-ident char).
+fn declares_struct(text: &str, name: &str) -> bool {
+    text.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("pub struct ")
+            .and_then(|rest| rest.strip_prefix(name))
+            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+    })
+}
+
+fn make_viewset_cmd<W: Write>(
+    args: &[String],
+    w: &mut W,
+    has_feature: impl Fn(&str) -> bool,
+) -> Result<(), MigrateError> {
     // Tenancy projects need a different scaffold shape — the
     // single-pool `#[derive(ViewSet)]` is fatal for them (#80) — so
     // this command toggles between two templates. Resolution order:
@@ -2479,13 +2607,25 @@ fn make_viewset_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateE
             "make:viewset: auto-detected tenancy mode from Cargo.toml (pass `--no-tenant` to override)"
         )?;
     }
+    // The tenant template uses `ViewSet`, which `tenancy` alone provides.
+    let (verb, feature) = if tenant_aware {
+        ("make:viewset --tenant", "tenancy")
+    } else {
+        ("make:viewset", "admin")
+    };
+    if !has_feature(feature) {
+        return Err(missing_feature_error(verb, feature));
+    }
     let (name, model, crate_root) = parse_name_and_model(&filtered)?;
     let snake = pascal_to_snake(&name);
-    let model = model.unwrap_or_else(|| "Post".into());
+    let model = ModelRef::resolve(
+        model.as_deref().unwrap_or("Post"),
+        std::path::Path::new("src"),
+    );
     let body = if tenant_aware {
         viewset_template_tenant(&name, &model, &snake, &crate_root)
     } else {
-        viewset_template_pool(&name, &model, &snake, &crate_root)
+        viewset_template_pool(&name, &model, &snake, &crate_root, &project_crate_name())
     };
     write_generated(w, &format!("{snake}.rs"), body)
 }
@@ -2494,13 +2634,23 @@ fn make_viewset_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateE
 /// `#[derive(ViewSet)]` shape with a mount-time `PgPool` —
 /// appropriate for single-tenant projects (api / fullstack
 /// templates).
-fn viewset_template_pool(name: &str, model: &str, snake: &str, crate_root: &str) -> String {
+fn viewset_template_pool(
+    name: &str,
+    model: &ModelRef,
+    snake: &str,
+    crate_root: &str,
+    app_crate: &str,
+) -> String {
+    let ModelRef {
+        path: model_path,
+        name: model,
+    } = model;
     format!(
         r#"//! Auto-scaffolded by `manage make:viewset {name}`.
 
 use {crate_root}::ViewSet;
 
-use crate::models::{model};
+use {model_path};
 
 #[derive(ViewSet)]
 #[viewset(
@@ -2515,9 +2665,10 @@ use crate::models::{model};
 )]
 pub struct {name};
 
-// Mount in your urls.rs:
+// Mount in src/main.rs: `urls::api()` has no pool, `nest_with` passes
+// the server's. Nest a prefix once; merge more viewsets in one closure.
 //
-//   .merge({name}::router("/api/{snake}", pool.clone()))
+//   .nest_with("/api", |pool| {app_crate}::{snake}::{name}::router("/{snake}", pool))
 "#
     )
 }
@@ -2532,7 +2683,11 @@ pub struct {name};
 /// chain (filter / search / ordering / pagination / permissions) so
 /// the scaffold demonstrates each knob, with `// uncomment to enable`
 /// markers next to each one.
-fn viewset_template_tenant(name: &str, model: &str, snake: &str, crate_root: &str) -> String {
+fn viewset_template_tenant(name: &str, model: &ModelRef, snake: &str, crate_root: &str) -> String {
+    let ModelRef {
+        path: model_path,
+        name: model,
+    } = model;
     format!(
         r#"//! Auto-scaffolded by `manage make:viewset {name} --tenant`.
 //!
@@ -2548,7 +2703,7 @@ use axum::Router;
 use {crate_root}::core::Model as _;
 use {crate_root}::viewset::ViewSet;
 
-use crate::models::{model};
+use {model_path};
 
 pub fn router() -> Router<()> {{
     ViewSet::for_model({model}::SCHEMA)
@@ -2856,7 +3011,10 @@ pub fn api(pool: Pool) -> Router<()> {{
 fn make_serializer_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let (name, model, crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
-    let model = model.unwrap_or_else(|| "Post".into());
+    let model = ModelRef::resolve(
+        model.as_deref().unwrap_or("Post"),
+        std::path::Path::new("src"),
+    );
     write_generated(
         w,
         &format!("{snake}.rs"),
@@ -2864,14 +3022,18 @@ fn make_serializer_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
     )
 }
 
-fn serializer_template(name: &str, model: &str, crate_root: &str) -> String {
+fn serializer_template(name: &str, model: &ModelRef, crate_root: &str) -> String {
+    let ModelRef {
+        path: model_path,
+        name: model,
+    } = model;
     format!(
         r#"//! Auto-scaffolded by `manage make:serializer {name}`.
 
 use {crate_root}::sql::Auto;
 use {crate_root}::Serializer;
 
-use crate::models::{model};
+use {model_path};
 
 #[derive(Serializer, serde::Deserialize, Default)]
 #[serializer(model = {model})]
@@ -3050,8 +3212,12 @@ fn make_worker_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateEr
     // `src/bin/*.rs` is its own crate, so job types must be named
     // through the project's library — `crate::` here would resolve to
     // the worker binary itself and never compile.
-    let app_crate = project_crate_name();
-    let body = format!(
+    let body = worker_template(&name, &snake, &crate_root, &project_crate_name());
+    write_generated_bin(w, &snake, body)
+}
+
+fn worker_template(name: &str, snake: &str, crate_root: &str, app_crate: &str) -> String {
+    format!(
         r#"//! Auto-scaffolded by `manage make:worker {name}`.
 //!
 //! A standalone worker process: it drains the job queue and serves no
@@ -3068,6 +3234,8 @@ use {crate_root}::sql::Pool;
 #[{crate_root}::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {{
     {crate_root}::logging::setup();
+    // A worker never runs main.rs, so it loads `.env` itself.
+    let _ = dotenvy::dotenv();
     // `std::env::var(..)?` would surface as the bare word `NotPresent`,
     // which tells an operator nothing about which variable or why.
     let url = std::env::var("DATABASE_URL").map_err(|_| {{
@@ -3110,8 +3278,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
     Ok(())
 }}
 "#
-    );
-    write_generated_bin(w, &snake, body)
+    )
 }
 
 /// Like [`write_generated`], but for `src/bin/` — where cargo
@@ -6424,7 +6591,7 @@ mod gen_tests {
             .find("//! Auto-scaffolded by `manage make:serializer PostSerializer`.")
             .expect("snippet");
         let snippet = &docs[start..start + docs[start..].find("```").expect("fence")];
-        let rendered = serializer_template("PostSerializer", "Post", "rustango");
+        let rendered = serializer_template("PostSerializer", &ModelRef::bare("Post"), "rustango");
         // Comments are abridged in the docs, so compare code lines only.
         for line in snippet.lines().filter(|l| !l.trim_start().starts_with('/')) {
             assert!(
@@ -6601,16 +6768,116 @@ mod gen_tests {
     /// The model must be in scope or the derive can't name it (#1913).
     #[test]
     fn pool_templates_import_their_model() {
-        let vs = viewset_template_pool("PostViewSet", "Post", "post_view_set", "rustango");
-        let ser = serializer_template("PostSerializer", "Post", "rustango");
+        let post = ModelRef::bare("Post");
+        let vs = viewset_template_pool("PostViewSet", &post, "post_view_set", "rustango", "app");
+        let ser = serializer_template("PostSerializer", &post, "rustango");
         for body in [&vs, &ser] {
             assert!(body.contains("use crate::models::Post;"), "{body}");
         }
-        let tenant = viewset_template_tenant("PostViewSet", "Post", "post_view_set", "rustango");
+        let tenant = viewset_template_tenant("PostViewSet", &post, "post_view_set", "rustango");
         assert!(
             tenant.contains(".merge(crate::post_view_set::router())"),
             "{tenant}"
         );
+    }
+
+    /// `startapp blog` puts `Post` in `src/blog/models.rs`, so the import
+    /// must follow it there.
+    #[test]
+    fn model_ref_finds_an_app_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("blog")).unwrap();
+        std::fs::write(src.join("models.rs"), "pub struct Author;\n").unwrap();
+        std::fs::write(
+            src.join("blog/models.rs"),
+            "#[derive(Model)]\npub struct Post {\n    pub id: i64,\n}\n",
+        )
+        .unwrap();
+        let path = |m: &str| ModelRef::resolve(m, &src).path;
+        assert_eq!(path("Post"), "crate::blog::models::Post");
+        assert_eq!(path("Author"), "crate::models::Author");
+        assert_eq!(path("Missing"), "crate::models::Missing");
+        assert_eq!(path("shop::models::Item"), "crate::shop::models::Item");
+        let explicit = ModelRef::resolve("crate::shop::models::Item", &src);
+        assert_eq!(
+            (explicit.path.as_str(), explicit.name.as_str()),
+            ("crate::shop::models::Item", "Item")
+        );
+        let post = ModelRef::resolve("Post", &src);
+        let vs = viewset_template_pool("PostViewSet", &post, "post_view_set", "rustango", "my_app");
+        assert!(vs.contains("use crate::blog::models::Post;"), "{vs}");
+        assert!(vs.contains("model        = Post,"), "{vs}");
+        // `urls::api()` takes no pool; main.rs's `nest_with` hands one over.
+        assert!(
+            vs.contains(r#".nest_with("/api", |pool| my_app::post_view_set::PostViewSet::router("/post_view_set", pool))"#),
+            "{vs}"
+        );
+    }
+
+    /// A `make:*` verb whose output needs a feature the build lacks says so.
+    #[test]
+    fn make_verbs_name_the_feature_their_output_needs() {
+        let none = |_: &str| false;
+        for (verb, feature) in [
+            ("make:serializer", "serializer"),
+            ("make:form", "forms"),
+            ("make:job", "jobs"),
+            ("make:worker", "jobs"),
+            ("make:scheduled", "scheduler"),
+            ("make:notification", "notifications"),
+            ("make:test", "admin"),
+        ] {
+            assert_eq!(missing_make_feature(verb, none), Some(feature), "{verb}");
+            assert_eq!(missing_make_feature(verb, |_| true), None, "{verb}");
+        }
+        for verb in ["make:middleware", "make:api_routes", "startapp"] {
+            assert_eq!(missing_make_feature(verb, none), None, "{verb}");
+        }
+        let err = make_cmd("make:test", &[], &mut Vec::new(), none).unwrap_err();
+        assert!(err.to_string().contains("`admin`"), "{err}");
+    }
+
+    /// The pool viewset needs `admin`; the tenant one only `tenancy`.
+    #[test]
+    fn make_viewset_needs_the_feature_of_its_template() {
+        // `--crate` with no value fails after the feature check, so no file is written.
+        let run = |flag: &str, missing: &'static str| {
+            let args = [flag.to_owned(), "--crate".to_owned()];
+            make_cmd("make:viewset", &args, &mut Vec::new(), move |f| {
+                f != missing
+            })
+            .unwrap_err()
+            .to_string()
+        };
+        assert!(run("--tenant", "tenancy").contains("`tenancy`"));
+        assert!(run("--no-tenant", "admin").contains("`admin`"));
+        let err = run("--tenant", "admin");
+        assert!(err.contains("--crate requires a value"), "{err}");
+    }
+
+    #[test]
+    fn compiled_feature_matches_the_build() {
+        for (feature, on) in [
+            ("admin", cfg!(feature = "admin")),
+            ("tenancy", cfg!(feature = "tenancy")),
+            ("serializer", cfg!(feature = "serializer")),
+            ("forms", cfg!(feature = "forms")),
+            ("jobs", cfg!(feature = "jobs")),
+            ("scheduler", cfg!(feature = "scheduler")),
+            ("notifications", cfg!(feature = "notifications")),
+            ("no_such_feature", false),
+        ] {
+            assert_eq!(compiled_feature(feature), on, "{feature}");
+        }
+    }
+
+    /// The worker reads `DATABASE_URL`, so it must load `.env` like main.rs.
+    #[test]
+    fn worker_loads_dotenv_before_reading_the_url() {
+        let body = worker_template("Mailer", "mailer", "rustango", "my_app");
+        let dotenv = body.find("dotenvy::dotenv()").expect("loads .env");
+        assert!(dotenv < body.find("\"DATABASE_URL\"").unwrap(), "{body}");
     }
 
     // -------- dumpdata --------
@@ -7194,7 +7461,13 @@ mod gen_tests {
     /// the mount-time `pool` argument.
     #[test]
     fn viewset_template_pool_emits_derive_macro() {
-        let body = viewset_template_pool("PostViewSet", "Post", "post_view_set", "rustango");
+        let body = viewset_template_pool(
+            "PostViewSet",
+            &ModelRef::bare("Post"),
+            "post_view_set",
+            "rustango",
+            "app",
+        );
         assert!(
             body.contains("#[derive(ViewSet)]"),
             "expected derive macro, got: {body}"
@@ -7220,12 +7493,23 @@ mod gen_tests {
     fn viewset_templates_guard_writes() {
         let live =
             |body: &str, needle: &str| body.lines().any(|l| l.trim_start().starts_with(needle));
-        let tenant = viewset_template_tenant("PostViewSet", "Post", "post_view_set", "rustango");
+        let tenant = viewset_template_tenant(
+            "PostViewSet",
+            &ModelRef::bare("Post"),
+            "post_view_set",
+            "rustango",
+        );
         assert!(
             live(&tenant, ".permissions_for_model::<Post>()"),
             "{tenant}"
         );
-        let pool = viewset_template_pool("PostViewSet", "Post", "post_view_set", "rustango");
+        let pool = viewset_template_pool(
+            "PostViewSet",
+            &ModelRef::bare("Post"),
+            "post_view_set",
+            "rustango",
+            "app",
+        );
         assert!(live(&pool, "read_only,"), "{pool}");
     }
 
@@ -7237,7 +7521,13 @@ mod gen_tests {
         // proc-macro contract is independent of the consumer's
         // Cargo.toml dep rename (same pattern #142 / renamed-smoke
         // proves for `#[rustango(...)]`).
-        let body = viewset_template_pool("PostViewSet", "Post", "post_view_set", "rustango_orm");
+        let body = viewset_template_pool(
+            "PostViewSet",
+            &ModelRef::bare("Post"),
+            "post_view_set",
+            "rustango_orm",
+            "app",
+        );
         assert!(
             body.contains("use rustango_orm::ViewSet;"),
             "renamed crate root must propagate to `use` line, got: {body}"
@@ -7254,7 +7544,12 @@ mod gen_tests {
 
     #[test]
     fn viewset_template_tenant_threads_renamed_crate_root() {
-        let body = viewset_template_tenant("PostViewSet", "Post", "post_view_set", "rustango_orm");
+        let body = viewset_template_tenant(
+            "PostViewSet",
+            &ModelRef::bare("Post"),
+            "post_view_set",
+            "rustango_orm",
+        );
         assert!(body.contains("use rustango_orm::core::Model as _;"));
         assert!(body.contains("use rustango_orm::viewset::ViewSet;"));
         assert!(!body.contains("use rustango::"));
@@ -7273,7 +7568,12 @@ mod gen_tests {
     /// (#80).
     #[test]
     fn viewset_template_tenant_uses_tenant_router() {
-        let body = viewset_template_tenant("PostViewSet", "Post", "post_view_set", "rustango");
+        let body = viewset_template_tenant(
+            "PostViewSet",
+            &ModelRef::bare("Post"),
+            "post_view_set",
+            "rustango",
+        );
         assert!(
             body.contains("ViewSet::for_model"),
             "expected runtime ViewSet::for_model builder, got: {body}"

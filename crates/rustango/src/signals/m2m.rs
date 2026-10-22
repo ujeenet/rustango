@@ -42,7 +42,8 @@
 //!   may be empty.
 //! - `Clear`: everything removed, `dst_pks` is empty.
 //!
-//! The signal is sent only after the SQL succeeds. There is no
+//! The signal is sent only after the SQL succeeds, and only when it
+//! changed a row: a duplicate `add`, an unchanged `set` or an empty `clear` sends none. There is no
 //! `pre_*` form, because a receiver cannot cancel the write anyway.
 
 use std::any::Any;

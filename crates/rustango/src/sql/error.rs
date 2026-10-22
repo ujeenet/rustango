@@ -126,6 +126,14 @@ pub enum SqlError {
         dialect: &'static str,
     },
 
+    /// A Postgres-only value (array, range, hstore, vector, geometry)
+    /// bound on another backend, or a raw `List` bind on any backend.
+    #[error("{value} values are not supported by the `{dialect}` dialect")]
+    ValueNotSupportedInDialect {
+        value: &'static str,
+        dialect: &'static str,
+    },
+
     /// A Postgres-only aggregate such as `array_agg` or `jsonb_agg`
     /// on another backend. MySQL's nearest equivalents differ enough
     /// that they are not translated automatically, so branch on

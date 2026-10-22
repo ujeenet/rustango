@@ -282,6 +282,20 @@ impl Builder {
         Self { pool, config }
     }
 
+    /// The mount prefix `settings` asks for, without a trailing slash:
+    /// `admin.url_prefix`, else `routes.admin_url`. Nest the admin router here.
+    /// `"/"` gives `""`, the root, which `Cli::nest_with` refuses at boot.
+    #[cfg(feature = "config")]
+    #[must_use]
+    pub fn settings_prefix(settings: &crate::config::Settings) -> Option<&str> {
+        settings
+            .admin
+            .url_prefix
+            .as_deref()
+            .or(settings.routes.admin_url.as_deref())
+            .map(|p| p.trim_end_matches('/'))
+    }
+
     /// Build from a parsed [`crate::config::Settings`].
     ///
     /// Order of precedence: the defaults, then the `admin` section,
@@ -323,13 +337,8 @@ impl Builder {
             builder = builder.theme_mode(mode);
         }
 
-        // 2. URL prefix: `admin.url_prefix` wins, then
-        //    `routes.admin_url`, else the `Builder::new` default.
-        let url_prefix = admin
-            .url_prefix
-            .as_deref()
-            .or(settings.routes.admin_url.as_deref());
-        if let Some(prefix) = url_prefix {
+        // 2. URL prefix, else the `Builder::new` default.
+        if let Some(prefix) = Self::settings_prefix(settings) {
             builder = builder.admin_prefix(prefix);
         }
         if let Some(audit_url) = settings.routes.audit_url.as_deref() {

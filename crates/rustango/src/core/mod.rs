@@ -43,7 +43,7 @@ pub use schema::{
     WriteKind,
 };
 #[doc(hidden)]
-pub use schema::{AdminConfigParts, FieldSchemaParts, ModelSchemaParts};
+pub use schema::{AdminConfigParts, FieldSchemaParts, GenericM2MEntry, ModelSchemaParts};
 pub use validate::validate_value;
 pub use value::SqlValue;
 pub use window::{FrameBoundary, FrameKind, WindowExpr, WindowFn, WindowFrame};

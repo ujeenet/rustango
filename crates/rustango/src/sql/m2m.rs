@@ -162,17 +162,20 @@ impl M2MManager {
         let src = self.src_key()?;
         let dsts = dst_keys(ids, self.through, self.dst_col)?;
         let rows = dsts.iter().map(|d| vec![src.clone(), d.clone()]).collect();
-        replace(
+        let changed = replace(
             self.junction(),
             vec![eq(self.src_col, src.clone())],
+            self.dst_col,
+            &dsts,
             vec![self.src_col, self.dst_col],
             rows,
             pool,
         )
         .await?;
-        // #410 — fire m2m_changed after the atomic DELETE+INSERT
-        // commits. `dst_pks` is the new full set (may be empty when
-        // `set([])` was called).
+        if !changed {
+            return Ok(());
+        }
+        // `dst_pks` is the new full set (may be empty when `set([])` was called).
         #[cfg(feature = "signals")]
         crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
             action: crate::signals::m2m::M2mAction::Set,
@@ -193,8 +196,9 @@ impl M2MManager {
     /// Driver failures.
     pub async fn clear(&self, pool: &Pool) -> Result<(), ExecError> {
         let src = self.src_key()?;
-        delete(self.junction(), vec![eq(self.src_col, src.clone())], pool).await?;
-        // #410 — fire m2m_changed after clear.
+        if delete(self.junction(), vec![eq(self.src_col, src.clone())], pool).await? == 0 {
+            return Ok(());
+        }
         #[cfg(feature = "signals")]
         crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
             action: crate::signals::m2m::M2mAction::Clear,
@@ -343,23 +347,67 @@ async fn delete(
 }
 
 /// Delete the rows `owner` matches and insert `rows` in one transaction, so
-/// readers never see the empty state in between.
+/// readers never see the empty state in between. `true` when the set of
+/// `dst_col` keys changed; `dsts` is the new set, deduplicated.
 async fn replace(
     junction: &'static ModelSchema,
     owner: Vec<Filter>,
+    dst_col: &'static str,
+    dsts: &[SqlValue],
     columns: Vec<&'static str>,
     rows: Vec<Vec<SqlValue>>,
     pool: &Pool,
-) -> Result<(), ExecError> {
+) -> Result<bool, ExecError> {
     // A bad key fails before the DELETE runs, not after.
     let ins = BulkInsertQuery::new(junction, columns, rows);
     ins.validate()?;
     let mut tx = crate::sql::transaction_pool(pool).await?;
+    let mut old = SelectQuery::new(junction).where_clause(WhereExpr::and_predicates(owner.clone()));
+    old.projection = Some(vec![dst_col]);
+    // An unregistered junction's column type is unknown: read it as the new keys' type.
+    let old = match dst_column_type(junction.table, dst_col) {
+        Some(ty) => keys_on(&mut tx, &old, Some(ty)).await?,
+        None => {
+            let ty = dsts.first().and_then(SqlValue::field_type);
+            match keys_on(&mut tx, &old, ty).await {
+                Err(ExecError::Driver(sqlx::Error::ColumnDecode { .. })) => None,
+                r => r?,
+            }
+        }
+    };
     let del = DeleteQuery::new(junction, WhereExpr::and_predicates(owner));
-    super::executor::delete_tx(&mut tx, &del).await?;
+    let deleted = super::executor::delete_tx(&mut tx, &del).await?;
     super::executor::bulk_insert_tx(&mut tx, &ins).await?;
     tx.commit().await.map_err(ExecError::Driver)?;
-    Ok(())
+    if dsts.is_empty() {
+        return Ok(deleted > 0);
+    }
+    let new: std::collections::HashSet<String> =
+        dsts.iter().map(SqlValue::to_display_string).collect();
+    Ok(old.is_none_or(|old| old != new))
+}
+
+/// The projected key column as display strings; `None` for a type it cannot decode.
+async fn keys_on(
+    tx: &mut crate::sql::PoolTx<'_>,
+    query: &SelectQuery,
+    ty: Option<FieldType>,
+) -> Result<Option<std::collections::HashSet<String>>, ExecError> {
+    use super::executor::fetch_values_flat_on as fetch;
+    let keys: Vec<String> = match ty {
+        // PG decodes only the exact integer width.
+        Some(FieldType::I16) => strings(fetch::<i16, _>(tx, query).await?),
+        Some(FieldType::I32) => strings(fetch::<i32, _>(tx, query).await?),
+        Some(FieldType::I64) => strings(fetch::<i64, _>(tx, query).await?),
+        Some(FieldType::String) => fetch::<String, _>(tx, query).await?,
+        Some(FieldType::Uuid) => strings(fetch::<uuid::Uuid, _>(tx, query).await?),
+        _ => return Ok(None),
+    };
+    Ok(Some(keys.into_iter().collect()))
+}
+
+fn strings<K: ToString>(keys: Vec<K>) -> Vec<String> {
+    keys.iter().map(ToString::to_string).collect()
 }
 
 /// The source PK bound as-is (#1926); an unsaved source has none.
@@ -470,6 +518,68 @@ pub struct GenericM2MManager {
     pub ct_col: &'static str,
     /// Junction column holding the related model's PK (e.g. `"tag_id"`).
     pub dst_col: &'static str,
+}
+
+/// The junction deletes an owner delete must run first: rows whose
+/// content type is the owner's and whose pk is one the delete removes.
+/// Reads the owner and the content-type table, never the junction, so
+/// MySQL accepts it (1093).
+pub(crate) fn generic_m2m_links(query: &DeleteQuery) -> Vec<DeleteQuery> {
+    let owner = query.model;
+    let mut entries = inventory::iter::<crate::core::GenericM2MEntry>
+        .into_iter()
+        .filter(|e| e.owner.table == owner.table)
+        .peekable();
+    if entries.peek().is_none() {
+        return Vec::new();
+    }
+    let (Some(pk), Some(model)) = (
+        owner.primary_key(),
+        crate::core::ModelEntry::for_schema(owner),
+    ) else {
+        return Vec::new();
+    };
+    let app = model.resolved_app_label().unwrap_or("project");
+    let name = owner.name.to_ascii_lowercase();
+    let ct = <crate::contenttypes::ContentType as crate::core::Model>::SCHEMA;
+    let mut ct_ids = SelectQuery::new(ct).where_clause(WhereExpr::and_predicates(vec![
+        eq("app_label", SqlValue::String(app.to_owned())),
+        eq("model_name", SqlValue::String(name)),
+    ]));
+    ct_ids.projection = Some(vec!["id"]);
+    let mut owner_pks = SelectQuery::new(owner).where_clause(query.where_clause.clone());
+    owner_pks.projection = Some(vec![pk.column]);
+    // A table-wide delete clears every row of the owner's type, orphans too.
+    let every_row = query.where_clause.is_empty();
+    entries
+        .map(|e| {
+            let mut preds = vec![WhereExpr::InSubquery {
+                column: e.ct_col,
+                negated: false,
+                subquery: Box::new(ct_ids.clone()),
+            }];
+            if !every_row {
+                preds.push(WhereExpr::InSubquery {
+                    column: e.pk_col,
+                    negated: false,
+                    subquery: Box::new(owner_pks.clone()),
+                });
+            }
+            DeleteQuery::new(
+                junction(e.through, &[e.pk_col, e.ct_col]),
+                WhereExpr::And(preds),
+            )
+        })
+        .collect()
+}
+
+/// The junction deletes that emptying `table` must run first.
+pub(crate) fn generic_m2m_truncate_links(table: &str) -> Vec<DeleteQuery> {
+    inventory::iter::<crate::core::GenericM2MEntry>
+        .into_iter()
+        .find(|e| e.owner.table == table)
+        .map(|e| generic_m2m_links(&DeleteQuery::new(e.owner, WhereExpr::And(Vec::new()))))
+        .unwrap_or_default()
 }
 
 impl GenericM2MManager {
@@ -606,7 +716,10 @@ impl GenericM2MManager {
             })
             .collect();
         let columns = vec![self.pk_col, self.ct_col, self.dst_col];
-        replace(self.junction(), owner, columns, rows, pool).await?;
+        let junction = self.junction();
+        if !replace(junction, owner, self.dst_col, &dsts, columns, rows, pool).await? {
+            return Ok(());
+        }
         #[cfg(feature = "signals")]
         self.signal(crate::signals::m2m::M2mAction::Set, dsts).await;
         Ok(())
@@ -618,7 +731,9 @@ impl GenericM2MManager {
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
     pub async fn clear(&self, pool: &Pool) -> Result<(), ExecError> {
         let owner = self.owner(pool).await?;
-        delete(self.junction(), owner, pool).await?;
+        if delete(self.junction(), owner, pool).await? == 0 {
+            return Ok(());
+        }
         #[cfg(feature = "signals")]
         self.signal(crate::signals::m2m::M2mAction::Clear, Vec::new())
             .await;

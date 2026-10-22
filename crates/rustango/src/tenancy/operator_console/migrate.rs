@@ -53,6 +53,23 @@ async fn start(state: &ConsoleState, op: &auth::Operator, slug: Option<String>) 
             }
         };
     let run_id = run.id.get().copied().unwrap_or_default();
+    let operator_id = op.id.get().copied().unwrap_or_default();
+    let mut extra = serde_json::Map::new();
+    extra.insert("run_id".into(), serde_json::json!(run_id));
+    match slug.as_deref() {
+        Some(s) => super::emit_op_audit(&state.registry, s, operator_id, "migrate", extra).await,
+        None => {
+            super::emit_registry_audit(
+                &state.registry,
+                "rustango_provisioning_runs",
+                &run_id.to_string(),
+                operator_id,
+                "migrate_all",
+                extra,
+            )
+            .await;
+        }
+    }
 
     // Detached: the response is a link to the run, not the result.
     // Failures are recorded on the run, which is the only place anyone

@@ -637,6 +637,31 @@ mod declarative_validators {
         };
         assert!(s.validate().is_ok());
     }
+
+    #[derive(rustango::Model, Clone)]
+    #[rustango(table = "dv_score")]
+    pub struct DvScore {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        pub score: f64,
+    }
+
+    #[derive(Serializer, serde::Deserialize, Default)]
+    #[serializer(model = DvScore)]
+    struct DvScoreSer {
+        #[serializer(min = 0, max = 100)]
+        pub score: f64,
+    }
+
+    #[test]
+    fn float_fields_are_bounded() {
+        let err = DvScoreSer { score: 150.5 }
+            .validate()
+            .expect_err("150.5 > 100");
+        assert!(err.get("score")[0].contains("≤ 100"), "{:?}", err.fields());
+        assert!(DvScoreSer { score: -0.5 }.validate().is_err());
+        assert!(DvScoreSer { score: 99.5 }.validate().is_ok());
+    }
 }
 
 // ------------------------------------------------------------------ Raw idents (#1937)

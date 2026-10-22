@@ -61,6 +61,28 @@ pub(crate) fn quote_with(name: &str, q: char) -> String {
     out
 }
 
+/// Refuse a bind whose bind arm can only panic: a `List` (the writer
+/// expands those) anywhere, a Postgres-only value off Postgres. The one
+/// check for both compiled and raw statements.
+pub(crate) fn refuse_unbindable_values(
+    d: &dyn Dialect,
+    params: &[crate::core::SqlValue],
+) -> Result<(), SqlError> {
+    let pg = d.binds_pg_only_values();
+    // Off Postgres a PG-only item names itself, even inside a list.
+    let kind = params.iter().find_map(|v| {
+        let pg_only = if pg { None } else { v.pg_only_kind() };
+        pg_only.or(matches!(v, crate::core::SqlValue::List(_)).then_some("list"))
+    });
+    match kind {
+        Some(value) => Err(SqlError::ValueNotSupportedInDialect {
+            value,
+            dialect: d.name(),
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Turns the dialect-neutral query IR into a parameterized statement,
 /// and supplies the DDL primitives the migration runner needs.
 ///
@@ -288,6 +310,12 @@ pub trait Dialect: Send + Sync {
         false
     }
 
+    /// `true` if arrays, ranges, hstore, vectors and geometries bind.
+    /// Postgres only; elsewhere the writer refuses them.
+    fn binds_pg_only_values(&self) -> bool {
+        true
+    }
+
     /// `true` if `ORDER BY … NULLS FIRST|LAST` is understood. MySQL
     /// is the exception, so the writer sorts on `<col> IS NULL`
     /// first: `DESC` on that term for NULLS FIRST, `ASC` for
@@ -315,6 +343,12 @@ pub trait Dialect: Send + Sync {
     /// (MySQL 1235), so the writer wraps it in a derived table. Inside an
     /// UPDATE/DELETE it also wraps one that reads the target (1093).
     fn in_subquery_limit_needs_derived_table(&self) -> bool {
+        false
+    }
+
+    /// `true` if a `WITH` may hold a `DELETE` (Postgres only), so an owner
+    /// delete and its junction cleanup run as one statement.
+    fn supports_dml_in_cte(&self) -> bool {
         false
     }
 
@@ -535,6 +569,7 @@ pub trait Dialect: Send + Sync {
 
     /// `(bytes, cap)` of an index key over these `(type, max_length)`
     /// columns, when the backend caps a key; `None` when it does not.
+    /// `bytes == u32::MAX` means a column cannot be in a key at all.
     fn index_key_size(&self, _cols: &[(FieldType, Option<u32>)]) -> Option<(u32, u32)> {
         None
     }
@@ -1016,6 +1051,66 @@ mod quote_with_tests {
         assert_eq!(super::quote_with("a\"b\"", '"'), "\"a\"\"b\"\"\"");
         assert_eq!(super::quote_with("\"", '"'), "\"\"\"\"");
         assert_eq!(super::quote_with("", '`'), "``");
+    }
+}
+
+#[cfg(test)]
+mod refuse_unbindable_values_tests {
+    use super::{refuse_unbindable_values, Dialect};
+    use crate::core::SqlValue;
+    use crate::sql::{MySql, Postgres, SqlError, Sqlite};
+
+    fn refused(d: &dyn Dialect, v: SqlValue) -> Option<&'static str> {
+        match refuse_unbindable_values(d, &[SqlValue::I64(1), v]) {
+            Ok(()) => None,
+            Err(SqlError::ValueNotSupportedInDialect { value, dialect }) => {
+                assert_eq!(dialect, d.name());
+                Some(value)
+            }
+            Err(e) => panic!("wrong error: {e}"),
+        }
+    }
+
+    #[test]
+    fn every_pg_only_kind_is_refused_off_postgres() {
+        let pg_only = [
+            (SqlValue::Array(vec![SqlValue::I64(1)]), "array"),
+            (SqlValue::RangeLiteral("[1,2)".into()), "range"),
+            (SqlValue::HStore(vec![("k".into(), None)]), "hstore"),
+            (SqlValue::Vector(vec![1.0]), "vector"),
+            (
+                SqlValue::Geometry {
+                    x: 1.0,
+                    y: 2.0,
+                    srid: 4326,
+                },
+                "geometry",
+            ),
+        ];
+        for (v, kind) in pg_only {
+            assert_eq!(refused(&MySql, v.clone()), Some(kind));
+            assert_eq!(refused(&Sqlite, v.clone()), Some(kind));
+            assert_eq!(refused(&Postgres, v), None);
+        }
+    }
+
+    /// The writer expands a `List`; bound raw, every backend's arm panics.
+    #[test]
+    fn a_list_is_refused_everywhere() {
+        let d: [&dyn Dialect; 3] = [&Postgres, &MySql, &Sqlite];
+        for d in d {
+            let list = SqlValue::List(vec![SqlValue::I64(1)]);
+            assert_eq!(refused(d, list), Some("list"), "{}", d.name());
+            // Off Postgres the PG-only item is the clearer name.
+            let inner = if d.name() == "postgres" {
+                "list"
+            } else {
+                "array"
+            };
+            let list = SqlValue::List(vec![SqlValue::Array(vec![])]);
+            assert_eq!(refused(d, list), Some(inner), "{}", d.name());
+            assert_eq!(refused(d, SqlValue::String("x".into())), None);
+        }
     }
 }
 

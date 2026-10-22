@@ -988,6 +988,9 @@ fn preview_schema_op(
     }
     statements.extend(drops);
     statements.extend(step.batch.immediate);
+    if let Some(retry) = &step.retry {
+        statements.extend(retry.preview().map(|l| format!("-- {l}")));
+    }
     statements.extend(readd);
     if let Some(rebuild) = &step.batch.rebuild {
         statements.extend(rebuild.statements(dialect));
@@ -3066,7 +3069,6 @@ impl<DB: sqlx::Database> Drop for LockSession<DB> {
 struct Step {
     batch: super::diff::RenderedBatch,
     /// SQLite's retry for an AddColumn on a table with rows (#2017).
-    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
     retry: Option<super::ensure::FilledTableRetry>,
     /// Live FKs on a column to drop by catalog name before the step.
     #[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]

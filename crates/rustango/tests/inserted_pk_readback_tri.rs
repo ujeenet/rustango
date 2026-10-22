@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use axum::body::Body;
 use axum::http::{header, Method, Request};
 use rustango::core::{Model as _, SqlValue};
-use rustango::forms::ModelForm;
+use rustango::forms::{ModelForm, ModelFormFor};
 use rustango::sql::{CounterPool as _, Pool};
 use rustango::{tri_dialect_test, Model};
 use tower::ServiceExt as _;
@@ -299,6 +299,24 @@ async fn model_form_fills_a_v7_pk(pool: &Pool) {
     }
 }
 
+async fn model_form_for_fills_a_v7_pk_and_skips_generated(pool: &Pool) {
+    let mf =
+        ModelFormFor::<V7Doc>::parse(&HashMap::from([("name".into(), "C".into())])).expect("valid");
+    rustango::sql::insert_pool(pool, &mf.into_insert_query())
+        .await
+        .expect("v7 insert");
+    let docs: Vec<V7Doc> = rustango::sql::FetcherPool::fetch(V7Doc::objects(), pool)
+        .await
+        .expect("docs");
+    v7(&docs[0].id.get().expect("pk").to_string());
+    let mf = ModelFormFor::<Line>::parse(&HashMap::from([("price".into(), "1.5".into())]))
+        .expect("a generated column is not input");
+    rustango::sql::insert_pool(pool, &mf.into_insert_query())
+        .await
+        .expect("generated insert");
+    assert_eq!(Line::objects().count(pool).await.expect("count"), 1);
+}
+
 async fn inline_row_fills_a_v7_pk(pool: &Pool) {
     let mut doc = V7Doc {
         id: rustango::sql::Auto::Unset,
@@ -369,6 +387,7 @@ tri_dialect_test! {
         integer_pk_inserts_beside_non_integer_returning_columns,
         admin_create_fills_a_v7_pk,
         model_form_fills_a_v7_pk,
+        model_form_for_fills_a_v7_pk_and_skips_generated,
         inline_row_fills_a_v7_pk,
     ],
 }

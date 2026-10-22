@@ -47,7 +47,7 @@ async fn create(mgr: &MediaManager, slug: &str, parent: Option<i64>) -> i64 {
 }
 
 /// The router answers 404 for "not found", so a bad `parent_id` avoids it (400).
-fn is_dead_parent(r: &Result<MediaCollection, MediaError>) -> bool {
+fn is_dead_parent<T>(r: &Result<T, MediaError>) -> bool {
     matches!(r, Err(MediaError::Other(m))
         if m.contains("missing or deleted") && !m.contains("not found"))
 }
@@ -74,6 +74,116 @@ async fn dead_parent_is_refused(pool: &Pool) {
         .create_collection("y", "seq-y", Some(i64::MAX), "")
         .await;
     assert!(is_dead_parent(&r), "{r:?}");
+}
+
+async fn save_into(mgr: &MediaManager, collection_id: Option<i64>) -> Result<Media, MediaError> {
+    mgr.save_bytes(rustango::media::SaveOpts {
+        disk: "default".into(),
+        key_prefix: "t/".into(),
+        bytes: b"x".to_vec(),
+        mime: "text/plain".into(),
+        original_filename: "x.txt".into(),
+        uploaded_by_id: None,
+        collection_id,
+        metadata: serde_json::json!({}),
+    })
+    .await
+}
+
+/// Media is never filed under a missing or deleted collection.
+async fn media_cannot_go_into_a_dead_collection(pool: &Pool) {
+    let mgr = manager(pool);
+    let live = create(&mgr, "mv-live", None).await;
+    let dead = create(&mgr, "mv-dead", None).await;
+    mgr.delete_collection(dead).await.expect("delete");
+
+    assert!(is_dead_parent(&save_into(&mgr, Some(dead)).await));
+    assert!(is_dead_parent(&save_into(&mgr, Some(i64::MAX)).await));
+    let m = save_into(&mgr, Some(live)).await.expect("save into live");
+    let Auto::Set(id) = m.id else { panic!("no id") };
+
+    for target in [dead, i64::MAX] {
+        let r = mgr.move_to_collection(id, Some(target)).await;
+        assert!(is_dead_parent(&r), "{r:?}");
+    }
+    let row = mgr.get(id).await.unwrap().expect("row");
+    assert_eq!(
+        row.collection_id,
+        Some(live),
+        "a refused move changed the row"
+    );
+    mgr.move_to_collection(id, None)
+        .await
+        .expect("move to root");
+    mgr.move_to_collection(id, Some(live))
+        .await
+        .expect("move back");
+}
+
+/// A move that waits on a collection being deleted is refused.
+async fn move_waits_and_sees_the_deleted_collection(pool: &Pool) {
+    if pool.dialect().name() == "sqlite" {
+        return; // One writer at a time; the sequential scenario covers it.
+    }
+    let mgr = manager(pool);
+    let target = create(&mgr, "mvw-target", None).await;
+    let m = save_into(&mgr, None).await.expect("save");
+    let Auto::Set(id) = m.id else { panic!("no id") };
+
+    let mut tx = transaction_pool(pool).await.expect("begin");
+    MediaCollection::objects()
+        .where_(MediaCollection::id.eq(target))
+        .select_for_update()
+        .fetch_tx(&mut tx)
+        .await
+        .expect("lock target");
+    let moving = tokio::spawn({
+        let mgr = mgr.clone();
+        async move { mgr.move_to_collection(id, Some(target)).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!moving.is_finished(), "the move did not wait for the lock");
+    let soft_delete = MediaCollection::objects()
+        .where_(MediaCollection::id.eq(target))
+        .update()
+        .set("deleted_at", Utc::now())
+        .compile()
+        .expect("compile");
+    update_tx(&mut tx, &soft_delete).await.expect("soft-delete");
+    tx.commit().await.expect("commit");
+
+    let r = moving.await.unwrap();
+    assert!(is_dead_parent(&r), "moved into a deleted collection: {r:?}");
+}
+
+/// An insert that waits on a collection being deleted is refused. On SQLite
+/// this needs the insert's IMMEDIATE transaction: a deferred one reads the
+/// stale live row first and then fails busy instead.
+async fn insert_waits_and_sees_the_deleted_collection(pool: &Pool) {
+    let mgr = manager(pool);
+    let target = create(&mgr, "insw-target", None).await;
+
+    let mut tx = transaction_pool(pool).await.expect("begin");
+    let soft_delete = MediaCollection::objects()
+        .where_(MediaCollection::id.eq(target))
+        .update()
+        .set("deleted_at", Utc::now())
+        .compile()
+        .expect("compile");
+    update_tx(&mut tx, &soft_delete).await.expect("soft-delete");
+    let saving = tokio::spawn({
+        let mgr = mgr.clone();
+        async move { save_into(&mgr, Some(target)).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !saving.is_finished(),
+        "the insert did not wait for the lock"
+    );
+    tx.commit().await.expect("commit");
+
+    let r = saving.await.unwrap();
+    assert!(is_dead_parent(&r), "saved into a deleted collection: {r:?}");
 }
 
 /// A child committed while the delete waits on its parent is deleted too.
@@ -332,5 +442,8 @@ tri_dialect_test!(
         dead_parent_is_refused,
         delete_takes_a_child_created_meanwhile,
         create_waits_and_sees_the_deleted_parent,
+        media_cannot_go_into_a_dead_collection,
+        move_waits_and_sees_the_deleted_collection,
+        insert_waits_and_sees_the_deleted_collection,
     ]
 );
