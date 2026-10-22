@@ -3584,6 +3584,8 @@ fn inherent_impl_tokens(
     // `save_pool(&Pool)` — emitted for every model with a PK. The
     // audited `save_pool` is built below on the diff path; both share
     // `save_partial_methods`, which differ only in how they run `_query`.
+    let save_ret = quote!(::core::result::Result<u64, #root::sql::ExecError>);
+    let save_keep = quote!(matches!(_saved, ::core::result::Result::Ok(n) if n > 0));
     let save_partial_methods = |pk_ident: &syn::Ident,
                                 pk_column_lit: &str,
                                 run: TokenStream2|
@@ -3591,6 +3593,46 @@ fn inherent_impl_tokens(
         let assignments = &fields.update_assignments;
         // Pushed in step with `update_assignments`: one column each.
         let assignment_cols = &fields.upsert_update_columns;
+        let write = restore_auto_now_unless(
+            &fields.auto_now_idents,
+            &save_ret,
+            &save_keep,
+            &quote! {
+                // Build only the wanted assignments, so an unnamed
+                // `auto_now` field is not stamped.
+                let mut _filtered: ::std::vec::Vec<#root::core::Assignment> =
+                    ::std::vec::Vec::with_capacity(_wanted_cols.len());
+                #(
+                    if _wanted_cols.contains(#assignment_cols) {
+                        _filtered.push(#assignments);
+                    }
+                )*
+                if _filtered.is_empty() {
+                    // All field names valid, but they all map to
+                    // non-assignable slots (PK column, computed/
+                    // virtual fields, relations without an
+                    // assignment). Same no-op as an empty list.
+                    #root::__tracing::warn!(
+                        target: "rustango::save_partial",
+                        model = _schema.name,
+                        "save_partial: every named field maps to a non-assignable column — no-op"
+                    );
+                    return ::core::result::Result::Ok(0);
+                }
+                let _query = #root::core::UpdateQuery::new(
+                    _schema,
+                    _filtered,
+                    #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                        #pk_column_lit,
+                        #root::core::Op::Eq,
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#pk_ident)
+                        ),
+                    )),
+                );
+                #run
+            },
+        );
         quote! {
             /// Save (UPDATE) only the listed Rust-side fields,
             /// leaving every other column untouched. Issue #66.
@@ -3653,39 +3695,7 @@ fn inherent_impl_tokens(
                         }
                     }
                 }
-                // Build only the wanted assignments, so an unnamed
-                // `auto_now` field is not stamped.
-                let mut _filtered: ::std::vec::Vec<#root::core::Assignment> =
-                    ::std::vec::Vec::with_capacity(_wanted_cols.len());
-                #(
-                    if _wanted_cols.contains(#assignment_cols) {
-                        _filtered.push(#assignments);
-                    }
-                )*
-                if _filtered.is_empty() {
-                    // All field names valid, but they all map to
-                    // non-assignable slots (PK column, computed/
-                    // virtual fields, relations without an
-                    // assignment). Same no-op as an empty list.
-                    #root::__tracing::warn!(
-                        target: "rustango::save_partial",
-                        model = _schema.name,
-                        "save_partial: every named field maps to a non-assignable column — no-op"
-                    );
-                    return ::core::result::Result::Ok(0);
-                }
-                let _query = #root::core::UpdateQuery::new(
-                    _schema,
-                    _filtered,
-                    #root::core::WhereExpr::Predicate(#root::core::Filter::new(
-                        #pk_column_lit,
-                        #root::core::Op::Eq,
-                        ::core::convert::Into::<#root::core::SqlValue>::into(
-                            ::core::clone::Clone::clone(&self.#pk_ident)
-                        ),
-                    )),
-                );
-                #run
+                #write
             }
 
             /// Typed-column counterpart of [`Self::save_partial`] —
@@ -3741,18 +3751,11 @@ fn inherent_impl_tokens(
             } else {
                 quote!()
             };
-            quote! {
-                /// Save this row to its table against either backend.
-                /// `INSERT` when the `Auto<T>` PK is `Unset`, else
-                /// `UPDATE` keyed on the PK; global scopes do not apply.
-                ///
-                /// # Errors
-                /// As [`Self::save`].
-                pub async fn save_pool(
-                    &mut self,
-                    pool: &#root::sql::Pool,
-                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    #dispatch_unset
+            let write = restore_auto_now_unless(
+                &fields.auto_now_idents,
+                &save_ret,
+                &save_keep,
+                &quote! {
                     let _query = #root::core::UpdateQuery::new(
                         <Self as #root::core::Model>::SCHEMA,
                         ::std::vec![ #( #assignments ),* ],
@@ -3766,6 +3769,21 @@ fn inherent_impl_tokens(
                     );
                     let _affected = #root::sql::update_pool(pool, &_query).await?;
                     ::core::result::Result::Ok(_affected)
+                },
+            );
+            quote! {
+                /// Save this row to its table against either backend.
+                /// `INSERT` when the `Auto<T>` PK is `Unset`, else
+                /// `UPDATE` keyed on the PK; global scopes do not apply.
+                ///
+                /// # Errors
+                /// As [`Self::save`].
+                pub async fn save_pool(
+                    &mut self,
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                    #dispatch_unset
+                    #write
                 }
 
                 #partial
@@ -3948,6 +3966,26 @@ fn inherent_impl_tokens(
             } else {
                 quote!()
             };
+            let write = restore_auto_now_unless(
+                &fields.auto_now_idents,
+                &save_ret,
+                &save_keep,
+                &quote! {
+                    let _query = #root::core::UpdateQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        ::std::vec![ #( #assignments ),* ],
+                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                            #pk_column_lit,
+                            #root::core::Op::Eq,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
+                            ),
+                        )),
+                    );
+                    self.__rustango_save_with_diff(pool, &_query, ::core::option::Option::None)
+                        .await
+                },
+            );
             quote! {
                 /// Save this row against either backend with audit
                 /// emission (diff-style: BEFORE+AFTER) inside the
@@ -3968,19 +4006,7 @@ fn inherent_impl_tokens(
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                     #unset_dispatch
-                    let _query = #root::core::UpdateQuery::new(
-                        <Self as #root::core::Model>::SCHEMA,
-                        ::std::vec![ #( #assignments ),* ],
-                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
-                            #pk_column_lit,
-                            #root::core::Op::Eq,
-                            ::core::convert::Into::<#root::core::SqlValue>::into(
-                                ::core::clone::Clone::clone(&self.#pk_ident)
-                            ),
-                        )),
-                    );
-                    self.__rustango_save_with_diff(pool, &_query, ::core::option::Option::None)
-                        .await
+                    #write
                 }
 
                 /// Run `query` and write its diff entry, limited to `only` columns.
@@ -6468,18 +6494,11 @@ fn inherent_impl_tokens(
         } else {
             quote!()
         };
-        quote! {
-            /// Save this row inside an open transaction. `INSERT` when
-            /// the `Auto<T>` PK is `Unset`, else `UPDATE` keyed on the
-            /// PK. Works against any backend that `tx` wraps.
-            ///
-            /// # Errors
-            /// As [`Self::save_pool`].
-            pub async fn save_tx(
-                &mut self,
-                tx: &mut #root::sql::PoolTx<'_>,
-            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                #dispatch_unset
+        let write = restore_auto_now_unless(
+            &fields.auto_now_idents,
+            &save_ret,
+            &save_keep,
+            &quote! {
                 let _query = #root::core::UpdateQuery::new(
                     <Self as #root::core::Model>::SCHEMA,
                     ::std::vec![ #( #assignments ),* ],
@@ -6493,6 +6512,21 @@ fn inherent_impl_tokens(
                 );
                 let _affected = #root::sql::update_tx(tx, &_query).await?;
                 ::core::result::Result::Ok(_affected)
+            },
+        );
+        quote! {
+            /// Save this row inside an open transaction. `INSERT` when
+            /// the `Auto<T>` PK is `Unset`, else `UPDATE` keyed on the
+            /// PK. Works against any backend that `tx` wraps.
+            ///
+            /// # Errors
+            /// As [`Self::save_pool`].
+            pub async fn save_tx(
+                &mut self,
+                tx: &mut #root::sql::PoolTx<'_>,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                #dispatch_unset
+                #write
             }
         }
     } else {
@@ -6681,6 +6715,54 @@ fn inherent_impl_tokens(
                 quote!(),
             )
         };
+        let save_on_write = restore_auto_now_unless(
+            auto_now_idents,
+            &save_ret,
+            &save_keep,
+            &quote! {
+                #audit_update_pre
+                let _query = #root::core::UpdateQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #assignments ),* ],
+                    #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                        #pk_column_lit,
+                        #root::core::Op::Eq,
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#pk_ident)
+                        ),
+                    )),
+                );
+                let _affected = #root::sql::__macro_internals::update_on(
+                    #executor_passes_to_data_write,
+                    &_query,
+                ).await?;
+                #audit_update_post
+                ::core::result::Result::Ok(_affected)
+            },
+        );
+        let upsert_write = restore_auto_now_unless(
+            auto_now_idents,
+            &quote!(::core::result::Result<(), #root::sql::ExecError>),
+            &quote!(_saved.is_ok()),
+            &quote! {
+                // The UPDATE branch writes `auto_now` too, so stamp it like `save`.
+                #( self.#auto_now_idents = #root::sql::Auto::Set(#root::__chrono::Utc::now()); )*
+                #( #upsert_pushes )*
+                let query = #root::core::InsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    _columns,
+                    _values,
+                )
+                .returning(::std::vec![ #( #upsert_returning ),* ])
+                .on_conflict(#conflict_clause)
+                .generated(_generated);
+                #upsert_run
+                let _returning_row = &_returning_row_v;
+                #( #upsert_auto_assigns )*
+                #audit_upsert_emit
+                ::core::result::Result::Ok(())
+            },
+        );
         Some(quote! {
             /// Insert this row if its `Auto<T>` primary key is
             /// `Unset`, otherwise update the existing row matching the
@@ -6739,24 +6821,7 @@ fn inherent_impl_tokens(
                 if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
                     return self.insert_on(#executor_passes_to_data_write).await.map(|()| 1u64);
                 }
-                #audit_update_pre
-                let _query = #root::core::UpdateQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    ::std::vec![ #( #assignments ),* ],
-                    #root::core::WhereExpr::Predicate(#root::core::Filter::new(
-                        #pk_column_lit,
-                        #root::core::Op::Eq,
-                        ::core::convert::Into::<#root::core::SqlValue>::into(
-                            ::core::clone::Clone::clone(&self.#pk_ident)
-                        ),
-                    )),
-                );
-                let _affected = #root::sql::__macro_internals::update_on(
-                    #executor_passes_to_data_write,
-                    &_query,
-                ).await?;
-                #audit_update_post
-                ::core::result::Result::Ok(_affected)
+                #save_on_write
             }
 
             /// Per-call override for the audit source. Runs
@@ -6820,22 +6885,7 @@ fn inherent_impl_tokens(
                         _generated.push(#gen_cols);
                     }
                 )*
-                // The UPDATE branch writes `auto_now` too, so stamp it like `save`.
-                #( self.#auto_now_idents = #root::sql::Auto::Set(#root::__chrono::Utc::now()); )*
-                #( #upsert_pushes )*
-                let query = #root::core::InsertQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    _columns,
-                    _values,
-                )
-                .returning(::std::vec![ #( #upsert_returning ),* ])
-                .on_conflict(#conflict_clause)
-                .generated(_generated);
-                #upsert_run
-                let _returning_row = &_returning_row_v;
-                #( #upsert_auto_assigns )*
-                #audit_upsert_emit
-                ::core::result::Result::Ok(())
+                #upsert_write
             }
         })
     } else {
@@ -8112,6 +8162,30 @@ fn column_module_tokens(
 fn column_type_ident(field_ident: &syn::Ident) -> syn::Ident {
     let name = ident_name(field_ident);
     syn::Ident::new(&format!("{name}_col"), field_ident.span())
+}
+
+/// Run `body` (of type `ret`) and put the `auto_now` fields back unless
+/// `keep` holds for `_saved`, so a failed or no-row write keeps the old stamp.
+fn restore_auto_now_unless(
+    idents: &[syn::Ident],
+    ret: &TokenStream2,
+    keep: &TokenStream2,
+    body: &TokenStream2,
+) -> TokenStream2 {
+    if idents.is_empty() {
+        return body.clone();
+    }
+    let prev: Vec<syn::Ident> = (0..idents.len())
+        .map(|i| quote::format_ident!("__rustango_auto_now_prev_{}", i))
+        .collect();
+    quote! {
+        #( let #prev = ::core::clone::Clone::clone(&self.#idents); )*
+        let _saved: #ret = async { #body }.await;
+        if !(#keep) {
+            #( self.#idents = #prev; )*
+        }
+        _saved
+    }
 }
 
 /// A field's name without the `r#` of a raw ident: `r#type` is `type` (#1937).

@@ -70,7 +70,7 @@ The key is quoted into the path, so `first-name` or `2fa` no longer fail with er
 
 ### Fixed — `save` writes the `auto_now` stamp back into the struct
 
-Every save path sets the field to the timestamp it binds, so a returned row carries the stored `updated_at`; `save_partial` stamps it only when named.
+Every save path sets the field to the timestamp it binds, so a returned row carries the stored `updated_at`; `save_partial` stamps it only when named. A save or upsert that fails or updates no row keeps the old value.
 
 ### Fixed — a typed `ForeignKey<T>` takes `on_delete`
 
