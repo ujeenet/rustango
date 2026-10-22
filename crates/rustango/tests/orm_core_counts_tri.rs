@@ -413,6 +413,38 @@ fn author_join() -> Join {
     }
 }
 
+/// A self-join shares every column name: WHERE and the aggregate's
+/// column must name the base table.
+async fn grouped_aggregate_join_qualifies_base_columns(pool: &Pool) {
+    let mut rows: Vec<(SqlValue, SqlValue, SqlValue)> = Book::objects()
+        .join(same_author("b2"))
+        .filter("pages__gt", 150_i64)
+        .values(&["author"])
+        .annotate("s", AggregateExpr::Sum("pages"))
+        .annotate(
+            "big",
+            AggregateExpr::Filtered {
+                inner: Box::new(AggregateExpr::Count(Some("id"))),
+                filter: WhereExpr::Predicate(rustango::core::Filter::new("pages", Op::Gt, 250_i64)),
+            },
+        )
+        .fetch(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| (r["author"].clone(), r["s"].clone(), r["big"].clone()))
+        .collect();
+    rows.sort_by_key(|(a, _, _)| format!("{a:?}"));
+    // Ada's 200-page book pairs with both her books; Bob's with his one.
+    assert_eq!(
+        rows,
+        [
+            (SqlValue::I64(1), SqlValue::I64(400), SqlValue::I64(0)),
+            (SqlValue::I64(2), SqlValue::I64(300), SqlValue::I64(1))
+        ]
+    );
+}
+
 /// A `.join()` sits inside the DISTINCT, so each book counts once.
 async fn grouped_aggregate_join_distinct(pool: &Pool) {
     let qs = Book::objects().join(same_author("b2")).distinct();
@@ -811,6 +843,7 @@ tri_dialect_test! {
         relation_sum_keeps_float,
         grouped_aggregate_honours_compound,
         grouped_aggregate_honours_distinct,
+        grouped_aggregate_join_qualifies_base_columns,
         grouped_aggregate_join_distinct,
         grouped_aggregate_join_limit,
         grouped_aggregate_join_alias_filter,

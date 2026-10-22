@@ -210,6 +210,12 @@ impl<'d> Sql<'d> {
         self.sql.push_str(&self.d.quote_ident(name));
     }
 
+    /// A column of the current scope, under its qualifier if one is set.
+    fn write_scope_col(&mut self, col: &str) {
+        let s = render_qualified_col(self, col);
+        self.sql.push_str(&s);
+    }
+
     /// [`Self::write_ident`] for a table a query reads: every FROM and JOIN
     /// item goes through here, so MySQL knows which subqueries hit 1093.
     fn write_table(&mut self, name: &str) {
@@ -1135,18 +1141,25 @@ fn write_aggregate_inner(
         }
         write_agg_group_col(b, col, scope, has_joins, derived, /*project=*/ true);
     }
-    for (i, (alias, expr)) in query.aggregates.iter().enumerate() {
-        if !query.group_by.is_empty() || i > 0 {
-            b.sql.push_str(", ");
+    // A joined table may share a column name, so base columns name their table.
+    let q = has_joins.then_some(Qualifier::Base(scope.name));
+    b.with_qualifier(q, |b| {
+        for (i, (alias, expr)) in query.aggregates.iter().enumerate() {
+            if !query.group_by.is_empty() || i > 0 {
+                b.sql.push_str(", ");
+            }
+            write_aggregate_expr(b, expr, query.model)?;
+            b.sql.push_str(" AS ");
+            b.write_ident(alias.as_ref());
         }
-        write_aggregate_expr(b, expr, query.model)?;
-        b.sql.push_str(" AS ");
-        b.write_ident(alias.as_ref());
-    }
+        Ok::<_, SqlError>(())
+    })?;
 
     write_from_source(b, scope, query.source.as_deref())?;
     write_model_joins(b, &query.joins)?;
-    write_where(b, &query.where_clause, Some(query.model))?;
+    b.with_qualifier(q, |b| {
+        write_where(b, &query.where_clause, Some(query.model))
+    })?;
 
     if !query.group_by.is_empty() {
         b.sql.push_str(" GROUP BY ");
@@ -1255,7 +1268,7 @@ fn render_agg_order_by(b: &Sql<'_>, order_by: &[crate::core::OrderClause]) -> St
         if i > 0 {
             s.push_str(", ");
         }
-        s.push_str(&b.d.quote_ident(o.column));
+        s.push_str(&render_qualified_col(b, o.column));
         if o.desc {
             s.push_str(" DESC");
         }
@@ -1267,20 +1280,21 @@ fn render_agg_order_by(b: &Sql<'_>, order_by: &[crate::core::OrderClause]) -> St
 /// It returns the string instead of writing it, so the caller can put
 /// it inside a `FILTER` clause and then apply [`apply_agg_cast`].
 fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, SqlError> {
+    let col_sql = |col: &str| render_qualified_col(b, col);
     Ok(match expr {
         AggregateExpr::Count(None) => "COUNT(*)".into(),
-        AggregateExpr::Count(Some(col)) => format!("COUNT({})", b.d.quote_ident(col)),
+        AggregateExpr::Count(Some(col)) => format!("COUNT({})", col_sql(col)),
         AggregateExpr::CountDistinct(col) => {
-            format!("COUNT(DISTINCT {})", b.d.quote_ident(col))
+            format!("COUNT(DISTINCT {})", col_sql(col))
         }
-        AggregateExpr::Sum(col) => format!("SUM({})", b.d.quote_ident(col)),
-        AggregateExpr::Avg(col) => format!("AVG({})", b.d.quote_ident(col)),
-        AggregateExpr::Max(col) => format!("MAX({})", b.d.quote_ident(col)),
-        AggregateExpr::Min(col) => format!("MIN({})", b.d.quote_ident(col)),
+        AggregateExpr::Sum(col) => format!("SUM({})", col_sql(col)),
+        AggregateExpr::Avg(col) => format!("AVG({})", col_sql(col)),
+        AggregateExpr::Max(col) => format!("MAX({})", col_sql(col)),
+        AggregateExpr::Min(col) => format!("MIN({})", col_sql(col)),
         AggregateExpr::AnyValue(col) => {
             // PG 16+ and MySQL have `any_value()`. SQLite does not,
             // so use `min()`: any value satisfies the contract.
-            let ident = b.d.quote_ident(col);
+            let ident = col_sql(col);
             match b.d.name() {
                 "mysql" => format!("ANY_VALUE({ident})"),
                 "sqlite" => format!("min({ident})"),
@@ -1297,7 +1311,7 @@ fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, Sq
                     dialect: b.d.name(),
                 });
             }
-            format!("{}({})", stddev_variance_name(expr), b.d.quote_ident(col))
+            format!("{}({})", stddev_variance_name(expr), col_sql(col))
         }
         // The arms below are not flat aggregates. Each has its own
         // arm in `write_aggregate_expr`, and reaching this helper
@@ -1406,7 +1420,7 @@ fn write_aggregate_expr(
             if *distinct {
                 b.sql.push_str("DISTINCT ");
             }
-            b.write_ident(column);
+            b.write_scope_col(column);
             b.sql.push(')');
             Ok(())
         }
@@ -1437,7 +1451,7 @@ fn write_aggregate_expr(
                     if *distinct {
                         b.sql.push_str("DISTINCT ");
                     }
-                    b.write_ident(column);
+                    b.write_scope_col(column);
                     b.sql.push_str(&order_sql);
                     b.sql.push_str(" SEPARATOR ");
                     b.sql.push_str(&b.d.quote_literal(delimiter));
@@ -1456,12 +1470,12 @@ fn write_aggregate_expr(
                             });
                         }
                         b.sql.push_str("group_concat(DISTINCT ");
-                        b.write_ident(column);
+                        b.write_scope_col(column);
                         b.sql.push_str(&order_sql);
                         b.sql.push(')');
                     } else {
                         b.sql.push_str("group_concat(");
-                        b.write_ident(column);
+                        b.write_scope_col(column);
                         b.sql.push_str(", ");
                         b.push_param(crate::core::SqlValue::String(delimiter.clone()));
                         b.sql.push_str(&order_sql);
@@ -1475,7 +1489,7 @@ fn write_aggregate_expr(
                     if *distinct {
                         b.sql.push_str("DISTINCT ");
                     }
-                    b.write_ident(column);
+                    b.write_scope_col(column);
                     b.sql.push_str(", ");
                     b.push_param(crate::core::SqlValue::String(delimiter.clone()));
                     b.sql.push_str(&order_sql);
@@ -1492,7 +1506,7 @@ fn write_aggregate_expr(
                 });
             }
             b.sql.push_str("jsonb_agg(");
-            b.write_ident(column);
+            b.write_scope_col(column);
             b.sql.push(')');
             Ok(())
         }
@@ -1571,7 +1585,7 @@ fn write_aggregate_as_case_when(
     write_where_expr(b, filter, None)?;
     b.sql.push_str(" THEN ");
     match case_then {
-        Some(col) => b.write_ident(col),
+        Some(col) => b.write_scope_col(col),
         None => b.sql.push('1'),
     }
     b.sql.push_str(" END)");

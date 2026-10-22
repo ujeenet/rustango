@@ -6,6 +6,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** `ModelFormFor::from_json` refuses unknown keys; an oversized CSRF form gets 413, not 403; undecodable job payloads are retried; the first `makemigrations` on PostgreSQL rewrites each table with a sized `vector` or `geometry` column. See UPGRADING.
 
+### Fixed — a grouped aggregate with joins names the base table
+
+`WHERE`, `SUM(…)` and the other aggregate columns of `.join(…).values(…).annotate(…)` are qualified with the model's table, as `fetch()` does; a column the join shares (a self-join, two soft-delete scopes) was ambiguous.
+
 ### Fixed — the fullstack scaffold mounts its admin at `[admin] url_prefix`
 
 `main.rs` loads the settings once, passes them to the server (via the now-public `Cli::with_loaded_settings`, so a missing `config/` still only warns) and to `admin::Builder::from_settings`, and nests the admin at the new `admin::Builder::settings_prefix` (default `/admin`). `url_prefix = "/"` stops boot with an error: `Cli::nest_with` refuses a root path, which axum would panic on.
