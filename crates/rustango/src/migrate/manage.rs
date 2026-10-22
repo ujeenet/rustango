@@ -2443,14 +2443,11 @@ fn make_cmd<W: Write>(
     w: &mut W,
     has_feature: impl Fn(&str) -> bool,
 ) -> Result<(), MigrateError> {
-    if let Some(feature) = missing_make_feature(cmd, has_feature) {
-        return Err(MigrateError::Validation(format!(
-            "{cmd}: the code it writes needs rustango's `{feature}` feature, which this \
-             project does not enable; add it to the rustango dependency's features"
-        )));
+    if let Some(feature) = missing_make_feature(cmd, &has_feature) {
+        return Err(missing_feature_error(cmd, feature));
     }
     match cmd {
-        "make:viewset" => make_viewset_cmd(args, w),
+        "make:viewset" => make_viewset_cmd(args, w, has_feature),
         "make:api_routes" => make_api_routes_cmd(args, w),
         "make:serializer" => make_serializer_cmd(args, w),
         "make:form" => make_form_cmd(args, w),
@@ -2464,11 +2461,19 @@ fn make_cmd<W: Write>(
     }
 }
 
+fn missing_feature_error(cmd: &str, feature: &str) -> MigrateError {
+    MigrateError::Validation(format!(
+        "{cmd}: the code it writes needs rustango's `{feature}` feature, which this \
+         project does not enable; add it to the rustango dependency's features"
+    ))
+}
+
 /// The feature a verb's output needs, when `has_feature` says it is off.
+/// `make:viewset` checks its own, once it knows which template it writes.
 fn missing_make_feature(cmd: &str, has_feature: impl Fn(&str) -> bool) -> Option<&'static str> {
     let feature = match cmd {
         // `make:test` writes a `test_client` test, which is `admin`-gated.
-        "make:viewset" | "make:test" => "admin",
+        "make:test" => "admin",
         "make:serializer" => "serializer",
         "make:form" => "forms",
         "make:job" | "make:worker" => "jobs",
@@ -2559,7 +2564,11 @@ fn declares_struct(text: &str, name: &str) -> bool {
     })
 }
 
-fn make_viewset_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+fn make_viewset_cmd<W: Write>(
+    args: &[String],
+    w: &mut W,
+    has_feature: impl Fn(&str) -> bool,
+) -> Result<(), MigrateError> {
     // Tenancy projects need a different scaffold shape — the
     // single-pool `#[derive(ViewSet)]` is fatal for them (#80) — so
     // this command toggles between two templates. Resolution order:
@@ -2598,12 +2607,14 @@ fn make_viewset_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateE
             "make:viewset: auto-detected tenancy mode from Cargo.toml (pass `--no-tenant` to override)"
         )?;
     }
-    if tenant_aware && !compiled_feature("tenancy") {
-        return Err(MigrateError::Validation(
-            "make:viewset --tenant: the code it writes needs rustango's `tenancy` feature; \
-             pass `--no-tenant` or enable it"
-                .into(),
-        ));
+    // The tenant template uses `ViewSet`, which `tenancy` alone provides.
+    let (verb, feature) = if tenant_aware {
+        ("make:viewset --tenant", "tenancy")
+    } else {
+        ("make:viewset", "admin")
+    };
+    if !has_feature(feature) {
+        return Err(missing_feature_error(verb, feature));
     }
     let (name, model, crate_root) = parse_name_and_model(&filtered)?;
     let snake = pascal_to_snake(&name);
@@ -6796,7 +6807,6 @@ mod gen_tests {
     fn make_verbs_name_the_feature_their_output_needs() {
         let none = |_: &str| false;
         for (verb, feature) in [
-            ("make:viewset", "admin"),
             ("make:serializer", "serializer"),
             ("make:form", "forms"),
             ("make:job", "jobs"),
@@ -6813,6 +6823,38 @@ mod gen_tests {
         }
         let err = make_cmd("make:test", &[], &mut Vec::new(), none).unwrap_err();
         assert!(err.to_string().contains("`admin`"), "{err}");
+    }
+
+    /// The pool viewset needs `admin`; the tenant one only `tenancy`.
+    #[test]
+    fn make_viewset_needs_the_feature_of_its_template() {
+        // `--crate` with no value fails after the feature check, so no file is written.
+        let run = |flag: &str, missing: &'static str| {
+            let args = [flag.to_owned(), "--crate".to_owned()];
+            make_cmd("make:viewset", &args, &mut Vec::new(), move |f| f != missing)
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(run("--tenant", "tenancy").contains("`tenancy`"));
+        assert!(run("--no-tenant", "admin").contains("`admin`"));
+        let err = run("--tenant", "admin");
+        assert!(err.contains("--crate requires a value"), "{err}");
+    }
+
+    #[test]
+    fn compiled_feature_matches_the_build() {
+        for (feature, on) in [
+            ("admin", cfg!(feature = "admin")),
+            ("tenancy", cfg!(feature = "tenancy")),
+            ("serializer", cfg!(feature = "serializer")),
+            ("forms", cfg!(feature = "forms")),
+            ("jobs", cfg!(feature = "jobs")),
+            ("scheduler", cfg!(feature = "scheduler")),
+            ("notifications", cfg!(feature = "notifications")),
+            ("no_such_feature", false),
+        ] {
+            assert_eq!(compiled_feature(feature), on, "{feature}");
+        }
     }
 
     /// The worker reads `DATABASE_URL`, so it must load `.env` like main.rs.
