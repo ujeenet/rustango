@@ -16,8 +16,8 @@ In-repo example → path dep on the framework. A real project uses
 | `src/lib.rs` — `Post`'s `admin(...)` block | list_display, list_display_links, list_filter, search_fields, search_help_text, ordering, list_per_page, date_hierarchy, fieldsets, actions |
 | `src/lib.rs` — `register_admin_inline!` | the comments inline on the post page |
 | `src/lib.rs` — `audit(track = …)` | the audit-trail card on the post page |
-| `src/main.rs` — `Builder::register_action(...)` | the `publish` / `archive` bulk-action handlers |
-| `tests/admin_smoke.rs` | asserts the list/detail render with filters + inline |
+| `src/lib.rs` — `admin_router` | the login (`with_session_auth`) and the `publish` / `archive` bulk actions |
+| `tests/admin_smoke.rs` | asserts the login gate, then the list/detail render with filters + inline |
 
 ## Run it
 
@@ -25,6 +25,7 @@ In-repo example → path dep on the framework. A real project uses
 docker compose -f ../getting_started_blog/docker-compose.yml up -d postgres  # or any Postgres
 export DATABASE_URL=postgres://rustango:rustango@localhost:5432/admin_demo
 cargo run -- migrate     # create tables (+ the audit-log table)
+cargo run -- create-admin alice  # the admin login
 cargo run                # seeds on first boot; admin at http://localhost:8080/admin
 cargo test               # integration test (needs DATABASE_URL)
 ```

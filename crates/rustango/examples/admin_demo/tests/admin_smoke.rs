@@ -1,12 +1,13 @@
-//! Verifies the auto-admin renders against a real Postgres: the home lists the
-//! models, the posts list shows seeded rows + the configured filters, and the
-//! post detail page shows the comments inline. Needs `DATABASE_URL` (the schema
-//! is created by `cargo run -- migrate`; CI does that before `cargo test`).
+//! Verifies the auto-admin renders against a real Postgres: it is behind a
+//! login, the home lists the models, the posts list shows seeded rows + the
+//! configured filters, and the post detail page shows the comments inline.
+//! Needs `DATABASE_URL` (the schema is created by `cargo run -- migrate`; CI
+//! does that before `cargo test`).
 //!
 //! One test on purpose — the shared seed runs once, avoiding a parallel race.
 
-use admin_demo::seed;
-use rustango::admin;
+use admin_demo::{admin_router, seed};
+use rustango::admin::AdminUser;
 use rustango::sql::sqlx::PgPool;
 use rustango::test_client::TestClient;
 
@@ -16,9 +17,31 @@ async fn admin_renders_list_filters_and_inline() {
     let pool = PgPool::connect(&url).await.expect("connect");
     seed(&pool).await.expect("seed");
 
-    let app = axum::Router::new()
-        .nest("/admin", admin::Builder::new(pool).admin_prefix("/admin").build());
+    // The router the server mounts, so this pins its login.
+    let app = axum::Router::new().nest("/admin", admin_router(pool.clone()));
     let client = TestClient::new(app);
+
+    // Anonymous: sent to the login page.
+    let anon = client.get("/admin").send().await;
+    assert!((300..400).contains(&anon.status), "anonymous got {}", anon.status);
+    assert!(anon.header("location").unwrap_or("").contains("/admin/login"));
+
+    let name = format!(
+        "smoke{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let mut user = AdminUser::new_with_password(&name, "smoke-pass-123", true).unwrap();
+    user.insert_pool(&pool.clone().into()).await.expect("admin user");
+    let login = client
+        .login(
+            "/admin/login",
+            &[("username", &name), ("password", "smoke-pass-123")],
+        )
+        .await;
+    assert!((300..400).contains(&login.status), "login: {}", login.status);
 
     // Home renders.
     let home = client.get("/admin").send().await;
