@@ -443,6 +443,11 @@ impl CsrfLayer {
             secure_from,
         }
     }
+
+    #[cfg(all(test, feature = "manage"))]
+    pub(crate) fn follows_session_policy(&self) -> bool {
+        matches!(self.secure_from, SecureFrom::SessionPolicy)
+    }
 }
 
 impl<S> tower::Layer<S> for CsrfLayer {

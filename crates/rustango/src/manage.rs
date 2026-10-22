@@ -2534,24 +2534,49 @@ mod tests {
     #[cfg(feature = "csrf")]
     #[tokio::test]
     async fn with_csrf_cookie_follows_the_session_policy() {
-        use tower::ServiceExt as _;
         assert!(Cli::new().csrf.is_none(), "default off");
-        // A OnceLock; nextest gives this test its own process.
-        if !crate::session::set_secure_cookies(false) && crate::session::secure_cookies() {
-            return;
+        // The policy is a write-once global; assert against whatever it holds.
+        let _ = crate::session::set_secure_cookies(false);
+        let mount = Cli::new().with_csrf().csrf.expect("set");
+        assert!(matches!(mount, CsrfMount::SessionPolicy));
+        assert!(mount.layer().follows_session_policy());
+        let cookie = csrf_cookie(CsrfMount::SessionPolicy).await;
+        assert_eq!(
+            cookie.contains("Secure"),
+            crate::session::secure_cookies(),
+            "{cookie}"
+        );
+    }
+
+    /// An explicit config sets `Secure` itself, on and off.
+    #[cfg(feature = "csrf")]
+    #[tokio::test]
+    async fn with_csrf_config_cookie_keeps_its_secure_flag() {
+        for secure in [true, false] {
+            let cfg = crate::forms::csrf::CsrfConfig {
+                secure,
+                ..Default::default()
+            };
+            assert!(!CsrfMount::Explicit(cfg.clone()).layer().follows_session_policy());
+            let cookie = csrf_cookie(CsrfMount::Explicit(cfg)).await;
+            assert_eq!(cookie.contains("Secure"), secure, "{cookie}");
         }
-        let layer = Cli::new().with_csrf().csrf.expect("set").layer();
+    }
+
+    #[cfg(feature = "csrf")]
+    async fn csrf_cookie(mount: CsrfMount) -> String {
+        use tower::ServiceExt as _;
         let app = axum::Router::new()
             .route("/", axum::routing::get(|| async { "ok" }))
-            .layer(layer);
+            .layer(mount.layer());
         let req = axum::http::Request::get("/")
             .body(axum::body::Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        let cookie = resp.headers()[axum::http::header::SET_COOKIE]
+        resp.headers()[axum::http::header::SET_COOKIE]
             .to_str()
-            .unwrap();
-        assert!(!cookie.contains("Secure"), "{cookie}");
+            .unwrap()
+            .to_owned()
     }
 
     #[cfg(feature = "csrf")]
