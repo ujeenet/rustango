@@ -34,19 +34,79 @@ pub fn invert(
     prev: &SchemaSnapshot,
 ) -> Result<Vec<Operation>, MigrateError> {
     let mut out = Vec::with_capacity(forward.len());
-    for op in forward.iter().rev() {
-        out.push(invert_one(op, prev)?);
+    for (i, op) in forward.iter().enumerate().rev() {
+        out.push(invert_one(op, prev, &Names::new(&forward[..i]))?);
     }
     Ok(out)
 }
 
-fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, MigrateError> {
+/// Maps names between `prev` and one forward op, through the renames
+/// before it: a drop looks its object up under the old name and
+/// recreates it under the name at its op.
+struct Names<'a> {
+    earlier: &'a [Operation],
+    /// `earlier`'s renames undone, last first.
+    undo: Vec<Operation>,
+}
+
+impl<'a> Names<'a> {
+    fn new(earlier: &'a [Operation]) -> Self {
+        let undo = earlier
+            .iter()
+            .rev()
+            .filter_map(|op| match op {
+                Operation::Schema(SchemaChange::RenameTable { old_name, new_name }) => {
+                    Some(SchemaChange::RenameTable {
+                        old_name: new_name.clone(),
+                        new_name: old_name.clone(),
+                    })
+                }
+                Operation::Schema(SchemaChange::RenameColumn {
+                    table,
+                    old_column,
+                    new_column,
+                }) => Some(SchemaChange::RenameColumn {
+                    table: table.clone(),
+                    old_column: new_column.clone(),
+                    new_column: old_column.clone(),
+                }),
+                _ => None,
+            })
+            .map(Operation::Schema)
+            .collect();
+        Self { earlier, undo }
+    }
+
+    /// `table` at the op, as `prev` names it.
+    fn before(&self, table: &str) -> String {
+        super::rebuild::name_at_end(table, &self.undo)
+    }
+
+    fn column_before(&self, table: &str, column: &str) -> String {
+        super::rebuild::columns_at_end(table, &[column.to_owned()], &self.undo).remove(0)
+    }
+
+    /// `prev`'s `table` as it is named at the op.
+    fn now(&self, table: &str) -> String {
+        super::rebuild::name_at_end(table, self.earlier)
+    }
+
+    fn columns_now(&self, table: &str, columns: &[String]) -> Vec<String> {
+        super::rebuild::columns_at_end(table, columns, self.earlier)
+    }
+}
+
+fn invert_one(
+    op: &Operation,
+    prev: &SchemaSnapshot,
+    names: &Names<'_>,
+) -> Result<Operation, MigrateError> {
     match op {
         Operation::Schema(SchemaChange::CreateTable(t)) => {
             Ok(Operation::Schema(SchemaChange::DropTable(t.clone())))
         }
         Operation::Schema(SchemaChange::DropTable(t)) => {
-            if prev.table(t).is_none() {
+            if prev.table(&names.before(t)).is_none() {
                 return Err(MigrateError::Validation(format!(
                     "cannot invert DropTable(`{t}`): table not in predecessor snapshot",
                 )));
@@ -60,12 +120,12 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
             }))
         }
         Operation::Schema(SchemaChange::DropColumn { table, column }) => {
-            let t = prev.table(table).ok_or_else(|| {
+            let t = prev.table(&names.before(table)).ok_or_else(|| {
                 MigrateError::Validation(format!(
                     "cannot invert DropColumn(`{table}`.`{column}`): table missing in predecessor snapshot",
                 ))
             })?;
-            if t.field(column).is_none() {
+            if t.field(&names.column_before(table, column)).is_none() {
                 return Err(MigrateError::Validation(format!(
                     "cannot invert DropColumn(`{table}`.`{column}`): column missing in predecessor snapshot",
                 )));
@@ -177,7 +237,7 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
             })?;
             Ok(Operation::Schema(SchemaChange::AddCheckConstraint {
                 name: name.clone(),
-                table: c.table.clone(),
+                table: names.now(&c.table),
                 expr: c.expr.clone(),
             }))
         }
@@ -195,7 +255,17 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
                     "cannot invert DropExclusionConstraint(`{name}`): constraint not in predecessor snapshot",
                 ))
             })?;
-            Ok(Operation::Schema(super::diff::add_exclude(x)))
+            let mut x = x.clone();
+            let columns: Vec<String> = x.elements.iter().map(|(c, _)| c.clone()).collect();
+            for ((c, _), now) in x
+                .elements
+                .iter_mut()
+                .zip(names.columns_now(&x.table, &columns))
+            {
+                *c = now;
+            }
+            x.table = names.now(&x.table);
+            Ok(Operation::Schema(super::diff::add_exclude(&x)))
         }
         Operation::Schema(SchemaChange::CreateIndex { name, table, .. }) => {
             Ok(Operation::Schema(SchemaChange::DropIndex {
@@ -213,12 +283,12 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
             })?;
             Ok(Operation::Schema(SchemaChange::CreateIndex {
                 name: name.clone(),
-                table: idx.table.clone(),
-                columns: idx.columns.clone(),
+                table: names.now(&idx.table),
+                columns: names.columns_now(&idx.table, &idx.columns),
                 unique: idx.unique,
                 method: idx.method.clone(),
                 where_clause: idx.where_clause.clone(),
-                include: idx.include.clone(),
+                include: names.columns_now(&idx.table, &idx.include),
             }))
         }
         Operation::Schema(SchemaChange::CreateM2MTable {
@@ -231,18 +301,18 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
             through: through.clone(),
         })),
         Operation::Schema(SchemaChange::DropM2MTable { through }) => {
-            if prev.m2m_table(through).is_none() {
-                return Err(MigrateError::Validation(format!(
+            let mt = prev.m2m_table(&names.before(through)).ok_or_else(|| {
+                MigrateError::Validation(format!(
                     "cannot invert DropM2MTable(`{through}`): junction table not in predecessor snapshot",
-                )));
-            }
-            let mt = prev.m2m_table(through).unwrap();
+                ))
+            })?;
+            let cols = names.columns_now(&mt.through, &[mt.src_col.clone(), mt.dst_col.clone()]);
             Ok(Operation::Schema(SchemaChange::CreateM2MTable {
                 through: through.clone(),
-                src_table: mt.src_table.clone(),
-                src_col: mt.src_col.clone(),
-                dst_table: mt.dst_table.clone(),
-                dst_col: mt.dst_col.clone(),
+                src_table: names.now(&mt.src_table),
+                src_col: cols[0].clone(),
+                dst_table: names.now(&mt.dst_table),
+                dst_col: cols[1].clone(),
             }))
         }
         Operation::Schema(SchemaChange::AddCompositeFk { table, name, .. }) => {
@@ -252,7 +322,7 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
             }))
         }
         Operation::Schema(SchemaChange::DropCompositeFk { table, name }) => {
-            let t = prev.table(table).ok_or_else(|| {
+            let t = prev.table(&names.before(table)).ok_or_else(|| {
                 MigrateError::Validation(format!(
                     "cannot invert DropCompositeFk(`{table}`.`{name}`): table missing in predecessor snapshot",
                 ))
@@ -265,9 +335,9 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
             Ok(Operation::Schema(SchemaChange::AddCompositeFk {
                 table: table.clone(),
                 name: name.clone(),
-                to: cf.to.clone(),
-                from: cf.from.clone(),
-                on: cf.on.clone(),
+                to: names.now(&cf.to),
+                from: names.columns_now(&t.name, &cf.from),
+                on: names.columns_now(&cf.to, &cf.on),
             }))
         }
         Operation::Data(d) => {

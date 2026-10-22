@@ -3928,9 +3928,67 @@ async fn missing_callback_fails_before_any_op(pool: &Pool) {
     assert!(recorded().await);
 }
 
+/// Unapplying drops that follow a table rename finds them under the old
+/// name and recreates them on the table before it is renamed back.
+async fn drops_after_a_rename_unapply(pool: &Pool) {
+    let (parent, t, u) = ("mad_rd_parent", "mad_rd_old", "mad_rd_new");
+    let chain = Chain::new(pool, "rd", &[u, t, parent]).await;
+    let ab = || vec![id(), col("a", "i64", json!({})), col("b", "i64", json!({}))];
+    let mut kid = table(t, {
+        let mut f = ab();
+        f.push(col("x", "i64", json!({})));
+        f
+    });
+    kid["composite_fks"] =
+        json!([{"name": "mad_rd_fk", "to": parent, "from": ["a", "b"], "on": ["a", "b"]}]);
+    let uq = json!({"name": "mad_rd_ab_uq", "table": parent, "columns": ["a", "b"], "unique": true});
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(parent, ab()), kid],
+                   "indexes": [uq, {"name": "mad_rd_ix", "table": t, "columns": ["a"],
+                                    "unique": false}]}),
+        )
+        .await
+        .expect("initial");
+    let ops = vec![
+        SchemaChange::RenameTable {
+            old_name: t.into(),
+            new_name: u.into(),
+        },
+        SchemaChange::DropIndex {
+            name: "mad_rd_ix".into(),
+            table: u.into(),
+        },
+        SchemaChange::DropCompositeFk {
+            table: u.into(),
+            name: "mad_rd_fk".into(),
+        },
+        SchemaChange::DropColumn {
+            table: u.into(),
+            column: "x".into(),
+        },
+    ];
+    let after = json!({"tables": [table(parent, ab()), table(u, ab())], "indexes": [uq]});
+    let name = chain.hand(pool, after, ops, None).await.expect("rename, then drops");
+    chain.undo(pool, &name).await.expect("the drops come back");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "x"])
+        .await
+        .expect("x is back");
+    assert!(
+        exec(pool, "INSERT INTO {} ({}, {}) VALUES (9, 9)", &[t, "a", "b"])
+            .await
+            .is_err(),
+        "the composite FK is back on {}",
+        pool.dialect().name()
+    );
+    chain.migrate(pool).await.expect("and forward again");
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
+        drops_after_a_rename_unapply,
         missing_callback_fails_before_any_op,
         migrate_to_applies_an_earlier_pending_file,
         unmanaged_model_keeps_its_table,

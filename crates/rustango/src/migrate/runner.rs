@@ -3374,6 +3374,10 @@ fn render_step(
             unique: false,
             ..
         } => Some(table.as_str()),
+        // Before a later rename (an unapply's), `after` has it under another name.
+        SC::AddColumn { table, .. } | SC::CreateTable(table) if after.table(table).is_none() => {
+            Some(table.as_str())
+        }
         _ if dialect.alters_by_rebuild() => rebuilt,
         _ => modified.filter(|_| dialect.modifies_whole_column()),
     };

@@ -6,6 +6,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`; `RequestIdLayer` no longer echoes an untrusted client's `X-Request-Id`; a SQLite UUID key stored both as BLOB and TEXT is now a 404 in ViewSets and template views. See UPGRADING.
 
+### Fixed — unapplying drops that follow a rename in the same migration
+
+The rollback finds the dropped column, index or FK under its old name and recreates it before the rename is undone.
+
 ### Fixed — an unregistered migration callback fails before the migration's first op
 
 Apply and unapply look up every callback first, so a missing one no longer leaves a half-run, still-recorded migration.
