@@ -162,9 +162,9 @@ Only new scaffolds change. To match in an existing project, drop `RUSTANGO_BIND`
 
 With `[security] secure_cookies = false`, or on a non-prod tier with it unset, the CSRF cookie is no longer `Secure`. A `Cli` without `with_settings_from_env` is `Secure` only when `RUSTANGO_ENV` is `prod`, so an HTTPS staging host loses the flag; load settings or use `with_csrf_config` to force it.
 
-### New fullstack projects: `admin_router` panics on a bad config
+### New fullstack projects: a bad config stops boot
 
-It used to fall back to defaults, which dropped `[admin]` table restrictions. Existing projects can replace `unwrap_or_default()` with `expect(..)` in `src/urls.rs`.
+`main.rs` loads settings once and passes them to `admin_router(pool, &settings)`; a config that fails to load stops `Cli::run` instead of dropping `[admin]` table restrictions (a missing `config/` only warns). Existing projects are unchanged.
 
 ### `Settings::load` inside `with_overridden` returns the overlay
 
@@ -237,6 +237,14 @@ All class-based views now add the registered context processors' keys, and every
 ### Translation lookup order
 
 A base-language override (`pt`) no longer hides a region file entry (`pt-BR`), and a flat entry in an earlier locale of the chain now beats a plural entry in a later one.
+
+### New `SqlError::ValueNotSupportedInDialect`
+
+Raw SQL helpers return it for a Postgres-only bind on MySQL/SQLite, or a `SqlValue::List` bind on any backend, where they used to panic. `SqlError` is `#[non_exhaustive]`, so matches keep compiling.
+
+### Deletes clear generic M2M junction rows
+
+Deleting a model that declares `generic_m2m(...)` now also deletes its junction rows; so does `Model::truncate`. On MySQL and SQLite this runs as two statements in one transaction.
 
 ## 0.60.9
 

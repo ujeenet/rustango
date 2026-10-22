@@ -696,8 +696,11 @@ impl Cli {
         self.with_loaded_settings(crate::config::Settings::load_from_env())
     }
 
+    /// [`Cli::with_settings_from_env`] for a result you already loaded,
+    /// so one load can also feed the admin. Same missing-file policy.
     #[cfg(feature = "config")]
-    fn with_loaded_settings(
+    #[must_use]
+    pub fn with_loaded_settings(
         mut self,
         loaded: Result<crate::config::Settings, crate::config::ConfigError>,
     ) -> Self {

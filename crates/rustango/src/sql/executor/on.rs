@@ -7,7 +7,7 @@ use futures_util::stream::{BoxStream, TryStreamExt as _};
 use super::atomic::{self, Gate};
 use super::{Dialect, ExecError, PoolTx};
 use crate::core::SqlValue;
-use crate::sql::Pool;
+use crate::sql::{DeletePlan, Pool};
 
 /// One connection held from a [`Pool`]. Every `_on` query given
 /// `&mut conn` runs on it, so a handler pays one checkout, not one per query.
@@ -165,6 +165,22 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
     ) -> BoxFuture<'e, Result<u64, sqlx::Error>>
     where
         'c: 'e;
+
+    /// Runs a delete plan's statements in one transaction. Only reached
+    /// on dialects that split it, so never on a Postgres sqlx executor.
+    #[doc(hidden)]
+    fn run_delete_plan<'e>(self, plan: DeletePlan) -> BoxFuture<'e, Result<u64, ExecError>>
+    where
+        'c: 'e,
+    {
+        let _ = plan;
+        Box::pin(async {
+            Err(ExecError::Sql(crate::sql::SqlError::OperatorNotSupportedInDialect {
+                op: "multi-statement DELETE",
+                dialect: "postgres",
+            }))
+        })
+    }
 }
 
 mod sealed {
@@ -316,6 +332,13 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
             Pool::Sqlite(p) => sq_exec(p, sql, params),
         }
     }
+
+    fn run_delete_plan<'e>(self, plan: DeletePlan) -> BoxFuture<'e, Result<u64, ExecError>>
+    where
+        'c: 'e,
+    {
+        Box::pin(super::delete_plan_pool(self, plan))
+    }
 }
 
 impl<'c> sealed::Sealed<'c> for &'c mut PoolConn {}
@@ -361,6 +384,18 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
             #[cfg(feature = "sqlite")]
             PoolConn::Sqlite(c) => sq_exec(&mut **c, sql, params),
         }
+    }
+
+    fn run_delete_plan<'e>(self, plan: DeletePlan) -> BoxFuture<'e, Result<u64, ExecError>>
+    where
+        'c: 'e,
+    {
+        Box::pin(async move {
+            let mut tx = self.begin().await?;
+            let n = super::run_delete_plan_tx(&mut tx, plan).await?;
+            tx.commit().await?;
+            Ok(n)
+        })
     }
 }
 
@@ -411,6 +446,13 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
             #[cfg(feature = "sqlite")]
             PoolTx::Sqlite(t) => sq_exec(&mut **t, sql, params),
         }
+    }
+
+    fn run_delete_plan<'e>(self, plan: DeletePlan) -> BoxFuture<'e, Result<u64, ExecError>>
+    where
+        'c: 'e,
+    {
+        Box::pin(super::run_delete_plan_tx(self, plan))
     }
 }
 

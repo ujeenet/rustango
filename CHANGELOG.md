@@ -4,6 +4,22 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the fullstack scaffold mounts its admin at `[admin] url_prefix`
+
+`main.rs` loads the settings once, passes them to the server (via the now-public `Cli::with_loaded_settings`, so a missing `config/` still only warns) and to `admin::Builder::from_settings`, and nests the admin at the new `admin::Builder::settings_prefix` (default `/admin`).
+
+### Fixed — SQLite migrations see columns another pooled connection added
+
+A migration on a connection that sat idle while another one ran DDL could fail a `RenameColumn` with `no such column`; each migration transaction now reloads the schema first.
+
+### Fixed — raw SQL helpers refuse Postgres-only binds instead of panicking
+
+`raw_execute_pool`/`_tx` and `raw_query_pool`/`_tx` return `SqlError::ValueNotSupportedInDialect` for an array, range, hstore, vector or geometry bind on MySQL or SQLite, and for a `SqlValue::List` bind on every backend.
+
+### Fixed — deleting a model removes its generic M2M links
+
+Every delete path (instance, `delete_where`, `QuerySet::delete_on`, transaction, audited, admin, `Model::truncate`) also deletes the owner's `generic_m2m` junction rows, in the same transaction; PostgreSQL does it in one statement.
+
 ### Fixed — class-based views run the template context processors
 
 Every template view now merges the registered processors and the request's `ExtraContext` before it renders; view keys still win. A layout reading a processor key used to fail with a 500.
@@ -66,7 +82,7 @@ Connects are bounded at 5 s per attempt (three attempts, ~1 s apart) and command
 
 ### Fixed — scaffolded projects honor settings and stay off the network in dev
 
-The fullstack admin is built with `admin::Builder::from_settings`, so `[admin]` and `[brand]` apply (the prefix stays `/admin`, matching `main.rs`); a config that fails to load stops it rather than dropping `[admin]` restrictions. `.env.example` no longer sets `RUSTANGO_BIND=0.0.0.0:8080`, which beat the dev tier's `127.0.0.1`; compose sets it for the container and publishes 8080 on loopback. `--features csrf` adds `.with_csrf()`. Every `main.rs` shows where `with_trusted_proxies` goes, and the README runs `makemigrations` before `migrate`.
+The fullstack admin is built with `admin::Builder::from_settings`, so `[admin]` and `[brand]` apply; a config that fails to load stops boot rather than dropping `[admin]` restrictions. `.env.example` no longer sets `RUSTANGO_BIND=0.0.0.0:8080`, which beat the dev tier's `127.0.0.1`; compose sets it for the container and publishes 8080 on loopback. `--features csrf` adds `.with_csrf()`. Every `main.rs` shows where `with_trusted_proxies` goes, and the README runs `makemigrations` before `migrate`.
 
 ### Fixed — `make:*` generators write code that compiles
 

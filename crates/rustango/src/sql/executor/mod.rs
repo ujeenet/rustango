@@ -615,8 +615,11 @@ impl<T: Model + Send> QuerySet<T> {
     pub async fn delete_on<'c, E: SqlExecutor<'c>>(self, executor: E) -> Result<u64, ExecError> {
         refuse_audited::<T>("`delete_on` cannot audit; use `Model::delete_where`")?;
         let query = self.compile_delete()?;
-        let stmt = executor.dialect().compile_delete(&query)?;
-        write_on(executor, &stmt.sql, stmt.params).await
+        let plan = crate::sql::compile_delete_plan(executor.dialect(), &query)?;
+        if plan.links.is_empty() {
+            return write_on(executor, &plan.owner.sql, plan.owner.params).await;
+        }
+        executor.run_delete_plan(plan).await
     }
 }
 
@@ -1215,8 +1218,37 @@ pub async fn update_pool(pool: &Pool, query: &UpdateQuery) -> Result<u64, ExecEr
 /// # Errors
 /// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn delete_pool(pool: &Pool, query: &DeleteQuery) -> Result<u64, ExecError> {
-    let stmt = pool.dialect().compile_delete(query)?;
-    execute_pool(pool, &stmt.sql, stmt.params).await
+    let plan = crate::sql::compile_delete_plan(pool.dialect(), query)?;
+    delete_plan_pool(pool, plan).await
+}
+
+/// Run a [`DeletePlan`](crate::sql::DeletePlan) on `pool`, in one
+/// transaction (a savepoint inside `atomic`) when it has links.
+pub(crate) async fn delete_plan_pool(
+    pool: &Pool,
+    plan: crate::sql::DeletePlan,
+) -> Result<u64, ExecError> {
+    if plan.links.is_empty() {
+        return execute_pool(pool, &plan.owner.sql, plan.owner.params).await;
+    }
+    atomic(pool, move |tx| {
+        Box::pin(async move {
+            let mut guard = tx.lock().await?;
+            run_delete_plan_tx(&mut guard, plan).await
+        })
+    })
+    .await
+}
+
+/// Run a [`DeletePlan`](crate::sql::DeletePlan) in `tx`: links, then the owner.
+pub(crate) async fn run_delete_plan_tx(
+    tx: &mut PoolTx<'_>,
+    plan: crate::sql::DeletePlan,
+) -> Result<u64, ExecError> {
+    for link in plan.links {
+        execute_tx(tx, &link.sql, link.params).await?;
+    }
+    execute_tx(tx, &plan.owner.sql, plan.owner.params).await
 }
 
 /// `SELECT COUNT(*)` against either backend.
@@ -1358,6 +1390,7 @@ pub async fn raw_execute_pool(
     sql: &str,
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
+    crate::sql::refuse_unbindable_values(pool.dialect(), &binds)?;
     execute_pool(pool, sql, binds).await
 }
 
@@ -1371,6 +1404,7 @@ pub async fn raw_execute_tx(
     sql: &str,
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
+    crate::sql::refuse_unbindable_values(tx.dialect(), &binds)?;
     let gate = atomic::gate(tx)?;
     gate.check(
         async {
@@ -1673,8 +1707,51 @@ pub async fn update_tx(tx: &mut PoolTx<'_>, query: &UpdateQuery) -> Result<u64, 
 /// # Errors
 /// As [`delete_pool`].
 pub async fn delete_tx(tx: &mut PoolTx<'_>, query: &DeleteQuery) -> Result<u64, ExecError> {
-    let stmt = tx.dialect().compile_delete(query)?;
-    execute_tx(tx, &stmt.sql, stmt.params).await
+    let plan = crate::sql::compile_delete_plan(tx.dialect(), query)?;
+    run_delete_plan_tx(tx, plan).await
+}
+
+/// `Model::truncate`'s statement: `TRUNCATE … RESTART IDENTITY CASCADE`
+/// on Postgres, `DELETE FROM` elsewhere. Not part of the public API.
+#[doc(hidden)]
+#[must_use]
+pub fn truncate_sql(d: &dyn crate::sql::Dialect, table: &str) -> String {
+    let quoted = d.quote_ident(table);
+    if d.name() == "postgres" {
+        format!("TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE")
+    } else {
+        format!("DELETE FROM {quoted}")
+    }
+}
+
+/// Run `sql` (a [`truncate_sql`]) in `tx` after clearing the table's
+/// generic M2M junction rows, so a reused id inherits no links.
+pub(crate) async fn truncate_tx(
+    tx: &mut PoolTx<'_>,
+    table: &str,
+    sql: &str,
+) -> Result<u64, ExecError> {
+    for link in crate::sql::m2m::generic_m2m_truncate_links(table) {
+        let stmt = tx.dialect().compile_delete(&link)?;
+        execute_tx(tx, &stmt.sql, stmt.params).await?;
+    }
+    execute_tx(tx, sql, Vec::new()).await
+}
+
+/// Empty `model`'s table and its generic M2M junction rows in one
+/// transaction. Backs the derived `Model::truncate`.
+///
+/// # Errors
+/// As [`raw_execute_tx`].
+pub async fn truncate(
+    pool: &Pool,
+    model: &'static crate::core::ModelSchema,
+) -> Result<u64, ExecError> {
+    let mut tx = tx::write_transaction_pool(pool).await?;
+    let sql = truncate_sql(tx.dialect(), model.table);
+    let affected = truncate_tx(&mut tx, model.table, &sql).await?;
+    tx.commit().await?;
+    Ok(affected)
 }
 
 /// Validated multi-row `INSERT` inside an open transaction, split to fit
@@ -1981,6 +2058,7 @@ pub async fn raw_query_pool<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
+    crate::sql::refuse_unbindable_values(pool.dialect(), &binds)?;
     crate::test_assertions::query_counter::bump();
     match pool {
         #[cfg(feature = "postgres")]
@@ -2030,6 +2108,7 @@ pub async fn raw_query_tx<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
+    crate::sql::refuse_unbindable_values(tx.dialect(), &binds)?;
     let gate = atomic::gate(tx)?;
     gate.check(
         async {

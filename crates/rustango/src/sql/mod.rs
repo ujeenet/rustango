@@ -33,7 +33,9 @@ mod range;
 mod sqlite;
 mod vector;
 mod writers;
-pub(crate) use writers::{compile_date_buckets, DateBucket};
+pub(crate) use writers::{compile_date_buckets, compile_delete_plan, DateBucket};
+#[doc(hidden)]
+pub use writers::DeletePlan;
 
 pub use array::Array;
 pub use auto::Auto;
@@ -45,6 +47,7 @@ pub use compiled::CompiledStatement;
 pub use connect_diagnosis::{ConnectDiagnosis, ConnectFault};
 pub(crate) use dialect::is_uuid_expr;
 pub use dialect::Dialect;
+pub(crate) use dialect::refuse_unbindable_values;
 pub use error::{is_mysql_dup_index_error, is_pg_dup_object_error, ExecError, SqlError};
 #[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
 pub(crate) use error::{Refusal, STILL_REFERENCED};
@@ -80,8 +83,9 @@ pub use executor::{
     SqlExecutor, TxGuard, UpdaterPool,
 };
 pub(crate) use executor::{
-    bulk_insert_pks_tx, fetch_in_chunks, fetch_select_in_chunks, inserted_pk,
+    bulk_insert_pks_tx, fetch_in_chunks, fetch_select_in_chunks, inserted_pk, truncate_tx,
 };
+pub use executor::{truncate, truncate_sql};
 #[cfg(feature = "admin")]
 pub(crate) use executor::{select_one_row_as_json_tx, select_rows_as_json_tx};
 // PG-typed back-compat surface gone (issue #270 / T1.8 waves 1–4):

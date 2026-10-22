@@ -830,7 +830,8 @@ mod tests {
         for template in [Template::Fullstack, Template::Tenant] {
             let main = templates::main_rs(template, "demo");
             assert!(
-                main.contains(".with_settings_from_env()"),
+                main.contains(".with_settings_from_env()")
+                    || main.contains(".with_loaded_settings(loaded)"),
                 "{template:?} main.rs does not load its settings"
             );
         }
@@ -1027,12 +1028,21 @@ mod tests {
     fn fullstack_mounts_a_gated_driver_neutral_admin() {
         let urls = templates::urls_rs(Template::Fullstack);
         let main = templates::main_rs(Template::Fullstack, "demo");
-        assert!(urls.contains("pub fn admin_router(pool: Pool)"), "{urls}");
-        assert!(urls.contains(".with_session_auth("), "{urls}");
         assert!(
-            main.contains(".nest_with(\"/admin\", urls::admin_router)"),
-            "{main}"
+            urls.contains("pub fn admin_router(pool: Pool, settings: &Settings)"),
+            "{urls}"
         );
+        assert!(urls.contains(".with_session_auth("), "{urls}");
+        // `[admin] url_prefix` moves both the mount and the admin's links.
+        assert!(urls.contains("admin::Builder::from_settings(pool, settings)"), "{urls}");
+        assert!(urls.contains("admin::Builder::settings_prefix(settings)"), "{urls}");
+        assert!(main.contains(".nest_with(urls::admin_prefix(&settings)"), "{main}");
+        // One settings load per boot, shared by the server and the admin.
+        assert_eq!(main.matches("Settings::load_from_env()").count(), 1, "{main}");
+        assert!(!main.contains("with_settings_from_env"), "{main}");
+        // A missing config/ warns and boots, as `with_settings_from_env` does.
+        assert!(!main.contains("load_from_env()?"), "{main}");
+        assert!(main.contains(".with_loaded_settings(loaded)"), "{main}");
         // The admin key survives a restart and fails closed on prod.
         assert!(urls.contains("load_session_secret_for_tier("), "{urls}");
         assert!(!urls.contains("from_env_or_random"), "{urls}");
@@ -1501,15 +1511,13 @@ mod tests {
     fn fullstack_admin_reads_settings() {
         let urls = templates::urls_rs(Template::Fullstack);
         assert!(
-            urls.contains("admin::Builder::from_settings(pool, &"),
+            urls.contains("admin::Builder::from_settings(pool, settings)"),
             "{urls}"
         );
-        // A config that fails to load must not drop `[admin]` restrictions.
-        assert!(!urls.contains("unwrap_or_default"), "{urls}");
-        assert!(
-            urls.contains("Settings::load_from_env()\n        .expect("),
-            "{urls}"
-        );
+        // A config that fails to load must not drop `[admin]` restrictions:
+        // `with_loaded_settings` makes `run` refuse it before the admin is built.
+        let main = templates::main_rs(Template::Fullstack, "demo");
+        assert!(main.contains(".with_loaded_settings(loaded)"), "{main}");
     }
 
     /// `--features csrf` mounts the layer; every template shows where the
