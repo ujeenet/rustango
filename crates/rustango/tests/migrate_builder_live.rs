@@ -31,13 +31,19 @@ fn live_lock() -> &'static Mutex<()> {
     M.get_or_init(|| Mutex::new(()))
 }
 
-async fn pool() -> Option<PgPool> {
+#[path = "support/scratch_db.rs"]
+mod scratch_db;
+use scratch_db::ScratchDb;
+
+/// A database of the test's own: other suites drop the default ledger
+/// on the shared one.
+async fn pool() -> Option<(ScratchDb, PgPool)> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    Some(
-        PgPool::connect(&url)
-            .await
-            .expect("connect to DATABASE_URL"),
-    )
+    let db = ScratchDb::create(&url, "rustango_builder").await;
+    let pool = PgPool::connect(db.url())
+        .await
+        .expect("connect to the scratch database");
+    Some((db, pool))
 }
 
 fn fresh_dir(label: &str) -> PathBuf {
@@ -104,7 +110,7 @@ async fn drop_table(pool: &PgPool, table: &str) {
 #[tokio::test]
 async fn two_builders_keep_distinct_ledgers() {
     let _g = live_lock().lock().await;
-    let Some(pool) = pool().await else {
+    let Some((_db, pool)) = pool().await else {
         return;
     };
     // Static (`'static`) ledger names — required by `Builder::ledger`.
@@ -166,8 +172,8 @@ async fn two_builders_keep_distinct_ledgers() {
 
     // Default `migrate::applied_set` (which reads
     // `__rustango_migrations__`) doesn't see entries from custom
-    // ledgers. Tolerate noise from other live tests in the same DB —
-    // we only assert *absence* of the custom ledger's entries here.
+    // ledgers.
+    Builder::default().ensure_ledger(&pool).await.unwrap();
     let default_set = migrate::applied_set(&pool).await.unwrap();
     assert!(!default_set.contains(&mig_a_name));
     assert!(!default_set.contains(&mig_b_name));
@@ -184,7 +190,7 @@ async fn two_builders_keep_distinct_ledgers() {
 #[tokio::test]
 async fn default_builder_matches_free_function_results() {
     let _g = live_lock().lock().await;
-    let Some(pool) = pool().await else {
+    let Some((_db, pool)) = pool().await else {
         return;
     };
     Builder::default().ensure_ledger(&pool).await.unwrap();
