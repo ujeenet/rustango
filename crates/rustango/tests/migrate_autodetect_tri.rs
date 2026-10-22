@@ -3871,9 +3871,67 @@ async fn migrate_to_applies_an_earlier_pending_file(pool: &Pool) {
     assert!(insert("b").await.is_err(), "b was unapplied");
 }
 
+fn noop_callback(_pool: Pool) -> rustango::migrate::callbacks::MigrationCallbackFut {
+    Box::pin(async { Ok(()) })
+}
+rustango::register_migration_callback!("mad_cb_noop", noop_callback);
+
+/// An unregistered callback fails a non-atomic run before its first op,
+/// both ways, so the schema and the ledger still agree.
+async fn missing_callback_fails_before_any_op(pool: &Pool) {
+    use rustango::migrate::{applied_set_pool_with_ledger, CallbackOp};
+    let t = "mad_cb_post";
+    let chain = Chain::new(pool, "cb", &[t]).await;
+    let with = |cols: &[&str]| {
+        let mut f = vec![id()];
+        f.extend(cols.iter().map(|c| col(c, "i64", json!({}))));
+        json!({"tables": [table(t, f)]})
+    };
+    let initial = chain.step(pool, with(&[])).await.expect("initial");
+    let add_x = Operation::Schema(SchemaChange::AddColumn {
+        table: t.into(),
+        column: "x".into(),
+    });
+    let cb = |name: &str, reverse: Option<&str>| {
+        Operation::Callback(CallbackOp {
+            name: name.into(),
+            reverse_name: reverse.map(Into::into),
+        })
+    };
+    let mig = |forward: Vec<Operation>| Migration {
+        name: "0002_cb".into(),
+        prev: Some(initial.clone()),
+        atomic: false,
+        snapshot: snap(with(&["x"])),
+        forward,
+        ..chain.head()
+    };
+    let has_x = || async { exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "x"]).await.is_ok() };
+    let recorded = || async {
+        applied_set_pool_with_ledger(pool, &chain.ledger)
+            .await
+            .expect("ledger")
+            .contains("0002_cb")
+    };
+
+    chain.write(&mig(vec![add_x.clone(), cb("mad_cb_missing", None)]));
+    let err = chain.migrate(pool).await.expect_err("unregistered callback");
+    assert!(err.contains("mad_cb_missing"), "{err}");
+    assert!(!has_x().await, "x was added before the callback lookup");
+    assert!(!recorded().await);
+
+    chain.write(&mig(vec![cb("mad_cb_noop", Some("mad_cb_missing")), add_x]));
+    chain.migrate(pool).await.expect("registered callback");
+    let err = chain.undo(pool, "0002_cb").await.expect_err("unregistered reverse");
+    assert!(err.contains("mad_cb_missing"), "{err}");
+    assert!(has_x().await, "x was dropped before the callback lookup");
+    assert!(recorded().await);
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
+        missing_callback_fails_before_any_op,
         migrate_to_applies_an_earlier_pending_file,
         unmanaged_model_keeps_its_table,
         empty_migration_renames_reach_the_snapshot,

@@ -801,23 +801,42 @@ pub fn sqlmigrate_one(
     preview_migration(mig, &before, dialect, LEDGER_TABLE)
 }
 
-/// #347 — invoke a named migration callback. Looks the name up in
-/// the inventory registry and `await`s the future. Unknown names
-/// surface as `MigrateError::Validation` so the operator gets a clear
-/// pointer to the missing `register_migration_callback!` call.
-async fn invoke_migration_callback(
-    op: &crate::migrate::file::CallbackOp,
-    pool: crate::sql::Pool,
-) -> Result<(), MigrateError> {
-    let cb = crate::migrate::callbacks::find(&op.name).ok_or_else(|| {
-        MigrateError::Validation(format!(
-            "migration callback `{}` is not registered — \
-             call `rustango::register_migration_callback!(\"{0}\", …)` \
-             at startup",
-            op.name,
-        ))
-    })?;
-    (cb.forward)(pool).await
+/// The callbacks an op list names, looked up before its first op runs, so
+/// a missing registration fails with nothing applied.
+struct Callbacks(Vec<&'static crate::migrate::callbacks::MigrationCallback>);
+
+impl Callbacks {
+    fn resolve(ops: &[Operation]) -> Result<Self, MigrateError> {
+        ops.iter()
+            .filter_map(|op| match op {
+                Operation::Callback(c) => Some(c),
+                _ => None,
+            })
+            .map(|c| crate::migrate::callbacks::find(&c.name).ok_or_else(|| unregistered(&c.name)))
+            .collect::<Result<_, _>>()
+            .map(Self)
+    }
+
+    async fn run(
+        &self,
+        op: &crate::migrate::file::CallbackOp,
+        pool: crate::sql::Pool,
+    ) -> Result<(), MigrateError> {
+        let cb = self
+            .0
+            .iter()
+            .find(|cb| cb.name == op.name)
+            .ok_or_else(|| unregistered(&op.name))?;
+        (cb.forward)(pool).await
+    }
+}
+
+fn unregistered(name: &str) -> MigrateError {
+    MigrateError::Validation(format!(
+        "migration callback `{name}` is not registered — \
+         call `rustango::register_migration_callback!(\"{name}\", …)` \
+         at startup",
+    ))
 }
 
 /// The atomic runners' callback arm. `file::parse` already refuses this
@@ -1576,6 +1595,7 @@ async fn unapply_loose(
     snapshot: &SchemaSnapshot,
     ledger: &str,
 ) -> Result<(), MigrateError> {
+    let callbacks = Callbacks::resolve(inverted)?;
     tracing::info!(migration = %target.name, "unapplying (non-atomic)");
     let schema = pg_creation_schema(pool).await?;
     let mut deferred_fks: Vec<String> = Vec::new();
@@ -1599,9 +1619,7 @@ async fn unapply_loose(
                 sqlx::query(&d.sql).execute(pool).await?;
             }
             Operation::Callback(c) => {
-                // #347 — non-tx PG path; pool is &PgPool, convert to
-                // the Pool enum via the From impl.
-                invoke_migration_callback(c, pool.clone().into()).await?;
+                callbacks.run(c, pool.clone().into()).await?;
             }
         }
     }
@@ -1617,6 +1635,7 @@ async fn unapply_loose(
 
 #[cfg(feature = "postgres")]
 async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
+    let callbacks = Callbacks::resolve(&mig.forward)?;
     tracing::info!(migration = %mig.name, "applying (non-atomic)");
     let schema = pg_creation_schema(pool).await?;
     let mut deferred_fks: Vec<String> = Vec::new();
@@ -1640,9 +1659,7 @@ async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(),
                 sqlx::query(&d.sql).execute(pool).await?;
             }
             Operation::Callback(c) => {
-                // #347 — non-tx PG path; pool is &PgPool, convert to
-                // the Pool enum via the From impl.
-                invoke_migration_callback(c, pool.clone().into()).await?;
+                callbacks.run(c, pool.clone().into()).await?;
             }
         }
     }
@@ -4081,6 +4098,7 @@ async fn apply_nonatomic_pool(
     mig: &Migration,
     ledger: &str,
 ) -> Result<(), MigrateError> {
+    let callbacks = Callbacks::resolve(&mig.forward)?;
     tracing::info!(migration = %mig.name, "applying (non-atomic, _pool)");
     let schema = super::ensure::creation_schema(pool).await?;
     let mut deferred_fks: Vec<String> = Vec::new();
@@ -4100,8 +4118,7 @@ async fn apply_nonatomic_pool(
                 crate::sql::raw_execute_pool(pool, &d.sql, ::std::vec::Vec::new()).await?;
             }
             Operation::Callback(c) => {
-                // #347 — non-tx context; pass the pool directly.
-                invoke_migration_callback(c, pool.clone()).await?;
+                callbacks.run(c, pool.clone()).await?;
             }
         }
     }
@@ -4562,6 +4579,7 @@ async fn unapply_nonatomic_pool(
     snapshot: &SchemaSnapshot,
     ledger: &str,
 ) -> Result<(), MigrateError> {
+    let callbacks = Callbacks::resolve(inverted)?;
     tracing::info!(migration = %target.name, "unapplying (non-atomic, _pool)");
     let schema = super::ensure::creation_schema(pool).await?;
     let mut deferred_fks: Vec<String> = Vec::new();
@@ -4581,8 +4599,7 @@ async fn unapply_nonatomic_pool(
                 crate::sql::raw_execute_pool(pool, &d.sql, ::std::vec::Vec::new()).await?;
             }
             Operation::Callback(c) => {
-                // #347 — non-tx context; pass the pool directly.
-                invoke_migration_callback(c, pool.clone()).await?;
+                callbacks.run(c, pool.clone()).await?;
             }
         }
     }
