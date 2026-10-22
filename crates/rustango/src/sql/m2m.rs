@@ -364,12 +364,24 @@ async fn replace(
     let mut tx = crate::sql::transaction_pool(pool).await?;
     let mut old = SelectQuery::new(junction).where_clause(WhereExpr::and_predicates(owner.clone()));
     old.projection = Some(vec![dst_col]);
-    let ty = junction.field_by_column(dst_col).map(|f| f.ty);
-    let old = keys_on(&mut tx, &old, ty).await?;
+    // An unregistered junction's column type is unknown: read it as the new keys' type.
+    let old = match dst_column_type(junction.table, dst_col) {
+        Some(ty) => keys_on(&mut tx, &old, Some(ty)).await?,
+        None => {
+            let ty = dsts.first().and_then(SqlValue::field_type);
+            match keys_on(&mut tx, &old, ty).await {
+                Err(ExecError::Driver(sqlx::Error::ColumnDecode { .. })) => None,
+                r => r?,
+            }
+        }
+    };
     let del = DeleteQuery::new(junction, WhereExpr::and_predicates(owner));
-    super::executor::delete_tx(&mut tx, &del).await?;
+    let deleted = super::executor::delete_tx(&mut tx, &del).await?;
     super::executor::bulk_insert_tx(&mut tx, &ins).await?;
     tx.commit().await.map_err(ExecError::Driver)?;
+    if dsts.is_empty() {
+        return Ok(deleted > 0);
+    }
     let new: std::collections::HashSet<String> =
         dsts.iter().map(SqlValue::to_display_string).collect();
     Ok(old.is_none_or(|old| old != new))
@@ -383,20 +395,19 @@ async fn keys_on(
 ) -> Result<Option<std::collections::HashSet<String>>, ExecError> {
     use super::executor::fetch_values_flat_on as fetch;
     let keys: Vec<String> = match ty {
-        Some(FieldType::I16 | FieldType::I32 | FieldType::I64) => fetch::<i64, _>(tx, query)
-            .await?
-            .into_iter()
-            .map(|k| k.to_string())
-            .collect(),
+        // PG decodes only the exact integer width.
+        Some(FieldType::I16) => strings(fetch::<i16, _>(tx, query).await?),
+        Some(FieldType::I32) => strings(fetch::<i32, _>(tx, query).await?),
+        Some(FieldType::I64) => strings(fetch::<i64, _>(tx, query).await?),
         Some(FieldType::String) => fetch::<String, _>(tx, query).await?,
-        Some(FieldType::Uuid) => fetch::<uuid::Uuid, _>(tx, query)
-            .await?
-            .into_iter()
-            .map(|k| k.to_string())
-            .collect(),
+        Some(FieldType::Uuid) => strings(fetch::<uuid::Uuid, _>(tx, query).await?),
         _ => return Ok(None),
     };
     Ok(Some(keys.into_iter().collect()))
+}
+
+fn strings<K: ToString>(keys: Vec<K>) -> Vec<String> {
+    keys.iter().map(ToString::to_string).collect()
 }
 
 /// The source PK bound as-is (#1926); an unsaved source has none.
