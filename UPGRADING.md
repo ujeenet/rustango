@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Admin returns 503 when it cannot read the user
+
+The bare admin's login and session gate now answer 503 on a database error (for example before the system migration ran) instead of failing open. Run `migrate` before serving.
+
 ### Trailing-dot hosts
 
 A `Host` ending in `.` now matches the same tenant and `allowed_hosts` entries as the host without it; an entry's own trailing dot is ignored.

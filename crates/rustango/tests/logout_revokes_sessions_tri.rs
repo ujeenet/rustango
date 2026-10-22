@@ -233,6 +233,39 @@ async fn a_bare_admin_logout_that_cannot_read_fails(pool: &Pool) {
     assert_eq!(env.logout(&cookie).await, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
+/// A login whose lookup fails is a 503 and never counts toward the lockout.
+async fn a_bare_admin_login_db_error_is_503_and_not_a_failure(pool: &Pool) {
+    let env = bare(pool).await;
+    let backend = [
+        rustango::testkit::matrix::Backend::Postgres,
+        rustango::testkit::matrix::Backend::MySql,
+        rustango::testkit::matrix::Backend::Sqlite,
+    ]
+    .into_iter()
+    .find(|b| b.dialect_name() == pool.dialect().name())
+    .unwrap();
+    let broken_pool = backend.pool().await.unwrap();
+    broken_pool.close().await;
+    let broken = rustango::admin::Builder::new(broken_pool)
+        .admin_prefix("")
+        .with_session_auth(SessionSecret::from_bytes(vec![7u8; 32]))
+        .build();
+    let form = format!(
+        "username={}&password={ADMIN_PASSWORD}&_csrf=t",
+        env.admin.username
+    );
+    // One past the default lockout of five failures.
+    for _ in 0..6 {
+        let res = send(&broken, "POST", "/login", "admin.test", form.clone(), "").await;
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+    // The cookie gate fails closed too, without signing the user out.
+    let cookie = env.login().await;
+    let res = send(&broken, "GET", "/", "admin.test", String::new(), &cookie).await;
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(env.status(&cookie).await, StatusCode::OK);
+}
+
 // ---- tenant admin + operator console -----------------------------------
 
 const TENANT_PASSWORD: &str = "tenant-password-1855";
@@ -782,6 +815,7 @@ tri_dialect_test! {
         a_bare_admin_logout_ends_a_cookie_from_a_faster_clock,
         a_stale_bare_admin_cookie_cannot_revoke,
         a_bare_admin_logout_that_cannot_read_fails,
+        a_bare_admin_login_db_error_is_503_and_not_a_failure,
         a_tenant_admin_logout_ends_every_session,
         a_tenant_admin_login_lands_after_the_cutoff,
         a_tenant_admin_logout_ends_a_cookie_from_a_faster_clock,
