@@ -147,11 +147,11 @@ async fn inspectdb_reads_column_type_and_quotes_defaults_on_mysql() {
         return;
     };
     let my = pool.as_mysql().expect("mysql pool").clone();
-    let _ = sqlx::query("DROP TABLE IF EXISTS `insp1230`")
+    let _ = sqlx::query("DROP TABLE IF EXISTS `insp_coltype`")
         .execute(&my)
         .await;
     sqlx::query(
-        r#"CREATE TABLE `insp1230` (
+        r#"CREATE TABLE `insp_coltype` (
             `id` INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
             `flag` TINYINT(1) NOT NULL DEFAULT 0,
             `small` TINYINT NOT NULL DEFAULT 3,
@@ -170,12 +170,12 @@ async fn inspectdb_reads_column_type_and_quotes_defaults_on_mysql() {
     rustango::migrate::manage::run_with_writer(
         &pool,
         std::path::Path::new("./migrations"),
-        vec!["inspectdb".into(), "--table".into(), "insp1230".into()],
+        vec!["inspectdb".into(), "--table".into(), "insp_coltype".into()],
         &mut buf,
     )
     .await
     .expect("inspectdb_cmd");
-    let _ = sqlx::query("DROP TABLE `insp1230`").execute(&my).await;
+    let _ = sqlx::query("DROP TABLE `insp_coltype`").execute(&my).await;
     let out = String::from_utf8(buf).expect("utf8 output");
     for want in [
         "pub id: Auto<i64>",

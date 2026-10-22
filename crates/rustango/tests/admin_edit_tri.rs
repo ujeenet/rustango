@@ -272,18 +272,28 @@ async fn inline_child_writes_send_admin_signals(pool: &Pool) {
         .find(|l| l.qty == 9)
         .expect("added row");
     let added = *added.id.get().expect("pk");
-    let mut seen = seen.lock().unwrap().clone();
-    seen.sort();
-    let mut want = vec![
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 6, "{seen:?}");
+    // Every pre comes before every post: the posts fire after the commit.
+    let sorted = |s: &[String]| {
+        let mut s = s.to_vec();
+        s.sort();
+        s
+    };
+    let mut pre = vec![
         format!("pre_save {} change", ids[0]),
         format!("pre_delete {}", ids[1]),
         "pre_save  add".to_owned(),
+    ];
+    pre.sort();
+    let mut post = vec![
         format!("post_save {} change", ids[0]),
         format!("post_delete {}", ids[1]),
         format!("post_save {added} add"),
     ];
-    want.sort();
-    assert_eq!(seen, want);
+    post.sort();
+    assert_eq!(sorted(&seen[..3]), pre, "{seen:?}");
+    assert_eq!(sorted(&seen[3..]), post, "{seen:?}");
 }
 
 async fn seed_order(pool: &Pool) -> i64 {

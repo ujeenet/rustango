@@ -231,7 +231,7 @@ pub struct CycB {
 }
 
 #[derive(Model, Debug, Clone)]
-#[rustango(table = "cli1227_counter", app = "cli1227")]
+#[rustango(table = "mdv_counter", app = "mdv")]
 pub struct Counter {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
@@ -245,8 +245,8 @@ pub struct Counter {
 async fn loaddata_leaves_missing_keys_to_the_column_default(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Counter>(pool).await;
     let fixture = serde_json::json!([
-        {"model": "cli1227.Counter", "fields": {"name": "a"}},
-        {"model": "cli1227.Counter", "pk": 9, "fields": {"name": "b", "hits": 1}},
+        {"model": "mdv.Counter", "fields": {"name": "a"}},
+        {"model": "mdv.Counter", "pk": 9, "fields": {"name": "b", "hits": 1}},
     ]);
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("partial.json");

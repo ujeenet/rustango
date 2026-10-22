@@ -399,9 +399,25 @@ async fn annotate_count_children_on_union_and_distinct_on(pool: &Pool) {
         .expect("union parent");
     assert_eq!(counts(rows), [(1, 2), (2, 1)]);
 
+    // A second "Ada" with a book of its own: `distinct_on` must drop it.
+    Author {
+        id: 3,
+        name: "Ada".into(),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("second Ada");
+    Book {
+        id: 4,
+        title: "b4".into(),
+        author: ForeignKey::unloaded(3),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("her book");
     let distinct = Author::objects()
         .distinct_on(&["name"])
-        .order_by(&[("name", false)]);
+        .order_by(&[("name", false), ("id", false)]);
     let rows = annotate_count_children_on::<Author, _>(distinct, "pc_book", "author", pool)
         .await
         .expect("distinct_on parent");

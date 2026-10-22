@@ -27,6 +27,16 @@ pub struct Author {
     pub name: String,
 }
 
+/// A string PK, so the clustered (MySQL) or index (SQLite) order is not the submit order.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "crf_tag", app = "crf")]
+pub struct Tag {
+    #[rustango(primary_key, max_length = 8)]
+    pub code: String,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "crf_post", app = "crf")]
 pub struct Post {
@@ -44,6 +54,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::drop_table(pool, Post::SCHEMA.table).await;
     rustango::testkit::matrix::fresh_table::<Author>(pool).await;
     rustango::testkit::matrix::fresh_table::<Post>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Tag>(pool).await;
 }
 
 fn app(pool: &Pool) -> axum::Router {
@@ -58,6 +69,7 @@ fn app(pool: &Pool) -> axum::Router {
     let t = Arc::new(t);
     ViewSet::for_model(Author::SCHEMA)
         .router_pool("/api/authors", pool.clone())
+        .merge(ViewSet::for_model(Tag::SCHEMA).router_pool("/api/tags", pool.clone()))
         .merge(
             DeleteView::for_model(Author::SCHEMA)
                 .template("detail.html")
@@ -158,20 +170,26 @@ async fn a_bad_fk_is_a_form_error(pool: &Pool) {
 
 /// Queries and response of one JSON bulk create.
 async fn bulk_create(pool: &Pool, names: &[&str]) -> (StatusCode, String, usize) {
+    let rows: Vec<_> = names
+        .iter()
+        .map(|n| serde_json::json!({ "name": n }))
+        .collect();
+    bulk_post(pool, "/api/authors", &rows).await
+}
+
+async fn bulk_post(
+    pool: &Pool,
+    uri: &str,
+    rows: &[serde_json::Value],
+) -> (StatusCode, String, usize) {
     use rustango::test_assertions::QueryCounter;
-    let body = serde_json::to_string(
-        &names
-            .iter()
-            .map(|n| serde_json::json!({ "name": n }))
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
+    let body = serde_json::to_string(rows).unwrap();
     QueryCounter::scope(async {
         let resp = app(pool)
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/api/authors")
+                    .uri(uri)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(body))
                     .unwrap(),
@@ -205,6 +223,30 @@ async fn bulk_create_reads_back_in_one_select(pool: &Pool) {
     assert_eq!(names, ["b", "c", "d", "e", "f"]);
     // Only the four extra INSERTs may add queries.
     assert_eq!(five - one, 4, "read-back scales with the rows");
+
+    // String PKs submitted out of their sort order come back as submitted.
+    let codes = ["m", "c", "x", "a"];
+    let rows: Vec<_> = codes
+        .iter()
+        .map(|c| serde_json::json!({ "code": c, "name": format!("n-{c}") }))
+        .collect();
+    let (status, body, _) = bulk_post(pool, "/api/tags", &rows).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let back: Vec<serde_json::Value> = serde_json::from_str(&body).expect("JSON array");
+    let got: Vec<(&str, &str)> = back
+        .iter()
+        .map(|r| {
+            (
+                r["code"].as_str().unwrap_or("?"),
+                r["name"].as_str().unwrap_or("?"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [("m", "n-m"), ("c", "n-c"), ("x", "n-x"), ("a", "n-a")],
+        "{body}"
+    );
 }
 
 tri_dialect_test! {
