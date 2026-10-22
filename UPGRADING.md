@@ -158,6 +158,10 @@ All class-based views now add the registered context processors' keys, and every
 
 `move_to_collection`, `save_bytes` and `begin_upload` now return `MediaError::Other("collection N is missing or deleted")` where they used to succeed.
 
+### Number and currency output changed for some locales
+
+`format_number` / `format_currency` now emit U+00A0 / U+202F instead of ASCII spaces, and move `€` for de, nl and most European locales. Code or tests that compare these strings need the new forms.
+
 ### Translation lookup order
 
 A base-language override (`pt`) no longer hides a region file entry (`pt-BR`), and a flat entry in an earlier locale of the chain now beats a plural entry in a later one.

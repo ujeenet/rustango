@@ -24,6 +24,10 @@ Lookups walk exact → base → fallback chain → default once, and at each loc
 
 `#[serializer(nested)]` and `#[serializer(slug)]` compile on an `Option<ForeignKey<T>>` source (null renders the default), and `#[derive(Form)]` parses `Option<bool>`, blank as `None`.
 
+### Fixed — `format_number` / `format_currency` follow CLDR
+
+pl, sv, fi and Norwegian group with a no-break space, fr with a narrow one; German puts `€` last and Dutch first (`€ 1.234,56`); a trailing symbol is joined by a no-break space so amounts never wrap.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.
