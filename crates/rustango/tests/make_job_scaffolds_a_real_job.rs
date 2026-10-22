@@ -15,7 +15,7 @@
 //!
 //! The scheduler shape now lives under `make:scheduled`.
 
-#![cfg(feature = "manage")]
+#![cfg(all(feature = "manage", feature = "jobs", feature = "scheduler"))]
 
 use std::path::PathBuf;
 use std::sync::Mutex;

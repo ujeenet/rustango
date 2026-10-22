@@ -290,6 +290,8 @@ jobs:
       # gated on `sso`, so its sanitizer tests compile to nothing
       # without it. No database — these are unit tests.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,sso --lib
+      # The integration tests' gates must hold on this row too.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,sso --tests --no-run
       - run: |
           cargo test -p rustango --features tenancy \
             --test branding_urls_are_escaped \
