@@ -3827,11 +3827,23 @@ async fn atomic_sqlite(
             ledger,
         )
         .await;
+        let ran_ddl = ops[range.clone()]
+            .iter()
+            .filter(|op| matches!(op, Operation::Schema(_)))
+            .count();
         match ran {
             Ok(()) => {}
-            Err(e) if applied == 0 => return Err(e),
-            Err(e) => {
-                let source = match e {
+            // The last range also wrote the ledger: the migration is applied.
+            Err(SegmentFailed { committed: true, error }) if last => return Err(error),
+            Err(SegmentFailed { committed, error }) => {
+                if committed {
+                    applied += range.len();
+                    ddl_applied += ran_ddl;
+                }
+                if applied == 0 {
+                    return Err(error);
+                }
+                let source = match error {
                     MigrateError::Driver(d) => d,
                     other => sqlx::Error::Protocol(other.to_string()),
                 };
@@ -3845,12 +3857,17 @@ async fn atomic_sqlite(
             }
         }
         applied += range.len();
-        ddl_applied += ops[range.clone()]
-            .iter()
-            .filter(|op| matches!(op, Operation::Schema(_)))
-            .count();
+        ddl_applied += ran_ddl;
     }
     Ok(())
+}
+
+/// A failed [`atomic_sqlite_segment`]: `committed` when only the FK restore
+/// after its COMMIT failed.
+#[cfg(feature = "sqlite")]
+struct SegmentFailed {
+    committed: bool,
+    error: MigrateError,
 }
 
 /// `ops` cut where a RunSQL meets a rebuild: FK enforcement can only change
@@ -3890,8 +3907,11 @@ async fn atomic_sqlite_segment(
     after: &SchemaSnapshot,
     deferred_fks: &mut Vec<String>,
     ledger: Option<LedgerWrite<'_>>,
-) -> Result<(), MigrateError> {
-    let mut conn = super::rebuild::RebuildConn::acquire(sq, rebuilds).await?;
+) -> Result<(), SegmentFailed> {
+    let fail = |committed, error| SegmentFailed { committed, error };
+    let mut conn = super::rebuild::RebuildConn::acquire(sq, rebuilds)
+        .await
+        .map_err(|e| fail(false, e.into()))?;
     let result: Result<(), MigrateError> = async {
         let mut tx = conn.begin().await?;
         for op in &ops[range] {
@@ -3935,8 +3955,8 @@ async fn atomic_sqlite_segment(
     .await;
     // The migration's own error wins over a failed restore.
     let finished = conn.finish().await;
-    result?;
-    Ok(finished?)
+    result.map_err(|e| fail(false, e))?;
+    finished.map_err(|e| fail(true, e.into()))
 }
 
 /// Run `step` for the non-atomic runners, on any backend.

@@ -2190,6 +2190,71 @@ async fn run_sql_beside_a_rebuild_round_trips(pool: &Pool) {
     has_x().await.expect_err("x is dropped again");
 }
 
+/// A RunSQL failing after a SQLite rebuild leaves the earlier ranges
+/// committed: `PartiallyApplied`. PostgreSQL rolls it all back.
+async fn split_sqlite_migration_fails_partially(pool: &Pool) {
+    let b = "mad_pa_book";
+    let chain = Chain::new(pool, "pa", &[b]).await;
+    let book = |extra: Vec<Value>| {
+        let mut fields = vec![id()];
+        fields.extend(extra);
+        json!({"tables": [table(b, fields)]})
+    };
+    chain
+        .step(pool, book(vec![col("y", "i64", json!({}))]))
+        .await
+        .expect("initial");
+    let data = |sql: String| {
+        Operation::Data(rustango::migrate::DataOp {
+            sql,
+            reverse_sql: None,
+            reversible: false,
+        })
+    };
+    chain.write_hand(
+        book(vec![
+            col("y", "i64", json!({"nullable": false})),
+            col("x", "i64", json!({})),
+        ]),
+        vec![
+            Operation::Schema(SchemaChange::AddColumn {
+                table: b.into(),
+                column: "x".into(),
+            }),
+            data(q(pool, "UPDATE {} SET {} = 7", &[b, "x"])),
+            Operation::Schema(SchemaChange::AlterColumnNullable {
+                table: b.into(),
+                column: "y".into(),
+                nullable: false,
+            }),
+            data(q(pool, "SELECT * FROM {}", &["mad_pa_missing"])),
+        ],
+    );
+    let err = migrate_pool_with_ledger(pool, chain.dir.path(), &chain.ledger)
+        .await
+        .expect_err("the last RunSQL fails");
+    let has_x = exec(pool, "SELECT {}.{} FROM {}", &[b, "x", b]).await.is_ok();
+    match pool.dialect().name() {
+        "sqlite" => {
+            assert!(
+                matches!(
+                    err,
+                    rustango::migrate::MigrateError::PartiallyApplied {
+                        applied: 3,
+                        total: 4,
+                        ddl_applied: 2,
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
+            assert!(has_x, "the first range committed");
+        }
+        "postgres" => assert!(!has_x, "rolled back: {err:?}"),
+        _ => {}
+    }
+}
+
 /// The `&PgPool` runners drop the live FK too.
 async fn legacy_pg_runner_replaces_the_fk(pool: &Pool) {
     let legacy = by_dialect! { pool,
@@ -3768,6 +3833,7 @@ tri_dialect_test!(
         declared_index_survives_unique_drop_before_rename,
         rebuild_checks_only_its_own_orphans,
         run_sql_beside_a_rebuild_round_trips,
+        split_sqlite_migration_fails_partially,
         legacy_pg_runner_replaces_the_fk,
         cross_ledger_squash_runs_its_other_changes,
         unique_drop_finds_the_live_name,
