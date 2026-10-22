@@ -114,6 +114,13 @@ impl OrgResolver for SubdomainResolver {
             Cached::Hit(org) => return Ok(Some(org)),
             Cached::Absent => {}
         }
+        // One query per host; the callers behind it read what it cached.
+        let _flight = st.org_cache.single_flight(&host).await;
+        match st.org_cache.get(&host) {
+            Cached::Miss => return Ok(None),
+            Cached::Hit(org) => return Ok(Some(org)),
+            Cached::Absent => {}
+        }
         let found = find_active_org_by(registry, &st, Org::host_pattern.eq(host.clone())).await?;
         // Cache the miss too: this resolver runs first for *every*
         // request, so an unregistered host would otherwise be a free
@@ -453,6 +460,12 @@ impl OrgResolver for RegisteredHostResolver {
         let st = state(registry);
         sync_generation(registry, &st).await;
         // Cached, including the miss — see `RegistryState::host_cache`.
+        match st.host_cache.get(&host) {
+            Cached::Miss => return Ok(None),
+            Cached::Hit(org) => return Ok(Some(org)),
+            Cached::Absent => {}
+        }
+        let _flight = st.host_cache.single_flight(&host).await;
         match st.host_cache.get(&host) {
             Cached::Miss => return Ok(None),
             Cached::Hit(org) => return Ok(Some(org)),

@@ -21,8 +21,8 @@
 //! without a lazy wrapper.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 /// A latch that lets one message through for the life of the process.
@@ -66,74 +66,164 @@ pub(super) enum Cached<V> {
 
 /// A bounded, TTL'd, negatively-caching map from hostname to `V`.
 ///
-/// ## Why bounded, and why eviction is single-entry
+/// ## Why two bounded maps, with LRU eviction
 ///
-/// The keys are `Host` header values, so an attacker picks them. An
-/// unbounded map trades a query amplification for a memory one. At the
-/// cap it evicts **one** entry rather than clearing: wiping would hand
-/// an attacker a cheap way to evict every real tenant by filling the map
-/// with junk. Not LRU — that needs a second index on the request path,
-/// and correctness never depends on a cache retaining anything.
+/// The keys are `Host` header values, so an attacker picks them. Misses
+/// live in their own, smaller map, so random hosts (wildcard DNS) can
+/// never push a resolved tenant out. Each map evicts its least recently
+/// read entry at the cap, never the whole map. [`Self::single_flight`]
+/// lets one caller per host query on a cold or expired entry.
 ///
 /// Callers must pass an already-normalised key. Hostnames are
 /// case-insensitive (RFC 4343), so `ACME.example` and `acme.example`
 /// must not be two entries for one tenant.
 pub(super) struct HostTtlCache<V> {
-    /// `Option` only because `HashMap::new` is not `const` — the map is
+    /// `Option` only because `HashMap::new` is not `const` — the maps are
     /// built on first write so the whole cache can live in a `static`.
-    map: RwLock<Option<HashMap<String, Entry<V>>>>,
+    hits: RwLock<Option<HashMap<String, Entry<V>>>>,
+    misses: RwLock<Option<HashMap<String, Entry<()>>>>,
     ttl: Duration,
     cap: usize,
+    /// Logical clock for LRU: bumped on every read hit.
+    tick: AtomicU64,
+    /// Per-host lock held while one caller queries.
+    flights: Mutex<Option<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
-/// A cached resolution (`None` = known-miss) and when it was stored.
-type Entry<V> = (Option<V>, Instant);
+/// A cached value, when it was stored, and when it was last read.
+struct Entry<V> {
+    value: V,
+    at: Instant,
+    used: AtomicU64,
+}
+
+/// Held by the one caller querying for a host; see [`HostTtlCache::single_flight`].
+pub(super) struct Flight<'a, V> {
+    cache: &'a HostTtlCache<V>,
+    host: String,
+    lock: Arc<tokio::sync::Mutex<()>>,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl<V> Drop for Flight<'_, V> {
+    fn drop(&mut self) {
+        // The map, `lock` and the guard: 3 means nobody else waits.
+        let Ok(mut g) = self.cache.flights.lock() else {
+            return;
+        };
+        if let Some(map) = g.as_mut() {
+            if Arc::strong_count(&self.lock) <= 3 {
+                map.remove(&self.host);
+            }
+        }
+    }
+}
 
 impl<V: Clone> HostTtlCache<V> {
     pub(super) const fn new(ttl: Duration, cap: usize) -> Self {
         Self {
-            map: RwLock::new(None),
+            hits: RwLock::new(None),
+            misses: RwLock::new(None),
             ttl,
             cap,
+            tick: AtomicU64::new(0),
+            flights: Mutex::new(None),
         }
     }
 
     pub(super) fn get(&self, host: &str) -> Cached<V> {
-        let Ok(guard) = self.map.read() else {
-            return Cached::Absent;
-        };
-        let Some((value, at)) = guard.as_ref().and_then(|m| m.get(host)) else {
-            return Cached::Absent;
-        };
-        // `>=`, not `>`: an entry exactly at its TTL is expired. The two
-        // hand-written copies disagreed on this.
-        if at.elapsed() >= self.ttl {
-            return Cached::Absent;
+        if let Some(v) = self.lookup(&self.hits, host) {
+            return Cached::Hit(v);
         }
-        match value {
-            Some(v) => Cached::Hit(v.clone()),
-            None => Cached::Miss,
+        match self.lookup(&self.misses, host) {
+            Some(()) => Cached::Miss,
+            None => Cached::Absent,
         }
+    }
+
+    fn lookup<T: Clone>(&self, map: &RwLock<Option<HashMap<String, Entry<T>>>>, host: &str) -> Option<T> {
+        let guard = map.read().ok()?;
+        let e = guard.as_ref()?.get(host)?;
+        // `>=`, not `>`: an entry exactly at its TTL is expired.
+        if e.at.elapsed() >= self.ttl {
+            return None;
+        }
+        e.used
+            .store(self.tick.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
+        Some(e.value.clone())
     }
 
     pub(super) fn put(&self, host: &str, value: Option<V>) {
-        let Ok(mut guard) = self.map.write() else {
+        match value {
+            Some(v) => {
+                remove(&self.misses, host);
+                self.insert(&self.hits, self.cap, host, v);
+            }
+            None => {
+                remove(&self.hits, host);
+                self.insert(&self.misses, (self.cap / 4).max(1), host, ());
+            }
+        }
+    }
+
+    fn insert<T>(&self, map: &RwLock<Option<HashMap<String, Entry<T>>>>, cap: usize, host: &str, value: T) {
+        let Ok(mut guard) = map.write() else {
             return;
         };
         let map = guard.get_or_insert_with(HashMap::default);
-        if map.len() >= self.cap {
-            if let Some(victim) = map.keys().next().cloned() {
-                map.remove(&victim);
+        if map.len() >= cap && !map.contains_key(host) {
+            map.retain(|_, e| e.at.elapsed() < self.ttl);
+            if map.len() >= cap {
+                let victim = map
+                    .iter()
+                    .min_by_key(|(_, e)| e.used.load(Ordering::Relaxed))
+                    .map(|(k, _)| k.clone());
+                if let Some(victim) = victim {
+                    map.remove(&victim);
+                }
             }
         }
-        map.insert(host.to_owned(), (value, Instant::now()));
+        let used = AtomicU64::new(self.tick.fetch_add(1, Ordering::Relaxed));
+        map.insert(host.to_owned(), Entry { value, at: Instant::now(), used });
+    }
+
+    /// Wait until no other caller is querying `host`. Re-check [`Self::get`]
+    /// after this returns: the caller ahead may have filled it.
+    pub(super) async fn single_flight(&self, host: &str) -> Flight<'_, V> {
+        let lock = {
+            let mut g = self.flights.lock().unwrap_or_else(PoisonError::into_inner);
+            g.get_or_insert_with(HashMap::default)
+                .entry(host.to_owned())
+                .or_default()
+                .clone()
+        };
+        let guard = lock.clone().lock_owned().await;
+        Flight {
+            cache: self,
+            host: host.to_owned(),
+            lock,
+            _guard: guard,
+        }
     }
 
     pub(super) fn clear(&self) {
-        if let Ok(mut guard) = self.map.write() {
-            if let Some(map) = guard.as_mut() {
-                map.clear();
-            }
+        clear(&self.hits);
+        clear(&self.misses);
+    }
+}
+
+fn remove<T>(map: &RwLock<Option<HashMap<String, Entry<T>>>>, host: &str) {
+    if let Ok(mut g) = map.write() {
+        if let Some(m) = g.as_mut() {
+            m.remove(host);
+        }
+    }
+}
+
+fn clear<T>(map: &RwLock<Option<HashMap<String, Entry<T>>>>) {
+    if let Ok(mut g) = map.write() {
+        if let Some(m) = g.as_mut() {
+            m.clear();
         }
     }
 }
@@ -362,5 +452,63 @@ impl Breaker {
     /// Warn at most once for the life of the process.
     pub(super) fn warn_once(&self, emit: impl FnOnce()) {
         self.warned.once(emit);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    const TTL: Duration = Duration::from_secs(60);
+
+    /// Junk hosts fill only the miss side; a resolved tenant stays cached.
+    #[test]
+    fn misses_never_evict_a_resolved_host() {
+        let cache = HostTtlCache::<u32>::new(TTL, 2);
+        cache.put("acme.example", Some(1));
+        for i in 0..64 {
+            cache.put(&format!("junk{i}.example"), None);
+        }
+        assert!(matches!(cache.get("acme.example"), Cached::Hit(1)));
+        assert!(matches!(cache.get("junk63.example"), Cached::Miss));
+    }
+
+    /// At the cap the least recently read entry goes.
+    #[test]
+    fn a_full_cache_evicts_the_least_recently_used() {
+        for _ in 0..16 {
+            let cache = HostTtlCache::<u32>::new(TTL, 2);
+            cache.put("a", Some(1));
+            cache.put("b", Some(2));
+            let _ = cache.get("a");
+            cache.put("c", Some(3));
+            assert!(matches!(cache.get("a"), Cached::Hit(1)), "a was just read");
+            assert!(matches!(cache.get("b"), Cached::Absent), "b was idle");
+        }
+    }
+
+    /// Concurrent cold lookups of one host run the query once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_cold_lookups_query_once() {
+        let cache = Arc::new(HostTtlCache::<u32>::new(TTL, 8));
+        let queries = Arc::new(AtomicUsize::new(0));
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let (cache, queries) = (cache.clone(), queries.clone());
+                tokio::spawn(async move {
+                    let _flight = cache.single_flight("acme.example").await;
+                    if matches!(cache.get("acme.example"), Cached::Absent) {
+                        queries.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        cache.put("acme.example", Some(1));
+                    }
+                })
+            })
+            .collect();
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert_eq!(queries.load(Ordering::SeqCst), 1);
     }
 }

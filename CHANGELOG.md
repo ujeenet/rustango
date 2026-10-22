@@ -166,6 +166,10 @@ One tier parser (trimmed, any case, `production` = `prod`) now drives the settin
 
 The audit warns on `secure_cookies = false`, on the `empty` preset and on unknown preset names, and on a missing `config/default.toml`. Without `with_settings_from_env`, the boot warning also names `allowed_hosts`, the SSL-redirect keys and `csrf_trusted_origins`. On the prod tier `with_settings_from_env` with no config now refuses to start.
 
+### Fixed — unknown hosts no longer push tenants out of the resolver cache
+
+Misses are cached in their own smaller map, each map evicts its least recently used entry, and concurrent cold lookups of one host run one registry query.
+
 ## [0.60.9] — 2026-10-21
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options; `loaddata` leaves omitted keys to the column default; MySQL JSON key checks are literal; idle connections close after 75 s; `CsrfConfig` has a new field; refused deletes are 409 and refused CBV writes 422. See UPGRADING.
