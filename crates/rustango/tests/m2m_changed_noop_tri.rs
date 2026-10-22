@@ -127,7 +127,7 @@ fn actions(fired: &Fired) -> Vec<M2mAction> {
 }
 
 async fn set_on_an_i32_through_model(pool: &Pool) {
-    let fired = record();
+    let (_signals, fired) = record().await;
     let p = M2MManager {
         src_pk: SqlValue::I64(1),
         through: PostTagI32::SCHEMA.table,
@@ -140,7 +140,7 @@ async fn set_on_an_i32_through_model(pool: &Pool) {
 }
 
 async fn generic_noop_set_and_clear_fire_nothing(pool: &Pool) {
-    let fired = record();
+    let (_signals, fired) = record().await;
     let t = tags(GENERIC_INT);
     t.set(&[5_i64, 6], pool).await.expect("set");
     t.set(&[6_i64, 5], pool).await.expect("same set");
@@ -150,7 +150,7 @@ async fn generic_noop_set_and_clear_fire_nothing(pool: &Pool) {
 }
 
 async fn generic_set_with_string_keys(pool: &Pool) {
-    let fired = record();
+    let (_signals, fired) = record().await;
     let t = tags(GENERIC_STR);
     t.set(&["a", "b"], pool).await.expect("set");
     t.set(&["b", "a"], pool).await.expect("same set");
@@ -161,6 +161,8 @@ async fn generic_set_with_string_keys(pool: &Pool) {
 
 /// The guessed `i64` read fails on PG's `INT`; `set` still applies.
 async fn generic_set_on_an_int_column(pool: &Pool) {
+    // Its signals would land in another scenario's recorder.
+    let _signals = signals_lock().await;
     let t = tags(GENERIC_I32);
     t.set(&[5_i64, 6], pool).await.expect("set");
     t.set(&[6_i64], pool).await.expect("smaller set");
@@ -168,7 +170,7 @@ async fn generic_set_on_an_int_column(pool: &Pool) {
 }
 
 async fn generic_set_with_uuid_keys(pool: &Pool) {
-    let fired = record();
+    let (_signals, fired) = record().await;
     let t = tags(GENERIC_UUID);
     let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
     t.set(&[a, b], pool).await.expect("set");
@@ -189,8 +191,16 @@ fn post(id: i64) -> M2MManager {
 
 type Fired = Arc<Mutex<Vec<(M2mAction, Vec<SqlValue>)>>>;
 
-/// Record every `m2m_changed`; the harness lock serializes the global registry.
-fn record() -> Fired {
+/// Serializes the global signal registry: the SQLite arm takes no harness
+/// lock, and `cargo test` runs scenarios on threads of one process.
+async fn signals_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    LOCK.lock().await
+}
+
+/// Record every `m2m_changed`, holding [`signals_lock`] while the guard lives.
+async fn record() -> (tokio::sync::MutexGuard<'static, ()>, Fired) {
+    let guard = signals_lock().await;
     clear_all();
     let fired: Fired = Arc::default();
     let sink = fired.clone();
@@ -198,11 +208,11 @@ fn record() -> Fired {
         sink.lock().unwrap().push((ctx.action, ctx.dst_pks.clone()));
         async {}
     });
-    fired
+    (guard, fired)
 }
 
 async fn noop_changes_fire_nothing(pool: &Pool) {
-    let fired = record();
+    let (_signals, fired) = record().await;
     let p = post(1);
     p.add(5, pool).await.expect("add");
     p.add(5, pool).await.expect("duplicate add");
@@ -225,7 +235,7 @@ async fn noop_changes_fire_nothing(pool: &Pool) {
 }
 
 async fn noop_set_and_clear_fire_nothing(pool: &Pool) {
-    let fired = record();
+    let (_signals, fired) = record().await;
     let p = post(2);
     p.set(&[5_i64, 6], pool).await.expect("set");
     p.set(&[6_i64, 5], pool).await.expect("same set");
