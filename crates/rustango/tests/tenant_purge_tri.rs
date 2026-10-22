@@ -803,6 +803,75 @@ async fn schema_purge_refuses_a_reserved_schema() {
         .unwrap();
 }
 
+/// An extension living in the schema is refused: its CASCADE reaches other
+/// tenants' columns. In a private database, extensions are database-wide.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[allow(irrefutable_let_patterns)]
+async fn schema_purge_refuses_a_schema_holding_an_extension() {
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    let Pool::Postgres(pg) = &pool else {
+        unreachable!()
+    };
+    let db = format!("rustango_purge_ext_{}", std::process::id());
+    let _ = rustango::sql::sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"))
+        .execute(pg)
+        .await;
+    rustango::sql::sqlx::query(&format!("CREATE DATABASE \"{db}\""))
+        .execute(pg)
+        .await
+        .unwrap();
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let private =
+        rustango::sql::sqlx::PgPool::connect(&format!("{}/{db}", url.rsplit_once('/').unwrap().0))
+            .await
+            .unwrap();
+    let registry = Pool::from(private.clone());
+    setup(&registry).await;
+    rustango::sql::sqlx::raw_sql(
+        "CREATE SCHEMA ext_a; CREATE SCHEMA ext_b; \
+         CREATE EXTENSION citext SCHEMA ext_a; \
+         CREATE TABLE ext_b.users (id INT, email ext_a.citext)",
+    )
+    .execute(&private)
+    .await
+    .unwrap();
+    for name in ["ext_a", "ext_b"] {
+        let mut org = Org {
+            slug: name.replace('_', "-"),
+            display_name: name.into(),
+            storage_mode: "schema".into(),
+            schema_name: Some(name.into()),
+            ..rustango::testkit::org()
+        };
+        org.save_pool(&registry).await.unwrap();
+    }
+
+    let err = purge_on(&registry, "ext-a")
+        .await
+        .expect_err("a schema holding an extension");
+    assert!(err.to_string().contains("citext"), "{err}");
+    let cols: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT count(*) FROM information_schema.columns \
+         WHERE table_schema = 'ext_b' AND table_name = 'users' AND column_name = 'email'",
+    )
+    .fetch_one(&private)
+    .await
+    .unwrap();
+    assert_eq!(cols, 1, "the other tenant's column was dropped");
+    assert!(org_active(&registry, "ext-a").await, "the refused purge deactivated the org");
+
+    private.close().await;
+    rustango::sql::sqlx::query(&format!("DROP DATABASE \"{db}\" WITH (FORCE)"))
+        .execute(pg)
+        .await
+        .unwrap();
+}
+
 /// Two tenants on one database, the other idle (no session): refused (#2291).
 #[cfg(feature = "postgres")]
 #[tokio::test]

@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Schema-tenant purge refuses a schema with an extension
+
+Move the extension out first (`ALTER EXTENSION <name> SET SCHEMA public`), then purge again.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more

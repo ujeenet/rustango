@@ -517,7 +517,41 @@ async fn refuse_shared_schema(
             "refusing to drop schema `{schema}` — another tenant uses it too"
         )));
     }
+    let extensions = schema_extensions(registry, schema).await?;
+    if !extensions.is_empty() {
+        return Err(TenancyError::Validation(format!(
+            "refusing to drop schema `{schema}` — it holds extension(s) {}; the CASCADE \
+             would drop their columns and indexes in every schema. Move them first \
+             (`ALTER EXTENSION … SET SCHEMA public`)",
+            extensions.join(", ")
+        )));
+    }
     Ok(())
+}
+
+/// Extensions installed in `schema`. Catalog query: schema mode is Postgres-only.
+async fn schema_extensions(
+    registry: &crate::sql::Pool,
+    schema: &str,
+) -> Result<Vec<String>, TenancyError> {
+    #[allow(unreachable_patterns)]
+    match registry {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => Ok(crate::sql::sqlx::query_scalar(
+            "SELECT e.extname::text FROM pg_catalog.pg_extension e \
+             JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
+             WHERE n.nspname = $1 ORDER BY 1",
+        )
+        .bind(schema)
+        .fetch_all(pg)
+        .await?),
+        _ => {
+            let _ = schema;
+            Err(TenancyError::Validation(
+                "schema mode needs a Postgres registry".into(),
+            ))
+        }
+    }
 }
 
 /// Same Postgres database: host (case-insensitive), port and name.
