@@ -107,12 +107,13 @@ pub(super) struct Flight<'a, V> {
 
 impl<V> Drop for Flight<'_, V> {
     fn drop(&mut self) {
-        // The map, `lock` and the guard: 3 means nobody else waits.
+        // Always, so a cancelled waiter cannot strand the entry; waiters
+        // still queued finish on this lock and re-check the cache.
         let Ok(mut g) = self.cache.flights.lock() else {
             return;
         };
         if let Some(map) = g.as_mut() {
-            if Arc::strong_count(&self.lock) <= 3 {
+            if map.get(&self.host).is_some_and(|l| Arc::ptr_eq(l, &self.lock)) {
                 map.remove(&self.host);
             }
         }
@@ -510,5 +511,19 @@ mod tests {
             t.await.unwrap();
         }
         assert_eq!(queries.load(Ordering::SeqCst), 1);
+    }
+
+    /// A waiter cancelled after the holder finished leaves no entry behind.
+    #[tokio::test]
+    async fn a_cancelled_waiter_leaves_no_flight_entry() {
+        let cache = HostTtlCache::<u32>::new(TTL, 8);
+        let holder = cache.single_flight("h.example").await;
+        let mut waiter = Box::pin(cache.single_flight("h.example"));
+        let pending = tokio::time::timeout(Duration::from_millis(5), &mut waiter).await;
+        assert!(pending.is_err(), "the waiter must queue behind the holder");
+        drop(holder);
+        drop(waiter);
+        let left = cache.flights.lock().unwrap().as_ref().map_or(0, HashMap::len);
+        assert_eq!(left, 0);
     }
 }
