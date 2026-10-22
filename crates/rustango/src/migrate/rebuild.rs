@@ -554,7 +554,9 @@ impl RebuildConn {
 
     pub(crate) async fn begin(&mut self) -> Result<RebuildTx<'_>, sqlx::Error> {
         use sqlx::Connection as _;
-        let mut tx = self.conn.begin().await?;
+        // Write lock first: a deferred tx that reads can't upgrade past
+        // another writer's commit, and busy_timeout doesn't retry that.
+        let mut tx = self.conn.begin_with("BEGIN IMMEDIATE").await?;
         // A connection idle while another one ran DDL prepares `RENAME COLUMN`
         // against its cached schema; reading `sqlite_master` reloads it.
         sqlx::query("SELECT COUNT(*) FROM sqlite_master")
@@ -650,5 +652,33 @@ mod tests {
             .execute(&mut *tx)
             .await
             .expect("the rename sees the column another connection added");
+    }
+
+    /// A write committed while the migration tx is open waits for it,
+    /// rather than leaving the migration's DDL `database is locked`.
+    #[tokio::test]
+    async fn migration_tx_holds_the_write_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let url = format!("sqlite:{}?mode=rwc", tmp.path().join("r.db").display());
+        let opts: sqlx::sqlite::SqliteConnectOptions = url.parse().unwrap();
+        let sq = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect_with(opts.journal_mode(sqlx::sqlite::SqliteJournalMode::Wal))
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE t (a INTEGER)").execute(&sq).await.unwrap();
+        let mut conn = super::RebuildConn::acquire(&sq, false).await.unwrap();
+        let mut tx = conn.begin().await.unwrap();
+        let writer = {
+            let sq = sq.clone();
+            tokio::spawn(async move { sqlx::query("INSERT INTO t VALUES (1)").execute(&sq).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        sqlx::query("CREATE TABLE u (b INTEGER)")
+            .execute(&mut *tx)
+            .await
+            .expect("the migration keeps its write lock");
+        tx.commit().await.unwrap();
+        writer.await.unwrap().expect("the writer ran after the migration");
     }
 }
