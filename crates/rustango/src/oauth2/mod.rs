@@ -583,12 +583,14 @@ async fn decode_or_error<T: serde::de::DeserializeOwned>(
             BodyError::Read(e) => OAuthError::from(e),
             too_large => OAuthError::BadResponse(too_large.to_string()),
         })?;
+    // Neither the body nor serde's message (it quotes values): both can hold tokens.
     serde_json::from_slice(&bytes).map_err(|e| {
-        let preview = String::from_utf8_lossy(&bytes)
-            .chars()
-            .take(200)
-            .collect::<String>();
-        OAuthError::BadResponse(format!("{e} (body: {preview})"))
+        OAuthError::BadResponse(format!(
+            "undecodable response body ({:?} error at line {} column {})",
+            e.classify(),
+            e.line(),
+            e.column()
+        ))
     })
 }
 
@@ -1156,6 +1158,26 @@ mod tests {
             }
             other => panic!("{other}"),
         }
+    }
+
+    /// A token body that fails to decode never lands in the (logged) error.
+    #[tokio::test]
+    async fn a_bad_token_body_is_not_echoed() {
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(|| async {
+                r#"{"access_token":"SECRET_A","refresh_token":"SECRET_R","expires_in":"SECRET_E"}"#
+            }),
+        );
+        let base = serve(app).await;
+        let p = OAuth2Provider::new("t", "c", "s", "https://app/cb", "", format!("{base}/token"));
+        let (_, flow) = p.begin();
+        let err = p
+            .complete_with(&flow, "code", &flow.state, &loopback())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, OAuthError::BadResponse(_)), "{err}");
+        assert!(!err.to_string().contains("SECRET"), "{err}");
     }
 
     /// Valid JSON padded past [`SUCCESS_BODY_MAX`].
