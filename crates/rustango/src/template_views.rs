@@ -2770,6 +2770,11 @@ fn parse_bulk_action_form(
     if pks.is_empty() {
         return Err("no rows selected (_selected_action missing)".into());
     }
+    // The selection becomes one `IN (...)`; past the cap it hits bind limits.
+    let max = crate::list_params::MAX_IN_VALUES;
+    if pks.len() > max {
+        return Err(format!("too many rows selected (at most {max})"));
+    }
     Ok((action, pks))
 }
 
@@ -3092,10 +3097,11 @@ async fn run_delete_selected_pool(
 ) -> Result<(), String> {
     // #810 — `DeleteQuery::by_pk_in` for the DELETE … WHERE pk IN (...) shape.
     let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks.to_vec());
-    delete_rows(pool, q)
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    // Driver text names tables and constraints; it goes to the log, not the body.
+    delete_rows(pool, q).await.map(|_| ()).map_err(|e| {
+        let client_caused = e.refusal().is_some();
+        crate::error::client_error_body("template_views::delete_selected", &e, client_caused)
+    })
 }
 
 // v0.38 — `run_delete_selected_conn` removed; tenant handlers now
@@ -3696,7 +3702,11 @@ mod tenant {
                     if let Some(pg) = pool.as_postgres() {
                         match pg.acquire().await {
                             Ok(mut conn) => f(&mut *conn, &pks).await,
-                            Err(e) => Err(e.to_string()),
+                            Err(e) => Err(crate::error::client_error_body(
+                                "template_views::bulk_action",
+                                &e,
+                                false,
+                            )),
                         }
                     } else {
                         Err("this action was registered via .tenant_action(&mut PgConnection,...) — \
@@ -5574,6 +5584,41 @@ mod tests {
         let (action, pks) = parse_bulk_action_form(&f).unwrap();
         assert_eq!(action, "delete_selected");
         assert_eq!(pks, vec!["1", "2", "3"]);
+
+        // A selection past the IN-list cap is refused before any SQL.
+        let max = crate::list_params::MAX_IN_VALUES;
+        f.insert(
+            "_selected_action".into(),
+            (0..=max).map(|n| n.to_string()).collect(),
+        );
+        assert!(parse_bulk_action_form(&f).is_err());
+        f.insert(
+            "_selected_action".into(),
+            (0..max).map(|n| n.to_string()).collect(),
+        );
+        assert!(parse_bulk_action_form(&f).is_ok());
+    }
+
+    /// A failed bulk delete answers 400 without the driver's text.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn bulk_delete_failure_hides_the_driver_error() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        // No `posts` table, so the DELETE fails in the driver.
+        let app = ListView::for_model(schema_two_fields())
+            .bulk_actions(true)
+            .router("/l", Arc::new(Tera::default()), pool);
+        let res = app
+            .oneshot(csrf_form_post(
+                "/l",
+                "action=delete_selected&_selected_action=1",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(!body.contains("posts"), "{body}");
     }
 
     /// `bulk_actions` Tera context entry leads with `delete_selected`,

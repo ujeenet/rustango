@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — `ListView` bulk delete withholds driver errors and caps the selection
+
+A failed `delete_selected` logs the database error and answers a generic 400, so FK refusals no longer show table and constraint names. More than 1000 selected rows is a 400 before any SQL.
+
 ### Fixed — `m2m_changed` skips an unchanged `set` and an empty `clear`
 
 Like a duplicate `add`, they changed no row and no longer send the signal, on plain and generic M2M managers.
