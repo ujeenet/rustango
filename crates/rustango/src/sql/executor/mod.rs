@@ -1211,13 +1211,17 @@ fn generated_pk(
                     T::I32 => SqlValue::I32(row.try_get(c)?),
                     T::I16 => SqlValue::I16(row.try_get(c)?),
                     T::String => SqlValue::String(row.try_get(c)?),
-                    // Bound values are BLOBs; a column default may be TEXT.
-                    T::Uuid => SqlValue::Uuid(row.try_get(c).or_else(|e| {
-                        row.try_get::<String, _>(c)
+                    // Bound values are BLOBs; a column default may be TEXT. A TEXT
+                    // key stays text, so a re-read by it binds what is stored.
+                    T::Uuid => match row.try_get::<uuid::Uuid, _>(c) {
+                        Ok(u) => SqlValue::Uuid(u),
+                        Err(e) => row
+                            .try_get::<String, _>(c)
                             .ok()
-                            .and_then(|s| uuid::Uuid::parse_str(&s).ok())
-                            .ok_or(e)
-                    })?),
+                            .filter(|s| uuid::Uuid::parse_str(s).is_ok())
+                            .map(SqlValue::String)
+                            .ok_or(e)?,
+                    },
                     _ => return Err(unreadable()),
                 })
             }
