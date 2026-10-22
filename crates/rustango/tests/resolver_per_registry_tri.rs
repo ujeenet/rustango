@@ -89,10 +89,21 @@ async fn a_broken_registry_does_not_trip_another(pool: &Pool) {
     );
 }
 
+/// `Host: acme.app.test.` is the same host as `acme.app.test`.
+async fn a_trailing_dot_host_resolves_the_tenant(pool: &Pool) {
+    let slug = unique("d");
+    let host = add_org(pool, &slug).await;
+    assert_eq!(
+        resolve(pool, &format!("{host}.:8080")).await.unwrap(),
+        Some(slug)
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
     scenarios: [
+        a_trailing_dot_host_resolves_the_tenant,
         cached_orgs_stay_with_their_registry,
         a_broken_registry_does_not_trip_another,
     ],

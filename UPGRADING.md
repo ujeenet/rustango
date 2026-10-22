@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Trailing-dot hosts
+
+A `Host` ending in `.` now matches the same tenant and `allowed_hosts` entries as the host without it; an entry's own trailing dot is ignored.
+
 ### `csrf_trusted_origins` takes effect
 
 Origins listed in `[security] csrf_trusted_origins` now pass the CSRF Origin check under `Cli::with_csrf` / `with_csrf_config`. Remove entries you did not mean to trust.

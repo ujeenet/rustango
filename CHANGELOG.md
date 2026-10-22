@@ -6,6 +6,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`; `RequestIdLayer` no longer echoes an untrusted client's `X-Request-Id`; a SQLite UUID key stored both as BLOB and TEXT is now a 404 in ViewSets and template views. See UPGRADING.
 
+### Fixed — a trailing-dot `Host` resolves its tenant
+
+`acme.app.test.` is the same host as `acme.app.test` for tenant resolution, apex detection and `AllowedHostsLayer`.
+
 ### Fixed — member SSO login with a bad IdP authorize URL
 
 A discovery URL a header cannot carry is a 500, not a panic.

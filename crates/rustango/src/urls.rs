@@ -326,6 +326,17 @@ pub(crate) fn split_host_port(authority: &str) -> Option<(&str, Option<u16>)> {
     Some((host, Some(port.parse().ok()?)))
 }
 
+/// The host of an authority as every host check compares it: no port,
+/// lowercased, one trailing FQDN dot dropped (`app.test.` is `app.test`).
+#[cfg_attr(
+    not(any(feature = "_http_layers", feature = "tenancy")),
+    allow(dead_code)
+)]
+pub(crate) fn normalize_host(authority: &str) -> Option<String> {
+    let (host, _) = split_host_port(authority)?;
+    Some(host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase())
+}
+
 /// A `Host` header that is only `host[:port]`, so it is safe to put in a
 /// URL: `good.com:1@evil.com` or `a@evil.com` never parse (#2173).
 #[cfg_attr(

@@ -743,7 +743,8 @@ pub(crate) fn host_is_apex(headers: &http::HeaderMap, uri: &http::Uri, apex: &st
     host_of(headers, uri).is_some_and(|h| h.eq_ignore_ascii_case(apex))
 }
 
-/// Pull the host name from the request, lowercased and without a port.
+/// Pull the host name from the request, normalised by
+/// [`crate::urls::normalize_host`] (no port, lowercase, no trailing dot).
 /// Tries the `Host` header, then `uri.host()` (HTTP/2 `:authority`,
 /// absolute-form URIs).
 ///
@@ -761,11 +762,10 @@ fn host_from_parts(parts: &Parts) -> Option<String> {
 fn host_of(headers: &http::HeaderMap, uri: &http::Uri) -> Option<String> {
     if let Some(value) = headers.get(http::header::HOST) {
         if let Ok(s) = value.to_str() {
-            // `Host` header may include `:port` — strip it.
-            return crate::urls::split_host_port(s).map(|(h, _)| h.to_ascii_lowercase());
+            return crate::urls::normalize_host(s);
         }
     }
-    uri.host().map(str::to_ascii_lowercase)
+    uri.host().and_then(crate::urls::normalize_host)
 }
 
 /// How long a recorded failure suppresses further attempts.
@@ -903,6 +903,19 @@ mod tests {
         // HTTP/2 carries the host in `:authority`, not `Host`.
         let h2: http::Uri = "https://app.test/x".parse().unwrap();
         assert!(host_is_apex(&none, &h2, "app.test"));
+    }
+
+    #[test]
+    fn trailing_dot_host_is_the_same_host() {
+        let mut h = http::HeaderMap::new();
+        h.insert(http::header::HOST, "ACME.app.test.:8080".parse().unwrap());
+        let path: http::Uri = "/".parse().unwrap();
+        assert_eq!(host_of(&h, &path).as_deref(), Some("acme.app.test"));
+        let mut apex = http::HeaderMap::new();
+        apex.insert(http::header::HOST, "app.test.".parse().unwrap());
+        assert!(host_is_apex(&apex, &path, "app.test"));
+        let h2: http::Uri = "https://app.test./x".parse().unwrap();
+        assert!(host_is_apex(&http::HeaderMap::new(), &h2, "app.test"));
     }
 
     /// An IPv6 `Host` keeps its address, not just `[` (#2043).
