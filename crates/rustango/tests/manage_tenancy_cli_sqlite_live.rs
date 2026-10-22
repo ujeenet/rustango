@@ -481,7 +481,7 @@ async fn revoke_passkey_removes_the_users_credentials() {
     let url = format!("sqlite://{}", b._tmp.path().join("acme.db").display());
     let tenant: rustango::sql::Pool = sqlx::SqlitePool::connect(&url).await.unwrap().into();
     passkey::ensure_table(&tenant).await.unwrap();
-    let id = |name: &'static str| {
+    let user = |name: &'static str| {
         use rustango::core::Column as _;
         use rustango::sql::FetcherPool as _;
         use rustango::tenancy::User;
@@ -492,8 +492,12 @@ async fn revoke_passkey_removes_the_users_credentials() {
                 .fetch(&tenant)
                 .await
                 .unwrap();
-            rows[0].id.get().copied().unwrap()
+            rows.into_iter().next().unwrap()
         }
+    };
+    let id = |name: &'static str| {
+        let user = user(name);
+        async move { user.await.id.get().copied().unwrap() }
     };
     let (bob, eve) = (id("bob").await, id("eve").await);
     passkey::register(&tenant, bob, "laptop", vec![1], 0, "").await.unwrap();
@@ -505,10 +509,14 @@ async fn revoke_passkey_removes_the_users_credentials() {
         .await
         .expect_err("eve's key is not bob's");
     assert!(err.contains("key"), "{err}");
+    assert!(user("bob").await.sessions_revoked_at.is_none(), "nothing was revoked");
     b.run(&["revoke-passkey", "acme", "bob", "--credential", "laptop"])
         .await
         .expect("one");
     assert_eq!(passkey::for_user(&tenant, bob).await.unwrap().len(), 1);
+    // A stolen key's sessions end with it.
+    assert!(user("bob").await.sessions_revoked_at.is_some());
+    assert!(user("eve").await.sessions_revoked_at.is_none());
     let out = b.run(&["revoke-passkey", "acme", "bob"]).await.expect("all");
     assert!(out.contains('1'), "{out}");
     assert!(passkey::for_user(&tenant, bob).await.unwrap().is_empty());

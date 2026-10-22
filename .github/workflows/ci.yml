@@ -921,7 +921,7 @@ jobs:
       # operator console writes rather than a parallel one.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_hosts_sqlite_live
       # #1909 / #1910 — tenancy verbs refuse flags they would have dropped.
-      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_tenancy_cli_sqlite_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,passkey --test manage_tenancy_cli_sqlite_live
       # #1344 — and that the CLI enforces the same operator lockout rules the
       # console does, now that both call one engine.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_operators_sqlite_live

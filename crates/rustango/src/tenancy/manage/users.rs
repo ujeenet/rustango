@@ -359,16 +359,16 @@ where
     let uid = user.id.get().copied().unwrap_or_default();
     match parsed.value("--credential")? {
         Some(cred) => {
-            if !crate::passkey::revoke(&pool, uid, cred).await.map_err(fail)? {
+            if !crate::passkey::revoke::<User>(&pool, uid, cred).await.map_err(fail)? {
                 return Err(TenancyError::Validation(format!(
                     "revoke-passkey: user `{username}` has no passkey `{cred}`"
                 )));
             }
-            writeln!(w, "revoked passkey `{cred}` of user `{username}` in tenant `{slug}`")?;
+            writeln!(w, "revoked passkey `{cred}` of user `{username}` in tenant `{slug}` and ended their sessions")?;
         }
         None => {
-            let n = crate::passkey::revoke_all(&pool, uid).await.map_err(fail)?;
-            writeln!(w, "revoked {n} passkey(s) of user `{username}` in tenant `{slug}`")?;
+            let n = crate::passkey::revoke_all::<User>(&pool, uid).await.map_err(fail)?;
+            writeln!(w, "revoked {n} passkey(s) of user `{username}` in tenant `{slug}` and ended their sessions")?;
         }
     }
     Ok(())
