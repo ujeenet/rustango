@@ -347,9 +347,9 @@ pub struct Translator {
     fallback_chain: Vec<Locale>,
     catalogs: RwLock<HashMap<Locale, HashMap<String, String>>>,
     /// DB-sourced override layer (#532). Same `locale → key → value`
-    /// shape as `catalogs`, but consulted *first* by [`Self::translate`]
-    /// so operator edits persisted to `rustango_translations` win over
-    /// the file-loaded defaults. Empty unless [`Self::load_overrides`] /
+    /// shape as `catalogs`, consulted before the file catalog at each
+    /// locale of the lookup order, so operator edits persisted to
+    /// `rustango_translations` win over the file-loaded defaults. Empty unless [`Self::load_overrides`] /
     /// [`Self::set_override`] is called (e.g. by
     /// [`crate::i18n::db::refresh_overrides_pool`]). Refreshing from the
     /// DB keeps `translate` synchronous — no per-render query.
@@ -457,88 +457,62 @@ impl Translator {
 
     /// Look up `key` in `locale`'s catalog, walking the fallback
     /// chain in order: exact locale → base language → explicit
-    /// `fallback_chain` (#425) → default locale → `key` itself.
+    /// `fallback_chain` (#425) → default locale → `key` itself. At each
+    /// locale a DB override beats the file catalog.
     ///
     /// `params` substitutes `{name}` placeholders in the result.
     #[must_use]
     pub fn translate(&self, locale: &str, key: &str, params: &[(&str, &str)]) -> String {
-        let req = Locale::new(locale);
-
-        // DB override layer (#532) takes priority over the file
-        // catalogs for the requested locale / its base language, so an
-        // operator's persisted edit wins. Anything not overridden falls
-        // through to the unchanged catalog lookup below.
-        {
-            let ov = self.overrides.read().expect("translator poisoned");
-            if let Some(v) = ov.get(&req).and_then(|c| c.get(key)).or_else(|| {
-                ov.get(&Locale::new(req.base_language()))
-                    .and_then(|c| c.get(key))
-            }) {
-                return substitute(v, params);
-            }
-        }
-
-        let cats = self.catalogs.read().expect("translator poisoned");
-
-        // Walk the lookup chain in priority order.
-        let mut template: Option<String> = cats
-            .get(&req)
-            .and_then(|c| c.get(key))
-            .or_else(|| {
-                cats.get(&Locale::new(req.base_language()))
-                    .and_then(|c| c.get(key))
-            })
-            .cloned();
-
-        if template.is_none() {
-            for fb in &self.fallback_chain {
-                if let Some(v) = cats.get(fb).and_then(|c| c.get(key)) {
-                    template = Some(v.clone());
-                    break;
-                }
-            }
-        }
-
-        let template = template
-            .or_else(|| {
-                cats.get(&self.default_locale)
-                    .and_then(|c| c.get(key))
-                    .cloned()
-            })
+        let template = self
+            .resolve(&Locale::new(locale), key, None)
             .unwrap_or_else(|| key.to_owned());
-
         substitute(&template, params)
     }
 
-    /// Resolve the plural template for `key`/`category` in `locale`, walking the
-    /// same locale chain as [`Self::translate`] but over the plural catalogs:
-    /// exact → base language → explicit fallback chain → default locale. Within a
-    /// matched entry, prefer the exact `category`, then `"other"`, then any form
-    /// (so a partially-authored entry never yields `None` once the key exists).
-    fn resolve_plural_template(&self, req: &Locale, key: &str, category: &str) -> Option<String> {
+    /// The one lookup order: each locale of exact → base language →
+    /// `fallback_chain` → default, and at each one the DB override, then the
+    /// plural entry (when `category` is set), then the flat file entry.
+    fn resolve(&self, req: &Locale, key: &str, category: Option<&str>) -> Option<String> {
+        let ov = self.overrides.read().expect("translator poisoned");
+        let cats = self.catalogs.read().expect("translator poisoned");
         let pc = self.plural_catalogs.read().expect("translator poisoned");
-        let pick = |entry: &HashMap<String, String>| -> Option<String> {
+        // Within a plural entry: the exact category, then `other`, then any
+        // form, so a partly authored entry still resolves.
+        let pick = |entry: &HashMap<String, String>, category: &str| -> Option<String> {
             entry
                 .get(category)
                 .or_else(|| entry.get("other"))
                 .or_else(|| entry.values().next())
                 .cloned()
         };
-        if let Some(v) = pc.get(req).and_then(|c| c.get(key)).and_then(&pick) {
-            return Some(v);
-        }
         let base = Locale::new(req.base_language());
-        if let Some(v) = pc.get(&base).and_then(|c| c.get(key)).and_then(&pick) {
-            return Some(v);
-        }
-        for fb in &self.fallback_chain {
-            if let Some(v) = pc.get(fb).and_then(|c| c.get(key)).and_then(&pick) {
-                return Some(v);
+        let mut seen: Vec<&Locale> = Vec::with_capacity(self.fallback_chain.len() + 3);
+        let order = [req, &base]
+            .into_iter()
+            .chain(&self.fallback_chain)
+            .chain(std::iter::once(&self.default_locale));
+        for loc in order {
+            if seen.contains(&loc) {
+                continue;
+            }
+            seen.push(loc);
+            if let Some(v) = ov.get(loc).and_then(|c| c.get(key)) {
+                return Some(v.clone());
+            }
+            if let Some(category) = category {
+                if let Some(v) = pc
+                    .get(loc)
+                    .and_then(|c| c.get(key))
+                    .and_then(|e| pick(e, category))
+                {
+                    return Some(v);
+                }
+            }
+            if let Some(v) = cats.get(loc).and_then(|c| c.get(key)) {
+                return Some(v.clone());
             }
         }
-        pc.get(&self.default_locale)
-            .and_then(|c| c.get(key))
-            .and_then(&pick)
+        None
     }
 
     /// Count-aware translation (#1102) — the `ngettext` shape. Picks the plural
@@ -546,10 +520,9 @@ impl Translator {
     /// substitutes `params` (pass the count itself, e.g.
     /// `&[("count", &n.to_string())]`, so the chosen form's `{count}` fills in).
     ///
-    /// When no plural entry exists for `key` in any locale, this falls back to
-    /// the scalar [`Self::translate`] — i.e. a flat catalog entry if present,
-    /// else the source `key` itself — so untranslated / English strings still
-    /// render (with `{count}` interpolated) instead of a blank or raw id.
+    /// Same locale order as [`Self::translate`]; at each locale a DB override
+    /// wins, then the plural entry, then a flat entry. With none anywhere the
+    /// source `key` renders, with `{count}` interpolated.
     ///
     /// ```ignore
     /// // en plural catalog: "Deleted {count} page(s)." =>
@@ -566,14 +539,11 @@ impl Translator {
         n: i64,
         params: &[(&str, &str)],
     ) -> String {
-        let req = Locale::new(locale);
         let category = plural_category(locale, n);
-        if let Some(tpl) = self.resolve_plural_template(&req, key, category) {
-            return substitute(&tpl, params);
-        }
-        // No plural catalog entry anywhere → scalar path handles flat keys, the
-        // source-string fallback, and substitution.
-        self.translate(locale, key, params)
+        let template = self
+            .resolve(&Locale::new(locale), key, Some(category))
+            .unwrap_or_else(|| key.to_owned());
+        substitute(&template, params)
     }
 
     /// `true` when strings are registered for `locale` (or its base
@@ -660,12 +630,21 @@ impl Translator {
             .sum()
     }
 
+    /// Insert one file's flat and plural entries for `locale`.
+    fn insert_catalog_file(&self, locale: Locale, path: &Path) -> Result<(), I18nError> {
+        let (flat, plural) = read_catalog(path)?;
+        self.insert_plural_locale(locale.clone(), plural);
+        self.insert_locale(locale, flat);
+        Ok(())
+    }
+
     /// Load every `*.json` file in `dir` as a locale catalog. The file
     /// stem becomes the locale identifier (e.g. `en.json` → `Locale::new("en")`).
     /// Of two spellings of one locale (`pt_BR.json`, `pt-BR.json`) the first
     /// by name wins; the other is skipped with a warning.
     ///
-    /// Each file must contain a flat object of string→string entries.
+    /// Each file is a JSON object; a value is a string, or a plural object
+    /// of CLDR category → string (`{"one": "…", "other": "…"}`).
     ///
     /// # Errors
     /// [`I18nError::Io`] when the dir can't be read or a file is unreadable.
@@ -673,7 +652,7 @@ impl Translator {
     pub fn from_directory(dir: &Path, default_locale: Locale) -> Result<Self, I18nError> {
         let t = Translator::new(default_locale);
         for (locale, path) in catalog_files(dir)? {
-            t.insert_locale(locale, read_catalog(&path)?);
+            t.insert_catalog_file(locale, &path)?;
         }
         Ok(t)
     }
@@ -743,7 +722,7 @@ impl Translator {
                         continue;
                     }
                 }
-                t.insert_locale(locale, read_catalog(&p)?);
+                t.insert_catalog_file(locale, &p)?;
             }
         }
 
@@ -1108,13 +1087,37 @@ fn catalog_files(dir: &Path) -> Result<Vec<(Locale, std::path::PathBuf)>, I18nEr
     Ok(out)
 }
 
-/// One flat string→string JSON catalog.
-fn read_catalog(path: &Path) -> Result<HashMap<String, String>, I18nError> {
+/// One catalog entry: a string, or a plural object of category → string.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum CatalogEntry {
+    Flat(String),
+    Plural(HashMap<String, String>),
+}
+
+type PluralCatalog = HashMap<String, HashMap<String, String>>;
+
+/// One JSON catalog, split into its flat and plural entries.
+fn read_catalog(path: &Path) -> Result<(HashMap<String, String>, PluralCatalog), I18nError> {
     let raw = std::fs::read_to_string(path).map_err(|e| I18nError::Io(e.to_string()))?;
-    serde_json::from_str(&raw).map_err(|e| I18nError::Parse {
-        file: path.display().to_string(),
-        detail: e.to_string(),
-    })
+    let entries: HashMap<String, CatalogEntry> =
+        serde_json::from_str(&raw).map_err(|e| I18nError::Parse {
+            file: path.display().to_string(),
+            detail: e.to_string(),
+        })?;
+    let mut flat = HashMap::new();
+    let mut plural = HashMap::new();
+    for (key, entry) in entries {
+        match entry {
+            CatalogEntry::Flat(v) => {
+                flat.insert(key, v);
+            }
+            CatalogEntry::Plural(forms) => {
+                plural.insert(key, forms);
+            }
+        }
+    }
+    Ok((flat, plural))
 }
 
 // ------------------------------------------------------------------ Accept-Language negotiation
@@ -1819,6 +1822,88 @@ mod tests {
         assert_eq!(
             t.translate_plural("en", "flat_msg", 2, &[("count", "2")]),
             "2 thing(s)"
+        );
+    }
+
+    #[test]
+    fn plural_beats_flat_at_one_locale_and_flat_beats_a_fallback_plural() {
+        let entry = |v: &str| {
+            let mut e = HashMap::new();
+            e.insert("other".to_owned(), v.to_owned());
+            [("k".to_owned(), e)].into_iter().collect::<HashMap<_, _>>()
+        };
+        let flat = |v: &str| [("k".to_owned(), v.to_owned())].into_iter().collect();
+        let t = Translator::new(Locale::new("en"))
+            .add_locale(Locale::new("fr"), flat("fr flat"))
+            .add_plural_locale(Locale::new("fr"), entry("fr plural"));
+        assert_eq!(t.translate_plural("fr", "k", 2, &[]), "fr plural");
+        let t = Translator::new(Locale::new("en"))
+            .add_locale(Locale::new("fr"), flat("fr flat"))
+            .add_plural_locale(Locale::new("en"), entry("en plural"));
+        assert_eq!(t.translate_plural("fr", "k", 2, &[]), "fr flat");
+    }
+
+    #[test]
+    fn default_locale_override_reaches_locales_missing_the_key() {
+        let t = make_translator();
+        t.set_override("en", "only_en", "Edited");
+        t.set_override("en", "hello", "Hello there");
+        assert_eq!(t.gettext("de", "only_en"), "Edited");
+        assert_eq!(t.gettext("fr", "only_en"), "Edited");
+        // A locale with its own file entry keeps it.
+        assert_eq!(t.gettext("fr", "hello"), "Bonjour");
+        assert_eq!(t.gettext("de", "hello"), "Hello there");
+    }
+
+    #[test]
+    fn fallback_chain_override_is_seen() {
+        let t = Translator::new(Locale::new("en")).with_fallback_chain(&["pt"]);
+        t.set_override("pt", "k", "Olá");
+        assert_eq!(t.gettext("es", "k"), "Olá");
+    }
+
+    #[test]
+    fn base_language_override_does_not_hide_a_region_file_entry() {
+        let mut br = HashMap::new();
+        br.insert("k".to_owned(), "Oi".to_owned());
+        let t = Translator::new(Locale::new("en")).add_locale(Locale::new("pt-BR"), br);
+        t.set_override("pt", "k", "Olá");
+        assert_eq!(t.gettext("pt-BR", "k"), "Oi");
+        assert_eq!(t.gettext("pt", "k"), "Olá");
+    }
+
+    #[test]
+    fn override_wins_over_a_plural_entry() {
+        let mut entry = HashMap::new();
+        entry.insert("one".to_owned(), "{count} page".to_owned());
+        entry.insert("other".to_owned(), "{count} pages".to_owned());
+        let mut en: HashMap<String, HashMap<String, String>> = HashMap::new();
+        en.insert("pages".to_owned(), entry);
+        let t = Translator::new(Locale::new("en")).add_plural_locale(Locale::new("en"), en);
+        t.set_override("en", "pages", "{count} page(s)");
+        assert_eq!(
+            t.translate_plural("en", "pages", 2, &[("count", "2")]),
+            "2 page(s)"
+        );
+    }
+
+    #[test]
+    fn catalog_files_may_hold_plural_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("fr.json"),
+            r#"{"hi": "Salut", "items": {"one": "{count} élément", "other": "{count} éléments"}}"#,
+        )
+        .unwrap();
+        let t = Translator::from_directory(dir.path(), Locale::new("en")).unwrap();
+        assert_eq!(t.gettext("fr", "hi"), "Salut");
+        assert_eq!(
+            t.translate_plural("fr", "items", 1, &[("count", "1")]),
+            "1 élément"
+        );
+        assert_eq!(
+            t.translate_plural("fr", "items", 3, &[("count", "3")]),
+            "3 éléments"
         );
     }
 }

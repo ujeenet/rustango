@@ -4,6 +4,30 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — class-based views run the template context processors
+
+Every template view now merges the registered processors and the request's `ExtraContext` before it renders; view keys still win. A layout reading a processor key used to fail with a 500.
+
+### Fixed — DB translation overrides follow the fallback chain
+
+Lookups walk exact → base → fallback chain → default once, and at each locale an override beats the file entry, so an edited default-locale string reaches locales missing the key. `translate_plural` honours overrides, and catalog files may hold plural objects.
+
+### Fixed — a media upload that names no owner belongs to the caller
+
+`POST /uploads/begin` without `uploaded_by_id` now stores the signed-in user as owner; only a superuser can still create an ownerless upload.
+
+### Fixed — media cannot be filed under a missing or deleted collection
+
+`move_to_collection`, `save_bytes` and `begin_upload` refuse such a collection (400 from the router) and lock it until they commit, so a concurrent `delete_collection` cannot leave media under a dead folder.
+
+### Fixed — derives accept nullable relations and `Option<bool>`
+
+`#[serializer(nested)]` and `#[serializer(slug)]` compile on an `Option<ForeignKey<T>>` source into an `Option` field, so a NULL relation renders `null` (also under `strict`, which now panics only on an unloaded one), and `#[derive(Form)]` parses `Option<bool>`, blank as `None`.
+
+### Fixed — `format_number` / `format_currency` follow CLDR
+
+pl, sv, fi and Norwegian group with a no-break space, fr with a narrow one; German puts `€` last and Dutch first (`€ 1.234,56`); a trailing symbol is joined by a no-break space so amounts never wrap.
+
 ### Fixed — purging a schema tenant no longer drops other tenants' objects
 
 `DROP SCHEMA … CASCADE` also dropped what other schemas built on it: views, columns of its types or extensions, FKs, defaults, triggers. Purge now refuses and names them.

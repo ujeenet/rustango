@@ -222,6 +222,22 @@ The error lists each outside object and what it uses; drop or move them, then pu
 
 Snapshots now carry the dimension / SRID, so on PostgreSQL the first `makemigrations` emits an `AlterColumnType` for each sized `vector` or `geometry` column; MySQL and SQLite get nothing (both stay `TEXT`). The cast fails on rows with another dimension, or with an SRID other than 0 or the model's; SRID-0 rows take the model's SRID.
 
+### Template views merge processors and `ExtraContext` everywhere
+
+All class-based views now add the registered context processors' keys, and every view (not only `ListView`) merges `ExtraContext`. A template that relied on such a key being undefined sees a value now.
+
+### Media refuses dead collections
+
+`move_to_collection`, `save_bytes` and `begin_upload` now return `MediaError::Other("collection N is missing or deleted")` where they used to succeed.
+
+### Number and currency output changed for some locales
+
+`format_number` / `format_currency` now emit U+00A0 / U+202F instead of ASCII spaces, and move `€` for de, nl and most European locales. Code or tests that compare these strings need the new forms.
+
+### Translation lookup order
+
+A base-language override (`pt`) no longer hides a region file entry (`pt-BR`), and a flat entry in an earlier locale of the chain now beats a plural entry in a later one.
+
 ## 0.60.9
 
 ### Idle connections close after 75 s

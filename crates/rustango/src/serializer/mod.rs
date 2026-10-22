@@ -137,6 +137,41 @@
 
 use serde_json::Value;
 
+/// A relation field read by `#[serializer(nested)]` and `slug`. A nullable
+/// `Option<ForeignKey<T>>` renders into an `Option` field, so NULL is `null`.
+#[doc(hidden)]
+pub trait LoadedRelation {
+    type Target;
+    /// The serializer field type for a rendered value `V`.
+    type Field<V>;
+    /// `map` the loaded parent; `unloaded` runs when the FK is set but not loaded.
+    fn render<V>(
+        &self,
+        map: impl FnOnce(&Self::Target) -> V,
+        unloaded: impl FnOnce() -> V,
+    ) -> Self::Field<V>;
+}
+
+impl<T, K> LoadedRelation for crate::sql::ForeignKey<T, K> {
+    type Target = T;
+    type Field<V> = V;
+    fn render<V>(&self, map: impl FnOnce(&T) -> V, unloaded: impl FnOnce() -> V) -> V {
+        self.value().map_or_else(unloaded, map)
+    }
+}
+
+impl<R: LoadedRelation> LoadedRelation for Option<R> {
+    type Target = R::Target;
+    type Field<V> = Option<R::Field<V>>;
+    fn render<V>(
+        &self,
+        map: impl FnOnce(&R::Target) -> V,
+        unloaded: impl FnOnce() -> V,
+    ) -> Option<R::Field<V>> {
+        self.as_ref().map(|r| r.render(map, unloaded))
+    }
+}
+
 /// The serializer trait. `#[derive(Serializer)]` implements it.
 ///
 /// The macro writes `from_model` and `writable_fields` for you. The

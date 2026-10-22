@@ -152,7 +152,7 @@ pub fn derive_form(input: TokenStream) -> TokenStream {
 /// - `#[serializer(method = "fn_name")]` — computed field: calls `Self::fn_name(&model)` for the field value; excluded from `writable_fields()`
 /// - `#[serializer(nested)]` / `nested(strict)` — auto-resolves nested serializer from a loaded `ForeignKey`; excluded from `writable_fields()`
 /// - `#[serializer(many = ChildSerializer)]` — collection of nested serializers; populated via macro-emitted `set_<field>(&[Child::Model])`; excluded from `writable_fields()`
-/// - `#[serializer(slug = "name")]` — render a relation as one of its fields: clones `model.<source>.value()?.name`; excluded from `writable_fields()` (v0.44)
+/// - `#[serializer(slug = "name")]` — render a relation (`ForeignKey<T>` or `Option<ForeignKey<T>>`) as one of its fields: clones the loaded parent's `name`; excluded from `writable_fields()` (v0.44)
 /// - `#[serializer(validate = "fn_name")]` — per-field validator surfaced by `Self::validate(&self)`
 /// - `#[serializer(max_length = N)]` / `min_length` / `min` / `max` — declarative bounds checked on
 ///   write; auto-inherit from the model's `FieldSchema` (`max_length`/`min`/`max`/`choices`) when
@@ -12482,6 +12482,19 @@ fn render_form_field_parse(
     };
 
     let parsed_value = match kind {
+        // `Option<bool>`: absent or blank is `None`, as for the other types.
+        FormFieldKind::Bool if nullable => quote! {
+            let __v: ::core::option::Option<bool> = match __raw {
+                ::core::option::Option::None => ::core::option::Option::None,
+                ::core::option::Option::Some(__s) if __s.is_empty() => {
+                    ::core::option::Option::None
+                }
+                ::core::option::Option::Some(__s) => ::core::option::Option::Some(!matches!(
+                    __s.to_ascii_lowercase().as_str(),
+                    "false" | "0" | "off" | "no"
+                )),
+            };
+        },
         FormFieldKind::Bool => quote! {
             let __v: bool = match __raw {
                 ::core::option::Option::None => false,
@@ -13236,7 +13249,6 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // Generate from_model body: struct literal with each field assigned.
     let from_model_fields = fields_info.iter().map(|fi| {
         let ident = &fi.ident;
-        let ty = &fi.ty;
         if let Some(_inner) = &fi.attrs.many {
             // Many — collection field. Initialize empty; caller
             // populates via the macro-emitted set_<field> helper
@@ -13255,7 +13267,8 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             // `ForeignKey<T>`; the slug field on the parent is named
             // by the attribute value. When the FK is unloaded the
             // field falls back to `Default::default()` — same
-            // graceful-degrade contract as `nested`.
+            // graceful-degrade contract as `nested`; a NULL
+            // `Option<ForeignKey>` renders `None`.
             let src_name = fi
                 .attrs
                 .source
@@ -13265,18 +13278,17 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let src_ident = ident_from_name(&src_name, ident.span());
             let slug_ident = syn::Ident::new(slug_field, ident.span());
             quote! {
-                #ident: match model.#src_ident.value() {
-                    ::core::option::Option::Some(__loaded) =>
-                        ::core::clone::Clone::clone(&__loaded.#slug_ident),
-                    ::core::option::Option::None =>
-                        ::core::default::Default::default(),
-                }
+                #ident: #root::serializer::LoadedRelation::render(
+                    &model.#src_ident,
+                    |__loaded| ::core::clone::Clone::clone(&__loaded.#slug_ident),
+                    ::core::default::Default::default,
+                )
             }
         } else if fi.attrs.nested {
             // Nested serializer. Source defaults to the field name on
             // this struct; override via `source = "..."`. The source
-            // field on the model is expected to be a `ForeignKey<T>`
-            // whose `.value()` returns `Option<&T>` after lazy-load.
+            // field on the model is a `ForeignKey<T>` or
+            // `Option<ForeignKey<T>>`, read through `LoadedRelation`.
             //
             // Behavior matrix (tweakable per-field):
             //   * FK loaded   → nested object materializes via
@@ -13284,31 +13296,29 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             //   * FK unloaded → fall back to ChildSerializer::default()
             //                   (so prod doesn't crash on a missing
             //                   prefetch — just renders a blank nested
-            //                   object). Add `#[serializer(nested,
-            //                   strict)]` to keep the v0.18.1
+            //                   object). Add `#[serializer(nested(
+            //                   strict))]` to keep the v0.18.1
             //                   panic-on-unloaded behavior for tests
             //                   that want hard guardrails.
+            //   * NULL `Option<ForeignKey>` → `None` in an `Option<Child>`
+            //                   field (JSON null), strict or not.
             let src_name = fi.attrs.source.as_deref().unwrap_or(&ident_name(&fi.ident)).to_owned();
             let src_ident = ident_from_name(&src_name, ident.span());
-            if fi.attrs.nested_strict {
+            let unloaded = if fi.attrs.nested_strict {
                 let panic_msg = format!(
                     "nested(strict) serializer for `{ident}` requires `model.{src_name}` to be loaded — \
                      call .get(&pool).await? or .select_related(\"{src_name}\") on the model first",
                 );
-                quote! {
-                    #ident: <#ty as #root::serializer::ModelSerializer>::from_model(
-                        model.#src_ident.value().expect(#panic_msg),
-                    )
-                }
+                quote! { || ::core::panic!("{}", #panic_msg) }
             } else {
-                quote! {
-                    #ident: match model.#src_ident.value() {
-                        ::core::option::Option::Some(__loaded) =>
-                            <#ty as #root::serializer::ModelSerializer>::from_model(__loaded),
-                        ::core::option::Option::None =>
-                            ::core::default::Default::default(),
-                    }
-                }
+                quote! { ::core::default::Default::default }
+            };
+            quote! {
+                #ident: #root::serializer::LoadedRelation::render(
+                    &model.#src_ident,
+                    |__loaded| #root::serializer::ModelSerializer::from_model(__loaded),
+                    #unloaded,
+                )
             }
         } else if fi.attrs.write_only || fi.attrs.skip {
             // Not read from model — use default

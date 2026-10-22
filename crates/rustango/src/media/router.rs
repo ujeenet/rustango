@@ -1326,10 +1326,28 @@ impl IntoResponse for MediaError {
 // Handlers
 // =====================================================================
 
+/// The upload's owner: as requested, or the signed-in caller when none is
+/// named. Only a superuser may leave an upload ownerless.
+fn upload_owner(requested: Option<i64>, extensions: &axum::http::Extensions) -> Option<i64> {
+    #[cfg(feature = "tenancy")]
+    if requested.is_none() {
+        if let Some(auth) = extensions.get::<crate::tenancy::middleware::AuthenticatedUser>() {
+            if !auth.is_superuser {
+                return Some(auth.id);
+            }
+        }
+    }
+    #[cfg(not(feature = "tenancy"))]
+    let _ = extensions;
+    requested
+}
+
 async fn begin_upload_handler(
     State(manager): State<Arc<MediaManager>>,
+    parts: axum::http::request::Parts,
     Json(body): Json<BeginUploadBody>,
 ) -> Result<Json<UploadTicketBody>, MediaError> {
+    let uploaded_by_id = upload_owner(body.uploaded_by_id, &parts.extensions);
     let ticket = manager
         .begin_upload(UploadIntent {
             disk: body.disk,
@@ -1337,7 +1355,7 @@ async fn begin_upload_handler(
             mime: body.mime,
             original_filename: body.original_filename,
             size_bytes: body.size_bytes,
-            uploaded_by_id: body.uploaded_by_id,
+            uploaded_by_id,
             collection_id: body.collection_id,
             ttl: Duration::from_secs(body.ttl_secs.clamp(60, 3600)),
         })
