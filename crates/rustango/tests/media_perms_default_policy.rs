@@ -829,17 +829,16 @@ impl rustango::storage::Storage for Presigning {
     }
 }
 
-// An upload that names no owner is attributed to the caller.
-#[tokio::test]
-async fn an_upload_without_an_owner_is_attributed_to_the_caller() {
+/// Begin an upload naming no owner; returns the stored owner and the caller id.
+async fn ownerless_upload(superuser: bool) -> (Option<i64>, i64) {
     let (_, pool) = setup().await;
     let registry = StorageRegistry::new()
         .set("default", Arc::new(Presigning(InMemoryStorage::new())))
         .with_default("default");
     let mgr = MediaManager::new_pool(pool.clone(), registry);
-    let uid = make_user(&pool, "uploader", false).await;
+    let uid = make_user(&pool, "uploader", superuser).await;
     grant(&pool, uid, "rustango_media.add").await;
-    let resp = app(mgr.clone(), pool, Some(principal(uid, false)))
+    let resp = app(mgr.clone(), pool, Some(principal(uid, superuser)))
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -861,7 +860,21 @@ async fn an_upload_without_an_owner_is_attributed_to_the_caller() {
     let ticket: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let id = ticket["media_id"].as_i64().expect("media_id");
     let row = mgr.get(id).await.unwrap().expect("pending row");
-    assert_eq!(row.uploaded_by_id, Some(uid), "the upload has no owner");
+    (row.uploaded_by_id, uid)
+}
+
+// An upload that names no owner is attributed to the caller.
+#[tokio::test]
+async fn an_upload_without_an_owner_is_attributed_to_the_caller() {
+    let (owner, uid) = ownerless_upload(false).await;
+    assert_eq!(owner, Some(uid), "the upload has no owner");
+}
+
+// Only a superuser may leave an upload ownerless.
+#[tokio::test]
+async fn a_superuser_upload_without_an_owner_stays_ownerless() {
+    let (owner, _) = ownerless_upload(true).await;
+    assert_eq!(owner, None);
 }
 
 // #2343 also covers a superuser, who may attribute an upload to anyone.

@@ -26,6 +26,16 @@ rustango::register_template_context_processor!(|parts| {
     out
 });
 
+// Collides with view keys (`object`, `is_update`) and an `ExtraContext`
+// key (`shared`): the view, then `ExtraContext`, must win.
+rustango::register_template_context_processor!(|_parts| {
+    let mut out: HashMap<String, Value> = HashMap::new();
+    out.insert("object".into(), json!("processor"));
+    out.insert("is_update".into(), json!("processor"));
+    out.insert("shared".into(), json!("processor"));
+    out
+});
+
 fn parts(path: &str) -> axum::http::request::Parts {
     let req: Request<()> = Request::builder().uri(path).body(()).unwrap();
     let (p, ()) = req.into_parts();
@@ -101,9 +111,12 @@ mod class_based_views {
     use http_body_util::BodyExt;
     use rustango::core::Model as _;
     use rustango::sql::{Auto, Pool};
-    use rustango::template_views::{CreateView, DetailView, ListView, TemplateView};
-    use rustango::Model;
-    use tera::Tera;
+    use rustango::template_views::{
+        CreateView, DeleteView, DetailView, ExtraContext, FormView, ListView, TemplateView,
+        UpdateView,
+    };
+    use rustango::{Form, Model};
+    use tera::{Context, Tera};
     use tower::ServiceExt;
 
     #[derive(Model, Debug, Clone)]
@@ -176,5 +189,96 @@ mod class_based_views {
         assert_eq!(get(detail, "/posts/1").await, "v=test-build p=/posts/1");
         let create = CreateView::for_model(CpPost::SCHEMA).router("/posts", tera(), pool);
         assert_eq!(get(create, "/posts/new").await, "v=test-build p=/posts/new");
+    }
+
+    const CSRF: &str = "cp-csrf-token-cp-csrf-token-cp-csrf-token-x";
+
+    /// Templates print a view key, an `ExtraContext` key and a processor-only key.
+    fn precedence_tera() -> Arc<Tera> {
+        let mut tera = Tera::default();
+        tera.add_raw_templates(vec![
+            ("cp_post_detail.html", "{{ object.title }}|{{ shared }}|{{ build_version }}"),
+            (
+                "cp_post_confirm_delete.html",
+                "{{ object.title }}|{{ shared }}|{{ build_version }}",
+            ),
+            ("cp_post_form.html", "{{ is_update }}|{{ shared }}|{{ build_version }}"),
+            ("form.html", "{{ errors | length }}|{{ shared }}|{{ build_version }}"),
+        ])
+        .unwrap();
+        Arc::new(tera)
+    }
+
+    fn with_extra(app: axum::Router) -> axum::Router {
+        let mut extra = Context::new();
+        extra.insert("shared", "extra");
+        extra.insert("object", "extra");
+        extra.insert("is_update", "extra");
+        app.layer(axum::Extension(ExtraContext(extra)))
+    }
+
+    async fn send(app: axum::Router, method: &str, uri: &str, form: &str) -> (StatusCode, String) {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("rustango_csrf={CSRF}"))
+                    .body(Body::from(format!("_csrf={CSRF}&{form}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[tokio::test]
+    async fn view_keys_beat_extra_context_which_beats_processors() {
+        let pool = pool().await;
+        let detail = with_extra(
+            DetailView::for_model(CpPost::SCHEMA).router("/posts", precedence_tera(), pool.clone()),
+        );
+        assert_eq!(get(detail, "/posts/1").await, "Hello|extra|test-build");
+        let delete = with_extra(
+            DeleteView::for_model(CpPost::SCHEMA).router("/posts", precedence_tera(), pool.clone()),
+        );
+        assert_eq!(get(delete, "/posts/1/delete").await, "Hello|extra|test-build");
+        let update = || {
+            with_extra(
+                UpdateView::for_model(CpPost::SCHEMA).router(
+                    "/posts",
+                    precedence_tera(),
+                    pool.clone(),
+                ),
+            )
+        };
+        assert_eq!(get(update(), "/posts/1/edit").await, "true|extra|test-build");
+        // A failed POST re-renders the form through the same merge.
+        let (status, body) = send(update(), "POST", "/posts/1/edit", "title=").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body, "true|extra|test-build");
+    }
+
+    #[derive(Form)]
+    pub struct CpForm {
+        #[allow(dead_code)]
+        pub name: String,
+    }
+
+    #[tokio::test]
+    async fn form_view_merges_extra_context_and_processors() {
+        let view = || {
+            with_extra(
+                FormView::<CpForm>::for_form(|_f| async { Ok(()) })
+                    .router("/contact", precedence_tera()),
+            )
+        };
+        assert_eq!(get(view(), "/contact").await, "0|extra|test-build");
+        let (status, body) = send(view(), "POST", "/contact", "").await;
+        assert!(status.is_success(), "{status}: {body}");
+        assert_eq!(body, "1|extra|test-build");
     }
 }

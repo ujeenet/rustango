@@ -1834,6 +1834,22 @@ mod tests {
     }
 
     #[test]
+    fn format_currency_eur_after_the_amount_in_every_suffix_locale() {
+        for loc in [
+            "fr", "it", "es", "pt", "de", "da", "el", "fi", "sv", "no", "nb", "nn", "pl", "ru",
+            "cs", "sk", "bg", "uk", "hu", "pt-BR",
+        ] {
+            let out = format_currency(1234.5, "EUR", loc);
+            assert!(out.ends_with("\u{a0}€") && !out.starts_with('€'), "{loc}: {out}");
+        }
+    }
+
+    #[test]
+    fn format_currency_rub_symbol_after_the_amount() {
+        assert_eq!(format_currency(1234.5, "RUB", "ru"), "1\u{a0}234,50\u{a0}₽");
+    }
+
+    #[test]
     fn format_currency_jpy_zero_decimals() {
         // JPY, KRW and CLP show no decimals.
         assert_eq!(format_currency(1234.0, "JPY", "ja"), "¥1,234");

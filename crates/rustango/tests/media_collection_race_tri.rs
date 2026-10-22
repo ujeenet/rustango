@@ -148,6 +148,33 @@ async fn move_waits_and_sees_the_deleted_collection(pool: &Pool) {
     assert!(is_dead_parent(&r), "moved into a deleted collection: {r:?}");
 }
 
+/// An insert that waits on a collection being deleted is refused. On SQLite
+/// this needs the insert's IMMEDIATE transaction: a deferred one reads the
+/// stale live row first and then fails busy instead.
+async fn insert_waits_and_sees_the_deleted_collection(pool: &Pool) {
+    let mgr = manager(pool);
+    let target = create(&mgr, "insw-target", None).await;
+
+    let mut tx = transaction_pool(pool).await.expect("begin");
+    let soft_delete = MediaCollection::objects()
+        .where_(MediaCollection::id.eq(target))
+        .update()
+        .set("deleted_at", Utc::now())
+        .compile()
+        .expect("compile");
+    update_tx(&mut tx, &soft_delete).await.expect("soft-delete");
+    let saving = tokio::spawn({
+        let mgr = mgr.clone();
+        async move { save_into(&mgr, Some(target)).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!saving.is_finished(), "the insert did not wait for the lock");
+    tx.commit().await.expect("commit");
+
+    let r = saving.await.unwrap();
+    assert!(is_dead_parent(&r), "saved into a deleted collection: {r:?}");
+}
+
 /// A child committed while the delete waits on its parent is deleted too.
 async fn delete_takes_a_child_created_meanwhile(pool: &Pool) {
     if pool.dialect().name() == "sqlite" {
@@ -406,5 +433,6 @@ tri_dialect_test!(
         create_waits_and_sees_the_deleted_parent,
         media_cannot_go_into_a_dead_collection,
         move_waits_and_sees_the_deleted_collection,
+        insert_waits_and_sees_the_deleted_collection,
     ]
 );

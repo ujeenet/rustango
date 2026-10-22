@@ -1781,6 +1781,24 @@ mod tests {
     }
 
     #[test]
+    fn plural_beats_flat_at_one_locale_and_flat_beats_a_fallback_plural() {
+        let entry = |v: &str| {
+            let mut e = HashMap::new();
+            e.insert("other".to_owned(), v.to_owned());
+            [("k".to_owned(), e)].into_iter().collect::<HashMap<_, _>>()
+        };
+        let flat = |v: &str| [("k".to_owned(), v.to_owned())].into_iter().collect();
+        let t = Translator::new(Locale::new("en"))
+            .add_locale(Locale::new("fr"), flat("fr flat"))
+            .add_plural_locale(Locale::new("fr"), entry("fr plural"));
+        assert_eq!(t.translate_plural("fr", "k", 2, &[]), "fr plural");
+        let t = Translator::new(Locale::new("en"))
+            .add_locale(Locale::new("fr"), flat("fr flat"))
+            .add_plural_locale(Locale::new("en"), entry("en plural"));
+        assert_eq!(t.translate_plural("fr", "k", 2, &[]), "fr flat");
+    }
+
+    #[test]
     fn default_locale_override_reaches_locales_missing_the_key() {
         let t = make_translator();
         t.set_override("en", "only_en", "Edited");
