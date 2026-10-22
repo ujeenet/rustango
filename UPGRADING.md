@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### SQLite: a RunSQL beside a rebuild is no longer refused
+
+Such a migration commits in steps, so a failure can return `MigrateError::PartiallyApplied`, as on MySQL. Migrations without that mix still run in one transaction.
+
 ### A panicking `on_commit` callback no longer escapes `atomic`
 
 It is logged and the later callbacks run. Code that caught that panic around `atomic` should watch the `rustango::error` log instead.
