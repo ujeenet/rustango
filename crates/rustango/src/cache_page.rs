@@ -304,8 +304,8 @@ impl CachePageLayer {
 /// A cached page, for [`CachePageLayer::invalidate`].
 ///
 /// Give path, query and host exactly as the request sends them: path
-/// percent-encoded (`/caf%C3%A9`) and relative to any `Router::nest`,
-/// host with the same case and port. A `vary_on` header not set here
+/// percent-encoded (`/caf%C3%A9`) and in full, any `Router::nest` prefix
+/// included, host with the same case and port. A `vary_on` header not set here
 /// counts as missing, as on a request.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -675,11 +675,16 @@ fn compute_cache_key(
                 .map(axum::http::uri::Authority::as_str)
         })
         .unwrap_or("");
+    // A nested router strips its prefix from `uri`; key on the full path.
+    let uri = req
+        .extensions()
+        .get::<axum::extract::OriginalUri>()
+        .map_or(req.uri(), |o| &o.0);
     build_key(
         prefix,
         req.method().as_str(),
-        req.uri().path(),
-        req.uri().query().unwrap_or(""),
+        uri.path(),
+        uri.query().unwrap_or(""),
         host,
         tenant,
         vary_on.iter().map(|name| {

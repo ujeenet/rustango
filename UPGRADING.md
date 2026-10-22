@@ -202,6 +202,18 @@ A JSON key that names no model field is now a per-key `FormErrors` entry. `parse
 
 A payload that fails to decode is `Retryable` (spends attempts, then dead-letters) instead of dead-lettering at once.
 
+### Admin `add` hooks also see the new row
+
+After a create, the written row (parent or inline child) must be inside `register_admin_queryset!` and pass the `add` hook, now called again with `Some(&row)`; a hook that refuses every `Some` now refuses every create. After an edit, the written row is checked against the queryset scope only; the `change` hook still sees only the row before the edit. A refusal returns 403 and rolls back the whole edit.
+
+### `PageKey` takes the full path
+
+Under `Router::nest`, pass `CachePageLayer::invalidate` the path with the nest prefix (`/en/about`, not `/about`). Old entries expire on their timeout.
+
+### `RedisCache` calls time out
+
+A command now fails after 2 s and a connect attempt after 5 s. Build with `RedisCache::with_timeouts` if a slow link needs more.
+
 ## 0.60.9
 
 ### Idle connections close after 75 s

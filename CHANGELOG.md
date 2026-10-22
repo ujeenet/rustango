@@ -4,6 +4,26 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — admin create and edit stay inside the row scope
+
+The written row, parent and inline children alike, is re-read in the write transaction through the queryset hooks (and the `add` hook after a create); a form that would put a row outside the scope is refused with 403 and the whole edit rolled back.
+
+### Fixed — `Accept-Language` with `q=NaN` can no longer panic `LocaleMiddleware`
+
+A non-finite q is ignored like an unparsable one, and qualities sort as integers.
+
+### Fixed — `cache_page` keys on the full path under `Router::nest`
+
+Two nests of one cached router no longer serve each other's pages.
+
+### Fixed — health probes under load and on the tenancy apex
+
+`cache_probe` uses a fresh key per run, so overlapping `/ready` calls on a shared cache no longer fail each other. `server::Builder::with_health` also serves `/health` and `/ready` on the apex host.
+
+### Fixed — `RedisCache` times out on a stalled server
+
+Connects are bounded at 5 s per attempt (three attempts, ~1 s apart) and commands at 2 s by default, instead of hanging on TCP retries and minute-long reconnect backoff. `RedisCache::with_timeouts` takes a `RedisTimeouts` to change them. `clear()` sends `FLUSHDB ASYNC` so a large flush does not hit the command timeout.
+
 ### Fixed — scaffolded projects honor settings and stay off the network in dev
 
 The fullstack admin is built with `admin::Builder::from_settings`, so `[admin]` and `[brand]` apply (the prefix stays `/admin`, matching `main.rs`); a config that fails to load stops it rather than dropping `[admin]` restrictions. `.env.example` no longer sets `RUSTANGO_BIND=0.0.0.0:8080`, which beat the dev tier's `127.0.0.1`; compose sets it for the container and publishes 8080 on loopback. `--features csrf` adds `.with_csrf()`. Every `main.rs` shows where `with_trusted_proxies` goes, and the README runs `makemigrations` before `migrate`.

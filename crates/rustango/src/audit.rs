@@ -1523,24 +1523,9 @@ pub(crate) async fn update_one_with_row_diff_tx(
     })
 }
 
-/// INSERT `query`, then build its entry from the new PK. With
-/// [`DiffEmit::InTx`] the entry commits with the row (#2101); otherwise
-/// it comes back for the caller's best-effort emit.
-#[cfg(feature = "admin")]
-pub(crate) async fn insert_one_with_entry(
-    pool: &crate::sql::Pool,
-    query: &crate::core::InsertQuery,
-    pk_field: &crate::core::FieldSchema,
-    entry_of: impl FnOnce(&crate::core::SqlValue) -> PendingEntry,
-    emit: DiffEmit,
-) -> Result<(crate::core::SqlValue, Option<PendingEntry>), crate::sql::ExecError> {
-    let mut tx = crate::sql::write_transaction_pool(pool).await?;
-    let written = insert_one_with_entry_tx(&mut tx, pool, query, pk_field, entry_of, emit).await?;
-    tx.commit().await?;
-    Ok(written)
-}
-
-/// [`insert_one_with_entry`] in the caller's `tx`; the caller commits.
+/// INSERT `query` in the caller's `tx`, then build its entry from the new
+/// PK. With [`DiffEmit::InTx`] the entry commits with the row (#2101);
+/// otherwise it comes back for the caller's best-effort emit.
 #[cfg(feature = "admin")]
 pub(crate) async fn insert_one_with_entry_tx(
     tx: &mut crate::sql::PoolTx<'_>,

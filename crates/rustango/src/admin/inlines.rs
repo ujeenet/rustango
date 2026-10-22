@@ -1277,8 +1277,9 @@ struct TargetPlan {
 enum InlineWrite {
     Update {
         query: crate::core::UpdateQuery,
+        /// Re-read after the write to check the row is still in scope.
+        pk: SqlValue,
         audit: Option<ChildAudit>,
-        pk: String,
     },
     Delete {
         query: InlineRemove,
@@ -1333,7 +1334,7 @@ impl InlinePlan {
                 out.push(match w {
                     InlineWrite::Update { pk, .. } => ChildSignal::Save {
                         table,
-                        pk: pk.clone(),
+                        pk: pk.to_display_string(),
                         change: true,
                     },
                     InlineWrite::Delete { pk, .. } => ChildSignal::Delete {
@@ -1597,8 +1598,8 @@ async fn plan_target(
             }
             // Schema-driven INSERT: nothing else supplies these (#1464).
             crate::forms::stamp_auto_timestamps(target.child, &mut columns, &mut sql_values);
-            // MySQL cannot read back a DB-default UUID key; the entry needs it.
-            if audited && target.pk.auto && !columns.contains(&target.pk.column) {
+            // MySQL cannot read back a DB-default UUID key; the scope re-read needs it.
+            if target.pk.auto && !columns.contains(&target.pk.column) {
                 if let crate::core::FieldType::Uuid = target.pk.ty {
                     columns.push(target.pk.column);
                     sql_values.push(SqlValue::Uuid(uuid::Uuid::now_v7()));
@@ -1619,13 +1620,9 @@ async fn plan_target(
                 }
                 super::audit::audit_form(target.child, &cfg, &row, &written)
             });
-            // The new PK feeds the audit entry and `admin_post_save`.
-            let pk_readable =
-                audited || target.pk.is_serial() || columns.contains(&target.pk.column);
+            // The new PK feeds the scope re-read, audit entry and `admin_post_save`.
             let mut query = crate::core::InsertQuery::new(target.child, columns, sql_values);
-            if pk_readable {
-                query.returning = vec![target.pk.column];
-            }
+            query.returning = vec![target.pk.column];
             out.inserts.push(InlineInsert { query, audit });
             continue;
         }
@@ -1699,8 +1696,8 @@ async fn plan_target(
             .map(|(column, value)| crate::core::Assignment::new(column, value))
             .collect();
         out.existing.push(InlineWrite::Update {
-            pk: pk.to_display_string(),
-            query: crate::core::UpdateQuery::new(target.child, set, target.row_where(pk)),
+            query: crate::core::UpdateQuery::new(target.child, set, target.row_where(pk.clone())),
+            pk,
             audit,
         });
     }
@@ -1745,6 +1742,11 @@ pub(crate) enum InlineApplyError {
     },
     /// A delete the inserts needed to stay within `max_num` removed nothing.
     MaxNum { child: &'static ModelSchema },
+    /// A written row left the child's scope or failed its `add` hook.
+    Forbidden {
+        child: &'static ModelSchema,
+        action: &'static str,
+    },
 }
 
 /// Run a checked plan in the parent's `tx`; the caller rolls back on error.
@@ -1752,8 +1754,10 @@ pub(crate) enum InlineApplyError {
 pub(crate) async fn apply_plan_tx(
     tx: &mut crate::sql::PoolTx<'_>,
     pool: &Pool,
+    parts: &Parts,
     plan: InlinePlan,
 ) -> Result<(InlineApplyOutcome, Vec<ChildSignal>), InlineApplyError> {
+    use super::views::Written;
     use crate::audit::{AuditOp, DiffEmit, RowDiffWrite};
     let mut outcome = InlineApplyOutcome::default();
     // The rows written, for `admin_post_*` after the commit.
@@ -1778,13 +1782,15 @@ pub(crate) async fn apply_plan_tx(
             match write {
                 InlineWrite::Update {
                     query,
-                    audit: None,
                     pk,
+                    audit: None,
                 } => {
                     if crate::sql::update_tx(tx, &query).await.map_err(refused)? > 0 {
+                        let key = pk.to_display_string();
+                        admit_written(tx, parts, child, target.pk, pk, Written::Edited).await?;
                         written_rows.push(ChildSignal::Save {
                             table,
-                            pk,
+                            pk: key,
                             change: true,
                         });
                     }
@@ -1792,8 +1798,8 @@ pub(crate) async fn apply_plan_tx(
                 }
                 InlineWrite::Update {
                     query,
-                    audit: Some(audit),
                     pk,
+                    audit: Some(audit),
                 } => {
                     let written = crate::audit::update_one_with_row_diff_tx(
                         tx,
@@ -1809,10 +1815,12 @@ pub(crate) async fn apply_plan_tx(
                     .await
                     .map_err(refused)?;
                     if let RowDiffWrite::Written { deferred } = written {
+                        let key = pk.to_display_string();
+                        admit_written(tx, parts, child, target.pk, pk, Written::Edited).await?;
                         entries.extend(deferred);
                         written_rows.push(ChildSignal::Save {
                             table,
-                            pk,
+                            pk: key,
                             change: true,
                         });
                     }
@@ -1852,21 +1860,14 @@ pub(crate) async fn apply_plan_tx(
         if deleted < target.deletes_needed {
             return Err(InlineApplyError::MaxNum { child });
         }
-        for insert in target.inserts {
-            let pk = match insert.audit {
-                None if insert.query.returning.is_empty() => {
-                    crate::sql::insert_tx(tx, &insert.query)
-                        .await
-                        .map_err(refused)?;
-                    String::new()
-                }
+        for insert in &target.inserts {
+            let pk = match &insert.audit {
                 None => {
                     let returning = crate::sql::insert_returning_tx(tx, &insert.query)
                         .await
                         .map_err(refused)?;
                     crate::sql::inserted_pk(&insert.query, &returning, target.pk)
-                        .map(|pk| pk.to_display_string())
-                        .unwrap_or_default()
+                        .map_err(refused)?
                 }
                 Some(form) => {
                     let (pk, entry) = crate::audit::insert_one_with_entry_tx(
@@ -1876,19 +1877,21 @@ pub(crate) async fn apply_plan_tx(
                         target.pk,
                         |pk| {
                             let pk = pk.to_display_string();
-                            super::audit::admin_audit_entry(child, &pk, AuditOp::Create, &form)
+                            super::audit::admin_audit_entry(child, &pk, AuditOp::Create, form)
                         },
                         DiffEmit::Deferred,
                     )
                     .await
                     .map_err(refused)?;
                     entries.extend(entry);
-                    pk.to_display_string()
+                    pk
                 }
             };
+            let key = pk.to_display_string();
+            admit_written(tx, parts, child, target.pk, pk, Written::Created).await?;
             written_rows.push(ChildSignal::Save {
                 table,
-                pk,
+                pk: key,
                 change: false,
             });
             outcome.inserted += 1;
@@ -1900,6 +1903,25 @@ pub(crate) async fn apply_plan_tx(
         }
     }
     Ok((outcome, written_rows))
+}
+
+/// The plan only saw the row before the write; re-check what was written.
+async fn admit_written(
+    tx: &mut crate::sql::PoolTx<'_>,
+    parts: &Parts,
+    child: &'static ModelSchema,
+    pk_field: &'static FieldSchema,
+    pk: SqlValue,
+    written: super::views::Written,
+) -> Result<(), InlineApplyError> {
+    match super::views::admits_written(tx, parts, child, pk_field, pk, written).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(InlineApplyError::Forbidden {
+            child,
+            action: written.action(),
+        }),
+        Err(error) => Err(InlineApplyError::Write { child, error }),
+    }
 }
 
 // ============================================================ Editable generic rendering (issue #243)
