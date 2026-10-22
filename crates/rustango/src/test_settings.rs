@@ -1,24 +1,25 @@
 //! Override [`Settings`] for the span of one test.
 //!
 //! [`with_overridden`](crate::test_settings::with_overridden) runs a
-//! future with a task-local overlay. Code
-//! that reads through [`current`] sees it; code holding its own
-//! `&Settings` does not.
+//! future with a task-local overlay. Inside it, `Settings::load` and
+//! `Settings::load_from_env` return the overlay instead of reading
+//! `config/`, and [`current`] returns it. `Settings::load_from(dir, _)`
+//! and code holding its own `&Settings` do not see it.
 //!
 //! ## Quick start
 //!
 //! ```ignore
-//! use rustango::test_settings::{with_overridden, current};
+//! use rustango::test_settings::with_overridden;
 //! use rustango::config::Settings;
 //!
 //! #[tokio::test]
-//! async fn admin_redirects_when_disabled() {
+//! async fn uses_the_test_database() {
 //!     let mut s = Settings::default();
-//!     s.admin.url_prefix = Some("/admin-test".into());
+//!     s.database.url = Some("sqlite::memory:".into());
 //!     with_overridden(s, async {
-//!         let cfg = current();
-//!         assert_eq!(cfg.admin.url_prefix.as_deref(), Some("/admin-test"));
-//!         // ... run the code under test ...
+//!         let cfg = Settings::load_from_env().unwrap();
+//!         assert_eq!(cfg.database.url.as_deref(), Some("sqlite::memory:"));
+//!         // ... run code that loads settings itself ...
 //!     })
 //!     .await;
 //! }
@@ -33,8 +34,8 @@
 //!
 //! Most handlers take a `&Settings` argument, so a test should build
 //! its own and pass it in. Reach for the overlay only when the code
-//! under test reads settings through [`current`] and gives you no
-//! place to hand one in.
+//! under test loads settings itself and gives you no place to hand
+//! one in.
 //!
 //! [`Settings`]: crate::config::Settings
 //! [`current`]: crate::test_settings::current
@@ -77,6 +78,11 @@ pub fn current() -> Settings {
         return overlay;
     }
     FALLBACK.get().cloned().unwrap_or_default()
+}
+
+/// The overlay alone, for `Settings::load` / `load_from_env`.
+pub(crate) fn overlay() -> Option<Settings> {
+    OVERLAY.try_with(Clone::clone).ok()
 }
 
 /// Set the Settings [`current`] returns outside any overlay. Call it
@@ -165,6 +171,21 @@ mod tests {
             .await;
             // The outer overlay is back.
             assert_eq!(current().database.url.as_deref(), Some("outer"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn framework_loads_see_the_overlay() {
+        let mut overlay = Settings::default();
+        overlay.database.url = Some("from-overlay".into());
+        with_overridden(overlay, async {
+            for loaded in [Settings::load("prod"), Settings::load_from_env()] {
+                assert_eq!(
+                    loaded.unwrap().database.url.as_deref(),
+                    Some("from-overlay")
+                );
+            }
         })
         .await;
     }

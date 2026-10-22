@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `test_settings::with_overridden` reaches the framework
+
+Inside the scope, `Settings::load` and `Settings::load_from_env` return the overlay, so framework code that loads settings itself sees it. Before, only `test_settings::current()` did, and nothing called that.
+
 ### Fixed — unknown settings keys warn
 
 A key nothing reads (a typo, a key in the wrong section, a mistyped `RUSTANGO__…` env var) now prints a `config: unknown key` line on stderr at load. Set `RUSTANGO_CONFIG_STRICT=1` to make it a load error.

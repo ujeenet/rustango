@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `Settings::load` inside `with_overridden` returns the overlay
+
+A test that loaded `config/` inside the scope now gets the overlay instead. `Settings::load_from(dir, _)` still reads the files.
+
 ### Unknown settings keys warn
 
 Loading settings prints one stderr line per key nothing reads. Fix or remove those keys; `RUSTANGO_CONFIG_STRICT=1` refuses them.

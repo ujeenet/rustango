@@ -53,6 +53,7 @@ impl Settings {
     /// Merge `config/default.toml`, `config/{env}_settings.toml` (or
     /// the older `config/{env}.toml`), and `RUSTANGO__*` env vars.
     /// The loader checks both filenames and prefers `_settings`.
+    /// Inside `test_settings::with_overridden` it returns the overlay.
     ///
     /// # Errors
     /// * [`ConfigError::Io`] when `config/default.toml` is missing or
@@ -61,6 +62,9 @@ impl Settings {
     /// * [`ConfigError::EnvOverride`] when a `RUSTANGO__*` var does
     ///   not parse into the field's type.
     pub fn load(env: &str) -> Result<Self, ConfigError> {
+        if let Some(overlay) = crate::test_settings::overlay() {
+            return Ok(overlay);
+        }
         loader::load_with_root(std::path::Path::new("config"), env)
     }
 
@@ -83,8 +87,7 @@ impl Settings {
     /// # Errors
     /// As [`Self::load`].
     pub fn load_from_env() -> Result<Self, ConfigError> {
-        let env = current_env_tier();
-        loader::load_with_root(std::path::Path::new("config"), &env)
+        Self::load(&current_env_tier())
     }
 
     /// The tier this process loads: `RUSTANGO_ENV`, or `"dev"`.

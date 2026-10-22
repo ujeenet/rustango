@@ -1228,8 +1228,8 @@ pub mod test_factory;
 
 /// Test-only Settings overlay — installs a
 /// per-task [`config::Settings`] overlay, so tests change configuration
-/// without touching process-global state. [`test_settings::current`] reads
-/// the overlay first and falls back to the real settings.
+/// without touching process-global state. `Settings::load` /
+/// `load_from_env` return the overlay while it is active.
 #[cfg(feature = "config")]
 pub mod test_settings;
 
