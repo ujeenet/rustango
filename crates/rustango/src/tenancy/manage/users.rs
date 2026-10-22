@@ -314,6 +314,66 @@ where
     Ok(())
 }
 
+// ---------- revoke-passkey ----------
+
+/// `revoke-passkey <slug> <username> [--credential <id>]`: delete one of a
+/// tenant user's passkeys, or all of them. The admin does not serve the table.
+#[cfg(feature = "passkey")]
+pub(super) async fn revoke_passkey_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    const USAGE: &str = "revoke-passkey <slug> <username> [--credential <id>]";
+    let parsed = parse(
+        args,
+        &Spec {
+            verb: "revoke-passkey",
+            usage: USAGE,
+            switches: &[],
+            valued: &["--credential"],
+            max_positionals: 2,
+        },
+    )?;
+    let slug = parsed.required(0, USAGE)?;
+    let username = parsed.required(1, USAGE)?;
+    let pool = scoped_tenant_pool(pools, registry_url, &slug).await?;
+    let fail = |e: crate::sql::ExecError| TenancyError::Validation(format!("revoke-passkey: {e}"));
+    use crate::tenancy::User;
+    let user = User::objects()
+        .where_(User::username.eq(username.clone()))
+        .fetch(&pool)
+        .await
+        .map_err(fail)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            TenancyError::Validation(format!(
+                "revoke-passkey: no user `{username}` in tenant `{slug}`"
+            ))
+        })?;
+    let uid = user.id.get().copied().unwrap_or_default();
+    match parsed.value("--credential")? {
+        Some(cred) => {
+            if !crate::passkey::revoke(&pool, uid, cred).await.map_err(fail)? {
+                return Err(TenancyError::Validation(format!(
+                    "revoke-passkey: user `{username}` has no passkey `{cred}`"
+                )));
+            }
+            writeln!(w, "revoked passkey `{cred}` of user `{username}` in tenant `{slug}`")?;
+        }
+        None => {
+            let n = crate::passkey::revoke_all(&pool, uid).await.map_err(fail)?;
+            writeln!(w, "revoked {n} passkey(s) of user `{username}` in tenant `{slug}`")?;
+        }
+    }
+    Ok(())
+}
+
 // ---------- reset-password (v0.27.6, #77 partial) ----------
 
 /// `reset-password <slug> <username> [--password <s>]` updates a

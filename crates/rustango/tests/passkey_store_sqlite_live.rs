@@ -104,3 +104,22 @@ async fn credential_id_is_unique() {
     let err = passkey::register(&p, 2, "dup", vec![1], 0, "second").await;
     assert!(err.is_err(), "duplicate credential_id must be rejected");
 }
+
+/// Staff can revoke one passkey, or all of a user's, and never another user's.
+#[tokio::test]
+async fn revoke_removes_only_the_owners_credentials() {
+    let p = pool().await;
+    passkey::register(&p, 7, "laptop", vec![1], 0, "").await.unwrap();
+    passkey::register(&p, 7, "phone", vec![2], 0, "").await.unwrap();
+    passkey::register(&p, 9, "key", vec![3], 0, "").await.unwrap();
+
+    assert!(!passkey::revoke(&p, 7, "key").await.unwrap(), "user 9's key");
+    assert!(passkey::by_credential_id(&p, "key").await.unwrap().is_some());
+    assert!(passkey::revoke(&p, 7, "laptop").await.unwrap());
+    assert!(passkey::by_credential_id(&p, "laptop").await.unwrap().is_none());
+    assert!(!passkey::revoke(&p, 7, "laptop").await.unwrap(), "already gone");
+
+    assert_eq!(passkey::revoke_all(&p, 7).await.unwrap(), 1);
+    assert!(passkey::for_user(&p, 7).await.unwrap().is_empty());
+    assert_eq!(passkey::for_user(&p, 9).await.unwrap().len(), 1);
+}

@@ -174,6 +174,10 @@ Misses are cached in their own smaller map, each map evicts its least recently u
 
 The console signs every `?error=` / `?notice=` / `?ok=` it redirects with and drops unsigned ones, so a link cannot put text on the login or list pages. Creating a shared SSO provider checks the slug, the kind and the OIDC issuer, and a duplicate slug is a 400, not a 500.
 
+### Added — revoke a passkey
+
+`passkey::revoke(pool, user_id, credential_id)` and `passkey::revoke_all(pool, user_id)` delete credentials, and the tenancy CLI has `revoke-passkey <slug> <username> [--credential <id>]`. The admin does not serve the table, so there was no way to drop a stolen key.
+
 ## [0.60.9] — 2026-10-21
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options; `loaddata` leaves omitted keys to the column default; MySQL JSON key checks are literal; idle connections close after 75 s; `CsrfConfig` has a new field; refused deletes are 409 and refused CBV writes 422. See UPGRADING.

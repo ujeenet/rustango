@@ -155,6 +155,31 @@ pub async fn register(
     Ok(())
 }
 
+/// Delete one of `user_id`'s credentials, e.g. a lost or stolen key.
+/// `false` when that user has no such credential.
+///
+/// # Errors
+/// As the ORM delete path ([`crate::sql::ExecError`]).
+pub async fn revoke(
+    pool: &Pool,
+    user_id: i64,
+    credential_id: &str,
+) -> Result<bool, crate::sql::ExecError> {
+    let query = WebauthnCredential::objects()
+        .filter("user_id", user_id)
+        .filter("credential_id", credential_id.to_owned())
+        .compile_delete()?;
+    Ok(crate::sql::delete_pool(pool, &query).await? > 0)
+}
+
+/// Delete every credential `user_id` has; returns how many.
+///
+/// # Errors
+/// As the ORM delete path ([`crate::sql::ExecError`]).
+pub async fn revoke_all(pool: &Pool, user_id: i64) -> Result<u64, crate::sql::ExecError> {
+    WebauthnCredential::delete_where("user_id", user_id, pool).await
+}
+
 /// What [`update_sign_count`] did. Refuse the login unless
 /// [`is_accepted`](Self::is_accepted).
 #[must_use]
