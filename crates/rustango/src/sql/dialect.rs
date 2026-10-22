@@ -1076,7 +1076,14 @@ mod refuse_unbindable_values_tests {
             (SqlValue::RangeLiteral("[1,2)".into()), "range"),
             (SqlValue::HStore(vec![("k".into(), None)]), "hstore"),
             (SqlValue::Vector(vec![1.0]), "vector"),
-            (SqlValue::Geometry { x: 1.0, y: 2.0, srid: 4326 }, "geometry"),
+            (
+                SqlValue::Geometry {
+                    x: 1.0,
+                    y: 2.0,
+                    srid: 4326,
+                },
+                "geometry",
+            ),
         ];
         for (v, kind) in pg_only {
             assert_eq!(refused(&MySql, v.clone()), Some(kind));

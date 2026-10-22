@@ -175,10 +175,12 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
     {
         let _ = plan;
         Box::pin(async {
-            Err(ExecError::Sql(crate::sql::SqlError::OperatorNotSupportedInDialect {
-                op: "multi-statement DELETE",
-                dialect: "postgres",
-            }))
+            Err(ExecError::Sql(
+                crate::sql::SqlError::OperatorNotSupportedInDialect {
+                    op: "multi-statement DELETE",
+                    dialect: "postgres",
+                },
+            ))
         })
     }
 }

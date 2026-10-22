@@ -1130,7 +1130,11 @@ async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
     }
     let video = Gvideo { id: 1 };
     video.insert_pool(pool).await.expect("video");
-    video.tags_m2m().set(&[1_i64], pool).await.expect("tag video");
+    video
+        .tags_m2m()
+        .set(&[1_i64], pool)
+        .await
+        .expect("tag video");
     for id in 1..=3 {
         let mut a = Gaudited {
             id,
@@ -1140,7 +1144,10 @@ async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
         a.tags_m2m().set(&[id], pool).await.expect("tag audited");
     }
 
-    Gpost { id: 1 }.delete_pool(pool).await.expect("delete_pool");
+    Gpost { id: 1 }
+        .delete_pool(pool)
+        .await
+        .expect("delete_pool");
     Gpost::delete_where("id", 2_i64, pool)
         .await
         .expect("delete_where");
@@ -1200,15 +1207,16 @@ async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
             label: "a".into(),
         };
         let links = a.tags_m2m().all(pool).await.unwrap();
-        assert!(links.is_empty(), "audited {id}'s links outlive it: {links:?}");
+        assert!(
+            links.is_empty(),
+            "audited {id}'s links outlive it: {links:?}"
+        );
     }
     assert_eq!(video.tags_m2m().all(pool).await.unwrap(), vec![1]);
-    let rows = rustango::sql::count_rows_pool(
-        pool,
-        &CountQuery::from_select(SelectQuery::new(TAGGABLES)),
-    )
-    .await
-    .unwrap();
+    let rows =
+        rustango::sql::count_rows_pool(pool, &CountQuery::from_select(SelectQuery::new(TAGGABLES)))
+            .await
+            .unwrap();
     // Post 8's two, the video's, audited 3's, and post 7's two off Postgres.
     assert_eq!(rows, if deleted == 7 { 4 } else { 6 });
 }
@@ -1221,7 +1229,11 @@ async fn generic_m2m_rows_go_with_truncate(pool: &Pool) {
     rustango::contenttypes::clear_cache();
     let video = Gvideo { id: 1 };
     video.insert_pool(pool).await.expect("video");
-    video.tags_m2m().set(&[1_i64], pool).await.expect("tag video");
+    video
+        .tags_m2m()
+        .set(&[1_i64], pool)
+        .await
+        .expect("tag video");
     for id in 1..=2 {
         Gpost { id }.insert_pool(pool).await.expect("post");
         Gpost { id }
@@ -1251,7 +1263,10 @@ async fn generic_m2m_rows_go_with_truncate(pool: &Pool) {
     };
     a.insert_pool(pool).await.expect("audited again");
     let links = a.tags_m2m().all(pool).await.unwrap();
-    assert!(links.is_empty(), "a new audited row inherits old links: {links:?}");
+    assert!(
+        links.is_empty(),
+        "a new audited row inherits old links: {links:?}"
+    );
     assert_eq!(video.tags_m2m().all(pool).await.unwrap(), vec![1]);
 }
 

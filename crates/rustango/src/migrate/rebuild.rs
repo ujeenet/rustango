@@ -637,7 +637,10 @@ mod tests {
             .connect_with(opts.journal_mode(sqlx::sqlite::SqliteJournalMode::Wal))
             .await
             .unwrap();
-        sqlx::query("CREATE TABLE t (a INTEGER)").execute(&sq).await.unwrap();
+        sqlx::query("CREATE TABLE t (a INTEGER)")
+            .execute(&sq)
+            .await
+            .unwrap();
         let stale = sq.acquire().await.unwrap();
         let mut other = sq.acquire().await.unwrap();
         sqlx::query("ALTER TABLE t ADD COLUMN nick TEXT")
@@ -666,7 +669,10 @@ mod tests {
             .connect_with(opts.journal_mode(sqlx::sqlite::SqliteJournalMode::Wal))
             .await
             .unwrap();
-        sqlx::query("CREATE TABLE t (a INTEGER)").execute(&sq).await.unwrap();
+        sqlx::query("CREATE TABLE t (a INTEGER)")
+            .execute(&sq)
+            .await
+            .unwrap();
         let mut conn = super::RebuildConn::acquire(&sq, false).await.unwrap();
         let mut tx = conn.begin().await.unwrap();
         let writer = {
@@ -679,6 +685,9 @@ mod tests {
             .await
             .expect("the migration keeps its write lock");
         tx.commit().await.unwrap();
-        writer.await.unwrap().expect("the writer ran after the migration");
+        writer
+            .await
+            .unwrap()
+            .expect("the writer ran after the migration");
     }
 }

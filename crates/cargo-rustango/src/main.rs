@@ -1034,11 +1034,24 @@ mod tests {
         );
         assert!(urls.contains(".with_session_auth("), "{urls}");
         // `[admin] url_prefix` moves both the mount and the admin's links.
-        assert!(urls.contains("admin::Builder::from_settings(pool, settings)"), "{urls}");
-        assert!(urls.contains("admin::Builder::settings_prefix(settings)"), "{urls}");
-        assert!(main.contains(".nest_with(urls::admin_prefix(&settings)"), "{main}");
+        assert!(
+            urls.contains("admin::Builder::from_settings(pool, settings)"),
+            "{urls}"
+        );
+        assert!(
+            urls.contains("admin::Builder::settings_prefix(settings)"),
+            "{urls}"
+        );
+        assert!(
+            main.contains(".nest_with(urls::admin_prefix(&settings)"),
+            "{main}"
+        );
         // One settings load per boot, shared by the server and the admin.
-        assert_eq!(main.matches("Settings::load_from_env()").count(), 1, "{main}");
+        assert_eq!(
+            main.matches("Settings::load_from_env()").count(),
+            1,
+            "{main}"
+        );
         assert!(!main.contains("with_settings_from_env"), "{main}");
         // A missing config/ warns and boots, as `with_settings_from_env` does.
         assert!(!main.contains("load_from_env()?"), "{main}");

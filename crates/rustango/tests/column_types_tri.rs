@@ -260,7 +260,10 @@ async fn raw_helpers_refuse_pg_only_values(pool: &Pool) {
     assert!(
         matches!(
             r,
-            Err(ExecError::Sql(SqlError::ValueNotSupportedInDialect { value: "list", .. }))
+            Err(ExecError::Sql(SqlError::ValueNotSupportedInDialect {
+                value: "list",
+                ..
+            }))
         ),
         "{r:?}"
     );
@@ -270,16 +273,23 @@ async fn raw_helpers_refuse_pg_only_values(pool: &Pool) {
     fn refused<T>(r: Result<T, ExecError>) -> bool {
         matches!(
             r,
-            Err(ExecError::Sql(SqlError::ValueNotSupportedInDialect { value: "array", .. }))
+            Err(ExecError::Sql(SqlError::ValueNotSupportedInDialect {
+                value: "array",
+                ..
+            }))
         )
     }
     let arr = || vec![SqlValue::Array(vec![SqlValue::I64(1)])];
-    assert!(refused(rustango::sql::raw_execute_pool(pool, &sql, arr()).await));
+    assert!(refused(
+        rustango::sql::raw_execute_pool(pool, &sql, arr()).await
+    ));
     assert!(refused(
         rustango::sql::raw_query_pool::<(i64,)>(&sql, arr(), pool).await
     ));
     let mut tx = rustango::sql::transaction_pool(pool).await.expect("tx");
-    assert!(refused(rustango::sql::raw_execute_tx(&mut tx, &sql, arr()).await));
+    assert!(refused(
+        rustango::sql::raw_execute_tx(&mut tx, &sql, arr()).await
+    ));
     assert!(refused(
         rustango::sql::raw_query_tx::<(i64,)>(&mut tx, &sql, arr()).await
     ));

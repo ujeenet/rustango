@@ -533,8 +533,10 @@ pub(crate) fn generic_m2m_links(query: &DeleteQuery) -> Vec<DeleteQuery> {
     if entries.peek().is_none() {
         return Vec::new();
     }
-    let (Some(pk), Some(model)) = (owner.primary_key(), crate::core::ModelEntry::for_schema(owner))
-    else {
+    let (Some(pk), Some(model)) = (
+        owner.primary_key(),
+        crate::core::ModelEntry::for_schema(owner),
+    ) else {
         return Vec::new();
     };
     let app = model.resolved_app_label().unwrap_or("project");
@@ -563,7 +565,10 @@ pub(crate) fn generic_m2m_links(query: &DeleteQuery) -> Vec<DeleteQuery> {
                     subquery: Box::new(owner_pks.clone()),
                 });
             }
-            DeleteQuery::new(junction(e.through, &[e.pk_col, e.ct_col]), WhereExpr::And(preds))
+            DeleteQuery::new(
+                junction(e.through, &[e.pk_col, e.ct_col]),
+                WhereExpr::And(preds),
+            )
         })
         .collect()
 }
