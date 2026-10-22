@@ -844,7 +844,15 @@ pub fn make_merge_migration(dir: &Path) -> Result<Option<Migration>, MigrateErro
     let (head, others) = branch.split_last().expect("a branch has 2+ leaves");
     let mut snapshot = effective_snapshot(&chain, head);
     for leaf in others {
-        snapshot.merge_branch(&base, &effective_snapshot(&chain, leaf));
+        if let Err(conflicts) = snapshot.merge_branch(&base, &effective_snapshot(&chain, leaf)) {
+            return Err(MigrateError::Validation(format!(
+                "makemigrations --merge: `{}` and `{}` both changed: {}. \
+                 Reconcile the branches by hand, then merge again",
+                head.name,
+                leaf.name,
+                conflicts.join("; "),
+            )));
+        }
     }
 
     // Point the merge node at the last leaf. Name order already applies
@@ -1544,5 +1552,32 @@ mod tests {
         );
         assert!(make_merge_migration(&dir).unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Both branches changing one thing differently is refused, not won by
+    /// the other branch or the drop.
+    #[test]
+    fn merge_refuses_conflicting_branches() {
+        let mut nullable = posts_with(&["c"]);
+        nullable.fields.iter_mut().find(|f| f.column == "c").unwrap().nullable = true;
+        let mut longer = posts_with(&["c"]);
+        longer.fields.iter_mut().find(|f| f.column == "c").unwrap().max_length = Some(9);
+        for (a, b, what) in [
+            (vec![nullable.clone()], vec![], "table `posts`"),
+            (vec![], vec![nullable.clone()], "table `posts`"),
+            (vec![nullable], vec![longer], "column `c`"),
+        ] {
+            let dir = tempdir();
+            write_mig(&dir, &mig_at("0001_initial", None, snap_with(vec![posts_with(&["c"])])));
+            write_mig(&dir, &mig_at("0002a", Some("0001_initial"), snap_with(a)));
+            write_mig(&dir, &mig_at("0002b", Some("0001_initial"), snap_with(b)));
+            let err = make_merge_migration(&dir).expect_err(what);
+            assert!(
+                matches!(&err, MigrateError::Validation(m) if m.contains(what)),
+                "{err:?}"
+            );
+            assert!(!dir.join("0003_merge.json").exists(), "{what}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

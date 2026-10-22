@@ -683,10 +683,20 @@ impl SchemaSnapshot {
 
     /// Add what branch `theirs` changed since `base`, so a merge node holds
     /// both branches and nothing unmigrated (#2574).
-    pub(crate) fn merge_branch(&mut self, base: &Self, theirs: &Self) {
+    ///
+    /// # Errors
+    /// What both branches changed differently, left unmerged.
+    pub(crate) fn merge_branch(&mut self, base: &Self, theirs: &Self) -> Result<(), Vec<String>> {
+        let mut conflicts = Vec::new();
         for b in &base.tables {
             if theirs.table(&b.name).is_none() {
-                self.tables.retain(|t| t.name != b.name);
+                match self.table(&b.name) {
+                    Some(o) if o != b => conflicts.push(format!(
+                        "table `{}`: dropped on one branch, changed on the other",
+                        b.name
+                    )),
+                    _ => self.tables.retain(|t| t.name != b.name),
+                }
             }
         }
         for t in &theirs.tables {
@@ -695,36 +705,77 @@ impl SchemaSnapshot {
                 continue;
             }
             let Some(ours) = self.tables.iter_mut().find(|o| o.name == t.name) else {
-                self.tables.push(t.clone());
+                if was.is_some() {
+                    conflicts.push(format!(
+                        "table `{}`: dropped on one branch, changed on the other",
+                        t.name
+                    ));
+                } else {
+                    self.tables.push(t.clone());
+                }
                 continue;
             };
             let (fields, fks) = was.map_or((&[][..], &[][..]), |w| {
                 (&w.fields[..], &w.composite_fks[..])
             });
-            merge_keyed(fields, &mut ours.fields, &t.fields, |f| f.column.clone());
-            merge_keyed(fks, &mut ours.composite_fks, &t.composite_fks, |c| {
-                c.name.clone()
-            });
-            if was.is_none_or(|w| w.model != t.model) {
-                ours.model.clone_from(&t.model);
+            let what = |kind: &str| format!("table `{}` {kind}", t.name);
+            conflicts.extend(
+                merge_keyed(fields, &mut ours.fields, &t.fields, |f| f.column.clone())
+                    .into_iter()
+                    .map(|k| format!("{} `{k}`", what("column"))),
+            );
+            conflicts.extend(
+                merge_keyed(fks, &mut ours.composite_fks, &t.composite_fks, |c| {
+                    c.name.clone()
+                })
+                .into_iter()
+                .map(|k| format!("{} `{k}`", what("composite FK"))),
+            );
+            let base_model = was.map(|w| &w.model);
+            if base_model != Some(&t.model) {
+                if base_model != Some(&ours.model) && ours.model != t.model {
+                    conflicts.push(what("model"));
+                } else {
+                    ours.model.clone_from(&t.model);
+                }
             }
         }
-        merge_keyed(
-            &base.m2m_tables,
-            &mut self.m2m_tables,
-            &theirs.m2m_tables,
-            |m| m.through.clone(),
+        let mut keyed = |kind: &str, found: Vec<String>| {
+            conflicts.extend(found.into_iter().map(|k| format!("{kind} `{k}`")));
+        };
+        keyed(
+            "m2m table",
+            merge_keyed(
+                &base.m2m_tables,
+                &mut self.m2m_tables,
+                &theirs.m2m_tables,
+                |m| m.through.clone(),
+            ),
         );
-        merge_keyed(&base.indexes, &mut self.indexes, &theirs.indexes, |i| {
-            i.name.clone()
-        });
-        merge_keyed(&base.checks, &mut self.checks, &theirs.checks, |c| {
-            c.name.clone()
-        });
-        merge_keyed(&base.excludes, &mut self.excludes, &theirs.excludes, |x| {
-            x.name.clone()
-        });
+        keyed(
+            "index",
+            merge_keyed(&base.indexes, &mut self.indexes, &theirs.indexes, |i| {
+                i.name.clone()
+            }),
+        );
+        keyed(
+            "check",
+            merge_keyed(&base.checks, &mut self.checks, &theirs.checks, |c| {
+                c.name.clone()
+            }),
+        );
+        keyed(
+            "exclusion constraint",
+            merge_keyed(&base.excludes, &mut self.excludes, &theirs.excludes, |x| {
+                x.name.clone()
+            }),
+        );
         self.sort();
+        if conflicts.is_empty() {
+            Ok(())
+        } else {
+            Err(conflicts)
+        }
     }
 
     /// The order `from_registry` writes, so a rebuilt snapshot diffs clean.
@@ -741,27 +792,35 @@ impl SchemaSnapshot {
 }
 
 /// Three-way merge by `key`: each entry `theirs` added, changed or dropped
-/// since `base` lands in `ours`.
+/// since `base` lands in `ours`. Returns the keys `ours` also changed
+/// differently, which stay as `ours` has them.
 fn merge_keyed<T: Clone + PartialEq>(
     base: &[T],
     ours: &mut Vec<T>,
     theirs: &[T],
     key: impl Fn(&T) -> String,
-) {
-    for b in base {
-        if !theirs.iter().any(|t| key(t) == key(b)) {
-            ours.retain(|o| key(o) != key(b));
-        }
-    }
-    for t in theirs {
-        if base.iter().any(|b| b == t && key(b) == key(t)) {
+) -> Vec<String> {
+    let find = |xs: &[T], k: &str| xs.iter().find(|x| key(x) == k).cloned();
+    let mut keys: Vec<String> = base.iter().chain(theirs).map(&key).collect();
+    keys.sort();
+    keys.dedup();
+    let mut conflicts = Vec::new();
+    for k in keys {
+        let (b, t, o) = (find(base, &k), find(theirs, &k), find(ours, &k));
+        if t == b {
             continue;
         }
-        match ours.iter_mut().find(|o| key(o) == key(t)) {
-            Some(o) => *o = t.clone(),
-            None => ours.push(t.clone()),
+        if o != b && o != t {
+            conflicts.push(k);
+            continue;
+        }
+        match (t, ours.iter_mut().find(|x| key(x) == k)) {
+            (Some(t), Some(o)) => *o = t,
+            (Some(t), None) => ours.push(t),
+            (None, _) => ours.retain(|x| key(x) != k),
         }
     }
+    conflicts
 }
 
 impl TableSnapshot {
