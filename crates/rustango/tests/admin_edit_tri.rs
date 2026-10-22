@@ -505,6 +505,60 @@ tri_dialect_test! {
     ],
 }
 
+#[cfg(feature = "sqlite")]
+mod sqlite_only {
+    use super::*;
+
+    /// A UUID key the column default writes as TEXT, not a bound BLOB.
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "aed_textkey")]
+    #[allow(dead_code)]
+    pub struct TextKey {
+        #[rustango(primary_key, auto_uuid, default = "(lower(hex(randomblob(16))))")]
+        pub id: Auto<uuid::Uuid>,
+        #[rustango(max_length = 32)]
+        pub name: String,
+    }
+
+    /// The admin finds a TEXT-stored UUID key on detail, edit and delete.
+    #[tokio::test]
+    async fn text_uuid_key_is_found_by_change_and_delete() {
+        use rustango::testkit::matrix::{live_lock, Backend};
+        let _guard = live_lock().lock().await;
+        let pool = Backend::Sqlite.pool().await.expect("sqlite pool");
+        rustango::testkit::matrix::fresh_table::<TextKey>(&pool).await;
+        let (status, body) = send(&pool, "POST", "/aed_textkey", "name=a").await;
+        assert!(status.is_redirection(), "create: {status} {body}");
+        let column = |c: &'static str| TextKey::objects().values_list_flat(c);
+        let key: String = column("id")
+            .fetch::<String>(&pool)
+            .await
+            .expect("read key")
+            .remove(0);
+        assert_eq!(key.len(), 32, "the default stores text: {key}");
+
+        let (status, html) = send(&pool, "GET", &format!("/aed_textkey/{key}"), "").await;
+        assert_eq!(status, StatusCode::OK, "detail: {html}");
+        let (status, html) = send(&pool, "GET", &format!("/aed_textkey/{key}/edit"), "").await;
+        assert_eq!(status, StatusCode::OK, "edit form: {html}");
+        let (status, body) = send(&pool, "POST", &format!("/aed_textkey/{key}"), "name=b").await;
+        assert!(status.is_redirection(), "edit: {status} {body}");
+        let names = column("name")
+            .fetch::<String>(&pool)
+            .await
+            .expect("read name");
+        assert_eq!(names, ["b"], "the edit did not reach the row");
+        let (status, body) =
+            send(&pool, "POST", &format!("/aed_textkey/{key}/delete"), "").await;
+        assert!(status.is_redirection(), "delete: {status} {body}");
+        let left = column("id")
+            .fetch::<String>(&pool)
+            .await
+            .expect("read keys");
+        assert!(left.is_empty(), "the row was not deleted");
+    }
+}
+
 #[cfg(feature = "postgres")]
 mod pg_only {
     use super::*;

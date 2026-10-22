@@ -257,7 +257,7 @@ pub(crate) fn resolve_model(
 ///
 /// Issue #562. Returns the model, the PK `FieldSchema`, and the parsed
 /// `SqlValue` ready to bind in a `WHERE pk = ?` clause.
-pub(crate) fn resolve_model_and_pk(
+pub(crate) async fn resolve_model_and_pk(
     state: &AppState,
     table: &str,
     pk_raw: &str,
@@ -271,9 +271,21 @@ pub(crate) fn resolve_model_and_pk(
 > {
     let model = resolve_model(state, table)?;
     let pk_field = primary_key_or_internal(model)?;
-    let pk_value = crate::forms::parse_pk_string(pk_field, pk_raw)
-        .map_err(crate::admin::errors::AdminError::Form)?;
+    let pk_value = parse_pk(state, model, pk_field, pk_raw).await?;
     Ok((model, pk_field, pk_value))
+}
+
+/// Parse a URL key and bind it as the row stores it (a SQLite UUID key
+/// may be TEXT, not the BLOB a parsed `Uuid` binds as).
+pub(crate) async fn parse_pk(
+    state: &AppState,
+    model: &'static ModelSchema,
+    pk_field: &'static crate::core::FieldSchema,
+    pk_raw: &str,
+) -> Result<crate::core::SqlValue, crate::admin::errors::AdminError> {
+    let key = crate::forms::parse_pk_string(pk_field, pk_raw)
+        .map_err(crate::admin::errors::AdminError::Form)?;
+    Ok(crate::sql::stored_key(&state.pool, model, pk_field, key, pk_raw).await?)
 }
 
 /// Return the model's `#[rustango(admin(...))]` block, falling back to

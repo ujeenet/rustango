@@ -17,8 +17,8 @@ use super::errors::AdminError;
 use super::forms;
 use super::helpers::{
     admin_config_or_default, build_fk_joins, chrome_context, fk_display_targets,
-    fk_map_from_joined_rows_json, is_secret_field, lookup_model, primary_key_or_internal,
-    render_cell_json, render_form, render_secret_cell, resolve_model, resolve_model_and_pk,
+    fk_map_from_joined_rows_json, is_secret_field, lookup_model, parse_pk,
+    primary_key_or_internal, render_cell_json, render_form, render_secret_cell, resolve_model, resolve_model_and_pk,
     search_columns, url_filterable, FormLayout, ListQuery,
 };
 use super::object_permissions::AdminWrite;
@@ -1697,7 +1697,7 @@ pub(crate) async fn detail_view(
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
-    let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw)?;
+    let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw).await?;
 
     let detail_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     // Single PK lookup, plus LEFT JOINs that carry the FK display
@@ -2218,7 +2218,7 @@ pub(crate) async fn edit_form(
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
-    let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw)?;
+    let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw).await?;
 
     let edit_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let row = crate::sql::select_one_row_as_json(
@@ -2300,7 +2300,7 @@ pub(crate) async fn update_submit(
         });
     }
     let pk_field = primary_key_or_internal(model)?;
-    let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
+    let pk_value = parse_pk(&state, model, pk_field, &pk_raw).await?;
 
     // `has_change_permission(request, obj)`. Fetch the row first so
     // the hook sees the state before the update. A select error is
@@ -2562,7 +2562,7 @@ pub(crate) async fn delete_submit(
         });
     }
     let pk_field = primary_key_or_internal(model)?;
-    let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
+    let pk_value = parse_pk(&state, model, pk_field, &pk_raw).await?;
 
     // Read the row before deleting it, so the audit entry records
     // what was removed. A row missing or outside the queryset hooks'

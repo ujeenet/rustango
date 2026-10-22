@@ -1182,22 +1182,63 @@ fn generated_pk(
                     T::I32 => SqlValue::I32(row.try_get(c)?),
                     T::I16 => SqlValue::I16(row.try_get(c)?),
                     T::String => SqlValue::String(row.try_get(c)?),
-                    // Bound values are BLOBs; a column default may be TEXT. A TEXT
-                    // key stays text, so a re-read by it binds what is stored.
-                    T::Uuid => match row.try_get::<uuid::Uuid, _>(c) {
-                        Ok(u) => SqlValue::Uuid(u),
-                        Err(e) => row
-                            .try_get::<String, _>(c)
-                            .ok()
-                            .filter(|s| uuid::Uuid::parse_str(s).is_ok())
-                            .map(SqlValue::String)
-                            .ok_or(e)?,
-                    },
+                    T::Uuid => sqlite_uuid_key(row, c)?,
                     _ => return Err(unreadable()),
                 })
             }
         }
     }
+}
+
+/// Bound values are BLOBs; a column default may be TEXT. A TEXT
+/// key stays text, so a re-read by it binds what is stored.
+#[cfg(feature = "sqlite")]
+fn sqlite_uuid_key(row: &sqlx::sqlite::SqliteRow, c: &str) -> Result<SqlValue, sqlx::Error> {
+    use crate::sql::sqlx::Row as _;
+    match row.try_get::<uuid::Uuid, _>(c) {
+        Ok(u) => Ok(SqlValue::Uuid(u)),
+        Err(e) => row
+            .try_get::<String, _>(c)
+            .ok()
+            .filter(|s| uuid::Uuid::parse_str(s).is_ok())
+            .map(SqlValue::String)
+            .ok_or(e),
+    }
+}
+
+/// `key` (parsed from `raw`) as the row stores it. Only a SQLite UUID key
+/// differs: BLOB when bound, TEXT when a column default wrote it.
+#[cfg(feature = "admin")]
+pub(crate) async fn stored_key(
+    pool: &Pool,
+    model: &'static crate::core::ModelSchema,
+    pk_field: &'static crate::core::FieldSchema,
+    key: SqlValue,
+    raw: &str,
+) -> Result<SqlValue, ExecError> {
+    #[cfg(feature = "sqlite")]
+    if let (Pool::Sqlite(sq), crate::core::FieldType::Uuid) = (pool, pk_field.ty) {
+        let query = SelectQuery {
+            limit: Some(1),
+            ..SelectQuery::by_pk_in(
+                model,
+                pk_field.column,
+                vec![key.clone(), SqlValue::String(raw.to_owned())],
+            )
+            .projection(vec![pk_field.column])
+        };
+        crate::test_assertions::query_counter::bump();
+        let stmt = pool.dialect().compile_select(&query)?;
+        let mut q = sqlx::query(&stmt.sql);
+        for v in stmt.params {
+            q = bind_query_sqlite(q, v);
+        }
+        if let Some(row) = q.fetch_optional(sq).await? {
+            return Ok(sqlite_uuid_key(&row, pk_field.column)?);
+        }
+    }
+    let _ = (pool, model, pk_field, raw);
+    Ok(key)
 }
 
 /// `UPDATE` against either backend; returns rows affected.

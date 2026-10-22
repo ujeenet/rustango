@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — SQLite admin finds a UUID key a column default wrote as TEXT
+
+Detail, edit and delete bind the URL key as the row stores it, not always as a BLOB.
+
 ### Fixed — audited `insert(&PgPool)` and `delete(&PgPool)` are atomic
 
 Each runs in one transaction, so a failed audit row rolls the write back.
