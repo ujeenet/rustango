@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — ViewSets and template views find a TEXT-stored UUID key on SQLite
 
-Retrieve, update, delete and bulk actions bind the key as the row stores it, as the admin does; a key a column default wrote as TEXT used to 404.
+Retrieve, update, delete and bulk actions bind the key as the row stores it, as the admin does; a key a column default wrote as TEXT used to 404. A UUID stored both as BLOB and as TEXT names no single row, so it is refused (404, or left out of a bulk action).
 
 ### Fixed — `run-server` keeps the app's `TenantPoolsConfig`
 

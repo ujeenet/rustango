@@ -285,10 +285,16 @@ pub(crate) async fn parse_pk(
 ) -> Result<crate::core::SqlValue, crate::admin::errors::AdminError> {
     let key = crate::forms::parse_pk_string(pk_field, pk_raw)
         .map_err(crate::admin::errors::AdminError::Form)?;
-    Ok(crate::sql::stored_key(&state.pool, model, pk_field, key, pk_raw).await?)
+    crate::sql::stored_key(&state.pool, model, pk_field, key, pk_raw)
+        .await?
+        .ok_or_else(|| crate::admin::errors::AdminError::RowNotFound {
+            table: model.table.to_owned(),
+            pk: pk_raw.to_owned(),
+        })
 }
 
-/// [`parse_pk`] for many keys of `field`; a key that does not parse is dropped.
+/// [`parse_pk`] for many keys of `field`; a key that does not parse, or
+/// names more than one row, is dropped.
 pub(crate) async fn parse_keys<'r>(
     state: &AppState,
     model: &'static ModelSchema,
@@ -301,7 +307,11 @@ pub(crate) async fn parse_keys<'r>(
         .collect();
     let raws: Vec<&'r str> = parsed.iter().map(|(_, raw)| *raw).collect();
     let keys = crate::sql::stored_keys(&state.pool, model, field, parsed).await?;
-    Ok(raws.into_iter().zip(keys).collect())
+    Ok(raws
+        .into_iter()
+        .zip(keys)
+        .filter_map(|(raw, k)| Some((raw, k?)))
+        .collect())
 }
 
 /// Return the model's `#[rustango(admin(...))]` block, falling back to

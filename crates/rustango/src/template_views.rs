@@ -1902,9 +1902,7 @@ async fn stored_pk(
     let Some(key) = coerce_pk(field, raw) else {
         return Ok(None);
     };
-    crate::sql::stored_key(pool, schema, field, key, raw)
-        .await
-        .map(Some)
+    crate::sql::stored_key(pool, schema, field, key, raw).await
 }
 
 async fn handle_create_get(
@@ -2832,7 +2830,8 @@ fn parse_bulk_action_form(
 /// generic `IN ($1)` clause. Errors when any PK fails to parse —
 /// hostile clients shouldn't be able to inject mistyped PKs into
 /// the SQL layer.
-/// Keys are bound as the rows store them (a SQLite UUID key may be TEXT).
+/// Keys are bound as the rows store them (a SQLite UUID key may be TEXT);
+/// a key that names more than one row is dropped.
 async fn coerce_selected_pks(
     pool: &Pool,
     schema: &'static ModelSchema,
@@ -2849,6 +2848,7 @@ async fn coerce_selected_pks(
         .collect::<Result<Vec<_>, _>>()?;
     crate::sql::stored_keys(pool, schema, pk_field, keys)
         .await
+        .map(|keys| keys.into_iter().flatten().collect())
         .map_err(|e| template_error(&format!("read keys: {e}")))
 }
 
@@ -3129,22 +3129,23 @@ async fn visible_pks_pool(
         return Ok(pks.to_vec());
     }
     let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).visible();
-    let rows = select_rows_as_json(pool, &q, &[pk_field])
+    // The visible rows' own stored keys, as `pks` were bound.
+    let visible = match crate::sql::select_stored_uuids(pool, &q, pk_field)
         .await
-        .map_err(|e| e.to_string())?;
-    let raws: Vec<String> = rows
-        .iter()
-        .filter_map(|r| r.get(pk_field.name))
-        .map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_owned))
-        .collect();
-    let parsed = raws
-        .iter()
-        .filter_map(|raw| Some((crate::forms::parse_pk_string(pk_field, raw).ok()?, raw.as_str())))
-        .collect();
-    // Compared in stored form, as `pks` were bound.
-    let visible = crate::sql::stored_keys(pool, schema, pk_field, parsed)
-        .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+    {
+        Some(stored) => stored,
+        None => select_rows_as_json(pool, &q, &[pk_field])
+            .await
+            .map_err(|e| e.to_string())?
+            .iter()
+            .filter_map(|r| r.get(pk_field.name))
+            .filter_map(|v| {
+                let raw = v.as_str().map_or_else(|| v.to_string(), str::to_owned);
+                crate::forms::parse_pk_string(pk_field, &raw).ok()
+            })
+            .collect(),
+    };
     Ok(pks
         .iter()
         .filter(|p| visible.contains(p))

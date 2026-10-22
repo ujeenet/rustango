@@ -625,6 +625,133 @@ async fn sqlite_text_uuid_key_is_found_by_every_view() {
     assert_eq!(live, 0, "the row was not deleted");
 }
 
+#[cfg(feature = "sqlite")]
+async fn post_form(app: &axum::Router, uri: &str, body: &str) -> StatusCode {
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, FORM)
+        .header(header::COOKIE, format!("rustango_csrf={CSRF}"))
+        .body(Body::from(format!("_csrf={CSRF}&{body}")))
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+#[cfg(feature = "sqlite")]
+fn mine_only() -> rustango::core::WhereExpr {
+    use rustango::core::{Filter, Op, SqlValue, WhereExpr};
+    WhereExpr::Predicate(Filter::new("mine", Op::Eq, SqlValue::Bool(true)))
+}
+
+/// One UUID may be stored twice on SQLite, once as BLOB and once as TEXT.
+#[cfg(feature = "sqlite")]
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "tv_sharedkey",
+    app = "tv1915",
+    global_scope(name = "mine", apply = mine_only)
+)]
+pub struct SharedKey {
+    #[rustango(primary_key, auto_uuid, default = "(lower(hex(randomblob(16))))")]
+    pub id: Auto<uuid::Uuid>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+    pub mine: bool,
+}
+
+/// A scoped bulk action never reaches a hidden row that shares a visible row's UUID.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_bulk_action_skips_a_hidden_row_sharing_the_uuid() {
+    use rustango::core::SqlValue;
+    let pool = rustango::testkit::matrix::Backend::Sqlite
+        .pool()
+        .await
+        .expect("sqlite");
+    let mut t = Tera::default();
+    t.add_raw_templates(vec![("t.html", "ok"), ("form.html", "form")])
+        .unwrap();
+    let t = Arc::new(t);
+    // Unscoped on purpose: only the key narrowing protects the hidden row.
+    let rename: rustango::template_views::BulkActionFn = Arc::new(|pool, pks| {
+        let pks = pks.to_vec();
+        Box::pin(async move {
+            SharedKey::objects()
+                .without_global_scopes()
+                .filter("id__in", SqlValue::List(pks))
+                .update()
+                .set("name", "hit")
+                .execute_on(pool)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+    });
+    let app = CreateView::for_model(SharedKey::SCHEMA)
+        .template("form.html")
+        .success_url("/sk")
+        .router("/sk", t.clone(), pool.clone())
+        .merge(
+            ListView::for_model(SharedKey::SCHEMA)
+                .template("t.html")
+                .bulk_actions(true)
+                .action("rename", "Rename", rename)
+                .router("/sk", t, pool.clone()),
+        );
+    let hidden = || async {
+        SharedKey::objects()
+            .without_global_scopes()
+            .filter("mine", false)
+            .values_list_flat("name")
+            .fetch::<String>(&pool)
+            .await
+            .expect("hidden rows")
+    };
+
+    // The hidden row holds the TEXT form, then the BLOB form.
+    for text_is_hidden in [true, false] {
+        rustango::testkit::matrix::fresh_table::<SharedKey>(&pool).await;
+        let status = post_form(&app, "/sk/new", "name=text&mine=true").await;
+        assert!(status.is_redirection(), "create: {status}");
+        let key = SharedKey::objects()
+            .values_list_flat("id")
+            .fetch::<String>(&pool)
+            .await
+            .expect("read key")
+            .remove(0);
+        assert_eq!(key.len(), 32, "the default stores text: {key}");
+        let u = uuid::Uuid::parse_str(&key).expect("uuid");
+        let mut blob = SharedKey {
+            id: Auto::Set(u),
+            name: "blob".into(),
+            mine: text_is_hidden,
+        };
+        blob.insert_pool(&pool).await.expect("blob row");
+        SharedKey::objects()
+            .without_global_scopes()
+            .filter("name", "text")
+            .update()
+            .set("mine", !text_is_hidden)
+            .execute_on(&pool)
+            .await
+            .expect("scope the text row");
+        let before = hidden().await;
+        assert_eq!(before.len(), 1, "one hidden row");
+
+        for spelling in [key.clone(), u.hyphenated().to_string()] {
+            let form = format!("action=rename&_selected_action={spelling}");
+            post_form(&app, "/sk", &form).await;
+            let form = format!("action=delete_selected&confirmed=true&_selected_action={spelling}");
+            post_form(&app, "/sk", &form).await;
+            let after = hidden().await;
+            assert_eq!(
+                after, before,
+                "hidden row hit via {spelling} (text hidden: {text_is_hidden})"
+            );
+        }
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [

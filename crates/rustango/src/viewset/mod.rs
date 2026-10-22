@@ -2196,7 +2196,7 @@ fn throttled_response(retry_after_secs: u64) -> Response {
 }
 
 /// Parse a path capture into the primary key's type, or a `400`, bound
-/// as the row stores it (a SQLite UUID key may be TEXT).
+/// as the row stores it (a SQLite UUID key may be TEXT); `404` when it names several rows.
 async fn parse_pk_or_400(
     state: &ViewSetState,
     acq: &AcquiredConn,
@@ -2207,7 +2207,8 @@ async fn parse_pk_or_400(
         .map_err(|e| json_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
     crate::sql::stored_key(&acq.pool, state.vs.schema, field, key, raw)
         .await
-        .map_err(|e| json_server_error("viewset::pk", &e))
+        .map_err(|e| json_server_error("viewset::pk", &e))?
+        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not found"))
 }
 
 /// The model's primary-key field, or a `500` if it has none.
