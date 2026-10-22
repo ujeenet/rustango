@@ -432,7 +432,7 @@ pub(crate) fn in_block(pool: &Pool) -> bool {
 /// commit), and `on_commit` there panics.
 ///
 /// **Callbacks fire in registration order**, serially, after the
-/// `COMMIT` returns OK. A panicking callback aborts the chain.
+/// `COMMIT` returns OK. A panicking callback is logged and the rest still run.
 ///
 /// # Errors
 /// Returns the first `ExecError` produced by `f`, or a driver error
@@ -562,7 +562,15 @@ where
             let callbacks = block.take_callbacks();
             BLOCK.sync_scope(block, || {
                 for cb in callbacks {
-                    cb();
+                    // The data is committed: one panicking hook must not skip the rest.
+                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cb));
+                    if let Err(panic) = run {
+                        tracing::error!(
+                            target: "rustango::error",
+                            panic = crate::panic_guard::panic_message(&*panic),
+                            "on_commit callback panicked"
+                        );
+                    }
                 }
             });
             Ok(v)

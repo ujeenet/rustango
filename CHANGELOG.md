@@ -6,6 +6,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** `ModelFormFor::from_json` refuses unknown keys; an oversized CSRF form gets 413, not 403; undecodable job payloads are retried; the first `makemigrations` on PostgreSQL rewrites each table with a sized `vector` or `geometry` column. See UPGRADING.
 
+### Fixed — a panicking `on_commit` callback no longer skips the rest
+
+After COMMIT each callback runs under `catch_unwind`; a panic is logged on `rustango::error` and the next callback still runs. `atomic` returns `Ok`, since the data is committed.
+
 ### Fixed — a grouped aggregate with joins names the base table
 
 `WHERE`, `SUM(…)` and the other aggregate columns of `.join(…).values(…).annotate(…)` are qualified with the model's table, as `fetch()` does; a column the join shares (a self-join, two soft-delete scopes) was ambiguous.

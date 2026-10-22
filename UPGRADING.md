@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### A panicking `on_commit` callback no longer escapes `atomic`
+
+It is logged and the later callbacks run. Code that caught that panic around `atomic` should watch the `rustango::error` log instead.
+
 ### New projects: dev server on loopback
 
 Only new scaffolds change. To match in an existing project, drop `RUSTANGO_BIND` from `.env`, add `RUSTANGO_BIND: 0.0.0.0:8080` under the compose `rust` service's `environment:`, and publish `"127.0.0.1:8080:8080"`.
