@@ -2064,7 +2064,8 @@ async fn rebuild_checks_only_its_own_orphans(pool: &Pool) {
         .expect_err("the rebuild orphans row 1");
     assert!(err.contains("FOREIGN KEY"), "{err}");
     chain.discard_head();
-    exec(pool, "SELECT {} FROM {}", &["x", b])
+    // Qualified: SQLite reads an unknown bare "x" as a string literal.
+    exec(pool, "SELECT {}.{} FROM {}", &[b, "x", b])
         .await
         .expect("rolled back: x is still there");
     // Author 5 exists now; an old orphan in another table does not block.
