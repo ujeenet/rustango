@@ -98,7 +98,7 @@ fn print_help() {
     println!("TEMPLATES:");
     println!("  api        bare ORM + axum, no admin (JSON-only services)");
     println!("  fullstack  ORM + auto-admin (default)");
-    println!("  tenant     multi-tenancy + operator console + tenancy_manage CLI");
+    println!("  tenant     multi-tenancy + operator console + tenant admin");
     println!();
     println!("OPTIONS:");
     println!("  -t, --template <name>    project template (default: fullstack)");
@@ -773,7 +773,11 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     // A `src/bin/*.rs` (a worker from `manage make:worker`, say) is its
     // own crate and can reach the app only through this.
     write(root, "src/lib.rs", &templates::lib_rs(name))?;
-    write(root, "src/main.rs", &templates::main_rs(template, name))?;
+    write(
+        root,
+        "src/main.rs",
+        &templates::main_rs_for(template, name, &args.features),
+    )?;
     write(root, "src/models.rs", &templates::models_rs(template))?;
     write(root, "src/views.rs", templates::VIEWS_RS)?;
     write(root, "src/urls.rs", &templates::urls_rs(template))?;
@@ -826,7 +830,8 @@ mod tests {
         for template in [Template::Fullstack, Template::Tenant] {
             let main = templates::main_rs(template, "demo");
             assert!(
-                main.contains(".with_settings_from_env()"),
+                main.contains(".with_settings_from_env()")
+                    || main.contains(".with_loaded_settings(loaded)"),
                 "{template:?} main.rs does not load its settings"
             );
         }
@@ -946,6 +951,34 @@ mod tests {
         );
     }
 
+    /// Settings has no root keys, so a rendered tier with one fails to
+    /// load under `RUSTANGO_CONFIG_STRICT`.
+    #[test]
+    fn config_templates_have_no_root_keys() {
+        for backend in [Backend::Postgres, Backend::Sqlite, Backend::Mysql] {
+            for (file, body) in [
+                (
+                    "default.toml",
+                    templates::config_default_toml("acme", backend),
+                ),
+                ("dev", templates::config_dev_settings_toml("acme", backend)),
+                (
+                    "staging",
+                    templates::config_staging_settings_toml("acme", backend),
+                ),
+                ("prod", templates::config_prod_settings_toml("acme")),
+            ] {
+                let tree: toml::Table = toml::from_str(&body).expect("rendered tier parses");
+                let loose: Vec<_> = tree
+                    .iter()
+                    .filter(|(_, v)| !v.is_table())
+                    .map(|(k, _)| k)
+                    .collect();
+                assert!(loose.is_empty(), "{backend:?} {file}: root keys {loose:?}");
+            }
+        }
+    }
+
     /// Regression guard against the original #79 footgun — no
     /// scaffold template may emit a yanked version literal.
     #[test]
@@ -995,12 +1028,34 @@ mod tests {
     fn fullstack_mounts_a_gated_driver_neutral_admin() {
         let urls = templates::urls_rs(Template::Fullstack);
         let main = templates::main_rs(Template::Fullstack, "demo");
-        assert!(urls.contains("pub fn admin_router(pool: Pool)"), "{urls}");
-        assert!(urls.contains(".with_session_auth("), "{urls}");
         assert!(
-            main.contains(".nest_with(\"/admin\", urls::admin_router)"),
+            urls.contains("pub fn admin_router(pool: Pool, settings: &Settings)"),
+            "{urls}"
+        );
+        assert!(urls.contains(".with_session_auth("), "{urls}");
+        // `[admin] url_prefix` moves both the mount and the admin's links.
+        assert!(
+            urls.contains("admin::Builder::from_settings(pool, settings)"),
+            "{urls}"
+        );
+        assert!(
+            urls.contains("admin::Builder::settings_prefix(settings)"),
+            "{urls}"
+        );
+        assert!(
+            main.contains(".nest_with(urls::admin_prefix(&settings)"),
             "{main}"
         );
+        // One settings load per boot, shared by the server and the admin.
+        assert_eq!(
+            main.matches("Settings::load_from_env()").count(),
+            1,
+            "{main}"
+        );
+        assert!(!main.contains("with_settings_from_env"), "{main}");
+        // A missing config/ warns and boots, as `with_settings_from_env` does.
+        assert!(!main.contains("load_from_env()?"), "{main}");
+        assert!(main.contains(".with_loaded_settings(loaded)"), "{main}");
         // The admin key survives a restart and fails closed on prod.
         assert!(urls.contains("load_session_secret_for_tier("), "{urls}");
         assert!(!urls.contains("from_env_or_random"), "{urls}");
@@ -1062,6 +1117,16 @@ mod tests {
     /// for a long time the only Dockerfile installed a toolchain and
     /// waited for a bind mount, so a project could be developed in
     /// Docker but not shipped in it.
+    /// The deploy image probes `/health`, so every template must mount it.
+    #[test]
+    fn every_template_mounts_the_dockerfile_health_path() {
+        assert!(templates::dockerfile_prod("myapp").contains("8080/health "));
+        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
+            let main = templates::main_rs(template, "myapp");
+            assert!(main.contains(".with_health()"), "{template:?}: {main}");
+        }
+    }
+
     #[test]
     fn dockerfile_builds_a_release_binary_and_drops_root() {
         let body = templates::dockerfile_prod("myapp");
@@ -1424,8 +1489,8 @@ mod tests {
     }
 
     /// `.env.example` defaults must work out-of-box for `docker
-    /// compose up -d` (host = `postgres`, bind = `0.0.0.0`). Users
-    /// running cargo on the host edit `postgres` -> `localhost`.
+    /// compose up -d` (host = `postgres`). Users running cargo on the
+    /// host edit `postgres` -> `localhost`.
     #[test]
     fn env_example_defaults_to_docker_friendly_values() {
         let body = templates::env_example("myapp", Backend::Postgres);
@@ -1434,10 +1499,78 @@ mod tests {
             "DATABASE_URL host must default to `postgres` (compose service name), \
              got: {body}"
         );
+    }
+
+    /// `.env` must not set `RUSTANGO_BIND`: it beats the dev tier's
+    /// `127.0.0.1`. Only the container binds all interfaces, and compose
+    /// publishes it on loopback.
+    #[test]
+    fn only_the_container_binds_all_interfaces() {
+        for backend in [Backend::Postgres, Backend::Mysql, Backend::Sqlite] {
+            let env = templates::env_example("myapp", backend);
+            assert!(
+                !env.lines().any(|l| l.starts_with("RUSTANGO_BIND=")),
+                "{env}"
+            );
+            let compose = templates::docker_compose("myapp", backend);
+            assert!(compose.contains("RUSTANGO_BIND: 0.0.0.0:8080"), "{compose}");
+            assert!(compose.contains("\"127.0.0.1:8080:8080\""), "{compose}");
+            assert!(!compose.contains("- \"8080:8080\""), "{compose}");
+        }
+    }
+
+    /// `[admin]` and `[brand]` reach the generated admin.
+    #[test]
+    fn fullstack_admin_reads_settings() {
+        let urls = templates::urls_rs(Template::Fullstack);
         assert!(
-            body.contains("RUSTANGO_BIND=0.0.0.0:8080"),
-            "bind must default to 0.0.0.0 so the container's exposed port is \
-             reachable from the host, got: {body}"
+            urls.contains("admin::Builder::from_settings(pool, settings)"),
+            "{urls}"
         );
+        // A config that fails to load must not drop `[admin]` restrictions:
+        // `with_loaded_settings` makes `run` refuse it before the admin is built.
+        let main = templates::main_rs(Template::Fullstack, "demo");
+        assert!(main.contains(".with_loaded_settings(loaded)"), "{main}");
+    }
+
+    /// `--features csrf` mounts the layer; every template shows where the
+    /// proxy list goes.
+    #[test]
+    fn main_rs_wires_csrf_and_shows_trusted_proxies() {
+        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
+            let plain = templates::main_rs_for(template, "myapp", &[]);
+            assert!(!plain.contains(".with_csrf()"), "{template:?}: {plain}");
+            assert!(
+                plain.contains(".with_trusted_proxies("),
+                "{template:?}: {plain}"
+            );
+            let csrf = templates::main_rs_for(template, "myapp", &["csrf".to_owned()]);
+            assert!(
+                csrf.contains("\n        .with_csrf()"),
+                "{template:?}: {csrf}"
+            );
+        }
+    }
+
+    /// A fresh project generates the framework's tables before migrating.
+    #[test]
+    fn readme_runs_makemigrations_before_migrate() {
+        for backend in [Backend::Postgres, Backend::Sqlite] {
+            let readme = templates::readme("myapp", Template::Fullstack, backend);
+            for line in readme
+                .lines()
+                .filter(|l| l.contains("cargo run -- migrate"))
+            {
+                let at = readme.find(line).unwrap();
+                assert!(
+                    readme[..at]
+                        .lines()
+                        .last()
+                        .unwrap_or("")
+                        .contains("makemigrations"),
+                    "`{line}` must follow makemigrations:\n{readme}"
+                );
+            }
+        }
     }
 }

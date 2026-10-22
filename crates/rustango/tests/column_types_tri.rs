@@ -249,9 +249,77 @@ async fn audit_diff_skips_an_unchanged_uuid(pool: &Pool) {
     );
 }
 
+/// Raw helpers refuse a Postgres-only bind elsewhere instead of panicking.
+async fn raw_helpers_refuse_pg_only_values(pool: &Pool) {
+    use rustango::core::SqlValue;
+    use rustango::sql::{ExecError, SqlError};
+    // A raw `List` bind panicked on every backend.
+    let list = || vec![SqlValue::List(vec![SqlValue::I64(1)])];
+    let sql = format!("SELECT {}", pool.dialect().placeholder(1));
+    let r = rustango::sql::raw_execute_pool(pool, &sql, list()).await;
+    assert!(
+        matches!(
+            r,
+            Err(ExecError::Sql(SqlError::ValueNotSupportedInDialect {
+                value: "list",
+                ..
+            }))
+        ),
+        "{r:?}"
+    );
+    if pool.dialect().name() == "postgres" {
+        return;
+    }
+    fn refused<T>(r: Result<T, ExecError>) -> bool {
+        matches!(
+            r,
+            Err(ExecError::Sql(SqlError::ValueNotSupportedInDialect {
+                value: "array",
+                ..
+            }))
+        )
+    }
+    let arr = || vec![SqlValue::Array(vec![SqlValue::I64(1)])];
+    assert!(refused(
+        rustango::sql::raw_execute_pool(pool, &sql, arr()).await
+    ));
+    assert!(refused(
+        rustango::sql::raw_query_pool::<(i64,)>(&sql, arr(), pool).await
+    ));
+    let mut tx = rustango::sql::transaction_pool(pool).await.expect("tx");
+    assert!(refused(
+        rustango::sql::raw_execute_tx(&mut tx, &sql, arr()).await
+    ));
+    assert!(refused(
+        rustango::sql::raw_query_tx::<(i64,)>(&mut tx, &sql, arr()).await
+    ));
+}
+
+/// The ORM refuses a `List` left as one bind, as the raw helpers do; it panicked.
+async fn orm_refuses_an_unexpanded_list(pool: &Pool) {
+    use rustango::core::SqlValue;
+    use rustango::sql::{ExecError, SqlError};
+    let r = Page::objects()
+        .filter("body", SqlValue::List(vec![SqlValue::String("a".into())]))
+        .fetch(pool)
+        .await;
+    assert!(
+        matches!(
+            r,
+            Err(ExecError::Sql(SqlError::ValueNotSupportedInDialect {
+                value: "list",
+                ..
+            }))
+        ),
+        "{r:?}"
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        raw_helpers_refuse_pg_only_values,
+        orm_refuses_an_unexpanded_list,
         unbounded_string_holds_more_than_64_kib,
         uuid_fields_round_trip_through_the_orm,
         uuid_fk_loads_through_select_related,

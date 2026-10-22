@@ -282,7 +282,7 @@ pub(crate) fn absent_takes_default(field: &FieldSchema, encoding: Encoding) -> b
 /// Parse one form value from a raw string.
 ///
 /// Empty string + nullable field → `SqlValue::Null`.
-/// Empty string + required field → `FormError::Missing`.
+/// Empty string + required String field → `FormError::Missing`, or `""` when it is `blank`.
 /// An absent key is `false` for a NOT NULL Bool (unchecked checkbox)
 /// and `NULL` for a nullable one. A Bool accepts `true/false/1/0/on/off/yes/no`
 /// (any case) or empty; anything else is a [`FormError::Parse`].
@@ -305,12 +305,8 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
     if field.nullable && raw.is_empty() {
         return Ok(SqlValue::Null);
     }
-    // Non-nullable String field with empty raw is a *missing* value,
-    // not a valid empty string: `""` is rejected unless the field
-    // is marked `blank`. Without this guard, blank
-    // form submits silently land empty strings in NOT NULL columns
-    // (surfaced playing with the cookbook /authors/new form).
-    if matches!(field.ty, FieldType::String) && !field.nullable && raw.is_empty() {
+    // An empty NOT NULL String is missing unless the field is `blank`.
+    if matches!(field.ty, FieldType::String) && !field.nullable && !field.blank && raw.is_empty() {
         return Err(FormError::Missing {
             field: field.name.to_owned(),
         });
@@ -1442,9 +1438,9 @@ mod dynamic_form_tests {
 /// rustango::sql::insert_on(&pool, &query).await?;
 /// ```
 ///
-/// Skips the `Auto<T>` PK on create; rejects unknown form keys with
-/// a clear error so callers can surface "you sent us a field we
-/// don't recognise" instead of silently dropping data.
+/// Skips server-assigned and generated columns. [`Self::from_json`]
+/// refuses a key that names no field; [`Self::parse`] ignores one, since
+/// an HTML form also posts its CSRF token and submit button.
 #[derive(Debug)]
 pub struct ModelFormFor<T: crate::core::Model> {
     /// Column names in the same declaration order as the model
@@ -1482,8 +1478,13 @@ impl<T: crate::core::Model> ModelFormFor<T> {
                 return Err(errors);
             }
         };
+        let mut unknown = FormErrors::default();
         let mut payload: HashMap<String, String> = HashMap::with_capacity(obj.len());
         for (k, v) in obj {
+            if !T::SCHEMA.scalar_fields().any(|f| f.name == k.as_str()) {
+                unknown.add(k.clone(), "unknown field");
+                continue;
+            }
             // serde_json::Value -> String for parse_form_value's
             // string-keyed contract:
             //   - null  → absent (skip insert; field's nullable
@@ -1501,7 +1502,14 @@ impl<T: crate::core::Model> ModelFormFor<T> {
                 }
             }
         }
-        Self::parse(&payload)
+        match Self::parse(&payload) {
+            Ok(form) if unknown.is_empty() => Ok(form),
+            Ok(_) => Err(unknown),
+            Err(mut errors) => {
+                errors.merge(unknown);
+                Err(errors)
+            }
+        }
     }
 
     /// Parse + validate `payload` against `T::SCHEMA`. Walks every
@@ -1522,15 +1530,8 @@ impl<T: crate::core::Model> ModelFormFor<T> {
         let mut columns = Vec::new();
         let mut values = Vec::new();
         for field in T::SCHEMA.scalar_fields() {
-            // Skip fields the database fills in automatically:
-            //   * Auto<T> PK (BIGSERIAL / SERIAL / gen_random_uuid())
-            //   * `auto = true` non-PK fields (auto_now_add /
-            //     auto_now mixins) — DB DEFAULT NOW() supplies the
-            //     value on INSERT, and the macro skips them on the
-            //     INSERT path too. ModelFormFor used to require these
-            //     on every create, breaking any model with a created_at
-            //     auto-timestamp.
-            if field.auto {
+            // Server-assigned and generated columns; `into_insert_query` stamps the former.
+            if !field.accepts_input(crate::core::WriteKind::Insert) {
                 continue;
             }
             let raw = payload.get(field.name).map(String::as_str);
@@ -1683,10 +1684,12 @@ impl<T: crate::core::Model> ModelFormFor<T> {
     /// from `columns()` + `values()`.
     #[must_use]
     pub fn into_insert_query(self) -> crate::core::InsertQuery {
+        let (mut columns, mut values) = (self.columns, self.values);
+        stamp_auto_timestamps(T::SCHEMA, &mut columns, &mut values);
         crate::core::InsertQuery {
             model: T::SCHEMA,
-            columns: self.columns,
-            values: self.values,
+            columns,
+            values,
             returning: Vec::new(),
             on_conflict: None,
             generated: Vec::new(),
@@ -1851,6 +1854,58 @@ mod model_form_tests {
             .expect("pk");
         let cols: Vec<&str> = q.set.iter().map(|a| a.column).collect();
         assert_eq!(cols, ["title", "updated_at"]);
+    }
+
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "mf_blank")]
+    #[allow(dead_code)]
+    pub struct Blank {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(blank, max_length = 20)]
+        pub note: String,
+        #[rustango(max_length = 20)]
+        pub name: String,
+    }
+
+    #[test]
+    fn empty_value_on_a_blank_field_is_an_empty_string() {
+        let p = HashMap::from([
+            ("note".to_owned(), String::new()),
+            ("name".to_owned(), "n".to_owned()),
+        ]);
+        let mf = ModelFormFor::<Blank>::parse(&p).expect("blank accepts empty");
+        assert_eq!(mf.values()[0], crate::core::SqlValue::String(String::new()));
+        assert!(ModelForm::new(<Blank as crate::core::Model>::SCHEMA, p.clone()).is_valid());
+        let name = <Blank as crate::core::Model>::SCHEMA.field("name").unwrap();
+        assert!(matches!(
+            parse_form_value(name, Some("")),
+            Err(FormError::Missing { .. })
+        ));
+    }
+
+    #[test]
+    fn into_insert_query_stamps_auto_timestamps() {
+        let p = HashMap::from([("title".to_owned(), "t".to_owned())]);
+        let q = ModelFormFor::<Stamped>::parse(&p)
+            .expect("valid")
+            .into_insert_query();
+        assert_eq!(q.columns, ["title", "created_at", "updated_at"]);
+    }
+
+    #[test]
+    fn from_json_rejects_an_unknown_key() {
+        let err = ModelFormFor::<Post>::from_json(&serde_json::json!({ "title": "t", "titel": 1 }))
+            .expect_err("unknown key");
+        assert!(!err.get("titel").is_empty(), "{err}");
+        // With a parse error too, both are reported.
+        let err = ModelFormFor::<Post>::from_json(&serde_json::json!({ "titel": 1 }))
+            .expect_err("unknown key and missing title");
+        assert!(!err.get("titel").is_empty(), "{err}");
+        assert!(!err.get("title").is_empty(), "{err}");
+        // A server-assigned field is known, so it is ignored rather than refused.
+        ModelFormFor::<Post>::from_json(&serde_json::json!({ "id": 9, "title": "t" }))
+            .expect("known key");
     }
 
     /// #2530: a Bool accepts only the known spellings; junk is not `true`.

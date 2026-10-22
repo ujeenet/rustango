@@ -123,6 +123,20 @@ impl SqlValue {
         }
     }
 
+    /// What a Postgres-only value is, for the error other backends
+    /// raise; `None` for a value every backend binds.
+    pub(crate) fn pg_only_kind(&self) -> Option<&'static str> {
+        match self {
+            Self::Array(_) => Some("array"),
+            Self::RangeLiteral(_) => Some("range"),
+            Self::HStore(_) => Some("hstore"),
+            Self::Vector(_) => Some("vector"),
+            Self::Geometry { .. } => Some("geometry"),
+            Self::List(items) => items.iter().find_map(Self::pg_only_kind),
+            _ => None,
+        }
+    }
+
     /// The [`FieldType`] for this value, or `None` for `Null` and the
     /// container variants (`List`, `Array`, `RangeLiteral`, `HStore`,
     /// `Vector`, `Geometry`), which carry no checkable type here.

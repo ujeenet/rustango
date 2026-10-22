@@ -60,6 +60,11 @@ pub struct Memo {
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+// The tenant views run the registered context processors too.
+rustango::register_template_context_processor!(|_parts| {
+    [("cp_tenant".to_owned(), serde_json::json!("proc"))].into()
+});
+
 const SECRET: &[u8] = b"scope1746-tenant-secret-32-bytes!!";
 const CSRF: &str = "scope1746-csrf-token-scope1746-csrf-token-x";
 
@@ -155,8 +160,8 @@ async fn app(name: &str) -> (Router, Pool, Vec<i64>, Vec<i64>) {
             "rows={{ object_list | length }} total={{ total }}",
         ),
         ("detail.html", "tag={{ object.tag }}"),
-        ("form.html", "form"),
-        ("confirm.html", "confirm"),
+        ("form.html", "form {{ cp_tenant }}"),
+        ("confirm.html", "confirm {{ cp_tenant }}"),
         ("bulk.html", "objects={{ objects | length }}"),
     ])
     .unwrap();
@@ -405,5 +410,26 @@ async fn tenant_views_soft_delete_and_hide_deleted_rows() {
         memo(&pool, gone).await.tag,
         "a",
         "a deleted row is not updated"
+    );
+}
+
+#[tokio::test]
+async fn tenant_views_merge_context_processors() {
+    let (app, _, shown, _) = app("procs").await;
+    let s = shown[0];
+    let (status, body) = send(&app, Method::GET, &format!("/notes/{s}/edit"), None).await;
+    assert_eq!((status, body.as_str()), (StatusCode::OK, "form proc"));
+    let (status, body) = send(&app, Method::GET, &format!("/notes/{s}/delete"), None).await;
+    assert_eq!((status, body.as_str()), (StatusCode::OK, "confirm proc"));
+    let (status, body) = send(
+        &app,
+        Method::POST,
+        &format!("/notes/{s}/edit"),
+        Some("tag="),
+    )
+    .await;
+    assert_eq!(
+        (status, body.as_str()),
+        (StatusCode::UNPROCESSABLE_ENTITY, "form proc")
     );
 }

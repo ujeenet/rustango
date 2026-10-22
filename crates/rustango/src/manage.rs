@@ -70,6 +70,26 @@ async fn run_shutdown_hook(hook: Option<ShutdownFn>) {
     }
 }
 
+/// Which CSRF layer `runserver` mounts.
+#[cfg(feature = "csrf")]
+#[derive(Clone)]
+enum CsrfMount {
+    /// [`Cli::with_csrf`]: the cookie's `Secure` follows the session policy.
+    SessionPolicy,
+    /// [`Cli::with_csrf_config`]: the config decides.
+    Explicit(crate::forms::csrf::CsrfConfig),
+}
+
+#[cfg(feature = "csrf")]
+impl CsrfMount {
+    fn layer(self) -> crate::forms::csrf::CsrfLayer {
+        match self {
+            Self::SessionPolicy => crate::forms::csrf::layer(),
+            Self::Explicit(cfg) => crate::forms::csrf::with_config(cfg),
+        }
+    }
+}
+
 /// One-builder dispatcher. Hand it your API router (and optionally a
 /// seed hook), call [`Cli::run`], and you're done.
 #[must_use = "Cli does nothing until .run() is awaited"]
@@ -135,7 +155,7 @@ pub struct Cli {
     /// at the deserializer layer. Form-driven apps opt in; the
     /// `template_views` routers carry their own layer.
     #[cfg(feature = "csrf")]
-    csrf: Option<crate::forms::csrf::CsrfConfig>,
+    csrf: Option<CsrfMount>,
     /// Set by [`Cli::with_trusted_proxies`]. Mounted outermost, so the
     /// access log and every per-IP limit see the client.
     real_ip: Option<crate::real_ip::RealIpLayer>,
@@ -460,12 +480,13 @@ impl Cli {
     ///     .run().await
     /// ```
     ///
-    /// To override the cookie name / `Secure` attribute, use
+    /// The cookie's `Secure` follows `[security] secure_cookies`, like
+    /// the session cookie. To set it or the name yourself, use
     /// [`Cli::with_csrf_config`] instead.
     #[cfg(feature = "csrf")]
     #[must_use]
     pub fn with_csrf(mut self) -> Self {
-        self.csrf = Some(crate::forms::csrf::CsrfConfig::default());
+        self.csrf = Some(CsrfMount::SessionPolicy);
         self
     }
 
@@ -486,7 +507,7 @@ impl Cli {
     #[cfg(feature = "csrf")]
     #[must_use]
     pub fn with_csrf_config(mut self, cfg: crate::forms::csrf::CsrfConfig) -> Self {
-        self.csrf = Some(cfg);
+        self.csrf = Some(CsrfMount::Explicit(cfg));
         self
     }
 
@@ -675,8 +696,11 @@ impl Cli {
         self.with_loaded_settings(crate::config::Settings::load_from_env())
     }
 
+    /// [`Cli::with_settings_from_env`] for a result you already loaded,
+    /// so one load can also feed the admin. Same missing-file policy.
     #[cfg(feature = "config")]
-    fn with_loaded_settings(
+    #[must_use]
+    pub fn with_loaded_settings(
         mut self,
         loaded: Result<crate::config::Settings, crate::config::ConfigError>,
     ) -> Self {
@@ -1083,7 +1107,7 @@ impl Cli {
         let api = mount_static_dirs(api, &self.static_dirs);
         #[cfg(feature = "csrf")]
         let api = match self.csrf.take() {
-            Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
+            Some(mount) => api.layer(mount.layer()),
             None => api,
         };
         // Inside CORS and the security headers, so a panic's 500 carries them (#1541).
@@ -1121,6 +1145,15 @@ impl Cli {
         }
         if let Some(layer) = &self.real_ip {
             builder = builder.real_ip(layer.clone());
+        }
+        // The api router got it in `apply_settings_layers`; the admin and console did not.
+        #[cfg(feature = "config")]
+        if let Some(layer) = self
+            .settings_for_layers
+            .as_ref()
+            .and_then(|s| crate::body_limit::BodyLimitLayer::from_settings(&s.server))
+        {
+            builder = builder.body_limit(layer);
         }
         match outer {
             Some(o) => o.apply_to(builder),
@@ -1241,6 +1274,18 @@ impl Cli {
                         the serving pool is the registry's"
                     .into(),
             );
+        }
+        // axum panics on a root nest; `[admin] url_prefix = "/"` reaches here as "".
+        if let Some((path, _)) = self
+            .nested
+            .iter()
+            .find(|(p, _)| p.trim_end_matches('/').is_empty())
+        {
+            return Err(format!(
+                "Cli::nest_with({path:?}) cannot mount at the root; use a prefix \
+                 such as \"/admin\" (for the admin, set `[admin] url_prefix`)"
+            )
+            .into());
         }
         #[cfg(feature = "tenancy")]
         if self.tenancy {
@@ -1363,7 +1408,7 @@ impl Cli {
         };
         #[cfg(feature = "csrf")]
         let api = match self.csrf.clone() {
-            Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
+            Some(mount) => api.layer(mount.layer()),
             None => api,
         };
         // Inside CORS; the builder catches the admin and console routes (#1541).
@@ -1433,7 +1478,7 @@ impl Cli {
         };
         #[cfg(feature = "csrf")]
         let api = match self.csrf.clone() {
-            Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
+            Some(mount) => api.layer(mount.layer()),
             None => api,
         };
         // Inside CORS; the builder catches the admin and console routes (#1541).
@@ -2304,6 +2349,37 @@ mod tests {
         assert_ne!(r.status(), StatusCode::MOVED_PERMANENTLY);
     }
 
+    /// `[server] max_body_bytes` reaches the operator console and tenant admin.
+    #[cfg(all(feature = "tenancy", feature = "config", feature = "sqlite"))]
+    #[tokio::test]
+    async fn tenancy_builder_hands_over_the_body_limit() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let mut s = crate::config::Settings::default();
+        s.server.max_body_bytes = Some(64);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let pool = sqlx::SqlitePool::connect(&url).await.expect("connect");
+        let builder = crate::server::Builder::from_pool(pool, url, "localhost");
+        let app = Cli::new()
+            .with_settings(&s)
+            .tenancy_builder(builder, None)
+            .into_router()
+            .await
+            .expect("assemble");
+        for host in ["localhost", "acme.localhost"] {
+            let req = Request::post("/login")
+                .header("host", host)
+                .header("content-length", "1000")
+                .body(Body::from(vec![b'a'; 1000]))
+                .unwrap();
+            let r = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE, "{host}");
+        }
+    }
+
     /// #2255 — `with_trusted_proxies` reaches the tenancy builder: the
     /// access log names the client behind the proxy, not the proxy.
     #[cfg(all(feature = "tenancy", feature = "sqlite"))]
@@ -2508,21 +2584,56 @@ mod tests {
         assert!(cli_with.install_logging);
     }
 
-    /// `Cli::with_csrf()` flips the flag from `None` to `Some(default)`.
-    /// `with_csrf_config(...)` lets callers override.
+    /// `with_csrf()` follows the session cookie policy, so plain-HTTP dev
+    /// with `secure_cookies = false` gets a cookie the browser sends back.
     #[cfg(feature = "csrf")]
-    #[test]
-    fn with_csrf_flips_flag() {
-        let cli_default = Cli::new();
-        assert!(cli_default.csrf.is_none(), "default off");
+    #[tokio::test]
+    async fn with_csrf_cookie_follows_the_session_policy() {
+        assert!(Cli::new().csrf.is_none(), "default off");
+        // The policy is a write-once global; assert against whatever it holds.
+        let _ = crate::session::set_secure_cookies(false);
+        let mount = Cli::new().with_csrf().csrf.expect("set");
+        assert!(matches!(mount, CsrfMount::SessionPolicy));
+        assert!(mount.layer().follows_session_policy());
+        let cookie = csrf_cookie(CsrfMount::SessionPolicy).await;
+        assert_eq!(
+            cookie.contains("Secure"),
+            crate::session::secure_cookies(),
+            "{cookie}"
+        );
+    }
 
-        let cli_with = Cli::new().with_csrf();
-        let csrf = cli_with.csrf.expect("with_csrf should set csrf");
-        assert_eq!(csrf.cookie_name, crate::forms::csrf::CSRF_COOKIE);
-        // v0.43 — default flipped to Secure=true so production isn't
-        // foot-gunned by forgetting to enable it. Dev over HTTP opts
-        // out via `.allow_insecure_for_dev()`.
-        assert!(csrf.secure, "default Secure=true since v0.43");
+    /// An explicit config sets `Secure` itself, on and off.
+    #[cfg(feature = "csrf")]
+    #[tokio::test]
+    async fn with_csrf_config_cookie_keeps_its_secure_flag() {
+        for secure in [true, false] {
+            let cfg = crate::forms::csrf::CsrfConfig {
+                secure,
+                ..Default::default()
+            };
+            assert!(!CsrfMount::Explicit(cfg.clone())
+                .layer()
+                .follows_session_policy());
+            let cookie = csrf_cookie(CsrfMount::Explicit(cfg)).await;
+            assert_eq!(cookie.contains("Secure"), secure, "{cookie}");
+        }
+    }
+
+    #[cfg(feature = "csrf")]
+    async fn csrf_cookie(mount: CsrfMount) -> String {
+        use tower::ServiceExt as _;
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(|| async { "ok" }))
+            .layer(mount.layer());
+        let req = axum::http::Request::get("/")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        resp.headers()[axum::http::header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .to_owned()
     }
 
     #[cfg(feature = "csrf")]
@@ -2546,7 +2657,9 @@ mod tests {
             exempt_prefixes: Vec::new(),
             ..Default::default()
         });
-        let csrf = cli.csrf.expect("with_csrf_config should set csrf");
+        let Some(CsrfMount::Explicit(csrf)) = cli.csrf else {
+            panic!("with_csrf_config should store its config");
+        };
         assert_eq!(csrf.cookie_name, "custom_csrf");
         assert_eq!(csrf.header_name, "X-Custom-CSRF");
         assert!(csrf.secure);
@@ -3052,6 +3165,23 @@ mod observability_without_admin_tests {
                 res.status(),
                 axum::http::StatusCode::OK,
                 "{path} not mounted"
+            );
+        }
+    }
+
+    /// A root `nest_with` (`[admin] url_prefix = "/"`) is a boot error, not an axum panic.
+    #[tokio::test]
+    async fn nest_with_at_the_root_is_refused() {
+        let _serial = serialized();
+        for path in ["", "/"] {
+            let err = Cli::new()
+                .nest_with(path, |_| Router::new())
+                .runserver()
+                .await
+                .expect_err("a root nest must not serve");
+            assert!(
+                err.to_string().contains("cannot mount at the root"),
+                "{err}"
             );
         }
     }

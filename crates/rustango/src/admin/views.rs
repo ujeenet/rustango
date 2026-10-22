@@ -17,7 +17,7 @@ use super::errors::AdminError;
 use super::forms;
 use super::helpers::{
     admin_config_or_default, build_fk_joins, chrome_context, fk_display_targets,
-    fk_map_from_joined_rows_json, is_secret_field, lookup_model, primary_key_or_internal,
+    fk_map_from_joined_rows_json, is_secret_field, lookup_model, parse_pk, primary_key_or_internal,
     render_cell_json, render_form, render_secret_cell, resolve_model, resolve_model_and_pk,
     search_columns, url_filterable, FormLayout, ListQuery,
 };
@@ -1196,10 +1196,12 @@ async fn fk_map_for_rows(
             .collect();
         raws.sort();
         raws.dedup();
-        let keys: Vec<SqlValue> = raws
-            .iter()
-            .filter_map(|raw| forms::parse_pk_string(on_field, raw).ok())
-            .collect();
+        let keys: Vec<SqlValue> =
+            super::helpers::parse_keys(state, t.target, on_field, raws.iter().map(String::as_str))
+                .await?
+                .into_iter()
+                .map(|(_, key)| key)
+                .collect();
         let names =
             fk_display_names(state, parts, t.target, on_field, t.display_field, keys).await?;
         for (raw, name) in names {
@@ -1697,7 +1699,7 @@ pub(crate) async fn detail_view(
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
-    let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw)?;
+    let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw).await?;
 
     let detail_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     // Single PK lookup, plus LEFT JOINs that carry the FK display
@@ -2022,7 +2024,13 @@ pub(crate) async fn create_submit(
     .await;
     // An `audit(...)` model's entry commits with the INSERT, as on edit (#2101).
     let emit = crate::audit::DiffEmit::for_model(model);
-    let written = crate::audit::insert_one_with_entry(
+    let refused = |msg: String| Html(render_form(&state, model, Some(&form), false, Some(&msg)));
+    let mut tx = match crate::sql::write_transaction_pool(&state.pool).await {
+        Ok(tx) => tx,
+        Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
+    };
+    let written = crate::audit::insert_one_with_entry_tx(
+        &mut tx,
         &state.pool,
         &query,
         pk_field,
@@ -2033,24 +2041,43 @@ pub(crate) async fn create_submit(
         emit,
     )
     .await;
-    let pk_value = match written {
-        Ok((pk, deferred)) => {
-            if let Some(entry) = deferred {
-                super::audit::emit_best_effort(&state, &entry).await;
-            }
-            pk.to_display_string()
-        }
+    let (pk, deferred) = match written {
+        Ok(w) => w,
         Err(e) => {
-            let html = render_form(
-                &state,
-                model,
-                Some(&form),
-                false,
-                Some(&write_error(model, &e)),
-            );
-            return Ok(Html(html).into_response());
+            rollback_quietly(tx, model.table).await;
+            return Ok(refused(write_error(model, &e)).into_response());
         }
     };
+    match admits_written(
+        &mut tx,
+        &parts,
+        model,
+        pk_field,
+        pk.clone(),
+        Written::Created,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            rollback_quietly(tx, model.table).await;
+            return Err(AdminError::Forbidden {
+                table: model.table.to_owned(),
+                action: "add",
+            });
+        }
+        Err(e) => {
+            rollback_quietly(tx, model.table).await;
+            return Ok(refused(write_error(model, &e)).into_response());
+        }
+    }
+    if let Err(e) = tx.commit().await {
+        return Ok(refused(write_error(model, &e.into())).into_response());
+    }
+    if let Some(entry) = deferred {
+        super::audit::emit_best_effort(&state, &entry).await;
+    }
+    let pk_value = pk.to_display_string();
     // `save_model` hook. It fires only on admin writes, not on every
     // ORM insert, so it is a seam for admin-only side effects.
     crate::signals::admin::send_admin_post_save(crate::signals::admin::AdminSaveContext {
@@ -2193,7 +2220,7 @@ pub(crate) async fn edit_form(
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
-    let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw)?;
+    let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw).await?;
 
     let edit_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let row = crate::sql::select_one_row_as_json(
@@ -2275,7 +2302,7 @@ pub(crate) async fn update_submit(
         });
     }
     let pk_field = primary_key_or_internal(model)?;
-    let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
+    let pk_value = parse_pk(&state, model, pk_field, &pk_raw).await?;
 
     // `has_change_permission(request, obj)`. Fetch the row first so
     // the hook sees the state before the update. A select error is
@@ -2367,7 +2394,7 @@ pub(crate) async fn update_submit(
         where_clause: WhereExpr::Predicate(Filter {
             column: pk_field.column,
             op: Op::Eq,
-            value: pk_value,
+            value: pk_value.clone(),
         }),
     };
     crate::signals::admin::send_admin_pre_save(crate::signals::admin::AdminSaveContext {
@@ -2413,18 +2440,39 @@ pub(crate) async fn update_submit(
             return Ok(refused(write_error(model, &e)).into_response());
         }
     };
-    let child_rows = match super::inlines::apply_plan_tx(&mut tx, &state.pool, inline_plan).await {
-        Ok((_, rows)) => rows,
-        Err(e) => {
-            use super::inlines::InlineApplyError as E;
+    match admits_written(&mut tx, &parts, model, pk_field, pk_value, Written::Edited).await {
+        Ok(true) => {}
+        Ok(false) => {
             rollback_quietly(tx, model.table).await;
-            let why = match e {
-                E::Write { child, error } => write_error(child, &error),
-                E::MaxNum { child } => format!("{} allows no more rows here.", child.name),
-            };
-            return Ok(refused(format!("Nothing was saved: {why}")).into_response());
+            return Err(AdminError::Forbidden {
+                table: model.table.to_owned(),
+                action: "change",
+            });
         }
-    };
+        Err(e) => {
+            rollback_quietly(tx, model.table).await;
+            return Ok(refused(write_error(model, &e)).into_response());
+        }
+    }
+    let child_rows =
+        match super::inlines::apply_plan_tx(&mut tx, &state.pool, &parts, inline_plan).await {
+            Ok((_, rows)) => rows,
+            Err(e) => {
+                use super::inlines::InlineApplyError as E;
+                rollback_quietly(tx, model.table).await;
+                let why = match e {
+                    E::Write { child, error } => write_error(child, &error),
+                    E::MaxNum { child } => format!("{} allows no more rows here.", child.name),
+                    E::Forbidden { child, action } => {
+                        return Err(AdminError::Forbidden {
+                            table: child.table.to_owned(),
+                            action,
+                        })
+                    }
+                };
+                return Ok(refused(format!("Nothing was saved: {why}")).into_response());
+            }
+        };
     if let Err(e) = tx.commit().await {
         return Ok(refused(write_error(model, &e.into())).into_response());
     }
@@ -2445,6 +2493,53 @@ pub(crate) async fn update_submit(
 
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_raw, &form);
     Ok(Redirect::to(&target).into_response())
+}
+
+/// How a written row was made, which picks its re-check.
+#[derive(Clone, Copy)]
+pub(super) enum Written {
+    /// Scope and the `add` hook: no row existed before.
+    Created,
+    /// Scope only: `change` already judged the row before the edit.
+    Edited,
+}
+
+impl Written {
+    /// The action a refusal reports.
+    pub(super) fn action(self) -> &'static str {
+        match self {
+            Self::Created => "add",
+            Self::Edited => "change",
+        }
+    }
+
+    /// The hook to run on the written row, if any.
+    fn hook(self) -> Option<&'static str> {
+        match self {
+            Self::Created => Some("add"),
+            Self::Edited => None,
+        }
+    }
+}
+
+/// Whether the row just written in `tx` is still in the request's scope
+/// (and, for a create, passes the `add` hook); a form must not move a row outside it.
+pub(super) async fn admits_written(
+    tx: &mut crate::sql::PoolTx<'_>,
+    parts: &axum::http::request::Parts,
+    model: &'static crate::core::ModelSchema,
+    pk_field: &'static FieldSchema,
+    pk: SqlValue,
+    written: Written,
+) -> Result<bool, crate::sql::ExecError> {
+    let fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    let select = RowScope::of(model, parts).by_pk(model, pk_field.column, pk);
+    let row = crate::sql::select_one_row_as_json_tx(tx, &select, &fields).await?;
+    Ok(row.is_some_and(|row| {
+        written.hook().is_none_or(|action| {
+            crate::admin::object_permissions::is_allowed(model.table, action, parts, Some(&row))
+        })
+    }))
 }
 
 /// A failed ROLLBACK must not replace the refusal with a 500; dropping
@@ -2469,7 +2564,7 @@ pub(crate) async fn delete_submit(
         });
     }
     let pk_field = primary_key_or_internal(model)?;
-    let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
+    let pk_value = parse_pk(&state, model, pk_field, &pk_raw).await?;
 
     // Read the row before deleting it, so the audit entry records
     // what was removed. A row missing or outside the queryset hooks'
@@ -2696,10 +2791,16 @@ pub(crate) async fn action_submit(
 
     let pk_field = primary_key_or_internal(model)?;
 
-    let pk_values: Vec<SqlValue> = selected_raw
-        .iter()
-        .filter_map(|raw| forms::parse_pk_string(pk_field, raw).ok())
-        .collect();
+    let pk_values: Vec<SqlValue> = super::helpers::parse_keys(
+        &state,
+        model,
+        pk_field,
+        selected_raw.iter().map(String::as_str),
+    )
+    .await?
+    .into_iter()
+    .map(|(_, key)| key)
+    .collect();
     if pk_values.is_empty() {
         return back();
     }
@@ -2737,7 +2838,7 @@ pub(crate) async fn action_submit(
         });
     }
     // Write only the rows that were checked, and audit exactly those.
-    let pk_values = rows_with_pk(&mut before_rows, pk_field);
+    let pk_values = rows_with_pk(&mut before_rows, pk_field, &pk_values);
     if pk_values.is_empty() {
         return back();
     }
@@ -2955,7 +3056,7 @@ impl BuiltinWrite {
                 ..SelectQuery::new(model)
             };
             let mut rows = crate::sql::select_rows_as_json_tx(tx, &select, &[pk_field]).await?;
-            let keys = rows_with_pk(&mut rows, pk_field);
+            let keys = rows_with_pk(&mut rows, pk_field, chunk);
             if keys.is_empty() {
                 continue;
             }
@@ -2981,11 +3082,24 @@ impl BuiltinWrite {
 
 /// Keep the rows whose PK round-trips and return those PKs, so the rows
 /// a bulk action writes and the rows it audits are the same list.
-fn rows_with_pk(rows: &mut Vec<serde_json::Value>, pk_field: &FieldSchema) -> Vec<SqlValue> {
+/// A PK in `selected` (the keys the rows were read by) keeps its stored form.
+fn rows_with_pk(
+    rows: &mut Vec<serde_json::Value>,
+    pk_field: &FieldSchema,
+    selected: &[SqlValue],
+) -> Vec<SqlValue> {
+    let selected: HashMap<String, &SqlValue> = selected
+        .iter()
+        .map(|k| (k.to_display_string(), k))
+        .collect();
     let mut pks = Vec::with_capacity(rows.len());
     rows.retain(|row| {
-        let pk = render::read_value_as_string_json(row, pk_field)
-            .and_then(|raw| forms::parse_pk_string(pk_field, &raw).ok());
+        let pk = render::read_value_as_string_json(row, pk_field).and_then(|raw| {
+            selected.get(&raw).map_or_else(
+                || forms::parse_pk_string(pk_field, &raw).ok(),
+                |k| Some((*k).clone()),
+            )
+        });
         pks.extend(pk.clone());
         pk.is_some()
     });
@@ -3004,7 +3118,7 @@ mod tests {
             serde_json::json!({"id": null}),
             serde_json::json!({"id": 3}),
         ];
-        let pks = rows_with_pk(&mut rows, &pk);
+        let pks = rows_with_pk(&mut rows, &pk, &[]);
         assert_eq!(pks, vec![SqlValue::I64(1), SqlValue::I64(3)]);
         assert_eq!(
             rows,

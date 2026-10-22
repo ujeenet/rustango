@@ -400,6 +400,102 @@ async fn a_row_out_of_attempts_is_dead_lettered_not_run(pool: &Pool) {
     assert_eq!(job_rows(pool).await, 0);
 }
 
+/// A job dispatched in a rolled-back `atomic` block is rolled back with it.
+async fn a_dispatch_rolls_back_with_its_atomic_block(pool: &Pool) {
+    let q = Arc::new(queue(pool, 1, Duration::from_secs(60)).await);
+    let tok = token(pool, "rolled-back");
+    let res = rustango::sql::atomic(pool, move |_tx| {
+        Box::pin(async move {
+            q.dispatch(&Tick { token: tok }).await.expect("dispatch");
+            Err::<(), _>(rustango::sql::ExecError::AtomicAborted)
+        })
+    })
+    .await;
+    assert!(res.is_err());
+    assert_eq!(job_rows(pool).await, 0, "the job outlived the rollback");
+}
+
+/// A dispatch after a write in the same block joins it, so SQLite's
+/// write lock does not make it wait.
+async fn a_dispatch_after_a_write_commits_with_its_block(pool: &Pool) {
+    let q = Arc::new(queue(pool, 1, Duration::from_secs(60)).await);
+    let tok = token(pool, "joined");
+    rustango::sql::atomic(pool, move |tx| {
+        Box::pin(async move {
+            rustango::sql::raw_execute_tx(
+                &mut *tx.lock().await?,
+                "UPDATE rustango_jobs SET attempt = attempt",
+                Vec::new(),
+            )
+            .await?;
+            q.dispatch(&Tick { token: tok }).await.expect("dispatch");
+            Ok(())
+        })
+    })
+    .await
+    .expect("commit");
+    assert_eq!(job_rows(pool).await, 1);
+}
+
+/// What an older release queued under `Tick`'s name.
+#[derive(Serialize, Deserialize)]
+struct OldTick {
+    legacy: u32,
+}
+
+#[async_trait::async_trait]
+impl Job for OldTick {
+    const NAME: &'static str = "tri1843:tick";
+    async fn run(&self) -> Result<(), JobError> {
+        Ok(())
+    }
+}
+
+/// A payload this build cannot decode is retried, not dead-lettered at once:
+/// during a rolling deploy another version may still read it.
+async fn an_undecodable_payload_is_retried(pool: &Pool) {
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    let dead = dead_letters(&q).await;
+    q.dispatch(&OldTick { legacy: 1 }).await.unwrap();
+    q.start().await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while job_rows(pool).await == 1 && the_row(pool).await != (1, false) {
+        assert!(Instant::now() < deadline, "timed out waiting for the run");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    q.shutdown().await;
+    assert!(dead.lock().unwrap().is_empty(), "dead-lettered at once");
+    assert_eq!(job_rows(pool).await, 1, "the row is kept for a retry");
+}
+
+/// A job dispatched in an `atomic` block wakes an idle worker once the
+/// block commits, not before; the poll is too slow to pick it up.
+async fn a_dispatch_in_a_block_wakes_the_worker_after_commit(pool: &Pool) {
+    let q = Arc::new(
+        PgJobQueue::with_workers_pool(pool.clone(), 1).poll_interval(Duration::from_secs(600)),
+    );
+    q.register::<Tick>().await;
+    q.start().await;
+    // Let the worker finish its first, empty claim and go idle.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let tok = token(pool, "woken");
+    let (q2, t2) = (q.clone(), tok.clone());
+    rustango::sql::atomic(pool, move |_tx| {
+        Box::pin(async move {
+            q2.dispatch(&Tick { token: t2.clone() })
+                .await
+                .expect("dispatch");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(counts(&t2).0, 0, "the job ran before its block committed");
+            Ok(())
+        })
+    })
+    .await
+    .expect("commit");
+    wait_for("the woken worker", || counts(&tok).1 == 1).await;
+    q.shutdown().await;
+}
+
 async fn a_heartbeat_keeps_a_long_job_leased(pool: &Pool) {
     let slow = token(pool, "heartbeat");
     let q = queue(pool, 2, Duration::from_millis(100)).await;
@@ -422,6 +518,32 @@ async fn a_heartbeat_keeps_a_long_job_leased(pool: &Pool) {
     tokio::time::sleep(Duration::from_millis(200)).await;
     q.shutdown().await;
     assert_eq!(counts(&slow).0, 1, "ran once");
+}
+
+/// A reclaim sweep beside busy heartbeats never fails on a lock cycle.
+async fn a_reclaim_beside_heartbeats_does_not_fail(pool: &Pool) {
+    let tok = token(pool, "reclaim_storm");
+    let q = queue(pool, 3, Duration::from_millis(2)).await;
+    for _ in 0..3 {
+        q.dispatch(&Slow {
+            token: tok.clone(),
+            first_ms: 3000,
+            later_ms: 3000,
+        })
+        .await
+        .unwrap();
+    }
+    q.start().await;
+    wait_for("the runs to start", || counts(&tok).0 == 3).await;
+    let mut sweeps = 0;
+    while counts(&tok).1 < 3 {
+        PgJobQueue::reclaim_stuck_jobs_pool(pool, Duration::from_millis(500))
+            .await
+            .unwrap_or_else(|e| panic!("sweep {sweeps} failed: {e}"));
+        sweeps += 1;
+    }
+    q.shutdown().await;
+    assert_eq!(counts(&tok).0, 3, "each ran once");
 }
 
 async fn a_lost_lease_does_not_finish_the_new_holders_row(pool: &Pool) {
@@ -870,6 +992,7 @@ tri_dialect_test! {
         a_dead_workers_row_is_reclaimed_at_boot,
         the_sweep_does_not_reclaim_a_live_job,
         a_heartbeat_keeps_a_long_job_leased,
+        a_reclaim_beside_heartbeats_does_not_fail,
         a_lost_lease_does_not_finish_the_new_holders_row,
         a_job_without_a_handler_spends_no_attempts,
         a_lost_lease_fires_no_dead_letter,
@@ -879,5 +1002,9 @@ tri_dialect_test! {
         zero_max_attempts_runs_once,
         a_jobs_backoff_hook_sets_its_retry_time,
         a_db_queue_sends_with_its_registered_mailer,
+        a_dispatch_rolls_back_with_its_atomic_block,
+        a_dispatch_after_a_write_commits_with_its_block,
+        an_undecodable_payload_is_retried,
+        a_dispatch_in_a_block_wakes_the_worker_after_commit,
     ],
 }

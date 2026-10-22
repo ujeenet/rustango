@@ -76,8 +76,8 @@ use sqlx::PgPool;
 use tokio::sync::{Mutex, Notify};
 
 use super::{
-    DeadLetterFn, HandlerRegistry, Job, JobDeadLetter, JobError, JobQueue, Running, StopSignal,
-    DEFAULT_SHUTDOWN_GRACE,
+    DeadLetterFn, HandlerRegistry, Job, JobDeadLetter, JobError, JobQueue, Registered, Running,
+    StopSignal, DEFAULT_SHUTDOWN_GRACE,
 };
 use crate::sql::Pool;
 
@@ -394,22 +394,40 @@ impl PgJobQueue {
         use crate::core::SqlValue;
         let cutoff: DateTime<Utc> = Utc::now()
             - chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::seconds(0));
-        let p = pool.dialect().placeholder(1);
-        let sql = format!(
-            "UPDATE rustango_jobs \
-                SET locked_at = NULL, locked_by = NULL \
-              WHERE locked_at IS NOT NULL AND locked_at < {p}"
-        );
+        let to_sqlx = |e| match e {
+            crate::sql::ExecError::Driver(err) => err,
+            other => sqlx::Error::Protocol(format!("{other}")),
+        };
+        let d = pool.dialect();
         // The cutoff is computed in Rust and bound, so no backend
         // needs its own `NOW() - INTERVAL` SQL. `SqlValue::DateTime`
         // encodes as TIMESTAMPTZ on PG, DATETIME(6) on MySQL and
         // RFC3339 TEXT on SQLite.
-        crate::sql::raw_execute_pool(pool, &sql, vec![SqlValue::DateTime(cutoff)])
-            .await
-            .map_err(|e| match e {
-                crate::sql::ExecError::Driver(err) => err,
-                other => sqlx::Error::Protocol(format!("{other}")),
-            })
+        let stale = format!(
+            "SELECT id FROM rustango_jobs WHERE locked_at IS NOT NULL AND locked_at < {}",
+            d.placeholder(1)
+        );
+        let ids: Vec<(i64,)> =
+            crate::sql::raw_query_pool(&stale, vec![SqlValue::DateTime(cutoff)], pool)
+                .await
+                .map_err(to_sqlx)?;
+        // One row at a time by key: a range UPDATE locks the `locked_at`
+        // index before the row, the heartbeat the row first, and MySQL
+        // deadlocks the two (1213). The cutoff is checked again per row.
+        let sql = format!(
+            "UPDATE rustango_jobs SET locked_at = NULL, locked_by = NULL \
+              WHERE id = {} AND locked_at IS NOT NULL AND locked_at < {}",
+            d.placeholder(1),
+            d.placeholder(2),
+        );
+        let mut reclaimed = 0;
+        for (id,) in ids {
+            let binds = vec![SqlValue::I64(id), SqlValue::DateTime(cutoff)];
+            reclaimed += crate::sql::raw_execute_pool(pool, &sql, binds)
+                .await
+                .map_err(to_sqlx)?;
+        }
+        Ok(reclaimed)
     }
 }
 
@@ -428,6 +446,8 @@ impl JobQueue for PgJobQueue {
         self.registry.lock().await.register_with::<T, F, Fut>(run);
     }
 
+    /// Inside an `atomic` block on this queue's pool, the insert joins that
+    /// block; do not hold its `TxGuard` across this call.
     async fn dispatch<T: Job>(&self, payload: &T) -> Result<(), JobError> {
         use crate::core::SqlValue;
         let value = serde_json::to_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
@@ -467,6 +487,20 @@ impl JobQueue for PgJobQueue {
             "INSERT INTO rustango_jobs (name, payload, max_attempts, run_at, created_at{cols}) \
              VALUES ({p1}, {p2}, {p3}, {p4}, {p5}{vals})"
         );
+        // Inside an `atomic` block on the queue's pool the row joins that
+        // transaction, and the worker is woken only once it commits.
+        if crate::sql::in_block(&self.pool) {
+            let notify = self.notify.clone();
+            return crate::sql::atomic(&self.pool, move |tx| {
+                Box::pin(async move {
+                    crate::sql::raw_execute_tx(&mut *tx.lock().await?, &sql, binds).await?;
+                    crate::sql::on_commit(move || notify.notify_one());
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(|e| JobError::Queue(e.to_string()));
+        }
         crate::sql::raw_execute_pool(&self.pool, &sql, binds)
             .await
             .map_err(|e| JobError::Queue(e.to_string()))?;
@@ -778,15 +812,13 @@ async fn run_one(
         give_back_attempt(pool, worker, job.id).await;
         return;
     };
-    let static_name = entry.name;
-
     // `attempt` already counts this run. Past the cap means earlier runs
     // died with their worker; running it again could crash the next one.
     // Rows queued before #2333 may still hold 0.
     let max_attempts = job.max_attempts.max(1);
     if job.attempt > max_attempts {
         let msg = "no attempts left: an earlier run stopped without finishing";
-        handle_dead_letter(pool, dead_letter, worker, &job, static_name, msg).await;
+        handle_dead_letter(pool, dead_letter, worker, &job, &entry, msg).await;
         return;
     }
 
@@ -808,7 +840,7 @@ async fn run_one(
         }
         Err(JobError::Retryable(msg)) => {
             if job.attempt >= max_attempts {
-                handle_dead_letter(pool, dead_letter, worker, &job, static_name, &msg).await;
+                handle_dead_letter(pool, dead_letter, worker, &job, &entry, &msg).await;
             } else {
                 let failed = u32::try_from(job.attempt - 1).unwrap_or(0);
                 let backoff = chrono::Duration::from_std(entry.backoff(failed)).unwrap_or_default();
@@ -818,7 +850,7 @@ async fn run_one(
         }
         Err(e @ (JobError::Fatal(_) | JobError::Queue(_))) => {
             let msg = e.to_string();
-            handle_dead_letter(pool, dead_letter, worker, &job, static_name, &msg).await;
+            handle_dead_letter(pool, dead_letter, worker, &job, &entry, &msg).await;
         }
     }
 }
@@ -989,7 +1021,7 @@ async fn handle_dead_letter(
     dead_letter: &Arc<Mutex<Option<DeadLetterFn>>>,
     worker: &Worker,
     job: &PickedJob,
-    static_name: &'static str,
+    entry: &Registered,
     error: &str,
 ) {
     // Confirm the lease first: the callback must not fire for a row
@@ -999,12 +1031,8 @@ async fn handle_dead_letter(
     }
     let cb = dead_letter.lock().await.clone();
     if let Some(cb) = cb {
-        let dl = JobDeadLetter {
-            name: static_name,
-            payload: job.payload.clone(),
-            attempts: u32::try_from(job.attempt).unwrap_or(0),
-            error: error.to_owned(),
-        };
+        let attempts = u32::try_from(job.attempt).unwrap_or(0);
+        let dl = entry.dead_letter(job.payload.clone(), attempts, error.to_owned());
         // The callback sees who enqueued the job, as the job did.
         job.context
             .clone()
@@ -1012,7 +1040,7 @@ async fn handle_dead_letter(
             .await;
     } else {
         tracing::error!(
-            job = static_name,
+            job = entry.name,
             attempts = job.attempt,
             error,
             "job queue dead-letter (no callback configured)"

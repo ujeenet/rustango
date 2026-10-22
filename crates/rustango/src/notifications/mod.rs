@@ -407,11 +407,9 @@ pub async fn should_send_throttled(
     key: &str,
     ttl: Duration,
 ) -> bool {
-    if cache.exists(key).await.unwrap_or(false) {
-        return false;
-    }
-    let _ = cache.set(key, "1", Some(ttl)).await;
-    true
+    // One set-if-absent, so two concurrent callers cannot both pass.
+    // A cache error still sends, as before.
+    cache.add(key, "1", Some(ttl)).await.unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -582,5 +580,50 @@ mod tests {
         let cache = InMemoryCache::new();
         assert!(should_send_throttled(&cache, "k", Duration::from_secs(60)).await);
         assert!(!should_send_throttled(&cache, "k", Duration::from_secs(60)).await);
+    }
+
+    /// Concurrent calls let exactly one send through.
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn concurrent_throttle_calls_send_once() {
+        use crate::cache::{Cache, CacheError, InMemoryCache};
+        const N: usize = 8;
+        /// Holds every `exists` until all callers have checked, so a
+        /// check-then-set races every time.
+        struct Gated(InMemoryCache, tokio::sync::Barrier);
+        #[async_trait::async_trait]
+        impl Cache for Gated {
+            async fn get(&self, k: &str) -> Result<Option<String>, CacheError> {
+                self.0.get(k).await
+            }
+            async fn set(&self, k: &str, v: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
+                self.0.set(k, v, ttl).await
+            }
+            async fn delete(&self, k: &str) -> Result<(), CacheError> {
+                self.0.delete(k).await
+            }
+            async fn exists(&self, k: &str) -> Result<bool, CacheError> {
+                let r = self.0.exists(k).await;
+                self.1.wait().await;
+                r
+            }
+            async fn clear(&self) -> Result<(), CacheError> {
+                self.0.clear().await
+            }
+            async fn add(
+                &self,
+                k: &str,
+                v: &str,
+                ttl: Option<Duration>,
+            ) -> Result<bool, CacheError> {
+                self.0.add(k, v, ttl).await
+            }
+        }
+        let cache = Gated(InMemoryCache::new(), tokio::sync::Barrier::new(N));
+        let sent = futures_util::future::join_all(
+            (0..N).map(|_| should_send_throttled(&cache, "k", Duration::from_secs(60))),
+        )
+        .await;
+        assert_eq!(sent.iter().filter(|s| **s).count(), 1, "{sent:?}");
     }
 }

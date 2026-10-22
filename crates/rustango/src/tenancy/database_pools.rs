@@ -104,6 +104,8 @@ pub struct DatabasePools<DB: Database> {
     /// LRU stamp source, as in [`super::pools`].
     lru_tick: std::sync::atomic::AtomicU64,
     cache: RwLock<HashMap<String, super::pools::CachedPool<DB>>>,
+    /// Single-flight for cache misses.
+    building: super::pools::SingleFlight<Arc<Pool<DB>>>,
     /// The backend type this registry serves. Validated against each
     /// `org.backend_kind` on `pool_for_org` so a mis-routed tenant
     /// fails loudly instead of silently building the wrong pool.
@@ -146,6 +148,7 @@ impl<DB: Database> DatabasePools<DB> {
             secrets: Arc::new(secrets),
             lru_tick: std::sync::atomic::AtomicU64::new(0),
             cache: RwLock::new(HashMap::new()),
+            building: super::pools::SingleFlight::default(),
             backend,
             url_template: None,
         }
@@ -246,16 +249,27 @@ impl<DB: Database> DatabasePools<DB> {
             )));
         }
 
-        // Fast path — cache hit.
+        // Fast path, then one build per slug and source, as in `TenantPools`.
         let source = super::pools::PoolSource::database(org);
-        {
-            let cache = self.cache.read().await;
-            if let Some(entry) = super::pools::CachedPool::lookup(&cache, &org.slug, &source) {
-                entry.touch(self.next_tick());
-                return Ok(DatabasePool {
-                    pool: entry.pool.clone(),
-                });
-            }
+        if let Some(pool) = self.cached(&org.slug, &source).await {
+            return Ok(DatabasePool { pool });
+        }
+        let build = self.build_for(org, source.clone());
+        let pool = if self.config.max_cached_database_pools == 0 {
+            build.await?
+        } else {
+            self.building.run(&org.slug, &source, build).await?
+        };
+        Ok(DatabasePool { pool })
+    }
+
+    async fn build_for(
+        &self,
+        org: &Org,
+        source: super::pools::PoolSource,
+    ) -> Result<Arc<sqlx::Pool<DB>>, TenancyError> {
+        if let Some(pool) = self.cached(&org.slug, &source).await {
+            return Ok(pool);
         }
 
         // Resolve the database_url — explicit `org.database_url`
@@ -294,9 +308,7 @@ impl<DB: Database> DatabasePools<DB> {
         // Re-check under write lock (race-loser case).
         if let Some(existing) = super::pools::CachedPool::lookup(&cache, &org.slug, &source) {
             existing.touch(self.next_tick());
-            return Ok(DatabasePool {
-                pool: existing.pool.clone(),
-            });
+            return Ok(existing.pool.clone());
         }
         cache.remove(&org.slug);
         // Evict the most idle tenant rather than refuse. Same policy
@@ -312,13 +324,24 @@ impl<DB: Database> DatabasePools<DB> {
             );
         }
         if self.config.max_cached_database_pools == 0 {
-            return Ok(DatabasePool { pool: pool_arc });
+            return Ok(pool_arc);
         }
         cache.insert(
             org.slug.clone(),
             super::pools::CachedPool::new(pool_arc.clone(), source, self.next_tick()),
         );
-        Ok(DatabasePool { pool: pool_arc })
+        Ok(pool_arc)
+    }
+
+    async fn cached(
+        &self,
+        slug: &str,
+        source: &super::pools::PoolSource,
+    ) -> Option<Arc<sqlx::Pool<DB>>> {
+        let cache = self.cache.read().await;
+        let entry = super::pools::CachedPool::lookup(&cache, slug, source)?;
+        entry.touch(self.next_tick());
+        Some(entry.pool.clone())
     }
 
     /// Acquire a connection scoped to `org`. Thin wrapper around

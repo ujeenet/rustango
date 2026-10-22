@@ -152,7 +152,7 @@ pub fn derive_form(input: TokenStream) -> TokenStream {
 /// - `#[serializer(method = "fn_name")]` — computed field: calls `Self::fn_name(&model)` for the field value; excluded from `writable_fields()`
 /// - `#[serializer(nested)]` / `nested(strict)` — auto-resolves nested serializer from a loaded `ForeignKey`; excluded from `writable_fields()`
 /// - `#[serializer(many = ChildSerializer)]` — collection of nested serializers; populated via macro-emitted `set_<field>(&[Child::Model])`; excluded from `writable_fields()`
-/// - `#[serializer(slug = "name")]` — render a relation as one of its fields: clones `model.<source>.value()?.name`; excluded from `writable_fields()` (v0.44)
+/// - `#[serializer(slug = "name")]` — render a relation (`ForeignKey<T>` or `Option<ForeignKey<T>>`) as one of its fields: clones the loaded parent's `name`; excluded from `writable_fields()` (v0.44)
 /// - `#[serializer(validate = "fn_name")]` — per-field validator surfaced by `Self::validate(&self)`
 /// - `#[serializer(max_length = N)]` / `min_length` / `min` / `max` — declarative bounds checked on
 ///   write; auto-inherit from the model's `FieldSchema` (`max_length`/`min`/`max`/`choices`) when
@@ -196,11 +196,15 @@ pub fn derive_serializer(input: TokenStream) -> TokenStream {
 /// up/down (same), Rwf's are raw SQL (no chain at all).
 ///
 /// Each migration is included via `include_str!` so cargo's rebuild
-/// detection picks up file *content* changes. **Caveat:** cargo
-/// doesn't watch directory listings, so adding or removing a
-/// migration file inside the dir won't auto-trigger a rebuild — run
-/// `cargo clean` (or just bump any other source file) when you add
-/// new migrations during embedded development.
+/// detection picks up file *content* changes. Cargo does not watch
+/// directory listings, so a new migration file is missed until the
+/// crate rebuilds. Add a `build.rs` that tracks the directory:
+///
+/// ```ignore
+/// fn main() { println!("cargo:rerun-if-changed=migrations"); }
+/// ```
+///
+/// A missing directory embeds nothing and emits a deprecation warning.
 #[proc_macro]
 pub fn embed_migrations(input: TokenStream) -> TokenStream {
     expand_embed_migrations(input.into())
@@ -681,8 +685,26 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
         })
         .collect();
 
+    // A wrong path used to embed nothing silently; a deprecation use is
+    // the only stable way for a proc macro to warn without breaking builds.
+    let missing_warning = if abs.is_dir() {
+        quote! {}
+    } else {
+        let note = format!(
+            "embed_migrations!: directory {} does not exist; no migrations are embedded",
+            abs.display()
+        );
+        quote! {
+            #[deprecated(note = #note)]
+            const __RUSTANGO_MIGRATIONS_DIR_MISSING: () = ();
+            #[allow(clippy::let_unit_value)]
+            let _ = __RUSTANGO_MIGRATIONS_DIR_MISSING;
+        }
+    };
+
     Ok(quote! {
         {
+            #missing_warning
             const __RUSTANGO_EMBEDDED: &[(&'static str, &'static str)] = &[#(#pairs),*];
             __RUSTANGO_EMBEDDED
         }
@@ -1688,10 +1710,27 @@ fn generic_m2m_accessor_tokens(
             }
         }
     });
+    // Lets an owner delete find and clear its junction rows.
+    let entries = relations.iter().map(|rel| {
+        let through = rel.through.as_str();
+        let pk_col = rel.pk_column.as_str();
+        let ct_col = rel.ct_column.as_str();
+        quote! {
+            #root::core::inventory::submit! {
+                #root::core::GenericM2MEntry::new(
+                    <#struct_name as #root::core::Model>::SCHEMA,
+                    #through,
+                    #pk_col,
+                    #ct_col,
+                )
+            }
+        }
+    });
     quote! {
         impl #struct_name {
             #( #methods )*
         }
+        #( #entries )*
     }
 }
 
@@ -3088,30 +3127,65 @@ fn inherent_impl_tokens(
                 _E: #root::sql::sqlx::Executor<'_c, Database = #root::sql::sqlx::Postgres>,
         }
     };
-    // For audited models the `_on` methods take `&mut PgConnection`, so
-    // the &PgPool convenience wrappers (`save`, `insert`, `delete`)
-    // must acquire a connection first. Non-audited models keep the
-    // direct delegation since `&PgPool` IS an Executor.
+    // Audited `_on` methods take `&mut PgConnection`; `&PgPool` is an Executor for the rest.
+    // One transaction: the before-image's FOR UPDATE must hold through
+    // the UPDATE and its audit row.
     let pool_to_save_on = if audited_fields.is_some() {
+        // Any failure, COMMIT included, rolls the INSERT back: put the pk and
+        // stamps back too, or a retry takes the UPDATE path and writes nothing.
+        let restored: Vec<&syn::Ident> = primary_key
+            .map(|(pk, _)| pk)
+            .into_iter()
+            .chain(&fields.auto_now_idents)
+            .collect();
+        let prev: Vec<syn::Ident> = (0..restored.len())
+            .map(|i| quote::format_ident!("__rustango_save_prev_{}", i))
+            .collect();
         quote! {
-            let mut _conn = pool.acquire().await?;
-            self.save_on(&mut *_conn).await
+            #( let #prev = ::core::clone::Clone::clone(&self.#restored); )*
+            let _saved: ::core::result::Result<u64, #root::sql::ExecError> = async {
+                let mut _tx = pool.begin().await?;
+                let _affected = self.save_on(&mut *_tx).await?;
+                _tx.commit().await?;
+                ::core::result::Result::Ok(_affected)
+            }
+            .await;
+            if _saved.is_err() {
+                #( self.#restored = #prev; )*
+            }
+            _saved
         }
     } else {
         quote!(self.save_on(pool).await)
     };
+    // One transaction so the write and its audit row commit together.
     let pool_to_insert_on = if audited_fields.is_some() {
-        quote! {
-            let mut _conn = pool.acquire().await?;
-            self.insert_on(&mut *_conn).await
-        }
+        // A failed COMMIT leaves the RETURNING values on `self`; put them back.
+        let assigned: Vec<syn::Ident> = fields
+            .auto_field_idents
+            .iter()
+            .map(|(ident, _)| ident.clone())
+            .collect();
+        restore_auto_now_unless(
+            &assigned,
+            &quote!(::core::result::Result<(), #root::sql::ExecError>),
+            &quote!(_saved.is_ok()),
+            &quote! {
+                let mut _tx = pool.begin().await?;
+                self.insert_on(&mut *_tx).await?;
+                _tx.commit().await?;
+                ::core::result::Result::Ok(())
+            },
+        )
     } else {
         quote!(self.insert_on(pool).await)
     };
     let pool_to_delete_on = if audited_fields.is_some() {
         quote! {
-            let mut _conn = pool.acquire().await?;
-            self.delete_on(&mut *_conn).await
+            let mut _tx = pool.begin().await?;
+            let _affected = self.delete_on(&mut *_tx).await?;
+            _tx.commit().await?;
+            ::core::result::Result::Ok(_affected)
         }
     } else {
         quote!(self.delete_on(pool).await)
@@ -4129,13 +4203,17 @@ fn inherent_impl_tokens(
                 _r.__rustango_audit_entry(#root::audit::AuditOp::Update)
             })
             .await),
-            quote!(#root::audit::truncate_with_audit(pool, _table, &_sql).await),
+            quote! {
+                let _table = <Self as #root::core::Model>::SCHEMA.table;
+                let _sql = #root::sql::truncate_sql(pool.dialect(), _table);
+                #root::audit::truncate_with_audit(pool, _table, &_sql).await
+            },
         )
     } else {
         (
             quote!(#root::sql::delete_pool(pool, &_query).await),
             quote!(#root::sql::update_pool(pool, &_query).await),
-            quote!(#root::sql::raw_execute_pool(pool, &_sql, ::std::vec::Vec::new()).await),
+            quote!(#root::sql::truncate(pool, <Self as #root::core::Model>::SCHEMA).await),
         )
     };
 
@@ -4933,23 +5011,15 @@ fn inherent_impl_tokens(
             /// `pre_delete` / `post_delete` signals (no per-row hooks
             /// fire on a TRUNCATE / bulk DELETE FROM). An audited model
             /// gets one bulk audit entry, not one per row. Global scopes
-            /// do not apply: every row goes.
+            /// do not apply: every row goes, generic M2M links too.
             ///
             /// # Errors
-            /// As [`raw_execute_pool`].
+            /// As [`truncate`].
             ///
-            /// [`raw_execute_pool`]: rustango::sql::raw_execute_pool
+            /// [`truncate`]: rustango::sql::truncate
             pub async fn truncate(
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                let _table = <Self as #root::core::Model>::SCHEMA.table;
-                let _dialect = pool.dialect();
-                let _quoted = _dialect.quote_ident(_table);
-                let _sql = if _dialect.name() == "postgres" {
-                    ::std::format!("TRUNCATE TABLE {} RESTART IDENTITY CASCADE", _quoted)
-                } else {
-                    ::std::format!("DELETE FROM {}", _quoted)
-                };
                 #truncate_run
             }
 
@@ -12255,6 +12325,20 @@ fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .ok_or_else(|| syn::Error::new(field.span(), "tuple structs are not supported"))?;
         let attrs = parse_form_field_attrs(field)?;
         let (kind, nullable) = detect_form_field(&field.ty, field.span())?;
+        let is_string = matches!(kind, FormFieldKind::String);
+        let is_number = !is_string && !matches!(kind, FormFieldKind::Bool);
+        if !is_string && (attrs.min_length.is_some() || attrs.max_length.is_some()) {
+            return Err(syn::Error::new(
+                field.span(),
+                "`min_length` / `max_length` need a String field",
+            ));
+        }
+        if !is_number && (attrs.min.is_some() || attrs.max.is_some()) {
+            return Err(syn::Error::new(
+                field.span(),
+                "`min` / `max` need a numeric field",
+            ));
+        }
 
         let name_lit = ident_name(ident);
         let parse_block = render_form_field_parse(ident, &name_lit, kind, nullable, &attrs);
@@ -12442,6 +12526,19 @@ fn render_form_field_parse(
     };
 
     let parsed_value = match kind {
+        // `Option<bool>`: absent or blank is `None`, as for the other types.
+        FormFieldKind::Bool if nullable => quote! {
+            let __v: ::core::option::Option<bool> = match __raw {
+                ::core::option::Option::None => ::core::option::Option::None,
+                ::core::option::Option::Some(__s) if __s.is_empty() => {
+                    ::core::option::Option::None
+                }
+                ::core::option::Option::Some(__s) => ::core::option::Option::Some(!matches!(
+                    __s.to_ascii_lowercase().as_str(),
+                    "false" | "0" | "off" | "no"
+                )),
+            };
+        },
         FormFieldKind::Bool => quote! {
             let __v: bool = match __raw {
                 ::core::option::Option::None => false,
@@ -13196,7 +13293,6 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // Generate from_model body: struct literal with each field assigned.
     let from_model_fields = fields_info.iter().map(|fi| {
         let ident = &fi.ident;
-        let ty = &fi.ty;
         if let Some(_inner) = &fi.attrs.many {
             // Many — collection field. Initialize empty; caller
             // populates via the macro-emitted set_<field> helper
@@ -13215,7 +13311,8 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             // `ForeignKey<T>`; the slug field on the parent is named
             // by the attribute value. When the FK is unloaded the
             // field falls back to `Default::default()` — same
-            // graceful-degrade contract as `nested`.
+            // graceful-degrade contract as `nested`; a NULL
+            // `Option<ForeignKey>` renders `None`.
             let src_name = fi
                 .attrs
                 .source
@@ -13225,18 +13322,17 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let src_ident = ident_from_name(&src_name, ident.span());
             let slug_ident = syn::Ident::new(slug_field, ident.span());
             quote! {
-                #ident: match model.#src_ident.value() {
-                    ::core::option::Option::Some(__loaded) =>
-                        ::core::clone::Clone::clone(&__loaded.#slug_ident),
-                    ::core::option::Option::None =>
-                        ::core::default::Default::default(),
-                }
+                #ident: #root::serializer::LoadedRelation::render(
+                    &model.#src_ident,
+                    |__loaded| ::core::clone::Clone::clone(&__loaded.#slug_ident),
+                    ::core::default::Default::default,
+                )
             }
         } else if fi.attrs.nested {
             // Nested serializer. Source defaults to the field name on
             // this struct; override via `source = "..."`. The source
-            // field on the model is expected to be a `ForeignKey<T>`
-            // whose `.value()` returns `Option<&T>` after lazy-load.
+            // field on the model is a `ForeignKey<T>` or
+            // `Option<ForeignKey<T>>`, read through `LoadedRelation`.
             //
             // Behavior matrix (tweakable per-field):
             //   * FK loaded   → nested object materializes via
@@ -13244,31 +13340,29 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             //   * FK unloaded → fall back to ChildSerializer::default()
             //                   (so prod doesn't crash on a missing
             //                   prefetch — just renders a blank nested
-            //                   object). Add `#[serializer(nested,
-            //                   strict)]` to keep the v0.18.1
+            //                   object). Add `#[serializer(nested(
+            //                   strict))]` to keep the v0.18.1
             //                   panic-on-unloaded behavior for tests
             //                   that want hard guardrails.
+            //   * NULL `Option<ForeignKey>` → `None` in an `Option<Child>`
+            //                   field (JSON null), strict or not.
             let src_name = fi.attrs.source.as_deref().unwrap_or(&ident_name(&fi.ident)).to_owned();
             let src_ident = ident_from_name(&src_name, ident.span());
-            if fi.attrs.nested_strict {
+            let unloaded = if fi.attrs.nested_strict {
                 let panic_msg = format!(
                     "nested(strict) serializer for `{ident}` requires `model.{src_name}` to be loaded — \
                      call .get(&pool).await? or .select_related(\"{src_name}\") on the model first",
                 );
-                quote! {
-                    #ident: <#ty as #root::serializer::ModelSerializer>::from_model(
-                        model.#src_ident.value().expect(#panic_msg),
-                    )
-                }
+                quote! { || ::core::panic!("{}", #panic_msg) }
             } else {
-                quote! {
-                    #ident: match model.#src_ident.value() {
-                        ::core::option::Option::Some(__loaded) =>
-                            <#ty as #root::serializer::ModelSerializer>::from_model(__loaded),
-                        ::core::option::Option::None =>
-                            ::core::default::Default::default(),
-                    }
-                }
+                quote! { ::core::default::Default::default }
+            };
+            quote! {
+                #ident: #root::serializer::LoadedRelation::render(
+                    &model.#src_ident,
+                    |__loaded| #root::serializer::ModelSerializer::from_model(__loaded),
+                    #unloaded,
+                )
             }
         } else if fi.attrs.write_only || fi.attrs.skip {
             // Not read from model — use default
@@ -13325,7 +13419,15 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let attr_min_len = opt_usize(fi.attrs.min_length);
             let attr_min = opt_i64(fi.attrs.min);
             let attr_max = opt_i64(fi.attrs.max);
+            // A bound the field's type cannot take is a compile error, not a no-op.
+            let ty = &fi.ty;
+            let len_check = (fi.attrs.max_length.is_some() || fi.attrs.min_length.is_some())
+                .then(|| quote! { #root::forms::validators::assert_length_bounded::<#ty>(); });
+            let num_check = (fi.attrs.min.is_some() || fi.attrs.max.is_some())
+                .then(|| quote! { #root::forms::validators::assert_number_bounded::<#ty>(); });
             quote! {
+                #len_check
+                #num_check
                 if __sent(#fname) {
                     let __sf = <#model_path as #root::core::Model>::SCHEMA.field(#mname);
                     let __max_length: ::core::option::Option<usize> = #attr_max_len
@@ -13813,6 +13915,30 @@ mod main_attr_tests {
         // match must not fire on the substring `logging`.
         assert!(parse_logging(&"logging = true".parse().unwrap()));
         assert!(!parse_logging(&"logging=false".parse().unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod embed_migrations_tests {
+    use super::*;
+
+    fn expand(path: &str) -> String {
+        expand_embed_migrations(quote! { #path })
+            .expect("expansion failed")
+            .to_string()
+    }
+
+    #[test]
+    fn missing_dir_warns() {
+        let out = expand("./no_such_migrations_dir");
+        assert!(out.contains("deprecated"), "missing dir must warn:\n{out}");
+        assert!(out.contains("no_such_migrations_dir"), "{out}");
+    }
+
+    #[test]
+    fn existing_dir_does_not_warn() {
+        let out = expand("./src");
+        assert!(!out.contains("deprecated"), "{out}");
     }
 }
 

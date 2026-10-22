@@ -4,6 +4,198 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.60.10] — 2026-10-22
+
+**Breaking:** `ModelFormFor::from_json` refuses unknown keys; an oversized CSRF form gets 413, not 403; undecodable job payloads are retried; the first `makemigrations` on PostgreSQL rewrites each table with a sized `vector` or `geometry` column; MySQL migrations with a key over 3072 bytes or on unbounded text, binary or JSON fail at render time; `InMemoryJobQueue::dispatch` inside `atomic` waits for the commit. See UPGRADING.
+
+### Fixed — the fullstack scaffold mounts its admin at `[admin] url_prefix`
+
+`main.rs` loads the settings once, passes them to the server (via the now-public `Cli::with_loaded_settings`, so a missing `config/` still only warns) and to `admin::Builder::from_settings`, and nests the admin at the new `admin::Builder::settings_prefix` (default `/admin`). `url_prefix = "/"` stops boot with an error: `Cli::nest_with` refuses a root path, which axum would panic on.
+
+### Fixed — SQLite migrations see columns another pooled connection added
+
+A migration on a connection that sat idle while another one ran DDL could fail a `RenameColumn` with `no such column`; each migration transaction now reloads the schema first.
+
+### Fixed — raw SQL helpers refuse Postgres-only binds instead of panicking
+
+`raw_execute_pool`/`_tx` and `raw_query_pool`/`_tx` return `SqlError::ValueNotSupportedInDialect` for an array, range, hstore, vector or geometry bind on MySQL or SQLite, and for a `SqlValue::List` bind on every backend. An ORM filter that leaves a `List` as one bind (`=` instead of `IN`) gets the same error.
+
+### Fixed — deleting a model removes its generic M2M links
+
+Every delete path (instance, `delete_where`, `QuerySet::delete_on`, transaction, audited, admin, `Model::truncate`) also deletes the owner's `generic_m2m` junction rows, in the same transaction; PostgreSQL does it in one statement.
+
+### Fixed — class-based views run the template context processors
+
+Every template view now merges the registered processors and the request's `ExtraContext` before it renders; view keys still win. A layout reading a processor key used to fail with a 500.
+
+### Fixed — DB translation overrides follow the fallback chain
+
+Lookups walk exact → base → fallback chain → default once, and at each locale an override beats the file entry, so an edited default-locale string reaches locales missing the key. `translate_plural` honours overrides, and catalog files may hold plural objects.
+
+### Fixed — a media upload that names no owner belongs to the caller
+
+`POST /uploads/begin` without `uploaded_by_id` now stores the signed-in user as owner; only a superuser can still create an ownerless upload.
+
+### Fixed — media cannot be filed under a missing or deleted collection
+
+`move_to_collection`, `save_bytes` and `begin_upload` refuse such a collection (400 from the router) and lock it until they commit, so a concurrent `delete_collection` cannot leave media under a dead folder.
+
+### Fixed — derives accept nullable relations and `Option<bool>`
+
+`#[serializer(nested)]` and `#[serializer(slug)]` compile on an `Option<ForeignKey<T>>` source into an `Option` field, so a NULL relation renders `null` (also under `strict`, which now panics only on an unloaded one), and `#[derive(Form)]` parses `Option<bool>`, blank as `None`.
+
+### Fixed — `format_number` / `format_currency` follow CLDR
+
+pl, sv, fi and Norwegian group with a no-break space, fr with a narrow one; German puts `€` last and Dutch first (`€ 1.234,56`); a trailing symbol is joined by a no-break space so amounts never wrap.
+
+### Fixed — purging a schema tenant no longer drops other tenants' objects
+
+`DROP SCHEMA … CASCADE` also dropped what other schemas built on it: views, columns of its types or extensions, FKs, defaults, triggers. Purge now refuses and names them.
+
+### Fixed — audited `save` locks the row it diffs
+
+The before-image read is `FOR UPDATE` on PostgreSQL and MySQL, so two concurrent saves no longer diff against the same stale row; SQLite takes its write lock at `BEGIN` instead of failing with `database is locked`. The Postgres `save(&PgPool)` now runs in one transaction, so the lock holds through the UPDATE and audit row.
+
+### Fixed — Postgres-only values error on MySQL and SQLite instead of panicking
+
+Saving or filtering with an array, range, hstore, vector or geometry value on MySQL or SQLite now returns `SqlError::ValueNotSupportedInDialect`; the bind step used to panic.
+
+### Fixed — file migrations keep pgvector dimensions and PostGIS SRID
+
+Snapshots record `vector(N)` / `geometry(SRID)`, so migrations create `vector(1536)` / `geometry(Point,4326)` like live DDL, a dimension or SRID change is diffed, and MySQL gets `TEXT` instead of the `VECTOR` it rejects.
+
+### Added — `TenantScope` extractor
+
+`extractors::TenantScope` gives the request's org and tenant pool with no held connection, on every backend. Use it for handlers that only call `t.pool()`.
+
+### Fixed — `[server] max_body_bytes` covers the tenant admin and operator console
+
+Under tenancy they kept axum's 2 MiB. `server::Builder::body_limit` sets it; `Cli` passes the setting.
+
+### Fixed — `InMemoryJobQueue::dispatch` inside `atomic` waits for the commit
+
+As on the DB queue, the job is queued on commit and dropped on rollback.
+
+### Security — a dead-lettered older webhook row no longer passes its signing secret
+
+The dead-letter callback gets the payload in the current shape of the job type.
+
+### Fixed — the stuck-job sweep no longer deadlocks with heartbeats on MySQL
+
+`reclaim_stuck_jobs_pool` unlocks rows one at a time by key instead of one range `UPDATE`.
+
+### Fixed — SQLite `migrate --dry-run` shows the filled-table ADD COLUMN
+
+After an ADD COLUMN with a `now()` or UUID DEFAULT, it shows the fixed-default or backfill form `migrate` runs on a table with rows.
+
+### Fixed — `migrate --dry-run` prints the converge SQL with its guards
+
+The converge step shows `IF NOT EXISTS` and the Postgres `DO` block, as it runs.
+
+### Fixed — MySQL key-size check covers model tables
+
+A primary key, unique column or index over MySQL's 3072-byte key limit is refused when the migration renders, not with `ERROR 1071` mid-run. Widening a column re-checks the indexes it is in, and a key on unbounded text, binary or JSON is refused (`ERROR 1170`).
+
+### Fixed — SQLite admin finds a UUID key a column default wrote as TEXT
+
+Detail, edit, delete, bulk actions, inline rows and FK display names bind the key as the row stores it, not always as a BLOB.
+
+### Fixed — audited `insert(&PgPool)` and `delete(&PgPool)` are atomic
+
+Each runs in one transaction, so a failed audit row rolls the write back; a failed `insert` also clears the pk it read back.
+
+### Security — admin create and edit stay inside the row scope
+
+The written row, parent and inline children alike, is re-read in the write transaction through the queryset hooks (and the `add` hook after a create); a form that would put a row outside the scope is refused with 403 and the whole edit rolled back.
+
+### Fixed — `Accept-Language` with `q=NaN` can no longer panic `LocaleMiddleware`
+
+A non-finite q is ignored like an unparsable one, and qualities sort as integers.
+
+### Fixed — `cache_page` keys on the full path under `Router::nest`
+
+Two nests of one cached router no longer serve each other's pages.
+
+### Fixed — health probes under load and on the tenancy apex
+
+`cache_probe` uses a fresh key per run, so overlapping `/ready` calls on a shared cache no longer fail each other. `server::Builder::with_health` also serves `/health` and `/ready` on the apex host.
+
+### Fixed — `RedisCache` times out on a stalled server
+
+Connects are bounded at 5 s per attempt (three attempts, ~1 s apart) and commands at 2 s by default, instead of hanging on TCP retries and minute-long reconnect backoff. `RedisCache::with_timeouts` takes a `RedisTimeouts` to change them. `clear()` sends `FLUSHDB ASYNC` so a large flush does not hit the command timeout.
+
+### Fixed — scaffolded projects honor settings and stay off the network in dev
+
+The fullstack admin is built with `admin::Builder::from_settings`, so `[admin]` and `[brand]` apply; a config that fails to load stops boot rather than dropping `[admin]` restrictions. `.env.example` no longer sets `RUSTANGO_BIND=0.0.0.0:8080`, which beat the dev tier's `127.0.0.1`; compose sets it for the container and publishes 8080 on loopback. `--features csrf` adds `.with_csrf()`. Every `main.rs` shows where `with_trusted_proxies` goes, and the README runs `makemigrations` before `migrate`.
+
+### Fixed — `make:*` generators write code that compiles
+
+`make:viewset` / `make:serializer` import `--model` from where it is declared (`src/blog/models.rs` after `startapp blog`), or take a path like `blog::models::Post`; the viewset's mount hint uses `Cli::nest_with`, which supplies the pool. `make:worker` loads `.env`. A verb whose output needs a rustango feature the project lacks (`make:test` / `make:viewset` on `--template api`) refuses and names the feature; `make:viewset --tenant` needs only `tenancy`. `getting_started_blog`'s prod tier no longer has pool keys at the TOML root.
+
+### Fixed — `--template api` image passes its healthcheck
+
+The api `main.rs` now calls `.with_health()`, so the Dockerfile's `/health` probe gets 200 instead of 404 and the container turns healthy.
+
+### Fixed — CSRF reads a form body up to the body limit
+
+The CSRF layer buffers a form-encoded body only up to the limit the handler's extractors use, not a fixed 2 MiB: a raised `BodyLimitLayer` (or `[server] max_body_bytes`) lets a large form through, and a stricter outer `DefaultBodyLimit` or `BodyLimitLayer` stops the read early. A form over the limit is a 413, not a 403. Nested `BodyLimitLayer`s keep the smaller cap.
+
+### Fixed — `Cli::with_csrf` follows `[security] secure_cookies`
+
+Its cookie was always `Secure`, so the browser never sent it back over plain-HTTP dev and every form POST got 403. It now uses the session cookie policy, like `csrf::layer()`.
+
+### Fixed — `test_settings::with_overridden` reaches the framework
+
+Inside the scope, `Settings::load` and `Settings::load_from_env` return the overlay, so framework code that loads settings itself sees it. Before, only `test_settings::current()` did, and nothing called that.
+
+### Fixed — unknown settings keys warn
+
+A key nothing reads (a typo, a key in the wrong section, a mistyped `RUSTANGO__…` env var) now prints a `config: unknown key` line on stderr at load. Set `RUSTANGO_CONFIG_STRICT=1` to make it a load error.
+
+### Fixed — `embed_migrations!` warns on a missing directory
+
+A wrong path used to embed nothing silently; it now emits a deprecation warning naming the path. The docs and examples add a `build.rs` with `rerun-if-changed=migrations`, so a new migration file triggers a rebuild.
+
+### Security — `ListView` bulk delete withholds driver errors and caps the selection
+
+A custom action whose selection check or connection fails logs the database error and answers a generic body, so it no longer shows table and constraint names. More than 1000 selected rows is a 400 before any SQL.
+
+### Fixed — `m2m_changed` skips an unchanged `set` and an empty `clear`
+
+Like a duplicate `add`, they changed no row and no longer send the signal, on plain and generic M2M managers.
+
+### Fixed — serializer `min` / `max` bound float fields
+
+They used to check integers only, so `#[serializer(min = 0, max = 100)] score: f64` took 150. A length bound on a non-string field, or a `min` / `max` on a non-numeric one, in `#[serializer]` or `#[form]`, is now a compile error instead of a silent no-op.
+
+### Fixed — forms honour `#[rustango(blank)]`
+
+An empty value on a blank NOT NULL String field is saved as `""` in the admin, `ModelForm`, `ModelFormFor` and viewsets, instead of being refused as missing.
+
+### Fixed — `ModelFormFor` inserts v7 keys, timestamps and generated columns
+
+`parse` skips generated columns, and `into_insert_query` fills `auto_now*` and `default_uuid_v7` values. `from_json` refuses a key that names no field, as documented.
+
+### Fixed — a cold tenant pool is built once
+
+Concurrent requests to a tenant with no cached pool now wait for one secret lookup and connect instead of each making their own, in database mode, schema mode and `DatabasePools`. If that build fails, every waiting request gets its error at once. With the pool cache cap at 0, builds still run side by side.
+
+### Fixed — `dispatch` inside `atomic` joins the block
+
+On the queue's own pool the job row is written in the block's transaction and the worker is woken after the commit. A rolled-back block no longer leaves its job queued, and SQLite no longer waits on the block's write lock.
+
+### Fixed — undecodable job payloads are retried
+
+A payload the registered job type cannot decode is a retryable failure, not an immediate dead letter, so rows from another release survive a rolling deploy. `WebhookEvent` also decodes rows queued before its body was signed at dispatch.
+
+### Fixed — `should_send_throttled` lets one concurrent caller through
+
+It uses the cache's set-if-absent, so two calls at once no longer both send.
+
+### Fixed — operator console audits tenant create and migrate runs; hosts errors withhold driver text
+
+Creating a tenant and starting a migrate run (one tenant or all) write an audit row; a failed create writes a `create_failed` row. A registry error on the hosts page no longer puts driver text into the redirect URL.
+
 ## [0.60.9] — 2026-10-21
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options; `loaddata` leaves omitted keys to the column default; MySQL JSON key checks are literal; idle connections close after 75 s; `CsrfConfig` has a new field; refused deletes are 409 and refused CBV writes 422. See UPGRADING.

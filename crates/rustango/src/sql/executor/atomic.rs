@@ -352,6 +352,15 @@ pub(crate) fn in_block(pool: &Pool) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the running task is inside an [`atomic`] block whose commit
+/// is still ahead, on any pool.
+#[cfg(feature = "jobs")]
+pub(crate) fn in_any_block() -> bool {
+    BLOCK
+        .try_with(|b| !b.committed.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
 /// Closure-scoped transaction with after-commit hooks.
 /// Auto-commits when `f` returns `Ok`,
 /// auto-rolls-back when `f` returns `Err`. Callbacks queued via

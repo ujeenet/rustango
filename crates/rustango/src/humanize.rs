@@ -140,16 +140,22 @@ fn locale_number_fmt(locale: &str) -> NumberFmt {
             group: ',',
         },
         // Comma decimal, dot groups.
-        "de" | "es" | "it" | "nl" | "pt" | "el" | "pl" | "tr" | "da" | "fi" | "sv" | "no"
-        | "nb" | "nn" => NumberFmt {
+        "de" | "es" | "it" | "nl" | "pt" | "el" | "tr" | "da" => NumberFmt {
             decimal: ',',
             group: '.',
         },
-        // Comma decimal, space groups.
-        "fr" | "ru" | "cs" | "sk" | "bg" | "uk" | "hu" => NumberFmt {
+        // Comma decimal, CLDR's narrow no-break space groups.
+        "fr" => NumberFmt {
             decimal: ',',
-            group: ' ',
+            group: '\u{202f}',
         },
+        // Comma decimal, no-break space groups, so a number never wraps.
+        "ru" | "cs" | "sk" | "bg" | "uk" | "hu" | "pl" | "fi" | "sv" | "no" | "nb" | "nn" => {
+            NumberFmt {
+                decimal: ',',
+                group: '\u{a0}',
+            }
+        }
         _ => {
             tracing::warn!(
                 target: "rustango::humanize",
@@ -194,9 +200,10 @@ fn apply_number_fmt(integer_part: &str, frac_part: &str, fmt: NumberFmt) -> Stri
 ///
 /// Separators by language:
 /// * en, ja, zh, ko, th: `.` decimal, `,` groups
-/// * de, es, it, nl, pt, pl, sv, nb, nn, da, fi, el, tr: `,` decimal,
-///   `.` groups
-/// * fr, ru, cs, sk, bg, uk, hu: `,` decimal, space groups
+/// * de, es, it, nl, pt, da, el, tr: `,` decimal, `.` groups
+/// * pl, sv, fi, no, nb, nn, ru, cs, sk, bg, uk, hu: `,` decimal,
+///   no-break space (U+00A0) groups
+/// * fr: `,` decimal, narrow no-break space (U+202F) groups
 ///
 /// As a Tera filter it takes the same `locale` and `decimals`
 /// arguments, and passes non-numeric input through unchanged:
@@ -210,7 +217,7 @@ fn apply_number_fmt(integer_part: &str, frac_part: &str, fmt: NumberFmt) -> Stri
 /// use rustango::humanize::format_number;
 /// assert_eq!(format_number(1234567.89, "en", None),    "1,234,567.89");
 /// assert_eq!(format_number(1234567.89, "de", None),    "1.234.567,89");
-/// assert_eq!(format_number(1234567.89, "fr", None),    "1 234 567,89");
+/// assert_eq!(format_number(1234567.89, "fr", None),    "1\u{202f}234\u{202f}567,89");
 /// assert_eq!(format_number(1234.5,     "en", Some(2)), "1,234.50");
 /// assert_eq!(format_number(0.0,        "en", Some(0)), "0");
 /// assert_eq!(format_number(-1234.5,    "en", None),    "-1,234.5");
@@ -364,8 +371,10 @@ fn currency_fmt(code: &str) -> CurrencyFmt {
 /// is used as its own symbol and logs a warning. `locale` only sets
 /// the separators.
 ///
-/// The euro is the one symbol whose place depends on the locale: fr,
-/// it, es, pt and nl put `€` after the amount, everyone else before.
+/// The euro is the one symbol whose place depends on the locale, per
+/// CLDR: most European locales put `€` after the amount, Dutch writes
+/// `€ 1.234,56`, the rest put it first. A trailing or Dutch symbol is
+/// joined by a no-break space.
 ///
 /// As a Tera filter it takes the same `currency` (default `"USD"`)
 /// and `locale` (default `"en"`) arguments, and passes non-numeric
@@ -374,8 +383,8 @@ fn currency_fmt(code: &str) -> CurrencyFmt {
 /// ```
 /// use rustango::humanize::format_currency;
 /// assert_eq!(format_currency(1234.56, "USD", "en"), "$1,234.56");
-/// assert_eq!(format_currency(1234.56, "EUR", "de"), "€1.234,56");
-/// assert_eq!(format_currency(1234.56, "EUR", "fr"), "1 234,56 €");
+/// assert_eq!(format_currency(1234.56, "EUR", "de"), "1.234,56\u{a0}€");
+/// assert_eq!(format_currency(1234.56, "EUR", "nl"), "€\u{a0}1.234,56");
 /// assert_eq!(format_currency(1234.0,  "JPY", "ja"), "¥1,234");   // 0 decimals
 /// assert_eq!(format_currency(-50.0,   "USD", "en"), "-$50.00");  // sign before symbol
 /// ```
@@ -393,17 +402,36 @@ pub fn format_currency(amount: f64, currency: &str, locale: &str) -> String {
 
     let base = locale.to_ascii_lowercase();
     let base = base.split('-').next().unwrap_or(&base);
-    let euro_suffix_locale = matches!(base, "fr" | "it" | "es" | "pt" | "nl");
-    let prefix_after_override = if currency.eq_ignore_ascii_case("EUR") && euro_suffix_locale {
-        false
+    let is_euro = currency.eq_ignore_ascii_case("EUR");
+    // CLDR places the euro after the amount in these, and `€ 1,00` in Dutch.
+    let euro_suffix_locale = matches!(
+        base,
+        "fr" | "it"
+            | "es"
+            | "pt"
+            | "de"
+            | "da"
+            | "el"
+            | "fi"
+            | "sv"
+            | "no"
+            | "nb"
+            | "nn"
+            | "pl"
+            | "ru"
+            | "cs"
+            | "sk"
+            | "bg"
+            | "uk"
+            | "hu"
+    );
+    let symbol = &cur.symbol;
+    if is_euro && base == "nl" {
+        format!("{sign}{symbol}\u{a0}{formatted}")
+    } else if cur.prefix && !(is_euro && euro_suffix_locale) {
+        format!("{sign}{symbol}{formatted}")
     } else {
-        cur.prefix
-    };
-
-    if prefix_after_override {
-        format!("{sign}{symbol}{formatted}", symbol = cur.symbol)
-    } else {
-        format!("{sign}{formatted} {symbol}", symbol = cur.symbol)
+        format!("{sign}{formatted}\u{a0}{symbol}")
     }
 }
 
@@ -1398,7 +1426,7 @@ mod tests {
         ctx.insert("x", &1234567.89_f64);
         assert_eq!(
             render_filter(r#"{{ x | format_number(locale="fr") }}"#, ctx),
-            "1 234 567,89"
+            "1\u{202f}234\u{202f}567,89"
         );
     }
 
@@ -1462,7 +1490,7 @@ mod tests {
             r#"{{ x | format_currency(currency="EUR", locale="fr") }}"#,
             ctx,
         );
-        assert_eq!(out, "1 234,50 €");
+        assert_eq!(out, "1\u{202f}234,50\u{a0}€");
     }
 
     #[test]
@@ -1733,7 +1761,24 @@ mod tests {
 
     #[test]
     fn format_number_fr_locale_space_thousands() {
-        assert_eq!(format_number(1234567.89, "fr", None), "1 234 567,89");
+        // CLDR: a narrow no-break space, so the number never wraps.
+        assert_eq!(
+            format_number(1234567.89, "fr", None),
+            "1\u{202f}234\u{202f}567,89"
+        );
+    }
+
+    #[test]
+    fn format_number_space_group_locales_use_a_no_break_space() {
+        for loc in ["sv", "fi", "no", "nb", "nn", "pl", "ru", "cs"] {
+            assert_eq!(
+                format_number(1234567.89, loc, None),
+                "1\u{a0}234\u{a0}567,89",
+                "{loc}"
+            );
+        }
+        assert_eq!(format_number(1234567.89, "da", None), "1.234.567,89");
+        assert_eq!(format_number(1234567.89, "nl", None), "1.234.567,89");
     }
 
     #[test]
@@ -1765,17 +1810,46 @@ mod tests {
     }
 
     #[test]
-    fn format_currency_eur_de_prefix() {
-        // German puts the `€` first.
-        assert_eq!(format_currency(1234.56, "EUR", "de"), "€1.234,56");
+    fn format_currency_eur_nl_prefix_de_suffix() {
+        // CLDR: Dutch puts the `€` first, German last.
+        assert_eq!(format_currency(1234.56, "EUR", "nl"), "€\u{a0}1.234,56");
+        assert_eq!(format_currency(1234.56, "EUR", "de"), "1.234,56\u{a0}€");
     }
 
     #[test]
-    fn format_currency_eur_fr_suffix_with_space() {
-        // Romance languages put the `€` last, after a space.
-        assert_eq!(format_currency(1234.56, "EUR", "fr"), "1 234,56 €");
-        assert_eq!(format_currency(1234.56, "EUR", "it"), "1.234,56 €");
-        assert_eq!(format_currency(1234.56, "EUR", "es"), "1.234,56 €");
+    fn format_currency_eur_suffix_with_a_no_break_space() {
+        assert_eq!(
+            format_currency(1234.56, "EUR", "fr"),
+            "1\u{202f}234,56\u{a0}€"
+        );
+        assert_eq!(format_currency(1234.56, "EUR", "it"), "1.234,56\u{a0}€");
+        assert_eq!(format_currency(1234.56, "EUR", "es"), "1.234,56\u{a0}€");
+        for loc in ["fi", "sv", "pl"] {
+            assert_eq!(
+                format_currency(1234.56, "EUR", loc),
+                "1\u{a0}234,56\u{a0}€",
+                "{loc}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_currency_eur_after_the_amount_in_every_suffix_locale() {
+        for loc in [
+            "fr", "it", "es", "pt", "de", "da", "el", "fi", "sv", "no", "nb", "nn", "pl", "ru",
+            "cs", "sk", "bg", "uk", "hu", "pt-BR",
+        ] {
+            let out = format_currency(1234.5, "EUR", loc);
+            assert!(
+                out.ends_with("\u{a0}€") && !out.starts_with('€'),
+                "{loc}: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_currency_rub_symbol_after_the_amount() {
+        assert_eq!(format_currency(1234.5, "RUB", "ru"), "1\u{a0}234,50\u{a0}₽");
     }
 
     #[test]
@@ -1803,7 +1877,7 @@ mod tests {
         // The minus sign comes first, before the symbol.
         assert_eq!(format_currency(-50.0, "USD", "en"), "-$50.00");
         // It still leads when the symbol trails.
-        assert_eq!(format_currency(-50.0, "EUR", "fr"), "-50,00 €");
+        assert_eq!(format_currency(-50.0, "EUR", "fr"), "-50,00\u{a0}€");
     }
 
     #[test]

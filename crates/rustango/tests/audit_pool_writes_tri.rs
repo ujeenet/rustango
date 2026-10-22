@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use rustango::audit::{self, AuditEntry, AuditLog};
+use rustango::core::Column as _;
 use rustango::sql::{Auto, CounterPool as _, FetcherPool as _, Pool};
 use rustango::{tri_dialect_test, Model};
 
@@ -204,8 +205,141 @@ async fn second_soft_delete_keeps_the_first_stamp(pool: &Pool) {
     );
 }
 
-/// The macro `save(&PgPool)` runs outside a transaction, so its
-/// pre-read guard is the only thing between a failure and an unaudited UPDATE.
+/// Waits until `n` before-image reads of `audit1675_note` wait on a row lock.
+/// SQLite has no lock view: it waits until the savers hold a connection.
+async fn wait_until_blocked(pool: &Pool, n: i64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let blocked: i64 = match pool.dialect().name() {
+            #[cfg(feature = "postgres")]
+            "postgres" => rustango::sql::sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' \
+                 AND query LIKE '%audit1675_note%' AND query LIKE '%FOR UPDATE%'",
+            )
+            .fetch_one(pool.as_postgres().unwrap())
+            .await
+            .unwrap(),
+            #[cfg(feature = "mysql")]
+            "mysql" => rustango::sql::sqlx::query_scalar(
+                "SELECT COUNT(*) FROM information_schema.PROCESSLIST \
+                 WHERE ID <> CONNECTION_ID() AND INFO LIKE '%audit1675_note%FOR UPDATE%'",
+            )
+            .fetch_one(pool.as_mysql().unwrap())
+            .await
+            .unwrap(),
+            #[cfg(feature = "sqlite")]
+            "sqlite" => {
+                let p = pool.as_sqlite().unwrap();
+                // The writer holds one connection.
+                i64::from(p.size()) - p.num_idle() as i64 - 1
+            }
+            other => panic!("no lock probe for {other}"),
+        };
+        if blocked >= n {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "only {blocked} of {n} saves reached the locked row"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    if pool.dialect().name() == "sqlite" {
+        // Covers the step from acquire to `BEGIN IMMEDIATE`.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// A save behind an open writer waits for it, then diffs against its row.
+/// SQLite on a file: the in-memory pool shares one cache, not WAL.
+async fn save_waits_for_a_concurrent_writer(pool: &Pool) {
+    #[cfg(feature = "sqlite")]
+    let file;
+    #[cfg(feature = "sqlite")]
+    let pool = if pool.dialect().name() == "sqlite" {
+        file = rustango::testkit::matrix::sqlite_file_pool().await;
+        setup(&file).await;
+        &file
+    } else {
+        pool
+    };
+    let mut note = insert_note(pool).await;
+    let id = *note.id.get().expect("pk assigned");
+    let update = Note::objects()
+        .where_(Note::id.eq(id))
+        .update()
+        .set("title", "held")
+        .compile()
+        .unwrap();
+    let mut writer = rustango::sql::transaction_pool(pool).await.unwrap();
+    rustango::sql::update_tx(&mut writer, &update)
+        .await
+        .unwrap();
+    let saver = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            note.title = "saved".into();
+            note.save_pool(&pool).await
+        })
+    };
+    wait_until_blocked(pool, 1).await;
+    assert!(!saver.is_finished(), "the save did not wait for the writer");
+    writer.commit().await.unwrap();
+    saver.await.unwrap().expect("save once the writer commits");
+    let changes = &entries(pool, &id.to_string()).await[0].changes;
+    assert_eq!(changes["title"]["before"], "held", "{changes}");
+}
+
+/// Two macro `save(&PgPool)` calls queued behind one writer: each must hold
+/// its row lock through its UPDATE, so the second diffs against the first.
+async fn pg_macro_saves_queue_behind_each_other(pool: &Pool) {
+    #[cfg(not(feature = "postgres"))]
+    let _ = pool;
+    #[cfg(feature = "postgres")]
+    {
+        let Some(pg) = pool.as_postgres() else {
+            return;
+        };
+        let note = insert_note(pool).await;
+        let id = *note.id.get().expect("pk assigned");
+        let update = Note::objects()
+            .where_(Note::id.eq(id))
+            .update()
+            .set("title", "held")
+            .compile()
+            .unwrap();
+        let mut writer = rustango::sql::transaction_pool(pool).await.unwrap();
+        rustango::sql::update_tx(&mut writer, &update)
+            .await
+            .unwrap();
+        let savers: Vec<_> = ["one", "two"]
+            .into_iter()
+            .map(|title| {
+                let (pg, mut note) = (pg.clone(), note.clone());
+                tokio::spawn(async move {
+                    note.title = title.into();
+                    note.save(&pg).await
+                })
+            })
+            .collect();
+        wait_until_blocked(pool, 2).await;
+        writer.commit().await.unwrap();
+        for s in savers {
+            s.await.unwrap().expect("save once the writer commits");
+        }
+        let rows = entries(pool, &id.to_string()).await;
+        let befores: Vec<&str> = rows
+            .iter()
+            .filter(|e| e.operation == "update")
+            .map(|e| e.changes["title"]["before"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(befores.len(), 2, "{rows:?}");
+        assert_ne!(befores[0], befores[1], "both saves diffed one stale row");
+    }
+}
+
+/// The macro `save(&PgPool)` pre-read guard is the only thing between a
+/// failure and an unaudited UPDATE.
 async fn pg_macro_save_skips_noop_and_fails_on_pre_read(pool: &Pool) {
     #[cfg(not(feature = "postgres"))]
     let _ = pool;
@@ -250,6 +384,96 @@ async fn pg_macro_save(pool: &Pool) {
         .await
         .expect("count");
     assert_eq!(updated, 0, "the UPDATE ran without its audit row");
+}
+
+/// A macro `save(&PgPool)` or `insert(&PgPool)` whose COMMIT fails leaves the
+/// pk unset, so a retry inserts instead of updating a row that was rolled back.
+async fn pg_macro_save_retries_after_failed_commit(pool: &Pool) {
+    #[cfg(not(feature = "postgres"))]
+    let _ = pool;
+    #[cfg(feature = "postgres")]
+    {
+        let Some(pg) = pool.as_postgres() else {
+            return;
+        };
+        rustango::sql::raw_execute_pool(
+            pool,
+            r#"ALTER TABLE "audit1675_note" ADD CONSTRAINT "audit_note_title_deferred"
+               UNIQUE ("title") DEFERRABLE INITIALLY DEFERRED"#,
+            Vec::new(),
+        )
+        .await
+        .expect("deferred unique");
+        insert_note(pool).await;
+        let mut note = Note {
+            id: Auto::default(),
+            title: "hello".into(),
+            deleted_at: None,
+        };
+        assert!(note.save(pg).await.is_err(), "the COMMIT must fail");
+        assert!(
+            note.id.get().is_none(),
+            "pk kept after a rolled-back insert"
+        );
+        assert!(note.insert(pg).await.is_err(), "the COMMIT must fail");
+        assert!(
+            note.id.get().is_none(),
+            "insert kept the pk of a rolled-back row"
+        );
+        note.title = "retried".into();
+        assert_eq!(note.save(pg).await.expect("retry"), 1);
+        let written = Note::objects()
+            .filter("title", "retried")
+            .count(pool)
+            .await
+            .expect("count");
+        assert_eq!(written, 1, "the retry wrote no row");
+    }
+}
+
+/// The macro `insert(&PgPool)` / `delete(&PgPool)` roll the write back when
+/// its audit row fails.
+async fn pg_macro_insert_and_delete_are_atomic(pool: &Pool) {
+    #[cfg(not(feature = "postgres"))]
+    let _ = pool;
+    #[cfg(feature = "postgres")]
+    pg_macro_atomic(pool).await;
+}
+
+#[cfg(feature = "postgres")]
+async fn pg_macro_atomic(pool: &Pool) {
+    let Some(pg) = pool.as_postgres() else {
+        return;
+    };
+    let kept = insert_note(pool).await;
+    // Refuse audit rows for this table only; other suites share the log.
+    let ddl = |sql: &'static str| rustango::sql::raw_execute_pool(pool, sql, Vec::new());
+    ddl(r#"ALTER TABLE "rustango_audit_log" DROP CONSTRAINT IF EXISTS "audit_atomic_refuse""#)
+        .await
+        .unwrap();
+    ddl(r#"ALTER TABLE "rustango_audit_log" ADD CONSTRAINT "audit_atomic_refuse" CHECK (entity_table <> 'audit1675_note') NOT VALID"#)
+        .await
+        .unwrap();
+    let mut note = Note {
+        id: Auto::default(),
+        title: "unaudited".into(),
+        deleted_at: None,
+    };
+    let inserted = note.insert(pg).await;
+    let deleted = kept.delete(pg).await;
+    ddl(r#"ALTER TABLE "rustango_audit_log" DROP CONSTRAINT "audit_atomic_refuse""#)
+        .await
+        .unwrap();
+    assert!(inserted.is_err(), "insert ran unaudited");
+    assert!(deleted.is_err(), "delete ran unaudited");
+    let titles: Vec<String> = Note::objects()
+        .fetch(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|n| n.title)
+        .collect();
+    assert_eq!(titles, ["hello"], "a write committed without its audit row");
 }
 
 /// Polls for the note titled `title`; returns its newest audit source.
@@ -311,8 +535,8 @@ mod ctx_jobs {
 
     /// What each probe saw, by its key: the backends share the process
     /// under `cargo test`.
-    pub fn pending_seen() -> &'static Mutex<HashMap<String, usize>> {
-        static S: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    pub fn probe_seen() -> &'static Mutex<HashMap<String, String>> {
+        static S: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
         S.get_or_init(Default::default)
     }
 
@@ -321,15 +545,35 @@ mod ctx_jobs {
         pub key: String,
     }
 
+    /// Opens its own `atomic` block: one carried over from the enqueuer
+    /// (already committed) would make it a nested block that cannot run.
     #[async_trait::async_trait]
     impl Job for ProbeAtomic {
         const NAME: &'static str = "audit1229_probe_atomic";
         async fn run(&self) -> Result<(), JobError> {
-            let pending = rustango::sql::on_commit_pending();
-            pending_seen()
-                .lock()
-                .unwrap()
-                .insert(self.key.clone(), pending);
+            let seen = |v: &str| {
+                probe_seen()
+                    .lock()
+                    .unwrap()
+                    .insert(self.key.clone(), v.to_owned());
+            };
+            seen("started");
+            let pool = pools().lock().unwrap()[&self.key].clone();
+            let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = fired.clone();
+            let res = rustango::sql::atomic(&pool, move |_tx| {
+                Box::pin(async move {
+                    let outer = rustango::sql::on_commit_pending();
+                    rustango::sql::on_commit(move || {
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    });
+                    assert_eq!(rustango::sql::on_commit_pending(), outer + 1);
+                    Ok(outer)
+                })
+            })
+            .await;
+            let fired = fired.load(std::sync::atomic::Ordering::SeqCst);
+            seen(&format!("{res:?} fired={fired}"));
             Ok(())
         }
     }
@@ -374,17 +618,18 @@ async fn job_audits_as_its_enqueuer(pool: &Pool) {
 }
 
 /// #1229 — the context crosses, the transaction does not: a job
-/// dispatched inside `atomic` sees none of its on-commit queue.
+/// dispatched inside `atomic` opens and commits a block of its own.
 async fn job_dispatched_in_atomic_does_not_join_it(pool: &Pool) {
     #[cfg(not(feature = "jobs"))]
     let _ = pool;
     #[cfg(feature = "jobs")]
     {
-        use ctx_jobs::{pending_seen, ProbeAtomic};
+        use ctx_jobs::{pools, probe_seen, ProbeAtomic};
         use rustango::jobs::{InMemoryJobQueue, JobQueue as _};
 
         let key = format!("{:p}", pool);
-        pending_seen().lock().unwrap().remove(&key);
+        pools().lock().unwrap().insert(key.clone(), pool.clone());
+        probe_seen().lock().unwrap().remove(&key);
         let q = std::sync::Arc::new(InMemoryJobQueue::with_workers(1));
         q.register::<ProbeAtomic>().await;
         q.start().await;
@@ -397,19 +642,29 @@ async fn job_dispatched_in_atomic_does_not_join_it(pool: &Pool) {
                     .dispatch(&ProbeAtomic { key: k.clone() })
                     .await
                     .unwrap();
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                while !pending_seen().lock().unwrap().contains_key(&k)
-                    && std::time::Instant::now() < deadline
-                {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
                 Ok(())
             })
         })
         .await
         .expect("atomic");
+        // The job runs after the commit, still outside the block.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let done = || {
+            probe_seen()
+                .lock()
+                .unwrap()
+                .get(&key)
+                .is_some_and(|v| v != "started")
+        };
+        while !done() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         q.shutdown().await;
-        assert_eq!(pending_seen().lock().unwrap().get(&key), Some(&0));
+        assert_eq!(
+            probe_seen().lock().unwrap().get(&key).map(String::as_str),
+            Some("Ok(0) fired=true"),
+            "the job must run in its own block, outside the enqueuer's"
+        );
     }
 }
 
@@ -466,7 +721,11 @@ tri_dialect_test! {
         save_partial_audits_only_its_fields,
         failed_pre_read_fails_the_save,
         second_soft_delete_keeps_the_first_stamp,
+        save_waits_for_a_concurrent_writer,
+        pg_macro_saves_queue_behind_each_other,
         pg_macro_save_skips_noop_and_fails_on_pre_read,
+        pg_macro_save_retries_after_failed_commit,
+        pg_macro_insert_and_delete_are_atomic,
         job_audits_as_its_enqueuer,
         job_dispatched_in_atomic_does_not_join_it,
         scheduled_task_audits_as_its_registration,

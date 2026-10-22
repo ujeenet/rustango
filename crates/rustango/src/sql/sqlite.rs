@@ -202,6 +202,10 @@ impl Dialect for Sqlite {
         true
     }
 
+    fn binds_pg_only_values(&self) -> bool {
+        false
+    }
+
     /// Translate a Postgres `DEFAULT` expression into SQLite's
     /// spelling.
     ///
@@ -543,37 +547,37 @@ impl Dialect for Sqlite {
     fn compile_select(&self, query: &SelectQuery) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::new(self);
         write_select(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 
     fn compile_count(&self, query: &CountQuery) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::new(self);
         write_count(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 
     fn compile_aggregate(&self, query: &AggregateQuery) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::new(self);
         write_aggregate(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 
     fn compile_insert(&self, query: &InsertQuery) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::new(self);
         write_insert(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 
     fn compile_bulk_insert(&self, query: &BulkInsertQuery) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::new(self);
         write_bulk_insert(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 
     fn compile_update(&self, query: &UpdateQuery) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::new(self);
         write_update(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 
     fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError> {
@@ -581,13 +585,13 @@ impl Dialect for Sqlite {
         // alias on inline VALUES, so use the CTE form instead.
         let mut b = Sql::new(self);
         write_bulk_update_sqlite(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 
     fn compile_delete(&self, query: &DeleteQuery) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::new(self);
         write_delete(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 }
 

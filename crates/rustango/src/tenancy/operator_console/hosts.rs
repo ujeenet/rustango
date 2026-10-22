@@ -199,7 +199,13 @@ fn explain(e: &HostError, slug: &str) -> String {
             format!("there is no tenant `{s}` — it may have been purged, or the link is stale")
         }
         HostError::NotFound => "no such host on this tenant".to_owned(),
-        HostError::Driver(d) => format!("the registry rejected the change: {d}"),
+        // The text goes into the redirect URL; the driver's stays in the log.
+        HostError::Driver(d) => super::withheld(
+            "operator_console::hosts",
+            slug,
+            "the registry rejected the change",
+            d,
+        ),
     }
 }
 
@@ -211,4 +217,27 @@ async fn audit(state: &ConsoleState, slug: &str, op: &auth::Operator, verb: &str
     );
     let operator_id = op.id.get().copied().unwrap_or_default();
     super::emit_op_audit(&state.registry, slug, operator_id, verb, extra).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::test_env;
+
+    /// The message lands in `?error=`, so it must not carry driver text.
+    #[test]
+    fn a_driver_error_withholds_its_text() {
+        let _g = test_env::lock();
+        test_env::with(crate::error::DISCLOSE_ENV, None, || {
+            test_env::with("RUSTANGO_TEMPLATE_DEBUG", None, || {
+                test_env::with("RUSTANGO_ENV", None, || {
+                    let e = HostError::Driver(crate::sql::ExecError::Driver(
+                        crate::sql::sqlx::Error::Protocol("registry-db.internal:5432".into()),
+                    ));
+                    let msg = explain(&e, "acme");
+                    assert!(!msg.contains("registry-db"), "{msg}");
+                });
+            });
+        });
+    }
 }

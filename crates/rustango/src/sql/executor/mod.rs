@@ -615,8 +615,11 @@ impl<T: Model + Send> QuerySet<T> {
     pub async fn delete_on<'c, E: SqlExecutor<'c>>(self, executor: E) -> Result<u64, ExecError> {
         refuse_audited::<T>("`delete_on` cannot audit; use `Model::delete_where`")?;
         let query = self.compile_delete()?;
-        let stmt = executor.dialect().compile_delete(&query)?;
-        write_on(executor, &stmt.sql, stmt.params).await
+        let plan = crate::sql::compile_delete_plan(executor.dialect(), &query)?;
+        if plan.links.is_empty() {
+            return write_on(executor, &plan.owner.sql, plan.owner.params).await;
+        }
+        executor.run_delete_plan(plan).await
     }
 }
 
@@ -939,6 +942,10 @@ use on::RowRef;
 pub use on::{PoolConn, SqlExecutor};
 
 mod atomic;
+#[cfg(feature = "jobs")]
+pub(crate) use atomic::in_any_block;
+#[cfg(feature = "jobs-postgres")]
+pub(crate) use atomic::in_block;
 pub(crate) use atomic::rolled_back;
 pub use atomic::{atomic, on_commit, on_commit_pending, AtomicTx, TxGuard};
 
@@ -1180,18 +1187,92 @@ fn generated_pk(
                     T::I32 => SqlValue::I32(row.try_get(c)?),
                     T::I16 => SqlValue::I16(row.try_get(c)?),
                     T::String => SqlValue::String(row.try_get(c)?),
-                    // Bound values are BLOBs; a column default may be TEXT.
-                    T::Uuid => SqlValue::Uuid(row.try_get(c).or_else(|e| {
-                        row.try_get::<String, _>(c)
-                            .ok()
-                            .and_then(|s| uuid::Uuid::parse_str(&s).ok())
-                            .ok_or(e)
-                    })?),
+                    T::Uuid => sqlite_uuid_key(row, c)?,
                     _ => return Err(unreadable()),
                 })
             }
         }
     }
+}
+
+/// Bound values are BLOBs; a column default may be TEXT. A TEXT
+/// key stays text, so a re-read by it binds what is stored.
+#[cfg(feature = "sqlite")]
+fn sqlite_uuid_key(row: &sqlx::sqlite::SqliteRow, c: &str) -> Result<SqlValue, sqlx::Error> {
+    use crate::sql::sqlx::Row as _;
+    match row.try_get::<uuid::Uuid, _>(c) {
+        Ok(u) => Ok(SqlValue::Uuid(u)),
+        Err(e) => row
+            .try_get::<String, _>(c)
+            .ok()
+            .filter(|s| uuid::Uuid::parse_str(s).is_ok())
+            .map(SqlValue::String)
+            .ok_or(e),
+    }
+}
+
+/// `key` (parsed from `raw`) as the row stores it. Only a SQLite UUID key
+/// differs: BLOB when bound, TEXT when a column default wrote it.
+#[cfg(feature = "admin")]
+pub(crate) async fn stored_key(
+    pool: &Pool,
+    model: &'static crate::core::ModelSchema,
+    pk_field: &'static crate::core::FieldSchema,
+    key: SqlValue,
+    raw: &str,
+) -> Result<SqlValue, ExecError> {
+    let mut keys = stored_keys(pool, model, pk_field, vec![(key, raw)]).await?;
+    Ok(keys.remove(0))
+}
+
+/// [`stored_key`] for many `(key, raw)` pairs of `field`, in one read per chunk.
+#[cfg(feature = "admin")]
+pub(crate) async fn stored_keys(
+    pool: &Pool,
+    model: &'static crate::core::ModelSchema,
+    field: &'static crate::core::FieldSchema,
+    keys: Vec<(SqlValue, &str)>,
+) -> Result<Vec<SqlValue>, ExecError> {
+    #[cfg(feature = "sqlite")]
+    if let (Pool::Sqlite(sq), crate::core::FieldType::Uuid) = (pool, field.ty) {
+        let uuid_of = |v: &SqlValue| match v {
+            SqlValue::Uuid(u) => Some(*u),
+            SqlValue::String(s) => uuid::Uuid::parse_str(s).ok(),
+            _ => None,
+        };
+        let mut stored = std::collections::HashMap::new();
+        // Two binds per key, well under SQLite's 32766.
+        for chunk in keys.chunks(4096) {
+            let binds = chunk
+                .iter()
+                .flat_map(|(k, raw)| [k.clone(), SqlValue::String((*raw).to_owned())])
+                .collect();
+            let query =
+                SelectQuery::by_pk_in(model, field.column, binds).projection(vec![field.column]);
+            crate::test_assertions::query_counter::bump();
+            let stmt = pool.dialect().compile_select(&query)?;
+            let mut q = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_sqlite(q, v);
+            }
+            for row in q.fetch_all(sq).await? {
+                let v = sqlite_uuid_key(&row, field.column)?;
+                if let Some(u) = uuid_of(&v) {
+                    stored.entry(u).or_insert(v);
+                }
+            }
+        }
+        return Ok(keys
+            .into_iter()
+            .map(|(k, _)| {
+                uuid_of(&k)
+                    .and_then(|u| stored.get(&u).cloned())
+                    .unwrap_or(k)
+            })
+            .collect());
+    }
+    let _ = (pool, model, field);
+    Ok(keys.into_iter().map(|(k, _)| k).collect())
 }
 
 /// `UPDATE` against either backend; returns rows affected.
@@ -1209,8 +1290,37 @@ pub async fn update_pool(pool: &Pool, query: &UpdateQuery) -> Result<u64, ExecEr
 /// # Errors
 /// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn delete_pool(pool: &Pool, query: &DeleteQuery) -> Result<u64, ExecError> {
-    let stmt = pool.dialect().compile_delete(query)?;
-    execute_pool(pool, &stmt.sql, stmt.params).await
+    let plan = crate::sql::compile_delete_plan(pool.dialect(), query)?;
+    delete_plan_pool(pool, plan).await
+}
+
+/// Run a [`DeletePlan`](crate::sql::DeletePlan) on `pool`, in one
+/// transaction (a savepoint inside `atomic`) when it has links.
+pub(crate) async fn delete_plan_pool(
+    pool: &Pool,
+    plan: crate::sql::DeletePlan,
+) -> Result<u64, ExecError> {
+    if plan.links.is_empty() {
+        return execute_pool(pool, &plan.owner.sql, plan.owner.params).await;
+    }
+    atomic(pool, move |tx| {
+        Box::pin(async move {
+            let mut guard = tx.lock().await?;
+            run_delete_plan_tx(&mut guard, plan).await
+        })
+    })
+    .await
+}
+
+/// Run a [`DeletePlan`](crate::sql::DeletePlan) in `tx`: links, then the owner.
+pub(crate) async fn run_delete_plan_tx(
+    tx: &mut PoolTx<'_>,
+    plan: crate::sql::DeletePlan,
+) -> Result<u64, ExecError> {
+    for link in plan.links {
+        execute_tx(tx, &link.sql, link.params).await?;
+    }
+    execute_tx(tx, &plan.owner.sql, plan.owner.params).await
 }
 
 /// `SELECT COUNT(*)` against either backend.
@@ -1352,6 +1462,7 @@ pub async fn raw_execute_pool(
     sql: &str,
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
+    crate::sql::refuse_unbindable_values(pool.dialect(), &binds)?;
     execute_pool(pool, sql, binds).await
 }
 
@@ -1365,6 +1476,7 @@ pub async fn raw_execute_tx(
     sql: &str,
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
+    crate::sql::refuse_unbindable_values(tx.dialect(), &binds)?;
     let gate = atomic::gate(tx)?;
     gate.check(
         async {
@@ -1667,8 +1779,51 @@ pub async fn update_tx(tx: &mut PoolTx<'_>, query: &UpdateQuery) -> Result<u64, 
 /// # Errors
 /// As [`delete_pool`].
 pub async fn delete_tx(tx: &mut PoolTx<'_>, query: &DeleteQuery) -> Result<u64, ExecError> {
-    let stmt = tx.dialect().compile_delete(query)?;
-    execute_tx(tx, &stmt.sql, stmt.params).await
+    let plan = crate::sql::compile_delete_plan(tx.dialect(), query)?;
+    run_delete_plan_tx(tx, plan).await
+}
+
+/// `Model::truncate`'s statement: `TRUNCATE … RESTART IDENTITY CASCADE`
+/// on Postgres, `DELETE FROM` elsewhere. Not part of the public API.
+#[doc(hidden)]
+#[must_use]
+pub fn truncate_sql(d: &dyn crate::sql::Dialect, table: &str) -> String {
+    let quoted = d.quote_ident(table);
+    if d.name() == "postgres" {
+        format!("TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE")
+    } else {
+        format!("DELETE FROM {quoted}")
+    }
+}
+
+/// Run `sql` (a [`truncate_sql`]) in `tx` after clearing the table's
+/// generic M2M junction rows, so a reused id inherits no links.
+pub(crate) async fn truncate_tx(
+    tx: &mut PoolTx<'_>,
+    table: &str,
+    sql: &str,
+) -> Result<u64, ExecError> {
+    for link in crate::sql::m2m::generic_m2m_truncate_links(table) {
+        let stmt = tx.dialect().compile_delete(&link)?;
+        execute_tx(tx, &stmt.sql, stmt.params).await?;
+    }
+    execute_tx(tx, sql, Vec::new()).await
+}
+
+/// Empty `model`'s table and its generic M2M junction rows in one
+/// transaction. Backs the derived `Model::truncate`.
+///
+/// # Errors
+/// As [`raw_execute_tx`].
+pub async fn truncate(
+    pool: &Pool,
+    model: &'static crate::core::ModelSchema,
+) -> Result<u64, ExecError> {
+    let mut tx = tx::write_transaction_pool(pool).await?;
+    let sql = truncate_sql(tx.dialect(), model.table);
+    let affected = truncate_tx(&mut tx, model.table, &sql).await?;
+    tx.commit().await?;
+    Ok(affected)
 }
 
 /// Validated multi-row `INSERT` inside an open transaction, split to fit
@@ -1949,6 +2104,7 @@ where
 
 // `.values_dict()` / `.values_list()` projection.
 mod values;
+pub(crate) use values::fetch_values_flat_on;
 #[allow(unused_imports)]
 pub use values::{
     fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, try_get_flat_my,
@@ -1974,6 +2130,7 @@ pub async fn raw_query_pool<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
+    crate::sql::refuse_unbindable_values(pool.dialect(), &binds)?;
     crate::test_assertions::query_counter::bump();
     match pool {
         #[cfg(feature = "postgres")]
@@ -2023,6 +2180,7 @@ pub async fn raw_query_tx<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
+    crate::sql::refuse_unbindable_values(tx.dialect(), &binds)?;
     let gate = atomic::gate(tx)?;
     gate.check(
         async {

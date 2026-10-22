@@ -11,7 +11,7 @@
 //! a partially-spent bucket would be a bypass, and the test below is
 //! what would catch it.
 
-#![cfg(feature = "_axum")]
+#![cfg(feature = "_http_layers")]
 
 use std::time::Duration;
 

@@ -1095,6 +1095,45 @@ async fn invalidate_purges_the_cached_page() {
     assert_eq!(hits.load(Ordering::SeqCst), 2);
 }
 
+/// Two nests of one cached router keep apart, and `invalidate` takes the full path.
+#[tokio::test]
+async fn nested_routers_do_not_share_pages() {
+    use axum::extract::OriginalUri;
+    use rustango::cache_page::PageKey;
+    let layer = CachePageLayer::new(Arc::new(InMemoryCache::new())).tenant_agnostic(true);
+    let inner: Router = Router::new()
+        .route(
+            "/about",
+            get(|OriginalUri(u): OriginalUri| async move { u.path().to_owned() }),
+        )
+        .layer(layer.clone());
+    let app: Router = Router::new().nest("/en", inner.clone()).nest("/fr", inner);
+    let fetch = |uri: &'static str| {
+        let app = app.clone();
+        async move {
+            let req = Request::get(uri)
+                .header(header::HOST, "a.test")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            let status = cache_status(&resp).map(str::to_owned);
+            (status, body_to_string(resp.into_body()).await)
+        }
+    };
+    assert_eq!(fetch("/en/about").await.1, "/en/about");
+    assert_eq!(
+        fetch("/fr/about").await,
+        (Some("MISS".into()), "/fr/about".into())
+    );
+    assert_eq!(fetch("/en/about").await.0.as_deref(), Some("HIT"));
+    layer
+        .invalidate([&PageKey::new("/en/about", "a.test")])
+        .await
+        .unwrap();
+    assert_eq!(fetch("/en/about").await.0.as_deref(), Some("MISS"));
+    assert_eq!(fetch("/fr/about").await.0.as_deref(), Some("HIT"));
+}
+
 /// An `InMemoryCache` that counts the text and bytes calls.
 #[derive(Default)]
 struct Counting {

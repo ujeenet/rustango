@@ -505,6 +505,158 @@ tri_dialect_test! {
     ],
 }
 
+#[cfg(feature = "sqlite")]
+mod sqlite_only {
+    use super::*;
+
+    /// A UUID key the column default writes as TEXT, not a bound BLOB.
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "aed_textkey", admin(actions = "delete_selected"))]
+    #[allow(dead_code)]
+    pub struct TextKey {
+        #[rustango(primary_key, auto_uuid, default = "(lower(hex(randomblob(16))))")]
+        pub id: Auto<uuid::Uuid>,
+        #[rustango(max_length = 32)]
+        pub name: String,
+    }
+
+    /// The admin finds a TEXT-stored UUID key on detail, edit and delete.
+    #[tokio::test]
+    async fn text_uuid_key_is_found_by_change_and_delete() {
+        use rustango::testkit::matrix::{live_lock, Backend};
+        let _guard = live_lock().lock().await;
+        let pool = Backend::Sqlite.pool().await.expect("sqlite pool");
+        rustango::testkit::matrix::fresh_table::<TextKey>(&pool).await;
+        let (status, body) = send(&pool, "POST", "/aed_textkey", "name=a").await;
+        assert!(status.is_redirection(), "create: {status} {body}");
+        let column = |c: &'static str| TextKey::objects().values_list_flat(c);
+        let key: String = column("id")
+            .fetch::<String>(&pool)
+            .await
+            .expect("read key")
+            .remove(0);
+        assert_eq!(key.len(), 32, "the default stores text: {key}");
+
+        let (status, html) = send(&pool, "GET", &format!("/aed_textkey/{key}"), "").await;
+        assert_eq!(status, StatusCode::OK, "detail: {html}");
+        let (status, html) = send(&pool, "GET", &format!("/aed_textkey/{key}/edit"), "").await;
+        assert_eq!(status, StatusCode::OK, "edit form: {html}");
+        let (status, body) = send(&pool, "POST", &format!("/aed_textkey/{key}"), "name=b").await;
+        assert!(status.is_redirection(), "edit: {status} {body}");
+        let names = column("name")
+            .fetch::<String>(&pool)
+            .await
+            .expect("read name");
+        assert_eq!(names, ["b"], "the edit did not reach the row");
+        let (status, body) = send(&pool, "POST", &format!("/aed_textkey/{key}/delete"), "").await;
+        assert!(status.is_redirection(), "delete: {status} {body}");
+        let left = column("id")
+            .fetch::<String>(&pool)
+            .await
+            .expect("read keys");
+        assert!(left.is_empty(), "the row was not deleted");
+    }
+
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "aed_tparent")]
+    #[allow(dead_code)]
+    pub struct TParent {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 32)]
+        pub name: String,
+    }
+
+    /// An inline child whose UUID key the column default writes as TEXT.
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "aed_tline")]
+    #[allow(dead_code)]
+    pub struct TLine {
+        #[rustango(primary_key, auto_uuid, default = "(lower(hex(randomblob(16))))")]
+        pub id: Auto<uuid::Uuid>,
+        #[rustango(fk = "aed_tparent", on = "id")]
+        pub parent_id: i64,
+        pub qty: i64,
+    }
+
+    rustango::register_admin_inline!(
+        parent = "aed_tparent",
+        child = "aed_tline",
+        fk = "parent_id",
+        fields = &["qty"],
+    );
+
+    /// `delete_selected` and an inline edit find a TEXT-stored UUID key.
+    #[tokio::test]
+    async fn text_uuid_key_is_found_by_bulk_delete_and_inline_edit() {
+        use rustango::testkit::matrix::{drop_table, fresh_table, live_lock, Backend};
+        let _guard = live_lock().lock().await;
+        let pool = Backend::Sqlite.pool().await.expect("sqlite pool");
+        fresh_table::<TextKey>(&pool).await;
+        drop_table(&pool, "aed_tline").await;
+        fresh_table::<TParent>(&pool).await;
+        fresh_table::<TLine>(&pool).await;
+
+        let (status, body) = send(&pool, "POST", "/aed_textkey", "name=a").await;
+        assert!(status.is_redirection(), "create: {status} {body}");
+        let keys = |pool: &Pool| {
+            let pool = pool.clone();
+            async move {
+                TextKey::objects()
+                    .values_list_flat("id")
+                    .fetch::<String>(&pool)
+                    .await
+                    .expect("read keys")
+            }
+        };
+        let key = keys(&pool).await.remove(0);
+        assert_eq!(key.len(), 32, "the default stores text: {key}");
+        let form = format!("action=delete_selected&_selected={key}");
+        let (status, body) = send(&pool, "POST", "/aed_textkey/__action", &form).await;
+        assert!(status.is_redirection(), "bulk delete: {status} {body}");
+        assert!(
+            keys(&pool).await.is_empty(),
+            "delete_selected missed the row"
+        );
+
+        let mut parent = TParent {
+            id: Auto::default(),
+            name: "p".into(),
+        };
+        parent.insert_pool(&pool).await.expect("parent");
+        let pid = *parent.id.get().expect("pk");
+        let add = "name=p&aed_tline-TOTAL_FORMS=1&aed_tline-INITIAL_FORMS=0&aed_tline-0-qty=3";
+        let (status, body) = send(&pool, "POST", &format!("/aed_tparent/{pid}"), add).await;
+        assert!(status.is_redirection(), "inline add: {status} {body}");
+        // The admin binds a new key itself; make it the TEXT a default writes.
+        let lines = TLine::objects()
+            .values_list_flat("id")
+            .fetch::<uuid::Uuid>(&pool)
+            .await
+            .expect("line key");
+        let lid = lines[0].simple().to_string();
+        rustango::sql::raw_execute_pool(
+            &pool,
+            "UPDATE aed_tline SET id = ?",
+            vec![rustango::core::SqlValue::String(lid.clone())],
+        )
+        .await
+        .expect("store the key as text");
+        let edit = format!(
+            "name=p&aed_tline-TOTAL_FORMS=1&aed_tline-INITIAL_FORMS=1\
+             &aed_tline-0-id={lid}&aed_tline-0-qty=5"
+        );
+        let (status, body) = send(&pool, "POST", &format!("/aed_tparent/{pid}"), &edit).await;
+        assert!(status.is_redirection(), "inline edit: {status} {body}");
+        let qty = TLine::objects()
+            .values_list_flat("qty")
+            .fetch::<i64>(&pool)
+            .await
+            .expect("read qty");
+        assert_eq!(qty, [5], "the inline edit did not reach the row");
+    }
+}
+
 #[cfg(feature = "postgres")]
 mod pg_only {
     use super::*;

@@ -408,10 +408,10 @@ jobs:
   # `timeout-minutes` because this job is reachable from a fork pull
   # request and builds three `build.rs` scripts that nothing ungated built
   # before — `libsqlite3-sys` with `bundled` compiles the SQLite C
-  # amalgamation. The default is six hours.
+  # amalgamation. The default is six hours. Green runs take 35-44 minutes.
   tests_compile:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
@@ -420,6 +420,8 @@ jobs:
       # The `not(feature = "postgres")` family; same command `sqlite_litmus`
       # runs, which is gated.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --no-run
+      # The integration tests' gates must hold on the guards job's lib row too.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,sso --tests --no-run
       # PG suites gated on `postgres` alone that import more (#1835).
       - run: cargo test -p rustango --no-default-features --features postgres,sqlite,tenancy --no-run
       # `oauth2_router_standalone`, gated on `not(feature = "admin")`. The
@@ -816,7 +818,7 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features ${{ matrix.features }} --lib
       # Build `tests/**` on the bare backends: no other job compiles a test
       # without tenancy, so a wrong single-backend `#![cfg]` stayed green (#2328).
-      - if: ${{ !contains(matrix.features, ',') || matrix.features == 'sqlite,_tower' || startsWith(matrix.features, 'postgres,batteries,tenancy') }}
+      - if: ${{ !contains(matrix.features, ',') || matrix.features == 'sqlite,_tower' || matrix.features == 'sqlite,csrf' || matrix.features == 'sqlite,template_views' || startsWith(matrix.features, 'postgres,batteries,tenancy') }}
         run: cargo test -p rustango --no-default-features --features ${{ matrix.features }} --tests --no-run
 
   # #1285 — the first Windows coverage this repo has had. Every other job
@@ -1144,6 +1146,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p rustango --features cache,cache-redis --test cache_redis_incr_live
       - run: cargo test -p rustango --features cache,cache-redis --test cache_redis_prefix_live
+      - run: cargo test -p rustango --features cache,cache-redis --test cache_redis_timeout_live
 
   # The S3 live suites gate on `RUSTANGO_S3_TEST_*`, which appeared
   # nowhere in `.github/` and were `#[ignore]`d nowhere either — so they

@@ -344,6 +344,10 @@ queue.start().await;
 queue.dispatch(&WelcomeEmail { user_id: 42 }).await?;
 ```
 
+**Dispatch inside a transaction.** Inside an `atomic` block on the queue's own
+pool, `dispatch` joins the block: the job is rolled back with it, and no worker
+wakes before the commit. Don't hold the block's `TxGuard` across the call.
+
 **Recovering crashed workers.** If a worker dies mid-job, the row stays locked.
 Run a periodic sweep to release locks older than a threshold so another worker
 picks the job back up:
