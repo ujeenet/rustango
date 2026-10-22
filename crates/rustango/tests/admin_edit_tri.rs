@@ -134,12 +134,20 @@ async fn detail_page_bounds_inline_rows_and_history(pool: &Pool) {
     }
     let (status, html) = send(pool, "GET", &format!("/aed_sorder/{o}"), "").await;
     assert_eq!(status, StatusCode::OK, "{html}");
-    assert_eq!(html.matches(r#"href="/aed_sline/"#).count(), 100, "inline rows");
+    assert_eq!(
+        html.matches(r#"href="/aed_sline/"#).count(),
+        100,
+        "inline rows"
+    );
     assert!(
         html.contains(&format!(r#"href="/aed_sline?order_id={o}""#)),
         "no link to the other rows"
     );
-    assert_eq!(html.matches(r#"class="audit-changes""#).count(), 20, "audit rows");
+    assert_eq!(
+        html.matches(r#"class="audit-changes""#).count(),
+        20,
+        "audit rows"
+    );
 }
 
 /// Queries one admin POST runs.
@@ -354,7 +362,9 @@ fn unescape(s: &str) -> String {
 /// What a browser submits for control `name` of the rendered form.
 fn shown(html: &str, name: &str) -> String {
     let open = format!(r#"name="{name}""#);
-    let at = html.find(&open).unwrap_or_else(|| panic!("no `{name}` control"));
+    let at = html
+        .find(&open)
+        .unwrap_or_else(|| panic!("no `{name}` control"));
     let tag_start = html[..at].rfind('<').unwrap();
     let rest = &html[tag_start..];
     if rest.starts_with("<textarea") {
@@ -386,7 +396,11 @@ fn encode(pairs: &[(&str, String)]) -> String {
 }
 
 /// Seed one doc, then rename it through the edit form as a browser would.
-async fn rename_through_the_form(pool: &Pool, meta: Option<serde_json::Value>, legacy: bool) -> Doc {
+async fn rename_through_the_form(
+    pool: &Pool,
+    meta: Option<serde_json::Value>,
+    legacy: bool,
+) -> Doc {
     let mut d = Doc {
         id: Auto::default(),
         name: "a".into(),
@@ -543,10 +557,19 @@ mod pg_only {
             pairs.push((f, shown(&html, f)));
         }
         assert_eq!(pairs[1].1, "x, y", "array prefill");
-        let (status, body) =
-            send(&pool, "POST", &format!("/aed_pgkinds/{id}"), &encode(&pairs)).await;
+        let (status, body) = send(
+            &pool,
+            "POST",
+            &format!("/aed_pgkinds/{id}"),
+            &encode(&pairs),
+        )
+        .await;
         assert!(status.is_redirection(), "{status}: {body}");
-        let got = PgKinds::objects().fetch(&pool).await.expect("fetch").remove(0);
+        let got = PgKinds::objects()
+            .fetch(&pool)
+            .await
+            .expect("fetch")
+            .remove(0);
         assert_eq!(got.name, "renamed");
         assert_eq!(got.tags.0, ["x", "y"]);
         assert_eq!(got.seats, Range::closed_open(1, 10));

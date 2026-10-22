@@ -801,7 +801,10 @@ mod csp_report_tests {
         if let Some(o) = origin {
             req = req.header("origin", o);
         }
-        let resp = app.oneshot(req.body(Body::from(body)).unwrap()).await.unwrap();
+        let resp = app
+            .oneshot(req.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
         resp.status().as_u16()
     }
 
@@ -810,17 +813,30 @@ mod csp_report_tests {
         let legacy = r#"{"csp-report":{"document-uri":"http://app.test/","violated-directive":"script-src","blocked-uri":"inline"}}"#;
         let api = r#"[{"type":"csp-violation","body":{"documentURL":"http://app.test/","effectiveDirective":"script-src","blockedURL":"inline"}}]"#;
         let origin = Some("http://app.test");
-        assert_eq!(post("application/csp-report", origin, legacy.into()).await, 204);
-        assert_eq!(post("application/reports+json", origin, api.into()).await, 204);
+        assert_eq!(
+            post("application/csp-report", origin, legacy.into()).await,
+            204
+        );
+        assert_eq!(
+            post("application/reports+json", origin, api.into()).await,
+            204
+        );
     }
 
     #[tokio::test]
     async fn report_types_still_need_a_same_origin_and_a_small_body() {
         let legacy = r#"{"csp-report":{}}"#;
         let evil = Some("http://evil.example");
-        assert_eq!(post("application/csp-report", evil, legacy.into()).await, 403);
+        assert_eq!(
+            post("application/csp-report", evil, legacy.into()).await,
+            403
+        );
         let big = format!(r#"{{"csp-report":{{"x":"{}"}}}}"#, "a".repeat(100 * 1024));
         assert_eq!(post("application/csp-report", None, big).await, 413);
-        assert_eq!(post("text/plain", None, legacy.into()).await, 403, "other types need the token");
+        assert_eq!(
+            post("text/plain", None, legacy.into()).await,
+            403,
+            "other types need the token"
+        );
     }
 }

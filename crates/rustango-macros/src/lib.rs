@@ -11321,10 +11321,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let blank = attrs.blank;
     let case_insensitive = attrs.case_insensitive;
     let validators_lits: Vec<&str> = attrs.validators.iter().map(String::as_str).collect();
-    if attrs.on_delete.is_some()
-        && attrs.fk.is_none()
-        && attrs.o2o.is_none()
-        && fk_inner.is_none()
+    if attrs.on_delete.is_some() && attrs.fk.is_none() && attrs.o2o.is_none() && fk_inner.is_none()
     {
         return Err(syn::Error::new_spanned(
             field,

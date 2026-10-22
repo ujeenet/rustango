@@ -152,7 +152,10 @@ compiled_with_text! { ORDER_ITEMS;
 #[tokio::test]
 async fn inspectdb_emits_compiling_models_for_awkward_names_on_sqlite() {
     let schema = <OrderItems as rustango::core::Model>::SCHEMA;
-    assert_eq!(schema.field("orderdate").map(|f| f.column), Some("OrderDate"));
+    assert_eq!(
+        schema.field("orderdate").map(|f| f.column),
+        Some("OrderDate")
+    );
     let pool = make_pool().await;
     sqlx::query(
         r#"CREATE TABLE "Order_Items" (

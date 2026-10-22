@@ -119,12 +119,13 @@ async fn serve_with(
             () = &mut signal => break,
         };
         // `ConnectInfo` feeds `access_log`, IP filters and per-IP limits.
-        let svc = app.clone().map_request(
-            move |mut req: axum::http::Request<hyper::body::Incoming>| {
-                req.extensions_mut().insert(axum::extract::ConnectInfo(addr));
-                req
-            },
-        );
+        let svc =
+            app.clone()
+                .map_request(move |mut req: axum::http::Request<hyper::body::Incoming>| {
+                    req.extensions_mut()
+                        .insert(axum::extract::ConnectInfo(addr));
+                    req
+                });
         let conn = builder
             .serve_connection(
                 TokioIo::new(io),
@@ -245,8 +246,14 @@ mod tests {
         use tokio::io::AsyncWriteExt as _;
         let (addr, _stop) = slow_client_server().await;
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        client.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n").await.unwrap();
-        assert!(closed_by_server(&mut client).await, "slow header held the connection");
+        client
+            .write_all(b"GET / HTTP/1.1\r\nhost: x\r\n")
+            .await
+            .unwrap();
+        assert!(
+            closed_by_server(&mut client).await,
+            "slow header held the connection"
+        );
     }
 
     /// An idle keep-alive connection is closed too.
@@ -261,7 +268,13 @@ mod tests {
             .unwrap();
         let mut buf = [0u8; 256];
         let n = client.read(&mut buf).await.unwrap();
-        assert!(buf[..n].starts_with(b"HTTP/1.1 200"), "first request is served");
-        assert!(closed_by_server(&mut client).await, "idle keep-alive stayed open");
+        assert!(
+            buf[..n].starts_with(b"HTTP/1.1 200"),
+            "first request is served"
+        );
+        assert!(
+            closed_by_server(&mut client).await,
+            "idle keep-alive stayed open"
+        );
     }
 }

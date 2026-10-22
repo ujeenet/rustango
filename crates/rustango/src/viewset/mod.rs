@@ -3449,13 +3449,15 @@ async fn fetch_many_by_pk_scoped(
         );
         let rows = render_list(state, acq, &q, fields).await?;
         if rows.iter().all(|r| key(r).is_some()) {
-            let mut by_pk: HashMap<String, Value> =
-                rows.into_iter().filter_map(|r| Some((key(&r)?, r))).collect();
-            out.extend(chunk.iter().map(|pk| {
-                by_pk
-                    .remove(&pk.to_display_string())
-                    .unwrap_or(Value::Null)
-            }));
+            let mut by_pk: HashMap<String, Value> = rows
+                .into_iter()
+                .filter_map(|r| Some((key(&r)?, r)))
+                .collect();
+            out.extend(
+                chunk
+                    .iter()
+                    .map(|pk| by_pk.remove(&pk.to_display_string()).unwrap_or(Value::Null)),
+            );
             continue;
         }
         for pk in chunk {

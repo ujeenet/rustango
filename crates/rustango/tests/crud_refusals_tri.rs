@@ -192,7 +192,11 @@ async fn bulk_create(pool: &Pool, names: &[&str]) -> (StatusCode, String, usize)
 async fn bulk_create_reads_back_in_one_select(pool: &Pool) {
     let (s1, _, one) = bulk_create(pool, &["a"]).await;
     let (s5, body, five) = bulk_create(pool, &["b", "c", "d", "e", "f"]).await;
-    assert_eq!((s1, s5), (StatusCode::CREATED, StatusCode::CREATED), "{body}");
+    assert_eq!(
+        (s1, s5),
+        (StatusCode::CREATED, StatusCode::CREATED),
+        "{body}"
+    );
     let names: Vec<String> = serde_json::from_str::<Vec<serde_json::Value>>(&body)
         .expect("JSON array")
         .iter()

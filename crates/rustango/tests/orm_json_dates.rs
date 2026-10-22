@@ -106,10 +106,22 @@ mod scenarios {
             ("has q\"x", Doc::data.json_has_key("q\"x"), vec![4]),
             ("has a.b", Doc::data.json_has_key("a.b"), vec![]),
             ("has *", Doc::data.json_has_key("*"), vec![]),
-            ("any", Doc::data.json_has_any_key(["first-name", "zz"]), vec![4]),
+            (
+                "any",
+                Doc::data.json_has_any_key(["first-name", "zz"]),
+                vec![4],
+            ),
             ("any *", Doc::data.json_has_any_key(["*"]), vec![]),
-            ("all", Doc::data.json_has_all_keys(["first-name", "2fa"]), vec![4]),
-            ("all a.b", Doc::data.json_has_all_keys(["first-name", "a.b"]), vec![]),
+            (
+                "all",
+                Doc::data.json_has_all_keys(["first-name", "2fa"]),
+                vec![4],
+            ),
+            (
+                "all a.b",
+                Doc::data.json_has_all_keys(["first-name", "a.b"]),
+                vec![],
+            ),
         ];
         for (label, filter, want) in cases {
             let rows: Vec<Doc> = Doc::objects()

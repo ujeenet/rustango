@@ -1143,10 +1143,15 @@ impl InlineTarget {
             ..SelectQuery::new(self.child)
         };
         for row in select_rows_as_json(pool, &query, &fields).await? {
-            let visible =
-                crate::admin::object_permissions::is_allowed(self.child.table, "view", parts, Some(&row));
+            let visible = crate::admin::object_permissions::is_allowed(
+                self.child.table,
+                "view",
+                parts,
+                Some(&row),
+            );
             let key = pk_key(&row, self.pk);
-            out.0.insert(key, if visible { Own::Row(row) } else { Own::Foreign });
+            out.0
+                .insert(key, if visible { Own::Row(row) } else { Own::Foreign });
         }
         let rest: Vec<SqlValue> = pks
             .into_iter()
@@ -1610,7 +1615,8 @@ async fn plan_target(
                 super::audit::audit_form(target.child, &cfg, &row, &written)
             });
             // The new PK feeds the audit entry and `admin_post_save`.
-            let pk_readable = audited || target.pk.is_serial() || columns.contains(&target.pk.column);
+            let pk_readable =
+                audited || target.pk.is_serial() || columns.contains(&target.pk.column);
             let mut query = crate::core::InsertQuery::new(target.child, columns, sql_values);
             if pk_readable {
                 query.returning = vec![target.pk.column];

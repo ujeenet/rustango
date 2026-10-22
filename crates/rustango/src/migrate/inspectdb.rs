@@ -1154,11 +1154,23 @@ fn mysql_udt(data_type: &str, column_type: &str) -> String {
 fn mysql_default_sql(default: &str, data_type: &str, extra: &str) -> String {
     let numeric = matches!(
         data_type.to_ascii_lowercase().as_str(),
-        "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "decimal"
-            | "numeric" | "float" | "double" | "real"
+        "tinyint"
+            | "smallint"
+            | "mediumint"
+            | "int"
+            | "integer"
+            | "bigint"
+            | "decimal"
+            | "numeric"
+            | "float"
+            | "double"
+            | "real"
     );
     if extra.to_ascii_uppercase().contains("DEFAULT_GENERATED") {
-        if default.to_ascii_uppercase().starts_with("CURRENT_TIMESTAMP") {
+        if default
+            .to_ascii_uppercase()
+            .starts_with("CURRENT_TIMESTAMP")
+        {
             default.to_owned()
         } else {
             format!("({default})")
@@ -1443,7 +1455,14 @@ fn emit_field<W: Write>(
     fks: &[(String, String)],
     dialect: &str,
 ) -> std::io::Result<()> {
-    emit_field_as(w, col, &sanitize_field_name(&col.name), pk_column, fks, dialect)
+    emit_field_as(
+        w,
+        col,
+        &sanitize_field_name(&col.name),
+        pk_column,
+        fks,
+        dialect,
+    )
 }
 
 fn emit_field_as<W: Write>(
@@ -1668,8 +1687,14 @@ mod tests {
         let ty = |d: &str, c: &str| mysql_type_to_rust(&mysql_udt(d, c));
         assert_eq!(ty("tinyint", "tinyint(1)").0, "bool");
         assert_eq!(ty("tinyint", "tinyint").0, "i16");
-        assert_eq!(ty("int", "int unsigned"), ("i64", ty("int", "int unsigned").1));
-        assert!(ty("int", "int unsigned").1.is_some(), "unsigned carries a TODO");
+        assert_eq!(
+            ty("int", "int unsigned"),
+            ("i64", ty("int", "int unsigned").1)
+        );
+        assert!(
+            ty("int", "int unsigned").1.is_some(),
+            "unsigned carries a TODO"
+        );
         assert_eq!(ty("smallint", "smallint unsigned").0, "i32");
         assert_eq!(ty("int", "int").0, "i32");
         assert_eq!(ty("double", "double unsigned").0, "f64");
@@ -1681,7 +1706,10 @@ mod tests {
         assert_eq!(mysql_default_sql("pending", "varchar", ""), "'pending'");
         assert_eq!(mysql_default_sql(r"it's \x", "varchar", ""), r"'it''s \\x'");
         assert_eq!(mysql_default_sql("0", "tinyint", ""), "0");
-        assert_eq!(mysql_default_sql("uuid()", "char", "DEFAULT_GENERATED"), "(uuid())");
+        assert_eq!(
+            mysql_default_sql("uuid()", "char", "DEFAULT_GENERATED"),
+            "(uuid())"
+        );
         assert_eq!(
             mysql_default_sql("CURRENT_TIMESTAMP", "datetime", "DEFAULT_GENERATED"),
             "CURRENT_TIMESTAMP"
@@ -1756,7 +1784,13 @@ mod tests {
             default: None,
             is_auto: false,
         };
-        let cols = [col("Name"), col("name"), col("name_2"), col("type"), col("TYPE")];
+        let cols = [
+            col("Name"),
+            col("name"),
+            col("name_2"),
+            col("type"),
+            col("TYPE"),
+        ];
         let mut buf: Vec<u8> = Vec::new();
         write_model(&mut buf, "people", &cols, &[], &[]).unwrap();
         let out = String::from_utf8(buf).unwrap();
@@ -1764,7 +1798,11 @@ mod tests {
             .lines()
             .filter_map(|l| l.strip_prefix("    pub ")?.split(':').next())
             .collect();
-        assert_eq!(fields, ["name", "name_2", "name_2_2", "r#type", "type_2"], "{out}");
+        assert_eq!(
+            fields,
+            ["name", "name_2", "name_2_2", "r#type", "type_2"],
+            "{out}"
+        );
         assert!(out.contains(r#"column = "TYPE""#), "{out}");
     }
 

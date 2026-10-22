@@ -147,7 +147,9 @@ async fn inspectdb_reads_column_type_and_quotes_defaults_on_mysql() {
         return;
     };
     let my = pool.as_mysql().expect("mysql pool").clone();
-    let _ = sqlx::query("DROP TABLE IF EXISTS `insp1230`").execute(&my).await;
+    let _ = sqlx::query("DROP TABLE IF EXISTS `insp1230`")
+        .execute(&my)
+        .await;
     sqlx::query(
         r#"CREATE TABLE `insp1230` (
             `id` INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -190,7 +192,10 @@ async fn inspectdb_reads_column_type_and_quotes_defaults_on_mysql() {
     ] {
         assert!(out.contains(want), "missing `{want}` in:\n{out}");
     }
-    assert!(out.contains(r#"default = "0""#), "numeric default stays bare:\n{out}");
+    assert!(
+        out.contains(r#"default = "0""#),
+        "numeric default stays bare:\n{out}"
+    );
 }
 
 /// View-walking on MySQL — issue #293 / T2.10. Creates a view over

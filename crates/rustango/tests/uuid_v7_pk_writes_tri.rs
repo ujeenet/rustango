@@ -312,7 +312,11 @@ async fn save_writes_the_auto_now_stamp_back(pool: &Pool) {
     b.updated_at = Auto::Set(old);
     b.name = "c".into();
     b.save_partial(&["name"], pool).await.expect("save_partial");
-    assert_eq!(b.updated_at.get(), Some(&old), "unnamed auto_now was stamped");
+    assert_eq!(
+        b.updated_at.get(),
+        Some(&old),
+        "unnamed auto_now was stamped"
+    );
     assert!(near(mem, stored(pool).await), "the row's stamp moved");
 }
 
@@ -333,9 +337,16 @@ async fn pg_upsert_stamps_auto_now(pool: &Pool) {
         let mem = *b.updated_at.get().expect("stamp");
         assert_ne!(mem, old, "upsert sent the stale stamp");
         let id = *b.id.get().expect("id");
-        let row = Badge::objects().filter("id", id).fetch(pool).await.expect("fetch");
+        let row = Badge::objects()
+            .filter("id", id)
+            .fetch(pool)
+            .await
+            .expect("fetch");
         let stored = *row[0].updated_at.get().expect("stored stamp");
-        assert!((stored - mem).num_milliseconds().abs() < 1000, "{stored} vs {mem}");
+        assert!(
+            (stored - mem).num_milliseconds().abs() < 1000,
+            "{stored} vs {mem}"
+        );
     }
     let _ = pool;
 }

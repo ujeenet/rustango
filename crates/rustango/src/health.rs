@@ -685,13 +685,21 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .into_router();
         let resp = app
-            .oneshot(Request::builder().uri("/ready").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let v = body_json(resp).await;
         let err = v["checks"]["upstream"]["error"].as_str().unwrap();
         assert!(err.contains("http://127.0.0.1:1/ping"), "{err}");
-        assert!(!err.contains("PASSWD") && !err.contains("SECRETTOKEN"), "{err}");
+        assert!(
+            !err.contains("PASSWD") && !err.contains("SECRETTOKEN"),
+            "{err}"
+        );
     }
 
     #[cfg(feature = "cache")]

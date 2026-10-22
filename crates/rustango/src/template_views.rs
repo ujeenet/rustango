@@ -938,7 +938,9 @@ async fn handle_list_action(
             }
         }
     } else if action == BUILTIN_DELETE_SELECTED {
-        if let Err(resp) = run_delete_selected_pool(state.vs.schema, pk_field, &state.pool, &pks).await {
+        if let Err(resp) =
+            run_delete_selected_pool(state.vs.schema, pk_field, &state.pool, &pks).await
+        {
             return resp;
         }
         Ok(())
@@ -1953,7 +1955,10 @@ enum WriteFailed {
 /// Form errors for a refusal other than a taken unique.
 fn refused_errors(r: crate::sql::Refusal, e: &crate::sql::ExecError) -> WriteFailed {
     tracing::warn!(target: "rustango::template_views", error = %e, "write refused");
-    WriteFailed::Refused(HashMap::from([("__all__".to_owned(), r.message().to_owned())]))
+    WriteFailed::Refused(HashMap::from([(
+        "__all__".to_owned(),
+        r.message().to_owned(),
+    )]))
 }
 
 /// A DELETE the database refused: rows still pointing at it are a 409,

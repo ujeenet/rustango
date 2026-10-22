@@ -130,8 +130,14 @@ fn array_index_step_emits_per_dialect_form() {
         "PG indexed: {pg}"
     );
     // MySQL/SQLite use `$."items"[0]."name"`.
-    assert!(my.contains(r#"'$."items"[0]."name"'"#), "MySQL indexed: {my}");
-    assert!(lite.contains(r#"'$."items"[0]."name"'"#), "SQLite indexed: {lite}");
+    assert!(
+        my.contains(r#"'$."items"[0]."name"'"#),
+        "MySQL indexed: {my}"
+    );
+    assert!(
+        lite.contains(r#"'$."items"[0]."name"'"#),
+        "SQLite indexed: {lite}"
+    );
 }
 
 #[test]

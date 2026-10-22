@@ -65,7 +65,13 @@ fn a_typed_foreign_key_carries_on_delete() {
     let schema = <PostTyped as rustango::core::Model>::SCHEMA;
     let f = schema.field("author").expect("author field");
     assert_eq!(f.fk_on_delete, Some(OnDeleteAction::Cascade));
-    assert!(matches!(f.relation, Some(Relation::Fk { to: "fkod_author", .. })));
+    assert!(matches!(
+        f.relation,
+        Some(Relation::Fk {
+            to: "fkod_author",
+            ..
+        })
+    ));
 }
 
 #[test]
