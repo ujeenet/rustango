@@ -3134,11 +3134,29 @@ fn inherent_impl_tokens(
     // One transaction: the before-image's FOR UPDATE must hold through
     // the UPDATE and its audit row.
     let pool_to_save_on = if audited_fields.is_some() {
+        // Any failure, COMMIT included, rolls the INSERT back: put the pk and
+        // stamps back too, or a retry takes the UPDATE path and writes nothing.
+        let restored: Vec<&syn::Ident> = primary_key
+            .map(|(pk, _)| pk)
+            .into_iter()
+            .chain(&fields.auto_now_idents)
+            .collect();
+        let prev: Vec<syn::Ident> = (0..restored.len())
+            .map(|i| quote::format_ident!("__rustango_save_prev_{}", i))
+            .collect();
         quote! {
-            let mut _tx = pool.begin().await?;
-            let _affected = self.save_on(&mut *_tx).await?;
-            _tx.commit().await?;
-            ::core::result::Result::Ok(_affected)
+            #( let #prev = ::core::clone::Clone::clone(&self.#restored); )*
+            let _saved: ::core::result::Result<u64, #root::sql::ExecError> = async {
+                let mut _tx = pool.begin().await?;
+                let _affected = self.save_on(&mut *_tx).await?;
+                _tx.commit().await?;
+                ::core::result::Result::Ok(_affected)
+            }
+            .await;
+            if _saved.is_err() {
+                #( self.#restored = #prev; )*
+            }
+            _saved
         }
     } else {
         quote!(self.save_on(pool).await)

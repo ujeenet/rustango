@@ -386,6 +386,46 @@ async fn pg_macro_save(pool: &Pool) {
     assert_eq!(updated, 0, "the UPDATE ran without its audit row");
 }
 
+/// A macro `save(&PgPool)` whose COMMIT fails leaves the pk unset, so a
+/// retry inserts instead of updating a row that was rolled back.
+async fn pg_macro_save_retries_after_failed_commit(pool: &Pool) {
+    #[cfg(not(feature = "postgres"))]
+    let _ = pool;
+    #[cfg(feature = "postgres")]
+    {
+        let Some(pg) = pool.as_postgres() else {
+            return;
+        };
+        rustango::sql::raw_execute_pool(
+            pool,
+            r#"ALTER TABLE "audit1675_note" ADD CONSTRAINT "audit_note_title_deferred"
+               UNIQUE ("title") DEFERRABLE INITIALLY DEFERRED"#,
+            Vec::new(),
+        )
+        .await
+        .expect("deferred unique");
+        insert_note(pool).await;
+        let mut note = Note {
+            id: Auto::default(),
+            title: "hello".into(),
+            deleted_at: None,
+        };
+        assert!(note.save(pg).await.is_err(), "the COMMIT must fail");
+        assert!(
+            note.id.get().is_none(),
+            "pk kept after a rolled-back insert"
+        );
+        note.title = "retried".into();
+        assert_eq!(note.save(pg).await.expect("retry"), 1);
+        let written = Note::objects()
+            .filter("title", "retried")
+            .count(pool)
+            .await
+            .expect("count");
+        assert_eq!(written, 1, "the retry wrote no row");
+    }
+}
+
 /// Polls for the note titled `title`; returns its newest audit source.
 #[cfg(any(feature = "jobs", feature = "scheduler"))]
 async fn source_of_title(pool: &Pool, title: &str) -> Option<String> {
@@ -603,6 +643,7 @@ tri_dialect_test! {
         save_waits_for_a_concurrent_writer,
         pg_macro_saves_queue_behind_each_other,
         pg_macro_save_skips_noop_and_fails_on_pre_read,
+        pg_macro_save_retries_after_failed_commit,
         job_audits_as_its_enqueuer,
         job_dispatched_in_atomic_does_not_join_it,
         scheduled_task_audits_as_its_registration,
