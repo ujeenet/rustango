@@ -6,11 +6,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — scaffolded projects honor settings and stay off the network in dev
 
-The fullstack admin is built with `admin::Builder::from_settings`, so `[admin]` and `[brand]` apply (the prefix stays `/admin`, matching `main.rs`). `.env.example` no longer sets `RUSTANGO_BIND=0.0.0.0:8080`, which beat the dev tier's `127.0.0.1`; compose sets it for the container and publishes 8080 on loopback. `--features csrf` adds `.with_csrf()`. Every `main.rs` shows where `with_trusted_proxies` goes, and the README runs `makemigrations` before `migrate`.
+The fullstack admin is built with `admin::Builder::from_settings`, so `[admin]` and `[brand]` apply (the prefix stays `/admin`, matching `main.rs`); a config that fails to load stops it rather than dropping `[admin]` restrictions. `.env.example` no longer sets `RUSTANGO_BIND=0.0.0.0:8080`, which beat the dev tier's `127.0.0.1`; compose sets it for the container and publishes 8080 on loopback. `--features csrf` adds `.with_csrf()`. Every `main.rs` shows where `with_trusted_proxies` goes, and the README runs `makemigrations` before `migrate`.
 
 ### Fixed — `make:*` generators write code that compiles
 
-`make:viewset` / `make:serializer` import `--model` from where it is declared (`src/blog/models.rs` after `startapp blog`), or take a path like `blog::models::Post`; the viewset's mount hint uses `Cli::nest_with`, which supplies the pool. `make:worker` loads `.env`. A verb whose output needs a rustango feature the project lacks (`make:test` / `make:viewset` on `--template api`) refuses and names the feature.
+`make:viewset` / `make:serializer` import `--model` from where it is declared (`src/blog/models.rs` after `startapp blog`), or take a path like `blog::models::Post`; the viewset's mount hint uses `Cli::nest_with`, which supplies the pool. `make:worker` loads `.env`. A verb whose output needs a rustango feature the project lacks (`make:test` / `make:viewset` on `--template api`) refuses and names the feature; `make:viewset --tenant` needs only `tenancy`. `getting_started_blog`'s prod tier no longer has pool keys at the TOML root.
 
 ### Fixed — `--template api` image passes its healthcheck
 

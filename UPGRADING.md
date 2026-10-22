@@ -156,11 +156,15 @@ Only new scaffolds change. To match in an existing project, drop `RUSTANGO_BIND`
 
 ### `make:*` verbs check features
 
-`make:viewset` and `make:test` need `admin`, `make:serializer` needs `serializer`, `make:form` `forms`, `make:job` / `make:worker` `jobs`, `make:scheduled` `scheduler`, `make:notification` `notifications`. Without it the verb now errors instead of writing a file that does not compile.
+`make:viewset` and `make:test` need `admin` (`make:viewset --tenant` needs `tenancy` instead), `make:serializer` needs `serializer`, `make:form` `forms`, `make:job` / `make:worker` `jobs`, `make:scheduled` `scheduler`, `make:notification` `notifications`. Without it the verb now errors instead of writing a file that does not compile.
 
 ### `Cli::with_csrf` cookie follows `secure_cookies`
 
-With `[security] secure_cookies = false`, or on a non-prod tier with it unset, the CSRF cookie is no longer `Secure`. Use `with_csrf_config` to force it.
+With `[security] secure_cookies = false`, or on a non-prod tier with it unset, the CSRF cookie is no longer `Secure`. A `Cli` without `with_settings_from_env` is `Secure` only when `RUSTANGO_ENV` is `prod`, so an HTTPS staging host loses the flag; load settings or use `with_csrf_config` to force it.
+
+### New fullstack projects: `admin_router` panics on a bad config
+
+It used to fall back to defaults, which dropped `[admin]` table restrictions. Existing projects can replace `unwrap_or_default()` with `expect(..)` in `src/urls.rs`.
 
 ### `Settings::load` inside `with_overridden` returns the overlay
 
