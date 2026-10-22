@@ -1,6 +1,6 @@
 //! Tiny JSON API showing how to read the tenant user's extras.
 //!
-//! `GET /users/:username` resolves a tenant from the request, fetches
+//! `GET /users/:username` (signed-in tenant users only) resolves a tenant from the request, fetches
 //! the matching `AppUser` via the ORM, and returns the typed extras
 //! (`display_name`, `timezone`) inline. The framework's auth path
 //! still operates against the seven core columns of `rustango_users`
@@ -13,7 +13,7 @@ use axum::routing::get;
 use axum::Router;
 
 use rustango::core::Column as _;
-use rustango::extractors::Tenant;
+use rustango::extractors::{SessionUser, Tenant};
 
 use crate::models::AppUser;
 
@@ -39,9 +39,14 @@ impl From<AppUser> for UserOut {
 }
 
 async fn lookup(
+    SessionUser(me): SessionUser,
     mut tenant: Tenant,
     Path(username): Path<String>,
 ) -> Result<Json<UserOut>, (StatusCode, String)> {
+    // A user directory is for signed-in tenant users only.
+    if me.is_none() {
+        return Err((StatusCode::UNAUTHORIZED, "login required".into()));
+    }
     let rows: Vec<AppUser> = AppUser::objects()
         .where_(AppUser::username.eq(username.clone()))
         .fetch_on(tenant.conn())

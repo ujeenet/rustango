@@ -150,6 +150,26 @@ untouched.
 
 ## Unreleased
 
+### Idle connections close after 30 s
+
+The built-in server closes a connection that sends no complete request head for 30 s, including idle keep-alive. Clients or proxies that keep idle sockets longer reconnect; the limit is fixed for now.
+
+### `HttpError::Reqwest` text has no URL
+
+`HttpClient` errors no longer include the request URL, which can hold a token. Log the target yourself if you need it.
+
+### CSRF skips the token for browser report bodies
+
+A same-origin POST with `Content-Type: application/csp-report` or `application/reports+json` passes `CsrfLayer` without a token, on any path. A handler that takes a raw body (`String`, `Bytes`) and changes state should check the content type.
+
+### `BodyLimitLayer` sets the extractor limit
+
+On POST, PUT, PATCH and QUERY its `max_bytes` is now the only body cap; axum's 2 MiB default no longer applies there. A route that wants less adds its own `DefaultBodyLimit::max` inside the layer.
+
+### `TestClient::login` sends a GET first
+
+With no CSRF cookie in the jar it GETs the login path before posting. A test that counted requests or wanted the 403 sees one more request and the real login result.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more

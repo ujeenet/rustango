@@ -6,8 +6,8 @@
 //!
 //! Exercises `rustango::passwords::{hash, verify}` + `rustango::jwt::{encode, decode}`
 //! end-to-end. The JWT secret is read from `SHOWCASE_JWT_SECRET` so
-//! the playwright suite can pre-set it; falls back to a fixed
-//! per-process random secret if unset (rejects any token after restart).
+//! the playwright suite can pre-set it; falls back to a random
+//! per-process secret if unset (rejects any token after restart).
 
 use std::time::Duration;
 
@@ -47,10 +47,14 @@ pub fn api() -> Router {
         .route("/accounts/me", get(me))
 }
 
-fn jwt_secret() -> Vec<u8> {
-    std::env::var("SHOWCASE_JWT_SECRET")
-        .unwrap_or_else(|_| "showcase-dev-only-jwt-secret-not-for-production".to_owned())
-        .into_bytes()
+/// `SHOWCASE_JWT_SECRET`, else a random key for this process. A fixed
+/// fallback let anyone sign a token for any `sub`.
+fn jwt_secret() -> &'static [u8] {
+    static SECRET: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    SECRET.get_or_init(|| match std::env::var("SHOWCASE_JWT_SECRET") {
+        Ok(s) if !s.is_empty() => s.into_bytes(),
+        _ => rustango::random::get_random_token_urlsafe(64).into_bytes(),
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -102,9 +106,11 @@ async fn register(
         password_hash,
         created_at: Auto::Unset,
     };
-    u.insert_pool(&pool)
-        .await
-        .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+    // The raw DB error names tables and constraints; log it, answer plainly.
+    u.insert_pool(&pool).await.map_err(|e| {
+        tracing::warn!(error = %e, "register failed");
+        (StatusCode::CONFLICT, "username or email already taken".into())
+    })?;
 
     let id = match u.id {
         Auto::Set(n) => n,
@@ -149,9 +155,11 @@ async fn login(
         .fetch(&pool)
         .await
         .map_err(rustango::server_error)?;
-    let user = rows
-        .pop()
-        .ok_or((StatusCode::UNAUTHORIZED, "invalid credentials".into()))?;
+    let Some(user) = rows.pop() else {
+        // Same argon2 cost as a real user, so timing hides who exists.
+        passwords::verify_dummy(&input.password);
+        return Err((StatusCode::UNAUTHORIZED, "invalid credentials".into()));
+    };
 
     let ok = passwords::verify(&input.password, &user.password_hash)
         .map_err(rustango::server_error)?;
@@ -168,7 +176,7 @@ async fn login(
     let claims = Claims::new(id.to_string())
         .issuer("rustango-showcase")
         .ttl(Duration::from_secs(3600));
-    let token = encode(&claims, &jwt_secret())
+    let token = encode(&claims, jwt_secret())
         .map_err(rustango::server_error)?;
 
     Ok(Json(LoginOut {
@@ -193,7 +201,7 @@ async fn me(
         ))?;
 
     let claims =
-        decode(token, &jwt_secret()).map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
+        decode(token, jwt_secret()).map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
     let id: i64 = claims
         .subject()
         .and_then(|s| s.parse().ok())
@@ -208,4 +216,20 @@ async fn me(
         .pop()
         .ok_or((StatusCode::UNAUTHORIZED, "user no longer exists".into()))?;
     Ok(Json(UserOut::from(&user)))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Unset, the key is random, not a string anyone can read here.
+    #[test]
+    fn unset_secret_is_not_the_old_fixed_string() {
+        if std::env::var_os("SHOWCASE_JWT_SECRET").is_some() {
+            return;
+        }
+        assert_ne!(
+            super::jwt_secret(),
+            b"showcase-dev-only-jwt-secret-not-for-production"
+        );
+        assert_eq!(super::jwt_secret(), super::jwt_secret());
+    }
 }
