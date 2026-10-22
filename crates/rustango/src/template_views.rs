@@ -5621,6 +5621,29 @@ mod tests {
         assert!(!body.contains("posts"), "{body}");
     }
 
+    /// A custom action's visibility pre-check failure hides the driver error too.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn custom_action_scope_failure_hides_the_driver_error() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let mut schema = schema_two_fields().clone();
+        // A soft-delete column makes the action scope its selection first.
+        schema.soft_delete_column = Some("title");
+        let h: BulkActionFn = Arc::new(|_p, _v| Box::pin(async { Ok(()) }));
+        let app = ListView::for_model(Box::leak(Box::new(schema)))
+            .bulk_actions(true)
+            .action("publish", "Publish", h)
+            .router("/l", Arc::new(Tera::default()), pool);
+        let res = app
+            .oneshot(csrf_form_post("/l", "action=publish&_selected_action=1"))
+            .await
+            .unwrap();
+        assert!(res.status().is_server_error(), "{}", res.status());
+        let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(!body.contains("posts"), "{body}");
+    }
+
     /// `bulk_actions` Tera context entry leads with `delete_selected`,
     /// then user-registered actions in order.
     #[test]
