@@ -297,7 +297,7 @@ pub(crate) fn admin_config_or_default(model: &'static ModelSchema) -> crate::cor
         .unwrap_or(crate::core::AdminConfig::DEFAULT)
 }
 
-/// Credential columns, secret whatever the model's widgets say (#1158).
+/// Credential columns, secret whatever the model's widgets say.
 const SECRET_COLUMNS: &[&str] = &["password_hash", "password", "database_url"];
 
 /// `true` for a credential column or one with a `password` widget override.
@@ -1034,7 +1034,7 @@ mod tests {
     use super::*;
     use crate::core::FieldType;
 
-    /// #1158 — credential columns are secret without a `password` widget.
+    /// Credential columns are secret without a `password` widget.
     #[test]
     fn credential_columns_are_secret_without_a_widget() {
         let cfg = crate::core::AdminConfig::DEFAULT;

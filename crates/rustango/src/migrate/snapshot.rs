@@ -843,6 +843,45 @@ impl FieldSnapshot {
     }
 }
 
+/// The inverse of [`field_type_name`]; `None` for vector, geometry and unknown names.
+pub(crate) fn field_type_from_name(name: &str) -> Option<FieldType> {
+    use crate::core::{ArrayElem, RangeElem};
+    Some(match name {
+        "i16" => FieldType::I16,
+        "i32" => FieldType::I32,
+        "i64" => FieldType::I64,
+        "f32" => FieldType::F32,
+        "f64" => FieldType::F64,
+        "bool" => FieldType::Bool,
+        "string" => FieldType::String,
+        "datetime" => FieldType::DateTime,
+        "date" => FieldType::Date,
+        "time" => FieldType::Time,
+        "uuid" => FieldType::Uuid,
+        "json" => FieldType::Json,
+        "decimal" => FieldType::Decimal,
+        "binary" => FieldType::Binary,
+        "array_text" => FieldType::Array(ArrayElem::Text),
+        "array_int" => FieldType::Array(ArrayElem::Int),
+        "array_bigint" => FieldType::Array(ArrayElem::BigInt),
+        "range_int" => FieldType::Range(RangeElem::Int),
+        "range_bigint" => FieldType::Range(RangeElem::BigInt),
+        "range_numeric" => FieldType::Range(RangeElem::Numeric),
+        "range_date" => FieldType::Range(RangeElem::Date),
+        "range_datetime" => FieldType::Range(RangeElem::DateTime),
+        "hstore" => FieldType::HStore,
+        _ => return None,
+    })
+}
+
+/// A snapshot type name of an integer column.
+pub(crate) fn is_integer_ty(name: &str) -> bool {
+    matches!(
+        field_type_from_name(name),
+        Some(FieldType::I16 | FieldType::I32 | FieldType::I64)
+    )
+}
+
 pub(crate) fn field_type_name(ty: FieldType) -> &'static str {
     // Like `FieldType::as_str`, but with names that are stable in
     // snapshot JSON.

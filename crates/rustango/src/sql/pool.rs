@@ -3,7 +3,7 @@
 //! [`Pool`] reaches Postgres, MySQL or SQLite through one handle and
 //! picks the matching [`Dialect`] for you. It is the multi-backend entry
 //! point; the `&PgPool` APIs and the `_on` methods outside `SqlExecutor`
-//! (#1395) are the Postgres-only executor forms.
+//! are the Postgres-only executor forms.
 //!
 //! Wrap a pool you already have:
 //!
@@ -190,7 +190,7 @@ macro_rules! tuned {
 }
 
 /// How a connection is checked before checkout. Every pool goes through
-/// here, tenant pools included (rel-0608 tenancy-001).
+/// here, tenant pools included.
 pub(crate) fn checkout_check<DB: sqlx::Database>(
     o: sqlx::pool::PoolOptions<DB>,
     t: &PoolTuning,
@@ -199,7 +199,7 @@ pub(crate) fn checkout_check<DB: sqlx::Database>(
         return o.test_before_acquire(true);
     }
     // Ping only a connection idle long enough for a server or load
-    // balancer to have dropped it; the hot path pays nothing (rel-0608).
+    // balancer to have dropped it; the hot path pays nothing.
     let after = t
         .idle_ping_after
         .unwrap_or(Duration::from_secs(IDLE_PING_DEFAULT_SECS));
@@ -717,7 +717,7 @@ pub struct PoolTuning {
     /// with credentials that have since been revoked.
     pub max_lifetime: Option<Duration>,
     /// Ping each connection before handing it out. Off by default: it
-    /// costs a round trip per checkout (8–16% of request CPU, #2674).
+    /// costs a round trip per checkout (8–16% of request CPU).
     /// Without it only connections idle past [`Self::idle_ping_after`]
     /// are pinged; `idle_timeout` and `max_lifetime` (sqlx defaults 10
     /// and 30 min) still recycle old connections.
@@ -1027,7 +1027,7 @@ mod tuning_tests {
         assert_eq!(merge_env_over(from_toml), from_toml);
     }
 
-    /// #2674: the per-checkout ping is off unless asked for.
+    /// The per-checkout ping is off unless asked for.
     #[test]
     fn the_acquire_ping_is_off_by_default() {
         let _g = env_lock();
@@ -1141,7 +1141,7 @@ mod tuning_tests {
         clear();
     }
 
-    /// #2674: the ping setting reaches every backend's pool, and the
+    /// The ping setting reaches every backend's pool, and the
     /// idle and lifetime bounds that replace it as the safety net stay set.
     #[tokio::test]
     async fn the_acquire_ping_setting_reaches_every_backend() {
@@ -1185,7 +1185,7 @@ mod tuning_tests {
             assert_eq!(ping, want, "test_before_acquire");
             assert!(idle.is_some() && life.is_some(), "{idle:?} {life:?}");
         }
-        // Tenant pools too (rel-0608 tenancy-001).
+        // Tenant pools too.
         #[cfg(all(feature = "tenancy", feature = "sqlite"))]
         {
             let config = crate::tenancy::TenantPoolsConfig::default();

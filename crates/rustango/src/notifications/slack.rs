@@ -90,7 +90,8 @@ async fn send(req: reqwest::RequestBuilder, value: Value) -> Result<(), String> 
         .json(&build_payload(value))
         .send()
         .await
-        .map_err(|e| format!("slack POST failed: {e}"))?;
+        // The webhook URL is the secret; reqwest's Display appends it.
+        .map_err(|e| format!("slack POST failed: {}", e.without_url()))?;
     let status = resp.status();
     if status.is_success() {
         return Ok(());
@@ -112,6 +113,18 @@ fn build_payload(value: Value) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A failed POST must not echo the webhook URL.
+    #[tokio::test]
+    async fn send_error_omits_the_webhook_url() {
+        let cb = webhook_callback_with_client(
+            "http://127.0.0.1:1/services/T0/B0/SECRETTOKEN",
+            reqwest::Client::new(),
+        );
+        let err = cb(json!("hi")).await.unwrap_err();
+        assert!(err.starts_with("slack POST failed"), "{err}");
+        assert!(!err.contains("SECRETTOKEN"), "{err}");
+    }
 
     #[test]
     fn string_value_wraps_into_text_envelope() {

@@ -202,7 +202,7 @@ async fn seed_counts(pool: &Pool) {
     }
 }
 
-/// #1346: SQLite compared the as_text path with a number as text vs integer.
+/// SQLite compared the as_text path with a number as text vs integer.
 async fn json_as_text_compares_with_a_number(pool: &Pool) {
     if pool.dialect().name() == "postgres" {
         return; // PG has no `text > bigint`.
@@ -222,7 +222,7 @@ async fn json_as_text_compares_with_a_number(pool: &Pool) {
     );
 }
 
-/// #1346: SQLite compared the extracted SQL value with the JSON text.
+/// SQLite compared the extracted SQL value with the JSON text.
 async fn json_path_equals_a_json_scalar(pool: &Pool) {
     seed_counts(pool).await;
     for (key, v) in [
@@ -235,9 +235,99 @@ async fn json_path_equals_a_json_scalar(pool: &Pool) {
     }
 }
 
+/// SQLite matched no JSON null and compared objects as text.
+async fn json_path_equals_null_and_reordered_object(pool: &Pool) {
+    for data in [
+        serde_json::json!({"z": null, "o": {"a": 1, "b": [1, 2]}}),
+        serde_json::json!({"o": {"a": 1}}),
+    ] {
+        Demo {
+            id: Auto::Unset,
+            data,
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed");
+    }
+    let json = |v: serde_json::Value| SqlValue::Json(v);
+    let null = || json(serde_json::Value::Null);
+    assert_eq!(
+        count_path(pool, "z", false, Op::Eq, null()).await,
+        1,
+        "= null"
+    );
+    assert_eq!(
+        count_path(pool, "z", false, Op::Ne, null()).await,
+        0,
+        "<> null"
+    );
+    let reordered = || json(serde_json::json!({"b": [1, 2], "a": 1}));
+    assert_eq!(
+        count_path(pool, "o", false, Op::Eq, reordered()).await,
+        1,
+        "key order"
+    );
+    assert_eq!(
+        count_path(pool, "o", false, Op::Ne, reordered()).await,
+        1,
+        "<> object"
+    );
+    let swapped = json(serde_json::json!({"a": 1, "b": [2, 1]}));
+    assert_eq!(
+        count_path(pool, "o", false, Op::Eq, swapped).await,
+        0,
+        "array order"
+    );
+    let empty = json(serde_json::json!({}));
+    assert_eq!(
+        count_path(pool, "o", false, Op::Eq, empty).await,
+        0,
+        "empty object"
+    );
+}
+
+/// Numbers inside an object compare by value, as PG and MySQL do: 1 = 1.0.
+async fn json_object_numbers_compare_by_value(pool: &Pool) {
+    Demo {
+        id: Auto::Unset,
+        data: serde_json::json!({"n": {"x": 1, "y": 9007199254740993_i64}}),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("seed");
+    let obj = |x: serde_json::Value| {
+        SqlValue::Json(serde_json::json!({"x": x, "y": 9007199254740993_i64}))
+    };
+    for (x, want) in [
+        (serde_json::json!(1.0), 1),
+        (serde_json::json!(1), 1),
+        (serde_json::json!(1.5), 0),
+        (serde_json::json!("1"), 0),
+    ] {
+        let n = count_path(pool, "n", false, Op::Eq, obj(x.clone())).await;
+        assert_eq!(n, want, "x = {x}");
+    }
+}
+
+/// A key starting with a digit is a valid path step on every backend.
+async fn a_digit_led_key_matches(pool: &Pool) {
+    Demo {
+        id: Auto::Unset,
+        data: serde_json::json!({"2fa": "on", "e1": "x"}),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("seed");
+    assert_eq!(count_text_eq(pool, "2fa", "on").await, 1);
+    assert_eq!(count_text_eq(pool, "e1", "x").await, 1);
+}
+
 tri_dialect_test! {
     setup: seeded,
     scenarios: [
+        a_digit_led_key_matches,
+        json_object_numbers_compare_by_value,
+        json_path_equals_null_and_reordered_object,
         json_as_text_compares_with_a_number,
         json_path_equals_a_json_scalar,
         a_single_key_path_executes,

@@ -2,7 +2,8 @@
 //!
 //! An unbounded request body is a denial-of-service: one client can
 //! make the server buffer gigabytes. axum's `DefaultBodyLimit` caps
-//! 2 MiB per extractor; this layer adds a router-wide cap. A declared
+//! 2 MiB per extractor; this layer replaces it with a router-wide cap,
+//! for the methods it checks. A declared
 //! `Content-Length` over it gets a JSON `413 Payload Too Large` upfront.
 //! Any other body is capped as it streams, and a body extractor that
 //! reads past the cap answers `413`.
@@ -121,9 +122,29 @@ async fn handle(cfg: Arc<BodyLimitLayer>, req: Request<Body>, next: Next) -> Res
         }
     }
     // Chunked and HTTP/2 bodies carry no Content-Length: cap the stream.
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
     let body = Body::new(http_body_util::Limited::new(body, cfg.max_bytes));
+    // This cap replaces axum's 2 MiB extractor default, so it can raise it,
+    // but a `DefaultBodyLimit` set outside stays: `extend` lets it win.
+    let mut extensions = disabled_default_limit().await;
+    extensions.extend(std::mem::take(&mut parts.extensions));
+    parts.extensions = extensions;
     next.run(Request::from_parts(parts, body)).await
+}
+
+/// Extensions holding only `DefaultBodyLimit::disable()`, whose type axum keeps private.
+async fn disabled_default_limit() -> axum::http::Extensions {
+    use tower::{Layer as _, ServiceExt as _};
+    let echo =
+        tower::service_fn(|r: Request<()>| async move { Ok::<_, std::convert::Infallible>(r) });
+    match axum::extract::DefaultBodyLimit::disable()
+        .layer(echo)
+        .oneshot(Request::new(()))
+        .await
+    {
+        Ok(r) => r.into_parts().0.extensions,
+        Err(never) => match never {},
+    }
 }
 
 /// Whether a body read failed on a size cap, not on the stream.
@@ -341,6 +362,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
+    }
+
+    /// A cap above axum's 2 MiB extractor default is the cap.
+    #[tokio::test]
+    async fn limit_above_axum_default_lets_the_extractor_read() {
+        let n = 3 * 1024 * 1024;
+        let resp = reading_app(5 * 1024 * 1024)
+            .oneshot(streamed(Method::POST, n))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let mut req = streamed(Method::POST, n);
+        req.headers_mut()
+            .insert(header::CONTENT_LENGTH, n.to_string().parse().unwrap());
+        let resp = reading_app(5 * 1024 * 1024).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    /// A stricter `DefaultBodyLimit` outside the layer still applies.
+    #[tokio::test]
+    async fn a_stricter_outer_default_limit_is_kept() {
+        let app = reading_app(1024).layer(axum::extract::DefaultBodyLimit::max(10));
+        let resp = app.oneshot(streamed(Method::POST, 100)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

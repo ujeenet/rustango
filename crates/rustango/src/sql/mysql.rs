@@ -70,8 +70,8 @@ impl Dialect for MySql {
         Some(" LIMIT 18446744073709551615")
     }
 
-    /// The derived table also lifts error 1093 when the subquery reads
-    /// the UPDATE/DELETE target table.
+    /// A materialized derived table also lifts error 1093, so the
+    /// subquery of an UPDATE/DELETE may read the target table.
     fn in_subquery_limit_needs_derived_table(&self) -> bool {
         true
     }
@@ -123,7 +123,7 @@ impl Dialect for MySql {
     /// MySQL's CAST targets differ from the ANSI names: integers
     /// cast to `SIGNED`, floats to `FLOAT` or `DOUBLE`, booleans to
     /// `UNSIGNED`, strings to `CHAR`, and timestamps to `DATETIME(6)`
-    /// (bare `DATETIME` / `TIME` drop the microseconds, #1359).
+    /// (bare `DATETIME` / `TIME` drop the microseconds).
     ///
     /// UUID has no CAST target, so it returns `None`; cast a
     /// string-shaped value to `CHAR` yourself.
@@ -149,6 +149,21 @@ impl Dialect for MySql {
             | FieldType::Vector(_)
             | FieldType::Geometry(_) => return None,
         })
+    }
+
+    /// InnoDB caps a key at 3072 bytes (1071); utf8mb4 counts 4 per char.
+    fn index_key_size(&self, cols: &[(FieldType, Option<u32>)]) -> Option<(u32, u32)> {
+        let bytes = cols
+            .iter()
+            .map(|(ty, len)| match (ty, len) {
+                (FieldType::String, Some(n)) => n.saturating_mul(4),
+                (FieldType::Uuid, _) => 36 * 4,
+                (FieldType::Decimal, _) => 30,
+                // Every other key-able type here is at most 8 bytes.
+                _ => 8,
+            })
+            .fold(0u32, u32::saturating_add);
+        Some((bytes, 3072))
     }
 
     /// MySQL's column types differ from the Postgres ones in
@@ -602,14 +617,9 @@ impl Dialect for MySql {
     }
 
     fn write_json_has_key(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {
-        // `JSON_CONTAINS_PATH(col, 'one', '$.key')` is MySQL's
-        // top-level key check. `CONCAT('$.', ?)` builds the path
-        // from the bound value.
-        sql.push_str("JSON_CONTAINS_PATH(");
-        sql.push_str(qualified_col);
-        sql.push_str(", 'one', CONCAT('$.', ");
-        sql.push_str(placeholder);
-        sql.push_str("))");
+        // `JSON_CONTAINS_PATH(col, 'one', '$."key"')` is MySQL's
+        // top-level key check.
+        write_my_json_has_keys(sql, qualified_col, &[placeholder], "one");
     }
 
     fn write_json_has_any_keys(
@@ -667,7 +677,7 @@ impl Dialect for MySql {
                     return Err(SqlError::EmptyUpdateSet);
                 }
                 // The clause fires on every unique key, so another key
-                // that can clash would update the wrong row (#1357).
+                // that can clash would update the wrong row.
                 if !my_target_is_only_unique_key(model, caller_set, target) {
                     return Err(SqlError::ConflictNotSupportedInDialect {
                         shape: "DO UPDATE on a target that is not the only unique key",
@@ -795,7 +805,7 @@ fn write_my_ident(sql: &mut String, name: &str) {
 
 /// True when every unique key a new row can clash on is `target`. A key
 /// with an `Auto` column the caller did not set holds a generated value,
-/// so it never clashes; a caller-set one can (rel-0608 correctness-003, #1407).
+/// so it never clashes; a caller-set one can.
 fn my_target_is_only_unique_key(model: &ModelSchema, caller_set: &[&str], target: &[&str]) -> bool {
     let fits = |cols: &[&str]| {
         let generated = cols.iter().any(|c| {
@@ -861,10 +871,10 @@ fn write_my_set_insert_id(sql: &mut String, id: &str, value: &str) {
 /// Shared body of [`MySql::write_json_has_any_keys`] /
 /// [`MySql::write_json_has_all_keys`]. `mode` is `"one"` for "any key
 /// matches" or `"all"` for "every key matches".
-fn write_my_json_has_keys(
+fn write_my_json_has_keys<P: AsRef<str>>(
     sql: &mut String,
     qualified_col: &str,
-    placeholders: &[String],
+    placeholders: &[P],
     mode: &'static str,
 ) {
     sql.push_str("JSON_CONTAINS_PATH(");
@@ -872,10 +882,12 @@ fn write_my_json_has_keys(
     sql.push_str(", '");
     sql.push_str(mode);
     sql.push('\'');
+    // `JSON_QUOTE` makes the bound key one literal member, as PG's `?`
+    // reads it; bare, `a.b` or `*` is a path and `2fa` a syntax error.
     for p in placeholders {
-        sql.push_str(", CONCAT('$.', ");
-        sql.push_str(p);
-        sql.push(')');
+        sql.push_str(", CONCAT('$.', JSON_QUOTE(");
+        sql.push_str(p.as_ref());
+        sql.push_str("))");
     }
     sql.push(')');
 }
@@ -1198,7 +1210,7 @@ mod tests {
         assert_eq!(sql, " ON DUPLICATE KEY UPDATE `a` = VALUES(`a`)");
     }
 
-    /// rel-0608 correctness-003: a bound `Auto` PK can clash like any key.
+    /// A bound `Auto` PK can clash like any key.
     #[test]
     fn conflict_do_update_refuses_a_bound_auto_pk() {
         use crate::core::{InsertQuery, SqlValue};
@@ -1243,7 +1255,7 @@ mod tests {
         );
     }
 
-    /// A bound uuid PK clashes unless the writer marks it generated (#1407).
+    /// A bound uuid PK clashes unless the writer marks it generated.
     #[test]
     fn conflict_do_update_trusts_only_a_generated_uuid_pk() {
         use crate::core::{InsertQuery, SqlValue};
@@ -1507,7 +1519,7 @@ mod tests {
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt
             .sql
-            .contains("JSON_CONTAINS_PATH(`meta`, 'one', CONCAT('$.', ?))"));
+            .contains("JSON_CONTAINS_PATH(`meta`, 'one', CONCAT('$.', JSON_QUOTE(?)))"));
     }
 
     #[test]
@@ -1542,7 +1554,7 @@ mod tests {
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt
             .sql
-            .contains("JSON_CONTAINS_PATH(`meta`, 'one', CONCAT('$.', ?), CONCAT('$.', ?))"));
+            .contains("JSON_CONTAINS_PATH(`meta`, 'one', CONCAT('$.', JSON_QUOTE(?)), CONCAT('$.', JSON_QUOTE(?)))"));
         assert_eq!(stmt.params.len(), 2);
     }
 
@@ -1578,7 +1590,7 @@ mod tests {
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt
             .sql
-            .contains("JSON_CONTAINS_PATH(`meta`, 'all', CONCAT('$.', ?), CONCAT('$.', ?))"));
+            .contains("JSON_CONTAINS_PATH(`meta`, 'all', CONCAT('$.', JSON_QUOTE(?)), CONCAT('$.', JSON_QUOTE(?)))"));
     }
 
     #[test]

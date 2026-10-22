@@ -991,7 +991,7 @@ fn forbidden_page(session: &AdminSession, logout_path: &str) -> Response {
     let username = crate::text::html_escape(&session.username);
     let logout_path = crate::text::html_escape(logout_path);
     let nonce = crate::csp_nonce::nonce_attr();
-    // `/logout` sits behind the CSRF layer (#1260).
+    // `/logout` sits behind the CSRF layer.
     let csrf_input = super::helpers::current_csrf_input();
     let body = format!(
         "<!doctype html>\

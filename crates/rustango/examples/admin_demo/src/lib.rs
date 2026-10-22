@@ -144,3 +144,48 @@ pub async fn seed(pool: &PgPool) -> Result<(), Box<dyn std::error::Error + Send 
     }
     Ok(())
 }
+
+/// The admin the server mounts at `/admin`: behind a login, with the two
+/// bulk actions. Create the first account with `cargo run -- create-admin <name>`.
+pub fn admin_router(pool: PgPool) -> axum::Router {
+    use rustango::session::{load_session_secret_for_tier, tier_from_env};
+    let secret = load_session_secret_for_tier(
+        &tier_from_env(),
+        std::path::Path::new("./var/.rustango_session.key"),
+    );
+    rustango::admin::Builder::new(pool)
+        .title("Admin Demo")
+        .subtitle("rustango auto-admin showcase")
+        .admin_prefix("/admin")
+        .with_session_auth(secret)
+        .register_action("posts", "publish", |pool, pks| {
+            Box::pin(async move { set_status(pool, pks, "published").await })
+        })
+        .register_action("posts", "archive", |pool, pks| {
+            Box::pin(async move { set_status(pool, pks, "archived").await })
+        })
+        .build()
+}
+
+/// Bulk action handler — sets `status` on every selected post.
+async fn set_status(
+    pool: &rustango::sql::Pool,
+    pks: &[rustango::core::SqlValue],
+    status: &str,
+) -> Result<(), rustango::admin::AdminError> {
+    use rustango::core::SqlValue;
+    let ids: Vec<String> = pks
+        .iter()
+        .filter_map(|v| match v {
+            SqlValue::I64(n) => Some(n.to_string()),
+            SqlValue::I32(n) => Some(n.to_string()),
+            _ => None,
+        })
+        .collect();
+    if !ids.is_empty() {
+        // ids are integers parsed from the admin — safe to inline.
+        let sql = format!("UPDATE posts SET status = '{status}' WHERE id IN ({})", ids.join(", "));
+        rustango::sql::raw_execute_pool(pool, &sql, Vec::new()).await?;
+    }
+    Ok(())
+}

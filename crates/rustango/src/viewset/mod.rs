@@ -3412,15 +3412,60 @@ async fn create_many(
     // be visible here — `acq` is the pool, not the transaction — and
     // atomicity is a property of the writes, which is the part that was
     // missing.
-    let mut created: Vec<Value> = Vec::with_capacity(pks.len());
-    for pk_val in pks {
-        match fetch_by_pk_scoped(state, acq, pk_field, pk_val, &fields, scope).await {
-            Ok(obj) => created.push(obj.unwrap_or(Value::Null)),
-            Err(e) => return json_server_error("viewset::bulk_create::read_back", &e),
+    match fetch_many_by_pk_scoped(state, acq, pk_field, pks, &fields, scope).await {
+        Ok(created) => json_created(Value::Array(created)),
+        Err(e) => json_server_error("viewset::bulk_create::read_back", &e),
+    }
+}
+
+/// PKs per read-back select: well under every backend's bind limit.
+const READ_BACK_CHUNK: usize = 500;
+
+/// [`fetch_by_pk_scoped`] for many rows: one `pk IN` select per chunk, in
+/// `pks` order. Per row when a rendered row does not carry its pk.
+async fn fetch_many_by_pk_scoped(
+    state: &ViewSetState,
+    acq: &mut AcquiredConn,
+    pk_field: &'static crate::core::FieldSchema,
+    pks: Vec<SqlValue>,
+    fields: &[&'static crate::core::FieldSchema],
+    scope: &[WhereExpr],
+) -> Result<Vec<Value>, crate::sql::ExecError> {
+    let key = |row: &Value| match row.get(pk_field.name)? {
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    };
+    let mut out = Vec::with_capacity(pks.len());
+    for chunk in pks.chunks(READ_BACK_CHUNK) {
+        let mut q = SelectQuery::new(state.vs.schema);
+        q.where_clause = narrow(
+            WhereExpr::Predicate(Filter {
+                column: pk_field.column,
+                op: Op::In,
+                value: SqlValue::List(chunk.to_vec()),
+            }),
+            scope.to_vec(),
+        );
+        let rows = render_list(state, acq, &q, fields).await?;
+        if rows.iter().all(|r| key(r).is_some()) {
+            let mut by_pk: HashMap<String, Value> = rows
+                .into_iter()
+                .filter_map(|r| Some((key(&r)?, r)))
+                .collect();
+            out.extend(
+                chunk
+                    .iter()
+                    .map(|pk| by_pk.remove(&pk.to_display_string()).unwrap_or(Value::Null)),
+            );
+            continue;
+        }
+        for pk in chunk {
+            let row = fetch_by_pk_scoped(state, acq, pk_field, pk.clone(), fields, scope).await?;
+            out.push(row.unwrap_or(Value::Null));
         }
     }
-
-    json_created(Value::Array(created))
+    Ok(out)
 }
 
 async fn handle_update(
@@ -3607,6 +3652,11 @@ async fn handle_destroy(
     match deleted {
         Ok(0) => json_error(StatusCode::NOT_FOUND, "not found"),
         Ok(_) => no_content(),
+        // Rows still pointing at it: the client's conflict, not a 500.
+        Err(e) if e.is_still_referenced() => {
+            tracing::warn!(target: "rustango::viewset", error = %e, "destroy refused");
+            json_error(StatusCode::CONFLICT, crate::sql::STILL_REFERENCED)
+        }
         Err(e) => json_server_error("viewset::destroy", &e),
     }
 }

@@ -540,9 +540,7 @@ async fn schema_purge_evicts_the_scoped_pool() {
 /// A fresh PG database and a database-mode org pointing at it.
 #[cfg(feature = "postgres")]
 async fn org_with_database(pool: &Pool, tag: &str) -> (Org, String) {
-    let Pool::Postgres(pg) = pool else {
-        unreachable!()
-    };
+    let pg = pool.as_postgres().expect("a Postgres pool");
     let slug = format!("purge-{tag}-{}", std::process::id());
     let db = format!("rustango_purge_{tag}_{}", std::process::id());
     let _ = rustango::sql::sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"))
@@ -566,9 +564,7 @@ async fn org_with_database(pool: &Pool, tag: &str) -> (Org, String) {
 
 #[cfg(feature = "postgres")]
 async fn database_exists(pool: &Pool, db: &str) -> bool {
-    let Pool::Postgres(pg) = pool else {
-        unreachable!()
-    };
+    let pg = pool.as_postgres().expect("a Postgres pool");
     rustango::sql::sqlx::query_scalar::<_, i64>(
         "SELECT count(*) FROM pg_database WHERE datname = $1",
     )

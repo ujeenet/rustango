@@ -57,7 +57,8 @@ pub enum HttpError {
 
 impl From<reqwest::Error> for HttpError {
     fn from(e: reqwest::Error) -> Self {
-        Self::Reqwest(e.to_string())
+        // A URL can hold credentials or a token; callers name the target.
+        Self::Reqwest(e.without_url().to_string())
     }
 }
 

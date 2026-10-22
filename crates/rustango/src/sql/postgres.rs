@@ -12,11 +12,7 @@ use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
     FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
 };
-#[cfg(feature = "postgres")]
-use crate::core::{SearchClause, WhereExpr};
 
-#[cfg(feature = "postgres")]
-use super::writers;
 use super::writers::{
     write_aggregate, write_bulk_insert, write_bulk_update_pg, write_count, write_delete,
     write_insert, write_select, write_update, Sql,
@@ -364,41 +360,4 @@ fn write_pg_ident(sql: &mut String, name: &str) {
         }
     }
     sql.push('"');
-}
-
-/// Compile the WHERE / ORDER BY / LIMIT / OFFSET tail of a `SelectQuery`
-/// into a `CompiledStatement`. The `sql` field starts at the first `WHERE`
-/// keyword (or is empty when there are no filters/search/ordering). `params`
-/// carries the bound values for the WHERE clause in order.
-///
-/// Used by `annotate_count_children_on` to forward the parent queryset's
-/// WHERE / ORDER / LIMIT constraints into the hand-rolled aggregate SQL.
-///
-/// This is the Postgres-typed shim — the underlying writer is dialect-
-/// agnostic, so [`super::writers::compile_where_order_tail`] takes a
-/// `&dyn Dialect` and is reusable from a `MySql` executor when batch 5
-/// migrates `annotate_count_children` to `&Pool`.
-///
-/// # Errors
-/// As [`super::writers::compile_where_order_tail`].
-#[cfg(feature = "postgres")]
-pub(crate) fn compile_where_order_tail(
-    where_clause: &WhereExpr,
-    search: Option<&SearchClause>,
-    order_by: &[crate::core::OrderItem],
-    limit: Option<i64>,
-    offset: Option<i64>,
-    qualify_with: Option<&'static str>,
-    model: Option<&'static ModelSchema>,
-) -> Result<CompiledStatement, SqlError> {
-    writers::compile_where_order_tail(
-        DIALECT,
-        where_clause,
-        search,
-        order_by,
-        limit,
-        offset,
-        qualify_with,
-        model,
-    )
 }

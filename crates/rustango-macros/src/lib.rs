@@ -2120,8 +2120,10 @@ struct CollectedFields {
     bulk_fill_in_place: Vec<TokenStream2>,
     /// Rust-filled `Auto` fields (`default_uuid_v7`, `auto_now(_add)`), reset when `insert_or_ignore` skips (#1937).
     rust_filled_idents: Vec<syn::Ident>,
+    /// `auto_now` fields: `upsert` stamps them before binding.
+    auto_now_idents: Vec<syn::Ident>,
     /// `default_uuid_v7` fields: an `Unset` one gets a fresh id, so the
-    /// upsert marks it `generated` for the MySQL key guard (#1407).
+    /// upsert marks it `generated` for the MySQL key guard.
     uuid_v7_fields: Vec<(syn::Ident, String)>,
     /// `let _i_unset_<n> = matches!(rows[0].<auto_field>, Auto::Unset);`
     /// + the loop that asserts every row matches. One pair per Auto
@@ -2211,6 +2213,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         bulk_columns_all: Vec::with_capacity(cap),
         bulk_fill_in_place: Vec::new(),
         rust_filled_idents: Vec::new(),
+        auto_now_idents: Vec::new(),
         uuid_v7_fields: Vec::new(),
         bulk_auto_uniformity: Vec::new(),
         first_auto_ident: None,
@@ -2399,6 +2402,9 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             if info.default_uuid_v7 || info.auto_now_add || info.auto_now {
                 out.rust_filled_idents.push(ident.clone());
             }
+            if info.auto_now {
+                out.auto_now_idents.push(ident.clone());
+            }
             if info.default_uuid_v7 {
                 out.uuid_v7_fields
                     .push((ident.clone(), info.column.clone()));
@@ -2490,15 +2496,15 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // Immutable post-insert: skip from UPDATE entirely.
         } else if info.auto_now {
             // `auto_now` columns: bind `chrono::Utc::now()` on every
-            // UPDATE so the column is always overridden with the
-            // wall-clock at write time, regardless of what value the
-            // user left in the struct field.
+            // UPDATE, and write it back so `self` matches the row.
             out.update_assignments.push(quote! {
                 #root::core::Assignment::new(
                     #column,
-                    ::core::convert::Into::<#root::core::SqlValue>::into(
-                        #root::__chrono::Utc::now()
-                    ),
+                    {
+                        let _now = #root::__chrono::Utc::now();
+                        self.#ident = #root::sql::Auto::Set(_now);
+                        ::core::convert::Into::<#root::core::SqlValue>::into(_now)
+                    },
                 )
             });
             out.upsert_update_columns.push(quote!(#column));
@@ -3578,11 +3584,55 @@ fn inherent_impl_tokens(
     // `save_pool(&Pool)` — emitted for every model with a PK. The
     // audited `save_pool` is built below on the diff path; both share
     // `save_partial_methods`, which differ only in how they run `_query`.
+    let save_ret = quote!(::core::result::Result<u64, #root::sql::ExecError>);
+    let save_keep = quote!(matches!(_saved, ::core::result::Result::Ok(n) if n > 0));
     let save_partial_methods = |pk_ident: &syn::Ident,
                                 pk_column_lit: &str,
                                 run: TokenStream2|
      -> TokenStream2 {
         let assignments = &fields.update_assignments;
+        // Pushed in step with `update_assignments`: one column each.
+        let assignment_cols = &fields.upsert_update_columns;
+        let write = restore_auto_now_unless(
+            &fields.auto_now_idents,
+            &save_ret,
+            &save_keep,
+            &quote! {
+                // Build only the wanted assignments, so an unnamed
+                // `auto_now` field is not stamped.
+                let mut _filtered: ::std::vec::Vec<#root::core::Assignment> =
+                    ::std::vec::Vec::with_capacity(_wanted_cols.len());
+                #(
+                    if _wanted_cols.contains(#assignment_cols) {
+                        _filtered.push(#assignments);
+                    }
+                )*
+                if _filtered.is_empty() {
+                    // All field names valid, but they all map to
+                    // non-assignable slots (PK column, computed/
+                    // virtual fields, relations without an
+                    // assignment). Same no-op as an empty list.
+                    #root::__tracing::warn!(
+                        target: "rustango::save_partial",
+                        model = _schema.name,
+                        "save_partial: every named field maps to a non-assignable column — no-op"
+                    );
+                    return ::core::result::Result::Ok(0);
+                }
+                let _query = #root::core::UpdateQuery::new(
+                    _schema,
+                    _filtered,
+                    #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                        #pk_column_lit,
+                        #root::core::Op::Eq,
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#pk_ident)
+                        ),
+                    )),
+                );
+                #run
+            },
+        );
         quote! {
             /// Save (UPDATE) only the listed Rust-side fields,
             /// leaving every other column untouched. Issue #66.
@@ -3645,38 +3695,7 @@ fn inherent_impl_tokens(
                         }
                     }
                 }
-                // Build the full assignment vec, then keep only the
-                // assignments whose column is in `_wanted_cols`.
-                let _full: ::std::vec::Vec<#root::core::Assignment> =
-                    ::std::vec![ #( #assignments ),* ];
-                let _filtered: ::std::vec::Vec<#root::core::Assignment> = _full
-                    .into_iter()
-                    .filter(|a| _wanted_cols.contains(a.column))
-                    .collect();
-                if _filtered.is_empty() {
-                    // All field names valid, but they all map to
-                    // non-assignable slots (PK column, computed/
-                    // virtual fields, relations without an
-                    // assignment). Same no-op as an empty list.
-                    #root::__tracing::warn!(
-                        target: "rustango::save_partial",
-                        model = _schema.name,
-                        "save_partial: every named field maps to a non-assignable column — no-op"
-                    );
-                    return ::core::result::Result::Ok(0);
-                }
-                let _query = #root::core::UpdateQuery::new(
-                    _schema,
-                    _filtered,
-                    #root::core::WhereExpr::Predicate(#root::core::Filter::new(
-                        #pk_column_lit,
-                        #root::core::Op::Eq,
-                        ::core::convert::Into::<#root::core::SqlValue>::into(
-                            ::core::clone::Clone::clone(&self.#pk_ident)
-                        ),
-                    )),
-                );
-                #run
+                #write
             }
 
             /// Typed-column counterpart of [`Self::save_partial`] —
@@ -3732,18 +3751,11 @@ fn inherent_impl_tokens(
             } else {
                 quote!()
             };
-            quote! {
-                /// Save this row to its table against either backend.
-                /// `INSERT` when the `Auto<T>` PK is `Unset`, else
-                /// `UPDATE` keyed on the PK; global scopes do not apply.
-                ///
-                /// # Errors
-                /// As [`Self::save`].
-                pub async fn save_pool(
-                    &mut self,
-                    pool: &#root::sql::Pool,
-                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    #dispatch_unset
+            let write = restore_auto_now_unless(
+                &fields.auto_now_idents,
+                &save_ret,
+                &save_keep,
+                &quote! {
                     let _query = #root::core::UpdateQuery::new(
                         <Self as #root::core::Model>::SCHEMA,
                         ::std::vec![ #( #assignments ),* ],
@@ -3757,6 +3769,21 @@ fn inherent_impl_tokens(
                     );
                     let _affected = #root::sql::update_pool(pool, &_query).await?;
                     ::core::result::Result::Ok(_affected)
+                },
+            );
+            quote! {
+                /// Save this row to its table against either backend.
+                /// `INSERT` when the `Auto<T>` PK is `Unset`, else
+                /// `UPDATE` keyed on the PK; global scopes do not apply.
+                ///
+                /// # Errors
+                /// As [`Self::save`].
+                pub async fn save_pool(
+                    &mut self,
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                    #dispatch_unset
+                    #write
                 }
 
                 #partial
@@ -3939,6 +3966,26 @@ fn inherent_impl_tokens(
             } else {
                 quote!()
             };
+            let write = restore_auto_now_unless(
+                &fields.auto_now_idents,
+                &save_ret,
+                &save_keep,
+                &quote! {
+                    let _query = #root::core::UpdateQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        ::std::vec![ #( #assignments ),* ],
+                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                            #pk_column_lit,
+                            #root::core::Op::Eq,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
+                            ),
+                        )),
+                    );
+                    self.__rustango_save_with_diff(pool, &_query, ::core::option::Option::None)
+                        .await
+                },
+            );
             quote! {
                 /// Save this row against either backend with audit
                 /// emission (diff-style: BEFORE+AFTER) inside the
@@ -3959,19 +4006,7 @@ fn inherent_impl_tokens(
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                     #unset_dispatch
-                    let _query = #root::core::UpdateQuery::new(
-                        <Self as #root::core::Model>::SCHEMA,
-                        ::std::vec![ #( #assignments ),* ],
-                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
-                            #pk_column_lit,
-                            #root::core::Op::Eq,
-                            ::core::convert::Into::<#root::core::SqlValue>::into(
-                                ::core::clone::Clone::clone(&self.#pk_ident)
-                            ),
-                        )),
-                    );
-                    self.__rustango_save_with_diff(pool, &_query, ::core::option::Option::None)
-                        .await
+                    #write
                 }
 
                 /// Run `query` and write its diff entry, limited to `only` columns.
@@ -6459,18 +6494,11 @@ fn inherent_impl_tokens(
         } else {
             quote!()
         };
-        quote! {
-            /// Save this row inside an open transaction. `INSERT` when
-            /// the `Auto<T>` PK is `Unset`, else `UPDATE` keyed on the
-            /// PK. Works against any backend that `tx` wraps.
-            ///
-            /// # Errors
-            /// As [`Self::save_pool`].
-            pub async fn save_tx(
-                &mut self,
-                tx: &mut #root::sql::PoolTx<'_>,
-            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                #dispatch_unset
+        let write = restore_auto_now_unless(
+            &fields.auto_now_idents,
+            &save_ret,
+            &save_keep,
+            &quote! {
                 let _query = #root::core::UpdateQuery::new(
                     <Self as #root::core::Model>::SCHEMA,
                     ::std::vec![ #( #assignments ),* ],
@@ -6484,6 +6512,21 @@ fn inherent_impl_tokens(
                 );
                 let _affected = #root::sql::update_tx(tx, &_query).await?;
                 ::core::result::Result::Ok(_affected)
+            },
+        );
+        quote! {
+            /// Save this row inside an open transaction. `INSERT` when
+            /// the `Auto<T>` PK is `Unset`, else `UPDATE` keyed on the
+            /// PK. Works against any backend that `tx` wraps.
+            ///
+            /// # Errors
+            /// As [`Self::save_pool`].
+            pub async fn save_tx(
+                &mut self,
+                tx: &mut #root::sql::PoolTx<'_>,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                #dispatch_unset
+                #write
             }
         }
     } else {
@@ -6627,6 +6670,7 @@ fn inherent_impl_tokens(
             fields.uuid_v7_fields.iter().cloned().unzip();
         let upsert_returning = &fields.returning_cols;
         let upsert_auto_assigns = &fields.auto_assigns;
+        let auto_now_idents = &fields.auto_now_idents;
         // Conflict target: prefer the first declared `unique_together`
         // when it exists. Plain `Auto<T>` PKs are server-assigned via
         // `BIGSERIAL` and never collide on insert, so a PK-only target
@@ -6671,6 +6715,54 @@ fn inherent_impl_tokens(
                 quote!(),
             )
         };
+        let save_on_write = restore_auto_now_unless(
+            auto_now_idents,
+            &save_ret,
+            &save_keep,
+            &quote! {
+                #audit_update_pre
+                let _query = #root::core::UpdateQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #assignments ),* ],
+                    #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                        #pk_column_lit,
+                        #root::core::Op::Eq,
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#pk_ident)
+                        ),
+                    )),
+                );
+                let _affected = #root::sql::__macro_internals::update_on(
+                    #executor_passes_to_data_write,
+                    &_query,
+                ).await?;
+                #audit_update_post
+                ::core::result::Result::Ok(_affected)
+            },
+        );
+        let upsert_write = restore_auto_now_unless(
+            auto_now_idents,
+            &quote!(::core::result::Result<(), #root::sql::ExecError>),
+            &quote!(_saved.is_ok()),
+            &quote! {
+                // The UPDATE branch writes `auto_now` too, so stamp it like `save`.
+                #( self.#auto_now_idents = #root::sql::Auto::Set(#root::__chrono::Utc::now()); )*
+                #( #upsert_pushes )*
+                let query = #root::core::InsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    _columns,
+                    _values,
+                )
+                .returning(::std::vec![ #( #upsert_returning ),* ])
+                .on_conflict(#conflict_clause)
+                .generated(_generated);
+                #upsert_run
+                let _returning_row = &_returning_row_v;
+                #( #upsert_auto_assigns )*
+                #audit_upsert_emit
+                ::core::result::Result::Ok(())
+            },
+        );
         Some(quote! {
             /// Insert this row if its `Auto<T>` primary key is
             /// `Unset`, otherwise update the existing row matching the
@@ -6729,24 +6821,7 @@ fn inherent_impl_tokens(
                 if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
                     return self.insert_on(#executor_passes_to_data_write).await.map(|()| 1u64);
                 }
-                #audit_update_pre
-                let _query = #root::core::UpdateQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    ::std::vec![ #( #assignments ),* ],
-                    #root::core::WhereExpr::Predicate(#root::core::Filter::new(
-                        #pk_column_lit,
-                        #root::core::Op::Eq,
-                        ::core::convert::Into::<#root::core::SqlValue>::into(
-                            ::core::clone::Clone::clone(&self.#pk_ident)
-                        ),
-                    )),
-                );
-                let _affected = #root::sql::__macro_internals::update_on(
-                    #executor_passes_to_data_write,
-                    &_query,
-                ).await?;
-                #audit_update_post
-                ::core::result::Result::Ok(_affected)
+                #save_on_write
             }
 
             /// Per-call override for the audit source. Runs
@@ -6810,20 +6885,7 @@ fn inherent_impl_tokens(
                         _generated.push(#gen_cols);
                     }
                 )*
-                #( #upsert_pushes )*
-                let query = #root::core::InsertQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    _columns,
-                    _values,
-                )
-                .returning(::std::vec![ #( #upsert_returning ),* ])
-                .on_conflict(#conflict_clause)
-                .generated(_generated);
-                #upsert_run
-                let _returning_row = &_returning_row_v;
-                #( #upsert_auto_assigns )*
-                #audit_upsert_emit
-                ::core::result::Result::Ok(())
+                #upsert_write
             }
         })
     } else {
@@ -8100,6 +8162,30 @@ fn column_module_tokens(
 fn column_type_ident(field_ident: &syn::Ident) -> syn::Ident {
     let name = ident_name(field_ident);
     syn::Ident::new(&format!("{name}_col"), field_ident.span())
+}
+
+/// Run `body` (of type `ret`) and put the `auto_now` fields back unless
+/// `keep` holds for `_saved`, so a failed or no-row write keeps the old stamp.
+fn restore_auto_now_unless(
+    idents: &[syn::Ident],
+    ret: &TokenStream2,
+    keep: &TokenStream2,
+    body: &TokenStream2,
+) -> TokenStream2 {
+    if idents.is_empty() {
+        return body.clone();
+    }
+    let prev: Vec<syn::Ident> = (0..idents.len())
+        .map(|i| quote::format_ident!("__rustango_auto_now_prev_{}", i))
+        .collect();
+    quote! {
+        #( let #prev = ::core::clone::Clone::clone(&self.#idents); )*
+        let _saved: #ret = async { #body }.await;
+        if !(#keep) {
+            #( self.#idents = #prev; )*
+        }
+        _saved
+    }
 }
 
 /// A field's name without the `r#` of a raw ident: `r#type` is `type` (#1937).
@@ -10484,8 +10570,8 @@ struct FieldAttrs {
     /// `#[rustango(on_delete = "cascade" | "restrict" | "set_null" |
     /// "set_default" | "no_action")]` — what happens to this row when
     /// the row it points at is deleted.
-    /// Only meaningful when `fk` / `o2o` is
-    /// also set; the macro errors at compile time if applied to a
+    /// Only meaningful on a `ForeignKey<T>` field or with `fk` / `o2o`
+    /// set; the macro errors at compile time if applied to a
     /// non-FK field. Threaded into `FieldSchema::fk_on_delete`. The
     /// DDL writer renders `ON DELETE <action>` after the constraint
     /// clause when this is `Some`; `None` falls back to the database
@@ -11309,12 +11395,20 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let blank = attrs.blank;
     let case_insensitive = attrs.case_insensitive;
     let validators_lits: Vec<&str> = attrs.validators.iter().map(String::as_str).collect();
-    if attrs.on_delete.is_some() && attrs.fk.is_none() && attrs.o2o.is_none() {
+    if attrs.on_delete.is_some() && attrs.fk.is_none() && attrs.o2o.is_none() && fk_inner.is_none()
+    {
         return Err(syn::Error::new_spanned(
             field,
-            "`#[rustango(on_delete = \"…\")]` requires either `fk = \"<table>\"` \
-             or `o2o = \"<table>\"` on the same field — it has no meaning on a \
-             non-FK column.",
+            "`#[rustango(on_delete = \"…\")]` requires a `ForeignKey<T>` field \
+             or `fk = \"<table>\"` / `o2o = \"<table>\"` on the same field — it \
+             has no meaning on a non-FK column.",
+        ));
+    }
+    if attrs.on_delete.as_deref() == Some("set_null") && fk_inner.is_some() && !nullable {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`on_delete = \"set_null\"` needs a nullable column: use \
+             `Option<ForeignKey<T>>`.",
         ));
     }
     let fk_on_delete = match attrs.on_delete.as_deref() {
@@ -13759,6 +13853,28 @@ mod field_attr_tests {
         };
         let err = parse_container_attrs(&input).err().expect("refused");
         assert!(err.to_string().contains("#2132"), "{err}");
+    }
+
+    /// `set_null` on a NOT NULL `ForeignKey<T>` would fail every parent delete.
+    #[test]
+    fn set_null_needs_an_optional_foreign_key() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[rustango(table = "c")]
+            struct Child {
+                #[rustango(primary_key)] id: i64,
+                #[rustango(on_delete = "set_null")] parent: ForeignKey<Parent>,
+            }
+        };
+        let err = expand(&input).err().expect("refused");
+        assert!(err.to_string().contains("set_null"), "{err}");
+        let input: DeriveInput = syn::parse_quote! {
+            #[rustango(table = "c")]
+            struct Child {
+                #[rustango(primary_key)] id: i64,
+                #[rustango(on_delete = "set_null")] parent: Option<ForeignKey<Parent>>,
+            }
+        };
+        assert!(expand(&input).is_ok());
     }
 
     /// A raw ident derives names without `r#`; this used to panic (#1937).

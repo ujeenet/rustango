@@ -126,7 +126,7 @@ sqlite = ["sqlx/sqlite"]
 _rand         = ["dep:rand"]
 _tera         = ["dep:tera"]
 _tower        = ["dep:tower"]
-_axum         = ["dep:axum"]
+_axum         = ["dep:axum", "dep:hyper", "dep:hyper-util", "_tower"]
 _async_trait  = ["dep:async-trait"]
 _base64       = ["dep:base64"]
 # The three that always travel together for cookie/token signing.
@@ -507,6 +507,9 @@ tenancy = [
 # unconditional dependency (see the note on the `tokio` line below).
 runtime = ["dep:tracing-subscriber", "dep:tracing-appender", "dep:dotenvy"]
 
+# Cleartext HTTP/2 (h2c) on the built-in server, next to HTTP/1.
+http2 = ["_axum", "axum/http2", "hyper/http2", "hyper-util/http2"]
+
 # Minimal axum runserver — `rustango::server::AppBuilder`. Bi-dialect
 # single-pool bootstrap (SQLite / Postgres / MySQL). Pulls axum; tokio is
 # unconditional. The full multi-tenant `Builder` lives behind `tenancy` and
@@ -515,7 +518,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.60.8", path = "../rustango-macros" }
+rustango-macros = { version = "0.60.9", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }
@@ -546,6 +549,9 @@ p256           = { workspace = true, optional = true }
 http           = { workspace = true, optional = true }
 http-body      = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
+# Already linked through axum; the serve loop sets hyper's timer.
+hyper          = { version = "1", features = ["server", "http1"], optional = true }
+hyper-util     = { version = "0.1", features = ["tokio", "server", "service", "http1"], optional = true }
 tera           = { workspace = true, optional = true }
 
 # `tenancy` feature deps — optional.

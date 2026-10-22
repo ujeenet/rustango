@@ -268,7 +268,7 @@ impl Dialect for Sqlite {
     }
 
     /// A Decimal binds as text, and text sorts above every number in an
-    /// expression with no affinity such as `SUM(x)` or `x * 2` (#1217).
+    /// expression with no affinity such as `SUM(x)` or `x * 2`.
     fn write_decimal_param(&self, sql: &mut String, placeholder: &str) {
         sql.push_str("CAST(");
         sql.push_str(placeholder);

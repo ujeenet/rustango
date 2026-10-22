@@ -1,12 +1,12 @@
 //! `pool.acquire()` holds one connection and every builder's `_on`
-//! method runs on it, on each backend (#2675).
+//! method runs on it, on each backend.
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
 use rustango::core::AggregateExpr;
 use rustango::query::QuerySet;
 use rustango::sql::sqlx;
-use rustango::sql::{CounterPool as _, FetcherPool as _, Pool, PoolConn};
+use rustango::sql::{CounterPool as _, FetcherPool as _, ForeignKey, Pool, PoolConn};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone, PartialEq)]
@@ -18,8 +18,21 @@ pub struct Author {
     pub name: String,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "pc_book")]
+pub struct Book {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 40)]
+    pub title: String,
+    pub author: ForeignKey<Author>,
+}
+
 async fn seeded(pool: &Pool) {
-    rustango::testkit::matrix::fresh_table::<Author>(pool).await;
+    use rustango::testkit::matrix::{drop_table, fresh_table};
+    drop_table(pool, "pc_book").await;
+    drop_table(pool, "pc_review").await;
+    fresh_table::<Author>(pool).await;
     for (id, name) in [(1, "Ada"), (2, "Bob")] {
         Author {
             id,
@@ -28,6 +41,17 @@ async fn seeded(pool: &Pool) {
         .insert_pool(pool)
         .await
         .expect("seed author");
+    }
+    fresh_table::<Book>(pool).await;
+    for (id, author) in [(1, 1_i64), (2, 1), (3, 2)] {
+        Book {
+            id,
+            title: format!("b{id}"),
+            author: ForeignKey::unloaded(author),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed book");
     }
 }
 
@@ -218,6 +242,288 @@ async fn on_tx_sees_its_writes(pool: &Pool) {
     tx.rollback().await.expect("rollback");
 }
 
+/// The `_on` methods that took only a Postgres executor run on a held
+/// connection on every backend, one counted query each.
+async fn former_pg_only_on_methods_run_on_a_held_conn(pool: &Pool) {
+    use rustango::sql::{
+        annotate_count_children_on, explain_pool, fetch_aggregate_on, ExplainOptions,
+    };
+    use rustango::test_assertions::assert_num_queries as one;
+    let mut conn = pool.acquire().await.expect("acquire");
+    let c = &mut conn;
+
+    let page = one(1, by_id().limit(1).fetch_paginated_on(&mut *c))
+        .await
+        .unwrap();
+    assert_eq!((page.rows.len(), page.total), (1, 2));
+
+    let bulk = one(
+        1,
+        Author::objects().in_bulk_on(Author::id, [1_i64, 2], |a| a.id, &mut *c),
+    )
+    .await
+    .unwrap();
+    assert_eq!(bulk[&2].name, "Bob");
+
+    let counts = one(
+        1,
+        annotate_count_children_on::<Author, _>(by_id(), "pc_book", "author", &mut *c),
+    )
+    .await
+    .unwrap();
+    let counts: Vec<(i64, i64)> = counts.into_iter().map(|(a, n)| (a.id, n)).collect();
+    assert_eq!(counts, [(1, 2), (2, 1)]);
+
+    // The `&PgPool` wrappers count too.
+    #[cfg(feature = "postgres")]
+    #[allow(irrefutable_let_patterns)] // single-variant `Pool` in a postgres-only build
+    if let Pool::Postgres(pg) = pool {
+        let page = one(1, by_id().limit(1).fetch_paginated(pg)).await.unwrap();
+        assert_eq!((page.rows.len(), page.total), (1, 2));
+        let counts = one(
+            1,
+            rustango::sql::annotate_count_children(by_id(), "pc_book", "author", pg),
+        )
+        .await
+        .unwrap();
+        assert_eq!(counts.len(), 2);
+    }
+
+    let plan = one(1, by_id().explain_on(&mut *c, ExplainOptions::default()))
+        .await
+        .unwrap();
+    assert!(!plan.is_empty());
+    let q = by_id().compile().unwrap();
+    let plan = one(1, explain_pool(pool, &q, ExplainOptions::default()))
+        .await
+        .unwrap();
+    assert!(!plan.is_empty());
+
+    let agg = Author::objects()
+        .aggregate()
+        .values(&[])
+        .annotate("n", AggregateExpr::Count(None))
+        .compile()
+        .unwrap();
+    let rows = one(1, fetch_aggregate_on(&agg, &mut *c)).await.unwrap();
+    assert_eq!(rows.len(), 1);
+
+    let mut book = Book::objects()
+        .filter("id", 3_i64)
+        .fetch_on(&mut *c)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        one(1, book.author.get_on(&mut *c)).await.unwrap().name,
+        "Bob"
+    );
+
+    let renamed = one(
+        1,
+        Author::objects()
+            .filter("id", 2_i64)
+            .update()
+            .set("name", "Cy")
+            .execute_on(&mut *c),
+    )
+    .await
+    .unwrap();
+    assert_eq!(renamed, 1);
+    let gone = one(1, Book::objects().filter("id", 3_i64).delete_on(&mut *c))
+        .await
+        .unwrap();
+    assert_eq!(gone, 1);
+    drop(conn);
+    assert_eq!(Book::objects().count(pool).await.unwrap(), 2);
+    let names: Vec<String> = by_id()
+        .fetch(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    assert_eq!(names, ["Ada", "Cy"]);
+}
+
+/// A child whose primary key is not `id`.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "pc_review")]
+pub struct Review {
+    #[rustango(primary_key)]
+    pub review_no: i64,
+    pub author: ForeignKey<Author>,
+}
+
+/// A filtered, limited parent queryset counts children whose pk is not `id`.
+async fn annotate_count_children_honours_where_and_child_pk(pool: &Pool) {
+    use rustango::sql::annotate_count_children_on;
+    use rustango::testkit::matrix::fresh_table;
+    fresh_table::<Review>(pool).await;
+    for (review_no, author) in [(10, 2_i64), (11, 2), (12, 1)] {
+        Review {
+            review_no,
+            author: ForeignKey::unloaded(author),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed review");
+    }
+    let qs = by_id().filter("name", "Bob");
+    let rows = annotate_count_children_on::<Author, _>(qs, "pc_review", "author", pool)
+        .await
+        .expect("filtered parent");
+    let rows: Vec<(i64, i64)> = rows.into_iter().map(|(a, n)| (a.id, n)).collect();
+    assert_eq!(rows, [(2, 2)]);
+
+    let rows = annotate_count_children_on::<Author, _>(by_id().limit(1), "pc_book", "author", pool)
+        .await
+        .expect("limited parent");
+    let rows: Vec<(i64, i64)> = rows.into_iter().map(|(a, n)| (a.id, n)).collect();
+    assert_eq!(rows, [(1, 2)]);
+}
+
+/// A UNION or `distinct_on` parent still gets its count column.
+async fn annotate_count_children_on_union_and_distinct_on(pool: &Pool) {
+    use rustango::sql::annotate_count_children_on;
+    let counts = |rows: Vec<(Author, i64)>| {
+        let mut v: Vec<(i64, i64)> = rows.into_iter().map(|(a, n)| (a.id, n)).collect();
+        v.sort_unstable();
+        v
+    };
+    let union = Author::objects()
+        .filter("id", 1_i64)
+        .union(Author::objects().filter("id", 2_i64));
+    let rows = annotate_count_children_on::<Author, _>(union, "pc_book", "author", pool)
+        .await
+        .expect("union parent");
+    assert_eq!(counts(rows), [(1, 2), (2, 1)]);
+
+    // A second "Ada" with a book of its own: `distinct_on` must drop it.
+    Author {
+        id: 3,
+        name: "Ada".into(),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("second Ada");
+    Book {
+        id: 4,
+        title: "b4".into(),
+        author: ForeignKey::unloaded(3),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("her book");
+    let distinct = Author::objects()
+        .distinct_on(&["name"])
+        .order_by(&[("name", false), ("id", false)]);
+    let rows = annotate_count_children_on::<Author, _>(distinct, "pc_book", "author", pool)
+        .await
+        .expect("distinct_on parent");
+    assert_eq!(counts(rows), [(1, 2), (2, 1)]);
+}
+
+/// A one-connection pool on the same database, so a release is visible.
+async fn one_conn(pool: &Pool) -> Pool {
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(p) => Pool::Postgres(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with((*p.connect_options()).clone())
+                .await
+                .unwrap(),
+        ),
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(p) => Pool::Mysql(
+            sqlx::mysql::MySqlPoolOptions::new()
+                .max_connections(1)
+                .connect_with((*p.connect_options()).clone())
+                .await
+                .unwrap(),
+        ),
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(p) => Pool::Sqlite(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with((*p.connect_options()).clone())
+                .await
+                .unwrap(),
+        ),
+    }
+}
+
+/// Read one session setting on `conn`, after setting it when `set`.
+async fn session_setting(conn: &mut PoolConn, set: bool) -> String {
+    match conn {
+        #[cfg(feature = "postgres")]
+        PoolConn::Postgres(c) => {
+            if set {
+                sqlx::query("SET application_name = 'rustango_leak'")
+                    .execute(&mut **c)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query_scalar("SELECT current_setting('application_name')")
+                .fetch_one(&mut **c)
+                .await
+                .unwrap()
+        }
+        #[cfg(feature = "mysql")]
+        PoolConn::Mysql(c) => {
+            if set {
+                sqlx::query("SET @rustango_leak = 'rustango_leak'")
+                    .execute(&mut **c)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query_scalar("SELECT CAST(COALESCE(@rustango_leak, '') AS CHAR)")
+                .fetch_one(&mut **c)
+                .await
+                .unwrap()
+        }
+        #[cfg(feature = "sqlite")]
+        PoolConn::Sqlite(c) => {
+            // Per connection; `cache_size` would live in the shared in-memory cache.
+            if set {
+                sqlx::query("PRAGMA reverse_unordered_selects = 1")
+                    .execute(&mut **c)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query_scalar::<_, i64>("PRAGMA reverse_unordered_selects")
+                .fetch_one(&mut **c)
+                .await
+                .unwrap()
+                .to_string()
+        }
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("no backend enabled"),
+    }
+}
+
+/// Session state set on a held connection reaches the next borrower,
+/// unless the connection is closed on drop.
+async fn close_on_drop_keeps_session_state_out_of_the_pool(pool: &Pool) {
+    let p = one_conn(pool).await;
+    let mut conn = p.acquire().await.unwrap();
+    let default = session_setting(&mut conn, false).await;
+    let set = session_setting(&mut conn, true).await;
+    assert_ne!(set, default);
+    drop(conn);
+    let mut conn = p.acquire().await.unwrap();
+    assert_eq!(
+        session_setting(&mut conn, false).await,
+        set,
+        "premise: sqlx keeps it"
+    );
+    conn.close_on_drop();
+    drop(conn);
+    let mut conn = p.acquire().await.unwrap();
+    assert_eq!(session_setting(&mut conn, false).await, default);
+}
+
 tri_dialect_test!(
     setup: seeded,
     scenarios: [
@@ -225,5 +531,9 @@ tri_dialect_test!(
         on_conn_matches_pool,
         queries_run_on_the_held_session,
         on_tx_sees_its_writes,
+        former_pg_only_on_methods_run_on_a_held_conn,
+        close_on_drop_keeps_session_state_out_of_the_pool,
+        annotate_count_children_honours_where_and_child_pk,
+        annotate_count_children_on_union_and_distinct_on,
     ]
 );

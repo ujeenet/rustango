@@ -361,34 +361,72 @@ async fn handle(cfg: Arc<SecurityHeadersLayer>, req: Request<Body>, next: Next) 
 ///   ...
 /// }}
 /// ```
+///
+/// It takes `application/csp-report` (`report-uri`), the Reporting API's
+/// `application/reports+json` and plain JSON, up to 64 KiB. The CSRF layer
+/// lets the two report types through without a token only at a path in
+/// [`crate::forms::csrf::CsrfConfig::report_paths`] (default `/__csp-report`).
 pub fn csp_report_router(path: &str) -> axum::Router {
     use axum::routing::post;
     let path = path.to_owned();
-    axum::Router::new().route(&path, post(handle_csp_report))
+    axum::Router::new().route(
+        &path,
+        post(handle_csp_report).layer(axum::extract::DefaultBodyLimit::max(CSP_REPORT_MAX_BYTES)),
+    )
 }
 
-async fn handle_csp_report(body: axum::extract::Json<serde_json::Value>) -> axum::http::StatusCode {
-    // Standard CSP report format wraps the body in {"csp-report": {...}}
-    let report = body.0.get("csp-report").unwrap_or(&body.0);
-    let document_uri = report
-        .get("document-uri")
-        .and_then(|v| v.as_str())
-        .unwrap_or("?");
-    let violated = report
-        .get("violated-directive")
-        .and_then(|v| v.as_str())
-        .unwrap_or("?");
-    let blocked = report
-        .get("blocked-uri")
-        .and_then(|v| v.as_str())
-        .unwrap_or("?");
+/// Largest CSP report body accepted.
+const CSP_REPORT_MAX_BYTES: usize = 64 * 1024;
+
+async fn handle_csp_report(body: axum::body::Bytes) -> axum::http::StatusCode {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return axum::http::StatusCode::BAD_REQUEST;
+    };
+    match value {
+        // Reporting API: `[{"type": "csp-violation", "body": {...}}, ...]`.
+        serde_json::Value::Array(reports) => {
+            let mut violations = reports.iter().filter(|r| r["type"] == "csp-violation");
+            for r in violations.by_ref().take(CSP_REPORTS_LOGGED) {
+                let b = &r["body"];
+                log_csp_violation(
+                    str_at(b, "documentURL"),
+                    str_at(b, "effectiveDirective"),
+                    str_at(b, "blockedURL"),
+                );
+            }
+            let skipped = violations.count();
+            if skipped > 0 {
+                tracing::warn!(skipped, "CSP violation reports not logged");
+            }
+        }
+        // `report-uri`: `{"csp-report": {...}}`.
+        v => {
+            let report = v.get("csp-report").unwrap_or(&v);
+            log_csp_violation(
+                str_at(report, "document-uri"),
+                str_at(report, "violated-directive"),
+                str_at(report, "blocked-uri"),
+            );
+        }
+    }
+    axum::http::StatusCode::NO_CONTENT
+}
+
+fn str_at<'a>(v: &'a serde_json::Value, key: &str) -> &'a str {
+    v.get(key).and_then(|v| v.as_str()).unwrap_or("?")
+}
+
+/// Violations logged per request; one body of tiny reports was thousands of lines.
+const CSP_REPORTS_LOGGED: usize = 10;
+
+// `?` escapes the newlines a forged report may carry.
+fn log_csp_violation(document_uri: &str, violated: &str, blocked: &str) {
     tracing::warn!(
-        document_uri = %document_uri,
-        violated_directive = %violated,
-        blocked_uri = %blocked,
+        document_uri = ?document_uri,
+        violated_directive = ?violated,
+        blocked_uri = ?blocked,
         "CSP violation report",
     );
-    axum::http::StatusCode::NO_CONTENT
 }
 
 // ------------------------------------------------------------------ CspBuilder
@@ -755,5 +793,131 @@ mod tests {
         s.csp = Some("default-src 'self'; img-src *".into());
         let l = SecurityHeadersLayer::from_settings(&s);
         assert_eq!(l.csp.as_deref(), Some("default-src 'self'; img-src *"));
+    }
+}
+
+#[cfg(all(test, feature = "csrf"))]
+mod csp_report_tests {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt as _;
+
+    /// The app as deployed: report route behind the CSRF layer.
+    async fn post(content_type: &str, origin: Option<&str>, body: String) -> u16 {
+        let app = super::csp_report_router("/__csp-report").layer(crate::forms::csrf::layer());
+        let mut req = Request::post("/__csp-report")
+            .header("host", "app.test")
+            .header("content-type", content_type);
+        if let Some(o) = origin {
+            req = req.header("origin", o);
+        }
+        let resp = app
+            .oneshot(req.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        resp.status().as_u16()
+    }
+
+    #[tokio::test]
+    async fn browser_report_types_are_accepted_without_a_token() {
+        let legacy = r#"{"csp-report":{"document-uri":"http://app.test/","violated-directive":"script-src","blocked-uri":"inline"}}"#;
+        let api = r#"[{"type":"csp-violation","body":{"documentURL":"http://app.test/","effectiveDirective":"script-src","blockedURL":"inline"}}]"#;
+        let origin = Some("http://app.test");
+        assert_eq!(
+            post("application/csp-report", origin, legacy.into()).await,
+            204
+        );
+        assert_eq!(
+            post("application/reports+json", origin, api.into()).await,
+            204
+        );
+    }
+
+    #[tokio::test]
+    async fn report_types_still_need_a_same_origin_and_a_small_body() {
+        let legacy = r#"{"csp-report":{}}"#;
+        let evil = Some("http://evil.example");
+        assert_eq!(
+            post("application/csp-report", evil, legacy.into()).await,
+            403
+        );
+        let big = format!(r#"{{"csp-report":{{"x":"{}"}}}}"#, "a".repeat(100 * 1024));
+        assert_eq!(post("application/csp-report", None, big).await, 413);
+        assert_eq!(
+            post("text/plain", None, legacy.into()).await,
+            403,
+            "other types need the token"
+        );
+    }
+
+    /// Only the report route skips the token; `Json` also reads `+json` types.
+    #[tokio::test]
+    async fn report_types_need_the_token_on_other_routes() {
+        let api = axum::Router::new()
+            .route(
+                "/api/items",
+                axum::routing::post(|b: String| async move { b }),
+            )
+            .merge(super::csp_report_router("/__csp-report"))
+            .layer(crate::forms::csrf::layer())
+            .layer(crate::forms::csrf::layer());
+        for ct in ["application/reports+json", "application/csp-report"] {
+            let req = Request::post("/api/items")
+                .header("host", "app.test")
+                .header("origin", "http://app.test")
+                .header("content-type", ct)
+                .body(Body::from("[]"))
+                .unwrap();
+            let resp = api.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status().as_u16(), 403, "{ct}");
+        }
+    }
+
+    /// A big batch logs a bounded number of lines, each on one line.
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn a_report_batch_logs_a_bounded_number_of_lines() {
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let one = r#"{"type":"csp-violation","body":{"documentURL":"a\nFAKE b"}}"#;
+        let body = format!("[{}]", vec![one; 500].join(","));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let status = tracing::subscriber::with_default(subscriber, || {
+            rt.block_on(super::handle_csp_report(body.into()))
+        });
+        assert_eq!(status, 204);
+        let out = buf.contents();
+        assert_eq!(out.lines().count(), 10 + 1, "{out}");
+        assert!(!out.lines().any(|l| l.starts_with("FAKE")), "{out}");
+        assert!(out.contains("skipped=490"), "{out}");
+    }
+
+    /// Over HTTPS a report with no Origin is taken; a foreign one is not.
+    #[tokio::test]
+    async fn https_report_without_origin_is_accepted() {
+        let send = |origin: Option<&'static str>| async move {
+            let app = super::csp_report_router("/__csp-report").layer(crate::forms::csrf::layer());
+            let mut req = Request::post("/__csp-report")
+                .header("host", "app.test")
+                .header("x-forwarded-proto", "https")
+                .header("content-type", "application/csp-report");
+            if let Some(o) = origin {
+                req = req.header("origin", o);
+            }
+            let body = Body::from(r#"{"csp-report":{}}"#);
+            app.oneshot(req.body(body).unwrap())
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        };
+        assert_eq!(send(None).await, 204);
+        assert_eq!(send(Some("https://app.test")).await, 204);
+        assert_eq!(send(Some("https://evil.example")).await, 403);
     }
 }

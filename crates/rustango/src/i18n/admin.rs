@@ -132,7 +132,7 @@ pub fn render_editor(
         "<form method=\"post\" action=\"{}\">",
         escape(action)
     ));
-    // The editor mounts under the admin's CSRF layer (#1259).
+    // The editor mounts under the admin's CSRF layer.
     #[cfg(feature = "admin")]
     h.push_str(&crate::admin::current_csrf_input());
     h.push_str("<table><thead><tr><th>key</th>");

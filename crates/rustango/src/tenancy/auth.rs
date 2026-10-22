@@ -178,12 +178,59 @@ inventory::submit! {
     }
 }
 
-// The registry admin serves operators too; never store their password raw (#1158).
+// The registry admin serves operators too; never store their password raw.
 #[cfg(feature = "admin")]
 inventory::submit! {
     crate::admin::derived_fields::AdminDerivedField {
         table: "rustango_operators",
         derive: admin_hash_password,
+    }
+}
+
+/// The admin writes `active` itself; a deactivation there ends the account's
+/// sessions and JWT refresh in the same UPDATE, at the logout cut-off.
+#[cfg(feature = "admin")]
+fn admin_revoke_on_deactivate<'a>(
+    values: &'a mut Vec<(&'static str, crate::core::SqlValue)>,
+    before: Option<&'a serde_json::Value>,
+) -> crate::admin::derived_fields::DeriveFuture<'a> {
+    use crate::core::SqlValue;
+    use crate::session::SESSIONS_REVOKED_AT;
+    Box::pin(async move {
+        let was_active = before
+            .and_then(|r| r.get("active"))
+            .is_some_and(|v| v.as_bool() == Some(true) || v.as_i64().is_some_and(|n| n != 0));
+        let deactivates = values
+            .iter()
+            .any(|(c, v)| *c == "active" && matches!(v, SqlValue::Bool(false)));
+        if !(was_active && deactivates) {
+            return Ok(());
+        }
+        let prev = before
+            .and_then(|r| r.get(SESSIONS_REVOKED_AT)?.as_str())
+            .and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
+        let cutoff = crate::session::logout_cutoff(prev, 0);
+        let cutoff = chrono::DateTime::from_timestamp(cutoff, 0).unwrap_or_else(chrono::Utc::now);
+        values.retain(|(c, _)| *c != SESSIONS_REVOKED_AT);
+        values.push((SESSIONS_REVOKED_AT, SqlValue::DateTime(cutoff)));
+        Ok::<(), String>(())
+    })
+}
+
+#[cfg(feature = "admin")]
+inventory::submit! {
+    crate::admin::derived_fields::AdminDerivedField {
+        table: "rustango_operators",
+        derive: admin_revoke_on_deactivate,
+    }
+}
+
+// Tenant users too.
+#[cfg(feature = "admin")]
+inventory::submit! {
+    crate::admin::derived_fields::AdminDerivedField {
+        table: "rustango_users",
+        derive: admin_revoke_on_deactivate,
     }
 }
 
@@ -544,7 +591,7 @@ pub fn parse_basic_auth(header_value: Option<&str>) -> Option<(String, String)> 
 mod tests {
     use super::*;
 
-    /// #1158 — an operator password typed into the registry admin is hashed.
+    /// An operator password typed into the registry admin is hashed.
     #[cfg(feature = "admin")]
     #[tokio::test]
     async fn the_admin_hashes_an_operator_password() {

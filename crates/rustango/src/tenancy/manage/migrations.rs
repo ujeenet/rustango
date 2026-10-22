@@ -175,7 +175,7 @@ fn write_tenant_report<W: Write>(
 
 /// Every tenant's names in each of `ledgers`, inactive tenants included,
 /// opening each tenant pool once. A tenant that can't be read fails the
-/// whole call, so nothing is assumed (#2393).
+/// whole call, so nothing is assumed.
 pub(super) async fn tenant_ledgers<DB: Database, const N: usize>(
     pools: &TenantPools<DB>,
     ledgers: [&str; N],
@@ -222,7 +222,7 @@ where
 pub(super) type TenantLedger = Vec<(String, std::collections::HashSet<String>)>;
 
 /// `showmigrations`: registry-scoped files from the registry ledger,
-/// tenant-scoped ones, framework steps too, from every tenant's (#1311).
+/// tenant-scoped ones, framework steps too, from every tenant's.
 pub(super) async fn showmigrations_cmd<W: Write, DB: Database>(
     pools: &TenantPools<DB>,
     dir: &Path,
@@ -450,7 +450,7 @@ where
     use rustango::migrate::MigrationScope;
     let target = args.iter().find(|a| !a.starts_with('-'));
     if target.is_none() && args.iter().any(|a| a == "--dry-run") {
-        // The registry's system chain is registry-scoped (#1311).
+        // The registry's system chain is registry-scoped.
         let scoped = tenant_migrate::scoped_subset(dir, MigrationScope::Registry).await?;
         let system = rustango::migrate::manage::SystemView::registry(dir);
         return rustango::migrate::manage::migrate_dry_run_cmd(

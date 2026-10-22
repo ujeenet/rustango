@@ -309,7 +309,7 @@ pub struct DatabaseSettings {
     /// hold connections to the old server, or with revoked
     /// credentials. `None` keeps sqlx's default.
     pub pool_max_lifetime_secs: Option<u64>,
-    /// Ping each connection before a checkout. `None` means off (#2674):
+    /// Ping each connection before a checkout. `None` means off:
     /// a connection dropped while idle then fails one query and is discarded.
     pub pool_test_before_acquire: Option<bool>,
     /// With the ping off, ping a connection idle at least this many
@@ -1011,7 +1011,7 @@ impl std::fmt::Debug for DiskSettings {
 mod tests {
     use super::*;
 
-    /// #2674: `[database].pool_test_before_acquire` reaches the pool tuning, off when unset.
+    /// `[database].pool_test_before_acquire` reaches the pool tuning, off when unset.
     #[test]
     fn pool_test_before_acquire_parses_into_the_tuning() {
         let unset: DatabaseSettings = toml::from_str("").expect("valid TOML");
@@ -1021,7 +1021,7 @@ mod tests {
         assert!(on.pool_tuning().test_before_acquire);
     }
 
-    /// pr-1408-r2 conventions-004: the idle ping threshold has a `[database]` key too.
+    /// The idle ping threshold has a `[database]` key too.
     #[test]
     fn pool_idle_ping_secs_parses_into_the_tuning() {
         let unset: DatabaseSettings = toml::from_str("").expect("valid TOML");

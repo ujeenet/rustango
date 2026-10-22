@@ -186,6 +186,48 @@ impl<T> QuerySet<T>
 where
     T: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
 {
+    /// [`Self::fetch_paginated_on`] against a pool, for non-tenant code.
+    ///
+    /// # Errors
+    /// As [`Self::fetch_paginated_on`].
+    pub async fn fetch_paginated(self, pool: &PgPool) -> Result<Page<T>, ExecError> {
+        let select = self.compile()?;
+        let stmt = paginated_statement(&Postgres, &select)?;
+        // Its own decode only for the looser `FromRow<PgRow>` bound.
+        let rows = run_on(pool, &stmt.sql, stmt.params, |row| match row {
+            RowRef::Postgres(r) => paged::<T, _>(r),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("a PgPool yields Postgres rows"),
+        })
+        .await?;
+        Ok(into_page(rows))
+    }
+}
+
+/// One `fetch_paginated` row and its window total.
+fn paged<T, R>(row: &R) -> Result<(T, i64), sqlx::Error>
+where
+    R: sqlx::Row,
+    T: for<'r> sqlx::FromRow<'r, R>,
+    for<'a> &'a str: sqlx::ColumnIndex<R>,
+    i64: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
+    Ok((T::from_row(row)?, row.try_get("__rustango_total")?))
+}
+
+/// An empty page has no row to carry the total, so it is 0.
+fn into_page<T>(rows: Vec<(T, i64)>) -> Page<T> {
+    let total = rows.first().map_or(0, |(_, total)| *total);
+    Page {
+        rows: rows.into_iter().map(|(row, _)| row).collect(),
+        total,
+    }
+}
+
+impl<T> QuerySet<T>
+where
+    T: Model + MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+{
     /// Fetch a page of rows **and** the total matching count in one
     /// round trip. `COUNT(*) OVER ()` returns the pre-LIMIT total on
     /// every row, so there is no second `SELECT COUNT(*)`.
@@ -194,7 +236,7 @@ where
     /// let page: Page<Post> = Post::objects()
     ///     .where_(Post::published.eq(true))
     ///     .limit(20).offset(40)
-    ///     .fetch_paginated_on(tenant.conn()).await?;
+    ///     .fetch_paginated_on(&mut conn).await?;
     /// assert!(page.total >= page.rows.len() as i64);
     /// ```
     ///
@@ -207,41 +249,30 @@ where
     /// ```
     ///
     /// An empty result gives `Page { rows: vec![], total: 0 }`.
+    /// MySQL needs 8.0 or later for the window function.
     ///
     /// # Errors
     /// As [`Self::fetch_on`].
-    pub async fn fetch_paginated_on<'c, E>(self, executor: E) -> Result<Page<T>, ExecError>
-    where
-        E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-    {
+    pub async fn fetch_paginated_on<'c, E: SqlExecutor<'c>>(
+        self,
+        exec: E,
+    ) -> Result<Page<T>, ExecError> {
         let select = self.compile()?;
-        let stmt = paginated_statement(&Postgres, &select)?;
-        let raw_rows: Vec<PgRow> = pg_on_query(&stmt.sql, stmt.params)
-            .fetch_all(executor)
-            .await?;
-        let total: i64 = raw_rows
-            .first()
-            .map(|row| sqlx::Row::try_get::<i64, _>(row, "__rustango_total"))
-            .transpose()?
-            .unwrap_or(0);
-        let mut rows = Vec::with_capacity(raw_rows.len());
-        for row in &raw_rows {
-            rows.push(T::from_row(row)?);
-        }
-        Ok(Page { rows, total })
+        let stmt = paginated_statement(exec.dialect(), &select)?;
+        let rows = run_on(exec, &stmt.sql, stmt.params, |row| match row {
+            #[cfg(feature = "postgres")]
+            RowRef::Postgres(r) => paged::<T, _>(r),
+            #[cfg(feature = "mysql")]
+            RowRef::Mysql(r) => paged::<T, _>(r),
+            #[cfg(feature = "sqlite")]
+            RowRef::Sqlite(r) => paged::<T, _>(r),
+        })
+        .await?;
+        Ok(into_page(rows))
     }
 
-    /// [`Self::fetch_paginated_on`] against a pool, for non-tenant code.
-    ///
-    /// # Errors
-    /// As [`Self::fetch_paginated_on`].
-    pub async fn fetch_paginated(self, pool: &PgPool) -> Result<Page<T>, ExecError> {
-        self.fetch_paginated_on(pool).await
-    }
-
-    /// [`QuerySet::in_bulk`] against any sqlx executor, so schema-mode
-    /// tenant queries can use the connection that holds their
-    /// `SET search_path`.
+    /// [`QuerySet::in_bulk`] on a [`SqlExecutor`], e.g. `Tenant::conn()`
+    /// whose connection holds the tenant's `search_path`.
     ///
     /// # Errors
     /// As [`Self::fetch_on`].
@@ -253,12 +284,8 @@ where
         executor: E,
     ) -> Result<std::collections::HashMap<K, T>, ExecError>
     where
-        E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-        T: LoadRelated
-            + MaybeMyFromRow
-            + MaybeSqliteFromRow
-            + MaybeMyLoadRelated
-            + MaybeSqliteLoadRelated,
+        E: SqlExecutor<'c>,
+        T: LoadRelated + MaybeMyLoadRelated + MaybeSqliteLoadRelated,
         C: crate::core::Column<Model = T>,
         K: Eq + std::hash::Hash + Into<crate::core::SqlValue>,
         I: IntoIterator<Item = K>,
@@ -314,11 +341,10 @@ pub(crate) use row_to_json::{select_one_row_as_json_tx, select_rows_as_json_tx};
 /// N + 1:
 ///
 /// ```text
-///   SELECT parent.<every-column>, COUNT(child.<pk>) AS __annotated_count
-///   FROM parent
-///   LEFT JOIN child ON child.<fk_column> = parent.<pk>
-///   GROUP BY parent.<every-column>
-///   [WHERE / ORDER BY clauses from `parent_qs` apply]
+///   SELECT parent.<every-column>,
+///     (SELECT COUNT(*) FROM child WHERE child.<fk_column> = parent.<pk>)
+///       AS __annotated_count
+///   FROM parent [WHERE / ORDER BY / LIMIT from `parent_qs`]
 /// ```
 ///
 /// Handles one Count over one reverse-FK relation. For `Sum`, `Avg`
@@ -339,16 +365,21 @@ pub async fn annotate_count_children<P>(
 where
     P: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
 {
-    annotate_count_children_on(parent_qs, child_table, child_fk_column, pool).await
+    let stmt = annotate_count_statement(&Postgres, parent_qs, child_table, child_fk_column)?;
+    // Its own decode only for the looser `FromRow<PgRow>` bound.
+    run_on(pool, &stmt.sql, stmt.params, |row| match row {
+        RowRef::Postgres(r) => counted::<P, _>(r),
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("a PgPool yields Postgres rows"),
+    })
+    .await
 }
 
-/// [`annotate_count_children`] against any sqlx executor, so
-/// tenant-scoped code can run it on a `Tenant::conn()` connection
-/// whose `search_path` points at the tenant schema.
+/// [`annotate_count_children`] on a [`SqlExecutor`], e.g. `Tenant::conn()`
+/// whose connection holds the tenant's `search_path`.
 ///
 /// # Errors
 /// As [`annotate_count_children`].
-#[cfg(feature = "postgres")]
 pub async fn annotate_count_children_on<'c, P, E>(
     parent_qs: crate::query::QuerySet<P>,
     child_table: &'static str,
@@ -356,63 +387,55 @@ pub async fn annotate_count_children_on<'c, P, E>(
     executor: E,
 ) -> Result<Vec<(P, i64)>, ExecError>
 where
-    P: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+    P: Model + MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+    E: SqlExecutor<'c>,
 {
-    use std::fmt::Write as _;
+    let stmt =
+        annotate_count_statement(executor.dialect(), parent_qs, child_table, child_fk_column)?;
+    run_on(executor, &stmt.sql, stmt.params, |row| match row {
+        #[cfg(feature = "postgres")]
+        RowRef::Postgres(r) => counted::<P, _>(r),
+        #[cfg(feature = "mysql")]
+        RowRef::Mysql(r) => counted::<P, _>(r),
+        #[cfg(feature = "sqlite")]
+        RowRef::Sqlite(r) => counted::<P, _>(r),
+    })
+    .await
+}
+
+/// One `annotate_count_children` row: the parent and its child count.
+fn counted<P, R>(row: &R) -> Result<(P, i64), sqlx::Error>
+where
+    R: sqlx::Row,
+    P: for<'r> sqlx::FromRow<'r, R>,
+    for<'a> &'a str: sqlx::ColumnIndex<R>,
+    i64: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
+    Ok((P::from_row(row)?, row.try_get("__annotated_count")?))
+}
+
+/// The `annotate_count_children` statement for dialect `d`.
+fn annotate_count_statement<P: Model>(
+    d: &dyn Dialect,
+    parent_qs: crate::query::QuerySet<P>,
+    child_table: &'static str,
+    child_fk_column: &'static str,
+) -> Result<super::CompiledStatement, ExecError> {
     let select = parent_qs.compile()?;
-    let parent = select.model;
-    let pk_field = parent.primary_key().ok_or(ExecError::MissingPrimaryKey {
-        table: parent.table,
-    })?;
-
-    // Hand-built SQL: compile_select emits no GROUP BY or aggregate
-    // columns. Follows its conventions (qualified columns, $N binds).
-    let cols: Vec<&'static str> = parent.scalar_fields().map(|f| f.column).collect();
-    let mut sql = String::from("SELECT ");
-    for (i, col) in cols.iter().enumerate() {
-        if i > 0 {
-            sql.push_str(", ");
-        }
-        let _ = write!(sql, "\"{}\".\"{col}\"", parent.table);
-    }
-    let _ = write!(
-        sql,
-        ", COUNT(\"{child_table}\".\"{child_pk}\") AS \"__annotated_count\" FROM \"{parent_table}\" LEFT JOIN \"{child_table}\" ON \"{child_table}\".\"{child_fk_column}\" = \"{parent_table}\".\"{parent_pk}\"",
-        parent_table = parent.table,
-        parent_pk = pk_field.column,
-        child_pk = "id",
-    );
-
-    // Forward WHERE / ORDER BY / LIMIT / OFFSET from the parent queryset.
-    let tail = crate::sql::postgres::compile_where_order_tail(
-        &select.where_clause,
-        select.search.as_ref(),
-        &select.order_by,
-        select.limit,
-        select.offset,
-        Some(parent.table),
-        Some(parent),
-    )?;
-
-    // GROUP BY before the WHERE tail.
-    sql.push_str(" GROUP BY ");
-    for (i, col) in cols.iter().enumerate() {
-        if i > 0 {
-            sql.push_str(", ");
-        }
-        let _ = write!(sql, "\"{}\".\"{col}\"", parent.table);
-    }
-    sql.push_str(&tail.sql);
-
-    let raw_rows = pg_on_query(&sql, tail.params).fetch_all(executor).await?;
-    let mut out = Vec::with_capacity(raw_rows.len());
-    for row in &raw_rows {
-        let parent_obj = P::from_row(row)?;
-        let count: i64 = sqlx::Row::try_get(row, "__annotated_count")?;
-        out.push((parent_obj, count));
-    }
-    Ok(out)
+    let pk_field = select
+        .model
+        .primary_key()
+        .ok_or(ExecError::MissingPrimaryKey {
+            table: select.model.table,
+        })?;
+    let child = super::writers::ChildCount {
+        child_table,
+        fk_column: child_fk_column,
+        parent_pk: pk_field.column,
+    };
+    Ok(super::writers::compile_select_with_child_count(
+        d, &select, child,
+    )?)
 }
 
 /// Prefetch children: fetch parents and, for each one,
@@ -560,88 +583,55 @@ impl<T: Model + Send> QuerySet<T> {
     pub async fn explain(self, pool: &PgPool) -> Result<Vec<String>, ExecError> {
         self.explain_on(pool, ExplainOptions::default()).await
     }
+}
 
-    /// [`Self::explain`] with your own executor and [`ExplainOptions`].
+impl<T: Model + Send> QuerySet<T> {
+    /// [`Self::explain`] with your own [`SqlExecutor`] and [`ExplainOptions`],
+    /// on any backend (see [`explain_pool`] for each one's syntax).
     /// `analyze = true` really runs the query, side effects included,
     /// so it is opt-in.
     ///
     /// # Errors
-    /// As [`Self::explain`].
-    pub async fn explain_on<'c, E>(
+    /// SQL-writing or driver failures from the EXPLAIN.
+    pub async fn explain_on<'c, E: SqlExecutor<'c>>(
         self,
         executor: E,
         options: ExplainOptions,
-    ) -> Result<Vec<String>, ExecError>
-    where
-        E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-    {
-        let select = self.compile()?;
-        let stmt = Postgres.compile_select(&select)?;
-        let mut sql = String::with_capacity(stmt.sql.len() + 32);
-        sql.push_str("EXPLAIN ");
-        let prefix = options.to_clause();
-        if !prefix.is_empty() {
-            sql.push_str(&prefix);
-            sql.push(' ');
-        }
-        sql.push_str(&stmt.sql);
-
-        let rows = pg_on_query(&sql, stmt.params).fetch_all(executor).await?;
-        let mut out = Vec::with_capacity(rows.len());
-        // EXPLAIN's row type follows `FORMAT`: text/yaml/xml come back
-        // as TEXT, `FORMAT JSON` gives column 0 as the JSON type.
-        for row in &rows {
-            let line: String = match options.format {
-                ExplainFormat::Json => {
-                    let v: serde_json::Value = sqlx::Row::try_get(row, 0)?;
-                    v.to_string()
-                }
-                ExplainFormat::Text | ExplainFormat::Yaml | ExplainFormat::Xml => {
-                    sqlx::Row::try_get(row, 0)?
-                }
-            };
-            out.push(line);
-        }
-        Ok(out)
+    ) -> Result<Vec<String>, ExecError> {
+        explain::explain_lines_on(executor, &self.compile()?, &options).await
     }
 }
 
 mod explain;
 pub use explain::{explain_pool, ExplainFormat, ExplainOptions};
 
-#[cfg(feature = "postgres")]
-#[cfg(feature = "postgres")]
 impl<T: Model + Send> QuerySet<T> {
-    /// Bulk-DELETE every row matching this queryset's filters. Takes
-    /// any sqlx executor, like [`Self::fetch_on`]. Returns the number
-    /// of rows affected.
+    /// Bulk-DELETE every row matching this queryset's filters, on a
+    /// [`SqlExecutor`] like [`Self::fetch_on`]. Returns the number of
+    /// rows affected.
     ///
     /// # Errors
     /// Returns [`ExecError`] for schema, SQL-writing, or driver failures.
-    pub async fn delete_on<'c, E>(self, executor: E) -> Result<u64, ExecError>
-    where
-        E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-    {
+    pub async fn delete_on<'c, E: SqlExecutor<'c>>(self, executor: E) -> Result<u64, ExecError> {
         refuse_audited::<T>("`delete_on` cannot audit; use `Model::delete_where`")?;
         let query = self.compile_delete()?;
-        delete_on(executor, &query).await
+        let stmt = executor.dialect().compile_delete(&query)?;
+        write_on(executor, &stmt.sql, stmt.params).await
     }
 }
 
-#[cfg(feature = "postgres")]
 impl<T: Model + Send> UpdateBuilder<T> {
-    /// Compile and run this `UpdateBuilder` against any sqlx executor.
+    /// Compile and run this `UpdateBuilder` on a [`SqlExecutor`].
     /// Returns the number of rows affected.
     ///
     /// # Errors
     /// Returns [`ExecError`] for schema, SQL-writing, or driver failures.
-    pub async fn execute_on<'c, E>(self, executor: E) -> Result<u64, ExecError>
-    where
-        E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-    {
+    pub async fn execute_on<'c, E: SqlExecutor<'c>>(self, executor: E) -> Result<u64, ExecError> {
         refuse_audited::<T>("`execute_on` cannot audit; use `execute_pool`")?;
         let query = self.compile()?;
-        update_on(executor, &query).await
+        query.validate()?;
+        let stmt = executor.dialect().compile_update(&query)?;
+        write_on(executor, &stmt.sql, stmt.params).await
     }
 }
 
@@ -673,7 +663,6 @@ impl<T: Model + Send> UpdaterPool<T> for UpdateBuilder<T> {
 }
 
 /// Refuse a write that cannot audit on an audited model.
-#[cfg(feature = "postgres")]
 fn refuse_audited<T: Model>(reason: &'static str) -> Result<(), ExecError> {
     if T::SCHEMA.audit_track.is_some() {
         return Err(ExecError::AuditUnsupported {
@@ -923,17 +912,16 @@ pub(super) fn pg_on_query(
     params.into_iter().fold(sqlx::query(sql), bind_query)
 }
 
-/// Like [`fetch_aggregate_pool`] but accepts any sqlx executor.
+/// Like [`fetch_aggregate_dict`] but on any [`SqlExecutor`].
 ///
 /// # Errors
 /// [`ExecError`] if the query is invalid or the driver rejects it.
-#[cfg(feature = "postgres")]
 pub async fn fetch_aggregate_on<'c, E>(
     query: &AggregateQuery,
     executor: E,
 ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError>
 where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+    E: SqlExecutor<'c>,
 {
     values::fetch_aggregate_dict_on(executor, query).await
 }
@@ -945,7 +933,7 @@ mod tx;
 pub(crate) use tx::write_transaction_pool;
 pub use tx::{transaction_pool, PoolTx};
 
-// One executor for every `_on` method (#2675).
+// One executor for every `_on` method.
 mod on;
 use on::RowRef;
 pub use on::{PoolConn, SqlExecutor};
@@ -1768,6 +1756,21 @@ where
     )
 }
 
+/// [`run_on`] for a statement that returns no rows: the rows affected.
+pub(crate) async fn write_on<'c, E: SqlExecutor<'c>>(
+    exec: E,
+    sql: &str,
+    params: Vec<SqlValue>,
+) -> Result<u64, ExecError> {
+    let guard = exec.guard()?;
+    crate::test_assertions::query_counter::bump();
+    guard.check(
+        exec.execute_rows(sql, params)
+            .await
+            .map_err(ExecError::from),
+    )
+}
+
 mod traits;
 #[cfg(feature = "mysql")]
 pub use traits::LoadRelatedMy;
@@ -2241,74 +2244,7 @@ pub async fn fetch_paginated_pool<T>(
 where
     T: Model + MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
-    crate::test_assertions::query_counter::bump();
-    let select = qs.compile()?;
-    let stmt = paginated_statement(pool.dialect(), &select)?;
-    let sql = stmt.sql;
-
-    match pool {
-        #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&sql);
-            for v in stmt.params {
-                q = bind_query(q, v);
-            }
-            use sqlx::Row as _;
-            let raw_rows: Vec<PgRow> = q.fetch_all(pg).await?;
-            let total: i64 = raw_rows
-                .first()
-                .map(|row| row.try_get::<i64, _>("__rustango_total"))
-                .transpose()?
-                .unwrap_or(0);
-            let mut rows = Vec::with_capacity(raw_rows.len());
-            for row in &raw_rows {
-                rows.push(T::from_row(row)?);
-            }
-            Ok(Page { rows, total })
-        }
-        #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(&sql);
-            for v in stmt.params {
-                q = bind_query_my(q, v);
-            }
-            use sqlx::Row as _;
-            let raw_rows: Vec<sqlx::mysql::MySqlRow> = q.fetch_all(my).await?;
-            let total: i64 = raw_rows
-                .first()
-                .map(|row| row.try_get::<i64, _>("__rustango_total"))
-                .transpose()?
-                .unwrap_or(0);
-            let mut rows = Vec::with_capacity(raw_rows.len());
-            for row in &raw_rows {
-                rows.push(<T as sqlx::FromRow<sqlx::mysql::MySqlRow>>::from_row(row)?);
-            }
-            Ok(Page { rows, total })
-        }
-        #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(&sql);
-            for v in stmt.params {
-                q = bind_query_sqlite(q, v);
-            }
-            use sqlx::Row as _;
-            let raw_rows: Vec<sqlx::sqlite::SqliteRow> = q.fetch_all(sq).await?;
-            let total: i64 = raw_rows
-                .first()
-                .map(|row| row.try_get::<i64, _>("__rustango_total"))
-                .transpose()?
-                .unwrap_or(0);
-            let mut rows = Vec::with_capacity(raw_rows.len());
-            for row in &raw_rows {
-                rows.push(<T as sqlx::FromRow<sqlx::sqlite::SqliteRow>>::from_row(
-                    row,
-                )?);
-            }
-            Ok(Page { rows, total })
-        }
-    }
+    qs.fetch_paginated_on(pool).await
 }
 
 mod prefetch;
@@ -2433,7 +2369,7 @@ where
 }
 
 // `_on` twins of the pool methods: run on a held `PoolConn`, a `PoolTx`,
-// or any Postgres sqlx executor (#2675).
+// or any Postgres sqlx executor.
 impl<T> QuerySet<T>
 where
     T: Model

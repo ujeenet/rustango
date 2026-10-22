@@ -746,8 +746,7 @@ async fn join_lock_during_background_settle_is_refused(pool: &Pool) {
 }
 
 /// `_on` reads pass the atomic gate: once the server ended the block's
-/// transaction they refuse, and a read that ends it is recorded
-/// (rel-0608 tests-001).
+/// transaction they refuse, and a read that ends it is recorded.
 async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
     use rustango::sql::{raw_execute_tx, transaction_pool};
     Note {
@@ -766,7 +765,6 @@ async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
         put(tx, 1).await?;
         let mut guard = tx.lock().await?;
         // End the transaction on the server, the way each backend can.
-        let mut errors = 0;
         if dialect(&registry) == "mysql" {
             // A lock-wait timeout (1205), which rustango treats as ending the block;
             // the server keeps the transaction open by default (innodb_rollback_on_timeout=OFF).
@@ -783,7 +781,6 @@ async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
                 matches!(timed_out, Err(ExecError::Driver(_))),
                 "got {timed_out:?}"
             );
-            errors += 1;
         }
         #[allow(unreachable_patterns)]
         match &mut *guard {
@@ -803,16 +800,22 @@ async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
             }
             _ => {}
         }
-        // PG: the reads that meet the dropped connection are driver errors
-        // until one is recorded as ending the transaction.
-        let refused = loop {
-            match Note::objects().fetch_on(&mut *guard).await {
-                Err(ExecError::AtomicAborted) => break true,
-                Err(ExecError::Driver(_)) if errors < 3 => errors += 1,
-                other => panic!("a read on the dead block ran: {other:?}"),
-            }
-        };
-        assert!(refused);
+        // PG: the first read meets the terminated backend (FATAL 57P01)
+        // and is recorded as ending the transaction.
+        let first = Note::objects().fetch_on(&mut *guard).await;
+        if dialect(&registry) == "postgres" {
+            assert!(matches!(first, Err(ExecError::Driver(_))), "got {first:?}");
+            let next = Note::objects().fetch_on(&mut *guard).await;
+            assert!(
+                matches!(next, Err(ExecError::AtomicAborted)),
+                "got {next:?} after {first:?}"
+            );
+        } else {
+            assert!(
+                matches!(first, Err(ExecError::AtomicAborted)),
+                "got {first:?}"
+            );
+        }
         let count = Note::objects().count_on(&mut *guard).await;
         assert!(
             matches!(count, Err(ExecError::AtomicAborted)),

@@ -674,6 +674,7 @@ mod admin_views {
     }
 
     /// POST a form to the admin; the status and the page body.
+    #[cfg(feature = "sqlite")]
     async fn post_page(_: &Signals, pool: &Pool, uri: &str, form: &str) -> (StatusCode, String) {
         let app = rustango::admin::Builder::new(pool.clone())
             .admin_prefix("")
@@ -694,6 +695,7 @@ mod admin_views {
     }
 
     /// Insert one row titled "a" through `schema`'s table; its PK.
+    #[cfg(feature = "sqlite")]
     async fn seed_one(pool: &Pool, schema: &'static rustango::core::ModelSchema) -> i64 {
         let q = rustango::core::InsertQuery::new(schema, vec!["title"], vec!["a".into()]);
         rustango::sql::insert_pool(pool, &q).await.expect("seed");

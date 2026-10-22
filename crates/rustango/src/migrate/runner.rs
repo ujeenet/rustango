@@ -2396,7 +2396,7 @@ pub(crate) enum MigrationState {
 }
 
 /// Each of `all` with its state: the one reading `migrate`, `showmigrations`
-/// and `--dry-run` share (#1311).
+/// and `--dry-run` share.
 pub(crate) fn migration_states<'a>(
     all: &'a [Migration],
     applied: &'a HashSet<String>,
@@ -2435,7 +2435,7 @@ pub(crate) async fn applied_or_empty(
 }
 
 /// The SQL `migrate` would run for `all`'s `scope` files under `ledger`:
-/// its pending set and reconcile verdicts, read without writing (#1311).
+/// its pending set and reconcile verdicts, read without writing.
 /// `owned` tables are left out, as the system chain leaves the project's.
 ///
 /// # Errors
@@ -2707,6 +2707,35 @@ pub(crate) async fn try_table_exists_here(
         crate::sql::Pool::Sqlite(sq) => {
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            )
+            .bind(table)
+            .fetch_one(sq)
+            .await?
+                > 0
+        }
+    })
+}
+
+/// Whether a `SELECT` from `table` would find it: views count, and on PG
+/// the whole `search_path` does, unlike [`try_table_exists_here`].
+pub(crate) async fn try_table_resolves(
+    pool: &crate::sql::Pool,
+    table: &str,
+) -> Result<bool, sqlx::Error> {
+    Ok(match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            sqlx::query_scalar::<_, bool>("SELECT to_regclass(quote_ident($1)) IS NOT NULL")
+                .bind(table)
+                .fetch_one(pg)
+                .await?
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(_) => try_table_exists_here(pool, table).await?,
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
             )
             .bind(table)
             .fetch_one(sq)

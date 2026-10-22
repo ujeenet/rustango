@@ -5,7 +5,7 @@
 //! no server-side session table for v1. Trade-offs:
 //!
 //! * **Idle and absolute expiry** — `exp` is the idle deadline, slid by
-//!   each request; `iat` + [`SESSION_TTL_SECS`] is the hard cap (#1344).
+//!   each request; `iat` + [`SESSION_TTL_SECS`] is the hard cap.
 //! * **No revocation list** — a cookie is valid until `exp`, unless the
 //!   operator is deactivated, changes password or logs out. Logout stamps
 //!   `sessions_revoked_at`, which ends the operator's sessions on every device.
@@ -40,10 +40,10 @@ pub(crate) use crate::session::{session_survives, sign};
 /// it doesn't collide with tenant cookies.
 pub const COOKIE_NAME: &str = "rustango_op_session";
 
-/// Longest a console session lasts from sign-in, however active (#1344).
+/// Longest a console session lasts from sign-in, however active.
 pub const SESSION_TTL_SECS: i64 = 12 * 60 * 60;
 
-/// A console session unused this long ends; each request slides `exp` (#1344).
+/// A console session unused this long ends; each request slides `exp`.
 pub const SESSION_IDLE_SECS: i64 = 30 * 60;
 
 /// How stale `exp` must be before a request re-issues the cookie.
@@ -109,7 +109,7 @@ impl SessionPayload {
     pub fn renewed(&self) -> Option<Self> {
         let now = chrono::Utc::now().timestamp();
         let exp = (now + SESSION_IDLE_SECS).min(self.iat.saturating_add(SESSION_TTL_SECS));
-        // A pre-#1344 cookie's far `exp` is pulled in, too.
+        // An older cookie's far `exp` is pulled in, too.
         (exp < self.exp || exp - self.exp >= RENEW_AFTER_SECS).then(|| Self {
             exp,
             ..self.clone()
@@ -205,7 +205,7 @@ mod tests {
         assert!(matches!(err, SessionError::Expired));
     }
 
-    /// #1344 — renewal slides `exp` to the idle window, never past the cap.
+    /// Renewal slides `exp` to the idle window, never past the cap.
     #[test]
     fn renewal_slides_exp_up_to_the_cap() {
         let now = chrono::Utc::now().timestamp();
@@ -217,13 +217,13 @@ mod tests {
         near_cap.iat = now - SESSION_TTL_SECS + 10;
         assert!(near_cap.renewed().unwrap().exp <= now + 10);
 
-        // A pre-#1344 week-long cookie is cut to the idle limit.
+        // An older week-long cookie is cut to the idle limit.
         let old = SessionPayload::new(1, 7 * 24 * 3600, fp());
         let cut = old.renewed().expect("a far exp is pulled in");
         assert!(cut.exp <= chrono::Utc::now().timestamp() + SESSION_IDLE_SECS);
     }
 
-    /// #1344 — a session older than the absolute cap is refused, whatever its `exp`.
+    /// A session older than the absolute cap is refused, whatever its `exp`.
     #[test]
     fn rejects_a_session_past_the_absolute_cap() {
         let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());

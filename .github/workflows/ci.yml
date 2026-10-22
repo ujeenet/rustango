@@ -800,6 +800,9 @@ jobs:
           - mysql,tenancy,config,email
           # `_tower` without `_axum` broke `i18n::middleware` (#2329).
           - sqlite,_tower
+          # `--features tenancy[,sso]` on the defaults: tests left dead code here.
+          - postgres,batteries,tenancy
+          - postgres,batteries,tenancy,sso
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
@@ -813,7 +816,7 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features ${{ matrix.features }} --lib
       # Build `tests/**` on the bare backends: no other job compiles a test
       # without tenancy, so a wrong single-backend `#![cfg]` stayed green (#2328).
-      - if: ${{ !contains(matrix.features, ',') || matrix.features == 'sqlite,_tower' }}
+      - if: ${{ !contains(matrix.features, ',') || matrix.features == 'sqlite,_tower' || startsWith(matrix.features, 'postgres,batteries,tenancy') }}
         run: cargo test -p rustango --no-default-features --features ${{ matrix.features }} --tests --no-run
 
   # #1285 — the first Windows coverage this repo has had. Every other job
@@ -1323,6 +1326,8 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test admin_row_scope_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test admin_list_state_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test admin_write_errors_tri
+      - run: cargo test -p rustango --features mysql,admin,testkit --test admin_edit_tri
+      - run: cargo test -p rustango --features mysql,admin,template_views,testkit --test crud_refusals_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test admin_audit_writes_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_bounded_dml_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_relations_tri

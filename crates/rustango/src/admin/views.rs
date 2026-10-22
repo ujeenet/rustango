@@ -1773,25 +1773,48 @@ pub(crate) async fn detail_view(
     // registration order. Best-effort: a fetch error, such as a
     // child table missing on this tenant, drops the panels to empty
     // instead of failing the page.
-    let mut inline_panels =
-        super::inlines::render_for_parent_in(&state.pool, model, pk_value.clone(), Some(&parts))
-            .await
-            .unwrap_or_default();
-    let generic_panels =
-        super::inlines::render_generic_for_parent_in(&state.pool, model, pk_value, Some(&parts))
-            .await
-            .unwrap_or_default();
+    // Each panel lists its first rows and links the child list for the rest.
+    let cap = Some(super::inlines::DETAIL_ROWS);
+    let mut inline_panels = super::inlines::render_for_parent_in(
+        &state.pool,
+        model,
+        pk_value.clone(),
+        Some(&parts),
+        cap,
+    )
+    .await
+    .unwrap_or_default();
+    let generic_panels = super::inlines::render_generic_for_parent_in(
+        &state.pool,
+        model,
+        pk_value,
+        Some(&parts),
+        cap,
+    )
+    .await
+    .unwrap_or_default();
     inline_panels.extend(generic_panels);
-    inline_panels.retain(|p| lookup_model(&state, &p.child_table).is_some());
+    inline_panels.retain(|(p, _)| lookup_model(&state, &p.child_table).is_some());
     let inline_panels_ctx: Vec<serde_json::Value> = inline_panels
         .into_iter()
-        .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null))
+        .map(|(p, more)| {
+            let mut v = serde_json::to_value(p).unwrap_or(serde_json::Value::Null);
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("more_rows_filter".to_owned(), more.into());
+            }
+            v
+        })
         .collect();
 
     // Audit-trail panel for this row, only for users who may read the
-    // log. Best-effort: a missing audit table renders no panel.
+    // log. Best-effort: a missing audit table renders no panel. The
+    // newest entries only; the full history is one link away.
     let audit_entries = match state.audit_reader() {
-        Some(reader) => reader.for_entity(model.table, &pk_raw).await,
+        Some(reader) => {
+            reader
+                .recent_for_entity(model.table, &pk_raw, super::audit::DETAIL_ROWS)
+                .await
+        }
         None => Ok(Vec::new()),
     };
     let audit_entries_ctx: Vec<serde_json::Value> = match audit_entries {
@@ -2073,9 +2096,7 @@ fn write_error(model: &'static crate::core::ModelSchema, e: &crate::sql::ExecErr
                 )
             }
         }
-        Some(Refusal::ForeignKey) => "A related object it points to does not exist.".to_owned(),
-        Some(Refusal::NotNull) => "A required value is missing.".to_owned(),
-        Some(Refusal::Check) => "A value is outside what this table allows.".to_owned(),
+        Some(r) => r.message().to_owned(),
         None => "The change could not be saved.".to_owned(),
     };
     format!("{msg} (error id {id})")
@@ -2121,8 +2142,23 @@ fn default_locked_flags(
     }
 }
 
-/// On update: a timestamp the form echoed back (at the input's second
-/// precision) is not rewritten, and `auto_now` columns are restamped.
+/// Whether `shown`, the prefill of `f`, may parse back to another value
+/// than the stored one.
+fn prefill_is_lossy(f: &FieldSchema, shown: &str) -> bool {
+    use crate::core::FieldType as T;
+    match f.ty {
+        T::DateTime | T::Array(_) | T::Range(_) | T::HStore | T::Vector(_) | T::Geometry(_) => true,
+        // `{}` and JSON null both show empty.
+        T::Json => shown.is_empty(),
+        _ => f
+            .choices
+            .is_some_and(|c| !shown.is_empty() && !c.iter().any(|(v, _)| *v == shown)),
+    }
+}
+
+/// On update: a lossy prefill the form echoed back as it was shown is not
+/// rewritten; other fields are, so a stale form still wins.
+/// `auto_now` columns are restamped.
 fn keep_unchanged(
     model: &'static crate::core::ModelSchema,
     form: &HashMap<String, String>,
@@ -2131,12 +2167,18 @@ fn keep_unchanged(
 ) {
     for f in model.scalar_fields() {
         let submitted = form.get(f.name).map(String::as_str);
-        let unchanged = f.ty == crate::core::FieldType::DateTime
-            && before.zip(submitted).is_some_and(|(row, sent)| {
-                let shown = render::render_value_for_input_json(row, f);
+        let unchanged = before.zip(submitted).is_some_and(|(row, sent)| {
+            let shown = render::render_value_for_input_json(row, f);
+            if !prefill_is_lossy(f, &shown) {
+                return false;
+            }
+            // A textarea submits CRLF line breaks.
+            let sent = sent.replace("\r\n", "\n");
+            sent == shown
                 // Browsers may drop a zero seconds part.
-                sent == shown || shown.strip_suffix(":00") == Some(sent)
-            });
+                || (f.ty == crate::core::FieldType::DateTime
+                    && shown.strip_suffix(":00") == Some(sent.as_str()))
+        });
         if unchanged {
             values.retain(|(c, _)| *c != f.column);
         }
@@ -2334,6 +2376,10 @@ pub(crate) async fn update_submit(
         change: true,
     })
     .await;
+    // One signal per inline row too, as for bulk actions.
+    for row in inline_plan.planned_rows() {
+        row.send(true).await;
+    }
     // "Before" is the locked row, "after" the form. The per-request
     // `with_source(User { id })` gives a "who changed what" trail. An
     // `audit(...)` model's entry commits with the UPDATE (#2060); others
@@ -2367,15 +2413,18 @@ pub(crate) async fn update_submit(
             return Ok(refused(write_error(model, &e)).into_response());
         }
     };
-    if let Err(e) = super::inlines::apply_plan_tx(&mut tx, &state.pool, inline_plan).await {
-        use super::inlines::InlineApplyError as E;
-        rollback_quietly(tx, model.table).await;
-        let why = match e {
-            E::Write { child, error } => write_error(child, &error),
-            E::MaxNum { child } => format!("{} allows no more rows here.", child.name),
-        };
-        return Ok(refused(format!("Nothing was saved: {why}")).into_response());
-    }
+    let child_rows = match super::inlines::apply_plan_tx(&mut tx, &state.pool, inline_plan).await {
+        Ok((_, rows)) => rows,
+        Err(e) => {
+            use super::inlines::InlineApplyError as E;
+            rollback_quietly(tx, model.table).await;
+            let why = match e {
+                E::Write { child, error } => write_error(child, &error),
+                E::MaxNum { child } => format!("{} allows no more rows here.", child.name),
+            };
+            return Ok(refused(format!("Nothing was saved: {why}")).into_response());
+        }
+    };
     if let Err(e) = tx.commit().await {
         return Ok(refused(write_error(model, &e.into())).into_response());
     }
@@ -2390,6 +2439,9 @@ pub(crate) async fn update_submit(
         change: true,
     })
     .await;
+    for row in child_rows {
+        row.send(false).await;
+    }
 
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_raw, &form);
     Ok(Redirect::to(&target).into_response())

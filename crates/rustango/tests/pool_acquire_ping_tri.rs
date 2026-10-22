@@ -1,4 +1,4 @@
-//! #2674 — a pool built with the defaults skips sqlx's per-checkout ping.
+//! A pool built with the defaults skips sqlx's per-checkout ping.
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
@@ -46,7 +46,7 @@ async fn default_pool_skips_the_acquire_ping(pool: &Pool) {
 }
 
 /// With the ping off, a connection the server dropped while idle is
-/// still checked once it sat idle past the threshold (rel-0608 performance-002).
+/// still checked once it sat idle past the threshold.
 async fn a_connection_dropped_while_idle_is_replaced(pool: &Pool) {
     #[cfg(any(feature = "postgres", feature = "mysql"))]
     drop_idle_then_query(pool).await;
@@ -67,7 +67,7 @@ async fn drop_idle_then_query(pool: &Pool) {
         #[allow(unreachable_patterns)]
         _ => return, // SQLite has no server to drop it.
     };
-    // Settings, not env: a set_var here races the SQLite arms' env reads (pr-1408-r2 tests-003).
+    // Settings, not env: a set_var here races the SQLite arms' env reads.
     // First call wins; every caller in this binary installs the same value.
     let threshold = std::time::Duration::from_secs(3);
     // One connection: sqlx returns a released one in a spawned task, so a
@@ -81,7 +81,7 @@ async fn drop_idle_then_query(pool: &Pool) {
     let past_threshold = || tokio::time::sleep(threshold + std::time::Duration::from_millis(300));
 
     // Below the threshold the dead connection is handed out unpinged:
-    // the hot path pays no round trip (pr-1408-r2 tests-001).
+    // the hot path pays no round trip.
     kill_idle(&fresh, pool).await;
     let stale = raw_execute_pool(&fresh, "SELECT 1", vec![]).await;
     assert!(stale.is_err(), "a recently idle connection was pinged");

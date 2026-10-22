@@ -248,20 +248,22 @@ impl HealthRouter {
         url: impl Into<String>,
     ) -> Self {
         let url = url.into();
+        let label = probe_label(&url);
         self.check(name, move || {
             let client = client.clone();
             let url = url.clone();
+            let label = label.clone();
             async move {
                 let resp = client
                     .get(url.as_str())
                     .send()
                     .await
-                    .map_err(|e| format!("{url}: {e}"))?;
+                    .map_err(|e| format!("{label}: {e}"))?;
                 let status = resp.status();
                 if status.is_success() {
                     Ok(())
                 } else {
-                    Err(format!("{url}: status {status}"))
+                    Err(format!("{label}: status {status}"))
                 }
             }
         })
@@ -281,6 +283,23 @@ impl HealthRouter {
             .route("/health", get(handle_live))
             .route("/ready", get(handle_ready))
             .with_state(state)
+    }
+}
+
+/// `url` for errors and logs: no userinfo, query or fragment.
+#[cfg(feature = "http-client")]
+fn probe_label(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(u) => {
+            let port = u.port().map(|p| format!(":{p}")).unwrap_or_default();
+            format!(
+                "{}://{}{port}{}",
+                u.scheme(),
+                u.host_str().unwrap_or(""),
+                u.path()
+            )
+        }
+        Err(_) => "<invalid url>".to_owned(),
     }
 }
 
@@ -645,6 +664,42 @@ mod tests {
         assert_eq!(v["checks"]["nothing-listening"]["status"], "error");
         let err = v["checks"]["nothing-listening"]["error"].as_str().unwrap();
         assert!(err.contains("127.0.0.1:1"), "expected addr in error: {err}");
+    }
+
+    /// Credentials and tokens in a probe URL stay out of the error.
+    #[cfg(feature = "http-client")]
+    #[tokio::test]
+    async fn http_probe_error_hides_url_secrets() {
+        let client = crate::http_client::HttpClient::builder()
+            .retry_policy(crate::http_client::RetryPolicy::off())
+            .build()
+            .unwrap();
+        let app = HealthRouter::new(lazy_pool())
+            .skip_db_probe()
+            .show_errors()
+            .http_probe(
+                "upstream",
+                client,
+                "http://admin:PASSWD@127.0.0.1:1/ping?token=SECRETTOKEN",
+            )
+            .timeout(Duration::from_secs(5))
+            .into_router();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let v = body_json(resp).await;
+        let err = v["checks"]["upstream"]["error"].as_str().unwrap();
+        assert!(err.contains("http://127.0.0.1:1/ping"), "{err}");
+        assert!(
+            !err.contains("PASSWD") && !err.contains("SECRETTOKEN"),
+            "{err}"
+        );
     }
 
     #[cfg(feature = "cache")]
