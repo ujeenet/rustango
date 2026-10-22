@@ -203,29 +203,59 @@ async fn assert_relations(pool: &rustango::sql::Pool) {
     assert_eq!(commented, vec!["P", "Q"]);
 }
 
+/// The shared database's content-type table still hands out ids afterwards.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn content_types_still_take_auto_ids(pool: &rustango::sql::Pool) {
+    use rustango::contenttypes::ContentType;
+    let mut ct = ContentType {
+        id: rustango::sql::Auto::default(),
+        app_label: "rmg".into(),
+        model_name: "probe".into(),
+        table: "rmg_probe".into(),
+    };
+    ct.insert_pool(pool).await.expect("a content type with an auto id");
+    ct.delete_pool(pool).await.expect("drop the probe row");
+}
+
 /// Seed statements shared across dialects. `reserved_table` is the
 /// dialect-quoted form of the reserved `table` column (`"table"` on
 /// PG/SQLite, `` `table` `` on MySQL). Content-type id `1` maps to
 /// `rmg_article`; id `99` is a decoy model — the gcomment under ct `99`
 /// (pointing at article `3`/`R`) must be excluded by the GFK
 /// discriminator.
-fn seed_sql(reserved_table: &str) -> Vec<String> {
+fn seed_sql(article_ct: i64, other_ct: i64) -> Vec<String> {
     vec![
         "INSERT INTO rmg_post (id, title) VALUES (1, 'A'), (2, 'B'), (3, 'C')".to_owned(),
         "INSERT INTO rmg_tag (id, name, weight) VALUES (10, 'x', 5), (20, 'y', 7)".to_owned(),
         "INSERT INTO rmg_post_tags (post_id, tag_id) VALUES (1, 10), (1, 20), (2, 10)".to_owned(),
         "INSERT INTO rmg_article (id, title) VALUES (1, 'P'), (2, 'Q'), (3, 'R')".to_owned(),
-        // content type rows: id 1 = rmg_article, id 99 = some other model.
-        format!(
-            "INSERT INTO rustango_content_types (id, app_label, model_name, {reserved_table}) \
-             VALUES (1, 'app', 'article', 'rmg_article'), (99, 'app', 'other', 'rmg_other')"
-        ),
-        // comments: P(obj 1) x2, Q(obj 2) x1 under ct 1; one decoy under ct 99 → R(obj 3).
+        // comments: P(obj 1) x2, Q(obj 2) x1 under the article ct; one decoy → R(obj 3).
         format!(
             "INSERT INTO rmg_gcomment (id, content_type_id, object_pk, body, score) VALUES \
-             (1, 1, 1, 'a', 3), (2, 1, 1, 'b', 4), (3, 1, 2, 'c', 10), (4, 99, 3, 'decoy', 1000)"
+             (1, {article_ct}, 1, 'a', 3), (2, {article_ct}, 1, 'b', 4), \
+             (3, {article_ct}, 2, 'c', 10), (4, {other_ct}, 3, 'decoy', 1000)"
         ),
     ]
+}
+
+/// On a shared database: the framework's own content-type table, with the
+/// article and decoy rows given auto ids. Returns `(article, other)` ids.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn seed_content_types(pool: &rustango::sql::Pool) -> (i64, i64) {
+    use rustango::contenttypes::{self, ContentType};
+    contenttypes::ensure_table(pool).await.expect("content type table");
+    let mut ids = Vec::new();
+    for (model, table) in [("article", "rmg_article"), ("other", "rmg_other")] {
+        let mut ct = ContentType {
+            id: rustango::sql::Auto::default(),
+            app_label: "rmg".into(),
+            model_name: model.into(),
+            table: table.into(),
+        };
+        ct.insert_pool(pool).await.expect("content type");
+        ids.push(*ct.id.get().expect("ct id"));
+    }
+    (ids[0], ids[1])
 }
 
 // ----------------------------------------------------------------- SQLite
@@ -249,7 +279,10 @@ mod sqlite_live {
         ] {
             sqlx::query(ddl).execute(&p).await.expect(ddl);
         }
-        for stmt in seed_sql("\"table\"") {
+        // content type rows: id 1 = rmg_article, id 99 = some other model.
+        let cts = "INSERT INTO rustango_content_types (id, app_label, model_name, \"table\") \
+                   VALUES (1, 'app', 'article', 'rmg_article'), (99, 'app', 'other', 'rmg_other')";
+        for stmt in std::iter::once(cts.to_owned()).chain(seed_sql(1, 99)) {
             sqlx::query(&stmt).execute(&p).await.expect(&stmt);
         }
         p.into()
@@ -288,15 +321,16 @@ mod pg_live {
             "CREATE TABLE rmg_post_tags (post_id BIGINT NOT NULL, tag_id BIGINT NOT NULL)",
             "CREATE TABLE rmg_article (id BIGINT PRIMARY KEY, title VARCHAR(80) NOT NULL)",
             "CREATE TABLE rmg_gcomment (id BIGINT PRIMARY KEY, content_type_id BIGINT NOT NULL, object_pk BIGINT NOT NULL, body VARCHAR(200) NOT NULL, score BIGINT NOT NULL)",
-            "CREATE TABLE rustango_content_types (id BIGINT PRIMARY KEY, app_label VARCHAR(100) NOT NULL, model_name VARCHAR(100) NOT NULL, \"table\" VARCHAR(100) NOT NULL)",
         ] {
             sqlx::query(ddl).execute(&pg).await.expect(ddl);
         }
-        for stmt in seed_sql("\"table\"") {
+        let pool: Pool = pg.clone().into();
+        let (article, other) = seed_content_types(&pool).await;
+        for stmt in seed_sql(article, other) {
             sqlx::query(&stmt).execute(&pg).await.expect(&stmt);
         }
-        let pool: Pool = pg.into();
         assert_relations(&pool).await;
+        content_types_still_take_auto_ids(&pool).await;
     }
 }
 
@@ -326,14 +360,15 @@ mod my_live {
             "CREATE TABLE rmg_post_tags (post_id BIGINT NOT NULL, tag_id BIGINT NOT NULL)",
             "CREATE TABLE rmg_article (id BIGINT PRIMARY KEY, title VARCHAR(80) NOT NULL)",
             "CREATE TABLE rmg_gcomment (id BIGINT PRIMARY KEY, content_type_id BIGINT NOT NULL, object_pk BIGINT NOT NULL, body VARCHAR(200) NOT NULL, score BIGINT NOT NULL)",
-            "CREATE TABLE rustango_content_types (id BIGINT PRIMARY KEY, app_label VARCHAR(100) NOT NULL, model_name VARCHAR(100) NOT NULL, `table` VARCHAR(100) NOT NULL)",
         ] {
             sqlx::query(ddl).execute(&my).await.expect(ddl);
         }
-        for stmt in seed_sql("`table`") {
+        let pool: Pool = my.clone().into();
+        let (article, other) = seed_content_types(&pool).await;
+        for stmt in seed_sql(article, other) {
             sqlx::query(&stmt).execute(&my).await.expect(&stmt);
         }
-        let pool: Pool = my.into();
         assert_relations(&pool).await;
+        content_types_still_take_auto_ids(&pool).await;
     }
 }
