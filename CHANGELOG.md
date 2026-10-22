@@ -6,6 +6,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** `ModelFormFor::from_json` refuses unknown keys; an oversized CSRF form gets 413, not 403; undecodable job payloads are retried; the first `makemigrations` on PostgreSQL rewrites each table with a sized `vector` or `geometry` column. See UPGRADING.
 
+### Fixed — reverse FK accessors for foreign-crate parents and twin FKs
+
+`#[rustango(related_name = "+")]` emits no `Parent::<name>` accessor, so an FK to a model from another crate derives. Two FKs to one parent under the same accessor name are a clear compile error asking for `related_name`.
+
 ### Fixed — SQLite runs a RunSQL beside a table rebuild
 
 An atomic migration that mixes a RunSQL with a rebuilding op (the "add nullable, backfill, set NOT NULL" pattern, or the downgrade of AddColumn + RunSQL) was refused. It now runs in one transaction per run of ops, RunSQL with FOREIGN KEY enforcement on; a failure after the first commit is `PartiallyApplied`.
