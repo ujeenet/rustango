@@ -1125,12 +1125,15 @@ async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
         .expect("delete_on");
     drop(conn);
     // The sqlx-executor delete exists on Postgres only.
-    let mut deleted = 4;
     #[cfg(feature = "postgres")]
-    if let Pool::Postgres(pg) = pool {
+    let deleted = if let Pool::Postgres(pg) = pool {
         Gpost { id: 5 }.delete(pg).await.expect("pg delete");
-        deleted = 5;
-    }
+        5
+    } else {
+        4
+    };
+    #[cfg(not(feature = "postgres"))]
+    let deleted = 4;
 
     for id in 1..=deleted {
         let links = Gpost { id }.tags_m2m().all(pool).await.unwrap();
