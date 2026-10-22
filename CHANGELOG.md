@@ -16,6 +16,10 @@ On the queue's own pool the job row is written in the block's transaction and th
 
 A payload the registered job type cannot decode is a retryable failure, not an immediate dead letter, so rows from another release survive a rolling deploy. `WebhookEvent` also decodes rows queued before its body was signed at dispatch.
 
+### Fixed — `should_send_throttled` lets one concurrent caller through
+
+It uses the cache's set-if-absent, so two calls at once no longer both send.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.
