@@ -137,25 +137,38 @@
 
 use serde_json::Value;
 
-/// The loaded parent of a relation field, for `#[serializer(nested)]` and
-/// `slug`. Covers `ForeignKey<T>` and the nullable `Option<ForeignKey<T>>`.
+/// A relation field read by `#[serializer(nested)]` and `slug`. A nullable
+/// `Option<ForeignKey<T>>` renders into an `Option` field, so NULL is `null`.
 #[doc(hidden)]
 pub trait LoadedRelation {
     type Target;
-    fn loaded(&self) -> Option<&Self::Target>;
+    /// The serializer field type for a rendered value `V`.
+    type Field<V>;
+    /// `map` the loaded parent; `unloaded` runs when the FK is set but not loaded.
+    fn render<V>(
+        &self,
+        map: impl FnOnce(&Self::Target) -> V,
+        unloaded: impl FnOnce() -> V,
+    ) -> Self::Field<V>;
 }
 
 impl<T, K> LoadedRelation for crate::sql::ForeignKey<T, K> {
     type Target = T;
-    fn loaded(&self) -> Option<&T> {
-        self.value()
+    type Field<V> = V;
+    fn render<V>(&self, map: impl FnOnce(&T) -> V, unloaded: impl FnOnce() -> V) -> V {
+        self.value().map_or_else(unloaded, map)
     }
 }
 
 impl<R: LoadedRelation> LoadedRelation for Option<R> {
     type Target = R::Target;
-    fn loaded(&self) -> Option<&R::Target> {
-        self.as_ref().and_then(R::loaded)
+    type Field<V> = Option<R::Field<V>>;
+    fn render<V>(
+        &self,
+        map: impl FnOnce(&R::Target) -> V,
+        unloaded: impl FnOnce() -> V,
+    ) -> Option<R::Field<V>> {
+        self.as_ref().map(|r| r.render(map, unloaded))
     }
 }
 

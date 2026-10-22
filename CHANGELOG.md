@@ -22,7 +22,7 @@ Lookups walk exact → base → fallback chain → default once, and at each loc
 
 ### Fixed — derives accept nullable relations and `Option<bool>`
 
-`#[serializer(nested)]` and `#[serializer(slug)]` compile on an `Option<ForeignKey<T>>` source (null renders the default), and `#[derive(Form)]` parses `Option<bool>`, blank as `None`.
+`#[serializer(nested)]` and `#[serializer(slug)]` compile on an `Option<ForeignKey<T>>` source into an `Option` field, so a NULL relation renders `null` (also under `strict`, which now panics only on an unloaded one), and `#[derive(Form)]` parses `Option<bool>`, blank as `None`.
 
 ### Fixed — `format_number` / `format_currency` follow CLDR
 
