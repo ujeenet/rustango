@@ -112,10 +112,10 @@ pub const fn assert_number_bounded<T: NumberBounded + ?Sized>() {}
 
 /// A bound attribute on a field type it cannot bound does not compile.
 /// ```
-/// # #[derive(rustango::Model, Clone)] #[rustango(table = "dv_t")]
-/// # pub struct T { #[rustango(primary_key)] pub id: rustango::sql::Auto<i64>, pub n: f64, pub s: String }
+/// # #[derive(rustango::Model, Clone)] #[rustango(table = "dv_row")]
+/// # pub struct Row { #[rustango(primary_key)] pub id: rustango::sql::Auto<i64>, pub n: f64, pub s: String }
 /// #[derive(rustango::Serializer, serde::Deserialize, Default)]
-/// #[serializer(model = T)]
+/// #[serializer(model = Row)]
 /// struct S {
 ///     #[serializer(min = 0)]
 ///     n: f64,
@@ -129,28 +129,31 @@ pub const fn assert_number_bounded<T: NumberBounded + ?Sized>() {}
 ///     #[form(max_length = 3)]
 ///     s: String,
 /// }
+/// # fn main() {}
 /// ```
 /// ```compile_fail
-/// # #[derive(rustango::Model, Clone)] #[rustango(table = "dv_t")]
-/// # pub struct T { #[rustango(primary_key)] pub id: rustango::sql::Auto<i64>, pub n: f64, pub s: String }
+/// # #[derive(rustango::Model, Clone)] #[rustango(table = "dv_row")]
+/// # pub struct Row { #[rustango(primary_key)] pub id: rustango::sql::Auto<i64>, pub n: f64, pub s: String }
 /// #[derive(rustango::Serializer, serde::Deserialize, Default)]
-/// #[serializer(model = T)]
+/// #[serializer(model = Row)]
 /// struct S {
 ///     #[serializer(max_length = 3)]
 ///     n: f64,
 ///     s: String,
 /// }
+/// # fn main() {}
 /// ```
 /// ```compile_fail
-/// # #[derive(rustango::Model, Clone)] #[rustango(table = "dv_t")]
-/// # pub struct T { #[rustango(primary_key)] pub id: rustango::sql::Auto<i64>, pub n: f64, pub s: String }
+/// # #[derive(rustango::Model, Clone)] #[rustango(table = "dv_row")]
+/// # pub struct Row { #[rustango(primary_key)] pub id: rustango::sql::Auto<i64>, pub n: f64, pub s: String }
 /// #[derive(rustango::Serializer, serde::Deserialize, Default)]
-/// #[serializer(model = T)]
+/// #[serializer(model = Row)]
 /// struct S {
 ///     n: f64,
 ///     #[serializer(min = 0)]
 ///     s: String,
 /// }
+/// # fn main() {}
 /// ```
 /// ```compile_fail
 /// #[derive(rustango::Form)]
