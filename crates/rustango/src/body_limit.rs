@@ -122,13 +122,27 @@ async fn handle(cfg: Arc<BodyLimitLayer>, req: Request<Body>, next: Next) -> Res
         }
     }
     // Chunked and HTTP/2 bodies carry no Content-Length: cap the stream.
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
     let body = Body::new(http_body_util::Limited::new(body, cfg.max_bytes));
-    // This cap replaces axum's 2 MiB extractor default, so it can raise it.
+    // This cap replaces axum's 2 MiB extractor default, so it can raise it,
+    // but a `DefaultBodyLimit` set outside stays: `extend` lets it win.
+    let mut extensions = disabled_default_limit().await;
+    extensions.extend(std::mem::take(&mut parts.extensions));
+    parts.extensions = extensions;
+    next.run(Request::from_parts(parts, body)).await
+}
+
+/// Extensions holding only `DefaultBodyLimit::disable()`, whose type axum keeps private.
+async fn disabled_default_limit() -> axum::http::Extensions {
     use tower::{Layer as _, ServiceExt as _};
-    let svc = axum::extract::DefaultBodyLimit::disable().layer(next);
-    match svc.oneshot(Request::from_parts(parts, body)).await {
-        Ok(r) => r,
+    let echo =
+        tower::service_fn(|r: Request<()>| async move { Ok::<_, std::convert::Infallible>(r) });
+    match axum::extract::DefaultBodyLimit::disable()
+        .layer(echo)
+        .oneshot(Request::new(()))
+        .await
+    {
+        Ok(r) => r.into_parts().0.extensions,
         Err(never) => match never {},
     }
 }
@@ -364,6 +378,14 @@ mod tests {
             .insert(header::CONTENT_LENGTH, n.to_string().parse().unwrap());
         let resp = reading_app(5 * 1024 * 1024).oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
+    }
+
+    /// A stricter `DefaultBodyLimit` outside the layer still applies.
+    #[tokio::test]
+    async fn a_stricter_outer_default_limit_is_kept() {
+        let app = reading_app(1024).layer(axum::extract::DefaultBodyLimit::max(10));
+        let resp = app.oneshot(streamed(Method::POST, 100)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

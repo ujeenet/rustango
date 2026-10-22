@@ -102,7 +102,7 @@ It reads `application/csp-report` and `application/reports+json` bodies up to 64
 
 ### Fixed — `server.max_body_bytes` can raise the limit above 2 MiB
 
-`BodyLimitLayer` now replaces axum's 2 MiB `DefaultBodyLimit` on the methods it checks, so a 10 MB cap lets a 5 MB upload reach `Bytes`, `Json`, `Form` or `Multipart`.
+`BodyLimitLayer` now replaces axum's 2 MiB `DefaultBodyLimit` on the methods it checks, so a 10 MB cap lets a 5 MB upload reach `Bytes`, `Json`, `Form` or `Multipart`. A `DefaultBodyLimit` set outside it still wins.
 
 ### Fixed — `TestClient::login` sends the CSRF token
 

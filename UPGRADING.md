@@ -166,7 +166,7 @@ A POST with `Content-Type: application/csp-report` or `application/reports+json`
 
 ### `BodyLimitLayer` sets the extractor limit
 
-On POST, PUT, PATCH and QUERY its `max_bytes` is now the only body cap; axum's 2 MiB default no longer applies there. A route that wants less adds its own `DefaultBodyLimit::max` inside the layer.
+On POST, PUT, PATCH and QUERY its `max_bytes` is now the only body cap; axum's 2 MiB default no longer applies there. A `DefaultBodyLimit` layered outside it still applies; a route that wants less can also add its own inside.
 
 ### `TestClient::login` sends a GET first
 
