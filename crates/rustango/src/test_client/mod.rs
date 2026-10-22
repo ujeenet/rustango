@@ -129,12 +129,15 @@ impl TestClient {
         self.jar().cookies.clear();
     }
 
-    /// Convenience: POST a form to `path` and return the response.
-    /// The client carries a cookie jar so any session cookie set by
-    /// the login handler is automatically attached to subsequent
-    /// requests.
+    /// Log in like a browser: GET `path` first when the jar has no CSRF
+    /// token, then POST `fields` with the token. The session cookie the
+    /// handler sets stays in the jar.
     pub async fn login(&self, path: impl Into<String>, fields: &[(&str, &str)]) -> TestResponse {
-        self.post(path).form(fields).send().await
+        let path = path.into();
+        if self.csrf_token().is_none() {
+            self.get(path.clone()).send().await;
+        }
+        self.post(path).form(fields).with_csrf().send().await
     }
 
     /// Mint a tenant session cookie directly into the jar. Bypasses
@@ -1326,6 +1329,29 @@ mod tests {
             .send()
             .await;
         assert_eq!(r.status, 200, "{}", r.text());
+    }
+
+    /// Behind the CSRF layer a right password must log in and a wrong one
+    /// must fail on the password, not on a missing token (#1305).
+    #[tokio::test]
+    async fn login_sends_the_csrf_token_like_a_browser() {
+        let app = Router::new()
+            .route(
+                "/signin",
+                get(|| async { "form" }).post(|body: String| async move {
+                    if body.contains("password=right") {
+                        (axum::http::StatusCode::OK, "in")
+                    } else {
+                        (axum::http::StatusCode::UNAUTHORIZED, "bad password")
+                    }
+                }),
+            )
+            .layer(crate::forms::csrf::layer());
+        let c = TestClient::new(app);
+        let ok = c.login("/signin", &[("password", "right")]).await;
+        assert_eq!(ok.status, 200, "{}", ok.text());
+        let bad = c.login("/signin", &[("password", "wrong")]).await;
+        assert_eq!(bad.status, 401, "{}", bad.text());
     }
 
     #[tokio::test]

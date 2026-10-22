@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `TestClient::login` sends a GET first (#1305)
+
+With no CSRF cookie in the jar it GETs the login path before posting. A test that counted requests or wanted the 403 sees one more request and the real login result.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more (#1411)
