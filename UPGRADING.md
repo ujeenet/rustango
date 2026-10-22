@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### MySQL `citext` columns: new collation
+
+New columns get `utf8mb4_0900_as_ci` (MySQL 8+). Existing ones keep `utf8mb4_general_ci` until altered; to switch, `ALTER TABLE t MODIFY col VARCHAR(n) COLLATE utf8mb4_0900_as_ci` (check `unique` columns for rows that now differ).
+
 ### SQLite: a RunSQL beside a rebuild is no longer refused
 
 Such a migration commits in steps, so a failure can return `MigrateError::PartiallyApplied`, as on MySQL. Migrations without that mix still run in one transaction.

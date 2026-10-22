@@ -5,7 +5,7 @@
 //! Verifies:
 //! 1. The flag threads from macro → `FieldSchema::case_insensitive`.
 //! 2. PG emits `CITEXT`, SQLite emits `TEXT COLLATE NOCASE`, MySQL
-//!    emits `LONGTEXT COLLATE utf8mb4_general_ci`.
+//!    emits `LONGTEXT COLLATE utf8mb4_0900_as_ci`.
 //! 3. PG's `ci_text_extension_sql()` returns the right prelude.
 //! 4. Other field types (`i64`, `DateTime`) ignore the flag — the
 //!    macro accepts it but the DDL falls through to the normal type.
@@ -74,11 +74,11 @@ fn sqlite_emits_text_collate_nocase() {
 }
 
 #[test]
-fn mysql_emits_varchar_collate_utf8mb4_general_ci() {
+fn mysql_emits_varchar_collate_utf8mb4_0900_as_ci() {
     let sql = create_table_sql_with_dialect(&MySql, <CiUser as Model>::SCHEMA);
     // max_length = 200 → VARCHAR(200) on MySQL.
     assert!(
-        sql.contains("`email` VARCHAR(200) COLLATE utf8mb4_general_ci"),
+        sql.contains("`email` VARCHAR(200) COLLATE utf8mb4_0900_as_ci"),
         "expected VARCHAR COLLATE on MySQL, got: {sql}"
     );
 }

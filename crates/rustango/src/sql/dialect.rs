@@ -617,7 +617,7 @@ pub trait Dialect: Send + Sync {
 
     /// The column type for a case-insensitive text field: `CITEXT` on
     /// Postgres, `TEXT COLLATE NOCASE` on SQLite, a
-    /// `utf8mb4_general_ci` collation on MySQL.
+    /// `utf8mb4_0900_as_ci` collation on MySQL.
     ///
     /// The default is plain `TEXT`, which leaves case handling to the
     /// query. Use `LOWER(…)` there on a dialect that does not

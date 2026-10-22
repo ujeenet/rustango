@@ -123,6 +123,37 @@ fn post(slug: &str, parent_id: Option<i64>) -> Post {
     }
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_ci")]
+#[rustango(app = "orm_dialect_tri")]
+pub struct CiName {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(citext, max_length = 40)]
+    pub name: String,
+}
+
+/// As in PG's citext, accents and trailing spaces still count.
+async fn citext_keeps_accents_and_spaces(pool: &Pool) {
+    fresh_table::<CiName>(pool).await;
+    for (id, name) in [(1, "café"), (2, "bob")] {
+        CiName {
+            id,
+            name: name.into(),
+        }
+        .insert_pool(pool)
+        .await
+        .unwrap();
+    }
+    let ids = |name: &'static str| async move {
+        let rows = CiName::objects().filter("name", name).fetch(pool).await;
+        rows.unwrap().into_iter().map(|r| r.id).collect::<Vec<_>>()
+    };
+    assert_eq!(ids("bob").await, [2]);
+    assert_eq!(ids("cafe").await, Vec::<i64>::new(), "accents count");
+    assert_eq!(ids("bob ").await, Vec::<i64>::new(), "trailing spaces count");
+}
+
 async fn setup(pool: &Pool) {
     fresh_table::<Code>(pool).await;
     fresh_table::<Post>(pool).await;
@@ -941,6 +972,7 @@ tri_dialect_test! {
         integer_division_truncates,
         second_lookup_truncates,
         relation_date_lookup,
+        citext_keeps_accents_and_spaces,
     ],
 }
 

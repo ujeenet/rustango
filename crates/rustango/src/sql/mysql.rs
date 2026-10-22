@@ -221,13 +221,12 @@ impl Dialect for MySql {
         }
     }
 
-    // `utf8mb4_general_ci` is already the default collation in
-    // modern MySQL, but setting it per column keeps the comparison
-    // case-insensitive even where the table default differs.
+    // Case-insensitive only, as PG citext: `general_ci` also ignores
+    // accents and trailing spaces (PAD SPACE). Needs MySQL 8.
     fn ci_text_type(&self, max_length: Option<u32>) -> String {
         match max_length {
-            Some(n) => format!("VARCHAR({n}) COLLATE utf8mb4_general_ci"),
-            None => "LONGTEXT COLLATE utf8mb4_general_ci".to_owned(),
+            Some(n) => format!("VARCHAR({n}) COLLATE utf8mb4_0900_as_ci"),
+            None => "LONGTEXT COLLATE utf8mb4_0900_as_ci".to_owned(),
         }
     }
 
@@ -1012,7 +1011,7 @@ mod tests {
         );
         assert_eq!(
             MySql.ci_text_type(None),
-            "LONGTEXT COLLATE utf8mb4_general_ci"
+            "LONGTEXT COLLATE utf8mb4_0900_as_ci"
         );
     }
 
