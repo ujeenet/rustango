@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — unknown settings keys warn
+
+A key nothing reads (a typo, a key in the wrong section, a mistyped `RUSTANGO__…` env var) now prints a `config: unknown key` line on stderr at load. Set `RUSTANGO_CONFIG_STRICT=1` to make it a load error.
+
 ### Fixed — `embed_migrations!` warns on a missing directory
 
 A wrong path used to embed nothing silently; it now emits a deprecation warning naming the path. The docs and examples add a `build.rs` with `rerun-if-changed=migrations`, so a new migration file triggers a rebuild.

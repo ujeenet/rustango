@@ -10,8 +10,10 @@
 //!    `RUSTANGO__DATABASE__URL=postgres://…` overrides
 //!    `[database] url`.
 //!
-//! The result is a typed [`Settings`] struct. Unknown TOML keys are
-//! ignored, so an older binary still reads a newer config file.
+//! The result is a typed [`Settings`] struct. Unknown keys (from files
+//! or env vars) are ignored with a warning on stderr, so an older
+//! binary still reads a newer config file. Set `RUSTANGO_CONFIG_STRICT=1`
+//! to refuse them instead.
 //!
 //! # Example
 //!

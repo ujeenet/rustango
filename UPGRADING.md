@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Unknown settings keys warn
+
+Loading settings prints one stderr line per key nothing reads. Fix or remove those keys; `RUSTANGO_CONFIG_STRICT=1` refuses them.
+
 ### `embed_migrations!` on a missing directory warns
 
 The build still succeeds, with a `deprecated` warning; `-D warnings` builds fail. Create the directory or fix the path. Add a `build.rs` with `println!("cargo:rerun-if-changed=migrations");` so new files are embedded without a clean build.
