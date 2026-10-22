@@ -1283,11 +1283,19 @@ pub(crate) async fn stored_keys(
         };
         let mut stored: std::collections::HashMap<uuid::Uuid, Vec<SqlValue>> =
             std::collections::HashMap::new();
-        // Two binds per key, well under SQLite's 32766.
+        // Four binds per key, well under SQLite's 32766.
         for chunk in keys.chunks(4096) {
+            // The raw spelling, plus the canonical text forms a default may write.
             let binds = chunk
                 .iter()
-                .flat_map(|(k, raw)| [k.clone(), SqlValue::String((*raw).to_owned())])
+                .flat_map(|(k, raw)| {
+                    let mut b = vec![k.clone(), SqlValue::String((*raw).to_owned())];
+                    if let Some(u) = uuid_of(k) {
+                        b.push(SqlValue::String(u.hyphenated().to_string()));
+                        b.push(SqlValue::String(u.simple().to_string()));
+                    }
+                    b
+                })
                 .collect();
             let query = SelectQuery::by_pk_in(model, field.column, binds);
             for v in sqlite_stored_column(sq, &query, field).await? {

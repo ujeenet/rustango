@@ -625,6 +625,48 @@ async fn sqlite_text_uuid_key_is_found_by_every_view() {
     assert_eq!(live, 0, "the row was not deleted");
 }
 
+/// A TEXT-stored UUID key is found under any spelling the parser accepts.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_text_uuid_key_matches_any_spelling() {
+    let pool = rustango::testkit::matrix::Backend::Sqlite
+        .pool()
+        .await
+        .expect("sqlite");
+    rustango::testkit::matrix::fresh_table::<TextKey>(&pool).await;
+    let mut t = Tera::default();
+    t.add_raw_templates(vec![("t.html", "ok"), ("form.html", "form")])
+        .unwrap();
+    let t = Arc::new(t);
+    let app = DetailView::for_model(TextKey::SCHEMA)
+        .template("t.html")
+        .router("/tk", t.clone(), pool.clone())
+        .merge(
+            CreateView::for_model(TextKey::SCHEMA)
+                .template("form.html")
+                .success_url("/tk")
+                .router("/tk", t, pool.clone()),
+        );
+    let status = post_form(&app, "/tk/new", "name=a").await;
+    assert!(status.is_redirection(), "create: {status}");
+    let key = TextKey::objects()
+        .values_list_flat("id")
+        .fetch::<String>(&pool)
+        .await
+        .expect("read key")
+        .remove(0);
+    let u = uuid::Uuid::parse_str(&key).expect("uuid");
+    let upper = u.hyphenated().to_string().to_uppercase();
+    for spelling in [upper, u.braced().to_string(), u.hyphenated().to_string()] {
+        let req = Request::builder()
+            .uri(format!("/tk/{spelling}"))
+            .body(Body::empty())
+            .unwrap();
+        let status = app.clone().oneshot(req).await.unwrap().status();
+        assert_eq!(status, StatusCode::OK, "detail by {spelling}");
+    }
+}
+
 #[cfg(feature = "sqlite")]
 async fn post_form(app: &axum::Router, uri: &str, body: &str) -> StatusCode {
     let req = Request::builder()
