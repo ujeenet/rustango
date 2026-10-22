@@ -162,6 +162,10 @@ Origins listed in `[security] csrf_trusted_origins` now pass the CSRF Origin che
 
 `production`, `PROD` and ` Prod ` all mean `prod`: they load `prod_settings.toml` (a `production_settings.toml` still loads if there is no `prod` file) and turn on JSON logs. `Settings::current_env_tier()` and `session::tier_from_env()` return the normalized name.
 
+### Prod needs a config to boot
+
+With `RUSTANGO_ENV=prod`, `Cli::with_settings_from_env` and `with_loaded_settings` now make `run` fail when `config/default.toml` is missing, instead of booting with no `[security]` layers. Ship the `config/` directory, or drop the call.
+
 ### `make:*` verbs check features
 
 `make:viewset` and `make:test` need `admin` (`make:viewset --tenant` needs `tenancy` instead), `make:serializer` needs `serializer`, `make:form` `forms`, `make:job` / `make:worker` `jobs`, `make:scheduled` `scheduler`, `make:notification` `notifications`. Without it the verb now errors instead of writing a file that does not compile.

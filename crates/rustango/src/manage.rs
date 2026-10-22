@@ -697,8 +697,8 @@ impl Cli {
     /// rustango::manage::Cli::new().with_settings(&cfg)
     /// ```
     ///
-    /// With no `config/default.toml` the [`Cli`] runs on its defaults.
-    /// Any other load error (bad TOML, a value of the wrong type, a bad
+    /// With no `config/default.toml` the [`Cli`] runs on its defaults,
+    /// except on the prod tier, where [`Cli::run`] fails. Any other load error (bad TOML, a value of the wrong type, a bad
     /// `RUSTANGO__*` override) makes [`Cli::run`] fail instead (#1927).
     #[cfg(feature = "config")]
     #[must_use]
@@ -711,12 +711,22 @@ impl Cli {
     #[cfg(feature = "config")]
     #[must_use]
     pub fn with_loaded_settings(
+        self,
+        loaded: Result<crate::config::Settings, crate::config::ConfigError>,
+    ) -> Self {
+        self.with_loaded_settings_on_tier(loaded, &crate::env::tier_from_env())
+    }
+
+    /// A missing config fails boot on the prod tier: it would run with no `[security]` layers.
+    #[cfg(feature = "config")]
+    fn with_loaded_settings_on_tier(
         mut self,
         loaded: Result<crate::config::Settings, crate::config::ConfigError>,
+        tier: &str,
     ) -> Self {
         match loaded {
             Ok(cfg) => self.with_settings(&cfg),
-            Err(e) if e.is_missing_config() => {
+            Err(e) if e.is_missing_config() && !crate::env::is_prod_tier(tier) => {
                 tracing::warn!(target: "rustango::manage", error = %e, "Cli::with_settings_from_env: no config file; running on Cli defaults");
                 self
             }
@@ -1684,6 +1694,21 @@ fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
     if !s.security.cors_allowed_origins.is_empty() {
         inert.push("security.cors_allowed_origins");
     }
+    if !s.security.allowed_hosts.is_empty() {
+        inert.push("security.allowed_hosts");
+    }
+    if s.security.secure_ssl_redirect == Some(true) {
+        inert.push("security.secure_ssl_redirect");
+    }
+    if !s.security.secure_proxy_ssl_header.is_empty() {
+        inert.push("security.secure_proxy_ssl_header");
+    }
+    if !s.security.secure_redirect_exempt.is_empty() {
+        inert.push("security.secure_redirect_exempt");
+    }
+    if !s.security.csrf_trusted_origins.is_empty() {
+        inert.push("security.csrf_trusted_origins");
+    }
     inert
 }
 
@@ -2245,6 +2270,18 @@ mod tests {
             .is_none());
     }
 
+    /// On the prod tier a missing config fails boot: no security layers.
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_missing_config_fails_boot_on_prod_only() {
+        let empty = tempfile::tempdir().unwrap();
+        let missing = || crate::config::Settings::load_from(empty.path(), "prod");
+        let prod = Cli::new().with_loaded_settings_on_tier(missing(), "production");
+        assert!(prod.boot_settings_error().is_some_and(|e| e.is_missing_config()));
+        let dev = Cli::new().with_loaded_settings_on_tier(missing(), "dev");
+        assert!(dev.boot_settings_error().is_none());
+    }
+
     #[cfg(feature = "config")]
     #[test]
     fn with_settings_stashes_handle_for_runtime_layering() {
@@ -2291,6 +2328,24 @@ mod tests {
         let mut s = Settings::default();
         s.database.url = Some("irrelevant".into());
         assert!(inert_layer_settings(&s).is_empty());
+
+        // The outer `[security]` layers and the CSRF origins count too.
+        let mut s = Settings::default();
+        s.security.allowed_hosts = vec!["example.com".into()];
+        s.security.secure_ssl_redirect = Some(true);
+        s.security.secure_proxy_ssl_header = vec!["x-forwarded-proto".into(), "https".into()];
+        s.security.secure_redirect_exempt = vec!["/health".into()];
+        s.security.csrf_trusted_origins = vec!["https://spa.example.com".into()];
+        assert_eq!(
+            inert_layer_settings(&s),
+            vec![
+                "security.allowed_hosts",
+                "security.secure_ssl_redirect",
+                "security.secure_proxy_ssl_header",
+                "security.secure_redirect_exempt",
+                "security.csrf_trusted_origins",
+            ]
+        );
     }
 
     /// #1856 — `Cli::tenant_header` reaches the builder's resolver chain.
