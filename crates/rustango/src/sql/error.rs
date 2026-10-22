@@ -127,7 +127,7 @@ pub enum SqlError {
     },
 
     /// A Postgres-only value (array, range, hstore, vector, geometry)
-    /// bound on another backend, which has no type for it.
+    /// bound on another backend, or a raw `List` bind on any backend.
     #[error("{value} values are not supported by the `{dialect}` dialect")]
     ValueNotSupportedInDialect {
         value: &'static str,

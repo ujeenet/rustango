@@ -61,15 +61,19 @@ pub(crate) fn quote_with(name: &str, q: char) -> String {
     out
 }
 
-/// Refuse a Postgres-only bind on a dialect whose bind arm for it can only panic.
-pub(crate) fn refuse_pg_only_values(
+/// Refuse a raw bind whose bind arm can only panic: a `List` (the writer
+/// expands those) anywhere, a Postgres-only value off Postgres.
+pub(crate) fn refuse_unbindable_values(
     d: &dyn Dialect,
     params: &[crate::core::SqlValue],
 ) -> Result<(), SqlError> {
-    if d.binds_pg_only_values() {
-        return Ok(());
-    }
-    match params.iter().find_map(crate::core::SqlValue::pg_only_kind) {
+    let pg = d.binds_pg_only_values();
+    let kind = params.iter().find_map(|v| match v {
+        crate::core::SqlValue::List(_) => Some("list"),
+        _ if pg => None,
+        _ => v.pg_only_kind(),
+    });
+    match kind {
         Some(value) => Err(SqlError::ValueNotSupportedInDialect {
             value,
             dialect: d.name(),
@@ -1045,6 +1049,55 @@ mod quote_with_tests {
         assert_eq!(super::quote_with("a\"b\"", '"'), "\"a\"\"b\"\"\"");
         assert_eq!(super::quote_with("\"", '"'), "\"\"\"\"");
         assert_eq!(super::quote_with("", '`'), "``");
+    }
+}
+
+#[cfg(test)]
+mod refuse_unbindable_values_tests {
+    use super::{refuse_unbindable_values, Dialect};
+    use crate::core::SqlValue;
+    use crate::sql::{MySql, Postgres, SqlError, Sqlite};
+
+    fn refused(d: &dyn Dialect, v: SqlValue) -> Option<&'static str> {
+        match refuse_unbindable_values(d, &[SqlValue::I64(1), v]) {
+            Ok(()) => None,
+            Err(SqlError::ValueNotSupportedInDialect { value, dialect }) => {
+                assert_eq!(dialect, d.name());
+                Some(value)
+            }
+            Err(e) => panic!("wrong error: {e}"),
+        }
+    }
+
+    #[test]
+    fn every_pg_only_kind_is_refused_off_postgres() {
+        let pg_only = [
+            (SqlValue::Array(vec![SqlValue::I64(1)]), "array"),
+            (SqlValue::RangeLiteral("[1,2)".into()), "range"),
+            (SqlValue::HStore(vec![("k".into(), None)]), "hstore"),
+            (SqlValue::Vector(vec![1.0]), "vector"),
+            (SqlValue::Geometry { x: 1.0, y: 2.0, srid: 4326 }, "geometry"),
+        ];
+        for (v, kind) in pg_only {
+            assert_eq!(refused(&MySql, v.clone()), Some(kind));
+            assert_eq!(refused(&Sqlite, v.clone()), Some(kind));
+            assert_eq!(refused(&Postgres, v), None);
+        }
+    }
+
+    /// The writer expands a `List`; bound raw, every backend's arm panics.
+    #[test]
+    fn a_list_is_refused_everywhere() {
+        let d: [&dyn Dialect; 3] = [&Postgres, &MySql, &Sqlite];
+        for d in d {
+            for list in [
+                SqlValue::List(vec![SqlValue::I64(1)]),
+                SqlValue::List(vec![SqlValue::Array(vec![])]),
+            ] {
+                assert_eq!(refused(d, list), Some("list"), "{}", d.name());
+            }
+            assert_eq!(refused(d, SqlValue::String("x".into())), None);
+        }
     }
 }
 

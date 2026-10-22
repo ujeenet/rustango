@@ -253,6 +253,17 @@ async fn audit_diff_skips_an_unchanged_uuid(pool: &Pool) {
 async fn raw_helpers_refuse_pg_only_values(pool: &Pool) {
     use rustango::core::SqlValue;
     use rustango::sql::{ExecError, SqlError};
+    // A raw `List` bind panicked on every backend.
+    let list = || vec![SqlValue::List(vec![SqlValue::I64(1)])];
+    let sql = format!("SELECT {}", pool.dialect().placeholder(1));
+    let r = rustango::sql::raw_execute_pool(pool, &sql, list()).await;
+    assert!(
+        matches!(
+            r,
+            Err(ExecError::Sql(SqlError::ValueNotSupportedInDialect { value: "list", .. }))
+        ),
+        "{r:?}"
+    );
     if pool.dialect().name() == "postgres" {
         return;
     }
@@ -263,7 +274,6 @@ async fn raw_helpers_refuse_pg_only_values(pool: &Pool) {
         )
     }
     let arr = || vec![SqlValue::Array(vec![SqlValue::I64(1)])];
-    let sql = format!("SELECT {}", pool.dialect().placeholder(1));
     assert!(refused(rustango::sql::raw_execute_pool(pool, &sql, arr()).await));
     assert!(refused(
         rustango::sql::raw_query_pool::<(i64,)>(&sql, arr(), pool).await
