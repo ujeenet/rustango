@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — deleting a model removes its generic M2M links
+
+Every delete path (instance, `delete_where`, `QuerySet::delete_on`, transaction, audited, admin) also deletes the owner's `generic_m2m` junction rows, in the same transaction; PostgreSQL does it in one statement.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

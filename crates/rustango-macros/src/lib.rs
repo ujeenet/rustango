@@ -1688,10 +1688,27 @@ fn generic_m2m_accessor_tokens(
             }
         }
     });
+    // Lets an owner delete find and clear its junction rows.
+    let entries = relations.iter().map(|rel| {
+        let through = rel.through.as_str();
+        let pk_col = rel.pk_column.as_str();
+        let ct_col = rel.ct_column.as_str();
+        quote! {
+            #root::core::inventory::submit! {
+                #root::core::GenericM2MEntry::new(
+                    <#struct_name as #root::core::Model>::SCHEMA,
+                    #through,
+                    #pk_col,
+                    #ct_col,
+                )
+            }
+        }
+    });
     quote! {
         impl #struct_name {
             #( #methods )*
         }
+        #( #entries )*
     }
 }
 

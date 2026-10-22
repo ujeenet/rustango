@@ -33,7 +33,9 @@ mod range;
 mod sqlite;
 mod vector;
 mod writers;
-pub(crate) use writers::{compile_date_buckets, DateBucket};
+pub(crate) use writers::{compile_date_buckets, compile_delete_plan, DateBucket};
+#[doc(hidden)]
+pub use writers::DeletePlan;
 
 pub use array::Array;
 pub use auto::Auto;

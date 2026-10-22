@@ -472,6 +472,54 @@ pub struct GenericM2MManager {
     pub dst_col: &'static str,
 }
 
+/// The junction deletes an owner delete must run first: rows whose
+/// content type is the owner's and whose pk is one the delete removes.
+/// Reads the owner and the content-type table, never the junction, so
+/// MySQL accepts it (1093).
+pub(crate) fn generic_m2m_links(query: &DeleteQuery) -> Vec<DeleteQuery> {
+    let owner = query.model;
+    let mut entries = inventory::iter::<crate::core::GenericM2MEntry>
+        .into_iter()
+        .filter(|e| e.owner.table == owner.table)
+        .peekable();
+    if entries.peek().is_none() {
+        return Vec::new();
+    }
+    let (Some(pk), Some(model)) = (owner.primary_key(), crate::core::ModelEntry::for_schema(owner))
+    else {
+        return Vec::new();
+    };
+    let app = model.resolved_app_label().unwrap_or("project");
+    let name = owner.name.to_ascii_lowercase();
+    let ct = <crate::contenttypes::ContentType as crate::core::Model>::SCHEMA;
+    let mut ct_ids = SelectQuery::new(ct).where_clause(WhereExpr::and_predicates(vec![
+        eq("app_label", SqlValue::String(app.to_owned())),
+        eq("model_name", SqlValue::String(name)),
+    ]));
+    ct_ids.projection = Some(vec!["id"]);
+    let mut owner_pks = SelectQuery::new(owner).where_clause(query.where_clause.clone());
+    owner_pks.projection = Some(vec![pk.column]);
+    entries
+        .map(|e| {
+            DeleteQuery::new(
+                junction(e.through, &[e.pk_col, e.ct_col]),
+                WhereExpr::And(vec![
+                    WhereExpr::InSubquery {
+                        column: e.ct_col,
+                        negated: false,
+                        subquery: Box::new(ct_ids.clone()),
+                    },
+                    WhereExpr::InSubquery {
+                        column: e.pk_col,
+                        negated: false,
+                        subquery: Box::new(owner_pks.clone()),
+                    },
+                ]),
+            )
+        })
+        .collect()
+}
+
 impl GenericM2MManager {
     fn src_key(&self) -> Result<SqlValue, ExecError> {
         src_key(&self.src_pk, self.through)

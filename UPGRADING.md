@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Deletes clear generic M2M junction rows
+
+Deleting a model that declares `generic_m2m(...)` now also deletes its junction rows. On MySQL and SQLite this runs as two statements in one transaction.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more

@@ -1386,9 +1386,8 @@ pub async fn delete_one_with_audit(
     query: &crate::core::DeleteQuery,
     entry: &PendingEntry,
 ) -> Result<u64, crate::sql::ExecError> {
-    let stmt = pool.dialect().compile_delete(query)?;
     let mut tx = crate::sql::transaction_pool(pool).await?;
-    let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+    let affected = crate::sql::delete_tx(&mut tx, query).await?;
     if affected > 0 {
         emit_one_tx(&mut tx, Via::Pool(pool), entry).await?;
     }

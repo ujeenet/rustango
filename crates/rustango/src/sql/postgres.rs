@@ -164,6 +164,10 @@ impl Dialect for Postgres {
         true
     }
 
+    fn supports_dml_in_cte(&self) -> bool {
+        true
+    }
+
     fn supports(&self, token: &str) -> bool {
         // Postgres-specific capability tokens that aren't reachable via
         // the default impl's whitelist. Extends the default; the

@@ -288,6 +288,12 @@ pub trait Dialect: Send + Sync {
         false
     }
 
+    /// `true` if a `WITH` may hold a `DELETE` (Postgres only), so an owner
+    /// delete and its junction cleanup run as one statement.
+    fn supports_dml_in_cte(&self) -> bool {
+        false
+    }
+
     /// `true` if `ORDER BY … NULLS FIRST|LAST` is understood. MySQL
     /// is the exception, so the writer sorts on `<col> IS NULL`
     /// first: `DESC` on that term for NULLS FIRST, `ASC` for

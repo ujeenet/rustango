@@ -119,6 +119,21 @@ pub struct Gpost {
     pub id: i64,
 }
 
+/// Shares `Gpost`'s junction and ids, so only the content type tells them apart.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rel2293_gvideo", app = "rel2293")]
+#[rustango(generic_m2m(
+    name = "tags",
+    through = "rel2293_taggables",
+    pk_column = "taggable_id",
+    ct_column = "taggable_type",
+    related_column = "tag_id"
+))]
+pub struct Gvideo {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
 /// Shares `id` and `at` with `Shift`, so a bare column is ambiguous.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "rel2293_crew", app = "rel2293")]
@@ -265,6 +280,8 @@ async fn setup(pool: &Pool) {
     fresh_table::<Shift>(pool).await;
     fresh_table::<Cat>(pool).await;
     fresh_table::<CatLink>(pool).await;
+    fresh_table::<Gpost>(pool).await;
+    fresh_table::<Gvideo>(pool).await;
     rustango::testkit::create_tables(pool, &[TAGGABLES])
         .await
         .expect("taggables");
@@ -1074,6 +1091,61 @@ async fn generic_m2m_set_ignores_repeated_ids(pool: &Pool) {
     assert_eq!(tags, vec![3, 4]);
 }
 
+/// Every delete path takes the owner's generic M2M rows with it, and only its own.
+async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
+    use rustango::core::{CountQuery, SelectQuery};
+    rustango::contenttypes::ensure_seeded(pool)
+        .await
+        .expect("seed content types");
+    rustango::contenttypes::clear_cache();
+    for id in 1..=5 {
+        Gpost { id }.insert_pool(pool).await.expect("post");
+        Gpost { id }
+            .tags_m2m()
+            .set(&[id, 10], pool)
+            .await
+            .expect("tag post");
+    }
+    let video = Gvideo { id: 1 };
+    video.insert_pool(pool).await.expect("video");
+    video.tags_m2m().set(&[1_i64], pool).await.expect("tag video");
+
+    Gpost { id: 1 }.delete_pool(pool).await.expect("delete_pool");
+    Gpost::delete_where("id", 2_i64, pool)
+        .await
+        .expect("delete_where");
+    let mut tx = rustango::sql::transaction_pool(pool).await.expect("tx");
+    Gpost { id: 3 }.delete_tx(&mut tx).await.expect("delete_tx");
+    tx.commit().await.expect("commit");
+    let mut conn = pool.acquire().await.expect("conn");
+    Gpost::objects()
+        .filter_op("id", Op::Eq, 4_i64)
+        .delete_on(&mut conn)
+        .await
+        .expect("delete_on");
+    drop(conn);
+    // The sqlx-executor delete exists on Postgres only.
+    let mut deleted = 4;
+    #[cfg(feature = "postgres")]
+    if let Pool::Postgres(pg) = pool {
+        Gpost { id: 5 }.delete(pg).await.expect("pg delete");
+        deleted = 5;
+    }
+
+    for id in 1..=deleted {
+        let links = Gpost { id }.tags_m2m().all(pool).await.unwrap();
+        assert!(links.is_empty(), "post {id}'s links outlive it: {links:?}");
+    }
+    assert_eq!(video.tags_m2m().all(pool).await.unwrap(), vec![1]);
+    let rows = rustango::sql::count_rows_pool(
+        pool,
+        &CountQuery::from_select(SelectQuery::new(TAGGABLES)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, if deleted == 5 { 1 } else { 3 });
+}
+
 async fn prefetch_generic_keeps_i32_pks(pool: &Pool) {
     use rustango::contenttypes::{self, ContentType};
     contenttypes::ensure_seeded(pool)
@@ -1181,6 +1253,7 @@ tri_dialect_test! {
         m2m_set_ignores_repeated_ids,
         self_relation_correlates_to_the_outer_row,
         generic_m2m_set_ignores_repeated_ids,
+        generic_m2m_rows_go_with_their_owner,
         prefetch_generic_keeps_i32_pks,
         prefetch_reverse_generic_past_the_bind_cap,
     ],

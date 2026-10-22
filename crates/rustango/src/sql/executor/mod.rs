@@ -646,8 +646,11 @@ impl<T: Model + Send> QuerySet<T> {
     pub async fn delete_on<'c, E: SqlExecutor<'c>>(self, executor: E) -> Result<u64, ExecError> {
         refuse_audited::<T>("`delete_on` cannot audit; use `Model::delete_where`")?;
         let query = self.compile_delete()?;
-        let stmt = executor.dialect().compile_delete(&query)?;
-        write_on(executor, &stmt.sql, stmt.params).await
+        let plan = crate::sql::compile_delete_plan(executor.dialect(), &query)?;
+        if plan.links.is_empty() {
+            return write_on(executor, &plan.owner.sql, plan.owner.params).await;
+        }
+        executor.run_delete_plan(plan).await
     }
 }
 
@@ -1240,8 +1243,37 @@ pub async fn update_pool(pool: &Pool, query: &UpdateQuery) -> Result<u64, ExecEr
 /// # Errors
 /// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn delete_pool(pool: &Pool, query: &DeleteQuery) -> Result<u64, ExecError> {
-    let stmt = pool.dialect().compile_delete(query)?;
-    execute_pool(pool, &stmt.sql, stmt.params).await
+    let plan = crate::sql::compile_delete_plan(pool.dialect(), query)?;
+    delete_plan_pool(pool, plan).await
+}
+
+/// Run a [`DeletePlan`](crate::sql::DeletePlan) on `pool`, in one
+/// transaction (a savepoint inside `atomic`) when it has links.
+pub(crate) async fn delete_plan_pool(
+    pool: &Pool,
+    plan: crate::sql::DeletePlan,
+) -> Result<u64, ExecError> {
+    if plan.links.is_empty() {
+        return execute_pool(pool, &plan.owner.sql, plan.owner.params).await;
+    }
+    atomic(pool, move |tx| {
+        Box::pin(async move {
+            let mut guard = tx.lock().await?;
+            run_delete_plan_tx(&mut guard, plan).await
+        })
+    })
+    .await
+}
+
+/// Run a [`DeletePlan`](crate::sql::DeletePlan) in `tx`: links, then the owner.
+pub(crate) async fn run_delete_plan_tx(
+    tx: &mut PoolTx<'_>,
+    plan: crate::sql::DeletePlan,
+) -> Result<u64, ExecError> {
+    for link in plan.links {
+        execute_tx(tx, &link.sql, link.params).await?;
+    }
+    execute_tx(tx, &plan.owner.sql, plan.owner.params).await
 }
 
 /// `SELECT COUNT(*)` against either backend.
@@ -1698,8 +1730,8 @@ pub async fn update_tx(tx: &mut PoolTx<'_>, query: &UpdateQuery) -> Result<u64, 
 /// # Errors
 /// As [`delete_pool`].
 pub async fn delete_tx(tx: &mut PoolTx<'_>, query: &DeleteQuery) -> Result<u64, ExecError> {
-    let stmt = tx.dialect().compile_delete(query)?;
-    execute_tx(tx, &stmt.sql, stmt.params).await
+    let plan = crate::sql::compile_delete_plan(tx.dialect(), query)?;
+    run_delete_plan_tx(tx, plan).await
 }
 
 /// Validated multi-row `INSERT` inside an open transaction, split to fit
