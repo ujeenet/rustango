@@ -1387,7 +1387,9 @@ fn write_view_model_with_dialect<W: Write>(
     dialect: &str,
 ) -> std::io::Result<()> {
     let struct_name = table_to_struct_name(view);
-    writeln!(w, "/// Auto-emitted from view `{view}` by `inspectdb`.")?;
+    // A quoted identifier may hold a newline, which would end the comment.
+    let view_doc = escape_for_comment(view);
+    writeln!(w, "/// Auto-emitted from view `{view_doc}` by `inspectdb`.")?;
     writeln!(w, "///")?;
     writeln!(
         w,
@@ -1427,12 +1429,16 @@ fn write_model_with_dialect<W: Write>(
     dialect: &str,
 ) -> std::io::Result<()> {
     let struct_name = table_to_struct_name(table);
-    writeln!(w, "/// Auto-emitted from `{table}` by `inspectdb`.")?;
+    writeln!(
+        w,
+        "/// Auto-emitted from `{}` by `inspectdb`.",
+        escape_for_comment(table)
+    )?;
     if pk_columns.len() > 1 {
         writeln!(
             w,
             "/// NOTE: composite primary key — `inspectdb` picked `{}`. Adjust as needed.",
-            pk_columns.first().map(String::as_str).unwrap_or("(none)")
+            escape_for_comment(pk_columns.first().map(String::as_str).unwrap_or("(none)"))
         )?;
     }
     writeln!(w, "#[derive(Model, Debug, Clone)]")?;
@@ -1561,7 +1567,7 @@ fn sanitize_field_name(name: &str) -> String {
 }
 
 fn escape_for_comment(s: &str) -> String {
-    s.replace('\n', " ").replace("*/", "* /")
+    s.replace(['\n', '\r'], " ").replace("*/", "* /")
 }
 
 #[cfg(test)]
@@ -1931,6 +1937,30 @@ mod tests {
             "expected composite-PK warning, got: {out}"
         );
         assert!(out.contains("pub struct UserRoles"));
+    }
+
+    /// A newline in a table, PK or view name cannot end the `///` line.
+    #[test]
+    fn doc_comments_escape_identifier_newlines() {
+        let col = |name: &str| ColumnRow {
+            name: name.into(),
+            udt_name: "int8".into(),
+            nullable: false,
+            max_length: None,
+            default: None,
+            is_auto: false,
+        };
+        let evil = "t\npub fn injected() {}\r\n//";
+        let pk = vec![evil.to_owned(), "b".to_owned()];
+        let mut buf: Vec<u8> = Vec::new();
+        write_model(&mut buf, evil, &[col("a"), col("b")], &pk, &[]).unwrap();
+        write_view_model_with_dialect(&mut buf, evil, &[col("a")], None, "postgres").unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            !out.lines().any(|l| l.starts_with("pub fn injected")),
+            "{out}"
+        );
+        assert!(!out.contains('\r'), "{out}");
     }
 
     #[test]
