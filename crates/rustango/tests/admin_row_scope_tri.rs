@@ -271,7 +271,8 @@ async fn create_outside_scope_is_refused(pool: &Pool) {
     let saves = Arc::new(AtomicUsize::new(0));
     let seen = saves.clone();
     let id = connect_admin_post_save(move |ctx| {
-        if ctx.table == "rowscope_item" {
+        // Creates only: edits in tests running alongside fire this global signal too.
+        if ctx.table == "rowscope_item" && !ctx.change {
             seen.fetch_add(1, Ordering::SeqCst);
         }
         async {}
