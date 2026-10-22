@@ -166,7 +166,9 @@ fn generate_id() -> String {
 /// Accept at most 128 visible ASCII characters, no quote or backslash,
 /// so an inbound id cannot inject a header or a log field.
 fn is_safe(s: &str) -> bool {
-    s.len() <= 128 && s.chars().all(|c| c.is_ascii_graphic() && c != '"' && c != '\\')
+    s.len() <= 128
+        && s.chars()
+            .all(|c| c.is_ascii_graphic() && c != '"' && c != '\\')
 }
 
 #[cfg(test)]
@@ -217,7 +219,11 @@ mod tests {
         let app = Router::new()
             .route("/", axum::routing::get(|| async { "ok" }))
             .request_id(RequestIdLayer::default())
-            .real_ip(RealIpLayer::default().trust_proxies(["10.0.0.0/8"]).unwrap());
+            .real_ip(
+                RealIpLayer::default()
+                    .trust_proxies(["10.0.0.0/8"])
+                    .unwrap(),
+            );
         let mut req = Request::builder().uri("/").header(HEADER_NAME, id);
         if let Some(xff) = xff {
             req = req.header("x-forwarded-for", xff);
@@ -231,7 +237,11 @@ mod tests {
     }
 
     async fn served_id(id: &str, via_trusted_proxy: bool) -> String {
-        let peer = if via_trusted_proxy { [10, 0, 0, 1] } else { [203, 0, 113, 9] };
+        let peer = if via_trusted_proxy {
+            [10, 0, 0, 1]
+        } else {
+            [203, 0, 113, 9]
+        };
         served_id_from(id, peer, Some("198.51.100.4")).await
     }
 
@@ -248,8 +258,14 @@ mod tests {
     /// Trust follows the peer, not whether it also sent X-Forwarded-For.
     #[tokio::test]
     async fn trusted_peer_without_forwarded_for_keeps_its_id() {
-        assert_eq!(served_id_from("edge-2", [10, 0, 0, 5], None).await, "edge-2");
-        assert_ne!(served_id_from("edge-3", [203, 0, 113, 9], None).await, "edge-3");
+        assert_eq!(
+            served_id_from("edge-2", [10, 0, 0, 5], None).await,
+            "edge-2"
+        );
+        assert_ne!(
+            served_id_from("edge-3", [203, 0, 113, 9], None).await,
+            "edge-3"
+        );
     }
 
     #[test]

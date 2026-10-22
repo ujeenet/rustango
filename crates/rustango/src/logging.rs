@@ -545,8 +545,9 @@ fn default_env_filter(spec: &str) -> EnvFilter {
     let directives: Vec<String> = spec
         .split(',')
         .map(|d| match d.rsplit_once('=') {
-            Some((target, level)) => alias(level.trim())
-                .map_or_else(|| d.to_owned(), |l| format!("{target}={l}")),
+            Some((target, level)) => {
+                alias(level.trim()).map_or_else(|| d.to_owned(), |l| format!("{target}={l}"))
+            }
             None => alias(d.trim()).map_or_else(|| d.to_owned(), str::to_owned),
         })
         .collect();

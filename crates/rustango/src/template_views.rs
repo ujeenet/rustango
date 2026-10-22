@@ -1089,8 +1089,12 @@ async fn handle_detail(
     };
     // #562 — use the `SelectQuery::by_pk` constructor instead of
     // spelling out the 11-field literal.
-    let select_q =
-        SelectQuery::by_pk(state.vs.schema, lookup.column, pk_or_404!(&state.pool, state.vs.schema, lookup, &pk)).visible();
+    let select_q = SelectQuery::by_pk(
+        state.vs.schema,
+        lookup.column,
+        pk_or_404!(&state.pool, state.vs.schema, lookup, &pk),
+    )
+    .visible();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
@@ -1227,8 +1231,12 @@ async fn handle_delete_confirm(
         ));
     };
     // #562 — by_pk constructor for the single-PK-lookup shape.
-    let select_q =
-        SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_or_404!(&state.pool, state.vs.schema, pk_field, &pk)).visible();
+    let select_q = SelectQuery::by_pk(
+        state.vs.schema,
+        pk_field.column,
+        pk_or_404!(&state.pool, state.vs.schema, pk_field, &pk),
+    )
+    .visible();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
@@ -2144,8 +2152,12 @@ async fn handle_update_get(
     };
     // #562 — `SelectQuery::by_pk` replaces the 11-field struct
     // literal.
-    let select_q =
-        SelectQuery::by_pk(state.schema, pk_field.column, pk_or_404!(&state.pool, state.schema, pk_field, &pk)).visible();
+    let select_q = SelectQuery::by_pk(
+        state.schema,
+        pk_field.column,
+        pk_or_404!(&state.pool, state.schema, pk_field, &pk),
+    )
+    .visible();
     let scalars: Vec<&'static crate::core::FieldSchema> = state.schema.scalar_fields().collect();
     let row_json = match select_one_row_as_json(&state.pool, &select_q, &scalars).await {
         Ok(Some(r)) => r,
@@ -3721,11 +3733,11 @@ mod tenant {
                 state.vs.schema.table
             ));
         };
-        let pks =
-            match super::coerce_selected_pks(t.pool(), state.vs.schema, pk_field, &raws).await {
-                Ok(v) => v,
-                Err(resp) => return resp,
-            };
+        let pks = match super::coerce_selected_pks(t.pool(), state.vs.schema, pk_field, &raws).await
+        {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
 
         // v0.30.7 — confirmation gate for built-in delete_selected.
         // Tenant variant: fetch confirm-page rows via the
@@ -3843,8 +3855,12 @@ mod tenant {
                 Err(e) => return template_error(&e),
             };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q =
-            SelectQuery::by_pk(state.vs.schema, lookup.column, pk_or_404!(t.pool(), state.vs.schema, lookup, &pk)).visible();
+        let select_q = SelectQuery::by_pk(
+            state.vs.schema,
+            lookup.column,
+            pk_or_404!(t.pool(), state.vs.schema, lookup, &pk),
+        )
+        .visible();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
             Ok(Some(r)) => r,
@@ -3882,9 +3898,12 @@ mod tenant {
             ));
         };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q =
-            SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_or_404!(t.pool(), state.vs.schema, pk_field, &pk))
-                .visible();
+        let select_q = SelectQuery::by_pk(
+            state.vs.schema,
+            pk_field.column,
+            pk_or_404!(t.pool(), state.vs.schema, pk_field, &pk),
+        )
+        .visible();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
             Ok(Some(r)) => r,
@@ -4006,8 +4025,12 @@ mod tenant {
             ));
         };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q =
-            SelectQuery::by_pk(state.schema, pk_field.column, pk_or_404!(t.pool(), state.schema, pk_field, &pk)).visible();
+        let select_q = SelectQuery::by_pk(
+            state.schema,
+            pk_field.column,
+            pk_or_404!(t.pool(), state.schema, pk_field, &pk),
+        )
+        .visible();
         let scalars: Vec<&'static crate::core::FieldSchema> =
             state.schema.scalar_fields().collect();
         let row_json = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &scalars).await

@@ -226,9 +226,7 @@ impl<S: Clone + Send + Sync + 'static> RealIpRouterExt for Router<S> {
                     if trusted_peer {
                         req.extensions_mut().insert(TrustedPeer);
                     }
-                    let trusted = trusted_peer
-                        .then(|| cfg.resolve_trusted(&req))
-                        .flatten();
+                    let trusted = trusted_peer.then(|| cfg.resolve_trusted(&req)).flatten();
                     if let Some(ip) = trusted {
                         req.extensions_mut().insert(RealIp(ip));
                         req.extensions_mut().insert(TrustedRealIp(ip));

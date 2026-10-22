@@ -58,8 +58,7 @@ where
     // request. Re-using the registry pool is cheap (sqlx::Pool is
     // Arc-shaped under the hood); the database-mode tenant cache on
     // `pools` is independent and remains usable elsewhere.
-    crate::tenancy::server::run::<DB, _>(server_pools(pools), registry_url.to_owned(), cfg, w)
-        .await
+    crate::tenancy::server::run::<DB, _>(server_pools(pools), registry_url.to_owned(), cfg, w).await
 }
 
 /// The server's own `TenantPools`, built with the app's config and secrets.
