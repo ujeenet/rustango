@@ -6253,8 +6253,7 @@ fn settings_audit_loaded(
             if crate::env::is_prod_tier(env_tier) {
                 out.warnings.push(
                     "config/default.toml is missing in prod tier — no [security] settings \
-                     (allowed_hosts, headers, SSL redirect) are applied, and \
-                     `Cli::with_settings_from_env` refuses to start"
+                     (allowed_hosts, headers, SSL redirect) are applied"
                         .into(),
                 );
             }

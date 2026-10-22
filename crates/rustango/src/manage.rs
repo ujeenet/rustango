@@ -697,8 +697,8 @@ impl Cli {
     /// rustango::manage::Cli::new().with_settings(&cfg)
     /// ```
     ///
-    /// With no `config/default.toml` the [`Cli`] runs on its defaults,
-    /// except on the prod tier, where [`Cli::run`] fails. Any other load error (bad TOML, a value of the wrong type, a bad
+    /// With no `config/default.toml` the [`Cli`] warns and runs on its
+    /// defaults (louder on the prod tier). Any other load error (bad TOML, a value of the wrong type, a bad
     /// `RUSTANGO__*` override) makes [`Cli::run`] fail instead (#1927).
     #[cfg(feature = "config")]
     #[must_use]
@@ -717,7 +717,7 @@ impl Cli {
         self.with_loaded_settings_on_tier(loaded, &crate::env::tier_from_env())
     }
 
-    /// A missing config fails boot on the prod tier: it would run with no `[security]` layers.
+    /// A missing config only warns, prod included: env-only containers must boot.
     #[cfg(feature = "config")]
     fn with_loaded_settings_on_tier(
         mut self,
@@ -726,8 +726,12 @@ impl Cli {
     ) -> Self {
         match loaded {
             Ok(cfg) => self.with_settings(&cfg),
-            Err(e) if e.is_missing_config() && !crate::env::is_prod_tier(tier) => {
-                tracing::warn!(target: "rustango::manage", error = %e, "Cli::with_settings_from_env: no config file; running on Cli defaults");
+            Err(e) if e.is_missing_config() => {
+                if crate::env::is_prod_tier(tier) {
+                    tracing::warn!(target: "rustango::manage", error = %e, "Cli::with_settings_from_env: no config file on the prod tier; no [security] layers are applied");
+                } else {
+                    tracing::warn!(target: "rustango::manage", error = %e, "Cli::with_settings_from_env: no config file; running on Cli defaults");
+                }
                 self
             }
             Err(e) => {
@@ -2270,14 +2274,14 @@ mod tests {
             .is_none());
     }
 
-    /// On the prod tier a missing config fails boot: no security layers.
+    /// A missing config only warns, prod included: env-only containers must boot.
     #[cfg(feature = "config")]
     #[test]
-    fn a_missing_config_fails_boot_on_prod_only() {
+    fn a_missing_config_does_not_fail_boot_even_on_prod() {
         let empty = tempfile::tempdir().unwrap();
         let missing = || crate::config::Settings::load_from(empty.path(), "prod");
         let prod = Cli::new().with_loaded_settings_on_tier(missing(), "production");
-        assert!(prod.boot_settings_error().is_some_and(|e| e.is_missing_config()));
+        assert!(prod.boot_settings_error().is_none());
         let dev = Cli::new().with_loaded_settings_on_tier(missing(), "dev");
         assert!(dev.boot_settings_error().is_none());
     }
