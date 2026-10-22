@@ -22,7 +22,7 @@ Each inline row an edit adds, changes or deletes sends `admin_pre_*` before the 
 
 ### Fixed — admin inline rows take no auto or generated input
 
-`auto_now_add` / `auto_now` / `auto_uuid` and `generated_as` columns, and an existing row's PK, show as text in inline rows and are never written from them. Adding a child no longer fails on an empty timestamp, and editing one no longer truncates it to whole seconds.
+`auto_now_add` / `auto_now` / `auto_uuid` and `generated_as` columns, and an existing row's PK, show as text in inline rows (a secret only as set or not set) and are never written from them. Adding a child no longer fails on an empty timestamp, and editing one no longer truncates it to whole seconds.
 
 ### Fixed — ViewSet and template views answer refused writes without a 500
 
@@ -78,7 +78,7 @@ Every save path sets the field to the timestamp it binds, so a returned row carr
 
 ### Fixed — `inspectdb` emits models that compile, with the right MySQL types
 
-Defaults are Rust-escaped and lose only a top-level PG cast; MySQL literal defaults are quoted and expressions parenthesised. Mixed-case or keyword columns get a snake-case field plus `column = ".."`. MySQL types come from `COLUMN_TYPE`: only `tinyint(1)` is `bool`, unsigned ints widen with a TODO.
+Defaults are Rust-escaped and lose only a top-level PG cast; a newline in a table, view or PK name no longer ends a doc comment; MySQL literal defaults are quoted and expressions parenthesised. Mixed-case or keyword columns get a snake-case field plus `column = ".."`. MySQL types come from `COLUMN_TYPE`: only `tinyint(1)` is `bool`, unsigned ints widen with a TODO.
 
 ### Security — example apps no longer ship open writes or forgeable tokens
 
