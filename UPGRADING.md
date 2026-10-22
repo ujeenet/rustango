@@ -162,13 +162,13 @@ Origins listed in `[security] csrf_trusted_origins` now pass the CSRF Origin che
 
 `production`, `PROD` and ` Prod ` all mean `prod`: they load `prod_settings.toml` (a `production_settings.toml` still loads if there is no `prod` file) and turn on JSON logs. `Settings::current_env_tier()` and `session::tier_from_env()` return the normalized name.
 
-### Prod needs a config to boot
+### Prod without a config warns
 
-With `RUSTANGO_ENV=prod`, `Cli::with_settings_from_env` and `with_loaded_settings` now make `run` fail when `config/default.toml` is missing, instead of booting with no `[security]` layers. Ship the `config/` directory, or drop the call.
+With `RUSTANGO_ENV=prod` and no `config/default.toml`, `Cli::with_settings_from_env` still boots (env-only containers keep working) but warns that no `[security]` layers apply, and `check --deploy` reports it. Ship the `config/` directory to get them.
 
 ### Console messages in the URL must be signed
 
-The operator console ignores `?error=`, `?notice=` and `?ok=` unless it added them itself. Bookmarks or links you built with those keys lose the message.
+The operator console ignores `?error=`, `?notice=` and `?ok=` unless it added them itself in the last five minutes. Bookmarks or links you built with those keys lose the message.
 
 ### `make:*` verbs check features
 

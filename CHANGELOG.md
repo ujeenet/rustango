@@ -164,7 +164,7 @@ One tier parser (trimmed, any case, `production` = `prod`) now drives the settin
 
 ### Fixed — `check --deploy` and boot catch more prod config gaps
 
-The audit warns on `secure_cookies = false`, on the `empty` preset and on unknown preset names, and on a missing `config/default.toml`. Without `with_settings_from_env`, the boot warning also names `allowed_hosts`, the SSL-redirect keys and `csrf_trusted_origins`. On the prod tier `with_settings_from_env` with no config now refuses to start.
+The audit warns on `secure_cookies = false`, on the `empty` preset and on unknown preset names, and on a missing `config/default.toml`. Without `with_settings_from_env`, the boot warning also names `allowed_hosts`, the SSL-redirect keys and `csrf_trusted_origins`. On the prod tier `with_settings_from_env` with no config warns that no `[security]` layers apply.
 
 ### Fixed — unknown hosts no longer push tenants out of the resolver cache
 
@@ -172,11 +172,11 @@ Misses are cached in their own smaller map, each map evicts its least recently u
 
 ### Fixed — operator console shows only messages it wrote
 
-The console signs every `?error=` / `?notice=` / `?ok=` it redirects with and drops unsigned ones, so a link cannot put text on the login or list pages. Creating a shared SSO provider checks the slug, the kind and the OIDC issuer, and a duplicate slug is a 400, not a 500.
+The console signs each `?error=` / `?notice=` / `?ok=` its handlers write, for that page and five minutes, and drops any other or repeated one, so a link (a login `next` included) cannot put text on a console page. Creating a shared SSO provider checks the slug, the kind and the OIDC issuer, and a duplicate slug is a 400, not a 500.
 
 ### Added — revoke a passkey
 
-`passkey::revoke(pool, user_id, credential_id)` and `passkey::revoke_all(pool, user_id)` delete credentials, and the tenancy CLI has `revoke-passkey <slug> <username> [--credential <id>]`. The admin does not serve the table, so there was no way to drop a stolen key.
+`passkey::revoke::<U>(pool, user_id, credential_id)` and `passkey::revoke_all::<U>(pool, user_id)` delete credentials and end the user's sessions on user model `U`, and the tenancy CLI has `revoke-passkey <slug> <username> [--credential <id>]`. The admin does not serve the table, so there was no way to drop a stolen key.
 
 ## [0.60.9] — 2026-10-21
 
