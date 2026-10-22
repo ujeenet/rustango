@@ -20,6 +20,10 @@ Two nests of one cached router no longer serve each other's pages.
 
 `cache_probe` uses a fresh key per run, so overlapping `/ready` calls on a shared cache no longer fail each other. `server::Builder::with_health` also serves `/health` and `/ready` on the apex host.
 
+### Fixed — `RedisCache` times out on a stalled server
+
+Connects are bounded at 5 s and commands at 2 s by default, instead of hanging on TCP retries. `RedisCache::with_timeouts` takes a `RedisTimeouts` to change them.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

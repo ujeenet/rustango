@@ -24,6 +24,32 @@ use redis::AsyncCommands;
 
 use super::{Cache, CacheError};
 
+/// How long one connect attempt and one command may take. Never unbounded:
+/// a stalled Redis would hang every cache call for minutes of TCP retries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RedisTimeouts {
+    /// One connect attempt, handshake included. The manager retries a few times.
+    pub connect: Duration,
+    /// One command, from send to reply.
+    pub response: Duration,
+}
+
+impl RedisTimeouts {
+    /// Connect within `connect`, answer within `response`.
+    #[must_use]
+    pub const fn new(connect: Duration, response: Duration) -> Self {
+        Self { connect, response }
+    }
+}
+
+impl Default for RedisTimeouts {
+    /// 5 s to connect, 2 s per command.
+    fn default() -> Self {
+        Self::new(Duration::from_secs(5), Duration::from_secs(2))
+    }
+}
+
 /// Async cache backed by Redis.
 ///
 /// Values are UTF-8 strings, or raw bytes through `set_bytes`.
@@ -52,8 +78,23 @@ impl RedisCache {
         url: &str,
         default_ttl: Option<Duration>,
     ) -> Result<Self, CacheError> {
+        Self::with_timeouts(url, default_ttl, RedisTimeouts::default()).await
+    }
+
+    /// [`Self::with_default_ttl`] with explicit connect and response timeouts.
+    ///
+    /// # Errors
+    /// [`CacheError::Connection`] when the initial connection fails or times out.
+    pub async fn with_timeouts(
+        url: &str,
+        default_ttl: Option<Duration>,
+        timeouts: RedisTimeouts,
+    ) -> Result<Self, CacheError> {
         let client = redis::Client::open(url).map_err(|e| CacheError::Connection(e.to_string()))?;
-        let conn = redis::aio::ConnectionManager::new(client)
+        let config = redis::aio::ConnectionManagerConfig::new()
+            .set_connection_timeout(timeouts.connect)
+            .set_response_timeout(timeouts.response);
+        let conn = redis::aio::ConnectionManager::new_with_config(client, config)
             .await
             .map_err(|e| CacheError::Connection(e.to_string()))?;
         Ok(Self { conn, default_ttl })
@@ -281,5 +322,28 @@ mod tests {
         assert!(ttl_ms(Duration::MAX) <= i64::MAX as u64);
         assert_eq!(ttl_ms(Duration::from_millis(1500)), 1500);
         assert_eq!(ttl_ms(Duration::ZERO), 1);
+    }
+
+    /// A server that accepts but never answers fails the connect, not hangs it.
+    #[tokio::test]
+    async fn a_silent_server_fails_the_connect() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("redis://{}/", listener.local_addr().unwrap());
+        let _accept = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        let t = Duration::from_millis(100);
+        let start = std::time::Instant::now();
+        let built = tokio::time::timeout(
+            Duration::from_secs(30),
+            RedisCache::with_timeouts(&url, None, RedisTimeouts::new(t, t)),
+        )
+        .await
+        .expect("connect hung past its timeout");
+        assert!(built.is_err(), "connected to a silent server");
+        assert!(start.elapsed() < Duration::from_secs(20));
     }
 }

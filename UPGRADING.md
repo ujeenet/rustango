@@ -158,6 +158,10 @@ After the INSERT, an `add` object-permission hook is called again with `Some(&ro
 
 Under `Router::nest`, pass `CachePageLayer::invalidate` the path with the nest prefix (`/en/about`, not `/about`). Old entries expire on their timeout.
 
+### `RedisCache` calls time out
+
+A command now fails after 2 s and a connect attempt after 5 s. Build with `RedisCache::with_timeouts` if a slow link needs more.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more

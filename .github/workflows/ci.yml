@@ -1144,6 +1144,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p rustango --features cache,cache-redis --test cache_redis_incr_live
       - run: cargo test -p rustango --features cache,cache-redis --test cache_redis_prefix_live
+      - run: cargo test -p rustango --features cache,cache-redis --test cache_redis_timeout_live
 
   # The S3 live suites gate on `RUSTANGO_S3_TEST_*`, which appeared
   # nowhere in `.github/` and were `#[ignore]`d nowhere either — so they
