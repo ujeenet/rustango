@@ -2157,10 +2157,10 @@ struct CollectedFields {
     /// `self.<field> = Row::try_get(&row, "<col>")?;` for each Auto
     /// field. Run after `insert_returning` to populate the model.
     auto_assigns: Vec<TokenStream2>,
-    /// `(ident, column_literal)` pairs for every Auto field. Used by
+    /// `(ident, column_literal, is_uuid)` for every Auto field. Used by
     /// the bulk_insert codegen to rebuild assigns against `_row_mut`
     /// instead of `self`.
-    auto_field_idents: Vec<(syn::Ident, String)>,
+    auto_field_idents: Vec<(syn::Ident, String, bool)>,
     /// #1028 — `(ident, column)` for each `generated_as` field. Drives
     /// the PG/SQLite RETURNING refresh that decodes the DB-computed value
     /// back into the struct after insert (MySQL has no RETURNING → the
@@ -2385,8 +2385,11 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                         .map(|ty| (ident.clone(), ty));
                 }
                 out.returning_cols.push(quote!(#column));
-                out.auto_field_idents
-                    .push((ident.clone(), info.column.clone()));
+                out.auto_field_idents.push((
+                    ident.clone(),
+                    info.column.clone(),
+                    info.fk_pk_kind == DetectedKind::Uuid,
+                ));
                 out.auto_assigns.push(quote! {
                     self.#ident = #root::sql::try_get_returning(_returning_row, #column)?;
                 });
@@ -3193,7 +3196,7 @@ fn inherent_impl_tokens(
         let assigned: Vec<syn::Ident> = fields
             .auto_field_idents
             .iter()
-            .map(|(ident, _)| ident.clone())
+            .map(|(ident, _, _)| ident.clone())
             .collect();
         restore_auto_now_unless(
             &assigned,
@@ -7966,7 +7969,15 @@ fn inherent_impl_tokens(
         let auto_assigns_sqlite: Vec<TokenStream2> = fields
             .auto_field_idents
             .iter()
-            .map(|(ident, column)| {
+            .map(|(ident, column, uuid)| {
+                // A UUID a column default wrote is TEXT, not the 16 bytes sqlx binds.
+                if *uuid {
+                    return quote! {
+                        self.#ident = #root::sql::Auto::Set(#root::sql::try_get_flat_sqlite(
+                            _returning_row, #column
+                        )?);
+                    };
+                }
                 quote! {
                     self.#ident = #root::sql::try_get_returning_sqlite(
                         _returning_row, #column
@@ -8191,7 +8202,7 @@ fn inherent_impl_tokens(
 /// `_row_mut` instead of `self`.
 fn bulk_auto_assigns_for_row(fields: &CollectedFields) -> TokenStream2 {
     let root = rustango_root();
-    let lines = fields.auto_field_idents.iter().map(|(ident, column)| {
+    let lines = fields.auto_field_idents.iter().map(|(ident, column, _)| {
         let col_lit = column.as_str();
         quote! {
             _row_mut.#ident = #root::sql::sqlx::Row::try_get(

@@ -199,6 +199,38 @@ pub struct Entry {
     pub acct: rustango::sql::ForeignKey<Acct>,
 }
 
+/// A UUID PK whose DB default SQLite stores as TEXT.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_textkey")]
+#[rustango(app = "orm_dialect_tri")]
+pub struct TextKey {
+    #[rustango(
+        primary_key,
+        auto_uuid,
+        default = "'7c9e6679-7425-40de-944b-e07fc1f90ae7'"
+    )]
+    pub id: Auto<uuid::Uuid>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+/// The insert reads back a default-written UUID key, TEXT on SQLite.
+async fn insert_reads_back_a_text_uuid_key(pool: &Pool) {
+    let mut k = TextKey {
+        id: Auto::default(),
+        name: "k".into(),
+    };
+    let got = k.insert_pool(pool).await;
+    if pool.dialect().name() == "mysql" {
+        assert!(got.is_err(), "MySQL cannot read the key back: {got:?}");
+        return;
+    }
+    got.expect("insert");
+    let want = uuid::uuid!("7c9e6679-7425-40de-944b-e07fc1f90ae7");
+    assert_eq!(k.id.get().copied(), Some(want));
+    assert_eq!(TextKey::objects().count(pool).await.expect("count"), 1);
+}
+
 /// PK lookups name the field, not the renamed column.
 async fn pk_lookups_on_a_renamed_pk_column(pool: &Pool) {
     for (number, name) in [(1, "a"), (2, "b")] {
@@ -300,6 +332,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::drop_table(pool, Entry::SCHEMA.table).await;
     fresh_table::<Acct>(pool).await;
     fresh_table::<Entry>(pool).await;
+    fresh_table::<TextKey>(pool).await;
 }
 
 async fn posts(pool: &Pool) -> Vec<Post> {
@@ -1114,6 +1147,7 @@ tri_dialect_test! {
         pk_lookups_on_a_renamed_pk_column,
         nested_empty_and_is_true,
         distinct_on_keeps_join_columns_and_order,
+        insert_reads_back_a_text_uuid_key,
     ],
 }
 

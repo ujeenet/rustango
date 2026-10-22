@@ -2153,7 +2153,7 @@ pub(crate) use values::fetch_values_flat_on;
 #[allow(unused_imports)]
 pub use values::{
     fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, try_get_flat_my,
-    FlatScalar, MaybeMyScalar, MaybePgScalar, MaybeSqliteScalar,
+    try_get_flat_sqlite, FlatScalar, MaybeMyScalar, MaybePgScalar, MaybeSqliteScalar,
 };
 
 /// Raw SQL on any backend: runs it with bound `SqlValue`

@@ -6,6 +6,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`; `RequestIdLayer` no longer echoes an untrusted client's `X-Request-Id`; a SQLite UUID key stored both as BLOB and TEXT is now a 404 in ViewSets and template views. See UPGRADING.
 
+### Fixed — SQLite insert reads back a TEXT `Auto<Uuid>` key
+
+`insert_pool` on a model whose `Auto<Uuid>` PK a column default writes as text now decodes it; it failed with `ParseByteLength`.
+
 ### Fixed — PK lookups on a PK with its own `column`
 
 `ForeignKey::get` / `get_on` / `get_pool`, `contains_pk`, `in_bulk` / `in_bulk_on` and the PK order of `first` / `last` filter by the field name; with `#[rustango(primary_key, column = "…")]` they failed with `UnknownField`.
