@@ -609,7 +609,9 @@ pub fn main_rs_for(template: Template, name: &str, features: &[String]) -> Strin
     }
     main.replacen(
         API_LINE,
-        &format!("{API_LINE}        .with_csrf() // `--features csrf`: form POSTs must carry `_csrf`\n"),
+        &format!(
+            "{API_LINE}        .with_csrf() // `--features csrf`: form POSTs must carry `_csrf`\n"
+        ),
         1,
     )
 }

@@ -125,7 +125,11 @@ async fn handle(cfg: Arc<BodyLimitLayer>, mut req: Request<Body>, next: Next) ->
     }
     // Chunked and HTTP/2 bodies carry no Content-Length: cap the stream,
     // once. A third `Limited` hides the length error, so axum answers 400.
-    if req.extensions().get::<StreamCap>().map_or(true, |c| cap < c.0) {
+    if req
+        .extensions()
+        .get::<StreamCap>()
+        .map_or(true, |c| cap < c.0)
+    {
         req.extensions_mut().insert(StreamCap(cap));
         req = req.map(|body| Body::new(http_body_util::Limited::new(body, cap)));
     }

@@ -482,7 +482,9 @@ async fn a_dispatch_in_a_block_wakes_the_worker_after_commit(pool: &Pool) {
     let (q2, t2) = (q.clone(), tok.clone());
     rustango::sql::atomic(pool, move |_tx| {
         Box::pin(async move {
-            q2.dispatch(&Tick { token: t2.clone() }).await.expect("dispatch");
+            q2.dispatch(&Tick { token: t2.clone() })
+                .await
+                .expect("dispatch");
             tokio::time::sleep(Duration::from_millis(300)).await;
             assert_eq!(counts(&t2).0, 0, "the job ran before its block committed");
             Ok(())

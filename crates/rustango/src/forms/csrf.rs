@@ -570,12 +570,13 @@ where
                     let (parts, body) = req.into_parts();
                     let mut limited = Request::new(body);
                     *limited.extensions_mut() = parts.extensions.clone();
-                    let bytes = match axum::RequestExt::extract::<axum::body::Bytes, _>(limited).await {
-                        Ok(b) => b,
-                        Err(rejection) => {
-                            return Ok(axum::response::IntoResponse::into_response(rejection))
-                        }
-                    };
+                    let bytes =
+                        match axum::RequestExt::extract::<axum::body::Bytes, _>(limited).await {
+                            Ok(b) => b,
+                            Err(rejection) => {
+                                return Ok(axum::response::IntoResponse::into_response(rejection))
+                            }
+                        };
                     let form_token = read_form_field(&bytes, CSRF_FORM_FIELD);
                     if !tokens_match(cookie_value.as_deref(), form_token.as_deref()) {
                         return Ok(forbid_response("CSRF token missing or mismatched"));
@@ -1639,7 +1640,10 @@ mod tests {
 
     /// A tokened form POST of `len` bytes sent in `frame`-byte chunks.
     #[cfg(feature = "_http_layers")]
-    fn counted_form(len: usize, frame: usize) -> (Request<Body>, Arc<std::sync::atomic::AtomicUsize>) {
+    fn counted_form(
+        len: usize,
+        frame: usize,
+    ) -> (Request<Body>, Arc<std::sync::atomic::AtomicUsize>) {
         let head = "_csrf=tok&text=";
         let body = format!("{head}{}", "a".repeat(len - head.len()));
         let read = Arc::new(std::sync::atomic::AtomicUsize::new(0));

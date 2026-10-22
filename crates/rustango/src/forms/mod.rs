@@ -306,8 +306,7 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
         return Ok(SqlValue::Null);
     }
     // An empty NOT NULL String is missing unless the field is `blank`.
-    if matches!(field.ty, FieldType::String) && !field.nullable && !field.blank && raw.is_empty()
-    {
+    if matches!(field.ty, FieldType::String) && !field.nullable && !field.blank && raw.is_empty() {
         return Err(FormError::Missing {
             field: field.name.to_owned(),
         });

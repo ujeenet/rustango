@@ -2618,7 +2618,10 @@ fn make_viewset_cmd<W: Write>(
     }
     let (name, model, crate_root) = parse_name_and_model(&filtered)?;
     let snake = pascal_to_snake(&name);
-    let model = ModelRef::resolve(model.as_deref().unwrap_or("Post"), std::path::Path::new("src"));
+    let model = ModelRef::resolve(
+        model.as_deref().unwrap_or("Post"),
+        std::path::Path::new("src"),
+    );
     let body = if tenant_aware {
         viewset_template_tenant(&name, &model, &snake, &crate_root)
     } else {
@@ -3008,7 +3011,10 @@ pub fn api(pool: Pool) -> Router<()> {{
 fn make_serializer_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let (name, model, crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
-    let model = ModelRef::resolve(model.as_deref().unwrap_or("Post"), std::path::Path::new("src"));
+    let model = ModelRef::resolve(
+        model.as_deref().unwrap_or("Post"),
+        std::path::Path::new("src"),
+    );
     write_generated(
         w,
         &format!("{snake}.rs"),
@@ -6794,7 +6800,10 @@ mod gen_tests {
         assert_eq!(path("Missing"), "crate::models::Missing");
         assert_eq!(path("shop::models::Item"), "crate::shop::models::Item");
         let explicit = ModelRef::resolve("crate::shop::models::Item", &src);
-        assert_eq!((explicit.path.as_str(), explicit.name.as_str()), ("crate::shop::models::Item", "Item"));
+        assert_eq!(
+            (explicit.path.as_str(), explicit.name.as_str()),
+            ("crate::shop::models::Item", "Item")
+        );
         let post = ModelRef::resolve("Post", &src);
         let vs = viewset_template_pool("PostViewSet", &post, "post_view_set", "rustango", "my_app");
         assert!(vs.contains("use crate::blog::models::Post;"), "{vs}");
@@ -6835,9 +6844,11 @@ mod gen_tests {
         // `--crate` with no value fails after the feature check, so no file is written.
         let run = |flag: &str, missing: &'static str| {
             let args = [flag.to_owned(), "--crate".to_owned()];
-            make_cmd("make:viewset", &args, &mut Vec::new(), move |f| f != missing)
-                .unwrap_err()
-                .to_string()
+            make_cmd("make:viewset", &args, &mut Vec::new(), move |f| {
+                f != missing
+            })
+            .unwrap_err()
+            .to_string()
         };
         assert!(run("--tenant", "tenancy").contains("`tenancy`"));
         assert!(run("--no-tenant", "admin").contains("`admin`"));
@@ -7450,7 +7461,13 @@ mod gen_tests {
     /// the mount-time `pool` argument.
     #[test]
     fn viewset_template_pool_emits_derive_macro() {
-        let body = viewset_template_pool("PostViewSet", &ModelRef::bare("Post"), "post_view_set", "rustango", "app");
+        let body = viewset_template_pool(
+            "PostViewSet",
+            &ModelRef::bare("Post"),
+            "post_view_set",
+            "rustango",
+            "app",
+        );
         assert!(
             body.contains("#[derive(ViewSet)]"),
             "expected derive macro, got: {body}"
@@ -7476,12 +7493,23 @@ mod gen_tests {
     fn viewset_templates_guard_writes() {
         let live =
             |body: &str, needle: &str| body.lines().any(|l| l.trim_start().starts_with(needle));
-        let tenant = viewset_template_tenant("PostViewSet", &ModelRef::bare("Post"),"post_view_set", "rustango");
+        let tenant = viewset_template_tenant(
+            "PostViewSet",
+            &ModelRef::bare("Post"),
+            "post_view_set",
+            "rustango",
+        );
         assert!(
             live(&tenant, ".permissions_for_model::<Post>()"),
             "{tenant}"
         );
-        let pool = viewset_template_pool("PostViewSet", &ModelRef::bare("Post"), "post_view_set", "rustango", "app");
+        let pool = viewset_template_pool(
+            "PostViewSet",
+            &ModelRef::bare("Post"),
+            "post_view_set",
+            "rustango",
+            "app",
+        );
         assert!(live(&pool, "read_only,"), "{pool}");
     }
 
@@ -7493,7 +7521,13 @@ mod gen_tests {
         // proc-macro contract is independent of the consumer's
         // Cargo.toml dep rename (same pattern #142 / renamed-smoke
         // proves for `#[rustango(...)]`).
-        let body = viewset_template_pool("PostViewSet", &ModelRef::bare("Post"), "post_view_set", "rustango_orm", "app");
+        let body = viewset_template_pool(
+            "PostViewSet",
+            &ModelRef::bare("Post"),
+            "post_view_set",
+            "rustango_orm",
+            "app",
+        );
         assert!(
             body.contains("use rustango_orm::ViewSet;"),
             "renamed crate root must propagate to `use` line, got: {body}"
@@ -7510,7 +7544,12 @@ mod gen_tests {
 
     #[test]
     fn viewset_template_tenant_threads_renamed_crate_root() {
-        let body = viewset_template_tenant("PostViewSet", &ModelRef::bare("Post"),"post_view_set", "rustango_orm");
+        let body = viewset_template_tenant(
+            "PostViewSet",
+            &ModelRef::bare("Post"),
+            "post_view_set",
+            "rustango_orm",
+        );
         assert!(body.contains("use rustango_orm::core::Model as _;"));
         assert!(body.contains("use rustango_orm::viewset::ViewSet;"));
         assert!(!body.contains("use rustango::"));
@@ -7529,7 +7568,12 @@ mod gen_tests {
     /// (#80).
     #[test]
     fn viewset_template_tenant_uses_tenant_router() {
-        let body = viewset_template_tenant("PostViewSet", &ModelRef::bare("Post"),"post_view_set", "rustango");
+        let body = viewset_template_tenant(
+            "PostViewSet",
+            &ModelRef::bare("Post"),
+            "post_view_set",
+            "rustango",
+        );
         assert!(
             body.contains("ViewSet::for_model"),
             "expected runtime ViewSet::for_model builder, got: {body}"

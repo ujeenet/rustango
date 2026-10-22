@@ -145,9 +145,12 @@ where
     let (settings, ignored) = load_report(root, env, env_vars)?;
     if !ignored.is_empty() {
         if strict {
-            return Err(ConfigError::Shape(<toml::de::Error as serde::de::Error>::custom(
-                format!("unknown keys ({STRICT_VAR} is set): {}", ignored.join(", ")),
-            )));
+            return Err(ConfigError::Shape(
+                <toml::de::Error as serde::de::Error>::custom(format!(
+                    "unknown keys ({STRICT_VAR} is set): {}",
+                    ignored.join(", ")
+                )),
+            ));
         }
         for key in &ignored {
             eprintln!("config: unknown key `{key}` is ignored; check its spelling and section");
@@ -160,7 +163,10 @@ where
 const STRICT_VAR: &str = "RUSTANGO_CONFIG_STRICT";
 
 fn is_truthy(v: &str) -> bool {
-    matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 /// The merged settings plus every key path nothing reads, sorted.
@@ -680,7 +686,8 @@ retention_days = 90
         }
     }
 
-    const MISPLACED: &str = "top = 1\n[security]\nallowed_host = \"x\"\nheaders_preset = \"strict\"\n\
+    const MISPLACED: &str =
+        "top = 1\n[security]\nallowed_host = \"x\"\nheaders_preset = \"strict\"\n\
                              [auth]\naccess_ttl_secs = 5\n[auth.jwt]\naccess_ttl_secs = 900\n";
 
     #[test]

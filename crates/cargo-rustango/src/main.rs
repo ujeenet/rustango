@@ -956,13 +956,23 @@ mod tests {
     fn config_templates_have_no_root_keys() {
         for backend in [Backend::Postgres, Backend::Sqlite, Backend::Mysql] {
             for (file, body) in [
-                ("default.toml", templates::config_default_toml("acme", backend)),
+                (
+                    "default.toml",
+                    templates::config_default_toml("acme", backend),
+                ),
                 ("dev", templates::config_dev_settings_toml("acme", backend)),
-                ("staging", templates::config_staging_settings_toml("acme", backend)),
+                (
+                    "staging",
+                    templates::config_staging_settings_toml("acme", backend),
+                ),
                 ("prod", templates::config_prod_settings_toml("acme")),
             ] {
                 let tree: toml::Table = toml::from_str(&body).expect("rendered tier parses");
-                let loose: Vec<_> = tree.iter().filter(|(_, v)| !v.is_table()).map(|(k, _)| k).collect();
+                let loose: Vec<_> = tree
+                    .iter()
+                    .filter(|(_, v)| !v.is_table())
+                    .map(|(k, _)| k)
+                    .collect();
                 assert!(loose.is_empty(), "{backend:?} {file}: root keys {loose:?}");
             }
         }
@@ -1490,10 +1500,16 @@ mod tests {
     #[test]
     fn fullstack_admin_reads_settings() {
         let urls = templates::urls_rs(Template::Fullstack);
-        assert!(urls.contains("admin::Builder::from_settings(pool, &"), "{urls}");
+        assert!(
+            urls.contains("admin::Builder::from_settings(pool, &"),
+            "{urls}"
+        );
         // A config that fails to load must not drop `[admin]` restrictions.
         assert!(!urls.contains("unwrap_or_default"), "{urls}");
-        assert!(urls.contains("Settings::load_from_env()\n        .expect("), "{urls}");
+        assert!(
+            urls.contains("Settings::load_from_env()\n        .expect("),
+            "{urls}"
+        );
     }
 
     /// `--features csrf` mounts the layer; every template shows where the
@@ -1503,9 +1519,15 @@ mod tests {
         for template in [Template::Api, Template::Fullstack, Template::Tenant] {
             let plain = templates::main_rs_for(template, "myapp", &[]);
             assert!(!plain.contains(".with_csrf()"), "{template:?}: {plain}");
-            assert!(plain.contains(".with_trusted_proxies("), "{template:?}: {plain}");
+            assert!(
+                plain.contains(".with_trusted_proxies("),
+                "{template:?}: {plain}"
+            );
             let csrf = templates::main_rs_for(template, "myapp", &["csrf".to_owned()]);
-            assert!(csrf.contains("\n        .with_csrf()"), "{template:?}: {csrf}");
+            assert!(
+                csrf.contains("\n        .with_csrf()"),
+                "{template:?}: {csrf}"
+            );
         }
     }
 
@@ -1514,10 +1536,17 @@ mod tests {
     fn readme_runs_makemigrations_before_migrate() {
         for backend in [Backend::Postgres, Backend::Sqlite] {
             let readme = templates::readme("myapp", Template::Fullstack, backend);
-            for line in readme.lines().filter(|l| l.contains("cargo run -- migrate")) {
+            for line in readme
+                .lines()
+                .filter(|l| l.contains("cargo run -- migrate"))
+            {
                 let at = readme.find(line).unwrap();
                 assert!(
-                    readme[..at].lines().last().unwrap_or("").contains("makemigrations"),
+                    readme[..at]
+                        .lines()
+                        .last()
+                        .unwrap_or("")
+                        .contains("makemigrations"),
                     "`{line}` must follow makemigrations:\n{readme}"
                 );
             }

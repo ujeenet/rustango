@@ -300,8 +300,8 @@ async fn model_form_fills_a_v7_pk(pool: &Pool) {
 }
 
 async fn model_form_for_fills_a_v7_pk_and_skips_generated(pool: &Pool) {
-    let mf = ModelFormFor::<V7Doc>::parse(&HashMap::from([("name".into(), "C".into())]))
-        .expect("valid");
+    let mf =
+        ModelFormFor::<V7Doc>::parse(&HashMap::from([("name".into(), "C".into())])).expect("valid");
     rustango::sql::insert_pool(pool, &mf.into_insert_query())
         .await
         .expect("v7 insert");

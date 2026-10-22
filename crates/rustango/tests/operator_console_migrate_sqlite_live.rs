@@ -300,7 +300,10 @@ async fn create_and_migrate_runs_are_audited() {
     let all = Booted::run_id(&b.post("/orgs/migrate").await);
     b.settled(all).await;
     let on_run = audited(&b, "rustango_provisioning_runs", &all.to_string()).await;
-    assert!(on_run.iter().any(|s| s.ends_with(":migrate_all")), "{on_run:?}");
+    assert!(
+        on_run.iter().any(|s| s.ends_with(":migrate_all")),
+        "{on_run:?}"
+    );
 }
 
 /// A create that fails is audited too: it may leave an inactive tenant behind.

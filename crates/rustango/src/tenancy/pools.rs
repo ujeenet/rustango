@@ -446,7 +446,10 @@ impl<T: Clone> SingleFlight<T> {
         *done = Some(copy(&out));
         // Later arrivals start a fresh flight: a failure is not cached.
         let mut map = self.map();
-        if map.get(slug).is_some_and(|f| f.as_ptr() == Arc::as_ptr(&flight)) {
+        if map
+            .get(slug)
+            .is_some_and(|f| f.as_ptr() == Arc::as_ptr(&flight))
+        {
             map.remove(slug);
         }
         out
@@ -1288,8 +1291,7 @@ impl TenantPools<sqlx::Postgres> {
         if let Some(pool) = self.cached_scoped_pool(&org.slug, &source).await {
             return Ok(pool);
         }
-        let span =
-            tracing::info_span!("tenant_pool_init", slug = %org.slug, mode = "schema");
+        let span = tracing::info_span!("tenant_pool_init", slug = %org.slug, mode = "schema");
         async {
             let connect_start = std::time::Instant::now();
             let scoped = self.build_scoped_pool(&schema, &registry).await?;
@@ -1328,11 +1330,7 @@ impl TenantPools<sqlx::Postgres> {
                 org.slug.clone(),
                 CachedPool::new(Arc::new(scoped.clone()), source, self.next_tick()),
             );
-            self.warn_if_near_cap(
-                cache.len(),
-                self.config.max_cached_scoped_pools,
-                "schema",
-            );
+            self.warn_if_near_cap(cache.len(), self.config.max_cached_scoped_pools, "schema");
             Ok(scoped)
         }
         .instrument(span)
@@ -1742,9 +1740,14 @@ mod tests {
         );
         let org = failing_sqlite_org();
         let got =
-            futures_util::future::join_all((0..32).map(|_| pools.pool_for_database_mode(&org))).await;
+            futures_util::future::join_all((0..32).map(|_| pools.pool_for_database_mode(&org)))
+                .await;
         assert!(got.iter().all(Result::is_err));
-        assert_eq!(n.load(Ordering::SeqCst), 1, "one build for 32 failing requests");
+        assert_eq!(
+            n.load(Ordering::SeqCst),
+            1,
+            "one build for 32 failing requests"
+        );
         // The failure is not cached: the next request tries again.
         assert!(pools.pool_for_database_mode(&org).await.is_err());
         assert_eq!(n.load(Ordering::SeqCst), 2);
@@ -1761,7 +1764,11 @@ mod tests {
         let org = failing_sqlite_org();
         let got = futures_util::future::join_all((0..32).map(|_| pools.pool_for_org(&org))).await;
         assert!(got.iter().all(Result::is_err));
-        assert_eq!(n.load(Ordering::SeqCst), 1, "one build for 32 failing requests");
+        assert_eq!(
+            n.load(Ordering::SeqCst),
+            1,
+            "one build for 32 failing requests"
+        );
     }
 
     /// With caching off there is nothing to share, so builds run side by side.
@@ -1800,9 +1807,11 @@ mod tests {
         let flights = SingleFlight::<u32>::default();
         for slug in ["a", "b", "c", "d"] {
             let pending = flights.run(slug, std::future::pending());
-            assert!(tokio::time::timeout(std::time::Duration::from_millis(5), pending)
-                .await
-                .is_err());
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(5), pending)
+                    .await
+                    .is_err()
+            );
         }
         assert_eq!(flights.run("e", async { Ok(1) }).await.ok(), Some(1));
         assert_eq!(flights.len(), 0, "dead and finished flights are dropped");
@@ -1830,9 +1839,14 @@ mod tests {
         );
         let org = cold_sqlite_org();
         let got =
-            futures_util::future::join_all((0..32).map(|_| pools.pool_for_database_mode(&org))).await;
+            futures_util::future::join_all((0..32).map(|_| pools.pool_for_database_mode(&org)))
+                .await;
         assert!(got.iter().all(Result::is_ok));
-        assert_eq!(n.load(Ordering::SeqCst), 1, "one build for 32 cold requests");
+        assert_eq!(
+            n.load(Ordering::SeqCst),
+            1,
+            "one build for 32 cold requests"
+        );
     }
 
     /// The same for the database-only registry.
@@ -1846,7 +1860,11 @@ mod tests {
         let org = cold_sqlite_org();
         let got = futures_util::future::join_all((0..32).map(|_| pools.pool_for_org(&org))).await;
         assert!(got.iter().all(Result::is_ok));
-        assert_eq!(n.load(Ordering::SeqCst), 1, "one build for 32 cold requests");
+        assert_eq!(
+            n.load(Ordering::SeqCst),
+            1,
+            "one build for 32 cold requests"
+        );
     }
 
     /// Schema mode too: a server that never answers sees one connect,

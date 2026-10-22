@@ -1951,12 +1951,12 @@ where
 
 // `.values_dict()` / `.values_list()` projection.
 mod values;
+pub(crate) use values::fetch_values_flat_on;
 #[allow(unused_imports)]
 pub use values::{
     fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, try_get_flat_my,
     FlatScalar, MaybeMyScalar, MaybePgScalar, MaybeSqliteScalar,
 };
-pub(crate) use values::fetch_values_flat_on;
 
 /// Raw SQL on any backend: runs it with bound `SqlValue`
 /// params and decodes each row into `T`.

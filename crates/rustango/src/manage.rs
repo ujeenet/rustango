@@ -2557,7 +2557,9 @@ mod tests {
                 secure,
                 ..Default::default()
             };
-            assert!(!CsrfMount::Explicit(cfg.clone()).layer().follows_session_policy());
+            assert!(!CsrfMount::Explicit(cfg.clone())
+                .layer()
+                .follows_session_policy());
             let cookie = csrf_cookie(CsrfMount::Explicit(cfg)).await;
             assert_eq!(cookie.contains("Secure"), secure, "{cookie}");
         }
