@@ -152,7 +152,7 @@ untouched.
 
 ### Admin `add` hooks also see the new row
 
-After the INSERT, an `add` object-permission hook is called again with `Some(&row)`; a hook that refuses every `Some` now refuses every create. A create or edit whose row falls outside `register_admin_queryset!` returns 403.
+After a create, the written row (parent or inline child) must be inside `register_admin_queryset!` and pass the `add` hook, now called again with `Some(&row)`; a hook that refuses every `Some` now refuses every create. After an edit, the written row is checked against the queryset scope only; the `change` hook still sees only the row before the edit. A refusal returns 403 and rolls back the whole edit.
 
 ### `PageKey` takes the full path
 

@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Security — admin create and edit stay inside the row scope
 
-The written row is re-read in the write transaction through the queryset hooks and checked by the `add` / `change` object hook; a form that would put a row outside the scope is refused with 403 and rolled back.
+The written row, parent and inline children alike, is re-read in the write transaction through the queryset hooks (and the `add` hook after a create); a form that would put a row outside the scope is refused with 403 and the whole edit rolled back.
 
 ### Fixed — `Accept-Language` with `q=NaN` can no longer panic `LocaleMiddleware`
 
@@ -22,7 +22,7 @@ Two nests of one cached router no longer serve each other's pages.
 
 ### Fixed — `RedisCache` times out on a stalled server
 
-Connects are bounded at 5 s per attempt (three attempts, ~1 s apart) and commands at 2 s by default, instead of hanging on TCP retries and minute-long reconnect backoff. `RedisCache::with_timeouts` takes a `RedisTimeouts` to change them.
+Connects are bounded at 5 s per attempt (three attempts, ~1 s apart) and commands at 2 s by default, instead of hanging on TCP retries and minute-long reconnect backoff. `RedisCache::with_timeouts` takes a `RedisTimeouts` to change them. `clear()` sends `FLUSHDB ASYNC` so a large flush does not hit the command timeout.
 
 ## [0.60.9] — 2026-10-16
 
