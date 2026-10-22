@@ -24,12 +24,16 @@ use redis::AsyncCommands;
 
 use super::{Cache, CacheError};
 
+/// Retries after a failed connect attempt, each at most a ~1 s (jittered) wait.
+const CONNECT_RETRIES: usize = 2;
+const RETRY_MAX_DELAY_MS: u64 = 1_000;
+
 /// How long one connect attempt and one command may take. Never unbounded:
 /// a stalled Redis would hang every cache call for minutes of TCP retries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RedisTimeouts {
-    /// One connect attempt, handshake included. The manager retries a few times.
+    /// One connect attempt, handshake included. Up to three attempts are made.
     pub connect: Duration,
     /// One command, from send to reply.
     pub response: Duration,
@@ -91,9 +95,13 @@ impl RedisCache {
         timeouts: RedisTimeouts,
     ) -> Result<Self, CacheError> {
         let client = redis::Client::open(url).map_err(|e| CacheError::Connection(e.to_string()))?;
+        // redis 0.27 otherwise backs off up to 60 s between 6 retries, and a
+        // call waits on the reconnect: minutes of stall per outage.
         let config = redis::aio::ConnectionManagerConfig::new()
             .set_connection_timeout(timeouts.connect)
-            .set_response_timeout(timeouts.response);
+            .set_response_timeout(timeouts.response)
+            .set_number_of_retries(CONNECT_RETRIES)
+            .set_max_delay(RETRY_MAX_DELAY_MS);
         let conn = redis::aio::ConnectionManager::new_with_config(client, config)
             .await
             .map_err(|e| CacheError::Connection(e.to_string()))?;
@@ -344,6 +352,7 @@ mod tests {
         .await
         .expect("connect hung past its timeout");
         assert!(built.is_err(), "connected to a silent server");
-        assert!(start.elapsed() < Duration::from_secs(20));
+        // Three 100 ms attempts and two ~1 s retry waits.
+        assert!(start.elapsed() < Duration::from_secs(8), "{:?}", start.elapsed());
     }
 }
