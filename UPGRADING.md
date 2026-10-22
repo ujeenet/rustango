@@ -154,6 +154,10 @@ untouched.
 
 After the INSERT, an `add` object-permission hook is called again with `Some(&row)`; a hook that refuses every `Some` now refuses every create. A create or edit whose row falls outside `register_admin_queryset!` returns 403.
 
+### `PageKey` takes the full path
+
+Under `Router::nest`, pass `CachePageLayer::invalidate` the path with the nest prefix (`/en/about`, not `/about`). Old entries expire on their timeout.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more

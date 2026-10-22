@@ -12,6 +12,10 @@ The written row is re-read in the write transaction through the queryset hooks a
 
 A non-finite q is ignored like an unparsable one, and qualities sort as integers.
 
+### Fixed — `cache_page` keys on the full path under `Router::nest`
+
+Two nests of one cached router no longer serve each other's pages.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.
