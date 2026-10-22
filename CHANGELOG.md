@@ -20,6 +20,10 @@ Lookups walk exact → base → fallback chain → default once, and at each loc
 
 `move_to_collection`, `save_bytes` and `begin_upload` refuse such a collection (400 from the router) and lock it until they commit, so a concurrent `delete_collection` cannot leave media under a dead folder.
 
+### Fixed — derives accept nullable relations and `Option<bool>`
+
+`#[serializer(nested)]` and `#[serializer(slug)]` compile on an `Option<ForeignKey<T>>` source (null renders the default), and `#[derive(Form)]` parses `Option<bool>`, blank as `None`.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

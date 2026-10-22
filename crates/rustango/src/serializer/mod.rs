@@ -137,6 +137,28 @@
 
 use serde_json::Value;
 
+/// The loaded parent of a relation field, for `#[serializer(nested)]` and
+/// `slug`. Covers `ForeignKey<T>` and the nullable `Option<ForeignKey<T>>`.
+#[doc(hidden)]
+pub trait LoadedRelation {
+    type Target;
+    fn loaded(&self) -> Option<&Self::Target>;
+}
+
+impl<T, K> LoadedRelation for crate::sql::ForeignKey<T, K> {
+    type Target = T;
+    fn loaded(&self) -> Option<&T> {
+        self.value()
+    }
+}
+
+impl<R: LoadedRelation> LoadedRelation for Option<R> {
+    type Target = R::Target;
+    fn loaded(&self) -> Option<&R::Target> {
+        self.as_ref().and_then(R::loaded)
+    }
+}
+
 /// The serializer trait. `#[derive(Serializer)]` implements it.
 ///
 /// The macro writes `from_model` and `writable_fields` for you. The
