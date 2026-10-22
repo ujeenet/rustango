@@ -428,6 +428,8 @@ impl JobQueue for PgJobQueue {
         self.registry.lock().await.register_with::<T, F, Fut>(run);
     }
 
+    /// Inside an `atomic` block on this queue's pool, the insert joins that
+    /// block; do not hold its `TxGuard` across this call.
     async fn dispatch<T: Job>(&self, payload: &T) -> Result<(), JobError> {
         use crate::core::SqlValue;
         let value = serde_json::to_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
@@ -467,6 +469,20 @@ impl JobQueue for PgJobQueue {
             "INSERT INTO rustango_jobs (name, payload, max_attempts, run_at, created_at{cols}) \
              VALUES ({p1}, {p2}, {p3}, {p4}, {p5}{vals})"
         );
+        // Inside an `atomic` block on the queue's pool the row joins that
+        // transaction, and the worker is woken only once it commits.
+        if crate::sql::in_block(&self.pool) {
+            let notify = self.notify.clone();
+            return crate::sql::atomic(&self.pool, move |tx| {
+                Box::pin(async move {
+                    crate::sql::raw_execute_tx(&mut *tx.lock().await?, &sql, binds).await?;
+                    crate::sql::on_commit(move || notify.notify_one());
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(|e| JobError::Queue(e.to_string()));
+        }
         crate::sql::raw_execute_pool(&self.pool, &sql, binds)
             .await
             .map_err(|e| JobError::Queue(e.to_string()))?;

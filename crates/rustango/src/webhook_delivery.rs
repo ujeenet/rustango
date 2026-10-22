@@ -91,6 +91,7 @@ pub static USER_AGENT: &str = concat!("rustango-webhook/", env!("CARGO_PKG_VERSI
 ///
 /// [`WebhookSubscription::dispatch`] builds these for you.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(try_from = "QueuedEvent")]
 pub struct WebhookEvent {
     pub id: String,
     pub event: String,
@@ -107,6 +108,87 @@ pub struct WebhookEvent {
     /// Allow loopback, private and link-local targets. Off by default.
     #[serde(default)]
     pub allow_private_targets: bool,
+}
+
+/// A queued row in either shape: rows queued before the body was signed at
+/// dispatch carry the secret and the raw payload, and still have to deliver.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum QueuedEvent {
+    Signed(SignedEvent),
+    Legacy(LegacyEvent),
+}
+
+/// The current shape, as [`WebhookEvent`] serializes it.
+#[derive(Deserialize)]
+struct SignedEvent {
+    id: String,
+    event: String,
+    target_url: String,
+    body: String,
+    signature: String,
+    headers: HashMap<String, String>,
+    timeout_secs: u64,
+    retry_status_codes: Vec<u16>,
+    #[serde(default)]
+    allow_private_targets: bool,
+}
+
+#[derive(Deserialize)]
+struct LegacyEvent {
+    id: String,
+    event: String,
+    target_url: String,
+    signing_secret: String,
+    signature_format: SignatureFormat,
+    payload: serde_json::Value,
+    headers: HashMap<String, String>,
+    timeout_secs: u64,
+    retry_status_codes: Vec<u16>,
+    #[serde(default)]
+    allow_private_targets: bool,
+}
+
+impl TryFrom<QueuedEvent> for WebhookEvent {
+    type Error = String;
+
+    fn try_from(q: QueuedEvent) -> Result<Self, String> {
+        let e = match q {
+            QueuedEvent::Signed(e) => e,
+            QueuedEvent::Legacy(e) => {
+                // Signed here as the older release did at delivery.
+                let body = serde_json::to_string(&e.payload).map_err(|e| e.to_string())?;
+                let signature = sign_body(
+                    e.signature_format,
+                    e.signing_secret.as_bytes(),
+                    body.as_bytes(),
+                )
+                .map_err(|e| e.to_string())?;
+                SignedEvent {
+                    id: e.id,
+                    event: e.event,
+                    target_url: e.target_url,
+                    body,
+                    signature,
+                    headers: e.headers,
+                    timeout_secs: e.timeout_secs,
+                    retry_status_codes: e.retry_status_codes,
+                    allow_private_targets: e.allow_private_targets,
+                }
+            }
+        };
+        Ok(Self {
+            id: e.id,
+            event: e.event,
+            target_url: e.target_url,
+            body: e.body,
+            signature: e.signature,
+            headers: e.headers,
+            timeout_secs: e.timeout_secs,
+            retry_status_codes: e.retry_status_codes,
+            allow_private_targets: e.allow_private_targets,
+        })
+    }
 }
 
 /// Only the URL's origin and the header names: both can carry secrets (#2161).
@@ -731,6 +813,28 @@ mod tests {
         ev.headers.insert("X Bad".into(), "v".into());
         let err = deliver(&ev).await.unwrap_err();
         assert!(matches!(err, JobError::Fatal(_)), "{err:?}");
+    }
+
+    /// A row queued by an older release, which stored the secret, still delivers.
+    #[test]
+    fn an_older_queued_event_still_decodes_and_signs() {
+        let old = serde_json::json!({
+            "id": "id", "event": "ping", "target_url": "https://example.com/h",
+            "signing_secret": "s3cret", "signature_format": "HexSha256WithPrefix",
+            "payload": {"a": 1}, "headers": {}, "timeout_secs": 5,
+            "retry_status_codes": [],
+        });
+        let ev: WebhookEvent = serde_json::from_value(old).expect("the older shape decodes");
+        assert_eq!(ev.body, r#"{"a":1}"#);
+        assert!(crate::webhook::verify_signature(
+            SignatureFormat::HexSha256WithPrefix,
+            b"s3cret",
+            ev.body.as_bytes(),
+            &ev.signature,
+        ));
+        let current: WebhookEvent =
+            serde_json::from_value(serde_json::to_value(&ev).unwrap()).expect("round trip");
+        assert_eq!(current.signature, ev.signature);
     }
 
     fn event(url: String, allow_private_targets: bool) -> WebhookEvent {

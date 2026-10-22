@@ -190,6 +190,14 @@ The build still succeeds, with a `deprecated` warning; `-D warnings` builds fail
 
 A JSON key that names no model field is now a per-key `FormErrors` entry. `parse` (form-encoded) still ignores such keys.
 
+### `dispatch` inside `atomic` is transactional
+
+`DatabaseJobQueue::dispatch` inside an `atomic` block on the queue's pool now commits or rolls back with the block. Code that relied on the job surviving a rollback must dispatch outside the block. Holding the block's `TxGuard` across `dispatch` makes it fail with a `NestedAtomic` queue error.
+
+### Undecodable job payloads retry
+
+A payload that fails to decode is `Retryable` (spends attempts, then dead-letters) instead of dead-lettering at once.
+
 ## 0.60.9
 
 ### Idle connections close after 75 s

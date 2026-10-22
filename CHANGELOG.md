@@ -56,6 +56,26 @@ An empty value on a blank NOT NULL String field is saved as `""` in the admin, `
 
 `parse` skips generated columns, and `into_insert_query` fills `auto_now*` and `default_uuid_v7` values. `from_json` refuses a key that names no field, as documented.
 
+### Fixed — a cold tenant pool is built once
+
+Concurrent requests to a tenant with no cached pool now wait for one secret lookup and connect instead of each making their own, in database mode, schema mode and `DatabasePools`. If that build fails, every waiting request gets its error at once. With the pool cache cap at 0, builds still run side by side.
+
+### Fixed — `dispatch` inside `atomic` joins the block
+
+On the queue's own pool the job row is written in the block's transaction and the worker is woken after the commit. A rolled-back block no longer leaves its job queued, and SQLite no longer waits on the block's write lock.
+
+### Fixed — undecodable job payloads are retried
+
+A payload the registered job type cannot decode is a retryable failure, not an immediate dead letter, so rows from another release survive a rolling deploy. `WebhookEvent` also decodes rows queued before its body was signed at dispatch.
+
+### Fixed — `should_send_throttled` lets one concurrent caller through
+
+It uses the cache's set-if-absent, so two calls at once no longer both send.
+
+### Fixed — operator console audits tenant create and migrate runs; hosts errors withhold driver text
+
+Creating a tenant and starting a migrate run (one tenant or all) write an audit row; a failed create writes a `create_failed` row. A registry error on the hosts page no longer puts driver text into the redirect URL.
+
 ## [0.60.9] — 2026-10-21
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options; `loaddata` leaves omitted keys to the column default; MySQL JSON key checks are literal; idle connections close after 75 s; `CsrfConfig` has a new field; refused deletes are 409 and refused CBV writes 422. See UPGRADING.

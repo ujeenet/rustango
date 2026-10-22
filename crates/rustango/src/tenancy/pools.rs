@@ -41,7 +41,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, Weak};
 
 #[cfg(feature = "postgres")]
 use crate::sql::sqlx::postgres::{PgPool, PgPoolOptions};
@@ -402,6 +402,90 @@ impl<DB: Database> CachedPool<DB> {
     }
 }
 
+/// One build at a time per slug, so a cold tenant hit by many requests
+/// resolves its secret and connects once. Requests that wait get that
+/// build's outcome, its error included, so they fail together.
+pub(super) struct SingleFlight<T>(std::sync::Mutex<HashMap<String, Weak<Flight<T>>>>);
+
+/// `None` until the build finishes; a cancelled build leaves it `None`.
+type Flight<T> = tokio::sync::Mutex<Option<Result<T, TenancyError>>>;
+
+impl<T> Default for SingleFlight<T> {
+    fn default() -> Self {
+        Self(std::sync::Mutex::default())
+    }
+}
+
+impl<T: Clone> SingleFlight<T> {
+    /// Run `build` unless a flight for `slug` is under way; then share its outcome.
+    pub(super) async fn run(
+        &self,
+        slug: &str,
+        build: impl std::future::Future<Output = Result<T, TenancyError>>,
+    ) -> Result<T, TenancyError> {
+        let flight = {
+            let mut map = self.map();
+            map.retain(|_, f| f.strong_count() > 0);
+            if let Some(f) = map.get(slug).and_then(Weak::upgrade) {
+                f
+            } else {
+                let f = Arc::new(tokio::sync::Mutex::new(None));
+                map.insert(slug.to_owned(), Arc::downgrade(&f));
+                f
+            }
+        };
+        let mut done = flight.lock().await;
+        let copy = |o: &Result<T, TenancyError>| match o {
+            Ok(v) => Ok(v.clone()),
+            Err(e) => Err(shared_error(e)),
+        };
+        if let Some(outcome) = done.as_ref() {
+            return copy(outcome);
+        }
+        let out = build.await;
+        *done = Some(copy(&out));
+        // Later arrivals start a fresh flight: a failure is not cached.
+        let mut map = self.map();
+        if map.get(slug).is_some_and(|f| f.as_ptr() == Arc::as_ptr(&flight)) {
+            map.remove(slug);
+        }
+        out
+    }
+
+    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, Weak<Flight<T>>>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map().len()
+    }
+}
+
+/// A copy of a failed build's error for another waiter. Text-only
+/// variants copy as they are; the rest keep their message and kind.
+fn shared_error(e: &TenancyError) -> TenancyError {
+    use super::secrets::SecretsError;
+    match e {
+        TenancyError::Resolution(s) => TenancyError::Resolution(s.clone()),
+        TenancyError::Validation(s) => TenancyError::Validation(s.clone()),
+        TenancyError::Busy => TenancyError::Busy,
+        TenancyError::Secrets(SecretsError::NotFound(s)) => {
+            TenancyError::Secrets(SecretsError::NotFound(s.clone()))
+        }
+        TenancyError::Secrets(SecretsError::Invalid(s)) => {
+            TenancyError::Secrets(SecretsError::Invalid(s.clone()))
+        }
+        TenancyError::Secrets(SecretsError::Backend(b)) => {
+            TenancyError::Secrets(SecretsError::Backend(b.to_string().into()))
+        }
+        TenancyError::Driver(sqlx::Error::PoolTimedOut) => {
+            TenancyError::Driver(sqlx::Error::PoolTimedOut)
+        }
+        other => TenancyError::Driver(sqlx::Error::Io(std::io::Error::other(other.to_string()))),
+    }
+}
+
 /// Drop least-recently-used entries until one more fits under `cap`,
 /// returning the evicted slugs to log. Evicting only drops this map's
 /// handle; sqlx pools are ref-counted, so a live holder keeps theirs.
@@ -443,6 +527,10 @@ pub struct TenantPools<DB: Database = DefaultTenantDb> {
     /// this file still builds under `--no-default-features --features
     /// sqlite,tenancy`; only the Postgres impl ever populates it.
     scoped_cache: RwLock<HashMap<String, CachedPool<DB>>>,
+    /// Single-flight for `cache` and `scoped_cache` misses.
+    building: SingleFlight<Arc<sqlx::Pool<DB>>>,
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    building_scoped: SingleFlight<sqlx::Pool<DB>>,
 }
 
 impl<DB: Database> TenantPools<DB> {
@@ -469,6 +557,8 @@ impl<DB: Database> TenantPools<DB> {
             warned_near_cap: std::sync::atomic::AtomicBool::new(false),
             cache: RwLock::new(HashMap::new()),
             scoped_cache: RwLock::new(HashMap::new()),
+            building: SingleFlight::default(),
+            building_scoped: SingleFlight::default(),
         }
     }
 
@@ -813,16 +903,40 @@ impl<DB: Database> TenantPools<DB> {
         self.scoped_cache.read().await.len()
     }
 
+    /// A cache hit. Recording it needs only `&`, so the LRU stamp costs
+    /// no write lock.
+    async fn cached_database_pool(
+        &self,
+        slug: &str,
+        source: &PoolSource,
+    ) -> Option<Arc<sqlx::Pool<DB>>> {
+        let cache = self.cache.read().await;
+        let entry = CachedPool::lookup(&cache, slug, source)?;
+        entry.touch(self.next_tick());
+        Some(Arc::clone(&entry.pool))
+    }
+
     async fn pool_for_database_mode(&self, org: &Org) -> Result<Arc<sqlx::Pool<DB>>, TenancyError> {
-        // Fast path: cache hit. Recording the hit needs only `&`, so
-        // the LRU stamp costs no write lock here.
         let source = PoolSource::database(org);
-        {
-            let cache = self.cache.read().await;
-            if let Some(entry) = CachedPool::lookup(&cache, &org.slug, &source) {
-                entry.touch(self.next_tick());
-                return Ok(Arc::clone(&entry.pool));
-            }
+        if let Some(pool) = self.cached_database_pool(&org.slug, &source).await {
+            return Ok(pool);
+        }
+        let build = self.build_database_mode(org, source);
+        if self.config.max_cached_database_pools == 0 {
+            // Nothing is cached, so there is nothing to share.
+            return build.await;
+        }
+        self.building.run(&org.slug, build).await
+    }
+
+    async fn build_database_mode(
+        &self,
+        org: &Org,
+        source: PoolSource,
+    ) -> Result<Arc<sqlx::Pool<DB>>, TenancyError> {
+        // A flight that started after another finished finds its pool here.
+        if let Some(pool) = self.cached_database_pool(&org.slug, &source).await {
+            return Ok(pool);
         }
         // Cache miss — instrument so the cold path is visible in
         // tracing output. (#60, v0.27.7)
@@ -1149,68 +1263,87 @@ impl TenantPools<sqlx::Postgres> {
     pub async fn scoped_pool(&self, org: &Org) -> Result<PgPool, TenancyError> {
         match self.pool_for_org(org).await? {
             TenantPool::Schema { schema, registry } => {
-                // Fast path: cache hit. Mirrors `pool_for_database_mode`.
+                // Fast path and single-flight, as in `pool_for_database_mode`.
                 let source = PoolSource::Schema(schema.clone());
-                {
-                    let cache = self.scoped_cache.read().await;
-                    if let Some(entry) = CachedPool::lookup(&cache, &org.slug, &source) {
-                        entry.touch(self.next_tick());
-                        return Ok((*entry.pool).clone());
-                    }
+                if let Some(pool) = self.cached_scoped_pool(&org.slug, &source).await {
+                    return Ok(pool);
                 }
-
-                let span =
-                    tracing::info_span!("tenant_pool_init", slug = %org.slug, mode = "schema");
-                async {
-                    let connect_start = std::time::Instant::now();
-                    let scoped = self.build_scoped_pool(&schema, &registry).await?;
-                    tracing::info!(
-                        target: "rustango::tenancy::pools",
-                        slug = %org.slug,
-                        schema = %schema,
-                        elapsed_ms = connect_start.elapsed().as_millis() as u64,
-                        max_conn = self.config.scoped_pool_max_connections,
-                        "tenant pool connected (schema mode)",
-                    );
-
-                    // Insert under write lock; check for race, then make room.
-                    let mut cache = self.scoped_cache.write().await;
-                    if let Some(existing) = CachedPool::lookup(&cache, &org.slug, &source) {
-                        existing.touch(self.next_tick());
-                        return Ok((*existing.pool).clone());
-                    }
-                    cache.remove(&org.slug);
-                    // Evict rather than skip the cache: skipping built a
-                    // fresh pool per request, uncapped (#1528). Safe here
-                    // because a scoped pool is cheap to rebuild.
-                    for slug in evict_to_fit(&mut cache, self.config.max_cached_scoped_pools) {
-                        tracing::info!(
-                            target: "rustango::tenancy::pools",
-                            evicted = %slug,
-                            for_slug = %org.slug,
-                            cap = self.config.max_cached_scoped_pools,
-                            "evicted the least recently used scoped pool to make room",
-                        );
-                    }
-                    if self.config.max_cached_scoped_pools == 0 {
-                        return Ok(scoped);
-                    }
-                    cache.insert(
-                        org.slug.clone(),
-                        CachedPool::new(Arc::new(scoped.clone()), source, self.next_tick()),
-                    );
-                    self.warn_if_near_cap(
-                        cache.len(),
-                        self.config.max_cached_scoped_pools,
-                        "schema",
-                    );
-                    Ok(scoped)
+                let build = self.build_schema_mode(org, schema, registry, source);
+                if self.config.max_cached_scoped_pools == 0 {
+                    return build.await;
                 }
-                .instrument(span)
-                .await
+                self.building_scoped.run(&org.slug, build).await
             }
             TenantPool::Database { pool } => Ok((*pool).clone()),
         }
+    }
+
+    async fn build_schema_mode(
+        &self,
+        org: &Org,
+        schema: String,
+        registry: PgPool,
+        source: PoolSource,
+    ) -> Result<PgPool, TenancyError> {
+        if let Some(pool) = self.cached_scoped_pool(&org.slug, &source).await {
+            return Ok(pool);
+        }
+        let span =
+            tracing::info_span!("tenant_pool_init", slug = %org.slug, mode = "schema");
+        async {
+            let connect_start = std::time::Instant::now();
+            let scoped = self.build_scoped_pool(&schema, &registry).await?;
+            tracing::info!(
+                target: "rustango::tenancy::pools",
+                slug = %org.slug,
+                schema = %schema,
+                elapsed_ms = connect_start.elapsed().as_millis() as u64,
+                max_conn = self.config.scoped_pool_max_connections,
+                "tenant pool connected (schema mode)",
+            );
+
+            // Insert under write lock; check for race, then make room.
+            let mut cache = self.scoped_cache.write().await;
+            if let Some(existing) = CachedPool::lookup(&cache, &org.slug, &source) {
+                existing.touch(self.next_tick());
+                return Ok((*existing.pool).clone());
+            }
+            cache.remove(&org.slug);
+            // Evict rather than skip the cache: skipping built a
+            // fresh pool per request, uncapped (#1528). Safe here
+            // because a scoped pool is cheap to rebuild.
+            for slug in evict_to_fit(&mut cache, self.config.max_cached_scoped_pools) {
+                tracing::info!(
+                    target: "rustango::tenancy::pools",
+                    evicted = %slug,
+                    for_slug = %org.slug,
+                    cap = self.config.max_cached_scoped_pools,
+                    "evicted the least recently used scoped pool to make room",
+                );
+            }
+            if self.config.max_cached_scoped_pools == 0 {
+                return Ok(scoped);
+            }
+            cache.insert(
+                org.slug.clone(),
+                CachedPool::new(Arc::new(scoped.clone()), source, self.next_tick()),
+            );
+            self.warn_if_near_cap(
+                cache.len(),
+                self.config.max_cached_scoped_pools,
+                "schema",
+            );
+            Ok(scoped)
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn cached_scoped_pool(&self, slug: &str, source: &PoolSource) -> Option<PgPool> {
+        let cache = self.scoped_cache.read().await;
+        let entry = CachedPool::lookup(&cache, slug, source)?;
+        entry.touch(self.next_tick());
+        Some((*entry.pool).clone())
     }
 
     /// Build one `search_path`-scoped pool against the registry
@@ -1558,6 +1691,253 @@ fn search_path_option(schema: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Counts lookups and parks each one briefly, so concurrent misses overlap.
+    #[cfg(feature = "sqlite")]
+    struct CountingSecrets(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[cfg(feature = "sqlite")]
+    #[async_trait::async_trait]
+    impl SecretsResolver for CountingSecrets {
+        async fn resolve(&self, r: &str) -> Result<String, super::super::secrets::SecretsError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if r == "fail" {
+                return Err(super::super::secrets::SecretsError::NotFound(r.to_owned()));
+            }
+            Ok(r.to_owned())
+        }
+    }
+
+    /// Lets a lookup through only once `n` of them run at the same time.
+    #[cfg(feature = "sqlite")]
+    struct BarrierSecrets(Arc<tokio::sync::Barrier>);
+
+    #[cfg(feature = "sqlite")]
+    #[async_trait::async_trait]
+    impl SecretsResolver for BarrierSecrets {
+        async fn resolve(&self, r: &str) -> Result<String, super::super::secrets::SecretsError> {
+            self.0.wait().await;
+            Ok(r.to_owned())
+        }
+    }
+
+    /// A tenant whose secret lookup fails.
+    #[cfg(feature = "sqlite")]
+    fn failing_sqlite_org() -> Org {
+        Org {
+            database_url: Some("fail".into()),
+            ..cold_sqlite_org()
+        }
+    }
+
+    /// Waiters get the first build's error instead of each retrying in turn.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_failed_cold_build_fails_every_waiter_once() {
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pools: TenantPools<sqlx::Sqlite> = TenantPools::with_secrets(
+            sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy"),
+            CountingSecrets(n.clone()),
+        );
+        let org = failing_sqlite_org();
+        let got =
+            futures_util::future::join_all((0..32).map(|_| pools.pool_for_database_mode(&org))).await;
+        assert!(got.iter().all(Result::is_err));
+        assert_eq!(n.load(Ordering::SeqCst), 1, "one build for 32 failing requests");
+        // The failure is not cached: the next request tries again.
+        assert!(pools.pool_for_database_mode(&org).await.is_err());
+        assert_eq!(n.load(Ordering::SeqCst), 2);
+    }
+
+    /// The same for the database-only registry.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_failed_cold_build_fails_every_waiter_once_in_database_pools() {
+        use super::super::{BackendKind, DatabasePools};
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pools: DatabasePools<sqlx::Sqlite> =
+            DatabasePools::with_secrets(BackendKind::Sqlite, CountingSecrets(n.clone()));
+        let org = failing_sqlite_org();
+        let got = futures_util::future::join_all((0..32).map(|_| pools.pool_for_org(&org))).await;
+        assert!(got.iter().all(Result::is_err));
+        assert_eq!(n.load(Ordering::SeqCst), 1, "one build for 32 failing requests");
+    }
+
+    /// With caching off there is nothing to share, so builds run side by side.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn with_caching_off_cold_builds_run_in_parallel() {
+        use super::super::{BackendKind, DatabasePools};
+        let config = TenantPoolsConfig {
+            max_cached_database_pools: 0,
+            ..TenantPoolsConfig::default()
+        };
+        let org = cold_sqlite_org();
+        let tenant = TenantPools::<sqlx::Sqlite>::with_secrets(
+            sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy"),
+            BarrierSecrets(Arc::new(tokio::sync::Barrier::new(4))),
+        )
+        .config(config.clone());
+        let db = DatabasePools::<sqlx::Sqlite>::with_secrets(
+            BackendKind::Sqlite,
+            BarrierSecrets(Arc::new(tokio::sync::Barrier::new(4))),
+        )
+        .config(config);
+        let both = async {
+            futures_util::future::join_all((0..4).map(|_| tenant.pool_for_database_mode(&org)))
+                .await;
+            futures_util::future::join_all((0..4).map(|_| db.pool_for_org(&org))).await;
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), both)
+            .await
+            .expect("cap 0 builds must not wait for each other");
+    }
+
+    /// A flight dropped mid-build leaves no entry behind.
+    #[tokio::test]
+    async fn abandoned_flights_are_pruned() {
+        let flights = SingleFlight::<u32>::default();
+        for slug in ["a", "b", "c", "d"] {
+            let pending = flights.run(slug, std::future::pending());
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(5), pending)
+                .await
+                .is_err());
+        }
+        assert_eq!(flights.run("e", async { Ok(1) }).await.ok(), Some(1));
+        assert_eq!(flights.len(), 0, "dead and finished flights are dropped");
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn cold_sqlite_org() -> Org {
+        Org {
+            slug: "cold".into(),
+            storage_mode: "database".into(),
+            backend_kind: "sqlite".into(),
+            database_url: Some("sqlite::memory:".into()),
+            ..crate::testkit::org()
+        }
+    }
+
+    /// A cold tenant hit by many requests at once resolves and connects once.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_cold_tenant_builds_its_pool_once() {
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pools: TenantPools<sqlx::Sqlite> = TenantPools::with_secrets(
+            sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy"),
+            CountingSecrets(n.clone()),
+        );
+        let org = cold_sqlite_org();
+        let got =
+            futures_util::future::join_all((0..32).map(|_| pools.pool_for_database_mode(&org))).await;
+        assert!(got.iter().all(Result::is_ok));
+        assert_eq!(n.load(Ordering::SeqCst), 1, "one build for 32 cold requests");
+    }
+
+    /// The same for the database-only registry.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_cold_tenant_builds_its_pool_once_in_database_pools() {
+        use super::super::{BackendKind, DatabasePools};
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pools: DatabasePools<sqlx::Sqlite> =
+            DatabasePools::with_secrets(BackendKind::Sqlite, CountingSecrets(n.clone()));
+        let org = cold_sqlite_org();
+        let got = futures_util::future::join_all((0..32).map(|_| pools.pool_for_org(&org))).await;
+        assert!(got.iter().all(Result::is_ok));
+        assert_eq!(n.load(Ordering::SeqCst), 1, "one build for 32 cold requests");
+    }
+
+    /// Schema mode too: a server that never answers sees one connect,
+    /// not one per waiting request.
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn a_cold_schema_tenant_connects_once() {
+        let (addr, accepted, server) = silent_pg_server().await;
+        let pools = Arc::new(TenantPools::new(lazy_pg(addr)));
+        let org = cold_schema_org();
+        let calls: Vec<_> = (0..16)
+            .map(|_| {
+                let (p, o) = (pools.clone(), org.clone());
+                tokio::spawn(async move { p.scoped_pool(&o).await })
+            })
+            .collect();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while accepted.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // Grace for any extra connect a waiter would open.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let seen = accepted.load(Ordering::SeqCst);
+        for c in calls {
+            c.abort();
+        }
+        server.abort();
+        assert_eq!(seen, 1, "16 cold requests opened {seen} connections");
+    }
+
+    /// Waiters behind a connect that times out fail with it, not one
+    /// timeout after another.
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn a_timed_out_schema_build_fails_every_waiter_together() {
+        let (addr, _accepted, server) = silent_pg_server().await;
+        let timeout = std::time::Duration::from_millis(300);
+        let pools = Arc::new(TenantPools::new(lazy_pg(addr)).config(TenantPoolsConfig {
+            database_pool_acquire_timeout: timeout,
+            ..TenantPoolsConfig::default()
+        }));
+        let org = cold_schema_org();
+        let start = std::time::Instant::now();
+        let calls = (0..8).map(|_| {
+            let (p, o) = (pools.clone(), org.clone());
+            tokio::spawn(async move { p.scoped_pool(&o).await })
+        });
+        let got = futures_util::future::join_all(calls).await;
+        let took = start.elapsed();
+        server.abort();
+        assert!(got.into_iter().all(|r| r.expect("task").is_err()));
+        assert!(took < timeout * 3, "8 waiters took {took:?}");
+    }
+
+    /// A Postgres address that accepts connections and never answers.
+    #[cfg(feature = "postgres")]
+    async fn silent_pg_server() -> (
+        std::net::SocketAddr,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = accepted.clone();
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                n.fetch_add(1, Ordering::SeqCst);
+                held.push(sock);
+            }
+        });
+        (addr, accepted, server)
+    }
+
+    #[cfg(feature = "postgres")]
+    fn lazy_pg(addr: std::net::SocketAddr) -> PgPool {
+        PgPoolOptions::new()
+            .connect_lazy(&format!("postgres://u:p@{addr}/db"))
+            .unwrap()
+    }
+
+    #[cfg(feature = "postgres")]
+    fn cold_schema_org() -> Org {
+        Org {
+            slug: "cold".into(),
+            storage_mode: "schema".into(),
+            schema_name: Some("cold".into()),
+            ..crate::testkit::org()
+        }
+    }
 
     /// The near-cap warning fires on the crossing, not on every
     /// insert. A cache sitting at its cap inserts on every miss, so an
