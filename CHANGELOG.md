@@ -154,6 +154,10 @@ It uses the cache's set-if-absent, so two calls at once no longer both send.
 
 Creating a tenant and starting a migrate run (one tenant or all) write an audit row; a failed create writes a `create_failed` row. A registry error on the hosts page no longer puts driver text into the redirect URL.
 
+### Fixed — `[security] csrf_trusted_origins` is applied
+
+`Cli::with_csrf` and `Cli::with_csrf_config` now trust these origins (added to the config's own list); the setting was only read by `check --deploy`.
+
 ## [0.60.9] — 2026-10-21
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options; `loaddata` leaves omitted keys to the column default; MySQL JSON key checks are literal; idle connections close after 75 s; `CsrfConfig` has a new field; refused deletes are 409 and refused CBV writes 422. See UPGRADING.

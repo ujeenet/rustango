@@ -82,10 +82,20 @@ enum CsrfMount {
 
 #[cfg(feature = "csrf")]
 impl CsrfMount {
-    fn layer(self) -> crate::forms::csrf::CsrfLayer {
+    /// `trusted` (`[security] csrf_trusted_origins`) adds to the config's own list.
+    fn layer(self, trusted: &[String]) -> crate::forms::csrf::CsrfLayer {
+        let mut cfg = match &self {
+            Self::SessionPolicy => crate::forms::csrf::CsrfConfig::default(),
+            Self::Explicit(cfg) => cfg.clone(),
+        };
+        for origin in trusted {
+            if !cfg.trusted_origins.contains(origin) {
+                cfg.trusted_origins.push(origin.clone());
+            }
+        }
         match self {
-            Self::SessionPolicy => crate::forms::csrf::layer(),
-            Self::Explicit(cfg) => crate::forms::csrf::with_config(cfg),
+            Self::SessionPolicy => crate::forms::csrf::layer_with_session_policy(cfg),
+            Self::Explicit(_) => crate::forms::csrf::with_config(cfg),
         }
     }
 }
@@ -1080,6 +1090,19 @@ impl Cli {
         crate::shutdown::DEFAULT_DRAIN_TIMEOUT
     }
 
+    /// The CSRF layer every serving path mounts, with the settings' trusted origins.
+    #[cfg(feature = "csrf")]
+    fn csrf_layer(&self) -> Option<crate::forms::csrf::CsrfLayer> {
+        #[cfg(feature = "config")]
+        let trusted = self
+            .settings_for_layers
+            .as_ref()
+            .map_or(&[][..], |s| s.security.csrf_trusted_origins.as_slice());
+        #[cfg(not(feature = "config"))]
+        let trusted: &[String] = &[];
+        self.csrf.clone().map(|mount| mount.layer(trusted))
+    }
+
     fn assemble_app<P>(&mut self, pool: P) -> Router
     where
         P: Clone + Send + Sync + 'static,
@@ -1106,8 +1129,8 @@ impl Cli {
         #[cfg(feature = "_http_layers")]
         let api = mount_static_dirs(api, &self.static_dirs);
         #[cfg(feature = "csrf")]
-        let api = match self.csrf.take() {
-            Some(mount) => api.layer(mount.layer()),
+        let api = match self.csrf_layer() {
+            Some(layer) => api.layer(layer),
             None => api,
         };
         // Inside CORS and the security headers, so a panic's 500 carries them (#1541).
@@ -1398,8 +1421,8 @@ impl Cli {
             api
         };
         #[cfg(feature = "csrf")]
-        let api = match self.csrf.clone() {
-            Some(mount) => api.layer(mount.layer()),
+        let api = match self.csrf_layer() {
+            Some(layer) => api.layer(layer),
             None => api,
         };
         // Inside CORS; the builder catches the admin and console routes (#1541).
@@ -1468,8 +1491,8 @@ impl Cli {
             api
         };
         #[cfg(feature = "csrf")]
-        let api = match self.csrf.clone() {
-            Some(mount) => api.layer(mount.layer()),
+        let api = match self.csrf_layer() {
+            Some(layer) => api.layer(layer),
             None => api,
         };
         // Inside CORS; the builder catches the admin and console routes (#1541).
@@ -2554,7 +2577,7 @@ mod tests {
         let _ = crate::session::set_secure_cookies(false);
         let mount = Cli::new().with_csrf().csrf.expect("set");
         assert!(matches!(mount, CsrfMount::SessionPolicy));
-        assert!(mount.layer().follows_session_policy());
+        assert!(mount.layer(&[]).follows_session_policy());
         let cookie = csrf_cookie(CsrfMount::SessionPolicy).await;
         assert_eq!(
             cookie.contains("Secure"),
@@ -2573,7 +2596,7 @@ mod tests {
                 ..Default::default()
             };
             assert!(!CsrfMount::Explicit(cfg.clone())
-                .layer()
+                .layer(&[])
                 .follows_session_policy());
             let cookie = csrf_cookie(CsrfMount::Explicit(cfg)).await;
             assert_eq!(cookie.contains("Secure"), secure, "{cookie}");
@@ -2585,7 +2608,7 @@ mod tests {
         use tower::ServiceExt as _;
         let app = axum::Router::new()
             .route("/", axum::routing::get(|| async { "ok" }))
-            .layer(mount.layer());
+            .layer(mount.layer(&[]));
         let req = axum::http::Request::get("/")
             .body(axum::body::Body::empty())
             .unwrap();
@@ -2871,6 +2894,36 @@ mod assemble_app_tests {
         assert!(ok.headers().contains_key("x-frame-options"));
         let bad = send("evil.example").await.expect("request");
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `[security] csrf_trusted_origins` reaches both CSRF mounts.
+    #[cfg(all(feature = "config", feature = "csrf"))]
+    #[tokio::test]
+    async fn csrf_mount_trusts_the_settings_origins() {
+        let _serial = serialized();
+        let mut s = crate::config::Settings::default();
+        s.security.csrf_trusted_origins = vec!["https://spa.example.com".into()];
+        let explicit = Cli::new().with_csrf_config(crate::forms::csrf::CsrfConfig::default());
+        for cli in [Cli::new().with_csrf(), explicit] {
+            let pool = crate::sql::Pool::connect("sqlite::memory:")
+                .await
+                .expect("sqlite");
+            let mut cli = cli.api(Router::new().route("/p", axum::routing::post(|| async { "ok" })));
+            cli.settings_for_layers = Some(s.clone());
+            let app = cli.assemble_app(pool);
+            let post = |origin: &str| {
+                let req = Request::post("/p")
+                    .header("host", "api.example.com")
+                    .header("origin", origin)
+                    .header("x-csrf-token", "tok")
+                    .header("cookie", "rustango_csrf=tok");
+                app.clone().oneshot(req.body(Body::empty()).unwrap())
+            };
+            let ok = post("https://spa.example.com").await.expect("request");
+            assert_eq!(ok.status(), StatusCode::OK, "trusted origin refused");
+            let bad = post("https://evil.example").await.expect("request");
+            assert_eq!(bad.status(), StatusCode::FORBIDDEN);
+        }
     }
 
     /// #1541 — a panic's 500 still carries CORS and the security headers.

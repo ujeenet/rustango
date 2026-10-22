@@ -736,8 +736,8 @@ pub struct SecuritySettings {
     /// same-host requests. Each
     /// entry is scheme plus host, such as `"https://app.example.com"`
     /// or `"https://*.example.com"`. Empty still checks Origin, against
-    /// the request's own Host only. Used by
-    /// [`crate::forms::csrf::CsrfConfig::with_trusted_origins`].
+    /// the request's own Host only. Applied by `Cli::with_csrf` and
+    /// `Cli::with_csrf_config` (added to the config's own list).
     pub csrf_trusted_origins: Vec<String>,
     /// `true` mounts [`crate::ssl_redirect::SslRedirectLayer`], which
     /// redirects plain HTTP to HTTPS. Default `false`.
