@@ -272,7 +272,7 @@ async fn pg_macro_atomic(pool: &Pool) {
     ddl(r#"ALTER TABLE "rustango_audit_log" DROP CONSTRAINT IF EXISTS "audit_atomic_refuse""#)
         .await
         .unwrap();
-    ddl(r#"ALTER TABLE "rustango_audit_log" ADD CONSTRAINT "audit_atomic_refuse" CHECK (entity_table <> 'audit1675_note')"#)
+    ddl(r#"ALTER TABLE "rustango_audit_log" ADD CONSTRAINT "audit_atomic_refuse" CHECK (entity_table <> 'audit1675_note') NOT VALID"#)
         .await
         .unwrap();
     let mut note = Note {
