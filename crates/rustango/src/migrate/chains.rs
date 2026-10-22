@@ -578,11 +578,12 @@ pub(crate) async fn converge_preview(
     groups.retain(|g| !pending.contains(g[0].table()));
     let schema = ensure::creation_schema(pool).await?;
     let mut fks = Vec::new();
+    let dialect = pool.dialect().name();
     for p in ensure::plan_groups(pool, &last.snapshot, &groups, schema.as_deref()).await? {
         match p.batch {
             Ok(b) => {
-                out.extend(b.immediate.into_iter().map(PreviewLine::Sql));
-                fks.extend(b.deferred_fks.into_iter().map(PreviewLine::Sql));
+                out.extend(ensure::as_run(&b.immediate, dialect).map(PreviewLine::Sql));
+                fks.extend(ensure::as_run(&b.deferred_fks, dialect).map(PreviewLine::Sql));
             }
             Err(e) => out.push(PreviewLine::Note(format!(
                 "{}: `migrate` fails here: {e}",

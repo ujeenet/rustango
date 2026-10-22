@@ -139,12 +139,18 @@ pub(crate) fn idempotent_ddl(
 ) -> Result<Vec<String>, String> {
     let changes = super::detect_changes(&super::SchemaSnapshot::default(), snapshot);
     let batch = super::diff::render_changes_split_in_schema(&changes, snapshot, dialect, None)?;
-    Ok(batch
-        .immediate
-        .iter()
-        .chain(&batch.deferred_fks)
-        .map(|s| idempotent(s, dialect.name()).into_owned())
-        .collect())
+    Ok(as_run(batch.immediate.iter().chain(&batch.deferred_fks), dialect.name()).collect())
+}
+
+/// `stmts` as [`run_statements`] sends them, for a `--dry-run`.
+pub(crate) fn as_run<'a, I>(stmts: I, dialect: &'a str) -> impl Iterator<Item = String> + 'a
+where
+    I: IntoIterator<Item = &'a String>,
+    I::IntoIter: 'a,
+{
+    stmts
+        .into_iter()
+        .map(move |s| idempotent(s, dialect).into_owned())
 }
 
 /// Add each `(table, column)` of `snapshot` that a table created by an

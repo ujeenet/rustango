@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `migrate --dry-run` prints the converge SQL with its guards
+
+The converge step shows `IF NOT EXISTS` and the Postgres `DO` block, as it runs.
+
 ### Fixed — MySQL key-size check covers model tables
 
 A primary key, unique column or index over MySQL's 3072-byte key limit is refused when the migration renders, not with `ERROR 1071` mid-run.

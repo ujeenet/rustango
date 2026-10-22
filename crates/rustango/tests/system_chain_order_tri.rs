@@ -345,6 +345,66 @@ async fn dry_run_shows_the_not_null_refusal(backend: Backend) {
     assert!(err.to_string().contains(&column), "{err}");
 }
 
+/// A project-owned `rustango_audit_log` without its `now()` column `occurred_at`,
+/// holding one row. The dry run, then `migrate` must add the column.
+async fn audit_log_missing_occurred_at(
+    backend: Backend,
+    tag: &str,
+    pending_step: bool,
+    check: impl FnOnce(&str),
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), tag).await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let (table, column) = ("rustango_audit_log", "occurred_at");
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let dir = root.join("migrations");
+    project_initial(&dir, current_table(table, Some(column)));
+    rustango::migrate::migrate_pool(&pool, &dir).await.unwrap();
+    rustango::sql::raw_execute_pool(
+        &pool,
+        &format!(
+            "INSERT INTO {table} (entity_table, entity_pk, operation, source, changes) \
+             VALUES ('t', '1', 'create', 's', '{{}}')"
+        ),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    if pending_step {
+        write_step(
+            &dir,
+            "0002_add",
+            Some("0001_initial"),
+            json!({ "tables": [current_table(table, None)] }),
+            vec![json!({ "AddColumn": { "table": table, "column": column } })],
+        );
+    }
+    check(&dry_run(&pool, &dir).await);
+    assert!(!has_column(&pool, table, column).await, "the dry run wrote");
+    manage_migrate(&pool, &dir).await.expect("migrate");
+    assert!(has_column(&pool, table, column).await);
+}
+
+/// The converge preview prints its ADD COLUMN with the guard it runs with.
+async fn dry_run_converge_shows_the_guarded_sql(backend: Backend) {
+    audit_log_missing_occurred_at(backend, "dryguard", false, |out| {
+        let add = out
+            .lines()
+            .find(|l| l.contains("ADD COLUMN") && l.contains("occurred_at"))
+            .unwrap_or_else(|| panic!("no ADD COLUMN:\n{out}"));
+        #[cfg(feature = "postgres")]
+        if matches!(backend, Backend::Postgres) {
+            assert!(add.contains("ADD COLUMN IF NOT EXISTS"), "{out}");
+        }
+        let _ = add;
+    })
+    .await;
+}
+
 /// Finding 2 — system step N adds a column to a project-owned table and
 /// N+1 alters it; the alter must find the column.
 async fn alter_after_add_on_owned(backend: Backend) {
@@ -1883,6 +1943,7 @@ per_backend!(
     pending_project_add_column,
     dry_run_defers_a_table_pending_migrations_change,
     dry_run_shows_the_not_null_refusal,
+    dry_run_converge_shows_the_guarded_sql,
     alter_after_add_on_owned,
     owned_table_dropped_later,
     not_null_column_on_empty_table,
