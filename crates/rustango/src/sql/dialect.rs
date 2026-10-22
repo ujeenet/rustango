@@ -69,10 +69,10 @@ pub(crate) fn refuse_unbindable_values(
     params: &[crate::core::SqlValue],
 ) -> Result<(), SqlError> {
     let pg = d.binds_pg_only_values();
-    let kind = params.iter().find_map(|v| match v {
-        crate::core::SqlValue::List(_) => Some("list"),
-        _ if pg => None,
-        _ => v.pg_only_kind(),
+    // Off Postgres a PG-only item names itself, even inside a list.
+    let kind = params.iter().find_map(|v| {
+        let pg_only = if pg { None } else { v.pg_only_kind() };
+        pg_only.or(matches!(v, crate::core::SqlValue::List(_)).then_some("list"))
     });
     match kind {
         Some(value) => Err(SqlError::ValueNotSupportedInDialect {
@@ -1098,12 +1098,16 @@ mod refuse_unbindable_values_tests {
     fn a_list_is_refused_everywhere() {
         let d: [&dyn Dialect; 3] = [&Postgres, &MySql, &Sqlite];
         for d in d {
-            for list in [
-                SqlValue::List(vec![SqlValue::I64(1)]),
-                SqlValue::List(vec![SqlValue::Array(vec![])]),
-            ] {
-                assert_eq!(refused(d, list), Some("list"), "{}", d.name());
-            }
+            let list = SqlValue::List(vec![SqlValue::I64(1)]);
+            assert_eq!(refused(d, list), Some("list"), "{}", d.name());
+            // Off Postgres the PG-only item is the clearer name.
+            let inner = if d.name() == "postgres" {
+                "list"
+            } else {
+                "array"
+            };
+            let list = SqlValue::List(vec![SqlValue::Array(vec![])]);
+            assert_eq!(refused(d, list), Some(inner), "{}", d.name());
             assert_eq!(refused(d, SqlValue::String("x".into())), None);
         }
     }

@@ -132,6 +132,7 @@ impl SqlValue {
             Self::HStore(_) => Some("hstore"),
             Self::Vector(_) => Some("vector"),
             Self::Geometry { .. } => Some("geometry"),
+            Self::List(items) => items.iter().find_map(Self::pg_only_kind),
             _ => None,
         }
     }
