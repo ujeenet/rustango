@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `HttpError::Reqwest` text has no URL (#1232)
+
+`HttpClient` errors no longer include the request URL, which can hold a token. Log the target yourself if you need it.
+
 ### CSRF skips the token for browser report bodies (#1212)
 
 A same-origin POST with `Content-Type: application/csp-report` or `application/reports+json` passes `CsrfLayer` without a token, on any path. A handler that takes a raw body (`String`, `Bytes`) and changes state should check the content type.

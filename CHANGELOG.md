@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — Slack and health-probe errors no longer show secret URLs (#1232)
+
+A failed Slack POST no longer prints the webhook URL, and `http_probe` errors show the target without userinfo, query or fragment. `HttpError::Reqwest` drops the URL too.
+
 ### Fixed — `csp_report_router` takes real browser reports (#1212)
 
 It reads `application/csp-report` and `application/reports+json` bodies up to 64 KiB; they were refused with 415. The CSRF layer lets these two types through without a token (no form or no-cors fetch can send them), and still checks the Origin.
