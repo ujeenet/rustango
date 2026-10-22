@@ -195,6 +195,47 @@ async fn nested_empty_and_is_true(pool: &Pool) {
     assert_eq!(count(not).await, 0, "NOT TRUE");
 }
 
+/// The MySQL / SQLite `distinct_on` fallback kept joined columns and
+/// ordered by relation and unprojected columns.
+async fn distinct_on_keeps_join_columns_and_order(pool: &Pool) {
+    seed_meas(pool, 1, "2024-01-01T00:00:00Z").await;
+    seed_meas(pool, 2, "2024-01-02T00:00:00Z").await;
+    let first = Meas::objects()
+        .order_by(&[("id", false)])
+        .fetch(pool)
+        .await
+        .expect("meas")[0]
+        .id;
+    Reading {
+        id: Auto::default(),
+        meas: rustango::sql::ForeignKey::unloaded(first.get().copied().expect("id")),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("second reading");
+    let per_meas = || {
+        Reading::objects()
+            .distinct_on(&["meas"])
+            .order_by(&[("meas", true), ("meas__n", false), ("id", true)])
+    };
+    let rows = per_meas()
+        .select_related("meas")
+        .fetch(pool)
+        .await
+        .expect("select_related");
+    let ns: Vec<i64> = rows
+        .iter()
+        .map(|r| r.meas.value().expect("loaded").n)
+        .collect();
+    assert_eq!(ns, [2, 1]);
+    let metas = per_meas()
+        .values_list(&["meas"])
+        .fetch(pool)
+        .await
+        .expect("values_list");
+    assert_eq!(metas.len(), 2);
+}
+
 async fn setup(pool: &Pool) {
     fresh_table::<Code>(pool).await;
     fresh_table::<Post>(pool).await;
@@ -1016,6 +1057,7 @@ tri_dialect_test! {
         citext_keeps_accents_and_spaces,
         citext_filter_ignores_case,
         nested_empty_and_is_true,
+        distinct_on_keeps_join_columns_and_order,
     ],
 }
 
