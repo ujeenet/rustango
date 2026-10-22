@@ -166,6 +166,10 @@ Origins listed in `[security] csrf_trusted_origins` now pass the CSRF Origin che
 
 With `RUSTANGO_ENV=prod`, `Cli::with_settings_from_env` and `with_loaded_settings` now make `run` fail when `config/default.toml` is missing, instead of booting with no `[security]` layers. Ship the `config/` directory, or drop the call.
 
+### Console messages in the URL must be signed
+
+The operator console ignores `?error=`, `?notice=` and `?ok=` unless it added them itself. Bookmarks or links you built with those keys lose the message.
+
 ### `make:*` verbs check features
 
 `make:viewset` and `make:test` need `admin` (`make:viewset --tenant` needs `tenancy` instead), `make:serializer` needs `serializer`, `make:form` `forms`, `make:job` / `make:worker` `jobs`, `make:scheduled` `scheduler`, `make:notification` `notifications`. Without it the verb now errors instead of writing a file that does not compile.

@@ -170,6 +170,10 @@ The audit warns on `secure_cookies = false`, on the `empty` preset and on unknow
 
 Misses are cached in their own smaller map, each map evicts its least recently used entry, and concurrent cold lookups of one host run one registry query.
 
+### Fixed — operator console shows only messages it wrote
+
+The console signs every `?error=` / `?notice=` / `?ok=` it redirects with and drops unsigned ones, so a link cannot put text on the login or list pages. Creating a shared SSO provider checks the slug, the kind and the OIDC issuer, and a duplicate slug is a 400, not a 500.
+
 ## [0.60.9] — 2026-10-21
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options; `loaddata` leaves omitted keys to the column default; MySQL JSON key checks are literal; idle connections close after 75 s; `CsrfConfig` has a new field; refused deletes are 409 and refused CBV writes 422. See UPGRADING.

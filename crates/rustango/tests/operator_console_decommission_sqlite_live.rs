@@ -215,14 +215,23 @@ async fn deactivating_stops_service_without_destroying_anything() {
 #[tokio::test]
 async fn the_org_list_renders_the_outcome_it_is_redirected_with() {
     let b = boot().await;
-    let html = body_of(b.get("/orgs?notice=purged%20%60ghost%60").await).await;
+    let slug = b.tenant().await;
+    let resp = b
+        .post(
+            &format!("/orgs/{slug}/purge"),
+            &format!("confirm={slug}&purge_database=on"),
+        )
+        .await;
+    let location = resp.headers()["location"].to_str().unwrap().to_owned();
+    let html = body_of(b.get(&location).await).await;
     assert!(
-        html.contains("purged") && html.contains("ghost"),
+        html.contains("purged") && html.contains(&slug),
         "the notice should reach the page: {html}"
     );
 
-    let html = body_of(b.get("/orgs?error=nope").await).await;
-    assert!(html.contains("nope"), "and so should an error: {html}");
+    // A message the console did not sign is dropped, so a link cannot add text.
+    let html = body_of(b.get("/orgs?error=call%20support%200800").await).await;
+    assert!(!html.contains("0800"), "a crafted message must not render: {html}");
 }
 
 #[tokio::test]

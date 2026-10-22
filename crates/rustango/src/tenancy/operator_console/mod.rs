@@ -65,6 +65,7 @@
 /// Mounted only by [`router_with_provisioning`].
 mod audit;
 mod decommission;
+mod flash;
 mod hosts;
 mod migrate;
 mod mount;
@@ -774,6 +775,7 @@ fn router_unlogged(
             crate::admin::csrf_context::csrf_context,
         ))
         .route_layer(crate::forms::csrf::layer())
+        .route_layer(middleware::from_fn_with_state(state.clone(), flash::layer))
         .merge(assets)
         .with_state(state)
         .layer(middleware::from_fn(mount::layer))
@@ -1660,7 +1662,25 @@ async fn sso_shared_create(
         created_at: crate::sql::Auto::Unset,
         updated_at: crate::sql::Auto::Unset,
     };
+    let bad = |msg: String| (StatusCode::BAD_REQUEST, msg).into_response();
+    if row.slug.len() > 64 || crate::validators::validate_slug(&row.slug).is_err() {
+        return bad("slug must be 1-64 letters, digits, `_` or `-`".into());
+    }
+    if let Err(e) = crate::sso::check_provider(&row.kind, row.issuer_url.as_deref()) {
+        return bad(e.to_string());
+    }
+    use crate::sql::ExistsPool as _;
+    let taken = super::sso::SharedSsoProvider::objects()
+        .where_(super::sso::SharedSsoProvider::slug.eq(row.slug.clone()))
+        .exists(&state.registry)
+        .await;
+    if matches!(taken, Ok(true)) {
+        return bad(format!("a shared provider `{}` already exists", row.slug));
+    }
     if let Err(e) = row.insert_pool(&state.registry).await {
+        if e.is_unique_violation() {
+            return bad(format!("a shared provider `{}` already exists", row.slug));
+        }
         return server_error("create failed", &e);
     }
     let mut detail = serde_json::Map::new();
@@ -2491,6 +2511,30 @@ mod config_warn_tests {
         let logged = out.contents();
         assert!(!logged.contains("s3cret"), "{logged}");
         assert!(logged.contains("line 2"), "{logged}");
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod flash_tests {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt as _;
+
+    async fn login_page(query: &str) -> String {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let app = super::router(pool, super::SessionSecret::from_bytes(vec![3; 32]));
+        let req = Request::get(format!("/login?{query}")).body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        String::from_utf8_lossy(&body).into_owned()
+    }
+
+    /// A link cannot put its own text on the console login page.
+    #[tokio::test]
+    async fn the_login_page_drops_an_unsigned_error() {
+        let page = login_page("error=Call+0800+PHISH+now").await;
+        assert!(page.contains("<form"), "{page}");
+        assert!(!page.contains("PHISH"), "{page}");
     }
 }
 
