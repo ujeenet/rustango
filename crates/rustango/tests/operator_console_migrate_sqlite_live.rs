@@ -269,6 +269,40 @@ async fn migrating_everything_records_one_run_naming_each_tenant() {
     );
 }
 
+/// Sources of every audit row on `table` / `pk`.
+async fn audited(b: &Booted, table: &str, pk: &str) -> Vec<String> {
+    let filter = rustango::audit::AuditFilter {
+        entity_table: Some(table.to_owned()),
+        entity_pk: Some(pk.to_owned()),
+        ..Default::default()
+    };
+    rustango::audit::list(&b.registry, &filter, 100, 0)
+        .await
+        .expect("read the audit log")
+        .into_iter()
+        .map(|e| e.source)
+        .collect()
+}
+
+/// Creating a tenant and starting migrate runs each leave an audit row.
+#[tokio::test]
+async fn create_and_migrate_runs_are_audited() {
+    let b = boot().await;
+    let slug = a_tenant(&b).await;
+    let on_org = audited(&b, "rustango_orgs", &slug).await;
+    assert!(on_org.iter().any(|s| s.ends_with(":create")), "{on_org:?}");
+
+    let one = Booted::run_id(&b.post(&format!("/orgs/{slug}/migrate")).await);
+    b.settled(one).await;
+    let on_org = audited(&b, "rustango_orgs", &slug).await;
+    assert!(on_org.iter().any(|s| s.ends_with(":migrate")), "{on_org:?}");
+
+    let all = Booted::run_id(&b.post("/orgs/migrate").await);
+    b.settled(all).await;
+    let on_run = audited(&b, "rustango_provisioning_runs", &all.to_string()).await;
+    assert!(on_run.iter().any(|s| s.ends_with(":migrate_all")), "{on_run:?}");
+}
+
 /// The work is spawned. An error has nowhere to go but the run, so it
 /// has to get there.
 #[tokio::test]

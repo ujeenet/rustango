@@ -20,6 +20,10 @@ A payload the registered job type cannot decode is a retryable failure, not an i
 
 It uses the cache's set-if-absent, so two calls at once no longer both send.
 
+### Fixed — operator console audits tenant create and migrate runs; hosts errors withhold driver text
+
+Creating a tenant and starting a migrate run (one tenant or all) write an audit row. A registry error on the hosts page no longer puts driver text into the redirect URL.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

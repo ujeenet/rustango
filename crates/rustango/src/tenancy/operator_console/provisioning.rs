@@ -241,6 +241,11 @@ pub(super) async fn org_new_submit(
     {
         Ok((run, _)) => {
             let run_id = run.id.get().copied().unwrap_or_default();
+            let mut extra = serde_json::Map::new();
+            extra.insert("run_id".into(), serde_json::json!(run_id));
+            let operator_id = op.id.get().copied().unwrap_or_default();
+            super::emit_op_audit(&state.registry, &request.slug, operator_id, "create", extra)
+                .await;
             Redirect::to(&format!("provision/{run_id}")).into_response()
         }
         // A failure before the row lands — a taken slug, an unreachable
