@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — the server times out slow headers and idle connections (#1211)
+
+`serve_until_drained` now runs hyper with a timer, so a client gets 30 s to send each request head and an idle keep-alive connection closes after 30 s. `axum::serve` left both off, so slowloris clients could hold every socket.
+
 ### Security — Slack and health-probe errors no longer show secret URLs (#1232)
 
 A failed Slack POST no longer prints the webhook URL, and `http_probe` errors show the target without userinfo, query or fragment. `HttpError::Reqwest` drops the URL too.

@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Idle connections close after 30 s (#1211)
+
+The built-in server closes a connection that sends no complete request head for 30 s, including idle keep-alive. Clients or proxies that keep idle sockets longer reconnect; the limit is fixed for now.
+
 ### `HttpError::Reqwest` text has no URL (#1232)
 
 `HttpClient` errors no longer include the request URL, which can hold a token. Log the target yourself if you need it.
