@@ -362,7 +362,7 @@ pub(super) struct CachedPool<DB: Database> {
 /// What a cached pool was built from. An `Org` naming another source is
 /// a miss, so an edit made by another process reaches this one (#1882).
 /// No `Debug`: the URL can carry a password.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub(super) enum PoolSource {
     /// `Org.database_url` as stored (the secret reference, unresolved).
     Database(Option<String>),
@@ -402,10 +402,17 @@ impl<DB: Database> CachedPool<DB> {
     }
 }
 
-/// One build at a time per slug, so a cold tenant hit by many requests
-/// resolves its secret and connects once. Requests that wait get that
-/// build's outcome, its error included, so they fail together.
-pub(super) struct SingleFlight<T>(std::sync::Mutex<HashMap<String, Weak<Flight<T>>>>);
+/// One build at a time per slug and source, so a cold tenant hit by many
+/// requests resolves its secret and connects once. Requests that wait get
+/// that build's outcome, its error included, so they fail together.
+pub(super) struct SingleFlight<T>(std::sync::Mutex<HashMap<FlightKey, Weak<Flight<T>>>>);
+
+/// A request for a moved tenant must not join a build for its old source.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct FlightKey {
+    slug: String,
+    source: PoolSource,
+}
 
 /// `None` until the build finishes; a cancelled build leaves it `None`.
 type Flight<T> = tokio::sync::Mutex<Option<Result<T, TenancyError>>>;
@@ -417,20 +424,26 @@ impl<T> Default for SingleFlight<T> {
 }
 
 impl<T: Clone> SingleFlight<T> {
-    /// Run `build` unless a flight for `slug` is under way; then share its outcome.
+    /// Run `build` unless a flight for `slug` from `source` is under way;
+    /// then share its outcome.
     pub(super) async fn run(
         &self,
         slug: &str,
+        source: &PoolSource,
         build: impl std::future::Future<Output = Result<T, TenancyError>>,
     ) -> Result<T, TenancyError> {
+        let key = FlightKey {
+            slug: slug.to_owned(),
+            source: source.clone(),
+        };
         let flight = {
             let mut map = self.map();
             map.retain(|_, f| f.strong_count() > 0);
-            if let Some(f) = map.get(slug).and_then(Weak::upgrade) {
+            if let Some(f) = map.get(&key).and_then(Weak::upgrade) {
                 f
             } else {
                 let f = Arc::new(tokio::sync::Mutex::new(None));
-                map.insert(slug.to_owned(), Arc::downgrade(&f));
+                map.insert(key.clone(), Arc::downgrade(&f));
                 f
             }
         };
@@ -447,15 +460,15 @@ impl<T: Clone> SingleFlight<T> {
         // Later arrivals start a fresh flight: a failure is not cached.
         let mut map = self.map();
         if map
-            .get(slug)
+            .get(&key)
             .is_some_and(|f| f.as_ptr() == Arc::as_ptr(&flight))
         {
-            map.remove(slug);
+            map.remove(&key);
         }
         out
     }
 
-    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, Weak<Flight<T>>>> {
+    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<FlightKey, Weak<Flight<T>>>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -924,12 +937,12 @@ impl<DB: Database> TenantPools<DB> {
         if let Some(pool) = self.cached_database_pool(&org.slug, &source).await {
             return Ok(pool);
         }
-        let build = self.build_database_mode(org, source);
+        let build = self.build_database_mode(org, source.clone());
         if self.config.max_cached_database_pools == 0 {
             // Nothing is cached, so there is nothing to share.
             return build.await;
         }
-        self.building.run(&org.slug, build).await
+        self.building.run(&org.slug, &source, build).await
     }
 
     async fn build_database_mode(
@@ -1271,11 +1284,11 @@ impl TenantPools<sqlx::Postgres> {
                 if let Some(pool) = self.cached_scoped_pool(&org.slug, &source).await {
                     return Ok(pool);
                 }
-                let build = self.build_schema_mode(org, schema, registry, source);
+                let build = self.build_schema_mode(org, schema, registry, source.clone());
                 if self.config.max_cached_scoped_pools == 0 {
                     return build.await;
                 }
-                self.building_scoped.run(&org.slug, build).await
+                self.building_scoped.run(&org.slug, &source, build).await
             }
             TenantPool::Database { pool } => Ok((*pool).clone()),
         }
@@ -1805,15 +1818,19 @@ mod tests {
     #[tokio::test]
     async fn abandoned_flights_are_pruned() {
         let flights = SingleFlight::<u32>::default();
+        let source = PoolSource::Database(None);
         for slug in ["a", "b", "c", "d"] {
-            let pending = flights.run(slug, std::future::pending());
+            let pending = flights.run(slug, &source, std::future::pending());
             assert!(
                 tokio::time::timeout(std::time::Duration::from_millis(5), pending)
                     .await
                     .is_err()
             );
         }
-        assert_eq!(flights.run("e", async { Ok(1) }).await.ok(), Some(1));
+        assert_eq!(
+            flights.run("e", &source, async { Ok(1) }).await.ok(),
+            Some(1)
+        );
         assert_eq!(flights.len(), 0, "dead and finished flights are dropped");
     }
 
@@ -1865,6 +1882,113 @@ mod tests {
             1,
             "one build for 32 cold requests"
         );
+    }
+
+    /// Holds the lookup of a URL naming `old`, so a second build overlaps it.
+    #[cfg(feature = "sqlite")]
+    struct SlowOldSecrets;
+
+    #[cfg(feature = "sqlite")]
+    #[async_trait::async_trait]
+    impl SecretsResolver for SlowOldSecrets {
+        async fn resolve(&self, r: &str) -> Result<String, super::super::secrets::SecretsError> {
+            if r.contains("old") {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+            Ok(r.to_owned())
+        }
+    }
+
+    /// The same slug before and after a move to another database file.
+    #[cfg(feature = "sqlite")]
+    fn moved_sqlite_orgs(dir: &std::path::Path) -> (Org, Org, String, String) {
+        let file = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        let (old, new) = (file("old.db"), file("new.db"));
+        let org = |path: &str| Org {
+            slug: "moved".into(),
+            database_url: Some(format!("sqlite:{path}?mode=rwc")),
+            ..cold_sqlite_org()
+        };
+        (org(&old), org(&new), old, new)
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn sqlite_file(pool: &sqlx::SqlitePool) -> String {
+        pool.connect_options()
+            .get_filename()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// A request for a moved tenant never joins a build for its old database.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_build_for_another_source_is_not_shared() {
+        let dir = tempfile::tempdir().unwrap();
+        let (old_org, new_org, old, new) = moved_sqlite_orgs(dir.path());
+        let pools: TenantPools<sqlx::Sqlite> = TenantPools::with_secrets(
+            sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy"),
+            SlowOldSecrets,
+        );
+        let late_new = async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            pools.pool_for_database_mode(&new_org).await
+        };
+        let (a, b) = tokio::join!(pools.pool_for_database_mode(&old_org), late_new);
+        assert_eq!(sqlite_file(&a.unwrap()), old);
+        assert_eq!(sqlite_file(&b.unwrap()), new, "new org got the old pool");
+    }
+
+    /// The same for the database-only registry.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_build_for_another_source_is_not_shared_in_database_pools() {
+        use super::super::{BackendKind, DatabasePools};
+        let dir = tempfile::tempdir().unwrap();
+        let (old_org, new_org, old, new) = moved_sqlite_orgs(dir.path());
+        let pools: DatabasePools<sqlx::Sqlite> =
+            DatabasePools::with_secrets(BackendKind::Sqlite, SlowOldSecrets);
+        let late_new = async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            pools.pool_for_org(&new_org).await
+        };
+        let (a, b) = tokio::join!(pools.pool_for_org(&old_org), late_new);
+        assert_eq!(sqlite_file(a.unwrap().pool()), old);
+        assert_eq!(
+            sqlite_file(b.unwrap().pool()),
+            new,
+            "new org got the old pool"
+        );
+    }
+
+    /// Schema mode: a tenant moved to another schema builds its own
+    /// pool instead of waiting on the old schema's connect.
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn a_schema_build_for_another_schema_is_not_shared() {
+        let (addr, accepted, server) = silent_pg_server().await;
+        let pools = Arc::new(TenantPools::new(lazy_pg(addr)));
+        let calls: Vec<_> = ["cold", "cold_v2"]
+            .into_iter()
+            .map(|schema| {
+                let org = Org {
+                    schema_name: Some(schema.into()),
+                    ..cold_schema_org()
+                };
+                let p = pools.clone();
+                tokio::spawn(async move { p.scoped_pool(&org).await })
+            })
+            .collect();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while accepted.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let seen = accepted.load(Ordering::SeqCst);
+        for c in calls {
+            c.abort();
+        }
+        server.abort();
+        assert_eq!(seen, 2, "two schemas opened {seen} connections");
     }
 
     /// Schema mode too: a server that never answers sees one connect,

@@ -249,16 +249,16 @@ impl<DB: Database> DatabasePools<DB> {
             )));
         }
 
-        // Fast path, then one build per slug at a time, as in `TenantPools`.
+        // Fast path, then one build per slug and source, as in `TenantPools`.
         let source = super::pools::PoolSource::database(org);
         if let Some(pool) = self.cached(&org.slug, &source).await {
             return Ok(DatabasePool { pool });
         }
-        let build = self.build_for(org, source);
+        let build = self.build_for(org, source.clone());
         let pool = if self.config.max_cached_database_pools == 0 {
             build.await?
         } else {
-            self.building.run(&org.slug, build).await?
+            self.building.run(&org.slug, &source, build).await?
         };
         Ok(DatabasePool { pool })
     }
