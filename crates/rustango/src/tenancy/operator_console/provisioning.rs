@@ -235,17 +235,24 @@ pub(super) async fn org_new_submit(
     // and losing the failure, and the operator is watching a form they
     // just submitted. The stream view is for *re*-connecting, not for
     // escaping this wait.
-    match provisioner
+    let outcome = provisioner
         .provision(&request, Some(&op.username), None)
-        .await
-    {
+        .await;
+    let operator_id = op.id.get().copied().unwrap_or_default();
+    let mut extra = serde_json::Map::new();
+    // A failure can come after the Org row lands, so it is audited too.
+    let verb = match &outcome {
         Ok((run, _)) => {
             let run_id = run.id.get().copied().unwrap_or_default();
-            let mut extra = serde_json::Map::new();
             extra.insert("run_id".into(), serde_json::json!(run_id));
-            let operator_id = op.id.get().copied().unwrap_or_default();
-            super::emit_op_audit(&state.registry, &request.slug, operator_id, "create", extra)
-                .await;
+            "create"
+        }
+        Err(_) => "create_failed",
+    };
+    super::emit_op_audit(&state.registry, &request.slug, operator_id, verb, extra).await;
+    match outcome {
+        Ok((run, _)) => {
+            let run_id = run.id.get().copied().unwrap_or_default();
             Redirect::to(&format!("provision/{run_id}")).into_response()
         }
         // A failure before the row lands — a taken slug, an unreachable

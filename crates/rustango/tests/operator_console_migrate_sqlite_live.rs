@@ -303,6 +303,39 @@ async fn create_and_migrate_runs_are_audited() {
     assert!(on_run.iter().any(|s| s.ends_with(":migrate_all")), "{on_run:?}");
 }
 
+/// A create that fails is audited too: it may leave an inactive tenant behind.
+#[tokio::test]
+async fn a_failed_create_is_audited() {
+    let b = boot().await;
+    let slug = unique("bad");
+    let form = format!(
+        "slug={slug}&storage_mode=database&backend_kind=sqlite\
+         &database_url=sqlite%3A%2F%2F%2Fno-such-dir-{slug}%2Fx.db"
+    );
+    let resp = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
+                .uri("/orgs/new")
+                .header("cookie", &b.cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.status().is_redirection(), "the create should fail");
+    let on_org = audited(&b, "rustango_orgs", &slug).await;
+    assert!(
+        on_org.iter().any(|s| s.ends_with(":create_failed")),
+        "{on_org:?}"
+    );
+}
+
 /// The work is spawned. An error has nowhere to go but the run, so it
 /// has to get there.
 #[tokio::test]
