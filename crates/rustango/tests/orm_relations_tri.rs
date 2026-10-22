@@ -1175,6 +1175,7 @@ async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
     tx.commit().await.expect("commit");
     // The sqlx-executor delete exists on Postgres only.
     #[cfg(feature = "postgres")]
+    #[allow(irrefutable_let_patterns)]
     let deleted = if let Pool::Postgres(pg) = pool {
         Gpost { id: 7 }.delete(pg).await.expect("pg delete");
         7
