@@ -515,13 +515,10 @@ impl Default for Setup {
 }
 
 /// Decide whether to use JSON output based on `RUSTANGO_ENV`.
-/// Returns `true` when env is `prod` or `production`.
+/// Returns `true` when env is `prod` or `production`, any case.
 #[must_use]
 pub fn should_use_json_for_env() -> bool {
-    matches!(
-        std::env::var("RUSTANGO_ENV").as_deref(),
-        Ok("prod") | Ok("production")
-    )
+    crate::env::is_prod_tier(&crate::env::tier_from_env())
 }
 
 /// One-call setup that picks the format from `RUSTANGO_ENV`: JSON in

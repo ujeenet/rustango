@@ -82,10 +82,20 @@ enum CsrfMount {
 
 #[cfg(feature = "csrf")]
 impl CsrfMount {
-    fn layer(self) -> crate::forms::csrf::CsrfLayer {
+    /// `trusted` (`[security] csrf_trusted_origins`) adds to the config's own list.
+    fn layer(self, trusted: &[String]) -> crate::forms::csrf::CsrfLayer {
+        let mut cfg = match &self {
+            Self::SessionPolicy => crate::forms::csrf::CsrfConfig::default(),
+            Self::Explicit(cfg) => cfg.clone(),
+        };
+        for origin in trusted {
+            if !cfg.trusted_origins.contains(origin) {
+                cfg.trusted_origins.push(origin.clone());
+            }
+        }
         match self {
-            Self::SessionPolicy => crate::forms::csrf::layer(),
-            Self::Explicit(cfg) => crate::forms::csrf::with_config(cfg),
+            Self::SessionPolicy => crate::forms::csrf::layer_with_session_policy(cfg),
+            Self::Explicit(_) => crate::forms::csrf::with_config(cfg),
         }
     }
 }
@@ -687,8 +697,8 @@ impl Cli {
     /// rustango::manage::Cli::new().with_settings(&cfg)
     /// ```
     ///
-    /// With no `config/default.toml` the [`Cli`] runs on its defaults.
-    /// Any other load error (bad TOML, a value of the wrong type, a bad
+    /// With no `config/default.toml` the [`Cli`] warns and runs on its
+    /// defaults (louder on the prod tier). Any other load error (bad TOML, a value of the wrong type, a bad
     /// `RUSTANGO__*` override) makes [`Cli::run`] fail instead (#1927).
     #[cfg(feature = "config")]
     #[must_use]
@@ -701,13 +711,27 @@ impl Cli {
     #[cfg(feature = "config")]
     #[must_use]
     pub fn with_loaded_settings(
+        self,
+        loaded: Result<crate::config::Settings, crate::config::ConfigError>,
+    ) -> Self {
+        self.with_loaded_settings_on_tier(loaded, &crate::env::tier_from_env())
+    }
+
+    /// A missing config only warns, prod included: env-only containers must boot.
+    #[cfg(feature = "config")]
+    fn with_loaded_settings_on_tier(
         mut self,
         loaded: Result<crate::config::Settings, crate::config::ConfigError>,
+        tier: &str,
     ) -> Self {
         match loaded {
             Ok(cfg) => self.with_settings(&cfg),
             Err(e) if e.is_missing_config() => {
-                tracing::warn!(target: "rustango::manage", error = %e, "Cli::with_settings_from_env: no config file; running on Cli defaults");
+                if crate::env::is_prod_tier(tier) {
+                    tracing::warn!(target: "rustango::manage", error = %e, "Cli::with_settings_from_env: no config file on the prod tier; no [security] layers are applied");
+                } else {
+                    tracing::warn!(target: "rustango::manage", error = %e, "Cli::with_settings_from_env: no config file; running on Cli defaults");
+                }
                 self
             }
             Err(e) => {
@@ -1080,6 +1104,19 @@ impl Cli {
         crate::shutdown::DEFAULT_DRAIN_TIMEOUT
     }
 
+    /// The CSRF layer every serving path mounts, with the settings' trusted origins.
+    #[cfg(feature = "csrf")]
+    fn csrf_layer(&self) -> Option<crate::forms::csrf::CsrfLayer> {
+        #[cfg(feature = "config")]
+        let trusted = self
+            .settings_for_layers
+            .as_ref()
+            .map_or(&[][..], |s| s.security.csrf_trusted_origins.as_slice());
+        #[cfg(not(feature = "config"))]
+        let trusted: &[String] = &[];
+        self.csrf.clone().map(|mount| mount.layer(trusted))
+    }
+
     fn assemble_app<P>(&mut self, pool: P) -> Router
     where
         P: Clone + Send + Sync + 'static,
@@ -1106,8 +1143,8 @@ impl Cli {
         #[cfg(feature = "_http_layers")]
         let api = mount_static_dirs(api, &self.static_dirs);
         #[cfg(feature = "csrf")]
-        let api = match self.csrf.take() {
-            Some(mount) => api.layer(mount.layer()),
+        let api = match self.csrf_layer() {
+            Some(layer) => api.layer(layer),
             None => api,
         };
         // Inside CORS and the security headers, so a panic's 500 carries them (#1541).
@@ -1407,8 +1444,8 @@ impl Cli {
             api
         };
         #[cfg(feature = "csrf")]
-        let api = match self.csrf.clone() {
-            Some(mount) => api.layer(mount.layer()),
+        let api = match self.csrf_layer() {
+            Some(layer) => api.layer(layer),
             None => api,
         };
         // Inside CORS; the builder catches the admin and console routes (#1541).
@@ -1477,8 +1514,8 @@ impl Cli {
             api
         };
         #[cfg(feature = "csrf")]
-        let api = match self.csrf.clone() {
-            Some(mount) => api.layer(mount.layer()),
+        let api = match self.csrf_layer() {
+            Some(layer) => api.layer(layer),
             None => api,
         };
         // Inside CORS; the builder catches the admin and console routes (#1541).
@@ -1669,6 +1706,21 @@ fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
     }
     if !s.security.cors_allowed_origins.is_empty() {
         inert.push("security.cors_allowed_origins");
+    }
+    if !s.security.allowed_hosts.is_empty() {
+        inert.push("security.allowed_hosts");
+    }
+    if s.security.secure_ssl_redirect == Some(true) {
+        inert.push("security.secure_ssl_redirect");
+    }
+    if !s.security.secure_proxy_ssl_header.is_empty() {
+        inert.push("security.secure_proxy_ssl_header");
+    }
+    if !s.security.secure_redirect_exempt.is_empty() {
+        inert.push("security.secure_redirect_exempt");
+    }
+    if !s.security.csrf_trusted_origins.is_empty() {
+        inert.push("security.csrf_trusted_origins");
     }
     inert
 }
@@ -2231,6 +2283,18 @@ mod tests {
             .is_none());
     }
 
+    /// A missing config only warns, prod included: env-only containers must boot.
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_missing_config_does_not_fail_boot_even_on_prod() {
+        let empty = tempfile::tempdir().unwrap();
+        let missing = || crate::config::Settings::load_from(empty.path(), "prod");
+        let prod = Cli::new().with_loaded_settings_on_tier(missing(), "production");
+        assert!(prod.boot_settings_error().is_none());
+        let dev = Cli::new().with_loaded_settings_on_tier(missing(), "dev");
+        assert!(dev.boot_settings_error().is_none());
+    }
+
     #[cfg(feature = "config")]
     #[test]
     fn with_settings_stashes_handle_for_runtime_layering() {
@@ -2277,6 +2341,24 @@ mod tests {
         let mut s = Settings::default();
         s.database.url = Some("irrelevant".into());
         assert!(inert_layer_settings(&s).is_empty());
+
+        // The outer `[security]` layers and the CSRF origins count too.
+        let mut s = Settings::default();
+        s.security.allowed_hosts = vec!["example.com".into()];
+        s.security.secure_ssl_redirect = Some(true);
+        s.security.secure_proxy_ssl_header = vec!["x-forwarded-proto".into(), "https".into()];
+        s.security.secure_redirect_exempt = vec!["/health".into()];
+        s.security.csrf_trusted_origins = vec!["https://spa.example.com".into()];
+        assert_eq!(
+            inert_layer_settings(&s),
+            vec![
+                "security.allowed_hosts",
+                "security.secure_ssl_redirect",
+                "security.secure_proxy_ssl_header",
+                "security.secure_redirect_exempt",
+                "security.csrf_trusted_origins",
+            ]
+        );
     }
 
     /// #1856 — `Cli::tenant_header` reaches the builder's resolver chain.
@@ -2594,7 +2676,7 @@ mod tests {
         let _ = crate::session::set_secure_cookies(false);
         let mount = Cli::new().with_csrf().csrf.expect("set");
         assert!(matches!(mount, CsrfMount::SessionPolicy));
-        assert!(mount.layer().follows_session_policy());
+        assert!(mount.layer(&[]).follows_session_policy());
         let cookie = csrf_cookie(CsrfMount::SessionPolicy).await;
         assert_eq!(
             cookie.contains("Secure"),
@@ -2613,7 +2695,7 @@ mod tests {
                 ..Default::default()
             };
             assert!(!CsrfMount::Explicit(cfg.clone())
-                .layer()
+                .layer(&[])
                 .follows_session_policy());
             let cookie = csrf_cookie(CsrfMount::Explicit(cfg)).await;
             assert_eq!(cookie.contains("Secure"), secure, "{cookie}");
@@ -2625,7 +2707,7 @@ mod tests {
         use tower::ServiceExt as _;
         let app = axum::Router::new()
             .route("/", axum::routing::get(|| async { "ok" }))
-            .layer(mount.layer());
+            .layer(mount.layer(&[]));
         let req = axum::http::Request::get("/")
             .body(axum::body::Body::empty())
             .unwrap();
@@ -2911,6 +2993,36 @@ mod assemble_app_tests {
         assert!(ok.headers().contains_key("x-frame-options"));
         let bad = send("evil.example").await.expect("request");
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `[security] csrf_trusted_origins` reaches both CSRF mounts.
+    #[cfg(all(feature = "config", feature = "csrf"))]
+    #[tokio::test]
+    async fn csrf_mount_trusts_the_settings_origins() {
+        let _serial = serialized();
+        let mut s = crate::config::Settings::default();
+        s.security.csrf_trusted_origins = vec!["https://spa.example.com".into()];
+        let explicit = Cli::new().with_csrf_config(crate::forms::csrf::CsrfConfig::default());
+        for cli in [Cli::new().with_csrf(), explicit] {
+            let pool = crate::sql::Pool::connect("sqlite::memory:")
+                .await
+                .expect("sqlite");
+            let mut cli = cli.api(Router::new().route("/p", axum::routing::post(|| async { "ok" })));
+            cli.settings_for_layers = Some(s.clone());
+            let app = cli.assemble_app(pool);
+            let post = |origin: &str| {
+                let req = Request::post("/p")
+                    .header("host", "api.example.com")
+                    .header("origin", origin)
+                    .header("x-csrf-token", "tok")
+                    .header("cookie", "rustango_csrf=tok");
+                app.clone().oneshot(req.body(Body::empty()).unwrap())
+            };
+            let ok = post("https://spa.example.com").await.expect("request");
+            assert_eq!(ok.status(), StatusCode::OK, "trusted origin refused");
+            let bad = post("https://evil.example").await.expect("request");
+            assert_eq!(bad.status(), StatusCode::FORBIDDEN);
+        }
     }
 
     /// #1541 — a panic's 500 still carries CORS and the security headers.

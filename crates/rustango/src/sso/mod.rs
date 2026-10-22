@@ -115,6 +115,18 @@ impl std::fmt::Display for SsoError {
 
 impl std::error::Error for SsoError {}
 
+/// Check a provider key and issuer before a config is saved, as
+/// [`build_provider`] would at login.
+#[cfg_attr(not(all(feature = "tenancy", feature = "admin-sso")), allow(dead_code))]
+pub(crate) fn check_provider(provider: &str, issuer_url: Option<&str>) -> Result<(), SsoError> {
+    match provider {
+        "google" | "microsoft" | "github" | "gitlab" | "discord" => Ok(()),
+        "oidc" if issuer_url.is_some_and(|u| !u.trim().is_empty()) => Ok(()),
+        "oidc" => Err(SsoError::MissingIssuer),
+        other => Err(SsoError::UnknownProvider(other.to_owned())),
+    }
+}
+
 /// Build an [`OAuth2Provider`] from a resolved config. Known keys use the
 /// built-in presets; `"oidc"` runs OpenID Connect discovery against
 /// `issuer_url`, reusing the result for an hour.

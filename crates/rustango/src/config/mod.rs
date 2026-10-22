@@ -90,7 +90,8 @@ impl Settings {
         Self::load(&current_env_tier())
     }
 
-    /// The tier this process loads: `RUSTANGO_ENV`, or `"dev"`.
+    /// The tier this process loads: `RUSTANGO_ENV` trimmed and lowercased
+    /// (`production` reads `prod`), or `"dev"`.
     /// Public so `manage check --deploy` can compare the tier with
     /// the loaded settings without reading the env var again.
     #[must_use]
@@ -100,10 +101,7 @@ impl Settings {
 }
 
 fn current_env_tier() -> String {
-    std::env::var("RUSTANGO_ENV")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "dev".to_owned())
+    crate::env::tier_from_env()
 }
 
 #[cfg(test)]

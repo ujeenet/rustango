@@ -4,6 +4,30 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `[security] csrf_trusted_origins` is applied
+
+`Cli::with_csrf` and `Cli::with_csrf_config` now trust these origins (added to the config's own list); the setting was only read by `check --deploy`.
+
+### Fixed — `RUSTANGO_ENV=production` loads `prod_settings.toml`
+
+One tier parser (trimmed, any case, `production` = `prod`) now drives the settings file, `check --deploy`, JSON logging and error pages, as it already did cookies. A non-dev tier with no tier file warns.
+
+### Fixed — `check --deploy` and boot catch more prod config gaps
+
+The audit warns on `secure_cookies = false`, on the `empty` preset and on unknown preset names, and on a missing `config/default.toml`. Without `with_settings_from_env`, the boot warning also names `allowed_hosts`, the SSL-redirect keys and `csrf_trusted_origins`. On the prod tier `with_settings_from_env` with no config warns that no `[security]` layers apply.
+
+### Fixed — unknown hosts no longer push tenants out of the resolver cache
+
+Misses are cached in their own smaller map, each map evicts its least recently used entry, and concurrent cold lookups of one host run one registry query.
+
+### Fixed — operator console shows only messages it wrote
+
+The console signs each `?error=` / `?notice=` / `?ok=` its handlers write, for that page and five minutes, and drops any other or repeated one, so a link (a login `next` included) cannot put text on a console page. Creating a shared SSO provider checks the slug, the kind and the OIDC issuer, and a duplicate slug is a 400, not a 500.
+
+### Added — revoke a passkey
+
+`passkey::revoke::<U>(pool, user_id, credential_id)` and `passkey::revoke_all::<U>(pool, user_id)` delete credentials and end the user's sessions on user model `U`, and the tenancy CLI has `revoke-passkey <slug> <username> [--credential <id>]`. The admin does not serve the table, so there was no way to drop a stolen key.
+
 ## [0.60.10] — 2026-10-22
 
 **Breaking:** `ModelFormFor::from_json` refuses unknown keys; an oversized CSRF form gets 413, not 403; undecodable job payloads are retried; the first `makemigrations` on PostgreSQL rewrites each table with a sized `vector` or `geometry` column; MySQL migrations with a key over 3072 bytes or on unbounded text, binary or JSON fail at render time; `InMemoryJobQueue::dispatch` inside `atomic` waits for the commit. See UPGRADING.

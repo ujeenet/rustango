@@ -6091,7 +6091,7 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
     }
     // RUSTANGO_ENV — production should be explicitly tagged.
     match env.rustango_env.as_deref() {
-        Some("prod" | "production") => {
+        Some(tier) if crate::env::is_prod_tier(tier) => {
             out.info
                 .push("RUSTANGO_ENV is set to a production value".into());
         }
@@ -6226,7 +6226,7 @@ pub(crate) fn login_store_audit(
 /// the prod tier. Pure function over the loaded settings + resolved
 /// tier, no env-var poking.
 ///
-/// Graceful: missing `config/default.toml` is silently skipped (the
+/// A missing `config/default.toml` warns on the prod tier only (the
 /// project might not use the layered loader at all). Bad TOML
 /// shape surfaces as a warning so the operator notices but the
 /// rest of the audit still runs.
@@ -6237,12 +6237,26 @@ fn run_settings_audit(out: &mut DeployAuditFindings) {
     let env_tier = Settings::current_env_tier();
     out.info
         .push(format!("config tier resolved to `{env_tier}`"));
+    settings_audit_loaded(&env_tier, Settings::load_from_env(), out);
+}
 
-    let settings = match Settings::load_from_env() {
+/// [`run_settings_audit`] for a load result, so tests skip the disk.
+#[cfg(feature = "config")]
+fn settings_audit_loaded(
+    env_tier: &str,
+    loaded: Result<crate::config::Settings, crate::config::ConfigError>,
+    out: &mut DeployAuditFindings,
+) {
+    let settings = match loaded {
         Ok(s) => s,
-        Err(crate::config::ConfigError::Io { .. }) => {
-            // `config/default.toml` not present — project doesn't use
-            // the layered loader. Skip silently.
+        Err(e) if e.is_missing_config() => {
+            if crate::env::is_prod_tier(env_tier) {
+                out.warnings.push(
+                    "config/default.toml is missing in prod tier — no [security] settings \
+                     (allowed_hosts, headers, SSL redirect) are applied"
+                        .into(),
+                );
+            }
             return;
         }
         Err(e) => {
@@ -6273,7 +6287,7 @@ pub fn settings_audit_check(
     settings: &crate::config::Settings,
     out: &mut DeployAuditFindings,
 ) {
-    let in_prod = matches!(env_tier, "prod" | "production");
+    let in_prod = crate::env::is_prod_tier(env_tier);
     if !in_prod {
         // Non-prod tiers don't need the dev-default-leak audit.
         return;
@@ -6282,13 +6296,25 @@ pub fn settings_audit_check(
     // [security] headers_preset — must be `strict` (or unset →
     // strict by default at the layer). `"dev"` / `"none"` in prod
     // strips HSTS / XFO / nosniff / Referrer-Policy.
-    if let Some(preset) = settings.security.headers_preset.as_deref() {
-        if preset == "dev" || preset == "none" {
-            out.warnings.push(format!(
-                "[security] headers_preset = `{preset}` in prod tier — promote to `strict` \
-                 so HSTS / X-Frame-Options / X-Content-Type-Options / Referrer-Policy are emitted"
-            ));
-        }
+    // Same names as `SecurityHeadersLayer::from_preset`.
+    match settings.security.headers_preset.as_deref() {
+        None | Some("strict" | "relaxed") => {}
+        Some(preset @ ("dev" | "none" | "empty")) => out.warnings.push(format!(
+            "[security] headers_preset = `{preset}` in prod tier — promote to `strict` \
+             so HSTS / X-Frame-Options / X-Content-Type-Options / Referrer-Policy are emitted"
+        )),
+        Some(preset) => out.warnings.push(format!(
+            "[security] headers_preset = `{preset}` is not `strict`, `relaxed`, `dev` or \
+             `none`; the layer falls back to `strict`. Fix the spelling."
+        )),
+    }
+
+    if settings.security.secure_cookies == Some(false) {
+        out.warnings.push(
+            "[security] secure_cookies = false in prod tier — session and CSRF cookies are \
+             sent over plain HTTP too. Remove it or set it to true."
+                .into(),
+        );
     }
 
     // [security] hsts_max_age_secs = 0 in prod disables HSTS.
@@ -8642,6 +8668,61 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             "dev tier should be quiet, got: {:?}",
             r.info
         );
+    }
+
+    /// Prod `secure_cookies = false`, a header-stripping or unknown preset,
+    /// and a missing config are all reported.
+    #[cfg(feature = "config")]
+    #[test]
+    fn settings_audit_reports_insecure_cookies_presets_and_missing_config() {
+        let mut s = crate::config::Settings::default();
+        s.security.secure_cookies = Some(false);
+        let r = settings_run("prod", &s);
+        assert!(r.warnings.iter().any(|w| w.contains("secure_cookies")), "{:?}", r.warnings);
+        for preset in ["empty", "strixt"] {
+            let mut s = crate::config::Settings::default();
+            s.security.headers_preset = Some(preset.into());
+            let r = settings_run("prod", &s);
+            assert!(
+                r.warnings.iter().any(|w| w.contains("headers_preset") && w.contains(preset)),
+                "{preset}: {:?}",
+                r.warnings
+            );
+        }
+        let mut s = crate::config::Settings::default();
+        s.security.headers_preset = Some("relaxed".into());
+        let r = settings_run("prod", &s);
+        assert!(!r.warnings.iter().any(|w| w.contains("headers_preset")), "{:?}", r.warnings);
+
+        let empty = tempfile::tempdir().unwrap();
+        let missing = crate::config::Settings::load_from(empty.path(), "prod");
+        let mut out = DeployAuditFindings::default();
+        settings_audit_loaded("prod", missing, &mut out);
+        assert!(out.warnings.iter().any(|w| w.contains("default.toml")), "{:?}", out.warnings);
+        let missing = crate::config::Settings::load_from(empty.path(), "dev");
+        let mut out = DeployAuditFindings::default();
+        settings_audit_loaded("dev", missing, &mut out);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// Any prod spelling runs the prod checks, in both halves of the audit.
+    #[cfg(feature = "config")]
+    #[test]
+    fn deploy_audit_treats_every_prod_spelling_as_prod() {
+        let mut s = crate::config::Settings::default();
+        s.security.hsts_max_age_secs = Some(0);
+        for tier in ["PROD", "Production", " prod "] {
+            let r = settings_run(tier, &s);
+            assert!(
+                r.warnings.iter().any(|w| w.contains("hsts_max_age_secs")),
+                "{tier:?}: {:?}",
+                r.warnings
+            );
+            let mut env = good_prod_env();
+            env.rustango_env = Some(tier.into());
+            let r = run(&env);
+            assert!(r.warnings.is_empty(), "{tier:?}: {:?}", r.warnings);
+        }
     }
 
     /// In prod, `headers_preset = "dev"` is a clear footgun —

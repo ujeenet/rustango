@@ -70,7 +70,12 @@ pub const CSRF_FORM_FIELD: &str = "_csrf";
 ///
 /// Its cookie's `Secure` flag follows [`crate::session::secure_cookies`].
 pub fn layer() -> CsrfLayer {
-    CsrfLayer::new(CsrfConfig::default(), SecureFrom::SessionPolicy)
+    layer_with_session_policy(CsrfConfig::default())
+}
+
+/// [`layer`] with a config; `cfg.secure` is ignored for the session policy.
+pub(crate) fn layer_with_session_policy(cfg: CsrfConfig) -> CsrfLayer {
+    CsrfLayer::new(cfg, SecureFrom::SessionPolicy)
 }
 
 /// Create the middleware with explicit config — used by integrators

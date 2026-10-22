@@ -898,6 +898,25 @@ async fn toggling_shared_email_linking_keeps_the_provider_and_its_links() {
     assert_eq!(env.sso("corp", "sub-ann", "ann@example.com").await, Ok(ann));
 }
 
+/// Bad shared-provider input is a 400, never a stored row or a 500.
+#[tokio::test]
+async fn the_console_refuses_an_invalid_shared_provider() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.shared_provider("corp", false).await;
+    for form in [
+        "slug=x&label=x&kind=myspace&client_id=c&client_secret=s",
+        "slug=x&label=x&kind=oidc&client_id=c&client_secret=s",
+        "slug=a%2Fb&label=x&kind=google&client_id=c&client_secret=s",
+        "slug=corp&label=x&kind=google&client_id=c&client_secret=s",
+    ] {
+        let status = env.console_post("/sso-shared", form.into()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{form}");
+    }
+    let html = env.shared_list().await;
+    assert!(!html.contains("myspace") && !html.contains("a/b"), "{html}");
+}
+
 #[tokio::test]
 async fn a_read_only_console_cannot_change_shared_providers() {
     let _g = SUITE.lock().await;

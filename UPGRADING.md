@@ -150,6 +150,22 @@ untouched.
 
 ## Unreleased
 
+### `csrf_trusted_origins` takes effect
+
+Origins listed in `[security] csrf_trusted_origins` now pass the CSRF Origin check under `Cli::with_csrf` / `with_csrf_config`. Remove entries you did not mean to trust.
+
+### `RUSTANGO_ENV` is normalized
+
+`production`, `PROD` and ` Prod ` all mean `prod`: they load `prod_settings.toml` (a `production_settings.toml` still loads if there is no `prod` file) and turn on JSON logs. `Settings::current_env_tier()` and `session::tier_from_env()` return the normalized name.
+
+### Prod without a config warns
+
+With `RUSTANGO_ENV=prod` and no `config/default.toml`, `Cli::with_settings_from_env` still boots (env-only containers keep working) but warns that no `[security]` layers apply, and `check --deploy` reports it. Ship the `config/` directory to get them.
+
+### Console messages in the URL must be signed
+
+The operator console ignores `?error=`, `?notice=` and `?ok=` unless it added them itself in the last five minutes. Bookmarks or links you built with those keys lose the message.
+
 ## 0.60.10
 
 ### New `TenantScope` extractor

@@ -466,6 +466,64 @@ async fn user_verbs_take_flags_anywhere() {
     .expect("leading flag");
 }
 
+/// Staff revoke a user's passkey from the CLI: one by id, or all of them.
+#[cfg(feature = "passkey")]
+#[tokio::test]
+async fn revoke_passkey_removes_the_users_credentials() {
+    use rustango::passkey;
+    let b = boot().await;
+    b.tenant("acme").await;
+    for name in ["bob", "eve"] {
+        b.run(&["create-user", "acme", name, "--skip-validation", "--password", "pw"])
+            .await
+            .expect("user");
+    }
+    let url = format!("sqlite://{}", b._tmp.path().join("acme.db").display());
+    let tenant: rustango::sql::Pool = sqlx::SqlitePool::connect(&url).await.unwrap().into();
+    passkey::ensure_table(&tenant).await.unwrap();
+    let user = |name: &'static str| {
+        use rustango::core::Column as _;
+        use rustango::sql::FetcherPool as _;
+        use rustango::tenancy::User;
+        let tenant = tenant.clone();
+        async move {
+            let rows = User::objects()
+                .where_(User::username.eq(name.to_owned()))
+                .fetch(&tenant)
+                .await
+                .unwrap();
+            rows.into_iter().next().unwrap()
+        }
+    };
+    let id = |name: &'static str| {
+        let user = user(name);
+        async move { user.await.id.get().copied().unwrap() }
+    };
+    let (bob, eve) = (id("bob").await, id("eve").await);
+    passkey::register(&tenant, bob, "laptop", vec![1], 0, "").await.unwrap();
+    passkey::register(&tenant, bob, "phone", vec![2], 0, "").await.unwrap();
+    passkey::register(&tenant, eve, "key", vec![3], 0, "").await.unwrap();
+
+    let err = b
+        .run(&["revoke-passkey", "acme", "bob", "--credential", "key"])
+        .await
+        .expect_err("eve's key is not bob's");
+    assert!(err.contains("key"), "{err}");
+    assert!(user("bob").await.sessions_revoked_at.is_none(), "nothing was revoked");
+    b.run(&["revoke-passkey", "acme", "bob", "--credential", "laptop"])
+        .await
+        .expect("one");
+    assert_eq!(passkey::for_user(&tenant, bob).await.unwrap().len(), 1);
+    // A stolen key's sessions end with it.
+    assert!(user("bob").await.sessions_revoked_at.is_some());
+    assert!(user("eve").await.sessions_revoked_at.is_none());
+    let out = b.run(&["revoke-passkey", "acme", "bob"]).await.expect("all");
+    assert!(out.contains('1'), "{out}");
+    assert!(passkey::for_user(&tenant, bob).await.unwrap().is_empty());
+    assert_eq!(passkey::for_user(&tenant, eve).await.unwrap().len(), 1);
+    assert!(b.run(&["revoke-passkey", "acme", "nobody"]).await.is_err());
+}
+
 /// set-superuser and reset-password write through the ORM (#1952).
 #[tokio::test]
 async fn set_superuser_and_reset_password_write_the_row() {
