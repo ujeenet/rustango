@@ -45,7 +45,7 @@ pub struct TenantContext<DB: Database = DefaultTenantDb> {
 /// [`Tenant::pool`] then holds no connection at all, so a request
 /// cannot pin a pool slot it never uses. That used to deadlock the
 /// pool once concurrency reached `max_conn`. Postgres stays eager,
-/// so schema mode can apply `SET search_path` up front.
+/// because [`Tenant::conn`] is sync; use [`TenantScope`] to hold none.
 enum TenantConnCell<DB: Database> {
     /// A connection is held: always on Postgres, and on the other
     /// backends after the first `pool_conn` or `into_conn` call.
@@ -180,15 +180,24 @@ impl<DB: Database> Tenant<DB> {
     }
 }
 
-/// A `Tenant<DB>` with the backend erased, so a `<DB>`-generic handler can
-/// hand off to a plain one whose future stays provably `Send` (#1778).
-pub(crate) struct TenantScope {
-    pub(crate) org: Org,
+/// The request's tenant and its pool, holding no connection. Prefer it
+/// over [`Tenant`] when a handler only uses the ORM's pool methods: it
+/// works on every backend and cannot pin a pool slot it never uses.
+///
+/// ```ignore
+/// pub async fn posts(t: TenantScope) -> Result<Json<Vec<Post>>, StatusCode> {
+///     Ok(Json(Post::objects().fetch(t.pool()).await?))
+/// }
+/// ```
+pub struct TenantScope {
+    pub org: Org,
     pool: crate::sql::Pool,
 }
 
 impl TenantScope {
-    pub(crate) fn pool(&self) -> &crate::sql::Pool {
+    /// The tenant's pool, as [`Tenant::pool`].
+    #[must_use]
+    pub fn pool(&self) -> &crate::sql::Pool {
         &self.pool
     }
 
@@ -395,9 +404,24 @@ async fn resolved_org(
         .ok_or(TenantRejection::NotFound)
 }
 
-// `Tenant<sqlx::Postgres>` goes through `TenantPools::acquire`,
-// which applies `SET search_path` for a schema-mode tenant before
-// the handler sees the connection. Database mode uses the same path.
+impl<S> FromRequestParts<S> for TenantScope
+where
+    S: Send + Sync,
+{
+    type Rejection = TenantRejection;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let mounted = super::MountedTenantContext::of(&parts.extensions)
+            .ok_or(TenantRejection::MissingContext)?;
+        let org = resolved_org(mounted, parts).await?;
+        let pool = mounted
+            .pool_for(&org)
+            .await
+            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
+        Ok(Self { org, pool })
+    }
+}
+
 #[cfg(feature = "postgres")]
 impl<S> FromRequestParts<S> for Tenant<sqlx::Postgres>
 where
@@ -413,24 +437,18 @@ where
             .ok_or(TenantRejection::MissingContext)?
             .clone();
         let org = resolved_org(mounted, parts).await?;
-        let conn = ctx
+        // Connection and `t.pool()` both come from the tenant's own pool:
+        // schema mode's carries `search_path`, so it never holds a
+        // registry connection for the request.
+        let (conn, pool) = ctx
             .pools
-            .acquire(&org)
-            .await
-            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        // Also resolve the `Pool` enum, so `t.pool()` works with the
-        // ORM helpers. Schema mode gets a dedicated pool carrying
-        // `search_path`, not the shared registry pool; database mode
-        // gets the tenant's own.
-        let pool = ctx
-            .pools
-            .scoped_pool_dyn(&org)
+            .scoped_acquire(&org)
             .await
             .map_err(|e| TenantRejection::Internal(e.to_string()))?;
         Ok(Tenant {
             org,
             conn: TenantConnCell::Ready(conn),
-            pool,
+            pool: crate::sql::Pool::Postgres(pool),
         })
     }
 }

@@ -3,6 +3,7 @@
 //! | Extractor | What it gives you |
 //! |---|---|
 //! | [`Tenant`] | Tenant-scoped DB connection (org + pool) |
+//! | [`TenantScope`] | Org + tenant pool, no held connection |
 //! | [`SessionUser`] | Browser-session tenant user (`None` = anonymous) |
 //! | [`SessionOperator`] | Browser-session operator (`None` = anonymous) |
 //!
@@ -25,6 +26,7 @@
 //! ```
 //!
 //! [`Tenant`]: crate::extractors::Tenant
+//! [`TenantScope`]: crate::extractors::TenantScope
 //! [`SessionUser`]: crate::extractors::SessionUser
 //! [`SessionOperator`]: crate::extractors::SessionOperator
 
@@ -40,5 +42,4 @@ mod tenant;
 pub use database_tenant::{DatabaseTenant, DatabaseTenantContext, DatabaseTenantRejection};
 pub(crate) use mounted::MountedTenantContext;
 pub use session_user::{SessionOperator, SessionUser};
-pub(crate) use tenant::TenantScope;
-pub use tenant::{Tenant, TenantContext, TenantRejection};
+pub use tenant::{Tenant, TenantContext, TenantRejection, TenantScope};

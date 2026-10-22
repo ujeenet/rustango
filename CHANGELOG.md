@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a schema-mode `Tenant` no longer holds a registry connection
+
+`Tenant<Postgres>` takes its connection from the tenant's scoped pool, so one busy tenant cannot use up the shared registry pool. New `extractors::TenantScope` gives the org and pool with no held connection.
+
 ### Security — admin create and edit stay inside the row scope
 
 The written row, parent and inline children alike, is re-read in the write transaction through the queryset hooks (and the `add` hook after a create); a form that would put a row outside the scope is refused with 403 and the whole edit rolled back.

@@ -1281,6 +1281,26 @@ impl TenantPools<sqlx::Postgres> {
         }
     }
 
+    /// A connection from [`Self::scoped_pool`], plus that pool. Schema mode
+    /// never borrows from the shared registry pool, so one busy tenant
+    /// cannot starve the others.
+    pub(crate) async fn scoped_acquire(
+        &self,
+        org: &Org,
+    ) -> Result<(TenantConn<sqlx::Postgres>, PgPool), TenancyError> {
+        let pool = self.scoped_pool(org).await?;
+        let conn = pool.acquire().await?;
+        // `search_path` is a startup option of this pool: nothing to reset.
+        let schema = matches!(StorageMode::parse(&org.storage_mode), Ok(StorageMode::Schema))
+            .then(|| org.effective_schema().to_owned());
+        let conn = TenantConn {
+            inner: Some(conn),
+            schema,
+            reset: None,
+        };
+        Ok((conn, pool))
+    }
+
     async fn build_schema_mode(
         &self,
         org: &Org,

@@ -761,3 +761,100 @@ async fn scoped_pool_over_cap_holds_the_connection_budget() {
     }
     migrate::drop_all(&pool).await.unwrap();
 }
+
+/// A resolver that returns one org without touching the registry.
+struct FixedOrg(Org);
+
+#[async_trait::async_trait]
+impl rustango::tenancy::OrgResolver for FixedOrg {
+    async fn resolve(
+        &self,
+        _: &axum::http::request::Parts,
+        _: &rustango::sql::Pool,
+    ) -> Result<Option<Org>, rustango::tenancy::TenancyError> {
+        Ok(Some(self.0.clone()))
+    }
+}
+
+/// Request parts carrying a `TenantContext` that resolves `org`.
+fn tenant_parts(pools: TenantPools, org: Org) -> axum::http::request::Parts {
+    use rustango::extractors::TenantContext;
+    use rustango::session::SessionSecret;
+    let ctx = TenantContext::<sqlx::Postgres> {
+        pools: std::sync::Arc::new(pools),
+        resolver: rustango::tenancy::ChainResolver::new().push(FixedOrg(org)),
+        session_secret: SessionSecret::from_bytes(vec![7; 32]),
+        operator_secret: SessionSecret::from_bytes(vec![8; 32]),
+    };
+    let mut parts = axum::http::Request::new(()).into_parts().0;
+    parts.extensions.insert(std::sync::Arc::new(ctx));
+    parts
+}
+
+fn schema_org(schema: &str) -> Org {
+    Org {
+        slug: schema.into(),
+        storage_mode: StorageMode::Schema.as_str().into(),
+        backend_kind: "postgres".to_owned(),
+        schema_name: Some(schema.to_owned()),
+        ..rustango::testkit::org()
+    }
+}
+
+/// A schema-mode `Tenant` takes its connection from the tenant's own
+/// pool, so a busy registry pool does not block it.
+#[tokio::test]
+async fn schema_mode_tenant_holds_no_registry_connection() {
+    use axum::extract::FromRequestParts as _;
+    let _g = live_lock().lock().await;
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let admin = pool().await.unwrap();
+    create_schema(&admin, "acme_tp_busy").await;
+    let registry = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(2))
+        .connect(&url)
+        .await
+        .unwrap();
+    // Every registry slot is busy, as under load from other tenants.
+    let _busy = registry.acquire().await.unwrap();
+    let mut parts = tenant_parts(TenantPools::new(registry.clone()), schema_org("acme_tp_busy"));
+    let mut t = rustango::extractors::Tenant::<sqlx::Postgres>::from_request_parts(&mut parts, &())
+        .await
+        .expect("a busy registry pool must not block the tenant");
+    assert_eq!(current_schema(t.conn()).await, "acme_tp_busy");
+    drop(t);
+    drop_schema(&admin, "acme_tp_busy").await;
+}
+
+/// `TenantScope` holds no connection, so many of them fit a one-slot pool.
+#[tokio::test]
+async fn tenant_scope_holds_no_connection() {
+    use axum::extract::FromRequestParts as _;
+    use rustango::extractors::TenantScope;
+    let _g = live_lock().lock().await;
+    let Some(admin) = pool().await else {
+        return;
+    };
+    create_schema(&admin, "acme_tp_scope").await;
+    let cfg = rustango::tenancy::TenantPoolsConfig {
+        scoped_pool_max_connections: 1,
+        database_pool_acquire_timeout: std::time::Duration::from_secs(2),
+        ..Default::default()
+    };
+    let pools = TenantPools::new(admin.clone()).config(cfg);
+    let mut parts = tenant_parts(pools, schema_org("acme_tp_scope"));
+    let first = TenantScope::from_request_parts(&mut parts, &()).await.unwrap();
+    let second = TenantScope::from_request_parts(&mut parts, &()).await.unwrap();
+    assert_eq!(first.org.slug, "acme_tp_scope");
+    let rustango::sql::Pool::Postgres(pg) = second.pool() else {
+        panic!("a Postgres pool");
+    };
+    let mut conn = pg.acquire().await.expect("the one slot is free");
+    assert_eq!(current_schema(&mut conn).await, "acme_tp_scope");
+    drop(conn);
+    drop((first, second));
+    drop_schema(&admin, "acme_tp_scope").await;
+}

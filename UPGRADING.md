@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Schema-mode `Tenant` connections come from the scoped pool
+
+A request now uses `scoped_pool_max_connections` (default 8) of its tenant, not the registry pool. Handlers that hold `Tenant` and also use `t.pool()` under high per-tenant load may need a larger value, or `TenantScope`.
+
 ### New projects: dev server on loopback
 
 Only new scaffolds change. To match in an existing project, drop `RUSTANGO_BIND` from `.env`, add `RUSTANGO_BIND: 0.0.0.0:8080` under the compose `rust` service's `environment:`, and publish `"127.0.0.1:8080:8080"`.
