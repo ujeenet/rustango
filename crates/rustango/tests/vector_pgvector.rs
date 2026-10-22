@@ -170,6 +170,9 @@ async fn sqlite_insert_of_a_vector_errors() {
         title: "t".into(),
         embedding: Vector(vec![1.0, 2.0, 3.0]),
     };
-    let err = doc.insert_pool(&pool).await.expect_err("a vector on SQLite");
+    let err = doc
+        .insert_pool(&pool)
+        .await
+        .expect_err("a vector on SQLite");
     assert!(err.to_string().contains("sqlite"), "{err}");
 }

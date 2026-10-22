@@ -1395,7 +1395,10 @@ fn render_changes_split_inner(
                     let sized = |name: &str| {
                         matches!(
                             super::snapshot::field_type_from_name(name),
-                            Some(crate::core::FieldType::Vector(_) | crate::core::FieldType::Geometry(_))
+                            Some(
+                                crate::core::FieldType::Vector(_)
+                                    | crate::core::FieldType::Geometry(_)
+                            )
                         )
                     };
                     let old = FieldSnapshot {
@@ -2844,19 +2847,23 @@ mod sql_type_tests {
     #[test]
     fn sized_type_upgrade_is_one_cast_on_postgres() {
         let (changes, snap) = upgrade("vector", "vector(3)");
-        let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
+        let out =
+            render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
         assert!(
-            out.immediate
-                .contains(&r#"ALTER TABLE "t" ALTER COLUMN "c" TYPE vector(3) USING "c"::vector(3)"#.into()),
+            out.immediate.contains(
+                &r#"ALTER TABLE "t" ALTER COLUMN "c" TYPE vector(3) USING "c"::vector(3)"#.into()
+            ),
             "{:?}",
             out.immediate
         );
         let (changes, snap) = upgrade("geometry", "geometry(4326)");
-        let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
+        let out =
+            render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
         assert!(
             out.immediate
                 .iter()
-                .any(|s| s.contains(" TYPE geometry(Point,4326) USING ") && s.contains(r#"ST_SetSRID("c", 4326)"#)),
+                .any(|s| s.contains(" TYPE geometry(Point,4326) USING ")
+                    && s.contains(r#"ST_SetSRID("c", 4326)"#)),
             "SRID-0 rows fail the plain cast: {:?}",
             out.immediate
         );
@@ -2880,7 +2887,12 @@ mod sql_type_tests {
             ] {
                 let (changes, snap) = upgrade(from, to);
                 let out = render_changes_split_with_dialect(&changes, &snap, d).unwrap();
-                assert!(out.immediate.is_empty(), "{}: {:?}", d.name(), out.immediate);
+                assert!(
+                    out.immediate.is_empty(),
+                    "{}: {:?}",
+                    d.name(),
+                    out.immediate
+                );
             }
         }
     }

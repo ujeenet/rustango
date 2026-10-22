@@ -892,7 +892,10 @@ async fn schema_purge_refuses_an_extension_used_outside() {
             assert!(msg.contains("ext_b.users"), "{msg}");
             assert!(msg.contains("ALTER EXTENSION citext SET SCHEMA"), "{msg}");
             assert_eq!(ext_b_columns(&registry, "users", "email").await, 1);
-            assert!(org_active(&registry, "ext-a").await, "the refused purge deactivated the org");
+            assert!(
+                org_active(&registry, "ext-a").await,
+                "the refused purge deactivated the org"
+            );
         },
     )
     .await;
@@ -907,7 +910,9 @@ async fn schema_purge_advice_fits_a_fixed_extension() {
         "CREATE EXTENSION xml2 SCHEMA ext_a; \
          CREATE TABLE ext_b.t (x TEXT DEFAULT ext_a.xpath_string('<a>1</a>', '/a'))",
         |res, registry| async move {
-            let msg = res.expect_err("another tenant's default calls it").to_string();
+            let msg = res
+                .expect_err("another tenant's default calls it")
+                .to_string();
             assert!(msg.contains("xml2 cannot move"), "{msg}");
             assert!(!msg.contains("SET SCHEMA"), "{msg}");
             assert_eq!(ext_b_columns(&registry, "t", "x").await, 1);
@@ -928,7 +933,10 @@ async fn schema_purge_refuses_a_view_in_another_schema() {
             let err = res.expect_err("another tenant's view reads the schema");
             assert!(err.to_string().contains("view ext_b.report"), "{err}");
             assert_eq!(ext_b_columns(&registry, "report", "id").await, 1);
-            assert!(org_active(&registry, "ext-a").await, "the refused purge deactivated the org");
+            assert!(
+                org_active(&registry, "ext-a").await,
+                "the refused purge deactivated the org"
+            );
         },
     )
     .await;

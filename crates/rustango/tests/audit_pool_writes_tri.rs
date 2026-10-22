@@ -272,7 +272,9 @@ async fn save_waits_for_a_concurrent_writer(pool: &Pool) {
         .compile()
         .unwrap();
     let mut writer = rustango::sql::transaction_pool(pool).await.unwrap();
-    rustango::sql::update_tx(&mut writer, &update).await.unwrap();
+    rustango::sql::update_tx(&mut writer, &update)
+        .await
+        .unwrap();
     let saver = {
         let pool = pool.clone();
         tokio::spawn(async move {
@@ -283,10 +285,7 @@ async fn save_waits_for_a_concurrent_writer(pool: &Pool) {
     wait_until_blocked(pool, 1).await;
     assert!(!saver.is_finished(), "the save did not wait for the writer");
     writer.commit().await.unwrap();
-    saver
-        .await
-        .unwrap()
-        .expect("save once the writer commits");
+    saver.await.unwrap().expect("save once the writer commits");
     let changes = &entries(pool, &id.to_string()).await[0].changes;
     assert_eq!(changes["title"]["before"], "held", "{changes}");
 }
@@ -310,7 +309,9 @@ async fn pg_macro_saves_queue_behind_each_other(pool: &Pool) {
             .compile()
             .unwrap();
         let mut writer = rustango::sql::transaction_pool(pool).await.unwrap();
-        rustango::sql::update_tx(&mut writer, &update).await.unwrap();
+        rustango::sql::update_tx(&mut writer, &update)
+            .await
+            .unwrap();
         let savers: Vec<_> = ["one", "two"]
             .into_iter()
             .map(|title| {
