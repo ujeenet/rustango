@@ -230,6 +230,40 @@ pub struct CycB {
     pub a_id: Option<i64>,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli1227_counter", app = "cli1227")]
+pub struct Counter {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+    #[rustango(default = "5")]
+    pub hits: i64,
+}
+
+/// A fixture key that is absent takes the column default, pk included.
+async fn loaddata_leaves_missing_keys_to_the_column_default(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<Counter>(pool).await;
+    let fixture = serde_json::json!([
+        {"model": "cli1227.Counter", "fields": {"name": "a"}},
+        {"model": "cli1227.Counter", "pk": 9, "fields": {"name": "b", "hits": 1}},
+    ]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("partial.json");
+    std::fs::write(&path, fixture.to_string()).unwrap();
+    let out = manage(pool, &["loaddata", path.to_str().unwrap(), "--fail-fast"]).await;
+    assert!(out.is_ok(), "loaddata: {out:?}");
+    let mut rows: Vec<(String, i64)> = Counter::objects()
+        .fetch(pool)
+        .await
+        .expect("fetch")
+        .into_iter()
+        .map(|c| (c.name, c.hits))
+        .collect();
+    rows.sort();
+    assert_eq!(rows, [("a".to_owned(), 5), ("b".to_owned(), 1)]);
+}
+
 async fn fresh_parent_child(pool: &Pool) {
     rustango::testkit::matrix::drop_table(pool, Child::SCHEMA.table).await;
     rustango::testkit::matrix::fresh_table::<Parent>(pool).await;
@@ -877,5 +911,6 @@ tri_dialect_test! {
         dump_and_load_keeps_m2m_links,
         dump_and_load_keeps_text_pk_m2m_links,
         a_bad_m2m_link_skips_only_its_row,
+        loaddata_leaves_missing_keys_to_the_column_default,
     ],
 }

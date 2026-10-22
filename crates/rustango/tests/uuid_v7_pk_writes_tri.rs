@@ -277,6 +277,69 @@ async fn pg_bulk_insert_set_pk_fills_unset_timestamps(pool: &Pool) {
     let _ = pool;
 }
 
+/// `save_pool` writes the `auto_now` stamp back into `self`; a
+/// `save_partial` that leaves it out stamps neither.
+async fn save_writes_the_auto_now_stamp_back(pool: &Pool) {
+    let mut b = Badge {
+        id: Auto::Unset,
+        name: "b".into(),
+        created_at: Auto::Unset,
+        updated_at: Auto::Unset,
+    };
+    b.insert_pool(pool).await.expect("insert");
+    let old = chrono::DateTime::from_timestamp(1_600_000_000, 0).expect("ts");
+    let id = *b.id.get().expect("id");
+    let stored = |pool: &Pool| {
+        let qs = Badge::objects().filter("id", id);
+        let pool = pool.clone();
+        async move {
+            *qs.fetch(&pool).await.expect("fetch")[0]
+                .updated_at
+                .get()
+                .expect("stored stamp")
+        }
+    };
+    let near = |a: chrono::DateTime<chrono::Utc>, b: chrono::DateTime<chrono::Utc>| {
+        (a - b).num_milliseconds().abs() < 1000
+    };
+
+    b.updated_at = Auto::Set(old);
+    b.save_pool(pool).await.expect("save_pool");
+    let mem = *b.updated_at.get().expect("stamp");
+    assert_ne!(mem, old, "save_pool left the stale stamp in memory");
+    assert!(near(mem, stored(pool).await), "memory {mem} vs row");
+
+    b.updated_at = Auto::Set(old);
+    b.name = "c".into();
+    b.save_partial(&["name"], pool).await.expect("save_partial");
+    assert_eq!(b.updated_at.get(), Some(&old), "unnamed auto_now was stamped");
+    assert!(near(mem, stored(pool).await), "the row's stamp moved");
+}
+
+/// `upsert` on a saved row stamps `auto_now` instead of sending the old value.
+async fn pg_upsert_stamps_auto_now(pool: &Pool) {
+    #[cfg(feature = "postgres")]
+    if let Some(pg) = pool.as_postgres() {
+        let mut b = Badge {
+            id: Auto::Unset,
+            name: "u".into(),
+            created_at: Auto::Unset,
+            updated_at: Auto::Unset,
+        };
+        b.insert_pool(pool).await.expect("insert");
+        let old = chrono::DateTime::from_timestamp(1_600_000_000, 0).expect("ts");
+        b.updated_at = Auto::Set(old);
+        b.upsert(pg).await.expect("upsert");
+        let mem = *b.updated_at.get().expect("stamp");
+        assert_ne!(mem, old, "upsert sent the stale stamp");
+        let id = *b.id.get().expect("id");
+        let row = Badge::objects().filter("id", id).fetch(pool).await.expect("fetch");
+        let stored = *row[0].updated_at.get().expect("stored stamp");
+        assert!((stored - mem).num_milliseconds().abs() < 1000, "{stored} vs {mem}");
+    }
+    let _ = pool;
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -288,5 +351,7 @@ tri_dialect_test! {
         pg_bulk_insert_writes_ids_back,
         db_pk_is_read_back_beside_a_rust_filled_auto,
         pg_bulk_insert_set_pk_fills_unset_timestamps,
+        save_writes_the_auto_now_stamp_back,
+        pg_upsert_stamps_auto_now,
     ],
 }

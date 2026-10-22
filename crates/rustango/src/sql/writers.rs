@@ -48,6 +48,8 @@ pub(super) struct Sql<'d> {
     pub join_types: Vec<(usize, &'static str, &'static ModelSchema)>,
     /// Count the next SELECT body writes as its `__rustango_total` column.
     pub total: Option<CountQuery>,
+    /// Children the next SELECT body counts as `__annotated_count`.
+    pub child_count: Option<ChildCount>,
     /// A MySQL `GROUP_CONCAT` was written: lift its 1024-byte cap.
     pub group_concat: bool,
     /// The UPDATE/DELETE target being written, if any.
@@ -130,6 +132,7 @@ impl<'d> Sql<'d> {
             derived_joins: None,
             join_types: Vec::new(),
             total: None,
+            child_count: None,
             group_concat: false,
             dml_target: None,
             read_dml_target: false,
@@ -147,6 +150,7 @@ impl<'d> Sql<'d> {
             derived_joins: None,
             join_types: Vec::new(),
             total: None,
+            child_count: None,
             group_concat: false,
             dml_target: None,
             read_dml_target: false,
@@ -552,6 +556,10 @@ fn write_distinct_on_via_window(
             b.write_ident(field.column);
         }
     }
+    // Counted over the survivors, which `sub` exposes.
+    if let Some(child) = b.child_count.take() {
+        write_child_count(b, "sub", child);
+    }
     b.sql.push_str(" FROM (");
 
     // Inner SELECT: the same projection plus __rn.
@@ -826,6 +834,9 @@ fn write_select_body_qualified(
         write_count(b, &count)?;
         b.sql.push_str(") AS ");
         b.write_ident("__rustango_total");
+    }
+    if let Some(child) = b.child_count.take() {
+        write_child_count(b, scope.name, child);
     }
 
     b.sql.push_str(" FROM ");
@@ -2086,7 +2097,7 @@ fn write_pg_utc_arg(b: &mut Sql<'_>, arg: &crate::core::Expr) -> Result<(), SqlE
 /// and binds each key as a parameter.
 ///
 /// MySQL and SQLite use one `json_extract` call with a path string
-/// like `$.k1.k2[0]`. Both require a literal there, so the path is
+/// like `$."k1"."k2"[0]`. Both require a literal there, so the path is
 /// inlined. To keep that safe, keys must match `[A-Za-z0-9_]`;
 /// anything else returns `OpNotSupportedInDialect`.
 fn write_json_path(
@@ -2192,7 +2203,7 @@ fn check_json_path(
     Ok(())
 }
 
-/// The checked MySQL / SQLite `$.<k>.<k>[<n>]` path string.
+/// The checked MySQL / SQLite `$."<k>"."<k>"[<n>]` path string.
 fn json_path_text(
     path: &[crate::core::JsonPathStep],
     dialect: &'static str,
@@ -2202,9 +2213,11 @@ fn json_path_text(
     let mut json_path = String::from("$");
     for step in path {
         match step {
+            // Quoted: MySQL rejects a bare `$.2fa`. The safe set keeps `"` out.
             JsonPathStep::Key(k) => {
-                json_path.push('.');
+                json_path.push_str(".\"");
                 json_path.push_str(k);
+                json_path.push('"');
             }
             JsonPathStep::Index(n) => {
                 if *n < 0 {
@@ -4974,28 +4987,72 @@ fn write_returning(b: &mut Sql<'_>, returning: &[&'static str]) -> Result<(), Sq
     Ok(())
 }
 
-/// Compile only the WHERE / ORDER BY / LIMIT / OFFSET tail, for
-/// callers that build the head of the statement themselves.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn compile_where_order_tail(
+/// `select` plus a correlated `__annotated_count` of each row's children,
+/// so the query keeps its WHERE, joins, ORDER BY and LIMIT.
+pub(crate) fn compile_select_with_child_count(
     d: &dyn Dialect,
-    where_clause: &WhereExpr,
-    search: Option<&SearchClause>,
-    order_by: &[crate::core::OrderItem],
-    limit: Option<i64>,
-    offset: Option<i64>,
-    qualify_with: Option<&'static str>,
-    model: Option<&'static ModelSchema>,
+    select: &SelectQuery,
+    child: ChildCount,
 ) -> Result<CompiledStatement, SqlError> {
     let mut b = Sql::new(d);
-    if let Some(m) = model {
-        b.scope_stack.push(Scope::plain(m));
+    if select.compound.is_empty() {
+        b.child_count = Some(child);
+        write_select(&mut b, select)?;
+        return Ok(b.finish());
     }
-    b.with_qualifier(qualify_with.map(Qualifier::Base), |b| {
-        write_where_with_search(b, where_clause, search, model)?;
-        write_order_limit_offset(b, order_by, limit, offset)
-    })?;
+    // A set operation counts over its merged rows, or only the head would
+    // carry the column.
+    const PARENT: &str = "__rustango_parent";
+    let merged = SelectQuery {
+        compound_order_by: Vec::new(),
+        compound_limit: None,
+        compound_offset: None,
+        lock_mode: None,
+        ..select.clone()
+    };
+    b.sql.push_str("SELECT ");
+    b.write_ident(PARENT);
+    b.sql.push_str(".*");
+    write_child_count(&mut b, PARENT, child);
+    b.sql.push_str(" FROM (");
+    write_select(&mut b, &merged)?;
+    b.sql.push_str(") AS ");
+    b.write_ident(PARENT);
+    write_order_limit_offset(
+        &mut b,
+        &select.compound_order_by,
+        select.compound_limit,
+        select.compound_offset,
+    )?;
     Ok(b.finish())
+}
+
+/// The children a SELECT counts per row: `child_table.fk_column = parent.parent_pk`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ChildCount {
+    pub child_table: &'static str,
+    pub fk_column: &'static str,
+    pub parent_pk: &'static str,
+}
+
+/// `, (SELECT COUNT(*) FROM child AS c WHERE c.fk = parent.pk) AS
+/// __annotated_count`. The alias keeps a self-referencing child apart.
+fn write_child_count(b: &mut Sql<'_>, parent: &str, child: ChildCount) {
+    const CHILD: &str = "__rustango_child";
+    b.sql.push_str(", (SELECT COUNT(*) FROM ");
+    b.write_ident(child.child_table);
+    b.sql.push_str(" AS ");
+    b.write_ident(CHILD);
+    b.sql.push_str(" WHERE ");
+    b.write_ident(CHILD);
+    b.sql.push('.');
+    b.write_ident(child.fk_column);
+    b.sql.push_str(" = ");
+    b.write_ident(parent);
+    b.sql.push('.');
+    b.write_ident(child.parent_pk);
+    b.sql.push_str(") AS ");
+    b.write_ident("__annotated_count");
 }
 
 /// Granularity of a `.dates()` / `.datetimes()` bucket.

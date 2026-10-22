@@ -823,7 +823,7 @@ pub trait Dialect: Send + Sync {
     }
 
     /// Top-level JSON key existence: `<col> ? <p>` (Postgres) /
-    /// `JSON_CONTAINS_PATH(<col>, 'one', CONCAT('$.', <p>))` (MySQL).
+    /// `JSON_CONTAINS_PATH(<col>, 'one', CONCAT('$.', JSON_QUOTE(<p>)))` (MySQL).
     fn write_json_has_key(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {
         sql.push_str(qualified_col);
         sql.push_str(" ? ");

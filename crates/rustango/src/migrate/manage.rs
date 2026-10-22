@@ -3759,6 +3759,10 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
     for entry in selected {
         let schema = entry.schema;
         let dotted_name = dotted_model_name(entry);
+        // Unmanaged tables such as TOTP are made on first use: none yet, no rows.
+        if !schema.managed && !runner::try_table_resolves(pool, schema.table).await? {
+            continue;
+        }
 
         // These decode as `null`, so a reload would wipe them (#1911).
         if let Some(f) = schema.scalar_fields().find(|f| !dumpable(f.ty)) {
@@ -4321,11 +4325,11 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         let mut values: Vec<crate::core::SqlValue> = Vec::new();
         let mut row_err: Option<String> = None;
         for f in schema.scalar_fields() {
-            let raw = fields_obj
-                .get(f.name)
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-            match json_to_sql_value(&raw, f) {
+            // An absent key takes the column default, not NULL.
+            let Some(raw) = fields_obj.get(f.name) else {
+                continue;
+            };
+            match json_to_sql_value(raw, f) {
                 Ok(v) => {
                     columns.push(f.column);
                     values.push(v);

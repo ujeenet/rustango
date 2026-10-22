@@ -170,6 +170,30 @@ On POST, PUT, PATCH and QUERY its `max_bytes` is now the only body cap; axum's 2
 
 With no CSRF cookie in the jar it GETs the login path before posting. A test that counted requests or wanted the 403 sees one more request and the real login result.
 
+### `loaddata` omits missing fixture keys
+
+A key absent from a fixture entry now takes the column default instead of NULL. Write `"field": null` to store NULL.
+
+### MySQL JSON key checks are literal
+
+`has_key("a.b")` now looks for the key `a.b`, as on PostgreSQL, not for `b` under `a`; `*` no longer matches any key.
+
+### MySQL / SQLite JSON paths are quoted
+
+`json_path` emits `'$."a"."b"'` instead of `'$.a.b'`. Rows are the same; only tests that match the SQL text need updating.
+
+### `dumpdata` leaves out missing unmanaged tables
+
+An unmanaged model whose table does not exist yet is skipped instead of failing the dump, even when named with `--model`.
+
+### `auto_now` fields change in memory on save
+
+After `save` / `save_pool` / `save_on` / `save_tx` the `auto_now` field holds the stored timestamp, not the value it had before. `upsert` / `upsert_on` now do the same, and no longer write a hand-set `auto_now` value.
+
+### `inspectdb` output changes
+
+On MySQL a plain `tinyint` is now `i16` (only `tinyint(1)` is `bool`) and `int unsigned` is `i64`. A column that is not a lower-case identifier becomes a lower-case field with `column = ".."`. Re-run it rather than diffing old output. A repeated field name gets a `_2` suffix, and a `model` / `auto` table a `_`.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more

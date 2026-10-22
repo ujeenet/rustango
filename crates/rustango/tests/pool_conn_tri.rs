@@ -31,6 +31,7 @@ pub struct Book {
 async fn seeded(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, "pc_book").await;
+    drop_table(pool, "pc_review").await;
     fresh_table::<Author>(pool).await;
     for (id, name) in [(1, "Ada"), (2, "Bob")] {
         Author {
@@ -345,6 +346,68 @@ async fn former_pg_only_on_methods_run_on_a_held_conn(pool: &Pool) {
     assert_eq!(names, ["Ada", "Cy"]);
 }
 
+/// A child whose primary key is not `id`.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "pc_review")]
+pub struct Review {
+    #[rustango(primary_key)]
+    pub review_no: i64,
+    pub author: ForeignKey<Author>,
+}
+
+/// A filtered, limited parent queryset counts children whose pk is not `id`.
+async fn annotate_count_children_honours_where_and_child_pk(pool: &Pool) {
+    use rustango::sql::annotate_count_children_on;
+    use rustango::testkit::matrix::fresh_table;
+    fresh_table::<Review>(pool).await;
+    for (review_no, author) in [(10, 2_i64), (11, 2), (12, 1)] {
+        Review {
+            review_no,
+            author: ForeignKey::unloaded(author),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed review");
+    }
+    let qs = by_id().filter("name", "Bob");
+    let rows = annotate_count_children_on::<Author, _>(qs, "pc_review", "author", pool)
+        .await
+        .expect("filtered parent");
+    let rows: Vec<(i64, i64)> = rows.into_iter().map(|(a, n)| (a.id, n)).collect();
+    assert_eq!(rows, [(2, 2)]);
+
+    let rows = annotate_count_children_on::<Author, _>(by_id().limit(1), "pc_book", "author", pool)
+        .await
+        .expect("limited parent");
+    let rows: Vec<(i64, i64)> = rows.into_iter().map(|(a, n)| (a.id, n)).collect();
+    assert_eq!(rows, [(1, 2)]);
+}
+
+/// A UNION or `distinct_on` parent still gets its count column.
+async fn annotate_count_children_on_union_and_distinct_on(pool: &Pool) {
+    use rustango::sql::annotate_count_children_on;
+    let counts = |rows: Vec<(Author, i64)>| {
+        let mut v: Vec<(i64, i64)> = rows.into_iter().map(|(a, n)| (a.id, n)).collect();
+        v.sort_unstable();
+        v
+    };
+    let union = Author::objects()
+        .filter("id", 1_i64)
+        .union(Author::objects().filter("id", 2_i64));
+    let rows = annotate_count_children_on::<Author, _>(union, "pc_book", "author", pool)
+        .await
+        .expect("union parent");
+    assert_eq!(counts(rows), [(1, 2), (2, 1)]);
+
+    let distinct = Author::objects()
+        .distinct_on(&["name"])
+        .order_by(&[("name", false)]);
+    let rows = annotate_count_children_on::<Author, _>(distinct, "pc_book", "author", pool)
+        .await
+        .expect("distinct_on parent");
+    assert_eq!(counts(rows), [(1, 2), (2, 1)]);
+}
+
 /// A one-connection pool on the same database, so a release is visible.
 async fn one_conn(pool: &Pool) -> Pool {
     match pool {
@@ -454,5 +517,7 @@ tri_dialect_test!(
         on_tx_sees_its_writes,
         former_pg_only_on_methods_run_on_a_held_conn,
         close_on_drop_keeps_session_state_out_of_the_pool,
+        annotate_count_children_honours_where_and_child_pk,
+        annotate_count_children_on_union_and_distinct_on,
     ]
 );

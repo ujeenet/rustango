@@ -6,7 +6,8 @@
 //! one with composite columns) and asserts that the emitted Rust
 //! source contains the expected `#[derive(Model)]` shape.
 
-use rustango::sql::Pool;
+use rustango::sql::{Auto, Pool};
+use rustango::Model;
 
 async fn make_pool() -> Pool {
     let tmp = tempfile::NamedTempFile::new().expect("tempfile");
@@ -119,4 +120,99 @@ async fn inspectdb_filters_by_table_flag_on_sqlite() {
         !out.contains("pub struct Posts"),
         "did NOT expect Posts when filtered to authors, got:\n{out}"
     );
+}
+
+/// Items and their text, so the test can hold inspectdb's output to a
+/// model that compiles.
+macro_rules! compiled_with_text {
+    ($text:ident; $($item:tt)*) => {
+        $($item)*
+        const $text: &str = stringify!($($item)*);
+    };
+}
+
+// What inspectdb must emit for `Order_Items` below.
+compiled_with_text! { ORDER_ITEMS;
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "Order_Items")]
+    pub struct OrderItems {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(column = "OrderDate", default = "'a::b'")]
+        pub orderdate: String,
+        #[rustango(default = "'it''s \"x\" \\ y'")]
+        pub r#type: String,
+        #[rustango(column = "self", default = "0")]
+        pub self_: i64,
+    }
+}
+
+/// Mixed-case and keyword names and quoted defaults emit a model that
+/// compiles.
+#[tokio::test]
+async fn inspectdb_emits_compiling_models_for_awkward_names_on_sqlite() {
+    let schema = <OrderItems as rustango::core::Model>::SCHEMA;
+    assert_eq!(schema.field("orderdate").map(|f| f.column), Some("OrderDate"));
+    let pool = make_pool().await;
+    sqlx::query(
+        r#"CREATE TABLE "Order_Items" (
+            id INTEGER PRIMARY KEY,
+            "OrderDate" TEXT NOT NULL DEFAULT 'a::b',
+            "type" TEXT NOT NULL DEFAULT 'it''s "x" \ y',
+            "self" INTEGER NOT NULL DEFAULT 0
+         )"#,
+    )
+    .execute(pool.as_sqlite().expect("sqlite"))
+    .await
+    .unwrap();
+    let mut buf: Vec<u8> = Vec::new();
+    rustango::migrate::manage::run_with_writer(
+        &pool,
+        std::path::Path::new("./migrations"),
+        vec!["inspectdb".into(), "--table".into(), "Order_Items".into()],
+        &mut buf,
+    )
+    .await
+    .expect("inspectdb_cmd");
+    let out = String::from_utf8(buf).expect("utf8 output");
+    // At a line start: the header comment names `#[derive(Model)]` too.
+    let start = out.find("\n#[derive(Model").expect("a model") + 1;
+    let end = start + out[start..].find("\n}").expect("struct end") + 2;
+    let squash = |s: &str| s.split_whitespace().collect::<String>();
+    assert_eq!(squash(&out[start..end]), squash(ORDER_ITEMS), "got:\n{out}");
+}
+
+// What inspectdb must emit for the `model` table below.
+compiled_with_text! { MODEL_TABLE;
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "model")]
+    pub struct Model_ {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        pub name: String,
+    }
+}
+
+/// A `model` table does not shadow the derive it is emitted with.
+#[tokio::test]
+async fn inspectdb_renames_a_model_table_on_sqlite() {
+    let pool = make_pool().await;
+    sqlx::query(r#"CREATE TABLE "model" (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"#)
+        .execute(pool.as_sqlite().expect("sqlite"))
+        .await
+        .unwrap();
+    let mut buf: Vec<u8> = Vec::new();
+    rustango::migrate::manage::run_with_writer(
+        &pool,
+        std::path::Path::new("./migrations"),
+        vec!["inspectdb".into(), "--table".into(), "model".into()],
+        &mut buf,
+    )
+    .await
+    .expect("inspectdb_cmd");
+    let out = String::from_utf8(buf).expect("utf8 output");
+    let start = out.find("\n#[derive(Model").expect("a model") + 1;
+    let end = start + out[start..].find("\n}").expect("struct end") + 2;
+    let squash = |s: &str| s.split_whitespace().collect::<String>();
+    assert_eq!(squash(&out[start..end]), squash(MODEL_TABLE), "got:\n{out}");
 }
