@@ -156,7 +156,9 @@ pub fn env_example(name: &str, backend: Backend) -> String {
         "# Copy to .env and edit for your environment; src/main.rs loads it at startup.
 {host_note}
 DATABASE_URL={url}
-RUSTANGO_BIND=0.0.0.0:8080
+# Bind address. Unset, the tier's `[server] bind` applies (127.0.0.1 in
+# dev); docker-compose.yml sets 0.0.0.0 for the container only.
+# RUSTANGO_BIND=127.0.0.1:8080
 
 # Apex domain the operator console is served on.
 RUSTANGO_APEX_DOMAIN=localhost
@@ -343,9 +345,12 @@ pub fn docker_compose(name: &str, backend: Backend) -> String {
     environment:
       CARGO_TARGET_DIR: /app/target
       CARGO_INCREMENTAL: "1"
+      # All interfaces inside the container, so the port mapping reaches it.
+      RUSTANGO_BIND: 0.0.0.0:8080
     command: bash -c "cargo watch -x run"
     ports:
-      - "8080:8080"
+      # Loopback only: a dev server is not for the network.
+      - "127.0.0.1:8080:8080"
 
 volumes:
 {db_volume}  cargo-target:
@@ -498,6 +503,7 @@ pub fn readme(name: &str, template: Template, backend: Backend) -> String {
 ```sh
 cp .env.example .env                 # then change `{svc}` -> `localhost` in DATABASE_URL
 docker compose up -d {svc}        # only the DB
+cargo run -- makemigrations          # generate the framework's (and your) tables
 cargo run -- migrate                 # apply pending migrations
 cargo run                            # boot the HTTP server
 cargo run -- --help                  # full verb list (makemigrations, startapp, etc.)
@@ -512,6 +518,7 @@ SQLite is a file next to the project, so nothing else has to be running.
 
 ```sh
 cp .env.example .env
+cargo run -- makemigrations          # generate the framework's (and your) tables
 cargo run -- migrate                 # creates the database file and applies migrations
 cargo run                            # boot the HTTP server
 cargo run -- --help                  # full verb list (makemigrations, startapp, etc.)
@@ -532,6 +539,7 @@ backend `{backend_label}`.
 ```sh
 cp .env.example .env
 {up_line}
+docker compose run --rm rust cargo run -- makemigrations
 docker compose run --rm rust cargo run -- migrate
 # server lives at http://localhost:8080 — edits to src/ trigger rebuild
 ```
@@ -592,6 +600,22 @@ pub fn main_rs(template: Template, name: &str) -> String {
     };
     body.replace("{crate_name}", &crate_name(name))
 }
+
+/// [`main_rs`] plus the `Cli` calls the chosen `--features` need.
+pub fn main_rs_for(template: Template, name: &str, features: &[String]) -> String {
+    let main = main_rs(template, name);
+    if !features.iter().any(|f| f == "csrf") {
+        return main;
+    }
+    main.replacen(
+        API_LINE,
+        &format!("{API_LINE}        .with_csrf() // `--features csrf`: form POSTs must carry `_csrf`\n"),
+        1,
+    )
+}
+
+/// The `Cli` line every `main.rs` template has; optional calls go after it.
+const API_LINE: &str = "        .api(urls::api())\n";
 
 /// The identifier Rust uses for a package: hyphens become underscores.
 pub fn crate_name(package_name: &str) -> String {
@@ -663,6 +687,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rustango::manage::Cli::new()
         .api(urls::api())
         .with_welcome() // friendly `/` on first run; drop once you have a root handler
+        .with_health() // /health + /ready; the Dockerfile HEALTHCHECK probes /health
+        // Behind a load balancer, name its addresses so per-IP limits see clients:
+        // .with_trusted_proxies([\"10.0.0.0/8\"])?
         // NOTE: no .with_settings_from_env() here. It is gated on the
         // config feature, and this template is deliberately bare: ORM +
         // axum + the manage dispatcher. Adding config alone does not
@@ -704,6 +731,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nest_with(\"/admin\", urls::admin_router)
         .with_welcome() // friendly `/` on first run; drop once you have a root handler
         .with_health() // /health + /ready endpoints for load balancers
+        // Behind a load balancer, name its addresses so per-IP limits see clients:
+        // .with_trusted_proxies([\"10.0.0.0/8\"])?
         // Loads config/*.toml for the RUSTANGO_ENV tier (default `dev`),
         // then RUSTANGO__* env overrides. Without it the files the
         // scaffolder writes are inert.
@@ -734,6 +763,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .api(urls::api())
         .with_welcome() // friendly `/` on first run; drop once you have a root handler
         .with_health() // /health + /ready hit the registry pool
+        // Behind a load balancer, name its addresses so per-IP limits see clients:
+        // .with_trusted_proxies(["10.0.0.0/8"])?
         // Loads config/*.toml for the RUSTANGO_ENV tier (default `dev`),
         // then RUSTANGO__* env overrides. Without it the files the
         // scaffolder writes are inert, and the login, admin and operator
@@ -849,6 +880,7 @@ pub fn api() -> Router<()> {
 use axum::routing::get;
 use axum::Router;
 use rustango::admin;
+use rustango::config::Settings;
 use rustango::session::{load_session_secret_for_tier, tier_from_env};
 use rustango::sql::Pool;
 
@@ -870,7 +902,11 @@ pub fn admin_router(pool: Pool) -> Router {
         &tier_from_env(),
         std::path::Path::new(\"./var/.rustango_session.key\"),
     );
-    admin::Builder::new(pool)
+    // `[admin]` and `[brand]` from config/*.toml; the calls below still win.
+    // Fail closed: defaults would drop `[admin]` table restrictions.
+    let settings = Settings::load_from_env()
+        .expect(\"config/*.toml must load; run from the project root\");
+    admin::Builder::from_settings(pool, &settings)
         .admin_prefix(\"/admin\") // must match the `.nest_with(\"/admin\", …)` in main.rs
         .with_session_auth(secret)
         .build()

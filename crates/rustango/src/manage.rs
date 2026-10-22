@@ -70,6 +70,26 @@ async fn run_shutdown_hook(hook: Option<ShutdownFn>) {
     }
 }
 
+/// Which CSRF layer `runserver` mounts.
+#[cfg(feature = "csrf")]
+#[derive(Clone)]
+enum CsrfMount {
+    /// [`Cli::with_csrf`]: the cookie's `Secure` follows the session policy.
+    SessionPolicy,
+    /// [`Cli::with_csrf_config`]: the config decides.
+    Explicit(crate::forms::csrf::CsrfConfig),
+}
+
+#[cfg(feature = "csrf")]
+impl CsrfMount {
+    fn layer(self) -> crate::forms::csrf::CsrfLayer {
+        match self {
+            Self::SessionPolicy => crate::forms::csrf::layer(),
+            Self::Explicit(cfg) => crate::forms::csrf::with_config(cfg),
+        }
+    }
+}
+
 /// One-builder dispatcher. Hand it your API router (and optionally a
 /// seed hook), call [`Cli::run`], and you're done.
 #[must_use = "Cli does nothing until .run() is awaited"]
@@ -135,7 +155,7 @@ pub struct Cli {
     /// at the deserializer layer. Form-driven apps opt in; the
     /// `template_views` routers carry their own layer.
     #[cfg(feature = "csrf")]
-    csrf: Option<crate::forms::csrf::CsrfConfig>,
+    csrf: Option<CsrfMount>,
     /// Set by [`Cli::with_trusted_proxies`]. Mounted outermost, so the
     /// access log and every per-IP limit see the client.
     real_ip: Option<crate::real_ip::RealIpLayer>,
@@ -460,12 +480,13 @@ impl Cli {
     ///     .run().await
     /// ```
     ///
-    /// To override the cookie name / `Secure` attribute, use
+    /// The cookie's `Secure` follows `[security] secure_cookies`, like
+    /// the session cookie. To set it or the name yourself, use
     /// [`Cli::with_csrf_config`] instead.
     #[cfg(feature = "csrf")]
     #[must_use]
     pub fn with_csrf(mut self) -> Self {
-        self.csrf = Some(crate::forms::csrf::CsrfConfig::default());
+        self.csrf = Some(CsrfMount::SessionPolicy);
         self
     }
 
@@ -486,7 +507,7 @@ impl Cli {
     #[cfg(feature = "csrf")]
     #[must_use]
     pub fn with_csrf_config(mut self, cfg: crate::forms::csrf::CsrfConfig) -> Self {
-        self.csrf = Some(cfg);
+        self.csrf = Some(CsrfMount::Explicit(cfg));
         self
     }
 
@@ -1083,7 +1104,7 @@ impl Cli {
         let api = mount_static_dirs(api, &self.static_dirs);
         #[cfg(feature = "csrf")]
         let api = match self.csrf.take() {
-            Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
+            Some(mount) => api.layer(mount.layer()),
             None => api,
         };
         // Inside CORS and the security headers, so a panic's 500 carries them (#1541).
@@ -1363,7 +1384,7 @@ impl Cli {
         };
         #[cfg(feature = "csrf")]
         let api = match self.csrf.clone() {
-            Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
+            Some(mount) => api.layer(mount.layer()),
             None => api,
         };
         // Inside CORS; the builder catches the admin and console routes (#1541).
@@ -1433,7 +1454,7 @@ impl Cli {
         };
         #[cfg(feature = "csrf")]
         let api = match self.csrf.clone() {
-            Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
+            Some(mount) => api.layer(mount.layer()),
             None => api,
         };
         // Inside CORS; the builder catches the admin and console routes (#1541).
@@ -2508,21 +2529,54 @@ mod tests {
         assert!(cli_with.install_logging);
     }
 
-    /// `Cli::with_csrf()` flips the flag from `None` to `Some(default)`.
-    /// `with_csrf_config(...)` lets callers override.
+    /// `with_csrf()` follows the session cookie policy, so plain-HTTP dev
+    /// with `secure_cookies = false` gets a cookie the browser sends back.
     #[cfg(feature = "csrf")]
-    #[test]
-    fn with_csrf_flips_flag() {
-        let cli_default = Cli::new();
-        assert!(cli_default.csrf.is_none(), "default off");
+    #[tokio::test]
+    async fn with_csrf_cookie_follows_the_session_policy() {
+        assert!(Cli::new().csrf.is_none(), "default off");
+        // The policy is a write-once global; assert against whatever it holds.
+        let _ = crate::session::set_secure_cookies(false);
+        let mount = Cli::new().with_csrf().csrf.expect("set");
+        assert!(matches!(mount, CsrfMount::SessionPolicy));
+        assert!(mount.layer().follows_session_policy());
+        let cookie = csrf_cookie(CsrfMount::SessionPolicy).await;
+        assert_eq!(
+            cookie.contains("Secure"),
+            crate::session::secure_cookies(),
+            "{cookie}"
+        );
+    }
 
-        let cli_with = Cli::new().with_csrf();
-        let csrf = cli_with.csrf.expect("with_csrf should set csrf");
-        assert_eq!(csrf.cookie_name, crate::forms::csrf::CSRF_COOKIE);
-        // v0.43 — default flipped to Secure=true so production isn't
-        // foot-gunned by forgetting to enable it. Dev over HTTP opts
-        // out via `.allow_insecure_for_dev()`.
-        assert!(csrf.secure, "default Secure=true since v0.43");
+    /// An explicit config sets `Secure` itself, on and off.
+    #[cfg(feature = "csrf")]
+    #[tokio::test]
+    async fn with_csrf_config_cookie_keeps_its_secure_flag() {
+        for secure in [true, false] {
+            let cfg = crate::forms::csrf::CsrfConfig {
+                secure,
+                ..Default::default()
+            };
+            assert!(!CsrfMount::Explicit(cfg.clone()).layer().follows_session_policy());
+            let cookie = csrf_cookie(CsrfMount::Explicit(cfg)).await;
+            assert_eq!(cookie.contains("Secure"), secure, "{cookie}");
+        }
+    }
+
+    #[cfg(feature = "csrf")]
+    async fn csrf_cookie(mount: CsrfMount) -> String {
+        use tower::ServiceExt as _;
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(|| async { "ok" }))
+            .layer(mount.layer());
+        let req = axum::http::Request::get("/")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        resp.headers()[axum::http::header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .to_owned()
     }
 
     #[cfg(feature = "csrf")]
@@ -2546,7 +2600,9 @@ mod tests {
             exempt_prefixes: Vec::new(),
             ..Default::default()
         });
-        let csrf = cli.csrf.expect("with_csrf_config should set csrf");
+        let Some(CsrfMount::Explicit(csrf)) = cli.csrf else {
+            panic!("with_csrf_config should store its config");
+        };
         assert_eq!(csrf.cookie_name, "custom_csrf");
         assert_eq!(csrf.header_name, "X-Custom-CSRF");
         assert!(csrf.secure);

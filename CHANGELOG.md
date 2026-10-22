@@ -4,6 +4,38 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — scaffolded projects honor settings and stay off the network in dev
+
+The fullstack admin is built with `admin::Builder::from_settings`, so `[admin]` and `[brand]` apply (the prefix stays `/admin`, matching `main.rs`); a config that fails to load stops it rather than dropping `[admin]` restrictions. `.env.example` no longer sets `RUSTANGO_BIND=0.0.0.0:8080`, which beat the dev tier's `127.0.0.1`; compose sets it for the container and publishes 8080 on loopback. `--features csrf` adds `.with_csrf()`. Every `main.rs` shows where `with_trusted_proxies` goes, and the README runs `makemigrations` before `migrate`.
+
+### Fixed — `make:*` generators write code that compiles
+
+`make:viewset` / `make:serializer` import `--model` from where it is declared (`src/blog/models.rs` after `startapp blog`), or take a path like `blog::models::Post`; the viewset's mount hint uses `Cli::nest_with`, which supplies the pool. `make:worker` loads `.env`. A verb whose output needs a rustango feature the project lacks (`make:test` / `make:viewset` on `--template api`) refuses and names the feature; `make:viewset --tenant` needs only `tenancy`. `getting_started_blog`'s prod tier no longer has pool keys at the TOML root.
+
+### Fixed — `--template api` image passes its healthcheck
+
+The api `main.rs` now calls `.with_health()`, so the Dockerfile's `/health` probe gets 200 instead of 404 and the container turns healthy.
+
+### Fixed — CSRF reads a form body up to the body limit
+
+Under a `BodyLimitLayer` (or `[server] max_body_bytes`) the CSRF layer buffers form-encoded bodies up to that cap, not a fixed 2 MiB, so a large form no longer gets 403.
+
+### Fixed — `Cli::with_csrf` follows `[security] secure_cookies`
+
+Its cookie was always `Secure`, so the browser never sent it back over plain-HTTP dev and every form POST got 403. It now uses the session cookie policy, like `csrf::layer()`.
+
+### Fixed — `test_settings::with_overridden` reaches the framework
+
+Inside the scope, `Settings::load` and `Settings::load_from_env` return the overlay, so framework code that loads settings itself sees it. Before, only `test_settings::current()` did, and nothing called that.
+
+### Fixed — unknown settings keys warn
+
+A key nothing reads (a typo, a key in the wrong section, a mistyped `RUSTANGO__…` env var) now prints a `config: unknown key` line on stderr at load. Set `RUSTANGO_CONFIG_STRICT=1` to make it a load error.
+
+### Fixed — `embed_migrations!` warns on a missing directory
+
+A wrong path used to embed nothing silently; it now emits a deprecation warning naming the path. The docs and examples add a `build.rs` with `rerun-if-changed=migrations`, so a new migration file triggers a rebuild.
+
 ### Security — `ListView` bulk delete withholds driver errors and caps the selection
 
 A custom action whose selection check or connection fails logs the database error and answers a generic body, so it no longer shows table and constraint names. More than 1000 selected rows is a 400 before any SQL.

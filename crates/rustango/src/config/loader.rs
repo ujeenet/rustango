@@ -65,7 +65,7 @@ impl ConfigError {
                 Some((line, col)) => format!("{path}, line {line}, column {col}"),
                 None => path.clone(),
             },
-            Self::Shape(_) => "the merged settings (a value has the wrong type)".into(),
+            Self::Shape(_) => "the merged settings (a value or key does not fit)".into(),
             Self::EnvOverride { var, .. } => format!("env var `{var}`"),
         }
     }
@@ -138,6 +138,37 @@ fn load_with_root_and_env<I>(root: &Path, env: &str, env_vars: I) -> Result<Sett
 where
     I: IntoIterator<Item = (String, String)>,
 {
+    let env_vars: Vec<(String, String)> = env_vars.into_iter().collect();
+    let strict = env_vars
+        .iter()
+        .any(|(k, v)| k == STRICT_VAR && is_truthy(v));
+    let (settings, ignored) = load_report(root, env, env_vars)?;
+    if !ignored.is_empty() {
+        if strict {
+            return Err(ConfigError::Shape(<toml::de::Error as serde::de::Error>::custom(
+                format!("unknown keys ({STRICT_VAR} is set): {}", ignored.join(", ")),
+            )));
+        }
+        for key in &ignored {
+            eprintln!("config: unknown key `{key}` is ignored; check its spelling and section");
+        }
+    }
+    Ok(settings)
+}
+
+/// Turns unknown keys from a warning into a load error.
+const STRICT_VAR: &str = "RUSTANGO_CONFIG_STRICT";
+
+fn is_truthy(v: &str) -> bool {
+    matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+}
+
+/// The merged settings plus every key path nothing reads, sorted.
+fn load_report(
+    root: &Path,
+    env: &str,
+    env_vars: Vec<(String, String)>,
+) -> Result<(Settings, Vec<String>), ConfigError> {
     let default_path = root.join("default.toml");
     let tiered_path = root.join(format!("{env}_settings.toml"));
     let legacy_path = root.join(format!("{env}.toml"));
@@ -167,8 +198,15 @@ where
     }
     apply_env_overrides(&mut tree, env_vars)?;
 
-    let settings: Settings = serde_path_to_error::deserialize(tree).map_err(shape_error)?;
-    Ok(settings)
+    let mut ignored: Vec<String> = Vec::new();
+    let settings: Settings = serde_path_to_error::deserialize(serde_ignored::Deserializer::new(
+        tree,
+        &mut |path: serde_ignored::Path<'_>| ignored.push(path.to_string()),
+    ))
+    .map_err(shape_error)?;
+    ignored.sort();
+    ignored.dedup();
+    Ok((settings, ignored))
 }
 
 /// A shape error naming the key and the expected type, never the value:
@@ -640,5 +678,67 @@ retention_days = 90
             );
             let _ = std::fs::remove_dir_all(&root);
         }
+    }
+
+    const MISPLACED: &str = "top = 1\n[security]\nallowed_host = \"x\"\nheaders_preset = \"strict\"\n\
+                             [auth]\naccess_ttl_secs = 5\n[auth.jwt]\naccess_ttl_secs = 900\n";
+
+    #[test]
+    fn unknown_keys_are_reported() {
+        let root = fresh_root("unknown_keys");
+        write(&root, "default.toml", MISPLACED);
+        let env = vec![("RUSTANGO__MAIL__SMTP_PASWORD".to_owned(), "x".to_owned())];
+        let (cfg, ignored) = load_report(&root, "any", env).unwrap();
+        assert_eq!(cfg.auth.jwt.access_ttl_secs, Some(900));
+        assert_eq!(
+            ignored,
+            [
+                "auth.access_ttl_secs",
+                "mail.smtp_pasword",
+                "security.allowed_host",
+                "top"
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn strict_mode_refuses_unknown_keys() {
+        let root = fresh_root("unknown_keys_strict");
+        write(&root, "default.toml", MISPLACED);
+        let env = vec![("RUSTANGO_CONFIG_STRICT".to_owned(), "1".to_owned())];
+        let err = load_with_root_and_env(&root, "any", env).unwrap_err();
+        assert!(matches!(err, ConfigError::Shape(_)), "{err:?}");
+        assert!(err.to_string().contains("security.allowed_host"), "{err}");
+        // Without strict mode the same file loads.
+        assert!(load_with_root_and_env(&root, "any", Vec::new()).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every tier of every shipped example loads under strict mode.
+    #[test]
+    fn example_configs_load_in_strict_mode() {
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let strict = || vec![(STRICT_VAR.to_owned(), "1".to_owned())];
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&examples).expect("read examples/") {
+            let config = entry.expect("examples/ entry").path().join("config");
+            if !config.join("default.toml").is_file() {
+                continue;
+            }
+            for file in std::fs::read_dir(&config).expect("read config/") {
+                let name = file.expect("config/ entry").file_name();
+                let name = name.to_str().unwrap();
+                let Some(stem) = name.strip_suffix(".toml") else {
+                    continue;
+                };
+                let env = stem.strip_suffix("_settings").unwrap_or(stem);
+                if let Err(e) = load_with_root_and_env(&config, env, strict()) {
+                    panic!("{}/{name}: {e}", config.display());
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 10, "checked only {checked} config files");
     }
 }

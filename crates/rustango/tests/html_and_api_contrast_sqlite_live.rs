@@ -9,7 +9,8 @@
 //!
 //! Run: `cargo test -p rustango --features sqlite --test html_and_api_contrast_sqlite_live`
 
-#![cfg(all(feature = "template_views", feature = "sqlite"))]
+// The ViewSet half needs `admin`.
+#![cfg(all(feature = "template_views", feature = "admin", feature = "sqlite"))]
 
 #[path = "support/doc_snippet.rs"]
 mod doc_snippet;
