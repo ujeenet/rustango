@@ -583,6 +583,9 @@ pub(crate) async fn converge_preview(
         match p.batch {
             Ok(b) => {
                 out.extend(ensure::as_run(&b.immediate, dialect).map(PreviewLine::Sql));
+                if let Some(Ok(r)) = &p.retry {
+                    out.extend(r.preview().map(PreviewLine::Note));
+                }
                 fks.extend(ensure::as_run(&b.deferred_fks, dialect).map(PreviewLine::Sql));
             }
             Err(e) => out.push(PreviewLine::Note(format!(

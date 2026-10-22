@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — SQLite `migrate --dry-run` shows the filled-table ADD COLUMN
+
+After an ADD COLUMN with a `now()` or UUID DEFAULT, it shows the fixed-default or backfill form `migrate` runs on a table with rows.
+
 ### Fixed — `migrate --dry-run` prints the converge SQL with its guards
 
 The converge step shows `IF NOT EXISTS` and the Postgres `DO` block, as it runs.

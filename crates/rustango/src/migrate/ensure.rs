@@ -259,22 +259,13 @@ pub(crate) async fn converge_groups(
     snapshot: &super::SchemaSnapshot,
     groups: &[Vec<super::SchemaChange>],
 ) -> Result<Vec<String>, sqlx::Error> {
-    use super::SchemaChange as SC;
     let schema = creation_schema(pool).await?;
-    let render = |changes: &[SC], snap: &super::SchemaSnapshot| {
-        super::diff::render_changes_split_in_schema(
-            changes,
-            snap,
-            pool.dialect(),
-            schema.as_deref(),
-        )
-    };
     let mut failed = Vec::new();
     let mut fks = Vec::new();
     for Planned {
         label,
-        group,
         batch,
+        retry,
     } in plan_groups(pool, snapshot, groups, schema.as_deref()).await?
     {
         let batch = match batch {
@@ -289,9 +280,7 @@ pub(crate) async fn converge_groups(
             continue;
         };
         // SQLite refuses a non-constant DEFAULT on a table with rows.
-        let retry = filled_table_retry(pool.dialect(), snapshot, group, |s| render(group, s))
-            .filter(|_| is_non_constant_default(&e));
-        match retry {
+        match retry.filter(|_| is_non_constant_default(&e)) {
             Some(Ok(r)) if run_statements(pool, &r.batch.immediate).await.is_ok() => {
                 tracing::warn!(target: "rustango::migrate", "{label}: {}", r.warning);
             }
@@ -307,10 +296,11 @@ pub(crate) async fn converge_groups(
 }
 
 /// One group [`converge_groups`] runs: its SQL, or why `migrate` refuses it.
-pub(crate) struct Planned<'g> {
+pub(crate) struct Planned {
     pub(crate) label: String,
-    group: &'g [super::SchemaChange],
     pub(crate) batch: Result<super::diff::RenderedBatch, String>,
+    /// What runs instead when SQLite refuses the batch's DEFAULT.
+    pub(crate) retry: Option<Result<FilledTableRetry, String>>,
 }
 
 /// How [`converge_groups`] renders `groups` into `schema`; reads only, so a
@@ -318,12 +308,12 @@ pub(crate) struct Planned<'g> {
 ///
 /// # Errors
 /// Only the row probe for a NOT NULL column.
-pub(crate) async fn plan_groups<'g>(
+pub(crate) async fn plan_groups(
     pool: &Pool,
     snapshot: &super::SchemaSnapshot,
-    groups: &'g [Vec<super::SchemaChange>],
+    groups: &[Vec<super::SchemaChange>],
     schema: Option<&str>,
-) -> Result<Vec<Planned<'g>>, sqlx::Error> {
+) -> Result<Vec<Planned>, sqlx::Error> {
     use super::SchemaChange as SC;
     let mut out = Vec::new();
     for group in groups {
@@ -349,8 +339,8 @@ pub(crate) async fn plan_groups<'g>(
                     let batch = Err("NOT NULL with no default, so rows have no value".to_owned());
                     out.push(Planned {
                         label,
-                        group,
                         batch,
+                        retry: None,
                     });
                     continue;
                 }
@@ -366,10 +356,14 @@ pub(crate) async fn plan_groups<'g>(
             Ok(b) if b.rebuild.is_some() => Err("needs a table rebuild".to_owned()),
             r => r,
         };
+        let retry = filled_table_retry(pool.dialect(), snapshot, group, |s| {
+            super::diff::render_changes_split_in_schema(group, s, pool.dialect(), schema)
+        })
+        .filter(|_| batch.is_ok() && !no_rows);
         out.push(Planned {
             label,
-            group,
             batch,
+            retry,
         });
     }
     Ok(out)
@@ -408,9 +402,21 @@ pub(super) fn is_non_constant_default(e: &sqlx::Error) -> bool {
 }
 
 /// A rendering of a SQLite AddColumn its non-constant DEFAULT refused.
-pub(super) struct FilledTableRetry {
+pub(crate) struct FilledTableRetry {
     pub(super) batch: super::diff::RenderedBatch,
     pub(super) warning: &'static str,
+}
+
+impl FilledTableRetry {
+    /// Comment lines for a `--dry-run`, which cannot know if the table has rows.
+    pub(super) fn preview(&self) -> impl Iterator<Item = String> + '_ {
+        std::iter::once(format!(
+            "if the table has rows SQLite refuses that DEFAULT, and `migrate` runs this \
+             instead ({}):",
+            self.warning
+        ))
+        .chain(self.batch.immediate.iter().map(|s| format!("  {s}")))
+    }
 }
 
 /// The AddColumn of `group` for a SQLite table with rows (#2017): `now()`

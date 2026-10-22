@@ -405,6 +405,23 @@ async fn dry_run_converge_shows_the_guarded_sql(backend: Backend) {
     .await;
 }
 
+/// On a SQLite table with rows the dry run shows the ADD COLUMN `migrate`
+/// falls back to, from the converge step and from a project step alike.
+async fn dry_run_shows_the_filled_table_retry(backend: Backend) {
+    for (tag, pending_step) in [("dryretry", false), ("dryretrystep", true)] {
+        audit_log_missing_occurred_at(backend, tag, pending_step, |out| {
+            let shown = out.contains("SQLite refuses") && out.contains("fixed DEFAULT");
+            #[cfg(feature = "sqlite")]
+            if matches!(backend, Backend::Sqlite) {
+                assert!(shown, "{tag}:\n{out}");
+                return;
+            }
+            assert!(!shown, "{tag}:\n{out}");
+        })
+        .await;
+    }
+}
+
 /// Finding 2 — system step N adds a column to a project-owned table and
 /// N+1 alters it; the alter must find the column.
 async fn alter_after_add_on_owned(backend: Backend) {
@@ -1944,6 +1961,7 @@ per_backend!(
     dry_run_defers_a_table_pending_migrations_change,
     dry_run_shows_the_not_null_refusal,
     dry_run_converge_shows_the_guarded_sql,
+    dry_run_shows_the_filled_table_retry,
     alter_after_add_on_owned,
     owned_table_dropped_later,
     not_null_column_on_empty_table,
