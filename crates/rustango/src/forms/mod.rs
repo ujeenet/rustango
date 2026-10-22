@@ -1899,6 +1899,11 @@ mod model_form_tests {
         let err = ModelFormFor::<Post>::from_json(&serde_json::json!({ "title": "t", "titel": 1 }))
             .expect_err("unknown key");
         assert!(!err.get("titel").is_empty(), "{err}");
+        // With a parse error too, both are reported.
+        let err = ModelFormFor::<Post>::from_json(&serde_json::json!({ "titel": 1 }))
+            .expect_err("unknown key and missing title");
+        assert!(!err.get("titel").is_empty(), "{err}");
+        assert!(!err.get("title").is_empty(), "{err}");
         // A server-assigned field is known, so it is ignored rather than refused.
         ModelFormFor::<Post>::from_json(&serde_json::json!({ "id": 9, "title": "t" }))
             .expect("known key");

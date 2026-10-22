@@ -161,6 +161,7 @@ pub const fn assert_number_bounded<T: NumberBounded + ?Sized>() {}
 ///     #[form(min = 1)]
 ///     s: String,
 /// }
+/// # fn main() {}
 /// ```
 /// ```compile_fail
 /// #[derive(rustango::Form)]
@@ -168,6 +169,7 @@ pub const fn assert_number_bounded<T: NumberBounded + ?Sized>() {}
 ///     #[form(max_length = 3)]
 ///     n: i64,
 /// }
+/// # fn main() {}
 /// ```
 #[cfg(all(doctest, feature = "serializer"))]
 pub struct BoundsMatchTheFieldType;
