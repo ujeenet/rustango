@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `make:*` verbs check features
+
+`make:viewset` and `make:test` need `admin`, `make:serializer` needs `serializer`, `make:form` `forms`, `make:job` / `make:worker` `jobs`, `make:scheduled` `scheduler`, `make:notification` `notifications`. Without it the verb now errors instead of writing a file that does not compile.
+
 ### `Cli::with_csrf` cookie follows `secure_cookies`
 
 With `[security] secure_cookies = false`, or on a non-prod tier with it unset, the CSRF cookie is no longer `Secure`. Use `with_csrf_config` to force it.

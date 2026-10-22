@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `make:*` generators write code that compiles
+
+`make:viewset` / `make:serializer` import `--model` from where it is declared (`src/blog/models.rs` after `startapp blog`), or take a path like `blog::models::Post`; the viewset's mount hint uses `Cli::nest_with`, which supplies the pool. `make:worker` loads `.env`. A verb whose output needs a rustango feature the project lacks (`make:test` / `make:viewset` on `--template api`) refuses and names the feature.
+
 ### Fixed — `--template api` image passes its healthcheck
 
 The api `main.rs` now calls `.with_health()`, so the Dockerfile's `/health` probe gets 200 instead of 404 and the container turns healthy.
