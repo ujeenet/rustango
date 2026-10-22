@@ -154,6 +154,10 @@ untouched.
 
 All class-based views now add the registered context processors' keys, and every view (not only `ListView`) merges `ExtraContext`. A template that relied on such a key being undefined sees a value now.
 
+### Media refuses dead collections
+
+`move_to_collection`, `save_bytes` and `begin_upload` now return `MediaError::Other("collection N is missing or deleted")` where they used to succeed.
+
 ### Translation lookup order
 
 A base-language override (`pt`) no longer hides a region file entry (`pt-BR`), and a flat entry in an earlier locale of the chain now beats a plural entry in a later one.

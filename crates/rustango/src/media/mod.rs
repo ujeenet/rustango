@@ -949,15 +949,7 @@ impl MediaManager {
         // Locked until commit, so a concurrent `delete_collection` either
         // sees this child or has already deleted the parent (#1573).
         if let Some(p) = parent {
-            use crate::sql::FetcherTx as _;
-            let live = MediaCollection::objects()
-                .where_(MediaCollection::id.eq(p))
-                .where_(MediaCollection::deleted_at.is_null())
-                .select_for_update()
-                .fetch_tx(&mut tx)
-                .await
-                .map_err(media_err_from_exec)?;
-            if live.is_empty() {
+            if !lock_live_collection_tx(&mut tx, p).await? {
                 tx.rollback().await?;
                 // Not "not found": the router would answer 404 for a bad body.
                 return Err(MediaError::Other(format!(
@@ -1148,27 +1140,37 @@ impl MediaManager {
     }
 
     /// Move a [`Media`] into a collection (or `None` to set "loose").
+    ///
+    /// # Errors
+    /// `Other("collection N is missing or deleted")` when the target is.
     pub async fn move_to_collection(
         &self,
         media_id: i64,
         collection_id: Option<i64>,
     ) -> Result<(), MediaError> {
-        let d = self.pool.dialect();
-        let sql = format!(
-            "UPDATE rustango_media SET collection_id = {p1} WHERE id = {p2}",
-            p1 = d.placeholder(1),
-            p2 = d.placeholder(2),
-        );
+        // IMMEDIATE on SQLite: the collection check reads before the update.
+        let mut tx = crate::sql::write_transaction_pool(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
+        if let Some(c) = collection_id {
+            if !lock_live_collection_tx(&mut tx, c).await? {
+                tx.rollback().await?;
+                return Err(dead_collection(c));
+            }
+        }
         let target = collection_id
             .map(crate::core::SqlValue::I64)
             .unwrap_or(crate::core::SqlValue::Null);
-        crate::sql::raw_execute_pool(
-            &self.pool,
-            &sql,
-            vec![target, crate::core::SqlValue::I64(media_id)],
-        )
-        .await
-        .map_err(media_err_from_exec)?;
+        let update = Media::objects()
+            .where_(Media::id.eq(media_id))
+            .update()
+            .set("collection_id", target)
+            .compile()
+            .map_err(media_err_from_query)?;
+        crate::sql::update_tx(&mut tx, &update)
+            .await
+            .map_err(media_err_from_exec)?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1664,79 +1666,49 @@ impl MediaManager {
 
     // --------- internal: row insert
 
+    /// Every media insert goes here, so none lands in a dead collection.
     async fn insert_row(&self, r: InsertRow) -> Result<Media, MediaError> {
-        let d = self.pool.dialect();
-        let ph: Vec<String> = (1..=10).map(|i| d.placeholder(i)).collect();
-        let placeholders = ph.join(", ");
-        let cols = "(disk, storage_key, mime, size_bytes, original_filename, \
-                     status, uploaded_by_id, derived_from_id, collection_id, metadata)";
-        let select_cols = "id, disk, storage_key, mime, size_bytes, original_filename, \
-                           status, uploaded_at, uploaded_by_id, derived_from_id, \
-                           collection_id, metadata, deleted_at";
-        let binds = vec![
-            crate::core::SqlValue::String(r.disk.clone()),
-            crate::core::SqlValue::String(r.storage_key.clone()),
-            crate::core::SqlValue::String(r.mime.clone()),
-            crate::core::SqlValue::I64(r.size_bytes),
-            crate::core::SqlValue::String(r.original_filename.clone()),
-            crate::core::SqlValue::String(r.status.as_str().to_owned()),
-            r.uploaded_by_id
-                .map(crate::core::SqlValue::I64)
-                .unwrap_or(crate::core::SqlValue::Null),
-            r.derived_from_id
-                .map(crate::core::SqlValue::I64)
-                .unwrap_or(crate::core::SqlValue::Null),
-            r.collection_id
-                .map(crate::core::SqlValue::I64)
-                .unwrap_or(crate::core::SqlValue::Null),
-            crate::core::SqlValue::Json(r.metadata.clone()),
-        ];
-        // MySQL has no RETURNING; do INSERT then SELECT LAST_INSERT_ID().
-        if d.name() == "mysql" {
-            #[cfg(feature = "mysql")]
-            {
-                // Irrefutable in a mysql-only build — see the note above.
-                #[allow(irrefutable_let_patterns)]
-                let crate::sql::Pool::Mysql(my) = &self.pool
-                else {
-                    unreachable!()
-                };
-                let insert_sql =
-                    format!("INSERT INTO `rustango_media` {cols} VALUES ({placeholders})");
-                let mut tx = my.begin().await?;
-                sqlx::query(&insert_sql)
-                    .bind(&r.disk)
-                    .bind(&r.storage_key)
-                    .bind(&r.mime)
-                    .bind(r.size_bytes)
-                    .bind(&r.original_filename)
-                    .bind(r.status.as_str())
-                    .bind(r.uploaded_by_id)
-                    .bind(r.derived_from_id)
-                    .bind(r.collection_id)
-                    .bind(sqlx::types::Json(&r.metadata))
-                    .execute(&mut *tx)
-                    .await?;
-                let out: Media = sqlx::query_as(&format!(
-                    "SELECT {select_cols} FROM `rustango_media` WHERE id = LAST_INSERT_ID()"
-                ))
-                .fetch_one(&mut *tx)
-                .await?;
-                tx.commit().await?;
-                return Ok(out);
-            }
-            #[cfg(not(feature = "mysql"))]
-            unreachable!();
-        }
-        let sql = format!(
-            "INSERT INTO rustango_media {cols} VALUES ({placeholders}) RETURNING {select_cols}"
-        );
-        let rows: Vec<Media> = crate::sql::raw_query_pool(&sql, binds, &self.pool)
+        use crate::sql::FetcherTx as _;
+        // IMMEDIATE on SQLite: the collection check reads before the insert.
+        let mut tx = crate::sql::write_transaction_pool(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
-        rows.into_iter()
+        if let Some(c) = r.collection_id {
+            if !lock_live_collection_tx(&mut tx, c).await? {
+                tx.rollback().await?;
+                return Err(dead_collection(c));
+            }
+        }
+        let mut row = Media {
+            id: Auto::Unset,
+            disk: r.disk,
+            storage_key: r.storage_key,
+            mime: r.mime,
+            size_bytes: r.size_bytes,
+            original_filename: r.original_filename,
+            status: r.status.as_str().to_owned(),
+            uploaded_at: Auto::Unset,
+            uploaded_by_id: r.uploaded_by_id,
+            derived_from_id: r.derived_from_id,
+            collection_id: r.collection_id,
+            metadata: r.metadata,
+            deleted_at: None,
+        };
+        row.insert_tx(&mut tx).await.map_err(media_err_from_exec)?;
+        let Auto::Set(id) = row.id else {
+            return Err(MediaError::Other("media INSERT returned no id".into()));
+        };
+        // Read back for the database-stamped `uploaded_at`.
+        let inserted = Media::objects()
+            .where_(Media::id.eq(id))
+            .fetch_tx(&mut tx)
+            .await
+            .map_err(media_err_from_exec)?;
+        tx.commit().await?;
+        inserted
+            .into_iter()
             .next()
-            .ok_or_else(|| MediaError::Other("media INSERT returned no rows".into()))
+            .ok_or_else(|| MediaError::Other(format!("media {id} vanished after INSERT")))
     }
 }
 
@@ -1843,6 +1815,28 @@ fn is_mysql_batch_retryable(e: &crate::sql::ExecError) -> bool {
     }
     let _ = e;
     false
+}
+
+/// `true` when collection `id` is live. Locks it until `tx` ends, so a
+/// concurrent `delete_collection` waits or has already deleted it.
+async fn lock_live_collection_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    id: i64,
+) -> Result<bool, MediaError> {
+    use crate::sql::FetcherTx as _;
+    let live = MediaCollection::objects()
+        .where_(MediaCollection::id.eq(id))
+        .where_(MediaCollection::deleted_at.is_null())
+        .select_for_update()
+        .fetch_tx(tx)
+        .await
+        .map_err(media_err_from_exec)?;
+    Ok(!live.is_empty())
+}
+
+/// Not "not found": the router would answer 404 for a bad body.
+fn dead_collection(id: i64) -> MediaError {
+    MediaError::Other(format!("collection {id} is missing or deleted"))
 }
 
 /// `root` and its live descendants, each level locked `FOR UPDATE`, so a

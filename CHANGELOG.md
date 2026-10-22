@@ -16,6 +16,10 @@ Lookups walk exact → base → fallback chain → default once, and at each loc
 
 `POST /uploads/begin` without `uploaded_by_id` now stores the signed-in user as owner; only a superuser can still create an ownerless upload.
 
+### Fixed — media cannot be filed under a missing or deleted collection
+
+`move_to_collection`, `save_bytes` and `begin_upload` refuse such a collection (400 from the router) and lock it until they commit, so a concurrent `delete_collection` cannot leave media under a dead folder.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.
