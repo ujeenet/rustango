@@ -23,12 +23,9 @@
 //!
 //! # Apex (no subdomain) handling
 //!
-//! Bare `app.com` does **not** resolve to any tenant. The default
-//! routing decision is that the apex hosts only operator UI
-//! (`/operator/*` in Slice 6); other apex paths return 404. The
-//! resolver returning `Ok(None)` is the signal — the caller (the
-//! tenant-aware admin in Slice 4) translates that into a 404 for
-//! tenant routes and bypasses the resolver entirely for `/operator`.
+//! Bare `app.com` does **not** resolve to any tenant: the resolver
+//! returns `Ok(None)`, and the apex serves the operator console at its
+//! root (`/`, `/login`, `/orgs`, ...) instead of a tenant.
 
 use crate::core::Column as _;
 use crate::sql::FetcherPool;

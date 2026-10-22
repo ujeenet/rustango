@@ -905,7 +905,8 @@ cargo build --release
 Assurez-vous que votre proxy inverse :
 - Termine le HTTPS
 - Transmet `X-Forwarded-For`, et l'app monte `RealIpLayer::trust_proxies([...])` avec ce proxy (`Cli::with_trusted_proxies([...])?` ou `server::Builder::real_ip`), pour des IP précises dans `AccessLogLayer` et les throttles (voir [security.md](security.md))
-- Transmet `X-Forwarded-Host`, `X-Forwarded-Proto`
+- Transmet l'en-tête `Host` d'origine sans le modifier : le routage des tenants, la détection de l'apex et `AllowedHostsLayer` ne lisent que `Host`
+- Transmet `X-Forwarded-Proto` (et `X-Forwarded-Host`, qui ne fixe que l'URL de redirection SSO derrière un proxy de confiance)
 - Utilise `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())` afin que `ConnectInfo` soit renseigné pour la limitation de débit et le filtrage par IP
 
 ---

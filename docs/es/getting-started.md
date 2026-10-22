@@ -901,7 +901,8 @@ cargo build --release
 Asegúrate de que tu proxy inverso:
 - Termine HTTPS
 - Reenvíe `X-Forwarded-For`, y la app monte `RealIpLayer::trust_proxies([...])` con ese proxy (`Cli::with_trusted_proxies([...])?` o `server::Builder::real_ip`), para obtener IPs precisas en `AccessLogLayer` y en los throttles (vea [security.md](security.md))
-- Reenvíe `X-Forwarded-Host`, `X-Forwarded-Proto`
+- Pase la cabecera `Host` original sin cambios: el enrutado de tenants, la detección del apex y `AllowedHostsLayer` solo leen `Host`
+- Reenvíe `X-Forwarded-Proto` (y `X-Forwarded-Host`, que solo fija la URL de redirección SSO detrás de un proxy de confianza)
 - Use `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())` para que `ConnectInfo` quede poblado para el límite de tasa + el filtrado de IP
 
 ---
