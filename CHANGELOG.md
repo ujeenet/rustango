@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `DROP SCHEMA … CASCADE` also dropped the extension and, through it, its columns and indexes in every other tenant's schema.
 
+### Fixed — audited `save` locks the row it diffs
+
+The before-image read is `FOR UPDATE` on PostgreSQL and MySQL, so two concurrent saves no longer diff against the same stale row; SQLite takes its write lock at `BEGIN` instead of failing with `database is locked`.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

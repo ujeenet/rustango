@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use rustango::audit::{self, AuditEntry, AuditLog};
+use rustango::core::Column as _;
 use rustango::sql::{Auto, CounterPool as _, FetcherPool as _, Pool};
 use rustango::{tri_dialect_test, Model};
 
@@ -202,6 +203,46 @@ async fn second_soft_delete_keeps_the_first_stamp(pool: &Pool) {
         2,
         "a second soft delete wrote an audit row"
     );
+}
+
+/// A save behind an open writer waits for it, then diffs against its row.
+/// SQLite on a file: the in-memory pool shares one cache, not WAL.
+async fn save_waits_for_a_concurrent_writer(pool: &Pool) {
+    #[cfg(feature = "sqlite")]
+    let file;
+    #[cfg(feature = "sqlite")]
+    let pool = if pool.dialect().name() == "sqlite" {
+        file = rustango::testkit::matrix::sqlite_file_pool().await;
+        setup(&file).await;
+        &file
+    } else {
+        pool
+    };
+    let mut note = insert_note(pool).await;
+    let id = *note.id.get().expect("pk assigned");
+    let update = Note::objects()
+        .where_(Note::id.eq(id))
+        .update()
+        .set("title", "held")
+        .compile()
+        .unwrap();
+    let mut writer = rustango::sql::transaction_pool(pool).await.unwrap();
+    rustango::sql::update_tx(&mut writer, &update).await.unwrap();
+    let saver = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            note.title = "saved".into();
+            note.save_pool(&pool).await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    writer.commit().await.unwrap();
+    saver
+        .await
+        .unwrap()
+        .expect("save once the writer commits");
+    let changes = &entries(pool, &id.to_string()).await[0].changes;
+    assert_eq!(changes["title"]["before"], "held", "{changes}");
 }
 
 /// The macro `save(&PgPool)` runs outside a transaction, so its
@@ -466,6 +507,7 @@ tri_dialect_test! {
         save_partial_audits_only_its_fields,
         failed_pre_read_fails_the_save,
         second_soft_delete_keeps_the_first_stamp,
+        save_waits_for_a_concurrent_writer,
         pg_macro_save_skips_noop_and_fails_on_pre_read,
         job_audits_as_its_enqueuer,
         job_dispatched_in_atomic_does_not_join_it,
