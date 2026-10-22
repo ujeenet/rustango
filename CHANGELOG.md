@@ -12,6 +12,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 Under tenancy they kept axum's 2 MiB. `server::Builder::body_limit` sets it; `Cli` passes the setting.
 
+### Fixed — `InMemoryJobQueue::dispatch` inside `atomic` waits for the commit
+
+As on the DB queue, the job is queued on commit and dropped on rollback.
+
 ### Security — admin create and edit stay inside the row scope
 
 The written row, parent and inline children alike, is re-read in the write transaction through the queryset hooks (and the `add` hook after a create); a form that would put a row outside the scope is refused with 403 and the whole edit rolled back.

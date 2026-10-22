@@ -499,15 +499,18 @@ impl JobQueue for InMemoryJobQueue {
             context: crate::task_context::TaskContext::capture(),
             not_before: None,
         };
-        self.pending
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // The queue owns the receiver, so this only fails mid-drop.
-        self.tx.send(envelope).map_err(|e| {
-            self.pending
-                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-            JobError::Queue(e.to_string())
-        })?;
-        Ok(())
+        // Inside an `atomic` block the job waits for the commit, as on
+        // the DB queue, and a rollback drops it.
+        if crate::sql::in_any_block() {
+            let (tx, pending) = (self.tx.clone(), self.pending.clone());
+            crate::sql::on_commit(move || {
+                if let Err(e) = enqueue(&tx, &pending, envelope) {
+                    tracing::error!(error = %e, "job dispatched in a committed block was lost");
+                }
+            });
+            return Ok(());
+        }
+        enqueue(&self.tx, &self.pending, envelope)
     }
 
     async fn start(&self) {
@@ -557,6 +560,20 @@ impl JobQueue for InMemoryJobQueue {
     async fn pending_count(&self) -> usize {
         self.pending.load(std::sync::atomic::Ordering::SeqCst)
     }
+}
+
+/// Count the job pending and queue it.
+fn enqueue(
+    tx: &mpsc::UnboundedSender<JobEnvelope>,
+    pending: &std::sync::atomic::AtomicUsize,
+    envelope: JobEnvelope,
+) -> Result<(), JobError> {
+    pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // The queue owns the receiver, so this only fails mid-drop.
+    tx.send(envelope).map_err(|e| {
+        pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        JobError::Queue(e.to_string())
+    })
 }
 
 struct InMemoryWorker {
@@ -931,6 +948,50 @@ mod tests {
         // Wait briefly for worker
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(COUNTER.load(Ordering::SeqCst), 1);
+        q.shutdown().await;
+    }
+
+    /// A dispatch inside `atomic` runs only after the commit, never on rollback.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_dispatch_in_a_block_waits_for_its_commit() {
+        static RUNS: AtomicUsize = AtomicUsize::new(0);
+        #[derive(Serialize, Deserialize)]
+        struct Once;
+        #[async_trait::async_trait]
+        impl Job for Once {
+            const NAME: &'static str = "test:once_after_commit";
+            async fn run(&self) -> Result<(), JobError> {
+                RUNS.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let q = Arc::new(InMemoryJobQueue::with_workers(1));
+        q.register::<Once>().await;
+        q.start().await;
+        let q2 = q.clone();
+        let rolled: Result<(), _> = crate::sql::atomic(&pool, move |_tx| {
+            Box::pin(async move {
+                q2.dispatch(&Once).await.unwrap();
+                Err(crate::sql::ExecError::AtomicAborted)
+            })
+        })
+        .await;
+        assert!(rolled.is_err());
+        let q2 = q.clone();
+        crate::sql::atomic(&pool, move |_tx| {
+            Box::pin(async move {
+                q2.dispatch(&Once).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                assert_eq!(RUNS.load(Ordering::SeqCst), 0, "ran before the commit");
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(RUNS.load(Ordering::SeqCst), 1, "the committed dispatch runs once");
         q.shutdown().await;
     }
 

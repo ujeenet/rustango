@@ -397,17 +397,18 @@ async fn job_dispatched_in_atomic_does_not_join_it(pool: &Pool) {
                     .dispatch(&ProbeAtomic { key: k.clone() })
                     .await
                     .unwrap();
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                while !pending_seen().lock().unwrap().contains_key(&k)
-                    && std::time::Instant::now() < deadline
-                {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
                 Ok(())
             })
         })
         .await
         .expect("atomic");
+        // The job runs after the commit, still outside the block.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !pending_seen().lock().unwrap().contains_key(&key)
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         q.shutdown().await;
         assert_eq!(pending_seen().lock().unwrap().get(&key), Some(&0));
     }
