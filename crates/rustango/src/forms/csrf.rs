@@ -565,19 +565,15 @@ where
                     // Form-encoded POST without the header — read
                     // `_csrf` from the body. Body is consumed once,
                     // so we buffer + replace so the inner handler
-                    // can still parse it.
+                    // can still parse it. `Bytes` stops at the limit the handler's
+                    // `Form` gets, so the read never goes past what it accepts.
                     let (parts, body) = req.into_parts();
-                    #[cfg(feature = "_http_layers")]
-                    let limit = parts
-                        .extensions
-                        .get::<crate::body_limit::BodyCap>()
-                        .map_or(BODY_BUFFER_LIMIT, |cap| cap.0);
-                    #[cfg(not(feature = "_http_layers"))]
-                    let limit = BODY_BUFFER_LIMIT;
-                    let bytes = match axum::body::to_bytes(body, limit).await {
+                    let mut limited = Request::new(body);
+                    *limited.extensions_mut() = parts.extensions.clone();
+                    let bytes = match axum::RequestExt::extract::<axum::body::Bytes, _>(limited).await {
                         Ok(b) => b,
-                        Err(_) => {
-                            return Ok(forbid_response("CSRF: form body exceeded buffer limit"));
+                        Err(rejection) => {
+                            return Ok(axum::response::IntoResponse::into_response(rejection))
                         }
                     };
                     let form_token = read_form_field(&bytes, CSRF_FORM_FIELD);
@@ -632,13 +628,6 @@ where
         })
     }
 }
-
-/// Cap the form-body buffer the CSRF middleware will consume while
-/// extracting the `_csrf` field. axum's default request body limit
-/// (2 MB), which the handler buffers up to anyway: a lower cap here
-/// turned a large admin edit (a long text field) into a 403 (#1714).
-/// An outer `BodyLimitLayer` replaces it with its own cap.
-const BODY_BUFFER_LIMIT: usize = 2 * 1024 * 1024;
 
 /// `true` when `path` is under any configured exempt prefix, by whole
 /// segment, so `/beacon` does not exempt `/beacon-admin`.
@@ -1595,7 +1584,7 @@ mod tests {
         use crate::body_limit::{BodyLimitLayer, BodyLimitRouterExt as _};
         use tower::ServiceExt as _;
         let app = axum::Router::new()
-            .route("/save", axum::routing::post(|| async { "saved" }))
+            .route("/save", axum::routing::post(form_handler))
             .layer(with_config(CsrfConfig::default().allow_insecure_for_dev()))
             .body_limit(BodyLimitLayer::new(8 * 1024 * 1024));
         let body = format!("_csrf=tok&text={}", "a".repeat(3 * 1024 * 1024));
@@ -1612,6 +1601,106 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[cfg(feature = "_http_layers")]
+    async fn form_handler(
+        axum::Form(f): axum::Form<std::collections::HashMap<String, String>>,
+    ) -> String {
+        f.get("text").map_or(0, String::len).to_string()
+    }
+
+    /// A streamed form body (no `Content-Length`) that counts the bytes read from it.
+    #[cfg(feature = "_http_layers")]
+    struct Counted {
+        data: axum::body::Bytes,
+        frame: usize,
+        read: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(feature = "_http_layers")]
+    impl http_body::Body for Counted {
+        type Data = axum::body::Bytes;
+        type Error = std::convert::Infallible;
+
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            if self.data.is_empty() {
+                return std::task::Poll::Ready(None);
+            }
+            let n = self.frame.min(self.data.len());
+            let chunk = self.data.split_to(n);
+            self.read.fetch_add(n, std::sync::atomic::Ordering::SeqCst);
+            std::task::Poll::Ready(Some(Ok(http_body::Frame::data(chunk))))
+        }
+    }
+
+    /// A tokened form POST of `len` bytes sent in `frame`-byte chunks.
+    #[cfg(feature = "_http_layers")]
+    fn counted_form(len: usize, frame: usize) -> (Request<Body>, Arc<std::sync::atomic::AtomicUsize>) {
+        let head = "_csrf=tok&text=";
+        let body = format!("{head}{}", "a".repeat(len - head.len()));
+        let read = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let body = Body::new(Counted {
+            data: body.into(),
+            frame,
+            read: Arc::clone(&read),
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/save")
+            .header("cookie", "rustango_csrf=tok")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(body)
+            .unwrap();
+        (req, read)
+    }
+
+    /// A stricter `DefaultBodyLimit` outside a raised body limit wins, and
+    /// CSRF reads no more of the form than it.
+    #[cfg(feature = "_http_layers")]
+    #[tokio::test]
+    async fn a_stricter_outer_default_limit_caps_the_csrf_read() {
+        use crate::body_limit::{BodyLimitLayer, BodyLimitRouterExt as _};
+        use tower::ServiceExt as _;
+        let app = axum::Router::new()
+            .route("/save", axum::routing::post(form_handler))
+            .layer(with_config(CsrfConfig::default().allow_insecure_for_dev()))
+            .body_limit(BodyLimitLayer::new(8 << 20))
+            .layer(axum::extract::DefaultBodyLimit::max(1 << 20));
+        let (req, read) = counted_form(3 << 20, 64 << 10);
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let read = read.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(read <= (1 << 20) + (64 << 10), "CSRF read {read} bytes");
+    }
+
+    /// Nested body limits keep the smaller cap: the form gets 413, not a CSRF 403.
+    #[cfg(feature = "_http_layers")]
+    #[tokio::test]
+    async fn nested_body_limits_keep_the_smaller_cap() {
+        use crate::body_limit::{BodyLimitLayer, BodyLimitRouterExt as _};
+        use tower::ServiceExt as _;
+        let app = axum::Router::new()
+            .route("/save", axum::routing::post(form_handler))
+            .layer(with_config(CsrfConfig::default().allow_insecure_for_dev()))
+            .body_limit(BodyLimitLayer::new(8 << 10))
+            .body_limit(BodyLimitLayer::new(1 << 10));
+        let (req, read) = counted_form(4 << 10, 256);
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let read = read.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(read <= (1 << 10) + 256, "CSRF read {read} bytes");
+        // Under both caps the form reaches the handler.
+        let (req, _) = counted_form(1 << 10, 256);
+        let app = axum::Router::new()
+            .route("/save", axum::routing::post(form_handler))
+            .layer(with_config(CsrfConfig::default().allow_insecure_for_dev()))
+            .body_limit(BodyLimitLayer::new(8 << 10))
+            .body_limit(BodyLimitLayer::new(1 << 10));
+        assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
     }
 
     #[test]

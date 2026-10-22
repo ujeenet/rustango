@@ -33,6 +33,15 @@ pub struct CsrfPost {
     title: String,
 }
 
+/// An unbounded text field, for forms larger than axum's 2 MiB default.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "csrf_note", admin(list_display = "id"))]
+pub struct CsrfNote {
+    #[rustango(primary_key)]
+    id: rustango::Auto<i64>,
+    body: String,
+}
+
 async fn pool() -> Pool {
     let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
     rustango::sql::raw_execute_pool(
@@ -324,6 +333,9 @@ async fn signed_in_as(superuser: bool) -> (axum::Router, String, String) {
     .await
     .unwrap();
     rustango::i18n::db::ensure_table_pool(&pool).await.unwrap();
+    rustango::testkit::create_tables_for::<CsrfNote>(&pool)
+        .await
+        .unwrap();
     let mut u = AdminUser::new_with_password("alice", "correct-horse", superuser).unwrap();
     u.insert_pool(&pool).await.unwrap();
     let app = app_with_session_auth(pool);
@@ -370,6 +382,34 @@ async fn a_signed_in_admin_passes_the_session_gate() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// With the body limit raised, admin create and edit forms over axum's
+/// 2 MiB default save.
+#[tokio::test]
+async fn a_form_over_2_mib_saves_under_a_raised_body_limit() {
+    use rustango::body_limit::{BodyLimitLayer, BodyLimitRouterExt as _};
+    let (app, cookie, token) = signed_in().await;
+    let app = app.body_limit(BodyLimitLayer::new(8 << 20));
+    let big = "a".repeat(3 << 20);
+    for uri in ["/csrf_note", "/csrf_note/1"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(format!("_csrf={token}&_continue=1&body={big}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER, "{uri}");
+        let to = resp.headers().get(header::LOCATION).unwrap();
+        assert_eq!(to, "/csrf_note/1", "{uri}");
+    }
 }
 
 /// The `_csrf` value of the first POST form in `html`, if it has one.

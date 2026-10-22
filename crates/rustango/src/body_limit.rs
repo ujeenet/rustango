@@ -3,7 +3,8 @@
 //! An unbounded request body is a denial-of-service: one client can
 //! make the server buffer gigabytes. axum's `DefaultBodyLimit` caps
 //! 2 MiB per extractor; this layer replaces it with a router-wide cap,
-//! for the methods it checks. A declared
+//! for the methods it checks. A stricter `DefaultBodyLimit` or
+//! `BodyLimitLayer` outside it still wins. A declared
 //! `Content-Length` over it gets a JSON `413 Payload Too Large` upfront.
 //! Any other body is capped as it streams, and a body extractor that
 //! reads past the cap answers `413`.
@@ -107,50 +108,73 @@ impl<S: Clone + Send + Sync + 'static> BodyLimitRouterExt for Router<S> {
     }
 }
 
-/// The cap this layer put on the body, so inner layers that buffer it
-/// (CSRF's form read) can use the same limit.
-#[derive(Clone, Copy, Debug)]
-#[cfg_attr(not(feature = "csrf"), allow(dead_code))]
-pub(crate) struct BodyCap(pub(crate) usize);
-
 async fn handle(cfg: Arc<BodyLimitLayer>, mut req: Request<Body>, next: Next) -> Response {
     if !cfg.methods.is_empty() && !cfg.methods.contains(req.method()) {
         return next.run(req).await;
     }
-    req.extensions_mut().insert(BodyCap(cfg.max_bytes));
+    let cap = effective_cap(&mut req, cfg.max_bytes);
     if let Some(declared) = req
         .headers()
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok())
     {
-        if usize::try_from(declared).map_or(true, |n| n > cfg.max_bytes) {
-            return too_large(cfg.max_bytes);
+        if usize::try_from(declared).map_or(true, |n| n > cap) {
+            return too_large(cap);
         }
     }
-    // Chunked and HTTP/2 bodies carry no Content-Length: cap the stream.
-    let (mut parts, body) = req.into_parts();
-    let body = Body::new(http_body_util::Limited::new(body, cfg.max_bytes));
-    // This cap replaces axum's 2 MiB extractor default, so it can raise it,
-    // but a `DefaultBodyLimit` set outside stays: `extend` lets it win.
-    let mut extensions = disabled_default_limit().await;
-    extensions.extend(std::mem::take(&mut parts.extensions));
-    parts.extensions = extensions;
-    next.run(Request::from_parts(parts, body)).await
+    // Chunked and HTTP/2 bodies carry no Content-Length: cap the stream,
+    // once. A third `Limited` hides the length error, so axum answers 400.
+    if req.extensions().get::<StreamCap>().map_or(true, |c| cap < c.0) {
+        req.extensions_mut().insert(StreamCap(cap));
+        req = req.map(|body| Body::new(http_body_util::Limited::new(body, cap)));
+    }
+    next.run(req).await
 }
 
-/// Extensions holding only `DefaultBodyLimit::disable()`, whose type axum keeps private.
-async fn disabled_default_limit() -> axum::http::Extensions {
-    use tower::{Layer as _, ServiceExt as _};
-    let echo =
-        tower::service_fn(|r: Request<()>| async move { Ok::<_, std::convert::Infallible>(r) });
-    match axum::extract::DefaultBodyLimit::disable()
-        .layer(echo)
-        .oneshot(Request::new(()))
-        .await
-    {
-        Ok(r) => r.into_parts().0.extensions,
-        Err(never) => match never {},
+/// The stream cap an outer layer already put on the body.
+#[derive(Clone, Copy)]
+struct StreamCap(usize);
+
+/// Record the smaller of `own` and any outer `DefaultBodyLimit` (an outer
+/// `BodyLimitLayer` sets one) as the extractor limit, and return it. Every
+/// extractor and CSRF's form read go by it, so they all stop at one cap.
+fn effective_cap(req: &mut Request<Body>, own: usize) -> usize {
+    use axum::extract::DefaultBodyLimit;
+    use axum::RequestExt as _;
+    // axum keeps the limit private: read it as the bound it puts on an unsized body.
+    let mut probe = Request::new(Body::new(Unsized));
+    *probe.extensions_mut() = std::mem::take(req.extensions_mut());
+    let before = probe.extensions().len();
+    let probe = probe.with_limited_body();
+    let outer = http_body::Body::size_hint(probe.body())
+        .upper()
+        .map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+    let mut probe = probe.map(|_| ());
+    // A set limit is replaced, not added: same count means one was set outside.
+    DefaultBodyLimit::disable().apply(&mut probe);
+    let set_outside = probe.extensions().len() == before;
+    *req.extensions_mut() = probe.into_parts().0.extensions;
+    let cap = match outer {
+        Some(n) if set_outside => n.min(own),
+        _ => own,
+    };
+    DefaultBodyLimit::max(cap).apply(req);
+    cap
+}
+
+/// An empty body with no size hint, so a limit shows as its upper bound.
+struct Unsized;
+
+impl http_body::Body for Unsized {
+    type Data = axum::body::Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        std::task::Poll::Ready(None)
     }
 }
 
@@ -392,6 +416,14 @@ mod tests {
     async fn a_stricter_outer_default_limit_is_kept() {
         let app = reading_app(1024).layer(axum::extract::DefaultBodyLimit::max(10));
         let resp = app.oneshot(streamed(Method::POST, 100)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// An outer limit set to axum's own 2 MiB is still the stricter one.
+    #[tokio::test]
+    async fn an_outer_limit_equal_to_the_axum_default_is_kept() {
+        let app = reading_app(5 << 20).layer(axum::extract::DefaultBodyLimit::max(2 << 20));
+        let resp = app.oneshot(streamed(Method::POST, 3 << 20)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 

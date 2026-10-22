@@ -18,7 +18,7 @@ The api `main.rs` now calls `.with_health()`, so the Dockerfile's `/health` prob
 
 ### Fixed — CSRF reads a form body up to the body limit
 
-Under a `BodyLimitLayer` (or `[server] max_body_bytes`) the CSRF layer buffers form-encoded bodies up to that cap, not a fixed 2 MiB, so a large form no longer gets 403.
+The CSRF layer buffers a form-encoded body only up to the limit the handler's extractors use, not a fixed 2 MiB: a raised `BodyLimitLayer` (or `[server] max_body_bytes`) lets a large form through, and a stricter outer `DefaultBodyLimit` or `BodyLimitLayer` stops the read early. A form over the limit is a 413, not a 403. Nested `BodyLimitLayer`s keep the smaller cap.
 
 ### Fixed — `Cli::with_csrf` follows `[security] secure_cookies`
 
