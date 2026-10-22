@@ -295,10 +295,31 @@ async fn raw_helpers_refuse_pg_only_values(pool: &Pool) {
     ));
 }
 
+/// The ORM refuses a `List` left as one bind, as the raw helpers do; it panicked.
+async fn orm_refuses_an_unexpanded_list(pool: &Pool) {
+    use rustango::core::SqlValue;
+    use rustango::sql::{ExecError, SqlError};
+    let r = Page::objects()
+        .filter("body", SqlValue::List(vec![SqlValue::String("a".into())]))
+        .fetch(pool)
+        .await;
+    assert!(
+        matches!(
+            r,
+            Err(ExecError::Sql(SqlError::ValueNotSupportedInDialect {
+                value: "list",
+                ..
+            }))
+        ),
+        "{r:?}"
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         raw_helpers_refuse_pg_only_values,
+        orm_refuses_an_unexpanded_list,
         unbounded_string_holds_more_than_64_kib,
         uuid_fields_round_trip_through_the_orm,
         uuid_fk_loads_through_select_related,

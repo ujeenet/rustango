@@ -61,8 +61,9 @@ pub(crate) fn quote_with(name: &str, q: char) -> String {
     out
 }
 
-/// Refuse a raw bind whose bind arm can only panic: a `List` (the writer
-/// expands those) anywhere, a Postgres-only value off Postgres.
+/// Refuse a bind whose bind arm can only panic: a `List` (the writer
+/// expands those) anywhere, a Postgres-only value off Postgres. The one
+/// check for both compiled and raw statements.
 pub(crate) fn refuse_unbindable_values(
     d: &dyn Dialect,
     params: &[crate::core::SqlValue],

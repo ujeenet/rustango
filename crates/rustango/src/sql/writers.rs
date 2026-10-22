@@ -261,17 +261,10 @@ impl<'d> Sql<'d> {
     }
 
     /// # Errors
-    /// [`SqlError::ValueNotSupportedInDialect`] for a Postgres-only
-    /// value on another backend: its bind arm can only panic.
+    /// [`SqlError::ValueNotSupportedInDialect`] for a bind whose bind arm
+    /// can only panic, as [`super::refuse_unbindable_values`] decides.
     pub(super) fn finish(mut self) -> Result<CompiledStatement, SqlError> {
-        if !self.d.binds_pg_only_values() {
-            if let Some(value) = self.params.iter().find_map(SqlValue::pg_only_kind) {
-                return Err(SqlError::ValueNotSupportedInDialect {
-                    value,
-                    dialect: self.d.name(),
-                });
-            }
-        }
+        super::refuse_unbindable_values(self.d, &self.params)?;
         if self.group_concat {
             // A statement-level hint: it covers the GROUP_CONCAT in any block.
             let start = self.sql.len() - self.sql.trim_start_matches('(').len();
