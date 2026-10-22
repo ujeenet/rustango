@@ -111,6 +111,30 @@ fn not_noadd(_: &axum::http::request::Parts, row: Option<&serde_json::Value>) ->
 }
 rustango::register_admin_object_permission!("rowscope_child", "add", not_noadd);
 
+/// An audited child under the same scope and `add` hook, so the audited
+/// write arms run the after-write check too.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rowscope_achild", audit(track = "label"))]
+#[allow(dead_code)]
+pub struct AuditedChild {
+    #[rustango(primary_key, max_length = 16)]
+    pub code: String,
+    pub parent_id: i64,
+    #[rustango(max_length = 64)]
+    pub label: String,
+}
+
+rustango::register_admin_inline!(
+    parent = "rowscope_parent",
+    child = "rowscope_achild",
+    fk = "parent_id",
+    fields = &["code", "label"],
+    extra = 1,
+    max_num = Some(2),
+);
+rustango::register_admin_queryset!("rowscope_achild", not_out);
+rustango::register_admin_object_permission!("rowscope_achild", "add", not_noadd);
+
 /// An auto-PK child with a secret, capped at one row per parent.
 #[derive(Model, Debug, Clone)]
 #[rustango(
@@ -176,6 +200,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Parent>(pool).await;
     fresh_table::<Child>(pool).await;
     fresh_table::<AutoChild>(pool).await;
+    fresh_table::<AuditedChild>(pool).await;
     fresh_table::<FlagParent>(pool).await;
     fresh_table::<Flag>(pool).await;
     rustango::audit::ensure_table_pool(pool)
@@ -358,6 +383,70 @@ async fn inline_child_outside_scope_is_refused(pool: &Pool) {
     assert!(status.is_redirection(), "{status}: {body}");
     assert_eq!(child(pool, "a").await.expect("a").label, "two");
     assert_eq!(child(pool, "n").await.expect("n").label, "fine");
+}
+
+/// The same refusals for an audited child, and no audit row survives them.
+async fn audited_inline_child_outside_scope_is_refused(pool: &Pool) {
+    let p = seed_parent(pool).await;
+    AuditedChild {
+        code: "a".into(),
+        parent_id: p,
+        label: "one".into(),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("insert child");
+    let label = |code: &'static str| async move {
+        AuditedChild::objects()
+            .filter("code", code)
+            .fetch(pool)
+            .await
+            .expect("fetch child")
+            .into_iter()
+            .next()
+            .map(|c| c.label)
+    };
+    let audit_rows = || {
+        rustango::audit::AuditLog::objects()
+            .filter("entity_table", "rowscope_achild")
+            .count(pool)
+    };
+    let before = audit_rows().await.expect("count audit rows");
+    let uri = format!("/rowscope_parent/{p}");
+    let head = "name=renamed&rowscope_achild-0-code=a";
+    for (slots, extra) in [
+        ("1", "&rowscope_achild-0-label=out"),
+        (
+            "2",
+            "&rowscope_achild-0-label=one&rowscope_achild-1-code=n&rowscope_achild-1-label=out",
+        ),
+        (
+            "2",
+            "&rowscope_achild-0-label=one&rowscope_achild-1-code=n&rowscope_achild-1-label=noadd",
+        ),
+    ] {
+        let form = format!(
+            "{head}&rowscope_achild-TOTAL_FORMS={slots}&rowscope_achild-INITIAL_FORMS=1{extra}"
+        );
+        let (status, body) = post(pool, &uri, &form).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{extra}: {body}");
+        assert_eq!(label("a").await.as_deref(), Some("one"), "{extra}");
+        assert!(label("n").await.is_none(), "{extra}: row inserted");
+        assert_eq!(parent_names(pool).await, ["p"], "{extra}: parent edit kept");
+        assert_eq!(
+            audit_rows().await.expect("count audit rows"),
+            before,
+            "{extra}: audit row kept"
+        );
+    }
+    let form = format!(
+        "{head}&rowscope_achild-TOTAL_FORMS=2&rowscope_achild-INITIAL_FORMS=1\
+         &rowscope_achild-0-label=two&rowscope_achild-1-code=n&rowscope_achild-1-label=fine"
+    );
+    let (status, body) = post(pool, &uri, &form).await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(label("a").await.as_deref(), Some("two"));
+    assert_eq!(label("n").await.as_deref(), Some("fine"));
 }
 
 /// An FK facet labels a hidden target by its key, not its title (#2029).
@@ -685,6 +774,7 @@ tri_dialect_test! {
         update_out_of_scope_is_refused,
         change_hook_sees_the_row_before_the_edit,
         inline_child_outside_scope_is_refused,
+        audited_inline_child_outside_scope_is_refused,
         fk_facet_hides_a_hidden_targets_name,
         fk_cell_shows_a_visible_targets_name,
         view_links_encode_the_pk,
