@@ -252,6 +252,51 @@ async fn pg_macro_save(pool: &Pool) {
     assert_eq!(updated, 0, "the UPDATE ran without its audit row");
 }
 
+/// The macro `insert(&PgPool)` / `delete(&PgPool)` roll the write back when
+/// its audit row fails.
+async fn pg_macro_insert_and_delete_are_atomic(pool: &Pool) {
+    #[cfg(not(feature = "postgres"))]
+    let _ = pool;
+    #[cfg(feature = "postgres")]
+    pg_macro_atomic(pool).await;
+}
+
+#[cfg(feature = "postgres")]
+async fn pg_macro_atomic(pool: &Pool) {
+    let Some(pg) = pool.as_postgres() else {
+        return;
+    };
+    let kept = insert_note(pool).await;
+    // Refuse audit rows for this table only; other suites share the log.
+    let ddl = |sql: &'static str| rustango::sql::raw_execute_pool(pool, sql, Vec::new());
+    ddl(r#"ALTER TABLE "rustango_audit_log" DROP CONSTRAINT IF EXISTS "audit_atomic_refuse""#)
+        .await
+        .unwrap();
+    ddl(r#"ALTER TABLE "rustango_audit_log" ADD CONSTRAINT "audit_atomic_refuse" CHECK (entity_table <> 'audit1675_note')"#)
+        .await
+        .unwrap();
+    let mut note = Note {
+        id: Auto::default(),
+        title: "unaudited".into(),
+        deleted_at: None,
+    };
+    let inserted = note.insert(pg).await;
+    let deleted = kept.delete(pg).await;
+    ddl(r#"ALTER TABLE "rustango_audit_log" DROP CONSTRAINT "audit_atomic_refuse""#)
+        .await
+        .unwrap();
+    assert!(inserted.is_err(), "insert ran unaudited");
+    assert!(deleted.is_err(), "delete ran unaudited");
+    let titles: Vec<String> = Note::objects()
+        .fetch(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|n| n.title)
+        .collect();
+    assert_eq!(titles, ["hello"], "a write committed without its audit row");
+}
+
 /// Polls for the note titled `title`; returns its newest audit source.
 #[cfg(any(feature = "jobs", feature = "scheduler"))]
 async fn source_of_title(pool: &Pool, title: &str) -> Option<String> {
@@ -467,6 +512,7 @@ tri_dialect_test! {
         failed_pre_read_fails_the_save,
         second_soft_delete_keeps_the_first_stamp,
         pg_macro_save_skips_noop_and_fails_on_pre_read,
+        pg_macro_insert_and_delete_are_atomic,
         job_audits_as_its_enqueuer,
         job_dispatched_in_atomic_does_not_join_it,
         scheduled_task_audits_as_its_registration,

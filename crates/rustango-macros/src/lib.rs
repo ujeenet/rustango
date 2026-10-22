@@ -3122,18 +3122,23 @@ fn inherent_impl_tokens(
     } else {
         quote!(self.save_on(pool).await)
     };
+    // One transaction so the write and its audit row commit together.
     let pool_to_insert_on = if audited_fields.is_some() {
         quote! {
-            let mut _conn = pool.acquire().await?;
-            self.insert_on(&mut *_conn).await
+            let mut _tx = pool.begin().await?;
+            self.insert_on(&mut *_tx).await?;
+            _tx.commit().await?;
+            ::core::result::Result::Ok(())
         }
     } else {
         quote!(self.insert_on(pool).await)
     };
     let pool_to_delete_on = if audited_fields.is_some() {
         quote! {
-            let mut _conn = pool.acquire().await?;
-            self.delete_on(&mut *_conn).await
+            let mut _tx = pool.begin().await?;
+            let _affected = self.delete_on(&mut *_tx).await?;
+            _tx.commit().await?;
+            ::core::result::Result::Ok(_affected)
         }
     } else {
         quote!(self.delete_on(pool).await)
