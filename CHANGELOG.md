@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The written row is re-read in the write transaction through the queryset hooks and checked by the `add` / `change` object hook; a form that would put a row outside the scope is refused with 403 and rolled back.
 
+### Fixed — `Accept-Language` with `q=NaN` can no longer panic `LocaleMiddleware`
+
+A non-finite q is ignored like an unparsable one, and qualities sort as integers.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

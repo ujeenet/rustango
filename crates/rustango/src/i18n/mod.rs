@@ -1130,8 +1130,8 @@ fn read_catalog(path: &Path) -> Result<HashMap<String, String>, I18nError> {
 #[must_use]
 pub fn negotiate_language<S: AsRef<str>>(accept_language: &str, available: &[S]) -> Option<String> {
     let mut prefs = parse_accept_language(accept_language);
-    // Sort by quality desc
-    prefs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Quality desc; stable, so equal q keeps header order.
+    prefs.sort_by_key(|p| std::cmp::Reverse(p.1));
 
     let avail_lower: Vec<String> = available
         .iter()
@@ -1139,7 +1139,7 @@ pub fn negotiate_language<S: AsRef<str>>(accept_language: &str, available: &[S])
         .collect();
 
     // `q=0` means "not acceptable" (RFC 9110 §12.4.2).
-    for (lang, _q) in prefs.into_iter().filter(|(_, q)| *q > 0.0) {
+    for (lang, _q) in prefs.into_iter().filter(|(_, q)| *q > 0) {
         let lang_lower = Locale::new(lang).0;
         // Exact match
         if let Some(matched) = avail_lower.iter().find(|a| **a == lang_lower) {
@@ -1160,7 +1160,8 @@ pub fn negotiate_language<S: AsRef<str>>(accept_language: &str, available: &[S])
     None
 }
 
-fn parse_accept_language(header: &str) -> Vec<(String, f32)> {
+/// `(tag, q)` with q in thousandths, so a hostile `q=NaN` cannot break the sort.
+fn parse_accept_language(header: &str) -> Vec<(String, u16)> {
     header
         .split(',')
         .filter_map(|raw| {
@@ -1169,11 +1170,12 @@ fn parse_accept_language(header: &str) -> Vec<(String, f32)> {
             if lang.is_empty() {
                 return None;
             }
-            let mut q = 1.0;
+            let mut q = 1000;
             for kv in parts {
                 if let Some(rest) = kv.strip_prefix("q=") {
-                    if let Ok(parsed) = rest.parse::<f32>() {
-                        q = parsed;
+                    // A non-finite q is as unusable as an unparsable one.
+                    if let Some(parsed) = rest.parse::<f32>().ok().filter(|p| p.is_finite()) {
+                        q = (parsed.clamp(0.0, 1.0) * 1000.0).round() as u16;
                     }
                 }
             }
@@ -1442,6 +1444,21 @@ mod tests {
             negotiate_language("fr;q=0,en;q=0.5", &["en", "fr"]).as_deref(),
             Some("en")
         );
+    }
+
+    #[test]
+    fn negotiate_survives_nan_q_values() {
+        let header: Vec<String> = (0..60)
+            .map(|i| match i % 3 {
+                0 => format!("x{i};q=NaN"),
+                1 => format!("y{i};q=0.{}", i % 10),
+                _ => format!("z{i}"),
+            })
+            .chain(["fr;q=0.95".to_owned(), "en;q=nan".to_owned()])
+            .collect();
+        let lang = negotiate_language(&header.join(","), &["en", "fr"]);
+        // A NaN q is ignored like an unparsable one, so `en` keeps q=1.
+        assert_eq!(lang.as_deref(), Some("en"));
     }
 
     #[test]
