@@ -6,6 +6,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** `ModelFormFor::from_json` refuses unknown keys; an oversized CSRF form gets 413, not 403; undecodable job payloads are retried; the first `makemigrations` on PostgreSQL rewrites each table with a sized `vector` or `geometry` column. See UPGRADING.
 
+### Fixed — `inspectdb` flags PostgreSQL `json` columns
+
+A `json` (not `jsonb`) column still maps to `serde_json::Value`, with a TODO: it has no `=` or `@>`, and ORM filters bind `jsonb`.
+
 ### Fixed — MySQL `citext` ignores case only
 
 New `#[rustango(citext)]` columns use `utf8mb4_0900_as_ci` instead of `utf8mb4_general_ci`, which also matched `'cafe'` to `'café'` and `'a'` to `'a '`, unlike PostgreSQL.
