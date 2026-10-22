@@ -154,6 +154,10 @@ untouched.
 
 All class-based views now add the registered context processors' keys, and every view (not only `ListView`) merges `ExtraContext`. A template that relied on such a key being undefined sees a value now.
 
+### Translation lookup order
+
+A base-language override (`pt`) no longer hides a region file entry (`pt-BR`), and a flat entry in an earlier locale of the chain now beats a plural entry in a later one.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more
