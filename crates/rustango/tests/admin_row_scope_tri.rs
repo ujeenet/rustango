@@ -282,8 +282,16 @@ async fn create_outside_scope_is_refused(pool: &Pool) {
     let (status, body) = post(pool, "/rowscope_item", "title=locked&owner_id=1").await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert!(items(pool).await.is_empty(), "row written");
-    assert_eq!(item_audit_rows(pool).await, 0, "audit entry for a refused create");
-    assert_eq!(saves.load(Ordering::SeqCst), 0, "post_save on a refused create");
+    assert_eq!(
+        item_audit_rows(pool).await,
+        0,
+        "audit entry for a refused create"
+    );
+    assert_eq!(
+        saves.load(Ordering::SeqCst),
+        0,
+        "post_save on a refused create"
+    );
     let (status, body) = post(pool, "/rowscope_item", "title=ok&owner_id=1").await;
     disconnect_admin_post_save(id);
     assert!(status.is_redirection(), "{status}: {body}");

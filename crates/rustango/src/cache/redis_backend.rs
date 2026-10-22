@@ -420,7 +420,11 @@ mod tests {
         .expect("connect hung past its timeout");
         assert!(built.is_err(), "connected to a silent server");
         // Three 100 ms attempts and two capped waits of 1–2 s (jitter); uncapped, the second is ~100 s.
-        assert!(start.elapsed() < Duration::from_secs(6), "{:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_secs(6),
+            "{:?}",
+            start.elapsed()
+        );
         tokio::time::sleep(Duration::from_millis(200)).await;
         let attempts = accepted.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(attempts, 3, "one connect and two retries");

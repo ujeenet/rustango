@@ -2046,7 +2046,16 @@ pub(crate) async fn create_submit(
             return Ok(refused(write_error(model, &e)).into_response());
         }
     };
-    match admits_written(&mut tx, &parts, model, pk_field, pk.clone(), Written::Created).await {
+    match admits_written(
+        &mut tx,
+        &parts,
+        model,
+        pk_field,
+        pk.clone(),
+        Written::Created,
+    )
+    .await
+    {
         Ok(true) => {}
         Ok(false) => {
             rollback_quietly(tx, model.table).await;
