@@ -838,9 +838,7 @@ async fn schema_mode_tenants_using_pool_do_not_starve_it() {
                 .await
                 .map_err(|_| "extractor rejected".to_owned())?;
                 barrier.wait().await;
-                let rustango::sql::Pool::Postgres(pg) = t.pool().clone() else {
-                    panic!("a Postgres pool");
-                };
+                let pg = t.pool().as_postgres().expect("a Postgres pool").clone();
                 let row: (String,) = sqlx::query_as("SELECT current_schema()::text")
                     .fetch_one(&pg)
                     .await
@@ -884,9 +882,7 @@ async fn tenant_scope_holds_no_connection() {
         .await
         .unwrap();
     assert_eq!(first.org.slug, "acme_tp_scope");
-    let rustango::sql::Pool::Postgres(pg) = second.pool() else {
-        panic!("a Postgres pool");
-    };
+    let pg = second.pool().as_postgres().expect("a Postgres pool");
     let mut conn = pg.acquire().await.expect("the one slot is free");
     assert_eq!(current_schema(&mut conn).await, "acme_tp_scope");
     drop(conn);
