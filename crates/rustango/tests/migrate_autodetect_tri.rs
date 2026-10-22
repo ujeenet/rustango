@@ -3797,9 +3797,84 @@ async fn branched_chain_needs_a_merge(pool: &Pool) {
     );
 }
 
+/// `migrate <target>` applies a pending file that sorts before the newest
+/// applied one, going forward or back.
+async fn migrate_to_applies_an_earlier_pending_file(pool: &Pool) {
+    use rustango::migrate::{applied_set_pool_with_ledger, migrate_to_pool_with_ledger};
+    let t = "mad_mt_post";
+    let chain = Chain::new(pool, "mt", &[t]).await;
+    let s = |name: &str| col(name, "string", json!({"max_length": 20}));
+    let with = |cols: &[&str]| {
+        let mut f = vec![id()];
+        f.extend(cols.iter().map(|c| s(c)));
+        json!({"tables": [table(t, f)]})
+    };
+    let initial = chain.step(pool, with(&[])).await.expect("initial");
+    let branch = |name: &str, c: &'static str| Migration {
+        name: name.into(),
+        prev: Some(initial.clone()),
+        snapshot: snap(with(&[c])),
+        forward: vec![Operation::Schema(SchemaChange::AddColumn {
+            table: t.into(),
+            column: c.into(),
+        })],
+        ..chain.head()
+    };
+    let to = |target: String| {
+        let (dir, ledger) = (chain.dir.path(), chain.ledger.as_str());
+        async move {
+            migrate_to_pool_with_ledger(pool, dir, &target, ledger)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    };
+    let applied = || async {
+        let mut v: Vec<String> = applied_set_pool_with_ledger(pool, &chain.ledger)
+            .await
+            .expect("ledger")
+            .into_iter()
+            .collect();
+        v.sort();
+        v
+    };
+    let insert =
+        |c: &'static str| async move { exec(pool, "INSERT INTO {} ({}) VALUES ('x')", &[t, c]).await };
+
+    // Branch a lands after b was applied, as a merged pull does.
+    chain.write(&branch("0002_b", "b"));
+    chain.migrate(pool).await.expect("branch b");
+    let a = branch("0002_a", "a");
+    chain.write(&a);
+    chain.write(&Migration {
+        name: "0003_merge".into(),
+        prev: Some("0002_b".into()),
+        merges: vec!["0002_a".into()],
+        snapshot: snap(with(&["a", "b"])),
+        forward: Vec::new(),
+        ..chain.head()
+    });
+    to("0003_merge".into()).await.expect("forward to the merge");
+    assert_eq!(
+        applied().await,
+        [initial.as_str(), "0002_a", "0002_b", "0003_merge"]
+    );
+    insert("a").await.expect("a's column");
+
+    // Only b applied, then back to a: b unapplies and a applies.
+    to(initial.clone()).await.expect("back to initial");
+    std::fs::remove_file(chain.dir.path().join("0002_a.json")).expect("hide a");
+    to("0002_b".into()).await.expect("only b");
+    chain.write(&a);
+    to("0002_a".into()).await.expect("back to a");
+    assert_eq!(applied().await, [initial.as_str(), "0002_a"]);
+    insert("a").await.expect("a's column");
+    assert!(insert("b").await.is_err(), "b was unapplied");
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
+        migrate_to_applies_an_earlier_pending_file,
         unmanaged_model_keeps_its_table,
         empty_migration_renames_reach_the_snapshot,
         branched_chain_needs_a_merge,

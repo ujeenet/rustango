@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `migrate <target>` applies earlier pending files
+
+A pending file sorting before the newest applied one (a merged branch) now applies when it is at or before the target; it used to be skipped.
+
 ### `csrf_trusted_origins` takes effect
 
 Origins listed in `[security] csrf_trusted_origins` now pass the CSRF Origin check under `Cli::with_csrf` / `with_csrf_config`. Remove entries you did not mean to trust.

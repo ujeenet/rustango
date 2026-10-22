@@ -6,6 +6,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`; `RequestIdLayer` no longer echoes an untrusted client's `X-Request-Id`; a SQLite UUID key stored both as BLOB and TEXT is now a 404 in ViewSets and template views. See UPGRADING.
 
+### Fixed — `migrate <target>` applies pending files that sort before the newest applied one
+
+The plan comes from the ledger: newer applied files unapply, then every pending file up to the target applies.
+
 ### Fixed — `[security] csrf_trusted_origins` is applied
 
 `Cli::with_csrf` and `Cli::with_csrf_config` now trust these origins (added to the config's own list); the setting was only read by `check --deploy`.

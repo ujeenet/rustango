@@ -621,17 +621,22 @@ async fn reconcile_and_apply_pg(
     })
 }
 
-/// What `migrate <target>` applies going forward: the pending files after
-/// `head` up to `target`, squashes included so they reconcile (#2243).
-fn forward_to(
-    all: &[Migration],
-    applied: &HashSet<String>,
-    head: Option<&str>,
-    target: &str,
-) -> Vec<Migration> {
+/// What `migrate <target>` unapplies first: every applied file after
+/// `target`, newest first. Read from the ledger, not from a head name.
+fn backward_from(all: &[Migration], applied: &HashSet<String>, target: &str) -> Vec<Migration> {
+    all.iter()
+        .rev()
+        .filter(|m| m.name.as_str() > target && applied.contains(&m.name))
+        .cloned()
+        .collect()
+}
+
+/// What `migrate <target>` then applies: every pending file up to `target`,
+/// even one sorting before the newest applied, squashes included.
+fn forward_to(all: &[Migration], applied: &HashSet<String>, target: &str) -> Vec<Migration> {
     pending_migrations(all, applied)
         .into_iter()
-        .filter(|m| head.is_none_or(|h| m.name.as_str() > h) && m.name.as_str() <= target)
+        .filter(|m| m.name.as_str() <= target)
         .collect()
 }
 
@@ -1208,48 +1213,16 @@ async fn migrate_to_with_ledger(
             )));
         }
 
-        let head = all
-            .iter()
-            .rev()
-            .find(|m| applied.contains(&m.name))
-            .map(|m| m.name.clone());
-
+        let mut applied = applied;
         let mut touched = Vec::new();
-        match head {
-            None => {
-                // Nothing applied — forward up to and including target.
-                for mig in forward_to(&all, &applied, None, target) {
-                    reconcile_and_apply_pg(pool, &mig, &applied, ledger).await?;
-                    touched.push(mig);
-                }
-            }
-            Some(h) => {
-                use std::cmp::Ordering;
-                match target.cmp(h.as_str()) {
-                    Ordering::Equal => {}
-                    Ordering::Greater => {
-                        for mig in forward_to(&all, &applied, Some(&h), target) {
-                            reconcile_and_apply_pg(pool, &mig, &applied, ledger).await?;
-                            touched.push(mig);
-                        }
-                    }
-                    Ordering::Less => {
-                        let mut to_unapply: Vec<Migration> = all
-                            .into_iter()
-                            .filter(|m| {
-                                m.name.as_str() > target
-                                    && m.name.as_str() <= h.as_str()
-                                    && applied.contains(&m.name)
-                            })
-                            .collect();
-                        to_unapply.reverse();
-                        for mig in to_unapply {
-                            unapply_locked(pool, dir, &mig.name, ledger).await?;
-                            touched.push(mig);
-                        }
-                    }
-                }
-            }
+        for mig in backward_from(&all, &applied, target) {
+            unapply_locked(pool, dir, &mig.name, ledger).await?;
+            applied.remove(&mig.name);
+            touched.push(mig);
+        }
+        for mig in forward_to(&all, &applied, target) {
+            reconcile_and_apply_pg(pool, &mig, &applied, ledger).await?;
+            touched.push(mig);
         }
         Ok(touched)
     })
@@ -4200,47 +4173,16 @@ pub async fn migrate_to_pool_with_ledger(
             )));
         }
 
-        let head = all
-            .iter()
-            .rev()
-            .find(|m| applied.contains(&m.name))
-            .map(|m| m.name.clone());
-
+        let mut applied = applied;
         let mut touched = Vec::new();
-        match head {
-            None => {
-                for mig in forward_to(&all, &applied, None, target) {
-                    reconcile_and_apply(pool, &mig, &applied, ledger, false).await?;
-                    touched.push(mig);
-                }
-            }
-            Some(h) => {
-                use std::cmp::Ordering;
-                match target.cmp(h.as_str()) {
-                    Ordering::Equal => {}
-                    Ordering::Greater => {
-                        for mig in forward_to(&all, &applied, Some(&h), target) {
-                            reconcile_and_apply(pool, &mig, &applied, ledger, false).await?;
-                            touched.push(mig);
-                        }
-                    }
-                    Ordering::Less => {
-                        let mut to_unapply: Vec<Migration> = all
-                            .into_iter()
-                            .filter(|m| {
-                                m.name.as_str() > target
-                                    && m.name.as_str() <= h.as_str()
-                                    && applied.contains(&m.name)
-                            })
-                            .collect();
-                        to_unapply.reverse();
-                        for mig in to_unapply {
-                            unapply_locked_pool(pool, dir, &mig.name, ledger).await?;
-                            touched.push(mig);
-                        }
-                    }
-                }
-            }
+        for mig in backward_from(&all, &applied, target) {
+            unapply_locked_pool(pool, dir, &mig.name, ledger).await?;
+            applied.remove(&mig.name);
+            touched.push(mig);
+        }
+        for mig in forward_to(&all, &applied, target) {
+            reconcile_and_apply(pool, &mig, &applied, ledger, false).await?;
+            touched.push(mig);
         }
         Ok(touched)
     })
