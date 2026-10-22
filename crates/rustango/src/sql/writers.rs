@@ -1710,10 +1710,26 @@ pub(super) fn write_insert_rows(b: &mut Sql<'_>, query: &InsertQuery) -> Result<
     }
 
     if let Some(conflict) = &query.on_conflict {
-        let set = caller_set(&query.columns, &query.generated);
-        b.d.write_conflict_clause(&mut b.sql, query.model, &set, conflict)?;
+        write_on_conflict(b, query.model, &query.columns, &query.generated, conflict)?;
     }
     Ok(())
+}
+
+/// The conflict clause of an INSERT. A `DoUpdate` with no columns has no SET to write.
+fn write_on_conflict(
+    b: &mut Sql<'_>,
+    model: &ModelSchema,
+    columns: &[&'static str],
+    generated: &[&str],
+    conflict: &crate::core::ConflictClause,
+) -> Result<(), SqlError> {
+    if let crate::core::ConflictClause::DoUpdate { update_columns, .. } = conflict {
+        if update_columns.is_empty() {
+            return Err(SqlError::EmptyUpdateSet);
+        }
+    }
+    let set = caller_set(columns, generated);
+    b.d.write_conflict_clause(&mut b.sql, model, &set, conflict)
 }
 
 /// The bound columns whose value the caller chose, not the writer.
@@ -1802,8 +1818,7 @@ pub(super) fn write_bulk_insert(b: &mut Sql<'_>, query: &BulkInsertQuery) -> Res
     }
 
     if let Some(conflict) = &query.on_conflict {
-        let set = caller_set(&query.columns, &query.generated);
-        b.d.write_conflict_clause(&mut b.sql, query.model, &set, conflict)?;
+        write_on_conflict(b, query.model, &query.columns, &query.generated, conflict)?;
     }
 
     write_returning(b, &query.returning)?;

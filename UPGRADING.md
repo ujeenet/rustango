@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Upserts with no update columns fail before the database
+
+On PostgreSQL and SQLite they return `ExecError::Sql(SqlError::EmptyUpdateSet)`, as MySQL did, instead of a driver syntax error. Use `insert_or_ignore` for "insert, skip conflicts".
+
 ### `csrf_trusted_origins` takes effect
 
 Origins listed in `[security] csrf_trusted_origins` now pass the CSRF Origin check under `Cli::with_csrf` / `with_csrf_config`. Remove entries you did not mean to trust.
