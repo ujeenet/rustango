@@ -16,6 +16,10 @@ Under tenancy they kept axum's 2 MiB. `server::Builder::body_limit` sets it; `Cl
 
 As on the DB queue, the job is queued on commit and dropped on rollback.
 
+### Security — a dead-lettered older webhook row no longer passes its signing secret
+
+The dead-letter callback gets the payload in the current shape of the job type.
+
 ### Security — admin create and edit stay inside the row scope
 
 The written row, parent and inline children alike, is re-read in the write transaction through the queryset hooks (and the `add` hook after a create); a form that would put a row outside the scope is refused with 403 and the whole edit rolled back.

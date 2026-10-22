@@ -261,13 +261,33 @@ type HandlerFn = Arc<
 #[derive(Clone)]
 struct Registered {
     handler: HandlerFn,
-    /// `JobDeadLetter` needs the static name; only the DB queue reads it.
-    #[cfg_attr(not(feature = "jobs-postgres"), allow(dead_code))]
+    /// `JobDeadLetter` needs the static name.
     name: &'static str,
     retry_backoff: fn(u32) -> Duration,
+    current_shape: fn(serde_json::Value) -> serde_json::Value,
+}
+
+/// `payload` as this release writes `T`. A row an older release stored
+/// can hold what the current shape leaves out, such as a webhook's
+/// signing secret. One that does not decode is returned as is.
+fn current_shape<T: Job>(payload: serde_json::Value) -> serde_json::Value {
+    serde_json::from_value::<T>(payload.clone())
+        .ok()
+        .and_then(|job| serde_json::to_value(job).ok())
+        .unwrap_or(payload)
 }
 
 impl Registered {
+    /// The dead letter for a job of this type, its payload in the current shape.
+    fn dead_letter(&self, payload: serde_json::Value, attempts: u32, error: String) -> JobDeadLetter {
+        JobDeadLetter {
+            name: self.name,
+            payload: (self.current_shape)(payload),
+            attempts,
+            error,
+        }
+    }
+
     /// The job's backoff, capped at a year so a runaway hook cannot
     /// overflow a deadline.
     fn backoff(&self, failed_attempt: u32) -> Duration {
@@ -313,6 +333,7 @@ impl HandlerRegistry {
             handler,
             name: T::NAME,
             retry_backoff: T::retry_backoff,
+            current_shape: current_shape::<T>,
         };
         self.handlers.insert(T::NAME, entry);
     }
@@ -625,7 +646,8 @@ async fn worker_loop(w: InMemoryWorker) {
             pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             let error = "attempts spent by runs aborted at shutdown".to_owned();
             let attempts = envelope.attempt;
-            dead_letter_job(&dead_letter, envelope, attempts, error).await;
+            let entry = registry.lock().await.lookup(envelope.name);
+            dead_letter_job(&dead_letter, entry.as_ref(), envelope, attempts, error).await;
             continue;
         }
 
@@ -661,7 +683,7 @@ async fn worker_loop(w: InMemoryWorker) {
                 if next_attempt >= envelope.max_attempts {
                     // Count it done first: an abort in the callback must not leak `pending`.
                     pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                    dead_letter_job(&dead_letter, envelope, next_attempt, msg).await;
+                    dead_letter_job(&dead_letter, Some(&entry), envelope, next_attempt, msg).await;
                 } else {
                     let backoff = entry.backoff(envelope.attempt);
                     let mut retry = envelope;
@@ -674,7 +696,7 @@ async fn worker_loop(w: InMemoryWorker) {
             Err(e @ (JobError::Fatal(_) | JobError::Queue(_))) => {
                 pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 let attempts = envelope.attempt + 1;
-                dead_letter_job(&dead_letter, envelope, attempts, e.to_string()).await;
+                dead_letter_job(&dead_letter, Some(&entry), envelope, attempts, e.to_string()).await;
             }
         }
     }
@@ -704,17 +726,21 @@ fn park(
 
 async fn dead_letter_job(
     dead_letter: &Mutex<Option<DeadLetterFn>>,
+    entry: Option<&Registered>,
     job: JobEnvelope,
     attempts: u32,
     error: String,
 ) {
     let cb = dead_letter.lock().await.clone();
     if let Some(cb) = cb {
-        let dl = JobDeadLetter {
-            name: job.name,
-            payload: job.payload,
-            attempts,
-            error,
+        let dl = match entry {
+            Some(entry) => entry.dead_letter(job.payload, attempts, error),
+            None => JobDeadLetter {
+                name: job.name,
+                payload: job.payload,
+                attempts,
+                error,
+            },
         };
         // The callback sees who enqueued the job, as the job did.
         job.context.install(deliver_dead_letter(cb, dl)).await;

@@ -76,8 +76,8 @@ use sqlx::PgPool;
 use tokio::sync::{Mutex, Notify};
 
 use super::{
-    DeadLetterFn, HandlerRegistry, Job, JobDeadLetter, JobError, JobQueue, Running, StopSignal,
-    DEFAULT_SHUTDOWN_GRACE,
+    DeadLetterFn, HandlerRegistry, Job, JobDeadLetter, JobError, JobQueue, Registered, Running,
+    StopSignal, DEFAULT_SHUTDOWN_GRACE,
 };
 use crate::sql::Pool;
 
@@ -794,15 +794,13 @@ async fn run_one(
         give_back_attempt(pool, worker, job.id).await;
         return;
     };
-    let static_name = entry.name;
-
     // `attempt` already counts this run. Past the cap means earlier runs
     // died with their worker; running it again could crash the next one.
     // Rows queued before #2333 may still hold 0.
     let max_attempts = job.max_attempts.max(1);
     if job.attempt > max_attempts {
         let msg = "no attempts left: an earlier run stopped without finishing";
-        handle_dead_letter(pool, dead_letter, worker, &job, static_name, msg).await;
+        handle_dead_letter(pool, dead_letter, worker, &job, &entry, msg).await;
         return;
     }
 
@@ -824,7 +822,7 @@ async fn run_one(
         }
         Err(JobError::Retryable(msg)) => {
             if job.attempt >= max_attempts {
-                handle_dead_letter(pool, dead_letter, worker, &job, static_name, &msg).await;
+                handle_dead_letter(pool, dead_letter, worker, &job, &entry, &msg).await;
             } else {
                 let failed = u32::try_from(job.attempt - 1).unwrap_or(0);
                 let backoff = chrono::Duration::from_std(entry.backoff(failed)).unwrap_or_default();
@@ -834,7 +832,7 @@ async fn run_one(
         }
         Err(e @ (JobError::Fatal(_) | JobError::Queue(_))) => {
             let msg = e.to_string();
-            handle_dead_letter(pool, dead_letter, worker, &job, static_name, &msg).await;
+            handle_dead_letter(pool, dead_letter, worker, &job, &entry, &msg).await;
         }
     }
 }
@@ -1005,7 +1003,7 @@ async fn handle_dead_letter(
     dead_letter: &Arc<Mutex<Option<DeadLetterFn>>>,
     worker: &Worker,
     job: &PickedJob,
-    static_name: &'static str,
+    entry: &Registered,
     error: &str,
 ) {
     // Confirm the lease first: the callback must not fire for a row
@@ -1015,12 +1013,8 @@ async fn handle_dead_letter(
     }
     let cb = dead_letter.lock().await.clone();
     if let Some(cb) = cb {
-        let dl = JobDeadLetter {
-            name: static_name,
-            payload: job.payload.clone(),
-            attempts: u32::try_from(job.attempt).unwrap_or(0),
-            error: error.to_owned(),
-        };
+        let attempts = u32::try_from(job.attempt).unwrap_or(0);
+        let dl = entry.dead_letter(job.payload.clone(), attempts, error.to_owned());
         // The callback sees who enqueued the job, as the job did.
         job.context
             .clone()
@@ -1028,7 +1022,7 @@ async fn handle_dead_letter(
             .await;
     } else {
         tracing::error!(
-            job = static_name,
+            job = entry.name,
             attempts = job.attempt,
             error,
             "job queue dead-letter (no callback configured)"
