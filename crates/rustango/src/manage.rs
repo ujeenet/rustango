@@ -1143,6 +1143,15 @@ impl Cli {
         if let Some(layer) = &self.real_ip {
             builder = builder.real_ip(layer.clone());
         }
+        // The api router got it in `apply_settings_layers`; the admin and console did not.
+        #[cfg(feature = "config")]
+        if let Some(layer) = self
+            .settings_for_layers
+            .as_ref()
+            .and_then(|s| crate::body_limit::BodyLimitLayer::from_settings(&s.server))
+        {
+            builder = builder.body_limit(layer);
+        }
         match outer {
             Some(o) => o.apply_to(builder),
             None => builder,
@@ -2323,6 +2332,37 @@ mod tests {
         assert!(r.headers().contains_key("x-frame-options"));
         let r = send("acme.localhost", "/app", false).await.unwrap();
         assert_ne!(r.status(), StatusCode::MOVED_PERMANENTLY);
+    }
+
+    /// `[server] max_body_bytes` reaches the operator console and tenant admin.
+    #[cfg(all(feature = "tenancy", feature = "config", feature = "sqlite"))]
+    #[tokio::test]
+    async fn tenancy_builder_hands_over_the_body_limit() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let mut s = crate::config::Settings::default();
+        s.server.max_body_bytes = Some(64);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let pool = sqlx::SqlitePool::connect(&url).await.expect("connect");
+        let builder = crate::server::Builder::from_pool(pool, url, "localhost");
+        let app = Cli::new()
+            .with_settings(&s)
+            .tenancy_builder(builder, None)
+            .into_router()
+            .await
+            .expect("assemble");
+        for host in ["localhost", "acme.localhost"] {
+            let req = Request::post("/login")
+                .header("host", host)
+                .header("content-length", "1000")
+                .body(Body::from(vec![b'a'; 1000]))
+                .unwrap();
+            let r = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE, "{host}");
+        }
     }
 
     /// #2255 — `with_trusted_proxies` reaches the tenancy builder: the
