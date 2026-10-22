@@ -311,8 +311,8 @@ mod ctx_jobs {
 
     /// What each probe saw, by its key: the backends share the process
     /// under `cargo test`.
-    pub fn pending_seen() -> &'static Mutex<HashMap<String, usize>> {
-        static S: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    pub fn probe_seen() -> &'static Mutex<HashMap<String, String>> {
+        static S: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
         S.get_or_init(Default::default)
     }
 
@@ -321,15 +321,35 @@ mod ctx_jobs {
         pub key: String,
     }
 
+    /// Opens its own `atomic` block: one carried over from the enqueuer
+    /// (already committed) would make it a nested block that cannot run.
     #[async_trait::async_trait]
     impl Job for ProbeAtomic {
         const NAME: &'static str = "audit1229_probe_atomic";
         async fn run(&self) -> Result<(), JobError> {
-            let pending = rustango::sql::on_commit_pending();
-            pending_seen()
-                .lock()
-                .unwrap()
-                .insert(self.key.clone(), pending);
+            let seen = |v: &str| {
+                probe_seen()
+                    .lock()
+                    .unwrap()
+                    .insert(self.key.clone(), v.to_owned());
+            };
+            seen("started");
+            let pool = pools().lock().unwrap()[&self.key].clone();
+            let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = fired.clone();
+            let res = rustango::sql::atomic(&pool, move |_tx| {
+                Box::pin(async move {
+                    let outer = rustango::sql::on_commit_pending();
+                    rustango::sql::on_commit(move || {
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    });
+                    assert_eq!(rustango::sql::on_commit_pending(), outer + 1);
+                    Ok(outer)
+                })
+            })
+            .await;
+            let fired = fired.load(std::sync::atomic::Ordering::SeqCst);
+            seen(&format!("{res:?} fired={fired}"));
             Ok(())
         }
     }
@@ -374,17 +394,18 @@ async fn job_audits_as_its_enqueuer(pool: &Pool) {
 }
 
 /// #1229 — the context crosses, the transaction does not: a job
-/// dispatched inside `atomic` sees none of its on-commit queue.
+/// dispatched inside `atomic` opens and commits a block of its own.
 async fn job_dispatched_in_atomic_does_not_join_it(pool: &Pool) {
     #[cfg(not(feature = "jobs"))]
     let _ = pool;
     #[cfg(feature = "jobs")]
     {
-        use ctx_jobs::{pending_seen, ProbeAtomic};
+        use ctx_jobs::{pools, probe_seen, ProbeAtomic};
         use rustango::jobs::{InMemoryJobQueue, JobQueue as _};
 
         let key = format!("{:p}", pool);
-        pending_seen().lock().unwrap().remove(&key);
+        pools().lock().unwrap().insert(key.clone(), pool.clone());
+        probe_seen().lock().unwrap().remove(&key);
         let q = std::sync::Arc::new(InMemoryJobQueue::with_workers(1));
         q.register::<ProbeAtomic>().await;
         q.start().await;
@@ -404,13 +425,22 @@ async fn job_dispatched_in_atomic_does_not_join_it(pool: &Pool) {
         .expect("atomic");
         // The job runs after the commit, still outside the block.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !pending_seen().lock().unwrap().contains_key(&key)
-            && std::time::Instant::now() < deadline
-        {
+        let done = || {
+            probe_seen()
+                .lock()
+                .unwrap()
+                .get(&key)
+                .is_some_and(|v| v != "started")
+        };
+        while !done() && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         q.shutdown().await;
-        assert_eq!(pending_seen().lock().unwrap().get(&key), Some(&0));
+        assert_eq!(
+            probe_seen().lock().unwrap().get(&key).map(String::as_str),
+            Some("Ok(0) fired=true"),
+            "the job must run in its own block, outside the enqueuer's"
+        );
     }
 }
 
