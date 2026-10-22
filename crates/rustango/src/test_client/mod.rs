@@ -130,14 +130,22 @@ impl TestClient {
     }
 
     /// Log in like a browser: GET `path` first when the jar has no CSRF
-    /// token, then POST `fields` with the token. The session cookie the
-    /// handler sets stays in the jar.
+    /// token, then POST `fields` with the token as the `_csrf` field, as
+    /// the rendered form would. The session cookie stays in the jar.
     pub async fn login(&self, path: impl Into<String>, fields: &[(&str, &str)]) -> TestResponse {
+        use crate::forms::csrf::CSRF_FORM_FIELD;
         let path = path.into();
         if self.csrf_token().is_none() {
             self.get(path.clone()).send().await;
         }
-        self.post(path).form(fields).with_csrf().send().await
+        let token = self.csrf_token();
+        let mut fields = fields.to_vec();
+        if let Some(t) = token.as_deref() {
+            if !fields.iter().any(|(k, _)| *k == CSRF_FORM_FIELD) {
+                fields.push((CSRF_FORM_FIELD, t));
+            }
+        }
+        self.post(path).form(&fields).send().await
     }
 
     /// Mint a tenant session cookie directly into the jar. Bypasses
@@ -1339,7 +1347,10 @@ mod tests {
             .route(
                 "/signin",
                 get(|| async { "form" }).post(|body: String| async move {
-                    if body.contains("password=right") {
+                    // Handlers like the admin login read the form field.
+                    if !body.contains("_csrf=") {
+                        (axum::http::StatusCode::FORBIDDEN, "no _csrf field")
+                    } else if body.contains("password=right") {
                         (axum::http::StatusCode::OK, "in")
                     } else {
                         (axum::http::StatusCode::UNAUTHORIZED, "bad password")
