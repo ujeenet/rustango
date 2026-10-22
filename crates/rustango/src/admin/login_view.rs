@@ -1214,11 +1214,15 @@ mod outer_csrf_tests {
     /// the POST passes both the outer layer and the login check.
     #[tokio::test]
     async fn login_round_trip_uses_the_outer_layers_cookie() {
-        let pool = crate::sql::sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap();
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        // The lookup must find no row, not fail: a DB error is a 503.
+        crate::testkit::create_tables_for::<AdminUser>(&pool)
+            .await
+            .unwrap();
         let mut config = super::super::urls::Config::default();
         config.session_secret = Some(crate::session::SessionSecret::from_bytes(vec![7u8; 32]));
         let state = AppState {
-            pool: crate::sql::Pool::Sqlite(pool),
+            pool,
             config: Arc::new(config),
         };
         let app = public_router(state).layer(with_config(CsrfConfig {
