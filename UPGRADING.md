@@ -152,7 +152,7 @@ untouched.
 
 ### MySQL: oversized keys fail at render
 
-A migration whose pk, unique column or index exceeds 3072 bytes (utf8mb4 counts 4 per `max_length` char) now errors before any statement runs; it failed with `ERROR 1071` before. Shorten the `max_length`.
+A migration whose pk, unique column or index exceeds 3072 bytes (utf8mb4 counts 4 per `max_length` char) now errors before any statement runs; it failed with `ERROR 1071` before. Shorten the `max_length`. Widening a column inside an existing index is checked too, and a key on unbounded text, binary or JSON (`ERROR 1170`) is refused.
 
 ### New projects: dev server on loopback
 

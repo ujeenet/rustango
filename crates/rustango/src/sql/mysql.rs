@@ -159,6 +159,8 @@ impl Dialect for MySql {
                 (FieldType::String, Some(n)) => n.saturating_mul(4),
                 (FieldType::Uuid, _) => 36 * 4,
                 (FieldType::Decimal, _) => 30,
+                // LONGTEXT / LONGBLOB / JSON take no key without a prefix (ERROR 1170 / 3152).
+                (FieldType::String, None) | (FieldType::Binary | FieldType::Json, _) => u32::MAX,
                 // Every other key-able type here is at most 8 bytes.
                 _ => 8,
             })

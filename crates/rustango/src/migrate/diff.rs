@@ -2215,6 +2215,11 @@ fn key_fits(
     key: &[(crate::core::FieldType, Option<u32>)],
 ) -> Result<(), String> {
     match dialect.index_key_size(key) {
+        Some((u32::MAX, _)) => Err(format!(
+            "{what} has a column {} cannot index (unbounded text, binary or JSON); give its \
+             string columns a max_length or drop it from the key",
+            dialect.name(),
+        )),
         Some((bytes, cap)) if bytes > cap => Err(format!(
             "{what} takes {bytes} bytes, over {}'s {cap}-byte key limit; shorten its string \
              columns' max_length",
@@ -2222,6 +2227,28 @@ fn key_fits(
         )),
         _ => Ok(()),
     }
+}
+
+/// `table`'s indexes (unique_together included), or the model's when the snapshot lists none.
+fn table_indexes<'a>(current: &'a SchemaSnapshot, table: &str) -> Vec<(&'a str, Vec<&'a str>)> {
+    let snap: Vec<_> = current
+        .indexes
+        .iter()
+        .filter(|i| i.table == table)
+        .map(|i| (i.name.as_str(), i.columns.iter().map(String::as_str).collect()))
+        .collect();
+    if !snap.is_empty() {
+        return snap;
+    }
+    crate::core::ModelEntry::for_table(table)
+        .map(|e| {
+            e.schema
+                .indexes
+                .iter()
+                .map(|i| (i.name, i.columns.to_vec()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The keys `change` creates or widens on a model table must fit [`key_fits`].
@@ -2265,6 +2292,12 @@ fn check_key_sizes(
         }
         if f.unique && !f.primary_key {
             check(t, "unique", &[column])?;
+        }
+        // MySQL re-checks every index on a MODIFY; its DDL auto-commits, so refuse here.
+        for (name, cols) in table_indexes(current, table) {
+            if cols.contains(&column) {
+                check(t, &format!("index `{name}`"), &cols)?;
+            }
         }
         Ok(())
     };
@@ -3182,6 +3215,69 @@ mod sql_type_tests {
         render(&[unique.clone()], &fits, &crate::sql::MySql).unwrap();
         render(&[unique], &snap(10, 10, 769), &crate::sql::MySql).unwrap_err();
         render(&[create, index(&["note"])], &fits, &crate::sql::MySql).unwrap();
+    }
+
+    /// Widening a column inside an existing index re-checks that index (MySQL 1071 on MODIFY).
+    #[test]
+    fn widening_a_column_in_an_existing_index_refuses_a_mysql_key_over_3072_bytes() {
+        let snap = |x: u32| -> SchemaSnapshot {
+            serde_json::from_value(serde_json::json!({
+                "tables": [{ "name": "a", "model": "a", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64", "nullable": false,
+                      "primary_key": true },
+                    { "name": "x", "column": "x", "ty": "string", "nullable": true,
+                      "primary_key": false, "max_length": x },
+                    { "name": "y", "column": "y", "ty": "string", "nullable": true,
+                      "primary_key": false, "max_length": 200 }] }],
+                "indexes": [{ "name": "a_x_y_uq", "table": "a", "columns": ["x", "y"],
+                              "unique": true }] }))
+            .unwrap()
+        };
+        let widen = [SchemaChange::AlterColumnMaxLength {
+            table: "a".into(),
+            column: "x".into(),
+            from: Some(500),
+            to: Some(700),
+        }];
+        let retype = [SchemaChange::AlterColumnType {
+            table: "a".into(),
+            column: "x".into(),
+            from: "i64".into(),
+            to: "string".into(),
+        }];
+        for change in [&widen[..], &retype[..]] {
+            // (700 + 200) * 4 = 3600 bytes.
+            let err = render_changes_split_with_dialect(change, &snap(700), &crate::sql::MySql)
+                .unwrap_err();
+            assert!(err.contains("a_x_y_uq") && err.contains("3072"), "{err}");
+            render_changes_split_with_dialect(change, &snap(700), &crate::sql::Postgres).unwrap();
+            render_changes_split_with_dialect(change, &snap(700), &crate::sql::Sqlite).unwrap();
+            // (568 + 200) * 4 = 3072 bytes, as MySQL accepts.
+            render_changes_split_with_dialect(change, &snap(568), &crate::sql::MySql).unwrap();
+        }
+    }
+
+    /// LONGTEXT / LONGBLOB in a key is MySQL 1170: refuse it before it runs.
+    #[test]
+    fn mysql_refuses_a_key_on_unbounded_text_or_binary() {
+        let snap = |ty: &str| -> SchemaSnapshot {
+            serde_json::from_value(serde_json::json!({ "tables": [{
+                "name": "t", "model": "t", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64", "nullable": false,
+                      "primary_key": true },
+                    { "name": "c", "column": "c", "ty": ty, "nullable": true,
+                      "primary_key": false, "unique": true }] }] }))
+            .unwrap()
+        };
+        let create = [SchemaChange::CreateTable("t".into())];
+        for ty in ["string", "binary"] {
+            let err =
+                render_changes_split_with_dialect(&create, &snap(ty), &crate::sql::MySql)
+                    .unwrap_err();
+            assert!(err.contains("cannot index"), "{ty}: {err}");
+            render_changes_split_with_dialect(&create, &snap(ty), &crate::sql::Postgres).unwrap();
+            render_changes_split_with_dialect(&create, &snap(ty), &crate::sql::Sqlite).unwrap();
+        }
     }
 
     #[test]

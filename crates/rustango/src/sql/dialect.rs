@@ -535,6 +535,7 @@ pub trait Dialect: Send + Sync {
 
     /// `(bytes, cap)` of an index key over these `(type, max_length)`
     /// columns, when the backend caps a key; `None` when it does not.
+    /// `bytes == u32::MAX` means a column cannot be in a key at all.
     fn index_key_size(&self, _cols: &[(FieldType, Option<u32>)]) -> Option<(u32, u32)> {
         None
     }

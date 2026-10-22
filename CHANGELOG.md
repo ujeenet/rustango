@@ -14,11 +14,11 @@ The converge step shows `IF NOT EXISTS` and the Postgres `DO` block, as it runs.
 
 ### Fixed — MySQL key-size check covers model tables
 
-A primary key, unique column or index over MySQL's 3072-byte key limit is refused when the migration renders, not with `ERROR 1071` mid-run.
+A primary key, unique column or index over MySQL's 3072-byte key limit is refused when the migration renders, not with `ERROR 1071` mid-run. Widening a column re-checks the indexes it is in, and a key on unbounded text, binary or JSON is refused (`ERROR 1170`).
 
 ### Fixed — SQLite admin finds a UUID key a column default wrote as TEXT
 
-Detail, edit and delete bind the URL key as the row stores it, not always as a BLOB.
+Detail, edit, delete, bulk actions, inline rows and FK display names bind the key as the row stores it, not always as a BLOB.
 
 ### Fixed — audited `insert(&PgPool)` and `delete(&PgPool)` are atomic
 
