@@ -1,4 +1,4 @@
-//! `m2m_changed` fires only when `add` / `remove` changed a junction row (#2221).
+//! `m2m_changed` fires only when `add` / `remove` / `set` / `clear` changed a junction row (#2221).
 
 #![cfg(all(
     feature = "signals",
@@ -82,7 +82,21 @@ async fn noop_changes_fire_nothing(pool: &Pool) {
     assert_eq!(p.all(pool).await.expect("all"), vec![6]);
 }
 
+async fn noop_set_and_clear_fire_nothing(pool: &Pool) {
+    let fired = record();
+    let p = post(2);
+    p.set(&[5_i64, 6], pool).await.expect("set");
+    p.set(&[6_i64, 5], pool).await.expect("same set");
+    p.set(&[6_i64], pool).await.expect("smaller set");
+    p.clear(pool).await.expect("clear");
+    p.clear(pool).await.expect("clear again");
+    p.set::<i64>(&[], pool).await.expect("empty set on empty");
+    let got: Vec<M2mAction> = fired.lock().unwrap().iter().map(|(a, _)| *a).collect();
+    clear_all();
+    assert_eq!(got, [M2mAction::Set, M2mAction::Set, M2mAction::Clear]);
+}
+
 tri_dialect_test! {
     setup: setup,
-    scenarios: [noop_changes_fire_nothing],
+    scenarios: [noop_changes_fire_nothing, noop_set_and_clear_fire_nothing],
 }

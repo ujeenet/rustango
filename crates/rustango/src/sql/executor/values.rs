@@ -515,7 +515,7 @@ pub async fn fetch_values_flat<U: FlatScalar>(
     fetch_values_flat_on(pool, query).await
 }
 
-async fn fetch_values_flat_on<'c, U: FlatScalar, E: SqlExecutor<'c>>(
+pub(crate) async fn fetch_values_flat_on<'c, U: FlatScalar, E: SqlExecutor<'c>>(
     exec: E,
     query: &SelectQuery,
 ) -> Result<Vec<U>, ExecError> {

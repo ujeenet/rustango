@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `m2m_changed` skips an unchanged `set` and an empty `clear`
+
+Like a duplicate `add`, they changed no row and no longer send the signal, on plain and generic M2M managers.
+
 ### Fixed — serializer `min` / `max` bound float fields
 
 They used to check integers only, so `#[serializer(min = 0, max = 100)] score: f64` took 150. A length bound on a non-string field, or a `min` / `max` on a non-numeric one, in `#[serializer]` or `#[form]`, is now a compile error instead of a silent no-op.
