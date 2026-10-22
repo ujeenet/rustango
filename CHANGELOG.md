@@ -12,6 +12,10 @@ Every template view now merges the registered processors and the request's `Extr
 
 Lookups walk exact → base → fallback chain → default once, and at each locale an override beats the file entry, so an edited default-locale string reaches locales missing the key. `translate_plural` honours overrides, and catalog files may hold plural objects.
 
+### Fixed — a media upload that names no owner belongs to the caller
+
+`POST /uploads/begin` without `uploaded_by_id` now stores the signed-in user as owner; only a superuser can still create an ownerless upload.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

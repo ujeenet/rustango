@@ -796,6 +796,74 @@ async fn an_upload_into_a_collection_needs_collection_view() {
     assert_ne!(begin_upload(me(), &into).await, StatusCode::FORBIDDEN);
 }
 
+/// In-memory storage that hands out presigned PUTs, so a ticket is issued.
+struct Presigning(InMemoryStorage);
+
+#[rustango::storage::async_trait]
+impl rustango::storage::Storage for Presigning {
+    async fn save(&self, key: &str, data: &[u8]) -> Result<(), rustango::storage::StorageError> {
+        self.0.save(key, data).await
+    }
+    async fn load(&self, key: &str) -> Result<Vec<u8>, rustango::storage::StorageError> {
+        self.0.load(key).await
+    }
+    async fn delete(&self, key: &str) -> Result<(), rustango::storage::StorageError> {
+        self.0.delete(key).await
+    }
+    async fn exists(&self, key: &str) -> Result<bool, rustango::storage::StorageError> {
+        self.0.exists(key).await
+    }
+    fn url(&self, _key: &str) -> Option<String> {
+        None
+    }
+    async fn presigned_put_url(
+        &self,
+        key: &str,
+        _ttl: std::time::Duration,
+        _put: &rustango::storage::PutConditions,
+    ) -> Option<String> {
+        Some(format!("mem://{key}"))
+    }
+    fn presigned_put_enforces_conditions(&self) -> bool {
+        true
+    }
+}
+
+// An upload that names no owner is attributed to the caller.
+#[tokio::test]
+async fn an_upload_without_an_owner_is_attributed_to_the_caller() {
+    let (_, pool) = setup().await;
+    let registry = StorageRegistry::new()
+        .set("default", Arc::new(Presigning(InMemoryStorage::new())))
+        .with_default("default");
+    let mgr = MediaManager::new_pool(pool.clone(), registry);
+    let uid = make_user(&pool, "uploader", false).await;
+    grant(&pool, uid, "rustango_media.add").await;
+    let resp = app(mgr.clone(), pool, Some(principal(uid, false)))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/uploads/begin")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"disk":"default","key_prefix":"t/","mime":"text/plain",
+                        "original_filename":"x.txt","size_bytes":1}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let ticket: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let id = ticket["media_id"].as_i64().expect("media_id");
+    let row = mgr.get(id).await.unwrap().expect("pending row");
+    assert_eq!(row.uploaded_by_id, Some(uid), "the upload has no owner");
+}
+
 // #2343 also covers a superuser, who may attribute an upload to anyone.
 #[tokio::test]
 async fn a_superuser_may_attribute_an_upload_to_someone_else() {
