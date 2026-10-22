@@ -544,7 +544,14 @@ where
                     // so we buffer + replace so the inner handler
                     // can still parse it.
                     let (parts, body) = req.into_parts();
-                    let bytes = match axum::body::to_bytes(body, BODY_BUFFER_LIMIT).await {
+                    #[cfg(feature = "_http_layers")]
+                    let limit = parts
+                        .extensions
+                        .get::<crate::body_limit::BodyCap>()
+                        .map_or(BODY_BUFFER_LIMIT, |cap| cap.0);
+                    #[cfg(not(feature = "_http_layers"))]
+                    let limit = BODY_BUFFER_LIMIT;
+                    let bytes = match axum::body::to_bytes(body, limit).await {
                         Ok(b) => b,
                         Err(_) => {
                             return Ok(forbid_response("CSRF: form body exceeded buffer limit"));
@@ -606,6 +613,7 @@ where
 /// extracting the `_csrf` field. axum's default request body limit
 /// (2 MB), which the handler buffers up to anyway: a lower cap here
 /// turned a large admin edit (a long text field) into a 403 (#1714).
+/// An outer `BodyLimitLayer` replaces it with its own cap.
 const BODY_BUFFER_LIMIT: usize = 2 * 1024 * 1024;
 
 /// `true` when `path` is under any configured exempt prefix, by whole
@@ -1529,6 +1537,32 @@ mod tests {
             .route("/save", axum::routing::post(|| async { "saved" }))
             .layer(with_config(CsrfConfig::default().allow_insecure_for_dev()));
         let body = format!("_csrf=tok&text={}", "a".repeat(200 * 1024));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/save")
+                    .header("cookie", "rustango_csrf=tok")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// A body limit raised above 2 MiB raises the form buffer too.
+    #[cfg(feature = "_http_layers")]
+    #[tokio::test]
+    async fn a_form_over_2_mib_passes_under_a_raised_body_limit() {
+        use crate::body_limit::{BodyLimitLayer, BodyLimitRouterExt as _};
+        use tower::ServiceExt as _;
+        let app = axum::Router::new()
+            .route("/save", axum::routing::post(|| async { "saved" }))
+            .layer(with_config(CsrfConfig::default().allow_insecure_for_dev()))
+            .body_limit(BodyLimitLayer::new(8 * 1024 * 1024));
+        let body = format!("_csrf=tok&text={}", "a".repeat(3 * 1024 * 1024));
         let resp = app
             .oneshot(
                 Request::builder()

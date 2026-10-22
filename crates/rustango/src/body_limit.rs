@@ -106,10 +106,17 @@ impl<S: Clone + Send + Sync + 'static> BodyLimitRouterExt for Router<S> {
     }
 }
 
-async fn handle(cfg: Arc<BodyLimitLayer>, req: Request<Body>, next: Next) -> Response {
+/// The cap this layer put on the body, so inner layers that buffer it
+/// (CSRF's form read) can use the same limit.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(feature = "csrf"), allow(dead_code))]
+pub(crate) struct BodyCap(pub(crate) usize);
+
+async fn handle(cfg: Arc<BodyLimitLayer>, mut req: Request<Body>, next: Next) -> Response {
     if !cfg.methods.is_empty() && !cfg.methods.contains(req.method()) {
         return next.run(req).await;
     }
+    req.extensions_mut().insert(BodyCap(cfg.max_bytes));
     if let Some(declared) = req
         .headers()
         .get(header::CONTENT_LENGTH)

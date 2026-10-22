@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — CSRF reads a form body up to the body limit
+
+Under a `BodyLimitLayer` (or `[server] max_body_bytes`) the CSRF layer buffers form-encoded bodies up to that cap, not a fixed 2 MiB, so a large form no longer gets 403.
+
 ### Fixed — `Cli::with_csrf` follows `[security] secure_cookies`
 
 Its cookie was always `Secure`, so the browser never sent it back over plain-HTTP dev and every form POST got 403. It now uses the session cookie policy, like `csrf::layer()`.
