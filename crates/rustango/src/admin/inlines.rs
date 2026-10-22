@@ -1546,18 +1546,25 @@ async fn plan_target(
     };
     let is_new = |idx: usize, raw_pk: &str| initial.map_or(raw_pk.trim().is_empty(), |n| idx >= n);
     // Every existing row's stored state in one read, not one per row.
-    let existing_pks: Vec<SqlValue> = (0..total_forms)
+    let existing_raw: Vec<String> = (0..total_forms)
         .filter_map(|idx| {
             let row = crate::forms::formset::row_payload(form, table, idx);
             let raw_pk = row.get(target.pk.name)?;
-            if is_new(idx, raw_pk) {
-                return None;
-            }
-            crate::forms::parse_pk_string(target.pk, raw_pk).ok()
+            (!is_new(idx, raw_pk)).then(|| raw_pk.clone())
         })
         .collect();
+    // Each key as the row stores it (a SQLite UUID may be TEXT).
+    let stored: HashMap<&str, SqlValue> = super::helpers::parse_keys(
+        state,
+        target.child,
+        target.pk,
+        existing_raw.iter().map(String::as_str),
+    )
+    .await?
+    .into_iter()
+    .collect();
     let own = target
-        .fetch_own_many(&state.pool, parts, existing_pks)
+        .fetch_own_many(&state.pool, parts, stored.values().cloned().collect())
         .await?;
     // Distinct PKs: a repeated DELETE slot removes one row (#1717).
     let mut deleted: HashSet<String> = HashSet::new();
@@ -1627,7 +1634,10 @@ async fn plan_target(
             continue;
         }
 
-        let pk = crate::forms::parse_pk_string(target.pk, &raw_pk).map_err(|e| bad_row(idx, e))?;
+        let pk = match stored.get(raw_pk.as_str()) {
+            Some(key) => key.clone(),
+            None => crate::forms::parse_pk_string(target.pk, &raw_pk).map_err(|e| bad_row(idx, e))?,
+        };
 
         if delete_flag {
             if !state.can_delete(table) {

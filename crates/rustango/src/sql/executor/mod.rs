@@ -1216,29 +1216,54 @@ pub(crate) async fn stored_key(
     key: SqlValue,
     raw: &str,
 ) -> Result<SqlValue, ExecError> {
+    let mut keys = stored_keys(pool, model, pk_field, vec![(key, raw)]).await?;
+    Ok(keys.remove(0))
+}
+
+/// [`stored_key`] for many `(key, raw)` pairs of `field`, in one read per chunk.
+#[cfg(feature = "admin")]
+pub(crate) async fn stored_keys(
+    pool: &Pool,
+    model: &'static crate::core::ModelSchema,
+    field: &'static crate::core::FieldSchema,
+    keys: Vec<(SqlValue, &str)>,
+) -> Result<Vec<SqlValue>, ExecError> {
     #[cfg(feature = "sqlite")]
-    if let (Pool::Sqlite(sq), crate::core::FieldType::Uuid) = (pool, pk_field.ty) {
-        let query = SelectQuery {
-            limit: Some(1),
-            ..SelectQuery::by_pk_in(
-                model,
-                pk_field.column,
-                vec![key.clone(), SqlValue::String(raw.to_owned())],
-            )
-            .projection(vec![pk_field.column])
+    if let (Pool::Sqlite(sq), crate::core::FieldType::Uuid) = (pool, field.ty) {
+        let uuid_of = |v: &SqlValue| match v {
+            SqlValue::Uuid(u) => Some(*u),
+            SqlValue::String(s) => uuid::Uuid::parse_str(s).ok(),
+            _ => None,
         };
-        crate::test_assertions::query_counter::bump();
-        let stmt = pool.dialect().compile_select(&query)?;
-        let mut q = sqlx::query(&stmt.sql);
-        for v in stmt.params {
-            q = bind_query_sqlite(q, v);
+        let mut stored = std::collections::HashMap::new();
+        // Two binds per key, well under SQLite's 32766.
+        for chunk in keys.chunks(4096) {
+            let binds = chunk
+                .iter()
+                .flat_map(|(k, raw)| [k.clone(), SqlValue::String((*raw).to_owned())])
+                .collect();
+            let query = SelectQuery::by_pk_in(model, field.column, binds)
+                .projection(vec![field.column]);
+            crate::test_assertions::query_counter::bump();
+            let stmt = pool.dialect().compile_select(&query)?;
+            let mut q = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_sqlite(q, v);
+            }
+            for row in q.fetch_all(sq).await? {
+                let v = sqlite_uuid_key(&row, field.column)?;
+                if let Some(u) = uuid_of(&v) {
+                    stored.entry(u).or_insert(v);
+                }
+            }
         }
-        if let Some(row) = q.fetch_optional(sq).await? {
-            return Ok(sqlite_uuid_key(&row, pk_field.column)?);
-        }
+        return Ok(keys
+            .into_iter()
+            .map(|(k, _)| uuid_of(&k).and_then(|u| stored.get(&u).cloned()).unwrap_or(k))
+            .collect());
     }
-    let _ = (pool, model, pk_field, raw);
-    Ok(key)
+    let _ = (pool, model, field);
+    Ok(keys.into_iter().map(|(k, _)| k).collect())
 }
 
 /// `UPDATE` against either backend; returns rows affected.

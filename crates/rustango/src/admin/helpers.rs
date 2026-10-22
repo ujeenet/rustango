@@ -288,6 +288,22 @@ pub(crate) async fn parse_pk(
     Ok(crate::sql::stored_key(&state.pool, model, pk_field, key, pk_raw).await?)
 }
 
+/// [`parse_pk`] for many keys of `field`; a key that does not parse is dropped.
+pub(crate) async fn parse_keys<'r>(
+    state: &AppState,
+    model: &'static ModelSchema,
+    field: &'static crate::core::FieldSchema,
+    raws: impl IntoIterator<Item = &'r str>,
+) -> Result<Vec<(&'r str, crate::core::SqlValue)>, crate::sql::ExecError> {
+    let parsed: Vec<_> = raws
+        .into_iter()
+        .filter_map(|raw| Some((crate::forms::parse_pk_string(field, raw).ok()?, raw)))
+        .collect();
+    let raws: Vec<&'r str> = parsed.iter().map(|(_, raw)| *raw).collect();
+    let keys = crate::sql::stored_keys(&state.pool, model, field, parsed).await?;
+    Ok(raws.into_iter().zip(keys).collect())
+}
+
 /// Return the model's `#[rustango(admin(...))]` block, falling back to
 /// [`crate::core::AdminConfig::DEFAULT`] when none is declared. Folds
 /// the third prologue pattern that recurs across every list / detail /
