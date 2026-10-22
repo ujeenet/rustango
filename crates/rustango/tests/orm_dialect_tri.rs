@@ -251,15 +251,72 @@ async fn pk_lookups_on_a_renamed_pk_column(pool: &Pool) {
         .await
         .expect("in_bulk");
     assert_eq!(by_no.len(), 2);
+    let last = Acct::objects().last(pool).await.expect("last");
+    assert_eq!(last.map(|a| a.number), Some(2));
+    let on = Acct::objects()
+        .in_bulk_on(Acct::number, [1_i64], |a| a.number, pool)
+        .await
+        .expect("in_bulk_on");
+    assert_eq!(on.len(), 1);
+    let pks = Acct::objects().pks::<i64>(pool).await.expect("pks");
+    assert_eq!(pks.len(), 2);
+    let mut e = Entry {
+        id: Auto::default(),
+        acct: rustango::sql::ForeignKey::unloaded(2),
+    };
+    e.insert_pool(pool).await.expect("seed entry");
+    assert_eq!(e.acct.clone().get_on(pool).await.expect("fk get_on").name, "b");
     #[cfg(feature = "postgres")]
-    {
-        let mut e = Entry {
-            id: Auto::default(),
-            acct: rustango::sql::ForeignKey::unloaded(2),
-        };
-        e.insert_pool(pool).await.expect("seed entry");
-        assert_eq!(e.acct.get_pool(pool).await.expect("fk get").name, "b");
-    }
+    assert_eq!(e.acct.get_pool(pool).await.expect("fk get").name, "b");
+}
+
+/// An empty `HAVING` predicate keeps every group.
+async fn empty_having_is_true(pool: &Pool) {
+    seed(pool, &[("a", "apple"), ("b", "apple"), ("c", "banana")]).await;
+    let rows = Post::objects()
+        .values(&["title"])
+        .annotate("n", AggregateExpr::Count(None))
+        .having(rustango::core::TypedExpr::from_where_expr(WhereExpr::And(vec![])))
+        .fetch(pool)
+        .await
+        .expect("having");
+    assert_eq!(rows.len(), 2);
+}
+
+/// The `distinct_on` fallback pages the survivors, not the ranked rows.
+async fn distinct_on_pages_the_survivors(pool: &Pool) {
+    seed(pool, &[("a", "apple"), ("b", "apple"), ("c", "banana"), ("d", "cherry")]).await;
+    let by_title = || {
+        Post::objects()
+            .distinct_on(&["title"])
+            .order_by(&[("title", false), ("id", false)])
+    };
+    let titles = |rows: Vec<Post>| rows.into_iter().map(|p| p.title).collect::<Vec<_>>();
+    let page = by_title().limit(1).offset(1).fetch(pool).await.expect("page");
+    assert_eq!(titles(page), ["banana"]);
+    let rest = by_title().offset(1).fetch(pool).await.expect("offset only");
+    assert_eq!(titles(rest), ["banana", "cherry"]);
+}
+
+/// A PG bulk insert reads back a default-written UUID key.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn pg_bulk_insert_reads_back_a_default_uuid_key() {
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    fresh_table::<TextKey>(&pool).await;
+    let mut rows = [TextKey {
+        id: Auto::default(),
+        name: "k".into(),
+    }];
+    TextKey::bulk_insert(&mut rows, pool.as_postgres().expect("pg"))
+        .await
+        .expect("bulk");
+    let want = uuid::uuid!("7c9e6679-7425-40de-944b-e07fc1f90ae7");
+    assert_eq!(rows[0].id.get().copied(), Some(want));
 }
 
 /// An empty `And` is TRUE wherever it nests.
@@ -1148,6 +1205,8 @@ tri_dialect_test! {
         nested_empty_and_is_true,
         distinct_on_keeps_join_columns_and_order,
         insert_reads_back_a_text_uuid_key,
+        empty_having_is_true,
+        distinct_on_pages_the_survivors,
     ],
 }
 
