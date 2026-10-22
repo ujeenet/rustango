@@ -434,7 +434,7 @@ impl syn::parse::Parse for QInput {
 fn expand_q(input: TokenStream2) -> syn::Result<TokenStream2> {
     let q: QInput = syn::parse2(input)?;
     let root = rustango_root();
-    let field_str = q.field.to_string();
+    let field_str = ident_name(&q.field);
     let field_span = q.field.span();
     let (base, suffix) = match field_str.find("__") {
         Some(idx) => (&field_str[..idx], &field_str[idx + 2..]),
@@ -446,7 +446,7 @@ fn expand_q(input: TokenStream2) -> syn::Result<TokenStream2> {
             "Q!(): field name is empty before `__` suffix",
         ));
     }
-    let base_ident = syn::Ident::new(base, field_span);
+    let base_ident = ident_from_name(base, field_span);
     let value = &q.value;
     let path = &q.base_path;
 
