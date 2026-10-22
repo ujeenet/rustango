@@ -1223,6 +1223,7 @@ fn render_changes_split_inner(
         if writes_ci_text(change, current) {
             out.immediate.extend(ci_extension.take().map(str::to_owned));
         }
+        check_key_sizes(change, current, dialect)?;
         match change {
             SchemaChange::CreateTable(name) => {
                 let table = current.table(name).ok_or_else(|| {
@@ -1804,16 +1805,11 @@ fn render_changes_split_inner(
                 let q_dst_col = dialect.quote_ident(dst_col);
                 let (src_ty, src_pk, src_key) = m2m_end(current, src_table, dialect);
                 let (dst_ty, dst_pk, dst_key) = m2m_end(current, dst_table, dialect);
-                if let Some((bytes, cap)) = dialect.index_key_size(&[src_key, dst_key]) {
-                    if bytes > cap {
-                        return Err(format!(
-                            "junction `{through}`: its primary key ({src_col}, {dst_col}) takes \
-                             {bytes} bytes, over {}'s {cap}-byte key limit; shorten the string \
-                             pks' max_length",
-                            dialect.name(),
-                        ));
-                    }
-                }
+                key_fits(
+                    dialect,
+                    &format!("junction `{through}`: its primary key ({src_col}, {dst_col})"),
+                    &[src_key, dst_key],
+                )?;
 
                 if dialect.inline_fks_in_create_table() {
                     // SQLite: ALTER TABLE … ADD CONSTRAINT FK isn't supported.
@@ -2210,6 +2206,101 @@ fn m2m_end<'a>(
         ..pk.clone()
     };
     (sql_type_with_dialect(&column, dialect), &pk.column, key)
+}
+
+/// Refuses a key over the backend's byte cap (MySQL 1071) before it runs.
+fn key_fits(
+    dialect: &dyn crate::sql::Dialect,
+    what: &str,
+    key: &[(crate::core::FieldType, Option<u32>)],
+) -> Result<(), String> {
+    match dialect.index_key_size(key) {
+        Some((bytes, cap)) if bytes > cap => Err(format!(
+            "{what} takes {bytes} bytes, over {}'s {cap}-byte key limit; shorten its string \
+             columns' max_length",
+            dialect.name(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The keys `change` creates or widens on a model table must fit [`key_fits`].
+fn check_key_sizes(
+    change: &SchemaChange,
+    current: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Result<(), String> {
+    let key_of = |t: &TableSnapshot, cols: &[&str]| -> Vec<_> {
+        cols.iter()
+            .filter_map(|c| t.field(c))
+            .filter_map(|f| {
+                super::snapshot::field_type_from_name(&f.ty).map(|ty| (ty, f.max_length))
+            })
+            .collect()
+    };
+    fn pk(t: &TableSnapshot) -> Vec<&str> {
+        t.fields
+            .iter()
+            .filter(|f| f.primary_key)
+            .map(|f| f.column.as_str())
+            .collect()
+    }
+    let check = |t: &TableSnapshot, what: &str, cols: &[&str]| {
+        key_fits(
+            dialect,
+            &format!("`{}`: {what} ({})", t.name, cols.join(", ")),
+            &key_of(t, cols),
+        )
+    };
+    // The pk and the column's own UNIQUE, whichever it is part of.
+    let column_keys = |table: &str, column: &str| -> Result<(), String> {
+        let Some(t) = current.table(table) else {
+            return Ok(());
+        };
+        let Some(f) = t.field(column) else {
+            return Ok(());
+        };
+        if f.primary_key {
+            check(t, "primary key", &pk(t))?;
+        }
+        if f.unique && !f.primary_key {
+            check(t, "unique", &[column])?;
+        }
+        Ok(())
+    };
+    match change {
+        SchemaChange::CreateTable(name) => {
+            let Some(t) = current.table(name) else {
+                return Ok(());
+            };
+            check(t, "primary key", &pk(t))?;
+            for f in t.fields.iter().filter(|f| f.unique && !f.primary_key) {
+                check(t, "unique", &[f.column.as_str()])?;
+            }
+            Ok(())
+        }
+        SchemaChange::AddColumn { table, column }
+        | SchemaChange::AlterColumnType { table, column, .. }
+        | SchemaChange::AlterColumnMaxLength { table, column, .. }
+        | SchemaChange::AlterColumnUnique {
+            table,
+            column,
+            unique: true,
+        } => column_keys(table, column),
+        SchemaChange::CreateIndex {
+            name,
+            table,
+            columns,
+            ..
+        } => match current.table(table) {
+            Some(t) => {
+                let cols: Vec<&str> = columns.iter().map(String::as_str).collect();
+                check(t, &format!("index `{name}`"), &cols)
+            }
+            None => Ok(()),
+        },
+        _ => Ok(()),
+    }
 }
 
 /// ` REFERENCES <to> (<on>) [ON DELETE …]`, for SQLite's inline FKs.
@@ -3032,6 +3123,62 @@ mod sql_type_tests {
         render(&string_pk_snap(384, "string"), &crate::sql::MySql).unwrap();
         render(&string_pk_snap(766, "i64"), &crate::sql::MySql).unwrap();
         render(&string_pk_snap(767, "i64"), &crate::sql::MySql).unwrap_err();
+    }
+
+    /// A model table's pk, unique column and index fit MySQL's 3072-byte key too.
+    #[test]
+    fn model_table_keys_refuse_a_mysql_key_over_3072_bytes() {
+        let snap = |pk: u32, code: u32, note: u32| -> SchemaSnapshot {
+            serde_json::from_value(serde_json::json!({ "tables": [{
+                "name": "t", "model": "t", "fields": [
+                    { "name": "id", "column": "id", "ty": "string", "nullable": false,
+                      "primary_key": true, "max_length": pk },
+                    { "name": "code", "column": "code", "ty": "string", "nullable": true,
+                      "primary_key": false, "unique": true, "max_length": code },
+                    { "name": "note", "column": "note", "ty": "string", "nullable": true,
+                      "primary_key": false, "max_length": note }] }] }))
+            .unwrap()
+        };
+        let index = |cols: &[&str]| SchemaChange::CreateIndex {
+            name: "t_idx".into(),
+            table: "t".into(),
+            columns: cols.iter().map(|c| (*c).to_owned()).collect(),
+            unique: false,
+            method: "btree".into(),
+            where_clause: None,
+            include: Vec::new(),
+        };
+        let add = |c: &str| SchemaChange::AddColumn {
+            table: "t".into(),
+            column: c.into(),
+        };
+        let unique = SchemaChange::AlterColumnUnique {
+            table: "t".into(),
+            column: "note".into(),
+            unique: true,
+        };
+        let create = SchemaChange::CreateTable("t".into());
+        let render = |changes: &[SchemaChange], s: &SchemaSnapshot, d: &dyn crate::sql::Dialect| {
+            render_changes_split_with_dialect(changes, s, d)
+        };
+        let fits = snap(768, 768, 768);
+        let wide = [
+            (create.clone(), snap(769, 10, 10)),
+            (add("code"), snap(10, 769, 10)),
+            (index(&["note"]), snap(10, 10, 769)),
+        ];
+        for (change, s) in &wide {
+            let one = std::slice::from_ref(change);
+            let err = render(one, s, &crate::sql::MySql).unwrap_err();
+            assert!(err.contains("3072"), "{change:?}: {err}");
+            render(one, s, &crate::sql::Postgres).unwrap();
+            render(one, s, &crate::sql::Sqlite).unwrap();
+        }
+        let err = render(&[index(&["code", "note"])], &fits, &crate::sql::MySql).unwrap_err();
+        assert!(err.contains("t_idx"), "{err}");
+        render(&[unique.clone()], &fits, &crate::sql::MySql).unwrap();
+        render(&[unique], &snap(10, 10, 769), &crate::sql::MySql).unwrap_err();
+        render(&[create, index(&["note"])], &fits, &crate::sql::MySql).unwrap();
     }
 
     #[test]

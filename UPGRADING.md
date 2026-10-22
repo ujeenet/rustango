@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### MySQL: oversized keys fail at render
+
+A migration whose pk, unique column or index exceeds 3072 bytes (utf8mb4 counts 4 per `max_length` char) now errors before any statement runs; it failed with `ERROR 1071` before. Shorten the `max_length`.
+
 ### New projects: dev server on loopback
 
 Only new scaffolds change. To match in an existing project, drop `RUSTANGO_BIND` from `.env`, add `RUSTANGO_BIND: 0.0.0.0:8080` under the compose `rust` service's `environment:`, and publish `"127.0.0.1:8080:8080"`.
