@@ -14,7 +14,7 @@ The tenancy `run-server` verb rebuilt its pools with defaults, dropping `Cli::wi
 
 ### Fixed — `X-Request-Id` is reused only from a trusted proxy
 
-`RequestIdLayer::default()` used to echo any client's id. It now keeps one only behind `with_trusted_proxies`, and only visible ASCII without quotes. A `[logging] level` of `warning`, `critical` or `fatal` now reads as a level instead of silencing every log.
+`RequestIdLayer::default()` used to echo any client's id. It now keeps one only behind `with_trusted_proxies` (whether or not that hop sends `X-Forwarded-For`), and only visible ASCII without quotes. A `[logging] level` of `warning`, `critical` or `fatal` now reads as a level instead of silencing every log.
 
 ## [0.60.10] — 2026-10-22
 

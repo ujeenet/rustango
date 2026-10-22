@@ -120,7 +120,7 @@ async fn handle(cfg: Arc<RequestIdLayer>, mut req: Request<Body>, next: Next) ->
     // Any client can send the header, so only a trusted proxy's is kept.
     let trusted = req
         .extensions()
-        .get::<crate::real_ip::TrustedRealIp>()
+        .get::<crate::real_ip::TrustedPeer>()
         .is_some();
     let id = if cfg.always_generate || !trusted {
         generate_id()
@@ -210,23 +210,29 @@ mod tests {
         assert!(!is_safe("abc\0def"));
     }
 
-    async fn served_id(id: &str, via_trusted_proxy: bool) -> String {
+    /// The id served for `id` sent from `peer`, behind a layer trusting 10/8.
+    async fn served_id_from(id: &str, peer: [u8; 4], xff: Option<&str>) -> String {
+        use crate::real_ip::{RealIpLayer, RealIpRouterExt as _};
         use tower::ServiceExt as _;
         let app = Router::new()
             .route("/", axum::routing::get(|| async { "ok" }))
-            .request_id(RequestIdLayer::default());
-        let mut req = Request::builder()
-            .uri("/")
-            .header(HEADER_NAME, id)
-            .body(Body::empty())
-            .unwrap();
-        if via_trusted_proxy {
-            let ip = std::net::IpAddr::from([10, 0, 0, 1]);
-            req.extensions_mut()
-                .insert(crate::real_ip::TrustedRealIp(ip));
+            .request_id(RequestIdLayer::default())
+            .real_ip(RealIpLayer::default().trust_proxies(["10.0.0.0/8"]).unwrap());
+        let mut req = Request::builder().uri("/").header(HEADER_NAME, id);
+        if let Some(xff) = xff {
+            req = req.header("x-forwarded-for", xff);
         }
+        let mut req = req.body(Body::empty()).unwrap();
+        let addr = std::net::SocketAddr::from((peer, 4000));
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
         let resp = app.oneshot(req).await.unwrap();
         resp.headers()[HEADER_NAME].to_str().unwrap().to_owned()
+    }
+
+    async fn served_id(id: &str, via_trusted_proxy: bool) -> String {
+        let peer = if via_trusted_proxy { [10, 0, 0, 1] } else { [203, 0, 113, 9] };
+        served_id_from(id, peer, Some("198.51.100.4")).await
     }
 
     /// Any client can send the header; only a trusted proxy's is kept.
@@ -237,6 +243,13 @@ mod tests {
         let spaced = "a request_id=forged";
         assert_ne!(served_id(spaced, true).await, spaced);
         assert_ne!(served_id("a\"b", true).await, "a\"b");
+    }
+
+    /// Trust follows the peer, not whether it also sent X-Forwarded-For.
+    #[tokio::test]
+    async fn trusted_peer_without_forwarded_for_keeps_its_id() {
+        assert_eq!(served_id_from("edge-2", [10, 0, 0, 5], None).await, "edge-2");
+        assert_ne!(served_id_from("edge-3", [203, 0, 113, 9], None).await, "edge-3");
     }
 
     #[test]
