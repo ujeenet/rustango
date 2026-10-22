@@ -162,7 +162,7 @@ The built-in server closes a connection that sends no complete request head for 
 
 ### CSRF skips the token for browser report bodies
 
-A same-origin POST with `Content-Type: application/csp-report` or `application/reports+json` passes `CsrfLayer` without a token, on any path. A handler that takes a raw body (`String`, `Bytes`) and changes state should check the content type.
+A POST with `Content-Type: application/csp-report` or `application/reports+json` passes `CsrfLayer` without a token only at a path in the new `CsrfConfig::report_paths` (default `["/__csp-report"]`), with a same-origin or no Origin. Mount `csp_report_router` elsewhere? Add the path with `CsrfConfig::report_path`. A `CsrfConfig { .. }` literal without `..Default::default()` needs the new field.
 
 ### `BodyLimitLayer` sets the extractor limit
 

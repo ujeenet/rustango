@@ -98,7 +98,7 @@ A failed Slack POST no longer prints the webhook URL, and `http_probe` errors sh
 
 ### Fixed — `csp_report_router` takes real browser reports
 
-It reads `application/csp-report` and `application/reports+json` bodies up to 64 KiB; they were refused with 415. The CSRF layer lets these two types through without a token (no form or no-cors fetch can send them), and still checks the Origin.
+It reads `application/csp-report` and `application/reports+json` bodies up to 64 KiB; they were refused with 415. The CSRF layer lets these two types through without a token only at `CsrfConfig::report_paths` (default `/__csp-report`); a foreign Origin is still refused. It logs at most 10 violations per request, newlines escaped.
 
 ### Fixed — `server.max_body_bytes` can raise the limit above 2 MiB
 

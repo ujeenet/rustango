@@ -158,6 +158,10 @@ pub struct CsrfConfig {
     ///
     /// If you can't guarantee both, set this to `true`.
     pub require_csrf_on_query: bool,
+    /// Exact paths of [`crate::security_headers::csp_report_router`]
+    /// endpoints. There, and only there, a browser report body needs no
+    /// token. Default `["/__csp-report"]`.
+    pub report_paths: Vec<String>,
 }
 
 impl Default for CsrfConfig {
@@ -169,6 +173,7 @@ impl Default for CsrfConfig {
             trusted_origins: Vec::new(),
             exempt_prefixes: Vec::new(),
             require_csrf_on_query: false,
+            report_paths: vec!["/__csp-report".to_owned()],
         }
     }
 }
@@ -214,6 +219,13 @@ impl CsrfConfig {
     #[must_use]
     pub fn exempt_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.exempt_prefixes.push(prefix.into());
+        self
+    }
+
+    /// Builder — add a CSP report endpoint path to [`Self::report_paths`].
+    #[must_use]
+    pub fn report_path(mut self, path: impl Into<String>) -> Self {
+        self.report_paths.push(path.into());
         self
     }
 }
@@ -518,10 +530,13 @@ where
             // (beacon/collector endpoints; see `CsrfConfig::exempt_prefix`).
             let enforced = !method_is_csrf_exempt(req.method(), &cfg)
                 && !path_is_exempt(req.uri().path(), &cfg.exempt_prefixes);
+            let report = is_browser_report(&req, &cfg.report_paths);
             let mut req = if enforced {
                 // Origin-header defense-in-depth. Always runs; an empty
-                // `trusted_origins` means same-host only (#1529).
-                if !origin_allowed(&req, &cfg.trusted_origins) {
+                // `trusted_origins` means same-host only (#1529). A report
+                // only logs, so one sent without an Origin is taken.
+                let no_origin = !req.headers().contains_key(axum::http::header::ORIGIN);
+                if !(report && no_origin) && !origin_allowed(&req, &cfg.trusted_origins) {
                     return Ok(forbid_response(
                         "CSRF: request Origin not in CSRF_TRUSTED_ORIGINS \
                          and does not match Host",
@@ -532,8 +547,8 @@ where
                     .get(&cfg.header_name)
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_owned);
-                if is_browser_report(&req) {
-                    // Reports carry no token; the Origin check above still ran.
+                if report {
+                    // Reports carry no token.
                     req
                 } else if let Some(h) = header_value {
                     // Header path — short-circuit, no body buffering.
@@ -565,7 +580,8 @@ where
             } else {
                 req
             };
-            if enforced {
+            // A report was not token-checked, so an inner layer must not defer.
+            if enforced && !report {
                 req.extensions_mut().insert(ActiveCsrf {
                     cfg: Arc::clone(&cfg),
                     secure_from,
@@ -681,13 +697,14 @@ fn is_form_encoded(req: &Request<Body>) -> bool {
     media_type(req).as_deref() == Some("application/x-www-form-urlencoded")
 }
 
-/// A browser violation report. No form or no-cors fetch can send these
-/// types, so like `QUERY` they carry no ambient-credential CSRF.
-fn is_browser_report(req: &Request<Body>) -> bool {
-    matches!(
-        media_type(req).as_deref(),
-        Some("application/csp-report" | "application/reports+json")
-    )
+/// A browser violation report to a report endpoint. No form or no-cors
+/// fetch can send these types; `Json` reads `+json`, so other paths still check.
+fn is_browser_report(req: &Request<Body>, report_paths: &[String]) -> bool {
+    report_paths.iter().any(|p| p == req.uri().path())
+        && matches!(
+            media_type(req).as_deref(),
+            Some("application/csp-report" | "application/reports+json")
+        )
 }
 
 /// The lowercased `Content-Type` without its parameters.
