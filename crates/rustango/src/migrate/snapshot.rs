@@ -826,7 +826,7 @@ impl FieldSnapshot {
         Self {
             name: f.name.to_owned(),
             column: f.column.to_owned(),
-            ty: field_type_name(f.ty).to_owned(),
+            ty: field_type_name(f.ty).into_owned(),
             nullable: f.nullable,
             primary_key: f.primary_key,
             max_length: f.max_length,
@@ -843,9 +843,23 @@ impl FieldSnapshot {
     }
 }
 
-/// The inverse of [`field_type_name`]; `None` for vector, geometry and unknown names.
+/// The inverse of [`field_type_name`]; `None` for unknown names.
 pub(crate) fn field_type_from_name(name: &str) -> Option<FieldType> {
     use crate::core::{ArrayElem, RangeElem};
+    // `vector(3)`, `geometry(4326)`; the bare names are size 0.
+    let sized = |prefix: &str| -> Option<u32> {
+        let rest = name.strip_prefix(prefix)?;
+        if rest.is_empty() {
+            return Some(0);
+        }
+        rest.strip_prefix('(')?.strip_suffix(')')?.parse().ok()
+    };
+    if let Some(dims) = sized("vector") {
+        return Some(FieldType::Vector(dims));
+    }
+    if let Some(srid) = sized("geometry") {
+        return Some(FieldType::Geometry(srid));
+    }
     Some(match name {
         "i16" => FieldType::I16,
         "i32" => FieldType::I32,
@@ -882,10 +896,17 @@ pub(crate) fn is_integer_ty(name: &str) -> bool {
     )
 }
 
-pub(crate) fn field_type_name(ty: FieldType) -> &'static str {
+pub(crate) fn field_type_name(ty: FieldType) -> std::borrow::Cow<'static, str> {
     // Like `FieldType::as_str`, but with names that are stable in
-    // snapshot JSON.
+    // snapshot JSON. The size is in the name, so changing it is a diff.
     match ty {
+        FieldType::Vector(0) => return "vector".into(),
+        FieldType::Vector(dims) => return format!("vector({dims})").into(),
+        FieldType::Geometry(0) => return "geometry".into(),
+        FieldType::Geometry(srid) => return format!("geometry({srid})").into(),
+        _ => {}
+    }
+    std::borrow::Cow::Borrowed(match ty {
         FieldType::I16 => "i16",
         FieldType::I32 => "i32",
         FieldType::I64 => "i64",
@@ -909,14 +930,8 @@ pub(crate) fn field_type_name(ty: FieldType) -> &'static str {
         FieldType::Range(crate::core::RangeElem::Date) => "range_date",
         FieldType::Range(crate::core::RangeElem::DateTime) => "range_datetime",
         FieldType::HStore => "hstore",
-        // The return type is `&'static str`, so the vector dimension
-        // is not encoded. A change from `vector(3)` to `vector(4)`
-        // does not show up as a schema diff.
-        FieldType::Vector(_) => "vector",
-        // Same for the geometry SRID: an SRID-only change is not
-        // diffed.
-        FieldType::Geometry(_) => "geometry",
-    }
+        FieldType::Vector(_) | FieldType::Geometry(_) => unreachable!("named above"),
+    })
 }
 
 /// Sort by name and keep one entry per name: the smallest definition,

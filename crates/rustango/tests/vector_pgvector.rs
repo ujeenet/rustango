@@ -103,3 +103,73 @@ fn distance_operators_error_cleanly_on_mysql_and_sqlite() {
         );
     }
 }
+
+/// A PG-only value is refused when compiled for MySQL or SQLite, not left
+/// to the bind step, which has no way to fail but a panic.
+#[test]
+fn pg_only_values_are_refused_at_compile_on_mysql_and_sqlite() {
+    use rustango::core::{Assignment, DeleteQuery, Filter, Op, SqlValue, UpdateQuery, WhereExpr};
+    use rustango::sql::SqlError;
+    let values = [
+        ("vector", SqlValue::Vector(vec![1.0, 2.0, 3.0])),
+        ("array", SqlValue::Array(vec![SqlValue::I32(1)])),
+        ("range", SqlValue::RangeLiteral("[1,2)".into())),
+        ("hstore", SqlValue::HStore(vec![("k".into(), None)])),
+        (
+            "geometry",
+            SqlValue::Geometry {
+                x: 1.0,
+                y: 2.0,
+                srid: 4326,
+            },
+        ),
+    ];
+    let refused = |name: &str, kind: &str, res: Result<_, SqlError>| {
+        let err = res.expect_err(&format!("{name} compiled a {kind}"));
+        assert!(
+            matches!(err, SqlError::ValueNotSupportedInDialect { value, dialect }
+                if value == kind && dialect == name),
+            "{name}: {err:?}"
+        );
+    };
+    for (kind, value) in values {
+        let q = UpdateQuery::new(
+            Doc::SCHEMA,
+            vec![Assignment::new("embedding", value.clone())],
+            WhereExpr::Predicate(Filter::new("id", Op::Eq, 1_i64)),
+        );
+        assert!(Postgres.compile_update(&q).is_ok(), "{value:?}");
+        refused("mysql", kind, MySql.compile_update(&q));
+        refused("sqlite", kind, Sqlite.compile_update(&q));
+
+        // Inside a list: `IN` binds each item, `=` binds the list whole.
+        for op in [Op::In, Op::Eq] {
+            let q = DeleteQuery::new(
+                Doc::SCHEMA,
+                WhereExpr::Predicate(Filter::new(
+                    "id",
+                    op,
+                    SqlValue::List(vec![SqlValue::I64(1), value.clone()]),
+                )),
+            );
+            refused("mysql", kind, MySql.compile_delete(&q));
+            refused("sqlite", kind, Sqlite.compile_delete(&q));
+        }
+    }
+}
+
+/// Saving such a model on SQLite returns an error instead of panicking.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_insert_of_a_vector_errors() {
+    let pool = rustango::sql::Pool::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let doc = Doc {
+        id: 1,
+        title: "t".into(),
+        embedding: Vector(vec![1.0, 2.0, 3.0]),
+    };
+    let err = doc.insert_pool(&pool).await.expect_err("a vector on SQLite");
+    assert!(err.to_string().contains("sqlite"), "{err}");
+}

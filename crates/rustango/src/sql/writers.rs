@@ -260,7 +260,18 @@ impl<'d> Sql<'d> {
         self.push_param_typed(value, None);
     }
 
-    pub(super) fn finish(mut self) -> CompiledStatement {
+    /// # Errors
+    /// [`SqlError::ValueNotSupportedInDialect`] for a Postgres-only
+    /// value on another backend: its bind arm can only panic.
+    pub(super) fn finish(mut self) -> Result<CompiledStatement, SqlError> {
+        if !self.d.binds_pg_only_values() {
+            if let Some(value) = self.params.iter().find_map(SqlValue::pg_only_kind) {
+                return Err(SqlError::ValueNotSupportedInDialect {
+                    value,
+                    dialect: self.d.name(),
+                });
+            }
+        }
         if self.group_concat {
             // A statement-level hint: it covers the GROUP_CONCAT in any block.
             let start = self.sql.len() - self.sql.trim_start_matches('(').len();
@@ -274,10 +285,10 @@ impl<'d> Sql<'d> {
                 );
             }
         }
-        CompiledStatement {
+        Ok(CompiledStatement {
             sql: self.sql,
             params: self.params,
-        }
+        })
     }
 }
 
@@ -5002,7 +5013,7 @@ pub(crate) fn compile_select_with_child_count(
     if select.compound.is_empty() {
         b.child_count = Some(child);
         write_select(&mut b, select)?;
-        return Ok(b.finish());
+        return b.finish();
     }
     // A set operation counts over its merged rows, or only the head would
     // carry the column.
@@ -5028,7 +5039,7 @@ pub(crate) fn compile_select_with_child_count(
         select.compound_limit,
         select.compound_offset,
     )?;
-    Ok(b.finish())
+    b.finish()
 }
 
 /// The children a SELECT counts per row: `child_table.fk_column = parent.parent_pk`.
@@ -5091,7 +5102,7 @@ pub(crate) fn compile_date_buckets(
     b.sql.push_str(" ORDER BY ");
     b.write_ident("rs_bucket");
     b.sql.push_str(if descending { " DESC" } else { " ASC" });
-    Ok(b.finish())
+    b.finish()
 }
 
 /// Truncate `col_quoted` to a date bucket, typed as a `DATE`.

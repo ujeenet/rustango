@@ -4,6 +4,22 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — purging a schema tenant no longer drops other tenants' objects
+
+`DROP SCHEMA … CASCADE` also dropped what other schemas built on it: views, columns of its types or extensions, FKs, defaults, triggers. Purge now refuses and names them.
+
+### Fixed — audited `save` locks the row it diffs
+
+The before-image read is `FOR UPDATE` on PostgreSQL and MySQL, so two concurrent saves no longer diff against the same stale row; SQLite takes its write lock at `BEGIN` instead of failing with `database is locked`. The Postgres `save(&PgPool)` now runs in one transaction, so the lock holds through the UPDATE and audit row.
+
+### Fixed — Postgres-only values error on MySQL and SQLite instead of panicking
+
+Saving or filtering with an array, range, hstore, vector or geometry value on MySQL or SQLite now returns `SqlError::ValueNotSupportedInDialect`; the bind step used to panic.
+
+### Fixed — file migrations keep pgvector dimensions and PostGIS SRID
+
+Snapshots record `vector(N)` / `geometry(SRID)`, so migrations create `vector(1536)` / `geometry(Point,4326)` like live DDL, a dimension or SRID change is diffed, and MySQL gets `TEXT` instead of the `VECTOR` it rejects.
+
 ### Security — admin create and edit stay inside the row scope
 
 The written row, parent and inline children alike, is re-read in the write transaction through the queryset hooks (and the `add` hook after a create); a form that would put a row outside the scope is refused with 403 and the whole edit rolled back.

@@ -1390,6 +1390,25 @@ fn render_changes_split_inner(
                     .ok_or_else(|| {
                         format!("altering `{table}.{column}` but the snapshot has no such column")
                     })?;
+                // A vector/geometry size change is TEXT to TEXT here.
+                if let SchemaChange::AlterColumnType { from, to, .. } = change {
+                    let sized = |name: &str| {
+                        matches!(
+                            super::snapshot::field_type_from_name(name),
+                            Some(crate::core::FieldType::Vector(_) | crate::core::FieldType::Geometry(_))
+                        )
+                    };
+                    let old = FieldSnapshot {
+                        ty: from.clone(),
+                        ..f.clone()
+                    };
+                    if sized(from)
+                        && sized(to)
+                        && sql_type_with_dialect(&old, dialect) == sql_type_with_dialect(f, dialect)
+                    {
+                        continue;
+                    }
+                }
                 alter_column_elsewhere(
                     change,
                     table,
@@ -1404,7 +1423,7 @@ fn render_changes_split_inner(
             SchemaChange::AlterColumnType {
                 table,
                 column,
-                from: _,
+                from,
                 to,
             } => {
                 let field = current
@@ -1432,9 +1451,18 @@ fn render_changes_split_inner(
                         sql_type_with_dialect(f, dialect)
                     ),
                     None => {
+                        use crate::core::FieldType::Geometry;
                         let pg_to = pg_type_for_ty_name(to);
+                        let from_ty = super::snapshot::field_type_from_name(from);
+                        let using = match (from_ty, super::snapshot::field_type_from_name(to)) {
+                            // An untyped column's SRID-0 rows take the SRID; other SRIDs still fail.
+                            (Some(Geometry(0)), Some(Geometry(srid))) if srid != 0 => format!(
+                                r#"CASE WHEN ST_SRID("{column}") = 0 THEN ST_SetSRID("{column}", {srid}) ELSE "{column}" END::{pg_to}"#
+                            ),
+                            _ => format!(r#""{column}"::{pg_to}"#),
+                        };
                         format!(
-                            r#"ALTER TABLE {target} ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
+                            r#"ALTER TABLE {target} ALTER COLUMN "{column}" TYPE {pg_to} USING {using}"#,
                         )
                     }
                 });
@@ -2792,6 +2820,71 @@ mod sql_type_tests {
         }]
     }
 
+    /// `t(id, c)` with `c` of snapshot type `ty`.
+    fn typed_snap(ty: &str) -> SchemaSnapshot {
+        let mut snap = alter_snap();
+        let c = &mut snap.tables[0].fields[1];
+        c.ty = ty.into();
+        c.default = None;
+        c.nullable = true;
+        snap
+    }
+
+    /// The upgrade from a bare `vector` / `geometry` snapshot name.
+    fn upgrade(from: &str, to: &str) -> (Vec<SchemaChange>, SchemaSnapshot) {
+        let changes = vec![SchemaChange::AlterColumnType {
+            table: "t".into(),
+            column: "c".into(),
+            from: from.into(),
+            to: to.into(),
+        }];
+        (changes, typed_snap(to))
+    }
+
+    #[test]
+    fn sized_type_upgrade_is_one_cast_on_postgres() {
+        let (changes, snap) = upgrade("vector", "vector(3)");
+        let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
+        assert!(
+            out.immediate
+                .contains(&r#"ALTER TABLE "t" ALTER COLUMN "c" TYPE vector(3) USING "c"::vector(3)"#.into()),
+            "{:?}",
+            out.immediate
+        );
+        let (changes, snap) = upgrade("geometry", "geometry(4326)");
+        let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
+        assert!(
+            out.immediate
+                .iter()
+                .any(|s| s.contains(" TYPE geometry(Point,4326) USING ") && s.contains(r#"ST_SetSRID("c", 4326)"#)),
+            "SRID-0 rows fail the plain cast: {:?}",
+            out.immediate
+        );
+    }
+
+    /// TEXT before and after: no rebuild, no MODIFY.
+    #[cfg(any(feature = "mysql", feature = "sqlite"))]
+    #[test]
+    fn sized_type_upgrade_is_nothing_on_text_dialects() {
+        let dialects: Vec<&dyn crate::sql::Dialect> = vec![
+            #[cfg(feature = "mysql")]
+            &crate::sql::MySql,
+            #[cfg(feature = "sqlite")]
+            &crate::sql::Sqlite,
+        ];
+        for d in dialects {
+            for (from, to) in [
+                ("vector", "vector(3)"),
+                ("vector(3)", "vector(4)"),
+                ("geometry", "geometry(4326)"),
+            ] {
+                let (changes, snap) = upgrade(from, to);
+                let out = render_changes_split_with_dialect(&changes, &snap, d).unwrap();
+                assert!(out.immediate.is_empty(), "{}: {:?}", d.name(), out.immediate);
+            }
+        }
+    }
+
     #[test]
     fn alter_column_type_emits_pg_sql_on_postgres() {
         let snap = empty_snap();
@@ -2981,6 +3074,10 @@ mod sql_type_tests {
             T::Range(R::Date),
             T::Range(R::DateTime),
             T::HStore,
+            T::Vector(0),
+            T::Vector(1536),
+            T::Geometry(0),
+            T::Geometry(4326),
         ];
         for t in all {
             // A new variant fails to compile here: add it to `all`.
@@ -3001,18 +3098,48 @@ mod sql_type_tests {
                 | T::Binary
                 | T::Array(_)
                 | T::Range(_)
-                | T::HStore => {}
-                T::Vector(_) | T::Geometry(_) => unreachable!("names carry no size"),
+                | T::HStore
+                | T::Vector(_)
+                | T::Geometry(_) => {}
             }
             let name = field_type_name(t);
-            assert_eq!(field_type_from_name(name), Some(t), "{name}");
+            assert_eq!(field_type_from_name(&name), Some(t), "{name}");
             assert_eq!(
-                pg_type_for_ty_name(name),
+                pg_type_for_ty_name(&name),
                 crate::sql::Postgres.column_type(t, None),
                 "{name}"
             );
         }
-        assert_eq!(pg_type_for_ty_name("vector"), "VECTOR");
+    }
+
+    /// A file migration's vector/geometry column matches live DDL on every
+    /// backend, and a dimension change is a type change.
+    #[test]
+    fn vector_and_geometry_keep_their_size_in_file_migrations() {
+        use crate::core::FieldType as T;
+        use crate::migrate::snapshot::field_type_name;
+        use crate::sql::Dialect as _;
+        for t in [T::Vector(3), T::Geometry(4326)] {
+            let f = fs(&field_type_name(t), false);
+            assert_eq!(
+                sql_type_with_dialect(&f, &crate::sql::Postgres),
+                crate::sql::Postgres.column_type(t, None)
+            );
+            #[cfg(feature = "mysql")]
+            assert_eq!(sql_type_with_dialect(&f, &crate::sql::MySql), "TEXT");
+            #[cfg(feature = "sqlite")]
+            assert_eq!(sql_type_with_dialect(&f, &crate::sql::Sqlite), "TEXT");
+        }
+        assert_ne!(
+            field_type_name(T::Vector(3)),
+            field_type_name(T::Vector(4)),
+            "a dimension change is not diffed"
+        );
+        assert_ne!(
+            field_type_name(T::Geometry(4326)),
+            field_type_name(T::Geometry(3857)),
+            "an SRID change is not diffed"
+        );
     }
 
     /// MySQL caps a key at 3072 bytes (1071) and utf8mb4 VARCHAR(n) counts 4n.

@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use rustango::audit::{self, AuditEntry, AuditLog};
+use rustango::core::Column as _;
 use rustango::sql::{Auto, CounterPool as _, FetcherPool as _, Pool};
 use rustango::{tri_dialect_test, Model};
 
@@ -204,8 +205,140 @@ async fn second_soft_delete_keeps_the_first_stamp(pool: &Pool) {
     );
 }
 
-/// The macro `save(&PgPool)` runs outside a transaction, so its
-/// pre-read guard is the only thing between a failure and an unaudited UPDATE.
+/// Waits until `n` before-image reads of `audit1675_note` wait on a row lock.
+/// SQLite has no lock view: it waits until the savers hold a connection.
+async fn wait_until_blocked(pool: &Pool, n: i64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let blocked: i64 = match pool.dialect().name() {
+            #[cfg(feature = "postgres")]
+            "postgres" => rustango::sql::sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' \
+                 AND query LIKE '%audit1675_note%' AND query LIKE '%FOR UPDATE%'",
+            )
+            .fetch_one(pool.as_postgres().unwrap())
+            .await
+            .unwrap(),
+            #[cfg(feature = "mysql")]
+            "mysql" => rustango::sql::sqlx::query_scalar(
+                "SELECT COUNT(*) FROM information_schema.PROCESSLIST \
+                 WHERE ID <> CONNECTION_ID() AND INFO LIKE '%audit1675_note%FOR UPDATE%'",
+            )
+            .fetch_one(pool.as_mysql().unwrap())
+            .await
+            .unwrap(),
+            #[cfg(feature = "sqlite")]
+            "sqlite" => {
+                let p = pool.as_sqlite().unwrap();
+                // The writer holds one connection.
+                i64::from(p.size()) - p.num_idle() as i64 - 1
+            }
+            other => panic!("no lock probe for {other}"),
+        };
+        if blocked >= n {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "only {blocked} of {n} saves reached the locked row"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    if pool.dialect().name() == "sqlite" {
+        // Covers the step from acquire to `BEGIN IMMEDIATE`.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// A save behind an open writer waits for it, then diffs against its row.
+/// SQLite on a file: the in-memory pool shares one cache, not WAL.
+async fn save_waits_for_a_concurrent_writer(pool: &Pool) {
+    #[cfg(feature = "sqlite")]
+    let file;
+    #[cfg(feature = "sqlite")]
+    let pool = if pool.dialect().name() == "sqlite" {
+        file = rustango::testkit::matrix::sqlite_file_pool().await;
+        setup(&file).await;
+        &file
+    } else {
+        pool
+    };
+    let mut note = insert_note(pool).await;
+    let id = *note.id.get().expect("pk assigned");
+    let update = Note::objects()
+        .where_(Note::id.eq(id))
+        .update()
+        .set("title", "held")
+        .compile()
+        .unwrap();
+    let mut writer = rustango::sql::transaction_pool(pool).await.unwrap();
+    rustango::sql::update_tx(&mut writer, &update).await.unwrap();
+    let saver = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            note.title = "saved".into();
+            note.save_pool(&pool).await
+        })
+    };
+    wait_until_blocked(pool, 1).await;
+    assert!(!saver.is_finished(), "the save did not wait for the writer");
+    writer.commit().await.unwrap();
+    saver
+        .await
+        .unwrap()
+        .expect("save once the writer commits");
+    let changes = &entries(pool, &id.to_string()).await[0].changes;
+    assert_eq!(changes["title"]["before"], "held", "{changes}");
+}
+
+/// Two macro `save(&PgPool)` calls queued behind one writer: each must hold
+/// its row lock through its UPDATE, so the second diffs against the first.
+async fn pg_macro_saves_queue_behind_each_other(pool: &Pool) {
+    #[cfg(not(feature = "postgres"))]
+    let _ = pool;
+    #[cfg(feature = "postgres")]
+    {
+        let Some(pg) = pool.as_postgres() else {
+            return;
+        };
+        let note = insert_note(pool).await;
+        let id = *note.id.get().expect("pk assigned");
+        let update = Note::objects()
+            .where_(Note::id.eq(id))
+            .update()
+            .set("title", "held")
+            .compile()
+            .unwrap();
+        let mut writer = rustango::sql::transaction_pool(pool).await.unwrap();
+        rustango::sql::update_tx(&mut writer, &update).await.unwrap();
+        let savers: Vec<_> = ["one", "two"]
+            .into_iter()
+            .map(|title| {
+                let (pg, mut note) = (pg.clone(), note.clone());
+                tokio::spawn(async move {
+                    note.title = title.into();
+                    note.save(&pg).await
+                })
+            })
+            .collect();
+        wait_until_blocked(pool, 2).await;
+        writer.commit().await.unwrap();
+        for s in savers {
+            s.await.unwrap().expect("save once the writer commits");
+        }
+        let rows = entries(pool, &id.to_string()).await;
+        let befores: Vec<&str> = rows
+            .iter()
+            .filter(|e| e.operation == "update")
+            .map(|e| e.changes["title"]["before"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(befores.len(), 2, "{rows:?}");
+        assert_ne!(befores[0], befores[1], "both saves diffed one stale row");
+    }
+}
+
+/// The macro `save(&PgPool)` pre-read guard is the only thing between a
+/// failure and an unaudited UPDATE.
 async fn pg_macro_save_skips_noop_and_fails_on_pre_read(pool: &Pool) {
     #[cfg(not(feature = "postgres"))]
     let _ = pool;
@@ -466,6 +599,8 @@ tri_dialect_test! {
         save_partial_audits_only_its_fields,
         failed_pre_read_fails_the_save,
         second_soft_delete_keeps_the_first_stamp,
+        save_waits_for_a_concurrent_writer,
+        pg_macro_saves_queue_behind_each_other,
         pg_macro_save_skips_noop_and_fails_on_pre_read,
         job_audits_as_its_enqueuer,
         job_dispatched_in_atomic_does_not_join_it,
