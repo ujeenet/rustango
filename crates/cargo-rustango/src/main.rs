@@ -825,7 +825,8 @@ mod tests {
         for template in [Template::Fullstack, Template::Tenant] {
             let main = templates::main_rs(template, "demo");
             assert!(
-                main.contains(".with_settings_from_env()") || main.contains(".with_settings(&settings)"),
+                main.contains(".with_settings_from_env()")
+                    || main.contains(".with_loaded_settings(loaded)"),
                 "{template:?} main.rs does not load its settings"
             );
         }
@@ -1006,7 +1007,9 @@ mod tests {
         // One settings load per boot, shared by the server and the admin.
         assert_eq!(main.matches("Settings::load_from_env()").count(), 1, "{main}");
         assert!(!main.contains("with_settings_from_env"), "{main}");
-        assert!(main.contains(".with_settings(&settings)"), "{main}");
+        // A missing config/ warns and boots, as `with_settings_from_env` does.
+        assert!(!main.contains("load_from_env()?"), "{main}");
+        assert!(main.contains(".with_loaded_settings(loaded)"), "{main}");
         // The admin key survives a restart and fails closed on prod.
         assert!(urls.contains("load_session_secret_for_tier("), "{urls}");
         assert!(!urls.contains("from_env_or_random"), "{urls}");

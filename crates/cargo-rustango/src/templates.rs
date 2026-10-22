@@ -701,7 +701,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     // config/*.toml for the RUSTANGO_ENV tier (default `dev`), then
     // RUSTANGO__* env overrides; loaded once for the server and the admin.
-    let settings = rustango::config::Settings::load_from_env()?;
+    // No config/ dir: a warning, and both run on defaults.
+    let loaded = rustango::config::Settings::load_from_env();
+    let settings = loaded.as_ref().cloned().unwrap_or_default();
     let admin_settings = settings.clone();
     rustango::manage::Cli::new()
         .api(urls::api())
@@ -711,7 +713,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .with_welcome() // friendly `/` on first run; drop once you have a root handler
         .with_health() // /health + /ready endpoints for load balancers
-        .with_settings(&settings)
+        .with_loaded_settings(loaded)
         .run()
         .await
 }
