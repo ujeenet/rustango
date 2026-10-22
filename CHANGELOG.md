@@ -20,6 +20,10 @@ As on the DB queue, the job is queued on commit and dropped on rollback.
 
 The dead-letter callback gets the payload in the current shape of the job type.
 
+### Fixed — the stuck-job sweep no longer deadlocks with heartbeats on MySQL
+
+`reclaim_stuck_jobs_pool` unlocks rows one at a time by key instead of one range `UPDATE`.
+
 ### Security — admin create and edit stay inside the row scope
 
 The written row, parent and inline children alike, is re-read in the write transaction through the queryset hooks (and the `add` hook after a create); a form that would put a row outside the scope is refused with 403 and the whole edit rolled back.

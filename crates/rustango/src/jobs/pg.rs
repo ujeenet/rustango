@@ -394,22 +394,40 @@ impl PgJobQueue {
         use crate::core::SqlValue;
         let cutoff: DateTime<Utc> = Utc::now()
             - chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::seconds(0));
-        let p = pool.dialect().placeholder(1);
-        let sql = format!(
-            "UPDATE rustango_jobs \
-                SET locked_at = NULL, locked_by = NULL \
-              WHERE locked_at IS NOT NULL AND locked_at < {p}"
-        );
+        let to_sqlx = |e| match e {
+            crate::sql::ExecError::Driver(err) => err,
+            other => sqlx::Error::Protocol(format!("{other}")),
+        };
+        let d = pool.dialect();
         // The cutoff is computed in Rust and bound, so no backend
         // needs its own `NOW() - INTERVAL` SQL. `SqlValue::DateTime`
         // encodes as TIMESTAMPTZ on PG, DATETIME(6) on MySQL and
         // RFC3339 TEXT on SQLite.
-        crate::sql::raw_execute_pool(pool, &sql, vec![SqlValue::DateTime(cutoff)])
-            .await
-            .map_err(|e| match e {
-                crate::sql::ExecError::Driver(err) => err,
-                other => sqlx::Error::Protocol(format!("{other}")),
-            })
+        let stale = format!(
+            "SELECT id FROM rustango_jobs WHERE locked_at IS NOT NULL AND locked_at < {}",
+            d.placeholder(1)
+        );
+        let ids: Vec<(i64,)> =
+            crate::sql::raw_query_pool(&stale, vec![SqlValue::DateTime(cutoff)], pool)
+                .await
+                .map_err(to_sqlx)?;
+        // One row at a time by key: a range UPDATE locks the `locked_at`
+        // index before the row, the heartbeat the row first, and MySQL
+        // deadlocks the two (1213). The cutoff is checked again per row.
+        let sql = format!(
+            "UPDATE rustango_jobs SET locked_at = NULL, locked_by = NULL \
+              WHERE id = {} AND locked_at IS NOT NULL AND locked_at < {}",
+            d.placeholder(1),
+            d.placeholder(2),
+        );
+        let mut reclaimed = 0;
+        for (id,) in ids {
+            let binds = vec![SqlValue::I64(id), SqlValue::DateTime(cutoff)];
+            reclaimed += crate::sql::raw_execute_pool(pool, &sql, binds)
+                .await
+                .map_err(to_sqlx)?;
+        }
+        Ok(reclaimed)
     }
 }
 
