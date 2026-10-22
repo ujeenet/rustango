@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+**Breaking:** `ModelFormFor::from_json` refuses unknown keys; an oversized CSRF form gets 413, not 403; undecodable job payloads are retried; the first `makemigrations` on PostgreSQL rewrites each table with a sized `vector` or `geometry` column. See UPGRADING.
+
 ### Fixed — the fullstack scaffold mounts its admin at `[admin] url_prefix`
 
 `main.rs` loads the settings once, passes them to the server (via the now-public `Cli::with_loaded_settings`, so a missing `config/` still only warns) and to `admin::Builder::from_settings`, and nests the admin at the new `admin::Builder::settings_prefix` (default `/admin`).
@@ -14,7 +16,7 @@ A migration on a connection that sat idle while another one ran DDL could fail a
 
 ### Fixed — raw SQL helpers refuse Postgres-only binds instead of panicking
 
-`raw_execute_pool`/`_tx` and `raw_query_pool`/`_tx` return `SqlError::ValueNotSupportedInDialect` for an array, range, hstore, vector or geometry bind on MySQL or SQLite, and for a `SqlValue::List` bind on every backend.
+`raw_execute_pool`/`_tx` and `raw_query_pool`/`_tx` return `SqlError::ValueNotSupportedInDialect` for an array, range, hstore, vector or geometry bind on MySQL or SQLite, and for a `SqlValue::List` bind on every backend. An ORM filter that leaves a `List` as one bind (`=` instead of `IN`) gets the same error.
 
 ### Fixed — deleting a model removes its generic M2M links
 

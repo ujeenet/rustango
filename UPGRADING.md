@@ -176,7 +176,7 @@ Loading settings prints one stderr line per key nothing reads. Fix or remove tho
 
 ### CSRF answers an oversized form with 413
 
-A form-encoded POST over the body limit now gets axum's 413 from `CsrfLayer` instead of a 403. Without a `BodyLimitLayer` the CSRF read follows the app's `DefaultBodyLimit` (2 MiB unless set).
+A form-encoded POST over the body limit now gets axum's 413 from `CsrfLayer` instead of a 403. Without a `BodyLimitLayer` the CSRF read follows the app's `DefaultBodyLimit` (2 MiB unless set; still 2 MiB under `DefaultBodyLimit::disable()`).
 
 ### `embed_migrations!` on a missing directory warns
 
@@ -220,7 +220,7 @@ The error lists each outside object and what it uses; drop or move them, then pu
 
 ### Vector and geometry columns get one `makemigrations` step
 
-Snapshots now carry the dimension / SRID, so on PostgreSQL the first `makemigrations` emits an `AlterColumnType` for each sized `vector` or `geometry` column; MySQL and SQLite get nothing (both stay `TEXT`). The cast fails on rows with another dimension, or with an SRID other than 0 or the model's; SRID-0 rows take the model's SRID.
+Snapshots now carry the dimension / SRID, so on PostgreSQL the first `makemigrations` emits an `AlterColumnType` for each sized `vector` or `geometry` column, which rewrites the table under an exclusive lock: plan it for large tables. MySQL and SQLite get nothing (both stay `TEXT`). The cast fails on rows with another dimension, or with an SRID other than 0 or the model's; SRID-0 rows take the model's SRID.
 
 ### Template views merge processors and `ExtraContext` everywhere
 
