@@ -6091,7 +6091,7 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
     }
     // RUSTANGO_ENV — production should be explicitly tagged.
     match env.rustango_env.as_deref() {
-        Some("prod" | "production") => {
+        Some(tier) if crate::env::is_prod_tier(tier) => {
             out.info
                 .push("RUSTANGO_ENV is set to a production value".into());
         }
@@ -6273,7 +6273,7 @@ pub fn settings_audit_check(
     settings: &crate::config::Settings,
     out: &mut DeployAuditFindings,
 ) {
-    let in_prod = matches!(env_tier, "prod" | "production");
+    let in_prod = crate::env::is_prod_tier(env_tier);
     if !in_prod {
         // Non-prod tiers don't need the dev-default-leak audit.
         return;
@@ -8642,6 +8642,26 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             "dev tier should be quiet, got: {:?}",
             r.info
         );
+    }
+
+    /// Any prod spelling runs the prod checks, in both halves of the audit.
+    #[cfg(feature = "config")]
+    #[test]
+    fn deploy_audit_treats_every_prod_spelling_as_prod() {
+        let mut s = crate::config::Settings::default();
+        s.security.hsts_max_age_secs = Some(0);
+        for tier in ["PROD", "Production", " prod "] {
+            let r = settings_run(tier, &s);
+            assert!(
+                r.warnings.iter().any(|w| w.contains("hsts_max_age_secs")),
+                "{tier:?}: {:?}",
+                r.warnings
+            );
+            let mut env = good_prod_env();
+            env.rustango_env = Some(tier.into());
+            let r = run(&env);
+            assert!(r.warnings.is_empty(), "{tier:?}: {:?}", r.warnings);
+        }
     }
 
     /// In prod, `headers_preset = "dev"` is a clear footgun —

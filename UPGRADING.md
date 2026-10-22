@@ -158,6 +158,10 @@ Only new scaffolds change. To match in an existing project, drop `RUSTANGO_BIND`
 
 Origins listed in `[security] csrf_trusted_origins` now pass the CSRF Origin check under `Cli::with_csrf` / `with_csrf_config`. Remove entries you did not mean to trust.
 
+### `RUSTANGO_ENV` is normalized
+
+`production`, `PROD` and ` Prod ` all mean `prod`: they load `prod_settings.toml` (a `production_settings.toml` still loads if there is no `prod` file) and turn on JSON logs. `Settings::current_env_tier()` and `session::tier_from_env()` return the normalized name.
+
 ### `make:*` verbs check features
 
 `make:viewset` and `make:test` need `admin` (`make:viewset --tenant` needs `tenancy` instead), `make:serializer` needs `serializer`, `make:form` `forms`, `make:job` / `make:worker` `jobs`, `make:scheduled` `scheduler`, `make:notification` `notifications`. Without it the verb now errors instead of writing a file that does not compile.
