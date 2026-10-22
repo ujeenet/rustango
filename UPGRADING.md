@@ -154,6 +154,10 @@ untouched.
 
 `DatabaseJobQueue::dispatch` inside an `atomic` block on the queue's pool now commits or rolls back with the block. Code that relied on the job surviving a rollback must dispatch outside the block. Holding the block's `TxGuard` across `dispatch` makes it fail with a `NestedAtomic` queue error.
 
+### Undecodable job payloads retry
+
+A payload that fails to decode is `Retryable` (spends attempts, then dead-letters) instead of dead-lettering at once.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more

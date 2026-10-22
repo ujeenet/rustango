@@ -12,6 +12,10 @@ Concurrent requests to a tenant with no cached pool now wait for one secret look
 
 On the queue's own pool the job row is written in the block's transaction and the worker is woken after the commit. A rolled-back block no longer leaves its job queued, and SQLite no longer waits on the block's write lock.
 
+### Fixed — undecodable job payloads are retried
+
+A payload the registered job type cannot decode is a retryable failure, not an immediate dead letter, so rows from another release survive a rolling deploy. `WebhookEvent` also decodes rows queued before its body was signed at dispatch.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

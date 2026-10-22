@@ -437,6 +437,37 @@ async fn a_dispatch_after_a_write_commits_with_its_block(pool: &Pool) {
     assert_eq!(job_rows(pool).await, 1);
 }
 
+/// What an older release queued under `Tick`'s name.
+#[derive(Serialize, Deserialize)]
+struct OldTick {
+    legacy: u32,
+}
+
+#[async_trait::async_trait]
+impl Job for OldTick {
+    const NAME: &'static str = "tri1843:tick";
+    async fn run(&self) -> Result<(), JobError> {
+        Ok(())
+    }
+}
+
+/// A payload this build cannot decode is retried, not dead-lettered at once:
+/// during a rolling deploy another version may still read it.
+async fn an_undecodable_payload_is_retried(pool: &Pool) {
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    let dead = dead_letters(&q).await;
+    q.dispatch(&OldTick { legacy: 1 }).await.unwrap();
+    q.start().await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while job_rows(pool).await == 1 && the_row(pool).await != (1, false) {
+        assert!(Instant::now() < deadline, "timed out waiting for the run");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    q.shutdown().await;
+    assert!(dead.lock().unwrap().is_empty(), "dead-lettered at once");
+    assert_eq!(job_rows(pool).await, 1, "the row is kept for a retry");
+}
+
 async fn a_heartbeat_keeps_a_long_job_leased(pool: &Pool) {
     let slow = token(pool, "heartbeat");
     let q = queue(pool, 2, Duration::from_millis(100)).await;
@@ -918,5 +949,6 @@ tri_dialect_test! {
         a_db_queue_sends_with_its_registered_mailer,
         a_dispatch_rolls_back_with_its_atomic_block,
         a_dispatch_after_a_write_commits_with_its_block,
+        an_undecodable_payload_is_retried,
     ],
 }

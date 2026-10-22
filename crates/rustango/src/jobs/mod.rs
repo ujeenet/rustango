@@ -296,8 +296,10 @@ impl HandlerRegistry {
         let handler: HandlerFn = Arc::new(move |payload| {
             let run = run.clone();
             Box::pin(async move {
-                let job: T =
-                    serde_json::from_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
+                // Retryable: during a rolling deploy the row may be another
+                // release's shape, and a worker of that release can still run it.
+                let job: T = serde_json::from_value(payload)
+                    .map_err(|e| JobError::Retryable(format!("payload decode: {e}")))?;
                 // A panic is a failed run, not a dead worker (#1843).
                 crate::panic_guard::catch_unwind(run(job))
                     .await
