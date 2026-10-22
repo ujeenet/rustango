@@ -197,13 +197,22 @@ mod class_based_views {
     fn precedence_tera() -> Arc<Tera> {
         let mut tera = Tera::default();
         tera.add_raw_templates(vec![
-            ("cp_post_detail.html", "{{ object.title }}|{{ shared }}|{{ build_version }}"),
+            (
+                "cp_post_detail.html",
+                "{{ object.title }}|{{ shared }}|{{ build_version }}",
+            ),
             (
                 "cp_post_confirm_delete.html",
                 "{{ object.title }}|{{ shared }}|{{ build_version }}",
             ),
-            ("cp_post_form.html", "{{ is_update }}|{{ shared }}|{{ build_version }}"),
-            ("form.html", "{{ errors | length }}|{{ shared }}|{{ build_version }}"),
+            (
+                "cp_post_form.html",
+                "{{ is_update }}|{{ shared }}|{{ build_version }}",
+            ),
+            (
+                "form.html",
+                "{{ errors | length }}|{{ shared }}|{{ build_version }}",
+            ),
         ])
         .unwrap();
         Arc::new(tera)
@@ -238,24 +247,32 @@ mod class_based_views {
     #[tokio::test]
     async fn view_keys_beat_extra_context_which_beats_processors() {
         let pool = pool().await;
-        let detail = with_extra(
-            DetailView::for_model(CpPost::SCHEMA).router("/posts", precedence_tera(), pool.clone()),
-        );
+        let detail = with_extra(DetailView::for_model(CpPost::SCHEMA).router(
+            "/posts",
+            precedence_tera(),
+            pool.clone(),
+        ));
         assert_eq!(get(detail, "/posts/1").await, "Hello|extra|test-build");
-        let delete = with_extra(
-            DeleteView::for_model(CpPost::SCHEMA).router("/posts", precedence_tera(), pool.clone()),
+        let delete = with_extra(DeleteView::for_model(CpPost::SCHEMA).router(
+            "/posts",
+            precedence_tera(),
+            pool.clone(),
+        ));
+        assert_eq!(
+            get(delete, "/posts/1/delete").await,
+            "Hello|extra|test-build"
         );
-        assert_eq!(get(delete, "/posts/1/delete").await, "Hello|extra|test-build");
         let update = || {
-            with_extra(
-                UpdateView::for_model(CpPost::SCHEMA).router(
-                    "/posts",
-                    precedence_tera(),
-                    pool.clone(),
-                ),
-            )
+            with_extra(UpdateView::for_model(CpPost::SCHEMA).router(
+                "/posts",
+                precedence_tera(),
+                pool.clone(),
+            ))
         };
-        assert_eq!(get(update(), "/posts/1/edit").await, "true|extra|test-build");
+        assert_eq!(
+            get(update(), "/posts/1/edit").await,
+            "true|extra|test-build"
+        );
         // A failed POST re-renders the form through the same merge.
         let (status, body) = send(update(), "POST", "/posts/1/edit", "title=").await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");

@@ -107,9 +107,17 @@ async fn media_cannot_go_into_a_dead_collection(pool: &Pool) {
         assert!(is_dead_parent(&r), "{r:?}");
     }
     let row = mgr.get(id).await.unwrap().expect("row");
-    assert_eq!(row.collection_id, Some(live), "a refused move changed the row");
-    mgr.move_to_collection(id, None).await.expect("move to root");
-    mgr.move_to_collection(id, Some(live)).await.expect("move back");
+    assert_eq!(
+        row.collection_id,
+        Some(live),
+        "a refused move changed the row"
+    );
+    mgr.move_to_collection(id, None)
+        .await
+        .expect("move to root");
+    mgr.move_to_collection(id, Some(live))
+        .await
+        .expect("move back");
 }
 
 /// A move that waits on a collection being deleted is refused.
@@ -168,7 +176,10 @@ async fn insert_waits_and_sees_the_deleted_collection(pool: &Pool) {
         async move { save_into(&mgr, Some(target)).await }
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(!saving.is_finished(), "the insert did not wait for the lock");
+    assert!(
+        !saving.is_finished(),
+        "the insert did not wait for the lock"
+    );
     tx.commit().await.expect("commit");
 
     let r = saving.await.unwrap();

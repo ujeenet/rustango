@@ -421,7 +421,13 @@ async fn tenant_views_merge_context_processors() {
     assert_eq!((status, body.as_str()), (StatusCode::OK, "form proc"));
     let (status, body) = send(&app, Method::GET, &format!("/notes/{s}/delete"), None).await;
     assert_eq!((status, body.as_str()), (StatusCode::OK, "confirm proc"));
-    let (status, body) = send(&app, Method::POST, &format!("/notes/{s}/edit"), Some("tag=")).await;
+    let (status, body) = send(
+        &app,
+        Method::POST,
+        &format!("/notes/{s}/edit"),
+        Some("tag="),
+    )
+    .await;
     assert_eq!(
         (status, body.as_str()),
         (StatusCode::UNPROCESSABLE_ENTITY, "form proc")

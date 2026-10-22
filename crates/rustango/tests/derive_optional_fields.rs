@@ -130,9 +130,17 @@ fn optional_bool_is_none_when_absent_or_blank() {
 #[test]
 fn optional_bool_reads_every_falsy_and_truthy_word_in_any_case() {
     for word in ["0", "off", "no", "false", "FALSE", "Off", "NO"] {
-        assert_eq!(parse(&[("published", word)]).published, Some(false), "{word}");
+        assert_eq!(
+            parse(&[("published", word)]).published,
+            Some(false),
+            "{word}"
+        );
     }
     for word in ["1", "on", "yes", "true", "TRUE", "On"] {
-        assert_eq!(parse(&[("published", word)]).published, Some(true), "{word}");
+        assert_eq!(
+            parse(&[("published", word)]).published,
+            Some(true),
+            "{word}"
+        );
     }
 }

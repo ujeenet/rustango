@@ -1840,7 +1840,10 @@ mod tests {
             "cs", "sk", "bg", "uk", "hu", "pt-BR",
         ] {
             let out = format_currency(1234.5, "EUR", loc);
-            assert!(out.ends_with("\u{a0}€") && !out.starts_with('€'), "{loc}: {out}");
+            assert!(
+                out.ends_with("\u{a0}€") && !out.starts_with('€'),
+                "{loc}: {out}"
+            );
         }
     }
 
