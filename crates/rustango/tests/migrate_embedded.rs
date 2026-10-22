@@ -318,6 +318,7 @@ fn embed_migrations_chain_is_validated_at_compile_time() {
 
 #[test]
 #[allow(clippy::const_is_empty)] // Whole point of this test is verifying the const came out empty.
+#[allow(deprecated)] // The missing directory warns by design.
 fn embed_migrations_default_path_compiles() {
     // Just verifies that calling embed_migrations!() with no argument
     // doesn't blow up at compile time. The default path is

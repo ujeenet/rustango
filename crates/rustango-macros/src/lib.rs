@@ -196,11 +196,15 @@ pub fn derive_serializer(input: TokenStream) -> TokenStream {
 /// up/down (same), Rwf's are raw SQL (no chain at all).
 ///
 /// Each migration is included via `include_str!` so cargo's rebuild
-/// detection picks up file *content* changes. **Caveat:** cargo
-/// doesn't watch directory listings, so adding or removing a
-/// migration file inside the dir won't auto-trigger a rebuild — run
-/// `cargo clean` (or just bump any other source file) when you add
-/// new migrations during embedded development.
+/// detection picks up file *content* changes. Cargo does not watch
+/// directory listings, so a new migration file is missed until the
+/// crate rebuilds. Add a `build.rs` that tracks the directory:
+///
+/// ```ignore
+/// fn main() { println!("cargo:rerun-if-changed=migrations"); }
+/// ```
+///
+/// A missing directory embeds nothing and emits a deprecation warning.
 #[proc_macro]
 pub fn embed_migrations(input: TokenStream) -> TokenStream {
     expand_embed_migrations(input.into())
@@ -681,8 +685,26 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
         })
         .collect();
 
+    // A wrong path used to embed nothing silently; a deprecation use is
+    // the only stable way for a proc macro to warn without breaking builds.
+    let missing_warning = if abs.is_dir() {
+        quote! {}
+    } else {
+        let note = format!(
+            "embed_migrations!: directory {} does not exist; no migrations are embedded",
+            abs.display()
+        );
+        quote! {
+            #[deprecated(note = #note)]
+            const __RUSTANGO_MIGRATIONS_DIR_MISSING: () = ();
+            #[allow(clippy::let_unit_value)]
+            let _ = __RUSTANGO_MIGRATIONS_DIR_MISSING;
+        }
+    };
+
     Ok(quote! {
         {
+            #missing_warning
             const __RUSTANGO_EMBEDDED: &[(&'static str, &'static str)] = &[#(#pairs),*];
             __RUSTANGO_EMBEDDED
         }
@@ -13719,6 +13741,30 @@ mod main_attr_tests {
         // match must not fire on the substring `logging`.
         assert!(parse_logging(&"logging = true".parse().unwrap()));
         assert!(!parse_logging(&"logging=false".parse().unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod embed_migrations_tests {
+    use super::*;
+
+    fn expand(path: &str) -> String {
+        expand_embed_migrations(quote! { #path })
+            .expect("expansion failed")
+            .to_string()
+    }
+
+    #[test]
+    fn missing_dir_warns() {
+        let out = expand("./no_such_migrations_dir");
+        assert!(out.contains("deprecated"), "missing dir must warn:\n{out}");
+        assert!(out.contains("no_such_migrations_dir"), "{out}");
+    }
+
+    #[test]
+    fn existing_dir_does_not_warn() {
+        let out = expand("./src");
+        assert!(!out.contains("deprecated"), "{out}");
     }
 }
 

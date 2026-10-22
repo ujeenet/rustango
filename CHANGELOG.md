@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `embed_migrations!` warns on a missing directory
+
+A wrong path used to embed nothing silently; it now emits a deprecation warning naming the path. The docs and examples add a `build.rs` with `rerun-if-changed=migrations`, so a new migration file triggers a rebuild.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

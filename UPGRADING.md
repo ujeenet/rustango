@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `embed_migrations!` on a missing directory warns
+
+The build still succeeds, with a `deprecated` warning; `-D warnings` builds fail. Create the directory or fix the path. Add a `build.rs` with `println!("cargo:rerun-if-changed=migrations");` so new files are embedded without a clean build.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more
