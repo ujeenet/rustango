@@ -12161,6 +12161,20 @@ fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .ok_or_else(|| syn::Error::new(field.span(), "tuple structs are not supported"))?;
         let attrs = parse_form_field_attrs(field)?;
         let (kind, nullable) = detect_form_field(&field.ty, field.span())?;
+        let is_string = matches!(kind, FormFieldKind::String);
+        let is_number = !is_string && !matches!(kind, FormFieldKind::Bool);
+        if !is_string && (attrs.min_length.is_some() || attrs.max_length.is_some()) {
+            return Err(syn::Error::new(
+                field.span(),
+                "`min_length` / `max_length` need a String field",
+            ));
+        }
+        if !is_number && (attrs.min.is_some() || attrs.max.is_some()) {
+            return Err(syn::Error::new(
+                field.span(),
+                "`min` / `max` need a numeric field",
+            ));
+        }
 
         let name_lit = ident_name(ident);
         let parse_block = render_form_field_parse(ident, &name_lit, kind, nullable, &attrs);
@@ -13231,7 +13245,15 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let attr_min_len = opt_usize(fi.attrs.min_length);
             let attr_min = opt_i64(fi.attrs.min);
             let attr_max = opt_i64(fi.attrs.max);
+            // A bound the field's type cannot take is a compile error, not a no-op.
+            let ty = &fi.ty;
+            let len_check = (fi.attrs.max_length.is_some() || fi.attrs.min_length.is_some())
+                .then(|| quote! { #root::forms::validators::assert_length_bounded::<#ty>(); });
+            let num_check = (fi.attrs.min.is_some() || fi.attrs.max.is_some())
+                .then(|| quote! { #root::forms::validators::assert_number_bounded::<#ty>(); });
             quote! {
+                #len_check
+                #num_check
                 if __sent(#fname) {
                     let __sf = <#model_path as #root::core::Model>::SCHEMA.field(#mname);
                     let __max_length: ::core::option::Option<usize> = #attr_max_len

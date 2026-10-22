@@ -17,7 +17,7 @@ use serde_json::Value;
 /// Type dispatch is by the JSON value, so the macro needs no Rust-type
 /// introspection:
 /// * **strings** — `max_length`, `min_length`, `choices`,
-/// * **integers** — `min`, `max`.
+/// * **numbers** — `min`, `max`.
 ///
 /// `null` / arrays / objects are skipped. `min_length` and `choices`
 /// skip empty strings (an empty value means "not provided", caught by
@@ -59,19 +59,115 @@ pub fn check_value(
                 errors.add(field, "Select a valid choice.");
             }
         }
-    } else if let Some(n) = value.as_i64() {
-        if let Some(m) = min {
-            if n < m {
-                errors.add(field, format!("Ensure this value is ≥ {m}."));
-            }
+    } else if value.is_number() {
+        // Integers compare exactly; floats (and u64 past i64::MAX) as f64.
+        let below = |m: i64| match value.as_i64() {
+            Some(n) => n < m,
+            None => value.as_f64().is_some_and(|n| n < m as f64),
+        };
+        let above = |m: i64| match value.as_i64() {
+            Some(n) => n > m,
+            None => value.as_f64().is_some_and(|n| n > m as f64),
+        };
+        if let Some(m) = min.filter(|&m| below(m)) {
+            errors.add(field, format!("Ensure this value is ≥ {m}."));
         }
-        if let Some(m) = max {
-            if n > m {
-                errors.add(field, format!("Ensure this value is ≤ {m}."));
-            }
+        if let Some(m) = max.filter(|&m| above(m)) {
+            errors.add(field, format!("Ensure this value is ≤ {m}."));
         }
     }
 }
+
+/// A type `#[serializer(max_length / min_length)]` can bound.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`max_length` / `min_length` need a string field, not `{Self}`"
+)]
+pub trait LengthBounded {}
+impl LengthBounded for String {}
+impl LengthBounded for str {}
+impl LengthBounded for Box<str> {}
+impl LengthBounded for std::borrow::Cow<'_, str> {}
+impl<T: LengthBounded + ?Sized> LengthBounded for &T {}
+impl<T: LengthBounded> LengthBounded for Option<T> {}
+
+/// A type `#[serializer(min / max)]` can bound.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(message = "`min` / `max` need a numeric field, not `{Self}`")]
+pub trait NumberBounded {}
+macro_rules! number_bounded {
+    ($($t:ty),*) => { $(impl NumberBounded for $t {})* };
+}
+number_bounded!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64);
+impl<T: NumberBounded + ?Sized> NumberBounded for &T {}
+impl<T: NumberBounded> NumberBounded for Option<T> {}
+
+/// Compile-time check the derive emits for a length attribute.
+#[doc(hidden)]
+pub const fn assert_length_bounded<T: LengthBounded + ?Sized>() {}
+
+/// Compile-time check the derive emits for a `min` / `max` attribute.
+#[doc(hidden)]
+pub const fn assert_number_bounded<T: NumberBounded + ?Sized>() {}
+
+/// A bound attribute on a field type it cannot bound does not compile.
+/// ```
+/// # #[derive(rustango::Model, Clone)] #[rustango(table = "dv_t")]
+/// # pub struct T { #[rustango(primary_key)] pub id: rustango::sql::Auto<i64>, pub n: f64, pub s: String }
+/// #[derive(rustango::Serializer, serde::Deserialize, Default)]
+/// #[serializer(model = T)]
+/// struct S {
+///     #[serializer(min = 0)]
+///     n: f64,
+///     #[serializer(max_length = 3)]
+///     s: String,
+/// }
+/// #[derive(rustango::Form)]
+/// struct F {
+///     #[form(min = 1)]
+///     n: i64,
+///     #[form(max_length = 3)]
+///     s: String,
+/// }
+/// ```
+/// ```compile_fail
+/// # #[derive(rustango::Model, Clone)] #[rustango(table = "dv_t")]
+/// # pub struct T { #[rustango(primary_key)] pub id: rustango::sql::Auto<i64>, pub n: f64, pub s: String }
+/// #[derive(rustango::Serializer, serde::Deserialize, Default)]
+/// #[serializer(model = T)]
+/// struct S {
+///     #[serializer(max_length = 3)]
+///     n: f64,
+///     s: String,
+/// }
+/// ```
+/// ```compile_fail
+/// # #[derive(rustango::Model, Clone)] #[rustango(table = "dv_t")]
+/// # pub struct T { #[rustango(primary_key)] pub id: rustango::sql::Auto<i64>, pub n: f64, pub s: String }
+/// #[derive(rustango::Serializer, serde::Deserialize, Default)]
+/// #[serializer(model = T)]
+/// struct S {
+///     n: f64,
+///     #[serializer(min = 0)]
+///     s: String,
+/// }
+/// ```
+/// ```compile_fail
+/// #[derive(rustango::Form)]
+/// struct F {
+///     #[form(min = 1)]
+///     s: String,
+/// }
+/// ```
+/// ```compile_fail
+/// #[derive(rustango::Form)]
+/// struct F {
+///     #[form(max_length = 3)]
+///     n: i64,
+/// }
+/// ```
+#[cfg(all(doctest, feature = "serializer"))]
+pub struct BoundsMatchTheFieldType;
 
 #[cfg(test)]
 mod tests {

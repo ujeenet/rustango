@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — serializer `min` / `max` bound float fields
+
+They used to check integers only, so `#[serializer(min = 0, max = 100)] score: f64` took 150. A length bound on a non-string field, or a `min` / `max` on a non-numeric one, in `#[serializer]` or `#[form]`, is now a compile error instead of a silent no-op.
+
 ### Fixed — forms honour `#[rustango(blank)]`
 
 An empty value on a blank NOT NULL String field is saved as `""` in the admin, `ModelForm`, `ModelFormFor` and viewsets, instead of being refused as missing.
