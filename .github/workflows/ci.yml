@@ -408,10 +408,10 @@ jobs:
   # `timeout-minutes` because this job is reachable from a fork pull
   # request and builds three `build.rs` scripts that nothing ungated built
   # before — `libsqlite3-sys` with `bundled` compiles the SQLite C
-  # amalgamation. The default is six hours.
+  # amalgamation. The default is six hours. Green runs take 35-44 minutes.
   tests_compile:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
