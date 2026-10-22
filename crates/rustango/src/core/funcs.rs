@@ -753,7 +753,7 @@ pub fn trunc_with_tz(ts: impl Into<Expr>, unit: &'static str, tz: &'static str) 
 ///
 /// // data->'address'->>'city' (PG) /
 /// // JSON_UNQUOTE(JSON_EXTRACT(data, '$."address"."city"')) (MySQL) /
-/// // json_extract(data, '$."address"."city"') (SQLite)
+/// // json_extract(data, '$.address.city') (SQLite)
 /// json_path(F("data"), &["address", "city"], true);
 /// ```
 ///
