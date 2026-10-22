@@ -816,7 +816,7 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features ${{ matrix.features }} --lib
       # Build `tests/**` on the bare backends: no other job compiles a test
       # without tenancy, so a wrong single-backend `#![cfg]` stayed green (#2328).
-      - if: ${{ !contains(matrix.features, ',') || matrix.features == 'sqlite,_tower' || startsWith(matrix.features, 'postgres,batteries,tenancy') }}
+      - if: ${{ !contains(matrix.features, ',') || matrix.features == 'sqlite,_tower' || matrix.features == 'sqlite,csrf' || matrix.features == 'sqlite,template_views' || startsWith(matrix.features, 'postgres,batteries,tenancy') }}
         run: cargo test -p rustango --no-default-features --features ${{ matrix.features }} --tests --no-run
 
   # #1285 — the first Windows coverage this repo has had. Every other job

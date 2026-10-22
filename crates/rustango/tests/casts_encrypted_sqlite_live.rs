@@ -54,9 +54,7 @@ async fn encrypted_cast_round_trips_and_stores_ciphertext() {
     assert_eq!(&*fetched.ssn, plaintext);
 
     // Raw column holds ciphertext, not the plaintext.
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     let raw: (String,) = sqlx::query_as("SELECT ssn FROM cast_patient WHERE id = ?")
         .bind(id)
         .fetch_one(sq)
