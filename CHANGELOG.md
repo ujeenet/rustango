@@ -12,6 +12,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The before-image read is `FOR UPDATE` on PostgreSQL and MySQL, so two concurrent saves no longer diff against the same stale row; SQLite takes its write lock at `BEGIN` instead of failing with `database is locked`.
 
+### Fixed — Postgres-only values error on MySQL and SQLite instead of panicking
+
+Saving or filtering with an array, range, hstore, vector or geometry value on MySQL or SQLite now returns `SqlError::ValueNotSupportedInDialect`; the bind step used to panic.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

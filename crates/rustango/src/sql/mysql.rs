@@ -40,13 +40,17 @@ impl MySql {
     ) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::with_capacity(self, query.values.len());
         super::writers::write_insert_rows(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 }
 
 impl Dialect for MySql {
     fn name(&self) -> &'static str {
         "mysql"
+    }
+
+    fn binds_pg_only_values(&self) -> bool {
+        false
     }
 
     fn default_values_clause(&self) -> &'static str {
@@ -740,43 +744,43 @@ impl Dialect for MySql {
     fn compile_select(&self, query: &SelectQuery) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::new(self);
         write_select(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 
     fn compile_count(&self, query: &CountQuery) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::new(self);
         write_count(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 
     fn compile_aggregate(&self, query: &AggregateQuery) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::new(self);
         write_aggregate(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 
     fn compile_insert(&self, query: &InsertQuery) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::with_capacity(self, query.values.len());
         write_insert(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 
     fn compile_bulk_insert(&self, query: &BulkInsertQuery) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::with_capacity(self, query.columns.len() * query.rows.len());
         write_bulk_insert(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 
     fn compile_update(&self, query: &UpdateQuery) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::new(self);
         write_update(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 
     fn compile_delete(&self, query: &DeleteQuery) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::new(self);
         write_delete(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 
     fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError> {
@@ -784,7 +788,7 @@ impl Dialect for MySql {
         // constructor. On anything older, update row by row.
         let mut b = Sql::new(self);
         write_mysql_bulk_update(&mut b, query)?;
-        Ok(b.finish())
+        b.finish()
     }
 }
 

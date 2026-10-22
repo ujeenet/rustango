@@ -71,7 +71,7 @@ pub(super) fn paginated_statement(
     if select.compound.is_empty() && distinct {
         let mut b = crate::sql::writers::Sql::new(d);
         crate::sql::writers::write_distinct_with_total(&mut b, select)?;
-        return Ok(b.finish());
+        return b.finish();
     }
     if select.compound.is_empty() {
         let stmt = d.compile_select(select)?;
@@ -82,5 +82,5 @@ pub(super) fn paginated_statement(
     }
     let mut b = crate::sql::writers::Sql::new(d);
     crate::sql::writers::write_compound_with_total(&mut b, select)?;
-    Ok(b.finish())
+    b.finish()
 }

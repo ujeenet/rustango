@@ -256,7 +256,18 @@ impl<'d> Sql<'d> {
         self.push_param_typed(value, None);
     }
 
-    pub(super) fn finish(mut self) -> CompiledStatement {
+    /// # Errors
+    /// [`SqlError::ValueNotSupportedInDialect`] for a Postgres-only
+    /// value on another backend: its bind arm can only panic.
+    pub(super) fn finish(mut self) -> Result<CompiledStatement, SqlError> {
+        if !self.d.binds_pg_only_values() {
+            if let Some(value) = self.params.iter().find_map(SqlValue::pg_only_kind) {
+                return Err(SqlError::ValueNotSupportedInDialect {
+                    value,
+                    dialect: self.d.name(),
+                });
+            }
+        }
         if self.group_concat {
             // A statement-level hint: it covers the GROUP_CONCAT in any block.
             let start = self.sql.len() - self.sql.trim_start_matches('(').len();
@@ -270,10 +281,10 @@ impl<'d> Sql<'d> {
                 );
             }
         }
-        CompiledStatement {
+        Ok(CompiledStatement {
             sql: self.sql,
             params: self.params,
-        }
+        })
     }
 }
 
@@ -4995,7 +5006,7 @@ pub(crate) fn compile_where_order_tail(
         write_where_with_search(b, where_clause, search, model)?;
         write_order_limit_offset(b, order_by, limit, offset)
     })?;
-    Ok(b.finish())
+    b.finish()
 }
 
 /// Granularity of a `.dates()` / `.datetimes()` bucket.
@@ -5030,7 +5041,7 @@ pub(crate) fn compile_date_buckets(
     b.sql.push_str(" ORDER BY ");
     b.write_ident("rs_bucket");
     b.sql.push_str(if descending { " DESC" } else { " ASC" });
-    Ok(b.finish())
+    b.finish()
 }
 
 /// Truncate `col_quoted` to a date bucket, typed as a `DATE`.

@@ -288,6 +288,12 @@ pub trait Dialect: Send + Sync {
         false
     }
 
+    /// `true` if arrays, ranges, hstore, vectors and geometries bind.
+    /// Postgres only; elsewhere the writer refuses them.
+    fn binds_pg_only_values(&self) -> bool {
+        true
+    }
+
     /// `true` if `ORDER BY … NULLS FIRST|LAST` is understood. MySQL
     /// is the exception, so the writer sorts on `<col> IS NULL`
     /// first: `DESC` on that term for NULLS FIRST, `ASC` for
