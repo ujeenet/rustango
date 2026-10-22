@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### New projects: dev server on loopback
+
+Only new scaffolds change. To match in an existing project, drop `RUSTANGO_BIND` from `.env`, add `RUSTANGO_BIND: 0.0.0.0:8080` under the compose `rust` service's `environment:`, and publish `"127.0.0.1:8080:8080"`.
+
 ### `make:*` verbs check features
 
 `make:viewset` and `make:test` need `admin`, `make:serializer` needs `serializer`, `make:form` `forms`, `make:job` / `make:worker` `jobs`, `make:scheduled` `scheduler`, `make:notification` `notifications`. Without it the verb now errors instead of writing a file that does not compile.

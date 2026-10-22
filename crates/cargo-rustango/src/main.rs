@@ -98,7 +98,7 @@ fn print_help() {
     println!("TEMPLATES:");
     println!("  api        bare ORM + axum, no admin (JSON-only services)");
     println!("  fullstack  ORM + auto-admin (default)");
-    println!("  tenant     multi-tenancy + operator console + tenancy_manage CLI");
+    println!("  tenant     multi-tenancy + operator console + tenant admin");
     println!();
     println!("OPTIONS:");
     println!("  -t, --template <name>    project template (default: fullstack)");
@@ -772,7 +772,11 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     // A `src/bin/*.rs` (a worker from `manage make:worker`, say) is its
     // own crate and can reach the app only through this.
     write(root, "src/lib.rs", &templates::lib_rs(name))?;
-    write(root, "src/main.rs", &templates::main_rs(template, name))?;
+    write(
+        root,
+        "src/main.rs",
+        &templates::main_rs_for(template, name, &args.features),
+    )?;
     write(root, "src/models.rs", &templates::models_rs(template))?;
     write(root, "src/views.rs", templates::VIEWS_RS)?;
     write(root, "src/urls.rs", &templates::urls_rs(template))?;
@@ -1433,8 +1437,8 @@ mod tests {
     }
 
     /// `.env.example` defaults must work out-of-box for `docker
-    /// compose up -d` (host = `postgres`, bind = `0.0.0.0`). Users
-    /// running cargo on the host edit `postgres` -> `localhost`.
+    /// compose up -d` (host = `postgres`). Users running cargo on the
+    /// host edit `postgres` -> `localhost`.
     #[test]
     fn env_example_defaults_to_docker_friendly_values() {
         let body = templates::env_example("myapp", Backend::Postgres);
@@ -1443,10 +1447,58 @@ mod tests {
             "DATABASE_URL host must default to `postgres` (compose service name), \
              got: {body}"
         );
-        assert!(
-            body.contains("RUSTANGO_BIND=0.0.0.0:8080"),
-            "bind must default to 0.0.0.0 so the container's exposed port is \
-             reachable from the host, got: {body}"
-        );
+    }
+
+    /// `.env` must not set `RUSTANGO_BIND`: it beats the dev tier's
+    /// `127.0.0.1`. Only the container binds all interfaces, and compose
+    /// publishes it on loopback.
+    #[test]
+    fn only_the_container_binds_all_interfaces() {
+        for backend in [Backend::Postgres, Backend::Mysql, Backend::Sqlite] {
+            let env = templates::env_example("myapp", backend);
+            assert!(
+                !env.lines().any(|l| l.starts_with("RUSTANGO_BIND=")),
+                "{env}"
+            );
+            let compose = templates::docker_compose("myapp", backend);
+            assert!(compose.contains("RUSTANGO_BIND: 0.0.0.0:8080"), "{compose}");
+            assert!(compose.contains("\"127.0.0.1:8080:8080\""), "{compose}");
+            assert!(!compose.contains("- \"8080:8080\""), "{compose}");
+        }
+    }
+
+    /// `[admin]` and `[brand]` reach the generated admin.
+    #[test]
+    fn fullstack_admin_reads_settings() {
+        let urls = templates::urls_rs(Template::Fullstack);
+        assert!(urls.contains("admin::Builder::from_settings(pool, &"), "{urls}");
+    }
+
+    /// `--features csrf` mounts the layer; every template shows where the
+    /// proxy list goes.
+    #[test]
+    fn main_rs_wires_csrf_and_shows_trusted_proxies() {
+        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
+            let plain = templates::main_rs_for(template, "myapp", &[]);
+            assert!(!plain.contains(".with_csrf()"), "{template:?}: {plain}");
+            assert!(plain.contains(".with_trusted_proxies("), "{template:?}: {plain}");
+            let csrf = templates::main_rs_for(template, "myapp", &["csrf".to_owned()]);
+            assert!(csrf.contains("\n        .with_csrf()"), "{template:?}: {csrf}");
+        }
+    }
+
+    /// A fresh project generates the framework's tables before migrating.
+    #[test]
+    fn readme_runs_makemigrations_before_migrate() {
+        for backend in [Backend::Postgres, Backend::Sqlite] {
+            let readme = templates::readme("myapp", Template::Fullstack, backend);
+            for line in readme.lines().filter(|l| l.contains("cargo run -- migrate")) {
+                let at = readme.find(line).unwrap();
+                assert!(
+                    readme[..at].lines().last().unwrap_or("").contains("makemigrations"),
+                    "`{line}` must follow makemigrations:\n{readme}"
+                );
+            }
+        }
     }
 }
