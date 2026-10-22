@@ -546,7 +546,7 @@ p256           = { workspace = true, optional = true }
 http           = { workspace = true, optional = true }
 http-body      = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
-# Already linked through axum; the serve loop sets hyper's header timeout (#1211).
+# Already linked through axum; the serve loop sets hyper's header timeout.
 hyper          = { version = "1", features = ["server", "http1"], optional = true }
 hyper-util     = { version = "0.1", features = ["tokio", "server", "service", "http1"], optional = true }
 tera           = { workspace = true, optional = true }

@@ -286,7 +286,7 @@ impl HealthRouter {
     }
 }
 
-/// `url` for errors and logs: no userinfo, query or fragment (#1232).
+/// `url` for errors and logs: no userinfo, query or fragment.
 #[cfg(feature = "http-client")]
 fn probe_label(url: &str) -> String {
     match reqwest::Url::parse(url) {
@@ -666,7 +666,7 @@ mod tests {
         assert!(err.contains("127.0.0.1:1"), "expected addr in error: {err}");
     }
 
-    /// Credentials and tokens in a probe URL stay out of the error (#1232).
+    /// Credentials and tokens in a probe URL stay out of the error.
     #[cfg(feature = "http-client")]
     #[tokio::test]
     async fn http_probe_error_hides_url_secrets() {

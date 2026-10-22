@@ -1340,7 +1340,7 @@ mod tests {
     }
 
     /// Behind the CSRF layer a right password must log in and a wrong one
-    /// must fail on the password, not on a missing token (#1305).
+    /// must fail on the password, not on a missing token.
     #[tokio::test]
     async fn login_sends_the_csrf_token_like_a_browser() {
         let app = Router::new()

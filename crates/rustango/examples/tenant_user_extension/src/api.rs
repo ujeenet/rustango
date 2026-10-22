@@ -43,7 +43,7 @@ async fn lookup(
     mut tenant: Tenant,
     Path(username): Path<String>,
 ) -> Result<Json<UserOut>, (StatusCode, String)> {
-    // A user directory is for signed-in tenant users only (#1265).
+    // A user directory is for signed-in tenant users only.
     if me.is_none() {
         return Err((StatusCode::UNAUTHORIZED, "login required".into()));
     }

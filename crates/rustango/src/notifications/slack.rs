@@ -114,7 +114,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// A failed POST must not echo the webhook URL (#1232).
+    /// A failed POST must not echo the webhook URL.
     #[tokio::test]
     async fn send_error_omits_the_webhook_url() {
         let cb = webhook_callback_with_client(

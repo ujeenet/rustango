@@ -4,31 +4,31 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-### Security — example apps no longer ship open writes or forgeable tokens (#1265)
+### Security — example apps no longer ship open writes or forgeable tokens
 
 The showcase signs JWTs with a random key when `SHOWCASE_JWT_SECRET` is unset, spends a dummy hash on unknown logins and hides DB errors on register. `cookbook_blog`'s author forms need a login and a CSRF token and show plain save errors. `tenant_user_extension`'s user lookup needs a login.
 
-### Security — `getting_started_blog` and `admin_demo` put the admin behind a login (#1264)
+### Security — `getting_started_blog` and `admin_demo` put the admin behind a login
 
 Both now build the admin with `.with_session_auth(..)`, as the scaffolder does, and their smoke tests check that an anonymous visit is sent to the login page.
 
-### Security — the server times out slow headers and idle connections (#1211)
+### Security — the server times out slow headers and idle connections
 
 `serve_until_drained` now runs hyper with a timer, so a client gets 30 s to send each request head and an idle keep-alive connection closes after 30 s. `axum::serve` left both off, so slowloris clients could hold every socket.
 
-### Security — Slack and health-probe errors no longer show secret URLs (#1232)
+### Security — Slack and health-probe errors no longer show secret URLs
 
 A failed Slack POST no longer prints the webhook URL, and `http_probe` errors show the target without userinfo, query or fragment. `HttpError::Reqwest` drops the URL too.
 
-### Fixed — `csp_report_router` takes real browser reports (#1212)
+### Fixed — `csp_report_router` takes real browser reports
 
 It reads `application/csp-report` and `application/reports+json` bodies up to 64 KiB; they were refused with 415. The CSRF layer lets these two types through without a token (no form or no-cors fetch can send them), and still checks the Origin.
 
-### Fixed — `server.max_body_bytes` can raise the limit above 2 MiB (#1210)
+### Fixed — `server.max_body_bytes` can raise the limit above 2 MiB
 
 `BodyLimitLayer` now replaces axum's 2 MiB `DefaultBodyLimit` on the methods it checks, so a 10 MB cap lets a 5 MB upload reach `Bytes`, `Json`, `Form` or `Multipart`.
 
-### Fixed — `TestClient::login` sends the CSRF token (#1305)
+### Fixed — `TestClient::login` sends the CSRF token
 
 It loads the login page first when the jar has no token, then posts with it, so a login test behind `CsrfLayer` no longer gets a 403 for every password.
 

@@ -24,7 +24,7 @@ pub fn api() -> Router<()> {
 /// `cargo run -- create-admin <username>`.
 ///
 /// Takes the multi-backend pool, so this file names no driver and
-/// compiles on all three (#1272).
+/// compiles on all three.
 pub fn admin_router(pool: Pool) -> Router {
     let secret = load_session_secret_for_tier(
         &tier_from_env(),

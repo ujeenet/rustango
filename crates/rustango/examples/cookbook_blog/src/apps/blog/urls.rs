@@ -83,7 +83,7 @@ fn form_page(page: Html<String>, set_cookie: Option<String>) -> Response {
 }
 
 /// What the user sees when a save fails. The raw DB error names tables
-/// and constraints, so it only goes to the log (#1265).
+/// and constraints, so it only goes to the log.
 fn save_error(e: &rustango::sql::ExecError) -> &'static str {
     if let rustango::sql::ExecError::Driver(rustango::sql::sqlx::Error::Database(db)) = e {
         if db.is_unique_violation() {
@@ -129,7 +129,7 @@ fn new_form(
 
 use rustango::text::html_escape;
 
-/// The forms write data, so they need a logged-in tenant user (#1265).
+/// The forms write data, so they need a logged-in tenant user.
 fn login_required() -> Response {
     Redirect::to("/login").into_response()
 }

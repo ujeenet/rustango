@@ -792,7 +792,7 @@ mod csp_report_tests {
     use axum::http::Request;
     use tower::ServiceExt as _;
 
-    /// The app as deployed: report route behind the CSRF layer (#1212).
+    /// The app as deployed: report route behind the CSRF layer.
     async fn post(content_type: &str, origin: Option<&str>, body: String) -> u16 {
         let app = super::csp_report_router("/__csp-report").layer(crate::forms::csrf::layer());
         let mut req = Request::post("/__csp-report")

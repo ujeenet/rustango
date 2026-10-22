@@ -682,7 +682,7 @@ fn is_form_encoded(req: &Request<Body>) -> bool {
 }
 
 /// A browser violation report. No form or no-cors fetch can send these
-/// types, so like `QUERY` they carry no ambient-credential CSRF (#1212).
+/// types, so like `QUERY` they carry no ambient-credential CSRF.
 fn is_browser_report(req: &Request<Body>) -> bool {
     matches!(
         media_type(req).as_deref(),

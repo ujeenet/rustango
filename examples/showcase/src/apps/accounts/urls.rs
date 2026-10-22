@@ -48,7 +48,7 @@ pub fn api() -> Router {
 }
 
 /// `SHOWCASE_JWT_SECRET`, else a random key for this process. A fixed
-/// fallback let anyone sign a token for any `sub` (#1265).
+/// fallback let anyone sign a token for any `sub`.
 fn jwt_secret() -> &'static [u8] {
     static SECRET: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     SECRET.get_or_init(|| match std::env::var("SHOWCASE_JWT_SECRET") {
@@ -220,7 +220,7 @@ async fn me(
 
 #[cfg(test)]
 mod tests {
-    /// Unset, the key is random, not a string anyone can read here (#1265).
+    /// Unset, the key is random, not a string anyone can read here.
     #[test]
     fn unset_secret_is_not_the_old_fixed_string() {
         if std::env::var_os("SHOWCASE_JWT_SECRET").is_some() {

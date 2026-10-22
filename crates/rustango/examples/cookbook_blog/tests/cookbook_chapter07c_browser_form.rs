@@ -8,7 +8,7 @@
 //! would surface:
 //!
 //! 0. Anonymous visitors are sent to `/login`, and a POST without the
-//!    form's CSRF token is refused (#1265).
+//!    form's CSRF token is refused.
 //! 1. GET renders an HTML form.
 //! 2. POST with empty body → re-rendered form + "required field"
 //!    errors (covers the empty-string-non-null-String fix shipped

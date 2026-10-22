@@ -112,7 +112,7 @@ async fn open_then_edit_existing_record_with_unique_rejection() {
     wait_ready().await;
 
     let host = "acme.localhost";
-    // Anonymous: the edit form sends you to /login (#1265).
+    // Anonymous: the edit form sends you to /login.
     let resp = client()
         .get(format!("http://{BIND}/authors/1/edit")).header("Host", host)
         .send().await.unwrap();

@@ -350,7 +350,7 @@ mod tests {
         assert_eq!(resp.status(), 200);
     }
 
-    /// A cap above axum's 2 MiB extractor default is the cap (#1210).
+    /// A cap above axum's 2 MiB extractor default is the cap.
     #[tokio::test]
     async fn limit_above_axum_default_lets_the_extractor_read() {
         let n = 3 * 1024 * 1024;

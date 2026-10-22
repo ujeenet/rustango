@@ -78,7 +78,7 @@ pub async fn serve_until_drained(
 }
 
 /// Time a client gets to send each request head, and the most an idle
-/// keep-alive connection stays open (#1211). hyper's own default.
+/// keep-alive connection stays open. hyper's own default.
 #[cfg(feature = "_axum")]
 const HEADER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -93,7 +93,7 @@ async fn drain_on(
 }
 
 /// `axum::serve` gives hyper no timer, which turns its header timeout
-/// off; a slow client then held a connection forever (#1211).
+/// off; a slow client then held a connection forever.
 #[cfg(feature = "_axum")]
 async fn serve_with(
     mut signal: StopSignal,
@@ -239,7 +239,7 @@ mod tests {
             .is_ok()
     }
 
-    /// A client that never finishes its headers is cut off (#1211).
+    /// A client that never finishes its headers is cut off.
     #[tokio::test]
     async fn a_slow_header_is_cut_off() {
         use tokio::io::AsyncWriteExt as _;
@@ -249,7 +249,7 @@ mod tests {
         assert!(closed_by_server(&mut client).await, "slow header held the connection");
     }
 
-    /// An idle keep-alive connection is closed too (#1211).
+    /// An idle keep-alive connection is closed too.
     #[tokio::test]
     async fn an_idle_keep_alive_connection_is_closed() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
