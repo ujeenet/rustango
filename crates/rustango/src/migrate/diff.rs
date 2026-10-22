@@ -2281,12 +2281,15 @@ fn check_key_sizes(
         }
         SchemaChange::AddColumn { table, column }
         | SchemaChange::AlterColumnType { table, column, .. }
-        | SchemaChange::AlterColumnMaxLength { table, column, .. }
-        | SchemaChange::AlterColumnUnique {
+        | SchemaChange::AlterColumnMaxLength { table, column, .. } => column_keys(table, column),
+        SchemaChange::AlterColumnUnique {
             table,
             column,
             unique: true,
-        } => column_keys(table, column),
+        } => match current.table(table) {
+            Some(t) => check(t, "unique", &[column.as_str()]),
+            None => Ok(()),
+        },
         SchemaChange::CreateIndex {
             name,
             table,
