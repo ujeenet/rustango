@@ -1195,6 +1195,27 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
         }
     }
 
+    // A re-diff loses these: data and callbacks vanish, a rename turns into drop + add.
+    for m in &pending {
+        if let Some(op) = m.forward.iter().find(|op| {
+            matches!(
+                op,
+                Operation::Data(_)
+                    | Operation::Callback(_)
+                    | Operation::Schema(
+                        super::SchemaChange::RenameTable { .. }
+                            | super::SchemaChange::RenameColumn { .. }
+                    )
+            )
+        }) {
+            return Err(MigrateError::Validation(format!(
+                "migrate --squash: refused — `{}` has a hand-written op a fresh diff would lose: \
+                 {op:?}. Fold the pending files by hand instead.",
+                m.name,
+            )));
+        }
+    }
+
     writeln!(
         w,
         "squashing {} pending migration(s) into a fresh diff:",
@@ -8313,6 +8334,50 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await;
         let out = out.unwrap();
         assert!(!out.contains("0001_a"), "{out}");
+    }
+
+    /// `--squash` refuses pending files whose hand-written ops a re-diff
+    /// would lose, and deletes nothing.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn squash_refuses_hand_written_ops() {
+        use super::super::{CallbackOp, SchemaChange};
+        let hand = [
+            Operation::Data(DataOp {
+                sql: "UPDATE t SET x = 1".into(),
+                reverse_sql: None,
+                reversible: false,
+            }),
+            Operation::Callback(CallbackOp {
+                name: "fill".into(),
+                reverse_name: None,
+            }),
+            Operation::Schema(SchemaChange::RenameTable {
+                old_name: "sq_a".into(),
+                new_name: "sq_b".into(),
+            }),
+            Operation::Schema(SchemaChange::RenameColumn {
+                table: "sq_a".into(),
+                old_column: "x".into(),
+                new_column: "y".into(),
+            }),
+        ];
+        for op in hand {
+            let pool = Pool::connect("sqlite::memory:").await.unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("migrations");
+            std::fs::create_dir_all(&dir).unwrap();
+            file::write(&dir.join("0001_a.json"), &create_mig("0001_a", None, "sq_a")).unwrap();
+            let mut second = create_mig("0002_b", Some("0001_a"), "sq_a");
+            second.atomic = false;
+            second.forward = vec![op.clone()];
+            file::write(&dir.join("0002_b.json"), &second).unwrap();
+            let err = manage_out(&pool, &dir, &["migrate", "--squash"])
+                .await
+                .expect_err("a re-diff would lose the op");
+            assert!(err.to_string().contains("0002_b"), "{op:?}: {err}");
+            assert!(dir.join("0002_b.json").exists(), "{op:?}: the file was deleted");
+        }
     }
 
     #[test]
