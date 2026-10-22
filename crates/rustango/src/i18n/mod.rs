@@ -1447,6 +1447,31 @@ mod tests {
     }
 
     #[test]
+    fn negotiate_clamps_q_above_one() {
+        let lang = negotiate_language("en,fr;q=5", &["en", "fr"]);
+        assert_eq!(lang.as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn negotiate_keeps_header_order_on_equal_q() {
+        assert_eq!(
+            negotiate_language("fr,en", &["en", "fr"]).as_deref(),
+            Some("fr")
+        );
+        assert_eq!(
+            negotiate_language("de;q=0.5,fr;q=0.5,en;q=0.5", &["en", "fr"]).as_deref(),
+            Some("fr")
+        );
+        // Long enough that an unstable sort would reorder the ties.
+        let header: Vec<String> = std::iter::once("fr".to_owned())
+            .chain((0..60).map(|i| format!("x{i};q=0.{}", 1 + i % 9)))
+            .chain(["en".to_owned()])
+            .collect();
+        let lang = negotiate_language(&header.join(","), &["en", "fr"]);
+        assert_eq!(lang.as_deref(), Some("fr"));
+    }
+
+    #[test]
     fn negotiate_survives_nan_q_values() {
         let header: Vec<String> = (0..60)
             .map(|i| match i % 3 {

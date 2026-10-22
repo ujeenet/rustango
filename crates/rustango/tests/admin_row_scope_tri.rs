@@ -11,7 +11,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use rustango::core::{Filter, Op, SqlValue};
-use rustango::sql::{Auto, FetcherPool as _, Pool};
+use rustango::sql::{Auto, CounterPool as _, FetcherPool as _, Pool};
 use rustango::{tri_dialect_test, Model};
 use tower::ServiceExt as _;
 
@@ -106,6 +106,11 @@ fn not_out(_: &axum::http::request::Parts) -> Vec<Filter> {
 }
 rustango::register_admin_queryset!("rowscope_child", not_out);
 
+fn not_noadd(_: &axum::http::request::Parts, row: Option<&serde_json::Value>) -> bool {
+    row.and_then(|r| r.get("label")) != Some(&serde_json::json!("noadd"))
+}
+rustango::register_admin_object_permission!("rowscope_child", "add", not_noadd);
+
 /// An auto-PK child with a secret, capped at one row per parent.
 #[derive(Model, Debug, Clone)]
 #[rustango(
@@ -173,6 +178,12 @@ async fn setup(pool: &Pool) {
     fresh_table::<AutoChild>(pool).await;
     fresh_table::<FlagParent>(pool).await;
     fresh_table::<Flag>(pool).await;
+    rustango::audit::ensure_table_pool(pool)
+        .await
+        .expect("audit table");
+    rustango::audit::AuditLog::delete_where("entity_table", "rowscope_item", pool)
+        .await
+        .expect("clear audit rows");
 }
 
 async fn post(pool: &Pool, uri: &str, form: &str) -> (StatusCode, String) {
@@ -243,30 +254,101 @@ async fn items(pool: &Pool) -> Vec<(String, i64)> {
     rows.into_iter().map(|i| (i.title, i.owner_id)).collect()
 }
 
-/// A create outside the scope, or one the `add` hook refuses, writes nothing.
+async fn item_audit_rows(pool: &Pool) -> i64 {
+    rustango::audit::AuditLog::objects()
+        .filter("entity_table", "rowscope_item")
+        .count(pool)
+        .await
+        .expect("count audit rows")
+}
+
+/// A create outside the scope, or one the `add` hook refuses, writes nothing:
+/// no row, no audit entry, no `post_save`.
 async fn create_outside_scope_is_refused(pool: &Pool) {
+    use rustango::signals::admin::{connect_admin_post_save, disconnect_admin_post_save};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let saves = Arc::new(AtomicUsize::new(0));
+    let seen = saves.clone();
+    let id = connect_admin_post_save(move |ctx| {
+        if ctx.table == "rowscope_item" {
+            seen.fetch_add(1, Ordering::SeqCst);
+        }
+        async {}
+    });
     let (status, body) = post(pool, "/rowscope_item", "title=t&owner_id=77").await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     let (status, body) = post(pool, "/rowscope_item", "title=locked&owner_id=1").await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert!(items(pool).await.is_empty(), "row written");
+    assert_eq!(item_audit_rows(pool).await, 0, "audit entry for a refused create");
+    assert_eq!(saves.load(Ordering::SeqCst), 0, "post_save on a refused create");
     let (status, body) = post(pool, "/rowscope_item", "title=ok&owner_id=1").await;
+    disconnect_admin_post_save(id);
     assert!(status.is_redirection(), "{status}: {body}");
     assert_eq!(items(pool).await, [("ok".to_owned(), 1)]);
+    assert_eq!(item_audit_rows(pool).await, 1);
+    assert_eq!(saves.load(Ordering::SeqCst), 1);
 }
 
-/// An edit that moves a row out of scope, or that the `change` hook refuses, writes nothing.
+/// An edit that moves a row out of scope writes nothing.
 async fn update_out_of_scope_is_refused(pool: &Pool) {
     let mine = seed(pool, "mine", 1).await;
     let uri = format!("/rowscope_item/{mine}");
     let (status, body) = post(pool, &uri, "title=moved&owner_id=77").await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    let (status, body) = post(pool, &uri, "title=locked&owner_id=1").await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(items(pool).await, [("mine".to_owned(), 1)]);
     let (status, body) = post(pool, &uri, "title=renamed&owner_id=1").await;
     assert!(status.is_redirection(), "{status}: {body}");
     assert_eq!(items(pool).await, [("renamed".to_owned(), 1)]);
+}
+
+/// The `change` hook judges the row before the edit, so a draft can be locked once.
+async fn change_hook_sees_the_row_before_the_edit(pool: &Pool) {
+    let draft = seed(pool, "draft", 1).await;
+    let uri = format!("/rowscope_item/{draft}");
+    let (status, body) = post(pool, &uri, "title=locked&owner_id=1").await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(items(pool).await, [("locked".to_owned(), 1)]);
+    let (status, body) = post(pool, &uri, "title=again&owner_id=1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(items(pool).await, [("locked".to_owned(), 1)]);
+}
+
+async fn parent_names(pool: &Pool) -> Vec<String> {
+    let rows = Parent::objects().fetch(pool).await.expect("fetch parents");
+    rows.into_iter().map(|p| p.name).collect()
+}
+
+/// An inline row edited or added outside the child's scope, or refused by its
+/// `add` hook, is a 403 and rolls the whole edit back.
+async fn inline_child_outside_scope_is_refused(pool: &Pool) {
+    let p = seed_parent(pool).await;
+    seed_child(pool, "a", p, "one", false).await;
+    let uri = format!("/rowscope_parent/{p}");
+    let head = "name=renamed&rowscope_child-0-code=a";
+    for (slots, extra) in [
+        ("1", "&rowscope_child-0-label=out"),
+        ("2", "&rowscope_child-0-label=one&rowscope_child-1-code=n&rowscope_child-1-label=out&rowscope_child-1-secret=s"),
+        ("2", "&rowscope_child-0-label=one&rowscope_child-1-code=n&rowscope_child-1-label=noadd&rowscope_child-1-secret=s"),
+    ] {
+        let form = format!(
+            "{head}&rowscope_child-TOTAL_FORMS={slots}&rowscope_child-INITIAL_FORMS=1{extra}"
+        );
+        let (status, body) = post(pool, &uri, &form).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{extra}: {body}");
+        assert_eq!(child(pool, "a").await.expect("a").label, "one", "{extra}");
+        assert!(child(pool, "n").await.is_none(), "{extra}: row inserted");
+        assert_eq!(parent_names(pool).await, ["p"], "{extra}: parent edit kept");
+    }
+    let form = format!(
+        "{head}&rowscope_child-TOTAL_FORMS=2&rowscope_child-INITIAL_FORMS=1\
+         &rowscope_child-0-label=two&rowscope_child-1-code=n&rowscope_child-1-label=fine&rowscope_child-1-secret=s"
+    );
+    let (status, body) = post(pool, &uri, &form).await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(child(pool, "a").await.expect("a").label, "two");
+    assert_eq!(child(pool, "n").await.expect("n").label, "fine");
 }
 
 /// An FK facet labels a hidden target by its key, not its title (#2029).
@@ -592,6 +674,8 @@ tri_dialect_test! {
         hidden_rows_are_404_and_uncounted,
         create_outside_scope_is_refused,
         update_out_of_scope_is_refused,
+        change_hook_sees_the_row_before_the_edit,
+        inline_child_outside_scope_is_refused,
         fk_facet_hides_a_hidden_targets_name,
         fk_cell_shows_a_visible_targets_name,
         view_links_encode_the_pk,

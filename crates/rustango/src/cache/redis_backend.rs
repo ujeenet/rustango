@@ -54,6 +54,16 @@ impl Default for RedisTimeouts {
     }
 }
 
+/// redis 0.27 otherwise backs off up to 60 s between 6 retries, and a
+/// call waits on the reconnect: minutes of stall per outage.
+fn manager_config(timeouts: RedisTimeouts) -> redis::aio::ConnectionManagerConfig {
+    redis::aio::ConnectionManagerConfig::new()
+        .set_connection_timeout(timeouts.connect)
+        .set_response_timeout(timeouts.response)
+        .set_number_of_retries(CONNECT_RETRIES)
+        .set_max_delay(RETRY_MAX_DELAY_MS)
+}
+
 /// Async cache backed by Redis.
 ///
 /// Values are UTF-8 strings, or raw bytes through `set_bytes`.
@@ -95,14 +105,7 @@ impl RedisCache {
         timeouts: RedisTimeouts,
     ) -> Result<Self, CacheError> {
         let client = redis::Client::open(url).map_err(|e| CacheError::Connection(e.to_string()))?;
-        // redis 0.27 otherwise backs off up to 60 s between 6 retries, and a
-        // call waits on the reconnect: minutes of stall per outage.
-        let config = redis::aio::ConnectionManagerConfig::new()
-            .set_connection_timeout(timeouts.connect)
-            .set_response_timeout(timeouts.response)
-            .set_number_of_retries(CONNECT_RETRIES)
-            .set_max_delay(RETRY_MAX_DELAY_MS);
-        let conn = redis::aio::ConnectionManager::new_with_config(client, config)
+        let conn = redis::aio::ConnectionManager::new_with_config(client, manager_config(timeouts))
             .await
             .map_err(|e| CacheError::Connection(e.to_string()))?;
         Ok(Self { conn, default_ttl })
@@ -229,9 +232,11 @@ impl Cache for RedisCache {
             .map_err(|e| CacheError::Connection(e.to_string()))
     }
 
+    /// `ASYNC` replies at once; a sync flush of a big DB outlasts the command timeout.
     async fn clear(&self) -> Result<(), CacheError> {
         let mut conn = self.conn.clone();
         redis::cmd("FLUSHDB")
+            .arg("ASYNC")
             .query_async::<()>(&mut conn)
             .await
             .map_err(|e| CacheError::Connection(e.to_string()))
@@ -332,14 +337,76 @@ mod tests {
         assert_eq!(ttl_ms(Duration::ZERO), 1);
     }
 
+    /// The retry cap and backoff ceiling reach the connection manager.
+    #[test]
+    fn manager_config_caps_retries_and_backoff() {
+        let t = Duration::from_millis(100);
+        let config = format!("{:?}", manager_config(RedisTimeouts::new(t, t)));
+        assert!(config.contains("number_of_retries: 2"), "{config}");
+        assert!(config.contains("max_delay: Some(1000)"), "{config}");
+    }
+
+    /// Reads RESP commands and answers `+OK`, recording each one.
+    async fn ok_server() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("redis://{}/", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::<std::sync::Mutex<Vec<Vec<String>>>>::default();
+        let log = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let (r, mut w) = sock.into_split();
+                    let mut r = BufReader::new(r);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        if r.read_line(&mut line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let n: usize = line.trim()[1..].parse().unwrap();
+                        let mut cmd = Vec::new();
+                        for _ in 0..n {
+                            line.clear();
+                            r.read_line(&mut line).await.unwrap();
+                            let len: usize = line.trim()[1..].parse().unwrap();
+                            let mut buf = vec![0; len + 2];
+                            r.read_exact(&mut buf).await.unwrap();
+                            buf.truncate(len);
+                            cmd.push(String::from_utf8(buf).unwrap());
+                        }
+                        log.lock().unwrap().push(cmd);
+                        w.write_all(b"+OK\r\n").await.unwrap();
+                    }
+                });
+            }
+        });
+        (url, seen)
+    }
+
+    /// `clear` must not wait on a large flush: the command timeout would fail it.
+    #[tokio::test]
+    async fn clear_flushes_asynchronously() {
+        let (url, seen) = ok_server().await;
+        let cache = RedisCache::new(&url).await.expect("connect");
+        cache.clear().await.expect("clear");
+        let seen = seen.lock().unwrap();
+        let flush = seen.iter().find(|c| c[0].eq_ignore_ascii_case("FLUSHDB"));
+        assert_eq!(flush.map(|c| &c[1..]), Some(&["ASYNC".to_owned()][..]));
+    }
+
     /// A server that accepts but never answers fails the connect, not hangs it.
     #[tokio::test]
     async fn a_silent_server_fails_the_connect() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("redis://{}/", listener.local_addr().unwrap());
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = accepted.clone();
         let _accept = tokio::spawn(async move {
             let mut held = Vec::new();
             while let Ok((sock, _)) = listener.accept().await {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 held.push(sock);
             }
         });
@@ -353,6 +420,9 @@ mod tests {
         .expect("connect hung past its timeout");
         assert!(built.is_err(), "connected to a silent server");
         // Three 100 ms attempts and two ~1 s retry waits.
-        assert!(start.elapsed() < Duration::from_secs(8), "{:?}", start.elapsed());
+        assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let attempts = accepted.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(attempts, 3, "one connect and two retries");
     }
 }
