@@ -2981,6 +2981,10 @@ mod sql_type_tests {
             T::Range(R::Date),
             T::Range(R::DateTime),
             T::HStore,
+            T::Vector(0),
+            T::Vector(1536),
+            T::Geometry(0),
+            T::Geometry(4326),
         ];
         for t in all {
             // A new variant fails to compile here: add it to `all`.
@@ -3001,18 +3005,48 @@ mod sql_type_tests {
                 | T::Binary
                 | T::Array(_)
                 | T::Range(_)
-                | T::HStore => {}
-                T::Vector(_) | T::Geometry(_) => unreachable!("names carry no size"),
+                | T::HStore
+                | T::Vector(_)
+                | T::Geometry(_) => {}
             }
             let name = field_type_name(t);
-            assert_eq!(field_type_from_name(name), Some(t), "{name}");
+            assert_eq!(field_type_from_name(&name), Some(t), "{name}");
             assert_eq!(
-                pg_type_for_ty_name(name),
+                pg_type_for_ty_name(&name),
                 crate::sql::Postgres.column_type(t, None),
                 "{name}"
             );
         }
-        assert_eq!(pg_type_for_ty_name("vector"), "VECTOR");
+    }
+
+    /// A file migration's vector/geometry column matches live DDL on every
+    /// backend, and a dimension change is a type change.
+    #[test]
+    fn vector_and_geometry_keep_their_size_in_file_migrations() {
+        use crate::core::FieldType as T;
+        use crate::migrate::snapshot::field_type_name;
+        use crate::sql::Dialect as _;
+        for t in [T::Vector(3), T::Geometry(4326)] {
+            let f = fs(&field_type_name(t), false);
+            assert_eq!(
+                sql_type_with_dialect(&f, &crate::sql::Postgres),
+                crate::sql::Postgres.column_type(t, None)
+            );
+            #[cfg(feature = "mysql")]
+            assert_eq!(sql_type_with_dialect(&f, &crate::sql::MySql), "TEXT");
+            #[cfg(feature = "sqlite")]
+            assert_eq!(sql_type_with_dialect(&f, &crate::sql::Sqlite), "TEXT");
+        }
+        assert_ne!(
+            field_type_name(T::Vector(3)),
+            field_type_name(T::Vector(4)),
+            "a dimension change is not diffed"
+        );
+        assert_ne!(
+            field_type_name(T::Geometry(4326)),
+            field_type_name(T::Geometry(3857)),
+            "an SRID change is not diffed"
+        );
     }
 
     /// MySQL caps a key at 3072 bytes (1071) and utf8mb4 VARCHAR(n) counts 4n.

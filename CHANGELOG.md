@@ -16,6 +16,10 @@ The before-image read is `FOR UPDATE` on PostgreSQL and MySQL, so two concurrent
 
 Saving or filtering with an array, range, hstore, vector or geometry value on MySQL or SQLite now returns `SqlError::ValueNotSupportedInDialect`; the bind step used to panic.
 
+### Fixed — file migrations keep pgvector dimensions and PostGIS SRID
+
+Snapshots record `vector(N)` / `geometry(SRID)`, so migrations create `vector(1536)` / `geometry(Point,4326)` like live DDL, a dimension or SRID change is diffed, and MySQL gets `TEXT` instead of the `VECTOR` it rejects.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

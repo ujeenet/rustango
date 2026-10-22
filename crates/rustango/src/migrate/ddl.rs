@@ -421,7 +421,7 @@ fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) 
         // rejects a literal default on a LOB column (TEXT/JSON/BLOB)
         // and needs the `DEFAULT ('')` form. PG and SQLite keep `''`.
         let expr_to_render = if expr.is_empty() { "''" } else { expr };
-        let rendered = dialect.translate_default_expr(expr_to_render, ty_name, field.max_length);
+        let rendered = dialect.translate_default_expr(expr_to_render, &ty_name, field.max_length);
         let _ = write!(s, " DEFAULT {rendered}");
     }
     if !field.nullable {

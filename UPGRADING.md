@@ -154,6 +154,10 @@ untouched.
 
 Move the extension out first (`ALTER EXTENSION <name> SET SCHEMA public`), then purge again.
 
+### Vector and geometry columns get one `makemigrations` step
+
+Snapshots now carry the dimension / SRID, so the first `makemigrations` emits an `AlterColumnType` for each sized `vector` or `geometry` column, fixing columns earlier file migrations created without it.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more
