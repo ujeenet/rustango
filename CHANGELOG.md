@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — the fullstack scaffold mounts its admin at `[admin] url_prefix`
 
-`main.rs` loads the settings once, passes them to the server and to `admin::Builder::from_settings`, and nests the admin at the new `admin::Builder::settings_prefix` (default `/admin`).
+`main.rs` loads the settings once, passes them to the server (via the now-public `Cli::with_loaded_settings`, so a missing `config/` still only warns) and to `admin::Builder::from_settings`, and nests the admin at the new `admin::Builder::settings_prefix` (default `/admin`).
 
 ### Fixed — SQLite migrations see columns another pooled connection added
 
@@ -14,11 +14,11 @@ A migration on a connection that sat idle while another one ran DDL could fail a
 
 ### Fixed — raw SQL helpers refuse Postgres-only binds instead of panicking
 
-`raw_execute_pool`/`_tx` and `raw_query_pool`/`_tx` return `SqlError::ValueNotSupportedInDialect` for an array, range, hstore, vector or geometry bind on MySQL or SQLite.
+`raw_execute_pool`/`_tx` and `raw_query_pool`/`_tx` return `SqlError::ValueNotSupportedInDialect` for an array, range, hstore, vector or geometry bind on MySQL or SQLite, and for a `SqlValue::List` bind on every backend.
 
 ### Fixed — deleting a model removes its generic M2M links
 
-Every delete path (instance, `delete_where`, `QuerySet::delete_on`, transaction, audited, admin) also deletes the owner's `generic_m2m` junction rows, in the same transaction; PostgreSQL does it in one statement.
+Every delete path (instance, `delete_where`, `QuerySet::delete_on`, transaction, audited, admin, `Model::truncate`) also deletes the owner's `generic_m2m` junction rows, in the same transaction; PostgreSQL does it in one statement.
 
 ## [0.60.9] — 2026-10-16
 

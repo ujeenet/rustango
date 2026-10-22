@@ -244,6 +244,7 @@ fn seed_sql(article_ct: i64, other_ct: i64) -> Vec<String> {
 async fn seed_content_types(pool: &rustango::sql::Pool) -> (i64, i64) {
     use rustango::contenttypes::{self, ContentType};
     contenttypes::ensure_table(pool).await.expect("content type table");
+    clear_content_types(pool).await;
     let mut ids = Vec::new();
     for (model, table) in [("article", "rmg_article"), ("other", "rmg_other")] {
         let mut ct = ContentType {
@@ -256,6 +257,14 @@ async fn seed_content_types(pool: &rustango::sql::Pool) -> (i64, i64) {
         ids.push(*ct.id.get().expect("ct id"));
     }
     (ids[0], ids[1])
+}
+
+/// Only this suite's `rmg` rows: other suites share the table, so it is never dropped.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn clear_content_types(pool: &rustango::sql::Pool) {
+    rustango::contenttypes::ContentType::delete_where("app_label", "rmg", pool)
+        .await
+        .expect("clear rmg content types");
 }
 
 // ----------------------------------------------------------------- SQLite
@@ -315,7 +324,6 @@ mod pg_live {
             "DROP TABLE IF EXISTS rmg_post",
             "DROP TABLE IF EXISTS rmg_tag",
             "DROP TABLE IF EXISTS rmg_article",
-            "DROP TABLE IF EXISTS rustango_content_types",
             "CREATE TABLE rmg_post (id BIGINT PRIMARY KEY, title VARCHAR(80) NOT NULL)",
             "CREATE TABLE rmg_tag (id BIGINT PRIMARY KEY, name VARCHAR(40) NOT NULL, weight BIGINT NOT NULL)",
             "CREATE TABLE rmg_post_tags (post_id BIGINT NOT NULL, tag_id BIGINT NOT NULL)",
@@ -331,6 +339,7 @@ mod pg_live {
         }
         assert_relations(&pool).await;
         content_types_still_take_auto_ids(&pool).await;
+        clear_content_types(&pool).await;
     }
 }
 
@@ -354,7 +363,6 @@ mod my_live {
             "DROP TABLE IF EXISTS rmg_post",
             "DROP TABLE IF EXISTS rmg_tag",
             "DROP TABLE IF EXISTS rmg_article",
-            "DROP TABLE IF EXISTS rustango_content_types",
             "CREATE TABLE rmg_post (id BIGINT PRIMARY KEY, title VARCHAR(80) NOT NULL)",
             "CREATE TABLE rmg_tag (id BIGINT PRIMARY KEY, name VARCHAR(40) NOT NULL, weight BIGINT NOT NULL)",
             "CREATE TABLE rmg_post_tags (post_id BIGINT NOT NULL, tag_id BIGINT NOT NULL)",
@@ -370,5 +378,6 @@ mod my_live {
         }
         assert_relations(&pool).await;
         content_types_still_take_auto_ids(&pool).await;
+        clear_content_types(&pool).await;
     }
 }

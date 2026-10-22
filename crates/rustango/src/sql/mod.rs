@@ -81,8 +81,9 @@ pub use executor::{
     SqlExecutor, TxGuard, UpdaterPool,
 };
 pub(crate) use executor::{
-    bulk_insert_pks_tx, fetch_in_chunks, fetch_select_in_chunks, inserted_pk,
+    bulk_insert_pks_tx, fetch_in_chunks, fetch_select_in_chunks, inserted_pk, truncate_tx,
 };
+pub use executor::{truncate, truncate_sql};
 #[cfg(feature = "admin")]
 pub(crate) use executor::{select_one_row_as_json_tx, select_rows_as_json_tx};
 // PG-typed back-compat surface gone (issue #270 / T1.8 waves 1–4):

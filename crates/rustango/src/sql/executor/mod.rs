@@ -1736,6 +1736,49 @@ pub async fn delete_tx(tx: &mut PoolTx<'_>, query: &DeleteQuery) -> Result<u64, 
     run_delete_plan_tx(tx, plan).await
 }
 
+/// `Model::truncate`'s statement: `TRUNCATE … RESTART IDENTITY CASCADE`
+/// on Postgres, `DELETE FROM` elsewhere. Not part of the public API.
+#[doc(hidden)]
+#[must_use]
+pub fn truncate_sql(d: &dyn crate::sql::Dialect, table: &str) -> String {
+    let quoted = d.quote_ident(table);
+    if d.name() == "postgres" {
+        format!("TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE")
+    } else {
+        format!("DELETE FROM {quoted}")
+    }
+}
+
+/// Run `sql` (a [`truncate_sql`]) in `tx` after clearing the table's
+/// generic M2M junction rows, so a reused id inherits no links.
+pub(crate) async fn truncate_tx(
+    tx: &mut PoolTx<'_>,
+    table: &str,
+    sql: &str,
+) -> Result<u64, ExecError> {
+    for link in crate::sql::m2m::generic_m2m_truncate_links(table) {
+        let stmt = tx.dialect().compile_delete(&link)?;
+        execute_tx(tx, &stmt.sql, stmt.params).await?;
+    }
+    execute_tx(tx, sql, Vec::new()).await
+}
+
+/// Empty `model`'s table and its generic M2M junction rows in one
+/// transaction. Backs the derived `Model::truncate`.
+///
+/// # Errors
+/// As [`raw_execute_tx`].
+pub async fn truncate(
+    pool: &Pool,
+    model: &'static crate::core::ModelSchema,
+) -> Result<u64, ExecError> {
+    let mut tx = tx::write_transaction_pool(pool).await?;
+    let sql = truncate_sql(tx.dialect(), model.table);
+    let affected = truncate_tx(&mut tx, model.table, &sql).await?;
+    tx.commit().await?;
+    Ok(affected)
+}
+
 /// Validated multi-row `INSERT` inside an open transaction, split to fit
 /// the backend's bind-parameter limit like [`bulk_insert_pool`].
 pub(crate) async fn bulk_insert_tx(

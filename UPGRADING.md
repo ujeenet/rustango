@@ -150,17 +150,13 @@ untouched.
 
 ## Unreleased
 
-### New fullstack projects need their config files
-
-A freshly scaffolded fullstack `main.rs` calls `Settings::load_from_env()?`, so a missing `config/default.toml` stops boot instead of warning. Existing projects are unchanged.
-
 ### New `SqlError::ValueNotSupportedInDialect`
 
-Raw SQL helpers return it for a Postgres-only bind on MySQL/SQLite, where they used to panic. `SqlError` is `#[non_exhaustive]`, so matches keep compiling.
+Raw SQL helpers return it for a Postgres-only bind on MySQL/SQLite, or a `SqlValue::List` bind on any backend, where they used to panic. `SqlError` is `#[non_exhaustive]`, so matches keep compiling.
 
 ### Deletes clear generic M2M junction rows
 
-Deleting a model that declares `generic_m2m(...)` now also deletes its junction rows. On MySQL and SQLite this runs as two statements in one transaction.
+Deleting a model that declares `generic_m2m(...)` now also deletes its junction rows; so does `Model::truncate`. On MySQL and SQLite this runs as two statements in one transaction.
 
 ## 0.60.9
 

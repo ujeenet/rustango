@@ -2339,7 +2339,7 @@ pub async fn truncate_with_audit(
     sql: &str,
 ) -> Result<u64, crate::sql::ExecError> {
     let mut tx = crate::sql::write_transaction_pool(pool).await?;
-    let affected = crate::sql::raw_execute_tx(&mut tx, sql, Vec::new()).await?;
+    let affected = crate::sql::truncate_tx(&mut tx, entity_table, sql).await?;
     let entry = PendingEntry {
         entity_table,
         entity_pk: String::new(),

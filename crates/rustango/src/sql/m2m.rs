@@ -499,25 +499,34 @@ pub(crate) fn generic_m2m_links(query: &DeleteQuery) -> Vec<DeleteQuery> {
     ct_ids.projection = Some(vec!["id"]);
     let mut owner_pks = SelectQuery::new(owner).where_clause(query.where_clause.clone());
     owner_pks.projection = Some(vec![pk.column]);
+    // A table-wide delete clears every row of the owner's type, orphans too.
+    let every_row = query.where_clause.is_empty();
     entries
         .map(|e| {
-            DeleteQuery::new(
-                junction(e.through, &[e.pk_col, e.ct_col]),
-                WhereExpr::And(vec![
-                    WhereExpr::InSubquery {
-                        column: e.ct_col,
-                        negated: false,
-                        subquery: Box::new(ct_ids.clone()),
-                    },
-                    WhereExpr::InSubquery {
-                        column: e.pk_col,
-                        negated: false,
-                        subquery: Box::new(owner_pks.clone()),
-                    },
-                ]),
-            )
+            let mut preds = vec![WhereExpr::InSubquery {
+                column: e.ct_col,
+                negated: false,
+                subquery: Box::new(ct_ids.clone()),
+            }];
+            if !every_row {
+                preds.push(WhereExpr::InSubquery {
+                    column: e.pk_col,
+                    negated: false,
+                    subquery: Box::new(owner_pks.clone()),
+                });
+            }
+            DeleteQuery::new(junction(e.through, &[e.pk_col, e.ct_col]), WhereExpr::And(preds))
         })
         .collect()
+}
+
+/// The junction deletes that emptying `table` must run first.
+pub(crate) fn generic_m2m_truncate_links(table: &str) -> Vec<DeleteQuery> {
+    inventory::iter::<crate::core::GenericM2MEntry>
+        .into_iter()
+        .find(|e| e.owner.table == table)
+        .map(|e| generic_m2m_links(&DeleteQuery::new(e.owner, WhereExpr::And(Vec::new()))))
+        .unwrap_or_default()
 }
 
 impl GenericM2MManager {

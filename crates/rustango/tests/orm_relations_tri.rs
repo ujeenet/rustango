@@ -134,6 +134,23 @@ pub struct Gvideo {
     pub id: i64,
 }
 
+/// An audited owner, so the audited delete and truncate paths run.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rel2293_gaudited", app = "rel2293", audit(track = "label"))]
+#[rustango(generic_m2m(
+    name = "tags",
+    through = "rel2293_taggables",
+    pk_column = "taggable_id",
+    ct_column = "taggable_type",
+    related_column = "tag_id"
+))]
+pub struct Gaudited {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 16)]
+    pub label: String,
+}
+
 /// Shares `id` and `at` with `Shift`, so a bare column is ambiguous.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "rel2293_crew", app = "rel2293")]
@@ -282,6 +299,10 @@ async fn setup(pool: &Pool) {
     fresh_table::<CatLink>(pool).await;
     fresh_table::<Gpost>(pool).await;
     fresh_table::<Gvideo>(pool).await;
+    fresh_table::<Gaudited>(pool).await;
+    rustango::audit::ensure_table_pool(pool)
+        .await
+        .expect("audit table");
     rustango::testkit::create_tables(pool, &[TAGGABLES])
         .await
         .expect("taggables");
@@ -1098,7 +1119,8 @@ async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
         .await
         .expect("seed content types");
     rustango::contenttypes::clear_cache();
-    for id in 1..=5 {
+    // Posts 1-7 are deleted below; post 8 stays.
+    for id in 1..=8 {
         Gpost { id }.insert_pool(pool).await.expect("post");
         Gpost { id }
             .tags_m2m()
@@ -1109,6 +1131,14 @@ async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
     let video = Gvideo { id: 1 };
     video.insert_pool(pool).await.expect("video");
     video.tags_m2m().set(&[1_i64], pool).await.expect("tag video");
+    for id in 1..=3 {
+        let mut a = Gaudited {
+            id,
+            label: "a".into(),
+        };
+        a.insert_pool(pool).await.expect("audited");
+        a.tags_m2m().set(&[id], pool).await.expect("tag audited");
+    }
 
     Gpost { id: 1 }.delete_pool(pool).await.expect("delete_pool");
     Gpost::delete_where("id", 2_i64, pool)
@@ -1122,22 +1152,55 @@ async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
         .filter_op("id", Op::Eq, 4_i64)
         .delete_on(&mut conn)
         .await
-        .expect("delete_on");
+        .expect("delete_on conn");
     drop(conn);
+    Gpost::objects()
+        .filter_op("id", Op::Eq, 5_i64)
+        .delete_on(pool)
+        .await
+        .expect("delete_on pool");
+    let mut tx = rustango::sql::transaction_pool(pool).await.expect("tx");
+    Gpost::objects()
+        .filter_op("id", Op::Eq, 6_i64)
+        .delete_on(&mut tx)
+        .await
+        .expect("delete_on tx");
+    tx.commit().await.expect("commit");
     // The sqlx-executor delete exists on Postgres only.
     #[cfg(feature = "postgres")]
     let deleted = if let Pool::Postgres(pg) = pool {
-        Gpost { id: 5 }.delete(pg).await.expect("pg delete");
-        5
+        Gpost { id: 7 }.delete(pg).await.expect("pg delete");
+        7
     } else {
-        4
+        6
     };
     #[cfg(not(feature = "postgres"))]
-    let deleted = 4;
+    let deleted = 6;
+    Gaudited {
+        id: 1,
+        label: "a".into(),
+    }
+    .delete_pool(pool)
+    .await
+    .expect("audited delete_pool");
+    Gaudited::delete_where("id", 2_i64, pool)
+        .await
+        .expect("audited delete_where");
 
     for id in 1..=deleted {
         let links = Gpost { id }.tags_m2m().all(pool).await.unwrap();
         assert!(links.is_empty(), "post {id}'s links outlive it: {links:?}");
+    }
+    let mut kept = Gpost { id: 8 }.tags_m2m().all(pool).await.unwrap();
+    kept.sort_unstable();
+    assert_eq!(kept, vec![8, 10], "a live post lost its links");
+    for id in 1..=2 {
+        let a = Gaudited {
+            id,
+            label: "a".into(),
+        };
+        let links = a.tags_m2m().all(pool).await.unwrap();
+        assert!(links.is_empty(), "audited {id}'s links outlive it: {links:?}");
     }
     assert_eq!(video.tags_m2m().all(pool).await.unwrap(), vec![1]);
     let rows = rustango::sql::count_rows_pool(
@@ -1146,7 +1209,50 @@ async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
     )
     .await
     .unwrap();
-    assert_eq!(rows, if deleted == 5 { 1 } else { 3 });
+    // Post 8's two, the video's, audited 3's, and post 7's two off Postgres.
+    assert_eq!(rows, if deleted == 7 { 4 } else { 6 });
+}
+
+/// `truncate` clears the owner's generic M2M rows, so a reused id starts bare.
+async fn generic_m2m_rows_go_with_truncate(pool: &Pool) {
+    rustango::contenttypes::ensure_seeded(pool)
+        .await
+        .expect("seed content types");
+    rustango::contenttypes::clear_cache();
+    let video = Gvideo { id: 1 };
+    video.insert_pool(pool).await.expect("video");
+    video.tags_m2m().set(&[1_i64], pool).await.expect("tag video");
+    for id in 1..=2 {
+        Gpost { id }.insert_pool(pool).await.expect("post");
+        Gpost { id }
+            .tags_m2m()
+            .set(&[id, 10], pool)
+            .await
+            .expect("tag post");
+        let mut a = Gaudited {
+            id,
+            label: "a".into(),
+        };
+        a.insert_pool(pool).await.expect("audited");
+        a.tags_m2m().set(&[id], pool).await.expect("tag audited");
+    }
+
+    Gpost::truncate(pool).await.expect("truncate");
+    Gaudited::truncate(pool).await.expect("audited truncate");
+
+    // Reuse id 1, as a restarted identity or a reused rowid would.
+    let post = Gpost { id: 1 };
+    post.insert_pool(pool).await.expect("post again");
+    let links = post.tags_m2m().all(pool).await.unwrap();
+    assert!(links.is_empty(), "a new post inherits old links: {links:?}");
+    let mut a = Gaudited {
+        id: 1,
+        label: "a".into(),
+    };
+    a.insert_pool(pool).await.expect("audited again");
+    let links = a.tags_m2m().all(pool).await.unwrap();
+    assert!(links.is_empty(), "a new audited row inherits old links: {links:?}");
+    assert_eq!(video.tags_m2m().all(pool).await.unwrap(), vec![1]);
 }
 
 async fn prefetch_generic_keeps_i32_pks(pool: &Pool) {
@@ -1257,6 +1363,7 @@ tri_dialect_test! {
         self_relation_correlates_to_the_outer_row,
         generic_m2m_set_ignores_repeated_ids,
         generic_m2m_rows_go_with_their_owner,
+        generic_m2m_rows_go_with_truncate,
         prefetch_generic_keeps_i32_pks,
         prefetch_reverse_generic_past_the_bind_cap,
     ],

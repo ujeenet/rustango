@@ -4111,13 +4111,17 @@ fn inherent_impl_tokens(
                 _r.__rustango_audit_entry(#root::audit::AuditOp::Update)
             })
             .await),
-            quote!(#root::audit::truncate_with_audit(pool, _table, &_sql).await),
+            quote! {
+                let _table = <Self as #root::core::Model>::SCHEMA.table;
+                let _sql = #root::sql::truncate_sql(pool.dialect(), _table);
+                #root::audit::truncate_with_audit(pool, _table, &_sql).await
+            },
         )
     } else {
         (
             quote!(#root::sql::delete_pool(pool, &_query).await),
             quote!(#root::sql::update_pool(pool, &_query).await),
-            quote!(#root::sql::raw_execute_pool(pool, &_sql, ::std::vec::Vec::new()).await),
+            quote!(#root::sql::truncate(pool, <Self as #root::core::Model>::SCHEMA).await),
         )
     };
 
@@ -4915,23 +4919,15 @@ fn inherent_impl_tokens(
             /// `pre_delete` / `post_delete` signals (no per-row hooks
             /// fire on a TRUNCATE / bulk DELETE FROM). An audited model
             /// gets one bulk audit entry, not one per row. Global scopes
-            /// do not apply: every row goes.
+            /// do not apply: every row goes, generic M2M links too.
             ///
             /// # Errors
-            /// As [`raw_execute_pool`].
+            /// As [`truncate`].
             ///
-            /// [`raw_execute_pool`]: rustango::sql::raw_execute_pool
+            /// [`truncate`]: rustango::sql::truncate
             pub async fn truncate(
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                let _table = <Self as #root::core::Model>::SCHEMA.table;
-                let _dialect = pool.dialect();
-                let _quoted = _dialect.quote_ident(_table);
-                let _sql = if _dialect.name() == "postgres" {
-                    ::std::format!("TRUNCATE TABLE {} RESTART IDENTITY CASCADE", _quoted)
-                } else {
-                    ::std::format!("DELETE FROM {}", _quoted)
-                };
                 #truncate_run
             }
 
