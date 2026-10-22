@@ -400,6 +400,43 @@ async fn a_row_out_of_attempts_is_dead_lettered_not_run(pool: &Pool) {
     assert_eq!(job_rows(pool).await, 0);
 }
 
+/// A job dispatched in a rolled-back `atomic` block is rolled back with it.
+async fn a_dispatch_rolls_back_with_its_atomic_block(pool: &Pool) {
+    let q = Arc::new(queue(pool, 1, Duration::from_secs(60)).await);
+    let tok = token(pool, "rolled-back");
+    let res = rustango::sql::atomic(pool, move |_tx| {
+        Box::pin(async move {
+            q.dispatch(&Tick { token: tok }).await.expect("dispatch");
+            Err::<(), _>(rustango::sql::ExecError::AtomicAborted)
+        })
+    })
+    .await;
+    assert!(res.is_err());
+    assert_eq!(job_rows(pool).await, 0, "the job outlived the rollback");
+}
+
+/// A dispatch after a write in the same block joins it, so SQLite's
+/// write lock does not make it wait.
+async fn a_dispatch_after_a_write_commits_with_its_block(pool: &Pool) {
+    let q = Arc::new(queue(pool, 1, Duration::from_secs(60)).await);
+    let tok = token(pool, "joined");
+    rustango::sql::atomic(pool, move |tx| {
+        Box::pin(async move {
+            rustango::sql::raw_execute_tx(
+                &mut *tx.lock().await?,
+                "UPDATE rustango_jobs SET attempt = attempt",
+                Vec::new(),
+            )
+            .await?;
+            q.dispatch(&Tick { token: tok }).await.expect("dispatch");
+            Ok(())
+        })
+    })
+    .await
+    .expect("commit");
+    assert_eq!(job_rows(pool).await, 1);
+}
+
 async fn a_heartbeat_keeps_a_long_job_leased(pool: &Pool) {
     let slow = token(pool, "heartbeat");
     let q = queue(pool, 2, Duration::from_millis(100)).await;
@@ -879,5 +916,7 @@ tri_dialect_test! {
         zero_max_attempts_runs_once,
         a_jobs_backoff_hook_sets_its_retry_time,
         a_db_queue_sends_with_its_registered_mailer,
+        a_dispatch_rolls_back_with_its_atomic_block,
+        a_dispatch_after_a_write_commits_with_its_block,
     ],
 }
