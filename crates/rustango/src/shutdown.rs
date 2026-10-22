@@ -77,10 +77,39 @@ pub async fn serve_until_drained(
     drain_on(Box::pin(shutdown_signal()), listener, app, drain).await
 }
 
-/// Time a client gets to send each request head, and the most an idle
-/// keep-alive connection stays open. hyper's own default.
+/// Per-connection time limits of the serve loop.
 #[cfg(feature = "_axum")]
-const HEADER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+#[derive(Debug, Clone, Copy)]
+struct ConnLimits {
+    /// A new connection must send its first request head in this time.
+    first_head: std::time::Duration,
+    /// Idle time plus head of every later request. Must exceed the
+    /// proxy's idle timeout (ALB and nginx use 60 s), or it sees 502s.
+    keep_alive: std::time::Duration,
+}
+
+#[cfg(feature = "_axum")]
+impl ConnLimits {
+    /// `RUSTANGO_HEADER_READ_TIMEOUT_SECS` (30) and `RUSTANGO_KEEP_ALIVE_TIMEOUT_SECS` (75).
+    fn from_env() -> Self {
+        Self {
+            first_head: env_secs("RUSTANGO_HEADER_READ_TIMEOUT_SECS", 30),
+            keep_alive: env_secs("RUSTANGO_KEEP_ALIVE_TIMEOUT_SECS", 75),
+        }
+    }
+}
+
+#[cfg(feature = "_axum")]
+fn env_secs(name: &str, default: u64) -> std::time::Duration {
+    let secs = match std::env::var(name) {
+        Err(_) => default,
+        Ok(v) => v.trim().parse::<u64>().ok().filter(|n| *n > 0).unwrap_or_else(|| {
+            tracing::warn!(target: "rustango::shutdown", var = name, value = ?v, default, "not a positive number of seconds; using the default");
+            default
+        }),
+    };
+    std::time::Duration::from_secs(secs)
+}
 
 #[cfg(feature = "_axum")]
 async fn drain_on(
@@ -89,7 +118,24 @@ async fn drain_on(
     app: axum::Router,
     drain: std::time::Duration,
 ) -> std::io::Result<()> {
-    serve_with(signal, listener, app, drain, HEADER_READ_TIMEOUT).await
+    serve_with(signal, listener, app, drain, ConnLimits::from_env()).await
+}
+
+/// HTTP/1, plus h2c with the `http2` feature. hyper's header timeout
+/// also runs while idle, so it carries the keep-alive limit.
+#[cfg(feature = "_axum")]
+fn conn_builder(
+    limits: ConnLimits,
+) -> hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor> {
+    let mut builder =
+        hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+    builder
+        .http1()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(limits.keep_alive);
+    #[cfg(feature = "http2")]
+    builder.http2().enable_connect_protocol();
+    builder
 }
 
 /// `axum::serve` gives hyper no timer, which turns its header timeout
@@ -100,15 +146,11 @@ async fn serve_with(
     mut listener: tokio::net::TcpListener,
     app: axum::Router,
     drain: std::time::Duration,
-    header_read: std::time::Duration,
+    limits: ConnLimits,
 ) -> std::io::Result<()> {
-    use hyper_util::rt::{TokioIo, TokioTimer};
+    use hyper_util::rt::TokioIo;
     use tower::ServiceExt as _;
 
-    let mut builder = hyper::server::conn::http1::Builder::new();
-    builder
-        .timer(TokioTimer::new())
-        .header_read_timeout(header_read);
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(());
     // Each connection holds a receiver; all dropped means all closed.
     let (open_tx, open_rx) = tokio::sync::watch::channel(());
@@ -118,28 +160,37 @@ async fn serve_with(
             conn = axum::serve::Listener::accept(&mut listener) => conn,
             () = &mut signal => break,
         };
+        let served = std::sync::Arc::new(tokio::sync::Notify::new());
+        let on_request = std::sync::Arc::clone(&served);
         // `ConnectInfo` feeds `access_log`, IP filters and per-IP limits.
         let svc =
             app.clone()
                 .map_request(move |mut req: axum::http::Request<hyper::body::Incoming>| {
                     req.extensions_mut()
                         .insert(axum::extract::ConnectInfo(addr));
+                    on_request.notify_one();
                     req
                 });
-        let conn = builder
-            .serve_connection(
-                TokioIo::new(io),
-                hyper_util::service::TowerToHyperService::new(svc),
-            )
-            .with_upgrades();
         let mut stop = stop_rx.clone();
         let open = open_rx.clone();
         tokio::spawn(async move {
+            let builder = conn_builder(limits);
+            let conn = builder.serve_connection_with_upgrades(
+                TokioIo::new(io),
+                hyper_util::service::TowerToHyperService::new(svc),
+            );
             tokio::pin!(conn);
+            // Slowloris guard for the first head; hyper times the later ones.
+            let first_head = tokio::time::sleep(limits.first_head);
+            tokio::pin!(first_head);
+            let mut got_first = false;
             loop {
                 tokio::select! {
+                    biased;
                     _ = conn.as_mut() => break,
                     Ok(()) = stop.changed() => conn.as_mut().graceful_shutdown(),
+                    () = served.notified(), if !got_first => got_first = true,
+                    () = &mut first_head, if !got_first => break,
                 }
             }
             drop(open);
@@ -205,7 +256,7 @@ mod tests {
         drop(client);
     }
 
-    /// Serve `/` with a 300 ms header timeout; the stop sender keeps it up.
+    /// Serve `/` with a 300 ms first-head and 1.5 s keep-alive limit; the stop sender keeps it up.
     async fn slow_client_server() -> (std::net::SocketAddr, tokio::sync::oneshot::Sender<()>) {
         let app = axum::Router::new().route("/", axum::routing::get(|| async { "ok" }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -218,9 +269,131 @@ mod tests {
             listener,
             app,
             std::time::Duration::from_millis(200),
-            std::time::Duration::from_millis(300),
+            ConnLimits {
+                first_head: std::time::Duration::from_millis(300),
+                keep_alive: std::time::Duration::from_millis(1500),
+            },
         ));
         (addr, stop)
+    }
+
+    /// `drain_on` serving `app` until the returned sender fires.
+    async fn spawn_drained(
+        app: axum::Router,
+        drain: std::time::Duration,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, on_stop) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(drain_on(
+            Box::pin(async move {
+                let _ = on_stop.await;
+            }),
+            listener,
+            app,
+            drain,
+        ));
+        (addr, stop, server)
+    }
+
+    /// Send one request, return the whole response text.
+    async fn get(addr: std::net::SocketAddr, path: &str) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = format!("GET {path} HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n");
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut out = String::new();
+        client.read_to_string(&mut out).await.unwrap();
+        out
+    }
+
+    /// The handler sees the peer address through `ConnectInfo`.
+    #[tokio::test]
+    async fn the_handler_gets_the_peer_address() {
+        use axum::extract::ConnectInfo;
+        let app =
+            axum::Router::new().route(
+                "/ip",
+                axum::routing::get(
+                    |ConnectInfo(a): ConnectInfo<std::net::SocketAddr>| async move {
+                        a.ip().to_string()
+                    },
+                ),
+            );
+        let (addr, _stop, _server) = spawn_drained(app, std::time::Duration::from_secs(1)).await;
+        let resp = get(addr, "/ip").await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+        assert!(resp.ends_with("127.0.0.1"), "{resp}");
+    }
+
+    /// A request running at the stop signal finishes; then the server returns.
+    #[tokio::test]
+    async fn an_in_flight_request_finishes_after_the_stop_signal() {
+        let app = axum::Router::new().route(
+            "/slow",
+            axum::routing::get(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                "done"
+            }),
+        );
+        let (addr, stop, server) = spawn_drained(app, std::time::Duration::from_secs(10)).await;
+        let client = tokio::spawn(async move { get(addr, "/slow").await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let started = std::time::Instant::now();
+        stop.send(()).unwrap();
+        let resp = client.await.unwrap();
+        assert!(
+            resp.starts_with("HTTP/1.1 200") && resp.ends_with("done"),
+            "{resp}"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("server returned once the request was done")
+            .unwrap()
+            .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    /// With nothing open, shutdown does not wait for the drain deadline.
+    #[tokio::test]
+    async fn shutdown_with_no_connections_is_immediate() {
+        let app = axum::Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let (addr, stop, server) = spawn_drained(app, std::time::Duration::from_secs(10)).await;
+        assert!(get(addr, "/").await.starts_with("HTTP/1.1 200"));
+        stop.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), server)
+            .await
+            .expect("shutdown waited for the drain deadline")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// An h2c prior-knowledge client gets HTTP/2 SETTINGS back.
+    #[cfg(feature = "http2")]
+    #[tokio::test]
+    async fn h2c_prior_knowledge_is_served() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let app = axum::Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let (addr, _stop, _server) = spawn_drained(app, std::time::Duration::from_secs(1)).await;
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        // Preface, then an empty SETTINGS frame.
+        client
+            .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0")
+            .await
+            .unwrap();
+        let mut head = [0u8; 9];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.read_exact(&mut head),
+        )
+        .await
+        .expect("no reply")
+        .unwrap();
+        assert_eq!(head[3], 0x4, "first frame is SETTINGS: {head:?}");
     }
 
     /// Reads until the server closes; `false` if it is still open at 3 s.
@@ -256,22 +429,24 @@ mod tests {
         );
     }
 
-    /// An idle keep-alive connection is closed too.
+    /// An idle keep-alive connection outlives the head limit and serves
+    /// again, then closes at the keep-alive limit.
     #[tokio::test]
-    async fn an_idle_keep_alive_connection_is_closed() {
+    async fn an_idle_keep_alive_connection_lives_to_its_own_limit() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let (addr, _stop) = slow_client_server().await;
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        client
-            .write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n")
-            .await
-            .unwrap();
         let mut buf = [0u8; 256];
-        let n = client.read(&mut buf).await.unwrap();
-        assert!(
-            buf[..n].starts_with(b"HTTP/1.1 200"),
-            "first request is served"
-        );
+        for _ in 0..2 {
+            client
+                .write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n")
+                .await
+                .unwrap();
+            let n = client.read(&mut buf).await.unwrap();
+            assert!(buf[..n].starts_with(b"HTTP/1.1 200"), "request is served");
+            // Idle past the 300 ms first-head limit.
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        }
         assert!(
             closed_by_server(&mut client).await,
             "idle keep-alive stayed open"

@@ -152,9 +152,9 @@ untouched.
 
 ## 0.60.9
 
-### Idle connections close after 30 s
+### Idle connections close after 75 s
 
-The built-in server closes a connection that sends no complete request head for 30 s, including idle keep-alive. Clients or proxies that keep idle sockets longer reconnect; the limit is fixed for now.
+The built-in server closes a new connection that sends no complete request head in 30 s (`RUSTANGO_HEADER_READ_TIMEOUT_SECS`), and an idle keep-alive connection after 75 s (`RUSTANGO_KEEP_ALIVE_TIMEOUT_SECS`). Keep the keep-alive limit above your proxy's idle timeout. It serves HTTP/1 only unless the new `http2` feature is on.
 
 ### `HttpError::Reqwest` text has no URL
 

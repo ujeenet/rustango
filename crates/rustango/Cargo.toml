@@ -507,6 +507,9 @@ tenancy = [
 # unconditional dependency (see the note on the `tokio` line below).
 runtime = ["dep:tracing-subscriber", "dep:tracing-appender", "dep:dotenvy"]
 
+# Cleartext HTTP/2 (h2c) on the built-in server, next to HTTP/1.
+http2 = ["_axum", "axum/http2", "hyper/http2", "hyper-util/http2"]
+
 # Minimal axum runserver — `rustango::server::AppBuilder`. Bi-dialect
 # single-pool bootstrap (SQLite / Postgres / MySQL). Pulls axum; tokio is
 # unconditional. The full multi-tenant `Builder` lives behind `tenancy` and
@@ -546,7 +549,7 @@ p256           = { workspace = true, optional = true }
 http           = { workspace = true, optional = true }
 http-body      = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
-# Already linked through axum; the serve loop sets hyper's header timeout.
+# Already linked through axum; the serve loop sets hyper's timer.
 hyper          = { version = "1", features = ["server", "http1"], optional = true }
 hyper-util     = { version = "0.1", features = ["tokio", "server", "service", "http1"], optional = true }
 tera           = { workspace = true, optional = true }

@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [0.60.9] — 2026-10-21
 
-**Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options; `loaddata` leaves omitted keys to the column default; MySQL JSON key checks are literal; idle connections close after 30 s; refused deletes are 409 and refused CBV writes 422. See UPGRADING.
+**Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options; `loaddata` leaves omitted keys to the column default; MySQL JSON key checks are literal; idle connections close after 75 s; `CsrfConfig` has a new field; refused deletes are 409 and refused CBV writes 422. See UPGRADING.
 
 ### Performance — admin inline saves and ViewSet bulk create read rows in one select
 
@@ -90,7 +90,7 @@ Both now build the admin with `.with_session_auth(..)`, as the scaffolder does, 
 
 ### Security — the server times out slow headers and idle connections
 
-`serve_until_drained` now runs hyper with a timer, so a client gets 30 s to send each request head and an idle keep-alive connection closes after 30 s. `axum::serve` left both off, so slowloris clients could hold every socket.
+`serve_until_drained` now runs hyper with a timer: a new connection gets 30 s for its first request head (`RUSTANGO_HEADER_READ_TIMEOUT_SECS`), and an idle keep-alive connection closes after 75 s (`RUSTANGO_KEEP_ALIVE_TIMEOUT_SECS`), above the 60 s idle of common load balancers. `axum::serve` left both off, so slowloris clients could hold every socket. New `http2` feature serves h2c as `axum::serve` did.
 
 ### Security — Slack and health-probe errors no longer show secret URLs
 
