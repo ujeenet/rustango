@@ -151,7 +151,11 @@ async fn citext_keeps_accents_and_spaces(pool: &Pool) {
     };
     assert_eq!(ids("bob").await, [2]);
     assert_eq!(ids("cafe").await, Vec::<i64>::new(), "accents count");
-    assert_eq!(ids("bob ").await, Vec::<i64>::new(), "trailing spaces count");
+    assert_eq!(
+        ids("bob ").await,
+        Vec::<i64>::new(),
+        "trailing spaces count"
+    );
 }
 
 /// A filter on a citext column ignores case; PG compared a text bind as text.

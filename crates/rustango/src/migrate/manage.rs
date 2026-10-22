@@ -8678,13 +8678,19 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         let mut s = crate::config::Settings::default();
         s.security.secure_cookies = Some(false);
         let r = settings_run("prod", &s);
-        assert!(r.warnings.iter().any(|w| w.contains("secure_cookies")), "{:?}", r.warnings);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("secure_cookies")),
+            "{:?}",
+            r.warnings
+        );
         for preset in ["empty", "strixt"] {
             let mut s = crate::config::Settings::default();
             s.security.headers_preset = Some(preset.into());
             let r = settings_run("prod", &s);
             assert!(
-                r.warnings.iter().any(|w| w.contains("headers_preset") && w.contains(preset)),
+                r.warnings
+                    .iter()
+                    .any(|w| w.contains("headers_preset") && w.contains(preset)),
                 "{preset}: {:?}",
                 r.warnings
             );
@@ -8692,13 +8698,21 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         let mut s = crate::config::Settings::default();
         s.security.headers_preset = Some("relaxed".into());
         let r = settings_run("prod", &s);
-        assert!(!r.warnings.iter().any(|w| w.contains("headers_preset")), "{:?}", r.warnings);
+        assert!(
+            !r.warnings.iter().any(|w| w.contains("headers_preset")),
+            "{:?}",
+            r.warnings
+        );
 
         let empty = tempfile::tempdir().unwrap();
         let missing = crate::config::Settings::load_from(empty.path(), "prod");
         let mut out = DeployAuditFindings::default();
         settings_audit_loaded("prod", missing, &mut out);
-        assert!(out.warnings.iter().any(|w| w.contains("default.toml")), "{:?}", out.warnings);
+        assert!(
+            out.warnings.iter().any(|w| w.contains("default.toml")),
+            "{:?}",
+            out.warnings
+        );
         let missing = crate::config::Settings::load_from(empty.path(), "dev");
         let mut out = DeployAuditFindings::default();
         settings_audit_loaded("dev", missing, &mut out);

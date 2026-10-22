@@ -233,12 +233,17 @@ async fn the_org_list_renders_the_outcome_it_is_redirected_with() {
 
     // A message the console did not sign is dropped, so a link cannot add text.
     let html = body_of(b.get("/orgs?error=call%20support%200800").await).await;
-    assert!(!html.contains("0800"), "a crafted message must not render: {html}");
+    assert!(
+        !html.contains("0800"),
+        "a crafted message must not render: {html}"
+    );
 }
 
 /// A signed `?error=` from a handler the operator can trigger.
 async fn signed_change_password_error(b: &Booted) -> String {
-    let resp = b.post("/change-password", "current_password=&new_password=").await;
+    let resp = b
+        .post("/change-password", "current_password=&new_password=")
+        .await;
     let location = resp.headers()["location"].to_str().unwrap().to_owned();
     let html = body_of(b.get(&location).await).await;
     assert!(html.contains("All fields are required"), "{html}");

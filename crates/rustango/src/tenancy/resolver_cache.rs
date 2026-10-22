@@ -113,7 +113,10 @@ impl<V> Drop for Flight<'_, V> {
             return;
         };
         if let Some(map) = g.as_mut() {
-            if map.get(&self.host).is_some_and(|l| Arc::ptr_eq(l, &self.lock)) {
+            if map
+                .get(&self.host)
+                .is_some_and(|l| Arc::ptr_eq(l, &self.lock))
+            {
                 map.remove(&self.host);
             }
         }
@@ -142,7 +145,11 @@ impl<V: Clone> HostTtlCache<V> {
         }
     }
 
-    fn lookup<T: Clone>(&self, map: &RwLock<Option<HashMap<String, Entry<T>>>>, host: &str) -> Option<T> {
+    fn lookup<T: Clone>(
+        &self,
+        map: &RwLock<Option<HashMap<String, Entry<T>>>>,
+        host: &str,
+    ) -> Option<T> {
         let guard = map.read().ok()?;
         let e = guard.as_ref()?.get(host)?;
         // `>=`, not `>`: an entry exactly at its TTL is expired.
@@ -167,7 +174,13 @@ impl<V: Clone> HostTtlCache<V> {
         }
     }
 
-    fn insert<T>(&self, map: &RwLock<Option<HashMap<String, Entry<T>>>>, cap: usize, host: &str, value: T) {
+    fn insert<T>(
+        &self,
+        map: &RwLock<Option<HashMap<String, Entry<T>>>>,
+        cap: usize,
+        host: &str,
+        value: T,
+    ) {
         let Ok(mut guard) = map.write() else {
             return;
         };
@@ -185,7 +198,14 @@ impl<V: Clone> HostTtlCache<V> {
             }
         }
         let used = AtomicU64::new(self.tick.fetch_add(1, Ordering::Relaxed));
-        map.insert(host.to_owned(), Entry { value, at: Instant::now(), used });
+        map.insert(
+            host.to_owned(),
+            Entry {
+                value,
+                at: Instant::now(),
+                used,
+            },
+        );
     }
 
     /// Wait until no other caller is querying `host`. Re-check [`Self::get`]
@@ -523,7 +543,12 @@ mod tests {
         assert!(pending.is_err(), "the waiter must queue behind the holder");
         drop(holder);
         drop(waiter);
-        let left = cache.flights.lock().unwrap().as_ref().map_or(0, HashMap::len);
+        let left = cache
+            .flights
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(0, HashMap::len);
         assert_eq!(left, 0);
     }
 }

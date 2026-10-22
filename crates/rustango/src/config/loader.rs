@@ -183,7 +183,8 @@ fn load_report(
     let pick = names
         .iter()
         .find(|n| {
-            root.join(format!("{n}_settings.toml")).exists() || root.join(format!("{n}.toml")).exists()
+            root.join(format!("{n}_settings.toml")).exists()
+                || root.join(format!("{n}.toml")).exists()
         })
         .unwrap_or(&names[0]);
     let tiered_path = root.join(format!("{pick}_settings.toml"));
@@ -528,7 +529,11 @@ mod tests {
     fn production_spellings_load_the_prod_file() {
         let root = fresh_root("prod_spellings");
         write(&root, "default.toml", "[database]\npool_max_size = 5\n");
-        write(&root, "prod_settings.toml", "[database]\npool_max_size = 100\n");
+        write(
+            &root,
+            "prod_settings.toml",
+            "[database]\npool_max_size = 100\n",
+        );
         for tier in ["production", "PROD", " Production "] {
             let cfg = load_with_root(&root, tier).unwrap();
             assert_eq!(cfg.database.pool_max_size, Some(100), "{tier:?}");
@@ -541,7 +546,11 @@ mod tests {
     fn raw_tier_filename_still_loads() {
         let root = fresh_root("raw_tier");
         write(&root, "default.toml", "[database]\npool_max_size = 5\n");
-        write(&root, "production_settings.toml", "[database]\npool_max_size = 7\n");
+        write(
+            &root,
+            "production_settings.toml",
+            "[database]\npool_max_size = 7\n",
+        );
         let cfg = load_with_root(&root, "production").unwrap();
         assert_eq!(cfg.database.pool_max_size, Some(7));
         let _ = std::fs::remove_dir_all(&root);

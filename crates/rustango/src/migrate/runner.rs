@@ -3540,7 +3540,11 @@ fn touches_table(op: &Operation, table: &str) -> bool {
 
 /// Whether `op`, one of `ops`, rebuilds a table, so FK enforcement must go off.
 #[cfg(feature = "sqlite")]
-fn rebuilds(op: &Operation, ops: &[Operation], after: &SchemaSnapshot) -> Result<bool, MigrateError> {
+fn rebuilds(
+    op: &Operation,
+    ops: &[Operation],
+    after: &SchemaSnapshot,
+) -> Result<bool, MigrateError> {
     let Operation::Schema(change) = op else {
         return Ok(false);
     };
@@ -3807,7 +3811,8 @@ async fn atomic_sqlite(
     ledger: LedgerWrite<'_>,
 ) -> Result<(), MigrateError> {
     // Refused before any range commits.
-    if let Some(Operation::Callback(c)) = ops.iter().find(|op| matches!(op, Operation::Callback(_))) {
+    if let Some(Operation::Callback(c)) = ops.iter().find(|op| matches!(op, Operation::Callback(_)))
+    {
         return Err(callback_in_atomic(name, c));
     }
     let segments = sqlite_segments(ops, after)?;
@@ -3836,7 +3841,10 @@ async fn atomic_sqlite(
         match ran {
             Ok(()) => {}
             // The last range also wrote the ledger: the migration is applied.
-            Err(SegmentFailed { committed: true, error }) if last => return Err(error),
+            Err(SegmentFailed {
+                committed: true,
+                error,
+            }) if last => return Err(error),
             Err(SegmentFailed { committed, error }) => {
                 if committed {
                     applied += range.len();

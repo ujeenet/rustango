@@ -2523,9 +2523,13 @@ mod flash_tests {
     async fn login_page(query: &str) -> String {
         let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
         let app = super::router(pool, super::SessionSecret::from_bytes(vec![3; 32]));
-        let req = Request::get(format!("/login?{query}")).body(Body::empty()).unwrap();
+        let req = Request::get(format!("/login?{query}"))
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
         String::from_utf8_lossy(&body).into_owned()
     }
 

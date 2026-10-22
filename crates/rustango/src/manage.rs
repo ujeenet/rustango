@@ -3007,7 +3007,8 @@ mod assemble_app_tests {
             let pool = crate::sql::Pool::connect("sqlite::memory:")
                 .await
                 .expect("sqlite");
-            let mut cli = cli.api(Router::new().route("/p", axum::routing::post(|| async { "ok" })));
+            let mut cli =
+                cli.api(Router::new().route("/p", axum::routing::post(|| async { "ok" })));
             cli.settings_for_layers = Some(s.clone());
             let app = cli.assemble_app(pool);
             let post = |origin: &str| {

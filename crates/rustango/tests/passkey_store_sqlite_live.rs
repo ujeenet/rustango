@@ -111,16 +111,36 @@ async fn credential_id_is_unique() {
 async fn revoke_removes_only_the_owners_credentials() {
     use rustango::tenancy::User;
     let p = pool().await;
-    rustango::testkit::create_tables_for::<User>(&p).await.unwrap();
-    passkey::register(&p, 7, "laptop", vec![1], 0, "").await.unwrap();
-    passkey::register(&p, 7, "phone", vec![2], 0, "").await.unwrap();
-    passkey::register(&p, 9, "key", vec![3], 0, "").await.unwrap();
+    rustango::testkit::create_tables_for::<User>(&p)
+        .await
+        .unwrap();
+    passkey::register(&p, 7, "laptop", vec![1], 0, "")
+        .await
+        .unwrap();
+    passkey::register(&p, 7, "phone", vec![2], 0, "")
+        .await
+        .unwrap();
+    passkey::register(&p, 9, "key", vec![3], 0, "")
+        .await
+        .unwrap();
 
-    assert!(!passkey::revoke::<User>(&p, 7, "key").await.unwrap(), "user 9's key");
-    assert!(passkey::by_credential_id(&p, "key").await.unwrap().is_some());
+    assert!(
+        !passkey::revoke::<User>(&p, 7, "key").await.unwrap(),
+        "user 9's key"
+    );
+    assert!(passkey::by_credential_id(&p, "key")
+        .await
+        .unwrap()
+        .is_some());
     assert!(passkey::revoke::<User>(&p, 7, "laptop").await.unwrap());
-    assert!(passkey::by_credential_id(&p, "laptop").await.unwrap().is_none());
-    assert!(!passkey::revoke::<User>(&p, 7, "laptop").await.unwrap(), "already gone");
+    assert!(passkey::by_credential_id(&p, "laptop")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(
+        !passkey::revoke::<User>(&p, 7, "laptop").await.unwrap(),
+        "already gone"
+    );
 
     assert_eq!(passkey::revoke_all::<User>(&p, 7).await.unwrap(), 1);
     assert!(passkey::for_user(&p, 7).await.unwrap().is_empty());

@@ -2148,7 +2148,10 @@ async fn run_sql_beside_a_rebuild_round_trips(pool: &Pool) {
                 column: "x".into(),
             }),
             data(backfill.clone(), "SELECT 1"),
-            data(q(pool, "DELETE FROM {} WHERE {} = 1", &[a, "id"]), "SELECT 1"),
+            data(
+                q(pool, "DELETE FROM {} WHERE {} = 1", &[a, "id"]),
+                "SELECT 1",
+            ),
             Operation::Schema(SchemaChange::AlterColumnNullable {
                 table: b.into(),
                 column: "y".into(),
@@ -2233,7 +2236,9 @@ async fn split_sqlite_migration_fails_partially(pool: &Pool) {
     let err = migrate_pool_with_ledger(pool, chain.dir.path(), &chain.ledger)
         .await
         .expect_err("the last RunSQL fails");
-    let has_x = exec(pool, "SELECT {}.{} FROM {}", &[b, "x", b]).await.is_ok();
+    let has_x = exec(pool, "SELECT {}.{} FROM {}", &[b, "x", b])
+        .await
+        .is_ok();
     match pool.dialect().name() {
         "sqlite" => {
             assert!(

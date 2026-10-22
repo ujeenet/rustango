@@ -61,7 +61,10 @@ pub(super) struct Messages {
 pub(super) fn redirect(location: &str, flash: Flash<'_>) -> Response<Body> {
     let (key, text) = flash.parts();
     let sep = if location.contains('?') { '&' } else { '?' };
-    let target = format!("{location}{sep}{key}={}", crate::url_codec::url_encode(&text));
+    let target = format!(
+        "{location}{sep}{key}={}",
+        crate::url_codec::url_encode(&text)
+    );
     let mut resp = Redirect::to(&target).into_response();
     resp.extensions_mut().insert(Pending { key, text });
     resp
@@ -133,7 +136,12 @@ fn verify(secret: &SessionSecret, path: &str, query: &str, now: i64) -> Verdict 
 }
 
 /// The messages, when each flash key appears at most once and the signature checks.
-fn signed_messages(secret: &SessionSecret, path: &str, pairs: &Pairs, now: i64) -> Option<Messages> {
+fn signed_messages(
+    secret: &SessionSecret,
+    path: &str,
+    pairs: &Pairs,
+    now: i64,
+) -> Option<Messages> {
     let one = |key: &str| -> Result<Option<&str>, ()> {
         let mut it = pairs.iter().filter(|(k, _)| k == key);
         let first = it.next().map(|(_, v)| v.as_str());
@@ -157,7 +165,11 @@ fn signed_messages(secret: &SessionSecret, path: &str, pairs: &Pairs, now: i64) 
     if !crate::crypto::constant_time_compare(given.as_bytes(), expected.as_bytes()) {
         return None;
     }
-    let get = |key: &str| msgs.iter().find(|(k, _)| *k == key).map(|(_, v)| (*v).to_owned());
+    let get = |key: &str| {
+        msgs.iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| (*v).to_owned())
+    };
     Some(Messages {
         error: get("error"),
         notice: get("notice"),
@@ -258,7 +270,10 @@ mod tests {
         let s = secret();
         let loc = signed("/change-password", Flash::Error("bad"));
         let q = query(&loc);
-        assert!(matches!(verify(&s, "/change-password", q, NOW + TTL_SECS), Verdict::Verified(_)));
+        assert!(matches!(
+            verify(&s, "/change-password", q, NOW + TTL_SECS),
+            Verdict::Verified(_)
+        ));
         assert!(matches!(verify(&s, "/orgs", q, NOW), Verdict::Stripped(_)));
         assert!(matches!(
             verify(&s, "/change-password", q, NOW + TTL_SECS + 1),
