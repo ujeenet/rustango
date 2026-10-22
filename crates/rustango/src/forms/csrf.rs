@@ -536,7 +536,7 @@ where
                 // `trusted_origins` means same-host only (#1529). A report
                 // only logs, so one sent without an Origin is taken.
                 let no_origin = !req.headers().contains_key(axum::http::header::ORIGIN);
-                if !(report && no_origin) && !origin_allowed(&req, &cfg.trusted_origins) {
+                if !((report && no_origin) || origin_allowed(&req, &cfg.trusted_origins)) {
                     return Ok(forbid_response(
                         "CSRF: request Origin not in CSRF_TRUSTED_ORIGINS \
                          and does not match Host",
