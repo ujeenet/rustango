@@ -1946,7 +1946,7 @@ async fn handle_create_post(
 /// Why a CreateView INSERT or UpdateView UPDATE did not redirect.
 enum WriteFailed {
     /// The database refused a value (a taken unique, a missing FK target,
-    /// NOT NULL, CHECK): errors for the form (#2033).
+    /// NOT NULL, CHECK): errors for the form.
     Refused(HashMap<String, String>),
     /// Anything else: an opaque 500.
     Error(Response),

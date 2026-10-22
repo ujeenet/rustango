@@ -110,7 +110,7 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
         // Decimal round-trips as a string via `row_to_json` to
         // preserve precision; Binary likewise (hex-encoded).
         FieldType::Decimal | FieldType::Binary => v.as_str().unwrap_or("").to_owned(),
-        // #341 — PG array: the comma list the form parser splits.
+        // PG array: the comma list the form parser splits.
         FieldType::Array(_) => v.as_array().map_or_else(
             || v.to_string(),
             |items| {
