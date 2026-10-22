@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Template views merge processors and `ExtraContext` everywhere
+
+All class-based views now add the registered context processors' keys, and every view (not only `ListView`) merges `ExtraContext`. A template that relied on such a key being undefined sees a value now.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more

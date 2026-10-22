@@ -89,3 +89,92 @@ fn parts_value_threads_through_to_the_processor() {
     assert_eq!(c1.into_json().get("request_path").unwrap(), &json!("/a"));
     assert_eq!(c2.into_json().get("request_path").unwrap(), &json!("/b"));
 }
+
+/// The class-based views merge the registered processors; a layout
+/// reading a processor key used to fail to render.
+#[cfg(feature = "template_views")]
+mod class_based_views {
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use rustango::core::Model as _;
+    use rustango::sql::{Auto, Pool};
+    use rustango::template_views::{CreateView, DetailView, ListView, TemplateView};
+    use rustango::Model;
+    use tera::Tera;
+    use tower::ServiceExt;
+
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "cp_post", display = "title")]
+    #[allow(dead_code)]
+    pub struct CpPost {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 200)]
+        pub title: String,
+    }
+
+    async fn pool() -> Pool {
+        let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
+        rustango::sql::raw_execute_pool(
+            &pool,
+            "CREATE TABLE cp_post (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL)",
+            Vec::new(),
+        )
+        .await
+        .expect("create");
+        rustango::sql::raw_execute_pool(
+            &pool,
+            "INSERT INTO cp_post (id, title) VALUES (1, 'Hello')",
+            Vec::new(),
+        )
+        .await
+        .expect("seed");
+        pool
+    }
+
+    fn tera() -> Arc<Tera> {
+        let mut tera = Tera::default();
+        for name in [
+            "page.html",
+            "cp_post_list.html",
+            "cp_post_detail.html",
+            "cp_post_form.html",
+        ] {
+            tera.add_raw_template(name, "v={{ build_version }} p={{ request_path | safe }}")
+                .unwrap();
+        }
+        Arc::new(tera)
+    }
+
+    async fn get(app: axum::Router, uri: &str) -> String {
+        let resp = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&bytes).into_owned();
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        body
+    }
+
+    #[tokio::test]
+    async fn template_view_merges_processors() {
+        let app = TemplateView::new("page.html").router("/about", tera());
+        assert_eq!(get(app, "/about").await, "v=test-build p=/about");
+    }
+
+    #[tokio::test]
+    async fn list_detail_and_create_views_merge_processors() {
+        let pool = pool().await;
+        let list = ListView::for_model(CpPost::SCHEMA).router("/posts", tera(), pool.clone());
+        assert_eq!(get(list, "/posts").await, "v=test-build p=/posts");
+        let detail = DetailView::for_model(CpPost::SCHEMA).router("/posts", tera(), pool.clone());
+        assert_eq!(get(detail, "/posts/1").await, "v=test-build p=/posts/1");
+        let create = CreateView::for_model(CpPost::SCHEMA).router("/posts", tera(), pool);
+        assert_eq!(get(create, "/posts/new").await, "v=test-build p=/posts/new");
+    }
+}
