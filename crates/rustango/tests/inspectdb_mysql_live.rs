@@ -139,7 +139,7 @@ async fn inspectdb_filters_by_table_flag_on_mysql() {
 }
 
 /// Types come from `COLUMN_TYPE`, defaults become SQL, names become
-/// identifiers (#1230).
+/// identifiers.
 #[tokio::test]
 async fn inspectdb_reads_column_type_and_quotes_defaults_on_mysql() {
     let _serial = serial_lock().lock().await;

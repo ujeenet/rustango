@@ -49,7 +49,7 @@ pub struct PostDefault {
     pub author_id: i64,
 }
 
-/// A typed `ForeignKey<T>` takes `on_delete` without `fk = ".."` (#1172).
+/// A typed `ForeignKey<T>` takes `on_delete` without `fk = ".."`.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "fkod_post_typed")]
 #[allow(dead_code)]

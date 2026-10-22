@@ -89,7 +89,7 @@ mod scenarios {
         assert_eq!(ids(rows), vec![1]);
     }
 
-    /// `has_key` and friends match a literal top-level key, not a path (#1228).
+    /// `has_key` and friends match a literal top-level key, not a path.
     #[allow(dead_code)] // SQLite has no JSON key operators
     pub async fn check_has_key_is_literal(pool: &Pool) {
         Doc {
@@ -121,7 +121,7 @@ mod scenarios {
         }
     }
 
-    /// `filter_op(.., Op::JsonHasKey, key)` takes a text key on a JSON column (#1435).
+    /// `filter_op(.., Op::JsonHasKey, key)` takes a text key on a JSON column.
     #[allow(dead_code)] // SQLite has no JSON key operators
     pub async fn check_filter_op_has_key(pool: &Pool) {
         let rows: Vec<Doc> = Doc::objects()

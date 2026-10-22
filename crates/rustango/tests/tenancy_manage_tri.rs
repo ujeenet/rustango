@@ -617,7 +617,7 @@ async fn data_verbs_stay_in_their_tenant(pool: &Pool) {
     assert!(!a.contains("carol"), "the load reached another tenant: {a}");
 
     // No --model: only that side's models. Unmanaged tables (TOTP and the
-    // like) are made on first use; a missing one is skipped (#1429).
+    // like) are made on first use; a missing one is skipped.
     let all = env
         .run_out(&dir, &["dumpdata", "--tenant", "mt-a", "--indent", "0"])
         .await

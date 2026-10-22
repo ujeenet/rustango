@@ -883,7 +883,7 @@ fn write_my_json_has_keys<P: AsRef<str>>(
     sql.push_str(mode);
     sql.push('\'');
     // `JSON_QUOTE` makes the bound key one literal member, as PG's `?`
-    // reads it; bare, `a.b` or `*` is a path and `2fa` a syntax error (#1228).
+    // reads it; bare, `a.b` or `*` is a path and `2fa` a syntax error.
     for p in placeholders {
         sql.push_str(", CONCAT('$.', JSON_QUOTE(");
         sql.push_str(p.as_ref());

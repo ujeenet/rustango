@@ -131,7 +131,7 @@ macro_rules! compiled_with_text {
     };
 }
 
-// What inspectdb must emit for `Order_Items` below (#1230).
+// What inspectdb must emit for `Order_Items` below.
 compiled_with_text! { ORDER_ITEMS;
     #[derive(Model, Debug, Clone)]
     #[rustango(table = "Order_Items")]
@@ -148,7 +148,7 @@ compiled_with_text! { ORDER_ITEMS;
 }
 
 /// Mixed-case and keyword names and quoted defaults emit a model that
-/// compiles (#1230).
+/// compiles.
 #[tokio::test]
 async fn inspectdb_emits_compiling_models_for_awkward_names_on_sqlite() {
     let schema = <OrderItems as rustango::core::Model>::SCHEMA;
@@ -182,7 +182,7 @@ async fn inspectdb_emits_compiling_models_for_awkward_names_on_sqlite() {
     assert_eq!(squash(&out[start..end]), squash(ORDER_ITEMS), "got:\n{out}");
 }
 
-// What inspectdb must emit for the `model` table below (#1439).
+// What inspectdb must emit for the `model` table below.
 compiled_with_text! { MODEL_TABLE;
     #[derive(Model, Debug, Clone)]
     #[rustango(table = "model")]
@@ -193,7 +193,7 @@ compiled_with_text! { MODEL_TABLE;
     }
 }
 
-/// A `model` table does not shadow the derive it is emitted with (#1439).
+/// A `model` table does not shadow the derive it is emitted with.
 #[tokio::test]
 async fn inspectdb_renames_a_model_table_on_sqlite() {
     let pool = make_pool().await;

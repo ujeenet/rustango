@@ -3758,7 +3758,7 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
     for entry in selected {
         let schema = entry.schema;
         let dotted_name = dotted_model_name(entry);
-        // Unmanaged tables such as TOTP are made on first use: none yet, no rows (#1429).
+        // Unmanaged tables such as TOTP are made on first use: none yet, no rows.
         if !schema.managed && !runner::try_table_resolves(pool, schema.table).await? {
             continue;
         }
@@ -4324,7 +4324,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         let mut values: Vec<crate::core::SqlValue> = Vec::new();
         let mut row_err: Option<String> = None;
         for f in schema.scalar_fields() {
-            // An absent key takes the column default, not NULL (#1227).
+            // An absent key takes the column default, not NULL.
             let Some(raw) = fields_obj.get(f.name) else {
                 continue;
             };

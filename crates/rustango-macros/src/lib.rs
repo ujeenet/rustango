@@ -2120,7 +2120,7 @@ struct CollectedFields {
     bulk_fill_in_place: Vec<TokenStream2>,
     /// Rust-filled `Auto` fields (`default_uuid_v7`, `auto_now(_add)`), reset when `insert_or_ignore` skips (#1937).
     rust_filled_idents: Vec<syn::Ident>,
-    /// `auto_now` fields: `upsert` stamps them before binding (#1438).
+    /// `auto_now` fields: `upsert` stamps them before binding.
     auto_now_idents: Vec<syn::Ident>,
     /// `default_uuid_v7` fields: an `Unset` one gets a fresh id, so the
     /// upsert marks it `generated` for the MySQL key guard (#1407).
@@ -2496,7 +2496,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // Immutable post-insert: skip from UPDATE entirely.
         } else if info.auto_now {
             // `auto_now` columns: bind `chrono::Utc::now()` on every
-            // UPDATE, and write it back so `self` matches the row (#1173).
+            // UPDATE, and write it back so `self` matches the row.
             out.update_assignments.push(quote! {
                 #root::core::Assignment::new(
                     #column,
@@ -3654,7 +3654,7 @@ fn inherent_impl_tokens(
                     }
                 }
                 // Build only the wanted assignments, so an unnamed
-                // `auto_now` field is not stamped (#1173).
+                // `auto_now` field is not stamped.
                 let mut _filtered: ::std::vec::Vec<#root::core::Assignment> =
                     ::std::vec::Vec::with_capacity(_wanted_cols.len());
                 #(
@@ -6820,7 +6820,7 @@ fn inherent_impl_tokens(
                         _generated.push(#gen_cols);
                     }
                 )*
-                // The UPDATE branch writes `auto_now` too, so stamp it like `save` (#1438).
+                // The UPDATE branch writes `auto_now` too, so stamp it like `save`.
                 #( self.#auto_now_idents = #root::sql::Auto::Set(#root::__chrono::Utc::now()); )*
                 #( #upsert_pushes )*
                 let query = #root::core::InsertQuery::new(

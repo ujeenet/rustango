@@ -1135,7 +1135,7 @@ pub(super) fn pg_type_to_rust(udt_name: &str) -> (&'static str, Option<&'static 
 }
 
 /// The MySQL type token [`mysql_type_to_rust`] maps: `bool` for
-/// `tinyint(1)`, `<type> unsigned` for an unsigned integer (#1230).
+/// `tinyint(1)`, `<type> unsigned` for an unsigned integer.
 #[cfg(any(feature = "mysql", test))]
 fn mysql_udt(data_type: &str, column_type: &str) -> String {
     let column_type = column_type.to_ascii_lowercase();
@@ -1274,7 +1274,7 @@ fn dialect_type_to_rust(dialect: &str, udt: &str) -> (&'static str, Option<&'sta
 // ====================================================================
 
 /// PascalCase the table name into a Rust type identifier; any character
-/// an identifier cannot hold starts a new word (#1230).
+/// an identifier cannot hold starts a new word.
 pub(super) fn table_to_struct_name(table: &str) -> String {
     let mut out = String::with_capacity(table.len());
     let mut next_upper = true;
@@ -1295,14 +1295,14 @@ pub(super) fn table_to_struct_name(table: &str) -> String {
     } else if out.starts_with(|c: char| c.is_ascii_digit()) {
         out.insert(0, 'T');
     } else if matches!(out.as_str(), "Self" | "Model" | "Auto") {
-        // `Model` / `Auto` would shadow the header's imports (#1439).
+        // `Model` / `Auto` would shadow the header's imports.
         out.push('_');
     }
     out
 }
 
 /// A field name per column; one that `sanitize_field_name` gave an
-/// earlier column takes the first free `_N` suffix (#1439).
+/// earlier column takes the first free `_N` suffix.
 fn field_names(columns: &[ColumnRow]) -> Vec<String> {
     let mut used = std::collections::HashSet::new();
     columns
@@ -1326,7 +1326,7 @@ fn rust_str(s: &str) -> String {
 }
 
 /// `default` minus the casts PostgreSQL appends (`'{}'::jsonb`), cut only
-/// outside quotes and parentheses so `'a::b'` survives (#1230).
+/// outside quotes and parentheses so `'a::b'` survives.
 fn strip_pg_cast(default: &str) -> &str {
     let (mut depth, mut quoted, mut cut) = (0_i32, false, None);
     let bytes = default.as_bytes();
@@ -1506,7 +1506,7 @@ fn emit_field_as<W: Write>(
 
 /// A field identifier for column `name`: lower-cased, other characters
 /// as `_`, a leading digit prefixed; `emit_field` adds `column = ".."`
-/// when it differs (#1230). The derive refuses a column like `Order-Date`
+/// when it differs. The derive refuses a column like `Order-Date`
 /// there, naming it, instead of failing to parse the field.
 fn sanitize_field_name(name: &str) -> String {
     const RUST_KEYWORDS: &[&str] = &[
@@ -1662,7 +1662,7 @@ mod tests {
         assert_eq!(mysql_type_to_rust("tinyint").0, "i16");
     }
 
-    /// Only `tinyint(1)` is a bool; unsigned ints widen (#1230).
+    /// Only `tinyint(1)` is a bool; unsigned ints widen.
     #[test]
     fn mysql_column_type_picks_bool_and_unsigned() {
         let ty = |d: &str, c: &str| mysql_type_to_rust(&mysql_udt(d, c));
@@ -1675,7 +1675,7 @@ mod tests {
         assert_eq!(ty("double", "double unsigned").0, "f64");
     }
 
-    /// MySQL literals are quoted, expressions parenthesised (#1230).
+    /// MySQL literals are quoted, expressions parenthesised.
     #[test]
     fn mysql_default_becomes_sql() {
         assert_eq!(mysql_default_sql("pending", "varchar", ""), "'pending'");
@@ -1688,7 +1688,7 @@ mod tests {
         );
     }
 
-    /// Only a top-level PG cast is cut (#1230).
+    /// Only a top-level PG cast is cut.
     #[test]
     fn strip_pg_cast_keeps_quoted_and_nested_colons() {
         assert_eq!(strip_pg_cast(r#"'{"a":1}'::jsonb"#), r#"'{"a":1}'"#);
@@ -1701,7 +1701,7 @@ mod tests {
         assert_eq!(strip_pg_cast("now()"), "now()");
     }
 
-    /// Attribute values are Rust literals, so quotes cannot end them (#1230).
+    /// Attribute values are Rust literals, so quotes cannot end them.
     #[test]
     fn emit_field_escapes_default_for_rust() {
         let mut buf: Vec<u8> = Vec::new();
@@ -1789,7 +1789,7 @@ mod tests {
         assert_eq!(sanitize_field_name("normal"), "normal");
     }
 
-    /// Any column name becomes an identifier (#1230).
+    /// Any column name becomes an identifier.
     #[test]
     fn sanitize_field_name_makes_identifiers() {
         assert_eq!(sanitize_field_name("Order-Date"), "order_date");

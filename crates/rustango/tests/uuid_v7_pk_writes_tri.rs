@@ -278,7 +278,7 @@ async fn pg_bulk_insert_set_pk_fills_unset_timestamps(pool: &Pool) {
 }
 
 /// `save_pool` writes the `auto_now` stamp back into `self`; a
-/// `save_partial` that leaves it out stamps neither (#1173).
+/// `save_partial` that leaves it out stamps neither.
 async fn save_writes_the_auto_now_stamp_back(pool: &Pool) {
     let mut b = Badge {
         id: Auto::Unset,
@@ -316,7 +316,7 @@ async fn save_writes_the_auto_now_stamp_back(pool: &Pool) {
     assert!(near(mem, stored(pool).await), "the row's stamp moved");
 }
 
-/// `upsert` on a saved row stamps `auto_now` instead of sending the old value (#1438).
+/// `upsert` on a saved row stamps `auto_now` instead of sending the old value.
 async fn pg_upsert_stamps_auto_now(pool: &Pool) {
     #[cfg(feature = "postgres")]
     if let Some(pg) = pool.as_postgres() {

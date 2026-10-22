@@ -48,7 +48,7 @@ pub(super) struct Sql<'d> {
     pub join_types: Vec<(usize, &'static str, &'static ModelSchema)>,
     /// Count the next SELECT body writes as its `__rustango_total` column.
     pub total: Option<CountQuery>,
-    /// Children the next SELECT body counts as `__annotated_count` (#1415).
+    /// Children the next SELECT body counts as `__annotated_count`.
     pub child_count: Option<ChildCount>,
     /// A MySQL `GROUP_CONCAT` was written: lift its 1024-byte cap (#1358).
     pub group_concat: bool,
@@ -556,7 +556,7 @@ fn write_distinct_on_via_window(
             b.write_ident(field.column);
         }
     }
-    // Counted over the survivors, which `sub` exposes (#1437).
+    // Counted over the survivors, which `sub` exposes.
     if let Some(child) = b.child_count.take() {
         write_child_count(b, "sub", child);
     }
@@ -2213,7 +2213,7 @@ fn json_path_text(
     let mut json_path = String::from("$");
     for step in path {
         match step {
-            // Quoted: MySQL rejects a bare `$.2fa` (#1436). The safe set keeps `"` out.
+            // Quoted: MySQL rejects a bare `$.2fa`. The safe set keeps `"` out.
             JsonPathStep::Key(k) => {
                 json_path.push_str(".\"");
                 json_path.push_str(k);
@@ -4988,7 +4988,7 @@ fn write_returning(b: &mut Sql<'_>, returning: &[&'static str]) -> Result<(), Sq
 }
 
 /// `select` plus a correlated `__annotated_count` of each row's children,
-/// so the query keeps its WHERE, joins, ORDER BY and LIMIT (#1415).
+/// so the query keeps its WHERE, joins, ORDER BY and LIMIT.
 pub(crate) fn compile_select_with_child_count(
     d: &dyn Dialect,
     select: &SelectQuery,
@@ -5001,7 +5001,7 @@ pub(crate) fn compile_select_with_child_count(
         return Ok(b.finish());
     }
     // A set operation counts over its merged rows, or only the head would
-    // carry the column (#1437).
+    // carry the column.
     const PARENT: &str = "__rustango_parent";
     let merged = SelectQuery {
         compound_order_by: Vec::new(),

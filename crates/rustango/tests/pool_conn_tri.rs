@@ -355,7 +355,7 @@ pub struct Review {
     pub author: ForeignKey<Author>,
 }
 
-/// A filtered, limited parent queryset counts children whose pk is not `id` (#1415).
+/// A filtered, limited parent queryset counts children whose pk is not `id`.
 async fn annotate_count_children_honours_where_and_child_pk(pool: &Pool) {
     use rustango::sql::annotate_count_children_on;
     use rustango::testkit::matrix::fresh_table;
@@ -383,7 +383,7 @@ async fn annotate_count_children_honours_where_and_child_pk(pool: &Pool) {
     assert_eq!(rows, [(1, 2)]);
 }
 
-/// A UNION or `distinct_on` parent still gets its count column (#1437).
+/// A UNION or `distinct_on` parent still gets its count column.
 async fn annotate_count_children_on_union_and_distinct_on(pool: &Pool) {
     use rustango::sql::annotate_count_children_on;
     let counts = |rows: Vec<(Author, i64)>| {

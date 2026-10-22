@@ -241,7 +241,7 @@ pub struct Counter {
     pub hits: i64,
 }
 
-/// A fixture key that is absent takes the column default, pk included (#1227).
+/// A fixture key that is absent takes the column default, pk included.
 async fn loaddata_leaves_missing_keys_to_the_column_default(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Counter>(pool).await;
     let fixture = serde_json::json!([

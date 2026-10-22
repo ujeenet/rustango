@@ -309,7 +309,7 @@ async fn json_object_numbers_compare_by_value(pool: &Pool) {
     }
 }
 
-/// A key starting with a digit is a valid path step on every backend (#1436).
+/// A key starting with a digit is a valid path step on every backend.
 async fn a_digit_led_key_matches(pool: &Pool) {
     Demo {
         id: Auto::Unset,

@@ -4,51 +4,51 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-### Fixed — `upsert` stamps `auto_now` (#1438)
+### Fixed — `upsert` stamps `auto_now`
 
 On a saved row it bound the old in-memory timestamp, so the conflict UPDATE wrote it back; now it binds the clock and keeps it in the struct, like `save`.
 
-### Fixed — `filter_op(.., Op::JsonHasKey, key)` works (#1435)
+### Fixed — `filter_op(.., Op::JsonHasKey, key)` works
 
 The text key was type-checked against the JSON column and refused with `TypeMismatch`.
 
-### Fixed — MySQL JSON paths accept a key that starts with a digit (#1436)
+### Fixed — MySQL JSON paths accept a key that starts with a digit
 
 MySQL / SQLite path keys are quoted (`$."2fa"`), so `json_path(F("data"), &["2fa"], ..)` no longer fails with MySQL error 3143.
 
-### Fixed — `dumpdata` skips an unmanaged table that is not created yet (#1429)
+### Fixed — `dumpdata` skips an unmanaged table that is not created yet
 
 Tables made on first use, such as `rustango_admin_totp`, failed a full dump (and every `--tenant` dump) until then; a missing one now has no rows.
 
-### Fixed — `annotate_count_children` on a UNION or `distinct_on` parent (#1437)
+### Fixed — `annotate_count_children` on a UNION or `distinct_on` parent
 
 A set-operation parent failed with a column-count mismatch; off PostgreSQL a `distinct_on` parent lost the count column.
 
-### Fixed — `inspectdb` emits unique field names and no `struct Model` (#1439)
+### Fixed — `inspectdb` emits unique field names and no `struct Model`
 
 Columns that map to one field name (`Name`, `name`) get `_2`, `_3`; tables named `model` or `auto` become `Model_` / `Auto_` so they don't shadow the imports.
 
-### Fixed — `annotate_count_children` keeps the parent queryset (#1415, #1288)
+### Fixed — `annotate_count_children` keeps the parent queryset
 
 It counts children in a correlated subquery, so a filtered, joined or limited parent queryset no longer fails with GROUP BY before WHERE, and a child pk not named `id` works.
 
-### Fixed — `loaddata` leaves keys a fixture omits to the column default (#1227)
+### Fixed — `loaddata` leaves keys a fixture omits to the column default
 
 A missing `pk` or field is left out of the INSERT instead of bound as NULL, so PostgreSQL assigns the id and a column default applies.
 
-### Fixed — MySQL JSON `has_key` / `has_any_keys` / `has_all_keys` match a literal key (#1228)
+### Fixed — MySQL JSON `has_key` / `has_any_keys` / `has_all_keys` match a literal key
 
 The key is quoted into the path, so `first-name` or `2fa` no longer fail with error 3143 and `a.b` or `*` no longer match nested or any keys.
 
-### Fixed — `save` writes the `auto_now` stamp back into the struct (#1173)
+### Fixed — `save` writes the `auto_now` stamp back into the struct
 
 Every save path sets the field to the timestamp it binds, so a returned row carries the stored `updated_at`; `save_partial` stamps it only when named.
 
-### Fixed — a typed `ForeignKey<T>` takes `on_delete` (#1172)
+### Fixed — a typed `ForeignKey<T>` takes `on_delete`
 
 `#[rustango(on_delete = "cascade")] author: ForeignKey<Author>` now compiles and renders `ON DELETE CASCADE`; before, only a raw `fk = ".."` column could declare an action.
 
-### Fixed — `inspectdb` emits models that compile, with the right MySQL types (#1230)
+### Fixed — `inspectdb` emits models that compile, with the right MySQL types
 
 Defaults are Rust-escaped and lose only a top-level PG cast; MySQL literal defaults are quoted and expressions parenthesised. Mixed-case or keyword columns get a snake-case field plus `column = ".."`. MySQL types come from `COLUMN_TYPE`: only `tinyint(1)` is `bool`, unsigned ints widen with a TODO.
 
