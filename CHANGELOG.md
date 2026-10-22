@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — forms honour `#[rustango(blank)]`
+
+An empty value on a blank NOT NULL String field is saved as `""` in the admin, `ModelForm`, `ModelFormFor` and viewsets, instead of being refused as missing.
+
 ### Fixed — `ModelFormFor` inserts v7 keys, timestamps and generated columns
 
 `parse` skips generated columns, and `into_insert_query` fills `auto_now*` and `default_uuid_v7` values. `from_json` refuses a key that names no field, as documented.

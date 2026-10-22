@@ -282,7 +282,7 @@ pub(crate) fn absent_takes_default(field: &FieldSchema, encoding: Encoding) -> b
 /// Parse one form value from a raw string.
 ///
 /// Empty string + nullable field → `SqlValue::Null`.
-/// Empty string + required field → `FormError::Missing`.
+/// Empty string + required String field → `FormError::Missing`, or `""` when it is `blank`.
 /// An absent key is `false` for a NOT NULL Bool (unchecked checkbox)
 /// and `NULL` for a nullable one. A Bool accepts `true/false/1/0/on/off/yes/no`
 /// (any case) or empty; anything else is a [`FormError::Parse`].
@@ -305,12 +305,9 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
     if field.nullable && raw.is_empty() {
         return Ok(SqlValue::Null);
     }
-    // Non-nullable String field with empty raw is a *missing* value,
-    // not a valid empty string: `""` is rejected unless the field
-    // is marked `blank`. Without this guard, blank
-    // form submits silently land empty strings in NOT NULL columns
-    // (surfaced playing with the cookbook /authors/new form).
-    if matches!(field.ty, FieldType::String) && !field.nullable && raw.is_empty() {
+    // An empty NOT NULL String is missing unless the field is `blank`.
+    if matches!(field.ty, FieldType::String) && !field.nullable && !field.blank && raw.is_empty()
+    {
         return Err(FormError::Missing {
             field: field.name.to_owned(),
         });
@@ -1858,6 +1855,34 @@ mod model_form_tests {
             .expect("pk");
         let cols: Vec<&str> = q.set.iter().map(|a| a.column).collect();
         assert_eq!(cols, ["title", "updated_at"]);
+    }
+
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "mf_blank")]
+    #[allow(dead_code)]
+    pub struct Blank {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(blank, max_length = 20)]
+        pub note: String,
+        #[rustango(max_length = 20)]
+        pub name: String,
+    }
+
+    #[test]
+    fn empty_value_on_a_blank_field_is_an_empty_string() {
+        let p = HashMap::from([
+            ("note".to_owned(), String::new()),
+            ("name".to_owned(), "n".to_owned()),
+        ]);
+        let mf = ModelFormFor::<Blank>::parse(&p).expect("blank accepts empty");
+        assert_eq!(mf.values()[0], crate::core::SqlValue::String(String::new()));
+        assert!(ModelForm::new(<Blank as crate::core::Model>::SCHEMA, p.clone()).is_valid());
+        let name = <Blank as crate::core::Model>::SCHEMA.field("name").unwrap();
+        assert!(matches!(
+            parse_form_value(name, Some("")),
+            Err(FormError::Missing { .. })
+        ));
     }
 
     #[test]
