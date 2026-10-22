@@ -3086,10 +3086,14 @@ fn inherent_impl_tokens(
     // the &PgPool convenience wrappers (`save`, `insert`, `delete`)
     // must acquire a connection first. Non-audited models keep the
     // direct delegation since `&PgPool` IS an Executor.
+    // One transaction: the before-image's FOR UPDATE must hold through
+    // the UPDATE and its audit row.
     let pool_to_save_on = if audited_fields.is_some() {
         quote! {
-            let mut _conn = pool.acquire().await?;
-            self.save_on(&mut *_conn).await
+            let mut _tx = pool.begin().await?;
+            let _affected = self.save_on(&mut *_tx).await?;
+            _tx.commit().await?;
+            ::core::result::Result::Ok(_affected)
         }
     } else {
         quote!(self.save_on(pool).await)

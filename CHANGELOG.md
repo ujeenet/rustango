@@ -10,7 +10,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — audited `save` locks the row it diffs
 
-The before-image read is `FOR UPDATE` on PostgreSQL and MySQL, so two concurrent saves no longer diff against the same stale row; SQLite takes its write lock at `BEGIN` instead of failing with `database is locked`.
+The before-image read is `FOR UPDATE` on PostgreSQL and MySQL, so two concurrent saves no longer diff against the same stale row; SQLite takes its write lock at `BEGIN` instead of failing with `database is locked`. The Postgres `save(&PgPool)` now runs in one transaction, so the lock holds through the UPDATE and audit row.
 
 ### Fixed — Postgres-only values error on MySQL and SQLite instead of panicking
 
