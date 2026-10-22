@@ -617,7 +617,7 @@ pub trait Dialect: Send + Sync {
 
     /// The column type for a case-insensitive text field: `CITEXT` on
     /// Postgres, `TEXT COLLATE NOCASE` on SQLite, a
-    /// `utf8mb4_0900_as_ci` collation on MySQL.
+    /// case-only `_as_ci` collation on MySQL and MariaDB.
     ///
     /// The default is plain `TEXT`, which leaves case handling to the
     /// query. Use `LOWER(…)` there on a dialect that does not
@@ -631,6 +631,12 @@ pub trait Dialect: Send + Sync {
     /// such as `CREATE EXTENSION IF NOT EXISTS citext SCHEMA public` on
     /// Postgres. `None` when nothing is needed.
     fn ci_text_extension_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// The cast every bind against a case-insensitive column needs, as
+    /// `citext` on Postgres, where a text bind compares case-sensitively.
+    fn ci_text_bind_cast(&self) -> Option<&'static str> {
         None
     }
 

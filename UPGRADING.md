@@ -150,9 +150,13 @@ untouched.
 
 ## Unreleased
 
+### PostgreSQL `citext` filters ignore case
+
+`=`, `<>`, `IN` and the other comparisons on a `#[rustango(citext)]` column now match regardless of case, as on MySQL and SQLite.
+
 ### MySQL `citext` columns: new collation
 
-New columns get `utf8mb4_0900_as_ci` (MySQL 8+). Existing ones keep `utf8mb4_general_ci` until altered; to switch, `ALTER TABLE t MODIFY col VARCHAR(n) COLLATE utf8mb4_0900_as_ci` (check `unique` columns for rows that now differ).
+New columns get `utf8mb4_0900_as_ci` on MySQL 8+ and `utf8mb4_uca1400_nopad_as_ci` on MariaDB 10.10+; older servers keep `utf8mb4_general_ci`. Existing ones keep `utf8mb4_general_ci` until altered; to switch, `ALTER TABLE t MODIFY col VARCHAR(n) COLLATE <collation>` (check `unique` columns for rows that now differ).
 
 ### SQLite: a RunSQL beside a rebuild is no longer refused
 

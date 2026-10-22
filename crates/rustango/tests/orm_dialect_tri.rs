@@ -154,6 +154,26 @@ async fn citext_keeps_accents_and_spaces(pool: &Pool) {
     assert_eq!(ids("bob ").await, Vec::<i64>::new(), "trailing spaces count");
 }
 
+/// A filter on a citext column ignores case; PG compared a text bind as text.
+async fn citext_filter_ignores_case(pool: &Pool) {
+    fresh_table::<CiName>(pool).await;
+    CiName {
+        id: 1,
+        name: "bob".into(),
+    }
+    .insert_pool(pool)
+    .await
+    .unwrap();
+    let ids = |key: &'static str, v: SqlValue| async move {
+        let rows = CiName::objects().filter(key, v).fetch(pool).await;
+        rows.unwrap().into_iter().map(|r| r.id).collect::<Vec<_>>()
+    };
+    assert_eq!(ids("name", "BOB".into()).await, [1], "=");
+    let list = SqlValue::List(vec!["BOB".into(), "X".into()]);
+    assert_eq!(ids("name__in", list).await, [1], "IN");
+    assert_eq!(ids("name__ne", "BOB".into()).await, Vec::<i64>::new(), "<>");
+}
+
 async fn setup(pool: &Pool) {
     fresh_table::<Code>(pool).await;
     fresh_table::<Post>(pool).await;
@@ -973,6 +993,7 @@ tri_dialect_test! {
         second_lookup_truncates,
         relation_date_lookup,
         citext_keeps_accents_and_spaces,
+        citext_filter_ignores_case,
     ],
 }
 

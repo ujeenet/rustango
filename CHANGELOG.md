@@ -10,9 +10,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 A `json` (not `jsonb`) column still maps to `serde_json::Value`, with a TODO: it has no `=` or `@>`, and ORM filters bind `jsonb`.
 
+### Fixed — PostgreSQL filters on a `citext` column ignore case
+
+The bind is cast to `citext`; as text, `filter("name", "BOB")` compared `text = text` and missed `"bob"`.
+
 ### Fixed — MySQL `citext` ignores case only
 
-New `#[rustango(citext)]` columns use `utf8mb4_0900_as_ci` instead of `utf8mb4_general_ci`, which also matched `'cafe'` to `'café'` and `'a'` to `'a '`, unlike PostgreSQL.
+New `#[rustango(citext)]` columns use `utf8mb4_0900_as_ci` (MariaDB 10.10+: `utf8mb4_uca1400_nopad_as_ci`, chosen by the server) instead of `utf8mb4_general_ci`, which also matched `'cafe'` to `'café'` and `'a'` to `'a '`, unlike PostgreSQL.
 
 ### Fixed — reverse FK accessors for foreign-crate parents and twin FKs
 
@@ -28,7 +32,7 @@ After COMMIT each callback runs under `catch_unwind`; a panic is logged on `rust
 
 ### Fixed — a grouped aggregate with joins names the base table
 
-`WHERE`, `SUM(…)` and the other aggregate columns of `.join(…).values(…).annotate(…)` are qualified with the model's table, as `fetch()` does; a column the join shares (a self-join, two soft-delete scopes) was ambiguous.
+`WHERE`, `SUM(…)` and the other aggregate columns of `.join(…).values(…).annotate(…)` are qualified with the model's table, as `fetch()` does; a column the join shares (a self-join, two soft-delete scopes) was ambiguous. `HAVING` and `ORDER BY` too; a column only the join has stays bare.
 
 ### Fixed — the fullstack scaffold mounts its admin at `[admin] url_prefix`
 

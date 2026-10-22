@@ -2478,7 +2478,7 @@ fn sql_type_with_dialect(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -
     }
     // #344 — case-insensitive String columns route through
     // `dialect.ci_text_type` (PG → CITEXT, SQLite → TEXT COLLATE
-    // NOCASE, MySQL → LONGTEXT COLLATE utf8mb4_0900_as_ci).
+    // NOCASE, MySQL → LONGTEXT with an `_as_ci` collation).
     if is_ci_text(f) {
         return dialect.ci_text_type(f.max_length);
     }

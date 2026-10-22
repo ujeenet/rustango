@@ -189,10 +189,15 @@ impl<'d> Sql<'d> {
             .map(|(_, q)| q)
     }
 
-    /// The table or alias a scope column is written under.
-    fn qualify_alias(&self) -> Option<&'static str> {
+    /// The table or alias `column` is written under. `Base` only names
+    /// the base model's own columns, so a joined-only one stays bare.
+    fn qualify_alias(&self, column: &str) -> Option<&'static str> {
         match self.qualifier()? {
-            Qualifier::Join(a) | Qualifier::Base(a) => Some(a),
+            Qualifier::Join(a) => Some(a),
+            Qualifier::Base(t) => self
+                .scope_model()
+                .map_or(true, |m| m.field_by_column(column).is_some())
+                .then_some(t),
         }
     }
 
@@ -229,16 +234,20 @@ impl<'d> Sql<'d> {
     /// [`Dialect::null_cast`]) in two cases: a `NULL`, which would
     /// otherwise have no type, and a [`SqlValue::RangeLiteral`], which
     /// binds as text and which PG will not cast to a range type on its
-    /// own in `INSERT` or `UPDATE SET`.
-    pub(super) fn push_param_typed(&mut self, value: SqlValue, cast: Option<&'static str>) {
-        let needs_cast = matches!(value, SqlValue::Null | SqlValue::RangeLiteral(_));
+    /// own in `INSERT` or `UPDATE SET`. A [`BindCast::Always`] is written
+    /// for every value.
+    pub(super) fn push_param_typed(&mut self, value: SqlValue, cast: Option<BindCast>) {
+        let untyped = matches!(value, SqlValue::Null | SqlValue::RangeLiteral(_));
         let p = self.bind(value);
         self.sql.push_str(&p);
-        if needs_cast {
-            if let Some(ty) = cast {
-                self.sql.push_str("::");
-                self.sql.push_str(ty);
-            }
+        let ty = match cast {
+            Some(BindCast::Always(ty)) => Some(ty),
+            Some(BindCast::Untyped(ty)) if untyped => Some(ty),
+            _ => None,
+        };
+        if let Some(ty) = ty {
+            self.sql.push_str("::");
+            self.sql.push_str(ty);
         }
     }
 
@@ -291,15 +300,29 @@ impl<'d> Sql<'d> {
     }
 }
 
-/// Look up a column's NULL cast. Postgres needs one; other dialects
+/// The `::TYPE` a bind for a column gets on Postgres.
+#[derive(Clone, Copy)]
+pub(super) enum BindCast {
+    /// Only a `NULL` or range literal, which binds without a usable type.
+    Untyped(&'static str),
+    /// Every value: a text bind would pick `text = text`, not `citext = citext`.
+    Always(&'static str),
+}
+
+/// Look up a column's bind cast. Postgres needs one; other dialects
 /// get `None`.
 pub(super) fn null_cast_for(
     d: &dyn Dialect,
     model: &ModelSchema,
     column: &str,
-) -> Option<&'static str> {
+) -> Option<BindCast> {
     let field = model.field_by_column(column)?;
-    d.null_cast(field.ty)
+    if field.case_insensitive && field.ty == crate::core::FieldType::String {
+        if let Some(ty) = d.ci_text_bind_cast() {
+            return Some(BindCast::Always(ty));
+        }
+    }
+    d.null_cast(field.ty).map(BindCast::Untyped)
 }
 
 // ---- SELECT ----
@@ -1180,7 +1203,7 @@ fn write_aggregate_inner(
             aliases: src.joins.iter().map(|j| j.alias).collect(),
         });
     }
-    let r = write_aggregate_tail(b, query);
+    let r = b.with_qualifier(q, |b| write_aggregate_tail(b, query));
     b.derived_joins = prev_derived;
     r
 }
@@ -1826,7 +1849,7 @@ pub(super) fn write_update(b: &mut Sql<'_>, query: &UpdateQuery) -> Result<(), S
 fn write_expr(
     b: &mut Sql<'_>,
     expr: &crate::core::Expr,
-    cast: Option<&'static str>,
+    cast: Option<BindCast>,
 ) -> Result<(), SqlError> {
     use crate::core::{BinOp as BO, Expr};
     match expr {
@@ -1835,20 +1858,7 @@ fn write_expr(
             Ok(())
         }
         Expr::Column(name) => {
-            // In a JOIN ON every column is the join's; under a SELECT with
-            // joins only the base model's own columns get its table, so a
-            // bare joined column still resolves to its join.
-            let alias = match b.qualifier() {
-                Some(Qualifier::Join(a)) => Some(a),
-                Some(Qualifier::Base(t))
-                    if b.scope_model()
-                        .map_or(true, |m| m.field_by_column(name).is_some()) =>
-                {
-                    Some(t)
-                }
-                _ => None,
-            };
-            if let Some(alias) = alias {
+            if let Some(alias) = b.qualify_alias(name) {
                 let qualified = format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(name),);
                 b.sql.push_str(&qualified);
             } else {
@@ -3952,14 +3962,14 @@ pub(super) fn write_bulk_update_pg(
     b.sql.push_str(" FROM (VALUES ");
     // A NULL takes its column's cast: an all-NULL column in VALUES
     // is otherwise typed text. Only here does a vector NULL need one (#1970).
-    let casts: Vec<Option<&'static str>> = std::iter::once(pk_field.column)
+    let casts: Vec<Option<BindCast>> = std::iter::once(pk_field.column)
         .chain(query.update_columns.iter().copied())
         .map(|c| {
             let vector = query
                 .model
                 .field_by_column(c)
                 .is_some_and(|f| matches!(f.ty, crate::core::FieldType::Vector(_)));
-            null_cast_for(b.d, query.model, c).or(vector.then_some("vector"))
+            null_cast_for(b.d, query.model, c).or(vector.then_some(BindCast::Untyped("vector")))
         })
         .collect();
     let mut first_row = true;
@@ -4059,7 +4069,7 @@ pub(super) fn write_where_with_search(
             b.params.push(SqlValue::String(pattern.clone()));
             let placeholder = b.d.placeholder(b.params.len());
             let mut qualified = String::new();
-            if let Some(table) = b.qualify_alias() {
+            if let Some(table) = b.qualify_alias(col) {
                 qualified.push_str(&b.d.quote_ident(table));
                 qualified.push('.');
             }
@@ -4427,7 +4437,17 @@ fn write_compare_rhs(
 ) -> Result<(), SqlError> {
     use crate::core::Expr;
     let (Expr::JsonPath { as_text, .. }, Expr::Literal(v)) = (lhs, rhs) else {
-        return write_expr(b, rhs, None);
+        // A relation lookup on a citext column needs its cast too.
+        let cast = match lhs {
+            Expr::Column(c) if !matches!(b.qualifier(), Some(Qualifier::Join(_))) => {
+                b.scope_model().and_then(|m| null_cast_for(b.d, m, c))
+            }
+            Expr::AliasedColumn { alias, column } => {
+                alias_model(b, alias).and_then(|m| null_cast_for(b.d, m, column))
+            }
+            _ => None,
+        };
+        return write_expr(b, rhs, cast);
     };
     let (open, close) = match (as_text, v) {
         _ if b.d.name() != "sqlite" => return write_expr(b, rhs, None),
@@ -4848,7 +4868,7 @@ fn simple_op(
     qualified_col: &str,
     kw: &str,
     value: SqlValue,
-    cast: Option<&'static str>,
+    cast: Option<BindCast>,
 ) {
     b.sql.push_str(qualified_col);
     b.sql.push_str(kw);
@@ -4860,7 +4880,7 @@ fn simple_op(
 /// example in `LOWER(…)`, without editing the buffer afterwards.
 fn render_qualified_col(b: &Sql<'_>, column: &str) -> String {
     let mut s = String::new();
-    if let Some(table) = b.qualify_alias() {
+    if let Some(table) = b.qualify_alias(column) {
         s.push_str(&b.d.quote_ident(table));
         s.push('.');
     }

@@ -445,6 +445,52 @@ async fn grouped_aggregate_join_qualifies_base_columns(pool: &Pool) {
     );
 }
 
+/// A column only the join has stays bare, so it resolves to the join.
+async fn grouped_aggregate_of_joined_only_column(pool: &Pool) {
+    let mut rows: Vec<(SqlValue, SqlValue)> = Book::objects()
+        .join(author_join())
+        .values(&["author"])
+        .annotate("m", AggregateExpr::Max("name"))
+        .fetch(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| (r["author"].clone(), r["m"].clone()))
+        .collect();
+    rows.sort_by_key(|(a, _)| format!("{a:?}"));
+    assert_eq!(
+        rows,
+        [
+            (SqlValue::I64(1), SqlValue::String("Ada".into())),
+            (SqlValue::I64(2), SqlValue::String("Bob".into()))
+        ]
+    );
+}
+
+/// HAVING and ORDER BY on an annotate alias in a self-join name the base table.
+async fn grouped_aggregate_join_having_qualifies(pool: &Pool) {
+    let rows: Vec<(SqlValue, SqlValue)> = Book::objects()
+        .join(same_author("b2"))
+        .values(&["author"])
+        .annotate("s", AggregateExpr::Sum("pages"))
+        .filter("s", Op::Gt, 250_i64)
+        .order_by(&[("s", true)])
+        .fetch(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| (r["author"].clone(), r["s"].clone()))
+        .collect();
+    // Ada: (100 + 200) x 2 pairs; Bob: 300 x 1.
+    assert_eq!(
+        rows,
+        [
+            (SqlValue::I64(1), SqlValue::I64(600)),
+            (SqlValue::I64(2), SqlValue::I64(300))
+        ]
+    );
+}
+
 /// A `.join()` sits inside the DISTINCT, so each book counts once.
 async fn grouped_aggregate_join_distinct(pool: &Pool) {
     let qs = Book::objects().join(same_author("b2")).distinct();
@@ -844,6 +890,8 @@ tri_dialect_test! {
         grouped_aggregate_honours_compound,
         grouped_aggregate_honours_distinct,
         grouped_aggregate_join_qualifies_base_columns,
+        grouped_aggregate_of_joined_only_column,
+        grouped_aggregate_join_having_qualifies,
         grouped_aggregate_join_distinct,
         grouped_aggregate_join_limit,
         grouped_aggregate_join_alias_filter,

@@ -1157,7 +1157,7 @@ let oldest = Post::objects().earliest_default(&pool).await?;
 **Render shape**:
 - Postgres: column type becomes `CITEXT` (the dialect auto-emits `CREATE EXTENSION IF NOT EXISTS citext;` prelude)
 - SQLite: `TEXT COLLATE NOCASE`
-- MySQL: `VARCHAR(N)/LONGTEXT COLLATE utf8mb4_0900_as_ci`
+- MySQL: `VARCHAR(N)/LONGTEXT COLLATE utf8mb4_0900_as_ci` (MariaDB 10.10+: `utf8mb4_uca1400_nopad_as_ci`)
 
 ```rust
 #[rustango(max_length = 200, citext)] pub email: String,
