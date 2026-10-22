@@ -1112,7 +1112,11 @@ pub(super) fn pg_type_to_rust(udt_name: &str) -> (&'static str, Option<&'static 
         ),
         "varchar" | "bpchar" | "text" | "citext" => ("String", None),
         "uuid" => ("uuid::Uuid", None),
-        "jsonb" | "json" => ("serde_json::Value", None),
+        "jsonb" => ("serde_json::Value", None),
+        "json" => (
+            "serde_json::Value",
+            Some("// TODO: `json` has no `=` or `@>`, and filters bind jsonb; ALTER the column TYPE jsonb"),
+        ),
         "timestamptz" => ("chrono::DateTime<chrono::Utc>", None),
         "timestamp" => (
             "chrono::NaiveDateTime",
@@ -1664,6 +1668,15 @@ mod tests {
         );
         assert_eq!(pg_type_to_rust("jsonb").0, "serde_json::Value");
         assert_eq!(pg_type_to_rust("bool").0, "bool");
+    }
+
+    /// Plain `json` decodes as Value but cannot be filtered like jsonb.
+    #[test]
+    fn pg_json_column_gets_a_jsonb_note() {
+        assert_eq!(pg_type_to_rust("jsonb").1, None);
+        let (ty, note) = pg_type_to_rust("json");
+        assert_eq!(ty, "serde_json::Value");
+        assert!(note.is_some_and(|n| n.contains("jsonb")), "{note:?}");
     }
 
     #[test]

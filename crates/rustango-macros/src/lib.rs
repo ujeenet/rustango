@@ -979,7 +979,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         struct_name,
         &collected.fk_relations,
         container.default_related_name.as_deref(),
-    );
+    )?;
     let m2m_accessors = m2m_accessor_tokens(struct_name, &container.m2m);
     let generic_m2m_accessors = generic_m2m_accessor_tokens(struct_name, &container.generic_m2m);
     // Issue #817 — `#[rustango(through(...))]` accessors.
@@ -1431,6 +1431,9 @@ fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
     }
 }
 
+/// `related_name = "+"`: the FK gets no reverse accessor on its parent.
+const NO_REVERSE_ACCESSOR: &str = "+";
+
 /// For every `ForeignKey<Parent>` field on `Child`, emit
 /// `impl Parent { pub async fn <child_table>_set(&self, executor) -> Vec<Child> }`.
 /// Reads the parent's PK via the macro-generated `__rustango_pk_value`
@@ -1448,10 +1451,15 @@ fn reverse_helper_tokens(
     child_ident: &syn::Ident,
     fk_relations: &[FkRelation],
     default_related_name: Option<&str>,
-) -> TokenStream2 {
+) -> syn::Result<TokenStream2> {
     let root = rustango_root();
+    // `related_name = "+"`: no accessor, so a parent from another crate works.
+    let fk_relations: Vec<&FkRelation> = fk_relations
+        .iter()
+        .filter(|rel| rel.related_name.as_deref() != Some(NO_REVERSE_ACCESSOR))
+        .collect();
     if fk_relations.is_empty() {
-        return TokenStream2::new();
+        return Ok(TokenStream2::new());
     }
     // Method-name resolution per FK (issue #816 + follow-up):
     //   1. Field-level `#[rustango(related_name = "...")]` on the FK
@@ -1469,11 +1477,32 @@ fn reverse_helper_tokens(
     let default_pg_suffix = default_related_name
         .map(str::to_owned)
         .unwrap_or_else(|| format!("{}_set", to_snake_case(&ident_name(child_ident))));
-    let impls = fk_relations.iter().map(|rel| {
-        let pg_suffix = rel
-            .related_name
+    let name_of = |rel: &FkRelation| {
+        rel.related_name
             .clone()
-            .unwrap_or_else(|| default_pg_suffix.clone());
+            .unwrap_or_else(|| default_pg_suffix.clone())
+    };
+    // Two FKs to one parent would define the same method twice (E0592).
+    for (i, rel) in fk_relations.iter().enumerate() {
+        let parent_ty = &rel.parent_type;
+        let parent = quote!(#parent_ty).to_string();
+        let name = name_of(rel);
+        if let Some(first) = fk_relations[..i].iter().find(|r| {
+            let other = &r.parent_type;
+            quote!(#other).to_string() == parent && name_of(r) == name
+        }) {
+            return Err(syn::Error::new_spanned(
+                &rel.field_ident,
+                format!(
+                    "`{}` and `{}` both point at `{parent}` and would both add `{parent}::{name}`; \
+                     give one `#[rustango(related_name = \"...\")]`, or `related_name = \"+\"` for none",
+                    first.field_ident, rel.field_ident
+                ),
+            ));
+        }
+    }
+    let impls = fk_relations.iter().map(|rel| {
+        let pg_suffix = name_of(rel);
         let pool_suffix = format!("{}_pool", pg_suffix);
         let pg_method_ident = syn::Ident::new(&pg_suffix, child_ident.span());
         let pool_method_ident = syn::Ident::new(&pool_suffix, child_ident.span());
@@ -1546,7 +1575,7 @@ fn reverse_helper_tokens(
             }
         }
     });
-    quote! { #( #impls )* }
+    Ok(quote! { #( #impls )* })
 }
 
 /// Emit `<name>_m2m(&self) -> M2MManager` inherent methods for every M2M
@@ -10653,6 +10682,7 @@ struct FieldAttrs {
     /// `default_related_name` or the `<child_snake>_set[_pool]`
     /// fallback. Only meaningful when `fk` / `o2o` is also set;
     /// silently ignored on non-FK fields. Follow-up to #816.
+    /// `"+"` emits none, for a parent defined in another crate.
     related_name: Option<String>,
     max_length: Option<u32>,
     /// `#[rustango(vector(dims = N))]` — pgvector column dimension (#824).
@@ -10864,15 +10894,16 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 // Validate as a Rust-ident shape — the value becomes
                 // a method name on the parent type. Same rule as
                 // `default_related_name` so the two surfaces match.
-                if !raw
+                // `"+"` emits no accessor at all.
+                let snake = raw
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-                    || raw.starts_with(char::is_numeric)
-                {
+                    && !raw.starts_with(char::is_numeric);
+                if !snake && raw != NO_REVERSE_ACCESSOR {
                     return Err(syn::Error::new(
                         s.span(),
                         "`related_name` must be snake_case ASCII (lowercase letters, \
-                         digits, underscores; no leading digit)",
+                         digits, underscores; no leading digit), or \"+\" for none",
                     ));
                 }
                 out.related_name = Some(raw);
@@ -14001,6 +14032,39 @@ mod field_attr_tests {
             }
         };
         assert!(expand(&input).is_ok());
+    }
+
+    /// Two FKs to one parent would emit the same reverse accessor twice.
+    #[test]
+    fn reverse_accessor_clash_names_related_name() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[rustango(table = "m")]
+            struct Message {
+                #[rustango(primary_key)] id: i64,
+                sender: ForeignKey<User>,
+                recipient: ForeignKey<User>,
+            }
+        };
+        let err = expand(&input).err().expect("refused");
+        assert!(err.to_string().contains("related_name"), "{err}");
+    }
+
+    /// `related_name = "+"` emits no reverse accessor, so a parent from
+    /// another crate, which cannot take an inherent impl, still derives.
+    #[test]
+    fn related_name_plus_skips_the_reverse_accessor() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[rustango(table = "m")]
+            struct Message {
+                #[rustango(primary_key)] id: i64,
+                sender: ForeignKey<User>,
+                #[rustango(related_name = "+")] recipient: ForeignKey<User>,
+                #[rustango(related_name = "+")] owner: ForeignKey<other::Account>,
+            }
+        };
+        let out = expand(&input).expect("derives").to_string();
+        assert_eq!(out.matches("message_set_pool").count(), 1, "{out}");
+        assert!(!out.contains("impl other :: Account {"), "{out}");
     }
 
     /// A raw ident derives names without `r#`; this used to panic (#1937).

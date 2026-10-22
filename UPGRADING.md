@@ -166,6 +166,22 @@ With `RUSTANGO_ENV=prod` and no `config/default.toml`, `Cli::with_settings_from_
 
 The operator console ignores `?error=`, `?notice=` and `?ok=` unless it added them itself in the last five minutes. Bookmarks or links you built with those keys lose the message.
 
+### PostgreSQL `citext` filters ignore case
+
+`=`, `<>`, `IN` and the other comparisons on a `#[rustango(citext)]` column now match regardless of case, as on MySQL and SQLite.
+
+### MySQL `citext` columns: new collation
+
+New columns get `utf8mb4_0900_as_ci` on MySQL 8+ and `utf8mb4_uca1400_nopad_as_ci` on MariaDB 10.10+; older servers keep `utf8mb4_general_ci`. Existing ones keep `utf8mb4_general_ci` until altered; to switch, `ALTER TABLE t MODIFY col VARCHAR(n) COLLATE <collation>` (check `unique` columns for rows that now differ).
+
+### SQLite: a RunSQL beside a rebuild is no longer refused
+
+Such a migration commits in steps, so a failure can return `MigrateError::PartiallyApplied`, as on MySQL. Migrations without that mix still run in one transaction.
+
+### A panicking `on_commit` callback no longer escapes `atomic`
+
+It is logged and the later callbacks run. Code that caught that panic around `atomic` should watch the `rustango::error` log instead.
+
 ## 0.60.10
 
 ### New `TenantScope` extractor

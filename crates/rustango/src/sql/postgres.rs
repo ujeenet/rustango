@@ -153,6 +153,10 @@ impl Dialect for Postgres {
         Some("CREATE EXTENSION IF NOT EXISTS citext SCHEMA public;")
     }
 
+    fn ci_text_bind_cast(&self) -> Option<&'static str> {
+        Some("citext")
+    }
+
     // Postgres has a native `BOOLEAN` type with `TRUE` / `FALSE`
     // literals — same as the trait default, no override.
 

@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+**Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`. See UPGRADING.
+
 ### Fixed — `[security] csrf_trusted_origins` is applied
 
 `Cli::with_csrf` and `Cli::with_csrf_config` now trust these origins (added to the config's own list); the setting was only read by `check --deploy`.
@@ -27,6 +29,34 @@ The console signs each `?error=` / `?notice=` / `?ok=` its handlers write, for t
 ### Added — revoke a passkey
 
 `passkey::revoke::<U>(pool, user_id, credential_id)` and `passkey::revoke_all::<U>(pool, user_id)` delete credentials and end the user's sessions on user model `U`, and the tenancy CLI has `revoke-passkey <slug> <username> [--credential <id>]`. The admin does not serve the table, so there was no way to drop a stolen key.
+
+### Fixed — `inspectdb` flags PostgreSQL `json` columns
+
+A `json` (not `jsonb`) column still maps to `serde_json::Value`, with a TODO: it has no `=` or `@>`, and ORM filters bind `jsonb`.
+
+### Fixed — PostgreSQL filters on a `citext` column ignore case
+
+The bind is cast to `citext`; as text, `filter("name", "BOB")` compared `text = text` and missed `"bob"`.
+
+### Fixed — MySQL `citext` ignores case only
+
+New `#[rustango(citext)]` columns use `utf8mb4_0900_as_ci` (MariaDB 10.10+: `utf8mb4_uca1400_nopad_as_ci`, chosen by the server) instead of `utf8mb4_general_ci`, which also matched `'cafe'` to `'café'` and `'a'` to `'a '`, unlike PostgreSQL.
+
+### Fixed — reverse FK accessors for foreign-crate parents and twin FKs
+
+`#[rustango(related_name = "+")]` emits no `Parent::<name>` accessor, so an FK to a model from another crate derives. Two FKs to one parent under the same accessor name are a clear compile error asking for `related_name`.
+
+### Fixed — SQLite runs a RunSQL beside a table rebuild
+
+An atomic migration that mixes a RunSQL with a rebuilding op (the "add nullable, backfill, set NOT NULL" pattern, or the downgrade of AddColumn + RunSQL) was refused. It now runs in one transaction per run of ops, RunSQL with FOREIGN KEY enforcement on; a failure after the first commit is `PartiallyApplied`.
+
+### Fixed — a panicking `on_commit` callback no longer skips the rest
+
+After COMMIT each callback runs under `catch_unwind`; a panic is logged on `rustango::error` and the next callback still runs. `atomic` returns `Ok`, since the data is committed.
+
+### Fixed — a grouped aggregate with joins names the base table
+
+`WHERE`, `SUM(…)` and the other aggregate columns of `.join(…).values(…).annotate(…)` are qualified with the model's table, as `fetch()` does; a column the join shares (a self-join, two soft-delete scopes) was ambiguous. `HAVING` and `ORDER BY` too; a column only the join has stays bare.
 
 ## [0.60.10] — 2026-10-22
 

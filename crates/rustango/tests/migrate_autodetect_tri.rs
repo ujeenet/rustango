@@ -2003,7 +2003,7 @@ async fn composite_fk_add_before_target_and_column_renames(pool: &Pool) {
 }
 
 /// SQLite: a rebuild that orphans a row rolls back; an orphan that was
-/// already there elsewhere does not block it; a RunSQL beside it is refused.
+/// already there elsewhere does not block it, nor does a RunSQL beside it.
 async fn rebuild_checks_only_its_own_orphans(pool: &Pool) {
     let (a, b) = ("mad_ro_author", "mad_ro_book");
     let chain = Chain::new(pool, "ro", &[b, a]).await;
@@ -2089,10 +2089,10 @@ async fn rebuild_checks_only_its_own_orphans(pool: &Pool) {
                 .unwrap();
         }
     }
-    let err = chain
+    chain
         .hand(
             pool,
-            books(vec![id(), col("y", "i64", json!({})), author.clone()]),
+            books(vec![id(), col("y", "i64", json!({})), author]),
             vec![SchemaChange::DropColumn {
                 table: b.into(),
                 column: "x".into(),
@@ -2100,14 +2100,159 @@ async fn rebuild_checks_only_its_own_orphans(pool: &Pool) {
             Some("SELECT 1"),
         )
         .await
-        .expect_err("RunSQL beside a rebuild");
-    assert!(err.contains("RunSQL"), "{err}");
-    chain.discard_head();
-    chain
-        .step(pool, books(vec![id(), col("y", "i64", json!({})), author]))
-        .await
         .expect("an old orphan in mad_ro_other does not block");
     drop_table(pool, "mad_ro_other").await;
+}
+
+/// RunSQL beside a SQLite rebuild applies and unapplies; it still runs with
+/// FK enforcement on, so its DELETE cascades.
+async fn run_sql_beside_a_rebuild_round_trips(pool: &Pool) {
+    let (a, b) = ("mad_rs_parent", "mad_rs_child");
+    let chain = Chain::new(pool, "rs", &[b, a]).await;
+    let parent_id = col("parent_id", "i64", fk(a));
+    let child = |extra: Vec<Value>| {
+        let mut fields = vec![id(), parent_id.clone()];
+        fields.extend(extra);
+        json!({"tables": [table(a, vec![id()]), table(b, fields)]})
+    };
+    chain
+        .step(pool, child(vec![col("y", "i64", json!({}))]))
+        .await
+        .expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1), (2)", &[a, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (1, 1, 5), (2, 2, 5)",
+        &[b, "id", "parent_id", "y"],
+    )
+    .await
+    .unwrap();
+    let data = |sql: String, reverse: &str| {
+        Operation::Data(rustango::migrate::DataOp {
+            sql,
+            reverse_sql: Some(reverse.to_owned()),
+            reversible: true,
+        })
+    };
+    let backfill = q(pool, "UPDATE {} SET {} = 7", &[b, "x"]);
+    chain.write_hand(
+        child(vec![
+            col("y", "i64", json!({"nullable": false})),
+            col("x", "i64", json!({})),
+        ]),
+        vec![
+            Operation::Schema(SchemaChange::AddColumn {
+                table: b.into(),
+                column: "x".into(),
+            }),
+            data(backfill.clone(), "SELECT 1"),
+            data(q(pool, "DELETE FROM {} WHERE {} = 1", &[a, "id"]), "SELECT 1"),
+            Operation::Schema(SchemaChange::AlterColumnNullable {
+                table: b.into(),
+                column: "y".into(),
+                nullable: false,
+            }),
+        ],
+    );
+    chain.migrate(pool).await.expect("RunSQL beside a rebuild");
+    let sql = q(pool, "SELECT {}, {} FROM {}", &["id", "x", b]);
+    let got: Vec<(i64, i64)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(2, 7)], "the DELETE cascaded to child 1");
+    chain
+        .undo(pool, &chain.head().name)
+        .await
+        .expect("unapply beside a rebuild");
+    // Qualified: SQLite reads an unknown bare "x" as a string literal.
+    let x_col = [b, "x", b];
+    let has_x = || exec(pool, "SELECT {}.{} FROM {}", &x_col);
+    has_x().await.expect_err("x is dropped again");
+    // AddColumn + RunSQL alone, whose reverse reads x before it goes.
+    chain.discard_head();
+    chain.write_hand(
+        child(vec![col("y", "i64", json!({})), col("x", "i64", json!({}))]),
+        vec![
+            Operation::Schema(SchemaChange::AddColumn {
+                table: b.into(),
+                column: "x".into(),
+            }),
+            data(backfill.clone(), &backfill),
+        ],
+    );
+    chain.migrate(pool).await.expect("AddColumn + RunSQL");
+    chain
+        .undo(pool, &chain.head().name)
+        .await
+        .expect("AddColumn + RunSQL unapplies");
+    has_x().await.expect_err("x is dropped again");
+}
+
+/// A RunSQL failing after a SQLite rebuild leaves the earlier ranges
+/// committed: `PartiallyApplied`. PostgreSQL rolls it all back.
+async fn split_sqlite_migration_fails_partially(pool: &Pool) {
+    let b = "mad_pa_book";
+    let chain = Chain::new(pool, "pa", &[b]).await;
+    let book = |extra: Vec<Value>| {
+        let mut fields = vec![id()];
+        fields.extend(extra);
+        json!({"tables": [table(b, fields)]})
+    };
+    chain
+        .step(pool, book(vec![col("y", "i64", json!({}))]))
+        .await
+        .expect("initial");
+    let data = |sql: String| {
+        Operation::Data(rustango::migrate::DataOp {
+            sql,
+            reverse_sql: None,
+            reversible: false,
+        })
+    };
+    chain.write_hand(
+        book(vec![
+            col("y", "i64", json!({"nullable": false})),
+            col("x", "i64", json!({})),
+        ]),
+        vec![
+            Operation::Schema(SchemaChange::AddColumn {
+                table: b.into(),
+                column: "x".into(),
+            }),
+            data(q(pool, "UPDATE {} SET {} = 7", &[b, "x"])),
+            Operation::Schema(SchemaChange::AlterColumnNullable {
+                table: b.into(),
+                column: "y".into(),
+                nullable: false,
+            }),
+            data(q(pool, "SELECT * FROM {}", &["mad_pa_missing"])),
+        ],
+    );
+    let err = migrate_pool_with_ledger(pool, chain.dir.path(), &chain.ledger)
+        .await
+        .expect_err("the last RunSQL fails");
+    let has_x = exec(pool, "SELECT {}.{} FROM {}", &[b, "x", b]).await.is_ok();
+    match pool.dialect().name() {
+        "sqlite" => {
+            assert!(
+                matches!(
+                    err,
+                    rustango::migrate::MigrateError::PartiallyApplied {
+                        applied: 3,
+                        total: 4,
+                        ddl_applied: 2,
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
+            assert!(has_x, "the first range committed");
+        }
+        "postgres" => assert!(!has_x, "rolled back: {err:?}"),
+        _ => {}
+    }
 }
 
 /// The `&PgPool` runners drop the live FK too.
@@ -3687,6 +3832,8 @@ tri_dialect_test!(
         composite_fk_add_before_target_and_column_renames,
         declared_index_survives_unique_drop_before_rename,
         rebuild_checks_only_its_own_orphans,
+        run_sql_beside_a_rebuild_round_trips,
+        split_sqlite_migration_fails_partially,
         legacy_pg_runner_replaces_the_fk,
         cross_ledger_squash_runs_its_other_changes,
         unique_drop_finds_the_live_name,
