@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `BodyLimitLayer` sets the extractor limit (#1210)
+
+On POST, PUT, PATCH and QUERY its `max_bytes` is now the only body cap; axum's 2 MiB default no longer applies there. A route that wants less adds its own `DefaultBodyLimit::max` inside the layer.
+
 ### `TestClient::login` sends a GET first (#1305)
 
 With no CSRF cookie in the jar it GETs the login path before posting. A test that counted requests or wanted the 403 sees one more request and the real login result.

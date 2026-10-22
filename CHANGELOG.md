@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `server.max_body_bytes` can raise the limit above 2 MiB (#1210)
+
+`BodyLimitLayer` now replaces axum's 2 MiB `DefaultBodyLimit` on the methods it checks, so a 10 MB cap lets a 5 MB upload reach `Bytes`, `Json`, `Form` or `Multipart`.
+
 ### Fixed — `TestClient::login` sends the CSRF token (#1305)
 
 It loads the login page first when the jar has no token, then posts with it, so a login test behind `CsrfLayer` no longer gets a 403 for every password.
