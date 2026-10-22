@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `ModelFormFor` inserts v7 keys, timestamps and generated columns
+
+`parse` skips generated columns, and `into_insert_query` fills `auto_now*` and `default_uuid_v7` values. `from_json` refuses a key that names no field, as documented.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

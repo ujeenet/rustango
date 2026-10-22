@@ -1442,9 +1442,9 @@ mod dynamic_form_tests {
 /// rustango::sql::insert_on(&pool, &query).await?;
 /// ```
 ///
-/// Skips the `Auto<T>` PK on create; rejects unknown form keys with
-/// a clear error so callers can surface "you sent us a field we
-/// don't recognise" instead of silently dropping data.
+/// Skips server-assigned and generated columns. [`Self::from_json`]
+/// refuses a key that names no field; [`Self::parse`] ignores one, since
+/// an HTML form also posts its CSRF token and submit button.
 #[derive(Debug)]
 pub struct ModelFormFor<T: crate::core::Model> {
     /// Column names in the same declaration order as the model
@@ -1482,8 +1482,13 @@ impl<T: crate::core::Model> ModelFormFor<T> {
                 return Err(errors);
             }
         };
+        let mut unknown = FormErrors::default();
         let mut payload: HashMap<String, String> = HashMap::with_capacity(obj.len());
         for (k, v) in obj {
+            if !T::SCHEMA.scalar_fields().any(|f| f.name == k.as_str()) {
+                unknown.add(k.clone(), "unknown field");
+                continue;
+            }
             // serde_json::Value -> String for parse_form_value's
             // string-keyed contract:
             //   - null  → absent (skip insert; field's nullable
@@ -1501,7 +1506,14 @@ impl<T: crate::core::Model> ModelFormFor<T> {
                 }
             }
         }
-        Self::parse(&payload)
+        match Self::parse(&payload) {
+            Ok(form) if unknown.is_empty() => Ok(form),
+            Ok(_) => Err(unknown),
+            Err(mut errors) => {
+                errors.merge(unknown);
+                Err(errors)
+            }
+        }
     }
 
     /// Parse + validate `payload` against `T::SCHEMA`. Walks every
@@ -1522,15 +1534,8 @@ impl<T: crate::core::Model> ModelFormFor<T> {
         let mut columns = Vec::new();
         let mut values = Vec::new();
         for field in T::SCHEMA.scalar_fields() {
-            // Skip fields the database fills in automatically:
-            //   * Auto<T> PK (BIGSERIAL / SERIAL / gen_random_uuid())
-            //   * `auto = true` non-PK fields (auto_now_add /
-            //     auto_now mixins) — DB DEFAULT NOW() supplies the
-            //     value on INSERT, and the macro skips them on the
-            //     INSERT path too. ModelFormFor used to require these
-            //     on every create, breaking any model with a created_at
-            //     auto-timestamp.
-            if field.auto {
+            // Server-assigned and generated columns; `into_insert_query` stamps the former.
+            if !field.accepts_input(crate::core::WriteKind::Insert) {
                 continue;
             }
             let raw = payload.get(field.name).map(String::as_str);
@@ -1683,10 +1688,12 @@ impl<T: crate::core::Model> ModelFormFor<T> {
     /// from `columns()` + `values()`.
     #[must_use]
     pub fn into_insert_query(self) -> crate::core::InsertQuery {
+        let (mut columns, mut values) = (self.columns, self.values);
+        stamp_auto_timestamps(T::SCHEMA, &mut columns, &mut values);
         crate::core::InsertQuery {
             model: T::SCHEMA,
-            columns: self.columns,
-            values: self.values,
+            columns,
+            values,
             returning: Vec::new(),
             on_conflict: None,
             generated: Vec::new(),
@@ -1851,6 +1858,25 @@ mod model_form_tests {
             .expect("pk");
         let cols: Vec<&str> = q.set.iter().map(|a| a.column).collect();
         assert_eq!(cols, ["title", "updated_at"]);
+    }
+
+    #[test]
+    fn into_insert_query_stamps_auto_timestamps() {
+        let p = HashMap::from([("title".to_owned(), "t".to_owned())]);
+        let q = ModelFormFor::<Stamped>::parse(&p)
+            .expect("valid")
+            .into_insert_query();
+        assert_eq!(q.columns, ["title", "created_at", "updated_at"]);
+    }
+
+    #[test]
+    fn from_json_rejects_an_unknown_key() {
+        let err = ModelFormFor::<Post>::from_json(&serde_json::json!({ "title": "t", "titel": 1 }))
+            .expect_err("unknown key");
+        assert!(!err.get("titel").is_empty(), "{err}");
+        // A server-assigned field is known, so it is ignored rather than refused.
+        ModelFormFor::<Post>::from_json(&serde_json::json!({ "id": 9, "title": "t" }))
+            .expect("known key");
     }
 
     /// #2530: a Bool accepts only the known spellings; junk is not `true`.

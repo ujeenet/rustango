@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `ModelFormFor::from_json` refuses unknown keys
+
+A JSON key that names no model field is now a per-key `FormErrors` entry. `parse` (form-encoded) still ignores such keys.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more
