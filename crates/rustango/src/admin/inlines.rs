@@ -942,9 +942,14 @@ fn render_prefixed_input(
     value: &str,
     (prefix, idx, kind): (&str, usize, crate::core::WriteKind),
 ) -> String {
-    // An auto or generated column is shown, never input.
+    // An auto or generated column is shown, never input; a secret only as set or not.
     if !field.accepts_input(kind) {
-        return format!(r#"<span class="readonly">{}</span>"#, html_escape(value));
+        let shown = if is_secret_field(cfg, field.name) {
+            super::helpers::render_secret_value(Some(&serde_json::Value::String(value.to_owned())))
+        } else {
+            html_escape(value)
+        };
+        return format!(r#"<span class="readonly">{shown}</span>"#);
     }
     // The child's widget overrides apply; a secret is never echoed (#1861).
     let base = if is_secret_field(cfg, field.name) {
@@ -2139,6 +2144,40 @@ mod tests {
             render_cell_text(&serde_json::json!("hi <b>")),
             "hi &lt;b&gt;"
         );
+    }
+
+    /// A read-only secret shows only whether it is set, never its value.
+    #[test]
+    fn a_read_only_secret_is_not_echoed() {
+        let f = FieldSchema {
+            name: "password_hash",
+            column: "password_hash",
+            ty: crate::core::FieldType::String,
+            nullable: false,
+            primary_key: false,
+            auto: false,
+            auto_now: false,
+            unique: false,
+            max_length: None,
+            min: None,
+            max: None,
+            default: None,
+            relation: None,
+            generated_as: Some("'x'"),
+            help_text: None,
+            choices: None,
+            db_comment: None,
+            verbose_name: None,
+            editable: true,
+            blank: false,
+            case_insensitive: false,
+            fk_on_delete: None,
+            validators: &[],
+        };
+        let cfg = crate::core::AdminConfig::DEFAULT;
+        let html = render_prefixed_input(&cfg, &f, "s3cret", ("c", 0, WriteKind::Update));
+        assert!(!html.contains("s3cret"), "{html}");
+        assert!(html.contains("<em>set</em>"), "{html}");
     }
 
     #[test]
