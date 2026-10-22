@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `Cli::with_csrf` follows `[security] secure_cookies`
+
+Its cookie was always `Secure`, so the browser never sent it back over plain-HTTP dev and every form POST got 403. It now uses the session cookie policy, like `csrf::layer()`.
+
 ### Fixed — `test_settings::with_overridden` reaches the framework
 
 Inside the scope, `Settings::load` and `Settings::load_from_env` return the overlay, so framework code that loads settings itself sees it. Before, only `test_settings::current()` did, and nothing called that.

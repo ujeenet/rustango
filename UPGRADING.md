@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `Cli::with_csrf` cookie follows `secure_cookies`
+
+With `[security] secure_cookies = false`, or on a non-prod tier with it unset, the CSRF cookie is no longer `Secure`. Use `with_csrf_config` to force it.
+
 ### `Settings::load` inside `with_overridden` returns the overlay
 
 A test that loaded `config/` inside the scope now gets the overlay instead. `Settings::load_from(dir, _)` still reads the files.
