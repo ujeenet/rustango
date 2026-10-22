@@ -4,6 +4,26 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — `ListView` bulk delete withholds driver errors and caps the selection
+
+A custom action whose selection check or connection fails logs the database error and answers a generic body, so it no longer shows table and constraint names. More than 1000 selected rows is a 400 before any SQL.
+
+### Fixed — `m2m_changed` skips an unchanged `set` and an empty `clear`
+
+Like a duplicate `add`, they changed no row and no longer send the signal, on plain and generic M2M managers.
+
+### Fixed — serializer `min` / `max` bound float fields
+
+They used to check integers only, so `#[serializer(min = 0, max = 100)] score: f64` took 150. A length bound on a non-string field, or a `min` / `max` on a non-numeric one, in `#[serializer]` or `#[form]`, is now a compile error instead of a silent no-op.
+
+### Fixed — forms honour `#[rustango(blank)]`
+
+An empty value on a blank NOT NULL String field is saved as `""` in the admin, `ModelForm`, `ModelFormFor` and viewsets, instead of being refused as missing.
+
+### Fixed — `ModelFormFor` inserts v7 keys, timestamps and generated columns
+
+`parse` skips generated columns, and `into_insert_query` fills `auto_now*` and `default_uuid_v7` values. `from_json` refuses a key that names no field, as documented.
+
 ## [0.60.9] — 2026-10-21
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options; `loaddata` leaves omitted keys to the column default; MySQL JSON key checks are literal; idle connections close after 75 s; `CsrfConfig` has a new field; refused deletes are 409 and refused CBV writes 422. See UPGRADING.

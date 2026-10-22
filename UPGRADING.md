@@ -150,6 +150,18 @@ untouched.
 
 ## Unreleased
 
+### Fewer `m2m_changed` signals
+
+`set` with the current set and `clear` on an empty relation no longer send `m2m_changed`. A receiver that counted them will see fewer calls.
+
+### Bound attributes must match the field type
+
+`#[serializer(max_length / min_length)]` and `#[form(...)]` length bounds need a string field; `min` / `max` need a numeric one. A mismatch, which never had an effect, no longer compiles: drop the attribute.
+
+### `ModelFormFor::from_json` refuses unknown keys
+
+A JSON key that names no model field is now a per-key `FormErrors` entry. `parse` (form-encoded) still ignores such keys.
+
 ## 0.60.9
 
 ### Idle connections close after 75 s

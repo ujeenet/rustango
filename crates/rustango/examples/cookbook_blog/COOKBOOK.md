@@ -1904,7 +1904,8 @@ current PK on update, and `None` on create.
 
 > **Note**: `ModelFormFor::parse` skips every auto-populated field —
 > `auto_now_add` timestamps like `joined_at: Auto<DateTime<Utc>>` and
-> `Auto<T>` primary keys — because the database fills them on INSERT.
+> `Auto<T>` primary keys, generated columns — and `into_insert_query` fills
+> the timestamps and `default_uuid_v7` keys itself.
 > Your form only has to carry the fields a user actually enters.
 
 ### 7.99b `#[derive(Serializer)]` — a JSON façade over a model
