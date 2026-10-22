@@ -517,34 +517,82 @@ async fn refuse_shared_schema(
             "refusing to drop schema `{schema}` — another tenant uses it too"
         )));
     }
-    let extensions = schema_extensions(registry, schema).await?;
-    if !extensions.is_empty() {
-        return Err(TenancyError::Validation(format!(
-            "refusing to drop schema `{schema}` — it holds extension(s) {}; the CASCADE \
-             would drop their columns and indexes in every schema. Move them first \
-             (`ALTER EXTENSION … SET SCHEMA public`)",
-            extensions.join(", ")
-        )));
+    let outside = outside_dependents(registry, schema).await?;
+    if outside.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    let mut extensions: Vec<String> = Vec::new();
+    for (_, _, ext, relocatable) in &outside {
+        let Some(ext) = ext else { continue };
+        let advice = if *relocatable == Some(true) {
+            format!("move extension {ext} with `ALTER EXTENSION {ext} SET SCHEMA public`")
+        } else {
+            format!("extension {ext} cannot move: drop it and reinstall it in another schema")
+        };
+        if !extensions.contains(&advice) {
+            extensions.push(advice);
+        }
+    }
+    let listed: Vec<String> = outside
+        .iter()
+        .map(|(dep, uses, _, _)| format!("{dep} (uses {uses})"))
+        .collect();
+    let mut msg = format!(
+        "refusing to drop schema `{schema}` — the CASCADE would drop objects outside it: {}; \
+         drop or move them first",
+        listed.join(", ")
+    );
+    for advice in extensions {
+        msg.push_str("; ");
+        msg.push_str(&advice);
+    }
+    Err(TenancyError::Validation(msg))
 }
 
-/// Extensions installed in `schema`. Catalog query: schema mode is Postgres-only.
-async fn schema_extensions(
+/// Objects outside `$1` that `DROP SCHEMA $1 CASCADE` would drop, each with
+/// the object inside it uses and that object's extension, if any.
+#[cfg(feature = "postgres")]
+const OUTSIDE_DEPENDENTS: &str = "WITH RECURSIVE dropped(classid, objid, objsubid, \
+        pclassid, pobjid, psubid) AS ( \
+        SELECT 'pg_namespace'::regclass::oid, n.oid, 0, 0::oid, 0::oid, 0 \
+          FROM pg_namespace n WHERE n.nspname = $1::text \
+      UNION \
+        SELECT d.classid, d.objid, d.objsubid, d.refclassid, d.refobjid, d.refobjsubid \
+          FROM pg_depend d JOIN dropped p ON d.refclassid = p.classid \
+           AND d.refobjid = p.objid AND (p.objsubid = 0 OR d.refobjsubid = p.objsubid) \
+         WHERE d.deptype IN ('n', 'a', 'i', 'e') \
+    ), placed AS ( \
+        SELECT x.*, COALESCE(i.schema, (SELECT c.relnamespace::regnamespace::text \
+            FROM pg_class c WHERE c.oid = CASE x.classid \
+              WHEN 'pg_rewrite'::regclass THEN (SELECT ev_class FROM pg_rewrite WHERE oid = x.objid) \
+              WHEN 'pg_attrdef'::regclass THEN (SELECT adrelid FROM pg_attrdef WHERE oid = x.objid) \
+              WHEN 'pg_trigger'::regclass THEN (SELECT tgrelid FROM pg_trigger WHERE oid = x.objid) \
+              WHEN 'pg_policy'::regclass THEN (SELECT polrelid FROM pg_policy WHERE oid = x.objid) \
+            END)) AS nsp \
+          FROM dropped x, LATERAL pg_identify_object(x.classid, x.objid, x.objsubid) i \
+    ) \
+    SELECT DISTINCT pg_describe_object(o.classid, o.objid, o.objsubid), \
+           pg_describe_object(o.pclassid, o.pobjid, o.psubid), e.extname::text, e.extrelocatable \
+      FROM placed o \
+      JOIN placed p ON p.classid = o.pclassid AND p.objid = o.pobjid \
+       AND p.objsubid IN (0, o.psubid) \
+      LEFT JOIN pg_depend m ON m.classid = o.pclassid AND m.objid = o.pobjid AND m.deptype = 'e' \
+      LEFT JOIN pg_extension e ON e.oid = m.refobjid \
+     WHERE o.nsp NOT IN ($1, 'pg_toast') AND (p.nsp IS NULL OR p.nsp = $1) \
+     ORDER BY 1, 2";
+
+/// Catalog query: schema mode is Postgres-only.
+async fn outside_dependents(
     registry: &crate::sql::Pool,
     schema: &str,
-) -> Result<Vec<String>, TenancyError> {
+) -> Result<Vec<(String, String, Option<String>, Option<bool>)>, TenancyError> {
     #[allow(unreachable_patterns)]
     match registry {
         #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => Ok(crate::sql::sqlx::query_scalar(
-            "SELECT e.extname::text FROM pg_catalog.pg_extension e \
-             JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
-             WHERE n.nspname = $1 ORDER BY 1",
-        )
-        .bind(schema)
-        .fetch_all(pg)
-        .await?),
+        crate::sql::Pool::Postgres(pg) => Ok(crate::sql::sqlx::query_as(OUTSIDE_DEPENDENTS)
+            .bind(schema)
+            .fetch_all(pg)
+            .await?),
         _ => {
             let _ = schema;
             Err(TenancyError::Validation(

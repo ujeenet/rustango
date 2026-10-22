@@ -803,12 +803,16 @@ async fn schema_purge_refuses_a_reserved_schema() {
         .unwrap();
 }
 
-/// An extension living in the schema is refused: its CASCADE reaches other
-/// tenants' columns. In a private database, extensions are database-wide.
+/// Tenants `ext-a` / `ext-b` on schemas `ext_a` / `ext_b` of a private
+/// database (extensions are database-wide); runs `sql`, then purges `ext-a`.
+/// `check` gets the result and the private pool; the database is dropped after.
 #[cfg(feature = "postgres")]
-#[tokio::test]
 #[allow(irrefutable_let_patterns)]
-async fn schema_purge_refuses_a_schema_holding_an_extension() {
+async fn purge_ext_a_after<F, Fut>(tag: &str, sql: &str, check: F)
+where
+    F: FnOnce(Result<Report, TenancyError>, Pool) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     let _guard = rustango::testkit::matrix::live_lock().lock().await;
     let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
         eprintln!("DATABASE_URL not set — skipping");
@@ -817,7 +821,7 @@ async fn schema_purge_refuses_a_schema_holding_an_extension() {
     let Pool::Postgres(pg) = &pool else {
         unreachable!()
     };
-    let db = format!("rustango_purge_ext_{}", std::process::id());
+    let db = format!("rustango_purge_{tag}_{}", std::process::id());
     let _ = rustango::sql::sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"))
         .execute(pg)
         .await;
@@ -832,14 +836,14 @@ async fn schema_purge_refuses_a_schema_holding_an_extension() {
             .unwrap();
     let registry = Pool::from(private.clone());
     setup(&registry).await;
-    rustango::sql::sqlx::raw_sql(
-        "CREATE SCHEMA ext_a; CREATE SCHEMA ext_b; \
-         CREATE EXTENSION citext SCHEMA ext_a; \
-         CREATE TABLE ext_b.users (id INT, email ext_a.citext)",
-    )
-    .execute(&private)
-    .await
-    .unwrap();
+    rustango::sql::sqlx::raw_sql("CREATE SCHEMA ext_a; CREATE SCHEMA ext_b")
+        .execute(&private)
+        .await
+        .unwrap();
+    rustango::sql::sqlx::raw_sql(sql)
+        .execute(&private)
+        .await
+        .unwrap();
     for name in ["ext_a", "ext_b"] {
         let mut org = Org {
             slug: name.replace('_', "-"),
@@ -851,25 +855,100 @@ async fn schema_purge_refuses_a_schema_holding_an_extension() {
         org.save_pool(&registry).await.unwrap();
     }
 
-    let err = purge_on(&registry, "ext-a")
-        .await
-        .expect_err("a schema holding an extension");
-    assert!(err.to_string().contains("citext"), "{err}");
-    let cols: i64 = rustango::sql::sqlx::query_scalar(
-        "SELECT count(*) FROM information_schema.columns \
-         WHERE table_schema = 'ext_b' AND table_name = 'users' AND column_name = 'email'",
-    )
-    .fetch_one(&private)
-    .await
-    .unwrap();
-    assert_eq!(cols, 1, "the other tenant's column was dropped");
-    assert!(org_active(&registry, "ext-a").await, "the refused purge deactivated the org");
+    check(purge_on(&registry, "ext-a").await, registry).await;
 
     private.close().await;
     rustango::sql::sqlx::query(&format!("DROP DATABASE \"{db}\" WITH (FORCE)"))
         .execute(pg)
         .await
         .unwrap();
+}
+
+/// Columns named `column` of `ext_b.table` (a view's columns count too).
+#[cfg(feature = "postgres")]
+async fn ext_b_columns(registry: &Pool, table: &str, column: &str) -> i64 {
+    rustango::sql::sqlx::query_scalar(
+        "SELECT count(*) FROM information_schema.columns \
+         WHERE table_schema = 'ext_b' AND table_name = $1 AND column_name = $2",
+    )
+    .bind(table)
+    .bind(column)
+    .fetch_one(registry.as_postgres().unwrap())
+    .await
+    .unwrap()
+}
+
+/// An extension in the schema that another tenant's column uses: refused.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn schema_purge_refuses_an_extension_used_outside() {
+    purge_ext_a_after(
+        "ext",
+        "CREATE EXTENSION citext SCHEMA ext_a; \
+         CREATE TABLE ext_b.users (id INT, email ext_a.citext)",
+        |res, registry| async move {
+            let err = res.expect_err("another tenant's column uses the extension");
+            let msg = err.to_string();
+            assert!(msg.contains("ext_b.users"), "{msg}");
+            assert!(msg.contains("ALTER EXTENSION citext SET SCHEMA"), "{msg}");
+            assert_eq!(ext_b_columns(&registry, "users", "email").await, 1);
+            assert!(org_active(&registry, "ext-a").await, "the refused purge deactivated the org");
+        },
+    )
+    .await;
+}
+
+/// A non-relocatable extension (xml2) gets no `SET SCHEMA` advice.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn schema_purge_advice_fits_a_fixed_extension() {
+    purge_ext_a_after(
+        "fixed_ext",
+        "CREATE EXTENSION xml2 SCHEMA ext_a; \
+         CREATE TABLE ext_b.t (x TEXT DEFAULT ext_a.xpath_string('<a>1</a>', '/a'))",
+        |res, registry| async move {
+            let msg = res.expect_err("another tenant's default calls it").to_string();
+            assert!(msg.contains("xml2 cannot move"), "{msg}");
+            assert!(!msg.contains("SET SCHEMA"), "{msg}");
+            assert_eq!(ext_b_columns(&registry, "t", "x").await, 1);
+        },
+    )
+    .await;
+}
+
+/// Another tenant's view over the schema's table: refused, nothing dropped.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn schema_purge_refuses_a_view_in_another_schema() {
+    purge_ext_a_after(
+        "view",
+        "CREATE TABLE ext_a.orders (id INT PRIMARY KEY); \
+         CREATE VIEW ext_b.report AS SELECT id FROM ext_a.orders",
+        |res, registry| async move {
+            let err = res.expect_err("another tenant's view reads the schema");
+            assert!(err.to_string().contains("view ext_b.report"), "{err}");
+            assert_eq!(ext_b_columns(&registry, "report", "id").await, 1);
+            assert!(org_active(&registry, "ext-a").await, "the refused purge deactivated the org");
+        },
+    )
+    .await;
+}
+
+/// An extension only this tenant uses goes with its schema.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn schema_purge_drops_an_extension_only_it_uses() {
+    purge_ext_a_after(
+        "own_ext",
+        "CREATE EXTENSION citext SCHEMA ext_a; \
+         CREATE TABLE ext_a.users (id INT, email ext_a.citext); \
+         CREATE TABLE ext_b.users (id INT, email TEXT)",
+        |res, registry| async move {
+            res.expect("nothing outside the schema depends on it");
+            assert_eq!(ext_b_columns(&registry, "users", "email").await, 1);
+        },
+    )
+    .await;
 }
 
 /// Two tenants on one database, the other idle (no session): refused (#2291).

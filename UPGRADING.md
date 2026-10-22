@@ -150,9 +150,9 @@ untouched.
 
 ## Unreleased
 
-### Schema-tenant purge refuses a schema with an extension
+### Schema-tenant purge refuses a schema other schemas depend on
 
-Move the extension out first (`ALTER EXTENSION <name> SET SCHEMA public`), then purge again.
+The error lists each outside object and what it uses; drop or move them, then purge again. An extension only the tenant uses is dropped with its schema.
 
 ### Vector and geometry columns get one `makemigrations` step
 

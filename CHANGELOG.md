@@ -4,9 +4,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-### Fixed — purging a schema tenant refuses a schema that holds an extension
+### Fixed — purging a schema tenant no longer drops other tenants' objects
 
-`DROP SCHEMA … CASCADE` also dropped the extension and, through it, its columns and indexes in every other tenant's schema.
+`DROP SCHEMA … CASCADE` also dropped what other schemas built on it: views, columns of its types or extensions, FKs, defaults, triggers. Purge now refuses and names them.
 
 ### Fixed — audited `save` locks the row it diffs
 
