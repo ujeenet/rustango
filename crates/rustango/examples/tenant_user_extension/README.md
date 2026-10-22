@@ -53,9 +53,12 @@ cargo run -- create-user acme alice --password tenantpw --superuser
 # Serve. Requests to acme.localhost:8080 land in the `acme` tenant.
 cargo run
 
-# In another terminal: log in (sets session cookie), then read the extras.
-curl -sc /tmp/c.txt -H "Host: acme.localhost" \
-     -d "username=alice&password=tenantpw" \
+# In another terminal: GET the login form (seeds the CSRF cookie and
+# token), log in with that token, then read the extras.
+CSRF=$(curl -sc /tmp/c.txt -H "Host: acme.localhost" http://127.0.0.1:8080/login \
+       | sed -n 's/.*name="_csrf" value="\([^"]*\)".*/\1/p' | head -1)
+curl -sb /tmp/c.txt -c /tmp/c.txt -H "Host: acme.localhost" \
+     -d "username=alice&password=tenantpw&_csrf=$CSRF" \
      http://127.0.0.1:8080/login >/dev/null
 curl -sb /tmp/c.txt -H "Host: acme.localhost" http://127.0.0.1:8080/users/alice
 # → {"id":1,"username":"alice","display_name":"","timezone":"UTC","is_superuser":true}

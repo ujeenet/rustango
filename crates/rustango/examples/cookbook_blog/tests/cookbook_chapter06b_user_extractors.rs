@@ -39,7 +39,7 @@ use rustango::tenancy::auth_backends::{ApiKeyBackend, AuthBackend, ModelBackend}
 use rustango::tenancy::{CurrentUser, RouterAuthExt};
 use tower::ServiceExt as _;
 
-const BIND: &str = "127.0.0.1:8868"; // chapter-unique port
+const BIND: &str = "127.0.0.1:8870"; // chapter-unique port; 7c has 8868
 const APEX: &str = "localhost";
 const SESSION_SECRET: &str = "cookbook-chapter6b-test-32bytes-please!!!!";
 const DB_NAME: &str = "cookbook_ch6b_dev";
