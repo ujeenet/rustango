@@ -807,8 +807,18 @@ async fn schema_purge_refuses_a_reserved_schema() {
 /// database (extensions are database-wide); runs `sql`, then purges `ext-a`.
 /// `check` gets the result and the private pool; the database is dropped after.
 #[cfg(feature = "postgres")]
-#[allow(irrefutable_let_patterns)]
 async fn purge_ext_a_after<F, Fut>(tag: &str, sql: &str, check: F)
+where
+    F: FnOnce(Result<Report, TenancyError>, Pool) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    purge_first_of(tag, ["ext_a", "ext_b"], sql, check).await;
+}
+
+/// [`purge_ext_a_after`] with the two schema names chosen by the caller.
+#[cfg(feature = "postgres")]
+#[allow(irrefutable_let_patterns)]
+async fn purge_first_of<F, Fut>(tag: &str, schemas: [&str; 2], sql: &str, check: F)
 where
     F: FnOnce(Result<Report, TenancyError>, Pool) -> Fut,
     Fut: std::future::Future<Output = ()>,
@@ -836,7 +846,8 @@ where
             .unwrap();
     let registry = Pool::from(private.clone());
     setup(&registry).await;
-    rustango::sql::sqlx::raw_sql("CREATE SCHEMA ext_a; CREATE SCHEMA ext_b")
+    let [a, b] = schemas;
+    rustango::sql::sqlx::raw_sql(&format!(r#"CREATE SCHEMA "{a}"; CREATE SCHEMA "{b}""#))
         .execute(&private)
         .await
         .unwrap();
@@ -844,9 +855,9 @@ where
         .execute(&private)
         .await
         .unwrap();
-    for name in ["ext_a", "ext_b"] {
+    for (slug, name) in [("ext-a", a), ("ext-b", b)] {
         let mut org = Org {
-            slug: name.replace('_', "-"),
+            slug: slug.into(),
             display_name: name.into(),
             storage_mode: "schema".into(),
             schema_name: Some(name.into()),
@@ -937,6 +948,27 @@ async fn schema_purge_refuses_a_view_in_another_schema() {
                 org_active(&registry, "ext-a").await,
                 "the refused purge deactivated the org"
             );
+        },
+    )
+    .await;
+}
+
+/// Hyphenated schemas: the own table is not "outside", the other's view is.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn schema_purge_compares_hyphenated_schemas_by_oid() {
+    purge_first_of(
+        "hyphen",
+        ["ext-a", "ext-b"],
+        r#"CREATE TABLE "ext-a".orders (id INT PRIMARY KEY);
+           CREATE VIEW "ext-b".report AS SELECT id FROM "ext-a".orders"#,
+        |res, registry| async move {
+            let msg = res
+                .expect_err("another tenant's view reads the schema")
+                .to_string();
+            assert!(msg.contains(r#"view "ext-b".report"#), "{msg}");
+            assert!(!msg.contains("table \"ext-a\".orders ("), "{msg}");
+            assert!(org_active(&registry, "ext-a").await);
         },
     )
     .await;

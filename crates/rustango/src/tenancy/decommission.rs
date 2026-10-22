@@ -551,18 +551,19 @@ async fn refuse_shared_schema(
 
 /// Objects outside `$1` that `DROP SCHEMA $1 CASCADE` would drop, each with
 /// the object inside it uses and that object's extension, if any.
+/// Namespaces compare by OID: catalog names come back quoted (`"a-b"`).
 #[cfg(feature = "postgres")]
-const OUTSIDE_DEPENDENTS: &str = "WITH RECURSIVE dropped(classid, objid, objsubid, \
-        pclassid, pobjid, psubid) AS ( \
-        SELECT 'pg_namespace'::regclass::oid, n.oid, 0, 0::oid, 0::oid, 0 \
-          FROM pg_namespace n WHERE n.nspname = $1::text \
+const OUTSIDE_DEPENDENTS: &str = "WITH RECURSIVE target AS ( \
+        SELECT n.oid FROM pg_namespace n WHERE n.nspname = $1::text \
+    ), dropped(classid, objid, objsubid, pclassid, pobjid, psubid) AS ( \
+        SELECT 'pg_namespace'::regclass::oid, t.oid, 0, 0::oid, 0::oid, 0 FROM target t \
       UNION \
         SELECT d.classid, d.objid, d.objsubid, d.refclassid, d.refobjid, d.refobjsubid \
           FROM pg_depend d JOIN dropped p ON d.refclassid = p.classid \
            AND d.refobjid = p.objid AND (p.objsubid = 0 OR d.refobjsubid = p.objsubid) \
          WHERE d.deptype IN ('n', 'a', 'i', 'e') \
     ), placed AS ( \
-        SELECT x.*, COALESCE(i.schema, (SELECT c.relnamespace::regnamespace::text \
+        SELECT x.*, COALESCE(to_regnamespace(i.schema)::oid, (SELECT c.relnamespace \
             FROM pg_class c WHERE c.oid = CASE x.classid \
               WHEN 'pg_rewrite'::regclass THEN (SELECT ev_class FROM pg_rewrite WHERE oid = x.objid) \
               WHEN 'pg_attrdef'::regclass THEN (SELECT adrelid FROM pg_attrdef WHERE oid = x.objid) \
@@ -578,7 +579,8 @@ const OUTSIDE_DEPENDENTS: &str = "WITH RECURSIVE dropped(classid, objid, objsubi
        AND p.objsubid IN (0, o.psubid) \
       LEFT JOIN pg_depend m ON m.classid = o.pclassid AND m.objid = o.pobjid AND m.deptype = 'e' \
       LEFT JOIN pg_extension e ON e.oid = m.refobjid \
-     WHERE o.nsp NOT IN ($1, 'pg_toast') AND (p.nsp IS NULL OR p.nsp = $1) \
+     CROSS JOIN target t \
+     WHERE o.nsp NOT IN (t.oid, 'pg_toast'::regnamespace) AND (p.nsp IS NULL OR p.nsp = t.oid) \
      ORDER BY 1, 2";
 
 /// Catalog query: schema mode is Postgres-only.
