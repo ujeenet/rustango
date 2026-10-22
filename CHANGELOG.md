@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — example apps no longer ship open writes or forgeable tokens (#1265)
+
+The showcase signs JWTs with a random key when `SHOWCASE_JWT_SECRET` is unset, spends a dummy hash on unknown logins and hides DB errors on register. `cookbook_blog`'s author forms need a login and a CSRF token and show plain save errors. `tenant_user_extension`'s user lookup needs a login.
+
+### Security — `getting_started_blog` and `admin_demo` put the admin behind a login (#1264)
+
+Both now build the admin with `.with_session_auth(..)`, as the scaffolder does, and their smoke tests check that an anonymous visit is sent to the login page.
+
 ### Security — the server times out slow headers and idle connections (#1211)
 
 `serve_until_drained` now runs hyper with a timer, so a client gets 30 s to send each request head and an idle keep-alive connection closes after 30 s. `axum::serve` left both off, so slowloris clients could hold every socket.

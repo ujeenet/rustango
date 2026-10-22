@@ -1858,7 +1858,9 @@ above — run them with `DATABASE_URL` set and `--test-threads=1`.
 `/authors/new` and its edit counterpart are tenant-aware form routes outside the admin:
 they boot a real server, submit real form bodies over HTTP, and assert the redirect and
 the persisted row. This is the path an end user walks, as opposed to the admin's generated
-form.
+form. Both need a signed-in tenant user (`SessionUser`) and the form's `_csrf` token
+(`csrf::layer()` on the blog router), and a failed save shows a plain message, not the
+database error.
 
 **Verified by**: [`tests/cookbook_chapter07c_browser_form.rs`](tests/cookbook_chapter07c_browser_form.rs)
 (create), [`tests/cookbook_chapter07d_edit_form.rs`](tests/cookbook_chapter07d_edit_form.rs)
