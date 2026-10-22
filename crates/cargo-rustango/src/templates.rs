@@ -903,7 +903,9 @@ pub fn admin_router(pool: Pool) -> Router {
         std::path::Path::new(\"./var/.rustango_session.key\"),
     );
     // `[admin]` and `[brand]` from config/*.toml; the calls below still win.
-    let settings = Settings::load_from_env().unwrap_or_default();
+    // Fail closed: defaults would drop `[admin]` table restrictions.
+    let settings = Settings::load_from_env()
+        .expect(\"config/*.toml must load; run from the project root\");
     admin::Builder::from_settings(pool, &settings)
         .admin_prefix(\"/admin\") // must match the `.nest_with(\"/admin\", …)` in main.rs
         .with_session_auth(secret)

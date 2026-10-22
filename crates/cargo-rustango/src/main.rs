@@ -949,6 +949,24 @@ mod tests {
         );
     }
 
+    /// Settings has no root keys, so a rendered tier with one fails to
+    /// load under `RUSTANGO_CONFIG_STRICT`.
+    #[test]
+    fn config_templates_have_no_root_keys() {
+        for backend in [Backend::Postgres, Backend::Sqlite, Backend::Mysql] {
+            for (file, body) in [
+                ("default.toml", templates::config_default_toml("acme", backend)),
+                ("dev", templates::config_dev_settings_toml("acme", backend)),
+                ("staging", templates::config_staging_settings_toml("acme", backend)),
+                ("prod", templates::config_prod_settings_toml("acme")),
+            ] {
+                let tree: toml::Table = toml::from_str(&body).expect("rendered tier parses");
+                let loose: Vec<_> = tree.iter().filter(|(_, v)| !v.is_table()).map(|(k, _)| k).collect();
+                assert!(loose.is_empty(), "{backend:?} {file}: root keys {loose:?}");
+            }
+        }
+    }
+
     /// Regression guard against the original #79 footgun — no
     /// scaffold template may emit a yanked version literal.
     #[test]
@@ -1472,6 +1490,9 @@ mod tests {
     fn fullstack_admin_reads_settings() {
         let urls = templates::urls_rs(Template::Fullstack);
         assert!(urls.contains("admin::Builder::from_settings(pool, &"), "{urls}");
+        // A config that fails to load must not drop `[admin]` restrictions.
+        assert!(!urls.contains("unwrap_or_default"), "{urls}");
+        assert!(urls.contains("Settings::load_from_env()\n        .expect("), "{urls}");
     }
 
     /// `--features csrf` mounts the layer; every template shows where the
