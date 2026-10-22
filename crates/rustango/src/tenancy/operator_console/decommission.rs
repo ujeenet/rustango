@@ -18,6 +18,7 @@ use serde::Deserialize;
 
 use super::super::auth;
 use super::super::decommission::Action;
+use super::flash::{self, Flash};
 use super::{urlencoding_lite, withheld, ConsoleState};
 
 #[derive(Deserialize)]
@@ -139,21 +140,18 @@ fn not_available() -> Response<Body> {
 }
 
 fn back_to_orgs(notice: Option<&str>, error: Option<&str>) -> Response<Body> {
-    let query = match (notice, error) {
-        (Some(n), _) => format!("?notice={}", urlencoding_lite(n)),
-        (_, Some(e)) => format!("?error={}", urlencoding_lite(e)),
-        _ => String::new(),
-    };
-    Redirect::to(&format!("/orgs{query}")).into_response()
+    match (notice, error) {
+        (Some(n), _) => flash::redirect("/orgs", Flash::Notice(n)),
+        (_, Some(e)) => flash::redirect("/orgs", Flash::Error(e)),
+        _ => Redirect::to("/orgs").into_response(),
+    }
 }
 
 fn back_to_tenant(slug: &str, error: &str) -> Response<Body> {
-    Redirect::to(&format!(
-        "/orgs/{}/edit?error={}",
-        urlencoding_lite(slug),
-        urlencoding_lite(error)
-    ))
-    .into_response()
+    flash::redirect(
+        &format!("/orgs/{}/edit", urlencoding_lite(slug)),
+        Flash::Error(error),
+    )
 }
 
 async fn audit(state: &ConsoleState, op: &auth::Operator, slug: &str, verb: &str) {

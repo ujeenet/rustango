@@ -164,15 +164,14 @@ async fn org_exists(state: &ConsoleState, slug: &str) -> bool {
 /// A redirect rather than a render so a reload does not repost the
 /// action — these are writes that change how traffic routes.
 fn back(slug: &str, error: Option<&str>, notice: Option<&str>) -> Response<Body> {
-    use std::fmt::Write as _;
+    use super::flash::{redirect, Flash};
 
-    let mut url = format!("/orgs/{}/hosts", urlencoding_lite(slug));
-    if let Some(e) = error {
-        let _ = write!(url, "?error={}", urlencoding_lite(e));
-    } else if let Some(n) = notice {
-        let _ = write!(url, "?notice={}", urlencoding_lite(n));
+    let url = format!("/orgs/{}/hosts", urlencoding_lite(slug));
+    match (error, notice) {
+        (Some(e), _) => redirect(&url, Flash::Error(e)),
+        (_, Some(n)) => redirect(&url, Flash::Notice(n)),
+        _ => Redirect::to(&url).into_response(),
     }
-    Redirect::to(&url).into_response()
 }
 
 /// The engine's message, plus what the operator should do about it.

@@ -1100,8 +1100,12 @@ async fn prewarm_pools(
 
 /// PRG back to the tenant list with a message.
 fn orgs_notice(msg: &str, is_error: bool) -> Response<Body> {
-    let key = if is_error { "error" } else { "notice" };
-    Redirect::to(&format!("/orgs?{key}={}", urlencoding_lite(msg))).into_response()
+    let msg = if is_error {
+        flash::Flash::Error(msg)
+    } else {
+        flash::Flash::Notice(msg)
+    };
+    flash::redirect("/orgs", msg)
 }
 
 /// Rewrite a `next` path so the bounce back from `/login` lands on a
@@ -1220,11 +1224,10 @@ async fn login_submit(
                 request: meta,
             })
             .await;
-            return Redirect::to(&format!(
-                "/login?error=Invalid+credentials&next={}",
-                urlencoding_lite(&next)
-            ))
-            .into_response();
+            return flash::redirect(
+                &format!("/login?next={}", urlencoding_lite(&next)),
+                flash::Flash::Error("Invalid credentials"),
+            );
         }
         Err(super::TenancyError::Busy) => return LoginRefused::Busy.into_response(),
         Err(e) => {
@@ -1383,14 +1386,16 @@ fn decode_operator_session(headers: &axum::http::HeaderMap, secret: &SessionSecr
 async fn change_password_form(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    messages: Option<Extension<flash::Messages>>,
 ) -> Response<Body> {
+    // What the flash check verified, not a second parse of the query.
+    let messages = messages.map(|Extension(m)| m).unwrap_or_default();
     let mut ctx = Context::new();
     inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("section", "change_password");
     ctx.insert("operator_username", &op.username);
-    ctx.insert("error", &params.get("error"));
-    ctx.insert("success", &params.get("ok"));
+    ctx.insert("error", &messages.error);
+    ctx.insert("success", &messages.ok);
     render(&state, "op_change_password.html", &ctx)
 }
 
@@ -1414,10 +1419,10 @@ async fn change_password_submit(
     ip: crate::login_throttle::ClientIp,
     Form(form): Form<OpChangePasswordForm>,
 ) -> Response<Body> {
-    let redir = |query: &str| -> Response<Body> {
-        Redirect::to(&format!("/change-password?{query}")).into_response()
-    };
-    let redir_err = |msg: &str| redir(&format!("error={}", crate::url_codec::url_encode(msg)));
+    fn redir(msg: flash::Flash<'_>) -> Response<Body> {
+        flash::redirect("/change-password", msg)
+    }
+    let redir_err = |msg: &str| redir(flash::Flash::Error(msg));
 
     if form.current_password.is_empty() || form.new_password.is_empty() {
         return redir_err("All fields are required.");
@@ -1516,7 +1521,7 @@ async fn change_password_submit(
         serde_json::Map::new(),
     )
     .await;
-    redir("ok=Password+updated")
+    redir(flash::Flash::Ok("Password updated"))
 }
 
 async fn welcome(
@@ -2032,21 +2037,17 @@ async fn org_edit_submit(
     } else {
         format!("updated `{slug}`")
     };
-    Redirect::to(&format!(
-        "/orgs/{}/edit?notice={}",
-        urlencoding_lite(&slug),
-        urlencoding_lite(&notice),
-    ))
-    .into_response()
+    flash::redirect(
+        &format!("/orgs/{}/edit", urlencoding_lite(&slug)),
+        flash::Flash::Notice(&notice),
+    )
 }
 
 fn redirect_with_error(slug: &str, msg: &str) -> Response<Body> {
-    Redirect::to(&format!(
-        "/orgs/{}/edit?error={}",
-        urlencoding_lite(slug),
-        urlencoding_lite(msg),
-    ))
-    .into_response()
+    flash::redirect(
+        &format!("/orgs/{}/edit", urlencoding_lite(slug)),
+        flash::Flash::Error(msg),
+    )
 }
 
 /// Write one audit row for an operator action on `rustango_orgs`. The
@@ -2270,12 +2271,10 @@ async fn org_edit_branding(
     emit_op_audit(&state.registry, &slug, operator_id, "branding", detail).await;
 
     let notice = format!("uploaded {} brand asset(s) for `{slug}`", updates.len());
-    Redirect::to(&format!(
-        "/orgs/{}/edit?notice={}",
-        urlencoding_lite(&slug),
-        urlencoding_lite(&notice),
-    ))
-    .into_response()
+    flash::redirect(
+        &format!("/orgs/{}/edit", urlencoding_lite(&slug)),
+        flash::Flash::Notice(&notice),
+    )
 }
 
 /// `GET /__brand__/{slug}/{filename}` — public asset serve. Validates
@@ -2322,10 +2321,11 @@ use crate::url_codec::url_encode as urlencoding_lite;
 ///
 /// Only same-origin relative paths pass, so a post-login redirect
 /// cannot be pointed at another site. The check itself lives in
-/// [`crate::auth_decorators::safe_next`].
+/// [`crate::auth_decorators::safe_next`]. Message keys are dropped, so
+/// `next` cannot carry text onto the page.
 fn sanitize_next(next: Option<&str>) -> String {
     next.and_then(crate::auth_decorators::safe_next)
-        .unwrap_or_else(|| "/".to_owned())
+        .map_or_else(|| "/".to_owned(), flash::strip_from_next)
 }
 
 // ============================================================== /orgs/{slug}/impersonate

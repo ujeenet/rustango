@@ -31,6 +31,7 @@ struct Booted {
     app: axum::Router,
     cookie: String,
     registry: rustango::sql::Pool,
+    username: String,
     _tmp: tempfile::TempDir,
     _migrations: tempfile::TempDir,
 }
@@ -106,6 +107,7 @@ async fn boot() -> Booted {
         app,
         cookie,
         registry,
+        username,
         _tmp: tmp,
         _migrations: migrations,
     }
@@ -232,6 +234,55 @@ async fn the_org_list_renders_the_outcome_it_is_redirected_with() {
     // A message the console did not sign is dropped, so a link cannot add text.
     let html = body_of(b.get("/orgs?error=call%20support%200800").await).await;
     assert!(!html.contains("0800"), "a crafted message must not render: {html}");
+}
+
+/// A signed `?error=` from a handler the operator can trigger.
+async fn signed_change_password_error(b: &Booted) -> String {
+    let resp = b.post("/change-password", "current_password=&new_password=").await;
+    let location = resp.headers()["location"].to_str().unwrap().to_owned();
+    let html = body_of(b.get(&location).await).await;
+    assert!(html.contains("All fields are required"), "{html}");
+    location
+}
+
+#[tokio::test]
+async fn a_login_next_cannot_carry_a_message() {
+    let b = boot().await;
+    let next = "%2Forgs%3Ferror%3DCall%2B0800%2BPHISH";
+    let resp = b
+        .post(
+            "/login",
+            &format!(
+                "username={}&password=letmein-please&next={next}",
+                b.username
+            ),
+        )
+        .await;
+    let location = resp.headers()["location"].to_str().unwrap().to_owned();
+    let html = body_of(b.get(&location).await).await;
+    assert!(!html.contains("PHISH"), "{location}: {html}");
+}
+
+#[tokio::test]
+async fn a_repeated_message_key_shows_no_text() {
+    let b = boot().await;
+    let location = signed_change_password_error(&b).await;
+    for extra in ["&error=Call+0800+PHISH", "&ok=Call+0800+PHISH"] {
+        let html = body_of(b.get(&format!("{location}{extra}")).await).await;
+        assert!(!html.contains("PHISH"), "{extra}: {html}");
+    }
+    let dup = location.replacen("?error=", "?error=Call+0800+PHISH&error=", 1);
+    let html = body_of(b.get(&dup).await).await;
+    assert!(!html.contains("PHISH"), "{dup}: {html}");
+}
+
+#[tokio::test]
+async fn a_signed_message_does_not_carry_to_another_page() {
+    let b = boot().await;
+    let location = signed_change_password_error(&b).await;
+    let query = location.split_once('?').unwrap().1;
+    let html = body_of(b.get(&format!("/orgs?{query}")).await).await;
+    assert!(!html.contains("All fields are required"), "{html}");
 }
 
 #[tokio::test]
