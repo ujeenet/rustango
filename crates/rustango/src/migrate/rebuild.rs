@@ -554,8 +554,14 @@ impl RebuildConn {
 
     pub(crate) async fn begin(&mut self) -> Result<RebuildTx<'_>, sqlx::Error> {
         use sqlx::Connection as _;
+        let mut tx = self.conn.begin().await?;
+        // A connection idle while another one ran DDL prepares `RENAME COLUMN`
+        // against its cached schema; reading `sqlite_master` reloads it.
+        sqlx::query("SELECT COUNT(*) FROM sqlite_master")
+            .fetch_all(&mut *tx)
+            .await?;
         Ok(RebuildTx {
-            tx: self.conn.begin().await?,
+            tx,
             fks_off: self.fks_off,
             check: self.was_on,
         })
@@ -611,5 +617,38 @@ impl std::ops::Deref for RebuildTx<'_> {
 impl std::ops::DerefMut for RebuildTx<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.tx
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    /// A pooled connection idle while another one changed the schema still
+    /// sees the new column in its migration transaction.
+    #[tokio::test]
+    async fn migration_tx_sees_ddl_from_another_connection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let url = format!("sqlite:{}?mode=rwc", tmp.path().join("r.db").display());
+        let opts: sqlx::sqlite::SqliteConnectOptions = url.parse().unwrap();
+        // Two connections, so the migration must take the stale one.
+        let sq = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect_with(opts.journal_mode(sqlx::sqlite::SqliteJournalMode::Wal))
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE t (a INTEGER)").execute(&sq).await.unwrap();
+        let stale = sq.acquire().await.unwrap();
+        let mut other = sq.acquire().await.unwrap();
+        sqlx::query("ALTER TABLE t ADD COLUMN nick TEXT")
+            .execute(&mut *other)
+            .await
+            .unwrap();
+        // `other` stays held, so the migration gets the stale connection.
+        drop(stale);
+        let mut conn = super::RebuildConn::acquire(&sq, false).await.unwrap();
+        let mut tx = conn.begin().await.unwrap();
+        sqlx::query("ALTER TABLE t RENAME COLUMN nick TO nick2")
+            .execute(&mut *tx)
+            .await
+            .expect("the rename sees the column another connection added");
     }
 }

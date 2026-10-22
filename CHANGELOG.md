@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — SQLite migrations see columns another pooled connection added
+
+A migration on a connection that sat idle while another one ran DDL could fail a `RenameColumn` with `no such column`; each migration transaction now reloads the schema first.
+
 ### Fixed — raw SQL helpers refuse Postgres-only binds instead of panicking
 
 `raw_execute_pool`/`_tx` and `raw_query_pool`/`_tx` return `SqlError::ValueNotSupportedInDialect` for an array, range, hstore, vector or geometry bind on MySQL or SQLite.
