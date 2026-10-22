@@ -126,7 +126,7 @@ sqlite = ["sqlx/sqlite"]
 _rand         = ["dep:rand"]
 _tera         = ["dep:tera"]
 _tower        = ["dep:tower"]
-_axum         = ["dep:axum", "dep:hyper", "dep:hyper-util"]
+_axum         = ["dep:axum", "dep:hyper", "dep:hyper-util", "_tower"]
 _async_trait  = ["dep:async-trait"]
 _base64       = ["dep:base64"]
 # The three that always travel together for cookie/token signing.
