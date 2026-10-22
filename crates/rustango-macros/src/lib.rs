@@ -11330,6 +11330,13 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
              has no meaning on a non-FK column.",
         ));
     }
+    if attrs.on_delete.as_deref() == Some("set_null") && fk_inner.is_some() && !nullable {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`on_delete = \"set_null\"` needs a nullable column: use \
+             `Option<ForeignKey<T>>`.",
+        ));
+    }
     let fk_on_delete = match attrs.on_delete.as_deref() {
         None => quote!(::core::option::Option::None),
         Some(action) => {
@@ -13772,6 +13779,28 @@ mod field_attr_tests {
         };
         let err = parse_container_attrs(&input).err().expect("refused");
         assert!(err.to_string().contains("#2132"), "{err}");
+    }
+
+    /// `set_null` on a NOT NULL `ForeignKey<T>` would fail every parent delete.
+    #[test]
+    fn set_null_needs_an_optional_foreign_key() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[rustango(table = "c")]
+            struct Child {
+                #[rustango(primary_key)] id: i64,
+                #[rustango(on_delete = "set_null")] parent: ForeignKey<Parent>,
+            }
+        };
+        let err = expand(&input).err().expect("refused");
+        assert!(err.to_string().contains("set_null"), "{err}");
+        let input: DeriveInput = syn::parse_quote! {
+            #[rustango(table = "c")]
+            struct Child {
+                #[rustango(primary_key)] id: i64,
+                #[rustango(on_delete = "set_null")] parent: Option<ForeignKey<Parent>>,
+            }
+        };
+        assert!(expand(&input).is_ok());
     }
 
     /// A raw ident derives names without `r#`; this used to panic (#1937).

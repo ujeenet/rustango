@@ -74,7 +74,7 @@ Every save path sets the field to the timestamp it binds, so a returned row carr
 
 ### Fixed — a typed `ForeignKey<T>` takes `on_delete`
 
-`#[rustango(on_delete = "cascade")] author: ForeignKey<Author>` now compiles and renders `ON DELETE CASCADE`; before, only a raw `fk = ".."` column could declare an action.
+`#[rustango(on_delete = "cascade")] author: ForeignKey<Author>` now compiles and renders `ON DELETE CASCADE`; before, only a raw `fk = ".."` column could declare an action. `set_null` needs `Option<ForeignKey<T>>`.
 
 ### Fixed — `inspectdb` emits models that compile, with the right MySQL types
 
