@@ -1386,6 +1386,21 @@ pub use sql::Auto;
 /// Bake every migration file in a directory into the binary at
 /// compile time, for shipping a single-binary distribution. Pair
 /// with [`migrate::migrate_embedded`].
+///
+/// A directory that does not exist still builds, with a `deprecated`
+/// warning naming it:
+///
+/// ```
+/// const NONE: &[(&str, &str)] = rustango::embed_migrations!("./no_such_migrations_dir");
+/// assert!(NONE.is_empty());
+/// ```
+///
+/// so `#![deny(deprecated)]` (or `-D warnings`) makes it a build error:
+///
+/// ```compile_fail
+/// #![deny(deprecated)]
+/// const NONE: &[(&str, &str)] = rustango::embed_migrations!("./no_such_migrations_dir");
+/// ```
 pub use rustango_macros::embed_migrations;
 
 /// `Q!()` — compact filter syntax compile-time-resolved against
