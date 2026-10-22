@@ -143,6 +143,7 @@ Un template active un ensemble raisonnable ; `--features` ajoute les options qu'
 | `scheduler` | Tâches d'arrière-plan à intervalle fixe |
 | `email-smtp` | Transport SMTP pour le framework e-mail |
 | `mcp` | Serveur Model Context Protocol pour les agents IA |
+| `http2` | Servir HTTP/2 en clair (h2c) à côté de HTTP/1 |
 | `testkit` / `test_utils` | Constructeurs de schéma, fabriques et constructeurs réservés aux tests |
 
 `cargo rustango new --help` affiche cette liste. Les backends ne sont **pas** valides ici — passez par `--backend`. En nommer un comme fonctionnalité est refusé : cela figerait le backend du framework alors que la fonctionnalité propre au projet resterait éteinte, et `#[derive(Model)]` aligne ses émissions sur les fonctionnalités du projet.

@@ -228,6 +228,7 @@ pub const OPTIONAL_FEATURES: &[(&str, &str)] = &[
     ("scheduler", "fixed-interval background tasks"),
     ("email-smtp", "SMTP transport for the email framework"),
     ("mcp", "Model Context Protocol server for AI agents"),
+    ("http2", "serve cleartext HTTP/2 (h2c) next to HTTP/1"),
     ("testkit", "test-only schema builders and model factories"),
     ("test_utils", "test-only constructors for downstream crates"),
 ];
