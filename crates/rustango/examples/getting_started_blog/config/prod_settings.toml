@@ -3,10 +3,12 @@
 # (database url, secret key) come from RUSTANGO__* env vars or your
 # secrets manager — leaving them out of source control.
 
+# Pool sizes can be pinned here. If you do, uncomment the header *with*
+# the keys: a key under a commented-out `[database]` lands at the root.
 # [database]
 # url = "set via RUSTANGO__DATABASE__URL or your secrets manager"
-pool_min_size = 5
-pool_max_size = 50
+# pool_min_size = 5
+# pool_max_size = 50
 
 [server]
 bind                 = "0.0.0.0:8080"

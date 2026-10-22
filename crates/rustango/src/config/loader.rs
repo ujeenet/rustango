@@ -714,4 +714,31 @@ retention_days = 90
         assert!(load_with_root_and_env(&root, "any", Vec::new()).is_ok());
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// Every tier of every shipped example loads under strict mode.
+    #[test]
+    fn example_configs_load_in_strict_mode() {
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let strict = || vec![(STRICT_VAR.to_owned(), "1".to_owned())];
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&examples).expect("read examples/") {
+            let config = entry.expect("examples/ entry").path().join("config");
+            if !config.join("default.toml").is_file() {
+                continue;
+            }
+            for file in std::fs::read_dir(&config).expect("read config/") {
+                let name = file.expect("config/ entry").file_name();
+                let name = name.to_str().unwrap();
+                let Some(stem) = name.strip_suffix(".toml") else {
+                    continue;
+                };
+                let env = stem.strip_suffix("_settings").unwrap_or(stem);
+                if let Err(e) = load_with_root_and_env(&config, env, strict()) {
+                    panic!("{}/{name}: {e}", config.display());
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 10, "checked only {checked} config files");
+    }
 }
