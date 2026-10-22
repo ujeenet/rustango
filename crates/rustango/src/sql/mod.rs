@@ -88,9 +88,9 @@ pub(crate) use executor::{
     bulk_insert_pks_tx, fetch_in_chunks, fetch_select_in_chunks, inserted_pk, truncate_tx,
 };
 #[cfg(feature = "admin")]
-pub(crate) use executor::{
-    select_one_row_as_json_tx, select_rows_as_json_tx, stored_key, stored_keys,
-};
+pub(crate) use executor::{select_one_row_as_json_tx, select_rows_as_json_tx};
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "template_views"))]
+pub(crate) use executor::{stored_key, stored_keys};
 pub use executor::{truncate, truncate_sql};
 // PG-typed back-compat surface gone (issue #270 / T1.8 waves 1–4):
 // the entire family of `_on` functions + `&PgPool` wrappers + the

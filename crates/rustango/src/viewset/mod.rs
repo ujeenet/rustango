@@ -2195,12 +2195,19 @@ fn throttled_response(retry_after_secs: u64) -> Response {
     crate::api_errors::ApiError::rate_limited_response("request throttled", retry_after_secs)
 }
 
-/// Parse a path capture into the primary key's type, or a `400`.
-fn parse_pk_or_400(
+/// Parse a path capture into the primary key's type, or a `400`, bound
+/// as the row stores it (a SQLite UUID key may be TEXT).
+async fn parse_pk_or_400(
+    state: &ViewSetState,
+    acq: &AcquiredConn,
     field: &'static crate::core::FieldSchema,
     raw: &str,
 ) -> Result<crate::core::SqlValue, Response> {
-    parse_pk_string(field, raw).map_err(|e| json_error(StatusCode::BAD_REQUEST, &e.to_string()))
+    let key = parse_pk_string(field, raw)
+        .map_err(|e| json_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
+    crate::sql::stored_key(&acq.pool, state.vs.schema, field, key, raw)
+        .await
+        .map_err(|e| json_server_error("viewset::pk", &e))
 }
 
 /// The model's primary-key field, or a `500` if it has none.
@@ -3109,7 +3116,7 @@ async fn handle_retrieve(
         Ok(f) => f,
         Err(resp) => return resp,
     };
-    let pk_val = match parse_pk_or_400(pk_field, &pk_raw) {
+    let pk_val = match parse_pk_or_400(&state, &acq, pk_field, &pk_raw).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -3505,7 +3512,7 @@ async fn update_inner(
         Ok(f) => f,
         Err(resp) => return resp,
     };
-    let pk_val = match parse_pk_or_400(pk_field, &pk_raw) {
+    let pk_val = match parse_pk_or_400(&state, &acq, pk_field, &pk_raw).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -3619,7 +3626,7 @@ async fn handle_destroy(
         Ok(f) => f,
         Err(resp) => return resp,
     };
-    let pk_val = match parse_pk_or_400(pk_field, &pk_raw) {
+    let pk_val = match parse_pk_or_400(&state, &acq, pk_field, &pk_raw).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };

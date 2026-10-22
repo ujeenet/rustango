@@ -1213,7 +1213,7 @@ fn sqlite_uuid_key(row: &sqlx::sqlite::SqliteRow, c: &str) -> Result<SqlValue, s
 
 /// `key` (parsed from `raw`) as the row stores it. Only a SQLite UUID key
 /// differs: BLOB when bound, TEXT when a column default wrote it.
-#[cfg(feature = "admin")]
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "template_views"))]
 pub(crate) async fn stored_key(
     pool: &Pool,
     model: &'static crate::core::ModelSchema,
@@ -1226,7 +1226,7 @@ pub(crate) async fn stored_key(
 }
 
 /// [`stored_key`] for many `(key, raw)` pairs of `field`, in one read per chunk.
-#[cfg(feature = "admin")]
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "template_views"))]
 pub(crate) async fn stored_keys(
     pool: &Pool,
     model: &'static crate::core::ModelSchema,
