@@ -421,10 +421,12 @@ const CSP_REPORTS_LOGGED: usize = 10;
 
 // `?` escapes the newlines a forged report may carry.
 fn log_csp_violation(document_uri: &str, violated: &str, blocked: &str) {
+    // Query and fragment can carry tokens (`?token=`, `?code=`): log the path only.
+    let no_query = |u: &'_ str| u.split(['?', '#']).next().unwrap_or_default().to_owned();
     tracing::warn!(
-        document_uri = ?document_uri,
+        document_uri = ?no_query(document_uri),
         violated_directive = ?violated,
-        blocked_uri = ?blocked,
+        blocked_uri = ?no_query(blocked),
         "CSP violation report",
     );
 }
@@ -895,6 +897,27 @@ mod csp_report_tests {
         assert_eq!(out.lines().count(), 10 + 1, "{out}");
         assert!(!out.lines().any(|l| l.starts_with("FAKE")), "{out}");
         assert!(out.contains("skipped=490"), "{out}");
+    }
+
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn a_report_logs_urls_without_query_or_fragment() {
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let body = r#"{"csp-report":{"document-uri":"https://app.test/reset?token=SECRET1#x","violated-directive":"img-src","blocked-uri":"https://app.test/cb?code=SECRET2"}}"#;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let status = tracing::subscriber::with_default(subscriber, || {
+            rt.block_on(super::handle_csp_report(body.into()))
+        });
+        assert_eq!(status, 204);
+        let out = buf.contents();
+        assert!(out.contains("https://app.test/reset"), "{out}");
+        assert!(!out.contains("SECRET"), "{out}");
     }
 
     /// Over HTTPS a report with no Origin is taken; a foreign one is not.

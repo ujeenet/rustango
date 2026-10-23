@@ -25,7 +25,7 @@ use super::bind_query_my;
 use super::bind_query_sqlite;
 
 use super::decode::{RowReader, TypedCol};
-use crate::core::joins::joined_label;
+use crate::core::joins::joined_key;
 
 /// Cells of a value row: the projection, then each join's columns. Any
 /// after them are DISTINCT's ORDER BY helpers, which the row drops.
@@ -49,7 +49,7 @@ fn select_model_cols(query: &SelectQuery) -> Vec<TypedCol> {
     for j in &query.joins {
         cols.extend(j.project.iter().map(|&c| {
             let ty = j.target.field_by_column(c).map(|f| f.ty);
-            (joined_label(j.alias, c).into(), ty)
+            (joined_key(j.alias, c).into(), ty)
         }));
     }
     cols
@@ -81,7 +81,7 @@ fn aggregate_cols(query: &AggregateQuery) -> Vec<TypedCol> {
     let groups = query.group_by.iter().map(|&col| {
         let label = match col.split_once('.') {
             None => col.into(),
-            Some((alias, c)) => joined_label(alias, c).into(),
+            Some((alias, c)) => joined_key(alias, c).into(),
         };
         (label, ty(col))
     });
@@ -485,6 +485,33 @@ pub fn try_get_flat_my<U: FlatScalar>(
 #[doc(hidden)]
 #[allow(clippy::missing_errors_doc)]
 pub fn try_get_flat_my<U>(row: &crate::sql::MyReturningRow, _name: &str) -> Result<U, sqlx::Error> {
+    match *row {}
+}
+
+/// SQLite twin of [`try_get_flat_my`]: a UUID a column default wrote is TEXT.
+///
+/// # Errors
+/// The driver's decode error, or NULL for a bare `U`.
+#[cfg(feature = "sqlite")]
+#[doc(hidden)]
+pub fn try_get_flat_sqlite<U: FlatScalar>(
+    row: &crate::sql::SqliteReturningRow,
+    name: &str,
+) -> Result<U, sqlx::Error> {
+    use sqlx::{Row as _, ValueRef as _};
+    if row.try_get_raw(name)?.is_null() {
+        return U::from_null(name);
+    }
+    row.try_get::<U::Cell, _>(name).map(U::from_cell)
+}
+
+#[cfg(not(feature = "sqlite"))]
+#[doc(hidden)]
+#[allow(clippy::missing_errors_doc)]
+pub fn try_get_flat_sqlite<U>(
+    row: &crate::sql::SqliteReturningRow,
+    _name: &str,
+) -> Result<U, sqlx::Error> {
     match *row {}
 }
 

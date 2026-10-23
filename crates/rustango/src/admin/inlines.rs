@@ -1056,6 +1056,8 @@ struct InlineTarget {
     secrets: Vec<&'static str>,
     /// The registration's `max_num`.
     max_num: Option<usize>,
+    /// Superuser-only fields on add, which an INSERT defaults.
+    add_locked: Vec<&'static str>,
 }
 
 impl InlineTarget {
@@ -1098,6 +1100,7 @@ impl InlineTarget {
             rows: RowScope::of(child, parts),
             secrets,
             max_num,
+            add_locked: add.superuser_only,
         })
     }
 
@@ -1597,6 +1600,11 @@ async fn plan_target(
                     crate::forms::parse_pk_string(pk, &raw_pk).map_err(|e| bad_row(idx, e))?;
                 values.push((pk.column, value));
             }
+            super::object_permissions::default_locked_flags(
+                target.child,
+                &target.add_locked,
+                &mut values,
+            );
             let (mut columns, mut sql_values): (Vec<&'static str>, Vec<SqlValue>) =
                 values.into_iter().unzip();
             for (column, value) in &target.scope.0 {

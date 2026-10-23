@@ -296,14 +296,16 @@ fn check_host_and_scheme(trimmed: &str, allowed_hosts: &[&str], require_https: b
         .rsplit_once('@')
         .map_or(host_with_port, |(_, h)| h);
     // Strip port.
-    let Some((host, _)) = split_host_port(host_after_userinfo) else {
+    let Some(host) = normalize_host(host_after_userinfo) else {
         return false;
     };
-    let host = host.to_ascii_lowercase();
     if host.is_empty() {
         return false;
     }
-    allowed_hosts.iter().any(|a| a.to_ascii_lowercase() == host)
+    // Same rule as `AllowedHostsLayer`: an entry's trailing dot is ignored.
+    allowed_hosts
+        .iter()
+        .any(|a| a.strip_suffix('.').unwrap_or(a).eq_ignore_ascii_case(&host))
 }
 
 /// Splits an authority into host and port; `[v6]:port` keeps the brackets
@@ -324,6 +326,13 @@ pub(crate) fn split_host_port(authority: &str) -> Option<(&str, Option<u16>)> {
         .strip_prefix(':')
         .filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))?;
     Some((host, Some(port.parse().ok()?)))
+}
+
+/// The host of an authority as every host check compares it: no port,
+/// lowercased, one trailing FQDN dot dropped (`app.test.` is `app.test`).
+pub(crate) fn normalize_host(authority: &str) -> Option<String> {
+    let (host, _) = split_host_port(authority)?;
+    Some(host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase())
 }
 
 /// A `Host` header that is only `host[:port]`, so it is safe to put in a
@@ -1629,6 +1638,26 @@ mod querystring_tests {
         assert!(!url_has_allowed_host_and_scheme(
             "http://[::2]:8080/x",
             &["["],
+            false
+        ));
+    }
+
+    /// A trailing FQDN dot is the same host, as in `AllowedHostsLayer`.
+    #[test]
+    fn trailing_dot_hosts_match_like_allowed_hosts() {
+        assert!(url_has_allowed_host_and_scheme(
+            "https://app.test./x",
+            &["app.test"],
+            false
+        ));
+        assert!(url_has_allowed_host_and_scheme(
+            "https://App.Test/x",
+            &["app.test."],
+            false
+        ));
+        assert!(!url_has_allowed_host_and_scheme(
+            "https://app.test../x",
+            &["app.test"],
             false
         ));
     }

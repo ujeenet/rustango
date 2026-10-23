@@ -238,10 +238,20 @@ async fn login_submit(
         "username",
         SqlValue::String(form.username.clone()),
     );
-    let row = crate::sql::select_one_row_as_json(&state.pool, &select, &fields)
-        .await
-        .ok()
-        .flatten();
+    // A failed lookup (e.g. schema not migrated yet) checked nothing:
+    // 503, and the dropped attempt is given back, not counted.
+    let row = match crate::sql::select_one_row_as_json(&state.pool, &select, &fields).await {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!(target: "rustango::admin", error = %e, "admin login: user lookup failed");
+            drop(attempt);
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "login temporarily unavailable",
+            )
+                .into_response();
+        }
+    };
 
     let Some(row) = row else {
         // Spend a verify's worth of work on the unknown-user path, so
@@ -960,10 +970,14 @@ pub(crate) async fn require_session(
             GateCheck::Reject => return Redirect::to(&gate.login_path).into_response(),
             // Row found + fingerprint matches: trust the LIVE flag.
             GateCheck::Live { is_superuser, .. } => session.is_superuser = is_superuser,
-            // Transient DB error: fail open on the fingerprint and
-            // active checks (the cookie HMAC and expiry still bound the
-            // session) and keep the cookie's `is_superuser`.
-            GateCheck::DbError => {}
+            // DB error: fail closed, but keep the cookie for a retry.
+            GateCheck::DbError => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "admin temporarily unavailable",
+                )
+                    .into_response()
+            }
         }
         if gate.require_superuser && !session.is_superuser {
             // Render a 403 here instead of redirecting to /login. A
@@ -1035,8 +1049,7 @@ enum GateCheck {
     /// Force a re-login: password changed, logged out, user deleted, or
     /// account deactivated.
     Reject,
-    /// Transient DB error. The caller fails open on the live checks; the
-    /// cookie HMAC and expiry still bound the session.
+    /// The live state could not be read; the caller fails closed.
     DbError,
 }
 
@@ -1201,11 +1214,15 @@ mod outer_csrf_tests {
     /// the POST passes both the outer layer and the login check.
     #[tokio::test]
     async fn login_round_trip_uses_the_outer_layers_cookie() {
-        let pool = crate::sql::sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap();
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        // The lookup must find no row, not fail: a DB error is a 503.
+        crate::testkit::create_tables_for::<AdminUser>(&pool)
+            .await
+            .unwrap();
         let mut config = super::super::urls::Config::default();
         config.session_secret = Some(crate::session::SessionSecret::from_bytes(vec![7u8; 32]));
         let state = AppState {
-            pool: crate::sql::Pool::Sqlite(pool),
+            pool,
             config: Arc::new(config),
         };
         let app = public_router(state).layer(with_config(CsrfConfig {

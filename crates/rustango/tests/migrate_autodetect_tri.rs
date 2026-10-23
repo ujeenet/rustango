@@ -3797,9 +3797,250 @@ async fn branched_chain_needs_a_merge(pool: &Pool) {
     );
 }
 
+/// `migrate <target>` applies a pending file that sorts before the newest
+/// applied one, going forward or back.
+async fn migrate_to_applies_an_earlier_pending_file(pool: &Pool) {
+    migrate_to_with_an_earlier_pending_file(pool, "mt2", "0002_a").await;
+    migrate_to_with_an_earlier_pending_file(pool, "mt", "0003_merge").await;
+}
+
+/// `0002_b` applied, `0002_a` and `0003_merge` pending; then `migrate <target>`.
+async fn migrate_to_with_an_earlier_pending_file(pool: &Pool, tag: &str, target: &str) {
+    use rustango::migrate::{applied_set_pool_with_ledger, migrate_to_pool_with_ledger};
+    let t = format!("mad_{tag}_post");
+    let t = t.as_str();
+    let chain = Chain::new(pool, tag, &[t]).await;
+    let s = |name: &str| col(name, "string", json!({"max_length": 20}));
+    let with = |cols: &[&str]| {
+        let mut f = vec![id()];
+        f.extend(cols.iter().map(|c| s(c)));
+        json!({"tables": [table(t, f)]})
+    };
+    let initial = chain.step(pool, with(&[])).await.expect("initial");
+    let branch = |name: &str, c: &'static str| Migration {
+        name: name.into(),
+        prev: Some(initial.clone()),
+        snapshot: snap(with(&[c])),
+        forward: vec![Operation::Schema(SchemaChange::AddColumn {
+            table: t.into(),
+            column: c.into(),
+        })],
+        ..chain.head()
+    };
+    let insert = |c: &'static str| async move {
+        exec(pool, "INSERT INTO {} ({}) VALUES ('x')", &[t, c]).await
+    };
+
+    // Branch a lands after b was applied, as a merged pull does.
+    chain.write(&branch("0002_b", "b"));
+    chain.migrate(pool).await.expect("branch b");
+    chain.write(&branch("0002_a", "a"));
+    chain.write(&Migration {
+        name: "0003_merge".into(),
+        prev: Some("0002_b".into()),
+        merges: vec!["0002_a".into()],
+        snapshot: snap(with(&["a", "b"])),
+        forward: Vec::new(),
+        ..chain.head()
+    });
+    migrate_to_pool_with_ledger(pool, chain.dir.path(), target, &chain.ledger)
+        .await
+        .expect("migrate to the target");
+    let mut applied: Vec<String> = applied_set_pool_with_ledger(pool, &chain.ledger)
+        .await
+        .expect("ledger")
+        .into_iter()
+        .collect();
+    applied.sort();
+    let mut want = vec![initial.as_str(), "0002_a", "0002_b", "0003_merge"];
+    want.retain(|m| *m <= target);
+    assert_eq!(applied, want);
+    insert("a").await.expect("a's column");
+    // Going back to a unapplies b.
+    assert_eq!(insert("b").await.is_ok(), target > "0002_b", "b's column");
+}
+
+fn noop_callback(_pool: Pool) -> rustango::migrate::callbacks::MigrationCallbackFut {
+    Box::pin(async { Ok(()) })
+}
+rustango::register_migration_callback!("mad_cb_noop", noop_callback);
+
+/// An unregistered callback fails a non-atomic run before its first op,
+/// both ways, so the schema and the ledger still agree.
+async fn missing_callback_fails_before_any_op(pool: &Pool) {
+    use rustango::migrate::{applied_set_pool_with_ledger, CallbackOp};
+    let t = "mad_cb_post";
+    let chain = Chain::new(pool, "cb", &[t]).await;
+    let with = |cols: &[&str]| {
+        let mut f = vec![id()];
+        f.extend(cols.iter().map(|c| col(c, "i64", json!({}))));
+        json!({"tables": [table(t, f)]})
+    };
+    let initial = chain.step(pool, with(&[])).await.expect("initial");
+    let add_x = Operation::Schema(SchemaChange::AddColumn {
+        table: t.into(),
+        column: "x".into(),
+    });
+    let cb = |name: &str, reverse: Option<&str>| {
+        Operation::Callback(CallbackOp {
+            name: name.into(),
+            reverse_name: reverse.map(Into::into),
+        })
+    };
+    let mig = |forward: Vec<Operation>| Migration {
+        name: "0002_cb".into(),
+        prev: Some(initial.clone()),
+        atomic: false,
+        snapshot: snap(with(&["x"])),
+        forward,
+        ..chain.head()
+    };
+    let has_x = || async {
+        exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "x"])
+            .await
+            .is_ok()
+    };
+    let recorded = || async {
+        applied_set_pool_with_ledger(pool, &chain.ledger)
+            .await
+            .expect("ledger")
+            .contains("0002_cb")
+    };
+
+    chain.write(&mig(vec![add_x.clone(), cb("mad_cb_missing", None)]));
+    let err = chain
+        .migrate(pool)
+        .await
+        .expect_err("unregistered callback");
+    assert!(err.contains("mad_cb_missing"), "{err}");
+    assert!(!has_x().await, "x was added before the callback lookup");
+    assert!(!recorded().await);
+
+    chain.write(&mig(vec![cb("mad_cb_noop", Some("mad_cb_missing")), add_x]));
+    chain.migrate(pool).await.expect("registered callback");
+    let err = chain
+        .undo(pool, "0002_cb")
+        .await
+        .expect_err("unregistered reverse");
+    assert!(err.contains("mad_cb_missing"), "{err}");
+    assert!(has_x().await, "x was dropped before the callback lookup");
+    assert!(recorded().await);
+}
+
+/// Unapplying drops that follow a table rename finds them under the old
+/// name and recreates them on the table before it is renamed back.
+async fn drops_after_a_rename_unapply(pool: &Pool) {
+    let (parent, t, u) = ("mad_rd_parent", "mad_rd_old", "mad_rd_new");
+    let chain = Chain::new(pool, "rd", &[u, t, parent]).await;
+    let ab = || vec![id(), col("a", "i64", json!({})), col("b", "i64", json!({}))];
+    let mut kid = table(t, {
+        let mut f = ab();
+        f.push(col("x", "i64", json!({})));
+        f
+    });
+    kid["composite_fks"] =
+        json!([{"name": "mad_rd_fk", "to": parent, "from": ["a", "b"], "on": ["a", "b"]}]);
+    let uq =
+        json!({"name": "mad_rd_ab_uq", "table": parent, "columns": ["a", "b"], "unique": true});
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(parent, ab()), kid],
+                   "indexes": [uq, {"name": "mad_rd_ix", "table": t, "columns": ["a"],
+                                    "unique": false}]}),
+        )
+        .await
+        .expect("initial");
+    let ops = vec![
+        SchemaChange::RenameTable {
+            old_name: t.into(),
+            new_name: u.into(),
+        },
+        SchemaChange::DropIndex {
+            name: "mad_rd_ix".into(),
+            table: u.into(),
+        },
+        SchemaChange::DropCompositeFk {
+            table: u.into(),
+            name: "mad_rd_fk".into(),
+        },
+        SchemaChange::DropColumn {
+            table: u.into(),
+            column: "x".into(),
+        },
+    ];
+    let after = json!({"tables": [table(parent, ab()), table(u, ab())], "indexes": [uq]});
+    let name = chain
+        .hand(pool, after, ops, None)
+        .await
+        .expect("rename, then drops");
+    chain.undo(pool, &name).await.expect("the drops come back");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "x"])
+        .await
+        .expect("x is back");
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (9, 9)",
+            &[t, "a", "b"]
+        )
+        .await
+        .is_err(),
+        "the composite FK is back on {}",
+        pool.dialect().name()
+    );
+    chain.migrate(pool).await.expect("and forward again");
+}
+
+/// A file that creates a table or adds a column and drops it again has no
+/// snapshot to render the create from: refused up front, nothing applied.
+async fn create_then_drop_in_one_file_is_refused(pool: &Pool) {
+    let (t, tmp) = ("mad_cd_post", "mad_cd_tmp");
+    let chain = Chain::new(pool, "cd", &[tmp, t]).await;
+    let posts = json!({"tables": [table(t, vec![id()])]});
+    chain.step(pool, posts.clone()).await.expect("initial");
+    let (table_t, column_c) = (t.to_owned(), "c".to_owned());
+    let column = |drop: bool| {
+        let (table, column) = (table_t.clone(), column_c.clone());
+        if drop {
+            SchemaChange::DropColumn { table, column }
+        } else {
+            SchemaChange::AddColumn { table, column }
+        }
+    };
+    let after = json!({"tables": [table(t, vec![id(), col("d", "i64", json!({}))])]});
+    for ops in [
+        vec![
+            SchemaChange::CreateTable(tmp.into()),
+            SchemaChange::DropTable(tmp.into()),
+        ],
+        vec![column(false), column(true)],
+    ] {
+        let err = chain
+            .hand(pool, after.clone(), ops, None)
+            .await
+            .expect_err("no snapshot entry to create from");
+        assert!(err.contains("snapshot"), "{err}");
+        assert!(
+            exec(pool, "SELECT 1 FROM {}", &[tmp]).await.is_err(),
+            "{tmp} left"
+        );
+        let head = chain.head().name;
+        let applied = rustango::migrate::applied_set_pool_with_ledger(pool, &chain.ledger)
+            .await
+            .expect("ledger");
+        assert!(!applied.contains(&head), "{head} recorded");
+        chain.discard_head();
+    }
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
+        create_then_drop_in_one_file_is_refused,
+        drops_after_a_rename_unapply,
+        missing_callback_fails_before_any_op,
+        migrate_to_applies_an_earlier_pending_file,
         unmanaged_model_keeps_its_table,
         empty_migration_renames_reach_the_snapshot,
         branched_chain_needs_a_merge,

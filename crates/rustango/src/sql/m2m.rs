@@ -162,7 +162,27 @@ impl M2MManager {
         let src = self.src_key()?;
         let dsts = dst_keys(ids, self.through, self.dst_col)?;
         let rows = dsts.iter().map(|d| vec![src.clone(), d.clone()]).collect();
+        // The manager does not name its source (a new pub field would break
+        // literals), so lock every registered model declaring this junction end.
+        let locks: Vec<SelectQuery> = inventory::iter::<crate::core::ModelEntry>
+            .into_iter()
+            .map(|e| e.schema)
+            .filter(|s| {
+                s.m2m
+                    .iter()
+                    .any(|r| r.through == self.through && r.src_col == self.src_col)
+            })
+            .filter_map(|s| source_lock(s, &src))
+            .collect();
+        if locks.is_empty() {
+            tracing::warn!(
+                through = self.through,
+                src_col = self.src_col,
+                "M2M set: no registered source model, so concurrent sets are not serialized"
+            );
+        }
         let changed = replace(
+            locks,
             self.junction(),
             vec![eq(self.src_col, src.clone())],
             self.dst_col,
@@ -346,10 +366,27 @@ async fn delete(
     super::executor::delete_pool(pool, &query).await
 }
 
+/// `SELECT pk … FOR NO KEY UPDATE` on the source row. Without it, two PG
+/// `set`s under READ COMMITTED both delete the old rows and keep both inserts.
+fn source_lock(source: &'static ModelSchema, pk: &SqlValue) -> Option<SelectQuery> {
+    let col = source.pk_column()?;
+    let mut q =
+        SelectQuery::new(source).where_clause(WhereExpr::and_predicates(vec![eq(col, pk.clone())]));
+    q.projection = Some(vec![col]);
+    q.lock_mode = Some(crate::core::LockMode {
+        no_key: true,
+        silent_on_sqlite: true,
+        ..crate::core::LockMode::default()
+    });
+    Some(q)
+}
+
 /// Delete the rows `owner` matches and insert `rows` in one transaction, so
 /// readers never see the empty state in between. `true` when the set of
 /// `dst_col` keys changed; `dsts` is the new set, deduplicated.
+#[allow(clippy::too_many_arguments)]
 async fn replace(
+    locks: Vec<SelectQuery>,
     junction: &'static ModelSchema,
     owner: Vec<Filter>,
     dst_col: &'static str,
@@ -361,7 +398,12 @@ async fn replace(
     // A bad key fails before the DELETE runs, not after.
     let ins = BulkInsertQuery::new(junction, columns, rows);
     ins.validate()?;
-    let mut tx = crate::sql::transaction_pool(pool).await?;
+    // SQLite has no row lock: take its write lock at BEGIN instead.
+    let mut tx = crate::sql::write_transaction(pool).await?;
+    for lock in locks {
+        let stmt = pool.dialect().compile_select(&lock)?;
+        super::executor::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+    }
     let mut old = SelectQuery::new(junction).where_clause(WhereExpr::and_predicates(owner.clone()));
     old.projection = Some(vec![dst_col]);
     // An unregistered junction's column type is unknown: read it as the new keys' type.
@@ -717,7 +759,21 @@ impl GenericM2MManager {
             .collect();
         let columns = vec![self.pk_col, self.ct_col, self.dst_col];
         let junction = self.junction();
-        if !replace(junction, owner, self.dst_col, &dsts, columns, rows, pool).await? {
+        let locks = source_lock(self.src_schema, &self.src_key()?)
+            .into_iter()
+            .collect();
+        if !replace(
+            locks,
+            junction,
+            owner,
+            self.dst_col,
+            &dsts,
+            columns,
+            rows,
+            pool,
+        )
+        .await?
+        {
             return Ok(());
         }
         #[cfg(feature = "signals")]

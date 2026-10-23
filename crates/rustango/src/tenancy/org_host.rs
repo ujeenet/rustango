@@ -269,7 +269,7 @@ async fn claim_once(
 ) -> Result<Claimed, HostError> {
     use crate::sql::FetcherTx as _;
     let taken = || HostError::Taken(host.to_owned());
-    let mut tx = crate::sql::write_transaction_pool(registry).await?;
+    let mut tx = crate::sql::write_transaction(registry).await?;
     let (org_id, base) = match claimant {
         Claimant::Extra(id) => (*id, false),
         Claimant::Base(id) => (*id, true),

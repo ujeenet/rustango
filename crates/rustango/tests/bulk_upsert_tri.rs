@@ -152,9 +152,25 @@ async fn empty_batch_is_a_noop(pool: &Pool) {
     assert_eq!(count(pool).await, 0, "an empty batch must write nothing");
 }
 
+/// No update columns is a typed error on every backend, not bad SQL.
+async fn empty_update_cols_is_refused(pool: &Pool) {
+    let err = Post::bulk_upsert_pool(&[post("a", "Alpha", 1)], &["slug"], &[], pool)
+        .await
+        .expect_err("empty update_cols");
+    assert!(
+        matches!(
+            err,
+            rustango::sql::ExecError::Sql(rustango::sql::SqlError::EmptyUpdateSet)
+        ),
+        "{err:?}"
+    );
+    assert_eq!(count(pool).await, 0);
+}
+
 tri_dialect_test! {
     model: Post,
     scenarios: [
+        empty_update_cols_is_refused,
         first_call_inserts_all_rows,
         second_call_updates_listed_columns_only,
         insert_or_ignore_skips_conflicts,

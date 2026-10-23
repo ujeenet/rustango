@@ -137,6 +137,25 @@ pub(crate) fn superuser_fields(table: &str, action: AdminWrite) -> Vec<&'static 
         .collect()
 }
 
+/// A locked NOT NULL flag with no column default stores `false`, as an
+/// unticked box would; anything else is left to the column default.
+pub(crate) fn default_locked_flags(
+    model: &'static crate::core::ModelSchema,
+    locked: &[&'static str],
+    values: &mut Vec<(&'static str, crate::core::SqlValue)>,
+) {
+    for f in model.scalar_fields() {
+        if f.ty == crate::core::FieldType::Bool
+            && !f.nullable
+            && f.default.is_none()
+            && locked.contains(&f.name)
+            && !values.iter().any(|(c, _)| *c == f.column)
+        {
+            values.push((f.column, crate::core::SqlValue::Bool(false)));
+        }
+    }
+}
+
 /// Fields a write leaves out: `readonly_fields`, plus the superuser-only
 /// ones for a non-superuser.
 pub(crate) struct LockedFields {

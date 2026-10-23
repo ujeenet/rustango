@@ -275,18 +275,27 @@ fn is_protocol_error(code: i64) -> bool {
 }
 
 /// Words whose values are scrubbed before a call is audited, so no
-/// secret reaches the audit table. A `_` entry is a run of words.
+/// secret reaches the audit table. A `_` entry is a run of words; `key`
+/// alone hides every `*_key` (`api_key`, `encryption_key`).
 const SENSITIVE_ARG_KEYS: &[&str] = &[
     "password",
     "passwd",
+    "pwd",
+    "passphrase",
+    "pin",
     "token",
+    "jwt",
+    "bearer",
     "secret",
-    "api_key",
+    "key",
     "apikey",
     "signature",
     "auth",
     "authorization",
-    "private_key",
+    "credential",
+    "credentials",
+    "cookie",
+    "session",
     "otp",
     "totp",
     "code_verifier",
@@ -448,11 +457,25 @@ mod tests {
             "user_api_key",
             "otp",
             "token_count",
+            "jwt",
+            "bearerToken",
+            "cookie",
+            "session_id",
+            "credential",
+            "credentials",
+            "passphrase",
+            "pwd",
+            "pin",
+            "key",
+            "encryption_key",
+            "signing-key",
         ];
         let shown = [
             "username",
             "author",
             "keyboard",
+            "monkey",
+            "pinned",
             "page_size",
             "passwords_match",
             "oauth_provider",

@@ -46,6 +46,8 @@ pub use schema::{
 pub use schema::{AdminConfigParts, FieldSchemaParts, GenericM2MEntry, ModelSchemaParts};
 pub use validate::validate_value;
 pub use value::SqlValue;
+#[doc(hidden)]
+pub use value::__json_value;
 pub use window::{FrameBoundary, FrameKind, WindowExpr, WindowFn, WindowFrame};
 
 /// Re-exported so `#[derive(Model)]` output can name `inventory`

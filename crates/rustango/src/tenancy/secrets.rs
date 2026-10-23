@@ -91,13 +91,14 @@ pub struct EnvSecretsResolver;
 #[async_trait]
 impl SecretsResolver for EnvSecretsResolver {
     async fn resolve(&self, reference: &str) -> Result<String, SecretsError> {
-        let var = reference.strip_prefix("env://").ok_or_else(|| {
-            SecretsError::Invalid(format!("expected env:// prefix, got `{reference}`"))
-        })?;
+        // Never echo the reference: a literal URL here carries its password.
+        let var = reference
+            .strip_prefix("env://")
+            .ok_or_else(|| SecretsError::Invalid("expected an env:// reference".into()))?;
         if var.is_empty() {
-            return Err(SecretsError::Invalid(format!(
-                "env:// reference has empty variable name: `{reference}`"
-            )));
+            return Err(SecretsError::Invalid(
+                "env:// reference has an empty variable name".into(),
+            ));
         }
         std::env::var(var).map_err(|_| SecretsError::NotFound(var.to_owned()))
     }
@@ -185,6 +186,16 @@ mod tests {
         let r = EnvSecretsResolver;
         let err = r.resolve("FOO").await.unwrap_err();
         assert!(matches!(err, SecretsError::Invalid(_)), "got {err:?}");
+    }
+
+    /// The error is logged per request: it must not carry a literal URL.
+    #[tokio::test]
+    async fn env_resolver_error_does_not_echo_the_reference() {
+        let err = EnvSecretsResolver
+            .resolve("postgres://u:hunter2@h/db")
+            .await
+            .unwrap_err();
+        assert!(!err.to_string().contains("hunter2"), "{err}");
     }
 
     #[tokio::test]

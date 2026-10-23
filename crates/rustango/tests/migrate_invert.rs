@@ -439,3 +439,84 @@ fn invert_drop_composite_fk_missing_in_prev_is_validation_error() {
     let err = invert(&forward, &empty()).unwrap_err();
     assert!(format!("{err:?}").contains("pair_left_right_fkey"));
 }
+
+// ---------------- drops after a rename ----------------
+
+fn rename(old: &str, new: &str) -> Operation {
+    Operation::Schema(SchemaChange::RenameTable {
+        old_name: old.into(),
+        new_name: new.into(),
+    })
+}
+
+/// `pair` with an index on `left_id`, before a migration renames it.
+fn pair_with_index() -> SchemaSnapshot {
+    serde_json::from_value(serde_json::json!({
+        "tables": [pair_table_with_composite_fk()],
+        "indexes": [{"name": "pair_left_ix", "table": "pair", "columns": ["left_id"],
+                     "unique": false}]
+    }))
+    .unwrap()
+}
+
+#[test]
+fn invert_finds_dropped_objects_under_their_pre_rename_names() {
+    let forward = vec![
+        rename("pair", "duo"),
+        Operation::Schema(SchemaChange::DropColumn {
+            table: "duo".into(),
+            column: "right_id".into(),
+        }),
+        Operation::Schema(SchemaChange::DropCompositeFk {
+            table: "duo".into(),
+            name: "pair_left_right_fkey".into(),
+        }),
+    ];
+    let out = invert(&forward, &pair_with_index()).expect("found under `pair`");
+    assert_eq!(
+        out,
+        vec![
+            Operation::Schema(SchemaChange::AddCompositeFk {
+                table: "duo".into(),
+                name: "pair_left_right_fkey".into(),
+                to: "target".into(),
+                from: vec!["left_id".into(), "right_id".into()],
+                on: vec!["a_id".into(), "b_id".into()],
+            }),
+            Operation::Schema(SchemaChange::AddColumn {
+                table: "duo".into(),
+                column: "right_id".into(),
+            }),
+            rename("duo", "pair"),
+        ]
+    );
+}
+
+#[test]
+fn invert_recreates_a_dropped_index_under_the_names_at_its_op() {
+    let forward = vec![
+        rename("pair", "duo"),
+        Operation::Schema(SchemaChange::RenameColumn {
+            table: "duo".into(),
+            old_column: "left_id".into(),
+            new_column: "l_id".into(),
+        }),
+        Operation::Schema(SchemaChange::DropIndex {
+            name: "pair_left_ix".into(),
+            table: "duo".into(),
+        }),
+    ];
+    let out = invert(&forward, &pair_with_index()).unwrap();
+    assert_eq!(
+        out[0],
+        Operation::Schema(SchemaChange::CreateIndex {
+            name: "pair_left_ix".into(),
+            table: "duo".into(),
+            columns: vec!["l_id".into()],
+            unique: false,
+            method: "btree".into(),
+            where_clause: None,
+            include: vec![],
+        })
+    );
+}

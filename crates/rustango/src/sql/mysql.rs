@@ -244,6 +244,12 @@ impl Dialect for MySql {
         )
     }
 
+    // CONVERT_TZ returns NULL for a named zone when the server's time
+    // zone tables are not loaded.
+    fn named_time_zone_sql(&self) -> Option<&'static str> {
+        Some("SELECT CAST(CONVERT_TZ('2000-01-01 00:00:00', '+00:00', 'UTC') AS CHAR)")
+    }
+
     /// Translate Postgres-native `DEFAULT` expressions to MySQL
     /// spelling.
     ///
@@ -372,6 +378,18 @@ impl Dialect for MySql {
             "SELECT CAST(k.CONSTRAINT_NAME AS CHAR) FROM information_schema.KEY_COLUMN_USAGE k \
              WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ? AND k.COLUMN_NAME = ? \
              AND k.REFERENCED_TABLE_NAME IS NOT NULL AND NOT EXISTS (\
+             SELECT 1 FROM information_schema.KEY_COLUMN_USAGE o \
+             WHERE o.TABLE_SCHEMA = k.TABLE_SCHEMA AND o.TABLE_NAME = k.TABLE_NAME \
+             AND o.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND o.ORDINAL_POSITION > 1)",
+        )
+    }
+
+    fn referencing_foreign_keys_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT CAST(k.TABLE_NAME AS CHAR), CAST(k.CONSTRAINT_NAME AS CHAR) \
+             FROM information_schema.KEY_COLUMN_USAGE k \
+             WHERE k.TABLE_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_SCHEMA = DATABASE() \
+             AND k.REFERENCED_TABLE_NAME = ? AND k.REFERENCED_COLUMN_NAME = ? AND NOT EXISTS (\
              SELECT 1 FROM information_schema.KEY_COLUMN_USAGE o \
              WHERE o.TABLE_SCHEMA = k.TABLE_SCHEMA AND o.TABLE_NAME = k.TABLE_NAME \
              AND o.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND o.ORDINAL_POSITION > 1)",

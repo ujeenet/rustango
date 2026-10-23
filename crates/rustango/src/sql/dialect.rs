@@ -427,6 +427,12 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// Query for `(table, name)` of the single-column FKs referencing one
+    /// column, binding `(table, column)`. `None` where a MODIFY needs none.
+    fn referencing_foreign_keys_sql(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Query for an index's first column when no other index starts with it,
     /// binding `(table, index)`, where an FK refuses to lose the only index
     /// it can use (MySQL, 1553; #2244).
@@ -644,6 +650,12 @@ pub trait Dialect: Send + Sync {
     /// A one-row, one-column query for the database's default collation,
     /// which `check --deploy` reads. `None` where text compares byte-wise.
     fn default_collation_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// A one-row, one-column query converting a time to a named zone; a
+    /// NULL cell means `trunc_with_tz` returns NULL. `None` where it cannot.
+    fn named_time_zone_sql(&self) -> Option<&'static str> {
         None
     }
 
@@ -926,11 +938,11 @@ pub trait Dialect: Send + Sync {
     // The migration runner keeps concurrent runs apart with two
     // locks: a session one held while applying the pending list, and
     // a transaction one held while creating the ledger table. SQLite
-    // needs neither, since it has a single writer.
+    // needs no ledger lock, since it has a single writer.
 
     /// SQL that tries a session-scoped advisory lock without waiting and
-    /// returns whether it was taken. The runner polls it, so a waiting run
-    /// holds no pool connection (#2027). `None` skips the lock.
+    /// returns whether it was taken. The runner polls it on a connection
+    /// outside the pool. `None` skips the lock.
     fn acquire_session_lock_sql(&self) -> Option<String> {
         None
     }

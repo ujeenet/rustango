@@ -79,12 +79,12 @@ pub use executor::{
     insert_returning_tx, insert_tx, on_commit, on_commit_pending, raw_execute_pool, raw_execute_tx,
     raw_query_pool, raw_query_tx, run_ddl_idempotent, select_one_row_as_json, select_one_row_pool,
     select_rows_as_json, select_rows_pool, select_rows_pool_with_related,
-    select_rows_tx_with_related, transaction_pool, try_get_flat_my, update_or_create, update_pool,
-    update_tx, AtomicTx, CounterPool, ExistsPool, ExplainFormat, ExplainOptions, FetcherPool,
-    FetcherTx, FkPkAccess, FlatScalar, HasPkValue, InsertReturningPool, LoadRelated,
-    MaybeMyFromRow, MaybeMyLoadRelated, MaybeMyScalar, MaybePgFromRow, MaybePgScalar,
-    MaybeSqliteFromRow, MaybeSqliteLoadRelated, MaybeSqliteScalar, Page, PoolConn, PoolTx,
-    SqlExecutor, TxGuard, UpdaterPool,
+    select_rows_tx_with_related, transaction_pool, try_get_flat_my, try_get_flat_sqlite,
+    update_or_create, update_pool, update_tx, write_transaction, AtomicTx, CounterPool, ExistsPool,
+    ExplainFormat, ExplainOptions, FetcherPool, FetcherTx, FkPkAccess, FlatScalar, HasPkValue,
+    InsertReturningPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated, MaybeMyScalar,
+    MaybePgFromRow, MaybePgScalar, MaybeSqliteFromRow, MaybeSqliteLoadRelated, MaybeSqliteScalar,
+    Page, PoolConn, PoolTx, SqlExecutor, TxGuard, UpdaterPool,
 };
 pub(crate) use executor::{
     bulk_insert_pks_tx, fetch_in_chunks, fetch_select_in_chunks, inserted_pk, truncate_tx,
@@ -168,7 +168,6 @@ pub(crate) use executor::bind_query;
 pub(crate) use executor::bind_query_my;
 #[cfg(feature = "sqlite")]
 pub(crate) use executor::bind_query_sqlite;
-pub(crate) use executor::write_transaction_pool;
 #[cfg(feature = "mysql")]
 pub use executor::LoadRelatedMy;
 #[cfg(feature = "sqlite")]

@@ -434,7 +434,7 @@ impl syn::parse::Parse for QInput {
 fn expand_q(input: TokenStream2) -> syn::Result<TokenStream2> {
     let q: QInput = syn::parse2(input)?;
     let root = rustango_root();
-    let field_str = q.field.to_string();
+    let field_str = ident_name(&q.field);
     let field_span = q.field.span();
     let (base, suffix) = match field_str.find("__") {
         Some(idx) => (&field_str[..idx], &field_str[idx + 2..]),
@@ -446,7 +446,7 @@ fn expand_q(input: TokenStream2) -> syn::Result<TokenStream2> {
             "Q!(): field name is empty before `__` suffix",
         ));
     }
-    let base_ident = syn::Ident::new(base, field_span);
+    let base_ident = ident_from_name(base, field_span);
     let value = &q.value;
     let path = &q.base_path;
 
@@ -860,11 +860,11 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         if let Ok(fa) = parse_field_attrs(field) {
             if fa.index {
                 let col_name = fa.column.clone().unwrap_or_else(|| col.clone());
-                let auto_name = if fa.index_unique {
+                let auto_name = capped_index_name(if fa.index_unique {
                     format!("{table}_{col_name}_uq_idx")
                 } else {
                     format!("{table}_{col_name}_idx")
-                };
+                });
                 all_indexes.push(IndexAttr {
                     name: fa.index_name.or(Some(auto_name)),
                     columns: vec![col_name],
@@ -1074,11 +1074,31 @@ fn loaded_reuse_tokens(
     }
 }
 
+/// Store the decoded `_parent` on the FK field, keeping the key the row
+/// holds: with `on = <unique column>` it is not the parent's PK.
+fn loaded_assign_tokens(rel: &FkRelation, receiver: &TokenStream2) -> TokenStream2 {
+    let root = rustango_root();
+    let field_ident = &rel.field_ident;
+    if rel.nullable {
+        quote! {
+            if let ::core::option::Option::Some(__fk) = &mut #receiver.#field_ident {
+                let _pk = ::core::clone::Clone::clone(__fk.pk_ref());
+                *__fk = #root::sql::ForeignKey::loaded(_pk, _parent);
+            }
+        }
+    } else {
+        quote! {
+            let _pk = ::core::clone::Clone::clone(#receiver.#field_ident.pk_ref());
+            #receiver.#field_ident = #root::sql::ForeignKey::loaded(_pk, _parent);
+        }
+    }
+}
+
 /// Emit `impl LoadRelated for #StructName` — slice 9.0d. Pattern-
 /// matches `field_name` against the model's FK fields and, for a
 /// match, decodes the FK target via the parent's macro-generated
-/// `__rustango_from_aliased_row`, reads the parent's PK, and stores
-/// `ForeignKey::Loaded` on `self`.
+/// `__rustango_from_aliased_row`, and stores `ForeignKey::Loaded` on
+/// `self` under the key the row already holds.
 ///
 /// Always emitted (with empty arms for FK-less models, which
 /// return `Ok(false)` for any field name) so the `T: LoadRelated`
@@ -1091,24 +1111,13 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
         let field_ident = &rel.field_ident;
         let fk_name = ident_name(field_ident);
         let fk_col = fk_name.as_str();
-        let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let guard = join_guard_tokens(rel, &quote!(self));
         let reuse = loaded_reuse_tokens(
             rel,
             &quote!(self),
             &quote!(#root::sql::LoadRelated::__rustango_load_related),
         );
-        let assign = if rel.nullable {
-            quote! {
-                self.#field_ident = ::core::option::Option::Some(
-                    #root::sql::ForeignKey::loaded(_pk, _parent),
-                );
-            }
-        } else {
-            quote! {
-                self.#field_ident = #root::sql::ForeignKey::loaded(_pk, _parent);
-            }
-        };
+        let assign = loaded_assign_tokens(rel, &quote!(self));
         quote! {
             #fk_col => {
                 #guard
@@ -1124,27 +1133,6 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
                         &mut _parent, row, __r, &__next_alias,
                     )?;
                 }
-                // Loud-in-debug, default-in-release: a divergence
-                // between the FK field's declared `K` (drives the
-                // expected `SqlValue::<Variant>`) and the parent's
-                // `__rustango_pk_value` output is a macro-internal
-                // invariant break — surfacing the panic in dev
-                // catches it before users hit silent PK=0 corruption.
-                let _pk = match <#parent_ty>::__rustango_pk_value(&_parent) {
-                    #root::core::SqlValue::#variant_ident(v) => v,
-                    _other => {
-                        ::core::debug_assert!(
-                            false,
-                            "rustango macro bug: load_related on FK `{}` expected \
-                             SqlValue::{} from parent's __rustango_pk_value but got \
-                             {:?} — file a bug at https://github.com/ujeenet/rustango",
-                            #fk_col,
-                            ::core::stringify!(#variant_ident),
-                            _other,
-                        );
-                        #default_expr
-                    }
-                };
                 #assign
                 ::core::result::Result::Ok(true)
             }
@@ -1203,24 +1191,13 @@ fn load_related_impl_my_tokens(
         let field_ident = &rel.field_ident;
         let fk_name = ident_name(field_ident);
         let fk_col = fk_name.as_str();
-        let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let guard = join_guard_tokens(rel, &quote!(__self));
         let reuse = loaded_reuse_tokens(
             rel,
             &quote!(__self),
             &quote!(#root::sql::LoadRelatedMy::__rustango_load_related_my),
         );
-        let assign = if rel.nullable {
-            quote! {
-                __self.#field_ident = ::core::option::Option::Some(
-                    #root::sql::ForeignKey::loaded(_pk, _parent),
-                );
-            }
-        } else {
-            quote! {
-                __self.#field_ident = #root::sql::ForeignKey::loaded(_pk, _parent);
-            }
-        };
+        let assign = loaded_assign_tokens(rel, &quote!(__self));
         // `self` IS hygiene-tracked through macro_rules — emitted from
         // a different context than the `&mut self` parameter inside
         // the macro_rules-expanded fn. Pass it through as `__self`
@@ -1238,23 +1215,6 @@ fn load_related_impl_my_tokens(
                         &mut _parent, row, __r, &__next_alias,
                     )?;
                 }
-                // See note in `load_related_impl_tokens` (PG twin) —
-                // the same loud-in-debug invariant guard.
-                let _pk = match <#parent_ty>::__rustango_pk_value(&_parent) {
-                    #root::core::SqlValue::#variant_ident(v) => v,
-                    _other => {
-                        ::core::debug_assert!(
-                            false,
-                            "rustango macro bug: load_related on FK `{}` expected \
-                             SqlValue::{} from parent's __rustango_pk_value but got \
-                             {:?} — file a bug at https://github.com/ujeenet/rustango",
-                            #fk_col,
-                            ::core::stringify!(#variant_ident),
-                            _other,
-                        );
-                        #default_expr
-                    }
-                };
                 #assign
                 ::core::result::Result::Ok(true)
             }
@@ -1280,24 +1240,13 @@ fn load_related_impl_sqlite_tokens(
         let field_ident = &rel.field_ident;
         let fk_name = ident_name(field_ident);
         let fk_col = fk_name.as_str();
-        let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let guard = join_guard_tokens(rel, &quote!(__self));
         let reuse = loaded_reuse_tokens(
             rel,
             &quote!(__self),
             &quote!(#root::sql::LoadRelatedSqlite::__rustango_load_related_sqlite),
         );
-        let assign = if rel.nullable {
-            quote! {
-                __self.#field_ident = ::core::option::Option::Some(
-                    #root::sql::ForeignKey::loaded(_pk, _parent),
-                );
-            }
-        } else {
-            quote! {
-                __self.#field_ident = #root::sql::ForeignKey::loaded(_pk, _parent);
-            }
-        };
+        let assign = loaded_assign_tokens(rel, &quote!(__self));
         quote! {
             #fk_col => {
                 #guard
@@ -1311,21 +1260,6 @@ fn load_related_impl_sqlite_tokens(
                         &mut _parent, row, __r, &__next_alias,
                     )?;
                 }
-                let _pk = match <#parent_ty>::__rustango_pk_value(&_parent) {
-                    #root::core::SqlValue::#variant_ident(v) => v,
-                    _other => {
-                        ::core::debug_assert!(
-                            false,
-                            "rustango macro bug: load_related on FK `{}` expected \
-                             SqlValue::{} from parent's __rustango_pk_value but got \
-                             {:?} — file a bug at https://github.com/ujeenet/rustango",
-                            #fk_col,
-                            ::core::stringify!(#variant_ident),
-                            _other,
-                        );
-                        #default_expr
-                    }
-                };
                 #assign
                 ::core::result::Result::Ok(true)
             }
@@ -2157,10 +2091,10 @@ struct CollectedFields {
     /// `self.<field> = Row::try_get(&row, "<col>")?;` for each Auto
     /// field. Run after `insert_returning` to populate the model.
     auto_assigns: Vec<TokenStream2>,
-    /// `(ident, column_literal)` pairs for every Auto field. Used by
+    /// `(ident, column_literal, is_uuid)` for every Auto field. Used by
     /// the bulk_insert codegen to rebuild assigns against `_row_mut`
     /// instead of `self`.
-    auto_field_idents: Vec<(syn::Ident, String)>,
+    auto_field_idents: Vec<(syn::Ident, String, bool)>,
     /// #1028 — `(ident, column)` for each `generated_as` field. Drives
     /// the PG/SQLite RETURNING refresh that decodes the DB-computed value
     /// back into the struct after insert (MySQL has no RETURNING → the
@@ -2385,8 +2319,11 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                         .map(|ty| (ident.clone(), ty));
                 }
                 out.returning_cols.push(quote!(#column));
-                out.auto_field_idents
-                    .push((ident.clone(), info.column.clone()));
+                out.auto_field_idents.push((
+                    ident.clone(),
+                    info.column.clone(),
+                    info.fk_pk_kind == DetectedKind::Uuid,
+                ));
                 out.auto_assigns.push(quote! {
                     self.#ident = #root::sql::try_get_returning(_returning_row, #column)?;
                 });
@@ -2599,6 +2536,24 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
     Ok(out)
 }
 
+/// A derived index name within PG's 63 bytes (MySQL takes 64); a longer one
+/// keeps a prefix plus a hash of the whole, so two long names stay distinct.
+fn capped_index_name(name: String) -> String {
+    const MAX: usize = 63;
+    if name.len() <= MAX {
+        return name;
+    }
+    // FNV-1a: stable across builds, unlike `DefaultHasher`.
+    let hash = name.bytes().fold(0x811c_9dc5_u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    });
+    let mut cut = MAX - 9;
+    while !name.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}_{hash:08x}", &name[..cut])
+}
+
 fn model_impl_tokens(
     struct_name: &syn::Ident,
     model_name: &str,
@@ -2695,14 +2650,10 @@ fn model_impl_tokens(
         // collision-free name from the table + columns
         // (`<table>_<col>_<col>_idx`) instead of a shared literal that
         // would clash the moment a model declares two unnamed indexes.
-        // Capped at Postgres's 63-char identifier limit.
-        let derived_name = idx.name.clone().unwrap_or_else(|| {
-            let mut n = format!("{table}_{}_idx", idx.columns.join("_"));
-            if n.len() > 63 {
-                n.truncate(63);
-            }
-            n
-        });
+        let derived_name = idx
+            .name
+            .clone()
+            .unwrap_or_else(|| capped_index_name(format!("{table}_{}_idx", idx.columns.join("_"))));
         let name = derived_name.as_str();
         let cols: Vec<&str> = idx.columns.iter().map(String::as_str).collect();
         let unique = idx.unique;
@@ -3193,7 +3144,7 @@ fn inherent_impl_tokens(
         let assigned: Vec<syn::Ident> = fields
             .auto_field_idents
             .iter()
-            .map(|(ident, _)| ident.clone())
+            .map(|(ident, _, _)| ident.clone())
             .collect();
         restore_auto_now_unless(
             &assigned,
@@ -3469,8 +3420,7 @@ fn inherent_impl_tokens(
                     quote! {
                         (
                             #column_lit,
-                            #root::__serde_json::to_value(&self.#ident)
-                                .unwrap_or(#root::__serde_json::Value::Null),
+                            #root::core::__json_value(&self.#ident),
                         )
                     }
                 })
@@ -4033,8 +3983,7 @@ fn inherent_impl_tokens(
                                         _audit_before_row, #column_lit,
                                     ) {
                                         ::core::result::Result::Ok(v) => {
-                                            #root::__serde_json::to_value(&v)
-                                                .unwrap_or(#root::__serde_json::Value::Null)
+                                            #root::core::__json_value(&v)
                                         }
                                         ::core::result::Result::Err(_) => #root::__serde_json::Value::Null,
                                     },
@@ -6698,10 +6647,7 @@ fn inherent_impl_tokens(
                         match #root::sql::sqlx::Row::try_get::<#value_ty, _>(
                             &_audit_before_row, #column_lit,
                         ) {
-                            ::core::result::Result::Ok(v) => {
-                                #root::__serde_json::to_value(&v)
-                                    .unwrap_or(#root::__serde_json::Value::Null)
-                            }
+                            ::core::result::Result::Ok(v) => #root::core::__json_value(&v),
                             ::core::result::Result::Err(_) => #root::__serde_json::Value::Null,
                         },
                     )
@@ -7966,7 +7912,15 @@ fn inherent_impl_tokens(
         let auto_assigns_sqlite: Vec<TokenStream2> = fields
             .auto_field_idents
             .iter()
-            .map(|(ident, column)| {
+            .map(|(ident, column, uuid)| {
+                // A UUID a column default wrote is TEXT, not the 16 bytes sqlx binds.
+                if *uuid {
+                    return quote! {
+                        self.#ident = #root::sql::Auto::Set(#root::sql::try_get_flat_sqlite(
+                            _returning_row, #column
+                        )?);
+                    };
+                }
                 quote! {
                     self.#ident = #root::sql::try_get_returning_sqlite(
                         _returning_row, #column
@@ -8191,7 +8145,7 @@ fn inherent_impl_tokens(
 /// `_row_mut` instead of `self`.
 fn bulk_auto_assigns_for_row(fields: &CollectedFields) -> TokenStream2 {
     let root = rustango_root();
-    let lines = fields.auto_field_idents.iter().map(|(ident, column)| {
+    let lines = fields.auto_field_idents.iter().map(|(ident, column, _)| {
         let col_lit = column.as_str();
         quote! {
             _row_mut.#ident = #root::sql::sqlx::Row::try_get(
@@ -11505,11 +11459,12 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
              has no meaning on a non-FK column.",
         ));
     }
-    if attrs.on_delete.as_deref() == Some("set_null") && fk_inner.is_some() && !nullable {
+    if attrs.on_delete.as_deref() == Some("set_null") && !nullable {
         return Err(syn::Error::new_spanned(
             field,
             "`on_delete = \"set_null\"` needs a nullable column: use \
-             `Option<ForeignKey<T>>`.",
+             `Option<ForeignKey<T>>` or `Option<…>` (spelled out; a type \
+             alias for `Option` is not seen).",
         ));
     }
     let fk_on_delete = match attrs.on_delete.as_deref() {
@@ -11564,7 +11519,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let from_aliased_row_init = quote! {
         #ident: #root::sql::sqlx::Row::try_get(
             row,
-            ::std::format!("{}__{}", prefix, #column_lit).as_str(),
+            #root::core::joins::joined_label(prefix, #column_lit).as_str(),
         )?
     };
     // `Auto<Uuid>` and `ForeignKey<_, Uuid>` decode through their own
@@ -11576,7 +11531,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             quote! {
                 #ident: #root::sql::try_get_flat_my(
                     row,
-                    ::std::format!("{}__{}", prefix, #column_lit).as_str(),
+                    #root::core::joins::joined_label(prefix, #column_lit).as_str(),
                 )?
             },
         )
@@ -11720,7 +11675,16 @@ fn relation_tokens(
                  remove the `fk = \"…\"` / `o2o = \"…\"` attribute.",
             ));
         }
-        let on = attrs.on.as_deref().unwrap_or("id");
+        // No `on`: the target's PK column, which may be renamed.
+        let on = match attrs.on.as_deref() {
+            Some(on) => quote!(#on),
+            None => quote! {
+                match <#inner as #root::core::Model>::SCHEMA.pk_column() {
+                    ::core::option::Option::Some(c) => c,
+                    ::core::option::Option::None => "id",
+                }
+            },
+        };
         return Ok(quote! {
             ::core::option::Option::Some(#root::core::Relation::fk(
                 <#inner as #root::core::Model>::SCHEMA.table,
@@ -11865,64 +11829,6 @@ impl DetectedKind {
 
     fn is_integer(self) -> bool {
         matches!(self, Self::I16 | Self::I32 | Self::I64)
-    }
-
-    /// `(SqlValue::<Variant>, default expr)` for emitting the
-    /// `match SqlValue { … }` arm in `LoadRelated::__rustango_load_related`
-    /// for a `ForeignKey<T, K>` FK whose K maps to `self`. The default
-    /// fires only when the parent's `__rustango_pk_value` returns a
-    /// different variant than expected, which is a compile-time bug —
-    /// but we still need a value-typed fallback to keep the match
-    /// total.
-    fn sqlvalue_match_arm(self) -> (TokenStream2, TokenStream2) {
-        let root = rustango_root();
-        match self {
-            Self::I16 => (quote!(I16), quote!(0i16)),
-            Self::I32 => (quote!(I32), quote!(0i32)),
-            Self::I64 => (quote!(I64), quote!(0i64)),
-            Self::F32 => (quote!(F32), quote!(0f32)),
-            Self::F64 => (quote!(F64), quote!(0f64)),
-            Self::Bool => (quote!(Bool), quote!(false)),
-            Self::String => (quote!(String), quote!(::std::string::String::new())),
-            Self::DateTime => (
-                quote!(DateTime),
-                quote!(<#root::__chrono::DateTime<#root::__chrono::Utc> as ::std::default::Default>::default()),
-            ),
-            Self::Date => (
-                quote!(Date),
-                quote!(<#root::__chrono::NaiveDate as ::std::default::Default>::default()),
-            ),
-            Self::Time => (
-                quote!(Time),
-                quote!(<#root::__chrono::NaiveTime as ::std::default::Default>::default()),
-            ),
-            Self::Uuid => (quote!(Uuid), quote!(#root::__uuid::Uuid::nil())),
-            Self::Json => (quote!(Json), quote!(#root::__serde_json::Value::Null)),
-            Self::Decimal => (
-                quote!(Decimal),
-                quote!(<#root::__rust_decimal::Decimal as ::std::default::Default>::default()),
-            ),
-            Self::Binary => (quote!(Binary), quote!(::std::vec::Vec::<u8>::new())),
-            // Arrays (#341) can never be a foreign-key primary key, so
-            // this arm is never reached at runtime — but the match must
-            // stay total. A bare empty `SqlValue::Array` is the dummy.
-            Self::ArrayText | Self::ArrayInt | Self::ArrayBigInt => {
-                (quote!(Array), quote!(::std::vec::Vec::new()))
-            }
-            // Ranges (#343) likewise can't be a FK PK — never reached.
-            Self::RangeInt
-            | Self::RangeBigInt
-            | Self::RangeNumeric
-            | Self::RangeDate
-            | Self::RangeDateTime => (quote!(RangeLiteral), quote!(::std::string::String::new())),
-            // HStore (#342) can't be a FK PK — never reached.
-            Self::HStore => (quote!(HStore), quote!(::std::vec::Vec::new())),
-            // Vector (#824) can't be a FK PK — never reached.
-            Self::Vector => (quote!(Vector), quote!(::std::vec::Vec::new())),
-            // Geometry (#443) can't be a FK PK — never reached (arm is
-            // exhaustiveness-only; never interpolated into emitted code).
-            Self::Geometry => (quote!(Geometry), quote!(::std::vec::Vec::new())),
-        }
     }
 }
 
@@ -14029,6 +13935,31 @@ mod field_attr_tests {
             struct Child {
                 #[rustango(primary_key)] id: i64,
                 #[rustango(on_delete = "set_null")] parent: Option<ForeignKey<Parent>>,
+            }
+        };
+        assert!(expand(&input).is_ok());
+    }
+
+    /// The same for `fk = "…"` / `o2o = "…"` on a plain column.
+    #[test]
+    fn set_null_needs_a_nullable_fk_column() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[rustango(table = "c")]
+            struct Child {
+                #[rustango(primary_key)] id: i64,
+                #[rustango(fk = "p", on_delete = "set_null")] parent_id: i64,
+                #[rustango(o2o = "q", on_delete = "set_null")] other_id: Option<i64>,
+            }
+        };
+        let err = expand(&input).err().expect("refused");
+        assert!(err.to_string().contains("set_null"), "{err}");
+        let input: DeriveInput = syn::parse_quote! {
+            #[rustango(table = "c")]
+            struct Child {
+                #[rustango(primary_key)] id: i64,
+                #[rustango(fk = "p", on_delete = "set_null")] parent_id: std::option::Option<i64>,
+                #[rustango(o2o = "q", on_delete = "set_null")] other_id: ::core::option::Option<i64>,
+                #[rustango(on_delete = "set_null")] parent: core::option::Option<ForeignKey<Parent>>,
             }
         };
         assert!(expand(&input).is_ok());

@@ -7,7 +7,7 @@ Hypercorn, **Laravel** sur php-fpm et sur Octane, et **WordPress**. Chaque
 application rend le même HTML à partir des mêmes données.
 
 Mesuré le **13 octobre 2026** : rustango release 0.60.6 dans les tableaux principaux,
-rustango 0.60.11 dans [son propre tableau](#rustango-0607). Un seul harnais, une
+rustango 0.60.12 dans [son propre tableau](#rustango-0607). Un seul harnais, une
 seule machine, les mêmes règles pour chaque application.
 
 ## Résumé

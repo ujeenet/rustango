@@ -169,6 +169,9 @@ pub fn make_migrations_scoped(
     if changes.is_empty() {
         return Ok(None);
     }
+    for w in super::diff::irreversible_drops(&prev_snapshot, &changes) {
+        tracing::warn!(target: "rustango::migrate", "{w}");
+    }
 
     let suffix = name_override.map_or_else(
         || auto_name(&changes, prior_scoped.is_empty()),
@@ -458,6 +461,9 @@ pub fn make_migrations_from(
     let changes = detect_changes(&prev_snapshot, current);
     if changes.is_empty() {
         return Ok(None);
+    }
+    for w in super::diff::irreversible_drops(&prev_snapshot, &changes) {
+        tracing::warn!(target: "rustango::migrate", "{w}");
     }
 
     let suffix = name_override.map_or_else(|| auto_name(&changes, prior.is_empty()), str::to_owned);
@@ -844,7 +850,15 @@ pub fn make_merge_migration(dir: &Path) -> Result<Option<Migration>, MigrateErro
     let (head, others) = branch.split_last().expect("a branch has 2+ leaves");
     let mut snapshot = effective_snapshot(&chain, head);
     for leaf in others {
-        snapshot.merge_branch(&base, &effective_snapshot(&chain, leaf));
+        if let Err(conflicts) = snapshot.merge_branch(&base, &effective_snapshot(&chain, leaf)) {
+            return Err(MigrateError::Validation(format!(
+                "makemigrations --merge: `{}` and `{}` both changed: {}. \
+                 Reconcile the branches by hand, then merge again",
+                head.name,
+                leaf.name,
+                conflicts.join("; "),
+            )));
+        }
     }
 
     // Point the merge node at the last leaf. Name order already applies
@@ -1544,5 +1558,68 @@ mod tests {
         );
         assert!(make_merge_migration(&dir).unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Both branches changing one thing differently is refused, not won by
+    /// the other branch or the drop.
+    #[test]
+    fn merge_refuses_conflicting_branches() {
+        let mut nullable = posts_with(&["c"]);
+        nullable
+            .fields
+            .iter_mut()
+            .find(|f| f.column == "c")
+            .unwrap()
+            .nullable = true;
+        let mut longer = posts_with(&["c"]);
+        longer
+            .fields
+            .iter_mut()
+            .find(|f| f.column == "c")
+            .unwrap()
+            .max_length = Some(9);
+        // Both add `tags.x`, with different types.
+        let tags = |ty: &str| {
+            let mut t = t("tags");
+            let mut x = t.fields[0].clone();
+            (x.name, x.column, x.primary_key, x.auto, x.ty) =
+                ("x".into(), "x".into(), false, false, ty.into());
+            t.fields.push(x);
+            t
+        };
+        let model = |m: &str| TableSnapshot {
+            model: m.into(),
+            ..posts_with(&["c"])
+        };
+        for (a, b, what) in [
+            (vec![nullable.clone()], vec![], "table `posts`"),
+            (vec![], vec![nullable.clone()], "table `posts`"),
+            (vec![nullable], vec![longer], "column `c`"),
+            (
+                vec![posts_with(&["c"]), tags("i64")],
+                vec![posts_with(&["c"]), tags("string")],
+                "table `tags` column `x`",
+            ),
+            (
+                vec![model("PostA")],
+                vec![model("PostB")],
+                "table `posts` model",
+            ),
+        ] {
+            let dir = tempdir();
+            write_mig(
+                &dir,
+                &mig_at("0001_initial", None, snap_with(vec![posts_with(&["c"])])),
+            );
+            write_mig(&dir, &mig_at("0002a", Some("0001_initial"), snap_with(a)));
+            write_mig(&dir, &mig_at("0002b", Some("0001_initial"), snap_with(b)));
+            let err = make_merge_migration(&dir).expect_err(what);
+            assert!(
+                matches!(&err, MigrateError::Validation(m) if m.contains(what)),
+                "{err:?}"
+            );
+            assert!(!dir.join("0003_merge.json").exists(), "{what}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

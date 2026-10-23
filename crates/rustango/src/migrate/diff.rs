@@ -481,6 +481,27 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     changes
 }
 
+/// Warnings for the dropped NOT NULL columns with no default in `changes`:
+/// their re-add on downgrade is refused, as for any such AddColumn.
+pub(crate) fn irreversible_drops(prev: &SchemaSnapshot, changes: &[SchemaChange]) -> Vec<String> {
+    changes
+        .iter()
+        .filter_map(|c| match c {
+            SchemaChange::DropColumn { table, column } => prev
+                .table(table)
+                .and_then(|t| t.field(column))
+                .filter(|f| !f.nullable && f.default.is_none())
+                .map(|_| {
+                    format!(
+                        "dropping NOT NULL `{table}.{column}` with no default: this migration \
+                         cannot be unapplied; add a `default` first to keep it reversible"
+                    )
+                }),
+            _ => None,
+        })
+        .collect()
+}
+
 pub(super) fn create_index(idx: &super::snapshot::IndexSnapshot) -> SchemaChange {
     SchemaChange::CreateIndex {
         name: idx.name.clone(),
@@ -2677,6 +2698,32 @@ mod sql_type_tests {
             "{}",
             out.immediate[1]
         );
+    }
+
+    /// makemigrations warns about a drop whose downgrade is refused.
+    #[test]
+    fn dropping_a_not_null_column_without_default_warns() {
+        let nullable = FieldSnapshot {
+            column: "y".into(),
+            nullable: true,
+            ..fs("i32", false)
+        };
+        let snap = SchemaSnapshot {
+            tables: vec![TableSnapshot {
+                name: "t".into(),
+                model: "T".into(),
+                fields: vec![fs("i32", false), nullable],
+                composite_fks: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let drop = |column: &str| SchemaChange::DropColumn {
+            table: "t".into(),
+            column: column.into(),
+        };
+        let warned = irreversible_drops(&snap, &[drop("x"), drop("y")]);
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].contains("`t.x`"), "{}", warned[0]);
     }
 
     #[test]

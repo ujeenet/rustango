@@ -212,3 +212,14 @@ impl<T: Into<SqlValue>> From<Option<T>> for SqlValue {
         }
     }
 }
+
+/// `v` as JSON, with each `f32` at its own digits: `serde_json::to_value`
+/// widens `0.1_f32` to `0.10000000149011612`, the text form does not.
+#[doc(hidden)]
+#[must_use]
+pub fn __json_value<T: serde::Serialize + ?Sized>(v: &T) -> serde_json::Value {
+    serde_json::to_string(v)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null)
+}

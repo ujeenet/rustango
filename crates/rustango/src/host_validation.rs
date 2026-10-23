@@ -61,7 +61,9 @@ enum Pattern {
 
 impl Pattern {
     fn parse(entry: &str) -> Option<Self> {
+        // Hosts are compared without the trailing FQDN dot; so are entries.
         let entry = entry.trim();
+        let entry = entry.strip_suffix('.').unwrap_or(entry);
         if entry.is_empty() {
             return None;
         }
@@ -138,10 +140,9 @@ impl AllowedHostsLayer {
         if self.patterns.is_empty() {
             return true;
         }
-        let Some((host, _)) = crate::urls::split_host_port(host) else {
+        let Some(host) = crate::urls::normalize_host(host) else {
             return false;
         };
-        let host = host.to_ascii_lowercase();
         self.patterns.iter().any(|p| p.matches(&host))
     }
 }
@@ -225,6 +226,16 @@ mod tests {
         let layer = AllowedHostsLayer::new(["example.com"]);
         assert!(layer.permits("example.com:8080"));
         assert!(layer.permits("example.com:443"));
+    }
+
+    #[test]
+    fn trailing_dot_host_matches_like_the_resolver() {
+        let layer = AllowedHostsLayer::new(["example.com", ".app.test", "fqdn.test."]);
+        assert!(layer.permits("example.com."));
+        assert!(layer.permits("Example.COM.:8080"));
+        assert!(layer.permits("acme.app.test."));
+        assert!(layer.permits("fqdn.test"));
+        assert!(!layer.permits("example.com.."));
     }
 
     #[test]

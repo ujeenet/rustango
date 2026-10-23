@@ -224,3 +224,29 @@ fn macro_results_chain_via_and_or() {
     assert!(sql.contains("AND"), "expected AND in: {sql}");
     assert!(sql.contains("ILIKE"), "expected ILIKE in: {sql}");
 }
+
+// ---------- Raw-ident fields ----------
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "q_kind")]
+#[allow(dead_code)]
+pub struct Kind {
+    #[rustango(primary_key)]
+    id: i64,
+    #[rustango(max_length = 20)]
+    r#type: String,
+}
+
+/// A keyword field resolves to its raw-ident column, with or without a suffix.
+#[test]
+fn raw_ident_field_expands() {
+    let typed = || QuerySet::<Kind>::default().where_(Kind::r#type.eq("a"));
+    let raw = QuerySet::<Kind>::default().where_(Q!(Kind.r#type = "a"));
+    let sql = |qs: QuerySet<Kind>| Postgres.compile_select(&qs.compile().unwrap()).unwrap().sql;
+    assert_eq!(sql(raw), sql(typed()));
+    let in_typed = QuerySet::<Kind>::default().where_(Kind::r#type.is_in(vec!["a"]));
+    let in_bare = QuerySet::<Kind>::default().where_(Q!(Kind.type__in = vec!["a"]));
+    let in_raw = QuerySet::<Kind>::default().where_(Q!(Kind.r#type__in = vec!["a"]));
+    assert_eq!(sql(in_bare), sql(in_typed.clone()));
+    assert_eq!(sql(in_raw), sql(in_typed));
+}
