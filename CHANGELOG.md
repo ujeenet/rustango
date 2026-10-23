@@ -48,6 +48,26 @@ A `DoUpdate` conflict with empty `update_columns` (e.g. `bulk_upsert_pool(rows, 
 
 `Q!(Post.r#type = …)` and `Q!(Post.type__in = …)` expand to `Post::r#type`; the first panicked in the macro, the second wrote `Post::type`.
 
+### Fixed — MCP audit redacts more secret-looking arguments
+
+Keys naming a JWT, bearer, cookie, session, credential, passphrase, PIN or any `*_key` are now scrubbed from tool-call audit rows.
+
+### Fixed — fewer secrets in logs
+
+CSP reports log URLs without query or fragment, `EnvSecretsResolver` errors no longer echo the reference, and an undecodable OAuth2 response no longer quotes its body.
+
+### Fixed — admin login and session gate fail closed on a database error
+
+A failed user lookup is a 503, not "Invalid credentials", and is not counted toward the lockout; the session gate returns 503 instead of trusting the cookie.
+
+### Fixed — a trailing-dot `Host` resolves its tenant
+
+`acme.app.test.` is the same host as `acme.app.test` for tenant resolution, apex detection (a configured apex too), `AllowedHostsLayer` and `url_has_allowed_host_and_scheme`.
+
+### Fixed — member SSO login with a bad IdP authorize URL
+
+A discovery URL a header cannot carry is a 500, not a panic.
+
 ## [0.60.11] — 2026-10-22
 
 **Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`; `RequestIdLayer` no longer echoes an untrusted client's `X-Request-Id`; a SQLite UUID key stored both as BLOB and TEXT is now a 404 in ViewSets and template views. See UPGRADING.

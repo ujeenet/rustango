@@ -167,6 +167,18 @@ A pending file sorting before the newest applied one (a merged branch) now appli
 
 On PostgreSQL and SQLite they return `ExecError::Sql(SqlError::EmptyUpdateSet)`, as MySQL did, instead of a driver syntax error. Use `insert_or_ignore` for "insert, skip conflicts".
 
+### MCP audit hides more arguments
+
+Tool-call audit rows now redact any argument whose key contains `key`, `session`, `cookie`, `jwt`, `bearer`, `credential(s)`, `passphrase`, `pwd` or `pin` as a word (for example `cache_key`).
+
+### Admin returns 503 when it cannot read the user
+
+The bare admin's login and session gate now answer 503 on a database error (for example before the system migration ran) instead of failing open. Run `migrate` before serving.
+
+### Trailing-dot hosts
+
+A `Host` ending in `.` now matches the same tenant and `allowed_hosts` entries as the host without it; an entry's own trailing dot is ignored.
+
 ## 0.60.11
 
 ### `csrf_trusted_origins` takes effect
