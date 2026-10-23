@@ -11443,7 +11443,8 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         return Err(syn::Error::new_spanned(
             field,
             "`on_delete = \"set_null\"` needs a nullable column: use \
-             `Option<ForeignKey<T>>` or `Option<…>`.",
+             `Option<ForeignKey<T>>` or `Option<…>` (spelled out; a type \
+             alias for `Option` is not seen).",
         ));
     }
     let fk_on_delete = match attrs.on_delete.as_deref() {
@@ -13936,8 +13937,9 @@ mod field_attr_tests {
             #[rustango(table = "c")]
             struct Child {
                 #[rustango(primary_key)] id: i64,
-                #[rustango(fk = "p", on_delete = "set_null")] parent_id: Option<i64>,
-                #[rustango(o2o = "q", on_delete = "set_null")] other_id: Option<i64>,
+                #[rustango(fk = "p", on_delete = "set_null")] parent_id: std::option::Option<i64>,
+                #[rustango(o2o = "q", on_delete = "set_null")] other_id: ::core::option::Option<i64>,
+                #[rustango(on_delete = "set_null")] parent: core::option::Option<ForeignKey<Parent>>,
             }
         };
         assert!(expand(&input).is_ok());
