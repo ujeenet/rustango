@@ -1197,20 +1197,19 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
 
     // A re-diff loses these: data and callbacks vanish, a rename turns into drop + add.
     for m in &pending {
-        if let Some(op) = m.forward.iter().find(|op| {
-            matches!(
-                op,
-                Operation::Data(_)
-                    | Operation::Callback(_)
-                    | Operation::Schema(
-                        super::SchemaChange::RenameTable { .. }
-                            | super::SchemaChange::RenameColumn { .. }
-                    )
-            )
+        if let Some((i, kind)) = m.forward.iter().enumerate().find_map(|(i, op)| {
+            let kind = match op {
+                Operation::Data(_) => "data op",
+                Operation::Callback(_) => "callback",
+                Operation::Schema(super::SchemaChange::RenameTable { .. }) => "RenameTable",
+                Operation::Schema(super::SchemaChange::RenameColumn { .. }) => "RenameColumn",
+                Operation::Schema(_) => return None,
+            };
+            Some((i, kind))
         }) {
             return Err(MigrateError::Validation(format!(
-                "migrate --squash: refused — `{}` has a hand-written op a fresh diff would lose: \
-                 {op:?}. Fold the pending files by hand instead.",
+                "migrate --squash: refused — `{}` forward[{i}] is a {kind}, which a fresh diff \
+                 would lose. Fold the pending files by hand instead.",
                 m.name,
             )));
         }
@@ -8376,6 +8375,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
                 .await
                 .expect_err("a re-diff would lose the op");
             assert!(err.to_string().contains("0002_b"), "{op:?}: {err}");
+            assert!(!err.to_string().contains("UPDATE"), "the SQL leaked: {err}");
             assert!(dir.join("0002_b.json").exists(), "{op:?}: the file was deleted");
         }
     }
