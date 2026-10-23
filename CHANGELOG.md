@@ -20,7 +20,7 @@ A failed user lookup is a 503, not "Invalid credentials", and is not counted tow
 
 ### Fixed — a trailing-dot `Host` resolves its tenant
 
-`acme.app.test.` is the same host as `acme.app.test` for tenant resolution, apex detection and `AllowedHostsLayer`.
+`acme.app.test.` is the same host as `acme.app.test` for tenant resolution, apex detection (a configured apex too), `AllowedHostsLayer` and `url_has_allowed_host_and_scheme`.
 
 ### Fixed — member SSO login with a bad IdP authorize URL
 

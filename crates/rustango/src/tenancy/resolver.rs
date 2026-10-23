@@ -98,7 +98,7 @@ impl OrgResolver for SubdomainResolver {
             return Ok(None);
         };
         // Apex only — no tenant resolution.
-        if host.eq_ignore_ascii_case(&self.apex_domain) {
+        if is_apex(&host, &self.apex_domain) {
             return Ok(None);
         }
         // Pick up a tenant created or suspended by another pod before
@@ -740,7 +740,13 @@ impl OrgResolver for ChainResolver {
 /// Whether the request's host is the apex, ignoring case like every
 /// other host comparison here (#1856).
 pub(crate) fn host_is_apex(headers: &http::HeaderMap, uri: &http::Uri, apex: &str) -> bool {
-    host_of(headers, uri).is_some_and(|h| h.eq_ignore_ascii_case(apex))
+    host_of(headers, uri).is_some_and(|h| is_apex(&h, apex))
+}
+
+/// `host` (already normalised) is `apex`; the apex comes from config, the
+/// env or a struct literal, so its trailing dot is dropped here.
+fn is_apex(host: &str, apex: &str) -> bool {
+    host.eq_ignore_ascii_case(apex.strip_suffix('.').unwrap_or(apex))
 }
 
 /// Pull the host name from the request, normalised by
@@ -916,6 +922,29 @@ mod tests {
         assert!(host_is_apex(&apex, &path, "app.test"));
         let h2: http::Uri = "https://app.test./x".parse().unwrap();
         assert!(host_is_apex(&http::HeaderMap::new(), &h2, "app.test"));
+    }
+
+    /// A configured apex with a trailing dot still matches.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_trailing_dot_apex_matches() {
+        let _iso = isolated().await;
+        let mut h = http::HeaderMap::new();
+        h.insert(http::header::HOST, "app.test".parse().unwrap());
+        let path: http::Uri = "/".parse().unwrap();
+        assert!(host_is_apex(&h, &path, "App.Test."));
+        // The apex short-circuits before any registry query, so a lazy pool is enough.
+        let pool =
+            Pool::Sqlite(crate::sql::sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap());
+        let parts = http::Request::builder()
+            .uri("/")
+            .header(http::header::HOST, "app.test.")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        let r = SubdomainResolver::new("app.test.");
+        assert!(r.resolve(&parts, &pool).await.unwrap().is_none());
     }
 
     /// An IPv6 `Host` keeps its address, not just `[` (#2043).
