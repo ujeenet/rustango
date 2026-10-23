@@ -1832,6 +1832,40 @@ struct WriteSet {
     writable: Vec<&'static crate::core::FieldSchema>,
     /// Forced by a filter backend; never read from the body.
     pinned: Vec<(&'static crate::core::FieldSchema, SqlValue)>,
+    /// Superuser-only fields this principal may not write, as in the admin.
+    #[cfg_attr(not(feature = "admin"), allow(dead_code))]
+    superuser_only: Vec<&'static str>,
+}
+
+/// The admin's superuser-only fields of `table`, unless the principal is a superuser.
+#[cfg_attr(
+    not(all(feature = "admin", feature = "tenancy")),
+    allow(unused_variables)
+)]
+fn superuser_only_fields(
+    table: &str,
+    write: crate::core::WriteKind,
+    parts: &axum::http::request::Parts,
+) -> Vec<&'static str> {
+    #[cfg(feature = "tenancy")]
+    if parts
+        .extensions
+        .get::<crate::tenancy::middleware::AuthenticatedUser>()
+        .is_some_and(|u| u.is_superuser)
+    {
+        return Vec::new();
+    }
+    #[cfg(feature = "admin")]
+    {
+        use crate::admin::object_permissions::{superuser_fields, AdminWrite};
+        let action = match write {
+            crate::core::WriteKind::Insert => AdminWrite::Add,
+            crate::core::WriteKind::Update => AdminWrite::Change,
+        };
+        superuser_fields(table, action)
+    }
+    #[cfg(not(feature = "admin"))]
+    Vec::new()
 }
 
 impl WriteSet {
@@ -1839,6 +1873,7 @@ impl WriteSet {
     fn for_request(
         state: &ViewSetState,
         parts: &axum::http::request::Parts,
+        write: crate::core::WriteKind,
     ) -> Result<Self, Response> {
         let schema = state.vs.schema;
         let mut pinned: Vec<(&'static crate::core::FieldSchema, SqlValue)> = Vec::new();
@@ -1872,6 +1907,7 @@ impl WriteSet {
                 }
             }
         }
+        let superuser_only = superuser_only_fields(schema.table, write, parts);
         let writable = state
             .vs
             .body_fields()
@@ -1879,11 +1915,13 @@ impl WriteSet {
             .filter(|f| !pinned.iter().any(|(p, _)| p.name == f.name))
             // Only DELETE stamps the soft-delete column; a body never sets it (#2074).
             .filter(|f| schema.soft_delete_column != Some(f.column))
+            .filter(|f| !superuser_only.contains(&f.name))
             .collect();
         Ok(Self {
             schema,
             writable,
             pinned,
+            superuser_only,
         })
     }
 
@@ -1941,6 +1979,12 @@ impl WriteSet {
         // A pin replaces a stamped `auto` value rather than doubling the column.
         out.retain(|(c, _)| !self.pinned.iter().any(|(f, _)| f.column == *c));
         out.extend(self.pinned.iter().map(|(f, v)| (f.column, v.clone())));
+        #[cfg(feature = "admin")]
+        crate::admin::object_permissions::default_locked_flags(
+            self.schema,
+            &self.superuser_only,
+            &mut out,
+        );
         self.check(&out)?;
         Ok(out)
     }
@@ -3147,7 +3191,7 @@ async fn handle_create(
 
     // The read-back is scoped: a row created outside it is not echoed.
     let scope = scope_filters(&state, &parts, &HashMap::new());
-    let write_set = match WriteSet::for_request(&state, &parts) {
+    let write_set = match WriteSet::for_request(&state, &parts, crate::core::WriteKind::Insert) {
         Ok(w) => w,
         Err(resp) => return resp,
     };
@@ -3504,7 +3548,7 @@ async fn update_inner(
     };
     // Scope first: an update must not reach a row this principal cannot see.
     let scope = scope_filters(&state, &parts, &HashMap::new());
-    let write_set = match WriteSet::for_request(&state, &parts) {
+    let write_set = match WriteSet::for_request(&state, &parts, crate::core::WriteKind::Update) {
         Ok(w) => w,
         Err(resp) => return resp,
     };

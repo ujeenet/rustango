@@ -16,6 +16,10 @@ Resolvers now see the request's extensions, so `PortResolver` works under `requi
 
 A gate that sets only `Extension<AdminSession>` now counts as signed in, so its non-superusers get the field locks; an inline add defaults a locked flag as the create form does.
 
+### Fixed — ViewSets keep the admin's superuser-only fields locked
+
+A ViewSet write by anyone but a superuser `AuthenticatedUser` skips the fields `register_admin_superuser_fields!` locks, such as a user's `is_superuser` and `password_hash`.
+
 ## [0.60.11] — 2026-10-22
 
 **Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`; `RequestIdLayer` no longer echoes an untrusted client's `X-Request-Id`; a SQLite UUID key stored both as BLOB and TEXT is now a 404 in ViewSets and template views. See UPGRADING.
