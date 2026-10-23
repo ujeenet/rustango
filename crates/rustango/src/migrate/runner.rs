@@ -3073,6 +3073,9 @@ struct Step {
     /// Live FKs on a column to drop by catalog name before the step.
     #[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
     drop_fks: Option<ColumnRef>,
+    /// Other tables' FK columns referencing the column, dropped the same way.
+    #[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
+    drop_referencing: Vec<ColumnRef>,
     /// A dropped single-column UNIQUE, found by name in the catalog (#1676).
     #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
     drop_unique: Option<ColumnRef>,
@@ -3435,6 +3438,15 @@ fn render_step(
             .filter(|(table, column)| has_fk(table, column))
             .map(|(table, column)| at_column(table, column)),
     };
+    // MySQL's MODIFY of a column other tables' FKs reference fails 3780 under them.
+    let referencing = match change {
+        SC::AlterColumnType { table, column, .. } if dialect.modifies_whole_column() => {
+            referencing_columns(snap, table, column)
+        }
+        _ => Vec::new(),
+    };
+    let drop_referencing: Vec<ColumnRef> =
+        referencing.iter().map(|(t, c)| at_column(t, c)).collect();
     let drop_unique = match change {
         SC::AlterColumnUnique {
             table,
@@ -3468,6 +3480,19 @@ fn render_step(
         let fks = std::mem::take(&mut batch.deferred_fks);
         batch.immediate.extend(fks);
     }
+    // They come back at the end, unless the referencing column's own alter re-adds them.
+    let earlier = at_op.map_or(&[][..], |i| &ops[..i]);
+    for (t, c) in &referencing {
+        if fk_deferred_earlier(t, c, earlier) || fk_readded_later(t, c, later, dialect) {
+            continue;
+        }
+        let end = super::rebuild::name_at_end(t, later);
+        let at_end = super::rebuild::columns_at_end(t, std::slice::from_ref(c), later);
+        batch.deferred_fks.extend(
+            super::diff::column_fk_sql(after, &end, &at_end[0], dialect, schema)
+                .map_err(MigrateError::Validation)?,
+        );
+    }
     // A rebuild already leaves every column the later ops drop.
     batch.rebuild = batch.rebuild.map(|r| {
         let dropped: Vec<&str> = later
@@ -3487,6 +3512,7 @@ fn render_step(
         batch,
         retry,
         drop_fks,
+        drop_referencing,
         drop_unique,
         index_fks,
         readded_now,
@@ -3511,6 +3537,19 @@ fn readds_fk<'a>(
         } if dialect.modifies_whole_column() => Some((table, column)),
         _ => None,
     }
+}
+
+/// The model columns in `snap` whose FK references `table.column`.
+fn referencing_columns(snap: &SchemaSnapshot, table: &str, column: &str) -> Vec<(String, String)> {
+    snap.tables
+        .iter()
+        .flat_map(|t| t.fields.iter().map(move |f| (t, f)))
+        .filter(|(_, f)| {
+            f.fk.as_ref()
+                .is_some_and(|r| r.to == table && r.on == column)
+        })
+        .map(|(t, f)| (t.name.clone(), f.column.clone()))
+        .collect()
 }
 
 /// Whether one of `later` re-adds the FK of `table.column`, so a rename
@@ -3591,17 +3630,19 @@ macro_rules! step_statements {
         use crate::sql::Dialect as _;
         let (step, dialect): (&Step, _) = ($step, $dialect);
         let mut out = Vec::new();
-        if let (Some(fk), Some(sql)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
-            let names: Vec<String> = sqlx::query_scalar(sql)
-                .bind(&fk.table)
-                .bind(&fk.column)
-                .fetch_all(&mut *$conn)
-                .await?;
-            out.extend(
-                names
-                    .iter()
-                    .filter_map(|n| dialect.drop_foreign_key_sql(&fk.table, n)),
-            );
+        if let Some(sql) = dialect.foreign_key_names_sql() {
+            for fk in step.drop_fks.iter().chain(&step.drop_referencing) {
+                let names: Vec<String> = sqlx::query_scalar(sql)
+                    .bind(&fk.table)
+                    .bind(&fk.column)
+                    .fetch_all(&mut *$conn)
+                    .await?;
+                out.extend(
+                    names
+                        .iter()
+                        .filter_map(|n| dialect.drop_foreign_key_sql(&fk.table, n)),
+                );
+            }
         }
         if let (Some(u), Some(sql)) = (&step.drop_unique, dialect.unique_index_names_sql()) {
             let names: Vec<String> = sqlx::query_scalar(sql)

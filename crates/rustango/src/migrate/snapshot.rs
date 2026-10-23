@@ -1071,14 +1071,30 @@ fn junction_conflict(out: &[M2MTableSnapshot]) -> Option<String> {
 }
 
 /// `makemigrations` refuses a conflicting junction as an error; the
-/// snapshot builders can only panic.
+/// snapshot builders can only panic. Also a CHECK name on two tables,
+/// which the snapshot keys by name alone and MySQL keeps schema-wide.
 pub(crate) fn check_registry_junctions() -> Result<(), super::MigrateError> {
-    let out: Vec<M2MTableSnapshot> = inventory::iter::<ModelEntry>
-        .into_iter()
-        .filter(|e| !e.schema.is_view && e.schema.managed)
-        .flat_map(|e| m2m_snapshots(e.schema))
+    let managed = || {
+        inventory::iter::<ModelEntry>
+            .into_iter()
+            .filter(|e| !e.schema.is_view && e.schema.managed)
+    };
+    let out: Vec<M2MTableSnapshot> = managed().flat_map(|e| m2m_snapshots(e.schema)).collect();
+    if let Some(e) = junction_conflict(&out) {
+        return Err(super::MigrateError::Validation(e));
+    }
+    let mut checks: Vec<(&str, &str)> = managed()
+        .flat_map(|e| e.schema.check_constraints.iter().map(|c| (c.name, e.schema.table)))
         .collect();
-    junction_conflict(&out).map_or(Ok(()), |e| Err(super::MigrateError::Validation(e)))
+    checks.sort_unstable();
+    checks.dedup();
+    match checks.windows(2).find(|w| w[0].0 == w[1].0) {
+        Some(w) => Err(super::MigrateError::Validation(format!(
+            "CHECK `{}` is declared on both `{}` and `{}`; give each table its own CHECK name",
+            w[0].0, w[0].1, w[1].1
+        ))),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]

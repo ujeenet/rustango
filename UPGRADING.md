@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Same CHECK name on two tables is refused
+
+`makemigrations` fails until each table has its own CHECK name; before, one of the two was silently left out.
+
 ### Derived index names over 63 bytes change
 
 A derived index name longer than 63 bytes now ends in a hash (field-level ones were not capped), so the next `makemigrations` drops and recreates those indexes once.
