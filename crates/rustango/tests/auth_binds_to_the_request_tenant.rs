@@ -274,14 +274,19 @@ async fn a_port_resolved_tenant_authenticates() {
         Some(("ann", "s3cret")),
     )
     .await;
-    assert_eq!(call(&app, "api.localhost", "ann:s3cret").await, StatusCode::OK);
+    assert_eq!(
+        call(&app, "api.localhost", "ann:s3cret").await,
+        StatusCode::OK
+    );
 }
 
 /// A tenant an outer layer bound must match the one auth resolves.
 #[tokio::test]
 async fn another_bound_tenant_is_refused() {
     let (app, template) = build_app("bound");
-    let app = app.layer(axum::Extension(rustango::tenancy::TenantSlug("beta".into())));
+    let app = app.layer(axum::Extension(rustango::tenancy::TenantSlug(
+        "beta".into(),
+    )));
     let _alpha = tenant_db(
         &template.replace("{slug}", "alpha"),
         Some(("ann", "s3cret")),

@@ -115,11 +115,23 @@ async fn extension_session_locks_superuser_fields(pool: &Pool) {
     let member = admin(pool)
         .build()
         .layer(axum::Extension(AdminSession::new(7, "m", false)));
-    let (status, body) = send(member, "POST", &format!("/aae_widget/{id}"), "name=x&flag=on").await;
+    let (status, body) = send(
+        member,
+        "POST",
+        &format!("/aae_widget/{id}"),
+        "name=x&flag=on",
+    )
+    .await;
     assert!(status.is_redirection(), "{status}: {body}");
     assert!(!flag_of(pool, id).await, "a member must not set the flag");
     // The control: no login is full access.
-    let (status, body) = send(admin(pool).build(), "POST", &format!("/aae_widget/{id}"), "name=x&flag=on").await;
+    let (status, body) = send(
+        admin(pool).build(),
+        "POST",
+        &format!("/aae_widget/{id}"),
+        "name=x&flag=on",
+    )
+    .await;
     assert!(status.is_redirection(), "{status}: {body}");
     assert!(flag_of(pool, id).await);
 }

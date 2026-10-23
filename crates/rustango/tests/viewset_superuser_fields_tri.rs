@@ -123,7 +123,13 @@ async fn a_member_cannot_create_a_superuser(pool: &Pool) {
 async fn a_member_put_keeps_them(pool: &Pool) {
     let (id, _) = seed(pool).await;
     let renamed = unique("vsp");
-    let (status, res) = send(app(pool, false), "PUT", &format!("/users/{id}"), full_body(&renamed)).await;
+    let (status, res) = send(
+        app(pool, false),
+        "PUT",
+        &format!("/users/{id}"),
+        full_body(&renamed),
+    )
+    .await;
     assert!(status.is_success(), "{status}: {res}");
     let u = by_name(pool, &renamed).await;
     assert!(!u.is_superuser);

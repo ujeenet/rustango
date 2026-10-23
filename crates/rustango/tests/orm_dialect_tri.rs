@@ -243,7 +243,10 @@ async fn pk_lookups_on_a_renamed_pk_column(pool: &Pool) {
         .expect("seed acct");
     }
     use rustango::sql::ExistsPool as _;
-    assert!(Acct::objects().contains_pk(pool, 2_i64).await.expect("contains_pk"));
+    assert!(Acct::objects()
+        .contains_pk(pool, 2_i64)
+        .await
+        .expect("contains_pk"));
     let first = Acct::objects().first(pool).await.expect("first");
     assert_eq!(first.map(|a| a.number), Some(1));
     let by_no = Acct::objects()
@@ -265,7 +268,10 @@ async fn pk_lookups_on_a_renamed_pk_column(pool: &Pool) {
         acct: rustango::sql::ForeignKey::unloaded(2),
     };
     e.insert_pool(pool).await.expect("seed entry");
-    assert_eq!(e.acct.clone().get_on(pool).await.expect("fk get_on").name, "b");
+    assert_eq!(
+        e.acct.clone().get_on(pool).await.expect("fk get_on").name,
+        "b"
+    );
     #[cfg(feature = "postgres")]
     assert_eq!(e.acct.get_pool(pool).await.expect("fk get").name, "b");
 }
@@ -276,7 +282,9 @@ async fn empty_having_is_true(pool: &Pool) {
     let rows = Post::objects()
         .values(&["title"])
         .annotate("n", AggregateExpr::Count(None))
-        .having(rustango::core::TypedExpr::from_where_expr(WhereExpr::And(vec![])))
+        .having(rustango::core::TypedExpr::from_where_expr(WhereExpr::And(
+            vec![],
+        )))
         .fetch(pool)
         .await
         .expect("having");
@@ -285,14 +293,28 @@ async fn empty_having_is_true(pool: &Pool) {
 
 /// The `distinct_on` fallback pages the survivors, not the ranked rows.
 async fn distinct_on_pages_the_survivors(pool: &Pool) {
-    seed(pool, &[("a", "apple"), ("b", "apple"), ("c", "banana"), ("d", "cherry")]).await;
+    seed(
+        pool,
+        &[
+            ("a", "apple"),
+            ("b", "apple"),
+            ("c", "banana"),
+            ("d", "cherry"),
+        ],
+    )
+    .await;
     let by_title = || {
         Post::objects()
             .distinct_on(&["title"])
             .order_by(&[("title", false), ("id", false)])
     };
     let titles = |rows: Vec<Post>| rows.into_iter().map(|p| p.title).collect::<Vec<_>>();
-    let page = by_title().limit(1).offset(1).fetch(pool).await.expect("page");
+    let page = by_title()
+        .limit(1)
+        .offset(1)
+        .fetch(pool)
+        .await
+        .expect("page");
     assert_eq!(titles(page), ["banana"]);
     let rest = by_title().offset(1).fetch(pool).await.expect("offset only");
     assert_eq!(titles(rest), ["banana", "cherry"]);
@@ -355,9 +377,11 @@ async fn distinct_on_keeps_join_columns_and_order(pool: &Pool) {
     .await
     .expect("second reading");
     let per_meas = || {
-        Reading::objects()
-            .distinct_on(&["meas"])
-            .order_by(&[("meas", true), ("meas__n", false), ("id", true)])
+        Reading::objects().distinct_on(&["meas"]).order_by(&[
+            ("meas", true),
+            ("meas__n", false),
+            ("id", true),
+        ])
     };
     let rows = per_meas()
         .select_related("meas")

@@ -172,7 +172,10 @@ mod tests {
     fn long_joined_labels_fit_and_stay_distinct() {
         assert_eq!(joined_label("author", "name"), "author__name");
         let alias = "a".repeat(60);
-        let (x, y) = (joined_label(&alias, "first"), joined_label(&alias, "second"));
+        let (x, y) = (
+            joined_label(&alias, "first"),
+            joined_label(&alias, "second"),
+        );
         assert!(x.len() <= 63 && y.len() <= 63, "{x} {y}");
         assert_ne!(x, y);
         assert_eq!(x, joined_label(&alias, "first"));

@@ -2544,9 +2544,9 @@ fn capped_index_name(name: String) -> String {
         return name;
     }
     // FNV-1a: stable across builds, unlike `DefaultHasher`.
-    let hash = name
-        .bytes()
-        .fold(0x811c_9dc5_u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
+    let hash = name.bytes().fold(0x811c_9dc5_u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    });
     let mut cut = MAX - 9;
     while !name.is_char_boundary(cut) {
         cut -= 1;
@@ -2650,9 +2650,10 @@ fn model_impl_tokens(
         // collision-free name from the table + columns
         // (`<table>_<col>_<col>_idx`) instead of a shared literal that
         // would clash the moment a model declares two unnamed indexes.
-        let derived_name = idx.name.clone().unwrap_or_else(|| {
-            capped_index_name(format!("{table}_{}_idx", idx.columns.join("_")))
-        });
+        let derived_name = idx
+            .name
+            .clone()
+            .unwrap_or_else(|| capped_index_name(format!("{table}_{}_idx", idx.columns.join("_"))));
         let name = derived_name.as_str();
         let cols: Vec<&str> = idx.columns.iter().map(String::as_str).collect();
         let unique = idx.unique;

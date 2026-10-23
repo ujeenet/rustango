@@ -3895,7 +3895,11 @@ async fn missing_callback_fails_before_any_op(pool: &Pool) {
         forward,
         ..chain.head()
     };
-    let has_x = || async { exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "x"]).await.is_ok() };
+    let has_x = || async {
+        exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "x"])
+            .await
+            .is_ok()
+    };
     let recorded = || async {
         applied_set_pool_with_ledger(pool, &chain.ledger)
             .await
@@ -3904,14 +3908,20 @@ async fn missing_callback_fails_before_any_op(pool: &Pool) {
     };
 
     chain.write(&mig(vec![add_x.clone(), cb("mad_cb_missing", None)]));
-    let err = chain.migrate(pool).await.expect_err("unregistered callback");
+    let err = chain
+        .migrate(pool)
+        .await
+        .expect_err("unregistered callback");
     assert!(err.contains("mad_cb_missing"), "{err}");
     assert!(!has_x().await, "x was added before the callback lookup");
     assert!(!recorded().await);
 
     chain.write(&mig(vec![cb("mad_cb_noop", Some("mad_cb_missing")), add_x]));
     chain.migrate(pool).await.expect("registered callback");
-    let err = chain.undo(pool, "0002_cb").await.expect_err("unregistered reverse");
+    let err = chain
+        .undo(pool, "0002_cb")
+        .await
+        .expect_err("unregistered reverse");
     assert!(err.contains("mad_cb_missing"), "{err}");
     assert!(has_x().await, "x was dropped before the callback lookup");
     assert!(recorded().await);
@@ -3930,7 +3940,8 @@ async fn drops_after_a_rename_unapply(pool: &Pool) {
     });
     kid["composite_fks"] =
         json!([{"name": "mad_rd_fk", "to": parent, "from": ["a", "b"], "on": ["a", "b"]}]);
-    let uq = json!({"name": "mad_rd_ab_uq", "table": parent, "columns": ["a", "b"], "unique": true});
+    let uq =
+        json!({"name": "mad_rd_ab_uq", "table": parent, "columns": ["a", "b"], "unique": true});
     chain
         .step(
             pool,
@@ -3959,15 +3970,22 @@ async fn drops_after_a_rename_unapply(pool: &Pool) {
         },
     ];
     let after = json!({"tables": [table(parent, ab()), table(u, ab())], "indexes": [uq]});
-    let name = chain.hand(pool, after, ops, None).await.expect("rename, then drops");
+    let name = chain
+        .hand(pool, after, ops, None)
+        .await
+        .expect("rename, then drops");
     chain.undo(pool, &name).await.expect("the drops come back");
     exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "x"])
         .await
         .expect("x is back");
     assert!(
-        exec(pool, "INSERT INTO {} ({}, {}) VALUES (9, 9)", &[t, "a", "b"])
-            .await
-            .is_err(),
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (9, 9)",
+            &[t, "a", "b"]
+        )
+        .await
+        .is_err(),
         "the composite FK is back on {}",
         pool.dialect().name()
     );
@@ -4003,7 +4021,10 @@ async fn create_then_drop_in_one_file_is_refused(pool: &Pool) {
             .await
             .expect_err("no snapshot entry to create from");
         assert!(err.contains("snapshot"), "{err}");
-        assert!(exec(pool, "SELECT 1 FROM {}", &[tmp]).await.is_err(), "{tmp} left");
+        assert!(
+            exec(pool, "SELECT 1 FROM {}", &[tmp]).await.is_err(),
+            "{tmp} left"
+        );
         let head = chain.head().name;
         let applied = rustango::migrate::applied_set_pool_with_ledger(pool, &chain.ledger)
             .await

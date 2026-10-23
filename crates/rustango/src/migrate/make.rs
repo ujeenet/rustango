@@ -1565,9 +1565,19 @@ mod tests {
     #[test]
     fn merge_refuses_conflicting_branches() {
         let mut nullable = posts_with(&["c"]);
-        nullable.fields.iter_mut().find(|f| f.column == "c").unwrap().nullable = true;
+        nullable
+            .fields
+            .iter_mut()
+            .find(|f| f.column == "c")
+            .unwrap()
+            .nullable = true;
         let mut longer = posts_with(&["c"]);
-        longer.fields.iter_mut().find(|f| f.column == "c").unwrap().max_length = Some(9);
+        longer
+            .fields
+            .iter_mut()
+            .find(|f| f.column == "c")
+            .unwrap()
+            .max_length = Some(9);
         // Both add `tags.x`, with different types.
         let tags = |ty: &str| {
             let mut t = t("tags");
@@ -1590,10 +1600,17 @@ mod tests {
                 vec![posts_with(&["c"]), tags("string")],
                 "table `tags` column `x`",
             ),
-            (vec![model("PostA")], vec![model("PostB")], "table `posts` model"),
+            (
+                vec![model("PostA")],
+                vec![model("PostB")],
+                "table `posts` model",
+            ),
         ] {
             let dir = tempdir();
-            write_mig(&dir, &mig_at("0001_initial", None, snap_with(vec![posts_with(&["c"])])));
+            write_mig(
+                &dir,
+                &mig_at("0001_initial", None, snap_with(vec![posts_with(&["c"])])),
+            );
             write_mig(&dir, &mig_at("0002a", Some("0001_initial"), snap_with(a)));
             write_mig(&dir, &mig_at("0002b", Some("0001_initial"), snap_with(b)));
             let err = make_merge_migration(&dir).expect_err(what);

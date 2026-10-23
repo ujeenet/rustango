@@ -8366,7 +8366,11 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             let root = tempfile::tempdir().unwrap();
             let dir = root.path().join("migrations");
             std::fs::create_dir_all(&dir).unwrap();
-            file::write(&dir.join("0001_a.json"), &create_mig("0001_a", None, "sq_a")).unwrap();
+            file::write(
+                &dir.join("0001_a.json"),
+                &create_mig("0001_a", None, "sq_a"),
+            )
+            .unwrap();
             let mut second = create_mig("0002_b", Some("0001_a"), "sq_a");
             second.atomic = false;
             second.forward = vec![op.clone()];
@@ -8376,7 +8380,10 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
                 .expect_err("a re-diff would lose the op");
             assert!(err.to_string().contains("0002_b"), "{op:?}: {err}");
             assert!(!err.to_string().contains("UPDATE"), "the SQL leaked: {err}");
-            assert!(dir.join("0002_b.json").exists(), "{op:?}: the file was deleted");
+            assert!(
+                dir.join("0002_b.json").exists(),
+                "{op:?}: the file was deleted"
+            );
         }
     }
 

@@ -35,7 +35,9 @@ async fn inactive_user_with_grants(pool: &Pool) -> i64 {
     };
     u.insert_pool(pool).await.expect("user");
     let uid = *u.id.get().expect("pk");
-    let role = create_role_pool(&unique("r"), "", pool).await.expect("role");
+    let role = create_role_pool(&unique("r"), "", pool)
+        .await
+        .expect("role");
     grant_role_perm_pool(role, "pit_post.view", pool)
         .await
         .expect("role grant");
@@ -86,9 +88,11 @@ async fn active_user_holds_its_grants(pool: &Pool) {
     if let Some(pg) = pool.as_postgres() {
         use rustango::tenancy::permissions::{has_all_perms, has_any_perm};
         assert!(has_any_perm(uid, &["pit_post.view"], pg).await.unwrap());
-        assert!(has_all_perms(uid, &["pit_post.view", "pit_post.export"], pg)
-            .await
-            .unwrap());
+        assert!(
+            has_all_perms(uid, &["pit_post.view", "pit_post.export"], pg)
+                .await
+                .unwrap()
+        );
     }
 }
 

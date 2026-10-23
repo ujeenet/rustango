@@ -2941,16 +2941,17 @@ where
         crate::sql::Pool::Postgres(pg) => {
             let opts = pg.connect_options();
             let connect_timeout = pg.options().get_acquire_timeout();
-            let mut held = LockSession::<sqlx::PgConnection>::wait(&opts, connect_timeout, |conn| {
-                let sql = acquire.clone();
-                Box::pin(async move {
-                    sqlx::query_scalar::<_, bool>(&sql)
-                        .bind(MIGRATE_LOCK_KEY)
-                        .fetch_one(&mut *conn)
-                        .await
+            let mut held =
+                LockSession::<sqlx::PgConnection>::wait(&opts, connect_timeout, |conn| {
+                    let sql = acquire.clone();
+                    Box::pin(async move {
+                        sqlx::query_scalar::<_, bool>(&sql)
+                            .bind(MIGRATE_LOCK_KEY)
+                            .fetch_one(&mut *conn)
+                            .await
+                    })
                 })
-            })
-            .await?;
+                .await?;
             let result = body.await;
             // Best-effort: PG releases on session close, and the session closes.
             let _ = sqlx::query(&release)
@@ -2965,17 +2966,18 @@ where
             const NAME: &str = "rustango_migrate_";
             let opts = my.connect_options();
             let connect_timeout = my.options().get_acquire_timeout();
-            let mut held = LockSession::<sqlx::MySqlConnection>::wait(&opts, connect_timeout, |conn| {
-                let sql = acquire.clone();
-                Box::pin(async move {
-                    let got: Option<i64> = sqlx::query_scalar(&sql)
-                        .bind(NAME)
-                        .fetch_one(&mut *conn)
-                        .await?;
-                    mysql_lock_taken(got)
+            let mut held =
+                LockSession::<sqlx::MySqlConnection>::wait(&opts, connect_timeout, |conn| {
+                    let sql = acquire.clone();
+                    Box::pin(async move {
+                        let got: Option<i64> = sqlx::query_scalar(&sql)
+                            .bind(NAME)
+                            .fetch_one(&mut *conn)
+                            .await?;
+                        mysql_lock_taken(got)
+                    })
                 })
-            })
-            .await?;
+                .await?;
             let result = body.await;
             let _ = sqlx::query(&release).bind(NAME).execute(held.conn()).await;
             held.close().await;
@@ -2987,23 +2989,24 @@ where
                 return body.await;
             };
             let connect_timeout = sq.options().get_acquire_timeout();
-            let held = LockSession::<sqlx::SqliteConnection>::wait(&opts, connect_timeout, |conn| {
-                let sql = acquire.clone();
-                Box::pin(async move {
-                    // SQLITE_BUSY in any of its extended codes.
-                    let busy = |e: &sqlx::Error| {
-                        e.as_database_error()
-                            .and_then(|d| d.code()?.parse::<i32>().ok())
-                            .is_some_and(|c| c & 0xff == 5)
-                    };
-                    match sqlx::query(&sql).execute(&mut *conn).await {
-                        Ok(_) => Ok(true),
-                        Err(e) if busy(&e) => Ok(false),
-                        Err(e) => Err(e),
-                    }
+            let held =
+                LockSession::<sqlx::SqliteConnection>::wait(&opts, connect_timeout, |conn| {
+                    let sql = acquire.clone();
+                    Box::pin(async move {
+                        // SQLITE_BUSY in any of its extended codes.
+                        let busy = |e: &sqlx::Error| {
+                            e.as_database_error()
+                                .and_then(|d| d.code()?.parse::<i32>().ok())
+                                .is_some_and(|c| c & 0xff == 5)
+                        };
+                        match sqlx::query(&sql).execute(&mut *conn).await {
+                            Ok(_) => Ok(true),
+                            Err(e) if busy(&e) => Ok(false),
+                            Err(e) => Err(e),
+                        }
+                    })
                 })
-            })
-            .await;
+                .await;
             // A directory or file that refuses the lock file, as a read-only one does.
             let mut held = match held {
                 Ok(held) => held,
@@ -3753,9 +3756,10 @@ macro_rules! step_statements {
                     .filter_map(|n| dialect.drop_foreign_key_sql(&fk.table, n)),
             );
         }
-        if let (Some((table, column)), Some(sql)) =
-            (&step.drop_referencing, dialect.referencing_foreign_keys_sql())
-        {
+        if let (Some((table, column)), Some(sql)) = (
+            &step.drop_referencing,
+            dialect.referencing_foreign_keys_sql(),
+        ) {
             let fks: Vec<(String, String)> = sqlx::query_as(sql)
                 .bind(table)
                 .bind(column)

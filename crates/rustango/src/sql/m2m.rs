@@ -370,10 +370,8 @@ async fn delete(
 /// `set`s under READ COMMITTED both delete the old rows and keep both inserts.
 fn source_lock(source: &'static ModelSchema, pk: &SqlValue) -> Option<SelectQuery> {
     let col = source.pk_column()?;
-    let mut q = SelectQuery::new(source).where_clause(WhereExpr::and_predicates(vec![eq(
-        col,
-        pk.clone(),
-    )]));
+    let mut q =
+        SelectQuery::new(source).where_clause(WhereExpr::and_predicates(vec![eq(col, pk.clone())]));
     q.projection = Some(vec![col]);
     q.lock_mode = Some(crate::core::LockMode {
         no_key: true,
@@ -406,7 +404,7 @@ async fn replace(
         let stmt = pool.dialect().compile_select(&lock)?;
         super::executor::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
     }
-    let mut old =SelectQuery::new(junction).where_clause(WhereExpr::and_predicates(owner.clone()));
+    let mut old = SelectQuery::new(junction).where_clause(WhereExpr::and_predicates(owner.clone()));
     old.projection = Some(vec![dst_col]);
     // An unregistered junction's column type is unknown: read it as the new keys' type.
     let old = match dst_column_type(junction.table, dst_col) {
@@ -761,8 +759,21 @@ impl GenericM2MManager {
             .collect();
         let columns = vec![self.pk_col, self.ct_col, self.dst_col];
         let junction = self.junction();
-        let locks = source_lock(self.src_schema, &self.src_key()?).into_iter().collect();
-        if !replace(locks, junction, owner, self.dst_col, &dsts, columns, rows, pool).await? {
+        let locks = source_lock(self.src_schema, &self.src_key()?)
+            .into_iter()
+            .collect();
+        if !replace(
+            locks,
+            junction,
+            owner,
+            self.dst_col,
+            &dsts,
+            columns,
+            rows,
+            pool,
+        )
+        .await?
+        {
             return Ok(());
         }
         #[cfg(feature = "signals")]

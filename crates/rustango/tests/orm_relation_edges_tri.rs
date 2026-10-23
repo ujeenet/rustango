@@ -108,7 +108,13 @@ pub struct AlbumTag {
 #[rustango(
     table = "edg_sha",
     app = "edg",
-    m2m(name = "tags", to = "edg_tag", through = "edg_share_tag", src = "owner_id", dst = "tag_id")
+    m2m(
+        name = "tags",
+        to = "edg_tag",
+        through = "edg_share_tag",
+        src = "owner_id",
+        dst = "tag_id"
+    )
 )]
 pub struct ShareA {
     #[rustango(primary_key)]
@@ -119,7 +125,13 @@ pub struct ShareA {
 #[rustango(
     table = "edg_shb",
     app = "edg",
-    m2m(name = "tags", to = "edg_tag", through = "edg_share_tag", src = "owner_id", dst = "tag_id")
+    m2m(
+        name = "tags",
+        to = "edg_tag",
+        through = "edg_share_tag",
+        src = "owner_id",
+        dst = "tag_id"
+    )
 )]
 pub struct ShareB {
     #[rustango(primary_key)]
@@ -191,10 +203,7 @@ async fn fk_targets_a_renamed_pk_column(pool: &Pool) {
         .fetch(pool)
         .await
         .expect("select_related joins on the renamed column");
-    assert_eq!(
-        rows[0].acct.value().map(|a| a.name.as_str()),
-        Some("seven")
-    );
+    assert_eq!(rows[0].acct.value().map(|a| a.name.as_str()), Some("seven"));
 }
 
 async fn seed_city(pool: &Pool) {
@@ -302,7 +311,11 @@ async fn long_join_labels_keep_their_key(pool: &Pool) {
         .await
         .expect("json rows");
     assert_eq!(json[0][key], "deep", "json: {json:?}");
-    let dicts = joined().values_dict(&["id"]).fetch(pool).await.expect("dicts");
+    let dicts = joined()
+        .values_dict(&["id"])
+        .fetch(pool)
+        .await
+        .expect("dicts");
     assert_eq!(
         dicts[0].get(key),
         Some(&SqlValue::String("deep".into())),
@@ -330,9 +343,10 @@ async fn pg_prefetch_past_the_bind_cap(pool: &Pool) {
         .insert_pool(pool)
         .await
         .expect("drip");
-        let groups = rustango::sql::fetch_with_prefetch::<Bucket, Drip>(Bucket::objects(), "bucket", pg)
-            .await
-            .expect("prefetch past the bind cap");
+        let groups =
+            rustango::sql::fetch_with_prefetch::<Bucket, Drip>(Bucket::objects(), "bucket", pg)
+                .await
+                .expect("prefetch past the bind cap");
         assert_eq!(groups.len(), usize::try_from(N).unwrap());
         let last = groups.iter().find(|(b, _)| b.id == N - 1).expect("last");
         assert_eq!(last.1.len(), 1);

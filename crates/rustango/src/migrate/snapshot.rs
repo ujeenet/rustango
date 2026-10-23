@@ -1143,7 +1143,12 @@ pub(crate) fn check_registry_junctions() -> Result<(), super::MigrateError> {
         return Err(super::MigrateError::Validation(e));
     }
     let mut checks: Vec<(&str, &str)> = managed()
-        .flat_map(|e| e.schema.check_constraints.iter().map(|c| (c.name, e.schema.table)))
+        .flat_map(|e| {
+            e.schema
+                .check_constraints
+                .iter()
+                .map(|c| (c.name, e.schema.table))
+        })
         .collect();
     checks.sort_unstable();
     checks.dedup();

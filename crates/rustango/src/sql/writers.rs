@@ -695,13 +695,19 @@ fn write_distinct_on_via_window(
     // Outer ORDER BY / LIMIT / OFFSET — applied to the survivors, by the
     // sort keys `sub` exposes.
     b.with_qualifier(None, |b| {
-        write_order_limit_offset_with(b, &query.order_by, query.limit, query.offset, |b, i, item| {
-            if matches!(item, crate::core::OrderItem::Random) {
-                return write_order_target(b, item);
-            }
-            b.write_ident(&distinct_on_order_label(i));
-            Ok(())
-        })
+        write_order_limit_offset_with(
+            b,
+            &query.order_by,
+            query.limit,
+            query.offset,
+            |b, i, item| {
+                if matches!(item, crate::core::OrderItem::Random) {
+                    return write_order_target(b, item);
+                }
+                b.write_ident(&distinct_on_order_label(i));
+                Ok(())
+            },
+        )
     })?;
 
     Ok(())

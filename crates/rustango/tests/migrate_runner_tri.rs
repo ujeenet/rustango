@@ -145,9 +145,12 @@ async fn referenced_key_widens(pool: &Pool) {
     .await
     .expect("the FK column is BIGINT");
     assert!(
-        exec(pool, &format!("INSERT INTO {qb} (id, author_id) VALUES (2, 7)"))
-            .await
-            .is_err(),
+        exec(
+            pool,
+            &format!("INSERT INTO {qb} (id, author_id) VALUES (2, 7)")
+        )
+        .await
+        .is_err(),
         "the FK is back on {}",
         d.name()
     );
@@ -169,7 +172,11 @@ async fn fk_count(pool: &Pool, t: &str) -> i64 {
             "SELECT COUNT(*) FROM information_schema.table_constraints \
              WHERE table_schema = {} AND table_name = '{t}' \
              AND constraint_type = 'FOREIGN KEY'",
-            if name == "mysql" { "DATABASE()" } else { "current_schema()" }
+            if name == "mysql" {
+                "DATABASE()"
+            } else {
+                "current_schema()"
+            }
         ),
     };
     let n: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
@@ -184,9 +191,7 @@ async fn referenced_key_widens_beside_new_fks(pool: &Pool) {
     let (a, kid, pal, old) = ("mr_wn_author", "mr_wn_kid", "mr_wn_pal", "mr_wn_old");
     let ledger = "mr_wn_ledger";
     let dir = fresh(pool, &[kid, pal, old, a], ledger).await;
-    let key = |ty: &str| {
-        json!({"name": "id", "column": "id", "ty": ty, "nullable": false, "primary_key": true})
-    };
+    let key = |ty: &str| json!({"name": "id", "column": "id", "ty": ty, "nullable": false, "primary_key": true});
     let fk_col = |ty: &str| {
         json!({"name": "author_id", "column": "author_id", "ty": ty, "nullable": true,
             "primary_key": false,
@@ -241,7 +246,11 @@ async fn referenced_key_widens_beside_new_fks(pool: &Pool) {
         .await
         .unwrap_or_else(|e| panic!("widening on {name}: {e}"));
     assert_eq!(
-        (fk_count(pool, kid).await, fk_count(pool, pal).await, fk_count(pool, old).await),
+        (
+            fk_count(pool, kid).await,
+            fk_count(pool, pal).await,
+            fk_count(pool, old).await
+        ),
         (1, 1, 0),
         "FKs on {name}"
     );
@@ -485,7 +494,11 @@ async fn concurrent_runs_apply_once(pool: &Pool) {
             .expect("count");
     assert_eq!(n[0].0, 1, "the RunSQL ran once on {name}");
     let applied = [r1, r2].map(|r| r.unwrap_or_else(|e| panic!("a run on {name}: {e}")));
-    assert_eq!(applied.iter().map(Vec::len).sum::<usize>(), 1, "{applied:?}");
+    assert_eq!(
+        applied.iter().map(Vec::len).sum::<usize>(),
+        1,
+        "{applied:?}"
+    );
     drop_table(&p1, t).await;
     drop_table(&p1, ledger).await;
 }
@@ -498,9 +511,13 @@ async fn sqlite_without_a_writable_dir_migrates_unlocked() {
     let db = tempfile::tempdir().expect("tempdir");
     let path = db.path().join("ro.db");
     let dir = tempfile::tempdir().expect("tempdir");
-    make_migrations_from(dir.path(), &snap(vec![table("mr_ro_item", vec![id()])]), None)
-        .expect("makemigrations")
-        .expect("a migration");
+    make_migrations_from(
+        dir.path(),
+        &snap(vec![table("mr_ro_item", vec![id()])]),
+        None,
+    )
+    .expect("makemigrations")
+    .expect("a migration");
     let rw = pool_of(&format!("sqlite://{}?mode=rwc", path.display()), 1).await;
     migrate_pool_with_ledger(&rw, dir.path(), "mr_ro_ledger")
         .await
@@ -513,7 +530,9 @@ async fn sqlite_without_a_writable_dir_migrates_unlocked() {
     let ro = pool_of(&format!("sqlite://{}?mode=ro", path.display()), 1).await;
     let ran = migrate_pool_with_ledger(&ro, dir.path(), "mr_ro_ledger").await;
     mode(0o755).expect("writable again");
-    assert!(ran.expect("nothing pending runs without the lock").is_empty());
+    assert!(ran
+        .expect("nothing pending runs without the lock")
+        .is_empty());
 }
 
 /// A lock connection to a server that never answers gives up like the pool would.
