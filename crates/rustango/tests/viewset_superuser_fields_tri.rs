@@ -30,14 +30,26 @@ fn unique(prefix: &str) -> String {
 
 /// `/users` over `rustango_users`, the caller signed in as `superuser` or not.
 fn app(pool: &Pool, superuser: bool) -> axum::Router {
+    anonymous(pool).layer(axum::Extension(AuthenticatedUser {
+        id: 1,
+        username: "caller".into(),
+        is_superuser: superuser,
+    }))
+}
+
+/// `/users` with no `AuthenticatedUser` at all.
+fn anonymous(pool: &Pool) -> axum::Router {
     ViewSet::for_model(User::SCHEMA)
         .allow_anonymous()
         .router_pool("/users", pool.clone())
-        .layer(axum::Extension(AuthenticatedUser {
-            id: 1,
-            username: "caller".into(),
-            is_superuser: superuser,
-        }))
+}
+
+/// A full user body that asks for superuser and a new hash.
+fn full_body(username: &str) -> serde_json::Value {
+    serde_json::json!({
+        "username": username, "password_hash": "new-hash", "is_superuser": true,
+        "active": true, "created_at": "2024-01-01T00:00:00Z", "data": {}
+    })
 }
 
 async fn send(
@@ -108,6 +120,50 @@ async fn a_member_cannot_create_a_superuser(pool: &Pool) {
     assert!(!by_name(pool, &name).await.is_superuser);
 }
 
+async fn a_member_put_keeps_them(pool: &Pool) {
+    let (id, _) = seed(pool).await;
+    let renamed = unique("vsp");
+    let (status, res) = send(app(pool, false), "PUT", &format!("/users/{id}"), full_body(&renamed)).await;
+    assert!(status.is_success(), "{status}: {res}");
+    let u = by_name(pool, &renamed).await;
+    assert!(!u.is_superuser);
+    assert_eq!(u.password_hash, "old-hash");
+}
+
+async fn a_member_bulk_create_keeps_them(pool: &Pool) {
+    let (a, b) = (unique("vsba"), unique("vsbb"));
+    let body = serde_json::json!([full_body(&a), full_body(&b)]);
+    let (status, res) = send(app(pool, false), "POST", "/users", body).await;
+    assert!(status.is_success(), "{status}: {res}");
+    assert!(!by_name(pool, &a).await.is_superuser);
+    assert!(!by_name(pool, &b).await.is_superuser);
+}
+
+/// No principal at all fails closed.
+async fn an_anonymous_write_keeps_them(pool: &Pool) {
+    let (id, _) = seed(pool).await;
+    let renamed = unique("vsn");
+    let body = serde_json::json!({ "username": renamed, "is_superuser": true });
+    let (status, res) = send(anonymous(pool), "PATCH", &format!("/users/{id}"), body).await;
+    assert!(status.is_success(), "{status}: {res}");
+    assert!(!by_name(pool, &renamed).await.is_superuser);
+    let name = unique("vsnc");
+    let (status, res) = send(anonymous(pool), "POST", "/users", full_body(&name)).await;
+    assert_eq!(status, StatusCode::CREATED, "{res}");
+    assert!(!by_name(pool, &name).await.is_superuser);
+}
+
+/// A body of only locked fields answers like an update that changed nothing.
+async fn a_locked_only_patch_is_a_no_op(pool: &Pool) {
+    let (id, name) = seed(pool).await;
+    let body = serde_json::json!({ "is_superuser": true, "password_hash": "new-hash" });
+    let (status, res) = send(app(pool, false), "PATCH", &format!("/users/{id}"), body).await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    let u = by_name(pool, &name).await;
+    assert!(!u.is_superuser);
+    assert_eq!(u.password_hash, "old-hash");
+}
+
 /// The control: a superuser principal writes them.
 async fn a_superuser_writes_them(pool: &Pool) {
     let (id, name) = seed(pool).await;
@@ -124,6 +180,10 @@ tri_dialect_test!(
     scenarios: [
         a_member_cannot_grant_superuser_or_set_a_hash,
         a_member_cannot_create_a_superuser,
+        a_member_put_keeps_them,
+        a_member_bulk_create_keeps_them,
+        an_anonymous_write_keeps_them,
+        a_locked_only_patch_is_a_no_op,
         a_superuser_writes_them,
     ],
 );

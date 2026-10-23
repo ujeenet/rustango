@@ -160,11 +160,11 @@ A resolver chain that reads extensions (`PortResolver`) now resolves under `requ
 
 ### Admin reads `Extension<AdminSession>` as the signed-in user
 
-If your own middleware inserts `AdminSession` in front of the admin, a session with `is_superuser: false` now gets the superuser-only field locks. `HmacAuthLayer::sign_port` does not bind a tenant; use `bind_tenants`.
+If your own middleware inserts `AdminSession` in front of the admin, the admin's superuser-only field locks now apply to that session. `HmacAuthLayer::sign_port` does not bind a tenant; use `bind_tenants`.
 
-### ViewSet writes skip superuser-only fields
+### ViewSet writes apply superuser-only field locks
 
-Fields locked with `register_admin_superuser_fields!` (user `is_superuser`, `password_hash`, an API key's or agent's `user_id`) are ignored in ViewSet bodies unless the request's `AuthenticatedUser` is a superuser. An anonymous or non-tenancy ViewSet can no longer set them; write them in your own handler.
+ViewSets now apply the admin's superuser-only field locks on create and update; without an authenticated superuser those fields are not written. Write them in your own handler if an anonymous or non-tenancy ViewSet needs them.
 
 ## 0.60.11
 

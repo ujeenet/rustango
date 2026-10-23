@@ -32,6 +32,9 @@
 //! | `PATCH` | `/api/posts/{pk}` | Partial update — only supplied fields |
 //! | `DELETE` | `/api/posts/{pk}` | Delete — `204 No Content` |
 //!
+//! Fields locked with `register_admin_superuser_fields!` are silently ignored
+//! in a write body unless the request's `AuthenticatedUser` is a superuser.
+//!
 //! ## Query parameters (list endpoint)
 //!
 //! ### Page-number pagination (default)
@@ -1833,7 +1836,6 @@ struct WriteSet {
     /// Forced by a filter backend; never read from the body.
     pinned: Vec<(&'static crate::core::FieldSchema, SqlValue)>,
     /// Superuser-only fields this principal may not write, as in the admin.
-    #[cfg_attr(not(feature = "admin"), allow(dead_code))]
     superuser_only: Vec<&'static str>,
 }
 
@@ -1927,6 +1929,11 @@ impl WriteSet {
 
     fn is_writable(&self, name: &str) -> bool {
         self.writable.iter().any(|f| f.name == name)
+    }
+
+    /// `true` when `form` carries a field this principal may not write.
+    fn sends_locked(&self, form: &HashMap<String, String>) -> bool {
+        self.superuser_only.iter().any(|n| form.contains_key(*n))
     }
 
     /// The fields an UPDATE writes when the body carries them.
@@ -3610,6 +3617,17 @@ async fn update_inner(
     };
 
     if assignments.is_empty() {
+        // Only locked fields: answer as an update that changed nothing.
+        if write_set.sends_locked(form) {
+            let fields = state.effective_fields();
+            return match fetch_by_pk_scoped(&state, &mut acq, pk_field, pk_val, &fields, &scope)
+                .await
+            {
+                Ok(Some(obj)) => json_response(obj),
+                Ok(None) => json_error(StatusCode::NOT_FOUND, "not found"),
+                Err(e) => json_server_error("viewset::update::read_back", &e),
+            };
+        }
         return json_error(StatusCode::BAD_REQUEST, "no fields to update");
     }
 

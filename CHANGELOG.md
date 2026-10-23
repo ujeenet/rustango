@@ -14,11 +14,11 @@ Resolvers now see the request's extensions, so `PortResolver` works under `requi
 
 ### Fixed — admin superuser-only fields follow the request's session
 
-A gate that sets only `Extension<AdminSession>` now counts as signed in, so its non-superusers get the field locks; an inline add defaults a locked flag as the create form does.
+The admin's field locks now follow a session set only as `Extension<AdminSession>`, and an inline add fills a locked flag the way the create form does.
 
 ### Fixed — ViewSets keep the admin's superuser-only fields locked
 
-A ViewSet write by anyone but a superuser `AuthenticatedUser` skips the fields `register_admin_superuser_fields!` locks, such as a user's `is_superuser` and `password_hash`.
+ViewSets now apply the admin's superuser-only field locks on create and update; without an authenticated superuser those fields are not written.
 
 ## [0.60.11] — 2026-10-22
 
