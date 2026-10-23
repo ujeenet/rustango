@@ -154,6 +154,10 @@ untouched.
 
 With `#[rustango(on = "num")]`, `get_on` / `get_pool` load the parent whose `num` equals the key (not its PK) when every FK to that model uses the same `on`. A `.join()` reusing a relation lookup's or `select_related` alias now fails at compile with `QueryError::DuplicateJoinAlias`; rename the alias.
 
+### `OAuthError::BadStatus` body is the error code
+
+`body` now holds only the provider's OAuth `error` code (e.g. `invalid_grant`), or is empty. Code that parsed the full body should match the code instead.
+
 ### Upserts with no update columns fail before the database
 
 On PostgreSQL and SQLite they return `ExecError::Sql(SqlError::EmptyUpdateSet)`, as MySQL did, instead of a driver syntax error. Use `insert_or_ignore` for "insert, skip conflicts".

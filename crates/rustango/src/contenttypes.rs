@@ -663,6 +663,10 @@ where
         .copied()
         .map(crate::core::SqlValue::I64)
         .collect();
+    // `filter_op` takes a field name; the caller gives the column.
+    let field = C::SCHEMA
+        .field_by_column(target_fk_column)
+        .map_or(target_fk_column, |f| f.name);
     let children: Vec<C> = crate::sql::fetch_in_chunks(
         pool,
         &crate::query::QuerySet::<C>::new(),
@@ -670,7 +674,7 @@ where
         |keys| {
             crate::query::QuerySet::<C>::new()
                 .filter_op(
-                    target_fk_column,
+                    field,
                     crate::core::Op::In,
                     crate::core::SqlValue::List(keys),
                 )
@@ -956,11 +960,15 @@ pub async fn prefetch_reverse_generic_for<Parent: crate::core::Model>(
         async move { crate::sql::select_rows_as_json(pool, &select_q, fields).await }
     })
     .await?;
+    // JSON rows are keyed by field name, not column.
+    let pk_key = child_schema
+        .field_by_column(rel.pk_column)
+        .map_or(rel.pk_column, |f| f.name);
     let mut grouped: ::std::collections::HashMap<i64, Vec<serde_json::Value>> =
         ::std::collections::HashMap::new();
     for row in rows {
         // The pk column on the row carries the parent_pk we matched on.
-        if let Some(pk_val) = row.get(rel.pk_column).and_then(serde_json::Value::as_i64) {
+        if let Some(pk_val) = row.get(pk_key).and_then(serde_json::Value::as_i64) {
             grouped.entry(pk_val).or_default().push(row);
         }
     }

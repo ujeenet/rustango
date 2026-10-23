@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `ForeignKey::get_on` / `get_pool` match the `on` column; a `.join()` alias a relation lookup needs returns `QueryError::DuplicateJoinAlias`; long `select_related` chain aliases no longer collide on PostgreSQL; `in_bulk_on` past one `IN` list returns `InListUnsplittable`.
 
+### Fixed — OAuth2 error bodies; prefetch by a renamed column
+
+`OAuthError::BadStatus` and discovery errors keep only the provider's `error` code, not the body; `prefetch_soft` and `prefetch_reverse_generic_for` work when the column differs from the field name.
+
 ## [0.60.11] — 2026-10-22
 
 **Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`; `RequestIdLayer` no longer echoes an untrusted client's `X-Request-Id`; a SQLite UUID key stored both as BLOB and TEXT is now a 404 in ViewSets and template views. See UPGRADING.

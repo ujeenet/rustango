@@ -88,6 +88,7 @@ pub use registry::OAuth2Registry;
 pub enum OAuthError {
     #[error("HTTP transport error: {0}")]
     Http(String),
+    /// `body` is only the response's OAuth `error` code, or empty.
     #[error("provider returned non-success status {status}: {body}")]
     BadStatus { status: u16, body: String },
     #[error("response body did not deserialize: {0}")]
@@ -360,9 +361,9 @@ impl OAuth2Provider {
             .map_err(|e| OAuthError::Discovery(format!("GET {url}: {e}")))?;
         let status = resp.status();
         if !status.is_success() {
-            let body = bounded_text(resp, ERROR_BODY_MAX).await;
+            let code = error_code(resp).await;
             return Err(OAuthError::Discovery(format!(
-                "GET {url} -> {status}: {body}"
+                "GET {url} -> {status}: {code}"
             )));
         }
         let bytes = capped_body(resp, SUCCESS_BODY_MAX)
@@ -520,8 +521,23 @@ impl OAuth2Provider {
 
 // --------------------------------------------------------------------- helpers
 
-/// Most bytes of a failed response body kept in an error.
+/// Most bytes of a failed response body read for its error code.
 const ERROR_BODY_MAX: usize = 256;
+
+/// A failed response's RFC 6749 `error` code, or `""`. The rest of the
+/// body is dropped: a description can echo the code or a token into logs.
+async fn error_code(resp: reqwest::Response) -> String {
+    #[derive(Deserialize)]
+    struct Body {
+        error: String,
+    }
+    let body = bounded_text(resp, ERROR_BODY_MAX).await;
+    serde_json::from_str::<Body>(&body)
+        .map(|b| b.error)
+        .ok()
+        .filter(|e| e.bytes().all(|c| matches!(c, 0x20..=0x7e) && c != b'"' && c != b'\\'))
+        .unwrap_or_default()
+}
 /// Cap on a success body: discovery, token and userinfo JSON (#1793).
 const SUCCESS_BODY_MAX: usize = 1 << 20;
 /// Timeout for discovery, token and userinfo calls.
@@ -571,10 +587,9 @@ async fn decode_or_error<T: serde::de::DeserializeOwned>(
 ) -> Result<T, OAuthError> {
     let status = resp.status();
     if !status.is_success() {
-        let body = bounded_text(resp, ERROR_BODY_MAX).await;
         return Err(OAuthError::BadStatus {
             status: status.as_u16(),
-            body,
+            body: error_code(resp).await,
         });
     }
     let bytes = capped_body(resp, SUCCESS_BODY_MAX)
@@ -1151,9 +1166,33 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            OAuthError::BadStatus { status: 400, body } => {
-                assert_eq!(body.len(), ERROR_BODY_MAX);
-            }
+            OAuthError::BadStatus { status: 400, body } => assert_eq!(body, ""),
+            other => panic!("{other}"),
+        }
+    }
+
+    /// Only the RFC 6749 `error` code is kept; a description may echo secrets.
+    #[tokio::test]
+    async fn token_error_keeps_only_the_error_code() {
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    r#"{"error":"invalid_grant","error_description":"code s3cr3t-code expired"}"#,
+                )
+            }),
+        );
+        let base = serve(app).await;
+        let p = OAuth2Provider::new("t", "c", "s", "https://app/cb", "", format!("{base}/token"));
+        let (_, flow) = p.begin();
+        let err = p
+            .complete_with(&flow, "code", &flow.state, &loopback())
+            .await
+            .unwrap_err();
+        assert!(!err.to_string().contains("s3cr3t"), "{err}");
+        match err {
+            OAuthError::BadStatus { status: 400, body } => assert_eq!(body, "invalid_grant"),
             other => panic!("{other}"),
         }
     }

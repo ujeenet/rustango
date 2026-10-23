@@ -1,5 +1,6 @@
 //! ORM edges on every backend: FK `get` under `on`, join alias clashes, long
-//! `select_related` chains and `in_bulk_on` past the bind cap.
+//! `select_related` chains, `in_bulk_on` past the bind cap, and soft /
+//! generic prefetch through a renamed column.
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
@@ -60,9 +61,37 @@ pub struct Bucket {
     pub id: i64,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "oqe_owner", app = "oqe")]
+pub struct Owner {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "oqe_pet", app = "oqe")]
+pub struct Pet {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(column = "owner_ref")]
+    pub owner: ForeignKey<Owner>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "oqe_note", app = "oqe")]
+#[rustango(generic_fk(name = "target", ct_column = "ct_ref", pk_column = "obj_ref"))]
+pub struct Note {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(column = "ct_ref")]
+    pub ct_id: i64,
+    #[rustango(column = "obj_ref")]
+    pub object_pk: i64,
+}
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
-    for t in [City::SCHEMA, Top::SCHEMA, Mid::SCHEMA] {
+    for t in [City::SCHEMA, Top::SCHEMA, Mid::SCHEMA, Pet::SCHEMA] {
         drop_table(pool, t.table).await;
     }
     fresh_table::<Country>(pool).await;
@@ -71,6 +100,9 @@ async fn setup(pool: &Pool) {
     fresh_table::<Mid>(pool).await;
     fresh_table::<Top>(pool).await;
     fresh_table::<Bucket>(pool).await;
+    fresh_table::<Owner>(pool).await;
+    fresh_table::<Pet>(pool).await;
+    fresh_table::<Note>(pool).await;
 }
 
 /// `get` loads the parent by the `on` column, not by a PK equal to the key.
@@ -172,6 +204,47 @@ async fn in_bulk_on_past_the_bind_cap(pool: &Pool) {
     assert!(matches!(err, ExecError::InListUnsplittable { .. }), "{err:?}");
 }
 
+/// `prefetch_soft` takes the FK's column, which may differ from its field.
+async fn prefetch_soft_by_a_renamed_column(pool: &Pool) {
+    Owner { id: 1 }.insert_pool(pool).await.expect("owner");
+    Pet {
+        id: 1,
+        owner: ForeignKey::unloaded(1),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("pet");
+    let grouped =
+        rustango::contenttypes::prefetch_soft::<Pet, _>(pool, &[1], "owner_ref", |p| p.owner.pk())
+            .await
+            .expect("prefetch_soft by column");
+    assert_eq!(grouped.get(&1).map(Vec::len), Some(1));
+}
+
+/// Reverse generic prefetch groups by the PK column's row key.
+async fn prefetch_reverse_generic_by_a_renamed_column(pool: &Pool) {
+    use rustango::contenttypes::{self, ContentType};
+    contenttypes::ensure_seeded(pool)
+        .await
+        .expect("seed content types");
+    let ct = ContentType::for_model::<Owner>(pool)
+        .await
+        .unwrap()
+        .expect("owner ct");
+    Note {
+        id: 1,
+        ct_id: *ct.id.get().expect("ct id"),
+        object_pk: 1,
+    }
+    .insert_pool(pool)
+    .await
+    .expect("note");
+    let grouped = contenttypes::prefetch_reverse_generic_for::<Owner>(pool, Note::SCHEMA, &[1], None)
+        .await
+        .expect("reverse generic prefetch");
+    assert_eq!(grouped.get(&1).map(Vec::len), Some(1), "{grouped:?}");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -179,5 +252,7 @@ tri_dialect_test! {
         ad_hoc_alias_clashing_a_relation_filter,
         long_select_related_chains,
         in_bulk_on_past_the_bind_cap,
+        prefetch_soft_by_a_renamed_column,
+        prefetch_reverse_generic_by_a_renamed_column,
     ],
 }
