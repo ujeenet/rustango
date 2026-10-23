@@ -10,6 +10,8 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use rustango::core::Model as _;
+#[cfg(feature = "sqlite")]
+use rustango::sql::CounterPool as _;
 use rustango::sql::{Auto, FetcherPool as _, ForeignKey, Pool};
 use rustango::template_views::{CreateView, DeleteView, DetailView, ListView, UpdateView};
 use rustango::{tri_dialect_test, Model};
@@ -503,6 +505,295 @@ async fn update_view_restamps_auto_now(pool: &Pool) {
     assert_eq!(memos[0].title, "b");
     assert_eq!(memos[0].created_at.get(), Some(&old), "auto_now_add moved");
     assert!(memos[0].updated_at.get() > Some(&old), "auto_now stale");
+}
+
+/// A UUID key the column default writes as TEXT, not a bound BLOB.
+#[cfg(feature = "sqlite")]
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "tv_textkey", app = "tv1915")]
+pub struct TextKey {
+    #[rustango(primary_key, auto_uuid, default = "(lower(hex(randomblob(16))))")]
+    pub id: Auto<uuid::Uuid>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+    #[rustango(soft_delete)]
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Detail, update, delete and a bulk action find a TEXT-stored UUID key on SQLite.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_text_uuid_key_is_found_by_every_view() {
+    use rustango::core::SqlValue;
+    let pool = rustango::testkit::matrix::Backend::Sqlite
+        .pool()
+        .await
+        .expect("sqlite");
+    rustango::testkit::matrix::fresh_table::<TextKey>(&pool).await;
+    let names = || async {
+        TextKey::objects()
+            .values_list_flat("name")
+            .fetch::<String>(&pool)
+            .await
+            .expect("names")
+    };
+
+    let mut t = Tera::default();
+    t.add_raw_templates(vec![("t.html", "ok"), ("form.html", "form")])
+        .unwrap();
+    let t = Arc::new(t);
+    let rename: rustango::template_views::BulkActionFn = Arc::new(|pool, pks| {
+        let pks = pks.to_vec();
+        Box::pin(async move {
+            TextKey::objects()
+                .filter("id__in", SqlValue::List(pks))
+                .update()
+                .set("name", "c")
+                .execute_on(pool)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+    });
+    let app = DetailView::for_model(TextKey::SCHEMA)
+        .template("t.html")
+        .router("/tk", t.clone(), pool.clone())
+        .merge(
+            CreateView::for_model(TextKey::SCHEMA)
+                .template("form.html")
+                .success_url("/tk")
+                .router("/tk", t.clone(), pool.clone()),
+        )
+        .merge(
+            UpdateView::for_model(TextKey::SCHEMA)
+                .template("form.html")
+                .success_url("/tk")
+                .router("/tk", t.clone(), pool.clone()),
+        )
+        .merge(
+            ListView::for_model(TextKey::SCHEMA)
+                .template("t.html")
+                .bulk_actions(true)
+                .action("rename", "Rename", rename)
+                .router("/tk", t.clone(), pool.clone()),
+        )
+        .merge(
+            DeleteView::for_model(TextKey::SCHEMA)
+                .template("t.html")
+                .success_url("/tk")
+                .router("/tk", t, pool.clone()),
+        );
+    let call = |method: Method, uri: String, body: String| {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, FORM)
+            .header(header::COOKIE, format!("rustango_csrf={CSRF}"))
+            .body(Body::from(format!("_csrf={CSRF}&{body}")))
+            .unwrap();
+        let app = app.clone();
+        async move { app.oneshot(req).await.unwrap().status() }
+    };
+
+    let status = call(Method::POST, "/tk/new".into(), "name=a".into()).await;
+    assert!(status.is_redirection(), "create: {status}");
+    let key: String = TextKey::objects()
+        .values_list_flat("id")
+        .fetch::<String>(&pool)
+        .await
+        .expect("read key")
+        .remove(0);
+    assert_eq!(key.len(), 32, "the default stores text: {key}");
+    let status = call(Method::GET, format!("/tk/{key}"), String::new()).await;
+    assert_eq!(status, StatusCode::OK, "detail");
+    let status = call(Method::GET, format!("/tk/{key}/edit"), String::new()).await;
+    assert_eq!(status, StatusCode::OK, "edit form");
+    let status = call(Method::POST, format!("/tk/{key}/edit"), "name=b".into()).await;
+    assert!(status.is_redirection(), "edit: {status}");
+    assert_eq!(names().await, ["b"], "the edit did not reach the row");
+    let form = format!("action=rename&_selected_action={key}");
+    let status = call(Method::POST, "/tk".into(), form).await;
+    assert!(status.is_redirection(), "bulk action: {status}");
+    assert_eq!(names().await, ["c"], "the bulk action missed the row");
+    let status = call(Method::GET, format!("/tk/{key}/delete"), String::new()).await;
+    assert_eq!(status, StatusCode::OK, "delete confirm");
+    let status = call(Method::POST, format!("/tk/{key}/delete"), String::new()).await;
+    assert!(status.is_redirection(), "delete: {status}");
+    let live = TextKey::objects()
+        .filter("deleted_at__isnull", true)
+        .count(&pool)
+        .await
+        .expect("count");
+    assert_eq!(live, 0, "the row was not deleted");
+}
+
+/// A TEXT-stored UUID key is found under any spelling the parser accepts.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_text_uuid_key_matches_any_spelling() {
+    let pool = rustango::testkit::matrix::Backend::Sqlite
+        .pool()
+        .await
+        .expect("sqlite");
+    rustango::testkit::matrix::fresh_table::<TextKey>(&pool).await;
+    let mut t = Tera::default();
+    t.add_raw_templates(vec![("t.html", "ok"), ("form.html", "form")])
+        .unwrap();
+    let t = Arc::new(t);
+    let app = DetailView::for_model(TextKey::SCHEMA)
+        .template("t.html")
+        .router("/tk", t.clone(), pool.clone())
+        .merge(
+            CreateView::for_model(TextKey::SCHEMA)
+                .template("form.html")
+                .success_url("/tk")
+                .router("/tk", t, pool.clone()),
+        );
+    let status = post_form(&app, "/tk/new", "name=a").await;
+    assert!(status.is_redirection(), "create: {status}");
+    let key = TextKey::objects()
+        .values_list_flat("id")
+        .fetch::<String>(&pool)
+        .await
+        .expect("read key")
+        .remove(0);
+    let u = uuid::Uuid::parse_str(&key).expect("uuid");
+    let upper = u.hyphenated().to_string().to_uppercase();
+    for spelling in [upper, u.braced().to_string(), u.hyphenated().to_string()] {
+        let req = Request::builder()
+            .uri(format!("/tk/{spelling}"))
+            .body(Body::empty())
+            .unwrap();
+        let status = app.clone().oneshot(req).await.unwrap().status();
+        assert_eq!(status, StatusCode::OK, "detail by {spelling}");
+    }
+}
+
+#[cfg(feature = "sqlite")]
+async fn post_form(app: &axum::Router, uri: &str, body: &str) -> StatusCode {
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, FORM)
+        .header(header::COOKIE, format!("rustango_csrf={CSRF}"))
+        .body(Body::from(format!("_csrf={CSRF}&{body}")))
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+#[cfg(feature = "sqlite")]
+fn mine_only() -> rustango::core::WhereExpr {
+    use rustango::core::{Filter, Op, SqlValue, WhereExpr};
+    WhereExpr::Predicate(Filter::new("mine", Op::Eq, SqlValue::Bool(true)))
+}
+
+/// One UUID may be stored twice on SQLite, once as BLOB and once as TEXT.
+#[cfg(feature = "sqlite")]
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "tv_sharedkey",
+    app = "tv1915",
+    global_scope(name = "mine", apply = mine_only)
+)]
+pub struct SharedKey {
+    #[rustango(primary_key, auto_uuid, default = "(lower(hex(randomblob(16))))")]
+    pub id: Auto<uuid::Uuid>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+    pub mine: bool,
+}
+
+/// A scoped bulk action never reaches a hidden row that shares a visible row's UUID.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_bulk_action_skips_a_hidden_row_sharing_the_uuid() {
+    use rustango::core::SqlValue;
+    let pool = rustango::testkit::matrix::Backend::Sqlite
+        .pool()
+        .await
+        .expect("sqlite");
+    let mut t = Tera::default();
+    t.add_raw_templates(vec![("t.html", "ok"), ("form.html", "form")])
+        .unwrap();
+    let t = Arc::new(t);
+    // Unscoped on purpose: only the key narrowing protects the hidden row.
+    let rename: rustango::template_views::BulkActionFn = Arc::new(|pool, pks| {
+        let pks = pks.to_vec();
+        Box::pin(async move {
+            SharedKey::objects()
+                .without_global_scopes()
+                .filter("id__in", SqlValue::List(pks))
+                .update()
+                .set("name", "hit")
+                .execute_on(pool)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+    });
+    let app = CreateView::for_model(SharedKey::SCHEMA)
+        .template("form.html")
+        .success_url("/sk")
+        .router("/sk", t.clone(), pool.clone())
+        .merge(
+            ListView::for_model(SharedKey::SCHEMA)
+                .template("t.html")
+                .bulk_actions(true)
+                .action("rename", "Rename", rename)
+                .router("/sk", t, pool.clone()),
+        );
+    let hidden = || async {
+        SharedKey::objects()
+            .without_global_scopes()
+            .filter("mine", false)
+            .values_list_flat("name")
+            .fetch::<String>(&pool)
+            .await
+            .expect("hidden rows")
+    };
+
+    // The hidden row holds the TEXT form, then the BLOB form.
+    for text_is_hidden in [true, false] {
+        rustango::testkit::matrix::fresh_table::<SharedKey>(&pool).await;
+        let status = post_form(&app, "/sk/new", "name=text&mine=true").await;
+        assert!(status.is_redirection(), "create: {status}");
+        let key = SharedKey::objects()
+            .values_list_flat("id")
+            .fetch::<String>(&pool)
+            .await
+            .expect("read key")
+            .remove(0);
+        assert_eq!(key.len(), 32, "the default stores text: {key}");
+        let u = uuid::Uuid::parse_str(&key).expect("uuid");
+        let mut blob = SharedKey {
+            id: Auto::Set(u),
+            name: "blob".into(),
+            mine: text_is_hidden,
+        };
+        blob.insert_pool(&pool).await.expect("blob row");
+        SharedKey::objects()
+            .without_global_scopes()
+            .filter("name", "text")
+            .update()
+            .set("mine", !text_is_hidden)
+            .execute_on(&pool)
+            .await
+            .expect("scope the text row");
+        let before = hidden().await;
+        assert_eq!(before.len(), 1, "one hidden row");
+
+        for spelling in [key.clone(), u.hyphenated().to_string()] {
+            let form = format!("action=rename&_selected_action={spelling}");
+            post_form(&app, "/sk", &form).await;
+            let form = format!("action=delete_selected&confirmed=true&_selected_action={spelling}");
+            post_form(&app, "/sk", &form).await;
+            let after = hidden().await;
+            assert_eq!(
+                after, before,
+                "hidden row hit via {spelling} (text hidden: {text_is_hidden})"
+            );
+        }
+    }
 }
 
 tri_dialect_test! {

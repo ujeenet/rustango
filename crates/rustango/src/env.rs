@@ -175,6 +175,26 @@ pub(crate) fn parse_flag(raw: &str) -> Option<bool> {
     }
 }
 
+/// The one tier parser: trimmed, lowercase, `production` as `prod`,
+/// `dev` when blank. Config files, cookies, logging and the audit all use it.
+pub(crate) fn canonical_tier(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" => "dev".to_owned(),
+        "production" => "prod".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+/// `RUSTANGO_ENV` through [`canonical_tier`].
+pub(crate) fn tier_from_env() -> String {
+    canonical_tier(&std::env::var("RUSTANGO_ENV").unwrap_or_default())
+}
+
+/// `true` when `raw` names the production tier.
+pub(crate) fn is_prod_tier(raw: &str) -> bool {
+    canonical_tier(raw) == "prod"
+}
+
 // ------------------------------------------------------------------ Startup validation
 
 /// One declared environment-variable requirement.

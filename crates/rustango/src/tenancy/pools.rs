@@ -642,13 +642,17 @@ impl<DB: Database> TenantPools<DB> {
     }
 
     /// v0.38 — backend-typed accessor for the registry `sqlx::Pool<DB>`.
-    /// Cheap clone (sqlx pools are Arc-shaped). Used by
-    /// `tenancy::manage::server::run_server_cmd` to rebuild a fresh
-    /// `Arc<TenantPools<DB>>` for the server closures without losing
-    /// the original `pools`' database-mode cache.
+    /// Cheap clone (sqlx pools are Arc-shaped).
     #[must_use]
     pub fn registry_inner(&self) -> &sqlx::Pool<DB> {
         &self.registry
+    }
+
+    /// Same registry, config and secrets resolver; empty caches.
+    pub(crate) fn fresh(&self) -> Self {
+        let mut pools = Self::new(self.registry.clone()).config(self.config.clone());
+        pools.secrets = Arc::clone(&self.secrets);
+        pools
     }
 }
 

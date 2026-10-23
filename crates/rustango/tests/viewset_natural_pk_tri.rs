@@ -209,6 +209,72 @@ async fn sqlite_nullable_pk_column_still_rejects_a_missing_pk() {
     assert_eq!(Tag::objects().count(&pool).await.expect("count"), 0);
 }
 
+/// A UUID key the column default writes as TEXT, not a bound BLOB.
+#[cfg(feature = "sqlite")]
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "vs_natural_pk_textkey")]
+#[rustango(app = "vs_natural_pk_tri")]
+pub struct TextKey {
+    #[rustango(primary_key, auto_uuid, default = "(lower(hex(randomblob(16))))")]
+    pub id: rustango::sql::Auto<uuid::Uuid>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+/// Retrieve, update and delete find a TEXT-stored UUID key on SQLite.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_text_uuid_key_is_found_by_retrieve_update_and_delete() {
+    use rustango::viewset::ViewSet;
+    let pool = rustango::testkit::matrix::Backend::Sqlite
+        .pool()
+        .await
+        .expect("sqlite");
+    rustango::testkit::matrix::fresh_table::<TextKey>(&pool).await;
+    let app = || ViewSet::for_model(TextKey::SCHEMA).router_pool("/keys", pool.clone());
+    let seed = Request::builder()
+        .method(Method::POST)
+        .uri("/keys")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"name":"a"}"#))
+        .unwrap();
+    let status = app().oneshot(seed).await.unwrap().status();
+    assert_eq!(status, StatusCode::CREATED, "create");
+    let column = |c: &'static str| TextKey::objects().values_list_flat(c);
+    let key: String = column("id")
+        .fetch::<String>(&pool)
+        .await
+        .expect("read key")
+        .remove(0);
+    assert_eq!(key.len(), 32, "the default stores text: {key}");
+
+    let call = |method: Method, body: &'static str| {
+        let app = app();
+        let req = Request::builder()
+            .method(method)
+            .uri(format!("/keys/{key}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        async move { app.oneshot(req).await.unwrap().status() }
+    };
+    assert_eq!(call(Method::GET, "").await, StatusCode::OK, "retrieve");
+    assert_eq!(
+        call(Method::PATCH, r#"{"name":"b"}"#).await,
+        StatusCode::OK,
+        "update"
+    );
+    let names = column("name").fetch::<String>(&pool).await.expect("names");
+    assert_eq!(names, ["b"], "the update did not reach the row");
+    assert_eq!(
+        call(Method::DELETE, "").await,
+        StatusCode::NO_CONTENT,
+        "delete"
+    );
+    let left = column("id").fetch::<String>(&pool).await.expect("keys");
+    assert!(left.is_empty(), "the row was not deleted");
+}
+
 /// Create fills a `default_uuid_v7` PK and leaves a generated column to the database.
 async fn create_fills_a_v7_pk_and_skips_generated_columns(pool: &Pool) {
     let (status, body) = send(pool, Method::POST, "/docs", r#"{"qty":3}"#).await;

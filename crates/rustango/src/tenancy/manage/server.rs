@@ -58,6 +58,32 @@ where
     // request. Re-using the registry pool is cheap (sqlx::Pool is
     // Arc-shaped under the hood); the database-mode tenant cache on
     // `pools` is independent and remains usable elsewhere.
-    let arc_pools = std::sync::Arc::new(TenantPools::<DB>::new(pools.registry_inner().clone()));
-    crate::tenancy::server::run::<DB, _>(arc_pools, registry_url.to_owned(), cfg, w).await
+    crate::tenancy::server::run::<DB, _>(server_pools(pools), registry_url.to_owned(), cfg, w).await
+}
+
+/// The server's own `TenantPools`, built with the app's config and secrets.
+fn server_pools<DB: Database>(pools: &TenantPools<DB>) -> std::sync::Arc<TenantPools<DB>> {
+    std::sync::Arc::new(pools.fresh())
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use super::*;
+    use crate::tenancy::TenantPoolsConfig;
+
+    #[tokio::test]
+    async fn server_pools_keep_the_app_config() {
+        let registry = sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy");
+        let pools = TenantPools::new(registry).config(TenantPoolsConfig {
+            max_cached_database_pools: 7,
+            database_pool_max_connections: 3,
+            media_storage: Some(crate::storage::StorageRegistry::new()),
+            ..TenantPoolsConfig::default()
+        });
+        let served = server_pools(&pools);
+        let cfg = served.pool_config();
+        assert_eq!(cfg.max_cached_database_pools, 7);
+        assert_eq!(cfg.database_pool_max_connections, 3);
+        assert!(cfg.media_storage.is_some(), "media storage dropped");
+    }
 }

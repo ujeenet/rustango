@@ -3538,21 +3538,20 @@ fn touches_table(op: &Operation, table: &str) -> bool {
     matches!(op, Operation::Schema(c) if c.table() == table)
 }
 
-/// Whether any of `ops` rebuilds a table, so FK enforcement must go off.
+/// Whether `op`, one of `ops`, rebuilds a table, so FK enforcement must go off.
 #[cfg(feature = "sqlite")]
-fn rebuilds(ops: &[Operation], after: &SchemaSnapshot) -> Result<bool, MigrateError> {
-    for op in ops {
-        if let Operation::Schema(change) = op {
-            if render_step(change, ops, after, &crate::sql::Sqlite, None)?
-                .batch
-                .rebuild
-                .is_some()
-            {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
+fn rebuilds(
+    op: &Operation,
+    ops: &[Operation],
+    after: &SchemaSnapshot,
+) -> Result<bool, MigrateError> {
+    let Operation::Schema(change) = op else {
+        return Ok(false);
+    };
+    Ok(render_step(change, ops, after, &crate::sql::Sqlite, None)?
+        .batch
+        .rebuild
+        .is_some())
 }
 
 /// Run `step` on SQLite, retrying an ADD COLUMN refused for a non-constant
@@ -3800,8 +3799,9 @@ async fn atomic_mysql(
     Ok(())
 }
 
-/// Run `ops` on SQLite in one transaction, FK enforcement off around it
-/// when one of them rebuilds a table.
+/// Run `ops` on SQLite in one transaction, or one per [`sqlite_segments`]
+/// range when a RunSQL sits beside a rebuild; a failure after the first
+/// range is `PartiallyApplied`.
 #[cfg(feature = "sqlite")]
 async fn atomic_sqlite(
     sq: &sqlx::SqlitePool,
@@ -3810,20 +3810,121 @@ async fn atomic_sqlite(
     after: &SchemaSnapshot,
     ledger: LedgerWrite<'_>,
 ) -> Result<(), MigrateError> {
-    let rebuilds = rebuilds(ops, after)?;
-    // FK enforcement can only change outside a transaction, so it is off for
-    // the whole migration; a RunSQL would lose its ON DELETE actions.
-    if rebuilds && ops.iter().any(|op| matches!(op, Operation::Data(_))) {
-        return Err(MigrateError::Validation(format!(
-            "migration `{name}` rebuilds a SQLite table, which runs with FOREIGN KEY \
-             enforcement off; move its RunSQL to a migration of its own or set `atomic: false`"
-        )));
+    // Refused before any range commits.
+    if let Some(Operation::Callback(c)) = ops.iter().find(|op| matches!(op, Operation::Callback(_)))
+    {
+        return Err(callback_in_atomic(name, c));
     }
-    let mut conn = super::rebuild::RebuildConn::acquire(sq, rebuilds).await?;
+    let segments = sqlite_segments(ops, after)?;
+    let total = ops.len();
+    let mut deferred_fks: Vec<String> = Vec::new();
+    let mut applied = 0usize;
+    let mut ddl_applied = 0usize;
+    for (i, (range, rebuilds)) in segments.iter().enumerate() {
+        let last = i + 1 == segments.len();
+        let ledger = last.then_some(ledger);
+        let ran = atomic_sqlite_segment(
+            sq,
+            name,
+            ops,
+            range.clone(),
+            *rebuilds,
+            after,
+            &mut deferred_fks,
+            ledger,
+        )
+        .await;
+        let ran_ddl = ops[range.clone()]
+            .iter()
+            .filter(|op| matches!(op, Operation::Schema(_)))
+            .count();
+        match ran {
+            Ok(()) => {}
+            // The last range also wrote the ledger: the migration is applied.
+            Err(SegmentFailed {
+                committed: true,
+                error,
+            }) if last => return Err(error),
+            Err(SegmentFailed { committed, error }) => {
+                if committed {
+                    applied += range.len();
+                    ddl_applied += ran_ddl;
+                }
+                if applied == 0 {
+                    return Err(error);
+                }
+                let source = match error {
+                    MigrateError::Driver(d) => d,
+                    other => sqlx::Error::Protocol(other.to_string()),
+                };
+                return Err(MigrateError::PartiallyApplied {
+                    migration: name.to_owned(),
+                    applied,
+                    total,
+                    ddl_applied,
+                    source: Box::new(source),
+                });
+            }
+        }
+        applied += range.len();
+        ddl_applied += ran_ddl;
+    }
+    Ok(())
+}
+
+/// A failed [`atomic_sqlite_segment`]: `committed` when only the FK restore
+/// after its COMMIT failed.
+#[cfg(feature = "sqlite")]
+struct SegmentFailed {
+    committed: bool,
+    error: MigrateError,
+}
+
+/// `ops` cut where a RunSQL meets a rebuild: FK enforcement can only change
+/// outside a transaction, and a RunSQL needs it on for its ON DELETE actions.
+/// Each range comes with whether it rebuilds.
+#[cfg(feature = "sqlite")]
+fn sqlite_segments(
+    ops: &[Operation],
+    after: &SchemaSnapshot,
+) -> Result<Vec<(std::ops::Range<usize>, bool)>, MigrateError> {
+    let mut out: Vec<(std::ops::Range<usize>, bool)> = Vec::new();
+    let (mut start, mut rebuilt, mut data) = (0, false, false);
+    for (i, op) in ops.iter().enumerate() {
+        let is_data = matches!(op, Operation::Data(_));
+        let is_rebuild = rebuilds(op, ops, after)?;
+        if (is_data && rebuilt) || (is_rebuild && data) {
+            out.push((start..i, rebuilt));
+            (start, rebuilt, data) = (i, false, false);
+        }
+        rebuilt |= is_rebuild;
+        data |= is_data;
+    }
+    out.push((start..ops.len(), rebuilt));
+    Ok(out)
+}
+
+/// `ops[range]` in one SQLite transaction, FK enforcement off around it when
+/// it rebuilds. `ledger` is written by the last range only.
+#[cfg(feature = "sqlite")]
+#[allow(clippy::too_many_arguments)]
+async fn atomic_sqlite_segment(
+    sq: &sqlx::SqlitePool,
+    name: &str,
+    ops: &[Operation],
+    range: std::ops::Range<usize>,
+    rebuilds: bool,
+    after: &SchemaSnapshot,
+    deferred_fks: &mut Vec<String>,
+    ledger: Option<LedgerWrite<'_>>,
+) -> Result<(), SegmentFailed> {
+    let fail = |committed, error| SegmentFailed { committed, error };
+    let mut conn = super::rebuild::RebuildConn::acquire(sq, rebuilds)
+        .await
+        .map_err(|e| fail(false, e.into()))?;
     let result: Result<(), MigrateError> = async {
         let mut tx = conn.begin().await?;
-        let mut deferred_fks: Vec<String> = Vec::new();
-        for op in ops {
+        for op in &ops[range] {
             match op {
                 Operation::Schema(change) => {
                     let step = render_step(change, ops, after, &crate::sql::Sqlite, None)?;
@@ -3835,7 +3936,10 @@ async fn atomic_sqlite(
                 Operation::Callback(c) => return Err(callback_in_atomic(name, c)),
             }
         }
-        for stmt in deferred_fks {
+        let Some(ledger) = ledger else {
+            return Ok(tx.commit().await?);
+        };
+        for stmt in std::mem::take(deferred_fks) {
             sqlx::query(&stmt).execute(&mut *tx).await?;
         }
         match ledger {
@@ -3861,8 +3965,8 @@ async fn atomic_sqlite(
     .await;
     // The migration's own error wins over a failed restore.
     let finished = conn.finish().await;
-    result?;
-    Ok(finished?)
+    result.map_err(|e| fail(false, e))?;
+    finished.map_err(|e| fail(true, e.into()))
 }
 
 /// Run `step` for the non-atomic runners, on any backend.

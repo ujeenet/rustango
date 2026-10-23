@@ -23,12 +23,9 @@
 //!
 //! # Apex (no subdomain) handling
 //!
-//! Bare `app.com` does **not** resolve to any tenant. The default
-//! routing decision is that the apex hosts only operator UI
-//! (`/operator/*` in Slice 6); other apex paths return 404. The
-//! resolver returning `Ok(None)` is the signal — the caller (the
-//! tenant-aware admin in Slice 4) translates that into a 404 for
-//! tenant routes and bypasses the resolver entirely for `/operator`.
+//! Bare `app.com` does **not** resolve to any tenant: the resolver
+//! returns `Ok(None)`, and the apex serves the operator console at its
+//! root (`/`, `/login`, `/orgs`, ...) instead of a tenant.
 
 use crate::core::Column as _;
 use crate::sql::FetcherPool;
@@ -109,6 +106,13 @@ impl OrgResolver for SubdomainResolver {
         // interval — see `sync_org_generation`.
         let st = state(registry);
         sync_org_generation(registry, &st).await;
+        match st.org_cache.get(&host) {
+            Cached::Miss => return Ok(None),
+            Cached::Hit(org) => return Ok(Some(org)),
+            Cached::Absent => {}
+        }
+        // One query per host; the callers behind it read what it cached.
+        let _flight = st.org_cache.single_flight(&host).await;
         match st.org_cache.get(&host) {
             Cached::Miss => return Ok(None),
             Cached::Hit(org) => return Ok(Some(org)),
@@ -453,6 +457,12 @@ impl OrgResolver for RegisteredHostResolver {
         let st = state(registry);
         sync_generation(registry, &st).await;
         // Cached, including the miss — see `RegistryState::host_cache`.
+        match st.host_cache.get(&host) {
+            Cached::Miss => return Ok(None),
+            Cached::Hit(org) => return Ok(Some(org)),
+            Cached::Absent => {}
+        }
+        let _flight = st.host_cache.single_flight(&host).await;
         match st.host_cache.get(&host) {
             Cached::Miss => return Ok(None),
             Cached::Hit(org) => return Ok(Some(org)),

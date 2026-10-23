@@ -276,6 +276,10 @@ where
             users::create_superuser_cmd(pools, registry_url, &args[1..], writer).await
         }
         "set-superuser" => users::set_superuser_cmd(pools, registry_url, &args[1..], writer).await,
+        #[cfg(feature = "passkey")]
+        "revoke-passkey" => {
+            users::revoke_passkey_cmd(pools, registry_url, &args[1..], writer).await
+        }
         "reset-password" => {
             users::reset_password_cmd(pools, registry_url, &args[1..], writer).await
         }
@@ -597,6 +601,12 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "                       Promote / demote an existing tenant user."
+    )?;
+    #[cfg(feature = "passkey")]
+    writeln!(
+        w,
+        "  revoke-passkey <slug> <username> [--credential <id>]\n                       \
+         Delete one passkey of a tenant user, or all of them."
     )?;
     writeln!(
         w,

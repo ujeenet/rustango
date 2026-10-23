@@ -445,7 +445,7 @@ above; this is the complete list, including advanced/PostgreSQL-specific ones.
 | `verbose_name` | `"Label"` | human label for the field in forms/admin |
 | `help_text` | `"…"` | help string rendered under the form/admin widget |
 | `validators` | `"name, name"` | named validators to run on this field |
-| `related_name` | `"posts"` | reverse-accessor name on the FK's target |
+| `related_name` | `"posts"` | reverse-accessor name on the FK's target; `"+"` for none (a target from another crate) |
 | `auto_now` | flag | set to now on every save |
 | `auto_now_add` | flag | set to now on insert |
 | `soft_delete` | flag | marks the soft-delete timestamp (`Option<DateTime<Utc>>`) |

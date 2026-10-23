@@ -255,10 +255,7 @@ impl SessionSecret {
 /// treated as non-production.
 #[must_use]
 pub fn is_prod_tier(tier: &str) -> bool {
-    matches!(
-        tier.trim().to_ascii_lowercase().as_str(),
-        "prod" | "production"
-    )
+    crate::env::is_prod_tier(tier)
 }
 
 /// Load the session secret for a deployment tier.
@@ -290,10 +287,10 @@ pub fn load_session_secret_for_tier(tier: &str, disk_path: &std::path::Path) -> 
 }
 
 /// Read the deployment tier from `RUSTANGO_ENV`, defaulting to `"dev"`
-/// when unset (matches `crate::config` tier resolution).
+/// when unset. Normalized like `crate::config` (`PRODUCTION` reads `prod`).
 #[must_use]
 pub fn tier_from_env() -> String {
-    std::env::var("RUSTANGO_ENV").unwrap_or_else(|_| "dev".to_owned())
+    crate::env::tier_from_env()
 }
 
 /// Explicit override for the console-cookie `Secure` policy, set once
