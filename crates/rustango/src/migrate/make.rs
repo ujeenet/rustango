@@ -1562,10 +1562,29 @@ mod tests {
         nullable.fields.iter_mut().find(|f| f.column == "c").unwrap().nullable = true;
         let mut longer = posts_with(&["c"]);
         longer.fields.iter_mut().find(|f| f.column == "c").unwrap().max_length = Some(9);
+        // Both add `tags.x`, with different types.
+        let tags = |ty: &str| {
+            let mut t = t("tags");
+            let mut x = t.fields[0].clone();
+            (x.name, x.column, x.primary_key, x.auto, x.ty) =
+                ("x".into(), "x".into(), false, false, ty.into());
+            t.fields.push(x);
+            t
+        };
+        let model = |m: &str| TableSnapshot {
+            model: m.into(),
+            ..posts_with(&["c"])
+        };
         for (a, b, what) in [
             (vec![nullable.clone()], vec![], "table `posts`"),
             (vec![], vec![nullable.clone()], "table `posts`"),
             (vec![nullable], vec![longer], "column `c`"),
+            (
+                vec![posts_with(&["c"]), tags("i64")],
+                vec![posts_with(&["c"]), tags("string")],
+                "table `tags` column `x`",
+            ),
+            (vec![model("PostA")], vec![model("PostB")], "table `posts` model"),
         ] {
             let dir = tempdir();
             write_mig(&dir, &mig_at("0001_initial", None, snap_with(vec![posts_with(&["c"])])));
