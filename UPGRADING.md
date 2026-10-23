@@ -161,6 +161,7 @@ A pending file with a data op, a callback or a rename now stops the squash; fold
 ### `migrate <target>` applies earlier pending files
 
 A pending file sorting before the newest applied one (a merged branch) now applies when it is at or before the target; it used to be skipped.
+`migrate <target>` orders by file name, so going back to a target also unapplies sibling-branch files that sort after it.
 
 ### `csrf_trusted_origins` takes effect
 
