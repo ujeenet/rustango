@@ -16,6 +16,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `__week` / `extract_week` use `WEEK(x, 3)` on MySQL and an ISO formula on SQLite, matching PostgreSQL; JSON rows, admin forms and audit changes show `0.1_f32` as `0.1`.
 
+### Added — `check --deploy` warns when MySQL has no time zone tables
+
+There `trunc_with_tz` with a named zone returns NULL.
+
 ### Added — `sql::write_transaction`
 
 A transaction that takes SQLite's write lock at `BEGIN`, for `select_for_update` claims there; the docs no longer say a SQLite transaction locks the database.

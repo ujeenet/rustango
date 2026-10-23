@@ -244,6 +244,12 @@ impl Dialect for MySql {
         )
     }
 
+    // CONVERT_TZ returns NULL for a named zone when the server's time
+    // zone tables are not loaded.
+    fn named_time_zone_sql(&self) -> Option<&'static str> {
+        Some("SELECT CAST(CONVERT_TZ('2000-01-01 00:00:00', '+00:00', 'UTC') AS CHAR)")
+    }
+
     /// Translate Postgres-native `DEFAULT` expressions to MySQL
     /// spelling.
     ///

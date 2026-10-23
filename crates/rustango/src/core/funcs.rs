@@ -711,7 +711,8 @@ pub fn age(ts1: impl Into<Expr>, ts2: impl Into<Expr>) -> Expr {
 /// unit emits `OpNotSupportedInDialect`.
 ///
 /// PG returns a timestamp, MySQL / SQLite return text. Cast app-side
-/// if you need a typed value.
+/// if you need a typed value. MySQL returns NULL for a named zone when
+/// its time zone tables are not loaded; `check --deploy` warns.
 #[must_use]
 pub fn trunc_with_tz(ts: impl Into<Expr>, unit: &'static str, tz: &'static str) -> Expr {
     use super::SqlValue;

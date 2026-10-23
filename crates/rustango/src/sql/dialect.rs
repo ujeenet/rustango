@@ -647,6 +647,12 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// A one-row, one-column query converting a time to a named zone; a
+    /// NULL cell means `trunc_with_tz` returns NULL. `None` where it cannot.
+    fn named_time_zone_sql(&self) -> Option<&'static str> {
+        None
+    }
+
     /// `true` if this dialect can write `op` as SQL. Return `false`
     /// for an operator with no equivalent; the writer then reports
     /// [`SqlError::OperatorNotSupportedInDialect`].
