@@ -3362,7 +3362,11 @@ fn merge_relation_join(
 /// Same target table and the same `a = b` column pair, in either order.
 fn same_join(a: &crate::core::Join, b: &crate::core::Join) -> bool {
     let pair = |j: &crate::core::Join| match &j.on {
-        WhereExpr::ExprCompare { lhs, op: Op::Eq, rhs } => Some((lhs.clone(), rhs.clone())),
+        WhereExpr::ExprCompare {
+            lhs,
+            op: Op::Eq,
+            rhs,
+        } => Some((lhs.clone(), rhs.clone())),
         _ => None,
     };
     a.target.table == b.target.table

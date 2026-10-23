@@ -131,7 +131,10 @@ async fn setup(pool: &Pool) {
 /// `get` loads the parent by the `on` column, not by a PK equal to the key.
 async fn fk_get_follows_the_on_column(pool: &Pool) {
     for (id, num) in [(1, 100), (100, 7)] {
-        Country { id, num }.insert_pool(pool).await.expect("country");
+        Country { id, num }
+            .insert_pool(pool)
+            .await
+            .expect("country");
     }
     City {
         id: 1,
@@ -171,7 +174,10 @@ async fn ad_hoc_alias_clashing_a_relation_filter(pool: &Pool) {
 /// An ad-hoc join equal to the relation join, either side order, is reused.
 async fn ad_hoc_join_equal_to_the_relation_join(pool: &Pool) {
     for (id, num) in [(1, 100), (2, 200)] {
-        Country { id, num }.insert_pool(pool).await.expect("country");
+        Country { id, num }
+            .insert_pool(pool)
+            .await
+            .expect("country");
     }
     for (id, num) in [(1, 100), (2, 200)] {
         City {
@@ -231,8 +237,12 @@ async fn long_select_related_chains(pool: &Pool) {
     .await
     .expect("top");
     let rows: Vec<Top> = Top::objects()
-        .select_related("the_middle_relation_with_a_much_longer_field_name__second_hop_relation_one")
-        .select_related("the_middle_relation_with_a_much_longer_field_name__second_hop_relation_two")
+        .select_related(
+            "the_middle_relation_with_a_much_longer_field_name__second_hop_relation_one",
+        )
+        .select_related(
+            "the_middle_relation_with_a_much_longer_field_name__second_hop_relation_two",
+        )
         .filter(
             "the_middle_relation_with_a_much_longer_field_name__second_hop_relation_two__label",
             "two",
@@ -264,7 +274,10 @@ async fn in_bulk_on_past_the_bind_cap(pool: &Pool) {
         .in_bulk_on(Bucket::id, 0..70_000_i64, |b| b.id, &mut conn)
         .await
         .expect_err("past the bind cap");
-    assert!(matches!(err, ExecError::InListUnsplittable { .. }), "{err:?}");
+    assert!(
+        matches!(err, ExecError::InListUnsplittable { .. }),
+        "{err:?}"
+    );
 }
 
 /// `prefetch_soft` takes the FK's column, which may differ from its field.
@@ -302,9 +315,10 @@ async fn prefetch_reverse_generic_by_a_renamed_column(pool: &Pool) {
     .insert_pool(pool)
     .await
     .expect("note");
-    let grouped = contenttypes::prefetch_reverse_generic_for::<Owner>(pool, Note::SCHEMA, &[1], None)
-        .await
-        .expect("reverse generic prefetch");
+    let grouped =
+        contenttypes::prefetch_reverse_generic_for::<Owner>(pool, Note::SCHEMA, &[1], None)
+            .await
+            .expect("reverse generic prefetch");
     assert_eq!(grouped.get(&1).map(Vec::len), Some(1), "{grouped:?}");
 }
 
@@ -349,7 +363,11 @@ async fn f32_json_is_not_widened(pool: &Pool) {
     let audit = rustango::audit::fetch_for_entity_pool(pool, Gauge::SCHEMA.table, "1")
         .await
         .expect("audit");
-    assert_eq!(audit[0].changes["ratio"], serde_json::json!(0.1), "{audit:?}");
+    assert_eq!(
+        audit[0].changes["ratio"],
+        serde_json::json!(0.1),
+        "{audit:?}"
+    );
 }
 
 tri_dialect_test! {

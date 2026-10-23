@@ -541,7 +541,10 @@ fn error_code_of(body: &str) -> String {
         .map(|b| b.error)
         .ok()
         .filter(|e| e.len() <= 64)
-        .filter(|e| e.bytes().all(|c| matches!(c, 0x20..=0x21 | 0x23..=0x5b | 0x5d..=0x7e)))
+        .filter(|e| {
+            e.bytes()
+                .all(|c| matches!(c, 0x20..=0x21 | 0x23..=0x5b | 0x5d..=0x7e))
+        })
         .unwrap_or_default()
 }
 /// Cap on a success body: discovery, token and userinfo JSON (#1793).
@@ -1181,7 +1184,10 @@ mod tests {
 
     #[test]
     fn error_code_outside_the_rfc_charset_or_length_is_dropped() {
-        assert_eq!(error_code_of(r#"{"error":"invalid_grant"}"#), "invalid_grant");
+        assert_eq!(
+            error_code_of(r#"{"error":"invalid_grant"}"#),
+            "invalid_grant"
+        );
         let long = format!(r#"{{"error":"{}"}}"#, "a".repeat(65));
         assert_eq!(error_code_of(&long), "");
         assert_eq!(error_code_of(r#"{"error":"bad\"quote"}"#), "");

@@ -62,7 +62,10 @@ async fn racing_workers_claim_distinct_jobs(pool: &Pool) {
         let (a, b) = tokio::join!(run(1), run(2));
         let a = a.unwrap_or_else(|e| panic!("round {round}: worker 1: {e}"));
         let b = b.unwrap_or_else(|e| panic!("round {round}: worker 2: {e}"));
-        assert!(a.is_some() && b.is_some() && a != b, "round {round}: {a:?} {b:?}");
+        assert!(
+            a.is_some() && b.is_some() && a != b,
+            "round {round}: {a:?} {b:?}"
+        );
     }
 }
 

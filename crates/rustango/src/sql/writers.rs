@@ -3729,7 +3729,8 @@ fn write_extract_int(
         // ISO week: the day of year of this week's Thursday, over seven.
         b.sql.push_str("((CAST(strftime('%j', date(");
         write_expr(b, &args[0], None)?;
-        b.sql.push_str(", '-3 days', 'weekday 4')) AS INTEGER) - 1) / 7 + 1)");
+        b.sql
+            .push_str(", '-3 days', 'weekday 4')) AS INTEGER) - 1) / 7 + 1)");
     } else {
         let token = match field {
             "YEAR" => "%Y",
