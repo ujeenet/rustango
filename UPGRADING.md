@@ -191,6 +191,18 @@ The PostgreSQL/MySQL migrate lock now opens one extra connection outside the poo
 
 A derived index name longer than 63 bytes now ends in a hash (field-level ones were not capped), so the next `makemigrations` drops and recreates those indexes once.
 
+### `ForeignKey<T>` to a renamed PK column
+
+The FK now references `T`'s PK column, not `id`. SQLite accepted the old target, so `makemigrations` there shows a changed FK.
+
+### `on_delete = "set_null"` needs an `Option` column
+
+A `fk = "…"` / `o2o = "…"` field with `set_null` must be `Option<…>`, as `ForeignKey<T>` already had to be. Make it optional (and migrate) or pick another action.
+
+### M2M `set` reads the source table
+
+`set` on an M2M or generic M2M manager now locks the source row, so a registered source model's table must exist; a test that created only the junction table needs it too. A hand-built `M2MManager` whose junction no registered model declares is not locked and logs a warning.
+
 ## 0.60.11
 
 ### `csrf_trusted_origins` takes effect
@@ -232,18 +244,6 @@ It is logged and the later callbacks run. Code that caught that panic around `at
 ### SQLite: a UUID key stored twice is a 404
 
 ViewSets and template views refuse a UUID that matches one row as BLOB and another as TEXT (404, or skipped in a bulk action). Remove the duplicate row to reach it.
-
-### `ForeignKey<T>` to a renamed PK column
-
-The FK now references `T`'s PK column, not `id`. SQLite accepted the old target, so `makemigrations` there shows a changed FK.
-
-### `on_delete = "set_null"` needs an `Option` column
-
-A `fk = "…"` / `o2o = "…"` field with `set_null` must be `Option<…>`, as `ForeignKey<T>` already had to be. Make it optional (and migrate) or pick another action.
-
-### M2M `set` reads the source table
-
-`set` on an M2M or generic M2M manager now locks the source row, so a registered source model's table must exist; a test that created only the junction table needs it too. A hand-built `M2MManager` whose junction no registered model declares is not locked and logs a warning.
 
 ## 0.60.10
 

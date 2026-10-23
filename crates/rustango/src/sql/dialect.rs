@@ -936,7 +936,7 @@ pub trait Dialect: Send + Sync {
 
     /// SQL that tries a session-scoped advisory lock without waiting and
     /// returns whether it was taken. The runner polls it on a connection
-    /// outside the pool (#2027). `None` skips the lock.
+    /// outside the pool. `None` skips the lock.
     fn acquire_session_lock_sql(&self) -> Option<String> {
         None
     }

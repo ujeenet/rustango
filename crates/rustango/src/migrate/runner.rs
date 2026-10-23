@@ -3055,7 +3055,7 @@ type TryLock<'c> =
 
 impl<C: sqlx::Connection> LockSession<C> {
     /// Poll `try_lock` until it takes the lock. A waiting run holds no pool
-    /// connection, so the holder's body can borrow one (#2027).
+    /// connection, so the holder's body can borrow one.
     /// The connect gives up after the pool's own acquire timeout.
     async fn wait<F>(
         opts: &C::Options,

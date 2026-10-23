@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+**Breaking:** `makemigrations --merge` refuses conflicting branches; `migrate --squash` refuses data ops, callbacks and renames; `migrate <target>` applies earlier-sorting pending files and unapplies later-sorting siblings; upserts with no update columns return `SqlError::EmptyUpdateSet` on PostgreSQL and SQLite; derived index names over 63 bytes get a hash suffix, so their indexes are recreated once; the migrate lock opens its own connection and SQLite locks a file; `ForeignKey<T>` references `T`'s PK column; `set_null` on a non-`Option` `fk` / `o2o` field is a compile error; M2M `set` locks the source row; admin login and the session gate return 503 on a database error; MCP audit redacts more argument keys; a trailing-dot `Host` matches the host without it. See UPGRADING.
+
 ### Fixed — `makemigrations --merge` refuses conflicting branches
 
 When both branches change the same table, column, FK, index or check differently (or one drops what the other changed), it names them instead of picking a winner.
@@ -84,6 +86,22 @@ The referencing FKs are dropped before the `MODIFY` and come back at the end; ma
 
 A field-level index name is capped too, and a capped name ends in a hash of the full one.
 
+### Fixed — `ForeignKey<T>` references `T`'s PK column
+
+Without `on`, the FK targeted `id` even when `T`'s PK sets `column = "…"`, so PG and MySQL refused the table.
+
+### Fixed — `on_delete = "set_null"` on a NOT NULL `fk = "…"` column is a compile error
+
+Only `ForeignKey<T>` was checked; a plain `fk = "…"` / `o2o = "…"` column passed, then every parent delete failed.
+
+### Fixed — concurrent M2M `set` keeps one of the sets
+
+`set` locks the source row first (SQLite takes its write lock at `BEGIN`). Two concurrent sets kept both sets' rows on PG and failed with "database is deadlocked" on SQLite.
+
+### Fixed — `select_related` keeps the FK key; long join labels; PG prefetch batches
+
+A loaded FK with `on = <unique column>` keeps that column's value, not the parent's PK. Joined-column labels past 63 bytes are hashed, so PG no longer truncates them (a fetch error, or a blank admin cell); dict and JSON rows still use the full key. The PG-typed `fetch_with_prefetch` batches its `IN` list past the bind cap.
+
 ## [0.60.11] — 2026-10-22
 
 **Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`; `RequestIdLayer` no longer echoes an untrusted client's `X-Request-Id`; a SQLite UUID key stored both as BLOB and TEXT is now a 404 in ViewSets and template views. See UPGRADING.
@@ -151,22 +169,6 @@ The tenancy `run-server` verb rebuilt its pools with defaults, dropping `Cli::wi
 ### Fixed — `X-Request-Id` is reused only from a trusted proxy
 
 `RequestIdLayer::default()` used to echo any client's id. It now keeps one only behind `with_trusted_proxies` (whether or not that hop sends `X-Forwarded-For`), and only visible ASCII without quotes. A `[logging] level` of `warning`, `critical` or `fatal` now reads as a level instead of silencing every log.
-
-### Fixed — `ForeignKey<T>` references `T`'s PK column
-
-Without `on`, the FK targeted `id` even when `T`'s PK sets `column = "…"`, so PG and MySQL refused the table.
-
-### Fixed — `on_delete = "set_null"` on a NOT NULL `fk = "…"` column is a compile error
-
-Only `ForeignKey<T>` was checked; a plain `fk = "…"` / `o2o = "…"` column passed, then every parent delete failed.
-
-### Fixed — concurrent M2M `set` keeps one of the sets
-
-`set` locks the source row first (SQLite takes its write lock at `BEGIN`). Two concurrent sets kept both sets' rows on PG and failed with "database is deadlocked" on SQLite.
-
-### Fixed — `select_related` keeps the FK key; long join labels; PG prefetch batches
-
-A loaded FK with `on = <unique column>` keeps that column's value, not the parent's PK. Joined-column labels past 63 bytes are hashed, so PG no longer truncates them (a fetch error, or a blank admin cell); dict and JSON rows still use the full key. The PG-typed `fetch_with_prefetch` batches its `IN` list past the bind cap.
 
 ## [0.60.10] — 2026-10-22
 
