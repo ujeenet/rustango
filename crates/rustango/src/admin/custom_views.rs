@@ -39,7 +39,8 @@
 //! With `Builder::with_user_perms`, a view needs `{table}.view` for a
 //! GET or QUERY and `{table}.change` for POST, PUT, PATCH or DELETE; the
 //! rest get 403. A trailing `perm = "publish"` asks for
-//! `{table}.publish` instead, with or without `with_user_perms`.
+//! `{table}.publish` instead. Without `with_user_perms` the user acts as
+//! superuser, who holds every codename, so a declared `perm` passes.
 
 use axum::http::Method;
 use axum::response::Response;

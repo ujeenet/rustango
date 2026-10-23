@@ -1993,7 +1993,7 @@ pub(crate) async fn create_submit(
         }
     };
     stamp_readonly_timestamps(model, &admin_cfg, &mut collected);
-    default_locked_flags(model, &locked.superuser_only, &mut collected);
+    super::object_permissions::default_locked_flags(model, &locked.superuser_only, &mut collected);
     if let Err(e) = super::derived_fields::apply(model.table, &mut collected, None).await {
         let html = render_form(&state, model, Some(&form), false, Some(e.as_str()));
         return Ok(Html(html).into_response());
@@ -2146,25 +2146,6 @@ fn stamp_readonly_timestamps(
             && !values.iter().any(|(c, _)| *c == f.column)
         {
             values.push((f.column, SqlValue::DateTime(now)));
-        }
-    }
-}
-
-/// A locked NOT NULL flag with no column default stores `false`, as an
-/// unticked box would; anything else is left to the column default.
-fn default_locked_flags(
-    model: &'static crate::core::ModelSchema,
-    locked: &[&'static str],
-    values: &mut Vec<(&'static str, SqlValue)>,
-) {
-    for f in model.scalar_fields() {
-        if f.ty == crate::core::FieldType::Bool
-            && !f.nullable
-            && f.default.is_none()
-            && locked.contains(&f.name)
-            && !values.iter().any(|(c, _)| *c == f.column)
-        {
-            values.push((f.column, SqlValue::Bool(false)));
         }
     }
 }

@@ -4,7 +4,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-**Breaking:** `makemigrations --merge` refuses conflicting branches; `migrate --squash` refuses data ops, callbacks and renames; `migrate <target>` applies earlier-sorting pending files and unapplies later-sorting siblings; upserts with no update columns return `SqlError::EmptyUpdateSet` on PostgreSQL and SQLite; derived index names over 63 bytes get a hash suffix, so their indexes are recreated once; the migrate lock opens its own connection and SQLite locks a file; `ForeignKey<T>` references `T`'s PK column; `set_null` on a non-`Option` `fk` / `o2o` field is a compile error; M2M `set` locks the source row; admin login and the session gate return 503 on a database error; MCP audit redacts more argument keys; a trailing-dot `Host` matches the host without it. See UPGRADING.
+**Breaking:** `makemigrations --merge` refuses conflicting branches; `migrate --squash` refuses data ops, callbacks and renames; `migrate <target>` applies earlier-sorting pending files and unapplies later-sorting siblings; upserts with no update columns return `SqlError::EmptyUpdateSet` on PostgreSQL and SQLite; derived index names over 63 bytes get a hash suffix, so their indexes are recreated once; the migrate lock opens its own connection and SQLite locks a file; `ForeignKey<T>` references `T`'s PK column; `set_null` on a non-`Option` `fk` / `o2o` field is a compile error; M2M `set` locks the source row; admin login and the session gate return 503 on a database error; MCP audit redacts more argument keys; a trailing-dot `Host` matches the host without it; ViewSet writes skip superuser-only fields unless a superuser is signed in; inactive users hold no permissions; `require_auth` answers 403 when an outer layer bound another tenant. See UPGRADING.
 
 ### Fixed — `makemigrations --merge` refuses conflicting branches
 
@@ -101,6 +101,22 @@ Only `ForeignKey<T>` was checked; a plain `fk = "…"` / `o2o = "…"` column pa
 ### Fixed — `select_related` keeps the FK key; long join labels; PG prefetch batches
 
 A loaded FK with `on = <unique column>` keeps that column's value, not the parent's PK. Joined-column labels past 63 bytes are hashed, so PG no longer truncates them (a fetch error, or a blank admin cell); dict and JSON rows still use the full key. The PG-typed `fetch_with_prefetch` batches its `IN` list past the bind cap.
+
+### Fixed — `require_auth` resolves the tenant from the whole request
+
+Resolvers now see the request's extensions, so `PortResolver` works under `require_auth`, and a tenant an outer layer already bound must match (403 otherwise).
+
+### Fixed — an inactive user holds no permission
+
+`user_permissions_pool`, `user_permissions`, `has_any_perm` and `has_all_perms` now ignore an inactive user's role and direct grants, as `has_perm_pool` does.
+
+### Fixed — admin superuser-only fields follow the request's session
+
+The admin's field locks now follow a session set only as `Extension<AdminSession>`, and an inline add fills a locked flag the way the create form does.
+
+### Fixed — ViewSets keep the admin's superuser-only fields locked
+
+ViewSets now apply the admin's superuser-only field locks on create and update; without an authenticated superuser those fields are not written.
 
 ## [0.60.11] — 2026-10-22
 

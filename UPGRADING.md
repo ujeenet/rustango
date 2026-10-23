@@ -203,6 +203,22 @@ A `fk = "…"` / `o2o = "…"` field with `set_null` must be `Option<…>`, as `
 
 `set` on an M2M or generic M2M manager now locks the source row, so a registered source model's table must exist; a test that created only the junction table needs it too. A hand-built `M2MManager` whose junction no registered model declares is not locked and logs a warning.
 
+### `require_auth` sees request extensions
+
+A resolver chain that reads extensions (`PortResolver`) now resolves under `require_auth` instead of answering 404. A request whose `TenantSlug` extension names another tenant than the resolved one gets 403.
+
+### Inactive users list no permissions
+
+`user_permissions_pool` / `user_permissions` return an empty list for an inactive user, and the PostgreSQL `has_any_perm` / `has_all_perms` return `false`. They now make one query per codename.
+
+### Admin reads `Extension<AdminSession>` as the signed-in user
+
+If your own middleware inserts `AdminSession` in front of the admin, the admin's superuser-only field locks now apply to that session. `HmacAuthLayer::sign_port` does not bind a tenant; use `bind_tenants`.
+
+### ViewSet writes apply superuser-only field locks
+
+ViewSets now apply the admin's superuser-only field locks on create and update; without an authenticated superuser those fields are not written. Write them in your own handler if an anonymous or non-tenancy ViewSet needs them.
+
 ## 0.60.11
 
 ### `csrf_trusted_origins` takes effect

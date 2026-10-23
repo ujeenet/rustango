@@ -207,8 +207,10 @@ impl HmacAuthLayer {
     }
 
     /// Sign the port in `Host` (empty when it has none), as the client
-    /// sends it. A proxy that rewrites `Host` breaks this; the tenant a
-    /// port resolves to is bound with [`Self::bind_tenants`], not here.
+    /// sends it. A proxy that rewrites `Host` breaks this.
+    ///
+    /// Not a tenant defence: `PortResolver` reads the listener port, which
+    /// no signature covers. Bind keys with [`Self::bind_tenants`].
     #[must_use]
     pub fn sign_port(mut self) -> Self {
         Arc::make_mut(&mut self.inner).sign_port = true;

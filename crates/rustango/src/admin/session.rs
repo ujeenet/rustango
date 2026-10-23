@@ -70,6 +70,18 @@ pub fn from_extensions(extensions: &axum::http::Extensions) -> Option<AdminSessi
     extensions.get::<AdminSession>().cloned().or_else(current)
 }
 
+/// Scope the task-local to the request's [`from_extensions`] session, so a
+/// custom gate that sets only the extension is seen by every reader.
+pub(crate) async fn scope_request_session(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    match from_extensions(req.extensions()) {
+        Some(s) => CURRENT_SESSION.scope(s, next.run(req)).await,
+        None => next.run(req).await,
+    }
+}
+
 tokio::task_local! {
     /// Per-request CSRF token, set by `csrf_context`.
     ///

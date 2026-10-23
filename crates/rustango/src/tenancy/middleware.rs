@@ -194,12 +194,22 @@ async fn auth_middleware(
         .body(())
         .unwrap_or_else(|_| axum::http::Request::new(()));
     let (mut dummy_parts, _) = dummy.into_parts();
+    // Resolvers read extensions too (`ListenerPort`), so they must see the request's.
+    dummy_parts.extensions = req.extensions().clone();
 
     // The tenant for THIS request, not for the router.
     let (org, pool) = match tenant_pool(&dummy_parts, req.extensions()).await {
         Ok(t) => t,
         Err(resp) => return resp,
     };
+    // An outer layer already bound another tenant: never mix the two.
+    if req
+        .extensions()
+        .get::<super::TenantSlug>()
+        .is_some_and(|s| s.0 != org.slug)
+    {
+        return (StatusCode::FORBIDDEN, "tenant mismatch").into_response();
+    }
     // Scope the Basic and API-key limits to this tenant and client.
     dummy_parts
         .extensions
