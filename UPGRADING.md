@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Upserts with no update columns fail before the database
+
+On PostgreSQL and SQLite they return `ExecError::Sql(SqlError::EmptyUpdateSet)`, as MySQL did, instead of a driver syntax error. Use `insert_or_ignore` for "insert, skip conflicts".
+
 ## 0.60.11
 
 ### `csrf_trusted_origins` takes effect

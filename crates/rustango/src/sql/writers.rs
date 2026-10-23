@@ -550,13 +550,13 @@ fn write_distinct_inner_col(b: &mut Sql<'_>, table: &str, col: &str, qualify: bo
 ///
 /// Layout:
 /// ```text
-/// SELECT <orig_cols> FROM (
-///   SELECT <orig_cols>,
+/// SELECT <orig_cols>, <join_cols> FROM (
+///   SELECT <orig_cols>, <join_cols>, <order> AS __rustango_order<i>,
 ///          ROW_NUMBER() OVER (PARTITION BY <cols> ORDER BY <order>) AS __rn
 ///   FROM <table> [JOIN ...] WHERE <where>
 /// ) sub
 /// WHERE __rn = 1
-/// [ORDER BY <order>] [LIMIT N] [OFFSET M]
+/// [ORDER BY __rustango_order<i>] [LIMIT N] [OFFSET M]
 /// ```
 fn write_distinct_on_via_window(
     b: &mut Sql<'_>,
@@ -589,6 +589,12 @@ fn write_distinct_on_via_window(
             b.write_ident(field.column);
         }
     }
+    for join in &query.joins {
+        for col in &join.project {
+            b.sql.push_str(", ");
+            b.write_ident(&crate::core::joins::joined_label(join.alias, col));
+        }
+    }
     // Counted over the survivors, which `sub` exposes.
     if let Some(child) = b.child_count.take() {
         write_child_count(b, "sub", child);
@@ -613,6 +619,25 @@ fn write_distinct_on_via_window(
             }
             inner_first = false;
             write_distinct_inner_col(b, scope.name, field.column, qualify);
+        }
+    }
+    for join in &query.joins {
+        for col in &join.project {
+            b.sql.push_str(", ");
+            b.write_ident(join.alias);
+            b.sql.push('.');
+            b.write_ident(col);
+            b.sql.push_str(" AS ");
+            b.write_ident(&crate::core::joins::joined_label(join.alias, col));
+        }
+    }
+    // Each sort key, so the outer ORDER BY can read relation and unprojected ones.
+    for (i, item) in query.order_by.iter().enumerate() {
+        if !matches!(item, crate::core::OrderItem::Random) {
+            b.sql.push_str(", ");
+            write_order_target(b, item)?;
+            b.sql.push_str(" AS ");
+            b.write_ident(&distinct_on_order_label(i));
         }
     }
     // ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) AS __rn
@@ -667,13 +692,23 @@ fn write_distinct_on_via_window(
 
     b.sql.push_str(") sub WHERE sub.__rn = 1");
 
-    // Outer ORDER BY / LIMIT / OFFSET — applied to the survivors, which
-    // `sub` exposes under bare names.
+    // Outer ORDER BY / LIMIT / OFFSET — applied to the survivors, by the
+    // sort keys `sub` exposes.
     b.with_qualifier(None, |b| {
-        write_order_limit_offset(b, &query.order_by, query.limit, query.offset)
+        write_order_limit_offset_with(b, &query.order_by, query.limit, query.offset, |b, i, item| {
+            if matches!(item, crate::core::OrderItem::Random) {
+                return write_order_target(b, item);
+            }
+            b.write_ident(&distinct_on_order_label(i));
+            Ok(())
+        })
     })?;
 
     Ok(())
+}
+
+fn distinct_on_order_label(i: usize) -> String {
+    format!("__rustango_order{i}")
 }
 
 /// Derived-table joins: `JOIN [LATERAL] (<subquery>) AS alias ON …`.
@@ -1710,10 +1745,26 @@ pub(super) fn write_insert_rows(b: &mut Sql<'_>, query: &InsertQuery) -> Result<
     }
 
     if let Some(conflict) = &query.on_conflict {
-        let set = caller_set(&query.columns, &query.generated);
-        b.d.write_conflict_clause(&mut b.sql, query.model, &set, conflict)?;
+        write_on_conflict(b, query.model, &query.columns, &query.generated, conflict)?;
     }
     Ok(())
+}
+
+/// The conflict clause of an INSERT. A `DoUpdate` with no columns has no SET to write.
+fn write_on_conflict(
+    b: &mut Sql<'_>,
+    model: &ModelSchema,
+    columns: &[&'static str],
+    generated: &[&str],
+    conflict: &crate::core::ConflictClause,
+) -> Result<(), SqlError> {
+    if let crate::core::ConflictClause::DoUpdate { update_columns, .. } = conflict {
+        if update_columns.is_empty() {
+            return Err(SqlError::EmptyUpdateSet);
+        }
+    }
+    let set = caller_set(columns, generated);
+    b.d.write_conflict_clause(&mut b.sql, model, &set, conflict)
 }
 
 /// The bound columns whose value the caller chose, not the writer.
@@ -1802,8 +1853,7 @@ pub(super) fn write_bulk_insert(b: &mut Sql<'_>, query: &BulkInsertQuery) -> Res
     }
 
     if let Some(conflict) = &query.on_conflict {
-        let set = caller_set(&query.columns, &query.generated);
-        b.d.write_conflict_clause(&mut b.sql, query.model, &set, conflict)?;
+        write_on_conflict(b, query.model, &query.columns, &query.generated, conflict)?;
     }
 
     write_returning(b, &query.returning)?;
@@ -4091,6 +4141,11 @@ pub(super) fn write_where_expr(
     match expr {
         WhereExpr::Predicate(filter) => write_filter(b, filter, model),
         WhereExpr::ColumnCompare(cf) => write_column_compare(b, cf, model),
+        // A nested empty AND is TRUE; the top level skips WHERE instead.
+        WhereExpr::And(items) if items.is_empty() => {
+            b.sql.push_str("1 = 1");
+            Ok(())
+        }
         WhereExpr::And(items) => write_joined(b, items, " AND ", model),
         WhereExpr::Or(items) => {
             if items.is_empty() {
@@ -4963,12 +5018,26 @@ fn write_order_limit_offset(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<(), SqlError> {
+    write_order_limit_offset_with(b, order_by, limit, offset, |b, _, item| {
+        write_order_target(b, item)
+    })
+}
+
+/// [`write_order_limit_offset`] with `target` writing each item's sort key,
+/// given its position in `order_by`.
+fn write_order_limit_offset_with(
+    b: &mut Sql<'_>,
+    order_by: &[crate::core::OrderItem],
+    limit: Option<i64>,
+    offset: Option<i64>,
+    target: impl Fn(&mut Sql<'_>, usize, &crate::core::OrderItem) -> Result<(), SqlError>,
+) -> Result<(), SqlError> {
     use crate::core::{NullsOrder, OrderItem};
     if !order_by.is_empty() {
         b.sql.push_str(" ORDER BY ");
         let supports_nulls = b.d.supports_nulls_order();
         let mut first = true;
-        for item in order_by {
+        for (i, item) in order_by.iter().enumerate() {
             let (desc, nulls) = match item {
                 OrderItem::Column { desc, nulls, .. } => (*desc, *nulls),
                 OrderItem::Expr { desc, nulls, .. } => (*desc, *nulls),
@@ -4983,7 +5052,7 @@ fn write_order_limit_offset(
                     b.sql.push_str(", ");
                 }
                 first = false;
-                write_order_target(b, item)?;
+                target(b, i, item)?;
                 b.sql.push_str(" IS NULL");
                 // NULLS FIRST puts nulls on top, so IS NULL DESC.
                 match nulls {
@@ -4996,7 +5065,7 @@ fn write_order_limit_offset(
                 b.sql.push_str(", ");
             }
             first = false;
-            write_order_target(b, item)?;
+            target(b, i, item)?;
             if desc {
                 b.sql.push_str(" DESC");
             }

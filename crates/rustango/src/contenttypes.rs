@@ -755,7 +755,7 @@ where
         |keys| {
             crate::query::QuerySet::<C>::new()
                 .filter_op(
-                    pk_field.column,
+                    pk_field.name,
                     crate::core::Op::In,
                     crate::core::SqlValue::List(keys),
                 )

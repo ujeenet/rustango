@@ -488,6 +488,33 @@ pub fn try_get_flat_my<U>(row: &crate::sql::MyReturningRow, _name: &str) -> Resu
     match *row {}
 }
 
+/// SQLite twin of [`try_get_flat_my`]: a UUID a column default wrote is TEXT.
+///
+/// # Errors
+/// The driver's decode error, or NULL for a bare `U`.
+#[cfg(feature = "sqlite")]
+#[doc(hidden)]
+pub fn try_get_flat_sqlite<U: FlatScalar>(
+    row: &crate::sql::SqliteReturningRow,
+    name: &str,
+) -> Result<U, sqlx::Error> {
+    use sqlx::{Row as _, ValueRef as _};
+    if row.try_get_raw(name)?.is_null() {
+        return U::from_null(name);
+    }
+    row.try_get::<U::Cell, _>(name).map(U::from_cell)
+}
+
+#[cfg(not(feature = "sqlite"))]
+#[doc(hidden)]
+#[allow(clippy::missing_errors_doc)]
+pub fn try_get_flat_sqlite<U>(
+    row: &crate::sql::SqliteReturningRow,
+    _name: &str,
+) -> Result<U, sqlx::Error> {
+    match *row {}
+}
+
 /// Decode a `(K, V)` row, each cell NULL-checked (#1808).
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 fn decode_pair<R, K, V>(row: &R) -> Result<(K, V), sqlx::Error>
