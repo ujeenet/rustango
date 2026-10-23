@@ -16,7 +16,7 @@ MySQL and non-atomic runs render every step before the first one runs; makemigra
 
 ### Fixed — MySQL widens a primary key other tables reference
 
-The referencing FKs are dropped before the `MODIFY` and come back at the end; makemigrations refuses one CHECK name on two tables.
+The referencing FKs are dropped before the `MODIFY` and come back at the end; makemigrations warns about one CHECK name on two tables.
 
 ### Fixed — long derived index names stay under 63 bytes and distinct
 

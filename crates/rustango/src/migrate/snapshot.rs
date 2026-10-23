@@ -1071,8 +1071,8 @@ fn junction_conflict(out: &[M2MTableSnapshot]) -> Option<String> {
 }
 
 /// `makemigrations` refuses a conflicting junction as an error; the
-/// snapshot builders can only panic. Also a CHECK name on two tables,
-/// which the snapshot keys by name alone and MySQL keeps schema-wide.
+/// snapshot builders can only panic. A CHECK name on two tables only warns:
+/// the snapshot keeps one of them, and MySQL refuses the second.
 pub(crate) fn check_registry_junctions() -> Result<(), super::MigrateError> {
     let managed = || {
         inventory::iter::<ModelEntry>
@@ -1088,13 +1088,17 @@ pub(crate) fn check_registry_junctions() -> Result<(), super::MigrateError> {
         .collect();
     checks.sort_unstable();
     checks.dedup();
-    match checks.windows(2).find(|w| w[0].0 == w[1].0) {
-        Some(w) => Err(super::MigrateError::Validation(format!(
-            "CHECK `{}` is declared on both `{}` and `{}`; give each table its own CHECK name",
-            w[0].0, w[0].1, w[1].1
-        ))),
-        None => Ok(()),
+    for w in checks.windows(2).filter(|w| w[0].0 == w[1].0) {
+        tracing::warn!(
+            target: "rustango::migrate",
+            "CHECK `{}` is declared on both `{}` and `{}`: only one is migrated, and MySQL \
+             refuses the name twice; give each table its own CHECK name",
+            w[0].0,
+            w[0].1,
+            w[1].1
+        );
     }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -67,16 +67,29 @@ fn derived_index_names_fit_and_differ() {
     assert_eq!(unique.len(), names.len(), "{names:?}");
 }
 
-/// The snapshot keys CHECKs by name, so one of the two tables lost its.
+/// The snapshot keys CHECKs by name, so one of the two tables loses its:
+/// makemigrations says so, and still runs.
+#[cfg(feature = "runtime")]
 #[test]
-fn check_name_on_two_tables_is_refused() {
+fn check_name_on_two_tables_warns() {
+    let buf = rustango::testkit::CaptureWriter::default();
+    let sink = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .finish();
     let dir = tempfile::tempdir().expect("tempdir");
-    let err = rustango::migrate::make_migrations(dir.path(), None)
-        .expect_err("a CHECK name on two tables");
-    let msg = err.to_string();
+    tracing::subscriber::with_default(subscriber, || {
+        rustango::migrate::make_migrations(dir.path(), None).expect("makemigrations still runs")
+    });
+    let logs = buf.contents();
     assert!(
-        msg.contains("mr_ck_positive") && msg.contains("mr_ck_a") && msg.contains("mr_ck_b"),
-        "{msg}"
+        logs.contains("mr_ck_positive")
+            && logs.contains("mr_ck_a")
+            && logs.contains("mr_ck_b")
+            && logs.contains("MySQL"),
+        "{logs}"
     );
 }
 
@@ -144,6 +157,103 @@ async fn referenced_key_widens(pool: &Pool) {
         .await
         .unwrap_or_else(|e| panic!("narrowing on {}: {e}", d.name()));
     for t in [b, a, ledger] {
+        drop_table(pool, t).await;
+    }
+}
+
+/// FKs on `t`, from the catalog.
+async fn fk_count(pool: &Pool, t: &str) -> i64 {
+    let sql = match pool.dialect().name() {
+        "sqlite" => format!("SELECT COUNT(*) FROM pragma_foreign_key_list('{t}')"),
+        name => format!(
+            "SELECT COUNT(*) FROM information_schema.table_constraints \
+             WHERE table_schema = {} AND table_name = '{t}' \
+             AND constraint_type = 'FOREIGN KEY'",
+            if name == "mysql" { "DATABASE()" } else { "current_schema()" }
+        ),
+    };
+    let n: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .expect("count FKs");
+    n[0].0
+}
+
+/// A widened key beside a table created, a column added and one dropped in
+/// the same migration: each referencing FK ends up there once, or gone.
+async fn referenced_key_widens_beside_new_fks(pool: &Pool) {
+    let (a, kid, pal, old) = ("mr_wn_author", "mr_wn_kid", "mr_wn_pal", "mr_wn_old");
+    let ledger = "mr_wn_ledger";
+    let dir = fresh(pool, &[kid, pal, old, a], ledger).await;
+    let key = |ty: &str| {
+        json!({"name": "id", "column": "id", "ty": ty, "nullable": false, "primary_key": true})
+    };
+    let fk_col = |ty: &str| {
+        json!({"name": "author_id", "column": "author_id", "ty": ty, "nullable": true,
+            "primary_key": false,
+            "fk": {"kind": "fk", "to": a, "on": "id", "on_delete": "CASCADE"}})
+    };
+    let initial = make_migrations_from(
+        dir.path(),
+        &snap(vec![
+            table(a, vec![key("i32")]),
+            table(pal, vec![key("i64")]),
+            table(old, vec![key("i64"), fk_col("i32")]),
+        ]),
+        None,
+    )
+    .expect("makemigrations")
+    .expect("a migration");
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .expect("initial");
+    let s = |t: &str| t.to_owned();
+    let mig = Migration {
+        name: "0002_widen".into(),
+        prev: Some(initial.name.clone()),
+        snapshot: snap(vec![
+            table(a, vec![key("i64")]),
+            table(pal, vec![key("i64"), fk_col("i64")]),
+            table(old, vec![key("i64")]),
+            table(kid, vec![key("i64"), fk_col("i64")]),
+        ]),
+        forward: vec![
+            Operation::Schema(SchemaChange::AlterColumnType {
+                table: s(a),
+                column: s("id"),
+                from: s("i32"),
+                to: s("i64"),
+            }),
+            Operation::Schema(SchemaChange::CreateTable(s(kid))),
+            Operation::Schema(SchemaChange::AddColumn {
+                table: s(pal),
+                column: s("author_id"),
+            }),
+            Operation::Schema(SchemaChange::DropColumn {
+                table: s(old),
+                column: s("author_id"),
+            }),
+        ],
+        ..initial
+    };
+    write(dir.path(), &mig);
+    let name = pool.dialect().name();
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("widening on {name}: {e}"));
+    assert_eq!(
+        (fk_count(pool, kid).await, fk_count(pool, pal).await, fk_count(pool, old).await),
+        (1, 1, 0),
+        "FKs on {name}"
+    );
+    unapply_pool_with_ledger(pool, dir.path(), &mig.name, ledger)
+        .await
+        .unwrap_or_else(|e| panic!("narrowing on {name}: {e}"));
+    assert_eq!(
+        (fk_count(pool, pal).await, fk_count(pool, old).await),
+        (0, 1),
+        "FKs after unapply on {name}"
+    );
+    for t in [kid, pal, old, a, ledger] {
         drop_table(pool, t).await;
     }
 }
@@ -385,6 +495,7 @@ tri_dialect_test!(
     scenarios: [
         long_index_names_apply,
         referenced_key_widens,
+        referenced_key_widens_beside_new_fks,
         refused_downgrade_runs_nothing,
         refused_loose_downgrade_runs_nothing,
         one_connection_pool_migrates,

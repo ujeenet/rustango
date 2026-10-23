@@ -154,9 +154,9 @@ untouched.
 
 The PostgreSQL/MySQL migrate lock now opens one extra connection outside the pool. File-backed SQLite creates `<db>-migrate.lock` beside the database and serialises concurrent runs on it.
 
-### Same CHECK name on two tables is refused
+### Same CHECK name on two tables warns
 
-`makemigrations` fails until each table has its own CHECK name; before, one of the two was silently left out.
+`makemigrations` warns when two tables share a CHECK name: only one of them is migrated, and MySQL refuses the second. Rename one.
 
 ### Derived index names over 63 bytes change
 
