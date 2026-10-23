@@ -1031,6 +1031,7 @@ jobs:
             --test orm_relations_tri \
             --test orm_relation_edges_tri \
             --test orm_query_edges_tri \
+            --test orm_claim_lock_tri \
             --test orm_core_counts_tri \
             --test pool_conn_tri \
             --test manage_data_verbs_tri \
@@ -1338,6 +1339,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test orm_relations_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_relation_edges_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_query_edges_tri
+      - run: cargo test -p rustango --features mysql,testkit --test orm_claim_lock_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_core_counts_tri
       - run: cargo test -p rustango --features mysql,testkit --test pool_conn_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_dialect_tri

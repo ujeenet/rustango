@@ -5403,7 +5403,7 @@ async fn delete_all_in_tx(
         let why = "they reference each other through NOT NULL foreign keys; no delete order exists";
         return Err((tables, why.to_owned()));
     }
-    let mut tx = crate::sql::write_transaction_pool(pool)
+    let mut tx = crate::sql::write_transaction(pool)
         .await
         .map_err(|e| ("BEGIN".to_owned(), e.to_string()))?;
     // SQLite: FK checks wait for COMMIT, for this transaction only.

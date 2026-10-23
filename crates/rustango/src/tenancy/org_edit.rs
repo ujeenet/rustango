@@ -242,7 +242,7 @@ pub(crate) async fn apply_values(
                 .map_err(claim_error)?
                 .tx
         }
-        None => crate::sql::write_transaction_pool(registry).await?,
+        None => crate::sql::write_transaction(registry).await?,
     };
     crate::sql::update_tx(&mut tx, &update).await?;
     if existing.active || activating {

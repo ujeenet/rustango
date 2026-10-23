@@ -282,9 +282,9 @@ Calling `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` without a prio
 |---|---|
 | PostgreSQL | Full support — every flag emits its native syntax. |
 | MySQL 8.0.1+ | Supports everything except `NO KEY` — that flag falls back to plain `FOR UPDATE` (the stricter lock). |
-| SQLite | No row-level lock syntax. The writer emits no clause at all; transactions hold an implicit write lock for the whole database. Use a different strategy for SQLite (typically a busy-wait loop on the transaction itself). |
+| SQLite | No row-level lock syntax; the writer emits no clause. Open the transaction with `rustango::sql::write_transaction(&pool)`: it takes the database write lock at `BEGIN`, so a second worker waits and then sees the claimed row. A `transaction_pool` one locks nothing until it writes, and the second writer fails with `SQLITE_BUSY`. |
 
-**Must run inside a transaction.** `FOR UPDATE` outside a tx is a no-op on PostgreSQL (the implicit single-statement tx releases the lock immediately) and an error on MySQL. On Postgres pair it with `pool.begin()` (a `sqlx::PgPool`); for a backend-agnostic transaction use `rustango::sql::atomic(&pool, …)` or `transaction_pool(&pool)`, which hand you a `PoolTx` to `match` on (`atomic` through `tx.lock().await?`).
+**Must run inside a transaction.** `FOR UPDATE` outside a tx is a no-op on PostgreSQL (the implicit single-statement tx releases the lock immediately) and an error on MySQL. On Postgres pair it with `pool.begin()` (a `sqlx::PgPool`); for a backend-agnostic transaction use `rustango::sql::write_transaction(&pool)` and `.fetch_on(&mut tx)`.
 
 ### Combining queries (union, intersection, difference)
 

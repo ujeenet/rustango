@@ -172,7 +172,7 @@ pub async fn load_all_pool(
     pool: &Pool,
 ) -> Result<usize, FixtureError> {
     let db = |e: crate::sql::ExecError| FixtureError::Database(e.to_string());
-    let mut tx = crate::sql::write_transaction_pool(pool).await.map_err(db)?;
+    let mut tx = crate::sql::write_transaction(pool).await.map_err(db)?;
     let mut total = 0;
     for (table, fixture) in fixtures {
         total += fixture.load_tx(table, &mut tx).await?;

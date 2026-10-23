@@ -888,8 +888,7 @@ where
 mod decode;
 
 mod tx;
-pub(crate) use tx::write_transaction_pool;
-pub use tx::{transaction_pool, PoolTx};
+pub use tx::{transaction_pool, write_transaction, PoolTx};
 
 // One executor for every `_on` method.
 mod on;
@@ -1819,7 +1818,7 @@ pub async fn truncate(
     pool: &Pool,
     model: &'static crate::core::ModelSchema,
 ) -> Result<u64, ExecError> {
-    let mut tx = tx::write_transaction_pool(pool).await?;
+    let mut tx = tx::write_transaction(pool).await?;
     let sql = truncate_sql(tx.dialect(), model.table);
     let affected = truncate_tx(&mut tx, model.table, &sql).await?;
     tx.commit().await?;

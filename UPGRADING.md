@@ -158,6 +158,10 @@ With `#[rustango(on = "num")]`, `get_on` / `get_pool` load the parent whose `num
 
 `body` now holds only the provider's OAuth `error` code (e.g. `invalid_grant`), or is empty. Code that parsed the full body should match the code instead.
 
+### SQLite `select_for_update` needs `write_transaction`
+
+A `transaction_pool` transaction on SQLite takes no lock when it reads, so two workers can claim one row and the second UPDATE fails with `SQLITE_BUSY`. Open it with `rustango::sql::write_transaction(&pool)`; on PG and MySQL it is the same as `transaction_pool`.
+
 ### Upserts with no update columns fail before the database
 
 On PostgreSQL and SQLite they return `ExecError::Sql(SqlError::EmptyUpdateSet)`, as MySQL did, instead of a driver syntax error. Use `insert_or_ignore` for "insert, skip conflicts".

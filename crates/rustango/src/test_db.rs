@@ -65,7 +65,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::sql::{raw_execute_tx, write_transaction_pool, AtomicTx, ExecError, Pool};
+use crate::sql::{raw_execute_tx, write_transaction, AtomicTx, ExecError, Pool};
 
 /// Run `f` in a transaction that ALWAYS rolls back when the closure
 /// returns, on `Ok` and on `Err` alike. The rollback happens after
@@ -193,7 +193,7 @@ pub async fn truncate_tables(pool: &Pool, tables: &[&str]) -> Result<(), ExecErr
     if tables.is_empty() {
         return Ok(());
     }
-    let mut tx = write_transaction_pool(pool).await?;
+    let mut tx = write_transaction(pool).await?;
     for sql in pool.dialect().clear_tables_sql(tables) {
         raw_execute_tx(&mut tx, &sql, Vec::new()).await?;
     }

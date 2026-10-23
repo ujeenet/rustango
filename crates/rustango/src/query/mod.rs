@@ -330,12 +330,14 @@ impl<T: Model> QuerySet<T> {
 
     /// Take a row lock. Emits `SELECT … FOR UPDATE` on
     /// Postgres and MySQL 8+. SQLite has no row-lock syntax, so it is a
-    /// no-op there; a SQLite transaction locks the whole database.
+    /// no-op there.
     ///
     /// Run it inside a transaction. `FOR UPDATE` outside one does
     /// nothing on Postgres and errors on MySQL. Open one with
-    /// [`crate::sql::transaction_pool`], then call
-    /// `.fetch_on(&mut *tx)`.
+    /// [`crate::sql::write_transaction`], then call
+    /// `.fetch_on(&mut tx)`. On SQLite that takes the database write lock
+    /// at `BEGIN`; a [`crate::sql::transaction_pool`] one locks nothing
+    /// until it writes, so two readers see the same row.
     ///
     /// The defaults ([`crate::core::LockMode::default`]) emit plain
     /// `FOR UPDATE`. Use the methods below to set individual flags.

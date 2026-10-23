@@ -401,7 +401,7 @@ async fn replace(
     let ins = BulkInsertQuery::new(junction, columns, rows);
     ins.validate()?;
     // SQLite has no row lock: take its write lock at BEGIN instead.
-    let mut tx = crate::sql::write_transaction_pool(pool).await?;
+    let mut tx = crate::sql::write_transaction(pool).await?;
     for lock in locks {
         let stmt = pool.dialect().compile_select(&lock)?;
         super::executor::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
