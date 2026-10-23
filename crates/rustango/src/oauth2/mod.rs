@@ -527,15 +527,21 @@ const ERROR_BODY_MAX: usize = 256;
 /// A failed response's RFC 6749 `error` code, or `""`. The rest of the
 /// body is dropped: a description can echo the code or a token into logs.
 async fn error_code(resp: reqwest::Response) -> String {
+    error_code_of(&bounded_text(resp, ERROR_BODY_MAX).await)
+}
+
+/// The `error` member if it is a short code in the RFC 6749 error
+/// charset (%x20-21 / %x23-5B / %x5D-7E), else `""`.
+fn error_code_of(body: &str) -> String {
     #[derive(Deserialize)]
     struct Body {
         error: String,
     }
-    let body = bounded_text(resp, ERROR_BODY_MAX).await;
-    serde_json::from_str::<Body>(&body)
+    serde_json::from_str::<Body>(body)
         .map(|b| b.error)
         .ok()
-        .filter(|e| e.bytes().all(|c| matches!(c, 0x20..=0x7e) && c != b'"' && c != b'\\'))
+        .filter(|e| e.len() <= 64)
+        .filter(|e| e.bytes().all(|c| matches!(c, 0x20..=0x21 | 0x23..=0x5b | 0x5d..=0x7e)))
         .unwrap_or_default()
 }
 /// Cap on a success body: discovery, token and userinfo JSON (#1793).
@@ -1169,6 +1175,16 @@ mod tests {
             OAuthError::BadStatus { status: 400, body } => assert_eq!(body, ""),
             other => panic!("{other}"),
         }
+    }
+
+    #[test]
+    fn error_code_outside_the_rfc_charset_or_length_is_dropped() {
+        assert_eq!(error_code_of(r#"{"error":"invalid_grant"}"#), "invalid_grant");
+        let long = format!(r#"{{"error":"{}"}}"#, "a".repeat(65));
+        assert_eq!(error_code_of(&long), "");
+        assert_eq!(error_code_of(r#"{"error":"bad\"quote"}"#), "");
+        assert_eq!(error_code_of(r#"{"error":"tab\there"}"#), "");
+        assert_eq!(error_code_of("not json"), "");
     }
 
     /// Only the RFC 6749 `error` code is kept; a description may echo secrets.

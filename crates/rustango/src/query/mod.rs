@@ -3340,19 +3340,36 @@ fn duplicate_join_alias(alias: &str) -> QueryError {
 }
 
 /// Add a span or `order_by` join unless its path is already joined. An
-/// ad-hoc join holding the alias is a different table, so it is refused.
+/// ad-hoc join under the alias is reused only if it joins the same table
+/// on the same columns; otherwise the lookup would read the wrong table.
 fn merge_relation_join(
     joins: &mut Vec<crate::core::Join>,
     ad_hoc: &[&'static str],
     j: crate::core::Join,
 ) -> Result<(), QueryError> {
-    if ad_hoc.contains(&j.alias) {
-        return Err(duplicate_join_alias(j.alias));
+    match joins.iter().find(|e| e.alias == j.alias) {
+        Some(e) if ad_hoc.contains(&j.alias) && !same_join(e, &j) => {
+            Err(duplicate_join_alias(j.alias))
+        }
+        Some(_) => Ok(()),
+        None => {
+            joins.push(j);
+            Ok(())
+        }
     }
-    if !joins.iter().any(|e| e.alias == j.alias) {
-        joins.push(j);
-    }
-    Ok(())
+}
+
+/// Same target table and the same `a = b` column pair, in either order.
+fn same_join(a: &crate::core::Join, b: &crate::core::Join) -> bool {
+    let pair = |j: &crate::core::Join| match &j.on {
+        WhereExpr::ExprCompare { lhs, op: Op::Eq, rhs } => Some((lhs.clone(), rhs.clone())),
+        _ => None,
+    };
+    a.target.table == b.target.table
+        && match (pair(a), pair(b)) {
+            (Some((l, r)), Some(other)) => other == (l.clone(), r.clone()) || other == (r, l),
+            _ => false,
+        }
 }
 
 /// Deepest relation path a span or `select_related` may walk. It bounds the

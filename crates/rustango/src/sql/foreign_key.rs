@@ -293,31 +293,58 @@ where
 
 /// The field a `ForeignKey<T>` key matches: the one `on` column every
 /// registered FK to `T` names, else `T`'s PK. The key alone cannot say.
+/// A heuristic until `ForeignKey` carries its `on` column.
 fn target_field<T: Model>() -> Result<&'static crate::core::FieldSchema, ExecError> {
-    use crate::core::Relation;
+    use std::collections::HashMap;
+    use std::sync::{OnceLock, PoisonError, RwLock};
+    // Per target table; the inventory is fixed for the process.
+    static FIELDS: OnceLock<RwLock<HashMap<&'static str, &'static str>>> = OnceLock::new();
     let pk = T::SCHEMA
         .primary_key()
         .ok_or(ExecError::MissingPrimaryKey {
             table: T::SCHEMA.table,
         })?;
+    let cache = FIELDS.get_or_init(RwLock::default);
+    let table = T::SCHEMA.table;
+    let cached = cache
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(table)
+        .copied();
+    let name = match cached {
+        Some(name) => name,
+        None => {
+            let name = shared_on_field(T::SCHEMA).map_or(pk.name, |f| f.name);
+            cache
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(table, name);
+            name
+        }
+    };
+    Ok(T::SCHEMA.field(name).unwrap_or(pk))
+}
+
+/// The field of the one `on` column every registered FK to `target` names.
+fn shared_on_field(
+    target: &'static crate::core::ModelSchema,
+) -> Option<&'static crate::core::FieldSchema> {
+    use crate::core::Relation;
     let mut ons = inventory::iter::<crate::core::ModelEntry>
         .into_iter()
         .flat_map(|e| e.schema.fields)
         .filter_map(|f| match f.relation {
-            Some(Relation::Fk { to, on } | Relation::O2O { to, on }) if to == T::SCHEMA.table => {
+            Some(Relation::Fk { to, on } | Relation::O2O { to, on }) if to == target.table => {
                 Some(on)
             }
             _ => None,
         });
-    let Some(first) = ons.next() else {
-        return Ok(pk);
-    };
+    let first = ons.next()?;
     if ons.all(|on| on == first) {
-        if let Some(field) = T::SCHEMA.field_by_column(first) {
-            return Ok(field);
-        }
+        target.field_by_column(first)
+    } else {
+        None
     }
-    Ok(pk)
 }
 
 // ============================================================ PG-typed get / get_on

@@ -152,7 +152,7 @@ untouched.
 
 ### `ForeignKey::get` follows `on`, and join aliases must be unique
 
-With `#[rustango(on = "num")]`, `get_on` / `get_pool` load the parent whose `num` equals the key (not its PK) when every FK to that model uses the same `on`. A `.join()` reusing a relation lookup's or `select_related` alias now fails at compile with `QueryError::DuplicateJoinAlias`; rename the alias.
+With `#[rustango(on = "num")]`, `get_on` / `get_pool` load the parent whose `num` equals the key (not its PK) when every FK to that model uses the same `on`. A `.join()` reusing a relation lookup's or `select_related` alias now fails at compile with `QueryError::DuplicateJoinAlias`; rename the alias. A `.join()` to the same table on the same columns as the lookup's join is still reused.
 
 ### `OAuthError::BadStatus` body is the error code
 

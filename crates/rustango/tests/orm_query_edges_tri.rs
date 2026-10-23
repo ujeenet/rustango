@@ -168,6 +168,42 @@ async fn ad_hoc_alias_clashing_a_relation_filter(pool: &Pool) {
     );
 }
 
+/// An ad-hoc join equal to the relation join, either side order, is reused.
+async fn ad_hoc_join_equal_to_the_relation_join(pool: &Pool) {
+    for (id, num) in [(1, 100), (2, 200)] {
+        Country { id, num }.insert_pool(pool).await.expect("country");
+    }
+    for (id, num) in [(1, 100), (2, 200)] {
+        City {
+            id,
+            country: ForeignKey::unloaded(num),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("city");
+    }
+    let (city, country) = (aliased("oqe_city", "country"), aliased("country", "num"));
+    for (lhs, rhs) in [(city.clone(), country.clone()), (country, city)] {
+        let rows: Vec<City> = City::objects()
+            .filter("country__num", 200_i64)
+            .join(Join {
+                target: Country::SCHEMA,
+                alias: "country",
+                kind: JoinKind::Left,
+                on: WhereExpr::ExprCompare {
+                    lhs,
+                    op: Op::Eq,
+                    rhs,
+                },
+                project: vec![],
+            })
+            .fetch(pool)
+            .await
+            .expect("the same join is reused");
+        assert_eq!(rows.iter().map(|c| c.id).collect::<Vec<_>>(), [2]);
+    }
+}
+
 /// Two chains whose aliases share 63 bytes: PG would cut both to one name.
 async fn long_select_related_chains(pool: &Pool) {
     for (id, label) in [(1, "one"), (2, "two")] {
@@ -197,6 +233,10 @@ async fn long_select_related_chains(pool: &Pool) {
     let rows: Vec<Top> = Top::objects()
         .select_related("the_middle_relation_with_a_much_longer_field_name__second_hop_relation_one")
         .select_related("the_middle_relation_with_a_much_longer_field_name__second_hop_relation_two")
+        .filter(
+            "the_middle_relation_with_a_much_longer_field_name__second_hop_relation_two__label",
+            "two",
+        )
         .fetch(pool)
         .await
         .expect("two long chains");
@@ -319,6 +359,7 @@ tri_dialect_test! {
         f32_json_is_not_widened,
         fk_get_follows_the_on_column,
         ad_hoc_alias_clashing_a_relation_filter,
+        ad_hoc_join_equal_to_the_relation_join,
         long_select_related_chains,
         in_bulk_on_past_the_bind_cap,
         prefetch_soft_by_a_renamed_column,
