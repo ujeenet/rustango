@@ -4,7 +4,10 @@
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
 use rustango::core::Model as _;
-use rustango::migrate::{make_migrations_from, migrate_pool_with_ledger, unapply_pool_with_ledger};
+use rustango::migrate::{
+    file, make_migrations_from, migrate_pool_with_ledger, unapply_pool_with_ledger, Migration,
+    Operation, SchemaChange,
+};
 use rustango::sql::{raw_execute_pool, Pool};
 use rustango::testkit::matrix::{drop_table, fresh_table};
 use rustango::{tri_dialect_test, Model};
@@ -144,6 +147,16 @@ async fn referenced_key_widens(pool: &Pool) {
     }
 }
 
+fn id() -> Value {
+    json!({"name": "id", "column": "id", "ty": "i64", "nullable": false,
+           "primary_key": true, "auto": true})
+}
+
+fn col(name: &str, nullable: bool) -> Value {
+    json!({"name": name, "column": name, "ty": "i64", "nullable": nullable,
+           "primary_key": false})
+}
+
 fn snap(tables: Vec<Value>) -> rustango::migrate::SchemaSnapshot {
     serde_json::from_value(json!({"tables": tables})).expect("snapshot")
 }
@@ -160,6 +173,10 @@ async fn fresh(pool: &Pool, tables: &[&str], ledger: &str) -> tempfile::TempDir 
     tempfile::tempdir().expect("tempdir")
 }
 
+fn write(dir: &std::path::Path, mig: &Migration) {
+    file::write(&dir.join(format!("{}.json", mig.name)), mig).expect("write migration");
+}
+
 async fn exec(pool: &Pool, sql: &str) -> Result<(), String> {
     raw_execute_pool(pool, sql, Vec::new())
         .await
@@ -167,10 +184,75 @@ async fn exec(pool: &Pool, sql: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// A downgrade refused at its second op ran nothing: the first op's
+/// column is still there and the migration still applied.
+async fn refused_downgrade_runs_nothing(pool: &Pool) {
+    refused_downgrade(pool, "mr_rd_item", true).await;
+}
+
+async fn refused_loose_downgrade_runs_nothing(pool: &Pool) {
+    refused_downgrade(pool, "mr_rl_item", false).await;
+}
+
+async fn refused_downgrade(pool: &Pool, t: &str, atomic: bool) {
+    let ledger = format!("{t}_ledger");
+    let dir = fresh(pool, &[t], &ledger).await;
+    let initial = make_migrations_from(
+        dir.path(),
+        &snap(vec![table(t, vec![id(), col("req", false)])]),
+        None,
+    )
+    .expect("makemigrations")
+    .expect("a migration");
+    // Inverted, the AddColumn of `req` comes second, after `z` is dropped.
+    let mig = Migration {
+        name: "0002_swap".into(),
+        prev: Some(initial.name.clone()),
+        atomic,
+        snapshot: snap(vec![table(t, vec![id(), col("z", true)])]),
+        forward: vec![
+            Operation::Schema(SchemaChange::DropColumn {
+                table: t.into(),
+                column: "req".into(),
+            }),
+            Operation::Schema(SchemaChange::AddColumn {
+                table: t.into(),
+                column: "z".into(),
+            }),
+        ],
+        ..initial
+    };
+    write(dir.path(), &mig);
+    migrate_pool_with_ledger(pool, dir.path(), &ledger)
+        .await
+        .expect("migrate");
+    let err = unapply_pool_with_ledger(pool, dir.path(), &mig.name, &ledger)
+        .await
+        .expect_err("NOT NULL with no default is refused");
+    assert!(err.to_string().contains("NOT NULL"), "{err}");
+    let q = pool.dialect().quote_ident(t);
+    exec(pool, &format!("INSERT INTO {q} (z) VALUES (1)"))
+        .await
+        .unwrap_or_else(|e| panic!("`z` was dropped on {}: {e}", pool.dialect().name()));
+    let sql = format!(
+        "SELECT COUNT(*) FROM {} WHERE name = '0002_swap'",
+        pool.dialect().quote_ident(&ledger)
+    );
+    let n: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .expect("ledger");
+    assert_eq!(n[0].0, 1, "still applied");
+    for d in [t, &ledger] {
+        drop_table(pool, d).await;
+    }
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
         long_index_names_apply,
         referenced_key_widens,
+        refused_downgrade_runs_nothing,
+        refused_loose_downgrade_runs_nothing,
     ]
 );

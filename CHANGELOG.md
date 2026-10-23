@@ -6,6 +6,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`; `RequestIdLayer` no longer echoes an untrusted client's `X-Request-Id`; a SQLite UUID key stored both as BLOB and TEXT is now a 404 in ViewSets and template views. See UPGRADING.
 
+### Fixed — a refused downgrade runs nothing
+
+MySQL and non-atomic runs render every step before the first one runs; makemigrations warns when a dropped NOT NULL column without a default makes the migration irreversible.
+
 ### Fixed — MySQL widens a primary key other tables reference
 
 The referencing FKs are dropped before the `MODIFY` and come back at the end; makemigrations refuses one CHECK name on two tables.

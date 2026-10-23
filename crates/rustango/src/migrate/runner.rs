@@ -1605,17 +1605,12 @@ async fn unapply_loose(
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %target.name, "unapplying (non-atomic)");
     let schema = pg_creation_schema(pool).await?;
+    let mut steps = render_steps(inverted, snapshot, &crate::sql::Postgres, schema.as_deref())?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in inverted {
         match op {
-            Operation::Schema(change) => {
-                let step = render_step(
-                    change,
-                    inverted,
-                    snapshot,
-                    &crate::sql::Postgres,
-                    schema.as_deref(),
-                )?;
+            Operation::Schema(_) => {
+                let step = steps.next_step();
                 let mut conn = pool.acquire().await?;
                 for stmt in pg_statements(&mut conn, &step).await? {
                     sqlx::query(&stmt).execute(&mut *conn).await?;
@@ -1646,17 +1641,17 @@ async fn unapply_loose(
 async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (non-atomic)");
     let schema = pg_creation_schema(pool).await?;
+    let mut steps = render_steps(
+        &mig.forward,
+        &mig.snapshot,
+        &crate::sql::Postgres,
+        schema.as_deref(),
+    )?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in &mig.forward {
         match op {
-            Operation::Schema(change) => {
-                let step = render_step(
-                    change,
-                    &mig.forward,
-                    &mig.snapshot,
-                    &crate::sql::Postgres,
-                    schema.as_deref(),
-                )?;
+            Operation::Schema(_) => {
+                let step = steps.next_step();
                 let mut conn = pool.acquire().await?;
                 for stmt in pg_statements(&mut conn, &step).await? {
                     sqlx::query(&stmt).execute(&mut *conn).await?;
@@ -3519,6 +3514,33 @@ fn render_step(
     })
 }
 
+/// The steps of `ops`' schema ops, rendered before any runs: a refusal after
+/// MySQL or a non-atomic run committed the first ones left them applied.
+struct Rendered(std::vec::IntoIter<Step>);
+
+impl Rendered {
+    /// The next schema op's step.
+    fn next_step(&mut self) -> Step {
+        self.0.next().expect("one step per schema op")
+    }
+}
+
+fn render_steps(
+    ops: &[Operation],
+    after: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> Result<Rendered, MigrateError> {
+    let steps: Result<Vec<Step>, MigrateError> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Operation::Schema(change) => Some(render_step(change, ops, after, dialect, schema)),
+            _ => None,
+        })
+        .collect();
+    Ok(Rendered(steps?.into_iter()))
+}
+
 /// The column whose live FK `change` drops and adds back: ON DELETE
 /// everywhere, and MySQL's MODIFY, which refuses it on (3780, 1553).
 fn readds_fk<'a>(
@@ -3750,6 +3772,12 @@ async fn atomic_mysql(
     schema: Option<&str>,
     ledger: LedgerWrite<'_>,
 ) -> Result<(), MigrateError> {
+    // Refused before any DDL commits.
+    if let Some(Operation::Callback(c)) = ops.iter().find(|op| matches!(op, Operation::Callback(_)))
+    {
+        return Err(callback_in_atomic(name, c));
+    }
+    let mut steps = render_steps(ops, after, &crate::sql::MySql, schema)?;
     let mut tx = my.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     // What has already committed when something fails.
@@ -3780,8 +3808,8 @@ async fn atomic_mysql(
     }
     for op in ops {
         match op {
-            Operation::Schema(change) => {
-                let step = render_step(change, ops, after, &crate::sql::MySql, schema)?;
+            Operation::Schema(_) => {
+                let step = steps.next_step();
                 let stmts = mysql_statements(&mut tx, &step)
                     .await
                     .map_err(|e| stuck!(e))?;
@@ -4151,18 +4179,17 @@ async fn apply_nonatomic_pool(
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (non-atomic, _pool)");
     let schema = super::ensure::creation_schema(pool).await?;
+    let mut steps = render_steps(
+        &mig.forward,
+        &mig.snapshot,
+        pool.dialect(),
+        schema.as_deref(),
+    )?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in &mig.forward {
         match op {
-            Operation::Schema(change) => {
-                let step = render_step(
-                    change,
-                    &mig.forward,
-                    &mig.snapshot,
-                    pool.dialect(),
-                    schema.as_deref(),
-                )?;
-                deferred_fks.extend(run_step_pool(pool, step).await?);
+            Operation::Schema(_) => {
+                deferred_fks.extend(run_step_pool(pool, steps.next_step()).await?);
             }
             Operation::Data(d) => {
                 crate::sql::raw_execute_pool(pool, &d.sql, ::std::vec::Vec::new()).await?;
@@ -4663,18 +4690,12 @@ async fn unapply_nonatomic_pool(
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %target.name, "unapplying (non-atomic, _pool)");
     let schema = super::ensure::creation_schema(pool).await?;
+    let mut steps = render_steps(inverted, snapshot, pool.dialect(), schema.as_deref())?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in inverted {
         match op {
-            Operation::Schema(change) => {
-                let step = render_step(
-                    change,
-                    inverted,
-                    snapshot,
-                    pool.dialect(),
-                    schema.as_deref(),
-                )?;
-                deferred_fks.extend(run_step_pool(pool, step).await?);
+            Operation::Schema(_) => {
+                deferred_fks.extend(run_step_pool(pool, steps.next_step()).await?);
             }
             Operation::Data(d) => {
                 crate::sql::raw_execute_pool(pool, &d.sql, ::std::vec::Vec::new()).await?;
