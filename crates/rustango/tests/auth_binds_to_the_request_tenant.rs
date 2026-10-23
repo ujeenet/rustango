@@ -242,7 +242,7 @@ impl OrgResolver for PortSlugResolver {
     }
 }
 
-fn port_app(ns: &str, outer: Option<&str>) -> (Router, String) {
+fn port_app(ns: &str) -> (Router, String) {
     let template = format!("sqlite:file:xtenant_{ns}_{{slug}}?mode=memory&cache=shared");
     let pools = Arc::new(
         DatabasePools::<sqlx::Sqlite>::new(BackendKind::Sqlite).with_url_template(&template),
@@ -257,21 +257,18 @@ fn port_app(ns: &str, outer: Option<&str>) -> (Router, String) {
         ),
     });
     let backends: Vec<Arc<dyn AuthBackend>> = vec![Arc::new(ModelBackend)];
-    let mut app = Router::new()
+    let app = Router::new()
         .route("/whoami", get(whoami))
         .require_auth(backends)
         .layer(axum::Extension(ctx))
         .layer(axum::Extension(rustango::tenancy::ListenerPort(8001)));
-    if let Some(slug) = outer {
-        app = app.layer(axum::Extension(rustango::tenancy::TenantSlug(slug.to_owned())));
-    }
     (app, template)
 }
 
 /// The tenant resolver sees the request's extensions, so a port-only chain resolves.
 #[tokio::test]
 async fn a_port_resolved_tenant_authenticates() {
-    let (app, template) = port_app("port", None);
+    let (app, template) = port_app("port");
     let _alpha = tenant_db(
         &template.replace("{slug}", "alpha"),
         Some(("ann", "s3cret")),
@@ -283,14 +280,15 @@ async fn a_port_resolved_tenant_authenticates() {
 /// A tenant an outer layer bound must match the one auth resolves.
 #[tokio::test]
 async fn another_bound_tenant_is_refused() {
-    let (app, template) = port_app("bound", Some("beta"));
+    let (app, template) = build_app("bound");
+    let app = app.layer(axum::Extension(rustango::tenancy::TenantSlug("beta".into())));
     let _alpha = tenant_db(
         &template.replace("{slug}", "alpha"),
         Some(("ann", "s3cret")),
     )
     .await;
     assert_eq!(
-        call(&app, "api.localhost", "ann:s3cret").await,
+        call(&app, "alpha.localhost", "ann:s3cret").await,
         StatusCode::FORBIDDEN
     );
 }
