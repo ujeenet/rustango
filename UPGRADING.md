@@ -150,6 +150,48 @@ untouched.
 
 ## Unreleased
 
+## 0.60.11
+
+### `csrf_trusted_origins` takes effect
+
+Origins listed in `[security] csrf_trusted_origins` now pass the CSRF Origin check under `Cli::with_csrf` / `with_csrf_config`. Remove entries you did not mean to trust.
+
+### `RUSTANGO_ENV` is normalized
+
+`production`, `PROD` and ` Prod ` all mean `prod`: they load `prod_settings.toml` (a `production_settings.toml` still loads if there is no `prod` file) and turn on JSON logs. `Settings::current_env_tier()` and `session::tier_from_env()` return the normalized name.
+
+### Prod without a config warns
+
+With `RUSTANGO_ENV=prod` and no `config/default.toml`, `Cli::with_settings_from_env` still boots (env-only containers keep working) but warns that no `[security]` layers apply, and `check --deploy` reports it. Ship the `config/` directory to get them.
+
+### Console messages in the URL must be signed
+
+The operator console ignores `?error=`, `?notice=` and `?ok=` unless it added them itself in the last five minutes. Bookmarks or links you built with those keys lose the message.
+
+### PostgreSQL `citext` filters ignore case
+
+`=`, `<>`, `IN` and the other comparisons on a `#[rustango(citext)]` column now match regardless of case, as on MySQL and SQLite.
+
+### MySQL `citext` columns: new collation
+
+New columns get `utf8mb4_0900_as_ci` on MySQL 8+ and `utf8mb4_uca1400_nopad_as_ci` on MariaDB 10.10+; older servers keep `utf8mb4_general_ci`. Existing ones keep `utf8mb4_general_ci` until altered; to switch, `ALTER TABLE t MODIFY col VARCHAR(n) COLLATE <collation>` (check `unique` columns for rows that now differ).
+
+### SQLite: a RunSQL beside a rebuild is no longer refused
+
+Such a migration commits in steps, so a failure can return `MigrateError::PartiallyApplied`, as on MySQL. Migrations without that mix still run in one transaction.
+
+### A panicking `on_commit` callback no longer escapes `atomic`
+
+It is logged and the later callbacks run. Code that caught that panic around `atomic` should watch the `rustango::error` log instead.
+
+### Inbound `X-Request-Id` needs a trusted proxy
+
+`RequestIdLayer::default()` keeps a client's `X-Request-Id` only when the request came through a proxy named in `with_trusted_proxies` (`RealIpLayer::trust_proxies`). Elsewhere each request gets a fresh id; list your ingress or calling services there to keep cross-service ids.
+
+### SQLite: a UUID key stored twice is a 404
+
+ViewSets and template views refuse a UUID that matches one row as BLOB and another as TEXT (404, or skipped in a bulk action). Remove the duplicate row to reach it.
+
 ## 0.60.10
 
 ### New `TenantScope` extractor

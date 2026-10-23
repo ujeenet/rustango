@@ -128,7 +128,7 @@ pub struct FieldSchema {
     /// a case-insensitive column type: `CITEXT` on Postgres, where a
     /// migration first runs `CREATE EXTENSION IF NOT EXISTS citext SCHEMA public;`,
     /// `TEXT COLLATE NOCASE` on SQLite, and a
-    /// `COLLATE utf8mb4_general_ci` column on MySQL. So
+    /// `utf8mb4_0900_as_ci` (MariaDB: `utf8mb4_uca1400_nopad_as_ci`) column on MySQL. So
     /// `WHERE col = 'foo'` also matches `'FOO'` with no `LOWER(…)`
     /// in the query.
     ///

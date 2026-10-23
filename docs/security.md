@@ -673,7 +673,7 @@ A request ID tags every log line for one request with the same ID, so you can fo
 let app = router.request_id(RequestIdLayer::default());
 ```
 
-It reuses an inbound `X-Request-Id` (so chained services share one ID) or generates a fresh 22-char base64 ID. Inbound IDs are validated first — anything with control chars, newlines, null bytes, or longer than 128 chars is rejected, which blocks header-injection attacks.
+It reuses an inbound `X-Request-Id` only from a proxy named in `with_trusted_proxies` (so chained services share one ID), and otherwise generates a fresh 22-char base64 ID. Inbound IDs must be at most 128 visible ASCII characters with no quote or backslash, which blocks header and log injection.
 
 In handlers:
 

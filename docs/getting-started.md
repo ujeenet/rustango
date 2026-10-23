@@ -169,7 +169,7 @@ This adds the `cargo rustango ...` subcommand globally. Confirm it's there:
 cargo rustango --help
 ```
 
-The scaffolder's own version is the one your project pins, so installing the newest gives you the newest rustango. To generate a project on an older release, install that generator instead (`cargo install cargo-rustango --version 0.60.10`) — see [Scaffolding](scaffolding.md#the-generators-own-version-is-the-one-your-project-gets).
+The scaffolder's own version is the one your project pins, so installing the newest gives you the newest rustango. To generate a project on an older release, install that generator instead (`cargo install cargo-rustango --version 0.60.11`) — see [Scaffolding](scaffolding.md#the-generators-own-version-is-the-one-your-project-gets).
 
 ---
 
@@ -890,7 +890,8 @@ cargo build --release
 Make sure your reverse proxy:
 - Terminates HTTPS
 - Forwards `X-Forwarded-For`, and the app mounts `RealIpLayer::trust_proxies([...])` naming that proxy (`Cli::with_trusted_proxies([...])?` or `server::Builder::real_ip`), for accurate IPs in `AccessLogLayer` and the throttles (see [security.md](security.md))
-- Forwards `X-Forwarded-Host`, `X-Forwarded-Proto`
+- Passes the original `Host` header unchanged: tenant routing, apex detection and `AllowedHostsLayer` read only `Host`
+- Forwards `X-Forwarded-Proto` (and `X-Forwarded-Host`, which only sets the SSO redirect URL behind a trusted proxy)
 - Uses `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())` so `ConnectInfo` is populated for rate limiting + IP filtering
 
 ---

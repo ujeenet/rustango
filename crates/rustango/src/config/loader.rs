@@ -133,7 +133,8 @@ pub(super) fn load_with_root(root: &Path, env: &str) -> Result<Settings, ConfigE
 /// 4. `RUSTANGO__*` env vars.
 ///
 /// If both per-env files exist, `_settings` wins and the loader warns
-/// on stderr about the unused one.
+/// on stderr about the unused one. `{env}` is the canonical tier
+/// (`PRODUCTION` → `prod`), falling back to the raw name's files.
 fn load_with_root_and_env<I>(root: &Path, env: &str, env_vars: I) -> Result<Settings, ConfigError>
 where
     I: IntoIterator<Item = (String, String)>,
@@ -176,8 +177,18 @@ fn load_report(
     env_vars: Vec<(String, String)>,
 ) -> Result<(Settings, Vec<String>), ConfigError> {
     let default_path = root.join("default.toml");
-    let tiered_path = root.join(format!("{env}_settings.toml"));
-    let legacy_path = root.join(format!("{env}.toml"));
+    // Canonical name first (`PRODUCTION` → `prod`), then the raw one.
+    let tier = crate::env::canonical_tier(env);
+    let names = [tier.as_str(), env.trim()];
+    let pick = names
+        .iter()
+        .find(|n| {
+            root.join(format!("{n}_settings.toml")).exists()
+                || root.join(format!("{n}.toml")).exists()
+        })
+        .unwrap_or(&names[0]);
+    let tiered_path = root.join(format!("{pick}_settings.toml"));
+    let legacy_path = root.join(format!("{pick}.toml"));
 
     // With `required = true`, `read_toml` returns `Some` or errors,
     // so this expect cannot fire.
@@ -186,6 +197,12 @@ fn load_report(
 
     let tiered = read_toml(&tiered_path, false)?;
     let legacy = read_toml(&legacy_path, false)?;
+    if tiered.is_none() && legacy.is_none() && tier != "dev" {
+        eprintln!(
+            "config: tier `{tier}` has no {} — running on default.toml alone",
+            tiered_path.display()
+        );
+    }
     match (tiered, legacy) {
         (Some(t), Some(_)) => {
             // Both exist. `_settings` wins; warn so the unused file
@@ -504,6 +521,38 @@ mod tests {
         );
         let cfg = load_with_root(&root, "prod").unwrap();
         assert_eq!(cfg.database.pool_max_size, Some(100));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every spelling the session code treats as prod loads `prod_settings.toml`.
+    #[test]
+    fn production_spellings_load_the_prod_file() {
+        let root = fresh_root("prod_spellings");
+        write(&root, "default.toml", "[database]\npool_max_size = 5\n");
+        write(
+            &root,
+            "prod_settings.toml",
+            "[database]\npool_max_size = 100\n",
+        );
+        for tier in ["production", "PROD", " Production "] {
+            let cfg = load_with_root(&root, tier).unwrap();
+            assert_eq!(cfg.database.pool_max_size, Some(100), "{tier:?}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file named after the raw tier still loads.
+    #[test]
+    fn raw_tier_filename_still_loads() {
+        let root = fresh_root("raw_tier");
+        write(&root, "default.toml", "[database]\npool_max_size = 5\n");
+        write(
+            &root,
+            "production_settings.toml",
+            "[database]\npool_max_size = 7\n",
+        );
+        let cfg = load_with_root(&root, "production").unwrap();
+        assert_eq!(cfg.database.pool_max_size, Some(7));
         let _ = std::fs::remove_dir_all(&root);
     }
 

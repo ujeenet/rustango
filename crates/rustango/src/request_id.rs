@@ -2,8 +2,9 @@
 //!
 //! It sets an `X-Request-Id` response header and exposes the value
 //! through the [`RequestId`] extractor. By default an inbound
-//! `X-Request-Id` is reused, so an ID can follow a call across
-//! services. [`RequestIdLayer::always_generate`] ignores it.
+//! `X-Request-Id` is reused only from a proxy named in
+//! [`crate::real_ip::RealIpLayer::trust_proxies`], so an ID can follow a
+//! call across services. [`RequestIdLayer::always_generate`] ignores it.
 //!
 //! ## Getting the id into your logs
 //!
@@ -52,8 +53,7 @@ const HEADER_NAME: &str = "x-request-id";
 /// Settings for the request-ID middleware.
 #[derive(Clone)]
 pub struct RequestIdLayer {
-    /// Generate a fresh ID even when the client sent one. Use this
-    /// when you do not trust client values.
+    /// Generate a fresh ID even when a trusted proxy sent one.
     pub always_generate: bool,
 }
 
@@ -64,7 +64,7 @@ impl Default for RequestIdLayer {
 }
 
 impl RequestIdLayer {
-    /// Reuse an inbound `X-Request-Id`, or generate one if absent.
+    /// Reuse an inbound `X-Request-Id` from a trusted proxy, else generate one.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -117,7 +117,12 @@ impl<S: Send + Sync> FromRequestParts<S> for RequestId {
 }
 
 async fn handle(cfg: Arc<RequestIdLayer>, mut req: Request<Body>, next: Next) -> Response<Body> {
-    let id = if cfg.always_generate {
+    // Any client can send the header, so only a trusted proxy's is kept.
+    let trusted = req
+        .extensions()
+        .get::<crate::real_ip::TrustedPeer>()
+        .is_some();
+    let id = if cfg.always_generate || !trusted {
         generate_id()
     } else {
         req.headers()
@@ -158,12 +163,12 @@ fn generate_id() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Reject inbound IDs that are too long or hold control characters
-/// or line breaks. This blocks header injection via `X-Request-Id`.
+/// Accept at most 128 visible ASCII characters, no quote or backslash,
+/// so an inbound id cannot inject a header or a log field.
 fn is_safe(s: &str) -> bool {
     s.len() <= 128
         && s.chars()
-            .all(|c| !c.is_control() && c != '\n' && c != '\r' && c != '\0')
+            .all(|c| c.is_ascii_graphic() && c != '"' && c != '\\')
 }
 
 #[cfg(test)]
@@ -205,6 +210,62 @@ mod tests {
     #[test]
     fn is_safe_rejects_null_bytes() {
         assert!(!is_safe("abc\0def"));
+    }
+
+    /// The id served for `id` sent from `peer`, behind a layer trusting 10/8.
+    async fn served_id_from(id: &str, peer: [u8; 4], xff: Option<&str>) -> String {
+        use crate::real_ip::{RealIpLayer, RealIpRouterExt as _};
+        use tower::ServiceExt as _;
+        let app = Router::new()
+            .route("/", axum::routing::get(|| async { "ok" }))
+            .request_id(RequestIdLayer::default())
+            .real_ip(
+                RealIpLayer::default()
+                    .trust_proxies(["10.0.0.0/8"])
+                    .unwrap(),
+            );
+        let mut req = Request::builder().uri("/").header(HEADER_NAME, id);
+        if let Some(xff) = xff {
+            req = req.header("x-forwarded-for", xff);
+        }
+        let mut req = req.body(Body::empty()).unwrap();
+        let addr = std::net::SocketAddr::from((peer, 4000));
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+        let resp = app.oneshot(req).await.unwrap();
+        resp.headers()[HEADER_NAME].to_str().unwrap().to_owned()
+    }
+
+    async fn served_id(id: &str, via_trusted_proxy: bool) -> String {
+        let peer = if via_trusted_proxy {
+            [10, 0, 0, 1]
+        } else {
+            [203, 0, 113, 9]
+        };
+        served_id_from(id, peer, Some("198.51.100.4")).await
+    }
+
+    /// Any client can send the header; only a trusted proxy's is kept.
+    #[tokio::test]
+    async fn inbound_id_is_kept_only_from_a_trusted_proxy() {
+        assert_ne!(served_id("client-chosen", false).await, "client-chosen");
+        assert_eq!(served_id("edge-1:abc", true).await, "edge-1:abc");
+        let spaced = "a request_id=forged";
+        assert_ne!(served_id(spaced, true).await, spaced);
+        assert_ne!(served_id("a\"b", true).await, "a\"b");
+    }
+
+    /// Trust follows the peer, not whether it also sent X-Forwarded-For.
+    #[tokio::test]
+    async fn trusted_peer_without_forwarded_for_keeps_its_id() {
+        assert_eq!(
+            served_id_from("edge-2", [10, 0, 0, 5], None).await,
+            "edge-2"
+        );
+        assert_ne!(
+            served_id_from("edge-3", [203, 0, 113, 9], None).await,
+            "edge-3"
+        );
     }
 
     #[test]

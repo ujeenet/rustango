@@ -39,7 +39,6 @@
 use axum::body::Body;
 use axum::extract::{Form, Path, Query, State};
 use axum::http::{header, Response};
-use axum::response::{IntoResponse, Redirect};
 use axum::Extension;
 use serde::Deserialize;
 use tera::Context;
@@ -461,11 +460,7 @@ fn sentence(msg: &str) -> String {
 
 /// Post/Redirect/Get on success, so a reload does not repeat the write.
 fn back_ok(notice: &str) -> Response<Body> {
-    Redirect::to(&format!(
-        "/operators?notice={}",
-        crate::url_codec::url_encode(notice)
-    ))
-    .into_response()
+    super::flash::redirect("/operators", super::flash::Flash::Notice(notice))
 }
 
 /// Re-render with the reason rather than redirecting, so a long message

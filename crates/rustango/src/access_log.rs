@@ -826,14 +826,12 @@ mod observability_mount_tests {
             .await
             .expect("router answers");
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(resp.headers()["x-request-id"], "rid-1541");
+        let rid = resp.headers()["x-request-id"].to_str().unwrap().to_owned();
         let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
         assert_eq!(&body[..], crate::error::OPAQUE_SERVER_ERROR.as_bytes());
         let out = buf.contents();
         assert!(
-            out.contains("handler panicked")
-                && out.contains("boom-1541")
-                && out.contains("rid-1541"),
+            out.contains("handler panicked") && out.contains("boom-1541") && out.contains(&rid),
             "the panic was not logged with its request id:\n{out}"
         );
     }

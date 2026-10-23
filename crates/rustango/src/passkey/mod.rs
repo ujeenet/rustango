@@ -155,6 +155,44 @@ pub async fn register(
     Ok(())
 }
 
+/// Delete one of `user_id`'s credentials, e.g. a lost or stolen key, and
+/// end that user's sessions on `U` (the user model, with
+/// `sessions_revoked_at`). `false`, sessions kept, when there is no such credential.
+///
+/// # Errors
+/// As the ORM delete and update paths ([`crate::sql::ExecError`]).
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+pub async fn revoke<U: crate::core::Model + Send>(
+    pool: &Pool,
+    user_id: i64,
+    credential_id: &str,
+) -> Result<bool, crate::sql::ExecError> {
+    let query = WebauthnCredential::objects()
+        .filter("user_id", user_id)
+        .filter("credential_id", credential_id.to_owned())
+        .compile_delete()?;
+    if crate::sql::delete_pool(pool, &query).await? == 0 {
+        return Ok(false);
+    }
+    crate::session::revoke_sessions::<U>(pool, user_id, None, 0).await?;
+    Ok(true)
+}
+
+/// Delete every credential `user_id` has and end their sessions on `U`;
+/// returns how many credentials went.
+///
+/// # Errors
+/// As the ORM delete and update paths ([`crate::sql::ExecError`]).
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+pub async fn revoke_all<U: crate::core::Model + Send>(
+    pool: &Pool,
+    user_id: i64,
+) -> Result<u64, crate::sql::ExecError> {
+    let n = WebauthnCredential::delete_where("user_id", user_id, pool).await?;
+    crate::session::revoke_sessions::<U>(pool, user_id, None, 0).await?;
+    Ok(n)
+}
+
 /// What [`update_sign_count`] did. Refuse the login unless
 /// [`is_accepted`](Self::is_accepted).
 #[must_use]

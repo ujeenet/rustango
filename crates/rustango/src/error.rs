@@ -81,11 +81,7 @@ pub(crate) fn debug_details_enabled() -> bool {
     {
         return flag;
     }
-    let env = std::env::var("RUSTANGO_ENV").unwrap_or_default();
-    !matches!(
-        env.trim().to_ascii_lowercase().as_str(),
-        "prod" | "production"
-    )
+    !crate::env::is_prod_tier(&crate::env::tier_from_env())
 }
 
 /// Test harness for the env vars above. It lives here, ungated,

@@ -230,6 +230,26 @@ async fn on_commit_waits_for_outermost(pool: &Pool) {
     assert_eq!(ids(pool).await, vec![1]);
 }
 
+/// The data is committed: a panicking callback must not skip the rest
+/// nor turn the committed block into a panic.
+async fn panicking_on_commit_runs_the_rest(pool: &Pool) {
+    let p = one_conn(pool).await;
+    let fired = Arc::new(AtomicUsize::new(0));
+    let f = Arc::clone(&fired);
+    let res = within(rustango::atomic!(&p, |tx| {
+        put(tx, 1).await?;
+        on_commit(|| panic!("callback boom"));
+        on_commit(move || {
+            f.fetch_add(1, Ordering::SeqCst);
+        });
+        Ok(())
+    }))
+    .await;
+    assert!(res.is_ok(), "{res:?}");
+    assert_eq!(fired.load(Ordering::SeqCst), 1, "the later callback ran");
+    assert_eq!(ids(pool).await, vec![1]);
+}
+
 async fn cancelled_nested_block_rolls_back(pool: &Pool) {
     let p = one_conn(pool).await;
     let q = p.clone();
@@ -842,6 +862,7 @@ tri_dialect_test! {
         outer_rollback_drops_inner_write,
         inner_rollback_keeps_outer_write,
         on_commit_waits_for_outermost,
+        panicking_on_commit_runs_the_rest,
         cancelled_nested_block_rolls_back,
         cancelled_nested_block_last_is_not_committed,
         panicking_nested_block_rolls_back,
