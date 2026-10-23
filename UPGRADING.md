@@ -154,6 +154,10 @@ untouched.
 
 A resolver chain that reads extensions (`PortResolver`) now resolves under `require_auth` instead of answering 404. A request whose `TenantSlug` extension names another tenant than the resolved one gets 403.
 
+### Inactive users list no permissions
+
+`user_permissions_pool` / `user_permissions` return an empty list for an inactive user, and the PostgreSQL `has_any_perm` / `has_all_perms` return `false`. They now make one query per codename.
+
 ## 0.60.11
 
 ### `csrf_trusted_origins` takes effect

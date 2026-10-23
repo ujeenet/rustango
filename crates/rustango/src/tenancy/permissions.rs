@@ -444,126 +444,36 @@ where
     Ok(row.try_get("via_role").unwrap_or(false))
 }
 
-/// Check whether user `uid` holds ANY of the given `codenames`.
-///
-/// Single round-trip — resolves superuser, explicit denials, explicit
-/// grants, and role-based grants in one CTE for the full array.
+/// Check whether user `uid` holds ANY of the given `codenames`, one
+/// [`has_perm_on`] per codename, so an inactive user holds none.
 #[cfg(feature = "postgres")]
 pub async fn has_any_perm(
     uid: i64,
     codenames: &[&str],
     pool: &PgPool,
 ) -> Result<bool, sqlx::Error> {
-    if codenames.is_empty() {
-        return Ok(false);
+    for c in codenames {
+        if has_perm_on(uid, c, pool).await? {
+            return Ok(true);
+        }
     }
-    let names: Vec<&str> = codenames.to_vec();
-    let row = sqlx::query(
-        r#"
-        WITH user_info AS (
-            SELECT is_superuser
-            FROM   "rustango_users"
-            WHERE  id = $1 AND active = TRUE
-        ),
-        denied AS (
-            SELECT codename
-            FROM   "rustango_user_permissions"
-            WHERE  user_id = $1 AND granted = FALSE AND codename = ANY($2::text[])
-        ),
-        via_role AS (
-            SELECT 1
-            FROM   "rustango_user_roles" ur
-            JOIN   "rustango_role_permissions" rp ON rp.role_id = ur.role_id
-            WHERE  ur.user_id = $1
-              AND  rp.codename = ANY($2::text[])
-              AND  rp.codename NOT IN (SELECT codename FROM denied)
-            LIMIT  1
-        ),
-        explicit_grant AS (
-            SELECT 1
-            FROM   "rustango_user_permissions"
-            WHERE  user_id = $1 AND granted = TRUE
-              AND  codename = ANY($2::text[])
-              AND  codename NOT IN (SELECT codename FROM denied)
-            LIMIT  1
-        )
-        SELECT
-            COALESCE((SELECT is_superuser FROM user_info), FALSE)                            AS is_super,
-            EXISTS(SELECT 1 FROM via_role) OR EXISTS(SELECT 1 FROM explicit_grant) AS has_any
-        "#,
-    )
-    .bind(uid)
-    .bind(names)
-    .fetch_one(pool)
-    .await?;
-
-    let is_super: bool = row.try_get("is_super").unwrap_or(false);
-    if is_super {
-        return Ok(true);
-    }
-    Ok(row.try_get("has_any").unwrap_or(false))
+    Ok(false)
 }
 
-/// Check whether user `uid` holds ALL of the given `codenames`.
-///
-/// Single round-trip — counts effective grants (after applying denials)
-/// and compares against the full codename list.
+/// Check whether user `uid` holds ALL of the given `codenames`, one
+/// [`has_perm_on`] per codename, so an inactive user holds none.
 #[cfg(feature = "postgres")]
 pub async fn has_all_perms(
     uid: i64,
     codenames: &[&str],
     pool: &PgPool,
 ) -> Result<bool, sqlx::Error> {
-    if codenames.is_empty() {
-        return Ok(true);
+    for c in codenames {
+        if !has_perm_on(uid, c, pool).await? {
+            return Ok(false);
+        }
     }
-    let names: Vec<&str> = codenames.to_vec();
-    let expected = codenames.len() as i64;
-    let row = sqlx::query(
-        r#"
-        WITH user_info AS (
-            SELECT is_superuser
-            FROM   "rustango_users"
-            WHERE  id = $1 AND active = TRUE
-        ),
-        denied AS (
-            SELECT codename
-            FROM   "rustango_user_permissions"
-            WHERE  user_id = $1 AND granted = FALSE AND codename = ANY($2::text[])
-        ),
-        effective AS (
-            SELECT rp.codename
-            FROM   "rustango_user_roles" ur
-            JOIN   "rustango_role_permissions" rp ON rp.role_id = ur.role_id
-            WHERE  ur.user_id = $1
-              AND  rp.codename = ANY($2::text[])
-              AND  rp.codename NOT IN (SELECT codename FROM denied)
-
-            UNION
-
-            SELECT codename
-            FROM   "rustango_user_permissions"
-            WHERE  user_id = $1 AND granted = TRUE
-              AND  codename = ANY($2::text[])
-              AND  codename NOT IN (SELECT codename FROM denied)
-        )
-        SELECT
-            COALESCE((SELECT is_superuser FROM user_info), FALSE) AS is_super,
-            COUNT(DISTINCT codename)                               AS matched
-        FROM effective
-        "#,
-    )
-    .bind(uid)
-    .bind(names)
-    .fetch_one(pool)
-    .await?;
-
-    let is_super: bool = row.try_get("is_super").unwrap_or(false);
-    if is_super {
-        return Ok(true);
-    }
-    let matched: i64 = row.try_get("matched").unwrap_or(0);
-    Ok(matched == expected)
+    Ok(true)
 }
 
 // ------------------------------------------------------------------ Role management (ORM-backed)
@@ -1095,7 +1005,17 @@ pub async fn user_permissions_pool(
     uid: i64,
     pool: &crate::sql::Pool,
 ) -> Result<Vec<String>, TenancyError> {
-    use crate::core::SqlValue;
+    use crate::core::{Column as _, SqlValue};
+    use crate::sql::ExistsPool as _;
+    // An inactive user holds no grants, as in `has_perm_pool`.
+    let active = super::auth::User::objects()
+        .where_(super::auth::User::id.eq(uid))
+        .where_(super::auth::User::active.eq(true))
+        .exists(pool)
+        .await?;
+    if !active {
+        return Ok(Vec::new());
+    }
     let dialect = pool.dialect();
     let user_perms_t = dialect.quote_ident("rustango_user_permissions");
     let user_roles_t = dialect.quote_ident("rustango_user_roles");
@@ -1185,38 +1105,7 @@ pub async fn user_roles(uid: i64, pool: &PgPool) -> Result<Vec<(i64, String)>, s
 /// removes the codename even if a role would otherwise grant it.
 #[cfg(feature = "postgres")]
 pub async fn user_permissions(uid: i64, pool: &PgPool) -> Result<Vec<String>, TenancyError> {
-    let rows = sqlx::query(
-        r#"
-        WITH denied AS (
-            SELECT codename
-            FROM   "rustango_user_permissions"
-            WHERE  user_id = $1 AND granted = FALSE
-        )
-        SELECT DISTINCT codename
-        FROM (
-            SELECT rp.codename
-            FROM   "rustango_user_roles" ur
-            JOIN   "rustango_role_permissions" rp ON rp.role_id = ur.role_id
-            WHERE  ur.user_id = $1
-              AND  rp.codename NOT IN (SELECT codename FROM denied)
-
-            UNION ALL
-
-            SELECT codename
-            FROM   "rustango_user_permissions"
-            WHERE  user_id = $1 AND granted = TRUE
-              AND  codename NOT IN (SELECT codename FROM denied)
-        ) effective
-        ORDER BY codename
-        "#,
-    )
-    .bind(uid)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .iter()
-        .map(|r| r.try_get::<String, _>("codename").unwrap_or_default())
-        .collect())
+    user_permissions_pool(uid, &crate::sql::Pool::from(pool.clone())).await
 }
 
 // ------------------------------------------------------------------ Codename helpers

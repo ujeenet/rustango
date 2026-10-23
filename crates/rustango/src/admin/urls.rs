@@ -953,7 +953,7 @@ impl AppState {
 
     /// `true` when the user holds `{table}.<perm>`: `view`, `change`,
     /// `add` and `delete` follow the flags above; any other codename
-    /// needs the perm itself.
+    /// needs the perm itself. No perm set is a superuser, who holds all.
     pub(crate) fn allows(&self, table: &str, perm: &str) -> bool {
         match perm {
             "view" => self.is_visible(table),
