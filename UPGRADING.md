@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.60.12
+
 ### `makemigrations --merge` refuses conflicts
 
 A merge where both branches changed one object differently now fails and lists the conflicts; reconcile the branch files, then merge again.
