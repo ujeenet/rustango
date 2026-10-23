@@ -162,16 +162,27 @@ impl M2MManager {
         let src = self.src_key()?;
         let dsts = dst_keys(ids, self.through, self.dst_col)?;
         let rows = dsts.iter().map(|d| vec![src.clone(), d.clone()]).collect();
-        let source = inventory::iter::<crate::core::ModelEntry>
+        // The manager does not name its source (a new pub field would break
+        // literals), so lock every registered model declaring this junction end.
+        let locks: Vec<SelectQuery> = inventory::iter::<crate::core::ModelEntry>
             .into_iter()
             .map(|e| e.schema)
-            .find(|s| {
+            .filter(|s| {
                 s.m2m
                     .iter()
                     .any(|r| r.through == self.through && r.src_col == self.src_col)
-            });
+            })
+            .filter_map(|s| source_lock(s, &src))
+            .collect();
+        if locks.is_empty() {
+            tracing::warn!(
+                through = self.through,
+                src_col = self.src_col,
+                "M2M set: no registered source model, so concurrent sets are not serialized"
+            );
+        }
         let changed = replace(
-            source.and_then(|s| source_lock(s, &src)),
+            locks,
             self.junction(),
             vec![eq(self.src_col, src.clone())],
             self.dst_col,
@@ -377,7 +388,7 @@ fn source_lock(source: &'static ModelSchema, pk: &SqlValue) -> Option<SelectQuer
 /// `dst_col` keys changed; `dsts` is the new set, deduplicated.
 #[allow(clippy::too_many_arguments)]
 async fn replace(
-    lock: Option<SelectQuery>,
+    locks: Vec<SelectQuery>,
     junction: &'static ModelSchema,
     owner: Vec<Filter>,
     dst_col: &'static str,
@@ -391,7 +402,7 @@ async fn replace(
     ins.validate()?;
     // SQLite has no row lock: take its write lock at BEGIN instead.
     let mut tx = crate::sql::write_transaction_pool(pool).await?;
-    if let Some(lock) = lock {
+    for lock in locks {
         let stmt = pool.dialect().compile_select(&lock)?;
         super::executor::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
     }
@@ -750,8 +761,8 @@ impl GenericM2MManager {
             .collect();
         let columns = vec![self.pk_col, self.ct_col, self.dst_col];
         let junction = self.junction();
-        let lock = source_lock(self.src_schema, &self.src_key()?);
-        if !replace(lock, junction, owner, self.dst_col, &dsts, columns, rows, pool).await? {
+        let locks = source_lock(self.src_schema, &self.src_key()?).into_iter().collect();
+        if !replace(locks, junction, owner, self.dst_col, &dsts, columns, rows, pool).await? {
             return Ok(());
         }
         #[cfg(feature = "signals")]

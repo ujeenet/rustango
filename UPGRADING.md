@@ -200,7 +200,7 @@ A `fk = "…"` / `o2o = "…"` field with `set_null` must be `Option<…>`, as `
 
 ### M2M `set` reads the source table
 
-`set` on an M2M or generic M2M manager now locks the source row, so the source model's table must exist; a test that created only the junction table needs it too.
+`set` on an M2M or generic M2M manager now locks the source row, so a registered source model's table must exist; a test that created only the junction table needs it too. A hand-built `M2MManager` whose junction no registered model declares is not locked and logs a warning.
 
 ## 0.60.10
 

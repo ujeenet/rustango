@@ -103,6 +103,38 @@ pub struct AlbumTag {
     pub tag_id: i64,
 }
 
+/// Two sources whose M2M share one junction and source column.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "edg_sha",
+    app = "edg",
+    m2m(name = "tags", to = "edg_tag", through = "edg_share_tag", src = "owner_id", dst = "tag_id")
+)]
+pub struct ShareA {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "edg_shb",
+    app = "edg",
+    m2m(name = "tags", to = "edg_tag", through = "edg_share_tag", src = "owner_id", dst = "tag_id")
+)]
+pub struct ShareB {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "edg_share_tag", app = "edg")]
+pub struct ShareTag {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub owner_id: i64,
+    pub tag_id: i64,
+}
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     for t in [
@@ -111,6 +143,7 @@ async fn setup(pool: &Pool) {
         LongChild::SCHEMA,
         Drip::SCHEMA,
         AlbumTag::SCHEMA,
+        ShareTag::SCHEMA,
     ] {
         drop_table(pool, t.table).await;
     }
@@ -122,6 +155,9 @@ async fn setup(pool: &Pool) {
     fresh_table::<Drip>(pool).await;
     fresh_table::<Album>(pool).await;
     fresh_table::<AlbumTag>(pool).await;
+    fresh_table::<ShareA>(pool).await;
+    fresh_table::<ShareB>(pool).await;
+    fresh_table::<ShareTag>(pool).await;
 }
 
 /// No `on`: the FK references the target's PK column, not `id`.
@@ -307,21 +343,32 @@ async fn pg_prefetch_past_the_bind_cap(pool: &Pool) {
 /// Two `set`s racing on one source: the result is one of them, never both.
 async fn concurrent_m2m_sets_keep_one(pool: &Pool) {
     Album { id: 1 }.insert_pool(pool).await.expect("album");
-    let album = Album { id: 1 };
+    race_sets(pool, || Album { id: 1 }.tags_m2m()).await;
+}
+
+/// Two sources sharing a junction end: each one's sets still serialize.
+async fn concurrent_sets_on_a_shared_junction(pool: &Pool) {
+    ShareA { id: 1 }.insert_pool(pool).await.expect("a");
+    ShareB { id: 2 }.insert_pool(pool).await.expect("b");
+    race_sets(pool, || ShareA { id: 1 }.tags_m2m()).await;
+    race_sets(pool, || ShareB { id: 2 }.tags_m2m()).await;
+}
+
+async fn race_sets(pool: &Pool, manager: impl Fn() -> rustango::sql::M2MManager) {
     for round in 0..40 {
-        album.tags_m2m().set(&[9_i64], pool).await.expect("reset");
+        manager().set(&[9_i64], pool).await.expect("reset");
         let barrier = tokio::sync::Barrier::new(2);
         let run = |ids: &'static [i64]| {
-            let barrier = &barrier;
+            let (barrier, m) = (&barrier, manager());
             async move {
                 barrier.wait().await;
-                Album { id: 1 }.tags_m2m().set(ids, pool).await
+                m.set(ids, pool).await
             }
         };
         let (a, b) = tokio::join!(run(&[1, 2]), run(&[3, 4]));
         a.unwrap_or_else(|e| panic!("round {round}: first set: {e}"));
         b.unwrap_or_else(|e| panic!("round {round}: second set: {e}"));
-        let mut got = album.tags_m2m().all(pool).await.expect("all");
+        let mut got = manager().all(pool).await.expect("all");
         got.sort_unstable();
         assert!(got == [1, 2] || got == [3, 4], "round {round}: {got:?}");
     }
@@ -337,5 +384,6 @@ tri_dialect_test! {
         long_join_labels_keep_their_key,
         pg_prefetch_past_the_bind_cap,
         concurrent_m2m_sets_keep_one,
+        concurrent_sets_on_a_shared_junction,
     ],
 }
