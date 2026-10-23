@@ -68,6 +68,22 @@ A failed user lookup is a 503, not "Invalid credentials", and is not counted tow
 
 A discovery URL a header cannot carry is a 500, not a panic.
 
+### Fixed — the migrate lock works with one connection and on SQLite files
+
+The lock holds its own connection outside the pool, and file-backed SQLite now locks a `-migrate.lock` file beside the database (unlocked, with a warning, where it cannot be created).
+
+### Fixed — a refused downgrade runs nothing
+
+MySQL and non-atomic runs render every step before the first one runs; makemigrations warns when a dropped NOT NULL column without a default makes the migration irreversible.
+
+### Fixed — MySQL widens a primary key other tables reference
+
+The referencing FKs are dropped before the `MODIFY` and come back at the end; makemigrations warns about one CHECK name on two tables.
+
+### Fixed — long derived index names stay under 63 bytes and distinct
+
+A field-level index name is capped too, and a capped name ends in a hash of the full one.
+
 ## [0.60.11] — 2026-10-22
 
 **Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`; `RequestIdLayer` no longer echoes an untrusted client's `X-Request-Id`; a SQLite UUID key stored both as BLOB and TEXT is now a 404 in ViewSets and template views. See UPGRADING.

@@ -179,6 +179,18 @@ The bare admin's login and session gate now answer 503 on a database error (for 
 
 A `Host` ending in `.` now matches the same tenant and `allowed_hosts` entries as the host without it; an entry's own trailing dot is ignored.
 
+### Migrate lock: own connection, and a lock file on SQLite
+
+The PostgreSQL/MySQL migrate lock now opens one extra connection outside the pool. File-backed SQLite creates `<db>-migrate.lock` beside the database and serialises concurrent runs on it; where that file cannot be created it warns and runs unlocked.
+
+### Same CHECK name on two tables warns
+
+`makemigrations` warns when two tables share a CHECK name: only one of them is migrated, and MySQL refuses the second. Rename one.
+
+### Derived index names over 63 bytes change
+
+A derived index name longer than 63 bytes now ends in a hash (field-level ones were not capped), so the next `makemigrations` drops and recreates those indexes once.
+
 ## 0.60.11
 
 ### `csrf_trusted_origins` takes effect

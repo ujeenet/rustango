@@ -378,6 +378,18 @@ impl Dialect for MySql {
         )
     }
 
+    fn referencing_foreign_keys_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT CAST(k.TABLE_NAME AS CHAR), CAST(k.CONSTRAINT_NAME AS CHAR) \
+             FROM information_schema.KEY_COLUMN_USAGE k \
+             WHERE k.TABLE_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_SCHEMA = DATABASE() \
+             AND k.REFERENCED_TABLE_NAME = ? AND k.REFERENCED_COLUMN_NAME = ? AND NOT EXISTS (\
+             SELECT 1 FROM information_schema.KEY_COLUMN_USAGE o \
+             WHERE o.TABLE_SCHEMA = k.TABLE_SCHEMA AND o.TABLE_NAME = k.TABLE_NAME \
+             AND o.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND o.ORDINAL_POSITION > 1)",
+        )
+    }
+
     fn sole_leading_column_sql(&self) -> Option<&'static str> {
         Some(
             "SELECT CAST(s.COLUMN_NAME AS CHAR) FROM information_schema.STATISTICS s \

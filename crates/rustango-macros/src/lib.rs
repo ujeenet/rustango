@@ -860,11 +860,11 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         if let Ok(fa) = parse_field_attrs(field) {
             if fa.index {
                 let col_name = fa.column.clone().unwrap_or_else(|| col.clone());
-                let auto_name = if fa.index_unique {
+                let auto_name = capped_index_name(if fa.index_unique {
                     format!("{table}_{col_name}_uq_idx")
                 } else {
                     format!("{table}_{col_name}_idx")
-                };
+                });
                 all_indexes.push(IndexAttr {
                     name: fa.index_name.or(Some(auto_name)),
                     columns: vec![col_name],
@@ -2602,6 +2602,24 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
     Ok(out)
 }
 
+/// A derived index name within PG's 63 bytes (MySQL takes 64); a longer one
+/// keeps a prefix plus a hash of the whole, so two long names stay distinct.
+fn capped_index_name(name: String) -> String {
+    const MAX: usize = 63;
+    if name.len() <= MAX {
+        return name;
+    }
+    // FNV-1a: stable across builds, unlike `DefaultHasher`.
+    let hash = name
+        .bytes()
+        .fold(0x811c_9dc5_u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
+    let mut cut = MAX - 9;
+    while !name.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}_{hash:08x}", &name[..cut])
+}
+
 fn model_impl_tokens(
     struct_name: &syn::Ident,
     model_name: &str,
@@ -2698,13 +2716,8 @@ fn model_impl_tokens(
         // collision-free name from the table + columns
         // (`<table>_<col>_<col>_idx`) instead of a shared literal that
         // would clash the moment a model declares two unnamed indexes.
-        // Capped at Postgres's 63-char identifier limit.
         let derived_name = idx.name.clone().unwrap_or_else(|| {
-            let mut n = format!("{table}_{}_idx", idx.columns.join("_"));
-            if n.len() > 63 {
-                n.truncate(63);
-            }
-            n
+            capped_index_name(format!("{table}_{}_idx", idx.columns.join("_")))
         });
         let name = derived_name.as_str();
         let cols: Vec<&str> = idx.columns.iter().map(String::as_str).collect();

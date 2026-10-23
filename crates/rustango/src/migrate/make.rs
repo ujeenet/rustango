@@ -169,6 +169,9 @@ pub fn make_migrations_scoped(
     if changes.is_empty() {
         return Ok(None);
     }
+    for w in super::diff::irreversible_drops(&prev_snapshot, &changes) {
+        tracing::warn!(target: "rustango::migrate", "{w}");
+    }
 
     let suffix = name_override.map_or_else(
         || auto_name(&changes, prior_scoped.is_empty()),
@@ -458,6 +461,9 @@ pub fn make_migrations_from(
     let changes = detect_changes(&prev_snapshot, current);
     if changes.is_empty() {
         return Ok(None);
+    }
+    for w in super::diff::irreversible_drops(&prev_snapshot, &changes) {
+        tracing::warn!(target: "rustango::migrate", "{w}");
     }
 
     let suffix = name_override.map_or_else(|| auto_name(&changes, prior.is_empty()), str::to_owned);
