@@ -12,6 +12,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `OAuthError::BadStatus` and discovery errors keep only the provider's `error` code, not the body; `prefetch_soft` and `prefetch_reverse_generic_for` work when the column differs from the field name.
 
+### Fixed — `__week` is the ISO week everywhere; `f32` JSON keeps its digits
+
+`__week` / `extract_week` use `WEEK(x, 3)` on MySQL and an ISO formula on SQLite, matching PostgreSQL; JSON rows, admin forms and audit changes show `0.1_f32` as `0.1`.
+
 ### Added — `sql::write_transaction`
 
 A transaction that takes SQLite's write lock at `BEGIN`, for `select_for_update` claims there; the docs no longer say a SQLite transaction locks the database.

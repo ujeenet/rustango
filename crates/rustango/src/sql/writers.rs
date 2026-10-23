@@ -3717,7 +3717,13 @@ fn write_extract_int(
         b.sql.push_str(field);
         b.sql.push('(');
         write_expr(b, &args[0], None)?;
-        b.sql.push(')');
+        // Mode 3 is ISO 8601, as PG's EXTRACT(WEEK).
+        b.sql.push_str(if field == "WEEK" { ", 3)" } else { ")" });
+    } else if field == "WEEK" {
+        // ISO week: the day of year of this week's Thursday, over seven.
+        b.sql.push_str("((CAST(strftime('%j', date(");
+        write_expr(b, &args[0], None)?;
+        b.sql.push_str(", '-3 days', 'weekday 4')) AS INTEGER) - 1) / 7 + 1)");
     } else {
         let token = match field {
             "YEAR" => "%Y",
@@ -3726,7 +3732,6 @@ fn write_extract_int(
             "HOUR" => "%H",
             "MINUTE" => "%M",
             "SECOND" => "%S",
-            "WEEK" => "%W",
             _ => unreachable!("sqlite extract: {field}"),
         };
         b.sql.push_str("CAST(strftime('");

@@ -38,7 +38,7 @@ pub(crate) fn coerce_form_to_json(field: &FieldSchema, raw: &str) -> serde_json:
             .unwrap_or_else(|_| Value::String(raw.to_owned())),
         FieldType::F32 => raw
             .parse::<f32>()
-            .map(Value::from)
+            .map(|n| crate::core::__json_value(&n))
             .unwrap_or_else(|_| Value::String(raw.to_owned())),
         FieldType::F64 => raw
             .parse::<f64>()
@@ -718,6 +718,12 @@ mod tests {
             fk_on_delete: None,
             validators: &[],
         }
+    }
+
+    #[test]
+    fn coerced_f32_keeps_its_digits() {
+        let f = field("ratio", "ratio", FieldType::F32);
+        assert_eq!(coerce_form_to_json(&f, "0.1"), json!(0.1));
     }
 
     #[test]

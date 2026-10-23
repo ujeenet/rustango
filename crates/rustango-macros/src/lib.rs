@@ -3406,8 +3406,7 @@ fn inherent_impl_tokens(
                     quote! {
                         (
                             #column_lit,
-                            #root::__serde_json::to_value(&self.#ident)
-                                .unwrap_or(#root::__serde_json::Value::Null),
+                            #root::core::__json_value(&self.#ident),
                         )
                     }
                 })
@@ -3970,8 +3969,7 @@ fn inherent_impl_tokens(
                                         _audit_before_row, #column_lit,
                                     ) {
                                         ::core::result::Result::Ok(v) => {
-                                            #root::__serde_json::to_value(&v)
-                                                .unwrap_or(#root::__serde_json::Value::Null)
+                                            #root::core::__json_value(&v)
                                         }
                                         ::core::result::Result::Err(_) => #root::__serde_json::Value::Null,
                                     },
@@ -6635,10 +6633,7 @@ fn inherent_impl_tokens(
                         match #root::sql::sqlx::Row::try_get::<#value_ty, _>(
                             &_audit_before_row, #column_lit,
                         ) {
-                            ::core::result::Result::Ok(v) => {
-                                #root::__serde_json::to_value(&v)
-                                    .unwrap_or(#root::__serde_json::Value::Null)
-                            }
+                            ::core::result::Result::Ok(v) => #root::core::__json_value(&v),
                             ::core::result::Result::Err(_) => #root::__serde_json::Value::Null,
                         },
                     )

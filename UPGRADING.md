@@ -158,6 +158,10 @@ With `#[rustango(on = "num")]`, `get_on` / `get_pool` load the parent whose `num
 
 `body` now holds only the provider's OAuth `error` code (e.g. `invalid_grant`), or is empty. Code that parsed the full body should match the code instead.
 
+### `__week` on MySQL and SQLite returns the ISO week
+
+It used to be MySQL mode 0 (Sunday start, 0–53) and SQLite `%W`. 2023-01-01 now gives 52 on every backend; adjust stored week numbers or filters written for the old values.
+
 ### SQLite `select_for_update` needs `write_transaction`
 
 A `transaction_pool` transaction on SQLite takes no lock when it reads, so two workers can claim one row and the second UPDATE fails with `SQLITE_BUSY`. Open it with `rustango::sql::write_transaction(&pool)`; on PG and MySQL it is the same as `transaction_pool`.

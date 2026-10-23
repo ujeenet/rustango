@@ -45,6 +45,8 @@ pub use schema::{
 #[doc(hidden)]
 pub use schema::{AdminConfigParts, FieldSchemaParts, GenericM2MEntry, ModelSchemaParts};
 pub use validate::validate_value;
+#[doc(hidden)]
+pub use value::__json_value;
 pub use value::SqlValue;
 pub use window::{FrameBoundary, FrameKind, WindowExpr, WindowFn, WindowFrame};
 

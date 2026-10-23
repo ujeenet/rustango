@@ -1,9 +1,10 @@
 //! ORM edges on every backend: FK `get` under `on`, join alias clashes, long
-//! `select_related` chains, `in_bulk_on` past the bind cap, and soft /
-//! generic prefetch through a renamed column.
+//! `select_related` chains, `in_bulk_on` past the bind cap, soft / generic
+//! prefetch through a renamed column, ISO weeks and `f32` in JSON.
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
+use chrono::{NaiveDate, TimeZone as _, Utc};
 use rustango::core::{joins::aliased, Join, JoinKind, Model as _, Op, QueryError, WhereExpr};
 use rustango::sql::{ExecError, FetcherPool as _, ForeignKey, Pool};
 use rustango::{tri_dialect_test, Model};
@@ -62,6 +63,23 @@ pub struct Bucket {
 }
 
 #[derive(Model, Debug, Clone)]
+#[rustango(table = "oqe_day", app = "oqe")]
+pub struct Day {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub d: NaiveDate,
+    pub at: chrono::DateTime<Utc>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "oqe_gauge", app = "oqe", audit(track = "ratio"))]
+pub struct Gauge {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub ratio: f32,
+}
+
+#[derive(Model, Debug, Clone)]
 #[rustango(table = "oqe_owner", app = "oqe")]
 pub struct Owner {
     #[rustango(primary_key)]
@@ -103,6 +121,11 @@ async fn setup(pool: &Pool) {
     fresh_table::<Owner>(pool).await;
     fresh_table::<Pet>(pool).await;
     fresh_table::<Note>(pool).await;
+    fresh_table::<Day>(pool).await;
+    fresh_table::<Gauge>(pool).await;
+    rustango::audit::ensure_table_pool(pool)
+        .await
+        .expect("audit table");
 }
 
 /// `get` loads the parent by the `on` column, not by a PK equal to the key.
@@ -245,9 +268,55 @@ async fn prefetch_reverse_generic_by_a_renamed_column(pool: &Pool) {
     assert_eq!(grouped.get(&1).map(Vec::len), Some(1), "{grouped:?}");
 }
 
+/// `__week` is the ISO 8601 week on every backend.
+async fn week_is_iso(pool: &Pool) {
+    let days = [
+        (1, NaiveDate::from_ymd_opt(2023, 1, 1).unwrap()),
+        (2, NaiveDate::from_ymd_opt(2021, 1, 3).unwrap()),
+        (3, NaiveDate::from_ymd_opt(2024, 12, 30).unwrap()),
+    ];
+    for (id, d) in days {
+        let at = Utc.from_utc_datetime(&d.and_hms_opt(12, 0, 0).unwrap());
+        Day { id, d, at }.insert_pool(pool).await.expect("day");
+    }
+    for (week, id) in [(52_i64, 1), (53, 2), (1, 3)] {
+        for field in ["d__week", "at__week"] {
+            let ids: Vec<i64> = Day::objects()
+                .filter(field, week)
+                .fetch(pool)
+                .await
+                .expect("week filter")
+                .into_iter()
+                .map(|d| d.id)
+                .collect();
+            assert_eq!(ids, [id], "{field} = {week}");
+        }
+    }
+}
+
+/// An `f32` reads as its own digits in JSON rows and audit changes.
+async fn f32_json_is_not_widened(pool: &Pool) {
+    Gauge { id: 1, ratio: 0.1 }
+        .insert_pool(pool)
+        .await
+        .expect("gauge");
+    let select = Gauge::objects().compile().expect("compile");
+    let fields: Vec<_> = Gauge::SCHEMA.scalar_fields().collect();
+    let rows = rustango::sql::select_rows_as_json(pool, &select, &fields)
+        .await
+        .expect("json rows");
+    assert_eq!(rows[0]["ratio"], serde_json::json!(0.1), "{rows:?}");
+    let audit = rustango::audit::fetch_for_entity_pool(pool, Gauge::SCHEMA.table, "1")
+        .await
+        .expect("audit");
+    assert_eq!(audit[0].changes["ratio"], serde_json::json!(0.1), "{audit:?}");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        week_is_iso,
+        f32_json_is_not_widened,
         fk_get_follows_the_on_column,
         ad_hoc_alias_clashing_a_relation_filter,
         long_select_related_chains,
