@@ -763,9 +763,13 @@ impl Builder {
         // Extra routes a model registers for itself. Each inventory
         // entry is checked against the built-in routes, then mounted
         // on the same protected router.
-        let protected = mount_custom_views(protected, state.clone()).layer(axum::Extension(
-            super::session::PermsScoped(state.config.user_perms.is_some()),
-        ));
+        let protected = mount_custom_views(protected, state.clone())
+            .layer(axum::middleware::from_fn(
+                super::session::scope_request_session,
+            ))
+            .layer(axum::Extension(super::session::PermsScoped(
+                state.config.user_perms.is_some(),
+            )));
 
         // With session auth on, `/login` and `/logout` mount before
         // the auth middleware so they stay reachable. Every other

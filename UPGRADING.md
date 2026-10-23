@@ -158,6 +158,10 @@ A resolver chain that reads extensions (`PortResolver`) now resolves under `requ
 
 `user_permissions_pool` / `user_permissions` return an empty list for an inactive user, and the PostgreSQL `has_any_perm` / `has_all_perms` return `false`. They now make one query per codename.
 
+### Admin reads `Extension<AdminSession>` as the signed-in user
+
+If your own middleware inserts `AdminSession` in front of the admin, a session with `is_superuser: false` now gets the superuser-only field locks. `HmacAuthLayer::sign_port` does not bind a tenant; use `bind_tenants`.
+
 ## 0.60.11
 
 ### `csrf_trusted_origins` takes effect
