@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Derived index names over 63 bytes change
+
+A derived index name longer than 63 bytes now ends in a hash (field-level ones were not capped), so the next `makemigrations` drops and recreates those indexes once.
+
 ### `csrf_trusted_origins` takes effect
 
 Origins listed in `[security] csrf_trusted_origins` now pass the CSRF Origin check under `Cli::with_csrf` / `with_csrf_config`. Remove entries you did not mean to trust.
