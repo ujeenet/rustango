@@ -11720,7 +11720,16 @@ fn relation_tokens(
                  remove the `fk = \"…\"` / `o2o = \"…\"` attribute.",
             ));
         }
-        let on = attrs.on.as_deref().unwrap_or("id");
+        // No `on`: the target's PK column, which may be renamed.
+        let on = match attrs.on.as_deref() {
+            Some(on) => quote!(#on),
+            None => quote! {
+                match <#inner as #root::core::Model>::SCHEMA.pk_column() {
+                    ::core::option::Option::Some(c) => c,
+                    ::core::option::Option::None => "id",
+                }
+            },
+        };
         return Ok(quote! {
             ::core::option::Option::Some(#root::core::Relation::fk(
                 <#inner as #root::core::Model>::SCHEMA.table,

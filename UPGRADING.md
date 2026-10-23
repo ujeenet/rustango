@@ -190,6 +190,10 @@ It is logged and the later callbacks run. Code that caught that panic around `at
 
 ViewSets and template views refuse a UUID that matches one row as BLOB and another as TEXT (404, or skipped in a bulk action). Remove the duplicate row to reach it.
 
+### `ForeignKey<T>` to a renamed PK column
+
+The FK now references `T`'s PK column, not `id`. SQLite accepted the old target, so `makemigrations` there shows a changed FK.
+
 ## 0.60.10
 
 ### New `TenantScope` extractor
