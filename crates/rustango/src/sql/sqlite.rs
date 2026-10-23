@@ -121,6 +121,15 @@ impl Dialect for Sqlite {
 
     // SQLite uses the trait defaults for quoting and placeholders.
 
+    /// A write transaction on the runner's lock file; BUSY means held.
+    fn acquire_session_lock_sql(&self) -> Option<String> {
+        Some("BEGIN IMMEDIATE".into())
+    }
+
+    fn release_session_lock_sql(&self) -> Option<String> {
+        Some("ROLLBACK".into())
+    }
+
     fn serial_type(&self, field_type: FieldType) -> &'static str {
         // `INTEGER PRIMARY KEY AUTOINCREMENT` must stay one phrase:
         // the rowid alias only works with PRIMARY KEY in the type

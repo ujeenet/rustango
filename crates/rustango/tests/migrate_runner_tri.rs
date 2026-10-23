@@ -4,9 +4,10 @@
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
 use rustango::core::Model as _;
+use rustango::migrate::callbacks::MigrationCallbackFut;
 use rustango::migrate::{
-    file, make_migrations_from, migrate_pool_with_ledger, unapply_pool_with_ledger, Migration,
-    Operation, SchemaChange,
+    file, make_migrations_from, migrate_pool_with_ledger, unapply_pool_with_ledger, CallbackOp,
+    DataOp, Migration, Operation, SchemaChange,
 };
 use rustango::sql::{raw_execute_pool, Pool};
 use rustango::testkit::matrix::{drop_table, fresh_table};
@@ -147,6 +148,14 @@ async fn referenced_key_widens(pool: &Pool) {
     }
 }
 
+fn slow(_pool: Pool) -> MigrationCallbackFut {
+    Box::pin(async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        Ok(())
+    })
+}
+rustango::register_migration_callback!("mr_slow", slow);
+
 fn id() -> Value {
     json!({"name": "id", "column": "id", "ty": "i64", "nullable": false,
            "primary_key": true, "auto": true})
@@ -247,6 +256,130 @@ async fn refused_downgrade(pool: &Pool, t: &str, atomic: bool) {
     }
 }
 
+/// The URL of `pool`'s server, or a fresh SQLite file.
+fn url_of(pool: &Pool, file: &std::path::Path) -> String {
+    match pool.dialect().name() {
+        "postgres" => std::env::var("DATABASE_URL").expect("DATABASE_URL"),
+        "mysql" => std::env::var("MYSQL_TEST_URL").expect("MYSQL_TEST_URL"),
+        _ => format!("sqlite://{}?mode=rwc", file.display()),
+    }
+}
+
+async fn pool_of(url: &str, max: u32) -> Pool {
+    let timeout = std::time::Duration::from_secs(5);
+    match url.split(':').next() {
+        #[cfg(feature = "postgres")]
+        Some("postgres" | "postgresql") => sqlx_pg(url, max, timeout).await,
+        #[cfg(feature = "mysql")]
+        Some("mysql") => Pool::from(
+            rustango::sql::sqlx::mysql::MySqlPoolOptions::new()
+                .max_connections(max)
+                .acquire_timeout(timeout)
+                .connect(url)
+                .await
+                .expect("connect"),
+        ),
+        #[cfg(feature = "sqlite")]
+        Some("sqlite") => Pool::from(
+            rustango::sql::sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(max)
+                .acquire_timeout(timeout)
+                .connect(url)
+                .await
+                .expect("connect"),
+        ),
+        _ => unreachable!("{url}"),
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn sqlx_pg(url: &str, max: u32, timeout: std::time::Duration) -> Pool {
+    Pool::from(
+        rustango::sql::sqlx::postgres::PgPoolOptions::new()
+            .max_connections(max)
+            .acquire_timeout(timeout)
+            .connect(url)
+            .await
+            .expect("connect"),
+    )
+}
+
+/// A one-connection pool migrates: the lock no longer takes its only connection.
+async fn one_connection_pool_migrates(pool: &Pool) {
+    let t = "mr_one_item";
+    let ledger = "mr_one_ledger";
+    let dir = fresh(pool, &[t], ledger).await;
+    let db = tempfile::tempdir().expect("tempdir");
+    let one = pool_of(&url_of(pool, &db.path().join("one.db")), 1).await;
+    make_migrations_from(dir.path(), &snap(vec![table(t, vec![id()])]), None)
+        .expect("makemigrations")
+        .expect("a migration");
+    let ran = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        migrate_pool_with_ledger(&one, dir.path(), ledger),
+    )
+    .await
+    .expect("no hang");
+    ran.unwrap_or_else(|e| panic!("one connection on {}: {e}", pool.dialect().name()));
+    drop_table(&one, t).await;
+    drop_table(&one, ledger).await;
+}
+
+/// Two runs at once apply a non-atomic migration once, SQLite included.
+async fn concurrent_runs_apply_once(pool: &Pool) {
+    let t = "mr_cc_counter";
+    let ledger = "mr_cc_ledger";
+    let dir = fresh(pool, &[t], ledger).await;
+    let db = tempfile::tempdir().expect("tempdir");
+    let url = url_of(pool, &db.path().join("cc.db"));
+    let (p1, p2) = (pool_of(&url, 5).await, pool_of(&url, 5).await);
+    let initial = make_migrations_from(
+        dir.path(),
+        &snap(vec![table(t, vec![id(), col("n", true)])]),
+        None,
+    )
+    .expect("makemigrations")
+    .expect("a migration");
+    migrate_pool_with_ledger(&p1, dir.path(), ledger)
+        .await
+        .expect("initial");
+    let q = pool.dialect().quote_ident(t);
+    write(
+        dir.path(),
+        &Migration {
+            name: "0002_count".into(),
+            prev: Some(initial.name.clone()),
+            atomic: false,
+            forward: vec![
+                Operation::Callback(CallbackOp {
+                    name: "mr_slow".into(),
+                    reverse_name: None,
+                }),
+                Operation::Data(DataOp {
+                    sql: format!("INSERT INTO {q} (n) VALUES (1)"),
+                    reverse_sql: None,
+                    reversible: false,
+                }),
+            ],
+            ..initial
+        },
+    );
+    let (r1, r2) = tokio::join!(
+        migrate_pool_with_ledger(&p1, dir.path(), ledger),
+        migrate_pool_with_ledger(&p2, dir.path(), ledger),
+    );
+    let name = pool.dialect().name();
+    let n: Vec<(i64,)> =
+        rustango::sql::raw_query_pool(&format!("SELECT COUNT(*) FROM {q}"), Vec::new(), &p1)
+            .await
+            .expect("count");
+    assert_eq!(n[0].0, 1, "the RunSQL ran once on {name}");
+    let applied = [r1, r2].map(|r| r.unwrap_or_else(|e| panic!("a run on {name}: {e}")));
+    assert_eq!(applied.iter().map(Vec::len).sum::<usize>(), 1, "{applied:?}");
+    drop_table(&p1, t).await;
+    drop_table(&p1, ledger).await;
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
@@ -254,5 +387,7 @@ tri_dialect_test!(
         referenced_key_widens,
         refused_downgrade_runs_nothing,
         refused_loose_downgrade_runs_nothing,
+        one_connection_pool_migrates,
+        concurrent_runs_apply_once,
     ]
 );

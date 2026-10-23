@@ -926,11 +926,11 @@ pub trait Dialect: Send + Sync {
     // The migration runner keeps concurrent runs apart with two
     // locks: a session one held while applying the pending list, and
     // a transaction one held while creating the ledger table. SQLite
-    // needs neither, since it has a single writer.
+    // needs no ledger lock, since it has a single writer.
 
     /// SQL that tries a session-scoped advisory lock without waiting and
-    /// returns whether it was taken. The runner polls it, so a waiting run
-    /// holds no pool connection (#2027). `None` skips the lock.
+    /// returns whether it was taken. The runner polls it on a connection
+    /// outside the pool (#2027). `None` skips the lock.
     fn acquire_session_lock_sql(&self) -> Option<String> {
         None
     }

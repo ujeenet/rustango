@@ -639,11 +639,8 @@ fn forward_to(
 /// release it (best-effort) before returning. Peers calling any
 /// migrate-shaped operation block until the holder releases.
 ///
-/// The lock is **session-scoped**, so we acquire a dedicated
-/// connection from the pool, hold it for the whole body, and
-/// explicitly unlock before dropping it back to the pool. (Dropping
-/// alone wouldn't release, since pooled connections survive between
-/// uses.)
+/// The lock is **session-scoped**, held on a connection outside the pool
+/// for the whole body and closed after.
 #[cfg(feature = "postgres")]
 async fn with_migrate_lock<F, R>(pool: &PgPool, body: F) -> Result<R, MigrateError>
 where
@@ -2855,9 +2852,8 @@ async fn fake_apply_pool(
 ///   appends a hash of `DATABASE()` to the bound `rustango_migrate_`
 ///   prefix: one lock per database, like PG advisory locks.
 ///
-/// The lock is acquired on a checked-out connection and held until
-/// `body` returns; release happens on the same connection so MySQL's
-/// connection-scoped `GET_LOCK` semantics work correctly.
+/// The lock is held on a connection of its own, outside the pool, until
+/// `body` returns. SQLite locks a `-migrate.lock` file beside the database.
 ///
 /// `ledger` is created under the lock before `body` runs (#1844).
 async fn with_migrate_lock_pool<F, R>(
@@ -2904,7 +2900,7 @@ tokio::task_local! {
 }
 
 /// Run `fut` with migrates that give up waiting for another run's lock after
-/// `timeout`, with [`MigrateError::LockTimeout`]. SQLite takes no lock, so it never times out.
+/// `timeout`, with [`MigrateError::LockTimeout`]. In-memory SQLite takes no lock, so it never times out.
 pub async fn with_lock_timeout<F: std::future::Future>(
     timeout: std::time::Duration,
     fut: F,
@@ -2948,18 +2944,18 @@ where
         dialect.acquire_session_lock_sql(),
         dialect.release_session_lock_sql(),
     ) else {
-        // SQLite: one writer, so the database file lock serializes runs.
         return body.await;
     };
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
-            let mut held = LockSession::wait(pg, |conn| {
+            let opts = pg.connect_options();
+            let mut held = LockSession::<sqlx::PgConnection>::wait(&opts, |conn| {
                 let sql = acquire.clone();
                 Box::pin(async move {
                     sqlx::query_scalar::<_, bool>(&sql)
                         .bind(MIGRATE_LOCK_KEY)
-                        .fetch_one(&mut **conn)
+                        .fetch_one(&mut *conn)
                         .await
                 })
             })
@@ -2968,68 +2964,109 @@ where
             // Best-effort: PG releases on session close, and the session closes.
             let _ = sqlx::query(&release)
                 .bind(MIGRATE_LOCK_KEY)
-                .execute(&mut **held.conn())
+                .execute(held.conn())
                 .await;
+            held.close().await;
             result
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
             const NAME: &str = "rustango_migrate_";
-            let mut held = LockSession::wait(my, |conn| {
+            let opts = my.connect_options();
+            let mut held = LockSession::<sqlx::MySqlConnection>::wait(&opts, |conn| {
                 let sql = acquire.clone();
                 Box::pin(async move {
                     let got: Option<i64> = sqlx::query_scalar(&sql)
                         .bind(NAME)
-                        .fetch_one(&mut **conn)
+                        .fetch_one(&mut *conn)
                         .await?;
                     mysql_lock_taken(got)
                 })
             })
             .await?;
             let result = body.await;
-            let _ = sqlx::query(&release)
-                .bind(NAME)
-                .execute(&mut **held.conn())
-                .await;
+            let _ = sqlx::query(&release).bind(NAME).execute(held.conn()).await;
+            held.close().await;
             result
         }
-        #[allow(unreachable_patterns)]
-        _ => {
-            let _ = (acquire, release);
-            body.await
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => {
+            let Some(opts) = sqlite_lock_options(sq).await? else {
+                return body.await;
+            };
+            let mut held = LockSession::<sqlx::SqliteConnection>::wait(&opts, |conn| {
+                let sql = acquire.clone();
+                Box::pin(async move {
+                    // SQLITE_BUSY in any of its extended codes.
+                    let busy = |e: &sqlx::Error| {
+                        e.as_database_error()
+                            .and_then(|d| d.code()?.parse::<i32>().ok())
+                            .is_some_and(|c| c & 0xff == 5)
+                    };
+                    match sqlx::query(&sql).execute(&mut *conn).await {
+                        Ok(_) => Ok(true),
+                        Err(e) if busy(&e) => Ok(false),
+                        Err(e) => Err(e),
+                    }
+                })
+            })
+            .await?;
+            let result = body.await;
+            let _ = sqlx::query(&release).execute(held.conn()).await;
+            held.close().await;
+            result
         }
     }
 }
 
-/// A lock-session connection: pooled again only after a clean failed try,
-/// closed otherwise, so a cancelled run never pools a session holding the lock.
-#[cfg(any(feature = "postgres", feature = "mysql"))]
-struct LockSession<DB: sqlx::Database>(Option<sqlx::pool::PoolConnection<DB>>);
+/// The migrate lock of a file database: a write transaction on a file
+/// beside it, which every process on the file sees and a crash releases.
+/// `None` in memory, which one process owns.
+#[cfg(feature = "sqlite")]
+async fn sqlite_lock_options(
+    sq: &sqlx::SqlitePool,
+) -> Result<Option<sqlx::sqlite::SqliteConnectOptions>, MigrateError> {
+    let file: String =
+        sqlx::query_scalar("SELECT file FROM pragma_database_list WHERE name = 'main'")
+            .fetch_one(sq)
+            .await?;
+    if file.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(format!("{file}-migrate.lock"))
+            .create_if_missing(true)
+            .busy_timeout(std::time::Duration::ZERO),
+    ))
+}
 
-#[cfg(any(feature = "postgres", feature = "mysql"))]
+/// The migrate lock's own connection, outside the pool, so a pool of one
+/// still runs the body. Dropping it, as a cancelled run does, releases the lock.
+struct LockSession<C: sqlx::Connection>(C);
+
 type TryLock<'c> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, sqlx::Error>> + Send + 'c>>;
 
-#[cfg(any(feature = "postgres", feature = "mysql"))]
-impl<DB: sqlx::Database> LockSession<DB> {
+impl<C: sqlx::Connection> LockSession<C> {
     /// Poll `try_lock` until it takes the lock. A waiting run holds no pool
-    /// connection between tries, so the holder's body can borrow one (#2027).
-    async fn wait<F>(pool: &sqlx::Pool<DB>, try_lock: F) -> Result<Self, MigrateError>
+    /// connection, so the holder's body can borrow one (#2027).
+    async fn wait<F>(opts: &C::Options, try_lock: F) -> Result<Self, MigrateError>
     where
-        F: for<'c> Fn(&'c mut sqlx::pool::PoolConnection<DB>) -> TryLock<'c>,
+        F: for<'c> Fn(&'c mut C) -> TryLock<'c>,
     {
+        use sqlx::ConnectOptions as _;
         use std::hash::{BuildHasher as _, Hasher as _};
         use std::time::{Duration, Instant};
         let limit = LOCK_TIMEOUT.try_with(|d| *d).ok();
         let start = Instant::now();
         let mut pause = Duration::from_millis(10);
         let mut logged = false;
+        let mut conn = opts.connect().await?;
         loop {
-            let mut session = Self(Some(pool.acquire().await?));
-            if try_lock(session.conn()).await? {
-                return Ok(session);
+            if try_lock(&mut conn).await? {
+                return Ok(Self(conn));
             }
-            drop(session.0.take());
             if !std::mem::replace(&mut logged, true) {
                 tracing::info!(target: "rustango::migrate", "waiting for another run's migrate lock");
             }
@@ -3046,17 +3083,12 @@ impl<DB: sqlx::Database> LockSession<DB> {
         }
     }
 
-    fn conn(&mut self) -> &mut sqlx::pool::PoolConnection<DB> {
-        self.0.as_mut().expect("lock session connection")
+    fn conn(&mut self) -> &mut C {
+        &mut self.0
     }
-}
 
-#[cfg(any(feature = "postgres", feature = "mysql"))]
-impl<DB: sqlx::Database> Drop for LockSession<DB> {
-    fn drop(&mut self) {
-        if let Some(conn) = self.0.as_mut() {
-            conn.close_on_drop();
-        }
+    async fn close(self) {
+        let _ = self.0.close().await;
     }
 }
 
