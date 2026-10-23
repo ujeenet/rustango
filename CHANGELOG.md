@@ -78,6 +78,10 @@ Without `on`, the FK targeted `id` even when `T`'s PK sets `column = "…"`, so 
 
 Only `ForeignKey<T>` was checked; a plain `fk = "…"` / `o2o = "…"` column passed, then every parent delete failed.
 
+### Fixed — concurrent M2M `set` keeps one of the sets
+
+`set` locks the source row first (SQLite takes its write lock at `BEGIN`). Two concurrent sets kept both sets' rows on PG and failed with "database is deadlocked" on SQLite.
+
 ## [0.60.10] — 2026-10-22
 
 **Breaking:** `ModelFormFor::from_json` refuses unknown keys; an oversized CSRF form gets 413, not 403; undecodable job payloads are retried; the first `makemigrations` on PostgreSQL rewrites each table with a sized `vector` or `geometry` column; MySQL migrations with a key over 3072 bytes or on unbounded text, binary or JSON fail at render time; `InMemoryJobQueue::dispatch` inside `atomic` waits for the commit. See UPGRADING.

@@ -198,6 +198,10 @@ The FK now references `T`'s PK column, not `id`. SQLite accepted the old target,
 
 A `fk = "…"` / `o2o = "…"` field with `set_null` must be `Option<…>`, as `ForeignKey<T>` already had to be. Make it optional (and migrate) or pick another action.
 
+### M2M `set` reads the source table
+
+`set` on an M2M or generic M2M manager now locks the source row, so the source model's table must exist; a test that created only the junction table needs it too.
+
 ## 0.60.10
 
 ### New `TenantScope` extractor

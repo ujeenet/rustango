@@ -1,9 +1,10 @@
-//! Relation edges on every backend: a `ForeignKey<T>` to a renamed PK column.
+//! Relation edges on every backend: a `ForeignKey<T>` to a renamed PK column
+//! and concurrent M2M `set`.
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
 use rustango::core::{Model as _, Relation};
-use rustango::sql::{FetcherPool as _, ForeignKey, Pool};
+use rustango::sql::{Auto, FetcherPool as _, ForeignKey, Pool};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone)]
@@ -23,8 +24,39 @@ pub struct Txn {
     pub acct: ForeignKey<Acct>,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "edg_album",
+    app = "edg",
+    m2m(
+        name = "tags",
+        to = "edg_tag",
+        through = "edg_album_tag",
+        src = "album_id",
+        dst = "tag_id"
+    )
+)]
+pub struct Album {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "edg_album_tag", app = "edg")]
+pub struct AlbumTag {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub album_id: i64,
+    pub tag_id: i64,
+}
+
 async fn setup(pool: &Pool) {
-    rustango::testkit::matrix::drop_table(pool, Txn::SCHEMA.table).await;
+    use rustango::testkit::matrix::{drop_table, fresh_table};
+    for t in [Txn::SCHEMA, AlbumTag::SCHEMA] {
+        drop_table(pool, t.table).await;
+    }
+    fresh_table::<Album>(pool).await;
+    fresh_table::<AlbumTag>(pool).await;
 }
 
 /// No `on`: the FK references the target's PK column, not `id`.
@@ -64,7 +96,30 @@ async fn fk_targets_a_renamed_pk_column(pool: &Pool) {
     );
 }
 
+/// Two `set`s racing on one source: the result is one of them, never both.
+async fn concurrent_m2m_sets_keep_one(pool: &Pool) {
+    Album { id: 1 }.insert_pool(pool).await.expect("album");
+    let album = Album { id: 1 };
+    for round in 0..40 {
+        album.tags_m2m().set(&[9_i64], pool).await.expect("reset");
+        let barrier = tokio::sync::Barrier::new(2);
+        let run = |ids: &'static [i64]| {
+            let barrier = &barrier;
+            async move {
+                barrier.wait().await;
+                Album { id: 1 }.tags_m2m().set(ids, pool).await
+            }
+        };
+        let (a, b) = tokio::join!(run(&[1, 2]), run(&[3, 4]));
+        a.unwrap_or_else(|e| panic!("round {round}: first set: {e}"));
+        b.unwrap_or_else(|e| panic!("round {round}: second set: {e}"));
+        let mut got = album.tags_m2m().all(pool).await.expect("all");
+        got.sort_unstable();
+        assert!(got == [1, 2] || got == [3, 4], "round {round}: {got:?}");
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
-    scenarios: [fk_targets_a_renamed_pk_column],
+    scenarios: [fk_targets_a_renamed_pk_column, concurrent_m2m_sets_keep_one],
 }
