@@ -215,3 +215,82 @@ async fn the_same_credential_is_refused_on_another_tenants_host() {
          tenant's database — the cross-tenant authentication bypass."
     );
 }
+
+/// `ListenerPort(8001)` → `alpha`, as `PortResolver` maps a listener to a tenant.
+#[derive(Clone)]
+struct PortSlugResolver;
+
+#[async_trait::async_trait]
+impl OrgResolver for PortSlugResolver {
+    async fn resolve(
+        &self,
+        parts: &axum::http::request::Parts,
+        _registry: &rustango::sql::Pool,
+    ) -> Result<Option<Org>, TenancyError> {
+        let Some(rustango::tenancy::ListenerPort(8001)) = parts.extensions.get().copied() else {
+            return Ok(None);
+        };
+        Ok(Some(Org {
+            id: rustango::sql::Auto::default(),
+            slug: "alpha".to_owned(),
+            display_name: "alpha".to_owned(),
+            storage_mode: "database".into(),
+            backend_kind: "sqlite".into(),
+            database_url: None,
+            ..rustango::testkit::org()
+        }))
+    }
+}
+
+fn port_app(ns: &str, outer: Option<&str>) -> (Router, String) {
+    let template = format!("sqlite:file:xtenant_{ns}_{{slug}}?mode=memory&cache=shared");
+    let pools = Arc::new(
+        DatabasePools::<sqlx::Sqlite>::new(BackendKind::Sqlite).with_url_template(&template),
+    );
+    let ctx = Arc::new(DatabaseTenantContext {
+        pools,
+        resolver: ChainResolver::new().push(PortSlugResolver),
+        session_secret: SessionSecret::from_bytes(b"test_tenant_secret_____32bytes!!".to_vec()),
+        operator_secret: SessionSecret::from_bytes(b"test_oper_secret_______32bytes!!".to_vec()),
+        registry: rustango::sql::Pool::Sqlite(
+            sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy sqlite"),
+        ),
+    });
+    let backends: Vec<Arc<dyn AuthBackend>> = vec![Arc::new(ModelBackend)];
+    let mut app = Router::new()
+        .route("/whoami", get(whoami))
+        .require_auth(backends)
+        .layer(axum::Extension(ctx))
+        .layer(axum::Extension(rustango::tenancy::ListenerPort(8001)));
+    if let Some(slug) = outer {
+        app = app.layer(axum::Extension(rustango::tenancy::TenantSlug(slug.to_owned())));
+    }
+    (app, template)
+}
+
+/// The tenant resolver sees the request's extensions, so a port-only chain resolves.
+#[tokio::test]
+async fn a_port_resolved_tenant_authenticates() {
+    let (app, template) = port_app("port", None);
+    let _alpha = tenant_db(
+        &template.replace("{slug}", "alpha"),
+        Some(("ann", "s3cret")),
+    )
+    .await;
+    assert_eq!(call(&app, "api.localhost", "ann:s3cret").await, StatusCode::OK);
+}
+
+/// A tenant an outer layer bound must match the one auth resolves.
+#[tokio::test]
+async fn another_bound_tenant_is_refused() {
+    let (app, template) = port_app("bound", Some("beta"));
+    let _alpha = tenant_db(
+        &template.replace("{slug}", "alpha"),
+        Some(("ann", "s3cret")),
+    )
+    .await;
+    assert_eq!(
+        call(&app, "api.localhost", "ann:s3cret").await,
+        StatusCode::FORBIDDEN
+    );
+}

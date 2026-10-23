@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `require_auth` sees request extensions
+
+A resolver chain that reads extensions (`PortResolver`) now resolves under `require_auth` instead of answering 404. A request whose `TenantSlug` extension names another tenant than the resolved one gets 403.
+
 ## 0.60.11
 
 ### `csrf_trusted_origins` takes effect
