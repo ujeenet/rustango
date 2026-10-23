@@ -298,7 +298,7 @@ where
         }
         let rows = self
             .filter_op(
-                C::COLUMN,
+                C::NAME,
                 crate::core::Op::In,
                 crate::core::SqlValue::List(id_values),
             )
@@ -2153,7 +2153,7 @@ pub(crate) use values::fetch_values_flat_on;
 #[allow(unused_imports)]
 pub use values::{
     fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, try_get_flat_my,
-    FlatScalar, MaybeMyScalar, MaybePgScalar, MaybeSqliteScalar,
+    try_get_flat_sqlite, FlatScalar, MaybeMyScalar, MaybePgScalar, MaybeSqliteScalar,
 };
 
 /// Raw SQL on any backend: runs it with bound `SqlValue`
@@ -2425,7 +2425,7 @@ impl<T: Model + Send> ExistsPool<T> for QuerySet<T> {
                 field: "primary_key".into(),
             }));
         };
-        self.filter_op(pk_field.column, crate::core::Op::Eq, pk_value.into())
+        self.filter_op(pk_field.name, crate::core::Op::Eq, pk_value.into())
             .exists(pool)
             .await
     }
@@ -2933,7 +2933,7 @@ where
         F: Fn(&T) -> K,
     {
         // `column` only carries the `Column<Model = T>` bound; the
-        // filter below uses its `COLUMN` const.
+        // filter below uses its field `NAME`.
         let _ = column;
         let id_values: Vec<crate::core::SqlValue> = ids.into_iter().map(|v| v.into()).collect();
         if id_values.is_empty() {
@@ -2942,7 +2942,7 @@ where
         let rows = fetch_in_chunks(pool, &self, id_values, |keys| {
             self.clone()
                 .filter_op(
-                    C::COLUMN,
+                    C::NAME,
                     crate::core::Op::In,
                     crate::core::SqlValue::List(keys),
                 )
@@ -2969,9 +2969,9 @@ fn ensure_pk_ordering<T: Model>(
     reverse: bool,
 ) -> crate::query::QuerySet<T> {
     if !qs.has_order_by() {
-        let pk = T::SCHEMA.primary_key().map(|f| f.column);
-        if let Some(pk_col) = pk {
-            return qs.replace_order_by(&[(pk_col, reverse)]);
+        let pk = T::SCHEMA.primary_key().map(|f| f.name);
+        if let Some(pk_name) = pk {
+            return qs.replace_order_by(&[(pk_name, reverse)]);
         }
         // No PK: leave the order empty and take whatever row the
         // dialect returns first.

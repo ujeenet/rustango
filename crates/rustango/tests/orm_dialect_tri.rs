@@ -178,6 +178,205 @@ async fn citext_filter_ignores_case(pool: &Pool) {
     assert_eq!(ids("name__ne", "BOB".into()).await, Vec::<i64>::new(), "<>");
 }
 
+/// A PK whose SQL column differs from its field name.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_acct")]
+#[rustango(app = "orm_dialect_tri")]
+pub struct Acct {
+    #[rustango(primary_key, column = "acct_no")]
+    pub number: i64,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_entry")]
+#[rustango(app = "orm_dialect_tri")]
+pub struct Entry {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(on = "acct_no")]
+    pub acct: rustango::sql::ForeignKey<Acct>,
+}
+
+/// A UUID PK whose DB default SQLite stores as TEXT.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_textkey")]
+#[rustango(app = "orm_dialect_tri")]
+pub struct TextKey {
+    #[rustango(
+        primary_key,
+        auto_uuid,
+        default = "'7c9e6679-7425-40de-944b-e07fc1f90ae7'"
+    )]
+    pub id: Auto<uuid::Uuid>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+/// The insert reads back a default-written UUID key, TEXT on SQLite.
+async fn insert_reads_back_a_text_uuid_key(pool: &Pool) {
+    let mut k = TextKey {
+        id: Auto::default(),
+        name: "k".into(),
+    };
+    let got = k.insert_pool(pool).await;
+    if pool.dialect().name() == "mysql" {
+        assert!(got.is_err(), "MySQL cannot read the key back: {got:?}");
+        return;
+    }
+    got.expect("insert");
+    let want = uuid::uuid!("7c9e6679-7425-40de-944b-e07fc1f90ae7");
+    assert_eq!(k.id.get().copied(), Some(want));
+    assert_eq!(TextKey::objects().count(pool).await.expect("count"), 1);
+}
+
+/// PK lookups name the field, not the renamed column.
+async fn pk_lookups_on_a_renamed_pk_column(pool: &Pool) {
+    for (number, name) in [(1, "a"), (2, "b")] {
+        Acct {
+            number,
+            name: name.into(),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed acct");
+    }
+    use rustango::sql::ExistsPool as _;
+    assert!(Acct::objects().contains_pk(pool, 2_i64).await.expect("contains_pk"));
+    let first = Acct::objects().first(pool).await.expect("first");
+    assert_eq!(first.map(|a| a.number), Some(1));
+    let by_no = Acct::objects()
+        .in_bulk(Acct::number, [1_i64, 2], |a| a.number, pool)
+        .await
+        .expect("in_bulk");
+    assert_eq!(by_no.len(), 2);
+    let last = Acct::objects().last(pool).await.expect("last");
+    assert_eq!(last.map(|a| a.number), Some(2));
+    let on = Acct::objects()
+        .in_bulk_on(Acct::number, [1_i64], |a| a.number, pool)
+        .await
+        .expect("in_bulk_on");
+    assert_eq!(on.len(), 1);
+    let pks = Acct::objects().pks::<i64>(pool).await.expect("pks");
+    assert_eq!(pks.len(), 2);
+    let mut e = Entry {
+        id: Auto::default(),
+        acct: rustango::sql::ForeignKey::unloaded(2),
+    };
+    e.insert_pool(pool).await.expect("seed entry");
+    assert_eq!(e.acct.clone().get_on(pool).await.expect("fk get_on").name, "b");
+    #[cfg(feature = "postgres")]
+    assert_eq!(e.acct.get_pool(pool).await.expect("fk get").name, "b");
+}
+
+/// An empty `HAVING` predicate keeps every group.
+async fn empty_having_is_true(pool: &Pool) {
+    seed(pool, &[("a", "apple"), ("b", "apple"), ("c", "banana")]).await;
+    let rows = Post::objects()
+        .values(&["title"])
+        .annotate("n", AggregateExpr::Count(None))
+        .having(rustango::core::TypedExpr::from_where_expr(WhereExpr::And(vec![])))
+        .fetch(pool)
+        .await
+        .expect("having");
+    assert_eq!(rows.len(), 2);
+}
+
+/// The `distinct_on` fallback pages the survivors, not the ranked rows.
+async fn distinct_on_pages_the_survivors(pool: &Pool) {
+    seed(pool, &[("a", "apple"), ("b", "apple"), ("c", "banana"), ("d", "cherry")]).await;
+    let by_title = || {
+        Post::objects()
+            .distinct_on(&["title"])
+            .order_by(&[("title", false), ("id", false)])
+    };
+    let titles = |rows: Vec<Post>| rows.into_iter().map(|p| p.title).collect::<Vec<_>>();
+    let page = by_title().limit(1).offset(1).fetch(pool).await.expect("page");
+    assert_eq!(titles(page), ["banana"]);
+    let rest = by_title().offset(1).fetch(pool).await.expect("offset only");
+    assert_eq!(titles(rest), ["banana", "cherry"]);
+}
+
+/// A PG bulk insert reads back a default-written UUID key.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn pg_bulk_insert_reads_back_a_default_uuid_key() {
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    fresh_table::<TextKey>(&pool).await;
+    let mut rows = [TextKey {
+        id: Auto::default(),
+        name: "k".into(),
+    }];
+    TextKey::bulk_insert(&mut rows, pool.as_postgres().expect("pg"))
+        .await
+        .expect("bulk");
+    let want = uuid::uuid!("7c9e6679-7425-40de-944b-e07fc1f90ae7");
+    assert_eq!(rows[0].id.get().copied(), Some(want));
+}
+
+/// An empty `And` is TRUE wherever it nests.
+async fn nested_empty_and_is_true(pool: &Pool) {
+    seed(pool, &[("a", "apple"), ("b", "banana")]).await;
+    let slug = |s: &str| WhereExpr::Predicate(Filter::new("slug", Op::Eq, s));
+    let count = |e: WhereExpr| async move {
+        let qs = Post::objects().filter("title__ne", "x").where_raw(e);
+        qs.count(pool).await.expect("count")
+    };
+    assert_eq!(count(WhereExpr::And(vec![])).await, 2, "AND ()");
+    let or = WhereExpr::Or(vec![WhereExpr::And(vec![]), slug("zz")]);
+    assert_eq!(count(or).await, 2, "TRUE OR x");
+    let and = WhereExpr::And(vec![slug("a"), WhereExpr::And(vec![])]);
+    assert_eq!(count(and).await, 1, "x AND TRUE");
+    let not = WhereExpr::Not(Box::new(WhereExpr::And(vec![])));
+    assert_eq!(count(not).await, 0, "NOT TRUE");
+}
+
+/// The MySQL / SQLite `distinct_on` fallback kept joined columns and
+/// ordered by relation and unprojected columns.
+async fn distinct_on_keeps_join_columns_and_order(pool: &Pool) {
+    seed_meas(pool, 1, "2024-01-01T00:00:00Z").await;
+    seed_meas(pool, 2, "2024-01-02T00:00:00Z").await;
+    let first = Meas::objects()
+        .order_by(&[("id", false)])
+        .fetch(pool)
+        .await
+        .expect("meas")[0]
+        .id;
+    Reading {
+        id: Auto::default(),
+        meas: rustango::sql::ForeignKey::unloaded(first.get().copied().expect("id")),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("second reading");
+    let per_meas = || {
+        Reading::objects()
+            .distinct_on(&["meas"])
+            .order_by(&[("meas", true), ("meas__n", false), ("id", true)])
+    };
+    let rows = per_meas()
+        .select_related("meas")
+        .fetch(pool)
+        .await
+        .expect("select_related");
+    let ns: Vec<i64> = rows
+        .iter()
+        .map(|r| r.meas.value().expect("loaded").n)
+        .collect();
+    assert_eq!(ns, [2, 1]);
+    let metas = per_meas()
+        .values_list(&["meas"])
+        .fetch(pool)
+        .await
+        .expect("values_list");
+    assert_eq!(metas.len(), 2);
+}
+
 async fn setup(pool: &Pool) {
     fresh_table::<Code>(pool).await;
     fresh_table::<Post>(pool).await;
@@ -187,6 +386,10 @@ async fn setup(pool: &Pool) {
     fresh_table::<Reading>(pool).await;
     fresh_table::<Noted>(pool).await;
     fresh_table::<Account>(pool).await;
+    rustango::testkit::matrix::drop_table(pool, Entry::SCHEMA.table).await;
+    fresh_table::<Acct>(pool).await;
+    fresh_table::<Entry>(pool).await;
+    fresh_table::<TextKey>(pool).await;
 }
 
 async fn posts(pool: &Pool) -> Vec<Post> {
@@ -998,6 +1201,12 @@ tri_dialect_test! {
         relation_date_lookup,
         citext_keeps_accents_and_spaces,
         citext_filter_ignores_case,
+        pk_lookups_on_a_renamed_pk_column,
+        nested_empty_and_is_true,
+        distinct_on_keeps_join_columns_and_order,
+        insert_reads_back_a_text_uuid_key,
+        empty_having_is_true,
+        distinct_on_pages_the_survivors,
     ],
 }
 

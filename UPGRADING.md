@@ -163,6 +163,10 @@ A pending file with a data op, a callback or a rename now stops the squash; fold
 A pending file sorting before the newest applied one (a merged branch) now applies when it is at or before the target; it used to be skipped.
 `migrate <target>` orders by file name, so going back to a target also unapplies sibling-branch files that sort after it.
 
+### Upserts with no update columns fail before the database
+
+On PostgreSQL and SQLite they return `ExecError::Sql(SqlError::EmptyUpdateSet)`, as MySQL did, instead of a driver syntax error. Use `insert_or_ignore` for "insert, skip conflicts".
+
 ## 0.60.11
 
 ### `csrf_trusted_origins` takes effect

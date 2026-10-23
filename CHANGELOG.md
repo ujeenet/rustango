@@ -24,6 +24,30 @@ Apply and unapply look up every callback first, so a missing one no longer leave
 
 The plan comes from the ledger: newer applied files unapply, then every pending file up to the target applies.
 
+### Fixed — SQLite insert reads back a TEXT `Auto<Uuid>` key
+
+`insert_pool` on a model whose `Auto<Uuid>` PK a column default writes as text now decodes it; it failed with `ParseByteLength`.
+
+### Fixed — PK lookups on a PK with its own `column`
+
+`ForeignKey::get` / `get_on` / `get_pool`, `contains_pk`, `in_bulk` / `in_bulk_on`, `contenttypes::prefetch_generic` and the PK order of `first` / `last` filter by the field name; with `#[rustango(primary_key, column = "…")]` they failed with `UnknownField`.
+
+### Fixed — MySQL / SQLite `distinct_on` keeps joins and relation order
+
+The window fallback now returns `select_related` columns and sorts by each ORDER BY key the inner query exposes, so `order_by("author__name")` and an unprojected sort column work as on PostgreSQL.
+
+### Fixed — an upsert with no update columns is refused on every backend
+
+A `DoUpdate` conflict with empty `update_columns` (e.g. `bulk_upsert_pool(rows, &["code"], &[], pool)`) returns `SqlError::EmptyUpdateSet` on PostgreSQL and SQLite too; it sent `DO UPDATE SET` with nothing after it.
+
+### Fixed — a nested empty `WhereExpr::And` is TRUE
+
+`where_raw(WhereExpr::And(vec![]))` next to other filters, or inside an `Or` / `Not`, writes `1 = 1`; it wrote `()`, a syntax error on every backend.
+
+### Fixed — `Q!` on a keyword field
+
+`Q!(Post.r#type = …)` and `Q!(Post.type__in = …)` expand to `Post::r#type`; the first panicked in the macro, the second wrote `Post::type`.
+
 ## [0.60.11] — 2026-10-22
 
 **Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`; `RequestIdLayer` no longer echoes an untrusted client's `X-Request-Id`; a SQLite UUID key stored both as BLOB and TEXT is now a 404 in ViewSets and template views. See UPGRADING.
