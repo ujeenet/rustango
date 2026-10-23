@@ -171,7 +171,7 @@ where
     let Some(pk) = target.primary_key() else {
         return Ok(());
     };
-    let col = format!("{alias}__{}", pk.column);
+    let col = crate::core::joins::joined_label(alias, pk.column);
     if sqlx::ValueRef::is_null(&row.try_get_raw(col.as_str())?) {
         return Err(sqlx::Error::ColumnDecode {
             index: col,
@@ -486,67 +486,8 @@ where
         + MaybeSqliteLoadRelated
         + FkPkAccess,
 {
-    let parents: Vec<P> = parent_qs.fetch_on(pool).await?;
-    if parents.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Collect parent PKs as `SqlValue`, so any PK type works
-    // (i64, i32, String, Uuid).
-    let pk_field = P::SCHEMA
-        .primary_key()
-        .ok_or(ExecError::MissingPrimaryKey {
-            table: P::SCHEMA.table,
-        })?;
-    let mut parent_pks: Vec<crate::core::SqlValue> = Vec::with_capacity(parents.len());
-    for parent in &parents {
-        let pk = extract_pk_value(parent);
-        if !matches!(pk, crate::core::SqlValue::Null) {
-            parent_pks.push(pk);
-        }
-    }
-    // Dedupe on the display form so a repeated PK lands once in IN.
-    {
-        let mut seen = std::collections::HashSet::new();
-        parent_pks.retain(|v| seen.insert(v.to_display_string()));
-    }
-    if parent_pks.is_empty() {
-        return Ok(parents.into_iter().map(|p| (p, Vec::new())).collect());
-    }
-
-    // Batch-fetch the children where their FK column points at any
-    // of the parent PKs.
-    let children: Vec<C> = crate::query::QuerySet::<C>::new()
-        .filter_op(
-            child_fk_column,
-            crate::core::Op::In,
-            crate::core::SqlValue::List(parent_pks),
-        )
-        .fetch_on(pool)
-        .await?;
-
-    // Group children by FK PK, keyed on the display form. Integers,
-    // strings and UUIDs all stringify uniquely; PKs are never floats.
-    let mut grouped: std::collections::HashMap<String, Vec<C>> = std::collections::HashMap::new();
-    for child in children {
-        let Some(fk_pk) = child.__rustango_fk_pk_value(child_fk_column) else {
-            continue;
-        };
-        grouped
-            .entry(fk_pk.to_display_string())
-            .or_default()
-            .push(child);
-    }
-
-    // Stitch.
-    let mut out = Vec::with_capacity(parents.len());
-    for parent in parents {
-        let pk = extract_pk_value(&parent).to_display_string();
-        let kids = grouped.remove(&pk).unwrap_or_default();
-        out.push((parent, kids));
-    }
-    let _ = pk_field; // suppress unused-warning when only the PK lookup ran
-    Ok(out)
+    // The pool path batches the `IN` list past the bind cap.
+    fetch_with_prefetch_pool(parent_qs, child_fk_column, &Pool::Postgres(pool.clone())).await
 }
 
 /// Read a model's PK as a [`crate::core::SqlValue`] through
