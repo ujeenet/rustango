@@ -10,7 +10,9 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use rustango::core::Model as _;
-use rustango::sql::{Auto, CounterPool as _, FetcherPool as _, ForeignKey, Pool};
+#[cfg(feature = "sqlite")]
+use rustango::sql::CounterPool as _;
+use rustango::sql::{Auto, FetcherPool as _, ForeignKey, Pool};
 use rustango::template_views::{CreateView, DeleteView, DetailView, ListView, UpdateView};
 use rustango::{tri_dialect_test, Model};
 use tera::Tera;
