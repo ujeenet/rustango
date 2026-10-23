@@ -330,12 +330,14 @@ impl<T: Model> QuerySet<T> {
 
     /// Take a row lock. Emits `SELECT … FOR UPDATE` on
     /// Postgres and MySQL 8+. SQLite has no row-lock syntax, so it is a
-    /// no-op there; a SQLite transaction locks the whole database.
+    /// no-op there.
     ///
     /// Run it inside a transaction. `FOR UPDATE` outside one does
     /// nothing on Postgres and errors on MySQL. Open one with
-    /// [`crate::sql::transaction_pool`], then call
-    /// `.fetch_on(&mut *tx)`.
+    /// [`crate::sql::write_transaction`], then call
+    /// `.fetch_on(&mut tx)`. On SQLite that takes the database write lock
+    /// at `BEGIN`; a [`crate::sql::transaction_pool`] one locks nothing
+    /// until it writes, so two readers see the same row.
     ///
     /// The defaults ([`crate::core::LockMode::default`]) emit plain
     /// `FOR UPDATE`. Use the methods below to set individual flags.
@@ -1234,7 +1236,7 @@ impl<T: Model> QuerySet<T> {
     /// | `__isnull` | `<col> IS NULL` / `IS NOT NULL` | value must be `bool` |
     /// | `__between` / `__range` | `<col> BETWEEN ? AND ?` | value must be 2-element `SqlValue::List` |
     /// | `__not_between` / `__not_range` | `<col> NOT BETWEEN ? AND ?` | value must be 2-element `SqlValue::List`. Eloquent `whereNotBetween` parity. |
-    /// | `__year` / `__month` / `__day` / `__hour` / `__minute` / `__second` / `__quarter` / `__week` / `__week_day` | `EXTRACT(<part> FROM <col>) = ?` | scalar value matches the date part. Composes with a trailing `__gte` / `__lt` / etc. `__quarter` works on every dialect; SQLite derives it from the month. `__week` numbering differs per backend. |
+    /// | `__year` / `__month` / `__day` / `__hour` / `__minute` / `__second` / `__quarter` / `__week` / `__week_day` | `EXTRACT(<part> FROM <col>) = ?` | scalar value matches the date part. Composes with a trailing `__gte` / `__lt` / etc. `__quarter` works on every dialect; SQLite derives it from the month. `__week` is the ISO 8601 week everywhere. |
     /// | `__date` | `DATE(<col>) = ?` | value is a `chrono::NaiveDate`; strips the time component before comparison. |
     ///
     /// ```ignore
@@ -1976,13 +1978,19 @@ impl<T: Model> QuerySet<T> {
         // Ad-hoc joins come after the FK-driven select_related ones, so
         // column order stays stable and user joins sit next to the user
         // WHERE.
-        joins.extend(self.ad_hoc_joins);
-        // Skip a span JOIN whose alias is already here, so a span over
-        // the same path as a select_related emits only once.
-        for j in span_joins {
-            if !joins.iter().any(|e| e.alias == j.alias) {
-                joins.push(j);
+        let mut ad_hoc: Vec<&'static str> = Vec::with_capacity(self.ad_hoc_joins.len());
+        for j in self.ad_hoc_joins {
+            if joins.iter().any(|e| e.alias == j.alias) {
+                return Err(duplicate_join_alias(j.alias));
             }
+            ad_hoc.push(j.alias);
+            joins.push(j);
+        }
+        // Skip a span JOIN whose alias is already here, so a span over
+        // the same path as a select_related emits only once. An ad-hoc
+        // join under that alias is another table: refuse it.
+        for j in span_joins {
+            merge_relation_join(&mut joins, &ad_hoc, j)?;
         }
         // Split head-branch clauses from combined-result clauses. With
         // a compound, `head_*` holds what was frozen at the first
@@ -2018,9 +2026,7 @@ impl<T: Model> QuerySet<T> {
         // Merge relation-span `order_by` JOINs into the join set,
         // skipping aliases already added above.
         for j in order_joins.into_iter().chain(comb_order_joins) {
-            if !joins.iter().any(|e| e.alias == j.alias) {
-                joins.push(j);
-            }
+            merge_relation_join(&mut joins, &ad_hoc, j)?;
         }
         // `.distinct_on(&[...])` needs its columns at the head of the
         // ORDER BY, so catch a mismatch at compile time.
@@ -3325,6 +3331,45 @@ fn resolve_span(
         rhs: Expr::Literal(value),
     };
     Ok((joins, predicate))
+}
+
+fn duplicate_join_alias(alias: &str) -> QueryError {
+    QueryError::DuplicateJoinAlias {
+        alias: alias.to_owned(),
+    }
+}
+
+/// Add a span or `order_by` join unless its path is already joined. An
+/// ad-hoc join under the alias is reused only if it joins the same table
+/// on the same columns; otherwise the lookup would read the wrong table.
+fn merge_relation_join(
+    joins: &mut Vec<crate::core::Join>,
+    ad_hoc: &[&'static str],
+    j: crate::core::Join,
+) -> Result<(), QueryError> {
+    match joins.iter().find(|e| e.alias == j.alias) {
+        Some(e) if ad_hoc.contains(&j.alias) && !same_join(e, &j) => {
+            Err(duplicate_join_alias(j.alias))
+        }
+        Some(_) => Ok(()),
+        None => {
+            joins.push(j);
+            Ok(())
+        }
+    }
+}
+
+/// Same target table and the same `a = b` column pair, in either order.
+fn same_join(a: &crate::core::Join, b: &crate::core::Join) -> bool {
+    let pair = |j: &crate::core::Join| match &j.on {
+        WhereExpr::ExprCompare { lhs, op: Op::Eq, rhs } => Some((lhs.clone(), rhs.clone())),
+        _ => None,
+    };
+    a.target.table == b.target.table
+        && match (pair(a), pair(b)) {
+            (Some((l, r)), Some(other)) => other == (l.clone(), r.clone()) || other == (r, l),
+            _ => false,
+        }
 }
 
 /// Deepest relation path a span or `select_related` may walk. It bounds the

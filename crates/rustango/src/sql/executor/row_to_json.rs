@@ -109,7 +109,7 @@ where
                 .unwrap_or(Value::Null),
             FieldType::F32 => row
                 .try_get::<f32, _>(field.column)
-                .map(|n| json!(n))
+                .map(|n| crate::core::__json_value(&n))
                 .unwrap_or(Value::Null),
             FieldType::F64 => row
                 .try_get::<f64, _>(field.column)
@@ -281,7 +281,7 @@ pub fn row_to_json_sqlite(
                 .unwrap_or(Value::Null),
             FieldType::F32 => row
                 .try_get::<f32, _>(field.column)
-                .map(|n| json!(n))
+                .map(|n| crate::core::__json_value(&n))
                 .unwrap_or(Value::Null),
             FieldType::F64 => row
                 .try_get::<f64, _>(field.column)

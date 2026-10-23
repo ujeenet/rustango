@@ -3586,7 +3586,7 @@ async fn update_inner(
                 silent_on_sqlite: true,
                 ..crate::core::LockMode::default()
             });
-            let mut tx = match crate::sql::write_transaction_pool(&acq.pool).await {
+            let mut tx = match crate::sql::write_transaction(&acq.pool).await {
                 Ok(tx) => tx,
                 Err(e) => return json_server_error("viewset::update::begin", &e),
             };

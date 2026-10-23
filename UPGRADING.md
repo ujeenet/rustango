@@ -163,6 +163,26 @@ A pending file with a data op, a callback or a rename now stops the squash; fold
 A pending file sorting before the newest applied one (a merged branch) now applies when it is at or before the target; it used to be skipped.
 `migrate <target>` orders by file name, so going back to a target also unapplies sibling-branch files that sort after it.
 
+### `ForeignKey::get` follows `on`, and join aliases must be unique
+
+With `#[rustango(on = "num")]`, `get_on` / `get_pool` load the parent whose `num` equals the key (not its PK) when every FK to that model uses the same `on`. A `.join()` reusing a relation lookup's or `select_related` alias now fails at compile with `QueryError::DuplicateJoinAlias`; rename the alias. A `.join()` to the same table on the same columns as the lookup's join is still reused.
+
+### `OAuthError::BadStatus` body is the error code
+
+`body` now holds only the provider's OAuth `error` code (e.g. `invalid_grant`), or is empty. Code that parsed the full body should match the code instead.
+
+### `__week` on MySQL and SQLite returns the ISO week
+
+It used to be MySQL mode 0 (Sunday start, 0–53) and SQLite `%W`. 2023-01-01 now gives 52 on every backend; adjust stored week numbers or filters written for the old values.
+
+### `check --deploy` checks MySQL time zone tables
+
+A new warning appears when they are not loaded; load them with `mysql_tzinfo_to_sql` if you use `trunc_with_tz` with zone names.
+
+### SQLite `select_for_update` needs `write_transaction`
+
+A `transaction_pool` transaction on SQLite takes no lock when it reads, so two workers can claim one row and the second UPDATE fails with `SQLITE_BUSY`. Open it with `rustango::sql::write_transaction(&pool)`; on PG and MySQL it is the same as `transaction_pool`.
+
 ### Upserts with no update columns fail before the database
 
 On PostgreSQL and SQLite they return `ExecError::Sql(SqlError::EmptyUpdateSet)`, as MySQL did, instead of a driver syntax error. Use `insert_or_ignore` for "insert, skip conflicts".

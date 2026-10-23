@@ -2009,6 +2009,30 @@ async fn collation_audit(pool: &Pool, audit: &mut DeployAuditFindings) {
     }
 }
 
+/// Warn when named time zones convert to NULL, as `trunc_with_tz` then does.
+async fn time_zone_audit(pool: &Pool, audit: &mut DeployAuditFindings) {
+    let Some(sql) = pool.dialect().named_time_zone_sql() else {
+        return;
+    };
+    match crate::sql::raw_query_pool::<(Option<String>,)>(sql, Vec::new(), pool).await {
+        Ok(rows) => {
+            let converted = rows.first().and_then(|(c,)| c.as_deref());
+            audit.warnings.extend(time_zone_warning(converted));
+        }
+        Err(e) => audit
+            .warnings
+            .push(format!("could not check named time zones: {e}")),
+    }
+}
+
+fn time_zone_warning(converted: Option<&str>) -> Option<String> {
+    converted.is_none().then(|| {
+        "the database has no time zone tables: `trunc_with_tz` with a named zone returns \
+         NULL — load them with `mysql_tzinfo_to_sql`, or pass `±HH:MM` offsets"
+            .to_owned()
+    })
+}
+
 fn collation_warning(collation: &str) -> Option<String> {
     const FIX: &str = "create the database with `COLLATE utf8mb4_0900_as_cs` \
                        (see the MySQL section of docs/getting-started.md)";
@@ -2121,6 +2145,7 @@ pub(crate) async fn check_cmd_with<W: Write>(
         #[cfg(feature = "cache")]
         login_store_audit(crate::account_lockout::shared(), &mut audit);
         collation_audit(pool, &mut audit).await;
+        time_zone_audit(pool, &mut audit).await;
         #[cfg(feature = "admin-sso")]
         sso_link_audit(pool, &mut audit).await;
         let extra = extra.await;
@@ -5423,7 +5448,7 @@ async fn delete_all_in_tx(
         let why = "they reference each other through NOT NULL foreign keys; no delete order exists";
         return Err((tables, why.to_owned()));
     }
-    let mut tx = crate::sql::write_transaction_pool(pool)
+    let mut tx = crate::sql::write_transaction(pool)
         .await
         .map_err(|e| ("BEGIN".to_owned(), e.to_string()))?;
     // SQLite: FK checks wait for COMMIT, for this transaction only.
@@ -8385,6 +8410,12 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
                 "{op:?}: the file was deleted"
             );
         }
+    }
+
+    #[test]
+    fn missing_time_zone_tables_warn() {
+        assert!(time_zone_warning(None).is_some());
+        assert!(time_zone_warning(Some("2000-01-01 00:00:00")).is_none());
     }
 
     #[test]

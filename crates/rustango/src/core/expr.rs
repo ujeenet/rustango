@@ -341,15 +341,8 @@ pub enum ScalarFn {
     ExtractMinute,
     /// Second (0–59).
     ExtractSecond,
-    /// Week-of-year. **Not portable**: each backend numbers weeks its
-    /// own way, so one date gives three values.
-    /// - PG (`EXTRACT(WEEK FROM x)`): ISO 8601, Monday start, 1–53.
-    /// - MySQL (`WEEK(x)` mode 0): **Sunday** start, **0**–53.
-    /// - SQLite (`strftime('%W', x)`): Monday start, 00–53.
-    ///
-    /// For 2024-01-01 (a Monday): PG=1, MySQL=0, SQLite=01. Use it on
-    /// one backend only, or compute the week start in app code as a
-    /// typed `chrono::DateTime`.
+    /// ISO 8601 week-of-year (1–53, Monday start) on every backend:
+    /// `EXTRACT(WEEK)` on PG, `WEEK(x, 3)` on MySQL, computed on SQLite.
     ExtractWeek,
     /// Day-of-week, **normalized to 0 = Sunday, 6 = Saturday** on all
     /// three dialects. MySQL's `DAYOFWEEK()` counts from 1, so the

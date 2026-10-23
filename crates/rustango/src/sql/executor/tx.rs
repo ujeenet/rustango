@@ -204,8 +204,14 @@ pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError>
     }
 }
 
-/// [`transaction_pool`] that takes SQLite's write lock at `BEGIN`.
-pub(crate) async fn write_transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError> {
+/// [`transaction_pool`] that takes SQLite's write lock at `BEGIN`. Use it
+/// for read-then-write work such as `select_for_update`: on SQLite a
+/// deferred one fails its first write with `SQLITE_BUSY` when another
+/// transaction wrote since its read.
+///
+/// # Errors
+/// Driver errors from `BEGIN`.
+pub async fn write_transaction(pool: &Pool) -> Result<PoolTx<'static>, ExecError> {
     match pool {
         // Take the write lock up front: a deferred tx that reads first
         // fails at once on a busy WAL database instead of waiting.

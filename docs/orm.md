@@ -282,9 +282,9 @@ Calling `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` without a prio
 |---|---|
 | PostgreSQL | Full support — every flag emits its native syntax. |
 | MySQL 8.0.1+ | Supports everything except `NO KEY` — that flag falls back to plain `FOR UPDATE` (the stricter lock). |
-| SQLite | No row-level lock syntax. The writer emits no clause at all; transactions hold an implicit write lock for the whole database. Use a different strategy for SQLite (typically a busy-wait loop on the transaction itself). |
+| SQLite | No row-level lock syntax; the writer emits no clause. Open the transaction with `rustango::sql::write_transaction(&pool)`: it takes the database write lock at `BEGIN`, so a second worker waits and then sees the claimed row. A `transaction_pool` one locks nothing until it writes, and the second writer fails with `SQLITE_BUSY`. |
 
-**Must run inside a transaction.** `FOR UPDATE` outside a tx is a no-op on PostgreSQL (the implicit single-statement tx releases the lock immediately) and an error on MySQL. On Postgres pair it with `pool.begin()` (a `sqlx::PgPool`); for a backend-agnostic transaction use `rustango::sql::atomic(&pool, …)` or `transaction_pool(&pool)`, which hand you a `PoolTx` to `match` on (`atomic` through `tx.lock().await?`).
+**Must run inside a transaction.** `FOR UPDATE` outside a tx is a no-op on PostgreSQL (the implicit single-statement tx releases the lock immediately) and an error on MySQL. On Postgres pair it with `pool.begin()` (a `sqlx::PgPool`); for a backend-agnostic transaction use `rustango::sql::write_transaction(&pool)` and `.fetch_on(&mut tx)`.
 
 ### Combining queries (union, intersection, difference)
 
@@ -718,7 +718,7 @@ Order::objects()
 |---|---|---|---|
 | `now()` | `NOW()` | `NOW()` | `CURRENT_TIMESTAMP` |
 | `extract_year(x)` | `CAST(EXTRACT(YEAR FROM x) AS INTEGER)` | `YEAR(x)` | `CAST(strftime('%Y', x) AS INTEGER)` |
-| `extract_week(x)` ⚠ | `EXTRACT(WEEK FROM x)` — ISO 8601, range 1–53 | `WEEK(x)` — Sunday-start, range **0**–53 | `strftime('%W', x)` — Monday-start, range 00–53 |
+| `extract_week(x)` | `EXTRACT(WEEK FROM x)` — ISO 8601, range 1–53 | `WEEK(x, 3)` — ISO 8601 | ISO 8601, from the week's Thursday |
 | `extract_weekday(x)` | `CAST(EXTRACT(DOW FROM x) AS INTEGER)` | `(DAYOFWEEK(x) - 1)` | `CAST(strftime('%w', x) AS INTEGER)` |
 | `extract_quarter(x)` | `EXTRACT(QUARTER FROM x)` | `QUARTER(x)` | **unsupported** — error |
 | `trunc_date(x)` | `DATE(x)` | `DATE(x)` | `DATE(x)` |
@@ -730,7 +730,7 @@ Order::objects()
 
 - **`trunc_year/month` return type diverges**: timestamp on PG, text on MySQL/SQLite. Cast on the app side when reading if you need a typed `chrono::NaiveDate` — or store the bucket as a plain integer (`extract_year` + `extract_month`) and reconstruct in code.
 - **`extract_weekday` is normalized to 0 = Sunday** across all three dialects. MySQL's native `DAYOFWEEK()` returns 1=Sunday, so the writer subtracts 1.
-- **⚠ `extract_week` is NOT portable.** PG returns ISO 8601 week numbers (Monday-start, range 1–53); MySQL's default `WEEK(x)` is Sunday-start with range **0**–53; SQLite's `strftime('%W')` is Monday-start with range 00–53. For 2024-01-01 (a Monday), the three backends return `1`, `0`, and `01` respectively. Single-backend code can use it freely; cross-dialect code should compute the week boundary as a typed `chrono::DateTime` in Rust and filter on the timestamp column instead.
+- **`extract_week` and `__week` are the ISO 8601 week** (Monday start, 1–53) on all three dialects: 2023-01-01 is week 52.
 - **`extract_quarter` on SQLite errors** with `OpNotSupportedInDialect` — SQLite has no native quarter token. Either gate the feature behind `cfg(not(sqlite))` or compute via `((extract_month - 1) / 3) + 1` in app code.
 - **Time-zone handling**: PG `EXTRACT` operates in the column's timezone; MySQL `YEAR()` operates in the session timezone (`SET time_zone = ...`); SQLite has no real TZ support — treat everything as UTC. Use `TIMESTAMPTZ` on PG, `DATETIME` on MySQL with the session TZ set, ISO-8601 strings on SQLite.
 

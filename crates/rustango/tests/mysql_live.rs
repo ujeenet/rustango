@@ -305,3 +305,23 @@ async fn check_deploy_warns_on_a_case_insensitive_database() {
         "{out}"
     );
 }
+
+/// The CI image loads the time zone tables, so the probe runs and is quiet.
+/// A server started with `MYSQL_INITDB_SKIP_TZINFO=1` gets the warning.
+#[tokio::test]
+async fn check_deploy_probes_named_time_zones() {
+    let Some(pool) = pool_or_skip().await else {
+        eprintln!("MYSQL_TEST_URL unset — skipping");
+        return;
+    };
+    let mut out: Vec<u8> = Vec::new();
+    let _ = rustango::migrate::manage::run_with_writer(
+        &pool,
+        std::path::Path::new("/nonexistent"),
+        ["check".to_owned(), "--deploy".to_owned()],
+        &mut out,
+    )
+    .await;
+    let out = String::from_utf8(out).unwrap();
+    assert!(!out.contains("time zone"), "{out}");
+}

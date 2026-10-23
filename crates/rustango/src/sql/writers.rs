@@ -191,13 +191,29 @@ impl<'d> Sql<'d> {
 
     /// The table or alias `column` is written under. `Base` only names
     /// the base model's own columns, so a joined-only one stays bare.
-    fn qualify_alias(&self, column: &str) -> Option<&'static str> {
+    fn qualify_alias(&self, column: &str) -> Option<std::borrow::Cow<'static, str>> {
         match self.qualifier()? {
-            Qualifier::Join(a) => Some(a),
+            Qualifier::Join(a) => Some(self.alias_ref(a)),
             Qualifier::Base(t) => self
                 .scope_model()
                 .map_or(true, |m| m.field_by_column(column).is_some())
-                .then_some(t),
+                .then_some(t.into()),
+        }
+    }
+
+    /// A model join's alias as written: PG cuts names past 63 bytes, so
+    /// two long chain aliases would collide.
+    fn write_alias(&mut self, alias: &str) {
+        self.write_ident(&crate::core::joins::sql_label(alias));
+    }
+
+    /// `alias` in an `<alias>.<col>` reference: shortened like
+    /// [`Self::write_alias`] when it names a model join.
+    fn alias_ref<'a>(&self, alias: &'a str) -> std::borrow::Cow<'a, str> {
+        if self.join_types.iter().any(|(_, a, _)| *a == alias) {
+            crate::core::joins::sql_label(alias)
+        } else {
+            alias.into()
         }
     }
 
@@ -624,7 +640,7 @@ fn write_distinct_on_via_window(
     for join in &query.joins {
         for col in &join.project {
             b.sql.push_str(", ");
-            b.write_ident(join.alias);
+            b.write_alias(join.alias);
             b.sql.push('.');
             b.write_ident(col);
             b.sql.push_str(" AS ");
@@ -891,7 +907,7 @@ fn write_select_body_qualified(
     for join in &query.joins {
         for col in &join.project {
             b.sql.push_str(", ");
-            b.write_ident(join.alias);
+            b.write_alias(join.alias);
             b.sql.push('.');
             b.write_ident(col);
             b.sql.push_str(" AS ");
@@ -1113,7 +1129,7 @@ fn write_model_joins(b: &mut Sql<'_>, joins: &[crate::core::Join]) -> Result<(),
         b.sql.push(' ');
         b.write_table(join.target.table);
         b.sql.push_str(" AS ");
-        b.write_ident(join.alias);
+        b.write_alias(join.alias);
         b.sql.push_str(" ON ");
         // Bare columns in the ON predicate resolve to the joined
         // alias here. Use `Expr::AliasedColumn` to point elsewhere.
@@ -1169,7 +1185,8 @@ fn write_agg_group_col(
             b.sql.push('.');
             b.write_ident(&flat);
         } else {
-            b.write_ident(scope.rename(alias));
+            let alias = b.alias_ref(scope.rename(alias)).into_owned();
+            b.write_ident(&alias);
             b.sql.push('.');
             b.write_ident(c);
         }
@@ -1915,7 +1932,7 @@ fn write_expr(
         }
         Expr::Column(name) => {
             if let Some(alias) = b.qualify_alias(name) {
-                let qualified = format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(name),);
+                let qualified = format!("{}.{}", b.d.quote_ident(&alias), b.d.quote_ident(name),);
                 b.sql.push_str(&qualified);
             } else {
                 b.write_ident(name);
@@ -2091,7 +2108,11 @@ fn write_expr(
                 _ => {
                     // The current table, written under its FROM name.
                     let alias = b.scope_stack.last().map_or(*alias, |s| s.rename(alias));
-                    format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(column))
+                    format!(
+                        "{}.{}",
+                        b.d.quote_ident(&b.alias_ref(alias)),
+                        b.d.quote_ident(column)
+                    )
                 }
             };
             b.sql.push_str(&qualified);
@@ -3702,7 +3723,13 @@ fn write_extract_int(
         b.sql.push_str(field);
         b.sql.push('(');
         write_expr(b, &args[0], None)?;
-        b.sql.push(')');
+        // Mode 3 is ISO 8601, as PG's EXTRACT(WEEK).
+        b.sql.push_str(if field == "WEEK" { ", 3)" } else { ")" });
+    } else if field == "WEEK" {
+        // ISO week: the day of year of this week's Thursday, over seven.
+        b.sql.push_str("((CAST(strftime('%j', date(");
+        write_expr(b, &args[0], None)?;
+        b.sql.push_str(", '-3 days', 'weekday 4')) AS INTEGER) - 1) / 7 + 1)");
     } else {
         let token = match field {
             "YEAR" => "%Y",
@@ -3711,7 +3738,6 @@ fn write_extract_int(
             "HOUR" => "%H",
             "MINUTE" => "%M",
             "SECOND" => "%S",
-            "WEEK" => "%W",
             _ => unreachable!("sqlite extract: {field}"),
         };
         b.sql.push_str("CAST(strftime('");
@@ -4126,7 +4152,7 @@ pub(super) fn write_where_with_search(
             let placeholder = b.d.placeholder(b.params.len());
             let mut qualified = String::new();
             if let Some(table) = b.qualify_alias(col) {
-                qualified.push_str(&b.d.quote_ident(table));
+                qualified.push_str(&b.d.quote_ident(&table));
                 qualified.push('.');
             }
             qualified.push_str(&b.d.quote_ident(col));
@@ -4942,7 +4968,7 @@ fn simple_op(
 fn render_qualified_col(b: &Sql<'_>, column: &str) -> String {
     let mut s = String::new();
     if let Some(table) = b.qualify_alias(column) {
-        s.push_str(&b.d.quote_ident(table));
+        s.push_str(&b.d.quote_ident(&table));
         s.push('.');
     }
     s.push_str(&b.d.quote_ident(column));

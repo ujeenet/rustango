@@ -2025,7 +2025,7 @@ pub(crate) async fn create_submit(
     // An `audit(...)` model's entry commits with the INSERT, as on edit (#2101).
     let emit = crate::audit::DiffEmit::for_model(model);
     let refused = |msg: String| Html(render_form(&state, model, Some(&form), false, Some(&msg)));
-    let mut tx = match crate::sql::write_transaction_pool(&state.pool).await {
+    let mut tx = match crate::sql::write_transaction(&state.pool).await {
         Ok(tx) => tx,
         Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
     };
@@ -2396,7 +2396,7 @@ pub(crate) async fn update_submit(
     // Parent and inline writes share one transaction: a refused inline
     // row rolls the parent back too (#2339).
     let refused = |msg: String| Html(render_form(&state, model, Some(&form), true, Some(&msg)));
-    let mut tx = match crate::sql::write_transaction_pool(&state.pool).await {
+    let mut tx = match crate::sql::write_transaction(&state.pool).await {
         Ok(tx) => tx,
         Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
     };
@@ -2591,7 +2591,7 @@ pub(crate) async fn delete_submit(
         super::audit::admin_row_snapshot_entry(model, pk_raw.clone(), audit_op, &before_row, None);
     // An `audit(...)` model's entry commits with the write, as on edit (#2390).
     let emit = crate::audit::DiffEmit::for_model(model);
-    let mut tx = crate::sql::write_transaction_pool(&state.pool).await?;
+    let mut tx = crate::sql::write_transaction(&state.pool).await?;
     let written = if let Some(col) = model.soft_delete_column {
         let now = Some(chrono::Utc::now());
         let stamp = crate::soft_delete::__mark_query(model, col, pk_field.column, pk_value, now);
@@ -2869,7 +2869,7 @@ pub(crate) async fn action_submit(
     };
     // An `audit(...)` model's entries commit with the write (#2390).
     let emit = crate::audit::DiffEmit::for_model(model);
-    let mut tx = crate::sql::write_transaction_pool(&state.pool).await?;
+    let mut tx = crate::sql::write_transaction(&state.pool).await?;
     let changed = match builtin.run(&mut tx, model, pk_field, &pk_values).await {
         Ok(changed) => changed,
         Err(e) => {
