@@ -133,8 +133,8 @@ fn sqlite_extract_year_uses_strftime_with_int_cast() {
 }
 
 #[test]
-fn extract_month_day_hour_minute_second_week_all_dialects() {
-    // Spot-check the table maps each field correctly. Walk the 6
+fn extract_month_day_hour_minute_second_all_dialects() {
+    // Spot-check the table maps each field correctly. Walk the 5
     // straight-shot variants in one test so the file stays terse.
     for (builder, pg_field, mysql_fn, sqlite_token) in [
         (extract_month as fn(_) -> Expr, "MONTH", "MONTH", "%m"),
@@ -142,7 +142,6 @@ fn extract_month_day_hour_minute_second_week_all_dialects() {
         (extract_hour, "HOUR", "HOUR", "%H"),
         (extract_minute, "MINUTE", "MINUTE", "%M"),
         (extract_second, "SECOND", "SECOND", "%S"),
-        (extract_week, "WEEK", "WEEK", "%W"),
     ] {
         let q = update_set(builder(F("created_at")));
         assert!(Postgres
@@ -161,6 +160,27 @@ fn extract_month_day_hour_minute_second_week_all_dialects() {
             .sql
             .contains(&format!("strftime('{sqlite_token}'")));
     }
+}
+
+/// The ISO week everywhere: MySQL mode 3, SQLite via the week's Thursday.
+#[test]
+fn extract_week_is_iso_on_every_dialect() {
+    let q = update_set(extract_week(F("created_at")));
+    assert!(Postgres
+        .compile_update(&q)
+        .unwrap()
+        .sql
+        .contains("EXTRACT(WEEK FROM"));
+    assert!(MySql
+        .compile_update(&q)
+        .unwrap()
+        .sql
+        .contains("WEEK(`created_at`, 3)"));
+    let sqlite = Sqlite.compile_update(&q).unwrap().sql;
+    assert!(
+        sqlite.contains("strftime('%j', date(\"created_at\", '-3 days', 'weekday 4'))"),
+        "{sqlite}"
+    );
 }
 
 // ---------- ExtractWeekDay — normalized to 0 = Sunday everywhere ----------

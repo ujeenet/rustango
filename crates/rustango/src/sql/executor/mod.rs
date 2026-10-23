@@ -122,8 +122,7 @@ where
     F: FnMut(Vec<SqlValue>) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
 {
-    let carried = pool.dialect().compile_select(base)?.params.len();
-    let room = pool.dialect().max_bind_params().saturating_sub(carried);
+    let room = bind_room(pool.dialect(), base)?;
     let size = in_chunk_size(base.model.table, keys.len(), room, sliced)?;
     if keys.len() <= size {
         return fetch(keys).await;
@@ -133,6 +132,12 @@ where
         out.extend(fetch(chunk.to_vec()).await?);
     }
     Ok(out)
+}
+
+/// Binds left for an `IN` list beside the ones `base` already carries.
+fn bind_room(dialect: &dyn Dialect, base: &SelectQuery) -> Result<usize, ExecError> {
+    let carried = dialect.compile_select(base)?.params.len();
+    Ok(dialect.max_bind_params().saturating_sub(carried))
 }
 
 /// Keys per `IN` list: the `room` the query's own binds leave. Refused when
@@ -171,7 +176,7 @@ where
     let Some(pk) = target.primary_key() else {
         return Ok(());
     };
-    let col = format!("{alias}__{}", pk.column);
+    let col = crate::core::joins::joined_label(alias, pk.column);
     if sqlx::ValueRef::is_null(&row.try_get_raw(col.as_str())?) {
         return Err(sqlx::Error::ColumnDecode {
             index: col,
@@ -275,7 +280,8 @@ where
     /// whose connection holds the tenant's `search_path`.
     ///
     /// # Errors
-    /// As [`Self::fetch_on`].
+    /// As [`Self::fetch_on`]; [`ExecError::InListUnsplittable`] when `ids`
+    /// exceed one `IN` list, since one executor runs one statement.
     pub async fn in_bulk_on<'c, E, C, K, I, F>(
         self,
         column: C,
@@ -296,9 +302,17 @@ where
         if id_values.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
+        let room = bind_room(executor.dialect(), &self.clone().compile()?)?;
+        if id_values.len() > room {
+            return Err(ExecError::InListUnsplittable {
+                table: T::SCHEMA.table,
+                keys: id_values.len(),
+                max: room,
+            });
+        }
         let rows = self
             .filter_op(
-                C::COLUMN,
+                C::NAME,
                 crate::core::Op::In,
                 crate::core::SqlValue::List(id_values),
             )
@@ -486,67 +500,8 @@ where
         + MaybeSqliteLoadRelated
         + FkPkAccess,
 {
-    let parents: Vec<P> = parent_qs.fetch_on(pool).await?;
-    if parents.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Collect parent PKs as `SqlValue`, so any PK type works
-    // (i64, i32, String, Uuid).
-    let pk_field = P::SCHEMA
-        .primary_key()
-        .ok_or(ExecError::MissingPrimaryKey {
-            table: P::SCHEMA.table,
-        })?;
-    let mut parent_pks: Vec<crate::core::SqlValue> = Vec::with_capacity(parents.len());
-    for parent in &parents {
-        let pk = extract_pk_value(parent);
-        if !matches!(pk, crate::core::SqlValue::Null) {
-            parent_pks.push(pk);
-        }
-    }
-    // Dedupe on the display form so a repeated PK lands once in IN.
-    {
-        let mut seen = std::collections::HashSet::new();
-        parent_pks.retain(|v| seen.insert(v.to_display_string()));
-    }
-    if parent_pks.is_empty() {
-        return Ok(parents.into_iter().map(|p| (p, Vec::new())).collect());
-    }
-
-    // Batch-fetch the children where their FK column points at any
-    // of the parent PKs.
-    let children: Vec<C> = crate::query::QuerySet::<C>::new()
-        .filter_op(
-            child_fk_column,
-            crate::core::Op::In,
-            crate::core::SqlValue::List(parent_pks),
-        )
-        .fetch_on(pool)
-        .await?;
-
-    // Group children by FK PK, keyed on the display form. Integers,
-    // strings and UUIDs all stringify uniquely; PKs are never floats.
-    let mut grouped: std::collections::HashMap<String, Vec<C>> = std::collections::HashMap::new();
-    for child in children {
-        let Some(fk_pk) = child.__rustango_fk_pk_value(child_fk_column) else {
-            continue;
-        };
-        grouped
-            .entry(fk_pk.to_display_string())
-            .or_default()
-            .push(child);
-    }
-
-    // Stitch.
-    let mut out = Vec::with_capacity(parents.len());
-    for parent in parents {
-        let pk = extract_pk_value(&parent).to_display_string();
-        let kids = grouped.remove(&pk).unwrap_or_default();
-        out.push((parent, kids));
-    }
-    let _ = pk_field; // suppress unused-warning when only the PK lookup ran
-    Ok(out)
+    // The pool path batches the `IN` list past the bind cap.
+    fetch_with_prefetch_pool(parent_qs, child_fk_column, &Pool::Postgres(pool.clone())).await
 }
 
 /// Read a model's PK as a [`crate::core::SqlValue`] through
@@ -933,8 +888,7 @@ where
 mod decode;
 
 mod tx;
-pub(crate) use tx::write_transaction_pool;
-pub use tx::{transaction_pool, PoolTx};
+pub use tx::{transaction_pool, write_transaction, PoolTx};
 
 // One executor for every `_on` method.
 mod on;
@@ -1864,7 +1818,7 @@ pub async fn truncate(
     pool: &Pool,
     model: &'static crate::core::ModelSchema,
 ) -> Result<u64, ExecError> {
-    let mut tx = tx::write_transaction_pool(pool).await?;
+    let mut tx = tx::write_transaction(pool).await?;
     let sql = truncate_sql(tx.dialect(), model.table);
     let affected = truncate_tx(&mut tx, model.table, &sql).await?;
     tx.commit().await?;
@@ -2153,7 +2107,7 @@ pub(crate) use values::fetch_values_flat_on;
 #[allow(unused_imports)]
 pub use values::{
     fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, try_get_flat_my,
-    FlatScalar, MaybeMyScalar, MaybePgScalar, MaybeSqliteScalar,
+    try_get_flat_sqlite, FlatScalar, MaybeMyScalar, MaybePgScalar, MaybeSqliteScalar,
 };
 
 /// Raw SQL on any backend: runs it with bound `SqlValue`
@@ -2425,7 +2379,7 @@ impl<T: Model + Send> ExistsPool<T> for QuerySet<T> {
                 field: "primary_key".into(),
             }));
         };
-        self.filter_op(pk_field.column, crate::core::Op::Eq, pk_value.into())
+        self.filter_op(pk_field.name, crate::core::Op::Eq, pk_value.into())
             .exists(pool)
             .await
     }
@@ -2933,7 +2887,7 @@ where
         F: Fn(&T) -> K,
     {
         // `column` only carries the `Column<Model = T>` bound; the
-        // filter below uses its `COLUMN` const.
+        // filter below uses its field `NAME`.
         let _ = column;
         let id_values: Vec<crate::core::SqlValue> = ids.into_iter().map(|v| v.into()).collect();
         if id_values.is_empty() {
@@ -2942,7 +2896,7 @@ where
         let rows = fetch_in_chunks(pool, &self, id_values, |keys| {
             self.clone()
                 .filter_op(
-                    C::COLUMN,
+                    C::NAME,
                     crate::core::Op::In,
                     crate::core::SqlValue::List(keys),
                 )
@@ -2969,9 +2923,9 @@ fn ensure_pk_ordering<T: Model>(
     reverse: bool,
 ) -> crate::query::QuerySet<T> {
     if !qs.has_order_by() {
-        let pk = T::SCHEMA.primary_key().map(|f| f.column);
-        if let Some(pk_col) = pk {
-            return qs.replace_order_by(&[(pk_col, reverse)]);
+        let pk = T::SCHEMA.primary_key().map(|f| f.name);
+        if let Some(pk_name) = pk {
+            return qs.replace_order_by(&[(pk_name, reverse)]);
         }
         // No PK: leave the order empty and take whatever row the
         // dialect returns first.

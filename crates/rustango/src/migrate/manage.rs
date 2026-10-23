@@ -1195,6 +1195,26 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
         }
     }
 
+    // A re-diff loses these: data and callbacks vanish, a rename turns into drop + add.
+    for m in &pending {
+        if let Some((i, kind)) = m.forward.iter().enumerate().find_map(|(i, op)| {
+            let kind = match op {
+                Operation::Data(_) => "data op",
+                Operation::Callback(_) => "callback",
+                Operation::Schema(super::SchemaChange::RenameTable { .. }) => "RenameTable",
+                Operation::Schema(super::SchemaChange::RenameColumn { .. }) => "RenameColumn",
+                Operation::Schema(_) => return None,
+            };
+            Some((i, kind))
+        }) {
+            return Err(MigrateError::Validation(format!(
+                "migrate --squash: refused — `{}` forward[{i}] is a {kind}, which a fresh diff \
+                 would lose. Fold the pending files by hand instead.",
+                m.name,
+            )));
+        }
+    }
+
     writeln!(
         w,
         "squashing {} pending migration(s) into a fresh diff:",
@@ -1989,6 +2009,30 @@ async fn collation_audit(pool: &Pool, audit: &mut DeployAuditFindings) {
     }
 }
 
+/// Warn when named time zones convert to NULL, as `trunc_with_tz` then does.
+async fn time_zone_audit(pool: &Pool, audit: &mut DeployAuditFindings) {
+    let Some(sql) = pool.dialect().named_time_zone_sql() else {
+        return;
+    };
+    match crate::sql::raw_query_pool::<(Option<String>,)>(sql, Vec::new(), pool).await {
+        Ok(rows) => {
+            let converted = rows.first().and_then(|(c,)| c.as_deref());
+            audit.warnings.extend(time_zone_warning(converted));
+        }
+        Err(e) => audit
+            .warnings
+            .push(format!("could not check named time zones: {e}")),
+    }
+}
+
+fn time_zone_warning(converted: Option<&str>) -> Option<String> {
+    converted.is_none().then(|| {
+        "the database has no time zone tables: `trunc_with_tz` with a named zone returns \
+         NULL — load them with `mysql_tzinfo_to_sql`, or pass `±HH:MM` offsets"
+            .to_owned()
+    })
+}
+
 fn collation_warning(collation: &str) -> Option<String> {
     const FIX: &str = "create the database with `COLLATE utf8mb4_0900_as_cs` \
                        (see the MySQL section of docs/getting-started.md)";
@@ -2101,6 +2145,7 @@ pub(crate) async fn check_cmd_with<W: Write>(
         #[cfg(feature = "cache")]
         login_store_audit(crate::account_lockout::shared(), &mut audit);
         collation_audit(pool, &mut audit).await;
+        time_zone_audit(pool, &mut audit).await;
         #[cfg(feature = "admin-sso")]
         sso_link_audit(pool, &mut audit).await;
         let extra = extra.await;
@@ -5403,7 +5448,7 @@ async fn delete_all_in_tx(
         let why = "they reference each other through NOT NULL foreign keys; no delete order exists";
         return Err((tables, why.to_owned()));
     }
-    let mut tx = crate::sql::write_transaction_pool(pool)
+    let mut tx = crate::sql::write_transaction(pool)
         .await
         .map_err(|e| ("BEGIN".to_owned(), e.to_string()))?;
     // SQLite: FK checks wait for COMMIT, for this transaction only.
@@ -8313,6 +8358,64 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await;
         let out = out.unwrap();
         assert!(!out.contains("0001_a"), "{out}");
+    }
+
+    /// `--squash` refuses pending files whose hand-written ops a re-diff
+    /// would lose, and deletes nothing.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn squash_refuses_hand_written_ops() {
+        use super::super::{CallbackOp, SchemaChange};
+        let hand = [
+            Operation::Data(DataOp {
+                sql: "UPDATE t SET x = 1".into(),
+                reverse_sql: None,
+                reversible: false,
+            }),
+            Operation::Callback(CallbackOp {
+                name: "fill".into(),
+                reverse_name: None,
+            }),
+            Operation::Schema(SchemaChange::RenameTable {
+                old_name: "sq_a".into(),
+                new_name: "sq_b".into(),
+            }),
+            Operation::Schema(SchemaChange::RenameColumn {
+                table: "sq_a".into(),
+                old_column: "x".into(),
+                new_column: "y".into(),
+            }),
+        ];
+        for op in hand {
+            let pool = Pool::connect("sqlite::memory:").await.unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("migrations");
+            std::fs::create_dir_all(&dir).unwrap();
+            file::write(
+                &dir.join("0001_a.json"),
+                &create_mig("0001_a", None, "sq_a"),
+            )
+            .unwrap();
+            let mut second = create_mig("0002_b", Some("0001_a"), "sq_a");
+            second.atomic = false;
+            second.forward = vec![op.clone()];
+            file::write(&dir.join("0002_b.json"), &second).unwrap();
+            let err = manage_out(&pool, &dir, &["migrate", "--squash"])
+                .await
+                .expect_err("a re-diff would lose the op");
+            assert!(err.to_string().contains("0002_b"), "{op:?}: {err}");
+            assert!(!err.to_string().contains("UPDATE"), "the SQL leaked: {err}");
+            assert!(
+                dir.join("0002_b.json").exists(),
+                "{op:?}: the file was deleted"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_time_zone_tables_warn() {
+        assert!(time_zone_warning(None).is_some());
+        assert!(time_zone_warning(Some("2000-01-01 00:00:00")).is_none());
     }
 
     #[test]

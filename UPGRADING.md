@@ -150,6 +150,97 @@ untouched.
 
 ## Unreleased
 
+## 0.60.12
+
+### `makemigrations --merge` refuses conflicts
+
+A merge where both branches changed one object differently now fails and lists the conflicts; reconcile the branch files, then merge again.
+
+### `migrate --squash` refuses hand-written ops
+
+A pending file with a data op, a callback or a rename now stops the squash; fold such files by hand.
+
+### `migrate <target>` applies earlier pending files
+
+A pending file sorting before the newest applied one (a merged branch) now applies when it is at or before the target; it used to be skipped.
+`migrate <target>` orders by file name, so going back to a target also unapplies sibling-branch files that sort after it.
+
+### `ForeignKey::get` follows `on`, and join aliases must be unique
+
+With `#[rustango(on = "num")]`, `get_on` / `get_pool` load the parent whose `num` equals the key (not its PK) when every FK to that model uses the same `on`. A `.join()` reusing a relation lookup's or `select_related` alias now fails at compile with `QueryError::DuplicateJoinAlias`; rename the alias. A `.join()` to the same table on the same columns as the lookup's join is still reused.
+
+### `OAuthError::BadStatus` body is the error code
+
+`body` now holds only the provider's OAuth `error` code (e.g. `invalid_grant`), or is empty. Code that parsed the full body should match the code instead.
+
+### `__week` on MySQL and SQLite returns the ISO week
+
+It used to be MySQL mode 0 (Sunday start, 0–53) and SQLite `%W`. 2023-01-01 now gives 52 on every backend; adjust stored week numbers or filters written for the old values.
+
+### `check --deploy` checks MySQL time zone tables
+
+A new warning appears when they are not loaded; load them with `mysql_tzinfo_to_sql` if you use `trunc_with_tz` with zone names.
+
+### SQLite `select_for_update` needs `write_transaction`
+
+A `transaction_pool` transaction on SQLite takes no lock when it reads, so two workers can claim one row and the second UPDATE fails with `SQLITE_BUSY`. Open it with `rustango::sql::write_transaction(&pool)`; on PG and MySQL it is the same as `transaction_pool`.
+
+### Upserts with no update columns fail before the database
+
+On PostgreSQL and SQLite they return `ExecError::Sql(SqlError::EmptyUpdateSet)`, as MySQL did, instead of a driver syntax error. Use `insert_or_ignore` for "insert, skip conflicts".
+
+### MCP audit hides more arguments
+
+Tool-call audit rows now redact any argument whose key contains `key`, `session`, `cookie`, `jwt`, `bearer`, `credential(s)`, `passphrase`, `pwd` or `pin` as a word (for example `cache_key`).
+
+### Admin returns 503 when it cannot read the user
+
+The bare admin's login and session gate now answer 503 on a database error (for example before the system migration ran) instead of failing open. Run `migrate` before serving.
+
+### Trailing-dot hosts
+
+A `Host` ending in `.` now matches the same tenant and `allowed_hosts` entries as the host without it; an entry's own trailing dot is ignored.
+
+### Migrate lock: own connection, and a lock file on SQLite
+
+The PostgreSQL/MySQL migrate lock now opens one extra connection outside the pool. File-backed SQLite creates `<db>-migrate.lock` beside the database and serialises concurrent runs on it; where that file cannot be created it warns and runs unlocked.
+
+### Same CHECK name on two tables warns
+
+`makemigrations` warns when two tables share a CHECK name: only one of them is migrated, and MySQL refuses the second. Rename one.
+
+### Derived index names over 63 bytes change
+
+A derived index name longer than 63 bytes now ends in a hash (field-level ones were not capped), so the next `makemigrations` drops and recreates those indexes once.
+
+### `ForeignKey<T>` to a renamed PK column
+
+The FK now references `T`'s PK column, not `id`. SQLite accepted the old target, so `makemigrations` there shows a changed FK.
+
+### `on_delete = "set_null"` needs an `Option` column
+
+A `fk = "…"` / `o2o = "…"` field with `set_null` must be `Option<…>`, as `ForeignKey<T>` already had to be. Make it optional (and migrate) or pick another action.
+
+### M2M `set` reads the source table
+
+`set` on an M2M or generic M2M manager now locks the source row, so a registered source model's table must exist; a test that created only the junction table needs it too. A hand-built `M2MManager` whose junction no registered model declares is not locked and logs a warning.
+
+### `require_auth` sees request extensions
+
+A resolver chain that reads extensions (`PortResolver`) now resolves under `require_auth` instead of answering 404. A request whose `TenantSlug` extension names another tenant than the resolved one gets 403.
+
+### Inactive users list no permissions
+
+`user_permissions_pool` / `user_permissions` return an empty list for an inactive user, and the PostgreSQL `has_any_perm` / `has_all_perms` return `false`. They now make one query per codename.
+
+### Admin reads `Extension<AdminSession>` as the signed-in user
+
+If your own middleware inserts `AdminSession` in front of the admin, the admin's superuser-only field locks now apply to that session. `HmacAuthLayer::sign_port` does not bind a tenant; use `bind_tenants`.
+
+### ViewSet writes apply superuser-only field locks
+
+ViewSets now apply the admin's superuser-only field locks on create and update; without an authenticated superuser those fields are not written. Write them in your own handler if an anonymous or non-tenancy ViewSet needs them.
+
 ## 0.60.11
 
 ### `csrf_trusted_origins` takes effect

@@ -128,7 +128,7 @@ async fn deactivate(registry: &crate::sql::Pool, id: i64) -> Result<u64, Tenancy
         .set("active", false)
         .compile()
         .map_err(crate::sql::ExecError::from)?;
-    let mut tx = crate::sql::write_transaction_pool(registry).await?;
+    let mut tx = crate::sql::write_transaction(registry).await?;
     let updated = crate::sql::update_tx(&mut tx, &update).await?;
     if updated > 0 {
         let forget = super::provision_store::forget_unsucceeded_runs(id)?;

@@ -1029,6 +1029,9 @@ jobs:
             --test atomic_savepoints_tri \
             --test orm_bounded_dml_tri \
             --test orm_relations_tri \
+            --test orm_relation_edges_tri \
+            --test orm_query_edges_tri \
+            --test orm_claim_lock_tri \
             --test orm_core_counts_tri \
             --test pool_conn_tri \
             --test manage_data_verbs_tri \
@@ -1334,6 +1337,9 @@ jobs:
       - run: cargo test -p rustango --features mysql,admin,testkit --test admin_audit_writes_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_bounded_dml_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_relations_tri
+      - run: cargo test -p rustango --features mysql,testkit --test orm_relation_edges_tri
+      - run: cargo test -p rustango --features mysql,testkit --test orm_query_edges_tri
+      - run: cargo test -p rustango --features mysql,testkit --test orm_claim_lock_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_core_counts_tri
       - run: cargo test -p rustango --features mysql,testkit --test pool_conn_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_dialect_tri
@@ -1359,6 +1365,9 @@ jobs:
       - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
       - run: cargo test -p rustango --features mysql,admin,tenancy,totp,passkey,testkit --test tenant_admin_tables_tri
       - run: cargo test -p rustango --features mysql,tenancy,passwords,auth_flows,testkit --test password_reset_links_tri
+      - run: cargo test -p rustango --features mysql,admin,testkit --test admin_authz_edges_tri
+      - run: cargo test -p rustango --features mysql,tenancy,testkit --test permissions_inactive_tri
+      - run: cargo test -p rustango --features mysql,admin,tenancy,testkit --test viewset_superuser_fields_tri
       - run: cargo test -p rustango --features mysql,admin --test login_throttle_mysql_live
       - run: cargo test -p rustango --features mysql,admin,template_views,testkit --test view_global_scopes_tri
       - run: cargo test -p rustango --features mysql,template_views,testkit --test template_views_typed_binds_tri
@@ -1379,6 +1388,8 @@ jobs:
       # #1877–#1881 — makemigrations → migrate; MySQL auto-commits DDL, so a
       # misordered drop cannot roll back.
       - run: cargo test -p rustango --features mysql,testkit --test migrate_autodetect_tri
+      # Runner lock outside the pool, pre-rendered steps, long index names, referenced key widening.
+      - run: cargo test -p rustango --features mysql,testkit --test migrate_runner_tri
       # The media tag surface had no MySQL coverage at all — `media_live`
       # and `media_collections_tags_live` are PostgreSQL-typed and
       # `media_sqlite_live` is SQLite, so `tag`'s `INSERT IGNORE` branch

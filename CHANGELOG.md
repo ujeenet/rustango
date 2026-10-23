@@ -4,6 +4,142 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.60.12] — 2026-10-23
+
+**Breaking:** `makemigrations --merge` refuses conflicting branches; `migrate --squash` refuses data ops, callbacks and renames; `migrate <target>` applies earlier-sorting pending files and unapplies later-sorting siblings; upserts with no update columns return `SqlError::EmptyUpdateSet` on PostgreSQL and SQLite; derived index names over 63 bytes get a hash suffix, so their indexes are recreated once; the migrate lock opens its own connection and SQLite locks a file; `ForeignKey<T>` references `T`'s PK column; `set_null` on a non-`Option` `fk` / `o2o` field is a compile error; M2M `set` locks the source row; admin login and the session gate return 503 on a database error; MCP audit redacts more argument keys; a trailing-dot `Host` matches the host without it; ViewSet writes skip superuser-only fields unless a superuser is signed in; inactive users hold no permissions; `require_auth` answers 403 when an outer layer bound another tenant; `__week` is the ISO week on MySQL and SQLite; a `.join()` alias that differs from the one a relation lookup needs returns `QueryError::DuplicateJoinAlias`; `OAuthError::BadStatus` keeps only the provider's error code; FK `get` follows a shared `on` column. See UPGRADING.
+
+### Fixed — FK `get` under `on`, join alias clashes, long chains, `in_bulk_on`
+
+`ForeignKey::get_on` / `get_pool` match the `on` column; a `.join()` alias a relation lookup needs returns `QueryError::DuplicateJoinAlias`; long `select_related` chain aliases no longer collide on PostgreSQL; `in_bulk_on` past one `IN` list returns `InListUnsplittable`.
+
+### Fixed — OAuth2 error bodies; prefetch by a renamed column
+
+`OAuthError::BadStatus` and discovery errors keep only the provider's `error` code, not the body; `prefetch_soft` and `prefetch_reverse_generic_for` work when the column differs from the field name.
+
+### Fixed — `__week` is the ISO week everywhere; `f32` JSON keeps its digits
+
+`__week` / `extract_week` use `WEEK(x, 3)` on MySQL and an ISO formula on SQLite, matching PostgreSQL; JSON rows, admin forms and audit changes show `0.1_f32` as `0.1`.
+
+### Added — `check --deploy` warns when MySQL has no time zone tables
+
+There `trunc_with_tz` with a named zone returns NULL.
+
+### Added — `sql::write_transaction`
+
+A transaction that takes SQLite's write lock at `BEGIN`, for `select_for_update` claims there; the docs no longer say a SQLite transaction locks the database.
+
+### Fixed — `makemigrations --merge` refuses conflicting branches
+
+When both branches change the same table, column, FK, index or check differently (or one drops what the other changed), it names them instead of picking a winner.
+
+### Fixed — `migrate --squash` no longer drops hand-written ops
+
+It refuses pending files with RunSQL, callbacks or renames, which a fresh diff would lose or turn into drop + add.
+
+### Fixed — unapplying drops that follow a rename in the same migration
+
+The rollback finds the dropped column, index or FK under its old name and recreates it before the rename is undone.
+
+### Fixed — an unregistered migration callback fails before the migration's first op
+
+Apply and unapply look up every callback first, so a missing one no longer leaves a half-run, still-recorded migration.
+
+### Fixed — `migrate <target>` applies pending files that sort before the newest applied one
+
+The plan comes from the ledger: newer applied files unapply, then every pending file up to the target applies.
+
+### Fixed — SQLite insert reads back a TEXT `Auto<Uuid>` key
+
+`insert_pool` on a model whose `Auto<Uuid>` PK a column default writes as text now decodes it; it failed with `ParseByteLength`.
+
+### Fixed — PK lookups on a PK with its own `column`
+
+`ForeignKey::get` / `get_on` / `get_pool`, `contains_pk`, `in_bulk` / `in_bulk_on`, `contenttypes::prefetch_generic` and the PK order of `first` / `last` filter by the field name; with `#[rustango(primary_key, column = "…")]` they failed with `UnknownField`.
+
+### Fixed — MySQL / SQLite `distinct_on` keeps joins and relation order
+
+The window fallback now returns `select_related` columns and sorts by each ORDER BY key the inner query exposes, so `order_by("author__name")` and an unprojected sort column work as on PostgreSQL.
+
+### Fixed — an upsert with no update columns is refused on every backend
+
+A `DoUpdate` conflict with empty `update_columns` (e.g. `bulk_upsert_pool(rows, &["code"], &[], pool)`) returns `SqlError::EmptyUpdateSet` on PostgreSQL and SQLite too; it sent `DO UPDATE SET` with nothing after it.
+
+### Fixed — a nested empty `WhereExpr::And` is TRUE
+
+`where_raw(WhereExpr::And(vec![]))` next to other filters, or inside an `Or` / `Not`, writes `1 = 1`; it wrote `()`, a syntax error on every backend.
+
+### Fixed — `Q!` on a keyword field
+
+`Q!(Post.r#type = …)` and `Q!(Post.type__in = …)` expand to `Post::r#type`; the first panicked in the macro, the second wrote `Post::type`.
+
+### Fixed — MCP audit redacts more secret-looking arguments
+
+Keys naming a JWT, bearer, cookie, session, credential, passphrase, PIN or any `*_key` are now scrubbed from tool-call audit rows.
+
+### Fixed — fewer secrets in logs
+
+CSP reports log URLs without query or fragment, `EnvSecretsResolver` errors no longer echo the reference, and an undecodable OAuth2 response no longer quotes its body.
+
+### Fixed — admin login and session gate fail closed on a database error
+
+A failed user lookup is a 503, not "Invalid credentials", and is not counted toward the lockout; the session gate returns 503 instead of trusting the cookie.
+
+### Fixed — a trailing-dot `Host` resolves its tenant
+
+`acme.app.test.` is the same host as `acme.app.test` for tenant resolution, apex detection (a configured apex too), `AllowedHostsLayer` and `url_has_allowed_host_and_scheme`.
+
+### Fixed — member SSO login with a bad IdP authorize URL
+
+A discovery URL a header cannot carry is a 500, not a panic.
+
+### Fixed — the migrate lock works with one connection and on SQLite files
+
+The lock holds its own connection outside the pool, and file-backed SQLite now locks a `-migrate.lock` file beside the database (unlocked, with a warning, where it cannot be created).
+
+### Fixed — a refused downgrade runs nothing
+
+MySQL and non-atomic runs render every step before the first one runs; makemigrations warns when a dropped NOT NULL column without a default makes the migration irreversible.
+
+### Fixed — MySQL widens a primary key other tables reference
+
+The referencing FKs are dropped before the `MODIFY` and come back at the end; makemigrations warns about one CHECK name on two tables.
+
+### Fixed — long derived index names stay under 63 bytes and distinct
+
+A field-level index name is capped too, and a capped name ends in a hash of the full one.
+
+### Fixed — `ForeignKey<T>` references `T`'s PK column
+
+Without `on`, the FK targeted `id` even when `T`'s PK sets `column = "…"`, so PG and MySQL refused the table.
+
+### Fixed — `on_delete = "set_null"` on a NOT NULL `fk = "…"` column is a compile error
+
+Only `ForeignKey<T>` was checked; a plain `fk = "…"` / `o2o = "…"` column passed, then every parent delete failed.
+
+### Fixed — concurrent M2M `set` keeps one of the sets
+
+`set` locks the source row first (SQLite takes its write lock at `BEGIN`). Two concurrent sets kept both sets' rows on PG and failed with "database is deadlocked" on SQLite.
+
+### Fixed — `select_related` keeps the FK key; long join labels; PG prefetch batches
+
+A loaded FK with `on = <unique column>` keeps that column's value, not the parent's PK. Joined-column labels past 63 bytes are hashed, so PG no longer truncates them (a fetch error, or a blank admin cell); dict and JSON rows still use the full key. The PG-typed `fetch_with_prefetch` batches its `IN` list past the bind cap.
+
+### Fixed — `require_auth` resolves the tenant from the whole request
+
+Resolvers now see the request's extensions, so `PortResolver` works under `require_auth`, and a tenant an outer layer already bound must match (403 otherwise).
+
+### Fixed — an inactive user holds no permission
+
+`user_permissions_pool`, `user_permissions`, `has_any_perm` and `has_all_perms` now ignore an inactive user's role and direct grants, as `has_perm_pool` does.
+
+### Fixed — admin superuser-only fields follow the request's session
+
+The admin's field locks now follow a session set only as `Extension<AdminSession>`, and an inline add fills a locked flag the way the create form does.
+
+### Fixed — ViewSets keep the admin's superuser-only fields locked
+
+ViewSets now apply the admin's superuser-only field locks on create and update; without an authenticated superuser those fields are not written.
+
 ## [0.60.11] — 2026-10-22
 
 **Breaking:** new MySQL `citext` columns use an accent-sensitive collation; the operator console drops unsigned `?error=` / `?notice=` / `?ok=` messages; a panicking `on_commit` callback no longer escapes `atomic`; `csrf_trusted_origins` now applies under `Cli::with_csrf`; `RequestIdLayer` no longer echoes an untrusted client's `X-Request-Id`; a SQLite UUID key stored both as BLOB and TEXT is now a 404 in ViewSets and template views. See UPGRADING.

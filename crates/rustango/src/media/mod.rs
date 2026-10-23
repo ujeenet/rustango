@@ -943,7 +943,7 @@ impl MediaManager {
             deleted_at: None,
         };
         // IMMEDIATE on SQLite: this tx reads before it writes (#2180).
-        let mut tx = crate::sql::write_transaction_pool(&self.pool)
+        let mut tx = crate::sql::write_transaction(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
         // Locked until commit, so a concurrent `delete_collection` either
@@ -1104,7 +1104,7 @@ impl MediaManager {
         // orphaned, and the old `collection_id` recorded nowhere.
         // Both are database-only, so a transaction closes it.
         // IMMEDIATE on SQLite: the walk reads before the writes (#2180).
-        let mut tx = crate::sql::write_transaction_pool(&self.pool)
+        let mut tx = crate::sql::write_transaction(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
         // One bind spare for `deleted_at`; a wide subtree is many `IN` lists.
@@ -1149,7 +1149,7 @@ impl MediaManager {
         collection_id: Option<i64>,
     ) -> Result<(), MediaError> {
         // IMMEDIATE on SQLite: the collection check reads before the update.
-        let mut tx = crate::sql::write_transaction_pool(&self.pool)
+        let mut tx = crate::sql::write_transaction(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
         if let Some(c) = collection_id {
@@ -1670,7 +1670,7 @@ impl MediaManager {
     async fn insert_row(&self, r: InsertRow) -> Result<Media, MediaError> {
         use crate::sql::FetcherTx as _;
         // IMMEDIATE on SQLite: the collection check reads before the insert.
-        let mut tx = crate::sql::write_transaction_pool(&self.pool)
+        let mut tx = crate::sql::write_transaction(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
         if let Some(c) = r.collection_id {

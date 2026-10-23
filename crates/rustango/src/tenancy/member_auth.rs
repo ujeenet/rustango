@@ -1076,13 +1076,19 @@ fn safe_landing(next: Option<&str>, landing: &str) -> String {
 }
 
 /// A `303 See Other` redirect carrying a single `Set-Cookie`.
+/// IdP discovery can yield bytes a header rejects: a 500, not a panic.
 fn redirect_with_cookie(location: &str, cookie: &str) -> Response {
-    Response::builder()
-        .status(StatusCode::SEE_OTHER)
-        .header(header::LOCATION, location)
-        .header(header::SET_COOKIE, cookie)
-        .body(Body::empty())
-        .expect("valid redirect response")
+    let (Ok(location), Ok(cookie)) = (
+        header::HeaderValue::from_str(location),
+        header::HeaderValue::from_str(cookie),
+    ) else {
+        tracing::error!(target: "rustango::error", "member sso: redirect URL or cookie is not a valid header value");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let mut resp = StatusCode::SEE_OTHER.into_response();
+    resp.headers_mut().insert(header::LOCATION, location);
+    resp.headers_mut().insert(header::SET_COOKIE, cookie);
+    resp
 }
 
 /// Append a flow-cookie-clearing `Set-Cookie` to a response.
@@ -1393,5 +1399,14 @@ mod tests {
         // leaves as protocol-relative `//evil.com/x` (#1526).
         assert_eq!(safe_landing(Some("/\\evil.com/x"), "/"), "/");
         assert_eq!(safe_landing(Some("/%5Cevil.com/x"), "/"), "/");
+    }
+
+    #[test]
+    fn redirect_with_cookie_rejects_bad_header_bytes_without_panicking() {
+        let resp = redirect_with_cookie("https://idp.test/auth\n?x=1", "f=1; Path=/");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(resp.headers().get(header::LOCATION).is_none());
+        let ok = redirect_with_cookie("https://idp.test/auth", "f=1; Path=/");
+        assert_eq!(ok.status(), StatusCode::SEE_OTHER);
     }
 }

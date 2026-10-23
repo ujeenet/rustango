@@ -66,6 +66,8 @@ async fn drop_table(pool: &PgPool, table: &str) {
 }
 
 async fn delete_ledger_entry(pool: &PgPool, name: &str) {
+    // A fresh database has no ledger until the first migrate.
+    migrate::ensure_ledger(pool).await.unwrap();
     sqlx::query("DELETE FROM __rustango_migrations__ WHERE name = $1")
         .bind(name)
         .execute(pool)

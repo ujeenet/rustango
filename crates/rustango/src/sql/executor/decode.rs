@@ -66,7 +66,8 @@ struct RowPlan {
 impl RowPlan {
     /// Only the leading `typed` columns count: an alias that shares a
     /// column name (`SUM(x) AS flag`) is not that column (#2296).
-    fn new<R: DecodeRow>(first: &R, typed: &[TypedCol], width: usize) -> Self {
+    /// A column written under a shortened label keeps its full name.
+    fn new<R: DecodeRow>(first: &R, typed: &[TypedCol], width: usize, use_types: bool) -> Self {
         use sqlx::Column as _;
         let (names, cells) = first
             .columns()
@@ -74,11 +75,12 @@ impl RowPlan {
             .take(width)
             .enumerate()
             .map(|(i, c)| {
-                let declared = typed
-                    .get(i)
-                    .filter(|(name, _)| name == c.name())
-                    .and_then(|(_, ty)| *ty);
-                (c.name().to_owned(), first.plan_cell(i, declared))
+                let own = typed.get(i).filter(|(name, _)| {
+                    name == c.name() || crate::core::joins::sql_label(name) == c.name()
+                });
+                let declared = own.and_then(|(_, ty)| *ty).filter(|_| use_types);
+                let name = own.map_or_else(|| c.name().to_owned(), |(n, _)| n.to_string());
+                (name, first.plan_cell(i, declared))
             })
             .unzip();
         Self { names, cells }
@@ -120,10 +122,7 @@ impl<F: Fn() -> Vec<TypedCol>> RowReader<F> {
 
     fn plan<R: DecodeRow>(&mut self, row: &R, use_typed: bool) -> &RowPlan {
         let Self { typed, width, plan } = self;
-        plan.get_or_insert_with(|| {
-            let typed = if use_typed { typed() } else { Vec::new() };
-            RowPlan::new(row, &typed, *width)
-        })
+        plan.get_or_insert_with(|| RowPlan::new(row, &typed(), *width, use_typed))
     }
 
     /// The row as its first `width` cells, in column order.

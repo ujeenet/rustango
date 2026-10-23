@@ -191,13 +191,29 @@ impl<'d> Sql<'d> {
 
     /// The table or alias `column` is written under. `Base` only names
     /// the base model's own columns, so a joined-only one stays bare.
-    fn qualify_alias(&self, column: &str) -> Option<&'static str> {
+    fn qualify_alias(&self, column: &str) -> Option<std::borrow::Cow<'static, str>> {
         match self.qualifier()? {
-            Qualifier::Join(a) => Some(a),
+            Qualifier::Join(a) => Some(self.alias_ref(a)),
             Qualifier::Base(t) => self
                 .scope_model()
                 .map_or(true, |m| m.field_by_column(column).is_some())
-                .then_some(t),
+                .then_some(t.into()),
+        }
+    }
+
+    /// A model join's alias as written: PG cuts names past 63 bytes, so
+    /// two long chain aliases would collide.
+    fn write_alias(&mut self, alias: &str) {
+        self.write_ident(&crate::core::joins::sql_label(alias));
+    }
+
+    /// `alias` in an `<alias>.<col>` reference: shortened like
+    /// [`Self::write_alias`] when it names a model join.
+    fn alias_ref<'a>(&self, alias: &'a str) -> std::borrow::Cow<'a, str> {
+        if self.join_types.iter().any(|(_, a, _)| *a == alias) {
+            crate::core::joins::sql_label(alias)
+        } else {
+            alias.into()
         }
     }
 
@@ -550,13 +566,13 @@ fn write_distinct_inner_col(b: &mut Sql<'_>, table: &str, col: &str, qualify: bo
 ///
 /// Layout:
 /// ```text
-/// SELECT <orig_cols> FROM (
-///   SELECT <orig_cols>,
+/// SELECT <orig_cols>, <join_cols> FROM (
+///   SELECT <orig_cols>, <join_cols>, <order> AS __rustango_order<i>,
 ///          ROW_NUMBER() OVER (PARTITION BY <cols> ORDER BY <order>) AS __rn
 ///   FROM <table> [JOIN ...] WHERE <where>
 /// ) sub
 /// WHERE __rn = 1
-/// [ORDER BY <order>] [LIMIT N] [OFFSET M]
+/// [ORDER BY __rustango_order<i>] [LIMIT N] [OFFSET M]
 /// ```
 fn write_distinct_on_via_window(
     b: &mut Sql<'_>,
@@ -589,6 +605,12 @@ fn write_distinct_on_via_window(
             b.write_ident(field.column);
         }
     }
+    for join in &query.joins {
+        for col in &join.project {
+            b.sql.push_str(", ");
+            b.write_ident(&crate::core::joins::joined_label(join.alias, col));
+        }
+    }
     // Counted over the survivors, which `sub` exposes.
     if let Some(child) = b.child_count.take() {
         write_child_count(b, "sub", child);
@@ -613,6 +635,25 @@ fn write_distinct_on_via_window(
             }
             inner_first = false;
             write_distinct_inner_col(b, scope.name, field.column, qualify);
+        }
+    }
+    for join in &query.joins {
+        for col in &join.project {
+            b.sql.push_str(", ");
+            b.write_alias(join.alias);
+            b.sql.push('.');
+            b.write_ident(col);
+            b.sql.push_str(" AS ");
+            b.write_ident(&crate::core::joins::joined_label(join.alias, col));
+        }
+    }
+    // Each sort key, so the outer ORDER BY can read relation and unprojected ones.
+    for (i, item) in query.order_by.iter().enumerate() {
+        if !matches!(item, crate::core::OrderItem::Random) {
+            b.sql.push_str(", ");
+            write_order_target(b, item)?;
+            b.sql.push_str(" AS ");
+            b.write_ident(&distinct_on_order_label(i));
         }
     }
     // ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) AS __rn
@@ -667,13 +708,29 @@ fn write_distinct_on_via_window(
 
     b.sql.push_str(") sub WHERE sub.__rn = 1");
 
-    // Outer ORDER BY / LIMIT / OFFSET — applied to the survivors, which
-    // `sub` exposes under bare names.
+    // Outer ORDER BY / LIMIT / OFFSET — applied to the survivors, by the
+    // sort keys `sub` exposes.
     b.with_qualifier(None, |b| {
-        write_order_limit_offset(b, &query.order_by, query.limit, query.offset)
+        write_order_limit_offset_with(
+            b,
+            &query.order_by,
+            query.limit,
+            query.offset,
+            |b, i, item| {
+                if matches!(item, crate::core::OrderItem::Random) {
+                    return write_order_target(b, item);
+                }
+                b.write_ident(&distinct_on_order_label(i));
+                Ok(())
+            },
+        )
     })?;
 
     Ok(())
+}
+
+fn distinct_on_order_label(i: usize) -> String {
+    format!("__rustango_order{i}")
 }
 
 /// Derived-table joins: `JOIN [LATERAL] (<subquery>) AS alias ON …`.
@@ -850,7 +907,7 @@ fn write_select_body_qualified(
     for join in &query.joins {
         for col in &join.project {
             b.sql.push_str(", ");
-            b.write_ident(join.alias);
+            b.write_alias(join.alias);
             b.sql.push('.');
             b.write_ident(col);
             b.sql.push_str(" AS ");
@@ -1072,7 +1129,7 @@ fn write_model_joins(b: &mut Sql<'_>, joins: &[crate::core::Join]) -> Result<(),
         b.sql.push(' ');
         b.write_table(join.target.table);
         b.sql.push_str(" AS ");
-        b.write_ident(join.alias);
+        b.write_alias(join.alias);
         b.sql.push_str(" ON ");
         // Bare columns in the ON predicate resolve to the joined
         // alias here. Use `Expr::AliasedColumn` to point elsewhere.
@@ -1128,7 +1185,8 @@ fn write_agg_group_col(
             b.sql.push('.');
             b.write_ident(&flat);
         } else {
-            b.write_ident(scope.rename(alias));
+            let alias = b.alias_ref(scope.rename(alias)).into_owned();
+            b.write_ident(&alias);
             b.sql.push('.');
             b.write_ident(c);
         }
@@ -1710,10 +1768,26 @@ pub(super) fn write_insert_rows(b: &mut Sql<'_>, query: &InsertQuery) -> Result<
     }
 
     if let Some(conflict) = &query.on_conflict {
-        let set = caller_set(&query.columns, &query.generated);
-        b.d.write_conflict_clause(&mut b.sql, query.model, &set, conflict)?;
+        write_on_conflict(b, query.model, &query.columns, &query.generated, conflict)?;
     }
     Ok(())
+}
+
+/// The conflict clause of an INSERT. A `DoUpdate` with no columns has no SET to write.
+fn write_on_conflict(
+    b: &mut Sql<'_>,
+    model: &ModelSchema,
+    columns: &[&'static str],
+    generated: &[&str],
+    conflict: &crate::core::ConflictClause,
+) -> Result<(), SqlError> {
+    if let crate::core::ConflictClause::DoUpdate { update_columns, .. } = conflict {
+        if update_columns.is_empty() {
+            return Err(SqlError::EmptyUpdateSet);
+        }
+    }
+    let set = caller_set(columns, generated);
+    b.d.write_conflict_clause(&mut b.sql, model, &set, conflict)
 }
 
 /// The bound columns whose value the caller chose, not the writer.
@@ -1802,8 +1876,7 @@ pub(super) fn write_bulk_insert(b: &mut Sql<'_>, query: &BulkInsertQuery) -> Res
     }
 
     if let Some(conflict) = &query.on_conflict {
-        let set = caller_set(&query.columns, &query.generated);
-        b.d.write_conflict_clause(&mut b.sql, query.model, &set, conflict)?;
+        write_on_conflict(b, query.model, &query.columns, &query.generated, conflict)?;
     }
 
     write_returning(b, &query.returning)?;
@@ -1859,7 +1932,7 @@ fn write_expr(
         }
         Expr::Column(name) => {
             if let Some(alias) = b.qualify_alias(name) {
-                let qualified = format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(name),);
+                let qualified = format!("{}.{}", b.d.quote_ident(&alias), b.d.quote_ident(name),);
                 b.sql.push_str(&qualified);
             } else {
                 b.write_ident(name);
@@ -2035,7 +2108,11 @@ fn write_expr(
                 _ => {
                     // The current table, written under its FROM name.
                     let alias = b.scope_stack.last().map_or(*alias, |s| s.rename(alias));
-                    format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(column))
+                    format!(
+                        "{}.{}",
+                        b.d.quote_ident(&b.alias_ref(alias)),
+                        b.d.quote_ident(column)
+                    )
                 }
             };
             b.sql.push_str(&qualified);
@@ -3646,7 +3723,14 @@ fn write_extract_int(
         b.sql.push_str(field);
         b.sql.push('(');
         write_expr(b, &args[0], None)?;
-        b.sql.push(')');
+        // Mode 3 is ISO 8601, as PG's EXTRACT(WEEK).
+        b.sql.push_str(if field == "WEEK" { ", 3)" } else { ")" });
+    } else if field == "WEEK" {
+        // ISO week: the day of year of this week's Thursday, over seven.
+        b.sql.push_str("((CAST(strftime('%j', date(");
+        write_expr(b, &args[0], None)?;
+        b.sql
+            .push_str(", '-3 days', 'weekday 4')) AS INTEGER) - 1) / 7 + 1)");
     } else {
         let token = match field {
             "YEAR" => "%Y",
@@ -3655,7 +3739,6 @@ fn write_extract_int(
             "HOUR" => "%H",
             "MINUTE" => "%M",
             "SECOND" => "%S",
-            "WEEK" => "%W",
             _ => unreachable!("sqlite extract: {field}"),
         };
         b.sql.push_str("CAST(strftime('");
@@ -4070,7 +4153,7 @@ pub(super) fn write_where_with_search(
             let placeholder = b.d.placeholder(b.params.len());
             let mut qualified = String::new();
             if let Some(table) = b.qualify_alias(col) {
-                qualified.push_str(&b.d.quote_ident(table));
+                qualified.push_str(&b.d.quote_ident(&table));
                 qualified.push('.');
             }
             qualified.push_str(&b.d.quote_ident(col));
@@ -4091,6 +4174,11 @@ pub(super) fn write_where_expr(
     match expr {
         WhereExpr::Predicate(filter) => write_filter(b, filter, model),
         WhereExpr::ColumnCompare(cf) => write_column_compare(b, cf, model),
+        // A nested empty AND is TRUE; the top level skips WHERE instead.
+        WhereExpr::And(items) if items.is_empty() => {
+            b.sql.push_str("1 = 1");
+            Ok(())
+        }
         WhereExpr::And(items) => write_joined(b, items, " AND ", model),
         WhereExpr::Or(items) => {
             if items.is_empty() {
@@ -4881,7 +4969,7 @@ fn simple_op(
 fn render_qualified_col(b: &Sql<'_>, column: &str) -> String {
     let mut s = String::new();
     if let Some(table) = b.qualify_alias(column) {
-        s.push_str(&b.d.quote_ident(table));
+        s.push_str(&b.d.quote_ident(&table));
         s.push('.');
     }
     s.push_str(&b.d.quote_ident(column));
@@ -4963,12 +5051,26 @@ fn write_order_limit_offset(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<(), SqlError> {
+    write_order_limit_offset_with(b, order_by, limit, offset, |b, _, item| {
+        write_order_target(b, item)
+    })
+}
+
+/// [`write_order_limit_offset`] with `target` writing each item's sort key,
+/// given its position in `order_by`.
+fn write_order_limit_offset_with(
+    b: &mut Sql<'_>,
+    order_by: &[crate::core::OrderItem],
+    limit: Option<i64>,
+    offset: Option<i64>,
+    target: impl Fn(&mut Sql<'_>, usize, &crate::core::OrderItem) -> Result<(), SqlError>,
+) -> Result<(), SqlError> {
     use crate::core::{NullsOrder, OrderItem};
     if !order_by.is_empty() {
         b.sql.push_str(" ORDER BY ");
         let supports_nulls = b.d.supports_nulls_order();
         let mut first = true;
-        for item in order_by {
+        for (i, item) in order_by.iter().enumerate() {
             let (desc, nulls) = match item {
                 OrderItem::Column { desc, nulls, .. } => (*desc, *nulls),
                 OrderItem::Expr { desc, nulls, .. } => (*desc, *nulls),
@@ -4983,7 +5085,7 @@ fn write_order_limit_offset(
                     b.sql.push_str(", ");
                 }
                 first = false;
-                write_order_target(b, item)?;
+                target(b, i, item)?;
                 b.sql.push_str(" IS NULL");
                 // NULLS FIRST puts nulls on top, so IS NULL DESC.
                 match nulls {
@@ -4996,7 +5098,7 @@ fn write_order_limit_offset(
                 b.sql.push_str(", ");
             }
             first = false;
-            write_order_target(b, item)?;
+            target(b, i, item)?;
             if desc {
                 b.sql.push_str(" DESC");
             }

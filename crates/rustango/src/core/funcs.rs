@@ -280,19 +280,8 @@ pub fn extract_second(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::ExtractSecond, arg)
 }
 
-/// `EXTRACT(WEEK FROM x)` — week-of-year as integer.
-///
-/// **⚠ Not portable.** Each backend numbers weeks its own way:
-/// - PG: ISO 8601, Monday start, range 1–53.
-/// - MySQL (default mode 0): **Sunday** start, range **0**–53.
-/// - SQLite (`strftime('%W')`): Monday start, the first Monday of the
-///   year begins week 01.
-///
-/// For 2024-01-01 (a Monday): PG=1, MySQL=0, SQLite=01.
-///
-/// Use it on a single backend only. For portable code, compute the
-/// week start as a `chrono::DateTime` in Rust and filter the
-/// timestamp column with `Column::gte()`.
+/// `EXTRACT(WEEK FROM x)` — the ISO 8601 week (1–53, Monday start) as
+/// an integer, the same on every backend. 2023-01-01 is week 52.
 #[must_use]
 pub fn extract_week(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::ExtractWeek, arg)
@@ -722,7 +711,8 @@ pub fn age(ts1: impl Into<Expr>, ts2: impl Into<Expr>) -> Expr {
 /// unit emits `OpNotSupportedInDialect`.
 ///
 /// PG returns a timestamp, MySQL / SQLite return text. Cast app-side
-/// if you need a typed value.
+/// if you need a typed value. MySQL returns NULL for a named zone when
+/// its time zone tables are not loaded; `check --deploy` warns.
 #[must_use]
 pub fn trunc_with_tz(ts: impl Into<Expr>, unit: &'static str, tz: &'static str) -> Expr {
     use super::SqlValue;

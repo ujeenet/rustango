@@ -202,6 +202,17 @@ async fn custom_view_declares_its_codename() {
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
 }
 
+/// No perm set is a superuser, who holds a declared codename too.
+#[tokio::test]
+async fn declared_codename_passes_without_a_perm_set() {
+    let pool = fresh_pool().await;
+    let (status, body) = fetch(build_app(pool.clone()), Method::POST, "/cv_post/publish").await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let viewer = app_with_perms(pool, &["cv_post.view"]);
+    let (status, _) = fetch(viewer, Method::POST, "/cv_post/publish").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a perm set without it");
+}
+
 /// A read-only admin without `with_user_perms` still runs a POST view.
 #[tokio::test]
 async fn read_only_admin_without_perms_runs_post_views() {
