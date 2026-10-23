@@ -194,6 +194,10 @@ ViewSets and template views refuse a UUID that matches one row as BLOB and anoth
 
 The FK now references `T`'s PK column, not `id`. SQLite accepted the old target, so `makemigrations` there shows a changed FK.
 
+### `on_delete = "set_null"` needs an `Option` column
+
+A `fk = "…"` / `o2o = "…"` field with `set_null` must be `Option<…>`, as `ForeignKey<T>` already had to be. Make it optional (and migrate) or pick another action.
+
 ## 0.60.10
 
 ### New `TenantScope` extractor

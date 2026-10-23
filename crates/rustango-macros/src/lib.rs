@@ -11505,11 +11505,11 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
              has no meaning on a non-FK column.",
         ));
     }
-    if attrs.on_delete.as_deref() == Some("set_null") && fk_inner.is_some() && !nullable {
+    if attrs.on_delete.as_deref() == Some("set_null") && !nullable {
         return Err(syn::Error::new_spanned(
             field,
             "`on_delete = \"set_null\"` needs a nullable column: use \
-             `Option<ForeignKey<T>>`.",
+             `Option<ForeignKey<T>>` or `Option<…>`.",
         ));
     }
     let fk_on_delete = match attrs.on_delete.as_deref() {
@@ -14038,6 +14038,30 @@ mod field_attr_tests {
             struct Child {
                 #[rustango(primary_key)] id: i64,
                 #[rustango(on_delete = "set_null")] parent: Option<ForeignKey<Parent>>,
+            }
+        };
+        assert!(expand(&input).is_ok());
+    }
+
+    /// The same for `fk = "…"` / `o2o = "…"` on a plain column.
+    #[test]
+    fn set_null_needs_a_nullable_fk_column() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[rustango(table = "c")]
+            struct Child {
+                #[rustango(primary_key)] id: i64,
+                #[rustango(fk = "p", on_delete = "set_null")] parent_id: i64,
+                #[rustango(o2o = "q", on_delete = "set_null")] other_id: Option<i64>,
+            }
+        };
+        let err = expand(&input).err().expect("refused");
+        assert!(err.to_string().contains("set_null"), "{err}");
+        let input: DeriveInput = syn::parse_quote! {
+            #[rustango(table = "c")]
+            struct Child {
+                #[rustango(primary_key)] id: i64,
+                #[rustango(fk = "p", on_delete = "set_null")] parent_id: Option<i64>,
+                #[rustango(o2o = "q", on_delete = "set_null")] other_id: Option<i64>,
             }
         };
         assert!(expand(&input).is_ok());
