@@ -25,7 +25,7 @@ use super::bind_query_my;
 use super::bind_query_sqlite;
 
 use super::decode::{RowReader, TypedCol};
-use crate::core::joins::joined_label;
+use crate::core::joins::joined_key;
 
 /// Cells of a value row: the projection, then each join's columns. Any
 /// after them are DISTINCT's ORDER BY helpers, which the row drops.
@@ -49,7 +49,7 @@ fn select_model_cols(query: &SelectQuery) -> Vec<TypedCol> {
     for j in &query.joins {
         cols.extend(j.project.iter().map(|&c| {
             let ty = j.target.field_by_column(c).map(|f| f.ty);
-            (joined_label(j.alias, c).into(), ty)
+            (joined_key(j.alias, c).into(), ty)
         }));
     }
     cols
@@ -81,7 +81,7 @@ fn aggregate_cols(query: &AggregateQuery) -> Vec<TypedCol> {
     let groups = query.group_by.iter().map(|&col| {
         let label = match col.split_once('.') {
             None => col.into(),
-            Some((alias, c)) => joined_label(alias, c).into(),
+            Some((alias, c)) => joined_key(alias, c).into(),
         };
         (label, ty(col))
     });

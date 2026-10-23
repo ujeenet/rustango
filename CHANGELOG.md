@@ -82,6 +82,10 @@ Only `ForeignKey<T>` was checked; a plain `fk = "…"` / `o2o = "…"` column pa
 
 `set` locks the source row first (SQLite takes its write lock at `BEGIN`). Two concurrent sets kept both sets' rows on PG and failed with "database is deadlocked" on SQLite.
 
+### Fixed — `select_related` keeps the FK key; long join labels; PG prefetch batches
+
+A loaded FK with `on = <unique column>` keeps that column's value, not the parent's PK. Joined-column labels past 63 bytes are hashed, so PG no longer truncates them (a fetch error, or a blank admin cell); dict and JSON rows still use the full key. The PG-typed `fetch_with_prefetch` batches its `IN` list past the bind cap.
+
 ## [0.60.10] — 2026-10-22
 
 **Breaking:** `ModelFormFor::from_json` refuses unknown keys; an oversized CSRF form gets 413, not 403; undecodable job payloads are retried; the first `makemigrations` on PostgreSQL rewrites each table with a sized `vector` or `geometry` column; MySQL migrations with a key over 3072 bytes or on unbounded text, binary or JSON fail at render time; `InMemoryJobQueue::dispatch` inside `atomic` waits for the commit. See UPGRADING.

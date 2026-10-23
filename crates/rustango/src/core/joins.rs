@@ -69,8 +69,33 @@ pub fn aliased(alias: &'static str, column: &'static str) -> Expr {
     Expr::AliasedColumn { alias, column }
 }
 
-/// The result-column name of joined column `alias.column`.
-pub(crate) fn joined_label(alias: &str, column: &str) -> String {
+/// The SQL result-column name of joined column `alias.column`.
+#[doc(hidden)]
+#[must_use]
+pub fn joined_label(alias: &str, column: &str) -> String {
+    sql_label(&joined_key(alias, column)).into_owned()
+}
+
+/// `name` as a result label: past 63 bytes it is cut and hashed, as PG
+/// would truncate it and a read by the full name would miss.
+pub(crate) fn sql_label(name: &str) -> std::borrow::Cow<'_, str> {
+    const MAX: usize = 63;
+    if name.len() <= MAX {
+        return name.into();
+    }
+    // FNV-1a: stable across builds, so writer and reader agree.
+    let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    let mut head = MAX - 17;
+    while !name.is_char_boundary(head) {
+        head -= 1;
+    }
+    format!("{}_{hash:016x}", &name[..head]).into()
+}
+
+/// The `alias__column` key a joined column is reported under.
+pub(crate) fn joined_key(alias: &str, column: &str) -> String {
     format!("{alias}__{column}")
 }
 
@@ -141,6 +166,16 @@ mod tests {
                 column: "post_id",
             },
         );
+    }
+
+    #[test]
+    fn long_joined_labels_fit_and_stay_distinct() {
+        assert_eq!(joined_label("author", "name"), "author__name");
+        let alias = "a".repeat(60);
+        let (x, y) = (joined_label(&alias, "first"), joined_label(&alias, "second"));
+        assert!(x.len() <= 63 && y.len() <= 63, "{x} {y}");
+        assert_ne!(x, y);
+        assert_eq!(x, joined_label(&alias, "first"));
     }
 
     #[test]
