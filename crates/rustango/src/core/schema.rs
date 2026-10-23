@@ -1500,6 +1500,19 @@ impl ModelSchema {
         self.fields.iter().find(|f| f.primary_key)
     }
 
+    /// The primary key's column, in a const context: what a `ForeignKey<T>` references.
+    #[must_use]
+    pub const fn pk_column(&self) -> Option<&'static str> {
+        let mut i = 0;
+        while i < self.fields.len() {
+            if self.fields[i].primary_key {
+                return Some(self.fields[i].column);
+            }
+            i += 1;
+        }
+        None
+    }
+
     /// `order` plus each primary-key column it lacks, ascending, so rows
     /// tied on the sort keys come back in the same order on every page.
     #[must_use]

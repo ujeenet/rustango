@@ -468,9 +468,10 @@ fn augment_joined_columns_pg(
     };
     for join in joins {
         for col in &join.project {
-            let key = crate::core::joins::joined_label(join.alias, col);
+            let key = crate::core::joins::joined_key(join.alias, col);
+            let label = crate::core::joins::joined_label(join.alias, col);
             let v = row
-                .try_get::<Option<String>, _>(key.as_str())
+                .try_get::<Option<String>, _>(label.as_str())
                 .ok()
                 .flatten();
             map.insert(
@@ -494,9 +495,10 @@ fn augment_joined_columns_my(
     };
     for join in joins {
         for col in &join.project {
-            let key = crate::core::joins::joined_label(join.alias, col);
+            let key = crate::core::joins::joined_key(join.alias, col);
+            let label = crate::core::joins::joined_label(join.alias, col);
             let v = row
-                .try_get::<Option<String>, _>(key.as_str())
+                .try_get::<Option<String>, _>(label.as_str())
                 .ok()
                 .flatten();
             map.insert(
@@ -520,9 +522,10 @@ fn augment_joined_columns_sqlite(
     };
     for join in joins {
         for col in &join.project {
-            let key = crate::core::joins::joined_label(join.alias, col);
+            let key = crate::core::joins::joined_key(join.alias, col);
+            let label = crate::core::joins::joined_label(join.alias, col);
             let v = row
-                .try_get::<Option<String>, _>(key.as_str())
+                .try_get::<Option<String>, _>(label.as_str())
                 .ok()
                 .flatten();
             map.insert(

@@ -292,6 +292,7 @@ async fn setup(pool: &Pool) {
     ] {
         drop_table(pool, t.table).await;
     }
+    fresh_table::<Post>(pool).await;
     fresh_table::<Country>(pool).await;
     fresh_table::<Agency>(pool).await;
     fresh_table::<Profile>(pool).await;

@@ -228,6 +228,14 @@ async fn setup(pool: &Pool) {
             .await
             .expect(junction.table);
     }
+    // `set` locks the source row, so the sources need their tables.
+    rustango::testkit::matrix::fresh_table::<Post>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Doc>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Note>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Shelf>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Rack>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Item>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Author>(pool).await;
     rustango::testkit::matrix::fresh_table::<RackBadge>(pool).await;
     rustango::testkit::matrix::fresh_table::<PostTag>(pool).await;
     rustango::testkit::matrix::fresh_table::<DocTag>(pool).await;
