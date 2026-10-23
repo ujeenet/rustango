@@ -150,6 +150,19 @@ untouched.
 
 ## Unreleased
 
+### `makemigrations --merge` refuses conflicts
+
+A merge where both branches changed one object differently now fails and lists the conflicts; reconcile the branch files, then merge again.
+
+### `migrate --squash` refuses hand-written ops
+
+A pending file with a data op, a callback or a rename now stops the squash; fold such files by hand.
+
+### `migrate <target>` applies earlier pending files
+
+A pending file sorting before the newest applied one (a merged branch) now applies when it is at or before the target; it used to be skipped.
+`migrate <target>` orders by file name, so going back to a target also unapplies sibling-branch files that sort after it.
+
 ## 0.60.11
 
 ### `csrf_trusted_origins` takes effect
