@@ -152,7 +152,7 @@ untouched.
 
 ### Migrate lock: own connection, and a lock file on SQLite
 
-The PostgreSQL/MySQL migrate lock now opens one extra connection outside the pool. File-backed SQLite creates `<db>-migrate.lock` beside the database and serialises concurrent runs on it.
+The PostgreSQL/MySQL migrate lock now opens one extra connection outside the pool. File-backed SQLite creates `<db>-migrate.lock` beside the database and serialises concurrent runs on it; where that file cannot be created it warns and runs unlocked.
 
 ### Same CHECK name on two tables warns
 

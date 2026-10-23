@@ -8,7 +8,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — the migrate lock works with one connection and on SQLite files
 
-The lock holds its own connection outside the pool, and file-backed SQLite now locks a `-migrate.lock` file beside the database.
+The lock holds its own connection outside the pool, and file-backed SQLite now locks a `-migrate.lock` file beside the database (unlocked, with a warning, where it cannot be created).
 
 ### Fixed — a refused downgrade runs nothing
 

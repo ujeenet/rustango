@@ -205,7 +205,7 @@ pub const GITIGNORE: &str = "/target
 *.db-wal
 *.db-shm
 *.db-journal
-*.db-migrate.lock*
+*-migrate.lock*
 
 *.log
 ";
@@ -478,7 +478,7 @@ target/
 *.db-wal
 *.db-shm
 *.db-journal
-*.db-migrate.lock*
+*-migrate.lock*
 
 # Nothing in the image needs these.
 .git/

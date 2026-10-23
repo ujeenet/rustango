@@ -490,6 +490,72 @@ async fn concurrent_runs_apply_once(pool: &Pool) {
     drop_table(&p1, ledger).await;
 }
 
+/// A SQLite database whose directory refuses the lock file still migrates.
+#[cfg(all(feature = "sqlite", unix))]
+#[tokio::test]
+async fn sqlite_without_a_writable_dir_migrates_unlocked() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let db = tempfile::tempdir().expect("tempdir");
+    let path = db.path().join("ro.db");
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_migrations_from(dir.path(), &snap(vec![table("mr_ro_item", vec![id()])]), None)
+        .expect("makemigrations")
+        .expect("a migration");
+    let rw = pool_of(&format!("sqlite://{}?mode=rwc", path.display()), 1).await;
+    migrate_pool_with_ledger(&rw, dir.path(), "mr_ro_ledger")
+        .await
+        .expect("initial");
+    drop(rw);
+    let lock = format!("{}-migrate.lock", path.display());
+    let _ = std::fs::remove_file(&lock);
+    let mode = |m| std::fs::set_permissions(db.path(), std::fs::Permissions::from_mode(m));
+    mode(0o555).expect("read-only dir");
+    let ro = pool_of(&format!("sqlite://{}?mode=ro", path.display()), 1).await;
+    let ran = migrate_pool_with_ledger(&ro, dir.path(), "mr_ro_ledger").await;
+    mode(0o755).expect("writable again");
+    assert!(ran.expect("nothing pending runs without the lock").is_empty());
+}
+
+/// A lock connection to a server that never answers gives up like the pool would.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+#[tokio::test]
+async fn silent_server_fails_the_lock_in_time() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut urls = Vec::new();
+    #[cfg(feature = "postgres")]
+    urls.push(format!("postgres://u:p@127.0.0.1:{port}/db"));
+    #[cfg(feature = "mysql")]
+    urls.push(format!("mysql://u:p@127.0.0.1:{port}/db"));
+    for url in urls {
+        let timeout = std::time::Duration::from_secs(1);
+        let pool: Pool = match url.split(':').next() {
+            #[cfg(feature = "postgres")]
+            Some("postgres") => rustango::sql::sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(timeout)
+                .connect_lazy(&url)
+                .expect("lazy pool")
+                .into(),
+            #[cfg(feature = "mysql")]
+            Some("mysql") => rustango::sql::sqlx::mysql::MySqlPoolOptions::new()
+                .acquire_timeout(timeout)
+                .connect_lazy(&url)
+                .expect("lazy pool")
+                .into(),
+            _ => unreachable!(),
+        };
+        let ran = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            migrate_pool_with_ledger(&pool, dir.path(), "mr_bh_ledger"),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("the lock connect hung on {url}"));
+        assert!(ran.is_err(), "{url}");
+    }
+    drop(listener);
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [

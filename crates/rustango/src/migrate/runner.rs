@@ -2950,7 +2950,8 @@ where
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
             let opts = pg.connect_options();
-            let mut held = LockSession::<sqlx::PgConnection>::wait(&opts, |conn| {
+            let connect_timeout = pg.options().get_acquire_timeout();
+            let mut held = LockSession::<sqlx::PgConnection>::wait(&opts, connect_timeout, |conn| {
                 let sql = acquire.clone();
                 Box::pin(async move {
                     sqlx::query_scalar::<_, bool>(&sql)
@@ -2973,7 +2974,8 @@ where
         crate::sql::Pool::Mysql(my) => {
             const NAME: &str = "rustango_migrate_";
             let opts = my.connect_options();
-            let mut held = LockSession::<sqlx::MySqlConnection>::wait(&opts, |conn| {
+            let connect_timeout = my.options().get_acquire_timeout();
+            let mut held = LockSession::<sqlx::MySqlConnection>::wait(&opts, connect_timeout, |conn| {
                 let sql = acquire.clone();
                 Box::pin(async move {
                     let got: Option<i64> = sqlx::query_scalar(&sql)
@@ -2994,7 +2996,8 @@ where
             let Some(opts) = sqlite_lock_options(sq).await? else {
                 return body.await;
             };
-            let mut held = LockSession::<sqlx::SqliteConnection>::wait(&opts, |conn| {
+            let connect_timeout = sq.options().get_acquire_timeout();
+            let held = LockSession::<sqlx::SqliteConnection>::wait(&opts, connect_timeout, |conn| {
                 let sql = acquire.clone();
                 Box::pin(async move {
                     // SQLITE_BUSY in any of its extended codes.
@@ -3010,7 +3013,19 @@ where
                     }
                 })
             })
-            .await?;
+            .await;
+            // A directory or file that refuses the lock file, as a read-only one does.
+            let mut held = match held {
+                Ok(held) => held,
+                Err(MigrateError::Driver(e)) => {
+                    tracing::warn!(
+                        target: "rustango::migrate",
+                        "migrating without the SQLite migrate lock: {e}"
+                    );
+                    return body.await;
+                }
+                Err(e) => return Err(e),
+            };
             let result = body.await;
             let _ = sqlx::query(&release).execute(held.conn()).await;
             held.close().await;
@@ -3051,7 +3066,12 @@ type TryLock<'c> =
 impl<C: sqlx::Connection> LockSession<C> {
     /// Poll `try_lock` until it takes the lock. A waiting run holds no pool
     /// connection, so the holder's body can borrow one (#2027).
-    async fn wait<F>(opts: &C::Options, try_lock: F) -> Result<Self, MigrateError>
+    /// The connect gives up after the pool's own acquire timeout.
+    async fn wait<F>(
+        opts: &C::Options,
+        connect_timeout: std::time::Duration,
+        try_lock: F,
+    ) -> Result<Self, MigrateError>
     where
         F: for<'c> Fn(&'c mut C) -> TryLock<'c>,
     {
@@ -3062,7 +3082,9 @@ impl<C: sqlx::Connection> LockSession<C> {
         let start = Instant::now();
         let mut pause = Duration::from_millis(10);
         let mut logged = false;
-        let mut conn = opts.connect().await?;
+        let mut conn = tokio::time::timeout(connect_timeout, opts.connect())
+            .await
+            .map_err(|_| sqlx::Error::PoolTimedOut)??;
         loop {
             if try_lock(&mut conn).await? {
                 return Ok(Self(conn));
