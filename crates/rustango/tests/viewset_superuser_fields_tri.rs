@@ -40,7 +40,12 @@ fn app(pool: &Pool, superuser: bool) -> axum::Router {
         }))
 }
 
-async fn send(app: axum::Router, method: &str, uri: &str, body: serde_json::Value) -> StatusCode {
+async fn send(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    body: serde_json::Value,
+) -> (StatusCode, String) {
     let res = app
         .oneshot(
             Request::builder()
@@ -52,7 +57,11 @@ async fn send(app: axum::Router, method: &str, uri: &str, body: serde_json::Valu
         )
         .await
         .unwrap();
-    res.status()
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
 async fn by_name(pool: &Pool, username: &str) -> User {
@@ -81,8 +90,8 @@ async fn a_member_cannot_grant_superuser_or_set_a_hash(pool: &Pool) {
     let body = serde_json::json!({
         "username": renamed, "is_superuser": true, "password_hash": "new-hash"
     });
-    let status = send(app(pool, false), "PATCH", &format!("/users/{id}"), body).await;
-    assert!(status.is_success(), "{status}");
+    let (status, res) = send(app(pool, false), "PATCH", &format!("/users/{id}"), body).await;
+    assert!(status.is_success(), "{status}: {res}");
     let u = by_name(pool, &renamed).await;
     assert!(!u.is_superuser, "is_superuser stays locked");
     assert_eq!(u.password_hash, "old-hash");
@@ -91,11 +100,11 @@ async fn a_member_cannot_grant_superuser_or_set_a_hash(pool: &Pool) {
 async fn a_member_cannot_create_a_superuser(pool: &Pool) {
     let name = unique("vsc");
     let body = serde_json::json!({
-        "username": name, "password_hash": "", "is_superuser": true,
+        "username": name, "password_hash": "h", "is_superuser": true,
         "active": true, "created_at": "2024-01-01T00:00:00Z", "data": {}
     });
-    let status = send(app(pool, false), "POST", "/users", body).await;
-    assert_eq!(status, StatusCode::CREATED);
+    let (status, res) = send(app(pool, false), "POST", "/users", body).await;
+    assert_eq!(status, StatusCode::CREATED, "{res}");
     assert!(!by_name(pool, &name).await.is_superuser);
 }
 
@@ -103,8 +112,8 @@ async fn a_member_cannot_create_a_superuser(pool: &Pool) {
 async fn a_superuser_writes_them(pool: &Pool) {
     let (id, name) = seed(pool).await;
     let body = serde_json::json!({ "is_superuser": true, "password_hash": "new-hash" });
-    let status = send(app(pool, true), "PATCH", &format!("/users/{id}"), body).await;
-    assert!(status.is_success(), "{status}");
+    let (status, res) = send(app(pool, true), "PATCH", &format!("/users/{id}"), body).await;
+    assert!(status.is_success(), "{status}: {res}");
     let u = by_name(pool, &name).await;
     assert!(u.is_superuser);
     assert_eq!(u.password_hash, "new-hash");
