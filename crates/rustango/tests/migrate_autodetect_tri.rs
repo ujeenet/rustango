@@ -3974,9 +3974,49 @@ async fn drops_after_a_rename_unapply(pool: &Pool) {
     chain.migrate(pool).await.expect("and forward again");
 }
 
+/// A file that creates a table or adds a column and drops it again has no
+/// snapshot to render the create from: refused up front, nothing applied.
+async fn create_then_drop_in_one_file_is_refused(pool: &Pool) {
+    let (t, tmp) = ("mad_cd_post", "mad_cd_tmp");
+    let chain = Chain::new(pool, "cd", &[tmp, t]).await;
+    let posts = json!({"tables": [table(t, vec![id()])]});
+    chain.step(pool, posts.clone()).await.expect("initial");
+    let (table_t, column_c) = (t.to_owned(), "c".to_owned());
+    let column = |drop: bool| {
+        let (table, column) = (table_t.clone(), column_c.clone());
+        if drop {
+            SchemaChange::DropColumn { table, column }
+        } else {
+            SchemaChange::AddColumn { table, column }
+        }
+    };
+    let after = json!({"tables": [table(t, vec![id(), col("d", "i64", json!({}))])]});
+    for ops in [
+        vec![
+            SchemaChange::CreateTable(tmp.into()),
+            SchemaChange::DropTable(tmp.into()),
+        ],
+        vec![column(false), column(true)],
+    ] {
+        let err = chain
+            .hand(pool, after.clone(), ops, None)
+            .await
+            .expect_err("no snapshot entry to create from");
+        assert!(err.contains("snapshot"), "{err}");
+        assert!(exec(pool, "SELECT 1 FROM {}", &[tmp]).await.is_err(), "{tmp} left");
+        let head = chain.head().name;
+        let applied = rustango::migrate::applied_set_pool_with_ledger(pool, &chain.ledger)
+            .await
+            .expect("ledger");
+        assert!(!applied.contains(&head), "{head} recorded");
+        chain.discard_head();
+    }
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
+        create_then_drop_in_one_file_is_refused,
         drops_after_a_rename_unapply,
         missing_callback_fails_before_any_op,
         migrate_to_applies_an_earlier_pending_file,

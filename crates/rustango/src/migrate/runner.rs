@@ -3293,6 +3293,13 @@ fn dropped_later(table: &str, later: &[Operation]) -> bool {
     false
 }
 
+/// Whether a later op renames `table` away.
+fn renamed_later(table: &str, later: &[Operation]) -> bool {
+    later.iter().any(|op| {
+        matches!(op, Operation::Schema(super::SchemaChange::RenameTable { old_name, .. }) if old_name == table)
+    })
+}
+
 /// A column whose FKs or UNIQUE the runner finds by name in the catalog:
 /// a dropped column's FKs, which MySQL keeps (1828) (#1981), one being
 /// replaced (#1557), or an index under an altered column (#1676).
@@ -3375,7 +3382,9 @@ fn render_step(
             ..
         } => Some(table.as_str()),
         // Before a later rename (an unapply's), `after` has it under another name.
-        SC::AddColumn { table, .. } | SC::CreateTable(table) if after.table(table).is_none() => {
+        SC::AddColumn { table, .. } | SC::CreateTable(table)
+            if after.table(table).is_none() && renamed_later(table, later) =>
+        {
             Some(table.as_str())
         }
         _ if dialect.alters_by_rebuild() => rebuilt,
