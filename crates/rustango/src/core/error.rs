@@ -202,6 +202,11 @@ pub enum QueryError {
         "`{model}`: cannot group by `{column}`: no such join, or the queryset has a set operation"
     )]
     GroupByJoinUnreachable { model: &'static str, column: String },
+
+    /// A `.join(...)` alias is already taken by another join, such as the
+    /// one a relation lookup (`author__name`) or `select_related` adds.
+    #[error("join alias `{alias}` is used twice in one queryset")]
+    DuplicateJoinAlias { alias: String },
 }
 
 impl QueryError {

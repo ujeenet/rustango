@@ -122,8 +122,7 @@ where
     F: FnMut(Vec<SqlValue>) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
 {
-    let carried = pool.dialect().compile_select(base)?.params.len();
-    let room = pool.dialect().max_bind_params().saturating_sub(carried);
+    let room = bind_room(pool.dialect(), base)?;
     let size = in_chunk_size(base.model.table, keys.len(), room, sliced)?;
     if keys.len() <= size {
         return fetch(keys).await;
@@ -133,6 +132,12 @@ where
         out.extend(fetch(chunk.to_vec()).await?);
     }
     Ok(out)
+}
+
+/// Binds left for an `IN` list beside the ones `base` already carries.
+fn bind_room(dialect: &dyn Dialect, base: &SelectQuery) -> Result<usize, ExecError> {
+    let carried = dialect.compile_select(base)?.params.len();
+    Ok(dialect.max_bind_params().saturating_sub(carried))
 }
 
 /// Keys per `IN` list: the `room` the query's own binds leave. Refused when
@@ -275,7 +280,8 @@ where
     /// whose connection holds the tenant's `search_path`.
     ///
     /// # Errors
-    /// As [`Self::fetch_on`].
+    /// As [`Self::fetch_on`]; [`ExecError::InListUnsplittable`] when `ids`
+    /// exceed one `IN` list, since one executor runs one statement.
     pub async fn in_bulk_on<'c, E, C, K, I, F>(
         self,
         column: C,
@@ -295,6 +301,14 @@ where
         let id_values: Vec<crate::core::SqlValue> = ids.into_iter().map(|v| v.into()).collect();
         if id_values.is_empty() {
             return Ok(std::collections::HashMap::new());
+        }
+        let room = bind_room(executor.dialect(), &self.clone().compile()?)?;
+        if id_values.len() > room {
+            return Err(ExecError::InListUnsplittable {
+                table: T::SCHEMA.table,
+                keys: id_values.len(),
+                max: room,
+            });
         }
         let rows = self
             .filter_op(

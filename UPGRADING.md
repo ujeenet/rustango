@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `ForeignKey::get` follows `on`, and join aliases must be unique
+
+With `#[rustango(on = "num")]`, `get_on` / `get_pool` load the parent whose `num` equals the key (not its PK) when every FK to that model uses the same `on`. A `.join()` reusing a relation lookup's or `select_related` alias now fails at compile with `QueryError::DuplicateJoinAlias`; rename the alias.
+
 ### Upserts with no update columns fail before the database
 
 On PostgreSQL and SQLite they return `ExecError::Sql(SqlError::EmptyUpdateSet)`, as MySQL did, instead of a driver syntax error. Use `insert_or_ignore` for "insert, skip conflicts".

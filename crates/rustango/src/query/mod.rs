@@ -1976,13 +1976,19 @@ impl<T: Model> QuerySet<T> {
         // Ad-hoc joins come after the FK-driven select_related ones, so
         // column order stays stable and user joins sit next to the user
         // WHERE.
-        joins.extend(self.ad_hoc_joins);
-        // Skip a span JOIN whose alias is already here, so a span over
-        // the same path as a select_related emits only once.
-        for j in span_joins {
-            if !joins.iter().any(|e| e.alias == j.alias) {
-                joins.push(j);
+        let mut ad_hoc: Vec<&'static str> = Vec::with_capacity(self.ad_hoc_joins.len());
+        for j in self.ad_hoc_joins {
+            if joins.iter().any(|e| e.alias == j.alias) {
+                return Err(duplicate_join_alias(j.alias));
             }
+            ad_hoc.push(j.alias);
+            joins.push(j);
+        }
+        // Skip a span JOIN whose alias is already here, so a span over
+        // the same path as a select_related emits only once. An ad-hoc
+        // join under that alias is another table: refuse it.
+        for j in span_joins {
+            merge_relation_join(&mut joins, &ad_hoc, j)?;
         }
         // Split head-branch clauses from combined-result clauses. With
         // a compound, `head_*` holds what was frozen at the first
@@ -2018,9 +2024,7 @@ impl<T: Model> QuerySet<T> {
         // Merge relation-span `order_by` JOINs into the join set,
         // skipping aliases already added above.
         for j in order_joins.into_iter().chain(comb_order_joins) {
-            if !joins.iter().any(|e| e.alias == j.alias) {
-                joins.push(j);
-            }
+            merge_relation_join(&mut joins, &ad_hoc, j)?;
         }
         // `.distinct_on(&[...])` needs its columns at the head of the
         // ORDER BY, so catch a mismatch at compile time.
@@ -3325,6 +3329,28 @@ fn resolve_span(
         rhs: Expr::Literal(value),
     };
     Ok((joins, predicate))
+}
+
+fn duplicate_join_alias(alias: &str) -> QueryError {
+    QueryError::DuplicateJoinAlias {
+        alias: alias.to_owned(),
+    }
+}
+
+/// Add a span or `order_by` join unless its path is already joined. An
+/// ad-hoc join holding the alias is a different table, so it is refused.
+fn merge_relation_join(
+    joins: &mut Vec<crate::core::Join>,
+    ad_hoc: &[&'static str],
+    j: crate::core::Join,
+) -> Result<(), QueryError> {
+    if ad_hoc.contains(&j.alias) {
+        return Err(duplicate_join_alias(j.alias));
+    }
+    if !joins.iter().any(|e| e.alias == j.alias) {
+        joins.push(j);
+    }
+    Ok(())
 }
 
 /// Deepest relation path a span or `select_related` may walk. It bounds the

@@ -33,9 +33,9 @@
 //! `Into<SqlValue> + Clone + sqlx::Decode + sqlx::Type` works.
 //!
 //! Limitations:
-//! * Target's PK column defaults to `"id"` for the
-//!   `Relation::Fk { on: … }` schema entry. Override with
-//!   `#[rustango(on = "user_uuid")]` on the FK field.
+//! * The FK references the target's PK column unless the field sets
+//!   `#[rustango(on = "user_uuid")]`. The value does not carry `on`, so
+//!   `get` cannot tell two FKs to one target with different `on` apart.
 
 use crate::core::SqlValue;
 use crate::core::{Model, Op};
@@ -291,6 +291,35 @@ where
     }
 }
 
+/// The field a `ForeignKey<T>` key matches: the one `on` column every
+/// registered FK to `T` names, else `T`'s PK. The key alone cannot say.
+fn target_field<T: Model>() -> Result<&'static crate::core::FieldSchema, ExecError> {
+    use crate::core::Relation;
+    let pk = T::SCHEMA
+        .primary_key()
+        .ok_or(ExecError::MissingPrimaryKey {
+            table: T::SCHEMA.table,
+        })?;
+    let mut ons = inventory::iter::<crate::core::ModelEntry>
+        .into_iter()
+        .flat_map(|e| e.schema.fields)
+        .filter_map(|f| match f.relation {
+            Some(Relation::Fk { to, on } | Relation::O2O { to, on }) if to == T::SCHEMA.table => {
+                Some(on)
+            }
+            _ => None,
+        });
+    let Some(first) = ons.next() else {
+        return Ok(pk);
+    };
+    if ons.all(|on| on == first) {
+        if let Some(field) = T::SCHEMA.field_by_column(first) {
+            return Ok(field);
+        }
+    }
+    Ok(pk)
+}
+
 // ============================================================ PG-typed get / get_on
 
 #[cfg(feature = "postgres")]
@@ -344,6 +373,9 @@ where
     /// it on the field, e.g. on a tenant connection whose `search_path`
     /// is already set.
     ///
+    /// The key matches the `on` column of the FKs to `T`; if they name
+    /// different columns, it matches `T`'s PK.
+    ///
     /// # Errors
     /// [`ExecError::ForeignKeyTargetMissing`] when no target row has the
     /// PK, [`ExecError::MissingPrimaryKey`], or the fetch's own errors.
@@ -353,13 +385,9 @@ where
     ) -> Result<&T, ExecError> {
         if matches!(self, Self::Unloaded(_)) {
             let pk = self.pk_ref().clone();
-            let pk_field = T::SCHEMA
-                .primary_key()
-                .ok_or(ExecError::MissingPrimaryKey {
-                    table: T::SCHEMA.table,
-                })?;
+            let target = target_field::<T>()?;
             let mut rows: Vec<T> = QuerySet::<T>::new()
-                .filter_op(pk_field.name, Op::Eq, pk.clone())
+                .filter_op(target.name, Op::Eq, pk.clone())
                 .fetch_on(executor)
                 .await?;
             let value = rows.pop().ok_or_else(|| {
@@ -422,13 +450,9 @@ where
         use crate::sql::FetcherPool as _;
         if matches!(self, Self::Unloaded(_)) {
             let pk = self.pk_ref().clone();
-            let pk_field = T::SCHEMA
-                .primary_key()
-                .ok_or(ExecError::MissingPrimaryKey {
-                    table: T::SCHEMA.table,
-                })?;
+            let target = target_field::<T>()?;
             let mut rows: Vec<T> = QuerySet::<T>::new()
-                .filter_op(pk_field.name, Op::Eq, pk.clone())
+                .filter_op(target.name, Op::Eq, pk.clone())
                 .fetch(pool)
                 .await?;
             let value = rows.pop().ok_or_else(|| {
