@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `Dialect` has server DDL methods
+
+`create_database_sql`, `create_login_sql`, `grant_database_sql` and friends have defaults; a custom `Dialect` with a method of the same name must rename it.
+
 ## 0.60.12
 
 ### `makemigrations --merge` refuses conflicts

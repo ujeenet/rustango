@@ -1399,8 +1399,16 @@ pub fn tenant_url_on_registry_server(registry_url: &str, database: &str) -> Opti
     if authority.is_empty() {
         return None;
     }
-    // Only TLS keys carry over: sqlx lets `dbname`/`host`/`user` in the
-    // query override the URL, so keeping them could point at the registry.
+    Some(format!(
+        "{scheme}://{authority}/{database}{}",
+        tls_query_suffix(query)
+    ))
+}
+
+/// `?<tls keys>` from `query`, or empty. Only TLS keys carry over: sqlx
+/// lets `dbname`/`host`/`user` in the query override the URL, so keeping
+/// them could point at the registry.
+pub(crate) fn tls_query_suffix(query: Option<&str>) -> String {
     let tls: Vec<&str> = query
         .unwrap_or("")
         .split('&')
@@ -1409,11 +1417,11 @@ pub fn tenant_url_on_registry_server(registry_url: &str, database: &str) -> Opti
             TLS_QUERY_KEYS.contains(&crate::url_codec::url_decode(key).as_str())
         })
         .collect();
-    Some(if tls.is_empty() {
-        format!("{scheme}://{authority}/{database}")
+    if tls.is_empty() {
+        String::new()
     } else {
-        format!("{scheme}://{authority}/{database}?{}", tls.join("&"))
-    })
+        format!("?{}", tls.join("&"))
+    }
 }
 
 /// The TLS query keys sqlx 0.8 reads for Postgres and MySQL.

@@ -1055,6 +1055,7 @@ jobs:
             --test i18n_admin_editor_tri \
             --test org_host_claims_tri \
             --test tenancy_manage_tri \
+            --test tenant_database_tri \
             --test i18n_db_overrides_sqlite_live \
             --test inspectdb_sqlite_live \
             --test inspectdb_views_sqlite_live \
@@ -1356,6 +1357,10 @@ jobs:
       - run: cargo test -p rustango --features mysql,sqlite,tenancy,testkit --test resolver_per_registry_tri
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test org_host_claims_tri
       - run: cargo test -p rustango --features mysql,sqlite,tenancy,testkit --test tenancy_manage_tri
+      # Creates databases and users, so it runs as root.
+      - run: >-
+          MYSQL_TEST_URL=mysql://root:rustango@127.0.0.1:3306/rustango_test
+          cargo test -p rustango --features mysql,tenancy --test tenant_database_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test i18n_admin_editor_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test logout_revokes_sessions_tri
