@@ -17,7 +17,19 @@ use super::writers::{
     write_aggregate, write_bulk_insert, write_bulk_update_pg, write_count, write_delete,
     write_insert, write_select, write_update, Sql,
 };
+use super::server::{DatabaseName, Login, LoginPassword};
 use super::{CompiledStatement, Dialect, SqlError};
+
+/// A string literal whose meaning does not depend on
+/// `standard_conforming_strings`: `E'…'` once a `\` is present.
+fn escape_string_literal(text: &str) -> String {
+    let quoted = text.replace('\'', "''");
+    if text.contains('\\') {
+        format!("E'{}'", quoted.replace('\\', "\\\\"))
+    } else {
+        format!("'{quoted}'")
+    }
+}
 
 /// The Postgres dialect.
 ///
@@ -69,6 +81,66 @@ impl Dialect for Postgres {
 
     fn defer_foreign_keys_sql(&self) -> Option<&'static str> {
         None
+    }
+
+    fn create_database_sql(&self, db: &DatabaseName) -> Option<String> {
+        Some(format!("CREATE DATABASE {}", self.quote_ident(db.as_str())))
+    }
+
+    fn drop_database_sql(&self, db: &DatabaseName) -> Option<String> {
+        Some(format!(
+            "DROP DATABASE IF EXISTS {}",
+            self.quote_ident(db.as_str())
+        ))
+    }
+
+    fn create_login_sql(&self, login: &Login, password: &LoginPassword) -> Option<String> {
+        Some(format!(
+            "CREATE ROLE {} LOGIN PASSWORD {}",
+            self.quote_ident(login.name().as_str()),
+            escape_string_literal(password.expose())
+        ))
+    }
+
+    fn drop_login_sql(&self, login: &Login) -> Option<String> {
+        Some(format!(
+            "DROP ROLE IF EXISTS {}",
+            self.quote_ident(login.name().as_str())
+        ))
+    }
+
+    /// PUBLIC has CONNECT on every new database; revoking it keeps the
+    /// other tenants' logins out.
+    fn grant_database_sql(&self, db: &DatabaseName, login: &Login) -> Vec<String> {
+        let (d, u) = (
+            self.quote_ident(db.as_str()),
+            self.quote_ident(login.name().as_str()),
+        );
+        vec![
+            format!("REVOKE ALL ON DATABASE {d} FROM PUBLIC"),
+            format!("GRANT ALL PRIVILEGES ON DATABASE {d} TO {u}"),
+        ]
+    }
+
+    /// PG 15+ gives `public` CREATE to the database owner only, which is
+    /// the admin, not the tenant login.
+    fn grant_in_database_sql(&self, login: &Login) -> Vec<String> {
+        vec![format!(
+            "GRANT ALL ON SCHEMA public TO {}",
+            self.quote_ident(login.name().as_str())
+        )]
+    }
+
+    fn server_version_sql(&self) -> Option<&'static str> {
+        Some("SELECT current_setting('server_version')")
+    }
+
+    /// One row: `rolsuper`, `rolcreatedb`, `rolcreaterole`.
+    fn login_privileges_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT rolsuper, rolcreatedb, rolcreaterole FROM pg_roles \
+             WHERE rolname = current_user",
+        )
     }
 
     fn clear_tables_sql(&self, tables: &[&str]) -> Vec<String> {
