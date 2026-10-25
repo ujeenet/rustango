@@ -190,7 +190,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     rustango::manage::Cli::new()
         .api(urls::api())
-        .with_welcome()  // friendly `/` page until you add a root handler
         .with_health()   // /health + /ready endpoints (fullstack & tenant)
         .run()
         .await

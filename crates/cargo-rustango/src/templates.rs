@@ -728,7 +728,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     rustango::manage::Cli::new()
         .api(urls::api())
-        .with_welcome() // friendly `/` on first run; drop once you have a root handler
         .with_health() // /health + /ready; the Dockerfile HEALTHCHECK probes /health
         // Behind a load balancer, name its addresses so per-IP limits see clients:
         // .with_trusted_proxies([\"10.0.0.0/8\"])?
@@ -780,7 +779,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nest_with(urls::admin_prefix(&settings), move |pool| {
             urls::admin_router(pool, &admin_settings)
         })
-        .with_welcome() // friendly `/` on first run; drop once you have a root handler
         .with_health() // /health + /ready endpoints for load balancers
         // Behind a load balancer, name its addresses so per-IP limits see clients:
         // .with_trusted_proxies([\"10.0.0.0/8\"])?
@@ -809,7 +807,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rustango::manage::Cli::new()
         .tenancy()
         .api(urls::api())
-        .with_welcome() // friendly `/` on first run; drop once you have a root handler
         .with_health() // /health + /ready hit the registry pool
         // Console "New tenant" and "Database servers" pages; every operator
         // can use them. Delete this line to turn them off.
