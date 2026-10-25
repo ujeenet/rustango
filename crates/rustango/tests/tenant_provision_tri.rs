@@ -710,7 +710,9 @@ async fn a_failed_first_admin_drops_everything_it_made(pool: &Pool) {
         first_admin: Some(admin("ann")),
         ..ProvisionRequest::on_server(&a, "main")
     };
-    env.provision(&env.dir("good"), &req).await.expect("retry");
+    if let Err(e) = env.provision(&env.dir("good"), &req).await {
+        panic!("retry: {e}: {:?}", env.steps(&a).await);
+    }
     let url = assert_provisioned(&env, &a).await;
     let tenant = Pool::connect(&url).await.expect("tenant");
     let users: Vec<rustango::tenancy::User> = rustango::tenancy::User::objects()
