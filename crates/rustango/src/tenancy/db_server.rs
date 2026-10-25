@@ -1110,6 +1110,33 @@ mod tests {
         assert!(matches!(on("postgres://u:p@db.internal:notaport/t"), Uses::Unknown(_)));
     }
 
+    /// A record counts only while the URL names its server, database and login.
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn a_record_matches_only_its_own_database_and_login() {
+        let mut s = pg("db.internal");
+        s.port = None;
+        let record = TenantDatabase {
+            id: crate::sql::Auto::Unset,
+            org_slug: "acme".into(),
+            org_id: Some(1),
+            server_name: "main".into(),
+            database_name: "acme".into(),
+            login_name: Some("acme".into()),
+            created_at: crate::sql::Auto::Unset,
+        };
+        assert_eq!(s.names_record("postgres://acme:pw@db.internal/acme", &record), Ok(()));
+        for (url, why) in [
+            ("postgres://acme:pw@other/acme", "another server"),
+            ("postgres://acme:pw@db.internal/acme2", "another database"),
+            ("postgres://admin:pw@db.internal/acme", "another login"),
+        ] {
+            let err = s.names_record(url, &record).unwrap_err();
+            assert!(err.contains(why), "{url}: {err}");
+            assert!(!err.contains("pw@"), "{err}");
+        }
+    }
+
     #[cfg(feature = "mysql")]
     #[test]
     fn mysql_default_port_counts() {
