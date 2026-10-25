@@ -270,31 +270,34 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
     if let Some(schema) = &target_schema {
         crate::tenancy::provision::provision_schema(pools, &schema.0).await?;
     }
-    let release = || async {
+    // Every way out before the move owns the schema drops it again.
+    let offline = async {
+        if org.active {
+            writeln!(
+                writer,
+                "  deactivating the tenant; if this run dies, run `edit-tenant {slug} --activate`"
+            )?;
+            writeln!(
+                writer,
+                "  waiting {} s for running servers' tenant caches…",
+                parsed.drain_secs
+            )?;
+            set_active(pools, slug, id, false).await
+        } else {
+            writeln!(
+                writer,
+                "  the tenant is inactive and stays so; if an earlier move left it so, \
+                 run `edit-tenant {slug} --activate` afterwards"
+            )?;
+            Ok(())
+        }
+    }
+    .await;
+    if let Err(e) = offline {
         if let Some(schema) = &target_schema {
             crate::tenancy::provision::release_schema(pools, &schema.0).await;
         }
-    };
-    if org.active {
-        writeln!(
-            writer,
-            "  deactivating the tenant; if this run dies, run `edit-tenant {slug} --activate`"
-        )?;
-        writeln!(
-            writer,
-            "  waiting {} s for running servers' tenant caches…",
-            parsed.drain_secs
-        )?;
-        if let Err(e) = set_active(pools, slug, id, false).await {
-            release().await;
-            return Err(e);
-        }
-    } else {
-        writeln!(
-            writer,
-            "  the tenant is inactive and stays so; if an earlier move left it so, \
-             run `edit-tenant {slug} --activate` afterwards"
-        )?;
+        return Err(e);
     }
     MoveCtx {
         pools,

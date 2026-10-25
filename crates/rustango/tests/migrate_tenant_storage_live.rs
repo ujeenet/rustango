@@ -971,3 +971,46 @@ async fn a_move_and_a_create_racing_for_one_schema_never_share_it() {
     assert!(moves > 0 && creates > 0, "no real race: {moves} moves / {creates} creates");
     pool.close().await;
 }
+
+/// Fails every write once the move starts going offline.
+struct FailsOffline(Vec<u8>);
+
+impl std::io::Write for FailsOffline {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.extend_from_slice(buf);
+        if String::from_utf8_lossy(&self.0).contains("deactivating") {
+            return Err(std::io::Error::other("closed"));
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A move that stops after claiming its schema drops it again.
+#[tokio::test]
+async fn a_move_failing_before_the_copy_drops_its_schema() {
+    let _g = live_lock().lock().await;
+    if pool().await.is_none() {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    }
+    let (registry, pool) = private_registry("rustango_t1487_rel").await;
+    let src = ScratchDb::create(&std::env::var("DATABASE_URL").unwrap(), "rustango_t1487_rsrc").await;
+    movable_tenant(&pool, "t1487-rel", src.url()).await;
+    let pools = TenantPools::new(pool.clone());
+    let mut out = FailsOffline(Vec::new());
+    let res = run_with_writer(
+        &pools,
+        registry.url(),
+        std::path::Path::new("."),
+        args(&["migrate-tenant-storage", "t1487-rel", "--to", "schema", "--schema-name", "t1487_rel", "--drain-secs", "0"]),
+        &mut out,
+    )
+    .await;
+    assert!(res.is_err(), "the writer failure was swallowed");
+    assert!(!schema_exists(&pool, "t1487_rel").await, "the claimed schema was left behind");
+    assert!(org_row(&pool, "t1487-rel").await.active);
+    pool.close().await;
+}
