@@ -4,7 +4,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-**Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set; `ProvisionRequest` takes a `TenantStorage` and an optional backend, which must be the registry's; a blank `RUSTANGO_SECRET_KEY` no longer seals; `RunKind` is `#[non_exhaustive]`; provisioning types gain a `first_admin` field. See UPGRADING.
+**Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set; `ProvisionRequest` takes a `TenantStorage` and an optional backend, which must be the registry's; a blank `RUSTANGO_SECRET_KEY` no longer seals; `RunKind` is `#[non_exhaustive]`; provisioning types gain a `first_admin` field; `S3Storage::new` takes an `S3Config` and credentials apart; `CreateView`, `UpdateView`, `ViewSet::for_model` and `#[viewset]` require the writable field list and lose `.fields()`; `PoolTuning` and `DatabaseSettings` are `#[non_exhaustive]`; `Debug` on auth, SSO and tenancy structs hides secrets. See UPGRADING.
 
 ### Added — purge and password rotation for tenants on a saved server
 
@@ -76,7 +76,7 @@ It soft-deletes the row, deletes the object, then the row, each on its own; a sl
 
 ### Fixed — `CreateView` / `UpdateView` write only an explicit field list
 
-`for_model(schema, &fields)` now requires the allow-list, so a POST can no longer set any column (`owner_id=…`). An update keeps a listed field the form did not send, instead of wiping it; an unsent `bool` is `false`. Breaking: `.fields()` is removed from both.
+`for_model(schema, &fields)` now requires the allow-list, so a POST can no longer set any column (`owner_id=…`). An update keeps a listed field the form did not send, instead of wiping it; an unsent `bool` is `false`. `.fields()` is removed from both.
 
 ```rust
 // before: every input column was writable
@@ -87,7 +87,7 @@ UpdateView::for_model(Post::SCHEMA, &["title", "body"])
 
 ### Changed — `PoolTuning` and `DatabaseSettings` are `#[non_exhaustive]`
 
-A new pool knob no longer breaks callers' struct literals. Breaking: build one from `Default::default()` and assign the `pub` fields.
+A new pool knob no longer breaks callers' struct literals. Build one from `Default::default()` and assign the `pub` fields.
 
 ### Fixed — `CreateView` uses the column default for an unsent field
 
@@ -95,7 +95,7 @@ A listed field with a default that the POST leaves out gets that default, as in 
 
 ### Fixed — `ViewSet` writes only an explicit field list
 
-`ViewSet::for_model(schema, &fields)` and `#[viewset(fields = "…")]` now require the list, so a body can no longer set any column (`is_admin`, `owner_id`). Breaking: `.fields()` is removed.
+`ViewSet::for_model(schema, &fields)` and `#[viewset(fields = "…")]` now require the list, so a body can no longer set any column (`is_admin`, `owner_id`). `.fields()` is removed.
 
 ## [0.60.12] — 2026-10-23
 
