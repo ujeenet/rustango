@@ -899,13 +899,16 @@ impl Cli {
         if let Some(cfg) = self.tenant_pools.clone() {
             pools = pools.config(cfg);
         }
-        crate::tenancy::manage::run_with_writer_and_init(
+        crate::tenancy::manage::run_from_cli(
             &pools,
             url,
             &self.migrations_dir,
             args,
             out,
             self.init_tenancy_fn,
+            crate::tenancy::manage::CliFacts {
+                provisioning: self.provisioning_dir.is_some(),
+            },
         )
         .await?;
         Ok(())
@@ -2137,6 +2140,37 @@ mod tests {
         }
         let out = String::from_utf8_lossy(&out);
         assert!(out.contains("skipped (cap) 1"), "{out}");
+    }
+
+    /// `check --deploy` reports the secret key only when provisioning is mounted.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[tokio::test]
+    async fn check_deploy_reports_the_secret_key_with_provisioning() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let registry = crate::sql::Pool::connect_sqlite(&url)
+            .await
+            .expect("connect");
+        let args = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        for provisioning in [false, true] {
+            let mut cli = Cli::new()
+                .tenancy()
+                .migrations_dir(tmp.path().join("migrations"));
+            if provisioning {
+                cli = cli.with_tenant_provisioning(tmp.path().join("migrations"));
+            }
+            let mut out: Vec<u8> = Vec::new();
+            cli.run_tenancy_verb_to(registry.clone(), &url, args(&["migrate-registry"]), &mut out)
+                .await
+                .expect("migrate-registry");
+            let mut out: Vec<u8> = Vec::new();
+            // Errors on the test env's unset settings; the report is still written.
+            let _ = cli
+                .run_tenancy_verb_to(registry.clone(), &url, args(&["check", "--deploy"]), &mut out)
+                .await;
+            let out = String::from_utf8_lossy(&out);
+            assert_eq!(out.contains("RUSTANGO_SECRET_KEY"), provisioning, "{out}");
+        }
     }
 
     #[test]
