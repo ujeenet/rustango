@@ -791,11 +791,11 @@ impl Dialect for MySql {
         if lhs.contains("*/") {
             return false;
         }
-        let op = if ne { "<>" } else { "=" };
-        let not = if ne { "NOT " } else { "" };
+        let (op, want) = if ne { ("<>", 0) } else { ("=", 1) };
+        // Bare in a WHERE, MariaDB 11 takes a NULL `JSON_EQUALS` as true.
         ByServer {
             mysql: &format!("{lhs} {op} CAST({placeholder} AS JSON)"),
-            mariadb: &format!("{not}JSON_EQUALS({lhs}, {placeholder})"),
+            mariadb: &format!("JSON_EQUALS({lhs}, {placeholder}) = {want}"),
         }
         .write(sql);
         true
