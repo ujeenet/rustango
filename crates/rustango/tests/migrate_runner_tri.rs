@@ -267,6 +267,296 @@ async fn referenced_key_widens_beside_new_fks(pool: &Pool) {
     }
 }
 
+/// Widening a key an M2M junction references: MySQL widens the junction
+/// column with it, so the junction's FK comes back (MySQL error 3780 otherwise).
+async fn referenced_key_widens_its_junction(pool: &Pool) {
+    let (post, tag, through) = ("mr_wj_post", "mr_wj_tag", "mr_wj_post_tags");
+    let ledger = "mr_wj_ledger";
+    let dir = fresh(pool, &[through, post, tag], ledger).await;
+    let with = |ty: &str| -> rustango::migrate::SchemaSnapshot {
+        let key = json!({"name": "id", "column": "id", "ty": ty, "nullable": false,
+            "primary_key": true});
+        serde_json::from_value(json!({
+            "tables": [table(post, vec![id()]), table(tag, vec![key])],
+            "m2m_tables": [{"through": through, "src_table": post, "src_col": "post_id",
+                "dst_table": tag, "dst_col": "tag_id"}],
+        }))
+        .expect("snapshot")
+    };
+    let step = |ty: &str| {
+        make_migrations_from(dir.path(), &with(ty), None)
+            .expect("makemigrations")
+            .expect("a migration")
+    };
+    step("i32");
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .expect("initial");
+    let widen = step("i64");
+    let name = pool.dialect().name();
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("widening on {name}: {e}"));
+    assert_eq!(fk_count(pool, through).await, 2, "junction FKs on {name}");
+    let d = pool.dialect();
+    let (qp, qt, qj) = (d.quote_ident(post), d.quote_ident(tag), d.quote_ident(through));
+    exec(pool, &format!("INSERT INTO {qp} (id) VALUES (1)"))
+        .await
+        .unwrap();
+    exec(pool, &format!("INSERT INTO {qt} (id) VALUES (3000000000)"))
+        .await
+        .expect("the PK is BIGINT");
+    exec(
+        pool,
+        &format!("INSERT INTO {qj} (post_id, tag_id) VALUES (1, 3000000000)"),
+    )
+    .await
+    .expect("the junction column is BIGINT");
+    assert!(
+        exec(
+            pool,
+            &format!("INSERT INTO {qj} (post_id, tag_id) VALUES (1, 7)")
+        )
+        .await
+        .is_err(),
+        "the junction FK is back on {name}"
+    );
+    for t in [through, post, tag] {
+        exec(pool, &format!("DELETE FROM {}", d.quote_ident(t)))
+            .await
+            .unwrap();
+    }
+    unapply_pool_with_ledger(pool, dir.path(), &widen.name, ledger)
+        .await
+        .unwrap_or_else(|e| panic!("narrowing on {name}: {e}"));
+    assert_eq!(fk_count(pool, through).await, 2, "junction FKs after unapply on {name}");
+    for t in [through, post, tag, ledger] {
+        drop_table(pool, t).await;
+    }
+}
+
+/// Rolling back drops that follow a column rename: the CHECK and the
+/// partial index come back once the rename is undone, not before it.
+async fn rollback_after_rename_restores_check_and_partial_index(pool: &Pool) {
+    let t = "mr_rn_item";
+    let ledger = "mr_rn_ledger";
+    let dir = fresh(pool, &[t], ledger).await;
+    let name = pool.dialect().name();
+    // MySQL refuses to rename a column a CHECK reads (MySQL error 3959).
+    let check = name != "mysql";
+    let mut before = json!({
+        "tables": [table(t, vec![id(), col("n", true)])],
+        "indexes": [{"name": "mr_rn_pos_idx", "table": t, "columns": ["n"],
+            "unique": false, "where_clause": "n > 0"}],
+    });
+    if check {
+        before["checks"] = json!([{"name": "mr_rn_ck", "table": t, "expr": "n >= 0"}]);
+    }
+    let exclude = name == "postgres";
+    if exclude {
+        before["excludes"] = json!([{"name": "mr_rn_ex", "table": t, "using": "btree",
+            "elements": [["n", "="]], "where_clause": "n > 100"}]);
+    }
+    let initial = make_migrations_from(
+        dir.path(),
+        &serde_json::from_value(before).expect("snapshot"),
+        None,
+    )
+    .expect("makemigrations")
+    .expect("a migration");
+    let mut forward = vec![Operation::Schema(SchemaChange::RenameColumn {
+        table: t.into(),
+        old_column: "n".into(),
+        new_column: "m".into(),
+    })];
+    if check {
+        forward.push(Operation::Schema(SchemaChange::DropCheckConstraint {
+            name: "mr_rn_ck".into(),
+            table: t.into(),
+        }));
+    }
+    forward.push(Operation::Schema(SchemaChange::DropIndex {
+        name: "mr_rn_pos_idx".into(),
+        table: t.into(),
+    }));
+    if exclude {
+        forward.push(Operation::Schema(SchemaChange::DropExclusionConstraint {
+            name: "mr_rn_ex".into(),
+            table: t.into(),
+        }));
+    }
+    let mig = Migration {
+        name: "0002_rename".into(),
+        prev: Some(initial.name.clone()),
+        snapshot: snap(vec![table(t, vec![id(), col("m", true)])]),
+        forward,
+        ..initial
+    };
+    write(dir.path(), &mig);
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("rename on {name}: {e}"));
+    unapply_pool_with_ledger(pool, dir.path(), &mig.name, ledger)
+        .await
+        .unwrap_or_else(|e| panic!("rollback on {name}: {e}"));
+    let q = pool.dialect().quote_ident(t);
+    exec(pool, &format!("INSERT INTO {q} (n) VALUES (1)"))
+        .await
+        .unwrap_or_else(|e| panic!("`n` is back on {name}: {e}"));
+    if check {
+        assert!(
+            exec(pool, &format!("INSERT INTO {q} (n) VALUES (-1)"))
+                .await
+                .is_err(),
+            "the CHECK is back on {name}"
+        );
+    }
+    if exclude {
+        exec(pool, &format!("INSERT INTO {q} (n) VALUES (101)"))
+            .await
+            .unwrap();
+        assert!(
+            exec(pool, &format!("INSERT INTO {q} (n) VALUES (101)"))
+                .await
+                .is_err(),
+            "the exclusion constraint is back"
+        );
+    }
+    for d in [t, ledger] {
+        drop_table(pool, d).await;
+    }
+}
+
+/// A CHECK and a partial index dropped with their renamed table, before or
+/// after the rename: rolling back creates each once.
+async fn rollback_of_a_renamed_dropped_table_restores_its_check_once(pool: &Pool) {
+    let (t, u) = ("mr_rt_item", "mr_rt_moved");
+    let ledger = "mr_rt_ledger";
+    let name = pool.dialect().name();
+    if name == "sqlite" {
+        return; // Its CHECK drop rebuilds the table, refused before a later DropTable.
+    }
+    let rename = || {
+        Operation::Schema(SchemaChange::RenameTable {
+            old_name: t.into(),
+            new_name: u.into(),
+        })
+    };
+    let drops = |on: &str| {
+        vec![
+            Operation::Schema(SchemaChange::DropCheckConstraint {
+                name: "mr_rt_ck".into(),
+                table: on.into(),
+            }),
+            Operation::Schema(SchemaChange::DropIndex {
+                name: "mr_rt_pos_idx".into(),
+                table: on.into(),
+            }),
+        ]
+    };
+    let before_rename = [drops(t), vec![rename()]].concat();
+    let after_rename = [vec![rename()], drops(u)].concat();
+    for mut forward in [before_rename, after_rename] {
+        forward.push(Operation::Schema(SchemaChange::DropTable(u.into())));
+        let dir = fresh(pool, &[t, u], ledger).await;
+        let before = json!({
+            "tables": [table(t, vec![id(), col("n", true)])],
+            "indexes": [{"name": "mr_rt_pos_idx", "table": t, "columns": ["n"],
+                "unique": false, "where_clause": "n > 0"}],
+            "checks": [{"name": "mr_rt_ck", "table": t, "expr": "n >= 0"}],
+        });
+        let initial = make_migrations_from(
+            dir.path(),
+            &serde_json::from_value(before).expect("snapshot"),
+            None,
+        )
+        .expect("makemigrations")
+        .expect("a migration");
+        let mig = Migration {
+            name: "0002_drop".into(),
+            prev: Some(initial.name.clone()),
+            snapshot: snap(vec![]),
+            forward,
+            ..initial
+        };
+        write(dir.path(), &mig);
+        migrate_pool_with_ledger(pool, dir.path(), ledger)
+            .await
+            .unwrap_or_else(|e| panic!("drop on {name}: {e}"));
+        unapply_pool_with_ledger(pool, dir.path(), &mig.name, ledger)
+            .await
+            .unwrap_or_else(|e| panic!("rollback on {name}: {e}"));
+        let q = pool.dialect().quote_ident(t);
+        exec(pool, &format!("INSERT INTO {q} (n) VALUES (1)"))
+            .await
+            .unwrap_or_else(|e| panic!("`{t}` is back on {name}: {e}"));
+        assert!(
+            exec(pool, &format!("INSERT INTO {q} (n) VALUES (-1)"))
+                .await
+                .is_err(),
+            "the CHECK is back on {name}"
+        );
+    }
+    for d in [t, u, ledger] {
+        drop_table(pool, d).await;
+    }
+}
+
+/// Two branches add a column each. Going back to one branch unapplies the
+/// other; SQLite rebuilt the table from the shared parent's snapshot and
+/// refused to lose the first branch's column.
+async fn unapplying_one_branch_keeps_the_others_column(pool: &Pool) {
+    let t = "mr_br_item";
+    let ledger = "mr_br_ledger";
+    let dir = fresh(pool, &[t], ledger).await;
+    let initial = make_migrations_from(dir.path(), &snap(vec![table(t, vec![id()])]), None)
+        .expect("makemigrations")
+        .expect("a migration");
+    let branch = |name: &str, column: &str| Migration {
+        name: name.into(),
+        prev: Some(initial.name.clone()),
+        snapshot: snap(vec![table(t, vec![id(), col(column, true)])]),
+        forward: vec![Operation::Schema(SchemaChange::AddColumn {
+            table: t.into(),
+            column: column.into(),
+        })],
+        ..initial.clone()
+    };
+    write(dir.path(), &branch("0002_a", "a"));
+    write(dir.path(), &branch("0002_b", "b"));
+    write(
+        dir.path(),
+        &Migration {
+            name: "0003_merge".into(),
+            prev: Some("0002_b".into()),
+            merges: vec!["0002_a".into()],
+            snapshot: snap(vec![table(t, vec![id(), col("a", true), col("b", true)])]),
+            forward: Vec::new(),
+            ..initial.clone()
+        },
+    );
+    let name = pool.dialect().name();
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("both branches on {name}: {e}"));
+    rustango::migrate::migrate_to_pool_with_ledger(pool, dir.path(), "0002_a", ledger)
+        .await
+        .unwrap_or_else(|e| panic!("back to one branch on {name}: {e}"));
+    let q = pool.dialect().quote_ident(t);
+    exec(pool, &format!("INSERT INTO {q} (a) VALUES (1)"))
+        .await
+        .unwrap_or_else(|e| panic!("`a` kept on {name}: {e}"));
+    assert!(
+        exec(pool, &format!("INSERT INTO {q} (b) VALUES (1)"))
+            .await
+            .is_err(),
+        "`b` gone on {name}"
+    );
+    for d in [t, ledger] {
+        drop_table(pool, d).await;
+    }
+}
+
 fn slow(_pool: Pool) -> MigrationCallbackFut {
     Box::pin(async {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -581,6 +871,10 @@ tri_dialect_test!(
         long_index_names_apply,
         referenced_key_widens,
         referenced_key_widens_beside_new_fks,
+        referenced_key_widens_its_junction,
+        rollback_after_rename_restores_check_and_partial_index,
+        rollback_of_a_renamed_dropped_table_restores_its_check_once,
+        unapplying_one_branch_keeps_the_others_column,
         refused_downgrade_runs_nothing,
         refused_loose_downgrade_runs_nothing,
         one_connection_pool_migrates,

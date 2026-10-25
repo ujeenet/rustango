@@ -341,6 +341,50 @@ async fn nested_same_table_exists_dml(pool: &Pool) {
     }
 }
 
+/// A correlated IN over the target, in a write that changes the column it
+/// filters on. As a derived table MySQL re-read it per row and saw the
+/// earlier writes; it now refuses it (MySQL error 1093) and writes nothing.
+/// MariaDB reads the target in a plain subquery and runs it correctly.
+async fn correlated_same_table_in_dml(pool: &Pool) {
+    use rustango::core::{subquery::outer_ref, Column as _};
+    // Tags of higher rows ranked over 25; only id 1 (rank 50) has none.
+    let higher = Item::objects()
+        .where_(Item::rank.gt_expr(outer_ref("rank")))
+        .filter("rank__gt", 25_i64)
+        .values_list_flat("tag")
+        .compile()
+        .unwrap();
+    let r = Item::objects()
+        .where_not_in_subquery("tag", higher)
+        .update()
+        .set("rank", 0_i64)
+        .execute_pool(pool)
+        .await;
+    let ranks = || async {
+        let rows: Vec<Item> = Item::objects()
+            .order_by(&[("id", false)])
+            .fetch(pool)
+            .await
+            .unwrap();
+        rows.iter().map(|r| r.rank).collect::<Vec<i64>>()
+    };
+    let mariadb = pool.dialect().name() == "mysql" && {
+        let v: Vec<(String,)> =
+            rustango::sql::raw_query_pool("SELECT VERSION()", Vec::new(), pool)
+                .await
+                .unwrap();
+        v[0].0.contains("MariaDB")
+    };
+    if pool.dialect().name() == "mysql" && !mariadb {
+        let e = r.expect_err("MySQL refuses a correlated IN over the target");
+        assert!(e.to_string().contains("1093"), "{e}");
+        assert_eq!(ranks().await, vec![50, 10, 40, 20, 30]);
+    } else {
+        assert_eq!(r.expect("update"), 1);
+        assert_eq!(ranks().await, vec![0, 10, 40, 20, 30]);
+    }
+}
+
 /// A raw-table relation EXISTS (M2M / generic `where_has`) over the write's
 /// own table; MySQL raised 1093.
 async fn self_relation_where_has_dml(pool: &Pool) {
@@ -569,6 +613,7 @@ tri_dialect_test! {
         same_table_in_subquery_dml,
         same_table_exists_dml,
         nested_same_table_exists_dml,
+        correlated_same_table_in_dml,
         self_relation_where_has_dml,
         nested_and_correlated_in_subquery_dml,
         nested_in_wraps_once,

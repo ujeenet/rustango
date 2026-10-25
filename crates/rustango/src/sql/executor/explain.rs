@@ -94,6 +94,9 @@ impl ExplainOptions {
 ///   * `EXPLAIN FORMAT=TREE <stmt>` otherwise (8.0.16+). Returns one
 ///     TEXT column with the optimizer's structured plan.
 ///
+///   MariaDB runs `EXPLAIN FORMAT=JSON` for the text plan and
+///   `ANALYZE FORMAT=JSON` for `analyze`, so both are JSON text there.
+///
 ///   MySQL's classic tabular `EXPLAIN <stmt>` (multi-column) is not
 ///   emitted by this helper because the single-string return shape
 ///   doesn't fit. Use `raw_query_pool` if you need the tabular form.
@@ -129,12 +132,19 @@ pub(super) async fn explain_lines_on<'c, E: SqlExecutor<'c>>(
     let d = exec.dialect();
     let stmt = d.compile_select(query)?;
     let json = options.format == ExplainFormat::Json;
+    let by_server = |mysql, mariadb| {
+        let mut sql = String::new();
+        crate::sql::mysql::ByServer { mysql, mariadb }.write(&mut sql);
+        sql.push(' ');
+        sql
+    };
     let prefix = match d.name() {
         // `EXPLAIN ANALYZE` (8.0.18+) runs the query and wins over
-        // `format`; `FORMAT=JSON|TREE` (8.0.16+) is plan-only.
-        "mysql" if options.analyze => "EXPLAIN ANALYZE ".to_owned(),
+        // `format`; `FORMAT=JSON|TREE` (8.0.16+) is plan-only. MariaDB has
+        // neither TREE nor `EXPLAIN ANALYZE`, so it gets its one-cell JSON.
+        "mysql" if options.analyze => by_server("EXPLAIN ANALYZE", "ANALYZE FORMAT=JSON"),
         "mysql" if json => "EXPLAIN FORMAT=JSON ".to_owned(),
-        "mysql" => "EXPLAIN FORMAT=TREE ".to_owned(),
+        "mysql" => by_server("EXPLAIN FORMAT=TREE", "EXPLAIN FORMAT=JSON"),
         // Plan-only, so analyze/buffers/verbose no-op. Columns: id,
         // parent, notused, detail.
         "sqlite" => "EXPLAIN QUERY PLAN ".to_owned(),

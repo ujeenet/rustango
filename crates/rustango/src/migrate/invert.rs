@@ -34,10 +34,54 @@ pub fn invert(
     prev: &SchemaSnapshot,
 ) -> Result<Vec<Operation>, MigrateError> {
     let mut out = Vec::with_capacity(forward.len());
+    let mut last = Vec::new();
     for (i, op) in forward.iter().enumerate().rev() {
-        out.push(invert_one(op, prev, &Names::new(&forward[..i]))?);
+        let names = Names::new(&forward[..i]);
+        match recreate_as_prev(op, prev, &names) {
+            Some(op) => last.push(op),
+            None => out.push(invert_one(op, prev, &names)?),
+        }
     }
+    out.extend(last);
     Ok(out)
+}
+
+/// A dropped CHECK, partial index or exclusion constraint on a table an
+/// earlier op renamed, or renamed a column of: its SQL text holds `prev`'s
+/// names, which cannot be remapped, so it is recreated as `prev` has it,
+/// at the end, once every rename is undone.
+fn recreate_as_prev(op: &Operation, prev: &SchemaSnapshot, names: &Names<'_>) -> Option<Operation> {
+    let change = match op {
+        Operation::Schema(SchemaChange::DropCheckConstraint { name, .. }) => {
+            let c = prev.check(name)?;
+            SchemaChange::AddCheckConstraint {
+                name: name.clone(),
+                table: c.table.clone(),
+                expr: c.expr.clone(),
+            }
+        }
+        Operation::Schema(SchemaChange::DropIndex { name, .. }) => {
+            let idx = prev.index(name).filter(|i| i.where_clause.is_some())?;
+            SchemaChange::CreateIndex {
+                name: name.clone(),
+                table: idx.table.clone(),
+                columns: idx.columns.clone(),
+                unique: idx.unique,
+                method: idx.method.clone(),
+                where_clause: idx.where_clause.clone(),
+                include: idx.include.clone(),
+            }
+        }
+        Operation::Schema(SchemaChange::DropExclusionConstraint { name, .. }) => {
+            let x = prev
+                .excludes
+                .iter()
+                .find(|x| x.name == *name && x.where_clause.is_some())?;
+            super::diff::add_exclude(x)
+        }
+        _ => return None,
+    };
+    names.renames(change.table()).then_some(Operation::Schema(change))
 }
 
 /// Maps names between `prev` and one forward op, through the renames
@@ -84,6 +128,21 @@ impl<'a> Names<'a> {
 
     fn column_before(&self, table: &str, column: &str) -> String {
         super::rebuild::columns_at_end(table, &[column.to_owned()], &self.undo).remove(0)
+    }
+
+    /// Whether an earlier op renames `prev`'s `table` or one of its columns.
+    fn renames(&self, table: &str) -> bool {
+        let mut name = table.to_owned();
+        self.earlier.iter().any(|op| match op {
+            Operation::Schema(SchemaChange::RenameTable { old_name, new_name })
+                if *old_name == name =>
+            {
+                name.clone_from(new_name);
+                true
+            }
+            Operation::Schema(SchemaChange::RenameColumn { table, .. }) => *table == name,
+            _ => false,
+        })
     }
 
     /// `prev`'s `table` as it is named at the op.
