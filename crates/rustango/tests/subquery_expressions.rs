@@ -220,7 +220,7 @@ fn mysql_wraps_dml_in_subquery_only_when_it_reads_the_target() {
     let (n, sql) = wraps(in_subquery("id", reverse));
     assert_eq!(n, 1, "{sql}");
     assert!(sql.ends_with(") AS `_rustango_in`)"), "{sql}");
-    // Depth 2 through an EXISTS.
+    // Depth 2 through an EXISTS, which reads the target as a derived table.
     let via_exists = Book::objects()
         .where_exists(
             Author::objects()
@@ -232,7 +232,11 @@ fn mysql_wraps_dml_in_subquery_only_when_it_reads_the_target() {
         .compile()
         .unwrap();
     let (n, sql) = wraps(in_subquery("id", via_exists));
-    assert_eq!(n, 1, "{sql}");
+    assert_eq!(n, 0, "{sql}");
+    assert!(
+        sql.contains("FROM (SELECT * FROM `sq_author`) AS `sq_author`"),
+        "{sql}"
+    );
     // Correlated over another table: stays a plain IN.
     let correlated = Book::objects()
         .where_(Book::author_id.eq_expr(outer_ref("id")))

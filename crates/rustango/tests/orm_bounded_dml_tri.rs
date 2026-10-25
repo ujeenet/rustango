@@ -254,6 +254,32 @@ async fn same_table_in_subquery_dml(pool: &Pool) {
     assert_eq!(ids(pool).await, vec![1, 3]);
 }
 
+/// A correlated `EXISTS` over the target in a write; MySQL raised 1093.
+async fn same_table_exists_dml(pool: &Pool) {
+    use rustango::core::{subquery::outer_ref, Column as _};
+    let higher = || {
+        Item::objects()
+            .where_(Item::rank.gt_expr(outer_ref("rank")))
+            .compile()
+            .unwrap()
+    };
+    let n = Item::objects()
+        .where_exists(higher())
+        .update()
+        .set("tag", "lo")
+        .execute_pool(pool)
+        .await
+        .expect("update EXISTS (same table)");
+    assert_eq!(n, 4);
+    assert_eq!(ids_tagged(pool, "lo").await, vec![2, 3, 4, 5]);
+    let q = Item::objects()
+        .where_not_exists(higher())
+        .compile_delete()
+        .unwrap();
+    assert_eq!(delete_pool(pool, &q).await.expect("delete NOT EXISTS"), 1);
+    assert_eq!(ids(pool).await, vec![2, 3, 4, 5]);
+}
+
 /// The target read only by a nested IN or EXISTS still raises 1093 on MySQL;
 /// a correlated subquery over another table runs as a plain IN.
 async fn nested_and_correlated_in_subquery_dml(pool: &Pool) {
@@ -429,6 +455,7 @@ tri_dialect_test! {
         unbounded_paths_unchanged,
         anti_join_delete,
         same_table_in_subquery_dml,
+        same_table_exists_dml,
         nested_and_correlated_in_subquery_dml,
         nested_in_wraps_once,
         set_operation_dml_is_refused,

@@ -9,6 +9,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — ORM and MySQL
 
 - MariaDB: JSON writes and text JSON paths no longer send `CAST(… AS JSON)`, which it rejects.
+- MySQL: an `update()` / `delete()` filtered by `EXISTS` over its own table no longer fails with error 1093.
 
 ### Fixed — the first admin could not set a password in a browser
 

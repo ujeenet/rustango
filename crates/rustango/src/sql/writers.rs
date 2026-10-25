@@ -56,6 +56,8 @@ pub(super) struct Sql<'d> {
     pub dml_target: Option<&'static str>,
     /// A FROM or JOIN item named [`Self::dml_target`] since the flag was last cleared.
     pub read_dml_target: bool,
+    /// Read [`Self::dml_target`] through a derived table (MySQL 1093 in an EXISTS).
+    pub derive_dml_target: bool,
 }
 
 /// The FROM name of a correlated subquery over its enclosing query's
@@ -83,11 +85,8 @@ impl Scope {
 
     /// `<table>` or `<table> AS <alias>`, as a FROM item.
     fn write_from(self, b: &mut Sql<'_>) {
-        b.write_table(self.model.table);
-        if self.name != self.model.table {
-            b.sql.push_str(" AS ");
-            b.write_ident(self.name);
-        }
+        let alias = (self.name != self.model.table).then_some(self.name);
+        b.write_table(self.model.table, alias);
     }
 
     /// An explicit `<table>.` reference to this scope's own table reads
@@ -136,6 +135,7 @@ impl<'d> Sql<'d> {
             group_concat: false,
             dml_target: None,
             read_dml_target: false,
+            derive_dml_target: false,
         }
     }
 
@@ -154,6 +154,7 @@ impl<'d> Sql<'d> {
             group_concat: false,
             dml_target: None,
             read_dml_target: false,
+            derive_dml_target: false,
         }
     }
 
@@ -239,9 +240,34 @@ impl<'d> Sql<'d> {
 
     /// [`Self::write_ident`] for a table a query reads: every FROM and JOIN
     /// item goes through here, so MySQL knows which subqueries hit 1093.
-    fn write_table(&mut self, name: &str) {
-        self.read_dml_target |= self.dml_target == Some(name);
-        self.write_ident(name);
+    /// `alias` is written as ` AS <alias>`.
+    fn write_table(&mut self, name: &str, alias: Option<&str>) {
+        let target = self.dml_target == Some(name);
+        // A correlated derived table fails on MariaDB; a derived target does not.
+        let derive = target && self.derive_dml_target;
+        self.read_dml_target |= target && !derive;
+        if derive {
+            self.sql.push_str("(SELECT * FROM ");
+            self.write_ident(name);
+            self.sql.push(')');
+        } else {
+            self.write_ident(name);
+        }
+        if let Some(alias) = alias.or(derive.then_some(name)) {
+            self.sql.push_str(" AS ");
+            self.write_ident(alias);
+        }
+    }
+
+    /// Run `f` reading the write target through a derived table where the
+    /// dialect needs it (1093).
+    fn with_derived_dml_target<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let needs = self.dml_target.is_some() && self.d.in_subquery_limit_needs_derived_table();
+        let outer = self.derive_dml_target;
+        self.derive_dml_target |= needs;
+        let r = f(self);
+        self.derive_dml_target = outer;
+        r
     }
 
     /// Add `value` to the bind list and write its placeholder.
@@ -1127,9 +1153,10 @@ fn write_model_joins(b: &mut Sql<'_>, joins: &[crate::core::Join]) -> Result<(),
         b.sql.push(' ');
         b.sql.push_str(kind_kw);
         b.sql.push(' ');
-        b.write_table(join.target.table);
-        b.sql.push_str(" AS ");
-        b.write_alias(join.alias);
+        b.write_table(
+            join.target.table,
+            Some(&crate::core::joins::sql_label(join.alias)),
+        );
         b.sql.push_str(" ON ");
         // Bare columns in the ON predicate resolve to the joined
         // alias here. Use `Expr::AliasedColumn` to point elsewhere.
@@ -4197,13 +4224,13 @@ pub(super) fn write_where_expr(
         }
         WhereExpr::Exists(subq) => {
             b.sql.push_str("EXISTS (");
-            write_select(b, subq)?;
+            b.with_derived_dml_target(|b| write_select(b, subq))?;
             b.sql.push(')');
             Ok(())
         }
         WhereExpr::NotExists(subq) => {
             b.sql.push_str("NOT EXISTS (");
-            write_select(b, subq)?;
+            b.with_derived_dml_target(|b| write_select(b, subq))?;
             b.sql.push(')');
             Ok(())
         }
@@ -4272,15 +4299,10 @@ fn write_rel_correlation(
             })
         }
     };
-    b.write_table(table);
     // A self relation must not hide the outer row.
-    let table = if table == outer_table {
-        b.sql.push_str(" AS ");
-        b.write_ident(SELF_ALIAS);
-        SELF_ALIAS
-    } else {
-        table
-    };
+    let alias = (table == outer_table).then_some(SELF_ALIAS);
+    b.write_table(table, alias);
+    let table = alias.unwrap_or(table);
     b.sql.push_str(" WHERE ");
     match correlation {
         RelCorrelation::Fk {
@@ -4305,7 +4327,7 @@ fn write_rel_correlation(
                 b.sql.push_str(" = (SELECT ");
                 b.write_ident(ct.ct_pk);
                 b.sql.push_str(" FROM ");
-                b.write_table(ct.ct_table);
+                b.write_table(ct.ct_table, None);
                 b.sql.push_str(" WHERE ");
                 b.write_ident(ct.ct_table_col);
                 b.sql.push_str(" = ");
@@ -4329,7 +4351,7 @@ fn write_rel_correlation(
             b.sql.push_str(" IN (SELECT ");
             b.write_ident(dst_col);
             b.sql.push_str(" FROM ");
-            b.write_table(through);
+            b.write_table(through, None);
             b.sql.push_str(" WHERE ");
             b.write_ident(through);
             b.sql.push('.');
