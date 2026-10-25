@@ -531,3 +531,119 @@ tri_dialect_test! {
         large_bulk_insert_audits_on_postgres,
     ],
 }
+
+/// Child rows an `ON DELETE CASCADE` removes get a `delete` audit row,
+/// through non-audited tables and self-references, each row once.
+mod cascade {
+    use super::*;
+
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "audit_casc_shelf", app = "audit1747")]
+    #[allow(dead_code)]
+    pub struct Shelf {
+        #[rustango(primary_key)]
+        pub id: i64,
+    }
+
+    /// Not audited: the cascade reaches `Crate` through it.
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "audit_casc_rack", app = "audit1747")]
+    #[allow(dead_code)]
+    pub struct Rack {
+        #[rustango(primary_key)]
+        pub id: i64,
+        #[rustango(fk = "audit_casc_shelf", on = "id", on_delete = "cascade")]
+        pub shelf_id: i64,
+    }
+
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "audit_casc_crate", app = "audit1747", audit(track = "label"))]
+    #[allow(dead_code)]
+    pub struct Crate {
+        #[rustango(primary_key)]
+        pub id: i64,
+        #[rustango(max_length = 16)]
+        pub label: String,
+        #[rustango(fk = "audit_casc_rack", on = "id", on_delete = "cascade")]
+        pub rack_id: i64,
+        #[rustango(fk = "audit_casc_crate", on = "id", on_delete = "cascade")]
+        pub parent_id: Option<i64>,
+    }
+
+    const CRATE: &str = "audit_casc_crate";
+
+    async fn setup(pool: &Pool) {
+        use rustango::testkit::matrix::{drop_table, fresh_table};
+        for t in [CRATE, "audit_casc_rack", "audit_casc_shelf"] {
+            drop_table(pool, t).await;
+        }
+        fresh_table::<Shelf>(pool).await;
+        fresh_table::<Rack>(pool).await;
+        fresh_table::<Crate>(pool).await;
+        audit::ensure_table_pool(pool).await.expect("audit table");
+        AuditLog::delete_where("entity_table", CRATE, pool)
+            .await
+            .expect("clear audit rows");
+        for id in [1, 2] {
+            Shelf { id }.insert_pool(pool).await.expect("shelf");
+            Rack { id: id * 10, shelf_id: id }
+                .insert_pool(pool)
+                .await
+                .expect("rack");
+        }
+        // 1 <- 2 <- 3 on rack 10; 4 on rack 20.
+        for (id, label, rack_id, parent_id) in [
+            (1, "x", 10, None),
+            (2, "x", 10, Some(1)),
+            (3, "y", 10, Some(2)),
+            (4, "z", 20, None),
+        ] {
+            Crate { id, label: label.into(), rack_id, parent_id }
+                .insert_pool(pool)
+                .await
+                .expect("crate");
+        }
+    }
+
+    /// `delete` entries per crate pk.
+    async fn deletes(pool: &Pool, pk: i64) -> i64 {
+        AuditLog::objects()
+            .filter("entity_table", CRATE)
+            .filter("entity_pk", pk.to_string())
+            .filter("operation", "delete")
+            .count(pool)
+            .await
+            .expect("count")
+    }
+
+    async fn fk_cascade_audits_each_removed_child(pool: &Pool) {
+        assert_eq!(Shelf::delete_where("id", 1_i64, pool).await.unwrap(), 1);
+        for pk in [1, 2, 3] {
+            assert_eq!(deletes(pool, pk).await, 1, "crate {pk}");
+        }
+        assert_eq!(deletes(pool, 4).await, 0);
+        let entry = latest(pool, CRATE, "3").await;
+        assert_eq!(entry.changes["label"], "y");
+        Shelf { id: 2 }.delete_pool(pool).await.unwrap();
+        assert_eq!(deletes(pool, 4).await, 1);
+        assert_eq!(Crate::objects().count(pool).await.unwrap(), 0);
+    }
+
+    async fn audited_delete_audits_each_row_once(pool: &Pool) {
+        // MySQL and SQLite do not count a row their cascade took first.
+        Crate::delete_where("label", "x", pool).await.unwrap();
+        assert_eq!(Crate::objects().count(pool).await.unwrap(), 1);
+        for pk in [1, 2, 3] {
+            assert_eq!(deletes(pool, pk).await, 1, "crate {pk}");
+        }
+        assert_eq!(deletes(pool, 4).await, 0);
+    }
+
+    tri_dialect_test! {
+        setup: setup,
+        scenarios: [
+            fk_cascade_audits_each_removed_child,
+            audited_delete_audits_each_row_once,
+        ],
+    }
+}

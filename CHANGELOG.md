@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — FK cascades write audit rows
+
+Deleting rows whose `on_delete = "cascade"` children (at any depth, self-references included) are audited now writes one `delete` entry per child row removed, in the delete's transaction. Models with no audited model downstream pay nothing.
+
 ### Added — related columns in `values_list` / `values_dict` / `only`
 
 A projection may name a column across FK hops, like `values_list(&["title", "author__name"])`: one LEFT JOIN per hop, only the named columns, in the caller's order, keyed by that name.

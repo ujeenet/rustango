@@ -123,7 +123,14 @@ where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
 {
     // Postgres folds the junction cleanup into this one statement.
-    let stmt = crate::sql::compile_delete_plan(&Postgres, query)?.owner;
+    let plan = crate::sql::compile_delete_plan(&Postgres, query)?;
+    if plan.cascade.is_some() {
+        return Err(ExecError::AuditUnsupported {
+            table: query.model.table,
+            reason: "it cascades to an audited model; use `delete_pool`",
+        });
+    }
+    let stmt = plan.owner;
     let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
     for value in stmt.params {
         q = bind_query(q, value);

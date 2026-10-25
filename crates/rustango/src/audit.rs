@@ -23,11 +23,13 @@
 //! model's `audit(track = "...")`. Bulk writes collect their entries and
 //! insert them in multi-row statements sized to the bind limit.
 //!
-//! Rows the database removes or changes through an FK `ON DELETE`
-//! action, or that PG's `truncate` (`CASCADE`) empties, are not audited
-//! (planned for 0.61.0).
+//! Audited rows an FK `ON DELETE CASCADE` removes get a `delete` entry
+//! too. Rows changed by `SET NULL` / `SET DEFAULT`, or emptied by PG's
+//! `truncate` (`CASCADE`), are not audited.
 
 use serde_json::{Map, Value};
+
+pub(crate) mod cascade;
 
 use crate::sql::sqlx;
 
@@ -151,10 +153,6 @@ fn source_token(source: &AuditSource, via: Via<'_>) -> String {
 }
 
 /// Run `fut` with its audited writes going through `pool`.
-#[cfg_attr(
-    not(any(feature = "admin", feature = "tenancy", feature = "forms")),
-    allow(dead_code)
-)]
 async fn writing_via<F: std::future::Future>(pool: &crate::sql::Pool, fut: F) -> F::Output {
     WRITE_POOL.scope(crate::sql::PoolId::of(pool), fut).await
 }
@@ -1387,7 +1385,7 @@ pub async fn delete_one_with_audit(
     entry: &PendingEntry,
 ) -> Result<u64, crate::sql::ExecError> {
     let mut tx = crate::sql::transaction_pool(pool).await?;
-    let affected = crate::sql::delete_tx(&mut tx, query).await?;
+    let affected = writing_via(pool, crate::sql::delete_tx(&mut tx, query)).await?;
     if affected > 0 {
         emit_one_tx(&mut tx, Via::Pool(pool), entry).await?;
     }
@@ -1762,7 +1760,7 @@ where
             model: query.model,
             where_clause: pk_in(query.model, pks)?,
         };
-        affected += crate::sql::delete_tx(&mut tx, &delete).await?;
+        affected += writing_via(pool, crate::sql::delete_tx(&mut tx, &delete)).await?;
         let entries: Vec<PendingEntry> = chunk.iter().map(&entry).collect();
         emit_many_tx(&mut tx, Via::Pool(pool), &entries).await?;
     }
@@ -1847,6 +1845,51 @@ pub type AuditedDelete = for<'a> fn(
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<u64, crate::sql::ExecError>> + Send + 'a>,
 >;
+
+/// Audited cascade reader, through `Model::__rustango_audited_cascade`:
+/// the rows matching the WHERE, locked in the transaction, as
+/// `(pk, delete entry)` pairs.
+pub type AuditedCascade = for<'a, 't> fn(
+    &'a mut crate::sql::PoolTx<'t>,
+    crate::core::WhereExpr,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<Vec<(crate::core::SqlValue, PendingEntry)>, crate::sql::ExecError>,
+            > + Send
+            + 'a,
+    >,
+>;
+
+/// Rows of `model` matching `rows`, locked in `tx`, with their `Delete`
+/// entries; backs `Model::__rustango_audited_cascade`.
+///
+/// # Errors
+/// As the SELECT.
+#[doc(hidden)]
+pub async fn cascade_rows<M>(
+    tx: &mut crate::sql::PoolTx<'_>,
+    model: &'static crate::core::ModelSchema,
+    rows: crate::core::WhereExpr,
+    entry: impl Fn(&M) -> PendingEntry,
+) -> Result<Vec<(crate::core::SqlValue, PendingEntry)>, crate::sql::ExecError>
+where
+    M: crate::sql::HasPkValue
+        + crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    let found: Vec<M> = rows_in_tx(tx, model, rows, true).await?;
+    Ok(found
+        .iter()
+        .map(|r| (r.__rustango_pk_value_impl(), entry(r)))
+        .collect())
+}
 
 /// Audited `create` recorder, through `Model::__rustango_audited_create`:
 /// re-reads the new row by PK in the insert's transaction and emits its entry.

@@ -177,7 +177,7 @@ pub async fn fetch_values_list(
     fetch_values_list_on(pool, query).await
 }
 
-async fn fetch_values_list_on<'c, E: SqlExecutor<'c>>(
+pub(crate) async fn fetch_values_list_on<'c, E: SqlExecutor<'c>>(
     exec: E,
     query: &SelectQuery,
 ) -> Result<Vec<Vec<SqlValue>>, ExecError> {

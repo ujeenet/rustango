@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Deletes that cascade to audited models
+
+Such a delete now runs in a transaction and first reads (and locks) the rows it will cascade to. The PG-only `Model::delete` / `delete_on` refuse it with `ExecError::AuditUnsupported`; use `delete_pool`.
+
 ### PostgreSQL `IN` lists compile to `= ANY($1)`
 
 Code that inspects compiled PG SQL sees `col = ANY($1)` with one `SqlValue::Array` bind instead of `col IN ($1, …)`. Results are the same.

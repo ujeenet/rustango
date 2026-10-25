@@ -90,8 +90,8 @@ pub use executor::{
     Page, PoolConn, PoolTx, SqlExecutor, TxGuard, UpdaterPool,
 };
 pub(crate) use executor::{
-    bulk_insert_pks_tx, compile_bulk_update_batches, execute_batches_tx, rows_per_batch,
-    fetch_in_chunks, fetch_select_in_chunks, inserted_pk, truncate_tx,
+    bulk_insert_pks_tx, compile_bulk_update_batches, execute_batches_tx, fetch_values_list_on,
+    rows_per_batch, fetch_in_chunks, fetch_select_in_chunks, inserted_pk, truncate_tx,
 };
 #[cfg(feature = "admin")]
 pub(crate) use executor::{select_one_row_as_json_tx, select_rows_as_json_tx};

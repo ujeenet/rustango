@@ -571,7 +571,7 @@ impl<T: Model + Send> QuerySet<T> {
         refuse_audited::<T>("`delete_on` cannot audit; use `Model::delete_where`")?;
         let query = self.compile_delete()?;
         let plan = crate::sql::compile_delete_plan(executor.dialect(), &query)?;
-        if plan.links.is_empty() {
+        if plan.is_one_statement() {
             return write_on(executor, &plan.owner.sql, plan.owner.params).await;
         }
         executor.run_delete_plan(plan).await
@@ -1313,27 +1313,36 @@ pub(crate) async fn delete_plan_pool(
     pool: &Pool,
     plan: crate::sql::DeletePlan,
 ) -> Result<u64, ExecError> {
-    if plan.links.is_empty() {
+    if plan.is_one_statement() {
         return execute_pool(pool, &plan.owner.sql, plan.owner.params).await;
     }
-    atomic(pool, move |tx| {
+    let run = atomic(pool, move |tx| {
         Box::pin(async move {
             let mut guard = tx.lock().await?;
             run_delete_plan_tx(&mut guard, plan).await
         })
-    })
-    .await
+    });
+    crate::audit::cascade::via_pool(pool, run).await
 }
 
-/// Run a [`DeletePlan`](crate::sql::DeletePlan) in `tx`: links, then the owner.
+/// Run a [`DeletePlan`](crate::sql::DeletePlan) in `tx`: links, then the
+/// owner, auditing the audited rows it cascades to.
 pub(crate) async fn run_delete_plan_tx(
     tx: &mut PoolTx<'_>,
     plan: crate::sql::DeletePlan,
 ) -> Result<u64, ExecError> {
+    let cascaded = match &plan.cascade {
+        Some(query) => Some(crate::audit::cascade::snapshot(tx, query).await?),
+        None => None,
+    };
     for link in plan.links {
         execute_tx(tx, &link.sql, link.params).await?;
     }
-    execute_tx(tx, &plan.owner.sql, plan.owner.params).await
+    let affected = execute_tx(tx, &plan.owner.sql, plan.owner.params).await?;
+    if let Some(pending) = cascaded {
+        crate::audit::cascade::emit_removed(tx, pending).await?;
+    }
+    Ok(affected)
 }
 
 /// `SELECT COUNT(*)` against either backend.
@@ -2128,7 +2137,7 @@ where
 
 // `.values_dict()` / `.values_list()` projection.
 mod values;
-pub(crate) use values::fetch_values_flat_on;
+pub(crate) use values::{fetch_values_flat_on, fetch_values_list_on};
 #[allow(unused_imports)]
 pub use values::{
     fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, try_get_flat_my,

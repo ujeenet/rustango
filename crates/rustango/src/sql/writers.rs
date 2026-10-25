@@ -3985,6 +3985,15 @@ pub(super) fn write_delete(b: &mut Sql<'_>, query: &DeleteQuery) -> Result<(), S
 pub struct DeletePlan {
     pub(crate) links: Vec<CompiledStatement>,
     pub(crate) owner: CompiledStatement,
+    /// The delete, when it may cascade to an audited model's rows.
+    pub(crate) cascade: Option<DeleteQuery>,
+}
+
+impl DeletePlan {
+    /// Just the owner statement: no junction deletes, no cascade to audit.
+    pub(crate) fn is_one_statement(&self) -> bool {
+        self.links.is_empty() && self.cascade.is_none()
+    }
 }
 
 /// Compile `query` with its generic M2M junction cleanup: one statement
@@ -3994,6 +4003,7 @@ pub(crate) fn compile_delete_plan(
     query: &DeleteQuery,
 ) -> Result<DeletePlan, SqlError> {
     let links = super::m2m::generic_m2m_links(query);
+    let cascade = crate::audit::cascade::reaches_audited(query.model).then(|| query.clone());
     if links.is_empty() || !d.supports_dml_in_cte() {
         return Ok(DeletePlan {
             links: links
@@ -4001,6 +4011,7 @@ pub(crate) fn compile_delete_plan(
                 .map(|l| d.compile_delete(l))
                 .collect::<Result<_, _>>()?,
             owner: d.compile_delete(query)?,
+            cascade,
         });
     }
     // Every CTE reads the same snapshot, so each sees the owner rows.
@@ -4020,6 +4031,7 @@ pub(crate) fn compile_delete_plan(
     Ok(DeletePlan {
         links: Vec::new(),
         owner: b.finish()?,
+        cascade,
     })
 }
 
