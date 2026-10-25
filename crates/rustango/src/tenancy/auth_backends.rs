@@ -354,8 +354,10 @@ pub struct ApiKey {
     /// ever issued (#1647).
     #[rustango(max_length = 8, index)]
     pub key_prefix: String,
-    /// `hmac-sha256$<hex>` keyed by the server secret (#2617); keys made
-    /// before that hold argon2id until first used. Never returned to callers.
+    /// `hmac-sha256v2$<hex>` under a sub-key of the server secret (#2617);
+    /// `hmac-sha256$` (the secret itself) still verifies; argon2id rows are
+    /// rewritten on first use.
+    /// Never returned to callers.
     #[rustango(max_length = 255)]
     pub key_hash: String,
     /// Human-readable label (e.g. "CI pipeline key").
@@ -443,28 +445,42 @@ impl AuthBackend for ApiKeyBackend {
         // Two indexed ORM round-trips: the key by prefix, then its user.
         // Failures per IP and per tenant; no lock, the prefix is no account.
         let attempt = begin(parts, LoginScope::TenantApiKey, "").await?;
-        let mac = api_key_mac(api_key_secret().map_err(AuthError::from_hash)?, secret);
+        let server_key = api_key_secret().map_err(AuthError::from_hash)?;
+        let mac = api_key_mac(server_key, secret);
         let keys = ApiKey::objects()
             .where_(ApiKey::key_prefix.eq(prefix.to_owned()))
             .fetch(pool)
             .await?;
         // The prefix is random, not unique: try every row (#2250).
-        let (macs, legacy): (Vec<_>, Vec<_>) = keys
-            .into_iter()
-            .partition(|k| k.key_hash.starts_with(API_KEY_MAC_SCHEME));
+        let (mut macs, mut raw_macs, mut legacy) = (Vec::new(), Vec::new(), Vec::new());
+        for k in keys {
+            match StoredKeyHash::of(&k.key_hash) {
+                StoredKeyHash::Mac => macs.push(k),
+                StoredKeyHash::RawSecretMac => raw_macs.push(k),
+                StoredKeyHash::Argon2 => legacy.push(k),
+            }
+        }
+        let raw_hit = || {
+            let raw = raw_secret_api_key_mac(server_key, secret);
+            raw_macs.into_iter().find(|k| mac_eq(&k.key_hash, &raw))
+        };
         let key = match macs.into_iter().find(|k| mac_eq(&k.key_hash, &mac)) {
             Some(k) => Some(k),
-            None if legacy.is_empty() => None,
-            // Pre-#2617 argon2 rows: verify once, then store the MAC.
-            None => {
-                let key = password::first_verified(legacy, secret, |k| &k.key_hash)
-                    .await
-                    .map_err(AuthError::from_hash)?;
-                if let Some(k) = &key {
-                    upgrade_api_key(pool, k, &mac).await;
+            // Keyed by the secret itself; left as is so a rollback still verifies.
+            None => match raw_hit() {
+                Some(k) => Some(k),
+                None if legacy.is_empty() => None,
+                // Pre-#2617 argon2 rows: verify once, then store the MAC.
+                None => {
+                    let key = password::first_verified(legacy, secret, |k| &k.key_hash)
+                        .await
+                        .map_err(AuthError::from_hash)?;
+                    if let Some(k) = &key {
+                        upgrade_api_key(pool, k, &mac).await;
+                    }
+                    key
                 }
-                key
-            }
+            },
         };
         let Some(key) = key else {
             attempt.failed().await;
@@ -497,16 +513,40 @@ impl AuthBackend for ApiKeyBackend {
     }
 }
 
-/// `key_hash` prefix of a key stored as an HMAC; anything else is argon2.
-const API_KEY_MAC_SCHEME: &str = "hmac-sha256$";
+/// `key_hash` prefix of a key MACed with the derived sub-key.
+const API_KEY_MAC_SCHEME: &str = "hmac-sha256v2$";
+/// Prefix of a key MACed with the server secret itself (0.60.x, 0.61.0-1).
+const API_KEY_RAW_MAC_SCHEME: &str = "hmac-sha256$";
 /// Domain tag, so a key MAC is never a valid MAC of anything else.
 const API_KEY_MAC_TAG: &[u8] = b"rustango-apikey-v1.";
+/// KDF label: the API-key sub-key is HMAC(server secret, label).
+const API_KEY_KDF_LABEL: &[u8] = b"rustango-apikey-mac-key-v2";
+
+/// How a stored `key_hash` is checked.
+enum StoredKeyHash {
+    Mac,
+    RawSecretMac,
+    Argon2,
+}
+
+impl StoredKeyHash {
+    fn of(key_hash: &str) -> Self {
+        if key_hash.starts_with(API_KEY_MAC_SCHEME) {
+            Self::Mac
+        } else if key_hash.starts_with(API_KEY_RAW_MAC_SCHEME) {
+            Self::RawSecretMac
+        } else {
+            Self::Argon2
+        }
+    }
+}
 
 static API_KEY_SECRET: std::sync::OnceLock<crate::session::SessionSecret> =
     std::sync::OnceLock::new();
 
 /// Set the key that MACs API keys. The first call wins; returns `false` after.
 /// Unset, it is `RUSTANGO_SESSION_SECRET`, or in dev the tenant session key file.
+/// Changing this key (or rotating that secret) invalidates every API key.
 pub fn set_api_key_secret(secret: crate::session::SessionSecret) -> bool {
     API_KEY_SECRET.set(secret).is_ok()
 }
@@ -538,13 +578,25 @@ pub(crate) fn existing_api_key_secret() -> Result<
     Ok((API_KEY_SECRET.get_or_init(|| secret), Some(source)))
 }
 
-/// `hmac-sha256$<hex>` of the secret half; the prefix is only the lookup.
+/// `hmac-sha256v2$<hex>` of the secret half under a sub-key derived from
+/// `key`, so the server secret never keys this MAC; the prefix is only the lookup.
 fn api_key_mac(key: &crate::session::SessionSecret, secret: &str) -> String {
-    let msg = [API_KEY_MAC_TAG, secret.as_bytes()].concat();
-    format!(
-        "{API_KEY_MAC_SCHEME}{}",
-        to_hex(&crate::session::sign(key, &msg))
+    let sub = crate::session::sign(key, API_KEY_KDF_LABEL).to_vec();
+    tagged_mac(
+        API_KEY_MAC_SCHEME,
+        &crate::session::SessionSecret::from_bytes(sub),
+        secret,
     )
+}
+
+/// The 0.60.x MAC, keyed by the server secret itself; verified, never minted.
+fn raw_secret_api_key_mac(key: &crate::session::SessionSecret, secret: &str) -> String {
+    tagged_mac(API_KEY_RAW_MAC_SCHEME, key, secret)
+}
+
+fn tagged_mac(scheme: &str, key: &crate::session::SessionSecret, secret: &str) -> String {
+    let msg = [API_KEY_MAC_TAG, secret.as_bytes()].concat();
+    format!("{scheme}{}", to_hex(&crate::session::sign(key, &msg)))
 }
 
 fn mac_eq(stored: &str, mac: &str) -> bool {
@@ -967,6 +1019,12 @@ mod tests {
         assert!(mac_eq(&mac, &api_key_mac(&a, "s3cret")));
         assert_ne!(mac, api_key_mac(&b, "s3cret"));
         assert_ne!(mac, api_key_mac(&a, "s3creu"));
+        // Keyed by the derived sub-key, not the secret itself.
+        let raw = raw_secret_api_key_mac(&a, "s3cret");
+        assert_ne!(
+            &raw[API_KEY_RAW_MAC_SCHEME.len()..],
+            &mac[API_KEY_MAC_SCHEME.len()..]
+        );
     }
 
     /// Authenticate `token` twice on `backend`; count revocation warnings.

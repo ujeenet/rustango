@@ -81,6 +81,14 @@ Admin create, edit, delete and bulk writes open a transaction that carries its o
 - MariaDB: purging a tenant made on a saved server no longer fails reading `@@server_uuid`, which MariaDB lacks.
 - A generated `main.rs` prints CLI errors with Display, not as `Validation("…")`.
 
+### Changed — API keys are MACed with a derived sub-key
+
+New API keys are MACed with a key derived from the server secret, not the secret itself. Existing keys still verify unchanged; rotating `RUSTANGO_SESSION_SECRET` still invalidates every API key.
+
+### Changed — `cursor_pagination` on a nullable field warns until 0.62.0
+
+`cursor_pagination` / `cursor_pagination_desc` on a nullable field log a warning when the ViewSet is built; 0.62.0 will refuse it.
+
 ## [0.61.1] — 2026-10-25
 
 ### Fixed — tenant logos 404'd under the default routes

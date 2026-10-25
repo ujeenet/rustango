@@ -808,6 +808,8 @@ jobs:
           # Media suites on one backend, without storage-s3.
           - mysql,testkit,tenancy,media
           - postgres,testkit,tenancy,media
+          # Single-variant `Pool`: test let-else on it warned here.
+          - sqlite,admin,tenancy
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
@@ -821,7 +823,7 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features ${{ matrix.features }} --lib
       # Build `tests/**` on the bare backends: no other job compiles a test
       # without tenancy, so a wrong single-backend `#![cfg]` stayed green (#2328).
-      - if: ${{ !contains(matrix.features, ',') || matrix.features == 'sqlite,_tower' || matrix.features == 'sqlite,csrf' || matrix.features == 'sqlite,template_views' || startsWith(matrix.features, 'postgres,batteries,tenancy') || endsWith(matrix.features, ',testkit,tenancy,media') }}
+      - if: ${{ !contains(matrix.features, ',') || matrix.features == 'sqlite,_tower' || matrix.features == 'sqlite,csrf' || matrix.features == 'sqlite,template_views' || matrix.features == 'sqlite,admin,tenancy' || startsWith(matrix.features, 'postgres,batteries,tenancy') || endsWith(matrix.features, ',testkit,tenancy,media') }}
         run: cargo test -p rustango --no-default-features --features ${{ matrix.features }} --tests --no-run
 
   # #1285 — the first Windows coverage this repo has had. Every other job

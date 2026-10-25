@@ -203,6 +203,10 @@ Call `.acting_superuser(user.is_superuser)` so a non-superuser cannot set the ta
 
 New projects wrap the `Cli` in `async fn run()` and print its error with `{e}`. Existing projects can copy that shape to stop `Validation("…")` output.
 
+### API keys get a new stored hash
+
+New keys are stored as `hmac-sha256v2$…` and do not verify on 0.61.1 or older; existing `hmac-sha256$…` keys keep working on both.
+
 ## 0.61.1
 
 ### Scaffold taglines lose their brackets

@@ -82,8 +82,10 @@ async fn pool_with_user(initial_hash: &str) -> Pool {
 
 async fn stored_hash(pool: &Pool, id: i64) -> String {
     use sqlx::Row;
-    let Pool::Sqlite(sq) = pool else {
-        unreachable!()
+    let sq = match pool {
+        Pool::Sqlite(sq) => sq,
+        #[allow(unreachable_patterns)]
+        _ => unreachable!(),
     };
     sqlx::query(r#"SELECT "password_hash" FROM "users" WHERE "id" = ?"#)
         .bind(id)
