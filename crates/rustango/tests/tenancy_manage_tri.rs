@@ -944,10 +944,38 @@ async fn reseal_seals_a_plain_password_url(pool: &Pool) {
     assert_eq!(opened, url);
 }
 
+/// `--apply` leaves a sealed URL without a password as it is, not unsealed.
+async fn reseal_leaves_a_sealed_url_without_a_password(pool: &Pool) {
+    with_secret_key();
+    let mut env = Env::new(pool).await;
+    let plain = match env.backend() {
+        BackendKind::Sqlite => env.tenant_db_url("nopw").await,
+        BackendKind::Postgres => "postgres://u@127.0.0.1:1/x".into(),
+        BackendKind::MySql => "mysql://u@127.0.0.1:1/x".into(),
+    };
+    let sealed = rustango::tenancy::seal(&plain).expect("seal");
+    let mut org = Org {
+        slug: "nopw".into(),
+        display_name: "nopw".into(),
+        backend_kind: env.backend().as_str().into(),
+        database_url: Some(sealed.clone()),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&env.registry).await.expect("insert org");
+    let dir = env.dir("migrations");
+    let out = env
+        .run_out(&dir, &["reseal-tenant-secrets", "--apply"])
+        .await
+        .expect("apply");
+    let stored = env.org("nopw").await.expect("row").database_url;
+    assert_eq!(stored.as_deref(), Some(sealed.as_str()), "{out}");
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
     scenarios: [
+        reseal_leaves_a_sealed_url_without_a_password,
         a_resolved_secret_is_never_echoed,
         migrate_storage_checks_the_target_url,
         reseal_seals_a_plain_password_url,

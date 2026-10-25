@@ -59,8 +59,10 @@ where
             // Not ours to touch: an `env://` or vault reference that does not resolve here.
             Err(_) => continue,
         };
-        let literal_with_password = resolved == stored && redact(stored) != stored;
-        if !sealed && !literal_with_password {
+        let has_password = redact(&resolved) != resolved;
+        let literal_with_password = resolved == stored && has_password;
+        // A sealed value with no password would be written back in plain text.
+        if (sealed && !has_password) || (!sealed && !literal_with_password) {
             continue;
         }
         todo += 1;
