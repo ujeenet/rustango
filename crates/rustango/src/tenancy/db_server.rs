@@ -1145,6 +1145,7 @@ mod tests {
             server_name: "main".into(),
             database_name: "acme".into(),
             login_name: Some("acme".into()),
+            created: true,
             created_at: crate::sql::Auto::Unset,
         };
         assert_eq!(s.names_record("postgres://acme:pw@db.internal/acme", &record), Ok(()));
