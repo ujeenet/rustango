@@ -208,6 +208,7 @@ impl ProvisionRequest {
 
 /// One stage of provisioning, reportable on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ProvisionStep {
     /// Slug is free; mode, backend and build agree.
     Validate,
@@ -864,12 +865,15 @@ where
     rep.step(ProvisionStep::CheckConnection, Progress::Started)
         .await;
     let admin = match ServerDatabase::open(server, &registry).await {
-        Ok(a) => a,
+        Ok((admin, warning)) => {
+            let done = warning.map_or(Progress::Ok, |w| Progress::Done(RunText::fixed(w)));
+            rep.step(ProvisionStep::CheckConnection, done).await;
+            admin
+        }
         Err(e) => return rep.fail(ProvisionStep::CheckConnection, e).await,
     };
-    rep.step(ProvisionStep::CheckConnection, Progress::Ok).await;
 
-    let mut db = ServerDatabase::create(admin, server, &request.slug, rep).await?;
+    let mut db = ServerDatabase::create(admin, server, &request.slug, &registry, rep).await?;
     if let Err(e) = db.check_login(rep).await {
         let undone = db.roll_back(pools, None, rep).await;
         return Err(with_undone(e, &undone));
@@ -877,22 +881,19 @@ where
 
     rep.step(ProvisionStep::RegisterOrg, Progress::Started)
         .await;
-    let stored = match db
-        .register(&registry, pools.secrets(), registry_url, &request.slug)
-        .await
-    {
+    let stored = match db.stored_url(&registry, pools.secrets(), registry_url).await {
         Ok(s) => s,
         Err(e) => {
-            let failed = rep.fail(ProvisionStep::RegisterOrg, e).await;
-            db.roll_back(pools, None, rep).await;
-            return failed;
+            let failed: Result<ProvisionOutcome, _> = rep.fail(ProvisionStep::RegisterOrg, e).await;
+            let undone = db.roll_back(pools, None, rep).await;
+            return failed.map_err(|e| with_undone(e, &undone));
         }
     };
     let mut org = new_org_row(checked, None, Some(stored));
     if let Err(e) = super::org_host::insert_org(&registry, &mut org).await {
-        let failed = rep.fail(ProvisionStep::RegisterOrg, e).await;
-        db.roll_back(pools, None, rep).await;
-        return failed;
+        let failed: Result<ProvisionOutcome, _> = rep.fail(ProvisionStep::RegisterOrg, e).await;
+        let undone = db.roll_back(pools, None, rep).await;
+        return failed.map_err(|e| with_undone(e, &undone));
     }
     db.attach(&registry, org.id.get().copied().unwrap_or_default())
         .await;
@@ -912,8 +913,8 @@ where
             )))
         }
         Err(e) => {
-            db.roll_back(pools, Some(&org), rep).await;
-            Err(e)
+            let undone = db.roll_back(pools, Some(&org), rep).await;
+            Err(with_undone(e, &undone))
         }
     }
 }
@@ -970,7 +971,11 @@ where
         .await;
     } else {
         rep.step(ProvisionStep::Activate, Progress::Started).await;
-        if let Err(e) = activate(&registry, org_id).await {
+        let activated = match injected_failure(ProvisionStep::Activate) {
+            Ok(()) => activate(&registry, org_id).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = activated {
             return rep.fail(ProvisionStep::Activate, e).await;
         }
         super::invalidate_org_cache();
@@ -1401,10 +1406,17 @@ async fn checked_server(
         )));
     }
     crate::sql::DatabaseName::new(slug).map_err(|e| TenancyError::Validation(e.to_string()))?;
-    // Before any DDL: a strict registry refuses a URL it cannot seal.
-    if secrets.requires_sealed() && backend != BackendKind::Sqlite {
+    // Before any DDL: the login rustango mints is stored only sealed,
+    // whatever the registry's strictness.
+    if backend != BackendKind::Sqlite {
+        if std::env::var(crate::aead::KEY_VAR).is_err() {
+            return Err(TenancyError::Validation(format!(
+                "{} is not set: the login rustango creates for a tenant is stored only sealed",
+                crate::aead::KEY_VAR
+            )));
+        }
         let probe = format!("{backend}://tenant:password@localhost/{slug}");
-        super::secrets::stored_form(&probe, &probe, secrets)
+        super::secrets::stored_form(&probe, &probe, &secrets.clone().require_sealed())
             .await
             .map_err(TenancyError::Validation)?;
     }
@@ -1970,13 +1982,34 @@ pub(crate) async fn activate(registry: &crate::sql::Pool, org_id: i64) -> Result
 /// How long a saved server's admin login gets to connect.
 const ADMIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// A database this run created on a saved server. Dropped again by
-/// [`Self::roll_back`] unless [`Self::keep`] is called.
+/// A record with no tenant this young may belong to a run in progress, so
+/// it is neither reclaimed nor ignored by `used_by`.
+pub(crate) const RECORD_IN_PROGRESS: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// A database this run created on a saved server, and its record. Dropped
+/// again by [`Self::roll_back`] unless [`Self::keep`] is called.
 pub(super) struct ServerDatabase {
     admin: super::server_admin::ServerAdmin,
     created: super::server_admin::Created,
-    server: String,
-    record: Option<super::TenantDatabase>,
+    record: super::TenantDatabase,
+}
+
+/// Fail the named step on purpose, so tests reach rollback paths no live
+/// server can be made to hit (`RUSTANGO_PROVISION_FAIL_AT=<step>`).
+#[cfg(feature = "testkit")]
+fn injected_failure(step: ProvisionStep) -> Result<(), TenancyError> {
+    if std::env::var("RUSTANGO_PROVISION_FAIL_AT").is_ok_and(|s| s == step.as_str()) {
+        return Err(TenancyError::Validation(format!(
+            "injected failure at {}",
+            step.as_str()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "testkit"))]
+fn injected_failure(_: ProvisionStep) -> Result<(), TenancyError> {
+    Ok(())
 }
 
 /// What [`ServerDatabase::roll_back`] managed.
@@ -1996,10 +2029,13 @@ impl RolledBack {
         };
         match (self.dropped, self.row_removed) {
             (true, true) => format!("the new {what} were dropped and the tenant removed"),
-            (true, false) => format!("the new {what} were dropped, but the tenant row remains"),
+            (true, false) => format!(
+                "the new {what} were dropped, but the tenant row could not be removed; it \
+                 was left inactive without a database URL"
+            ),
             (false, _) => format!(
                 "the new {what} could not be dropped and remain, recorded in \
-                 rustango_tenant_databases"
+                 rustango_tenant_databases; a retry reclaims them"
             ),
         }
     }
@@ -2027,7 +2063,7 @@ pub(crate) async fn dry_run_on_server(
     let Some(server) = checked.server() else {
         return Ok(());
     };
-    let admin = ServerDatabase::open(server, registry).await?;
+    let (admin, _) = ServerDatabase::open(server, registry).await?;
     let name = crate::sql::DatabaseName::new(request.slug.as_str())
         .map_err(|e| TenancyError::Validation(e.to_string()))?;
     let login = crate::sql::Login::new(super::server_admin::tenant_login_name(&name));
@@ -2037,23 +2073,158 @@ pub(crate) async fn dry_run_on_server(
 }
 
 /// The registry database's utf8mb4 collation, which tenant databases copy:
-/// the app was built against it.
-async fn registry_collation(registry: &crate::sql::Pool) -> Option<crate::sql::Collation> {
-    let sql = registry.dialect().default_collation_sql()?;
-    let rows: Vec<(String,)> = crate::sql::raw_query_pool(sql, Vec::new(), registry)
-        .await
-        .ok()?;
-    rows.into_iter()
+/// the app was built against it. `Err` when it cannot be read.
+async fn registry_collation(
+    registry: &crate::sql::Pool,
+) -> Result<Option<crate::sql::Collation>, crate::sql::ExecError> {
+    let Some(sql) = registry.dialect().default_collation_sql() else {
+        return Ok(None);
+    };
+    let rows: Vec<(String,)> = crate::sql::raw_query_pool(sql, Vec::new(), registry).await?;
+    Ok(rows
+        .into_iter()
         .next()
-        .and_then(|(c,)| crate::sql::Collation::new(c).ok())
+        .and_then(|(c,)| crate::sql::Collation::new(c).ok()))
 }
 
-/// `e`, with what the rollback did appended to an operator-facing message.
+/// The collation `admin` should create databases with, and a warning when
+/// it falls back to the server's own utf8mb4 default.
+async fn collation_for(
+    admin: &super::server_admin::ServerAdmin,
+    registry: &crate::sql::Pool,
+    server: &str,
+) -> (Option<crate::sql::Collation>, Option<&'static str>) {
+    match registry_collation(registry).await {
+        Ok(Some(c)) if admin.supports_collation(&c).await == Some(false) => {
+            tracing::warn!(target: "rustango::tenancy::provision", server, collation = c.as_str(), "the server lacks the registry's collation; using its utf8mb4 default");
+            (None, Some("the server lacks the registry's collation, so its utf8mb4 default is used"))
+        }
+        Ok(c) => (c, None),
+        Err(e) => {
+            tracing::warn!(target: "rustango::tenancy::provision", server, error = %e, "could not read the registry's collation");
+            (None, Some("could not read the registry's collation, so the server's utf8mb4 default is used"))
+        }
+    }
+}
+
+/// `e`, with what the rollback did added. A cause that is not
+/// operator-facing is logged and replaced, so the leftovers always show.
 pub(super) fn with_undone(e: TenancyError, undone: &RolledBack) -> TenancyError {
     match e {
-        TenancyError::Validation(m) => TenancyError::Validation(format!("{m} So {}.", undone.describe())),
-        other => other,
+        TenancyError::Validation(m) => {
+            TenancyError::Validation(format!("{m} So {}.", undone.describe()))
+        }
+        other => {
+            tracing::error!(target: "rustango::tenancy::provision", error = %other, "provisioning on a saved server failed");
+            TenancyError::Validation(format!(
+                "provisioning failed (the cause is in the server log), so {}.",
+                undone.describe()
+            ))
+        }
     }
+}
+
+/// Empty `org`'s database URL and keep it inactive, best effort.
+async fn forget_database(registry: &crate::sql::Pool, org: &Org) {
+    use crate::sql::UpdaterPool as _;
+    let res = Org::objects()
+        .where_(Org::id.eq(org.id.get().copied().unwrap_or_default()))
+        .update()
+        .set("database_url", None::<String>)
+        .set("active", false)
+        .execute_pool(registry)
+        .await;
+    if let Err(e) = res {
+        tracing::error!(target: "rustango::tenancy::provision", org = %org.slug, error = %e, "could not empty the database URL of a rolled-back tenant");
+    }
+}
+
+/// Note that the database now exists. A failure leaves `created = false`,
+/// which a retry treats with care.
+async fn mark_created(record: &mut super::TenantDatabase, registry: &crate::sql::Pool) {
+    use crate::sql::UpdaterPool as _;
+    let id = record.id.get().copied().unwrap_or_default();
+    let marked = super::TenantDatabase::objects()
+        .where_(super::TenantDatabase::id.eq(id))
+        .update()
+        .set("created", true)
+        .execute_pool(registry)
+        .await;
+    match marked {
+        Ok(_) => record.created = true,
+        Err(e) => {
+            tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not mark the tenant database created");
+        }
+    }
+}
+
+/// Deal with a record an interrupted run left for `name` on `server`
+/// before creating it again. A database the record says rustango created
+/// is dropped; one it may not have created is refused, never dropped.
+async fn reclaim(
+    admin: &super::server_admin::ServerAdmin,
+    server: &super::DbServer,
+    name: &crate::sql::DatabaseName,
+    registry: &crate::sql::Pool,
+    rep: &Reporter<'_>,
+) -> Result<(), TenancyError> {
+    let Some(record) = super::TenantDatabase::objects()
+        .where_(super::TenantDatabase::server_name.eq(server.name.clone()))
+        .where_(super::TenantDatabase::database_name.eq(name.to_string()))
+        .first(registry)
+        .await?
+    else {
+        return Ok(());
+    };
+    let tenant = match record.org_id {
+        Some(id) => Org::objects().where_(Org::id.eq(id)).first(registry).await?,
+        None => None,
+    };
+    if let Some(org) = tenant {
+        return Err(TenancyError::Validation(format!(
+            "database `{name}` on server `{}` belongs to tenant `{}`",
+            server.name, org.slug
+        )));
+    }
+    let cutoff = chrono::Utc::now()
+        - chrono::Duration::from_std(RECORD_IN_PROGRESS).unwrap_or_default();
+    if record.org_id.is_none() && record.created_at.get().is_some_and(|t| *t > cutoff) {
+        return Err(TenancyError::Validation(format!(
+            "another run is creating database `{name}` on server `{}`; try again in a few minutes",
+            server.name
+        )));
+    }
+    let login = crate::sql::Login::new(super::server_admin::tenant_login_name(name));
+    if record.created {
+        rep.step(ProvisionStep::Rollback, Progress::Started).await;
+        if let Err(e) = admin.drop_tenant_database(name, &login).await {
+            tracing::error!(target: "rustango::tenancy::provision", database = %name, error = %e, "could not drop what an interrupted run left");
+            return Err(TenancyError::Validation(format!(
+                "an interrupted run left database `{name}` and login `{}`, and they could not be \
+                 dropped; drop them on the server, then retry",
+                login.name()
+            )));
+        }
+        record.delete_pool(registry).await?;
+        let text = RunText::about_database(
+            "dropped what an interrupted run left",
+            name,
+            Some(login.name()),
+        );
+        rep.step(ProvisionStep::Rollback, Progress::Done(text)).await;
+        return Ok(());
+    }
+    // The run stopped around its `CREATE`: the database may be someone else's.
+    let free = admin.names_free(name, &login).await;
+    if let Err(super::server_admin::TenantDbError::DatabaseExists(_)) = free {
+        return Err(TenancyError::Validation(format!(
+            "a run was interrupted while creating database `{name}`, and a database of that \
+             name exists that may not be rustango's; choose another slug, or drop it on the \
+             server and retry"
+        )));
+    }
+    record.delete_pool(registry).await?;
+    Ok(())
 }
 
 /// Why the new login could not sign in, and where to look.
@@ -2079,15 +2250,14 @@ fn login_refused(
 
 impl ServerDatabase {
     /// Log in to `server` and refuse it unless its admin may provision.
-    /// Nothing is created yet.
+    /// Nothing is created yet. Also returns a collation warning, if any.
     pub(super) async fn open(
         server: &super::DbServer,
         registry: &crate::sql::Pool,
-    ) -> Result<super::server_admin::ServerAdmin, TenancyError> {
-        let admin = server
-            .connect(ADMIN_TIMEOUT)
-            .await?
-            .with_collation(registry_collation(registry).await);
+    ) -> Result<(super::server_admin::ServerAdmin, Option<&'static str>), TenancyError> {
+        let admin = server.connect(ADMIN_TIMEOUT).await?;
+        let (collation, warning) = collation_for(&admin, registry, &server.name).await;
+        let admin = admin.with_collation(collation);
         let report = match admin.probe().await {
             Ok(r) => r,
             Err(e) => {
@@ -2102,18 +2272,41 @@ impl ServerDatabase {
                 server.name
             )));
         }
-        Ok(admin)
+        Ok((admin, warning))
     }
 
     /// Create a database named `slug` and its own login with a random
-    /// password, reporting each stage. An existing database or login is
-    /// refused; a failed create leaves nothing behind.
+    /// password, reporting each stage. The record is written first, so an
+    /// interrupted run leaves a database that is always findable. An
+    /// existing database or login is refused; a failed create leaves
+    /// nothing behind.
     pub(super) async fn create(
         admin: super::server_admin::ServerAdmin,
         server: &super::DbServer,
         slug: &str,
+        registry: &crate::sql::Pool,
         rep: &Reporter<'_>,
     ) -> Result<Self, TenancyError> {
+        match Self::create_inner(&admin, server, slug, registry, rep).await {
+            Ok((created, record)) => Ok(Self {
+                admin,
+                created,
+                record,
+            }),
+            Err(e) => {
+                admin.close().await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn create_inner(
+        admin: &super::server_admin::ServerAdmin,
+        server: &super::DbServer,
+        slug: &str,
+        registry: &crate::sql::Pool,
+        rep: &Reporter<'_>,
+    ) -> Result<(super::server_admin::Created, super::TenantDatabase), TenancyError> {
         use super::server_admin::CreateStage;
         let stage_step = |s: CreateStage| match s {
             CreateStage::Login => ProvisionStep::CreateLogin,
@@ -2123,7 +2316,6 @@ impl ServerDatabase {
         let name = match crate::sql::DatabaseName::new(slug) {
             Ok(n) => n,
             Err(e) => {
-                admin.close().await;
                 return rep
                     .fail(
                         ProvisionStep::CreateDatabase,
@@ -2133,6 +2325,32 @@ impl ServerDatabase {
             }
         };
         let login = crate::sql::Login::new(super::server_admin::tenant_login_name(&name));
+        if let Err(e) = reclaim(admin, server, &name, registry, rep).await {
+            return rep.fail(ProvisionStep::CreateDatabase, e).await;
+        }
+        let mut record = super::TenantDatabase {
+            id: Auto::default(),
+            org_slug: slug.to_owned(),
+            org_id: None,
+            server_name: server.name.clone(),
+            database_name: name.to_string(),
+            login_name: (BackendKind::of_pool(registry) != BackendKind::Sqlite)
+                .then(|| login.name().to_string()),
+            created: false,
+            created_at: Auto::default(),
+        };
+        if let Err(e) = record.insert_pool(registry).await {
+            let e = if e.is_unique_violation() {
+                TenancyError::Validation(format!(
+                    "another run is creating database `{name}` on server `{}`; try again in a few \
+                     minutes",
+                    server.name
+                ))
+            } else {
+                e.into()
+            };
+            return rep.fail(ProvisionStep::CreateDatabase, e).await;
+        }
         let password = crate::sql::LoginPassword::generate();
         let current = std::sync::Mutex::new(None::<ProvisionStep>);
         let result = admin
@@ -2156,11 +2374,22 @@ impl ServerDatabase {
             .unwrap_or(ProvisionStep::CreateDatabase);
         let created = match result {
             Ok(c) => c,
+            // The create made a database it could not undo: ours, so a
+            // retry may reclaim it.
+            Err(e @ super::server_admin::TenantDbError::RollbackFailed { .. }) => {
+                mark_created(&mut record, registry).await;
+                return rep.fail(last, e.into()).await;
+            }
             Err(e) => {
-                admin.close().await;
+                // Nothing of ours exists: the create made nothing or undid it,
+                // or found someone else's database.
+                if let Err(d) = record.clone().delete_pool(registry).await {
+                    tracing::warn!(target: "rustango::tenancy::provision", error = %d, "could not delete the record of a failed create");
+                }
                 return rep.fail(last, e.into()).await;
             }
         };
+        mark_created(&mut record, registry).await;
         rep.step(last, Progress::Ok).await;
         if created.login.is_none() {
             for step in [
@@ -2172,12 +2401,7 @@ impl ServerDatabase {
                     .await;
             }
         }
-        Ok(Self {
-            admin,
-            created,
-            server: server.name.clone(),
-            record: None,
-        })
+        Ok((created, record))
     }
 
     /// Sign in as the new login. A server rule can refuse a login the
@@ -2187,6 +2411,9 @@ impl ServerDatabase {
             return Ok(());
         };
         rep.step(ProvisionStep::CheckLogin, Progress::Started).await;
+        if let Err(e) = injected_failure(ProvisionStep::CheckLogin) {
+            return rep.fail(ProvisionStep::CheckLogin, e).await;
+        }
         match crate::sql::Pool::connect_diagnosed(self.created.url(), ADMIN_TIMEOUT).await {
             Ok(pool) => {
                 pool.close().await;
@@ -2205,28 +2432,17 @@ impl ServerDatabase {
         }
     }
 
-    /// Record the database, then return what goes in `Org.database_url`:
-    /// the tenant URL, sealed under the registry's rules.
-    pub(super) async fn register(
-        &mut self,
+    /// What goes in `Org.database_url`: the tenant URL, always sealed. A
+    /// login rustango minted is never stored in plain text.
+    pub(super) async fn stored_url(
+        &self,
         registry: &crate::sql::Pool,
         secrets: &TenantSecrets,
         registry_url: &str,
-        slug: &str,
     ) -> Result<String, TenancyError> {
-        let vetted = vet_database_url(self.created.url(), secrets, registry, Some(registry_url))
-            .await?;
-        let mut record = super::TenantDatabase {
-            id: Auto::default(),
-            org_slug: slug.to_owned(),
-            org_id: None,
-            server_name: self.server.clone(),
-            database_name: self.created.database.to_string(),
-            login_name: self.created.login.as_ref().map(|l| l.name().to_string()),
-            created_at: Auto::default(),
-        };
-        record.insert_pool(registry).await?;
-        self.record = Some(record);
+        let strict = secrets.clone().require_sealed();
+        let vetted =
+            vet_database_url(self.created.url(), &strict, registry, Some(registry_url)).await?;
         Ok(vetted.stored)
     }
 
@@ -2234,9 +2450,10 @@ impl ServerDatabase {
     /// link; the slug still names it.
     pub(super) async fn attach(&mut self, registry: &crate::sql::Pool, org_id: i64) {
         use crate::sql::UpdaterPool as _;
-        let Some(id) = self.record.as_ref().and_then(|r| r.id.get().copied()) else {
+        let Some(id) = self.record.id.get().copied() else {
             return;
         };
+        self.record.org_id = Some(org_id);
         let res = super::TenantDatabase::objects()
             .where_(super::TenantDatabase::id.eq(id))
             .update()
@@ -2295,16 +2512,21 @@ impl ServerDatabase {
             return undone;
         }
         undone.dropped = true;
-        let rows = async {
-            if let Some(record) = self.record {
-                record.delete_pool(&registry).await?;
-            }
-            if let Some(org) = org {
-                super::decommission::remove_org_row(&registry, org).await?;
-            }
-            Ok::<_, TenancyError>(())
-        }
-        .await;
+        let tenant_row = match org {
+            Some(org) => match super::decommission::remove_org_row(&registry, org).await {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    // Never leave a resumable row pointing at a dropped database.
+                    forget_database(&registry, org).await;
+                    Err(e)
+                }
+            },
+            None => Ok(()),
+        };
+        // The database is gone either way. A record left behind still says
+        // `created`, and a retry reclaims it with a no-op drop.
+        let record = self.record.delete_pool(&registry).await.map(drop);
+        let rows = tenant_row.and(record.map_err(TenancyError::from));
         match rows {
             Ok(()) => {
                 undone.row_removed = true;
@@ -2467,17 +2689,28 @@ where
         requested_by: Option<&'a str>,
         idempotency_key: Option<&'a str>,
     ) -> BoxFuture<'a, (super::provision_store::ProvisioningRun, ProvisionOutcome)> {
+        // Detached: a dropped request must not stop a run between its DDL
+        // and the rows that record it. The caller still waits for it.
+        let pools = self.pools.clone();
+        let (url, dir) = (self.registry_url.clone(), self.migrations_dir.clone());
+        let request = request.clone();
+        let requested_by = requested_by.map(ToOwned::to_owned);
+        let idempotency_key = idempotency_key.map(ToOwned::to_owned);
         Box::pin(async move {
-            provision_tenant_recorded(
-                self.pools.as_ref(),
-                &self.registry_url,
-                &self.migrations_dir,
-                request,
-                None,
-                requested_by,
-                idempotency_key,
-            )
+            tokio::spawn(async move {
+                provision_tenant_recorded(
+                    pools.as_ref(),
+                    &url,
+                    &dir,
+                    &request,
+                    None,
+                    requested_by.as_deref(),
+                    idempotency_key.as_deref(),
+                )
+                .await
+            })
             .await
+            .map_err(|e| TenancyError::Validation(format!("the provisioning task stopped: {e}")))?
         })
     }
 

@@ -10,6 +10,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The console create form, `create-tenant --server <name>`, `api::create_tenant` (`database_server`), the signup webhook (`UrlPolicy::Server`) and `ProvisionRequest::on_server` create a database named as the slug plus its own login, then migrate and activate. Each step shows on the run page.
 The new login must sign in before anything is registered (`check_login`, with pg_hba and shadowing hints); MySQL tenant databases copy the registry's utf8mb4 collation.
+Creates run detached from the request; the record is written before the `CREATE` (unique per server and database), so an interrupted run's database is reclaimed by the next try. A stale run reads as interrupted when viewed.
 A later failure drops the new database, login and tenant row; the new registry table `rustango_tenant_databases` records each database rustango created, and a server with a record cannot be removed.
 
 ### Fixed — tenant backend and URL schemes

@@ -953,6 +953,9 @@ If registering, migrating or activating fails, the new database, login and
 tenant row are dropped again, so the same command can simply be re-run.
 Should that drop fail, the inactive tenant and its record stay: a
 resuming retry (webhook, `create_tenant_if_missing`) migrates it in place.
+The record is written before the `CREATE`, so a run killed midway leaves
+a database rustango can find: a retry after ten minutes drops it and
+starts again, and refuses a database it cannot prove it made.
 
 ### `edit-tenant <slug> [options]`
 

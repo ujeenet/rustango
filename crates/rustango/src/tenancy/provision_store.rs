@@ -747,6 +747,21 @@ async fn close_interrupted(registry: &Pool, id: i64) -> Result<bool, TenancyErro
     Ok(n > 0)
 }
 
+/// Close `run` as interrupted if it is stale, so a viewer is not shown a
+/// dead run as `running`. `true` when it was closed.
+///
+/// # Errors
+/// A registry read or write failure.
+pub(crate) async fn close_if_stale(
+    registry: &Pool,
+    run: &ProvisioningRun,
+) -> Result<bool, TenancyError> {
+    if !is_stale(registry, run, STALE_RUN_AFTER).await? {
+        return Ok(false);
+    }
+    close_interrupted(registry, run.id.get().copied().unwrap_or_default()).await
+}
+
 /// Close every `running` run with no progress for `after` (see
 /// [`STALE_RUN_AFTER`]). Called at boot. Returns how many were closed.
 ///

@@ -802,6 +802,7 @@ async fn the_api_creates_on_a_saved_server(pool: &Pool) {
         server_name: "main".into(),
         database_name: "ghost".into(),
         login_name: None,
+        created: false,
         created_at: rustango::sql::Auto::default(),
     };
     ghost.insert_pool(&env.registry).await.unwrap();
@@ -886,6 +887,97 @@ async fn the_tenant_database_takes_the_registry_collation(pool: &Pool) {
     env.clean(&[&a]).await;
 }
 
+/// A failure at the login check or at activate drops everything the run
+/// made, and the error names what was undone.
+async fn late_failures_roll_back(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+    let env = Env::new(pool).await;
+    env.add_server("main").await;
+    for step in ["check_login", "activate"] {
+        let a = slug(&format!("late-{}", &step[..3]));
+        env.clean(&[&a]).await;
+        std::env::set_var("RUSTANGO_PROVISION_FAIL_AT", step);
+        let err = env
+            .provision(&env.dir("good"), &ProvisionRequest::on_server(&a, "main"))
+            .await
+            .expect_err("injected");
+        std::env::remove_var("RUSTANGO_PROVISION_FAIL_AT");
+        let msg = err.to_string();
+        assert!(msg.contains("dropped"), "{step}: {msg}");
+        assert!(env.org(&a).await.is_none(), "{step}: the row survived");
+        assert!(env.records(&a).await.is_empty(), "{step}: the record survived");
+        assert!(env.nothing_left(&a).await, "{step}: the database or login survived");
+        let steps = env.steps(&a).await;
+        assert!(steps.iter().any(|s| s == "rollback:ok"), "{step}: {steps:?}");
+    }
+}
+
+/// A record an interrupted run left is reclaimed when it says the database
+/// is rustango's; a fresh one means a run is in progress and is refused.
+async fn an_interrupted_run_is_reclaimed(pool: &Pool) {
+    use rustango::sql::UpdaterPool as _;
+    let _g = env_lock().lock().await;
+    std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+    let env = Env::new(pool).await;
+    let a = slug("intr");
+    env.clean(&[&a]).await;
+    env.add_server("main").await;
+    // What a run killed after its CREATE leaves behind.
+    let admin = env.admin().await;
+    let name = db_name(&a);
+    admin
+        .create_tenant_database(&name, &Login::new(tenant_login_name(&name)), &LoginPassword::generate())
+        .await
+        .expect("leftover");
+    admin.close().await;
+    let mut record = TenantDatabase {
+        id: rustango::sql::Auto::default(),
+        org_slug: a.clone(),
+        org_id: None,
+        server_name: "main".into(),
+        database_name: a.clone(),
+        login_name: None,
+        created: true,
+        created_at: rustango::sql::Auto::default(),
+    };
+    record.insert_pool(&env.registry).await.unwrap();
+    let req = ProvisionRequest::on_server(&a, "main");
+
+    let err = env.provision(&env.dir("good"), &req).await.expect_err("in progress");
+    assert!(err.to_string().contains("another run"), "{err}");
+    assert!(env.database_exists(&a).await, "a run in progress lost its database");
+
+    TenantDatabase::objects()
+        .where_(TenantDatabase::org_slug.eq(a.clone()))
+        .update()
+        .set("created_at", chrono::Utc::now() - chrono::Duration::hours(1))
+        .execute_pool(&env.registry)
+        .await
+        .unwrap();
+    env.provision(&env.dir("good"), &req).await.expect("reclaimed and created");
+    assert_provisioned(&env, &a).await;
+    let steps = env.steps(&a).await;
+    assert!(steps.iter().any(|s| s == "rollback:ok"), "{steps:?}");
+    env.clean(&[&a]).await;
+}
+
+/// Two creates of one slug at once: one tenant, one clear refusal.
+async fn concurrent_creates_make_one_tenant(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+    let env = Env::new(pool).await;
+    let a = slug("race");
+    env.clean(&[&a]).await;
+    env.add_server("main").await;
+    let req = ProvisionRequest::on_server(&a, "main");
+    let good = env.dir("good");
+    let (x, y) = tokio::join!(env.provision(&good, &req), env.provision(&good, &req));
+    assert_eq!(x.is_ok() as u8 + y.is_ok() as u8, 1, "{x:?} {y:?}");
+    assert_provisioned(&env, &a).await;
+    env.clean(&[&a]).await;
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
@@ -899,5 +991,8 @@ tri_dialect_test! {
         the_api_creates_on_a_saved_server,
         a_login_that_cannot_sign_in_is_rolled_back,
         the_tenant_database_takes_the_registry_collation,
+        late_failures_roll_back,
+        an_interrupted_run_is_reclaimed,
+        concurrent_creates_make_one_tenant,
     ],
 }

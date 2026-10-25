@@ -583,12 +583,18 @@ pub(super) async fn provision_run_view(
     Extension(op): Extension<auth::Operator>,
     Path(run_id): Path<i64>,
 ) -> Response<Body> {
-    let Some(run) = (match store::run_by_id(&state.registry, run_id).await {
+    let Some(mut run) = (match store::run_by_id(&state.registry, run_id).await {
         Ok(r) => r,
         Err(e) => return super::server_error("operator_console", &e),
     }) else {
         return (StatusCode::NOT_FOUND, format!("no run {run_id}")).into_response();
     };
+    // A run whose process died reads as interrupted, not `running`.
+    if matches!(store::close_if_stale(&state.registry, &run).await, Ok(true)) {
+        if let Ok(Some(fresh)) = store::run_by_id(&state.registry, run_id).await {
+            run = fresh;
+        }
+    }
     let events = store::events_since(&state.registry, run_id, 0)
         .await
         .unwrap_or_default();

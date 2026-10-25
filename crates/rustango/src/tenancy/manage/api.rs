@@ -127,6 +127,29 @@ pub async fn create_tenant<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    // Detached: a dropped caller must not stop a create between its DDL
+    // and the rows that record it.
+    let pools = pools.fresh();
+    let (url, dir, slug) = (
+        registry_url.to_owned(),
+        migrations_dir.to_owned(),
+        slug.to_owned(),
+    );
+    tokio::spawn(async move { create_tenant_inner(&pools, &url, &dir, &slug, opts).await })
+        .await
+        .map_err(|e| TenancyError::Validation(format!("the create task stopped: {e}")))?
+}
+
+async fn create_tenant_inner<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    migrations_dir: &Path,
+    slug: &str,
+    opts: CreateTenantOpts,
+) -> Result<Org, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     if find_org(pools, slug).await?.is_some() {
         return Err(TenancyError::Validation(format!(
             "tenant slug `{slug}` already exists"
@@ -158,8 +181,9 @@ where
     let rep = provision::Reporter::new(None);
     let mut created = match checked.server() {
         Some(server) => {
-            let admin = provision::ServerDatabase::open(server, &registry).await?;
-            let db = provision::ServerDatabase::create(admin, server, slug, &rep).await?;
+            let (admin, _) = provision::ServerDatabase::open(server, &registry).await?;
+            let db =
+                provision::ServerDatabase::create(admin, server, slug, &registry, &rep).await?;
             if let Err(e) = db.check_login(&rep).await {
                 let undone = db.roll_back(pools, None, &rep).await;
                 return Err(provision::with_undone(e, &undone));
@@ -171,14 +195,15 @@ where
             None
         }
     };
-    let database_url = match created.as_mut() {
-        Some(db) => match db.register(&registry, pools.secrets(), registry_url, slug).await {
-            Ok(stored) => Some(stored),
+    let database_url = match created.take() {
+        Some(db) => match db.stored_url(&registry, pools.secrets(), registry_url).await {
+            Ok(stored) => {
+                created = Some(db);
+                Some(stored)
+            }
             Err(e) => {
-                if let Some(db) = created {
-                    db.roll_back(pools, None, &rep).await;
-                }
-                return Err(e);
+                let undone = db.roll_back(pools, None, &rep).await;
+                return Err(provision::with_undone(e, &undone));
             }
         },
         None => checked.stored_database_url(),
@@ -237,9 +262,10 @@ where
         if let Some(schema) = org.schema_name.as_deref() {
             provision::release_schema(pools, schema).await;
         }
-        if let Some(db) = created {
-            db.roll_back(pools, None, &rep).await;
-        }
+        let e = match created {
+            Some(db) => provision::with_undone(e, &db.roll_back(pools, None, &rep).await),
+            None => e,
+        };
         if let Some(run) = run_id {
             let text =
                 RunText::user_facing(&e).unwrap_or(RunText::fixed("registering the tenant failed"));

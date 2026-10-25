@@ -56,7 +56,12 @@ pub struct DbServer {
 /// A tenant database rustango created on a saved server, so a purge
 /// drops only what rustango made. Written by provisioning only.
 #[derive(crate::Model, Debug, Clone)]
-#[rustango(table = "rustango_tenant_databases", scope = "registry", display = "database_name")]
+#[rustango(
+    table = "rustango_tenant_databases",
+    scope = "registry",
+    display = "database_name",
+    unique_together = "server_name, database_name"
+)]
 pub struct TenantDatabase {
     #[rustango(primary_key)]
     pub id: crate::sql::Auto<i64>,
@@ -71,6 +76,10 @@ pub struct TenantDatabase {
     /// `None` on SQLite, which has no logins.
     #[rustango(max_length = 32)]
     pub login_name: Option<String>,
+    /// Written before the `CREATE`, set once it succeeded. A row still
+    /// `false` may name a database that exists but is not ours.
+    #[rustango(default = "false")]
+    pub created: bool,
     #[rustango(auto_now_add)]
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
@@ -418,8 +427,9 @@ impl DbServer {
     /// Tenants this server must not be removed under: database-mode
     /// tenants whose URL points at its host and port (SQLite: a file in
     /// its directory), those whose URL is missing, does not resolve or
-    /// does not parse, since they may be on it too, and every
-    /// [`TenantDatabase`] recorded on it.
+    /// does not parse, since they may be on it too, and each
+    /// [`TenantDatabase`] recorded on it whose tenant still exists or whose
+    /// run started within the last hour.
     ///
     /// Hosts match ignoring case, IPv6 brackets and one trailing dot, after
     /// sqlx reads `?host=` / `hostaddr=`. Other spellings of one machine
@@ -453,14 +463,26 @@ impl DbServer {
                 Uses::Unknown(why) => out.push(format!("{} ({why})", org.slug)),
             }
         }
-        // A database rustango created here counts while its record lasts,
-        // whatever the tenant's URL says now.
+        // A database rustango created here counts while its tenant exists,
+        // whatever the tenant's URL says now, and so does a run in progress.
+        // Records of purged tenants do not block removal.
         let created: Vec<TenantDatabase> = TenantDatabase::objects()
             .where_(TenantDatabase::server_name.eq(self.name.clone()))
             .fetch(registry)
             .await?;
+        let in_progress = chrono::Utc::now()
+            - chrono::Duration::from_std(super::provision_store::STALE_RUN_AFTER)
+                .unwrap_or_default();
         for record in created {
-            if !out.iter().any(|t| t == &record.org_slug) {
+            let live = match record.org_id {
+                Some(id) => Org::objects()
+                    .where_(Org::id.eq(id))
+                    .first(registry)
+                    .await?
+                    .is_some(),
+                None => record.created_at.get().is_some_and(|t| *t > in_progress),
+            };
+            if live && !out.iter().any(|t| t == &record.org_slug) {
                 out.push(record.org_slug);
             }
         }
