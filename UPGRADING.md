@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### Tenant database URLs are resolved and may be sealed
+
+`TenantPools::new` resolves `env://` and `enc:` references; literal URLs work as before. With `RUSTANGO_SECRET_KEY` set, new password URLs are stored sealed, so re-enter them after rotating that key.
+Create and edit refuse a URL of another backend or an unresolvable reference; `api::create_tenant` now probes the tenant database before writing.
+
 ## 0.60.12
 
 ### `makemigrations --merge` refuses conflicts
