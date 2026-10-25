@@ -6,6 +6,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set; `ProvisionRequest` takes a `TenantStorage` and an optional backend, which must be the registry's; a blank `RUSTANGO_SECRET_KEY` no longer seals; `RunKind` is `#[non_exhaustive]`; provisioning types gain a `first_admin` field. See UPGRADING.
 
+### Added — browser tests for the console's tenant-database pages
+
+`examples/tenant_console_e2e` drives a scaffolded tenant app through Playwright on PostgreSQL, MySQL and SQLite: save a server, create, first-admin link, rotate, refused slug, purge. CI job `tenant_e2e`.
+
 ### Added — purge and password rotation for tenants on a saved server
 
 `purge-tenant` and the console drop a database rustango made as the saved server's admin, then its login and record; every refusal (URL moved off the record, a shared database, missing owner or PG 16 ADMIN OPTION, a foreign session) runs before anything changes, and the tenant's own sessions on other pods are ended.
