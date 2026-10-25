@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Template views are `private` to shared caches
+
+Their pages carry the CSRF token, so they now send `Cache-Control: private` (any `public` is dropped) and `Vary: Cookie`.
+
 ### `create-api-key` needs the server's key
 
 Set `RUSTANGO_SESSION_SECRET`, or start the server once so it writes the dev key file; the verb no longer creates one.

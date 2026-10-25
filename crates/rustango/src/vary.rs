@@ -30,6 +30,28 @@ pub(crate) fn add_vary(headers: &mut HeaderMap, token: &str) {
     }
 }
 
+/// Make `Cache-Control` `private`: any `public` is dropped, freshness
+/// directives such as `max-age` are kept.
+#[cfg(any(feature = "cache-page", feature = "template_views"))]
+pub(crate) fn mark_private(headers: &mut HeaderMap) {
+    use axum::http::header::CACHE_CONTROL;
+    let existing = headers
+        .get(CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let mut directives: Vec<String> = existing
+        .split(',')
+        .map(|d| d.trim().to_owned())
+        .filter(|d| {
+            !d.is_empty() && !d.eq_ignore_ascii_case("public") && !d.eq_ignore_ascii_case("private")
+        })
+        .collect();
+    directives.insert(0, "private".to_owned());
+    if let Ok(v) = HeaderValue::from_str(&directives.join(", ")) {
+        headers.insert(CACHE_CONTROL, v);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
