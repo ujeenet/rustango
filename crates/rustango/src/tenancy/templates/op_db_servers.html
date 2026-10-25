@@ -37,43 +37,107 @@ login. The password is stored encrypted and never shown again. Use
       <td class="actions-col">
         <button type="button" class="btn-row-action db-server-test" data-name="{{ s.name }}">Test</button>
         <a class="btn-row-action" href="{{ console_prefix }}/db-servers/{{ s.name }}/edit">Edit</a>
-        <form method="post" action="{{ console_prefix }}/db-servers/{{ s.name }}/delete"
+        <form method="post" action="{{ console_prefix }}/db-servers/{{ s.name }}/delete" class="inline-form"
               data-confirm="Remove database server {{ s.name }}?">
           {{ csrf_input | default(value='') | safe }}
           <button type="submit" class="btn-row-action">Delete</button>
         </form>
-        <div class="probe-result" data-for="{{ s.name }}"></div>
       </td>
+    </tr>
+    {#- A full-width row, so a long probe result wraps instead of widening the table. -#}
+    <tr class="probe-row" hidden>
+      <td colspan="7"><div class="probe-result" data-for="{{ s.name }}"></div></td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
 {% endif %}
 
-<h2>Add a database server</h2>
-<form method="post" action="{{ console_prefix }}/db-servers" class="op-form" autocomplete="off">
+<form method="post" action="{{ console_prefix }}/db-servers" class="edit-form" autocomplete="off">
   {{ csrf_input | default(value='') | safe }}
-  <label>Name <input name="name" required pattern="[a-z0-9-]+" maxlength="64" value="{{ prefill.name | default(value='') }}" placeholder="main-pg"></label>
-  <label>Backend <input value="{{ backend }}" disabled></label>
-  {% if is_sqlite %}
-  <label>Directory for tenant files <input name="sqlite_dir" required value="{{ prefill.sqlite_dir | default(value='') }}" placeholder="/var/lib/app/tenants"></label>
-  {% else %}
-  <label>Host <input name="host" required value="{{ prefill.host | default(value='') }}" placeholder="db.internal"></label>
-  <label>Port (blank for the default) <input name="port" type="number" min="1" max="65535" value="{{ prefill.port | default(value='') }}"></label>
-  <label>Admin user <input name="admin_user" required value="{{ prefill.admin_user | default(value='') }}" autocomplete="off"></label>
-  <label>Admin password <input name="admin_password" type="password" autocomplete="new-password"></label>
-  <label>TLS (require unless you pick another)
-    <select name="tls_mode">
-      {% set chosen = prefill.tls_mode | default(value='require') %}
-      {% for m in tls_modes %}<option value="{{ m }}"{% if chosen == m %} selected{% endif %}>{{ m }}</option>{% endfor %}
-    </select>
-  </label>
-  {% if backend == "postgres" %}
-  <label>Maintenance database (blank for <code>postgres</code>) <input name="maintenance_db" value="{{ prefill.maintenance_db | default(value='') }}"></label>
-  {% endif %}
-  {% endif %}
-  <label class="inline"><input type="checkbox" name="active"{% if not prefill or prefill.active %} checked{% endif %}> Active</label>
-  <button type="submit">Save server</button>
+  <fieldset class="section">
+    <legend>Add a database server</legend>
+    <table>
+      <tr>
+        <th><label for="name">name</label></th>
+        <td>
+          <input type="text" id="name" name="name" required pattern="[a-z0-9\-]+" maxlength="64"
+                 value="{{ prefill.name | default(value='') }}" placeholder="main-pg">
+          <div class="field-helper">Lowercase letters, digits and hyphens.</div>
+        </td>
+      </tr>
+      <tr>
+        <th>backend</th>
+        <td>
+          <code>{{ backend }}</code>
+          <div class="field-helper">The registry's backend.</div>
+        </td>
+      </tr>
+      {% if is_sqlite %}
+      <tr>
+        <th><label for="sqlite_dir">directory</label></th>
+        <td>
+          <input type="text" id="sqlite_dir" name="sqlite_dir" required
+                 value="{{ prefill.sqlite_dir | default(value='') }}" placeholder="/var/lib/app/tenants">
+          <div class="field-helper">Where tenant database files are created.</div>
+        </td>
+      </tr>
+      {% else %}
+      <tr>
+        <th><label for="host">host</label></th>
+        <td><input type="text" id="host" name="host" required
+                   value="{{ prefill.host | default(value='') }}" placeholder="db.internal"></td>
+      </tr>
+      <tr>
+        <th><label for="port">port</label></th>
+        <td>
+          <input type="number" id="port" name="port" min="1" max="65535"
+                 value="{{ prefill.port | default(value='') }}">
+          <div class="field-helper">Blank for the backend's default.</div>
+        </td>
+      </tr>
+      <tr>
+        <th><label for="admin_user">admin user</label></th>
+        <td><input type="text" id="admin_user" name="admin_user" required
+                   value="{{ prefill.admin_user | default(value='') }}" autocomplete="off"></td>
+      </tr>
+      <tr>
+        <th><label for="admin_password">admin password</label></th>
+        <td>
+          <input type="password" id="admin_password" name="admin_password" autocomplete="new-password">
+          <div class="field-helper">Stored encrypted; never shown again.</div>
+        </td>
+      </tr>
+      <tr>
+        <th><label for="tls_mode">TLS</label></th>
+        <td>
+          <select id="tls_mode" name="tls_mode">
+            {% set chosen = prefill.tls_mode | default(value='require') %}
+            {% for m in tls_modes %}<option value="{{ m }}"{% if chosen == m %} selected{% endif %}>{{ m }}</option>{% endfor %}
+          </select>
+          <div class="field-helper"><code>require</code> unless you pick another.</div>
+        </td>
+      </tr>
+      {% if backend == "postgres" %}
+      <tr>
+        <th><label for="maintenance_db">maintenance database</label></th>
+        <td>
+          <input type="text" id="maintenance_db" name="maintenance_db"
+                 value="{{ prefill.maintenance_db | default(value='') }}">
+          <div class="field-helper">Blank for <code>postgres</code>.</div>
+        </td>
+      </tr>
+      {% endif %}
+      {% endif %}
+      <tr>
+        <th><label for="active">active</label></th>
+        <td><input type="checkbox" id="active" name="active"{% if not prefill or prefill.active %} checked{% endif %}></td>
+      </tr>
+    </table>
+  </fieldset>
+  <p class="form-actions">
+    <button type="submit" class="btn btn-primary">Save server</button>
+  </p>
 </form>
 
 <script nonce="{{ csp_nonce }}">
@@ -81,6 +145,7 @@ login. The password is stored encrypted and never shown again. Use
     b.addEventListener("click", async () => {
       const name = b.dataset.name;
       const out = document.querySelector('.probe-result[data-for="' + CSS.escape(name) + '"]');
+      out.closest("tr").hidden = false;
       b.disabled = true;
       out.textContent = "checking…";
       try {

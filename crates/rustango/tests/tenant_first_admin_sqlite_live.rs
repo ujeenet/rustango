@@ -198,6 +198,15 @@ fn signature_of(link: &str) -> String {
         .to_owned()
 }
 
+/// The `Origin` a browser sends on a form POST from `page`: `null` under
+/// `Referrer-Policy: no-referrer`, the page's own origin otherwise.
+fn browser_origin(page: &axum::response::Response, host: &str) -> String {
+    match page.headers().get(header::REFERRER_POLICY) {
+        Some(v) if v == "no-referrer" => "null".to_owned(),
+        _ => format!("http://{host}"),
+    }
+}
+
 async fn tenant_req(
     admin: &axum::Router,
     host: &str,
@@ -377,6 +386,8 @@ async fn the_console_creates_a_first_admin_who_signs_in_through_the_link() {
         "the run renders with the link"
     );
     assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store");
+    let run_policy = resp.headers()[header::REFERRER_POLICY].clone();
+    let run_origin = browser_origin(&resp, "console.test");
     let page = body_of(resp).await;
     assert!(page.contains("create_admin"), "{page}");
     let link = link_in(&page[page.find("first-admin").expect("handover block")..]);
@@ -418,6 +429,26 @@ async fn the_console_creates_a_first_admin_who_signs_in_through_the_link() {
 
     let admin = env.tenant_admin(&secret);
     redeem_and_sign_in(&admin, &host, &link, email).await;
+
+    // The run page's own form (sign out) still passes the CSRF Origin check.
+    let logout = console
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/logout")
+                .header(header::HOST, "console.test")
+                .header(header::ORIGIN, &run_origin)
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(logout.status(), StatusCode::FORBIDDEN, "{run_origin}");
+    assert_eq!(run_policy, "same-origin");
 }
 
 /// `create-tenant --admin-email` prints the link once; a link for another
@@ -650,6 +681,8 @@ async fn a_set_password_link_holds_up_over_http() {
         )
         .await
         .unwrap();
+    let policy = page.headers()[header::REFERRER_POLICY].clone();
+    let origin = browser_origin(&page, &host);
     let cookie = set_cookie(&page, "rustango_csrf").expect("a CSRF cookie");
     let html = body_of(page).await;
     let token = html
@@ -665,6 +698,7 @@ async fn a_set_password_link_holds_up_over_http() {
                 .method("POST")
                 .uri(&uri)
                 .header(header::HOST, &host)
+                .header(header::ORIGIN, &origin)
                 .header(header::COOKIE, format!("rustango_csrf={cookie}"))
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(Body::from(format!("_csrf={}&{set}", form_encode(&token))))
@@ -672,7 +706,10 @@ async fn a_set_password_link_holds_up_over_http() {
         )
         .await
         .unwrap();
-    assert!(body_of(done).await.contains("Password set"));
+    let done = body_of(done).await;
+    assert!(done.contains("Password set"), "{done}");
+    // Keeps the link out of cross-origin `Referer` without nulling `Origin`.
+    assert_eq!(policy, "same-origin");
 
     // Used: the form no longer shows.
     assert!(dead(

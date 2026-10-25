@@ -74,7 +74,7 @@ fn view(s: &DbServer) -> serde_json::Value {
 fn base_ctx(state: &ConsoleState, op: &auth::Operator) -> Context {
     let mut ctx = Context::new();
     inject_op_brand(&mut ctx, &state.op_brand);
-    ctx.insert("section", "orgs");
+    ctx.insert("section", "db_servers");
     ctx.insert("operator_username", &op.username);
     ctx.insert("backend", registry_backend(state).as_str());
     ctx.insert(

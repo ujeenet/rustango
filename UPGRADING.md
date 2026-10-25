@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Built-in logo is square
+
+`/__static__/rustango.png` and `icon.png` now serve a 256 px / 64 px square logo instead of the wide banner. A custom template sized for the banner may need new image dimensions.
+
 ### Tenant database URLs are resolved and may be sealed
 
 `TenantPools::new` resolves `env://` and `enc:` references; literal URLs work as before. With `RUSTANGO_SECRET_KEY` set (use 32 or more random bytes), new password URLs are stored sealed; without it they are stored in plain text with a warning, unless `require_sealed_secrets()` / `RUSTANGO_REQUIRE_SEALED_SECRETS=1` refuses them.

@@ -46,16 +46,21 @@ document.addEventListener('change',function(e){var s=e.target;if(s.matches&&s.ma
 </head>
 <body>
   <div class="shell">
+    {#- The column stretches to the page; the sidebar inside it sticks. -#}
+    <div class="sidebar-col">
     <aside class="sidebar">
       <div class="brand">
         {% if brand_logo_url %}<img class="brand-logo" src="{{ brand_logo_url }}" alt="">{% endif %}
-        <span>{{ brand_name | default(value='Rustango') }}</span>
-        {% if brand_tagline %}<span class="brand-tagline">{{ brand_tagline }}</span>{% endif %}
+        <span class="brand-text">
+          <span class="brand-name">{{ brand_name | default(value='Rustango') }}</span>
+          {% if brand_tagline %}<span class="brand-tagline">{{ brand_tagline }}</span>{% endif %}
+        </span>
       </div>
       <nav>
         <a href="{{ console_home | default(value='/') }}" class="{% if section == 'home' %}active{% endif %}">Home</a>
         <a href="{{ console_prefix | default(value='') }}/operators" class="{% if section == 'operators' %}active{% endif %}">Operators</a>
         <a href="{{ console_prefix | default(value='') }}/orgs" class="{% if section == 'orgs' %}active{% endif %}">Organizations</a>
+        {% if nav_db_servers %}<a href="{{ console_prefix | default(value='') }}/db-servers" class="{% if section == 'db_servers' %}active{% endif %}">Database servers</a>{% endif %}
         {% if sso_console %}<a href="{{ console_prefix | default(value='') }}/sso-shared" class="{% if section == 'sso' %}active{% endif %}">Shared SSO</a>{% endif %}
         <a href="{{ console_prefix | default(value='') }}/audit" class="{% if section == 'audit' %}active{% endif %}">Audit log</a>
         <a href="{{ console_prefix | default(value='') }}/change-password" class="{% if section == 'change_password' %}active{% endif %}">Change password</a>
@@ -66,6 +71,7 @@ document.addEventListener('change',function(e){var s=e.target;if(s.matches&&s.ma
         <button type="submit">Sign out</button>
       </form>
     </aside>
+    </div>
     <main>
       {% block content %}{% endblock %}
     </main>

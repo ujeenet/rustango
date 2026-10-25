@@ -946,6 +946,8 @@ fn render(state: &ConsoleState, template: &str, ctx: &Context) -> Response<Body>
         "csp_nonce",
         &crate::csp_nonce::current().unwrap_or_default(),
     );
+    // The `/db-servers` routes mount with the provisioner.
+    ctx.insert("nav_db_servers", &state.provisioner.is_some());
     // `csrf_token` is for scripts that send `X-CSRF-Token` (fetch, and
     // the multipart branding form, whose body the layer cannot read).
     if let Some(token) = crate::admin::session::current_csrf_token() {
@@ -1912,12 +1914,15 @@ async fn org_edit_form(
         }
         // database_url: mask the prefill, supply a placeholder, and
         // surface the secret-reference shape separately.
-        let (prefill_for_input, helper) = if field.name == DATABASE_URL_FIELD {
-            (String::new(), Some(database_url_hint(&prefill)))
+        let (input_html, helper) = if field.name == DATABASE_URL_FIELD {
+            // A one-line masked field: the URL can carry a password.
+            (
+                render::render_secret_input(field, false, false),
+                Some(database_url_hint(&prefill)),
+            )
         } else {
-            (prefill, None::<String>)
+            (render::render_input(field, &prefill, false), None::<String>)
         };
-        let input_html = render::render_input(field, &prefill_for_input, false);
         editable_rows.push(serde_json::json!({
             "name": field.name,
             "input": input_html,
@@ -1951,13 +1956,29 @@ async fn org_edit_form(
     // Drives the "Run migrations" button: migrations ride with the
     // provisioner, which owns the migrations directory.
     ctx.insert("provisioning_enabled", &state.provisioner.is_some());
+    // A database the console made on a saved server. No password in it.
+    let managed = if state.provisioner.is_some() {
+        super::TenantDatabase::of_org(&state.registry, &org_row)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
     // Only a login rustango made on a saved server can be rotated.
-    let rotatable = state.provisioner.is_some()
-        && matches!(
-            super::TenantDatabase::of_org(&state.registry, &org_row).await,
-            Ok(Some(ref r)) if r.login_name.is_some()
-        );
+    let rotatable = managed.as_ref().is_some_and(|r| r.login_name.is_some());
     ctx.insert("rotatable", &rotatable);
+    ctx.insert(
+        "managed",
+        &managed.map(|r| {
+            serde_json::json!({
+                "server_name": r.server_name,
+                "database_name": r.database_name,
+                "login_name": r.login_name,
+                "created": r.created,
+            })
+        }),
+    );
     ctx.insert("editable_rows", &editable_rows);
     ctx.insert("locked_rows", &locked_rows);
     ctx.insert("logo_url", &logo_url);

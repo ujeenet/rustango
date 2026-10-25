@@ -1854,11 +1854,7 @@ async fn set_password(
     let mut resp = render_password_page(org, cfg, &ctx).into_response();
     let h = resp.headers_mut();
     // The URL is a credential until used: keep it out of caches and referrers.
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    h.insert(
-        header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
+    super::first_admin::guard_link_page(h);
     #[cfg(feature = "csrf")]
     if let Some(v) = set_cookie.and_then(|c| HeaderValue::from_str(&c).ok()) {
         h.append(header::SET_COOKIE, v);
@@ -2013,11 +2009,10 @@ fn build_inner_admin_router(
     if let Some(tag) = org.brand_tagline.as_deref() {
         builder = builder.brand_tagline(tag);
     }
-    if let Some(logo_url) =
-        branding::brand_asset_url(&org.slug, org.logo_path.as_deref(), brand_storage)
-    {
-        builder = builder.brand_logo_url(logo_url);
-    }
+    // No upload: the framework logo, as on the tenant's sign-in page.
+    let logo_url = branding::brand_asset_url(&org.slug, org.logo_path.as_deref(), brand_storage)
+        .unwrap_or_else(|| format!("{static_url}/rustango.png"));
+    builder = builder.brand_logo_url(logo_url);
     if let Some(mode) = org
         .theme_mode
         .as_deref()
