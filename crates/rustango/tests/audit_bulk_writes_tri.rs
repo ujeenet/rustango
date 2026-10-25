@@ -639,11 +639,55 @@ mod cascade {
         assert_eq!(deletes(pool, 4).await, 0);
     }
 
+    /// Inside `atomic` the cascade audit joins the block: a rollback leaves
+    /// neither the delete nor its audit rows, a commit keeps both.
+    async fn cascade_audit_follows_the_atomic_block(pool: &Pool) {
+        let p = pool.clone();
+        let rolled: Result<(), ExecError> = rustango::sql::atomic(pool, move |_tx| {
+            Box::pin(async move {
+                Shelf::delete_where("id", 1_i64, &p).await?;
+                Err(ExecError::MissingPrimaryKey { table: "rollback" })
+            })
+        })
+        .await;
+        assert!(rolled.is_err());
+        assert_eq!(Crate::objects().count(pool).await.unwrap(), 4);
+        assert_eq!(deletes(pool, 1).await, 0);
+        let p = pool.clone();
+        rustango::sql::atomic(pool, move |_tx| {
+            Box::pin(async move { Shelf::delete_where("id", 1_i64, &p).await.map(drop) })
+        })
+        .await
+        .expect("commit");
+        for pk in [1, 2, 3] {
+            assert_eq!(deletes(pool, pk).await, 1, "crate {pk}");
+        }
+    }
+
+    /// A raw PG executor runs one statement: the delete still works (as in
+    /// 0.61.1), the cascade just goes unaudited.
+    async fn single_statement_pg_paths_still_delete(pool: &Pool) {
+        let Some(pg) = pool.as_postgres() else {
+            return;
+        };
+        Shelf { id: 1 }.delete(pg).await.expect("Model::delete(&PgPool)");
+        let n = Shelf::objects()
+            .filter("id", 2_i64)
+            .delete_on(pg)
+            .await
+            .expect("QuerySet::delete_on(&PgPool)");
+        assert_eq!(n, 1);
+        assert_eq!(Crate::objects().count(pool).await.unwrap(), 0);
+        assert_eq!(deletes(pool, 1).await, 0);
+    }
+
     tri_dialect_test! {
         setup: setup,
         scenarios: [
             fk_cascade_audits_each_removed_child,
             audited_delete_audits_each_row_once,
+            cascade_audit_follows_the_atomic_block,
+            single_statement_pg_paths_still_delete,
         ],
     }
 }

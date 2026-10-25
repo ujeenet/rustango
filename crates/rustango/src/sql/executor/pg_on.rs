@@ -124,11 +124,9 @@ where
 {
     // Postgres folds the junction cleanup into this one statement.
     let plan = crate::sql::compile_delete_plan(&Postgres, query)?;
+    // One statement here: delete as before; the cascade goes unaudited.
     if plan.cascade.is_some() {
-        return Err(ExecError::AuditUnsupported {
-            table: query.model.table,
-            reason: "it cascades to an audited model; use `delete_pool`",
-        });
+        crate::audit::cascade::warn_unaudited(query.model.table);
     }
     let stmt = plan.owner;
     let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);

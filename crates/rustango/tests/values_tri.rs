@@ -817,6 +817,28 @@ mod related {
         assert_eq!(names, vec![Some("Acme".to_owned()), None]);
     }
 
+    /// `distinct_on` (a window rewrite on MySQL / SQLite) keeps related columns.
+    async fn related_projection_with_distinct_on(pool: &Pool) {
+        let rows = Book::objects()
+            .distinct_on(&["title"])
+            .order_by(&[("title", false), ("id", false)])
+            .values_list(&["title", "writer__name"])
+            .fetch(pool)
+            .await
+            .expect("distinct_on values_list");
+        assert_eq!(
+            rows,
+            vec![vec![s("One"), s("Ann")], vec![s("Two"), SqlValue::Null]]
+        );
+        let plain = Book::objects()
+            .distinct()
+            .values_list(&["writer__press__name"])
+            .fetch(pool)
+            .await
+            .expect("distinct values_list");
+        assert_eq!(plain.len(), 2, "{plain:?}");
+    }
+
     async fn related_projection_selects_only_what_it_names(pool: &Pool) {
         let q = Book::objects()
             .filter("writer__name", "Ann")
@@ -841,6 +863,7 @@ mod related {
             values_list_reads_related_columns_in_order,
             values_dict_and_only_key_related_columns_by_name,
             related_projection_selects_only_what_it_names,
+            related_projection_with_distinct_on,
         ],
     }
 }

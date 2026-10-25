@@ -571,7 +571,12 @@ impl<T: Model + Send> QuerySet<T> {
         refuse_audited::<T>("`delete_on` cannot audit; use `Model::delete_where`")?;
         let query = self.compile_delete()?;
         let plan = crate::sql::compile_delete_plan(executor.dialect(), &query)?;
-        if plan.is_one_statement() {
+        // A raw sqlx executor runs one statement: delete as before, unaudited cascade.
+        let single = plan.links.is_empty() && !executor.runs_plans();
+        if plan.is_one_statement() || single {
+            if plan.cascade.is_some() {
+                crate::audit::cascade::warn_unaudited(query.model.table);
+            }
             return write_on(executor, &plan.owner.sql, plan.owner.params).await;
         }
         executor.run_delete_plan(plan).await
@@ -1331,18 +1336,21 @@ pub(crate) async fn run_delete_plan_tx(
     tx: &mut PoolTx<'_>,
     plan: crate::sql::DeletePlan,
 ) -> Result<u64, ExecError> {
-    let cascaded = match &plan.cascade {
-        Some(query) => Some(crate::audit::cascade::snapshot(tx, query).await?),
-        None => None,
-    };
+    match plan.cascade {
+        Some(query) => crate::audit::cascade::delete_with_audit(tx, &query).await,
+        None => run_delete_statements_tx(tx, plan).await,
+    }
+}
+
+/// A plan's statements in `tx`: links, then the owner; returns the owner's count.
+pub(crate) async fn run_delete_statements_tx(
+    tx: &mut PoolTx<'_>,
+    plan: crate::sql::DeletePlan,
+) -> Result<u64, ExecError> {
     for link in plan.links {
         execute_tx(tx, &link.sql, link.params).await?;
     }
-    let affected = execute_tx(tx, &plan.owner.sql, plan.owner.params).await?;
-    if let Some(pending) = cascaded {
-        crate::audit::cascade::emit_removed(tx, pending).await?;
-    }
-    Ok(affected)
+    execute_tx(tx, &plan.owner.sql, plan.owner.params).await
 }
 
 /// `SELECT COUNT(*)` against either backend.

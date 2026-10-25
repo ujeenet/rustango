@@ -1614,7 +1614,7 @@ with_source(
 
 The admin's per-row history panel reads from this table; the cross-model feed is at `/__audit`.
 
-Audited rows an FK `on_delete = "cascade"` removes get a `delete` entry, read before the delete in its transaction. Rows changed by `set_null` / `set_default`, and child tables PostgreSQL's `Model::truncate` empties with `CASCADE`, are not audited. The PG-only `delete_on` refuses a delete that would cascade to an audited model; use `delete_pool`.
+Audited rows an FK `on_delete = "cascade"` removes get a `delete` entry, read before the delete in its transaction. Rows changed by `set_null` / `set_default`, and child tables PostgreSQL's `Model::truncate` empties with `CASCADE`, are not audited. It runs on pool and transaction paths (`delete_pool`, `PoolTx`, `PoolConn`), 500 deleted rows at a time: each chunk's cascaded rows are read with `FOR UPDATE` and held in memory with their entries until the chunk is deleted. A raw sqlx executor (`Model::delete(&PgPool)`, `delete_on`) runs one plain DELETE and logs a one-time warning instead. A `DEFERRABLE INITIALLY DEFERRED` FK cascades only at commit, so its rows get no entries.
 
 Cleanup:
 

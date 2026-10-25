@@ -166,6 +166,12 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
     where
         'c: 'e;
 
+    /// Whether [`Self::run_delete_plan`] can run several statements.
+    #[doc(hidden)]
+    fn runs_plans(&self) -> bool {
+        false
+    }
+
     /// Runs a delete plan's statements in one transaction. Only reached
     /// on dialects that split it, so never on a Postgres sqlx executor.
     #[doc(hidden)]
@@ -336,6 +342,10 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
         }
     }
 
+    fn runs_plans(&self) -> bool {
+        true
+    }
+
     fn run_delete_plan<'e>(self, plan: DeletePlan) -> BoxFuture<'e, Result<u64, ExecError>>
     where
         'c: 'e,
@@ -387,6 +397,10 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
             #[cfg(feature = "sqlite")]
             PoolConn::Sqlite(c) => sq_exec(&mut **c, sql, params),
         }
+    }
+
+    fn runs_plans(&self) -> bool {
+        true
     }
 
     fn run_delete_plan<'e>(self, plan: DeletePlan) -> BoxFuture<'e, Result<u64, ExecError>>
@@ -449,6 +463,10 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
             #[cfg(feature = "sqlite")]
             PoolTx::Sqlite(t) => sq_exec(&mut **t, sql, params),
         }
+    }
+
+    fn runs_plans(&self) -> bool {
+        true
     }
 
     fn run_delete_plan<'e>(self, plan: DeletePlan) -> BoxFuture<'e, Result<u64, ExecError>>

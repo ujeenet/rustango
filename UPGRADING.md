@@ -152,7 +152,7 @@ untouched.
 
 ### Deletes that cascade to audited models
 
-Such a delete now runs in a transaction and first reads (and locks) the rows it will cascade to. The PG-only `Model::delete` / `delete_on` refuse it with `ExecError::AuditUnsupported`; use `delete_pool`.
+Such a delete now runs in a transaction and first reads (and locks) the rows it will cascade to. Cascade audit happens on pool / transaction paths (`delete_pool`, `PoolTx`, `PoolConn`); a raw sqlx executor still runs the plain DELETE and logs a one-time warning.
 
 ### PostgreSQL `IN` lists compile to `= ANY($1)`
 
