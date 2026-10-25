@@ -600,28 +600,56 @@ pub(super) fn rollback_snapshot(
     else {
         return prev;
     };
-    let line = ancestry(&chain, parent);
-    let mut snap = prev.clone();
-    for leaf in leaves(&chain) {
-        let reach = reachable(&chain, leaf);
-        // The parent's own line, or a migration built on `target`.
-        if leaf.name == parent.name || reach.contains(&target.name) {
+    with_other_branches(&chain, parent, Some(&target.name), prev, "unapplying", &target.name)
+}
+
+/// The schema applying `mig` leaves: its own snapshot plus the other branches
+/// already applied, so a SQLite rebuild keeps their columns.
+pub(super) fn apply_snapshot(
+    all: &[Migration],
+    applied: &std::collections::HashSet<String>,
+    mig: &Migration,
+) -> SchemaSnapshot {
+    let chain: Vec<&Migration> = all
+        .iter()
+        .filter(|m| m.name == mig.name || applied.contains(&m.name))
+        .collect();
+    let Some(tip) = chain.iter().copied().find(|m| m.name == mig.name) else {
+        return mig.snapshot.clone();
+    };
+    with_other_branches(&chain, tip, None, mig.snapshot.clone(), "applying", &mig.name)
+}
+
+/// `own` (the schema along `tip`'s line) merged with every other leaf of
+/// `chain`, skipping leaves built on `skip`. Falls back to `own` on a conflict.
+fn with_other_branches(
+    chain: &[&Migration],
+    tip: &Migration,
+    skip: Option<&str>,
+    own: SchemaSnapshot,
+    verb: &str,
+    name: &str,
+) -> SchemaSnapshot {
+    let line = ancestry(chain, tip);
+    let mut snap = own.clone();
+    for leaf in leaves(chain) {
+        let reach = reachable(chain, leaf);
+        if leaf.name == tip.name || skip.is_some_and(|s| reach.contains(s)) {
             continue;
         }
         let Some(base) = line.iter().find(|a| reach.contains(&a.name)) else {
             continue;
         };
-        let theirs = effective_snapshot(&chain, leaf);
-        if let Err(conflicts) = snap.merge_branch(&effective_snapshot(&chain, base), &theirs) {
+        let theirs = effective_snapshot(chain, leaf);
+        if let Err(conflicts) = snap.merge_branch(&effective_snapshot(chain, base), &theirs) {
             tracing::warn!(
                 target: "rustango::migrate",
-                "unapplying `{}`: branch `{}` conflicts ({}); rebuilding from `{}` alone",
-                target.name,
+                "{verb} `{name}`: branch `{}` conflicts ({}); rebuilding from `{}` alone",
                 leaf.name,
                 conflicts.join("; "),
-                parent.name,
+                tip.name,
             );
-            return prev;
+            return own;
         }
     }
     snap

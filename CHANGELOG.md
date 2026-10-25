@@ -11,6 +11,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - MariaDB: JSON `=` / `<>` compare by value (`JSON_EQUALS`), not as text; `explain` returns its JSON plan instead of failing on `FORMAT=TREE` / `EXPLAIN ANALYZE`; check constraints drop with `DROP CONSTRAINT`; `bulk_update` no longer sends `VALUES ROW(…)`.
 - Rolling back a migration that renamed a column and then dropped a CHECK, partial index or exclusion constraint recreates it after the rename is undone, so its SQL finds the old name.
 - SQLite: unapplying one branch of a merged history keeps the other branch's columns; the table rebuild used the shared parent's snapshot and refused.
+- SQLite: applying one branch of a merged history keeps the other applied branch's columns when it rebuilds a table.
+- MySQL: a migration that renames a column and then drops a CHECK reading it drops the CHECK first, so the rename no longer fails with error 3959.
+- SQLite: JSON column `=` / `<>` compare by value (`1` = `1.0`, any key order), not as text.
+- `DatabaseTenant` connections (`&mut DatabaseConn<Sqlite | MySql>`) are accepted by the ORM's `_on` queries, e.g. `fetch_on(t.conn())`.
+- Tenancy Basic auth: the verified-credential cache holds 256 entries per tenant instead of 1024 shared, so a busy tenant no longer evicts the others.
 
 ### Fixed — FK cascades write audit rows
 

@@ -4507,7 +4507,9 @@ fn write_expr_compare(
     if let Some(kw) = binary_op_str {
         let start = b.sql.len();
         write_expr(b, lhs, None)?;
-        if let Expr::Literal(v @ SqlValue::Json(_)) = rhs {
+        // A SQLite JSON path reads an SQL value, compared via `json_extract`.
+        let sqlite_path = b.d.name() == "sqlite" && matches!(lhs, Expr::JsonPath { .. });
+        if let (Expr::Literal(v @ SqlValue::Json(_)), false) = (rhs, sqlite_path) {
             let lhs_sql = b.sql.split_off(start);
             if try_json_eq(b, &lhs_sql, op, v) {
                 return Ok(());

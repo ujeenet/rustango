@@ -190,3 +190,37 @@ async fn no_url_no_template_is_a_clear_error() {
         "error should name the missing knob, got: {msg}"
     );
 }
+
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "dbt_fetch_on_item")]
+#[allow(dead_code)]
+pub struct FetchOnItem {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub n: i64,
+}
+
+/// A tenant connection runs the ORM's `_on` queries.
+#[tokio::test]
+async fn orm_queries_run_on_a_tenant_connection() {
+    use rustango::core::Column as _;
+    let pools: DatabasePools<sqlx::Sqlite> = DatabasePools::new(BackendKind::Sqlite);
+    let mut conn = pools.acquire(&fake_sqlite_org("acme")).await.expect("acquire");
+    sqlx::query("CREATE TABLE dbt_fetch_on_item (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)")
+        .execute(&mut **conn)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO dbt_fetch_on_item (id, n) VALUES (1, 10), (2, 20)")
+        .execute(&mut **conn)
+        .await
+        .unwrap();
+    let rows = FetchOnItem::objects().fetch_on(&mut conn).await.expect("fetch_on");
+    assert_eq!(rows.len(), 2);
+    let gone = FetchOnItem::objects()
+        .where_(FetchOnItem::n.eq(10))
+        .delete_on(&mut conn)
+        .await
+        .expect("delete_on");
+    assert_eq!(gone, 1);
+    assert_eq!(FetchOnItem::objects().count_on(&mut conn).await.expect("count_on"), 1);
+}
