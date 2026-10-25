@@ -53,6 +53,28 @@ pub struct DbServer {
     pub updated_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
 
+/// A tenant database rustango created on a saved server, so a purge
+/// drops only what rustango made. Written by provisioning only.
+#[derive(crate::Model, Debug, Clone)]
+#[rustango(table = "rustango_tenant_databases", scope = "registry", display = "database_name")]
+pub struct TenantDatabase {
+    #[rustango(primary_key)]
+    pub id: crate::sql::Auto<i64>,
+    #[rustango(max_length = 63)]
+    pub org_slug: String,
+    /// Set once the tenant row exists.
+    pub org_id: Option<i64>,
+    #[rustango(max_length = 64)]
+    pub server_name: String,
+    #[rustango(max_length = 63)]
+    pub database_name: String,
+    /// `None` on SQLite, which has no logins.
+    #[rustango(max_length = 32)]
+    pub login_name: Option<String>,
+    #[rustango(auto_now_add)]
+    pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
+}
+
 impl std::fmt::Debug for DbServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DbServer")
@@ -395,8 +417,9 @@ impl DbServer {
 
     /// Tenants this server must not be removed under: database-mode
     /// tenants whose URL points at its host and port (SQLite: a file in
-    /// its directory), and those whose URL is missing, does not resolve
-    /// or does not parse, since they may be on it too.
+    /// its directory), those whose URL is missing, does not resolve or
+    /// does not parse, since they may be on it too, and every
+    /// [`TenantDatabase`] recorded on it.
     ///
     /// Hosts match ignoring case, IPv6 brackets and one trailing dot, after
     /// sqlx reads `?host=` / `hostaddr=`. Other spellings of one machine
@@ -428,6 +451,17 @@ impl DbServer {
                 Uses::Yes => out.push(org.slug),
                 Uses::No => {}
                 Uses::Unknown(why) => out.push(format!("{} ({why})", org.slug)),
+            }
+        }
+        // A database rustango created here counts while its record lasts,
+        // whatever the tenant's URL says now.
+        let created: Vec<TenantDatabase> = TenantDatabase::objects()
+            .where_(TenantDatabase::server_name.eq(self.name.clone()))
+            .fetch(registry)
+            .await?;
+        for record in created {
+            if !out.iter().any(|t| t == &record.org_slug) {
+                out.push(record.org_slug);
             }
         }
         out.sort();

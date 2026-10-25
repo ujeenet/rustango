@@ -844,6 +844,11 @@ fn is_never_served(table: &str) -> bool {
     if table == <crate::tenancy::DbServer as crate::core::Model>::SCHEMA.table {
         return true;
     }
+    // A purge drops what these rows name, so only provisioning writes them.
+    #[cfg(feature = "tenancy")]
+    if table == <crate::tenancy::TenantDatabase as crate::core::Model>::SCHEMA.table {
+        return true;
+    }
     #[cfg(feature = "totp")]
     if table == <super::totp_store::AdminTotp as crate::core::Model>::SCHEMA.table {
         return true;
@@ -1123,6 +1128,8 @@ mod scope_filter_tests {
             assert!(!registry.is_visible("rustango_users"));
             // Its password column must be written only sealed.
             assert!(!registry.is_visible("rustango_db_servers"));
+            // A purge drops what its rows name.
+            assert!(!registry.is_visible("rustango_tenant_databases"));
             assert!(registry.is_visible("rustango_audit_log"));
         }
     }

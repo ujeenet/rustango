@@ -176,7 +176,9 @@ pub use permissions::{
 };
 
 pub use database_pools::{DatabaseConn, DatabasePool, DatabasePools};
-pub use db_server::{DbServer, DbServerError, DbServerSpec, PasswordChange, TlsMode};
+pub use db_server::{
+    DbServer, DbServerError, DbServerSpec, PasswordChange, TenantDatabase, TlsMode,
+};
 pub use error::TenancyError;
 #[cfg(all(feature = "tenancy", feature = "sso"))]
 pub use member_auth::{member_sso_router, CurrentMember, MemberAuthConfig, MEMBER_COOKIE};
