@@ -165,7 +165,9 @@ New servers use TLS `require` unless saved with `disable` or another mode; a ser
 
 ### New registry table `rustango_tenant_databases`; `ProvisionRequest` reshaped
 
-Run `makemigrations` then `migrate` to create the table. `ProvisionRequest.mode`, `database_url` and `schema_name` are now one `storage: TenantStorage` (use `ProvisionRequest::database`, `::on_server` or `::new`); `ProvisionStep` has new variants.
+Run `makemigrations` then `migrate` to create the table. `ProvisionRequest.mode`, `database_url` and `schema_name` are now one `storage: TenantStorage` (use `ProvisionRequest::database`, `::on_server` or `::new`); `ProvisionStep` has new variants and is `#[non_exhaustive]`, so a match needs a wildcard arm.
+`CreateTenantOpts` has a new `database_server` field: add `..Default::default()` to a struct literal. `Dialect::create_database_sql` takes a second `Option<&Collation>` argument; a custom dialect overriding it must add it.
+A saved-server create needs `RUSTANGO_SECRET_KEY`: the tenant login it creates is stored only sealed.
 `backend` is `Option<BackendKind>` in `ProvisionRequest`, `CreateTenantOpts` and `WebhookConfig`: `None` (the default) takes the registry's, and any other value is refused.
 `UrlPolicy` has a new `Server(name)` variant, so an exhaustive match needs an arm.
 `create-tenant --database-url` without `--mode` now means database mode; `api::create_tenant` refuses a database URL or server in schema mode. Database mode on a saved server returns `Err` when migrations fail, since the tenant was removed again.
