@@ -107,7 +107,8 @@ Both run as a recorded run with these steps:
 2. `alter_password`: a new random password on the server.
 3. `store_password`: the new URL, sealed, is written only while the stored
    URL is still the one read (compare-and-set). If that fails, `revert` puts
-   the old password back.
+   the old password back, but only while the stored URL still holds it;
+   otherwise run `rotate-tenant-password` again.
 4. `invalidate_pools`: this process drops its pools for the tenant.
 5. `discard_old_password`: see the window below.
 
@@ -117,7 +118,9 @@ their *new* connections use the old password. Open connections are never cut.
 
 - On MySQL 8.0.14 and later the old password is kept valid with
   `RETAIN CURRENT PASSWORD` for two poll intervals, then dropped with
-  `DISCARD OLD PASSWORD`. No connection fails.
+  `DISCARD OLD PASSWORD`. No connection fails. The admin's global
+  `CREATE USER` is enough for both. If the process stops during the wait,
+  the old password stays valid until the next rotation or purge.
 - On PostgreSQL and MariaDB there are no dual passwords: the old one stops at
   once, so other pods may fail to open new connections for up to one poll
   interval.
@@ -141,16 +144,20 @@ run page; the CLI prints the same steps. Every refusal comes first, in
   example after `edit-tenant --database-url` or `migrate-tenant-storage`.
   Nothing is dropped: put the URL back, or drop that database by hand and
   delete its `rustango_tenant_databases` row;
-- another tenant's URL names the same database;
+- another tenant's URL names the same database, or can't be read to rule
+  it out (on MySQL and SQLite each one is checked by the live server and
+  file, so an alias counts), or it is the registry's;
+- another purge or password change is running for the tenant;
 - the admin does not own the database (Postgres: it was made by another
   admin), or may not drop the login (see
-  [PostgreSQL notes](#postgresql-notes));
+  [PostgreSQL notes](#postgresql-notes)); on MySQL it needs global `DROP`
+  and `CREATE USER`;
 - a session not opened by this tenant's pools is open in the database (an
   operator, a backup).
 
 Then: `deactivate`, `purge_media`, `drop_database` (ending this tenant's
-own sessions on every pod first), `drop_login`, `delete_record`,
-`remove_org`. SQLite deletes the tenant's file and its `-wal`, `-shm` and
+own sessions on every pod first), `drop_login`, `remove_org`,
+`delete_record`. A retry after a failed step skips what is already gone. SQLite deletes the tenant's file and its `-wal`, `-shm` and
 `-journal` files.
 
 A database the operator brought has no record and keeps the old behaviour:

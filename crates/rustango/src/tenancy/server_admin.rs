@@ -37,6 +37,10 @@ pub enum TenantDbError {
     Connect(ConnectDiagnosis),
     #[error("{0}")]
     Unsupported(&'static str),
+    /// The server refused a statement holding a password; its text may
+    /// quote it, so only the step is named.
+    #[error("the server refused to {0}; the cause is not shown because it may quote the password")]
+    PasswordStatement(&'static str),
     #[error(transparent)]
     Exec(#[from] ExecError),
     #[error(transparent)]
@@ -685,7 +689,16 @@ impl ServerAdmin {
             .dialect()
             .alter_login_password_sql(login, password, retain_current)
             .ok_or(TenantDbError::Unsupported("this backend has no logins"))?;
-        step(pool, &sql, "change a login's password").await
+        const WHAT: &str = "change a login's password";
+        match crate::sql::raw_execute_pool(pool, &sql, Vec::new()).await {
+            Ok(_) => Ok(()),
+            // Driver text can quote the statement, password included.
+            Err(e) if fault(&e) == Fault::Denied => Err(TenantDbError::Denied {
+                step: WHAT,
+                detail: "access denied".to_owned(),
+            }),
+            Err(_) => Err(TenantDbError::PasswordStatement(WHAT)),
+        }
     }
 
     /// Forget the password [`Self::alter_password`] retained. `Ok` where
@@ -806,6 +819,15 @@ impl ServerAdmin {
             Target::Server { pool, .. } => {
                 undo_create(pool, &created.database, created.login.as_ref()).await
             }
+        }
+    }
+
+    /// The admin pool; `None` for a SQLite directory.
+    #[cfg(feature = "mysql")]
+    pub(crate) fn server_pool(&self) -> Option<&Pool> {
+        match &self.target {
+            Target::Server { pool, .. } => Some(pool),
+            Target::Sqlite { .. } => None,
         }
     }
 

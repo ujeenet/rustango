@@ -18,6 +18,7 @@ use serde::Deserialize;
 
 use super::super::auth;
 use super::super::decommission::Action;
+use super::super::error::TenancyError;
 use super::super::provision_store::{self as store, RunKind};
 use super::flash::{self, Flash};
 use super::{urlencoding_lite, withheld, ConsoleState};
@@ -201,9 +202,12 @@ async fn open_run(
         Ok(None) => return Err(back_to_orgs(None, Some(&format!("no tenant `{slug}`")))),
         Err(e) => return Err(super::server_error("could not read the tenant", &e)),
     };
-    let run = store::open_operation_run(&state.registry, kind, &org, Some(&op.username))
-        .await
-        .map_err(|e| super::server_error("could not open a run", &e))?;
+    let run = match store::open_operation_run(&state.registry, kind, &org, Some(&op.username)).await {
+        Ok(run) => run,
+        // Another purge or password change is running: say so.
+        Err(TenancyError::Validation(why)) => return Err(back_to_orgs(None, Some(&why))),
+        Err(e) => return Err(super::server_error("could not open a run", &e)),
+    };
     let run_id = run.id.get().copied().unwrap_or_default();
     let mut extra = serde_json::Map::new();
     extra.insert("run_id".into(), serde_json::json!(run_id));

@@ -524,6 +524,20 @@ impl DbServer {
         Ok(())
     }
 
+    /// Whether `url` names `database` here; `Err` when it cannot tell.
+    pub(crate) fn may_name_database(
+        &self,
+        backend: BackendKind,
+        url: &str,
+        database: &str,
+    ) -> Result<bool, &'static str> {
+        match self.holds(backend, url) {
+            Uses::Yes => Ok(url_database_and_user(backend, url).0.as_deref() == Some(database)),
+            Uses::No => Ok(false),
+            Uses::Unknown(why) => Err(why),
+        }
+    }
+
     /// Whether tenant `url` lives on this server.
     fn holds(&self, backend: BackendKind, url: &str) -> Uses {
         let same_host = |host: &str, port: u16| {

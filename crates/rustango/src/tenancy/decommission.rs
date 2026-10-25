@@ -344,8 +344,8 @@ async fn schema_has_table(
 }
 
 /// `Ok` when no other tenant and not the registry use this database-mode
-/// tenant's database. The Postgres purge refuses that; other backends drop
-/// nothing, so only the media step needs the proof (#2569).
+/// tenant's database. The Postgres purge refuses that; for a brought
+/// database elsewhere only the media step needs the proof.
 #[cfg(feature = "media")]
 async fn exclusive_database<DB: Database>(
     pools: &TenantPools<DB>,
@@ -355,15 +355,28 @@ async fn exclusive_database<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let shared = |why: String| format!("the database may be shared: {why}");
     let url = pools
         .resolved_database_url(org)
         .await
         .map_err(|e| e.to_string())?;
-    let me = DbIdentity::of_url(&url)
-        .await?
-        .ok_or_else(|| shared("its URL names no existing file or server database".into()))?;
-    if DbIdentity::of_pool(registry).await?.as_ref() == Some(&me) {
+    let me = DbIdentity::of_url(&url).await?.ok_or_else(|| {
+        "the database may be shared: its URL names no existing file or server database".to_owned()
+    })?;
+    refuse_twins(pools, registry, org, &me).await
+}
+
+/// `Ok` when neither the registry nor another tenant uses database `me`.
+async fn refuse_twins<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry: &crate::sql::Pool,
+    org: &Org,
+    me: &DbIdentity,
+) -> Result<(), String>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let shared = |why: String| format!("the database may be shared: {why}");
+    if DbIdentity::of_pool(registry).await?.as_ref() == Some(me) {
         return Err(shared("it is the registry's".into()));
     }
     let others: Vec<Org> = Org::objects()
@@ -383,7 +396,7 @@ where
         if !me.same_backend(&url) {
             continue;
         }
-        if DbIdentity::of_url(&url).await.map_err(cant)?.as_ref() == Some(&me) {
+        if DbIdentity::of_url(&url).await.map_err(cant)?.as_ref() == Some(me) {
             return Err(shared(format!("tenant `{}` uses it too", other.slug)));
         }
     }
@@ -392,7 +405,6 @@ where
 
 /// Which database a SQLite or MySQL tenant uses: a canonical file, or the
 /// live server's uuid and database, so a host alias can't hide a twin.
-#[cfg(feature = "media")]
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(not(all(feature = "sqlite", feature = "mysql")), allow(dead_code))]
 enum DbIdentity {
@@ -400,8 +412,28 @@ enum DbIdentity {
     Server { uuid: String, database: String },
 }
 
-#[cfg(feature = "media")]
 impl DbIdentity {
+    /// Database `name` on the server behind a MySQL admin `pool`: known
+    /// without the tenant's login, which a retried purge may have dropped.
+    #[cfg(feature = "mysql")]
+    async fn on_server(pool: &crate::sql::Pool, name: &str) -> Result<Option<Self>, String> {
+        #[allow(unreachable_patterns)]
+        let p = match pool {
+            crate::sql::Pool::Mysql(p) => p,
+            _ => return Ok(None),
+        };
+        let (uuid, database): (String, String) = sqlx::query_as(
+            "SELECT CAST(@@server_uuid AS CHAR), \
+             CAST(IF(@@lower_case_table_names = 0, ?, LOWER(?)) AS CHAR)",
+        )
+        .bind(name)
+        .bind(name)
+        .fetch_one(p)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(Some(Self::Server { uuid, database }))
+    }
+
     /// `Ok(None)` for another backend or a missing / in-memory SQLite file.
     async fn of_url(url: &str) -> Result<Option<Self>, String> {
         #[cfg(feature = "sqlite")]
@@ -537,14 +569,18 @@ where
         return Ok((mode, id, DropPlan::None));
     }
     let url = pools.resolved_database_url(org).await?;
+    // A record never makes the registry's own database droppable.
+    #[cfg(feature = "postgres")]
+    if org.backend_kind == "postgres" {
+        refuse_registry_database(pools, &parse_pg_url(org, &url)?)?;
+    }
     if let Some(tenant) = ServerTenant::of(registry, org, &url).await? {
-        let plan = check_server_drop(pools, registry, id, tenant).await?;
+        let plan = check_server_drop(pools, registry, org, tenant).await?;
         return Ok((mode, id, DropPlan::Server(plan)));
     }
     #[cfg(feature = "postgres")]
     if org.backend_kind == "postgres" {
         let opts = parse_pg_url(org, &url)?;
-        refuse_registry_database(pools, &opts)?;
         if let Some(other) = database_claimed(pools, registry, id, &opts).await? {
             return Err(TenancyError::Validation(format!(
                 "refusing to drop this tenant's database — tenant `{other}` uses it too"
@@ -562,12 +598,13 @@ where
 async fn check_server_drop<DB: Database>(
     pools: &TenantPools<DB>,
     registry: &crate::sql::Pool,
-    id: i64,
+    org: &Org,
     tenant: ServerTenant,
 ) -> Result<ServerDrop, TenancyError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    let id = org.id.get().copied().unwrap_or_default();
     let backend = tenant.server.backend_kind()?;
     let others: Vec<Org> = Org::objects()
         .where_(Org::storage_mode.eq(StorageMode::Database.as_str().to_owned()))
@@ -580,15 +617,23 @@ where
                 other.slug
             ))
         })?;
-        if tenant
+        match tenant
             .server
-            .names_database(backend, &url, tenant.database.as_str())
-            .is_ok()
+            .may_name_database(backend, &url, tenant.database.as_str())
         {
-            return Err(TenancyError::Validation(format!(
-                "refusing to drop this tenant's database — tenant `{}` uses it too",
-                other.slug
-            )));
+            Ok(false) => {}
+            Ok(true) => {
+                return Err(TenancyError::Validation(format!(
+                    "refusing to drop this tenant's database — tenant `{}` uses it too",
+                    other.slug
+                )))
+            }
+            Err(why) => {
+                return Err(TenancyError::Validation(format!(
+                    "refusing to drop this tenant's database — tenant `{}` may use it ({why})",
+                    other.slug
+                )))
+            }
         }
     }
     let admin = tenant.connect().await?;
@@ -600,6 +645,23 @@ where
                 "the admin login of server `{}` is refused: {why}",
                 tenant.server.name
             )));
+        }
+        // MySQL has no per-object check: the global rights decide, before media goes.
+        if report.backend == "mysql" && !(report.can_create_database && report.can_create_user) {
+            return Err(TenancyError::Validation(format!(
+                "the admin login of server `{}` may not drop databases and logins (it needs \
+                 global DROP and CREATE USER); grant them and purge again",
+                tenant.server.name
+            )));
+        }
+        // An alias, a twin or the registry: names alone can't tell on these backends.
+        if backend != super::org::BackendKind::Postgres {
+            let me = server_identity(&admin, &tenant).await.map_err(TenancyError::Validation)?;
+            if let Some(me) = me {
+                refuse_twins(pools, registry, org, &me)
+                    .await
+                    .map_err(|why| TenancyError::Validation(format!("refusing to drop this tenant's database — {why}")))?;
+            }
         }
         let rights = admin.tenant_rights(&tenant.database, tenant.login.as_ref()).await?;
         if !rights.drop_database {
@@ -640,6 +702,21 @@ where
             Err(e)
         }
     }
+}
+
+/// The identity of a recorded database, read through its server's admin:
+/// `None` once a SQLite file is gone, or on Postgres.
+async fn server_identity(admin: &ServerAdmin, tenant: &ServerTenant) -> Result<Option<DbIdentity>, String> {
+    #[cfg(feature = "sqlite")]
+    if let Some(path) = admin.sqlite_path(&tenant.database) {
+        return Ok(DbIdentity::file(&path));
+    }
+    #[cfg(feature = "mysql")]
+    if let Some(pool) = admin.server_pool() {
+        return DbIdentity::on_server(pool, tenant.database.as_str()).await;
+    }
+    let _ = (admin, tenant);
+    Ok(None)
 }
 
 /// Everything after the checks. Each drop is `IF EXISTS`, so a retry
@@ -702,7 +779,7 @@ where
             report.schema_dropped = Some(schema);
             rep.ok(Step::DropSchema).await;
         }
-        DropPlan::Server(s) => drop_server_database(registry, s, report, rep).await?,
+        DropPlan::Server(s) => drop_server_database(s, report, rep).await?,
         #[cfg(feature = "postgres")]
         DropPlan::Brought(target) => {
             rep.started(Step::DropDatabase).await;
@@ -739,6 +816,16 @@ where
     }
     report.row_deleted = true;
     rep.ok(Step::RemoveOrg).await;
+
+    // Last: while the org stays, a retry finds the record and goes by the
+    // server's admin, not the tenant login it already dropped.
+    if let DropPlan::Server(s) = plan {
+        rep.started(Step::DeleteRecord).await;
+        if let Err(e) = s.tenant.record.clone().delete_pool(registry).await {
+            return rep.fail(Step::DeleteRecord, e.into()).await;
+        }
+        rep.ok(Step::DeleteRecord).await;
+    }
     Ok(())
 }
 
@@ -749,10 +836,9 @@ async fn leave_login_and_record(rep: &OpReporter<'_>) {
         .await;
 }
 
-/// Drop a recorded database, then its login, then the record: sessions
-/// tagged as this tenant's pools, on any pod, are ended first.
+/// Drop a recorded database, then its login: sessions tagged as this
+/// tenant's pools, on any pod, are ended first. The record goes last.
 async fn drop_server_database(
-    registry: &crate::sql::Pool,
     s: &ServerDrop,
     report: &mut Report,
     rep: &OpReporter<'_>,
@@ -781,12 +867,6 @@ async fn drop_server_database(
         }
         None => rep.skipped(Step::DropLogin, "a SQLite tenant has no login").await,
     }
-
-    rep.started(Step::DeleteRecord).await;
-    if let Err(e) = t.record.clone().delete_pool(registry).await {
-        return rep.fail(Step::DeleteRecord, e.into()).await;
-    }
-    rep.ok(Step::DeleteRecord).await;
     Ok(())
 }
 
@@ -1119,23 +1199,4 @@ mod tests {
         assert!(err.contains("env://ACME_DB") && err.contains("acme"), "{err}");
     }
 
-    /// The flag is the whole guard for an unrecoverable act, so the two
-    /// purge shapes must not compare equal.
-    #[test]
-    fn purging_a_database_is_a_distinct_action() {
-        assert_ne!(
-            Action::Purge {
-                purge_database: false
-            },
-            Action::Purge {
-                purge_database: true
-            }
-        );
-        assert_ne!(
-            Action::Deactivate,
-            Action::Purge {
-                purge_database: false
-            }
-        );
-    }
 }

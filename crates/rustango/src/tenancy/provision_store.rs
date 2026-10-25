@@ -696,11 +696,43 @@ pub async fn open_migrate_run(
 }
 
 /// Open a run of `kind` for work on an existing tenant: a purge or a
-/// password rotation.
+/// password rotation. Refused while another one runs for the same tenant.
 ///
 /// # Errors
-/// Driver / insert failures.
+/// Driver / insert failures, or a refusal naming the running run.
 pub async fn open_operation_run(
+    registry: &Pool,
+    kind: RunKind,
+    org: &super::Org,
+    requested_by: Option<&str>,
+) -> Result<ProvisioningRun, TenancyError> {
+    let run = insert_operation_run(registry, kind, org, requested_by).await?;
+    let id = run.id.get().copied().unwrap_or_default();
+    // Inserted first, then compared by id: of two racing opens the later one yields.
+    let earlier: Vec<ProvisioningRun> = ProvisioningRun::objects()
+        .where_(ProvisioningRun::org_id.eq(org.id.get().copied()))
+        .where_(ProvisioningRun::state.eq(RunState::Running.as_str().to_owned()))
+        .where_(ProvisioningRun::id.lt(id))
+        .fetch(registry)
+        .await?;
+    for other in earlier {
+        let operation = matches!(
+            RunKind::parse(&other.kind),
+            RunKind::Purge | RunKind::RotatePassword
+        );
+        if operation && !close_if_stale(registry, &other).await? {
+            let why = RunText(format!(
+                "another purge or password change (run {}) is running for this tenant; wait for it",
+                other.id.get().copied().unwrap_or_default()
+            ));
+            finish_run_text(registry, id, RunState::Failed, Some(&why)).await?;
+            return Err(TenancyError::Validation(why.0));
+        }
+    }
+    Ok(run)
+}
+
+async fn insert_operation_run(
     registry: &Pool,
     kind: RunKind,
     org: &super::Org,

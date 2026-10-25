@@ -697,10 +697,68 @@ async fn the_console_rotates_and_purges_through_the_run_page(pool: &Pool) {
     assert!(!env.database_exists(&a).await);
 }
 
+/// One purge or rotation at a time per tenant; the record goes after the row,
+/// so a retry still finds it.
+async fn operations_wait_for_each_other_and_the_record_goes_last(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    prepare();
+    let env = Env::new(pool).await;
+    let a = slug("busy");
+    env.clean(&[&a]).await;
+    env.add_server_as("main", None).await;
+    env.server_tenant(&a).await;
+    let org = env.org(&a).await.unwrap();
+
+    let running = store::open_operation_run(&env.registry, RunKind::RotatePassword, &org, None)
+        .await
+        .expect("first run");
+    let err = env.purge(&a).await.expect_err("a second operation");
+    assert!(err.to_string().contains("another purge or password change"), "{err}");
+    assert!(env.org(&a).await.unwrap().active);
+    assert!(env.database_exists(&a).await);
+    let id = running.id.get().copied().unwrap();
+    store::finish_run_text(&env.registry, id, RunState::Failed, None).await.unwrap();
+
+    env.purge(&a).await.expect("purge once the other run ended");
+    let (_, steps) = env.last_run(&a, RunKind::Purge).await;
+    let at = |s: &str| steps.iter().position(|x| x == s).unwrap_or_else(|| panic!("{s}: {steps:?}"));
+    assert!(at("remove_org:ok") < at("delete_record:ok"), "{steps:?}");
+}
+
+/// Another tenant's URL that can't be read might name this database: refused.
+async fn an_unreadable_tenant_url_blocks_the_drop(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    prepare();
+    let env = Env::new(pool).await;
+    if !env.server_backend() {
+        return;
+    }
+    let a = slug("unread");
+    env.clean(&[&a]).await;
+    env.add_server_as("main", None).await;
+    env.server_tenant(&a).await;
+    let scheme = if env.backend() == BackendKind::Postgres { "postgres" } else { "mysql" };
+    let mut other = Org {
+        slug: slug("bad"),
+        storage_mode: "database".into(),
+        backend_kind: env.backend().as_str().into(),
+        database_url: Some(format!("{scheme}://u:p@db.internal:notaport/x")),
+        ..rustango::testkit::org()
+    };
+    other.insert_pool(&env.registry).await.expect("org with a bad URL");
+
+    let err = env.purge(&a).await.expect_err("refused");
+    assert!(err.to_string().contains("may use it"), "{err}");
+    assert!(env.database_exists(&a).await, "dropped anyway");
+    env.clean(&[&a]).await;
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
     scenarios: [
+        operations_wait_for_each_other_and_the_record_goes_last,
+        an_unreadable_tenant_url_blocks_the_drop,
         purge_drops_a_server_tenant_as_the_admin,
         purge_ends_the_tenants_sessions_on_other_pods,
         a_moved_tenant_is_refused_before_anything_changes,

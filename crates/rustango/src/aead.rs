@@ -88,7 +88,24 @@ impl<'a> AeadKey<'a> {
 
 /// Encrypt `plaintext`, binding `aad` (empty for the cast).
 pub(crate) fn encrypt(plaintext: &[u8], aad: &[u8]) -> Result<String, AeadError> {
+    warn_blank_previous(std::env::var(PREVIOUS_KEY_VAR).ok().as_deref());
     encrypt_with(env_key().as_deref(), plaintext, aad)
+}
+
+/// A blank previous key opens what anyone could seal: say so, once, while
+/// it is set. It still opens, so old values can be re-sealed.
+fn warn_blank_previous(previous: Option<&str>) -> bool {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let blank = previous.is_some_and(|p| p.trim().is_empty());
+    if blank {
+        WARNED.call_once(|| {
+            tracing::warn!(
+                target: "rustango::aead",
+                "{PREVIOUS_KEY_VAR} is set but blank; run `reseal-tenant-secrets --apply`, then unset it"
+            );
+        });
+    }
+    blank
 }
 
 /// Set during key rotation to the old key; only ever used to open.
@@ -99,6 +116,7 @@ pub(crate) const PREVIOUS_KEY_VAR: &str = "RUSTANGO_SECRET_KEY_PREVIOUS";
 #[cfg_attr(not(feature = "casts"), allow(dead_code))]
 pub(crate) fn decrypt(stored: &str, aad: &[u8]) -> Result<Vec<u8>, AeadError> {
     let previous = std::env::var(PREVIOUS_KEY_VAR).ok();
+    warn_blank_previous(previous.as_deref());
     decrypt_either(env_key().as_deref(), previous.as_deref(), stored, aad)
 }
 
@@ -186,6 +204,13 @@ mod tests {
         let framed = [nonce.as_slice(), &ct].concat();
         let stored = base64::engine::general_purpose::STANDARD.encode(framed);
         assert_eq!(decrypt_with(KEY, &stored, b"").unwrap(), b"legacy");
+    }
+
+    #[test]
+    fn only_a_blank_previous_key_warns() {
+        assert!(warn_blank_previous(Some("  ")));
+        assert!(!warn_blank_previous(Some("old-key")));
+        assert!(!warn_blank_previous(None));
     }
 
     #[test]

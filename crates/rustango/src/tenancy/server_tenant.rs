@@ -323,7 +323,7 @@ where
 
     rep.started(Step::StorePassword).await;
     if let Err(e) = store_url(pools, org, &r.stored, &new_url).await {
-        revert(r, rep).await;
+        revert(&pools.registry_pool(), org, r, rep).await;
         return rep.fail(Step::StorePassword, e).await;
     }
     super::invalidate_org_cache();
@@ -396,20 +396,35 @@ where
     Ok(())
 }
 
-/// Put the old password back after a failed store, so the stored URL works.
-async fn revert(r: &Rotation, rep: &OpReporter<'_>) {
+/// Put the old password back after a failed store, but only while the
+/// stored URL still holds it: a URL changed meanwhile is not ours to undo.
+async fn revert(registry: &crate::sql::Pool, org: &Org, r: &Rotation, rep: &OpReporter<'_>) {
+    let again = format!("run `rotate-tenant-password {}` again so they agree", org.slug);
+    let failed = |why: String| async move {
+        let _ = rep.fail::<()>(Step::Revert, TenancyError::Validation(why)).await;
+    };
     rep.started(Step::Revert).await;
+    let still_old = match Org::objects()
+        .where_(Org::id.eq(org.id.get().copied().unwrap_or_default()))
+        .first(registry)
+        .await
+    {
+        Ok(Some(now)) => now.database_url.as_deref() == Some(r.stored.as_str()),
+        _ => false,
+    };
+    if !still_old {
+        return failed(format!(
+            "the stored URL changed meanwhile or could not be read, so the old password was not \
+             put back; the login has the new password and the URL does not: {again}"
+        ))
+        .await;
+    }
     let Some(old) = &r.old else {
-        let _ = rep
-            .fail::<()>(
-                Step::Revert,
-                TenancyError::Validation(
-                    "the stored URL has no password to put back; set the login's password by hand"
-                        .into(),
-                ),
-            )
-            .await;
-        return;
+        return failed(format!(
+            "the stored URL has no password to put back; the login has the new password and the \
+             URL does not: {again}"
+        ))
+        .await;
     };
     match r.admin.alter_password(&r.login, old, false).await {
         Ok(()) => {
@@ -421,16 +436,11 @@ async fn revert(r: &Rotation, rep: &OpReporter<'_>) {
         }
         Err(e) => {
             tracing::error!(target: "rustango::tenancy::operation", error = %e, "could not restore the old tenant password");
-            let _ = rep
-                .fail::<()>(
-                    Step::Revert,
-                    TenancyError::Validation(
-                        "the old password could not be restored; the tenant cannot connect until \
-                         its URL and login agree"
-                            .into(),
-                    ),
-                )
-                .await;
+            failed(format!(
+                "the old password could not be put back; the stored URL holds the old password \
+                 and the login the new one: {again}"
+            ))
+            .await;
         }
     }
 }
