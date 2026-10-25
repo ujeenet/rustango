@@ -143,6 +143,8 @@ pub enum NewPasswordError {
         "no current password: pass --current-stdin, set RUSTANGO_CURRENT_PASSWORD, or run in a terminal"
     )]
     MissingCurrent,
+    #[error("--current-stdin would echo on a terminal; leave it off to get a hidden prompt")]
+    CurrentStdinOnTty,
 }
 
 /// Env var a `change-password` verb reads the current password from.
@@ -176,6 +178,7 @@ fn read_current_password_on(
             }
             Ok(p)
         }
+        (None, true) if console.is_tty() => Err(NewPasswordError::CurrentStdinOnTty),
         (None, true) => {
             let line = console.stdin_line()?;
             let p = line.strip_suffix('\n').unwrap_or(&line);
@@ -470,6 +473,21 @@ mod tests {
         };
         assert_eq!(read_current_password_on(&mut c, Some("old".into()), false).unwrap(), "old");
         assert_eq!(c.warnings.len(), 1);
+    }
+
+    /// On a terminal `--current-stdin` would echo; the prompt is hidden.
+    #[test]
+    fn current_stdin_is_refused_on_a_terminal() {
+        let mut c = Script {
+            tty: true,
+            stdin: "old pw\n".into(),
+            ..Script::default()
+        };
+        assert!(matches!(
+            read_current_password_on(&mut c, None, true),
+            Err(NewPasswordError::CurrentStdinOnTty)
+        ));
+        assert_eq!(c.stdin, "old pw\n", "nothing was read");
     }
 
     #[test]
