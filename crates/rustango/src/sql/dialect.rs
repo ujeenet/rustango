@@ -17,6 +17,7 @@ use crate::core::{
     FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
 };
 
+use super::server::{DatabaseName, Login, LoginPassword};
 use super::{CompiledStatement, SqlError};
 
 /// Write `<col> ?| ARRAY[$1, $2, …]`, shared by both default
@@ -995,6 +996,67 @@ pub trait Dialect: Send + Sync {
     /// A `COMMENT ON TABLE` statement to run after `CREATE TABLE`.
     /// [`Self::column_comment_statement`] for the whole table.
     fn table_comment_statement(&self, _table: &str, _comment: &str) -> Option<String> {
+        None
+    }
+
+    // ---- Server administration: tenant databases and logins ----
+    // `None` / empty where the backend has no such object (SQLite).
+
+    /// `CREATE DATABASE` for `db`.
+    fn create_database_sql(&self, _db: &DatabaseName) -> Option<String> {
+        None
+    }
+
+    /// `DROP DATABASE IF EXISTS` for `db`.
+    fn drop_database_sql(&self, _db: &DatabaseName) -> Option<String> {
+        None
+    }
+
+    /// Drop `db` even with sessions open, where the backend can.
+    fn force_drop_database_sql(&self, _db: &DatabaseName) -> Option<String> {
+        None
+    }
+
+    /// One row, one count: whether `login` exists.
+    fn login_exists_sql(&self, _login: &Login) -> Option<CompiledStatement> {
+        None
+    }
+
+    /// Create `login` with `password`. The password is escaped here.
+    fn create_login_sql(&self, _login: &Login, _password: &LoginPassword) -> Option<String> {
+        None
+    }
+
+    /// Drop `login` if it exists.
+    fn drop_login_sql(&self, _login: &Login) -> Option<String> {
+        None
+    }
+
+    /// Statements on the server connection that give `login` all rights
+    /// on `db` and keep other logins out of it.
+    fn grant_database_sql(&self, _db: &DatabaseName, _login: &Login) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Statements run inside the new database itself, as the admin.
+    fn grant_in_database_sql(&self, _login: &Login) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// One row, one text column: the server version.
+    fn server_version_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// The current login's server-level rights. The row shape is the
+    /// dialect's own; `tenancy::server_admin` reads it.
+    fn login_privileges_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Run on each admin connection before any DDL, so the emitted
+    /// literals mean what the emitter assumed.
+    fn admin_session_sql(&self) -> Option<&'static str> {
         None
     }
 

@@ -15,6 +15,7 @@ use super::writers::{
     write_aggregate, write_bulk_insert, write_count, write_delete, write_insert, write_select,
     write_update, Sql,
 };
+use super::server::{DatabaseName, Login, LoginPassword};
 use super::{CompiledStatement, Dialect, SqlError};
 
 /// The insert id a skipped `DoNothing` insert reports. No auto-increment
@@ -29,6 +30,17 @@ pub struct MySql;
 /// [`crate::sql::Pool::dialect`] hands back for a MySQL pool.
 #[cfg(feature = "mysql")]
 pub static DIALECT: &MySql = &MySql;
+
+impl MySql {
+    /// `user`@`host`, both identifier-quoted.
+    fn account(&self, login: &Login) -> String {
+        format!(
+            "{}@{}",
+            self.quote_ident(login.name().as_str()),
+            self.quote_ident(login.host())
+        )
+    }
+}
 
 #[cfg(feature = "mysql")]
 impl MySql {
@@ -91,6 +103,79 @@ impl Dialect for MySql {
     /// On a `NO_BACKSLASH_ESCAPES` server the `\` is stored doubled.
     fn quote_literal(&self, text: &str) -> String {
         format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
+    }
+
+    /// utf8mb4 with the server's default collation for it: older MariaDB
+    /// defaults to latin1, and no one collation name exists on both.
+    fn create_database_sql(&self, db: &DatabaseName) -> Option<String> {
+        Some(format!(
+            "CREATE DATABASE {} CHARACTER SET utf8mb4",
+            self.quote_ident(db.as_str())
+        ))
+    }
+
+    fn drop_database_sql(&self, db: &DatabaseName) -> Option<String> {
+        Some(format!(
+            "DROP DATABASE IF EXISTS {}",
+            self.quote_ident(db.as_str())
+        ))
+    }
+
+    /// The account is identifier-quoted, so only the password is a
+    /// literal; [`Self::admin_session_sql`] pins its escaping.
+    fn create_login_sql(&self, login: &Login, password: &LoginPassword) -> Option<String> {
+        Some(format!(
+            "CREATE USER {} IDENTIFIED BY {}",
+            self.account(login),
+            self.quote_literal(password.expose())
+        ))
+    }
+
+    fn drop_login_sql(&self, login: &Login) -> Option<String> {
+        Some(format!("DROP USER IF EXISTS {}", self.account(login)))
+    }
+
+    /// Needs SELECT on `mysql.user`; callers treat a refusal as unknown.
+    fn login_exists_sql(&self, login: &Login) -> Option<CompiledStatement> {
+        Some(CompiledStatement {
+            sql: "SELECT count(*) FROM mysql.user WHERE User = ? AND Host = ?".to_owned(),
+            params: vec![
+                crate::core::SqlValue::String(login.name().as_str().to_owned()),
+                crate::core::SqlValue::String(login.host().to_owned()),
+            ],
+        })
+    }
+
+    /// `DatabaseName` holds no `_` or `%`, the wildcards of `db.*`.
+    fn grant_database_sql(&self, db: &DatabaseName, login: &Login) -> Vec<String> {
+        vec![format!(
+            "GRANT ALL PRIVILEGES ON {}.* TO {}",
+            self.quote_ident(db.as_str()),
+            self.account(login)
+        )]
+    }
+
+    fn server_version_sql(&self) -> Option<&'static str> {
+        Some("SELECT VERSION()")
+    }
+
+    /// Rows of (`PRIVILEGE_TYPE`, `IS_GRANTABLE`): the current account's
+    /// global privileges. MariaDB has the same view.
+    fn login_privileges_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.USER_PRIVILEGES \
+             WHERE GRANTEE = CONCAT('''', SUBSTRING_INDEX(CURRENT_USER(), '@', 1), \
+             '''@''', SUBSTRING_INDEX(CURRENT_USER(), '@', -1), '''')",
+        )
+    }
+
+    /// sqlx appends to the server's `sql_mode`, so a server-wide
+    /// `NO_BACKSLASH_ESCAPES` would make [`Self::quote_literal`] wrong.
+    fn admin_session_sql(&self) -> Option<&'static str> {
+        Some(
+            "SET SESSION sql_mode = TRIM(BOTH ',' FROM REPLACE(\
+             CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ','))",
+        )
     }
 
     /// MySQL writes a column comment inline, after the rest of the

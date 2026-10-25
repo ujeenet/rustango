@@ -30,6 +30,8 @@ mod mysql;
 mod pool;
 mod postgres;
 mod range;
+/// Validated names for tenant database and login DDL.
+pub mod server;
 mod sqlite;
 mod vector;
 mod writers;
@@ -54,6 +56,7 @@ pub(crate) use error::{Refusal, STILL_REFERENCED};
 pub use geometry::{Point, SRID_WGS84};
 pub use hstore::HStore;
 pub use range::Range;
+pub use server::{DatabaseName, InvalidName, Login, LoginName, LoginPassword};
 pub use vector::Vector;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
 #[cfg(feature = "media")]

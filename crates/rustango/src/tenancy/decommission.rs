@@ -702,10 +702,7 @@ impl PgDropTarget {
                 "the tenant's database URL names no database — nothing to drop".into(),
             )
         })?;
-        if matches!(
-            dbname.to_ascii_lowercase().as_str(),
-            "postgres" | "template0" | "template1"
-        ) {
+        if crate::sql::server::PG_SYSTEM_DATABASES.contains(&dbname.to_ascii_lowercase().as_str()) {
             return Err(TenancyError::Validation(format!(
                 "refusing to drop `{dbname}` — that is a Postgres system database"
             )));
@@ -713,7 +710,11 @@ impl PgDropTarget {
         let dbname = dbname.to_owned();
         // `DROP DATABASE` cannot run from inside the database being
         // dropped, so this connects to `postgres` on the same server.
-        let admin = opts.clone().database("postgres").connect().await?;
+        let admin = opts
+            .clone()
+            .database(crate::sql::server::PG_MAINTENANCE_DATABASE)
+            .connect()
+            .await?;
         Ok(Self { admin, dbname, tag })
     }
 

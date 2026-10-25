@@ -128,6 +128,8 @@ pub mod sweep;
 // built with, schema-mode dispatch only fires on PG (by language),
 // and the inner admin uses the unified `crate::sql::Pool` enum.
 pub mod server;
+/// Creating and dropping a database-mode tenant's database and login.
+pub mod server_admin;
 pub mod tenant_console;
 
 #[cfg(feature = "mcp")]

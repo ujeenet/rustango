@@ -15,6 +15,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `TenantPools::new` uses the standard resolver (`env://`, `enc:`, literal); preflight, the console probe and `api::create_tenant` check the resolved URL; a URL of another backend is refused; the console edit hint matches the real schemes.
 
+### Added — `tenancy::server_admin`: create and drop a tenant's database and login
+
+`ServerAdmin` creates a slug-named database plus a login granted only that database (rolled back on failure), drops both, and reports the admin login's rights; SQLite uses `<dir>/<slug>.db`. PostgreSQL tenant databases need PostgreSQL 15+.
+
 ## [0.60.12] — 2026-10-23
 
 **Breaking:** `makemigrations --merge` refuses conflicting branches; `migrate --squash` refuses data ops, callbacks and renames; `migrate <target>` applies earlier-sorting pending files and unapplies later-sorting siblings; upserts with no update columns return `SqlError::EmptyUpdateSet` on PostgreSQL and SQLite; derived index names over 63 bytes get a hash suffix, so their indexes are recreated once; the migrate lock opens its own connection and SQLite locks a file; `ForeignKey<T>` references `T`'s PK column; `set_null` on a non-`Option` `fk` / `o2o` field is a compile error; M2M `set` locks the source row; admin login and the session gate return 503 on a database error; MCP audit redacts more argument keys; a trailing-dot `Host` matches the host without it; ViewSet writes skip superuser-only fields unless a superuser is signed in; inactive users hold no permissions; `require_auth` answers 403 when an outer layer bound another tenant; `__week` is the ISO week on MySQL and SQLite; a `.join()` alias that differs from the one a relation lookup needs returns `QueryError::DuplicateJoinAlias`; `OAuthError::BadStatus` keeps only the provider's error code; FK `get` follows a shared `on` column. See UPGRADING.
