@@ -20,6 +20,10 @@ Path prefix and port changes are claimed like hosts, so two tenants can no longe
 
 Deliveries now carry `X-Webhook-Timestamp` and `X-Webhook-Signature-V2`, an HMAC over the id, event, timestamp and body; check it with `webhook::verify_delivery`. The body-only `X-Webhook-Signature` is still sent for a transition.
 
+### Added — `PgJobQueue::queue_name`
+
+Queues sharing `rustango_jobs` picked each other's jobs. A named queue now runs only its own jobs, an unnamed one only unnamed jobs; `ensure_table_pool` adds the `queue_name` column.
+
 ### Fixed — tenant logos 404'd under the default routes
 
 Tenant pages link uploaded logos and favicons under `RouteConfig::brand_url` (`/_brand` by default), the prefix tenant hosts serve, via the new `RouteConfig::brand_asset_url`. Tenant admin pages now use the tenant favicon too.

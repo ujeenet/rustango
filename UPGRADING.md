@@ -166,6 +166,10 @@ Saving a `rustango_orgs` or `rustango_org_hosts` row in the generic admin now re
 
 Verify `X-Webhook-Signature-V2` with `webhook::verify_delivery` and drop repeated `X-Webhook-Id`s within its `max_age`. The body-only `X-Webhook-Signature` stays for now but does not stop replays.
 
+### `rustango_jobs` gets a `queue_name` column
+
+`PgJobQueue::ensure_table_pool` adds it. With a hand-written migration, add `queue_name` (`TEXT`, `VARCHAR(255)` on MySQL) before naming a queue. Once the column exists, unnamed queues no longer run jobs of named ones.
+
 ### Scaffold taglines lose their brackets
 
 `cargo rustango new` now writes `tagline = "dev"` / `"staging"`, not `"(dev)"` / `"(staging)"`. Existing projects keep theirs; edit the line to match.

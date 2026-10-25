@@ -259,6 +259,11 @@ pull from the shared table safely. The web process then only needs to
 periodic [`reclaim_stuck_jobs_pool`](#the-persistent-queue-production) sweep to
 recover jobs from a crashed worker.
 
+Two different queues on one table (say, a mailer and a report runner with their
+own handlers) pick each other's jobs. Give each its own name with
+`.queue_name("mailer")` on the dispatching and the working side: a named queue
+runs only its jobs, an unnamed one only unnamed jobs.
+
 ---
 
 ## Retries and backoff
