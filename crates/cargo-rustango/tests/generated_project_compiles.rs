@@ -302,6 +302,20 @@ fn tenant_project_mounts_the_provisioning_pages() {
         .expect("run cargo build");
     assert!(built.success(), "the tenant project did not build");
 
+    // A failing verb prints its error with Display, not as `Exec(Driver(…))`.
+    let failed = Command::new(scaffold_target().join("debug").join("probe"))
+        .current_dir(&root)
+        .env("DATABASE_URL", "sqlite://./probe_dev.db?mode=rwc")
+        .args(["purge-tenant", "ghost", "--confirm", "ghost"])
+        .output()
+        .expect("run a failing verb");
+    let err = String::from_utf8_lossy(&failed.stderr);
+    assert!(!failed.status.success(), "purging a missing tenant succeeded:\n{err}");
+    let msg = err.lines().find_map(|l| l.strip_prefix("Error: ")).unwrap_or_default();
+    let variant: String = msg.chars().take_while(char::is_ascii_alphanumeric).collect();
+    let debug = variant.starts_with(char::is_uppercase) && msg[variant.len()..].starts_with('(');
+    assert!(!msg.is_empty() && !debug, "error printed with Debug:\n{err}");
+
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())
         .expect("free port")

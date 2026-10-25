@@ -205,6 +205,10 @@ Call `.acting_superuser(user.is_superuser)` so a non-superuser cannot set the ta
 
 `cargo rustango new` now writes `tagline = "dev"` / `"staging"`, not `"(dev)"` / `"(staging)"`. Existing projects keep theirs; edit the line to match.
 
+### Generated `main.rs` prints errors with Display
+
+New projects wrap the `Cli` in `async fn run()` and print its error with `{e}`. Existing projects can copy that shape to stop `Validation("…")` output.
+
 ### `BrandSettings` has a new `logo_path` field
 
 A struct literal of `BrandSettings` needs `..Default::default()` (or the new field).

@@ -723,8 +723,17 @@ const MAIN_RS_API: &str = "//! Project entrypoint — `Cli::run()` is the unifie
 // file is its own crate, so `crate::` there is NOT this project.
 use {crate_name}::urls;
 
+// Errors print with Display, so a multi-line CLI error reads as lines.
 #[rustango::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::process::ExitCode {
+    if let Err(e) = run().await {
+        eprintln!(\"Error: {e}\");
+        return std::process::ExitCode::FAILURE;
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     rustango::manage::Cli::new()
         .api(urls::api())
@@ -764,8 +773,17 @@ const MAIN_RS_FULLSTACK: &str = "//! Project entrypoint — `Cli::run()` is the 
 // library target so `src/bin/*.rs` binaries can reach them.
 use {crate_name}::urls;
 
+// Errors print with Display, so a multi-line CLI error reads as lines.
 #[rustango::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::process::ExitCode {
+    if let Err(e) = run().await {
+        eprintln!(\"Error: {e}\");
+        return std::process::ExitCode::FAILURE;
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     // config/*.toml for the RUSTANGO_ENV tier (default `dev`), then
     // RUSTANGO__* env overrides; loaded once for the server and the admin.
@@ -801,8 +819,17 @@ const MAIN_RS_TENANT: &str = r##"//! Tenant project entrypoint — HTTP server s
 // library target so `src/bin/*.rs` binaries can reach them.
 use {crate_name}::urls;
 
+// Errors print with Display, so a multi-line CLI error reads as lines.
 #[rustango::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::process::ExitCode {
+    if let Err(e) = run().await {
+        eprintln!("Error: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     rustango::manage::Cli::new()
         .tenancy()
