@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Mail test doubles check addresses
+
+`InMemoryMailer`, `ConsoleMailer`, `FileMailer` and `NullMailer` return `MailError::InvalidMessage` for an address `SmtpMailer` refuses, so a test sending such mail now fails.
+
 ### Email attachments serialize as base64
 
 In JSON, `Attachment::content` is now a base64 string; binary serde formats keep bytes. The old integer array still deserializes. Code that reads the JSON itself must decode base64.

@@ -453,6 +453,47 @@ fn check_no_crlf(field: &str, value: &str) -> Result<(), MailError> {
     Ok(())
 }
 
+/// [`Email::validate`] plus the address parse `SmtpMailer` does, so the
+/// non-sending backends refuse what production refuses.
+fn validate_like_smtp(email: &Email) -> Result<(), MailError> {
+    email.validate()?;
+    let addrs = email.to.iter().chain(&email.cc).chain(&email.bcc);
+    for addr in addrs.chain(&email.from).chain(&email.reply_to) {
+        check_mailbox(addr)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "email-smtp")]
+fn check_mailbox(addr: &str) -> Result<(), MailError> {
+    smtp::parse_mailbox(addr).map(drop)
+}
+
+/// Without lettre: the `[Name] <local@domain>` shape its parser accepts.
+#[cfg(not(feature = "email-smtp"))]
+fn check_mailbox(addr: &str) -> Result<(), MailError> {
+    let atom = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_alphanumeric() || "!#$%&'*+-/=?^_`{|}~".contains(c))
+    };
+    let (_, address) = parseaddr(addr);
+    let ok = address.rsplit_once('@').is_some_and(|(local, domain)| {
+        let local_ok = (local.len() >= 2 && local.starts_with('"') && local.ends_with('"'))
+            || local.split('.').all(atom);
+        let domain_ok = (domain.starts_with('[') && domain.ends_with(']'))
+            || domain.split('.').all(|l| {
+                atom(l) && l.starts_with(char::is_alphanumeric) && l.ends_with(char::is_alphanumeric)
+            });
+        local_ok && domain_ok
+    });
+    if ok {
+        Ok(())
+    } else {
+        Err(MailError::InvalidMessage(format!("bad address `{addr}`")))
+    }
+}
+
 // ------------------------------------------------------------------ Mailer trait
 
 /// Pluggable async email backend.
@@ -475,7 +516,7 @@ pub struct ConsoleMailer;
 #[async_trait]
 impl Mailer for ConsoleMailer {
     async fn send(&self, email: &Email) -> Result<(), MailError> {
-        email.validate()?;
+        validate_like_smtp(email)?;
         println!("============= [ConsoleMailer] outgoing =============");
         if let Some(f) = &email.from {
             println!("From: {f}");
@@ -519,17 +560,25 @@ impl Mailer for ConsoleMailer {
 // ------------------------------------------------------------------ InMemoryMailer
 
 /// Test mailer — captures every sent email into a shared `Vec` for assertions.
+/// Refuses the addresses `SmtpMailer` refuses; a missing `from` passes,
+/// as with an SMTP `default_from`, unless [`Self::require_from`] is set.
 #[derive(Default)]
 pub struct InMemoryMailer {
     sent: Mutex<Vec<Email>>,
+    require_from: bool,
 }
 
 impl InMemoryMailer {
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            sent: Mutex::new(Vec::new()),
-        }
+        Self::default()
+    }
+
+    /// Refuse mail with no `from`, as an `SmtpMailer` without `default_from` does.
+    #[must_use]
+    pub fn require_from(mut self) -> Self {
+        self.require_from = true;
+        self
     }
 
     /// Snapshot all emails sent so far. Doesn't clear the buffer.
@@ -553,7 +602,10 @@ impl InMemoryMailer {
 #[async_trait]
 impl Mailer for InMemoryMailer {
     async fn send(&self, email: &Email) -> Result<(), MailError> {
-        email.validate()?;
+        validate_like_smtp(email)?;
+        if self.require_from && email.from.is_none() {
+            return Err(MailError::InvalidMessage("Email has no `from`".into()));
+        }
         self.sent
             .lock()
             .expect("sent mutex poisoned")
@@ -664,7 +716,7 @@ fn serialize_eml(email: &Email) -> String {
 #[async_trait]
 impl Mailer for FileMailer {
     async fn send(&self, email: &Email) -> Result<(), MailError> {
-        email.validate()?;
+        validate_like_smtp(email)?;
         // Owner-only: the files hold reset links and other tokens.
         let mut dir = std::fs::DirBuilder::new();
         dir.recursive(true);
@@ -713,7 +765,7 @@ pub struct NullMailer;
 #[async_trait]
 impl Mailer for NullMailer {
     async fn send(&self, email: &Email) -> Result<(), MailError> {
-        email.validate()?;
+        validate_like_smtp(email)?;
         Ok(())
     }
 }
@@ -1007,6 +1059,48 @@ mod tests {
         assert_eq!(m.sent()[0].to, vec!["a@x"]);
         m.clear();
         assert_eq!(m.count(), 0);
+    }
+
+    /// The doubles refuse an address SMTP cannot parse, so tests catch it.
+    #[tokio::test]
+    async fn doubles_refuse_what_smtp_refuses() {
+        let dir = std::env::temp_dir().join(format!("rg-mail-{}", std::process::id()));
+        let file = FileMailer::new(&dir);
+        let mailers: [&dyn Mailer; 4] = [&InMemoryMailer::new(), &NullMailer, &ConsoleMailer, &file];
+        let ok = || Email::new().to("a@x").subject("s").body("b");
+        for bad in [
+            ok().to("not an address"),
+            ok().to("alice@"),
+            ok().cc("@example.com"),
+            ok().bcc("a b@example.com"),
+            ok().from("Alice <alice@example.com"),
+            ok().reply_to("nope"),
+        ] {
+            for m in mailers {
+                assert!(
+                    matches!(m.send(&bad).await, Err(MailError::InvalidMessage(_))),
+                    "{bad:?}"
+                );
+            }
+        }
+        let good = ok()
+            .to("Alice <alice@example.com>")
+            .cc("\"Smith, J.\" <j@example.com>")
+            .from("noreply@example.com");
+        for m in mailers {
+            m.send(&good).await.unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `require_from` refuses what an `SmtpMailer` without `default_from` does.
+    #[tokio::test]
+    async fn in_memory_require_from_refuses_mail_without_from() {
+        let m = InMemoryMailer::new().require_from();
+        let e = Email::new().to("a@x").subject("s").body("b");
+        assert!(matches!(m.send(&e).await, Err(MailError::InvalidMessage(_))));
+        m.send(&e.from("noreply@x")).await.unwrap();
+        assert_eq!(m.count(), 1);
     }
 
     #[tokio::test]

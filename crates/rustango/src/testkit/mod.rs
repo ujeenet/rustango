@@ -78,11 +78,31 @@ pub async fn create_tables(
 }
 
 /// Create a single model's table (convenience over [`create_tables`]).
+/// Its M2M junctions are not created: see [`create_junctions`].
 ///
 /// # Errors
 /// Any DDL failure ([`MigrateError`]).
 pub async fn create_tables_for<M: crate::core::Model>(pool: &Pool) -> Result<(), MigrateError> {
     emit_tables(pool, &[M::SCHEMA]).await
+}
+
+/// Create the auto-created M2M junctions of `models` as migrations build
+/// them, FKs included. Pass both ends, and create their tables first.
+///
+/// # Errors
+/// Any DDL failure ([`MigrateError`]).
+pub async fn create_junctions(
+    pool: &Pool,
+    models: &[&'static ModelSchema],
+) -> Result<(), MigrateError> {
+    let snapshot = crate::migrate::SchemaSnapshot::from_models_forced(models);
+    let junctions: Vec<crate::migrate::SchemaChange> =
+        crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot)
+            .into_iter()
+            .filter(|c| matches!(c, crate::migrate::SchemaChange::CreateM2MTable { .. }))
+            .collect();
+    crate::migrate::ensure::apply_changes_idempotent(pool, &snapshot, &junctions).await?;
+    Ok(())
 }
 
 /// Create the given models' tables inside a specific SQL schema
