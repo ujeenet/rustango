@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Slack plain strings are sent literally
+
+A string payload no longer renders Slack markup such as `<@U123>` or `<url|label>`. Send a JSON object (`{"text": …}` or `blocks`) to keep markup; objects pass through unchanged.
+
 ### Access-log query redaction is word-based
 
 `redact_query_params` entries now match any key containing them as words (`client_secret` also hides `x-client-secret`), and the defaults are wider. Logs may show `[redacted]` for keys like `sort_key` or `zip_code` that were visible before.

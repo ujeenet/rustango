@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — Slack plain-text notifications are escaped
+
+A plain string sent through `slack::webhook_callback` has `&`, `<` and `>` escaped, so message content cannot ping a channel or disguise a link.
+
 ### Fixed — access-log and span query redaction matches by word
 
 A query key is redacted when its words contain a listed name, so `X-Api-Key`, `reset_token` or `oauth_client_secret` are hidden too; the defaults also cover `key`, `jwt`, `otp`, `sig` and `sessionid`. MCP audit uses the same matcher.
