@@ -572,6 +572,11 @@ impl Dialect for MySql {
         true
     }
 
+    // sqlx decodes any MySQL integer as `i64`, so the junction need not widen.
+    fn fk_needs_same_int_width(&self) -> bool {
+        true
+    }
+
     /// `PRIMARY` and multi-column indexes are left out.
     fn unique_index_names_sql(&self) -> Option<&'static str> {
         Some(

@@ -391,6 +391,59 @@ async fn a_column_can_be_renamed(pool: &Pool) {
         .unwrap_or_else(|e| panic!("the renamed column should exist on {}: {e}", d.name()));
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "dc_tri_i32_tag")]
+#[rustango(app = "migrate_ddl_tri")]
+#[allow(dead_code)]
+pub struct I32Tag {
+    #[rustango(primary_key)]
+    pub id: Auto<i32>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "dc_tri_i32_post")]
+#[rustango(app = "migrate_ddl_tri")]
+#[rustango(m2m(
+    name = "tags",
+    to = "dc_tri_i32_tag",
+    through = "dc_tri_i32_post_tags",
+    src = "post_id",
+    dst = "tag_id"
+))]
+#[allow(dead_code)]
+pub struct I32Post {
+    #[rustango(primary_key)]
+    pub id: Auto<i32>,
+}
+
+/// An auto junction over `i32` pks gets its FKs (MySQL refused BIGINT to
+/// INT) and the manager reads it back.
+async fn an_i32_pk_junction_gets_its_foreign_keys(pool: &Pool) {
+    let drop_all = || async {
+        for t in ["dc_tri_i32_post_tags", "dc_tri_i32_post", "dc_tri_i32_tag"] {
+            rustango::testkit::matrix::drop_table(pool, t).await;
+        }
+    };
+    drop_all().await;
+    let snap = SchemaSnapshot::from_models(&[I32Tag::SCHEMA, I32Post::SCHEMA]);
+    let changes = rustango::migrate::detect_changes(&SchemaSnapshot::from_models(&[]), &snap);
+    let b = render_changes_split_with_dialect(&changes, &snap, pool.dialect())
+        .expect("render the junction");
+    run(pool, &b.immediate).await;
+    run(pool, &b.deferred_fks).await;
+    let mut tag = I32Tag { id: Auto::Unset };
+    tag.insert_pool(pool).await.expect("tag");
+    let mut post = I32Post { id: Auto::Unset };
+    post.insert_pool(pool).await.expect("post");
+    let tag_id = tag.id.get().copied().expect("tag id");
+    post.tags_m2m().add(tag_id, pool).await.expect("add");
+    assert_eq!(
+        post.tags_m2m().all(pool).await.expect("all"),
+        vec![i64::from(tag_id)]
+    );
+    drop_all().await;
+}
+
 /// MySQL's 3072-byte key cap, checked against the server: the widest
 /// junction the renderer allows is created, one char more gets 1071.
 async fn mysql_junction_key_limit_matches_the_server(pool: &Pool) {
@@ -456,6 +509,7 @@ async fn mysql_junction_key_limit_matches_the_server(pool: &Pool) {
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        an_i32_pk_junction_gets_its_foreign_keys,
         mysql_junction_key_limit_matches_the_server,
         check_constraint_can_be_added_and_dropped,
         composite_fk_can_be_added_and_dropped,

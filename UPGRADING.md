@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### MySQL M2M junctions keep an `i32` / `i16` pk's width
+
+New auto junctions over such pks get `INT` / `SMALLINT` columns, not `BIGINT`, which MySQL refused as a foreign key. Existing junctions are unchanged.
+
 ### Built-in logo is square
 
 `/__static__/rustango.png` and `icon.png` now serve a 256 px / 64 px square logo instead of the wide banner. A custom template sized for the banner may need new image dimensions.

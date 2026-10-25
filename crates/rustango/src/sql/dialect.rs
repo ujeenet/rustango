@@ -174,6 +174,12 @@ pub trait Dialect: Send + Sync {
         false
     }
 
+    /// `true` when an integer FK column must match the width of the key it
+    /// references (MySQL 3780), so a junction keeps an `INT` pk's width.
+    fn fk_needs_same_int_width(&self) -> bool {
+        false
+    }
+
     /// `true` when changing a table's constraints means rebuilding the
     /// table (SQLite), not an `ALTER` (#1557, #1982).
     fn alters_by_rebuild(&self) -> bool {
