@@ -368,6 +368,19 @@ pub(super) async fn test_connection(
 ) -> Response<Body> {
     let field = |k: &str| form.get(k).map(|s| s.trim()).filter(|s| !s.is_empty());
 
+    // Schema mode: the registry's own login creates the schema.
+    if field("storage_mode") == Some("schema") {
+        if state.registry.dialect().name() != "postgres" {
+            return probe_bad("Schema mode needs a Postgres registry; choose database mode.");
+        }
+        let rights = crate::tenancy::rights::RightsReport::for_new_schema(&state.registry).await;
+        let probe = super::db_servers::ServerProbe::of(
+            &rights,
+            "Schema mode uses the registry's login (DATABASE_URL).".to_owned(),
+        );
+        return axum::Json(probe).into_response();
+    }
+
     // A new database on a saved server: report its admin's rights.
     if field("storage_mode") != Some("schema") && field("database_source") == Some("server") {
         let Some(name) = field("server") else {

@@ -301,17 +301,19 @@ where
     if let Some(v) = &report.server_version {
         writeln!(w, "  server version:   {v}")?;
     }
-    writeln!(w, "  create database:  {}", yes(report.can_create_database))?;
-    writeln!(w, "  create login:     {}", yes(report.can_create_user))?;
-    writeln!(w, "  grant:            {}", yes(report.can_grant))?;
-    match report.blocker() {
-        None => writeln!(w, "ready: tenant databases can be created here")?,
-        Some(why) => {
-            writeln!(w, "not ready: {why}")?;
-            return Err(TenancyError::Validation(format!(
-                "database server `{name}` cannot provision tenants: {why}"
-            )));
-        }
+    let rights = report.rights();
+    for c in rights.checks() {
+        writeln!(w, "  {:<46}{}", format!("{}:", c.label), c.has.as_str())?;
+    }
+    if let Some(note) = rights.unknown_note() {
+        writeln!(w, "  note: {note}")?;
+    }
+    if rights.is_ready() {
+        writeln!(w, "ready: tenant databases can be created here")?;
+    } else {
+        writeln!(w, "not ready")?;
+        let subject = format!("database server `{name}` cannot create tenant databases");
+        return Err(TenancyError::Validation(rights.refusal(&subject)));
     }
     Ok(())
 }
