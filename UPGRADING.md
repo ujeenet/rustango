@@ -154,10 +154,6 @@ untouched.
 
 New keys are stored as `hmac-sha256v2$…` and do not verify on 0.61.1 or older; existing `hmac-sha256$…` keys keep working on both.
 
-### `cursor_pagination` panics on a nullable field
-
-A ViewSet that paginates on an `Option<_>` field now panics at mount. Paginate on a NOT NULL column such as `id`.
-
 ### Scaffold taglines lose their brackets
 
 `cargo rustango new` now writes `tagline = "dev"` / `"staging"`, not `"(dev)"` / `"(staging)"`. Existing projects keep theirs; edit the line to match.

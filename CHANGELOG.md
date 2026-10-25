@@ -8,9 +8,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 New API keys are MACed with a key derived from the server secret, not the secret itself. Existing keys still verify unchanged; rotating `RUSTANGO_SESSION_SECRET` still invalidates every API key.
 
-### Changed — `cursor_pagination` refuses a nullable field
+### Changed — `cursor_pagination` on a nullable field warns until 0.62.0
 
-`cursor_pagination` / `cursor_pagination_desc` on a nullable field now panic when the ViewSet is built; before they logged an error and NULL rows were skipped or failed the page.
+`cursor_pagination` / `cursor_pagination_desc` on a nullable field log a warning when the ViewSet is built; 0.62.0 will refuse it.
 
 ### Fixed — tenant logos 404'd under the default routes
 
