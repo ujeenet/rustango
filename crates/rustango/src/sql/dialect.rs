@@ -1042,6 +1042,41 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// Give `login` a new password. `retain_current` keeps the old one
+    /// valid too where the backend has dual passwords (MySQL 8.0.14+).
+    fn alter_login_password_sql(
+        &self,
+        _login: &Login,
+        _password: &LoginPassword,
+        _retain_current: bool,
+    ) -> Option<String> {
+        None
+    }
+
+    /// Forget the password `alter_login_password_sql` retained.
+    fn discard_old_password_sql(&self, _login: &Login) -> Option<String> {
+        None
+    }
+
+    /// One row: may the current login drop `db`, alter and drop `login`,
+    /// and end `login`'s sessions. `NULL` for an object that is absent.
+    /// `None` where the server-wide rights the probe reads are enough.
+    fn tenant_rights_sql(&self, _db: &DatabaseName, _login: &Login) -> Option<CompiledStatement> {
+        None
+    }
+
+    /// One row, two counts: sessions in `db` whose application name is
+    /// `tag`, and the others.
+    fn database_sessions_sql(&self, _db: &DatabaseName, _tag: &str) -> Option<CompiledStatement> {
+        None
+    }
+
+    /// End the sessions in `db` whose application name is `tag`. One row,
+    /// one count.
+    fn end_sessions_sql(&self, _db: &DatabaseName, _tag: &str) -> Option<CompiledStatement> {
+        None
+    }
+
     /// Statements on the server connection that give `login` all rights
     /// on `db` and keep other logins out of it.
     fn grant_database_sql(&self, _db: &DatabaseName, _login: &Login) -> Vec<String> {
