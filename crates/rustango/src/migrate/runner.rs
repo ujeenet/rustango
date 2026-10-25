@@ -3569,8 +3569,9 @@ fn render_step(
                     _ => None,
                 })
                 .collect();
-            let mut first = super::diff::render_changes_split_in_schema(&drops, snap, dialect, schema)
-                .map_err(MigrateError::Validation)?;
+            let mut first =
+                super::diff::render_changes_split_in_schema(&drops, snap, dialect, schema)
+                    .map_err(MigrateError::Validation)?;
             first.immediate.append(&mut batch.immediate);
             batch.immediate = first.immediate;
         }

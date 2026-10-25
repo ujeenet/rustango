@@ -180,8 +180,16 @@ async fn json_column_equality_compares_values(pool: &Pool) {
     .insert_pool(pool)
     .await
     .expect("seed");
-    assert_eq!(count_json_eq(pool, serde_json::json!(1)).await, 1, "scalar 1 = 1.0");
-    assert_eq!(count_json_eq(pool, serde_json::json!(true)).await, 0, "true <> 1");
+    assert_eq!(
+        count_json_eq(pool, serde_json::json!(1)).await,
+        1,
+        "scalar 1 = 1.0"
+    );
+    assert_eq!(
+        count_json_eq(pool, serde_json::json!(true)).await,
+        0,
+        "true <> 1"
+    );
 }
 
 /// #1898: SQLite's as_text path returned the number 1 and the bool 1.

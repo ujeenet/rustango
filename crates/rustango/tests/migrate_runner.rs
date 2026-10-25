@@ -691,7 +691,8 @@ async fn unapply_unknown_migration_returns_validation_error() {
     let dir = fresh_dir("unapply_unknown");
     let _ = std::fs::create_dir_all(&dir);
 
-    let err = runner().unapply(&pool, &dir, "0042_does_not_exist")
+    let err = runner()
+        .unapply(&pool, &dir, "0042_does_not_exist")
         .await
         .unwrap_err();
     assert!(format!("{err}").contains("0042_does_not_exist"));
@@ -908,7 +909,8 @@ async fn migrate_to_unknown_target_is_validation_error() {
     };
     let dir = fresh_dir("migrate_to_unknown");
     let _ = std::fs::create_dir_all(&dir);
-    let err = runner().migrate_to(&pool, &dir, "0042_does_not_exist")
+    let err = runner()
+        .migrate_to(&pool, &dir, "0042_does_not_exist")
         .await
         .unwrap_err();
     assert!(format!("{err}").contains("0042_does_not_exist"));
@@ -1349,9 +1351,7 @@ async fn dry_run_returns_pending_sql_without_executing() {
         p.statements
     );
     assert!(
-        p.statements
-            .iter()
-            .any(|s| s.contains("mr_legacy_ledger")),
+        p.statements.iter().any(|s| s.contains("mr_legacy_ledger")),
         "{:?}",
         p.statements
     );
@@ -1464,7 +1464,8 @@ async fn unapply_force_bypasses_head_check() {
     // Forcefully drop the middle migration's table even though 0003
     // is still in place. (Schema state is inconsistent afterward —
     // exactly why the default refuses; we only test the bypass here.)
-    let target = runner().unapply_force(&pool, &dir, &names[1])
+    let target = runner()
+        .unapply_force(&pool, &dir, &names[1])
         .await
         .unwrap();
     assert_eq!(target.name, names[1]);

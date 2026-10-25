@@ -600,7 +600,14 @@ pub(super) fn rollback_snapshot(
     else {
         return prev;
     };
-    with_other_branches(&chain, parent, Some(&target.name), prev, "unapplying", &target.name)
+    with_other_branches(
+        &chain,
+        parent,
+        Some(&target.name),
+        prev,
+        "unapplying",
+        &target.name,
+    )
 }
 
 /// The schema applying `mig` leaves: its own snapshot plus the other branches
@@ -617,7 +624,14 @@ pub(super) fn apply_snapshot(
     let Some(tip) = chain.iter().copied().find(|m| m.name == mig.name) else {
         return mig.snapshot.clone();
     };
-    with_other_branches(&chain, tip, None, mig.snapshot.clone(), "applying", &mig.name)
+    with_other_branches(
+        &chain,
+        tip,
+        None,
+        mig.snapshot.clone(),
+        "applying",
+        &mig.name,
+    )
 }
 
 /// `own` (the schema along `tip`'s line) merged with every other leaf of

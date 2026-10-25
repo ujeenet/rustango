@@ -137,7 +137,10 @@ type CacheKey = [u8; 32];
 struct BasicCache {
     ttl: std::time::Duration,
     cap: usize,
-    tenants: std::collections::HashMap<String, std::collections::HashMap<CacheKey, (i64, std::time::Instant)>>,
+    tenants: std::collections::HashMap<
+        String,
+        std::collections::HashMap<CacheKey, (i64, std::time::Instant)>,
+    >,
 }
 
 impl BasicCache {
@@ -160,7 +163,9 @@ impl BasicCache {
         let ttl = self.ttl;
         // Expired buckets of other tenants go too, so idle slugs don't pile up.
         self.tenants.retain(|s, m| {
-            s == slug || m.values().any(|(_, at)| now.saturating_duration_since(*at) < ttl)
+            s == slug
+                || m.values()
+                    .any(|(_, at)| now.saturating_duration_since(*at) < ttl)
         });
         let map = self.tenants.entry(slug.to_owned()).or_default();
         if map.len() >= self.cap && !map.contains_key(&key) {
@@ -1124,7 +1129,12 @@ mod tests {
         let mut cache = BasicCache::new(ttl, 4);
         let t0 = std::time::Instant::now();
         cache.put("a", key_n(1), 1, t0);
-        assert!(cache.hit("a", &key_n(1), 1, t0 + ttl - std::time::Duration::from_millis(1)));
+        assert!(cache.hit(
+            "a",
+            &key_n(1),
+            1,
+            t0 + ttl - std::time::Duration::from_millis(1)
+        ));
         assert!(!cache.hit("a", &key_n(1), 1, t0 + ttl));
     }
 
@@ -1148,11 +1158,19 @@ mod tests {
         let t0 = std::time::Instant::now();
         cache.put("quiet", key_n(0), 9, t0);
         for n in 1..50 {
-            cache.put("busy", key_n(n), i64::from(n), t0 + std::time::Duration::from_millis(u64::from(n)));
+            cache.put(
+                "busy",
+                key_n(n),
+                i64::from(n),
+                t0 + std::time::Duration::from_millis(u64::from(n)),
+            );
         }
         let now = t0 + std::time::Duration::from_secs(1);
         assert!(cache.hit("quiet", &key_n(0), 9, now));
-        assert!(!cache.hit("busy", &key_n(0), 9, now), "buckets are per tenant");
+        assert!(
+            !cache.hit("busy", &key_n(0), 9, now),
+            "buckets are per tenant"
+        );
         assert_eq!(cache.tenants["busy"].len(), 2);
     }
 

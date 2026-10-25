@@ -564,5 +564,19 @@ macro_rules! database_conn_executor {
     };
 }
 
-database_conn_executor!("mysql", sqlx::MySql, my_rows, my_exec, Mysql, crate::sql::mysql::DIALECT);
-database_conn_executor!("sqlite", sqlx::Sqlite, sq_rows, sq_exec, Sqlite, crate::sql::sqlite::DIALECT);
+database_conn_executor!(
+    "mysql",
+    sqlx::MySql,
+    my_rows,
+    my_exec,
+    Mysql,
+    crate::sql::mysql::DIALECT
+);
+database_conn_executor!(
+    "sqlite",
+    sqlx::Sqlite,
+    sq_rows,
+    sq_exec,
+    Sqlite,
+    crate::sql::sqlite::DIALECT
+);

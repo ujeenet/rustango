@@ -205,7 +205,10 @@ pub struct FetchOnItem {
 async fn orm_queries_run_on_a_tenant_connection() {
     use rustango::core::Column as _;
     let pools: DatabasePools<sqlx::Sqlite> = DatabasePools::new(BackendKind::Sqlite);
-    let mut conn = pools.acquire(&fake_sqlite_org("acme")).await.expect("acquire");
+    let mut conn = pools
+        .acquire(&fake_sqlite_org("acme"))
+        .await
+        .expect("acquire");
     sqlx::query("CREATE TABLE dbt_fetch_on_item (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)")
         .execute(&mut **conn)
         .await
@@ -214,7 +217,10 @@ async fn orm_queries_run_on_a_tenant_connection() {
         .execute(&mut **conn)
         .await
         .unwrap();
-    let rows = FetchOnItem::objects().fetch_on(&mut conn).await.expect("fetch_on");
+    let rows = FetchOnItem::objects()
+        .fetch_on(&mut conn)
+        .await
+        .expect("fetch_on");
     assert_eq!(rows.len(), 2);
     let gone = FetchOnItem::objects()
         .where_(FetchOnItem::n.eq(10))
@@ -222,5 +228,11 @@ async fn orm_queries_run_on_a_tenant_connection() {
         .await
         .expect("delete_on");
     assert_eq!(gone, 1);
-    assert_eq!(FetchOnItem::objects().count_on(&mut conn).await.expect("count_on"), 1);
+    assert_eq!(
+        FetchOnItem::objects()
+            .count_on(&mut conn)
+            .await
+            .expect("count_on"),
+        1
+    );
 }

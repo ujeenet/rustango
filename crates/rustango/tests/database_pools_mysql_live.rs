@@ -191,7 +191,10 @@ async fn orm_queries_run_on_a_tenant_connection() {
         return;
     };
     let pools: DatabasePools<sqlx::MySql> = DatabasePools::new(BackendKind::MySql);
-    let mut conn = pools.acquire(&fake_mysql_org("acme", &url)).await.expect("acquire");
+    let mut conn = pools
+        .acquire(&fake_mysql_org("acme", &url))
+        .await
+        .expect("acquire");
     for sql in [
         "DROP TABLE IF EXISTS dbt_fetch_on_item",
         "CREATE TABLE dbt_fetch_on_item (id BIGINT PRIMARY KEY, n BIGINT NOT NULL)",
@@ -199,7 +202,10 @@ async fn orm_queries_run_on_a_tenant_connection() {
     ] {
         sqlx::query(sql).execute(&mut **conn).await.unwrap();
     }
-    let rows = FetchOnItem::objects().fetch_on(&mut conn).await.expect("fetch_on");
+    let rows = FetchOnItem::objects()
+        .fetch_on(&mut conn)
+        .await
+        .expect("fetch_on");
     assert_eq!(rows.len(), 2);
     let gone = FetchOnItem::objects()
         .where_(FetchOnItem::n.eq(10))
@@ -207,7 +213,13 @@ async fn orm_queries_run_on_a_tenant_connection() {
         .await
         .expect("delete_on");
     assert_eq!(gone, 1);
-    assert_eq!(FetchOnItem::objects().count_on(&mut conn).await.expect("count_on"), 1);
+    assert_eq!(
+        FetchOnItem::objects()
+            .count_on(&mut conn)
+            .await
+            .expect("count_on"),
+        1
+    );
     sqlx::query("DROP TABLE dbt_fetch_on_item")
         .execute(&mut **conn)
         .await
