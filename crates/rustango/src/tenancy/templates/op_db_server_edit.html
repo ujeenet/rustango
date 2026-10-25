@@ -10,6 +10,7 @@
 {% if prefill %}{% set f = prefill %}{% else %}{% set f = server %}{% endif %}
 <form method="post" action="{{ console_prefix }}/db-servers/{{ server.name }}/edit" class="op-form" autocomplete="off">
   {{ csrf_input | default(value='') | safe }}
+  <input type="hidden" name="version" value="{{ f.version | default(value='') }}">
   <label>Backend <input value="{{ server.backend }}" disabled></label>
   {% if is_sqlite %}
   <label>Directory for tenant files <input name="sqlite_dir" required value="{{ f.sqlite_dir | default(value='') }}"></label>
@@ -24,7 +25,7 @@
   {% endif %}
   <label>TLS
     <select name="tls_mode">
-      <option value="">driver default</option>
+      {% if not server.tls_mode %}<option value="">none saved (driver default, may send the password in clear)</option>{% endif %}
       {% for m in tls_modes %}<option value="{{ m }}"{% if f.tls_mode | default(value='') == m %} selected{% endif %}>{{ m }}</option>{% endfor %}
     </select>
   </label>

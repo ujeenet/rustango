@@ -26,6 +26,20 @@ use crate::tenancy::BackendKind;
 const TABLE: &str = "rustango_db_servers";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Why an edit was not saved.
+enum EditFail {
+    /// Changed meanwhile: reload, so the other change shows first.
+    Stale(String),
+    /// Re-render the form with this message.
+    Form(String),
+}
+
+impl From<String> for EditFail {
+    fn from(m: String) -> Self {
+        Self::Form(m)
+    }
+}
+
 #[derive(Deserialize)]
 pub(super) struct MessagesQuery {
     #[serde(default)]
@@ -51,6 +65,7 @@ fn view(s: &DbServer) -> serde_json::Value {
         "sqlite_dir": s.sqlite_dir,
         "active": s.active,
         "has_password": s.has_password(),
+        "version": s.updated_at.get().map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
     })
 }
 
@@ -268,12 +283,28 @@ pub(super) async fn edit_submit(
         } else {
             password_from_form(&form)?.map_or(PasswordChange::Keep, PasswordChange::Set)
         };
-        db_server::update(&state.registry, &name, &spec, password)
+        // The row the form was built from; a later write makes this stale.
+        let seen = match form.get("version").map(|v| v.trim()).filter(|v| !v.is_empty()) {
+            None => None,
+            Some(v) => Some(
+                chrono::DateTime::parse_from_rfc3339(v)
+                    .map_err(|_| "The form's version is not valid; reload the page.".to_owned())?
+                    .with_timezone(&chrono::Utc),
+            ),
+        };
+        db_server::update(&state.registry, &name, &spec, password, seen)
             .await
-            .map_err(|e| explain(&e, &name))
+            .map_err(|e| match e {
+                DbServerError::Stale(_) => EditFail::Stale(e.to_string()),
+                e => EditFail::Form(explain(&e, &name)),
+            })
     }
     .await;
     match outcome {
+        Err(EditFail::Stale(msg)) => redirect(
+            &format!("/db-servers/{}/edit", urlencoding_lite(&row.name)),
+            Flash::Error(&msg),
+        ),
         Ok((row, changed)) => {
             if !changed.is_empty() {
                 audit(&state, &op, &row.name, "db_server_edit", &changed).await;
@@ -283,7 +314,7 @@ pub(super) async fn edit_submit(
                 Flash::Notice(&format!("updated `{}`", row.name)),
             )
         }
-        Err(msg) => render_edit(&state, &op, &row, Some(&form), Some(&msg), None),
+        Err(EditFail::Form(msg)) => render_edit(&state, &op, &row, Some(&form), Some(&msg), None),
     }
 }
 
@@ -292,11 +323,18 @@ pub(super) async fn delete(
     Extension(op): Extension<auth::Operator>,
     Path(name): Path<String>,
 ) -> Response<Body> {
-    let secrets = state.pools.as_ref().map_or_else(
-        crate::tenancy::TenantSecrets::standard,
-        |p| p.tenant_secrets(),
-    );
-    match db_server::remove(&state.registry, &name, &secrets).await {
+    // The deployment's resolver decides which tenants use the server; a
+    // stand-in could miss one.
+    let Some(pools) = state.pools.as_ref() else {
+        return redirect(
+            "/db-servers",
+            Flash::Error(
+                "this console has no tenant pools, so it cannot tell which tenants use the \
+                 server; remove it with `remove-db-server`",
+            ),
+        );
+    };
+    match db_server::remove(&state.registry, &name, &pools.tenant_secrets()).await {
         Ok(()) => {
             audit(&state, &op, &name, "db_server_delete", &[]).await;
             redirect(
@@ -324,9 +362,11 @@ struct ServerProbe {
 
 pub(super) async fn test(
     State(state): State<ConsoleState>,
-    Extension(_op): Extension<auth::Operator>,
+    Extension(op): Extension<auth::Operator>,
     Path(name): Path<String>,
 ) -> Response<Body> {
+    // A probe logs in with the saved password, so it is on the trail too.
+    audit(&state, &op, &name, "db_server_test", &[]).await;
     let bad = |message: String| ServerProbe {
         status: "bad",
         message,
@@ -357,6 +397,9 @@ pub(super) async fn test(
                 };
                 if let Some(b) = blocker {
                     message.push_str(&format!(" Not ready: {b}."));
+                }
+                if let Some(w) = row.tls_warning() {
+                    message.push_str(&format!(" Warning: {w}."));
                 }
                 ServerProbe {
                     status: if blocker.is_none() { "ok" } else { "bad" },

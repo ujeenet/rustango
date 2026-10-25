@@ -9,7 +9,7 @@ use std::time::Duration;
 use rustango::sql::{LoginPassword, Pool};
 use rustango::tenancy::db_server::{self, PasswordChange};
 use rustango::tenancy::{
-    BackendKind, DbServerError, DbServerSpec, Org, TenancyError, TenantPools,
+    BackendKind, DbServerError, DbServerSpec, Org, TenancyError, TenantPools, TlsMode,
 };
 use rustango::tri_dialect_test;
 
@@ -143,6 +143,8 @@ impl Env {
             host: Some(s.host),
             port: Some(s.port),
             admin_user: Some(s.user),
+            // The CI Postgres has no TLS; new servers default to `require`.
+            tls: Some(TlsMode::Disable),
             ..base
         }
     }
@@ -224,6 +226,21 @@ async fn the_password_is_sealed_and_never_shown(pool: &Pool) {
         assert!(!text.contains(SECRET), "{text}");
     }
     assert!(seen[1].contains("main") && seen[1].contains("saved"), "{}", seen[1]);
+
+    // The driver names the login it refused; the diagnosis must not.
+    const USER: &str = "leakuser-q7";
+    let ghost = DbServerSpec {
+        admin_user: Some(USER.into()),
+        ..env.spec("ghost")
+    };
+    db_server::add(&env.registry, &ghost, Some(&pw(SECRET))).await.unwrap();
+    let row = db_server::get(&env.registry, "ghost").await.unwrap();
+    let report = row.probe(Duration::from_secs(10)).await.expect("a report");
+    let diagnosis = report.login_error.as_ref().expect("refused").to_string();
+    let err = env.run(&["test-db-server", "ghost"]).await.expect_err("refused").to_string();
+    for text in [format!("{report:?}"), diagnosis, err] {
+        assert!(!text.contains(USER) && !text.contains(SECRET), "{text}");
+    }
 }
 
 /// Without a key, a password is refused, not stored in plain text.
@@ -264,7 +281,7 @@ async fn a_probe_reports_the_admin_rights(pool: &Pool) {
             assert!(out.contains("ready") && out.contains("server version"), "{out}");
             let mut spec = row.spec().unwrap();
             spec.maintenance_db = Some("no_such_db_dbs".into());
-            let (row, changed) = db_server::update(&env.registry, "live", &spec, PasswordChange::Keep)
+            let (row, changed) = db_server::update(&env.registry, "live", &spec, PasswordChange::Keep, None)
                 .await
                 .unwrap();
             assert_eq!(changed, vec!["maintenance_db"]);
@@ -285,7 +302,7 @@ async fn an_edit_keeps_the_password_unless_told(pool: &Pool) {
         let row = db_server::add(&env.registry, &env.spec("files"), None).await.unwrap();
         let mut spec = row.spec().unwrap();
         spec.active = false;
-        let (_, changed) = db_server::update(&env.registry, "files", &spec, PasswordChange::Keep)
+        let (_, changed) = db_server::update(&env.registry, "files", &spec, PasswordChange::Keep, None)
             .await
             .unwrap();
         assert_eq!(changed, vec!["active"]);
@@ -295,23 +312,23 @@ async fn an_edit_keeps_the_password_unless_told(pool: &Pool) {
     let first = env.stored_password("e").await.unwrap();
     let mut spec = row.spec().unwrap();
     spec.port = Some(1);
-    let (_, changed) = db_server::update(&env.registry, "e", &spec, PasswordChange::Keep)
+    let (_, changed) = db_server::update(&env.registry, "e", &spec, PasswordChange::Keep, None)
         .await
         .unwrap();
     assert_eq!(changed, vec!["port"]);
     assert_eq!(env.stored_password("e").await.as_deref(), Some(first.as_str()));
-    let (_, changed) = db_server::update(&env.registry, "e", &spec, PasswordChange::Set(pw("other")))
+    let (_, changed) = db_server::update(&env.registry, "e", &spec, PasswordChange::Set(pw("other")), None)
         .await
         .unwrap();
     assert_eq!(changed, vec!["admin_password"]);
     let second = env.stored_password("e").await.unwrap();
     assert!(second != first && second.starts_with("enc:v1:"));
-    let (row, _) = db_server::update(&env.registry, "e", &spec, PasswordChange::Clear)
+    let (row, _) = db_server::update(&env.registry, "e", &spec, PasswordChange::Clear, None)
         .await
         .unwrap();
     assert!(!row.has_password() && env.stored_password("e").await.is_none());
     spec.name = "renamed".into();
-    assert!(db_server::update(&env.registry, "e", &spec, PasswordChange::Keep).await.is_err());
+    assert!(db_server::update(&env.registry, "e", &spec, PasswordChange::Keep, None).await.is_err());
 }
 
 /// A server of another backend, a duplicate and a bad name are refused.
@@ -375,6 +392,104 @@ async fn a_server_in_use_is_not_removed(pool: &Pool) {
     assert!(db_server::get(&env.registry, "free").await.is_err());
 }
 
+/// A tenant whose URL is missing or does not resolve may be on the
+/// server, so removal is refused and says why.
+async fn an_unknown_tenant_url_blocks_removal(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    with_key();
+    let env = Env::new(pool).await;
+    db_server::add(&env.registry, &env.spec("maybe"), None).await.unwrap();
+    for (slug, url) in [
+        ("lost", Some("env://RUSTANGO_DBS_UNSET_VAR_q7".to_owned())),
+        ("blank", None),
+    ] {
+        let mut org = Org {
+            slug: slug.into(),
+            display_name: slug.into(),
+            backend_kind: env.backend().as_str().into(),
+            database_url: url,
+            ..rustango::testkit::org()
+        };
+        org.save_pool(&env.registry).await.expect("insert org");
+    }
+    let err = env.run(&["remove-db-server", "maybe"]).await.expect_err("unknown").to_string();
+    assert!(err.contains("lost (its database URL does not resolve here)"), "{err}");
+    assert!(err.contains("blank (it has no database URL)"), "{err}");
+    assert!(db_server::get(&env.registry, "maybe").await.is_ok());
+}
+
+/// An edit built from an older read is refused, not written over the newer one.
+async fn a_stale_edit_is_refused(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    with_key();
+    let env = Env::new(pool).await;
+    let row = db_server::add(&env.registry, &env.spec("cas"), None).await.unwrap();
+    let first = db_server::get(&env.registry, "cas").await.unwrap();
+    let seen = first.updated_at.get().copied();
+    assert!(seen.is_some(), "{row:?}");
+    let mut spec = first.spec().unwrap();
+    spec.active = false;
+    db_server::update(&env.registry, "cas", &spec, PasswordChange::Keep, seen)
+        .await
+        .expect("fresh");
+    spec.active = true;
+    let err = db_server::update(&env.registry, "cas", &spec, PasswordChange::Keep, seen)
+        .await
+        .expect_err("stale");
+    assert!(matches!(err, DbServerError::Stale(_)), "{err:?}");
+    assert!(!db_server::get(&env.registry, "cas").await.unwrap().active);
+}
+
+/// New servers get TLS `require` unless told otherwise.
+async fn new_servers_require_tls(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    with_key();
+    let env = Env::new(pool).await;
+    let spec = DbServerSpec {
+        tls: None,
+        ..env.spec("tls")
+    };
+    let row = db_server::add(&env.registry, &spec, None).await.unwrap();
+    if env.backend() == BackendKind::Sqlite {
+        assert_eq!(row.tls_mode, None);
+        return;
+    }
+    assert_eq!(row.tls_mode.as_deref(), Some("require"));
+    assert!(row.tls_warning().is_none());
+    let mut spec = row.spec().unwrap();
+    spec.tls = None;
+    let (row, _) = db_server::update(&env.registry, "tls", &spec, PasswordChange::Keep, None)
+        .await
+        .unwrap();
+    assert!(row.tls_warning().is_some(), "an old row with no mode warns");
+}
+
+/// `reseal-tenant-secrets` re-seals server passwords under the new key.
+async fn reseal_covers_server_passwords(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    let env = Env::new(pool).await;
+    if env.backend() == BackendKind::Sqlite {
+        return;
+    }
+    std::env::set_var("RUSTANGO_SECRET_KEY", "old-dbs-key-0123456789abcdef0123456789");
+    db_server::add(&env.registry, &env.spec("rot"), Some(&pw(SECRET))).await.unwrap();
+    let old = env.stored_password("rot").await.unwrap();
+    std::env::set_var("RUSTANGO_SECRET_KEY_PREVIOUS", "old-dbs-key-0123456789abcdef0123456789");
+    std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+    let dry = env.run(&["reseal-tenant-secrets"]).await.expect("dry run");
+    assert!(dry.contains("server rot: would re-seal"), "{dry}");
+    assert_eq!(env.stored_password("rot").await.as_deref(), Some(old.as_str()));
+    let out = env.run(&["reseal-tenant-secrets", "--apply"]).await.expect("apply");
+    assert!(out.contains("server rot: re-sealed"), "{out}");
+    let new = env.stored_password("rot").await.unwrap();
+    assert!(new != old && new.starts_with("enc:v1:") && !out.contains(SECRET), "{out}");
+    // Opens without the old key now.
+    std::env::remove_var("RUSTANGO_SECRET_KEY_PREVIOUS");
+    let row = db_server::get(&env.registry, "rot").await.unwrap();
+    assert!(row.admin_url().await.is_ok());
+    with_key();
+}
+
 // ------------------------------------------------------------- console
 
 struct Console {
@@ -382,20 +497,94 @@ struct Console {
     cookie: String,
 }
 
+enum Mode {
+    ReadOnly,
+    Full,
+    /// A provisioner but no tenant pools.
+    NoPools,
+}
+
+async fn seed_operator(env: &Env) {
+    let mut op = rustango::tenancy::Operator {
+        id: rustango::sql::Auto::default(),
+        username: "op".into(),
+        password_hash: rustango::tenancy::password::hash("letmein").unwrap(),
+        active: true,
+        created_at: chrono::Utc::now(),
+        password_changed_at: None,
+        sessions_revoked_at: None,
+    };
+    op.insert_pool(&env.registry).await.expect("seed operator");
+}
+
+/// A console POST without the CSRF token is refused and writes nothing.
+async fn a_console_post_needs_csrf(pool: &Pool) {
+    use tower::ServiceExt as _;
+    let _g = env_lock().lock().await;
+    with_key();
+    let env = Env::new(pool).await;
+    seed_operator(&env).await;
+    let c = Console::boot(&env, true).await;
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/db-servers")
+        .header("cookie", &c.cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(axum::body::Body::from("name=nocsrf&sqlite_dir=/tmp&active=on"))
+        .unwrap();
+    let resp = c.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status().as_u16(), 403);
+    assert!(db_server::get(&env.registry, "nocsrf").await.is_err());
+}
+
+/// Without tenant pools the console cannot tell who uses a server, so it
+/// does not delete it.
+async fn a_console_without_pools_does_not_delete(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    with_key();
+    let env = Env::new(pool).await;
+    seed_operator(&env).await;
+    db_server::add(&env.registry, &env.spec("kept"), None).await.unwrap();
+    let c = Console::boot_with(&env, Mode::NoPools).await;
+    let resp = c.post("/db-servers/kept/delete", "").await;
+    assert_eq!(resp.status().as_u16(), 303);
+    let location = resp.headers()["location"].to_str().unwrap().to_owned();
+    assert!(location.contains("remove-db-server"), "{location}");
+    assert!(db_server::get(&env.registry, "kept").await.is_ok());
+}
+
 impl Console {
     /// Signed in, with provisioning (`full`) or read-only.
     async fn boot(env: &Env, full: bool) -> Self {
-        use rustango::tenancy::operator_console::{router, router_with_provisioning, SessionSecret};
-        let app = if full {
-            let dir = env.dir();
-            typed!(env.registry, p => {
+        Self::boot_with(env, if full { Mode::Full } else { Mode::ReadOnly }).await
+    }
+
+    async fn boot_with(env: &Env, mode: Mode) -> Self {
+        use rustango::tenancy::operator_console::{
+            router, router_full, router_with_provisioning, SessionSecret,
+        };
+        let dir = env.dir();
+        let app = match mode {
+            Mode::Full => typed!(env.registry, p => {
                 let pools = std::sync::Arc::new(p);
                 let provisioner = rustango::tenancy::provision::Provisioner::new(
                     pools.clone(), env.url.clone(), dir).erased();
                 router_with_provisioning(env.registry.clone(), pools, provisioner, SessionSecret::from_env_or_random())
-            })
-        } else {
-            router(env.registry.clone(), SessionSecret::from_env_or_random())
+            }),
+            Mode::NoPools => typed!(env.registry, p => {
+                let provisioner = rustango::tenancy::provision::Provisioner::new(
+                    std::sync::Arc::new(p), env.url.clone(), dir).erased();
+                router_full(
+                    env.registry.clone(),
+                    None,
+                    Some(provisioner),
+                    SessionSecret::from_env_or_random(),
+                    rustango::tenancy::branding::default_brand_storage(),
+                    None,
+                    "/_impersonation_handoff".into(),
+                )
+            }),
+            Mode::ReadOnly => router(env.registry.clone(), SessionSecret::from_env_or_random()),
         };
         let mut c = Self {
             app,
@@ -460,16 +649,7 @@ async fn the_console_never_shows_the_password(pool: &Pool) {
     let _g = env_lock().lock().await;
     with_key();
     let env = Env::new(pool).await;
-    let mut op = rustango::tenancy::Operator {
-        id: rustango::sql::Auto::default(),
-        username: "op".into(),
-        password_hash: rustango::tenancy::password::hash("letmein").unwrap(),
-        active: true,
-        created_at: chrono::Utc::now(),
-        password_changed_at: None,
-        sessions_revoked_at: None,
-    };
-    op.insert_pool(&env.registry).await.expect("seed operator");
+    seed_operator(&env).await;
     let read_only = Console::boot(&env, false).await;
     assert_eq!(read_only.get("/db-servers").await.0, 404, "mounted without provisioning");
     let c = Console::boot(&env, true).await;
@@ -517,14 +697,34 @@ async fn the_console_never_shows_the_password(pool: &Pool) {
     if !sqlite {
         assert!(edit.contains(r#"type="password" autocomplete="new-password">"#), "{edit}");
     }
+
+    // The version the form was built from rides along.
+    let version = edit
+        .split(r#"name="version" value=""#)
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("a version field")
+        .to_owned();
     seen.push(edit);
 
     // Blank password keeps it; a bad port re-renders without echoing a typed one.
     let mut edited = pairs.clone();
     edited.retain(|(k, _)| *k != "active");
-    let resp = c.post("/db-servers/web/edit", &form(&edited)).await;
+    let mut fresh = edited.clone();
+    fresh.push(("version", &version));
+    let resp = c.post("/db-servers/web/edit", &form(&fresh)).await;
     assert_eq!(resp.status().as_u16(), 303, "{}", body(resp).await);
     assert_eq!(env.stored_password("web").await, stored, "a blank field kept it");
+    assert!(!db_server::get(&env.registry, "web").await.unwrap().active);
+    // Same form again: its version is now old, so nothing is written.
+    let mut stale = fresh.clone();
+    stale.retain(|(k, _)| *k != "active");
+    stale.push(("active", "on"));
+    let resp = c.post("/db-servers/web/edit", &form(&stale)).await;
+    assert_eq!(resp.status().as_u16(), 303);
+    let location = resp.headers()["location"].to_str().unwrap().to_owned();
+    let (_, page) = c.get(&location).await;
+    assert!(page.contains("changed meanwhile"), "{page}");
     assert!(!db_server::get(&env.registry, "web").await.unwrap().active);
     if !sqlite {
         let mut bad = edited.clone();
@@ -558,6 +758,8 @@ async fn the_console_never_shows_the_password(pool: &Pool) {
         assert!(audit.contains("admin_password"), "names the field: {audit}");
     }
     assert!(!audit.contains("enc:v1"), "{audit}");
+    let sources: Vec<&str> = entries.iter().map(|e| e.source.as_str()).collect();
+    assert!(sources.iter().any(|s| s.ends_with(":db_server_test")), "{sources:?}");
     seen.push(audit);
 
     for text in &seen {
@@ -572,6 +774,12 @@ tri_dialect_test! {
     setup: setup,
     sqlite: file,
     scenarios: [
+        an_unknown_tenant_url_blocks_removal,
+        a_stale_edit_is_refused,
+        new_servers_require_tls,
+        reseal_covers_server_passwords,
+        a_console_post_needs_csrf,
+        a_console_without_pools_does_not_delete,
         the_console_never_shows_the_password,
         the_password_is_sealed_and_never_shown,
         without_a_key_a_password_is_refused,

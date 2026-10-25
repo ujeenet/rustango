@@ -9,6 +9,7 @@
 use std::time::Duration;
 
 use crate::core::Column as _;
+use crate::sql::connect_diagnosis::ConnectDiagnosis;
 use crate::sql::{FetcherPool as _, LoginPassword, Pool};
 
 use super::server_admin::{PrivilegeReport, ServerAdmin, TenantDbError};
@@ -177,7 +178,10 @@ pub enum DbServerError {
     Seal(String),
     #[error("the saved password does not open: {0}")]
     Unseal(String),
-    #[error("database server `{name}` is used by tenant(s) {}", tenants.join(", "))]
+    /// Someone else changed the server after it was read.
+    #[error("database server `{0}` was changed meanwhile; reload it and edit again")]
+    Stale(String),
+    #[error("database server `{name}` may be used by tenant(s) {}", tenants.join(", "))]
     InUse { name: String, tenants: Vec<String> },
     #[error(transparent)]
     Exec(#[from] crate::sql::ExecError),
@@ -233,6 +237,15 @@ impl DbServer {
         self.admin_password.is_some()
     }
 
+    /// Set for a server row saved without a TLS mode.
+    #[must_use]
+    pub fn tls_warning(&self) -> Option<&'static str> {
+        (self.backend != BackendKind::Sqlite.as_str() && self.tls_mode.is_none()).then_some(
+            "no TLS mode is saved, so the driver default applies and the password may travel \
+             in clear; set one (require is the default for new servers)",
+        )
+    }
+
     /// # Errors
     /// [`DbServerError::Invalid`] for a row holding an unknown backend.
     pub fn backend_kind(&self) -> Result<BackendKind, DbServerError> {
@@ -245,11 +258,20 @@ impl DbServer {
     /// # Errors
     /// [`DbServerError::Invalid`] for an unknown backend or TLS mode.
     pub fn spec(&self) -> Result<DbServerSpec, DbServerError> {
+        let port = self
+            .port
+            .map(|p| {
+                u16::try_from(p)
+                    .ok()
+                    .filter(|p| *p != 0)
+                    .ok_or_else(|| DbServerError::Invalid(format!("stored port {p} is not a port")))
+            })
+            .transpose()?;
         Ok(DbServerSpec {
             name: self.name.clone(),
             backend: self.backend_kind()?,
             host: self.host.clone(),
-            port: self.port.and_then(|p| u16::try_from(p).ok()),
+            port,
             admin_user: self.admin_user.clone(),
             tls: self.tls_mode.as_deref().map(TlsMode::parse).transpose()?,
             maintenance_db: self.maintenance_db.clone(),
@@ -313,12 +335,13 @@ impl DbServer {
     /// [`DbServerError::Unseal`], or the connect failure.
     pub async fn connect(&self, timeout: Duration) -> Result<ServerAdmin, DbServerError> {
         match self.admin_url().await? {
-            Some(url) => Ok(ServerAdmin::connect_with(
+            Some(url) => ServerAdmin::connect_with(
                 url.expose(),
                 self.maintenance_db.as_deref(),
                 timeout,
             )
-            .await?),
+            .await
+            .map_err(|e| self.scrubbed_error(e)),
             None => Ok(ServerAdmin::sqlite_dir(
                 self.sqlite_dir.clone().unwrap_or_default(),
             )),
@@ -326,25 +349,58 @@ impl DbServer {
     }
 
     /// Log in and report what the admin login may do. A refused login is
-    /// a report with `can_login: false`.
+    /// a report with `can_login: false`. Diagnoses name the server, not
+    /// the login.
     ///
     /// # Errors
     /// [`DbServerError::Unseal`], or an unreachable server.
     pub async fn probe(&self, timeout: Duration) -> Result<PrivilegeReport, DbServerError> {
         match self.admin_url().await? {
-            Some(url) => Ok(ServerAdmin::probe_url_with(
-                url.expose(),
-                self.maintenance_db.as_deref(),
-                timeout,
-            )
-            .await?),
+            Some(url) => {
+                let mut report =
+                    ServerAdmin::probe_url_with(url.expose(), self.maintenance_db.as_deref(), timeout)
+                        .await
+                        .map_err(|e| self.scrubbed_error(e))?;
+                report.login_error = report.login_error.map(|d| self.scrubbed(d));
+                Ok(report)
+            }
             None => Ok(self.connect(timeout).await?.probe().await?),
+        }
+    }
+
+    /// `d` with the login and password removed: the endpoint becomes the
+    /// server, and the driver's text loses the user name.
+    fn scrubbed(&self, d: ConnectDiagnosis) -> ConnectDiagnosis {
+        let mut detail = d.detail;
+        if let Some(user) = self.admin_user.as_deref().filter(|u| !u.is_empty()) {
+            detail = detail.replace(user, "<admin user>");
+        }
+        ConnectDiagnosis {
+            fault: d.fault,
+            endpoint: format!(
+                "{}:{}",
+                self.host.as_deref().unwrap_or_default(),
+                self.port.map_or_else(|| "default port".to_owned(), |p| p.to_string())
+            ),
+            detail,
+        }
+    }
+
+    fn scrubbed_error(&self, e: TenantDbError) -> DbServerError {
+        match e {
+            TenantDbError::Connect(d) => DbServerError::Admin(TenantDbError::Connect(self.scrubbed(d))),
+            other => DbServerError::Admin(other),
         }
     }
 
     /// Tenants this server must not be removed under: database-mode
     /// tenants whose URL points at its host and port (SQLite: a file in
-    /// its directory). URLs that do not resolve here are not counted.
+    /// its directory), and those whose URL is missing, does not resolve
+    /// or does not parse, since they may be on it too.
+    ///
+    /// Hosts match ignoring case, IPv6 brackets and one trailing dot, after
+    /// sqlx reads `?host=` / `hostaddr=`. Other spellings of one machine
+    /// (`localhost` and `127.0.0.1`, a name and its IP) do not match.
     ///
     /// # Errors
     /// A registry read failure.
@@ -361,14 +417,17 @@ impl DbServer {
             .await?;
         let mut out = Vec::new();
         for org in orgs {
-            let Some(stored) = org.database_url.as_deref() else {
-                continue;
+            let verdict = match org.database_url.as_deref() {
+                None => Uses::Unknown("it has no database URL"),
+                Some(stored) => match secrets.resolve(stored).await {
+                    Ok(url) => self.holds(backend, &url),
+                    Err(_) => Uses::Unknown("its database URL does not resolve here"),
+                },
             };
-            let Ok(url) = secrets.resolve(stored).await else {
-                continue;
-            };
-            if self.holds(backend, &url) {
-                out.push(org.slug);
+            match verdict {
+                Uses::Yes => out.push(org.slug),
+                Uses::No => {}
+                Uses::Unknown(why) => out.push(format!("{} ({why})", org.slug)),
             }
         }
         out.sort();
@@ -376,46 +435,73 @@ impl DbServer {
     }
 
     /// Whether tenant `url` lives on this server.
-    fn holds(&self, backend: BackendKind, url: &str) -> bool {
+    fn holds(&self, backend: BackendKind, url: &str) -> Uses {
         let same_host = |host: &str, port: u16| {
-            self.host
-                .as_deref()
-                .is_some_and(|h| h.eq_ignore_ascii_case(host))
-                && self
-                    .port
-                    .and_then(|p| u16::try_from(p).ok())
-                    .unwrap_or_else(|| default_port(backend))
-                    == port
+            let ours = self.host.as_deref().map(normalized_host);
+            let ours_port = self
+                .port
+                .and_then(|p| u16::try_from(p).ok())
+                .unwrap_or_else(|| default_port(backend));
+            if ours.as_deref() == Some(normalized_host(host).as_str()) && ours_port == port {
+                Uses::Yes
+            } else {
+                Uses::No
+            }
         };
+        let unparsable = Uses::Unknown("its database URL does not parse");
         #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
         use std::str::FromStr as _;
         match backend {
             #[cfg(feature = "postgres")]
             BackendKind::Postgres => crate::sql::sqlx::postgres::PgConnectOptions::from_str(url)
-                .is_ok_and(|o| same_host(o.get_host(), o.get_port())),
+                .map_or(unparsable, |o| same_host(o.get_host(), o.get_port())),
             #[cfg(feature = "mysql")]
             BackendKind::MySql => crate::sql::sqlx::mysql::MySqlConnectOptions::from_str(url)
-                .is_ok_and(|o| same_host(o.get_host(), o.get_port())),
+                .map_or(unparsable, |o| same_host(o.get_host(), o.get_port())),
             #[cfg(feature = "sqlite")]
             BackendKind::Sqlite => {
                 let Some(dir) = self.sqlite_dir.as_deref() else {
-                    return false;
+                    return Uses::No;
                 };
                 let Ok(o) = crate::sql::sqlx::sqlite::SqliteConnectOptions::from_str(url) else {
-                    return false;
+                    return unparsable;
                 };
                 let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_owned());
-                o.get_filename()
+                if o.get_filename()
                     .parent()
                     .is_some_and(|p| canon(p) == canon(std::path::Path::new(dir)))
+                {
+                    Uses::Yes
+                } else {
+                    Uses::No
+                }
             }
             #[allow(unreachable_patterns)]
             _ => {
                 let _ = (url, same_host);
-                false
+                unparsable
             }
         }
     }
+}
+
+/// Whether a tenant's database is on a server.
+#[derive(Debug, PartialEq, Eq)]
+enum Uses {
+    Yes,
+    No,
+    /// Cannot tell, so assume it is.
+    Unknown(&'static str),
+}
+
+/// `[::1]` → `::1`, `DB.Example.` → `db.example`.
+fn normalized_host(h: &str) -> String {
+    let h = h.trim();
+    let h = h
+        .strip_prefix('[')
+        .and_then(|x| x.strip_suffix(']'))
+        .unwrap_or(h);
+    h.strip_suffix('.').unwrap_or(h).to_ascii_lowercase()
 }
 
 /// Every saved server, by name.
@@ -451,7 +537,11 @@ pub async fn add(
     spec: &DbServerSpec,
     password: Option<&LoginPassword>,
 ) -> Result<DbServer, DbServerError> {
-    let spec = validate(spec, registry)?;
+    let mut spec = validate(spec, registry.dialect().name())?;
+    // TLS unless the operator turned it off: the login can drop every database.
+    if spec.backend != BackendKind::Sqlite && spec.tls.is_none() {
+        spec.tls = Some(TlsMode::Require);
+    }
     check_password(&spec, password.is_some())?;
     let mut row = DbServer {
         id: crate::sql::Auto::Unset,
@@ -490,16 +580,25 @@ pub async fn add(
 /// Change the server named `name`. A server keeps its name and backend.
 /// Returns the row and the names of the fields that changed.
 ///
+/// `seen` is the `updated_at` the caller's form was built from; the write
+/// also happens only while the row is as read here, so a concurrent edit
+/// is never overwritten.
+///
 /// # Errors
-/// As [`add`], plus [`DbServerError::NotFound`].
+/// As [`add`], plus [`DbServerError::NotFound`] and [`DbServerError::Stale`].
 pub async fn update(
     registry: &Pool,
     name: &str,
     spec: &DbServerSpec,
     password: PasswordChange,
+    seen: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<(DbServer, Vec<&'static str>), DbServerError> {
     let mut row = get(registry, name).await?;
-    let spec = validate(spec, registry)?;
+    let read_at = row.updated_at.get().copied();
+    if seen.is_some() && seen != read_at {
+        return Err(DbServerError::Stale(row.name));
+    }
+    let spec = validate(spec, registry.dialect().name())?;
     if spec.name != row.name {
         return Err(DbServerError::Invalid(
             "a database server cannot be renamed; add a new one instead".into(),
@@ -538,8 +637,62 @@ pub async fn update(
             changed.push(field);
         }
     }
-    row.save_pool(registry).await?;
+    write_if_unchanged(registry, &mut row, read_at).await?;
     Ok((row, changed))
+}
+
+/// `UPDATE … WHERE id = ? AND updated_at = <read_at>`; no row means
+/// another write landed in between.
+async fn write_if_unchanged(
+    registry: &Pool,
+    row: &mut DbServer,
+    read_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<(), DbServerError> {
+    use crate::core::{Assignment, Filter, Model as _, Op, SqlValue, UpdateQuery, WhereExpr};
+    use chrono::SubsecRound as _;
+    let now = chrono::Utc::now().trunc_subsecs(6);
+    let set = |column: &'static str, value: SqlValue| Assignment {
+        column,
+        value: value.into(),
+    };
+    let id = row.id.get().copied().unwrap_or_default();
+    let mut filters = vec![Filter {
+        column: "id",
+        op: Op::Eq,
+        value: SqlValue::I64(id),
+    }];
+    filters.push(match read_at {
+        Some(t) => Filter {
+            column: "updated_at",
+            op: Op::Eq,
+            value: SqlValue::DateTime(t),
+        },
+        None => Filter {
+            column: "updated_at",
+            op: Op::IsNull,
+            value: SqlValue::Bool(true),
+        },
+    });
+    let query = UpdateQuery {
+        model: DbServer::SCHEMA,
+        set: vec![
+            set("host", row.host.clone().into()),
+            set("port", row.port.into()),
+            set("admin_user", row.admin_user.clone().into()),
+            set("admin_password", row.admin_password.clone().into()),
+            set("tls_mode", row.tls_mode.clone().into()),
+            set("maintenance_db", row.maintenance_db.clone().into()),
+            set("sqlite_dir", row.sqlite_dir.clone().into()),
+            set("active", SqlValue::Bool(row.active)),
+            set("updated_at", SqlValue::DateTime(now)),
+        ],
+        where_clause: WhereExpr::and_predicates(filters),
+    };
+    if crate::sql::update_pool(registry, &query).await? == 0 {
+        return Err(DbServerError::Stale(row.name.clone()));
+    }
+    row.updated_at = crate::sql::Auto::Set(now);
+    Ok(())
 }
 
 /// Delete the server named `name`, unless a tenant uses it.
@@ -561,6 +714,69 @@ pub async fn remove(
     }
     row.delete_pool(registry).await?;
     Ok(())
+}
+
+/// What `reseal-tenant-secrets` did with one saved password.
+pub(crate) enum Resealed {
+    Would,
+    Done,
+    /// Changed since it was read; left as is.
+    Skipped,
+    Failed(String),
+}
+
+/// Re-seal `row`'s password with the current key (opening it with the
+/// current or previous one), only over the value read.
+pub(crate) async fn reseal_password(registry: &Pool, row: &DbServer, apply: bool) -> Resealed {
+    use crate::core::{Assignment, Filter, Model as _, Op, SqlValue, UpdateQuery, WhereExpr};
+    use chrono::SubsecRound as _;
+    let Some(old) = row.admin_password.as_deref() else {
+        return Resealed::Skipped;
+    };
+    let plain = match super::SealedSecretsResolver.resolve(old).await {
+        Ok(p) => p,
+        Err(e) => return Resealed::Failed(format!("cannot open: {e}")),
+    };
+    if !apply {
+        return Resealed::Would;
+    }
+    let new = match LoginPassword::new(plain)
+        .map_err(|e| DbServerError::Seal(e.to_string()))
+        .and_then(|pw| sealed(&pw))
+    {
+        Ok(s) => s,
+        Err(e) => return Resealed::Failed(e.to_string()),
+    };
+    let query = UpdateQuery {
+        model: DbServer::SCHEMA,
+        set: vec![
+            Assignment {
+                column: "admin_password",
+                value: SqlValue::String(new).into(),
+            },
+            Assignment {
+                column: "updated_at",
+                value: SqlValue::DateTime(chrono::Utc::now().trunc_subsecs(6)).into(),
+            },
+        ],
+        where_clause: WhereExpr::and_predicates(vec![
+            Filter {
+                column: "id",
+                op: Op::Eq,
+                value: SqlValue::I64(row.id.get().copied().unwrap_or_default()),
+            },
+            Filter {
+                column: "admin_password",
+                op: Op::Eq,
+                value: SqlValue::String(old.to_owned()),
+            },
+        ]),
+    };
+    match crate::sql::update_pool(registry, &query).await {
+        Ok(0) => Resealed::Skipped,
+        Ok(_) => Resealed::Done,
+        Err(e) => Resealed::Failed(e.to_string()),
+    }
 }
 
 impl DbServer {
@@ -600,7 +816,10 @@ fn trimmed(v: Option<&String>) -> Option<String> {
 }
 
 /// The spec with blanks dropped and every field checked.
-fn validate(spec: &DbServerSpec, registry: &Pool) -> Result<DbServerSpec, DbServerError> {
+fn validate(
+    spec: &DbServerSpec,
+    registry_backend: &'static str,
+) -> Result<DbServerSpec, DbServerError> {
     let bad = |m: &str| Err(DbServerError::Invalid(m.to_owned()));
     let name = spec.name.trim().to_owned();
     let legal = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-';
@@ -612,7 +831,6 @@ fn validate(spec: &DbServerSpec, registry: &Pool) -> Result<DbServerSpec, DbServ
     {
         return bad("a server name is 1 to 64 lowercase letters, digits and inner hyphens");
     }
-    let registry_backend = registry.dialect().name();
     if spec.backend.as_str() != registry_backend {
         return Err(DbServerError::BackendMismatch {
             server: spec.backend.as_str(),
@@ -630,9 +848,16 @@ fn validate(spec: &DbServerSpec, registry: &Pool) -> Result<DbServerSpec, DbServ
         if maintenance_db.is_some() {
             return bad("a maintenance database is for Postgres only");
         }
-        match &sqlite_dir {
-            Some(d) if !d.contains('\0') => {}
-            _ => return bad("a SQLite server needs a directory"),
+        let dir_ok = sqlite_dir.as_deref().is_some_and(|d| {
+            let p = std::path::Path::new(d);
+            !d.contains('\0')
+                && p.is_absolute()
+                && !p
+                    .components()
+                    .any(|c| c == std::path::Component::ParentDir)
+        });
+        if !dir_ok {
+            return bad("a SQLite server needs an absolute directory without `..`");
         }
     } else {
         if sqlite_dir.is_some() {
@@ -642,10 +867,14 @@ fn validate(spec: &DbServerSpec, registry: &Pool) -> Result<DbServerSpec, DbServ
             h.len() <= 255
                 && !h
                     .chars()
-                    .any(|c| c.is_whitespace() || c.is_control() || "/?#@[]".contains(c))
+                    .any(|c| c.is_whitespace() || c.is_control() || "/?#@[]%".contains(c))
         });
         if !host_ok {
             return bad("a host is required: a name or an IP address, without scheme, port or path");
+        }
+        // One colon is `host:port`; an IPv6 address has two or more.
+        if host.as_deref().is_some_and(|h| h.matches(':').count() == 1) {
+            return bad("put the port in the port field, not after the host");
         }
         if spec.port == Some(0) {
             return bad("port 0 is not a port");
@@ -727,6 +956,83 @@ mod tests {
             url.expose(),
             "mysql://ad%20min@[::1]:6543?ssl-mode=verify_identity"
         );
+    }
+
+    /// Brackets, case and a trailing dot do not hide a tenant; another
+    /// spelling of the same machine is not matched.
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn a_tenant_url_on_the_server_is_found_in_any_spelling() {
+        let mut s = pg("DB.Internal");
+        s.port = None;
+        let on = |url: &str| s.holds(BackendKind::Postgres, url);
+        assert_eq!(on("postgres://u:p@db.internal./t"), Uses::Yes);
+        assert_eq!(on("postgres://u:p@db.internal:5432/t"), Uses::Yes);
+        assert_eq!(on("postgres://u:p@other/t?host=db.internal"), Uses::Yes);
+        assert_eq!(on("postgres://u:p@db.internal:6432/t"), Uses::No);
+        assert_eq!(on("postgres://u:p@10.0.0.5/t"), Uses::No, "an IP is another spelling");
+        let mut v6 = pg("::1");
+        v6.port = Some(5432);
+        assert_eq!(v6.holds(BackendKind::Postgres, "postgres://u@[::1]/t"), Uses::Yes);
+        assert_eq!(
+            v6.holds(BackendKind::Postgres, "postgres://u@x/t?hostaddr=::1"),
+            Uses::Yes
+        );
+        assert!(matches!(on("postgres://u:p@db.internal:notaport/t"), Uses::Unknown(_)));
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn mysql_default_port_counts() {
+        let mut s = pg("db");
+        s.backend = "mysql".into();
+        s.port = Some(3306);
+        assert_eq!(s.holds(BackendKind::MySql, "mysql://u@DB/t"), Uses::Yes);
+        assert_eq!(s.holds(BackendKind::MySql, "mysql://u@db:3307/t"), Uses::No);
+    }
+
+    #[test]
+    fn hosts_and_directories_are_checked() {
+        let server = |host: &str| DbServerSpec {
+            name: "a".into(),
+            backend: BackendKind::Postgres,
+            host: Some(host.into()),
+            admin_user: Some("u".into()),
+            ..DbServerSpec::default()
+        };
+        for bad in ["db%2Einternal", "db:5432", "db/x", "[::1]"] {
+            assert!(validate(&server(bad), "postgres").is_err(), "{bad}");
+        }
+        for good in ["db.internal", "::1", "fe80::1", "10.0.0.5"] {
+            assert!(validate(&server(good), "postgres").is_ok(), "{good}");
+        }
+        let dir = |d: &str| DbServerSpec {
+            name: "a".into(),
+            backend: BackendKind::Sqlite,
+            sqlite_dir: Some(d.into()),
+            ..DbServerSpec::default()
+        };
+        for bad in ["tenants", "./tenants", "/srv/../etc"] {
+            assert!(validate(&dir(bad), "sqlite").is_err(), "{bad}");
+        }
+        assert!(validate(&dir("/srv/tenants"), "sqlite").is_ok());
+    }
+
+    #[test]
+    fn a_stored_port_out_of_range_is_an_error() {
+        let mut s = pg("db");
+        s.port = Some(70_000);
+        assert!(s.spec().is_err());
+        s.port = Some(0);
+        assert!(s.spec().is_err());
+    }
+
+    #[test]
+    fn a_row_without_tls_warns() {
+        let mut s = pg("db");
+        assert!(s.tls_warning().is_none());
+        s.tls_mode = None;
+        assert!(s.tls_warning().is_some());
     }
 
     #[test]

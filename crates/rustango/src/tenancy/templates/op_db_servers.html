@@ -61,10 +61,10 @@ login. The password is stored encrypted and never shown again. Use
   <label>Port (blank for the default) <input name="port" type="number" min="1" max="65535" value="{{ prefill.port | default(value='') }}"></label>
   <label>Admin user <input name="admin_user" required value="{{ prefill.admin_user | default(value='') }}" autocomplete="off"></label>
   <label>Admin password <input name="admin_password" type="password" autocomplete="new-password"></label>
-  <label>TLS
+  <label>TLS (require unless you pick another)
     <select name="tls_mode">
-      <option value="">driver default</option>
-      {% for m in tls_modes %}<option value="{{ m }}"{% if prefill.tls_mode | default(value='') == m %} selected{% endif %}>{{ m }}</option>{% endfor %}
+      {% set chosen = prefill.tls_mode | default(value='require') %}
+      {% for m in tls_modes %}<option value="{{ m }}"{% if chosen == m %} selected{% endif %}>{{ m }}</option>{% endfor %}
     </select>
   </label>
   {% if backend == "postgres" %}

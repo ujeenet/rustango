@@ -11,6 +11,7 @@ use crate::sql::connect_diagnosis::{redact, SEALED_SCHEME};
 use crate::sql::FetcherPool as _;
 use crate::tenancy::error::TenancyError;
 use crate::core::SqlValue;
+use crate::tenancy::db_server::{self, Resealed};
 use crate::tenancy::org_edit::apply_values_if;
 use crate::tenancy::pools::TenantPools;
 use crate::tenancy::{Org, SecretsResolver as _};
@@ -89,6 +90,29 @@ where
             }
         }
     }
+    // Saved server admin passwords: always sealed, so each one is re-sealed.
+    for server in db_server::list(&registry).await? {
+        if !server.has_password() {
+            continue;
+        }
+        todo += 1;
+        let name = &server.name;
+        match db_server::reseal_password(&registry, &server, apply).await {
+            Resealed::Would => writeln!(w, "  server {name}: would re-seal")?,
+            Resealed::Done => {
+                done += 1;
+                writeln!(w, "  server {name}: re-sealed")?;
+            }
+            Resealed::Skipped => {
+                skipped += 1;
+                writeln!(w, "  server {name}: skipped, changed meanwhile")?;
+            }
+            Resealed::Failed(e) => {
+                failed += 1;
+                writeln!(w, "  server {name}: failed: {e}")?;
+            }
+        }
+    }
     if apply {
         writeln!(
             w,
@@ -99,7 +123,7 @@ where
     }
     if failed > 0 {
         return Err(TenancyError::Validation(format!(
-            "{failed} tenant URL(s) could not be resealed"
+            "{failed} secret(s) could not be resealed"
         )));
     }
     Ok(())

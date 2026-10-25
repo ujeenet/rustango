@@ -23,7 +23,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const ADD: Spec<'static> = Spec {
     verb: "add-db-server",
     usage: "add-db-server <name> [--backend <b>] [--host <h>] [--port <n>] [--user <u>] \
-            [--tls <mode>] [--maintenance-db <db>] [--sqlite-dir <dir>] \
+            [--tls <mode>, default require] [--maintenance-db <db>] [--sqlite-dir <dir>] \
             [--password-env <VAR> | --no-password] [--inactive]",
     switches: &["--no-password", "--inactive"],
     valued: &[
@@ -108,6 +108,23 @@ fn password_from_prompt() -> Result<Option<LoginPassword>, TenancyError> {
         .map_err(|_| TenancyError::Validation("that password is not usable".into()))
 }
 
+/// The server name, or the answer to a prompt on a terminal (the menu
+/// runs these verbs without positionals).
+fn name_arg(p: &Parsed, usage: &str) -> Result<String, TenancyError> {
+    match p.positional(0) {
+        Some(n) => Ok(n.clone()),
+        None => crate::manage_interactive::ask("Server name: ")
+            .map_err(TenancyError::Io)?
+            .ok_or_else(|| TenancyError::Validation(format!("usage: {usage}"))),
+    }
+}
+
+/// A blank prompt answer keeps the saved password; only
+/// `--clear-password` removes it.
+fn prompted_change(answer: Option<LoginPassword>) -> PasswordChange {
+    answer.map_or(PasswordChange::Keep, PasswordChange::Set)
+}
+
 fn apply_common(spec: &mut DbServerSpec, p: &Parsed) -> Result<(), TenancyError> {
     if let Some(v) = p.value("--host")? {
         spec.host = Some(v.to_owned());
@@ -146,7 +163,7 @@ where
         None => BackendKind::parse(registry.dialect().name()).unwrap_or_default(),
     };
     let mut spec = DbServerSpec {
-        name: p.required(0, ADD.usage)?,
+        name: name_arg(&p, ADD.usage)?,
         backend,
         active: !p.has("--inactive"),
         ..DbServerSpec::default()
@@ -178,7 +195,7 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     let p = parse(args, &EDIT)?;
-    let name = p.required(0, EDIT.usage)?;
+    let name = name_arg(&p, EDIT.usage)?;
     let registry = pools.registry_pool();
     let row = db_server::get(&registry, &name).await?;
     let mut spec = row.spec()?;
@@ -199,13 +216,14 @@ where
     let password = if let Some(var) = p.value("--password-env")? {
         PasswordChange::Set(password_from_env(var)?)
     } else if p.has("--prompt-password") {
-        password_from_prompt()?.map_or(PasswordChange::Clear, PasswordChange::Set)
+        prompted_change(password_from_prompt()?)
     } else if p.has("--clear-password") {
         PasswordChange::Clear
     } else {
         PasswordChange::Keep
     };
-    let (_, changed) = db_server::update(&registry, &name, &spec, password).await?;
+    let seen = row.updated_at.get().copied();
+    let (_, changed) = db_server::update(&registry, &name, &spec, password, seen).await?;
     if changed.is_empty() {
         writeln!(w, "`{name}`: nothing changed")?;
     } else {
@@ -264,11 +282,14 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     let p = parse(args, &name_spec("test-db-server"))?;
-    let name = p.required(0, "test-db-server <name>")?;
+    let name = name_arg(&p, "test-db-server <name>")?;
     let row = db_server::get(&pools.registry_pool(), &name).await?;
     let report = row.probe(PROBE_TIMEOUT).await?;
     let yes = |b: bool| if b { "yes" } else { "no" };
     writeln!(w, "{name} ({})", report.backend)?;
+    if let Some(warning) = row.tls_warning() {
+        writeln!(w, "  warning:          {warning}")?;
+    }
     writeln!(w, "  login:            {}", yes(report.can_login))?;
     if let Some(e) = &report.login_error {
         writeln!(w, "  login error:      {e}")?;
@@ -300,8 +321,20 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     let p = parse(args, &name_spec("remove-db-server"))?;
-    let name = p.required(0, "remove-db-server <name>")?;
+    let name = name_arg(&p, "remove-db-server <name>")?;
     db_server::remove(&pools.registry_pool(), &name, pools.secrets()).await?;
     writeln!(w, "removed database server `{name}`")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_blank_prompt_keeps_the_password() {
+        assert!(matches!(prompted_change(None), PasswordChange::Keep));
+        let pw = LoginPassword::new("x").unwrap();
+        assert!(matches!(prompted_change(Some(pw)), PasswordChange::Set(_)));
+    }
 }

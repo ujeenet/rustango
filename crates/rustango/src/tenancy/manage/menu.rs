@@ -185,6 +185,72 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
+        title: "DATABASE SERVERS",
+        actions: &[
+            Action {
+                verb: "list-db-servers",
+                about: "saved database servers, without secrets",
+                asks: &[],
+            },
+            Action {
+                verb: "add-db-server",
+                about: "save a server's admin login (password asked hidden)",
+                asks: &[
+                    Ask::Value {
+                        flag: "--host",
+                        label: "host (blank on SQLite)",
+                        default: None,
+                    },
+                    Ask::Value {
+                        flag: "--port",
+                        label: "port (blank for the default)",
+                        default: None,
+                    },
+                    Ask::Value {
+                        flag: "--user",
+                        label: "admin user (blank on SQLite)",
+                        default: None,
+                    },
+                    Ask::Value {
+                        flag: "--sqlite-dir",
+                        label: "SQLite directory (blank on a server)",
+                        default: None,
+                    },
+                ],
+            },
+            Action {
+                verb: "test-db-server",
+                about: "log in and report the admin login's rights",
+                asks: &[],
+            },
+            Action {
+                verb: "edit-db-server",
+                about: "change a saved server",
+                asks: &[
+                    Ask::Value {
+                        flag: "--host",
+                        label: "new host (blank keeps it)",
+                        default: None,
+                    },
+                    Ask::Value {
+                        flag: "--port",
+                        label: "new port (blank keeps it)",
+                        default: None,
+                    },
+                    Ask::Toggle {
+                        flag: "--prompt-password",
+                        question: "change the password?",
+                    },
+                ],
+            },
+            Action {
+                verb: "remove-db-server",
+                about: "delete a saved server no tenant uses",
+                asks: &[],
+            },
+        ],
+    },
+    Group {
         title: "OPERATORS AND USERS",
         actions: &[
             Action {
@@ -472,6 +538,14 @@ fn build_argv<R: LineSource + ?Sized, W: Write>(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn the_db_server_verbs_are_offered() {
+        let verbs: Vec<&str> = flatten().iter().map(|a| a.verb).collect();
+        for v in ["add-db-server", "list-db-servers", "test-db-server", "edit-db-server", "remove-db-server"] {
+            assert!(verbs.contains(&v), "{v}");
+        }
+    }
 
     /// Every menu entry must be a verb the dispatcher handles.
     ///

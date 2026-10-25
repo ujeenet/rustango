@@ -576,7 +576,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(w, "DATABASE SERVERS:")?;
     writeln!(
         w,
-        "  add-db-server <name> --host <h> [--port <n>] --user <u> [--tls <mode>]"
+        "  add-db-server <name> --host <h> [--port <n>] --user <u> [--tls <mode>, default require]"
     )?;
     writeln!(
         w,
