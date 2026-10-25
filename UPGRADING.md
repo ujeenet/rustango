@@ -162,6 +162,12 @@ Create, edit and `migrate-tenant-storage` refuse a URL of another backend or an 
 Run `makemigrations` then `migrate` to create it. A server password is stored only sealed, so saving one needs `RUSTANGO_SECRET_KEY`.
 New servers use TLS `require` unless saved with `disable` or another mode; a server without TLS needs `--tls disable`. `reseal-tenant-secrets` also re-seals server passwords, so the table must exist before it runs.
 
+### New registry table `rustango_tenant_databases`; `ProvisionRequest` reshaped
+
+Run `makemigrations` then `migrate` to create the table. `ProvisionRequest.mode`, `database_url` and `schema_name` are now one `storage: TenantStorage` (use `ProvisionRequest::database`, `::on_server` or `::new`); `ProvisionStep` has new variants.
+`backend` is `Option<BackendKind>` in `ProvisionRequest`, `CreateTenantOpts` and `WebhookConfig`: `None` (the default) takes the registry's, and any other value is refused.
+`create-tenant --database-url` without `--mode` now means database mode; `api::create_tenant` refuses a database URL or server in schema mode. Database mode on a saved server returns `Err` when migrations fail, since the tenant was removed again.
+
 ### `TenantPoolInvalidator::tenant_secrets` has no default
 
 A custom implementor must return its `TenantSecrets`; the old default ignored `require_sealed_secrets()`.

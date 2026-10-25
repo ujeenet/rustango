@@ -926,19 +926,31 @@ already exists`` (`tenancy::provision::provision_tenant`), before anything else 
 ```bash
 cargo run -- create-tenant acme --display-name "ACME Corp"
 cargo run -- create-tenant beta --mode database --database-url postgres://...
+cargo run -- create-tenant gamma --mode database --server main
 ```
 
 | Flag | Description |
 |---|---|
 | `--display-name <name>` | Human-readable label shown in admin sidebars |
-| `--mode schema \| database` | Storage mode (default: schema) |
-| `--database-url <url>` | Tenant-specific DB URL (required for database mode) |
+| `--mode schema \| database` | Storage mode (default: schema, or database when `--database-url` or `--server` is given) |
+| `--database-url <url>` | An existing database for the tenant |
+| `--server <name>` | Create the database on this [saved server](#database-servers) instead |
 | `--host-pattern <pattern>` | Override the host pattern used by `SubdomainResolver` |
 | `--no-migrate` | Skip applying tenant-scoped migrations after provisioning |
-| `--backend postgres \| mysql \| sqlite` | Driver for a database-mode tenant (default: `postgres`). Validated against `--mode` |
+| `--backend postgres \| mysql \| sqlite` | Must be the registry's backend, which is the default |
 | `--schema-name <s>` | Override the generated schema name in schema mode |
 | `--port <n>` | Port the tenant is reachable on, for routing |
 | `--path-prefix <s>` | Path prefix the tenant is reachable under, for routing |
+
+With `--server`, the server's admin rights are checked first, then a
+database named exactly as the slug is created with its own login (random
+password, granted that database only); SQLite creates `<dir>/<slug>.db`.
+An existing database of that name is refused, never reused. The tenant URL
+is stored sealed and the database is recorded in `rustango_tenant_databases`.
+If registering, migrating or activating fails, the new database, login and
+tenant row are dropped again, so the same command can simply be re-run.
+Should that drop fail, the inactive tenant and its record stay: a
+resuming retry (webhook, `create_tenant_if_missing`) migrates it in place.
 
 ### `edit-tenant <slug> [options]`
 

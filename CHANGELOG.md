@@ -4,7 +4,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-**Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set. See UPGRADING.
+**Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set; `ProvisionRequest` takes a `TenantStorage` and an optional backend, which must be the registry's. See UPGRADING.
+
+### Added — create a database-mode tenant on a saved server
+
+The console create form, `create-tenant --server <name>`, `api::create_tenant` (`database_server`) and `ProvisionRequest::on_server` create a database named as the slug plus its own login, then migrate and activate. Each step shows on the run page.
+A later failure drops the new database, login and tenant row; the new registry table `rustango_tenant_databases` records each database rustango created, and a server with a record cannot be removed.
+
+### Fixed — tenant backend and URL schemes
+
+A tenant whose backend differs from the registry's is refused at validation; `pg://`, `sqlite3://` and `mariadb://` URLs, which cannot connect, are refused as unknown schemes. The create form no longer sends a typed URL back.
 
 ### Added — sealed tenant database URLs
 

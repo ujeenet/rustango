@@ -137,6 +137,22 @@ Provisioning a tenant is several steps against a database that may be slow or un
 
 Tenants created from the CLI are recorded too, tagged `requested_by = cli`, so the history covers both surfaces.
 
+### Creating a tenant
+
+**Organizations → New tenant**. In database mode, pick one:
+
+- **Create a new database on a saved server**: choose the server. The
+  database is named exactly as the slug and gets a login of its own with a
+  random password, granted that database only. The run shows
+  `create_database`, `create_login` and `grant`. An existing database of that
+  name is refused. If a later step fails, the run's `rollback` step drops the
+  new database, login and tenant row, and the form comes back with the reason.
+- **Use an existing database**: a database name on the registry's server, or a
+  full URL. The URL field is masked and never sent back to the page.
+
+**Test connection** checks the chosen server's admin rights, or reaches the
+existing database. The backend is always the registry's.
+
 From the CLI: [`list-runs` / `show-run`](manage.md#inspecting-what-happened).
 
 ---
@@ -161,8 +177,9 @@ TLS defaults to `require` for a new server. An edit made from a page that
 someone else changed in the meantime is refused; reload and edit again.
 
 Delete is refused while a database-mode tenant's URL points at the server's
-host and port (SQLite: a file in its directory), or cannot be resolved, and
-on a console built without tenant pools.
+host and port (SQLite: a file in its directory), or cannot be resolved, while
+a database rustango created there is still recorded, and on a console built
+without tenant pools.
 
 From the CLI: [`add-db-server` and friends](manage.md#database-servers).
 
