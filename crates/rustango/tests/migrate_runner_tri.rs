@@ -342,8 +342,8 @@ async fn rollback_after_rename_restores_check_and_partial_index(pool: &Pool) {
     let ledger = "mr_rn_ledger";
     let dir = fresh(pool, &[t], ledger).await;
     let name = pool.dialect().name();
-    // MySQL refuses to rename a column a CHECK reads (MySQL error 3959).
-    let check = name != "mysql";
+    // MySQL refuses to rename a column a CHECK reads (3959): the drop goes first.
+    let check = true;
     let mut before = json!({
         "tables": [table(t, vec![id(), col("n", true)])],
         "indexes": [{"name": "mr_rn_pos_idx", "table": t, "columns": ["n"],
@@ -552,6 +552,72 @@ async fn unapplying_one_branch_keeps_the_others_column(pool: &Pool) {
             .is_err(),
         "`b` gone on {name}"
     );
+    for d in [t, ledger] {
+        drop_table(pool, d).await;
+    }
+}
+
+/// One branch adds a column, the other drops one. SQLite rebuilt the table
+/// for the drop from its own branch's snapshot, which lacks the first column.
+async fn applying_a_branch_keeps_the_others_column(pool: &Pool) {
+    let t = "mr_bra_item";
+    let ledger = "mr_bra_ledger";
+    let dir = fresh(pool, &[t], ledger).await;
+    let initial = make_migrations_from(
+        dir.path(),
+        &snap(vec![table(t, vec![id(), col("x", true)])]),
+        None,
+    )
+    .expect("makemigrations")
+    .expect("a migration");
+    let step = |name: &str, fields: Vec<Value>, change: SchemaChange| Migration {
+        name: name.into(),
+        prev: Some(initial.name.clone()),
+        snapshot: snap(vec![table(t, fields)]),
+        forward: vec![Operation::Schema(change)],
+        ..initial.clone()
+    };
+    write(
+        dir.path(),
+        &step(
+            "0002_a",
+            vec![id(), col("x", true), col("a", true)],
+            SchemaChange::AddColumn {
+                table: t.into(),
+                column: "a".into(),
+            },
+        ),
+    );
+    write(
+        dir.path(),
+        &step(
+            "0002_b",
+            vec![id()],
+            SchemaChange::DropColumn {
+                table: t.into(),
+                column: "x".into(),
+            },
+        ),
+    );
+    write(
+        dir.path(),
+        &Migration {
+            name: "0003_merge".into(),
+            prev: Some("0002_b".into()),
+            merges: vec!["0002_a".into()],
+            snapshot: snap(vec![table(t, vec![id(), col("a", true)])]),
+            forward: Vec::new(),
+            ..initial.clone()
+        },
+    );
+    let name = pool.dialect().name();
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("both branches on {name}: {e}"));
+    let q = pool.dialect().quote_ident(t);
+    exec(pool, &format!("INSERT INTO {q} (a) VALUES (1)"))
+        .await
+        .unwrap_or_else(|e| panic!("`a` kept on {name}: {e}"));
     for d in [t, ledger] {
         drop_table(pool, d).await;
     }
@@ -875,6 +941,7 @@ tri_dialect_test!(
         rollback_after_rename_restores_check_and_partial_index,
         rollback_of_a_renamed_dropped_table_restores_its_check_once,
         unapplying_one_branch_keeps_the_others_column,
+        applying_a_branch_keeps_the_others_column,
         refused_downgrade_runs_nothing,
         refused_loose_downgrade_runs_nothing,
         one_connection_pool_migrates,

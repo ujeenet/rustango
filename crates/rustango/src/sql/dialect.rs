@@ -198,6 +198,11 @@ pub trait Dialect: Send + Sync {
         false
     }
 
+    /// `true` when renaming a column a CHECK reads is refused (MySQL 3959).
+    fn check_blocks_column_rename(&self) -> bool {
+        false
+    }
+
     /// How many binds the backend takes in one statement. A multi-row
     /// `INSERT` reaches this at `rows × columns`.
     ///
