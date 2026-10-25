@@ -212,6 +212,9 @@ where
         "test-tenant-connection" => tenants::test_tenant_connection(&args[1..], writer).await,
         "drop-tenant" => tenants::drop_tenant(pools, &args[1..], writer).await,
         "purge-tenant" => tenants::purge_tenant(pools, &args[1..], writer).await,
+        "rotate-tenant-password" => {
+            tenants::rotate_tenant_password(pools, &args[1..], writer).await
+        }
         "list-tenants" => tenants::list_tenants(pools, writer).await,
         // #1344 — routing and display config were console-only to change.
         "edit-tenant" => edit::edit_tenant(pools, &args[1..], writer).await,
@@ -497,6 +500,11 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "                       HARD-delete: drops schema (or DB with --purge-database)."
     )?;
+    writeln!(w, "  rotate-tenant-password <slug>")?;
+    writeln!(
+        w,
+        "                       New password for a login made on a saved server."
+    )?;
     writeln!(
         w,
         "  list-tenants         Print every Org row in the registry."
@@ -530,7 +538,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(w, "INSPECTION (read-only):")?;
     writeln!(
         w,
-        "  list-runs [--limit N] [--kind provision|migrate] [--state <s>]"
+        "  list-runs [--limit N] [--kind provision|migrate|purge|rotate_password] [--state <s>]"
     )?;
     writeln!(
         w,

@@ -39,6 +39,13 @@
     <button type="submit" class="btn btn-secondary">Run migrations</button>
   </form>
   {% endif %}
+  {% if rotatable %}
+  <form method="post" action="{{ console_prefix }}/orgs/{{ slug }}/rotate-password" class="inline-form"
+        data-confirm="Give {{ slug }}'s database login a new password? Other pods reconnect within seconds.">
+    {{ csrf_input | default(value='') | safe }}
+    <button type="submit" class="btn btn-secondary" id="rotate-password">Rotate database password</button>
+  </form>
+  {% endif %}
 </div>
 
 <form method="post" action="{{ console_prefix }}/orgs/{{ slug }}/edit" class="edit-form">

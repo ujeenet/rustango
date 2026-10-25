@@ -520,13 +520,18 @@ where
         )));
     }
 
-    let report = super::super::decommission::decommission(
+    let progress = OperationProgress::new(w);
+    let purged = super::super::decommission::purge_recorded(
         pools,
         &slug,
-        super::super::decommission::Action::Purge { purge_database },
+        purge_database,
+        Some(&progress),
+        Some("cli"),
     )
-    .await
-    .map_err(|e| TenancyError::Validation(format!("purge-tenant: {e}")))?;
+    .await;
+    let w = progress.into_inner();
+    let (_run, report) =
+        purged.map_err(|e| TenancyError::Validation(format!("purge-tenant: {e}")))?;
 
     if let Some(schema) = &report.schema_dropped {
         writeln!(w, "purged tenant `{slug}` (dropped schema `{schema}`)")?;
@@ -558,6 +563,74 @@ where
         Err(e) => writeln!(w, "  brand files left in place: {e}")?,
     }
     Ok(())
+}
+
+// ---------- rotate-tenant-password ----------
+
+pub(super) async fn rotate_tenant_password<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    const HELP: &str = "rotate-tenant-password <slug>\n  \
+        A new password for the login rustango made for the tenant on a saved\n  \
+        server: altered on the server, then sealed and stored, then pools reopen.";
+    reject_leading_flag(args, "rotate-tenant-password", "slug", HELP)?;
+    let slug = match args {
+        [slug] => slug.clone(),
+        _ => return Err(TenancyError::Validation(HELP.to_owned())),
+    };
+    let progress = OperationProgress::new(w);
+    let rotated = crate::tenancy::server_tenant::rotate_password_recorded(
+        pools,
+        &slug,
+        Some(&progress),
+        Some("cli"),
+    )
+    .await;
+    let w = progress.into_inner();
+    rotated.map_err(|e| TenancyError::Validation(format!("rotate-tenant-password: {e}")))?;
+    writeln!(w, "rotated the database password of tenant `{slug}`")?;
+    Ok(())
+}
+
+/// Prints each step of a purge or rotation as it ends, as the console's
+/// run page shows it. Never prints a password: events carry none.
+struct OperationProgress<'w, W> {
+    out: std::sync::Mutex<&'w mut W>,
+}
+
+impl<'w, W: Write + Send> OperationProgress<'w, W> {
+    fn new(out: &'w mut W) -> Self {
+        Self {
+            out: std::sync::Mutex::new(out),
+        }
+    }
+
+    fn into_inner(self) -> &'w mut W {
+        self.out.into_inner().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl<W: Write + Send> crate::tenancy::operation::OperationObserver for OperationProgress<'_, W> {
+    fn on_event(&self, event: crate::tenancy::operation::OperationEvent) {
+        use provision::StepStatus;
+        let Ok(mut out) = self.out.lock() else {
+            return;
+        };
+        let step = event.step.as_str();
+        // Progress is cosmetic; a broken pipe must not fail the verb.
+        let _ = match &event.status {
+            StepStatus::Started => Ok(()),
+            StepStatus::Ok => writeln!(out, "  {step} ... ok"),
+            StepStatus::Skipped(why) => writeln!(out, "  {step} ... skipped ({why})"),
+            StepStatus::Failed(why) => writeln!(out, "  {step} ... failed: {why}"),
+        };
+        let _ = out.flush();
+    }
 }
 
 // ---------- list-tenants ----------

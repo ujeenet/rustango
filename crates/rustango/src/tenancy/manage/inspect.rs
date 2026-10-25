@@ -22,7 +22,16 @@ use super::args::next_value;
 const DEFAULT_LIMIT: i64 = 20;
 
 /// What `provision_store` writes into `kind` and `state`.
-const KINDS: &[&str] = &["provision", "migrate"];
+const KINDS: &[&str] = &{
+    use crate::tenancy::provision_store::RunKind;
+    let mut out = [""; RunKind::ALL.len()];
+    let mut i = 0;
+    while i < out.len() {
+        out[i] = RunKind::ALL[i].as_str();
+        i += 1;
+    }
+    out
+};
 const STATES: &[&str] = &["pending", "running", "succeeded", "failed"];
 
 /// Accept only a value the column can actually hold.

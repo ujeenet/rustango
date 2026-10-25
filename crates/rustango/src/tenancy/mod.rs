@@ -88,6 +88,8 @@ pub mod middleware;
 pub mod migrate;
 /// Tenant migrations against a recorded, streamable run.
 pub mod migrate_run;
+/// Purges and password rotations, reported step by step and recorded.
+pub mod operation;
 pub mod operator_console;
 pub mod operators;
 mod org;
@@ -132,6 +134,9 @@ pub mod sweep;
 pub mod server;
 /// Creating and dropping a database-mode tenant's database and login.
 pub mod server_admin;
+/// A tenant whose database rustango made on a saved server: rotating its
+/// login's password.
+pub mod server_tenant;
 pub mod tenant_console;
 
 #[cfg(feature = "mcp")]

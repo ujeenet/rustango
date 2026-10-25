@@ -341,6 +341,12 @@ const GEN_CHECK_EVERY_DEFAULT: std::time::Duration = std::time::Duration::from_s
 /// on the path that must not acquire new ways to fail.
 const GEN_CHECK_ENV: &str = "RUSTANGO_HOST_GEN_CHECK_SECS";
 
+/// How long another pod may keep serving an `Org` row this pod changed:
+/// two fingerprint polls, capped by the cache TTL that also bounds it.
+pub(crate) fn org_change_settles_within() -> std::time::Duration {
+    gen_check_every().map_or(CACHE_TTL, |every| (every * 2).min(CACHE_TTL))
+}
+
 /// Resolved once — reading and parsing an env var on every resolve would
 /// cost more than the check it is gating.
 fn gen_check_every() -> Option<std::time::Duration> {

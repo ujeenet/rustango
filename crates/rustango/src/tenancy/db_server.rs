@@ -468,6 +468,40 @@ impl DbServer {
         Ok(out)
     }
 
+    /// `Ok` when tenant `url` names exactly the database and login in
+    /// `record` on this server; else what differs. Never echoes the URL.
+    pub(crate) fn names_record(&self, url: &str, record: &TenantDatabase) -> Result<(), String> {
+        let backend = self.backend_kind().map_err(|e| e.to_string())?;
+        self.names_database(backend, url, &record.database_name)?;
+        let (_, user) = url_database_and_user(backend, url);
+        if backend != BackendKind::Sqlite && user.as_deref() != record.login_name.as_deref() {
+            return Err(format!(
+                "it signs in as another login than `{}`",
+                record.login_name.as_deref().unwrap_or_default()
+            ));
+        }
+        Ok(())
+    }
+
+    /// `Ok` when `url` names database `database` on this server.
+    pub(crate) fn names_database(
+        &self,
+        backend: BackendKind,
+        url: &str,
+        database: &str,
+    ) -> Result<(), String> {
+        match self.holds(backend, url) {
+            Uses::Yes => {}
+            Uses::No => return Err(format!("it points at another server than `{}`", self.name)),
+            Uses::Unknown(why) => return Err(why.to_owned()),
+        }
+        let (named, _) = url_database_and_user(backend, url);
+        if named.as_deref() != Some(database) {
+            return Err(format!("it names another database than `{database}`"));
+        }
+        Ok(())
+    }
+
     /// Whether tenant `url` lives on this server.
     fn holds(&self, backend: BackendKind, url: &str) -> Uses {
         let same_host = |host: &str, port: u16| {
@@ -526,6 +560,67 @@ enum Uses {
     No,
     /// Cannot tell, so assume it is.
     Unknown(&'static str),
+}
+
+/// The database and user a tenant URL names, as the backend's driver
+/// reads it. A SQLite database is the file name without `.db`.
+fn url_database_and_user(backend: BackendKind, url: &str) -> (Option<String>, Option<String>) {
+    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+    use std::str::FromStr as _;
+    match backend {
+        #[cfg(feature = "postgres")]
+        BackendKind::Postgres => crate::sql::sqlx::postgres::PgConnectOptions::from_str(url)
+            .map_or((None, None), |o| {
+                (o.get_database().map(str::to_owned), Some(o.get_username().to_owned()))
+            }),
+        #[cfg(feature = "mysql")]
+        BackendKind::MySql => crate::sql::sqlx::mysql::MySqlConnectOptions::from_str(url)
+            .map_or((None, None), |o| {
+                (o.get_database().map(str::to_owned), Some(o.get_username().to_owned()))
+            }),
+        #[cfg(feature = "sqlite")]
+        BackendKind::Sqlite => {
+            let db = crate::sql::sqlx::sqlite::SqliteConnectOptions::from_str(url)
+                .ok()
+                .and_then(|o| {
+                    o.get_filename()
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .and_then(|f| f.strip_suffix(".db"))
+                        .map(str::to_owned)
+                });
+            (db, None)
+        }
+        #[allow(unreachable_patterns)]
+        _ => {
+            let _ = url;
+            (None, None)
+        }
+    }
+}
+
+impl TenantDatabase {
+    /// The record of the database rustango made for `org`: by tenant id,
+    /// else by slug while the record was never linked.
+    ///
+    /// # Errors
+    /// A registry read failure.
+    pub async fn of_org(registry: &Pool, org: &Org) -> Result<Option<Self>, crate::sql::ExecError> {
+        if let Some(id) = org.id.get().copied() {
+            let linked = Self::objects()
+                .where_(Self::org_id.eq(Some(id)))
+                .first(registry)
+                .await?;
+            if linked.is_some() {
+                return Ok(linked);
+            }
+        }
+        Self::objects()
+            .where_(Self::org_slug.eq(org.slug.clone()))
+            .where_(Self::org_id.is_null())
+            .first(registry)
+            .await
+    }
 }
 
 /// `[::1]` → `::1`, `DB.Example.` → `db.example`.
