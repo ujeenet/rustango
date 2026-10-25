@@ -199,15 +199,15 @@ A `register_action` handler writes on its own connection, so its audit rows are 
 
 Call `.acting_superuser(user.is_superuser)` so a non-superuser cannot set the table's registered superuser-only fields (the tenant `rustango_users` locks `is_superuser` and the password); without it the form locks nothing.
 
+### Generated `main.rs` prints errors with Display
+
+New projects wrap the `Cli` in `async fn run()` and print its error with `{e}`. Existing projects can copy that shape to stop `Validation("…")` output.
+
 ## 0.61.1
 
 ### Scaffold taglines lose their brackets
 
 `cargo rustango new` now writes `tagline = "dev"` / `"staging"`, not `"(dev)"` / `"(staging)"`. Existing projects keep theirs; edit the line to match.
-
-### Generated `main.rs` prints errors with Display
-
-New projects wrap the `Cli` in `async fn run()` and print its error with `{e}`. Existing projects can copy that shape to stop `Validation("…")` output.
 
 ### `BrandSettings` has a new `logo_path` field
 

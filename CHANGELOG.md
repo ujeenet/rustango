@@ -76,6 +76,11 @@ Its link ignores the admin prefix and view permissions. Build your own from `Con
 
 Admin create, edit, delete and bulk writes open a transaction that carries its own pool, so their audit source can no longer be judged against another pool. The S3 media test suites now need `storage-s3`, and the MySQL media suite builds under `-D warnings`.
 
+### Fixed — MariaDB purge and generated `main.rs`
+
+- MariaDB: purging a tenant made on a saved server no longer fails reading `@@server_uuid`, which MariaDB lacks.
+- A generated `main.rs` prints CLI errors with Display, not as `Validation("…")`.
+
 ## [0.61.1] — 2026-10-25
 
 ### Fixed — tenant logos 404'd under the default routes
@@ -88,11 +93,10 @@ A local logo file (env `RUSTANGO_OPERATOR_LOGO_PATH`), read once at boot with th
 
 ### Changed — scaffold tier taglines are `dev` / `staging`
 
-New projects get plain `dev` / `staging` taglines (they render as a badge), and the commented `[brand]` example in `default.toml` shows `logo_url` and `logo_path`. A generated `main.rs` prints CLI errors with Display, not as `Validation("…")`.
+New projects get plain `dev` / `staging` taglines (they render as a badge), and the commented `[brand]` example in `default.toml` shows `logo_url` and `logo_path`.
 
 ### Fixed — ORM and MySQL
 
-- MariaDB: purging a tenant made on a saved server no longer fails reading `@@server_uuid`, which MariaDB lacks.
 - MariaDB: JSON writes and text JSON paths no longer send `CAST(… AS JSON)`, which it rejects.
 - MySQL: an `update()` / `delete()` filtered by `EXISTS` or `where_has` over its own table no longer fails with error 1093; one nested deeper still does, rather than see its own writes.
 - MySQL: an auto M2M junction over an `i32` / `i16` pk keeps the pk's width, so its foreign keys are accepted.
