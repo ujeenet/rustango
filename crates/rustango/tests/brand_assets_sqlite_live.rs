@@ -11,6 +11,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::admin::TenantAdminBuilder;
+use rustango::tenancy::operator_console::{router_full, SessionSecret};
 use rustango::tenancy::{branding, HeaderResolver, Org, TenantPools};
 use tower::ServiceExt as _;
 
@@ -26,12 +27,24 @@ const PNG: &[u8] = &[
     0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 ];
 
+const OP_ENV: &[&str] = &[
+    "RUSTANGO_OPERATOR_LOGO_URL",
+    "RUSTANGO_OPERATOR_LOGO_PATH",
+    branding::MAX_BRAND_BYTES_ENV,
+];
+
 fn unique(prefix: &str) -> String {
     format!(
         "{prefix}{}x{}",
         std::process::id(),
         UNIQ.fetch_add(1, Ordering::SeqCst)
     )
+}
+
+fn clear_op_env() {
+    for v in OP_ENV {
+        std::env::remove_var(v);
+    }
 }
 
 async fn send(app: &axum::Router, host: &str, uri: &str) -> axum::response::Response {
@@ -189,4 +202,103 @@ async fn tenant_admin_pages_use_the_tenant_favicon() {
     assert!(favicon.contains("favicon"), "tenant favicon linked: {favicon}");
     assert_png(&app, &host, &favicon).await;
     std::env::remove_var(branding::BRAND_STORAGE_ROOT_ENV);
+}
+
+const PREFIX: &str = "/ops";
+
+/// The console, nested under [`PREFIX`], built after the env is set.
+async fn console() -> (axum::Router, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+    let pool = sqlx::SqlitePool::connect(&url).await.expect("connect");
+    let storage: rustango::storage::BoxedStorage = Arc::new(rustango::storage::LocalStorage::new(
+        tmp.path().join("brand"),
+    ));
+    let console = router_full(
+        pool,
+        None,
+        None,
+        SessionSecret::from_env_or_random(),
+        storage,
+        None,
+        "/_impersonation_handoff".into(),
+    );
+    (axum::Router::new().nest(PREFIX, console), tmp)
+}
+
+async fn console_logo(app: &axum::Router) -> String {
+    let resp = send(app, "localhost", &format!("{PREFIX}/login")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    attr_after(&text(resp).await, "class=\"brand-logo\"", "src").expect("console logo img")
+}
+
+fn write_file(dir: &std::path::Path, name: &str, bytes: &[u8]) -> String {
+    let p = dir.join(name);
+    std::fs::write(&p, bytes).unwrap();
+    p.display().to_string()
+}
+
+/// `logo_path` is read at boot and served by the console with a
+/// versioned, long-cached URL under its mount prefix.
+#[tokio::test]
+async fn console_serves_a_local_logo_file() {
+    let _g = SUITE.lock().await;
+    clear_op_env();
+    let files = tempfile::tempdir().unwrap();
+    std::env::set_var(
+        "RUSTANGO_OPERATOR_LOGO_PATH",
+        write_file(files.path(), "acme.png", PNG),
+    );
+    let (app, _tmp) = console().await;
+    clear_op_env();
+
+    let src = console_logo(&app).await;
+    assert!(
+        src.starts_with(&format!("{PREFIX}/__static__/brand-logo.png?v=")),
+        "local logo src: {src}"
+    );
+    let resp = send(&app, "localhost", &src).await;
+    assert_eq!(resp.status(), StatusCode::OK, "GET {src}");
+    assert_eq!(resp.headers()[header::CONTENT_TYPE], "image/png");
+    let cache = resp.headers()[header::CACHE_CONTROL].to_str().unwrap();
+    assert!(cache.contains("immutable"), "long cache: {cache}");
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    assert_eq!(&bytes[..], PNG);
+}
+
+/// A file the tenant upload would refuse falls back to the bundled logo.
+#[tokio::test]
+async fn console_refuses_a_bad_logo_file() {
+    let _g = SUITE.lock().await;
+    let files = tempfile::tempdir().unwrap();
+    let svg = write_file(files.path(), "acme.svg", b"<svg onload=alert(1)/>");
+    let big = write_file(files.path(), "big.png", &[0_u8; 64]);
+    let missing = files.path().join("nope.png").display().to_string();
+    for (path, max) in [(svg, None), (big, Some("16")), (missing, None)] {
+        clear_op_env();
+        std::env::set_var("RUSTANGO_OPERATOR_LOGO_PATH", &path);
+        if let Some(m) = max {
+            std::env::set_var(branding::MAX_BRAND_BYTES_ENV, m);
+        }
+        let (app, _tmp) = console().await;
+        clear_op_env();
+        let src = console_logo(&app).await;
+        assert_eq!(src, format!("{PREFIX}/__static__/rustango.png"), "{path}");
+    }
+}
+
+/// Within one source `logo_url` beats `logo_path`.
+#[tokio::test]
+async fn console_logo_url_beats_logo_path() {
+    let _g = SUITE.lock().await;
+    clear_op_env();
+    let files = tempfile::tempdir().unwrap();
+    std::env::set_var(
+        "RUSTANGO_OPERATOR_LOGO_PATH",
+        write_file(files.path(), "acme.png", PNG),
+    );
+    std::env::set_var("RUSTANGO_OPERATOR_LOGO_URL", "https://cdn.example.com/l.png");
+    let (app, _tmp) = console().await;
+    clear_op_env();
+    assert_eq!(console_logo(&app).await, "https://cdn.example.com/l.png");
 }

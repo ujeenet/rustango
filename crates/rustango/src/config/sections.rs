@@ -718,8 +718,12 @@ pub struct BrandSettings {
     /// Tagline under the brand name.
     pub tagline: Option<String>,
     /// Logo URL for the operator console. Defaults to the built-in
-    /// asset.
+    /// asset. Beats `logo_path` from the same source.
     pub logo_url: Option<String>,
+    /// Local logo file for the operator console, relative to the
+    /// working directory. Read once at boot with the tenant upload
+    /// checks (PNG, JPEG, WebP or ICO; size cap) and served by the console.
+    pub logo_path: Option<std::path::PathBuf>,
     /// Accent color in hex, such as `"#2c6fb0"`. The theme uses it
     /// to tint primary buttons and links.
     pub primary_color: Option<String>,

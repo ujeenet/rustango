@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 Tenant pages link uploaded logos and favicons under `RouteConfig::brand_url` (`/_brand` by default), the prefix tenant hosts serve, via the new `RouteConfig::brand_asset_url`. Tenant admin pages now use the tenant favicon too.
 
+### Added — `[brand] logo_path` for the operator console
+
+A local logo file (env `RUSTANGO_OPERATOR_LOGO_PATH`), read once at boot with the tenant upload checks and served by the console under a content-hashed, long-cached URL. `logo_url` still wins within the same source.
+
 ### Fixed — ORM and MySQL
 
 - MariaDB: JSON writes and text JSON paths no longer send `CAST(… AS JSON)`, which it rejects.

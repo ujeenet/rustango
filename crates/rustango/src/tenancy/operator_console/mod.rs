@@ -155,6 +155,105 @@ struct ConsoleState {
 /// The bundled logo, served by the console itself.
 const DEFAULT_LOGO_URL: &str = "/__static__/rustango.png";
 
+/// One config source's logo choice: `logo_url` beats `logo_path`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LogoSource {
+    Url(String),
+    Path(std::path::PathBuf),
+}
+
+impl LogoSource {
+    /// Empty values count as unset.
+    fn pick(url: Option<&str>, path: Option<&std::path::Path>) -> Option<Self> {
+        let url = url.filter(|u| !u.is_empty()).map(|u| Self::Url(u.to_owned()));
+        url.or_else(|| {
+            path.filter(|p| !p.as_os_str().is_empty())
+                .map(|p| Self::Path(p.to_owned()))
+        })
+    }
+}
+
+/// The console logo as rendered.
+#[derive(Debug, Clone)]
+enum OpLogo {
+    Builtin,
+    Url(String),
+    File(Arc<LocalLogo>),
+}
+
+impl OpLogo {
+    /// Reads a `logo_path` file now; a bad one warns and keeps the bundled logo.
+    fn load(source: Option<LogoSource>) -> Self {
+        match source {
+            None => Self::Builtin,
+            Some(LogoSource::Url(u)) => Self::Url(u),
+            Some(LogoSource::Path(p)) => match LocalLogo::read(&p) {
+                Ok(logo) => Self::File(Arc::new(logo)),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "rustango::tenancy::operator_console",
+                        path = %p.display(),
+                        error = %e,
+                        "brand logo_path not used; the console shows the bundled logo"
+                    );
+                    Self::Builtin
+                }
+            },
+        }
+    }
+}
+
+/// A `logo_path` image, read once at boot with the tenant upload checks.
+#[derive(Debug)]
+struct LocalLogo {
+    bytes: axum::body::Bytes,
+    content_type: &'static str,
+    /// Console route, `/__static__/brand-logo.<ext>`.
+    route: String,
+    /// Content hash: the `?v=` cache buster and the ETag.
+    version: String,
+}
+
+impl LocalLogo {
+    fn read(path: &std::path::Path) -> Result<Self, branding::BrandError> {
+        use sha2::Digest as _;
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let content_type = branding::content_type_for(name)
+            .ok_or_else(|| branding::BrandError::UnsupportedContentType(name.to_owned()))?;
+        let io = |e: std::io::Error| crate::storage::StorageError::Io(e.to_string());
+        let len = std::fs::metadata(path).map_err(io)?.len();
+        branding::check_brand_size(usize::try_from(len).unwrap_or(usize::MAX))?;
+        let bytes = std::fs::read(path).map_err(io)?;
+        branding::check_brand_size(bytes.len())?;
+        let digest = sha2::Sha256::digest(&bytes);
+        let version = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        Ok(Self {
+            bytes: bytes.into(),
+            content_type,
+            route: format!("/__static__/brand-logo.{}", ext.to_ascii_lowercase()),
+            version,
+        })
+    }
+
+    /// The `<img src>`: the route plus the content hash, so a new file
+    /// busts the year-long cache.
+    fn src(&self) -> String {
+        format!("{}?v={}", self.route, self.version)
+    }
+
+    fn response(&self) -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, self.content_type)
+            .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+            .header(header::ETAG, format!("\"{}\"", self.version))
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .body(Body::from(self.bytes.clone()))
+            .expect("response builds")
+    }
+}
+
 /// Operator console branding, resolved once at boot. Per-tenant
 /// branding lives on `Org` instead.
 ///
@@ -162,11 +261,14 @@ const DEFAULT_LOGO_URL: &str = "/__static__/rustango.png";
 /// 1. `RUSTANGO_OPERATOR_*` env vars
 /// 2. `[brand]` in `config/<env>_settings.toml`
 /// 3. Hardcoded defaults
+///
+/// The logo comes from the highest source that sets one; within it
+/// `logo_url` beats `logo_path`.
 #[derive(Debug, Clone)]
 struct OpBrand {
     name: String,
     tagline: Option<String>,
-    logo_url: String,
+    logo: OpLogo,
     primary_color: Option<String>,
     theme_mode: String,
 }
@@ -177,7 +279,7 @@ impl OpBrand {
         Self {
             name: "Rustango".to_owned(),
             tagline: None,
-            logo_url: DEFAULT_LOGO_URL.to_owned(),
+            logo: OpLogo::Builtin,
             primary_color: None,
             theme_mode: "auto".to_owned(),
         }
@@ -188,14 +290,27 @@ impl OpBrand {
     /// A missing config file is skipped without error.
     fn from_env() -> Self {
         let mut out = Self::defaults();
+        #[allow(unused_mut)]
+        let mut toml_logo = None;
         #[cfg(feature = "config")]
         match crate::config::Settings::load_from_env() {
-            Ok(s) => Self::apply_brand_settings(&mut out, &s.brand),
+            Ok(s) => {
+                Self::apply_brand_settings(&mut out, &s.brand);
+                toml_logo = LogoSource::pick(s.brand.logo_url.as_deref(), s.brand.logo_path.as_deref());
+            }
             Err(e) if e.is_missing_config() => {}
             // A broken config should say so, not silently drop the brand (#1948).
             Err(e) => warn_config_error(&e),
         }
         Self::apply_env_overrides(&mut out);
+        let env = |k: &str| std::env::var(k).ok();
+        let env_logo = LogoSource::pick(
+            env("RUSTANGO_OPERATOR_LOGO_URL").as_deref(),
+            env("RUSTANGO_OPERATOR_LOGO_PATH")
+                .map(std::path::PathBuf::from)
+                .as_deref(),
+        );
+        out.logo = OpLogo::load(env_logo.or(toml_logo));
         out
     }
 
@@ -206,9 +321,6 @@ impl OpBrand {
         }
         if let Some(t) = b.tagline.as_deref().filter(|s| !s.is_empty()) {
             out.tagline = Some(t.to_owned());
-        }
-        if let Some(u) = b.logo_url.as_deref().filter(|s| !s.is_empty()) {
-            out.logo_url = u.to_owned();
         }
         if let Some(hex) = b
             .primary_color
@@ -235,11 +347,6 @@ impl OpBrand {
         if let Ok(v) = std::env::var("RUSTANGO_OPERATOR_TAGLINE") {
             if !v.is_empty() {
                 out.tagline = Some(v);
-            }
-        }
-        if let Ok(v) = std::env::var("RUSTANGO_OPERATOR_LOGO_URL") {
-            if !v.is_empty() {
-                out.logo_url = v;
             }
         }
         if let Some(hex) = std::env::var("RUSTANGO_OPERATOR_PRIMARY_COLOR")
@@ -624,12 +731,16 @@ fn router_unlogged(
         .route("/logout", post(logout));
     // Cacheable GET-only assets stay outside the CSRF layers, so no
     // shared cache stores a `Set-Cookie` with them.
-    let assets = Router::new()
+    let mut assets = Router::new()
         .route("/__static__/rustango.png", get(static_rustango_png))
         .route(
             &format!("{}/{{slug}}/{{filename}}", branding::CONSOLE_BRAND_URL),
             get(serve_brand_asset),
         );
+    if let OpLogo::File(logo) = &state.op_brand.logo {
+        let served = logo.clone();
+        assets = assets.route(&logo.route, get(move || async move { served.response() }));
+    }
 
     // Authenticated routes: the middleware injects an `Extension<auth::Operator>`.
     let mut private = Router::new()
@@ -988,10 +1099,10 @@ fn inject_op_brand(ctx: &mut Context, brand: &OpBrand) {
     ctx.insert("brand_name", &brand.name);
     ctx.insert("brand_tagline", &brand.tagline);
     // A configured logo URL is the deployment's own; only ours moves.
-    let logo_url = if brand.logo_url == DEFAULT_LOGO_URL {
-        prefix.url(DEFAULT_LOGO_URL)
-    } else {
-        brand.logo_url.clone()
+    let logo_url = match &brand.logo {
+        OpLogo::Builtin => prefix.url(DEFAULT_LOGO_URL),
+        OpLogo::File(logo) => prefix.url(&logo.src()),
+        OpLogo::Url(u) => u.clone(),
     };
     ctx.insert("brand_logo_url", &logo_url);
     ctx.insert("theme_mode", &brand.theme_mode);
@@ -2772,7 +2883,37 @@ mod opbrand_tests {
         assert_eq!(b.theme_mode, "auto");
         assert!(b.tagline.is_none());
         assert!(b.primary_color.is_none());
-        assert_eq!(b.logo_url, "/__static__/rustango.png");
+        assert!(matches!(b.logo, super::OpLogo::Builtin));
+    }
+
+    /// Within one source `logo_url` wins; empty values count as unset.
+    #[test]
+    fn logo_source_pick_prefers_the_url() {
+        use super::LogoSource;
+        use std::path::Path;
+        let url = LogoSource::Url("https://cdn.example/l.png".into());
+        let file = LogoSource::Path("logo.png".into());
+        let pick = |u, p: Option<&str>| LogoSource::pick(u, p.map(Path::new));
+        assert_eq!(pick(Some("https://cdn.example/l.png"), Some("logo.png")), Some(url));
+        assert_eq!(pick(Some(""), Some("logo.png")), Some(file));
+        assert_eq!(pick(None, Some("")), None);
+    }
+
+    /// The upload's type check applies: SVG is refused, PNG is served
+    /// under a content-hashed URL.
+    #[test]
+    fn local_logo_reads_with_the_upload_checks() {
+        use super::LocalLogo;
+        let dir = tempfile::tempdir().unwrap();
+        let svg = dir.path().join("l.svg");
+        std::fs::write(&svg, b"<svg/>").unwrap();
+        assert!(LocalLogo::read(&svg).is_err());
+        let png = dir.path().join("L.PNG");
+        std::fs::write(&png, b"png-bytes").unwrap();
+        let logo = LocalLogo::read(&png).unwrap();
+        assert_eq!(logo.content_type, "image/png");
+        assert_eq!(logo.route, "/__static__/brand-logo.png");
+        assert!(logo.src().starts_with("/__static__/brand-logo.png?v="));
     }
 
     /// `BrandSettings` overrides the defaults — but the function

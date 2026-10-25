@@ -192,13 +192,7 @@ pub async fn save_brand_asset(
     content_type: Option<&str>,
     storage: &BoxedStorage,
 ) -> Result<String, BrandError> {
-    let max = max_brand_bytes();
-    if bytes.len() > max {
-        return Err(BrandError::TooLarge {
-            actual: bytes.len(),
-            max,
-        });
-    }
+    check_brand_size(bytes.len())?;
     let ct = content_type.unwrap_or("application/octet-stream").trim();
     let ext = ALLOWED_CONTENT_TYPES
         .iter()
@@ -208,6 +202,15 @@ pub async fn save_brand_asset(
     let key = storage_key(slug, &filename)?;
     storage.save(&key, bytes).await?;
     Ok(filename)
+}
+
+/// The [`max_brand_bytes`] cap every brand asset must fit.
+pub(crate) fn check_brand_size(len: usize) -> Result<(), BrandError> {
+    let max = max_brand_bytes();
+    if len > max {
+        return Err(BrandError::TooLarge { actual: len, max });
+    }
+    Ok(())
 }
 
 /// Delete the `kind` files other than `kept` (a [`save_brand_asset`] result).
