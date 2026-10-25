@@ -12,6 +12,22 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Rolling back a migration that renamed a column and then dropped a CHECK, partial index or exclusion constraint recreates it after the rename is undone, so its SQL finds the old name.
 - SQLite: unapplying one branch of a merged history keeps the other branch's columns; the table rebuild used the shared parent's snapshot and refused.
 
+### Fixed — FK cascades write audit rows
+
+Deleting rows whose `on_delete = "cascade"` children (at any depth, self-references included) are audited now writes one `delete` entry per child row removed, in the delete's transaction. Models with no audited model downstream pay nothing.
+
+### Added — related columns in `values_list` / `values_dict` / `only`
+
+A projection may name a column across FK hops, like `values_list(&["title", "author__name"])`: one LEFT JOIN per hop, only the named columns, in the caller's order, keyed by that name.
+
+### Changed — PostgreSQL `IN` lists bind one array
+
+On PostgreSQL `is_in` / `__in` / `Op::In` over a list of one integer, string, bool or uuid type compiles to `= ANY($1)` (`NOT IN` to `<> ALL($1)`), so every list length shares one prepared statement. Lists with NULLs or other types, and MySQL / SQLite, keep `IN (…)`.
+
+### Changed — bulk writes share one batching helper
+
+`bulk_insert`, `bulk_update` and the audited bulk writes size their batches and run them all-or-none through one implementation.
+
 ## [0.61.1] — 2026-10-25
 
 ### Fixed — tenant logos 404'd under the default routes

@@ -146,28 +146,59 @@ fn is_not_null_emitted_for_false() {
     );
 }
 
+fn in_stmt(d: &dyn Dialect, op: Op, list: Vec<SqlValue>) -> rustango::sql::CompiledStatement {
+    d.compile_select(
+        &User::objects()
+            .filter_op("id", op, SqlValue::List(list))
+            .compile()
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+fn i64s(ns: &[i64]) -> Vec<SqlValue> {
+    ns.iter().copied().map(SqlValue::I64).collect()
+}
+
 #[test]
-fn in_list_expands_to_one_placeholder_per_element() {
-    let stmt = pg()
-        .compile_select(
-            &User::objects()
-                .filter_op(
-                    "id",
-                    Op::In,
-                    SqlValue::List(vec![SqlValue::I64(1), SqlValue::I64(2), SqlValue::I64(3)]),
-                )
-                .compile()
-                .unwrap(),
-        )
-        .unwrap();
+fn pg_in_list_binds_one_array() {
+    let stmt = in_stmt(&Postgres, Op::In, i64s(&[1, 2, 3]));
     assert_eq!(
         stmt.sql,
-        r#"SELECT "id", "name", "is_active" FROM "user" WHERE "id" IN ($1, $2, $3)"#
+        r#"SELECT "id", "name", "is_active" FROM "user" WHERE "id" = ANY($1)"#
     );
-    assert_eq!(
-        stmt.params,
-        vec![SqlValue::I64(1), SqlValue::I64(2), SqlValue::I64(3)],
-    );
+    assert_eq!(stmt.params, vec![SqlValue::Array(i64s(&[1, 2, 3]))]);
+    let not_in = in_stmt(&Postgres, Op::NotIn, i64s(&[1, 2]));
+    assert!(not_in.sql.ends_with(r#"WHERE "id" <> ALL($1)"#), "{}", not_in.sql);
+}
+
+#[test]
+fn pg_in_lists_of_any_length_share_one_statement() {
+    let two = in_stmt(&Postgres, Op::In, i64s(&[1, 2]));
+    let five = in_stmt(&Postgres, Op::In, i64s(&[1, 2, 3, 4, 5]));
+    assert_eq!(two.sql, five.sql);
+}
+
+#[test]
+fn pg_in_list_with_null_or_mixed_types_keeps_in() {
+    for list in [
+        vec![SqlValue::I64(1), SqlValue::Null],
+        vec![SqlValue::I64(1), SqlValue::I32(2)],
+        vec![SqlValue::F64(1.5), SqlValue::F64(2.5)],
+    ] {
+        let stmt = in_stmt(&Postgres, Op::NotIn, list.clone());
+        assert!(stmt.sql.contains(r#"WHERE "id" NOT IN ($1, $2"#), "{}", stmt.sql);
+        assert_eq!(stmt.params, list);
+    }
+}
+
+#[test]
+fn mysql_and_sqlite_keep_one_placeholder_per_element() {
+    let my = in_stmt(&rustango::sql::MySql, Op::In, i64s(&[1, 2, 3]));
+    assert!(my.sql.ends_with("WHERE `id` IN (?, ?, ?)"), "{}", my.sql);
+    let lite = in_stmt(&rustango::sql::Sqlite, Op::NotIn, i64s(&[1, 2]));
+    assert!(lite.sql.ends_with(r#"WHERE "id" NOT IN (?, ?)"#), "{}", lite.sql);
+    assert_eq!(lite.params, i64s(&[1, 2]));
 }
 
 #[test]
@@ -493,11 +524,8 @@ fn delete_with_in_list_expands_placeholders() {
         )),
     );
     let stmt = pg().compile_delete(&query).unwrap();
-    assert_eq!(stmt.sql, r#"DELETE FROM "user" WHERE "id" IN ($1, $2, $3)"#);
-    assert_eq!(
-        stmt.params,
-        vec![SqlValue::I64(1), SqlValue::I64(2), SqlValue::I64(3)],
-    );
+    assert_eq!(stmt.sql, r#"DELETE FROM "user" WHERE "id" = ANY($1)"#);
+    assert_eq!(stmt.params, vec![SqlValue::Array(i64s(&[1, 2, 3]))]);
 }
 
 #[test]

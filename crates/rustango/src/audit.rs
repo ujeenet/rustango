@@ -23,11 +23,13 @@
 //! model's `audit(track = "...")`. Bulk writes collect their entries and
 //! insert them in multi-row statements sized to the bind limit.
 //!
-//! Rows the database removes or changes through an FK `ON DELETE`
-//! action, or that PG's `truncate` (`CASCADE`) empties, are not audited
-//! (planned for 0.61.0).
+//! Audited rows an FK `ON DELETE CASCADE` removes get a `delete` entry
+//! too. Rows changed by `SET NULL` / `SET DEFAULT`, or emptied by PG's
+//! `truncate` (`CASCADE`), are not audited.
 
 use serde_json::{Map, Value};
+
+pub(crate) mod cascade;
 
 use crate::sql::sqlx;
 
@@ -151,10 +153,6 @@ fn source_token(source: &AuditSource, via: Via<'_>) -> String {
 }
 
 /// Run `fut` with its audited writes going through `pool`.
-#[cfg_attr(
-    not(any(feature = "admin", feature = "tenancy", feature = "forms")),
-    allow(dead_code)
-)]
 async fn writing_via<F: std::future::Future>(pool: &crate::sql::Pool, fut: F) -> F::Output {
     WRITE_POOL.scope(crate::sql::PoolId::of(pool), fut).await
 }
@@ -429,7 +427,7 @@ const AUDIT_ROWS_PER_INSERT_MAX: usize = 100;
 
 /// Entries per audit INSERT, so their binds fit the dialect's cap.
 fn audit_rows_per_insert(dialect: &dyn crate::sql::Dialect) -> usize {
-    (dialect.max_bind_params() / AUDIT_COLUMNS.len()).clamp(1, AUDIT_ROWS_PER_INSERT_MAX)
+    crate::sql::rows_per_batch(dialect, AUDIT_COLUMNS.len(), AUDIT_ROWS_PER_INSERT_MAX)
 }
 
 /// One multi-row audit INSERT, rendered by the bulk-insert writer.
@@ -1387,7 +1385,7 @@ pub async fn delete_one_with_audit(
     entry: &PendingEntry,
 ) -> Result<u64, crate::sql::ExecError> {
     let mut tx = crate::sql::transaction_pool(pool).await?;
-    let affected = crate::sql::delete_tx(&mut tx, query).await?;
+    let affected = writing_via(pool, crate::sql::delete_tx(&mut tx, query)).await?;
     if affected > 0 {
         emit_one_tx(&mut tx, Via::Pool(pool), entry).await?;
     }
@@ -1579,12 +1577,11 @@ async fn emit_many_tx(
     via: Via<'_>,
     entries: &[PendingEntry],
 ) -> Result<(), crate::sql::ExecError> {
-    let per_insert = audit_rows_per_insert(tx.dialect());
-    for chunk in entries.chunks(per_insert) {
-        let stmt = audit_insert_stmt(tx.dialect(), chunk, via)?;
-        crate::sql::raw_execute_tx(tx, &stmt.sql, stmt.params).await?;
-    }
-    Ok(())
+    let stmts = entries
+        .chunks(audit_rows_per_insert(tx.dialect()))
+        .map(|chunk| audit_insert_stmt(tx.dialect(), chunk, via))
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::sql::execute_batches_tx(tx, stmts).await.map(drop)
 }
 
 /// PKs per bulk-write statement: under SQLite's oldest bind limit (999).
@@ -1763,7 +1760,7 @@ where
             model: query.model,
             where_clause: pk_in(query.model, pks)?,
         };
-        affected += crate::sql::delete_tx(&mut tx, &delete).await?;
+        affected += writing_via(pool, crate::sql::delete_tx(&mut tx, &delete)).await?;
         let entries: Vec<PendingEntry> = chunk.iter().map(&entry).collect();
         emit_many_tx(&mut tx, Via::Pool(pool), &entries).await?;
     }
@@ -1848,6 +1845,51 @@ pub type AuditedDelete = for<'a> fn(
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<u64, crate::sql::ExecError>> + Send + 'a>,
 >;
+
+/// Audited cascade reader, through `Model::__rustango_audited_cascade`:
+/// the rows matching the WHERE, locked in the transaction, as
+/// `(pk, delete entry)` pairs.
+pub type AuditedCascade = for<'a, 't> fn(
+    &'a mut crate::sql::PoolTx<'t>,
+    crate::core::WhereExpr,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<Vec<(crate::core::SqlValue, PendingEntry)>, crate::sql::ExecError>,
+            > + Send
+            + 'a,
+    >,
+>;
+
+/// Rows of `model` matching `rows`, locked in `tx`, with their `Delete`
+/// entries; backs `Model::__rustango_audited_cascade`.
+///
+/// # Errors
+/// As the SELECT.
+#[doc(hidden)]
+pub async fn cascade_rows<M>(
+    tx: &mut crate::sql::PoolTx<'_>,
+    model: &'static crate::core::ModelSchema,
+    rows: crate::core::WhereExpr,
+    entry: impl Fn(&M) -> PendingEntry,
+) -> Result<Vec<(crate::core::SqlValue, PendingEntry)>, crate::sql::ExecError>
+where
+    M: crate::sql::HasPkValue
+        + crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    let found: Vec<M> = rows_in_tx(tx, model, rows, true).await?;
+    Ok(found
+        .iter()
+        .map(|r| (r.__rustango_pk_value_impl(), entry(r)))
+        .collect())
+}
 
 /// Audited `create` recorder, through `Model::__rustango_audited_create`:
 /// re-reads the new row by PK in the insert's transaction and emits its entry.
@@ -2166,20 +2208,9 @@ where
         return Ok(0);
     }
     let mut tx = crate::sql::write_transaction(pool).await?;
-    // Each row binds its PK and one value per update column. Small pages
-    // also keep SQLite's per-row CTE lookup cheap.
-    let per_row = query.update_columns.len() + 1;
-    let max_rows = (tx.dialect().max_bind_params() / per_row).clamp(1, BULK_AUDIT_CHUNK);
-    let mut affected = 0;
-    for chunk in query.rows.chunks(max_rows) {
-        let batch = crate::core::BulkUpdateQuery::new(
-            query.model,
-            query.update_columns.clone(),
-            chunk.to_vec(),
-        );
-        let stmt = tx.dialect().compile_bulk_update(&batch)?;
-        affected += crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
-    }
+    // Small pages also keep SQLite's per-row CTE lookup cheap.
+    let stmts = crate::sql::compile_bulk_update_batches(tx.dialect(), query, BULK_AUDIT_CHUNK)?;
+    let affected = crate::sql::execute_batches_tx(&mut tx, stmts).await?;
     // Each row is `[pk, …update cols]`.
     let pks: Vec<crate::core::SqlValue> = query
         .rows

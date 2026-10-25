@@ -707,3 +707,163 @@ tri_dialect_test! {
         joined_projection_bool_keeps_its_type,
     ],
 }
+
+/// Projections that name a related column (`writer__name`) read it through
+/// one LEFT JOIN per FK hop, in the caller's column order.
+mod related {
+    use super::*;
+    use rustango::core::QueryError;
+    use rustango::sql::ForeignKey;
+
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "values_tri_press", app = "values_tri")]
+    #[allow(dead_code)]
+    pub struct Press {
+        #[rustango(primary_key)]
+        pub id: i64,
+        #[rustango(max_length = 32)]
+        pub name: String,
+    }
+
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "values_tri_writer", app = "values_tri")]
+    #[allow(dead_code)]
+    pub struct Writer {
+        #[rustango(primary_key)]
+        pub id: i64,
+        #[rustango(max_length = 32)]
+        pub name: String,
+        pub press: ForeignKey<Press>,
+    }
+
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "values_tri_book", app = "values_tri")]
+    #[allow(dead_code)]
+    pub struct Book {
+        #[rustango(primary_key)]
+        pub id: i64,
+        #[rustango(max_length = 32)]
+        pub title: String,
+        pub body: String,
+        pub writer: Option<ForeignKey<Writer>>,
+    }
+
+    async fn setup(pool: &Pool) {
+        use rustango::testkit::matrix::{drop_table, fresh_table};
+        drop_table(pool, Book::SCHEMA.table).await;
+        drop_table(pool, Writer::SCHEMA.table).await;
+        fresh_table::<Press>(pool).await;
+        fresh_table::<Writer>(pool).await;
+        fresh_table::<Book>(pool).await;
+        Press { id: 1, name: "Acme".into() }
+            .insert_pool(pool)
+            .await
+            .expect("press");
+        Writer { id: 1, name: "Ann".into(), press: ForeignKey::unloaded(1) }
+            .insert_pool(pool)
+            .await
+            .expect("writer");
+        for (id, title, writer) in [(1, "One", Some(1)), (2, "Two", None)] {
+            Book {
+                id,
+                title: title.into(),
+                body: "long text".into(),
+                writer: writer.map(ForeignKey::unloaded),
+            }
+            .insert_pool(pool)
+            .await
+            .expect("book");
+        }
+    }
+
+    fn s(v: &str) -> SqlValue {
+        SqlValue::String(v.into())
+    }
+
+    async fn values_list_reads_related_columns_in_order(pool: &Pool) {
+        let rows = Book::objects()
+            .select_related("writer")
+            .order_by(&[("id", false)])
+            .values_list(&["writer__name", "title", "writer__press__name"])
+            .fetch(pool)
+            .await
+            .expect("values_list");
+        assert_eq!(
+            rows,
+            vec![
+                vec![s("Ann"), s("One"), s("Acme")],
+                vec![SqlValue::Null, s("Two"), SqlValue::Null],
+            ]
+        );
+    }
+
+    async fn values_dict_and_only_key_related_columns_by_name(pool: &Pool) {
+        let rows = Book::objects()
+            .filter("writer__name", "Ann")
+            .only(&["title", "writer__name"])
+            .fetch(pool)
+            .await
+            .expect("only");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 2, "{rows:?}");
+        assert_eq!(rows[0]["writer__name"], s("Ann"));
+        assert_eq!(rows[0]["title"], s("One"));
+        let names: Vec<Option<String>> = Book::objects()
+            .order_by(&[("id", false)])
+            .values_list_flat("writer__press__name")
+            .fetch::<Option<String>>(pool)
+            .await
+            .expect("flat");
+        assert_eq!(names, vec![Some("Acme".to_owned()), None]);
+    }
+
+    /// `distinct_on` (a window rewrite on MySQL / SQLite) keeps related columns.
+    async fn related_projection_with_distinct_on(pool: &Pool) {
+        let rows = Book::objects()
+            .distinct_on(&["title"])
+            .order_by(&[("title", false), ("id", false)])
+            .values_list(&["title", "writer__name"])
+            .fetch(pool)
+            .await
+            .expect("distinct_on values_list");
+        assert_eq!(
+            rows,
+            vec![vec![s("One"), s("Ann")], vec![s("Two"), SqlValue::Null]]
+        );
+        let plain = Book::objects()
+            .distinct()
+            .values_list(&["writer__press__name"])
+            .fetch(pool)
+            .await
+            .expect("distinct values_list");
+        assert_eq!(plain.len(), 2, "{plain:?}");
+    }
+
+    async fn related_projection_selects_only_what_it_names(pool: &Pool) {
+        let q = Book::objects()
+            .filter("writer__name", "Ann")
+            .values_list(&["title", "writer__name"])
+            .compile()
+            .expect("compile");
+        let sql = pool.dialect().compile_select(&q).expect("sql").sql;
+        assert!(!sql.contains("body"), "{sql}");
+        assert_eq!(sql.matches("JOIN").count(), 1, "{sql}");
+        for bad in ["writer__bogus", "title__name", "writer__press__bogus"] {
+            let err = Book::objects().values_list(&[bad]).compile().unwrap_err();
+            assert!(matches!(err, QueryError::UnknownField { .. }), "{bad}: {err:?}");
+        }
+        // `defer` names columns to leave out; a related one is not one of them.
+        let err = Book::objects().defer(&["writer__name"]).compile().unwrap_err();
+        assert!(matches!(err, QueryError::UnknownField { .. }), "{err:?}");
+    }
+
+    tri_dialect_test! {
+        setup: setup,
+        scenarios: [
+            values_list_reads_related_columns_in_order,
+            values_dict_and_only_key_related_columns_by_name,
+            related_projection_selects_only_what_it_names,
+            related_projection_with_distinct_on,
+        ],
+    }
+}

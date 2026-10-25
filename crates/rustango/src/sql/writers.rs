@@ -383,6 +383,52 @@ pub(super) fn null_cast_for(
     d.null_cast(field.ty).map(BindCast::Untyped)
 }
 
+/// The right side of `IN` / `NOT IN`. Where arrays bind, a list of one
+/// array-bindable type is `= ANY($1)` / `<> ALL($1)`, so every list length
+/// shares one statement; NULLs keep the same meaning either way.
+fn write_in_list(b: &mut Sql<'_>, op: Op, elements: &[SqlValue], cast: Option<BindCast>) {
+    let negated = matches!(op, Op::NotIn);
+    if b.d.binds_pg_only_values() && array_bindable(elements) {
+        b.sql.push_str(if negated { " <> ALL(" } else { " = ANY(" });
+        let p = b.bind(SqlValue::Array(elements.to_vec()));
+        b.sql.push_str(&p);
+        if let Some(BindCast::Always(ty)) = cast {
+            b.sql.push_str("::");
+            b.sql.push_str(ty);
+            b.sql.push_str("[]");
+        }
+        b.sql.push(')');
+        return;
+    }
+    b.sql.push_str(if negated { " NOT IN (" } else { " IN (" });
+    for (i, elem) in elements.iter().enumerate() {
+        if i > 0 {
+            b.sql.push_str(", ");
+        }
+        b.push_param_typed(elem.clone(), cast);
+    }
+    b.sql.push(')');
+}
+
+/// Whether `elements` bind as one typed array: all one type the array
+/// bind takes, with no NULL (an array would drop it).
+fn array_bindable(elements: &[SqlValue]) -> bool {
+    let Some(first) = elements.first() else {
+        return false;
+    };
+    matches!(
+        first,
+        SqlValue::I16(_)
+            | SqlValue::I32(_)
+            | SqlValue::I64(_)
+            | SqlValue::String(_)
+            | SqlValue::Bool(_)
+            | SqlValue::Uuid(_)
+    ) && elements
+        .iter()
+        .all(|e| std::mem::discriminant(e) == std::mem::discriminant(first))
+}
+
 // ---- SELECT ----
 
 /// A SELECT that may correlate to the enclosing query through `OuterRef`.
@@ -587,6 +633,20 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
     Ok(())
 }
 
+/// Write a projected `alias.col` as `"alias"."col" AS "alias__col"`, like a
+/// join's own columns; `false` for a bare model column.
+fn write_joined_projection(b: &mut Sql<'_>, col: &str) -> bool {
+    let Some((alias, c)) = col.split_once('.') else {
+        return false;
+    };
+    b.write_alias(alias);
+    b.sql.push('.');
+    b.write_ident(c);
+    b.sql.push_str(" AS ");
+    b.write_ident(&crate::core::joins::joined_label(alias, c));
+    true
+}
+
 /// Write a model column for the distinct-on fallback's inner SELECT.
 /// With joins present it is qualified, so it cannot clash with a
 /// joined column of the same name. The outer SELECT reads from the
@@ -636,7 +696,10 @@ fn write_distinct_on_via_window(
                 b.sql.push_str(", ");
             }
             first_col = false;
-            b.write_ident(col);
+            match col.split_once('.') {
+                Some((alias, c)) => b.write_ident(&crate::core::joins::joined_label(alias, c)),
+                None => b.write_ident(col),
+            }
         }
     } else {
         for field in query.model.scalar_fields() {
@@ -668,7 +731,9 @@ fn write_distinct_on_via_window(
                 b.sql.push_str(", ");
             }
             inner_first = false;
-            write_distinct_inner_col(b, scope.name, col, qualify);
+            if !write_joined_projection(b, col) {
+                write_distinct_inner_col(b, scope.name, col, qualify);
+            }
         }
     } else {
         for field in query.model.scalar_fields() {
@@ -907,6 +972,9 @@ fn write_select_body_qualified(
                 b.sql.push_str(", ");
             }
             first_col = false;
+            if write_joined_projection(b, col) {
+                continue;
+            }
             if qualify {
                 b.write_ident(scope.name);
                 b.sql.push('.');
@@ -3927,6 +3995,15 @@ pub(super) fn write_delete(b: &mut Sql<'_>, query: &DeleteQuery) -> Result<(), S
 pub struct DeletePlan {
     pub(crate) links: Vec<CompiledStatement>,
     pub(crate) owner: CompiledStatement,
+    /// The delete, when it may cascade to an audited model's rows.
+    pub(crate) cascade: Option<DeleteQuery>,
+}
+
+impl DeletePlan {
+    /// Just the owner statement: no junction deletes, no cascade to audit.
+    pub(crate) fn is_one_statement(&self) -> bool {
+        self.links.is_empty() && self.cascade.is_none()
+    }
 }
 
 /// Compile `query` with its generic M2M junction cleanup: one statement
@@ -3936,6 +4013,7 @@ pub(crate) fn compile_delete_plan(
     query: &DeleteQuery,
 ) -> Result<DeletePlan, SqlError> {
     let links = super::m2m::generic_m2m_links(query);
+    let cascade = crate::audit::cascade::reaches_audited(query.model).then(|| query.clone());
     if links.is_empty() || !d.supports_dml_in_cte() {
         return Ok(DeletePlan {
             links: links
@@ -3943,6 +4021,7 @@ pub(crate) fn compile_delete_plan(
                 .map(|l| d.compile_delete(l))
                 .collect::<Result<_, _>>()?,
             owner: d.compile_delete(query)?,
+            cascade,
         });
     }
     // Every CTE reads the same snapshot, so each sees the owner rows.
@@ -3962,6 +4041,7 @@ pub(crate) fn compile_delete_plan(
     Ok(DeletePlan {
         links: Vec::new(),
         owner: b.finish()?,
+        cascade,
     })
 }
 
@@ -4505,20 +4585,7 @@ fn write_expr_compare(
                 return Err(SqlError::EmptyInList);
             }
             write_expr(b, lhs, None)?;
-            b.sql.push_str(if matches!(op, Op::In) {
-                " IN ("
-            } else {
-                " NOT IN ("
-            });
-            let mut first = true;
-            for elem in elements {
-                if !first {
-                    b.sql.push_str(", ");
-                }
-                first = false;
-                b.push_param_typed(elem.clone(), None);
-            }
-            b.sql.push(')');
+            write_in_list(b, op, elements, None);
             Ok(())
         }
         Op::Between | Op::NotBetween => {
@@ -4901,20 +4968,7 @@ fn write_filter(
                 return Err(SqlError::EmptyInList);
             }
             b.sql.push_str(&qualified_col);
-            b.sql.push_str(if matches!(filter.op, Op::In) {
-                " IN ("
-            } else {
-                " NOT IN ("
-            });
-            let mut first = true;
-            for elem in elements {
-                if !first {
-                    b.sql.push_str(", ");
-                }
-                first = false;
-                b.push_param_typed(elem.clone(), cast);
-            }
-            b.sql.push(')');
+            write_in_list(b, filter.op, elements, cast);
         }
         Op::Between | Op::NotBetween => {
             let SqlValue::List(bounds) = &filter.value else {

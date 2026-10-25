@@ -154,6 +154,14 @@ untouched.
 
 In `update()` / `delete()`, a `where_in_subquery` over the same table that uses `outer_ref` now returns MySQL error 1093. Before, it ran but could see rows the same statement had already changed. A `where_exists` / `where_not_exists` with `outer_ref`, placed directly in the write's filter, still runs.
 
+### Deletes that cascade to audited models
+
+Such a delete now runs in a transaction and first reads (and locks) the rows it will cascade to. Cascade audit happens on pool / transaction paths (`delete_pool`, `PoolTx`, `PoolConn`); a raw sqlx executor still runs the plain DELETE and logs a one-time warning.
+
+### PostgreSQL `IN` lists compile to `= ANY($1)`
+
+Code that inspects compiled PG SQL sees `col = ANY($1)` with one `SqlValue::Array` bind instead of `col IN ($1, …)`. Results are the same.
+
 ## 0.61.1
 
 ### Scaffold taglines lose their brackets
