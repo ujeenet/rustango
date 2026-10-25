@@ -126,6 +126,9 @@ impl Env {
         write_migrations(&env.dir("good"), &["0001_notes"]);
         // Two files creating one table: the second fails.
         write_migrations(&env.dir("broken"), &["0001_notes", "0002_again"]);
+        // Migrates fine, but seeds a user the first admin then collides with.
+        write_migrations(&env.dir("taken"), &["0001_notes"]);
+        write_seed_user(&env.dir("taken"), "taken");
         env
     }
 
@@ -373,6 +376,37 @@ fn write_migrations(dir: &Path, names: &[&str]) {
         };
         rustango::migrate::file::write(&dir.join(format!("{name}.json")), &mig).unwrap();
     }
+}
+
+/// A tenant data migration inserting user `username`. Runs after the
+/// system chain, which makes `rustango_users`.
+fn write_seed_user(dir: &Path, username: &str) {
+    let mig = rustango::migrate::Migration {
+        name: "0002_seed_user".to_owned(),
+        created_at: "2026-10-25T00:00:01Z".into(),
+        prev: None,
+        atomic: true,
+        scope: rustango::migrate::MigrationScope::Tenant,
+        replaces: Vec::new(),
+        merges: Vec::new(),
+        snapshot: serde_json::from_value(serde_json::json!({
+            "tables": [{
+                "name": "tp_notes", "model": "T",
+                "fields": [{"name": "id", "column": "id", "ty": "i64",
+                            "nullable": false, "primary_key": true}]
+            }]
+        }))
+        .unwrap(),
+        forward: vec![rustango::migrate::Operation::Data(rustango::migrate::DataOp {
+            sql: format!(
+                "INSERT INTO rustango_users (username, password_hash, is_superuser, active, \
+                 created_at, data) VALUES ('{username}', 'x', false, true, CURRENT_TIMESTAMP, '{{}}')"
+            ),
+            reverse_sql: None,
+            reversible: false,
+        })],
+    };
+    rustango::migrate::file::write(&dir.join("0002_seed_user.json"), &mig).unwrap();
 }
 
 /// The tenant is active, its URL sealed, its record written, and its own
@@ -644,6 +678,58 @@ async fn a_failed_migration_drops_everything_it_made(pool: &Pool) {
     let req = ProvisionRequest::on_server(&a, "main");
     env.provision(&env.dir("good"), &req).await.expect("retry");
     assert_provisioned(&env, &a).await;
+    env.clean(&[&a]).await;
+}
+
+/// A first admin that cannot be created rolls the run back like any other
+/// step; a good one is a superuser and nothing stores its handover.
+async fn a_failed_first_admin_drops_everything_it_made(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+    let env = Env::new(pool).await;
+    let a = slug("adm");
+    env.clean(&[&a]).await;
+    env.add_server("main").await;
+    let admin = |name: &str| rustango::tenancy::FirstAdmin::new("ann@acme.test", Some(name)).unwrap();
+
+    let req = ProvisionRequest {
+        first_admin: Some(admin("taken")),
+        ..ProvisionRequest::on_server(&a, "main")
+    };
+    let err = env.provision(&env.dir("taken"), &req).await.expect_err("taken");
+    assert!(err.to_string().contains("taken"), "{err}");
+    assert!(env.org(&a).await.is_none(), "the row survived");
+    assert!(env.records(&a).await.is_empty(), "the record survived");
+    assert!(env.nothing_left(&a).await, "a login or database survived");
+    let steps = env.steps(&a).await;
+    assert!(steps.iter().any(|s| s == "create_admin:failed"), "{steps:?}");
+    assert!(steps.iter().any(|s| s == "rollback:ok"), "{steps:?}");
+    assert!(!steps.iter().any(|s| s == "activate:ok"), "{steps:?}");
+
+    let req = ProvisionRequest {
+        first_admin: Some(admin("ann")),
+        ..ProvisionRequest::on_server(&a, "main")
+    };
+    env.provision(&env.dir("good"), &req).await.expect("retry");
+    let url = assert_provisioned(&env, &a).await;
+    let tenant = Pool::connect(&url).await.expect("tenant");
+    let users: Vec<rustango::tenancy::User> = rustango::tenancy::User::objects()
+        .where_(rustango::tenancy::User::username.eq("ann".to_owned()))
+        .fetch(&tenant)
+        .await
+        .unwrap();
+    assert!(users.len() == 1 && users[0].is_superuser, "{users:?}");
+    assert!(users[0].password_changed_at.is_none(), "a set-password link needs it unset");
+    tenant.close().await;
+    let audit = rustango::audit::list(&env.registry, &Default::default(), 500, 0)
+        .await
+        .unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|e| e.source == "provision:first_admin" && e.entity_table == "rustango_users"),
+        "no audit row"
+    );
     env.clean(&[&a]).await;
 }
 
@@ -985,6 +1071,7 @@ tri_dialect_test! {
         the_console_creates_a_tenant_on_a_saved_server,
         the_cli_creates_tenants_on_a_saved_server,
         a_failed_migration_drops_everything_it_made,
+        a_failed_first_admin_drops_everything_it_made,
         a_failed_insert_drops_what_it_made,
         an_existing_database_is_refused_and_kept,
         a_blocked_server_is_refused_before_any_ddl,

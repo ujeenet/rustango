@@ -21,7 +21,9 @@
 //!    **inactive**.
 //! 5. [`Migrate`][step] — this tenant's schema, via
 //!    [`tenant_migrate::migrate_one_tenant`].
-//! 6. [`Activate`][step] — set `active`, and the tenant starts
+//! 6. [`CreateAdmin`][step] — the requested first admin, if any. See
+//!    [`first_admin`](crate::tenancy::first_admin).
+//! 7. [`Activate`][step] — set `active`, and the tenant starts
 //!    resolving.
 //!
 //! ## What a failed run leaves behind
@@ -96,6 +98,8 @@ pub struct ProvisionRequest {
     /// Defaults to a full check including the write probe — see
     /// [`preflight`] for why a bare `SELECT 1` is not enough.
     pub preflight: preflight::Preflight,
+    /// A superuser to create after the migrations, before the tenant goes live.
+    pub first_admin: Option<super::first_admin::FirstAdmin>,
 }
 
 /// Where a tenant's tables live.
@@ -155,6 +159,7 @@ impl ProvisionRequest {
             path_prefix: None,
             run_migrations: true,
             preflight: preflight::Preflight::default(),
+            first_admin: None,
         }
     }
 
@@ -231,6 +236,9 @@ pub enum ProvisionStep {
     RegisterOrg,
     /// Apply the tenant's migrations.
     Migrate,
+    /// Create the requested first admin, a superuser with no usable
+    /// password until they set one.
+    CreateAdmin,
     /// Set `active`, after which the tenant resolves. Last on purpose,
     /// so a half-provisioned tenant never serves a request.
     Activate,
@@ -307,6 +315,8 @@ pub struct ProvisionOutcome {
     pub slug: String,
     pub mode: StorageMode,
     pub migrations: MigrationsOutcome,
+    /// The first admin, when the request asked for one.
+    pub first_admin: Option<super::first_admin::CreatedAdmin>,
 }
 
 /// Where a run reports: the caller's observer, and optionally the
@@ -564,6 +574,7 @@ impl ProvisionStep {
             Self::CheckLogin => "check_login",
             Self::RegisterOrg => "register_org",
             Self::Migrate => "migrate",
+            Self::CreateAdmin => "create_admin",
             Self::Activate => "activate",
             Self::Rollback => "rollback",
         }
@@ -919,7 +930,7 @@ where
     }
 }
 
-/// Steps 5 and 6, shared by a fresh tenant and a resumed one.
+/// Steps 5 to 7, shared by a fresh tenant and a resumed one.
 async fn migrate_and_activate<DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
@@ -957,7 +968,33 @@ where
         MigrationsOutcome::Skipped
     };
 
-    // ---- 6. Activate ----
+    // ---- 6. First admin ----
+    //
+    // Before activation, so a failure here rolls back like any other
+    // step and a live tenant always has the admin it was asked for.
+    let first_admin = match &request.first_admin {
+        None => None,
+        Some(_) if matches!(migrations, MigrationsOutcome::Failed(_)) => {
+            rep.step(
+                ProvisionStep::CreateAdmin,
+                Progress::Skipped("migrations failed"),
+            )
+            .await;
+            None
+        }
+        Some(admin) => {
+            rep.step(ProvisionStep::CreateAdmin, Progress::Started).await;
+            match super::first_admin::create(pools, org, admin).await {
+                Ok(created) => {
+                    rep.step(ProvisionStep::CreateAdmin, Progress::Ok).await;
+                    Some(created)
+                }
+                Err(e) => return rep.fail(ProvisionStep::CreateAdmin, e).await,
+            }
+        }
+    };
+
+    // ---- 7. Activate ----
     //
     // The row went in inactive, so until now the tenant does not
     // resolve. A migration failure leaves it that way on purpose: the
@@ -987,6 +1024,7 @@ where
         slug: request.slug.clone(),
         mode: request.mode(),
         migrations,
+        first_admin,
     })
 }
 
@@ -1103,6 +1141,9 @@ fn validate_fields(request: &ProvisionRequest) -> Result<ProvisionRequest, Strin
     }
     if let Some(port) = request.port {
         validate_port(port)?;
+    }
+    if request.first_admin.is_some() && !request.run_migrations {
+        return Err("a first admin needs the tenant's migrations; do not skip them".into());
     }
 
     let mut out = request.clone();
@@ -2658,6 +2699,11 @@ pub trait TenantProvisioner: Send + Sync {
 
     /// The registry pool, so a caller can read runs and events back.
     fn registry(&self) -> crate::sql::Pool;
+
+    /// How a first admin is handed over; `None` refuses first admins.
+    fn first_admin_handover(&self) -> Option<&super::first_admin::FirstAdminHandover> {
+        None
+    }
 }
 
 /// Close `run_id` as failed: this provisioner cannot do that work.
@@ -2683,6 +2729,7 @@ pub struct Provisioner<DB: Database> {
     pools: std::sync::Arc<TenantPools<DB>>,
     registry_url: String,
     migrations_dir: std::path::PathBuf,
+    first_admin: Option<super::first_admin::FirstAdminHandover>,
 }
 
 impl<DB: Database> Provisioner<DB> {
@@ -2695,7 +2742,18 @@ impl<DB: Database> Provisioner<DB> {
             pools,
             registry_url: registry_url.into(),
             migrations_dir: migrations_dir.into(),
+            first_admin: None,
         }
+    }
+
+    /// Let callers ask for a first admin, handed over by `handover`.
+    #[must_use]
+    pub fn with_first_admin_handover(
+        mut self,
+        handover: super::first_admin::FirstAdminHandover,
+    ) -> Self {
+        self.first_admin = Some(handover);
+        self
     }
 
     /// Type-erase for the console and anything else that does not want
@@ -2800,6 +2858,10 @@ where
 
     fn registry(&self) -> crate::sql::Pool {
         self.pools.registry_pool()
+    }
+
+    fn first_admin_handover(&self) -> Option<&super::first_admin::FirstAdminHandover> {
+        self.first_admin.as_ref()
     }
 }
 

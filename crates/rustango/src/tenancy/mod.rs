@@ -70,6 +70,8 @@ pub mod db_server;
 /// `purge-tenant` run, callable from anything that is not a terminal.
 pub mod decommission;
 mod error;
+/// A new tenant's first admin and their set-password link.
+pub mod first_admin;
 pub mod impersonation_handoff;
 pub mod jwt_lifecycle;
 pub mod manage;
@@ -185,6 +187,7 @@ pub use db_server::{
     DbServer, DbServerError, DbServerSpec, PasswordChange, TenantDatabase, TlsMode,
 };
 pub use error::TenancyError;
+pub use first_admin::{CreatedAdmin, FirstAdmin, FirstAdminHandover, Handover, SetPasswordLink};
 #[cfg(all(feature = "tenancy", feature = "sso"))]
 pub use member_auth::{member_sso_router, CurrentMember, MemberAuthConfig, MEMBER_COOKIE};
 pub use migrate::{

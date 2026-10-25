@@ -159,6 +159,64 @@ pub(crate) fn tenant_origin(host: &str, port_suffix: &str) -> String {
     format!("{scheme}://{host}{port_suffix}")
 }
 
+/// A link to `path` on `org`'s tenant host. `request_host` is the
+/// caller's own `Host`, whose port is the last fallback.
+pub(crate) fn tenant_link(org: &super::Org, path: &str, request_host: Option<&str>) -> String {
+    let prefix = tenant_path_prefix(org.path_prefix.as_deref());
+    let host = match org.host_pattern.as_deref().filter(|s| !s.is_empty()) {
+        Some(pattern) => pattern.to_owned(),
+        // A path-prefix tenant lives on the apex, any other on `<slug>.<apex>`.
+        None if prefix.is_empty() => format!("{}.{}", org.slug, apex_domain()),
+        None => apex_domain(),
+    };
+    let port = tenant_port_suffix(
+        org.port,
+        std::env::var("RUSTANGO_TENANT_PORT").ok(),
+        request_host,
+    );
+    format!(
+        "{}{prefix}{}",
+        tenant_origin(&host, &port),
+        path.trim_end_matches('/')
+    )
+}
+
+/// The org's path prefix for a tenant link, or `""` when the stored
+/// value is not one segment: `//evil.example` would redirect off-site.
+pub(crate) fn tenant_path_prefix(path_prefix: Option<&str>) -> &str {
+    path_prefix
+        .map(|p| p.trim_end_matches('/'))
+        .filter(|p| crate::tenancy::provision::validate_path_prefix(p).is_ok())
+        .unwrap_or("")
+}
+
+/// Port for a tenant link. A port-routed org's own port wins;
+/// then `RUSTANGO_TENANT_PORT`; then the caller's request port.
+pub(crate) fn tenant_port_suffix(
+    org_port: Option<i32>,
+    env_port: Option<String>,
+    host: Option<&str>,
+) -> String {
+    let usable = |p: &str| !p.is_empty() && p != "80" && p != "443";
+    if let Some(p) = org_port {
+        let p = p.to_string();
+        return if usable(&p) {
+            format!(":{p}")
+        } else {
+            String::new()
+        };
+    }
+    env_port
+        .filter(|p| usable(p))
+        .or_else(|| {
+            host.and_then(|h| crate::urls::split_host_port(h)?.1)
+                .map(|p| p.to_string())
+                .filter(|p| usable(p))
+        })
+        .map(|p| format!(":{p}"))
+        .unwrap_or_default()
+}
+
 /// A loopback host stays http: it never crosses the network, and browsers
 /// keep `Secure` cookies on it.
 fn pick_tenant_scheme(setting: Option<String>, secure: bool, host: &str) -> String {

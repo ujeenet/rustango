@@ -210,6 +210,13 @@ pub struct ProvisionPayload {
     /// under any other policy rather than ignored.
     #[serde(default)]
     pub database_url: Option<String>,
+    /// A first admin, mailed a set-password link. Refused unless the
+    /// provisioner mails links: nobody here could pass one on.
+    #[serde(default)]
+    pub admin_email: Option<String>,
+    /// Defaults to `admin_email`.
+    #[serde(default)]
+    pub admin_username: Option<String>,
 }
 
 /// What the caller gets back.
@@ -338,6 +345,16 @@ async fn handle(
 
     // ---- 5. Build the request under the URL policy ----
     let request = build_request(&state.config, &payload)?;
+    if request.first_admin.is_some()
+        && !state
+            .provisioner
+            .first_admin_handover()
+            .is_some_and(super::first_admin::FirstAdminHandover::mails)
+    {
+        return Err(Refusal::Policy(
+            "this endpoint cannot mail a first admin's link; remove `admin_email`".to_owned(),
+        ));
+    }
 
     // ---- 6. Open the run, then hand off ----
     //
@@ -385,17 +402,39 @@ async fn handle(
         // `provision`, or the task would open a second run for the
         // same tenant and the caller's id would point at a run that
         // never progresses.
-        if let Err(e) = provisioner.provision_in_run(run_id, &request).await {
-            // The run itself already records this; the log line is for
-            // an operator tailing the app, who has no reason to be
-            // watching the console.
-            tracing::warn!(
-                target: "rustango::tenancy::provision_webhook",
-                slug = %request.slug,
-                run_id,
-                error = %e,
-                "webhook-initiated provisioning failed"
-            );
+        match provisioner.provision_in_run(run_id, &request).await {
+            Ok(mut outcome) => {
+                if let Some(handover) = provisioner.first_admin_handover() {
+                    let handed = handover
+                        .hand_over_outcome(&provisioner.registry(), &mut outcome, None)
+                        .await;
+                    let mailed = outcome
+                        .first_admin
+                        .as_ref()
+                        .is_none_or(|a| matches!(a.handover, Some(super::first_admin::Handover::Mailed { .. })));
+                    // Never the link: name the verb that issues a new one.
+                    if handed.is_err() || !mailed {
+                        tracing::warn!(
+                            target: "rustango::tenancy::provision_webhook",
+                            slug = %request.slug,
+                            run_id,
+                            "the first admin's link was not mailed; issue one with `set-password-link`"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                // The run itself already records this; the log line is for
+                // an operator tailing the app, who has no reason to be
+                // watching the console.
+                tracing::warn!(
+                    target: "rustango::tenancy::provision_webhook",
+                    slug = %request.slug,
+                    run_id,
+                    error = %e,
+                    "webhook-initiated provisioning failed"
+                );
+            }
         }
     });
 
@@ -476,11 +515,24 @@ fn build_request(
             ))
         }
     };
+    let first_admin = match (&payload.admin_email, &payload.admin_username) {
+        (Some(email), username) => Some(
+            super::first_admin::FirstAdmin::new(email, username.as_deref())
+                .map_err(Refusal::Malformed)?,
+        ),
+        (None, Some(_)) => {
+            return Err(Refusal::Malformed(
+                "`admin_username` needs `admin_email`".to_owned(),
+            ))
+        }
+        (None, None) => None,
+    };
     Ok(ProvisionRequest {
         backend: config.backend,
         display_name: payload.display_name.clone(),
         host_pattern: payload.host_pattern.clone(),
         preflight: Preflight::default(),
+        first_admin,
         ..ProvisionRequest::new(payload.slug.clone(), storage)
     })
 }
@@ -514,6 +566,8 @@ mod tests {
             display_name: None,
             host_pattern: None,
             database_url: url.map(ToOwned::to_owned),
+            admin_email: None,
+            admin_username: None,
         }
     }
 

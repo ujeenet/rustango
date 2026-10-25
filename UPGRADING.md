@@ -176,6 +176,11 @@ A saved-server create needs `RUSTANGO_SECRET_KEY`: the tenant login it creates i
 
 `cargo rustango new --template tenant` now adds `.with_tenant_provisioning("migrations")` to `main.rs`; delete the line to keep the console read-only. Existing projects add the call themselves to get **New tenant** and **Database servers**, plus `RUSTANGO_SECRET_KEY` in their env.
 
+### First admin fields
+
+`ProvisionRequest`, `ProvisionOutcome`, `CreateTenantOpts` and `ProvisionPayload` have a new `first_admin` (payload: `admin_email`, `admin_username`) field, and `ProvisionStep` a `CreateAdmin` variant: struct literals need `..` defaults and an exhaustive match needs an arm.
+`Provisioner` offers first admins only with `with_first_admin_handover`; the standard `Builder` sets it, signing links with the tenant session secret. The tenant's change-password page now also takes a set-password link without a session.
+
 ### `TenantPoolInvalidator::tenant_secrets` has no default
 
 A custom implementor must return its `TenantSecrets`; the old default ignored `require_sealed_secrets()`.

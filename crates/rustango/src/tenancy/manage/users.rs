@@ -202,20 +202,14 @@ where
         }
     }
 
-    let mut user = crate::tenancy::User {
-        id: Auto::default(),
-        username: username.clone(),
+    let user = crate::tenancy::auth::NewUser {
+        username: &username,
         password_hash: hash,
-        #[cfg(feature = "sso")]
-        email: None,
         is_superuser,
-        active: true,
-        created_at: chrono::Utc::now(),
-        data: serde_json::Value::Object(serde_json::Map::new()),
-        password_changed_at: None,
-        sessions_revoked_at: None,
-    };
-    user.save_pool(&scoped).await?;
+        email: None,
+    }
+    .insert(&scoped)
+    .await?;
     let row_id: i64 = user.id.get().copied().unwrap_or_default();
     if auto_promoted {
         writeln!(

@@ -163,6 +163,17 @@ impl<'a> LinkTarget<'a> {
     }
 }
 
+#[cfg(all(feature = "passwords", feature = "tenancy", feature = "admin"))]
+impl<'a> LinkTarget<'a> {
+    /// `org`'s user pool and scope, for a caller holding the org itself.
+    pub(crate) fn tenant(pool: &'a crate::sql::Pool, org: &crate::tenancy::Org) -> Self {
+        Self {
+            pool,
+            scope: LinkScope::from(org),
+        }
+    }
+}
+
 #[cfg(all(feature = "passwords", feature = "tenancy"))]
 impl<'a, DB: crate::sql::sqlx::Database> From<&'a crate::extractors::Tenant<DB>>
     for LinkTarget<'a>

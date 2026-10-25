@@ -226,6 +226,33 @@ connection check passes.</p>
     </table>
   </fieldset>
 
+  {% if first_admin %}
+  <fieldset class="section">
+    <legend>First admin</legend>
+    <table>
+      <tr>
+        <th><label for="admin_email">email</label></th>
+        <td>
+          <input type="email" id="admin_email" name="admin_email" maxlength="254"
+                 value="{{ prefill.admin_email | default(value='') }}"
+                 placeholder="optional">
+          <div class="field-helper">Creates a superuser who sets their own password
+          through a single-use link{% if first_admin == "mail" %}, mailed to this
+          address{% else %}, shown to you once when the tenant is ready{% endif %}.</div>
+        </td>
+      </tr>
+      <tr>
+        <th><label for="admin_username">username</label></th>
+        <td>
+          <input type="text" id="admin_username" name="admin_username" maxlength="64"
+                 value="{{ prefill.admin_username | default(value='') }}"
+                 placeholder="defaults to the email">
+        </td>
+      </tr>
+    </table>
+  </fieldset>
+  {% endif %}
+
   <p class="form-actions">
     <button type="submit" class="btn btn-primary">Create tenant</button>
     <a href="{{ console_prefix }}/orgs" class="btn-link">Cancel</a>

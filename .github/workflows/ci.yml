@@ -942,6 +942,8 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_audit_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_migrate_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_decommission_sqlite_live
+      # A new tenant's first admin and its single-use set-password link.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,webhook,email --test tenant_first_admin_sqlite_live
       # #1341 — pre-warming pools from the console, which was CLI-only.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_prewarm_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_errors_sqlite_live

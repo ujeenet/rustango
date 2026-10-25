@@ -4,7 +4,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-**Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set; `ProvisionRequest` takes a `TenantStorage` and an optional backend, which must be the registry's; a blank `RUSTANGO_SECRET_KEY` no longer seals; `RunKind` is `#[non_exhaustive]`. See UPGRADING.
+**Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set; `ProvisionRequest` takes a `TenantStorage` and an optional backend, which must be the registry's; a blank `RUSTANGO_SECRET_KEY` no longer seals; `RunKind` is `#[non_exhaustive]`; provisioning types gain a `first_admin` field. See UPGRADING.
 
 ### Added — purge and password rotation for tenants on a saved server
 
@@ -15,6 +15,11 @@ Both run as recorded runs (`purge`, `rotate_password`) on the console's run page
 ### Fixed — a blank `RUSTANGO_SECRET_KEY` sealed with a known key
 
 It now counts as unset. The **New tenant** page shows the missing-key banner too.
+
+### Added — a new tenant's first admin
+
+The console create form (admin email, optional username), `create-tenant --admin-email <e> [--admin-username <u>]`, the signup webhook (`admin_email`) and `api::create_tenant` (`first_admin`) create a superuser in a `create_admin` step after migrate and before activate; a failure rolls the run back.
+The admin gets no usable password but a single-use, tenant-bound set-password link (72 hours), redeemed on the tenant's change-password page: mailed with `Builder::first_admin_mailer`, else shown once on the run page or printed once by the CLI, and never stored, audited or logged. `set-password-link <slug> <username>` issues a fresh one.
 
 ### Added — create a database-mode tenant on a saved server
 

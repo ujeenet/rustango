@@ -40,6 +40,7 @@ use tera::Context;
 use super::{inject_op_brand, withheld, withheld_in, ConsoleState};
 use crate::sql::connect_diagnosis::redact;
 use crate::tenancy::auth;
+use crate::tenancy::first_admin::{FirstAdmin, Handover};
 use crate::tenancy::org::{BackendKind, StorageMode};
 use crate::tenancy::preflight::{self, Preflight};
 use crate::tenancy::provision::{self, DatabaseSource, ProvisionRequest, TenantStorage};
@@ -106,6 +107,15 @@ async fn render_form(
         if servers.is_empty() { "url" } else { "server" },
     );
     ctx.insert("servers", &servers);
+    // The first-admin fields appear only where a handover is set up.
+    let handover = state
+        .provisioner
+        .as_ref()
+        .and_then(|p| p.first_admin_handover());
+    ctx.insert(
+        "first_admin",
+        &handover.map(|h| if h.mails() { "mail" } else { "link" }),
+    );
     // What a derived URL will look like, with the password removed.
     // The real one is built server-side at submit time; the browser
     // never sees the registry's credentials.
@@ -193,6 +203,12 @@ fn request_from_form(
         )?)),
     };
 
+    let first_admin = match (field("admin_email"), field("admin_username")) {
+        (Some(email), username) => Some(FirstAdmin::new(email, username)?),
+        (None, Some(_)) => return Err("Enter the first admin's email, or clear the username.".into()),
+        (None, None) => None,
+    };
+
     Ok(ProvisionRequest {
         backend,
         display_name: field("display_name").map(ToOwned::to_owned),
@@ -200,6 +216,7 @@ fn request_from_form(
         port,
         path_prefix: field("path_prefix").map(ToOwned::to_owned),
         run_migrations: !form.contains_key("no_migrate"),
+        first_admin,
         ..ProvisionRequest::new(slug, storage)
     })
 }
@@ -239,6 +256,7 @@ fn existing_database_url<'a>(
 pub(super) async fn org_new_submit(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response<Body> {
     let provisioner = state
@@ -251,6 +269,11 @@ pub(super) async fn org_new_submit(
         Ok(r) => r,
         Err(msg) => return render_form(&state, &op, &form, Some(&msg)).await,
     };
+    let handover = provisioner.first_admin_handover();
+    if request.first_admin.is_some() && handover.is_none() {
+        let msg = "This console cannot hand over a first admin; leave the admin email empty.";
+        return render_form(&state, &op, &form, Some(msg)).await;
+    }
 
     // Provisioning runs inline. It is slower than a request should be
     // — the migrate step is seconds — but the alternative is spawning
@@ -273,9 +296,44 @@ pub(super) async fn org_new_submit(
     };
     super::emit_op_audit(&state.registry, &request.slug, operator_id, verb, extra).await;
     match outcome {
-        Ok((run, _)) => {
+        Ok((run, mut outcome)) => {
             let run_id = run.id.get().copied().unwrap_or_default();
-            Redirect::to(&format!("provision/{run_id}")).into_response()
+            let (Some(handover), Some(_)) = (handover, &outcome.first_admin) else {
+                return Redirect::to(&format!("provision/{run_id}")).into_response();
+            };
+            let host = headers.get(axum::http::header::HOST).and_then(|v| v.to_str().ok());
+            if let Err(e) = handover
+                .hand_over_outcome(&state.registry, &mut outcome, host)
+                .await
+            {
+                tracing::warn!(target: "rustango::tenancy::operator_console", run_id, error = %e, "first admin handover failed");
+            }
+            // Rendered here, not redirected: the link is shown this once.
+            let shown = outcome.first_admin.as_ref().map(|admin| HandoverView {
+                username: admin.username.clone(),
+                mailed_to: match &admin.handover {
+                    Some(Handover::Mailed { to }) => Some(to.clone()),
+                    _ => None,
+                },
+                mail_failed: matches!(admin.handover, Some(Handover::MailFailed(_))),
+                link: admin
+                    .handover
+                    .as_ref()
+                    .and_then(Handover::link)
+                    .map(|l| l.expose().to_owned()),
+                hours: handover.ttl_hours(),
+            });
+            let mut resp = render_run(&state, &op, run_id, shown.as_ref()).await;
+            let h = resp.headers_mut();
+            h.insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-store"),
+            );
+            h.insert(
+                axum::http::header::REFERRER_POLICY,
+                axum::http::HeaderValue::from_static("no-referrer"),
+            );
+            resp
         }
         // A failure before the row lands — a taken slug, an unreachable
         // database — comes back here rather than as a run to watch,
@@ -584,6 +642,25 @@ pub(super) async fn provision_run_view(
     Extension(op): Extension<auth::Operator>,
     Path(run_id): Path<i64>,
 ) -> Response<Body> {
+    render_run(&state, &op, run_id, None).await
+}
+
+/// A first admin's handover, for the one render that shows it.
+#[derive(serde::Serialize)]
+struct HandoverView {
+    username: String,
+    mailed_to: Option<String>,
+    mail_failed: bool,
+    link: Option<String>,
+    hours: u64,
+}
+
+async fn render_run(
+    state: &ConsoleState,
+    op: &auth::Operator,
+    run_id: i64,
+    handover: Option<&HandoverView>,
+) -> Response<Body> {
     let Some(mut run) = (match store::run_by_id(&state.registry, run_id).await {
         Ok(r) => r,
         Err(e) => return super::server_error("operator_console", &e),
@@ -637,7 +714,8 @@ pub(super) async fn provision_run_view(
             })
             .collect::<Vec<_>>(),
     );
-    render(&state, "op_provision_run.html", &ctx)
+    ctx.insert("handover", &handover);
+    render(state, "op_provision_run.html", &ctx)
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -851,6 +929,20 @@ mod tests {
         let err = request_from_form(&form(&[("database_url", "x")]), Some(TEST_REGISTRY))
             .expect_err("no slug");
         assert!(err.contains("slug"), "{err}");
+    }
+
+    #[test]
+    fn the_admin_fields_become_a_first_admin() {
+        let base = [("slug", "acme"), ("database_url", "sqlite://x.db")];
+        let none = request_from_form(&form(&base), None).unwrap();
+        assert!(none.first_admin.is_none());
+        let with = [&base[..], &[("admin_email", " ann@acme.test "), ("admin_username", "")]].concat();
+        let admin = request_from_form(&form(&with), None).unwrap().first_admin.unwrap();
+        assert_eq!((admin.email(), admin.username()), ("ann@acme.test", "ann@acme.test"));
+        let orphan = [&base[..], &[("admin_username", "ann")]].concat();
+        assert!(request_from_form(&form(&orphan), None).is_err());
+        let bad = [&base[..], &[("admin_email", "nope")]].concat();
+        assert!(request_from_form(&form(&bad), None).is_err());
     }
 
     #[test]
