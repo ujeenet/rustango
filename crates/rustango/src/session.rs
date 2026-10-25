@@ -332,7 +332,7 @@ pub fn secure_cookies() -> bool {
 /// Goes to both `tracing` (for the logs) and stderr (for whoever is
 /// watching the boot). Staying quiet here makes a failed key rotation
 /// look like it worked.
-fn warn_unusable_secret(reason: &str) {
+pub(crate) fn warn_unusable_secret(reason: &str) {
     tracing::warn!(
         reason,
         "RUSTANGO_SESSION_SECRET is set but unusable — falling back to the persisted key",

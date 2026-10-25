@@ -31,7 +31,7 @@ New `session::deactivate::<T>(pool, id)` does the same from code; a direct ORM w
 
 ### Fixed — `create-api-key` could write its own key file
 
-The verb only loads the server's key (`RUSTANGO_SESSION_SECRET` or the dev key file) and fails when there is none, so every key it prints matches the server.
+The verb only loads the server's key (`RUSTANGO_SESSION_SECRET` or the dev key file) and fails when there is none, so every key it prints matches the server. Off the prod tier a malformed secret falls back to the dev key file, as the server does.
 
 ### Fixed — pages with a CSRF token could be shared by a cache
 

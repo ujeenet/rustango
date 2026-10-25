@@ -74,21 +74,34 @@ pub(crate) enum KeySource {
 /// The tenant session key, only if one exists: never generated or written,
 /// so a CLI cannot sign with a key no server holds.
 pub(crate) fn existing_tenant_secret() -> Result<(SessionSecret, KeySource), super::TenancyError> {
-    existing_tenant_secret_at(std::path::Path::new(
-        crate::session::TENANT_SESSION_KEY_PATH,
-    ))
+    use crate::session::{is_prod_tier, tier_from_env};
+    existing_tenant_secret_at(
+        std::env::var("RUSTANGO_SESSION_SECRET").ok().as_deref(),
+        is_prod_tier(&tier_from_env()),
+        std::path::Path::new(crate::session::TENANT_SESSION_KEY_PATH),
+    )
 }
 
 fn existing_tenant_secret_at(
+    env: Option<&str>,
+    prod: bool,
     dev_file: &std::path::Path,
 ) -> Result<(SessionSecret, KeySource), super::TenancyError> {
-    use crate::session::{is_prod_tier, tier_from_env};
     let invalid =
         |e: crate::session::SessionSecretError| super::TenancyError::Validation(e.to_string());
-    if std::env::var_os("RUSTANGO_SESSION_SECRET").is_some() || is_prod_tier(&tier_from_env()) {
-        return SessionSecret::require_from_env()
+    if prod {
+        return env
+            .ok_or(crate::session::SessionSecretError::Missing)
+            .and_then(SessionSecret::from_b64)
             .map(|s| (s, KeySource::Env))
             .map_err(invalid);
+    }
+    // Off prod the server falls back to the dev file on a bad env value; match it.
+    if let Some(raw) = env {
+        match SessionSecret::from_b64(raw) {
+            Ok(s) => return Ok((s, KeySource::Env)),
+            Err(e) => crate::session::warn_unusable_secret(&e.to_string()),
+        }
     }
     match std::fs::read(dev_file) {
         Ok(bytes) if bytes.len() >= 32 => Ok((SessionSecret::from_bytes(bytes), KeySource::DevFile)),
@@ -217,16 +230,27 @@ mod tests {
     /// The CLI loads a key; it never makes one that no server holds.
     #[test]
     fn an_existing_key_is_loaded_never_created() {
-        if std::env::var_os("RUSTANGO_SESSION_SECRET").is_some() {
-            return;
-        }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tenant.key");
-        assert!(existing_tenant_secret_at(&path).is_err());
+        assert!(existing_tenant_secret_at(None, false, &path).is_err());
         assert!(!path.exists(), "a key file was written");
         std::fs::write(&path, [7u8; 32]).unwrap();
-        let (_, source) = existing_tenant_secret_at(&path).unwrap();
+        let (_, source) = existing_tenant_secret_at(None, false, &path).unwrap();
         assert_eq!(source, KeySource::DevFile);
+    }
+
+    /// Off prod an unusable env secret falls back to the dev file, as the server does.
+    #[test]
+    fn an_unusable_env_secret_uses_the_servers_dev_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tenant.key");
+        std::fs::write(&path, [7u8; 32]).unwrap();
+        let (_, source) = existing_tenant_secret_at(Some("not-base64!"), false, &path).unwrap();
+        assert_eq!(source, KeySource::DevFile);
+        assert!(existing_tenant_secret_at(Some("not-base64!"), true, &path).is_err());
+        let good = "A".repeat(44);
+        let (_, source) = existing_tenant_secret_at(Some(&good), false, &path).unwrap();
+        assert_eq!(source, KeySource::Env);
     }
 
     #[test]
