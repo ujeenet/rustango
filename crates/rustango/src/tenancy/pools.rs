@@ -796,10 +796,33 @@ pub trait TenantPoolInvalidator: Send + Sync {
     >;
 
     /// How tenant URLs are opened and stored, so an edit can check a new
-    /// reference before it is written.
-    fn tenant_secrets(&self) -> TenantSecrets {
-        TenantSecrets::standard()
-    }
+    /// reference before it is written. No default: a fallback would drop
+    /// the deployment's `require_sealed_secrets()`.
+    ///
+    /// ```compile_fail
+    /// # use rustango::tenancy::{Org, PrewarmReport, TenancyError, TenantPoolInvalidator};
+    /// # use rustango::tenancy::decommission::{Action, Report};
+    /// # use std::{future::Future, pin::Pin};
+    /// struct NoSecrets;
+    /// impl TenantPoolInvalidator for NoSecrets {
+    ///     fn invalidate<'a>(&'a self, _: &'a str) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    ///         Box::pin(async {})
+    ///     }
+    ///     fn resolved_database_url<'a>(&'a self, _: &'a Org)
+    ///         -> Pin<Box<dyn Future<Output = Result<String, TenancyError>> + Send + 'a>> {
+    ///         unimplemented!()
+    ///     }
+    ///     fn decommission<'a>(&'a self, _: &'a str, _: Action)
+    ///         -> Pin<Box<dyn Future<Output = Result<Report, TenancyError>> + Send + 'a>> {
+    ///         unimplemented!()
+    ///     }
+    ///     fn prewarm<'a>(&'a self)
+    ///         -> Pin<Box<dyn Future<Output = Result<PrewarmReport, TenancyError>> + Send + 'a>> {
+    ///         unimplemented!()
+    ///     }
+    /// }
+    /// ```
+    fn tenant_secrets(&self) -> TenantSecrets;
 
     /// Take a tenant out of service — see
     /// [`crate::tenancy::decommission`].

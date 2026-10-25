@@ -157,6 +157,10 @@ To rotate the key, move the old one to `RUSTANGO_SECRET_KEY_PREVIOUS`, set the n
 Rolling back to 0.60.x leaves `enc:` rows unreadable there: edit those tenants back to a literal URL first.
 Create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` now probes the tenant database before writing.
 
+### `TenantPoolInvalidator::tenant_secrets` has no default
+
+A custom implementor must return its `TenantSecrets`; the old default ignored `require_sealed_secrets()`.
+
 ### `Dialect` has server DDL methods
 
 `create_database_sql`, `create_login_sql`, `grant_database_sql` and friends have defaults; a custom `Dialect` with a method of the same name must rename it.
