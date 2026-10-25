@@ -1348,26 +1348,46 @@ pub async fn bulk_insert_pool(pool: &Pool, query: &BulkInsertQuery) -> Result<()
     // Keep every `pool.dialect()` a temporary: it yields `&dyn Dialect`,
     // which is not `Sync`, so holding one across an `.await` would make
     // this future non-Send.
-    let mut stmts = compile_bulk_insert_batches(pool.dialect(), query)?;
+    let stmts = compile_bulk_insert_batches(pool.dialect(), query)?;
+    execute_all_or_none(pool, stmts).await.map(drop)
+}
 
-    // One statement is atomic alone, but inside an outer `atomic` it must
-    // join that transaction like a multi-batch insert does.
+/// Rows per batched statement: `binds_per_row` binds each under the
+/// dialect's cap, and at most `max`.
+pub(crate) fn rows_per_batch(dialect: &dyn Dialect, binds_per_row: usize, max: usize) -> usize {
+    (dialect.max_bind_params() / binds_per_row.max(1)).clamp(1, max.max(1))
+}
+
+/// Run `stmts` all or none; returns rows affected. One statement alone
+/// needs no transaction, but inside an [`atomic`] on `pool` any count
+/// joins it as a savepoint.
+pub(crate) async fn execute_all_or_none(
+    pool: &Pool,
+    mut stmts: Vec<super::CompiledStatement>,
+) -> Result<u64, ExecError> {
     if stmts.len() == 1 && !atomic::in_block(pool) {
         let stmt = stmts.remove(0);
-        execute_pool(pool, &stmt.sql, stmt.params).await?;
-        return Ok(());
+        return execute_pool(pool, &stmt.sql, stmt.params).await;
     }
-    // All batches or none; inside an outer `atomic` on this pool this is a savepoint.
     atomic(pool, move |tx| {
         Box::pin(async move {
             let mut guard = tx.lock().await?;
-            for stmt in stmts {
-                execute_tx(&mut guard, &stmt.sql, stmt.params).await?;
-            }
-            Ok(())
+            execute_batches_tx(&mut guard, stmts).await
         })
     })
     .await
+}
+
+/// Run `stmts` in order in `tx`; returns the rows they affected.
+pub(crate) async fn execute_batches_tx(
+    tx: &mut PoolTx<'_>,
+    stmts: Vec<super::CompiledStatement>,
+) -> Result<u64, ExecError> {
+    let mut affected = 0;
+    for stmt in stmts {
+        affected += execute_tx(tx, &stmt.sql, stmt.params).await?;
+    }
+    Ok(affected)
 }
 
 /// Check `query` against field limits like [`insert_pool`] does (#2153),
@@ -1384,7 +1404,7 @@ pub(crate) fn compile_bulk_insert_batches(
     if query.rows.is_empty() {
         return Ok(Vec::new());
     }
-    let max_rows = (dialect.max_bind_params() / query.columns.len().max(1)).max(1);
+    let max_rows = rows_per_batch(dialect, query.columns.len(), usize::MAX);
     if query.rows.len() <= max_rows {
         return Ok(vec![dialect.compile_bulk_insert(query)?]);
     }
@@ -1417,33 +1437,27 @@ pub async fn bulk_update_pool(pool: &Pool, query: &BulkUpdateQuery) -> Result<u6
     if query.rows.is_empty() {
         return Ok(0);
     }
-    // Each row binds its PK plus one value per column; past the cap, batch (#2295).
-    let max_rows = (pool.dialect().max_bind_params() / (query.update_columns.len() + 1)).max(1);
-    let mut stmts = query
+    let stmts = compile_bulk_update_batches(pool.dialect(), query, usize::MAX)?;
+    execute_all_or_none(pool, stmts).await
+}
+
+/// Compile `query` in batches of at most `max` rows that fit the bind cap.
+pub(crate) fn compile_bulk_update_batches(
+    dialect: &dyn Dialect,
+    query: &BulkUpdateQuery,
+    max: usize,
+) -> Result<Vec<super::CompiledStatement>, ExecError> {
+    // Each row binds its PK plus one value per column (#2295).
+    let max_rows = rows_per_batch(dialect, query.update_columns.len() + 1, max);
+    query
         .rows
         .chunks(max_rows)
         .map(|chunk| {
             let batch =
                 BulkUpdateQuery::new(query.model, query.update_columns.clone(), chunk.to_vec());
-            pool.dialect().compile_bulk_update(&batch)
+            dialect.compile_bulk_update(&batch).map_err(ExecError::from)
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    if stmts.len() == 1 && !atomic::in_block(pool) {
-        let stmt = stmts.remove(0);
-        return execute_pool(pool, &stmt.sql, stmt.params).await;
-    }
-    // All batches or none, like `bulk_insert_pool`.
-    atomic(pool, move |tx| {
-        Box::pin(async move {
-            let mut guard = tx.lock().await?;
-            let mut affected = 0;
-            for stmt in stmts {
-                affected += execute_tx(&mut guard, &stmt.sql, stmt.params).await?;
-            }
-            Ok(affected)
-        })
-    })
-    .await
+        .collect()
 }
 
 /// Run arbitrary SQL with bound `SqlValue` params; returns rows
@@ -1832,10 +1846,7 @@ pub(crate) async fn bulk_insert_tx(
     query: &BulkInsertQuery,
 ) -> Result<(), ExecError> {
     let stmts = compile_bulk_insert_batches(tx.dialect(), query)?;
-    for stmt in stmts {
-        execute_tx(tx, &stmt.sql, stmt.params).await?;
-    }
-    Ok(())
+    execute_batches_tx(tx, stmts).await.map(drop)
 }
 
 /// `SELECT` inside an open transaction, with optional `select_related`
@@ -3003,6 +3014,17 @@ mod in_chunk_tests {
             in_chunk_size("t", 5, 0, false),
             Err(ExecError::InListUnsplittable { max: 0, .. })
         ));
+    }
+
+    #[test]
+    fn rows_per_batch_fits_the_bind_cap_and_the_row_cap() {
+        let pg = &crate::sql::Postgres;
+        assert_eq!(rows_per_batch(pg, 6, 100), 100);
+        assert_eq!(rows_per_batch(pg, 6, usize::MAX), 65535 / 6);
+        assert_eq!(rows_per_batch(&crate::sql::Sqlite, 3, usize::MAX), 32766 / 3);
+        // A row wider than the cap still gets a batch of its own.
+        assert_eq!(rows_per_batch(pg, 70_000, usize::MAX), 1);
+        assert_eq!(rows_per_batch(pg, 0, 0), 1);
     }
 }
 

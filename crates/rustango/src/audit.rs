@@ -429,7 +429,7 @@ const AUDIT_ROWS_PER_INSERT_MAX: usize = 100;
 
 /// Entries per audit INSERT, so their binds fit the dialect's cap.
 fn audit_rows_per_insert(dialect: &dyn crate::sql::Dialect) -> usize {
-    (dialect.max_bind_params() / AUDIT_COLUMNS.len()).clamp(1, AUDIT_ROWS_PER_INSERT_MAX)
+    crate::sql::rows_per_batch(dialect, AUDIT_COLUMNS.len(), AUDIT_ROWS_PER_INSERT_MAX)
 }
 
 /// One multi-row audit INSERT, rendered by the bulk-insert writer.
@@ -1579,12 +1579,11 @@ async fn emit_many_tx(
     via: Via<'_>,
     entries: &[PendingEntry],
 ) -> Result<(), crate::sql::ExecError> {
-    let per_insert = audit_rows_per_insert(tx.dialect());
-    for chunk in entries.chunks(per_insert) {
-        let stmt = audit_insert_stmt(tx.dialect(), chunk, via)?;
-        crate::sql::raw_execute_tx(tx, &stmt.sql, stmt.params).await?;
-    }
-    Ok(())
+    let stmts = entries
+        .chunks(audit_rows_per_insert(tx.dialect()))
+        .map(|chunk| audit_insert_stmt(tx.dialect(), chunk, via))
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::sql::execute_batches_tx(tx, stmts).await.map(drop)
 }
 
 /// PKs per bulk-write statement: under SQLite's oldest bind limit (999).
@@ -2166,20 +2165,9 @@ where
         return Ok(0);
     }
     let mut tx = crate::sql::write_transaction(pool).await?;
-    // Each row binds its PK and one value per update column. Small pages
-    // also keep SQLite's per-row CTE lookup cheap.
-    let per_row = query.update_columns.len() + 1;
-    let max_rows = (tx.dialect().max_bind_params() / per_row).clamp(1, BULK_AUDIT_CHUNK);
-    let mut affected = 0;
-    for chunk in query.rows.chunks(max_rows) {
-        let batch = crate::core::BulkUpdateQuery::new(
-            query.model,
-            query.update_columns.clone(),
-            chunk.to_vec(),
-        );
-        let stmt = tx.dialect().compile_bulk_update(&batch)?;
-        affected += crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
-    }
+    // Small pages also keep SQLite's per-row CTE lookup cheap.
+    let stmts = crate::sql::compile_bulk_update_batches(tx.dialect(), query, BULK_AUDIT_CHUNK)?;
+    let affected = crate::sql::execute_batches_tx(&mut tx, stmts).await?;
     // Each row is `[pk, …update cols]`.
     let pks: Vec<crate::core::SqlValue> = query
         .rows
