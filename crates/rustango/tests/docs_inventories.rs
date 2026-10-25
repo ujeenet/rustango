@@ -218,3 +218,103 @@ fn the_documented_tracing_targets_are_the_ones_that_exist() {
         );
     }
 }
+
+// =====================================================================
+// Branding: the `[admin]` / `[brand]` key tables and the console's env vars
+// =====================================================================
+//
+// English only: the translations do not carry these sections yet.
+
+/// `pub` field names of `pub struct <name>` in `config/sections.rs`.
+fn settings_fields(root: &Path, name: &str) -> BTreeSet<String> {
+    let text = std::fs::read_to_string(root.join("crates/rustango/src/config/sections.rs"))
+        .expect("read config/sections.rs");
+    let open = format!("pub struct {name} {{");
+    let fields: BTreeSet<String> = text
+        .lines()
+        .skip_while(|l| l.trim() != open)
+        .skip(1)
+        .take_while(|l| l.trim() != "}")
+        .filter_map(|l| l.trim().strip_prefix("pub "))
+        .filter_map(|rest| rest.split(':').next())
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        !fields.is_empty(),
+        "parsed no fields out of `{name}` — the struct moved or changed shape"
+    );
+    fields
+}
+
+/// First-cell code spans of the table rows between `heading` and the next
+/// heading of the same or a higher level.
+fn table_keys(text: &str, heading: &str) -> BTreeSet<String> {
+    let level = heading.chars().take_while(|c| *c == '#').count();
+    let mut lines = text.lines().skip_while(|l| l.trim_end() != heading);
+    assert!(lines.next().is_some(), "heading `{heading}` not found");
+    lines
+        .take_while(|l| {
+            let hashes = l.chars().take_while(|c| *c == '#').count();
+            !(hashes > 0 && hashes <= level && l[hashes..].starts_with(' '))
+        })
+        .filter_map(|l| l.trim().strip_prefix("| `"))
+        .filter_map(|rest| rest.split('`').next())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn assert_same(page: &str, what: &str, code: &BTreeSet<String>, doc: &BTreeSet<String>) {
+    let missing: Vec<&String> = code.difference(doc).collect();
+    let invented: Vec<&String> = doc.difference(code).collect();
+    assert!(
+        missing.is_empty() && invented.is_empty(),
+        "{page}: the {what} table does not match the code.\n  \
+         in the code but undocumented: {missing:?}\n  \
+         documented but nonexistent: {invented:?}"
+    );
+}
+
+/// A reader copies keys off these tables; a key the table lacks cannot
+/// be found, and one only the table has is silently ignored at load.
+#[test]
+fn the_documented_admin_and_brand_keys_are_the_settings_fields() {
+    let root = repo_root();
+
+    let admin = std::fs::read_to_string(root.join("docs/admin.md")).expect("read admin.md");
+    let documented = table_keys(&admin, "### Config: `[admin]` and `[brand]`");
+    assert_same(
+        "docs/admin.md",
+        "`[admin]` key",
+        &settings_fields(&root, "AdminSettings"),
+        &documented,
+    );
+
+    let console = std::fs::read_to_string(root.join("docs/operator-console.md"))
+        .expect("read operator-console.md");
+    let (env, keys): (BTreeSet<String>, BTreeSet<String>) = table_keys(&console, "## Branding")
+        .into_iter()
+        .partition(|k| k.starts_with("RUSTANGO_"));
+    assert_same(
+        "docs/operator-console.md",
+        "`[brand]` key",
+        &settings_fields(&root, "BrandSettings"),
+        &keys,
+    );
+
+    let src =
+        std::fs::read_to_string(root.join("crates/rustango/src/tenancy/operator_console/mod.rs"))
+            .expect("read operator_console/mod.rs");
+    let read: BTreeSet<String> = src
+        .split("\"RUSTANGO_OPERATOR_")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .map(|tail| format!("RUSTANGO_OPERATOR_{tail}"))
+        .collect();
+    assert!(!read.is_empty(), "found no RUSTANGO_OPERATOR_* reads");
+    assert_same(
+        "docs/operator-console.md",
+        "`RUSTANGO_OPERATOR_*` variable",
+        &read,
+        &env,
+    );
+}

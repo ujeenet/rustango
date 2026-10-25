@@ -90,6 +90,21 @@ login, registers the tenant, runs its migrations and activates it. A failure
 after the database exists drops what the run made. The tenant's URL holds the
 new login's password and is stored sealed.
 
+To give the tenant its first admin, fill in the admin email on the form
+(username optional; it defaults to the email), or on the CLI:
+
+```bash
+cargo run -- create-tenant acme --server main --admin-email admin@example.com
+```
+
+The run creates a superuser with no usable password, before the tenant goes
+live. The admin sets their own password through a link that works once, for
+72 hours, on this tenant only. With `Builder::first_admin_mailer` it is mailed
+to them; otherwise the console shows it **once** after you submit, and the CLI
+prints it. Copy it then. A lost or expired link:
+`cargo run -- set-password-link acme admin@example.com`. Details:
+[First admin](operator-console.md).
+
 ## 5. Rotate a tenant's password
 
 Console: the tenant's page, **Rotate database password**. CLI:
