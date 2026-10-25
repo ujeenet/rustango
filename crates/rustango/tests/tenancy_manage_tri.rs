@@ -743,7 +743,7 @@ async fn schema_mode_data_verbs_skip_public(pool: &Pool) {
 
 /// One key for every scenario here, so parallel tests never disagree.
 fn with_secret_key() {
-    std::env::set_var("RUSTANGO_SECRET_KEY", "tenancy-manage-tri-key");
+    std::env::set_var("RUSTANGO_SECRET_KEY", "tenancy-manage-tri-key-0123456789abcdef");
 }
 
 /// The preflight probes the URL an `env://` reference names, and the row
@@ -826,6 +826,17 @@ async fn a_password_url_is_stored_sealed(pool: &Pool) {
     let stored = org.database_url.clone().expect("url");
     if env.backend() == BackendKind::Sqlite {
         assert_eq!(stored, url, "no password, nothing to seal");
+        // sqlx refuses `?password=` on SQLite, so one is never stored, and
+        // the refusal masks it.
+        let with_password = format!("{url}&password=hunter2");
+        let err = env
+            .run(&env.dir("migrations"), &["edit-tenant", "sealed", "--database-url", &with_password])
+            .await
+            .expect_err("sqlx refuses the parameter")
+            .to_string();
+        assert!(!err.contains("hunter2"), "{err}");
+        let kept = env.org("sealed").await.expect("row").database_url;
+        assert_eq!(kept.as_deref(), Some(url.as_str()));
         return;
     }
     assert!(stored.starts_with("enc:v1:"), "{stored}");
@@ -840,10 +851,106 @@ async fn a_password_url_is_stored_sealed(pool: &Pool) {
     assert!(edited.starts_with("enc:v1:") && edited != stored, "{edited}");
 }
 
+/// A reference resolving to a bare secret is never echoed: not by
+/// provision, the run store, or the CLI.
+async fn a_resolved_secret_is_never_echoed(pool: &Pool) {
+    use rustango::tenancy::provision_store::{ProvisioningEvent, ProvisioningRun};
+    let env = Env::new(pool).await;
+    let var = format!("RUSTANGO_MT_LEAK_{}", env.backend().as_str().to_uppercase());
+    std::env::set_var(&var, "hunter2-leak");
+    let reference = format!("env://{var}");
+    let dir = env.dir("migrations");
+    let request = env.db_request("leak", &reference);
+    let r = typed!(env.registry, p => rustango::tenancy::provision::provision_tenant_recorded(
+        &p, &env.url, &dir, &request, None, None, None).await.map(drop));
+    let err = r.expect_err("not a URL").to_string();
+    assert!(!err.contains("hunter2"), "{err}");
+    let runs: Vec<ProvisioningRun> = ProvisioningRun::objects()
+        .fetch(&env.registry)
+        .await
+        .unwrap();
+    let events: Vec<ProvisioningEvent> = ProvisioningEvent::objects()
+        .fetch(&env.registry)
+        .await
+        .unwrap();
+    let stored = format!("{runs:?}{events:?}");
+    assert!(!runs.is_empty() && !stored.contains("hunter2"), "{stored}");
+
+    let mut org = Org {
+        slug: "leak-edit".into(),
+        display_name: "leak-edit".into(),
+        backend_kind: env.backend().as_str().into(),
+        database_url: Some(env.unreachable_url()),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&env.registry).await.expect("insert org");
+    let err = env
+        .run(&dir, &["edit-tenant", "leak-edit", "--database-url", &reference])
+        .await
+        .expect_err("not a URL")
+        .to_string();
+    assert!(!err.contains("hunter2") && err.contains(&reference), "{err}");
+}
+
+/// `migrate-tenant-storage --to database` checks the target like create does.
+async fn migrate_storage_checks_the_target_url(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    if env.backend() != BackendKind::Postgres {
+        return;
+    }
+    let dir = env.dir("migrations");
+    let opts = env.tenant_opts("mv").await;
+    env.create(&dir, "mt-mv", opts).await.expect("schema tenant");
+    let foreign = env.foreign_url();
+    let err = env
+        .run(
+            &dir,
+            &["migrate-tenant-storage", "mt-mv", "--to", "database", "--database-url", &foreign, "--dry-run"],
+        )
+        .await
+        .expect_err("another backend's URL");
+    assert!(err.to_string().contains("registry runs on"), "{err}");
+}
+
+/// `reseal-tenant-secrets` lists, then seals, a plain password URL.
+async fn reseal_seals_a_plain_password_url(pool: &Pool) {
+    with_secret_key();
+    let mut env = Env::new(pool).await;
+    let url = env.tenant_db_url("plain").await;
+    let mut org = Org {
+        slug: "plain".into(),
+        display_name: "plain".into(),
+        backend_kind: env.backend().as_str().into(),
+        database_url: Some(url.clone()),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&env.registry).await.expect("insert org");
+    let dir = env.dir("migrations");
+    let out = env.run_out(&dir, &["reseal-tenant-secrets"]).await.expect("dry run");
+    let stored = || async { env.org("plain").await.expect("row").database_url.expect("url") };
+    assert_eq!(stored().await, url, "a dry run wrote: {out}");
+    if env.backend() == BackendKind::Sqlite {
+        assert!(out.contains("0 to change"), "no password, nothing to seal: {out}");
+        return;
+    }
+    assert!(out.contains("plain: would seal"), "{out}");
+    env.run_out(&dir, &["reseal-tenant-secrets", "--apply"])
+        .await
+        .expect("apply");
+    let sealed = stored().await;
+    assert!(sealed.starts_with("enc:v1:"), "{sealed}");
+    let org = env.org("plain").await.expect("row");
+    let opened = typed!(env.registry, p => p.resolved_database_url(&org).await.expect("opens"));
+    assert_eq!(opened, url);
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
     scenarios: [
+        a_resolved_secret_is_never_echoed,
+        migrate_storage_checks_the_target_url,
+        reseal_seals_a_plain_password_url,
         provision_resolves_an_env_reference,
         create_tenant_probes_before_writing,
         a_url_of_another_backend_is_refused,
