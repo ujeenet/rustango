@@ -291,6 +291,7 @@ where
         "reset-password" => {
             users::reset_password_cmd(pools, registry_url, &args[1..], writer).await
         }
+        "set-password-link" => tenants::set_password_link(pools, &args[1..], writer).await,
         "reset-operator-password" => {
             users::reset_operator_password_cmd(pools, &args[1..], writer).await
         }
@@ -467,6 +468,10 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "                       [--host-pattern <s>] [--database-url <s>] [--no-migrate]"
+    )?;
+    writeln!(
+        w,
+        "                       [--admin-email <e> [--admin-username <u>]]  first admin; prints a set-password link"
     )?;
     writeln!(
         w,
@@ -658,6 +663,11 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "                       Reset a tenant user's password without their old one."
+    )?;
+    writeln!(w, "  set-password-link <slug> <username>")?;
+    writeln!(
+        w,
+        "                       A single-use link for the user to set their own password."
     )?;
     writeln!(
         w,

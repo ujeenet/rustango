@@ -533,6 +533,31 @@ where
                 }
             }
         }
+        // A first admin's set-password link: anonymous, the link is the credential.
+        if path == routes.change_password_url {
+            if let Some(query) = parts
+                .uri
+                .query()
+                .filter(|q| super::first_admin::is_link_query(q))
+            {
+                let link = super::first_admin::signed_link(query);
+                let form_action = format!("{path}?{query}");
+                return set_password(
+                    &org,
+                    cfg,
+                    &pool,
+                    brand_storage,
+                    routes,
+                    &method,
+                    &link,
+                    &form_action,
+                    &parts.headers,
+                    &parts.extensions,
+                    body,
+                )
+                .await;
+            }
+        }
         if path == routes.login_url {
             return match method {
                 axum::http::Method::GET => {
@@ -1540,11 +1565,24 @@ fn change_password_form(
             }
         }
     }
+    let mut ctx = password_page_ctx(org, brand_storage, routes);
+    ctx.insert("error", &error);
+    ctx.insert("success", &success);
+    if let Some(token) = crate::admin::session::current_csrf_token() {
+        ctx.insert("csrf_token", &token);
+    }
+    render_password_page(org, cfg, &ctx)
+}
+
+/// What the change- and set-password pages share: the tenant's brand and routes.
+fn password_page_ctx(
+    org: &Org,
+    brand_storage: &BoxedStorage,
+    routes: &super::routes::RouteConfig,
+) -> Context {
     let mut ctx = Context::new();
     ctx.insert("tenant_slug", &org.slug);
     ctx.insert("tenant_name", &org.display_name);
-    ctx.insert("error", &error);
-    ctx.insert("success", &success);
     let brand_name = org
         .brand_name
         .as_deref()
@@ -1569,15 +1607,21 @@ fn change_password_form(
     ctx.insert("change_password_url", &routes.change_password_url);
     ctx.insert("admin_url", &routes.admin_url);
     ctx.insert("logout_url", &routes.logout_url);
+    ctx.insert("login_url", &routes.login_url);
     ctx.insert("static_url", &routes.static_url);
-    if let Some(token) = crate::admin::session::current_csrf_token() {
-        ctx.insert("csrf_token", &token);
-    }
     ctx.insert(
         "csp_nonce",
         &crate::csp_nonce::current().unwrap_or_default(),
     );
-    axum::response::Html(match cfg.tera.render("tenant_change_password.html", &ctx) {
+    ctx
+}
+
+fn render_password_page(
+    org: &Org,
+    cfg: &TenantSessionConfig,
+    ctx: &Context,
+) -> axum::response::Html<String> {
+    axum::response::Html(match cfg.tera.render("tenant_change_password.html", ctx) {
         Ok(html) => html,
         Err(e) => {
             tracing::error!(
@@ -1707,6 +1751,105 @@ async fn change_password_submit(
         routes.change_password_url
     ))
     .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct SetPasswordForm {
+    new_password: String,
+    #[serde(default)]
+    confirm_password: String,
+}
+
+/// A first admin's set-password link: GET shows the form, POST sets the
+/// password. The write lands only while the password is unchanged since
+/// the link was issued, so the link works once.
+#[allow(clippy::too_many_arguments)]
+async fn set_password(
+    org: &Org,
+    cfg: &TenantSessionConfig,
+    tenant_pool: &crate::sql::Pool,
+    brand_storage: &BoxedStorage,
+    routes: &super::routes::RouteConfig,
+    method: &axum::http::Method,
+    link: &str,
+    form_action: &str,
+    headers: &HeaderMap,
+    extensions: &axum::http::Extensions,
+    body: Body,
+) -> Response {
+    use crate::auth_flows::{AuthFlowError, LinkScope, LinkTarget, PasswordReset};
+
+    const DEAD: &str = "This link is invalid, used or expired. Ask for a new one.";
+    let key = super::first_admin::link_key(&cfg.secret);
+    let mut ctx = password_page_ctx(org, brand_storage, routes);
+    ctx.insert("set_password", &true);
+    ctx.insert("form_action", form_action);
+    let outcome: Result<bool, String> = match *method {
+        axum::http::Method::GET => PasswordReset::verify(&LinkScope::from(org), link, &key)
+            .map(|_| false)
+            .map_err(|_| DEAD.to_owned()),
+        axum::http::Method::POST => {
+            let form = match http_body_util::BodyExt::collect(body).await {
+                Ok(b) => serde_urlencoded::from_bytes::<SetPasswordForm>(&b.to_bytes()).ok(),
+                Err(_) => None,
+            };
+            match form {
+                None => Err("All fields are required.".to_owned()),
+                Some(f) if !f.confirm_password.is_empty() && f.confirm_password != f.new_password => {
+                    Err("The password and its confirmation did not match.".to_owned())
+                }
+                Some(f) => match crate::auth_flows::confirm_password_reset_pool(
+                    LinkTarget::tenant(tenant_pool, org),
+                    link,
+                    &f.new_password,
+                    &key,
+                )
+                .await
+                {
+                    Ok(_) => Ok(true),
+                    Err(AuthFlowError::WeakPassword(m)) => Err(m),
+                    Err(AuthFlowError::Database(e)) => {
+                        warn!(target: "rustango::tenancy::admin", slug = %org.slug, error = %e, "set-password write");
+                        Err("Could not set the password; please try again.".to_owned())
+                    }
+                    Err(_) => Err(DEAD.to_owned()),
+                },
+            }
+        }
+        _ => return (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response(),
+    };
+    match outcome {
+        Ok(done) => ctx.insert("done", &done),
+        Err(msg) => {
+            ctx.insert("dead", &(msg == DEAD));
+            ctx.insert("error", &msg);
+        }
+    }
+    // Same token seeding as the login page: the visitor has no session yet.
+    #[cfg(feature = "csrf")]
+    let set_cookie = match crate::admin::session::current_csrf_token() {
+        Some(token) => {
+            ctx.insert("csrf_token", &token);
+            None
+        }
+        None => {
+            let (token, cookie) = crate::forms::csrf::ensure_token_under_layer(headers, extensions);
+            ctx.insert("csrf_token", &token);
+            cookie
+        }
+    };
+    #[cfg(not(feature = "csrf"))]
+    let _ = (headers, extensions);
+    let mut resp = render_password_page(org, cfg, &ctx).into_response();
+    let h = resp.headers_mut();
+    // The URL is a credential until used: keep it out of caches and referrers.
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    #[cfg(feature = "csrf")]
+    if let Some(v) = set_cookie.and_then(|c| HeaderValue::from_str(&c).ok()) {
+        h.append(header::SET_COOKIE, v);
+    }
+    resp
 }
 
 fn rustango_png_response() -> Response {

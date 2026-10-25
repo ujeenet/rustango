@@ -13,6 +13,24 @@
 <div class="alert alert-error">{{ error }}</div>
 {% endif %}
 
+{% if handover %}
+<div class="alert alert-success" id="first-admin">
+  {% if handover.mailed_to %}
+  A set-password link for <code>{{ handover.username }}</code> was mailed to
+  <code>{{ handover.mailed_to }}</code>. It works once and expires in {{ handover.hours }} hours.
+  {% elif handover.link %}
+  {% if handover.mail_failed %}The mail could not be sent. {% endif %}
+  Give this set-password link to <code>{{ handover.username }}</code>. It is shown
+  only now, works once, and expires in {{ handover.hours }} hours.
+  <p><input type="text" readonly value="{{ handover.link }}" aria-label="Set-password link"
+            size="80" autocomplete="off"></p>
+  {% else %}
+  The first admin <code>{{ handover.username }}</code> was created, but no link could
+  be issued. Run <code>set-password-link {{ slug }} {{ handover.username }}</code>.
+  {% endif %}
+</div>
+{% endif %}
+
 <table>
   <thead>
     <tr><th>#</th><th>Step</th><th>Status</th><th>Detail</th></tr>

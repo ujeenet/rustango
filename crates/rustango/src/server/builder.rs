@@ -55,6 +55,9 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// operator console cannot create tenants — see that method for
     /// why this is opt-in rather than on by default.
     provisioning_dir: Option<std::path::PathBuf>,
+    /// Mails a new tenant's first admin their set-password link.
+    #[cfg(feature = "email")]
+    first_admin_mail: Option<(crate::email::BoxedMailer, String)>,
     /// How long `serve` lets open connections finish after SIGTERM.
     drain_timeout: std::time::Duration,
     /// A `running` run silent this long is closed at boot.
@@ -172,6 +175,8 @@ impl<DB: Database> Builder<DB> {
             routes: crate::tenancy::RouteConfig::default(),
             health_endpoints: false,
             provisioning_dir: None,
+            #[cfg(feature = "email")]
+            first_admin_mail: None,
             drain_timeout: crate::shutdown::DEFAULT_DRAIN_TIMEOUT,
             stale_run_after: crate::tenancy::provision_store::STALE_RUN_AFTER,
             static_dirs: Vec::new(),
@@ -325,6 +330,19 @@ impl<DB: Database> Builder<DB> {
         migrations_dir: impl Into<std::path::PathBuf>,
     ) -> Self {
         self.provisioning_dir = Some(migrations_dir.into());
+        self
+    }
+
+    /// Mail a new tenant's first admin their set-password link, from
+    /// `from`. Without it the console shows the link to the operator once.
+    #[cfg(feature = "email")]
+    #[must_use]
+    pub fn first_admin_mailer(
+        mut self,
+        mailer: crate::email::BoxedMailer,
+        from: impl Into<String>,
+    ) -> Self {
+        self.first_admin_mail = Some((mailer, from.into()));
         self
     }
 
@@ -860,12 +878,21 @@ impl<DB: Database> Builder<DB> {
                 ),
             }
         }
+        // Links are signed with the tenant admin's own secret and path.
+        let handover = crate::tenancy::FirstAdminHandover::new(&session_secret_for_tenant)
+            .set_password_path(self.routes.change_password_url.clone());
+        #[cfg(feature = "email")]
+        let handover = match self.first_admin_mail {
+            Some((mailer, from)) => handover.mailer(mailer, from),
+            None => handover,
+        };
         let provisioner = self.provisioning_dir.map(|dir| {
             crate::tenancy::provision::Provisioner::new(
                 self.pools.clone(),
                 self.registry_url.clone(),
                 dir,
             )
+            .with_first_admin_handover(handover)
             .erased()
         });
         let operator_admin = operator_console::router_full_unlogged(

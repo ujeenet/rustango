@@ -45,6 +45,9 @@ pub struct CreateTenantOpts {
     pub port: Option<i32>,
     pub path_prefix: Option<String>,
     pub no_migrate: bool,
+    /// A superuser created before the tenant goes live. Issue their
+    /// set-password link with [`crate::tenancy::first_admin::hand_over_user`].
+    pub first_admin: Option<crate::tenancy::FirstAdmin>,
 }
 
 impl Default for CreateTenantOpts {
@@ -60,6 +63,7 @@ impl Default for CreateTenantOpts {
             port: None,
             path_prefix: None,
             no_migrate: false,
+            first_admin: None,
         }
     }
 }
@@ -150,6 +154,7 @@ where
             port: opts.port,
             path_prefix: opts.path_prefix.clone(),
             run_migrations: !opts.no_migrate,
+            first_admin: opts.first_admin.clone(),
             ..provision::ProvisionRequest::new(slug, storage)
         },
     )
@@ -257,8 +262,15 @@ where
         }
     }
 
-    let mut result =
-        migrate_and_activate(pools, registry_url, migrations_dir, &org, !opts.no_migrate).await;
+    let mut result = migrate_and_activate(
+        pools,
+        registry_url,
+        migrations_dir,
+        &org,
+        !opts.no_migrate,
+        opts.first_admin.as_ref(),
+    )
+    .await;
     if let Some(db) = created {
         match result {
             Ok(()) => db.keep().await,
@@ -327,6 +339,7 @@ where
         migrations_dir,
         &existing,
         !opts.no_migrate,
+        opts.first_admin.as_ref(),
     )
     .await?;
     let forget = crate::tenancy::provision_store::forget_unsucceeded_runs(org_id)?;
@@ -336,13 +349,14 @@ where
         .ok_or_else(|| TenancyError::Validation(format!("create_tenant: tenant `{slug}` vanished")))
 }
 
-/// Migrate `org` alone, then activate it (#2392).
+/// Migrate `org` alone, create its first admin, then activate it.
 async fn migrate_and_activate<DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
     migrations_dir: &Path,
     org: &Org,
     migrate: bool,
+    first_admin: Option<&crate::tenancy::FirstAdmin>,
 ) -> Result<(), TenancyError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
@@ -351,6 +365,9 @@ where
         for dir in resolve_migration_dirs(migrations_dir) {
             tenant_migrate::migrate_one_tenant(pools, org, &dir, registry_url, None).await?;
         }
+    }
+    if let Some(admin) = first_admin {
+        crate::tenancy::first_admin::create(pools, org, admin).await?;
     }
     let org_id = org.id.get().copied().unwrap_or_default();
     crate::tenancy::provision::activate(&pools.registry_pool(), org_id).await?;

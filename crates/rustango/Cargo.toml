@@ -492,6 +492,8 @@ tenancy = [
     "_rand",
     # Sealed (`enc:`) tenant database URLs.
     "_aead",
+    # A new tenant's first admin gets a signed set-password link.
+    "auth_flows",
     "dep:rpassword",
     "dep:serde_urlencoded",
     "_tower",
