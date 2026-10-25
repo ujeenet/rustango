@@ -624,6 +624,20 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
     Ok(())
 }
 
+/// Write a projected `alias.col` as `"alias"."col" AS "alias__col"`, like a
+/// join's own columns; `false` for a bare model column.
+fn write_joined_projection(b: &mut Sql<'_>, col: &str) -> bool {
+    let Some((alias, c)) = col.split_once('.') else {
+        return false;
+    };
+    b.write_alias(alias);
+    b.sql.push('.');
+    b.write_ident(c);
+    b.sql.push_str(" AS ");
+    b.write_ident(&crate::core::joins::joined_label(alias, c));
+    true
+}
+
 /// Write a model column for the distinct-on fallback's inner SELECT.
 /// With joins present it is qualified, so it cannot clash with a
 /// joined column of the same name. The outer SELECT reads from the
@@ -673,7 +687,10 @@ fn write_distinct_on_via_window(
                 b.sql.push_str(", ");
             }
             first_col = false;
-            b.write_ident(col);
+            match col.split_once('.') {
+                Some((alias, c)) => b.write_ident(&crate::core::joins::joined_label(alias, c)),
+                None => b.write_ident(col),
+            }
         }
     } else {
         for field in query.model.scalar_fields() {
@@ -705,7 +722,9 @@ fn write_distinct_on_via_window(
                 b.sql.push_str(", ");
             }
             inner_first = false;
-            write_distinct_inner_col(b, scope.name, col, qualify);
+            if !write_joined_projection(b, col) {
+                write_distinct_inner_col(b, scope.name, col, qualify);
+            }
         }
     } else {
         for field in query.model.scalar_fields() {
@@ -944,6 +963,9 @@ fn write_select_body_qualified(
                 b.sql.push_str(", ");
             }
             first_col = false;
+            if write_joined_projection(b, col) {
+                continue;
+            }
             if qualify {
                 b.write_ident(scope.name);
                 b.sql.push('.');

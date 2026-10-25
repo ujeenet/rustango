@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — related columns in `values_list` / `values_dict` / `only`
+
+A projection may name a column across FK hops, like `values_list(&["title", "author__name"])`: one LEFT JOIN per hop, only the named columns, in the caller's order, keyed by that name.
+
 ### Changed — PostgreSQL `IN` lists bind one array
 
 On PostgreSQL `is_in` / `__in` / `Op::In` over a list of one integer, string, bool or uuid type compiles to `= ANY($1)` (`NOT IN` to `<> ALL($1)`), so every list length shares one prepared statement. Lists with NULLs or other types, and MySQL / SQLite, keep `IN (…)`.

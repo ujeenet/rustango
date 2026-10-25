@@ -41,7 +41,15 @@ fn values_width(query: &SelectQuery) -> usize {
 /// field, then each join's projected `alias__col`.
 fn select_model_cols(query: &SelectQuery) -> Vec<TypedCol> {
     let model = query.model;
-    let typed = |c: &'static str| (c.into(), model.field_by_column(c).map(|f| f.ty));
+    // A projected `alias.col` reads back as `alias__col`, typed by its join.
+    let typed = |c: &'static str| match c.split_once('.') {
+        None => (c.into(), model.field_by_column(c).map(|f| f.ty)),
+        Some((alias, col)) => {
+            let target = query.joins.iter().find(|j| j.alias == alias);
+            let ty = target.and_then(|j| j.target.field_by_column(col)).map(|f| f.ty);
+            (joined_key(alias, col).into(), ty)
+        }
+    };
     let mut cols: Vec<TypedCol> = match &query.projection {
         Some(cols) => cols.iter().copied().map(typed).collect(),
         None => model.scalar_fields().map(|f| typed(f.column)).collect(),
