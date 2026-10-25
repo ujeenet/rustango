@@ -206,17 +206,25 @@ impl Dialect for MySql {
         Some("SELECT VERSION()")
     }
 
-    /// Rows of one text column, the session's grant lines. MySQL folds
-    /// active roles' rights into the user's line; MariaDB lists each role.
+    /// Rows of (`PRIVILEGE_TYPE`, `IS_GRANTABLE`): the current account's
+    /// global privileges. MariaDB has the same view.
     fn login_privileges_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.USER_PRIVILEGES \
+             WHERE GRANTEE = CONCAT('''', SUBSTRING_INDEX(CURRENT_USER(), '@', 1), \
+             '''@''', SUBSTRING_INDEX(CURRENT_USER(), '@', -1), '''')",
+        )
+    }
+
+    /// MySQL folds active roles' rights into the user's line; MariaDB
+    /// lists each role, nested ones too.
+    fn login_grants_sql(&self) -> Option<&'static str> {
         Some("SHOW GRANTS")
     }
 
+    /// `user@host`; the host follows the last `@`.
     fn current_account_sql(&self) -> Option<&'static str> {
-        Some(
-            "SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1), \
-             SUBSTRING_INDEX(CURRENT_USER(), '@', -1)",
-        )
+        Some("SELECT CAST(CURRENT_USER() AS CHAR)")
     }
 
     fn grant_admin_rights_sql(

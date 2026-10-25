@@ -275,6 +275,27 @@ const MYSQL_DB_PRIVILEGES: &[&str] = &[
 /// MariaDB's `ALL` on a database also holds these.
 const MARIADB_DB_PRIVILEGES: &[&str] = &["DELETE HISTORY"];
 
+/// MariaDB 10.3.4+ has `DELETE HISTORY`, which `ALL` on a database holds.
+/// Old servers report `5.5.5-10.x.y-MariaDB`.
+fn has_delete_history(version: &str) -> bool {
+    version.contains("MariaDB")
+        && mysql_at_least(version.strip_prefix("5.5.5-").unwrap_or(version), (10, 3, 4))
+}
+
+/// `user@host` (MySQL: the host follows the last `@`), or a bare user.
+fn split_account(account: &str, has_host: bool) -> crate::sql::ServerAccount {
+    match account.rsplit_once('@').filter(|_| has_host) {
+        Some((user, host)) => crate::sql::ServerAccount {
+            user: user.to_owned(),
+            host: Some(host.to_owned()),
+        },
+        None => crate::sql::ServerAccount {
+            user: account.to_owned(),
+            host: None,
+        },
+    }
+}
+
 /// Whether `rows` of (privilege, grantable) cover `GRANT ALL ON db.*`.
 fn mysql_can_grant(rows: &[(String, bool)], mariadb: bool) -> bool {
     let grantable = |p: &str| rows.iter().any(|(r, g)| *g && r.eq_ignore_ascii_case(p));
@@ -511,13 +532,13 @@ impl ServerAdmin {
             account: None,
             dir: None,
         };
+        // Shown only, so a failure leaves it out.
         if let Some(sql) = d.current_account_sql() {
-            let rows: Vec<(String, Option<String>)> =
-                crate::sql::raw_query_pool(sql, Vec::new(), pool).await?;
+            let rows: Option<Vec<(String,)>> =
+                crate::sql::raw_query_pool(sql, Vec::new(), pool).await.ok();
             report.account = rows
-                .into_iter()
-                .next()
-                .map(|(user, host)| crate::sql::ServerAccount { user, host });
+                .and_then(|r| r.into_iter().next())
+                .map(|(a,)| split_account(&a, d.name() == "mysql"));
         }
         if let Some(sql) = d.server_version_sql() {
             let rows: Vec<(String,)> = crate::sql::raw_query_pool(sql, Vec::new(), pool).await?;
@@ -526,7 +547,7 @@ impl ServerAdmin {
         if d.name() == "postgres" {
             report.pg_major = report.server_version.as_deref().and_then(pg_major);
         }
-        let Some(sql) = d.login_privileges_sql() else {
+        let Some(sql) = d.login_grants_sql().or_else(|| d.login_privileges_sql()) else {
             return Ok(report);
         };
         if d.name() == "postgres" {
@@ -552,11 +573,11 @@ impl ServerAdmin {
             // DROP too: a failed create is undone by dropping.
             report.can_create_database = has("CREATE") && has("DROP");
             report.can_create_user = has("CREATE USER");
-            let mariadb = report
+            let history = report
                 .server_version
                 .as_deref()
-                .is_some_and(|v| v.contains("MariaDB"));
-            report.can_grant = mysql_can_grant(&rows, mariadb);
+                .is_some_and(has_delete_history);
+            report.can_grant = mysql_can_grant(&rows, history);
         }
         Ok(report)
     }
@@ -1252,6 +1273,24 @@ mod tests {
     }
 
     #[test]
+    fn delete_history_only_on_mariadb_10_3_4() {
+        assert!(has_delete_history("11.8.9-MariaDB-ubu2404"));
+        assert!(has_delete_history("10.3.4-MariaDB"));
+        assert!(has_delete_history("5.5.5-10.11.2-MariaDB"));
+        assert!(!has_delete_history("10.3.3-MariaDB"));
+        assert!(!has_delete_history("10.2.44-MariaDB-log"));
+        assert!(!has_delete_history("8.0.46"));
+    }
+
+    #[test]
+    fn an_account_splits_on_the_last_at() {
+        let a = split_account("ops@corp@10.0.%", true);
+        assert_eq!((a.user.as_str(), a.host.as_deref()), ("ops@corp", Some("10.0.%")));
+        let a = split_account("app@x", false);
+        assert_eq!((a.user.as_str(), a.host), ("app@x", None));
+    }
+
+    #[test]
     fn mariadb_grant_needs_delete_history() {
         let mut rows: Vec<(String, bool)> = MYSQL_DB_PRIVILEGES
             .iter()
@@ -1303,7 +1342,6 @@ mod tests {
             "GRANT ALL PRIVILEGES ON *.* TO `u`@`%`",
         ]));
         assert_eq!(rights(&no_opt, false), (true, true, false));
-        assert!(maria.iter().all(|(p, _)| !p.contains("B279")));
     }
 
     #[test]

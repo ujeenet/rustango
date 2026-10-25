@@ -240,7 +240,7 @@ impl Dialect for Postgres {
     }
 
     fn current_account_sql(&self) -> Option<&'static str> {
-        Some("SELECT current_user::text, NULL::text")
+        Some("SELECT current_user::text")
     }
 
     fn schema_privileges_sql(&self) -> Option<&'static str> {

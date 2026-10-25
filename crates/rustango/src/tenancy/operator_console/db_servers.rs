@@ -392,6 +392,7 @@ pub(super) struct ServerProbe {
     message: String,
     login: bool,
     server_version: Option<String>,
+    // Shipped in 0.61.0: `false` means not confirmed, a no or an unknown.
     can_create_database: bool,
     can_create_user: bool,
     can_grant: bool,

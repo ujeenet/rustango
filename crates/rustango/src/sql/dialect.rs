@@ -1110,7 +1110,13 @@ pub trait Dialect: Send + Sync {
         None
     }
 
-    /// One row: the current login's user and, on MySQL, account host.
+    /// Rows of one text column: the session's grant lines, roles included.
+    /// Read in place of [`Self::login_privileges_sql`] where present.
+    fn login_grants_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// One row, one text column: the current login (MySQL: `user@host`).
     fn current_account_sql(&self) -> Option<&'static str> {
         None
     }

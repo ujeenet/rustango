@@ -152,7 +152,7 @@ untouched.
 
 ### Schema-mode creates check `CREATE` on the registry database
 
-A registry login without it is now refused before `CREATE SCHEMA`, with the `GRANT` to run. `Dialect::login_privileges_sql` on MySQL now returns `SHOW GRANTS` lines.
+A registry login without it is now refused before `CREATE SCHEMA`, with the `GRANT` to run.
 
 ### Scaffold taglines lose their brackets
 
