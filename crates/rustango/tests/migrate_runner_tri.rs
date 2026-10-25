@@ -335,6 +335,76 @@ async fn referenced_key_widens_its_junction(pool: &Pool) {
     }
 }
 
+/// Rolling back drops that follow a column rename: the CHECK and the
+/// partial index come back once the rename is undone, not before it.
+async fn rollback_after_rename_restores_check_and_partial_index(pool: &Pool) {
+    let t = "mr_rn_item";
+    let ledger = "mr_rn_ledger";
+    let dir = fresh(pool, &[t], ledger).await;
+    let name = pool.dialect().name();
+    // MySQL refuses to rename a column a CHECK reads (3959).
+    let check = name != "mysql";
+    let mut before = json!({
+        "tables": [table(t, vec![id(), col("n", true)])],
+        "indexes": [{"name": "mr_rn_pos_idx", "table": t, "columns": ["n"],
+            "unique": false, "where_clause": "n > 0"}],
+    });
+    if check {
+        before["checks"] = json!([{"name": "mr_rn_ck", "table": t, "expr": "n >= 0"}]);
+    }
+    let initial = make_migrations_from(
+        dir.path(),
+        &serde_json::from_value(before).expect("snapshot"),
+        None,
+    )
+    .expect("makemigrations")
+    .expect("a migration");
+    let mut forward = vec![Operation::Schema(SchemaChange::RenameColumn {
+        table: t.into(),
+        old_column: "n".into(),
+        new_column: "m".into(),
+    })];
+    if check {
+        forward.push(Operation::Schema(SchemaChange::DropCheckConstraint {
+            name: "mr_rn_ck".into(),
+            table: t.into(),
+        }));
+    }
+    forward.push(Operation::Schema(SchemaChange::DropIndex {
+        name: "mr_rn_pos_idx".into(),
+        table: t.into(),
+    }));
+    let mig = Migration {
+        name: "0002_rename".into(),
+        prev: Some(initial.name.clone()),
+        snapshot: snap(vec![table(t, vec![id(), col("m", true)])]),
+        forward,
+        ..initial
+    };
+    write(dir.path(), &mig);
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("rename on {name}: {e}"));
+    unapply_pool_with_ledger(pool, dir.path(), &mig.name, ledger)
+        .await
+        .unwrap_or_else(|e| panic!("rollback on {name}: {e}"));
+    let q = pool.dialect().quote_ident(t);
+    exec(pool, &format!("INSERT INTO {q} (n) VALUES (1)"))
+        .await
+        .unwrap_or_else(|e| panic!("`n` is back on {name}: {e}"));
+    if check {
+        assert!(
+            exec(pool, &format!("INSERT INTO {q} (n) VALUES (-1)"))
+                .await
+                .is_err(),
+            "the CHECK is back on {name}"
+        );
+    }
+    for d in [t, ledger] {
+        drop_table(pool, d).await;
+    }
+}
+
 fn slow(_pool: Pool) -> MigrationCallbackFut {
     Box::pin(async {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -650,6 +720,7 @@ tri_dialect_test!(
         referenced_key_widens,
         referenced_key_widens_beside_new_fks,
         referenced_key_widens_its_junction,
+        rollback_after_rename_restores_check_and_partial_index,
         refused_downgrade_runs_nothing,
         refused_loose_downgrade_runs_nothing,
         one_connection_pool_migrates,

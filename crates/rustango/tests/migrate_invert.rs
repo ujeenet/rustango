@@ -520,3 +520,36 @@ fn invert_recreates_a_dropped_index_under_the_names_at_its_op() {
         })
     );
 }
+
+/// A CHECK's text holds `prev`'s names, so it comes back after the renames.
+#[test]
+fn invert_recreates_a_check_once_its_renames_are_undone() {
+    let prev: SchemaSnapshot = serde_json::from_value(serde_json::json!({
+        "tables": [pair_table_with_composite_fk()],
+        "checks": [{"name": "pair_left_ck", "table": "pair", "expr": "left_id > 0"}]
+    }))
+    .unwrap();
+    let rename_col = Operation::Schema(SchemaChange::RenameColumn {
+        table: "duo".into(),
+        old_column: "left_id".into(),
+        new_column: "l_id".into(),
+    });
+    let forward = vec![
+        rename("pair", "duo"),
+        rename_col,
+        Operation::Schema(SchemaChange::DropCheckConstraint {
+            name: "pair_left_ck".into(),
+            table: "duo".into(),
+        }),
+    ];
+    let out = invert(&forward, &prev).unwrap();
+    assert_eq!(
+        out.last(),
+        Some(&Operation::Schema(SchemaChange::AddCheckConstraint {
+            name: "pair_left_ck".into(),
+            table: "pair".into(),
+            expr: "left_id > 0".into(),
+        }))
+    );
+    assert_eq!(out[1], rename("duo", "pair"));
+}
