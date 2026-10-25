@@ -441,22 +441,7 @@ mod tests {
         Org {
             id: crate::sql::Auto::from(id),
             slug: "acme".into(),
-            display_name: "Acme".into(),
-            storage_mode: "database".into(),
-            backend_kind: "sqlite".into(),
-            database_url: None,
-            schema_name: None,
-            host_pattern: None,
-            port: None,
-            path_prefix: None,
-            active: true,
-            created_at: chrono::Utc::now(),
-            brand_name: None,
-            brand_tagline: None,
-            logo_path: None,
-            favicon_path: None,
-            primary_color: None,
-            theme_mode: None,
+            ..crate::testkit::org()
         }
     }
 

@@ -933,6 +933,20 @@ mod tests {
     }
 
     #[test]
+    fn the_admin_fields_become_a_first_admin() {
+        let base = [("slug", "acme"), ("database_url", "sqlite://x.db")];
+        let none = request_from_form(&form(&base), None).unwrap();
+        assert!(none.first_admin.is_none());
+        let with = [&base[..], &[("admin_email", " ann@acme.test "), ("admin_username", "")]].concat();
+        let admin = request_from_form(&form(&with), None).unwrap().first_admin.unwrap();
+        assert_eq!((admin.email(), admin.username()), ("ann@acme.test", "ann@acme.test"));
+        let orphan = [&base[..], &[("admin_username", "ann")]].concat();
+        assert!(request_from_form(&form(&orphan), None).is_err());
+        let bad = [&base[..], &[("admin_email", "nope")]].concat();
+        assert!(request_from_form(&form(&bad), None).is_err());
+    }
+
+    #[test]
     fn a_non_numeric_port_is_refused() {
         let err = request_from_form(
             &form(&[("slug", "a"), ("port", "eighty")]),
