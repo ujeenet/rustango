@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — migrations, MySQL and MariaDB
+
+- MySQL: a correlated `IN` over the table an `update()` / `delete()` writes is no longer read through a derived table, which saw the write's own changes and hit wrong rows; it fails with error 1093 instead.
+- MySQL: widening a pk an M2M junction references widens the junction column too, so the junction keeps its foreign key.
+- MariaDB: JSON `=` / `<>` compare by value (`JSON_EQUALS`), not as text; `explain` returns its JSON plan instead of failing on `FORMAT=TREE` / `EXPLAIN ANALYZE`; check constraints drop with `DROP CONSTRAINT`; `bulk_update` no longer sends `VALUES ROW(…)`.
+- Rolling back a migration that renamed a column and then dropped a CHECK, partial index or exclusion constraint recreates it after the rename is undone, so its SQL finds the old name.
+- SQLite: unapplying one branch of a merged history keeps the other branch's columns; the table rebuild used the shared parent's snapshot and refused.
+
 ### Fixed — tenant logos 404'd under the default routes
 
 Tenant pages link uploaded logos and favicons under `RouteConfig::brand_url` (`/_brand` by default), the prefix tenant hosts serve, via the new `RouteConfig::brand_asset_url`. Tenant admin pages now use the tenant favicon too.

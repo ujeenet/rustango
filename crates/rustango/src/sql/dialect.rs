@@ -388,8 +388,8 @@ pub trait Dialect: Send + Sync {
     ///
     /// Every dialect must answer for itself. Postgres spells it
     /// `DROP CONSTRAINT IF EXISTS`, which is idempotent. MySQL spells
-    /// it `DROP CHECK` and takes no `IF EXISTS`, so it errors when
-    /// the constraint is already gone.
+    /// it `DROP CHECK` (MariaDB `DROP CONSTRAINT`) and takes no `IF EXISTS`,
+    /// so it errors when the constraint is already gone.
     ///
     /// # Panics
     /// The default body panics on purpose, naming the dialect. There
@@ -855,6 +855,13 @@ pub trait Dialect: Send + Sync {
     /// it as is; MySQL wraps it, since sqlx binds JSON as text.
     fn write_json_param(&self, sql: &mut String, placeholder: &str) {
         sql.push_str(placeholder);
+    }
+
+    /// Write `<lhs> = <p>` (`<>` when `ne`) for a bound JSON value at
+    /// `placeholder`, and return `true`; `false` keeps the plain operator
+    /// with [`Self::write_json_param`].
+    fn write_json_eq(&self, _sql: &mut String, _lhs: &str, _placeholder: &str, _ne: bool) -> bool {
+        false
     }
 
     /// Write the placeholder of a bound Decimal. SQLite wraps it, since

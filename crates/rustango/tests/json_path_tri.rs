@@ -153,6 +153,31 @@ async fn json_equality_matches(pool: &Pool) {
     assert_eq!(same, 1, "IS NOT DISTINCT FROM");
 }
 
+/// A JSON column compares by value, not by its text (MariaDB stores text).
+async fn json_column_equality_compares_values(pool: &Pool) {
+    use rustango::sql::CounterPool as _;
+    if pool.dialect().name() == "sqlite" {
+        return; // SQLite still compares the column as text.
+    }
+    Demo {
+        id: Auto::Unset,
+        data: serde_json::json!({"a": 1, "b": [1, 2]}),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("seed");
+    let same = serde_json::json!({"b": [1, 2], "a": 1.0});
+    assert_eq!(count_json_eq(pool, same.clone()).await, 1, "1 = 1.0");
+    let ne = rustango::query::QuerySet::<Demo>::default()
+        .filter_op("data", Op::Ne, SqlValue::Json(same))
+        .count(pool)
+        .await
+        .expect("count");
+    assert_eq!(ne, 1, "<> matches only the seeded row");
+    let swapped = serde_json::json!({"a": 1, "b": [2, 1]});
+    assert_eq!(count_json_eq(pool, swapped).await, 0, "array order");
+}
+
 /// #1898: SQLite's as_text path returned the number 1 and the bool 1.
 async fn json_as_text_is_text(pool: &Pool) {
     Demo {
@@ -360,6 +385,7 @@ tri_dialect_test! {
         a_nested_key_path_executes,
         an_array_indexed_path_executes,
         json_equality_matches,
+        json_column_equality_compares_values,
         json_as_text_is_text,
     ],
 }

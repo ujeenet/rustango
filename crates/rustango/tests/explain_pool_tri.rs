@@ -164,13 +164,14 @@ async fn analyze_flag_is_accepted(pool: &Pool) {
     // The negative arm is the load-bearing one here: it is what would
     // notice a backend quietly starting to execute the query on
     // `analyze: true`, which is a behaviour change, not an improvement.
+    // MariaDB's `ANALYZE FORMAT=JSON` reports `r_total_time_ms` instead.
+    let timed = plan.contains("actual time=") || plan.contains("r_total_time_ms");
     assert_eq!(
-        plan.contains("actual time="),
+        timed,
         timings.value,
-        "ANALYZE timings on {}: expected present={}, got present={} — {}\n{plan}",
+        "ANALYZE timings on {}: expected present={}, got present={timed} — {}\n{plan}",
         pool.dialect().name(),
         timings.value,
-        plan.contains("actual time="),
         timings.why
     );
 }

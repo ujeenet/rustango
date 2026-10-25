@@ -22,6 +22,27 @@ use super::{CompiledStatement, Dialect, SqlError};
 /// column reaches it: a signed BIGINT stops at 2^63 - 1.
 pub(crate) const SKIPPED_INSERT_ID: u64 = u64::MAX;
 
+/// SQL that MySQL and MariaDB spell differently, picked by the server
+/// itself: MySQL 8 runs `/*!80000 …*/`, which MariaDB skips, and MariaDB
+/// runs `/*M! …*/`, which MySQL skips. Both sides bind the same
+/// placeholders in the same order.
+#[derive(Clone, Copy)]
+pub(crate) struct ByServer<'a> {
+    pub mysql: &'a str,
+    pub mariadb: &'a str,
+}
+
+impl ByServer<'_> {
+    pub(crate) fn write(self, sql: &mut String) {
+        debug_assert!(!self.mysql.contains("*/") && !self.mariadb.contains("*/"));
+        sql.push_str("/*!80000 ");
+        sql.push_str(self.mysql);
+        sql.push_str(" */ /*M! ");
+        sql.push_str(self.mariadb);
+        sql.push_str(" */");
+    }
+}
+
 /// The `MySQL` 8.4+ dialect. Stateless; construct with `MySql`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MySql;
@@ -461,18 +482,22 @@ impl Dialect for MySql {
         false
     }
 
-    /// MySQL spells this `DROP CHECK` and takes no `IF EXISTS`,
-    /// which is a parse error on any drop-constraint form.
+    /// MySQL spells this `DROP CHECK`, MariaDB `DROP CONSTRAINT`, and
+    /// neither takes `IF EXISTS` there.
     ///
     /// **So this is not idempotent.** Dropping a constraint that is
     /// already gone is an error, where the Postgres form does
     /// nothing.
     fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String> {
-        Some(format!(
-            "ALTER TABLE {} DROP CHECK {}",
-            self.quote_ident(table),
-            self.quote_ident(name)
-        ))
+        let mut sql = format!("ALTER TABLE {} DROP ", self.quote_ident(table));
+        ByServer {
+            mysql: "CHECK",
+            mariadb: "CONSTRAINT",
+        }
+        .write(&mut sql);
+        sql.push(' ');
+        sql.push_str(&self.quote_ident(name));
+        Some(sql)
     }
 
     /// MySQL spells this `DROP FOREIGN KEY` and takes no
@@ -758,6 +783,22 @@ impl Dialect for MySql {
         sql.push_str("/*!80000 CAST(*/");
         sql.push_str(placeholder);
         sql.push_str("/*!80000 AS JSON)*/");
+    }
+
+    /// MariaDB's JSON is text, so `=` would compare key order and `1` vs `1.0`.
+    fn write_json_eq(&self, sql: &mut String, lhs: &str, placeholder: &str, ne: bool) -> bool {
+        // A comment in `lhs` would end the per-server one.
+        if lhs.contains("*/") {
+            return false;
+        }
+        let (op, want) = if ne { ("<>", 0) } else { ("=", 1) };
+        // Bare in a WHERE, MariaDB 11 takes a NULL `JSON_EQUALS` as true.
+        ByServer {
+            mysql: &format!("{lhs} {op} CAST({placeholder} AS JSON)"),
+            mariadb: &format!("JSON_EQUALS({lhs}, {placeholder}) = {want}"),
+        }
+        .write(sql);
+        true
     }
 
     fn write_json_contains(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {
@@ -1057,14 +1098,13 @@ fn write_my_json_has_keys<P: AsRef<str>>(
 }
 
 /// MySQL's bulk UPDATE: `UPDATE t INNER JOIN (VALUES ROW(…), …) AS
-/// d(pk, c1, …) ON t.pk = d.pk SET t.c1 = d.c1`. It lives here
-/// rather than in `writers` because the syntax is MySQL's own.
+/// d(pk, c1, …) ON t.pk = d.pk SET t.c1 = d.c1`. MariaDB has no `ROW(…)`
+/// and gets `(SELECT ? AS pk, … UNION ALL SELECT …) AS d` instead. It lives
+/// here rather than in `writers` because the syntax is MySQL's own.
 fn write_mysql_bulk_update(
     b: &mut crate::sql::writers::Sql<'_>,
     query: &crate::core::BulkUpdateQuery,
 ) -> Result<(), SqlError> {
-    use std::fmt::Write as _;
-
     if query.rows.is_empty() {
         return Err(SqlError::EmptyBulkInsert);
     }
@@ -1075,33 +1115,44 @@ fn write_mysql_bulk_update(
         .model
         .primary_key()
         .ok_or(SqlError::MissingPrimaryKey)?;
+    let columns: Vec<String> = std::iter::once(pk_field.column)
+        .chain(query.update_columns.iter().copied())
+        .map(|c| b.d.quote_ident(c))
+        .collect();
 
     b.sql.push_str("UPDATE ");
     b.write_ident(query.model.table);
-    b.sql.push_str(" INNER JOIN (VALUES ");
-    let mut first_row = true;
-    for row in &query.rows {
-        if !first_row {
-            b.sql.push_str(", ");
-        }
-        first_row = false;
-        b.sql.push_str("ROW(");
+    b.sql.push_str(" INNER JOIN (");
+    // Both spellings bind the rows in the same order.
+    let (mut my, mut maria) = (String::from("VALUES "), String::new());
+    for (r, row) in query.rows.iter().enumerate() {
+        my.push_str(if r == 0 { "ROW(" } else { ", ROW(" });
+        maria.push_str(if r == 0 { "SELECT " } else { " UNION ALL SELECT " });
         for (i, val) in row.iter().enumerate() {
-            if i > 0 {
-                b.sql.push_str(", ");
-            }
             b.params.push(val.clone());
-            let _ = write!(b.sql, "{}", b.d.placeholder(b.params.len()));
+            let p = b.d.placeholder(b.params.len());
+            let sep = if i > 0 { ", " } else { "" };
+            my.push_str(sep);
+            my.push_str(&p);
+            maria.push_str(sep);
+            maria.push_str(&p);
+            if let (0, Some(c)) = (r, columns.get(i)) {
+                maria.push_str(" AS ");
+                maria.push_str(c);
+            }
         }
-        b.sql.push(')');
+        my.push(')');
     }
-    b.sql.push_str(") AS __data(");
-    b.write_ident(pk_field.column);
-    for col in &query.update_columns {
-        b.sql.push_str(", ");
-        b.write_ident(col);
+    my.push_str(") AS __data(");
+    my.push_str(&columns.join(", "));
+    my.push(')');
+    maria.push_str(") AS __data");
+    ByServer {
+        mysql: &my,
+        mariadb: &maria,
     }
-    b.sql.push_str(") ON ");
+    .write(&mut b.sql);
+    b.sql.push_str(" ON ");
     b.write_ident(query.model.table);
     b.sql.push('.');
     b.write_ident(pk_field.column);
@@ -1778,8 +1829,11 @@ mod tests {
         let stmt = MySql.compile_bulk_update(&q).unwrap();
         // Spot-check the key shape: VALUES ROW(?, ?) plus the JOIN
         // on the PK plus the SET on the qualified target column.
-        assert!(stmt.sql.starts_with("UPDATE `users` INNER JOIN (VALUES "));
+        assert!(stmt.sql.starts_with("UPDATE `users` INNER JOIN (/*!80000 VALUES "));
         assert!(stmt.sql.contains("ROW(?, ?), ROW(?, ?)"));
+        assert!(stmt
+            .sql
+            .contains("/*M! SELECT ? AS `id`, ? AS `name` UNION ALL SELECT ?, ?) AS __data */"));
         assert!(stmt.sql.contains(") AS __data(`id`, `name`)"));
         assert!(stmt.sql.contains("ON `users`.`id` = __data.`id`"));
         assert!(stmt.sql.contains("SET `users`.`name` = __data.`name`"));

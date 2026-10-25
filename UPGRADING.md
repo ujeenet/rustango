@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### MySQL: correlated `IN` over the written table
+
+In `update()` / `delete()`, a `where_in_subquery` over the same table that uses `outer_ref` now returns MySQL error 1093. Before, it ran but could see rows the same statement had already changed. A `where_exists` / `where_not_exists` with `outer_ref`, placed directly in the write's filter, still runs.
+
 ### Scaffold taglines lose their brackets
 
 `cargo rustango new` now writes `tagline = "dev"` / `"staging"`, not `"(dev)"` / `"(staging)"`. Existing projects keep theirs; edit the line to match.
