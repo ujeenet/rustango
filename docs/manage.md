@@ -945,7 +945,9 @@ cargo run -- create-tenant gamma --mode database --server main
 With `--server`, the server's admin rights are checked first, then a
 database named exactly as the slug is created with its own login (random
 password, granted that database only); SQLite creates `<dir>/<slug>.db`.
-An existing database of that name is refused, never reused. The tenant URL
+An existing database of that name is refused, never reused. The new login
+must then sign in (a pg_hba rule or a shadowing MySQL account fails here). On
+MySQL the database copies the registry's utf8mb4 collation. The tenant URL
 is stored sealed and the database is recorded in `rustango_tenant_databases`.
 If registering, migrating or activating fails, the new database, login and
 tenant row are dropped again, so the same command can simply be re-run.

@@ -144,14 +144,19 @@ Tenants created from the CLI are recorded too, tagged `requested_by = cli`, so t
 - **Create a new database on a saved server**: choose the server. The
   database is named exactly as the slug and gets a login of its own with a
   random password, granted that database only. The run shows
-  `create_database`, `create_login` and `grant`. An existing database of that
-  name is refused. If a later step fails, the run's `rollback` step drops the
-  new database, login and tenant row, and the form comes back with the reason.
-- **Use an existing database**: a database name on the registry's server, or a
-  full URL. The URL field is masked and never sent back to the page.
+  `create_database`, `create_login`, `grant` and `check_login` (the new login
+  signs in). An existing database of that name is refused. If a later step
+  fails, the run's `rollback` step drops the new database, login and tenant
+  row, and the form comes back with the reason. This is the default once a
+  server is saved.
+- **Use an existing database URL**: masked, and never sent back to the page.
+- **A database on the registry's server**: a database name; it uses the
+  registry's login, so tenants are not isolated from each other.
 
-**Test connection** checks the chosen server's admin rights, or reaches the
-existing database. The backend is always the registry's.
+**Test connection** on a saved server runs every check a submit runs before
+creating anything (slug free, routing, admin rights, no database or login of
+that name) and reports the rights. Otherwise it reaches the database. The
+backend is always the registry's.
 
 From the CLI: [`list-runs` / `show-run`](manage.md#inspecting-what-happened).
 
