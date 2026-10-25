@@ -700,10 +700,24 @@ macro_rules! bind_match {
                 $q.bind(crate::sql::Point { x, y, srid })
             }
             // PG arrays are typed, so elements must be homogeneous.
-            // I32/I64/String/Bool are supported; anything else panics
+            // I16/I32/I64/String/Bool/Uuid are supported; anything else panics
             // at bind time.
             SqlValue::Array(elems) => match elems.first() {
                 None => $q.bind(Vec::<i32>::new()),
+                Some(SqlValue::I16(_)) => {
+                    let v: Vec<i16> = elems
+                        .into_iter()
+                        .filter_map(|e| if let SqlValue::I16(n) = e { Some(n) } else { None })
+                        .collect();
+                    $q.bind(v)
+                }
+                Some(SqlValue::Uuid(_)) => {
+                    let v: Vec<::uuid::Uuid> = elems
+                        .into_iter()
+                        .filter_map(|e| if let SqlValue::Uuid(u) = e { Some(u) } else { None })
+                        .collect();
+                    $q.bind(v)
+                }
                 Some(SqlValue::I64(_)) => {
                     let v: Vec<i64> = elems
                         .into_iter()
@@ -739,7 +753,7 @@ macro_rules! bind_match {
                     $q.bind(v)
                 }
                 Some(_) => unreachable!(
-                    "SqlValue::Array elements other than I32/I64/String/Bool are not yet supported (v1, issue #30)"
+                    "SqlValue::Array elements other than I16/I32/I64/String/Bool/Uuid are not yet supported (v1, issue #30)"
                 ),
             },
         }

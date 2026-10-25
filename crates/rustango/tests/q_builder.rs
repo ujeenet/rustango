@@ -77,13 +77,13 @@ fn startswith_emits_like_with_trailing_wildcard() {
 #[test]
 fn in_takes_iterable() {
     let sql = compile_pg(Q::in_("id", vec![1_i64, 2, 3]));
-    assert!(sql.contains(r#""id" IN ($1, $2, $3)"#), "got: {sql}");
+    assert!(sql.contains(r#""id" = ANY($1)"#), "got: {sql}");
 }
 
 #[test]
 fn not_in_takes_iterable() {
     let sql = compile_pg(Q::not_in("id", vec![1_i64, 2, 3]));
-    assert!(sql.contains(r#""id" NOT IN ($1, $2, $3)"#), "got: {sql}");
+    assert!(sql.contains(r#""id" <> ALL($1)"#), "got: {sql}");
 }
 
 #[test]

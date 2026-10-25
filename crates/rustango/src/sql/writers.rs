@@ -374,6 +374,52 @@ pub(super) fn null_cast_for(
     d.null_cast(field.ty).map(BindCast::Untyped)
 }
 
+/// The right side of `IN` / `NOT IN`. Where arrays bind, a list of one
+/// array-bindable type is `= ANY($1)` / `<> ALL($1)`, so every list length
+/// shares one statement; NULLs keep the same meaning either way.
+fn write_in_list(b: &mut Sql<'_>, op: Op, elements: &[SqlValue], cast: Option<BindCast>) {
+    let negated = matches!(op, Op::NotIn);
+    if b.d.binds_pg_only_values() && array_bindable(elements) {
+        b.sql.push_str(if negated { " <> ALL(" } else { " = ANY(" });
+        let p = b.bind(SqlValue::Array(elements.to_vec()));
+        b.sql.push_str(&p);
+        if let Some(BindCast::Always(ty)) = cast {
+            b.sql.push_str("::");
+            b.sql.push_str(ty);
+            b.sql.push_str("[]");
+        }
+        b.sql.push(')');
+        return;
+    }
+    b.sql.push_str(if negated { " NOT IN (" } else { " IN (" });
+    for (i, elem) in elements.iter().enumerate() {
+        if i > 0 {
+            b.sql.push_str(", ");
+        }
+        b.push_param_typed(elem.clone(), cast);
+    }
+    b.sql.push(')');
+}
+
+/// Whether `elements` bind as one typed array: all one type the array
+/// bind takes, with no NULL (an array would drop it).
+fn array_bindable(elements: &[SqlValue]) -> bool {
+    let Some(first) = elements.first() else {
+        return false;
+    };
+    matches!(
+        first,
+        SqlValue::I16(_)
+            | SqlValue::I32(_)
+            | SqlValue::I64(_)
+            | SqlValue::String(_)
+            | SqlValue::Bool(_)
+            | SqlValue::Uuid(_)
+    ) && elements
+        .iter()
+        .all(|e| std::mem::discriminant(e) == std::mem::discriminant(first))
+}
+
 // ---- SELECT ----
 
 /// A SELECT that may correlate to the enclosing query through `OuterRef`.
@@ -4477,20 +4523,7 @@ fn write_expr_compare(
                 return Err(SqlError::EmptyInList);
             }
             write_expr(b, lhs, None)?;
-            b.sql.push_str(if matches!(op, Op::In) {
-                " IN ("
-            } else {
-                " NOT IN ("
-            });
-            let mut first = true;
-            for elem in elements {
-                if !first {
-                    b.sql.push_str(", ");
-                }
-                first = false;
-                b.push_param_typed(elem.clone(), None);
-            }
-            b.sql.push(')');
+            write_in_list(b, op, elements, None);
             Ok(())
         }
         Op::Between | Op::NotBetween => {
@@ -4870,20 +4903,7 @@ fn write_filter(
                 return Err(SqlError::EmptyInList);
             }
             b.sql.push_str(&qualified_col);
-            b.sql.push_str(if matches!(filter.op, Op::In) {
-                " IN ("
-            } else {
-                " NOT IN ("
-            });
-            let mut first = true;
-            for elem in elements {
-                if !first {
-                    b.sql.push_str(", ");
-                }
-                first = false;
-                b.push_param_typed(elem.clone(), cast);
-            }
-            b.sql.push(')');
+            write_in_list(b, filter.op, elements, cast);
         }
         Op::Between | Op::NotBetween => {
             let SqlValue::List(bounds) = &filter.value else {

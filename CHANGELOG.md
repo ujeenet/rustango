@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed — PostgreSQL `IN` lists bind one array
+
+On PostgreSQL `is_in` / `__in` / `Op::In` over a list of one integer, string, bool or uuid type compiles to `= ANY($1)` (`NOT IN` to `<> ALL($1)`), so every list length shares one prepared statement. Lists with NULLs or other types, and MySQL / SQLite, keep `IN (…)`.
+
 ### Changed — bulk writes share one batching helper
 
 `bulk_insert`, `bulk_update` and the audited bulk writes size their batches and run them all-or-none through one implementation.

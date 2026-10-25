@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### PostgreSQL `IN` lists compile to `= ANY($1)`
+
+Code that inspects compiled PG SQL sees `col = ANY($1)` with one `SqlValue::Array` bind instead of `col IN ($1, …)`. Results are the same.
+
 ### Scaffold taglines lose their brackets
 
 `cargo rustango new` now writes `tagline = "dev"` / `"staging"`, not `"(dev)"` / `"(staging)"`. Existing projects keep theirs; edit the line to match.
