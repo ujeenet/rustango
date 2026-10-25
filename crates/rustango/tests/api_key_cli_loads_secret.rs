@@ -1,8 +1,8 @@
 #![cfg(all(feature = "sqlite", feature = "tenancy"))]
 //! `create-api-key` only loads the server's key; it never writes one.
 //!
-//! One test in its own binary: it moves the process cwd and clears the
-//! key env vars for this process only.
+//! Its own binary: it moves the process cwd and clears the key env vars
+//! for this process only. The ignored test is its server-side child.
 
 use rustango::sql::sqlx;
 use rustango::tenancy::TenantPools;
@@ -66,7 +66,58 @@ async fn create_api_key_never_writes_a_key_file() {
 
     std::fs::create_dir_all(key_file.parent().unwrap()).unwrap();
     std::fs::write(&key_file, [9u8; 32]).unwrap();
-    run(argv(&["create-api-key", "acme", "bob"]))
+    let out = run(argv(&["create-api-key", "acme", "bob"]))
         .await
         .expect("the server's key file is used");
+    let token = out
+        .lines()
+        .map(str::trim)
+        .find(|l| l.len() == 41 && l.as_bytes()[8] == b'.')
+        .unwrap_or_else(|| panic!("no token in {out}"));
+
+    // A fresh process loads the key the way a server does, so a CLI and a
+    // server that disagree on the key fail here.
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([SERVER_CHILD, "--exact", "--ignored", "--nocapture"])
+        .current_dir(tmp.path())
+        .env_remove("RUSTANGO_SESSION_SECRET")
+        .env_remove("RUSTANGO_ENV")
+        .env("API_KEY_CHILD_TOKEN", token)
+        .env("API_KEY_CHILD_DB", &db)
+        .output()
+        .expect("spawn server process");
+    let log = String::from_utf8_lossy(&child.stdout);
+    assert!(
+        child.status.success() && log.contains("1 passed"),
+        "the server refused a CLI-minted key:\n{log}\n{}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+}
+
+const SERVER_CHILD: &str = "cli_minted_key_verifies_in_a_server_process";
+
+/// Run only by the test above, in its own process.
+#[tokio::test]
+#[ignore = "spawned by create_api_key_never_writes_a_key_file"]
+async fn cli_minted_key_verifies_in_a_server_process() {
+    use rustango::tenancy::auth_backends::{ApiKeyBackend, AuthBackend};
+    let token = std::env::var("API_KEY_CHILD_TOKEN").expect("run by the parent test");
+    let db = std::env::var("API_KEY_CHILD_DB").expect("run by the parent test");
+    let pool = rustango::sql::Pool::connect(&format!("sqlite://{db}"))
+        .await
+        .expect("tenant db");
+    let addr: std::net::SocketAddr = "10.64.0.1:1".parse().unwrap();
+    let (parts, ()) = axum::http::Request::builder()
+        .header("authorization", format!("Bearer {token}"))
+        .extension(rustango::tenancy::TenantSlug("acme".into()))
+        .extension(axum::extract::ConnectInfo(addr))
+        .body(())
+        .unwrap()
+        .into_parts();
+    let user = ApiKeyBackend.authenticate(&parts, &pool).await;
+    assert!(
+        matches!(&user, Ok(Some(u)) if u.username == "bob"),
+        "{:?}",
+        user.map(|u| u.map(|u| u.username))
+    );
 }

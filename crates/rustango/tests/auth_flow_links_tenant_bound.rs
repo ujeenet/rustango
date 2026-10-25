@@ -24,8 +24,10 @@ async fn tenant_db() -> Pool {
     rustango::testkit::create_tables_for::<rustango::tenancy::User>(&pool)
         .await
         .expect("create rustango_users");
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!("connected to sqlite")
+    let sq = match &pool {
+        Pool::Sqlite(sq) => sq,
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("connected to sqlite"),
     };
     sqlx::query(
         "INSERT INTO rustango_users \
@@ -40,8 +42,10 @@ async fn tenant_db() -> Pool {
 
 async fn hash(pool: &Pool) -> String {
     use sqlx::Row;
-    let Pool::Sqlite(sq) = pool else {
-        unreachable!()
+    let sq = match pool {
+        Pool::Sqlite(sq) => sq,
+        #[allow(unreachable_patterns)]
+        _ => unreachable!(),
     };
     sqlx::query("SELECT password_hash FROM rustango_users WHERE id = 1")
         .fetch_one(sq)

@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed — API keys are MACed with a derived sub-key
+
+New API keys are MACed with a key derived from the server secret, not the secret itself. Existing keys still verify unchanged; rotating `RUSTANGO_SESSION_SECRET` still invalidates every API key.
+
+### Changed — `cursor_pagination` refuses a nullable field
+
+`cursor_pagination` / `cursor_pagination_desc` on a nullable field now panic when the ViewSet is built; before they logged an error and NULL rows were skipped or failed the page.
+
 ### Fixed — tenant logos 404'd under the default routes
 
 Tenant pages link uploaded logos and favicons under `RouteConfig::brand_url` (`/_brand` by default), the prefix tenant hosts serve, via the new `RouteConfig::brand_asset_url`. Tenant admin pages now use the tenant favicon too.

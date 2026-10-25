@@ -387,7 +387,7 @@ impl MoveCtx<'_> {
     /// No lock is held across the move: the switch and the reactivation
     /// are short updates guarded by `active = false`. A suspension made
     /// during the move is still undone by them; a "moved by migrate"
-    /// marker column would fix that (0.61.0).
+    /// marker column would fix that (0.62.0).
     async fn run<W: Write + Send>(
         self,
         restore: Restore,

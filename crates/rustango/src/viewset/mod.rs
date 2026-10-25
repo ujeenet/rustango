@@ -803,8 +803,7 @@ impl ViewSet {
     /// # Panics
     ///
     /// If `field` is not on the model, or has a type that cannot be a
-    /// cursor (float, bool, json or blob). A nullable field is logged as
-    /// an error for now and refused from 0.61.0. Caught at mount time, not
+    /// cursor (float, bool, json or blob), or is nullable. Caught at mount time, not
     /// per request, so a misconfigured ViewSet fails where the
     /// mistake is instead of returning 500 to every caller.
     #[must_use]
@@ -848,15 +847,12 @@ impl ViewSet {
              totally. Use an integer, timestamp, date, uuid or string column.",
             f.ty
         );
-        // NULL has no place in `col > v`: rows go missing, or the token
-        // fails (#2230). Logged, not refused, until 0.61.0.
-        if f.nullable {
-            tracing::error!(
-                target: "rustango::viewset",
-                "cursor_pagination(\"{field}\"): `{table}.{field}` is nullable; NULL rows \
-                 are skipped or fail the page. Use a NOT NULL column; 0.61.0 refuses this."
-            );
-        }
+        // NULL has no place in `col > v`: rows go missing, or the token fails.
+        assert!(
+            !f.nullable,
+            "cursor_pagination(\"{field}\"): `{table}.{field}` is nullable; NULL rows \
+             would be skipped or fail the page. Use a NOT NULL column."
+        );
     }
 
     /// The field list must include the cursor column and the primary key.
