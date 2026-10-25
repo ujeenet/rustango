@@ -628,6 +628,8 @@ pub struct ModelForm {
     pk_value: Option<SqlValue>,
     include_fields: Option<Vec<String>>,
     exclude_fields: Vec<String>,
+    /// Superuser-only fields this form's user may not write.
+    locked: Vec<&'static str>,
 }
 
 impl ModelForm {
@@ -639,6 +641,7 @@ impl ModelForm {
             pk_value: None,
             include_fields: None,
             exclude_fields: Vec::new(),
+            locked: Vec::new(),
         }
     }
 
@@ -654,6 +657,7 @@ impl ModelForm {
             pk_value: Some(pk),
             include_fields: None,
             exclude_fields: Vec::new(),
+            locked: Vec::new(),
         }
     }
 
@@ -677,6 +681,27 @@ impl ModelForm {
         self
     }
 
+    /// Apply the admin's superuser-only field locks
+    /// (`register_admin_superuser_fields!`): unless `is_superuser`, the
+    /// form leaves them out and a locked NOT NULL flag stores `false`.
+    /// Without this call no field is locked.
+    #[cfg(feature = "admin")]
+    #[must_use]
+    pub fn acting_superuser(mut self, is_superuser: bool) -> Self {
+        use crate::admin::object_permissions::{superuser_fields, AdminWrite};
+        let action = if self.pk_value.is_some() {
+            AdminWrite::Change
+        } else {
+            AdminWrite::Add
+        };
+        self.locked = if is_superuser {
+            Vec::new()
+        } else {
+            superuser_fields(self.schema.table, action)
+        };
+        self
+    }
+
     fn should_include(&self, field: &FieldSchema) -> bool {
         let kind = if self.pk_value.is_some() {
             crate::core::WriteKind::Update
@@ -686,7 +711,8 @@ impl ModelForm {
         if !field.accepts_input(kind) {
             return false;
         }
-        if self.exclude_fields.iter().any(|n| n == field.name) {
+        if self.exclude_fields.iter().any(|n| n == field.name) || self.locked.contains(&field.name)
+        {
             return false;
         }
         // An omitted defaulted field takes the column default (#2528).
@@ -801,6 +827,16 @@ impl ModelForm {
                 columns.push(field.column);
                 values.push(v);
             }
+        }
+        #[cfg(feature = "admin")]
+        if self.pk_value.is_none() && !self.locked.is_empty() {
+            let mut pairs: Vec<_> = columns.into_iter().zip(values).collect();
+            crate::admin::object_permissions::default_locked_flags(
+                self.schema,
+                &self.locked,
+                &mut pairs,
+            );
+            (columns, values) = pairs.into_iter().unzip();
         }
 
         Ok(PreparedSave {
@@ -2042,6 +2078,46 @@ mod model_form_tests {
         let form = ModelForm::new(post_schema(), HashMap::new()).exclude(&["id"]);
         // title + body still present (id was already excluded).
         assert_eq!(form.included_field_names(), vec!["title", "body"]);
+    }
+
+    #[cfg(feature = "admin")]
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "mf_account")]
+    #[allow(dead_code)]
+    pub struct Account {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 32)]
+        pub name: String,
+        pub is_staff: bool,
+        #[rustango(max_length = 32)]
+        pub owner: String,
+    }
+
+    #[cfg(feature = "admin")]
+    crate::register_admin_superuser_fields!(Account, Add, [is_staff]);
+    #[cfg(feature = "admin")]
+    crate::register_admin_superuser_fields!(Account, Change, [owner]);
+
+    /// A non-superuser form leaves the superuser-only fields out, as the admin does.
+    #[cfg(feature = "admin")]
+    #[test]
+    fn modelform_locks_superuser_fields_for_a_non_superuser() {
+        let schema = <Account as crate::core::Model>::SCHEMA;
+        let data: HashMap<String, String> = [("name", "a"), ("is_staff", "true"), ("owner", "o")]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        let add = ModelForm::new(schema, data.clone()).acting_superuser(false);
+        assert_eq!(add.included_field_names(), vec!["name", "owner"]);
+        // A locked NOT NULL flag stores `false`, not the posted `true`.
+        let prep = add.prepare_save().expect("valid");
+        let at = prep.columns.iter().position(|c| *c == "is_staff");
+        assert_eq!(at.map(|i| &prep.values[i]), Some(&SqlValue::Bool(false)));
+        let su = ModelForm::new(schema, data.clone()).acting_superuser(true);
+        assert_eq!(su.included_field_names(), vec!["name", "is_staff", "owner"]);
+        let change = ModelForm::for_update(schema, data, SqlValue::I64(1)).acting_superuser(false);
+        assert_eq!(change.included_field_names(), vec!["name", "is_staff"]);
     }
 
     #[test]

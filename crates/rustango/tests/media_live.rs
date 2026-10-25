@@ -1,4 +1,9 @@
-#![cfg(all(feature = "postgres", feature = "media", feature = "testkit"))]
+#![cfg(all(
+    feature = "postgres",
+    feature = "media",
+    feature = "storage-s3",
+    feature = "testkit"
+))]
 //! Live integration tests for `MediaManager` against Postgres + an
 //! S3-compatible bucket.
 //!

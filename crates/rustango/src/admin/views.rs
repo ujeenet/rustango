@@ -25,7 +25,7 @@ use super::object_permissions::AdminWrite;
 use super::queryset_hooks::RowScope;
 use super::render;
 use super::templates::render_with_chrome;
-use super::urls::{ActionPerm, AppState, CREATE_SEGMENT};
+use super::urls::{ActionHandler, ActionPerm, AppState, CREATE_SEGMENT};
 
 /// Render a `data.<key>` cell: read a JSON column at the given key
 /// path and emit an HTML-escaped scalar.
@@ -2035,13 +2035,12 @@ pub(crate) async fn create_submit(
     // An `audit(...)` model's entry commits with the INSERT, as on edit (#2101).
     let emit = crate::audit::DiffEmit::for_model(model);
     let refused = |msg: String| Html(render_form(&state, model, Some(&form), false, Some(&msg)));
-    let mut tx = match crate::sql::write_transaction(&state.pool).await {
+    let mut tx = match crate::audit::PoolBoundTx::begin_write(&state.pool).await {
         Ok(tx) => tx,
         Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
     };
     let written = crate::audit::insert_one_with_entry_tx(
         &mut tx,
-        &state.pool,
         &query,
         pk_field,
         |pk| {
@@ -2438,17 +2437,16 @@ pub(crate) async fn update_submit(
     let refused = |msg: String| Html(render_form(&state, model, Some(&form), true, Some(&msg)));
     #[cfg(feature = "tenancy")]
     let mut tx = match claims.begin(&state.pool, &pk_value).await {
-        Ok(tx) => tx,
+        Ok(tx) => crate::audit::PoolBoundTx::opened_on(&state.pool, tx),
         Err(e) => return Ok(refused(claim_refusal(model, e)).into_response()),
     };
     #[cfg(not(feature = "tenancy"))]
-    let mut tx = match crate::sql::write_transaction(&state.pool).await {
+    let mut tx = match crate::audit::PoolBoundTx::begin_write(&state.pool).await {
         Ok(tx) => tx,
         Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
     };
     let written = crate::audit::update_one_with_row_diff_tx(
         &mut tx,
-        &state.pool,
         &query,
         before_select,
         &pre_update_fields,
@@ -2486,25 +2484,24 @@ pub(crate) async fn update_submit(
             return Ok(refused(write_error(model, &e)).into_response());
         }
     }
-    let child_rows =
-        match super::inlines::apply_plan_tx(&mut tx, &state.pool, &parts, inline_plan).await {
-            Ok((_, rows)) => rows,
-            Err(e) => {
-                use super::inlines::InlineApplyError as E;
-                rollback_quietly(tx, model.table).await;
-                let why = match e {
-                    E::Write { child, error } => write_error(child, &error),
-                    E::MaxNum { child } => format!("{} allows no more rows here.", child.name),
-                    E::Forbidden { child, action } => {
-                        return Err(AdminError::Forbidden {
-                            table: child.table.to_owned(),
-                            action,
-                        })
-                    }
-                };
-                return Ok(refused(format!("Nothing was saved: {why}")).into_response());
-            }
-        };
+    let child_rows = match super::inlines::apply_plan_tx(&mut tx, &parts, inline_plan).await {
+        Ok((_, rows)) => rows,
+        Err(e) => {
+            use super::inlines::InlineApplyError as E;
+            rollback_quietly(tx, model.table).await;
+            let why = match e {
+                E::Write { child, error } => write_error(child, &error),
+                E::MaxNum { child } => format!("{} allows no more rows here.", child.name),
+                E::Forbidden { child, action } => {
+                    return Err(AdminError::Forbidden {
+                        table: child.table.to_owned(),
+                        action,
+                    })
+                }
+            };
+            return Ok(refused(format!("Nothing was saved: {why}")).into_response());
+        }
+    };
     if let Err(e) = tx.commit().await {
         return Ok(refused(write_error(model, &e.into())).into_response());
     }
@@ -2576,7 +2573,7 @@ pub(super) async fn admits_written(
 
 /// A failed ROLLBACK must not replace the refusal with a 500; dropping
 /// the connection discards the tx anyway.
-async fn rollback_quietly(tx: crate::sql::PoolTx<'_>, table: &str) {
+async fn rollback_quietly(tx: crate::audit::PoolBoundTx<'_>, table: &str) {
     if let Err(e) = tx.rollback().await {
         tracing::warn!(target: "rustango::admin", error = %e, table, "admin edit rollback failed");
     }
@@ -2642,7 +2639,7 @@ pub(crate) async fn delete_submit(
         super::audit::admin_row_snapshot_entry(model, pk_raw.clone(), audit_op, &before_row, None);
     // An `audit(...)` model's entry commits with the write, as on edit (#2390).
     let emit = crate::audit::DiffEmit::for_model(model);
-    let mut tx = crate::sql::write_transaction(&state.pool).await?;
+    let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
     let written = if let Some(col) = model.soft_delete_column {
         let now = Some(chrono::Utc::now());
         let stamp = crate::soft_delete::__mark_query(model, col, pk_field.column, pk_value, now);
@@ -2664,9 +2661,7 @@ pub(crate) async fn delete_submit(
         return Ok(Redirect::to(&list_url).into_response());
     }
     if emit == crate::audit::DiffEmit::InTx {
-        if let Err(e) =
-            crate::audit::emit_in_tx(&mut tx, &state.pool, std::slice::from_ref(&entry)).await
-        {
+        if let Err(e) = crate::audit::emit_in_tx(&mut tx, std::slice::from_ref(&entry)).await {
             rollback_quietly(tx, model.table).await;
             return Err(e.into());
         }
@@ -2902,11 +2897,32 @@ pub(crate) async fn action_submit(
     };
     let builtin = match &write {
         BulkWrite::Custom(a) => {
-            // Handlers get the `Pool` enum, so a user action can match on the
-            // backend. It writes on its own connection, so its audit follows it.
-            (a.handler)(&state.pool, &pk_values).await?;
             let entries = entries_for(&before_rows, &row_pks);
-            super::audit::emit_many_best_effort(&state, &entries, &action).await;
+            match &a.handler {
+                // A pool handler writes on its own connection, so its audit follows it.
+                ActionHandler::Pool(handler) => {
+                    handler(&state.pool, &pk_values).await?;
+                    super::audit::emit_many_best_effort(&state, &entries, &action).await;
+                }
+                ActionHandler::Tx(handler) => {
+                    let emit = crate::audit::DiffEmit::for_model(model);
+                    let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
+                    if let Err(e) = handler(&mut tx, &pk_values).await {
+                        rollback_quietly(tx, model.table).await;
+                        return Err(e);
+                    }
+                    if emit == crate::audit::DiffEmit::InTx {
+                        if let Err(e) = crate::audit::emit_in_tx(&mut tx, &entries).await {
+                            rollback_quietly(tx, model.table).await;
+                            return Err(e.into());
+                        }
+                    }
+                    tx.commit().await.map_err(crate::sql::ExecError::from)?;
+                    if emit == crate::audit::DiffEmit::Deferred {
+                        super::audit::emit_many_best_effort(&state, &entries, &action).await;
+                    }
+                }
+            }
             send_row_signals(model.table, &row_pks, is_delete, false).await;
             return back();
         }
@@ -2920,7 +2936,7 @@ pub(crate) async fn action_submit(
     };
     // An `audit(...)` model's entries commit with the write (#2390).
     let emit = crate::audit::DiffEmit::for_model(model);
-    let mut tx = crate::sql::write_transaction(&state.pool).await?;
+    let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
     let changed = match builtin.run(&mut tx, model, pk_field, &pk_values).await {
         Ok(changed) => changed,
         Err(e) => {
@@ -2938,7 +2954,7 @@ pub(crate) async fn action_submit(
         .unzip();
     let entries = entries_for(&before_rows, &row_pks);
     if emit == crate::audit::DiffEmit::InTx {
-        if let Err(e) = crate::audit::emit_in_tx(&mut tx, &state.pool, &entries).await {
+        if let Err(e) = crate::audit::emit_in_tx(&mut tx, &entries).await {
             rollback_quietly(tx, model.table).await;
             return Err(e.into());
         }

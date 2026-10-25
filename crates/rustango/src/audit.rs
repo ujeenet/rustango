@@ -1459,14 +1459,65 @@ impl DiffEmit {
     }
 }
 
+/// A write transaction tied to the pool it was opened on, so its audit
+/// entries are attributed through that pool and no other.
+#[cfg(feature = "admin")]
+pub(crate) struct PoolBoundTx<'p> {
+    tx: crate::sql::PoolTx<'static>,
+    pool: &'p crate::sql::Pool,
+}
+
+#[cfg(feature = "admin")]
+impl<'p> PoolBoundTx<'p> {
+    /// [`crate::sql::write_transaction`] on `pool`.
+    pub(crate) async fn begin_write(
+        pool: &'p crate::sql::Pool,
+    ) -> Result<Self, crate::sql::ExecError> {
+        let tx = crate::sql::write_transaction(pool).await?;
+        Ok(Self { tx, pool })
+    }
+
+    /// Bind `tx`, which the caller opened on `pool`.
+    pub(crate) fn opened_on(pool: &'p crate::sql::Pool, tx: crate::sql::PoolTx<'static>) -> Self {
+        Self { tx, pool }
+    }
+
+    fn via(&self) -> Via<'p> {
+        Via::Pool(self.pool)
+    }
+
+    pub(crate) async fn commit(self) -> Result<(), sqlx::Error> {
+        self.tx.commit().await
+    }
+
+    pub(crate) async fn rollback(self) -> Result<(), sqlx::Error> {
+        self.tx.rollback().await
+    }
+}
+
+#[cfg(feature = "admin")]
+impl std::ops::Deref for PoolBoundTx<'_> {
+    type Target = crate::sql::PoolTx<'static>;
+    fn deref(&self) -> &Self::Target {
+        &self.tx
+    }
+}
+
+#[cfg(feature = "admin")]
+impl std::ops::DerefMut for PoolBoundTx<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.tx
+    }
+}
+
 /// Write `entries` in the caller's `tx`: a failed emit fails the write.
 #[cfg(feature = "admin")]
 pub(crate) async fn emit_in_tx(
-    tx: &mut crate::sql::PoolTx<'_>,
-    pool: &crate::sql::Pool,
+    tx: &mut PoolBoundTx<'_>,
     entries: &[PendingEntry],
 ) -> Result<(), crate::sql::ExecError> {
-    emit_many_tx(tx, Via::Pool(pool), entries).await
+    let via = tx.via();
+    emit_many_tx(tx, via, entries).await
 }
 
 /// Outcome of [`update_one_with_row_diff_tx`].
@@ -1484,8 +1535,7 @@ pub(crate) enum RowDiffWrite {
 /// the write. The caller commits, so later writes can share the tx.
 #[cfg(feature = "admin")]
 pub(crate) async fn update_one_with_row_diff_tx(
-    tx: &mut crate::sql::PoolTx<'_>,
-    pool: &crate::sql::Pool,
+    tx: &mut PoolBoundTx<'_>,
     query: &crate::core::UpdateQuery,
     mut before: crate::core::SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
@@ -1497,7 +1547,7 @@ pub(crate) async fn update_one_with_row_diff_tx(
     let stmt = if query.set.is_empty() {
         None
     } else {
-        Some(pool.dialect().compile_update(query)?)
+        Some(tx.dialect().compile_update(query)?)
     };
     before.lock_mode = Some(crate::core::LockMode {
         silent_on_sqlite: true,
@@ -1513,7 +1563,8 @@ pub(crate) async fn update_one_with_row_diff_tx(
     };
     let entry = entry.filter(|_| affected > 0);
     if let (DiffEmit::InTx, Some(entry)) = (emit, &entry) {
-        emit_one_tx(tx, Via::Pool(pool), entry).await?;
+        let via = tx.via();
+        emit_one_tx(tx, via, entry).await?;
     }
     Ok(RowDiffWrite::Written {
         deferred: entry.filter(|_| emit == DiffEmit::Deferred),
@@ -1525,8 +1576,7 @@ pub(crate) async fn update_one_with_row_diff_tx(
 /// otherwise it comes back for the caller's best-effort emit.
 #[cfg(feature = "admin")]
 pub(crate) async fn insert_one_with_entry_tx(
-    tx: &mut crate::sql::PoolTx<'_>,
-    pool: &crate::sql::Pool,
+    tx: &mut PoolBoundTx<'_>,
     query: &crate::core::InsertQuery,
     pk_field: &crate::core::FieldSchema,
     entry_of: impl FnOnce(&crate::core::SqlValue) -> PendingEntry,
@@ -1536,7 +1586,8 @@ pub(crate) async fn insert_one_with_entry_tx(
     let pk = crate::sql::inserted_pk(query, &returning, pk_field)?;
     let entry = entry_of(&pk);
     if emit == DiffEmit::InTx {
-        emit_one_tx(tx, Via::Pool(pool), &entry).await?;
+        let via = tx.via();
+        emit_one_tx(tx, via, &entry).await?;
     }
     Ok((pk, (emit == DiffEmit::Deferred).then_some(entry)))
 }
@@ -2559,5 +2610,62 @@ mod tx_update_tests {
         assert!(TxUpdate::for_entry(Some(&audited)).is_none());
         assert!(TxUpdate::for_entry(Some(&ModelEntry::new(schema, "app"))).is_some());
         assert!(TxUpdate::for_entry(None).is_some());
+    }
+}
+
+#[cfg(all(test, feature = "admin", feature = "tenancy", feature = "sqlite"))]
+mod pool_bound_tx_tests {
+    use super::*;
+
+    async fn audited_pool() -> crate::sql::Pool {
+        let sq = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let pool = crate::sql::Pool::Sqlite(sq);
+        ensure_table_pool(&pool).await.unwrap();
+        pool
+    }
+
+    async fn source_of(pool: &crate::sql::Pool) -> String {
+        let sq = match pool {
+            crate::sql::Pool::Sqlite(sq) => sq,
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
+        };
+        sqlx::query_scalar("SELECT source FROM rustango_audit_log")
+            .fetch_one(sq)
+            .await
+            .unwrap()
+    }
+
+    /// A tenant-bound source survives only on the tx opened on the scoped pool.
+    #[tokio::test]
+    async fn emit_in_tx_attributes_through_the_pool_the_tx_was_opened_on() {
+        let (a, b) = (audited_pool().await, audited_pool().await);
+        let entry = PendingEntry {
+            entity_table: "t",
+            entity_pk: "1".into(),
+            operation: AuditOp::Action,
+            source: AuditSource::User { id: "7".into() },
+            changes: serde_json::json!({}),
+        };
+        let user = AuditSource::User { id: "7".into() };
+        with_tenant_source(user, "a".into(), async {
+            writing_to_tenant("a".into(), Some(&a), async {
+                for pool in [&a, &b] {
+                    let mut tx = PoolBoundTx::begin_write(pool).await.unwrap();
+                    emit_in_tx(&mut tx, std::slice::from_ref(&entry))
+                        .await
+                        .unwrap();
+                    tx.commit().await.unwrap();
+                }
+            })
+            .await;
+        })
+        .await;
+        assert_eq!(source_of(&a).await, "user:7");
+        assert_eq!(source_of(&b).await, "system");
     }
 }

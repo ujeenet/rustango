@@ -1772,8 +1772,7 @@ pub(crate) enum InlineApplyError {
 /// Run a checked plan in the parent's `tx`; the caller rolls back on error.
 /// An `audit(...)` child's entries go in `tx` too, one batch per inline (#2389).
 pub(crate) async fn apply_plan_tx(
-    tx: &mut crate::sql::PoolTx<'_>,
-    pool: &Pool,
+    tx: &mut crate::audit::PoolBoundTx<'_>,
     parts: &Parts,
     plan: InlinePlan,
 ) -> Result<(InlineApplyOutcome, Vec<ChildSignal>), InlineApplyError> {
@@ -1823,7 +1822,6 @@ pub(crate) async fn apply_plan_tx(
                 } => {
                     let written = crate::audit::update_one_with_row_diff_tx(
                         tx,
-                        pool,
                         &query,
                         locked(&query.where_clause),
                         &fields,
@@ -1892,7 +1890,6 @@ pub(crate) async fn apply_plan_tx(
                 Some(form) => {
                     let (pk, entry) = crate::audit::insert_one_with_entry_tx(
                         tx,
-                        pool,
                         &insert.query,
                         target.pk,
                         |pk| {
@@ -1917,7 +1914,7 @@ pub(crate) async fn apply_plan_tx(
             outcome.inserted += 1;
         }
         if !entries.is_empty() {
-            crate::audit::emit_in_tx(tx, pool, &entries)
+            crate::audit::emit_in_tx(tx, &entries)
                 .await
                 .map_err(refused)?;
         }

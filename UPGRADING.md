@@ -187,6 +187,18 @@ Old workers ignore the column and still run named jobs: drain them before you di
 
 A registry login without it is now refused before `CREATE SCHEMA`, with the `GRANT` to run.
 
+### `render_generic_fk_link` is deprecated
+
+It renders a root-relative link with no permission check. Look up the target with `ContentType::by_id` and build the link under your own prefix.
+
+### Audited bulk actions: prefer `register_tx_action`
+
+A `register_action` handler writes on its own connection, so its audit rows are best effort. `register_tx_action` takes `&mut PoolTx` and audits in the same transaction; write only through that transaction (a second connection can deadlock a single-connection SQLite pool).
+
+### `ModelForm` over a user table
+
+Call `.acting_superuser(user.is_superuser)` so a non-superuser cannot set the table's registered superuser-only fields (the tenant `rustango_users` locks `is_superuser` and the password); without it the form locks nothing.
+
 ## 0.61.1
 
 ### Scaffold taglines lose their brackets
