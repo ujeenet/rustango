@@ -152,7 +152,8 @@ untouched.
 
 ### `api::create_tenant` goes through the provisioning engine
 
-A failed migration now returns `TenancyError::Validation` (with the cause in the text), not `TenancyError::Migrate`. If the run record cannot be written, the create fails, as on the CLI.
+A failed migration now returns `TenancyError::Validation`, not `TenancyError::Migrate`. With a database URL or schema the text carries the cause; on a saved server everything is rolled back and the cause is in the run log.
+Run the registry migrations (the provisioning-runs table) before calling it: the run record is no longer best effort, so a missing table fails the create, as on the CLI.
 `provision_tenant` given a project root now applies `migrations/` and every `<app>/migrations/` under it; a flat migrations dir works as before.
 
 ### Built-in logo is square

@@ -604,6 +604,24 @@ async fn provision_releases_its_schema_on_a_failed_insert(pool: &Pool) {
     }
 }
 
+/// A create of a taken slug is refused before it opens a run.
+async fn a_duplicate_slug_leaves_no_run(pool: &Pool) {
+    use rustango::tenancy::provision_store::ProvisioningRun;
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("migrations");
+    let opts = env.tenant_opts("dup").await;
+    env.create(&dir, "dup", opts).await.expect("first create");
+    let opts = env.tenant_opts("dup2").await;
+    let err = env.create(&dir, "dup", opts).await.expect_err("taken slug");
+    assert!(err.to_string().contains("already exists"), "{err}");
+    let runs: Vec<ProvisioningRun> = ProvisioningRun::objects()
+        .where_(ProvisioningRun::slug.eq("dup".to_owned()))
+        .fetch(&env.registry)
+        .await
+        .unwrap();
+    assert_eq!(runs.len(), 1, "the refused create left a run: {runs:?}");
+}
+
 /// Two creates naming one schema at once, by name or slug default: one
 /// tenant lives there, the other is refused. Both create paths race.
 async fn concurrent_creates_never_share_a_schema(pool: &Pool) {
@@ -1097,5 +1115,6 @@ tri_dialect_test! {
         create_tenant_releases_its_schema_on_a_failed_insert,
         provision_releases_its_schema_on_a_failed_insert,
         concurrent_creates_never_share_a_schema,
+        a_duplicate_slug_leaves_no_run,
     ],
 }

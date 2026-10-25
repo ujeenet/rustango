@@ -658,6 +658,18 @@ where
     use super::provision_store as store;
 
     let registry = pools.registry_pool();
+    // A taken slug leaves no failed run behind. A lookup error falls
+    // through, so Validate records it; Validate also checks again.
+    let taken = Org::objects()
+        .where_(Org::slug.eq(request.slug.clone()))
+        .first(&registry)
+        .await;
+    if matches!(taken, Ok(Some(_))) {
+        return Err(TenancyError::Validation(format!(
+            "tenant slug `{}` already exists",
+            request.slug
+        )));
+    }
     let run = store::open_run(
         &registry,
         &request.slug,
@@ -1970,7 +1982,9 @@ pub(crate) async fn provision_schema<DB: Database>(
             // duplicate_schema; or unique_violation when a concurrent create
             // inserted the same name first.
             Err(sqlx::Error::Database(e))
-                if matches!(e.code().as_deref(), Some("42P06" | "23505")) =>
+                if e.code().as_deref() == Some("42P06")
+                    || (e.code().as_deref() == Some("23505")
+                        && e.constraint() == Some("pg_namespace_nspname_index")) =>
             {
                 Err(TenancyError::Validation(format!(
                     "schema `{schema}` already exists — choose another schema name, or, if a \

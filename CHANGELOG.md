@@ -8,7 +8,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Changed — `api::create_tenant` runs the provisioning engine
 
-It no longer repeats the engine's steps: the run records each step like the CLI and console, and a resume goes through the engine too. The engine takes a project root and migrates every app's `migrations/` dir.
+It no longer repeats the engine's steps: the run records each step like the CLI and console, and a resume goes through the engine too. The engine takes a project root and migrates every app's `migrations/` dir. A create of a taken slug no longer leaves a failed run.
+
+**Behaviour change:** a failed migration returns `TenancyError::Validation` instead of `TenancyError::Migrate`, and the registry must be migrated first, since the run record is required. See UPGRADING.
 
 ### Fixed — racing schema-mode creates got a driver error
 
