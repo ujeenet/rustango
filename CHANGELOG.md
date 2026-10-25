@@ -4,6 +4,26 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — admin bulk actions that write in the admin's transaction
+
+`admin::Builder::register_tx_action` (and `_with_perm`) hands the handler the write transaction, so an audited model's audit rows commit or roll back with the action. `register_action` handlers still audit best effort after they run.
+
+### Added — `ModelForm::acting_superuser`
+
+Applies the admin's superuser-only field locks to a `ModelForm`: for a non-superuser they are left out, and a locked NOT NULL flag stores `false`. Forms that don't call it lock nothing, as before.
+
+### Fixed — `NullCache` has its own `touch`
+
+Every built-in cache backend now overrides `touch`, and a test fails if one falls back to the racy `get`-then-`set` default.
+
+### Changed — `tenancy` names `admin`
+
+It was only reached through `uploads`; the tenant user field locks now register in every tenancy build without a feature gate.
+
+### Deprecated — `contenttypes::render_generic_fk_link`
+
+Its link ignores the admin prefix and view permissions. Build your own from `ContentType::by_id`.
+
 ### Fixed — tenant logos 404'd under the default routes
 
 Tenant pages link uploaded logos and favicons under `RouteConfig::brand_url` (`/_brand` by default), the prefix tenant hosts serve, via the new `RouteConfig::brand_asset_url`. Tenant admin pages now use the tenant favicon too.
