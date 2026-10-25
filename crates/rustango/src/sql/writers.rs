@@ -56,8 +56,9 @@ pub(super) struct Sql<'d> {
     pub dml_target: Option<&'static str>,
     /// A FROM or JOIN item named [`Self::dml_target`] since the flag was last cleared.
     pub read_dml_target: bool,
-    /// Read [`Self::dml_target`] through a derived table (MySQL 1093 in an EXISTS).
-    pub derive_dml_target: bool,
+    /// Scope depth whose reads of [`Self::dml_target`] go through a derived
+    /// table (MySQL 1093 in an EXISTS).
+    pub derive_dml_target: Option<usize>,
 }
 
 /// The FROM name of a correlated subquery over its enclosing query's
@@ -135,7 +136,7 @@ impl<'d> Sql<'d> {
             group_concat: false,
             dml_target: None,
             read_dml_target: false,
-            derive_dml_target: false,
+            derive_dml_target: None,
         }
     }
 
@@ -154,7 +155,7 @@ impl<'d> Sql<'d> {
             group_concat: false,
             dml_target: None,
             read_dml_target: false,
-            derive_dml_target: false,
+            derive_dml_target: None,
         }
     }
 
@@ -244,7 +245,7 @@ impl<'d> Sql<'d> {
     fn write_table(&mut self, name: &str, alias: Option<&str>) {
         let target = self.dml_target == Some(name);
         // A correlated derived table fails on MariaDB; a derived target does not.
-        let derive = target && self.derive_dml_target;
+        let derive = target && self.derive_dml_target == Some(self.scope_stack.len());
         self.read_dml_target |= target && !derive;
         if derive {
             self.sql.push_str("(SELECT * FROM ");
@@ -259,12 +260,18 @@ impl<'d> Sql<'d> {
         }
     }
 
-    /// Run `f` reading the write target through a derived table where the
-    /// dialect needs it (1093).
-    fn with_derived_dml_target<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-        let needs = self.dml_target.is_some() && self.d.in_subquery_limit_needs_derived_table();
+    /// Run `f`, a subquery of the write whose FROM sits at scope depth
+    /// `depth`, reading the target through a derived table where the dialect
+    /// needs it (1093). Only directly under the write: MySQL rebuilds a
+    /// deeper one per row and sees its own writes, so that one stays a 1093.
+    fn with_derived_dml_target<R>(&mut self, depth: usize, f: impl FnOnce(&mut Self) -> R) -> R {
+        let direct = self.scope_stack.len() == 1;
+        let needs =
+            direct && self.dml_target.is_some() && self.d.in_subquery_limit_needs_derived_table();
         let outer = self.derive_dml_target;
-        self.derive_dml_target |= needs;
+        if needs {
+            self.derive_dml_target = Some(depth);
+        }
         let r = f(self);
         self.derive_dml_target = outer;
         r
@@ -4204,13 +4211,13 @@ pub(super) fn write_where_expr(
         }
         WhereExpr::Exists(subq) => {
             b.sql.push_str("EXISTS (");
-            b.with_derived_dml_target(|b| write_select(b, subq))?;
+            b.with_derived_dml_target(2, |b| write_select(b, subq))?;
             b.sql.push(')');
             Ok(())
         }
         WhereExpr::NotExists(subq) => {
             b.sql.push_str("NOT EXISTS (");
-            b.with_derived_dml_target(|b| write_select(b, subq))?;
+            b.with_derived_dml_target(2, |b| write_select(b, subq))?;
             b.sql.push(')');
             Ok(())
         }
@@ -4252,7 +4259,7 @@ pub(super) fn write_where_expr(
             b.sql
                 .push_str(if *negated { "NOT EXISTS (" } else { "EXISTS (" });
             b.sql.push_str("SELECT 1 FROM ");
-            write_rel_correlation(b, table, correlation)?;
+            b.with_derived_dml_target(1, |b| write_rel_correlation(b, table, correlation))?;
             b.sql.push(')');
             Ok(())
         }
@@ -4331,7 +4338,10 @@ fn write_rel_correlation(
             b.sql.push_str(" IN (SELECT ");
             b.write_ident(dst_col);
             b.sql.push_str(" FROM ");
+            // One subquery deeper, so never derived (see `with_derived_dml_target`).
+            let derive = b.derive_dml_target.take();
             b.write_table(through, None);
+            b.derive_dml_target = derive;
             b.sql.push_str(" WHERE ");
             b.write_ident(through);
             b.sql.push('.');

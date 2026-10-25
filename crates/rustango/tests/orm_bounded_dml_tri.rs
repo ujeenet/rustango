@@ -38,6 +38,18 @@ pub struct Link {
     pub item_id: i64,
 }
 
+/// Its children are rows of its own table.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "bdml_node")]
+#[allow(dead_code)]
+pub struct Node {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    #[rustango(max_length = 10)]
+    pub tag: String,
+}
+
 /// No primary key at all: a bounded write has nothing to bound by.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "bdml_log")]
@@ -280,6 +292,101 @@ async fn same_table_exists_dml(pool: &Pool) {
     assert_eq!(ids(pool).await, vec![2, 3, 4, 5]);
 }
 
+/// Two EXISTS levels over the target: each `outer_ref` reads the level above.
+/// MySQL may refuse the inner read (1093) but must never write wrong rows.
+async fn nested_same_table_exists_dml(pool: &Pool) {
+    use rustango::core::{subquery::outer_ref, Column as _};
+    let two_higher = || {
+        let higher = Item::objects()
+            .where_(Item::rank.gt_expr(outer_ref("rank")))
+            .compile()
+            .unwrap();
+        Item::objects()
+            .where_(Item::rank.gt_expr(outer_ref("rank")))
+            .where_exists(higher)
+            .compile()
+            .unwrap()
+    };
+    let refused = |r: Result<u64, rustango::sql::ExecError>, want: u64| match r {
+        Ok(n) => {
+            assert_eq!(n, want);
+            false
+        }
+        Err(e) if pool.dialect().name() == "mysql" && e.to_string().contains("1093") => true,
+        Err(e) => panic!("{e}"),
+    };
+    // Raises rank: a read that saw its own writes would pick other rows.
+    let r = Item::objects()
+        .where_exists(two_higher())
+        .update()
+        .set("rank", 100_i64)
+        .execute_pool(pool)
+        .await;
+    if !refused(r, 3) {
+        let rows: Vec<Item> = Item::objects()
+            .order_by(&[("id", false)])
+            .fetch(pool)
+            .await
+            .unwrap();
+        let ranks: Vec<i64> = rows.iter().map(|r| r.rank).collect();
+        assert_eq!(ranks, vec![50, 100, 40, 100, 100]);
+    }
+    seeded(pool).await;
+    let q = Item::objects()
+        .where_not_exists(two_higher())
+        .compile_delete()
+        .unwrap();
+    if !refused(delete_pool(pool, &q).await, 2) {
+        assert_eq!(ids(pool).await, vec![2, 4, 5]);
+    }
+}
+
+/// A raw-table relation EXISTS (M2M / generic `where_has`) over the write's
+/// own table; MySQL raised 1093.
+async fn self_relation_where_has_dml(pool: &Pool) {
+    use rustango::core::{RelCorrelation, WhereExpr};
+    let children = |negated| WhereExpr::RelExists {
+        table: "bdml_node",
+        correlation: RelCorrelation::Fk {
+            fk_column: "parent_id",
+            outer_column: "id",
+            ct: None,
+        },
+        negated,
+    };
+    rustango::testkit::matrix::fresh_table::<Node>(pool).await;
+    for (id, parent_id) in [(1, None), (2, Some(1)), (3, Some(2)), (4, None)] {
+        Node {
+            id,
+            parent_id,
+            tag: "new".into(),
+        }
+        .insert_pool(pool)
+        .await
+        .unwrap();
+    }
+    let n = Node::objects()
+        .where_raw(children(false))
+        .update()
+        .set("tag", "parent")
+        .execute_pool(pool)
+        .await
+        .expect("update where_has (same table)");
+    assert_eq!(n, 2);
+    let q = Node::objects()
+        .where_raw(children(true))
+        .compile_delete()
+        .unwrap();
+    assert_eq!(delete_pool(pool, &q).await.expect("delete where_doesnt_have"), 2);
+    let left: Vec<Node> = Node::objects()
+        .order_by(&[("id", false)])
+        .fetch(pool)
+        .await
+        .unwrap();
+    let left: Vec<_> = left.iter().map(|r| (r.id, r.tag.as_str())).collect();
+    assert_eq!(left, vec![(1, "parent"), (2, "parent")]);
+}
+
 /// The target read only by a nested IN or EXISTS still raises 1093 on MySQL;
 /// a correlated subquery over another table runs as a plain IN.
 async fn nested_and_correlated_in_subquery_dml(pool: &Pool) {
@@ -456,6 +563,8 @@ tri_dialect_test! {
         anti_join_delete,
         same_table_in_subquery_dml,
         same_table_exists_dml,
+        nested_same_table_exists_dml,
+        self_relation_where_has_dml,
         nested_and_correlated_in_subquery_dml,
         nested_in_wraps_once,
         set_operation_dml_is_refused,

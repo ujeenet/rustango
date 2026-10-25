@@ -9,7 +9,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — ORM and MySQL
 
 - MariaDB: JSON writes and text JSON paths no longer send `CAST(… AS JSON)`, which it rejects.
-- MySQL: an `update()` / `delete()` filtered by `EXISTS` over its own table no longer fails with error 1093.
+- MySQL: an `update()` / `delete()` filtered by `EXISTS` or `where_has` over its own table no longer fails with error 1093; one nested deeper still does, rather than see its own writes.
 - MySQL: an auto M2M junction over an `i32` / `i16` pk keeps the pk's width, so its foreign keys are accepted.
 - `ForeignKey::get_pool` no longer needs the `postgres` feature.
 - MySQL / SQLite: `distinct_on` picks each row by the NULLS FIRST / LAST order too.
