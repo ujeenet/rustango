@@ -158,6 +158,18 @@ JSON binds are cast only on MySQL 8.0+ (and not on MariaDB); MySQL 5.7 is not su
 
 New auto junctions over such pks get `INT` / `SMALLINT` columns, not `BIGINT`, which MySQL refused as a foreign key. Existing junctions are unchanged.
 
+### Forwarded proto and host are read from the right
+
+Behind `trust_proxies`, a comma list in `X-Forwarded-Proto` / `X-Forwarded-Host` now yields the value of the outermost trusted proxy: one value is skipped per trusted hop in `X-Forwarded-For`. Before, the first (client-sent) value won.
+
+### Template views are `private` to shared caches
+
+Their pages carry the CSRF token, so they now send `Cache-Control: private` (any `public` is dropped) and `Vary: Cookie`.
+
+### `create-api-key` needs the server's key
+
+Set `RUSTANGO_SESSION_SECRET`, or start the server once so it writes the dev key file; the verb no longer creates one.
+
 ## 0.61.0
 
 ### Built-in logo is square

@@ -213,6 +213,73 @@ async fn a_bare_admin_logout_ends_a_cookie_from_a_faster_clock(pool: &Pool) {
     assert!(env.status(&cookie).await.is_redirection());
 }
 
+/// Deactivating an admin user in the admin stamps the logout cut-off, so
+/// reactivating never brings an old cookie back.
+async fn deactivating_a_bare_admin_ends_their_sessions(pool: &Pool) {
+    let env = bare(pool).await;
+    let editor = env.login().await;
+    let mut other = AdminUser::new_with_password(&unique("off"), ADMIN_PASSWORD, true).unwrap();
+    other.insert_pool(pool).await.expect("seed admin");
+    let form = format!(
+        "username={}&password={ADMIN_PASSWORD}&_csrf=t",
+        other.username
+    );
+    let theirs = set_cookie(
+        &send(&env.app, "POST", "/login", "admin.test", form, "").await,
+        ADMIN_COOKIE,
+    );
+    assert_eq!(env.status(&theirs).await, StatusCode::OK);
+
+    let pk = other.id.get().copied().unwrap();
+    let edit = |active: bool| {
+        format!(
+            "username={}&password_hash=&is_superuser=true{}&created_at=2026-01-01T00:00:00&_csrf=t",
+            other.username,
+            if active { "&active=true" } else { "" }
+        )
+    };
+    let uri = format!("/rustango_admin_users/{pk}");
+    for active in [false, true] {
+        let res = send(&env.app, "POST", &uri, "admin.test", edit(active), &editor).await;
+        assert!(res.status().is_redirection(), "{}", res.status());
+    }
+    let row = AdminUser::objects()
+        .filter("id", pk)
+        .fetch(pool)
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(row.active);
+    assert!(
+        env.status(&theirs).await.is_redirection(),
+        "a cookie from before the deactivation came back"
+    );
+    assert!(row.sessions_revoked_at.is_some(), "deactivation not stamped");
+}
+
+/// `session::deactivate` ends the sessions; reactivating with a plain ORM
+/// save revives none.
+async fn the_deactivate_helper_ends_sessions(pool: &Pool) {
+    let env = bare(pool).await;
+    let cookie = env.login().await;
+    let pk = env.admin.id.get().copied().unwrap();
+    assert!(rustango::session::deactivate::<AdminUser>(pool, pk)
+        .await
+        .unwrap());
+    let mut row = env.row().await;
+    assert!(!row.active);
+    assert!(row.sessions_revoked_at.is_some(), "deactivation not stamped");
+    row.active = true;
+    row.save_pool(pool).await.unwrap();
+    assert!(
+        env.status(&cookie).await.is_redirection(),
+        "a cookie from before the deactivation came back"
+    );
+    assert!(!rustango::session::deactivate::<AdminUser>(pool, i64::MAX)
+        .await
+        .unwrap());
+}
+
 /// A signed but stale cookie logs this browser out and revokes nothing.
 async fn a_stale_bare_admin_cookie_cannot_revoke(pool: &Pool) {
     let env = bare(pool).await;
@@ -814,6 +881,8 @@ tri_dialect_test! {
         a_bare_admin_login_lands_after_the_cutoff,
         a_bare_admin_logout_ends_a_cookie_from_a_faster_clock,
         a_stale_bare_admin_cookie_cannot_revoke,
+        deactivating_a_bare_admin_ends_their_sessions,
+        the_deactivate_helper_ends_sessions,
         a_bare_admin_logout_that_cannot_read_fails,
         a_bare_admin_login_db_error_is_503_and_not_a_failure,
         a_tenant_admin_logout_ends_every_session,

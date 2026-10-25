@@ -41,6 +41,11 @@ fn migration(name: &str, table: &str, scope: MigrationScope) -> Migration {
 /// A registry with nothing applied, over a dir holding one registry-scoped
 /// and one tenant-scoped migration.
 async fn boot() -> Booted {
+    // `create-api-key` loads a key, never makes one.
+    rustango::tenancy::set_api_key_secret(rustango::session::SessionSecret::from_bytes(vec![
+        7;
+        32
+    ]));
     let tmp = tempfile::tempdir().expect("tempdir");
     let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
     let raw = sqlx::SqlitePool::connect(&url).await.expect("connect");
@@ -649,6 +654,48 @@ async fn password_and_key_verbs_take_flags_anywhere() {
         .run(&["create-api-key", "acme", "bob", "junk"])
         .await
         .is_err());
+}
+
+/// The current password may come from the env, so it stays out of argv.
+#[tokio::test]
+async fn change_password_reads_the_current_password_from_env() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.run(&[
+        "create-user",
+        "acme",
+        "carol",
+        "--skip-validation",
+        "--password",
+        "env-old",
+    ])
+    .await
+    .expect("user");
+    std::env::set_var("RUSTANGO_CURRENT_PASSWORD", "env-old");
+    let out = b
+        .run(&[
+            "change-password",
+            "acme",
+            "carol",
+            "--skip-validation",
+            "--password",
+            "env-new",
+        ])
+        .await;
+    std::env::remove_var("RUSTANGO_CURRENT_PASSWORD");
+    out.expect("current password from the env");
+    b.run(&[
+        "change-password",
+        "acme",
+        "carol",
+        "--current",
+        "env-new",
+        "--skip-validation",
+        "--password",
+        "env-3",
+    ])
+    .await
+    .expect("the new password took");
 }
 
 /// `--expires-days` out of range is a validation error, not a panic (#2395).

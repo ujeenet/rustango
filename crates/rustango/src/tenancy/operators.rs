@@ -139,18 +139,18 @@ pub async fn set_active(
 
     // Only `active`: a whole-row save would undo a password reset that
     // landed since `target` was read (#2467).
-    Operator::objects()
-        .where_(Operator::id.eq(id))
-        .update()
-        .set_typed(Operator::active.set(active))
-        .execute_pool(registry)
-        .await?;
-    target.active = active;
-    if !active {
-        // So a later reactivation does not revive today's cookies.
-        crate::session::revoke_sessions::<Operator>(registry, id, target.sessions_revoked_at, 0)
+    if active {
+        Operator::objects()
+            .where_(Operator::id.eq(id))
+            .update()
+            .set_typed(Operator::active.set(true))
+            .execute_pool(registry)
             .await?;
+    } else {
+        // So a later reactivation does not revive today's cookies.
+        crate::session::deactivate::<Operator>(registry, id).await?;
     }
+    target.active = active;
     Ok(Outcome::Changed)
 }
 

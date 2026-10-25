@@ -4,10 +4,6 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-## [0.61.0] — 2026-10-25
-
-**Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set; `ProvisionRequest` takes a `TenantStorage` and an optional backend, which must be the registry's; a blank `RUSTANGO_SECRET_KEY` no longer seals; `RunKind` is `#[non_exhaustive]`; provisioning types gain a `first_admin` field; `S3Storage::new` takes an `S3Config` and credentials apart; `CreateView`, `UpdateView`, `ViewSet::for_model` and `#[viewset]` require the writable field list and lose `.fields()`; `PoolTuning` and `DatabaseSettings` are `#[non_exhaustive]`; `Debug` on auth, SSO and tenancy structs hides secrets. See UPGRADING.
-
 ### Fixed — ORM and MySQL
 
 - MariaDB: JSON writes and text JSON paths no longer send `CAST(… AS JSON)`, which it rejects.
@@ -15,6 +11,31 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - MySQL: an auto M2M junction over an `i32` / `i16` pk keeps the pk's width, so its foreign keys are accepted.
 - `ForeignKey::get_pool` no longer needs the `postgres` feature.
 - MySQL / SQLite: `distinct_on` picks each row by the NULLS FIRST / LAST order too.
+
+### Fixed — deactivating an admin user ends their sessions
+
+Unchecking **active** on a `rustango_admin_users` row stamps the logout cut-off, as for operators and tenant users, so reactivating revives no old cookie.
+New `session::deactivate::<T>(pool, id)` does the same from code; a direct ORM write to `active` does not stamp.
+
+### Fixed — `create-api-key` could write its own key file
+
+The verb only loads the server's key (`RUSTANGO_SESSION_SECRET` or the dev key file) and fails when there is none, so every key it prints matches the server.
+
+### Fixed — pages with a CSRF token could be shared by a cache
+
+Template views that render `csrf_input` send `Cache-Control: private` and `Vary: Cookie`, so a cache never serves one user's token to another.
+
+### Fixed — `X-Forwarded-Proto` / `-Host` read the client's hop
+
+Behind a trusted proxy the SSO and MCP redirect builders take the value set by the outermost trusted proxy, read from the right, not the first.
+
+### Added — `--current-stdin` and `RUSTANGO_CURRENT_PASSWORD` for change-password verbs
+
+`change-password` and `change-operator-password` read the current password from stdin or the env off a terminal, and warn when `--current` is in argv.
+
+## [0.61.0] — 2026-10-25
+
+**Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set; `ProvisionRequest` takes a `TenantStorage` and an optional backend, which must be the registry's; a blank `RUSTANGO_SECRET_KEY` no longer seals; `RunKind` is `#[non_exhaustive]`; provisioning types gain a `first_admin` field; `S3Storage::new` takes an `S3Config` and credentials apart; `CreateView`, `UpdateView`, `ViewSet::for_model` and `#[viewset]` require the writable field list and lose `.fields()`; `PoolTuning` and `DatabaseSettings` are `#[non_exhaustive]`; `Debug` on auth, SSO and tenancy structs hides secrets. See UPGRADING.
 
 ### Fixed — the first admin could not set a password in a browser
 

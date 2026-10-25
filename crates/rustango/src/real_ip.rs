@@ -77,8 +77,22 @@ pub struct TrustedRealIp(pub IpAddr);
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TrustedPeer;
 
-/// The first value of forwarding header `name`, only when the peer is a
-/// trusted proxy (a [`TrustedRealIp`] is set); any client can send it.
+/// Trusted proxies the forwarded-for walk passed before the client, not
+/// counting the peer; each may have appended its own forwarding value.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(
+    not(any(
+        all(feature = "tenancy", feature = "sso"),
+        feature = "admin-sso",
+        feature = "mcp"
+    )),
+    allow(dead_code)
+)]
+pub(crate) struct TrustedHops(usize);
+
+/// The value of forwarding header `name` set by the outermost trusted proxy,
+/// only when a [`TrustedRealIp`] is set. Read from the right, one value per
+/// trusted hop, since proxies append; values further left are client-sent.
 #[cfg(any(
     all(feature = "tenancy", feature = "sso"),
     feature = "admin-sso",
@@ -90,8 +104,14 @@ pub(crate) fn trusted_forwarded<'a>(
     name: &str,
 ) -> Option<&'a str> {
     extensions.get::<TrustedRealIp>()?;
-    let v = headers.get(name)?.to_str().ok()?;
-    Some(v.split(',').next().unwrap_or(v).trim()).filter(|s| !s.is_empty())
+    let hops = extensions.get::<TrustedHops>().map_or(0, |h| h.0);
+    let mut values = Vec::new();
+    for line in headers.get_all(name) {
+        values.extend(line.to_str().ok()?.split(',').map(str::trim));
+    }
+    // Fewer values than proxies: some overwrote, so all left are theirs.
+    let at = values.len().checked_sub(1)?.saturating_sub(hops);
+    Some(values[at]).filter(|s| !s.is_empty())
 }
 
 #[derive(Clone, Debug)]
@@ -163,7 +183,13 @@ impl RealIpLayer {
 
     /// The client behind a trusted peer. A hop chain is read right to
     /// left and the first untrusted hop wins, since proxies append.
+    #[cfg(test)]
     fn resolve_trusted(&self, req: &Request<Body>) -> Option<IpAddr> {
+        self.resolve_trusted_hops(req).map(|(ip, _)| ip)
+    }
+
+    /// [`Self::resolve_trusted`] plus the trusted hops walked past.
+    fn resolve_trusted_hops(&self, req: &Request<Body>) -> Option<(IpAddr, usize)> {
         let chain: Vec<Option<IpAddr>> = match self.strategy {
             // Proxies append to XFF; other headers may be client-sent.
             HeaderStrategy::XForwardedFor | HeaderStrategy::Auto => {
@@ -175,18 +201,19 @@ impl RealIpLayer {
                 .map(|h| h.and_then(rfc7239_for))
                 .collect(),
             HeaderStrategy::XRealIp | HeaderStrategy::CfConnectingIp => {
-                return extract(req, &self.strategy);
+                return extract(req, &self.strategy).map(|ip| (ip, 0));
             }
         };
         let mut rightmost = None;
-        for hop in chain.iter().rev() {
+        for (walked, hop) in chain.iter().rev().enumerate() {
             let ip = (*hop)?;
             if !self.trusts(ip) {
-                return Some(ip);
+                return Some((ip, walked));
             }
             rightmost = rightmost.or(Some(ip));
         }
-        rightmost
+        // All trusted: the leftmost hop is the client, the rest proxies.
+        rightmost.map(|ip| (ip, chain.len().saturating_sub(1)))
     }
 }
 
@@ -226,10 +253,13 @@ impl<S: Clone + Send + Sync + 'static> RealIpRouterExt for Router<S> {
                     if trusted_peer {
                         req.extensions_mut().insert(TrustedPeer);
                     }
-                    let trusted = trusted_peer.then(|| cfg.resolve_trusted(&req)).flatten();
-                    if let Some(ip) = trusted {
+                    let trusted = trusted_peer
+                        .then(|| cfg.resolve_trusted_hops(&req))
+                        .flatten();
+                    if let Some((ip, hops)) = trusted {
                         req.extensions_mut().insert(RealIp(ip));
                         req.extensions_mut().insert(TrustedRealIp(ip));
+                        req.extensions_mut().insert(TrustedHops(hops));
                     } else if let Some(ip) = extract(&req, &cfg.strategy) {
                         // The bare claim: fine for logs, never trusted.
                         req.extensions_mut().insert(RealIp(ip));
@@ -508,6 +538,91 @@ mod tests {
             .unwrap();
         let ip = trusting(HeaderStrategy::Auto).resolve_trusted(&r);
         assert_eq!(ip.unwrap().to_string(), "203.0.113.7");
+    }
+
+    /// Proxies append, so the trusted proxy's value is the last one.
+    #[cfg(any(
+        all(feature = "tenancy", feature = "sso"),
+        feature = "admin-sso",
+        feature = "mcp"
+    ))]
+    #[test]
+    fn trusted_forwarded_takes_the_hop_the_proxy_added() {
+        use axum::http::HeaderValue;
+        let mut ext = axum::http::Extensions::new();
+        ext.insert(TrustedRealIp("10.0.0.2".parse().unwrap()));
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("x-forwarded-proto", HeaderValue::from_static("http, https"));
+        assert_eq!(
+            trusted_forwarded(&h, &ext, "x-forwarded-proto"),
+            Some("https")
+        );
+        h.append("x-forwarded-proto", HeaderValue::from_static("http"));
+        assert_eq!(
+            trusted_forwarded(&h, &ext, "x-forwarded-proto"),
+            Some("http")
+        );
+        h.insert("x-forwarded-host", HeaderValue::from_static("evil.test, app.test"));
+        assert_eq!(
+            trusted_forwarded(&h, &ext, "x-forwarded-host"),
+            Some("app.test")
+        );
+        assert_eq!(
+            trusted_forwarded(&h, &axum::http::Extensions::new(), "x-forwarded-host"),
+            None
+        );
+    }
+
+    /// CDN and inner proxy both trusted and both appending: the CDN's value
+    /// wins, not the inner hop's, nor the client's.
+    #[cfg(any(
+        all(feature = "tenancy", feature = "sso"),
+        feature = "admin-sso",
+        feature = "mcp"
+    ))]
+    #[tokio::test]
+    async fn trusted_forwarded_skips_values_of_inner_trusted_proxies() {
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        async fn handler(req: Request<Body>) -> String {
+            let (parts, _) = req.into_parts();
+            let get = |n| trusted_forwarded(&parts.headers, &parts.extensions, n).unwrap_or("-");
+            format!("{} {}", get("x-forwarded-proto"), get("x-forwarded-host"))
+        }
+        let app = Router::new()
+            .route("/", get(handler))
+            .real_ip(trusting(HeaderStrategy::XForwardedFor));
+        let send = |xff: &'static str, proto: &'static str, host: &'static str| {
+            let app = app.clone();
+            async move {
+                let peer: std::net::SocketAddr = "10.0.0.2:4000".parse().unwrap();
+                let res = app
+                    .oneshot(
+                        Request::builder()
+                            .uri("/")
+                            .extension(ConnectInfo(peer))
+                            .header("x-forwarded-for", xff)
+                            .header("x-forwarded-proto", proto)
+                            .header("x-forwarded-host", host)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let b = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
+                String::from_utf8(b.to_vec()).unwrap()
+            }
+        };
+        // client -> CDN (10.0.0.1) -> nginx (peer 10.0.0.2) -> app.
+        assert_eq!(
+            send("203.0.113.7, 10.0.0.1", "http, https, http", "evil.test, app.test, app.test").await,
+            "https app.test"
+        );
+        // One trusted proxy: its own value, the last.
+        assert_eq!(send("203.0.113.7", "http, https", "evil.test, app.test").await, "https app.test");
+        // The CDN overwrote instead of appending: its lone value stands.
+        assert_eq!(send("203.0.113.7, 10.0.0.1", "https", "app.test").await, "https app.test");
     }
 
     #[test]
