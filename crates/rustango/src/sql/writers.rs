@@ -2246,7 +2246,9 @@ fn write_json_path(
             write_expr(b, source, None)?;
             b.sql.push_str(", '");
             b.sql.push_str(&json_path);
-            b.sql.push_str("'), CAST('null' AS JSON)))");
+            b.sql.push_str("'), ");
+            b.d.write_json_param(&mut b.sql, "'null'");
+            b.sql.push_str("))");
         } else {
             b.sql.push_str("JSON_EXTRACT(");
             write_expr(b, source, None)?;
