@@ -22,6 +22,10 @@ Template views that render `csrf_input` send `Cache-Control: private` and `Vary:
 
 Behind a trusted proxy the SSO and MCP redirect builders take the last value, the one the proxy appended, not the first.
 
+### Added — `--current-stdin` and `RUSTANGO_CURRENT_PASSWORD` for change-password verbs
+
+`change-password` and `change-operator-password` read the current password from stdin or the env off a terminal, and warn when `--current` is in argv.
+
 ### Fixed — the first admin could not set a password in a browser
 
 The set-password page and the run page that shows its link sent `Referrer-Policy: no-referrer`, so browsers posted `Origin: null` and CSRF refused the form. They now send `same-origin`.

@@ -656,6 +656,48 @@ async fn password_and_key_verbs_take_flags_anywhere() {
         .is_err());
 }
 
+/// The current password may come from the env, so it stays out of argv.
+#[tokio::test]
+async fn change_password_reads_the_current_password_from_env() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.run(&[
+        "create-user",
+        "acme",
+        "carol",
+        "--skip-validation",
+        "--password",
+        "env-old",
+    ])
+    .await
+    .expect("user");
+    std::env::set_var("RUSTANGO_CURRENT_PASSWORD", "env-old");
+    let out = b
+        .run(&[
+            "change-password",
+            "acme",
+            "carol",
+            "--skip-validation",
+            "--password",
+            "env-new",
+        ])
+        .await;
+    std::env::remove_var("RUSTANGO_CURRENT_PASSWORD");
+    out.expect("current password from the env");
+    b.run(&[
+        "change-password",
+        "acme",
+        "carol",
+        "--current",
+        "env-new",
+        "--skip-validation",
+        "--password",
+        "env-3",
+    ])
+    .await
+    .expect("the new password took");
+}
+
 /// `--expires-days` out of range is a validation error, not a panic (#2395).
 #[tokio::test]
 async fn api_key_expiry_out_of_range_is_refused() {
