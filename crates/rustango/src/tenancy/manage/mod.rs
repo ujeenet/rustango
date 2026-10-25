@@ -45,6 +45,7 @@ mod agents;
 mod args;
 mod audit;
 mod data;
+mod db_servers;
 mod edit;
 mod flush;
 mod hosts;
@@ -221,6 +222,11 @@ where
         "add-host" => hosts::add_host(pools, &args[1..], writer).await,
         "remove-host" => hosts::remove_host(pools, &args[1..], writer).await,
         "set-host-enabled" => hosts::set_host_enabled(pools, &args[1..], writer).await,
+        "add-db-server" => db_servers::add_db_server(pools, &args[1..], writer).await,
+        "edit-db-server" => db_servers::edit_db_server(pools, &args[1..], writer).await,
+        "list-db-servers" => db_servers::list_db_servers(pools, &args[1..], writer).await,
+        "test-db-server" => db_servers::test_db_server(pools, &args[1..], writer).await,
+        "remove-db-server" => db_servers::remove_db_server(pools, &args[1..], writer).await,
         "prewarm-pools" => {
             // v0.27.7 (#60) — eagerly build pools for every active
             // database-mode tenant. Useful as a post-deploy hook
@@ -566,6 +572,37 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         "                       Park a host without losing the record (DNS in flight,"
     )?;
     writeln!(w, "                       domain being retired).")?;
+    writeln!(w)?;
+    writeln!(w, "DATABASE SERVERS:")?;
+    writeln!(
+        w,
+        "  add-db-server <name> --host <h> [--port <n>] --user <u> [--tls <mode>]"
+    )?;
+    writeln!(
+        w,
+        "                [--maintenance-db <db>] [--sqlite-dir <dir>] [--password-env <VAR> | --no-password]"
+    )?;
+    writeln!(
+        w,
+        "                       Save a server's admin login; the password is asked hidden"
+    )?;
+    writeln!(
+        w,
+        "                       and stored sealed (needs RUSTANGO_SECRET_KEY)."
+    )?;
+    writeln!(w, "  list-db-servers      Saved servers, without secrets.")?;
+    writeln!(
+        w,
+        "  test-db-server <name>  Log in and report the admin login's rights."
+    )?;
+    writeln!(
+        w,
+        "  edit-db-server <name> [same flags] [--prompt-password | --clear-password] [--on|--off]"
+    )?;
+    writeln!(
+        w,
+        "  remove-db-server <name>  Refused while a tenant's database is on it."
+    )?;
     writeln!(w)?;
     writeln!(w, "USER / OPERATOR MANAGEMENT:")?;
     writeln!(
