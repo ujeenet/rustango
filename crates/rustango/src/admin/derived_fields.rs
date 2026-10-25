@@ -56,7 +56,8 @@ pub(crate) fn text(
 }
 
 /// The admin writes `active` itself; a deactivation there ends the account's
-/// sessions and JWT refresh in the same UPDATE, at the logout cut-off.
+/// sessions and JWT refresh in the same UPDATE, at the cut-off
+/// [`crate::session::deactivate`] uses elsewhere.
 pub(crate) fn revoke_on_deactivate<'a>(
     values: &'a mut Vec<(&'static str, SqlValue)>,
     before: Option<&'a serde_json::Value>,
@@ -75,8 +76,7 @@ pub(crate) fn revoke_on_deactivate<'a>(
         let prev = before
             .and_then(|r| r.get(SESSIONS_REVOKED_AT)?.as_str())
             .and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
-        let cutoff = crate::session::logout_cutoff(prev, 0);
-        let cutoff = chrono::DateTime::from_timestamp(cutoff, 0).unwrap_or_else(chrono::Utc::now);
+        let cutoff = crate::session::logout_cutoff_at(prev, 0);
         values.retain(|(c, _)| *c != SESSIONS_REVOKED_AT);
         values.push((SESSIONS_REVOKED_AT, SqlValue::DateTime(cutoff)));
         Ok::<(), String>(())

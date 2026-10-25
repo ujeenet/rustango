@@ -443,6 +443,11 @@ let admin = admin::Builder::new(pool)
 The tenant-admin builder wires this to its `RouteConfig::logout_url`
 automatically, so the button always hits a route that exists.
 
+Unchecking **active** in the admin stamps `sessions_revoked_at` too. A direct
+ORM write to `active` does not; in your own code use
+`rustango::session::deactivate::<AdminUser>(&pool, id)` (or `Operator`, `User`),
+so a later reactivation revives no old cookie.
+
 ---
 
 ## Theming and branding

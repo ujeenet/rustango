@@ -9,6 +9,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — deactivating an admin user ends their sessions
 
 Unchecking **active** on a `rustango_admin_users` row stamps the logout cut-off, as for operators and tenant users, so reactivating revives no old cookie.
+New `session::deactivate::<T>(pool, id)` does the same from code; a direct ORM write to `active` does not stamp.
 
 ### Fixed — `create-api-key` could write its own key file
 

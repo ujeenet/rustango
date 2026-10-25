@@ -257,6 +257,29 @@ async fn deactivating_a_bare_admin_ends_their_sessions(pool: &Pool) {
     assert!(row.sessions_revoked_at.is_some(), "deactivation not stamped");
 }
 
+/// `session::deactivate` ends the sessions; reactivating with a plain ORM
+/// save revives none.
+async fn the_deactivate_helper_ends_sessions(pool: &Pool) {
+    let env = bare(pool).await;
+    let cookie = env.login().await;
+    let pk = env.admin.id.get().copied().unwrap();
+    assert!(rustango::session::deactivate::<AdminUser>(pool, pk)
+        .await
+        .unwrap());
+    let mut row = env.row().await;
+    assert!(!row.active);
+    assert!(row.sessions_revoked_at.is_some(), "deactivation not stamped");
+    row.active = true;
+    row.save_pool(pool).await.unwrap();
+    assert!(
+        env.status(&cookie).await.is_redirection(),
+        "a cookie from before the deactivation came back"
+    );
+    assert!(!rustango::session::deactivate::<AdminUser>(pool, i64::MAX)
+        .await
+        .unwrap());
+}
+
 /// A signed but stale cookie logs this browser out and revokes nothing.
 async fn a_stale_bare_admin_cookie_cannot_revoke(pool: &Pool) {
     let env = bare(pool).await;
@@ -859,6 +882,7 @@ tri_dialect_test! {
         a_bare_admin_logout_ends_a_cookie_from_a_faster_clock,
         a_stale_bare_admin_cookie_cannot_revoke,
         deactivating_a_bare_admin_ends_their_sessions,
+        the_deactivate_helper_ends_sessions,
         a_bare_admin_logout_that_cannot_read_fails,
         a_bare_admin_login_db_error_is_503_and_not_a_failure,
         a_tenant_admin_logout_ends_every_session,
