@@ -1567,7 +1567,10 @@ mod tests {
             created_at: 7,
         };
         let s = format!("{flow:?}");
-        assert!(!s.contains("st-secret") && !s.contains("pkce-secret"), "{s}");
+        assert!(
+            !s.contains("st-secret") && !s.contains("pkce-secret"),
+            "{s}"
+        );
     }
 
     #[test]

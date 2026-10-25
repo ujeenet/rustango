@@ -5278,7 +5278,8 @@ mod tests {
     fn parse_form_flags_required_missing() {
         let s = schema_two_fields();
         let submitted = HashMap::new();
-        let (cols, vals, errors) = parse_form(s, &every(s), &submitted, crate::core::WriteKind::Insert);
+        let (cols, vals, errors) =
+            parse_form(s, &every(s), &submitted, crate::core::WriteKind::Insert);
         assert!(cols.is_empty());
         assert!(vals.is_empty());
         assert_eq!(errors.len(), 1);
@@ -5292,7 +5293,8 @@ mod tests {
         let s = schema_two_fields();
         let mut submitted = HashMap::new();
         submitted.insert("title".to_owned(), "Hello".to_owned());
-        let (cols, vals, errors) = parse_form(s, &every(s), &submitted, crate::core::WriteKind::Insert);
+        let (cols, vals, errors) =
+            parse_form(s, &every(s), &submitted, crate::core::WriteKind::Insert);
         assert!(errors.is_empty());
         assert_eq!(cols, vec!["title"]);
         assert_eq!(vals.len(), 1);
@@ -5326,7 +5328,8 @@ mod tests {
         let mut submitted = HashMap::new();
         submitted.insert("title".to_owned(), "way too long".to_owned()); // 12 > 5
         submitted.insert("score".to_owned(), "50".to_owned());
-        let (cols, vals, errors) = parse_form(s, &every(s), &submitted, crate::core::WriteKind::Insert);
+        let (cols, vals, errors) =
+            parse_form(s, &every(s), &submitted, crate::core::WriteKind::Insert);
         assert!(cols.is_empty() || !cols.contains(&"title"));
         assert!(
             vals.is_empty() || vals.len() == 1,

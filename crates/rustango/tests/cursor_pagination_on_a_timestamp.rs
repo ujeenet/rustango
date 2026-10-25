@@ -48,7 +48,7 @@ pub struct Event {
 
 const FIELDS: &[&str] = &["id", "label", "occurred_at", "score"];
 
-const DDL: &str ="CREATE TABLE cursor_ts_event (
+const DDL: &str = "CREATE TABLE cursor_ts_event (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     label       TEXT NOT NULL,
     occurred_at TEXT NOT NULL,

@@ -50,7 +50,10 @@ async fn temporary_keys_need_their_session_token() {
         .expect("GET url");
     assert!(reqwest::get(&url).await.unwrap().status().is_success());
 
-    assert!(no_token.load(&key).await.is_err(), "loaded without the token");
+    assert!(
+        no_token.load(&key).await.is_err(),
+        "loaded without the token"
+    );
     let url = no_token
         .presigned_get_url(&key, Duration::from_secs(60))
         .await

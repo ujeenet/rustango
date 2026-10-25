@@ -208,7 +208,10 @@ fn app(pool: &Pool) -> axum::Router {
                 .search_fields(&["name"])
                 .router_pool("/api/owners", pool.clone()),
         )
-        .merge(ViewSet::for_model(Memo::SCHEMA, &["id", "tag", "deleted_at"]).router_pool("/api/memos", pool.clone()))
+        .merge(
+            ViewSet::for_model(Memo::SCHEMA, &["id", "tag", "deleted_at"])
+                .router_pool("/api/memos", pool.clone()),
+        )
         .merge(
             ListView::for_model(Memo::SCHEMA)
                 .template("list.html")
@@ -232,7 +235,10 @@ fn app(pool: &Pool) -> axum::Router {
                 .success_url("/memos")
                 .router("/memos", t.clone(), pool.clone()),
         )
-        .merge(ViewSet::for_model(Ranked::SCHEMA, &["id", "rank"]).router_pool("/api/ranked", pool.clone()))
+        .merge(
+            ViewSet::for_model(Ranked::SCHEMA, &["id", "rank"])
+                .router_pool("/api/ranked", pool.clone()),
+        )
         .merge(
             DetailView::for_model(Note::SCHEMA)
                 .template("detail.html")

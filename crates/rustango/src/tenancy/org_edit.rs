@@ -374,7 +374,10 @@ mod tests {
             ..OrgPatch::default()
         };
         let s = format!("{p:?}");
-        assert!(s.contains("database_url") && !s.contains("db-pw-123"), "{s}");
+        assert!(
+            s.contains("database_url") && !s.contains("db-pw-123"),
+            "{s}"
+        );
     }
 
     #[test]

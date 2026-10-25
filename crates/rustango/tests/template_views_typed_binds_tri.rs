@@ -860,7 +860,11 @@ async fn seed_story(pool: &Pool) -> i64 {
 }
 
 async fn story(pool: &Pool) -> Story {
-    Story::objects().fetch(pool).await.expect("stories").remove(0)
+    Story::objects()
+        .fetch(pool)
+        .await
+        .expect("stories")
+        .remove(0)
 }
 
 /// A posted column outside the allow-list is not written.
@@ -915,12 +919,21 @@ async fn update_view_unticked_checkbox_is_false(pool: &Pool) {
 async fn create_view_unsent_field_takes_the_column_default(pool: &Pool) {
     let (status, body) = send(pool, Method::POST, "/badges/new", "name=a").await;
     assert!(status.is_redirection(), "create: {status} {body}");
-    let b = Badge::objects().fetch(pool).await.expect("badges").remove(0);
+    let b = Badge::objects()
+        .fetch(pool)
+        .await
+        .expect("badges")
+        .remove(0);
     assert_eq!((b.tier.as_str(), b.rank), ("bronze", 3));
     // A sent value still wins over the default.
     let (status, body) = send(pool, Method::POST, "/badges/new", "name=b&tier=gold&rank=1").await;
     assert!(status.is_redirection(), "create: {status} {body}");
-    let b = Badge::objects().filter("name", "b").fetch(pool).await.expect("b").remove(0);
+    let b = Badge::objects()
+        .filter("name", "b")
+        .fetch(pool)
+        .await
+        .expect("b")
+        .remove(0);
     assert_eq!((b.tier.as_str(), b.rank), ("gold", 1));
 }
 

@@ -248,8 +248,8 @@ async fn ordering_fields_whitelist_drops_off_list_names() {
 /// Seeds through an unrestricted ViewSet: a `fields()` one cannot write
 /// `secret_score` (#1845).
 async fn seed_divergent(pool: &Pool) {
-    let app =
-        rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS).router_pool("/posts", pool.clone());
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
+        .router_pool("/posts", pool.clone());
     for (title, rating, secret) in [("a", 1, "zzz"), ("b", 2, "mmm"), ("c", 3, "aaa")] {
         let payload = serde_json::json!({
             "title": title, "rating": rating, "secret_score": secret

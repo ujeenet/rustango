@@ -128,7 +128,10 @@ async fn seed_pending(mgr: &MediaManager, pool: &Pool) -> i64 {
         .where_(Media::id.eq(id))
         .update()
         .set("status", "pending")
-        .set("uploaded_at", Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap())
+        .set(
+            "uploaded_at",
+            Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap(),
+        )
         .execute_pool(pool)
         .await
         .expect("age it");
@@ -228,7 +231,11 @@ async fn storage_error_keeps_the_row_for_the_next_sweep(pool: &Pool) {
     let id = seed_pending(&mgr, pool).await;
 
     assert!(mgr.purge_pending(Duration::ZERO).await.is_err());
-    assert_eq!(row_count(pool, id).await, 1, "row dropped on a storage error");
+    assert_eq!(
+        row_count(pool, id).await,
+        1,
+        "row dropped on a storage error"
+    );
 
     storage
         .fail_delete

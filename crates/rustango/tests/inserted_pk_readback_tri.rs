@@ -340,8 +340,8 @@ async fn inline_row_fills_a_v7_pk(pool: &Pool) {
 
 /// #2416: an INSERT naming no column. MySQL needs `() VALUES ()`.
 async fn an_insert_of_only_defaults_writes_them(pool: &Pool) {
-    let app =
-        rustango::viewset::ViewSet::for_model(Flag::SCHEMA, &["id", "status", "is_public"]).router_pool("/flags", pool.clone());
+    let app = rustango::viewset::ViewSet::for_model(Flag::SCHEMA, &["id", "status", "is_public"])
+        .router_pool("/flags", pool.clone());
     let resp = app
         .oneshot(
             Request::builder()

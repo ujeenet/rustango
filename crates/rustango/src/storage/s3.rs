@@ -366,7 +366,11 @@ impl S3Storage {
             headers.push(("x-amz-security-token", token.clone()));
         }
         let canonical_headers: String = headers.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
-        let signed_headers = headers.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(";");
+        let signed_headers = headers
+            .iter()
+            .map(|(k, _)| *k)
+            .collect::<Vec<_>>()
+            .join(";");
 
         let canonical_request =
             format!("{method}\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
@@ -1192,7 +1196,9 @@ mod tests {
             "{head}"
         );
         assert!(
-            lower.contains("signedheaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token"),
+            lower.contains(
+                "signedheaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token"
+            ),
             "{head}"
         );
         verify_sigv4(&head);

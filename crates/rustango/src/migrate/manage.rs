@@ -7584,7 +7584,10 @@ mod gen_tests {
         );
         assert!(live(&pool, "read_only,"), "{pool}");
         // Both name the write allow-list.
-        assert!(live(&tenant, "ViewSet::for_model(Post::SCHEMA, &[\"id\"])"), "{tenant}");
+        assert!(
+            live(&tenant, "ViewSet::for_model(Post::SCHEMA, &[\"id\"])"),
+            "{tenant}"
+        );
         assert!(live(&pool, "fields       = \"id"), "{pool}");
     }
 

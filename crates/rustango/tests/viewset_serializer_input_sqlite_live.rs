@@ -234,9 +234,12 @@ async fn widget_router() -> axum::Router {
     .execute(&sq)
     .await
     .expect("create");
-    rustango::viewset::ViewSet::for_model(Widget::SCHEMA, &["id", "code", "note", "priority", "status"])
-        .serializer::<WidgetSerializer>()
-        .router_pool("/widgets", Pool::Sqlite(sq))
+    rustango::viewset::ViewSet::for_model(
+        Widget::SCHEMA,
+        &["id", "code", "note", "priority", "status"],
+    )
+    .serializer::<WidgetSerializer>()
+    .router_pool("/widgets", Pool::Sqlite(sq))
 }
 
 /// Helper: POST a widget body, return (status, body).
@@ -881,7 +884,10 @@ fn spec_body(vs: rustango::viewset::ViewSet, path: &str, method: &str) -> serde_
 #[test]
 fn spec_request_bodies_follow_the_serializer_write_set() {
     use rustango::viewset::ViewSet;
-    let item = || ViewSet::for_model(Item::SCHEMA, &["id", "name", "slug", "internal_score"]).serializer::<ItemSerializer>();
+    let item = || {
+        ViewSet::for_model(Item::SCHEMA, &["id", "name", "slug", "internal_score"])
+            .serializer::<ItemSerializer>()
+    };
     let post = spec_body(item(), "/x", "post");
     assert_eq!(
         post["properties"],
@@ -893,7 +899,8 @@ fn spec_request_bodies_follow_the_serializer_write_set() {
         .get("required")
         .is_none());
 
-    let acct = ViewSet::for_model(Acct::SCHEMA, &["id", "name", "secret"]).serializer::<AcctSerializer>();
+    let acct =
+        ViewSet::for_model(Acct::SCHEMA, &["id", "name", "secret"]).serializer::<AcctSerializer>();
     let put = spec_body(acct, "/x/{pk}", "put");
     assert_eq!(
         put["required"],
@@ -901,7 +908,8 @@ fn spec_request_bodies_follow_the_serializer_write_set() {
         "write_only: {put}"
     );
 
-    let doc = ViewSet::for_model(Doc::SCHEMA, &["id", "title", "body"]).serializer::<DocSerializer>();
+    let doc =
+        ViewSet::for_model(Doc::SCHEMA, &["id", "title", "body"]).serializer::<DocSerializer>();
     let post = spec_body(doc, "/x", "post");
     assert_eq!(
         post["required"],
