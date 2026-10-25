@@ -18,6 +18,10 @@ The verb only loads the server's key (`RUSTANGO_SESSION_SECRET` or the dev key f
 
 Template views that render `csrf_input` send `Cache-Control: private` and `Vary: Cookie`, so a cache never serves one user's token to another.
 
+### Fixed — `X-Forwarded-Proto` / `-Host` read the client's hop
+
+Behind a trusted proxy the SSO and MCP redirect builders take the last value, the one the proxy appended, not the first.
+
 ### Fixed — the first admin could not set a password in a browser
 
 The set-password page and the run page that shows its link sent `Referrer-Policy: no-referrer`, so browsers posted `Origin: null` and CSRF refused the form. They now send `same-origin`.

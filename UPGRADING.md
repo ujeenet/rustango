@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Forwarded proto and host use the last value
+
+Behind `trust_proxies`, a comma list in `X-Forwarded-Proto` / `X-Forwarded-Host` now yields its last value. A proxy chain whose inner hops append their own value should overwrite the header at the edge instead.
+
 ### Template views are `private` to shared caches
 
 Their pages carry the CSRF token, so they now send `Cache-Control: private` (any `public` is dropped) and `Vary: Cookie`.

@@ -77,8 +77,8 @@ pub struct TrustedRealIp(pub IpAddr);
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TrustedPeer;
 
-/// The first value of forwarding header `name`, only when the peer is a
-/// trusted proxy (a [`TrustedRealIp`] is set); any client can send it.
+/// The last value of forwarding header `name`, the one the trusted proxy
+/// appended, only when a [`TrustedRealIp`] is set; values to its left are client-sent.
 #[cfg(any(
     all(feature = "tenancy", feature = "sso"),
     feature = "admin-sso",
@@ -90,8 +90,8 @@ pub(crate) fn trusted_forwarded<'a>(
     name: &str,
 ) -> Option<&'a str> {
     extensions.get::<TrustedRealIp>()?;
-    let v = headers.get(name)?.to_str().ok()?;
-    Some(v.split(',').next().unwrap_or(v).trim()).filter(|s| !s.is_empty())
+    let v = headers.get_all(name).iter().last()?.to_str().ok()?;
+    Some(v.rsplit(',').next().unwrap_or(v).trim()).filter(|s| !s.is_empty())
 }
 
 #[derive(Clone, Debug)]
@@ -508,6 +508,39 @@ mod tests {
             .unwrap();
         let ip = trusting(HeaderStrategy::Auto).resolve_trusted(&r);
         assert_eq!(ip.unwrap().to_string(), "203.0.113.7");
+    }
+
+    /// Proxies append, so the trusted proxy's value is the last one.
+    #[cfg(any(
+        all(feature = "tenancy", feature = "sso"),
+        feature = "admin-sso",
+        feature = "mcp"
+    ))]
+    #[test]
+    fn trusted_forwarded_takes_the_hop_the_proxy_added() {
+        use axum::http::HeaderValue;
+        let mut ext = axum::http::Extensions::new();
+        ext.insert(TrustedRealIp("10.0.0.2".parse().unwrap()));
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("x-forwarded-proto", HeaderValue::from_static("http, https"));
+        assert_eq!(
+            trusted_forwarded(&h, &ext, "x-forwarded-proto"),
+            Some("https")
+        );
+        h.append("x-forwarded-proto", HeaderValue::from_static("http"));
+        assert_eq!(
+            trusted_forwarded(&h, &ext, "x-forwarded-proto"),
+            Some("http")
+        );
+        h.insert("x-forwarded-host", HeaderValue::from_static("evil.test, app.test"));
+        assert_eq!(
+            trusted_forwarded(&h, &ext, "x-forwarded-host"),
+            Some("app.test")
+        );
+        assert_eq!(
+            trusted_forwarded(&h, &axum::http::Extensions::new(), "x-forwarded-host"),
+            None
+        );
     }
 
     #[test]
