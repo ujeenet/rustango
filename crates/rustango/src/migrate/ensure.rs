@@ -100,8 +100,7 @@ fn idempotent<'a>(stmt: &'a str, dialect: &str) -> std::borrow::Cow<'a, str> {
     if dialect != "postgres" {
         return std::borrow::Cow::Borrowed(stmt);
     }
-    if is_add_constraint(stmt) && !stmt.contains("$rustango$")
-    {
+    if is_add_constraint(stmt) && !stmt.contains("$rustango$") {
         return std::borrow::Cow::Owned(format!(
             "DO $rustango$ BEGIN {stmt}; \
              EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $rustango$"
@@ -695,7 +694,10 @@ mod tests {
     #[test]
     fn mysql_duplicates_are_numbers() {
         let create = "CREATE TABLE t (id INT)";
-        assert!(is_mysql_duplicate(1050, "", create), "ER_TABLE_EXISTS_ERROR");
+        assert!(
+            is_mysql_duplicate(1050, "", create),
+            "ER_TABLE_EXISTS_ERROR"
+        );
         assert!(is_mysql_duplicate(1061, "", create), "ER_DUP_KEYNAME");
         assert!(is_mysql_duplicate(1826, "", create), "ER_FK_DUP_NAME");
         // ER_DUP_ENTRY: a unique index that genuinely could not be
@@ -734,11 +736,16 @@ mod tests {
     /// `ensure_*` call failed there; errno 150 (bad FK) must still fail.
     #[test]
     fn mariadb_dup_fk_name_is_already_exists() {
-        let fk = "ALTER TABLE `c` ADD CONSTRAINT `c_p_fkey` FOREIGN KEY (`p`) REFERENCES `p` (`id`)";
+        let fk =
+            "ALTER TABLE `c` ADD CONSTRAINT `c_p_fkey` FOREIGN KEY (`p`) REFERENCES `p` (`id`)";
         let dup = "Can't create table `db`.`c` (errno: 121 \"Duplicate key on write or update\")";
         let bad = "Can't create table `db`.`c` (errno: 150 \"Foreign key constraint is incorrectly formed\")";
         assert!(is_mysql_duplicate(1005, dup, fk));
         assert!(!is_mysql_duplicate(1005, bad, fk));
-        assert!(!is_mysql_duplicate(1005, dup, "CREATE TABLE `c` (`id` INT)"));
+        assert!(!is_mysql_duplicate(
+            1005,
+            dup,
+            "CREATE TABLE `c` (`id` INT)"
+        ));
     }
 }

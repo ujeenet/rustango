@@ -261,7 +261,11 @@ async fn admin_org_creates_racing_for_a_host_one_wins(pool: &Pool) {
         let host = format!("{}.race.test", name(pool, &format!("host{i}")));
         let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
         let create = |slug: String| {
-            let (pool, barrier, form) = (pool.clone(), barrier.clone(), org_form(&slug, &host, "", ""));
+            let (pool, barrier, form) = (
+                pool.clone(),
+                barrier.clone(),
+                org_form(&slug, &host, "", ""),
+            );
             tokio::spawn(async move {
                 barrier.wait().await;
                 send(&pool, Method::POST, "/rustango_orgs", form).await
@@ -322,7 +326,11 @@ async fn admin_writes_clear_the_org_cache(pool: &Pool) {
     let suspend = org_form(&slug, "", "", "").replace("&active=true", "");
     let (status, html) = send(pool, Method::POST, &format!("/rustango_orgs/{id}"), suspend).await;
     assert!(status.is_redirection(), "{status}: {html}");
-    assert_eq!(resolve(pool, &host).await, None, "a suspended tenant still resolved");
+    assert_eq!(
+        resolve(pool, &host).await,
+        None,
+        "a suspended tenant still resolved"
+    );
 
     let slug = name(pool, "cache2");
     let id = org(pool, &slug).await;
@@ -340,7 +348,11 @@ async fn admin_writes_clear_the_org_cache(pool: &Pool) {
     let uri = format!("/rustango_org_hosts/{hid}/delete");
     let (status, html) = send(pool, Method::POST, &uri, String::new()).await;
     assert!(status.is_redirection(), "{status}: {html}");
-    assert_eq!(resolve(pool, &host).await, None, "a deleted host still resolved");
+    assert_eq!(
+        resolve(pool, &host).await,
+        None,
+        "a deleted host still resolved"
+    );
 }
 
 /// A REST delete of an extra host stops it resolving at once.
@@ -368,7 +380,11 @@ async fn viewset_writes_clear_the_host_cache(pool: &Pool) {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert!(resp.status().is_success(), "{}", resp.status());
-    assert_eq!(resolve(pool, &host).await, None, "a deleted host still resolved");
+    assert_eq!(
+        resolve(pool, &host).await,
+        None,
+        "a deleted host still resolved"
+    );
 }
 
 tri_dialect_test! {

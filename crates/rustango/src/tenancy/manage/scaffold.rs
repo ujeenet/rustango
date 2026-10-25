@@ -235,9 +235,15 @@ mod tests {
             super::TENANCY_MANAGE_BIN,
             crate::migrate::scaffold::SINGLE_TENANT_MANAGE_BIN,
         ] {
-            assert!(bin.contains("async fn main() -> std::process::ExitCode"), "{bin}");
+            assert!(
+                bin.contains("async fn main() -> std::process::ExitCode"),
+                "{bin}"
+            );
             assert!(bin.contains("eprintln!(\"Error: {e}\")"), "{bin}");
-            assert!(!bin.contains("crate::"), "a bin can't name the library as crate:\n{bin}");
+            assert!(
+                !bin.contains("crate::"),
+                "a bin can't name the library as crate:\n{bin}"
+            );
         }
     }
 }
