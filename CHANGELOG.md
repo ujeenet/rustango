@@ -12,6 +12,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - MySQL: an `update()` / `delete()` filtered by `EXISTS` over its own table no longer fails with error 1093.
 - MySQL: an auto M2M junction over an `i32` / `i16` pk keeps the pk's width, so its foreign keys are accepted.
 - `ForeignKey::get_pool` no longer needs the `postgres` feature.
+- MySQL / SQLite: `distinct_on` picks each row by the NULLS FIRST / LAST order too.
 
 ### Fixed — the first admin could not set a password in a browser
 

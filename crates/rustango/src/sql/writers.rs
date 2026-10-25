@@ -690,35 +690,15 @@ fn write_distinct_on_via_window(
         }
         write_distinct_inner_col(b, scope.name, col, qualify);
     }
-    if !query.order_by.is_empty() {
-        b.sql.push_str(" ORDER BY ");
-        for (i, item) in query.order_by.iter().enumerate() {
-            if i > 0 {
-                b.sql.push_str(", ");
-            }
-            match item {
-                crate::core::OrderItem::Column { column, desc, .. } => {
-                    write_distinct_inner_col(b, scope.name, column, qualify);
-                    if *desc {
-                        b.sql.push_str(" DESC");
-                    }
-                }
-                crate::core::OrderItem::Expr { expr, desc, .. } => {
-                    write_expr(b, expr, None)?;
-                    if *desc {
-                        b.sql.push_str(" DESC");
-                    }
-                }
-                crate::core::OrderItem::Random => {
-                    b.sql.push_str(if b.d.name() == "mysql" {
-                        "RAND()"
-                    } else {
-                        "RANDOM()"
-                    });
-                }
-            }
+    // The outer ORDER BY's writer, so the ranking keeps its NULLS order.
+    write_order_limit_offset_with(b, &query.order_by, None, None, |b, _, item| {
+        if let crate::core::OrderItem::Column { column, .. } = item {
+            write_distinct_inner_col(b, scope.name, column, qualify);
+            Ok(())
+        } else {
+            write_order_target(b, item)
         }
-    }
+    })?;
     b.sql.push_str(") AS __rn FROM ");
     scope.write_from(b);
     // The joins sit in the inner SELECT next to the ROW_NUMBER()
