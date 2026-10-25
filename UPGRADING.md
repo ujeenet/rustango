@@ -156,11 +156,11 @@ It renders a root-relative link with no permission check. Look up the target wit
 
 ### Audited bulk actions: prefer `register_tx_action`
 
-A `register_action` handler writes on its own connection, so its audit rows are best effort. `register_tx_action` takes `&mut PoolTx` and audits in the same transaction.
+A `register_action` handler writes on its own connection, so its audit rows are best effort. `register_tx_action` takes `&mut PoolTx` and audits in the same transaction; write only through that transaction (a second connection can deadlock a single-connection SQLite pool).
 
 ### `ModelForm` over a user table
 
-Call `.acting_superuser(user.is_superuser)` so a non-superuser cannot set `is_superuser` or a password; without it the form locks nothing.
+Call `.acting_superuser(user.is_superuser)` so a non-superuser cannot set the table's registered superuser-only fields (the tenant `rustango_users` locks `is_superuser` and the password); without it the form locks nothing.
 
 ### Scaffold taglines lose their brackets
 

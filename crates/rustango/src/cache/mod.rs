@@ -314,6 +314,7 @@ thread_local! {
 }
 
 /// Fails when `cache.touch` falls back to the trait default.
+/// The counter is thread-local: call it from a `current_thread` runtime.
 #[cfg(test)]
 pub(crate) async fn assert_overrides_touch(cache: &dyn Cache, name: &str) {
     cache.set("touch-k", "v", None).await.unwrap();
