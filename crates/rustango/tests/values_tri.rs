@@ -826,7 +826,7 @@ mod related {
         let sql = pool.dialect().compile_select(&q).expect("sql").sql;
         assert!(!sql.contains("body"), "{sql}");
         assert_eq!(sql.matches("JOIN").count(), 1, "{sql}");
-        for bad in ["writer__bogus", "title__name", "writer__press"] {
+        for bad in ["writer__bogus", "title__name", "writer__press__bogus"] {
             let err = Book::objects().values_list(&[bad]).compile().unwrap_err();
             assert!(matches!(err, QueryError::UnknownField { .. }), "{bad}: {err:?}");
         }
