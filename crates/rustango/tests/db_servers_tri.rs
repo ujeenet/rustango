@@ -844,7 +844,9 @@ async fn the_console_never_shows_the_password(pool: &Pool) {
     let (_, edit) = c.get("/db-servers/web/edit").await;
     if !sqlite {
         assert!(
-            edit.contains(r#"type="password" autocomplete="new-password">"#),
+            edit.contains(
+                r#"type="password" id="admin_password" name="admin_password" autocomplete="new-password">"#
+            ),
             "{edit}"
         );
     }
