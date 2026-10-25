@@ -201,7 +201,7 @@ impl SecretsResolver for SealedSecretsResolver {
     }
 }
 
-fn open_sealed(
+pub(crate) fn open_sealed(
     reference: &str,
     current: Option<&str>,
     previous: Option<&str>,

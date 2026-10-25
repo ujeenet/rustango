@@ -157,6 +157,10 @@ To rotate the key, move the old one to `RUSTANGO_SECRET_KEY_PREVIOUS`, set the n
 Rolling back to 0.60.x leaves `enc:` rows unreadable there: edit those tenants back to a literal URL first.
 Create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` now probes the tenant database before writing.
 
+### New registry table `rustango_db_servers`
+
+Run `makemigrations` then `migrate` to create it. A server password is stored only sealed, so saving one needs `RUSTANGO_SECRET_KEY`.
+
 ### `TenantPoolInvalidator::tenant_secrets` has no default
 
 A custom implementor must return its `TenantSecrets`; the old default ignored `require_sealed_secrets()`.

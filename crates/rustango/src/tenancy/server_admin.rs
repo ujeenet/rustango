@@ -236,7 +236,20 @@ impl ServerAdmin {
     /// # Errors
     /// [`TenantDbError::Connect`] naming the fault.
     pub async fn connect(url: &str, timeout: Duration) -> Result<Self, TenantDbError> {
-        let pool = Pool::connect_admin(url, None, timeout)
+        Self::connect_with(url, None, timeout).await
+    }
+
+    /// [`Self::connect`], running DDL from `maintenance` instead of the
+    /// default target, for a server without a `postgres` database.
+    ///
+    /// # Errors
+    /// [`TenantDbError::Connect`] naming the fault.
+    pub async fn connect_with(
+        url: &str,
+        maintenance: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Self, TenantDbError> {
+        let pool = Pool::connect_admin(url, maintenance, timeout)
             .await
             .map_err(TenantDbError::Connect)?;
         let (user, db) = url_user_and_database(url);
@@ -246,7 +259,11 @@ impl ServerAdmin {
                 url: url.to_owned(),
                 timeout,
             },
-            protected: user.into_iter().chain(db).collect(),
+            protected: user
+                .into_iter()
+                .chain(db)
+                .chain(maintenance.map(ToOwned::to_owned))
+                .collect(),
         })
     }
 
@@ -287,7 +304,19 @@ impl ServerAdmin {
     /// # Errors
     /// [`TenantDbError::Connect`] when the server cannot be reached.
     pub async fn probe_url(url: &str, timeout: Duration) -> Result<PrivilegeReport, TenantDbError> {
-        match Self::connect(url, timeout).await {
+        Self::probe_url_with(url, None, timeout).await
+    }
+
+    /// [`Self::probe_url`] through [`Self::connect_with`].
+    ///
+    /// # Errors
+    /// As [`Self::probe_url`].
+    pub async fn probe_url_with(
+        url: &str,
+        maintenance: Option<&str>,
+        timeout: Duration,
+    ) -> Result<PrivilegeReport, TenantDbError> {
+        match Self::connect_with(url, maintenance, timeout).await {
             Ok(admin) => {
                 let report = admin.probe().await;
                 admin.close().await;

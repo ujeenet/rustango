@@ -18,6 +18,10 @@ A purge that cannot parse a tenant's URL names the stored reference, not the res
 `TenantPoolInvalidator::tenant_secrets` has no default, so a custom invalidator cannot drop strict sealing.
 `reseal-tenant-secrets --apply` leaves a sealed URL without a password sealed, and skips a row edited since it was read.
 
+### Added — saved database servers
+
+`tenancy::db_server` stores a server's admin login in the new registry table `rustango_db_servers`, password sealed only; the console's **Database servers** page (with provisioning) and `add-db-server` / `list-db-servers` / `test-db-server` / `edit-db-server` / `remove-db-server` save, test and remove them. `ServerAdmin::connect_with` takes a maintenance database.
+
 ### Added — `tenancy::server_admin`: create and drop a tenant's database and login
 
 `ServerAdmin` creates a slug-named database plus a login granted only that database (rolled back on failure), drops both, and reports the admin login's rights; SQLite uses `<dir>/<slug>.db`. PostgreSQL tenant databases need PostgreSQL 15+.

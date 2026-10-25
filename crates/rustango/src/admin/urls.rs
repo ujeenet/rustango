@@ -837,8 +837,13 @@ impl Builder {
 /// secrets, and a passkey row signs in as its `user_id` (#2364).
 /// Enrollment has its own pages.
 fn is_never_served(table: &str) -> bool {
-    #[cfg(not(any(feature = "totp", feature = "passkey")))]
+    #[cfg(not(any(feature = "totp", feature = "passkey", feature = "tenancy")))]
     let _ = table;
+    // Written only through `db_server`, which seals the admin password.
+    #[cfg(feature = "tenancy")]
+    if table == <crate::tenancy::DbServer as crate::core::Model>::SCHEMA.table {
+        return true;
+    }
     #[cfg(feature = "totp")]
     if table == <super::totp_store::AdminTotp as crate::core::Model>::SCHEMA.table {
         return true;
@@ -1116,6 +1121,8 @@ mod scope_filter_tests {
             let registry = state_with(AdminDatabase::Registry);
             assert!(registry.is_visible("rustango_orgs"));
             assert!(!registry.is_visible("rustango_users"));
+            // Its password column must be written only sealed.
+            assert!(!registry.is_visible("rustango_db_servers"));
             assert!(registry.is_visible("rustango_audit_log"));
         }
     }

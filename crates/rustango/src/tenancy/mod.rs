@@ -64,6 +64,8 @@ pub mod auth_routes;
 pub mod bootstrap;
 pub mod branding;
 pub mod database_pools;
+/// Saved database servers that tenant databases are provisioned on.
+pub mod db_server;
 /// Taking a tenant out of service — the steps `drop-tenant` and
 /// `purge-tenant` run, callable from anything that is not a terminal.
 pub mod decommission;
@@ -174,6 +176,7 @@ pub use permissions::{
 };
 
 pub use database_pools::{DatabaseConn, DatabasePool, DatabasePools};
+pub use db_server::{DbServer, DbServerError, DbServerSpec, PasswordChange, TlsMode};
 pub use error::TenancyError;
 #[cfg(all(feature = "tenancy", feature = "sso"))]
 pub use member_auth::{member_sso_router, CurrentMember, MemberAuthConfig, MEMBER_COOKIE};
