@@ -160,9 +160,10 @@ impl Env {
     /// The stored column, read past the model on purpose.
     async fn stored_password(&self, name: &str) -> Option<String> {
         let sql = format!("SELECT admin_password FROM rustango_db_servers WHERE name = '{name}'");
-        let rows: Vec<(Option<String>,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), &self.registry)
-            .await
-            .unwrap();
+        let rows: Vec<(Option<String>,)> =
+            rustango::sql::raw_query_pool(&sql, Vec::new(), &self.registry)
+                .await
+                .unwrap();
         rows.into_iter().next().expect("row").0
     }
 }
@@ -189,7 +190,14 @@ async fn the_password_is_sealed_and_never_shown(pool: &Pool) {
     if env.backend() == BackendKind::Sqlite {
         let dir = env.dir().display().to_string();
         let err = env
-            .run(&["add-db-server", "files", "--sqlite-dir", &dir, "--password-env", &var])
+            .run(&[
+                "add-db-server",
+                "files",
+                "--sqlite-dir",
+                &dir,
+                "--password-env",
+                &var,
+            ])
             .await
             .expect_err("a directory has no login")
             .to_string();
@@ -200,32 +208,62 @@ async fn the_password_is_sealed_and_never_shown(pool: &Pool) {
     let port = s.port.to_string();
     let out = env
         .run(&[
-            "add-db-server", "main", "--host", &s.host, "--port", &port, "--user", &s.user,
-            "--tls", "disable", "--password-env", &var,
+            "add-db-server",
+            "main",
+            "--host",
+            &s.host,
+            "--port",
+            &port,
+            "--user",
+            &s.user,
+            "--tls",
+            "disable",
+            "--password-env",
+            &var,
         ])
         .await
         .expect("add");
     let stored = env.stored_password("main").await.expect("a password");
-    assert!(stored.starts_with("enc:v1:") && !stored.contains(SECRET), "{stored}");
+    assert!(
+        stored.starts_with("enc:v1:") && !stored.contains(SECRET),
+        "{stored}"
+    );
 
     let mut seen = vec![out];
     seen.push(env.run(&["list-db-servers"]).await.expect("list"));
     // A wrong password: the login is refused, and the report says so.
-    let err = env.run(&["test-db-server", "main"]).await.expect_err("refused");
+    let err = env
+        .run(&["test-db-server", "main"])
+        .await
+        .expect_err("refused");
     seen.push(err.to_string());
     let row = db_server::get(&env.registry, "main").await.unwrap();
     let report = row.probe(Duration::from_secs(10)).await.expect("a report");
     assert!(!report.can_login, "{report:?}");
     seen.push(format!("{row:?} {report:?}"));
     seen.push(format!("{:?}", row.admin_url().await.unwrap()));
-    seen.push(env.run(&["edit-db-server", "main", "--port", "1"]).await.expect("edit"));
+    seen.push(
+        env.run(&["edit-db-server", "main", "--port", "1"])
+            .await
+            .expect("edit"),
+    );
     let unreachable = db_server::get(&env.registry, "main").await.unwrap();
-    seen.push(format!("{:?}", unreachable.probe(Duration::from_secs(3)).await));
-    seen.push(format!("{:?}", unreachable.connect(Duration::from_secs(3)).await.err()));
+    seen.push(format!(
+        "{:?}",
+        unreachable.probe(Duration::from_secs(3)).await
+    ));
+    seen.push(format!(
+        "{:?}",
+        unreachable.connect(Duration::from_secs(3)).await.err()
+    ));
     for text in &seen {
         assert!(!text.contains(SECRET), "{text}");
     }
-    assert!(seen[1].contains("main") && seen[1].contains("saved"), "{}", seen[1]);
+    assert!(
+        seen[1].contains("main") && seen[1].contains("saved"),
+        "{}",
+        seen[1]
+    );
 
     // The driver names the login it refused; the diagnosis must not.
     const USER: &str = "leakuser-q7";
@@ -233,11 +271,17 @@ async fn the_password_is_sealed_and_never_shown(pool: &Pool) {
         admin_user: Some(USER.into()),
         ..env.spec("ghost")
     };
-    db_server::add(&env.registry, &ghost, Some(&pw(SECRET))).await.unwrap();
+    db_server::add(&env.registry, &ghost, Some(&pw(SECRET)))
+        .await
+        .unwrap();
     let row = db_server::get(&env.registry, "ghost").await.unwrap();
     let report = row.probe(Duration::from_secs(10)).await.expect("a report");
     let diagnosis = report.login_error.as_ref().expect("refused").to_string();
-    let err = env.run(&["test-db-server", "ghost"]).await.expect_err("refused").to_string();
+    let err = env
+        .run(&["test-db-server", "ghost"])
+        .await
+        .expect_err("refused")
+        .to_string();
     for text in [format!("{report:?}"), diagnosis, err] {
         assert!(!text.contains(USER) && !text.contains(SECRET), "{text}");
     }
@@ -256,8 +300,13 @@ async fn without_a_key_a_password_is_refused(pool: &Pool) {
         .expect_err("no key");
     with_key();
     assert!(matches!(err, DbServerError::Seal(_)), "{err:?}");
-    assert!(err.to_string().contains("RUSTANGO_SECRET_KEY") && !err.to_string().contains(SECRET), "{err}");
-    let gone = db_server::get(&env.registry, "nokey").await.expect_err("not stored");
+    assert!(
+        err.to_string().contains("RUSTANGO_SECRET_KEY") && !err.to_string().contains(SECRET),
+        "{err}"
+    );
+    let gone = db_server::get(&env.registry, "nokey")
+        .await
+        .expect_err("not stored");
     assert!(matches!(gone, DbServerError::NotFound(_)), "{gone:?}");
     // A blank key would seal under SHA-256 of nothing.
     std::env::set_var("RUSTANGO_SECRET_KEY", "");
@@ -285,14 +334,21 @@ async fn a_probe_reports_the_admin_rights(pool: &Pool) {
             // The CI role is a superuser.
             assert!(report.can_provision(), "{:?}", report.blocker());
             let out = env.run(&["test-db-server", "live"]).await.expect("ready");
-            assert!(out.contains("ready") && out.contains("server version"), "{out}");
+            assert!(
+                out.contains("ready") && out.contains("server version"),
+                "{out}"
+            );
             let mut spec = row.spec().unwrap();
             spec.maintenance_db = Some("no_such_db_dbs".into());
-            let (row, changed) = db_server::update(&env.registry, "live", &spec, PasswordChange::Keep, None)
-                .await
-                .unwrap();
+            let (row, changed) =
+                db_server::update(&env.registry, "live", &spec, PasswordChange::Keep, None)
+                    .await
+                    .unwrap();
             assert_eq!(changed, vec!["maintenance_db"]);
-            let err = row.probe(Duration::from_secs(10)).await.expect_err("no such database");
+            let err = row
+                .probe(Duration::from_secs(10))
+                .await
+                .expect_err("no such database");
             assert!(err.to_string().contains("no_such_db_dbs"), "{err}");
         }
         BackendKind::MySql => assert!(report.server_version.is_some(), "{report:?}"),
@@ -306,16 +362,21 @@ async fn an_edit_keeps_the_password_unless_told(pool: &Pool) {
     with_key();
     let env = Env::new(pool).await;
     if env.backend() == BackendKind::Sqlite {
-        let row = db_server::add(&env.registry, &env.spec("files"), None).await.unwrap();
-        let mut spec = row.spec().unwrap();
-        spec.active = false;
-        let (_, changed) = db_server::update(&env.registry, "files", &spec, PasswordChange::Keep, None)
+        let row = db_server::add(&env.registry, &env.spec("files"), None)
             .await
             .unwrap();
+        let mut spec = row.spec().unwrap();
+        spec.active = false;
+        let (_, changed) =
+            db_server::update(&env.registry, "files", &spec, PasswordChange::Keep, None)
+                .await
+                .unwrap();
         assert_eq!(changed, vec!["active"]);
         return;
     }
-    let row = db_server::add(&env.registry, &env.spec("e"), Some(&pw(SECRET))).await.unwrap();
+    let row = db_server::add(&env.registry, &env.spec("e"), Some(&pw(SECRET)))
+        .await
+        .unwrap();
     let first = env.stored_password("e").await.unwrap();
     let mut spec = row.spec().unwrap();
     spec.port = Some(1);
@@ -323,10 +384,19 @@ async fn an_edit_keeps_the_password_unless_told(pool: &Pool) {
         .await
         .unwrap();
     assert_eq!(changed, vec!["port"]);
-    assert_eq!(env.stored_password("e").await.as_deref(), Some(first.as_str()));
-    let (_, changed) = db_server::update(&env.registry, "e", &spec, PasswordChange::Set(pw("other")), None)
-        .await
-        .unwrap();
+    assert_eq!(
+        env.stored_password("e").await.as_deref(),
+        Some(first.as_str())
+    );
+    let (_, changed) = db_server::update(
+        &env.registry,
+        "e",
+        &spec,
+        PasswordChange::Set(pw("other")),
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(changed, vec!["admin_password"]);
     let second = env.stored_password("e").await.unwrap();
     assert!(second != first && second.starts_with("enc:v1:"));
@@ -335,7 +405,11 @@ async fn an_edit_keeps_the_password_unless_told(pool: &Pool) {
         .unwrap();
     assert!(!row.has_password() && env.stored_password("e").await.is_none());
     spec.name = "renamed".into();
-    assert!(db_server::update(&env.registry, "e", &spec, PasswordChange::Keep, None).await.is_err());
+    assert!(
+        db_server::update(&env.registry, "e", &spec, PasswordChange::Keep, None)
+            .await
+            .is_err()
+    );
 }
 
 /// A server of another backend, a duplicate and a bad name are refused.
@@ -352,12 +426,23 @@ async fn bad_servers_are_refused(pool: &Pool) {
         backend: other,
         ..env.spec("foreign")
     };
-    let err = db_server::add(&env.registry, &foreign, None).await.expect_err("other backend");
-    assert!(matches!(err, DbServerError::BackendMismatch { .. }), "{err:?}");
-    db_server::add(&env.registry, &env.spec("dup"), None).await.unwrap();
-    let err = db_server::add(&env.registry, &env.spec("dup"), None).await.expect_err("taken");
+    let err = db_server::add(&env.registry, &foreign, None)
+        .await
+        .expect_err("other backend");
+    assert!(
+        matches!(err, DbServerError::BackendMismatch { .. }),
+        "{err:?}"
+    );
+    db_server::add(&env.registry, &env.spec("dup"), None)
+        .await
+        .unwrap();
+    let err = db_server::add(&env.registry, &env.spec("dup"), None)
+        .await
+        .expect_err("taken");
     assert!(matches!(err, DbServerError::Taken(_)), "{err:?}");
-    let err = db_server::add(&env.registry, &env.spec("Bad_Name"), None).await.expect_err("name");
+    let err = db_server::add(&env.registry, &env.spec("Bad_Name"), None)
+        .await
+        .expect_err("name");
     assert!(matches!(err, DbServerError::Invalid(_)), "{err:?}");
 }
 
@@ -366,7 +451,9 @@ async fn a_server_in_use_is_not_removed(pool: &Pool) {
     let _g = env_lock().lock().await;
     with_key();
     let env = Env::new(pool).await;
-    db_server::add(&env.registry, &env.spec("used"), None).await.unwrap();
+    db_server::add(&env.registry, &env.spec("used"), None)
+        .await
+        .unwrap();
     let tenant_url = match env.backend() {
         BackendKind::Sqlite => format!("sqlite://{}?mode=rwc", env.dir().join("acme.db").display()),
         _ => env.url.clone(),
@@ -379,7 +466,11 @@ async fn a_server_in_use_is_not_removed(pool: &Pool) {
         ..rustango::testkit::org()
     };
     org.save_pool(&env.registry).await.expect("insert org");
-    let err = env.run(&["remove-db-server", "used"]).await.expect_err("in use").to_string();
+    let err = env
+        .run(&["remove-db-server", "used"])
+        .await
+        .expect_err("in use")
+        .to_string();
     assert!(err.contains("acme"), "{err}");
     assert!(db_server::get(&env.registry, "used").await.is_ok());
 
@@ -393,8 +484,13 @@ async fn a_server_in_use_is_not_removed(pool: &Pool) {
             ..env.spec("free")
         },
     };
-    db_server::add(&env.registry, &elsewhere, None).await.unwrap();
-    let out = env.run(&["remove-db-server", "free"]).await.expect("removed");
+    db_server::add(&env.registry, &elsewhere, None)
+        .await
+        .unwrap();
+    let out = env
+        .run(&["remove-db-server", "free"])
+        .await
+        .expect("removed");
     assert!(out.contains("removed"), "{out}");
     assert!(db_server::get(&env.registry, "free").await.is_err());
 }
@@ -405,7 +501,9 @@ async fn an_unknown_tenant_url_blocks_removal(pool: &Pool) {
     let _g = env_lock().lock().await;
     with_key();
     let env = Env::new(pool).await;
-    db_server::add(&env.registry, &env.spec("maybe"), None).await.unwrap();
+    db_server::add(&env.registry, &env.spec("maybe"), None)
+        .await
+        .unwrap();
     for (slug, url) in [
         ("lost", Some("env://RUSTANGO_DBS_UNSET_VAR_q7".to_owned())),
         ("blank", None),
@@ -419,8 +517,15 @@ async fn an_unknown_tenant_url_blocks_removal(pool: &Pool) {
         };
         org.save_pool(&env.registry).await.expect("insert org");
     }
-    let err = env.run(&["remove-db-server", "maybe"]).await.expect_err("unknown").to_string();
-    assert!(err.contains("lost (its database URL does not resolve here)"), "{err}");
+    let err = env
+        .run(&["remove-db-server", "maybe"])
+        .await
+        .expect_err("unknown")
+        .to_string();
+    assert!(
+        err.contains("lost (its database URL does not resolve here)"),
+        "{err}"
+    );
     assert!(err.contains("blank (it has no database URL)"), "{err}");
     assert!(db_server::get(&env.registry, "maybe").await.is_ok());
 }
@@ -430,7 +535,9 @@ async fn a_stale_edit_is_refused(pool: &Pool) {
     let _g = env_lock().lock().await;
     with_key();
     let env = Env::new(pool).await;
-    let row = db_server::add(&env.registry, &env.spec("cas"), None).await.unwrap();
+    let row = db_server::add(&env.registry, &env.spec("cas"), None)
+        .await
+        .unwrap();
     let first = db_server::get(&env.registry, "cas").await.unwrap();
     let seen = first.updated_at.get().copied();
     assert!(seen.is_some(), "{row:?}");
@@ -478,18 +585,35 @@ async fn reseal_covers_server_passwords(pool: &Pool) {
     if env.backend() == BackendKind::Sqlite {
         return;
     }
-    std::env::set_var("RUSTANGO_SECRET_KEY", "old-dbs-key-0123456789abcdef0123456789");
-    db_server::add(&env.registry, &env.spec("rot"), Some(&pw(SECRET))).await.unwrap();
+    std::env::set_var(
+        "RUSTANGO_SECRET_KEY",
+        "old-dbs-key-0123456789abcdef0123456789",
+    );
+    db_server::add(&env.registry, &env.spec("rot"), Some(&pw(SECRET)))
+        .await
+        .unwrap();
     let old = env.stored_password("rot").await.unwrap();
-    std::env::set_var("RUSTANGO_SECRET_KEY_PREVIOUS", "old-dbs-key-0123456789abcdef0123456789");
+    std::env::set_var(
+        "RUSTANGO_SECRET_KEY_PREVIOUS",
+        "old-dbs-key-0123456789abcdef0123456789",
+    );
     std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
     let dry = env.run(&["reseal-tenant-secrets"]).await.expect("dry run");
     assert!(dry.contains("server rot: would re-seal"), "{dry}");
-    assert_eq!(env.stored_password("rot").await.as_deref(), Some(old.as_str()));
-    let out = env.run(&["reseal-tenant-secrets", "--apply"]).await.expect("apply");
+    assert_eq!(
+        env.stored_password("rot").await.as_deref(),
+        Some(old.as_str())
+    );
+    let out = env
+        .run(&["reseal-tenant-secrets", "--apply"])
+        .await
+        .expect("apply");
     assert!(out.contains("server rot: re-sealed"), "{out}");
     let new = env.stored_password("rot").await.unwrap();
-    assert!(new != old && new.starts_with("enc:v1:") && !out.contains(SECRET), "{out}");
+    assert!(
+        new != old && new.starts_with("enc:v1:") && !out.contains(SECRET),
+        "{out}"
+    );
     // Opens without the old key now.
     std::env::remove_var("RUSTANGO_SECRET_KEY_PREVIOUS");
     let row = db_server::get(&env.registry, "rot").await.unwrap();
@@ -537,7 +661,9 @@ async fn a_console_post_needs_csrf(pool: &Pool) {
         .uri("/db-servers")
         .header("cookie", &c.cookie)
         .header("content-type", "application/x-www-form-urlencoded")
-        .body(axum::body::Body::from("name=nocsrf&sqlite_dir=/tmp&active=on"))
+        .body(axum::body::Body::from(
+            "name=nocsrf&sqlite_dir=/tmp&active=on",
+        ))
         .unwrap();
     let resp = c.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status().as_u16(), 403);
@@ -551,7 +677,9 @@ async fn a_console_without_pools_does_not_delete(pool: &Pool) {
     with_key();
     let env = Env::new(pool).await;
     seed_operator(&env).await;
-    db_server::add(&env.registry, &env.spec("kept"), None).await.unwrap();
+    db_server::add(&env.registry, &env.spec("kept"), None)
+        .await
+        .unwrap();
     let c = Console::boot_with(&env, Mode::NoPools).await;
     let resp = c.post("/db-servers/kept/delete", "").await;
     assert_eq!(resp.status().as_u16(), 303);
@@ -639,7 +767,9 @@ impl Console {
 }
 
 async fn body(resp: axum::response::Response) -> String {
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
@@ -658,7 +788,11 @@ async fn the_console_never_shows_the_password(pool: &Pool) {
     let env = Env::new(pool).await;
     seed_operator(&env).await;
     let read_only = Console::boot(&env, false).await;
-    assert_eq!(read_only.get("/db-servers").await.0, 404, "mounted without provisioning");
+    assert_eq!(
+        read_only.get("/db-servers").await.0,
+        404,
+        "mounted without provisioning"
+    );
     let c = Console::boot(&env, true).await;
     let (status, page) = c.get("/db-servers").await;
     assert_eq!(status, 200, "{page}");
@@ -666,12 +800,19 @@ async fn the_console_never_shows_the_password(pool: &Pool) {
 
     let sqlite = env.backend() == BackendKind::Sqlite;
     let (port, fields) = if sqlite {
-        (String::new(), vec![("sqlite_dir", env.dir().display().to_string())])
+        (
+            String::new(),
+            vec![("sqlite_dir", env.dir().display().to_string())],
+        )
     } else {
         let s = env.server();
         (
             s.port.to_string(),
-            vec![("host", s.host), ("admin_user", s.user), ("tls_mode", "disable".into())],
+            vec![
+                ("host", s.host),
+                ("admin_user", s.user),
+                ("tls_mode", "disable".into()),
+            ],
         )
     };
     let mut pairs: Vec<(&str, &str)> = vec![("name", "web"), ("active", "on")];
@@ -702,7 +843,10 @@ async fn the_console_never_shows_the_password(pool: &Pool) {
     seen.push(list);
     let (_, edit) = c.get("/db-servers/web/edit").await;
     if !sqlite {
-        assert!(edit.contains(r#"type="password" autocomplete="new-password">"#), "{edit}");
+        assert!(
+            edit.contains(r#"type="password" autocomplete="new-password">"#),
+            "{edit}"
+        );
     }
 
     // The version the form was built from rides along.
@@ -721,7 +865,11 @@ async fn the_console_never_shows_the_password(pool: &Pool) {
     fresh.push(("version", &version));
     let resp = c.post("/db-servers/web/edit", &form(&fresh)).await;
     assert_eq!(resp.status().as_u16(), 303, "{}", body(resp).await);
-    assert_eq!(env.stored_password("web").await, stored, "a blank field kept it");
+    assert_eq!(
+        env.stored_password("web").await,
+        stored,
+        "a blank field kept it"
+    );
     assert!(!db_server::get(&env.registry, "web").await.unwrap().active);
     // Same form again: its version is now old, so nothing is written.
     let mut stale = fresh.clone();
@@ -759,14 +907,20 @@ async fn the_console_never_shows_the_password(pool: &Pool) {
     )
     .await
     .unwrap();
-    let audit = format!("{:?}", entries.iter().map(|e| &e.changes).collect::<Vec<_>>());
+    let audit = format!(
+        "{:?}",
+        entries.iter().map(|e| &e.changes).collect::<Vec<_>>()
+    );
     assert!(entries.len() >= 2, "{audit}");
     if !sqlite {
         assert!(audit.contains("admin_password"), "names the field: {audit}");
     }
     assert!(!audit.contains("enc:v1"), "{audit}");
     let sources: Vec<&str> = entries.iter().map(|e| e.source.as_str()).collect();
-    assert!(sources.iter().any(|s| s.ends_with(":db_server_test")), "{sources:?}");
+    assert!(
+        sources.iter().any(|s| s.ends_with(":db_server_test")),
+        "{sources:?}"
+    );
     seen.push(audit);
 
     for text in &seen {
@@ -794,10 +948,15 @@ async fn reseal_covers_sso_client_secrets() {
          enabled, sort_order, allow_email_link, created_at, updated_at) VALUES ('g', 'G', \
          'google', 'cid', '{sealed}', 1, 0, 0, '2026-01-01 00:00:00', '2026-01-01 00:00:00')"
     );
-    rustango::sql::raw_execute_pool(&env.registry, &insert, Vec::new()).await.unwrap();
+    rustango::sql::raw_execute_pool(&env.registry, &insert, Vec::new())
+        .await
+        .unwrap();
     std::env::set_var("RUSTANGO_SECRET_KEY_PREVIOUS", old);
     std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
-    let out = env.run(&["reseal-tenant-secrets", "--apply"]).await.expect("apply");
+    let out = env
+        .run(&["reseal-tenant-secrets", "--apply"])
+        .await
+        .expect("apply");
     assert!(out.contains("sso shared/g: re-sealed"), "{out}");
     std::env::remove_var("RUSTANGO_SECRET_KEY_PREVIOUS");
     let rows: Vec<(String,)> = rustango::sql::raw_query_pool(
@@ -807,7 +966,10 @@ async fn reseal_covers_sso_client_secrets() {
     )
     .await
     .unwrap();
-    assert_eq!(EncryptedString::from_db(&rows[0].0).unwrap(), "client-secret");
+    assert_eq!(
+        EncryptedString::from_db(&rows[0].0).unwrap(),
+        "client-secret"
+    );
 }
 
 /// The pages warn while the key is missing or short, without showing it.
@@ -816,7 +978,9 @@ async fn the_console_warns_without_a_good_key(pool: &Pool) {
     with_key();
     let env = Env::new(pool).await;
     seed_operator(&env).await;
-    db_server::add(&env.registry, &env.spec("warned"), None).await.unwrap();
+    db_server::add(&env.registry, &env.spec("warned"), None)
+        .await
+        .unwrap();
     let c = Console::boot(&env, true).await;
     const SHORT: &str = "short-key-q7Zx";
     for (key, warned) in [
@@ -832,8 +996,15 @@ async fn the_console_warns_without_a_good_key(pool: &Pool) {
         for uri in ["/db-servers", "/db-servers/warned/edit", "/orgs/new"] {
             let (status, page) = c.get(uri).await;
             assert_eq!(status, 200, "{page}");
-            assert_eq!(page.contains("key-warning"), warned, "{key:?} {uri}: {page}");
-            assert!(!page.contains(SHORT) && !page.contains(KEY), "{uri}: {page}");
+            assert_eq!(
+                page.contains("key-warning"),
+                warned,
+                "{key:?} {uri}: {page}"
+            );
+            assert!(
+                !page.contains(SHORT) && !page.contains(KEY),
+                "{uri}: {page}"
+            );
         }
     }
     with_key();

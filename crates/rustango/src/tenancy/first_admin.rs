@@ -43,13 +43,19 @@ impl FirstAdmin {
         if !crate::validators::is_email(email) {
             return Err(format!("`{email}` is not a valid email address."));
         }
-        let username = username.map(str::trim).filter(|u| !u.is_empty()).unwrap_or(email);
+        let username = username
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .unwrap_or(email);
         if username.chars().count() > USERNAME_MAX {
             return Err(format!(
                 "The admin username is longer than {USERNAME_MAX} characters; give a shorter one."
             ));
         }
-        if username.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        if username
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+        {
             return Err("The admin username may not contain spaces.".to_owned());
         }
         Ok(Self {
@@ -223,7 +229,11 @@ impl FirstAdminHandover {
         let link = self.link(org, admin.user_id, request_host);
         #[cfg(feature = "email")]
         if let Some(mail) = &self.mail {
-            return match mail.mailer.send(&self.email(org, admin, &mail.from, &link)).await {
+            return match mail
+                .mailer
+                .send(&self.email(org, admin, &mail.from, &link))
+                .await
+            {
                 Ok(()) => Handover::Mailed {
                     to: admin.email.clone(),
                 },
@@ -495,7 +505,10 @@ mod tests {
     #[test]
     fn the_username_defaults_to_the_email_and_bad_input_is_refused() {
         let a = FirstAdmin::new(" ann@acme.test ", None).unwrap();
-        assert_eq!((a.email(), a.username()), ("ann@acme.test", "ann@acme.test"));
+        assert_eq!(
+            (a.email(), a.username()),
+            ("ann@acme.test", "ann@acme.test")
+        );
         let b = FirstAdmin::new("ann@acme.test", Some("ann")).unwrap();
         assert_eq!(b.username(), "ann");
         assert!(FirstAdmin::new("not-an-email", None).is_err());
@@ -537,7 +550,11 @@ mod tests {
         let h = FirstAdminHandover::new(&secret());
         let link = h.link(&tenant, 42, None);
         let query = link.expose().split_once('?').unwrap().1;
-        assert!(link.expose().contains("/change-password?"), "{}", link.expose());
+        assert!(
+            link.expose().contains("/change-password?"),
+            "{}",
+            link.expose()
+        );
         assert!(is_link_query(query));
         let key = link_key(&secret());
         let scope = crate::auth_flows::LinkScope::from(&tenant);
@@ -547,8 +564,12 @@ mod tests {
         );
         // Same slug, new id: a purged and re-created tenant.
         let other = crate::auth_flows::LinkScope::from(&org(8));
-        assert!(crate::auth_flows::PasswordReset::verify(&other, &signed_link(query), &key).is_err());
+        assert!(
+            crate::auth_flows::PasswordReset::verify(&other, &signed_link(query), &key).is_err()
+        );
         let wrong = link_key(&SessionSecret::from_bytes(vec![1; 32]));
-        assert!(crate::auth_flows::PasswordReset::verify(&scope, &signed_link(query), &wrong).is_err());
+        assert!(
+            crate::auth_flows::PasswordReset::verify(&scope, &signed_link(query), &wrong).is_err()
+        );
     }
 }

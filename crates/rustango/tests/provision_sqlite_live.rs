@@ -231,8 +231,10 @@ async fn another_backend_is_rejected_before_any_write() {
     migrate_registry(&pools, &url, migrations.path()).await;
 
     let tenant_db = _tmp.path().join("pgkind.db");
-    let mut request =
-        ProvisionRequest::database("pgkind", format!("sqlite://{}?mode=rwc", tenant_db.display()));
+    let mut request = ProvisionRequest::database(
+        "pgkind",
+        format!("sqlite://{}?mode=rwc", tenant_db.display()),
+    );
     request.backend = Some(rustango::tenancy::BackendKind::Postgres);
 
     let rec = Recorder::default();

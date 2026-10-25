@@ -125,9 +125,15 @@ impl<'a> OpReporter<'a> {
     async fn emit(&self, step: OperationStep, status: StepStatus, text: &RunText) {
         if let Some(s) = &self.store {
             let seq = s.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if let Err(e) =
-                store::append_event_text(s.registry, s.run_id, seq, step.as_str(), status.as_str(), text)
-                    .await
+            if let Err(e) = store::append_event_text(
+                s.registry,
+                s.run_id,
+                seq,
+                step.as_str(),
+                status.as_str(),
+                text,
+            )
+            .await
             {
                 tracing::warn!(target: "rustango::tenancy::operation", run_id = s.run_id, error = %e, "could not record a step; the run continues");
             }
@@ -138,7 +144,8 @@ impl<'a> OpReporter<'a> {
     }
 
     pub(crate) async fn started(&self, step: OperationStep) {
-        self.emit(step, StepStatus::Started, &RunText::default()).await;
+        self.emit(step, StepStatus::Started, &RunText::default())
+            .await;
     }
 
     pub(crate) async fn ok(&self, step: OperationStep) {
@@ -151,13 +158,21 @@ impl<'a> OpReporter<'a> {
     }
 
     pub(crate) async fn skipped(&self, step: OperationStep, why: &'static str) {
-        self.emit(step, StepStatus::Skipped(why.to_owned()), &RunText::fixed(why))
-            .await;
+        self.emit(
+            step,
+            StepStatus::Skipped(why.to_owned()),
+            &RunText::fixed(why),
+        )
+        .await;
     }
 
     /// Report `e` as `step`'s failure and hand it back. The observer gets
     /// the full text; the run gets the operator-safe one.
-    pub(crate) async fn fail<T>(&self, step: OperationStep, e: TenancyError) -> Result<T, TenancyError> {
+    pub(crate) async fn fail<T>(
+        &self,
+        step: OperationStep,
+        e: TenancyError,
+    ) -> Result<T, TenancyError> {
         let text = match &self.store {
             Some(s) => {
                 let text = s.log.failure(&s.slug, "Step failed", &e);
@@ -168,7 +183,8 @@ impl<'a> OpReporter<'a> {
             }
             None => RunText::default(),
         };
-        self.emit(step, StepStatus::Failed(e.to_string()), &text).await;
+        self.emit(step, StepStatus::Failed(e.to_string()), &text)
+            .await;
         Err(e)
     }
 

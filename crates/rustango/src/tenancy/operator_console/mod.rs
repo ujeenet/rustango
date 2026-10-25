@@ -2021,22 +2021,18 @@ async fn org_edit_submit(
     // The CLI's write path, so the console runs the same routing
     // validators and host-clash check (#1931).
     let secrets = pools.tenant_secrets();
-    let applied = match crate::tenancy::org_edit::apply_values(
-        &state.registry,
-        &secrets,
-        &slug,
-        collected,
-    )
-    .await
-    {
-        Ok(a) => a,
-        Err(e) => {
-            let msg = e.user_facing().unwrap_or_else(|| {
-                withheld("operator_console::org_edit", &slug, "Could not save", &e)
-            });
-            return redirect_with_error(&slug, &msg);
-        }
-    };
+    let applied =
+        match crate::tenancy::org_edit::apply_values(&state.registry, &secrets, &slug, collected)
+            .await
+        {
+            Ok(a) => a,
+            Err(e) => {
+                let msg = e.user_facing().unwrap_or_else(|| {
+                    withheld("operator_console::org_edit", &slug, "Could not save", &e)
+                });
+                return redirect_with_error(&slug, &msg);
+            }
+        };
     let database_url_changed = applied.database_url_rotated;
 
     if database_url_changed {
@@ -2552,7 +2548,10 @@ mod database_url_hint_tests {
     fn only_an_env_reference_is_shown() {
         assert!(database_url_hint("env://ACME_DB").contains("current: env://ACME_DB"));
         let sealed = database_url_hint("enc:v1:QUJDREVG");
-        assert!(sealed.contains("<encrypted>") && !sealed.contains("QUJD"), "{sealed}");
+        assert!(
+            sealed.contains("<encrypted>") && !sealed.contains("QUJD"),
+            "{sealed}"
+        );
         for hidden in ["env:ACME_DB", "vault:secret/acme", "postgres://u:pw@h/db"] {
             let hint = database_url_hint(hidden);
             assert!(!hint.contains(hidden), "{hint}");

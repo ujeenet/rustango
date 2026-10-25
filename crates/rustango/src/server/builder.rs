@@ -459,7 +459,8 @@ impl<DB: Database> Builder<DB> {
     #[must_use]
     pub fn secrets(mut self, resolver: impl crate::tenancy::SecretsResolver) -> Self {
         let config = self.pools.pool_config().clone();
-        let mut pools = TenantPools::<DB>::with_secrets(self.registry.clone(), resolver).config(config);
+        let mut pools =
+            TenantPools::<DB>::with_secrets(self.registry.clone(), resolver).config(config);
         if self.pools.secrets().requires_sealed() {
             pools = pools.require_sealed_secrets();
         }

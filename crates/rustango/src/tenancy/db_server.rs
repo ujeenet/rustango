@@ -244,7 +244,11 @@ impl AdminUrl {
 
 impl std::fmt::Debug for AdminUrl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "AdminUrl({})", crate::sql::connect_diagnosis::redact(&self.0))
+        write!(
+            f,
+            "AdminUrl({})",
+            crate::sql::connect_diagnosis::redact(&self.0)
+        )
     }
 }
 
@@ -289,15 +293,14 @@ impl DbServer {
     /// # Errors
     /// [`DbServerError::Invalid`] for an unknown backend or TLS mode.
     pub fn spec(&self) -> Result<DbServerSpec, DbServerError> {
-        let port = self
-            .port
-            .map(|p| {
-                u16::try_from(p)
-                    .ok()
-                    .filter(|p| *p != 0)
-                    .ok_or_else(|| DbServerError::Invalid(format!("stored port {p} is not a port")))
-            })
-            .transpose()?;
+        let port =
+            self.port
+                .map(|p| {
+                    u16::try_from(p).ok().filter(|p| *p != 0).ok_or_else(|| {
+                        DbServerError::Invalid(format!("stored port {p} is not a port"))
+                    })
+                })
+                .transpose()?;
         Ok(DbServerSpec {
             name: self.name.clone(),
             backend: self.backend_kind()?,
@@ -366,13 +369,11 @@ impl DbServer {
     /// [`DbServerError::Unseal`], or the connect failure.
     pub async fn connect(&self, timeout: Duration) -> Result<ServerAdmin, DbServerError> {
         match self.admin_url().await? {
-            Some(url) => ServerAdmin::connect_with(
-                url.expose(),
-                self.maintenance_db.as_deref(),
-                timeout,
-            )
-            .await
-            .map_err(|e| self.scrubbed_error(e)),
+            Some(url) => {
+                ServerAdmin::connect_with(url.expose(), self.maintenance_db.as_deref(), timeout)
+                    .await
+                    .map_err(|e| self.scrubbed_error(e))
+            }
             None => Ok(ServerAdmin::sqlite_dir(
                 self.sqlite_dir.clone().unwrap_or_default(),
             )),
@@ -388,10 +389,13 @@ impl DbServer {
     pub async fn probe(&self, timeout: Duration) -> Result<PrivilegeReport, DbServerError> {
         match self.admin_url().await? {
             Some(url) => {
-                let mut report =
-                    ServerAdmin::probe_url_with(url.expose(), self.maintenance_db.as_deref(), timeout)
-                        .await
-                        .map_err(|e| self.scrubbed_error(e))?;
+                let mut report = ServerAdmin::probe_url_with(
+                    url.expose(),
+                    self.maintenance_db.as_deref(),
+                    timeout,
+                )
+                .await
+                .map_err(|e| self.scrubbed_error(e))?;
                 report.login_error = report.login_error.map(|d| self.scrubbed(d));
                 Ok(report)
             }
@@ -411,7 +415,8 @@ impl DbServer {
             endpoint: format!(
                 "{}:{}",
                 self.host.as_deref().unwrap_or_default(),
-                self.port.map_or_else(|| "default port".to_owned(), |p| p.to_string())
+                self.port
+                    .map_or_else(|| "default port".to_owned(), |p| p.to_string())
             ),
             detail,
         }
@@ -419,7 +424,9 @@ impl DbServer {
 
     fn scrubbed_error(&self, e: TenantDbError) -> DbServerError {
         match e {
-            TenantDbError::Connect(d) => DbServerError::Admin(TenantDbError::Connect(self.scrubbed(d))),
+            TenantDbError::Connect(d) => {
+                DbServerError::Admin(TenantDbError::Connect(self.scrubbed(d)))
+            }
             other => DbServerError::Admin(other),
         }
     }
@@ -607,13 +614,20 @@ fn url_database_and_user(backend: BackendKind, url: &str) -> (Option<String>, Op
         #[cfg(feature = "postgres")]
         BackendKind::Postgres => crate::sql::sqlx::postgres::PgConnectOptions::from_str(url)
             .map_or((None, None), |o| {
-                (o.get_database().map(str::to_owned), Some(o.get_username().to_owned()))
+                (
+                    o.get_database().map(str::to_owned),
+                    Some(o.get_username().to_owned()),
+                )
             }),
         #[cfg(feature = "mysql")]
-        BackendKind::MySql => crate::sql::sqlx::mysql::MySqlConnectOptions::from_str(url)
-            .map_or((None, None), |o| {
-                (o.get_database().map(str::to_owned), Some(o.get_username().to_owned()))
-            }),
+        BackendKind::MySql => {
+            crate::sql::sqlx::mysql::MySqlConnectOptions::from_str(url).map_or((None, None), |o| {
+                (
+                    o.get_database().map(str::to_owned),
+                    Some(o.get_username().to_owned()),
+                )
+            })
+        }
         #[cfg(feature = "sqlite")]
         BackendKind::Sqlite => {
             let db = crate::sql::sqlx::sqlite::SqliteConnectOptions::from_str(url)
@@ -789,7 +803,10 @@ pub async fn update(
         ("port", before.port != spec.port),
         ("admin_user", before.admin_user != spec.admin_user),
         ("tls_mode", before.tls != spec.tls),
-        ("maintenance_db", before.maintenance_db != spec.maintenance_db),
+        (
+            "maintenance_db",
+            before.maintenance_db != spec.maintenance_db,
+        ),
         ("sqlite_dir", before.sqlite_dir != spec.sqlite_dir),
         ("active", before.active != spec.active),
         (
@@ -1017,9 +1034,7 @@ fn validate(
             let p = std::path::Path::new(d);
             !d.contains('\0')
                 && p.is_absolute()
-                && !p
-                    .components()
-                    .any(|c| c == std::path::Component::ParentDir)
+                && !p.components().any(|c| c == std::path::Component::ParentDir)
         });
         if !dir_ok {
             return bad("a SQLite server needs an absolute directory without `..`");
@@ -1035,7 +1050,9 @@ fn validate(
                     .any(|c| c.is_whitespace() || c.is_control() || "/?#@[]%".contains(c))
         });
         if !host_ok {
-            return bad("a host is required: a name or an IP address, without scheme, port or path");
+            return bad(
+                "a host is required: a name or an IP address, without scheme, port or path",
+            );
         }
         // One colon is `host:port`; an IPv6 address has two or more.
         if host.as_deref().is_some_and(|h| h.matches(':').count() == 1) {
@@ -1105,7 +1122,10 @@ mod tests {
             "postgres://ad%20min:p%40ss%2Fw0rd@db.internal:6543/defaultdb?sslmode=require"
         );
         for shown in [format!("{url}"), format!("{url:?}"), format!("{s:?}")] {
-            assert!(!shown.contains("p%40ss") && !shown.contains("p@ss"), "{shown}");
+            assert!(
+                !shown.contains("p%40ss") && !shown.contains("p@ss"),
+                "{shown}"
+            );
         }
         assert!(!format!("{s:?}").contains("enc:v1"), "{s:?}");
     }
@@ -1117,9 +1137,12 @@ mod tests {
         use crate::sql::UpdaterPool as _;
         crate::aead::set_test_key();
         let dir = tempfile::tempdir().unwrap();
-        let pool = Pool::connect(&format!("sqlite://{}?mode=rwc", dir.path().join("r.db").display()))
-            .await
-            .unwrap();
+        let pool = Pool::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("r.db").display()
+        ))
+        .await
+        .unwrap();
         crate::testkit::migrate_framework(&pool).await.unwrap();
         let mut row = pg("db.internal");
         row.admin_password = Some(sealed(&LoginPassword::new("first-pass").unwrap()).unwrap());
@@ -1134,8 +1157,16 @@ mod tests {
             .execute_pool(&pool)
             .await
             .unwrap();
-        assert!(matches!(reseal_password(&pool, &stale, true).await, Resealed::Skipped));
-        let now = DbServer::objects().where_(DbServer::id.eq(id)).first(&pool).await.unwrap().unwrap();
+        assert!(matches!(
+            reseal_password(&pool, &stale, true).await,
+            Resealed::Skipped
+        ));
+        let now = DbServer::objects()
+            .where_(DbServer::id.eq(id))
+            .first(&pool)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(now.admin_password.as_deref(), Some(newer.as_str()));
     }
 
@@ -1164,15 +1195,25 @@ mod tests {
         assert_eq!(on("postgres://u:p@db.internal:5432/t"), Uses::Yes);
         assert_eq!(on("postgres://u:p@other/t?host=db.internal"), Uses::Yes);
         assert_eq!(on("postgres://u:p@db.internal:6432/t"), Uses::No);
-        assert_eq!(on("postgres://u:p@10.0.0.5/t"), Uses::No, "an IP is another spelling");
+        assert_eq!(
+            on("postgres://u:p@10.0.0.5/t"),
+            Uses::No,
+            "an IP is another spelling"
+        );
         let mut v6 = pg("::1");
         v6.port = Some(5432);
-        assert_eq!(v6.holds(BackendKind::Postgres, "postgres://u@[::1]/t"), Uses::Yes);
+        assert_eq!(
+            v6.holds(BackendKind::Postgres, "postgres://u@[::1]/t"),
+            Uses::Yes
+        );
         assert_eq!(
             v6.holds(BackendKind::Postgres, "postgres://u@x/t?hostaddr=::1"),
             Uses::Yes
         );
-        assert!(matches!(on("postgres://u:p@db.internal:notaport/t"), Uses::Unknown(_)));
+        assert!(matches!(
+            on("postgres://u:p@db.internal:notaport/t"),
+            Uses::Unknown(_)
+        ));
     }
 
     /// A record counts only while the URL names its server, database and login.
@@ -1191,7 +1232,10 @@ mod tests {
             created: true,
             created_at: crate::sql::Auto::Unset,
         };
-        assert_eq!(s.names_record("postgres://acme:pw@db.internal/acme", &record), Ok(()));
+        assert_eq!(
+            s.names_record("postgres://acme:pw@db.internal/acme", &record),
+            Ok(())
+        );
         for (url, why) in [
             ("postgres://acme:pw@other/acme", "another server"),
             ("postgres://acme:pw@db.internal/acme2", "another database"),

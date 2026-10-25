@@ -75,7 +75,9 @@ where
             .await;
         if let Some(admin) = &outcome.first_admin {
             match (&handed, &admin.handover) {
-                (Ok(()), Some(link)) => print_handover(w, &admin.username, link, handover.ttl_hours())?,
+                (Ok(()), Some(link)) => {
+                    print_handover(w, &admin.username, link, handover.ttl_hours())?
+                }
                 // The tenant is made; only the link is lost.
                 _ => writeln!(
                     w,
@@ -200,7 +202,10 @@ fn print_handover<W: Write>(
     if let crate::tenancy::Handover::Mailed { to } = handed {
         writeln!(w, "  set-password link for `{username}` mailed to {to}")?;
     } else if let Some(link) = handed.link() {
-        writeln!(w, "  set-password link for `{username}` (works once, expires in {hours}h):")?;
+        writeln!(
+            w,
+            "  set-password link for `{username}` (works once, expires in {hours}h):"
+        )?;
         writeln!(w, "  {}", link.expose())?;
         writeln!(w, "  give it to the admin; it won't be shown again")?;
     }
@@ -390,7 +395,9 @@ fn parse_create_tenant_args(args: &[String]) -> Result<provision::ProvisionReque
     };
     out.storage = match (mode, database_url, server) {
         (StorageMode::Schema, None, None) => TenantStorage::Schema(schema_name),
-        (StorageMode::Schema, _, _) => return bad("--database-url and --server need --mode database"),
+        (StorageMode::Schema, _, _) => {
+            return bad("--database-url and --server need --mode database")
+        }
         (StorageMode::Database, Some(_), Some(_)) => {
             return bad("give --database-url or --server, not both")
         }

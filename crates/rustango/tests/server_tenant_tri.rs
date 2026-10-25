@@ -158,7 +158,9 @@ impl Env {
                 sqlite_dir: Some(self.dir("tenants").display().to_string()),
                 ..base
             };
-            db_server::add(&self.registry, &spec, None).await.expect("add server");
+            db_server::add(&self.registry, &spec, None)
+                .await
+                .expect("add server");
             return;
         }
         let (admin, admin_pw, host, port) = self.admin_parts();
@@ -171,7 +173,9 @@ impl Env {
             ..base
         };
         let pw = LoginPassword::new(pw).unwrap();
-        db_server::add(&self.registry, &spec, Some(&pw)).await.expect("add server");
+        db_server::add(&self.registry, &spec, Some(&pw))
+            .await
+            .expect("add server");
     }
 
     async fn admin(&self) -> ServerAdmin {
@@ -221,7 +225,10 @@ impl Env {
             .await;
         let ok = made.is_ok();
         if ok {
-            admin.drop_tenant_database(&name, &login).await.expect("drop again");
+            admin
+                .drop_tenant_database(&name, &login)
+                .await
+                .expect("drop again");
         }
         admin.close().await;
         ok
@@ -292,7 +299,10 @@ impl Env {
     /// Every stored run error and event message, and every audit change.
     async fn trail(&self) -> String {
         let mut out = String::new();
-        let runs: Vec<ProvisioningRun> = ProvisioningRun::objects().fetch(&self.registry).await.unwrap();
+        let runs: Vec<ProvisioningRun> = ProvisioningRun::objects()
+            .fetch(&self.registry)
+            .await
+            .unwrap();
         for run in runs {
             out.push_str(&format!("{:?}\n", run.error));
             let id = run.id.get().copied().unwrap_or_default();
@@ -303,13 +313,17 @@ impl Env {
         let audit = rustango::audit::list(&self.registry, &Default::default(), 500, 0)
             .await
             .unwrap();
-        out.push_str(&format!("{:?}", audit.iter().map(|e| &e.changes).collect::<Vec<_>>()));
+        out.push_str(&format!(
+            "{:?}",
+            audit.iter().map(|e| &e.changes).collect::<Vec<_>>()
+        ));
         out
     }
 
     /// A tenant made on server `main`, with its resolved URL.
     async fn server_tenant(&self, slug: &str) -> String {
-        self.provision(&ProvisionRequest::on_server(slug, "main")).await;
+        self.provision(&ProvisionRequest::on_server(slug, "main"))
+            .await;
         let org = self.org(slug).await.expect("org");
         self.resolved_url(&org).await
     }
@@ -362,7 +376,13 @@ async fn purge_drops_a_server_tenant_as_the_admin(pool: &Pool) {
     let url = env.server_tenant(&a).await;
 
     let out = env.purge(&a).await.expect("purge");
-    for step in ["check", "deactivate", "drop_database", "delete_record", "remove_org"] {
+    for step in [
+        "check",
+        "deactivate",
+        "drop_database",
+        "delete_record",
+        "remove_org",
+    ] {
         assert!(out.contains(&format!("  {step} ... ok")), "{step}: {out}");
     }
     assert!(env.org(&a).await.is_none(), "the row survived");
@@ -370,8 +390,16 @@ async fn purge_drops_a_server_tenant_as_the_admin(pool: &Pool) {
     assert!(!env.database_exists(&a).await, "the database survived");
     assert!(env.nothing_left(&a).await, "the login survived");
     let (run, steps) = env.last_run(&a, RunKind::Purge).await;
-    assert_eq!(RunState::parse(&run.state), RunState::Succeeded, "{steps:?}");
-    let login_step = if env.server_backend() { "drop_login:ok" } else { "drop_login:skipped" };
+    assert_eq!(
+        RunState::parse(&run.state),
+        RunState::Succeeded,
+        "{steps:?}"
+    );
+    let login_step = if env.server_backend() {
+        "drop_login:ok"
+    } else {
+        "drop_login:skipped"
+    };
     assert!(steps.iter().any(|s| s == login_step), "{steps:?}");
     if let Some(pw) = password_of(&url) {
         assert!(!out.contains(&pw), "{out}");
@@ -412,7 +440,11 @@ async fn a_moved_tenant_is_refused_before_anything_changes(pool: &Pool) {
     // Another database the tenant now points at, as after migrate-tenant-storage.
     let admin = env.admin().await;
     let other = admin
-        .create_tenant_database(&db_name(&b), &Login::new(tenant_login_name(&db_name(&b))), &LoginPassword::generate())
+        .create_tenant_database(
+            &db_name(&b),
+            &Login::new(tenant_login_name(&db_name(&b))),
+            &LoginPassword::generate(),
+        )
         .await
         .expect("other database");
     let moved = rustango::tenancy::seal(other.url()).expect("seal");
@@ -427,10 +459,19 @@ async fn a_moved_tenant_is_refused_before_anything_changes(pool: &Pool) {
         .unwrap();
 
     let err = env.purge(&a).await.expect_err("moved");
-    assert!(err.to_string().contains("no longer names the database"), "{err}");
+    assert!(
+        err.to_string().contains("no longer names the database"),
+        "{err}"
+    );
     if env.server_backend() {
-        let err = env.run(&["rotate-tenant-password", &a]).await.expect_err("moved");
-        assert!(err.to_string().contains("no longer names the database"), "{err}");
+        let err = env
+            .run(&["rotate-tenant-password", &a])
+            .await
+            .expect_err("moved");
+        assert!(
+            err.to_string().contains("no longer names the database"),
+            "{err}"
+        );
     }
     let org = env.org(&a).await.expect("the row stays");
     assert!(org.active, "a refused purge deactivated it");
@@ -454,17 +495,25 @@ async fn a_brought_database_is_left_off_postgres(pool: &Pool) {
     env.clean(&[&a]).await;
     let admin = env.admin().await;
     let made = admin
-        .create_tenant_database(&db_name(&a), &Login::new(tenant_login_name(&db_name(&a))), &LoginPassword::generate())
+        .create_tenant_database(
+            &db_name(&a),
+            &Login::new(tenant_login_name(&db_name(&a))),
+            &LoginPassword::generate(),
+        )
         .await
         .expect("brought database");
     admin.close().await;
-    env.provision(&ProvisionRequest::database(&a, made.url())).await;
+    env.provision(&ProvisionRequest::database(&a, made.url()))
+        .await;
     assert!(env.records(&a).await.is_empty());
 
     let out = env.purge(&a).await.expect("purge");
     assert!(out.contains("drop_database ... skipped"), "{out}");
     assert!(env.org(&a).await.is_none());
-    assert!(env.database_exists(&a).await, "a brought database was dropped");
+    assert!(
+        env.database_exists(&a).await,
+        "a brought database was dropped"
+    );
     env.clean(&[&a]).await;
 }
 
@@ -486,20 +535,42 @@ async fn rotation_gives_the_login_a_new_password(pool: &Pool) {
         return;
     }
     let out = rotated.expect("rotate");
-    for step in ["check", "alter_password", "store_password", "invalidate_pools"] {
+    for step in [
+        "check",
+        "alter_password",
+        "store_password",
+        "invalidate_pools",
+    ] {
         assert!(out.contains(&format!("  {step} ... ok")), "{step}: {out}");
     }
     let org = env.org(&a).await.unwrap();
     assert!(org.database_url.as_deref().unwrap().starts_with("enc:v1:"));
     let new_url = env.resolved_url(&org).await;
     assert_ne!(new_url, old_url);
-    Pool::connect(&new_url).await.expect("new password works").close().await;
-    assert!(Pool::connect(&old_url).await.is_err(), "the old password still works");
+    Pool::connect(&new_url)
+        .await
+        .expect("new password works")
+        .close()
+        .await;
+    assert!(
+        Pool::connect(&old_url).await.is_err(),
+        "the old password still works"
+    );
     let (run, steps) = env.last_run(&a, RunKind::RotatePassword).await;
-    assert_eq!(RunState::parse(&run.state), RunState::Succeeded, "{steps:?}");
+    assert_eq!(
+        RunState::parse(&run.state),
+        RunState::Succeeded,
+        "{steps:?}"
+    );
     let trail = env.trail().await;
-    for pw in [password_of(&old_url).unwrap(), password_of(&new_url).unwrap()] {
-        assert!(!out.contains(&pw) && !trail.contains(&pw), "a password leaked");
+    for pw in [
+        password_of(&old_url).unwrap(),
+        password_of(&new_url).unwrap(),
+    ] {
+        assert!(
+            !out.contains(&pw) && !trail.contains(&pw),
+            "a password leaked"
+        );
     }
     env.clean(&[&a]).await;
 }
@@ -516,14 +587,22 @@ async fn rotation_refuses_a_brought_database(pool: &Pool) {
     env.clean(&[&a]).await;
     let admin = env.admin().await;
     let made = admin
-        .create_tenant_database(&db_name(&a), &Login::new(tenant_login_name(&db_name(&a))), &LoginPassword::generate())
+        .create_tenant_database(
+            &db_name(&a),
+            &Login::new(tenant_login_name(&db_name(&a))),
+            &LoginPassword::generate(),
+        )
         .await
         .expect("brought database");
     admin.close().await;
-    env.provision(&ProvisionRequest::database(&a, made.url())).await;
+    env.provision(&ProvisionRequest::database(&a, made.url()))
+        .await;
     let before = env.org(&a).await.unwrap().database_url;
 
-    let err = env.run(&["rotate-tenant-password", &a]).await.expect_err("brought");
+    let err = env
+        .run(&["rotate-tenant-password", &a])
+        .await
+        .expect_err("brought");
     assert!(err.to_string().contains("not made by rustango"), "{err}");
     assert_eq!(env.org(&a).await.unwrap().database_url, before);
     env.clean(&[&a]).await;
@@ -558,7 +637,8 @@ async fn a_replaced_admin_is_told_what_it_lacks(pool: &Pool) {
         &format!("CREATE ROLE \"{second}\" LOGIN CREATEDB CREATEROLE PASSWORD 'secondpw'"),
     )
     .await;
-    env.add_server_as("second", Some((&second, "secondpw"))).await;
+    env.add_server_as("second", Some((&second, "secondpw")))
+        .await;
     TenantDatabase::objects()
         .where_(TenantDatabase::org_slug.eq(a.clone()))
         .update()
@@ -567,7 +647,10 @@ async fn a_replaced_admin_is_told_what_it_lacks(pool: &Pool) {
         .await
         .unwrap();
 
-    let err = env.run(&["rotate-tenant-password", &a]).await.expect_err("no ADMIN OPTION");
+    let err = env
+        .run(&["rotate-tenant-password", &a])
+        .await
+        .expect_err("no ADMIN OPTION");
     assert!(err.to_string().contains("ADMIN OPTION"), "{err}");
     let err = env.purge(&a).await.expect_err("does not own it");
     assert!(err.to_string().contains("does not own database"), "{err}");
@@ -633,7 +716,9 @@ impl Console {
             .body(axum::body::Body::empty())
             .unwrap();
         let resp = self.app.clone().oneshot(req).await.unwrap();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
@@ -658,7 +743,10 @@ impl Console {
         let to = resp.headers()["location"].to_str().unwrap().to_owned();
         let id: i64 = to.rsplit('/').next().unwrap().parse().expect("a run id");
         for _ in 0..600 {
-            let run = store::run_by_id(&env.registry, id).await.unwrap().expect("run");
+            let run = store::run_by_id(&env.registry, id)
+                .await
+                .unwrap()
+                .expect("run");
             if RunState::parse(&run.state).is_terminal() {
                 return (run, self.get(&to).await);
             }
@@ -681,7 +769,11 @@ async fn the_console_rotates_and_purges_through_the_run_page(pool: &Pool) {
     let c = Console::boot(&env).await;
 
     let page = c.get(&format!("/orgs/{a}/edit")).await;
-    assert_eq!(page.contains("rotate-password"), env.server_backend(), "{page}");
+    assert_eq!(
+        page.contains("rotate-password"),
+        env.server_backend(),
+        "{page}"
+    );
     if env.server_backend() {
         let (run, page) = c.run(&env, &format!("/orgs/{a}/rotate-password"), "").await;
         assert_eq!(RunState::parse(&run.state), RunState::Succeeded, "{page}");
@@ -689,10 +781,17 @@ async fn the_console_rotates_and_purges_through_the_run_page(pool: &Pool) {
         assert!(page.contains("store_password"), "{page}");
     }
     let (run, page) = c
-        .run(&env, &format!("/orgs/{a}/purge"), &format!("confirm={a}&purge_database=on"))
+        .run(
+            &env,
+            &format!("/orgs/{a}/purge"),
+            &format!("confirm={a}&purge_database=on"),
+        )
         .await;
     assert_eq!(RunState::parse(&run.state), RunState::Succeeded, "{page}");
-    assert!(page.contains("Purging") && page.contains("drop_database"), "{page}");
+    assert!(
+        page.contains("Purging") && page.contains("drop_database"),
+        "{page}"
+    );
     assert!(env.org(&a).await.is_none());
     assert!(!env.database_exists(&a).await);
 }
@@ -713,15 +812,25 @@ async fn operations_wait_for_each_other_and_the_record_goes_last(pool: &Pool) {
         .await
         .expect("first run");
     let err = env.purge(&a).await.expect_err("a second operation");
-    assert!(err.to_string().contains("another purge or password change"), "{err}");
+    assert!(
+        err.to_string().contains("another purge or password change"),
+        "{err}"
+    );
     assert!(env.org(&a).await.unwrap().active);
     assert!(env.database_exists(&a).await);
     let id = running.id.get().copied().unwrap();
-    store::finish_run_text(&env.registry, id, RunState::Failed, None).await.unwrap();
+    store::finish_run_text(&env.registry, id, RunState::Failed, None)
+        .await
+        .unwrap();
 
     env.purge(&a).await.expect("purge once the other run ended");
     let (_, steps) = env.last_run(&a, RunKind::Purge).await;
-    let at = |s: &str| steps.iter().position(|x| x == s).unwrap_or_else(|| panic!("{s}: {steps:?}"));
+    let at = |s: &str| {
+        steps
+            .iter()
+            .position(|x| x == s)
+            .unwrap_or_else(|| panic!("{s}: {steps:?}"))
+    };
     assert!(at("remove_org:ok") < at("delete_record:ok"), "{steps:?}");
 }
 
@@ -737,7 +846,11 @@ async fn an_unreadable_tenant_url_blocks_the_drop(pool: &Pool) {
     env.clean(&[&a]).await;
     env.add_server_as("main", None).await;
     env.server_tenant(&a).await;
-    let scheme = if env.backend() == BackendKind::Postgres { "postgres" } else { "mysql" };
+    let scheme = if env.backend() == BackendKind::Postgres {
+        "postgres"
+    } else {
+        "mysql"
+    };
     let mut other = Org {
         slug: slug("bad"),
         storage_mode: "database".into(),
@@ -745,7 +858,10 @@ async fn an_unreadable_tenant_url_blocks_the_drop(pool: &Pool) {
         database_url: Some(format!("{scheme}://u:p@db.internal:notaport/x")),
         ..rustango::testkit::org()
     };
-    other.insert_pool(&env.registry).await.expect("org with a bad URL");
+    other
+        .insert_pool(&env.registry)
+        .await
+        .expect("org with a bad URL");
 
     let err = env.purge(&a).await.expect_err("refused");
     assert!(err.to_string().contains("may use it"), "{err}");

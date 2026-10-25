@@ -329,7 +329,10 @@ async fn a_run_that_fails_early_still_closes() {
     )
     .await
     .expect_err("must be rejected");
-    assert!(err.to_string().contains("registry runs on sqlite"), "got: {err}");
+    assert!(
+        err.to_string().contains("registry runs on sqlite"),
+        "got: {err}"
+    );
 
     let registry_pool = pools.registry_pool();
     let runs: Vec<store::ProvisioningRun> = store::ProvisioningRun::objects()

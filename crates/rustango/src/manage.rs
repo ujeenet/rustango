@@ -2160,13 +2160,23 @@ mod tests {
                 cli = cli.with_tenant_provisioning(tmp.path().join("migrations"));
             }
             let mut out: Vec<u8> = Vec::new();
-            cli.run_tenancy_verb_to(registry.clone(), &url, args(&["migrate-registry"]), &mut out)
-                .await
-                .expect("migrate-registry");
+            cli.run_tenancy_verb_to(
+                registry.clone(),
+                &url,
+                args(&["migrate-registry"]),
+                &mut out,
+            )
+            .await
+            .expect("migrate-registry");
             let mut out: Vec<u8> = Vec::new();
             // Errors on the test env's unset settings; the report is still written.
             let _ = cli
-                .run_tenancy_verb_to(registry.clone(), &url, args(&["check", "--deploy"]), &mut out)
+                .run_tenancy_verb_to(
+                    registry.clone(),
+                    &url,
+                    args(&["check", "--deploy"]),
+                    &mut out,
+                )
                 .await;
             let out = String::from_utf8_lossy(&out);
             assert_eq!(out.contains("RUSTANGO_SECRET_KEY"), provisioning, "{out}");

@@ -312,7 +312,17 @@ mod tests {
     fn database_name_is_a_slug_and_not_a_system_database() {
         assert_eq!(db("acme-shop").as_str(), "acme-shop");
         for bad in [
-            "", "-a", "a-", "Acme", "a_b", "a%b", "a\"b", "a`b", "postgres", "template1", "mysql",
+            "",
+            "-a",
+            "a-",
+            "Acme",
+            "a_b",
+            "a%b",
+            "a\"b",
+            "a`b",
+            "postgres",
+            "template1",
+            "mysql",
             "sys",
         ] {
             assert!(DatabaseName::new(bad).is_err(), "{bad:?} accepted");
@@ -324,7 +334,9 @@ mod tests {
     fn login_name_rule() {
         assert!(LoginName::new("acme-shop").is_ok());
         assert!(LoginName::new("a_b").is_ok());
-        for bad in ["", "_a", "-a", "A", "root", "postgres", "pg_x", "a'b", "a b"] {
+        for bad in [
+            "", "_a", "-a", "A", "root", "postgres", "pg_x", "a'b", "a b",
+        ] {
             assert!(LoginName::new(bad).is_err(), "{bad:?} accepted");
         }
         assert!(LoginName::new("a".repeat(33)).is_err());
@@ -366,7 +378,10 @@ mod tests {
             r#"CREATE ROLE "u" LOGIN PASSWORD 'é''y'"#
         );
         let exists = d.login_exists_sql(&login("u")).unwrap();
-        assert_eq!(exists.sql, "SELECT count(*) FROM pg_roles WHERE rolname = $1");
+        assert_eq!(
+            exists.sql,
+            "SELECT count(*) FROM pg_roles WHERE rolname = $1"
+        );
         assert_eq!(exists.params.len(), 1);
         assert_eq!(
             d.drop_login_sql(&login("u")).unwrap(),
@@ -393,8 +408,14 @@ mod tests {
         let rights = d.tenant_rights_sql(&db("acme-shop"), &login("u")).unwrap();
         assert!(rights.sql.contains("ADMIN OPTION") && rights.sql.contains("pg_signal_backend"));
         assert_eq!(rights.params.len(), 2);
-        let sessions = d.database_sessions_sql(&db("a"), "rustango-tenant:7").unwrap();
-        assert!(sessions.sql.contains("IS DISTINCT FROM $2"), "{}", sessions.sql);
+        let sessions = d
+            .database_sessions_sql(&db("a"), "rustango-tenant:7")
+            .unwrap();
+        assert!(
+            sessions.sql.contains("IS DISTINCT FROM $2"),
+            "{}",
+            sessions.sql
+        );
         let end = d.end_sessions_sql(&db("a"), "rustango-tenant:7").unwrap();
         assert!(end.sql.contains("pg_terminate_backend") && end.sql.contains("= $2"));
     }
@@ -425,9 +446,16 @@ mod tests {
     #[test]
     fn postgres_rotation_sends_a_verifier() {
         let sql = Postgres
-            .alter_login_password_sql(&login("u"), &LoginPassword::new("n3w-secret").unwrap(), false)
+            .alter_login_password_sql(
+                &login("u"),
+                &LoginPassword::new("n3w-secret").unwrap(),
+                false,
+            )
             .unwrap();
-        assert!(sql.starts_with(r#"ALTER ROLE "u" PASSWORD 'SCRAM-SHA-256$4096:"#), "{sql}");
+        assert!(
+            sql.starts_with(r#"ALTER ROLE "u" PASSWORD 'SCRAM-SHA-256$4096:"#),
+            "{sql}"
+        );
         assert!(!sql.contains("n3w-secret"), "{sql}");
     }
 
@@ -445,7 +473,12 @@ mod tests {
             d.create_database_sql(&db("a"), Some(&cs)).unwrap(),
             "CREATE DATABASE `a` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs"
         );
-        for bad in ["latin1_swedish_ci", "utf8mb4_x; DROP", "utf8mb4_", "UTF8MB4_BIN"] {
+        for bad in [
+            "latin1_swedish_ci",
+            "utf8mb4_x; DROP",
+            "utf8mb4_",
+            "UTF8MB4_BIN",
+        ] {
             assert!(Collation::new(bad).is_err(), "{bad}");
         }
         assert_eq!(
@@ -470,7 +503,10 @@ mod tests {
         assert_eq!(exists.params.len(), 2);
         // A backtick in a host is doubled, not a way out of the quotes.
         let odd = login("u").with_host("a`b").unwrap();
-        assert_eq!(d.drop_login_sql(&odd).unwrap(), "DROP USER IF EXISTS `u`@`a``b`");
+        assert_eq!(
+            d.drop_login_sql(&odd).unwrap(),
+            "DROP USER IF EXISTS `u`@`a``b`"
+        );
     }
 
     /// Expected value from Python's `hashlib.pbkdf2_hmac` + `hmac`.
@@ -504,7 +540,9 @@ mod tests {
     fn sqlite_has_no_server_ddl() {
         let d = Sqlite;
         assert!(d.create_database_sql(&db("a"), None).is_none());
-        assert!(d.create_login_sql(&login("a"), &LoginPassword::new("x").unwrap()).is_none());
+        assert!(d
+            .create_login_sql(&login("a"), &LoginPassword::new("x").unwrap())
+            .is_none());
         assert!(d.grant_database_sql(&db("a"), &login("a")).is_empty());
         let pw = LoginPassword::new("x").unwrap();
         assert!(d.alter_login_password_sql(&login("a"), &pw, true).is_none());

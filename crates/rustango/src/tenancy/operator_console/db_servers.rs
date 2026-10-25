@@ -20,7 +20,9 @@ use super::flash::{redirect, Flash};
 use super::{inject_op_brand, render, urlencoding_lite, ConsoleState};
 use crate::sql::LoginPassword;
 use crate::tenancy::auth;
-use crate::tenancy::db_server::{self, DbServer, DbServerError, DbServerSpec, PasswordChange, TlsMode};
+use crate::tenancy::db_server::{
+    self, DbServer, DbServerError, DbServerSpec, PasswordChange, TlsMode,
+};
 use crate::tenancy::BackendKind;
 
 const TABLE: &str = "rustango_db_servers";
@@ -75,7 +77,10 @@ fn base_ctx(state: &ConsoleState, op: &auth::Operator) -> Context {
     ctx.insert("section", "orgs");
     ctx.insert("operator_username", &op.username);
     ctx.insert("backend", registry_backend(state).as_str());
-    ctx.insert("is_sqlite", &(registry_backend(state) == BackendKind::Sqlite));
+    ctx.insert(
+        "is_sqlite",
+        &(registry_backend(state) == BackendKind::Sqlite),
+    );
     ctx.insert(
         "tls_modes",
         &TlsMode::ALL.iter().map(|m| m.as_str()).collect::<Vec<_>>(),
@@ -190,11 +195,11 @@ fn explain(e: &DbServerError, name: &str) -> String {
         DbServerError::Exec(d)
         | DbServerError::Admin(crate::tenancy::server_admin::TenantDbError::Exec(d)) => {
             super::withheld(
-            "operator_console::db_servers",
-            name,
-            "the database refused the request",
-            d,
-        )
+                "operator_console::db_servers",
+                name,
+                "the database refused the request",
+                d,
+            )
         }
         other => other.to_string(),
     }
@@ -214,7 +219,10 @@ pub(super) async fn create(
     Extension(op): Extension<auth::Operator>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response<Body> {
-    let name = form.get("name").map(|n| n.trim().to_owned()).unwrap_or_default();
+    let name = form
+        .get("name")
+        .map(|n| n.trim().to_owned())
+        .unwrap_or_default();
     let outcome = async {
         let spec = spec_from_form(&state, &form, name.clone())?;
         let password = password_from_form(&form)?;
@@ -260,7 +268,14 @@ pub(super) async fn edit_form(
     Query(q): Query<MessagesQuery>,
 ) -> Response<Body> {
     match db_server::get(&state.registry, &name).await {
-        Ok(row) => render_edit(&state, &op, &row, None, q.error.as_deref(), q.notice.as_deref()),
+        Ok(row) => render_edit(
+            &state,
+            &op,
+            &row,
+            None,
+            q.error.as_deref(),
+            q.notice.as_deref(),
+        ),
         Err(DbServerError::NotFound(_)) => redirect(
             "/db-servers",
             Flash::Error(&format!("no database server `{name}`")),
@@ -303,7 +318,11 @@ pub(super) async fn edit_submit(
             password_from_form(&form)?.map_or(PasswordChange::Keep, PasswordChange::Set)
         };
         // The row the form was built from; a later write makes this stale.
-        let seen = match form.get("version").map(|v| v.trim()).filter(|v| !v.is_empty()) {
+        let seen = match form
+            .get("version")
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+        {
             None => None,
             Some(v) => Some(
                 chrono::DateTime::parse_from_rfc3339(v)

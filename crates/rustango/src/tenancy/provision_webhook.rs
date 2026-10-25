@@ -408,10 +408,12 @@ async fn handle(
                     let handed = handover
                         .hand_over_outcome(&provisioner.registry(), &mut outcome, None)
                         .await;
-                    let mailed = outcome
-                        .first_admin
-                        .as_ref()
-                        .is_none_or(|a| matches!(a.handover, Some(super::first_admin::Handover::Mailed { .. })));
+                    let mailed = outcome.first_admin.as_ref().is_none_or(|a| {
+                        matches!(
+                            a.handover,
+                            Some(super::first_admin::Handover::Mailed { .. })
+                        )
+                    });
                     // Never the link: name the verb that issues a new one.
                     if handed.is_err() || !mailed {
                         tracing::warn!(
@@ -421,7 +423,8 @@ async fn handle(
                             "the first admin's link was not mailed; issue one with `set-password-link`"
                         );
                         if let Some(admin) = &outcome.first_admin {
-                            let note = store::RunText::handover_lost(&outcome.slug, &admin.username);
+                            let note =
+                                store::RunText::handover_lost(&outcome.slug, &admin.username);
                             let noted = store::append_note(
                                 &provisioner.registry(),
                                 run_id,
@@ -519,7 +522,9 @@ fn build_request(
                     .to_owned(),
             ))
         }
-        (UrlPolicy::Server(name), _) => TenantStorage::Database(DatabaseSource::Server(name.clone())),
+        (UrlPolicy::Server(name), _) => {
+            TenantStorage::Database(DatabaseSource::Server(name.clone()))
+        }
         _ if schema => TenantStorage::Schema(None),
         (_, Some(url)) => TenantStorage::Database(DatabaseSource::Url(url)),
         (_, None) => {
@@ -694,7 +699,10 @@ mod tests {
             storage_mode: StorageMode::Schema,
             ..config(UrlPolicy::Server("main".to_owned()))
         };
-        assert!(matches!(build_request(&schema, &payload("acme", None)), Err(Refusal::Policy(_))));
+        assert!(matches!(
+            build_request(&schema, &payload("acme", None)),
+            Err(Refusal::Policy(_))
+        ));
     }
 
     #[test]

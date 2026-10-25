@@ -335,7 +335,9 @@ async fn test_connection_never_echoes_a_resolved_secret() {
                 .uri("/orgs/test-connection")
                 .header("cookie", &b.cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("database_url=env%3A%2F%2FRUSTANGO_OC_PROBE_LEAK"))
+                .body(Body::from(
+                    "database_url=env%3A%2F%2FRUSTANGO_OC_PROBE_LEAK",
+                ))
                 .unwrap(),
         )
         .await

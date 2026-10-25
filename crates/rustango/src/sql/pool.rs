@@ -402,7 +402,9 @@ impl Pool {
                 Ok(Self::Mysql(pool))
             }
             "sqlite" => Err(refuse("a SQLite database has no server to administer")),
-            _ => Err(refuse("not a postgres:// or mysql:// URL this server can reach")),
+            _ => Err(refuse(
+                "not a postgres:// or mysql:// URL this server can reach",
+            )),
         }
     }
 

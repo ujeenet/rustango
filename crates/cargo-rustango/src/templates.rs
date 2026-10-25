@@ -594,11 +594,15 @@ feature list.
 /// How to save the compose database as a server in the console.
 fn tenant_dev_note(backend: Backend) -> String {
     let server = match backend {
-        Backend::Postgres => "The compose Postgres has no TLS: save it with host `postgres`
-(`localhost` from the host), user `rustango` and TLS `disable`.",
-        Backend::Mysql => "The compose `rustango` user cannot create users or grant rights:
+        Backend::Postgres => {
+            "The compose Postgres has no TLS: save it with host `postgres`
+(`localhost` from the host), user `rustango` and TLS `disable`."
+        }
+        Backend::Mysql => {
+            "The compose `rustango` user cannot create users or grant rights:
 save the server as `root` (password `rustango`), host `mysql` (`localhost`
-from the host).",
+from the host)."
+        }
         Backend::Sqlite => "Save a server with a directory for tenant files, e.g. `var/tenants`.",
     };
     format!(

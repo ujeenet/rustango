@@ -56,7 +56,9 @@ impl Env {
             migrations,
             tmp,
         };
-        env.run(&["migrate-registry"]).await.expect("migrate-registry");
+        env.run(&["migrate-registry"])
+            .await
+            .expect("migrate-registry");
         env
     }
 
@@ -65,7 +67,10 @@ impl Env {
     }
 
     fn tenant_url(&self, slug: &str) -> String {
-        format!("sqlite://{}?mode=rwc", self.tmp.path().join(format!("{slug}.db")).display())
+        format!(
+            "sqlite://{}?mode=rwc",
+            self.tmp.path().join(format!("{slug}.db")).display()
+        )
     }
 
     async fn run(&self, args: &[&str]) -> Result<String, String> {
@@ -130,7 +135,10 @@ impl Env {
             .await
             .unwrap()
         {
-            out.push_str(&format!("{} {} {} {}\n", e.entity_table, e.entity_pk, e.source, e.changes));
+            out.push_str(&format!(
+                "{} {} {} {}\n",
+                e.entity_table, e.entity_pk, e.source, e.changes
+            ));
         }
         out
     }
@@ -227,7 +235,10 @@ async fn redeem_and_sign_in(admin: &axum::Router, host: &str, link: &str, userna
     let done = body_of(tenant_req(admin, host, "POST", &uri, &set).await).await;
     assert!(done.contains("Password set"), "{done}");
     let again = body_of(tenant_req(admin, host, "POST", &uri, &set).await).await;
-    assert!(again.contains("invalid, used or expired"), "the link worked twice: {again}");
+    assert!(
+        again.contains("invalid, used or expired"),
+        "the link worked twice: {again}"
+    );
 
     let login = tenant_req(
         admin,
@@ -235,7 +246,10 @@ async fn redeem_and_sign_in(admin: &axum::Router, host: &str, link: &str, userna
         "POST",
         "/login",
         // Some feature sets read the login's token from the form, not the header.
-        &format!("username={}&password={NEW_PASSWORD}&_csrf=t", form_encode(username)),
+        &format!(
+            "username={}&password={NEW_PASSWORD}&_csrf=t",
+            form_encode(username)
+        ),
     )
     .await;
     if !login.status().is_redirection() {
@@ -287,7 +301,10 @@ async fn operator_cookie(console: &axum::Router, registry: &rustango::sql::Pool)
         .to_owned()
 }
 
-fn capture() -> (rustango::testkit::CaptureWriter, tracing::subscriber::DefaultGuard) {
+fn capture() -> (
+    rustango::testkit::CaptureWriter,
+    tracing::subscriber::DefaultGuard,
+) {
     let buf = rustango::testkit::CaptureWriter::default();
     let writer = buf.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -354,19 +371,29 @@ async fn the_console_creates_a_first_admin_who_signs_in_through_the_link() {
         .await
         .unwrap();
     drop(guard);
-    assert_eq!(resp.status(), StatusCode::OK, "the run renders with the link");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the run renders with the link"
+    );
     assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store");
     let page = body_of(resp).await;
     assert!(page.contains("create_admin"), "{page}");
     let link = link_in(&page[page.find("first-admin").expect("handover block")..]);
     let sig = signature_of(&link);
 
-    let user = env.user(&slug, email).await.expect("the first admin exists");
+    let user = env
+        .user(&slug, email)
+        .await
+        .expect("the first admin exists");
     assert!(user.is_superuser && user.active);
     assert!(env.org(&slug).await.unwrap().active);
 
     let trail = env.trail().await;
-    assert!(trail.contains("provision:first_admin") && trail.contains(email), "{trail}");
+    assert!(
+        trail.contains("provision:first_admin") && trail.contains(email),
+        "{trail}"
+    );
     assert!(!trail.contains(&sig), "the link reached a record: {trail}");
     assert!(!logs.contents().contains(&sig), "the link reached a log");
 
@@ -403,9 +430,8 @@ async fn the_cli_creates_a_first_admin_and_prints_the_link() {
     let host = format!("{slug}.app.test");
     // The CLI signs with the server's tenant key: the env var, or the file
     // a server writes on first boot. It only loads it.
-    let secret = SessionSecret::from_env_or_disk(std::path::Path::new(
-        "./var/.rustango_tenant_session.key",
-    ));
+    let secret =
+        SessionSecret::from_env_or_disk(std::path::Path::new("./var/.rustango_tenant_session.key"));
     let out = env
         .run(&[
             "create-tenant",
@@ -427,7 +453,10 @@ async fn the_cli_creates_a_first_admin_and_prints_the_link() {
         .expect("create-tenant");
     assert!(out.contains("created the first admin"), "{out}");
     let link = link_in(&out[out.find("set-password link").expect("the link")..]);
-    let user = env.user(&slug, "bob").await.expect("the first admin exists");
+    let user = env
+        .user(&slug, "bob")
+        .await
+        .expect("the first admin exists");
     assert!(user.is_superuser);
     assert!(!env.trail().await.contains(&signature_of(&link)));
     let admin = env.tenant_admin(&secret);
@@ -449,7 +478,14 @@ async fn the_cli_creates_a_first_admin_and_prints_the_link() {
     .await
     .expect("second tenant");
     let foreign = body_of(
-        tenant_req(&admin, &format!("{other}.app.test"), "GET", &path_and_query(&link), "").await,
+        tenant_req(
+            &admin,
+            &format!("{other}.app.test"),
+            "GET",
+            &path_and_query(&link),
+            "",
+        )
+        .await,
     )
     .await;
     assert!(foreign.contains("invalid, used or expired"), "{foreign}");
@@ -466,14 +502,13 @@ async fn the_cli_creates_a_first_admin_and_prints_the_link() {
 }
 
 /// A tenant with a first admin `ann`, and a link for her from `handover`.
-async fn tenant_with_admin(
-    env: &Env,
-    handover: &FirstAdminHandover,
-) -> (String, String) {
+async fn tenant_with_admin(env: &Env, handover: &FirstAdminHandover) -> (String, String) {
     let slug = unique("http");
     let request = rustango::tenancy::provision::ProvisionRequest {
         host_pattern: Some(format!("{slug}.app.test")),
-        first_admin: Some(rustango::tenancy::FirstAdmin::new("ann@acme.test", Some("ann")).unwrap()),
+        first_admin: Some(
+            rustango::tenancy::FirstAdmin::new("ann@acme.test", Some("ann")).unwrap(),
+        ),
         ..rustango::tenancy::provision::ProvisionRequest::database(&slug, env.tenant_url(&slug))
     };
     let outcome = rustango::tenancy::provision::provision_tenant(
@@ -491,7 +526,11 @@ async fn tenant_with_admin(
         rustango::tenancy::first_admin::hand_over_user(env.pools.as_ref(), &org, "ann", handover)
             .await
             .unwrap();
-    let link = handed.link().expect("no mailer: a link").expose().to_owned();
+    let link = handed
+        .link()
+        .expect("no mailer: a link")
+        .expose()
+        .to_owned();
     (slug, link)
 }
 
@@ -521,35 +560,63 @@ async fn a_set_password_link_holds_up_over_http() {
     let dead = |html: &str| html.contains("invalid, used or expired");
 
     // Another user id under the same signature.
-    let id = env.user(&slug, "ann").await.unwrap().id.get().copied().unwrap();
+    let id = env
+        .user(&slug, "ann")
+        .await
+        .unwrap()
+        .id
+        .get()
+        .copied()
+        .unwrap();
     let tampered = uri.replace(&format!("user_id={id}"), &format!("user_id={}", id + 1));
     assert_ne!(tampered, uri);
-    assert!(dead(&body_of(tenant_req(&admin, &host, "GET", &tampered, "").await).await));
-    assert!(dead(&body_of(tenant_req(&admin, &host, "POST", &tampered, &set).await).await));
+    assert!(dead(
+        &body_of(tenant_req(&admin, &host, "GET", &tampered, "").await).await
+    ));
+    assert!(dead(
+        &body_of(tenant_req(&admin, &host, "POST", &tampered, &set).await).await
+    ));
 
     // The same link POSTed to another tenant.
     let (other, _) = tenant_with_admin(&env, &FirstAdminHandover::new(&secret)).await;
     let foreign = format!("{other}.app.test");
-    assert!(dead(&body_of(tenant_req(&admin, &foreign, "POST", &uri, &set).await).await));
+    assert!(dead(
+        &body_of(tenant_req(&admin, &foreign, "POST", &uri, &set).await).await
+    ));
 
     // Expired.
     let org = env.org(&slug).await.unwrap();
     let short = FirstAdminHandover::new(&secret).ttl(std::time::Duration::from_secs(1));
-    let expired = rustango::tenancy::first_admin::hand_over_user(env.pools.as_ref(), &org, "ann", &short)
-        .await
-        .unwrap();
+    let expired =
+        rustango::tenancy::first_admin::hand_over_user(env.pools.as_ref(), &org, "ann", &short)
+            .await
+            .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
     let expired_uri = path_and_query(expired.link().unwrap().expose());
-    assert!(dead(&body_of(tenant_req(&admin, &host, "GET", &expired_uri, "").await).await));
-    assert!(dead(&body_of(tenant_req(&admin, &host, "POST", &expired_uri, &set).await).await));
+    assert!(dead(
+        &body_of(tenant_req(&admin, &host, "GET", &expired_uri, "").await).await
+    ));
+    assert!(dead(
+        &body_of(tenant_req(&admin, &host, "POST", &expired_uri, &set).await).await
+    ));
 
     // The form's own rule: too short, and the link survives it.
     let weak = body_of(
-        tenant_req(&admin, &host, "POST", &uri, "new_password=Ab1!&confirm_password=Ab1!").await,
+        tenant_req(
+            &admin,
+            &host,
+            "POST",
+            &uri,
+            "new_password=Ab1!&confirm_password=Ab1!",
+        )
+        .await,
     )
     .await;
     assert!(!dead(&weak) && !weak.contains("Password set"), "{weak}");
-    assert_eq!(env.user(&slug, "ann").await.unwrap().password_hash, hash_before);
+    assert_eq!(
+        env.user(&slug, "ann").await.unwrap().password_hash,
+        hash_before
+    );
 
     // No CSRF token: refused, nothing written.
     let bare = admin
@@ -566,7 +633,10 @@ async fn a_set_password_link_holds_up_over_http() {
         .await
         .unwrap();
     assert_eq!(bare.status(), StatusCode::FORBIDDEN);
-    assert_eq!(env.user(&slug, "ann").await.unwrap().password_hash, hash_before);
+    assert_eq!(
+        env.user(&slug, "ann").await.unwrap().password_hash,
+        hash_before
+    );
 
     // The token the GET hands out, sent back as a browser would.
     let page = admin
@@ -605,7 +675,9 @@ async fn a_set_password_link_holds_up_over_http() {
     assert!(body_of(done).await.contains("Password set"));
 
     // Used: the form no longer shows.
-    assert!(dead(&body_of(tenant_req(&admin, &host, "GET", &uri, "").await).await));
+    assert!(dead(
+        &body_of(tenant_req(&admin, &host, "GET", &uri, "").await).await
+    ));
 }
 
 /// `set-password-link` refuses an inactive user.
@@ -625,9 +697,10 @@ async fn no_link_for_an_inactive_user() {
         .execute_pool(&pool)
         .await
         .unwrap();
-    let err = rustango::tenancy::first_admin::hand_over_user(env.pools.as_ref(), &org, "ann", &handover)
-        .await
-        .expect_err("refused");
+    let err =
+        rustango::tenancy::first_admin::hand_over_user(env.pools.as_ref(), &org, "ann", &handover)
+            .await
+            .expect_err("refused");
     assert!(err.to_string().contains("inactive"), "{err}");
 }
 
@@ -659,27 +732,47 @@ async fn a_resumed_run_never_adds_a_second_superuser() {
             .await
             .unwrap();
             let id = opened.id.get().copied().unwrap();
-            provision_tenant_in_run(env.pools.as_ref(), &env.url, &env.migrations, &request, None, id)
-                .await
+            provision_tenant_in_run(
+                env.pools.as_ref(),
+                &env.url,
+                &env.migrations,
+                &request,
+                None,
+                id,
+            )
+            .await
         }
     };
     std::env::set_var("RUSTANGO_PROVISION_FAIL_AT", "activate");
-    run(request("ann@acme.test", "ann")).await.expect_err("activate fails");
+    run(request("ann@acme.test", "ann"))
+        .await
+        .expect_err("activate fails");
     std::env::remove_var("RUSTANGO_PROVISION_FAIL_AT");
     assert!(env.user(&slug, "ann").await.unwrap().is_superuser);
 
-    let err = run(request("eve@evil.test", "eve")).await.expect_err("another admin");
+    let err = run(request("eve@evil.test", "eve"))
+        .await
+        .expect_err("another admin");
     assert!(err.to_string().contains("superuser"), "{err}");
     assert!(env.user(&slug, "eve").await.is_none());
     assert!(!env.org(&slug).await.unwrap().active);
 
-    let outcome = run(request("ann@acme.test", "ann")).await.expect("the same admin resumes");
+    let outcome = run(request("ann@acme.test", "ann"))
+        .await
+        .expect("the same admin resumes");
     let ann = env.user(&slug, "ann").await.unwrap();
-    assert_eq!(outcome.first_admin.unwrap().user_id, ann.id.get().copied().unwrap());
+    assert_eq!(
+        outcome.first_admin.unwrap().user_id,
+        ann.id.get().copied().unwrap()
+    );
     assert!(env.org(&slug).await.unwrap().active);
     let org = env.org(&slug).await.unwrap();
     let pool = env.pools.scoped_pool_dyn(&org).await.unwrap();
-    let supers = User::objects().where_(User::is_superuser.eq(true)).fetch(&pool).await.unwrap();
+    let supers = User::objects()
+        .where_(User::is_superuser.eq(true))
+        .fetch(&pool)
+        .await
+        .unwrap();
     assert_eq!(supers.len(), 1);
 }
 
@@ -746,7 +839,12 @@ mod webhook {
             "admin_email": "dee@acme.test",
         })
         .to_string();
-        let sig = sign(SignatureFormat::HexSha256WithPrefix, HOOK_SECRET, body.as_bytes()).unwrap();
+        let sig = sign(
+            SignatureFormat::HexSha256WithPrefix,
+            HOOK_SECRET,
+            body.as_bytes(),
+        )
+        .unwrap();
         app.clone()
             .oneshot(
                 Request::builder()
@@ -768,8 +866,7 @@ mod webhook {
         let env = Env::new().await;
         let secret = SessionSecret::from_bytes(b"first-admin-webhook-secret-32-b!".to_vec());
         let mailer = Arc::new(InMemoryMailer::new());
-        let handover =
-            FirstAdminHandover::new(&secret).mailer(mailer.clone(), "noreply@ops.test");
+        let handover = FirstAdminHandover::new(&secret).mailer(mailer.clone(), "noreply@ops.test");
         let app = app(&env, Some(handover));
         let slug = unique("hook");
         let resp = deliver(&app, &slug).await;
@@ -788,7 +885,10 @@ mod webhook {
         let link = link_in(&sent[0].body);
         let org = env.org(&slug).await.expect("tenant");
         let id = org.id.get().copied().unwrap();
-        assert!(link.contains(&format!("scope=tenant%3A{slug}%3A{id}")), "{link}");
+        assert!(
+            link.contains(&format!("scope=tenant%3A{slug}%3A{id}")),
+            "{link}"
+        );
         assert!(env.user(&slug, "dee@acme.test").await.unwrap().is_superuser);
         assert!(!env.trail().await.contains(&signature_of(&link)));
 
@@ -807,7 +907,10 @@ mod webhook {
             let slug = unique("nomail");
             let resp = deliver(&app, &slug).await;
             assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-            assert!(store::recent_runs(&env.registry(), 10, 0).await.unwrap().is_empty());
+            assert!(store::recent_runs(&env.registry(), 10, 0)
+                .await
+                .unwrap()
+                .is_empty());
             assert!(env.org(&slug).await.is_none());
         }
     }

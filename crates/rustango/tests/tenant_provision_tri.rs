@@ -168,7 +168,9 @@ impl Env {
                 sqlite_dir: Some(dir.display().to_string()),
                 ..base
             };
-            db_server::add(&self.registry, &spec, None).await.expect("add server");
+            db_server::add(&self.registry, &spec, None)
+                .await
+                .expect("add server");
             return;
         }
         let rest = self.url.split_once("://").unwrap().1;
@@ -186,7 +188,9 @@ impl Env {
             ..base
         };
         let pw = LoginPassword::new(pw).unwrap();
-        db_server::add(&self.registry, &spec, Some(&pw)).await.expect("add server");
+        db_server::add(&self.registry, &spec, Some(&pw))
+            .await
+            .expect("add server");
     }
 
     /// An admin on the live server, or the tenants directory.
@@ -242,7 +246,10 @@ impl Env {
             .await;
         let ok = made.is_ok();
         if ok {
-            admin.drop_tenant_database(&name, &login).await.expect("drop again");
+            admin
+                .drop_tenant_database(&name, &login)
+                .await
+                .expect("drop again");
         }
         admin.close().await;
         ok
@@ -287,7 +294,10 @@ impl Env {
     async fn trail(&self) -> String {
         use rustango::tenancy::provision_store::{events_since, ProvisioningRun};
         let mut out = String::new();
-        let runs: Vec<ProvisioningRun> = ProvisioningRun::objects().fetch(&self.registry).await.unwrap();
+        let runs: Vec<ProvisioningRun> = ProvisioningRun::objects()
+            .fetch(&self.registry)
+            .await
+            .unwrap();
         for run in runs {
             out.push_str(&format!("{:?} {:?}\n", run.error, run.database_url));
             let id = run.id.get().copied().unwrap_or_default();
@@ -298,7 +308,10 @@ impl Env {
         let audit = rustango::audit::list(&self.registry, &Default::default(), 500, 0)
             .await
             .unwrap();
-        out.push_str(&format!("{:?}", audit.iter().map(|e| &e.changes).collect::<Vec<_>>()));
+        out.push_str(&format!(
+            "{:?}",
+            audit.iter().map(|e| &e.changes).collect::<Vec<_>>()
+        ));
         out
     }
 
@@ -331,10 +344,14 @@ impl Env {
                  FOR EACH ROW EXECUTE FUNCTION tp_refuse()",
             ],
             (BackendKind::Postgres, false) => &["DROP TRIGGER tp_refuse ON rustango_orgs"],
-            (BackendKind::MySql, true) => &["CREATE TRIGGER tp_refuse BEFORE INSERT ON rustango_orgs \
-                 FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'injected insert failure'"],
-            (BackendKind::Sqlite, true) => &["CREATE TRIGGER tp_refuse BEFORE INSERT ON rustango_orgs \
-                 BEGIN SELECT RAISE(ABORT, 'injected insert failure'); END"],
+            (BackendKind::MySql, true) => {
+                &["CREATE TRIGGER tp_refuse BEFORE INSERT ON rustango_orgs \
+                 FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'injected insert failure'"]
+            }
+            (BackendKind::Sqlite, true) => {
+                &["CREATE TRIGGER tp_refuse BEFORE INSERT ON rustango_orgs \
+                 BEGIN SELECT RAISE(ABORT, 'injected insert failure'); END"]
+            }
             (_, false) => &["DROP TRIGGER tp_refuse"],
         };
         for s in sql {
@@ -419,21 +436,32 @@ async fn assert_provisioned(env: &Env, slug: &str) -> String {
     let records = env.records(slug).await;
     assert_eq!(records.len(), 1, "{records:?}");
     let r = &records[0];
-    assert_eq!((r.server_name.as_str(), r.database_name.as_str()), ("main", slug));
+    assert_eq!(
+        (r.server_name.as_str(), r.database_name.as_str()),
+        ("main", slug)
+    );
     assert_eq!(r.org_id, org.id.get().copied());
     if env.server_backend() {
-        assert!(stored.starts_with("enc:v1:"), "stored in plain: {}", &stored[..10]);
+        assert!(
+            stored.starts_with("enc:v1:"),
+            "stored in plain: {}",
+            &stored[..10]
+        );
         let login = tenant_login_name(&db_name(slug));
         assert_eq!(r.login_name.as_deref(), Some(login.as_str()));
-        assert!(url.contains(&format!("://{login}:")), "connects as its own login");
+        assert!(
+            url.contains(&format!("://{login}:")),
+            "connects as its own login"
+        );
     } else {
         assert_eq!(r.login_name, None);
         assert!(stored.contains(&format!("{slug}.db")), "{stored}");
     }
     let tenant = Pool::connect(&url).await.expect("tenant connects");
-    let rows: Vec<(i64,)> = rustango::sql::raw_query_pool("SELECT COUNT(*) FROM tp_notes", vec![], &tenant)
-        .await
-        .expect("its migration ran");
+    let rows: Vec<(i64,)> =
+        rustango::sql::raw_query_pool("SELECT COUNT(*) FROM tp_notes", vec![], &tenant)
+            .await
+            .expect("its migration ran");
     assert_eq!(rows[0].0, 0);
     tenant.close().await;
     url
@@ -515,7 +543,9 @@ impl Console {
 }
 
 async fn body(resp: axum::response::Response) -> String {
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
@@ -533,17 +563,32 @@ async fn the_console_creates_a_tenant_on_a_saved_server(pool: &Pool) {
     let c = Console::boot(&env, &env.dir("good")).await;
 
     let page = c.get("/orgs/new").await;
-    assert!(page.contains("Create a new database on a saved server"), "{page}");
+    assert!(
+        page.contains("Create a new database on a saved server"),
+        "{page}"
+    );
     assert!(page.contains(r#"<option value="main""#), "{page}");
-    assert!(page.contains(r#"type="password" id="database_url""#), "{page}");
+    assert!(
+        page.contains(r#"type="password" id="database_url""#),
+        "{page}"
+    );
     // A saved server is the default; the shared-login path says so.
-    let server_radio = page.split(r#"value="server""#).nth(1).unwrap().split('>').next().unwrap();
+    let server_radio = page
+        .split(r#"value="server""#)
+        .nth(1)
+        .unwrap()
+        .split('>')
+        .next()
+        .unwrap();
     assert!(server_radio.contains("checked"), "{page}");
     assert!(page.contains("not isolated"), "{page}");
 
     let probe = body(
-        c.post("/orgs/test-connection", "storage_mode=database&database_source=server&server=main")
-            .await,
+        c.post(
+            "/orgs/test-connection",
+            "storage_mode=database&database_source=server&server=main",
+        )
+        .await,
     )
     .await;
     let json: serde_json::Value = serde_json::from_str(&probe).expect("json");
@@ -551,7 +596,11 @@ async fn the_console_creates_a_tenant_on_a_saved_server(pool: &Pool) {
     assert_eq!(json["can_create_database"], true, "{probe}");
 
     // A refused URL comes back as an error, never as a pre-filled field.
-    let foreign = if env.backend() == BackendKind::Postgres { "mysql" } else { "postgres" };
+    let foreign = if env.backend() == BackendKind::Postgres {
+        "mysql"
+    } else {
+        "postgres"
+    };
     let leak = "Leak-q7Zx-pw";
     let refused = body(
         c.post(
@@ -590,7 +639,10 @@ async fn the_console_creates_a_tenant_on_a_saved_server(pool: &Pool) {
         .await,
     )
     .await;
-    assert!(probe.contains(r#""status":"bad""#) && probe.contains("already exists"), "{probe}");
+    assert!(
+        probe.contains(r#""status":"bad""#) && probe.contains("already exists"),
+        "{probe}"
+    );
 
     let in_use = db_server::get(&env.registry, "main")
         .await
@@ -626,7 +678,17 @@ async fn the_cli_creates_tenants_on_a_saved_server(pool: &Pool) {
     let good = env.dir("good");
 
     let err = env
-        .run(&good, &["create-tenant", &a, "--server", "main", "--database-url", "x"])
+        .run(
+            &good,
+            &[
+                "create-tenant",
+                &a,
+                "--server",
+                "main",
+                "--database-url",
+                "x",
+            ],
+        )
         .await
         .expect_err("both sources");
     assert!(err.to_string().contains("not both"), "{err}");
@@ -634,9 +696,12 @@ async fn the_cli_creates_tenants_on_a_saved_server(pool: &Pool) {
     let mut out = String::new();
     for s in [&a, &b] {
         out.push_str(
-            &env.run(&good, &["create-tenant", s, "--mode", "database", "--server", "main"])
-                .await
-                .expect("create-tenant"),
+            &env.run(
+                &good,
+                &["create-tenant", s, "--mode", "database", "--server", "main"],
+            )
+            .await
+            .expect("create-tenant"),
         );
     }
     assert!(out.contains(&format!("created database `{a}`")), "{out}");
@@ -646,8 +711,15 @@ async fn the_cli_creates_tenants_on_a_saved_server(pool: &Pool) {
         assert!(!out.contains(&pw), "{out}");
         assert!(!env.trail().await.contains(&pw));
         // A's login cannot open B's database, and B's still can.
-        assert!(Pool::connect(&on_db(&url_a, &b)).await.is_err(), "a reached b");
-        Pool::connect(&url_b).await.expect("b connects").close().await;
+        assert!(
+            Pool::connect(&on_db(&url_a, &b)).await.is_err(),
+            "a reached b"
+        );
+        Pool::connect(&url_b)
+            .await
+            .expect("b connects")
+            .close()
+            .await;
     }
     env.clean(&[&a, &b]).await;
 }
@@ -666,7 +738,10 @@ async fn a_failed_migration_drops_everything_it_made(pool: &Pool) {
     let resp = c.create(&a).await;
     assert_eq!(resp.status().as_u16(), 200, "the form comes back");
     let page = body(resp).await;
-    assert!(page.contains("migrations failed") && page.contains("dropped"), "{page}");
+    assert!(
+        page.contains("migrations failed") && page.contains("dropped"),
+        "{page}"
+    );
     assert!(env.org(&a).await.is_none(), "the row survived");
     assert!(env.records(&a).await.is_empty(), "the record survived");
     assert!(!env.database_exists(&a).await, "the database survived");
@@ -690,19 +765,26 @@ async fn a_failed_first_admin_drops_everything_it_made(pool: &Pool) {
     let a = slug("adm");
     env.clean(&[&a]).await;
     env.add_server("main").await;
-    let admin = |name: &str| rustango::tenancy::FirstAdmin::new("ann@acme.test", Some(name)).unwrap();
+    let admin =
+        |name: &str| rustango::tenancy::FirstAdmin::new("ann@acme.test", Some(name)).unwrap();
 
     let req = ProvisionRequest {
         first_admin: Some(admin("taken")),
         ..ProvisionRequest::on_server(&a, "main")
     };
-    let err = env.provision(&env.dir("taken"), &req).await.expect_err("taken");
+    let err = env
+        .provision(&env.dir("taken"), &req)
+        .await
+        .expect_err("taken");
     assert!(err.to_string().contains("taken"), "{err}");
     assert!(env.org(&a).await.is_none(), "the row survived");
     assert!(env.records(&a).await.is_empty(), "the record survived");
     assert!(env.nothing_left(&a).await, "a login or database survived");
     let steps = env.steps(&a).await;
-    assert!(steps.iter().any(|s| s == "create_admin:failed"), "{steps:?}");
+    assert!(
+        steps.iter().any(|s| s == "create_admin:failed"),
+        "{steps:?}"
+    );
     assert!(steps.iter().any(|s| s == "rollback:ok"), "{steps:?}");
     assert!(!steps.iter().any(|s| s == "activate:ok"), "{steps:?}");
 
@@ -721,7 +803,10 @@ async fn a_failed_first_admin_drops_everything_it_made(pool: &Pool) {
         .await
         .unwrap();
     assert!(users.len() == 1 && users[0].is_superuser, "{users:?}");
-    assert!(users[0].password_changed_at.is_none(), "a set-password link needs it unset");
+    assert!(
+        users[0].password_changed_at.is_none(),
+        "a set-password link needs it unset"
+    );
     tenant.close().await;
     let audit = rustango::audit::list(&env.registry, &Default::default(), 500, 0)
         .await
@@ -746,7 +831,10 @@ async fn a_failed_insert_drops_what_it_made(pool: &Pool) {
     let req = ProvisionRequest::on_server(&a, "main");
 
     env.refuse_org_inserts(true).await;
-    let err = env.provision(&env.dir("good"), &req).await.expect_err("insert refused");
+    let err = env
+        .provision(&env.dir("good"), &req)
+        .await
+        .expect_err("insert refused");
     env.refuse_org_inserts(false).await;
     assert!(env.org(&a).await.is_none(), "{err}");
     assert!(env.records(&a).await.is_empty(), "the record survived");
@@ -786,7 +874,10 @@ async fn an_existing_database_is_refused_and_kept(pool: &Pool) {
         .await,
     )
     .await;
-    assert!(probe.contains("database") && probe.contains("already exists"), "{probe}");
+    assert!(
+        probe.contains("database") && probe.contains("already exists"),
+        "{probe}"
+    );
     assert!(env.org(&a).await.is_none());
     drop(c);
 
@@ -795,13 +886,25 @@ async fn an_existing_database_is_refused_and_kept(pool: &Pool) {
         .await
         .expect_err("exists");
     assert!(err.to_string().contains("already exists"), "{err}");
-    assert!(env.database_exists(&a).await, "a database it did not make was dropped");
+    assert!(
+        env.database_exists(&a).await,
+        "a database it did not make was dropped"
+    );
     assert!(env.org(&a).await.is_none() && env.records(&a).await.is_empty());
     let steps = env.steps(&a).await;
-    assert!(steps.iter().any(|s| s == "create_database:failed"), "{steps:?}");
-    assert!(!steps.iter().any(|s| s.starts_with("rollback")), "{steps:?}");
+    assert!(
+        steps.iter().any(|s| s == "create_database:failed"),
+        "{steps:?}"
+    );
+    assert!(
+        !steps.iter().any(|s| s.starts_with("rollback")),
+        "{steps:?}"
+    );
 
-    admin.drop_tenant_database(&name, &other).await.expect("cleanup");
+    admin
+        .drop_tenant_database(&name, &other)
+        .await
+        .expect("cleanup");
     admin.close().await;
 }
 
@@ -825,7 +928,11 @@ async fn a_blocked_server_is_refused_before_any_ddl(pool: &Pool) {
         }
         BackendKind::MySql => {
             exec_text(&env.registry, &format!("DROP USER IF EXISTS '{weak}'@'%'")).await;
-            exec_text(&env.registry, &format!("CREATE USER '{weak}'@'%' IDENTIFIED BY 'weakpw'")).await;
+            exec_text(
+                &env.registry,
+                &format!("CREATE USER '{weak}'@'%' IDENTIFIED BY 'weakpw'"),
+            )
+            .await;
             Some(format!("DROP USER '{weak}'@'%'"))
         }
         BackendKind::Sqlite => None,
@@ -836,11 +943,20 @@ async fn a_blocked_server_is_refused_before_any_ddl(pool: &Pool) {
         .provision(&env.dir("good"), &ProvisionRequest::on_server(&a, "main"))
         .await
         .expect_err("blocked");
-    assert!(err.to_string().contains("cannot create tenant databases"), "{err}");
+    assert!(
+        err.to_string().contains("cannot create tenant databases"),
+        "{err}"
+    );
     assert!(!env.database_exists(&a).await);
     let steps = env.steps(&a).await;
-    assert!(steps.iter().any(|s| s == "check_connection:failed"), "{steps:?}");
-    assert!(!steps.iter().any(|s| s.starts_with("create_database")), "{steps:?}");
+    assert!(
+        steps.iter().any(|s| s == "check_connection:failed"),
+        "{steps:?}"
+    );
+    assert!(
+        !steps.iter().any(|s| s.starts_with("create_database")),
+        "{steps:?}"
+    );
     if let Some(sql) = drop_weak {
         exec_text(&env.registry, &sql).await;
     }
@@ -868,7 +984,11 @@ async fn the_api_creates_on_a_saved_server(pool: &Pool) {
     let err = typed!(env.registry, p => create_tenant(&p, &env.url, &good, &a, both).await)
         .expect_err("both sources");
     assert!(err.to_string().contains("not both"), "{err}");
-    let other = if env.server_backend() { BackendKind::Sqlite } else { BackendKind::Postgres };
+    let other = if env.server_backend() {
+        BackendKind::Sqlite
+    } else {
+        BackendKind::Postgres
+    };
     let wrong = CreateTenantOpts {
         backend: Some(other),
         ..opts()
@@ -895,14 +1015,24 @@ async fn the_api_creates_on_a_saved_server(pool: &Pool) {
     };
     ghost.insert_pool(&env.registry).await.unwrap();
     // Only the record is left to say so.
-    let orgs = Org::objects().where_(Org::slug.eq(a.clone())).compile_delete().unwrap();
-    rustango::sql::delete_pool(&env.registry, &orgs).await.unwrap();
+    let orgs = Org::objects()
+        .where_(Org::slug.eq(a.clone()))
+        .compile_delete()
+        .unwrap();
+    rustango::sql::delete_pool(&env.registry, &orgs)
+        .await
+        .unwrap();
     let records = TenantDatabase::objects()
         .where_(TenantDatabase::org_slug.eq(a.clone()))
         .compile_delete()
         .unwrap();
-    rustango::sql::delete_pool(&env.registry, &records).await.unwrap();
-    let err = env.run(&good, &["remove-db-server", "main"]).await.expect_err("in use");
+    rustango::sql::delete_pool(&env.registry, &records)
+        .await
+        .unwrap();
+    let err = env
+        .run(&good, &["remove-db-server", "main"])
+        .await
+        .expect_err("in use");
     assert!(err.to_string().contains("ghost"), "{err}");
 }
 
@@ -918,9 +1048,19 @@ async fn a_login_that_cannot_sign_in_is_rolled_back(pool: &Pool) {
     env.add_server("main").await;
     let req = ProvisionRequest::on_server(&a, "main");
     if env.backend() != BackendKind::MySql {
-        env.provision(&env.dir("good"), &req).await.expect("created");
-        let want = if env.server_backend() { "check_login:ok" } else { "check_login:skipped" };
-        assert!(env.steps(&a).await.iter().any(|s| s == want), "{:?}", env.steps(&a).await);
+        env.provision(&env.dir("good"), &req)
+            .await
+            .expect("created");
+        let want = if env.server_backend() {
+            "check_login:ok"
+        } else {
+            "check_login:skipped"
+        };
+        assert!(
+            env.steps(&a).await.iter().any(|s| s == want),
+            "{:?}",
+            env.steps(&a).await
+        );
         env.clean(&[&a]).await;
         return;
     }
@@ -934,13 +1074,26 @@ async fn a_login_that_cannot_sign_in_is_rolled_back(pool: &Pool) {
     .unwrap();
     let shadow = format!("'{a}'@'{}'", rows[0].0);
     exec_text(&env.registry, &format!("DROP USER IF EXISTS {shadow}")).await;
-    exec_text(&env.registry, &format!("CREATE USER {shadow} IDENTIFIED BY 'other-pw'")).await;
+    exec_text(
+        &env.registry,
+        &format!("CREATE USER {shadow} IDENTIFIED BY 'other-pw'"),
+    )
+    .await;
 
-    let err = env.provision(&env.dir("good"), &req).await.expect_err("shadowed");
+    let err = env
+        .provision(&env.dir("good"), &req)
+        .await
+        .expect_err("shadowed");
     exec_text(&env.registry, &format!("DROP USER {shadow}")).await;
     let msg = err.to_string();
-    assert!(msg.contains("cannot sign in") && msg.contains("shadow"), "{msg}");
-    assert!(env.org(&a).await.is_none() && env.records(&a).await.is_empty(), "{msg}");
+    assert!(
+        msg.contains("cannot sign in") && msg.contains("shadow"),
+        "{msg}"
+    );
+    assert!(
+        env.org(&a).await.is_none() && env.records(&a).await.is_empty(),
+        "{msg}"
+    );
     assert!(env.nothing_left(&a).await, "the database or login survived");
     let steps = env.steps(&a).await;
     assert!(steps.iter().any(|s| s == "check_login:failed"), "{steps:?}");
@@ -998,10 +1151,19 @@ async fn late_failures_roll_back(pool: &Pool) {
         let msg = err.to_string();
         assert!(msg.contains("dropped"), "{step}: {msg}");
         assert!(env.org(&a).await.is_none(), "{step}: the row survived");
-        assert!(env.records(&a).await.is_empty(), "{step}: the record survived");
-        assert!(env.nothing_left(&a).await, "{step}: the database or login survived");
+        assert!(
+            env.records(&a).await.is_empty(),
+            "{step}: the record survived"
+        );
+        assert!(
+            env.nothing_left(&a).await,
+            "{step}: the database or login survived"
+        );
         let steps = env.steps(&a).await;
-        assert!(steps.iter().any(|s| s == "rollback:ok"), "{step}: {steps:?}");
+        assert!(
+            steps.iter().any(|s| s == "rollback:ok"),
+            "{step}: {steps:?}"
+        );
     }
 }
 
@@ -1019,7 +1181,11 @@ async fn an_interrupted_run_is_reclaimed(pool: &Pool) {
     let admin = env.admin().await;
     let name = db_name(&a);
     admin
-        .create_tenant_database(&name, &Login::new(tenant_login_name(&name)), &LoginPassword::generate())
+        .create_tenant_database(
+            &name,
+            &Login::new(tenant_login_name(&name)),
+            &LoginPassword::generate(),
+        )
         .await
         .expect("leftover");
     admin.close().await;
@@ -1036,18 +1202,29 @@ async fn an_interrupted_run_is_reclaimed(pool: &Pool) {
     record.insert_pool(&env.registry).await.unwrap();
     let req = ProvisionRequest::on_server(&a, "main");
 
-    let err = env.provision(&env.dir("good"), &req).await.expect_err("in progress");
+    let err = env
+        .provision(&env.dir("good"), &req)
+        .await
+        .expect_err("in progress");
     assert!(err.to_string().contains("another run"), "{err}");
-    assert!(env.database_exists(&a).await, "a run in progress lost its database");
+    assert!(
+        env.database_exists(&a).await,
+        "a run in progress lost its database"
+    );
 
     TenantDatabase::objects()
         .where_(TenantDatabase::org_slug.eq(a.clone()))
         .update()
-        .set("created_at", chrono::Utc::now() - chrono::Duration::hours(1))
+        .set(
+            "created_at",
+            chrono::Utc::now() - chrono::Duration::hours(1),
+        )
         .execute_pool(&env.registry)
         .await
         .unwrap();
-    env.provision(&env.dir("good"), &req).await.expect("reclaimed and created");
+    env.provision(&env.dir("good"), &req)
+        .await
+        .expect("reclaimed and created");
     assert_provisioned(&env, &a).await;
     let steps = env.steps(&a).await;
     assert!(steps.iter().any(|s| s == "rollback:ok"), "{steps:?}");

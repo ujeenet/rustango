@@ -40,7 +40,11 @@ async fn tenant_db(pool: &Pool) -> (BackendKind, String, Option<Box<dyn std::any
         #[cfg(feature = "postgres")]
         Pool::Postgres(_) => {
             let db = scratch("DATABASE_URL").await;
-            (BackendKind::Postgres, db.url().to_owned(), Some(Box::new(db)))
+            (
+                BackendKind::Postgres,
+                db.url().to_owned(),
+                Some(Box::new(db)),
+            )
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(_) => {

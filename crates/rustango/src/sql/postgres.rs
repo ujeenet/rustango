@@ -13,11 +13,11 @@ use crate::core::{
     FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
 };
 
+use super::server::{Collation, DatabaseName, Login, LoginPassword};
 use super::writers::{
     write_aggregate, write_bulk_insert, write_bulk_update_pg, write_count, write_delete,
     write_insert, write_select, write_update, Sql,
 };
-use super::server::{Collation, DatabaseName, Login, LoginPassword};
 use super::{CompiledStatement, Dialect, SqlError};
 
 /// A string literal whose meaning does not depend on
@@ -105,15 +105,23 @@ impl Dialect for Postgres {
 
     fn database_exists_sql(&self, db: &DatabaseName) -> Option<CompiledStatement> {
         Some(CompiledStatement {
-            sql: format!("SELECT count(*) FROM pg_database WHERE datname = {}", self.placeholder(1)),
+            sql: format!(
+                "SELECT count(*) FROM pg_database WHERE datname = {}",
+                self.placeholder(1)
+            ),
             params: vec![crate::core::SqlValue::String(db.as_str().to_owned())],
         })
     }
 
     fn login_exists_sql(&self, login: &Login) -> Option<CompiledStatement> {
         Some(CompiledStatement {
-            sql: format!("SELECT count(*) FROM pg_roles WHERE rolname = {}", self.placeholder(1)),
-            params: vec![crate::core::SqlValue::String(login.name().as_str().to_owned())],
+            sql: format!(
+                "SELECT count(*) FROM pg_roles WHERE rolname = {}",
+                self.placeholder(1)
+            ),
+            params: vec![crate::core::SqlValue::String(
+                login.name().as_str().to_owned(),
+            )],
         })
     }
 

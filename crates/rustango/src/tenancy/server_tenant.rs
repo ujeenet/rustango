@@ -137,8 +137,8 @@ where
 {
     let registry = pools.registry_pool();
     let org = tenant(pools, slug).await?;
-    let run = store::open_operation_run(&registry, RunKind::RotatePassword, &org, requested_by)
-        .await?;
+    let run =
+        store::open_operation_run(&registry, RunKind::RotatePassword, &org, requested_by).await?;
     let run_id = run.id.get().copied().unwrap_or_default();
     let result = rotate_in(pools, &org, observer, run_id).await;
     let run = store::run_by_id(&registry, run_id).await?.unwrap_or(run);
@@ -224,19 +224,24 @@ where
             "tenant `{slug}` is not database-mode, so it has no login of its own"
         )));
     }
-    let stored = org.database_url.clone().ok_or_else(|| {
-        TenancyError::Validation(format!("tenant `{slug}` has no database URL"))
-    })?;
+    let stored = org
+        .database_url
+        .clone()
+        .ok_or_else(|| TenancyError::Validation(format!("tenant `{slug}` has no database URL")))?;
     let url = pools.resolved_database_url(org).await?;
     let registry = pools.registry_pool();
-    let tenant = ServerTenant::of(&registry, org, &url).await?.ok_or_else(|| {
-        TenancyError::Validation(format!(
-            "tenant `{slug}`'s database was not made by rustango on a saved server, so its \
+    let tenant = ServerTenant::of(&registry, org, &url)
+        .await?
+        .ok_or_else(|| {
+            TenancyError::Validation(format!(
+                "tenant `{slug}`'s database was not made by rustango on a saved server, so its \
              login is not rustango's to change; change the password where it was made"
-        ))
-    })?;
+            ))
+        })?;
     let login = tenant.login.clone().ok_or_else(|| {
-        TenancyError::Validation(format!("tenant `{slug}` is on SQLite, which has no password"))
+        TenancyError::Validation(format!(
+            "tenant `{slug}` is on SQLite, which has no password"
+        ))
     })?;
     // Only a literal or sealed URL can be written back; a reference names
     // a secret store this registry cannot change.
@@ -319,7 +324,8 @@ where
     if let Err(e) = r.admin.alter_password(&r.login, &new, r.retain).await {
         return rep.fail(Step::AlterPassword, e.into()).await;
     }
-    rep.done(Step::AlterPassword, named("new password set")).await;
+    rep.done(Step::AlterPassword, named("new password set"))
+        .await;
 
     rep.started(Step::StorePassword).await;
     if let Err(e) = store_url(pools, org, &r.stored, &new_url).await {
@@ -399,9 +405,14 @@ where
 /// Put the old password back after a failed store, but only while the
 /// stored URL still holds it: a URL changed meanwhile is not ours to undo.
 async fn revert(registry: &crate::sql::Pool, org: &Org, r: &Rotation, rep: &OpReporter<'_>) {
-    let again = format!("run `rotate-tenant-password {}` again so they agree", org.slug);
+    let again = format!(
+        "run `rotate-tenant-password {}` again so they agree",
+        org.slug
+    );
     let failed = |why: String| async move {
-        let _ = rep.fail::<()>(Step::Revert, TenancyError::Validation(why)).await;
+        let _ = rep
+            .fail::<()>(Step::Revert, TenancyError::Validation(why))
+            .await;
     };
     rep.started(Step::Revert).await;
     let still_old = match Org::objects()
@@ -430,7 +441,11 @@ async fn revert(registry: &crate::sql::Pool, org: &Org, r: &Rotation, rep: &OpRe
         Ok(()) => {
             rep.done(
                 Step::Revert,
-                RunText::about_database("old password restored", &r.tenant.database, Some(r.login.name())),
+                RunText::about_database(
+                    "old password restored",
+                    &r.tenant.database,
+                    Some(r.login.name()),
+                ),
             )
             .await;
         }
@@ -458,7 +473,11 @@ fn with_password(url: &str, password: &LoginPassword) -> Result<String, TenancyE
     let (scheme, userinfo, rest) = crate::sql::connect_diagnosis::split_userinfo_exact(url)
         .map_err(TenancyError::Validation)?
         .ok_or_else(none)?;
-    let user = userinfo.split(':').next().filter(|u| !u.is_empty()).ok_or_else(none)?;
+    let user = userinfo
+        .split(':')
+        .next()
+        .filter(|u| !u.is_empty())
+        .ok_or_else(none)?;
     Ok(format!(
         "{scheme}://{user}:{}@{rest}",
         crate::url_codec::url_encode(password.expose())
@@ -477,7 +496,9 @@ mod tests {
             "postgres://acme:n3w%2Fp%40ss@db:5432/acme?sslmode=require"
         );
         assert_eq!(
-            old_password("mysql://acme:old%2Fpw@db/acme").unwrap().expose(),
+            old_password("mysql://acme:old%2Fpw@db/acme")
+                .unwrap()
+                .expose(),
             "old/pw"
         );
         assert!(with_password("sqlite:///srv/t/acme.db", &pw).is_err());
@@ -487,6 +508,9 @@ mod tests {
     #[test]
     fn the_admin_option_refusal_says_what_to_grant() {
         let msg = admin_option_refusal(&LoginName::new("acme").unwrap(), "main").to_string();
-        assert!(msg.contains("ADMIN OPTION") && msg.contains("GRANT \"acme\""), "{msg}");
+        assert!(
+            msg.contains("ADMIN OPTION") && msg.contains("GRANT \"acme\""),
+            "{msg}"
+        );
     }
 }

@@ -245,7 +245,10 @@ fn mysql_can_grant(rows: &[(String, String)], mariadb: bool) -> bool {
             .any(|(r, g)| r.eq_ignore_ascii_case(p) && g.eq_ignore_ascii_case("YES"))
     };
     let extra: &[&str] = if mariadb { MARIADB_DB_PRIVILEGES } else { &[] };
-    MYSQL_DB_PRIVILEGES.iter().chain(extra).all(|p| grantable(p))
+    MYSQL_DB_PRIVILEGES
+        .iter()
+        .chain(extra)
+        .all(|p| grantable(p))
 }
 
 /// `8.0.36-log` against `(8, 0, 14)`; an unreadable version is too old.
@@ -522,9 +525,9 @@ impl ServerAdmin {
         // Built first: nothing to undo when the admin URL cannot yield one.
         let tenant = tenant_url(url, login, password, name)?;
         let d = pool.dialect();
-        let sql = d
-            .create_database_sql(name, self.collation.as_ref())
-            .ok_or(TenantDbError::Unsupported("this backend has no databases to create"))?;
+        let sql = d.create_database_sql(name, self.collation.as_ref()).ok_or(
+            TenantDbError::Unsupported("this backend has no databases to create"),
+        )?;
         on_stage(CreateStage::Database).await;
         step(pool, &sql, "create a database")
             .await
@@ -760,7 +763,8 @@ impl ServerAdmin {
         let Some(stmt) = pool.dialect().database_sessions_sql(name, tag) else {
             return Ok(Sessions::default());
         };
-        let rows: Vec<(i64, i64)> = crate::sql::raw_query_pool(&stmt.sql, stmt.params, pool).await?;
+        let rows: Vec<(i64, i64)> =
+            crate::sql::raw_query_pool(&stmt.sql, stmt.params, pool).await?;
         Ok(rows
             .into_iter()
             .next()
@@ -785,7 +789,11 @@ impl ServerAdmin {
     ///
     /// # Errors
     /// [`TenantDbError::DatabaseExists`] / [`TenantDbError::LoginExists`].
-    pub async fn names_free(&self, name: &DatabaseName, login: &Login) -> Result<(), TenantDbError> {
+    pub async fn names_free(
+        &self,
+        name: &DatabaseName,
+        login: &Login,
+    ) -> Result<(), TenantDbError> {
         let pool = match &self.target {
             Target::Sqlite { dir } => {
                 return if sqlite_file(dir, name).exists() {
@@ -996,7 +1004,11 @@ fn tenant_url(
         Some((p, q)) => (p, Some(q)),
         None => (rest, None),
     };
-    let host = path.split('/').next().filter(|h| !h.is_empty()).ok_or_else(bad)?;
+    let host = path
+        .split('/')
+        .next()
+        .filter(|h| !h.is_empty())
+        .ok_or_else(bad)?;
     let enc = crate::url_codec::url_encode;
     Ok(format!(
         "{scheme}://{}:{}@{host}/{db}{}",
@@ -1012,9 +1024,9 @@ fn sqlite_file(dir: &Path, db: &DatabaseName) -> PathBuf {
 
 /// sqlx percent-decodes the path, so `%`, `?` and `#` are encoded.
 fn sqlite_url(path: &Path) -> Result<String, TenantDbError> {
-    let path = path
-        .to_str()
-        .ok_or(TenantDbError::Unsupported("the SQLite directory is not UTF-8"))?;
+    let path = path.to_str().ok_or(TenantDbError::Unsupported(
+        "the SQLite directory is not UTF-8",
+    ))?;
     let mut out = String::from("sqlite://");
     for c in path.chars() {
         match c {
@@ -1139,11 +1151,14 @@ mod tests {
         let report = |backend, v: &str| PrivilegeReport {
             backend,
             server_version: Some(v.into()),
-            ..PrivilegeReport::refused(backend, ConnectDiagnosis {
-                fault: ConnectFault::AuthFailed,
-                endpoint: String::new(),
-                detail: String::new(),
-            })
+            ..PrivilegeReport::refused(
+                backend,
+                ConnectDiagnosis {
+                    fault: ConnectFault::AuthFailed,
+                    endpoint: String::new(),
+                    detail: String::new(),
+                },
+            )
         };
         assert!(report("mysql", "8.0.14").dual_passwords());
         assert!(report("mysql", "8.4.2-log").dual_passwords());
@@ -1193,7 +1208,9 @@ mod tests {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             return;
         };
-        let admin = ServerAdmin::connect(&url, Duration::from_secs(10)).await.unwrap();
+        let admin = ServerAdmin::connect(&url, Duration::from_secs(10))
+            .await
+            .unwrap();
         let Target::Server { pool, .. } = &admin.target else {
             unreachable!()
         };
@@ -1208,7 +1225,9 @@ mod tests {
         crate::sql::raw_execute_pool(&session, "SELECT 1", Vec::new())
             .await
             .unwrap();
-        undo_create(pool, &name, Some(&login)).await.expect("rollback drop");
+        undo_create(pool, &name, Some(&login))
+            .await
+            .expect("rollback drop");
         session.close().await;
         let gone = Pool::connect_admin(&url, Some(name.as_str()), Duration::from_secs(10)).await;
         assert!(gone.is_err(), "the database survived");

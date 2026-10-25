@@ -71,9 +71,14 @@ async fn boot() -> Booted {
 
     let provisioner = Provisioner::new(pools.clone(), url.clone(), migrations.path()).erased();
     let secret = SessionSecret::from_env_or_random();
-    let app = router_with_provisioning(registry.clone(), pools.clone(), provisioner, secret.clone());
+    let app =
+        router_with_provisioning(registry.clone(), pools.clone(), provisioner, secret.clone());
     // Without a provisioner a purge runs inline and reports by redirect.
-    let direct = rustango::tenancy::operator_console::router_with_pools(registry.clone(), pools.clone(), secret);
+    let direct = rustango::tenancy::operator_console::router_with_pools(
+        registry.clone(),
+        pools.clone(),
+        secret,
+    );
 
     let login = app
         .clone()
@@ -125,7 +130,8 @@ impl Booted {
 
     /// A purge on the console without a provisioner: inline, not a run.
     async fn purge(&self, slug: &str, body: &str) -> axum::response::Response {
-        self.post_to(&self.direct, &format!("/orgs/{slug}/purge"), body).await
+        self.post_to(&self.direct, &format!("/orgs/{slug}/purge"), body)
+            .await
     }
 
     async fn post_to(&self, app: &axum::Router, uri: &str, body: &str) -> axum::response::Response {

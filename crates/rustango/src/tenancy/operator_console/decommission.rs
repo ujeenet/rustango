@@ -88,7 +88,14 @@ pub(super) async fn purge(
 
     // With a provisioner the purge is a recorded run, followed live.
     if let Some(provisioner) = state.provisioner.clone() {
-        return purge_in_run(&state, &op, provisioner, slug, form.purge_database.is_some()).await;
+        return purge_in_run(
+            &state,
+            &op,
+            provisioner,
+            slug,
+            form.purge_database.is_some(),
+        )
+        .await;
     }
     let action = Action::Purge {
         purge_database: form.purge_database.is_some(),
@@ -202,7 +209,8 @@ async fn open_run(
         Ok(None) => return Err(back_to_orgs(None, Some(&format!("no tenant `{slug}`")))),
         Err(e) => return Err(super::server_error("could not read the tenant", &e)),
     };
-    let run = match store::open_operation_run(&state.registry, kind, &org, Some(&op.username)).await {
+    let run = match store::open_operation_run(&state.registry, kind, &org, Some(&op.username)).await
+    {
         Ok(run) => run,
         // Another purge or password change is running: say so.
         Err(TenancyError::Validation(why)) => return Err(back_to_orgs(None, Some(&why))),

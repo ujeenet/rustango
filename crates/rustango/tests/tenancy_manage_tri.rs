@@ -229,7 +229,10 @@ impl Env {
         }
     }
 
-    async fn provision(&self, request: &ProvisionRequest) -> Result<ProvisionOutcome, TenancyError> {
+    async fn provision(
+        &self,
+        request: &ProvisionRequest,
+    ) -> Result<ProvisionOutcome, TenancyError> {
         let dir = self.dir("migrations");
         typed!(self.registry, p => provision_tenant(&p, &self.url, &dir, request, None).await)
     }
@@ -739,7 +742,10 @@ async fn schema_mode_data_verbs_skip_public(pool: &Pool) {
 
 /// One key for every scenario here, so parallel tests never disagree.
 fn with_secret_key() {
-    std::env::set_var("RUSTANGO_SECRET_KEY", "tenancy-manage-tri-key-0123456789abcdef");
+    std::env::set_var(
+        "RUSTANGO_SECRET_KEY",
+        "tenancy-manage-tri-key-0123456789abcdef",
+    );
 }
 
 /// The preflight probes the URL an `env://` reference names, and the row
@@ -747,7 +753,10 @@ fn with_secret_key() {
 async fn provision_resolves_an_env_reference(pool: &Pool) {
     let mut env = Env::new(pool).await;
     let url = env.tenant_db_url("envref").await;
-    let var = format!("RUSTANGO_MT_ENVREF_{}", env.backend().as_str().to_uppercase());
+    let var = format!(
+        "RUSTANGO_MT_ENVREF_{}",
+        env.backend().as_str().to_uppercase()
+    );
     std::env::set_var(&var, &url);
     let reference = format!("env://{var}");
     env.provision(&env.db_request("envref", &reference))
@@ -826,7 +835,10 @@ async fn a_password_url_is_stored_sealed(pool: &Pool) {
         // the refusal masks it.
         let with_password = format!("{url}&password=hunter2");
         let err = env
-            .run(&env.dir("migrations"), &["edit-tenant", "sealed", "--database-url", &with_password])
+            .run(
+                &env.dir("migrations"),
+                &["edit-tenant", "sealed", "--database-url", &with_password],
+            )
             .await
             .expect_err("sqlx refuses the parameter")
             .to_string();
@@ -843,8 +855,16 @@ async fn a_password_url_is_stored_sealed(pool: &Pool) {
     env.run(&dir, &["edit-tenant", "sealed", "--database-url", &url])
         .await
         .expect("edit");
-    let edited = env.org("sealed").await.expect("row").database_url.expect("url");
-    assert!(edited.starts_with("enc:v1:") && edited != stored, "{edited}");
+    let edited = env
+        .org("sealed")
+        .await
+        .expect("row")
+        .database_url
+        .expect("url");
+    assert!(
+        edited.starts_with("enc:v1:") && edited != stored,
+        "{edited}"
+    );
 }
 
 /// A reference resolving to a bare secret is never echoed: not by
@@ -881,11 +901,17 @@ async fn a_resolved_secret_is_never_echoed(pool: &Pool) {
     };
     org.save_pool(&env.registry).await.expect("insert org");
     let err = env
-        .run(&dir, &["edit-tenant", "leak-edit", "--database-url", &reference])
+        .run(
+            &dir,
+            &["edit-tenant", "leak-edit", "--database-url", &reference],
+        )
         .await
         .expect_err("not a URL")
         .to_string();
-    assert!(!err.contains("hunter2") && err.contains(&reference), "{err}");
+    assert!(
+        !err.contains("hunter2") && err.contains(&reference),
+        "{err}"
+    );
 }
 
 /// `migrate-tenant-storage --to database` checks the target like create does.
@@ -896,12 +922,22 @@ async fn migrate_storage_checks_the_target_url(pool: &Pool) {
     }
     let dir = env.dir("migrations");
     let opts = env.tenant_opts("mv").await;
-    env.create(&dir, "mt-mv", opts).await.expect("schema tenant");
+    env.create(&dir, "mt-mv", opts)
+        .await
+        .expect("schema tenant");
     let foreign = env.foreign_url();
     let err = env
         .run(
             &dir,
-            &["migrate-tenant-storage", "mt-mv", "--to", "database", "--database-url", &foreign, "--dry-run"],
+            &[
+                "migrate-tenant-storage",
+                "mt-mv",
+                "--to",
+                "database",
+                "--database-url",
+                &foreign,
+                "--dry-run",
+            ],
         )
         .await
         .expect_err("another backend's URL");
@@ -922,11 +958,23 @@ async fn reseal_seals_a_plain_password_url(pool: &Pool) {
     };
     org.save_pool(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
-    let out = env.run_out(&dir, &["reseal-tenant-secrets"]).await.expect("dry run");
-    let stored = || async { env.org("plain").await.expect("row").database_url.expect("url") };
+    let out = env
+        .run_out(&dir, &["reseal-tenant-secrets"])
+        .await
+        .expect("dry run");
+    let stored = || async {
+        env.org("plain")
+            .await
+            .expect("row")
+            .database_url
+            .expect("url")
+    };
     assert_eq!(stored().await, url, "a dry run wrote: {out}");
     if env.backend() == BackendKind::Sqlite {
-        assert!(out.contains("0 to change"), "no password, nothing to seal: {out}");
+        assert!(
+            out.contains("0 to change"),
+            "no password, nothing to seal: {out}"
+        );
         return;
     }
     assert!(out.contains("plain: would seal"), "{out}");
@@ -959,12 +1007,16 @@ async fn reseal_leaves_a_sealed_url_without_a_password(pool: &Pool) {
     };
     org.save_pool(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
-    let out = env.run_out(&dir, &["reseal-tenant-secrets", "--apply"]).await;
+    let out = env
+        .run_out(&dir, &["reseal-tenant-secrets", "--apply"])
+        .await;
     // The server arms point at no server: its SSO secrets can't be reached,
     // which counts as a failure, but the URL is still left as it is.
     match env.backend() {
         BackendKind::Sqlite => drop(out.expect("apply")),
-        _ => assert!(format!("{:?}", out.expect_err("unreachable")).contains("could not be resealed")),
+        _ => {
+            assert!(format!("{:?}", out.expect_err("unreachable")).contains("could not be resealed"))
+        }
     }
     let stored = env.org("nopw").await.expect("row").database_url;
     assert_eq!(stored.as_deref(), Some(sealed.as_str()));

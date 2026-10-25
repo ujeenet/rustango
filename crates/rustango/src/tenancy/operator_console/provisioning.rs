@@ -194,18 +194,26 @@ fn request_from_form(
                 .ok_or("Enter the existing database's URL.")?
                 .to_owned(),
         )),
-        (_, Some("registry")) => TenantStorage::Database(DatabaseSource::Url(
-            existing_database_url(&|k| if k == "database_url" { None } else { field(k) }, &slug, registry_url)?,
-        )),
+        (_, Some("registry")) => {
+            TenantStorage::Database(DatabaseSource::Url(existing_database_url(
+                &|k| if k == "database_url" { None } else { field(k) },
+                &slug,
+                registry_url,
+            )?))
+        }
         // A post from before the choice existed.
         (_, _) => TenantStorage::Database(DatabaseSource::Url(existing_database_url(
-            &field, &slug, registry_url,
+            &field,
+            &slug,
+            registry_url,
         )?)),
     };
 
     let first_admin = match (field("admin_email"), field("admin_username")) {
         (Some(email), username) => Some(FirstAdmin::new(email, username)?),
-        (None, Some(_)) => return Err("Enter the first admin's email, or clear the username.".into()),
+        (None, Some(_)) => {
+            return Err("Enter the first admin's email, or clear the username.".into())
+        }
         (None, None) => None,
     };
 
@@ -301,7 +309,9 @@ pub(super) async fn org_new_submit(
             let (Some(handover), Some(_)) = (handover, &outcome.first_admin) else {
                 return Redirect::to(&format!("provision/{run_id}")).into_response();
             };
-            let host = headers.get(axum::http::header::HOST).and_then(|v| v.to_str().ok());
+            let host = headers
+                .get(axum::http::header::HOST)
+                .and_then(|v| v.to_str().ok());
             if let Err(e) = handover
                 .hand_over_outcome(&state.registry, &mut outcome, host)
                 .await
@@ -380,16 +390,27 @@ pub(super) async fn test_connection(
                 Ok(r) => r,
                 Err(msg) => return probe_bad(&msg),
             };
-            let secrets = state.pools.as_ref().map_or_else(
-                crate::tenancy::TenantSecrets::standard,
-                |p| p.tenant_secrets(),
-            );
-            let dry =
-                provision::dry_run_on_server(&state.registry, &secrets, &p.registry_url(), &request)
-                    .await;
+            let secrets = state
+                .pools
+                .as_ref()
+                .map_or_else(crate::tenancy::TenantSecrets::standard, |p| {
+                    p.tenant_secrets()
+                });
+            let dry = provision::dry_run_on_server(
+                &state.registry,
+                &secrets,
+                &p.registry_url(),
+                &request,
+            )
+            .await;
             if let Err(e) = dry {
                 let msg = e.user_facing().unwrap_or_else(|| {
-                    withheld("operator_console::test_connection", name, "Could not check", &e)
+                    withheld(
+                        "operator_console::test_connection",
+                        name,
+                        "Could not check",
+                        &e,
+                    )
                 });
                 return probe_bad(&msg);
             }
@@ -425,10 +446,12 @@ pub(super) async fn test_connection(
     // tables in it, so the probe used to bless the one target
     // provisioning refuses outright.
     // Checks only: a probe stores nothing, so it neither seals nor warns.
-    let secrets = state.pools.as_ref().map_or_else(
-        crate::tenancy::TenantSecrets::standard,
-        |p| p.tenant_secrets(),
-    );
+    let secrets = state
+        .pools
+        .as_ref()
+        .map_or_else(crate::tenancy::TenantSecrets::standard, |p| {
+            p.tenant_secrets()
+        });
     let registry_url = state.provisioner.as_ref().map(|p| p.registry_url());
     let resolved =
         provision::check_database_url(&url, &secrets, &state.registry, registry_url.as_deref())
@@ -870,7 +893,12 @@ mod tests {
         let mut f = form(&both);
         f.insert("database_source".into(), "registry".into());
         let r = request_from_form(&f, Some(TEST_REGISTRY)).unwrap();
-        assert!(r.database_url().unwrap().ends_with("db.internal:5432/acme_db"), "{r:?}");
+        assert!(
+            r.database_url()
+                .unwrap()
+                .ends_with("db.internal:5432/acme_db"),
+            "{r:?}"
+        );
         f.insert("database_source".into(), "url".into());
         let r = request_from_form(&f, Some(TEST_REGISTRY)).unwrap();
         assert_eq!(r.database_url(), Some("postgres://u:p@elsewhere/own"));
@@ -936,9 +964,19 @@ mod tests {
         let base = [("slug", "acme"), ("database_url", "sqlite://x.db")];
         let none = request_from_form(&form(&base), None).unwrap();
         assert!(none.first_admin.is_none());
-        let with = [&base[..], &[("admin_email", " ann@acme.test "), ("admin_username", "")]].concat();
-        let admin = request_from_form(&form(&with), None).unwrap().first_admin.unwrap();
-        assert_eq!((admin.email(), admin.username()), ("ann@acme.test", "ann@acme.test"));
+        let with = [
+            &base[..],
+            &[("admin_email", " ann@acme.test "), ("admin_username", "")],
+        ]
+        .concat();
+        let admin = request_from_form(&form(&with), None)
+            .unwrap()
+            .first_admin
+            .unwrap();
+        assert_eq!(
+            (admin.email(), admin.username()),
+            ("ann@acme.test", "ann@acme.test")
+        );
         let orphan = [&base[..], &[("admin_username", "ann")]].concat();
         assert!(request_from_form(&form(&orphan), None).is_err());
         let bad = [&base[..], &[("admin_email", "nope")]].concat();

@@ -67,10 +67,7 @@ async fn database_exists(admin: &ServerAdmin, admin_url: Option<&str>, db: &Data
                 false
             }
         },
-        None => admin
-            .sqlite_path(db)
-            .expect("sqlite admin")
-            .exists(),
+        None => admin.sqlite_path(db).expect("sqlite admin").exists(),
     }
 }
 
@@ -191,7 +188,10 @@ async fn password_with_quotes_and_backslashes(admin: &ServerAdmin) {
             .create_tenant_database(&a, &login_for(&a), &LoginPassword::new(pw).unwrap())
             .await
             .expect("create with an odd password");
-        assert!(connects(ca.url()).await, "{tag}: the stored password differs");
+        assert!(
+            connects(ca.url()).await,
+            "{tag}: the stored password differs"
+        );
         assert!(!format!("{ca:?}").contains("DROP DATABASE"), "{ca:?}");
         clean(admin, &[&a]).await;
     }
@@ -208,11 +208,19 @@ async fn drop_refuses_protected_names(admin: &ServerAdmin) {
         .await
         .expect("create");
     // An admin whose URL names `reg` and logs in as `reg`.
-    let as_reg = ServerAdmin::connect(creg.url(), T).await.expect("connect as reg");
+    let as_reg = ServerAdmin::connect(creg.url(), T)
+        .await
+        .expect("connect as reg");
     let own_db = as_reg.drop_tenant_database(&reg, &login_for(&other)).await;
-    assert!(matches!(own_db, Err(TenantDbError::Protected(_))), "{own_db:?}");
+    assert!(
+        matches!(own_db, Err(TenantDbError::Protected(_))),
+        "{own_db:?}"
+    );
     let own_login = as_reg.drop_tenant_database(&other, &login_for(&reg)).await;
-    assert!(matches!(own_login, Err(TenantDbError::Protected(_))), "{own_login:?}");
+    assert!(
+        matches!(own_login, Err(TenantDbError::Protected(_))),
+        "{own_login:?}"
+    );
     as_reg.close().await;
     assert!(connects(creg.url()).await, "reg was dropped");
 
@@ -221,7 +229,10 @@ async fn drop_refuses_protected_names(admin: &ServerAdmin) {
         .unwrap()
         .with_protected([kept.as_str()]);
     let listed = guarded.drop_tenant_database(&kept, &login_for(&kept)).await;
-    assert!(matches!(listed, Err(TenantDbError::Protected(_))), "{listed:?}");
+    assert!(
+        matches!(listed, Err(TenantDbError::Protected(_))),
+        "{listed:?}"
+    );
     guarded.close().await;
     clean(admin, &[&reg]).await;
 }
@@ -239,7 +250,10 @@ async fn probe_reports_rights(admin: &ServerAdmin, admin_url: Option<&str>) {
         assert!(!report.can_create_database);
         return;
     };
-    assert!(report.server_version.as_deref().is_some_and(|v| !v.is_empty()));
+    assert!(report
+        .server_version
+        .as_deref()
+        .is_some_and(|v| !v.is_empty()));
     if report.backend == "postgres" {
         assert!(report.pg_major.is_some_and(|m| m >= 15), "{report:?}");
     } else {
@@ -253,7 +267,9 @@ async fn probe_reports_rights(admin: &ServerAdmin, admin_url: Option<&str>) {
         .create_tenant_database(&a, &login_for(&a), &LoginPassword::generate())
         .await
         .expect("create");
-    let plain = ServerAdmin::probe_url(ca.url(), T).await.expect("probe plain");
+    let plain = ServerAdmin::probe_url(ca.url(), T)
+        .await
+        .expect("probe plain");
     assert!(plain.can_login, "{plain:?}");
     assert!(!plain.can_create_database, "{plain:?}");
     assert!(!plain.can_create_user, "{plain:?}");
@@ -276,13 +292,17 @@ async fn failed_grant_rolls_back(
 ) {
     let (lim, a) = (name("rb-adm"), name("rb-t"));
     clean(admin, &[&lim, &a]).await;
-    let pool = Pool::connect_admin(admin_url, None, T).await.expect("admin pool");
+    let pool = Pool::connect_admin(admin_url, None, T)
+        .await
+        .expect("admin pool");
     let pw = LoginPassword::new("rb-pass").unwrap();
     let sql = pool
         .dialect()
         .create_login_sql(&login_for(&lim), &pw)
         .expect("server backend");
-    rustango::sql::raw_execute_pool(&pool, &sql, vec![]).await.expect("limited admin");
+    rustango::sql::raw_execute_pool(&pool, &sql, vec![])
+        .await
+        .expect("limited admin");
     for stmt in limit {
         let stmt = stmt.replace("{u}", lim.as_str());
         rustango::sql::raw_execute_pool(&pool, &stmt, vec![])
@@ -303,7 +323,10 @@ async fn failed_grant_rolls_back(
     assert!(at_grant(&err), "failed elsewhere: {err:?}");
     limited.close().await;
 
-    assert!(!database_exists(admin, Some(admin_url), &a).await, "database survived");
+    assert!(
+        !database_exists(admin, Some(admin_url), &a).await,
+        "database survived"
+    );
     // The login is gone too: creating it again succeeds.
     admin
         .create_tenant_database(&a, &login_for(&a), &LoginPassword::generate())
@@ -324,20 +347,26 @@ mod postgres {
 
     #[tokio::test]
     async fn lifecycle() {
-        let Some((a, url)) = admin().await else { return };
+        let Some((a, url)) = admin().await else {
+            return;
+        };
         super::lifecycle(&a, Some(&url)).await;
     }
 
     #[tokio::test]
     async fn existing_database_or_login_is_refused() {
-        let Some((a, url)) = admin().await else { return };
+        let Some((a, url)) = admin().await else {
+            return;
+        };
         super::existing_database_or_login_is_refused(&a, Some(&url)).await;
     }
 
     /// `standard_conforming_strings = off` makes `\` an escape in `'…'`.
     #[tokio::test]
     async fn password_with_quotes_and_backslashes() {
-        let Ok(url) = std::env::var("DATABASE_URL") else { return };
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
         let url = with_query(&url, "options=-c%20standard_conforming_strings%3Doff");
         let a = ServerAdmin::connect(&url, T).await.expect("admin connects");
         super::password_with_quotes_and_backslashes(&a).await;
@@ -351,14 +380,18 @@ mod postgres {
 
     #[tokio::test]
     async fn probe_reports_rights() {
-        let Some((a, url)) = admin().await else { return };
+        let Some((a, url)) = admin().await else {
+            return;
+        };
         super::probe_reports_rights(&a, Some(&url)).await;
     }
 
     /// One connection allowed: the in-database grant cannot open its own.
     #[tokio::test]
     async fn failed_grant_rolls_back() {
-        let Some((a, url)) = admin().await else { return };
+        let Some((a, url)) = admin().await else {
+            return;
+        };
         super::failed_grant_rolls_back(
             &a,
             &url,
@@ -381,13 +414,17 @@ mod mysql {
 
     #[tokio::test]
     async fn lifecycle() {
-        let Some((a, url)) = admin().await else { return };
+        let Some((a, url)) = admin().await else {
+            return;
+        };
         super::lifecycle(&a, Some(&url)).await;
     }
 
     #[tokio::test]
     async fn existing_database_or_login_is_refused() {
-        let Some((a, url)) = admin().await else { return };
+        let Some((a, url)) = admin().await else {
+            return;
+        };
         super::existing_database_or_login_is_refused(&a, Some(&url)).await;
     }
 
@@ -450,7 +487,9 @@ mod mysql {
 
     #[tokio::test]
     async fn password_with_quotes_and_backslashes() {
-        let Ok(url) = std::env::var("MYSQL_TEST_URL") else { return };
+        let Ok(url) = std::env::var("MYSQL_TEST_URL") else {
+            return;
+        };
         let _mode = NoBackslashEscapes::set(&url).await;
         let a = ServerAdmin::connect(&url, T).await.expect("admin connects");
         super::password_with_quotes_and_backslashes(&a).await;
@@ -464,19 +503,31 @@ mod mysql {
 
     #[tokio::test]
     async fn probe_reports_rights() {
-        let Some((a, url)) = admin().await else { return };
+        let Some((a, url)) = admin().await else {
+            return;
+        };
         super::probe_reports_rights(&a, Some(&url)).await;
     }
 
     /// No GRANT OPTION: the database and login are made, the grant is denied.
     #[tokio::test]
     async fn failed_grant_rolls_back() {
-        let Some((a, url)) = admin().await else { return };
+        let Some((a, url)) = admin().await else {
+            return;
+        };
         super::failed_grant_rolls_back(
             &a,
             &url,
             &["GRANT CREATE, DROP, CREATE USER ON *.* TO `{u}`@`%`"],
-            |e| matches!(e, TenantDbError::Denied { step: "grant a login its database", .. }),
+            |e| {
+                matches!(
+                    e,
+                    TenantDbError::Denied {
+                        step: "grant a login its database",
+                        ..
+                    }
+                )
+            },
         )
         .await;
     }
@@ -535,10 +586,22 @@ mod sqlite {
             .await
             .unwrap();
         pool.close().await;
-        let files: Vec<_> = std::fs::read_dir(&odd).unwrap().flatten().map(|e| e.file_name()).collect();
-        assert!(files.iter().any(|f| f == format!("{db}.db").as_str()), "{files:?}");
-        a.drop_tenant_database(&db, &login_for(&db)).await.expect("drop");
-        assert!(std::fs::read_dir(dir.path()).unwrap().count() == 1, "stray file next to the dir");
+        let files: Vec<_> = std::fs::read_dir(&odd)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert!(
+            files.iter().any(|f| f == format!("{db}.db").as_str()),
+            "{files:?}"
+        );
+        a.drop_tenant_database(&db, &login_for(&db))
+            .await
+            .expect("drop");
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().count() == 1,
+            "stray file next to the dir"
+        );
     }
 
     /// Drop removes the WAL side files too.
@@ -555,7 +618,9 @@ mod sqlite {
         rustango::sql::raw_execute_pool(&pool, "CREATE TABLE t (id INTEGER)", vec![])
             .await
             .unwrap();
-        a.drop_tenant_database(&db, &login_for(&db)).await.expect("drop");
+        a.drop_tenant_database(&db, &login_for(&db))
+            .await
+            .expect("drop");
         let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().collect();
         pool.close().await;
         assert!(left.is_empty(), "{left:?}");

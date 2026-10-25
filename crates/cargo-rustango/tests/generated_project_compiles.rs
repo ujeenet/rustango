@@ -349,6 +349,9 @@ fn tenant_project_mounts_the_provisioning_pages() {
             status.contains(" 302 ") || status.contains(" 303 "),
             "{path} is not mounted: {head}\n{logs}"
         );
-        assert!(head.to_ascii_lowercase().contains("login"), "{path}: {head}");
+        assert!(
+            head.to_ascii_lowercase().contains("login"),
+            "{path}: {head}"
+        );
     }
 }

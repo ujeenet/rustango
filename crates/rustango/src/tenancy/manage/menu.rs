@@ -558,7 +558,13 @@ mod tests {
     #[test]
     fn the_db_server_verbs_are_offered() {
         let verbs: Vec<&str> = flatten().iter().map(|a| a.verb).collect();
-        for v in ["add-db-server", "list-db-servers", "test-db-server", "edit-db-server", "remove-db-server"] {
+        for v in [
+            "add-db-server",
+            "list-db-servers",
+            "test-db-server",
+            "edit-db-server",
+            "remove-db-server",
+        ] {
             assert!(verbs.contains(&v), "{v}");
         }
     }

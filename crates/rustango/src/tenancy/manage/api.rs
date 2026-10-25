@@ -80,9 +80,9 @@ impl CreateTenantOpts {
             (StorageMode::Database, Some(url), None) => {
                 Ok(TenantStorage::Database(DatabaseSource::Url(url.clone())))
             }
-            (StorageMode::Database, None, Some(server)) => {
-                Ok(TenantStorage::Database(DatabaseSource::Server(server.clone())))
-            }
+            (StorageMode::Database, None, Some(server)) => Ok(TenantStorage::Database(
+                DatabaseSource::Server(server.clone()),
+            )),
             (StorageMode::Database, Some(_), Some(_)) => {
                 bad("give database_url or database_server, not both")
             }
@@ -201,7 +201,10 @@ where
         }
     };
     let database_url = match created.take() {
-        Some(db) => match db.stored_url(&registry, pools.secrets(), registry_url).await {
+        Some(db) => match db
+            .stored_url(&registry, pools.secrets(), registry_url)
+            .await
+        {
             Ok(stored) => {
                 created = Some(db);
                 Some(stored)

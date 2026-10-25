@@ -1047,8 +1047,7 @@ fn secret_key_audit(
                 .into(),
         ),
         KeyStatus::Short => out.warnings.push(
-            "RUSTANGO_SECRET_KEY is shorter than 32 bytes — sealed secrets use a weak key"
-                .into(),
+            "RUSTANGO_SECRET_KEY is shorter than 32 bytes — sealed secrets use a weak key".into(),
         ),
         KeyStatus::Ok => out
             .info
@@ -1091,7 +1090,9 @@ mod deploy_tests {
             let mut out = rustango::migrate::manage::DeployAuditFindings::default();
             secret_key_audit(status, &mut out);
             assert_eq!(
-                out.warnings.iter().any(|w| w.contains("RUSTANGO_SECRET_KEY")),
+                out.warnings
+                    .iter()
+                    .any(|w| w.contains("RUSTANGO_SECRET_KEY")),
                 flagged,
                 "{status:?}"
             );

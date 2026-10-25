@@ -90,7 +90,10 @@ mod tests {
     fn the_previous_key_opens_old_values() {
         let old = crate::aead::encrypt_with(Some("old-key"), b"client-secret", b"").unwrap();
         let open = |cur, prev| crate::aead::decrypt_either(cur, prev, &old, b"");
-        assert_eq!(open(Some("new-key"), Some("old-key")).unwrap(), b"client-secret");
+        assert_eq!(
+            open(Some("new-key"), Some("old-key")).unwrap(),
+            b"client-secret"
+        );
         assert!(open(Some("new-key"), None).is_err());
         assert!(open(Some("new-key"), Some("wrong")).is_err());
     }

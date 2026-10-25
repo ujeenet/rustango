@@ -209,8 +209,8 @@ pub(crate) fn open_sealed(
     let b64 = reference.strip_prefix(SEALED_V1).ok_or_else(|| {
         SecretsError::Invalid("unsupported sealed secret; expected `enc:v1:`".into())
     })?;
-    let plain = crate::aead::decrypt_either(current, previous, b64, SEALED_AAD)
-        .map_err(sealed_error)?;
+    let plain =
+        crate::aead::decrypt_either(current, previous, b64, SEALED_AAD).map_err(sealed_error)?;
     String::from_utf8(plain).map_err(|_| SecretsError::Invalid("sealed secret is not UTF-8".into()))
 }
 
@@ -430,7 +430,10 @@ mod tests {
             ("sqlite:///tmp/t.db?mode=rwc", "sqlite:///tmp/t.db?mode=rwc"),
             ("postgres://u@h/db", "postgres://u@h/db"),
         ] {
-            assert_eq!(stored_form(reference, resolved, &chain).await.unwrap(), reference);
+            assert_eq!(
+                stored_form(reference, resolved, &chain).await.unwrap(),
+                reference
+            );
         }
     }
 
@@ -453,21 +456,27 @@ mod tests {
         assert!(err.contains("sealed storage is required"), "{err}");
         assert!(!err.contains("hunter2"), "{err}");
         let ok = TenantSecrets::standard().require_sealed();
-        assert!(stored_form(url, url, &ok).await.unwrap().starts_with("enc:v1:"));
+        assert!(stored_form(url, url, &ok)
+            .await
+            .unwrap()
+            .starts_with("enc:v1:"));
     }
 
     /// A value sealed under the previous key still opens after a rotation.
     #[test]
     fn the_previous_key_opens_what_the_old_key_sealed() {
-        let b64 = crate::aead::encrypt_with(Some("old-key"), b"postgres://u:p@h/db", SEALED_AAD)
-            .unwrap();
+        let b64 =
+            crate::aead::encrypt_with(Some("old-key"), b"postgres://u:p@h/db", SEALED_AAD).unwrap();
         let sealed = format!("{SEALED_V1}{b64}");
         assert!(open_sealed(&sealed, Some("new-key"), None).is_err());
         assert_eq!(
             open_sealed(&sealed, Some("new-key"), Some("old-key")).unwrap(),
             "postgres://u:p@h/db"
         );
-        assert_eq!(open_sealed(&sealed, None, Some("old-key")).unwrap(), "postgres://u:p@h/db");
+        assert_eq!(
+            open_sealed(&sealed, None, Some("old-key")).unwrap(),
+            "postgres://u:p@h/db"
+        );
     }
 
     #[test]

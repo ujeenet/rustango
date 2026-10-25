@@ -207,7 +207,8 @@ impl ProvisionRequest {
     /// [`Self::backend`], or `registry`'s when unset.
     #[must_use]
     pub fn backend_on(&self, registry: &crate::sql::Pool) -> BackendKind {
-        self.backend.unwrap_or_else(|| BackendKind::of_pool(registry))
+        self.backend
+            .unwrap_or_else(|| BackendKind::of_pool(registry))
     }
 }
 
@@ -802,11 +803,10 @@ where
         return migrate_and_activate(pools, registry_url, dir, request, &org, rep).await;
     }
 
-    let checked =
-        match checked_request(&registry, pools.secrets(), registry_url, request).await {
-            Ok(r) => r,
-            Err(e) => return rep.fail(ProvisionStep::Validate, e).await,
-        };
+    let checked = match checked_request(&registry, pools.secrets(), registry_url, request).await {
+        Ok(r) => r,
+        Err(e) => return rep.fail(ProvisionStep::Validate, e).await,
+    };
     let request = &checked.request;
 
     rep.step(ProvisionStep::Validate, Progress::Ok).await;
@@ -892,7 +892,10 @@ where
 
     rep.step(ProvisionStep::RegisterOrg, Progress::Started)
         .await;
-    let stored = match db.stored_url(&registry, pools.secrets(), registry_url).await {
+    let stored = match db
+        .stored_url(&registry, pools.secrets(), registry_url)
+        .await
+    {
         Ok(s) => s,
         Err(e) => {
             let failed: Result<ProvisionOutcome, _> = rep.fail(ProvisionStep::RegisterOrg, e).await;
@@ -983,7 +986,8 @@ where
             None
         }
         Some(admin) => {
-            rep.step(ProvisionStep::CreateAdmin, Progress::Started).await;
+            rep.step(ProvisionStep::CreateAdmin, Progress::Started)
+                .await;
             match super::first_admin::create(pools, org, admin).await {
                 Ok(created) => {
                     rep.step(ProvisionStep::CreateAdmin, Progress::Ok).await;
@@ -1032,7 +1036,10 @@ where
 ///
 /// Only database-mode has a separate database to reach; a schema-mode
 /// tenant lives in the registry's, which is already connected.
-async fn check_connection(checked: &CheckedRequest, rep: &Reporter<'_>) -> Result<(), TenancyError> {
+async fn check_connection(
+    checked: &CheckedRequest,
+    rep: &Reporter<'_>,
+) -> Result<(), TenancyError> {
     if checked.probe_target().is_none() {
         rep.step(
             ProvisionStep::CheckConnection,
@@ -1497,9 +1504,10 @@ pub(crate) async fn check_database_url(
     registry: &crate::sql::Pool,
     registry_url: Option<&str>,
 ) -> Result<String, TenancyError> {
-    let resolved = secrets.resolve(reference).await.map_err(|e| {
-        TenancyError::Validation(format!("cannot resolve the database URL: {e}"))
-    })?;
+    let resolved = secrets
+        .resolve(reference)
+        .await
+        .map_err(|e| TenancyError::Validation(format!("cannot resolve the database URL: {e}")))?;
     refuse_other_backend(&resolved, reference, registry).map_err(TenancyError::Validation)?;
     refuse_registry_pool_as(&resolved, reference, registry).map_err(TenancyError::Validation)?;
     if let Some(url) = registry_url {
@@ -1592,10 +1600,7 @@ fn refuse_registry_url_as(
 /// [`refuse_registry_url`] against the database the registry pool is
 /// connected to (#2320).
 #[cfg(test)]
-fn refuse_registry_pool(
-    tenant_url: &str,
-    registry: &crate::sql::Pool,
-) -> Result<(), String> {
+fn refuse_registry_pool(tenant_url: &str, registry: &crate::sql::Pool) -> Result<(), String> {
     refuse_registry_pool_as(tenant_url, tenant_url, registry)
 }
 
@@ -2138,7 +2143,10 @@ async fn collation_for(
     match registry_collation(registry).await {
         Ok(Some(c)) if admin.supports_collation(&c).await == Some(false) => {
             tracing::warn!(target: "rustango::tenancy::provision", server, collation = c.as_str(), "the server lacks the registry's collation; using its utf8mb4 default");
-            (None, Some("the server lacks the registry's collation, so its utf8mb4 default is used"))
+            (
+                None,
+                Some("the server lacks the registry's collation, so its utf8mb4 default is used"),
+            )
         }
         Ok(c) => (c, None),
         Err(e) => {
@@ -2218,7 +2226,12 @@ async fn reclaim(
         return Ok(());
     };
     let tenant = match record.org_id {
-        Some(id) => Org::objects().where_(Org::id.eq(id)).first(registry).await?,
+        Some(id) => {
+            Org::objects()
+                .where_(Org::id.eq(id))
+                .first(registry)
+                .await?
+        }
         None => None,
     };
     if let Some(org) = tenant {
@@ -2227,8 +2240,8 @@ async fn reclaim(
             server.name, org.slug
         )));
     }
-    let cutoff = chrono::Utc::now()
-        - chrono::Duration::from_std(RECORD_IN_PROGRESS).unwrap_or_default();
+    let cutoff =
+        chrono::Utc::now() - chrono::Duration::from_std(RECORD_IN_PROGRESS).unwrap_or_default();
     if record.org_id.is_none() && record.created_at.get().is_some_and(|t| *t > cutoff) {
         return Err(TenancyError::Validation(format!(
             "another run is creating database `{name}` on server `{}`; try again in a few minutes",
@@ -2252,7 +2265,8 @@ async fn reclaim(
             name,
             Some(login.name()),
         );
-        rep.step(ProvisionStep::Rollback, Progress::Done(text)).await;
+        rep.step(ProvisionStep::Rollback, Progress::Done(text))
+            .await;
         return Ok(());
     }
     // The run stopped around its `CREATE`: the database may be someone else's.
@@ -2576,7 +2590,8 @@ impl ServerDatabase {
                     &undone.database,
                     undone.login.as_ref(),
                 );
-                rep.step(ProvisionStep::Rollback, Progress::Done(text)).await;
+                rep.step(ProvisionStep::Rollback, Progress::Done(text))
+                    .await;
             }
             Err(e) => {
                 tracing::error!(target: "rustango::tenancy::provision", error = %e, "could not remove the rows of a rolled-back tenant");
@@ -2711,7 +2726,9 @@ async fn unsupported_run(registry: &crate::sql::Pool, run_id: i64) -> TenancyErr
     const WHY: &str = "this provisioner cannot run that operation";
     let text = RunText::fixed(WHY);
     let state = super::provision_store::RunState::Failed;
-    if let Err(e) = super::provision_store::finish_run_text(registry, run_id, state, Some(&text)).await {
+    if let Err(e) =
+        super::provision_store::finish_run_text(registry, run_id, state, Some(&text)).await
+    {
         tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not close provisioning run");
     }
     TenancyError::Validation(WHY.to_owned())
@@ -2840,8 +2857,14 @@ where
         purge_database: bool,
     ) -> BoxFuture<'a, super::decommission::Report> {
         Box::pin(async move {
-            super::decommission::purge_in_run(self.pools.as_ref(), slug, purge_database, None, run_id)
-                .await
+            super::decommission::purge_in_run(
+                self.pools.as_ref(),
+                slug,
+                purge_database,
+                None,
+                run_id,
+            )
+            .await
         })
     }
 
@@ -3064,7 +3087,10 @@ mod validation_tests {
             Endpoint::scheme_kind("PostgreSQL://u@h/db"),
             Some(BackendKind::Postgres)
         );
-        assert_eq!(Endpoint::scheme_kind("sqlite::memory:"), Some(BackendKind::Sqlite));
+        assert_eq!(
+            Endpoint::scheme_kind("sqlite::memory:"),
+            Some(BackendKind::Sqlite)
+        );
     }
 
     #[test]
@@ -3342,7 +3368,11 @@ mod registry_endpoint_tests {
             assert!(err.contains("sqlite"), "{err}");
             assert!(!err.contains(":pw@"), "{err}");
         }
-        for same in ["sqlite:///tmp/t.db?mode=rwc", "sqlite::memory:", "SQLite:t.db"] {
+        for same in [
+            "sqlite:///tmp/t.db?mode=rwc",
+            "sqlite::memory:",
+            "SQLite:t.db",
+        ] {
             assert!(refuse_other_backend(same, same, &pool).is_ok(), "{same}");
         }
     }

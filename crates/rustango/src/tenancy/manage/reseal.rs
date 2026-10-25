@@ -7,11 +7,11 @@ use std::io::Write;
 
 use sqlx::Database;
 
+use crate::core::SqlValue;
 use crate::sql::connect_diagnosis::{redact, SEALED_SCHEME};
 use crate::sql::FetcherPool as _;
-use crate::tenancy::error::TenancyError;
-use crate::core::SqlValue;
 use crate::tenancy::db_server::{self, Resealed};
+use crate::tenancy::error::TenancyError;
 use crate::tenancy::org_edit::apply_values_if;
 use crate::tenancy::pools::TenantPools;
 use crate::tenancy::{Org, SecretsResolver as _};
@@ -116,11 +116,17 @@ where
     // SSO client secrets: the shared set, then each tenant's own.
     #[cfg(feature = "sso")]
     {
-        let mut tables: Vec<(String, Result<Vec<SsoSecret>, String>, crate::sql::Pool)> = Vec::new();
+        let mut tables: Vec<(String, Result<Vec<SsoSecret>, String>, crate::sql::Pool)> =
+            Vec::new();
         #[cfg(feature = "admin-sso")]
         {
             use crate::tenancy::sso::SharedSsoProvider as P;
-            let rows = SsoSecret::list(P::objects().values_list(SsoSecret::COLUMNS), <P as crate::core::Model>::SCHEMA, &registry).await;
+            let rows = SsoSecret::list(
+                P::objects().values_list(SsoSecret::COLUMNS),
+                <P as crate::core::Model>::SCHEMA,
+                &registry,
+            )
+            .await;
             tables.push(("shared".into(), rows, registry.clone()));
         }
         let mut orgs: Vec<Org> = Org::objects().fetch(&registry).await?;
@@ -132,14 +138,25 @@ where
                 writeln!(w, "  sso {}: cannot reach the tenant", org.slug)?;
                 continue;
             };
-            let rows = SsoSecret::list(P::objects().values_list(SsoSecret::COLUMNS), <P as crate::core::Model>::SCHEMA, &pool).await;
+            let rows = SsoSecret::list(
+                P::objects().values_list(SsoSecret::COLUMNS),
+                <P as crate::core::Model>::SCHEMA,
+                &pool,
+            )
+            .await;
             tables.push((org.slug, rows, pool));
         }
         for (owner, rows, pool) in tables {
             let rows = match rows {
                 Ok(r) => r,
                 // A tenant made before the table existed has nothing to reseal.
-                Err(e) if e.contains("does not exist") || e.contains("no such table") || e.contains("doesn't exist") => continue,
+                Err(e)
+                    if e.contains("does not exist")
+                        || e.contains("no such table")
+                        || e.contains("doesn't exist") =>
+                {
+                    continue
+                }
                 Err(e) => {
                     failed += 1;
                     writeln!(w, "  sso {owner}: cannot open: {e}")?;
@@ -176,7 +193,10 @@ where
             "reseal-tenant-secrets: {done} done, {skipped} skipped, {failed} failed"
         )?;
     } else {
-        writeln!(w, "reseal-tenant-secrets: {todo} to change (dry run; pass --apply)")?;
+        writeln!(
+            w,
+            "reseal-tenant-secrets: {todo} to change (dry run; pass --apply)"
+        )?;
     }
     if failed > 0 {
         return Err(TenancyError::Validation(format!(
@@ -209,12 +229,14 @@ impl SsoSecret {
         Ok(rows
             .into_iter()
             .filter_map(|r| match r.as_slice() {
-                [SqlValue::I64(id), SqlValue::String(slug), SqlValue::String(stored)] => Some(Self {
-                    id: *id,
-                    slug: slug.clone(),
-                    stored: stored.clone(),
-                    model,
-                }),
+                [SqlValue::I64(id), SqlValue::String(slug), SqlValue::String(stored)] => {
+                    Some(Self {
+                        id: *id,
+                        slug: slug.clone(),
+                        stored: stored.clone(),
+                        model,
+                    })
+                }
                 _ => None,
             })
             .collect())
@@ -224,8 +246,10 @@ impl SsoSecret {
     /// is the one read. `Ok(false)`: it changed meanwhile.
     async fn reseal(&self, pool: &crate::sql::Pool) -> Result<bool, String> {
         use crate::core::{Assignment, Filter, Op, UpdateQuery, WhereExpr};
-        let plain = crate::aead::decrypt(&self.stored, b"").map_err(|e| format!("cannot open: {e:?}"))?;
-        let sealed = crate::aead::encrypt(&plain, b"").map_err(|e| format!("cannot seal: {e:?}"))?;
+        let plain =
+            crate::aead::decrypt(&self.stored, b"").map_err(|e| format!("cannot open: {e:?}"))?;
+        let sealed =
+            crate::aead::encrypt(&plain, b"").map_err(|e| format!("cannot seal: {e:?}"))?;
         let seen = Filter {
             column: "client_secret",
             op: Op::Eq,

@@ -54,7 +54,8 @@ const RENEW_AFTER_SECS: i64 = 60;
 pub(crate) fn tenant_secret_from_env() -> Result<SessionSecret, super::TenancyError> {
     use crate::session::{is_prod_tier, tier_from_env};
     if is_prod_tier(&tier_from_env()) {
-        SessionSecret::require_from_env().map_err(|e| super::TenancyError::Validation(e.to_string()))
+        SessionSecret::require_from_env()
+            .map_err(|e| super::TenancyError::Validation(e.to_string()))
     } else {
         Ok(SessionSecret::from_env_or_disk(std::path::Path::new(
             crate::session::TENANT_SESSION_KEY_PATH,
@@ -73,14 +74,17 @@ pub(crate) enum KeySource {
 /// The tenant session key, only if one exists: never generated or written,
 /// so a CLI cannot sign with a key no server holds.
 pub(crate) fn existing_tenant_secret() -> Result<(SessionSecret, KeySource), super::TenancyError> {
-    existing_tenant_secret_at(std::path::Path::new(crate::session::TENANT_SESSION_KEY_PATH))
+    existing_tenant_secret_at(std::path::Path::new(
+        crate::session::TENANT_SESSION_KEY_PATH,
+    ))
 }
 
 fn existing_tenant_secret_at(
     dev_file: &std::path::Path,
 ) -> Result<(SessionSecret, KeySource), super::TenancyError> {
     use crate::session::{is_prod_tier, tier_from_env};
-    let invalid = |e: crate::session::SessionSecretError| super::TenancyError::Validation(e.to_string());
+    let invalid =
+        |e: crate::session::SessionSecretError| super::TenancyError::Validation(e.to_string());
     if std::env::var_os("RUSTANGO_SESSION_SECRET").is_some() || is_prod_tier(&tier_from_env()) {
         return SessionSecret::require_from_env()
             .map(|s| (s, KeySource::Env))

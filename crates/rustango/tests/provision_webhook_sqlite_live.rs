@@ -155,7 +155,12 @@ async fn the_server_policy_creates_the_database() {
         .expect("save the server");
     let slug = unique("signup");
     let body = body_for(&slug, "evt-server", chrono::Utc::now().timestamp());
-    let resp = b.app.clone().oneshot(post(body.clone(), Some(&signed(&body)))).await.unwrap();
+    let resp = b
+        .app
+        .clone()
+        .oneshot(post(body.clone(), Some(&signed(&body))))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     let run_id = json_of(resp).await["run_id"].as_i64().expect("a run id");
     let run = await_run(&b, run_id).await;
@@ -165,14 +170,20 @@ async fn the_server_policy_creates_the_database() {
         "run failed: {:?}",
         run.error
     );
-    assert!(dir.join(format!("{slug}.db")).exists(), "the database file was not made");
+    assert!(
+        dir.join(format!("{slug}.db")).exists(),
+        "the database file was not made"
+    );
     let records: Vec<rustango::tenancy::TenantDatabase> =
         rustango::tenancy::TenantDatabase::objects()
             .fetch(&b.pools.registry_pool())
             .await
             .unwrap();
     assert_eq!(records.len(), 1);
-    assert!(records[0].created && records[0].org_id.is_some(), "{records:?}");
+    assert!(
+        records[0].created && records[0].org_id.is_some(),
+        "{records:?}"
+    );
 }
 
 #[tokio::test]

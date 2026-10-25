@@ -656,14 +656,22 @@ where
         }
         // An alias, a twin or the registry: names alone can't tell on these backends.
         if backend != super::org::BackendKind::Postgres {
-            let me = server_identity(&admin, &tenant).await.map_err(TenancyError::Validation)?;
+            let me = server_identity(&admin, &tenant)
+                .await
+                .map_err(TenancyError::Validation)?;
             if let Some(me) = me {
                 refuse_twins(pools, registry, org, &me)
                     .await
-                    .map_err(|why| TenancyError::Validation(format!("refusing to drop this tenant's database — {why}")))?;
+                    .map_err(|why| {
+                        TenancyError::Validation(format!(
+                            "refusing to drop this tenant's database — {why}"
+                        ))
+                    })?;
             }
         }
-        let rights = admin.tenant_rights(&tenant.database, tenant.login.as_ref()).await?;
+        let rights = admin
+            .tenant_rights(&tenant.database, tenant.login.as_ref())
+            .await?;
         if !rights.drop_database {
             return Err(TenancyError::Validation(format!(
                 "the admin login of server `{}` does not own database `{}` and is not a \
@@ -706,7 +714,10 @@ where
 
 /// The identity of a recorded database, read through its server's admin:
 /// `None` once a SQLite file is gone, or on Postgres.
-async fn server_identity(admin: &ServerAdmin, tenant: &ServerTenant) -> Result<Option<DbIdentity>, String> {
+async fn server_identity(
+    admin: &ServerAdmin,
+    tenant: &ServerTenant,
+) -> Result<Option<DbIdentity>, String> {
     #[cfg(feature = "sqlite")]
     if let Some(path) = admin.sqlite_path(&tenant.database) {
         return Ok(DbIdentity::file(&path));
@@ -830,8 +841,11 @@ where
 }
 
 async fn leave_login_and_record(rep: &OpReporter<'_>) {
-    rep.skipped(Step::DropLogin, "rustango did not create the login; it is left alone")
-        .await;
+    rep.skipped(
+        Step::DropLogin,
+        "rustango did not create the login; it is left alone",
+    )
+    .await;
     rep.skipped(Step::DeleteRecord, "rustango did not create this database")
         .await;
 }
@@ -849,7 +863,10 @@ async fn drop_server_database(
     if let Err(e) = s.admin.drop_database(&t.database, Some(&s.tag)).await {
         return rep.fail(Step::DropDatabase, e.into()).await;
     }
-    report.database_dropped = Some(format!("database `{}` on server `{}`", t.database, t.server.name));
+    report.database_dropped = Some(format!(
+        "database `{}` on server `{}`",
+        t.database, t.server.name
+    ));
     rep.done(
         Step::DropDatabase,
         RunText::about_database("dropped", &t.database, None),
@@ -862,10 +879,16 @@ async fn drop_server_database(
             if let Err(e) = s.admin.drop_login(l).await {
                 return rep.fail(Step::DropLogin, e.into()).await;
             }
-            rep.done(Step::DropLogin, RunText::about_database("dropped", &t.database, login))
-                .await;
+            rep.done(
+                Step::DropLogin,
+                RunText::about_database("dropped", &t.database, login),
+            )
+            .await;
         }
-        None => rep.skipped(Step::DropLogin, "a SQLite tenant has no login").await,
+        None => {
+            rep.skipped(Step::DropLogin, "a SQLite tenant has no login")
+                .await
+        }
     }
     Ok(())
 }
@@ -1196,7 +1219,9 @@ mod tests {
         };
         let err = parse_pg_url(&org, "hunter2-leak").unwrap_err().to_string();
         assert!(!err.contains("hunter2"), "{err}");
-        assert!(err.contains("env://ACME_DB") && err.contains("acme"), "{err}");
+        assert!(
+            err.contains("env://ACME_DB") && err.contains("acme"),
+            "{err}"
+        );
     }
-
 }

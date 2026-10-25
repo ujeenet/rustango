@@ -68,9 +68,9 @@ fn name_spec(verb: &'static str) -> Spec<'static> {
 }
 
 fn port(raw: &str) -> Result<u16, TenancyError> {
-    raw.trim()
-        .parse()
-        .map_err(|_| TenancyError::Validation(format!("port `{raw}` is not a number from 1 to 65535")))
+    raw.trim().parse().map_err(|_| {
+        TenancyError::Validation(format!("port `{raw}` is not a number from 1 to 65535"))
+    })
 }
 
 /// `none` clears an optional value.
@@ -100,7 +100,11 @@ fn password_from_prompt() -> Result<Option<LoginPassword>, TenancyError> {
     let Some(pw) = ask("Admin password (blank for none): ").map_err(TenancyError::Io)? else {
         return Ok(None);
     };
-    if ask("Admin password (again): ").map_err(TenancyError::Io)?.as_deref() != Some(pw.as_str()) {
+    if ask("Admin password (again): ")
+        .map_err(TenancyError::Io)?
+        .as_deref()
+        != Some(pw.as_str())
+    {
         return Err(TenancyError::Validation("passwords didn't match".into()));
     }
     LoginPassword::new(pw)
