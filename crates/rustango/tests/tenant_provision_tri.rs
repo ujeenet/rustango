@@ -502,6 +502,10 @@ async fn the_console_creates_a_tenant_on_a_saved_server(pool: &Pool) {
     assert!(page.contains("Create a new database on a saved server"), "{page}");
     assert!(page.contains(r#"<option value="main""#), "{page}");
     assert!(page.contains(r#"type="password" id="database_url""#), "{page}");
+    // A saved server is the default; the shared-login path says so.
+    let server_radio = page.split(r#"value="server""#).nth(1).unwrap().split('>').next().unwrap();
+    assert!(server_radio.contains("checked"), "{page}");
+    assert!(page.contains("not isolated"), "{page}");
 
     let probe = body(
         c.post("/orgs/test-connection", "storage_mode=database&database_source=server&server=main")

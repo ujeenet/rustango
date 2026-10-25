@@ -82,8 +82,11 @@ connection check passes.</p>
                  {% if not servers %}disabled{% endif %}>
             Create a new database on a saved server</label><br>
           <label><input type="radio" name="database_source" value="url"
-                 {% if source != "server" %}checked{% endif %}>
-            Use an existing database</label>
+                 {% if source == "url" %}checked{% endif %}>
+            Use an existing database URL</label><br>
+          <label><input type="radio" name="database_source" value="registry"
+                 {% if source == "registry" %}checked{% endif %}>
+            A database on the registry's server (uses the registry's login — not isolated)</label>
           {% if not servers %}
           <div class="field-helper">No saved database server yet —
           <a href="{{ console_prefix }}/db-servers">add one</a> to create
@@ -105,7 +108,7 @@ connection check passes.</p>
           It must not exist yet.</div>
         </td>
       </tr>
-      <tr class="mode-database source-url">
+      <tr class="mode-database source-registry">
         <th><label for="database_name">database name</label></th>
         <td>
           <input type="text" id="database_name" name="database_name"
@@ -121,14 +124,14 @@ connection check passes.</p>
         </td>
       </tr>
       <tr class="mode-database source-url">
-        <th><label for="database_url">or a full URL</label></th>
+        <th><label for="database_url">database URL</label></th>
         <td>
           {#- A URL may hold a password: masked, and never sent back. -#}
           <input type="password" id="database_url" name="database_url"
                  autocomplete="off"
-                 placeholder="leave blank unless the tenant lives elsewhere">
-          <div class="field-helper">Only for a tenant on a different
-          server. Overrides the database name above.</div>
+                 placeholder="postgres://user:password@host/db">
+          <div class="field-helper">A database that exists, with its own
+          login. An <code>env://</code> reference works too.</div>
         </td>
       </tr>
       <tr class="mode-database">
@@ -258,11 +261,10 @@ connection check passes.</p>
       for (const row of document.querySelectorAll(".mode-schema")) {
         row.hidden = !schema;
       }
-      for (const row of document.querySelectorAll(".source-server")) {
-        row.hidden = schema || source() !== "server";
-      }
-      for (const row of document.querySelectorAll(".source-url")) {
-        row.hidden = schema || source() === "server";
+      for (const kind of ["server", "url", "registry"]) {
+        for (const row of document.querySelectorAll(".source-" + kind)) {
+          row.hidden = schema || source() !== kind;
+        }
       }
     }
 

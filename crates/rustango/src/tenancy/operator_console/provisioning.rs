@@ -101,6 +101,7 @@ async fn render_form(
         .collect();
     ctx.insert(
         "default_source",
+        // Isolated by default: the registry path shares its login.
         if servers.is_empty() { "url" } else { "server" },
     );
     ctx.insert("servers", &servers);
@@ -177,6 +178,15 @@ fn request_from_form(
                 .ok_or("Choose the saved database server to create the database on.")?
                 .to_owned(),
         )),
+        (_, Some("url")) => TenantStorage::Database(DatabaseSource::Url(
+            field("database_url")
+                .ok_or("Enter the existing database's URL.")?
+                .to_owned(),
+        )),
+        (_, Some("registry")) => TenantStorage::Database(DatabaseSource::Url(
+            existing_database_url(&|k| if k == "database_url" { None } else { field(k) }, &slug, registry_url)?,
+        )),
+        // A post from before the choice existed.
         (_, _) => TenantStorage::Database(DatabaseSource::Url(existing_database_url(
             &field, &slug, registry_url,
         )?)),
@@ -770,6 +780,29 @@ mod tests {
         assert_eq!(r.slug, "acme");
         assert_eq!(r.mode(), StorageMode::Database);
         assert!(r.run_migrations, "migrations run unless opted out");
+    }
+
+    /// Each choice reads only its own fields.
+    #[test]
+    fn the_registry_and_url_choices_read_their_own_fields() {
+        let both = [
+            ("slug", "acme"),
+            ("database_name", "acme_db"),
+            ("database_url", "postgres://u:p@elsewhere/own"),
+        ];
+        let mut f = form(&both);
+        f.insert("database_source".into(), "registry".into());
+        let r = request_from_form(&f, Some(TEST_REGISTRY)).unwrap();
+        assert!(r.database_url().unwrap().ends_with("db.internal:5432/acme_db"), "{r:?}");
+        f.insert("database_source".into(), "url".into());
+        let r = request_from_form(&f, Some(TEST_REGISTRY)).unwrap();
+        assert_eq!(r.database_url(), Some("postgres://u:p@elsewhere/own"));
+        let err = request_from_form(
+            &form(&[("slug", "acme"), ("database_source", "url")]),
+            Some(TEST_REGISTRY),
+        )
+        .expect_err("no URL");
+        assert!(err.contains("URL"), "{err}");
     }
 
     /// The saved-server choice names the server, and only that.
