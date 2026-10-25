@@ -434,7 +434,7 @@ pub(crate) async fn render_for_parent_in(
 /// whose `(content_type_id, object_pk)` matches the parent.
 ///
 /// Resolves the parent's `ContentType` via the inventory registry +
-/// `ContentType::by_natural_key` (cache-hot after the first call). The
+/// `ContentType::get_by_natural_key` (cached after the first call). The
 /// resulting WHERE pins both `ct_column` and `pk_column` on the child.
 ///
 /// # Errors
@@ -629,7 +629,8 @@ async fn resolve_ct_id_for_schema(
     };
     let app = entry.resolved_app_label().unwrap_or("project");
     let name = schema.name.to_ascii_lowercase();
-    let ct = crate::contenttypes::ContentType::by_natural_key(pool, app, &name).await?;
+    // Cached per database, like every other content-type lookup.
+    let ct = crate::contenttypes::ContentType::get_by_natural_key(pool, app, &name).await?;
     Ok(ct.and_then(|c| c.id.get().copied()))
 }
 
@@ -2196,6 +2197,31 @@ use crate::text::html_escape;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "inl_ct_parent", app = "inl_ct")]
+    #[allow(dead_code)]
+    pub struct CtParent {
+        #[rustango(primary_key)]
+        pub id: i64,
+    }
+
+    /// A generic inline resolves its parent's content type from the cache.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn parent_content_type_lookup_is_cached() {
+        use crate::core::Model as _;
+        let pool = Pool::Sqlite(crate::sql::sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap());
+        crate::contenttypes::ensure_seeded(&pool).await.unwrap();
+        let first = resolve_ct_id_for_schema(&pool, CtParent::SCHEMA).await.unwrap();
+        assert!(first.is_some());
+        let (again, queries) = crate::test_assertions::QueryCounter::scope(async {
+            let id = resolve_ct_id_for_schema(&pool, CtParent::SCHEMA).await.unwrap();
+            (id, crate::test_assertions::QueryCounter::current())
+        })
+        .await;
+        assert_eq!((again, queries), (first, 0));
+    }
 
     #[test]
     fn cut_rows_links_the_rest_only_past_the_cap() {

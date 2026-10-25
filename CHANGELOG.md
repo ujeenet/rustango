@@ -11,6 +11,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Email attachments serialize as base64, so a queued `EmailJob` no longer holds one JSON number per byte; jobs queued in the old form still load.
 - `InMemoryMailer`, `ConsoleMailer`, `FileMailer` and `NullMailer` refuse addresses `SmtpMailer` cannot parse; `InMemoryMailer::require_from()` also refuses mail with no `from`.
 - `testkit::create_junctions` creates models' M2M junctions as migrations build them.
+- Generic admin inlines read the parent's content type from the cache instead of the database on every render.
 
 ### Fixed — migrations, MySQL and MariaDB
 
