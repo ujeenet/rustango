@@ -62,6 +62,22 @@ pub type AdminActionFn = Arc<
     dyn for<'a> Fn(&'a crate::sql::Pool, &'a [SqlValue]) -> AdminActionFuture<'a> + Send + Sync,
 >;
 
+/// Bulk action handler that writes in the admin's transaction, so the
+/// action's audit rows commit or roll back with it. See
+/// [`Builder::register_tx_action`].
+pub type AdminTxActionFn = Arc<
+    dyn for<'a> Fn(&'a mut crate::sql::PoolTx<'static>, &'a [SqlValue]) -> AdminActionFuture<'a>
+        + Send
+        + Sync,
+>;
+
+/// How a custom action writes: on its own connection, or in the admin's tx.
+#[derive(Clone)]
+pub(crate) enum ActionHandler {
+    Pool(AdminActionFn),
+    Tx(AdminTxActionFn),
+}
+
 /// The permission a custom bulk action is checked against (#1818).
 ///
 /// Any custom action also needs the table writable, so `Delete` needs
@@ -79,7 +95,7 @@ pub enum ActionPerm {
 /// A registered custom action: its handler and the permission it needs.
 #[derive(Clone)]
 pub(crate) struct RegisteredAction {
-    pub(crate) handler: AdminActionFn,
+    pub(crate) handler: ActionHandler,
     pub(crate) perm: ActionPerm,
 }
 
@@ -673,6 +689,9 @@ impl Builder {
     /// named after the action. An action that deletes should use
     /// [`Self::register_action_with_perm`] with [`ActionPerm::Delete`].
     ///
+    /// Its audit rows are written after it, best effort. Use
+    /// [`Self::register_tx_action`] to audit in the action's transaction.
+    ///
     /// ```ignore
     /// use rustango::sql::sqlx::PgPool;
     /// use rustango::core::SqlValue;
@@ -707,7 +726,7 @@ impl Builder {
     /// A `Delete` action still needs `{table}.change`, and it audits and
     /// signals as an edit; the handler does its own deleting.
     pub fn register_action_with_perm<F>(
-        mut self,
+        self,
         model_table: &'static str,
         action_name: &'static str,
         perm: ActionPerm,
@@ -719,13 +738,69 @@ impl Builder {
             + Sync
             + 'static,
     {
-        self.config.actions.entry(model_table).or_default().insert(
-            action_name,
-            RegisteredAction {
-                handler: Arc::new(handler),
-                perm,
-            },
-        );
+        self.insert_action(model_table, action_name, perm, ActionHandler::Pool(Arc::new(handler)))
+    }
+
+    /// [`Self::register_action`] for a handler that writes in the admin's
+    /// transaction: the action's audit rows commit with its writes, and an
+    /// error from either rolls both back. Prefer it for audited models.
+    ///
+    /// ```ignore
+    /// admin::Builder::new(pool)
+    ///     .register_tx_action("post", "publish", |tx, pks| {
+    ///         Box::pin(async move {
+    ///             rustango::sql::update_tx(tx, &publish_query(pks)).await
+    ///                 .map_err(|e| AdminError::Internal(e.to_string()))?;
+    ///             Ok(())
+    ///         })
+    ///     })
+    ///     .build();
+    /// ```
+    pub fn register_tx_action<F>(
+        self,
+        model_table: &'static str,
+        action_name: &'static str,
+        handler: F,
+    ) -> Self
+    where
+        F: for<'a> Fn(&'a mut crate::sql::PoolTx<'static>, &'a [SqlValue]) -> AdminActionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.register_tx_action_with_perm(model_table, action_name, ActionPerm::Change, handler)
+    }
+
+    /// [`Self::register_tx_action`] checked against `perm`, as
+    /// [`Self::register_action_with_perm`].
+    pub fn register_tx_action_with_perm<F>(
+        self,
+        model_table: &'static str,
+        action_name: &'static str,
+        perm: ActionPerm,
+        handler: F,
+    ) -> Self
+    where
+        F: for<'a> Fn(&'a mut crate::sql::PoolTx<'static>, &'a [SqlValue]) -> AdminActionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.insert_action(model_table, action_name, perm, ActionHandler::Tx(Arc::new(handler)))
+    }
+
+    fn insert_action(
+        mut self,
+        model_table: &'static str,
+        action_name: &'static str,
+        perm: ActionPerm,
+        handler: ActionHandler,
+    ) -> Self {
+        self.config
+            .actions
+            .entry(model_table)
+            .or_default()
+            .insert(action_name, RegisteredAction { handler, perm });
         self
     }
 
