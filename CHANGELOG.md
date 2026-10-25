@@ -15,6 +15,10 @@ The set-password page and the run page that shows its link sent `Referrer-Policy
 The built-in `rustango.png` / `icon.png` are the new square logo (transparent, 256 and 64 px). Sidebars and sign-in pages show it beside the name, with the tagline as a badge.
 Database server forms use the sectioned layout; probe results are green or red and wrap; the run page shows one row per step, `code` in details and a **Copy** button for the link; the tenant edit page shows its managed database and takes the URL in a masked field; the sidebar links **Database servers** and reaches the page bottom.
 
+### Added — browser tests for the console's tenant-database pages
+
+`examples/tenant_console_e2e` drives a scaffolded tenant app through Playwright on PostgreSQL, MySQL and SQLite: save a server, create, first-admin link, rotate, refused slug, purge. CI job `tenant_e2e`.
+
 ### Added — purge and password rotation for tenants on a saved server
 
 `purge-tenant` and the console drop a database rustango made as the saved server's admin, then its login and record; every refusal (URL moved off the record, a shared database, missing owner or PG 16 ADMIN OPTION, a foreign session) runs before anything changes, and the tenant's own sessions on other pods are ended.
