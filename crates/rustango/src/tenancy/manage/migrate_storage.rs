@@ -1000,7 +1000,10 @@ async fn run_into_schema(
     let stage = target.database(&staging);
     // The dump creates the schema; drop the empty one the move claimed
     // in the same transaction, so nobody else can take the name meanwhile.
-    let mut before = vec![format!("DROP SCHEMA {} RESTRICT", quote_ident(&plan.schema.0))];
+    let mut before = vec![format!(
+        "DROP SCHEMA {} RESTRICT",
+        quote_ident(&plan.schema.0)
+    )];
     before.extend(plan.create);
     let moved = pg_dump_to_psql(source, None, &[], &stage, &[], &plan.moves)
         .and_then(|()| pg_dump_to_psql(&stage, Some(&plan.schema), &[], target, &before, &[]));

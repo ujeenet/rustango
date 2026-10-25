@@ -718,7 +718,13 @@ async fn worker_loop(
 ) {
     while !stop.is_set() {
         let with_context = worker.context_column.present(&pool).await;
-        let picked = match QueueFilter::of(worker.queue_name.as_deref(), &worker.queue_column, &pool).await {
+        let picked = match QueueFilter::of(
+            worker.queue_name.as_deref(),
+            &worker.queue_column,
+            &pool,
+        )
+        .await
+        {
             Ok(queue) => pick_one(&pool, &worker.id, with_context, queue).await,
             Err(e) => Err(sqlx::Error::Protocol(e.to_owned())),
         };

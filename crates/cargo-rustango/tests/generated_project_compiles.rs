@@ -310,11 +310,23 @@ fn tenant_project_mounts_the_provisioning_pages() {
         .output()
         .expect("run a failing verb");
     let err = String::from_utf8_lossy(&failed.stderr);
-    assert!(!failed.status.success(), "purging a missing tenant succeeded:\n{err}");
-    let msg = err.lines().find_map(|l| l.strip_prefix("Error: ")).unwrap_or_default();
-    let variant: String = msg.chars().take_while(char::is_ascii_alphanumeric).collect();
+    assert!(
+        !failed.status.success(),
+        "purging a missing tenant succeeded:\n{err}"
+    );
+    let msg = err
+        .lines()
+        .find_map(|l| l.strip_prefix("Error: "))
+        .unwrap_or_default();
+    let variant: String = msg
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
     let debug = variant.starts_with(char::is_uppercase) && msg[variant.len()..].starts_with('(');
-    assert!(!msg.is_empty() && !debug, "error printed with Debug:\n{err}");
+    assert!(
+        !msg.is_empty() && !debug,
+        "error printed with Debug:\n{err}"
+    );
 
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())

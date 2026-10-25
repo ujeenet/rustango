@@ -315,24 +315,55 @@ async fn in_lists_match_alike_and_share_a_statement(pool: &Pool) {
     let ids: Vec<uuid::Uuid> = (0..4).map(|_| uuid::Uuid::new_v4()).collect();
     for (i, id) in ids.iter().enumerate() {
         let label = (i != 3).then(|| format!("t{i}"));
-        Token { id: *id, label, rank: i as i32 }
-            .insert_pool(pool)
-            .await
-            .expect("token");
+        Token {
+            id: *id,
+            label,
+            rank: i as i32,
+        }
+        .insert_pool(pool)
+        .await
+        .expect("token");
     }
     let count = |col: &'static str, op: Op, list: Vec<SqlValue>| {
         Token::objects().filter_op(col, op, SqlValue::List(list))
     };
-    let uuids = |xs: &[usize]| xs.iter().map(|&i| SqlValue::Uuid(ids[i])).collect::<Vec<_>>();
-    let strs = |xs: &[&str]| xs.iter().map(|s| SqlValue::String((*s).into())).collect::<Vec<_>>();
+    let uuids = |xs: &[usize]| {
+        xs.iter()
+            .map(|&i| SqlValue::Uuid(ids[i]))
+            .collect::<Vec<_>>()
+    };
+    let strs = |xs: &[&str]| {
+        xs.iter()
+            .map(|s| SqlValue::String((*s).into()))
+            .collect::<Vec<_>>()
+    };
     let n = |qs: rustango::query::QuerySet<Token>| async move {
         qs.fetch(pool).await.expect("fetch").len()
     };
     assert_eq!(n(count("id", Op::In, uuids(&[0, 2]))).await, 2);
     assert_eq!(n(count("id", Op::NotIn, uuids(&[0]))).await, 3);
-    assert_eq!(n(count("rank", Op::In, vec![SqlValue::I32(1), SqlValue::I32(3)])).await, 2);
-    assert_eq!(n(count("rank", Op::In, vec![SqlValue::I64(1), SqlValue::I64(9)])).await, 1);
-    assert_eq!(n(count("label", Op::In, strs(&["t0", "t1", "zz"]))).await, 2);
+    assert_eq!(
+        n(count(
+            "rank",
+            Op::In,
+            vec![SqlValue::I32(1), SqlValue::I32(3)]
+        ))
+        .await,
+        2
+    );
+    assert_eq!(
+        n(count(
+            "rank",
+            Op::In,
+            vec![SqlValue::I64(1), SqlValue::I64(9)]
+        ))
+        .await,
+        1
+    );
+    assert_eq!(
+        n(count("label", Op::In, strs(&["t0", "t1", "zz"]))).await,
+        2
+    );
     // NOT IN over a NULL row or a NULL element matches nothing for that row.
     assert_eq!(n(count("label", Op::NotIn, strs(&["t0"]))).await, 2);
     let with_null = vec![SqlValue::String("t0".into()), SqlValue::Null];

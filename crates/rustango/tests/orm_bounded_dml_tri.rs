@@ -369,10 +369,9 @@ async fn correlated_same_table_in_dml(pool: &Pool) {
         rows.iter().map(|r| r.rank).collect::<Vec<i64>>()
     };
     let mariadb = pool.dialect().name() == "mysql" && {
-        let v: Vec<(String,)> =
-            rustango::sql::raw_query_pool("SELECT VERSION()", Vec::new(), pool)
-                .await
-                .unwrap();
+        let v: Vec<(String,)> = rustango::sql::raw_query_pool("SELECT VERSION()", Vec::new(), pool)
+            .await
+            .unwrap();
         v[0].0.contains("MariaDB")
     };
     if pool.dialect().name() == "mysql" && !mariadb {

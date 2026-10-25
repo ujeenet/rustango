@@ -127,7 +127,10 @@ async fn owner(pool: &Pool) -> (String, String, i32) {
 
 fn refused(status: StatusCode, html: &str, what: &str) {
     assert_eq!(status, StatusCode::OK, "{what}: {html}");
-    assert!(html.contains("already used"), "{what} was not refused: {html}");
+    assert!(
+        html.contains("already used"),
+        "{what} was not refused: {html}"
+    );
 }
 
 async fn admin_org_edit_refuses_another_tenants_routing(pool: &Pool) {
@@ -144,7 +147,10 @@ async fn admin_org_edit_refuses_another_tenants_routing(pool: &Pool) {
         refused(status, &html, what);
     }
     let row = org_named(pool, &slug).await.unwrap();
-    assert_eq!((row.host_pattern, row.path_prefix, row.port), (None, None, None));
+    assert_eq!(
+        (row.host_pattern, row.path_prefix, row.port),
+        (None, None, None)
+    );
 }
 
 async fn admin_org_create_refuses_a_taken_host(pool: &Pool) {
@@ -187,7 +193,10 @@ async fn admin_org_edit_keeps_and_normalizes_its_own_routing(pool: &Pool) {
     let (status, html) = send(pool, Method::POST, &uri, form.clone()).await;
     assert!(status.is_redirection(), "{status}: {html}");
     let (status, html) = send(pool, Method::POST, &uri, form).await;
-    assert!(status.is_redirection(), "resaving clashed with itself: {status}: {html}");
+    assert!(
+        status.is_redirection(),
+        "resaving clashed with itself: {status}: {html}"
+    );
     let row = org_named(pool, &slug).await.unwrap();
     assert_eq!(row.host_pattern.as_deref(), Some(host.as_str()));
     assert_eq!(row.path_prefix.as_deref(), Some(prefix.as_str()));
@@ -203,7 +212,8 @@ async fn admin_and_cli_racing_for_a_prefix_one_wins(pool: &Pool) {
         let prefix = format!("/{a}-{i}");
         let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
         let admin = {
-            let (pool, barrier, form) = (pool.clone(), barrier.clone(), org_form(&a, "", &prefix, ""));
+            let (pool, barrier, form) =
+                (pool.clone(), barrier.clone(), org_form(&a, "", &prefix, ""));
             tokio::spawn(async move {
                 barrier.wait().await;
                 send(&pool, Method::POST, &format!("/rustango_orgs/{a_id}"), form).await

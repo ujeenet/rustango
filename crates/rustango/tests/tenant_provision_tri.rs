@@ -1001,8 +1001,16 @@ async fn a_limited_admin_is_told_what_to_grant(pool: &Pool) {
         }
         BackendKind::MySql => {
             exec_text(&env.registry, &format!("DROP USER IF EXISTS '{weak}'@'%'")).await;
-            exec_text(&env.registry, &format!("CREATE USER '{weak}'@'%' IDENTIFIED BY 'weakpw'")).await;
-            exec_text(&env.registry, &format!("GRANT ALL PRIVILEGES ON `{weak}\\_%`.* TO '{weak}'@'%'")).await;
+            exec_text(
+                &env.registry,
+                &format!("CREATE USER '{weak}'@'%' IDENTIFIED BY 'weakpw'"),
+            )
+            .await;
+            exec_text(
+                &env.registry,
+                &format!("GRANT ALL PRIVILEGES ON `{weak}\\_%`.* TO '{weak}'@'%'"),
+            )
+            .await;
             (
                 vec![
                     format!("The login `{weak}` cannot create databases (CREATE, DROP), create logins (CREATE USER) or grant rights (GRANT OPTION)."),
@@ -1049,7 +1057,11 @@ async fn a_limited_admin_is_told_what_to_grant(pool: &Pool) {
 
     // The console's server Test and the form's Test.
     let c = Console::boot(&env, &env.dir("good")).await;
-    let unescape = |t: &str| t.replace("&#x27;", "'").replace("&quot;", "\"").replace("&#x2F;", "/");
+    let unescape = |t: &str| {
+        t.replace("&#x27;", "'")
+            .replace("&quot;", "\"")
+            .replace("&#x2F;", "/")
+    };
     for (uri, form) in [
         ("/db-servers/main/test".to_owned(), String::new()),
         (
@@ -1071,7 +1083,13 @@ async fn a_limited_admin_is_told_what_to_grant(pool: &Pool) {
                 "{} {} {} {}",
                 json["message"].as_str().unwrap(),
                 json["fix"].as_str().unwrap_or_default(),
-                json["fix_sql"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>().join(" "),
+                json["fix_sql"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap())
+                    .collect::<Vec<_>>()
+                    .join(" "),
                 json["alternative"].as_str().unwrap_or_default()
             )
         } else {
@@ -1088,8 +1106,14 @@ async fn a_limited_admin_is_told_what_to_grant(pool: &Pool) {
     assert!(!env.database_exists(&a).await);
     assert!(env.org(&a).await.is_none());
     let steps = env.steps(&a).await;
-    assert!(steps.iter().any(|s| s == "check_connection:failed"), "{steps:?}");
-    assert!(!steps.iter().any(|s| s.starts_with("create_database")), "{steps:?}");
+    assert!(
+        steps.iter().any(|s| s == "check_connection:failed"),
+        "{steps:?}"
+    );
+    assert!(
+        !steps.iter().any(|s| s.starts_with("create_database")),
+        "{steps:?}"
+    );
     drop(c);
     if let Some(sql) = drop_weak {
         exec_text(&env.registry, &sql).await;
@@ -1134,10 +1158,22 @@ async fn a_role_based_admin_may_provision(pool: &Pool) {
         exec_text(&env.registry, &sql).await;
     }
     if mariadb {
-        exec_text(&env.registry, &format!("SET DEFAULT ROLE '{dba}' FOR '{direct}'@'%'")).await;
-        exec_text(&env.registry, &format!("SET DEFAULT ROLE '{outer}' FOR '{nested}'@'%'")).await;
+        exec_text(
+            &env.registry,
+            &format!("SET DEFAULT ROLE '{dba}' FOR '{direct}'@'%'"),
+        )
+        .await;
+        exec_text(
+            &env.registry,
+            &format!("SET DEFAULT ROLE '{outer}' FOR '{nested}'@'%'"),
+        )
+        .await;
     } else {
-        exec_text(&env.registry, &format!("SET DEFAULT ROLE ALL TO '{direct}'@'%', '{nested}'@'%'")).await;
+        exec_text(
+            &env.registry,
+            &format!("SET DEFAULT ROLE ALL TO '{direct}'@'%', '{nested}'@'%'"),
+        )
+        .await;
     }
     env.add_server_as("direct", Some((&direct, "rolepw"))).await;
     env.add_server_as("main", Some((&nested, "rolepw"))).await;
@@ -1181,7 +1217,14 @@ async fn a_registry_login_without_create_is_refused_for_schemas(pool: &Pool) {
     let rest = env.url.split_once("://").unwrap().1;
     let host_db = rest.rsplit_once('@').unwrap().1;
     let url = format!("postgres://{reg}:regpw@{host_db}");
-    let db = host_db.split('/').nth(1).unwrap().split('?').next().unwrap().to_owned();
+    let db = host_db
+        .split('/')
+        .nth(1)
+        .unwrap()
+        .split('?')
+        .next()
+        .unwrap()
+        .to_owned();
     let restricted = Pool::connect(&url).await.expect("restricted registry");
     let want = [
         format!("The registry's login `{reg}` (DATABASE_URL) cannot create schemas in database `{db}` (CREATE)."),
@@ -1194,7 +1237,10 @@ async fn a_registry_login_without_create_is_refused_for_schemas(pool: &Pool) {
         assert!(!text.contains("regpw"), "{text}");
     };
 
-    let req = ProvisionRequest::new(&a, rustango::tenancy::provision::TenantStorage::Schema(None));
+    let req = ProvisionRequest::new(
+        &a,
+        rustango::tenancy::provision::TenantStorage::Schema(None),
+    );
     let err = typed!(restricted, p => provision::provision_tenant_recorded(
         &p, &url, &env.dir("good"), &req, None, None, None,
     )
@@ -1211,7 +1257,14 @@ async fn a_registry_login_without_create_is_refused_for_schemas(pool: &Pool) {
     .to_string();
     has_all(&cli);
     let c = Console::boot_on(&restricted, &url, &env.dir("good")).await;
-    let probe = body(c.post("/orgs/test-connection", &format!("slug={a}&storage_mode=schema")).await).await;
+    let probe = body(
+        c.post(
+            "/orgs/test-connection",
+            &format!("slug={a}&storage_mode=schema"),
+        )
+        .await,
+    )
+    .await;
     let json: serde_json::Value = serde_json::from_str(&probe).expect("json");
     assert_eq!(json["status"], "bad", "{probe}");
     has_all(&format!("{} {}", json["message"], json["fix_sql"]).replace("\\\"", "\""));
@@ -1226,16 +1279,29 @@ async fn a_registry_login_without_create_is_refused_for_schemas(pool: &Pool) {
     assert_eq!(schemas[0].0, 0, "a schema was made");
     assert!(env.org(&a).await.is_none());
     let steps = env.steps(&a).await;
-    assert!(steps.iter().any(|s| s == "check_connection:failed"), "{steps:?}");
-    assert!(!steps.iter().any(|s| s.starts_with("provision_storage")), "{steps:?}");
+    assert!(
+        steps.iter().any(|s| s == "check_connection:failed"),
+        "{steps:?}"
+    );
+    assert!(
+        !steps.iter().any(|s| s.starts_with("provision_storage")),
+        "{steps:?}"
+    );
 
     // With the right granted, the same request passes the check.
-    exec_text(&env.registry, &format!("GRANT CREATE ON DATABASE \"{db}\" TO \"{reg}\"")).await;
+    exec_text(
+        &env.registry,
+        &format!("GRANT CREATE ON DATABASE \"{db}\" TO \"{reg}\""),
+    )
+    .await;
     let probe = body(c.post("/orgs/test-connection", "storage_mode=schema").await).await;
     assert!(probe.contains(r#""status":"ok""#), "{probe}");
     drop(c);
     restricted.close().await;
-    for sql in [format!("DROP OWNED BY \"{reg}\""), format!("DROP ROLE \"{reg}\"")] {
+    for sql in [
+        format!("DROP OWNED BY \"{reg}\""),
+        format!("DROP ROLE \"{reg}\""),
+    ] {
         exec_text(&env.registry, &sql).await;
     }
 }

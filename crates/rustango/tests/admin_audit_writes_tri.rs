@@ -533,7 +533,12 @@ async fn tx_action_audits_in_its_transaction(pool: &Pool) {
         );
         rustango::sql::insert_pool(pool, &q).await.expect("seed");
     }
-    let (status, body) = post_to(stamping_admin(pool), "/aaw_card/__action", "action=stamp&_selected=a").await;
+    let (status, body) = post_to(
+        stamping_admin(pool),
+        "/aaw_card/__action",
+        "action=stamp&_selected=a",
+    )
+    .await;
     assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
     assert_eq!(card_body(pool, "a").await, "stamped");
     let rows = audit_rows(pool, "aaw_card").await;
@@ -545,7 +550,11 @@ async fn tx_action_audits_in_its_transaction(pool: &Pool) {
     let form = format!("action=stamp&_selected={key}");
     let (status, body) = post_to(stamping_admin(pool), "/aaw_card/__action", &form).await;
     assert_eq!(status, refusal_status(pool), "{body}");
-    assert_eq!(card_body(pool, &key).await, "card", "committed without an audit row");
+    assert_eq!(
+        card_body(pool, &key).await,
+        "card",
+        "committed without an audit row"
+    );
 }
 
 /// An inline DELETE stamps a `soft_delete` child and audits it as a

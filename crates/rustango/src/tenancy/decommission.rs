@@ -422,14 +422,13 @@ impl DbIdentity {
             crate::sql::Pool::Mysql(p) => p,
             _ => return Ok(None),
         };
-        let (database,): (String,) = sqlx::query_as(
-            "SELECT CAST(IF(@@lower_case_table_names = 0, ?, LOWER(?)) AS CHAR)",
-        )
-        .bind(name)
-        .bind(name)
-        .fetch_one(p)
-        .await
-        .map_err(|e| e.to_string())?;
+        let (database,): (String,) =
+            sqlx::query_as("SELECT CAST(IF(@@lower_case_table_names = 0, ?, LOWER(?)) AS CHAR)")
+                .bind(name)
+                .bind(name)
+                .fetch_one(p)
+                .await
+                .map_err(|e| e.to_string())?;
         let key = Self::server_key(p).await?;
         Ok(Some(Self::Server { key, database }))
     }

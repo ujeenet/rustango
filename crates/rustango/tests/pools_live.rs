@@ -979,13 +979,20 @@ async fn uncached_schema_tenant_holds_a_registry_connection() {
     {
         let mut conn = pools.acquire(&org).await.unwrap();
         assert_eq!(current_schema(&mut conn).await, "acme_tp_nocache");
-        assert!(registry.try_acquire().is_none(), "built a pool for one request");
+        assert!(
+            registry.try_acquire().is_none(),
+            "built a pool for one request"
+        );
     }
     let mut plain = tokio::time::timeout(Duration::from_secs(5), registry.acquire())
         .await
         .expect("the connection never came back")
         .unwrap();
-    assert_eq!(current_schema(&mut plain).await, "public", "search_path leaked");
+    assert_eq!(
+        current_schema(&mut plain).await,
+        "public",
+        "search_path leaked"
+    );
     drop(plain);
     drop_schema(&admin, "acme_tp_nocache").await;
 }

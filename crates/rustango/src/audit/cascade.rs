@@ -51,8 +51,10 @@ fn build_graph() -> HashMap<&'static str, Vec<Edge>> {
     let mut graph: HashMap<&'static str, Vec<Edge>> = HashMap::new();
     for &entry in &entries {
         for field in entry.schema.fields {
-            let (Some(OnDeleteAction::Cascade), Some(Relation::Fk { to, on } | Relation::O2O { to, on })) =
-                (field.fk_on_delete, field.relation)
+            let (
+                Some(OnDeleteAction::Cascade),
+                Some(Relation::Fk { to, on } | Relation::O2O { to, on }),
+            ) = (field.fk_on_delete, field.relation)
             else {
                 continue;
             };
@@ -159,10 +161,13 @@ async fn snapshot(
                     SqlValue::List(chunk.to_vec()),
                 ));
                 let found: Vec<(SqlValue, Option<PendingEntry>)> = if child.audit_track.is_some() {
-                    let read = edge.child.audited_cascade().ok_or(ExecError::AuditUnsupported {
-                        table: child.table,
-                        reason: "its registry entry has no cascade recorder",
-                    })?;
+                    let read = edge
+                        .child
+                        .audited_cascade()
+                        .ok_or(ExecError::AuditUnsupported {
+                            table: child.table,
+                            reason: "its registry entry has no cascade recorder",
+                        })?;
                     let rows = read(tx, child_rows).await?;
                     rows.into_iter().map(|(k, e)| (k, Some(e))).collect()
                 } else {
@@ -228,14 +233,14 @@ async fn column_values(
         ..crate::core::LockMode::default()
     });
     let rows = crate::sql::fetch_values_list_on(tx, &select).await?;
-    Ok(rows.into_iter().filter_map(|r| r.into_iter().next()).collect())
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| r.into_iter().next())
+        .collect())
 }
 
 /// Run `fut`, a delete through `pool`, so cascade entries keep the source.
-pub(crate) async fn via_pool<F: std::future::Future>(
-    pool: &crate::sql::Pool,
-    fut: F,
-) -> F::Output {
+pub(crate) async fn via_pool<F: std::future::Future>(pool: &crate::sql::Pool, fut: F) -> F::Output {
     super::writing_via(pool, fut).await
 }
 

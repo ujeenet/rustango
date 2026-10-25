@@ -811,7 +811,10 @@ fn has_pg_dump() -> bool {
         .arg("--version")
         .output()
         .is_ok();
-    assert!(found || std::env::var("CI").is_err(), "CI needs pg_dump and psql");
+    assert!(
+        found || std::env::var("CI").is_err(),
+        "CI needs pg_dump and psql"
+    );
     found
 }
 
@@ -881,9 +884,17 @@ async fn migrate_into_an_existing_schema_is_refused_up_front() {
         return;
     }
     let (registry, pool) = private_registry("rustango_t1487_reg").await;
-    let src = ScratchDb::create(&std::env::var("DATABASE_URL").unwrap(), "rustango_t1487_src").await;
+    let src = ScratchDb::create(
+        &std::env::var("DATABASE_URL").unwrap(),
+        "rustango_t1487_src",
+    )
+    .await;
     let src_pool = PgPool::connect(src.url()).await.unwrap();
-    sqlx_exec(&src_pool, "CREATE TABLE rustango_users (id BIGSERIAL PRIMARY KEY)").await;
+    sqlx_exec(
+        &src_pool,
+        "CREATE TABLE rustango_users (id BIGSERIAL PRIMARY KEY)",
+    )
+    .await;
     src_pool.close().await;
     movable_tenant(&pool, "t1487", src.url()).await;
     sqlx_exec(&pool, "CREATE SCHEMA t1487_other").await;
@@ -919,7 +930,11 @@ async fn a_move_and_a_create_racing_for_one_schema_never_share_it() {
     let registry_url = registry.url().to_owned();
     let src = ScratchDb::create(&std::env::var("DATABASE_URL").unwrap(), "rustango_t1487_rs").await;
     let src_pool = PgPool::connect(src.url()).await.unwrap();
-    sqlx_exec(&src_pool, "CREATE TABLE rustango_users (id BIGSERIAL PRIMARY KEY)").await;
+    sqlx_exec(
+        &src_pool,
+        "CREATE TABLE rustango_users (id BIGSERIAL PRIMARY KEY)",
+    )
+    .await;
     src_pool.close().await;
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let (mut moves, mut creates) = (0, 0);
@@ -956,19 +971,28 @@ async fn a_move_and_a_create_racing_for_one_schema_never_share_it() {
         let created = created.unwrap();
         match (&moved, &created) {
             (Ok(()), Err(e)) => {
-                assert!(e.contains(SCHEMA_EXISTS) || e.contains("already used"), "{e}");
+                assert!(
+                    e.contains(SCHEMA_EXISTS) || e.contains("already used"),
+                    "{e}"
+                );
                 moves += 1;
             }
             (Err(e), Ok(())) => {
                 assert!(e.contains(SCHEMA_EXISTS), "round {round}: {e}");
                 assert!(org_row(&pool, &mover).await.active, "left inactive");
-                assert!(schema_exists(&pool, &schema).await, "the move dropped the create's schema");
+                assert!(
+                    schema_exists(&pool, &schema).await,
+                    "the move dropped the create's schema"
+                );
                 creates += 1;
             }
             other => panic!("round {round}: both or neither got `{schema}`: {other:?}"),
         }
     }
-    assert!(moves > 0 && creates > 0, "no real race: {moves} moves / {creates} creates");
+    assert!(
+        moves > 0 && creates > 0,
+        "no real race: {moves} moves / {creates} creates"
+    );
     pool.close().await;
 }
 
@@ -997,7 +1021,11 @@ async fn a_move_failing_before_the_copy_drops_its_schema() {
         return;
     }
     let (registry, pool) = private_registry("rustango_t1487_rel").await;
-    let src = ScratchDb::create(&std::env::var("DATABASE_URL").unwrap(), "rustango_t1487_rsrc").await;
+    let src = ScratchDb::create(
+        &std::env::var("DATABASE_URL").unwrap(),
+        "rustango_t1487_rsrc",
+    )
+    .await;
     movable_tenant(&pool, "t1487-rel", src.url()).await;
     let pools = TenantPools::new(pool.clone());
     let mut out = FailsOffline(Vec::new());
@@ -1005,12 +1033,24 @@ async fn a_move_failing_before_the_copy_drops_its_schema() {
         &pools,
         registry.url(),
         std::path::Path::new("."),
-        args(&["migrate-tenant-storage", "t1487-rel", "--to", "schema", "--schema-name", "t1487_rel", "--drain-secs", "0"]),
+        args(&[
+            "migrate-tenant-storage",
+            "t1487-rel",
+            "--to",
+            "schema",
+            "--schema-name",
+            "t1487_rel",
+            "--drain-secs",
+            "0",
+        ]),
         &mut out,
     )
     .await;
     assert!(res.is_err(), "the writer failure was swallowed");
-    assert!(!schema_exists(&pool, "t1487_rel").await, "the claimed schema was left behind");
+    assert!(
+        !schema_exists(&pool, "t1487_rel").await,
+        "the claimed schema was left behind"
+    );
     assert!(org_row(&pool, "t1487-rel").await.active);
     pool.close().await;
 }

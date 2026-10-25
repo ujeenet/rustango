@@ -299,7 +299,11 @@ async fn referenced_key_widens_its_junction(pool: &Pool) {
         .unwrap_or_else(|e| panic!("widening on {name}: {e}"));
     assert_eq!(fk_count(pool, through).await, 2, "junction FKs on {name}");
     let d = pool.dialect();
-    let (qp, qt, qj) = (d.quote_ident(post), d.quote_ident(tag), d.quote_ident(through));
+    let (qp, qt, qj) = (
+        d.quote_ident(post),
+        d.quote_ident(tag),
+        d.quote_ident(through),
+    );
     exec(pool, &format!("INSERT INTO {qp} (id) VALUES (1)"))
         .await
         .unwrap();
@@ -329,7 +333,11 @@ async fn referenced_key_widens_its_junction(pool: &Pool) {
     unapply_pool_with_ledger(pool, dir.path(), &widen.name, ledger)
         .await
         .unwrap_or_else(|e| panic!("narrowing on {name}: {e}"));
-    assert_eq!(fk_count(pool, through).await, 2, "junction FKs after unapply on {name}");
+    assert_eq!(
+        fk_count(pool, through).await,
+        2,
+        "junction FKs after unapply on {name}"
+    );
     for t in [through, post, tag, ledger] {
         drop_table(pool, t).await;
     }

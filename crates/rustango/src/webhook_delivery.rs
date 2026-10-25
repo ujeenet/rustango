@@ -443,7 +443,8 @@ impl WebhookSubscription {
         .map_err(|e| JobError::Queue(e.to_string()))?;
         let mut headers = self.headers.clone();
         headers.retain(|k, _| {
-            !k.eq_ignore_ascii_case(HEADER_TIMESTAMP) && !k.eq_ignore_ascii_case(HEADER_SIGNATURE_V2)
+            !k.eq_ignore_ascii_case(HEADER_TIMESTAMP)
+                && !k.eq_ignore_ascii_case(HEADER_SIGNATURE_V2)
         });
         headers.insert(HEADER_TIMESTAMP.to_owned(), at.to_string());
         headers.insert(HEADER_SIGNATURE_V2.to_owned(), v2);
@@ -597,9 +598,14 @@ mod tests {
         }
         let recv = received.lock().unwrap();
         let (_status, hdrs, body) = &recv[0];
-        let ts = hdrs.get("x-webhook-timestamp").expect("no timestamp header");
+        let ts = hdrs
+            .get("x-webhook-timestamp")
+            .expect("no timestamp header");
         let at: i64 = ts.parse().expect("unix seconds");
-        assert!((before..=chrono::Utc::now().timestamp()).contains(&at), "{at}");
+        assert!(
+            (before..=chrono::Utc::now().timestamp()).contains(&at),
+            "{at}"
+        );
         let v2 = hdrs.get("x-webhook-signature-v2").expect("no v2 signature");
         let signed = |id: &str, event: &str| {
             let mut msg = format!("v2\n{id}\n{event}\n{ts}\n").into_bytes();

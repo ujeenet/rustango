@@ -272,7 +272,9 @@ impl Dialect for MySql {
         }
         // GRANT ALL ON db.* needs every database privilege grantable.
         if rights.contains(&AdminRight::Grant) {
-            out.push(format!("GRANT ALL PRIVILEGES ON *.* TO {to} WITH GRANT OPTION"));
+            out.push(format!(
+                "GRANT ALL PRIVILEGES ON *.* TO {to} WITH GRANT OPTION"
+            ));
         }
         out
     }
@@ -1167,7 +1169,11 @@ fn write_mysql_bulk_update(
     let (mut my, mut maria) = (String::from("VALUES "), String::new());
     for (r, row) in query.rows.iter().enumerate() {
         my.push_str(if r == 0 { "ROW(" } else { ", ROW(" });
-        maria.push_str(if r == 0 { "SELECT " } else { " UNION ALL SELECT " });
+        maria.push_str(if r == 0 {
+            "SELECT "
+        } else {
+            " UNION ALL SELECT "
+        });
         for (i, val) in row.iter().enumerate() {
             b.params.push(val.clone());
             let p = b.d.placeholder(b.params.len());
@@ -1869,7 +1875,9 @@ mod tests {
         let stmt = MySql.compile_bulk_update(&q).unwrap();
         // Spot-check the key shape: VALUES ROW(?, ?) plus the JOIN
         // on the PK plus the SET on the qualified target column.
-        assert!(stmt.sql.starts_with("UPDATE `users` INNER JOIN (/*!80000 VALUES "));
+        assert!(stmt
+            .sql
+            .starts_with("UPDATE `users` INNER JOIN (/*!80000 VALUES "));
         assert!(stmt.sql.contains("ROW(?, ?), ROW(?, ?)"));
         assert!(stmt
             .sql

@@ -133,11 +133,11 @@ pub mod sweep;
 // operator console runs on whichever backend `TenantPools<DB>` was
 // built with, schema-mode dispatch only fires on PG (by language),
 // and the inner admin uses the unified `crate::sql::Pool` enum.
+/// The database rights each storage mode needs, and what a login has.
+pub mod rights;
 pub mod server;
 /// Creating and dropping a database-mode tenant's database and login.
 pub mod server_admin;
-/// The database rights each storage mode needs, and what a login has.
-pub mod rights;
 /// A tenant whose database rustango made on a saved server: rotating its
 /// login's password.
 pub mod server_tenant;

@@ -755,14 +755,21 @@ mod related {
         fresh_table::<Press>(pool).await;
         fresh_table::<Writer>(pool).await;
         fresh_table::<Book>(pool).await;
-        Press { id: 1, name: "Acme".into() }
-            .insert_pool(pool)
-            .await
-            .expect("press");
-        Writer { id: 1, name: "Ann".into(), press: ForeignKey::unloaded(1) }
-            .insert_pool(pool)
-            .await
-            .expect("writer");
+        Press {
+            id: 1,
+            name: "Acme".into(),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("press");
+        Writer {
+            id: 1,
+            name: "Ann".into(),
+            press: ForeignKey::unloaded(1),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("writer");
         for (id, title, writer) in [(1, "One", Some(1)), (2, "Two", None)] {
             Book {
                 id,
@@ -850,10 +857,16 @@ mod related {
         assert_eq!(sql.matches("JOIN").count(), 1, "{sql}");
         for bad in ["writer__bogus", "title__name", "writer__press__bogus"] {
             let err = Book::objects().values_list(&[bad]).compile().unwrap_err();
-            assert!(matches!(err, QueryError::UnknownField { .. }), "{bad}: {err:?}");
+            assert!(
+                matches!(err, QueryError::UnknownField { .. }),
+                "{bad}: {err:?}"
+            );
         }
         // `defer` names columns to leave out; a related one is not one of them.
-        let err = Book::objects().defer(&["writer__name"]).compile().unwrap_err();
+        let err = Book::objects()
+            .defer(&["writer__name"])
+            .compile()
+            .unwrap_err();
         assert!(matches!(err, QueryError::UnknownField { .. }), "{err:?}");
     }
 

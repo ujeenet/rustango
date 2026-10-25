@@ -352,7 +352,10 @@ mod tests {
         assert!(!mixed_db_mailers(db(), 1, &m2), "same queue re-registered");
         assert!(!mixed_db_mailers((n + 1, None), 2, &m1), "own database");
         assert!(!mixed_db_mailers((n, named), 5, &m1), "own queue name");
-        assert!(!mixed_db_mailers(db(), 2, &m2), "same mailer on the database");
+        assert!(
+            !mixed_db_mailers(db(), 2, &m2),
+            "same mailer on the database"
+        );
         assert!(mixed_db_mailers(db(), 3, &m1), "two mailers on one table");
         assert!(!mixed_db_mailers(db(), 4, &m1), "warned once");
     }

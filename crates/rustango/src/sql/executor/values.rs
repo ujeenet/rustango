@@ -46,7 +46,9 @@ fn select_model_cols(query: &SelectQuery) -> Vec<TypedCol> {
         None => (c.into(), model.field_by_column(c).map(|f| f.ty)),
         Some((alias, col)) => {
             let target = query.joins.iter().find(|j| j.alias == alias);
-            let ty = target.and_then(|j| j.target.field_by_column(col)).map(|f| f.ty);
+            let ty = target
+                .and_then(|j| j.target.field_by_column(col))
+                .map(|f| f.ty);
             (joined_key(alias, col).into(), ty)
         }
     };

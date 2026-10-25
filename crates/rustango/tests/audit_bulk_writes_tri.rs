@@ -586,10 +586,13 @@ mod cascade {
             .expect("clear audit rows");
         for id in [1, 2] {
             Shelf { id }.insert_pool(pool).await.expect("shelf");
-            Rack { id: id * 10, shelf_id: id }
-                .insert_pool(pool)
-                .await
-                .expect("rack");
+            Rack {
+                id: id * 10,
+                shelf_id: id,
+            }
+            .insert_pool(pool)
+            .await
+            .expect("rack");
         }
         // 1 <- 2 <- 3 on rack 10; 4 on rack 20.
         for (id, label, rack_id, parent_id) in [
@@ -598,10 +601,15 @@ mod cascade {
             (3, "y", 10, Some(2)),
             (4, "z", 20, None),
         ] {
-            Crate { id, label: label.into(), rack_id, parent_id }
-                .insert_pool(pool)
-                .await
-                .expect("crate");
+            Crate {
+                id,
+                label: label.into(),
+                rack_id,
+                parent_id,
+            }
+            .insert_pool(pool)
+            .await
+            .expect("crate");
         }
     }
 
@@ -670,7 +678,10 @@ mod cascade {
         let Some(pg) = pool.as_postgres() else {
             return;
         };
-        Shelf { id: 1 }.delete(pg).await.expect("Model::delete(&PgPool)");
+        Shelf { id: 1 }
+            .delete(pg)
+            .await
+            .expect("Model::delete(&PgPool)");
         let n = Shelf::objects()
             .filter("id", 2_i64)
             .delete_on(pg)

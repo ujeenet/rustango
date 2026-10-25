@@ -998,7 +998,8 @@ fn routed_runs() -> &'static Mutex<Vec<(String, String, String)>> {
 
 /// A queue named `label` (`""` = unnamed) whose `Routed` handler records the run.
 async fn routed_queue(pool: &Pool, label: &'static str) -> PgJobQueue {
-    let mut q = PgJobQueue::with_workers_pool(pool.clone(), 2).poll_interval(Duration::from_millis(20));
+    let mut q =
+        PgJobQueue::with_workers_pool(pool.clone(), 2).poll_interval(Duration::from_millis(20));
     if !label.is_empty() {
         q = q.queue_name(label);
     }

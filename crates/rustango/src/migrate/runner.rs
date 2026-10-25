@@ -3678,7 +3678,10 @@ fn referencing_columns(snap: &SchemaSnapshot, table: &str, column: &str) -> Vec<
         .table(table)
         .into_iter()
         .flat_map(|t| t.fields.iter().filter(|f| f.primary_key));
-    let is_pk = pks.next().filter(|_| pks.next().is_none()).is_some_and(|f| f.column == column);
+    let is_pk = pks
+        .next()
+        .filter(|_| pks.next().is_none())
+        .is_some_and(|f| f.column == column);
     let junctions = snap
         .m2m_tables
         .iter()

@@ -738,7 +738,12 @@ impl Builder {
             + Sync
             + 'static,
     {
-        self.insert_action(model_table, action_name, perm, ActionHandler::Pool(Arc::new(handler)))
+        self.insert_action(
+            model_table,
+            action_name,
+            perm,
+            ActionHandler::Pool(Arc::new(handler)),
+        )
     }
 
     /// [`Self::register_action`] for a handler that writes in the admin's
@@ -786,7 +791,12 @@ impl Builder {
             + Sync
             + 'static,
     {
-        self.insert_action(model_table, action_name, perm, ActionHandler::Tx(Arc::new(handler)))
+        self.insert_action(
+            model_table,
+            action_name,
+            perm,
+            ActionHandler::Tx(Arc::new(handler)),
+        )
     }
 
     fn insert_action(

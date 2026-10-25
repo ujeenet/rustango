@@ -339,7 +339,10 @@ impl ClaimError {
 
 impl Claimant<'_> {
     /// The tenant's id, inserting a new tenant first.
-    async fn begin(&mut self, tx: &mut crate::sql::PoolTx<'_>) -> Result<i64, crate::sql::ExecError> {
+    async fn begin(
+        &mut self,
+        tx: &mut crate::sql::PoolTx<'_>,
+    ) -> Result<i64, crate::sql::ExecError> {
         Ok(match self {
             Self::Base(id) => *id,
             Self::NewOrg(org) => {
@@ -839,7 +842,9 @@ impl AdminClaims {
         before: Option<&serde_json::Value>,
     ) -> Result<Self, String> {
         use crate::core::SqlValue;
-        use crate::tenancy::provision::{validate_host_pattern, validate_path_prefix, validate_port};
+        use crate::tenancy::provision::{
+            validate_host_pattern, validate_path_prefix, validate_port,
+        };
         let changed = |column: &str, now: &serde_json::Value| {
             before.is_none_or(|row| row.get(column).unwrap_or(&serde_json::Value::Null) != now)
         };
@@ -871,7 +876,9 @@ impl AdminClaims {
                 };
                 // Stored as claimed: a host matches the `Host` header byte for byte.
                 *value = match &key {
-                    Some(ClaimKey::Host(h) | ClaimKey::PathPrefix(h)) => SqlValue::String(h.clone()),
+                    Some(ClaimKey::Host(h) | ClaimKey::PathPrefix(h)) => {
+                        SqlValue::String(h.clone())
+                    }
                     Some(ClaimKey::Port(n)) => SqlValue::I32(*n),
                     None => SqlValue::Null,
                 };
@@ -901,7 +908,9 @@ impl AdminClaims {
                         *value = SqlValue::String(h.clone());
                         host = Some(h);
                     }
-                    ("org_id", SqlValue::I64(id)) => moved |= changed(column, &serde_json::json!(id)),
+                    ("org_id", SqlValue::I64(id)) => {
+                        moved |= changed(column, &serde_json::json!(id))
+                    }
                     _ => {}
                 }
             }
@@ -923,7 +932,9 @@ impl AdminClaims {
         pk: &crate::core::SqlValue,
     ) -> Result<crate::sql::PoolTx<'static>, ClaimError> {
         match (self, pk_id(pk)) {
-            (Self::OrgBefore(keys), Some(id)) => claim_routing(registry, keys, Claimant::Base(id)).await,
+            (Self::OrgBefore(keys), Some(id)) => {
+                claim_routing(registry, keys, Claimant::Base(id)).await
+            }
             _ => Ok(crate::sql::write_transaction(registry).await?),
         }
     }

@@ -570,13 +570,22 @@ fn invert_recreates_a_check_of_a_dropped_renamed_table_once() {
     };
     let drop_table = Operation::Schema(SchemaChange::DropTable("duo".into()));
     for forward in [
-        vec![drop_check("pair"), rename("pair", "duo"), drop_table.clone()],
+        vec![
+            drop_check("pair"),
+            rename("pair", "duo"),
+            drop_table.clone(),
+        ],
         vec![rename("pair", "duo"), drop_check("duo"), drop_table.clone()],
     ] {
         let out = invert(&forward, &prev).unwrap();
         let adds = out
             .iter()
-            .filter(|op| matches!(op, Operation::Schema(SchemaChange::AddCheckConstraint { .. })))
+            .filter(|op| {
+                matches!(
+                    op,
+                    Operation::Schema(SchemaChange::AddCheckConstraint { .. })
+                )
+            })
             .count();
         assert_eq!(adds, 1, "{out:?}");
         assert!(

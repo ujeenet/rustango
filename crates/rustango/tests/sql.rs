@@ -169,7 +169,11 @@ fn pg_in_list_binds_one_array() {
     );
     assert_eq!(stmt.params, vec![SqlValue::Array(i64s(&[1, 2, 3]))]);
     let not_in = in_stmt(&Postgres, Op::NotIn, i64s(&[1, 2]));
-    assert!(not_in.sql.ends_with(r#"WHERE "id" <> ALL($1)"#), "{}", not_in.sql);
+    assert!(
+        not_in.sql.ends_with(r#"WHERE "id" <> ALL($1)"#),
+        "{}",
+        not_in.sql
+    );
 }
 
 #[test]
@@ -187,7 +191,11 @@ fn pg_in_list_with_null_or_mixed_types_keeps_in() {
         vec![SqlValue::F64(1.5), SqlValue::F64(2.5)],
     ] {
         let stmt = in_stmt(&Postgres, Op::NotIn, list.clone());
-        assert!(stmt.sql.contains(r#"WHERE "id" NOT IN ($1, $2"#), "{}", stmt.sql);
+        assert!(
+            stmt.sql.contains(r#"WHERE "id" NOT IN ($1, $2"#),
+            "{}",
+            stmt.sql
+        );
         assert_eq!(stmt.params, list);
     }
 }
@@ -197,7 +205,11 @@ fn mysql_and_sqlite_keep_one_placeholder_per_element() {
     let my = in_stmt(&rustango::sql::MySql, Op::In, i64s(&[1, 2, 3]));
     assert!(my.sql.ends_with("WHERE `id` IN (?, ?, ?)"), "{}", my.sql);
     let lite = in_stmt(&rustango::sql::Sqlite, Op::NotIn, i64s(&[1, 2]));
-    assert!(lite.sql.ends_with(r#"WHERE "id" NOT IN (?, ?)"#), "{}", lite.sql);
+    assert!(
+        lite.sql.ends_with(r#"WHERE "id" NOT IN (?, ?)"#),
+        "{}",
+        lite.sql
+    );
     assert_eq!(lite.params, i64s(&[1, 2]));
 }
 

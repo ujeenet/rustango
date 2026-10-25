@@ -81,7 +81,9 @@ fn recreate_as_prev(op: &Operation, prev: &SchemaSnapshot, names: &Names<'_>) ->
         }
         _ => return None,
     };
-    names.renames(change.table()).then_some(Operation::Schema(change))
+    names
+        .renames(change.table())
+        .then_some(Operation::Schema(change))
 }
 
 /// Maps names between `prev` and one forward op, through the renames

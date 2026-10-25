@@ -263,13 +263,34 @@ mod tests {
             signature: &sig,
         };
         assert!(verify_delivery(f, SECRET, &h, BODY, age));
-        assert!(!verify_delivery(f, SECRET, &DeliveryHeaders { id: "id-2", ..h }, BODY, age));
-        assert!(!verify_delivery(f, SECRET, &DeliveryHeaders { event: "pong", ..h }, BODY, age));
+        assert!(!verify_delivery(
+            f,
+            SECRET,
+            &DeliveryHeaders { id: "id-2", ..h },
+            BODY,
+            age
+        ));
+        assert!(!verify_delivery(
+            f,
+            SECRET,
+            &DeliveryHeaders { event: "pong", ..h },
+            BODY,
+            age
+        ));
         assert!(!verify_delivery(f, SECRET, &h, b"{}", age));
         assert!(!verify_delivery(f, b"other", &h, BODY, age));
         // The v1 body-only signature is not a v2 one.
         let v1 = sign(f, SECRET, BODY).unwrap();
-        assert!(!verify_delivery(f, SECRET, &DeliveryHeaders { signature: &v1, ..h }, BODY, age));
+        assert!(!verify_delivery(
+            f,
+            SECRET,
+            &DeliveryHeaders {
+                signature: &v1,
+                ..h
+            },
+            BODY,
+            age
+        ));
         // A stale or future timestamp fails even with its own signature.
         for off in [-301, 301] {
             let at = now() + off;
@@ -282,7 +303,16 @@ mod tests {
             };
             assert!(!verify_delivery(f, SECRET, &old, BODY, age), "{off}");
         }
-        assert!(!verify_delivery(f, SECRET, &DeliveryHeaders { timestamp: "x", ..h }, BODY, age));
+        assert!(!verify_delivery(
+            f,
+            SECRET,
+            &DeliveryHeaders {
+                timestamp: "x",
+                ..h
+            },
+            BODY,
+            age
+        ));
     }
 
     const SECRET: &[u8] = b"my-test-secret";

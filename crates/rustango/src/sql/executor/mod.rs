@@ -2145,12 +2145,12 @@ where
 
 // `.values_dict()` / `.values_list()` projection.
 mod values;
-pub(crate) use values::{fetch_values_flat_on, fetch_values_list_on};
 #[allow(unused_imports)]
 pub use values::{
     fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, try_get_flat_my,
     try_get_flat_sqlite, FlatScalar, MaybeMyScalar, MaybePgScalar, MaybeSqliteScalar,
 };
+pub(crate) use values::{fetch_values_flat_on, fetch_values_list_on};
 
 /// Raw SQL on any backend: runs it with bound `SqlValue`
 /// params and decodes each row into `T`.
@@ -3052,7 +3052,10 @@ mod in_chunk_tests {
         let pg = &crate::sql::Postgres;
         assert_eq!(rows_per_batch(pg, 6, 100), 100);
         assert_eq!(rows_per_batch(pg, 6, usize::MAX), 65535 / 6);
-        assert_eq!(rows_per_batch(&crate::sql::Sqlite, 3, usize::MAX), 32766 / 3);
+        assert_eq!(
+            rows_per_batch(&crate::sql::Sqlite, 3, usize::MAX),
+            32766 / 3
+        );
         // A row wider than the cap still gets a batch of its own.
         assert_eq!(rows_per_batch(pg, 70_000, usize::MAX), 1);
         assert_eq!(rows_per_batch(pg, 0, 0), 1);

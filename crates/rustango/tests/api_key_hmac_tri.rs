@@ -132,10 +132,7 @@ async fn a_legacy_argon2_key_is_upgraded_on_use(pool: &Pool) {
 
     assert!(ok(pool, &token).await, "the legacy key was refused");
     assert!(
-        row(pool, &prefix)
-            .await
-            .key_hash
-            .starts_with(MAC),
+        row(pool, &prefix).await.key_hash.starts_with(MAC),
         "the legacy key was not upgraded"
     );
     let held = rustango::passwords::hold_all_hash_slots().await;
@@ -183,7 +180,11 @@ async fn a_key_maced_with_the_raw_secret_still_verifies(pool: &Pool) {
     let hit = ok(pool, &token).await;
     drop(held);
     assert!(hit, "the raw-secret key was refused");
-    assert_eq!(row(pool, &prefix).await.key_hash, old, "the raw-secret key was rewritten");
+    assert_eq!(
+        row(pool, &prefix).await.key_hash,
+        old,
+        "the raw-secret key was rewritten"
+    );
 }
 
 /// tenancy-001 — more parallel calls from one IP than the per-IP limit

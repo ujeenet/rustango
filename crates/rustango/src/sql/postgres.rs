@@ -270,7 +270,10 @@ impl Dialect for Postgres {
             out.push(format!("ALTER ROLE {role} {}", attrs.join(" ")));
         }
         if let (true, Some(db)) = (rights.contains(&AdminRight::CreateSchema), database) {
-            out.push(format!("GRANT CREATE ON DATABASE {} TO {role}", self.quote_ident(db)));
+            out.push(format!(
+                "GRANT CREATE ON DATABASE {} TO {role}",
+                self.quote_ident(db)
+            ));
         }
         out
     }

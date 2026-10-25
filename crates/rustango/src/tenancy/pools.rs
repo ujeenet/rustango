@@ -1338,7 +1338,10 @@ impl TenantPools<sqlx::Postgres> {
         }
     }
 
-    fn scoped_cache_for(&self, of: ScopedUse) -> &RwLock<HashMap<String, CachedPool<sqlx::Postgres>>> {
+    fn scoped_cache_for(
+        &self,
+        of: ScopedUse,
+    ) -> &RwLock<HashMap<String, CachedPool<sqlx::Postgres>>> {
         match of {
             ScopedUse::Queries => &self.scoped_cache,
             ScopedUse::Held => &self.held_cache,

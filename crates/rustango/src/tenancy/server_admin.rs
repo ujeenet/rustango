@@ -279,7 +279,10 @@ const MARIADB_DB_PRIVILEGES: &[&str] = &["DELETE HISTORY"];
 /// Old servers report `5.5.5-10.x.y-MariaDB`.
 fn has_delete_history(version: &str) -> bool {
     version.contains("MariaDB")
-        && mysql_at_least(version.strip_prefix("5.5.5-").unwrap_or(version), (10, 3, 4))
+        && mysql_at_least(
+            version.strip_prefix("5.5.5-").unwrap_or(version),
+            (10, 3, 4),
+        )
 }
 
 /// `user@host` (MySQL: the host follows the last `@`), or a bare user.
@@ -1285,7 +1288,10 @@ mod tests {
     #[test]
     fn an_account_splits_on_the_last_at() {
         let a = split_account("ops@corp@10.0.%", true);
-        assert_eq!((a.user.as_str(), a.host.as_deref()), ("ops@corp", Some("10.0.%")));
+        assert_eq!(
+            (a.user.as_str(), a.host.as_deref()),
+            ("ops@corp", Some("10.0.%"))
+        );
         let a = split_account("app@x", false);
         assert_eq!((a.user.as_str(), a.host), ("app@x", None));
     }
@@ -1310,7 +1316,11 @@ mod tests {
         let lines = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         let rights = |rows: &[(String, bool)], mariadb: bool| {
             let has = |p: &str| rows.iter().any(|(r, _)| r == p);
-            (has("CREATE") && has("DROP"), has("CREATE USER"), mysql_can_grant(rows, mariadb))
+            (
+                has("CREATE") && has("DROP"),
+                has("CREATE USER"),
+                mysql_can_grant(rows, mariadb),
+            )
         };
         // The scaffold's app login: its own databases only.
         let app = mysql_global_privileges(&lines(&[
@@ -1338,9 +1348,7 @@ mod tests {
         ]));
         assert_eq!(rights(&maria, true), (true, true, true));
         // Rights without GRANT OPTION cannot be handed on.
-        let no_opt = mysql_global_privileges(&lines(&[
-            "GRANT ALL PRIVILEGES ON *.* TO `u`@`%`",
-        ]));
+        let no_opt = mysql_global_privileges(&lines(&["GRANT ALL PRIVILEGES ON *.* TO `u`@`%`"]));
         assert_eq!(rights(&no_opt, false), (true, true, false));
     }
 

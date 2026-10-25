@@ -178,7 +178,10 @@ impl RightsReport {
         if p.backend == "sqlite" && !p.can_login {
             r.gate = Some(format!(
                 "The directory `{}` does not exist.",
-                r.dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default()
+                r.dir
+                    .as_ref()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_default()
             ));
         } else if !p.can_login {
             r.refused = Some(
@@ -257,7 +260,10 @@ impl RightsReport {
     /// The rights the server would not report.
     #[must_use]
     pub fn unknown(&self) -> Vec<&RightCheck> {
-        self.checks.iter().filter(|c| c.has == Has::Unknown).collect()
+        self.checks
+            .iter()
+            .filter(|c| c.has == Has::Unknown)
+            .collect()
     }
 
     /// Nothing known blocks the create.
@@ -418,12 +424,18 @@ mod tests {
             ),
             "{text}"
         );
-        assert!(text.contains("GRANT CREATE USER ON *.* TO 'rustango'@'%';"), "{text}");
+        assert!(
+            text.contains("GRANT CREATE USER ON *.* TO 'rustango'@'%';"),
+            "{text}"
+        );
         assert!(
             text.contains("GRANT ALL PRIVILEGES ON *.* TO 'rustango'@'%' WITH GRANT OPTION;"),
             "{text}"
         );
-        assert!(text.contains("root") && text.contains("existing database"), "{text}");
+        assert!(
+            text.contains("root") && text.contains("existing database"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -436,7 +448,10 @@ mod tests {
         p.pg_major = Some(16);
         let r = p.rights();
         assert_eq!(r.missing().len(), 3);
-        assert_eq!(r.fix_sql(), vec!["ALTER ROLE \"app\"\"x\" CREATEDB CREATEROLE;"]);
+        assert_eq!(
+            r.fix_sql(),
+            vec!["ALTER ROLE \"app\"\"x\" CREATEDB CREATEROLE;"]
+        );
     }
 
     #[test]
@@ -446,7 +461,9 @@ mod tests {
         let r = p.rights();
         assert!(r.is_ready(), "{:?}", r.problem());
         assert_eq!(r.unknown().len(), 3);
-        assert!(r.unknown_note().is_some_and(|n| n.contains("the create will try")));
+        assert!(r
+            .unknown_note()
+            .is_some_and(|n| n.contains("the create will try")));
     }
 
     #[test]

@@ -57,7 +57,8 @@ pub use geometry::{Point, SRID_WGS84};
 pub use hstore::HStore;
 pub use range::Range;
 pub use server::{
-    AdminRight, Collation, DatabaseName, InvalidName, Login, LoginName, LoginPassword, ServerAccount,
+    AdminRight, Collation, DatabaseName, InvalidName, Login, LoginName, LoginPassword,
+    ServerAccount,
 };
 pub use vector::Vector;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
@@ -92,8 +93,9 @@ pub use executor::{
     Page, PoolConn, PoolTx, SqlExecutor, TxGuard, UpdaterPool,
 };
 pub(crate) use executor::{
-    bulk_insert_pks_tx, compile_bulk_update_batches, execute_batches_tx, fetch_values_list_on,
-    rows_per_batch, run_delete_statements_tx, fetch_in_chunks, fetch_select_in_chunks, inserted_pk, truncate_tx,
+    bulk_insert_pks_tx, compile_bulk_update_batches, execute_batches_tx, fetch_in_chunks,
+    fetch_select_in_chunks, fetch_values_list_on, inserted_pk, rows_per_batch,
+    run_delete_statements_tx, truncate_tx,
 };
 #[cfg(feature = "admin")]
 pub(crate) use executor::{select_one_row_as_json_tx, select_rows_as_json_tx};
