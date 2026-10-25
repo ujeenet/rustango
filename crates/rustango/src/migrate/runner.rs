@@ -3539,6 +3539,11 @@ fn render_step(
         let end_column = super::rebuild::columns_at_end(table, std::slice::from_ref(column), later);
         for (t, c) in referencing_columns(after, &end, &end_column[0]) {
             if !fk_comes_back_elsewhere(&t, &c, ops, at_op, dialect) {
+                if dialect.fk_needs_same_int_width() {
+                    batch
+                        .deferred_fks
+                        .extend(super::diff::junction_modify_sql(after, &t, &c, dialect));
+                }
                 batch.deferred_fks.extend(
                     super::diff::column_fk_sql(after, &t, &c, dialect, schema)
                         .map_err(MigrateError::Validation)?,
@@ -3641,7 +3646,9 @@ fn fk_comes_back_elsewhere(
         };
         match change {
             _ if Some(i) == at => false,
-            SC::CreateTable(table) => super::rebuild::name_at_end(table, rest) == t,
+            SC::CreateTable(table) | SC::CreateM2MTable { through: table, .. } => {
+                super::rebuild::name_at_end(table, rest) == t
+            }
             SC::AddColumn { table, column }
             | SC::RenameColumn {
                 table,
@@ -3653,17 +3660,31 @@ fn fk_comes_back_elsewhere(
     })
 }
 
-/// The model columns in `snap` whose FK references `table.column`.
+/// The model and junction columns in `snap` whose FK references `table.column`.
 fn referencing_columns(snap: &SchemaSnapshot, table: &str, column: &str) -> Vec<(String, String)> {
-    snap.tables
+    let fields = snap
+        .tables
         .iter()
         .flat_map(|t| t.fields.iter().map(move |f| (t, f)))
         .filter(|(_, f)| {
             f.fk.as_ref()
                 .is_some_and(|r| r.to == table && r.on == column)
         })
-        .map(|(t, f)| (t.name.clone(), f.column.clone()))
-        .collect()
+        .map(|(t, f)| (t.name.clone(), f.column.clone()));
+    // A junction references its end's single pk.
+    let mut pks = snap
+        .table(table)
+        .into_iter()
+        .flat_map(|t| t.fields.iter().filter(|f| f.primary_key));
+    let is_pk = pks.next().filter(|_| pks.next().is_none()).is_some_and(|f| f.column == column);
+    let junctions = snap
+        .m2m_tables
+        .iter()
+        .filter(|_| is_pk)
+        .flat_map(|m| [(&m.src_table, &m.src_col), (&m.dst_table, &m.dst_col)].map(|e| (m, e)))
+        .filter(|(_, (to, _))| *to == table)
+        .map(|(m, (_, c))| (m.through.clone(), c.clone()));
+    fields.chain(junctions).collect()
 }
 
 /// Whether one of `later` re-adds the FK of `table.column`, so a rename

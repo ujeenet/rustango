@@ -59,6 +59,8 @@ pub(super) struct Sql<'d> {
     /// Scope depth whose reads of [`Self::dml_target`] go through a derived
     /// table (MySQL 1093 in an EXISTS).
     pub derive_dml_target: Option<usize>,
+    /// Shallowest scope depth a correlated reference read since cleared.
+    pub outer_reach: Option<usize>,
 }
 
 /// The FROM name of a correlated subquery over its enclosing query's
@@ -137,6 +139,7 @@ impl<'d> Sql<'d> {
             dml_target: None,
             read_dml_target: false,
             derive_dml_target: None,
+            outer_reach: None,
         }
     }
 
@@ -156,6 +159,7 @@ impl<'d> Sql<'d> {
             dml_target: None,
             read_dml_target: false,
             derive_dml_target: None,
+            outer_reach: None,
         }
     }
 
@@ -258,6 +262,11 @@ impl<'d> Sql<'d> {
             self.sql.push_str(" AS ");
             self.write_ident(alias);
         }
+    }
+
+    /// Note a correlated read of the query at scope depth `depth`.
+    fn read_outer(&mut self, depth: usize) {
+        self.outer_reach = Some(self.outer_reach.map_or(depth, |d| d.min(depth)));
     }
 
     /// Run `f`, a subquery of the write whose FROM sits at scope depth
@@ -2104,6 +2113,7 @@ fn write_expr(
                 return Err(SqlError::OuterRefOutsideSubquery { column: col });
             }
             let outer = b.scope_stack[len - 2];
+            b.read_outer(len - 1);
             let qualified = format!("{}.{}", b.d.quote_ident(outer.name), b.d.quote_ident(col),);
             b.sql.push_str(&qualified);
             Ok(())
@@ -4233,13 +4243,22 @@ pub(super) fn write_where_expr(
                 || subquery.offset.is_some()
                 || subquery.compound_limit.is_some()
                 || subquery.compound_offset.is_some();
-            // Only a subquery reading the write's target needs it (1093): a
-            // correlated derived table re-runs per outer row.
+            // Only a subquery reading the write's target needs it (1093). A
+            // correlated one stays a plain IN and fails 1093: MySQL re-runs a
+            // correlated derived table per row, seeing the write's own changes.
             let outer_read = std::mem::take(&mut b.read_dml_target);
+            let outer_reach = b.outer_reach.take();
             let start = b.sql.len();
             write_select(b, subquery)?;
             let reads_target = b.read_dml_target;
-            let wrap = (limited || reads_target) && b.d.in_subquery_limit_needs_derived_table();
+            let correlated = b.outer_reach.is_some_and(|d| d <= b.scope_stack.len());
+            b.outer_reach = match (outer_reach, b.outer_reach) {
+                (Some(a), Some(c)) => Some(a.min(c)),
+                (a, c) => a.or(c),
+            };
+            let wrap = (limited || reads_target)
+                && !(reads_target && correlated)
+                && b.d.in_subquery_limit_needs_derived_table();
             // A materialized derived table hides its read from the enclosing query.
             b.read_dml_target = outer_read || (reads_target && !wrap);
             if wrap {
@@ -4286,6 +4305,7 @@ fn write_rel_correlation(
             })
         }
     };
+    b.read_outer(b.scope_stack.len());
     // A self relation must not hide the outer row.
     let alias = (table == outer_table).then_some(SELF_ALIAS);
     b.write_table(table, alias);

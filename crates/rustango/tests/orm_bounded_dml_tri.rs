@@ -341,6 +341,39 @@ async fn nested_same_table_exists_dml(pool: &Pool) {
     }
 }
 
+/// A correlated IN over the target, in a write that changes the column it
+/// filters on. MySQL may refuse it (1093) but must never write wrong rows:
+/// as a derived table it was re-read per row and saw the earlier writes.
+async fn correlated_same_table_in_dml(pool: &Pool) {
+    use rustango::core::{subquery::outer_ref, Column as _};
+    // Tags of higher rows ranked over 25; only id 1 (rank 50) has none.
+    let higher = Item::objects()
+        .where_(Item::rank.gt_expr(outer_ref("rank")))
+        .filter("rank__gt", 25_i64)
+        .values_list_flat("tag")
+        .compile()
+        .unwrap();
+    let r = Item::objects()
+        .where_not_in_subquery("tag", higher)
+        .update()
+        .set("rank", 0_i64)
+        .execute_pool(pool)
+        .await;
+    match r {
+        Ok(n) => {
+            let rows: Vec<Item> = Item::objects()
+                .order_by(&[("id", false)])
+                .fetch(pool)
+                .await
+                .unwrap();
+            let ranks: Vec<i64> = rows.iter().map(|r| r.rank).collect();
+            assert_eq!((n, ranks), (1, vec![0, 10, 40, 20, 30]));
+        }
+        Err(e) if pool.dialect().name() == "mysql" && e.to_string().contains("1093") => {}
+        Err(e) => panic!("{e}"),
+    }
+}
+
 /// A raw-table relation EXISTS (M2M / generic `where_has`) over the write's
 /// own table; MySQL raised 1093.
 async fn self_relation_where_has_dml(pool: &Pool) {
@@ -569,6 +602,7 @@ tri_dialect_test! {
         same_table_in_subquery_dml,
         same_table_exists_dml,
         nested_same_table_exists_dml,
+        correlated_same_table_in_dml,
         self_relation_where_has_dml,
         nested_and_correlated_in_subquery_dml,
         nested_in_wraps_once,

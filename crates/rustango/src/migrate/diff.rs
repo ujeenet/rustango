@@ -2208,6 +2208,25 @@ pub(crate) fn column_fk_sql(
         .transpose()
 }
 
+/// MySQL's `MODIFY` of junction column `through.column` to the width of the
+/// pk it references in `snap`, so a widened pk takes the FK back (3780).
+pub(crate) fn junction_modify_sql(
+    snap: &SchemaSnapshot,
+    through: &str,
+    column: &str,
+    dialect: &dyn crate::sql::Dialect,
+) -> Option<String> {
+    let Some(ColumnFk::Junction(to)) = column_fk(snap, through, column) else {
+        return None;
+    };
+    let (ty, _, _) = m2m_end(snap, to, dialect);
+    Some(format!(
+        "ALTER TABLE {} MODIFY COLUMN {} {ty} NOT NULL",
+        dialect.quote_ident(through),
+        dialect.quote_ident(column),
+    ))
+}
+
 /// A junction column's FK, which cascades.
 fn m2m_fk_sql(
     through: &str,
