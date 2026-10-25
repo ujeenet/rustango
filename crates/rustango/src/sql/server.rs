@@ -294,7 +294,7 @@ mod tests {
         let u = login("u").with_host("10.0.%").unwrap();
         assert_eq!(
             d.create_database_sql(&db("acme-shop")).unwrap(),
-            "CREATE DATABASE `acme-shop`"
+            "CREATE DATABASE `acme-shop` CHARACTER SET utf8mb4"
         );
         assert_eq!(
             d.create_login_sql(&u, &pw).unwrap(),

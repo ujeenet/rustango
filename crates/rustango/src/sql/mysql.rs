@@ -105,8 +105,13 @@ impl Dialect for MySql {
         format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
     }
 
+    /// utf8mb4 with the server's default collation for it: older MariaDB
+    /// defaults to latin1, and no one collation name exists on both.
     fn create_database_sql(&self, db: &DatabaseName) -> Option<String> {
-        Some(format!("CREATE DATABASE {}", self.quote_ident(db.as_str())))
+        Some(format!(
+            "CREATE DATABASE {} CHARACTER SET utf8mb4",
+            self.quote_ident(db.as_str())
+        ))
     }
 
     fn drop_database_sql(&self, db: &DatabaseName) -> Option<String> {
