@@ -2700,6 +2700,7 @@ use {model_path};
 #[derive(ViewSet)]
 #[viewset(
     model        = {model},
+    // Required: the only fields the API renders and a body may write.
     fields       = "id, ",
     filter_fields = "",
     search_fields = "",
@@ -2751,8 +2752,8 @@ use {crate_root}::viewset::ViewSet;
 use {model_path};
 
 pub fn router() -> Router<()> {{
-    ViewSet::for_model({model}::SCHEMA)
-        // .fields(&["id", "name", "created_at"])    // restrict response shape
+    // The only fields the API renders and a body may write.
+    ViewSet::for_model({model}::SCHEMA, &["id"])
         // .filter_fields(&["status", "owner_id"])    // ?status=draft&owner_id=42
         // .search_fields(&["name", "description"])   // ?search=foo (ILIKE)
         // .ordering(&[("created_at", true)])         // default ORDER BY
@@ -6072,8 +6073,8 @@ use crate::sql::connect_diagnosis::redact as redact_url;
 /// Snapshot of the env vars `manage check --deploy` cares about.
 /// Lifted out so the audit logic is pure (testable without
 /// `unsafe { env::set_var }` race conditions across `cargo test`'s
-/// parallel runners).
-#[derive(Debug, Default, Clone)]
+/// parallel runners). No `Debug`: it holds the session secret.
+#[derive(Default, Clone)]
 pub(crate) struct DeployAuditEnv {
     pub rustango_env: Option<String>,
     pub session_secret: Option<String>,
@@ -7582,6 +7583,12 @@ mod gen_tests {
             "app",
         );
         assert!(live(&pool, "read_only,"), "{pool}");
+        // Both name the write allow-list.
+        assert!(
+            live(&tenant, "ViewSet::for_model(Post::SCHEMA, &[\"id\"])"),
+            "{tenant}"
+        );
+        assert!(live(&pool, "fields       = \"id"), "{pool}");
     }
 
     #[test]
@@ -7710,7 +7717,7 @@ version = "0.1.0"
 
 [dependencies]
 name = "not-this-one"
-rustango = { version = "0.60", features = ["batteries"] }
+rustango = { version = "0.61", features = ["batteries"] }
 "#;
         assert_eq!(
             package_name_from_cargo_toml(manifest).as_deref(),

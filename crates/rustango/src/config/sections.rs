@@ -269,8 +269,30 @@ impl SsoSettings {
 }
 
 /// Connection URL + pool sizing for the primary database.
+///
+/// Build one from the default and assign, as for [`LoggingSettings`];
+/// a struct literal does not compile outside rustango:
+///
+/// ```
+/// let mut db = rustango::config::DatabaseSettings::default();
+/// db.pool_max_size = Some(20);
+/// assert_eq!(db.pool_tuning().max_connections, Some(20));
+/// ```
+///
+/// ```compile_fail
+/// let _ = rustango::config::DatabaseSettings {
+///     url: None,
+///     backend: None,
+///     pool_max_size: Some(20),
+///     pool_min_size: None,
+///     pool_acquire_timeout_secs: None,
+///     pool_idle_timeout_secs: None,
+///     pool_max_lifetime_secs: None,
+/// };
+/// ```
 #[derive(Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct DatabaseSettings {
     /// Connection URL. **Not used to connect yet** (#1379): every pool
     /// the framework opens reads the `DATABASE_URL` env var.

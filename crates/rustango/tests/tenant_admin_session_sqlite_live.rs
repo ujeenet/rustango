@@ -799,7 +799,7 @@ async fn api_create_tenant_checks_the_host() {
     let dir = tempfile::tempdir().unwrap();
     let opts = |host: &str| CreateTenantOpts {
         mode: StorageMode::Database,
-        backend: BackendKind::Sqlite,
+        backend: Some(BackendKind::Sqlite),
         database_url: Some(format!(
             "sqlite://{}?mode=rwc",
             dir.path().join("new.db").display()

@@ -64,10 +64,14 @@ pub mod auth_routes;
 pub mod bootstrap;
 pub mod branding;
 pub mod database_pools;
+/// Saved database servers that tenant databases are provisioned on.
+pub mod db_server;
 /// Taking a tenant out of service — the steps `drop-tenant` and
 /// `purge-tenant` run, callable from anything that is not a terminal.
 pub mod decommission;
 mod error;
+/// A new tenant's first admin and their set-password link.
+pub mod first_admin;
 pub mod impersonation_handoff;
 pub mod jwt_lifecycle;
 pub mod manage;
@@ -86,6 +90,8 @@ pub mod middleware;
 pub mod migrate;
 /// Tenant migrations against a recorded, streamable run.
 pub mod migrate_run;
+/// Purges and password rotations, reported step by step and recorded.
+pub mod operation;
 pub mod operator_console;
 pub mod operators;
 mod org;
@@ -128,6 +134,11 @@ pub mod sweep;
 // built with, schema-mode dispatch only fires on PG (by language),
 // and the inner admin uses the unified `crate::sql::Pool` enum.
 pub mod server;
+/// Creating and dropping a database-mode tenant's database and login.
+pub mod server_admin;
+/// A tenant whose database rustango made on a saved server: rotating its
+/// login's password.
+pub mod server_tenant;
 pub mod tenant_console;
 
 #[cfg(feature = "mcp")]
@@ -172,7 +183,11 @@ pub use permissions::{
 };
 
 pub use database_pools::{DatabaseConn, DatabasePool, DatabasePools};
+pub use db_server::{
+    DbServer, DbServerError, DbServerSpec, PasswordChange, TenantDatabase, TlsMode,
+};
 pub use error::TenancyError;
+pub use first_admin::{CreatedAdmin, FirstAdmin, FirstAdminHandover, Handover, SetPasswordLink};
 #[cfg(all(feature = "tenancy", feature = "sso"))]
 pub use member_auth::{member_sso_router, CurrentMember, MemberAuthConfig, MEMBER_COOKIE};
 pub use migrate::{
@@ -219,7 +234,8 @@ pub(crate) use resolver::{
 };
 pub use routes::RouteConfig;
 pub use secrets::{
-    ChainSecretsResolver, EnvSecretsResolver, LiteralSecretsResolver, SecretsError, SecretsResolver,
+    seal, ChainSecretsResolver, EnvSecretsResolver, LiteralSecretsResolver, SealedSecretsResolver,
+    SecretsError, SecretsResolver, TenantSecrets, PREVIOUS_KEY_VAR, REQUIRE_SEALED_VAR,
 };
 pub use sweep::{
     active_tenants, for_each_tenant, with_tenant, SweepError, TenantOutcome, TenantSweep,

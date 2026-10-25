@@ -36,7 +36,7 @@ async fn fresh_author_table(pool: &sqlx::PgPool) {
 }
 
 fn router(pool: sqlx::PgPool) -> axum::Router {
-    ViewSet::for_model(Author::SCHEMA)
+    ViewSet::for_model(Author::SCHEMA, &["id", "name", "email", "bio", "joined_at"])
         .filter_fields(&["name", "email"])
         .search_fields(&["name", "email", "bio"])
         .ordering(&[("id", false)])

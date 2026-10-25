@@ -177,12 +177,10 @@ async fn create_tenant_database_mode_requires_database_url() {
         &["create-tenant", &slug, "--mode", "database"],
     )
     .await;
-    // The message no longer names `--database-url`: the check moved
-    // into the provisioning engine, which the console and the webhook
-    // share, and neither of those has a command-line flag to suggest.
+    // The CLI refuses before the engine, naming both of its sources.
     let err = res.unwrap_err();
     assert!(
-        format!("{err}").contains("database mode needs a database URL"),
+        format!("{err}").contains("database mode needs --database-url <url> or --server <name>"),
         "expected database_url validation error, got: {err}"
     );
 

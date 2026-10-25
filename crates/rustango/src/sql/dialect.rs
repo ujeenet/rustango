@@ -17,6 +17,7 @@ use crate::core::{
     FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
 };
 
+use super::server::{Collation, DatabaseName, Login, LoginPassword};
 use super::{CompiledStatement, SqlError};
 
 /// Write `<col> ?| ARRAY[$1, $2, …]`, shared by both default
@@ -995,6 +996,117 @@ pub trait Dialect: Send + Sync {
     /// A `COMMENT ON TABLE` statement to run after `CREATE TABLE`.
     /// [`Self::column_comment_statement`] for the whole table.
     fn table_comment_statement(&self, _table: &str, _comment: &str) -> Option<String> {
+        None
+    }
+
+    // ---- Server administration: tenant databases and logins ----
+    // `None` / empty where the backend has no such object (SQLite).
+
+    /// `CREATE DATABASE` for `db`, with `collation` where the backend
+    /// takes one.
+    fn create_database_sql(
+        &self,
+        _db: &DatabaseName,
+        _collation: Option<&Collation>,
+    ) -> Option<String> {
+        None
+    }
+
+    /// `DROP DATABASE IF EXISTS` for `db`.
+    fn drop_database_sql(&self, _db: &DatabaseName) -> Option<String> {
+        None
+    }
+
+    /// Drop `db` even with sessions open, where the backend can.
+    fn force_drop_database_sql(&self, _db: &DatabaseName) -> Option<String> {
+        None
+    }
+
+    /// One row, one count: whether the server knows `collation`.
+    fn collation_exists_sql(&self, _collation: &Collation) -> Option<CompiledStatement> {
+        None
+    }
+
+    /// One row, one count: whether database `db` exists.
+    fn database_exists_sql(&self, _db: &DatabaseName) -> Option<CompiledStatement> {
+        None
+    }
+
+    /// One row, one count: whether `login` exists.
+    fn login_exists_sql(&self, _login: &Login) -> Option<CompiledStatement> {
+        None
+    }
+
+    /// Create `login` with `password`. The password is escaped here.
+    fn create_login_sql(&self, _login: &Login, _password: &LoginPassword) -> Option<String> {
+        None
+    }
+
+    /// Drop `login` if it exists.
+    fn drop_login_sql(&self, _login: &Login) -> Option<String> {
+        None
+    }
+
+    /// Give `login` a new password. `retain_current` keeps the old one
+    /// valid too where the backend has dual passwords (MySQL 8.0.14+).
+    fn alter_login_password_sql(
+        &self,
+        _login: &Login,
+        _password: &LoginPassword,
+        _retain_current: bool,
+    ) -> Option<String> {
+        None
+    }
+
+    /// Forget the password `alter_login_password_sql` retained.
+    fn discard_old_password_sql(&self, _login: &Login) -> Option<String> {
+        None
+    }
+
+    /// One row: may the current login drop `db`, alter and drop `login`,
+    /// and end `login`'s sessions. `NULL` for an object that is absent.
+    /// `None` where the server-wide rights the probe reads are enough.
+    fn tenant_rights_sql(&self, _db: &DatabaseName, _login: &Login) -> Option<CompiledStatement> {
+        None
+    }
+
+    /// One row, two counts: sessions in `db` whose application name is
+    /// `tag`, and the others.
+    fn database_sessions_sql(&self, _db: &DatabaseName, _tag: &str) -> Option<CompiledStatement> {
+        None
+    }
+
+    /// End the sessions in `db` whose application name is `tag`. One row,
+    /// one count.
+    fn end_sessions_sql(&self, _db: &DatabaseName, _tag: &str) -> Option<CompiledStatement> {
+        None
+    }
+
+    /// Statements on the server connection that give `login` all rights
+    /// on `db` and keep other logins out of it.
+    fn grant_database_sql(&self, _db: &DatabaseName, _login: &Login) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Statements run inside the new database itself, as the admin.
+    fn grant_in_database_sql(&self, _login: &Login) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// One row, one text column: the server version.
+    fn server_version_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// The current login's server-level rights. The row shape is the
+    /// dialect's own; `tenancy::server_admin` reads it.
+    fn login_privileges_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Run on each admin connection before any DDL, so the emitted
+    /// literals mean what the emitter assumed.
+    fn admin_session_sql(&self) -> Option<&'static str> {
         None
     }
 

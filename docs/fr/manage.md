@@ -482,8 +482,8 @@ Montez-le avec : `.merge(PostViewSet::router("/api/posts", pool.clone()))`.
 
 Modèle tenant — **pas un derive**. Il émet un `pub fn router() -> Router<()>`
 construit à partir de
-`ViewSet::for_model(Post::SCHEMA).tenant_router("/api/posts")`, avec toute la
-chaîne du builder (`fields` / `filter_fields` / `search_fields` / `ordering` /
+`ViewSet::for_model(Post::SCHEMA, &["id"]).tenant_router("/api/posts")`, avec le reste de la
+chaîne du builder (`filter_fields` / `search_fields` / `ordering` /
 `page_size` / `permissions_for_model` / `read_only`) ébauchée en lignes
 commentées. La connexion est résolue par requête via l'extracteur `Tenant` au
 lieu d'être capturée une fois au montage, donc un seul `router()` sert tous les
@@ -651,7 +651,7 @@ Affiche la version du framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.60.12
+rustango 0.61.0
 ```
 
 ### `about`
@@ -664,7 +664,7 @@ support en cas de problème.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.60.12
+  version:        0.61.0
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -1004,6 +1004,32 @@ ligne propre : il ne peut donc pas être retiré ici — changez-le avec
 [`edit-tenant --host-pattern`](#edit-tenant-slug-options). Il n'y a
 délibérément pas de `rename-host` : retirez puis rajoutez, pour que le
 changement atteigne aussi les autres pods en cours d'exécution.
+
+### Serveurs de bases de données
+
+Enregistrez une fois le login d'administration d'un serveur, pour y créer les
+bases des tenants sans SQL. Le backend est celui du registre.
+
+```bash
+cargo run -- add-db-server main --host db.internal --user admin --tls require
+cargo run -- test-db-server main
+cargo run -- list-db-servers
+cargo run -- edit-db-server main --port 6432
+cargo run -- remove-db-server main
+```
+
+| Verbe | Ce qu'il fait |
+|---|---|
+| `add-db-server <name> --host <h> [--port <n>] --user <u> [--tls <mode>] [--maintenance-db <db>]` | Enregistre un serveur. SQLite : `--sqlite-dir <dir>` à la place |
+| `list-db-servers` | Tous les serveurs enregistrés, sans secrets |
+| `test-db-server <name>` | Se connecte et affiche la version et les droits du login ; échoue s'il ne peut pas provisionner |
+| `edit-db-server <name> [mêmes options] [--prompt-password \| --clear-password] [--on\|--off]` | Modifie un serveur ; `none` vide `--tls` ou `--maintenance-db` |
+| `remove-db-server <name>` | Le supprime ; refusé tant que la base d'un tenant s'y trouve |
+
+Le mot de passe est demandé sans écho, ou lu dans la variable nommée par
+`--password-env <VAR>` ; `--no-password` n'en enregistre aucun. Il ne vient
+jamais d'argv et n'est jamais affiché. Il est stocké scellé, donc
+`RUSTANGO_SECRET_KEY` doit être défini.
 
 ### `create-operator <username> --password <pwd>`
 
@@ -1684,6 +1710,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 | `migrate-tenants` / `migrate-registry` | Applique les migrations à tous les tenants, ou au registre |
 | `migrate-tenant-storage <slug> --to schema\|database` | Déplace un tenant d'un mode de stockage à l'autre |
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Routage par hôte |
+| `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Serveurs de bases de données enregistrés |
 | `test-tenant-connection` | Vérifie que la base d'un tenant est joignable |
 | `prewarm-pools` | Ouvre les pools de tenants avant la première requête |
 | `run-server` / `runserver` | Lance le serveur multi-tenant |

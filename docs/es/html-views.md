@@ -181,10 +181,16 @@ inserta la fila y hace un `303` a `success_url`:
 ```rust
 use rustango::template_views::CreateView;
 
-let app = CreateView::for_model(Post::SCHEMA)
+let app = CreateView::for_model(Post::SCHEMA, &["title", "body"])
     .success_url("/posts")         // where to send the browser after a save
     .router("/posts", Arc::new(tera), pool);
 ```
+
+La lista de campos es obligatoria. Es la lista blanca de escritura: el formulario
+muestra solo esos campos y cualquier otra clave enviada (por ejemplo `author_id=1`)
+se ignora. En UpdateView, un campo listado que no llega conserva su valor; solo un
+`bool` pasa a `false`, porque una casilla sin marcar no envía nada. En CreateView,
+un campo listado con default de columna que no llega recibe ese default.
 
 La plantilla del formulario (`posts_form.html`) se comparte con UpdateView. `is_update`
 distingue las dos, y **`form`** transporta tanto los campos como cualquier mensaje de
@@ -221,7 +227,7 @@ se vuelve a renderizar con los mensajes y un estado `422` en lugar de guardar:
 ```rust
 use rustango::forms::FormErrors;
 
-CreateView::for_model(Post::SCHEMA)
+CreateView::for_model(Post::SCHEMA, &["title", "body"])
     .validator(|data| {
         let mut errs = FormErrors::default();
         if data.get("title").map_or(true, |t| t.len() < 5) {
@@ -242,7 +248,7 @@ fila (`object` está poblado, `is_update` es `true`); `POST` actualiza y hace un
 ```rust
 use rustango::template_views::UpdateView;
 
-UpdateView::for_model(Post::SCHEMA)
+UpdateView::for_model(Post::SCHEMA, &["title", "body"])
     .success_url("/posts")
     .router("/posts", Arc::new(tera), pool);
 ```
@@ -264,8 +270,8 @@ Monta las cinco en el mismo prefijo y tienes un CRUD HTML completo:
 let app = axum::Router::new()
     .merge(ListView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
-    .merge(CreateView::for_model(Post::SCHEMA).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
-    .merge(UpdateView::for_model(Post::SCHEMA).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
+    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
+    .merge(UpdateView::for_model(Post::SCHEMA, &["title", "body"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
     .merge(DeleteView::for_model(Post::SCHEMA).success_url("/posts").router("/posts", tera, pool));
 ```
 
@@ -351,7 +357,7 @@ use rustango::template_views::{ListView, DetailView};
 
 let app = axum::Router::new()
     // JSON for API clients:
-    .merge(ViewSet::for_model(Post::SCHEMA).router_pool("/api/posts", pool.clone()))
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router_pool("/api/posts", pool.clone()))
     // HTML pages for browsers:
     .merge(ListView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera, pool));

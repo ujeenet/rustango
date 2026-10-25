@@ -84,7 +84,7 @@ pub fn api(
 /// Promotions over the API. The global scope hides `visible = false`
 /// rows from list, detail, update and delete (#1746).
 fn promotions(pool: &Pool) -> Router<AppState> {
-    ViewSet::for_model(Promotion::SCHEMA)
+    ViewSet::for_model(Promotion::SCHEMA, &["id", "code", "label", "amount_cents", "visible", "deleted_at"])
         .filter_fields(&["code", "visible"])
         .search_fields(&["code"])
         .limit_offset_pagination()
@@ -94,10 +94,13 @@ fn promotions(pool: &Pool) -> Router<AppState> {
 
 /// The card code is the primary key, and a create keeps it (#1671).
 fn gift_cards(pool: &Pool) -> Router<AppState> {
-    ViewSet::for_model(GiftCard::SCHEMA)
+    ViewSet::for_model(GiftCard::SCHEMA, &["code", "balance_cents"])
         .router_pool("/api/v1/gift-cards", pool.clone())
         .with_state(())
 }
+
+/// The only columns the promotion form renders and writes.
+const PROMO_FIELDS: &[&str] = &["code", "label", "amount_cents", "visible"];
 
 /// Server-rendered promotion pages. They apply the global scope like
 /// the API (#1746), and every POST needs the CSRF token (#1669).
@@ -110,13 +113,13 @@ fn promotion_pages(pool: &Pool) -> Router<AppState> {
             tera.clone(),
             pool.clone(),
         ))
-        .merge(CreateView::for_model(s).success_url("/promos").router(
+        .merge(CreateView::for_model(s, PROMO_FIELDS).success_url("/promos").router(
             "/promos",
             tera.clone(),
             pool.clone(),
         ))
         .merge(DetailView::for_model(s).router("/promos", tera.clone(), pool.clone()))
-        .merge(UpdateView::for_model(s).success_url("/promos").router(
+        .merge(UpdateView::for_model(s, PROMO_FIELDS).success_url("/promos").router(
             "/promos",
             tera.clone(),
             pool.clone(),
@@ -237,7 +240,7 @@ fn cache_namespace() -> String {
 
 /// Limit/offset pagination, filtering and search.
 fn products(pool: &Pool) -> Router<AppState> {
-    ViewSet::for_model(Product::SCHEMA)
+    ViewSet::for_model(Product::SCHEMA, &["id", "sku", "name", "description", "price_cents", "active", "created_at"])
         .serializer::<ProductSerializer>()
         .filter_fields(&["active", "sku"])
         .search_fields(&["sku", "name"])
@@ -249,6 +252,18 @@ fn products(pool: &Pool) -> Router<AppState> {
         .with_state(())
 }
 
+/// What the two order APIs render and write.
+const ORDER_FIELDS: &[&str] = &[
+    "id",
+    "reference",
+    "customer_id",
+    "assigned_picker_id",
+    "note",
+    "status",
+    "total_cents",
+    "placed_at",
+];
+
 /// Cursor pagination — deliberately the *other* style, so both
 /// paginators are exercised by the same soak.
 ///
@@ -258,7 +273,7 @@ fn products(pool: &Pool) -> Router<AppState> {
 /// rejected non-integers per request — and this endpoint was dead on
 /// all six instances until the soak's first run found it.
 fn orders(pool: &Pool) -> Router<AppState> {
-    ViewSet::for_model(Order::SCHEMA)
+    ViewSet::for_model(Order::SCHEMA, ORDER_FIELDS)
         .serializer::<OrderSerializer>()
         .filter_fields(&["status", "customer_id"])
         .cursor_pagination_desc("placed_at")
@@ -283,7 +298,7 @@ fn orders(pool: &Pool) -> Router<AppState> {
 /// assigned_picker_id is of type bigint but expression is of type
 /// text"*.
 fn orders_raw(pool: &Pool) -> Router<AppState> {
-    ViewSet::for_model(Order::SCHEMA)
+    ViewSet::for_model(Order::SCHEMA, ORDER_FIELDS)
         .filter_fields(&["status", "customer_id"])
         .limit_offset_pagination()
         .router_pool("/api/v1/orders-raw", pool.clone())
@@ -295,7 +310,7 @@ fn orders_raw(pool: &Pool) -> Router<AppState> {
 /// back and leave zero rows (#1403). `unique_together(order_id,
 /// product_id)` on the model is what makes that provokable from a test.
 fn order_lines(pool: &Pool) -> Router<AppState> {
-    ViewSet::for_model(OrderLine::SCHEMA)
+    ViewSet::for_model(OrderLine::SCHEMA, &["id", "order_id", "product_id", "quantity", "unit_price_cents"])
         .filter_fields(&["order_id", "product_id"])
         .page_size(50)
         .router_pool("/api/v1/order-lines", pool.clone())
@@ -303,7 +318,7 @@ fn order_lines(pool: &Pool) -> Router<AppState> {
 }
 
 fn customers(pool: &Pool) -> Router<AppState> {
-    ViewSet::for_model(Customer::SCHEMA)
+    ViewSet::for_model(Customer::SCHEMA, &["id", "email", "full_name", "loyalty_tier", "created_at"])
         .serializer::<CustomerSerializer>()
         .filter_fields(&["loyalty_tier"])
         .search_fields(&["email", "full_name"])
@@ -315,7 +330,7 @@ fn customers(pool: &Pool) -> Router<AppState> {
 /// Writable on purpose: the reconciliation job writes the same rows, so
 /// the soak generates real contention rather than simulating it.
 fn inventory(pool: &Pool) -> Router<AppState> {
-    ViewSet::for_model(InventoryItem::SCHEMA)
+    ViewSet::for_model(InventoryItem::SCHEMA, &["id", "product_id", "location", "on_hand", "updated_at"])
         .filter_fields(&["product_id", "location"])
         .limit_offset_pagination()
         .router_pool("/api/v1/inventory", pool.clone())

@@ -55,6 +55,9 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// operator console cannot create tenants — see that method for
     /// why this is opt-in rather than on by default.
     provisioning_dir: Option<std::path::PathBuf>,
+    /// Mails a new tenant's first admin their set-password link.
+    #[cfg(feature = "email")]
+    first_admin_mail: Option<(crate::email::BoxedMailer, String)>,
     /// How long `serve` lets open connections finish after SIGTERM.
     drain_timeout: std::time::Duration,
     /// A `running` run silent this long is closed at boot.
@@ -172,6 +175,8 @@ impl<DB: Database> Builder<DB> {
             routes: crate::tenancy::RouteConfig::default(),
             health_endpoints: false,
             provisioning_dir: None,
+            #[cfg(feature = "email")]
+            first_admin_mail: None,
             drain_timeout: crate::shutdown::DEFAULT_DRAIN_TIMEOUT,
             stale_run_after: crate::tenancy::provision_store::STALE_RUN_AFTER,
             static_dirs: Vec::new(),
@@ -328,6 +333,19 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
+    /// Mail a new tenant's first admin their set-password link, from
+    /// `from`. Without it the console shows the link to the operator once.
+    #[cfg(feature = "email")]
+    #[must_use]
+    pub fn first_admin_mailer(
+        mut self,
+        mailer: crate::email::BoxedMailer,
+        from: impl Into<String>,
+    ) -> Self {
+        self.first_admin_mail = Some((mailer, from.into()));
+        self
+    }
+
     /// Auto-mount a [`crate::static_files::static_router`] at `prefix`
     /// serving files under `root_dir` on the tenant subdomain. Repeat
     /// to mount more than one directory. Wired by
@@ -431,7 +449,31 @@ impl<DB: Database> Builder<DB> {
         // `TenantPools` is behind an `Arc` by this point, so rebuild
         // rather than mutate — the registry pool itself is cheap to
         // clone (it is an `Arc` internally).
-        self.pools = Arc::new(TenantPools::<DB>::new(self.registry.clone()).config(config));
+        // `fresh` keeps a resolver installed by `secrets`.
+        self.pools = Arc::new(self.pools.fresh().config(config));
+        self
+    }
+
+    /// Open tenant `database_url` references with `resolver` instead of
+    /// [`ChainSecretsResolver::standard`](crate::tenancy::ChainSecretsResolver::standard).
+    #[must_use]
+    pub fn secrets(mut self, resolver: impl crate::tenancy::SecretsResolver) -> Self {
+        let config = self.pools.pool_config().clone();
+        let mut pools =
+            TenantPools::<DB>::with_secrets(self.registry.clone(), resolver).config(config);
+        if self.pools.secrets().requires_sealed() {
+            pools = pools.require_sealed_secrets();
+        }
+        self.pools = Arc::new(pools);
+        self
+    }
+
+    /// Refuse to store a tenant URL with a password unsealed (no key set,
+    /// or a resolver that cannot open `enc:`). Also on with
+    /// `RUSTANGO_REQUIRE_SEALED_SECRETS=1`.
+    #[must_use]
+    pub fn require_sealed_secrets(mut self) -> Self {
+        self.pools = Arc::new(self.pools.fresh().require_sealed_secrets());
         self
     }
 
@@ -837,12 +879,21 @@ impl<DB: Database> Builder<DB> {
                 ),
             }
         }
+        // Links are signed with the tenant admin's own secret and path.
+        let handover = crate::tenancy::FirstAdminHandover::new(&session_secret_for_tenant)
+            .set_password_path(self.routes.change_password_url.clone());
+        #[cfg(feature = "email")]
+        let handover = match self.first_admin_mail {
+            Some((mailer, from)) => handover.mailer(mailer, from),
+            None => handover,
+        };
         let provisioner = self.provisioning_dir.map(|dir| {
             crate::tenancy::provision::Provisioner::new(
                 self.pools.clone(),
                 self.registry_url.clone(),
                 dir,
             )
+            .with_first_admin_handover(handover)
             .erased()
         });
         let operator_admin = operator_console::router_full_unlogged(
@@ -1229,6 +1280,53 @@ pub(crate) mod resolver_tests {
         let body = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
         let want = listener.local_addr().unwrap().port().to_string();
         assert_eq!(&body[..], want.as_bytes());
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod secrets_tests {
+    use super::Builder;
+
+    struct Fixed;
+
+    #[async_trait::async_trait]
+    impl crate::tenancy::SecretsResolver for Fixed {
+        async fn resolve(&self, _: &str) -> Result<String, crate::tenancy::SecretsError> {
+            Ok("fixed".into())
+        }
+    }
+
+    fn builder() -> Builder<sqlx::Sqlite> {
+        let pool = sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy");
+        Builder::from_pool(pool, "sqlite::memory:", "localhost")
+    }
+
+    /// A built server opens `env://` references, before and after
+    /// `tenant_pools` rebuilds the pool set.
+    #[tokio::test]
+    async fn the_default_resolver_reads_env_references() {
+        let path = std::env::var("PATH").expect("PATH");
+        let b = builder();
+        assert_eq!(b.pools().resolve_secret("env://PATH").await.unwrap(), path);
+        let b = b.tenant_pools(crate::tenancy::TenantPoolsConfig::default());
+        assert_eq!(b.pools().resolve_secret("env://PATH").await.unwrap(), path);
+    }
+
+    #[tokio::test]
+    async fn a_custom_resolver_survives_tenant_pools() {
+        let b = builder()
+            .secrets(Fixed)
+            .tenant_pools(crate::tenancy::TenantPoolsConfig::default());
+        assert_eq!(b.pools().resolve_secret("x").await.unwrap(), "fixed");
+    }
+
+    #[tokio::test]
+    async fn require_sealed_survives_rebuilds() {
+        let b = builder()
+            .require_sealed_secrets()
+            .secrets(Fixed)
+            .tenant_pools(crate::tenancy::TenantPoolsConfig::default());
+        assert!(b.pools().secrets().requires_sealed());
     }
 }
 

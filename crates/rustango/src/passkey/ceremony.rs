@@ -229,15 +229,13 @@ fn extract_auth_data(value: &ciborium::value::Value) -> Result<Vec<u8>, PasskeyE
 mod tests {
     use super::*;
     use ciborium::value::{Integer, Value};
-    use p256::ecdsa::{signature::Signer as _, Signature, SigningKey};
+    use p256::ecdsa::{signature::Signer as _, Signature};
     use sha2::{Digest, Sha256};
 
-    fn os_rng() -> p256::elliptic_curve::rand_core::OsRng {
-        p256::elliptic_curve::rand_core::OsRng
-    }
+    use crate::passkey::verify::tests::random_signing_key;
 
     fn cose_key_of(vk: &p256::ecdsa::VerifyingKey) -> Vec<u8> {
-        let pt = vk.to_encoded_point(false);
+        let pt = vk.to_sec1_point(false);
         let map = Value::Map(vec![
             (
                 Value::Integer(Integer::from(1)),
@@ -312,7 +310,7 @@ mod tests {
     fn full_register_then_authenticate_round_trip() {
         let rp_id = "example.com";
         let origins = vec!["https://example.com".to_owned()];
-        let sk = SigningKey::random(&mut os_rng());
+        let sk = random_signing_key();
         let cose = cose_key_of(sk.verifying_key());
         let cred_id = b"credential-handle-1";
 
@@ -368,7 +366,7 @@ mod tests {
     ) -> Result<AuthenticationOutcome, PasskeyError> {
         let rp_id = "example.com";
         let origins = vec!["https://example.com".to_owned()];
-        let sk = SigningKey::random(&mut os_rng());
+        let sk = random_signing_key();
         let cose = cose_key_of(sk.verifying_key());
 
         let challenge = generate_challenge();

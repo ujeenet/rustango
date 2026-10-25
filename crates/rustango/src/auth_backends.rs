@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 /// read one field: a password backend reads `username` and
 /// `password`, [`RemoteUserBackend`] reads `remote_user`, an OAuth
 /// callback puts its token in `extras`.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct Credentials {
     /// Login handle, set by any form-based flow.
     pub username: Option<String>,
@@ -64,6 +64,19 @@ pub struct Credentials {
     /// Anything else a backend needs, such as a token, a provider
     /// name or an MFA code. Strings only; parse them yourself.
     pub extras: HashMap<String, String>,
+}
+
+/// Redacted: the password and `extras` values (tokens, MFA codes).
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let extras: Vec<&String> = self.extras.keys().collect();
+        f.debug_struct("Credentials")
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("remote_user", &self.remote_user)
+            .field("extras", &extras)
+            .finish()
+    }
 }
 
 impl Credentials {
@@ -316,6 +329,15 @@ impl AuthBackend for RemoteUserBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credentials_debug_hides_the_password_and_extras() {
+        let mut c = Credentials::password("alice", "hunter2-pw");
+        c.extras.insert("mfa".into(), "123456".into());
+        let s = format!("{c:?}");
+        assert!(s.contains("alice") && s.contains("mfa"), "{s}");
+        assert!(!s.contains("hunter2-pw") && !s.contains("123456"), "{s}");
+    }
 
     /// Accepts one fixed `(username, password)` pair.
     struct FixedPasswordBackend {

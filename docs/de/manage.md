@@ -470,8 +470,8 @@ Einbinden mit: `.merge(PostViewSet::router("/api/posts", pool.clone()))`.
 
 Tenant-Vorlage — **kein Derive**. Sie erzeugt ein
 `pub fn router() -> Router<()>`, gebaut aus
-`ViewSet::for_model(Post::SCHEMA).tenant_router("/api/posts")`, mit der ganzen
-Builder-Kette (`fields` / `filter_fields` / `search_fields` / `ordering` /
+`ViewSet::for_model(Post::SCHEMA, &["id"]).tenant_router("/api/posts")`, mit der restlichen
+Builder-Kette (`filter_fields` / `search_fields` / `ordering` /
 `page_size` / `permissions_for_model` / `read_only`) als auskommentierte Zeilen
 vorgestubbt. Die Verbindung wird pro Anfrage über den `Tenant`-Extractor
 aufgelöst statt einmalig beim Einbinden eingefangen — ein `router()` bedient also
@@ -636,7 +636,7 @@ Gibt die Version des **Rustango**-Frameworks aus.
 
 ```bash
 $ cargo run -- version
-rustango 0.60.12
+rustango 0.61.0
 ```
 
 ### `about`
@@ -648,7 +648,7 @@ Umgebungsvariablen. Legen Sie dies in Support-Tickets, wenn etwas nicht stimmt.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.60.12
+  version:        0.61.0
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -976,6 +976,33 @@ eigene Zeile, kann hier also nicht entfernt werden — ändern Sie ihn mit
 [`edit-tenant --host-pattern`](#edit-tenant-slug-options). Ein `rename-host`
 gibt es bewusst nicht: entfernen und neu hinzufügen, damit die Änderung auch
 andere laufende Pods erreicht.
+
+### Datenbankserver
+
+Speichern Sie den Admin-Login eines Datenbankservers einmal, damit
+Tenant-Datenbanken ohne SQL darauf angelegt werden können. Das Backend ist das
+der Registry.
+
+```bash
+cargo run -- add-db-server main --host db.internal --user admin --tls require
+cargo run -- test-db-server main
+cargo run -- list-db-servers
+cargo run -- edit-db-server main --port 6432
+cargo run -- remove-db-server main
+```
+
+| Verb | Was es tut |
+|---|---|
+| `add-db-server <name> --host <h> [--port <n>] --user <u> [--tls <mode>] [--maintenance-db <db>]` | Speichert einen Server. SQLite: stattdessen `--sqlite-dir <dir>` |
+| `list-db-servers` | Alle gespeicherten Server, ohne Geheimnisse |
+| `test-db-server <name>` | Meldet sich an und zeigt Version und Rechte des Admin-Logins; schlägt fehl, wenn nicht provisioniert werden kann |
+| `edit-db-server <name> [gleiche Flags] [--prompt-password \| --clear-password] [--on\|--off]` | Ändert einen Server; `none` leert `--tls` oder `--maintenance-db` |
+| `remove-db-server <name>` | Löscht ihn; abgelehnt, solange eine Tenant-Datenbank darauf liegt |
+
+Das Passwort wird verdeckt abgefragt oder aus der mit `--password-env <VAR>`
+benannten Variable gelesen; `--no-password` speichert keines. Es kommt nie aus
+argv und wird nie ausgegeben. Es wird versiegelt gespeichert, daher muss
+`RUSTANGO_SECRET_KEY` gesetzt sein.
 
 ### `create-operator <username> --password <pwd>`
 
@@ -1646,6 +1673,7 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 | `migrate-tenants` / `migrate-registry` | Wendet Migrationen über alle Tenants oder auf die Registry an |
 | `migrate-tenant-storage <slug> --to schema\|database` | Verschiebt einen Tenant zwischen Speichermodi |
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host-Routing |
+| `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Gespeicherte Datenbankserver |
 | `test-tenant-connection` | Prüft, ob die Datenbank eines Tenants erreichbar ist |
 | `prewarm-pools` | Öffnet Tenant-Pools vor dem ersten Request |
 | `run-server` / `runserver` | Startet den Multi-Tenant-Server |

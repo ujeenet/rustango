@@ -133,6 +133,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | `create-superuser` / `set-superuser` | Create a superuser, or promote an existing user |
 | `create-user` / `create-operator` | Create a tenant user or an operator |
 | `reset-password` / `change-password` | Tenant-user password recovery |
+| `set-password-link <slug> <username>` | Print a single-use link for the user to set their own password |
 | `reset-operator-password` / `change-operator-password` | Operator password recovery |
 | `set-operator-active` | Enable or disable an operator |
 | `create-role` / `assign-role` / `revoke-role` / `list-roles` | Roles |
@@ -146,13 +147,23 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 |---|---|
 | `create-tenant` / `edit-tenant` / `list-tenants` | Provision, edit, list |
 | `drop-tenant` / `purge-tenant` | Deactivate (reversible) / destroy (not) |
+| `rotate-tenant-password <slug>` | New password for a login rustango made on a saved server |
 | `migrate-tenants` / `migrate-registry` | Apply migrations across tenants, or to the registry |
 | `migrate-tenant-storage <slug> --to schema\|database` | Move a tenant between storage modes |
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host routing |
+| `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Saved database servers |
 | `test-tenant-connection` | Verify a tenant's database is reachable |
 | `prewarm-pools` | Open tenant pools ahead of first request |
 | `run-server` / `runserver` | Run the multi-tenant server |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup and interactive entry points |
+
+**First admin.** `create-tenant <slug> … --admin-email <e> [--admin-username <u>]`
+creates a superuser after the migrations, before the tenant goes live; if that
+fails, the run rolls back. The admin gets no password. The verb prints a
+set-password link once: it works once, expires in 72 hours, and only on this
+tenant. Give it to the admin. It is signed with the server's tenant session key
+(`RUSTANGO_SESSION_SECRET`, or the dev key file), so run the CLI with the same
+key as the server. `set-password-link <slug> <username>` prints a fresh one.
 
 ### Audit **T**
 
@@ -566,8 +577,8 @@ pub struct PostViewSet;
 Mount with: `.merge(PostViewSet::router("/api/posts", pool.clone()))`.
 
 Tenant template — **not a derive**. It emits a `pub fn router() -> Router<()>`
-built from `ViewSet::for_model(Post::SCHEMA).tenant_router("/api/posts")`, with
-the whole builder chain (`fields` / `filter_fields` / `search_fields` /
+built from `ViewSet::for_model(Post::SCHEMA, &["id"]).tenant_router("/api/posts")`, with
+the rest of the builder chain (`filter_fields` / `search_fields` /
 `ordering` / `page_size` / `permissions_for_model` / `read_only`) stubbed out as
 commented lines. The connection is resolved per request through the `Tenant`
 extractor rather than captured once at mount time, so one `router()` serves every
@@ -730,7 +741,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.60.12
+rustango 0.61.0
 ```
 
 ### `about`
@@ -742,7 +753,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.60.12
+  version:        0.61.0
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -925,19 +936,36 @@ already exists`` (`tenancy::provision::provision_tenant`), before anything else 
 ```bash
 cargo run -- create-tenant acme --display-name "ACME Corp"
 cargo run -- create-tenant beta --mode database --database-url postgres://...
+cargo run -- create-tenant gamma --mode database --server main
 ```
 
 | Flag | Description |
 |---|---|
 | `--display-name <name>` | Human-readable label shown in admin sidebars |
-| `--mode schema \| database` | Storage mode (default: schema) |
-| `--database-url <url>` | Tenant-specific DB URL (required for database mode) |
+| `--mode schema \| database` | Storage mode (default: schema, or database when `--database-url` or `--server` is given) |
+| `--database-url <url>` | An existing database for the tenant |
+| `--server <name>` | Create the database on this [saved server](#database-servers) instead |
 | `--host-pattern <pattern>` | Override the host pattern used by `SubdomainResolver` |
 | `--no-migrate` | Skip applying tenant-scoped migrations after provisioning |
-| `--backend postgres \| mysql \| sqlite` | Driver for a database-mode tenant (default: `postgres`). Validated against `--mode` |
+| `--backend postgres \| mysql \| sqlite` | Must be the registry's backend, which is the default |
 | `--schema-name <s>` | Override the generated schema name in schema mode |
 | `--port <n>` | Port the tenant is reachable on, for routing |
 | `--path-prefix <s>` | Path prefix the tenant is reachable under, for routing |
+
+With `--server`, the server's admin rights are checked first, then a
+database named exactly as the slug is created with its own login (random
+password, granted that database only); SQLite creates `<dir>/<slug>.db`.
+An existing database of that name is refused, never reused. The new login
+must then sign in (a pg_hba rule or a shadowing MySQL account fails here). On
+MySQL the database copies the registry's utf8mb4 collation. The tenant URL
+is stored sealed and the database is recorded in `rustango_tenant_databases`.
+If registering, migrating or activating fails, the new database, login and
+tenant row are dropped again, so the same command can simply be re-run.
+Should that drop fail, the inactive tenant and its record stay: a
+resuming retry (webhook, `create_tenant_if_missing`) migrates it in place.
+The record is written before the `CREATE`, so a run killed midway leaves
+a database rustango can find: a retry after ten minutes drops it and
+starts again, and refuses a database it cannot prove it made.
 
 ### `edit-tenant <slug> [options]`
 
@@ -1013,10 +1041,29 @@ cargo run -- purge-tenant acme --confirm acme
 cargo run -- purge-tenant beta --confirm beta --purge-database   # database-mode: also DROP DATABASE
 ```
 
+Each step prints as it ends and the purge is recorded as a run of kind
+`purge` (`list-runs --kind purge`). A database rustango made on a saved
+server is dropped by that server's admin, with its login and record; every
+refusal runs before anything changes. See
+[Tenant databases on a saved server](tenant-databases.md).
+
 With several servers, deactivate first (`drop-tenant`) and wait 30 s. A
 server whose tenant cache still holds a schema-mode tenant keeps
 `search_path = <schema>, public`; once the schema is dropped, its queries
 fall through to `public` until the cache refreshes.
+
+### `rotate-tenant-password <slug>`
+
+Gives the login rustango made for the tenant on a saved server a new random
+password: altered on the server, then sealed and stored over the old URL,
+then the tenant's pools reopen. Steps print as they end; the run is recorded
+as `rotate_password`. Other pods pick the new URL up within one fingerprint
+poll; see [Tenant databases on a saved server](tenant-databases.md) for that
+window.
+
+```bash
+cargo run -- rotate-tenant-password acme
+```
 
 ### `list-tenants`
 
@@ -1058,6 +1105,38 @@ of its own, so it cannot be removed here — change it with
 [`edit-tenant --host-pattern`](#edit-tenant-slug-options). There is
 deliberately no `rename-host`: remove and add instead, so the change
 reaches other running pods.
+
+### Database servers
+
+Save a database server's admin login once, so tenant databases can be
+created on it without SQL. The backend is the registry's.
+
+```bash
+cargo run -- add-db-server main --host db.internal --user admin --tls require
+cargo run -- test-db-server main
+cargo run -- list-db-servers
+cargo run -- edit-db-server main --port 6432
+cargo run -- remove-db-server main
+```
+
+| Verb | What it does |
+|---|---|
+| `add-db-server <name> --host <h> [--port <n>] --user <u> [--tls <mode>] [--maintenance-db <db>]` | Save a server. SQLite: `--sqlite-dir <dir>` instead |
+| `list-db-servers` | Every saved server, without secrets |
+| `test-db-server <name>` | Log in and report the version and the admin login's rights; fails when it cannot provision |
+| `edit-db-server <name> [same flags] [--prompt-password \| --clear-password] [--on\|--off]` | Change a server; `none` clears `--tls` or `--maintenance-db` |
+| `remove-db-server <name>` | Delete it; refused while a tenant's database is on it |
+
+The password is asked at a hidden prompt, or read from the variable named
+by `--password-env <VAR>`; `--no-password` saves none. It is never taken
+from argv and never printed. It is stored sealed, so `RUSTANGO_SECRET_KEY`
+must be set. `--tls` takes `disable`, `prefer`, `require`, `verify-ca` or
+`verify-full`; a new server gets `require` unless you pass another.
+`edit-db-server --prompt-password` keeps the saved password on a blank
+answer. Removal is refused while a tenant's URL points at the server, or
+cannot be resolved or parsed. Hosts are compared ignoring case, IPv6
+brackets and a trailing dot; `localhost` and `127.0.0.1` count as
+different hosts. `reseal-tenant-secrets` re-seals server passwords too.
 
 ### `create-operator <username> --password <pwd>`
 

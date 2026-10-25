@@ -24,11 +24,11 @@
 use crate::core::{Column as _, Model as _};
 use crate::sql::{FetcherPool as _, Pool};
 use crate::tenancy::error::TenancyError;
-use crate::tenancy::Org;
+use crate::tenancy::{Org, SecretsResolver as _, TenantSecrets};
 
 /// Which fields an edit touches. `None` means "leave alone" — distinct
 /// from `Some("")`, which clears an optional column.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct OrgPatch {
     pub display_name: Option<String>,
     pub host_pattern: Option<String>,
@@ -36,6 +36,23 @@ pub struct OrgPatch {
     pub port: Option<String>,
     pub active: Option<bool>,
     pub database_url: Option<String>,
+}
+
+/// The password in `database_url` is masked.
+impl std::fmt::Debug for OrgPatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OrgPatch")
+            .field("display_name", &self.display_name)
+            .field("host_pattern", &self.host_pattern)
+            .field("path_prefix", &self.path_prefix)
+            .field("port", &self.port)
+            .field("active", &self.active)
+            .field(
+                "database_url",
+                &super::org::redacted_url(self.database_url.as_deref()),
+            )
+            .finish()
+    }
 }
 
 impl OrgPatch {
@@ -95,10 +112,28 @@ pub struct Applied {
 /// generic over the backend and this module is not: do it when
 /// [`Applied::database_url_rotated`] is true, and not otherwise.
 ///
+/// A new `database_url` is opened with
+/// [`ChainSecretsResolver::standard`](crate::tenancy::ChainSecretsResolver::standard);
+/// see [`apply_with_secrets`] for a custom resolver.
+///
 /// # Errors
-/// [`TenancyError::Validation`] for a bad host pattern, port, or path
-/// prefix, or when the tenant does not exist; driver errors otherwise.
+/// [`TenancyError::Validation`] for a bad host pattern, port, path prefix
+/// or database URL, or when the tenant does not exist; driver errors otherwise.
 pub async fn apply(registry: &Pool, slug: &str, patch: &OrgPatch) -> Result<Applied, TenancyError> {
+    apply_with_secrets(registry, &TenantSecrets::standard(), slug, patch).await
+}
+
+/// [`apply`], opening and storing a new `database_url` per `secrets`
+/// (the tenant pools') so it is checked like a literal.
+///
+/// # Errors
+/// As [`apply`].
+pub async fn apply_with_secrets(
+    registry: &Pool,
+    secrets: &TenantSecrets,
+    slug: &str,
+    patch: &OrgPatch,
+) -> Result<Applied, TenancyError> {
     use crate::core::SqlValue;
     if patch.is_empty() {
         return Err(TenancyError::Validation(
@@ -135,7 +170,7 @@ pub async fn apply(registry: &Pool, slug: &str, patch: &OrgPatch) -> Result<Appl
     if let Some(v) = patch.database_url.as_deref() {
         values.push(("database_url", SqlValue::String(v.to_owned())));
     }
-    let mut applied = apply_values(registry, slug, values).await?;
+    let mut applied = apply_values(registry, secrets, slug, values).await?;
     applied.touched = patch.touched();
     Ok(applied)
 }
@@ -145,9 +180,24 @@ pub async fn apply(registry: &Pool, slug: &str, patch: &OrgPatch) -> Result<Appl
 /// check here (#1931).
 pub(crate) async fn apply_values(
     registry: &Pool,
+    secrets: &TenantSecrets,
     slug: &str,
     values: Vec<(&'static str, crate::core::SqlValue)>,
 ) -> Result<Applied, TenancyError> {
+    apply_values_if(registry, secrets, slug, values, None)
+        .await?
+        .ok_or_else(|| TenancyError::Validation(format!("tenant `{slug}` not found")))
+}
+
+/// [`apply_values`], written only while `database_url` still holds
+/// `expected` when that is `Some`; `Ok(None)` when it changed meanwhile.
+pub(crate) async fn apply_values_if(
+    registry: &Pool,
+    secrets: &TenantSecrets,
+    slug: &str,
+    values: Vec<(&'static str, crate::core::SqlValue)>,
+    expected: Option<&str>,
+) -> Result<Option<Applied>, TenancyError> {
     use crate::core::SqlValue;
     let existing = Org::objects()
         .where_(Org::slug.eq(slug.to_owned()))
@@ -178,10 +228,16 @@ pub(crate) async fn apply_values(
             // Blank keeps the current URL; it is a credential, never cleared here.
             ("database_url", v) if blank(&v) => continue,
             ("database_url", SqlValue::String(new)) => {
-                crate::tenancy::provision::refuse_registry_pool(&new, registry)
-                    .map_err(TenancyError::Validation)?;
-                database_url_rotated = existing.database_url.as_deref() != Some(new.as_str());
-                SqlValue::String(new)
+                let url =
+                    crate::tenancy::provision::vet_database_url(&new, secrets, registry, None)
+                        .await?;
+                // Compared resolved: re-sealing the same URL is not a rotation.
+                let old = match existing.database_url.as_deref() {
+                    Some(old) => secrets.resolve(old).await.ok(),
+                    None => None,
+                };
+                database_url_rotated = old.as_deref() != Some(url.resolved.as_str());
+                SqlValue::String(url.stored)
             }
             ("host_pattern" | "path_prefix", v) if blank(&v) => SqlValue::Null,
             ("host_pattern", SqlValue::String(v)) => {
@@ -225,14 +281,22 @@ pub(crate) async fn apply_values(
         ));
     }
 
+    let mut filters = vec![crate::core::Filter {
+        column: "slug",
+        op: crate::core::Op::Eq,
+        value: crate::core::SqlValue::String(slug.to_owned()),
+    }];
+    if let Some(old) = expected {
+        filters.push(crate::core::Filter {
+            column: "database_url",
+            op: crate::core::Op::Eq,
+            value: crate::core::SqlValue::String(old.to_owned()),
+        });
+    }
     let update = crate::core::UpdateQuery {
         model: Org::SCHEMA,
         set,
-        where_clause: crate::core::WhereExpr::and_predicates(vec![crate::core::Filter {
-            column: "slug",
-            op: crate::core::Op::Eq,
-            value: crate::core::SqlValue::String(slug.to_owned()),
-        }]),
+        where_clause: crate::core::WhereExpr::and_predicates(filters),
     };
     use crate::tenancy::org_host::{claim_error, claim_host, Claimant};
     let mut tx = match &claim {
@@ -244,7 +308,9 @@ pub(crate) async fn apply_values(
         }
         None => crate::sql::write_transaction(registry).await?,
     };
-    crate::sql::update_tx(&mut tx, &update).await?;
+    if crate::sql::update_tx(&mut tx, &update).await? == 0 && expected.is_some() {
+        return Ok(None);
+    }
     if existing.active || activating {
         let forget = crate::tenancy::provision_store::forget_unsucceeded_runs(existing_id)?;
         crate::sql::update_tx(&mut tx, &forget).await?;
@@ -254,10 +320,10 @@ pub(crate) async fn apply_values(
     // Before anything else acts on the write — see the module docs.
     crate::tenancy::invalidate_org_cache();
 
-    Ok(Applied {
+    Ok(Some(Applied {
         touched,
         database_url_rotated,
-    })
+    }))
 }
 
 fn assign(column: &'static str, value: crate::core::SqlValue) -> crate::core::Assignment {
@@ -270,6 +336,49 @@ fn assign(column: &'static str, value: crate::core::SqlValue) -> crate::core::As
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A write over a `database_url` that changed since it was read is skipped.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_conditional_write_skips_a_changed_url() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        crate::testkit::migrate_framework(&pool).await.unwrap();
+        let first = "sqlite:///tmp/first.db?mode=rwc";
+        let mut org = Org {
+            slug: "cas".into(),
+            backend_kind: "sqlite".into(),
+            database_url: Some(first.into()),
+            ..crate::testkit::org()
+        };
+        org.save_pool(&pool).await.unwrap();
+        let secrets = TenantSecrets::standard();
+        let tmp = tempfile::tempdir().unwrap();
+        let next = format!("sqlite://{}?mode=rwc", tmp.path().join("b.db").display());
+        let set = || vec![("database_url", crate::core::SqlValue::String(next.clone()))];
+        let stale = apply_values_if(&pool, &secrets, "cas", set(), Some("old"))
+            .await
+            .unwrap();
+        assert!(stale.is_none());
+        let rows: Vec<Org> = Org::objects().fetch(&pool).await.unwrap();
+        assert_eq!(rows[0].database_url.as_deref(), Some(first));
+        let fresh = apply_values_if(&pool, &secrets, "cas", set(), Some(first))
+            .await
+            .unwrap();
+        assert!(fresh.is_some());
+    }
+
+    #[test]
+    fn patch_debug_masks_the_database_password() {
+        let p = OrgPatch {
+            database_url: Some("postgres://u:db-pw-123@h/acme".into()),
+            ..OrgPatch::default()
+        };
+        let s = format!("{p:?}");
+        assert!(
+            s.contains("database_url") && !s.contains("db-pw-123"),
+            "{s}"
+        );
+    }
 
     #[test]
     fn an_empty_patch_is_refused_rather_than_run() {

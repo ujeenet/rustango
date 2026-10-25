@@ -50,7 +50,7 @@ pub const SSO_FLOW_COOKIE: &str = "rustango_admin_sso_flow";
 /// A fully-resolved SSO provider config — the client secret is the
 /// dereferenced value (not an `env://` reference), ready to build a
 /// provider. Both surfaces normalize their stored config into this.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ResolvedSso {
     /// Provider key: `"google"`, `"microsoft"`, `"github"`, `"gitlab"`,
     /// `"discord"`, or `"oidc"` for a generic OpenID Connect provider.
@@ -65,6 +65,20 @@ pub struct ResolvedSso {
     /// Optional OAuth scope override. `None` keeps the provider defaults
     /// (`openid email profile`); `Some(list)` replaces them.
     pub scopes: Option<Vec<String>>,
+}
+
+/// Redacted: `{:?}` must not print the client secret.
+impl std::fmt::Debug for ResolvedSso {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedSso")
+            .field("provider", &self.provider)
+            .field("issuer_url", &self.issuer_url)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("redirect_uri", &self.redirect_uri)
+            .field("scopes", &self.scopes)
+            .finish()
+    }
 }
 
 /// Errors surfaced by the SSO login flow. Rendered as a generic
@@ -309,6 +323,12 @@ mod tests {
             redirect_uri: "https://app.example.com/login/sso/x/callback".into(),
             scopes: None,
         }
+    }
+
+    #[test]
+    fn debug_hides_the_client_secret() {
+        let s = format!("{:?}", cfg("google"));
+        assert!(s.contains("cid") && !s.contains("csecret"), "{s}");
     }
 
     #[tokio::test]

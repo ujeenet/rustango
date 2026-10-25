@@ -45,6 +45,7 @@ mod agents;
 mod args;
 mod audit;
 mod data;
+mod db_servers;
 mod edit;
 mod flush;
 mod hosts;
@@ -54,6 +55,7 @@ mod menu;
 mod migrate_storage;
 mod migrations;
 mod operators;
+mod reseal;
 mod roles;
 mod scaffold;
 mod server;
@@ -184,6 +186,39 @@ where
     .await
 }
 
+/// What `Cli` knows about the deployment that a verb cannot see.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CliFacts {
+    /// `with_tenant_provisioning` was called.
+    pub(crate) provisioning: bool,
+}
+
+/// [`run_with_writer_and_init`] with the `Cli`'s [`CliFacts`].
+#[cfg(feature = "manage")]
+pub(crate) async fn run_from_cli<W: Write + Send, DB: sqlx::Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    args: Vec<String>,
+    writer: &mut W,
+    init_fn: InitTenancyFn,
+    facts: CliFacts,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    Box::pin(dispatch_with(
+        pools,
+        registry_url,
+        dir,
+        args,
+        writer,
+        init_fn,
+        facts,
+    ))
+    .await
+}
+
 /// One verb, dispatched. Split out so `menu` can run a chosen verb through
 /// the same match rather than shelling out or duplicating the table.
 pub(super) async fn dispatch<W: Write + Send, DB: sqlx::Database>(
@@ -193,6 +228,30 @@ pub(super) async fn dispatch<W: Write + Send, DB: sqlx::Database>(
     args: Vec<String>,
     writer: &mut W,
     init_fn: InitTenancyFn,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    dispatch_with(
+        pools,
+        registry_url,
+        dir,
+        args,
+        writer,
+        init_fn,
+        CliFacts::default(),
+    )
+    .await
+}
+
+async fn dispatch_with<W: Write + Send, DB: sqlx::Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    args: Vec<String>,
+    writer: &mut W,
+    init_fn: InitTenancyFn,
+    facts: CliFacts,
 ) -> Result<(), TenancyError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
@@ -210,15 +269,24 @@ where
         "test-tenant-connection" => tenants::test_tenant_connection(&args[1..], writer).await,
         "drop-tenant" => tenants::drop_tenant(pools, &args[1..], writer).await,
         "purge-tenant" => tenants::purge_tenant(pools, &args[1..], writer).await,
+        "rotate-tenant-password" => {
+            tenants::rotate_tenant_password(pools, &args[1..], writer).await
+        }
         "list-tenants" => tenants::list_tenants(pools, writer).await,
         // #1344 — routing and display config were console-only to change.
         "edit-tenant" => edit::edit_tenant(pools, &args[1..], writer).await,
+        "reseal-tenant-secrets" => reseal::reseal_tenant_secrets(pools, &args[1..], writer).await,
         // #1344 — the console has bound extra hostnames since #1318; these
         // give a deploy hook and a browser-less box the same reach.
         "list-hosts" => hosts::list_hosts(pools, &args[1..], writer).await,
         "add-host" => hosts::add_host(pools, &args[1..], writer).await,
         "remove-host" => hosts::remove_host(pools, &args[1..], writer).await,
         "set-host-enabled" => hosts::set_host_enabled(pools, &args[1..], writer).await,
+        "add-db-server" => db_servers::add_db_server(pools, &args[1..], writer).await,
+        "edit-db-server" => db_servers::edit_db_server(pools, &args[1..], writer).await,
+        "list-db-servers" => db_servers::list_db_servers(pools, &args[1..], writer).await,
+        "test-db-server" => db_servers::test_db_server(pools, &args[1..], writer).await,
+        "remove-db-server" => db_servers::remove_db_server(pools, &args[1..], writer).await,
         "prewarm-pools" => {
             // v0.27.7 (#60) — eagerly build pools for every active
             // database-mode tenant. Useful as a post-deploy hook
@@ -283,6 +351,7 @@ where
         "reset-password" => {
             users::reset_password_cmd(pools, registry_url, &args[1..], writer).await
         }
+        "set-password-link" => tenants::set_password_link(pools, &args[1..], writer).await,
         "reset-operator-password" => {
             users::reset_operator_password_cmd(pools, &args[1..], writer).await
         }
@@ -388,7 +457,7 @@ where
             dir,
             &args[1..],
             writer,
-            tenancy_deploy_findings(pools),
+            tenancy_deploy_findings(pools, facts),
         )
         .await
         .map_err(TenancyError::Migrate),
@@ -462,6 +531,10 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
+        "                       [--admin-email <e> [--admin-username <u>]]  first admin; prints a set-password link"
+    )?;
+    writeln!(
+        w,
         "  test-tenant-connection <url> [--no-write-probe] [--timeout <secs>]"
     )?;
     writeln!(
@@ -489,6 +562,11 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "                       HARD-delete: drops schema (or DB with --purge-database)."
     )?;
+    writeln!(w, "  rotate-tenant-password <slug>")?;
+    writeln!(
+        w,
+        "                       New password for a login made on a saved server."
+    )?;
     writeln!(
         w,
         "  list-tenants         Print every Org row in the registry."
@@ -507,6 +585,10 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
+        "  reseal-tenant-secrets [--apply]  Re-seal stored tenant URLs with the current key (dry run without --apply)."
+    )?;
+    writeln!(
+        w,
         "                       Change routing and display config. Only the fields you"
     )?;
     writeln!(
@@ -518,7 +600,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(w, "INSPECTION (read-only):")?;
     writeln!(
         w,
-        "  list-runs [--limit N] [--kind provision|migrate] [--state <s>]"
+        "  list-runs [--limit N] [--kind provision|migrate|purge|rotate_password] [--state <s>]"
     )?;
     writeln!(
         w,
@@ -560,6 +642,37 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         "                       Park a host without losing the record (DNS in flight,"
     )?;
     writeln!(w, "                       domain being retired).")?;
+    writeln!(w)?;
+    writeln!(w, "DATABASE SERVERS:")?;
+    writeln!(
+        w,
+        "  add-db-server <name> --host <h> [--port <n>] --user <u> [--tls <mode>, default require]"
+    )?;
+    writeln!(
+        w,
+        "                [--maintenance-db <db>] [--sqlite-dir <dir>] [--password-env <VAR> | --no-password]"
+    )?;
+    writeln!(
+        w,
+        "                       Save a server's admin login; the password is asked hidden"
+    )?;
+    writeln!(
+        w,
+        "                       and stored sealed (needs RUSTANGO_SECRET_KEY)."
+    )?;
+    writeln!(w, "  list-db-servers      Saved servers, without secrets.")?;
+    writeln!(
+        w,
+        "  test-db-server <name>  Log in and report the admin login's rights."
+    )?;
+    writeln!(
+        w,
+        "  edit-db-server <name> [same flags] [--prompt-password | --clear-password] [--on|--off]"
+    )?;
+    writeln!(
+        w,
+        "  remove-db-server <name>  Refused while a tenant's database is on it."
+    )?;
     writeln!(w)?;
     writeln!(w, "USER / OPERATOR MANAGEMENT:")?;
     writeln!(
@@ -615,6 +728,11 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "                       Reset a tenant user's password without their old one."
+    )?;
+    writeln!(w, "  set-password-link <slug> <username>")?;
+    writeln!(
+        w,
+        "                       A single-use link for the user to set their own password."
     )?;
     writeln!(
         w,
@@ -893,6 +1011,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
 /// `check --deploy` findings only a tenancy deploy has.
 async fn tenancy_deploy_findings<DB: sqlx::Database>(
     pools: &TenantPools<DB>,
+    facts: CliFacts,
 ) -> rustango::migrate::manage::DeployAuditFindings
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
@@ -908,7 +1027,32 @@ where
         crate::tenancy::server::tenant_scheme_setting().as_deref(),
         &mut out,
     );
+    if facts.provisioning {
+        secret_key_audit(crate::aead::key_status(), &mut out);
+    }
     out
+}
+
+/// Provisioning seals server passwords and tenant URLs with this key.
+fn secret_key_audit(
+    status: crate::aead::KeyStatus,
+    out: &mut rustango::migrate::manage::DeployAuditFindings,
+) {
+    use crate::aead::KeyStatus;
+    match status {
+        KeyStatus::Missing => out.warnings.push(
+            "RUSTANGO_SECRET_KEY is unset — tenant provisioning is mounted but cannot save \
+             server passwords, and new tenant URLs are stored unsealed; set 32+ random bytes \
+             (`openssl rand -base64 48`) and back it up"
+                .into(),
+        ),
+        KeyStatus::Short => out.warnings.push(
+            "RUSTANGO_SECRET_KEY is shorter than 32 bytes — sealed secrets use a weak key".into(),
+        ),
+        KeyStatus::Ok => out
+            .info
+            .push("RUSTANGO_SECRET_KEY is set for sealed secrets".into()),
+    }
 }
 
 /// The impersonation handoff carries a one-time superuser login (#2425).
@@ -933,6 +1077,27 @@ fn tenant_scheme_audit(
 #[cfg(test)]
 mod deploy_tests {
     use super::*;
+
+    /// A missing or short secret key is flagged when provisioning is mounted.
+    #[test]
+    fn a_missing_or_short_secret_key_is_flagged() {
+        use crate::aead::KeyStatus;
+        for (status, flagged) in [
+            (KeyStatus::Missing, true),
+            (KeyStatus::Short, true),
+            (KeyStatus::Ok, false),
+        ] {
+            let mut out = rustango::migrate::manage::DeployAuditFindings::default();
+            secret_key_audit(status, &mut out);
+            assert_eq!(
+                out.warnings
+                    .iter()
+                    .any(|w| w.contains("RUSTANGO_SECRET_KEY")),
+                flagged,
+                "{status:?}"
+            );
+        }
+    }
 
     /// #2425 — an unset or non-https tenant scheme is flagged; https is not.
     #[test]

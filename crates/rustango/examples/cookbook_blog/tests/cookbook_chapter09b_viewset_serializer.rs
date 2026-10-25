@@ -85,14 +85,14 @@ async fn json_request(
 }
 
 fn router_with_serializer(pool: sqlx::PgPool) -> axum::Router {
-    ViewSet::for_model(Author::SCHEMA)
+    ViewSet::for_model(Author::SCHEMA, &["id", "name", "email", "bio", "joined_at"])
         .serializer::<AuthorPublic>()
         .ordering(&[("id", false)])
         .router("/api", pool)
 }
 
 fn router_default(pool: sqlx::PgPool) -> axum::Router {
-    ViewSet::for_model(Author::SCHEMA)
+    ViewSet::for_model(Author::SCHEMA, &["id", "name", "email", "bio", "joined_at"])
         .ordering(&[("id", false)])
         .router("/api", pool)
 }

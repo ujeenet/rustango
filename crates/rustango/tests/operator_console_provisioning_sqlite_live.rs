@@ -318,6 +318,35 @@ async fn the_create_routes_require_a_session() {
     }
 }
 
+/// A reference resolving to a bare secret: the probe names the
+/// reference and never echoes the resolved value.
+#[tokio::test]
+async fn test_connection_never_echoes_a_resolved_secret() {
+    let b = boot().await;
+    std::env::set_var("RUSTANGO_OC_PROBE_LEAK", "hunter2-leak");
+    let resp = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
+                .uri("/orgs/test-connection")
+                .header("cookie", &b.cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "database_url=env%3A%2F%2FRUSTANGO_OC_PROBE_LEAK",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = body_of(resp).await;
+    assert!(html.contains(r#""status":"bad""#), "{html}");
+    assert!(!html.contains("hunter2"), "resolved secret echoed: {html}");
+}
+
 /// The probe reports the taxonomy, writes nothing, and does not leak
 /// the password back into the page.
 #[tokio::test]

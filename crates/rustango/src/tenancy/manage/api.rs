@@ -23,6 +23,7 @@ use crate::tenancy::error::TenancyError;
 use crate::tenancy::migrate as tenant_migrate;
 use crate::tenancy::org::{Org, StorageMode};
 use crate::tenancy::pools::TenantPools;
+use crate::tenancy::provision::{self, DatabaseSource, TenantStorage};
 
 /// Inputs for [`create_tenant`] / [`create_tenant_if_missing`].
 ///
@@ -32,32 +33,62 @@ use crate::tenancy::pools::TenantPools;
 /// time) — same convention the CLI verb uses.
 pub struct CreateTenantOpts {
     pub mode: StorageMode,
-    /// Backend driver (v0.33+). Defaults to `Postgres` for
-    /// back-compat. `validate_storage_mode` is called against the
-    /// `(mode, backend)` pair before the row is inserted — see
-    /// [`crate::tenancy::BackendKind::validate_storage_mode`].
-    pub backend: crate::tenancy::BackendKind,
+    /// `None` takes the registry's; anything else must equal it.
+    pub backend: Option<crate::tenancy::BackendKind>,
     pub display_name: Option<String>,
     pub schema_name: Option<String>,
+    /// An existing database. Database mode needs this or `database_server`.
     pub database_url: Option<String>,
+    /// Create the database, named as the slug, on this saved server.
+    pub database_server: Option<String>,
     pub host_pattern: Option<String>,
     pub port: Option<i32>,
     pub path_prefix: Option<String>,
     pub no_migrate: bool,
+    /// A superuser created before the tenant goes live. Issue their
+    /// set-password link with [`crate::tenancy::first_admin::hand_over_user`].
+    pub first_admin: Option<crate::tenancy::FirstAdmin>,
 }
 
 impl Default for CreateTenantOpts {
     fn default() -> Self {
         Self {
             mode: StorageMode::Schema,
-            backend: crate::tenancy::BackendKind::Postgres,
+            backend: None,
             display_name: None,
             schema_name: None,
             database_url: None,
+            database_server: None,
             host_pattern: None,
             port: None,
             path_prefix: None,
             no_migrate: false,
+            first_admin: None,
+        }
+    }
+}
+
+impl CreateTenantOpts {
+    /// The one storage these options name.
+    fn storage(&self) -> Result<TenantStorage, TenancyError> {
+        let bad = |m: &str| Err(TenancyError::Validation(format!("create_tenant: {m}")));
+        match (self.mode, &self.database_url, &self.database_server) {
+            (StorageMode::Schema, None, None) => {
+                Ok(TenantStorage::Schema(self.schema_name.clone()))
+            }
+            (StorageMode::Schema, _, _) => bad("schema mode takes no database URL or server"),
+            (StorageMode::Database, Some(url), None) => {
+                Ok(TenantStorage::Database(DatabaseSource::Url(url.clone())))
+            }
+            (StorageMode::Database, None, Some(server)) => Ok(TenantStorage::Database(
+                DatabaseSource::Server(server.clone()),
+            )),
+            (StorageMode::Database, Some(_), Some(_)) => {
+                bad("give database_url or database_server, not both")
+            }
+            (StorageMode::Database, None, None) => {
+                bad("mode=Database requires database_url or database_server")
+            }
         }
     }
 }
@@ -82,7 +113,8 @@ where
 }
 
 /// Provision a new tenant and run tenant-scoped migrations against it.
-/// Errors if a tenant with this slug already exists.
+/// Errors if a tenant with this slug already exists. On a saved server,
+/// a failure after the create drops the new database, login and row.
 ///
 /// # Errors
 /// * `TenancyError::Validation` for duplicate slug or bad
@@ -99,59 +131,106 @@ pub async fn create_tenant<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    // Detached: a dropped caller must not stop a create between its DDL
+    // and the rows that record it.
+    let pools = pools.fresh();
+    let (url, dir, slug) = (
+        registry_url.to_owned(),
+        migrations_dir.to_owned(),
+        slug.to_owned(),
+    );
+    tokio::spawn(async move { create_tenant_inner(&pools, &url, &dir, &slug, opts).await })
+        .await
+        .map_err(|e| TenancyError::Validation(format!("the create task stopped: {e}")))?
+}
+
+async fn create_tenant_inner<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    migrations_dir: &Path,
+    slug: &str,
+    opts: CreateTenantOpts,
+) -> Result<Org, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     if find_org(pools, slug).await?.is_some() {
         return Err(TenancyError::Validation(format!(
             "tenant slug `{slug}` already exists"
         )));
     }
 
-    if opts.mode == StorageMode::Database && opts.database_url.is_none() {
-        return Err(TenancyError::Validation(
-            "create_tenant: mode=Database requires database_url".into(),
-        ));
-    }
-    // v0.33 — reject schema-mode for non-Postgres backends. MySQL +
-    // SQLite must use database-mode.
-    opts.backend
-        .validate_storage_mode(opts.mode)
-        .map_err(|msg| TenancyError::Validation(msg.to_owned()))?;
+    let storage = opts.storage()?;
 
-    // The provisioner's own checks: slug, schema, host, prefix, port, and
-    // that no other tenant routes on them (#2097).
-    let checked = crate::tenancy::provision::checked_request(
-        &pools.registry_pool(),
+    // The provisioner's own checks: fields, backend, the database URL or
+    // server, routing clashes, then the same preflight, before anything
+    // is written.
+    let registry = pools.registry_pool();
+    let checked = provision::checked_request(
+        &registry,
+        pools.secrets(),
         registry_url,
-        &crate::tenancy::provision::ProvisionRequest {
-            slug: slug.to_owned(),
-            mode: opts.mode,
+        &provision::ProvisionRequest {
             backend: opts.backend,
             display_name: opts.display_name.clone(),
-            database_url: opts.database_url.clone(),
-            schema_name: opts.schema_name.clone(),
             host_pattern: opts.host_pattern.clone(),
             port: opts.port,
             path_prefix: opts.path_prefix.clone(),
             run_migrations: !opts.no_migrate,
-            preflight: crate::tenancy::preflight::Preflight::default(),
+            first_admin: opts.first_admin.clone(),
+            ..provision::ProvisionRequest::new(slug, storage)
         },
     )
     .await?;
-    let schema_name = crate::tenancy::provision::schema_name_for(&checked);
-    let host_pattern = checked.host_pattern;
+    // No observer: steps go nowhere, failures come back as `Err`.
+    let rep = provision::Reporter::new(None);
+    let mut created = match checked.server() {
+        Some(server) => {
+            let (admin, _) = provision::ServerDatabase::open(server, &registry).await?;
+            let db =
+                provision::ServerDatabase::create(admin, server, slug, &registry, &rep).await?;
+            if let Err(e) = db.check_login(&rep).await {
+                let undone = db.roll_back(pools, None, &rep).await;
+                return Err(provision::with_undone(e, &undone));
+            }
+            Some(db)
+        }
+        None => {
+            checked.preflight().await?;
+            None
+        }
+    };
+    let database_url = match created.take() {
+        Some(db) => match db
+            .stored_url(&registry, pools.secrets(), registry_url)
+            .await
+        {
+            Ok(stored) => {
+                created = Some(db);
+                Some(stored)
+            }
+            Err(e) => {
+                let undone = db.roll_back(pools, None, &rep).await;
+                return Err(provision::with_undone(e, &undone));
+            }
+        },
+        None => checked.stored_database_url(),
+    };
+    let schema_name = provision::schema_name_for(&checked.request);
+    let host_pattern = checked.request.host_pattern.clone();
     let display_name = opts.display_name.clone().unwrap_or_else(|| slug.to_owned());
 
     if let Some(schema) = schema_name.as_deref() {
-        crate::tenancy::provision::provision_schema(pools, schema).await?;
+        provision::provision_schema(pools, schema).await?;
     }
 
     // A run record lets `create_tenant_if_missing` tell a failed create
     // from a suspended tenant. Best effort: bookkeeping must not block a create.
-    let registry = pools.registry_pool();
     let run_id = match crate::tenancy::provision_store::open_run(
         &registry,
         slug,
         opts.mode.as_str(),
-        opts.backend.as_str(),
+        checked.backend.as_str(),
         opts.database_url.as_deref(),
         None,
         None,
@@ -170,8 +249,8 @@ where
         slug: slug.to_owned(),
         display_name,
         storage_mode: opts.mode.as_str().into(),
-        backend_kind: opts.backend.as_str().into(),
-        database_url: opts.database_url.clone(),
+        backend_kind: checked.backend.as_str().into(),
+        database_url,
         schema_name,
         host_pattern,
         port: opts.port,
@@ -189,8 +268,12 @@ where
     use crate::tenancy::provision_store::{self as store, RunState, RunText};
     if let Err(e) = crate::tenancy::org_host::insert_org(&registry, &mut org).await {
         if let Some(schema) = org.schema_name.as_deref() {
-            crate::tenancy::provision::release_schema(pools, schema).await;
+            provision::release_schema(pools, schema).await;
         }
+        let e = match created {
+            Some(db) => provision::with_undone(e, &db.roll_back(pools, None, &rep).await),
+            None => e,
+        };
         if let Some(run) = run_id {
             let text =
                 RunText::user_facing(&e).unwrap_or(RunText::fixed("registering the tenant failed"));
@@ -199,14 +282,33 @@ where
         return Err(e);
     }
     let org_id = org.id.get().copied().unwrap_or_default();
+    if let Some(db) = created.as_mut() {
+        db.attach(&registry, org_id).await;
+    }
     if let Some(run) = run_id {
         if let Err(e) = store::attach_org(&registry, run, org_id).await {
             tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not attach org id to run");
         }
     }
 
-    let result =
-        migrate_and_activate(pools, registry_url, migrations_dir, &org, !opts.no_migrate).await;
+    let mut result = migrate_and_activate(
+        pools,
+        registry_url,
+        migrations_dir,
+        &org,
+        !opts.no_migrate,
+        opts.first_admin.as_ref(),
+    )
+    .await;
+    if let Some(db) = created {
+        match result {
+            Ok(()) => db.keep().await,
+            Err(e) => {
+                let undone = db.roll_back(pools, Some(&org), &rep).await;
+                result = Err(provision::with_undone(e, &undone));
+            }
+        }
+    }
     if let Some(run) = run_id {
         let (state, text) = match &result {
             Ok(()) => (RunState::Succeeded, None),
@@ -266,6 +368,7 @@ where
         migrations_dir,
         &existing,
         !opts.no_migrate,
+        opts.first_admin.as_ref(),
     )
     .await?;
     let forget = crate::tenancy::provision_store::forget_unsucceeded_runs(org_id)?;
@@ -275,13 +378,14 @@ where
         .ok_or_else(|| TenancyError::Validation(format!("create_tenant: tenant `{slug}` vanished")))
 }
 
-/// Migrate `org` alone, then activate it (#2392).
+/// Migrate `org` alone, create its first admin, then activate it.
 async fn migrate_and_activate<DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
     migrations_dir: &Path,
     org: &Org,
     migrate: bool,
+    first_admin: Option<&crate::tenancy::FirstAdmin>,
 ) -> Result<(), TenancyError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
@@ -290,6 +394,9 @@ where
         for dir in resolve_migration_dirs(migrations_dir) {
             tenant_migrate::migrate_one_tenant(pools, org, &dir, registry_url, None).await?;
         }
+    }
+    if let Some(admin) = first_admin {
+        crate::tenancy::first_admin::create(pools, org, admin).await?;
     }
     let org_id = org.id.get().copied().unwrap_or_default();
     crate::tenancy::provision::activate(&pools.registry_pool(), org_id).await?;
@@ -365,21 +472,14 @@ where
     if let Some(u) = existing.pop() {
         return Ok(u);
     }
-    let mut user = User {
-        id: Auto::default(),
-        username: username.to_owned(),
+    crate::tenancy::auth::NewUser {
+        username,
         password_hash: crate::tenancy::password::hash_async(password).await?,
-        #[cfg(feature = "sso")]
-        email: None,
         is_superuser: superuser,
-        active: true,
-        created_at: chrono::Utc::now(),
-        data: serde_json::json!({}),
-        password_changed_at: None,
-        sessions_revoked_at: None,
-    };
-    user.save_pool(&scoped).await?;
-    Ok(user)
+        email: None,
+    }
+    .insert(&scoped)
+    .await
 }
 
 /// Resolve the path the caller passed to [`create_tenant`] /

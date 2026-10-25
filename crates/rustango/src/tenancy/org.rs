@@ -36,7 +36,7 @@ use crate::Model;
 /// linking `rustango-tenancy` automatically picks up the table when
 /// `migrate::apply_all` walks the registry — or via
 /// `make_migrations` against the registry DB.
-#[derive(Model, Debug, Clone, serde::Serialize)]
+#[derive(Model, Clone, serde::Serialize)]
 #[rustango(table = "rustango_orgs", display = "slug", scope = "registry")]
 #[allow(dead_code)] // Slices 2+ wire these fields into resolvers / pools / migrations.
 pub struct Org {
@@ -141,6 +141,38 @@ pub struct Org {
     // (registry-wide) models, so a tenant can offer MANY providers, all
     // managed from the admin UI. See `crate::admin::sso_provider` and
     // `crate::tenancy::sso::SharedSsoProvider`.
+}
+
+/// The password in a literal `database_url` is masked.
+impl std::fmt::Debug for Org {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Org")
+            .field("id", &self.id)
+            .field("slug", &self.slug)
+            .field("display_name", &self.display_name)
+            .field("storage_mode", &self.storage_mode)
+            .field("backend_kind", &self.backend_kind)
+            .field("database_url", &redacted_url(self.database_url.as_deref()))
+            .field("schema_name", &self.schema_name)
+            .field("host_pattern", &self.host_pattern)
+            .field("port", &self.port)
+            .field("path_prefix", &self.path_prefix)
+            .field("active", &self.active)
+            .field("created_at", &self.created_at)
+            .field("brand_name", &self.brand_name)
+            .field("brand_tagline", &self.brand_tagline)
+            .field("logo_path", &self.logo_path)
+            .field("favicon_path", &self.favicon_path)
+            .field("primary_color", &self.primary_color)
+            .field("theme_mode", &self.theme_mode)
+            .finish()
+    }
+}
+
+/// A `database_url` for `{:?}`: a literal URL's password masked, a
+/// secret reference as is.
+pub(crate) fn redacted_url(url: Option<&str>) -> Option<String> {
+    url.map(crate::sql::connect_diagnosis::redact)
 }
 
 impl Org {
@@ -269,6 +301,31 @@ impl BackendKind {
             "mysql" | "mariadb" => Ok(Self::MySql),
             "sqlite" | "sqlite3" => Ok(Self::Sqlite),
             other => Err(other),
+        }
+    }
+
+    /// The backend a URL's scheme selects, read as `Pool::connect` reads
+    /// it: no `pg://` or `sqlite3://` aliases, which it refuses.
+    #[must_use]
+    pub fn of_url(url: &str) -> Option<Self> {
+        match url.split(':').next()?.to_ascii_lowercase().as_str() {
+            "postgres" | "postgresql" => Some(Self::Postgres),
+            "mysql" => Some(Self::MySql),
+            "sqlite" => Some(Self::Sqlite),
+            _ => None,
+        }
+    }
+
+    /// The backend `pool` runs on.
+    #[must_use]
+    pub fn of_pool(pool: &crate::sql::Pool) -> Self {
+        match pool {
+            #[cfg(feature = "postgres")]
+            crate::sql::Pool::Postgres(_) => Self::Postgres,
+            #[cfg(feature = "mysql")]
+            crate::sql::Pool::Mysql(_) => Self::MySql,
+            #[cfg(feature = "sqlite")]
+            crate::sql::Pool::Sqlite(_) => Self::Sqlite,
         }
     }
 
@@ -401,6 +458,32 @@ pub async fn generation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn org_debug_masks_the_database_password() {
+        let org = Org {
+            id: rustango::Auto::Set(1),
+            slug: "acme".into(),
+            display_name: "Acme".into(),
+            storage_mode: "database".into(),
+            backend_kind: "postgres".into(),
+            database_url: Some("postgres://u:db-pw-123@h/acme".into()),
+            schema_name: None,
+            host_pattern: None,
+            port: None,
+            path_prefix: None,
+            active: true,
+            created_at: chrono::Utc::now(),
+            brand_name: None,
+            brand_tagline: None,
+            logo_path: None,
+            favicon_path: None,
+            primary_color: None,
+            theme_mode: None,
+        };
+        let s = format!("{org:?}");
+        assert!(s.contains("acme") && !s.contains("db-pw-123"), "{s}");
+    }
 
     #[test]
     fn parse_accepts_aliases() {

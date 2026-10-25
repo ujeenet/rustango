@@ -94,7 +94,8 @@ pub(crate) async fn well_known_authorization_server(
     .into_response()
 }
 
-#[derive(Debug, Deserialize)]
+/// No `Debug`: it carries the client secret.
+#[derive(Deserialize)]
 pub(crate) struct OAuthTokenForm {
     pub grant_type: String,
     // Optional here, because the client may instead authenticate

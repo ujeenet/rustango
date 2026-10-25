@@ -69,7 +69,7 @@ Wie Sie ein Objekt bauen, hängt davon ab, was es benötigt. Es gibt einige Stan
 | `T::new(arg)` | Eine erforderliche Abhängigkeit | `EnvSecrets::with_prefix(s)`, `RedisCache::new(url)` |
 | `T::with_X(arg)` | Builder-artige Überschreibung nach `new()` | `InMemoryCache::with_default_ttl(d)`, `JwtLifecycle::new(s).with_access_ttl(60)` |
 | `T::from_X(arg)` | Konvertieren AUS Y | `TotpSecret::from_base32(s)`, `Locale::new(s)` (manchmal `from_str`) |
-| `T::for_Y(arg)` | Ein auf ein bestimmtes Y beschränktes T bauen | `ViewSet::for_model(schema)` |
+| `T::for_Y(arg)` | Ein auf ein bestimmtes Y beschränktes T bauen | `ViewSet::for_model(schema, &fields)` |
 
 **Vermeiden Sie dies:** `T::with_X_and_Y_and_Z(a, b, c)` — ein Konstruktor, der alles entgegennimmt. Teilen Sie ihn stattdessen in `new(...)` plus verkettete `.with_*()`-Aufrufe auf.
 
@@ -286,7 +286,7 @@ default = [
 Um ein Binary zu verschlanken, das nicht alles braucht, deaktivieren Sie die Standardwerte und listen Sie nur auf, was Sie verwenden:
 
 ```toml
-rustango = { version = "0.60", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.61", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

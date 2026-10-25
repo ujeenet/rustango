@@ -39,7 +39,7 @@ async fn router(throttle: ViewSetThrottle) -> axum::Router {
     .execute(&sq)
     .await
     .expect("create");
-    ViewSet::for_model(Post::SCHEMA)
+    ViewSet::for_model(Post::SCHEMA, &["id", "title"])
         .throttle(throttle)
         .router_pool("/posts", Pool::Sqlite(sq))
 }

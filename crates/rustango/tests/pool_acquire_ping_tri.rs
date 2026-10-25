@@ -72,11 +72,10 @@ async fn drop_idle_then_query(pool: &Pool) {
     let threshold = std::time::Duration::from_secs(3);
     // One connection: sqlx returns a released one in a spawned task, so a
     // larger pool could open a fresh one instead of handing out the dead one.
-    rustango::sql::configure_pools(rustango::sql::PoolTuning {
-        idle_ping_after: Some(threshold),
-        max_connections: Some(1),
-        ..Default::default()
-    });
+    let mut tuning = rustango::sql::PoolTuning::default();
+    tuning.idle_ping_after = Some(threshold);
+    tuning.max_connections = Some(1);
+    rustango::sql::configure_pools(tuning);
     let fresh = backend.pool().await.expect("the live URL is set");
     let past_threshold = || tokio::time::sleep(threshold + std::time::Duration::from_millis(300));
 

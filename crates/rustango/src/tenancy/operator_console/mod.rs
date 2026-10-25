@@ -64,6 +64,7 @@
 /// Tenant creation from the console, and its progress view.
 /// Mounted only by [`router_with_provisioning`].
 mod audit;
+mod db_servers;
 mod decommission;
 mod flash;
 mod hosts;
@@ -590,6 +591,14 @@ fn router_unlogged(
             include_str!("../templates/op_provision_runs.html"),
         ),
         ("op_audit.html", include_str!("../templates/op_audit.html")),
+        (
+            "op_db_servers.html",
+            include_str!("../templates/op_db_servers.html"),
+        ),
+        (
+            "op_db_server_edit.html",
+            include_str!("../templates/op_db_server_edit.html"),
+        ),
     ])
     .expect("operator-console templates parse");
     let edit_enabled = pools.is_some();
@@ -724,6 +733,17 @@ fn router_unlogged(
                 get(provisioning::org_new_form).post(provisioning::org_new_submit),
             )
             .route("/orgs/test-connection", post(provisioning::test_connection))
+            // Servers tenant databases are made on: same capability.
+            .route(
+                "/db-servers",
+                get(db_servers::list).post(db_servers::create),
+            )
+            .route(
+                "/db-servers/{name}/edit",
+                get(db_servers::edit_form).post(db_servers::edit_submit),
+            )
+            .route("/db-servers/{name}/delete", post(db_servers::delete))
+            .route("/db-servers/{name}/test", post(db_servers::test))
             // Migrations ride with provisioning: both need the
             // provisioner's migrations directory and its registry URL.
             .route(
@@ -733,6 +753,11 @@ fn router_unlogged(
             .route(
                 "/orgs/{slug}/migrate",
                 get(org_post_only_redirect).post(migrate::migrate_one),
+            )
+            // A new password for a login rustango made on a saved server.
+            .route(
+                "/orgs/{slug}/rotate-password",
+                get(org_post_only_redirect).post(decommission::rotate_password),
             )
             // The index has to come before the `{run_id}` route it
             // shares a prefix with, and be a distinct path: a run id is
@@ -921,6 +946,8 @@ fn render(state: &ConsoleState, template: &str, ctx: &Context) -> Response<Body>
         "csp_nonce",
         &crate::csp_nonce::current().unwrap_or_default(),
     );
+    // The `/db-servers` routes mount with the provisioner.
+    ctx.insert("nav_db_servers", &state.provisioner.is_some());
     // `csrf_token` is for scripts that send `X-CSRF-Token` (fetch, and
     // the multipart branding form, whose body the layer cannot read).
     if let Some(token) = crate::admin::session::current_csrf_token() {
@@ -1826,6 +1853,17 @@ const LOCKED_ORG_FIELDS: &[&str] = &[
 /// current", and we never render the existing value into the input.
 const DATABASE_URL_FIELD: &str = "database_url";
 
+/// The edit form's note on the stored `database_url`: an `env://` name is
+/// shown, a sealed or literal value never is.
+fn database_url_hint(stored: &str) -> String {
+    let current = if stored.is_empty() {
+        "no value set".to_owned()
+    } else {
+        format!("current: {}", super::secrets::shown_reference(stored))
+    };
+    format!("{current} — leave blank to keep current; new value evicts the cached pool")
+}
+
 #[derive(Deserialize, Default)]
 struct OrgEditQuery {
     #[serde(default)]
@@ -1876,25 +1914,15 @@ async fn org_edit_form(
         }
         // database_url: mask the prefill, supply a placeholder, and
         // surface the secret-reference shape separately.
-        let (prefill_for_input, helper) = if field.name == DATABASE_URL_FIELD {
-            let hint = if prefill.starts_with("env:") || prefill.starts_with("vault:") {
-                Some(format!("current: {prefill}"))
-            } else if !prefill.is_empty() {
-                Some("current: <literal connection URL — masked>".to_owned())
-            } else {
-                None
-            };
+        let (input_html, helper) = if field.name == DATABASE_URL_FIELD {
+            // A one-line masked field: the URL can carry a password.
             (
-                String::new(),
-                Some(format!(
-                    "{} — leave blank to keep current; new value evicts the cached pool",
-                    hint.unwrap_or_else(|| "no value set".to_owned())
-                )),
+                render::render_secret_input(field, false, false),
+                Some(database_url_hint(&prefill)),
             )
         } else {
-            (prefill, None::<String>)
+            (render::render_input(field, &prefill, false), None::<String>)
         };
-        let input_html = render::render_input(field, &prefill_for_input, false);
         editable_rows.push(serde_json::json!({
             "name": field.name,
             "input": input_html,
@@ -1928,6 +1956,29 @@ async fn org_edit_form(
     // Drives the "Run migrations" button: migrations ride with the
     // provisioner, which owns the migrations directory.
     ctx.insert("provisioning_enabled", &state.provisioner.is_some());
+    // A database the console made on a saved server. No password in it.
+    let managed = if state.provisioner.is_some() {
+        super::TenantDatabase::of_org(&state.registry, &org_row)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    // Only a login rustango made on a saved server can be rotated.
+    let rotatable = managed.as_ref().is_some_and(|r| r.login_name.is_some());
+    ctx.insert("rotatable", &rotatable);
+    ctx.insert(
+        "managed",
+        &managed.map(|r| {
+            serde_json::json!({
+                "server_name": r.server_name,
+                "database_name": r.database_name,
+                "login_name": r.login_name,
+                "created": r.created,
+            })
+        }),
+    );
     ctx.insert("editable_rows", &editable_rows);
     ctx.insert("locked_rows", &locked_rows);
     ctx.insert("logo_url", &logo_url);
@@ -1990,8 +2041,11 @@ async fn org_edit_submit(
 
     // The CLI's write path, so the console runs the same routing
     // validators and host-clash check (#1931).
+    let secrets = pools.tenant_secrets();
     let applied =
-        match crate::tenancy::org_edit::apply_values(&state.registry, &slug, collected).await {
+        match crate::tenancy::org_edit::apply_values(&state.registry, &secrets, &slug, collected)
+            .await
+        {
             Ok(a) => a,
             Err(e) => {
                 let msg = e.user_facing().unwrap_or_else(|| {
@@ -2394,32 +2448,13 @@ async fn org_impersonate(
     );
     emit_op_audit(&state.registry, &slug, operator_id, "impersonating", detail).await;
 
-    // Build the redirect: tenant subdomain, the handoff path, and the
-    // token. See `tenant_origin` for the scheme.
-    let prefix = handoff_prefix(org.path_prefix.as_deref());
-    let host = if let Some(pat) = org.host_pattern.as_deref().filter(|s| !s.is_empty()) {
-        pat.to_owned()
-    } else {
-        // No host pattern: a path-prefix tenant lives on the apex,
-        // any other on `<slug>.<apex>`.
-        let apex = crate::tenancy::server::apex_domain();
-        if prefix.is_empty() {
-            format!("{}.{}", slug, apex)
-        } else {
-            apex
-        }
-    };
-    let port_suffix = handoff_port_suffix(
-        org.port,
-        std::env::var("RUSTANGO_TENANT_PORT").ok(),
-        headers.get(header::HOST).and_then(|v| v.to_str().ok()),
-    );
-    let handoff_path = format!("{prefix}{}", state.tenant_handoff_url.trim_end_matches('/'));
+    // Build the redirect: tenant host, the handoff path, and the token.
     // The token is base64url (`URL_SAFE_NO_PAD`) + a single `.` —
     // every character is already URL-safe, so no escaping needed.
-    let handoff = format!(
-        "{}{handoff_path}",
-        crate::tenancy::server::tenant_origin(&host, &port_suffix)
+    let handoff = crate::tenancy::server::tenant_link(
+        &org,
+        &state.tenant_handoff_url,
+        headers.get(header::HOST).and_then(|v| v.to_str().ok()),
     );
     let redirect_to = format!("{handoff}?token={token}");
 
@@ -2441,42 +2476,6 @@ async fn org_impersonate(
         "minted impersonation handoff token",
     );
     resp
-}
-
-/// The org's path prefix for the handoff URL, or `""` when the stored
-/// value is not one segment: `//evil.example` would redirect off-site.
-fn handoff_prefix(path_prefix: Option<&str>) -> &str {
-    path_prefix
-        .map(|p| p.trim_end_matches('/'))
-        .filter(|p| crate::tenancy::provision::validate_path_prefix(p).is_ok())
-        .unwrap_or("")
-}
-
-/// Port for the handoff URL. A port-routed org's own port wins (#1933);
-/// then `RUSTANGO_TENANT_PORT`; then the console request's port.
-fn handoff_port_suffix(
-    org_port: Option<i32>,
-    env_port: Option<String>,
-    host: Option<&str>,
-) -> String {
-    let usable = |p: &str| !p.is_empty() && p != "80" && p != "443";
-    if let Some(p) = org_port {
-        let p = p.to_string();
-        return if usable(&p) {
-            format!(":{p}")
-        } else {
-            String::new()
-        };
-    }
-    env_port
-        .filter(|p| usable(p))
-        .or_else(|| {
-            host.and_then(|h| crate::urls::split_host_port(h)?.1)
-                .map(|p| p.to_string())
-                .filter(|p| usable(p))
-        })
-        .map(|p| format!(":{p}"))
-        .unwrap_or_default()
 }
 
 /// Names only where the config broke; the error text can quote a secret.
@@ -2561,8 +2560,32 @@ mod withheld_tests {
 }
 
 #[cfg(test)]
+mod database_url_hint_tests {
+    use super::database_url_hint;
+
+    /// The hint follows the resolver's schemes: `env://` shown, `enc:` and
+    /// every other value masked.
+    #[test]
+    fn only_an_env_reference_is_shown() {
+        assert!(database_url_hint("env://ACME_DB").contains("current: env://ACME_DB"));
+        let sealed = database_url_hint("enc:v1:QUJDREVG");
+        assert!(
+            sealed.contains("<encrypted>") && !sealed.contains("QUJD"),
+            "{sealed}"
+        );
+        for hidden in ["env:ACME_DB", "vault:secret/acme", "postgres://u:pw@h/db"] {
+            let hint = database_url_hint(hidden);
+            assert!(!hint.contains(hidden), "{hint}");
+        }
+        assert!(database_url_hint("").contains("no value set"));
+    }
+}
+
+#[cfg(test)]
 mod handoff_port_tests {
-    use super::{handoff_port_suffix, handoff_prefix};
+    use crate::tenancy::server::{
+        tenant_path_prefix as handoff_prefix, tenant_port_suffix as handoff_port_suffix,
+    };
 
     #[test]
     fn only_a_valid_path_prefix_reaches_the_handoff_url() {

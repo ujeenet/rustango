@@ -43,6 +43,8 @@ pub struct Post {
     pub secret_score: String,
 }
 
+const POST_FIELDS: &[&str] = &["id", "title", "rating", "secret_score"];
+
 async fn fresh_pool() -> Pool {
     let sq = sqlx::SqlitePool::connect("sqlite::memory:")
         .await
@@ -105,7 +107,7 @@ fn ids(body: &Value) -> Vec<i64> {
 #[tokio::test]
 async fn default_ordering_applies_when_no_query_param() {
     let pool = fresh_pool().await;
-    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
         .page_size(50)
         .ordering(&[("rating", true)])
         .router_pool("/posts", pool);
@@ -124,7 +126,7 @@ async fn default_ordering_applies_when_no_query_param() {
 #[tokio::test]
 async fn explicit_ordering_overrides_default_and_handles_desc_prefix() {
     let pool = fresh_pool().await;
-    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
         .page_size(50)
         .ordering(&[("rating", true)]) // default DESC on rating
         .router_pool("/posts", pool);
@@ -157,7 +159,7 @@ async fn explicit_ordering_overrides_default_and_handles_desc_prefix() {
 #[tokio::test]
 async fn comma_separated_multi_field_ordering() {
     let pool = fresh_pool().await;
-    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
         .page_size(50)
         .router_pool("/posts", pool);
 
@@ -181,7 +183,7 @@ async fn comma_separated_multi_field_ordering() {
 #[tokio::test]
 async fn ordering_fields_whitelist_drops_off_list_names() {
     let pool = fresh_pool().await;
-    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
         .page_size(50)
         .ordering(&[("id", false)])
         .ordering_fields(&["title", "rating"]) // `secret_score` NOT whitelisted
@@ -246,8 +248,8 @@ async fn ordering_fields_whitelist_drops_off_list_names() {
 /// Seeds through an unrestricted ViewSet: a `fields()` one cannot write
 /// `secret_score` (#1845).
 async fn seed_divergent(pool: &Pool) {
-    let app =
-        rustango::viewset::ViewSet::for_model(Post::SCHEMA).router_pool("/posts", pool.clone());
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
+        .router_pool("/posts", pool.clone());
     for (title, rating, secret) in [("a", 1, "zzz"), ("b", 2, "mmm"), ("c", 3, "aaa")] {
         let payload = serde_json::json!({
             "title": title, "rating": rating, "secret_score": secret
@@ -272,9 +274,9 @@ async fn seed_divergent(pool: &Pool) {
 #[tokio::test]
 async fn ordering_on_an_unexposed_field_is_dropped_by_default() {
     let pool = fresh_pool().await;
-    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+    // secret_score NOT exposed
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "rating"])
         .page_size(50)
-        .fields(&["id", "title", "rating"]) // secret_score NOT exposed
         .ordering(&[("id", false)])
         .router_pool("/posts", pool.clone());
 
@@ -301,9 +303,8 @@ async fn ordering_on_an_unexposed_field_is_dropped_by_default() {
 #[tokio::test]
 async fn ordering_on_an_exposed_field_still_works() {
     let pool = fresh_pool().await;
-    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "rating"])
         .page_size(50)
-        .fields(&["id", "title", "rating"])
         .router_pool("/posts", pool.clone());
 
     seed_divergent(&pool).await;
@@ -317,12 +318,12 @@ async fn ordering_on_an_exposed_field_still_works() {
     assert_eq!(ids(&body), vec![3, 2, 1], "exposed field must still sort");
 }
 
-/// When `fields` is unset the ViewSet exposes everything, so ordering
-/// stays permissive — the fix must not tighten that case.
+/// When the field list names every column, ordering stays open on all of
+/// them — the fix must not tighten that case.
 #[tokio::test]
-async fn ordering_stays_open_when_no_fields_restriction_is_set() {
+async fn ordering_stays_open_when_every_field_is_listed() {
     let pool = fresh_pool().await;
-    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
         .page_size(50)
         .router_pool("/posts", pool.clone());
 
@@ -366,7 +367,7 @@ impl rustango::serializer::ModelSerializer for HandPost {
 #[tokio::test]
 async fn ordering_is_closed_when_the_serializer_renders_no_model_field() {
     let pool = fresh_pool().await;
-    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
         .page_size(50)
         .serializer::<HandPost>()
         .router_pool("/posts", pool.clone());
@@ -387,7 +388,7 @@ async fn ordering_is_closed_when_the_serializer_renders_no_model_field() {
 #[tokio::test]
 async fn an_empty_ordering_fields_list_sorts_on_nothing() {
     let pool = fresh_pool().await;
-    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
         .page_size(50)
         .ordering(&[("id", false)])
         .ordering_fields(&[])

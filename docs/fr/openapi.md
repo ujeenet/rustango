@@ -54,7 +54,7 @@ let mut spec = OpenApiSpec::new("Blog API", "1.0.0")
     .add_schema("Post", PostSerializer::openapi_schema()); // from #[derive(Serializer)]
 
 // CRUD path items straight off the ViewSet:
-for (path, item) in ViewSet::for_model(Post::SCHEMA).openapi_paths("/api/posts", "Post") {
+for (path, item) in ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).openapi_paths("/api/posts", "Post") {
     spec = spec.add_path(path, item);
 }
 
@@ -126,7 +126,7 @@ update, partial update, delete — câblées pour référencer un schéma de com
 enregistré :
 
 ```rust
-for (path, item) in ViewSet::for_model(Post::SCHEMA)
+for (path, item) in ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .filter_fields(&["author_id", "status"])
     .search_fields(&["title", "body"])
     .openapi_paths("/api/posts", "Post")

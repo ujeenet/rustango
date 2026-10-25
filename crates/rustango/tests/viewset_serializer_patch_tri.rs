@@ -73,13 +73,13 @@ async fn setup(pool: &Pool) {
 }
 
 fn plain(pool: &Pool) -> axum::Router {
-    ViewSet::for_model(Span::SCHEMA)
+    ViewSet::for_model(Span::SCHEMA, &["id", "owner_id", "lo", "hi", "note"])
         .serializer::<SpanSerializer>()
         .router_pool("/spans", pool.clone())
 }
 
 fn owned(pool: &Pool) -> axum::Router {
-    ViewSet::for_model(Span::SCHEMA)
+    ViewSet::for_model(Span::SCHEMA, &["id", "owner_id", "lo", "hi", "note"])
         .serializer::<SpanSerializer>()
         .filter_backend(OwnedBy::column("owner_id"))
         .router_pool("/spans", pool.clone())
@@ -126,13 +126,12 @@ async fn stored(pool: &Pool, id: i64) -> (i64, i64, i64) {
     (s.owner_id, s.lo, s.hi)
 }
 
-/// `lo` is outside `fields()`, so the UPDATE never writes it: the check
+/// `lo` is outside the field list, so the UPDATE never writes it: the check
 /// must see the stored `lo`, not the sent one.
 async fn patch_checks_the_stored_value_of_an_unwritten_field(pool: &Pool) {
     let id = seed(pool, 1, 1, 10).await;
-    let app = ViewSet::for_model(Span::SCHEMA)
+    let app = ViewSet::for_model(Span::SCHEMA, &["id", "hi"])
         .serializer::<SpanSerializer>()
-        .fields(&["id", "hi"])
         .router_pool("/spans", pool.clone());
     let uri = format!("/spans/{id}");
 

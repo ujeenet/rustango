@@ -17,6 +17,7 @@ La console opérateur est l'interface web de la première sorte — provisionner
 - [Opérateurs](#opérateurs)
 - [Le journal d'audit](#le-journal-daudit)
 - [Exécutions de provisioning](#exécutions-de-provisioning)
+- [Serveurs de bases de données](#serveurs-de-bases-de-données)
 - [Les trois niveaux de capacité](#les-trois-niveaux-de-capacité)
 
 ---
@@ -71,6 +72,7 @@ La console répond sur le domaine **apex** (`RUSTANGO_APEX_DOMAIN`), pas sur un 
 | **Operators** | Qui peut se connecter à cette console |
 | **Audit log** | Chaque changement effectué via la console |
 | **Runs** | Exécutions de provisioning et de migration, diffusées en direct |
+| **Database servers** | Serveurs où les bases des tenants sont créées, avec leur login d'administration |
 
 ---
 
@@ -135,6 +137,31 @@ Depuis la CLI : [`list-runs` / `show-run`](manage.md#voir-ce-qui-sest-passé).
 
 ---
 
+## Serveurs de bases de données
+
+**Organizations → Database servers** enregistre un serveur une seule fois :
+hôte, port, utilisateur et mot de passe d'administration, mode TLS et, sous
+Postgres, une base de maintenance facultative à la place de `postgres`. Avec un
+registre SQLite, un « serveur » est un répertoire pour les fichiers des
+tenants. Le backend est toujours celui du registre.
+
+Le mot de passe est stocké scellé (`enc:v1:`), donc `RUSTANGO_SECRET_KEY` doit
+être défini ; sinon l'enregistrement est refusé. Il n'est jamais réaffiché : le
+formulaire d'édition laisse le champ vide, et un champ vide conserve celui
+enregistré. Les lignes d'audit nomment les champs modifiés, jamais leurs valeurs.
+
+**Test** se connecte et affiche la version du serveur et si le login peut créer
+des bases, créer des logins et accorder des droits, ainsi que la première raison
+pour laquelle il ne peut pas provisionner de tenants (par exemple PostgreSQL
+avant 15).
+
+La suppression est refusée tant que l'URL d'un tenant en mode base de données
+pointe vers l'hôte et le port du serveur (SQLite : un fichier dans son répertoire).
+
+Depuis la CLI : [`add-db-server` et compagnie](manage.md#serveurs-de-bases-de-données).
+
+---
+
 ## Les trois niveaux de capacité
 
 Les routes qui existent dépendent du constructeur que vous avez monté :
@@ -148,6 +175,7 @@ Les routes qui existent dépendent du constructeur que vous avez monté :
 | Mettre un tenant hors service | | ✓ | ✓ |
 | Provisionner un tenant, exécuter les migrations | | | ✓ |
 | Consulter les exécutions de provisioning | | | ✓ |
+| Enregistrer et tester des serveurs de bases de données | | | ✓ |
 
 Les routes non montées renvoient 404 plutôt que 403 — une console en lecture seule n'annonce pas ce qu'elle ne sait pas faire.
 

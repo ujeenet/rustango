@@ -21,6 +21,7 @@ and runs the whole registry. There is no per-tenant migrate on the command line.
 - [Operators](#operators)
 - [The audit log](#the-audit-log)
 - [Provisioning runs](#provisioning-runs)
+- [Database servers](#database-servers)
 - [The three capability levels](#the-three-capability-levels)
 
 ---
@@ -75,6 +76,7 @@ The console answers on the **apex** domain (`RUSTANGO_APEX_DOMAIN`), not on a te
 | **Operators** | Who can sign in to this console |
 | **Audit log** | Every change made through the console |
 | **Runs** | Provisioning and migration runs, streamed live |
+| **Database servers** | Servers tenant databases are created on, with their admin login |
 
 ---
 
@@ -135,7 +137,83 @@ Provisioning a tenant is several steps against a database that may be slow or un
 
 Tenants created from the CLI are recorded too, tagged `requested_by = cli`, so the history covers both surfaces.
 
+### Creating a tenant
+
+**Organizations → New tenant**. In database mode, pick one:
+
+- **Create a new database on a saved server**: choose the server. The
+  database is named exactly as the slug and gets a login of its own with a
+  random password, granted that database only. The run shows
+  `create_database`, `create_login`, `grant` and `check_login` (the new login
+  signs in). An existing database of that name is refused. If a later step
+  fails, the run's `rollback` step drops the new database, login and tenant
+  row, and the form comes back with the reason. This is the default once a
+  server is saved.
+- **Use an existing database URL**: masked, and never sent back to the page.
+- **A database on the registry's server**: a database name; it uses the
+  registry's login, so tenants are not isolated from each other.
+
+**Test connection** on a saved server runs every check a submit runs before
+creating anything (slug free, routing, admin rights, no database or login of
+that name) and reports the rights. Otherwise it reaches the database. The
+backend is always the registry's.
+
+### First admin
+
+Give an admin email (and optionally a username; it defaults to the email)
+and the run adds a `create_admin` step after the migrations, before the
+tenant goes live. It creates a superuser with no usable password. If the step
+fails, the run rolls back like any other step.
+
+The admin sets their own password through a set-password link. The link
+works once, expires in 72 hours, and opens only this tenant's
+change-password page. With `Builder::first_admin_mailer(mailer, from)` it is
+mailed to the admin. Without a mailer, the run page shows it to you **once**,
+right after you submit; copy it and give it to the admin. It is never stored,
+audited or logged; the audit log records the user's creation only.
+
+The fields appear when the provisioner has a handover
+(`Provisioner::with_first_admin_handover`; the standard `Builder` sets one).
+A lost or expired link: run `manage set-password-link <slug> <username>`.
+
 From the CLI: [`list-runs` / `show-run`](manage.md#inspecting-what-happened).
+
+---
+
+## Database servers
+
+**Organizations → Database servers** saves a server once: host, port, admin
+user, admin password, TLS mode and, on Postgres, a maintenance database to use
+instead of `postgres`. On a SQLite registry a "server" is a directory for
+tenant files. The backend is always the registry's.
+
+The password is stored sealed (`enc:v1:`), so `RUSTANGO_SECRET_KEY` must be
+set; without it the save is refused and the page shows a warning. It is never shown again: the edit form
+leaves the field empty, and a blank field keeps the saved one. Audit rows name
+the fields that changed, never their values.
+
+**Test** logs in and reports the server version and whether the admin login may
+create databases, create logins and grant rights, plus the first reason it
+cannot provision tenants (for example PostgreSQL before 15).
+
+TLS defaults to `require` for a new server. An edit made from a page that
+someone else changed in the meantime is refused; reload and edit again.
+
+In the scaffolded `docker compose` dev stack, Postgres has no TLS, so save it
+with TLS `disable`. The compose MySQL `rustango` user cannot create users or
+grant rights; save that server as `root`.
+
+Delete is refused while a database-mode tenant's URL points at the server's
+host and port (SQLite: a file in its directory), or cannot be resolved, while
+a database rustango created there is still recorded, and on a console built
+without tenant pools.
+
+A tenant whose database was made on a saved server gets **Rotate database
+password** on its page. That and **Purge** run as recorded runs, followed live
+like a create. The whole flow is in
+[Tenant databases on a saved server](tenant-databases.md).
+
+From the CLI: [`add-db-server` and friends](manage.md#database-servers).
 
 ---
 
@@ -152,6 +230,7 @@ Which routes exist depends on which constructor you mounted:
 | Decommission a tenant | | ✓ | ✓ |
 | Provision a new tenant, run migrations | | | ✓ |
 | View provisioning runs | | | ✓ |
+| Save and test database servers | | | ✓ |
 
 Routes that are not mounted return 404 rather than 403 — a read-only console does not advertise what it cannot do.
 

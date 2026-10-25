@@ -170,6 +170,15 @@ RUSTANGO_APEX_DOMAIN=localhost
 #   RUSTANGO_SESSION_SECRET=$(openssl rand -base64 32)
 # RUSTANGO_SESSION_SECRET=
 
+# Encryption key for sealed secrets: saved database server passwords,
+# tenant database URLs, EncryptedString fields. Use 32 or more random
+# bytes and back it up: without it sealed values cannot be read.
+#   RUSTANGO_SECRET_KEY=$(openssl rand -base64 48)
+# RUSTANGO_SECRET_KEY=
+# Rotation: old key here, new one above, then in a tenancy project
+# `cargo run -- reseal-tenant-secrets --apply`.
+# RUSTANGO_SECRET_KEY_PREVIOUS=
+
 # Log filter, standard RUST_LOG syntax. Default is `info,sqlx=warn`.
 # Production sets this in the orchestrator rather than here.
 # RUST_LOG=info,my_app=debug
@@ -528,6 +537,10 @@ cargo run -- --help                  # full verb list (makemigrations, startapp,
                 .to_owned(),
         ),
     };
+    let tenant_note = match template {
+        Template::Tenant => tenant_dev_note(backend),
+        _ => String::new(),
+    };
     format!(
         r#"# {name}
 
@@ -557,7 +570,7 @@ Either way: `cargo run` (no args) is `runserver`. Every other
 management verb (`makemigrations`, `migrate`, `startapp`, `check`, …)
 flows through the same binary via `rustango::manage::Cli` — see
 `src/main.rs`.
-
+{tenant_note}
 ## Project layout
 
 ```text
@@ -575,6 +588,31 @@ Adding a new model is one struct in `models.rs`; the auto-admin sees
 it immediately. See <https://github.com/ujeenet/rustango> for the full
 feature list.
 "#
+    )
+}
+
+/// How to save the compose database as a server in the console.
+fn tenant_dev_note(backend: Backend) -> String {
+    let server = match backend {
+        Backend::Postgres => {
+            "The compose Postgres has no TLS: save it with host `postgres`
+(`localhost` from the host), user `rustango` and TLS `disable`."
+        }
+        Backend::Mysql => {
+            "The compose `rustango` user cannot create users or grant rights:
+save the server as `root` (password `rustango`), host `mysql` (`localhost`
+from the host)."
+        }
+        Backend::Sqlite => "Save a server with a directory for tenant files, e.g. `var/tenants`.",
+    };
+    format!(
+        "
+## Tenants and database servers
+
+The operator console has **New tenant** and **Database servers** pages (see
+`src/main.rs`). Saving a server password needs `RUSTANGO_SECRET_KEY` in `.env`
+(see `.env.example`). {server}
+"
     )
 }
 
@@ -773,6 +811,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .api(urls::api())
         .with_welcome() // friendly `/` on first run; drop once you have a root handler
         .with_health() // /health + /ready hit the registry pool
+        // Console "New tenant" and "Database servers" pages; every operator
+        // can use them. Delete this line to turn them off.
+        .with_tenant_provisioning("migrations")
         // Behind a load balancer, name its addresses so per-IP limits see clients:
         // .with_trusted_proxies(["10.0.0.0/8"])?
         // Loads config/*.toml for the RUSTANGO_ENV tier (default `dev`),

@@ -15,7 +15,7 @@
 //! after themselves, so the console looks empty after they finish.
 //! This one stays put.
 
-use rustango::storage::s3::{S3Config, S3Storage};
+use rustango::storage::s3::{S3Config, S3Credentials, S3Storage};
 use rustango::storage::Storage;
 use std::time::Duration;
 
@@ -25,14 +25,9 @@ fn maybe_storage() -> Option<S3Storage> {
     let bucket = std::env::var("RUSTANGO_S3_TEST_BUCKET").ok()?;
     let endpoint = std::env::var("RUSTANGO_S3_TEST_ENDPOINT").ok();
     let region = std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
-    Some(S3Storage::new(S3Config {
-        bucket,
-        region,
-        endpoint: endpoint.clone(),
-        access_key_id: key,
-        secret_access_key: secret,
-        path_style: endpoint.is_some(),
-    }))
+    let mut cfg = S3Config::new(bucket, region).with_path_style(endpoint.is_some());
+    cfg.endpoint = endpoint;
+    Some(S3Storage::new(cfg, S3Credentials::new(key, secret)))
 }
 
 #[ignore = "live test that LEAVES FILES BEHIND for the console — run with --ignored"]

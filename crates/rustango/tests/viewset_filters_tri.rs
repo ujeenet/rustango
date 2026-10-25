@@ -61,21 +61,30 @@ fn price_min(params: &HashMap<String, String>, _: &'static ModelSchema) -> Vec<W
 
 fn app(pool: &Pool) -> axum::Router {
     use rustango::viewset::ViewSet;
-    ViewSet::for_model(Item::SCHEMA)
-        .filter_fields(&["category_id", "name", "created_at"])
-        .router_pool("/items", pool.clone())
-        .merge(
-            ViewSet::for_model(Item::SCHEMA)
-                .filter_fields(&["price"])
-                .filter_backend(price_min)
-                .router_pool("/priced", pool.clone()),
+    ViewSet::for_model(
+        Item::SCHEMA,
+        &["id", "name", "category_id", "created_at", "price"],
+    )
+    .filter_fields(&["category_id", "name", "created_at"])
+    .router_pool("/items", pool.clone())
+    .merge(
+        ViewSet::for_model(
+            Item::SCHEMA,
+            &["id", "name", "category_id", "created_at", "price"],
         )
-        .merge(
-            ViewSet::for_model(Item::SCHEMA)
-                .filter_fields(&["category_id"])
-                .cursor_pagination("category_id")
-                .router_pool("/by_cat", pool.clone()),
+        .filter_fields(&["price"])
+        .filter_backend(price_min)
+        .router_pool("/priced", pool.clone()),
+    )
+    .merge(
+        ViewSet::for_model(
+            Item::SCHEMA,
+            &["id", "name", "category_id", "created_at", "price"],
         )
+        .filter_fields(&["category_id"])
+        .cursor_pagination("category_id")
+        .router_pool("/by_cat", pool.clone()),
+    )
 }
 
 /// Status and the result names, in id order.
@@ -222,8 +231,11 @@ fn a_nullable_cursor_column_is_logged_at_build_time() {
         .with_max_level(tracing::Level::ERROR)
         .finish();
     tracing::subscriber::with_default(subscriber, || {
-        let _ =
-            rustango::viewset::ViewSet::for_model(Item::SCHEMA).cursor_pagination("category_id");
+        let _ = rustango::viewset::ViewSet::for_model(
+            Item::SCHEMA,
+            &["id", "name", "category_id", "created_at", "price"],
+        )
+        .cursor_pagination("category_id");
     });
     let logs = buf.contents();
     assert!(

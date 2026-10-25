@@ -232,6 +232,13 @@ fn classify_db(db: &dyn sqlx::error::DatabaseError) -> ConnectFault {
     }
 }
 
+/// Prefix of a sealed secret (`enc:v1:<base64>`). Here, not in tenancy,
+/// so [`redact`] knows it in every build.
+pub(crate) const SEALED_SCHEME: &str = "enc:";
+
+/// What [`redact`] shows for a sealed secret.
+pub(crate) const ENCRYPTED_LABEL: &str = "<encrypted>";
+
 /// A connection URL with its password replaced.
 ///
 /// These strings reach terminals, log files and — once the operator
@@ -244,6 +251,9 @@ fn classify_db(db: &dyn sqlx::error::DatabaseError) -> ConnectFault {
 /// exactly what the reader needs to see.
 #[must_use]
 pub fn redact(url: &str) -> String {
+    if url.starts_with(SEALED_SCHEME) {
+        return ENCRYPTED_LABEL.to_owned();
+    }
     let url = redact_userinfo(url);
     // sqlx also reads `password=` from the query. Every `?`/`&` chunk is
     // checked, so it is masked even if the userinfo pass ate the `?`.
@@ -336,6 +346,13 @@ mod tests {
             redact("postgres://localhost:5432/acme"),
             "postgres://localhost:5432/acme"
         );
+    }
+
+    /// A sealed secret shows as a word, never its ciphertext.
+    #[test]
+    fn redact_shows_a_sealed_secret_only_as_encrypted() {
+        assert_eq!(redact("enc:v1:QUJDREVG"), ENCRYPTED_LABEL);
+        assert_eq!(redact("enc:v9:anything"), ENCRYPTED_LABEL);
     }
 
     #[test]

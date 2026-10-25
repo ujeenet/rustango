@@ -541,10 +541,20 @@ fn session_claims(
 
 // ---------------------------------------------------------------- Handlers
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct LoginInput {
     pub username: String,
     pub password: String,
+}
+
+/// Redacted: `{:?}` must not print the password.
+impl std::fmt::Debug for LoginInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginInput")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1127,6 +1137,16 @@ impl<S: Send + Sync> FromRequestParts<S> for Bearer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_input_debug_hides_the_password() {
+        let i = LoginInput {
+            username: "alice".into(),
+            password: "hunter2-pw".into(),
+        };
+        let s = format!("{i:?}");
+        assert!(s.contains("alice") && !s.contains("hunter2-pw"), "{s}");
+    }
 
     #[test]
     fn config_default_paths_match_documentation() {

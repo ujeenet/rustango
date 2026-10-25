@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustango::media::{MediaManager, MediaStatus, SaveOpts, UploadIntent};
-use rustango::storage::s3::{S3Config, S3Storage};
+use rustango::storage::s3::{S3Config, S3Credentials, S3Storage};
 use rustango::storage::{BoxedStorage, StorageRegistry};
 use sqlx::PgPool;
 
@@ -55,14 +55,9 @@ async fn maybe_setup() -> Option<MediaManager> {
         .await
         .expect("clear media");
 
-    let storage: BoxedStorage = Arc::new(S3Storage::new(S3Config {
-        bucket,
-        region,
-        endpoint: endpoint.clone(),
-        access_key_id: key,
-        secret_access_key: secret,
-        path_style: endpoint.is_some(),
-    }));
+    let mut cfg = S3Config::new(bucket, region).with_path_style(endpoint.is_some());
+    cfg.endpoint = endpoint;
+    let storage: BoxedStorage = Arc::new(S3Storage::new(cfg, S3Credentials::new(key, secret)));
     let registry = StorageRegistry::new()
         .set(DISK_NAME, storage)
         .with_default(DISK_NAME);

@@ -126,6 +126,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::email_jobs` | Two queues on one jobs table given different mailers |
 | `rustango::error` | The cause behind a 5xx, which the response body withholds |
 | `rustango::auth_flows` | Single-use auth links refused by the cache |
+| `rustango::aead` | A blank previous secret key |
 | `rustango::hmac_auth` | HMAC request auth setup |
 | `rustango::humanize` | Humanize filters |
 | `rustango::jobs` | Background job queues |
@@ -150,12 +151,16 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::tenancy` | Tenancy, general |
 | `rustango::tenancy::admin` | Tenant admin |
 | `rustango::tenancy::decommission` | Tenant decommission and purge |
+| `rustango::tenancy::first_admin` | A new tenant's first admin and its link |
 | `rustango::tenancy::migrate_run` | Per-tenant migrations |
+| `rustango::tenancy::operation` | Tenant purge and password rotation runs |
 | `rustango::tenancy::operator_console` | Operator console |
 | `rustango::tenancy::pools` | Tenant pool lifecycle |
 | `rustango::tenancy::provision` | Tenant provisioning |
 | `rustango::tenancy::provision_webhook` | Provisioning webhooks |
 | `rustango::tenancy::resolver` | Tenant resolution |
+| `rustango::tenancy::secrets` | Sealed tenant secrets |
+| `rustango::tenancy::server_admin` | Tenant databases made on a saved server |
 | `rustango::tenancy::sso` | Tenant SSO |
 | `rustango::tenancy::sweep` | Retention sweeps |
 | `rustango::viewset` | ViewSets mounted with open write actions |

@@ -17,10 +17,10 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.60"                                        # Postgres (the default backend)
+//! rustango = "0.61"                                        # Postgres (the default backend)
 //! # or pick another backend — see "Choosing a backend" below:
-//! rustango = { version = "0.60", default-features = false, features = ["sqlite", "batteries"] }
-//! rustango = { version = "0.60", default-features = false, features = ["mysql",  "batteries"] }
+//! rustango = { version = "0.61", default-features = false, features = ["sqlite", "batteries"] }
+//! rustango = { version = "0.61", default-features = false, features = ["mysql",  "batteries"] }
 //! ```
 //!
 //! `default = ["postgres", "batteries"]`. **`batteries`** is everything except
@@ -525,6 +525,10 @@ pub mod jsonapi;
     feature = "totp",
 ))]
 pub(crate) mod crypto;
+
+/// AEAD sealing shared by `EncryptedString` and sealed tenant secrets.
+#[cfg(feature = "_aead")]
+pub(crate) mod aead;
 
 /// Attribute casts — `Cast<C>` field wrapper + `CastValue` trait, with the
 /// `EncryptedString` AEAD-at-rest built-in.

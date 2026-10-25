@@ -51,7 +51,7 @@ use tracing::Instrument as _;
 
 use super::error::TenancyError;
 use super::org::{Org, StorageMode};
-use super::secrets::{LiteralSecretsResolver, SecretsResolver};
+use super::secrets::{ChainSecretsResolver, SecretsResolver, TenantSecrets};
 
 /// Configuration for [`TenantPools`].
 #[derive(Debug, Clone)]
@@ -528,7 +528,7 @@ pub(super) fn evict_to_fit<DB: Database>(
 pub struct TenantPools<DB: Database = DefaultTenantDb> {
     registry: sqlx::Pool<DB>,
     config: TenantPoolsConfig,
-    secrets: Arc<dyn SecretsResolver>,
+    secrets: TenantSecrets,
     /// Source of `CachedPool::last_used` stamps, shared by both caches
     /// so their orderings never collide.
     lru_tick: AtomicU64,
@@ -549,13 +549,12 @@ pub struct TenantPools<DB: Database = DefaultTenantDb> {
 }
 
 impl<DB: Database> TenantPools<DB> {
-    /// Construct with the default `LiteralSecretsResolver` (i.e.
-    /// `Org.database_url` carries the literal URL). Existing
-    /// `TenantPools::new(pg_pool)` call sites continue to work
-    /// — `DB` is inferred from the pool type.
+    /// Construct with [`ChainSecretsResolver::standard`]: `env://`, sealed
+    /// `enc:` and literal URLs all resolve. Every built-in surface (builder,
+    /// manage CLI, console) gets its pools here.
     #[must_use]
     pub fn new(registry: sqlx::Pool<DB>) -> Self {
-        Self::with_secrets(registry, LiteralSecretsResolver)
+        Self::with_secrets(registry, ChainSecretsResolver::standard())
     }
 
     /// Construct with a user-supplied [`SecretsResolver`]. Use
@@ -567,7 +566,7 @@ impl<DB: Database> TenantPools<DB> {
         Self {
             registry,
             config: TenantPoolsConfig::default(),
-            secrets: Arc::new(secrets),
+            secrets: TenantSecrets::new(secrets),
             lru_tick: AtomicU64::new(0),
             warned_near_cap: std::sync::atomic::AtomicBool::new(false),
             cache: RwLock::new(HashMap::new()),
@@ -648,10 +647,22 @@ impl<DB: Database> TenantPools<DB> {
         &self.registry
     }
 
+    /// How `database_url` references are opened and stored.
+    pub(crate) fn secrets(&self) -> &TenantSecrets {
+        &self.secrets
+    }
+
+    /// Refuse to store a password URL that cannot be sealed.
+    #[must_use]
+    pub fn require_sealed_secrets(mut self) -> Self {
+        self.secrets = self.secrets.require_sealed();
+        self
+    }
+
     /// Same registry, config and secrets resolver; empty caches.
     pub(crate) fn fresh(&self) -> Self {
         let mut pools = Self::new(self.registry.clone()).config(self.config.clone());
-        pools.secrets = Arc::clone(&self.secrets);
+        pools.secrets = self.secrets.clone();
         pools
     }
 }
@@ -784,6 +795,35 @@ pub trait TenantPoolInvalidator: Send + Sync {
         >,
     >;
 
+    /// How tenant URLs are opened and stored, so an edit can check a new
+    /// reference before it is written. No default: a fallback would drop
+    /// the deployment's `require_sealed_secrets()`.
+    ///
+    /// ```compile_fail
+    /// # use rustango::tenancy::{Org, PrewarmReport, TenancyError, TenantPoolInvalidator};
+    /// # use rustango::tenancy::decommission::{Action, Report};
+    /// # use std::{future::Future, pin::Pin};
+    /// struct NoSecrets;
+    /// impl TenantPoolInvalidator for NoSecrets {
+    ///     fn invalidate<'a>(&'a self, _: &'a str) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    ///         Box::pin(async {})
+    ///     }
+    ///     fn resolved_database_url<'a>(&'a self, _: &'a Org)
+    ///         -> Pin<Box<dyn Future<Output = Result<String, TenancyError>> + Send + 'a>> {
+    ///         unimplemented!()
+    ///     }
+    ///     fn decommission<'a>(&'a self, _: &'a str, _: Action)
+    ///         -> Pin<Box<dyn Future<Output = Result<Report, TenancyError>> + Send + 'a>> {
+    ///         unimplemented!()
+    ///     }
+    ///     fn prewarm<'a>(&'a self)
+    ///         -> Pin<Box<dyn Future<Output = Result<PrewarmReport, TenancyError>> + Send + 'a>> {
+    ///         unimplemented!()
+    ///     }
+    /// }
+    /// ```
+    fn tenant_secrets(&self) -> TenantSecrets;
+
     /// Take a tenant out of service — see
     /// [`crate::tenancy::decommission`].
     ///
@@ -842,6 +882,10 @@ where
         >,
     > {
         Box::pin(async move { TenantPools::<DB>::resolved_database_url(self, org).await })
+    }
+
+    fn tenant_secrets(&self) -> TenantSecrets {
+        self.secrets.clone()
     }
 
     fn decommission<'a>(
@@ -2086,6 +2130,17 @@ mod tests {
             schema_name: Some("cold".into()),
             ..crate::testkit::org()
         }
+    }
+
+    /// `new` is what the builder, CLI and console use, so it must resolve
+    /// `env://` references, not hand them to the driver.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn new_resolves_env_references() {
+        let pools: TenantPools<sqlx::Sqlite> =
+            TenantPools::new(sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy"));
+        let path = std::env::var("PATH").expect("PATH");
+        assert_eq!(pools.resolve_secret("env://PATH").await.unwrap(), path);
     }
 
     /// The near-cap warning fires on the crossing, not on every

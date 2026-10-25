@@ -345,6 +345,69 @@ impl Pool {
         }
     }
 
+    /// A one-connection admin pool on the server behind `url`, for
+    /// database and login DDL. `database: None` picks the maintenance
+    /// target: Postgres' `postgres` database, no database on MySQL.
+    /// Each connection first runs [`Dialect::admin_session_sql`].
+    ///
+    /// # Errors
+    /// A [`ConnectDiagnosis`]; SQLite and unknown schemes are refused.
+    pub async fn connect_admin(
+        url: &str,
+        database: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Self, ConnectDiagnosis> {
+        #[cfg(not(any(feature = "postgres", feature = "mysql")))]
+        let _ = (database, timeout);
+        let refuse = |detail: &str| ConnectDiagnosis::new(ConnectFault::Other, url, detail);
+        let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
+        match scheme.as_str() {
+            #[cfg(feature = "postgres")]
+            "postgres" | "postgresql" => {
+                use std::str::FromStr as _;
+                let opts = sqlx::postgres::PgConnectOptions::from_str(url)
+                    .map_err(|e| ConnectDiagnosis::of(url, &e))?
+                    .database(database.unwrap_or(super::server::PG_MAINTENANCE_DATABASE));
+                let pool = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .acquire_timeout(timeout)
+                    .connect_with(opts)
+                    .await
+                    .map_err(|e| ConnectDiagnosis::of(url, &e))?;
+                Ok(Self::Postgres(pool))
+            }
+            #[cfg(feature = "mysql")]
+            "mysql" => {
+                use std::str::FromStr as _;
+                let mut opts = sqlx::mysql::MySqlConnectOptions::from_str(&without_database(url))
+                    .map_err(|e| ConnectDiagnosis::of(url, &e))?;
+                if let Some(db) = database {
+                    opts = opts.database(db);
+                }
+                let setup = super::mysql::MySql.admin_session_sql();
+                let pool = sqlx::mysql::MySqlPoolOptions::new()
+                    .max_connections(1)
+                    .acquire_timeout(timeout)
+                    .after_connect(move |conn, _| {
+                        Box::pin(async move {
+                            if let Some(sql) = setup {
+                                sqlx::Executor::execute(conn, sql).await?;
+                            }
+                            Ok(())
+                        })
+                    })
+                    .connect_with(opts)
+                    .await
+                    .map_err(|e| ConnectDiagnosis::of(url, &e))?;
+                Ok(Self::Mysql(pool))
+            }
+            "sqlite" => Err(refuse("a SQLite database has no server to administer")),
+            _ => Err(refuse(
+                "not a postgres:// or mysql:// URL this server can reach",
+            )),
+        }
+    }
+
     /// Read connection details from environment variables and connect.
     /// See [`crate::env::database_url_from_env`] for the var resolution
     /// order (`DATABASE_URL` takes precedence; otherwise assembled from
@@ -696,7 +759,27 @@ pub const IDLE_PING_ENV: &str = "RUSTANGO_DB_IDLE_PING_SECS";
 ///
 /// [`configure_pools`] installs it once at boot from `[database]`,
 /// and every [`Pool`] constructor reads it.
+///
+/// Build one from the default and assign; a struct literal does not
+/// compile outside rustango, so a new field never breaks yours:
+///
+/// ```
+/// let mut t = rustango::sql::PoolTuning::default();
+/// t.max_connections = Some(20);
+/// rustango::sql::configure_pools(t);
+/// ```
+///
+/// ```compile_fail
+/// let _ = rustango::sql::PoolTuning {
+///     max_connections: Some(20),
+///     min_connections: None,
+///     acquire_timeout: None,
+///     idle_timeout: None,
+///     max_lifetime: None,
+/// };
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PoolTuning {
     /// Most connections to keep. sqlx's 10 is usually too few for a
     /// web server and far too many for SQLite.
@@ -825,6 +908,43 @@ fn parse_env<T: std::str::FromStr + PartialEq + Default>(key: &str) -> Option<T>
             );
             None
         }
+    }
+}
+
+/// `url` with its database path removed, query kept: sqlx's MySQL
+/// options cannot unset a database once parsed.
+#[cfg(feature = "mysql")]
+fn without_database(url: &str) -> String {
+    let (head, rest) = match super::connect_diagnosis::split_userinfo(url) {
+        Some((scheme, userinfo, rest)) => (format!("{scheme}://{userinfo}@"), rest),
+        None => match url.split_once("://") {
+            Some((scheme, rest)) => (format!("{scheme}://"), rest),
+            None => return url.to_owned(),
+        },
+    };
+    let (path, query) = match rest.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (rest, None),
+    };
+    let host = path.split('/').next().unwrap_or(path);
+    match query {
+        Some(q) => format!("{head}{host}?{q}"),
+        None => format!("{head}{host}"),
+    }
+}
+
+#[cfg(all(test, feature = "mysql"))]
+mod without_database_tests {
+    use super::without_database;
+
+    #[test]
+    fn drops_only_the_path() {
+        assert_eq!(
+            without_database("mysql://u:p/w@h:3306/db?ssl-mode=required"),
+            "mysql://u:p/w@h:3306?ssl-mode=required"
+        );
+        assert_eq!(without_database("mysql://h/db"), "mysql://h");
+        assert_eq!(without_database("mysql://u@h"), "mysql://u@h");
     }
 }
 

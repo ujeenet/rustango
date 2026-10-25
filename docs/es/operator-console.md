@@ -17,6 +17,7 @@ La consola de operador es la interfaz web de la primera clase — aprovisionar t
 - [Operadores](#operadores)
 - [El registro de auditoría](#el-registro-de-auditoría)
 - [Ejecuciones de aprovisionamiento](#ejecuciones-de-aprovisionamiento)
+- [Servidores de bases de datos](#servidores-de-bases-de-datos)
 - [Los tres niveles de capacidad](#los-tres-niveles-de-capacidad)
 
 ---
@@ -70,6 +71,7 @@ La consola responde en el dominio **apex** (`RUSTANGO_APEX_DOMAIN`), no en un su
 | **Operators** | Quién puede entrar en esta consola |
 | **Audit log** | Cada cambio hecho a través de la consola |
 | **Runs** | Ejecuciones de aprovisionamiento y migración, en directo |
+| **Database servers** | Servidores donde se crean las bases de los tenants, con su login de administración |
 
 ---
 
@@ -134,6 +136,30 @@ Desde la CLI: [`list-runs` / `show-run`](manage.md#ver-qué-ha-pasado).
 
 ---
 
+## Servidores de bases de datos
+
+**Organizations → Database servers** guarda un servidor una sola vez: host,
+puerto, usuario y contraseña de administración, modo TLS y, en Postgres, una
+base de mantenimiento opcional en lugar de `postgres`. Con un registro SQLite,
+un «servidor» es un directorio para los archivos de los tenants. El backend es
+siempre el del registro.
+
+La contraseña se guarda sellada (`enc:v1:`), así que `RUSTANGO_SECRET_KEY` debe
+estar definida; si no, se rechaza. Nunca se vuelve a mostrar: el formulario de
+edición deja el campo vacío y un campo vacío conserva la guardada. Las filas de
+auditoría nombran los campos cambiados, nunca sus valores.
+
+**Test** inicia sesión y muestra la versión del servidor y si el login puede
+crear bases, crear logins y conceder permisos, además del primer motivo por el
+que no puede aprovisionar tenants (por ejemplo PostgreSQL anterior a 15).
+
+Borrar se rechaza mientras la URL de un tenant en modo base de datos apunte al
+host y puerto del servidor (SQLite: un archivo en su directorio).
+
+Desde la CLI: [`add-db-server` y compañía](manage.md#servidores-de-bases-de-datos).
+
+---
+
 ## Los tres niveles de capacidad
 
 Qué rutas existen depende del constructor que hayas montado:
@@ -147,6 +173,7 @@ Qué rutas existen depende del constructor que hayas montado:
 | Sacar un tenant de servicio | | ✓ | ✓ |
 | Aprovisionar un tenant, ejecutar migraciones | | | ✓ |
 | Ver las ejecuciones de aprovisionamiento | | | ✓ |
+| Guardar y probar servidores de bases de datos | | | ✓ |
 
 Las rutas no montadas devuelven 404 en lugar de 403 — una consola de solo lectura no anuncia lo que no puede hacer.
 

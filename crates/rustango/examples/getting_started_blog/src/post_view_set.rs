@@ -9,6 +9,7 @@ use crate::blog::models::Post;
 #[derive(ViewSet)]
 #[viewset(
     model         = Post,
+    fields        = "id, title, body, author_id, published_at",
     serializer    = crate::post_serializer::PostSerializer,
     filter_fields = "author_id, status",
     search_fields = "title, body",
