@@ -431,6 +431,19 @@ fieldset.section .brand-asset-preview {
   border-color: var(--color-error-border);
   color: var(--color-error-fg);
 }
+/* A rights report: one line per right, then the fix. */
+.probe ul.rights { margin: var(--space-1) 0; padding-left: 1.2rem; }
+.probe .right-no { font-weight: var(--font-weight-bold); }
+.probe pre.fix-sql {
+  margin: var(--space-1) 0;
+  padding: var(--space-2);
+  white-space: pre-wrap;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  border-radius: var(--radius-md);
+}
+/* Refusals keep their line breaks. */
+.alert-lines, td.detail { white-space: pre-line; }
 tr.probe-row td { border-top: 0; padding-top: 0; }
 tr.probe-row:hover td { background: transparent; }
 
