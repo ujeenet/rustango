@@ -40,7 +40,7 @@ use tokio::sync::RwLock;
 use super::error::TenancyError;
 use super::org::{BackendKind, Org, StorageMode};
 use super::pools::TenantPoolsConfig;
-use super::secrets::{LiteralSecretsResolver, SecretsResolver};
+use super::secrets::{ChainSecretsResolver, SecretsResolver};
 
 /// One tenant's pool (database-mode only, parameterized by backend
 /// type). Holds an `Arc<Pool<DB>>` so callers can clone cheaply for
@@ -124,14 +124,12 @@ pub struct DatabasePools<DB: Database> {
 }
 
 impl<DB: Database> DatabasePools<DB> {
-    /// Construct with the default literal secrets resolver — i.e.
-    /// `Org.database_url` is treated as a verbatim connection string.
-    /// Pair with [`super::EnvSecretsResolver`] /
-    /// [`super::ChainSecretsResolver`] via [`Self::with_secrets`]
-    /// when you want env-var or vault indirection.
+    /// Construct with [`super::ChainSecretsResolver::standard`], like
+    /// [`super::TenantPools::new`]. Use [`Self::with_secrets`] for vault
+    /// indirection.
     #[must_use]
     pub fn new(backend: BackendKind) -> Self {
-        Self::with_secrets(backend, LiteralSecretsResolver)
+        Self::with_secrets(backend, ChainSecretsResolver::standard())
     }
 
     /// Next LRU stamp. See [`super::pools::CachedPool`].

@@ -431,7 +431,18 @@ impl<DB: Database> Builder<DB> {
         // `TenantPools` is behind an `Arc` by this point, so rebuild
         // rather than mutate — the registry pool itself is cheap to
         // clone (it is an `Arc` internally).
-        self.pools = Arc::new(TenantPools::<DB>::new(self.registry.clone()).config(config));
+        // `fresh` keeps a resolver installed by `secrets`.
+        self.pools = Arc::new(self.pools.fresh().config(config));
+        self
+    }
+
+    /// Open tenant `database_url` references with `resolver` instead of
+    /// [`ChainSecretsResolver::standard`](crate::tenancy::ChainSecretsResolver::standard).
+    #[must_use]
+    pub fn secrets(mut self, resolver: impl crate::tenancy::SecretsResolver) -> Self {
+        let config = self.pools.pool_config().clone();
+        self.pools =
+            Arc::new(TenantPools::<DB>::with_secrets(self.registry.clone(), resolver).config(config));
         self
     }
 
@@ -1229,6 +1240,44 @@ pub(crate) mod resolver_tests {
         let body = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
         let want = listener.local_addr().unwrap().port().to_string();
         assert_eq!(&body[..], want.as_bytes());
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod secrets_tests {
+    use super::Builder;
+
+    struct Fixed;
+
+    #[async_trait::async_trait]
+    impl crate::tenancy::SecretsResolver for Fixed {
+        async fn resolve(&self, _: &str) -> Result<String, crate::tenancy::SecretsError> {
+            Ok("fixed".into())
+        }
+    }
+
+    fn builder() -> Builder<sqlx::Sqlite> {
+        let pool = sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy");
+        Builder::from_pool(pool, "sqlite::memory:", "localhost")
+    }
+
+    /// A built server opens `env://` references, before and after
+    /// `tenant_pools` rebuilds the pool set.
+    #[tokio::test]
+    async fn the_default_resolver_reads_env_references() {
+        let path = std::env::var("PATH").expect("PATH");
+        let b = builder();
+        assert_eq!(b.pools().resolve_secret("env://PATH").await.unwrap(), path);
+        let b = b.tenant_pools(crate::tenancy::TenantPoolsConfig::default());
+        assert_eq!(b.pools().resolve_secret("env://PATH").await.unwrap(), path);
+    }
+
+    #[tokio::test]
+    async fn a_custom_resolver_survives_tenant_pools() {
+        let b = builder()
+            .secrets(Fixed)
+            .tenant_pools(crate::tenancy::TenantPoolsConfig::default());
+        assert_eq!(b.pools().resolve_secret("x").await.unwrap(), "fixed");
     }
 }
 

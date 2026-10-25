@@ -51,7 +51,7 @@ use tracing::Instrument as _;
 
 use super::error::TenancyError;
 use super::org::{Org, StorageMode};
-use super::secrets::{LiteralSecretsResolver, SecretsResolver};
+use super::secrets::{ChainSecretsResolver, SecretsResolver};
 
 /// Configuration for [`TenantPools`].
 #[derive(Debug, Clone)]
@@ -549,13 +549,12 @@ pub struct TenantPools<DB: Database = DefaultTenantDb> {
 }
 
 impl<DB: Database> TenantPools<DB> {
-    /// Construct with the default `LiteralSecretsResolver` (i.e.
-    /// `Org.database_url` carries the literal URL). Existing
-    /// `TenantPools::new(pg_pool)` call sites continue to work
-    /// — `DB` is inferred from the pool type.
+    /// Construct with [`ChainSecretsResolver::standard`]: `env://`, sealed
+    /// `enc:` and literal URLs all resolve. Every built-in surface (builder,
+    /// manage CLI, console) gets its pools here.
     #[must_use]
     pub fn new(registry: sqlx::Pool<DB>) -> Self {
-        Self::with_secrets(registry, LiteralSecretsResolver)
+        Self::with_secrets(registry, ChainSecretsResolver::standard())
     }
 
     /// Construct with a user-supplied [`SecretsResolver`]. Use
@@ -646,6 +645,11 @@ impl<DB: Database> TenantPools<DB> {
     #[must_use]
     pub fn registry_inner(&self) -> &sqlx::Pool<DB> {
         &self.registry
+    }
+
+    /// The resolver `database_url` references are opened with.
+    pub(crate) fn secrets(&self) -> &Arc<dyn SecretsResolver> {
+        &self.secrets
     }
 
     /// Same registry, config and secrets resolver; empty caches.
@@ -784,6 +788,12 @@ pub trait TenantPoolInvalidator: Send + Sync {
         >,
     >;
 
+    /// The resolver tenant URLs are opened with, so an edit can check a
+    /// new reference before it is written.
+    fn secrets_resolver(&self) -> Arc<dyn SecretsResolver> {
+        Arc::new(ChainSecretsResolver::standard())
+    }
+
     /// Take a tenant out of service — see
     /// [`crate::tenancy::decommission`].
     ///
@@ -842,6 +852,10 @@ where
         >,
     > {
         Box::pin(async move { TenantPools::<DB>::resolved_database_url(self, org).await })
+    }
+
+    fn secrets_resolver(&self) -> Arc<dyn SecretsResolver> {
+        Arc::clone(&self.secrets)
     }
 
     fn decommission<'a>(
@@ -2086,6 +2100,17 @@ mod tests {
             schema_name: Some("cold".into()),
             ..crate::testkit::org()
         }
+    }
+
+    /// `new` is what the builder, CLI and console use, so it must resolve
+    /// `env://` references, not hand them to the driver.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn new_resolves_env_references() {
+        let pools: TenantPools<sqlx::Sqlite> =
+            TenantPools::new(sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy"));
+        let path = std::env::var("PATH").expect("PATH");
+        assert_eq!(pools.resolve_secret("env://PATH").await.unwrap(), path);
     }
 
     /// The near-cap warning fires on the crossing, not on every

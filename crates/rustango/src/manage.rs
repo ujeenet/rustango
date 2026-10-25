@@ -153,6 +153,9 @@ pub struct Cli {
     /// Set via [`Cli::with_tenant_pools`] (#1456).
     #[cfg(feature = "tenancy")]
     tenant_pools: Option<crate::tenancy::TenantPoolsConfig>,
+    /// `None` = `ChainSecretsResolver::standard()`. Set via [`Cli::with_secrets`].
+    #[cfg(feature = "tenancy")]
+    secrets: Option<std::sync::Arc<dyn crate::tenancy::SecretsResolver>>,
     /// Mounts registered via [`Cli::with_static`] and [`Cli::with_uploads`],
     /// nested at `runserver` time as `Router::nest(prefix, static_router(files))`.
     /// Empty by default — projects that already mount their own
@@ -213,6 +216,8 @@ impl Cli {
             provisioning_dir: None,
             #[cfg(feature = "tenancy")]
             tenant_pools: None,
+            #[cfg(feature = "tenancy")]
+            secrets: None,
             #[cfg(feature = "_http_layers")]
             static_dirs: Vec::new(),
             #[cfg(feature = "csrf")]
@@ -397,6 +402,16 @@ impl Cli {
     #[must_use]
     pub fn with_tenant_pools(mut self, config: crate::tenancy::TenantPoolsConfig) -> Self {
         self.tenant_pools = Some(config);
+        self
+    }
+
+    /// Open tenant `database_url` references with `resolver`, in the
+    /// server and in every tenancy verb. Default:
+    /// [`ChainSecretsResolver::standard`](crate::tenancy::ChainSecretsResolver::standard).
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn with_secrets(mut self, resolver: impl crate::tenancy::SecretsResolver) -> Self {
+        self.secrets = Some(std::sync::Arc::new(resolver));
         self
     }
 
@@ -860,7 +875,10 @@ impl Cli {
     where
         crate::sql::Pool: From<crate::sql::sqlx::Pool<DB>>,
     {
-        let mut pools = crate::tenancy::TenantPools::new(registry);
+        let mut pools = match self.secrets.clone() {
+            Some(r) => crate::tenancy::TenantPools::with_secrets(registry, r),
+            None => crate::tenancy::TenantPools::new(registry),
+        };
         if let Some(cfg) = self.tenant_pools.clone() {
             pools = pools.config(cfg);
         }
@@ -1477,6 +1495,9 @@ impl Cli {
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
         }
+        if let Some(r) = self.secrets.clone() {
+            builder = builder.secrets(r);
+        }
         // #1456 — same reason as the dispatch path above.
         if let Some(cfg) = self.tenant_pools.clone() {
             builder = builder.tenant_pools(cfg);
@@ -1558,6 +1579,9 @@ impl Cli {
         }
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
+        }
+        if let Some(r) = self.secrets.clone() {
+            builder = builder.secrets(r);
         }
         // #1456 — same reason as the dispatch path above.
         if let Some(cfg) = self.tenant_pools.clone() {
