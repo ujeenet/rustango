@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `time` is no longer capped below 0.3.48
+
+Apps can resolve `time` 0.3.49 and 0.3.51+ again (the yanked 0.3.48 / 0.3.50 are skipped); the floor is now 0.3.47, and `rand` 0.8.6, to keep pre-advisory releases out.
+
 ### Fixed — Slack plain-text notifications are escaped
 
 A plain string sent through `slack::webhook_callback` has `&`, `<` and `>` escaped, so message content cannot ping a channel or disguise a link.

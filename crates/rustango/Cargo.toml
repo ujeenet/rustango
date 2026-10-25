@@ -628,9 +628,8 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 tracing-appender = { workspace = true, optional = true }
 # `#[rustango::main]` loads `.env` before installing its subscriber (#2204).
 dotenvy = { workspace = true, optional = true }
-# Not used directly — declared only to pin the transitive `time` away from
-# the broken 0.3.48 (see the workspace.dependencies note). `time` is
-# already pulled by cookie / tracing-appender / sqlx in every real build.
+# Not used directly — declared only to floor the transitive `time` past
+# pre-advisory releases (see the workspace.dependencies note).
 time = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
