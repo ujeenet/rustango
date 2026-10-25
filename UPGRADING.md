@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.61.0
+
 ### Built-in logo is square
 
 `/__static__/rustango.png` and `icon.png` now serve a 256 px / 64 px square logo instead of the wide banner. A custom template sized for the banner may need new image dimensions.

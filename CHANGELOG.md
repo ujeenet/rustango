@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.0] — 2026-10-25
+
 **Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set; `ProvisionRequest` takes a `TenantStorage` and an optional backend, which must be the registry's; a blank `RUSTANGO_SECRET_KEY` no longer seals; `RunKind` is `#[non_exhaustive]`; provisioning types gain a `first_admin` field; `S3Storage::new` takes an `S3Config` and credentials apart; `CreateView`, `UpdateView`, `ViewSet::for_model` and `#[viewset]` require the writable field list and lose `.fields()`; `PoolTuning` and `DatabaseSettings` are `#[non_exhaustive]`; `Debug` on auth, SSO and tenancy structs hides secrets. See UPGRADING.
 
 ### Fixed — the first admin could not set a password in a browser
