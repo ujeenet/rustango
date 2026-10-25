@@ -73,11 +73,22 @@ const GROUPS: &[Group] = &[
             Action {
                 verb: "create-tenant",
                 about: "provision a new tenant",
+                // No schema default: MySQL and SQLite registries cannot use it.
                 asks: &[
                     Ask::Value {
+                        flag: "--server",
+                        label: "saved database server to create the database on (blank for none)",
+                        default: None,
+                    },
+                    Ask::Value {
+                        flag: "--database-url",
+                        label: "or an existing database URL (blank for none)",
+                        default: None,
+                    },
+                    Ask::Value {
                         flag: "--mode",
-                        label: "storage mode (schema|database)",
-                        default: Some("schema"),
+                        label: "storage mode (schema|database; blank: database if either is given)",
+                        default: None,
                     },
                     Ask::Value {
                         flag: "--display-name",
@@ -409,7 +420,12 @@ where
         let argv = build_argv(action, reader, writer)?;
         writeln!(writer)?;
         writeln!(writer, "  Same thing without the menu:")?;
-        writeln!(writer, "    cargo run -- {}", argv.join(" "))?;
+        // A typed database URL may hold a password.
+        let shown: Vec<String> = argv
+            .iter()
+            .map(|a| crate::sql::connect_diagnosis::redact(a))
+            .collect();
+        writeln!(writer, "    cargo run -- {}", shown.join(" "))?;
         writeln!(writer)?;
 
         // Same match the flags go through — boxed because this is the one
@@ -787,6 +803,21 @@ mod tests {
             !text.contains("Same thing without the menu"),
             "quitting should not have run anything:\n{text}"
         );
+    }
+
+    /// The menu's create-tenant offers a saved server and never picks
+    /// schema mode for a MySQL or SQLite registry.
+    #[test]
+    fn create_tenant_asks_for_a_server_and_defaults_no_mode() {
+        let action = GROUPS
+            .iter()
+            .flat_map(|g| g.actions)
+            .find(|a| a.verb == "create-tenant")
+            .expect("in the menu");
+        let mut sink = Vec::new();
+        let input = "main\n".to_owned() + &"\n".repeat(action.asks.len());
+        let argv = build_argv(action, &mut Cursor::new(input), &mut sink).expect("argv");
+        assert_eq!(argv, vec!["create-tenant", "--server", "main"]);
     }
 
     /// Values become `--flag value`; an empty answer drops the flag entirely
