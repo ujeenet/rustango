@@ -502,7 +502,7 @@ impl Reporter<'_> {
         tracing::warn!(
             target: "rustango::tenancy::provision",
             step = at.as_str(),
-            reason = %crate::sql::connect_diagnosis::redact(&e.to_string()),
+            reason = %crate::sql::connect_diagnosis::redact(&e.to_string()).replace('\n', " "),
             "a provisioning step failed"
         );
         let text = self

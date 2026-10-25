@@ -386,6 +386,11 @@ pub(super) async fn test_connection(
         let Some(name) = field("server") else {
             return probe_bad("Choose a saved database server first.");
         };
+        // The rights first, listed; a refused server needs no dry run.
+        let probe = super::db_servers::server_probe(&state, &op, name).await;
+        if !probe.is_ok() {
+            return axum::Json(probe).into_response();
+        }
         // With a slug, everything a submit checks before DDL, dry.
         if field("slug").is_some() {
             let Some(p) = state.provisioner.as_ref() else {
@@ -420,7 +425,7 @@ pub(super) async fn test_connection(
                 return probe_bad(&msg);
             }
         }
-        return super::db_servers::probe_response(&state, &op, name).await;
+        return axum::Json(probe).into_response();
     }
 
     // Probe exactly what a submit would use — an explicit URL, or the

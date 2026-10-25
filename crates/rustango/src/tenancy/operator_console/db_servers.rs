@@ -410,6 +410,10 @@ pub(super) struct RightView {
 }
 
 impl ServerProbe {
+    pub(super) fn is_ok(&self) -> bool {
+        self.status == "ok"
+    }
+
     pub(super) fn bad(message: String) -> Self {
         Self {
             status: "bad",
@@ -462,19 +466,19 @@ pub(super) async fn test(
     Extension(op): Extension<auth::Operator>,
     Path(name): Path<String>,
 ) -> Response<Body> {
-    probe_response(&state, &op, &name).await
+    axum::Json(server_probe(&state, &op, &name).await).into_response()
 }
 
-/// Log in to server `name` and report its admin's rights as JSON. Also
-/// the create form's test for a new database on a saved server.
-pub(super) async fn probe_response(
+/// Log in to server `name` and report its admin's rights. Also the
+/// create form's test for a new database on a saved server.
+pub(super) async fn server_probe(
     state: &ConsoleState,
     op: &auth::Operator,
     name: &str,
-) -> Response<Body> {
+) -> ServerProbe {
     // A probe logs in with the saved password, so it is on the trail too.
     audit(state, op, name, "db_server_test", &[]).await;
-    let probe = match db_server::get(&state.registry, name).await {
+    match db_server::get(&state.registry, name).await {
         Ok(row) => match row.probe(PROBE_TIMEOUT).await {
             Ok(r) => {
                 let rights = r.rights();
@@ -497,6 +501,5 @@ pub(super) async fn probe_response(
             Err(e) => ServerProbe::bad(explain(&e, name)),
         },
         Err(e) => ServerProbe::bad(explain(&e, name)),
-    };
-    axum::Json(probe).into_response()
+    }
 }

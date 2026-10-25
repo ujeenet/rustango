@@ -303,7 +303,7 @@ where
     }
     let rights = report.rights();
     for c in rights.checks() {
-        writeln!(w, "  {:<46}{}", format!("{}:", c.label), c.has.as_str())?;
+        writeln!(w, "  {}: {}", c.label, c.has.as_str())?;
     }
     if let Some(note) = rights.unknown_note() {
         writeln!(w, "  note: {note}")?;
@@ -311,7 +311,9 @@ where
     if rights.is_ready() {
         writeln!(w, "ready: tenant databases can be created here")?;
     } else {
-        writeln!(w, "not ready")?;
+        for line in rights.refusal_lines("not ready") {
+            writeln!(w, "{line}")?;
+        }
         let subject = format!("database server `{name}` cannot create tenant databases");
         return Err(TenancyError::Validation(rights.refusal(&subject)));
     }
