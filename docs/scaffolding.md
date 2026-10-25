@@ -190,7 +190,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     rustango::manage::Cli::new()
         .api(urls::api())
-        .with_welcome()  // friendly `/` page until you add a root handler
         .with_health()   // /health + /ready endpoints (fullstack & tenant)
         .run()
         .await
@@ -208,6 +207,8 @@ How the templates differ inside `main.rs` / `urls.rs`:
 ### Layered configuration
 
 Settings load `config/default.toml` first, then `config/<RUSTANGO_ENV>_settings.toml` on top. `RUSTANGO_ENV` defaults to `dev`, so a freshly scaffolded `cargo run` works with no edits; set `RUSTANGO_ENV=prod` in production to pick up `prod_settings.toml`.
+
+The dev and staging files set a `[brand] tagline` of `dev` and `staging`. To change it, or to set your own name and logo, see [Branding](operator-console.md#branding) and the admin's [config keys](admin.md#config-admin-and-brand).
 
 ### Settings that do not take effect on their own
 

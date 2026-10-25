@@ -443,6 +443,11 @@ let admin = admin::Builder::new(pool)
 The tenant-admin builder wires this to its `RouteConfig::logout_url`
 automatically, so the button always hits a route that exists.
 
+Unchecking **active** in the admin stamps `sessions_revoked_at` too. A direct
+ORM write to `active` does not; in your own code use
+`rustango::session::deactivate::<AdminUser>(&pool, id)` (or `Operator`, `User`),
+so a later reactivation revives no old cookie.
+
 ---
 
 ## Theming and branding
@@ -454,12 +459,62 @@ automatically, so the button always hits a route that exists.
 | `.brand_logo_url(url)` | Logo rendered above the title. |
 | `.brand_name(s)` / `.brand_tagline(s)` | Per-tenant overrides of title/subtitle. |
 | `.tenant_brand_css(css)` | A pre-built `:root{…}` CSS-variable block, inlined for per-tenant palettes. |
-| `.from_settings(pool, &settings)` | Build branding + visibility from your config file's `[admin]` / `[brand]` sections. |
+| `.from_settings(pool, &settings)` | Build branding + visibility from your config file's `[admin]` / `[brand]` sections; see below. |
 
-`from_settings` reads `admin.title`, `admin.subtitle`, `admin.logo_url`,
-`admin.theme_mode`, `admin.url_prefix`, `admin.allowed_tables`,
-`admin.read_only_tables`, falling back to the `[brand]` section, and defaults
-`secure_cookies` to `true`. Imperative `Builder` calls after it still win.
+### Config: `[admin]` and `[brand]`
+
+`Builder::from_settings(pool, &settings)` reads `[admin]` from
+`config/default.toml` or `config/<env>_settings.toml`, and falls back to
+`[brand]` for the chrome. A scaffolded project's `urls.rs` already calls it.
+`Builder` calls made after it still win.
+
+```toml
+[admin]
+title            = "Acme Admin"
+subtitle         = "Back office"
+logo_url         = "/static/acme-logo.png"
+theme_mode       = "auto"           # auto | light | dark
+url_prefix       = "/admin"
+allowed_tables   = []               # empty = every registered model
+read_only_tables = ["orders"]
+```
+
+| Key | Default | Falls back to | What it does |
+|---|---|---|---|
+| `title` | `Rustango Admin` | `[brand] name` | Sidebar heading and the page `<title>` |
+| `subtitle` | none | `[brand] tagline` | Line under the heading |
+| `logo_url` | none: no logo | `[brand] logo_url` | Image next to the heading |
+| `theme_mode` | `auto` | `[brand] theme_mode` | Starting theme, the `data-theme` on `<html>` |
+| `url_prefix` | `/__admin` | `[routes] admin_url` | Prefix of every admin link. Nest the router at the same path: `Builder::settings_prefix(&settings)` returns it, and the scaffold falls back to `/admin` |
+| `allowed_tables` | `[]`, every model | | Same as `show_only` |
+| `read_only_tables` | `[]` | | Same as `read_only` |
+| `primary_color` | | | No effect yet; only `manage check --deploy` reads it |
+| `csrf_cookie_secure` | | | No effect yet; the CSRF cookie follows `[security] secure_cookies` |
+| `session_timeout_minutes` | | | No effect yet; the admin has no idle timeout |
+
+`[brand] primary_color` does not tint this admin either; it is for the
+[operator console](operator-console.md#branding). The session cookie is
+`Secure` unless `[security] secure_cookies = false`.
+
+The scaffold's `config/dev_settings.toml` sets `[brand] tagline = "dev"`,
+which shows here as the subtitle; see
+[the tier taglines](operator-console.md#the-dev-and-staging-taglines).
+
+**Your own logo.** `logo_url` goes into `<img src>` as is. Serve the file
+from your app: put it at `assets/acme-logo.png`, add
+`.with_static("/static", "./assets")` to your `Cli::new()` chain in `main.rs`,
+and set `logo_url = "/static/acme-logo.png"`. The admin and the static mount
+share a host, so a path works. A full URL to a CDN works too.
+`[brand] logo_path` is for the operator console only; this admin ignores it.
+
+### The tenant admin
+
+The tenant admin does not read `[admin]` or `[brand]`. It takes its brand from
+the tenant's `Org` row: the name is `brand_name`, else the tenant's display
+name; the logo is the one uploaded on the console's edit page, else the
+framework logo (`rustango.png` under the static URL); the theme is
+`theme_mode` and the accent colour `primary_color`. See
+[per-tenant branding](operator-console.md#per-tenant-branding).
 
 ---
 

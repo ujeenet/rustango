@@ -572,6 +572,11 @@ impl Dialect for MySql {
         true
     }
 
+    // sqlx decodes any MySQL integer as `i64`, so the junction need not widen.
+    fn fk_needs_same_int_width(&self) -> bool {
+        true
+    }
+
     /// `PRIMARY` and multi-column indexes are left out.
     fn unique_index_names_sql(&self) -> Option<&'static str> {
         Some(
@@ -747,11 +752,12 @@ impl Dialect for MySql {
         }
     }
 
-    /// Bound as text, a JSON value never equals a JSON column.
+    /// Bound as text, a JSON value never equals a JSON column. MariaDB has
+    /// no JSON cast and skips `/*!80000`; its JSON is text anyway.
     fn write_json_param(&self, sql: &mut String, placeholder: &str) {
-        sql.push_str("CAST(");
+        sql.push_str("/*!80000 CAST(*/");
         sql.push_str(placeholder);
-        sql.push_str(" AS JSON)");
+        sql.push_str("/*!80000 AS JSON)*/");
     }
 
     fn write_json_contains(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {

@@ -184,8 +184,10 @@ pub(crate) struct Config {
     pub(crate) brand_name: Option<String>,
     /// Per-tenant brand tagline. Falls back to `subtitle`.
     pub(crate) brand_tagline: Option<String>,
-    /// Public URL of the tenant logo, e.g. `/__brand__/{slug}/logo.png`.
+    /// Public URL of the tenant logo, e.g. `/_brand/{slug}/logo.png`.
     pub(crate) brand_logo_url: Option<String>,
+    /// Public URL of the tenant favicon. `None` keeps the bundled icon.
+    pub(crate) brand_favicon_url: Option<String>,
     /// `"light"`, `"dark"` or `"auto"`. `None` means `"auto"`.
     pub(crate) theme_mode: Option<String>,
     /// CSS variable assignments built from the tenant's
@@ -610,6 +612,13 @@ impl Builder {
     #[must_use]
     pub fn brand_logo_url(mut self, url: impl Into<String>) -> Self {
         self.config.brand_logo_url = Some(url.into());
+        self
+    }
+
+    /// Public URL of the favicon. Unset keeps the bundled icon.
+    #[must_use]
+    pub fn brand_favicon_url(mut self, url: impl Into<String>) -> Self {
+        self.config.brand_favicon_url = Some(url.into());
         self
     }
 

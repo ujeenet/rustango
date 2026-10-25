@@ -25,6 +25,24 @@ use crate::tenancy::pools::TenantPools;
 
 /// Switches every new-password verb takes (#2589).
 const PASSWORD_SWITCHES: [&str; 3] = ["--generate", "--password-stdin", "--skip-validation"];
+const CHANGE_PASSWORD_SWITCHES: [&str; 4] = [
+    "--generate",
+    "--password-stdin",
+    "--skip-validation",
+    "--current-stdin",
+];
+
+/// The current password, kept out of argv when it comes from stdin or env.
+fn current_password(verb: &str, parsed: &Parsed) -> Result<String, TenancyError> {
+    use manage_interactive::NewPasswordError;
+    let current = parsed.value("--current")?.map(str::to_owned);
+    manage_interactive::read_current_password(current, parsed.has("--current-stdin")).map_err(|e| {
+        match e {
+            NewPasswordError::Io(e) => TenancyError::Io(e),
+            e => TenancyError::Validation(format!("{verb}: {e}")),
+        }
+    })
+}
 
 /// A generated password, or one read and validated like the forms (#2589).
 fn new_password(verb: &str, parsed: &Parsed, prompt: &str) -> Result<(String, bool), TenancyError> {
@@ -498,8 +516,8 @@ where
 /// CLI counterpart to the self-serve change-password UI. Operators
 /// recovering a locked-out user should use `reset-password` instead.
 ///
-/// Both passwords are read interactively from a TTY when not passed
-/// on the command line; the prompts are echo-suppressed.
+/// Off the command line, both passwords come from stdin, the env, or
+/// an echo-suppressed TTY prompt.
 pub(super) async fn change_password_cmd<W: Write + Send, DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
@@ -510,28 +528,20 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     const USAGE: &str =
-        "change-password <slug> <username> [--current <s>] [--password <s> | --password-stdin | --generate] [--skip-validation]";
+        "change-password <slug> <username> [--current <s> | --current-stdin] [--password <s> | --password-stdin | --generate] [--skip-validation]";
     let parsed = parse(
         args,
         &Spec {
             verb: "change-password",
             usage: USAGE,
-            switches: &PASSWORD_SWITCHES,
+            switches: &CHANGE_PASSWORD_SWITCHES,
             valued: &["--current", "--password"],
             max_positionals: 2,
         },
     )?;
     let slug = parsed.required(0, USAGE)?;
     let username = parsed.required(1, USAGE)?;
-    let current = parsed.value("--current")?.map(str::to_owned);
-    let cur_plain = match current {
-        Some(p) => p,
-        None => manage_interactive::ask_password("Current password: ")
-            .map_err(TenancyError::Io)?
-            .ok_or_else(|| {
-                TenancyError::Validation("change-password requires --current (or a TTY)".into())
-            })?,
-    };
+    let cur_plain = current_password("change-password", &parsed)?;
     let (new_plain, generated) = new_password("change-password", &parsed, "New password: ")?;
 
     let pool = scoped_tenant_pool(pools, registry_url, &slug).await?;
@@ -591,29 +601,19 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     const USAGE: &str =
-        "change-operator-password <username> [--current <s>] [--password <s> | --password-stdin | --generate] [--skip-validation]";
+        "change-operator-password <username> [--current <s> | --current-stdin] [--password <s> | --password-stdin | --generate] [--skip-validation]";
     let parsed = parse(
         args,
         &Spec {
             verb: "change-operator-password",
             usage: USAGE,
-            switches: &PASSWORD_SWITCHES,
+            switches: &CHANGE_PASSWORD_SWITCHES,
             valued: &["--current", "--password"],
             max_positionals: 1,
         },
     )?;
     let username = parsed.required(0, USAGE)?;
-    let current = parsed.value("--current")?.map(str::to_owned);
-    let cur_plain = match current {
-        Some(p) => p,
-        None => manage_interactive::ask_password("Current password: ")
-            .map_err(TenancyError::Io)?
-            .ok_or_else(|| {
-                TenancyError::Validation(
-                    "change-operator-password requires --current (or a TTY)".into(),
-                )
-            })?,
-    };
+    let cur_plain = current_password("change-operator-password", &parsed)?;
     let (new_plain, generated) =
         new_password("change-operator-password", &parsed, "New password: ")?;
 

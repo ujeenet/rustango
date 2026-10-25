@@ -1013,6 +1013,7 @@ jobs:
             --features sqlite,tenancy,admin,jobs-postgres,media,passwords,serializer,totp,scheduler,testkit \
             --test access_admin_codename_sqlite_live \
             --test admin_sqlite_live \
+            --test brand_assets_sqlite_live \
             --test admin_list_display_links_sqlite_live \
             --test admin_search_help_text_sqlite_live \
             --test admin_actions_position_sqlite_live \

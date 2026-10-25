@@ -8,14 +8,14 @@
    admin route, where static_url comes from RouteConfig — `/_static`
    under friendly, `/__static__` under default). Per-tenant overrides
    via `brand_favicon_url`. #}
-<link rel="icon" type="image/png"
-      href="{{ brand_favicon_url | default(value=static_url ~ '/icon.png') }}">
+{% if brand_favicon_url %}<link rel="icon" href="{{ brand_favicon_url }}">
+{% else %}<link rel="icon" type="image/png" href="{{ static_url }}/icon.png">{% endif %}
 <script nonce="{{ csp_nonce }}">
 // No-flash theme application — runs before any CSS so the page never
 // paints the wrong theme. localStorage overrides the server-supplied
 // data-theme attribute set above.
 (function(){try{var t=localStorage.getItem('rustango-theme');if(t==='light'||t==='dark'||t==='auto'){document.documentElement.dataset.theme=t;}}catch(e){}})();
-// Delegated handlers: a strict CSP blocks inline on* attributes (#1703).
+// Delegated handlers: a strict CSP blocks inline on* attributes.
 document.addEventListener('submit',function(e){var m=e.target.getAttribute('data-confirm');if(m&&!confirm(m))e.preventDefault();});
 document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('button[data-confirm]');if(b&&!confirm(b.getAttribute('data-confirm')))e.preventDefault();});
 document.addEventListener('change',function(e){var s=e.target;if(s.matches&&s.matches('select[data-nav]')){location.href=s.options[s.selectedIndex].dataset.href;}});
@@ -25,7 +25,7 @@ document.addEventListener('change',function(e){var s=e.target;if(s.matches&&s.ma
 {% if tenant_brand_css %}<style nonce="{{ csp_nonce }}">:root { {{ tenant_brand_css | safe }} }</style>{% endif %}
 </head>
 <body>
-{# v0.27.8 (#78) — impersonation banner. Threaded through every
+{# v0.27.8 — impersonation banner. Threaded through every
    admin page so an operator who's impersonating a tenant can't
    forget. The end-impersonation form posts to the tenant admin's
    /__admin/__end-impersonation route which clears the cookie and

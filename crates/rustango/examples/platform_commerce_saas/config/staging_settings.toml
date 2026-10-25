@@ -14,7 +14,7 @@ headers_preset    = "strict"
 hsts_max_age_secs = 31536000
 
 [brand]
-tagline = "(staging)"
+tagline = "staging"
 
 [audit]
 retention_days = 30

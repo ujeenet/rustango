@@ -516,9 +516,9 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto-bigint"
-version = "0.7.8"
+version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d726facc8b27e604391b232b970cdc19b5468c69f08b466b9734c759216c7415"
+checksum = "d811ea23fdfbcce2e2d5132344d471abdb8f901ac496a0893a3df92e70525e52"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -2145,7 +2145,7 @@ dependencies = [
 
 [[package]]
 name = "rustango"
-version = "0.61.0"
+version = "0.61.1"
 dependencies = [
  "argon2",
  "async-stream",
@@ -2202,7 +2202,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-macros"
-version = "0.61.0"
+version = "0.61.1"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

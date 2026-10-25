@@ -37,6 +37,8 @@
 # [brand]
 # name           = "platform_commerce"
 # tagline        = ""
+# logo_url       = "https://cdn.example.com/logo.png"  # full URL; beats logo_path
+# logo_path      = "assets/logo.png"   # local file the operator console serves
 # primary_color  = "#2c6fb0"
 # theme_mode     = "auto"       # auto | light | dark
 

@@ -90,6 +90,14 @@ inventory::submit! {
     }
 }
 
+// A deactivation ends the account's sessions, so reactivating revives none.
+inventory::submit! {
+    super::derived_fields::AdminDerivedField {
+        table: "rustango_admin_users",
+        derive: super::derived_fields::revoke_on_deactivate,
+    }
+}
+
 super::object_permissions::lock_user_credentials!(AdminUser, "rustango_admin_users");
 #[cfg(feature = "admin-sso")]
 crate::register_admin_superuser_fields!(AdminUser, Add, [email]);

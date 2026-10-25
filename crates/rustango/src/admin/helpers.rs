@@ -115,6 +115,7 @@ pub(crate) fn chrome_context_with_session(
         "brand_name": brand_name,
         "brand_tagline": brand_tagline,
         "brand_logo_url": state.config.brand_logo_url.as_deref(),
+        "brand_favicon_url": state.config.brand_favicon_url.as_deref(),
         "theme_mode": state.config.theme_mode.as_deref().unwrap_or("auto"),
         "tenant_brand_css": state.config.tenant_brand_css.as_deref(),
         // v0.27.8 (#78) — impersonation banner. Templates render

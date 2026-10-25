@@ -744,7 +744,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
-        "  change-password <slug> <username> [--current <p>] [--password <p> | --generate]"
+        "  change-password <slug> <username> [--current <p> | --current-stdin] [--password <p> | --generate]"
     )?;
     writeln!(
         w,
@@ -752,7 +752,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
-        "  change-operator-password <username> [--current <p>] [--password <p> | --generate]"
+        "  change-operator-password <username> [--current <p> | --current-stdin] [--password <p> | --generate]"
     )?;
     writeln!(
         w,

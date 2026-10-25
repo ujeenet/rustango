@@ -137,6 +137,62 @@ pub enum NewPasswordError {
     Mismatch,
     #[error("{0} (pass --skip-validation to bypass)")]
     Invalid(String),
+    #[error("--current and --current-stdin are mutually exclusive")]
+    CurrentConflict,
+    #[error(
+        "no current password: pass --current-stdin, set RUSTANGO_CURRENT_PASSWORD, or run in a terminal"
+    )]
+    MissingCurrent,
+    #[error("--current-stdin would echo on a terminal; leave it off to get a hidden prompt")]
+    CurrentStdinOnTty,
+}
+
+/// Env var a `change-password` verb reads the current password from.
+pub const CURRENT_PASSWORD_ENV: &str = "RUSTANGO_CURRENT_PASSWORD";
+
+/// The current password for a `change-password` verb: `--current`,
+/// `--current-stdin` (read before a `--password-stdin` line), the env, or a prompt.
+///
+/// # Errors
+/// [`NewPasswordError::CurrentConflict`], [`NewPasswordError::MissingCurrent`] or I/O.
+pub fn read_current_password(
+    current: Option<String>,
+    stdin: bool,
+) -> Result<String, NewPasswordError> {
+    read_current_password_on(&mut Terminal, current, stdin)
+}
+
+fn read_current_password_on(
+    console: &mut dyn PasswordConsole,
+    current: Option<String>,
+    stdin: bool,
+) -> Result<String, NewPasswordError> {
+    match (current, stdin) {
+        (Some(_), true) => Err(NewPasswordError::CurrentConflict),
+        (Some(p), false) => {
+            if console.in_argv(&p) {
+                console.warn(
+                    "warning: --current is visible in `ps` and shell history; \
+                     use --current-stdin or RUSTANGO_CURRENT_PASSWORD",
+                );
+            }
+            Ok(p)
+        }
+        (None, true) if console.is_tty() => Err(NewPasswordError::CurrentStdinOnTty),
+        (None, true) => {
+            let line = console.stdin_line()?;
+            let p = line.strip_suffix('\n').unwrap_or(&line);
+            let p = p.strip_suffix('\r').unwrap_or(p);
+            password_answer(p.to_owned()).ok_or(NewPasswordError::MissingCurrent)
+        }
+        (None, false) => match console.env(CURRENT_PASSWORD_ENV).and_then(password_answer) {
+            Some(p) => Ok(p),
+            None if console.is_tty() => console
+                .ask_hidden("Current password: ")?
+                .ok_or(NewPasswordError::MissingCurrent),
+            None => Err(NewPasswordError::MissingCurrent),
+        },
+    }
 }
 
 /// The terminal I/O [`read_new_password`] needs, so tests can script it.
@@ -388,6 +444,59 @@ mod tests {
         let mut c = Script::default();
         read(&mut c, PasswordInput::Argv("long-enough-1".into()), false).unwrap();
         assert!(c.warnings.is_empty(), "an in-process call is not in ps");
+    }
+
+    /// Off a terminal the current password comes from stdin or env, never only argv.
+    #[test]
+    fn the_current_password_comes_from_stdin_env_or_argv() {
+        let mut c = Script {
+            stdin: "old pw\n".into(),
+            ..Script::default()
+        };
+        assert_eq!(
+            read_current_password_on(&mut c, None, true).unwrap(),
+            "old pw"
+        );
+        let mut c = Script {
+            env: Some("from-env".into()),
+            ..Script::default()
+        };
+        assert_eq!(
+            read_current_password_on(&mut c, None, false).unwrap(),
+            "from-env"
+        );
+        assert!(matches!(
+            read_current_password_on(&mut Script::default(), None, false),
+            Err(NewPasswordError::MissingCurrent)
+        ));
+        assert!(matches!(
+            read_current_password_on(&mut Script::default(), Some("x".into()), true),
+            Err(NewPasswordError::CurrentConflict)
+        ));
+        let mut c = Script {
+            argv: vec!["old".into()],
+            ..Script::default()
+        };
+        assert_eq!(
+            read_current_password_on(&mut c, Some("old".into()), false).unwrap(),
+            "old"
+        );
+        assert_eq!(c.warnings.len(), 1);
+    }
+
+    /// On a terminal `--current-stdin` would echo; the prompt is hidden.
+    #[test]
+    fn current_stdin_is_refused_on_a_terminal() {
+        let mut c = Script {
+            tty: true,
+            stdin: "old pw\n".into(),
+            ..Script::default()
+        };
+        assert!(matches!(
+            read_current_password_on(&mut c, None, true),
+            Err(NewPasswordError::CurrentStdinOnTty)
+        ));
+        assert_eq!(c.stdin, "old pw\n", "nothing was read");
     }
 
     #[test]
