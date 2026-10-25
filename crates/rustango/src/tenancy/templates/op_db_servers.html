@@ -1,0 +1,99 @@
+{% extends "op_layout.html" %}
+{% block title %}Database servers — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
+{% block content %}
+<h1>Database servers</h1>
+{% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+{% if notice %}<div class="alert alert-notice">{{ notice }}</div>{% endif %}
+
+<p>Servers that tenant databases can be created on, each with an admin
+login. The password is stored encrypted and never shown again. Use
+<strong>Test</strong> to check the login and its rights.</p>
+
+{% if servers | length == 0 %}
+  <div class="empty">No database servers yet — add one below.</div>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Where</th>
+      <th>Admin user</th>
+      <th>TLS</th>
+      <th>Password</th>
+      <th>Active</th>
+      <th class="actions-col">Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in servers %}
+    <tr>
+      <td><strong>{{ s.name }}</strong></td>
+      <td>{% if s.host %}<code>{{ s.host }}{% if s.port %}:{{ s.port }}{% endif %}</code>{% else %}<code>{{ s.sqlite_dir }}</code>{% endif %}</td>
+      <td>{{ s.admin_user | default(value='—') }}</td>
+      <td>{{ s.tls_mode | default(value='—') }}</td>
+      <td>{% if s.has_password %}saved{% else %}—{% endif %}</td>
+      <td>{% if s.active %}✓{% else %}—{% endif %}</td>
+      <td class="actions-col">
+        <button type="button" class="btn-row-action db-server-test" data-name="{{ s.name }}">Test</button>
+        <a class="btn-row-action" href="{{ console_prefix }}/db-servers/{{ s.name }}/edit">Edit</a>
+        <form method="post" action="{{ console_prefix }}/db-servers/{{ s.name }}/delete"
+              data-confirm="Remove database server {{ s.name }}?">
+          {{ csrf_input | default(value='') | safe }}
+          <button type="submit" class="btn-row-action">Delete</button>
+        </form>
+        <div class="probe-result" data-for="{{ s.name }}"></div>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Add a database server</h2>
+<form method="post" action="{{ console_prefix }}/db-servers" class="op-form" autocomplete="off">
+  {{ csrf_input | default(value='') | safe }}
+  <label>Name <input name="name" required pattern="[a-z0-9-]+" maxlength="64" value="{{ prefill.name | default(value='') }}" placeholder="main-pg"></label>
+  <label>Backend <input value="{{ backend }}" disabled></label>
+  {% if is_sqlite %}
+  <label>Directory for tenant files <input name="sqlite_dir" required value="{{ prefill.sqlite_dir | default(value='') }}" placeholder="/var/lib/app/tenants"></label>
+  {% else %}
+  <label>Host <input name="host" required value="{{ prefill.host | default(value='') }}" placeholder="db.internal"></label>
+  <label>Port (blank for the default) <input name="port" type="number" min="1" max="65535" value="{{ prefill.port | default(value='') }}"></label>
+  <label>Admin user <input name="admin_user" required value="{{ prefill.admin_user | default(value='') }}" autocomplete="off"></label>
+  <label>Admin password <input name="admin_password" type="password" autocomplete="new-password"></label>
+  <label>TLS
+    <select name="tls_mode">
+      <option value="">driver default</option>
+      {% for m in tls_modes %}<option value="{{ m }}"{% if prefill.tls_mode | default(value='') == m %} selected{% endif %}>{{ m }}</option>{% endfor %}
+    </select>
+  </label>
+  {% if backend == "postgres" %}
+  <label>Maintenance database (blank for <code>postgres</code>) <input name="maintenance_db" value="{{ prefill.maintenance_db | default(value='') }}"></label>
+  {% endif %}
+  {% endif %}
+  <label class="inline"><input type="checkbox" name="active"{% if not prefill or prefill.active %} checked{% endif %}> Active</label>
+  <button type="submit">Save server</button>
+</form>
+
+<script nonce="{{ csp_nonce }}">
+  for (const b of document.querySelectorAll(".db-server-test")) {
+    b.addEventListener("click", async () => {
+      const name = b.dataset.name;
+      const out = document.querySelector('.probe-result[data-for="' + CSS.escape(name) + '"]');
+      b.disabled = true;
+      out.textContent = "checking…";
+      try {
+        const res = await fetch(consoleUrl("/db-servers/" + encodeURIComponent(name) + "/test"), {
+          method: "POST",
+          headers: { "X-CSRF-Token": csrfToken() },
+        });
+        await showProbe(out, res);
+      } catch (err) {
+        out.textContent = "could not reach the console: " + err;
+      } finally {
+        b.disabled = false;
+      }
+    });
+  }
+</script>
+{% endblock %}

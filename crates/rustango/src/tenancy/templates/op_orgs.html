@@ -20,6 +20,7 @@
   {% if provisioning_enabled %}
   <a href="{{ console_prefix }}/orgs/new" class="btn btn-primary">+ New tenant</a>
   <a href="{{ console_prefix }}/orgs/provision" class="btn btn-secondary">Runs</a>
+  <a href="{{ console_prefix }}/db-servers" class="btn btn-secondary">Database servers</a>
   <form method="post" action="{{ console_prefix }}/orgs/migrate" class="inline-form"
         data-confirm="Run migrations for every active tenant?">
     {{ csrf_input | default(value='') | safe }}

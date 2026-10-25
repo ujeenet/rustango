@@ -64,6 +64,7 @@
 /// Tenant creation from the console, and its progress view.
 /// Mounted only by [`router_with_provisioning`].
 mod audit;
+mod db_servers;
 mod decommission;
 mod flash;
 mod hosts;
@@ -590,6 +591,14 @@ fn router_unlogged(
             include_str!("../templates/op_provision_runs.html"),
         ),
         ("op_audit.html", include_str!("../templates/op_audit.html")),
+        (
+            "op_db_servers.html",
+            include_str!("../templates/op_db_servers.html"),
+        ),
+        (
+            "op_db_server_edit.html",
+            include_str!("../templates/op_db_server_edit.html"),
+        ),
     ])
     .expect("operator-console templates parse");
     let edit_enabled = pools.is_some();
@@ -724,6 +733,17 @@ fn router_unlogged(
                 get(provisioning::org_new_form).post(provisioning::org_new_submit),
             )
             .route("/orgs/test-connection", post(provisioning::test_connection))
+            // Servers tenant databases are made on: same capability.
+            .route(
+                "/db-servers",
+                get(db_servers::list).post(db_servers::create),
+            )
+            .route(
+                "/db-servers/{name}/edit",
+                get(db_servers::edit_form).post(db_servers::edit_submit),
+            )
+            .route("/db-servers/{name}/delete", post(db_servers::delete))
+            .route("/db-servers/{name}/test", post(db_servers::test))
             // Migrations ride with provisioning: both need the
             // provisioner's migrations directory and its registry URL.
             .route(
