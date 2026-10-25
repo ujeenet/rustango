@@ -416,7 +416,7 @@ pub struct AdminSettings {
     /// `Settings.brand.tagline`.
     pub subtitle: Option<String>,
     /// Logo URL next to the title. Falls back to
-    /// `Settings.brand.logo_url`, then the built-in asset.
+    /// `Settings.brand.logo_url`; with neither, no logo is shown.
     pub logo_url: Option<String>,
     /// Accent color in hex, such as `"#2c6fb0"`. **No effect yet**
     /// (#1379): `Builder::from_settings` does not apply it; only
@@ -724,11 +724,12 @@ pub struct BrandSettings {
     /// working directory. Read once at boot with the tenant upload
     /// checks (PNG, JPEG, WebP or ICO; size cap) and served by the console.
     pub logo_path: Option<std::path::PathBuf>,
-    /// Accent color in hex, such as `"#2c6fb0"`. The theme uses it
-    /// to tint primary buttons and links.
+    /// Accent color in hex, such as `"#2c6fb0"`. Only the operator
+    /// console uses it, to tint primary buttons and links.
     pub primary_color: Option<String>,
-    /// Starting theme: `"auto"` (default), `"light"` or `"dark"`.
-    /// The tenant admin reads it too, but `Org.theme_mode` wins.
+    /// Starting theme: `"auto"` (default), `"light"` or `"dark"`. The
+    /// operator console and the plain admin read it; the tenant admin
+    /// uses `Org.theme_mode` instead.
     pub theme_mode: Option<String>,
 }
 
