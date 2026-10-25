@@ -127,19 +127,63 @@ fn tenant_slug(parts: &Parts) -> Result<&str, AuthError> {
 
 /// How long a verified Basic credential skips argon2 (#2617).
 const BASIC_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
-/// Entries the Basic cache holds before it evicts.
-const BASIC_CACHE_CAP: usize = 1024;
+/// Entries one tenant's Basic cache holds before it evicts; a busy tenant
+/// only evicts its own entries.
+const BASIC_CACHE_CAP: usize = 256;
 
-type BasicCache = std::collections::HashMap<[u8; 32], (i64, std::time::Instant)>;
+type CacheKey = [u8; 32];
+
+/// Verified Basic credentials, bucketed per tenant slug.
+struct BasicCache {
+    ttl: std::time::Duration,
+    cap: usize,
+    tenants: std::collections::HashMap<String, std::collections::HashMap<CacheKey, (i64, std::time::Instant)>>,
+}
+
+impl BasicCache {
+    fn new(ttl: std::time::Duration, cap: usize) -> Self {
+        Self {
+            ttl,
+            cap,
+            tenants: std::collections::HashMap::new(),
+        }
+    }
+
+    fn hit(&self, slug: &str, key: &CacheKey, user_id: i64, now: std::time::Instant) -> bool {
+        self.tenants
+            .get(slug)
+            .and_then(|m| m.get(key))
+            .is_some_and(|(id, at)| *id == user_id && now.saturating_duration_since(*at) < self.ttl)
+    }
+
+    fn put(&mut self, slug: &str, key: CacheKey, user_id: i64, now: std::time::Instant) {
+        let ttl = self.ttl;
+        // Expired buckets of other tenants go too, so idle slugs don't pile up.
+        self.tenants.retain(|s, m| {
+            s == slug || m.values().any(|(_, at)| now.saturating_duration_since(*at) < ttl)
+        });
+        let map = self.tenants.entry(slug.to_owned()).or_default();
+        if map.len() >= self.cap && !map.contains_key(&key) {
+            map.retain(|_, (_, at)| now.saturating_duration_since(*at) < ttl);
+            if map.len() >= self.cap {
+                let oldest = map.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| *k);
+                if let Some(oldest) = oldest {
+                    map.remove(&oldest);
+                }
+            }
+        }
+        map.insert(key, (user_id, now));
+    }
+}
 
 fn basic_cache() -> &'static std::sync::Mutex<BasicCache> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<BasicCache>> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(BasicCache::new()))
+    CACHE.get_or_init(|| std::sync::Mutex::new(BasicCache::new(BASIC_CACHE_TTL, BASIC_CACHE_CAP)))
 }
 
 /// SHA-256 over the tenant, the credential and the stored hash. A password
 /// change rewrites the hash, so it misses; `active` is read per request.
-fn basic_cache_key(slug: &str, username: &str, password: &str, stored_hash: &str) -> [u8; 32] {
+fn basic_cache_key(slug: &str, username: &str, password: &str, stored_hash: &str) -> CacheKey {
     use sha2::Digest as _;
     let mut hasher = sha2::Sha256::new();
     for part in [slug, username, password, stored_hash] {
@@ -149,29 +193,16 @@ fn basic_cache_key(slug: &str, username: &str, password: &str, stored_hash: &str
     hasher.finalize().into()
 }
 
-fn basic_cache_hit(key: &[u8; 32], user_id: i64) -> bool {
-    let Ok(cache) = basic_cache().lock() else {
-        return false;
-    };
-    cache
-        .get(key)
-        .is_some_and(|(id, at)| *id == user_id && at.elapsed() < BASIC_CACHE_TTL)
+fn basic_cache_hit(slug: &str, key: &CacheKey, user_id: i64) -> bool {
+    basic_cache()
+        .lock()
+        .is_ok_and(|c| c.hit(slug, key, user_id, std::time::Instant::now()))
 }
 
-fn basic_cache_put(key: [u8; 32], user_id: i64) {
-    let Ok(mut cache) = basic_cache().lock() else {
-        return;
-    };
-    if cache.len() >= BASIC_CACHE_CAP && !cache.contains_key(&key) {
-        cache.retain(|_, (_, at)| at.elapsed() < BASIC_CACHE_TTL);
-        if cache.len() >= BASIC_CACHE_CAP {
-            let oldest = cache.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| *k);
-            if let Some(oldest) = oldest {
-                cache.remove(&oldest);
-            }
-        }
+fn basic_cache_put(slug: &str, key: CacheKey, user_id: i64) {
+    if let Ok(mut cache) = basic_cache().lock() {
+        cache.put(slug, key, user_id, std::time::Instant::now());
     }
-    cache.insert(key, (user_id, std::time::Instant::now()));
 }
 
 // ------------------------------------------------------------------ Trait
@@ -244,7 +275,7 @@ impl AuthBackend for ModelBackend {
         let cached = |u: &super::auth::User| {
             let uid = u.id.get().copied().unwrap_or(0);
             let key = cache_key.as_ref()?;
-            (u.active && uid != 0 && basic_cache_hit(key, uid)).then(|| AuthUser {
+            (u.active && uid != 0 && basic_cache_hit(slug, key, uid)).then(|| AuthUser {
                 id: uid,
                 username: u.username.clone(),
                 is_superuser: u.is_superuser,
@@ -305,7 +336,7 @@ impl AuthBackend for ModelBackend {
         attempt.succeeded().await;
         let id = user.id.get().copied().unwrap_or(0);
         if let (Some(key), true) = (cache_key, id != 0) {
-            basic_cache_put(key, id);
+            basic_cache_put(slug, key, id);
         }
         Ok(Some(AuthUser {
             id,
@@ -1017,10 +1048,64 @@ mod tests {
     #[test]
     fn basic_cache_hit_needs_the_same_user() {
         let key = basic_cache_key("t-hit", "bob", "pw", "h");
-        assert!(!basic_cache_hit(&key, 7));
-        basic_cache_put(key, 7);
-        assert!(basic_cache_hit(&key, 7));
-        assert!(!basic_cache_hit(&key, 8));
+        assert!(!basic_cache_hit("t-hit", &key, 7));
+        basic_cache_put("t-hit", key, 7);
+        assert!(basic_cache_hit("t-hit", &key, 7));
+        assert!(!basic_cache_hit("t-hit", &key, 8));
+    }
+
+    fn key_n(n: u32) -> CacheKey {
+        let mut k = [0u8; 32];
+        k[..4].copy_from_slice(&n.to_le_bytes());
+        k
+    }
+
+    #[test]
+    fn basic_cache_entry_expires_after_ttl() {
+        let ttl = std::time::Duration::from_secs(30);
+        let mut cache = BasicCache::new(ttl, 4);
+        let t0 = std::time::Instant::now();
+        cache.put("a", key_n(1), 1, t0);
+        assert!(cache.hit("a", &key_n(1), 1, t0 + ttl - std::time::Duration::from_millis(1)));
+        assert!(!cache.hit("a", &key_n(1), 1, t0 + ttl));
+    }
+
+    #[test]
+    fn basic_cache_full_tenant_evicts_its_oldest_entry() {
+        let mut cache = BasicCache::new(std::time::Duration::from_secs(30), 2);
+        let t0 = std::time::Instant::now();
+        let s = std::time::Duration::from_secs(1);
+        cache.put("a", key_n(1), 1, t0);
+        cache.put("a", key_n(2), 2, t0 + s);
+        cache.put("a", key_n(3), 3, t0 + 2 * s);
+        let now = t0 + 3 * s;
+        assert!(!cache.hit("a", &key_n(1), 1, now));
+        assert!(cache.hit("a", &key_n(2), 2, now));
+        assert!(cache.hit("a", &key_n(3), 3, now));
+    }
+
+    #[test]
+    fn basic_cache_busy_tenant_never_evicts_another() {
+        let mut cache = BasicCache::new(std::time::Duration::from_secs(30), 2);
+        let t0 = std::time::Instant::now();
+        cache.put("quiet", key_n(0), 9, t0);
+        for n in 1..50 {
+            cache.put("busy", key_n(n), i64::from(n), t0 + std::time::Duration::from_millis(u64::from(n)));
+        }
+        let now = t0 + std::time::Duration::from_secs(1);
+        assert!(cache.hit("quiet", &key_n(0), 9, now));
+        assert!(!cache.hit("busy", &key_n(0), 9, now), "buckets are per tenant");
+        assert_eq!(cache.tenants["busy"].len(), 2);
+    }
+
+    #[test]
+    fn basic_cache_drops_expired_tenant_buckets() {
+        let ttl = std::time::Duration::from_secs(30);
+        let mut cache = BasicCache::new(ttl, 2);
+        let t0 = std::time::Instant::now();
+        cache.put("old", key_n(1), 1, t0);
+        cache.put("new", key_n(2), 2, t0 + ttl);
+        assert!(!cache.tenants.contains_key("old"));
     }
 
     /// performance-001 / security-003 — a locked Basic account is refused

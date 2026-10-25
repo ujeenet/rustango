@@ -493,3 +493,58 @@ impl<'c, E: sqlx::Executor<'c, Database = sqlx::Postgres>> SqlExecutor<'c> for E
         pg_exec(self, sql, params)
     }
 }
+
+// A `DatabaseTenant` connection, so `fetch_on(t.conn())` works on every backend.
+macro_rules! database_conn_executor {
+    ($feature:literal, $db:ty, $rows:ident, $exec:ident, $variant:ident, $dialect:path) => {
+        #[cfg(all(feature = "tenancy", feature = $feature))]
+        impl<'c> sealed::Sealed<'c> for &'c mut crate::tenancy::DatabaseConn<$db> {}
+        #[cfg(all(feature = "tenancy", feature = $feature))]
+        impl<'c> SqlExecutor<'c> for &'c mut crate::tenancy::DatabaseConn<$db> {
+            fn dialect(&self) -> &'static dyn Dialect {
+                $dialect
+            }
+
+            fn fetch_rows<'e, 'q: 'e, U, F>(
+                self,
+                sql: &'q str,
+                params: Vec<SqlValue>,
+                decode: F,
+            ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+            where
+                'c: 'e,
+                U: Send + 'e,
+                F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
+            {
+                $rows(&mut ***self, sql, params, decode)
+            }
+
+            fn execute_rows<'e, 'q: 'e>(
+                self,
+                sql: &'q str,
+                params: Vec<SqlValue>,
+            ) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+            where
+                'c: 'e,
+            {
+                $exec(&mut ***self, sql, params)
+            }
+
+            fn run_delete_plan<'e>(self, plan: DeletePlan) -> BoxFuture<'e, Result<u64, ExecError>>
+            where
+                'c: 'e,
+            {
+                Box::pin(async move {
+                    use sqlx::Connection as _;
+                    let mut tx = PoolTx::$variant((***self).begin().await?);
+                    let n = super::run_delete_plan_tx(&mut tx, plan).await?;
+                    tx.commit().await?;
+                    Ok(n)
+                })
+            }
+        }
+    };
+}
+
+database_conn_executor!("mysql", sqlx::MySql, my_rows, my_exec, Mysql, crate::sql::mysql::DIALECT);
+database_conn_executor!("sqlite", sqlx::Sqlite, sq_rows, sq_exec, Sqlite, crate::sql::sqlite::DIALECT);

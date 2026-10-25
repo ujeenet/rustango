@@ -172,3 +172,44 @@ async fn rejects_schema_mode() {
         "error should explain database-mode-only, got: {msg}"
     );
 }
+
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "dbt_fetch_on_item")]
+#[allow(dead_code)]
+pub struct FetchOnItem {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub n: i64,
+}
+
+/// A tenant connection runs the ORM's `_on` queries.
+#[tokio::test]
+async fn orm_queries_run_on_a_tenant_connection() {
+    use rustango::core::Column as _;
+    let Ok(url) = std::env::var("MYSQL_TEST_URL") else {
+        eprintln!("MYSQL_TEST_URL not set — skipping");
+        return;
+    };
+    let pools: DatabasePools<sqlx::MySql> = DatabasePools::new(BackendKind::MySql);
+    let mut conn = pools.acquire(&fake_mysql_org("acme", &url)).await.expect("acquire");
+    for sql in [
+        "DROP TABLE IF EXISTS dbt_fetch_on_item",
+        "CREATE TABLE dbt_fetch_on_item (id BIGINT PRIMARY KEY, n BIGINT NOT NULL)",
+        "INSERT INTO dbt_fetch_on_item (id, n) VALUES (1, 10), (2, 20)",
+    ] {
+        sqlx::query(sql).execute(&mut **conn).await.unwrap();
+    }
+    let rows = FetchOnItem::objects().fetch_on(&mut conn).await.expect("fetch_on");
+    assert_eq!(rows.len(), 2);
+    let gone = FetchOnItem::objects()
+        .where_(FetchOnItem::n.eq(10))
+        .delete_on(&mut conn)
+        .await
+        .expect("delete_on");
+    assert_eq!(gone, 1);
+    assert_eq!(FetchOnItem::objects().count_on(&mut conn).await.expect("count_on"), 1);
+    sqlx::query("DROP TABLE dbt_fetch_on_item")
+        .execute(&mut **conn)
+        .await
+        .unwrap();
+}
