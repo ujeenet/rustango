@@ -113,6 +113,71 @@ where
             }
         }
     }
+    // SSO client secrets: the shared set, then each tenant's own.
+    #[cfg(feature = "sso")]
+    {
+        let mut tables: Vec<(String, Result<Vec<SsoSecret>, String>, crate::sql::Pool)> = Vec::new();
+        #[cfg(feature = "admin-sso")]
+        {
+            use crate::tenancy::sso::SharedSsoProvider as P;
+            let rows = P::objects().fetch(&registry).await.map(|rows: Vec<P>| {
+                rows.into_iter()
+                    .map(|r| SsoSecret::of(r.id.get().copied(), r.updated_at.get().copied(), &r.slug, r.client_secret.into_inner(), <P as crate::core::Model>::SCHEMA))
+                    .collect()
+            });
+            tables.push(("shared".into(), rows.map_err(|e| e.to_string()), registry.clone()));
+        }
+        let mut orgs: Vec<Org> = Org::objects().fetch(&registry).await?;
+        orgs.sort_by(|a, b| a.slug.cmp(&b.slug));
+        for org in orgs {
+            use crate::sso::SsoProvider as P;
+            let Ok(pool) = pools.scoped_pool_dyn(&org).await else {
+                failed += 1;
+                writeln!(w, "  sso {}: cannot reach the tenant", org.slug)?;
+                continue;
+            };
+            let rows = P::objects().fetch(&pool).await.map(|rows: Vec<P>| {
+                rows.into_iter()
+                    .map(|r| SsoSecret::of(r.id.get().copied(), r.updated_at.get().copied(), &r.slug, r.client_secret.into_inner(), <P as crate::core::Model>::SCHEMA))
+                    .collect()
+            });
+            tables.push((org.slug, rows.map_err(|e| e.to_string()), pool));
+        }
+        for (owner, rows, pool) in tables {
+            let rows = match rows {
+                Ok(r) => r,
+                // A tenant made before the table existed has nothing to reseal.
+                Err(e) if e.contains("does not exist") || e.contains("no such table") || e.contains("doesn't exist") => continue,
+                Err(e) => {
+                    failed += 1;
+                    writeln!(w, "  sso {owner}: cannot open: {e}")?;
+                    continue;
+                }
+            };
+            for row in rows {
+                todo += 1;
+                let what = format!("sso {owner}/{}", row.slug);
+                if !apply {
+                    writeln!(w, "  {what}: would re-seal")?;
+                    continue;
+                }
+                match row.reseal(&pool).await {
+                    Ok(true) => {
+                        done += 1;
+                        writeln!(w, "  {what}: re-sealed")?;
+                    }
+                    Ok(false) => {
+                        skipped += 1;
+                        writeln!(w, "  {what}: skipped, changed meanwhile")?;
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        writeln!(w, "  {what}: failed: {e}")?;
+                    }
+                }
+            }
+        }
+    }
     if apply {
         writeln!(
             w,
@@ -127,4 +192,72 @@ where
         )));
     }
     Ok(())
+}
+
+/// One SSO provider's client secret, opened (current or previous key).
+#[cfg(feature = "sso")]
+struct SsoSecret {
+    id: i64,
+    seen: Option<chrono::DateTime<chrono::Utc>>,
+    slug: String,
+    plain: String,
+    model: &'static crate::core::ModelSchema,
+}
+
+#[cfg(feature = "sso")]
+impl SsoSecret {
+    fn of(
+        id: Option<i64>,
+        seen: Option<chrono::DateTime<chrono::Utc>>,
+        slug: &str,
+        plain: String,
+        model: &'static crate::core::ModelSchema,
+    ) -> Self {
+        Self {
+            id: id.unwrap_or_default(),
+            seen,
+            slug: slug.to_owned(),
+            plain,
+            model,
+        }
+    }
+
+    /// Write it sealed under the current key, only while the row is as
+    /// read. `Ok(false)`: it changed meanwhile.
+    async fn reseal(&self, pool: &crate::sql::Pool) -> Result<bool, String> {
+        use crate::core::{Assignment, Filter, Op, UpdateQuery, WhereExpr};
+        let sealed = crate::aead::encrypt(self.plain.as_bytes(), b"")
+            .map_err(|e| format!("cannot seal: {e:?}"))?;
+        let seen = match self.seen {
+            Some(t) => Filter {
+                column: "updated_at",
+                op: Op::Eq,
+                value: SqlValue::DateTime(t),
+            },
+            None => Filter {
+                column: "updated_at",
+                op: Op::IsNull,
+                value: SqlValue::Bool(true),
+            },
+        };
+        let query = UpdateQuery {
+            model: self.model,
+            set: vec![Assignment {
+                column: "client_secret",
+                value: SqlValue::String(sealed).into(),
+            }],
+            where_clause: WhereExpr::and_predicates(vec![
+                Filter {
+                    column: "id",
+                    op: Op::Eq,
+                    value: SqlValue::I64(self.id),
+                },
+                seen,
+            ]),
+        };
+        crate::sql::update_pool(pool, &query)
+            .await
+            .map(|n| n > 0)
+            .map_err(|e| e.to_string())
+    }
 }

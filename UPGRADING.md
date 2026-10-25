@@ -154,6 +154,7 @@ untouched.
 
 `TenantPools::new` resolves `env://` and `enc:` references; literal URLs work as before. With `RUSTANGO_SECRET_KEY` set (use 32 or more random bytes), new password URLs are stored sealed; without it they are stored in plain text with a warning, unless `require_sealed_secrets()` / `RUSTANGO_REQUIRE_SEALED_SECRETS=1` refuses them.
 To rotate the key, move the old one to `RUSTANGO_SECRET_KEY_PREVIOUS`, set the new one, run `reseal-tenant-secrets --apply`, then drop the old key.
+That verb re-seals tenant URLs, saved server passwords and SSO client secrets (shared and per tenant). `EncryptedString` casts open with the previous key too, but your own models' encrypted columns are not rewritten: re-save them before dropping the old key.
 Rolling back to 0.60.x leaves `enc:` rows unreadable there: edit those tenants back to a literal URL first.
 Create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` now probes the tenant database before writing.
 

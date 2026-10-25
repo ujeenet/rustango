@@ -55,10 +55,30 @@ pub(crate) fn encrypt(plaintext: &[u8], aad: &[u8]) -> Result<String, AeadError>
     encrypt_with(env_key().as_deref(), plaintext, aad)
 }
 
-/// Open what [`encrypt`] produced under the same `aad`.
+/// Set during key rotation to the old key; only ever used to open.
+pub(crate) const PREVIOUS_KEY_VAR: &str = "RUSTANGO_SECRET_KEY_PREVIOUS";
+
+/// Open what [`encrypt`] produced under the same `aad`, with the
+/// previous key when the current one fails.
 #[cfg_attr(not(feature = "casts"), allow(dead_code))]
 pub(crate) fn decrypt(stored: &str, aad: &[u8]) -> Result<Vec<u8>, AeadError> {
-    decrypt_with(env_key().as_deref(), stored, aad)
+    let previous = std::env::var(PREVIOUS_KEY_VAR).ok();
+    decrypt_either(env_key().as_deref(), previous.as_deref(), stored, aad)
+}
+
+/// [`decrypt_with`] under `current`, then under `previous`.
+pub(crate) fn decrypt_either(
+    current: Option<&str>,
+    previous: Option<&str>,
+    stored: &str,
+    aad: &[u8],
+) -> Result<Vec<u8>, AeadError> {
+    match decrypt_with(current, stored, aad) {
+        Err(AeadError::Decrypt | AeadError::MissingKey) if previous.is_some() => {
+            decrypt_with(previous, stored, aad)
+        }
+        other => other,
+    }
 }
 
 pub(crate) fn encrypt_with(

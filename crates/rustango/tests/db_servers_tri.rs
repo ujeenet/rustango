@@ -770,6 +770,39 @@ async fn the_console_never_shows_the_password(pool: &Pool) {
     assert!(db_server::get(&env.registry, "web").await.is_err());
 }
 
+/// `reseal-tenant-secrets` also re-seals SSO client secrets, opened with
+/// the previous key, so the old key can then go.
+#[cfg(feature = "admin-sso")]
+#[tokio::test]
+async fn reseal_covers_sso_client_secrets() {
+    use rustango::casts::{CastValue as _, EncryptedString};
+    let _g = env_lock().lock().await;
+    let pool = rustango::testkit::matrix::sqlite_file_pool().await;
+    let env = Env::new(&pool).await;
+    let old = "old-sso-key-0123456789abcdef0123456789";
+    std::env::set_var("RUSTANGO_SECRET_KEY", old);
+    let sealed = EncryptedString::to_db(&"client-secret".to_owned());
+    let insert = format!(
+        "INSERT INTO rustango_shared_sso_providers (slug, label, kind, client_id, client_secret, \
+         enabled, sort_order, allow_email_link, created_at, updated_at) VALUES ('g', 'G', \
+         'google', 'cid', '{sealed}', 1, 0, 0, '2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+    );
+    rustango::sql::raw_execute_pool(&env.registry, &insert, Vec::new()).await.unwrap();
+    std::env::set_var("RUSTANGO_SECRET_KEY_PREVIOUS", old);
+    std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+    let out = env.run(&["reseal-tenant-secrets", "--apply"]).await.expect("apply");
+    assert!(out.contains("sso shared/g: re-sealed"), "{out}");
+    std::env::remove_var("RUSTANGO_SECRET_KEY_PREVIOUS");
+    let rows: Vec<(String,)> = rustango::sql::raw_query_pool(
+        "SELECT client_secret FROM rustango_shared_sso_providers",
+        Vec::new(),
+        &env.registry,
+    )
+    .await
+    .unwrap();
+    assert_eq!(EncryptedString::from_db(&rows[0].0).unwrap(), "client-secret");
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,

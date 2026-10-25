@@ -186,7 +186,7 @@ pub fn seal(plaintext: &str) -> Result<String, SecretsError> {
 
 /// Decrypt-only fallback key, so a rotation or rollback can still open
 /// values sealed under the old key until `reseal-tenant-secrets` runs.
-pub const PREVIOUS_KEY_VAR: &str = "RUSTANGO_SECRET_KEY_PREVIOUS";
+pub const PREVIOUS_KEY_VAR: &str = crate::aead::PREVIOUS_KEY_VAR;
 
 /// Open an `enc:` reference made by [`seal`]. In the standard chain.
 /// Falls back to `RUSTANGO_SECRET_KEY_PREVIOUS` when the current key fails.
@@ -206,17 +206,11 @@ pub(crate) fn open_sealed(
     current: Option<&str>,
     previous: Option<&str>,
 ) -> Result<String, SecretsError> {
-    use crate::aead::{decrypt_with, AeadError};
     let b64 = reference.strip_prefix(SEALED_V1).ok_or_else(|| {
         SecretsError::Invalid("unsupported sealed secret; expected `enc:v1:`".into())
     })?;
-    let plain = match decrypt_with(current, b64, SEALED_AAD) {
-        Err(AeadError::Decrypt | AeadError::MissingKey) if previous.is_some() => {
-            decrypt_with(previous, b64, SEALED_AAD)
-        }
-        other => other,
-    }
-    .map_err(sealed_error)?;
+    let plain = crate::aead::decrypt_either(current, previous, b64, SEALED_AAD)
+        .map_err(sealed_error)?;
     String::from_utf8(plain).map_err(|_| SecretsError::Invalid("sealed secret is not UTF-8".into()))
 }
 
