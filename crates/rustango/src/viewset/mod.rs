@@ -4677,3 +4677,37 @@ mod default_order_tests {
         assert!(sql.ends_with(r#"ORDER BY "title" DESC, "id""#), "{sql}");
     }
 }
+
+#[cfg(all(test, feature = "admin", feature = "mcp"))]
+mod credential_owner_tests {
+    use super::superuser_only_fields;
+    use crate::core::WriteKind;
+
+    fn parts(superuser: Option<bool>) -> axum::http::request::Parts {
+        let (mut p, ()) = axum::http::Request::new(()).into_parts();
+        if let Some(s) = superuser {
+            p.extensions
+                .insert(crate::tenancy::middleware::AuthenticatedUser {
+                    id: 7,
+                    username: "u".into(),
+                    is_superuser: s,
+                });
+        }
+        p
+    }
+
+    /// A non-superuser cannot pick the owner of a new credential either.
+    #[test]
+    fn create_locks_the_credential_owner() {
+        for table in ["rustango_api_keys", "rustango_agents"] {
+            for write in [WriteKind::Insert, WriteKind::Update] {
+                assert_eq!(
+                    superuser_only_fields(table, write, &parts(Some(false))),
+                    ["user_id"],
+                    "{table}"
+                );
+                assert!(superuser_only_fields(table, write, &parts(Some(true))).is_empty());
+            }
+        }
+    }
+}
