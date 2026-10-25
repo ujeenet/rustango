@@ -1785,9 +1785,10 @@ async fn set_password(
     ctx.insert("set_password", &true);
     ctx.insert("form_action", form_action);
     let outcome: Result<bool, String> = match *method {
-        axum::http::Method::GET => PasswordReset::verify(&LinkScope::from(org), link, &key)
-            .map(|_| false)
-            .map_err(|_| DEAD.to_owned()),
+        axum::http::Method::GET => match PasswordReset::verify_issued(&LinkScope::from(org), link, &key) {
+            Ok((user_id, iat)) if link_unused(tenant_pool, user_id, iat).await => Ok(false),
+            _ => Err(DEAD.to_owned()),
+        },
         axum::http::Method::POST => {
             let form = match http_body_util::BodyExt::collect(body).await {
                 Ok(b) => serde_urlencoded::from_bytes::<SetPasswordForm>(&b.to_bytes()).ok(),
@@ -1798,7 +1799,10 @@ async fn set_password(
                 Some(f) if !f.confirm_password.is_empty() && f.confirm_password != f.new_password => {
                     Err("The password and its confirmation did not match.".to_owned())
                 }
-                Some(f) => match crate::auth_flows::confirm_password_reset_pool(
+                Some(f) => match crate::password_validators::check_builtin_form_password(&f.new_password) {
+                    // The same rule as the change-password form.
+                    Err(e) => Err(e.message),
+                    Ok(()) => match crate::auth_flows::confirm_password_reset_pool(
                     LinkTarget::tenant(tenant_pool, org),
                     link,
                     &f.new_password,
@@ -1813,6 +1817,7 @@ async fn set_password(
                         Err("Could not set the password; please try again.".to_owned())
                     }
                     Err(_) => Err(DEAD.to_owned()),
+                    },
                 },
             }
         }
@@ -1850,6 +1855,26 @@ async fn set_password(
         h.append(header::SET_COOKIE, v);
     }
     resp
+}
+
+/// Whether the password is unchanged since the link was issued, so the
+/// form is worth showing. The write checks this again.
+async fn link_unused(tenant_pool: &crate::sql::Pool, user_id: i64, issued_micros: i64) -> bool {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+    let users: Vec<super::auth::User> = match super::auth::User::objects()
+        .where_(super::auth::User::id.eq(user_id))
+        .fetch(tenant_pool)
+        .await
+    {
+        Ok(v) => v,
+        // Show the form; the POST answers for real.
+        Err(_) => return true,
+    };
+    users.first().is_some_and(|u| {
+        u.password_changed_at
+            .is_none_or(|at| at.timestamp_micros() < issued_micros)
+    })
 }
 
 fn rustango_png_response() -> Response {

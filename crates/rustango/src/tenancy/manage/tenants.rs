@@ -39,7 +39,7 @@ where
     let request = parse_create_tenant_args(args)?;
     // Before anything is made: a missing prod key must not strand an admin.
     let handover = match &request.first_admin {
-        Some(_) => Some(cli_handover()?),
+        Some(_) => Some(cli_handover(w)?),
         None => None,
     };
 
@@ -70,12 +70,18 @@ where
 
     let w = progress.into_inner();
     if let Some(handover) = &handover {
-        handover
+        let handed = handover
             .hand_over_outcome(&pools.registry_pool(), &mut outcome, None)
-            .await?;
+            .await;
         if let Some(admin) = &outcome.first_admin {
-            if let Some(handed) = &admin.handover {
-                print_handover(w, &admin.username, handed, handover.ttl_hours())?;
+            match (&handed, &admin.handover) {
+                (Ok(()), Some(link)) => print_handover(w, &admin.username, link, handover.ttl_hours())?,
+                // The tenant is made; only the link is lost.
+                _ => writeln!(
+                    w,
+                    "  could not issue the set-password link; run `set-password-link {} {}`",
+                    outcome.slug, admin.username
+                )?,
             }
         }
     }
@@ -171,9 +177,16 @@ impl<W: Write + Send> provision::ProvisionObserver for CreateTenantProgress<'_, 
     }
 }
 
-/// The CLI signs links with the server's tenant session key.
-fn cli_handover() -> Result<crate::tenancy::FirstAdminHandover, TenancyError> {
-    let secret = crate::tenancy::session::tenant_secret_from_env()?;
+/// The CLI signs links with the server's tenant session key, loaded only.
+fn cli_handover<W: Write>(w: &mut W) -> Result<crate::tenancy::FirstAdminHandover, TenancyError> {
+    use crate::tenancy::session::{existing_tenant_secret, KeySource};
+    let (secret, source) = existing_tenant_secret()?;
+    if source == KeySource::DevFile {
+        writeln!(
+            w,
+            "  note: links are signed with the dev key file; they work only on a server using the same file"
+        )?;
+    }
     Ok(crate::tenancy::FirstAdminHandover::new(&secret))
 }
 
@@ -222,7 +235,7 @@ where
     let org = super::api::find_org(pools, &slug)
         .await?
         .ok_or_else(|| TenancyError::Validation(format!("no tenant with slug `{slug}`")))?;
-    let handover = cli_handover()?;
+    let handover = cli_handover(w)?;
     let handed =
         crate::tenancy::first_admin::hand_over_user(pools, &org, &username, &handover).await?;
     print_handover(w, &username, &handed, handover.ttl_hours())

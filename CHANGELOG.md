@@ -19,7 +19,7 @@ It now counts as unset. The **New tenant** page shows the missing-key banner too
 ### Added — a new tenant's first admin
 
 The console create form (admin email, optional username), `create-tenant --admin-email <e> [--admin-username <u>]`, the signup webhook (`admin_email`) and `api::create_tenant` (`first_admin`) create a superuser in a `create_admin` step after migrate and before activate; a failure rolls the run back.
-The admin gets no usable password but a single-use, tenant-bound set-password link (72 hours), redeemed on the tenant's change-password page: mailed with `Builder::first_admin_mailer`, else shown once on the run page or printed once by the CLI, and never stored, audited or logged. `set-password-link <slug> <username>` issues a fresh one.
+The admin gets no usable password but a single-use, tenant-bound set-password link (72 hours), redeemed on the tenant's change-password page: mailed with `Builder::first_admin_mailer`, else shown once on the run page or printed once by the CLI, and never stored, audited or logged. `set-password-link <slug> <username>` issues a fresh one. A resumed run reuses the admin an earlier run made and never adds a second superuser.
 
 ### Added — create a database-mode tenant on a saved server
 

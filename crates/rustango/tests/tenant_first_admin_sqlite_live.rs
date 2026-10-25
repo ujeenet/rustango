@@ -9,7 +9,7 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use rustango::core::Column as _;
-use rustango::sql::{sqlx, Auto, FetcherPool as _};
+use rustango::sql::{sqlx, Auto, FetcherPool as _, UpdaterPool as _};
 use rustango::tenancy::operator_console::router_with_provisioning;
 use rustango::tenancy::provision::Provisioner;
 use rustango::tenancy::provision_store as store;
@@ -397,6 +397,11 @@ async fn the_cli_creates_a_first_admin_and_prints_the_link() {
     let env = Env::new().await;
     let slug = unique("cli");
     let host = format!("{slug}.app.test");
+    // The CLI signs with the server's tenant key: the env var, or the file
+    // a server writes on first boot. It only loads it.
+    let secret = SessionSecret::from_env_or_disk(std::path::Path::new(
+        "./var/.rustango_tenant_session.key",
+    ));
     let out = env
         .run(&[
             "create-tenant",
@@ -417,15 +422,10 @@ async fn the_cli_creates_a_first_admin_and_prints_the_link() {
         .await
         .expect("create-tenant");
     assert!(out.contains("created the first admin"), "{out}");
-    let link = link_in(&out);
+    let link = link_in(&out[out.find("set-password link").expect("the link")..]);
     let user = env.user(&slug, "bob").await.expect("the first admin exists");
     assert!(user.is_superuser);
     assert!(!env.trail().await.contains(&signature_of(&link)));
-
-    // The CLI signs with the server's tenant key: the env var, or this file.
-    let secret = SessionSecret::from_env_or_disk(std::path::Path::new(
-        "./var/.rustango_tenant_session.key",
-    ));
     let admin = env.tenant_admin(&secret);
 
     // The same path and query on another tenant's host is refused.
@@ -457,7 +457,226 @@ async fn the_cli_creates_a_first_admin_and_prints_the_link() {
         .run(&["set-password-link", &slug, "bob"])
         .await
         .expect("set-password-link");
-    assert_ne!(signature_of(&link_in(&fresh)), signature_of(&link));
+    let fresh = &fresh[fresh.find("set-password link").expect("the link")..];
+    assert_ne!(signature_of(&link_in(fresh)), signature_of(&link));
+}
+
+/// A tenant with a first admin `ann`, and a link for her from `handover`.
+async fn tenant_with_admin(
+    env: &Env,
+    handover: &FirstAdminHandover,
+) -> (String, String) {
+    let slug = unique("http");
+    let request = rustango::tenancy::provision::ProvisionRequest {
+        host_pattern: Some(format!("{slug}.app.test")),
+        first_admin: Some(rustango::tenancy::FirstAdmin::new("ann@acme.test", Some("ann")).unwrap()),
+        ..rustango::tenancy::provision::ProvisionRequest::database(&slug, env.tenant_url(&slug))
+    };
+    let outcome = rustango::tenancy::provision::provision_tenant(
+        env.pools.as_ref(),
+        &env.url,
+        &env.migrations,
+        &request,
+        None,
+    )
+    .await
+    .expect("provision");
+    assert!(outcome.first_admin.is_some());
+    let org = env.org(&slug).await.unwrap();
+    let handed =
+        rustango::tenancy::first_admin::hand_over_user(env.pools.as_ref(), &org, "ann", handover)
+            .await
+            .unwrap();
+    let link = handed.link().expect("no mailer: a link").expose().to_owned();
+    (slug, link)
+}
+
+/// The cookie value `name` set by `resp`.
+fn set_cookie(resp: &axum::response::Response, name: &str) -> Option<String> {
+    resp.headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find_map(|v| v.strip_prefix(&format!("{name}=")))
+        .map(|v| v.split(';').next().unwrap().to_owned())
+}
+
+/// Tampered, foreign, expired, used and weak: each refused over HTTP, and
+/// the POST needs a real CSRF token.
+#[tokio::test]
+async fn a_set_password_link_holds_up_over_http() {
+    let _suite = SUITE.lock().await;
+    let env = Env::new().await;
+    let secret = SessionSecret::from_bytes(b"first-admin-http-secret-32-byte!".to_vec());
+    let (slug, link) = tenant_with_admin(&env, &FirstAdminHandover::new(&secret)).await;
+    let host = format!("{slug}.app.test");
+    let admin = env.tenant_admin(&secret);
+    let uri = path_and_query(&link);
+    let hash_before = env.user(&slug, "ann").await.unwrap().password_hash;
+    let set = format!("new_password={NEW_PASSWORD}&confirm_password={NEW_PASSWORD}");
+    let dead = |html: &str| html.contains("invalid, used or expired");
+
+    // Another user id under the same signature.
+    let id = env.user(&slug, "ann").await.unwrap().id.get().copied().unwrap();
+    let tampered = uri.replace(&format!("user_id={id}"), &format!("user_id={}", id + 1));
+    assert_ne!(tampered, uri);
+    assert!(dead(&body_of(tenant_req(&admin, &host, "GET", &tampered, "").await).await));
+    assert!(dead(&body_of(tenant_req(&admin, &host, "POST", &tampered, &set).await).await));
+
+    // The same link POSTed to another tenant.
+    let (other, _) = tenant_with_admin(&env, &FirstAdminHandover::new(&secret)).await;
+    let foreign = format!("{other}.app.test");
+    assert!(dead(&body_of(tenant_req(&admin, &foreign, "POST", &uri, &set).await).await));
+
+    // Expired.
+    let org = env.org(&slug).await.unwrap();
+    let short = FirstAdminHandover::new(&secret).ttl(std::time::Duration::from_secs(1));
+    let expired = rustango::tenancy::first_admin::hand_over_user(env.pools.as_ref(), &org, "ann", &short)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    let expired_uri = path_and_query(expired.link().unwrap().expose());
+    assert!(dead(&body_of(tenant_req(&admin, &host, "GET", &expired_uri, "").await).await));
+    assert!(dead(&body_of(tenant_req(&admin, &host, "POST", &expired_uri, &set).await).await));
+
+    // The form's own rule: too short, and the link survives it.
+    let weak = body_of(
+        tenant_req(&admin, &host, "POST", &uri, "new_password=Ab1!&confirm_password=Ab1!").await,
+    )
+    .await;
+    assert!(!dead(&weak) && !weak.contains("Password set"), "{weak}");
+    assert_eq!(env.user(&slug, "ann").await.unwrap().password_hash, hash_before);
+
+    // No CSRF token: refused, nothing written.
+    let bare = admin
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&uri)
+                .header(header::HOST, &host)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(set.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bare.status(), StatusCode::FORBIDDEN);
+    assert_eq!(env.user(&slug, "ann").await.unwrap().password_hash, hash_before);
+
+    // The token the GET hands out, sent back as a browser would.
+    let page = admin
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&uri)
+                .header(header::HOST, &host)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookie = set_cookie(&page, "rustango_csrf").expect("a CSRF cookie");
+    let html = body_of(page).await;
+    let token = html
+        .split("name=\"_csrf\" value=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("a CSRF field")
+        .to_owned();
+    let done = admin
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&uri)
+                .header(header::HOST, &host)
+                .header(header::COOKIE, format!("rustango_csrf={cookie}"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!("_csrf={}&{set}", form_encode(&token))))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(body_of(done).await.contains("Password set"));
+
+    // Used: the form no longer shows.
+    assert!(dead(&body_of(tenant_req(&admin, &host, "GET", &uri, "").await).await));
+}
+
+/// `set-password-link` refuses an inactive user.
+#[tokio::test]
+async fn no_link_for_an_inactive_user() {
+    let _suite = SUITE.lock().await;
+    let env = Env::new().await;
+    let secret = SessionSecret::from_bytes(b"first-admin-http-secret-32-byte!".to_vec());
+    let handover = FirstAdminHandover::new(&secret);
+    let (slug, _) = tenant_with_admin(&env, &handover).await;
+    let org = env.org(&slug).await.unwrap();
+    let pool = env.pools.scoped_pool_dyn(&org).await.unwrap();
+    User::objects()
+        .where_(User::username.eq("ann".to_owned()))
+        .update()
+        .set("active", false)
+        .execute_pool(&pool)
+        .await
+        .unwrap();
+    let err = rustango::tenancy::first_admin::hand_over_user(env.pools.as_ref(), &org, "ann", &handover)
+        .await
+        .expect_err("refused");
+    assert!(err.to_string().contains("inactive"), "{err}");
+}
+
+/// A resumed run reuses the admin an earlier run made, and never adds a
+/// second superuser for somebody else.
+#[cfg(feature = "testkit")]
+#[tokio::test]
+async fn a_resumed_run_never_adds_a_second_superuser() {
+    use rustango::tenancy::provision::{provision_tenant_in_run, ProvisionRequest};
+    let _suite = SUITE.lock().await;
+    let env = Env::new().await;
+    let slug = unique("resume");
+    let request = |email: &str, username: &str| ProvisionRequest {
+        first_admin: Some(rustango::tenancy::FirstAdmin::new(email, Some(username)).unwrap()),
+        ..ProvisionRequest::database(&slug, env.tenant_url(&slug))
+    };
+    let run = |request: ProvisionRequest| {
+        let env = &env;
+        async move {
+            let opened = store::open_run(
+                &env.registry(),
+                &request.slug,
+                "database",
+                "sqlite",
+                request.database_url(),
+                Some("test"),
+                None,
+            )
+            .await
+            .unwrap();
+            let id = opened.id.get().copied().unwrap();
+            provision_tenant_in_run(env.pools.as_ref(), &env.url, &env.migrations, &request, None, id)
+                .await
+        }
+    };
+    std::env::set_var("RUSTANGO_PROVISION_FAIL_AT", "activate");
+    run(request("ann@acme.test", "ann")).await.expect_err("activate fails");
+    std::env::remove_var("RUSTANGO_PROVISION_FAIL_AT");
+    assert!(env.user(&slug, "ann").await.unwrap().is_superuser);
+
+    let err = run(request("eve@evil.test", "eve")).await.expect_err("another admin");
+    assert!(err.to_string().contains("superuser"), "{err}");
+    assert!(env.user(&slug, "eve").await.is_none());
+    assert!(!env.org(&slug).await.unwrap().active);
+
+    let outcome = run(request("ann@acme.test", "ann")).await.expect("the same admin resumes");
+    let ann = env.user(&slug, "ann").await.unwrap();
+    assert_eq!(outcome.first_admin.unwrap().user_id, ann.id.get().copied().unwrap());
+    assert!(env.org(&slug).await.unwrap().active);
+    let org = env.org(&slug).await.unwrap();
+    let pool = env.pools.scoped_pool_dyn(&org).await.unwrap();
+    let supers = User::objects().where_(User::is_superuser.eq(true)).fetch(&pool).await.unwrap();
+    assert_eq!(supers.len(), 1);
 }
 
 /// A first admin needs migrations: refused before anything is made.
@@ -579,11 +798,13 @@ mod webhook {
         let _suite = SUITE.lock().await;
         let env = Env::new().await;
         let secret = SessionSecret::from_bytes(b"first-admin-webhook-secret-32-b!".to_vec());
-        let app = app(&env, Some(FirstAdminHandover::new(&secret)));
-        let slug = unique("nomail");
-        let resp = deliver(&app, &slug).await;
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-        assert!(store::recent_runs(&env.registry(), 10, 0).await.unwrap().is_empty());
-        assert!(env.org(&slug).await.is_none());
+        for handover in [Some(FirstAdminHandover::new(&secret)), None] {
+            let app = app(&env, handover);
+            let slug = unique("nomail");
+            let resp = deliver(&app, &slug).await;
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert!(store::recent_runs(&env.registry(), 10, 0).await.unwrap().is_empty());
+            assert!(env.org(&slug).await.is_none());
+        }
     }
 }

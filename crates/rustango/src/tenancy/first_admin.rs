@@ -283,11 +283,15 @@ impl FirstAdminHandover {
         from: &str,
         link: &SetPasswordLink,
     ) -> crate::email::Email {
-        let name = org
+        // No CR/LF from a tenant name may reach a mail header.
+        let name: String = org
             .brand_name
             .as_deref()
             .filter(|s| !s.is_empty())
-            .unwrap_or(&org.display_name);
+            .unwrap_or(&org.display_name)
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect();
         crate::email::Email::new()
             .to(admin.email.clone())
             .from(from)
@@ -322,6 +326,9 @@ pub(crate) fn signed_link(query: &str) -> String {
 }
 
 /// Create `admin` as a superuser of `org` with a password nobody holds.
+///
+/// A resumed run reuses the superuser an earlier run made for the same
+/// admin; any other existing superuser refuses, so a resume never adds one.
 pub(crate) async fn create<DB: sqlx::Database>(
     pools: &TenantPools<DB>,
     org: &Org,
@@ -336,11 +343,29 @@ where
         .limit(1)
         .fetch(&pool)
         .await?;
-    if !taken.is_empty() {
-        return Err(TenancyError::Validation(format!(
-            "the tenant already has a user `{}`",
-            admin.username
-        )));
+    if let Some(user) = taken.into_iter().next() {
+        if !is_same_admin(&user, admin) {
+            return Err(TenancyError::Validation(format!(
+                "the tenant already has a user `{}`",
+                admin.username
+            )));
+        }
+        return Ok(CreatedAdmin {
+            user_id: user.id.get().copied().unwrap_or_default(),
+            username: user.username,
+            email: admin.email.clone(),
+            handover: None,
+        });
+    }
+    let superusers: Vec<User> = User::objects()
+        .where_(User::is_superuser.eq(true))
+        .limit(1)
+        .fetch(&pool)
+        .await?;
+    if !superusers.is_empty() {
+        return Err(TenancyError::Validation(
+            "the tenant already has a superuser; a first admin cannot be added".to_owned(),
+        ));
     }
     // Generated and dropped here: the admin sets their own through the link.
     let unusable = super::password::hash_async(&super::password::generate(32)).await?;
@@ -360,6 +385,22 @@ where
     };
     audit(&pools.registry_pool(), org, &created).await;
     Ok(created)
+}
+
+/// `user` is the superuser an earlier run made for `admin`. Builds
+/// without `sso` store no email, so the username alone decides there.
+fn is_same_admin(user: &User, admin: &FirstAdmin) -> bool {
+    #[cfg(feature = "sso")]
+    let email_matches = user
+        .email
+        .as_deref()
+        .is_some_and(|e| e.eq_ignore_ascii_case(&admin.email));
+    #[cfg(not(feature = "sso"))]
+    let email_matches = {
+        let _ = admin;
+        true
+    };
+    user.is_superuser && user.active && email_matches
 }
 
 /// Record the creation in the registry's audit log. Never the link.
@@ -408,6 +449,12 @@ where
         .ok_or_else(|| {
             TenancyError::Validation(format!("no user `{username}` in tenant `{}`", org.slug))
         })?;
+    if !user.active {
+        // The link would set a password nobody can sign in with.
+        return Err(TenancyError::Validation(format!(
+            "user `{username}` is inactive; activate it first"
+        )));
+    }
     #[cfg(feature = "sso")]
     let email = user.email.clone().unwrap_or_default();
     #[cfg(not(feature = "sso"))]
@@ -463,6 +510,24 @@ mod tests {
         assert!(!shown.contains("signature"), "{shown}");
         let h = FirstAdminHandover::new(&secret());
         assert!(!format!("{h:?}").contains("key"));
+    }
+
+    #[cfg(feature = "email")]
+    #[test]
+    fn a_tenant_name_cannot_break_the_subject() {
+        let tenant = Org {
+            display_name: "Acme\r\nBcc: eve@evil.test".into(),
+            ..org(7)
+        };
+        let admin = CreatedAdmin {
+            user_id: 1,
+            username: "ann".into(),
+            email: "ann@acme.test".into(),
+            handover: None,
+        };
+        let h = FirstAdminHandover::new(&secret());
+        let mail = h.email(&tenant, &admin, "ops@acme.test", &h.link(&tenant, 1, None));
+        assert!(!mail.subject.contains(['\r', '\n']), "{:?}", mail.subject);
     }
 
     /// The link's query, re-based, verifies for its own tenant only.

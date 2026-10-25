@@ -251,7 +251,7 @@ impl PasswordReset {
     /// [`Self::verify`] plus the link's issue time; `Expired` for a link
     /// minted before it carried one.
     #[cfg(feature = "passwords")]
-    fn verify_issued(
+    pub(crate) fn verify_issued(
         scope: &LinkScope,
         url: &str,
         secret: &[u8],

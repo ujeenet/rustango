@@ -315,6 +315,14 @@ impl RunText {
         })
     }
 
+    /// A first admin's link that never went out. Validated names only.
+    #[cfg(feature = "webhook")]
+    pub(crate) fn handover_lost(slug: &str, username: &str) -> Self {
+        Self(format!(
+            "the set-password link was not mailed; run `set-password-link {slug} {username}`"
+        ))
+    }
+
     /// A validation (or busy) error's own text; `None` for a cause to withhold.
     #[must_use]
     pub fn user_facing(e: &TenancyError) -> Option<Self> {
@@ -501,6 +509,25 @@ pub async fn append_event_text(
     };
     event.insert_pool(registry).await?;
     Ok(())
+}
+
+/// Append one event after the run's last, for a note made once it closed.
+///
+/// # Errors
+/// A registry read or write failure.
+#[cfg(feature = "webhook")]
+pub(crate) async fn append_note(
+    registry: &Pool,
+    run_id: i64,
+    step: &str,
+    status: &str,
+    message: &RunText,
+) -> Result<(), TenancyError> {
+    let next = events_since(registry, run_id, 0)
+        .await?
+        .last()
+        .map_or(0, |e| e.seq + 1);
+    append_event_text(registry, run_id, next, step, status, message).await
 }
 
 /// Record that the `Org` row now exists, so a run that fails later

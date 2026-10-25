@@ -420,6 +420,20 @@ async fn handle(
                             run_id,
                             "the first admin's link was not mailed; issue one with `set-password-link`"
                         );
+                        if let Some(admin) = &outcome.first_admin {
+                            let note = store::RunText::handover_lost(&outcome.slug, &admin.username);
+                            let noted = store::append_note(
+                                &provisioner.registry(),
+                                run_id,
+                                super::provision::ProvisionStep::CreateAdmin.as_str(),
+                                "failed",
+                                &note,
+                            )
+                            .await;
+                            if let Err(e) = noted {
+                                tracing::warn!(target: "rustango::tenancy::provision_webhook", run_id, error = %e, "could not record the lost handover");
+                            }
+                        }
                     }
                 }
             }

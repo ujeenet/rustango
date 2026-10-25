@@ -180,6 +180,8 @@ A saved-server create needs `RUSTANGO_SECRET_KEY`: the tenant login it creates i
 
 `ProvisionRequest`, `ProvisionOutcome`, `CreateTenantOpts` and `ProvisionPayload` have a new `first_admin` (payload: `admin_email`, `admin_username`) field, and `ProvisionStep` a `CreateAdmin` variant: struct literals need `..` defaults and an exhaustive match needs an arm.
 `Provisioner` offers first admins only with `with_first_admin_handover`; the standard `Builder` sets it, signing links with the tenant session secret. The tenant's change-password page now also takes a set-password link without a session.
+`tenancy` now enables `auth_flows`. Without `sso` the admin's email is not stored, so `set-password-link` mails only a username that is an email.
+`create-tenant --admin-email` and `set-password-link` no longer create a tenant session key: set `RUSTANGO_SESSION_SECRET`, or start the server once in dev.
 
 ### `TenantPoolInvalidator::tenant_secrets` has no default
 
