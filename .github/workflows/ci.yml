@@ -805,6 +805,9 @@ jobs:
           # `--features tenancy[,sso]` on the defaults: tests left dead code here.
           - postgres,batteries,tenancy
           - postgres,batteries,tenancy,sso
+          # Media suites on one backend, without storage-s3.
+          - mysql,testkit,tenancy,media
+          - postgres,testkit,tenancy,media
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
@@ -818,7 +821,7 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features ${{ matrix.features }} --lib
       # Build `tests/**` on the bare backends: no other job compiles a test
       # without tenancy, so a wrong single-backend `#![cfg]` stayed green (#2328).
-      - if: ${{ !contains(matrix.features, ',') || matrix.features == 'sqlite,_tower' || matrix.features == 'sqlite,csrf' || matrix.features == 'sqlite,template_views' || startsWith(matrix.features, 'postgres,batteries,tenancy') }}
+      - if: ${{ !contains(matrix.features, ',') || matrix.features == 'sqlite,_tower' || matrix.features == 'sqlite,csrf' || matrix.features == 'sqlite,template_views' || startsWith(matrix.features, 'postgres,batteries,tenancy') || endsWith(matrix.features, ',testkit,tenancy,media') }}
         run: cargo test -p rustango --no-default-features --features ${{ matrix.features }} --tests --no-run
 
   # #1285 — the first Windows coverage this repo has had. Every other job

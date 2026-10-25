@@ -1,4 +1,9 @@
-#![cfg(all(feature = "postgres", feature = "media", feature = "testkit"))]
+#![cfg(all(
+    feature = "postgres",
+    feature = "media",
+    feature = "storage-s3",
+    feature = "testkit"
+))]
 //! `#[ignore]`-d helper that creates visible Media rows + S3
 //! objects via `MediaManager`, leaves everything behind for
 //! inspection.

@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin audit writes are tied to their transaction's pool
+
+Admin create, edit, delete and bulk writes open a transaction that carries its own pool, so their audit source can no longer be judged against another pool. The S3 media test suites now need `storage-s3`, and the MySQL media suite builds under `-D warnings`.
+
 ### Fixed — tenant logos 404'd under the default routes
 
 Tenant pages link uploaded logos and favicons under `RouteConfig::brand_url` (`/_brand` by default), the prefix tenant hosts serve, via the new `RouteConfig::brand_asset_url`. Tenant admin pages now use the tenant favicon too.

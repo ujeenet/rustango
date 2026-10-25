@@ -151,8 +151,11 @@ async fn a_failed_set_tags_rolls_back_on_mysql() {
     // Fail the insert half only. `ensure_tag` writes to a different
     // table, so it still succeeds — the realistic shape is "the new tag
     // exists, the link does not".
-    let Pool::Mysql(ref my) = pool else {
-        unreachable!("mysql-only suite")
+    let my = match &pool {
+        Pool::Mysql(my) => my,
+        // Unreachable, and absent in mysql-only builds.
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("mysql-only suite"),
     };
     // Rename the column the INSERT names but the DELETE does not. The
     // delete (`WHERE media_id = ?`) still works; the insert fails with
