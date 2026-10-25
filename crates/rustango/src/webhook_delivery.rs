@@ -31,8 +31,12 @@
 //! - `X-Webhook-Id: <uuid>`, the same on every retry so the receiver
 //!   can drop duplicates.
 //! - `X-Webhook-Event: <event_name>`
-//! - `X-Webhook-Signature: <signature>`, in your chosen
-//!   [`SignatureFormat`].
+//! - `X-Webhook-Timestamp: <unix seconds at dispatch>`
+//! - `X-Webhook-Signature-V2: <signature>` over the id, event, timestamp
+//!   and body; check it with [`verify_delivery`], which also bounds the age.
+//! - `X-Webhook-Signature: <signature>` over the body only, for receivers
+//!   not yet on v2. It does not stop a replay under a new id or event:
+//!   move receivers to v2. Both are in your chosen [`SignatureFormat`].
 //! - Any extra headers from [`WebhookSubscription::header`].
 //!
 //! ## Retry policy
@@ -61,6 +65,7 @@
 //! either is stored with it; the signing secret is not.
 //!
 //! [`SignatureFormat`]: crate::webhook::SignatureFormat
+//! [`verify_delivery`]: crate::webhook::verify_delivery
 //! [`WebhookSubscription::header`]: crate::webhook_delivery::WebhookSubscription::header
 //! [`WebhookSubscription::retry_status_codes`]: crate::webhook_delivery::WebhookSubscription::retry_status_codes
 //! [`WebhookSubscription::allow_private_targets`]: crate::webhook_delivery::WebhookSubscription::allow_private_targets
@@ -74,14 +79,18 @@ use uuid::Uuid;
 
 use crate::jobs::{Job, JobError, JobQueue};
 use crate::outbound::{self, TargetError, TargetPolicy};
-use crate::webhook::{sign as sign_body, SignatureFormat};
+use crate::webhook::{sign as sign_body, sign_delivery, SignatureFormat};
 
 /// Per-delivery UUID. Receivers can use it to drop duplicates.
 pub const HEADER_ID: &str = "X-Webhook-Id";
 /// Header that carries the event name.
 pub const HEADER_EVENT: &str = "X-Webhook-Event";
-/// Header that carries the HMAC signature of the body.
+/// Header that carries the HMAC signature of the body (v1).
 pub const HEADER_SIGNATURE: &str = "X-Webhook-Signature";
+/// Header that carries the dispatch time, unix seconds.
+pub const HEADER_TIMESTAMP: &str = "X-Webhook-Timestamp";
+/// Header that carries the v2 signature, see [`crate::webhook::verify_delivery`].
+pub const HEADER_SIGNATURE_V2: &str = "X-Webhook-Signature-V2";
 
 /// User-Agent advertised on every delivery.
 pub static USER_AGENT: &str = concat!("rustango-webhook/", env!("CARGO_PKG_VERSION"));
@@ -415,11 +424,29 @@ impl WebhookSubscription {
             return Err(JobError::Fatal(bad.clone()));
         }
         let id = Uuid::new_v4().to_string();
+        let event_name = event_name.into();
         let body = serde_json::to_string(&payload)
             .map_err(|e| JobError::Queue(format!("payload serialize: {e}")))?;
+        // In `headers`, so rows already queued keep their shape.
+        let at = chrono::Utc::now().timestamp();
+        let v2 = sign_delivery(
+            self.signature_format,
+            self.secret.as_bytes(),
+            &id,
+            &event_name,
+            at,
+            body.as_bytes(),
+        )
+        .map_err(|e| JobError::Queue(e.to_string()))?;
+        let mut headers = self.headers.clone();
+        headers.retain(|k, _| {
+            !k.eq_ignore_ascii_case(HEADER_TIMESTAMP) && !k.eq_ignore_ascii_case(HEADER_SIGNATURE_V2)
+        });
+        headers.insert(HEADER_TIMESTAMP.to_owned(), at.to_string());
+        headers.insert(HEADER_SIGNATURE_V2.to_owned(), v2);
         let event = WebhookEvent {
             id: id.clone(),
-            event: event_name.into(),
+            event: event_name,
             target_url: self.target_url.clone(),
             signature: sign_body(
                 self.signature_format,
@@ -428,7 +455,7 @@ impl WebhookSubscription {
             )
             .map_err(|e| JobError::Queue(e.to_string()))?,
             body,
-            headers: self.headers.clone(),
+            headers,
             timeout_secs: self.timeout.as_secs().max(1),
             retry_status_codes: self.retry_status_codes.clone(),
             allow_private_targets: self.allow_private_targets,
@@ -538,6 +565,50 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
         assert_eq!(parsed["order_id"], 42);
 
+        srv.abort();
+        q.shutdown().await;
+    }
+
+    /// The v2 signature covers the id, event and timestamp too, so a
+    /// captured delivery cannot be replayed under a fresh id or another
+    /// event; the body-only v1 header is still sent for old receivers.
+    #[tokio::test]
+    async fn delivery_signs_id_event_and_timestamp() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (url, srv) = start_server(200, received.clone()).await;
+        let q = InMemoryJobQueue::with_workers(1);
+        WebhookSubscription::register(&q).await;
+        q.start().await;
+        let before = chrono::Utc::now().timestamp();
+        let id = WebhookSubscription::new(url, "secret-bytes")
+            .allow_private_targets(true)
+            .signature_format(SignatureFormat::HexSha256)
+            .dispatch(&q, "order.created", &serde_json::json!({"order_id": 7}))
+            .await
+            .unwrap();
+        for _ in 0..50 {
+            if !received.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let recv = received.lock().unwrap();
+        let (_status, hdrs, body) = &recv[0];
+        let ts = hdrs.get("x-webhook-timestamp").expect("no timestamp header");
+        let at: i64 = ts.parse().expect("unix seconds");
+        assert!((before..=chrono::Utc::now().timestamp()).contains(&at), "{at}");
+        let v2 = hdrs.get("x-webhook-signature-v2").expect("no v2 signature");
+        let signed = |id: &str, event: &str| {
+            let mut msg = format!("v2\n{id}\n{event}\n{ts}\n").into_bytes();
+            msg.extend_from_slice(body);
+            sign_body(SignatureFormat::HexSha256, b"secret-bytes", &msg).unwrap()
+        };
+        assert_eq!(v2, &signed(&id, "order.created"));
+        assert_ne!(v2, &signed("other-id", "order.created"));
+        assert_ne!(v2, &signed(&id, "order.deleted"));
+        let v1 = sign_body(SignatureFormat::HexSha256, b"secret-bytes", body).unwrap();
+        assert_eq!(hdrs.get("x-webhook-signature"), Some(&v1));
+        drop(recv);
         srv.abort();
         q.shutdown().await;
     }

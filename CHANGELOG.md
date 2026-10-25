@@ -16,6 +16,10 @@ The move creates the target schema before the tenant goes offline and refuses an
 
 Path prefix and port changes are claimed like hosts, so two tenants can no longer take one at once. Generic admin writes of `rustango_orgs` and `rustango_org_hosts` now validate, normalize and claim hosts, prefixes and ports too.
 
+### Added — webhook signature v2 with a timestamp
+
+Deliveries now carry `X-Webhook-Timestamp` and `X-Webhook-Signature-V2`, an HMAC over the id, event, timestamp and body; check it with `webhook::verify_delivery`. The body-only `X-Webhook-Signature` is still sent for a transition.
+
 ### Fixed — tenant logos 404'd under the default routes
 
 Tenant pages link uploaded logos and favicons under `RouteConfig::brand_url` (`/_brand` by default), the prefix tenant hosts serve, via the new `RouteConfig::brand_asset_url`. Tenant admin pages now use the tenant favicon too.

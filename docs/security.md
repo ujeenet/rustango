@@ -627,6 +627,33 @@ async fn handle_stripe_webhook(headers: HeaderMap, body: Bytes) -> StatusCode {
 | `HexSha256` | whatever bytes you pass, raw hex | Stripe `v1=` / Slack `v0=` values over the strings above |
 | `Base64Sha256` | body, standard base64 | Shopify (`X-Shopify-Hmac-Sha256`) |
 
+### Webhooks from `webhook_delivery`
+
+Rustango's own deliveries carry `X-Webhook-Signature-V2`, signed over the id, event, timestamp and body. Check it with `verify_delivery`, then drop an `X-Webhook-Id` you saw within `max_age`. Pick a `max_age` longer than jobs may queue.
+
+```rust
+use axum::{body::Bytes, http::HeaderMap, http::StatusCode};
+use rustango::webhook::{verify_delivery, DeliveryHeaders, SignatureFormat};
+
+fn check(secret: &[u8], headers: &HeaderMap, body: &Bytes) -> StatusCode {
+    let h = |name| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let signed = DeliveryHeaders {
+        id: h("x-webhook-id"),
+        event: h("x-webhook-event"),
+        timestamp: h("x-webhook-timestamp"),
+        signature: h("x-webhook-signature-v2"),
+    };
+    let max_age = std::time::Duration::from_secs(600);
+    if !verify_delivery(SignatureFormat::HexSha256WithPrefix, secret, &signed, body, max_age) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    // ... drop a repeated id, then process
+    StatusCode::OK
+}
+```
+
+The older `X-Webhook-Signature` covers the body alone and is still sent while receivers move to v2.
+
 The signature comparison is constant-time, meaning it always takes the same amount of time whether the guess is right or wrong. That stops timing attacks, where an attacker measures tiny response-time differences to guess the secret one character at a time.
 
 Outbound calls to URLs that config can set (webhook delivery, Slack `webhook_callback`, OAuth2/OIDC discovery, token and userinfo) refuse loopback, private, link-local and metadata addresses and never follow redirects. To reach an IdP or Slack hook on your own network, list it in `RUSTANGO_OUTBOUND_ALLOW` (comma-separated hosts and CIDRs, e.g. `10.0.5.0/24,idp.internal`); everything else stays refused. A host entry trusts whatever that name resolves to, so list only names you control. The list never applies to webhook delivery: a subscription opts in with `allow_private_targets(true)`.

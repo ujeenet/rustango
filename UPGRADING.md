@@ -162,6 +162,10 @@ It refuses a target schema that already exists, before the tenant goes offline, 
 
 Saving a `rustango_orgs` or `rustango_org_hosts` row in the generic admin now refuses a host, path prefix or port another tenant uses, and stores hosts lowercased.
 
+### Webhook receivers: move to signature v2
+
+Verify `X-Webhook-Signature-V2` with `webhook::verify_delivery` and drop repeated `X-Webhook-Id`s within its `max_age`. The body-only `X-Webhook-Signature` stays for now but does not stop replays.
+
 ### Scaffold taglines lose their brackets
 
 `cargo rustango new` now writes `tagline = "dev"` / `"staging"`, not `"(dev)"` / `"(staging)"`. Existing projects keep theirs; edit the line to match.
