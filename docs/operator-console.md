@@ -149,7 +149,7 @@ instead of `postgres`. On a SQLite registry a "server" is a directory for
 tenant files. The backend is always the registry's.
 
 The password is stored sealed (`enc:v1:`), so `RUSTANGO_SECRET_KEY` must be
-set; without it the save is refused. It is never shown again: the edit form
+set; without it the save is refused and the page shows a warning. It is never shown again: the edit form
 leaves the field empty, and a blank field keeps the saved one. Audit rows name
 the fields that changed, never their values.
 
@@ -159,6 +159,10 @@ cannot provision tenants (for example PostgreSQL before 15).
 
 TLS defaults to `require` for a new server. An edit made from a page that
 someone else changed in the meantime is refused; reload and edit again.
+
+In the scaffolded `docker compose` dev stack, Postgres has no TLS, so save it
+with TLS `disable`. The compose MySQL `rustango` user cannot create users or
+grant rights; save that server as `root`.
 
 Delete is refused while a database-mode tenant's URL points at the server's
 host and port (SQLite: a file in its directory), or cannot be resolved, and

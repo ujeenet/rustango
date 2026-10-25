@@ -23,6 +23,11 @@ A purge that cannot parse a tenant's URL names the stored reference, not the res
 `tenancy::db_server` stores a server's admin login in the new registry table `rustango_db_servers`, password sealed only; the console's **Database servers** page (with provisioning) and `add-db-server` / `list-db-servers` / `test-db-server` / `edit-db-server` / `remove-db-server` save, test and remove them. `ServerAdmin::connect_with` takes a maintenance database.
 New servers default to TLS `require`; an edit from a stale form is refused; removal is refused while any tenant's URL is on the server or cannot be checked; `reseal-tenant-secrets` also re-seals server passwords.
 
+### Added — scaffolded tenant projects can provision
+
+`cargo rustango new --template tenant` calls `.with_tenant_provisioning("migrations")`, so the console has **New tenant** and **Database servers**; `.env.example` documents `RUSTANGO_SECRET_KEY` and `RUSTANGO_SECRET_KEY_PREVIOUS`; the README says how to save the compose database as a server.
+The Database servers pages warn while `RUSTANGO_SECRET_KEY` is missing or short; `check --deploy` warns too when provisioning is mounted.
+
 ### Added — `tenancy::server_admin`: create and drop a tenant's database and login
 
 `ServerAdmin` creates a slug-named database plus a login granted only that database (rolled back on failure), drops both, and reports the admin login's rights; SQLite uses `<dir>/<slug>.db`. PostgreSQL tenant databases need PostgreSQL 15+.

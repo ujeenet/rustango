@@ -162,6 +162,10 @@ Create, edit and `migrate-tenant-storage` refuse a URL of another backend or an 
 Run `makemigrations` then `migrate` to create it. A server password is stored only sealed, so saving one needs `RUSTANGO_SECRET_KEY`.
 New servers use TLS `require` unless saved with `disable` or another mode; a server without TLS needs `--tls disable`. `reseal-tenant-secrets` also re-seals server passwords, so the table must exist before it runs.
 
+### New tenant projects mount provisioning
+
+`cargo rustango new --template tenant` now adds `.with_tenant_provisioning("migrations")` to `main.rs`; delete the line to keep the console read-only. Existing projects add the call themselves to get **New tenant** and **Database servers**, plus `RUSTANGO_SECRET_KEY` in their env.
+
 ### `TenantPoolInvalidator::tenant_secrets` has no default
 
 A custom implementor must return its `TenantSecrets`; the old default ignored `require_sealed_secrets()`.
