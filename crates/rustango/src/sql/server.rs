@@ -265,6 +265,30 @@ fn base64_std(bytes: &[u8]) -> String {
     out
 }
 
+/// A collation for a new MySQL tenant database: `utf8mb4_` and then
+/// `[a-z0-9_]`, so it is safe unquoted and fits the utf8mb4 character set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Collation(String);
+
+impl Collation {
+    /// # Errors
+    /// [`InvalidName`] for anything but a utf8mb4 collation name.
+    pub fn new(name: impl Into<String>) -> Result<Self, InvalidName> {
+        let name = name.into();
+        let rest = name.strip_prefix("utf8mb4_").unwrap_or_default();
+        let legal = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_';
+        if rest.is_empty() || name.len() > 64 || !rest.bytes().all(legal) {
+            return Err(InvalidName(format!("`{name}` is not a utf8mb4 collation")));
+        }
+        Ok(Self(name))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl fmt::Debug for LoginPassword {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("LoginPassword(***)")
@@ -320,7 +344,7 @@ mod tests {
         // Non-ASCII, so sent as text even where SCRAM is available.
         let pw = LoginPassword::new(r#"é'b\c"d"#).unwrap();
         assert_eq!(
-            d.create_database_sql(&db("acme-shop")).unwrap(),
+            d.create_database_sql(&db("acme-shop"), None).unwrap(),
             r#"CREATE DATABASE "acme-shop""#
         );
         assert_eq!(
@@ -367,9 +391,17 @@ mod tests {
         let pw = LoginPassword::new(r#"a'b\c"d"#).unwrap();
         let u = login("u").with_host("10.0.%").unwrap();
         assert_eq!(
-            d.create_database_sql(&db("acme-shop")).unwrap(),
+            d.create_database_sql(&db("acme-shop"), None).unwrap(),
             "CREATE DATABASE `acme-shop` CHARACTER SET utf8mb4"
         );
+        let cs = Collation::new("utf8mb4_0900_as_cs").unwrap();
+        assert_eq!(
+            d.create_database_sql(&db("a"), Some(&cs)).unwrap(),
+            "CREATE DATABASE `a` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs"
+        );
+        for bad in ["latin1_swedish_ci", "utf8mb4_x; DROP", "utf8mb4_", "UTF8MB4_BIN"] {
+            assert!(Collation::new(bad).is_err(), "{bad}");
+        }
         assert_eq!(
             d.create_login_sql(&u, &pw).unwrap(),
             r#"CREATE USER `u`@`10.0.%` IDENTIFIED BY 'a''b\\c"d'"#
@@ -425,7 +457,7 @@ mod tests {
     #[test]
     fn sqlite_has_no_server_ddl() {
         let d = Sqlite;
-        assert!(d.create_database_sql(&db("a")).is_none());
+        assert!(d.create_database_sql(&db("a"), None).is_none());
         assert!(d.create_login_sql(&login("a"), &LoginPassword::new("x").unwrap()).is_none());
         assert!(d.grant_database_sql(&db("a"), &login("a")).is_empty());
     }

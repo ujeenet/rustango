@@ -15,7 +15,7 @@ use super::writers::{
     write_aggregate, write_bulk_insert, write_count, write_delete, write_insert, write_select,
     write_update, Sql,
 };
-use super::server::{DatabaseName, Login, LoginPassword};
+use super::server::{Collation, DatabaseName, Login, LoginPassword};
 use super::{CompiledStatement, Dialect, SqlError};
 
 /// The insert id a skipped `DoNothing` insert reports. No auto-increment
@@ -105,11 +105,16 @@ impl Dialect for MySql {
         format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
     }
 
-    /// utf8mb4 with the server's default collation for it: older MariaDB
-    /// defaults to latin1, and no one collation name exists on both.
-    fn create_database_sql(&self, db: &DatabaseName) -> Option<String> {
+    /// utf8mb4: older MariaDB defaults to latin1. Without `collation` the
+    /// server picks utf8mb4's default, which ignores `collation_server`.
+    fn create_database_sql(
+        &self,
+        db: &DatabaseName,
+        collation: Option<&Collation>,
+    ) -> Option<String> {
+        let collate = collation.map_or_else(String::new, |c| format!(" COLLATE {}", c.as_str()));
         Some(format!(
-            "CREATE DATABASE {} CHARACTER SET utf8mb4",
+            "CREATE DATABASE {} CHARACTER SET utf8mb4{collate}",
             self.quote_ident(db.as_str())
         ))
     }

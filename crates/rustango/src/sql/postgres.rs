@@ -17,7 +17,7 @@ use super::writers::{
     write_aggregate, write_bulk_insert, write_bulk_update_pg, write_count, write_delete,
     write_insert, write_select, write_update, Sql,
 };
-use super::server::{DatabaseName, Login, LoginPassword};
+use super::server::{Collation, DatabaseName, Login, LoginPassword};
 use super::{CompiledStatement, Dialect, SqlError};
 
 /// A string literal whose meaning does not depend on
@@ -83,7 +83,8 @@ impl Dialect for Postgres {
         None
     }
 
-    fn create_database_sql(&self, db: &DatabaseName) -> Option<String> {
+    /// A Postgres database inherits its collation from the template.
+    fn create_database_sql(&self, db: &DatabaseName, _: Option<&Collation>) -> Option<String> {
         Some(format!("CREATE DATABASE {}", self.quote_ident(db.as_str())))
     }
 

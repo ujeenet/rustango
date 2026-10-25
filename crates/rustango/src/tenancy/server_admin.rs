@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::sql::connect_diagnosis::{ConnectDiagnosis, ConnectFault};
-use crate::sql::{DatabaseName, ExecError, Login, LoginName, LoginPassword, Pool};
+use crate::sql::{Collation, DatabaseName, ExecError, Login, LoginName, LoginPassword, Pool};
 
 use super::TenancyError;
 use crate::sql::sqlx;
@@ -166,6 +166,8 @@ pub struct ServerAdmin {
     target: Target,
     /// Database and login names `drop_tenant_database` refuses.
     protected: Vec<String>,
+    /// For new databases, where the backend takes one.
+    collation: Option<Collation>,
 }
 
 enum Target {
@@ -273,6 +275,7 @@ impl ServerAdmin {
                 .chain(db)
                 .chain(maintenance.map(ToOwned::to_owned))
                 .collect(),
+            collation: None,
         })
     }
 
@@ -282,7 +285,16 @@ impl ServerAdmin {
         Self {
             target: Target::Sqlite { dir: dir.into() },
             protected: Vec::new(),
+            collation: None,
         }
+    }
+
+    /// Create MySQL databases with `collation` instead of utf8mb4's
+    /// default, which ignores case. Other backends ignore it.
+    #[must_use]
+    pub fn with_collation(mut self, collation: Option<Collation>) -> Self {
+        self.collation = collation;
+        self
     }
 
     /// Database and login names `drop_tenant_database` must refuse, such
@@ -446,7 +458,7 @@ impl ServerAdmin {
         let tenant = tenant_url(url, login, password, name)?;
         let d = pool.dialect();
         let sql = d
-            .create_database_sql(name)
+            .create_database_sql(name, self.collation.as_ref())
             .ok_or(TenantDbError::Unsupported("this backend has no databases to create"))?;
         on_stage(CreateStage::Database).await;
         step(pool, &sql, "create a database")

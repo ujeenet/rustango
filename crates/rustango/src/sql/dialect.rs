@@ -17,7 +17,7 @@ use crate::core::{
     FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
 };
 
-use super::server::{DatabaseName, Login, LoginPassword};
+use super::server::{Collation, DatabaseName, Login, LoginPassword};
 use super::{CompiledStatement, SqlError};
 
 /// Write `<col> ?| ARRAY[$1, $2, …]`, shared by both default
@@ -1002,8 +1002,13 @@ pub trait Dialect: Send + Sync {
     // ---- Server administration: tenant databases and logins ----
     // `None` / empty where the backend has no such object (SQLite).
 
-    /// `CREATE DATABASE` for `db`.
-    fn create_database_sql(&self, _db: &DatabaseName) -> Option<String> {
+    /// `CREATE DATABASE` for `db`, with `collation` where the backend
+    /// takes one.
+    fn create_database_sql(
+        &self,
+        _db: &DatabaseName,
+        _collation: Option<&Collation>,
+    ) -> Option<String> {
         None
     }
 
