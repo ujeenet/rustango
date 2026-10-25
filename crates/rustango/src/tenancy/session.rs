@@ -49,6 +49,19 @@ pub const SESSION_IDLE_SECS: i64 = 30 * 60;
 /// How stale `exp` must be before a request re-issues the cookie.
 const RENEW_AFTER_SECS: i64 = 60;
 
+/// The tenant session key as the server loads it: the env var, or off the
+/// prod tier the dev key file. Never a random key, so a CLI and the server agree.
+pub(crate) fn tenant_secret_from_env() -> Result<SessionSecret, super::TenancyError> {
+    use crate::session::{is_prod_tier, tier_from_env};
+    if is_prod_tier(&tier_from_env()) {
+        SessionSecret::require_from_env().map_err(|e| super::TenancyError::Validation(e.to_string()))
+    } else {
+        Ok(SessionSecret::from_env_or_disk(std::path::Path::new(
+            crate::session::TENANT_SESSION_KEY_PATH,
+        )))
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     #[error("session cookie is malformed")]

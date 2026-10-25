@@ -426,21 +426,14 @@ where
     if let Some(u) = existing.pop() {
         return Ok(u);
     }
-    let mut user = User {
-        id: Auto::default(),
-        username: username.to_owned(),
+    crate::tenancy::auth::NewUser {
+        username,
         password_hash: crate::tenancy::password::hash_async(password).await?,
-        #[cfg(feature = "sso")]
-        email: None,
         is_superuser: superuser,
-        active: true,
-        created_at: chrono::Utc::now(),
-        data: serde_json::json!({}),
-        password_changed_at: None,
-        sessions_revoked_at: None,
-    };
-    user.save_pool(&scoped).await?;
-    Ok(user)
+        email: None,
+    }
+    .insert(&scoped)
+    .await
 }
 
 /// Resolve the path the caller passed to [`create_tenant`] /

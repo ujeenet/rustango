@@ -242,6 +242,38 @@ crate::register_admin_superuser_fields!(User, Add, [email]);
 #[cfg(all(feature = "admin", feature = "sso"))]
 crate::register_admin_superuser_fields!(User, Change, [email]);
 
+/// A tenant user to insert. `create-user`, the typed API and the first
+/// admin of a new tenant all write the row through this.
+pub(crate) struct NewUser<'a> {
+    pub(crate) username: &'a str,
+    pub(crate) password_hash: String,
+    pub(crate) is_superuser: bool,
+    /// Stored only with `sso`, the one build with an email column.
+    pub(crate) email: Option<&'a str>,
+}
+
+impl NewUser<'_> {
+    pub(crate) async fn insert(self, pool: &crate::sql::Pool) -> Result<User, TenancyError> {
+        #[cfg(not(feature = "sso"))]
+        let _ = self.email;
+        let mut user = User {
+            id: Auto::default(),
+            username: self.username.to_owned(),
+            password_hash: self.password_hash,
+            #[cfg(feature = "sso")]
+            email: self.email.map(str::to_owned),
+            is_superuser: self.is_superuser,
+            active: true,
+            created_at: chrono::Utc::now(),
+            data: serde_json::Value::Object(serde_json::Map::new()),
+            password_changed_at: None,
+            sessions_revoked_at: None,
+        };
+        user.save_pool(pool).await?;
+        Ok(user)
+    }
+}
+
 /// A row whose password matched, before any second factor. A weak stored
 /// hash is replaced only by `complete`, so a password alone cannot change
 /// the fingerprint that ends the user's other sessions (#2093).

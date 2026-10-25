@@ -2419,32 +2419,13 @@ async fn org_impersonate(
     );
     emit_op_audit(&state.registry, &slug, operator_id, "impersonating", detail).await;
 
-    // Build the redirect: tenant subdomain, the handoff path, and the
-    // token. See `tenant_origin` for the scheme.
-    let prefix = handoff_prefix(org.path_prefix.as_deref());
-    let host = if let Some(pat) = org.host_pattern.as_deref().filter(|s| !s.is_empty()) {
-        pat.to_owned()
-    } else {
-        // No host pattern: a path-prefix tenant lives on the apex,
-        // any other on `<slug>.<apex>`.
-        let apex = crate::tenancy::server::apex_domain();
-        if prefix.is_empty() {
-            format!("{}.{}", slug, apex)
-        } else {
-            apex
-        }
-    };
-    let port_suffix = handoff_port_suffix(
-        org.port,
-        std::env::var("RUSTANGO_TENANT_PORT").ok(),
-        headers.get(header::HOST).and_then(|v| v.to_str().ok()),
-    );
-    let handoff_path = format!("{prefix}{}", state.tenant_handoff_url.trim_end_matches('/'));
+    // Build the redirect: tenant host, the handoff path, and the token.
     // The token is base64url (`URL_SAFE_NO_PAD`) + a single `.` —
     // every character is already URL-safe, so no escaping needed.
-    let handoff = format!(
-        "{}{handoff_path}",
-        crate::tenancy::server::tenant_origin(&host, &port_suffix)
+    let handoff = crate::tenancy::server::tenant_link(
+        &org,
+        &state.tenant_handoff_url,
+        headers.get(header::HOST).and_then(|v| v.to_str().ok()),
     );
     let redirect_to = format!("{handoff}?token={token}");
 
@@ -2466,42 +2447,6 @@ async fn org_impersonate(
         "minted impersonation handoff token",
     );
     resp
-}
-
-/// The org's path prefix for the handoff URL, or `""` when the stored
-/// value is not one segment: `//evil.example` would redirect off-site.
-fn handoff_prefix(path_prefix: Option<&str>) -> &str {
-    path_prefix
-        .map(|p| p.trim_end_matches('/'))
-        .filter(|p| crate::tenancy::provision::validate_path_prefix(p).is_ok())
-        .unwrap_or("")
-}
-
-/// Port for the handoff URL. A port-routed org's own port wins (#1933);
-/// then `RUSTANGO_TENANT_PORT`; then the console request's port.
-fn handoff_port_suffix(
-    org_port: Option<i32>,
-    env_port: Option<String>,
-    host: Option<&str>,
-) -> String {
-    let usable = |p: &str| !p.is_empty() && p != "80" && p != "443";
-    if let Some(p) = org_port {
-        let p = p.to_string();
-        return if usable(&p) {
-            format!(":{p}")
-        } else {
-            String::new()
-        };
-    }
-    env_port
-        .filter(|p| usable(p))
-        .or_else(|| {
-            host.and_then(|h| crate::urls::split_host_port(h)?.1)
-                .map(|p| p.to_string())
-                .filter(|p| usable(p))
-        })
-        .map(|p| format!(":{p}"))
-        .unwrap_or_default()
 }
 
 /// Names only where the config broke; the error text can quote a secret.
@@ -2606,7 +2551,9 @@ mod database_url_hint_tests {
 
 #[cfg(test)]
 mod handoff_port_tests {
-    use super::{handoff_port_suffix, handoff_prefix};
+    use crate::tenancy::server::{
+        tenant_path_prefix as handoff_prefix, tenant_port_suffix as handoff_port_suffix,
+    };
 
     #[test]
     fn only_a_valid_path_prefix_reaches_the_handoff_url() {
