@@ -788,6 +788,75 @@ async fn the_api_creates_on_a_saved_server(pool: &Pool) {
     assert!(err.to_string().contains("ghost"), "{err}");
 }
 
+/// The new login signs in before anything is registered; a login the
+/// server will not admit is rolled back. MySQL: a more specific account of
+/// the same name shadows it.
+async fn a_login_that_cannot_sign_in_is_rolled_back(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+    let env = Env::new(pool).await;
+    let a = slug("shadow");
+    env.clean(&[&a]).await;
+    env.add_server("main").await;
+    let req = ProvisionRequest::on_server(&a, "main");
+    if env.backend() != BackendKind::MySql {
+        env.provision(&env.dir("good"), &req).await.expect("created");
+        let want = if env.server_backend() { "check_login:ok" } else { "check_login:skipped" };
+        assert!(env.steps(&a).await.iter().any(|s| s == want), "{:?}", env.steps(&a).await);
+        env.clean(&[&a]).await;
+        return;
+    }
+    // This client's address, as the server sees it.
+    let rows: Vec<(String,)> = rustango::sql::raw_query_pool(
+        "SELECT CAST(SUBSTRING_INDEX(USER(), '@', -1) AS CHAR)",
+        vec![],
+        &env.registry,
+    )
+    .await
+    .unwrap();
+    let shadow = format!("'{a}'@'{}'", rows[0].0);
+    exec_text(&env.registry, &format!("DROP USER IF EXISTS {shadow}")).await;
+    exec_text(&env.registry, &format!("CREATE USER {shadow} IDENTIFIED BY 'other-pw'")).await;
+
+    let err = env.provision(&env.dir("good"), &req).await.expect_err("shadowed");
+    exec_text(&env.registry, &format!("DROP USER {shadow}")).await;
+    let msg = err.to_string();
+    assert!(msg.contains("cannot sign in") && msg.contains("shadow"), "{msg}");
+    assert!(env.org(&a).await.is_none() && env.records(&a).await.is_empty(), "{msg}");
+    assert!(env.nothing_left(&a).await, "the database or login survived");
+    let steps = env.steps(&a).await;
+    assert!(steps.iter().any(|s| s == "check_login:failed"), "{steps:?}");
+    assert!(steps.iter().any(|s| s == "rollback:ok"), "{steps:?}");
+}
+
+/// MySQL: the tenant database takes the registry's collation, not
+/// utf8mb4's default, which ignores case.
+async fn the_tenant_database_takes_the_registry_collation(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+    let env = Env::new(pool).await;
+    if env.backend() != BackendKind::MySql {
+        return;
+    }
+    let a = slug("coll");
+    env.clean(&[&a]).await;
+    env.add_server("main").await;
+    exec_text(&env.registry, "ALTER DATABASE COLLATE utf8mb4_0900_as_cs").await;
+    env.provision(&env.dir("good"), &ProvisionRequest::on_server(&a, "main"))
+        .await
+        .expect("created");
+    let rows: Vec<(String,)> = rustango::sql::raw_query_pool(
+        "SELECT CAST(DEFAULT_COLLATION_NAME AS CHAR) FROM information_schema.SCHEMATA \
+         WHERE SCHEMA_NAME = ?",
+        vec![a.clone().into()],
+        &env.registry,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows[0].0, "utf8mb4_0900_as_cs");
+    env.clean(&[&a]).await;
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
@@ -799,5 +868,7 @@ tri_dialect_test! {
         an_existing_database_is_refused_and_kept,
         a_blocked_server_is_refused_before_any_ddl,
         the_api_creates_on_a_saved_server,
+        a_login_that_cannot_sign_in_is_rolled_back,
+        the_tenant_database_takes_the_registry_collation,
     ],
 }

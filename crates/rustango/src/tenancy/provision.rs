@@ -223,6 +223,8 @@ pub enum ProvisionStep {
     CreateLogin,
     /// Grant that login its database, and nothing else.
     Grant,
+    /// Sign in as the new login, before anything is registered.
+    CheckLogin,
     /// Insert the `rustango_orgs` row — **inactive**, so nothing routes
     /// to the tenant until its schema is in place.
     RegisterOrg,
@@ -558,6 +560,7 @@ impl ProvisionStep {
             Self::CreateDatabase => "create_database",
             Self::CreateLogin => "create_login",
             Self::Grant => "grant",
+            Self::CheckLogin => "check_login",
             Self::RegisterOrg => "register_org",
             Self::Migrate => "migrate",
             Self::Activate => "activate",
@@ -860,13 +863,17 @@ where
 
     rep.step(ProvisionStep::CheckConnection, Progress::Started)
         .await;
-    let admin = match ServerDatabase::open(server).await {
+    let admin = match ServerDatabase::open(server, &registry).await {
         Ok(a) => a,
         Err(e) => return rep.fail(ProvisionStep::CheckConnection, e).await,
     };
     rep.step(ProvisionStep::CheckConnection, Progress::Ok).await;
 
     let mut db = ServerDatabase::create(admin, server, &request.slug, rep).await?;
+    if let Err(e) = db.check_login(rep).await {
+        let undone = db.roll_back(pools, None, rep).await;
+        return Err(with_undone(e, &undone));
+    }
 
     rep.step(ProvisionStep::RegisterOrg, Progress::Started)
         .await;
@@ -1998,13 +2005,58 @@ impl RolledBack {
     }
 }
 
+/// The registry database's utf8mb4 collation, which tenant databases copy:
+/// the app was built against it.
+async fn registry_collation(registry: &crate::sql::Pool) -> Option<crate::sql::Collation> {
+    let sql = registry.dialect().default_collation_sql()?;
+    let rows: Vec<(String,)> = crate::sql::raw_query_pool(sql, Vec::new(), registry)
+        .await
+        .ok()?;
+    rows.into_iter()
+        .next()
+        .and_then(|(c,)| crate::sql::Collation::new(c).ok())
+}
+
+/// `e`, with what the rollback did appended to an operator-facing message.
+pub(super) fn with_undone(e: TenancyError, undone: &RolledBack) -> TenancyError {
+    match e {
+        TenancyError::Validation(m) => TenancyError::Validation(format!("{m} So {}.", undone.describe())),
+        other => other,
+    }
+}
+
+/// Why the new login could not sign in, and where to look.
+fn login_refused(
+    login: &crate::sql::LoginName,
+    db: &crate::sql::DatabaseName,
+    d: &crate::sql::connect_diagnosis::ConnectDiagnosis,
+) -> String {
+    use crate::sql::connect_diagnosis::ConnectFault;
+    let hint = match d.fault {
+        ConnectFault::AuthFailed => {
+            " Check that pg_hba.conf admits it (rules can name users), and on MySQL or \
+             MariaDB that no more specific account of that name, or an anonymous \
+             ''@'localhost' account, shadows it."
+        }
+        _ => "",
+    };
+    format!(
+        "the new login `{login}` cannot sign in to database `{db}`: {}.{hint}",
+        d.summary()
+    )
+}
+
 impl ServerDatabase {
     /// Log in to `server` and refuse it unless its admin may provision.
     /// Nothing is created yet.
     pub(super) async fn open(
         server: &super::DbServer,
+        registry: &crate::sql::Pool,
     ) -> Result<super::server_admin::ServerAdmin, TenancyError> {
-        let admin = server.connect(ADMIN_TIMEOUT).await?;
+        let admin = server
+            .connect(ADMIN_TIMEOUT)
+            .await?
+            .with_collation(registry_collation(registry).await);
         let report = match admin.probe().await {
             Ok(r) => r,
             Err(e) => {
@@ -2080,7 +2132,11 @@ impl ServerDatabase {
         };
         rep.step(last, Progress::Ok).await;
         if created.login.is_none() {
-            for step in [ProvisionStep::CreateLogin, ProvisionStep::Grant] {
+            for step in [
+                ProvisionStep::CreateLogin,
+                ProvisionStep::Grant,
+                ProvisionStep::CheckLogin,
+            ] {
                 rep.step(step, Progress::Skipped("a SQLite tenant has no login"))
                     .await;
             }
@@ -2091,6 +2147,31 @@ impl ServerDatabase {
             server: server.name.clone(),
             record: None,
         })
+    }
+
+    /// Sign in as the new login. A server rule can refuse a login the
+    /// create accepted, and the migrate step would then fail obscurely.
+    pub(super) async fn check_login(&self, rep: &Reporter<'_>) -> Result<(), TenancyError> {
+        let Some(login) = &self.created.login else {
+            return Ok(());
+        };
+        rep.step(ProvisionStep::CheckLogin, Progress::Started).await;
+        match crate::sql::Pool::connect_diagnosed(self.created.url(), ADMIN_TIMEOUT).await {
+            Ok(pool) => {
+                pool.close().await;
+                rep.step(ProvisionStep::CheckLogin, Progress::Ok).await;
+                Ok(())
+            }
+            Err(d) => {
+                tracing::warn!(target: "rustango::tenancy::provision", detail = %d.detail, "the new tenant login cannot sign in");
+                let e = TenancyError::Validation(login_refused(
+                    login.name(),
+                    &self.created.database,
+                    &d,
+                ));
+                rep.fail(ProvisionStep::CheckLogin, e).await
+            }
+        }
     }
 
     /// Record the database, then return what goes in `Org.database_url`:

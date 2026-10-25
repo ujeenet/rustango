@@ -158,8 +158,13 @@ where
     let rep = provision::Reporter::new(None);
     let mut created = match checked.server() {
         Some(server) => {
-            let admin = provision::ServerDatabase::open(server).await?;
-            Some(provision::ServerDatabase::create(admin, server, slug, &rep).await?)
+            let admin = provision::ServerDatabase::open(server, &registry).await?;
+            let db = provision::ServerDatabase::create(admin, server, slug, &rep).await?;
+            if let Err(e) = db.check_login(&rep).await {
+                let undone = db.roll_back(pools, None, &rep).await;
+                return Err(provision::with_undone(e, &undone));
+            }
+            Some(db)
         }
         None => {
             checked.preflight().await?;
@@ -255,12 +260,11 @@ where
     let mut result =
         migrate_and_activate(pools, registry_url, migrations_dir, &org, !opts.no_migrate).await;
     if let Some(db) = created {
-        if result.is_ok() {
-            db.keep().await;
-        } else {
-            let undone = db.roll_back(pools, Some(&org), &rep).await;
-            if let Err(TenancyError::Validation(m)) = &mut result {
-                *m = format!("{m}; {}", undone.describe());
+        match result {
+            Ok(()) => db.keep().await,
+            Err(e) => {
+                let undone = db.roll_back(pools, Some(&org), &rep).await;
+                result = Err(provision::with_undone(e, &undone));
             }
         }
     }
