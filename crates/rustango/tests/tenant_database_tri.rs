@@ -179,6 +179,7 @@ async fn existing_database_or_login_is_refused(admin: &ServerAdmin, admin_url: O
 /// `admin` runs with backslash escapes in string literals turned on, so a
 /// literal that relies on the default mode stores a different password.
 /// ASCII takes Postgres' SCRAM path, the `é` its plain-text path.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 async fn password_with_quotes_and_backslashes(admin: &ServerAdmin) {
     for (tag, pw) in [
         ("pw-a", r#"x'y\z"w`?#%$1; DROP DATABASE rustango_test; --\"#),
@@ -198,6 +199,7 @@ async fn password_with_quotes_and_backslashes(admin: &ServerAdmin) {
 
 /// The admin's own database and login, and names handed to
 /// `with_protected`, are never dropped.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 async fn drop_refuses_protected_names(admin: &ServerAdmin) {
     let (reg, other, kept) = (name("prot-reg"), name("prot-x"), name("prot-kept"));
     clean(admin, &[&reg, &other, &kept]).await;
@@ -265,6 +267,7 @@ async fn probe_reports_rights(admin: &ServerAdmin, admin_url: Option<&str>) {
 }
 
 /// A step after the database and login exist fails: both are removed.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 async fn failed_grant_rolls_back(
     admin: &ServerAdmin,
     admin_url: &str,
