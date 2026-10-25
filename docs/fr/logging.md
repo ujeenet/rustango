@@ -128,6 +128,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::email_jobs` | Deux files sur une table de jobs avec des mailers différents |
 | `rustango::error` | La cause d'une 5xx, que le corps de la réponse ne divulgue pas |
 | `rustango::auth_flows` | Liens d'authentification à usage unique refusés par le cache |
+| `rustango::aead` | Une clé secrète précédente vide |
 | `rustango::hmac_auth` | Configuration de l'authentification HMAC des requêtes |
 | `rustango::humanize` | Filtres humanize |
 | `rustango::jobs` | Files de tâches de fond |
@@ -152,6 +153,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::tenancy` | Multi-tenancy, général |
 | `rustango::tenancy::admin` | Admin de locataire |
 | `rustango::tenancy::decommission` | Désactivation et purge de locataire |
+| `rustango::tenancy::first_admin` | Le premier admin d'un nouveau locataire et son lien |
 | `rustango::tenancy::migrate_run` | Migrations par locataire |
 | `rustango::tenancy::operation` | Purge et rotation de mot de passe des locataires |
 | `rustango::tenancy::operator_console` | Console opérateur |
@@ -160,6 +162,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::tenancy::provision_webhook` | Webhooks de provisionnement |
 | `rustango::tenancy::resolver` | Résolution de locataire |
 | `rustango::tenancy::secrets` | Secrets de locataire scellés |
+| `rustango::tenancy::server_admin` | Bases de locataire créées sur un serveur enregistré |
 | `rustango::tenancy::sso` | SSO de locataire |
 | `rustango::tenancy::sweep` | Balayages de rétention |
 | `rustango::viewset` | ViewSets montés avec des écritures ouvertes |

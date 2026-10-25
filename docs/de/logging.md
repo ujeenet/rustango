@@ -127,6 +127,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::email_jobs` | Zwei Queues auf einer Jobs-Tabelle mit verschiedenen Mailern |
 | `rustango::error` | Die Ursache eines 5xx, die der Response-Body zurückhält |
 | `rustango::auth_flows` | Vom Cache abgewiesene Einmal-Auth-Links |
+| `rustango::aead` | Ein leerer vorheriger Geheimschlüssel |
 | `rustango::hmac_auth` | Einrichtung der HMAC-Request-Authentifizierung |
 | `rustango::humanize` | Humanize-Filter |
 | `rustango::jobs` | Hintergrund-Job-Queues |
@@ -151,6 +152,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::tenancy` | Mandantenfähigkeit, allgemein |
 | `rustango::tenancy::admin` | Mandanten-Admin |
 | `rustango::tenancy::decommission` | Mandanten-Stilllegung und -Bereinigung |
+| `rustango::tenancy::first_admin` | Der erste Admin eines neuen Mandanten und sein Link |
 | `rustango::tenancy::migrate_run` | Migrationen pro Mandant |
 | `rustango::tenancy::operation` | Mandanten-Purge und Passwortrotation |
 | `rustango::tenancy::operator_console` | Operator-Konsole |
@@ -159,6 +161,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::tenancy::provision_webhook` | Provisionierungs-Webhooks |
 | `rustango::tenancy::resolver` | Mandanten-Auflösung |
 | `rustango::tenancy::secrets` | Versiegelte Mandanten-Geheimnisse |
+| `rustango::tenancy::server_admin` | Mandanten-Datenbanken auf einem gespeicherten Server |
 | `rustango::tenancy::sso` | Mandanten-SSO |
 | `rustango::tenancy::sweep` | Aufbewahrungs-Sweeps |
 | `rustango::viewset` | ViewSets mit offenen Schreibaktionen |
