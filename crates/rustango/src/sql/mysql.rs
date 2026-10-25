@@ -11,7 +11,7 @@ use crate::core::{
     FieldSchema, FieldType, InsertQuery, ModelSchema, SelectQuery, UpdateQuery,
 };
 
-use super::server::{Collation, DatabaseName, Login, LoginPassword};
+use super::server::{AdminRight, Collation, DatabaseName, Login, LoginPassword, ServerAccount};
 use super::writers::{
     write_aggregate, write_bulk_insert, write_count, write_delete, write_insert, write_select,
     write_update, Sql,
@@ -206,14 +206,46 @@ impl Dialect for MySql {
         Some("SELECT VERSION()")
     }
 
-    /// Rows of (`PRIVILEGE_TYPE`, `IS_GRANTABLE`): the current account's
-    /// global privileges. MariaDB has the same view.
+    /// Rows of one text column, the session's grant lines. MySQL folds
+    /// active roles' rights into the user's line; MariaDB lists each role.
     fn login_privileges_sql(&self) -> Option<&'static str> {
+        Some("SHOW GRANTS")
+    }
+
+    fn current_account_sql(&self) -> Option<&'static str> {
         Some(
-            "SELECT PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.USER_PRIVILEGES \
-             WHERE GRANTEE = CONCAT('''', SUBSTRING_INDEX(CURRENT_USER(), '@', 1), \
-             '''@''', SUBSTRING_INDEX(CURRENT_USER(), '@', -1), '''')",
+            "SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1), \
+             SUBSTRING_INDEX(CURRENT_USER(), '@', -1)",
         )
+    }
+
+    fn grant_admin_rights_sql(
+        &self,
+        account: &ServerAccount,
+        _database: Option<&str>,
+        rights: &[AdminRight],
+    ) -> Vec<String> {
+        let to = format!(
+            "{}@{}",
+            self.quote_literal(&account.user),
+            self.quote_literal(account.host.as_deref().unwrap_or("%"))
+        );
+        let mut privs = Vec::new();
+        if rights.contains(&AdminRight::CreateDatabase) {
+            privs.push("CREATE, DROP");
+        }
+        if rights.contains(&AdminRight::CreateLogin) {
+            privs.push("CREATE USER");
+        }
+        let mut out = Vec::new();
+        if !privs.is_empty() {
+            out.push(format!("GRANT {} ON *.* TO {to}", privs.join(", ")));
+        }
+        // GRANT ALL ON db.* needs every database privilege grantable.
+        if rights.contains(&AdminRight::Grant) {
+            out.push(format!("GRANT ALL PRIVILEGES ON *.* TO {to} WITH GRANT OPTION"));
+        }
+        out
     }
 
     /// sqlx appends to the server's `sql_mode`, so a server-wide

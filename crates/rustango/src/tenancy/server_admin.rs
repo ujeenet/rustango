@@ -102,6 +102,13 @@ pub struct PrivilegeReport {
     /// Grant a login all rights on one database (MySQL: GRANT OPTION on
     /// every database-level privilege). Always `true` on SQLite.
     pub can_grant: bool,
+    /// `false` when the rights could not be read: the `can_*` flags are
+    /// then unknown, not denied.
+    pub(crate) rights_read: bool,
+    /// The login as the server names it; `None` when refused.
+    pub(crate) account: Option<crate::sql::ServerAccount>,
+    /// The SQLite directory probed.
+    pub(crate) dir: Option<PathBuf>,
 }
 
 impl PrivilegeReport {
@@ -109,6 +116,12 @@ impl PrivilegeReport {
     #[must_use]
     pub fn can_provision(&self) -> bool {
         self.blocker().is_none()
+    }
+
+    /// The rights a new tenant database needs, each yes, no or unknown.
+    #[must_use]
+    pub fn rights(&self) -> super::rights::RightsReport {
+        super::rights::RightsReport::for_new_database(self)
     }
 
     /// The first reason tenant databases cannot be made here.
@@ -121,6 +134,9 @@ impl PrivilegeReport {
                 "PostgreSQL 15 or later is needed: before 15 every login may create \
                  tables in the shared databases",
             )
+        } else if !self.rights_read {
+            // Unknown rights do not block: the create itself will tell.
+            None
         } else if !self.can_create_database {
             Some("the admin login may not create databases")
         } else if !self.can_create_user {
@@ -143,6 +159,24 @@ impl PrivilegeReport {
                 .is_some_and(|v| !v.contains("MariaDB") && mysql_at_least(v, (8, 0, 14)))
     }
 
+    /// Logged in, rights read, none held.
+    #[cfg(test)]
+    pub(crate) fn for_tests(backend: &'static str) -> Self {
+        Self {
+            can_login: true,
+            login_error: None,
+            rights_read: true,
+            ..Self::refused(
+                backend,
+                ConnectDiagnosis {
+                    fault: ConnectFault::Other,
+                    endpoint: String::new(),
+                    detail: String::new(),
+                },
+            )
+        }
+    }
+
     fn refused(backend: &'static str, why: ConnectDiagnosis) -> Self {
         Self {
             backend,
@@ -153,6 +187,9 @@ impl PrivilegeReport {
             can_create_database: false,
             can_create_user: false,
             can_grant: false,
+            rights_read: false,
+            account: None,
+            dir: None,
         }
     }
 }
@@ -239,16 +276,41 @@ const MYSQL_DB_PRIVILEGES: &[&str] = &[
 const MARIADB_DB_PRIVILEGES: &[&str] = &["DELETE HISTORY"];
 
 /// Whether `rows` of (privilege, grantable) cover `GRANT ALL ON db.*`.
-fn mysql_can_grant(rows: &[(String, String)], mariadb: bool) -> bool {
-    let grantable = |p: &str| {
-        rows.iter()
-            .any(|(r, g)| r.eq_ignore_ascii_case(p) && g.eq_ignore_ascii_case("YES"))
-    };
+fn mysql_can_grant(rows: &[(String, bool)], mariadb: bool) -> bool {
+    let grantable = |p: &str| rows.iter().any(|(r, g)| *g && r.eq_ignore_ascii_case(p));
     let extra: &[&str] = if mariadb { MARIADB_DB_PRIVILEGES } else { &[] };
     MYSQL_DB_PRIVILEGES
         .iter()
         .chain(extra)
         .all(|p| grantable(p))
+}
+
+/// The global privileges in `SHOW GRANTS` lines, as (privilege,
+/// grantable). Only `ON *.*` lines count; `ALL` expands to every right
+/// probed. The lines can hold a password hash, so they are never shown.
+fn mysql_global_privileges(lines: &[String]) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    for line in lines {
+        let Some(rest) = line.strip_prefix("GRANT ") else {
+            continue;
+        };
+        let Some((privs, to)) = rest.split_once(" ON *.* TO ") else {
+            continue;
+        };
+        let grantable = to.contains(" WITH GRANT OPTION");
+        for p in privs.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            if p.eq_ignore_ascii_case("ALL") || p.eq_ignore_ascii_case("ALL PRIVILEGES") {
+                let all = MYSQL_DB_PRIVILEGES
+                    .iter()
+                    .chain(MARIADB_DB_PRIVILEGES)
+                    .chain(&["CREATE USER"]);
+                out.extend(all.map(|a| ((*a).to_owned(), grantable)));
+            } else {
+                out.push((p.to_owned(), grantable));
+            }
+        }
+    }
+    out
 }
 
 /// `8.0.36-log` against `(8, 0, 14)`; an unreadable version is too old.
@@ -425,8 +487,8 @@ impl ServerAdmin {
 
     /// What this admin login may do.
     ///
-    /// MySQL reads global privileges only: rights from roles or
-    /// database-pattern grants are not counted.
+    /// MySQL reads the session's grants, active roles included; a
+    /// database-pattern grant is not counted.
     ///
     /// # Errors
     /// The driver's error if a catalog query fails.
@@ -445,7 +507,18 @@ impl ServerAdmin {
             can_create_database: false,
             can_create_user: false,
             can_grant: false,
+            rights_read: false,
+            account: None,
+            dir: None,
         };
+        if let Some(sql) = d.current_account_sql() {
+            let rows: Vec<(String, Option<String>)> =
+                crate::sql::raw_query_pool(sql, Vec::new(), pool).await?;
+            report.account = rows
+                .into_iter()
+                .next()
+                .map(|(user, host)| crate::sql::ServerAccount { user, host });
+        }
         if let Some(sql) = d.server_version_sql() {
             let rows: Vec<(String,)> = crate::sql::raw_query_pool(sql, Vec::new(), pool).await?;
             report.server_version = rows.into_iter().next().map(|(v,)| v);
@@ -460,14 +533,21 @@ impl ServerAdmin {
             let rows: Vec<(bool, bool, bool)> =
                 crate::sql::raw_query_pool(sql, Vec::new(), pool).await?;
             if let Some((sup, createdb, createrole)) = rows.into_iter().next() {
+                report.rights_read = true;
                 report.can_create_database = sup || createdb;
                 report.can_create_user = sup || createrole;
                 // The creator owns the database, so may grant on it.
                 report.can_grant = report.can_create_database;
             }
         } else {
-            let rows: Vec<(String, String)> =
-                crate::sql::raw_query_pool(sql, Vec::new(), pool).await?;
+            // Unreadable grants are unknown, not denied.
+            let Ok(lines) = crate::sql::raw_query_pool::<(String,)>(sql, Vec::new(), pool).await
+            else {
+                return Ok(report);
+            };
+            let lines: Vec<String> = lines.into_iter().map(|(l,)| l).collect();
+            let rows = mysql_global_privileges(&lines);
+            report.rights_read = true;
             let has = |p: &str| rows.iter().any(|(r, _)| r.eq_ignore_ascii_case(p));
             // DROP too: a failed create is undone by dropping.
             report.can_create_database = has("CREATE") && has("DROP");
@@ -1099,6 +1179,9 @@ fn probe_dir(dir: &Path) -> PrivilegeReport {
         can_create_database: writable,
         can_create_user: true,
         can_grant: true,
+        rights_read: true,
+        account: None,
+        dir: Some(dir.to_owned()),
     }
 }
 
@@ -1170,16 +1253,57 @@ mod tests {
 
     #[test]
     fn mariadb_grant_needs_delete_history() {
-        let mut rows: Vec<(String, String)> = MYSQL_DB_PRIVILEGES
+        let mut rows: Vec<(String, bool)> = MYSQL_DB_PRIVILEGES
             .iter()
-            .map(|p| ((*p).to_owned(), "YES".to_owned()))
+            .map(|p| ((*p).to_owned(), true))
             .collect();
         assert!(mysql_can_grant(&rows, false));
         assert!(!mysql_can_grant(&rows, true));
-        rows.push(("DELETE HISTORY".into(), "YES".into()));
+        rows.push(("DELETE HISTORY".into(), true));
         assert!(mysql_can_grant(&rows, true));
-        rows[0].1 = "NO".into();
+        rows[0].1 = false;
         assert!(!mysql_can_grant(&rows, false));
+    }
+
+    /// Lines as MySQL 8 and MariaDB 11 print them, roles included.
+    #[test]
+    fn show_grants_lines_give_global_rights() {
+        let lines = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let rights = |rows: &[(String, bool)], mariadb: bool| {
+            let has = |p: &str| rows.iter().any(|(r, _)| r == p);
+            (has("CREATE") && has("DROP"), has("CREATE USER"), mysql_can_grant(rows, mariadb))
+        };
+        // The scaffold's app login: its own databases only.
+        let app = mysql_global_privileges(&lines(&[
+            "GRANT USAGE ON *.* TO `rustango`@`%`",
+            "GRANT ALL PRIVILEGES ON `rustango\\_%`.* TO `rustango`@`%`",
+        ]));
+        assert_eq!(rights(&app, false), (false, false, false));
+        // MySQL folds an active role's rights into the user's line.
+        let role = mysql_global_privileges(&lines(&[
+            "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, REFERENCES, INDEX, ALTER, \
+             CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, SHOW VIEW, \
+             CREATE ROUTINE, ALTER ROUTINE, CREATE USER, EVENT, TRIGGER ON *.* TO `u`@`%` \
+             WITH GRANT OPTION",
+            "GRANT APPLICATION_PASSWORD_ADMIN,AUDIT_ADMIN ON *.* TO `u`@`%` WITH GRANT OPTION",
+            "GRANT `dba`@`%` TO `u`@`%`",
+        ]));
+        assert_eq!(rights(&role, false), (true, true, true));
+        // MariaDB prints each role, nested ones too; the hash is skipped.
+        let maria = mysql_global_privileges(&lines(&[
+            "GRANT `outer_r` TO `u2`@`%`",
+            "GRANT USAGE ON *.* TO `u2`@`%` IDENTIFIED BY PASSWORD '*B27918D2D9402882'",
+            "GRANT `dba` TO `outer_r`",
+            "GRANT ALL PRIVILEGES ON *.* TO `dba` WITH GRANT OPTION",
+            "GRANT PROXY ON ``@`%` TO `root`@`%` WITH GRANT OPTION",
+        ]));
+        assert_eq!(rights(&maria, true), (true, true, true));
+        // Rights without GRANT OPTION cannot be handed on.
+        let no_opt = mysql_global_privileges(&lines(&[
+            "GRANT ALL PRIVILEGES ON *.* TO `u`@`%`",
+        ]));
+        assert_eq!(rights(&no_opt, false), (true, true, false));
+        assert!(maria.iter().all(|(p, _)| !p.contains("B279")));
     }
 
     #[test]
@@ -1193,6 +1317,9 @@ mod tests {
             can_create_database: true,
             can_create_user: true,
             can_grant: true,
+            rights_read: true,
+            account: None,
+            dir: None,
         };
         assert_eq!(r.pg_major, Some(14));
         assert!(!r.can_provision());
