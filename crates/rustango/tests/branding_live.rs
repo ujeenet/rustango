@@ -420,15 +420,10 @@ async fn tenant_admin_renders_brand_overrides() {
     );
     // Logo URL ends up as an `<img>` source in the sidebar.
     //
-    // Matched on the path segment rather than `src="/__brand__/`:
-    // #1537 dropped the `| safe` filter that let an operator-supplied
-    // URL inject attributes, so Tera now escapes the value and the
-    // rendered attribute reads `src="&#x2F;__brand__&#x2F;…"`. That is
-    // correct — the HTML parser decodes character references in
-    // attribute values before the URL is resolved — and asserting the
-    // raw spelling made this test fail on a page that works.
+    // Tera escapes the value, so `/` renders as `&#x2F;`. The tenant
+    // host serves `RouteConfig::brand_url`, `/_brand` by default.
     assert!(
-        body.contains("__brand__"),
+        body.contains(&format!("&#x2F;_brand&#x2F;{slug}&#x2F;logo.png")),
         "logo URL should appear in admin: {body}"
     );
     assert!(

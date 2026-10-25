@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### Scaffold taglines lose their brackets
+
+`cargo rustango new` now writes `tagline = "dev"` / `"staging"`, not `"(dev)"` / `"(staging)"`. Existing projects keep theirs; edit the line to match.
+
+### `BrandSettings` has a new `logo_path` field
+
+A struct literal of `BrandSettings` needs `..Default::default()` (or the new field).
+
 ### MySQL 5.7 no longer gets JSON casts
 
 JSON binds are cast only on MySQL 8.0+ (and not on MariaDB); MySQL 5.7 is not supported.

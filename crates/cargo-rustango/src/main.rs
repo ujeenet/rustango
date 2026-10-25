@@ -875,14 +875,23 @@ mod tests {
                 "config_default_toml({name}) must mention the project name; got: {default_body}"
             );
             let dev = templates::config_dev_settings_toml(name, Backend::Postgres);
+            // Plain words: the tagline renders as a badge.
             assert!(
-                dev.contains("(dev)") || dev.contains("dev_settings"),
+                dev.contains("tagline = \"dev\""),
                 "dev tier should be visually distinguishable; got: {dev}"
+            );
+            assert!(
+                default_body.contains("# logo_url") && default_body.contains("# logo_path"),
+                "default.toml [brand] example names both logo keys; got: {default_body}"
             );
             let staging = templates::config_staging_settings_toml(name, Backend::Postgres);
             assert!(
                 staging.contains("staging") && staging.contains("retention_days"),
                 "staging tier missing retention_days; got: {staging}"
+            );
+            assert!(
+                staging.contains("tagline = \"staging\""),
+                "staging tier tagline; got: {staging}"
             );
             let prod = templates::config_prod_settings_toml(name);
             assert!(

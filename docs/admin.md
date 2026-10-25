@@ -496,7 +496,7 @@ read_only_tables = ["orders"]
 [operator console](operator-console.md#branding). The session cookie is
 `Secure` unless `[security] secure_cookies = false`.
 
-The scaffold's `config/dev_settings.toml` sets `[brand] tagline = "(dev)"`,
+The scaffold's `config/dev_settings.toml` sets `[brand] tagline = "dev"`,
 which shows here as the subtitle; see
 [the tier taglines](operator-console.md#the-dev-and-staging-taglines).
 
@@ -505,6 +505,7 @@ from your app: put it at `assets/acme-logo.png`, add
 `.with_static("/static", "./assets")` to your `Cli::new()` chain in `main.rs`,
 and set `logo_url = "/static/acme-logo.png"`. The admin and the static mount
 share a host, so a path works. A full URL to a CDN works too.
+`[brand] logo_path` is for the operator console only; this admin ignores it.
 
 ### The tenant admin
 

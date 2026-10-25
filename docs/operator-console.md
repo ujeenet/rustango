@@ -237,6 +237,7 @@ theme_mode    = "auto"
 | `name` | `Rustango` | Name in the header and on the sign-in page |
 | `tagline` | none; the sign-in page shows "Operator console" | Line under the name |
 | `logo_url` | `/__static__/rustango.png` | Logo image; the default is the bundled logo, served by the console |
+| `logo_path` | none | Local logo file the console serves itself; see [Your own logo](#your-own-logo) |
 | `primary_color` | the theme's colour | Tints primary buttons and links. Hex: `#rrggbb` or `#rgb` |
 | `theme_mode` | `auto` | Starting theme: `auto`, `light` or `dark` |
 
@@ -251,6 +252,7 @@ without a config change:
 | `RUSTANGO_OPERATOR_BRAND_NAME` | `name` |
 | `RUSTANGO_OPERATOR_TAGLINE` | `tagline` |
 | `RUSTANGO_OPERATOR_LOGO_URL` | `logo_url` |
+| `RUSTANGO_OPERATOR_LOGO_PATH` | `logo_path` |
 | `RUSTANGO_OPERATOR_PRIMARY_COLOR` | `primary_color` |
 | `RUSTANGO_OPERATOR_THEME_MODE` | `theme_mode` |
 
@@ -260,27 +262,40 @@ reads all of this once at boot, so restart it after a change.
 
 ### Your own logo
 
+The apex domain serves only the console: a `Cli::with_static` mount is served
+on tenant hosts, not on the apex. So a logo is either a file the console
+serves, or a full URL.
+
+`logo_path = "assets/acme-logo.png"` names a local file, relative to the
+working directory. The console reads it once at boot, with the same checks as
+a tenant logo upload: PNG, JPEG, WebP or ICO (no SVG), at most
+`RUSTANGO_BRAND_MAX_BYTES` (1 MiB). It serves the file at
+`/__static__/brand-logo.<ext>?v=<hash>` with a year-long cache; the hash
+changes with the file. A missing or refused file logs a warning and the
+bundled logo stays.
+
 `logo_url` goes straight into `<img src>`, so the browser must be able to load
-it. The apex domain serves only the console: a `Cli::with_static` mount is
-served on tenant hosts, not on the apex. So put the file somewhere with its
-own URL (a CDN, an object-storage bucket, your website) and give the full URL,
-as in the example above. If you set `[security] csp`, allow that host in
-`img-src`.
+it: a CDN, an object-storage bucket or your website. If you set
+`[security] csp`, allow that host in `img-src`.
+
+If both are set, the env variables win over the file, and within one of them
+`logo_url` wins over `logo_path`.
 
 In a project without tenancy the admin shares a host with your routes, so a
 static mount works there; see [the admin's branding section](admin.md#config-admin-and-brand).
 
 The console sets no favicon, and there is no key for one.
 
-### The `(dev)` and `(staging)` taglines
+### The `dev` and `staging` taglines
 
-`cargo rustango new` writes `tagline = "(dev)"` under `[brand]` in
-`config/dev_settings.toml` and `tagline = "(staging)"` in
-`staging_settings.toml`, so you can tell the tiers apart at a glance.
+`cargo rustango new` writes `tagline = "dev"` under `[brand]` in
+`config/dev_settings.toml` and `tagline = "staging"` in
+`staging_settings.toml`, so you can tell the tiers apart at a glance; the
+tagline shows as a badge.
 `prod_settings.toml` sets none. The tier file wins over `default.toml`, so this
 replaces a tagline you set there.
 
-To change it, edit the line, for example `tagline = "Acme (dev)"`. To remove
+To change it, edit the line, for example `tagline = "Acme dev"`. To remove
 it, delete the line or set `tagline = ""`. In a project with the admin, the
 same tagline is the admin's subtitle.
 
