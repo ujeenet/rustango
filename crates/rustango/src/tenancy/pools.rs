@@ -3,13 +3,10 @@
 //! Two storage modes coexist:
 //!
 //! * **Schema mode** (`Org.storage_mode == "schema"`). Tenant data
-//!   lives in a Postgres schema inside the registry DB. Each tenant
-//!   gets small pools against the registry server with
-//!   `search_path = <schema>, public` in their connect options: one for
-//!   [`TenantPools::scoped_pool`], one for [`TenantPools::acquire`]'s
-//!   held connections, so a busy tenant never takes the registry's.
-//!   On release [`TenantConn`] runs `RESET search_path`, undoing a
-//!   handler's own `SET` before the next borrower (#1224).
+//!   lives in a Postgres schema inside the registry DB. Each tenant gets
+//!   two small `search_path`-scoped pools, for [`TenantPools::scoped_pool`]
+//!   and for [`TenantPools::acquire`], so a busy tenant never takes the
+//!   registry's connections.
 //!
 //! * **Database mode** (`Org.storage_mode == "database"`). Tenant data
 //!   lives in a separate Postgres database. `Org.database_url` is a
@@ -29,7 +26,7 @@
 //!
 //! Schema-mode tenants don't consume the *database* cache. Their
 //! separate caches hold the `search_path`-scoped pools
-//! [`TenantPools::scoped_pool`] and [`TenantPools::acquire`] use (#1235).
+//! [`TenantPools::scoped_pool`] and [`TenantPools::acquire`] use.
 //!
 //! The two budgets are deliberately separate: one shared cap would let
 //! schema-mode tenants silently eat a mixed deployment's database-mode
@@ -144,32 +141,12 @@ pub struct TenantPoolsConfig {
     /// Default: 64.
     pub max_cached_scoped_pools: usize,
 
-    /// Per-pool `max_connections` for schema-mode scoped pools.
-    ///
-    /// Was a hardcoded 2 while these pools were per-call throwaways.
-    /// Caching them made every caller for a given tenant share one
-    /// pool, which makes 2 actively dangerous: concurrent `t.pool()`
-    /// handlers share it, and a long-lived per-tenant job worker built
-    /// on `scoped_pool_dyn` (see `docs/jobs.md`) holds one slot more or
-    /// less permanently. The `Tenant` extractor's held connection comes
-    /// from a second pool of this size, so it never waits on this one
-    /// and a busy tenant never takes the registry's connections. This
-    /// is the same reasoning that puts `database_pool_max_connections` at 16.
-    ///
-    /// Still smaller than the database-mode figure, because every
-    /// scoped pool points at the *same* registry server — this
-    /// multiplies across cached tenants instead of being spread over
-    /// separate databases. Budget the worst case as
-    /// `2 * max_cached_scoped_pools * scoped_pool_max_connections` and
-    /// keep it under the server's `max_connections`; the defaults give
-    /// 2 × 64 × 8 = 1024, which is only reachable with every cached
-    /// tenant saturated at once.
-    ///
-    /// These pools are built with `min_connections = 0` and inherit
-    /// `database_pool_idle_timeout`, so a cached-but-quiet tenant
-    /// settles back to zero connections. That is what makes caching
-    /// them affordable — the cache costs a `PgPool` struct, not a
-    /// held connection. Default: 8.
+    /// Per-pool `max_connections` for schema-mode scoped pools. Each
+    /// tenant has two: `t.pool()`'s and the held connections', so one
+    /// never waits on the other. Budget `2 * max_cached_scoped_pools *
+    /// scoped_pool_max_connections` against the registry server's
+    /// `max_connections`; quiet tenants hold none (`min_connections = 0`).
+    /// Default: 8.
     pub scoped_pool_max_connections: u32,
 
     /// The app's media disks. With the `media` feature, purging a tenant
@@ -1284,6 +1261,8 @@ impl TenantPools<sqlx::Postgres> {
     /// comes from a per-tenant pool with `search_path` in its connect
     /// options, separate from [`Self::scoped_pool`]'s, so one busy
     /// tenant can block neither the others nor its own `t.pool()`.
+    /// With `max_cached_scoped_pools = 0` it is a registry connection
+    /// with `SET search_path`, reset on release.
     /// For database mode it just acquires from the dedicated pool.
     ///
     /// # Errors
@@ -1291,6 +1270,20 @@ impl TenantPools<sqlx::Postgres> {
     /// the schema-mode pool build.
     pub async fn acquire(&self, org: &Org) -> Result<TenantConn<sqlx::Postgres>, TenancyError> {
         match self.pool_for_org(org).await? {
+            // No cache: a pool per call would connect per request.
+            TenantPool::Schema { schema, registry } if self.config.max_cached_scoped_pools == 0 => {
+                let conn = registry.acquire().await?;
+                // Reset installed before the `SET`, so a cancel cannot
+                // return it to the shared pool still scoped.
+                let mut tc = TenantConn {
+                    inner: Some(conn),
+                    schema: Some(schema.clone()),
+                    reset: Some(reset_pg_search_path),
+                };
+                let stmt = format!("SET search_path TO {}", search_path(&schema));
+                rustango::sql::sqlx::query(&stmt).execute(&mut **tc).await?;
+                Ok(tc)
+            }
             TenantPool::Schema { schema, registry } => {
                 let pool = self
                     .schema_mode_pool(org, schema.clone(), registry, ScopedUse::Held)
@@ -1703,7 +1696,7 @@ impl<DB: Database> std::ops::DerefMut for TenantConn<DB> {
 /// schema-mode connection. sqlx does not reset session state on
 /// release — it only pings — so without this the connection goes back
 /// to the pool still pointing where the handler left it, and the next
-/// request silently inherits it (#1224).
+/// request silently inherits it.
 ///
 /// The reset runs in a spawned task because `Drop` cannot be async, but
 /// it is not racy: the task owns the `PoolConnection`, so the pool
@@ -1723,7 +1716,7 @@ impl<DB: Database> Drop for TenantConn<DB> {
         // connection to be closed on drop rather than returned, so a
         // connection with a handler's `search_path` can never rejoin
         // its pool. Losing one connection is cheap; handing the next
-        // borrower another tenant's `search_path` is #1224.
+        // borrower another tenant's `search_path` is a cross-tenant read.
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             conn.close_on_drop();
             return;

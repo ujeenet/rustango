@@ -952,3 +952,40 @@ async fn a_busy_schema_tenant_does_not_block_other_tenants() {
         drop_schema(&admin, s).await;
     }
 }
+
+/// With the scoped-pool cache off, a held connection comes from the
+/// registry pool, not from a pool built per request.
+#[tokio::test]
+async fn uncached_schema_tenant_holds_a_registry_connection() {
+    use std::time::Duration;
+    let _g = live_lock().lock().await;
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let admin = pool().await.unwrap();
+    create_schema(&admin, "acme_tp_nocache").await;
+    let registry = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(2))
+        .connect(&url)
+        .await
+        .unwrap();
+    let cfg = rustango::tenancy::TenantPoolsConfig {
+        max_cached_scoped_pools: 0,
+        ..Default::default()
+    };
+    let pools = TenantPools::new(registry.clone()).config(cfg);
+    let org = schema_org("acme_tp_nocache");
+    {
+        let mut conn = pools.acquire(&org).await.unwrap();
+        assert_eq!(current_schema(&mut conn).await, "acme_tp_nocache");
+        assert!(registry.try_acquire().is_none(), "built a pool for one request");
+    }
+    let mut plain = tokio::time::timeout(Duration::from_secs(5), registry.acquire())
+        .await
+        .expect("the connection never came back")
+        .unwrap();
+    assert_eq!(current_schema(&mut plain).await, "public", "search_path leaked");
+    drop(plain);
+    drop_schema(&admin, "acme_tp_nocache").await;
+}
