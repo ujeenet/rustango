@@ -153,6 +153,12 @@ pub struct Cli {
     /// Set via [`Cli::with_tenant_pools`] (#1456).
     #[cfg(feature = "tenancy")]
     tenant_pools: Option<crate::tenancy::TenantPoolsConfig>,
+    /// `None` = `ChainSecretsResolver::standard()`. Set via [`Cli::with_secrets`].
+    #[cfg(feature = "tenancy")]
+    secrets: Option<std::sync::Arc<dyn crate::tenancy::SecretsResolver>>,
+    /// Set via [`Cli::require_sealed_secrets`].
+    #[cfg(feature = "tenancy")]
+    require_sealed_secrets: bool,
     /// Mounts registered via [`Cli::with_static`] and [`Cli::with_uploads`],
     /// nested at `runserver` time as `Router::nest(prefix, static_router(files))`.
     /// Empty by default — projects that already mount their own
@@ -213,6 +219,10 @@ impl Cli {
             provisioning_dir: None,
             #[cfg(feature = "tenancy")]
             tenant_pools: None,
+            #[cfg(feature = "tenancy")]
+            secrets: None,
+            #[cfg(feature = "tenancy")]
+            require_sealed_secrets: false,
             #[cfg(feature = "_http_layers")]
             static_dirs: Vec::new(),
             #[cfg(feature = "csrf")]
@@ -397,6 +407,25 @@ impl Cli {
     #[must_use]
     pub fn with_tenant_pools(mut self, config: crate::tenancy::TenantPoolsConfig) -> Self {
         self.tenant_pools = Some(config);
+        self
+    }
+
+    /// Open tenant `database_url` references with `resolver`, in the
+    /// server and in every tenancy verb. Default:
+    /// [`ChainSecretsResolver::standard`](crate::tenancy::ChainSecretsResolver::standard).
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn with_secrets(mut self, resolver: impl crate::tenancy::SecretsResolver) -> Self {
+        self.secrets = Some(std::sync::Arc::new(resolver));
+        self
+    }
+
+    /// Refuse to store a tenant URL with a password unsealed, in the server
+    /// and every tenancy verb. Also on with `RUSTANGO_REQUIRE_SEALED_SECRETS=1`.
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn require_sealed_secrets(mut self) -> Self {
+        self.require_sealed_secrets = true;
         self
     }
 
@@ -860,17 +889,26 @@ impl Cli {
     where
         crate::sql::Pool: From<crate::sql::sqlx::Pool<DB>>,
     {
-        let mut pools = crate::tenancy::TenantPools::new(registry);
+        let mut pools = match self.secrets.clone() {
+            Some(r) => crate::tenancy::TenantPools::with_secrets(registry, r),
+            None => crate::tenancy::TenantPools::new(registry),
+        };
+        if self.require_sealed_secrets {
+            pools = pools.require_sealed_secrets();
+        }
         if let Some(cfg) = self.tenant_pools.clone() {
             pools = pools.config(cfg);
         }
-        crate::tenancy::manage::run_with_writer_and_init(
+        crate::tenancy::manage::run_from_cli(
             &pools,
             url,
             &self.migrations_dir,
             args,
             out,
             self.init_tenancy_fn,
+            crate::tenancy::manage::CliFacts {
+                provisioning: self.provisioning_dir.is_some(),
+            },
         )
         .await?;
         Ok(())
@@ -1477,6 +1515,12 @@ impl Cli {
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
         }
+        if let Some(r) = self.secrets.clone() {
+            builder = builder.secrets(r);
+        }
+        if self.require_sealed_secrets {
+            builder = builder.require_sealed_secrets();
+        }
         // #1456 — same reason as the dispatch path above.
         if let Some(cfg) = self.tenant_pools.clone() {
             builder = builder.tenant_pools(cfg);
@@ -1558,6 +1602,12 @@ impl Cli {
         }
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
+        }
+        if let Some(r) = self.secrets.clone() {
+            builder = builder.secrets(r);
+        }
+        if self.require_sealed_secrets {
+            builder = builder.require_sealed_secrets();
         }
         // #1456 — same reason as the dispatch path above.
         if let Some(cfg) = self.tenant_pools.clone() {
@@ -2090,6 +2140,47 @@ mod tests {
         }
         let out = String::from_utf8_lossy(&out);
         assert!(out.contains("skipped (cap) 1"), "{out}");
+    }
+
+    /// `check --deploy` reports the secret key only when provisioning is mounted.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[tokio::test]
+    async fn check_deploy_reports_the_secret_key_with_provisioning() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let registry = crate::sql::Pool::connect_sqlite(&url)
+            .await
+            .expect("connect");
+        let args = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        for provisioning in [false, true] {
+            let mut cli = Cli::new()
+                .tenancy()
+                .migrations_dir(tmp.path().join("migrations"));
+            if provisioning {
+                cli = cli.with_tenant_provisioning(tmp.path().join("migrations"));
+            }
+            let mut out: Vec<u8> = Vec::new();
+            cli.run_tenancy_verb_to(
+                registry.clone(),
+                &url,
+                args(&["migrate-registry"]),
+                &mut out,
+            )
+            .await
+            .expect("migrate-registry");
+            let mut out: Vec<u8> = Vec::new();
+            // Errors on the test env's unset settings; the report is still written.
+            let _ = cli
+                .run_tenancy_verb_to(
+                    registry.clone(),
+                    &url,
+                    args(&["check", "--deploy"]),
+                    &mut out,
+                )
+                .await;
+            let out = String::from_utf8_lossy(&out);
+            assert_eq!(out.contains("RUSTANGO_SECRET_KEY"), provisioning, "{out}");
+        }
     }
 
     #[test]

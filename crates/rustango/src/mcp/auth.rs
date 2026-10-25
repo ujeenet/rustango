@@ -146,13 +146,14 @@ async fn verify_agent_claims(
 
 // --------------------------------------------------------------- HTTP layer
 
-#[derive(Debug, Deserialize)]
+// No `Debug` on these: they carry a secret or a bearer token.
+#[derive(Deserialize)]
 pub(crate) struct AgentTokenInput {
     pub name: String,
     pub secret: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub(crate) struct AgentTokenOutput {
     pub access_token: String,
     pub token_type: &'static str,

@@ -53,7 +53,7 @@ async fn fresh_pool() -> Pool {
 }
 
 fn app(pool: Pool) -> axum::Router {
-    rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+    rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "status", "rating"])
         .page_size(50)
         .filter_fields(&["status", "rating"])
         .ordering_fields(&["rating", "title"])

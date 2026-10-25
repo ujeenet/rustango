@@ -131,6 +131,8 @@ _async_trait  = ["dep:async-trait"]
 _base64       = ["dep:base64"]
 # The three that always travel together for cookie/token signing.
 _signing      = ["_base64", "dep:hmac", "dep:sha2"]
+# XChaCha20-Poly1305 under `RUSTANGO_SECRET_KEY` (`crate::aead`).
+_aead         = ["dep:chacha20poly1305", "_base64", "_rand", "dep:sha2"]
 # The request middleware (`cors`, `body_limit`, `security_headers`, …): `manage`
 # mounts them from `[server]`/`[security]` settings without `admin` (#1739),
 # and the request span, request id and access log with them (#1514), and
@@ -330,7 +332,7 @@ secrets = ["_async_trait"]
 # Attribute casts (#819) — `Cast<C>` field wrapper + `CastValue` trait;
 # the `EncryptedString` built-in pulls XChaCha20-Poly1305 + base64 + a
 # SHA-256 key derivation (`rand` for the per-write nonce).
-casts = ["dep:chacha20poly1305", "dep:base64", "_rand", "dep:sha2"]
+casts = ["_aead"]
 
 # TOTP / 2FA (`rustango::totp`) — RFC 6238 time-based one-time passwords
 # for second-factor authentication. SHA-1 (Google Authenticator default).
@@ -481,14 +483,17 @@ tenancy = [
     "dep:async-stream",
     "dep:argon2",
     "dep:cookie",
-    # Deliberately the exact pair tenancy carried before #1208, not `_signing`
-    # — that capability also pulls `base64`, which tenancy never depended on.
+    # Deliberately the hmac/sha2 pair, not `_signing`.
     # The capability features exist to stop the feature table lying about what
     # it pulls in; widening one while introducing them would defeat that.
     "dep:hmac",
     "dep:sha2",
     "dep:password-hash",
     "_rand",
+    # Sealed (`enc:`) tenant database URLs.
+    "_aead",
+    # A new tenant's first admin gets a signed set-password link.
+    "auth_flows",
     "dep:rpassword",
     "dep:serde_urlencoded",
     "_tower",
@@ -518,7 +523,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.60.12", path = "../rustango-macros" }
+rustango-macros = { version = "0.61.0", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }

@@ -538,9 +538,11 @@ impl MediaManager {
             None => (MediaStatus::Failed, false),
         };
         use crate::sql::UpdaterPool as _;
+        // Not a row `purge_pending` has claimed meanwhile.
         let changed = Media::objects()
             .where_(Media::id.eq(media_id))
             .where_(Media::status.eq(MediaStatus::Pending.as_str().to_owned()))
+            .where_(Media::deleted_at.is_null())
             .update()
             .set("status", new_status.as_str())
             .execute_pool(&self.pool)
@@ -828,10 +830,10 @@ impl MediaManager {
     /// Returns the number of media rows deleted. A full batch means
     /// there is more work — call again, or let the next run take it.
     ///
-    /// Each row is deleted on `id` and the status it was read with, so
-    /// one finalized in between is kept. Its object is deleted inside
-    /// that transaction: on a storage error the row stays for the next
-    /// sweep. Tag links of gone rows are reclaimed at the end.
+    /// Each row is claimed (soft-deleted) on `id` and the status it was
+    /// read with, so one finalized in between is kept. Then its object is
+    /// deleted, then the row; on a storage error the row stays for the
+    /// next sweep. Tag links of gone rows are reclaimed at the end.
     ///
     /// # Errors
     /// The first failure, after trying every row.
@@ -887,30 +889,38 @@ impl MediaManager {
 
     /// Delete one row read as `m.status`, and its object.
     /// `Ok(false)` when the row changed status or went away meanwhile.
+    ///
+    /// No transaction spans the storage call: the row is first
+    /// claimed by soft-deleting it, which `finalize_upload` respects.
     async fn purge_unconfirmed(&self, m: &Media) -> Result<bool, MediaError> {
+        use crate::sql::UpdaterPool as _;
         let Auto::Set(id) = m.id else {
             return Err(MediaError::Other("Media has no id".into()));
         };
         let storage = self.resolve_disk(&m.disk)?;
+        let claimed = Media::objects()
+            .where_(Media::id.eq(id))
+            .where_(Media::status.eq(m.status.clone()))
+            .update()
+            .set("deleted_at", Utc::now())
+            .execute_pool(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
+        if claimed != 1 {
+            return Ok(false);
+        }
+        // A missing key is a no-op, so an error here is real; the claimed
+        // row stays for the next sweep.
+        storage.delete(&m.storage_key).await?;
         let row = Media::objects()
             .where_(Media::id.eq(id))
             .where_(Media::status.eq(m.status.clone()))
             .compile_delete()
             .map_err(media_err_from_query)?;
-        let mut tx = crate::sql::transaction_pool(&self.pool)
+        let deleted = crate::sql::delete_pool(&self.pool, &row)
             .await
             .map_err(media_err_from_exec)?;
-        let deleted = crate::sql::delete_tx(&mut tx, &row)
-            .await
-            .map_err(media_err_from_exec)?;
-        if deleted != 1 {
-            tx.rollback().await?;
-            return Ok(false);
-        }
-        // A missing key is a no-op, so an error here is real.
-        storage.delete(&m.storage_key).await?;
-        tx.commit().await?;
-        Ok(true)
+        Ok(deleted == 1)
     }
 
     // =================================================================

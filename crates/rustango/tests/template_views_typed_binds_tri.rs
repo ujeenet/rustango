@@ -117,6 +117,37 @@ pub struct Memo {
     pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 
+/// The form views write only their allow-list.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "tv1136_story", app = "tv1915")]
+pub struct Story {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub title: String,
+    #[rustango(max_length = 32)]
+    pub note: Option<String>,
+    pub featured: bool,
+    pub owner_id: Option<i64>,
+}
+
+/// Listed fields with a column default.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "tv1402_badge", app = "tv1915")]
+pub struct Badge {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+    #[rustango(max_length = 16, default = "'bronze'")]
+    pub tier: String,
+    #[rustango(default = "3")]
+    pub rank: i64,
+}
+
+const STORY_FIELDS: &[&str] = &["title", "note", "featured"];
+const EVENT_FIELDS: &[&str] = &["day", "at", "token", "meta", "done", "author_id", "note"];
+
 const CSRF: &str = "tv1915-csrf-token-tv1915-csrf-token-tv1915x";
 const UUID_A: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 const FORM: &str = "application/x-www-form-urlencoded";
@@ -131,6 +162,8 @@ async fn setup(pool: &Pool) {
     slot_unique_index(pool).await;
     rustango::testkit::matrix::fresh_table::<Doc>(pool).await;
     rustango::testkit::matrix::fresh_table::<Memo>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Story>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Badge>(pool).await;
 }
 
 fn app(pool: &Pool) -> axum::Router {
@@ -146,12 +179,12 @@ fn app(pool: &Pool) -> axum::Router {
     ])
     .unwrap();
     let t = Arc::new(t);
-    CreateView::for_model(Event::SCHEMA)
+    CreateView::for_model(Event::SCHEMA, EVENT_FIELDS)
         .template("form.html")
         .success_url("/events")
         .router("/events", t.clone(), pool.clone())
         .merge(
-            UpdateView::for_model(Event::SCHEMA)
+            UpdateView::for_model(Event::SCHEMA, EVENT_FIELDS)
                 .template("form.html")
                 .success_url("/events")
                 .router("/events", t.clone(), pool.clone()),
@@ -174,52 +207,70 @@ fn app(pool: &Pool) -> axum::Router {
                 .router("/ev", t.clone(), pool.clone()),
         )
         .merge(
-            CreateView::for_model(Label::SCHEMA)
+            CreateView::for_model(Label::SCHEMA, &["code"])
                 .template("form.html")
                 .success_url("/labels")
                 .router("/labels", t.clone(), pool.clone()),
         )
         .merge(
-            CreateView::for_model(Slot::SCHEMA)
+            CreateView::for_model(Slot::SCHEMA, &["day", "hour"])
                 .template("form.html")
                 .success_url("/slots")
                 .router("/slots", t.clone(), pool.clone()),
         )
         .merge(
-            UpdateView::for_model(Slot::SCHEMA)
+            UpdateView::for_model(Slot::SCHEMA, &["day", "hour"])
                 .template("form.html")
                 .success_url("/slots")
                 .router("/slots", t.clone(), pool.clone()),
         )
         .merge(
-            UpdateView::for_model(Label::SCHEMA)
+            UpdateView::for_model(Label::SCHEMA, &["code"])
                 .template("form.html")
                 .success_url("/labels")
                 .router("/labels", t.clone(), pool.clone()),
         )
         .merge(
-            CreateView::for_model(Label::SCHEMA)
+            CreateView::for_model(Label::SCHEMA, &["code"])
                 .template("form.html")
                 .success_url("/labels/{id}")
                 .router("/rlabels", t.clone(), pool.clone()),
         )
         .merge(
-            CreateView::for_model(Tag::SCHEMA)
+            CreateView::for_model(Tag::SCHEMA, &["code", "name"])
                 .template("form.html")
                 .success_url("/tags")
                 .router("/tags", t.clone(), pool.clone()),
         )
         .merge(
-            CreateView::for_model(Doc::SCHEMA)
+            CreateView::for_model(Doc::SCHEMA, &["name"])
                 .template("form.html")
                 .success_url("/docs")
                 .router("/docs", t.clone(), pool.clone()),
         )
         .merge(
-            UpdateView::for_model(Memo::SCHEMA)
+            UpdateView::for_model(Memo::SCHEMA, &["title"])
                 .template("form.html")
                 .success_url("/memos")
                 .router("/memos", t.clone(), pool.clone()),
+        )
+        .merge(
+            CreateView::for_model(Story::SCHEMA, STORY_FIELDS)
+                .template("form.html")
+                .success_url("/stories")
+                .router("/stories", t.clone(), pool.clone()),
+        )
+        .merge(
+            UpdateView::for_model(Story::SCHEMA, STORY_FIELDS)
+                .template("form.html")
+                .success_url("/stories")
+                .router("/stories", t.clone(), pool.clone()),
+        )
+        .merge(
+            CreateView::for_model(Badge::SCHEMA, &["name", "tier", "rank"])
+                .template("form.html")
+                .success_url("/badges")
+                .router("/badges", t.clone(), pool.clone()),
         )
         .merge(
             ListView::for_model(Pin::SCHEMA)
@@ -559,13 +610,13 @@ async fn sqlite_text_uuid_key_is_found_by_every_view() {
         .template("t.html")
         .router("/tk", t.clone(), pool.clone())
         .merge(
-            CreateView::for_model(TextKey::SCHEMA)
+            CreateView::for_model(TextKey::SCHEMA, &["name"])
                 .template("form.html")
                 .success_url("/tk")
                 .router("/tk", t.clone(), pool.clone()),
         )
         .merge(
-            UpdateView::for_model(TextKey::SCHEMA)
+            UpdateView::for_model(TextKey::SCHEMA, &["name"])
                 .template("form.html")
                 .success_url("/tk")
                 .router("/tk", t.clone(), pool.clone()),
@@ -644,7 +695,7 @@ async fn sqlite_text_uuid_key_matches_any_spelling() {
         .template("t.html")
         .router("/tk", t.clone(), pool.clone())
         .merge(
-            CreateView::for_model(TextKey::SCHEMA)
+            CreateView::for_model(TextKey::SCHEMA, &["name"])
                 .template("form.html")
                 .success_url("/tk")
                 .router("/tk", t, pool.clone()),
@@ -731,7 +782,7 @@ async fn sqlite_bulk_action_skips_a_hidden_row_sharing_the_uuid() {
                 .map_err(|e| e.to_string())
         })
     });
-    let app = CreateView::for_model(SharedKey::SCHEMA)
+    let app = CreateView::for_model(SharedKey::SCHEMA, &["name", "mine"])
         .template("form.html")
         .success_url("/sk")
         .router("/sk", t.clone(), pool.clone())
@@ -796,9 +847,103 @@ async fn sqlite_bulk_action_skips_a_hidden_row_sharing_the_uuid() {
     }
 }
 
+async fn seed_story(pool: &Pool) -> i64 {
+    let mut s = Story {
+        id: Auto::Unset,
+        title: "a".into(),
+        note: Some("keep".into()),
+        featured: true,
+        owner_id: Some(5),
+    };
+    s.insert_pool(pool).await.expect("seed story");
+    *s.id.get().expect("pk")
+}
+
+async fn story(pool: &Pool) -> Story {
+    Story::objects()
+        .fetch(pool)
+        .await
+        .expect("stories")
+        .remove(0)
+}
+
+/// A posted column outside the allow-list is not written.
+async fn form_views_ignore_unlisted_columns(pool: &Pool) {
+    let id = seed_story(pool).await;
+    let edit = format!("/stories/{id}/edit");
+    let (status, body) = send(pool, Method::POST, &edit, "title=b&owner_id=99").await;
+    assert!(status.is_redirection(), "update: {status} {body}");
+    let s = story(pool).await;
+    assert_eq!(s.title, "b");
+    assert_eq!(s.owner_id, Some(5), "update mass-assigned");
+
+    let (status, body) = send(
+        pool,
+        Method::POST,
+        "/stories/new",
+        "title=new&featured=on&owner_id=99",
+    )
+    .await;
+    assert!(status.is_redirection(), "create: {status} {body}");
+    let created = Story::objects()
+        .filter("title", "new")
+        .fetch(pool)
+        .await
+        .expect("created")
+        .remove(0);
+    assert!(created.featured);
+    assert_eq!(created.owner_id, None, "create mass-assigned");
+}
+
+/// UpdateView keeps a listed field the POST leaves out.
+async fn update_view_keeps_an_unsent_field(pool: &Pool) {
+    let id = seed_story(pool).await;
+    let edit = format!("/stories/{id}/edit");
+    let (status, body) = send(pool, Method::POST, &edit, "title=b&featured=on").await;
+    assert!(status.is_redirection(), "{status} {body}");
+    let s = story(pool).await;
+    assert_eq!(s.title, "b");
+    assert_eq!(s.note.as_deref(), Some("keep"), "unsent field wiped");
+}
+
+/// An unticked checkbox sends nothing and still means `false`.
+async fn update_view_unticked_checkbox_is_false(pool: &Pool) {
+    let id = seed_story(pool).await;
+    let edit = format!("/stories/{id}/edit");
+    let (status, body) = send(pool, Method::POST, &edit, "title=b").await;
+    assert!(status.is_redirection(), "{status} {body}");
+    assert!(!story(pool).await.featured, "unticked box kept true");
+}
+
+/// A listed field the create POST leaves out takes its column default.
+async fn create_view_unsent_field_takes_the_column_default(pool: &Pool) {
+    let (status, body) = send(pool, Method::POST, "/badges/new", "name=a").await;
+    assert!(status.is_redirection(), "create: {status} {body}");
+    let b = Badge::objects()
+        .fetch(pool)
+        .await
+        .expect("badges")
+        .remove(0);
+    assert_eq!((b.tier.as_str(), b.rank), ("bronze", 3));
+    // A sent value still wins over the default.
+    let (status, body) = send(pool, Method::POST, "/badges/new", "name=b&tier=gold&rank=1").await;
+    assert!(status.is_redirection(), "create: {status} {body}");
+    let b = Badge::objects()
+        .filter("name", "b")
+        .fetch(pool)
+        .await
+        .expect("b")
+        .remove(0);
+    assert_eq!((b.tier.as_str(), b.rank), ("gold", 1));
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        create_view_unsent_field_takes_the_column_default,
+        form_views_ignore_unlisted_columns,
+        update_view_keeps_an_unsent_field,
+        update_view_unticked_checkbox_is_false,
         update_view_restamps_auto_now,
         a_duplicate_create_is_a_form_error,
         a_duplicate_update_is_a_form_error,

@@ -25,6 +25,37 @@ fn name(tag: &str) -> String {
     format!("claim-{tag}-{}", std::process::id())
 }
 
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+#[path = "support/scratch_db.rs"]
+mod scratch_db;
+
+/// A tenant database on the registry's backend, and the guard that drops it.
+async fn tenant_db(pool: &Pool) -> (BackendKind, String, Option<Box<dyn std::any::Any>>) {
+    #[cfg(any(feature = "postgres", feature = "mysql"))]
+    let scratch = |var: &str| {
+        let admin = std::env::var(var).expect(var);
+        async move { scratch_db::ScratchDb::create(&admin, "rustango_claim").await }
+    };
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(_) => {
+            let db = scratch("DATABASE_URL").await;
+            (
+                BackendKind::Postgres,
+                db.url().to_owned(),
+                Some(Box::new(db)),
+            )
+        }
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(_) => {
+            let db = scratch("MYSQL_TEST_URL").await;
+            (BackendKind::MySql, db.url().to_owned(), Some(Box::new(db)))
+        }
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(_) => (BackendKind::Sqlite, "sqlite::memory:".into(), None),
+    }
+}
+
 async fn org(pool: &Pool, slug: &str) -> i64 {
     let mut org = Org {
         slug: slug.to_owned(),
@@ -100,10 +131,12 @@ async fn create_refuses_a_host_claimed_meanwhile(pool: &Pool) {
     let owner = org(pool, &name("create-a")).await;
     let slug = name("create-b");
     let host = format!("{}.example.test", name("create"));
+    // A database of the registry's backend: another backend's URL is refused.
+    let (backend, database_url, _scratch) = tenant_db(pool).await;
     let opts = CreateTenantOpts {
         mode: StorageMode::Database,
-        backend: BackendKind::Sqlite,
-        database_url: Some("sqlite::memory:".into()),
+        backend: Some(backend),
+        database_url: Some(database_url),
         host_pattern: Some(host.clone()),
         no_migrate: true,
         ..CreateTenantOpts::default()

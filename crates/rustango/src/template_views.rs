@@ -1306,26 +1306,28 @@ pub struct CreateView {
     schema: &'static ModelSchema,
     template: String,
     success_url: String,
-    fields: Option<Vec<String>>,
+    /// The write allow-list: the only fields the form renders and a POST sets.
+    fields: Vec<String>,
     validator: Option<Validator>,
 }
 
 impl CreateView {
-    /// Start a `CreateView` for the given schema. Defaults: template
+    /// Start a `CreateView` that renders and writes only `fields` (names or
+    /// columns); any other posted key is ignored. Defaults: template
     /// `<table>_form.html`, redirect to `/` on success.
     #[must_use]
-    pub fn for_model(schema: &'static ModelSchema) -> Self {
+    pub fn for_model(schema: &'static ModelSchema, fields: &[&str]) -> Self {
         Self {
             schema,
             template: format!("{}_form.html", schema.table),
             success_url: "/".to_owned(),
-            fields: None,
+            fields: fields.iter().map(|s| (*s).to_owned()).collect(),
             validator: None,
         }
     }
 
     // #807 — byte-identical setters emitted via `cbv_setters!`.
-    cbv_setters!(template, success_url, fields);
+    cbv_setters!(template, success_url);
 
     /// Install a closure-based validator that runs after schema-level
     /// type coercion + bounds checks but before the SQL INSERT.
@@ -1333,7 +1335,7 @@ impl CreateView {
     /// merged error map and a 422 status.
     ///
     /// ```ignore
-    /// CreateView::for_model(Post::SCHEMA)
+    /// CreateView::for_model(Post::SCHEMA, &["title", "body"])
     ///     .validator(|data| {
     ///         let mut errs = FormErrors::default();
     ///         if data.get("title").map_or(true, |s| s.len() < 5) {
@@ -1387,7 +1389,7 @@ impl CreateView {
     ///     body: String,
     /// }
     ///
-    /// CreateView::for_model(Post::SCHEMA)
+    /// CreateView::for_model(Post::SCHEMA, &["title", "body"])
     ///     .form::<PostForm>()    // F's validators run; F's parsed value is dropped
     ///     .router("/posts", tera, pool)
     /// ```
@@ -1451,29 +1453,35 @@ impl CreateView {
 /// Same field-rendering and form-parsing rules as [`CreateView`] —
 /// templates should be interchangeable. The PK column is read-only
 /// (skipped from the form fields) since the URL already pins it.
+///
+/// A listed field the POST leaves out keeps its stored value, except a
+/// `bool`: browsers send nothing for an unticked checkbox, so it is `false`.
 #[derive(Clone)]
 pub struct UpdateView {
     schema: &'static ModelSchema,
     template: String,
     success_url: String,
-    fields: Option<Vec<String>>,
+    /// The write allow-list, as on [`CreateView`].
+    fields: Vec<String>,
     validator: Option<Validator>,
 }
 
 impl UpdateView {
+    /// Start an `UpdateView` that renders and writes only `fields`; see
+    /// [`CreateView::for_model`].
     #[must_use]
-    pub fn for_model(schema: &'static ModelSchema) -> Self {
+    pub fn for_model(schema: &'static ModelSchema, fields: &[&str]) -> Self {
         Self {
             schema,
             template: format!("{}_form.html", schema.table),
             success_url: "/".to_owned(),
-            fields: None,
+            fields: fields.iter().map(|s| (*s).to_owned()).collect(),
             validator: None,
         }
     }
 
     // #807 — byte-identical setters emitted via `cbv_setters!`.
-    cbv_setters!(template, success_url, fields);
+    cbv_setters!(template, success_url);
 
     /// Install a closure-based validator. Same shape and semantics
     /// as [`CreateView::validator`].
@@ -1560,7 +1568,7 @@ struct FormViewState {
     schema: &'static ModelSchema,
     template: String,
     success_url: String,
-    fields: Option<Vec<String>>,
+    fields: Vec<String>,
     tera: Arc<Tera>,
     pool: Pool,
     /// Optional user-supplied validator (`#[derive(Form)]`-derived
@@ -1600,22 +1608,14 @@ struct FormField {
 ///   the meantime — relation fields render with `ty = "i64"` etc.)
 fn form_fields(
     schema: &'static ModelSchema,
-    explicit: Option<&[String]>,
+    allowed: &[String],
     values: &HashMap<String, String>,
     kind: crate::core::WriteKind,
 ) -> Vec<FormField> {
     schema
         .fields
         .iter()
-        .filter(|f| {
-            if !takes_input(schema, f, kind) {
-                return false;
-            }
-            match explicit {
-                Some(names) => names.iter().any(|n| n == f.name || n == f.column),
-                None => true,
-            }
-        })
+        .filter(|f| takes_input(schema, f, kind) && is_listed(allowed, f))
         .map(|f| FormField {
             name: f.name,
             column: f.column,
@@ -1921,7 +1921,7 @@ async fn handle_create_get(
     let mut ctx = Context::new();
     let fields = form_fields(
         state.schema,
-        state.fields.as_deref(),
+        &state.fields,
         &HashMap::new(),
         crate::core::WriteKind::Insert,
     );
@@ -1944,7 +1944,7 @@ async fn handle_create_post(
 ) -> Response {
     let (mut columns, mut values, mut errors) = parse_form(
         state.schema,
-        state.fields.as_deref(),
+        &state.fields,
         &form,
         crate::core::WriteKind::Insert,
     );
@@ -2178,7 +2178,7 @@ async fn handle_update_get(
     }
     let fields = form_fields(
         state.schema,
-        state.fields.as_deref(),
+        &state.fields,
         &values,
         crate::core::WriteKind::Update,
     );
@@ -2211,7 +2211,7 @@ async fn handle_update_post(
     };
     let (columns, values, mut errors) = parse_form(
         state.schema,
-        state.fields.as_deref(),
+        &state.fields,
         &form,
         crate::core::WriteKind::Update,
     );
@@ -2242,6 +2242,11 @@ fn takes_input(schema: &ModelSchema, f: &FieldSchema, kind: crate::core::WriteKi
     f.accepts_input(kind) && schema.soft_delete_column != Some(f.column)
 }
 
+/// Whether the view's write allow-list names `f`, by field name or column.
+fn is_listed(allowed: &[String], f: &FieldSchema) -> bool {
+    allowed.iter().any(|n| n == f.name || n == f.column)
+}
+
 /// Walk the form submission and produce `(columns, values, errors)`.
 /// `errors` is non-empty only when at least one field failed to
 /// coerce. Form-level validation (required-field checks) happens
@@ -2249,7 +2254,7 @@ fn takes_input(schema: &ModelSchema, f: &FieldSchema, kind: crate::core::WriteKi
 /// `"this field is required"`.
 fn parse_form(
     schema: &'static ModelSchema,
-    explicit: Option<&[String]>,
+    allowed: &[String],
     submitted: &HashMap<String, String>,
     kind: crate::core::WriteKind,
 ) -> (Vec<&'static str>, Vec<SqlValue>, HashMap<String, String>) {
@@ -2257,19 +2262,25 @@ fn parse_form(
     let mut values: Vec<SqlValue> = Vec::new();
     let mut errors: HashMap<String, String> = HashMap::new();
     for f in schema.fields {
-        if !takes_input(schema, f, kind) {
+        if !takes_input(schema, f, kind) || !is_listed(allowed, f) {
             continue;
         }
-        if let Some(names) = explicit {
-            if !names.iter().any(|n| n == f.name || n == f.column) {
-                continue;
-            }
+        let raw = submitted.get(f.name).or_else(|| submitted.get(f.column));
+        // An unsent field keeps its value on update; an unsent Bool is an unticked box.
+        if raw.is_none()
+            && kind == crate::core::WriteKind::Update
+            && !matches!(f.ty, crate::core::FieldType::Bool)
+        {
+            continue;
         }
-        let raw = submitted
-            .get(f.name)
-            .or_else(|| submitted.get(f.column))
-            .cloned()
-            .unwrap_or_default();
+        // An unsent defaulted field takes the column default on create, as in `ModelForm`.
+        if raw.is_none()
+            && kind == crate::core::WriteKind::Insert
+            && crate::forms::absent_takes_default(f, crate::forms::Encoding::Form)
+        {
+            continue;
+        }
+        let raw = raw.cloned().unwrap_or_default();
         if raw.is_empty() && !f.nullable && !matches!(f.ty, crate::core::FieldType::Bool) {
             // Bool checkboxes legitimately submit nothing when
             // unchecked — treat that as `false` rather than
@@ -2368,7 +2379,7 @@ fn rerender_form(
 ) -> Response {
     let fields = form_fields(
         state.schema,
-        state.fields.as_deref(),
+        &state.fields,
         submitted,
         write_kind(is_update),
     );
@@ -3951,7 +3962,7 @@ mod tenant {
         pub(super) schema: &'static ModelSchema,
         pub(super) template: String,
         pub(super) success_url: String,
-        pub(super) fields: Option<Vec<String>>,
+        pub(super) fields: Vec<String>,
         pub(super) tera: Arc<Tera>,
         /// Optional `#[derive(Form)]` validator (#80 v0.30.2 parity
         /// with the static `FormViewState` path).
@@ -3966,7 +3977,7 @@ mod tenant {
         let mut ctx = Context::new();
         let fields = form_fields(
             state.schema,
-            state.fields.as_deref(),
+            &state.fields,
             &HashMap::new(),
             crate::core::WriteKind::Insert,
         );
@@ -3990,7 +4001,7 @@ mod tenant {
     ) -> Response {
         let (mut columns, mut values, mut errors) = parse_form(
             state.schema,
-            state.fields.as_deref(),
+            &state.fields,
             &form,
             crate::core::WriteKind::Insert,
         );
@@ -4051,7 +4062,7 @@ mod tenant {
         }
         let fields = form_fields(
             state.schema,
-            state.fields.as_deref(),
+            &state.fields,
             &values,
             crate::core::WriteKind::Update,
         );
@@ -4085,7 +4096,7 @@ mod tenant {
         };
         let (columns, values, mut errors) = parse_form(
             state.schema,
-            state.fields.as_deref(),
+            &state.fields,
             &form,
             crate::core::WriteKind::Update,
         );
@@ -4120,7 +4131,7 @@ mod tenant {
     ) -> Response {
         let fields = form_fields(
             state.schema,
-            state.fields.as_deref(),
+            &state.fields,
             submitted,
             write_kind(is_update),
         );
@@ -4806,20 +4817,42 @@ mod tests {
         assert_eq!(dv.fields.as_deref().map(<[String]>::len), Some(2));
     }
 
+    /// Every field name: an allow-list that lets the whole model through.
+    fn every(s: &ModelSchema) -> Vec<String> {
+        s.fields.iter().map(|f| f.name.to_owned()).collect()
+    }
+
     /// CreateView default template + success_url.
     #[test]
     fn create_view_defaults() {
-        let cv = CreateView::for_model(schema_two_fields());
+        let cv = CreateView::for_model(schema_two_fields(), &["title"]);
         assert_eq!(cv.template, "posts_form.html");
         assert_eq!(cv.success_url, "/");
+        assert_eq!(cv.fields, ["title"]);
     }
 
     /// UpdateView shares the same default template name (forms are
     /// interchangeable; templates branch on `is_create`/`is_update`).
     #[test]
     fn update_view_default_template_matches_create() {
-        let uv = UpdateView::for_model(schema_two_fields());
+        let uv = UpdateView::for_model(schema_two_fields(), &["title"]);
         assert_eq!(uv.template, "posts_form.html");
+    }
+
+    /// Only listed fields are written; an unsent one is kept on update
+    /// and required on create.
+    #[test]
+    fn parse_form_writes_only_the_allow_list() {
+        use crate::core::WriteKind;
+        let s = schema_two_fields();
+        let listed = ["title".to_owned()];
+        let none: HashMap<String, String> = HashMap::new();
+        let (cols, _, errors) = parse_form(s, &listed, &none, WriteKind::Update);
+        assert!(cols.is_empty() && errors.is_empty(), "{cols:?} {errors:?}");
+        let (_, _, errors) = parse_form(s, &listed, &none, WriteKind::Insert);
+        assert!(errors.contains_key("title"), "{errors:?}");
+        let (cols, _, _) = parse_form(s, &[], &none, WriteKind::Insert);
+        assert!(cols.is_empty());
     }
 
     /// `form_fields` skips the primary key (Auto<i64> id).
@@ -4827,7 +4860,7 @@ mod tests {
     fn form_fields_skips_pk_and_auto() {
         let s = schema_two_fields();
         let values = HashMap::new();
-        let ff = form_fields(s, None, &values, crate::core::WriteKind::Insert);
+        let ff = form_fields(s, &every(s), &values, crate::core::WriteKind::Insert);
         assert_eq!(ff.len(), 1);
         assert_eq!(ff[0].name, "title");
     }
@@ -4848,7 +4881,7 @@ mod tests {
         use crate::core::WriteKind;
         let s = <Tag as crate::core::Model>::SCHEMA;
         let names = |kind| -> Vec<&str> {
-            form_fields(s, None, &HashMap::new(), kind)
+            form_fields(s, &every(s), &HashMap::new(), kind)
                 .iter()
                 .map(|f| f.name)
                 .collect()
@@ -4859,7 +4892,7 @@ mod tests {
             .into_iter()
             .map(|(k, v)| (k.to_owned(), v.to_owned()))
             .collect();
-        let (cols, _, errors) = parse_form(s, None, &submitted, WriteKind::Insert);
+        let (cols, _, errors) = parse_form(s, &every(s), &submitted, WriteKind::Insert);
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(cols, ["slug", "name"]);
     }
@@ -4870,7 +4903,7 @@ mod tests {
         let s = schema_two_fields();
         let mut values = HashMap::new();
         values.insert("title".to_owned(), "Hello".to_owned());
-        let ff = form_fields(s, None, &values, crate::core::WriteKind::Insert);
+        let ff = form_fields(s, &every(s), &values, crate::core::WriteKind::Insert);
         assert_eq!(ff[0].value, "Hello");
     }
 
@@ -5245,7 +5278,8 @@ mod tests {
     fn parse_form_flags_required_missing() {
         let s = schema_two_fields();
         let submitted = HashMap::new();
-        let (cols, vals, errors) = parse_form(s, None, &submitted, crate::core::WriteKind::Insert);
+        let (cols, vals, errors) =
+            parse_form(s, &every(s), &submitted, crate::core::WriteKind::Insert);
         assert!(cols.is_empty());
         assert!(vals.is_empty());
         assert_eq!(errors.len(), 1);
@@ -5259,7 +5293,8 @@ mod tests {
         let s = schema_two_fields();
         let mut submitted = HashMap::new();
         submitted.insert("title".to_owned(), "Hello".to_owned());
-        let (cols, vals, errors) = parse_form(s, None, &submitted, crate::core::WriteKind::Insert);
+        let (cols, vals, errors) =
+            parse_form(s, &every(s), &submitted, crate::core::WriteKind::Insert);
         assert!(errors.is_empty());
         assert_eq!(cols, vec!["title"]);
         assert_eq!(vals.len(), 1);
@@ -5293,7 +5328,8 @@ mod tests {
         let mut submitted = HashMap::new();
         submitted.insert("title".to_owned(), "way too long".to_owned()); // 12 > 5
         submitted.insert("score".to_owned(), "50".to_owned());
-        let (cols, vals, errors) = parse_form(s, None, &submitted, crate::core::WriteKind::Insert);
+        let (cols, vals, errors) =
+            parse_form(s, &every(s), &submitted, crate::core::WriteKind::Insert);
         assert!(cols.is_empty() || !cols.contains(&"title"));
         assert!(
             vals.is_empty() || vals.len() == 1,
@@ -5315,7 +5351,7 @@ mod tests {
         let mut submitted = HashMap::new();
         submitted.insert("title".to_owned(), "ok".to_owned());
         submitted.insert("score".to_owned(), "150".to_owned()); // > 100
-        let (_, _, errors) = parse_form(s, None, &submitted, crate::core::WriteKind::Insert);
+        let (_, _, errors) = parse_form(s, &every(s), &submitted, crate::core::WriteKind::Insert);
         let score_err = errors.get("score").expect("score error present");
         assert!(
             score_err.contains("100") && score_err.contains("150"),
@@ -5611,13 +5647,13 @@ mod tests {
     #[test]
     fn validator_and_form_builders_set_validator_field() {
         // Closure form
-        let cv = CreateView::for_model(schema_two_fields()).validator(|_data| Ok(()));
+        let cv = CreateView::for_model(schema_two_fields(), &["title"]).validator(|_data| Ok(()));
         assert!(
             cv.validator.is_some(),
             ".validator(closure) must set the field"
         );
 
-        let uv = UpdateView::for_model(schema_two_fields()).validator(|_data| Ok(()));
+        let uv = UpdateView::for_model(schema_two_fields(), &["title"]).validator(|_data| Ok(()));
         assert!(uv.validator.is_some());
 
         // Typed Form trait
@@ -5627,7 +5663,7 @@ mod tests {
                 Ok(Tiny)
             }
         }
-        let cv2 = CreateView::for_model(schema_two_fields()).form::<Tiny>();
+        let cv2 = CreateView::for_model(schema_two_fields(), &["title"]).form::<Tiny>();
         assert!(
             cv2.validator.is_some(),
             ".form::<T>() must set the validator"
@@ -5951,10 +5987,10 @@ mod tests {
         let _ = DeleteView::for_model(s)
             .success_url("/posts")
             .tenant_router("/posts", tera.clone());
-        let _ = CreateView::for_model(s)
+        let _ = CreateView::for_model(s, &["title"])
             .success_url("/posts")
             .tenant_router("/posts", tera.clone());
-        let _ = UpdateView::for_model(s)
+        let _ = UpdateView::for_model(s, &["title"])
             .success_url("/posts")
             .tenant_router("/posts", tera);
     }
@@ -6234,7 +6270,7 @@ mod tests {
             cookie_name: "app_csrf".into(),
             ..Default::default()
         };
-        let app = CreateView::for_model(schema_two_fields())
+        let app = CreateView::for_model(schema_two_fields(), &["title"])
             .template("f.html")
             .router("/c", Arc::new(tera), pool)
             .layer(crate::forms::csrf::with_config(cfg));
@@ -6305,7 +6341,7 @@ mod tests {
                 false,
             ),
         ] {
-            let app = CreateView::for_model(schema_two_fields())
+            let app = CreateView::for_model(schema_two_fields(), &["title"])
                 .template("f.html")
                 .router("/c", tera.clone(), pool.clone())
                 .layer(crate::forms::csrf::with_config(cfg));
@@ -6338,7 +6374,7 @@ mod tests {
         let mut tera = Tera::default();
         tera.add_raw_template("f.html", "{{ csrf_token }}").unwrap();
         let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
-        let app = CreateView::for_model(schema_two_fields())
+        let app = CreateView::for_model(schema_two_fields(), &["title"])
             .template("f.html")
             .router("/c", Arc::new(tera), pool);
         let req = Request::builder()
@@ -6365,7 +6401,7 @@ mod tests {
         tera.add_raw_template("f.html", "").unwrap();
         let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
         let cfg = crate::forms::csrf::CsrfConfig::default().exempt_prefix("/c");
-        let app = CreateView::for_model(schema_two_fields())
+        let app = CreateView::for_model(schema_two_fields(), &["title"])
             .template("f.html")
             .router("/c", Arc::new(tera), pool)
             .layer(crate::forms::csrf::with_config(cfg));
@@ -6406,11 +6442,11 @@ mod tests {
             ),
             (
                 "/c/new",
-                CreateView::for_model(schema).router("/c", tera.clone(), pool.clone()),
+                CreateView::for_model(schema, &["title"]).router("/c", tera.clone(), pool.clone()),
             ),
             (
                 "/u/1/edit",
-                UpdateView::for_model(schema).router("/u", tera.clone(), pool.clone()),
+                UpdateView::for_model(schema, &["title"]).router("/u", tera.clone(), pool.clone()),
             ),
             (
                 "/d/1/delete",
@@ -6452,11 +6488,11 @@ mod tests {
             vec![
                 (
                     "/c/new",
-                    CreateView::for_model(schema).tenant_router("/c", tera.clone()),
+                    CreateView::for_model(schema, &["title"]).tenant_router("/c", tera.clone()),
                 ),
                 (
                     "/u/1/edit",
-                    UpdateView::for_model(schema).tenant_router("/u", tera.clone()),
+                    UpdateView::for_model(schema, &["title"]).tenant_router("/u", tera.clone()),
                 ),
                 (
                     "/d/1/delete",

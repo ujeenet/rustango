@@ -69,7 +69,7 @@ La façon de construire un objet dépend de ce dont il a besoin. Il existe quelq
 | `T::new(arg)` | Une dépendance obligatoire | `EnvSecrets::with_prefix(s)`, `RedisCache::new(url)` |
 | `T::with_X(arg)` | Surcharge de style builder après `new()` | `InMemoryCache::with_default_ttl(d)`, `JwtLifecycle::new(s).with_access_ttl(60)` |
 | `T::from_X(arg)` | Convertir DEPUIS Y | `TotpSecret::from_base32(s)`, `Locale::new(s)` (parfois `from_str`) |
-| `T::for_Y(arg)` | Construire un T restreint à un Y spécifique | `ViewSet::for_model(schema)` |
+| `T::for_Y(arg)` | Construire un T restreint à un Y spécifique | `ViewSet::for_model(schema, &fields)` |
 
 **À éviter :** `T::with_X_and_Y_and_Z(a, b, c)` — un seul constructeur qui prend tout. Découpez-le plutôt en `new(...)` plus des appels chaînés `.with_*()`.
 
@@ -286,7 +286,7 @@ default = [
 Pour réduire un binaire qui n'a pas besoin de tout, désactivez les valeurs par défaut et ne listez que ce que vous utilisez :
 
 ```toml
-rustango = { version = "0.60", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.61", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

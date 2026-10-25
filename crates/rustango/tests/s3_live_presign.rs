@@ -6,24 +6,60 @@
 //!
 //! Skipped silently when RUSTANGO_S3_TEST_KEY etc. aren't set.
 
-use rustango::storage::s3::{S3Config, S3Storage};
+use rustango::storage::s3::{S3Config, S3Credentials, S3Storage};
 use rustango::storage::{PutConditions, Storage};
 use std::time::Duration;
 
-fn maybe_storage() -> Option<S3Storage> {
+/// `RUSTANGO_S3_TEST_SESSION_TOKEN` is set when the keys are STS ones.
+fn storage_with(token: Option<String>) -> Option<S3Storage> {
     let key = std::env::var("RUSTANGO_S3_TEST_KEY").ok()?;
     let secret = std::env::var("RUSTANGO_S3_TEST_SECRET").ok()?;
     let bucket = std::env::var("RUSTANGO_S3_TEST_BUCKET").ok()?;
     let endpoint = std::env::var("RUSTANGO_S3_TEST_ENDPOINT").ok();
     let region = std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
-    Some(S3Storage::new(S3Config {
-        bucket,
-        region,
-        endpoint: endpoint.clone(),
-        access_key_id: key,
-        secret_access_key: secret,
-        path_style: endpoint.is_some(),
-    }))
+    let mut cfg = S3Config::new(bucket, region).with_path_style(endpoint.is_some());
+    cfg.endpoint = endpoint;
+    let mut creds = S3Credentials::new(key, secret);
+    if let Some(token) = token {
+        creds = creds.with_session_token(token);
+    }
+    Some(S3Storage::new(cfg, creds))
+}
+
+fn maybe_storage() -> Option<S3Storage> {
+    storage_with(std::env::var("RUSTANGO_S3_TEST_SESSION_TOKEN").ok())
+}
+
+/// With STS keys, the token is what makes requests pass, so the
+/// tests above prove it is sent and signed.
+#[tokio::test]
+async fn temporary_keys_need_their_session_token() {
+    let (Ok(_), Some(storage), Some(no_token)) = (
+        std::env::var("RUSTANGO_S3_TEST_SESSION_TOKEN"),
+        maybe_storage(),
+        storage_with(None),
+    ) else {
+        eprintln!("skipping — set RUSTANGO_S3_TEST_SESSION_TOKEN etc.");
+        return;
+    };
+    let key = format!("sts-test/{}.txt", uuid::Uuid::new_v4());
+    storage.save(&key, b"x").await.expect("save with the token");
+    let url = storage
+        .presigned_get_url(&key, Duration::from_secs(60))
+        .await
+        .expect("GET url");
+    assert!(reqwest::get(&url).await.unwrap().status().is_success());
+
+    assert!(
+        no_token.load(&key).await.is_err(),
+        "loaded without the token"
+    );
+    let url = no_token
+        .presigned_get_url(&key, Duration::from_secs(60))
+        .await
+        .expect("GET url");
+    assert!(!reqwest::get(&url).await.unwrap().status().is_success());
+    storage.delete(&key).await.expect("delete");
 }
 
 #[tokio::test]

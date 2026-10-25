@@ -320,14 +320,14 @@ pub(super) fn b64url_encode(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use p256::ecdsa::{signature::Signer as _, Signature, SigningKey};
 
     /// Build a COSE EC2/ES256 key from a p256 verifying key.
     fn cose_key_of(vk: &p256::ecdsa::VerifyingKey) -> Vec<u8> {
         use ciborium::value::{Integer, Value};
-        let pt = vk.to_encoded_point(false); // uncompressed 0x04||x||y
+        let pt = vk.to_sec1_point(false); // uncompressed 0x04||x||y
         let x = pt.x().unwrap().to_vec();
         let y = pt.y().unwrap().to_vec();
         let map = Value::Map(vec![
@@ -365,16 +365,16 @@ mod tests {
 
     #[test]
     fn cose_key_round_trips_to_verifying_key() {
-        let sk = SigningKey::random(&mut rand_core_os());
+        let sk = random_signing_key();
         let vk = *sk.verifying_key();
         let cose = cose_key_of(&vk);
         let parsed = cose_es256_key(&cose).expect("parse COSE key");
-        assert_eq!(parsed.to_encoded_point(false), vk.to_encoded_point(false));
+        assert_eq!(parsed.to_sec1_point(false), vk.to_sec1_point(false));
     }
 
     #[test]
     fn assertion_verifies_and_tamper_is_rejected() {
-        let sk = SigningKey::random(&mut rand_core_os());
+        let sk = random_signing_key();
         let cose = cose_key_of(sk.verifying_key());
 
         let ad = auth_data("example.com", FLAG_UP, 1);
@@ -438,9 +438,12 @@ mod tests {
         ));
     }
 
-    // p256's `SigningKey::random` wants an `OsRng`; pull it from `rand`'s
-    // re-exported core to avoid a separate `rand_core` dep in tests.
-    fn rand_core_os() -> p256::elliptic_curve::rand_core::OsRng {
-        p256::elliptic_curve::rand_core::OsRng
+    /// Random test key from `rand` bytes; p256's own RNG API needs rand_core 0.10.
+    pub(in crate::passkey) fn random_signing_key() -> SigningKey {
+        loop {
+            if let Ok(sk) = SigningKey::from_slice(&rand::random::<[u8; 32]>()) {
+                return sk;
+            }
+        }
     }
 }

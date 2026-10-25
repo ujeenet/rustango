@@ -69,7 +69,7 @@ Cómo construyes un objeto depende de lo que necesita. Hay unas pocas formas est
 | `T::new(arg)` | Una dependencia obligatoria | `EnvSecrets::with_prefix(s)`, `RedisCache::new(url)` |
 | `T::with_X(arg)` | Sobrescritura estilo builder tras `new()` | `InMemoryCache::with_default_ttl(d)`, `JwtLifecycle::new(s).with_access_ttl(60)` |
 | `T::from_X(arg)` | Convertir DESDE Y | `TotpSecret::from_base32(s)`, `Locale::new(s)` (a veces `from_str`) |
-| `T::for_Y(arg)` | Construir un T acotado a un Y específico | `ViewSet::for_model(schema)` |
+| `T::for_Y(arg)` | Construir un T acotado a un Y específico | `ViewSet::for_model(schema, &fields)` |
 
 **Evita esto:** `T::with_X_and_Y_and_Z(a, b, c)` — un único constructor que recibe todo. Divídelo en `new(...)` más llamadas encadenadas `.with_*()`.
 
@@ -286,7 +286,7 @@ default = [
 Para adelgazar un binario que no necesita todo, desactiva los valores por defecto y lista solo lo que uses:
 
 ```toml
-rustango = { version = "0.60", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.61", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

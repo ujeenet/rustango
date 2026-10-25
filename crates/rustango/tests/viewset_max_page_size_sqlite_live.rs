@@ -78,7 +78,7 @@ async fn count_returned(app: axum::Router, uri: &str) -> usize {
 /// The regression: a client asking for 1000 no longer gets 1000.
 #[tokio::test]
 async fn client_cannot_exceed_the_default_ceiling() {
-    let app = ViewSet::for_model(Note::SCHEMA)
+    let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .page_size(20)
         .router_pool("/notes", pool_with_rows().await);
     let n = count_returned(app, "/notes?page_size=1000").await;
@@ -91,7 +91,7 @@ async fn client_cannot_exceed_the_default_ceiling() {
 /// The app can lower the ceiling below the default.
 #[tokio::test]
 async fn app_can_lower_the_ceiling() {
-    let app = ViewSet::for_model(Note::SCHEMA)
+    let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .page_size(20)
         .max_page_size(25)
         .router_pool("/notes", pool_with_rows().await);
@@ -102,7 +102,7 @@ async fn app_can_lower_the_ceiling() {
 /// …and raise it deliberately when a consumer needs bigger pages.
 #[tokio::test]
 async fn app_can_raise_the_ceiling() {
-    let app = ViewSet::for_model(Note::SCHEMA)
+    let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .max_page_size(200)
         .router_pool("/notes", pool_with_rows().await);
     let n = count_returned(app, "/notes?page_size=200").await;
@@ -113,7 +113,7 @@ async fn app_can_raise_the_ceiling() {
 /// unbounded way around it.
 #[tokio::test]
 async fn limit_offset_respects_the_same_ceiling() {
-    let app = ViewSet::for_model(Note::SCHEMA)
+    let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .max_page_size(30)
         .pagination(rustango::viewset::PaginationStyle::LimitOffset)
         .router_pool("/notes", pool_with_rows().await);
@@ -125,7 +125,7 @@ async fn limit_offset_respects_the_same_ceiling() {
 /// no-parameter path.
 #[tokio::test]
 async fn default_page_size_is_clamped_to_the_ceiling() {
-    let app = ViewSet::for_model(Note::SCHEMA)
+    let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .page_size(500)
         .max_page_size(50)
         .router_pool("/notes", pool_with_rows().await);
@@ -143,7 +143,7 @@ async fn status_of(app: axum::Router, uri: &str) -> StatusCode {
 /// `?page=i64::MAX` is an empty page, not a wrapped negative OFFSET (#1865).
 #[tokio::test]
 async fn huge_page_number_is_an_empty_page() {
-    let app = ViewSet::for_model(Note::SCHEMA)
+    let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .page_size(20)
         .router_pool("/notes", pool_with_rows().await);
     let n = count_returned(app, &format!("/notes?page={}", i64::MAX)).await;
@@ -155,7 +155,7 @@ async fn huge_page_number_is_an_empty_page() {
 async fn in_list_over_the_cap_is_a_400() {
     let cap = rustango::list_params::MAX_IN_VALUES;
     let ids = |n: usize| (1..=n).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
-    let app = ViewSet::for_model(Note::SCHEMA)
+    let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .filter_fields(&["id"])
         .router_pool("/notes", pool_with_rows().await);
     let at_cap = status_of(app.clone(), &format!("/notes?id__in={}", ids(cap))).await;
@@ -202,7 +202,7 @@ async fn in_lists_over_the_bind_total_are_a_400() {
         .unwrap();
     let names: Vec<String> = (0..17).map(|i| format!("f{i}")).collect();
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let app = ViewSet::for_model(Wide::SCHEMA)
+    let app = ViewSet::for_model(Wide::SCHEMA, &["id"])
         .filter_fields(&refs)
         .router_pool("/wide", pool);
     let ids = (1..=rustango::list_params::MAX_IN_VALUES)

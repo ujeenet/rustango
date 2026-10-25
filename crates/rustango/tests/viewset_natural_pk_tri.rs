@@ -52,10 +52,15 @@ async fn setup(pool: &Pool) {
 
 fn app(pool: &Pool) -> axum::Router {
     use rustango::viewset::ViewSet;
-    ViewSet::for_model(Tag::SCHEMA)
+    ViewSet::for_model(Tag::SCHEMA, &["slug", "name"])
         .router_pool("/tags", pool.clone())
-        .merge(ViewSet::for_model(Token::SCHEMA).router_pool("/tokens", pool.clone()))
-        .merge(ViewSet::for_model(Doc::SCHEMA).router_pool("/docs", pool.clone()))
+        .merge(
+            ViewSet::for_model(Token::SCHEMA, &["id", "name"]).router_pool("/tokens", pool.clone()),
+        )
+        .merge(
+            ViewSet::for_model(Doc::SCHEMA, &["id", "qty", "twice"])
+                .router_pool("/docs", pool.clone()),
+        )
 }
 
 fn json(body: &str) -> serde_json::Value {
@@ -231,7 +236,8 @@ async fn sqlite_text_uuid_key_is_found_by_retrieve_update_and_delete() {
         .await
         .expect("sqlite");
     rustango::testkit::matrix::fresh_table::<TextKey>(&pool).await;
-    let app = || ViewSet::for_model(TextKey::SCHEMA).router_pool("/keys", pool.clone());
+    let app =
+        || ViewSet::for_model(TextKey::SCHEMA, &["id", "name"]).router_pool("/keys", pool.clone());
     let seed = Request::builder()
         .method(Method::POST)
         .uri("/keys")

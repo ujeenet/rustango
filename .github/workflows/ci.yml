@@ -942,6 +942,8 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_audit_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_migrate_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_decommission_sqlite_live
+      # A new tenant's first admin and its single-use set-password link.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,webhook,email,testkit --test tenant_first_admin_sqlite_live
       # #1341 — pre-warming pools from the console, which was CLI-only.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_prewarm_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_errors_sqlite_live
@@ -1055,6 +1057,10 @@ jobs:
             --test i18n_admin_editor_tri \
             --test org_host_claims_tri \
             --test tenancy_manage_tri \
+            --test db_servers_tri \
+            --test tenant_database_tri \
+            --test tenant_provision_tri \
+            --test server_tenant_tri \
             --test i18n_db_overrides_sqlite_live \
             --test inspectdb_sqlite_live \
             --test inspectdb_views_sqlite_live \
@@ -1083,6 +1089,7 @@ jobs:
             --test unique_when_sqlite_live \
             --test viewset_sqlite_live \
             --test viewset_natural_pk_tri \
+            --test viewset_write_allowlist_tri \
             --test viewset_filters_tri \
             --test viewset_serializer_patch_tri \
             --test inserted_pk_readback_tri \
@@ -1247,6 +1254,16 @@ jobs:
           docker logs minio >&2 || true
           exit 1
       - run: cargo test -p rustango --features postgres --test s3_live_presign
+      # Again with STS temporary keys, so the session token is signed and sent.
+      - name: s3_live_presign with STS keys
+        run: |
+          X=$(curl -sf --aws-sigv4 "aws:amz:us-east-1:sts" -u "$RUSTANGO_S3_TEST_KEY:$RUSTANGO_S3_TEST_SECRET" \
+            -X POST -d "Action=AssumeRole&Version=2011-06-15&DurationSeconds=3600" "$RUSTANGO_S3_TEST_ENDPOINT/")
+          export RUSTANGO_S3_TEST_KEY=$(echo "$X" | sed -n 's:.*<AccessKeyId>\(.*\)</AccessKeyId>.*:\1:p')
+          export RUSTANGO_S3_TEST_SECRET=$(echo "$X" | sed -n 's:.*<SecretAccessKey>\(.*\)</SecretAccessKey>.*:\1:p')
+          export RUSTANGO_S3_TEST_SESSION_TOKEN=$(echo "$X" | sed -n 's:.*<SessionToken>\(.*\)</SessionToken>.*:\1:p')
+          test -n "$RUSTANGO_S3_TEST_SESSION_TOKEN"
+          cargo test -p rustango --features postgres --test s3_live_presign
       # These 22 were the ones that exposed #1450 the first time they ran
       # against a real database. `--test-threads=1`: the setup helper
       # truncates the shared media tables, so they must not overlap.
@@ -1347,6 +1364,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri
       - run: cargo test -p rustango --features mysql,testkit --test testkit_matrix_forms_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_natural_pk_tri
+      - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_write_allowlist_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_filters_tri
       - run: cargo test -p rustango --features mysql,tenancy,serializer,testkit --test viewset_serializer_patch_tri
       - run: cargo test -p rustango --features mysql,serializer,testkit --test unique_together_validator_tri
@@ -1356,6 +1374,17 @@ jobs:
       - run: cargo test -p rustango --features mysql,sqlite,tenancy,testkit --test resolver_per_registry_tri
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test org_host_claims_tri
       - run: cargo test -p rustango --features mysql,sqlite,tenancy,testkit --test tenancy_manage_tri
+      - run: cargo test -p rustango --features mysql,sqlite,tenancy,testkit --test db_servers_tri
+      # Creates databases and users, so it runs as root.
+      - run: >-
+          MYSQL_TEST_URL=mysql://root:rustango@127.0.0.1:3306/rustango_test
+          cargo test -p rustango --features mysql,tenancy --test tenant_database_tri
+      - run: >-
+          MYSQL_TEST_URL=mysql://root:rustango@127.0.0.1:3306/rustango_test
+          cargo test -p rustango --features mysql,sqlite,tenancy,testkit --test tenant_provision_tri
+      - run: >-
+          MYSQL_TEST_URL=mysql://root:rustango@127.0.0.1:3306/rustango_test
+          cargo test -p rustango --features mysql,sqlite,tenancy,testkit --test server_tenant_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test i18n_admin_editor_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test logout_revokes_sessions_tri
@@ -1401,6 +1430,8 @@ jobs:
           --test media_tags_mysql_live -- --test-threads=1
       # #1573 — collection delete/create under concurrent row locks.
       - run: cargo test -p rustango --features mysql,media,testkit --test media_collection_race_tri
+      # purge_pending holds no lock across the storage call.
+      - run: cargo test -p rustango --features mysql,media,testkit --test media_purge_tri
       # #1570 — media listings return a page; tagging is batched.
       - run: cargo test -p rustango --features mysql,media,testkit,admin --test media_listing_bounds_tri
       # #1403 — bulk create must roll back on a constraint violation.
@@ -1648,6 +1679,110 @@ jobs:
         with:
           name: playwright-report-${{ matrix.backend }}
           path: examples/showcase/e2e/playwright-report
+
+  # Playwright journey through the operator console's tenant-database
+  # pages: save a server, create, hand over, rotate, refuse, purge. The
+  # app is generated by the scaffolder in the job, so it cannot drift.
+  # PG uses the superuser and MySQL root as the saved server's admin.
+  tenant_e2e:
+    permissions:
+      contents: read
+      packages: read
+    needs: gate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: postgres
+            database_url: postgres://rustango:tenant-e2e-pg-secret@127.0.0.1:5432/tenant_e2e
+            db_password: tenant-e2e-pg-secret
+          - backend: mysql
+            database_url: mysql://rustango:rustango@127.0.0.1:3306/tenant_e2e
+            db_password: tenant-e2e-root-secret
+          - backend: sqlite
+            database_url: ''
+            db_password: ''
+    services:
+      postgres:
+        image: ${{ matrix.backend == 'postgres' && 'ghcr.io/ujeenet/ci-postgres:16-alpine' || '' }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          POSTGRES_USER: rustango
+          POSTGRES_PASSWORD: tenant-e2e-pg-secret
+          POSTGRES_DB: tenant_e2e
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U rustango -d tenant_e2e"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+      mysql:
+        image: ${{ matrix.backend == 'mysql' && 'ghcr.io/ujeenet/ci-mysql:8' || '' }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          MYSQL_ROOT_PASSWORD: tenant-e2e-root-secret
+          MYSQL_USER: rustango
+          MYSQL_PASSWORD: rustango
+          MYSQL_DATABASE: tenant_e2e
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -ptenant-e2e-root-secret"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      TENANT_E2E_BACKEND: ${{ matrix.backend }}
+      DATABASE_URL: ${{ matrix.database_url }}
+      TENANT_E2E_DB_PASSWORD: ${{ matrix.db_password }}
+      # rust-cache keeps `target/`; the generated app builds there too.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_INCREMENTAL: '0'
+      CI: '1'
+    steps:
+      # Same SHA pin as `e2e`, see there.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tenant-e2e-${{ matrix.backend }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install playwright + chromium
+        working-directory: examples/tenant_console_e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Scaffold, build and migrate the tenant app
+        working-directory: examples/tenant_console_e2e
+        run: node scripts/app.mjs prepare
+      - name: Run playwright suite
+        working-directory: examples/tenant_console_e2e
+        env:
+          TENANT_E2E_SKIP_PREPARE: '1'
+        run: npx playwright test
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tenant-e2e-report-${{ matrix.backend }}
+          path: |
+            examples/tenant_console_e2e/playwright-report
+            examples/tenant_console_e2e/test-results
 
   # Runnable documentation examples — keep docs/getting-started.md and
   # docs/orm.md in sync with the framework. Each example is a severed

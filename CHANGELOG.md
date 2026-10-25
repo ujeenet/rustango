@@ -4,6 +4,114 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.0] — 2026-10-25
+
+**Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set; `ProvisionRequest` takes a `TenantStorage` and an optional backend, which must be the registry's; a blank `RUSTANGO_SECRET_KEY` no longer seals; `RunKind` is `#[non_exhaustive]`; provisioning types gain a `first_admin` field; `S3Storage::new` takes an `S3Config` and credentials apart; `CreateView`, `UpdateView`, `ViewSet::for_model` and `#[viewset]` require the writable field list and lose `.fields()`; `PoolTuning` and `DatabaseSettings` are `#[non_exhaustive]`; `Debug` on auth, SSO and tenancy structs hides secrets. See UPGRADING.
+
+### Fixed — the first admin could not set a password in a browser
+
+The set-password page and the run page that shows its link sent `Referrer-Policy: no-referrer`, so browsers posted `Origin: null` and CSRF refused the form. They now send `same-origin`.
+
+### Changed — console look and the built-in logo
+
+The built-in `rustango.png` / `icon.png` are the new square logo (transparent, 256 and 64 px). Sidebars and sign-in pages show it beside the name, with the tagline as a badge.
+Database server forms use the sectioned layout; probe results are green or red and wrap; the run page shows one row per step, `code` in details and a **Copy** button for the link; the tenant edit page shows its managed database and takes the URL in a masked field; the sidebar links **Database servers** and reaches the page bottom.
+
+### Added — browser tests for the console's tenant-database pages
+
+`examples/tenant_console_e2e` drives a scaffolded tenant app through Playwright on PostgreSQL, MySQL and SQLite: save a server, create, first-admin link, rotate, refused slug, purge. CI job `tenant_e2e`.
+
+### Added — purge and password rotation for tenants on a saved server
+
+`purge-tenant` and the console drop a database rustango made as the saved server's admin, then its login and record; every refusal (URL moved off the record, a shared database, missing owner or PG 16 ADMIN OPTION, a foreign session) runs before anything changes, and the tenant's own sessions on other pods are ended.
+`rotate-tenant-password <slug>` and the console's **Rotate database password** set a new password, store it sealed by compare-and-set and reopen pools; MySQL 8.0.14+ keeps the old one until other pods catch up.
+Both run as recorded runs (`purge`, `rotate_password`) on the console's run page, and the CLI prints each step. New page: `docs/tenant-databases.md`.
+
+### Fixed — a blank `RUSTANGO_SECRET_KEY` sealed with a known key
+
+It now counts as unset. The **New tenant** page shows the missing-key banner too.
+
+### Added — a new tenant's first admin
+
+The console create form (admin email, optional username), `create-tenant --admin-email <e> [--admin-username <u>]`, the signup webhook (`admin_email`) and `api::create_tenant` (`first_admin`) create a superuser in a `create_admin` step after migrate and before activate; a failure rolls the run back.
+The admin gets no usable password but a single-use, tenant-bound set-password link (72 hours), redeemed on the tenant's change-password page: mailed with `Builder::first_admin_mailer`, else shown once on the run page or printed once by the CLI, and never stored, audited or logged. `set-password-link <slug> <username>` issues a fresh one. A resumed run reuses the admin an earlier run made and never adds a second superuser.
+
+### Added — create a database-mode tenant on a saved server
+
+The console create form, `create-tenant --server <name>`, `api::create_tenant` (`database_server`), the signup webhook (`UrlPolicy::Server`) and `ProvisionRequest::on_server` create a database named as the slug plus its own login, then migrate and activate. Each step shows on the run page.
+The new login must sign in before anything is registered (`check_login`, with pg_hba and shadowing hints); MySQL tenant databases copy the registry's utf8mb4 collation.
+Creates run detached from the request; the record is written before the `CREATE` (unique per server and database), so an interrupted run's database is reclaimed by the next try. A stale run reads as interrupted when viewed.
+A later failure drops the new database, login and tenant row; the new registry table `rustango_tenant_databases` records each database rustango created, and a server with a record cannot be removed.
+
+### Fixed — tenant backend and URL schemes
+
+A tenant whose backend differs from the registry's is refused at validation; `pg://`, `sqlite3://` and `mariadb://` URLs, which cannot connect, are refused as unknown schemes. The create form no longer sends a typed URL back.
+
+### Added — sealed tenant database URLs
+
+`tenancy::seal` writes `enc:v1:` secrets (XChaCha20-Poly1305, `RUSTANGO_SECRET_KEY`); create, edit and storage moves seal a password URL when the key is set; `Builder::secrets` / `Cli::with_secrets` install a custom resolver.
+`require_sealed_secrets()` (or `RUSTANGO_REQUIRE_SEALED_SECRETS=1`) refuses to store one unsealed; `RUSTANGO_SECRET_KEY_PREVIOUS` opens values sealed under the old key; `reseal-tenant-secrets [--apply]` re-seals with the current key.
+
+### Fixed — tenant URL references resolve on every path
+
+`TenantPools::new` uses the standard resolver (`env://`, `enc:`, literal); preflight, the console probe and `api::create_tenant` check the resolved URL; a URL of another backend is refused; the console edit hint matches the real schemes.
+A purge that cannot parse a tenant's URL names the stored reference, not the resolved value.
+`TenantPoolInvalidator::tenant_secrets` has no default, so a custom invalidator cannot drop strict sealing.
+`reseal-tenant-secrets --apply` leaves a sealed URL without a password sealed, and skips a row edited since it was read.
+
+### Added — saved database servers
+
+`tenancy::db_server` stores a server's admin login in the new registry table `rustango_db_servers`, password sealed only; the console's **Database servers** page (with provisioning) and `add-db-server` / `list-db-servers` / `test-db-server` / `edit-db-server` / `remove-db-server` save, test and remove them. `ServerAdmin::connect_with` takes a maintenance database.
+New servers default to TLS `require`; an edit from a stale form is refused; removal is refused while any tenant's URL is on the server or cannot be checked; `reseal-tenant-secrets` also re-seals server passwords.
+
+### Added — scaffolded tenant projects can provision
+
+`cargo rustango new --template tenant` calls `.with_tenant_provisioning("migrations")`, so the console has **New tenant** and **Database servers**; `.env.example` documents `RUSTANGO_SECRET_KEY` and `RUSTANGO_SECRET_KEY_PREVIOUS`; the README says how to save the compose database as a server.
+The Database servers pages warn while `RUSTANGO_SECRET_KEY` is missing or short; `check --deploy` warns too when provisioning is mounted.
+
+### Added — `tenancy::server_admin`: create and drop a tenant's database and login
+
+`ServerAdmin` creates a slug-named database plus a login granted only that database (rolled back on failure), drops both, and reports the admin login's rights; SQLite uses `<dir>/<slug>.db`. PostgreSQL tenant databases need PostgreSQL 15+.
+
+### Security — `passkey` moves to `p256` 0.14
+
+Clears the `crypto-bigint` < 0.7.6 advisory. `passkey::verify::cose_es256_key` now returns a `p256` 0.14 key.
+
+### Fixed — `S3Storage` works with temporary keys and IAM roles
+
+`S3Credentials::with_session_token` signs and sends `X-Amz-Security-Token`; an `S3CredentialProvider` refreshes role keys per request. `S3Storage::new` takes the config and the keys apart, see UPGRADING.
+
+### Fixed — `purge_pending` holds no database lock during the storage delete
+
+It soft-deletes the row, deletes the object, then the row, each on its own; a slow bucket no longer blocks other writers (SQLite: "database is locked"). `finalize_upload` skips a soft-deleted row.
+
+### Security — `{:?}` no longer prints secrets
+
+`ResolvedSso`, `TokenResponse`, `OAuth2Flow`, `JwtTokenPair`, `Credentials` and `LoginInput` redact their secrets; `Org`, `ProvisionRequest`, `OrgPatch` and `ProvisionPayload` mask the password in `database_url`.
+
+### Fixed — `CreateView` / `UpdateView` write only an explicit field list
+
+`for_model(schema, &fields)` now requires the allow-list, so a POST can no longer set any column (`owner_id=…`). An update keeps a listed field the form did not send, instead of wiping it; an unsent `bool` is `false`. `.fields()` is removed from both.
+
+```rust
+// before: every input column was writable
+UpdateView::for_model(Post::SCHEMA)
+// after
+UpdateView::for_model(Post::SCHEMA, &["title", "body"])
+```
+
+### Changed — `PoolTuning` and `DatabaseSettings` are `#[non_exhaustive]`
+
+A new pool knob no longer breaks callers' struct literals. Build one from `Default::default()` and assign the `pub` fields.
+
+### Fixed — `CreateView` uses the column default for an unsent field
+
+A listed field with a default that the POST leaves out gets that default, as in `ModelForm` and `ViewSet`, instead of "this field is required".
+
+### Fixed — `ViewSet` writes only an explicit field list
+
+`ViewSet::for_model(schema, &fields)` and `#[viewset(fields = "…")]` now require the list, so a body can no longer set any column (`is_admin`, `owner_id`). `.fields()` is removed.
+
 ## [0.60.12] — 2026-10-23
 
 **Breaking:** `makemigrations --merge` refuses conflicting branches; `migrate --squash` refuses data ops, callbacks and renames; `migrate <target>` applies earlier-sorting pending files and unapplies later-sorting siblings; upserts with no update columns return `SqlError::EmptyUpdateSet` on PostgreSQL and SQLite; derived index names over 63 bytes get a hash suffix, so their indexes are recreated once; the migrate lock opens its own connection and SQLite locks a file; `ForeignKey<T>` references `T`'s PK column; `set_null` on a non-`Option` `fk` / `o2o` field is a compile error; M2M `set` locks the source row; admin login and the session gate return 503 on a database error; MCP audit redacts more argument keys; a trailing-dot `Host` matches the host without it; ViewSet writes skip superuser-only fields unless a superuser is signed in; inactive users hold no permissions; `require_auth` answers 403 when an outer layer bound another tenant; `__week` is the ISO week on MySQL and SQLite; a `.join()` alias that differs from the one a relation lookup needs returns `QueryError::DuplicateJoinAlias`; `OAuthError::BadStatus` keeps only the provider's error code; FK `get` follows a shared `on` column. See UPGRADING.

@@ -49,6 +49,56 @@ pub const SESSION_IDLE_SECS: i64 = 30 * 60;
 /// How stale `exp` must be before a request re-issues the cookie.
 const RENEW_AFTER_SECS: i64 = 60;
 
+/// The tenant session key as the server loads it: the env var, or off the
+/// prod tier the dev key file. Never a random key, so a CLI and the server agree.
+pub(crate) fn tenant_secret_from_env() -> Result<SessionSecret, super::TenancyError> {
+    use crate::session::{is_prod_tier, tier_from_env};
+    if is_prod_tier(&tier_from_env()) {
+        SessionSecret::require_from_env()
+            .map_err(|e| super::TenancyError::Validation(e.to_string()))
+    } else {
+        Ok(SessionSecret::from_env_or_disk(std::path::Path::new(
+            crate::session::TENANT_SESSION_KEY_PATH,
+        )))
+    }
+}
+
+/// Where [`existing_tenant_secret`] found the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeySource {
+    Env,
+    /// The dev key file: only a server reading the same file shares it.
+    DevFile,
+}
+
+/// The tenant session key, only if one exists: never generated or written,
+/// so a CLI cannot sign with a key no server holds.
+pub(crate) fn existing_tenant_secret() -> Result<(SessionSecret, KeySource), super::TenancyError> {
+    existing_tenant_secret_at(std::path::Path::new(
+        crate::session::TENANT_SESSION_KEY_PATH,
+    ))
+}
+
+fn existing_tenant_secret_at(
+    dev_file: &std::path::Path,
+) -> Result<(SessionSecret, KeySource), super::TenancyError> {
+    use crate::session::{is_prod_tier, tier_from_env};
+    let invalid =
+        |e: crate::session::SessionSecretError| super::TenancyError::Validation(e.to_string());
+    if std::env::var_os("RUSTANGO_SESSION_SECRET").is_some() || is_prod_tier(&tier_from_env()) {
+        return SessionSecret::require_from_env()
+            .map(|s| (s, KeySource::Env))
+            .map_err(invalid);
+    }
+    match std::fs::read(dev_file) {
+        Ok(bytes) if bytes.len() >= 32 => Ok((SessionSecret::from_bytes(bytes), KeySource::DevFile)),
+        _ => Err(super::TenancyError::Validation(format!(
+            "no tenant session key: set RUSTANGO_SESSION_SECRET, or start the server once so it writes {}",
+            dev_file.display()
+        ))),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     #[error("session cookie is malformed")]
@@ -162,6 +212,21 @@ mod tests {
 
     fn fp() -> PasswordFingerprint {
         PasswordFingerprint::default()
+    }
+
+    /// The CLI loads a key; it never makes one that no server holds.
+    #[test]
+    fn an_existing_key_is_loaded_never_created() {
+        if std::env::var_os("RUSTANGO_SESSION_SECRET").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tenant.key");
+        assert!(existing_tenant_secret_at(&path).is_err());
+        assert!(!path.exists(), "a key file was written");
+        std::fs::write(&path, [7u8; 32]).unwrap();
+        let (_, source) = existing_tenant_secret_at(&path).unwrap();
+        assert_eq!(source, KeySource::DevFile);
     }
 
     #[test]

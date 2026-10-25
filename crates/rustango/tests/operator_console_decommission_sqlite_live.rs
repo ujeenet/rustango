@@ -29,6 +29,7 @@ fn unique(prefix: &str) -> String {
 
 struct Booted {
     app: axum::Router,
+    direct: axum::Router,
     cookie: String,
     registry: rustango::sql::Pool,
     username: String,
@@ -69,11 +70,14 @@ async fn boot() -> Booted {
     op.insert_pool(&registry).await.expect("seed operator");
 
     let provisioner = Provisioner::new(pools.clone(), url.clone(), migrations.path()).erased();
-    let app = router_with_provisioning(
+    let secret = SessionSecret::from_env_or_random();
+    let app =
+        router_with_provisioning(registry.clone(), pools.clone(), provisioner, secret.clone());
+    // Without a provisioner a purge runs inline and reports by redirect.
+    let direct = rustango::tenancy::operator_console::router_with_pools(
         registry.clone(),
         pools.clone(),
-        provisioner,
-        SessionSecret::from_env_or_random(),
+        secret,
     );
 
     let login = app
@@ -105,6 +109,7 @@ async fn boot() -> Booted {
 
     Booted {
         app,
+        direct,
         cookie,
         registry,
         username,
@@ -120,8 +125,17 @@ async fn body_of(resp: axum::response::Response) -> String {
 
 impl Booted {
     async fn post(&self, uri: &str, body: &str) -> axum::response::Response {
-        self.app
-            .clone()
+        self.post_to(&self.app, uri, body).await
+    }
+
+    /// A purge on the console without a provisioner: inline, not a run.
+    async fn purge(&self, slug: &str, body: &str) -> axum::response::Response {
+        self.post_to(&self.direct, &format!("/orgs/{slug}/purge"), body)
+            .await
+    }
+
+    async fn post_to(&self, app: &axum::Router, uri: &str, body: &str) -> axum::response::Response {
+        app.clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -219,10 +233,7 @@ async fn the_org_list_renders_the_outcome_it_is_redirected_with() {
     let b = boot().await;
     let slug = b.tenant().await;
     let resp = b
-        .post(
-            &format!("/orgs/{slug}/purge"),
-            &format!("confirm={slug}&purge_database=on"),
-        )
+        .purge(&slug, &format!("confirm={slug}&purge_database=on"))
         .await;
     let location = resp.headers()["location"].to_str().unwrap().to_owned();
     let html = body_of(b.get(&location).await).await;
@@ -347,9 +358,7 @@ async fn purging_a_database_mode_tenant_needs_the_explicit_flag() {
     let b = boot().await;
     let slug = b.tenant().await;
 
-    let resp = b
-        .post(&format!("/orgs/{slug}/purge"), &format!("confirm={slug}"))
-        .await;
+    let resp = b.purge(&slug, &format!("confirm={slug}")).await;
     let location = resp
         .headers()
         .get("location")
@@ -374,10 +383,7 @@ async fn purging_removes_the_tenant() {
     let slug = b.tenant().await;
 
     let resp = b
-        .post(
-            &format!("/orgs/{slug}/purge"),
-            &format!("confirm={slug}&purge_database=on"),
-        )
+        .purge(&slug, &format!("confirm={slug}&purge_database=on"))
         .await;
     let location = resp
         .headers()

@@ -49,7 +49,7 @@ async fn pool_with_row() -> Pool {
 #[tokio::test]
 async fn renamed_capture_still_resolves_the_detail_route() {
     let pool = pool_with_row().await;
-    let app = rustango::viewset::ViewSet::for_model(Note::SCHEMA)
+    let app = rustango::viewset::ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .pk_param("id")
         .router_pool("/notes", pool);
 
@@ -72,7 +72,7 @@ async fn renamed_capture_still_resolves_the_detail_route() {
 #[tokio::test]
 async fn sibling_route_with_matching_capture_name_mounts() {
     let pool = pool_with_row().await;
-    let vs = rustango::viewset::ViewSet::for_model(Note::SCHEMA)
+    let vs = rustango::viewset::ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .pk_param("id")
         .router_pool("/notes", pool);
 
@@ -103,7 +103,7 @@ async fn sibling_route_with_matching_capture_name_mounts() {
 /// otherwise the OpenAPI describes a path variable that does not exist.
 #[test]
 fn openapi_path_and_parameter_follow_the_rename() {
-    let vs = rustango::viewset::ViewSet::for_model(Note::SCHEMA).pk_param("id");
+    let vs = rustango::viewset::ViewSet::for_model(Note::SCHEMA, &["id", "title"]).pk_param("id");
     let paths = vs.openapi_paths("/notes", "Note");
 
     let item = paths
@@ -126,7 +126,7 @@ fn openapi_path_and_parameter_follow_the_rename() {
 /// Default is unchanged: no call to `pk_param` still yields `{pk}`.
 #[test]
 fn default_capture_is_still_pk() {
-    let vs = rustango::viewset::ViewSet::for_model(Note::SCHEMA);
+    let vs = rustango::viewset::ViewSet::for_model(Note::SCHEMA, &["id", "title"]);
     assert_eq!(vs.pk_param_name(), "pk");
     let paths = vs.openapi_paths("/notes", "Note");
     assert!(paths.iter().any(|(p, _)| p == "/notes/{pk}"));

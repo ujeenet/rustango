@@ -127,6 +127,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::email_jobs` | Dos colas en una tabla de jobs con mailers distintos |
 | `rustango::error` | La causa de un 5xx, que el cuerpo de la respuesta omite |
 | `rustango::auth_flows` | Enlaces de autenticación de un solo uso rechazados por el caché |
+| `rustango::aead` | Una clave secreta anterior vacía |
 | `rustango::hmac_auth` | Configuración de la autenticación HMAC de peticiones |
 | `rustango::humanize` | Filtros de humanize |
 | `rustango::jobs` | Colas de trabajos en segundo plano |
@@ -151,12 +152,16 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::tenancy` | Multi-tenancy, general |
 | `rustango::tenancy::admin` | Admin de inquilino |
 | `rustango::tenancy::decommission` | Baja y purga de inquilinos |
+| `rustango::tenancy::first_admin` | El primer admin de un inquilino nuevo y su enlace |
 | `rustango::tenancy::migrate_run` | Migraciones por inquilino |
+| `rustango::tenancy::operation` | Purga y rotación de contraseña de inquilinos |
 | `rustango::tenancy::operator_console` | Consola de operador |
 | `rustango::tenancy::pools` | Ciclo de vida de los pools de inquilino |
 | `rustango::tenancy::provision` | Aprovisionamiento de inquilinos |
 | `rustango::tenancy::provision_webhook` | Webhooks de aprovisionamiento |
 | `rustango::tenancy::resolver` | Resolución de inquilino |
+| `rustango::tenancy::secrets` | Secretos sellados de inquilino |
+| `rustango::tenancy::server_admin` | Bases de datos de inquilino en un servidor guardado |
 | `rustango::tenancy::sso` | SSO de inquilino |
 | `rustango::tenancy::sweep` | Barridos de retención |
 | `rustango::viewset` | ViewSets montados con escrituras abiertas |

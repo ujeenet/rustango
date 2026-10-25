@@ -133,7 +133,7 @@ pub struct NormalizedUser {
 }
 
 /// Token bag returned by the provider's `/token` endpoint.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct TokenResponse {
     pub access_token: String,
     #[serde(default)]
@@ -149,6 +149,21 @@ pub struct TokenResponse {
     pub scope: Option<String>,
 }
 
+/// Redacted: the tokens are bearer credentials.
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hide = |v: &Option<String>| v.as_ref().map(|_| "<redacted>");
+        f.debug_struct("TokenResponse")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &hide(&self.refresh_token))
+            .field("expires_in", &self.expires_in)
+            .field("token_type", &self.token_type)
+            .field("id_token", &hide(&self.id_token))
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
 /// Maximum age of an OAuth2 login flow (audit N7). `complete()` rejects
 /// a flow whose sealed `created_at` is older than this, bounding replay
 /// of a captured sealed-flow value. 10 minutes gives headroom over the
@@ -157,11 +172,22 @@ const MAX_FLOW_AGE_SECS: u64 = 600;
 
 /// Per-flow secret state — must be persisted between `begin()` and
 /// `complete()`. Round-trip via signed cookie, server-side cache, or DB.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuth2Flow {
     pub state: String,
     pub pkce_verifier: String,
     pub created_at: u64,
+}
+
+/// Redacted: state and verifier are what a callback replay needs.
+impl std::fmt::Debug for OAuth2Flow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuth2Flow")
+            .field("state", &"<redacted>")
+            .field("pkce_verifier", &"<redacted>")
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 /// User mapper — pluggable so providers with weird shapes (GitHub puts
@@ -1517,6 +1543,34 @@ mod tests {
         let dbg = format!("{p:?}");
         assert!(!dbg.contains("supersecret"));
         assert!(dbg.contains("<redacted>"));
+    }
+
+    /// Tokens and flow secrets stay out of `{:?}`.
+    #[test]
+    fn token_and_flow_debug_redact() {
+        let t = TokenResponse {
+            access_token: "acc-tok".into(),
+            refresh_token: Some("ref-tok".into()),
+            expires_in: Some(60),
+            token_type: Some("Bearer".into()),
+            id_token: Some("id-tok".into()),
+            scope: None,
+        };
+        let s = format!("{t:?}");
+        assert!(s.contains("Bearer"), "{s}");
+        for secret in ["acc-tok", "ref-tok", "id-tok"] {
+            assert!(!s.contains(secret), "{s}");
+        }
+        let flow = OAuth2Flow {
+            state: "st-secret".into(),
+            pkce_verifier: "pkce-secret".into(),
+            created_at: 7,
+        };
+        let s = format!("{flow:?}");
+        assert!(
+            !s.contains("st-secret") && !s.contains("pkce-secret"),
+            "{s}"
+        );
     }
 
     #[test]

@@ -178,7 +178,7 @@ Esto añade el subcomando `cargo rustango ...` de forma global. Confirma que est
 cargo rustango --help
 ```
 
-La versión del propio generador de andamiaje es la que fija tu proyecto, así que instalar el más reciente te da el rustango más reciente. Para generar un proyecto sobre una versión anterior, instala ese generador en su lugar (`cargo install cargo-rustango --version 0.60.12`) — véase [Andamiaje](scaffolding.md#la-versión-del-propio-generador-es-la-que-obtiene-tu-proyecto).
+La versión del propio generador de andamiaje es la que fija tu proyecto, así que instalar el más reciente te da el rustango más reciente. Para generar un proyecto sobre una versión anterior, instala ese generador en su lugar (`cargo install cargo-rustango --version 0.61.0`) — véase [Andamiaje](scaffolding.md#la-versión-del-propio-generador-es-la-que-obtiene-tu-proyecto).
 
 ---
 
@@ -679,12 +679,13 @@ Una vez que hay un serializer conectado, **sus campos son toda la superficie de 
 
 El tipo de cada campo del serializer refleja el campo correspondiente del modelo, así que `id` y `published_at` conservan su envoltorio `Auto<…>` del modelo (un `Auto<i64>` sigue serializándose a un entero JSON plano). Luego registra el módulo añadiendo `mod post_serializer;` junto a las otras declaraciones `mod` en `src/main.rs`.
 
-Conecta el serializer al ViewSet con el atributo `serializer` — las respuestas de listar, recuperar y crear se renderizan entonces a través de él (la proyección `fields` a nivel de campo se omite en favor de la forma del serializer):
+Conecta el serializer al ViewSet con el atributo `serializer` — las respuestas de listar, recuperar y crear se renderizan entonces a través de él. `fields` sigue siendo obligatorio: un body solo escribe los campos listados aquí y en el serializer:
 
 ```rust
 #[derive(ViewSet)]
 #[viewset(
     model = Post,
+    fields = "id, title, body, author_id, published_at",
     serializer = crate::post_serializer::PostSerializer,
     ordering = "-published_at",
 )]

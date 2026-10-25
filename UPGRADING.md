@@ -150,6 +150,131 @@ untouched.
 
 ## Unreleased
 
+## 0.61.0
+
+### Built-in logo is square
+
+`/__static__/rustango.png` and `icon.png` now serve a 256 px / 64 px square logo instead of the wide banner. A custom template sized for the banner may need new image dimensions.
+
+### Tenant database URLs are resolved and may be sealed
+
+`TenantPools::new` resolves `env://` and `enc:` references; literal URLs work as before. With `RUSTANGO_SECRET_KEY` set (use 32 or more random bytes), new password URLs are stored sealed; without it they are stored in plain text with a warning, unless `require_sealed_secrets()` / `RUSTANGO_REQUIRE_SEALED_SECRETS=1` refuses them.
+To rotate the key, move the old one to `RUSTANGO_SECRET_KEY_PREVIOUS`, set the new one, run `reseal-tenant-secrets --apply`, then drop the old key.
+That verb re-seals tenant URLs, saved server passwords and SSO client secrets (shared and per tenant). `EncryptedString` casts open with the previous key too, but your own models' encrypted columns are not rewritten: re-save them before dropping the old key.
+Rolling back to 0.60.x leaves `enc:` rows unreadable there: edit those tenants back to a literal URL first.
+Create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` now probes the tenant database before writing.
+
+### New registry table `rustango_db_servers`
+
+Run `makemigrations` then `migrate` to create it. A server password is stored only sealed, so saving one needs `RUSTANGO_SECRET_KEY`.
+New servers use TLS `require` unless saved with `disable` or another mode; a server without TLS needs `--tls disable`. `reseal-tenant-secrets` also re-seals server passwords, so the table must exist before it runs.
+
+### New registry table `rustango_tenant_databases`; `ProvisionRequest` reshaped
+
+Run `makemigrations` then `migrate` to create the table. `ProvisionRequest.mode`, `database_url` and `schema_name` are now one `storage: TenantStorage` (use `ProvisionRequest::database`, `::on_server` or `::new`); `ProvisionStep` has new variants and is `#[non_exhaustive]`, so a match needs a wildcard arm.
+`CreateTenantOpts` has a new `database_server` field: add `..Default::default()` to a struct literal. `Dialect::create_database_sql` takes a second `Option<&Collation>` argument; a custom dialect overriding it must add it.
+A saved-server create needs `RUSTANGO_SECRET_KEY`: the tenant login it creates is stored only sealed.
+`backend` is `Option<BackendKind>` in `ProvisionRequest`, `CreateTenantOpts` and `WebhookConfig`: `None` (the default) takes the registry's, and any other value is refused.
+`UrlPolicy` has a new `Server(name)` variant, so an exhaustive match needs an arm.
+`create-tenant --database-url` without `--mode` now means database mode; `api::create_tenant` refuses a database URL or server in schema mode. Database mode on a saved server returns `Err` when migrations fail, since the tenant was removed again.
+
+### New tenant projects mount provisioning
+
+`cargo rustango new --template tenant` now adds `.with_tenant_provisioning("migrations")` to `main.rs`; delete the line to keep the console read-only. Existing projects add the call themselves to get **New tenant** and **Database servers**, plus `RUSTANGO_SECRET_KEY` in their env.
+
+### First admin fields
+
+`ProvisionRequest`, `ProvisionOutcome`, `CreateTenantOpts` and `ProvisionPayload` have a new `first_admin` (payload: `admin_email`, `admin_username`) field, and `ProvisionStep` a `CreateAdmin` variant: struct literals need `..` defaults and an exhaustive match needs an arm.
+`Provisioner` offers first admins only with `with_first_admin_handover`; the standard `Builder` sets it, signing links with the tenant session secret. The tenant's change-password page now also takes a set-password link without a session.
+`tenancy` now enables `auth_flows`. Without `sso` the admin's email is not stored, so `set-password-link` mails only a username that is an email.
+`create-tenant --admin-email` and `set-password-link` no longer create a tenant session key: set `RUSTANGO_SESSION_SECRET`, or start the server once in dev.
+
+### `TenantPoolInvalidator::tenant_secrets` has no default
+
+A custom implementor must return its `TenantSecrets`; the old default ignored `require_sealed_secrets()`.
+
+### `Dialect` has server DDL methods
+
+`create_database_sql`, `create_login_sql`, `grant_database_sql` and friends have defaults; a custom `Dialect` with a method of the same name must rename it.
+The same goes for `alter_login_password_sql`, `discard_old_password_sql`, `tenant_rights_sql`, `database_sessions_sql` and `end_sessions_sql`.
+
+### A blank `RUSTANGO_SECRET_KEY` is unset
+
+It no longer seals anything. Values it sealed still open with `RUSTANGO_SECRET_KEY_PREVIOUS` set and empty: set a real key and run `reseal-tenant-secrets --apply`.
+
+### Purge of a server-made tenant; purge and rotation runs
+
+`purge-tenant` and the console drop a database rustango made on a saved server as that server's admin, with its login and record; it is refused, changing nothing, when the tenant's URL no longer names that database. Brought databases behave as before.
+With a provisioning console, **Purge** opens a recorded run and redirects to its page instead of flashing the result; `purge-tenant` prints each step.
+`RunKind` has `Purge` and `RotatePassword` and is `#[non_exhaustive]`, so a match needs a wildcard arm. `TenantProvisioner` has `purge_in_run` and `rotate_password_in_run`, with defaults that refuse.
+
+### `passkey` uses `p256` 0.14
+
+`passkey::verify::cose_es256_key` returns a `p256` 0.14 `VerifyingKey`. If you use that key with your own `p256`, move it to 0.14 too (`to_encoded_point` is now `to_sec1_point`).
+
+### `S3Storage::new` takes the config and the keys apart
+
+`S3Config` lost `access_key_id` / `secret_access_key` and is `#[non_exhaustive]`:
+
+```rust
+// before: S3Storage::new(S3Config { bucket, region, endpoint, access_key_id, secret_access_key, path_style })
+S3Storage::new(
+    S3Config::new(bucket, region).with_endpoint(ep).with_path_style(true),
+    S3Credentials::new(key, secret), // .with_session_token(t) for STS keys
+)
+```
+
+### `purge_pending` soft-deletes before it deletes the object
+
+When the storage delete fails, the pending row is left soft-deleted, so `get` no longer returns it and `finalize_upload` reports it missing; the next `purge_pending` or `purge_orphans` retries it.
+
+### `Debug` output hides secrets
+
+Code that read a token, password or `database_url` out of `{:?}` output (e.g. in a test) must read the field instead.
+
+### `CreateView` / `UpdateView` need a field list
+
+`for_model` takes the write allow-list and `.fields()` is gone from both. Other posted keys are ignored; on update an unsent listed field keeps its value, except a `bool`, which is `false` (unticked checkbox).
+
+```rust
+// before
+CreateView::for_model(Post::SCHEMA).fields(&["title", "body"])
+UpdateView::for_model(Post::SCHEMA)
+// after
+CreateView::for_model(Post::SCHEMA, &["title", "body"])
+UpdateView::for_model(Post::SCHEMA, &["title", "body"])
+```
+
+### `PoolTuning` and `DatabaseSettings` are `#[non_exhaustive]`
+
+Struct literals, `..Default::default()` included, no longer compile outside rustango. Start from the default and assign.
+
+```rust
+// before
+let t = PoolTuning { max_connections: Some(20), ..Default::default() };
+// after
+let mut t = PoolTuning::default();
+t.max_connections = Some(20);
+```
+
+### `CreateView` fills an unsent defaulted field
+
+A listed field with a column default that the POST omits is no longer a "required" error; the row gets the default. An empty value is still sent, so it is still checked.
+
+### `ViewSet` needs a field list
+
+`for_model` takes the list of fields responses render and bodies may write, and `.fields()` is gone. The derive needs `fields = "…"`, even with a serializer, which still narrows the list.
+
+```rust
+// before
+ViewSet::for_model(Post::SCHEMA).fields(&["id", "title"])
+ViewSet::for_model(Post::SCHEMA)                    // every column writable
+#[viewset(model = Post, serializer = PostSerializer)]
+// after
+ViewSet::for_model(Post::SCHEMA, &["id", "title"])
+#[viewset(model = Post, fields = "id, title", serializer = PostSerializer)]
+```
+
 ## 0.60.12
 
 ### `makemigrations --merge` refuses conflicts

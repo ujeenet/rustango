@@ -37,9 +37,19 @@ fn app(pool: &Pool, superuser: bool) -> axum::Router {
     }))
 }
 
-/// `/users` with no `AuthenticatedUser` at all.
+/// `/users` with no `AuthenticatedUser` at all. The superuser-only fields
+/// are listed, so only the superuser rule keeps a member from writing them.
 fn anonymous(pool: &Pool) -> axum::Router {
-    ViewSet::for_model(User::SCHEMA)
+    let fields = &[
+        "id",
+        "username",
+        "password_hash",
+        "is_superuser",
+        "active",
+        "created_at",
+        "data",
+    ];
+    ViewSet::for_model(User::SCHEMA, fields)
         .allow_anonymous()
         .router_pool("/users", pool.clone())
 }

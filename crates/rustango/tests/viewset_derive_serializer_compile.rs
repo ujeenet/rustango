@@ -44,6 +44,7 @@ impl PostSerializer {
 #[derive(ViewSet)]
 #[viewset(
     model = Post,
+    fields = "id, title, body",
     serializer = PostSerializer,
     ordering = "-id",
     page_size = 25,

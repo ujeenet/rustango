@@ -180,7 +180,7 @@ Ceci ajoute globalement la sous-commande `cargo rustango ...`. Vérifiez qu'elle
 cargo rustango --help
 ```
 
-La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.60.12`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
+La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.61.0`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
 
 ---
 
@@ -683,12 +683,13 @@ Dès qu'un serializer est attaché, **ses champs constituent toute la surface d'
 
 Le type de chaque champ du serializer reflète le champ correspondant du modèle, donc `id` et `published_at` conservent leur enveloppe `Auto<…>` héritée du modèle (un `Auto<i64>` se sérialise toujours en un simple entier JSON). Enregistrez ensuite le module en ajoutant `mod post_serializer;` avec les autres déclarations `mod` dans `src/main.rs`.
 
-Branchez le serializer dans le ViewSet avec l'attribut `serializer` — les réponses de liste, de récupération et de création sont alors rendues via celui-ci (la projection de champs `fields` est alors contournée au profit de la forme du serializer) :
+Branchez le serializer dans le ViewSet avec l'attribut `serializer` — les réponses de liste, de récupération et de création sont alors rendues via celui-ci. `fields` reste obligatoire : un body n'écrit que les champs listés à la fois ici et dans le serializer :
 
 ```rust
 #[derive(ViewSet)]
 #[viewset(
     model = Post,
+    fields = "id, title, body, author_id, published_at",
     serializer = crate::post_serializer::PostSerializer,
     ordering = "-published_at",
 )]

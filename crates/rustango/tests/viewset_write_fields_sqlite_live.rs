@@ -26,6 +26,19 @@ pub struct Doc {
     pub salary: i64,
 }
 
+const DOC_FIELDS: &[&str] = &["id", "owner_id", "title", "salary"];
+const ITEM_FIELDS: &[&str] = &[
+    "id",
+    "title",
+    "status",
+    "contact",
+    "note",
+    "is_public",
+    "settings",
+    "created_at",
+    "updated_at",
+];
+
 /// Renders no `salary`, so it must not be sortable either.
 #[derive(Serializer, serde::Deserialize, Default)]
 #[serializer(model = Doc)]
@@ -103,8 +116,7 @@ async fn send(app: &axum::Router, r: Request<Body>) -> (StatusCode, Value) {
 #[tokio::test]
 async fn fields_limits_what_update_writes() {
     let sq = pool().await;
-    let app = ViewSet::for_model(Doc::SCHEMA)
-        .fields(&["id", "title"])
+    let app = ViewSet::for_model(Doc::SCHEMA, &["id", "title"])
         .router_pool("/docs", Pool::Sqlite(sq.clone()));
 
     let (status, _) = send(
@@ -129,8 +141,7 @@ async fn fields_limits_what_update_writes() {
 #[tokio::test]
 async fn fields_limits_what_create_writes() {
     let sq = pool().await;
-    let app = ViewSet::for_model(Doc::SCHEMA)
-        .fields(&["id", "title"])
+    let app = ViewSet::for_model(Doc::SCHEMA, &["id", "title"])
         .router_pool("/docs", Pool::Sqlite(sq.clone()));
     let body = r#"{"title":"n","owner_id":7,"salary":99}"#;
     let (status, created) = send(&app, req(Method::POST, "/docs", body, None)).await;
@@ -140,7 +151,7 @@ async fn fields_limits_what_create_writes() {
 }
 
 fn owned(sq: &sqlx::SqlitePool) -> axum::Router {
-    ViewSet::for_model(Doc::SCHEMA)
+    ViewSet::for_model(Doc::SCHEMA, DOC_FIELDS)
         .filter_backend(OwnedBy::column("owner_id"))
         .router_pool("/docs", Pool::Sqlite(sq.clone()))
 }
@@ -206,7 +217,7 @@ async fn owned_by_refuses_an_unauthenticated_create() {
 #[tokio::test]
 async fn owned_by_superuser_sees_all_may_set_the_owner() {
     let sq = pool().await;
-    let app = ViewSet::for_model(Doc::SCHEMA)
+    let app = ViewSet::for_model(Doc::SCHEMA, DOC_FIELDS)
         .filter_backend(OwnedBy::column("owner_id").superuser_sees_all())
         .router_pool("/docs", Pool::Sqlite(sq.clone()));
     let mut r = req(Method::PATCH, "/docs/1", r#"{"owner_id":2}"#, None);
@@ -219,7 +230,7 @@ async fn owned_by_superuser_sees_all_may_set_the_owner() {
 #[tokio::test]
 async fn ordering_falls_back_to_the_serializer_fields() {
     let sq = pool().await;
-    let app = ViewSet::for_model(Doc::SCHEMA)
+    let app = ViewSet::for_model(Doc::SCHEMA, DOC_FIELDS)
         .serializer::<DocSerializer>()
         .ordering(&[("id", false)])
         .router_pool("/docs", Pool::Sqlite(sq));
@@ -282,7 +293,7 @@ impl rustango::viewset::ViewSetFilter for PinOwner {
 #[tokio::test]
 async fn two_pins_on_one_field_write_it_once_or_deny() {
     let sq = pool().await;
-    let agree = ViewSet::for_model(Doc::SCHEMA)
+    let agree = ViewSet::for_model(Doc::SCHEMA, DOC_FIELDS)
         .filter_backend(OwnedBy::column("owner_id"))
         .filter_backend(PinOwner(1))
         .router_pool("/docs", Pool::Sqlite(sq.clone()));
@@ -291,7 +302,7 @@ async fn two_pins_on_one_field_write_it_once_or_deny() {
     assert_eq!(status, StatusCode::CREATED, "{created}");
     assert_eq!(created["owner_id"], 1);
 
-    let disagree = ViewSet::for_model(Doc::SCHEMA)
+    let disagree = ViewSet::for_model(Doc::SCHEMA, DOC_FIELDS)
         .filter_backend(OwnedBy::column("owner_id"))
         .filter_backend(PinOwner(2))
         .router_pool("/docs", Pool::Sqlite(sq.clone()));
@@ -351,7 +362,7 @@ async fn item_pool() -> sqlx::SqlitePool {
 }
 
 fn items(sq: &sqlx::SqlitePool) -> axum::Router {
-    ViewSet::for_model(Item::SCHEMA).router_pool("/items", Pool::Sqlite(sq.clone()))
+    ViewSet::for_model(Item::SCHEMA, ITEM_FIELDS).router_pool("/items", Pool::Sqlite(sq.clone()))
 }
 
 /// Create one item through the API; returns its id.
@@ -505,7 +516,7 @@ async fn create_applies_column_defaults() {
 #[cfg(feature = "openapi")]
 #[test]
 fn create_spec_does_not_require_defaulted_fields() {
-    let (_, item) = ViewSet::for_model(Item::SCHEMA)
+    let (_, item) = ViewSet::for_model(Item::SCHEMA, ITEM_FIELDS)
         .openapi_paths("/x", "X")
         .into_iter()
         .find(|(p, _)| p == "/x")

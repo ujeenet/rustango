@@ -84,17 +84,31 @@ impl RunState {
 /// One attempt to stand up a tenant.
 /// What a run was for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RunKind {
     Provision,
     Migrate,
+    /// Destroying a tenant's storage and row.
+    Purge,
+    /// A new password for a server-made tenant's login.
+    RotatePassword,
 }
 
 impl RunKind {
+    pub const ALL: [Self; 4] = [
+        Self::Provision,
+        Self::Migrate,
+        Self::Purge,
+        Self::RotatePassword,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Provision => "provision",
             Self::Migrate => "migrate",
+            Self::Purge => "purge",
+            Self::RotatePassword => "rotate_password",
         }
     }
 
@@ -104,7 +118,20 @@ impl RunKind {
     pub fn parse(raw: &str) -> Self {
         match raw {
             "migrate" => Self::Migrate,
+            "purge" => Self::Purge,
+            "rotate_password" => Self::RotatePassword,
             _ => Self::Provision,
+        }
+    }
+
+    /// What a run page calls the work, before the tenant's slug.
+    #[must_use]
+    pub const fn verb(self) -> &'static str {
+        match self {
+            Self::Provision => "Provisioning",
+            Self::Migrate => "Migrating",
+            Self::Purge => "Purging",
+            Self::RotatePassword => "Rotating the database password of",
         }
     }
 }
@@ -272,6 +299,28 @@ impl RunText {
     #[must_use]
     pub fn fixed(text: &'static str) -> Self {
         Self(text.to_owned())
+    }
+
+    /// `what` about a database and its login. Validated names only, so
+    /// nothing else can ride along.
+    #[must_use]
+    pub(crate) fn about_database(
+        what: &'static str,
+        database: &crate::sql::DatabaseName,
+        login: Option<&crate::sql::LoginName>,
+    ) -> Self {
+        Self(match login {
+            Some(l) => format!("{what}: database `{database}`, login `{l}`"),
+            None => format!("{what}: database `{database}`"),
+        })
+    }
+
+    /// A first admin's link that never went out. Validated names only.
+    #[cfg(feature = "webhook")]
+    pub(crate) fn handover_lost(slug: &str, username: &str) -> Self {
+        Self(format!(
+            "the set-password link was not mailed; run `set-password-link {slug} {username}`"
+        ))
     }
 
     /// A validation (or busy) error's own text; `None` for a cause to withhold.
@@ -462,6 +511,25 @@ pub async fn append_event_text(
     Ok(())
 }
 
+/// Append one event after the run's last, for a note made once it closed.
+///
+/// # Errors
+/// A registry read or write failure.
+#[cfg(feature = "webhook")]
+pub(crate) async fn append_note(
+    registry: &Pool,
+    run_id: i64,
+    step: &str,
+    status: &str,
+    message: &RunText,
+) -> Result<(), TenancyError> {
+    let next = events_since(registry, run_id, 0)
+        .await?
+        .last()
+        .map_or(0, |e| e.seq + 1);
+    append_event_text(registry, run_id, next, step, status, message).await
+}
+
 /// Record that the `Org` row now exists, so a run that fails later
 /// still says which tenant it half-made.
 ///
@@ -627,6 +695,68 @@ pub async fn open_migrate_run(
     Ok(run)
 }
 
+/// Open a run of `kind` for work on an existing tenant: a purge or a
+/// password rotation. Refused while another one runs for the same tenant.
+///
+/// # Errors
+/// Driver / insert failures, or a refusal naming the running run.
+pub async fn open_operation_run(
+    registry: &Pool,
+    kind: RunKind,
+    org: &super::Org,
+    requested_by: Option<&str>,
+) -> Result<ProvisioningRun, TenancyError> {
+    let run = insert_operation_run(registry, kind, org, requested_by).await?;
+    let id = run.id.get().copied().unwrap_or_default();
+    // Inserted first, then compared by id: of two racing opens the later one yields.
+    let earlier: Vec<ProvisioningRun> = ProvisioningRun::objects()
+        .where_(ProvisioningRun::org_id.eq(org.id.get().copied()))
+        .where_(ProvisioningRun::state.eq(RunState::Running.as_str().to_owned()))
+        .where_(ProvisioningRun::id.lt(id))
+        .fetch(registry)
+        .await?;
+    for other in earlier {
+        let operation = matches!(
+            RunKind::parse(&other.kind),
+            RunKind::Purge | RunKind::RotatePassword
+        );
+        if operation && !close_if_stale(registry, &other).await? {
+            let why = RunText(format!(
+                "another purge or password change (run {}) is running for this tenant; wait for it",
+                other.id.get().copied().unwrap_or_default()
+            ));
+            finish_run_text(registry, id, RunState::Failed, Some(&why)).await?;
+            return Err(TenancyError::Validation(why.0));
+        }
+    }
+    Ok(run)
+}
+
+async fn insert_operation_run(
+    registry: &Pool,
+    kind: RunKind,
+    org: &super::Org,
+    requested_by: Option<&str>,
+) -> Result<ProvisioningRun, TenancyError> {
+    let mut run = ProvisioningRun {
+        id: Auto::default(),
+        kind: kind.as_str().to_owned(),
+        slug: org.slug.clone(),
+        org_id: org.id.get().copied(),
+        state: RunState::Running.as_str().to_owned(),
+        storage_mode: org.storage_mode.clone(),
+        backend_kind: org.backend_kind.clone(),
+        database_url: None,
+        requested_by: requested_by.map(ToOwned::to_owned),
+        idempotency_key: None,
+        error: None,
+        started_at: Auto::default(),
+        finished_at: None,
+    };
+    run.insert_pool(registry).await?;
+    Ok(run)
+}
+
 /// The most recent runs, newest first.
 ///
 /// A run is reachable by id and nothing enumerated them, so a console
@@ -731,6 +861,21 @@ async fn close_interrupted(registry: &Pool, id: i64) -> Result<bool, TenancyErro
         .execute_pool(registry)
         .await?;
     Ok(n > 0)
+}
+
+/// Close `run` as interrupted if it is stale, so a viewer is not shown a
+/// dead run as `running`. `true` when it was closed.
+///
+/// # Errors
+/// A registry read or write failure.
+pub(crate) async fn close_if_stale(
+    registry: &Pool,
+    run: &ProvisioningRun,
+) -> Result<bool, TenancyError> {
+    if !is_stale(registry, run, STALE_RUN_AFTER).await? {
+        return Ok(false);
+    }
+    close_interrupted(registry, run.id.get().copied().unwrap_or_default()).await
 }
 
 /// Close every `running` run with no progress for `after` (see

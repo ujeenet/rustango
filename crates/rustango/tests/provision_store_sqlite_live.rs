@@ -315,8 +315,8 @@ async fn a_run_that_fails_early_still_closes() {
     let migrations = tempfile::tempdir().expect("migrations dir");
     migrate_registry(&pools, &url, migrations.path()).await;
 
-    let mut request = ProvisionRequest::database("nowhere", "unused");
-    request.database_url = None; // rejected at Validate
+    // Another backend's URL: rejected at Validate.
+    let request = ProvisionRequest::database("nowhere", "postgres://u@db.invalid/nowhere");
 
     let err = provision::provision_tenant_recorded(
         &pools,
@@ -329,7 +329,10 @@ async fn a_run_that_fails_early_still_closes() {
     )
     .await
     .expect_err("must be rejected");
-    assert!(err.to_string().contains("database URL"), "got: {err}");
+    assert!(
+        err.to_string().contains("registry runs on sqlite"),
+        "got: {err}"
+    );
 
     let registry_pool = pools.registry_pool();
     let runs: Vec<store::ProvisioningRun> = store::ProvisioningRun::objects()

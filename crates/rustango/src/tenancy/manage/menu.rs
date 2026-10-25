@@ -73,11 +73,22 @@ const GROUPS: &[Group] = &[
             Action {
                 verb: "create-tenant",
                 about: "provision a new tenant",
+                // No schema default: MySQL and SQLite registries cannot use it.
                 asks: &[
                     Ask::Value {
+                        flag: "--server",
+                        label: "saved database server to create the database on (blank for none)",
+                        default: None,
+                    },
+                    Ask::Value {
+                        flag: "--database-url",
+                        label: "or an existing database URL (blank for none)",
+                        default: None,
+                    },
+                    Ask::Value {
                         flag: "--mode",
-                        label: "storage mode (schema|database)",
-                        default: Some("schema"),
+                        label: "storage mode (schema|database; blank: database if either is given)",
+                        default: None,
                     },
                     Ask::Value {
                         flag: "--display-name",
@@ -181,6 +192,72 @@ const GROUPS: &[Group] = &[
                     yes: "--on",
                     no: "--off",
                 }],
+            },
+        ],
+    },
+    Group {
+        title: "DATABASE SERVERS",
+        actions: &[
+            Action {
+                verb: "list-db-servers",
+                about: "saved database servers, without secrets",
+                asks: &[],
+            },
+            Action {
+                verb: "add-db-server",
+                about: "save a server's admin login (password asked hidden)",
+                asks: &[
+                    Ask::Value {
+                        flag: "--host",
+                        label: "host (blank on SQLite)",
+                        default: None,
+                    },
+                    Ask::Value {
+                        flag: "--port",
+                        label: "port (blank for the default)",
+                        default: None,
+                    },
+                    Ask::Value {
+                        flag: "--user",
+                        label: "admin user (blank on SQLite)",
+                        default: None,
+                    },
+                    Ask::Value {
+                        flag: "--sqlite-dir",
+                        label: "SQLite directory (blank on a server)",
+                        default: None,
+                    },
+                ],
+            },
+            Action {
+                verb: "test-db-server",
+                about: "log in and report the admin login's rights",
+                asks: &[],
+            },
+            Action {
+                verb: "edit-db-server",
+                about: "change a saved server",
+                asks: &[
+                    Ask::Value {
+                        flag: "--host",
+                        label: "new host (blank keeps it)",
+                        default: None,
+                    },
+                    Ask::Value {
+                        flag: "--port",
+                        label: "new port (blank keeps it)",
+                        default: None,
+                    },
+                    Ask::Toggle {
+                        flag: "--prompt-password",
+                        question: "change the password?",
+                    },
+                ],
+            },
+            Action {
+                verb: "remove-db-server",
+                about: "delete a saved server no tenant uses",
+                asks: &[],
             },
         ],
     },
@@ -343,7 +420,12 @@ where
         let argv = build_argv(action, reader, writer)?;
         writeln!(writer)?;
         writeln!(writer, "  Same thing without the menu:")?;
-        writeln!(writer, "    cargo run -- {}", argv.join(" "))?;
+        // A typed database URL may hold a password.
+        let shown: Vec<String> = argv
+            .iter()
+            .map(|a| crate::sql::connect_diagnosis::redact(a))
+            .collect();
+        writeln!(writer, "    cargo run -- {}", shown.join(" "))?;
         writeln!(writer)?;
 
         // Same match the flags go through — boxed because this is the one
@@ -472,6 +554,20 @@ fn build_argv<R: LineSource + ?Sized, W: Write>(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn the_db_server_verbs_are_offered() {
+        let verbs: Vec<&str> = flatten().iter().map(|a| a.verb).collect();
+        for v in [
+            "add-db-server",
+            "list-db-servers",
+            "test-db-server",
+            "edit-db-server",
+            "remove-db-server",
+        ] {
+            assert!(verbs.contains(&v), "{v}");
+        }
+    }
 
     /// Every menu entry must be a verb the dispatcher handles.
     ///
@@ -713,6 +809,21 @@ mod tests {
             !text.contains("Same thing without the menu"),
             "quitting should not have run anything:\n{text}"
         );
+    }
+
+    /// The menu's create-tenant offers a saved server and never picks
+    /// schema mode for a MySQL or SQLite registry.
+    #[test]
+    fn create_tenant_asks_for_a_server_and_defaults_no_mode() {
+        let action = GROUPS
+            .iter()
+            .flat_map(|g| g.actions)
+            .find(|a| a.verb == "create-tenant")
+            .expect("in the menu");
+        let mut sink = Vec::new();
+        let input = "main\n".to_owned() + &"\n".repeat(action.asks.len());
+        let argv = build_argv(action, &mut Cursor::new(input), &mut sink).expect("argv");
+        assert_eq!(argv, vec!["create-tenant", "--server", "main"]);
     }
 
     /// Values become `--flag value`; an empty answer drops the flag entirely

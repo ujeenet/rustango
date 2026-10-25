@@ -20,6 +20,7 @@
   {% if provisioning_enabled %}
   <a href="{{ console_prefix }}/orgs/new" class="btn btn-primary">+ New tenant</a>
   <a href="{{ console_prefix }}/orgs/provision" class="btn btn-secondary">Runs</a>
+  <a href="{{ console_prefix }}/db-servers" class="btn btn-secondary">Database servers</a>
   <form method="post" action="{{ console_prefix }}/orgs/migrate" class="inline-form"
         data-confirm="Run migrations for every active tenant?">
     {{ csrf_input | default(value='') | safe }}
@@ -39,10 +40,10 @@
 {% if provisioning_enabled %}
 <p>Tenants the registry knows about. Create one here, or from the CLI
 with <code>cargo run -- create-tenant</code>; removal is
-<code>cargo run -- drop-tenant</code>.</p>
+<code>cargo run -- purge-tenant</code>.</p>
 {% else %}
 <p>Tenants the registry knows about. Mutations go through
-<code>cargo run -- create-tenant</code> / <code>cargo run -- drop-tenant</code>
+<code>cargo run -- create-tenant</code> / <code>cargo run -- purge-tenant</code>
 (or whatever your project binary is — runs through
 <code>rustango::manage::Cli</code>). To create tenants from here, add
 <code>.with_tenant_provisioning("migrations")</code> to the

@@ -76,6 +76,10 @@ fn generate(template: &str, flags: &[&str], tag: &str) -> (PathBuf, PathBuf) {
     (work, root)
 }
 
+fn scaffold_target() -> PathBuf {
+    std::env::temp_dir().join("rustango-scaffold-target")
+}
+
 /// `cargo check` the generated project, returning (compiled, warnings, log).
 ///
 /// Warnings are counted **only for the generated crate**, never for rustango.
@@ -94,10 +98,7 @@ fn check(root: &Path, extra: &[&str]) -> (bool, usize, String) {
         .args(extra)
         // One shared target dir across every case, so rustango compiles once
         // per feature set rather than once per test.
-        .env(
-            "CARGO_TARGET_DIR",
-            std::env::temp_dir().join("rustango-scaffold-target"),
-        )
+        .env("CARGO_TARGET_DIR", scaffold_target())
         .env("CARGO_INCREMENTAL", "0")
         // Pick deps the running toolchain supports; the repo pins 1.88 (#2310).
         .env("CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS", "fallback")
@@ -263,4 +264,94 @@ fn tenancy_feature_on_fullstack_compiles() {
         &[],
         "features-tenancy",
     );
+}
+
+// ------------------------------------------------------------ run it
+
+/// Status line and headers of a signed-out `GET path` on the apex.
+fn get_head(port: u16, path: &str) -> String {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    write!(
+        s,
+        "GET {path} HTTP/1.1\r\nHost: localhost:{port}\r\nAccept: text/html\r\nConnection: close\r\n\r\n"
+    )
+    .expect("send");
+    let mut resp = String::new();
+    let _ = s.read_to_string(&mut resp);
+    resp.split("\r\n\r\n").next().unwrap_or_default().to_owned()
+}
+
+/// A generated tenant project mounts the console's provisioning pages: signed
+/// out they redirect to the login, where a route that is not mounted is a 404.
+#[test]
+#[ignore = "compiles rustango; run with --ignored"]
+fn tenant_project_mounts_the_provisioning_pages() {
+    if !in_repo() {
+        eprintln!("skipping: crates/rustango not alongside — not a repo checkout");
+        return;
+    }
+    let (work, root) = generate("tenant", &["--backend", "sqlite"], "tenant-run");
+    let built = Command::new(env!("CARGO"))
+        .current_dir(&root)
+        .arg("build")
+        .env("CARGO_TARGET_DIR", scaffold_target())
+        .env("CARGO_INCREMENTAL", "0")
+        .env("CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS", "fallback")
+        .status()
+        .expect("run cargo build");
+    assert!(built.success(), "the tenant project did not build");
+
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("free port")
+        .port();
+    let log = work.join("server.log");
+    let mut server = Command::new(scaffold_target().join("debug").join("probe"))
+        .current_dir(&root)
+        .env("DATABASE_URL", "sqlite://./probe_dev.db?mode=rwc")
+        .env("RUSTANGO_BIND", format!("127.0.0.1:{port}"))
+        .env("RUSTANGO_APEX_DOMAIN", "localhost")
+        .stdout(std::fs::File::create(&log).expect("log file"))
+        .stderr(std::fs::File::create(work.join("server.err")).expect("log file"))
+        .spawn()
+        .expect("start the server");
+    let up = (0..600).any(|_| {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return true;
+        }
+        if server.try_wait().ok().flatten().is_some() {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        false
+    });
+    let heads: Vec<_> = if up {
+        ["/orgs/new", "/db-servers"]
+            .iter()
+            .map(|p| (*p, get_head(port, p)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let _ = server.kill();
+    let _ = server.wait();
+    let logs = format!(
+        "{}{}",
+        std::fs::read_to_string(&log).unwrap_or_default(),
+        std::fs::read_to_string(work.join("server.err")).unwrap_or_default()
+    );
+    let _ = std::fs::remove_dir_all(&work);
+    assert!(up, "the server did not come up:\n{logs}");
+    for (path, head) in heads {
+        let status = head.lines().next().unwrap_or_default();
+        assert!(
+            status.contains(" 302 ") || status.contains(" 303 "),
+            "{path} is not mounted: {head}\n{logs}"
+        );
+        assert!(
+            head.to_ascii_lowercase().contains("login"),
+            "{path}: {head}"
+        );
+    }
 }

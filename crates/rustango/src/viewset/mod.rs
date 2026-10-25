@@ -9,8 +9,8 @@
 //! use rustango::viewset::ViewSet;
 //!
 //! // In your router setup:
-//! let posts_router = ViewSet::for_model(Post::SCHEMA)
-//!     .fields(&["id", "title", "body", "author_id", "published_at"])
+//! // The fields the API renders and a body may write; nothing else is.
+//! let posts_router = ViewSet::for_model(Post::SCHEMA, &["id", "title", "body", "published_at"])
 //!     .filter_fields(&["author_id"])
 //!     .search_fields(&["title", "body"])
 //!     .ordering(&[("published_at", true)])  // DESC by default
@@ -86,7 +86,7 @@
 //! on the outer router to require auth, then pass codenames to `.permissions()`:
 //!
 //! ```ignore
-//! ViewSet::for_model(Post::SCHEMA)
+//! ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
 //!     .permissions(ViewSetPerms {
 //!         list:     vec!["post.view"],
 //!         retrieve: vec!["post.view"],
@@ -420,7 +420,7 @@ where
 ///
 /// ```ignore
 /// use rustango::core::{Filter, Op, SqlValue, WhereExpr};
-/// ViewSet::for_model(Post::SCHEMA)
+/// ViewSet::for_model(Post::SCHEMA, &["id", "title", "status"])
 ///     .filter_backend(|params: &HashMap<String, String>, schema| {
 ///         // hide drafts unless ?include_drafts=1
 ///         if params.get("include_drafts").map(String::as_str) == Some("1") {
@@ -521,7 +521,7 @@ impl WritePin {
 /// # #[derive(rustango::Model)] #[rustango(table = "note")]
 /// # pub struct Note { #[rustango(primary_key)] pub id: rustango::sql::Auto<i64>, pub owner_id: i64 }
 /// # fn main() {
-/// ViewSet::for_model(Note::SCHEMA)
+/// ViewSet::for_model(Note::SCHEMA, &["id", "owner_id"])
 ///     .filter_backend(OwnedBy::column("owner_id"))
 ///     .tenant_router("/api/notes");
 /// # }
@@ -688,7 +688,8 @@ where
 #[derive(Clone)]
 pub struct ViewSet {
     schema: &'static ModelSchema,
-    fields: Option<Vec<String>>,
+    /// The fields responses render and bodies may write.
+    fields: Vec<String>,
     filter_fields: Vec<String>,
     search_fields: Vec<String>,
     /// Allow-list for `?ordering=`. `None` (the default) means the
@@ -724,11 +725,23 @@ pub struct ViewSet {
 }
 
 impl ViewSet {
-    /// Start a ViewSet for the given model schema.
-    pub fn for_model(schema: &'static ModelSchema) -> Self {
+    /// Start a ViewSet that renders and writes only `fields`; any other
+    /// body key is ignored. A natural primary key stays writable on create.
+    ///
+    /// The derive needs the list too:
+    ///
+    /// ```compile_fail
+    /// # #[derive(rustango::Model)] #[rustango(table = "note")]
+    /// # pub struct Note { #[rustango(primary_key)] pub id: rustango::sql::Auto<i64> }
+    /// #[derive(rustango::ViewSet)]
+    /// #[viewset(model = Note)] // no `fields`
+    /// pub struct NoteViewSet;
+    /// ```
+    #[must_use]
+    pub fn for_model(schema: &'static ModelSchema, fields: &[&str]) -> Self {
         Self {
             schema,
-            fields: None,
+            fields: fields.iter().map(|&s| s.to_owned()).collect(),
             filter_fields: Vec::new(),
             search_fields: Vec::new(),
             ordering_fields: None,
@@ -846,25 +859,20 @@ impl ViewSet {
         }
     }
 
-    /// A `.fields([..])` projection must include the cursor column and
-    /// the primary key.
+    /// The field list must include the cursor column and the primary key.
     ///
     /// The `next` token is built from the *rendered* row, so a
-    /// projection that drops either leaves nothing to encode. Checked
-    /// both ways: from `fields()` when a cursor is already set, and
-    /// from `cursor_pagination()` when the projection is.
+    /// projection that drops either leaves nothing to encode.
     ///
-    /// Only `.fields([..])` is covered. A serializer can project the
+    /// Only the field list is covered. A serializer can project the
     /// same column away, and `ModelSerializer` exposes no field list
     /// to check, so that case is still caught at request time.
     fn assert_cursor_is_projected(&self, field: &str) {
-        let Some(projection) = self.fields.as_ref() else {
-            return; // no projection: every column is rendered
-        };
+        let projection = &self.fields;
         let table = self.schema.table;
         assert!(
             projection.iter().any(|f| f == field),
-            "cursor_pagination(\"{field}\") with .fields({projection:?}): the cursor \
+            "cursor_pagination(\"{field}\") with fields {projection:?}: the cursor \
              column is projected away, so no `next` token can be built from a rendered \
              row and pagination would stop after one page. Add `{field}` to the field \
              list, or paginate on a field that is in it."
@@ -872,7 +880,7 @@ impl ViewSet {
         if let Some(pk) = self.schema.fields.iter().find(|f| f.primary_key) {
             assert!(
                 pk.name == field || projection.iter().any(|f| f == pk.name),
-                "cursor_pagination(\"{field}\") with .fields({projection:?}): the primary \
+                "cursor_pagination(\"{field}\") with fields {projection:?}: the primary \
                  key `{table}.{}` is projected away. It breaks ties between rows sharing \
                  a `{field}`, and without it a page boundary inside a run of equal values \
                  skips the rest of the run. Add `{}` to the field list.",
@@ -924,19 +932,6 @@ impl ViewSet {
         self
     }
 
-    /// Restrict which fields appear in list/retrieve responses and are
-    /// accepted on create/update. Default: all scalar fields. A natural
-    /// primary key stays writable on create.
-    pub fn fields(mut self, fields: &[&str]) -> Self {
-        self.fields = Some(fields.iter().map(|&s| s.to_owned()).collect());
-        // Order-independent: the projection can be narrowed after the
-        // cursor is chosen just as easily as before it.
-        if let PaginationStyle::Cursor { field, .. } = self.pagination {
-            self.assert_cursor_is_projected(field);
-        }
-        self
-    }
-
     /// Fields that can be filtered via query params (`?field=value`).
     pub fn filter_fields(mut self, fields: &[&str]) -> Self {
         self.filter_fields = fields.iter().map(|&s| s.to_owned()).collect();
@@ -982,7 +977,7 @@ impl ViewSet {
     /// needs bigger pages:
     ///
     /// ```ignore
-    /// ViewSet::for_model(Post::SCHEMA).page_size(20).max_page_size(500)
+    /// ViewSet::for_model(Post::SCHEMA, &["id", "title"]).page_size(20).max_page_size(500)
     /// ```
     #[must_use]
     pub fn max_page_size(mut self, n: usize) -> Self {
@@ -1043,7 +1038,7 @@ impl ViewSet {
     /// its neighbours instead of renaming them all:
     ///
     /// ```ignore
-    /// ViewSet::for_model(Post::SCHEMA).pk_param("id").router("/api/posts", pool)
+    /// ViewSet::for_model(Post::SCHEMA, &["id", "title"]).pk_param("id").router("/api/posts", pool)
     /// // detail routes become /api/posts/{id}
     /// ```
     ///
@@ -1108,7 +1103,7 @@ impl ViewSet {
     /// Turn it on once your toolchain reads 3.2:
     ///
     /// ```ignore
-    /// ViewSet::for_model(Post::SCHEMA).openapi_query(true)
+    /// ViewSet::for_model(Post::SCHEMA, &["id", "title"]).openapi_query(true)
     /// ```
     #[must_use]
     pub fn openapi_query(mut self, on: bool) -> Self {
@@ -1148,7 +1143,7 @@ impl ViewSet {
     /// ```ignore
     /// use rustango::viewset::ViewSet;
     ///
-    /// let posts_router = ViewSet::for_model(Post::SCHEMA)
+    /// let posts_router = ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     ///     .filter_fields(&["author_id"])
     ///     .search_fields(&["title", "body"])
     ///     .ordering(&[("published_at", true)])
@@ -1459,10 +1454,10 @@ impl AcquiredConn {
 
 impl ViewSet {
     fn effective_fields(&self) -> Vec<&'static crate::core::FieldSchema> {
-        match &self.fields {
-            Some(names) => names.iter().filter_map(|n| self.schema.field(n)).collect(),
-            None => self.schema.scalar_fields().collect(),
-        }
+        self.fields
+            .iter()
+            .filter_map(|n| self.schema.field(n))
+            .collect()
     }
 
     /// The fields a request body may set, before per-request pins.
@@ -1501,7 +1496,7 @@ impl ViewSetState {
         self.vs.effective_fields()
     }
 
-    /// The fields a response shows: `fields()`, narrowed to what the
+    /// The fields a response shows: the field list, narrowed to what the
     /// serializer renders when one is set.
     fn rendered_fields(&self) -> Vec<&'static crate::core::FieldSchema> {
         let mut fields = self.effective_fields();
@@ -1827,11 +1822,11 @@ fn sql_value_json(v: SqlValue) -> Option<Value> {
 
 /// The fields one write request may set, decided once (#1845).
 ///
-/// Create and update read the body only through this, so `fields()`,
+/// Create and update read the body only through this, so the field list,
 /// the serializer and the filter backends' pins cannot disagree.
 struct WriteSet {
     schema: &'static ModelSchema,
-    /// `fields()` ∩ the serializer's writable fields, minus the pinned.
+    /// The field list ∩ the serializer's writable fields, minus the pinned.
     writable: Vec<&'static crate::core::FieldSchema>,
     /// Forced by a filter backend; never read from the body.
     pinned: Vec<(&'static crate::core::FieldSchema, SqlValue)>,
@@ -2607,9 +2602,8 @@ async fn run_list(
     // column. With no explicit allow-list the fallback is the fields
     // this ViewSet actually *exposes*, not every column on the model
     // — otherwise `fields = "id, title"` would still allow a sort
-    // oracle over a column the API never returns. When `fields` is
-    // unset, `effective_fields` is every scalar column anyway. A
-    // serializer narrows it to what it renders (#1845).
+    // oracle over a column the API never returns. A serializer
+    // narrows it to what it renders.
     //
     // `list_params::parse_ordering` is the single source of truth,
     // shared with `template_views::ListView`.
@@ -2997,7 +2991,7 @@ async fn handle_list_cursor(
                             "cursor pagination on `{}` needs the primary key `{}` in the \
                              rendered rows to break ties, and it is not projected. Two rows \
                              sharing a `{}` would otherwise be split across a page boundary \
-                             and all but one skipped. Include `{}` in `.fields([..])` / the \
+                             and all but one skipped. Include `{}` in the field list / the \
                              serializer.",
                             cursor_schema.name, pk.name, cursor_schema.name, pk.name,
                         ),
@@ -3019,8 +3013,8 @@ async fn handle_list_cursor(
                 );
             }
             // The cursor column is not in the rendered row, almost
-            // always because `.fields([...])` or a serializer
-            // projected it away. `next: null` here would be silent
+            // always because a serializer projected it away (the
+            // field list is checked at mount). `next: null` here would be silent
             // truncation: `has_more` is true, but the caller gets no
             // continuation token and no error. Say so instead.
             None => {
@@ -3029,7 +3023,7 @@ async fn handle_list_cursor(
                     &format!(
                         "cursor field `{}` is not present in the rendered rows, so no \
                          `next` token can be issued and pagination would silently stop \
-                         after one page. Include it in `.fields([..])` / the \
+                         after one page. Include it in the field list / the \
                          serializer, or paginate on a field that is projected.",
                         cursor_schema.name
                     ),
@@ -4256,7 +4250,7 @@ mod tenant_router_tests {
         use crate::core::Model as _;
         // Use the framework's own User schema as a stand-in —
         // it's always available and has a PK.
-        let _r = ViewSet::for_model(crate::tenancy::auth::User::SCHEMA)
+        let _r = ViewSet::for_model(crate::tenancy::auth::User::SCHEMA, &["id", "username"])
             .read_only()
             .tenant_router("/api/users");
     }
@@ -4268,7 +4262,7 @@ mod tenant_router_tests {
     #[test]
     fn tenant_router_carries_over_full_builder_chain() {
         use crate::core::Model as _;
-        let _r = ViewSet::for_model(crate::tenancy::auth::User::SCHEMA)
+        let _r = ViewSet::for_model(crate::tenancy::auth::User::SCHEMA, &["id", "username"])
             .filter_fields(&["username"])
             .search_fields(&["username"])
             .ordering(&[("id", true)])
@@ -4283,7 +4277,8 @@ mod tenant_router_tests {
         use crate::core::Model as _;
         // We can't compare PoolSource directly (no PartialEq), but we
         // can assert the discriminant via matches!.
-        let static_state = ViewSet::for_model(crate::tenancy::auth::User::SCHEMA);
+        let static_state =
+            ViewSet::for_model(crate::tenancy::auth::User::SCHEMA, &["id", "username"]);
         // Static can't be tested without a real PgPool; just confirm
         // the tenant variant exists and matches what we expect.
         let vs = static_state.read_only();
@@ -4628,8 +4623,8 @@ mod typed_perms_tests {
     #[test]
     fn permissions_for_model_fills_all_four_crud_codenames() {
         use crate::core::Model;
-        let vs =
-            ViewSet::for_model(<PermPost as Model>::SCHEMA).permissions_for_model::<PermPost>();
+        let vs = ViewSet::for_model(<PermPost as Model>::SCHEMA, &["id", "title"])
+            .permissions_for_model::<PermPost>();
         assert_eq!(vs.perms.list, vec!["vs_typed_perm_post.view"]);
         assert_eq!(vs.perms.retrieve, vec!["vs_typed_perm_post.view"]);
         assert_eq!(vs.perms.create, vec!["vs_typed_perm_post.add"]);
@@ -4660,7 +4655,10 @@ mod default_order_tests {
         schema.default_order = &[("title", true)];
         let schema: &'static ModelSchema = Box::leak(Box::new(schema));
         let mut q = SelectQuery::new(schema);
-        q.order_by = schema.with_pk_tiebreak(default_order_by(&ViewSet::for_model(schema)));
+        q.order_by = schema.with_pk_tiebreak(default_order_by(&ViewSet::for_model(
+            schema,
+            &["id", "title"],
+        )));
         let sql = crate::sql::Sqlite.compile_select(&q).unwrap().sql;
         assert!(sql.ends_with(r#"ORDER BY "title" DESC, "id""#), "{sql}");
     }

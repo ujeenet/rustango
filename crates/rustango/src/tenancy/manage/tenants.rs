@@ -15,7 +15,7 @@ use crate::tenancy::manage::args::{next_value, reject_leading_flag};
 use crate::tenancy::manage_interactive;
 use crate::tenancy::org::{BackendKind, Org, StorageMode};
 use crate::tenancy::pools::TenantPools;
-use crate::tenancy::provision;
+use crate::tenancy::provision::{self, DatabaseSource, TenantStorage};
 
 // ---------- create-tenant ----------
 
@@ -37,6 +37,11 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     let request = parse_create_tenant_args(args)?;
+    // Before anything is made: a missing prod key must not strand an admin.
+    let handover = match &request.first_admin {
+        Some(_) => Some(cli_handover(w)?),
+        None => None,
+    };
 
     // Steps print as they happen rather than from the outcome, because
     // "created tenant …" has always appeared *before* the migrations,
@@ -44,7 +49,7 @@ where
     let progress = CreateTenantProgress {
         out: std::sync::Mutex::new(w),
         slug: request.slug.clone(),
-        mode: request.mode,
+        mode: request.mode(),
     };
     // Recorded, like the console's provisioning (#1344). A tenant created
     // from a shell used to leave no run at all, so the run history — and
@@ -52,7 +57,7 @@ where
     // provision that died halfway left nothing to find. Recording is
     // best-effort inside `provision_tenant_recorded`: bookkeeping must not
     // be what fails a tenant creation.
-    let (_run, outcome) = provision::provision_tenant_recorded(
+    let (_run, mut outcome) = provision::provision_tenant_recorded(
         pools,
         registry_url,
         dir,
@@ -64,6 +69,24 @@ where
     .await?;
 
     let w = progress.into_inner();
+    if let Some(handover) = &handover {
+        let handed = handover
+            .hand_over_outcome(&pools.registry_pool(), &mut outcome, None)
+            .await;
+        if let Some(admin) = &outcome.first_admin {
+            match (&handed, &admin.handover) {
+                (Ok(()), Some(link)) => {
+                    print_handover(w, &admin.username, link, handover.ttl_hours())?
+                }
+                // The tenant is made; only the link is lost.
+                _ => writeln!(
+                    w,
+                    "  could not issue the set-password link; run `set-password-link {} {}`",
+                    outcome.slug, admin.username
+                )?,
+            }
+        }
+    }
     match &outcome.migrations {
         // The observer already printed the `--no-migrate` line; the
         // verb has never followed it with a summary.
@@ -123,6 +146,30 @@ impl<W: Write + Send> provision::ProvisionObserver for CreateTenantProgress<'_, 
                 step: S::Migrate,
                 status: StepStatus::Skipped(_),
             } => writeln!(out, "  --no-migrate: skipping tenant migrations"),
+            E::Step {
+                step: S::CreateDatabase,
+                status: StepStatus::Ok,
+            } => writeln!(out, "created database `{}`", self.slug),
+            E::Step {
+                step: S::CreateLogin,
+                status: StepStatus::Ok,
+            } => writeln!(out, "  created its own login"),
+            E::Step {
+                step: S::Grant,
+                status: StepStatus::Ok,
+            } => writeln!(out, "  granted the login that database only"),
+            E::Step {
+                step: S::CreateAdmin,
+                status: StepStatus::Ok,
+            } => writeln!(out, "  created the first admin (superuser)"),
+            E::Step {
+                step: S::Rollback,
+                status: StepStatus::Ok,
+            } => writeln!(out, "rolled back: dropped the new database and login"),
+            E::Step {
+                step: S::Rollback,
+                status: StepStatus::Failed(why),
+            } => writeln!(out, "rollback failed: {why}"),
             // Validation and storage failures come back as `Err` from
             // the engine and are rendered by the caller; the remaining
             // steps are detail the CLI has never printed.
@@ -130,6 +177,73 @@ impl<W: Write + Send> provision::ProvisionObserver for CreateTenantProgress<'_, 
         };
         let _ = out.flush();
     }
+}
+
+/// The CLI signs links with the server's tenant session key, loaded only.
+fn cli_handover<W: Write>(w: &mut W) -> Result<crate::tenancy::FirstAdminHandover, TenancyError> {
+    use crate::tenancy::session::{existing_tenant_secret, KeySource};
+    let (secret, source) = existing_tenant_secret()?;
+    if source == KeySource::DevFile {
+        writeln!(
+            w,
+            "  note: links are signed with the dev key file; they work only on a server using the same file"
+        )?;
+    }
+    Ok(crate::tenancy::FirstAdminHandover::new(&secret))
+}
+
+/// Print the link once. It is never logged or stored.
+fn print_handover<W: Write>(
+    w: &mut W,
+    username: &str,
+    handed: &crate::tenancy::Handover,
+    hours: u64,
+) -> Result<(), TenancyError> {
+    if let crate::tenancy::Handover::Mailed { to } = handed {
+        writeln!(w, "  set-password link for `{username}` mailed to {to}")?;
+    } else if let Some(link) = handed.link() {
+        writeln!(
+            w,
+            "  set-password link for `{username}` (works once, expires in {hours}h):"
+        )?;
+        writeln!(w, "  {}", link.expose())?;
+        writeln!(w, "  give it to the admin; it won't be shown again")?;
+    }
+    Ok(())
+}
+
+// ---------- set-password-link ----------
+
+/// `set-password-link <slug> <username>`: a fresh single-use link, for an
+/// expired one or a mail that never arrived.
+pub(super) async fn set_password_link<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    const USAGE: &str = "set-password-link <slug> <username>";
+    let parsed = super::args::parse(
+        args,
+        &super::args::Spec {
+            verb: "set-password-link",
+            usage: USAGE,
+            switches: &[],
+            valued: &[],
+            max_positionals: 2,
+        },
+    )?;
+    let slug = parsed.required(0, USAGE)?;
+    let username = parsed.required(1, USAGE)?;
+    let org = super::api::find_org(pools, &slug)
+        .await?
+        .ok_or_else(|| TenancyError::Validation(format!("no tenant with slug `{slug}`")))?;
+    let handover = cli_handover(w)?;
+    let handed =
+        crate::tenancy::first_admin::hand_over_user(pools, &org, &username, &handover).await?;
+    print_handover(w, &username, &handed, handover.ttl_hours())
 }
 
 // ---------- test-tenant-connection ----------
@@ -203,8 +317,9 @@ pub(super) async fn test_tenant_connection<W: Write + Send>(
 fn parse_create_tenant_args(args: &[String]) -> Result<provision::ProvisionRequest, TenancyError> {
     const HELP: &str = "create-tenant <slug> [--mode schema|database] \
         [--backend postgres|mysql|sqlite] [--display-name <s>] \
-        [--database-url <url>] [--schema-name <s>] [--host-pattern <s>] \
-        [--port <n>] [--path-prefix <s>] [--no-migrate]";
+        [--database-url <url> | --server <name>] [--schema-name <s>] [--host-pattern <s>] \
+        [--port <n>] [--path-prefix <s>] [--no-migrate] \
+        [--admin-email <e> [--admin-username <u>]]";
     reject_leading_flag(args, "create-tenant", "slug", HELP)?;
     let mut iter = args.iter();
     let slug_arg = iter.next().cloned();
@@ -216,40 +331,32 @@ fn parse_create_tenant_args(args: &[String]) -> Result<provision::ProvisionReque
                 TenancyError::Validation("create-tenant requires a slug positional argument".into())
             })?,
     };
-    let mut out = provision::ProvisionRequest {
-        slug,
-        mode: StorageMode::Schema,
-        backend: BackendKind::Postgres,
-        display_name: None,
-        database_url: None,
-        schema_name: None,
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        run_migrations: true,
-        preflight: crate::tenancy::preflight::Preflight::default(),
-    };
+    let mut out = provision::ProvisionRequest::new(slug, TenantStorage::Schema(None));
+    let mut mode = None;
+    let (mut database_url, mut server, mut schema_name) = (None, None, None);
+    let (mut admin_email, mut admin_username) = (None, None);
     while let Some(flag) = iter.next() {
         match flag.as_str() {
             "--mode" => {
                 let v = next_value(&mut iter, "--mode")?;
-                out.mode = StorageMode::parse(&v).map_err(|got| {
+                mode = Some(StorageMode::parse(&v).map_err(|got| {
                     TenancyError::Validation(format!(
                         "--mode must be `schema` or `database`, got `{got}`"
                     ))
-                })?;
+                })?);
             }
             "--backend" => {
                 let v = next_value(&mut iter, "--backend")?;
-                out.backend = BackendKind::parse(&v).map_err(|got| {
+                out.backend = Some(BackendKind::parse(&v).map_err(|got| {
                     TenancyError::Validation(format!(
                         "--backend must be `postgres`, `mysql`, or `sqlite`, got `{got}`"
                     ))
-                })?;
+                })?);
             }
             "--display-name" => out.display_name = Some(next_value(&mut iter, "--display-name")?),
-            "--database-url" => out.database_url = Some(next_value(&mut iter, "--database-url")?),
-            "--schema-name" => out.schema_name = Some(next_value(&mut iter, "--schema-name")?),
+            "--database-url" => database_url = Some(next_value(&mut iter, "--database-url")?),
+            "--server" => server = Some(next_value(&mut iter, "--server")?),
+            "--schema-name" => schema_name = Some(next_value(&mut iter, "--schema-name")?),
             "--host-pattern" => out.host_pattern = Some(next_value(&mut iter, "--host-pattern")?),
             "--port" => {
                 let v = next_value(&mut iter, "--port")?;
@@ -259,6 +366,10 @@ fn parse_create_tenant_args(args: &[String]) -> Result<provision::ProvisionReque
             }
             "--path-prefix" => out.path_prefix = Some(next_value(&mut iter, "--path-prefix")?),
             "--no-migrate" => out.run_migrations = false,
+            "--admin-email" => admin_email = Some(next_value(&mut iter, "--admin-email")?),
+            "--admin-username" => {
+                admin_username = Some(next_value(&mut iter, "--admin-username")?);
+            }
             "--help" | "-h" => return Err(TenancyError::Validation(HELP.to_owned())),
             other => {
                 return Err(TenancyError::Validation(format!(
@@ -267,12 +378,47 @@ fn parse_create_tenant_args(args: &[String]) -> Result<provision::ProvisionReque
             }
         }
     }
+    // A database flag alone means database mode.
+    let mode = mode.unwrap_or(if database_url.is_some() || server.is_some() {
+        StorageMode::Database
+    } else {
+        StorageMode::Schema
+    });
+    let bad = |m: &str| Err(TenancyError::Validation(format!("create-tenant: {m}")));
+    out.first_admin = match (admin_email, admin_username) {
+        (Some(email), username) => Some(
+            crate::tenancy::FirstAdmin::new(&email, username.as_deref())
+                .map_err(|m| TenancyError::Validation(format!("create-tenant: {m}")))?,
+        ),
+        (None, Some(_)) => return bad("--admin-username needs --admin-email"),
+        (None, None) => None,
+    };
+    out.storage = match (mode, database_url, server) {
+        (StorageMode::Schema, None, None) => TenantStorage::Schema(schema_name),
+        (StorageMode::Schema, _, _) => {
+            return bad("--database-url and --server need --mode database")
+        }
+        (StorageMode::Database, Some(_), Some(_)) => {
+            return bad("give --database-url or --server, not both")
+        }
+        (StorageMode::Database, Some(url), None) => {
+            TenantStorage::Database(DatabaseSource::Url(url))
+        }
+        (StorageMode::Database, None, Some(name)) => {
+            TenantStorage::Database(DatabaseSource::Server(name))
+        }
+        (StorageMode::Database, None, None) => {
+            return bad("database mode needs --database-url <url> or --server <name>")
+        }
+    };
     // v0.33 — guard the unsupported pairs early so a clear error
     // surfaces instead of a generic schema-mode failure deep in the
     // pool layer.
-    out.backend
-        .validate_storage_mode(out.mode)
-        .map_err(|msg| TenancyError::Validation(msg.to_owned()))?;
+    if let Some(backend) = out.backend {
+        backend
+            .validate_storage_mode(mode)
+            .map_err(|msg| TenancyError::Validation(msg.to_owned()))?;
+    }
     Ok(out)
 }
 
@@ -484,13 +630,18 @@ where
         )));
     }
 
-    let report = super::super::decommission::decommission(
+    let progress = OperationProgress::new(w);
+    let purged = super::super::decommission::purge_recorded(
         pools,
         &slug,
-        super::super::decommission::Action::Purge { purge_database },
+        purge_database,
+        Some(&progress),
+        Some("cli"),
     )
-    .await
-    .map_err(|e| TenancyError::Validation(format!("purge-tenant: {e}")))?;
+    .await;
+    let w = progress.into_inner();
+    let (_run, report) =
+        purged.map_err(|e| TenancyError::Validation(format!("purge-tenant: {e}")))?;
 
     if let Some(schema) = &report.schema_dropped {
         writeln!(w, "purged tenant `{slug}` (dropped schema `{schema}`)")?;
@@ -522,6 +673,74 @@ where
         Err(e) => writeln!(w, "  brand files left in place: {e}")?,
     }
     Ok(())
+}
+
+// ---------- rotate-tenant-password ----------
+
+pub(super) async fn rotate_tenant_password<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    const HELP: &str = "rotate-tenant-password <slug>\n  \
+        A new password for the login rustango made for the tenant on a saved\n  \
+        server: altered on the server, then sealed and stored, then pools reopen.";
+    reject_leading_flag(args, "rotate-tenant-password", "slug", HELP)?;
+    let slug = match args {
+        [slug] => slug.clone(),
+        _ => return Err(TenancyError::Validation(HELP.to_owned())),
+    };
+    let progress = OperationProgress::new(w);
+    let rotated = crate::tenancy::server_tenant::rotate_password_recorded(
+        pools,
+        &slug,
+        Some(&progress),
+        Some("cli"),
+    )
+    .await;
+    let w = progress.into_inner();
+    rotated.map_err(|e| TenancyError::Validation(format!("rotate-tenant-password: {e}")))?;
+    writeln!(w, "rotated the database password of tenant `{slug}`")?;
+    Ok(())
+}
+
+/// Prints each step of a purge or rotation as it ends, as the console's
+/// run page shows it. Never prints a password: events carry none.
+struct OperationProgress<'w, W> {
+    out: std::sync::Mutex<&'w mut W>,
+}
+
+impl<'w, W: Write + Send> OperationProgress<'w, W> {
+    fn new(out: &'w mut W) -> Self {
+        Self {
+            out: std::sync::Mutex::new(out),
+        }
+    }
+
+    fn into_inner(self) -> &'w mut W {
+        self.out.into_inner().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl<W: Write + Send> crate::tenancy::operation::OperationObserver for OperationProgress<'_, W> {
+    fn on_event(&self, event: crate::tenancy::operation::OperationEvent) {
+        use provision::StepStatus;
+        let Ok(mut out) = self.out.lock() else {
+            return;
+        };
+        let step = event.step.as_str();
+        // Progress is cosmetic; a broken pipe must not fail the verb.
+        let _ = match &event.status {
+            StepStatus::Started => Ok(()),
+            StepStatus::Ok => writeln!(out, "  {step} ... ok"),
+            StepStatus::Skipped(why) => writeln!(out, "  {step} ... skipped ({why})"),
+            StepStatus::Failed(why) => writeln!(out, "  {step} ... failed: {why}"),
+        };
+        let _ = out.flush();
+    }
 }
 
 // ---------- list-tenants ----------

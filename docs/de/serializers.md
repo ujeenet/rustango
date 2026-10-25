@@ -425,9 +425,9 @@ gesamte REST-Ressource — **Ausgabe und Eingabe**, auf jedem Backend
 
 ```rust
 #[derive(ViewSet)]
-#[viewset(model = Post, serializer = crate::PostSerializer, ordering = "-published_at")]
+#[viewset(model = Post, fields = "id, title, body", serializer = crate::PostSerializer, ordering = "-published_at")]
 pub struct PostViewSet;
-// or, on the builder: ViewSet::for_model(Post::SCHEMA).serializer::<PostSerializer>()…
+// or, on the builder: ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).serializer::<PostSerializer>()…
 ```
 
 - **Ausgabe** — `list` / `retrieve` / `create` / `update`-Antworten rendern

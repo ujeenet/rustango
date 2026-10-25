@@ -67,7 +67,7 @@ use crate::webhook::{verify_signature, SignatureFormat};
 
 use super::org::{BackendKind, StorageMode};
 use super::preflight::Preflight;
-use super::provision::{ProvisionRequest, TenantProvisioner};
+use super::provision::{DatabaseSource, ProvisionRequest, TenantProvisioner, TenantStorage};
 use super::provision_store::{self as store, RunState};
 
 /// Where a new tenant's database URL comes from.
@@ -93,6 +93,10 @@ pub enum UrlPolicy {
 
     /// Schema-mode tenants: no separate database to name.
     SchemaMode,
+
+    /// Create the database, named as the slug, with its own login on
+    /// this saved [`DbServer`](crate::tenancy::DbServer).
+    Server(String),
 }
 
 impl Default for UrlPolicy {
@@ -147,7 +151,8 @@ pub struct WebhookConfig {
     /// skew.
     pub timestamp_tolerance: Duration,
     pub storage_mode: StorageMode,
-    pub backend: BackendKind,
+    /// `None` takes the registry's; anything else must equal it.
+    pub backend: Option<BackendKind>,
     /// A `running` run with no event for this long is taken as dead, so
     /// a retry of its event starts over (#1883).
     pub stale_run_after: Duration,
@@ -174,7 +179,7 @@ impl WebhookConfig {
             url_policy: UrlPolicy::Template(database_url_template.into()),
             timestamp_tolerance: Duration::from_secs(300),
             storage_mode: StorageMode::Database,
-            backend: BackendKind::default(),
+            backend: None,
             stale_run_after: store::STALE_RUN_AFTER,
         }
     }
@@ -188,7 +193,7 @@ pub struct WebhookState {
 }
 
 /// The payload a caller signs and sends.
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 pub struct ProvisionPayload {
     /// Idempotency key. Every provider retries; this is what makes two
     /// deliveries of one event produce one tenant.
@@ -205,6 +210,32 @@ pub struct ProvisionPayload {
     /// under any other policy rather than ignored.
     #[serde(default)]
     pub database_url: Option<String>,
+    /// A first admin, mailed a set-password link. Refused unless the
+    /// provisioner mails links: nobody here could pass one on.
+    #[serde(default)]
+    pub admin_email: Option<String>,
+    /// Defaults to `admin_email`.
+    #[serde(default)]
+    pub admin_username: Option<String>,
+}
+
+/// The password in `database_url` is masked.
+impl std::fmt::Debug for ProvisionPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProvisionPayload")
+            .field("event_id", &self.event_id)
+            .field("timestamp", &self.timestamp)
+            .field("slug", &self.slug)
+            .field("display_name", &self.display_name)
+            .field("host_pattern", &self.host_pattern)
+            .field(
+                "database_url",
+                &super::org::redacted_url(self.database_url.as_deref()),
+            )
+            .field("admin_email", &self.admin_email)
+            .field("admin_username", &self.admin_username)
+            .finish()
+    }
 }
 
 /// What the caller gets back.
@@ -333,6 +364,16 @@ async fn handle(
 
     // ---- 5. Build the request under the URL policy ----
     let request = build_request(&state.config, &payload)?;
+    if request.first_admin.is_some()
+        && !state
+            .provisioner
+            .first_admin_handover()
+            .is_some_and(super::first_admin::FirstAdminHandover::mails)
+    {
+        return Err(Refusal::Policy(
+            "this endpoint cannot mail a first admin's link; remove `admin_email`".to_owned(),
+        ));
+    }
 
     // ---- 6. Open the run, then hand off ----
     //
@@ -342,9 +383,9 @@ async fn handle(
     let run = match store::open_run(
         &registry,
         &request.slug,
-        request.mode.as_str(),
-        request.backend.as_str(),
-        request.database_url.as_deref(),
+        request.mode().as_str(),
+        request.backend_on(&registry).as_str(),
+        request.database_url(),
         Some("webhook"),
         Some(&payload.event_id),
     )
@@ -380,17 +421,56 @@ async fn handle(
         // `provision`, or the task would open a second run for the
         // same tenant and the caller's id would point at a run that
         // never progresses.
-        if let Err(e) = provisioner.provision_in_run(run_id, &request).await {
-            // The run itself already records this; the log line is for
-            // an operator tailing the app, who has no reason to be
-            // watching the console.
-            tracing::warn!(
-                target: "rustango::tenancy::provision_webhook",
-                slug = %request.slug,
-                run_id,
-                error = %e,
-                "webhook-initiated provisioning failed"
-            );
+        match provisioner.provision_in_run(run_id, &request).await {
+            Ok(mut outcome) => {
+                if let Some(handover) = provisioner.first_admin_handover() {
+                    let handed = handover
+                        .hand_over_outcome(&provisioner.registry(), &mut outcome, None)
+                        .await;
+                    let mailed = outcome.first_admin.as_ref().is_none_or(|a| {
+                        matches!(
+                            a.handover,
+                            Some(super::first_admin::Handover::Mailed { .. })
+                        )
+                    });
+                    // Never the link: name the verb that issues a new one.
+                    if handed.is_err() || !mailed {
+                        tracing::warn!(
+                            target: "rustango::tenancy::provision_webhook",
+                            slug = %request.slug,
+                            run_id,
+                            "the first admin's link was not mailed; issue one with `set-password-link`"
+                        );
+                        if let Some(admin) = &outcome.first_admin {
+                            let note =
+                                store::RunText::handover_lost(&outcome.slug, &admin.username);
+                            let noted = store::append_note(
+                                &provisioner.registry(),
+                                run_id,
+                                super::provision::ProvisionStep::CreateAdmin.as_str(),
+                                "failed",
+                                &note,
+                            )
+                            .await;
+                            if let Err(e) = noted {
+                                tracing::warn!(target: "rustango::tenancy::provision_webhook", run_id, error = %e, "could not record the lost handover");
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                // The run itself already records this; the log line is for
+                // an operator tailing the app, who has no reason to be
+                // watching the console.
+                tracing::warn!(
+                    target: "rustango::tenancy::provision_webhook",
+                    slug = %request.slug,
+                    run_id,
+                    error = %e,
+                    "webhook-initiated provisioning failed"
+                );
+            }
         }
     });
 
@@ -426,7 +506,7 @@ fn build_request(
     let database_url = match (&config.url_policy, &payload.database_url) {
         // Refused, not ignored: a caller who sent a URL believes it
         // was used.
-        (UrlPolicy::Template(_) | UrlPolicy::SchemaMode, Some(_)) => {
+        (UrlPolicy::Template(_) | UrlPolicy::SchemaMode | UrlPolicy::Server(_), Some(_)) => {
             return Err(Refusal::Policy(
                 "this endpoint derives tenant database URLs itself; \
                  remove `database_url` from the payload"
@@ -441,7 +521,7 @@ fn build_request(
             }
             Some(template.replace("{slug}", &payload.slug))
         }
-        (UrlPolicy::SchemaMode, None) => None,
+        (UrlPolicy::SchemaMode | UrlPolicy::Server(_), None) => None,
         (UrlPolicy::CallerSupplied, url) => {
             let Some(url) = url.as_ref().filter(|u| !u.trim().is_empty()) else {
                 return Err(Refusal::Malformed(
@@ -452,18 +532,46 @@ fn build_request(
         }
     };
 
+    let schema = matches!(config.url_policy, UrlPolicy::SchemaMode)
+        || config.storage_mode == StorageMode::Schema;
+    let storage = match (&config.url_policy, database_url) {
+        (UrlPolicy::Server(_), _) if schema => {
+            return Err(Refusal::Policy(
+                "this endpoint creates schema-mode tenants, which have no database to create"
+                    .to_owned(),
+            ))
+        }
+        (UrlPolicy::Server(name), _) => {
+            TenantStorage::Database(DatabaseSource::Server(name.clone()))
+        }
+        _ if schema => TenantStorage::Schema(None),
+        (_, Some(url)) => TenantStorage::Database(DatabaseSource::Url(url)),
+        (_, None) => {
+            return Err(Refusal::Policy(
+                "this endpoint creates database-mode tenants but derives no database URL"
+                    .to_owned(),
+            ))
+        }
+    };
+    let first_admin = match (&payload.admin_email, &payload.admin_username) {
+        (Some(email), username) => Some(
+            super::first_admin::FirstAdmin::new(email, username.as_deref())
+                .map_err(Refusal::Malformed)?,
+        ),
+        (None, Some(_)) => {
+            return Err(Refusal::Malformed(
+                "`admin_username` needs `admin_email`".to_owned(),
+            ))
+        }
+        (None, None) => None,
+    };
     Ok(ProvisionRequest {
-        slug: payload.slug.clone(),
-        mode: config.storage_mode,
         backend: config.backend,
         display_name: payload.display_name.clone(),
-        database_url,
-        schema_name: None,
         host_pattern: payload.host_pattern.clone(),
-        port: None,
-        path_prefix: None,
-        run_migrations: true,
         preflight: Preflight::default(),
+        first_admin,
+        ..ProvisionRequest::new(payload.slug.clone(), storage)
     })
 }
 
@@ -496,7 +604,15 @@ mod tests {
             display_name: None,
             host_pattern: None,
             database_url: url.map(ToOwned::to_owned),
+            admin_email: None,
+            admin_username: None,
         }
+    }
+
+    #[test]
+    fn payload_debug_masks_the_database_password() {
+        let s = format!("{:?}", payload("acme", Some("postgres://u:db-pw-123@h/a")));
+        assert!(s.contains("acme") && !s.contains("db-pw-123"), "{s}");
     }
 
     fn config(policy: UrlPolicy) -> WebhookConfig {
@@ -526,7 +642,7 @@ mod tests {
         ));
         let r = build_request(&c, &payload("acme", None)).expect("valid");
         assert_eq!(
-            r.database_url.as_deref(),
+            r.database_url(),
             Some("postgres://app:pw@db.internal:5432/tenant_acme")
         );
     }
@@ -549,7 +665,7 @@ mod tests {
     fn the_caller_supplied_policy_accepts_one_when_deliberately_enabled() {
         let c = config(UrlPolicy::CallerSupplied);
         let r = build_request(&c, &payload("acme", Some("postgres://mine/x"))).expect("allowed");
-        assert_eq!(r.database_url.as_deref(), Some("postgres://mine/x"));
+        assert_eq!(r.database_url(), Some("postgres://mine/x"));
     }
 
     #[test]
@@ -592,10 +708,32 @@ mod tests {
         assert!(build_request(&c, &payload("acme-2", None)).is_ok());
     }
 
+    /// Signup creates the database itself on a saved server; the caller
+    /// still names only the tenant.
+    #[test]
+    fn the_server_policy_creates_the_database_on_a_saved_server() {
+        let c = config(UrlPolicy::Server("main".to_owned()));
+        let r = build_request(&c, &payload("acme", None)).expect("valid");
+        assert_eq!(r.server(), Some("main"));
+        assert_eq!(r.database_url(), None);
+        assert!(matches!(
+            build_request(&c, &payload("acme", Some("postgres://attacker/x"))),
+            Err(Refusal::Policy(_))
+        ));
+        let schema = WebhookConfig {
+            storage_mode: StorageMode::Schema,
+            ..config(UrlPolicy::Server("main".to_owned()))
+        };
+        assert!(matches!(
+            build_request(&schema, &payload("acme", None)),
+            Err(Refusal::Policy(_))
+        ));
+    }
+
     #[test]
     fn schema_mode_takes_no_url_at_all() {
         let c = config(UrlPolicy::SchemaMode);
         let r = build_request(&c, &payload("acme", None)).expect("valid");
-        assert_eq!(r.database_url, None);
+        assert_eq!(r.database_url(), None);
     }
 }

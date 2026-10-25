@@ -43,7 +43,7 @@ async fn fresh_pool() -> Pool {
 }
 
 fn build_app(pool: Pool) -> axum::Router {
-    ViewSet::for_model(Widget::SCHEMA).router_pool("/widgets", pool)
+    ViewSet::for_model(Widget::SCHEMA, &["id", "label", "priority"]).router_pool("/widgets", pool)
 }
 
 async fn post_json(app: axum::Router, body: &str) -> (StatusCode, String) {
@@ -163,7 +163,7 @@ async fn bulk_entry_that_is_not_an_object_returns_400() {
 #[tokio::test]
 async fn bulk_over_the_row_cap_is_413() {
     let pool = fresh_pool().await;
-    let app = ViewSet::for_model(Widget::SCHEMA)
+    let app = ViewSet::for_model(Widget::SCHEMA, &["id", "label", "priority"])
         .max_bulk_create(2)
         .router_pool("/widgets", pool.clone());
     let three =
@@ -192,7 +192,7 @@ fn bulk(n: usize) -> String {
 #[tokio::test]
 async fn a_rejected_bulk_does_not_lock_the_client_out() {
     let pool = fresh_pool().await;
-    let app = ViewSet::for_model(Widget::SCHEMA)
+    let app = ViewSet::for_model(Widget::SCHEMA, &["id", "label", "priority"])
         .throttle_all(4, 60)
         .router_pool("/widgets", pool.clone());
     let (status, body) = post_json(app.clone(), &bulk(5)).await;

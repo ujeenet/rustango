@@ -157,9 +157,17 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
             )));
         }
     }
+    // The same checks as create and edit, before anything is printed or moved.
     let (target_ref, target_url) = match &parsed.database_url {
         Some(reference) if parsed.target == StorageMode::Database => {
-            (reference.clone(), pools.resolve_secret(reference).await?)
+            let resolved = crate::tenancy::provision::check_database_url(
+                reference,
+                pools.secrets(),
+                &pools.registry_pool(),
+                Some(registry_url),
+            )
+            .await?;
+            (reference.clone(), resolved)
         }
         _ => (registry_url.to_owned(), registry_url.to_owned()),
     };
@@ -184,6 +192,15 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         writeln!(writer, "  [dry-run] no changes — exit.")?;
         return Ok(());
     }
+    // Sealed like a created tenant's; after the dry-run, which stores nothing.
+    let target_stored = match parsed.target {
+        StorageMode::Database => Some(
+            crate::tenancy::secrets::stored_form(&target_ref, &target_url, pools.secrets())
+                .await
+                .map_err(TenancyError::Validation)?,
+        ),
+        StorageMode::Schema => None,
+    };
 
     // 2. Every refusal before the tenant goes offline.
     let restore = match (&target_schema, &source_schema) {
@@ -274,6 +291,7 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         source_url: &source_url,
         source_schema: source_schema.as_ref(),
         target_url: &target_url,
+        target_stored,
         target_schema: target_schema.as_ref(),
     }
     .run(restore, &mut interrupt, writer)
@@ -360,6 +378,8 @@ struct MoveCtx<'a> {
     source_url: &'a str,
     source_schema: Option<&'a SchemaName>,
     target_url: &'a str,
+    /// What `database_url` becomes: the reference, or the literal sealed.
+    target_stored: Option<String>,
     target_schema: Option<&'a SchemaName>,
 }
 
@@ -480,7 +500,7 @@ impl MoveCtx<'_> {
     /// 5. Only the storage columns (and `active`), one guarded update.
     async fn switch(&self) -> Result<(), TenancyError> {
         let (database_url, schema_name) = match self.parsed.target {
-            StorageMode::Database => (self.parsed.database_url.clone(), None),
+            StorageMode::Database => (self.target_stored.clone(), None),
             StorageMode::Schema => (None, self.target_schema.map(|s| s.0.clone())),
         };
         let mut update = self

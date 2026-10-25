@@ -514,20 +514,12 @@ pub fn set_api_key_secret(secret: crate::session::SessionSecret) -> bool {
 /// The CLI that mints a key and the server that checks it must agree, so
 /// this reads the env or the dev key file, never a per-process random key.
 fn api_key_secret() -> Result<&'static crate::session::SessionSecret, super::TenancyError> {
-    use crate::session::{is_prod_tier, tier_from_env, SessionSecret};
     if let Some(s) = API_KEY_SECRET.get() {
         return Ok(s);
     }
-    let secret = if is_prod_tier(&tier_from_env()) {
-        SessionSecret::require_from_env().map_err(|e| {
-            tracing::error!(error = %e, "API keys need RUSTANGO_SESSION_SECRET on the prod tier");
-            super::TenancyError::Validation(e.to_string())
-        })?
-    } else {
-        SessionSecret::from_env_or_disk(std::path::Path::new(
-            crate::session::TENANT_SESSION_KEY_PATH,
-        ))
-    };
+    let secret = super::session::tenant_secret_from_env().inspect_err(|e| {
+        tracing::error!(error = %e, "API keys need RUSTANGO_SESSION_SECRET on the prod tier");
+    })?;
     Ok(API_KEY_SECRET.get_or_init(|| secret))
 }
 

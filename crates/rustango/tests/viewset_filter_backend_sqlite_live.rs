@@ -57,7 +57,7 @@ async fn router() -> axum::Router {
     .await
     .expect("create");
     let pool = Pool::Sqlite(sq);
-    rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+    rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "status"])
         .page_size(100)
         .filter_fields(&["title"])
         .filter_backend(published_only)

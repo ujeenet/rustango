@@ -13,11 +13,23 @@ use crate::core::{
     FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
 };
 
+use super::server::{Collation, DatabaseName, Login, LoginPassword};
 use super::writers::{
     write_aggregate, write_bulk_insert, write_bulk_update_pg, write_count, write_delete,
     write_insert, write_select, write_update, Sql,
 };
 use super::{CompiledStatement, Dialect, SqlError};
+
+/// A string literal whose meaning does not depend on
+/// `standard_conforming_strings`: `E'…'` once a `\` is present.
+fn escape_string_literal(text: &str) -> String {
+    let quoted = text.replace('\'', "''");
+    if text.contains('\\') {
+        format!("E'{}'", quoted.replace('\\', "\\\\"))
+    } else {
+        format!("'{quoted}'")
+    }
+}
 
 /// The Postgres dialect.
 ///
@@ -69,6 +81,162 @@ impl Dialect for Postgres {
 
     fn defer_foreign_keys_sql(&self) -> Option<&'static str> {
         None
+    }
+
+    /// A Postgres database inherits its collation from the template.
+    fn create_database_sql(&self, db: &DatabaseName, _: Option<&Collation>) -> Option<String> {
+        Some(format!("CREATE DATABASE {}", self.quote_ident(db.as_str())))
+    }
+
+    fn drop_database_sql(&self, db: &DatabaseName) -> Option<String> {
+        Some(format!(
+            "DROP DATABASE IF EXISTS {}",
+            self.quote_ident(db.as_str())
+        ))
+    }
+
+    /// Postgres 13+.
+    fn force_drop_database_sql(&self, db: &DatabaseName) -> Option<String> {
+        Some(format!(
+            "DROP DATABASE IF EXISTS {} WITH (FORCE)",
+            self.quote_ident(db.as_str())
+        ))
+    }
+
+    fn database_exists_sql(&self, db: &DatabaseName) -> Option<CompiledStatement> {
+        Some(CompiledStatement {
+            sql: format!(
+                "SELECT count(*) FROM pg_database WHERE datname = {}",
+                self.placeholder(1)
+            ),
+            params: vec![crate::core::SqlValue::String(db.as_str().to_owned())],
+        })
+    }
+
+    fn login_exists_sql(&self, login: &Login) -> Option<CompiledStatement> {
+        Some(CompiledStatement {
+            sql: format!(
+                "SELECT count(*) FROM pg_roles WHERE rolname = {}",
+                self.placeholder(1)
+            ),
+            params: vec![crate::core::SqlValue::String(
+                login.name().as_str().to_owned(),
+            )],
+        })
+    }
+
+    /// A SCRAM verifier where it can be built, so the server log never
+    /// holds the password; else the text in a mode-proof literal.
+    fn create_login_sql(&self, login: &Login, password: &LoginPassword) -> Option<String> {
+        Some(format!(
+            "CREATE ROLE {} LOGIN PASSWORD {}",
+            self.quote_ident(login.name().as_str()),
+            escape_string_literal(&password.pg_secret())
+        ))
+    }
+
+    fn drop_login_sql(&self, login: &Login) -> Option<String> {
+        Some(format!(
+            "DROP ROLE IF EXISTS {}",
+            self.quote_ident(login.name().as_str())
+        ))
+    }
+
+    /// No dual passwords: the old one stops working at once.
+    fn alter_login_password_sql(
+        &self,
+        login: &Login,
+        password: &LoginPassword,
+        _retain_current: bool,
+    ) -> Option<String> {
+        Some(format!(
+            "ALTER ROLE {} PASSWORD {}",
+            self.quote_ident(login.name().as_str()),
+            escape_string_literal(&password.pg_secret())
+        ))
+    }
+
+    /// PG 16+ lets a CREATEROLE login alter or drop only roles it holds
+    /// ADMIN OPTION on, so a replaced admin may not touch older logins.
+    /// Ending sessions needs membership or `pg_signal_backend`.
+    fn tenant_rights_sql(&self, db: &DatabaseName, login: &Login) -> Option<CompiledStatement> {
+        Some(CompiledStatement {
+            sql: "SELECT \
+                  (SELECT me.rolsuper OR pg_has_role(current_user, d.datdba, 'USAGE') \
+                     FROM pg_database d WHERE d.datname = $1), \
+                  (SELECT CASE WHEN current_setting('server_version_num')::int >= 160000 \
+                     THEN pg_has_role(current_user, t.oid, 'MEMBER WITH ADMIN OPTION') \
+                     ELSE me.rolsuper OR me.rolcreaterole END \
+                     FROM pg_roles t WHERE t.rolname = $2), \
+                  me.rolsuper OR pg_has_role(current_user, 'pg_signal_backend', 'USAGE') \
+                     OR COALESCE((SELECT pg_has_role(current_user, t.oid, 'USAGE') \
+                     FROM pg_roles t WHERE t.rolname = $2), false) \
+                  FROM pg_roles me WHERE me.rolname = current_user"
+                .to_owned(),
+            params: vec![
+                crate::core::SqlValue::String(db.as_str().to_owned()),
+                crate::core::SqlValue::String(login.name().as_str().to_owned()),
+            ],
+        })
+    }
+
+    fn database_sessions_sql(&self, db: &DatabaseName, tag: &str) -> Option<CompiledStatement> {
+        Some(CompiledStatement {
+            sql: "SELECT count(*) FILTER (WHERE application_name = $2), \
+                  count(*) FILTER (WHERE application_name IS DISTINCT FROM $2) \
+                  FROM pg_stat_activity WHERE datname = $1"
+                .to_owned(),
+            params: vec![
+                crate::core::SqlValue::String(db.as_str().to_owned()),
+                crate::core::SqlValue::String(tag.to_owned()),
+            ],
+        })
+    }
+
+    fn end_sessions_sql(&self, db: &DatabaseName, tag: &str) -> Option<CompiledStatement> {
+        Some(CompiledStatement {
+            sql: "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity \
+                  WHERE datname = $1 AND application_name = $2"
+                .to_owned(),
+            params: vec![
+                crate::core::SqlValue::String(db.as_str().to_owned()),
+                crate::core::SqlValue::String(tag.to_owned()),
+            ],
+        })
+    }
+
+    /// PUBLIC has CONNECT on every new database; revoking it keeps the
+    /// other tenants' logins out.
+    fn grant_database_sql(&self, db: &DatabaseName, login: &Login) -> Vec<String> {
+        let (d, u) = (
+            self.quote_ident(db.as_str()),
+            self.quote_ident(login.name().as_str()),
+        );
+        vec![
+            format!("REVOKE ALL ON DATABASE {d} FROM PUBLIC"),
+            format!("GRANT ALL PRIVILEGES ON DATABASE {d} TO {u}"),
+        ]
+    }
+
+    /// PG 15+ gives `public` CREATE to the database owner only, which is
+    /// the admin, not the tenant login.
+    fn grant_in_database_sql(&self, login: &Login) -> Vec<String> {
+        vec![format!(
+            "GRANT ALL ON SCHEMA public TO {}",
+            self.quote_ident(login.name().as_str())
+        )]
+    }
+
+    fn server_version_sql(&self) -> Option<&'static str> {
+        Some("SELECT current_setting('server_version')")
+    }
+
+    /// One row: `rolsuper`, `rolcreatedb`, `rolcreaterole`.
+    fn login_privileges_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT rolsuper, rolcreatedb, rolcreaterole FROM pg_roles \
+             WHERE rolname = current_user",
+        )
     }
 
     fn clear_tables_sql(&self, tables: &[&str]) -> Vec<String> {
