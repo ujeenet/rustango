@@ -12,6 +12,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The move creates the target schema before the tenant goes offline and refuses an existing one as `create-tenant` does; the restore replaces it in its own transaction.
 
+### Fixed — tenant path prefixes, ports and admin writes skipped the claim
+
+Path prefix and port changes are claimed like hosts, so two tenants can no longer take one at once. Generic admin writes of `rustango_orgs` and `rustango_org_hosts` now validate, normalize and claim hosts, prefixes and ports too.
+
 ### Fixed — tenant logos 404'd under the default routes
 
 Tenant pages link uploaded logos and favicons under `RouteConfig::brand_url` (`/_brand` by default), the prefix tenant hosts serve, via the new `RouteConfig::brand_asset_url`. Tenant admin pages now use the tenant favicon too.

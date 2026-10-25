@@ -158,6 +158,10 @@ untouched.
 
 It refuses a target schema that already exists, before the tenant goes offline, and drops the empty schema again if the move fails.
 
+### Admin edits of tenants are checked
+
+Saving a `rustango_orgs` or `rustango_org_hosts` row in the generic admin now refuses a host, path prefix or port another tenant uses, and stores hosts lowercased.
+
 ### Scaffold taglines lose their brackets
 
 `cargo rustango new` now writes `tagline = "dev"` / `"staging"`, not `"(dev)"` / `"(staging)"`. Existing projects keep theirs; edit the line to match.

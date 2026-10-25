@@ -186,7 +186,7 @@ pub async fn add_host(
         return Err(HostError::NoSuchOrg(org_slug.to_owned()));
     };
     let org_id = org.id.get().copied().unwrap_or_default();
-    let Claimed { tx, row } = claim_host(registry, &host, Claimant::Extra(org_id)).await?;
+    let Claimed { tx, row } = claim_extra_host(registry, &host, org_id).await?;
     tx.commit().await.map_err(crate::sql::ExecError::from)?;
     super::invalidate_host_cache();
     Ok(row)
@@ -223,141 +223,294 @@ pub(crate) async fn host_claimed(
         .any(|h| except_org.is_none() || Some(h.org_id) != except_org))
 }
 
-/// Who a [`claim_host`] takes the host for.
+/// Whose base routing values a [`claim_routing`] takes: they clash only
+/// with another tenant's.
 pub(crate) enum Claimant<'a> {
-    /// A new `rustango_org_hosts` row: clashes with any other host, its own tenant's too.
-    Extra(i64),
-    /// This tenant's `Org.host_pattern`: clashes only with another tenant's hosts.
+    /// An existing tenant.
     Base(i64),
-    /// A tenant inserted in the claim's transaction, claiming its base host.
+    /// A tenant inserted in the claim's transaction.
     NewOrg(&'a mut super::Org),
 }
 
-/// A held claim: commit `tx` after the write the claim guards.
-pub(crate) struct Claimed {
-    pub(crate) tx: crate::sql::PoolTx<'static>,
-    pub(crate) row: OrgHost,
+/// A held extra-host claim: commit `tx`; `row` is the new host.
+struct Claimed {
+    tx: crate::sql::PoolTx<'static>,
+    row: OrgHost,
 }
 
-/// Claim `host` in a transaction this opens, so nothing reads before it (#2099).
+/// Claim `host` as an extra host of `org_id` in a transaction this opens,
+/// so nothing reads before it (#2099).
 ///
 /// The claim is the hostname's `rustango_org_hosts` row: its unique index
-/// makes a concurrent claim wait for the transaction, then fail. A base
-/// host's claim row is dropped again before commit. MySQL breaks two
-/// claims of a free host with a deadlock; the loser retries once and
-/// then sees the winner's row.
+/// makes a concurrent claim wait for the transaction, then fail. MySQL
+/// breaks two claims of a free host with a deadlock; the loser retries
+/// once and then sees the winner's row.
 ///
 /// # Errors
-/// [`HostError::Taken`] when another tenant has it, or a driver failure.
-pub(crate) async fn claim_host(
-    registry: &Pool,
-    host: &str,
-    mut claimant: Claimant<'_>,
-) -> Result<Claimed, HostError> {
-    match claim_once(registry, host, &mut claimant).await {
+/// [`HostError::Taken`] when any tenant has it, or a driver failure.
+async fn claim_extra_host(registry: &Pool, host: &str, org_id: i64) -> Result<Claimed, HostError> {
+    match claim_extra_host_once(registry, host, org_id).await {
         Err(HostError::Driver(e)) if e.is_deadlock() => {
-            claim_once(registry, host, &mut claimant).await
+            claim_extra_host_once(registry, host, org_id).await
         }
         r => r,
     }
 }
 
-async fn claim_once(
+async fn claim_extra_host_once(
     registry: &Pool,
     host: &str,
-    claimant: &mut Claimant<'_>,
+    org_id: i64,
 ) -> Result<Claimed, HostError> {
-    use crate::sql::FetcherTx as _;
-    let taken = || HostError::Taken(host.to_owned());
+    let key = ClaimKey::Host(host.to_owned());
     let mut tx = crate::sql::write_transaction(registry).await?;
-    let (org_id, base) = match claimant {
-        Claimant::Extra(id) => (*id, false),
-        Claimant::Base(id) => (*id, true),
-        Claimant::NewOrg(org) => {
-            // A retry re-inserts: the deadlock rolled the first INSERT back.
-            org.id = crate::sql::Auto::Unset;
-            org.insert_tx(&mut tx).await?;
-            (org.id.get().copied().unwrap_or_default(), true)
-        }
-    };
-    // A locking read: waits for a writer holding the row, takes no snapshot.
-    let held: Vec<OrgHost> = OrgHost::objects()
-        .where_(OrgHost::hostname.eq(host.to_owned()))
-        .select_for_update()
-        .silent_on_sqlite()
-        .fetch_tx(&mut tx)
-        .await?;
-    let (row, inserted) = match held.into_iter().next() {
-        // Promoting the tenant's own extra host: that row is the claim.
-        Some(own) if base && own.org_id == org_id => (own, false),
-        Some(_) => return Err(taken()),
-        None => {
-            let mut row = OrgHost {
-                id: crate::sql::Auto::Unset,
-                org_id,
-                hostname: host.to_owned(),
-                enabled: true,
-                created_at: crate::sql::Auto::Unset,
-            };
-            match row.insert_tx(&mut tx).await {
-                Err(e) if e.is_unique_violation() => return Err(taken()),
-                r => r?,
-            }
-            (row, true)
-        }
-    };
-    // The first plain reads, so MySQL's snapshot starts after the claim.
-    // `iexact`, as `host_claimed`: a row stored before lowercasing clashes too.
-    let orgs: Vec<super::Org> = super::Org::objects()
-        .where_(super::Org::host_pattern.iexact(host))
-        .fetch_tx(&mut tx)
-        .await?;
-    let extra: Vec<OrgHost> = OrgHost::objects()
-        .where_(OrgHost::hostname.iexact(host))
-        .fetch_tx(&mut tx)
-        .await?;
-    let except = base.then_some(org_id);
-    let clash = other_org(&orgs, except)
-        || extra
-            .iter()
-            .any(|h| h.id.get() != row.id.get() && except != Some(h.org_id));
-    if clash {
-        return Err(taken());
-    }
-    if inserted && base {
-        row.delete_tx(&mut tx).await?;
+    let (row, _) = lock_key(&mut tx, &key, org_id, false)
+        .await
+        .map_err(ClaimError::into_host)?;
+    if held_elsewhere(&mut tx, &key, row.id.get().copied(), None).await? {
+        return Err(HostError::Taken(host.to_owned()));
     }
     Ok(Claimed { tx, row })
 }
 
-/// Insert a new `org`, claiming its host in the same transaction (#2099).
+/// A routing value only one tenant may hold.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ClaimKey {
+    /// A normalized hostname.
+    Host(String),
+    /// A validated path prefix, `/segment`.
+    PathPrefix(String),
+    Port(i32),
+}
+
+impl ClaimKey {
+    /// Its lock row's `hostname`: no hostname holds `/` or `:`, so a
+    /// prefix or port lock never meets a real host.
+    fn lock_name(&self) -> String {
+        match self {
+            Self::Host(h) => h.clone(),
+            Self::PathPrefix(p) => p.to_ascii_lowercase(),
+            Self::Port(n) => format!(":{n}"),
+        }
+    }
+}
+
+impl std::fmt::Display for ClaimKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Host(h) => write!(f, "host `{h}`"),
+            Self::PathPrefix(p) => write!(f, "path prefix `{p}`"),
+            Self::Port(n) => write!(f, "port {n}"),
+        }
+    }
+}
+
+/// Why a routing claim failed.
+#[derive(Debug)]
+pub(crate) enum ClaimError {
+    Taken(ClaimKey),
+    Driver(crate::sql::ExecError),
+}
+
+impl From<crate::sql::ExecError> for ClaimError {
+    fn from(e: crate::sql::ExecError) -> Self {
+        Self::Driver(e)
+    }
+}
+
+impl ClaimError {
+    fn into_host(self) -> HostError {
+        match self {
+            Self::Taken(k) => HostError::Taken(k.lock_name()),
+            Self::Driver(e) => HostError::Driver(e),
+        }
+    }
+
+    /// As the tenant-edit and provisioning paths report it.
+    pub(crate) fn into_tenancy(self) -> super::TenancyError {
+        match self {
+            Self::Taken(k) => {
+                super::TenancyError::Validation(format!("{k} is already used by another tenant"))
+            }
+            Self::Driver(e) => super::TenancyError::Exec(e),
+        }
+    }
+}
+
+impl Claimant<'_> {
+    /// The tenant's id, inserting a new tenant first.
+    async fn begin(&mut self, tx: &mut crate::sql::PoolTx<'_>) -> Result<i64, crate::sql::ExecError> {
+        Ok(match self {
+            Self::Base(id) => *id,
+            Self::NewOrg(org) => {
+                // A retry re-inserts: the deadlock rolled the first INSERT back.
+                org.id = crate::sql::Auto::Unset;
+                org.insert_tx(tx).await?;
+                org.id.get().copied().unwrap_or_default()
+            }
+        })
+    }
+}
+
+/// Claim a tenant's base host, path prefix and port at once, in a
+/// transaction this opens; commit it after the write it guards. Retried
+/// once on a MySQL deadlock, as [`claim_extra_host`].
 ///
 /// # Errors
-/// As [`claim_error`], or the INSERT's driver failure.
+/// [`ClaimError::Taken`] for the first value another tenant holds.
+pub(crate) async fn claim_routing(
+    registry: &Pool,
+    keys: &[ClaimKey],
+    mut claimant: Claimant<'_>,
+) -> Result<crate::sql::PoolTx<'static>, ClaimError> {
+    match claim_routing_once(registry, keys, &mut claimant).await {
+        Err(ClaimError::Driver(e)) if e.is_deadlock() => {
+            claim_routing_once(registry, keys, &mut claimant).await
+        }
+        r => r,
+    }
+}
+
+async fn claim_routing_once(
+    registry: &Pool,
+    keys: &[ClaimKey],
+    claimant: &mut Claimant<'_>,
+) -> Result<crate::sql::PoolTx<'static>, ClaimError> {
+    let mut tx = crate::sql::write_transaction(registry).await?;
+    let org_id = claimant.begin(&mut tx).await?;
+    claim_routing_tx(&mut tx, keys, org_id).await?;
+    Ok(tx)
+}
+
+/// [`claim_routing`] for `org_id`'s base values, inside `tx`. No plain
+/// read may run in `tx` before it: MySQL's snapshot must start after the locks.
+///
+/// # Errors
+/// As [`claim_routing`]; not retried.
+pub(crate) async fn claim_routing_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    keys: &[ClaimKey],
+    org_id: i64,
+) -> Result<(), ClaimError> {
+    let mut keys = keys.to_vec();
+    // One order for every claimant, so two cannot wait on each other.
+    keys.sort();
+    keys.dedup();
+    let mut locked = Vec::with_capacity(keys.len());
+    for key in &keys {
+        locked.push(lock_key(tx, key, org_id, true).await?);
+    }
+    for (key, (row, _)) in keys.iter().zip(&locked) {
+        if held_elsewhere(tx, key, row.id.get().copied(), Some(org_id)).await? {
+            return Err(ClaimError::Taken(key.clone()));
+        }
+    }
+    for (row, inserted) in locked {
+        if inserted {
+            row.delete_tx(tx).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Take `key`'s lock row in `tx`: a waiting writer of the same row
+/// blocks here until it commits. `(row, inserted)`.
+async fn lock_key(
+    tx: &mut crate::sql::PoolTx<'_>,
+    key: &ClaimKey,
+    org_id: i64,
+    base: bool,
+) -> Result<(OrgHost, bool), ClaimError> {
+    use crate::sql::FetcherTx as _;
+    let name = key.lock_name();
+    // A locking read: waits for a writer holding the row, takes no snapshot.
+    let held: Vec<OrgHost> = OrgHost::objects()
+        .where_(OrgHost::hostname.eq(name.clone()))
+        .select_for_update()
+        .silent_on_sqlite()
+        .fetch_tx(tx)
+        .await?;
+    match held.into_iter().next() {
+        // Promoting the tenant's own extra host: that row is the claim.
+        Some(own) if base && own.org_id == org_id && matches!(key, ClaimKey::Host(_)) => {
+            Ok((own, false))
+        }
+        Some(_) => Err(ClaimError::Taken(key.clone())),
+        None => {
+            let mut row = OrgHost {
+                id: crate::sql::Auto::Unset,
+                org_id,
+                hostname: name,
+                enabled: true,
+                created_at: crate::sql::Auto::Unset,
+            };
+            match row.insert_tx(tx).await {
+                Err(e) if e.is_unique_violation() => return Err(ClaimError::Taken(key.clone())),
+                r => r?,
+            }
+            Ok((row, true))
+        }
+    }
+}
+
+/// Does a tenant other than `except` hold `key`? Plain reads, so MySQL's
+/// snapshot starts after the lock. `iexact`, as [`host_claimed`]: a row
+/// stored before lowercasing clashes too. `own_row` is the claim's lock row.
+async fn held_elsewhere(
+    tx: &mut crate::sql::PoolTx<'_>,
+    key: &ClaimKey,
+    own_row: Option<i64>,
+    except: Option<i64>,
+) -> Result<bool, crate::sql::ExecError> {
+    use crate::sql::FetcherTx as _;
+    let filter = match key {
+        ClaimKey::Host(h) => super::Org::host_pattern.iexact(h.clone()),
+        ClaimKey::PathPrefix(p) => super::Org::path_prefix.iexact(p.clone()),
+        ClaimKey::Port(n) => super::Org::port.eq(Some(*n)),
+    };
+    let orgs: Vec<super::Org> = super::Org::objects().where_(filter).fetch_tx(tx).await?;
+    if other_org(&orgs, except) {
+        return Ok(true);
+    }
+    let ClaimKey::Host(h) = key else {
+        return Ok(false);
+    };
+    let extra: Vec<OrgHost> = OrgHost::objects()
+        .where_(OrgHost::hostname.iexact(h.clone()))
+        .fetch_tx(tx)
+        .await?;
+    Ok(extra
+        .iter()
+        .any(|r| r.id.get().copied() != own_row && except != Some(r.org_id)))
+}
+
+/// Insert a new `org`, claiming its host, path prefix and port in the same
+/// transaction (#2099).
+///
+/// # Errors
+/// The first value another tenant holds, or the INSERT's driver failure.
 pub(crate) async fn insert_org(
     registry: &Pool,
     org: &mut super::Org,
 ) -> Result<(), super::TenancyError> {
-    let Some(host) = org.host_pattern.clone() else {
+    let keys = routing_keys(org);
+    if keys.is_empty() {
         org.insert_pool(registry).await?;
         return Ok(());
-    };
-    let claimed = claim_host(registry, &host, Claimant::NewOrg(org))
+    }
+    let tx = claim_routing(registry, &keys, Claimant::NewOrg(org))
         .await
-        .map_err(claim_error)?;
-    claimed.tx.commit().await?;
+        .map_err(ClaimError::into_tenancy)?;
+    tx.commit().await?;
     Ok(())
 }
 
-/// A [`claim_host`] failure as the tenant-edit and provisioning paths report it.
-pub(crate) fn claim_error(e: HostError) -> super::TenancyError {
-    match e {
-        HostError::Driver(e) => super::TenancyError::Exec(e),
-        HostError::Taken(h) => {
-            super::TenancyError::Validation(format!("host `{h}` is already used by another tenant"))
-        }
-        other => super::TenancyError::Validation(other.to_string()),
-    }
+/// The routing values `org` holds alone.
+pub(crate) fn routing_keys(org: &super::Org) -> Vec<ClaimKey> {
+    let host = org.host_pattern.clone().map(ClaimKey::Host);
+    let prefix = org.path_prefix.clone().map(ClaimKey::PathPrefix);
+    let port = org.port.map(ClaimKey::Port);
+    [host, prefix, port].into_iter().flatten().collect()
 }
 
 /// Is `prefix` another tenant's path prefix? Two would route by row order.
@@ -655,5 +808,157 @@ mod tests {
         // what makes it undeletable through this table.
         assert!(base.is_base);
         assert!(base.id.is_none());
+    }
+}
+
+/// What the generic admin's write of a `rustango_orgs` or
+/// `rustango_org_hosts` row claims, so it cannot take another tenant's
+/// host, path prefix or port.
+#[cfg(feature = "admin")]
+pub(crate) enum AdminClaims {
+    /// Another table, or no routing value changed.
+    Nothing,
+    /// An edited tenant's new values, claimed before its UPDATE.
+    OrgBefore(Vec<ClaimKey>),
+    /// A new tenant's values, claimed once its INSERT gave it an id.
+    OrgAfter(Vec<ClaimKey>),
+    /// An extra host: its written row is the lock; checked after the write.
+    HostAfter(String),
+}
+
+#[cfg(feature = "admin")]
+impl AdminClaims {
+    /// Validate and normalize `values` as the console does, and say what
+    /// to claim. `before` is the stored row on an edit.
+    ///
+    /// # Errors
+    /// The validator's message, for the form.
+    pub(crate) fn of(
+        table: &str,
+        values: &mut [(&'static str, crate::core::SqlValue)],
+        before: Option<&serde_json::Value>,
+    ) -> Result<Self, String> {
+        use crate::core::SqlValue;
+        use crate::tenancy::provision::{validate_host_pattern, validate_path_prefix, validate_port};
+        let changed = |column: &str, now: &serde_json::Value| {
+            before.is_none_or(|row| row.get(column).unwrap_or(&serde_json::Value::Null) != now)
+        };
+        let text = |v: &SqlValue| match v {
+            SqlValue::String(s) if !s.trim().is_empty() => Some(s.clone()),
+            _ => None,
+        };
+        if table == <super::Org as crate::core::Model>::SCHEMA.table {
+            let mut keys = Vec::new();
+            for (column, value) in values.iter_mut() {
+                let key = match *column {
+                    "host_pattern" => text(value)
+                        .map(|h| validate_host_pattern(&h).map(ClaimKey::Host))
+                        .transpose()?,
+                    "path_prefix" => text(value)
+                        .map(|p| {
+                            let p = p.trim().to_owned();
+                            validate_path_prefix(&p).map(|()| ClaimKey::PathPrefix(p))
+                        })
+                        .transpose()?,
+                    "port" => match value {
+                        SqlValue::I32(n) => {
+                            validate_port(*n)?;
+                            Some(ClaimKey::Port(*n))
+                        }
+                        _ => None,
+                    },
+                    _ => continue,
+                };
+                // Stored as claimed: a host matches the `Host` header byte for byte.
+                *value = match &key {
+                    Some(ClaimKey::Host(h) | ClaimKey::PathPrefix(h)) => SqlValue::String(h.clone()),
+                    Some(ClaimKey::Port(n)) => SqlValue::I32(*n),
+                    None => SqlValue::Null,
+                };
+                let now = match &key {
+                    Some(ClaimKey::Host(h) | ClaimKey::PathPrefix(h)) => serde_json::json!(h),
+                    Some(ClaimKey::Port(n)) => serde_json::json!(n),
+                    None => serde_json::Value::Null,
+                };
+                if let Some(key) = key.filter(|_| changed(column, &now)) {
+                    keys.push(key);
+                }
+            }
+            return Ok(match (keys.is_empty(), before.is_some()) {
+                (true, _) => Self::Nothing,
+                (false, true) => Self::OrgBefore(keys),
+                (false, false) => Self::OrgAfter(keys),
+            });
+        }
+        if table == <OrgHost as crate::core::Model>::SCHEMA.table {
+            let mut host = None;
+            let mut moved = false;
+            for (column, value) in values.iter_mut() {
+                match (*column, &*value) {
+                    ("hostname", SqlValue::String(h)) => {
+                        let h = normalize_hostname(h).map_err(|e| e.to_string())?;
+                        moved |= changed(column, &serde_json::json!(h));
+                        *value = SqlValue::String(h.clone());
+                        host = Some(h);
+                    }
+                    ("org_id", SqlValue::I64(id)) => moved |= changed(column, &serde_json::json!(id)),
+                    _ => {}
+                }
+            }
+            return Ok(match host {
+                Some(h) if moved => Self::HostAfter(h),
+                _ => Self::Nothing,
+            });
+        }
+        Ok(Self::Nothing)
+    }
+
+    /// The write's transaction, an edited tenant's values already claimed.
+    ///
+    /// # Errors
+    /// As [`claim_routing`].
+    pub(crate) async fn begin(
+        &self,
+        registry: &Pool,
+        pk: &crate::core::SqlValue,
+    ) -> Result<crate::sql::PoolTx<'static>, ClaimError> {
+        match (self, pk_id(pk)) {
+            (Self::OrgBefore(keys), Some(id)) => claim_routing(registry, keys, Claimant::Base(id)).await,
+            _ => Ok(crate::sql::write_transaction(registry).await?),
+        }
+    }
+
+    /// Claim or check what the write in `tx` could only claim once written.
+    ///
+    /// # Errors
+    /// As [`claim_routing_tx`].
+    pub(crate) async fn after_write(
+        &self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        pk: &crate::core::SqlValue,
+    ) -> Result<(), ClaimError> {
+        let Some(id) = pk_id(pk) else {
+            return Ok(());
+        };
+        match self {
+            Self::OrgAfter(keys) => claim_routing_tx(tx, keys, id).await,
+            Self::HostAfter(h) => {
+                let key = ClaimKey::Host(h.clone());
+                if held_elsewhere(tx, &key, Some(id), None).await? {
+                    return Err(ClaimError::Taken(key));
+                }
+                Ok(())
+            }
+            Self::Nothing | Self::OrgBefore(_) => Ok(()),
+        }
+    }
+}
+
+#[cfg(feature = "admin")]
+fn pk_id(pk: &crate::core::SqlValue) -> Option<i64> {
+    match pk {
+        crate::core::SqlValue::I64(n) => Some(*n),
+        crate::core::SqlValue::I32(n) => Some(i64::from(*n)),
+        _ => None,
     }
 }
