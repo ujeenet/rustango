@@ -1,17 +1,17 @@
 #![cfg(all(feature = "sqlite", feature = "tenancy"))]
 //! `create-api-key` only loads the server's key; it never writes one.
 //!
-//! One test in its own binary: it moves the process cwd and needs the
-//! API key secret unset.
+//! One test in its own binary: it moves the process cwd and clears the
+//! key env vars for this process only.
 
 use rustango::sql::sqlx;
 use rustango::tenancy::TenantPools;
 
 #[tokio::test]
 async fn create_api_key_never_writes_a_key_file() {
-    if std::env::var_os("RUSTANGO_SESSION_SECRET").is_some() {
-        return;
-    }
+    // A set secret or prod tier would skip the dev key file this test is about.
+    std::env::remove_var("RUSTANGO_SESSION_SECRET");
+    std::env::remove_var("RUSTANGO_ENV");
     let tmp = tempfile::tempdir().expect("tempdir");
     std::env::set_current_dir(tmp.path()).expect("cwd");
     let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
