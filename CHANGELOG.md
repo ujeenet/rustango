@@ -22,10 +22,11 @@ A local logo file (env `RUSTANGO_OPERATOR_LOGO_PATH`), read once at boot with th
 
 ### Changed — scaffold tier taglines are `dev` / `staging`
 
-New projects get plain `dev` / `staging` taglines (they render as a badge), and the commented `[brand]` example in `default.toml` shows `logo_url` and `logo_path`.
+New projects get plain `dev` / `staging` taglines (they render as a badge), and the commented `[brand]` example in `default.toml` shows `logo_url` and `logo_path`. A generated `main.rs` prints CLI errors with Display, not as `Validation("…")`.
 
 ### Fixed — ORM and MySQL
 
+- MariaDB: purging a tenant made on a saved server no longer fails reading `@@server_uuid`, which MariaDB lacks.
 - MariaDB: JSON writes and text JSON paths no longer send `CAST(… AS JSON)`, which it rejects.
 - MySQL: an `update()` / `delete()` filtered by `EXISTS` or `where_has` over its own table no longer fails with error 1093; one nested deeper still does, rather than see its own writes.
 - MySQL: an auto M2M junction over an `i32` / `i16` pk keeps the pk's width, so its foreign keys are accepted.

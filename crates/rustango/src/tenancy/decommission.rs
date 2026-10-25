@@ -404,12 +404,12 @@ where
 }
 
 /// Which database a SQLite or MySQL tenant uses: a canonical file, or the
-/// live server's uuid and database, so a host alias can't hide a twin.
+/// live server's key and database, so a host alias can't hide a twin.
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(not(all(feature = "sqlite", feature = "mysql")), allow(dead_code))]
 enum DbIdentity {
     File(std::path::PathBuf),
-    Server { uuid: String, database: String },
+    Server { key: String, database: String },
 }
 
 impl DbIdentity {
@@ -422,16 +422,16 @@ impl DbIdentity {
             crate::sql::Pool::Mysql(p) => p,
             _ => return Ok(None),
         };
-        let (uuid, database): (String, String) = sqlx::query_as(
-            "SELECT CAST(@@server_uuid AS CHAR), \
-             CAST(IF(@@lower_case_table_names = 0, ?, LOWER(?)) AS CHAR)",
+        let (database,): (String,) = sqlx::query_as(
+            "SELECT CAST(IF(@@lower_case_table_names = 0, ?, LOWER(?)) AS CHAR)",
         )
         .bind(name)
         .bind(name)
         .fetch_one(p)
         .await
         .map_err(|e| e.to_string())?;
-        Ok(Some(Self::Server { uuid, database }))
+        let key = Self::server_key(p).await?;
+        Ok(Some(Self::Server { key, database }))
     }
 
     /// `Ok(None)` for another backend or a missing / in-memory SQLite file.
@@ -480,15 +480,34 @@ impl DbIdentity {
     /// folds them (`lower_case_table_names`).
     #[cfg(feature = "mysql")]
     async fn server(pool: &sqlx::MySqlPool) -> Result<Self, String> {
-        let (uuid, database): (String, Option<String>) = sqlx::query_as(
-            "SELECT CAST(@@server_uuid AS CHAR), \
-             CAST(IF(@@lower_case_table_names = 0, DATABASE(), LOWER(DATABASE())) AS CHAR)",
+        let (database,): (Option<String>,) = sqlx::query_as(
+            "SELECT CAST(IF(@@lower_case_table_names = 0, DATABASE(), LOWER(DATABASE())) AS CHAR)",
         )
         .fetch_one(pool)
         .await
         .map_err(|e| e.to_string())?;
         let database = database.ok_or("the connection selects no database")?;
-        Ok(Self::Server { uuid, database })
+        let key = Self::server_key(pool).await?;
+        Ok(Self::Server { key, database })
+    }
+
+    /// `@@server_uuid`; MariaDB has none, so host, port and server id.
+    #[cfg(feature = "mysql")]
+    async fn server_key(pool: &sqlx::MySqlPool) -> Result<String, String> {
+        let (version,): (String,) = sqlx::query_as("SELECT CAST(VERSION() AS CHAR)")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        let sql = if version.contains("MariaDB") {
+            "SELECT CAST(CONCAT(@@hostname, ':', @@port, ':', @@server_id) AS CHAR)"
+        } else {
+            "SELECT CAST(@@server_uuid AS CHAR)"
+        };
+        let (key,): (String,) = sqlx::query_as(sql)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(key)
     }
 }
 
