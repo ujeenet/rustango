@@ -626,7 +626,10 @@ fn router_unlogged(
     // shared cache stores a `Set-Cookie` with them.
     let assets = Router::new()
         .route("/__static__/rustango.png", get(static_rustango_png))
-        .route("/__brand__/{slug}/{filename}", get(serve_brand_asset));
+        .route(
+            &format!("{}/{{slug}}/{{filename}}", branding::CONSOLE_BRAND_URL),
+            get(serve_brand_asset),
+        );
 
     // Authenticated routes: the middleware injects an `Extension<auth::Operator>`.
     let mut private = Router::new()
@@ -1933,10 +1936,10 @@ async fn org_edit_form(
     // Pull current logo / favicon paths off the org row.
     let logo_path: Option<String> = org_row.logo_path.clone();
     let favicon_path: Option<String> = org_row.favicon_path.clone();
-    // The `/__brand__/` fallback is a console route; a storage URL is not.
+    // The brand fallback is a console route; a storage URL is not.
     let prefix = mount::MountPrefix::current();
     let console_url = |u: String| {
-        if u.starts_with("/__brand__/") {
+        if u.starts_with(branding::CONSOLE_BRAND_URL) {
             prefix.url(&u)
         } else {
             u

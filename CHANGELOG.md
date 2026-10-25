@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — tenant logos 404'd under the default routes
+
+Tenant pages link uploaded logos and favicons under `RouteConfig::brand_url` (`/_brand` by default), the prefix tenant hosts serve, via the new `RouteConfig::brand_asset_url`. Tenant admin pages now use the tenant favicon too.
+
 ### Fixed — ORM and MySQL
 
 - MariaDB: JSON writes and text JSON paths no longer send `CAST(… AS JSON)`, which it rejects.

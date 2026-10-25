@@ -192,6 +192,19 @@ impl RouteConfig {
         format!("{}{}", self.admin_url, self.audit_url)
     }
 
+    /// Public URL of a tenant's logo / favicon on a tenant host, built
+    /// from [`Self::brand_url`], the prefix the tenant host serves.
+    /// A direct storage URL wins. `None` when `path` is unset or unsafe.
+    #[must_use]
+    pub fn brand_asset_url(
+        &self,
+        slug: &str,
+        path: Option<&str>,
+        storage: &crate::storage::BoxedStorage,
+    ) -> Option<String> {
+        super::branding::brand_asset_url_at(&self.brand_url, slug, path, storage)
+    }
+
     /// The tenant-admin URLs as seen under a path-prefix tenant's
     /// `prefix`, so routes match and links keep the prefix (#2059).
     /// `brand_url` is served before the tenant resolves, so it stays.
@@ -232,6 +245,16 @@ pub(crate) fn path_is_under(path: &str, prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tenant brand URLs follow the prefix the tenant host serves.
+    #[test]
+    fn brand_asset_url_uses_brand_url() {
+        let storage: crate::storage::BoxedStorage =
+            std::sync::Arc::new(crate::storage::InMemoryStorage::new());
+        let url = |r: &RouteConfig| r.brand_asset_url("acme", Some("logo.png"), &storage);
+        assert_eq!(url(&RouteConfig::default()).as_deref(), Some("/_brand/acme/logo.png"));
+        assert_eq!(url(&RouteConfig::legacy()).as_deref(), Some("/__brand__/acme/logo.png"));
+    }
 
     /// #2098 — cookies scope to the prefix only when the request is under it.
     #[test]

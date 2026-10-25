@@ -341,7 +341,7 @@ where
         // or default to a `LocalStorage` rooted at
         // `RUSTANGO_BRAND_STORAGE_DIR` (default `./var/brand`). The
         // same backend serves both the operator console and the
-        // tenant admin's `/__brand__/{slug}/{filename}` fallback.
+        // tenant admin's `<brand_url>/{slug}/{filename}` fallback.
         let brand_storage: BoxedStorage = self
             .brand_storage
             .unwrap_or_else(branding::default_brand_storage);
@@ -760,11 +760,7 @@ where
         &org,
         brand_storage,
         actor.as_ref().and_then(SessionActor::impersonated_by),
-        routes.admin_url.as_str(),
-        routes.change_password_url.as_str(),
-        routes.logout_url.as_str(),
-        routes.audit_url.as_str(),
-        routes.static_url.as_str(),
+        routes,
     );
 
     // Strip the admin mount prefix so the inner router sees plain
@@ -1061,11 +1057,10 @@ async fn login_form(
         .unwrap_or(&org.display_name);
     ctx.insert("brand_name", brand_name);
     ctx.insert("brand_tagline", &org.brand_tagline);
-    let brand_logo_url =
-        super::branding::brand_asset_url(&org.slug, org.logo_path.as_deref(), brand_storage);
+    let brand_logo_url = routes.brand_asset_url(&org.slug, org.logo_path.as_deref(), brand_storage);
     ctx.insert("brand_logo_url", &brand_logo_url);
     let brand_favicon_url =
-        super::branding::brand_asset_url(&org.slug, org.favicon_path.as_deref(), brand_storage);
+        routes.brand_asset_url(&org.slug, org.favicon_path.as_deref(), brand_storage);
     ctx.insert("brand_favicon_url", &brand_favicon_url);
     let theme_mode = org
         .theme_mode
@@ -1590,11 +1585,10 @@ fn password_page_ctx(
         .unwrap_or(&org.display_name);
     ctx.insert("brand_name", brand_name);
     ctx.insert("brand_tagline", &org.brand_tagline);
-    let brand_logo_url =
-        super::branding::brand_asset_url(&org.slug, org.logo_path.as_deref(), brand_storage);
+    let brand_logo_url = routes.brand_asset_url(&org.slug, org.logo_path.as_deref(), brand_storage);
     ctx.insert("brand_logo_url", &brand_logo_url);
     let brand_favicon_url =
-        super::branding::brand_asset_url(&org.slug, org.favicon_path.as_deref(), brand_storage);
+        routes.brand_asset_url(&org.slug, org.favicon_path.as_deref(), brand_storage);
     ctx.insert("brand_favicon_url", &brand_favicon_url);
     let theme_mode = org
         .theme_mode
@@ -1946,12 +1940,13 @@ fn build_inner_admin_router(
     org: &Org,
     brand_storage: &BoxedStorage,
     impersonated_by: Option<i64>,
-    admin_url_prefix: &str,
-    change_password_url: &str,
-    logout_url: &str,
-    audit_url: &str,
-    static_url: &str,
+    routes: &super::routes::RouteConfig,
 ) -> Router {
+    let admin_url_prefix = routes.admin_url.as_str();
+    let change_password_url = routes.change_password_url.as_str();
+    let logout_url = routes.logout_url.as_str();
+    let audit_url = routes.audit_url.as_str();
+    let static_url = routes.static_url.as_str();
     // v0.27.7 — `tenant_mode()` filters registry-scoped models
     // (Org / Operator) out of the sidebar / index so the tenant
     // admin can't surface cross-tenant data.
@@ -2010,9 +2005,14 @@ fn build_inner_admin_router(
         builder = builder.brand_tagline(tag);
     }
     // No upload: the framework logo, as on the tenant's sign-in page.
-    let logo_url = branding::brand_asset_url(&org.slug, org.logo_path.as_deref(), brand_storage)
+    let logo_url = routes
+        .brand_asset_url(&org.slug, org.logo_path.as_deref(), brand_storage)
         .unwrap_or_else(|| format!("{static_url}/rustango.png"));
     builder = builder.brand_logo_url(logo_url);
+    if let Some(url) = routes.brand_asset_url(&org.slug, org.favicon_path.as_deref(), brand_storage)
+    {
+        builder = builder.brand_favicon_url(url);
+    }
     if let Some(mode) = org
         .theme_mode
         .as_deref()
@@ -2213,11 +2213,7 @@ mod ungated_flag_tests {
             &crate::testkit::org(),
             &storage,
             None,
-            "/admin",
-            "/change-password",
-            "/logout",
-            "/audit",
-            "/static",
+            &crate::tenancy::RouteConfig::default(),
         );
         let flagged = crate::admin::ungated_admin_built();
         crate::admin::reset_ungated_admin_built();
