@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — forms, mail and admin
+
+- Admin time inputs show a stored time to the millisecond and forms parse fractional seconds, so saving a time with microseconds no longer clears or refuses it; an untouched time keeps its stored value.
+
 ### Fixed — migrations, MySQL and MariaDB
 
 - MySQL: a correlated `IN` over the table an `update()` / `delete()` writes is no longer read through a derived table, which saw the write's own changes and hit wrong rows; it fails with error 1093 instead.

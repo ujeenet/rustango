@@ -2200,7 +2200,14 @@ fn stamp_readonly_timestamps(
 fn prefill_is_lossy(f: &FieldSchema, shown: &str) -> bool {
     use crate::core::FieldType as T;
     match f.ty {
-        T::DateTime | T::Array(_) | T::Range(_) | T::HStore | T::Vector(_) | T::Geometry(_) => true,
+        // A time shows only milliseconds.
+        T::DateTime
+        | T::Time
+        | T::Array(_)
+        | T::Range(_)
+        | T::HStore
+        | T::Vector(_)
+        | T::Geometry(_) => true,
         // `{}` and JSON null both show empty.
         T::Json => shown.is_empty(),
         _ => f
@@ -2229,7 +2236,7 @@ fn keep_unchanged(
             let sent = sent.replace("\r\n", "\n");
             sent == shown
                 // Browsers may drop a zero seconds part.
-                || (f.ty == crate::core::FieldType::DateTime
+                || (matches!(f.ty, crate::core::FieldType::DateTime | crate::core::FieldType::Time)
                     && shown.strip_suffix(":00") == Some(sent.as_str()))
         });
         if unchanged {
@@ -3262,6 +3269,29 @@ mod tests {
             .iter()
             .map(|o| (o.column_name().unwrap(), o.is_desc()))
             .collect()
+    }
+
+    /// A time shown to the millisecond and posted back as shown keeps its
+    /// stored microseconds; an edited time is written.
+    #[test]
+    fn echoed_time_prefill_keeps_the_stored_micros() {
+        use crate::core::{FieldSchema, FieldType, ModelSchema};
+        const FIELDS: &[FieldSchema] = &[FieldSchema::new("at", "at", FieldType::Time)];
+        const M: &ModelSchema = &{
+            let mut s = ModelSchema::new("T", "t");
+            s.fields = FIELDS;
+            s
+        };
+        let before = serde_json::json!({ "at": "10:00:00.123456" });
+        for (sent, kept) in [("10:00:00.123", false), ("11:00:00", true)] {
+            let form = HashMap::from([("at".to_owned(), sent.to_owned())]);
+            let mut values = vec![(
+                "at",
+                crate::forms::parse_form_value(&FIELDS[0], Some(sent)).unwrap(),
+            )];
+            keep_unchanged(M, &form, Some(&before), &mut values);
+            assert_eq!(!values.is_empty(), kept, "{sent}");
+        }
     }
 
     /// Admin ordering wins, then `default_order`, and the PK always
