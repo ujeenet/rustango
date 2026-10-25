@@ -1,40 +1,86 @@
 {% extends "op_layout.html" %}
 {% block title %}{{ server.name }} — Database servers — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
 {% block content %}
+<p class="breadcrumb"><a href="{{ console_prefix }}/db-servers">Database servers</a><span class="sep">/</span>{{ server.name }}</p>
 <h1>Database server <code>{{ server.name }}</code></h1>
-<p><a href="{{ console_prefix }}/db-servers">← All database servers</a></p>
 {% if key_warning %}<div class="alert alert-error key-warning">{{ key_warning }}</div>{% endif %}
 {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
 {% if notice %}<div class="alert alert-notice">{{ notice }}</div>{% endif %}
 
 {#- On a failed submit, show what was typed; else the saved row. Never the password. -#}
 {% if prefill %}{% set f = prefill %}{% else %}{% set f = server %}{% endif %}
-<form method="post" action="{{ console_prefix }}/db-servers/{{ server.name }}/edit" class="op-form" autocomplete="off">
+<form method="post" action="{{ console_prefix }}/db-servers/{{ server.name }}/edit" class="edit-form" autocomplete="off">
   {{ csrf_input | default(value='') | safe }}
   <input type="hidden" name="version" value="{{ f.version | default(value='') }}">
-  <label>Backend <input value="{{ server.backend }}" disabled></label>
-  {% if is_sqlite %}
-  <label>Directory for tenant files <input name="sqlite_dir" required value="{{ f.sqlite_dir | default(value='') }}"></label>
-  {% else %}
-  <label>Host <input name="host" required value="{{ f.host | default(value='') }}"></label>
-  <label>Port (blank for the default) <input name="port" type="number" min="1" max="65535" value="{{ f.port | default(value='') }}"></label>
-  <label>Admin user <input name="admin_user" required value="{{ f.admin_user | default(value='') }}" autocomplete="off"></label>
-  <label>Admin password ({% if server.has_password %}saved — leave blank to keep it{% else %}none saved{% endif %})
-    <input name="admin_password" type="password" autocomplete="new-password"></label>
-  {% if server.has_password %}
-  <label class="inline"><input type="checkbox" name="clear_password"> Remove the saved password</label>
-  {% endif %}
-  <label>TLS
-    <select name="tls_mode">
-      {% if not server.tls_mode %}<option value="">none saved (driver default, may send the password in clear)</option>{% endif %}
-      {% for m in tls_modes %}<option value="{{ m }}"{% if f.tls_mode | default(value='') == m %} selected{% endif %}>{{ m }}</option>{% endfor %}
-    </select>
-  </label>
-  {% if backend == "postgres" %}
-  <label>Maintenance database (blank for <code>postgres</code>) <input name="maintenance_db" value="{{ f.maintenance_db | default(value='') }}"></label>
-  {% endif %}
-  {% endif %}
-  <label class="inline"><input type="checkbox" name="active"{% if f.active %} checked{% endif %}> Active</label>
-  <button type="submit">Save changes</button>
+  <fieldset class="section">
+    <legend>Server</legend>
+    <table>
+      <tr>
+        <th>backend</th>
+        <td><code>{{ server.backend }}</code></td>
+      </tr>
+      {% if is_sqlite %}
+      <tr>
+        <th><label for="sqlite_dir">directory</label></th>
+        <td>
+          <input type="text" id="sqlite_dir" name="sqlite_dir" required value="{{ f.sqlite_dir | default(value='') }}">
+          <div class="field-helper">Where tenant database files are created.</div>
+        </td>
+      </tr>
+      {% else %}
+      <tr>
+        <th><label for="host">host</label></th>
+        <td><input type="text" id="host" name="host" required value="{{ f.host | default(value='') }}"></td>
+      </tr>
+      <tr>
+        <th><label for="port">port</label></th>
+        <td>
+          <input type="number" id="port" name="port" min="1" max="65535" value="{{ f.port | default(value='') }}">
+          <div class="field-helper">Blank for the backend's default.</div>
+        </td>
+      </tr>
+      <tr>
+        <th><label for="admin_user">admin user</label></th>
+        <td><input type="text" id="admin_user" name="admin_user" required value="{{ f.admin_user | default(value='') }}" autocomplete="off"></td>
+      </tr>
+      <tr>
+        <th><label for="admin_password">admin password</label></th>
+        <td>
+          <input type="password" id="admin_password" name="admin_password" autocomplete="new-password">
+          <div class="field-helper">{% if server.has_password %}Saved — leave blank to keep it.{% else %}None saved.{% endif %}</div>
+          {% if server.has_password %}
+          <label><input type="checkbox" name="clear_password"> Remove the saved password</label>
+          {% endif %}
+        </td>
+      </tr>
+      <tr>
+        <th><label for="tls_mode">TLS</label></th>
+        <td>
+          <select id="tls_mode" name="tls_mode">
+            {% if not server.tls_mode %}<option value="">none saved (driver default, may send the password in clear)</option>{% endif %}
+            {% for m in tls_modes %}<option value="{{ m }}"{% if f.tls_mode | default(value='') == m %} selected{% endif %}>{{ m }}</option>{% endfor %}
+          </select>
+        </td>
+      </tr>
+      {% if backend == "postgres" %}
+      <tr>
+        <th><label for="maintenance_db">maintenance database</label></th>
+        <td>
+          <input type="text" id="maintenance_db" name="maintenance_db" value="{{ f.maintenance_db | default(value='') }}">
+          <div class="field-helper">Blank for <code>postgres</code>.</div>
+        </td>
+      </tr>
+      {% endif %}
+      {% endif %}
+      <tr>
+        <th><label for="active">active</label></th>
+        <td><input type="checkbox" id="active" name="active"{% if f.active %} checked{% endif %}></td>
+      </tr>
+    </table>
+  </fieldset>
+  <p class="form-actions">
+    <button type="submit" class="btn btn-primary">Save changes</button>
+    <a href="{{ console_prefix }}/db-servers" class="btn-link">Cancel</a>
+  </p>
 </form>
 {% endblock %}

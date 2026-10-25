@@ -334,15 +334,7 @@ pub(super) async fn org_new_submit(
                 hours: handover.ttl_hours(),
             });
             let mut resp = render_run(&state, &op, run_id, shown.as_ref()).await;
-            let h = resp.headers_mut();
-            h.insert(
-                axum::http::header::CACHE_CONTROL,
-                axum::http::HeaderValue::from_static("no-store"),
-            );
-            h.insert(
-                axum::http::header::REFERRER_POLICY,
-                axum::http::HeaderValue::from_static("no-referrer"),
-            );
+            crate::tenancy::first_admin::guard_link_page(resp.headers_mut());
             resp
         }
         // A failure before the row lands — a taken slug, an unreachable
@@ -725,20 +717,76 @@ async fn render_run(
     ctx.insert("error", &run.error);
     ctx.insert(
         "events",
-        &events
+        &step_rows(&events)
             .iter()
-            .map(|e| {
+            .map(|r| {
                 serde_json::json!({
-                    "seq": e.seq,
-                    "step": e.step,
-                    "status": e.status,
-                    "message": e.message,
+                    "seq": r.seq,
+                    "step": r.step,
+                    "status": r.status,
+                    "parts": message_parts(&r.message),
                 })
             })
             .collect::<Vec<_>>(),
     );
     ctx.insert("handover", &handover);
     render(state, "op_provision_run.html", &ctx)
+}
+
+/// One row per step at its latest status; `info` rows stay as they are.
+#[derive(Debug, PartialEq)]
+struct StepRow<'a> {
+    seq: i64,
+    step: &'a str,
+    status: &'a str,
+    message: &'a str,
+}
+
+fn step_rows(events: &[store::ProvisioningEvent]) -> Vec<StepRow<'_>> {
+    let mut rows: Vec<StepRow<'_>> = Vec::with_capacity(events.len());
+    for e in events {
+        let row = StepRow {
+            seq: e.seq,
+            step: &e.step,
+            status: &e.status,
+            message: &e.message,
+        };
+        let earlier = (e.status != "info")
+            .then(|| {
+                rows.iter_mut()
+                    .rev()
+                    .find(|r| r.step == row.step && r.status != "info")
+            })
+            .flatten();
+        match earlier {
+            Some(r) => {
+                // Keep an earlier detail unless this event brings its own,
+                // or the earlier one was a failure since retried.
+                if !row.message.is_empty() || r.status == "failed" {
+                    r.message = row.message;
+                }
+                r.seq = row.seq;
+                r.status = row.status;
+            }
+            None => rows.push(row),
+        }
+    }
+    rows
+}
+
+/// `a `b` c` as text and code parts, for `<code>` spans the template escapes.
+fn message_parts(message: &str) -> Vec<serde_json::Value> {
+    let pieces: Vec<&str> = message.split('`').collect();
+    // An odd number of backticks is not markup: show it as written.
+    if pieces.len() % 2 == 0 {
+        return vec![serde_json::json!({ "text": message, "code": false })];
+    }
+    pieces
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !p.is_empty())
+        .map(|(i, p)| serde_json::json!({ "text": p, "code": i % 2 == 1 }))
+        .collect()
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -868,6 +916,59 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
+    }
+
+    fn ev(seq: i64, step: &str, status: &str, message: &str) -> store::ProvisioningEvent {
+        store::ProvisioningEvent {
+            id: crate::sql::Auto::default(),
+            run_id: 1,
+            seq,
+            step: step.into(),
+            status: status.into(),
+            message: message.into(),
+            at: crate::sql::Auto::default(),
+        }
+    }
+
+    /// `started` + `ok` read as one row; forwarded `info` rows stay.
+    #[test]
+    fn a_run_shows_one_row_per_step() {
+        let events = [
+            ev(1, "migrate", "started", ""),
+            ev(2, "migration", "info", "a: 1 pending"),
+            ev(3, "migration", "info", "a: applied 0001"),
+            ev(4, "migrate", "ok", ""),
+            ev(5, "alter", "started", ""),
+            ev(6, "alter", "ok", "login `x`"),
+        ];
+        let rows = step_rows(&events);
+        let shape: Vec<_> = rows.iter().map(|r| (r.seq, r.step, r.status)).collect();
+        assert_eq!(
+            shape,
+            [
+                (4, "migrate", "ok"),
+                (2, "migration", "info"),
+                (3, "migration", "info"),
+                (6, "alter", "ok"),
+            ]
+        );
+        assert_eq!(rows[3].message, "login `x`");
+    }
+
+    #[test]
+    fn backticks_become_code_parts() {
+        let parts = message_parts("database `<b>`, login `x`");
+        assert_eq!(
+            parts,
+            [
+                serde_json::json!({"text": "database ", "code": false}),
+                serde_json::json!({"text": "<b>", "code": true}),
+                serde_json::json!({"text": ", login ", "code": false}),
+                serde_json::json!({"text": "x", "code": true}),
+            ]
+        );
+        // Unbalanced: shown as written.
+        assert_eq!(message_parts("a `b")[0]["text"], "a `b");
     }
 
     #[test]

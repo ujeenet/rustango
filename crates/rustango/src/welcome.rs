@@ -94,10 +94,9 @@ body {{
   margin-bottom: 2rem;
 }}
 .hero img {{
-  width: 80px;
-  height: 80px;
+  width: 64px;
+  height: 64px;
   flex-shrink: 0;
-  border-radius: 16px;
 }}
 h1 {{
   margin: 0 0 .15rem;

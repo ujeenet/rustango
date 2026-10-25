@@ -6,6 +6,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set; `ProvisionRequest` takes a `TenantStorage` and an optional backend, which must be the registry's; a blank `RUSTANGO_SECRET_KEY` no longer seals; `RunKind` is `#[non_exhaustive]`; provisioning types gain a `first_admin` field; `S3Storage::new` takes an `S3Config` and credentials apart; `CreateView`, `UpdateView`, `ViewSet::for_model` and `#[viewset]` require the writable field list and lose `.fields()`; `PoolTuning` and `DatabaseSettings` are `#[non_exhaustive]`; `Debug` on auth, SSO and tenancy structs hides secrets. See UPGRADING.
 
+### Fixed — the first admin could not set a password in a browser
+
+The set-password page and the run page that shows its link sent `Referrer-Policy: no-referrer`, so browsers posted `Origin: null` and CSRF refused the form. They now send `same-origin`.
+
+### Changed — console look and the built-in logo
+
+The built-in `rustango.png` / `icon.png` are the new square logo (transparent, 256 and 64 px). Sidebars and sign-in pages show it beside the name, with the tagline as a badge.
+Database server forms use the sectioned layout; probe results are green or red and wrap; the run page shows one row per step, `code` in details and a **Copy** button for the link; the tenant edit page shows its managed database and takes the URL in a masked field; the sidebar links **Database servers** and reaches the page bottom.
+
 ### Added — purge and password rotation for tenants on a saved server
 
 `purge-tenant` and the console drop a database rustango made as the saved server's admin, then its login and record; every refusal (URL moved off the record, a shared database, missing owner or PG 16 ADMIN OPTION, a foreign session) runs before anything changes, and the tenant's own sessions on other pods are ended.

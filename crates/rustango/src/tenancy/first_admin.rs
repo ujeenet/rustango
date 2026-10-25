@@ -106,6 +106,18 @@ impl std::fmt::Debug for SetPasswordLink {
     }
 }
 
+/// Headers for a page that shows a link or is reached through one.
+/// `same-origin`, not `no-referrer`: under that browsers send
+/// `Origin: null` and the CSRF check refuses the page's own forms.
+pub(crate) fn guard_link_page(h: &mut axum::http::HeaderMap) {
+    use axum::http::{header, HeaderValue};
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("same-origin"),
+    );
+}
+
 /// How a first admin got their set-password link.
 #[derive(Debug, Clone)]
 #[non_exhaustive]

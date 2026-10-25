@@ -14,7 +14,7 @@
 {% endif %}
 
 {% if handover %}
-<div class="alert alert-success" id="first-admin">
+<div class="alert alert-secret" id="first-admin">
   {% if handover.mailed_to %}
   A set-password link for <code>{{ handover.username }}</code> was mailed to
   <code>{{ handover.mailed_to }}</code>. It works once and expires in {{ handover.hours }} hours.
@@ -22,8 +22,24 @@
   {% if handover.mail_failed %}The mail could not be sent. {% endif %}
   Give this set-password link to <code>{{ handover.username }}</code>. It is shown
   only now, works once, and expires in {{ handover.hours }} hours.
-  <p><input type="text" readonly value="{{ handover.link }}" aria-label="Set-password link"
-            size="80" autocomplete="off"></p>
+  <div class="link-copy">
+    <input type="text" id="handover-link" readonly value="{{ handover.link }}" aria-label="Set-password link"
+           autocomplete="off">
+    <button type="button" class="btn btn-secondary" id="copy-link">Copy</button>
+  </div>
+  <script nonce="{{ csp_nonce }}">
+    document.getElementById("copy-link").addEventListener("click", async (e) => {
+      const input = document.getElementById("handover-link");
+      try {
+        await navigator.clipboard.writeText(input.value);
+      } catch (_) {
+        // No clipboard API (plain HTTP): fall back to the selection.
+        input.select();
+        document.execCommand("copy");
+      }
+      e.target.textContent = "Copied";
+    });
+  </script>
   {% else %}
   The first admin <code>{{ handover.username }}</code> was created, but no link could
   be issued. Run <code>set-password-link {{ slug }} {{ handover.username }}</code>.
@@ -36,12 +52,14 @@
     <tr><th>#</th><th>Step</th><th>Status</th><th>Detail</th></tr>
   </thead>
   <tbody id="events">
+    {#- One row per step at its latest status; `data-step` lets the live
+        stream update it in place. `info` rows are details, one per event. -#}
     {% for e in events %}
-    <tr data-seq="{{ e.seq }}">
-      <td>{{ e.seq }}</td>
+    <tr data-seq="{{ e.seq }}"{% if e.status != "info" %} data-step="{{ e.step }}"{% endif %}>
+      <td>{{ loop.index }}</td>
       <td><code>{{ e.step }}</code></td>
       <td class="status-{{ e.status }}">{{ e.status }}</td>
-      <td>{{ e.message }}</td>
+      <td>{% for p in e.parts %}{% if p.code %}<code>{{ p.text }}</code>{% else %}{{ p.text }}{% endif %}{% endfor %}</td>
     </tr>
     {% endfor %}
   </tbody>
@@ -57,36 +75,55 @@
   // this is the explicit form for the first connection.
   (function () {
     const tbody = document.getElementById("events");
-    const rows = tbody.querySelectorAll("tr[data-seq]");
-    const last = rows.length ? rows[rows.length - 1].dataset.seq : 0;
+    // A step row is updated in place, so the newest seq can sit anywhere.
+    let last = 0;
+    for (const r of tbody.querySelectorAll("tr[data-seq]")) {
+      last = Math.max(last, Number(r.dataset.seq));
+    }
 
     const es = new EventSource(consoleUrl("/orgs/provision/{{ run_id }}/stream?after=" + last));
 
+    // `a `b` c` as text and <code> nodes. textContent, never innerHTML:
+    // `message` carries driver text and hostnames that are not ours.
+    function fillMessage(td, message) {
+      const parts = String(message || "").split("`");
+      td.replaceChildren();
+      if (parts.length % 2 === 0) { td.textContent = message; return; }
+      parts.forEach((p, i) => {
+        if (!p) { return; }
+        if (i % 2) {
+          const c = document.createElement("code");
+          c.textContent = p;
+          td.appendChild(c);
+        } else {
+          td.append(p);
+        }
+      });
+    }
+
     es.addEventListener("step", (msg) => {
       const e = JSON.parse(msg.data);
-      const tr = document.createElement("tr");
+      let tr = e.status === "info"
+        ? null
+        : tbody.querySelector('tr[data-step="' + CSS.escape(e.step) + '"]');
+      if (!tr) {
+        tr = document.createElement("tr");
+        if (e.status !== "info") { tr.dataset.step = e.step; }
+        const n = document.createElement("td");
+        n.textContent = tbody.rows.length + 1;
+        const step = document.createElement("td");
+        const code = document.createElement("code");
+        code.textContent = e.step;
+        step.appendChild(code);
+        tr.append(n, step, document.createElement("td"), document.createElement("td"));
+        tbody.appendChild(tr);
+      }
       tr.dataset.seq = e.seq;
-      const cells = [
-        [e.seq, null],
-        [e.step, "code"],
-        [e.status, null],
-        [e.message, null],
-      ];
-      cells.forEach(([value, tag], i) => {
-        const td = document.createElement("td");
-        if (i === 2) { td.className = "status-" + e.status; }
-        // textContent, never innerHTML: `message` carries driver text
-        // and hostnames that are not ours.
-        if (tag) {
-          const el = document.createElement(tag);
-          el.textContent = value;
-          td.appendChild(el);
-        } else {
-          td.textContent = value;
-        }
-        tr.appendChild(td);
-      });
-      tbody.appendChild(tr);
+      const status = tr.cells[2];
+      const wasFailed = status.textContent === "failed";
+      status.className = "status-" + e.status;
+      status.textContent = e.status;
+      if (e.message || wasFailed) { fillMessage(tr.cells[3], e.message); }
     });
 
     es.addEventListener("done", () => {

@@ -13,8 +13,8 @@
 <h1>Edit <code>{{ slug }}</code></h1>
 <p class="lead">
   Adjust the live config for this tenant. Locked fields stay where they
-  are — re-provisioning needs <code>cargo run -- create-tenant</code> /
-  <code>drop-tenant</code>. Inputs are generated from
+  are — re-provisioning needs <code>cargo run -- purge-tenant</code> and
+  <code>create-tenant</code>. Inputs are generated from
   <code>Org::SCHEMA</code> via
   <code>rustango::admin::render::render_input</code>, so new columns
   added to <code>Org</code> show up here without template edits.
@@ -31,7 +31,6 @@
 <div class="page-actions">
   <a href="{{ console_prefix }}/orgs/{{ slug }}/hosts" class="btn btn-secondary">Hostnames →</a>
   <button type="button" class="btn btn-secondary" id="test-connection">Test connection</button>
-  <span id="probe-result"></span>
   {% if provisioning_enabled %}
   <form method="post" action="{{ console_prefix }}/orgs/{{ slug }}/migrate" class="inline-form"
         data-confirm="Run migrations for {{ slug }}?">
@@ -47,6 +46,20 @@
   </form>
   {% endif %}
 </div>
+<div id="probe-result"></div>
+
+{% if managed %}
+<fieldset class="section locked info">
+  <legend>Managed database</legend>
+  <table>
+    <tr><th>server</th><td><a href="{{ console_prefix }}/db-servers/{{ managed.server_name }}/edit"><code>{{ managed.server_name }}</code></a></td></tr>
+    <tr><th>database</th><td><code>{{ managed.database_name }}</code></td></tr>
+    <tr><th>login</th><td>{% if managed.login_name %}<code>{{ managed.login_name }}</code>{% else %}<span class="empty">None</span>{% endif %}</td></tr>
+    {% if not managed.created %}<tr><th>state</th><td>not created yet</td></tr>{% endif %}
+  </table>
+  <p class="section-note">Created by the console on a saved server. Its password is stored sealed and never shown.</p>
+</fieldset>
+{% endif %}
 
 <form method="post" action="{{ console_prefix }}/orgs/{{ slug }}/edit" class="edit-form">
   {{ csrf_input | default(value='') | safe }}
