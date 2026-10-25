@@ -10,7 +10,7 @@
 </p>
 
 {% if error %}
-<div class="alert alert-error">{{ error }}</div>
+<div class="alert alert-error alert-lines">{{ error }}</div>
 {% endif %}
 
 {% if handover %}
@@ -59,7 +59,7 @@
       <td>{{ loop.index }}</td>
       <td><code>{{ e.step }}</code></td>
       <td class="status-{{ e.status }}">{{ e.status }}</td>
-      <td>{% for p in e.parts %}{% if p.code %}<code>{{ p.text }}</code>{% else %}{{ p.text }}{% endif %}{% endfor %}</td>
+      <td class="detail">{% for p in e.parts %}{% if p.code %}<code>{{ p.text }}</code>{% else %}{{ p.text }}{% endif %}{% endfor %}</td>
     </tr>
     {% endfor %}
   </tbody>

@@ -385,17 +385,81 @@ pub(super) async fn delete(
 }
 
 /// A probe's result as JSON. `status`/`message` feed the console's
-/// shared `showProbe`; the rest is the report itself.
-#[derive(serde::Serialize)]
-struct ServerProbe {
+/// shared `showProbe`; `rights` and the fix lines render as a list.
+#[derive(serde::Serialize, Default)]
+pub(super) struct ServerProbe {
     status: &'static str,
     message: String,
     login: bool,
     server_version: Option<String>,
+    // Shipped in 0.61.0: `false` means not confirmed, a no or an unknown.
     can_create_database: bool,
     can_create_user: bool,
     can_grant: bool,
-    blocker: Option<&'static str>,
+    blocker: Option<String>,
+    rights: Vec<RightView>,
+    fix: Option<String>,
+    fix_sql: Vec<String>,
+    alternative: Option<&'static str>,
+    note: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct RightView {
+    label: String,
+    has: &'static str,
+}
+
+impl ServerProbe {
+    pub(super) fn is_ok(&self) -> bool {
+        self.status == "ok"
+    }
+
+    pub(super) fn bad(message: String) -> Self {
+        Self {
+            status: "bad",
+            message,
+            ..Self::default()
+        }
+    }
+
+    /// `lead` opens the message; the report fills the rest.
+    pub(super) fn of(r: &crate::tenancy::rights::RightsReport, lead: String) -> Self {
+        use crate::sql::AdminRight;
+        use crate::tenancy::rights::Has;
+        let yes = |right: AdminRight| {
+            r.checks()
+                .iter()
+                .any(|c| c.right == right && c.has == Has::Yes)
+        };
+        let problem = r.problem();
+        let message = match &problem {
+            None => format!("{lead} Ready: the login has every right this needs."),
+            Some(p) => format!("{lead} Not ready. {p}"),
+        };
+        Self {
+            status: if r.is_ready() { "ok" } else { "bad" },
+            message,
+            login: r.logged_in(),
+            server_version: r.server_version().map(ToOwned::to_owned),
+            can_create_database: yes(AdminRight::CreateDatabase),
+            can_create_user: yes(AdminRight::CreateLogin) || r.backend() == "sqlite",
+            can_grant: yes(AdminRight::Grant) || r.backend() == "sqlite",
+            blocker: problem,
+            rights: r
+                .checks()
+                .iter()
+                .map(|c| RightView {
+                    label: c.label.clone(),
+                    has: c.has.as_str(),
+                })
+                .collect(),
+            fix: r.fix(),
+            fix_sql: r.fix_sql(),
+            alternative: r.alternative(),
+            note: r.unknown_note(),
+        }
+    }
 }
 
 pub(super) async fn test(
@@ -403,66 +467,40 @@ pub(super) async fn test(
     Extension(op): Extension<auth::Operator>,
     Path(name): Path<String>,
 ) -> Response<Body> {
-    probe_response(&state, &op, &name).await
+    axum::Json(server_probe(&state, &op, &name).await).into_response()
 }
 
-/// Log in to server `name` and report its admin's rights as JSON. Also
-/// the create form's test for a new database on a saved server.
-pub(super) async fn probe_response(
+/// Log in to server `name` and report its admin's rights. Also the
+/// create form's test for a new database on a saved server.
+pub(super) async fn server_probe(
     state: &ConsoleState,
     op: &auth::Operator,
     name: &str,
-) -> Response<Body> {
+) -> ServerProbe {
     // A probe logs in with the saved password, so it is on the trail too.
     audit(state, op, name, "db_server_test", &[]).await;
-    let bad = |message: String| ServerProbe {
-        status: "bad",
-        message,
-        login: false,
-        server_version: None,
-        can_create_database: false,
-        can_create_user: false,
-        can_grant: false,
-        blocker: None,
-    };
-    let probe = match db_server::get(&state.registry, name).await {
+    match db_server::get(&state.registry, name).await {
         Ok(row) => match row.probe(PROBE_TIMEOUT).await {
             Ok(r) => {
-                let blocker = r.blocker();
-                let yes = |b: bool| if b { "yes" } else { "no" };
-                let mut message = match &r.login_error {
-                    Some(e) => format!("Login refused: {e}"),
-                    None => format!(
-                        "Logged in{}. Create databases: {}, create logins: {}, grant: {}.",
+                let rights = r.rights();
+                let mut lead = if rights.logged_in() {
+                    format!(
+                        "Logged in{}.",
                         r.server_version
                             .as_deref()
                             .map(|v| format!(" to {v}"))
-                            .unwrap_or_default(),
-                        yes(r.can_create_database),
-                        yes(r.can_create_user),
-                        yes(r.can_grant)
-                    ),
+                            .unwrap_or_default()
+                    )
+                } else {
+                    String::new()
                 };
-                if let Some(b) = blocker {
-                    message.push_str(&format!(" Not ready: {b}."));
-                }
                 if let Some(w) = row.tls_warning() {
-                    message.push_str(&format!(" Warning: {w}."));
+                    lead.push_str(&format!(" Warning: {w}."));
                 }
-                ServerProbe {
-                    status: if blocker.is_none() { "ok" } else { "bad" },
-                    message,
-                    login: r.can_login,
-                    server_version: r.server_version.clone(),
-                    can_create_database: r.can_create_database,
-                    can_create_user: r.can_create_user,
-                    can_grant: r.can_grant,
-                    blocker,
-                }
+                ServerProbe::of(&rights, lead.trim_start().to_owned())
             }
-            Err(e) => bad(explain(&e, name)),
+            Err(e) => ServerProbe::bad(explain(&e, name)),
         },
-        Err(e) => bad(explain(&e, name)),
-    };
-    axum::Json(probe).into_response()
+        Err(e) => ServerProbe::bad(explain(&e, name)),
+    }
 }

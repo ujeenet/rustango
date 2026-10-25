@@ -136,6 +136,8 @@ pub mod sweep;
 pub mod server;
 /// Creating and dropping a database-mode tenant's database and login.
 pub mod server_admin;
+/// The database rights each storage mode needs, and what a login has.
+pub mod rights;
 /// A tenant whose database rustango made on a saved server: rotating its
 /// login's password.
 pub mod server_tenant;

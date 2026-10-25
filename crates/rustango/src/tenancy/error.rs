@@ -58,6 +58,11 @@ pub enum TenancyError {
 impl TenancyError {
     /// The text of an error the operator can act on; `None` for a cause to withhold (#2171).
     pub(crate) fn user_facing(&self) -> Option<String> {
-        matches!(self, Self::Validation(_) | Self::Busy).then(|| self.to_string())
+        match self {
+            // The variant's prefix is for logs, not for the operator.
+            Self::Validation(m) => Some(m.clone()),
+            Self::Busy => Some(self.to_string()),
+            _ => None,
+        }
     }
 }

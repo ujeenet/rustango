@@ -17,7 +17,7 @@ use crate::core::{
     FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
 };
 
-use super::server::{Collation, DatabaseName, Login, LoginPassword};
+use super::server::{AdminRight, Collation, DatabaseName, Login, LoginPassword, ServerAccount};
 use super::{CompiledStatement, SqlError};
 
 /// Write `<col> ?| ARRAY[$1, $2, …]`, shared by both default
@@ -1115,6 +1115,34 @@ pub trait Dialect: Send + Sync {
     /// dialect's own; `tenancy::server_admin` reads it.
     fn login_privileges_sql(&self) -> Option<&'static str> {
         None
+    }
+
+    /// Rows of one text column: the session's grant lines, roles included.
+    /// Read in place of [`Self::login_privileges_sql`] where present.
+    fn login_grants_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// One row, one text column: the current login (MySQL: `user@host`).
+    fn current_account_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// One row: user, database, and whether the current login may
+    /// create schemas in the current database.
+    fn schema_privileges_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// What an admin runs to give `account` the `rights`; `database` is
+    /// where [`AdminRight::CreateSchema`] applies. Empty where nothing helps.
+    fn grant_admin_rights_sql(
+        &self,
+        _account: &ServerAccount,
+        _database: Option<&str>,
+        _rights: &[AdminRight],
+    ) -> Vec<String> {
+        Vec::new()
     }
 
     /// Run on each admin connection before any DDL, so the emitted

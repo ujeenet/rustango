@@ -498,6 +498,13 @@ impl Reporter<'_> {
     /// explanation — which is the state the whole event stream exists
     /// to prevent.
     async fn fail<T>(&self, at: ProvisionStep, e: TenancyError) -> Result<T, TenancyError> {
+        // Refusals too, so the server log always holds the reason.
+        tracing::warn!(
+            target: "rustango::tenancy::provision",
+            step = at.as_str(),
+            reason = %crate::sql::connect_diagnosis::redact(&e.to_string()).replace('\n', " "),
+            "a provisioning step failed"
+        );
         let text = self
             .store
             .as_ref()
@@ -835,7 +842,7 @@ where
     // typo'd host, wrong password, database not created yet — used to
     // be discovered *after* the `Org` row landed, leaving a tenant the
     // resolver matches in front of a database with no schema.
-    check_connection(&checked, rep).await?;
+    check_connection(&checked, &registry, rep).await?;
 
     let schema_name = schema_name_for(request);
 
@@ -1052,15 +1059,20 @@ where
 /// tenant lives in the registry's, which is already connected.
 async fn check_connection(
     checked: &CheckedRequest,
+    registry: &crate::sql::Pool,
     rep: &Reporter<'_>,
 ) -> Result<(), TenancyError> {
     if checked.probe_target().is_none() {
-        rep.step(
-            ProvisionStep::CheckConnection,
-            Progress::Skipped("schema-mode tenants share the registry's database"),
-        )
-        .await;
-        return Ok(());
+        // Schema mode: the registry's own login makes the schema.
+        rep.step(ProvisionStep::CheckConnection, Progress::Started)
+            .await;
+        return match schema_rights_refusal(registry).await {
+            None => {
+                rep.step(ProvisionStep::CheckConnection, Progress::Ok).await;
+                Ok(())
+            }
+            Some(e) => rep.fail(ProvisionStep::CheckConnection, e).await,
+        };
     }
 
     rep.step(ProvisionStep::CheckConnection, Progress::Started)
@@ -1072,6 +1084,14 @@ async fn check_connection(
         }
         Err(e) => rep.fail(ProvisionStep::CheckConnection, e).await,
     }
+}
+
+/// Why the registry's login may not create a tenant schema; `None` when
+/// it may, or when the server would not say.
+pub(crate) async fn schema_rights_refusal(registry: &crate::sql::Pool) -> Option<TenancyError> {
+    let rights = super::rights::RightsReport::for_new_schema(registry).await;
+    (!rights.is_ready())
+        .then(|| TenancyError::Validation(rights.refusal("schema-mode tenants cannot be created")))
 }
 
 /// Make the tenant's storage, if it needs making.
@@ -2339,12 +2359,13 @@ impl ServerDatabase {
                 return Err(e.into());
             }
         };
-        if let Some(why) = report.blocker() {
+        let rights = report.rights();
+        if !rights.is_ready() {
             admin.close().await;
-            return Err(TenancyError::Validation(format!(
-                "database server `{}` cannot create tenant databases: {why}",
+            return Err(TenancyError::Validation(rights.refusal(&format!(
+                "database server `{}` cannot create tenant databases",
                 server.name
-            )));
+            ))));
         }
         Ok((admin, warning))
     }

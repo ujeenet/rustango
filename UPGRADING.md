@@ -183,6 +183,10 @@ Verify `X-Webhook-Signature-V2` with `webhook::verify_delivery` and drop repeate
 `PgJobQueue::ensure_table_pool` adds it. With a hand-written migration, add `queue_name` (`TEXT`, `VARCHAR(255)` on MySQL) before naming a queue. Once the column exists, unnamed queues no longer run jobs of named ones.
 Old workers ignore the column and still run named jobs: drain them before you dispatch on a named queue.
 
+### Schema-mode creates check `CREATE` on the registry database
+
+A registry login without it is now refused before `CREATE SCHEMA`, with the `GRANT` to run.
+
 ## 0.61.1
 
 ### Scaffold taglines lose their brackets

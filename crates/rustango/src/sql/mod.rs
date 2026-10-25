@@ -56,7 +56,9 @@ pub(crate) use error::{Refusal, STILL_REFERENCED};
 pub use geometry::{Point, SRID_WGS84};
 pub use hstore::HStore;
 pub use range::Range;
-pub use server::{Collation, DatabaseName, InvalidName, Login, LoginName, LoginPassword};
+pub use server::{
+    AdminRight, Collation, DatabaseName, InvalidName, Login, LoginName, LoginPassword, ServerAccount,
+};
 pub use vector::Vector;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
 #[cfg(feature = "media")]

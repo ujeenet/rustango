@@ -48,6 +48,14 @@ Deliveries now carry `X-Webhook-Timestamp` and `X-Webhook-Signature-V2`, an HMAC
 
 Queues sharing `rustango_jobs` picked each other's jobs. A named queue now runs only its own jobs, an unnamed one only unnamed jobs; `ensure_table_pool` adds the `queue_name` column.
 
+### Fixed — tenant creates say which database rights are missing
+
+The server Test, the New tenant Test, the run and the CLI (`test-db-server`, `create-tenant`) share one rights report: each right yes, no or unknown, what is missing, and the `GRANT` / `ALTER ROLE` that fixes it. Schema mode now checks the registry login's `CREATE` before `CREATE SCHEMA`; the form explains each option's login and rights.
+
+### Fixed — MySQL admins whose rights come from a role were refused
+
+The probe reads `SHOW GRANTS`, so active roles count, nested ones too, on MySQL and MariaDB. Rights the server will not report are "unknown" and no longer block. Refusals are logged, and console errors drop the `tenancy validation:` prefix.
+
 ## [0.61.1] — 2026-10-25
 
 ### Fixed — tenant logos 404'd under the default routes
