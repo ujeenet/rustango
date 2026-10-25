@@ -444,6 +444,27 @@ async fn an_i32_pk_junction_gets_its_foreign_keys(pool: &Pool) {
     drop_all().await;
 }
 
+/// A stored snapshot names a junction's columns, not their width, so a
+/// junction made as `BIGINT` before diffs to nothing.
+#[test]
+fn an_existing_bigint_junction_does_not_churn() {
+    let now = SchemaSnapshot::from_models(&[I32Tag::SCHEMA, I32Post::SCHEMA]);
+    let stored = serde_json::to_value(&now).unwrap();
+    let junction = &stored["m2m_tables"][0];
+    let keys: Vec<&str> = junction
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        ["dst_col", "dst_table", "src_col", "src_table", "through"]
+    );
+    let prev: SchemaSnapshot = serde_json::from_value(stored).unwrap();
+    assert!(rustango::migrate::detect_changes(&prev, &now).is_empty());
+}
+
 /// MySQL's 3072-byte key cap, checked against the server: the widest
 /// junction the renderer allows is created, one char more gets 1071.
 async fn mysql_junction_key_limit_matches_the_server(pool: &Pool) {
