@@ -4,9 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+**Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set. See UPGRADING.
+
 ### Added — sealed tenant database URLs
 
-`tenancy::seal` writes `enc:v1:` secrets (XChaCha20-Poly1305, `RUSTANGO_SECRET_KEY`); create and edit seal a password URL when the key is set; `Builder::secrets` / `Cli::with_secrets` install a custom resolver.
+`tenancy::seal` writes `enc:v1:` secrets (XChaCha20-Poly1305, `RUSTANGO_SECRET_KEY`); create, edit and storage moves seal a password URL when the key is set; `Builder::secrets` / `Cli::with_secrets` install a custom resolver.
+`require_sealed_secrets()` (or `RUSTANGO_REQUIRE_SEALED_SECRETS=1`) refuses to store one unsealed; `RUSTANGO_SECRET_KEY_PREVIOUS` opens values sealed under the old key; `reseal-tenant-secrets [--apply]` re-seals with the current key.
 
 ### Fixed — tenant URL references resolve on every path
 
