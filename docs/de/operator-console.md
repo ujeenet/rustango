@@ -17,6 +17,7 @@ Die Operator-Konsole ist die Weboberfläche für die erste Art — Tenants provi
 - [Operatoren](#operatoren)
 - [Das Audit-Log](#das-audit-log)
 - [Provisioning-Läufe](#provisioning-läufe)
+- [Datenbankserver](#datenbankserver)
 - [Die drei Fähigkeitsstufen](#die-drei-fähigkeitsstufen)
 
 ---
@@ -70,6 +71,7 @@ Die Konsole antwortet auf der **Apex**-Domain (`RUSTANGO_APEX_DOMAIN`), nicht au
 | **Operators** | Wer sich an dieser Konsole anmelden darf |
 | **Audit log** | Jede Änderung, die über diese Konsole lief |
 | **Runs** | Provisioning- und Migrationsläufe, live gestreamt |
+| **Database servers** | Server, auf denen Tenant-Datenbanken angelegt werden, mit ihrem Admin-Login |
 
 ---
 
@@ -134,6 +136,30 @@ Einen Tenant zu provisionieren sind mehrere Schritte gegen eine Datenbank, die l
 
 ---
 
+## Datenbankserver
+
+**Organizations → Database servers** speichert einen Server einmal: Host, Port,
+Admin-Benutzer, Admin-Passwort, TLS-Modus und bei Postgres optional eine
+Wartungsdatenbank statt `postgres`. Bei einer SQLite-Registry ist ein „Server“
+ein Verzeichnis für Tenant-Dateien. Das Backend ist immer das der Registry.
+
+Das Passwort wird versiegelt gespeichert (`enc:v1:`), daher muss
+`RUSTANGO_SECRET_KEY` gesetzt sein; sonst wird das Speichern abgelehnt. Es wird
+nie wieder angezeigt: Das Bearbeiten-Formular lässt das Feld leer, ein leeres
+Feld behält das gespeicherte. Audit-Zeilen nennen die geänderten Felder, nie
+ihre Werte.
+
+**Test** meldet sich an und zeigt die Serverversion und ob der Admin-Login
+Datenbanken und Logins anlegen und Rechte vergeben darf, dazu den ersten Grund,
+warum keine Tenants angelegt werden können (etwa PostgreSQL vor 15).
+
+Löschen wird abgelehnt, solange die URL eines Datenbank-Tenants auf Host und
+Port des Servers zeigt (SQLite: eine Datei in seinem Verzeichnis).
+
+Über die CLI: [`add-db-server` und Verwandte](manage.md#datenbankserver).
+
+---
+
 ## Die drei Fähigkeitsstufen
 
 Welche Routen existieren, hängt davon ab, welchen Konstruktor du eingehängt hast:
@@ -147,6 +173,7 @@ Welche Routen existieren, hängt davon ab, welchen Konstruktor du eingehängt ha
 | Tenant außer Betrieb nehmen | | ✓ | ✓ |
 | Neuen Tenant provisionieren, Migrationen ausführen | | | ✓ |
 | Provisioning-Läufe ansehen | | | ✓ |
+| Datenbankserver speichern und testen | | | ✓ |
 
 Nicht eingehängte Routen liefern 404 statt 403 — eine Nur-Lese-Konsole bewirbt nicht, was sie nicht kann.
 

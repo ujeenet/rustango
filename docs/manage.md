@@ -149,6 +149,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | `migrate-tenants` / `migrate-registry` | Apply migrations across tenants, or to the registry |
 | `migrate-tenant-storage <slug> --to schema\|database` | Move a tenant between storage modes |
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host routing |
+| `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Saved database servers |
 | `test-tenant-connection` | Verify a tenant's database is reachable |
 | `prewarm-pools` | Open tenant pools ahead of first request |
 | `run-server` / `runserver` | Run the multi-tenant server |
@@ -1058,6 +1059,33 @@ of its own, so it cannot be removed here — change it with
 [`edit-tenant --host-pattern`](#edit-tenant-slug-options). There is
 deliberately no `rename-host`: remove and add instead, so the change
 reaches other running pods.
+
+### Database servers
+
+Save a database server's admin login once, so tenant databases can be
+created on it without SQL. The backend is the registry's.
+
+```bash
+cargo run -- add-db-server main --host db.internal --user admin --tls require
+cargo run -- test-db-server main
+cargo run -- list-db-servers
+cargo run -- edit-db-server main --port 6432
+cargo run -- remove-db-server main
+```
+
+| Verb | What it does |
+|---|---|
+| `add-db-server <name> --host <h> [--port <n>] --user <u> [--tls <mode>] [--maintenance-db <db>]` | Save a server. SQLite: `--sqlite-dir <dir>` instead |
+| `list-db-servers` | Every saved server, without secrets |
+| `test-db-server <name>` | Log in and report the version and the admin login's rights; fails when it cannot provision |
+| `edit-db-server <name> [same flags] [--prompt-password \| --clear-password] [--on\|--off]` | Change a server; `none` clears `--tls` or `--maintenance-db` |
+| `remove-db-server <name>` | Delete it; refused while a tenant's database is on it |
+
+The password is asked at a hidden prompt, or read from the variable named
+by `--password-env <VAR>`; `--no-password` saves none. It is never taken
+from argv and never printed. It is stored sealed, so `RUSTANGO_SECRET_KEY`
+must be set. `--tls` takes `disable`, `prefer`, `require`, `verify-ca` or
+`verify-full`.
 
 ### `create-operator <username> --password <pwd>`
 

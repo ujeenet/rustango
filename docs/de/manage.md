@@ -977,6 +977,33 @@ eigene Zeile, kann hier also nicht entfernt werden — ändern Sie ihn mit
 gibt es bewusst nicht: entfernen und neu hinzufügen, damit die Änderung auch
 andere laufende Pods erreicht.
 
+### Datenbankserver
+
+Speichern Sie den Admin-Login eines Datenbankservers einmal, damit
+Tenant-Datenbanken ohne SQL darauf angelegt werden können. Das Backend ist das
+der Registry.
+
+```bash
+cargo run -- add-db-server main --host db.internal --user admin --tls require
+cargo run -- test-db-server main
+cargo run -- list-db-servers
+cargo run -- edit-db-server main --port 6432
+cargo run -- remove-db-server main
+```
+
+| Verb | Was es tut |
+|---|---|
+| `add-db-server <name> --host <h> [--port <n>] --user <u> [--tls <mode>] [--maintenance-db <db>]` | Speichert einen Server. SQLite: stattdessen `--sqlite-dir <dir>` |
+| `list-db-servers` | Alle gespeicherten Server, ohne Geheimnisse |
+| `test-db-server <name>` | Meldet sich an und zeigt Version und Rechte des Admin-Logins; schlägt fehl, wenn nicht provisioniert werden kann |
+| `edit-db-server <name> [gleiche Flags] [--prompt-password \| --clear-password] [--on\|--off]` | Ändert einen Server; `none` leert `--tls` oder `--maintenance-db` |
+| `remove-db-server <name>` | Löscht ihn; abgelehnt, solange eine Tenant-Datenbank darauf liegt |
+
+Das Passwort wird verdeckt abgefragt oder aus der mit `--password-env <VAR>`
+benannten Variable gelesen; `--no-password` speichert keines. Es kommt nie aus
+argv und wird nie ausgegeben. Es wird versiegelt gespeichert, daher muss
+`RUSTANGO_SECRET_KEY` gesetzt sein.
+
 ### `create-operator <username> --password <pwd>`
 
 Erstellt einen Operator — einen globalen Admin, der jeden Tenant von einer
@@ -1646,6 +1673,7 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 | `migrate-tenants` / `migrate-registry` | Wendet Migrationen über alle Tenants oder auf die Registry an |
 | `migrate-tenant-storage <slug> --to schema\|database` | Verschiebt einen Tenant zwischen Speichermodi |
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host-Routing |
+| `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Gespeicherte Datenbankserver |
 | `test-tenant-connection` | Prüft, ob die Datenbank eines Tenants erreichbar ist |
 | `prewarm-pools` | Öffnet Tenant-Pools vor dem ersten Request |
 | `run-server` / `runserver` | Startet den Multi-Tenant-Server |

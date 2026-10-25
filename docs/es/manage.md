@@ -960,6 +960,32 @@ así que no puede quitarse aquí — cámbialo con
 hay `rename-host`: quita y vuelve a añadir, para que el cambio llegue también
 a los demás pods en ejecución.
 
+### Servidores de bases de datos
+
+Guarda una vez el login de administración de un servidor, para crear en él
+bases de datos de tenants sin SQL. El backend es el del registro.
+
+```bash
+cargo run -- add-db-server main --host db.internal --user admin --tls require
+cargo run -- test-db-server main
+cargo run -- list-db-servers
+cargo run -- edit-db-server main --port 6432
+cargo run -- remove-db-server main
+```
+
+| Verbo | Qué hace |
+|---|---|
+| `add-db-server <name> --host <h> [--port <n>] --user <u> [--tls <mode>] [--maintenance-db <db>]` | Guarda un servidor. SQLite: `--sqlite-dir <dir>` en su lugar |
+| `list-db-servers` | Todos los servidores guardados, sin secretos |
+| `test-db-server <name>` | Inicia sesión y muestra la versión y los permisos del login; falla si no se puede aprovisionar |
+| `edit-db-server <name> [mismos flags] [--prompt-password \| --clear-password] [--on\|--off]` | Cambia un servidor; `none` vacía `--tls` o `--maintenance-db` |
+| `remove-db-server <name>` | Lo borra; se rechaza mientras la base de un tenant esté en él |
+
+La contraseña se pide sin eco, o se lee de la variable indicada con
+`--password-env <VAR>`; `--no-password` no guarda ninguna. Nunca viene de argv
+ni se imprime. Se guarda sellada, así que `RUSTANGO_SECRET_KEY` debe estar
+definida.
+
 ### `create-operator <username> --password <pwd>`
 
 Crea un operador — un admin global que puede gestionar cada tenant desde una
@@ -1617,6 +1643,7 @@ alcanzan mediante `Cli::tenancy()`.
 | `migrate-tenants` / `migrate-registry` | Aplica migraciones a todos los tenants, o al registro |
 | `migrate-tenant-storage <slug> --to schema\|database` | Mueve un tenant entre modos de almacenamiento |
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Enrutado por host |
+| `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Servidores de bases de datos guardados |
 | `test-tenant-connection` | Verifica que la base de un tenant es alcanzable |
 | `prewarm-pools` | Abre los pools de tenants antes de la primera petición |
 | `run-server` / `runserver` | Ejecuta el servidor multi-tenant |

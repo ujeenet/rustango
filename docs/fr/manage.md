@@ -1005,6 +1005,32 @@ ligne propre : il ne peut donc pas être retiré ici — changez-le avec
 délibérément pas de `rename-host` : retirez puis rajoutez, pour que le
 changement atteigne aussi les autres pods en cours d'exécution.
 
+### Serveurs de bases de données
+
+Enregistrez une fois le login d'administration d'un serveur, pour y créer les
+bases des tenants sans SQL. Le backend est celui du registre.
+
+```bash
+cargo run -- add-db-server main --host db.internal --user admin --tls require
+cargo run -- test-db-server main
+cargo run -- list-db-servers
+cargo run -- edit-db-server main --port 6432
+cargo run -- remove-db-server main
+```
+
+| Verbe | Ce qu'il fait |
+|---|---|
+| `add-db-server <name> --host <h> [--port <n>] --user <u> [--tls <mode>] [--maintenance-db <db>]` | Enregistre un serveur. SQLite : `--sqlite-dir <dir>` à la place |
+| `list-db-servers` | Tous les serveurs enregistrés, sans secrets |
+| `test-db-server <name>` | Se connecte et affiche la version et les droits du login ; échoue s'il ne peut pas provisionner |
+| `edit-db-server <name> [mêmes options] [--prompt-password \| --clear-password] [--on\|--off]` | Modifie un serveur ; `none` vide `--tls` ou `--maintenance-db` |
+| `remove-db-server <name>` | Le supprime ; refusé tant que la base d'un tenant s'y trouve |
+
+Le mot de passe est demandé sans écho, ou lu dans la variable nommée par
+`--password-env <VAR>` ; `--no-password` n'en enregistre aucun. Il ne vient
+jamais d'argv et n'est jamais affiché. Il est stocké scellé, donc
+`RUSTANGO_SECRET_KEY` doit être défini.
+
 ### `create-operator <username> --password <pwd>`
 
 Crée un opérateur — un administrateur global qui peut gérer chaque
@@ -1684,6 +1710,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 | `migrate-tenants` / `migrate-registry` | Applique les migrations à tous les tenants, ou au registre |
 | `migrate-tenant-storage <slug> --to schema\|database` | Déplace un tenant d'un mode de stockage à l'autre |
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Routage par hôte |
+| `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Serveurs de bases de données enregistrés |
 | `test-tenant-connection` | Vérifie que la base d'un tenant est joignable |
 | `prewarm-pools` | Ouvre les pools de tenants avant la première requête |
 | `run-server` / `runserver` | Lance le serveur multi-tenant |

@@ -21,6 +21,7 @@ and runs the whole registry. There is no per-tenant migrate on the command line.
 - [Operators](#operators)
 - [The audit log](#the-audit-log)
 - [Provisioning runs](#provisioning-runs)
+- [Database servers](#database-servers)
 - [The three capability levels](#the-three-capability-levels)
 
 ---
@@ -75,6 +76,7 @@ The console answers on the **apex** domain (`RUSTANGO_APEX_DOMAIN`), not on a te
 | **Operators** | Who can sign in to this console |
 | **Audit log** | Every change made through the console |
 | **Runs** | Provisioning and migration runs, streamed live |
+| **Database servers** | Servers tenant databases are created on, with their admin login |
 
 ---
 
@@ -139,6 +141,29 @@ From the CLI: [`list-runs` / `show-run`](manage.md#inspecting-what-happened).
 
 ---
 
+## Database servers
+
+**Organizations → Database servers** saves a server once: host, port, admin
+user, admin password, TLS mode and, on Postgres, a maintenance database to use
+instead of `postgres`. On a SQLite registry a "server" is a directory for
+tenant files. The backend is always the registry's.
+
+The password is stored sealed (`enc:v1:`), so `RUSTANGO_SECRET_KEY` must be
+set; without it the save is refused. It is never shown again: the edit form
+leaves the field empty, and a blank field keeps the saved one. Audit rows name
+the fields that changed, never their values.
+
+**Test** logs in and reports the server version and whether the admin login may
+create databases, create logins and grant rights, plus the first reason it
+cannot provision tenants (for example PostgreSQL before 15).
+
+Delete is refused while a database-mode tenant's URL points at the server's
+host and port (SQLite: a file in its directory).
+
+From the CLI: [`add-db-server` and friends](manage.md#database-servers).
+
+---
+
 ## The three capability levels
 
 Which routes exist depends on which constructor you mounted:
@@ -152,6 +177,7 @@ Which routes exist depends on which constructor you mounted:
 | Decommission a tenant | | ✓ | ✓ |
 | Provision a new tenant, run migrations | | | ✓ |
 | View provisioning runs | | | ✓ |
+| Save and test database servers | | | ✓ |
 
 Routes that are not mounted return 404 rather than 403 — a read-only console does not advertise what it cannot do.
 
