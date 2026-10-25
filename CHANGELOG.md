@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Added — `tenancy::server_admin`: create and drop a tenant's database and login
 
-`ServerAdmin` creates a slug-named database plus a login granted only that database (rolled back on failure), drops both, and reports the admin login's rights; SQLite uses `<dir>/<slug>.db`.
+`ServerAdmin` creates a slug-named database plus a login granted only that database (rolled back on failure), drops both, and reports the admin login's rights; SQLite uses `<dir>/<slug>.db`. PostgreSQL tenant databases need PostgreSQL 15+.
 
 ## [0.60.12] — 2026-10-23
 

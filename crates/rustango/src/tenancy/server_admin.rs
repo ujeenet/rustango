@@ -4,6 +4,9 @@
 //! Postgres and MySQL get a database named as the slug plus a login
 //! granted only that database. SQLite gets `<dir>/<slug>.db` and no login.
 //! All SQL comes from the [`crate::sql::Dialect`] emitters.
+//!
+//! Tenant databases need PostgreSQL 15 or later: before 15 every login may
+//! create tables in `public` of every shared database (registry, template1).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -26,6 +29,10 @@ pub enum TenantDbError {
     InUse(DatabaseName),
     #[error("the admin login may not {step}: {detail}")]
     Denied { step: &'static str, detail: String },
+    /// The admin's own database or login, or a name passed to
+    /// [`ServerAdmin::with_protected`].
+    #[error("refusing to drop `{0}` — it is protected")]
+    Protected(String),
     #[error("{0}")]
     Connect(ConnectDiagnosis),
     #[error("{0}")]
@@ -62,6 +69,8 @@ pub struct PrivilegeReport {
     /// `"postgres"`, `"mysql"` or `"sqlite"`.
     pub backend: &'static str,
     pub server_version: Option<String>,
+    /// PostgreSQL's major version; `None` on other backends.
+    pub pg_major: Option<u32>,
     pub can_login: bool,
     /// Why the login was refused, when it was.
     pub login_error: Option<ConnectDiagnosis>,
@@ -78,13 +87,35 @@ impl PrivilegeReport {
     /// Everything [`ServerAdmin::create_tenant_database`] needs.
     #[must_use]
     pub fn can_provision(&self) -> bool {
-        self.can_login && self.can_create_database && self.can_create_user && self.can_grant
+        self.blocker().is_none()
+    }
+
+    /// The first reason tenant databases cannot be made here.
+    #[must_use]
+    pub fn blocker(&self) -> Option<&'static str> {
+        if !self.can_login {
+            Some("the admin login is refused")
+        } else if self.pg_major.is_some_and(|m| m < 15) {
+            Some(
+                "PostgreSQL 15 or later is needed: before 15 every login may create \
+                 tables in the shared databases",
+            )
+        } else if !self.can_create_database {
+            Some("the admin login may not create databases")
+        } else if !self.can_create_user {
+            Some("the admin login may not create logins")
+        } else if !self.can_grant {
+            Some("the admin login may not grant rights on a database")
+        } else {
+            None
+        }
     }
 
     fn refused(backend: &'static str, why: ConnectDiagnosis) -> Self {
         Self {
             backend,
             server_version: None,
+            pg_major: None,
             can_login: false,
             login_error: Some(why),
             can_create_database: false,
@@ -124,6 +155,8 @@ impl std::fmt::Debug for Created {
 /// An admin connection to a database server, or a SQLite directory.
 pub struct ServerAdmin {
     target: Target,
+    /// Database and login names `drop_tenant_database` refuses.
+    protected: Vec<String>,
 }
 
 enum Target {
@@ -159,9 +192,46 @@ const MYSQL_DB_PRIVILEGES: &[&str] = &[
     "TRIGGER",
 ];
 
+/// MariaDB's `ALL` on a database also holds these.
+const MARIADB_DB_PRIVILEGES: &[&str] = &["DELETE HISTORY"];
+
+/// Whether `rows` of (privilege, grantable) cover `GRANT ALL ON db.*`.
+fn mysql_can_grant(rows: &[(String, String)], mariadb: bool) -> bool {
+    let grantable = |p: &str| {
+        rows.iter()
+            .any(|(r, g)| r.eq_ignore_ascii_case(p) && g.eq_ignore_ascii_case("YES"))
+    };
+    let extra: &[&str] = if mariadb { MARIADB_DB_PRIVILEGES } else { &[] };
+    MYSQL_DB_PRIVILEGES.iter().chain(extra).all(|p| grantable(p))
+}
+
+/// `16` from `16.15` or `14.9 (Debian 14.9-1)`.
+fn pg_major(version: &str) -> Option<u32> {
+    let digits: String = version.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// The user and database an admin URL names, URL-decoded.
+fn url_user_and_database(url: &str) -> (Option<String>, Option<String>) {
+    let (user, rest) = match crate::sql::connect_diagnosis::split_userinfo(url) {
+        Some((_, userinfo, rest)) => {
+            let user = userinfo.split(':').next().unwrap_or(userinfo);
+            (Some(crate::url_codec::percent_decode_path(user)), rest)
+        }
+        None => (None, url.split_once("://").map_or(url, |(_, r)| r)),
+    };
+    let path = rest.split('?').next().unwrap_or(rest);
+    let db = path
+        .split_once('/')
+        .map(|(_, d)| crate::url_codec::percent_decode_path(d))
+        .filter(|d| !d.is_empty());
+    (user.filter(|u| !u.is_empty()), db)
+}
+
 impl ServerAdmin {
     /// Connect to the server behind `url` (`postgres://` or `mysql://`)
-    /// as its admin login. The URL's database is ignored.
+    /// as its admin login. DDL runs on the maintenance target; the URL's
+    /// database and login are protected from [`Self::drop_tenant_database`].
     ///
     /// # Errors
     /// [`TenantDbError::Connect`] naming the fault.
@@ -169,12 +239,14 @@ impl ServerAdmin {
         let pool = Pool::connect_admin(url, None, timeout)
             .await
             .map_err(TenantDbError::Connect)?;
+        let (user, db) = url_user_and_database(url);
         Ok(Self {
             target: Target::Server {
                 pool,
                 url: url.to_owned(),
                 timeout,
             },
+            protected: user.into_iter().chain(db).collect(),
         })
     }
 
@@ -183,7 +255,21 @@ impl ServerAdmin {
     pub fn sqlite_dir(dir: impl Into<PathBuf>) -> Self {
         Self {
             target: Target::Sqlite { dir: dir.into() },
+            protected: Vec::new(),
         }
+    }
+
+    /// Database and login names `drop_tenant_database` must refuse, such
+    /// as the registry's. Callers should still drop only names they
+    /// recorded when creating the tenant.
+    #[must_use]
+    pub fn with_protected<S: Into<String>>(mut self, names: impl IntoIterator<Item = S>) -> Self {
+        self.protected.extend(names.into_iter().map(Into::into));
+        self
+    }
+
+    fn is_protected(&self, name: &str) -> bool {
+        self.protected.iter().any(|p| p.eq_ignore_ascii_case(name))
     }
 
     /// The file a SQLite tenant lives in; `None` for a server.
@@ -235,6 +321,7 @@ impl ServerAdmin {
         let mut report = PrivilegeReport {
             backend: d.name(),
             server_version: None,
+            pg_major: None,
             can_login: true,
             login_error: None,
             can_create_database: false,
@@ -244,6 +331,9 @@ impl ServerAdmin {
         if let Some(sql) = d.server_version_sql() {
             let rows: Vec<(String,)> = crate::sql::raw_query_pool(sql, Vec::new(), pool).await?;
             report.server_version = rows.into_iter().next().map(|(v,)| v);
+        }
+        if d.name() == "postgres" {
+            report.pg_major = report.server_version.as_deref().and_then(pg_major);
         }
         let Some(sql) = d.login_privileges_sql() else {
             return Ok(report);
@@ -261,14 +351,14 @@ impl ServerAdmin {
             let rows: Vec<(String, String)> =
                 crate::sql::raw_query_pool(sql, Vec::new(), pool).await?;
             let has = |p: &str| rows.iter().any(|(r, _)| r.eq_ignore_ascii_case(p));
-            let grantable = |p: &str| {
-                rows.iter()
-                    .any(|(r, g)| r.eq_ignore_ascii_case(p) && g.eq_ignore_ascii_case("YES"))
-            };
             // DROP too: a failed create is undone by dropping.
             report.can_create_database = has("CREATE") && has("DROP");
             report.can_create_user = has("CREATE USER");
-            report.can_grant = MYSQL_DB_PRIVILEGES.iter().all(|p| grantable(p));
+            let mariadb = report
+                .server_version
+                .as_deref()
+                .is_some_and(|v| v.contains("MariaDB"));
+            report.can_grant = mysql_can_grant(&rows, mariadb);
         }
         Ok(report)
     }
@@ -303,12 +393,25 @@ impl ServerAdmin {
 
         let mut login_made = false;
         let rest = async {
+            let taken = || TenantDbError::LoginExists(login.name().clone());
+            // `None` when the admin may not read the user catalog.
+            let existed = login_exists(pool, login).await;
+            if existed == Some(true) {
+                return Err(taken());
+            }
             let sql = d
                 .create_login_sql(login, password)
                 .ok_or(TenantDbError::Unsupported("this backend has no logins"))?;
-            step(pool, &sql, "create a login")
-                .await
-                .map_err(|e| exists_as(e, || TenantDbError::LoginExists(login.name().clone())))?;
+            if let Err(e) = step(pool, &sql, "create a login").await {
+                let f = match &e {
+                    TenantDbError::Exec(x) => fault(x),
+                    TenantDbError::Denied { .. } => Fault::Denied,
+                    _ => Fault::Other,
+                };
+                // The server may have made it before the error reached us.
+                login_made = undo_login_after_failure(f, existed);
+                return Err(exists_as(e, taken));
+            }
             login_made = true;
             for sql in d.grant_database_sql(name, login) {
                 step(pool, &sql, "grant a login its database").await?;
@@ -334,7 +437,7 @@ impl ServerAdmin {
         .await;
 
         if let Err(cause) = rest {
-            let undo = drop_server(pool, name, login_made.then_some(login)).await;
+            let undo = undo_create(pool, name, login_made.then_some(login)).await;
             return Err(match undo {
                 Ok(()) => cause,
                 Err(undo) => TenantDbError::RollbackFailed {
@@ -358,16 +461,28 @@ impl ServerAdmin {
     /// Drop `name` and then `login`; each is skipped when absent.
     /// SQLite deletes the file and its `-wal` / `-shm` / `-journal`.
     ///
+    /// Drops whatever valid names it is given, short of the protected
+    /// ones: pass the names recorded when the tenant was created.
+    ///
     /// # Errors
-    /// [`TenantDbError::InUse`] while sessions are open, or the step's error.
+    /// [`TenantDbError::Protected`], [`TenantDbError::InUse`] while
+    /// sessions are open, or the step's error.
     pub async fn drop_tenant_database(
         &self,
         name: &DatabaseName,
         login: &Login,
     ) -> Result<(), TenantDbError> {
+        if self.is_protected(name.as_str()) {
+            return Err(TenantDbError::Protected(name.to_string()));
+        }
         match &self.target {
             Target::Sqlite { dir } => drop_sqlite(dir, name),
-            Target::Server { pool, .. } => drop_server(pool, name, Some(login)).await,
+            Target::Server { pool, .. } => {
+                if self.is_protected(login.name().as_str()) {
+                    return Err(TenantDbError::Protected(login.name().to_string()));
+                }
+                drop_server(pool, name, Some(login), false).await
+            }
         }
     }
 
@@ -379,14 +494,41 @@ impl ServerAdmin {
     }
 }
 
+/// Undo a failed create. `force` ends sessions inside the new database
+/// (Postgres 13+): the admin's own just-closed one can still be exiting.
+async fn undo_create(
+    pool: &Pool,
+    name: &DatabaseName,
+    login: Option<&Login>,
+) -> Result<(), TenantDbError> {
+    drop_server(pool, name, login, true).await
+}
+
+/// Whether a failed CREATE login may have left one behind that is ours
+/// to drop: an unclear failure, and the login was absent beforehand.
+fn undo_login_after_failure(fault: Fault, existed_before: Option<bool>) -> bool {
+    !matches!(fault, Fault::Exists | Fault::Denied) && existed_before == Some(false)
+}
+
+/// `Some(true)` when `login` exists; `None` when it cannot be checked.
+async fn login_exists(pool: &Pool, login: &Login) -> Option<bool> {
+    let stmt = pool.dialect().login_exists_sql(login)?;
+    let rows: Vec<(i64,)> = crate::sql::raw_query_pool(&stmt.sql, stmt.params, pool)
+        .await
+        .ok()?;
+    rows.first().map(|(n,)| *n > 0)
+}
+
 /// Database first: Postgres refuses to drop a role still granted one.
 async fn drop_server(
     pool: &Pool,
     name: &DatabaseName,
     login: Option<&Login>,
+    force: bool,
 ) -> Result<(), TenantDbError> {
     let d = pool.dialect();
-    if let Some(sql) = d.drop_database_sql(name) {
+    let forced = force.then(|| d.force_drop_database_sql(name)).flatten();
+    if let Some(sql) = forced.or_else(|| d.drop_database_sql(name)) {
         step(pool, &sql, "drop a database")
             .await
             .map_err(|e| match e {
@@ -414,16 +556,17 @@ pub fn tenant_login_name(db: &DatabaseName) -> LoginName {
     let slug = db.as_str();
     LoginName::new(slug).unwrap_or_else(|_| {
         let h = Sha256::digest(slug.as_bytes());
-        let head = slug[..slug.len().min(23)].trim_end_matches('-');
-        LoginName::new(format!(
-            "{head}-{:02x}{:02x}{:02x}{:02x}",
-            h[0], h[1], h[2], h[3]
-        ))
-        .expect("a slug prefix plus a hash is a valid login name")
+        // 15 + `-` + 16 hex digits = 32 characters.
+        let head = slug[..slug.len().min(15)].trim_end_matches('-');
+        let mut name = format!("{head}-");
+        for b in &h[..8] {
+            let _ = std::fmt::Write::write_fmt(&mut name, format_args!("{b:02x}"));
+        }
+        LoginName::new(name).expect("a slug prefix plus a hash is a valid login name")
     })
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fault {
     Exists,
     Denied,
@@ -447,12 +590,21 @@ fn fault(e: &ExecError) -> Fault {
             _ => Fault::Other,
         };
     }
-    match db.code().as_deref() {
+    pg_fault(db.code().as_deref(), db.constraint())
+}
+
+/// The Postgres decision, apart from the driver type so it can be tested.
+fn pg_fault(code: Option<&str>, constraint: Option<&str>) -> Fault {
+    match (code, constraint) {
         // duplicate_database, duplicate_object
-        Some("42P04" | "42710") => Fault::Exists,
-        Some("42501") => Fault::Denied,
+        (Some("42P04" | "42710"), _) => Fault::Exists,
+        // A concurrent create of the same name loses on the catalog index.
+        (Some("23505"), Some("pg_database_datname_index" | "pg_authid_rolname_index")) => {
+            Fault::Exists
+        }
+        (Some("42501"), _) => Fault::Denied,
         // object_in_use
-        Some("55006") => Fault::InUse,
+        (Some("55006"), _) => Fault::InUse,
         _ => Fault::Other,
     }
 }
@@ -509,9 +661,28 @@ fn sqlite_file(dir: &Path, db: &DatabaseName) -> PathBuf {
     dir.join(format!("{db}.db"))
 }
 
+/// sqlx percent-decodes the path, so `%`, `?` and `#` are encoded.
+fn sqlite_url(path: &Path) -> Result<String, TenantDbError> {
+    let path = path
+        .to_str()
+        .ok_or(TenantDbError::Unsupported("the SQLite directory is not UTF-8"))?;
+    let mut out = String::from("sqlite://");
+    for c in path.chars() {
+        match c {
+            '%' => out.push_str("%25"),
+            '?' => out.push_str("%3F"),
+            '#' => out.push_str("%23"),
+            c => out.push(c),
+        }
+    }
+    out.push_str("?mode=rwc");
+    Ok(out)
+}
+
 /// `create_new`, so an existing file is refused without a race.
 fn create_sqlite(dir: &Path, name: &DatabaseName) -> Result<Created, TenantDbError> {
     let path = sqlite_file(dir, name);
+    let url = sqlite_url(&path)?;
     match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -526,7 +697,7 @@ fn create_sqlite(dir: &Path, name: &DatabaseName) -> Result<Created, TenantDbErr
     Ok(Created {
         database: name.clone(),
         login: None,
-        url: format!("sqlite://{}?mode=rwc", path.display()),
+        url,
     })
 }
 
@@ -561,6 +732,7 @@ fn probe_dir(dir: &Path) -> PrivilegeReport {
     PrivilegeReport {
         backend: "sqlite",
         server_version: None,
+        pg_major: None,
         can_login: dir.is_dir(),
         login_error: None,
         can_create_database: writable,
@@ -588,6 +760,90 @@ mod tests {
         assert_eq!(l1, tenant_login_name(&long));
         // A valid slug that is a reserved login gets the hashed form.
         assert!(tenant_login_name(&db("root")).as_str().starts_with("root-"));
+        // 64 bits of hash, still within MySQL's 32 characters.
+        let (_, hash) = l1.as_str().rsplit_once('-').unwrap();
+        assert_eq!(hash.len(), 16, "{l1}");
+        assert_eq!(l1.as_str().len(), 32, "{l1}");
+    }
+
+    #[test]
+    fn concurrent_create_races_count_as_exists() {
+        assert!(pg_fault(Some("42P04"), None) == Fault::Exists);
+        assert!(pg_fault(Some("23505"), Some("pg_database_datname_index")) == Fault::Exists);
+        assert!(pg_fault(Some("23505"), Some("pg_authid_rolname_index")) == Fault::Exists);
+        assert!(pg_fault(Some("23505"), Some("users_email_key")) == Fault::Other);
+        assert!(pg_fault(Some("55006"), None) == Fault::InUse);
+    }
+
+    /// Only a login this call may have made is dropped after a failure.
+    #[test]
+    fn an_unclear_create_login_failure_drops_only_a_new_login() {
+        assert!(undo_login_after_failure(Fault::Other, Some(false)));
+        assert!(!undo_login_after_failure(Fault::Other, Some(true)));
+        assert!(!undo_login_after_failure(Fault::Other, None));
+        assert!(!undo_login_after_failure(Fault::Exists, Some(false)));
+        assert!(!undo_login_after_failure(Fault::Denied, Some(false)));
+    }
+
+    #[test]
+    fn mariadb_grant_needs_delete_history() {
+        let mut rows: Vec<(String, String)> = MYSQL_DB_PRIVILEGES
+            .iter()
+            .map(|p| ((*p).to_owned(), "YES".to_owned()))
+            .collect();
+        assert!(mysql_can_grant(&rows, false));
+        assert!(!mysql_can_grant(&rows, true));
+        rows.push(("DELETE HISTORY".into(), "YES".into()));
+        assert!(mysql_can_grant(&rows, true));
+        rows[0].1 = "NO".into();
+        assert!(!mysql_can_grant(&rows, false));
+    }
+
+    #[test]
+    fn postgres_before_15_cannot_provision() {
+        let mut r = PrivilegeReport {
+            backend: "postgres",
+            server_version: Some("14.9".into()),
+            pg_major: pg_major("14.9 (Debian 14.9-1)"),
+            can_login: true,
+            login_error: None,
+            can_create_database: true,
+            can_create_user: true,
+            can_grant: true,
+        };
+        assert_eq!(r.pg_major, Some(14));
+        assert!(!r.can_provision());
+        assert!(r.blocker().is_some_and(|b| b.contains("15")));
+        r.pg_major = pg_major("16.15");
+        assert!(r.can_provision(), "{:?}", r.blocker());
+    }
+
+    /// The rollback drop ends sessions inside the new database.
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn rollback_drops_a_database_with_a_session_open() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let admin = ServerAdmin::connect(&url, Duration::from_secs(10)).await.unwrap();
+        let Target::Server { pool, .. } = &admin.target else {
+            unreachable!()
+        };
+        let name = db(&format!("rt{}-force", std::process::id()));
+        let login = Login::new(tenant_login_name(&name));
+        admin.drop_tenant_database(&name, &login).await.unwrap();
+        let created = admin
+            .create_tenant_database(&name, &login, &LoginPassword::generate())
+            .await
+            .unwrap();
+        let session = Pool::connect(created.url()).await.unwrap();
+        crate::sql::raw_execute_pool(&session, "SELECT 1", Vec::new())
+            .await
+            .unwrap();
+        undo_create(pool, &name, Some(&login)).await.expect("rollback drop");
+        session.close().await;
+        let gone = Pool::connect_admin(&url, Some(name.as_str()), Duration::from_secs(10)).await;
+        assert!(gone.is_err(), "the database survived");
     }
 
     #[test]

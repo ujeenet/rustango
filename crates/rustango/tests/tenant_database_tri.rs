@@ -37,6 +37,13 @@ fn on_db(url: &str, db: &str) -> String {
     format!("{base}/{db}{}", query.unwrap_or_default())
 }
 
+/// `url` with `kv` added to its query.
+#[allow(dead_code)]
+fn with_query(url: &str, kv: &str) -> String {
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}{kv}")
+}
+
 async fn connects(url: &str) -> bool {
     match Pool::connect_diagnosed(url, T).await {
         Ok(p) => {
@@ -169,17 +176,52 @@ async fn existing_database_or_login_is_refused(admin: &ServerAdmin, admin_url: O
     clean(admin, &[&a, &b, &c]).await;
 }
 
+/// `admin` runs with backslash escapes in string literals turned on, so a
+/// literal that relies on the default mode stores a different password.
+/// ASCII takes Postgres' SCRAM path, the `é` its plain-text path.
 async fn password_with_quotes_and_backslashes(admin: &ServerAdmin) {
-    let a = name("pw");
-    clean(admin, &[&a]).await;
-    let pw = LoginPassword::new(r#"x'y\z"w`$1; DROP DATABASE rustango_test; --\"#).unwrap();
-    let ca = admin
-        .create_tenant_database(&a, &login_for(&a), &pw)
+    for (tag, pw) in [
+        ("pw-a", r#"x'y\z"w`?#%$1; DROP DATABASE rustango_test; --\"#),
+        ("pw-u", r#"é'y\z"w?#%; DROP DATABASE rustango_test; --\"#),
+    ] {
+        let a = name(tag);
+        clean(admin, &[&a]).await;
+        let ca = admin
+            .create_tenant_database(&a, &login_for(&a), &LoginPassword::new(pw).unwrap())
+            .await
+            .expect("create with an odd password");
+        assert!(connects(ca.url()).await, "{tag}: the stored password differs");
+        assert!(!format!("{ca:?}").contains("DROP DATABASE"), "{ca:?}");
+        clean(admin, &[&a]).await;
+    }
+}
+
+/// The admin's own database and login, and names handed to
+/// `with_protected`, are never dropped.
+async fn drop_refuses_protected_names(admin: &ServerAdmin) {
+    let (reg, other, kept) = (name("prot-reg"), name("prot-x"), name("prot-kept"));
+    clean(admin, &[&reg, &other, &kept]).await;
+    let creg = admin
+        .create_tenant_database(&reg, &login_for(&reg), &LoginPassword::generate())
         .await
-        .expect("create with an odd password");
-    assert!(connects(ca.url()).await, "the stored password differs");
-    assert!(!format!("{ca:?}").contains("DROP DATABASE"), "{ca:?}");
-    clean(admin, &[&a]).await;
+        .expect("create");
+    // An admin whose URL names `reg` and logs in as `reg`.
+    let as_reg = ServerAdmin::connect(creg.url(), T).await.expect("connect as reg");
+    let own_db = as_reg.drop_tenant_database(&reg, &login_for(&other)).await;
+    assert!(matches!(own_db, Err(TenantDbError::Protected(_))), "{own_db:?}");
+    let own_login = as_reg.drop_tenant_database(&other, &login_for(&reg)).await;
+    assert!(matches!(own_login, Err(TenantDbError::Protected(_))), "{own_login:?}");
+    as_reg.close().await;
+    assert!(connects(creg.url()).await, "reg was dropped");
+
+    let guarded = ServerAdmin::connect(&on_db(creg.url(), reg.as_str()), T)
+        .await
+        .unwrap()
+        .with_protected([kept.as_str()]);
+    let listed = guarded.drop_tenant_database(&kept, &login_for(&kept)).await;
+    assert!(matches!(listed, Err(TenantDbError::Protected(_))), "{listed:?}");
+    guarded.close().await;
+    clean(admin, &[&reg]).await;
 }
 
 async fn probe_reports_rights(admin: &ServerAdmin, admin_url: Option<&str>) {
@@ -196,6 +238,11 @@ async fn probe_reports_rights(admin: &ServerAdmin, admin_url: Option<&str>) {
         return;
     };
     assert!(report.server_version.as_deref().is_some_and(|v| !v.is_empty()));
+    if report.backend == "postgres" {
+        assert!(report.pg_major.is_some_and(|m| m >= 15), "{report:?}");
+    } else {
+        assert_eq!(report.pg_major, None);
+    }
 
     // A tenant login is a plain one.
     let a = name("probe");
@@ -218,7 +265,12 @@ async fn probe_reports_rights(admin: &ServerAdmin, admin_url: Option<&str>) {
 }
 
 /// A step after the database and login exist fails: both are removed.
-async fn failed_grant_rolls_back(admin: &ServerAdmin, admin_url: &str, limit: &[&str]) {
+async fn failed_grant_rolls_back(
+    admin: &ServerAdmin,
+    admin_url: &str,
+    limit: &[&str],
+    at_grant: fn(&TenantDbError) -> bool,
+) {
     let (lim, a) = (name("rb-adm"), name("rb-t"));
     clean(admin, &[&lim, &a]).await;
     let pool = Pool::connect_admin(admin_url, None, T).await.expect("admin pool");
@@ -244,8 +296,8 @@ async fn failed_grant_rolls_back(admin: &ServerAdmin, admin_url: &str, limit: &[
     let failed = limited
         .create_tenant_database(&a, &login_for(&a), &LoginPassword::generate())
         .await;
-    assert!(failed.is_err(), "the grant step was expected to fail");
-    eprintln!("grant failure: {failed:?}");
+    let err = failed.expect_err("the grant step was expected to fail");
+    assert!(at_grant(&err), "failed elsewhere: {err:?}");
     limited.close().await;
 
     assert!(!database_exists(admin, Some(admin_url), &a).await, "database survived");
@@ -279,10 +331,19 @@ mod postgres {
         super::existing_database_or_login_is_refused(&a, Some(&url)).await;
     }
 
+    /// `standard_conforming_strings = off` makes `\` an escape in `'…'`.
     #[tokio::test]
     async fn password_with_quotes_and_backslashes() {
-        let Some((a, _)) = admin().await else { return };
+        let Ok(url) = std::env::var("DATABASE_URL") else { return };
+        let url = with_query(&url, "options=-c%20standard_conforming_strings%3Doff");
+        let a = ServerAdmin::connect(&url, T).await.expect("admin connects");
         super::password_with_quotes_and_backslashes(&a).await;
+    }
+
+    #[tokio::test]
+    async fn drop_refuses_protected_names() {
+        let Some((a, _)) = admin().await else { return };
+        super::drop_refuses_protected_names(&a).await;
     }
 
     #[tokio::test]
@@ -299,6 +360,7 @@ mod postgres {
             &a,
             &url,
             &[r#"ALTER ROLE "{u}" CREATEDB CREATEROLE CONNECTION LIMIT 1"#],
+            |e| matches!(e, TenantDbError::Connect(_)),
         )
         .await;
     }
@@ -326,10 +388,75 @@ mod mysql {
         super::existing_database_or_login_is_refused(&a, Some(&url)).await;
     }
 
+    /// The server's `sql_mode` gains `NO_BACKSLASH_ESCAPES` for this test;
+    /// `Drop` puts the old one back. The admin connects after it is set.
+    struct NoBackslashEscapes {
+        url: String,
+        saved: String,
+    }
+
+    impl NoBackslashEscapes {
+        async fn set(url: &str) -> Self {
+            let pool = Pool::connect(url).await.expect("connect");
+            let saved: Vec<(String,)> =
+                rustango::sql::raw_query_pool("SELECT @@GLOBAL.sql_mode", vec![], &pool)
+                    .await
+                    .expect("read sql_mode");
+            rustango::sql::raw_execute_pool(
+                &pool,
+                "SET GLOBAL sql_mode = CONCAT(@@GLOBAL.sql_mode, ',NO_BACKSLASH_ESCAPES')",
+                vec![],
+            )
+            .await
+            .expect("set sql_mode");
+            pool.close().await;
+            Self {
+                url: url.to_owned(),
+                saved: saved[0].0.clone(),
+            }
+        }
+    }
+
+    impl Drop for NoBackslashEscapes {
+        fn drop(&mut self) {
+            let (url, saved) = (self.url.clone(), self.saved.clone());
+            // Own thread and runtime: this may run inside the test's runtime or its unwind.
+            let reset = std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let pool = Pool::connect(&url).await.unwrap();
+                    rustango::sql::raw_execute_pool(
+                        &pool,
+                        "SET GLOBAL sql_mode = ?",
+                        vec![saved.into()],
+                    )
+                    .await
+                    .unwrap();
+                    pool.close().await;
+                });
+            })
+            .join();
+            if reset.is_err() {
+                eprintln!("could not restore the global sql_mode");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn password_with_quotes_and_backslashes() {
-        let Some((a, _)) = admin().await else { return };
+        let Ok(url) = std::env::var("MYSQL_TEST_URL") else { return };
+        let _mode = NoBackslashEscapes::set(&url).await;
+        let a = ServerAdmin::connect(&url, T).await.expect("admin connects");
         super::password_with_quotes_and_backslashes(&a).await;
+    }
+
+    #[tokio::test]
+    async fn drop_refuses_protected_names() {
+        let Some((a, _)) = admin().await else { return };
+        super::drop_refuses_protected_names(&a).await;
     }
 
     #[tokio::test]
@@ -346,6 +473,7 @@ mod mysql {
             &a,
             &url,
             &["GRANT CREATE, DROP, CREATE USER ON *.* TO `{u}`@`%`"],
+            |e| matches!(e, TenantDbError::Denied { step: "grant a login its database", .. }),
         )
         .await;
     }
@@ -376,6 +504,38 @@ mod sqlite {
     async fn probe_reports_rights() {
         let (a, _dir) = admin();
         super::probe_reports_rights(&a, None).await;
+    }
+
+    #[tokio::test]
+    async fn drop_refuses_protected_names() {
+        let (a, _dir) = admin();
+        let db = name("prot");
+        let a = a.with_protected([db.as_str()]);
+        let r = a.drop_tenant_database(&db, &login_for(&db)).await;
+        assert!(matches!(r, Err(TenantDbError::Protected(_))), "{r:?}");
+    }
+
+    /// `?`, `#` and `%` in the directory survive the URL.
+    #[tokio::test]
+    async fn odd_directory_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let odd = dir.path().join("a?b#c%20d");
+        std::fs::create_dir(&odd).unwrap();
+        let a = ServerAdmin::sqlite_dir(&odd);
+        let db = name("odd");
+        let created = a
+            .create_tenant_database(&db, &login_for(&db), &LoginPassword::generate())
+            .await
+            .expect("create");
+        let pool = Pool::connect(created.url()).await.expect("open");
+        rustango::sql::raw_execute_pool(&pool, "CREATE TABLE t (id INTEGER)", vec![])
+            .await
+            .unwrap();
+        pool.close().await;
+        let files: Vec<_> = std::fs::read_dir(&odd).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert!(files.iter().any(|f| f == format!("{db}.db").as_str()), "{files:?}");
+        a.drop_tenant_database(&db, &login_for(&db)).await.expect("drop");
+        assert!(std::fs::read_dir(dir.path()).unwrap().count() == 1, "stray file next to the dir");
     }
 
     /// Drop removes the WAL side files too.
