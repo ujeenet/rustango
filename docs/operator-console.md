@@ -158,6 +158,24 @@ creating anything (slug free, routing, admin rights, no database or login of
 that name) and reports the rights. Otherwise it reaches the database. The
 backend is always the registry's.
 
+### First admin
+
+Give an admin email (and optionally a username; it defaults to the email)
+and the run adds a `create_admin` step after the migrations, before the
+tenant goes live. It creates a superuser with no usable password. If the step
+fails, the run rolls back like any other step.
+
+The admin sets their own password through a set-password link. The link
+works once, expires in 72 hours, and opens only this tenant's
+change-password page. With `Builder::first_admin_mailer(mailer, from)` it is
+mailed to the admin. Without a mailer, the run page shows it to you **once**,
+right after you submit; copy it and give it to the admin. It is never stored,
+audited or logged; the audit log records the user's creation only.
+
+The fields appear when the provisioner has a handover
+(`Provisioner::with_first_admin_handover`; the standard `Builder` sets one).
+A lost or expired link: run `manage set-password-link <slug> <username>`.
+
 From the CLI: [`list-runs` / `show-run`](manage.md#inspecting-what-happened).
 
 ---

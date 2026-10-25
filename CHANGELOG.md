@@ -6,6 +6,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set; `ProvisionRequest` takes a `TenantStorage` and an optional backend, which must be the registry's. See UPGRADING.
 
+### Added — a new tenant's first admin
+
+The console create form (admin email, optional username), `create-tenant --admin-email <e> [--admin-username <u>]`, the signup webhook (`admin_email`) and `api::create_tenant` (`first_admin`) create a superuser in a `create_admin` step after migrate and before activate; a failure rolls the run back.
+The admin gets no usable password but a single-use, tenant-bound set-password link (72 hours), redeemed on the tenant's change-password page: mailed with `Builder::first_admin_mailer`, else shown once on the run page or printed once by the CLI, and never stored, audited or logged. `set-password-link <slug> <username>` issues a fresh one.
+
 ### Added — create a database-mode tenant on a saved server
 
 The console create form, `create-tenant --server <name>`, `api::create_tenant` (`database_server`), the signup webhook (`UrlPolicy::Server`) and `ProvisionRequest::on_server` create a database named as the slug plus its own login, then migrate and activate. Each step shows on the run page.

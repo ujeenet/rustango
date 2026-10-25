@@ -170,6 +170,11 @@ Run `makemigrations` then `migrate` to create the table. `ProvisionRequest.mode`
 `UrlPolicy` has a new `Server(name)` variant, so an exhaustive match needs an arm.
 `create-tenant --database-url` without `--mode` now means database mode; `api::create_tenant` refuses a database URL or server in schema mode. Database mode on a saved server returns `Err` when migrations fail, since the tenant was removed again.
 
+### First admin fields
+
+`ProvisionRequest`, `ProvisionOutcome`, `CreateTenantOpts` and `ProvisionPayload` have a new `first_admin` (payload: `admin_email`, `admin_username`) field, and `ProvisionStep` a `CreateAdmin` variant: struct literals need `..` defaults and an exhaustive match needs an arm.
+`Provisioner` offers first admins only with `with_first_admin_handover`; the standard `Builder` sets it, signing links with the tenant session secret. The tenant's change-password page now also takes a set-password link without a session.
+
 ### `TenantPoolInvalidator::tenant_secrets` has no default
 
 A custom implementor must return its `TenantSecrets`; the old default ignored `require_sealed_secrets()`.

@@ -133,6 +133,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | `create-superuser` / `set-superuser` | Create a superuser, or promote an existing user |
 | `create-user` / `create-operator` | Create a tenant user or an operator |
 | `reset-password` / `change-password` | Tenant-user password recovery |
+| `set-password-link <slug> <username>` | Print a single-use link for the user to set their own password |
 | `reset-operator-password` / `change-operator-password` | Operator password recovery |
 | `set-operator-active` | Enable or disable an operator |
 | `create-role` / `assign-role` / `revoke-role` / `list-roles` | Roles |
@@ -154,6 +155,14 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | `prewarm-pools` | Open tenant pools ahead of first request |
 | `run-server` / `runserver` | Run the multi-tenant server |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup and interactive entry points |
+
+**First admin.** `create-tenant <slug> … --admin-email <e> [--admin-username <u>]`
+creates a superuser after the migrations, before the tenant goes live; if that
+fails, the run rolls back. The admin gets no password. The verb prints a
+set-password link once: it works once, expires in 72 hours, and only on this
+tenant. Give it to the admin. It is signed with the server's tenant session key
+(`RUSTANGO_SESSION_SECRET`, or the dev key file), so run the CLI with the same
+key as the server. `set-password-link <slug> <username>` prints a fresh one.
 
 ### Audit **T**
 
