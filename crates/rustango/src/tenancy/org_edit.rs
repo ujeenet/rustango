@@ -24,7 +24,7 @@
 use crate::core::{Column as _, Model as _};
 use crate::sql::{FetcherPool as _, Pool};
 use crate::tenancy::error::TenancyError;
-use crate::tenancy::Org;
+use crate::tenancy::{Org, SecretsResolver};
 
 /// Which fields an edit touches. `None` means "leave alone" — distinct
 /// from `Some("")`, which clears an optional column.
@@ -95,10 +95,29 @@ pub struct Applied {
 /// generic over the backend and this module is not: do it when
 /// [`Applied::database_url_rotated`] is true, and not otherwise.
 ///
+/// A new `database_url` is opened with
+/// [`ChainSecretsResolver::standard`](crate::tenancy::ChainSecretsResolver::standard);
+/// see [`apply_with_secrets`] for a custom resolver.
+///
 /// # Errors
-/// [`TenancyError::Validation`] for a bad host pattern, port, or path
-/// prefix, or when the tenant does not exist; driver errors otherwise.
+/// [`TenancyError::Validation`] for a bad host pattern, port, path prefix
+/// or database URL, or when the tenant does not exist; driver errors otherwise.
 pub async fn apply(registry: &Pool, slug: &str, patch: &OrgPatch) -> Result<Applied, TenancyError> {
+    let secrets = crate::tenancy::ChainSecretsResolver::standard();
+    apply_with_secrets(registry, &secrets, slug, patch).await
+}
+
+/// [`apply`], opening a new `database_url` with `secrets` (the tenant
+/// pools' resolver) so it is checked like a literal.
+///
+/// # Errors
+/// As [`apply`].
+pub async fn apply_with_secrets(
+    registry: &Pool,
+    secrets: &dyn SecretsResolver,
+    slug: &str,
+    patch: &OrgPatch,
+) -> Result<Applied, TenancyError> {
     use crate::core::SqlValue;
     if patch.is_empty() {
         return Err(TenancyError::Validation(
@@ -135,7 +154,7 @@ pub async fn apply(registry: &Pool, slug: &str, patch: &OrgPatch) -> Result<Appl
     if let Some(v) = patch.database_url.as_deref() {
         values.push(("database_url", SqlValue::String(v.to_owned())));
     }
-    let mut applied = apply_values(registry, slug, values).await?;
+    let mut applied = apply_values(registry, secrets, slug, values).await?;
     applied.touched = patch.touched();
     Ok(applied)
 }
@@ -145,6 +164,7 @@ pub async fn apply(registry: &Pool, slug: &str, patch: &OrgPatch) -> Result<Appl
 /// check here (#1931).
 pub(crate) async fn apply_values(
     registry: &Pool,
+    secrets: &dyn SecretsResolver,
     slug: &str,
     values: Vec<(&'static str, crate::core::SqlValue)>,
 ) -> Result<Applied, TenancyError> {
@@ -178,10 +198,16 @@ pub(crate) async fn apply_values(
             // Blank keeps the current URL; it is a credential, never cleared here.
             ("database_url", v) if blank(&v) => continue,
             ("database_url", SqlValue::String(new)) => {
-                crate::tenancy::provision::refuse_registry_pool(&new, registry)
-                    .map_err(TenancyError::Validation)?;
-                database_url_rotated = existing.database_url.as_deref() != Some(new.as_str());
-                SqlValue::String(new)
+                let url =
+                    crate::tenancy::provision::vet_database_url(&new, secrets, registry, None)
+                        .await?;
+                // Compared resolved: re-sealing the same URL is not a rotation.
+                let old = match existing.database_url.as_deref() {
+                    Some(old) => secrets.resolve(old).await.ok(),
+                    None => None,
+                };
+                database_url_rotated = old.as_deref() != Some(url.resolved.as_str());
+                SqlValue::String(url.stored)
             }
             ("host_pattern" | "path_prefix", v) if blank(&v) => SqlValue::Null,
             ("host_pattern", SqlValue::String(v)) => {

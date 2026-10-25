@@ -116,10 +116,11 @@ where
         .validate_storage_mode(opts.mode)
         .map_err(|msg| TenancyError::Validation(msg.to_owned()))?;
 
-    // The provisioner's own checks: slug, schema, host, prefix, port, and
-    // that no other tenant routes on them (#2097).
+    // The provisioner's own checks: fields, the database URL, routing
+    // clashes, then the same preflight, before anything is written.
     let checked = crate::tenancy::provision::checked_request(
         &pools.registry_pool(),
+        pools.secrets().as_ref(),
         registry_url,
         &crate::tenancy::provision::ProvisionRequest {
             slug: slug.to_owned(),
@@ -136,8 +137,10 @@ where
         },
     )
     .await?;
-    let schema_name = crate::tenancy::provision::schema_name_for(&checked);
-    let host_pattern = checked.host_pattern;
+    checked.preflight().await?;
+    let database_url = checked.stored_database_url();
+    let schema_name = crate::tenancy::provision::schema_name_for(&checked.request);
+    let host_pattern = checked.request.host_pattern;
     let display_name = opts.display_name.clone().unwrap_or_else(|| slug.to_owned());
 
     if let Some(schema) = schema_name.as_deref() {
@@ -171,7 +174,7 @@ where
         display_name,
         storage_mode: opts.mode.as_str().into(),
         backend_kind: opts.backend.as_str().into(),
-        database_url: opts.database_url.clone(),
+        database_url,
         schema_name,
         host_pattern,
         port: opts.port,

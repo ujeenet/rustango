@@ -1990,16 +1990,23 @@ async fn org_edit_submit(
 
     // The CLI's write path, so the console runs the same routing
     // validators and host-clash check (#1931).
-    let applied =
-        match crate::tenancy::org_edit::apply_values(&state.registry, &slug, collected).await {
-            Ok(a) => a,
-            Err(e) => {
-                let msg = e.user_facing().unwrap_or_else(|| {
-                    withheld("operator_console::org_edit", &slug, "Could not save", &e)
-                });
-                return redirect_with_error(&slug, &msg);
-            }
-        };
+    let secrets = pools.secrets_resolver();
+    let applied = match crate::tenancy::org_edit::apply_values(
+        &state.registry,
+        secrets.as_ref(),
+        &slug,
+        collected,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            let msg = e.user_facing().unwrap_or_else(|| {
+                withheld("operator_console::org_edit", &slug, "Could not save", &e)
+            });
+            return redirect_with_error(&slug, &msg);
+        }
+    };
     let database_url_changed = applied.database_url_rotated;
 
     if database_url_changed {

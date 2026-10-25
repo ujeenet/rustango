@@ -15,7 +15,7 @@ use sqlx::Database;
 
 use crate::manage_interactive;
 use crate::tenancy::error::TenancyError;
-use crate::tenancy::org_edit::{apply, OrgPatch};
+use crate::tenancy::org_edit::{apply_with_secrets, OrgPatch};
 use crate::tenancy::pools::TenantPools;
 
 use super::args::next_value;
@@ -103,7 +103,7 @@ where
     };
 
     let registry = pools.registry_pool();
-    let applied = apply(&registry, &slug, &patch).await?;
+    let applied = apply_with_secrets(&registry, pools.secrets().as_ref(), &slug, &patch).await?;
 
     // Only on a real change — evicting for a display name throws away warm
     // connections for nothing.

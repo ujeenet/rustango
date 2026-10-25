@@ -10,8 +10,7 @@ use std::time::Duration;
 use rustango::core::Column as _;
 use rustango::sql::{FetcherPool as _, Pool};
 use rustango::tenancy::manage::api::{create_tenant, create_tenant_if_missing, CreateTenantOpts};
-#[cfg(feature = "postgres")]
-use rustango::tenancy::provision::{provision_tenant, ProvisionRequest};
+use rustango::tenancy::provision::{provision_tenant, ProvisionOutcome, ProvisionRequest};
 use rustango::tenancy::{BackendKind, Org, StorageMode, TenancyError, TenantPools};
 use rustango::tri_dialect_test;
 
@@ -182,6 +181,57 @@ impl Env {
         rustango::migrate::applied_set_pool(&pool)
             .await
             .expect("ledger")
+    }
+
+    /// A database-mode tenant URL on the registry's backend; PG and MySQL
+    /// ones carry a password.
+    async fn tenant_db_url(&mut self, tag: &str) -> String {
+        match self.backend() {
+            #[cfg(feature = "postgres")]
+            BackendKind::Postgres => scratch(&mut self.guards, "DATABASE_URL").await,
+            #[cfg(feature = "mysql")]
+            BackendKind::MySql => scratch(&mut self.guards, "MYSQL_TEST_URL").await,
+            _ => format!(
+                "sqlite://{}?mode=rwc",
+                self.tmp.path().join(format!("{tag}.db")).display()
+            ),
+        }
+    }
+
+    /// A URL the registry's driver does not speak. The SQLite file one is
+    /// reachable, so only the backend check can refuse it.
+    fn foreign_url(&self) -> String {
+        match self.backend() {
+            BackendKind::Sqlite => "postgres://u:pw@127.0.0.1:1/x".into(),
+            _ => format!(
+                "sqlite://{}?mode=rwc",
+                self.tmp.path().join("foreign.db").display()
+            ),
+        }
+    }
+
+    /// A same-backend URL nothing answers on.
+    fn unreachable_url(&self) -> String {
+        match self.backend() {
+            BackendKind::Postgres => "postgres://u:pw@127.0.0.1:1/x".into(),
+            BackendKind::MySql => "mysql://u:pw@127.0.0.1:1/x".into(),
+            BackendKind::Sqlite => format!(
+                "sqlite://{}?mode=rwc",
+                self.tmp.path().join("no/such/dir/x.db").display()
+            ),
+        }
+    }
+
+    fn db_request(&self, slug: &str, url: &str) -> ProvisionRequest {
+        ProvisionRequest {
+            backend: self.backend(),
+            ..ProvisionRequest::database(slug, url)
+        }
+    }
+
+    async fn provision(&self, request: &ProvisionRequest) -> Result<ProvisionOutcome, TenancyError> {
+        let dir = self.dir("migrations");
+        typed!(self.registry, p => provision_tenant(&p, &self.url, &dir, request, None).await)
     }
 
     async fn run(&self, dir: &Path, args: &[&str]) -> Result<(), TenancyError> {
@@ -691,10 +741,113 @@ async fn schema_mode_data_verbs_skip_public(pool: &Pool) {
     assert!(public.is_empty(), "loaddata wrote to public");
 }
 
+/// One key for every scenario here, so parallel tests never disagree.
+fn with_secret_key() {
+    std::env::set_var("RUSTANGO_SECRET_KEY", "tenancy-manage-tri-key");
+}
+
+/// The preflight probes the URL an `env://` reference names, and the row
+/// keeps the reference.
+async fn provision_resolves_an_env_reference(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let url = env.tenant_db_url("envref").await;
+    let var = format!("RUSTANGO_MT_ENVREF_{}", env.backend().as_str().to_uppercase());
+    std::env::set_var(&var, &url);
+    let reference = format!("env://{var}");
+    env.provision(&env.db_request("envref", &reference))
+        .await
+        .expect("an env:// reference provisions");
+    let org = env.org("envref").await.expect("row");
+    assert!(org.active);
+    assert_eq!(org.database_url.as_deref(), Some(reference.as_str()));
+}
+
+/// `api::create_tenant` probes before it writes, like the provisioner.
+async fn create_tenant_probes_before_writing(pool: &Pool) {
+    let env = Env::new(pool).await;
+    let opts = CreateTenantOpts {
+        mode: StorageMode::Database,
+        backend: env.backend(),
+        database_url: Some(env.unreachable_url()),
+        ..CreateTenantOpts::default()
+    };
+    let err = env
+        .create(&env.dir("migrations"), "unreach", opts)
+        .await
+        .expect_err("nothing answers");
+    assert!(
+        env.org("unreach").await.is_none(),
+        "a row was written before the probe: {err}"
+    );
+}
+
+/// Another backend's URL is refused at provision and at edit.
+async fn a_url_of_another_backend_is_refused(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let foreign = env.foreign_url();
+    let err = env
+        .provision(&env.db_request("foreign", &foreign))
+        .await
+        .err()
+        .expect("another backend's URL");
+    assert!(err.to_string().contains("registry runs on"), "{err}");
+    assert!(env.org("foreign").await.is_none());
+
+    let url = env.tenant_db_url("edited").await;
+    let mut org = Org {
+        slug: "edited".into(),
+        display_name: "edited".into(),
+        backend_kind: env.backend().as_str().into(),
+        database_url: Some(url.clone()),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&env.registry).await.expect("insert org");
+    let dir = env.dir("migrations");
+    let err = env
+        .run(&dir, &["edit-tenant", "edited", "--database-url", &foreign])
+        .await
+        .expect_err("edit to another backend");
+    assert!(err.to_string().contains("registry runs on"), "{err}");
+    let kept = env.org("edited").await.expect("row").database_url;
+    assert_eq!(kept.as_deref(), Some(url.as_str()));
+}
+
+/// A literal URL with a password is stored sealed by provision and edit,
+/// and still opens through the default resolver.
+async fn a_password_url_is_stored_sealed(pool: &Pool) {
+    with_secret_key();
+    let mut env = Env::new(pool).await;
+    let url = env.tenant_db_url("sealed").await;
+    env.provision(&env.db_request("sealed", &url))
+        .await
+        .expect("provisions");
+    let org = env.org("sealed").await.expect("row");
+    assert!(org.active);
+    let stored = org.database_url.clone().expect("url");
+    if env.backend() == BackendKind::Sqlite {
+        assert_eq!(stored, url, "no password, nothing to seal");
+        return;
+    }
+    assert!(stored.starts_with("enc:v1:"), "{stored}");
+    let opened = typed!(env.registry, p => p.resolved_database_url(&org).await.expect("opens"));
+    assert_eq!(opened, url);
+
+    let dir = env.dir("migrations");
+    env.run(&dir, &["edit-tenant", "sealed", "--database-url", &url])
+        .await
+        .expect("edit");
+    let edited = env.org("sealed").await.expect("row").database_url.expect("url");
+    assert!(edited.starts_with("enc:v1:") && edited != stored, "{edited}");
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
     scenarios: [
+        provision_resolves_an_env_reference,
+        create_tenant_probes_before_writing,
+        a_url_of_another_backend_is_refused,
+        a_password_url_is_stored_sealed,
         data_verbs_stay_in_their_tenant,
         schema_mode_data_verbs_skip_public,
         create_tenant_returns_a_failed_migration,

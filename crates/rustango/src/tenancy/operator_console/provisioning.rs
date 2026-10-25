@@ -308,22 +308,36 @@ pub(super) async fn test_connection(
     let Some(url) = target else {
         return probe_bad("Enter a slug, a database name, or a full URL first.");
     };
-    let url = url.as_str();
-
-    // Answer the same question the submit will, including the one
-    // refusal that has nothing to do with reachability. The registry's
-    // own database is reachable and this role *can* create tables in
-    // it, so the probe used to report "migrations will run" for the
-    // single target provisioning refuses outright — blessing, in its
-    // most confident wording, the mistake that ran the tenant
-    // migration chain over the registry.
-    if let Some(p) = state.provisioner.as_ref() {
-        if let Err(msg) = provision::refuse_registry(url, &p.registry(), &p.registry_url()) {
-            return probe_bad(&msg);
+    // Answer the same question the submit will: resolve the reference,
+    // then the refusals that have nothing to do with reachability. The
+    // registry's own database is reachable and this role *can* create
+    // tables in it, so the probe used to bless the one target
+    // provisioning refuses outright.
+    let secrets = state.pools.as_ref().map_or_else(
+        || {
+            std::sync::Arc::new(crate::tenancy::ChainSecretsResolver::standard())
+                as std::sync::Arc<dyn crate::tenancy::SecretsResolver>
+        },
+        |p| p.secrets_resolver(),
+    );
+    let resolved = match state.provisioner.as_ref() {
+        Some(p) => {
+            provision::vet_database_url(&url, secrets.as_ref(), &p.registry(), Some(&p.registry_url()))
+                .await
+                .map(|v| v.resolved)
         }
-    }
+        None => secrets
+            .resolve(&url)
+            .await
+            .map_err(|e| crate::tenancy::TenancyError::Validation(e.to_string())),
+    };
+    let url = match resolved {
+        Ok(u) => u,
+        Err(crate::tenancy::TenancyError::Validation(msg)) => return probe_bad(&msg),
+        Err(_) => return probe_bad("Could not check this database URL."),
+    };
 
-    match preflight::check(url, &Preflight::default()).await {
+    match preflight::check(&url, &Preflight::default()).await {
         Ok(ok) => Probe::Ok {
             endpoint: Some(ok.endpoint),
             message: "This role can create tables, so migrations will run.",
