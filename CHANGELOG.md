@@ -7,6 +7,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — forms, mail and admin
 
 - Admin time inputs show a stored time to the millisecond and forms parse fractional seconds, so saving a time with microseconds no longer clears or refuses it; an untouched time keeps its stored value.
+- `#[derive(Form)]` refuses `NaN` and `inf` in float fields; they passed every `min` / `max` check.
 
 ### Fixed — migrations, MySQL and MariaDB
 
