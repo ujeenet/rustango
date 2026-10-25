@@ -7,7 +7,7 @@ gunicorn y sobre Hypercorn, **Laravel** sobre php-fpm y sobre Octane, y
 **WordPress**. Cada app renderiza el mismo HTML a partir de los mismos datos.
 
 Medido el **13 de octubre de 2026**: rustango release 0.60.6 en las tablas principales,
-rustango 0.61.0 en [su propia tabla](#rustango-0607). Un solo arnés, una sola
+rustango 0.61.1 en [su propia tabla](#rustango-0607). Un solo arnés, una sola
 máquina, las mismas reglas para cada app.
 
 ## Resumen

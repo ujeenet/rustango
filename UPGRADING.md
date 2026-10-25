@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.61.1
+
 ### Scaffold taglines lose their brackets
 
 `cargo rustango new` now writes `tagline = "dev"` / `"staging"`, not `"(dev)"` / `"(staging)"`. Existing projects keep theirs; edit the line to match.
