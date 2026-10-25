@@ -319,6 +319,11 @@ impl From<crate::sql::ExecError> for ClaimError {
 }
 
 impl ClaimError {
+    /// MySQL broke a tie between two claims; the caller may retry once.
+    pub(crate) fn is_deadlock(&self) -> bool {
+        matches!(self, Self::Driver(e) if e.is_deadlock())
+    }
+
     fn into_host(self) -> HostError {
         match self {
             Self::Taken(k) => HostError::Taken(k.lock_name()),
@@ -814,6 +819,17 @@ mod tests {
     }
 }
 
+/// Drop the resolver caches after a generic admin or REST write to
+/// `table`, so the next request sees the row the write committed.
+pub(crate) fn routing_written(table: &str) {
+    use crate::core::Model as _;
+    if table == super::Org::SCHEMA.table {
+        super::invalidate_org_cache();
+    } else if table == OrgHost::SCHEMA.table {
+        super::invalidate_host_cache();
+    }
+}
+
 /// What the generic admin's write of a `rustango_orgs` or
 /// `rustango_org_hosts` row claims, so it cannot take another tenant's
 /// host, path prefix or port.
@@ -920,6 +936,11 @@ impl AdminClaims {
             });
         }
         Ok(Self::Nothing)
+    }
+
+    /// Whether a write deadlocked on this claim is worth one retry.
+    pub(crate) fn retries(&self) -> bool {
+        !matches!(self, Self::Nothing)
     }
 
     /// The write's transaction, an edited tenant's values already claimed.

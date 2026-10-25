@@ -32,8 +32,19 @@ const MYSQL_DUP_FIELDNAME: u16 = 1060;
 /// are error numbers, and comparing one against `DatabaseError::code()`
 /// — which is the `SQLSTATE` — silently never matches.
 #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
-fn is_mysql_duplicate(number: u16, stmt: &str) -> bool {
-    MYSQL_DUPLICATES.contains(&number) || (number == MYSQL_DUP_FIELDNAME && is_add_column(stmt))
+fn is_mysql_duplicate(number: u16, msg: &str, stmt: &str) -> bool {
+    MYSQL_DUPLICATES.contains(&number)
+        || (number == MYSQL_DUP_FIELDNAME && is_add_column(stmt))
+        || (number == MARIADB_CANT_CREATE && is_add_constraint(stmt) && msg.contains(": 121 "))
+}
+
+/// MariaDB reports a taken FK name as `ER_CANT_CREATE_TABLE` with
+/// errno 121, not 1826; other errnos (150: bad FK) are real failures.
+#[cfg_attr(not(feature = "mysql"), allow(dead_code))]
+const MARIADB_CANT_CREATE: u16 = 1005;
+
+fn is_add_constraint(stmt: &str) -> bool {
+    stmt.starts_with("ALTER TABLE ") && stmt.contains(" ADD CONSTRAINT ")
 }
 
 fn is_add_column(stmt: &str) -> bool {
@@ -66,7 +77,7 @@ pub(crate) fn is_already_exists(e: &crate::sql::ExecError, dialect: &str, stmt: 
         "mysql" => err
             .as_database_error()
             .and_then(|db| db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>())
-            .is_some_and(|my| is_mysql_duplicate(my.number(), stmt)),
+            .is_some_and(|my| is_mysql_duplicate(my.number(), my.message(), stmt)),
         _ => {
             let msg = format!("{e}").to_lowercase();
             msg.contains("already exists") || msg.contains("duplicate")
@@ -89,9 +100,7 @@ fn idempotent<'a>(stmt: &'a str, dialect: &str) -> std::borrow::Cow<'a, str> {
     if dialect != "postgres" {
         return std::borrow::Cow::Borrowed(stmt);
     }
-    if stmt.starts_with("ALTER TABLE ")
-        && stmt.contains(" ADD CONSTRAINT ")
-        && !stmt.contains("$rustango$")
+    if is_add_constraint(stmt) && !stmt.contains("$rustango$")
     {
         return std::borrow::Cow::Owned(format!(
             "DO $rustango$ BEGIN {stmt}; \
@@ -686,21 +695,21 @@ mod tests {
     #[test]
     fn mysql_duplicates_are_numbers() {
         let create = "CREATE TABLE t (id INT)";
-        assert!(is_mysql_duplicate(1050, create), "ER_TABLE_EXISTS_ERROR");
-        assert!(is_mysql_duplicate(1061, create), "ER_DUP_KEYNAME");
-        assert!(is_mysql_duplicate(1826, create), "ER_FK_DUP_NAME");
+        assert!(is_mysql_duplicate(1050, "", create), "ER_TABLE_EXISTS_ERROR");
+        assert!(is_mysql_duplicate(1061, "", create), "ER_DUP_KEYNAME");
+        assert!(is_mysql_duplicate(1826, "", create), "ER_FK_DUP_NAME");
         // ER_DUP_ENTRY: a unique index that genuinely could not be
         // built. It must propagate, not read as "already exists".
         assert!(
-            !is_mysql_duplicate(1062, create),
+            !is_mysql_duplicate(1062, "", create),
             "ER_DUP_ENTRY must not swallow"
         );
         assert!(
-            !is_mysql_duplicate(1064, create),
+            !is_mysql_duplicate(1064, "", create),
             "syntax error must not swallow"
         );
         assert!(
-            !is_mysql_duplicate(1170, create),
+            !is_mysql_duplicate(1170, "", create),
             "TEXT-in-index must not swallow"
         );
     }
@@ -711,11 +720,25 @@ mod tests {
     fn mysql_dup_fieldname_only_for_add_column() {
         assert!(is_mysql_duplicate(
             1060,
+            "",
             "ALTER TABLE `t` ADD COLUMN `c` BIGINT"
         ));
         assert!(!is_mysql_duplicate(
             1060,
+            "",
             "CREATE TABLE `t` (`c` INT, `c` INT)"
         ));
+    }
+
+    /// MariaDB 11 answers a re-run FK with 1005 errno 121, so a second
+    /// `ensure_*` call failed there; errno 150 (bad FK) must still fail.
+    #[test]
+    fn mariadb_dup_fk_name_is_already_exists() {
+        let fk = "ALTER TABLE `c` ADD CONSTRAINT `c_p_fkey` FOREIGN KEY (`p`) REFERENCES `p` (`id`)";
+        let dup = "Can't create table `db`.`c` (errno: 121 \"Duplicate key on write or update\")";
+        let bad = "Can't create table `db`.`c` (errno: 150 \"Foreign key constraint is incorrectly formed\")";
+        assert!(is_mysql_duplicate(1005, dup, fk));
+        assert!(!is_mysql_duplicate(1005, bad, fk));
+        assert!(!is_mysql_duplicate(1005, dup, "CREATE TABLE `c` (`id` INT)"));
     }
 }

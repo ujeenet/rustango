@@ -1478,6 +1478,7 @@ impl<'p> PoolBoundTx<'p> {
     }
 
     /// Bind `tx`, which the caller opened on `pool`.
+    #[cfg(feature = "tenancy")]
     pub(crate) fn opened_on(pool: &'p crate::sql::Pool, tx: crate::sql::PoolTx<'static>) -> Self {
         Self { tx, pool }
     }
