@@ -3300,6 +3300,7 @@ async fn insert_and_fetch_one(
         .insert_returning_pk(&query, pk_field)
         .await
         .map_err(|e| write_failure("viewset::create", &e))?;
+    wrote(state);
     fetch_by_pk_scoped(state, acq, pk_field, pk_val, fields, scope)
         .await
         .map_err(|e| {
@@ -3460,6 +3461,7 @@ async fn create_many(
     if let Err(e) = tx.commit().await {
         return json_server_error("viewset::bulk_create::commit", &e);
     }
+    wrote(state);
 
     // Read the rows back after the commit. They have to be committed to
     // be visible here — `acq` is the pool, not the transaction — and
@@ -3657,6 +3659,7 @@ async fn update_inner(
             return json_server_error("viewset::update::commit", &e);
         }
     }
+    wrote(&state);
 
     // The UPDATE committed; a row it moved out of scope answers 204.
     let fields = state.effective_fields();
@@ -3715,7 +3718,10 @@ async fn handle_destroy(
     };
     match deleted {
         Ok(0) => json_error(StatusCode::NOT_FOUND, "not found"),
-        Ok(_) => no_content(),
+        Ok(_) => {
+            wrote(&state);
+            no_content()
+        }
         // Rows still pointing at it: the client's conflict, not a 500.
         Err(e) if e.is_still_referenced() => {
             tracing::warn!(target: "rustango::viewset", error = %e, "destroy refused");
@@ -3726,6 +3732,14 @@ async fn handle_destroy(
 }
 
 // ------------------------------------------------------------------ helpers
+
+/// After a committed write: the tenant resolver caches hold Org rows.
+fn wrote(state: &ViewSetState) {
+    #[cfg(feature = "tenancy")]
+    crate::tenancy::org_host::routing_written(state.vs.schema.table);
+    #[cfg(not(feature = "tenancy"))]
+    let _ = state;
+}
 
 /// The read-back after a write, narrowed by `scope`: `None` when the
 /// written row is outside it, so a scoped-out row is never echoed.

@@ -156,6 +156,9 @@ pub fn disconnect_admin_post_save(id: ReceiverId) {
 }
 
 pub async fn send_admin_post_save(ctx: AdminSaveContext) {
+    // Every admin write ends here: bulk, inline and custom actions too.
+    #[cfg(feature = "tenancy")]
+    crate::tenancy::org_host::routing_written(ctx.table);
     POST_SAVE.send(ctx).await;
 }
 
@@ -192,6 +195,8 @@ pub fn disconnect_admin_post_delete(id: ReceiverId) {
 }
 
 pub async fn send_admin_post_delete(ctx: AdminDeleteContext) {
+    #[cfg(feature = "tenancy")]
+    crate::tenancy::org_host::routing_written(ctx.table);
     POST_DELETE.send(ctx).await;
 }
 

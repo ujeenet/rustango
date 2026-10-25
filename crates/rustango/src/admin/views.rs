@@ -2035,34 +2035,52 @@ pub(crate) async fn create_submit(
     // An `audit(...)` model's entry commits with the INSERT, as on edit (#2101).
     let emit = crate::audit::DiffEmit::for_model(model);
     let refused = |msg: String| Html(render_form(&state, model, Some(&form), false, Some(&msg)));
-    let mut tx = match crate::sql::write_transaction(&state.pool).await {
-        Ok(tx) => tx,
-        Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
-    };
-    let written = crate::audit::insert_one_with_entry_tx(
-        &mut tx,
-        &state.pool,
-        &query,
-        pk_field,
-        |pk| {
-            let pk = pk.to_display_string();
-            super::audit::admin_audit_entry(model, &pk, crate::audit::AuditOp::Create, &audit_form)
-        },
-        emit,
-    )
-    .await;
-    let (pk, deferred) = match written {
-        Ok(w) => w,
-        Err(e) => {
-            rollback_quietly(tx, model.table).await;
-            return Ok(refused(write_error(model, &e)).into_response());
-        }
-    };
+    // MySQL breaks two claims of one free value with a deadlock: retry once.
     #[cfg(feature = "tenancy")]
-    if let Err(e) = claims.after_write(&mut tx, &pk).await {
-        rollback_quietly(tx, model.table).await;
-        return Ok(refused(claim_refusal(model, e)).into_response());
-    }
+    let mut retry = claims.retries();
+    let (mut tx, pk, deferred) = loop {
+        let mut tx = match crate::sql::write_transaction(&state.pool).await {
+            Ok(tx) => tx,
+            Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
+        };
+        let written = crate::audit::insert_one_with_entry_tx(
+            &mut tx,
+            &state.pool,
+            &query,
+            pk_field,
+            |pk| {
+                let pk = pk.to_display_string();
+                super::audit::admin_audit_entry(
+                    model,
+                    &pk,
+                    crate::audit::AuditOp::Create,
+                    &audit_form,
+                )
+            },
+            emit,
+        )
+        .await;
+        let (pk, deferred) = match written {
+            Ok(w) => w,
+            Err(e) => {
+                rollback_quietly(tx, model.table).await;
+                #[cfg(feature = "tenancy")]
+                if std::mem::take(&mut retry) && e.is_deadlock() {
+                    continue;
+                }
+                return Ok(refused(write_error(model, &e)).into_response());
+            }
+        };
+        #[cfg(feature = "tenancy")]
+        if let Err(e) = claims.after_write(&mut tx, &pk).await {
+            rollback_quietly(tx, model.table).await;
+            if std::mem::take(&mut retry) && e.is_deadlock() {
+                continue;
+            }
+            return Ok(refused(claim_refusal(model, e)).into_response());
+        }
+        break (tx, pk, deferred);
+    };
     match admits_written(
         &mut tx,
         &parts,
@@ -2436,42 +2454,55 @@ pub(crate) async fn update_submit(
     // Parent and inline writes share one transaction: a refused inline
     // row rolls the parent back too (#2339).
     let refused = |msg: String| Html(render_form(&state, model, Some(&form), true, Some(&msg)));
+    // An extra host is checked after its UPDATE: retried once, as on create.
     #[cfg(feature = "tenancy")]
-    let mut tx = match claims.begin(&state.pool, &pk_value).await {
-        Ok(tx) => tx,
-        Err(e) => return Ok(refused(claim_refusal(model, e)).into_response()),
-    };
-    #[cfg(not(feature = "tenancy"))]
-    let mut tx = match crate::sql::write_transaction(&state.pool).await {
-        Ok(tx) => tx,
-        Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
-    };
-    let written = crate::audit::update_one_with_row_diff_tx(
-        &mut tx,
-        &state.pool,
-        &query,
-        before_select,
-        &pre_update_fields,
-        |row| super::audit::admin_audit_diff_entry(model, &pk_raw, row, &audit_form),
-        emit,
-    )
-    .await;
-    let deferred = match written {
-        Ok(crate::audit::RowDiffWrite::Written { deferred }) => deferred,
-        Ok(crate::audit::RowDiffWrite::Gone) => {
+    let mut retry = claims.retries();
+    let (mut tx, deferred) = loop {
+        #[cfg(feature = "tenancy")]
+        let mut tx = match claims.begin(&state.pool, &pk_value).await {
+            Ok(tx) => tx,
+            Err(e) => return Ok(refused(claim_refusal(model, e)).into_response()),
+        };
+        #[cfg(not(feature = "tenancy"))]
+        let mut tx = match crate::sql::write_transaction(&state.pool).await {
+            Ok(tx) => tx,
+            Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
+        };
+        let written = crate::audit::update_one_with_row_diff_tx(
+            &mut tx,
+            &state.pool,
+            &query,
+            before_select.clone(),
+            &pre_update_fields,
+            |row| super::audit::admin_audit_diff_entry(model, &pk_raw, row, &audit_form),
+            emit,
+        )
+        .await;
+        let deferred = match written {
+            Ok(crate::audit::RowDiffWrite::Written { deferred }) => deferred,
+            Ok(crate::audit::RowDiffWrite::Gone) => {
+                rollback_quietly(tx, model.table).await;
+                return Err(AdminError::RowNotFound { table, pk: pk_raw });
+            }
+            Err(e) => {
+                rollback_quietly(tx, model.table).await;
+                #[cfg(feature = "tenancy")]
+                if std::mem::take(&mut retry) && e.is_deadlock() {
+                    continue;
+                }
+                return Ok(refused(write_error(model, &e)).into_response());
+            }
+        };
+        #[cfg(feature = "tenancy")]
+        if let Err(e) = claims.after_write(&mut tx, &pk_value).await {
             rollback_quietly(tx, model.table).await;
-            return Err(AdminError::RowNotFound { table, pk: pk_raw });
+            if std::mem::take(&mut retry) && e.is_deadlock() {
+                continue;
+            }
+            return Ok(refused(claim_refusal(model, e)).into_response());
         }
-        Err(e) => {
-            rollback_quietly(tx, model.table).await;
-            return Ok(refused(write_error(model, &e)).into_response());
-        }
+        break (tx, deferred);
     };
-    #[cfg(feature = "tenancy")]
-    if let Err(e) = claims.after_write(&mut tx, &pk_value).await {
-        rollback_quietly(tx, model.table).await;
-        return Ok(refused(claim_refusal(model, e)).into_response());
-    }
     match admits_written(&mut tx, &parts, model, pk_field, pk_value, Written::Edited).await {
         Ok(true) => {}
         Ok(false) => {
@@ -2495,6 +2526,8 @@ pub(crate) async fn update_submit(
                 let why = match e {
                     E::Write { child, error } => write_error(child, &error),
                     E::MaxNum { child } => format!("{} allows no more rows here.", child.name),
+                    #[cfg(feature = "tenancy")]
+                    E::Claim { child, error } => claim_refusal(child, error),
                     E::Forbidden { child, action } => {
                         return Err(AdminError::Forbidden {
                             table: child.table.to_owned(),

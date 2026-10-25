@@ -15,6 +15,7 @@ The move creates the target schema before the tenant goes offline and refuses an
 ### Fixed — tenant path prefixes, ports and admin writes skipped the claim
 
 Path prefix and port changes are claimed like hosts, so two tenants can no longer take one at once. Generic admin writes of `rustango_orgs` and `rustango_org_hosts` now validate, normalize and claim hosts, prefixes and ports too.
+Extra hosts edited inline on the Org page are claimed too; a MySQL deadlock between two admin claims is retried instead of showing "could not be saved"; admin and REST writes of those tables clear the resolver caches at once.
 
 ### Added — webhook signature v2 with a timestamp
 
@@ -37,6 +38,9 @@ A local logo file (env `RUSTANGO_OPERATOR_LOGO_PATH`), read once at boot with th
 New projects get plain `dev` / `staging` taglines (they render as a badge), and the commented `[brand]` example in `default.toml` shows `logo_url` and `logo_path`.
 
 ### Fixed — ORM and MySQL
+
+- MariaDB: re-running an `ensure_*` table helper no longer fails with `1005 … errno: 121`; MariaDB's code for a taken FK name now reads as "already exists".
+- `startapp --with-manage-bin` writes a `main.rs` that prints errors with Display and names `rustango::`, not `crate::`.
 
 - MariaDB: JSON writes and text JSON paths no longer send `CAST(… AS JSON)`, which it rejects.
 - MySQL: an `update()` / `delete()` filtered by `EXISTS` or `where_has` over its own table no longer fails with error 1093; one nested deeper still does, rather than see its own writes.
