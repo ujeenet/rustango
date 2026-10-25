@@ -1967,8 +1967,11 @@ pub(crate) async fn provision_schema<DB: Database>(
             .await
         {
             Ok(_) => Ok(()),
-            // duplicate_schema
-            Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("42P06") => {
+            // duplicate_schema; or unique_violation when a concurrent create
+            // inserted the same name first.
+            Err(sqlx::Error::Database(e))
+                if matches!(e.code().as_deref(), Some("42P06" | "23505")) =>
+            {
                 Err(TenancyError::Validation(format!(
                     "schema `{schema}` already exists — choose another schema name, or, if a \
                      failed create left it empty, run `DROP SCHEMA {}`",

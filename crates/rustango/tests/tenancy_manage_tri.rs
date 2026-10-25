@@ -604,6 +604,54 @@ async fn provision_releases_its_schema_on_a_failed_insert(pool: &Pool) {
     }
 }
 
+/// Two creates naming one schema at once, by name or slug default: one
+/// tenant lives there, the other is refused. Both create paths race.
+async fn concurrent_creates_never_share_a_schema(pool: &Pool) {
+    let env = Env::new(pool).await;
+    if env.backend() != BackendKind::Postgres {
+        return;
+    }
+    #[cfg(feature = "postgres")]
+    for round in 0..20 {
+        let shared = format!("sh{round}");
+        // Odd rounds: the API tenant's slug is the schema, by default.
+        let (api_slug, api_schema) = if round % 2 == 1 {
+            (shared.clone(), None)
+        } else {
+            (format!("{shared}b"), Some(shared.clone()))
+        };
+        let barrier = tokio::sync::Barrier::new(2);
+        let engine = async {
+            barrier.wait().await;
+            let request = schema_request(&format!("{shared}a"), &shared, None);
+            typed!(env.registry, p => provision_tenant(&p, &env.url, Path::new("none"), &request, None).await)
+                .map(drop)
+        };
+        let api = async {
+            barrier.wait().await;
+            let opts = CreateTenantOpts {
+                schema_name: api_schema,
+                ..schema_opts(BackendKind::Postgres, "unused")
+            };
+            env.create(Path::new("none"), &api_slug, opts).await.map(drop)
+        };
+        let (x, y) = tokio::join!(engine, api);
+        assert_eq!(
+            x.is_ok() as u8 + y.is_ok() as u8,
+            1,
+            "round {round}: {x:?} {y:?}"
+        );
+        let refused = x.err().or(y.err()).unwrap().to_string();
+        assert!(refused.contains("already"), "round {round}: {refused}");
+        let orgs: Vec<Org> = Org::objects().fetch(&env.registry).await.unwrap();
+        let sharing = orgs
+            .iter()
+            .filter(|o| o.schema_name.as_deref().unwrap_or(&o.slug) == shared)
+            .count();
+        assert_eq!(sharing, 1, "round {round}: tenants share schema `{shared}`");
+    }
+}
+
 /// `dumpdata` / `loaddata` run on the `--tenant` pool and touch only
 /// that tenant; without it they cover registry models only.
 async fn data_verbs_stay_in_their_tenant(pool: &Pool) {
@@ -1048,5 +1096,6 @@ tri_dialect_test! {
         an_existing_schema_is_not_adopted,
         create_tenant_releases_its_schema_on_a_failed_insert,
         provision_releases_its_schema_on_a_failed_insert,
+        concurrent_creates_never_share_a_schema,
     ],
 }
