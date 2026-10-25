@@ -274,65 +274,9 @@ fn is_protocol_error(code: i64) -> bool {
     )
 }
 
-/// Words whose values are scrubbed before a call is audited, so no
-/// secret reaches the audit table. A `_` entry is a run of words; `key`
-/// alone hides every `*_key` (`api_key`, `encryption_key`).
-const SENSITIVE_ARG_KEYS: &[&str] = &[
-    "password",
-    "passwd",
-    "pwd",
-    "passphrase",
-    "pin",
-    "token",
-    "jwt",
-    "bearer",
-    "secret",
-    "key",
-    "apikey",
-    "signature",
-    "auth",
-    "authorization",
-    "credential",
-    "credentials",
-    "cookie",
-    "session",
-    "otp",
-    "totp",
-    "code_verifier",
-];
-
-/// The lowercase words of a key, split on `_`, `-` and lower-to-upper
-/// case changes: `newPassword` is `new password`, `x-api-key` is `x api key`.
-fn key_words(key: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut prev_lower = false;
-    for c in key.chars() {
-        let split = matches!(c, '_' | '-') || (prev_lower && c.is_ascii_uppercase());
-        if split && !word.is_empty() {
-            words.push(std::mem::take(&mut word));
-        }
-        if !matches!(c, '_' | '-') {
-            word.push(c.to_ascii_lowercase());
-        }
-        prev_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
-    }
-    if !word.is_empty() {
-        words.push(word);
-    }
-    words
-}
-
-/// `true` when any run of the key's words is a sensitive entry. Errs
-/// toward hiding: `token_count` is redacted too (#1963).
+/// `true` when the key names a secret; the access log uses the same test.
 fn is_sensitive(key: &str) -> bool {
-    let words = key_words(key);
-    SENSITIVE_ARG_KEYS.iter().any(|entry| {
-        let want: Vec<&str> = entry.split('_').collect();
-        words
-            .windows(want.len())
-            .any(|w| w.iter().zip(&want).all(|(a, b)| a == b))
-    })
+    crate::secret_keys::is_secret(key)
 }
 
 /// Return a copy of `value` with every sensitive key's value

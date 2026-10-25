@@ -444,8 +444,7 @@ mod tests {
     }
 
     /// OAuth callbacks such as `/sso/callback?code=…&state=…` carry
-    /// credentials under their own names. Matching is exact, so
-    /// `access_token` does not cover `id_token`.
+    /// credentials under their own names.
     #[test]
     fn the_defaults_cover_the_oauth_parameters_this_framework_emits() {
         let raw = "code=AUTHCODE&state=STATEVAL&id_token=IDTOK&code_verifier=VERIFIER\

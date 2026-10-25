@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Access-log query redaction is word-based
+
+`redact_query_params` entries now match any key containing them as words (`client_secret` also hides `x-client-secret`), and the defaults are wider. Logs may show `[redacted]` for keys like `sort_key` or `zip_code` that were visible before.
+
 ### SQLite: JSON column equality compares values
 
 `filter(data = json)` on SQLite now matches `1` to `1.0` and objects in any key order, as PostgreSQL and MySQL do; a filter that relied on text equality may match more rows.

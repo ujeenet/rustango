@@ -59,6 +59,8 @@ pub struct AccessLogLayer {
     /// Query parameters whose values are replaced with `[redacted]`.
     /// The default list covers the usual credential names such as
     /// `password`, `token`, `secret`, `api_key` and `access_token`.
+    /// A name matches as a run of words, so `client_secret` also hides
+    /// `x-client-secret`.
     pub redact_query_params: Vec<String>,
     /// Log the `TrustedRealIp` that `RealIpLayer::trust_proxies`
     /// resolved, over the TCP peer. Raw forwarding headers are never
@@ -391,31 +393,29 @@ fn resolve_client_ip(req: &Request, use_real_ip: bool) -> Option<String> {
     ip.map(|ip| ip.to_string())
 }
 
-/// Query parameters whose values are redacted by default.
+/// Query parameters whose values are redacted by default: the shared
+/// secret words plus the OAuth / OIDC callback names.
 pub(crate) fn default_redact_params() -> Vec<String> {
-    vec![
-        "password".into(),
-        "passwd".into(),
-        "token".into(),
-        "secret".into(),
-        "api_key".into(),
-        "apikey".into(),
-        "access_token".into(),
-        "refresh_token".into(),
-        "signature".into(),
-        "auth".into(),
-        // OAuth2 / OIDC. The framework's own `/sso/callback?code=…`
-        // URLs carry credentials that none of the names above match.
-        // Matching is exact, not substring, so `access_token` does
-        // not cover `id_token`.
-        "code".into(),
-        "client_secret".into(),
-        "id_token".into(),
-        "code_verifier".into(),
-        "state".into(),
-        "assertion".into(),
-        "session_state".into(),
-    ]
+    let mut out: Vec<String> = crate::secret_keys::SECRET_WORDS
+        .iter()
+        .map(|w| (*w).to_owned())
+        .collect();
+    // The framework's own `/sso/callback?code=…` URLs carry credentials
+    // under names no secret word covers.
+    for extra in [
+        "api_key",
+        "access_token",
+        "refresh_token",
+        "code",
+        "client_secret",
+        "id_token",
+        "state",
+        "assertion",
+        "session_state",
+    ] {
+        out.push(extra.to_owned());
+    }
+    out
 }
 
 /// Params the framework itself puts credentials in (the console's
@@ -440,8 +440,14 @@ pub(crate) fn redact_query<'a>(raw: &'a str, redact_keys: &[String]) -> std::bor
         } else {
             k.into()
         };
-        ALWAYS_REDACTED.iter().any(|r| r.eq_ignore_ascii_case(&key))
-            || redact_keys.iter().any(|r| r.eq_ignore_ascii_case(&key))
+        // A key matches by word, so `X-Api-Key` and `reset_token` count.
+        crate::secret_keys::matches_any(
+            &key,
+            ALWAYS_REDACTED
+                .iter()
+                .copied()
+                .chain(redact_keys.iter().map(String::as_str)),
+        )
     };
     let any_hidden = raw
         .split('&')
@@ -613,6 +619,49 @@ mod tests {
         assert_eq!(
             r,
             "token=[redacted]&signature=[redacted]&code=[redacted]&page=2"
+        );
+    }
+
+    /// A secret word anywhere in a key is hidden, in any case style.
+    #[test]
+    fn the_defaults_hide_secret_words_in_any_key_style() {
+        let leaks = [
+            "auth_token",
+            "reset_token",
+            "jwt",
+            "key",
+            "api-key",
+            "access-token",
+            "sessionid",
+            "sig",
+            "otp",
+            "X-Api-Key",
+            "oauth_client_secret",
+            "apiKey",
+            "newPassword",
+        ];
+        let raw: Vec<String> = leaks
+            .iter()
+            .enumerate()
+            .map(|(i, k)| format!("{k}=zzleak{i:02}"))
+            .chain(["page=2".to_owned(), "keyboard=qwerty".to_owned()])
+            .collect();
+        let raw = raw.join("&");
+        let out = redact_query(&raw, &default_redact_params());
+        assert!(!out.contains("zzleak"), "{out}");
+        assert!(out.ends_with("page=2&keyboard=qwerty"), "{out}");
+    }
+
+    /// A configured key matches as a word run, so prefixed and kebab names count.
+    #[test]
+    fn a_configured_key_matches_prefixed_and_kebab_names() {
+        let r = redact_query(
+            "x-client-secret=s&my_client_secret=t&client=c&secretary=d",
+            &["client_secret".to_owned()],
+        );
+        assert_eq!(
+            r,
+            "x-client-secret=[redacted]&my_client_secret=[redacted]&client=c&secretary=d"
         );
     }
 
