@@ -54,6 +54,7 @@ mod menu;
 mod migrate_storage;
 mod migrations;
 mod operators;
+mod reseal;
 mod roles;
 mod scaffold;
 mod server;
@@ -213,6 +214,7 @@ where
         "list-tenants" => tenants::list_tenants(pools, writer).await,
         // #1344 — routing and display config were console-only to change.
         "edit-tenant" => edit::edit_tenant(pools, &args[1..], writer).await,
+        "reseal-tenant-secrets" => reseal::reseal_tenant_secrets(pools, &args[1..], writer).await,
         // #1344 — the console has bound extra hostnames since #1318; these
         // give a deploy hook and a browser-less box the same reach.
         "list-hosts" => hosts::list_hosts(pools, &args[1..], writer).await,
@@ -504,6 +506,10 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "                     [--activate | --deactivate] [--clear <field>]"
+    )?;
+    writeln!(
+        w,
+        "  reseal-tenant-secrets [--apply]  Re-seal stored tenant URLs with the current key (dry run without --apply)."
     )?;
     writeln!(
         w,
