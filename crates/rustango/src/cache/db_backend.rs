@@ -684,6 +684,16 @@ mod tests {
         assert_eq!(cache.delete_if_expired("k").await.unwrap(), 1);
     }
 
+    /// `DatabaseCache` keeps its single-`UPDATE` touch.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn overrides_touch() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let cache = DatabaseCache::new(pool, "c");
+        cache.ensure_table().await.unwrap();
+        crate::cache::assert_overrides_touch(&cache, "DatabaseCache").await;
+    }
+
     #[test]
     fn short_keys_are_stored_unchanged() {
         let k = "x".repeat(MAX_RAW_KEY_BYTES);

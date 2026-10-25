@@ -199,9 +199,11 @@ pub trait Cache: Send + Sync + 'static {
     /// `ttl = None` makes the entry last forever, as `set` does.
     ///
     /// The default is a `get` then a `set`, which can bring back a key
-    /// deleted in between. Every built-in backend that stores data
-    /// overrides it (#2300); `NullCache` keeps it, as it stores nothing.
+    /// deleted in between: a backend that stores data must override it.
+    /// Every built-in backend does.
     async fn touch(&self, key: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        #[cfg(test)]
+        DEFAULT_TOUCH_RUNS.with(|n| n.set(n.get() + 1));
         match self.get(key).await? {
             Some(value) => {
                 self.set(key, &value, ttl).await?;
@@ -304,6 +306,23 @@ pub trait Cache: Send + Sync + 'static {
 
 /// `Arc<dyn Cache>` alias — the standard way to share a cache instance.
 pub type BoxedCache = Arc<dyn Cache>;
+
+#[cfg(test)]
+thread_local! {
+    /// Runs of the racy `touch` default on this thread.
+    static DEFAULT_TOUCH_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Fails when `cache.touch` falls back to the trait default.
+#[cfg(test)]
+pub(crate) async fn assert_overrides_touch(cache: &dyn Cache, name: &str) {
+    cache.set("touch-k", "v", None).await.unwrap();
+    DEFAULT_TOUCH_RUNS.with(|n| n.set(0));
+    let _ = cache.touch("touch-k", Some(Duration::from_secs(60))).await;
+    let _ = cache.touch("touch-missing", None).await;
+    let runs = DEFAULT_TOUCH_RUNS.with(std::cell::Cell::get);
+    assert_eq!(runs, 0, "{name} uses the racy `touch` default");
+}
 
 /// Build a [`BoxedCache`] from a loaded
 /// [`crate::config::CacheSettings`] section (#87 wiring, v0.29).
@@ -550,6 +569,11 @@ impl Cache for NullCache {
     }
 
     async fn exists(&self, _key: &str) -> Result<bool, CacheError> {
+        Ok(false)
+    }
+
+    /// Nothing is stored, so no key is ever there to touch.
+    async fn touch(&self, _key: &str, _ttl: Option<Duration>) -> Result<bool, CacheError> {
         Ok(false)
     }
 
@@ -1635,6 +1659,23 @@ mod settings_tests {
         let cache = from_settings_async(&s).await.expect("memory builds");
         cache.set("k", "v", None).await.unwrap();
         assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+    }
+}
+
+#[cfg(test)]
+mod touch_override_tests {
+    use super::*;
+
+    /// Every built-in backend has its own `touch`; none may lose it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn builtin_backends_override_touch() {
+        assert_overrides_touch(&NullCache, "NullCache").await;
+        assert_overrides_touch(&InMemoryCache::new(), "InMemoryCache").await;
+        let dir = std::env::temp_dir().join(format!("rustango-touch-{}", uuid::Uuid::new_v4()));
+        assert_overrides_touch(&FileCache::new(&dir), "FileCache").await;
+        let _ = std::fs::remove_dir_all(&dir);
+        let scoped = scoped::ScopedCache::new(Arc::new(InMemoryCache::new()), "ns");
+        assert_overrides_touch(&scoped, "ScopedCache").await;
     }
 }
 

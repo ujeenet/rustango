@@ -396,6 +396,19 @@ mod tests {
         assert_eq!(flush.map(|c| &c[1..]), Some(&["ASYNC".to_owned()][..]));
     }
 
+    /// `touch` sends `PEXPIRE` / `PERSIST`, never the default's `GET` then `SET`.
+    #[tokio::test]
+    async fn touch_never_reads_then_writes() {
+        let (url, seen) = ok_server().await;
+        let cache = RedisCache::new(&url).await.expect("connect");
+        let _ = cache.touch("k", Some(Duration::from_secs(60))).await;
+        let _ = cache.touch("k", None).await;
+        let seen = seen.lock().unwrap();
+        let sent = |name: &str| seen.iter().any(|c| c[0].eq_ignore_ascii_case(name));
+        assert!(sent("PEXPIRE") && sent("PERSIST"), "{seen:?}");
+        assert!(!sent("GET") && !sent("SET"), "{seen:?}");
+    }
+
     /// A server that accepts but never answers fails the connect, not hangs it.
     #[tokio::test]
     async fn a_silent_server_fails_the_connect() {
