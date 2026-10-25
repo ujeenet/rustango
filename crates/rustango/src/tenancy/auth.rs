@@ -206,11 +206,11 @@ inventory::submit! {
 }
 
 // One role must not grant superuser or take another account (#2521).
-#[cfg(feature = "admin")]
+// Ungated: `tenancy` implies `admin`, so a tenancy build always locks these.
 crate::admin::object_permissions::lock_user_credentials!(User, "rustango_users");
-#[cfg(all(feature = "admin", feature = "sso"))]
+#[cfg(feature = "sso")]
 crate::register_admin_superuser_fields!(User, Add, [email]);
-#[cfg(all(feature = "admin", feature = "sso"))]
+#[cfg(feature = "sso")]
 crate::register_admin_superuser_fields!(User, Change, [email]);
 
 /// A tenant user to insert. `create-user`, the typed API and the first
@@ -593,6 +593,16 @@ pub fn parse_basic_auth(header_value: Option<&str>) -> Option<(String, String)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tenancy build locks the tenant user's superuser grant and password.
+    #[test]
+    fn tenancy_registers_user_field_locks() {
+        use crate::admin::object_permissions::{superuser_fields, AdminWrite};
+        let add = superuser_fields("rustango_users", AdminWrite::Add);
+        assert!(add.contains(&"is_superuser"), "{add:?}");
+        let change = superuser_fields("rustango_users", AdminWrite::Change);
+        assert!(change.contains(&"password_hash"), "{change:?}");
+    }
 
     /// An operator password typed into the registry admin is hashed.
     #[cfg(feature = "admin")]

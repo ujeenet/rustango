@@ -4,6 +4,22 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — admin bulk actions that write in the admin's transaction
+
+`admin::Builder::register_tx_action` (and `_with_perm`) hands the handler the write transaction, so an audited model's audit rows commit or roll back with the action. `register_action` handlers still audit best effort after they run.
+
+### Added — `ModelForm::acting_superuser`
+
+Applies the admin's superuser-only field locks to a `ModelForm`: for a non-superuser they are left out, and a locked NOT NULL flag stores `false`. Forms that don't call it lock nothing, as before.
+
+### Internal — every built-in cache backend overrides `touch`
+
+`NullCache` gets its own `touch` (no behaviour change), and a test fails if a backend falls back to the racy `get`-then-`set` default.
+
+### Deprecated — `contenttypes::render_generic_fk_link`
+
+Its link ignores the admin prefix and view permissions. Build your own from `ContentType::by_id`.
+
 ### Fixed — admin audit writes are tied to their transaction's pool
 
 Admin create, edit, delete and bulk writes open a transaction that carries its own pool, so their audit source can no longer be judged against another pool. The S3 media test suites now need `storage-s3`, and the MySQL media suite builds under `-D warnings`.
