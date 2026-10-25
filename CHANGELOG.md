@@ -14,6 +14,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — tenant URL references resolve on every path
 
 `TenantPools::new` uses the standard resolver (`env://`, `enc:`, literal); preflight, the console probe and `api::create_tenant` check the resolved URL; a URL of another backend is refused; the console edit hint matches the real schemes.
+A purge that cannot parse a tenant's URL names the stored reference, not the resolved value.
 
 ### Added — `tenancy::server_admin`: create and drop a tenant's database and login
 

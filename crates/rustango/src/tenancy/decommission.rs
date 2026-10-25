@@ -406,7 +406,7 @@ where
     }
     #[cfg(feature = "postgres")]
     let pg_target = if mode == StorageMode::Database && org.backend_kind == "postgres" {
-        let opts = parse_pg_url(&pools.resolved_database_url(org).await?)?;
+        let opts = parse_pg_url(org, &pools.resolved_database_url(org).await?)?;
         refuse_registry_database(pools, &opts)?;
         if let Some(other) = database_claimed(pools, registry, id, &opts).await? {
             return Err(TenancyError::Validation(format!(
@@ -617,12 +617,18 @@ fn same_pg_database(
 }
 
 #[cfg(feature = "postgres")]
-fn parse_pg_url(url: &str) -> Result<crate::sql::sqlx::postgres::PgConnectOptions, TenancyError> {
+/// `url` is `org`'s resolved URL. The error names the stored reference:
+/// a resolved secret need not look like a URL, so `redact` cannot mask it.
+fn parse_pg_url(
+    org: &Org,
+    url: &str,
+) -> Result<crate::sql::sqlx::postgres::PgConnectOptions, TenancyError> {
     use std::str::FromStr;
-    crate::sql::sqlx::postgres::PgConnectOptions::from_str(url).map_err(|e| {
+    crate::sql::sqlx::postgres::PgConnectOptions::from_str(url).map_err(|_| {
         TenancyError::Validation(format!(
-            "cannot parse the tenant's database URL: {e} ({})",
-            crate::sql::connect_diagnosis::redact(url)
+            "cannot parse tenant `{}`'s database URL ({})",
+            org.slug,
+            super::secrets::shown_reference(org.database_url.as_deref().unwrap_or_default())
         ))
     })
 }
@@ -673,7 +679,7 @@ where
                 other.slug
             ))
         })?;
-        if same_pg_database(tenant, &parse_pg_url(&url)?) {
+        if same_pg_database(tenant, &parse_pg_url(other, &url)?) {
             return Ok(Some(other.slug.clone()));
         }
     }
@@ -772,6 +778,20 @@ impl PgDropTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reference that resolves to a bare secret is named, never echoed.
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn an_unparsable_url_names_the_reference_not_the_secret() {
+        let org = Org {
+            slug: "acme".into(),
+            database_url: Some("env://ACME_DB".into()),
+            ..crate::testkit::org()
+        };
+        let err = parse_pg_url(&org, "hunter2-leak").unwrap_err().to_string();
+        assert!(!err.contains("hunter2"), "{err}");
+        assert!(err.contains("env://ACME_DB") && err.contains("acme"), "{err}");
+    }
 
     /// The flag is the whole guard for an unrecoverable act, so the two
     /// purge shapes must not compare equal.
