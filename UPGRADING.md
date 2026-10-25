@@ -169,6 +169,7 @@ Verify `X-Webhook-Signature-V2` with `webhook::verify_delivery` and drop repeate
 ### `rustango_jobs` gets a `queue_name` column
 
 `PgJobQueue::ensure_table_pool` adds it. With a hand-written migration, add `queue_name` (`TEXT`, `VARCHAR(255)` on MySQL) before naming a queue. Once the column exists, unnamed queues no longer run jobs of named ones.
+Old workers ignore the column and still run named jobs: drain them before you dispatch on a named queue.
 
 ### Scaffold taglines lose their brackets
 

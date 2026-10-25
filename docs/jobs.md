@@ -263,6 +263,8 @@ Two different queues on one table (say, a mailer and a report runner with their
 own handlers) pick each other's jobs. Give each its own name with
 `.queue_name("mailer")` on the dispatching and the working side: a named queue
 runs only its jobs, an unnamed one only unnamed jobs.
+Workers from before `queue_name` existed ignore it and run named jobs too:
+stop them before you dispatch on a named queue.
 
 ---
 

@@ -115,7 +115,7 @@ async fn send(mailer: &BoxedMailer, email: &Email) -> Result<(), JobError> {
 /// Each in-memory queue keeps its own mailer (#2334). Database queues
 /// share one `rustango_jobs` table, so any of them may send any queued
 /// mail: use one mailer per jobs table, or give each queue its own
-/// `PgJobQueue::queue_name` (#2338).
+/// `PgJobQueue::queue_name`.
 pub async fn register_email_job<Q: JobQueue>(queue: &Q, cfg: EmailJobConfig) {
     #[cfg(feature = "jobs-postgres")]
     warn_on_second_db_mailer(queue, &cfg.mailer);

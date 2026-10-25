@@ -1054,6 +1054,37 @@ async fn named_queues_run_only_their_own_jobs(pool: &Pool) {
     assert!(strays.is_empty(), "jobs ran on another queue: {strays:?}");
 }
 
+/// An older table gets `queue_name` and its pickup index from `ensure_table_pool`.
+async fn an_older_table_gets_the_queue_index(pool: &Pool) {
+    PgJobQueue::ensure_table_pool(pool).await.expect("ensure");
+    let mysql = pool.dialect().name() == "mysql";
+    let drop_idx = if mysql {
+        "DROP INDEX `rustango_jobs_queue_idx` ON `rustango_jobs`"
+    } else {
+        "DROP INDEX rustango_jobs_queue_idx"
+    };
+    let mut tx = rustango::sql::transaction_pool(pool).await.expect("tx");
+    for sql in [drop_idx, "ALTER TABLE rustango_jobs DROP COLUMN queue_name"] {
+        rustango::sql::raw_execute_tx(&mut tx, sql, Vec::new())
+            .await
+            .expect(sql);
+    }
+    tx.commit().await.expect("commit");
+    PgJobQueue::ensure_table_pool(pool).await.expect("ensure");
+    let probe = match pool.dialect().name() {
+        "postgres" => "SELECT COUNT(*) FROM pg_indexes WHERE indexname = 'rustango_jobs_queue_idx'",
+        "mysql" => {
+            "SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics \
+             WHERE table_schema = DATABASE() AND index_name = 'rustango_jobs_queue_idx'"
+        }
+        _ => "SELECT COUNT(*) FROM sqlite_master WHERE name = 'rustango_jobs_queue_idx'",
+    };
+    let rows: Vec<(i64,)> = rustango::sql::raw_query_pool(probe, Vec::new(), pool)
+        .await
+        .expect("probe");
+    assert_eq!(rows[0].0, 1, "no queue index");
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
@@ -1085,5 +1116,6 @@ tri_dialect_test! {
         an_undecodable_payload_is_retried,
         a_dispatch_in_a_block_wakes_the_worker_after_commit,
         named_queues_run_only_their_own_jobs,
+        an_older_table_gets_the_queue_index,
     ],
 }

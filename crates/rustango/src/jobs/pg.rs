@@ -447,7 +447,7 @@ impl PgJobQueue {
             _ => CREATE_JOBS_TABLE_SQL_PG.to_owned(),
         };
         crate::sql::run_ddl_idempotent(pool, &ddl).await?;
-        // An older table lacks `context` (before 0.60.1, #1229) or
+        // An older table lacks `context` (before 0.60.1) or
         // `queue_name` (before 0.61.2). Look first: on PG even a no-op
         // ADD COLUMN takes ACCESS EXCLUSIVE.
         let cols = crate::migrate::ensure::live_columns(pool, "rustango_jobs")
@@ -463,10 +463,18 @@ impl PgJobQueue {
             .filter(|(col, _)| !cols.contains(*col))
             .map(|(col, ty)| format!("ALTER TABLE rustango_jobs ADD COLUMN {col} {ty}"))
             .collect();
-        if add.is_empty() {
-            return Ok(());
+        if !add.is_empty() {
+            crate::migrate::ensure::run_statements(pool, &add).await?;
         }
-        crate::migrate::ensure::run_statements(pool, &add).await
+        // After the column exists: a named queue's pickup stays fast
+        // however busy its neighbours are.
+        let queue_idx = if pool.dialect().name() == "mysql" {
+            "CREATE INDEX `rustango_jobs_queue_idx` ON `rustango_jobs` (`queue_name`, `run_at`)"
+        } else {
+            "CREATE INDEX IF NOT EXISTS rustango_jobs_queue_idx \
+             ON rustango_jobs (queue_name, run_at) WHERE locked_at IS NULL"
+        };
+        crate::sql::run_ddl_idempotent(pool, queue_idx).await
     }
 
     /// PG-typed shim around [`Self::reclaim_stuck_jobs_pool`].
