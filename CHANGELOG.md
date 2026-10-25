@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — unknown `cache.backend` values are refused
+
+`cache::from_settings` panics and `from_settings_async` errors on an unknown or mis-cased backend (`Redis`, a typo) and on `file` without `file_cache_dir`, instead of quietly giving each process its own in-memory cache.
+
 ### Fixed — `time` is no longer capped below 0.3.48
 
 Apps can resolve `time` 0.3.49 and 0.3.51+ again (the yanked 0.3.48 / 0.3.50 are skipped); the floor is now 0.3.47, and `rand` 0.8.6, to keep pre-advisory releases out.

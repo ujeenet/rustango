@@ -464,14 +464,13 @@ pub struct CacheSettings {
     /// [`cache::from_settings`](crate::cache::from_settings) is sync
     /// and cannot build `"redis"` or `"db"`; it panics rather than
     /// swap in another backend. Use `cache::from_settings_async` for
-    /// redis, and build the DB backend where the `Pool` is.
+    /// redis, and build the DB backend where the `Pool` is. Any other
+    /// value, including a mis-cased one, is refused.
     pub backend: Option<String>,
     /// Redis connection URL when `backend = "redis"`.
     pub redis_url: Option<String>,
     /// Directory the `"file"` backend stores entries in, one file per
-    /// key. If
-    /// `backend = "file"` but this is unset, the resolver warns and
-    /// uses `InMemoryCache` so boot is not blocked.
+    /// key. Required when `backend = "file"`.
     pub file_cache_dir: Option<std::path::PathBuf>,
 }
 

@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `[cache] backend` must be a known lowercase name
+
+Use `memory`, `null` / `none`, `file` (with `file_cache_dir`), `redis` or `db`. Anything else now fails at startup instead of falling back to an in-memory cache.
+
 ### Slack plain strings are sent literally
 
 A string payload no longer renders Slack markup such as `<@U123>` or `<url|label>`. Send a JSON object (`{"text": …}` or `blocks`) to keep markup; objects pass through unchanged.
