@@ -705,10 +705,10 @@ pub struct JwtSettings {
     pub audience: Option<String>,
 }
 
-/// Display strings for the operator console and tenant admin. These
-/// also come from `RUSTANGO_OPERATOR_*` env vars; putting them in
-/// TOML makes per-tier branding easier, such as a different logo in
-/// staging. Per-tenant branding stays on the `Org` row.
+/// Display strings for the operator console, and the plain admin's
+/// fallback. These also come from `RUSTANGO_OPERATOR_*` env vars;
+/// putting them in TOML makes per-tier branding easier, such as a
+/// different logo in staging. Per-tenant branding stays on the `Org` row.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct BrandSettings {
