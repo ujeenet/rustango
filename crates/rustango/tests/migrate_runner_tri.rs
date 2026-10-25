@@ -405,6 +405,61 @@ async fn rollback_after_rename_restores_check_and_partial_index(pool: &Pool) {
     }
 }
 
+/// Two branches add a column each. Going back to one branch unapplies the
+/// other; SQLite rebuilt the table from the shared parent's snapshot and
+/// refused to lose the first branch's column.
+async fn unapplying_one_branch_keeps_the_others_column(pool: &Pool) {
+    let t = "mr_br_item";
+    let ledger = "mr_br_ledger";
+    let dir = fresh(pool, &[t], ledger).await;
+    let initial = make_migrations_from(dir.path(), &snap(vec![table(t, vec![id()])]), None)
+        .expect("makemigrations")
+        .expect("a migration");
+    let branch = |name: &str, column: &str| Migration {
+        name: name.into(),
+        prev: Some(initial.name.clone()),
+        snapshot: snap(vec![table(t, vec![id(), col(column, true)])]),
+        forward: vec![Operation::Schema(SchemaChange::AddColumn {
+            table: t.into(),
+            column: column.into(),
+        })],
+        ..initial.clone()
+    };
+    write(dir.path(), &branch("0002_a", "a"));
+    write(dir.path(), &branch("0002_b", "b"));
+    write(
+        dir.path(),
+        &Migration {
+            name: "0003_merge".into(),
+            prev: Some("0002_b".into()),
+            merges: vec!["0002_a".into()],
+            snapshot: snap(vec![table(t, vec![id(), col("a", true), col("b", true)])]),
+            forward: Vec::new(),
+            ..initial.clone()
+        },
+    );
+    let name = pool.dialect().name();
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("both branches on {name}: {e}"));
+    rustango::migrate::migrate_to_pool_with_ledger(pool, dir.path(), "0002_a", ledger)
+        .await
+        .unwrap_or_else(|e| panic!("back to one branch on {name}: {e}"));
+    let q = pool.dialect().quote_ident(t);
+    exec(pool, &format!("INSERT INTO {q} (a) VALUES (1)"))
+        .await
+        .unwrap_or_else(|e| panic!("`a` kept on {name}: {e}"));
+    assert!(
+        exec(pool, &format!("INSERT INTO {q} (b) VALUES (1)"))
+            .await
+            .is_err(),
+        "`b` gone on {name}"
+    );
+    for d in [t, ledger] {
+        drop_table(pool, d).await;
+    }
+}
+
 fn slow(_pool: Pool) -> MigrationCallbackFut {
     Box::pin(async {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -721,6 +776,7 @@ tri_dialect_test!(
         referenced_key_widens_beside_new_fks,
         referenced_key_widens_its_junction,
         rollback_after_rename_restores_check_and_partial_index,
+        unapplying_one_branch_keeps_the_others_column,
         refused_downgrade_runs_nothing,
         refused_loose_downgrade_runs_nothing,
         one_connection_pool_migrates,

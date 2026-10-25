@@ -1530,11 +1530,13 @@ async fn unapply_locked(
     let prev_snapshot = prev_snapshot(&all, &target, dir)?;
 
     let inverted = invert(&target.forward, &prev_snapshot)?;
+    let applied = applied_set_for(pool, ledger).await?;
+    let after = super::make::rollback_snapshot(&all, &applied, &target, prev_snapshot);
 
     if target.atomic {
-        unapply_atomic(pool, &target, &inverted, &prev_snapshot, ledger).await?;
+        unapply_atomic(pool, &target, &inverted, &after, ledger).await?;
     } else {
-        unapply_loose(pool, &target, &inverted, &prev_snapshot, ledger).await?;
+        unapply_loose(pool, &target, &inverted, &after, ledger).await?;
     }
 
     Ok(target)
@@ -4596,11 +4598,13 @@ async fn unapply_locked_pool(
     let prev_snapshot = prev_snapshot(&all, &target, dir)?;
 
     let inverted = invert(&target.forward, &prev_snapshot)?;
+    let applied = applied_set_pool_with_ledger(pool, ledger).await?;
+    let after = super::make::rollback_snapshot(&all, &applied, &target, prev_snapshot);
 
     if target.atomic {
-        unapply_atomic_pool(pool, &target, &inverted, &prev_snapshot, ledger).await?;
+        unapply_atomic_pool(pool, &target, &inverted, &after, ledger).await?;
     } else {
-        unapply_nonatomic_pool(pool, &target, &inverted, &prev_snapshot, ledger).await?;
+        unapply_nonatomic_pool(pool, &target, &inverted, &after, ledger).await?;
     }
 
     Ok(target)

@@ -580,6 +580,65 @@ fn ancestry<'a>(chain: &[&'a Migration], m: &'a Migration) -> Vec<&'a Migration>
     out
 }
 
+/// The schema rolling back `target` leaves: `prev` (its parent's snapshot)
+/// plus the other branches still applied, which `prev` does not know. Falls
+/// back to `prev` when those branches cannot be merged into it.
+pub(super) fn rollback_snapshot(
+    all: &[Migration],
+    applied: &std::collections::HashSet<String>,
+    target: &Migration,
+    prev: SchemaSnapshot,
+) -> SchemaSnapshot {
+    let chain: Vec<&Migration> = all
+        .iter()
+        .filter(|m| m.name != target.name && applied.contains(&m.name))
+        .collect();
+    let Some(parent) = target
+        .prev
+        .as_deref()
+        .and_then(|p| chain.iter().copied().find(|m| m.name == p))
+    else {
+        return prev;
+    };
+    let line = ancestry(&chain, parent);
+    let mut snap = prev.clone();
+    for leaf in leaves(&chain) {
+        let reach = reachable(&chain, leaf);
+        // The parent's own line, or a migration built on `target`.
+        if leaf.name == parent.name || reach.contains(&target.name) {
+            continue;
+        }
+        let Some(base) = line.iter().find(|a| reach.contains(&a.name)) else {
+            continue;
+        };
+        let theirs = effective_snapshot(&chain, leaf);
+        if snap
+            .merge_branch(&effective_snapshot(&chain, base), &theirs)
+            .is_err()
+        {
+            return prev;
+        }
+    }
+    snap
+}
+
+/// Names reachable from `m` through `prev` and merged branches, `m`'s own
+/// and names missing from `chain` included.
+fn reachable(chain: &[&Migration], m: &Migration) -> std::collections::HashSet<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut todo = vec![m.name.as_str()];
+    while let Some(name) = todo.pop() {
+        if !seen.insert(name.to_owned()) {
+            continue;
+        }
+        if let Some(c) = chain.iter().find(|c| c.name == name) {
+            todo.extend(c.prev.as_deref());
+            todo.extend(merged_branches(chain, c));
+        }
+    }
+    seen
+}
+
 /// Migrations no `prev`, merged branch or `replaces` names.
 fn leaves<'a>(chain: &[&'a Migration]) -> Vec<&'a Migration> {
     let joined: std::collections::HashSet<&str> = chain
