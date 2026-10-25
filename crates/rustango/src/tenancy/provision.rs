@@ -58,7 +58,7 @@ use super::org::{BackendKind, Org, StorageMode};
 use super::pools::TenantPools;
 use super::preflight;
 use super::provision_store::RunText;
-use super::secrets::SecretsResolver;
+use super::secrets::{SecretsResolver, TenantSecrets};
 
 /// Everything needed to stand up one tenant.
 ///
@@ -670,7 +670,7 @@ where
     }
 
     let checked =
-        match checked_request(&registry, pools.secrets().as_ref(), registry_url, request).await {
+        match checked_request(&registry, pools.secrets(), registry_url, request).await {
             Ok(r) => r,
             Err(e) => return rep.fail(ProvisionStep::Validate, e).await,
         };
@@ -1127,7 +1127,7 @@ impl CheckedRequest {
 /// Shared with `api::create_tenant`.
 pub(crate) async fn checked_request(
     registry: &crate::sql::Pool,
-    secrets: &dyn SecretsResolver,
+    secrets: &TenantSecrets,
     registry_url: &str,
     request: &ProvisionRequest,
 ) -> Result<CheckedRequest, TenancyError> {
@@ -1157,40 +1157,61 @@ pub(crate) struct VettedUrl {
     pub(crate) stored: String,
 }
 
-/// Resolve `reference`, then refuse a URL this registry's pools cannot
-/// open or that names the registry itself. Provision, edit and the
-/// console probe all pass here, so a reference is checked like a literal.
+/// [`check_database_url`], then the form to store: what create, edit and
+/// storage moves write.
 pub(crate) async fn vet_database_url(
+    reference: &str,
+    secrets: &TenantSecrets,
+    registry: &crate::sql::Pool,
+    registry_url: Option<&str>,
+) -> Result<VettedUrl, TenancyError> {
+    let resolved = check_database_url(reference, secrets, registry, registry_url).await?;
+    let stored = super::secrets::stored_form(reference, &resolved, secrets)
+        .await
+        .map_err(TenancyError::Validation)?;
+    Ok(VettedUrl { resolved, stored })
+}
+
+/// Resolve `reference`, then refuse a URL this registry's pools cannot
+/// open or that names the registry itself, so a reference is checked like
+/// a literal. Returns the resolved URL. Errors never echo it: it may be a
+/// bare secret.
+pub(crate) async fn check_database_url(
     reference: &str,
     secrets: &dyn SecretsResolver,
     registry: &crate::sql::Pool,
     registry_url: Option<&str>,
-) -> Result<VettedUrl, TenancyError> {
+) -> Result<String, TenancyError> {
     let resolved = secrets.resolve(reference).await.map_err(|e| {
         TenancyError::Validation(format!("cannot resolve the database URL: {e}"))
     })?;
-    refuse_other_backend(&resolved, registry).map_err(TenancyError::Validation)?;
-    refuse_registry_pool(&resolved, registry).map_err(TenancyError::Validation)?;
+    refuse_other_backend(&resolved, reference, registry).map_err(TenancyError::Validation)?;
+    refuse_registry_pool_as(&resolved, reference, registry).map_err(TenancyError::Validation)?;
     if let Some(url) = registry_url {
-        refuse_registry_url(&resolved, url).map_err(TenancyError::Validation)?;
+        refuse_registry_url_as(&resolved, reference, url).map_err(TenancyError::Validation)?;
     }
-    let stored = super::secrets::stored_form(reference, &resolved, secrets).await;
-    Ok(VettedUrl { resolved, stored })
+    Ok(resolved)
 }
 
 /// `TenantPools<DB>` opens every tenant with the registry's driver, which
 /// reads any URL as its own: a MySQL URL on a Postgres registry passes the
-/// probe and then fails at pool build.
-fn refuse_other_backend(url: &str, registry: &crate::sql::Pool) -> Result<(), String> {
+/// probe and then fails at pool build. Names `reference`, never `url`.
+fn refuse_other_backend(
+    url: &str,
+    reference: &str,
+    registry: &crate::sql::Pool,
+) -> Result<(), String> {
     let want = backend_of(registry);
-    let shown = crate::sql::connect_diagnosis::redact(url);
+    let shown = crate::sql::connect_diagnosis::redact(reference);
     match Endpoint::scheme_kind(url) {
         Some(got) if got == want => Ok(()),
         Some(got) => Err(format!(
             "{shown} is a {got} URL, but the registry runs on {want}; a tenant database must \
              use the registry's backend"
         )),
-        None => Err(format!("{shown} is not a {want} URL")),
+        // The text has no known scheme, so `redact` cannot mask it.
+        None if reference == url => Err(format!("the database URL is not a {want} URL")),
+        None => Err(format!("{shown} does not resolve to a {want} URL")),
     }
 }
 
@@ -1243,30 +1264,64 @@ async fn routing_clash(
 ///
 /// Compares the [`Endpoint`] only, because two URLs may name the same
 /// database with different credentials.
-pub(crate) fn refuse_registry_url(tenant_url: &str, registry_url: &str) -> Result<(), String> {
+#[cfg(test)]
+fn refuse_registry_url(tenant_url: &str, registry_url: &str) -> Result<(), String> {
+    refuse_registry_url_as(tenant_url, tenant_url, registry_url)
+}
+
+/// [`refuse_registry_url`], naming `reference` (what the operator gave)
+/// in errors instead of the resolved `tenant_url`.
+fn refuse_registry_url_as(
+    tenant_url: &str,
+    reference: &str,
+    registry_url: &str,
+) -> Result<(), String> {
     let Some(kind) = Endpoint::scheme_kind(registry_url) else {
         return Ok(());
     };
     match Endpoint::parse(registry_url, kind) {
-        Ok(registry) => refuse_endpoint(tenant_url, kind, &registry),
+        Ok(registry) => refuse_endpoint(tenant_url, reference, kind, &registry),
         Err(_) => Ok(()),
     }
 }
 
 /// [`refuse_registry_url`] against the database the registry pool is
 /// connected to (#2320).
-pub(crate) fn refuse_registry_pool(
+#[cfg(test)]
+fn refuse_registry_pool(
     tenant_url: &str,
     registry: &crate::sql::Pool,
 ) -> Result<(), String> {
-    let (kind, endpoint) = Endpoint::of_pool(registry);
-    refuse_endpoint(tenant_url, kind, &endpoint)
+    refuse_registry_pool_as(tenant_url, tenant_url, registry)
 }
 
-fn refuse_endpoint(tenant_url: &str, kind: BackendKind, registry: &Endpoint) -> Result<(), String> {
-    let shown = crate::sql::connect_diagnosis::redact(tenant_url);
+fn refuse_registry_pool_as(
+    tenant_url: &str,
+    reference: &str,
+    registry: &crate::sql::Pool,
+) -> Result<(), String> {
+    let (kind, endpoint) = Endpoint::of_pool(registry);
+    refuse_endpoint(tenant_url, reference, kind, &endpoint)
+}
+
+/// Errors name `reference`, password masked; the parse detail only when
+/// it describes that same text.
+fn refuse_endpoint(
+    tenant_url: &str,
+    reference: &str,
+    kind: BackendKind,
+    registry: &Endpoint,
+) -> Result<(), String> {
+    let shown = crate::sql::connect_diagnosis::redact(reference);
     let tenant = Endpoint::of_url(tenant_url, kind).map_err(|e| {
-        format!("cannot read {shown} ({e}), so cannot tell it from the registry's own database")
+        if reference == tenant_url {
+            format!("cannot read {shown} ({e}), so cannot tell it from the registry's own database")
+        } else {
+            format!(
+                "cannot read what {shown} resolves to, so cannot tell it from the registry's \
+                 own database"
+            )
+        }
     })?;
     if tenant.as_ref() == Some(registry) {
         return Err(format!(
@@ -2302,13 +2357,30 @@ mod registry_endpoint_tests {
             sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy"),
         );
         for other in ["postgres://u:pw@h/db", "mysql://u:pw@h/db", "/tmp/bare.db"] {
-            let err = refuse_other_backend(other, &pool).expect_err(other);
+            let err = refuse_other_backend(other, other, &pool).expect_err(other);
             assert!(err.contains("sqlite"), "{err}");
             assert!(!err.contains(":pw@"), "{err}");
         }
         for same in ["sqlite:///tmp/t.db?mode=rwc", "sqlite::memory:", "SQLite:t.db"] {
-            assert!(refuse_other_backend(same, &pool).is_ok(), "{same}");
+            assert!(refuse_other_backend(same, same, &pool).is_ok(), "{same}");
         }
+    }
+
+    /// A reference resolving to a bare secret: `redact` cannot mask a
+    /// value with no scheme, so no error may echo the resolved text.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_resolved_value_is_never_echoed() {
+        let pool = crate::sql::Pool::Sqlite(
+            sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy"),
+        );
+        for (resolved, reference) in [("hunter2", "env://X"), ("hunter2", "hunter2")] {
+            let err = refuse_other_backend(resolved, reference, &pool).expect_err(resolved);
+            assert!(!err.contains("hunter2"), "{err}");
+        }
+        let err = refuse_registry_pool_as("sqlite:/x?mode=hunter2", "env://X", &pool)
+            .expect_err("unreadable");
+        assert!(!err.contains("hunter2") && err.contains("env://X"), "{err}");
     }
 
     /// An `env://` reference is checked as the URL it names.
@@ -2325,12 +2397,13 @@ mod registry_endpoint_tests {
         let pool = crate::sql::Pool::Sqlite(
             sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy"),
         );
-        let err = vet_database_url("env://T", &To("postgres://u:pw@h/db"), &pool, None)
+        let to = |url| TenantSecrets::new(To(url));
+        let err = vet_database_url("env://T", &to("postgres://u:pw@h/db"), &pool, None)
             .await
             .err()
             .expect("another backend");
         assert!(err.to_string().contains("registry runs on sqlite"), "{err}");
-        let ok = vet_database_url("env://T", &To("sqlite:///tmp/t.db"), &pool, None)
+        let ok = vet_database_url("env://T", &to("sqlite:///tmp/t.db"), &pool, None)
             .await
             .expect("same backend");
         assert_eq!(ok.stored, "env://T");

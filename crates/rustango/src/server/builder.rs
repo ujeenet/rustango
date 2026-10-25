@@ -441,8 +441,20 @@ impl<DB: Database> Builder<DB> {
     #[must_use]
     pub fn secrets(mut self, resolver: impl crate::tenancy::SecretsResolver) -> Self {
         let config = self.pools.pool_config().clone();
-        self.pools =
-            Arc::new(TenantPools::<DB>::with_secrets(self.registry.clone(), resolver).config(config));
+        let mut pools = TenantPools::<DB>::with_secrets(self.registry.clone(), resolver).config(config);
+        if self.pools.secrets().requires_sealed() {
+            pools = pools.require_sealed_secrets();
+        }
+        self.pools = Arc::new(pools);
+        self
+    }
+
+    /// Refuse to store a tenant URL with a password unsealed (no key set,
+    /// or a resolver that cannot open `enc:`). Also on with
+    /// `RUSTANGO_REQUIRE_SEALED_SECRETS=1`.
+    #[must_use]
+    pub fn require_sealed_secrets(mut self) -> Self {
+        self.pools = Arc::new(self.pools.fresh().require_sealed_secrets());
         self
     }
 
@@ -1278,6 +1290,15 @@ mod secrets_tests {
             .secrets(Fixed)
             .tenant_pools(crate::tenancy::TenantPoolsConfig::default());
         assert_eq!(b.pools().resolve_secret("x").await.unwrap(), "fixed");
+    }
+
+    #[tokio::test]
+    async fn require_sealed_survives_rebuilds() {
+        let b = builder()
+            .require_sealed_secrets()
+            .secrets(Fixed)
+            .tenant_pools(crate::tenancy::TenantPoolsConfig::default());
+        assert!(b.pools().secrets().requires_sealed());
     }
 }
 

@@ -63,7 +63,7 @@ mod tests {
     /// Set a key for the duration of these (serial) unit tests.
     fn with_key() {
         // SAFETY: single-threaded unit test process for this module.
-        std::env::set_var("RUSTANGO_SECRET_KEY", "unit-test-secret-key");
+        crate::aead::set_test_key();
     }
 
     #[test]

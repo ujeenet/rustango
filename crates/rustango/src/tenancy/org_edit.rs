@@ -24,7 +24,7 @@
 use crate::core::{Column as _, Model as _};
 use crate::sql::{FetcherPool as _, Pool};
 use crate::tenancy::error::TenancyError;
-use crate::tenancy::{Org, SecretsResolver};
+use crate::tenancy::{Org, SecretsResolver as _, TenantSecrets};
 
 /// Which fields an edit touches. `None` means "leave alone" — distinct
 /// from `Some("")`, which clears an optional column.
@@ -103,18 +103,17 @@ pub struct Applied {
 /// [`TenancyError::Validation`] for a bad host pattern, port, path prefix
 /// or database URL, or when the tenant does not exist; driver errors otherwise.
 pub async fn apply(registry: &Pool, slug: &str, patch: &OrgPatch) -> Result<Applied, TenancyError> {
-    let secrets = crate::tenancy::ChainSecretsResolver::standard();
-    apply_with_secrets(registry, &secrets, slug, patch).await
+    apply_with_secrets(registry, &TenantSecrets::standard(), slug, patch).await
 }
 
-/// [`apply`], opening a new `database_url` with `secrets` (the tenant
-/// pools' resolver) so it is checked like a literal.
+/// [`apply`], opening and storing a new `database_url` per `secrets`
+/// (the tenant pools') so it is checked like a literal.
 ///
 /// # Errors
 /// As [`apply`].
 pub async fn apply_with_secrets(
     registry: &Pool,
-    secrets: &dyn SecretsResolver,
+    secrets: &TenantSecrets,
     slug: &str,
     patch: &OrgPatch,
 ) -> Result<Applied, TenancyError> {
@@ -164,7 +163,7 @@ pub async fn apply_with_secrets(
 /// check here (#1931).
 pub(crate) async fn apply_values(
     registry: &Pool,
-    secrets: &dyn SecretsResolver,
+    secrets: &TenantSecrets,
     slug: &str,
     values: Vec<(&'static str, crate::core::SqlValue)>,
 ) -> Result<Applied, TenancyError> {

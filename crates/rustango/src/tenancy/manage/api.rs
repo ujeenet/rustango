@@ -120,7 +120,7 @@ where
     // clashes, then the same preflight, before anything is written.
     let checked = crate::tenancy::provision::checked_request(
         &pools.registry_pool(),
-        pools.secrets().as_ref(),
+        pools.secrets(),
         registry_url,
         &crate::tenancy::provision::ProvisionRequest {
             slug: slug.to_owned(),

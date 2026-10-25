@@ -51,7 +51,7 @@ use tracing::Instrument as _;
 
 use super::error::TenancyError;
 use super::org::{Org, StorageMode};
-use super::secrets::{ChainSecretsResolver, SecretsResolver};
+use super::secrets::{ChainSecretsResolver, SecretsResolver, TenantSecrets};
 
 /// Configuration for [`TenantPools`].
 #[derive(Debug, Clone)]
@@ -528,7 +528,7 @@ pub(super) fn evict_to_fit<DB: Database>(
 pub struct TenantPools<DB: Database = DefaultTenantDb> {
     registry: sqlx::Pool<DB>,
     config: TenantPoolsConfig,
-    secrets: Arc<dyn SecretsResolver>,
+    secrets: TenantSecrets,
     /// Source of `CachedPool::last_used` stamps, shared by both caches
     /// so their orderings never collide.
     lru_tick: AtomicU64,
@@ -566,7 +566,7 @@ impl<DB: Database> TenantPools<DB> {
         Self {
             registry,
             config: TenantPoolsConfig::default(),
-            secrets: Arc::new(secrets),
+            secrets: TenantSecrets::new(secrets),
             lru_tick: AtomicU64::new(0),
             warned_near_cap: std::sync::atomic::AtomicBool::new(false),
             cache: RwLock::new(HashMap::new()),
@@ -647,15 +647,22 @@ impl<DB: Database> TenantPools<DB> {
         &self.registry
     }
 
-    /// The resolver `database_url` references are opened with.
-    pub(crate) fn secrets(&self) -> &Arc<dyn SecretsResolver> {
+    /// How `database_url` references are opened and stored.
+    pub(crate) fn secrets(&self) -> &TenantSecrets {
         &self.secrets
+    }
+
+    /// Refuse to store a password URL that cannot be sealed.
+    #[must_use]
+    pub fn require_sealed_secrets(mut self) -> Self {
+        self.secrets = self.secrets.require_sealed();
+        self
     }
 
     /// Same registry, config and secrets resolver; empty caches.
     pub(crate) fn fresh(&self) -> Self {
         let mut pools = Self::new(self.registry.clone()).config(self.config.clone());
-        pools.secrets = Arc::clone(&self.secrets);
+        pools.secrets = self.secrets.clone();
         pools
     }
 }
@@ -788,10 +795,10 @@ pub trait TenantPoolInvalidator: Send + Sync {
         >,
     >;
 
-    /// The resolver tenant URLs are opened with, so an edit can check a
-    /// new reference before it is written.
-    fn secrets_resolver(&self) -> Arc<dyn SecretsResolver> {
-        Arc::new(ChainSecretsResolver::standard())
+    /// How tenant URLs are opened and stored, so an edit can check a new
+    /// reference before it is written.
+    fn tenant_secrets(&self) -> TenantSecrets {
+        TenantSecrets::standard()
     }
 
     /// Take a tenant out of service — see
@@ -854,8 +861,8 @@ where
         Box::pin(async move { TenantPools::<DB>::resolved_database_url(self, org).await })
     }
 
-    fn secrets_resolver(&self) -> Arc<dyn SecretsResolver> {
-        Arc::clone(&self.secrets)
+    fn tenant_secrets(&self) -> TenantSecrets {
+        self.secrets.clone()
     }
 
     fn decommission<'a>(

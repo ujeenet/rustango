@@ -313,24 +313,15 @@ pub(super) async fn test_connection(
     // registry's own database is reachable and this role *can* create
     // tables in it, so the probe used to bless the one target
     // provisioning refuses outright.
+    // Checks only: a probe stores nothing, so it neither seals nor warns.
     let secrets = state.pools.as_ref().map_or_else(
-        || {
-            std::sync::Arc::new(crate::tenancy::ChainSecretsResolver::standard())
-                as std::sync::Arc<dyn crate::tenancy::SecretsResolver>
-        },
-        |p| p.secrets_resolver(),
+        crate::tenancy::TenantSecrets::standard,
+        |p| p.tenant_secrets(),
     );
-    let resolved = match state.provisioner.as_ref() {
-        Some(p) => {
-            provision::vet_database_url(&url, secrets.as_ref(), &p.registry(), Some(&p.registry_url()))
-                .await
-                .map(|v| v.resolved)
-        }
-        None => secrets
-            .resolve(&url)
-            .await
-            .map_err(|e| crate::tenancy::TenancyError::Validation(e.to_string())),
-    };
+    let registry_url = state.provisioner.as_ref().map(|p| p.registry_url());
+    let resolved =
+        provision::check_database_url(&url, &secrets, &state.registry, registry_url.as_deref())
+            .await;
     let url = match resolved {
         Ok(u) => u,
         Err(crate::tenancy::TenancyError::Validation(msg)) => return probe_bad(&msg),

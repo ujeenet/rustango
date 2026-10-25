@@ -220,7 +220,7 @@ pub(crate) use resolver::{
 pub use routes::RouteConfig;
 pub use secrets::{
     seal, ChainSecretsResolver, EnvSecretsResolver, LiteralSecretsResolver, SealedSecretsResolver,
-    SecretsError, SecretsResolver,
+    SecretsError, SecretsResolver, TenantSecrets, PREVIOUS_KEY_VAR, REQUIRE_SEALED_VAR,
 };
 pub use sweep::{
     active_tenants, for_each_tenant, with_tenant, SweepError, TenantOutcome, TenantSweep,

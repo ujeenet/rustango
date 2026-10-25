@@ -14,6 +14,21 @@ const NONCE_LEN: usize = 24;
 /// The environment variable the key is derived from.
 pub(crate) const KEY_VAR: &str = "RUSTANGO_SECRET_KEY";
 
+/// Shorter keys are guessable; 32 random bytes is the documented floor.
+pub(crate) const MIN_KEY_LEN: usize = 32;
+
+/// `true` when the current key is set but below [`MIN_KEY_LEN`].
+pub(crate) fn key_is_short() -> bool {
+    env_key().is_some_and(|k| k.len() < MIN_KEY_LEN)
+}
+
+/// The one key every in-crate unit test uses: they share a process
+/// under `cargo test`, so differing values would race.
+#[cfg(test)]
+pub(crate) fn set_test_key() {
+    std::env::set_var(KEY_VAR, "unit-test-secret-key");
+}
+
 /// Why sealing or opening failed. Callers word their own message.
 #[derive(Debug)]
 pub(crate) enum AeadError {
@@ -41,11 +56,16 @@ pub(crate) fn encrypt(plaintext: &[u8], aad: &[u8]) -> Result<String, AeadError>
 }
 
 /// Open what [`encrypt`] produced under the same `aad`.
+#[cfg_attr(not(feature = "casts"), allow(dead_code))]
 pub(crate) fn decrypt(stored: &str, aad: &[u8]) -> Result<Vec<u8>, AeadError> {
     decrypt_with(env_key().as_deref(), stored, aad)
 }
 
-fn encrypt_with(secret: Option<&str>, plaintext: &[u8], aad: &[u8]) -> Result<String, AeadError> {
+pub(crate) fn encrypt_with(
+    secret: Option<&str>,
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<String, AeadError> {
     let cipher = cipher(secret)?;
     let mut nonce = [0u8; NONCE_LEN];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
@@ -64,7 +84,11 @@ fn encrypt_with(secret: Option<&str>, plaintext: &[u8], aad: &[u8]) -> Result<St
     Ok(base64::engine::general_purpose::STANDARD.encode(framed))
 }
 
-fn decrypt_with(secret: Option<&str>, stored: &str, aad: &[u8]) -> Result<Vec<u8>, AeadError> {
+pub(crate) fn decrypt_with(
+    secret: Option<&str>,
+    stored: &str,
+    aad: &[u8],
+) -> Result<Vec<u8>, AeadError> {
     let framed = base64::engine::general_purpose::STANDARD
         .decode(stored)
         .map_err(|e| AeadError::Decode(e.to_string()))?;

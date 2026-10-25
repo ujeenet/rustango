@@ -167,27 +167,104 @@ const SEALED_AAD: &[u8] = b"rustango:tenancy-secret:v1";
 
 /// Seal `plaintext` as `enc:v1:<base64>` (XChaCha20-Poly1305, key from
 /// `RUSTANGO_SECRET_KEY`). [`ChainSecretsResolver::standard`] opens it.
+/// Use a key of 32 or more random bytes; a shorter one logs a warning.
 ///
 /// # Errors
 /// [`SecretsError::Backend`] when `RUSTANGO_SECRET_KEY` is not set.
 pub fn seal(plaintext: &str) -> Result<String, SecretsError> {
+    if crate::aead::key_is_short() {
+        tracing::warn!(
+            target: "rustango::tenancy::secrets",
+            min = crate::aead::MIN_KEY_LEN,
+            "RUSTANGO_SECRET_KEY is shorter than the minimum; use 32 or more random bytes"
+        );
+    }
     crate::aead::encrypt(plaintext.as_bytes(), SEALED_AAD)
         .map(|b64| format!("{SEALED_V1}{b64}"))
         .map_err(sealed_error)
 }
 
+/// Decrypt-only fallback key, so a rotation or rollback can still open
+/// values sealed under the old key until `reseal-tenant-secrets` runs.
+pub const PREVIOUS_KEY_VAR: &str = "RUSTANGO_SECRET_KEY_PREVIOUS";
+
 /// Open an `enc:` reference made by [`seal`]. In the standard chain.
+/// Falls back to `RUSTANGO_SECRET_KEY_PREVIOUS` when the current key fails.
 pub struct SealedSecretsResolver;
 
 #[async_trait]
 impl SecretsResolver for SealedSecretsResolver {
     async fn resolve(&self, reference: &str) -> Result<String, SecretsError> {
-        let b64 = reference.strip_prefix(SEALED_V1).ok_or_else(|| {
-            SecretsError::Invalid("unsupported sealed secret; expected `enc:v1:`".into())
-        })?;
-        let plain = crate::aead::decrypt(b64, SEALED_AAD).map_err(sealed_error)?;
-        String::from_utf8(plain)
-            .map_err(|_| SecretsError::Invalid("sealed secret is not UTF-8".into()))
+        let current = std::env::var(crate::aead::KEY_VAR).ok();
+        let previous = std::env::var(PREVIOUS_KEY_VAR).ok();
+        open_sealed(reference, current.as_deref(), previous.as_deref())
+    }
+}
+
+fn open_sealed(
+    reference: &str,
+    current: Option<&str>,
+    previous: Option<&str>,
+) -> Result<String, SecretsError> {
+    use crate::aead::{decrypt_with, AeadError};
+    let b64 = reference.strip_prefix(SEALED_V1).ok_or_else(|| {
+        SecretsError::Invalid("unsupported sealed secret; expected `enc:v1:`".into())
+    })?;
+    let plain = match decrypt_with(current, b64, SEALED_AAD) {
+        Err(AeadError::Decrypt | AeadError::MissingKey) if previous.is_some() => {
+            decrypt_with(previous, b64, SEALED_AAD)
+        }
+        other => other,
+    }
+    .map_err(sealed_error)?;
+    String::from_utf8(plain).map_err(|_| SecretsError::Invalid("sealed secret is not UTF-8".into()))
+}
+
+/// How tenant database URLs are opened, and whether a password URL may
+/// be stored unsealed. Owned by [`super::TenantPools`].
+#[derive(Clone)]
+pub struct TenantSecrets {
+    resolver: std::sync::Arc<dyn SecretsResolver>,
+    require_sealed: bool,
+}
+
+/// Set to `1` to refuse storing a password URL unsealed.
+pub const REQUIRE_SEALED_VAR: &str = "RUSTANGO_REQUIRE_SEALED_SECRETS";
+
+impl TenantSecrets {
+    /// `resolver`, with `require_sealed` from `RUSTANGO_REQUIRE_SEALED_SECRETS`.
+    #[must_use]
+    pub fn new(resolver: impl SecretsResolver) -> Self {
+        Self {
+            resolver: std::sync::Arc::new(resolver),
+            require_sealed: std::env::var(REQUIRE_SEALED_VAR).is_ok_and(|v| v == "1"),
+        }
+    }
+
+    /// [`ChainSecretsResolver::standard`].
+    #[must_use]
+    pub fn standard() -> Self {
+        Self::new(ChainSecretsResolver::standard())
+    }
+
+    /// Refuse to store a password URL that cannot be sealed.
+    #[must_use]
+    pub fn require_sealed(mut self) -> Self {
+        self.require_sealed = true;
+        self
+    }
+
+    /// Whether [`Self::require_sealed`] is on.
+    #[must_use]
+    pub fn requires_sealed(&self) -> bool {
+        self.require_sealed
+    }
+}
+
+#[async_trait]
+impl SecretsResolver for TenantSecrets {
+    async fn resolve(&self, reference: &str) -> Result<String, SecretsError> {
+        self.resolver.resolve(reference).await
     }
 }
 
@@ -216,36 +293,35 @@ fn sealed_error(e: crate::aead::AeadError) -> SecretsError {
 /// `resolved` under `secrets`.
 ///
 /// A literal URL with a password is sealed, if a key is set and `secrets`
-/// opens the result back to the same URL; otherwise it is kept as given.
+/// opens the result back to the same URL. Otherwise it is kept as given
+/// with a warning, or refused when `secrets` requires sealing.
 pub(crate) async fn stored_form(
     reference: &str,
     resolved: &str,
-    secrets: &dyn SecretsResolver,
-) -> String {
+    secrets: &TenantSecrets,
+) -> Result<String, String> {
     // A reference the resolver passed through unchanged is the literal itself.
     let literal_with_password =
         reference == resolved && crate::sql::connect_diagnosis::redact(reference) != reference;
     if !literal_with_password {
-        return reference.to_owned();
+        return Ok(reference.to_owned());
     }
-    let sealed = match seal(reference) {
-        Ok(s) => s,
-        Err(e) => {
-            static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                tracing::warn!(target: "rustango::tenancy::secrets", error = %e, "tenant database URL stored unsealed");
-            }
-            return reference.to_owned();
-        }
+    let why = match seal(reference) {
+        Ok(sealed) => match secrets.resolve(&sealed).await {
+            Ok(back) if back == resolved => return Ok(sealed),
+            // A custom resolver that does not know `enc:` would break the tenant.
+            _ => "the secrets resolver cannot open `enc:` values".to_owned(),
+        },
+        Err(e) => e.to_string(),
     };
-    match secrets.resolve(&sealed).await {
-        Ok(back) if back == resolved => sealed,
-        // A custom resolver that does not know `enc:` would break the tenant.
-        _ => {
-            tracing::warn!(target: "rustango::tenancy::secrets", "the secrets resolver cannot open `enc:`; tenant database URL stored unsealed");
-            reference.to_owned()
-        }
+    if secrets.require_sealed {
+        return Err(format!(
+            "this database URL has a password and sealed storage is required, but it cannot \
+             be sealed: {why}"
+        ));
     }
+    tracing::warn!(target: "rustango::tenancy::secrets", reason = %why, "tenant database URL stored unsealed");
+    Ok(reference.to_owned())
 }
 
 /// How a stored `database_url` may be shown: an `env://` name as is,
@@ -298,9 +374,8 @@ mod tests {
         assert!(!v.is_empty(), "{key} should be a non-empty env var");
     }
 
-    /// The value the casts unit tests set too, so parallel tests agree.
     fn with_key() {
-        std::env::set_var("RUSTANGO_SECRET_KEY", "unit-test-secret-key");
+        crate::aead::set_test_key();
     }
 
     #[tokio::test]
@@ -346,8 +421,8 @@ mod tests {
     async fn a_literal_with_a_password_is_stored_sealed() {
         with_key();
         let url = "postgres://u:hunter2@h/db";
-        let chain = ChainSecretsResolver::standard();
-        let stored = stored_form(url, url, &chain).await;
+        let chain = TenantSecrets::standard();
+        let stored = stored_form(url, url, &chain).await.unwrap();
         assert!(stored.starts_with("enc:v1:"), "{stored}");
         assert_eq!(chain.resolve(&stored).await.unwrap(), url);
     }
@@ -355,13 +430,13 @@ mod tests {
     #[tokio::test]
     async fn references_and_password_free_urls_are_stored_as_given() {
         with_key();
-        let chain = ChainSecretsResolver::standard();
+        let chain = TenantSecrets::standard();
         for (reference, resolved) in [
             ("env://TENANT_URL", "postgres://u:p@h/db"),
             ("sqlite:///tmp/t.db?mode=rwc", "sqlite:///tmp/t.db?mode=rwc"),
             ("postgres://u@h/db", "postgres://u@h/db"),
         ] {
-            assert_eq!(stored_form(reference, resolved, &chain).await, reference);
+            assert_eq!(stored_form(reference, resolved, &chain).await.unwrap(), reference);
         }
     }
 
@@ -370,7 +445,35 @@ mod tests {
     async fn a_resolver_that_cannot_open_enc_gets_the_literal() {
         with_key();
         let url = "postgres://u:p@h/db";
-        assert_eq!(stored_form(url, url, &LiteralSecretsResolver).await, url);
+        let literal = TenantSecrets::new(LiteralSecretsResolver);
+        assert_eq!(stored_form(url, url, &literal).await.unwrap(), url);
+    }
+
+    /// Strict mode refuses the unsealed fallback instead of storing it.
+    #[tokio::test]
+    async fn strict_mode_refuses_an_unsealed_password_url() {
+        with_key();
+        let url = "postgres://u:hunter2@h/db";
+        let strict = TenantSecrets::new(LiteralSecretsResolver).require_sealed();
+        let err = stored_form(url, url, &strict).await.unwrap_err();
+        assert!(err.contains("sealed storage is required"), "{err}");
+        assert!(!err.contains("hunter2"), "{err}");
+        let ok = TenantSecrets::standard().require_sealed();
+        assert!(stored_form(url, url, &ok).await.unwrap().starts_with("enc:v1:"));
+    }
+
+    /// A value sealed under the previous key still opens after a rotation.
+    #[test]
+    fn the_previous_key_opens_what_the_old_key_sealed() {
+        let b64 = crate::aead::encrypt_with(Some("old-key"), b"postgres://u:p@h/db", SEALED_AAD)
+            .unwrap();
+        let sealed = format!("{SEALED_V1}{b64}");
+        assert!(open_sealed(&sealed, Some("new-key"), None).is_err());
+        assert_eq!(
+            open_sealed(&sealed, Some("new-key"), Some("old-key")).unwrap(),
+            "postgres://u:p@h/db"
+        );
+        assert_eq!(open_sealed(&sealed, None, Some("old-key")).unwrap(), "postgres://u:p@h/db");
     }
 
     #[test]

@@ -1988,10 +1988,10 @@ async fn org_edit_submit(
 
     // The CLI's write path, so the console runs the same routing
     // validators and host-clash check (#1931).
-    let secrets = pools.secrets_resolver();
+    let secrets = pools.tenant_secrets();
     let applied = match crate::tenancy::org_edit::apply_values(
         &state.registry,
-        secrets.as_ref(),
+        &secrets,
         &slug,
         collected,
     )
