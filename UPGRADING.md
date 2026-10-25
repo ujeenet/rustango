@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `create-api-key` needs the server's key
+
+Set `RUSTANGO_SESSION_SECRET`, or start the server once so it writes the dev key file; the verb no longer creates one.
+
 ### Built-in logo is square
 
 `/__static__/rustango.png` and `icon.png` now serve a 256 px / 64 px square logo instead of the wide banner. A custom template sized for the banner may need new image dimensions.

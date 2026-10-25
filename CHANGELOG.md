@@ -10,6 +10,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 Unchecking **active** on a `rustango_admin_users` row stamps the logout cut-off, as for operators and tenant users, so reactivating revives no old cookie.
 
+### Fixed — `create-api-key` could write its own key file
+
+The verb only loads the server's key (`RUSTANGO_SESSION_SECRET` or the dev key file) and fails when there is none, so every key it prints matches the server.
+
 ### Fixed — the first admin could not set a password in a browser
 
 The set-password page and the run page that shows its link sent `Referrer-Policy: no-referrer`, so browsers posted `Origin: null` and CSRF refused the form. They now send `same-origin`.

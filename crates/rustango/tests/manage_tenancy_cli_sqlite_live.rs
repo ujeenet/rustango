@@ -41,6 +41,11 @@ fn migration(name: &str, table: &str, scope: MigrationScope) -> Migration {
 /// A registry with nothing applied, over a dir holding one registry-scoped
 /// and one tenant-scoped migration.
 async fn boot() -> Booted {
+    // `create-api-key` loads a key, never makes one.
+    rustango::tenancy::set_api_key_secret(rustango::session::SessionSecret::from_bytes(vec![
+        7;
+        32
+    ]));
     let tmp = tempfile::tempdir().expect("tempdir");
     let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
     let raw = sqlx::SqlitePool::connect(&url).await.expect("connect");
