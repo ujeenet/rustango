@@ -140,6 +140,14 @@ impl Dialect for MySql {
         Some(format!("DROP USER IF EXISTS {}", self.account(login)))
     }
 
+    fn collation_exists_sql(&self, collation: &Collation) -> Option<CompiledStatement> {
+        Some(CompiledStatement {
+            sql: "SELECT count(*) FROM information_schema.COLLATIONS WHERE COLLATION_NAME = ?"
+                .to_owned(),
+            params: vec![crate::core::SqlValue::String(collation.as_str().to_owned())],
+        })
+    }
+
     fn database_exists_sql(&self, db: &DatabaseName) -> Option<CompiledStatement> {
         Some(CompiledStatement {
             sql: "SELECT count(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?".to_owned(),

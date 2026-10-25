@@ -1022,6 +1022,11 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// One row, one count: whether the server knows `collation`.
+    fn collation_exists_sql(&self, _collation: &Collation) -> Option<CompiledStatement> {
+        None
+    }
+
     /// One row, one count: whether database `db` exists.
     fn database_exists_sql(&self, _db: &DatabaseName) -> Option<CompiledStatement> {
         None

@@ -56,6 +56,23 @@ impl From<TenantDbError> for TenancyError {
             TenantDbError::Exec(e) => Self::Exec(e),
             TenantDbError::Io(e) => Self::Io(e),
             TenantDbError::Connect(d) => Self::Validation(d.summary()),
+            // The causes carry driver text: logged, not shown.
+            TenantDbError::RollbackFailed {
+                cause,
+                undo,
+                leftover,
+            } => {
+                tracing::error!(
+                    target: "rustango::tenancy::server_admin",
+                    cause = %crate::sql::connect_diagnosis::redact(&cause.to_string()),
+                    undo = %crate::sql::connect_diagnosis::redact(&undo.to_string()),
+                    "creating a tenant database failed and could not be undone"
+                );
+                Self::Validation(format!(
+                    "creating the tenant database failed and could not be undone, so {leftover} \
+                     may remain"
+                ))
+            }
             other => Self::Validation(other.to_string()),
         }
     }
@@ -560,6 +577,18 @@ impl ServerAdmin {
                 drop_server(pool, name, Some(login), false).await
             }
         }
+    }
+
+    /// Whether the server knows `collation`; `None` when it cannot tell.
+    pub async fn supports_collation(&self, collation: &Collation) -> Option<bool> {
+        let Target::Server { pool, .. } = &self.target else {
+            return None;
+        };
+        let stmt = pool.dialect().collation_exists_sql(collation)?;
+        let rows: Vec<(i64,)> = crate::sql::raw_query_pool(&stmt.sql, stmt.params, pool)
+            .await
+            .ok()?;
+        rows.first().map(|(n,)| *n > 0)
     }
 
     /// Refuse a database or login of these names that already exists,
