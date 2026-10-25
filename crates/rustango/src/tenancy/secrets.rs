@@ -172,7 +172,7 @@ const SEALED_AAD: &[u8] = b"rustango:tenancy-secret:v1";
 /// # Errors
 /// [`SecretsError::Backend`] when `RUSTANGO_SECRET_KEY` is not set.
 pub fn seal(plaintext: &str) -> Result<String, SecretsError> {
-    if crate::aead::key_is_short() {
+    if crate::aead::key_status() == crate::aead::KeyStatus::Short {
         tracing::warn!(
             target: "rustango::tenancy::secrets",
             min = crate::aead::MIN_KEY_LEN,

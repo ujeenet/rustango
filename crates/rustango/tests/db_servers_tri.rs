@@ -770,10 +770,35 @@ async fn the_console_never_shows_the_password(pool: &Pool) {
     assert!(db_server::get(&env.registry, "web").await.is_err());
 }
 
+/// The pages warn while the key is missing or short, without showing it.
+async fn the_console_warns_without_a_good_key(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    with_key();
+    let env = Env::new(pool).await;
+    seed_operator(&env).await;
+    db_server::add(&env.registry, &env.spec("warned"), None).await.unwrap();
+    let c = Console::boot(&env, true).await;
+    const SHORT: &str = "short-key-q7Zx";
+    for (key, warned) in [(None, true), (Some(SHORT), true), (Some(KEY), false)] {
+        match key {
+            Some(k) => std::env::set_var("RUSTANGO_SECRET_KEY", k),
+            None => std::env::remove_var("RUSTANGO_SECRET_KEY"),
+        }
+        for uri in ["/db-servers", "/db-servers/warned/edit"] {
+            let (status, page) = c.get(uri).await;
+            assert_eq!(status, 200, "{page}");
+            assert_eq!(page.contains("key-warning"), warned, "{key:?} {uri}: {page}");
+            assert!(!page.contains(SHORT) && !page.contains(KEY), "{uri}: {page}");
+        }
+    }
+    with_key();
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
     scenarios: [
+        the_console_warns_without_a_good_key,
         an_unknown_tenant_url_blocks_removal,
         a_stale_edit_is_refused,
         new_servers_require_tls,

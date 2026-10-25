@@ -80,7 +80,26 @@ fn base_ctx(state: &ConsoleState, op: &auth::Operator) -> Context {
         "tls_modes",
         &TlsMode::ALL.iter().map(|m| m.as_str()).collect::<Vec<_>>(),
     );
+    ctx.insert("key_warning", &key_warning());
     ctx
+}
+
+/// What a missing or short `RUSTANGO_SECRET_KEY` disables. Never the key.
+fn key_warning() -> Option<&'static str> {
+    use crate::aead::{key_status, KeyStatus};
+    match key_status() {
+        KeyStatus::Missing => Some(
+            "RUSTANGO_SECRET_KEY is not set, so server passwords cannot be saved and new \
+             tenant URLs are stored unsealed. Set it to 32 or more random bytes \
+             (openssl rand -base64 48) and restart.",
+        ),
+        KeyStatus::Short => Some(
+            "RUSTANGO_SECRET_KEY is shorter than 32 bytes, so passwords are sealed with a weak \
+             key. Move it to RUSTANGO_SECRET_KEY_PREVIOUS, set 32 or more random bytes, restart \
+             and run reseal-tenant-secrets --apply.",
+        ),
+        KeyStatus::Ok => None,
+    }
 }
 
 /// `form` without the password, for re-rendering after an error.
