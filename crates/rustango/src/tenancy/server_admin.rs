@@ -562,6 +562,36 @@ impl ServerAdmin {
         }
     }
 
+    /// Refuse a database or login of these names that already exists,
+    /// without creating anything. A name the admin cannot check passes.
+    ///
+    /// # Errors
+    /// [`TenantDbError::DatabaseExists`] / [`TenantDbError::LoginExists`].
+    pub async fn names_free(&self, name: &DatabaseName, login: &Login) -> Result<(), TenantDbError> {
+        let pool = match &self.target {
+            Target::Sqlite { dir } => {
+                return if sqlite_file(dir, name).exists() {
+                    Err(TenantDbError::DatabaseExists(name.clone()))
+                } else {
+                    Ok(())
+                };
+            }
+            Target::Server { pool, .. } => pool,
+        };
+        if let Some(stmt) = pool.dialect().database_exists_sql(name) {
+            let rows: Vec<(i64,)> = crate::sql::raw_query_pool(&stmt.sql, stmt.params, pool)
+                .await
+                .unwrap_or_default();
+            if rows.first().is_some_and(|(n,)| *n > 0) {
+                return Err(TenantDbError::DatabaseExists(name.clone()));
+            }
+        }
+        if login_exists(pool, login).await == Some(true) {
+            return Err(TenantDbError::LoginExists(login.name().clone()));
+        }
+        Ok(())
+    }
+
     /// Undo a [`Created`]: drop its database and login, ending sessions
     /// inside. Takes the value a create returned, so nothing that existed
     /// before can reach it.

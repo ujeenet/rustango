@@ -543,6 +543,17 @@ async fn the_console_creates_a_tenant_on_a_saved_server(pool: &Pool) {
         assert!(steps.iter().any(|x| x == s), "{s} missing: {steps:?}");
     }
 
+    // The dry check now finds the slug taken.
+    let probe = body(
+        c.post(
+            "/orgs/test-connection",
+            &format!("slug={a}&storage_mode=database&database_source=server&server=main"),
+        )
+        .await,
+    )
+    .await;
+    assert!(probe.contains(r#""status":"bad""#) && probe.contains("already exists"), "{probe}");
+
     let in_use = db_server::get(&env.registry, "main")
         .await
         .unwrap()
@@ -672,6 +683,20 @@ async fn an_existing_database_is_refused_and_kept(pool: &Pool) {
         .create_tenant_database(&name, &other, &LoginPassword::generate())
         .await
         .expect("pre-existing");
+
+    // The console's dry check sees it first, and creates nothing.
+    let c = Console::boot(&env, &env.dir("good")).await;
+    let probe = body(
+        c.post(
+            "/orgs/test-connection",
+            &format!("slug={a}&storage_mode=database&database_source=server&server=main"),
+        )
+        .await,
+    )
+    .await;
+    assert!(probe.contains("database") && probe.contains("already exists"), "{probe}");
+    assert!(env.org(&a).await.is_none());
+    drop(c);
 
     let err = env
         .provision(&env.dir("good"), &ProvisionRequest::on_server(&a, "main"))

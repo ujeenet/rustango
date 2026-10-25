@@ -302,6 +302,29 @@ pub(super) async fn test_connection(
         let Some(name) = field("server") else {
             return probe_bad("Choose a saved database server first.");
         };
+        // With a slug, everything a submit checks before DDL, dry.
+        if field("slug").is_some() {
+            let Some(p) = state.provisioner.as_ref() else {
+                return probe_bad("This console cannot create tenants.");
+            };
+            let request = match request_from_form(&form, None) {
+                Ok(r) => r,
+                Err(msg) => return probe_bad(&msg),
+            };
+            let secrets = state.pools.as_ref().map_or_else(
+                crate::tenancy::TenantSecrets::standard,
+                |p| p.tenant_secrets(),
+            );
+            let dry =
+                provision::dry_run_on_server(&state.registry, &secrets, &p.registry_url(), &request)
+                    .await;
+            if let Err(e) = dry {
+                let msg = e.user_facing().unwrap_or_else(|| {
+                    withheld("operator_console::test_connection", name, "Could not check", &e)
+                });
+                return probe_bad(&msg);
+            }
+        }
         return super::db_servers::probe_response(&state, &op, name).await;
     }
 

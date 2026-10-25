@@ -140,6 +140,13 @@ impl Dialect for MySql {
         Some(format!("DROP USER IF EXISTS {}", self.account(login)))
     }
 
+    fn database_exists_sql(&self, db: &DatabaseName) -> Option<CompiledStatement> {
+        Some(CompiledStatement {
+            sql: "SELECT count(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?".to_owned(),
+            params: vec![crate::core::SqlValue::String(db.as_str().to_owned())],
+        })
+    }
+
     /// Needs SELECT on `mysql.user`; callers treat a refusal as unknown.
     fn login_exists_sql(&self, login: &Login) -> Option<CompiledStatement> {
         Some(CompiledStatement {

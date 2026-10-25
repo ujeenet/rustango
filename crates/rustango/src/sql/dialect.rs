@@ -1022,6 +1022,11 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// One row, one count: whether database `db` exists.
+    fn database_exists_sql(&self, _db: &DatabaseName) -> Option<CompiledStatement> {
+        None
+    }
+
     /// One row, one count: whether `login` exists.
     fn login_exists_sql(&self, _login: &Login) -> Option<CompiledStatement> {
         None

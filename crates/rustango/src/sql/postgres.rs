@@ -103,6 +103,13 @@ impl Dialect for Postgres {
         ))
     }
 
+    fn database_exists_sql(&self, db: &DatabaseName) -> Option<CompiledStatement> {
+        Some(CompiledStatement {
+            sql: format!("SELECT count(*) FROM pg_database WHERE datname = {}", self.placeholder(1)),
+            params: vec![crate::core::SqlValue::String(db.as_str().to_owned())],
+        })
+    }
+
     fn login_exists_sql(&self, login: &Login) -> Option<CompiledStatement> {
         Some(CompiledStatement {
             sql: format!("SELECT count(*) FROM pg_roles WHERE rolname = {}", self.placeholder(1)),
