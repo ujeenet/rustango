@@ -612,10 +612,15 @@ pub(super) fn rollback_snapshot(
             continue;
         };
         let theirs = effective_snapshot(&chain, leaf);
-        if snap
-            .merge_branch(&effective_snapshot(&chain, base), &theirs)
-            .is_err()
-        {
+        if let Err(conflicts) = snap.merge_branch(&effective_snapshot(&chain, base), &theirs) {
+            tracing::warn!(
+                target: "rustango::migrate",
+                "unapplying `{}`: branch `{}` conflicts ({}); rebuilding from `{}` alone",
+                target.name,
+                leaf.name,
+                conflicts.join("; "),
+                parent.name,
+            );
             return prev;
         }
     }

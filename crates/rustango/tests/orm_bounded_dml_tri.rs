@@ -342,8 +342,9 @@ async fn nested_same_table_exists_dml(pool: &Pool) {
 }
 
 /// A correlated IN over the target, in a write that changes the column it
-/// filters on. MySQL may refuse it (1093) but must never write wrong rows:
-/// as a derived table it was re-read per row and saw the earlier writes.
+/// filters on. As a derived table MySQL re-read it per row and saw the
+/// earlier writes; it now refuses it (MySQL error 1093) and writes nothing.
+/// MariaDB reads the target in a plain subquery and runs it correctly.
 async fn correlated_same_table_in_dml(pool: &Pool) {
     use rustango::core::{subquery::outer_ref, Column as _};
     // Tags of higher rows ranked over 25; only id 1 (rank 50) has none.
@@ -359,18 +360,28 @@ async fn correlated_same_table_in_dml(pool: &Pool) {
         .set("rank", 0_i64)
         .execute_pool(pool)
         .await;
-    match r {
-        Ok(n) => {
-            let rows: Vec<Item> = Item::objects()
-                .order_by(&[("id", false)])
-                .fetch(pool)
+    let ranks = || async {
+        let rows: Vec<Item> = Item::objects()
+            .order_by(&[("id", false)])
+            .fetch(pool)
+            .await
+            .unwrap();
+        rows.iter().map(|r| r.rank).collect::<Vec<i64>>()
+    };
+    let mariadb = pool.dialect().name() == "mysql" && {
+        let v: Vec<(String,)> =
+            rustango::sql::raw_query_pool("SELECT VERSION()", Vec::new(), pool)
                 .await
                 .unwrap();
-            let ranks: Vec<i64> = rows.iter().map(|r| r.rank).collect();
-            assert_eq!((n, ranks), (1, vec![0, 10, 40, 20, 30]));
-        }
-        Err(e) if pool.dialect().name() == "mysql" && e.to_string().contains("1093") => {}
-        Err(e) => panic!("{e}"),
+        v[0].0.contains("MariaDB")
+    };
+    if pool.dialect().name() == "mysql" && !mariadb {
+        let e = r.expect_err("MySQL refuses a correlated IN over the target");
+        assert!(e.to_string().contains("1093"), "{e}");
+        assert_eq!(ranks().await, vec![50, 10, 40, 20, 30]);
+    } else {
+        assert_eq!(r.expect("update"), 1);
+        assert_eq!(ranks().await, vec![0, 10, 40, 20, 30]);
     }
 }
 

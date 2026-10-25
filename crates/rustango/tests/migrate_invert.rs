@@ -553,3 +553,35 @@ fn invert_recreates_a_check_once_its_renames_are_undone() {
     );
     assert_eq!(out[1], rename("duo", "pair"));
 }
+
+/// Dropped with its renamed table, the CHECK still comes back once, last.
+#[test]
+fn invert_recreates_a_check_of_a_dropped_renamed_table_once() {
+    let prev: SchemaSnapshot = serde_json::from_value(serde_json::json!({
+        "tables": [pair_table_with_composite_fk()],
+        "checks": [{"name": "pair_left_ck", "table": "pair", "expr": "left_id > 0"}]
+    }))
+    .unwrap();
+    let drop_check = |table: &str| {
+        Operation::Schema(SchemaChange::DropCheckConstraint {
+            name: "pair_left_ck".into(),
+            table: table.into(),
+        })
+    };
+    let drop_table = Operation::Schema(SchemaChange::DropTable("duo".into()));
+    for forward in [
+        vec![drop_check("pair"), rename("pair", "duo"), drop_table.clone()],
+        vec![rename("pair", "duo"), drop_check("duo"), drop_table.clone()],
+    ] {
+        let out = invert(&forward, &prev).unwrap();
+        let adds = out
+            .iter()
+            .filter(|op| matches!(op, Operation::Schema(SchemaChange::AddCheckConstraint { .. })))
+            .count();
+        assert_eq!(adds, 1, "{out:?}");
+        assert!(
+            matches!(out.last(), Some(Operation::Schema(SchemaChange::AddCheckConstraint { table, .. })) if table == "pair"),
+            "{out:?}"
+        );
+    }
+}

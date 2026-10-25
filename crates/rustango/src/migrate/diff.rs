@@ -2209,7 +2209,7 @@ pub(crate) fn column_fk_sql(
 }
 
 /// MySQL's `MODIFY` of junction column `through.column` to the width of the
-/// pk it references in `snap`, so a widened pk takes the FK back (3780).
+/// pk it references in `snap`, so a widened pk takes the FK back (MySQL error 3780).
 pub(crate) fn junction_modify_sql(
     snap: &SchemaSnapshot,
     through: &str,
