@@ -154,6 +154,10 @@ untouched.
 
 `TenantPools::acquire` (and so `Tenant`) takes its connection from a per-tenant pool, not the registry pool. Budget `2 * max_cached_scoped_pools * scoped_pool_max_connections` connections on the registry server.
 
+### `migrate-tenant-storage --to schema` creates the schema first
+
+It refuses a target schema that already exists, before the tenant goes offline, and drops the empty schema again if the move fails.
+
 ### Scaffold taglines lose their brackets
 
 `cargo rustango new` now writes `tagline = "dev"` / `"staging"`, not `"(dev)"` / `"(staging)"`. Existing projects keep theirs; edit the line to match.

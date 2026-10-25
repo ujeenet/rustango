@@ -802,3 +802,172 @@ async fn migrate_tenant_storage_refuses_a_schema_another_tenant_uses() {
 
     rustango::migrate::drop_all(&pool).await.unwrap();
 }
+
+/// The refusal `create-tenant` gives for a schema that already exists.
+const SCHEMA_EXISTS: &str = "already exists — choose another schema name";
+
+fn has_pg_dump() -> bool {
+    let found = std::process::Command::new("pg_dump")
+        .arg("--version")
+        .output()
+        .is_ok();
+    assert!(found || std::env::var("CI").is_err(), "CI needs pg_dump and psql");
+    found
+}
+
+/// A database-mode tenant whose database holds `rustango_users`.
+async fn movable_tenant(pool: &PgPool, slug: &str, src_url: &str) {
+    let mut org = Org {
+        id: Auto::default(),
+        slug: slug.into(),
+        display_name: slug.into(),
+        storage_mode: StorageMode::Database.as_str().into(),
+        backend_kind: "postgres".to_owned(),
+        database_url: Some(src_url.into()),
+        schema_name: None,
+        host_pattern: None,
+        port: None,
+        path_prefix: None,
+        ..rustango::testkit::org()
+    };
+    org.insert(pool).await.unwrap();
+}
+
+async fn move_into_schema(
+    pools: &TenantPools,
+    registry_url: &str,
+    slug: &str,
+    schema: &str,
+) -> Result<(), String> {
+    let mut out = Vec::<u8>::new();
+    run_with_writer(
+        pools,
+        registry_url,
+        std::path::Path::new("."),
+        args(&[
+            "migrate-tenant-storage",
+            slug,
+            "--to",
+            "schema",
+            "--schema-name",
+            schema,
+            "--drain-secs",
+            "0",
+        ]),
+        &mut out,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+async fn schema_exists(pool: &PgPool, schema: &str) -> bool {
+    rustango::sql::sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM pg_namespace WHERE nspname = $1",
+    )
+    .bind(schema)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+        == 1
+}
+
+/// A schema no tenant claims but that exists is refused like `create-tenant`
+/// refuses it, before the tenant goes offline, and is left as it was.
+#[tokio::test]
+async fn migrate_into_an_existing_schema_is_refused_up_front() {
+    let _g = live_lock().lock().await;
+    if pool().await.is_none() || !has_pg_dump() {
+        eprintln!("skipping: DATABASE_URL or pg_dump missing");
+        return;
+    }
+    let (registry, pool) = private_registry("rustango_t1487_reg").await;
+    let src = ScratchDb::create(&std::env::var("DATABASE_URL").unwrap(), "rustango_t1487_src").await;
+    let src_pool = PgPool::connect(src.url()).await.unwrap();
+    sqlx_exec(&src_pool, "CREATE TABLE rustango_users (id BIGSERIAL PRIMARY KEY)").await;
+    src_pool.close().await;
+    movable_tenant(&pool, "t1487", src.url()).await;
+    sqlx_exec(&pool, "CREATE SCHEMA t1487_other").await;
+    sqlx_exec(&pool, "CREATE TABLE t1487_other.keep (id INT)").await;
+
+    let pools = TenantPools::new(pool.clone());
+    let err = move_into_schema(&pools, registry.url(), "t1487", "t1487_other")
+        .await
+        .expect_err("an existing schema must be refused");
+    assert!(err.contains(SCHEMA_EXISTS), "{err}");
+    let org = org_row(&pool, "t1487").await;
+    assert!(org.active, "left inactive");
+    assert_eq!(org.storage_mode, StorageMode::Database.as_str());
+    let kept: i64 = rustango::sql::sqlx::query_scalar("SELECT count(*) FROM t1487_other.keep")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(kept, 0, "the other schema's table is gone");
+    pool.close().await;
+}
+
+/// A move and a create racing for one schema never both get it; the
+/// loser gets the usual refusal.
+#[tokio::test]
+async fn a_move_and_a_create_racing_for_one_schema_never_share_it() {
+    use rustango::tenancy::manage::api::{create_tenant, CreateTenantOpts};
+    let _g = live_lock().lock().await;
+    if pool().await.is_none() || !has_pg_dump() {
+        eprintln!("skipping: DATABASE_URL or pg_dump missing");
+        return;
+    }
+    let (registry, pool) = private_registry("rustango_t1487_race").await;
+    let registry_url = registry.url().to_owned();
+    let src = ScratchDb::create(&std::env::var("DATABASE_URL").unwrap(), "rustango_t1487_rs").await;
+    let src_pool = PgPool::connect(src.url()).await.unwrap();
+    sqlx_exec(&src_pool, "CREATE TABLE rustango_users (id BIGSERIAL PRIMARY KEY)").await;
+    src_pool.close().await;
+    let pools = Arc::new(TenantPools::new(pool.clone()));
+    let (mut moves, mut creates) = (0, 0);
+    for round in 0..8u64 {
+        let (mover, schema) = (format!("t1487-m{round}"), format!("t1487_s{round}"));
+        movable_tenant(&pool, &mover, src.url()).await;
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        // In this task: the verb's future is not `Send`.
+        let moved = async {
+            barrier.wait().await;
+            move_into_schema(&pools, &registry_url, &mover, &schema).await
+        };
+        let created = {
+            let (pools, url, barrier) = (pools.clone(), registry_url.clone(), barrier.clone());
+            let schema = schema.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                // Spread the create over the move's whole run.
+                tokio::time::sleep(std::time::Duration::from_millis(round * 400)).await;
+                let opts = CreateTenantOpts {
+                    mode: StorageMode::Schema,
+                    schema_name: Some(schema),
+                    no_migrate: true,
+                    ..CreateTenantOpts::default()
+                };
+                let dir = std::path::Path::new("no-migrations");
+                create_tenant(&pools, &url, dir, &format!("t1487-c{round}"), opts)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+        };
+        let (moved, created) = tokio::join!(moved, created);
+        let created = created.unwrap();
+        match (&moved, &created) {
+            (Ok(()), Err(e)) => {
+                assert!(e.contains(SCHEMA_EXISTS) || e.contains("already used"), "{e}");
+                moves += 1;
+            }
+            (Err(e), Ok(())) => {
+                assert!(e.contains(SCHEMA_EXISTS), "round {round}: {e}");
+                assert!(org_row(&pool, &mover).await.active, "left inactive");
+                assert!(schema_exists(&pool, &schema).await, "the move dropped the create's schema");
+                creates += 1;
+            }
+            other => panic!("round {round}: both or neither got `{schema}`: {other:?}"),
+        }
+    }
+    assert!(moves > 0 && creates > 0, "no real race: {moves} moves / {creates} creates");
+    pool.close().await;
+}
