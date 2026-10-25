@@ -157,8 +157,12 @@ the fields that changed, never their values.
 create databases, create logins and grant rights, plus the first reason it
 cannot provision tenants (for example PostgreSQL before 15).
 
+TLS defaults to `require` for a new server. An edit made from a page that
+someone else changed in the meantime is refused; reload and edit again.
+
 Delete is refused while a database-mode tenant's URL points at the server's
-host and port (SQLite: a file in its directory).
+host and port (SQLite: a file in its directory), or cannot be resolved, and
+on a console built without tenant pools.
 
 From the CLI: [`add-db-server` and friends](manage.md#database-servers).
 

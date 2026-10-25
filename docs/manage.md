@@ -1085,7 +1085,12 @@ The password is asked at a hidden prompt, or read from the variable named
 by `--password-env <VAR>`; `--no-password` saves none. It is never taken
 from argv and never printed. It is stored sealed, so `RUSTANGO_SECRET_KEY`
 must be set. `--tls` takes `disable`, `prefer`, `require`, `verify-ca` or
-`verify-full`.
+`verify-full`; a new server gets `require` unless you pass another.
+`edit-db-server --prompt-password` keeps the saved password on a blank
+answer. Removal is refused while a tenant's URL points at the server, or
+cannot be resolved or parsed. Hosts are compared ignoring case, IPv6
+brackets and a trailing dot; `localhost` and `127.0.0.1` count as
+different hosts. `reseal-tenant-secrets` re-seals server passwords too.
 
 ### `create-operator <username> --password <pwd>`
 

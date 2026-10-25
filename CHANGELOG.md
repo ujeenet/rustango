@@ -21,6 +21,7 @@ A purge that cannot parse a tenant's URL names the stored reference, not the res
 ### Added — saved database servers
 
 `tenancy::db_server` stores a server's admin login in the new registry table `rustango_db_servers`, password sealed only; the console's **Database servers** page (with provisioning) and `add-db-server` / `list-db-servers` / `test-db-server` / `edit-db-server` / `remove-db-server` save, test and remove them. `ServerAdmin::connect_with` takes a maintenance database.
+New servers default to TLS `require`; an edit from a stale form is refused; removal is refused while any tenant's URL is on the server or cannot be checked; `reseal-tenant-secrets` also re-seals server passwords.
 
 ### Added — `tenancy::server_admin`: create and drop a tenant's database and login
 
