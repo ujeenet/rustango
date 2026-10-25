@@ -120,12 +120,8 @@ where
         #[cfg(feature = "admin-sso")]
         {
             use crate::tenancy::sso::SharedSsoProvider as P;
-            let rows = P::objects().fetch(&registry).await.map(|rows: Vec<P>| {
-                rows.into_iter()
-                    .map(|r| SsoSecret::of(r.id.get().copied(), r.updated_at.get().copied(), &r.slug, r.client_secret.into_inner(), <P as crate::core::Model>::SCHEMA))
-                    .collect()
-            });
-            tables.push(("shared".into(), rows.map_err(|e| e.to_string()), registry.clone()));
+            let rows = SsoSecret::list(P::objects().values_list(SsoSecret::COLUMNS), <P as crate::core::Model>::SCHEMA, &registry).await;
+            tables.push(("shared".into(), rows, registry.clone()));
         }
         let mut orgs: Vec<Org> = Org::objects().fetch(&registry).await?;
         orgs.sort_by(|a, b| a.slug.cmp(&b.slug));
@@ -136,12 +132,8 @@ where
                 writeln!(w, "  sso {}: cannot reach the tenant", org.slug)?;
                 continue;
             };
-            let rows = P::objects().fetch(&pool).await.map(|rows: Vec<P>| {
-                rows.into_iter()
-                    .map(|r| SsoSecret::of(r.id.get().copied(), r.updated_at.get().copied(), &r.slug, r.client_secret.into_inner(), <P as crate::core::Model>::SCHEMA))
-                    .collect()
-            });
-            tables.push((org.slug, rows.map_err(|e| e.to_string()), pool));
+            let rows = SsoSecret::list(P::objects().values_list(SsoSecret::COLUMNS), <P as crate::core::Model>::SCHEMA, &pool).await;
+            tables.push((org.slug, rows, pool));
         }
         for (owner, rows, pool) in tables {
             let rows = match rows {
@@ -194,51 +186,50 @@ where
     Ok(())
 }
 
-/// One SSO provider's client secret, opened (current or previous key).
+/// One SSO provider's client secret as stored, sealed.
 #[cfg(feature = "sso")]
 struct SsoSecret {
     id: i64,
-    seen: Option<chrono::DateTime<chrono::Utc>>,
     slug: String,
-    plain: String,
+    stored: String,
     model: &'static crate::core::ModelSchema,
 }
 
 #[cfg(feature = "sso")]
 impl SsoSecret {
-    fn of(
-        id: Option<i64>,
-        seen: Option<chrono::DateTime<chrono::Utc>>,
-        slug: &str,
-        plain: String,
+    const COLUMNS: &'static [&'static str] = &["id", "slug", "client_secret"];
+
+    /// The rows of `rows`, raw: the compare-and-set needs the stored text.
+    async fn list<T: crate::core::Model>(
+        rows: crate::query::ValuesListQuerySet<T>,
         model: &'static crate::core::ModelSchema,
-    ) -> Self {
-        Self {
-            id: id.unwrap_or_default(),
-            seen,
-            slug: slug.to_owned(),
-            plain,
-            model,
-        }
+        pool: &crate::sql::Pool,
+    ) -> Result<Vec<Self>, String> {
+        let rows = rows.fetch(pool).await.map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| match r.as_slice() {
+                [SqlValue::I64(id), SqlValue::String(slug), SqlValue::String(stored)] => Some(Self {
+                    id: *id,
+                    slug: slug.clone(),
+                    stored: stored.clone(),
+                    model,
+                }),
+                _ => None,
+            })
+            .collect())
     }
 
-    /// Write it sealed under the current key, only while the row is as
-    /// read. `Ok(false)`: it changed meanwhile.
+    /// Write it sealed under the current key, only while the stored value
+    /// is the one read. `Ok(false)`: it changed meanwhile.
     async fn reseal(&self, pool: &crate::sql::Pool) -> Result<bool, String> {
         use crate::core::{Assignment, Filter, Op, UpdateQuery, WhereExpr};
-        let sealed = crate::aead::encrypt(self.plain.as_bytes(), b"")
-            .map_err(|e| format!("cannot seal: {e:?}"))?;
-        let seen = match self.seen {
-            Some(t) => Filter {
-                column: "updated_at",
-                op: Op::Eq,
-                value: SqlValue::DateTime(t),
-            },
-            None => Filter {
-                column: "updated_at",
-                op: Op::IsNull,
-                value: SqlValue::Bool(true),
-            },
+        let plain = crate::aead::decrypt(&self.stored, b"").map_err(|e| format!("cannot open: {e:?}"))?;
+        let sealed = crate::aead::encrypt(&plain, b"").map_err(|e| format!("cannot seal: {e:?}"))?;
+        let seen = Filter {
+            column: "client_secret",
+            op: Op::Eq,
+            value: SqlValue::String(self.stored.clone()),
         };
         let query = UpdateQuery {
             model: self.model,

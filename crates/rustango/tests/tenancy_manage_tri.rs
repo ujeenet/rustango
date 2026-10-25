@@ -959,12 +959,15 @@ async fn reseal_leaves_a_sealed_url_without_a_password(pool: &Pool) {
     };
     org.save_pool(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
-    let out = env
-        .run_out(&dir, &["reseal-tenant-secrets", "--apply"])
-        .await
-        .expect("apply");
+    let out = env.run_out(&dir, &["reseal-tenant-secrets", "--apply"]).await;
+    // The server arms point at no server: its SSO secrets can't be reached,
+    // which counts as a failure, but the URL is still left as it is.
+    match env.backend() {
+        BackendKind::Sqlite => drop(out.expect("apply")),
+        _ => assert!(format!("{:?}", out.expect_err("unreachable")).contains("could not be resealed")),
+    }
     let stored = env.org("nopw").await.expect("row").database_url;
-    assert_eq!(stored.as_deref(), Some(sealed.as_str()), "{out}");
+    assert_eq!(stored.as_deref(), Some(sealed.as_str()));
 }
 
 tri_dialect_test! {

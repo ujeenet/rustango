@@ -234,10 +234,14 @@ async fn redeem_and_sign_in(admin: &axum::Router, host: &str, link: &str, userna
         host,
         "POST",
         "/login",
-        &format!("username={}&password={NEW_PASSWORD}", form_encode(username)),
+        // Some feature sets read the login's token from the form, not the header.
+        &format!("username={}&password={NEW_PASSWORD}&_csrf=t", form_encode(username)),
     )
     .await;
-    assert!(login.status().is_redirection(), "login failed: {}", login.status());
+    if !login.status().is_redirection() {
+        let status = login.status();
+        panic!("login failed: {status}: {}", body_of(login).await);
+    }
     assert!(
         login
             .headers()

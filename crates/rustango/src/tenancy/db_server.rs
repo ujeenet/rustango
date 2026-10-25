@@ -1110,6 +1110,35 @@ mod tests {
         assert!(!format!("{s:?}").contains("enc:v1"), "{s:?}");
     }
 
+    /// A reseal writes only over the value it read: a newer password wins.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_reseal_never_overwrites_a_newer_password() {
+        use crate::sql::UpdaterPool as _;
+        crate::aead::set_test_key();
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Pool::connect(&format!("sqlite://{}?mode=rwc", dir.path().join("r.db").display()))
+            .await
+            .unwrap();
+        crate::testkit::migrate_framework(&pool).await.unwrap();
+        let mut row = pg("db.internal");
+        row.admin_password = Some(sealed(&LoginPassword::new("first-pass").unwrap()).unwrap());
+        row.insert_pool(&pool).await.unwrap();
+        let stale = row.clone();
+        let id = row.id.get().copied().unwrap();
+        let newer = sealed(&LoginPassword::new("second-pass").unwrap()).unwrap();
+        DbServer::objects()
+            .where_(DbServer::id.eq(id))
+            .update()
+            .set("admin_password", Some(newer.clone()))
+            .execute_pool(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(reseal_password(&pool, &stale, true).await, Resealed::Skipped));
+        let now = DbServer::objects().where_(DbServer::id.eq(id)).first(&pool).await.unwrap().unwrap();
+        assert_eq!(now.admin_password.as_deref(), Some(newer.as_str()));
+    }
+
     #[tokio::test]
     async fn mysql_spells_tls_its_own_way_and_brackets_ipv6() {
         let mut s = pg("::1");
