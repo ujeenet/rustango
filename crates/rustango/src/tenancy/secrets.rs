@@ -268,7 +268,7 @@ fn sealed_error(e: crate::aead::AeadError) -> SecretsError {
     match e {
         AeadError::MissingKey => SecretsError::Backend(
             format!(
-                "{} is not set; it is needed to seal and open `enc:` secrets",
+                "{} is not set or blank; it is needed to seal and open `enc:` secrets",
                 crate::aead::KEY_VAR
             )
             .into(),

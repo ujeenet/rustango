@@ -85,7 +85,7 @@ fn base_ctx(state: &ConsoleState, op: &auth::Operator) -> Context {
 }
 
 /// What a missing or short `RUSTANGO_SECRET_KEY` disables. Never the key.
-fn key_warning() -> Option<&'static str> {
+pub(super) fn key_warning() -> Option<&'static str> {
     use crate::aead::{key_status, KeyStatus};
     match key_status() {
         KeyStatus::Missing => Some(

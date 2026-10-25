@@ -33,9 +33,9 @@ where
             ))
         }
     };
-    if std::env::var(crate::aead::KEY_VAR).is_err() {
+    if crate::aead::key_status() == crate::aead::KeyStatus::Missing {
         return Err(TenancyError::Validation(format!(
-            "{} is not set, so nothing can be sealed",
+            "{} is not set or blank, so nothing can be sealed",
             crate::aead::KEY_VAR
         )));
     }

@@ -83,6 +83,7 @@ async fn render_form(
         form.iter().filter(|(k, _)| *k != "database_url").collect();
     ctx.insert("prefill", &prefill);
     ctx.insert("error", &error);
+    ctx.insert("key_warning", &super::db_servers::key_warning());
     // Schema-mode is Postgres-only by language. Offering it on a
     // SQLite or MySQL registry would be offering a choice that can
     // only fail, so the form does not.
