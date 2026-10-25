@@ -1127,7 +1127,7 @@ fn build_admin_routes(tenant_admin: &Router, routes: &crate::tenancy::RouteConfi
     let admin_slash = format!("{}/", routes.admin_url);
     let admin_glob = format!("{}/{{*rest}}", routes.admin_url);
     let static_glob = format!("{}/{{*rest}}", routes.static_url);
-    let brand_glob = format!("{}/{{*rest}}", routes.brand_url);
+    let brand_glob = format!("{}/{{*rest}}", routes.brand_prefix());
 
     let mut r = Router::new()
         // Admin proper.

@@ -222,10 +222,22 @@ impl LocalLogo {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let content_type = branding::content_type_for(name)
             .ok_or_else(|| branding::BrandError::UnsupportedContentType(name.to_owned()))?;
+        use std::io::Read as _;
         let io = |e: std::io::Error| crate::storage::StorageError::Io(e.to_string());
-        let len = std::fs::metadata(path).map_err(io)?.len();
-        branding::check_brand_size(usize::try_from(len).unwrap_or(usize::MAX))?;
-        let bytes = std::fs::read(path).map_err(io)?;
+        // A FIFO or device would block boot or never end.
+        let meta = std::fs::metadata(path).map_err(io)?;
+        if !meta.is_file() {
+            return Err(io(std::io::Error::other("not a regular file")).into());
+        }
+        branding::check_brand_size(usize::try_from(meta.len()).unwrap_or(usize::MAX))?;
+        // Bounded: the file may grow after the size check.
+        let cap = branding::max_brand_bytes() as u64 + 1;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .map_err(io)?
+            .take(cap)
+            .read_to_end(&mut bytes)
+            .map_err(io)?;
         branding::check_brand_size(bytes.len())?;
         let digest = sha2::Sha256::digest(&bytes);
         let version = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
@@ -244,12 +256,24 @@ impl LocalLogo {
         format!("{}?v={}", self.route, self.version)
     }
 
-    fn response(&self) -> Response<Body> {
-        Response::builder()
+    fn response(&self, headers: &HeaderMap) -> Response<Body> {
+        let etag = format!("\"{}\"", self.version);
+        let fresh = headers
+            .get(header::IF_NONE_MATCH)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|inm| crate::etag::if_none_match(inm, &etag));
+        let builder = Response::builder()
+            .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+            .header(header::ETAG, etag);
+        if fresh {
+            return builder
+                .status(StatusCode::NOT_MODIFIED)
+                .body(Body::empty())
+                .expect("response builds");
+        }
+        builder
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, self.content_type)
-            .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-            .header(header::ETAG, format!("\"{}\"", self.version))
             .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
             .body(Body::from(self.bytes.clone()))
             .expect("response builds")
@@ -302,7 +326,7 @@ impl OpBrand {
                     LogoSource::pick(s.brand.logo_url.as_deref(), s.brand.logo_path.as_deref());
             }
             Err(e) if e.is_missing_config() => {}
-            // A broken config should say so, not silently drop the brand (#1948).
+            // A broken config should say so, not silently drop the brand.
             Err(e) => warn_config_error(&e),
         }
         Self::apply_env_overrides(&mut out);
@@ -519,13 +543,13 @@ pub fn router_with_brand_storage(
 
 /// Handoff URL used by the constructors that do not take one.
 /// Same value as [`super::routes::RouteConfig`]'s default.
-/// A logged `500` whose body withholds the cause (#1955).
+/// A logged `500` whose body withholds the cause.
 fn server_error(context: &str, e: &dyn std::fmt::Display) -> Response<Body> {
     let body = crate::error::server_error_body(context, e);
     (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
 }
 
-/// Operator text for a failure whose cause is logged, not shown (#2034).
+/// Operator text for a failure whose cause is logged, not shown.
 /// The log line names the org, so the operator can find it.
 fn withheld(context: &str, slug: &str, what: &str, e: &dyn std::fmt::Display) -> String {
     withheld_in(
@@ -580,7 +604,7 @@ pub fn router_full(
 }
 
 /// [`router_full`] without its own access log, for `server::Builder` when
-/// it mounts observability itself; one line per request (#1788).
+/// it mounts observability itself; one line per request.
 pub(crate) fn router_full_unlogged(
     registry: crate::sql::Pool,
     pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
@@ -742,7 +766,10 @@ fn router_unlogged(
         );
     if let OpLogo::File(logo) = &state.op_brand.logo {
         let served = logo.clone();
-        assets = assets.route(&logo.route, get(move || async move { served.response() }));
+        assets = assets.route(
+            &logo.route,
+            get(move |h: HeaderMap| async move { served.response(&h) }),
+        );
     }
 
     // Authenticated routes: the middleware injects an `Extension<auth::Operator>`.
@@ -904,7 +931,7 @@ fn router_unlogged(
         require_session,
     ));
 
-    // CSRF on every console POST, login included (#1710): a tenant
+    // CSRF on every console POST, login included: a tenant
     // subdomain is same-site with the apex, so `SameSite=Lax` does not
     // stop it. The layer checks token and Origin first; inside it,
     // `csrf_context` mints the token `render` puts in each form and sets
@@ -1057,7 +1084,7 @@ pub(super) struct ListQuery {
 /// Prefer this to `.unwrap_or_default()`, which turns a template error
 /// into a blank `200` with no clue what went wrong.
 fn render(state: &ConsoleState, template: &str, ctx: &Context) -> Response<Body> {
-    // Every console form posts this back; `csrf::layer()` checks it (#1710).
+    // Every console form posts this back; `csrf::layer()` checks it.
     let mut ctx = ctx.clone();
     ctx.insert(
         "csp_nonce",
@@ -1095,7 +1122,7 @@ fn inject_op_brand(ctx: &mut Context, brand: &OpBrand) {
     // Show the "Shared SSO" nav entry only when the admin-sso feature is
     // compiled in (its routes exist only then).
     ctx.insert("sso_console", &cfg!(feature = "admin-sso"));
-    // Templates prefix every console link with it (#2007).
+    // Templates prefix every console link with it.
     let prefix = mount::MountPrefix::current();
     ctx.insert("console_prefix", prefix.as_str());
     ctx.insert("console_home", &prefix.url("/"));
@@ -1335,7 +1362,7 @@ async fn login_submit(
     let meta = meta_from_parts(&extensions, &headers, Some("/login"));
     let next = sanitize_next(form.next.as_deref());
 
-    // Rate limits and the account lock, before the lookup (#1609).
+    // Rate limits and the account lock, before the lookup.
     let mut attempt = match crate::login_throttle::shared()
         .begin(&LoginScope::Operator, &ip, &form.username)
         .await
@@ -1525,7 +1552,7 @@ fn decode_operator_session(headers: &axum::http::HeaderMap, secret: &SessionSecr
 // ----------------------------- views
 
 /// `GET /change-password` — render the operator self-serve
-/// change-password form (#77, v0.29). Lives behind
+/// change-password form (v0.29). Lives behind
 /// `require_session` so unauthenticated requests bounce to login.
 async fn change_password_form(
     State(state): State<ConsoleState>,
@@ -2102,7 +2129,7 @@ async fn org_edit_form(
     ctx.insert("favicon_url", &favicon_url);
     ctx.insert("error", &q.error);
     ctx.insert("notice", &q.notice);
-    // v0.27.8 (#78) — show the "Open admin as superuser →"
+    // v0.27.8 — show the "Open admin as superuser →"
     // form only when the operator console was wired with a
     // tenant session secret (i.e. via `router_with_impersonation`).
     ctx.insert(
@@ -2157,7 +2184,7 @@ async fn org_edit_submit(
     }
 
     // The CLI's write path, so the console runs the same routing
-    // validators and host-clash check (#1931).
+    // validators and host-clash check.
     let secrets = pools.tenant_secrets();
     let applied =
         match crate::tenancy::org_edit::apply_values(&state.registry, &secrets, &slug, collected)
@@ -2408,7 +2435,7 @@ async fn org_edit_branding(
             ),
         );
     }
-    // Only now does no column name the old file (#1933).
+    // Only now does no column name the old file.
     for (kind, _, kept) in &updates {
         if let Err(e) = branding::prune_brand_asset(&slug, *kind, kept, &state.brand_storage).await
         {
@@ -2485,7 +2512,7 @@ async fn static_rustango_png() -> Response<Body> {
 
 // ----------------------------- helpers
 
-// The crate's one query-value encoder (#1663); it also escapes `/`.
+// The crate's one query-value encoder; it also escapes `/`.
 use crate::url_codec::url_encode as urlencoding_lite;
 
 /// Check a caller-supplied `?next=` before it reaches `Location`.
@@ -2588,7 +2615,7 @@ async fn org_impersonate(
         slug = %slug,
         operator_id,
         ttl_secs = handoff::HANDOFF_TTL_SECS,
-        // Not the token: it is a live login until redeemed (#2107).
+        // Not the token: it is a live login until redeemed.
         handoff = %handoff,
         "minted impersonation handoff token",
     );
@@ -2727,13 +2754,13 @@ mod handoff_port_tests {
         for bad in ["ops:@evil.com", "[::1]:@evil.com", "ops:1@evil.com:2"] {
             assert_eq!(handoff_port_suffix(None, None, Some(bad)), "", "{bad}");
         }
-        // An IPv6 host's colons are not a port (#2043).
+        // An IPv6 host's colons are not a port.
         assert_eq!(handoff_port_suffix(None, None, Some("[::1]")), "");
         assert_eq!(handoff_port_suffix(None, None, Some("[::1]:8080")), ":8080");
     }
 }
 
-/// #1526. These exercise `sanitize_next` — the function the login
+/// These exercise `sanitize_next` — the function the login
 /// handler actually calls, whose result reaches `Redirect::to` — and
 /// not the public `urls::url_has_allowed_host_and_scheme` helper,
 /// which this codebase never calls and which the original fix went
@@ -2769,7 +2796,7 @@ mod sanitize_next_tests {
             "javascript:1",
             // The browser strips TAB, CR and LF while parsing a URL
             // (WHATWG URL 4.1), so each of these leaves as the
-            // protocol-relative `//evil.example` (#1604 security-001).
+            // protocol-relative `//evil.example` (security-001).
             "/\x09/evil.example/x",
             "/\x0d/evil.example/x",
             "/\x0a/evil.example/x",
@@ -2814,7 +2841,7 @@ mod sanitize_next_method_tests {
     use super::sanitize_next_for_method;
     use axum::http::Method;
 
-    // v0.27.10 (#68) — guard against the regression that made
+    // v0.27.10 — guard against the regression that made
     // a POST → /login?next=… → POST chain land on a 405.
 
     #[test]
@@ -2922,6 +2949,35 @@ mod opbrand_tests {
         assert!(logo.src().starts_with("/__static__/brand-logo.png?v="));
     }
 
+    /// Only a regular file is read: a FIFO or device would block boot.
+    #[test]
+    fn local_logo_refuses_a_non_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_file = dir.path().join("logo.png");
+        std::fs::create_dir(&not_a_file).unwrap();
+        assert!(super::LocalLogo::read(&not_a_file).is_err());
+    }
+
+    /// A matching `If-None-Match` gets a bodiless 304 with the same ETag.
+    #[test]
+    fn local_logo_answers_if_none_match() {
+        use axum::http::{header, HeaderMap, StatusCode};
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("l.png");
+        std::fs::write(&png, b"png-bytes").unwrap();
+        let logo = super::LocalLogo::read(&png).unwrap();
+        let fresh = logo.response(&HeaderMap::new());
+        assert_eq!(fresh.status(), StatusCode::OK);
+        let etag = fresh.headers()[header::ETAG].clone();
+        let mut h = HeaderMap::new();
+        h.insert(header::IF_NONE_MATCH, etag.clone());
+        let cached = logo.response(&h);
+        assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(cached.headers()[header::ETAG], etag);
+        h.insert(header::IF_NONE_MATCH, "\"stale\"".parse().unwrap());
+        assert_eq!(logo.response(&h).status(), StatusCode::OK);
+    }
+
     /// `BrandSettings` overrides the defaults — but the function
     /// stays pure (no env reads), so the test doesn't need to
     /// poke `std::env::set_var` (forbidden by workspace lint).
@@ -2956,7 +3012,7 @@ mod opbrand_tests {
     }
 
     /// Invalid hex colors are dropped, not propagated. Matches the
-    /// `from_env` pre-#87 behavior — bad input falls through to
+    /// older `from_env` behavior — bad input falls through to
     /// the default.
     #[cfg(feature = "config")]
     #[test]

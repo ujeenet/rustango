@@ -416,7 +416,7 @@ where
     // Served before the resolver runs so the assets are reachable
     // even when the requesting host doesn't match a known tenant
     // (the slug in the path is validated by the branding module).
-    let brand_prefix = format!("{}/", routes.brand_url);
+    let brand_prefix = format!("{}/", routes.brand_prefix());
     if let Some(rest) = req.uri().path().strip_prefix(&brand_prefix) {
         if let Some((slug, filename)) = rest.split_once('/') {
             return serve_brand_asset(slug, filename, brand_storage).await;

@@ -213,6 +213,30 @@ async fn tenant_admin_pages_use_the_tenant_favicon() {
     std::env::remove_var(branding::BRAND_STORAGE_ROOT_ENV);
 }
 
+/// A `brand_url` with a trailing slash links and serves `/_brand/...`, not `//`.
+#[tokio::test]
+async fn brand_url_with_a_trailing_slash_still_serves() {
+    let _g = SUITE.lock().await;
+    let t = tenant().await;
+    let routes = rustango::tenancy::RouteConfig {
+        brand_url: "/_brand/".to_owned(),
+        ..Default::default()
+    };
+    let app = TenantAdminBuilder::new(t.pools.clone(), t.url.clone(), HeaderResolver::default())
+        .routes(routes)
+        .build();
+    let host = format!("{}.localhost", t.slug);
+
+    let html = text(send(&app, &host, "/").await).await;
+    let favicon = attr_after(&html, "rel=\"icon\"", "href").expect("favicon link");
+    assert!(
+        favicon.starts_with("/_brand/") && !favicon.contains("//"),
+        "no `//`: {favicon}"
+    );
+    assert_png(&app, &host, &favicon).await;
+    std::env::remove_var(branding::BRAND_STORAGE_ROOT_ENV);
+}
+
 const PREFIX: &str = "/ops";
 
 /// The console, nested under [`PREFIX`], built after the env is set.
@@ -271,8 +295,19 @@ async fn console_serves_a_local_logo_file() {
     assert_eq!(resp.headers()[header::CONTENT_TYPE], "image/png");
     let cache = resp.headers()[header::CACHE_CONTROL].to_str().unwrap();
     assert!(cache.contains("immutable"), "long cache: {cache}");
+    let etag = resp.headers()[header::ETAG].clone();
     let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
     assert_eq!(&bytes[..], PNG);
+
+    let req = Request::builder()
+        .uri(&src)
+        .header(header::HOST, "localhost")
+        .header(header::IF_NONE_MATCH, etag.clone())
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_MODIFIED, "revalidate {src}");
+    assert_eq!(resp.headers()[header::ETAG], etag);
 }
 
 /// A file the tenant upload would refuse falls back to the bundled logo.

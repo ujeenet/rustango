@@ -214,7 +214,7 @@ pub(crate) fn check_brand_size(len: usize) -> Result<(), BrandError> {
 }
 
 /// Delete the `kind` files other than `kept` (a [`save_brand_asset`] result).
-/// Call it only after the `Org` column names `kept`, or the old path dangles (#1933).
+/// Call it only after the `Org` column names `kept`, or the old path dangles.
 ///
 /// # Errors
 /// [`BrandError::InvalidSlug`] or a storage failure.
