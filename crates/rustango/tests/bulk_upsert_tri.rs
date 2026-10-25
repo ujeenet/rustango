@@ -167,9 +167,58 @@ async fn empty_update_cols_is_refused(pool: &Pool) {
     assert_eq!(count(pool).await, 0);
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "bulk_upsert_tri_doc")]
+#[rustango(app = "bulk_upsert_tri")]
+pub struct Doc {
+    #[rustango(primary_key, default_uuid_v7)]
+    pub id: Auto<uuid::Uuid>,
+    #[rustango(max_length = 64, unique)]
+    pub slug: String,
+    #[rustango(max_length = 64)]
+    pub title: String,
+}
+
+async fn doc_title(pool: &Pool, slug: &str) -> String {
+    let rows: Vec<Doc> = Doc::objects()
+        .filter("slug", slug.to_owned())
+        .fetch(pool)
+        .await
+        .expect("fetch doc");
+    rows[0].title.clone()
+}
+
+/// A caller-set `default_uuid_v7` pk can clash, so a slug upsert must
+/// not update the row that owns that pk.
+async fn caller_set_uuid_pk_never_updates_another_row(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<Doc>(pool).await;
+    let doc = |id: Auto<uuid::Uuid>, slug: &str, title: &str| Doc {
+        id,
+        slug: slug.into(),
+        title: title.into(),
+    };
+    let fresh = [doc(Auto::Unset, "a", "A"), doc(Auto::Unset, "b", "B")];
+    Doc::bulk_upsert_pool(&fresh, &["slug"], &["title"], pool)
+        .await
+        .expect("generated pks never clash");
+    let a: Vec<Doc> = Doc::objects().filter("slug", "a").fetch(pool).await.unwrap();
+    let a_id = a[0].id.get().copied().expect("id");
+    let r = Doc::bulk_upsert_pool(
+        &[doc(Auto::Set(a_id), "c", "X")],
+        &["slug"],
+        &["title"],
+        pool,
+    )
+    .await;
+    assert!(r.is_err(), "a pk clash is not a slug conflict");
+    assert_eq!(doc_title(pool, "a").await, "A");
+    assert_eq!(doc_title(pool, "b").await, "B");
+}
+
 tri_dialect_test! {
     model: Post,
     scenarios: [
+        caller_set_uuid_pk_never_updates_another_row,
         empty_update_cols_is_refused,
         first_call_inserts_all_rows,
         second_call_updates_listed_columns_only,

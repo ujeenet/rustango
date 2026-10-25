@@ -1370,6 +1370,9 @@ impl<T: Model> QuerySet<T> {
     /// ```
     ///
     /// Sugar over `self.where_raw(subquery::exists(subquery))`.
+    ///
+    /// In a MySQL `update()` / `delete()`, a subquery over the target table
+    /// reads it as a materialised copy (`(SELECT * FROM t)`), to avoid 1093.
     #[must_use]
     pub fn where_exists(self, subquery: SelectQuery) -> Self {
         self.where_raw(crate::core::subquery::exists(subquery))

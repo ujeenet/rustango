@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### MySQL 5.7 no longer gets JSON casts
+
+JSON binds are cast only on MySQL 8.0+ (and not on MariaDB); MySQL 5.7 is not supported.
+
+### MySQL M2M junctions keep an `i32` / `i16` pk's width
+
+New auto junctions over such pks get `INT` / `SMALLINT` columns, not `BIGINT`, which MySQL refused as a foreign key. Existing junctions are unchanged.
+
 ## 0.61.0
 
 ### Built-in logo is square

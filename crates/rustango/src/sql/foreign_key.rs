@@ -445,19 +445,11 @@ where
 /// [`crate::sql::FetcherPool`] — every `#[derive(Model)]` target
 /// satisfies them via the macro's per-backend `FromRow` + `LoadRelated`
 /// emissions. Use this in new framework code so sqlite/mysql apps
-/// can lazy-load FK targets without going through the PG-typed
-/// [`Self::get`].
-///
-/// v0.35: gated on `postgres` while `FetcherPool` still requires
-/// `FromRow<PgRow>` unconditionally. v0.35 slice 6 introduces a
-/// `MaybePgFromRow` marker trait paralleling the existing
-/// `MaybeMyFromRow` / `MaybeSqliteFromRow` so this bound becomes
-/// universally satisfiable + the gate drops.
-#[cfg(feature = "postgres")]
+/// can lazy-load FK targets without going through the PG-typed `get`.
 impl<T, K> ForeignKey<T, K>
 where
     T: Model
-        + for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>
+        + crate::sql::MaybePgFromRow
         + crate::sql::MaybeMyFromRow
         + crate::sql::MaybeSqliteFromRow
         + crate::sql::LoadRelated
@@ -468,11 +460,11 @@ where
     K: Clone + Into<SqlValue> + Send + Sync + 'static,
 {
     /// Resolve the parent row and cache it on the field. Backend-
-    /// agnostic counterpart of [`Self::get`] — routes through
+    /// agnostic counterpart of `get` — routes through
     /// [`crate::sql::FetcherPool::fetch`].
     ///
     /// # Errors
-    /// As [`Self::get`].
+    /// As [`Self::get_on`].
     pub async fn get_pool(&mut self, pool: &crate::sql::Pool) -> Result<&T, ExecError> {
         use crate::sql::FetcherPool as _;
         if matches!(self, Self::Unloaded(_)) {

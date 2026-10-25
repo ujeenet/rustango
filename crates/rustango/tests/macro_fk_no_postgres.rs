@@ -41,6 +41,22 @@ pub struct Child {
     pub parent: ForeignKey<Parent>,
 }
 
+/// The pool-generic FK resolver exists without the `postgres` feature.
+#[tokio::test]
+async fn get_pool_resolves_under_sqlite_only() {
+    let pool = rustango::sql::Pool::connect("sqlite::memory:")
+        .await
+        .expect("sqlite pool");
+    rustango::testkit::create_tables_for::<Parent>(&pool)
+        .await
+        .expect("table");
+    let mut parent = Parent { id: Auto::Unset };
+    parent.insert_pool(&pool).await.expect("parent");
+    let id = parent.id.get().copied().expect("id");
+    let mut fk: ForeignKey<Parent> = ForeignKey::unloaded(id);
+    assert_eq!(fk.get_pool(&pool).await.expect("resolve").id.get(), Some(&id));
+}
+
 #[test]
 fn derives_compile_with_fk_under_sqlite_only() {
     use rustango::core::Model as _;

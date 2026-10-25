@@ -320,6 +320,33 @@ async fn distinct_on_pages_the_survivors(pool: &Pool) {
     assert_eq!(titles(rest), ["banana", "cherry"]);
 }
 
+/// The `distinct_on` fallback picks each survivor by the NULLS order too.
+async fn distinct_on_honours_nulls_order(pool: &Pool) {
+    use rustango::core::NullsOrder;
+    for (slug, title, parent) in [
+        ("a", "x", None),
+        ("b", "x", Some(5)),
+        ("c", "y", Some(3)),
+        ("d", "y", None),
+    ] {
+        let mut p = post(slug, parent);
+        p.title = title.into();
+        p.insert_pool(pool).await.expect("seed");
+    }
+    let winners = |desc: bool, nulls: NullsOrder| async move {
+        let rows: Vec<Post> = Post::objects()
+            .distinct_on(&["title"])
+            .order_by(&[("title", false)])
+            .order_by_with_nulls(&[("parent_id", desc, nulls)])
+            .fetch(pool)
+            .await
+            .expect("distinct_on");
+        rows.into_iter().map(|p| p.parent_id).collect::<Vec<_>>()
+    };
+    assert_eq!(winners(false, NullsOrder::Last).await, [Some(5), Some(3)]);
+    assert_eq!(winners(true, NullsOrder::First).await, [None, None]);
+}
+
 /// A PG bulk insert reads back a default-written UUID key.
 #[cfg(feature = "postgres")]
 #[tokio::test]
@@ -1231,6 +1258,7 @@ tri_dialect_test! {
         insert_reads_back_a_text_uuid_key,
         empty_having_is_true,
         distinct_on_pages_the_survivors,
+        distinct_on_honours_nulls_order,
     ],
 }
 

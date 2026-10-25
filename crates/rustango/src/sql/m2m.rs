@@ -273,7 +273,8 @@ pub(crate) fn end_type(target: &ModelSchema) -> Option<FieldType> {
 }
 
 /// A junction column's type for a pk of type `pk`: integers widen to BIGINT.
-/// The one rule for the runtime and the migration writer.
+/// The one rule for the runtime and the migration writer, whose MySQL DDL
+/// keeps the pk's width ([`crate::sql::Dialect::fk_needs_same_int_width`]).
 pub(crate) fn junction_column_type(pk: FieldType) -> FieldType {
     match pk {
         FieldType::I16 | FieldType::I32 => FieldType::I64,

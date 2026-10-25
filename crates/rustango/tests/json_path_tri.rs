@@ -322,9 +322,31 @@ async fn a_digit_led_key_matches(pool: &Pool) {
     assert_eq!(count_text_eq(pool, "e1", "x").await, 1);
 }
 
+/// MariaDB has no `CAST(… AS JSON)`; a JSON insert and a text path must
+/// still run there under the MySQL dialect.
+async fn json_round_trips_on_every_mysql_flavour(pool: &Pool) {
+    use rustango::sql::FetcherPool as _;
+    let data = serde_json::json!({"s": "x", "z": null});
+    let mut row = Demo {
+        id: Auto::Unset,
+        data: data.clone(),
+    };
+    row.insert_pool(pool).await.expect("insert JSON");
+    let id = row.id.get().copied().expect("id");
+    let back: Vec<Demo> = rustango::query::QuerySet::<Demo>::default()
+        .filter("id", id)
+        .fetch(pool)
+        .await
+        .expect("fetch");
+    assert_eq!(back[0].data, data);
+    assert_eq!(count_text_eq(pool, "s", "x").await, 1);
+    assert_eq!(count_text_eq(pool, "z", "null").await, 0, "JSON null is NULL");
+}
+
 tri_dialect_test! {
     setup: seeded,
     scenarios: [
+        json_round_trips_on_every_mysql_flavour,
         a_digit_led_key_matches,
         json_object_numbers_compare_by_value,
         json_path_equals_null_and_reordered_object,

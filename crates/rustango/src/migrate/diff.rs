@@ -2228,7 +2228,8 @@ fn m2m_fk_sql(
 }
 
 /// A junction column's type and the pk it references in `table`.
-/// Typed by [`crate::sql::m2m::junction_column_type`], the runtime's rule; a table outside
+/// Typed by [`crate::sql::m2m::junction_column_type`], the runtime's rule, unless the
+/// dialect's FKs need the pk's own width; a table outside
 /// `current` keeps the old `BIGINT` to `id`. Also the `(type, max_length)` its key counts.
 fn m2m_end<'a>(
     current: &'a SchemaSnapshot,
@@ -2244,8 +2245,13 @@ fn m2m_end<'a>(
     let Some(pk) = pks.next().filter(|_| pks.next().is_none()) else {
         return (bigint(), "id", (FieldType::I64, None));
     };
-    let end =
-        super::snapshot::field_type_from_name(&pk.ty).map(crate::sql::m2m::junction_column_type);
+    let end = super::snapshot::field_type_from_name(&pk.ty).map(|ty| {
+        if dialect.fk_needs_same_int_width() {
+            ty
+        } else {
+            crate::sql::m2m::junction_column_type(ty)
+        }
+    });
     if end == Some(FieldType::I64) {
         return (bigint(), &pk.column, (FieldType::I64, None));
     }
