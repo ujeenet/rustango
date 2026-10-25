@@ -94,11 +94,28 @@ impl Dialect for Postgres {
         ))
     }
 
+    /// Postgres 13+.
+    fn force_drop_database_sql(&self, db: &DatabaseName) -> Option<String> {
+        Some(format!(
+            "DROP DATABASE IF EXISTS {} WITH (FORCE)",
+            self.quote_ident(db.as_str())
+        ))
+    }
+
+    fn login_exists_sql(&self, login: &Login) -> Option<CompiledStatement> {
+        Some(CompiledStatement {
+            sql: format!("SELECT count(*) FROM pg_roles WHERE rolname = {}", self.placeholder(1)),
+            params: vec![crate::core::SqlValue::String(login.name().as_str().to_owned())],
+        })
+    }
+
+    /// A SCRAM verifier where it can be built, so the server log never
+    /// holds the password; else the text in a mode-proof literal.
     fn create_login_sql(&self, login: &Login, password: &LoginPassword) -> Option<String> {
         Some(format!(
             "CREATE ROLE {} LOGIN PASSWORD {}",
             self.quote_ident(login.name().as_str()),
-            escape_string_literal(password.expose())
+            escape_string_literal(&password.pg_secret())
         ))
     }
 

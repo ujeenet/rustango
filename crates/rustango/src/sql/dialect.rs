@@ -1012,6 +1012,16 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// Drop `db` even with sessions open, where the backend can.
+    fn force_drop_database_sql(&self, _db: &DatabaseName) -> Option<String> {
+        None
+    }
+
+    /// One row, one count: whether `login` exists.
+    fn login_exists_sql(&self, _login: &Login) -> Option<CompiledStatement> {
+        None
+    }
+
     /// Create `login` with `password`. The password is escaped here.
     fn create_login_sql(&self, _login: &Login, _password: &LoginPassword) -> Option<String> {
         None

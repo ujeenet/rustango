@@ -135,6 +135,17 @@ impl Dialect for MySql {
         Some(format!("DROP USER IF EXISTS {}", self.account(login)))
     }
 
+    /// Needs SELECT on `mysql.user`; callers treat a refusal as unknown.
+    fn login_exists_sql(&self, login: &Login) -> Option<CompiledStatement> {
+        Some(CompiledStatement {
+            sql: "SELECT count(*) FROM mysql.user WHERE User = ? AND Host = ?".to_owned(),
+            params: vec![
+                crate::core::SqlValue::String(login.name().as_str().to_owned()),
+                crate::core::SqlValue::String(login.host().to_owned()),
+            ],
+        })
+    }
+
     /// `DatabaseName` holds no `_` or `%`, the wildcards of `db.*`.
     fn grant_database_sql(&self, db: &DatabaseName, login: &Login) -> Vec<String> {
         vec![format!(

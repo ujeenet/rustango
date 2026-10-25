@@ -197,6 +197,72 @@ impl LoginPassword {
     pub fn expose(&self) -> &str {
         &self.0
     }
+
+    /// What Postgres' `PASSWORD` gets: a SCRAM-SHA-256 verifier for
+    /// printable ASCII (SASLprep leaves it unchanged, so clients agree),
+    /// else the text. The verifier needs the `tenancy` build's crypto.
+    pub(crate) fn pg_secret(&self) -> std::borrow::Cow<'_, str> {
+        #[cfg(feature = "tenancy")]
+        if self.0.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+            use rand::RngCore as _;
+            let mut salt = [0u8; 16];
+            rand::rngs::OsRng.fill_bytes(&mut salt);
+            return scram_sha256_verifier(&self.0, &salt, 4096).into();
+        }
+        std::borrow::Cow::Borrowed(&self.0)
+    }
+}
+
+/// The verifier Postgres stores for SCRAM-SHA-256 (RFC 5802 / 7677).
+#[cfg(feature = "tenancy")]
+pub(crate) fn scram_sha256_verifier(password: &str, salt: &[u8], iterations: u32) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::{Digest, Sha256};
+    let hmac = |key: &[u8], parts: &[&[u8]]| {
+        let mut m = <Hmac<Sha256>>::new_from_slice(key).expect("HMAC accepts any key length");
+        for p in parts {
+            m.update(p);
+        }
+        m.finalize().into_bytes()
+    };
+    // Hi(): PBKDF2-HMAC-SHA-256 with one output block.
+    let mut u = hmac(password.as_bytes(), &[salt, &1u32.to_be_bytes()]);
+    let mut salted = u;
+    for _ in 1..iterations {
+        u = hmac(password.as_bytes(), &[&u]);
+        for (s, b) in salted.iter_mut().zip(u.iter()) {
+            *s ^= b;
+        }
+    }
+    let stored = Sha256::digest(hmac(&salted, &[b"Client Key"]));
+    let server = hmac(&salted, &[b"Server Key"]);
+    format!(
+        "SCRAM-SHA-256${iterations}:{}${}:{}",
+        base64_std(salt),
+        base64_std(&stored),
+        base64_std(&server)
+    )
+}
+
+/// Standard, padded base64; `tenancy` does not pull the base64 crate.
+#[cfg(feature = "tenancy")]
+fn base64_std(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 impl fmt::Debug for LoginPassword {
@@ -251,7 +317,8 @@ mod tests {
     #[test]
     fn postgres_emitters_quote_names_and_escape_the_password() {
         let d = Postgres;
-        let pw = LoginPassword::new(r#"a'b\c"d"#).unwrap();
+        // Non-ASCII, so sent as text even where SCRAM is available.
+        let pw = LoginPassword::new(r#"é'b\c"d"#).unwrap();
         assert_eq!(
             d.create_database_sql(&db("acme-shop")).unwrap(),
             r#"CREATE DATABASE "acme-shop""#
@@ -260,16 +327,23 @@ mod tests {
             d.drop_database_sql(&db("acme-shop")).unwrap(),
             r#"DROP DATABASE IF EXISTS "acme-shop""#
         );
+        assert_eq!(
+            d.force_drop_database_sql(&db("acme-shop")).unwrap(),
+            r#"DROP DATABASE IF EXISTS "acme-shop" WITH (FORCE)"#
+        );
         // E'' reads `\` as an escape whatever `standard_conforming_strings` says.
         assert_eq!(
             d.create_login_sql(&login("acme-shop"), &pw).unwrap(),
-            r#"CREATE ROLE "acme-shop" LOGIN PASSWORD E'a''b\\c"d'"#
+            r#"CREATE ROLE "acme-shop" LOGIN PASSWORD E'é''b\\c"d'"#
         );
         assert_eq!(
-            d.create_login_sql(&login("u"), &LoginPassword::new("x'y").unwrap())
+            d.create_login_sql(&login("u"), &LoginPassword::new("é'y").unwrap())
                 .unwrap(),
-            r#"CREATE ROLE "u" LOGIN PASSWORD 'x''y'"#
+            r#"CREATE ROLE "u" LOGIN PASSWORD 'é''y'"#
         );
+        let exists = d.login_exists_sql(&login("u")).unwrap();
+        assert_eq!(exists.sql, "SELECT count(*) FROM pg_roles WHERE rolname = $1");
+        assert_eq!(exists.params.len(), 1);
         assert_eq!(
             d.drop_login_sql(&login("u")).unwrap(),
             r#"DROP ROLE IF EXISTS "u""#
@@ -309,9 +383,43 @@ mod tests {
             vec!["GRANT ALL PRIVILEGES ON `acme-shop`.* TO `u`@`10.0.%`".to_owned()]
         );
         assert!(d.grant_in_database_sql(&u).is_empty());
+        assert!(d.force_drop_database_sql(&db("a")).is_none());
+        let exists = d.login_exists_sql(&u).unwrap();
+        assert_eq!(
+            exists.sql,
+            "SELECT count(*) FROM mysql.user WHERE User = ? AND Host = ?"
+        );
+        assert_eq!(exists.params.len(), 2);
         // A backtick in a host is doubled, not a way out of the quotes.
         let odd = login("u").with_host("a`b").unwrap();
         assert_eq!(d.drop_login_sql(&odd).unwrap(), "DROP USER IF EXISTS `u`@`a``b`");
+    }
+
+    /// Expected value from Python's `hashlib.pbkdf2_hmac` + `hmac`.
+    #[cfg(feature = "tenancy")]
+    #[test]
+    fn scram_verifier_matches_an_independent_implementation() {
+        let salt: Vec<u8> = (0..16).collect();
+        assert_eq!(
+            scram_sha256_verifier("pencil", &salt, 4096),
+            "SCRAM-SHA-256$4096:AAECAwQFBgcICQoLDA0ODw==\
+             $zHCdol2044/ZyWzPLi7oxApCkamKw9Z+E4U/QApd/5Y=\
+             :dd5peBOitVnLNFu7VmwP+HiDaaw4OUCv396eVCWhYiE="
+        );
+    }
+
+    /// Printable ASCII goes to the server as a verifier, never as text.
+    #[cfg(feature = "tenancy")]
+    #[test]
+    fn postgres_sends_a_scram_verifier_for_ascii() {
+        let sql = Postgres
+            .create_login_sql(&login("u"), &LoginPassword::new("s3cret'?").unwrap())
+            .unwrap();
+        assert!(
+            sql.starts_with(r#"CREATE ROLE "u" LOGIN PASSWORD 'SCRAM-SHA-256$4096:"#),
+            "{sql}"
+        );
+        assert!(!sql.contains("s3cret"), "{sql}");
     }
 
     #[test]
