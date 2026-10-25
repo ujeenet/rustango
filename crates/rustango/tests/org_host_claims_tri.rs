@@ -131,7 +131,7 @@ async fn create_refuses_a_host_claimed_meanwhile(pool: &Pool) {
     let (backend, database_url, _scratch) = tenant_db(pool).await;
     let opts = CreateTenantOpts {
         mode: StorageMode::Database,
-        backend,
+        backend: Some(backend),
         database_url: Some(database_url),
         host_pattern: Some(host.clone()),
         no_migrate: true,

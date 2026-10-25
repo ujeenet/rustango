@@ -98,7 +98,7 @@ impl Env {
         let org = self.own_tenant(tag).await;
         CreateTenantOpts {
             mode: StorageMode::parse(&org.storage_mode).unwrap(),
-            backend: self.backend(),
+            backend: Some(self.backend()),
             database_url: org.database_url,
             schema_name: org.schema_name,
             ..CreateTenantOpts::default()
@@ -224,7 +224,7 @@ impl Env {
 
     fn db_request(&self, slug: &str, url: &str) -> ProvisionRequest {
         ProvisionRequest {
-            backend: self.backend(),
+            backend: Some(self.backend()),
             ..ProvisionRequest::database(slug, url)
         }
     }
@@ -442,7 +442,7 @@ async fn schema_exists(pool: &Pool, schema: &str) -> bool {
 fn schema_opts(backend: BackendKind, schema: &str) -> CreateTenantOpts {
     CreateTenantOpts {
         mode: StorageMode::Schema,
-        backend,
+        backend: Some(backend),
         schema_name: Some(schema.to_owned()),
         no_migrate: true,
         ..CreateTenantOpts::default()
@@ -452,17 +452,13 @@ fn schema_opts(backend: BackendKind, schema: &str) -> CreateTenantOpts {
 #[cfg(feature = "postgres")]
 fn schema_request(slug: &str, schema: &str, host: Option<String>) -> ProvisionRequest {
     ProvisionRequest {
-        slug: slug.to_owned(),
-        mode: StorageMode::Schema,
-        backend: BackendKind::Postgres,
-        display_name: None,
-        database_url: None,
-        schema_name: Some(schema.to_owned()),
+        backend: Some(BackendKind::Postgres),
         host_pattern: host,
-        port: None,
-        path_prefix: None,
         run_migrations: false,
-        preflight: rustango::tenancy::preflight::Preflight::default(),
+        ..ProvisionRequest::new(
+            slug,
+            rustango::tenancy::provision::TenantStorage::Schema(Some(schema.to_owned())),
+        )
     }
 }
 
@@ -767,7 +763,7 @@ async fn create_tenant_probes_before_writing(pool: &Pool) {
     let env = Env::new(pool).await;
     let opts = CreateTenantOpts {
         mode: StorageMode::Database,
-        backend: env.backend(),
+        backend: Some(env.backend()),
         database_url: Some(env.unreachable_url()),
         ..CreateTenantOpts::default()
     };

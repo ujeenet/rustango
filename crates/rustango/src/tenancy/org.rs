@@ -272,6 +272,31 @@ impl BackendKind {
         }
     }
 
+    /// The backend a URL's scheme selects, read as `Pool::connect` reads
+    /// it: no `pg://` or `sqlite3://` aliases, which it refuses.
+    #[must_use]
+    pub fn of_url(url: &str) -> Option<Self> {
+        match url.split(':').next()?.to_ascii_lowercase().as_str() {
+            "postgres" | "postgresql" => Some(Self::Postgres),
+            "mysql" => Some(Self::MySql),
+            "sqlite" => Some(Self::Sqlite),
+            _ => None,
+        }
+    }
+
+    /// The backend `pool` runs on.
+    #[must_use]
+    pub fn of_pool(pool: &crate::sql::Pool) -> Self {
+        match pool {
+            #[cfg(feature = "postgres")]
+            crate::sql::Pool::Postgres(_) => Self::Postgres,
+            #[cfg(feature = "mysql")]
+            crate::sql::Pool::Mysql(_) => Self::MySql,
+            #[cfg(feature = "sqlite")]
+            crate::sql::Pool::Sqlite(_) => Self::Sqlite,
+        }
+    }
+
     /// Validate the `(storage_mode, backend_kind)` pair. Returns
     /// `Err` with a human-readable explanation when the
     /// combination isn't supported.

@@ -274,6 +274,20 @@ impl RunText {
         Self(text.to_owned())
     }
 
+    /// `what` about a database and its login. Validated names only, so
+    /// nothing else can ride along.
+    #[must_use]
+    pub(crate) fn about_database(
+        what: &'static str,
+        database: &crate::sql::DatabaseName,
+        login: Option<&crate::sql::LoginName>,
+    ) -> Self {
+        Self(match login {
+            Some(l) => format!("{what}: database `{database}`, login `{l}`"),
+            None => format!("{what}: database `{database}`"),
+        })
+    }
+
     /// A validation (or busy) error's own text; `None` for a cause to withhold.
     #[must_use]
     pub fn user_facing(e: &TenancyError) -> Option<Self> {

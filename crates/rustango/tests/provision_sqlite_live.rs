@@ -222,15 +222,18 @@ async fn a_duplicate_slug_fails_at_validate_and_says_so() {
     assert_eq!(orgs.len(), 1);
 }
 
-/// Database-mode without a URL is rejected before anything is written.
+/// A backend other than the registry's is rejected before anything is
+/// written: tenant pools open with the registry's driver.
 #[tokio::test]
-async fn database_mode_without_a_url_is_rejected_before_any_write() {
+async fn another_backend_is_rejected_before_any_write() {
     let (pools, url, _tmp) = registry().await;
     let migrations = tempfile::tempdir().expect("migrations dir");
     migrate_registry(&pools, &url, migrations.path()).await;
 
-    let mut request = ProvisionRequest::database("nourl", "unused");
-    request.database_url = None;
+    let tenant_db = _tmp.path().join("pgkind.db");
+    let mut request =
+        ProvisionRequest::database("pgkind", format!("sqlite://{}?mode=rwc", tenant_db.display()));
+    request.backend = Some(rustango::tenancy::BackendKind::Postgres);
 
     let rec = Recorder::default();
     let err = provision::provision_tenant(
@@ -244,7 +247,7 @@ async fn database_mode_without_a_url_is_rejected_before_any_write() {
     .expect_err("must be rejected");
 
     let msg = err.to_string();
-    assert!(msg.contains("database URL"), "got: {msg}");
+    assert!(msg.contains("registry runs on sqlite"), "got: {msg}");
     // The engine is shared by the CLI, the console and the webhook, so
     // its messages cannot name one caller's flags. This said
     // "create-tenant --mode database requires --database-url" and was
@@ -270,9 +273,10 @@ async fn schema_mode_on_sqlite_is_refused_with_a_useful_message() {
     let migrations = tempfile::tempdir().expect("migrations dir");
     migrate_registry(&pools, &url, migrations.path()).await;
 
-    let mut request = ProvisionRequest::database("schemamode", "unused");
-    request.mode = rustango::tenancy::StorageMode::Schema;
-    request.database_url = None;
+    let mut request = ProvisionRequest::new(
+        "schemamode",
+        rustango::tenancy::provision::TenantStorage::Schema(None),
+    );
     request.run_migrations = false;
 
     let rec = Recorder::default();
@@ -293,18 +297,10 @@ async fn schema_mode_on_sqlite_is_refused_with_a_useful_message() {
         msg.contains("database storage mode"),
         "the error should point at the fix, got: {msg}"
     );
-    // It gets past validation — the request is internally coherent —
-    // and fails at the storage step, which is where the dialect
-    // actually bites.
+    // Refused at validation, now that the registry's backend is known there.
     assert_eq!(
         rec.steps(),
-        vec![
-            "Validate:started",
-            "Validate:ok",
-            "CheckConnection:skipped",
-            "ProvisionStorage:started",
-            "ProvisionStorage:failed",
-        ],
+        vec!["Validate:started", "Validate:failed"],
         "{:?}",
         rec.steps()
     );

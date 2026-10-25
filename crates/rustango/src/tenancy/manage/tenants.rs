@@ -15,7 +15,7 @@ use crate::tenancy::manage::args::{next_value, reject_leading_flag};
 use crate::tenancy::manage_interactive;
 use crate::tenancy::org::{BackendKind, Org, StorageMode};
 use crate::tenancy::pools::TenantPools;
-use crate::tenancy::provision;
+use crate::tenancy::provision::{self, DatabaseSource, TenantStorage};
 
 // ---------- create-tenant ----------
 
@@ -44,7 +44,7 @@ where
     let progress = CreateTenantProgress {
         out: std::sync::Mutex::new(w),
         slug: request.slug.clone(),
-        mode: request.mode,
+        mode: request.mode(),
     };
     // Recorded, like the console's provisioning (#1344). A tenant created
     // from a shell used to leave no run at all, so the run history — and
@@ -123,6 +123,26 @@ impl<W: Write + Send> provision::ProvisionObserver for CreateTenantProgress<'_, 
                 step: S::Migrate,
                 status: StepStatus::Skipped(_),
             } => writeln!(out, "  --no-migrate: skipping tenant migrations"),
+            E::Step {
+                step: S::CreateDatabase,
+                status: StepStatus::Ok,
+            } => writeln!(out, "created database `{}`", self.slug),
+            E::Step {
+                step: S::CreateLogin,
+                status: StepStatus::Ok,
+            } => writeln!(out, "  created its own login"),
+            E::Step {
+                step: S::Grant,
+                status: StepStatus::Ok,
+            } => writeln!(out, "  granted the login that database only"),
+            E::Step {
+                step: S::Rollback,
+                status: StepStatus::Ok,
+            } => writeln!(out, "rolled back: dropped the new database and login"),
+            E::Step {
+                step: S::Rollback,
+                status: StepStatus::Failed(why),
+            } => writeln!(out, "rollback failed: {why}"),
             // Validation and storage failures come back as `Err` from
             // the engine and are rendered by the caller; the remaining
             // steps are detail the CLI has never printed.
@@ -203,7 +223,7 @@ pub(super) async fn test_tenant_connection<W: Write + Send>(
 fn parse_create_tenant_args(args: &[String]) -> Result<provision::ProvisionRequest, TenancyError> {
     const HELP: &str = "create-tenant <slug> [--mode schema|database] \
         [--backend postgres|mysql|sqlite] [--display-name <s>] \
-        [--database-url <url>] [--schema-name <s>] [--host-pattern <s>] \
+        [--database-url <url> | --server <name>] [--schema-name <s>] [--host-pattern <s>] \
         [--port <n>] [--path-prefix <s>] [--no-migrate]";
     reject_leading_flag(args, "create-tenant", "slug", HELP)?;
     let mut iter = args.iter();
@@ -216,40 +236,31 @@ fn parse_create_tenant_args(args: &[String]) -> Result<provision::ProvisionReque
                 TenancyError::Validation("create-tenant requires a slug positional argument".into())
             })?,
     };
-    let mut out = provision::ProvisionRequest {
-        slug,
-        mode: StorageMode::Schema,
-        backend: BackendKind::Postgres,
-        display_name: None,
-        database_url: None,
-        schema_name: None,
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        run_migrations: true,
-        preflight: crate::tenancy::preflight::Preflight::default(),
-    };
+    let mut out = provision::ProvisionRequest::new(slug, TenantStorage::Schema(None));
+    let mut mode = None;
+    let (mut database_url, mut server, mut schema_name) = (None, None, None);
     while let Some(flag) = iter.next() {
         match flag.as_str() {
             "--mode" => {
                 let v = next_value(&mut iter, "--mode")?;
-                out.mode = StorageMode::parse(&v).map_err(|got| {
+                mode = Some(StorageMode::parse(&v).map_err(|got| {
                     TenancyError::Validation(format!(
                         "--mode must be `schema` or `database`, got `{got}`"
                     ))
-                })?;
+                })?);
             }
             "--backend" => {
                 let v = next_value(&mut iter, "--backend")?;
-                out.backend = BackendKind::parse(&v).map_err(|got| {
+                out.backend = Some(BackendKind::parse(&v).map_err(|got| {
                     TenancyError::Validation(format!(
                         "--backend must be `postgres`, `mysql`, or `sqlite`, got `{got}`"
                     ))
-                })?;
+                })?);
             }
             "--display-name" => out.display_name = Some(next_value(&mut iter, "--display-name")?),
-            "--database-url" => out.database_url = Some(next_value(&mut iter, "--database-url")?),
-            "--schema-name" => out.schema_name = Some(next_value(&mut iter, "--schema-name")?),
+            "--database-url" => database_url = Some(next_value(&mut iter, "--database-url")?),
+            "--server" => server = Some(next_value(&mut iter, "--server")?),
+            "--schema-name" => schema_name = Some(next_value(&mut iter, "--schema-name")?),
             "--host-pattern" => out.host_pattern = Some(next_value(&mut iter, "--host-pattern")?),
             "--port" => {
                 let v = next_value(&mut iter, "--port")?;
@@ -267,12 +278,37 @@ fn parse_create_tenant_args(args: &[String]) -> Result<provision::ProvisionReque
             }
         }
     }
+    // A database flag alone means database mode.
+    let mode = mode.unwrap_or(if database_url.is_some() || server.is_some() {
+        StorageMode::Database
+    } else {
+        StorageMode::Schema
+    });
+    let bad = |m: &str| Err(TenancyError::Validation(format!("create-tenant: {m}")));
+    out.storage = match (mode, database_url, server) {
+        (StorageMode::Schema, None, None) => TenantStorage::Schema(schema_name),
+        (StorageMode::Schema, _, _) => return bad("--database-url and --server need --mode database"),
+        (StorageMode::Database, Some(_), Some(_)) => {
+            return bad("give --database-url or --server, not both")
+        }
+        (StorageMode::Database, Some(url), None) => {
+            TenantStorage::Database(DatabaseSource::Url(url))
+        }
+        (StorageMode::Database, None, Some(name)) => {
+            TenantStorage::Database(DatabaseSource::Server(name))
+        }
+        (StorageMode::Database, None, None) => {
+            return bad("database mode needs --database-url <url> or --server <name>")
+        }
+    };
     // v0.33 — guard the unsupported pairs early so a clear error
     // surfaces instead of a generic schema-mode failure deep in the
     // pool layer.
-    out.backend
-        .validate_storage_mode(out.mode)
-        .map_err(|msg| TenancyError::Validation(msg.to_owned()))?;
+    if let Some(backend) = out.backend {
+        backend
+            .validate_storage_mode(mode)
+            .map_err(|msg| TenancyError::Validation(msg.to_owned()))?;
+    }
     Ok(out)
 }
 

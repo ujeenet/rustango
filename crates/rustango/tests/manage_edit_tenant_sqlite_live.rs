@@ -449,7 +449,7 @@ async fn no_path_points_a_tenant_at_the_registry_database() {
         "globex",
         CreateTenantOpts {
             mode: StorageMode::Database,
-            backend: BackendKind::Sqlite,
+            backend: Some(BackendKind::Sqlite),
             database_url: Some(registry.clone()),
             no_migrate: true,
             ..CreateTenantOpts::default()

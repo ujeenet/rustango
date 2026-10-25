@@ -67,7 +67,7 @@ use crate::webhook::{verify_signature, SignatureFormat};
 
 use super::org::{BackendKind, StorageMode};
 use super::preflight::Preflight;
-use super::provision::{ProvisionRequest, TenantProvisioner};
+use super::provision::{DatabaseSource, ProvisionRequest, TenantProvisioner, TenantStorage};
 use super::provision_store::{self as store, RunState};
 
 /// Where a new tenant's database URL comes from.
@@ -147,7 +147,8 @@ pub struct WebhookConfig {
     /// skew.
     pub timestamp_tolerance: Duration,
     pub storage_mode: StorageMode,
-    pub backend: BackendKind,
+    /// `None` takes the registry's; anything else must equal it.
+    pub backend: Option<BackendKind>,
     /// A `running` run with no event for this long is taken as dead, so
     /// a retry of its event starts over (#1883).
     pub stale_run_after: Duration,
@@ -174,7 +175,7 @@ impl WebhookConfig {
             url_policy: UrlPolicy::Template(database_url_template.into()),
             timestamp_tolerance: Duration::from_secs(300),
             storage_mode: StorageMode::Database,
-            backend: BackendKind::default(),
+            backend: None,
             stale_run_after: store::STALE_RUN_AFTER,
         }
     }
@@ -342,9 +343,9 @@ async fn handle(
     let run = match store::open_run(
         &registry,
         &request.slug,
-        request.mode.as_str(),
-        request.backend.as_str(),
-        request.database_url.as_deref(),
+        request.mode().as_str(),
+        request.backend_on(&registry).as_str(),
+        request.database_url(),
         Some("webhook"),
         Some(&payload.event_id),
     )
@@ -452,18 +453,24 @@ fn build_request(
         }
     };
 
+    let schema = matches!(config.url_policy, UrlPolicy::SchemaMode)
+        || config.storage_mode == StorageMode::Schema;
+    let storage = match database_url {
+        _ if schema => TenantStorage::Schema(None),
+        Some(url) => TenantStorage::Database(DatabaseSource::Url(url)),
+        None => {
+            return Err(Refusal::Policy(
+                "this endpoint creates database-mode tenants but derives no database URL"
+                    .to_owned(),
+            ))
+        }
+    };
     Ok(ProvisionRequest {
-        slug: payload.slug.clone(),
-        mode: config.storage_mode,
         backend: config.backend,
         display_name: payload.display_name.clone(),
-        database_url,
-        schema_name: None,
         host_pattern: payload.host_pattern.clone(),
-        port: None,
-        path_prefix: None,
-        run_migrations: true,
         preflight: Preflight::default(),
+        ..ProvisionRequest::new(payload.slug.clone(), storage)
     })
 }
 
@@ -526,7 +533,7 @@ mod tests {
         ));
         let r = build_request(&c, &payload("acme", None)).expect("valid");
         assert_eq!(
-            r.database_url.as_deref(),
+            r.database_url(),
             Some("postgres://app:pw@db.internal:5432/tenant_acme")
         );
     }
@@ -549,7 +556,7 @@ mod tests {
     fn the_caller_supplied_policy_accepts_one_when_deliberately_enabled() {
         let c = config(UrlPolicy::CallerSupplied);
         let r = build_request(&c, &payload("acme", Some("postgres://mine/x"))).expect("allowed");
-        assert_eq!(r.database_url.as_deref(), Some("postgres://mine/x"));
+        assert_eq!(r.database_url(), Some("postgres://mine/x"));
     }
 
     #[test]
@@ -596,6 +603,6 @@ mod tests {
     fn schema_mode_takes_no_url_at_all() {
         let c = config(UrlPolicy::SchemaMode);
         let r = build_request(&c, &payload("acme", None)).expect("valid");
-        assert_eq!(r.database_url, None);
+        assert_eq!(r.database_url(), None);
     }
 }

@@ -473,6 +473,21 @@ where
         }
     }
 
+    remove_org_row(registry, org).await?;
+    report.row_deleted = true;
+    Ok(())
+}
+
+/// Delete `org`'s row, its extra hosts first, and unlink its runs.
+pub(crate) async fn remove_org_row(
+    registry: &crate::sql::Pool,
+    org: &Org,
+) -> Result<(), TenancyError> {
+    let id = org
+        .id
+        .get()
+        .copied()
+        .ok_or_else(|| TenancyError::Validation("Org row has no PK".into()))?;
     // Extra hosts first: their FK has no ON DELETE, so the Org delete
     // fails while any remain (#1930).
     let hosts = OrgHost::objects()
@@ -496,7 +511,6 @@ where
         )));
     }
     super::invalidate_org_cache();
-    report.row_deleted = true;
     Ok(())
 }
 

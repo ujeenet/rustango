@@ -125,6 +125,15 @@ impl PrivilegeReport {
     }
 }
 
+/// A stage of [`ServerAdmin::create_tenant_database_with`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CreateStage {
+    Database,
+    Login,
+    Grant,
+}
+
 /// A tenant database just made.
 #[non_exhaustive]
 pub struct Created {
@@ -406,8 +415,31 @@ impl ServerAdmin {
         login: &Login,
         password: &LoginPassword,
     ) -> Result<Created, TenantDbError> {
+        self.create_tenant_database_with(name, login, password, |_| async {})
+            .await
+    }
+
+    /// [`Self::create_tenant_database`], awaiting `on_stage` as each
+    /// stage starts. SQLite has only [`CreateStage::Database`].
+    ///
+    /// # Errors
+    /// As [`Self::create_tenant_database`].
+    pub async fn create_tenant_database_with<F, Fut>(
+        &self,
+        name: &DatabaseName,
+        login: &Login,
+        password: &LoginPassword,
+        mut on_stage: F,
+    ) -> Result<Created, TenantDbError>
+    where
+        F: FnMut(CreateStage) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         let (pool, url, timeout) = match &self.target {
-            Target::Sqlite { dir } => return create_sqlite(dir, name),
+            Target::Sqlite { dir } => {
+                on_stage(CreateStage::Database).await;
+                return create_sqlite(dir, name);
+            }
             Target::Server { pool, url, timeout } => (pool, url, *timeout),
         };
         // Built first: nothing to undo when the admin URL cannot yield one.
@@ -416,12 +448,14 @@ impl ServerAdmin {
         let sql = d
             .create_database_sql(name)
             .ok_or(TenantDbError::Unsupported("this backend has no databases to create"))?;
+        on_stage(CreateStage::Database).await;
         step(pool, &sql, "create a database")
             .await
             .map_err(|e| exists_as(e, || TenantDbError::DatabaseExists(name.clone())))?;
 
         let mut login_made = false;
         let rest = async {
+            on_stage(CreateStage::Login).await;
             let taken = || TenantDbError::LoginExists(login.name().clone());
             // `None` when the admin may not read the user catalog.
             let existed = login_exists(pool, login).await;
@@ -442,6 +476,7 @@ impl ServerAdmin {
                 return Err(exists_as(e, taken));
             }
             login_made = true;
+            on_stage(CreateStage::Grant).await;
             for sql in d.grant_database_sql(name, login) {
                 step(pool, &sql, "grant a login its database").await?;
             }
@@ -511,6 +546,18 @@ impl ServerAdmin {
                     return Err(TenantDbError::Protected(login.name().to_string()));
                 }
                 drop_server(pool, name, Some(login), false).await
+            }
+        }
+    }
+
+    /// Undo a [`Created`]: drop its database and login, ending sessions
+    /// inside. Takes the value a create returned, so nothing that existed
+    /// before can reach it.
+    pub(crate) async fn roll_back(&self, created: Created) -> Result<(), TenantDbError> {
+        match &self.target {
+            Target::Sqlite { dir } => drop_sqlite(dir, &created.database),
+            Target::Server { pool, .. } => {
+                undo_create(pool, &created.database, created.login.as_ref()).await
             }
         }
     }

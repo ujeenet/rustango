@@ -39,6 +39,15 @@
 //! finished". The resolver treats both the same way. To tell them
 //! apart, read [`provision_store`](crate::tenancy::provision_store).
 //!
+//! ## On a saved server
+//!
+//! [`DatabaseSource::Server`] makes storage three steps: create the
+//! database named as the slug, create its own login, grant it that
+//! database. The connection check probes the server's admin rights first.
+//! The database is recorded in [`TenantDatabase`](crate::tenancy::TenantDatabase).
+//! Any later failure drops what the run made and the row, so nothing is
+//! left to resume. If that drop fails, the record and inactive row stay.
+//!
 //! [`ProvisionRequest`]: crate::tenancy::provision::ProvisionRequest
 //! [`ProvisionEvent`]: crate::tenancy::provision::ProvisionEvent
 //! [step]: crate::tenancy::provision::ProvisionStep
@@ -70,14 +79,12 @@ pub struct ProvisionRequest {
     /// Globally unique. Also the default schema name, display name, and
     /// subdomain label.
     pub slug: String,
-    pub mode: StorageMode,
-    pub backend: BackendKind,
+    pub storage: TenantStorage,
+    /// `None` takes the registry's. Anything else must equal it: tenant
+    /// pools open with the registry's driver.
+    pub backend: Option<BackendKind>,
     /// Defaults to the slug.
     pub display_name: Option<String>,
-    /// Required in database-mode; meaningless in schema-mode.
-    pub database_url: Option<String>,
-    /// Schema-mode only; defaults to the slug.
-    pub schema_name: Option<String>,
     /// Defaults to `<slug>.<RUSTANGO_APEX_DOMAIN>` when that env var is
     /// set, and to nothing when it is not.
     pub host_pattern: Option<String>,
@@ -91,23 +98,111 @@ pub struct ProvisionRequest {
     pub preflight: preflight::Preflight,
 }
 
-impl ProvisionRequest {
-    /// A database-mode request with everything else defaulted.
+/// Where a tenant's tables live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TenantStorage {
+    /// A schema in the registry's database, named by the slug when `None`.
+    Schema(Option<String>),
+    /// A database of its own.
+    Database(DatabaseSource),
+}
+
+/// Where a database-mode tenant's database comes from.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DatabaseSource {
+    /// One that exists: a connection URL or a secret reference.
+    Url(String),
+    /// Create one named exactly as the slug, with its own login, on the
+    /// saved [`DbServer`](super::DbServer) of this name.
+    Server(String),
+}
+
+impl std::fmt::Debug for DatabaseSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Url(u) => f
+                .debug_tuple("Url")
+                .field(&crate::sql::connect_diagnosis::redact(u))
+                .finish(),
+            Self::Server(s) => f.debug_tuple("Server").field(s).finish(),
+        }
+    }
+}
+
+impl TenantStorage {
     #[must_use]
-    pub fn database(slug: impl Into<String>, database_url: impl Into<String>) -> Self {
+    pub fn mode(&self) -> StorageMode {
+        match self {
+            Self::Schema(_) => StorageMode::Schema,
+            Self::Database(_) => StorageMode::Database,
+        }
+    }
+}
+
+impl ProvisionRequest {
+    /// A request with everything but the slug and storage defaulted.
+    #[must_use]
+    pub fn new(slug: impl Into<String>, storage: TenantStorage) -> Self {
         Self {
             slug: slug.into(),
-            mode: StorageMode::Database,
-            backend: BackendKind::default(),
+            storage,
+            backend: None,
             display_name: None,
-            database_url: Some(database_url.into()),
-            schema_name: None,
             host_pattern: None,
             port: None,
             path_prefix: None,
             run_migrations: true,
             preflight: preflight::Preflight::default(),
         }
+    }
+
+    /// A tenant in a database that exists.
+    #[must_use]
+    pub fn database(slug: impl Into<String>, database_url: impl Into<String>) -> Self {
+        Self::new(
+            slug,
+            TenantStorage::Database(DatabaseSource::Url(database_url.into())),
+        )
+    }
+
+    /// A tenant in a new database on the saved server `server`.
+    #[must_use]
+    pub fn on_server(slug: impl Into<String>, server: impl Into<String>) -> Self {
+        Self::new(
+            slug,
+            TenantStorage::Database(DatabaseSource::Server(server.into())),
+        )
+    }
+
+    #[must_use]
+    pub fn mode(&self) -> StorageMode {
+        self.storage.mode()
+    }
+
+    /// The URL or reference of an existing database, if that is the source.
+    #[must_use]
+    pub fn database_url(&self) -> Option<&str> {
+        match &self.storage {
+            TenantStorage::Database(DatabaseSource::Url(u)) => Some(u),
+            _ => None,
+        }
+    }
+
+    /// The saved server to create the database on, if that is the source.
+    #[must_use]
+    pub fn server(&self) -> Option<&str> {
+        match &self.storage {
+            TenantStorage::Database(DatabaseSource::Server(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// [`Self::backend`], or `registry`'s when unset.
+    #[must_use]
+    pub fn backend_on(&self, registry: &crate::sql::Pool) -> BackendKind {
+        self.backend.unwrap_or_else(|| BackendKind::of_pool(registry))
     }
 }
 
@@ -119,8 +214,15 @@ pub enum ProvisionStep {
     /// Reach the target database, and prove this role can create
     /// tables in it, before anything is written.
     CheckConnection,
-    /// `CREATE SCHEMA` for schema-mode. Nothing to do in database-mode.
+    /// `CREATE SCHEMA` for schema-mode. Nothing to do for an existing
+    /// database.
     ProvisionStorage,
+    /// Create the tenant's database on a saved server.
+    CreateDatabase,
+    /// Create its own login, with a random password.
+    CreateLogin,
+    /// Grant that login its database, and nothing else.
+    Grant,
     /// Insert the `rustango_orgs` row — **inactive**, so nothing routes
     /// to the tenant until its schema is in place.
     RegisterOrg,
@@ -129,6 +231,9 @@ pub enum ProvisionStep {
     /// Set `active`, after which the tenant resolves. Last on purpose,
     /// so a half-provisioned tenant never serves a request.
     Activate,
+    /// Undo a failed run on a saved server: drop the database and login
+    /// it made, and the tenant row.
+    Rollback,
 }
 
 /// How a step went.
@@ -241,6 +346,8 @@ struct RunStore<'a> {
 enum Progress {
     Started,
     Ok,
+    /// `Ok`, with what was done.
+    Done(RunText),
     Skipped(&'static str),
 }
 
@@ -248,7 +355,7 @@ impl Progress {
     fn status(&self) -> StepStatus {
         match self {
             Self::Started => StepStatus::Started,
-            Self::Ok => StepStatus::Ok,
+            Self::Ok | Self::Done(_) => StepStatus::Ok,
             Self::Skipped(why) => StepStatus::Skipped((*why).to_owned()),
         }
     }
@@ -361,6 +468,7 @@ impl Reporter<'_> {
         let status = progress.status();
         let text = match progress {
             Progress::Skipped(why) => RunText::fixed(why),
+            Progress::Done(text) => text,
             Progress::Started | Progress::Ok => RunText::default(),
         };
         self.write(step.as_str(), status.as_str(), &text).await;
@@ -406,6 +514,12 @@ impl Reporter<'_> {
         });
     }
 
+    /// A failure whose text is operator-safe already.
+    async fn failed_with(&self, step: ProvisionStep, text: RunText) {
+        let stored = self.store.as_ref().map(|_| text.clone());
+        self.step_failed(step, text.to_string(), stored).await;
+    }
+
     /// The run's stored `error`: the last failed step's text, else `e`'s.
     fn run_error(&self, e: Option<&TenancyError>) -> Option<RunText> {
         let store = self.store.as_ref()?;
@@ -441,9 +555,13 @@ impl ProvisionStep {
             Self::Validate => "validate",
             Self::CheckConnection => "check_connection",
             Self::ProvisionStorage => "provision_storage",
+            Self::CreateDatabase => "create_database",
+            Self::CreateLogin => "create_login",
+            Self::Grant => "grant",
             Self::RegisterOrg => "register_org",
             Self::Migrate => "migrate",
             Self::Activate => "activate",
+            Self::Rollback => "rollback",
         }
     }
 }
@@ -525,9 +643,9 @@ where
     let run = store::open_run(
         &registry,
         &request.slug,
-        request.mode.as_str(),
-        request.backend.as_str(),
-        request.database_url.as_deref(),
+        request.mode().as_str(),
+        request.backend_on(&registry).as_str(),
+        request.database_url(),
         requested_by,
         idempotency_key,
     )
@@ -637,7 +755,7 @@ where
     if let Some(org) = existing.into_iter().next() {
         let resumable = rep.resume
             && !org.active
-            && org.storage_mode == request.mode.as_str()
+            && org.storage_mode == request.mode().as_str()
             && match super::provision_store::org_left_by_failed_run(
                 &registry,
                 org.id.get().copied().unwrap_or_default(),
@@ -676,16 +794,11 @@ where
         };
     let request = &checked.request;
 
-    if request.mode == StorageMode::Database && request.database_url.is_none() {
-        return rep
-            .fail(
-                ProvisionStep::Validate,
-                TenancyError::Validation("database mode needs a database URL".into()),
-            )
-            .await;
-    }
-
     rep.step(ProvisionStep::Validate, Progress::Ok).await;
+
+    if let Some(server) = checked.server() {
+        return provision_on_server(pools, registry_url, dir, &checked, server, rep).await;
+    }
 
     // ---- 2. Check the connection ----
     //
@@ -706,13 +819,20 @@ where
     // ---- 4. Register the org ----
     rep.step(ProvisionStep::RegisterOrg, Progress::Started)
         .await;
-    let mut org = new_org_row(&checked, schema_name);
+    let mut org = new_org_row(&checked, schema_name, checked.stored_database_url());
     if let Err(e) = super::org_host::insert_org(&registry, &mut org).await {
         if let Some(schema) = org.schema_name.as_deref() {
             release_schema(pools, schema).await;
         }
         return rep.fail(ProvisionStep::RegisterOrg, e).await;
     }
+    registered(&org, rep).await;
+
+    migrate_and_activate(pools, registry_url, dir, request, &org, rep).await
+}
+
+/// Announce a new `Org` row.
+async fn registered(org: &Org, rep: &Reporter<'_>) {
     // This pod sees the new tenant immediately; others converge on the
     // registry fingerprint (see `resolver::sync_org_generation`).
     super::invalidate_org_cache();
@@ -720,8 +840,75 @@ where
     rep.registered(org_id).await;
     rep.step(ProvisionStep::RegisterOrg, Progress::Ok).await;
     rep.notify(ProvisionEvent::Registered { org_id });
+}
 
-    migrate_and_activate(pools, registry_url, dir, request, &org, rep).await
+/// Steps 2–6 when the database is created on a saved server. Any failure
+/// after the create drops what this run made, row included.
+async fn provision_on_server<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    checked: &CheckedRequest,
+    server: &super::DbServer,
+    rep: &Reporter<'_>,
+) -> Result<ProvisionOutcome, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let request = &checked.request;
+    let registry = pools.registry_pool();
+
+    rep.step(ProvisionStep::CheckConnection, Progress::Started)
+        .await;
+    let admin = match ServerDatabase::open(server).await {
+        Ok(a) => a,
+        Err(e) => return rep.fail(ProvisionStep::CheckConnection, e).await,
+    };
+    rep.step(ProvisionStep::CheckConnection, Progress::Ok).await;
+
+    let mut db = ServerDatabase::create(admin, server, &request.slug, rep).await?;
+
+    rep.step(ProvisionStep::RegisterOrg, Progress::Started)
+        .await;
+    let stored = match db
+        .register(&registry, pools.secrets(), registry_url, &request.slug)
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            let failed = rep.fail(ProvisionStep::RegisterOrg, e).await;
+            db.roll_back(pools, None, rep).await;
+            return failed;
+        }
+    };
+    let mut org = new_org_row(checked, None, Some(stored));
+    if let Err(e) = super::org_host::insert_org(&registry, &mut org).await {
+        let failed = rep.fail(ProvisionStep::RegisterOrg, e).await;
+        db.roll_back(pools, None, rep).await;
+        return failed;
+    }
+    db.attach(&registry, org.id.get().copied().unwrap_or_default())
+        .await;
+    registered(&org, rep).await;
+
+    match migrate_and_activate(pools, registry_url, dir, request, &org, rep).await {
+        Ok(outcome) if !matches!(outcome.migrations, MigrationsOutcome::Failed(_)) => {
+            db.keep().await;
+            Ok(outcome)
+        }
+        // The tenant is gone again, so this is an error, not an outcome.
+        Ok(_) => {
+            let undone = db.roll_back(pools, Some(&org), rep).await;
+            Err(TenancyError::Validation(format!(
+                "the tenant's migrations failed; {}. The cause is in the run log",
+                undone.describe()
+            )))
+        }
+        Err(e) => {
+            db.roll_back(pools, Some(&org), rep).await;
+            Err(e)
+        }
+    }
 }
 
 /// Steps 5 and 6, shared by a fresh tenant and a resumed one.
@@ -786,7 +973,7 @@ where
     Ok(ProvisionOutcome {
         org_id,
         slug: request.slug.clone(),
-        mode: request.mode,
+        mode: request.mode(),
         migrations,
     })
 }
@@ -1083,20 +1270,41 @@ pub(crate) fn validate_port(port: i32) -> Result<(), String> {
 pub(crate) struct CheckedRequest {
     /// `host_pattern` normalized.
     pub(crate) request: ProvisionRequest,
-    url: Option<VettedUrl>,
+    /// The registry's; the request's, if it named one, equals it.
+    pub(crate) backend: BackendKind,
+    source: CheckedSource,
+}
+
+/// Where the database comes from, checked.
+enum CheckedSource {
+    Schema,
+    Url(VettedUrl),
+    /// Active, and on the registry's backend.
+    Server(Box<super::DbServer>),
 }
 
 impl CheckedRequest {
-    /// What goes in `Org.database_url`.
+    /// What goes in `Org.database_url` for an existing database.
     pub(crate) fn stored_database_url(&self) -> Option<String> {
-        self.url.as_ref().map(|u| u.stored.clone())
+        match &self.source {
+            CheckedSource::Url(u) => Some(u.stored.clone()),
+            CheckedSource::Schema | CheckedSource::Server(_) => None,
+        }
     }
 
-    /// The resolved URL to probe; only database mode has one.
+    /// The saved server to create the database on.
+    pub(crate) fn server(&self) -> Option<&super::DbServer> {
+        match &self.source {
+            CheckedSource::Server(s) => Some(s),
+            CheckedSource::Schema | CheckedSource::Url(_) => None,
+        }
+    }
+
+    /// The resolved URL of an existing database, to probe.
     fn probe_target(&self) -> Option<&str> {
-        match (&self.url, self.request.mode) {
-            (Some(u), StorageMode::Database) => Some(&u.resolved),
-            _ => None,
+        match &self.source {
+            CheckedSource::Url(u) => Some(&u.resolved),
+            CheckedSource::Schema | CheckedSource::Server(_) => None,
         }
     }
 
@@ -1132,11 +1340,24 @@ pub(crate) async fn checked_request(
     request: &ProvisionRequest,
 ) -> Result<CheckedRequest, TenancyError> {
     let normalized = validate_fields(request).map_err(TenancyError::Validation)?;
-    let url = match &normalized.database_url {
-        Some(reference) => {
-            Some(vet_database_url(reference, secrets, registry, Some(registry_url)).await?)
-        }
-        None => None,
+    let backend = BackendKind::of_pool(registry);
+    if let Some(asked) = normalized.backend.filter(|b| *b != backend) {
+        return Err(TenancyError::Validation(format!(
+            "the registry runs on {backend}, so a {asked} tenant cannot be opened; a tenant uses \
+             the registry's backend"
+        )));
+    }
+    backend
+        .validate_storage_mode(normalized.mode())
+        .map_err(|m| TenancyError::Validation(m.to_owned()))?;
+    let source = match &normalized.storage {
+        TenantStorage::Schema(_) => CheckedSource::Schema,
+        TenantStorage::Database(DatabaseSource::Url(reference)) => CheckedSource::Url(
+            vet_database_url(reference, secrets, registry, Some(registry_url)).await?,
+        ),
+        TenantStorage::Database(DatabaseSource::Server(name)) => CheckedSource::Server(Box::new(
+            checked_server(registry, secrets, name, &normalized.slug, backend).await?,
+        )),
     };
     if let Some(clash) = routing_clash(registry, &normalized).await? {
         return Err(TenancyError::Validation(format!(
@@ -1145,8 +1366,42 @@ pub(crate) async fn checked_request(
     }
     Ok(CheckedRequest {
         request: normalized,
-        url,
+        backend,
+        source,
     })
+}
+
+/// The saved server `name`, refused unless it is active, on `backend`,
+/// and a URL with a password could be stored for a tenant on it.
+async fn checked_server(
+    registry: &crate::sql::Pool,
+    secrets: &TenantSecrets,
+    name: &str,
+    slug: &str,
+    backend: BackendKind,
+) -> Result<super::DbServer, TenancyError> {
+    let server = super::db_server::get(registry, name).await?;
+    if !server.active {
+        return Err(TenancyError::Validation(format!(
+            "database server `{}` is inactive",
+            server.name
+        )));
+    }
+    if server.backend_kind()? != backend {
+        return Err(TenancyError::Validation(format!(
+            "database server `{}` is a {} server, but the registry runs on {backend}",
+            server.name, server.backend
+        )));
+    }
+    crate::sql::DatabaseName::new(slug).map_err(|e| TenancyError::Validation(e.to_string()))?;
+    // Before any DDL: a strict registry refuses a URL it cannot seal.
+    if secrets.requires_sealed() && backend != BackendKind::Sqlite {
+        let probe = format!("{backend}://tenant:password@localhost/{slug}");
+        super::secrets::stored_form(&probe, &probe, secrets)
+            .await
+            .map_err(TenancyError::Validation)?;
+    }
+    Ok(server)
 }
 
 /// A tenant database URL that passed [`vet_database_url`].
@@ -1201,7 +1456,7 @@ fn refuse_other_backend(
     reference: &str,
     registry: &crate::sql::Pool,
 ) -> Result<(), String> {
-    let want = backend_of(registry);
+    let want = BackendKind::of_pool(registry);
     let shown = crate::sql::connect_diagnosis::redact(reference);
     match Endpoint::scheme_kind(url) {
         Some(got) if got == want => Ok(()),
@@ -1212,17 +1467,6 @@ fn refuse_other_backend(
         // The text has no known scheme, so `redact` cannot mask it.
         None if reference == url => Err(format!("the database URL is not a {want} URL")),
         None => Err(format!("{shown} does not resolve to a {want} URL")),
-    }
-}
-
-fn backend_of(pool: &crate::sql::Pool) -> BackendKind {
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(_) => BackendKind::Postgres,
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(_) => BackendKind::MySql,
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(_) => BackendKind::Sqlite,
     }
 }
 
@@ -1356,7 +1600,7 @@ enum Place {
 
 impl Endpoint {
     fn scheme_kind(url: &str) -> Option<BackendKind> {
-        BackendKind::parse(&url.split(':').next()?.to_ascii_lowercase()).ok()
+        BackendKind::of_url(url)
     }
 
     /// Read as the registry's backend connects it: sqlx ignores a PG/MySQL scheme and SQLite
@@ -1578,17 +1822,21 @@ const TLS_QUERY_KEYS: &[&str] = &[
 /// The schema a schema-mode tenant lives in: whatever the request
 /// named, or the slug. `None` in database-mode, which has no schema.
 pub(crate) fn schema_name_for(request: &ProvisionRequest) -> Option<String> {
-    match request.mode {
-        StorageMode::Schema => Some(
-            super::org::effective_schema(request.schema_name.as_deref(), &request.slug).to_owned(),
-        ),
-        StorageMode::Database => None,
+    match &request.storage {
+        TenantStorage::Schema(name) => {
+            Some(super::org::effective_schema(name.as_deref(), &request.slug).to_owned())
+        }
+        TenantStorage::Database(_) => None,
     }
 }
 
 /// The registry row for a validated request, slug-derived defaults
 /// filled in.
-fn new_org_row(checked: &CheckedRequest, schema_name: Option<String>) -> Org {
+fn new_org_row(
+    checked: &CheckedRequest,
+    schema_name: Option<String>,
+    database_url: Option<String>,
+) -> Org {
     let request = &checked.request;
     Org {
         id: Auto::default(),
@@ -1597,9 +1845,9 @@ fn new_org_row(checked: &CheckedRequest, schema_name: Option<String>) -> Org {
             .display_name
             .clone()
             .unwrap_or_else(|| request.slug.clone()),
-        storage_mode: request.mode.as_str().into(),
-        backend_kind: request.backend.as_str().into(),
-        database_url: checked.stored_database_url(),
+        storage_mode: request.mode().as_str().into(),
+        backend_kind: checked.backend.as_str().into(),
+        database_url,
         schema_name,
         // `validate_fields` already filled in the `<slug>.<APEX>` default.
         host_pattern: request.host_pattern.clone(),
@@ -1710,6 +1958,263 @@ pub(crate) async fn activate(registry: &crate::sql::Pool, org_id: i64) -> Result
         )));
     }
     Ok(())
+}
+
+/// How long a saved server's admin login gets to connect.
+const ADMIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A database this run created on a saved server. Dropped again by
+/// [`Self::roll_back`] unless [`Self::keep`] is called.
+pub(super) struct ServerDatabase {
+    admin: super::server_admin::ServerAdmin,
+    created: super::server_admin::Created,
+    server: String,
+    record: Option<super::TenantDatabase>,
+}
+
+/// What [`ServerDatabase::roll_back`] managed.
+pub(super) struct RolledBack {
+    database: crate::sql::DatabaseName,
+    login: Option<crate::sql::LoginName>,
+    dropped: bool,
+    row_removed: bool,
+}
+
+impl RolledBack {
+    /// For an error message. Names only, never the URL.
+    pub(super) fn describe(&self) -> String {
+        let what = match &self.login {
+            Some(l) => format!("database `{}` and login `{l}`", self.database),
+            None => format!("database `{}`", self.database),
+        };
+        match (self.dropped, self.row_removed) {
+            (true, true) => format!("the new {what} were dropped and the tenant removed"),
+            (true, false) => format!("the new {what} were dropped, but the tenant row remains"),
+            (false, _) => format!(
+                "the new {what} could not be dropped and remain, recorded in \
+                 rustango_tenant_databases"
+            ),
+        }
+    }
+}
+
+impl ServerDatabase {
+    /// Log in to `server` and refuse it unless its admin may provision.
+    /// Nothing is created yet.
+    pub(super) async fn open(
+        server: &super::DbServer,
+    ) -> Result<super::server_admin::ServerAdmin, TenancyError> {
+        let admin = server.connect(ADMIN_TIMEOUT).await?;
+        let report = match admin.probe().await {
+            Ok(r) => r,
+            Err(e) => {
+                admin.close().await;
+                return Err(e.into());
+            }
+        };
+        if let Some(why) = report.blocker() {
+            admin.close().await;
+            return Err(TenancyError::Validation(format!(
+                "database server `{}` cannot create tenant databases: {why}",
+                server.name
+            )));
+        }
+        Ok(admin)
+    }
+
+    /// Create a database named `slug` and its own login with a random
+    /// password, reporting each stage. An existing database or login is
+    /// refused; a failed create leaves nothing behind.
+    pub(super) async fn create(
+        admin: super::server_admin::ServerAdmin,
+        server: &super::DbServer,
+        slug: &str,
+        rep: &Reporter<'_>,
+    ) -> Result<Self, TenancyError> {
+        use super::server_admin::CreateStage;
+        let stage_step = |s: CreateStage| match s {
+            CreateStage::Login => ProvisionStep::CreateLogin,
+            CreateStage::Grant => ProvisionStep::Grant,
+            _ => ProvisionStep::CreateDatabase,
+        };
+        let name = match crate::sql::DatabaseName::new(slug) {
+            Ok(n) => n,
+            Err(e) => {
+                admin.close().await;
+                return rep
+                    .fail(
+                        ProvisionStep::CreateDatabase,
+                        TenancyError::Validation(e.to_string()),
+                    )
+                    .await;
+            }
+        };
+        let login = crate::sql::Login::new(super::server_admin::tenant_login_name(&name));
+        let password = crate::sql::LoginPassword::generate();
+        let current = std::sync::Mutex::new(None::<ProvisionStep>);
+        let result = admin
+            .create_tenant_database_with(&name, &login, &password, |stage| {
+                let step = stage_step(stage);
+                let prev = current
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .replace(step);
+                async move {
+                    if let Some(prev) = prev {
+                        rep.step(prev, Progress::Ok).await;
+                    }
+                    rep.step(step, Progress::Started).await;
+                }
+            })
+            .await;
+        let last = current
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or(ProvisionStep::CreateDatabase);
+        let created = match result {
+            Ok(c) => c,
+            Err(e) => {
+                admin.close().await;
+                return rep.fail(last, e.into()).await;
+            }
+        };
+        rep.step(last, Progress::Ok).await;
+        if created.login.is_none() {
+            for step in [ProvisionStep::CreateLogin, ProvisionStep::Grant] {
+                rep.step(step, Progress::Skipped("a SQLite tenant has no login"))
+                    .await;
+            }
+        }
+        Ok(Self {
+            admin,
+            created,
+            server: server.name.clone(),
+            record: None,
+        })
+    }
+
+    /// Record the database, then return what goes in `Org.database_url`:
+    /// the tenant URL, sealed under the registry's rules.
+    pub(super) async fn register(
+        &mut self,
+        registry: &crate::sql::Pool,
+        secrets: &TenantSecrets,
+        registry_url: &str,
+        slug: &str,
+    ) -> Result<String, TenancyError> {
+        let vetted = vet_database_url(self.created.url(), secrets, registry, Some(registry_url))
+            .await?;
+        let mut record = super::TenantDatabase {
+            id: Auto::default(),
+            org_slug: slug.to_owned(),
+            org_id: None,
+            server_name: self.server.clone(),
+            database_name: self.created.database.to_string(),
+            login_name: self.created.login.as_ref().map(|l| l.name().to_string()),
+            created_at: Auto::default(),
+        };
+        record.insert_pool(registry).await?;
+        self.record = Some(record);
+        Ok(vetted.stored)
+    }
+
+    /// Link the record to the new tenant row. A failure only loses the
+    /// link; the slug still names it.
+    pub(super) async fn attach(&mut self, registry: &crate::sql::Pool, org_id: i64) {
+        use crate::sql::UpdaterPool as _;
+        let Some(id) = self.record.as_ref().and_then(|r| r.id.get().copied()) else {
+            return;
+        };
+        let res = super::TenantDatabase::objects()
+            .where_(super::TenantDatabase::id.eq(id))
+            .update()
+            .set("org_id", Some(org_id))
+            .execute_pool(registry)
+            .await;
+        if let Err(e) = res {
+            tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not link the tenant database record");
+        }
+    }
+
+    /// The run succeeded: keep everything.
+    pub(super) async fn keep(self) {
+        self.admin.close().await;
+    }
+
+    /// Drop the database and login, then the record and `org` if given.
+    /// When the drop fails both rows stay, so a resuming retry or a purge
+    /// still finds the database.
+    pub(super) async fn roll_back<DB: Database>(
+        self,
+        pools: &TenantPools<DB>,
+        org: Option<&Org>,
+        rep: &Reporter<'_>,
+    ) -> RolledBack
+    where
+        crate::sql::Pool: From<sqlx::Pool<DB>>,
+    {
+        rep.step(ProvisionStep::Rollback, Progress::Started).await;
+        let registry = pools.registry_pool();
+        let mut undone = RolledBack {
+            database: self.created.database.clone(),
+            login: self.created.login.as_ref().map(|l| l.name().clone()),
+            dropped: false,
+            row_removed: false,
+        };
+        if let Some(org) = org {
+            // Its pool holds sessions in the database about to go.
+            pools.invalidate(&org.slug).await;
+        }
+        let dropped = self.admin.roll_back(self.created).await;
+        self.admin.close().await;
+        if let Err(e) = dropped {
+            tracing::error!(
+                target: "rustango::tenancy::provision",
+                database = %undone.database,
+                error = %e,
+                "could not drop the tenant database a failed run created"
+            );
+            let text = RunText::about_database(
+                "could not drop what this run created; it remains",
+                &undone.database,
+                undone.login.as_ref(),
+            );
+            rep.failed_with(ProvisionStep::Rollback, text).await;
+            return undone;
+        }
+        undone.dropped = true;
+        let rows = async {
+            if let Some(record) = self.record {
+                record.delete_pool(&registry).await?;
+            }
+            if let Some(org) = org {
+                super::decommission::remove_org_row(&registry, org).await?;
+            }
+            Ok::<_, TenancyError>(())
+        }
+        .await;
+        match rows {
+            Ok(()) => {
+                undone.row_removed = true;
+                let text = RunText::about_database(
+                    "dropped and the tenant removed",
+                    &undone.database,
+                    undone.login.as_ref(),
+                );
+                rep.step(ProvisionStep::Rollback, Progress::Done(text)).await;
+            }
+            Err(e) => {
+                tracing::error!(target: "rustango::tenancy::provision", error = %e, "could not remove the rows of a rolled-back tenant");
+                let text = RunText::about_database(
+                    "dropped, but the registry rows could not be removed",
+                    &undone.database,
+                    undone.login.as_ref(),
+                );
+                rep.failed_with(ProvisionStep::Rollback, text).await;
+            }
+        }
+        undone
+    }
 }
 
 /// Migrate the tenant that was just created, and only that one.
@@ -2084,14 +2589,26 @@ mod validation_tests {
     fn validate_fields_checks_the_slug_derived_schema_name_too() {
         // A slug legal as a hostname label is legal as a schema name,
         // so the default never trips its own rule.
-        let mut req = ProvisionRequest::database("acme-2", "postgres://h/tenant");
-        req.mode = StorageMode::Schema;
-        req.database_url = None;
+        let mut req = ProvisionRequest::new("acme-2", TenantStorage::Schema(None));
         assert!(validate_fields(&req).is_ok());
 
         // An explicit one is checked by the same rule.
-        req.schema_name = Some(r#"x"; DROP TABLE t; --"#.into());
+        req.storage = TenantStorage::Schema(Some(r#"x"; DROP TABLE t; --"#.into()));
         assert!(validate_fields(&req).is_err());
+    }
+
+    /// Aliases `Pool::connect` refuses name no backend, so a URL using
+    /// one is refused at validation, not at the connection check.
+    #[test]
+    fn alias_schemes_name_no_backend() {
+        for alias in ["pg://u@h/db", "sqlite3:///tmp/a.db", "mariadb://u@h/db"] {
+            assert_eq!(Endpoint::scheme_kind(alias), None, "{alias}");
+        }
+        assert_eq!(
+            Endpoint::scheme_kind("PostgreSQL://u@h/db"),
+            Some(BackendKind::Postgres)
+        );
+        assert_eq!(Endpoint::scheme_kind("sqlite::memory:"), Some(BackendKind::Sqlite));
     }
 
     #[test]
