@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a busy schema-mode tenant blocked every tenant
+
+`Tenant`'s held connection (`TenantPools::acquire`) now comes from a per-tenant pool with the schema in its connect options, not the shared registry pool. Schema-mode tenants can use up to twice `scoped_pool_max_connections` each.
+
 ### Fixed — tenant logos 404'd under the default routes
 
 Tenant pages link uploaded logos and favicons under `RouteConfig::brand_url` (`/_brand` by default), the prefix tenant hosts serve, via the new `RouteConfig::brand_asset_url`. Tenant admin pages now use the tenant favicon too.

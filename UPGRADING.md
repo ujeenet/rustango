@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Schema-mode tenants get a second pool
+
+`TenantPools::acquire` (and so `Tenant`) takes its connection from a per-tenant pool, not the registry pool. Budget `2 * max_cached_scoped_pools * scoped_pool_max_connections` connections on the registry server.
+
 ### Scaffold taglines lose their brackets
 
 `cargo rustango new` now writes `tagline = "dev"` / `"staging"`, not `"(dev)"` / `"(staging)"`. Existing projects keep theirs; edit the line to match.
