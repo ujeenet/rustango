@@ -1278,10 +1278,16 @@ mod tests {
             sqlite_dir: Some(d.into()),
             ..DbServerSpec::default()
         };
-        for bad in ["tenants", "./tenants", "/srv/../etc"] {
+        // `/srv` has no drive, so it is not absolute on Windows.
+        let (root, up) = if cfg!(windows) {
+            (r"C:\srv\tenants", r"C:\srv\..\etc")
+        } else {
+            ("/srv/tenants", "/srv/../etc")
+        };
+        for bad in ["tenants", "./tenants", up] {
             assert!(validate(&dir(bad), "sqlite").is_err(), "{bad}");
         }
-        assert!(validate(&dir("/srv/tenants"), "sqlite").is_ok());
+        assert!(validate(&dir(root), "sqlite").is_ok());
     }
 
     #[test]

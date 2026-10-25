@@ -1204,12 +1204,11 @@ impl PgDropTarget {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 mod tests {
     use super::*;
 
     /// A reference that resolves to a bare secret is named, never echoed.
-    #[cfg(feature = "postgres")]
     #[test]
     fn an_unparsable_url_names_the_reference_not_the_secret() {
         let org = Org {
