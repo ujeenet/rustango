@@ -286,15 +286,16 @@ static mount works there; see [the admin's branding section](admin.md#config-adm
 
 The console sets no favicon, and there is no key for one.
 
-### The `(dev)` and `(staging)` taglines
+### The `dev` and `staging` taglines
 
-`cargo rustango new` writes `tagline = "(dev)"` under `[brand]` in
-`config/dev_settings.toml` and `tagline = "(staging)"` in
-`staging_settings.toml`, so you can tell the tiers apart at a glance.
+`cargo rustango new` writes `tagline = "dev"` under `[brand]` in
+`config/dev_settings.toml` and `tagline = "staging"` in
+`staging_settings.toml`, so you can tell the tiers apart at a glance; the
+tagline shows as a badge.
 `prod_settings.toml` sets none. The tier file wins over `default.toml`, so this
 replaces a tagline you set there.
 
-To change it, edit the line, for example `tagline = "Acme (dev)"`. To remove
+To change it, edit the line, for example `tagline = "Acme dev"`. To remove
 it, delete the line or set `tagline = ""`. In a project with the admin, the
 same tagline is the admin's subtitle.
 

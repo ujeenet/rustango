@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Scaffold taglines lose their brackets
+
+`cargo rustango new` now writes `tagline = "dev"` / `"staging"`, not `"(dev)"` / `"(staging)"`. Existing projects keep theirs; edit the line to match.
+
 ### `BrandSettings` has a new `logo_path` field
 
 A struct literal of `BrandSettings` needs `..Default::default()` (or the new field).

@@ -1062,6 +1062,8 @@ pub fn config_default_toml(name: &str, backend: Backend) -> String {
 # [brand]
 # name           = "{name}"
 # tagline        = ""
+# logo_url       = "https://cdn.example.com/logo.png"  # full URL; beats logo_path
+# logo_path      = "assets/logo.png"   # local file the operator console serves
 # primary_color  = "#2c6fb0"
 # theme_mode     = "auto"       # auto | light | dark
 
@@ -1126,8 +1128,8 @@ hsts_max_age_secs = 0
 secure_cookies    = false
 
 [brand]
-# Make the dev tier visually distinguishable from prod.
-tagline = "(dev)"
+# Make the dev tier visually distinguishable from prod (shown as a badge).
+tagline = "dev"
 "##
     )
 }
@@ -1157,7 +1159,7 @@ headers_preset    = "strict"
 hsts_max_age_secs = 31536000
 
 [brand]
-tagline = "(staging)"
+tagline = "staging"
 
 [audit]
 retention_days = 30
