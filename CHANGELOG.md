@@ -8,6 +8,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - Admin time inputs show a stored time to the millisecond and forms parse fractional seconds, so saving a time with microseconds no longer clears or refuses it; an untouched time keeps its stored value.
 - `#[derive(Form)]` refuses `NaN` and `inf` in float fields; they passed every `min` / `max` check.
+- Email attachments serialize as base64, so a queued `EmailJob` no longer holds one JSON number per byte; jobs queued in the old form still load.
 
 ### Fixed — migrations, MySQL and MariaDB
 

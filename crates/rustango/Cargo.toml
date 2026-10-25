@@ -183,7 +183,7 @@ signals = []
 # Email backends (`rustango::email`) — Mailer trait + ConsoleMailer +
 # InMemoryMailer + NullMailer. SMTP and external transports plug in via
 # the trait.
-email = ["_async_trait"]
+email = ["_async_trait", "_base64"]
 
 # Production SMTP backend (`rustango::email::SmtpMailer`, issue #48).
 # Implies `email`. Pulls `lettre` with rustls TLS (no openssl).

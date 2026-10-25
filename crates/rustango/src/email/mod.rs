@@ -91,10 +91,52 @@ pub struct Attachment {
     pub filename: String,
     /// Raw bytes. Plain-text attachments can be built via
     /// [`Email::attach_text`] which UTF-8 encodes a `&str`.
+    /// Serialized as base64, so a queued job holds no integer per byte.
+    #[serde(with = "base64_bytes")]
     pub content: Vec<u8>,
     /// MIME type. `None` = `application/octet-stream`. Common values:
     /// `text/plain`, `text/csv`, `application/pdf`, `image/png`.
     pub mimetype: Option<String>,
+}
+
+/// Base64 serde for [`Attachment::content`]; still reads the integer
+/// array that jobs queued by older releases hold.
+mod base64_bytes {
+    use base64::Engine as _;
+
+    pub(super) fn serialize<S: serde::Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        // Binary formats keep their compact byte form.
+        if !s.is_human_readable() {
+            return serde::Serialize::serialize(bytes, s);
+        }
+        s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = Vec<u8>;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("base64 text or an array of bytes")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Vec<u8>, E> {
+                base64::engine::general_purpose::STANDARD
+                    .decode(v)
+                    .map_err(E::custom)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(b) = seq.next_element::<u8>()? {
+                    out.push(b);
+                }
+                Ok(out)
+            }
+        }
+        if !d.is_human_readable() {
+            return <Vec<u8> as serde::Deserialize>::deserialize(d);
+        }
+        d.deserialize_any(V)
+    }
 }
 
 impl Email {
