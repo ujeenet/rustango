@@ -93,6 +93,10 @@ pub enum UrlPolicy {
 
     /// Schema-mode tenants: no separate database to name.
     SchemaMode,
+
+    /// Create the database, named as the slug, with its own login on
+    /// this saved [`DbServer`](crate::tenancy::DbServer).
+    Server(String),
 }
 
 impl Default for UrlPolicy {
@@ -427,7 +431,7 @@ fn build_request(
     let database_url = match (&config.url_policy, &payload.database_url) {
         // Refused, not ignored: a caller who sent a URL believes it
         // was used.
-        (UrlPolicy::Template(_) | UrlPolicy::SchemaMode, Some(_)) => {
+        (UrlPolicy::Template(_) | UrlPolicy::SchemaMode | UrlPolicy::Server(_), Some(_)) => {
             return Err(Refusal::Policy(
                 "this endpoint derives tenant database URLs itself; \
                  remove `database_url` from the payload"
@@ -442,7 +446,7 @@ fn build_request(
             }
             Some(template.replace("{slug}", &payload.slug))
         }
-        (UrlPolicy::SchemaMode, None) => None,
+        (UrlPolicy::SchemaMode | UrlPolicy::Server(_), None) => None,
         (UrlPolicy::CallerSupplied, url) => {
             let Some(url) = url.as_ref().filter(|u| !u.trim().is_empty()) else {
                 return Err(Refusal::Malformed(
@@ -455,10 +459,17 @@ fn build_request(
 
     let schema = matches!(config.url_policy, UrlPolicy::SchemaMode)
         || config.storage_mode == StorageMode::Schema;
-    let storage = match database_url {
+    let storage = match (&config.url_policy, database_url) {
+        (UrlPolicy::Server(_), _) if schema => {
+            return Err(Refusal::Policy(
+                "this endpoint creates schema-mode tenants, which have no database to create"
+                    .to_owned(),
+            ))
+        }
+        (UrlPolicy::Server(name), _) => TenantStorage::Database(DatabaseSource::Server(name.clone())),
         _ if schema => TenantStorage::Schema(None),
-        Some(url) => TenantStorage::Database(DatabaseSource::Url(url)),
-        None => {
+        (_, Some(url)) => TenantStorage::Database(DatabaseSource::Url(url)),
+        (_, None) => {
             return Err(Refusal::Policy(
                 "this endpoint creates database-mode tenants but derives no database URL"
                     .to_owned(),
@@ -597,6 +608,25 @@ mod tests {
             );
         }
         assert!(build_request(&c, &payload("acme-2", None)).is_ok());
+    }
+
+    /// Signup creates the database itself on a saved server; the caller
+    /// still names only the tenant.
+    #[test]
+    fn the_server_policy_creates_the_database_on_a_saved_server() {
+        let c = config(UrlPolicy::Server("main".to_owned()));
+        let r = build_request(&c, &payload("acme", None)).expect("valid");
+        assert_eq!(r.server(), Some("main"));
+        assert_eq!(r.database_url(), None);
+        assert!(matches!(
+            build_request(&c, &payload("acme", Some("postgres://attacker/x"))),
+            Err(Refusal::Policy(_))
+        ));
+        let schema = WebhookConfig {
+            storage_mode: StorageMode::Schema,
+            ..config(UrlPolicy::Server("main".to_owned()))
+        };
+        assert!(matches!(build_request(&schema, &payload("acme", None)), Err(Refusal::Policy(_))));
     }
 
     #[test]

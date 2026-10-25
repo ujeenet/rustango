@@ -166,6 +166,7 @@ New servers use TLS `require` unless saved with `disable` or another mode; a ser
 
 Run `makemigrations` then `migrate` to create the table. `ProvisionRequest.mode`, `database_url` and `schema_name` are now one `storage: TenantStorage` (use `ProvisionRequest::database`, `::on_server` or `::new`); `ProvisionStep` has new variants.
 `backend` is `Option<BackendKind>` in `ProvisionRequest`, `CreateTenantOpts` and `WebhookConfig`: `None` (the default) takes the registry's, and any other value is refused.
+`UrlPolicy` has a new `Server(name)` variant, so an exhaustive match needs an arm.
 `create-tenant --database-url` without `--mode` now means database mode; `api::create_tenant` refuses a database URL or server in schema mode. Database mode on a saved server returns `Err` when migrations fail, since the tenant was removed again.
 
 ### `TenantPoolInvalidator::tenant_secrets` has no default
