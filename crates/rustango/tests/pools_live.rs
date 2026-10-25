@@ -889,3 +889,103 @@ async fn tenant_scope_holds_no_connection() {
     drop((first, second));
     drop_schema(&admin, "acme_tp_scope").await;
 }
+
+/// One busy schema-mode tenant must not block the others or the registry:
+/// the extractor's held connections come from that tenant's own pool.
+#[tokio::test]
+async fn a_busy_schema_tenant_does_not_block_other_tenants() {
+    use axum::extract::FromRequestParts as _;
+    use std::sync::Arc;
+    use std::time::Duration;
+    let _g = live_lock().lock().await;
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let admin = pool().await.unwrap();
+    for s in ["acme_tp_busy", "globex_tp_busy"] {
+        create_schema(&admin, s).await;
+    }
+    let registry = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .acquire_timeout(Duration::from_secs(2))
+        .connect(&url)
+        .await
+        .unwrap();
+    let cfg = rustango::tenancy::TenantPoolsConfig {
+        scoped_pool_max_connections: 2,
+        database_pool_acquire_timeout: Duration::from_secs(2),
+        ..Default::default()
+    };
+    let pools = Arc::new(TenantPools::new(registry.clone()).config(cfg));
+    let tenant = |schema: &str| {
+        let mut parts = tenant_parts(pools.clone(), schema_org(schema));
+        async move {
+            rustango::extractors::Tenant::<sqlx::Postgres>::from_request_parts(&mut parts, &())
+                .await
+                .map_err(|_| "extractor rejected")
+        }
+    };
+    // As many in-flight acme requests as the registry pool has slots.
+    let mut busy = Vec::new();
+    for _ in 0..2 {
+        busy.push(tenant("acme_tp_busy").await.expect("acme request"));
+    }
+    let mut other = tokio::time::timeout(Duration::from_secs(5), tenant("globex_tp_busy"))
+        .await
+        .expect("globex waited for acme's connections")
+        .expect("globex request");
+    assert_eq!(current_schema(other.conn()).await, "globex_tp_busy");
+    for t in &mut busy {
+        assert_eq!(current_schema(t.conn()).await, "acme_tp_busy");
+        // `t.pool()` stays usable while every held slot is taken.
+        let pg = t.pool().as_postgres().unwrap().clone();
+        let mut c = pg.acquire().await.expect("t.pool() starved");
+        assert_eq!(current_schema(&mut c).await, "acme_tp_busy");
+    }
+    let mut reg = tokio::time::timeout(Duration::from_secs(5), registry.acquire())
+        .await
+        .expect("the registry pool is exhausted")
+        .unwrap();
+    assert_eq!(current_schema(&mut reg).await, "public");
+    drop((busy, other, reg));
+    for s in ["acme_tp_busy", "globex_tp_busy"] {
+        drop_schema(&admin, s).await;
+    }
+}
+
+/// With the scoped-pool cache off, a held connection comes from the
+/// registry pool, not from a pool built per request.
+#[tokio::test]
+async fn uncached_schema_tenant_holds_a_registry_connection() {
+    use std::time::Duration;
+    let _g = live_lock().lock().await;
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let admin = pool().await.unwrap();
+    create_schema(&admin, "acme_tp_nocache").await;
+    let registry = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(2))
+        .connect(&url)
+        .await
+        .unwrap();
+    let cfg = rustango::tenancy::TenantPoolsConfig {
+        max_cached_scoped_pools: 0,
+        ..Default::default()
+    };
+    let pools = TenantPools::new(registry.clone()).config(cfg);
+    let org = schema_org("acme_tp_nocache");
+    {
+        let mut conn = pools.acquire(&org).await.unwrap();
+        assert_eq!(current_schema(&mut conn).await, "acme_tp_nocache");
+        assert!(registry.try_acquire().is_none(), "built a pool for one request");
+    }
+    let mut plain = tokio::time::timeout(Duration::from_secs(5), registry.acquire())
+        .await
+        .expect("the connection never came back")
+        .unwrap();
+    assert_eq!(current_schema(&mut plain).await, "public", "search_path leaked");
+    drop(plain);
+    drop_schema(&admin, "acme_tp_nocache").await;
+}

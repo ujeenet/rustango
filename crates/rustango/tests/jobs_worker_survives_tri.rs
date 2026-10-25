@@ -976,6 +976,115 @@ async fn a_tenant_bound_job_outside_with_tenant_is_system(pool: &Pool) {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct Routed {
+    token: String,
+    meant_for: String,
+}
+
+#[async_trait::async_trait]
+impl Job for Routed {
+    const NAME: &'static str = "tri1843:routed";
+    async fn run(&self) -> Result<(), JobError> {
+        Err(JobError::Fatal("registered per queue".into()))
+    }
+}
+
+/// `(token, meant_for, ran_on)` of every routed run.
+fn routed_runs() -> &'static Mutex<Vec<(String, String, String)>> {
+    static R: OnceLock<Mutex<Vec<(String, String, String)>>> = OnceLock::new();
+    R.get_or_init(Mutex::default)
+}
+
+/// A queue named `label` (`""` = unnamed) whose `Routed` handler records the run.
+async fn routed_queue(pool: &Pool, label: &'static str) -> PgJobQueue {
+    let mut q = PgJobQueue::with_workers_pool(pool.clone(), 2).poll_interval(Duration::from_millis(20));
+    if !label.is_empty() {
+        q = q.queue_name(label);
+    }
+    q.register_with(move |job: Routed| async move {
+        routed_runs()
+            .lock()
+            .unwrap()
+            .push((job.token, job.meant_for, label.to_owned()));
+        Ok(())
+    })
+    .await;
+    q
+}
+
+/// Queues sharing `rustango_jobs` run only their own jobs, even when
+/// they register the same job type.
+async fn named_queues_run_only_their_own_jobs(pool: &Pool) {
+    let tok = token(pool, "routed");
+    let queues = [
+        routed_queue(pool, "mailer").await,
+        routed_queue(pool, "reports").await,
+        routed_queue(pool, "").await,
+    ];
+    let labels = ["mailer", "reports", ""];
+    for (q, label) in queues.iter().zip(labels) {
+        for _ in 0..10 {
+            let job = Routed {
+                token: tok.clone(),
+                meant_for: label.to_owned(),
+            };
+            q.dispatch(&job).await.unwrap();
+        }
+    }
+    for q in &queues {
+        q.start().await;
+    }
+    let mine = || {
+        routed_runs()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.0 == tok)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    wait_for("every routed job", || mine().len() >= 30).await;
+    for q in &queues {
+        q.shutdown().await;
+    }
+    let runs = mine();
+    assert_eq!(runs.len(), 30, "{runs:?}");
+    let strays: Vec<_> = runs.iter().filter(|r| r.1 != r.2).collect();
+    assert!(strays.is_empty(), "jobs ran on another queue: {strays:?}");
+}
+
+/// An older table gets `queue_name` and its pickup index from `ensure_table_pool`.
+async fn an_older_table_gets_the_queue_index(pool: &Pool) {
+    PgJobQueue::ensure_table_pool(pool).await.expect("ensure");
+    let mysql = pool.dialect().name() == "mysql";
+    let drop_idx = if mysql {
+        "DROP INDEX `rustango_jobs_queue_idx` ON `rustango_jobs`"
+    } else {
+        "DROP INDEX rustango_jobs_queue_idx"
+    };
+    let mut tx = rustango::sql::transaction_pool(pool).await.expect("tx");
+    for sql in [drop_idx, "ALTER TABLE rustango_jobs DROP COLUMN queue_name"] {
+        rustango::sql::raw_execute_tx(&mut tx, sql, Vec::new())
+            .await
+            .expect(sql);
+    }
+    tx.commit().await.expect("commit");
+    PgJobQueue::ensure_table_pool(pool).await.expect("ensure");
+    let probe = match pool.dialect().name() {
+        "postgres" => "SELECT COUNT(*) FROM pg_indexes WHERE indexname = 'rustango_jobs_queue_idx'",
+        "mysql" => {
+            "SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics \
+             WHERE table_schema = DATABASE() AND index_name = 'rustango_jobs_queue_idx'"
+        }
+        _ => "SELECT COUNT(*) FROM sqlite_master WHERE name = 'rustango_jobs_queue_idx'",
+    };
+    let rows: Vec<(i64,)> = rustango::sql::raw_query_pool(probe, Vec::new(), pool)
+        .await
+        .expect("probe");
+    assert_eq!(rows[0].0, 1, "no queue index");
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
@@ -1006,5 +1115,7 @@ tri_dialect_test! {
         a_dispatch_after_a_write_commits_with_its_block,
         an_undecodable_payload_is_retried,
         a_dispatch_in_a_block_wakes_the_worker_after_commit,
+        named_queues_run_only_their_own_jobs,
+        an_older_table_gets_the_queue_index,
     ],
 }

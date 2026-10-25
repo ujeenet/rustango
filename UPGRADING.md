@@ -162,6 +162,27 @@ Such a delete now runs in a transaction and first reads (and locks) the rows it 
 
 Code that inspects compiled PG SQL sees `col = ANY($1)` with one `SqlValue::Array` bind instead of `col IN ($1, …)`. Results are the same.
 
+### Schema-mode tenants get a second pool
+
+`TenantPools::acquire` (and so `Tenant`) takes its connection from a per-tenant pool, not the registry pool. Budget `2 * max_cached_scoped_pools * scoped_pool_max_connections` connections on the registry server.
+
+### `migrate-tenant-storage --to schema` creates the schema first
+
+It refuses a target schema that already exists, before the tenant goes offline, and drops the empty schema again if the move fails.
+
+### Admin edits of tenants are checked
+
+Saving a `rustango_orgs` or `rustango_org_hosts` row in the generic admin now refuses a host, path prefix or port another tenant uses, and stores hosts lowercased.
+
+### Webhook receivers: move to signature v2
+
+Verify `X-Webhook-Signature-V2` with `webhook::verify_delivery` and drop repeated `X-Webhook-Id`s within its `max_age`. The body-only `X-Webhook-Signature` stays for now but does not stop replays.
+
+### `rustango_jobs` gets a `queue_name` column
+
+`PgJobQueue::ensure_table_pool` adds it. With a hand-written migration, add `queue_name` (`TEXT`, `VARCHAR(255)` on MySQL) before naming a queue. Once the column exists, unnamed queues no longer run jobs of named ones.
+Old workers ignore the column and still run named jobs: drain them before you dispatch on a named queue.
+
 ## 0.61.1
 
 ### Scaffold taglines lose their brackets

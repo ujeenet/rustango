@@ -1998,6 +1998,16 @@ pub(crate) async fn create_submit(
         let html = render_form(&state, model, Some(&form), false, Some(e.as_str()));
         return Ok(Html(html).into_response());
     }
+    // A tenant's host, path prefix and port, claimed as the console does.
+    #[cfg(feature = "tenancy")]
+    let claims = match crate::tenancy::org_host::AdminClaims::of(model.table, &mut collected, None)
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let html = render_form(&state, model, Some(&form), false, Some(e.as_str()));
+            return Ok(Html(html).into_response());
+        }
+    };
     let audit_form = super::audit::audit_form(model, &admin_cfg, &form, &collected);
     let (columns, values): (Vec<&'static str>, Vec<SqlValue>) = collected.into_iter().unzip();
 
@@ -2048,6 +2058,11 @@ pub(crate) async fn create_submit(
             return Ok(refused(write_error(model, &e)).into_response());
         }
     };
+    #[cfg(feature = "tenancy")]
+    if let Err(e) = claims.after_write(&mut tx, &pk).await {
+        rollback_quietly(tx, model.table).await;
+        return Ok(refused(claim_refusal(model, e)).into_response());
+    }
     match admits_written(
         &mut tx,
         &parts,
@@ -2088,6 +2103,19 @@ pub(crate) async fn create_submit(
     .await;
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_value, &form);
     Ok(Redirect::to(&target).into_response())
+}
+
+/// The form error for a routing claim another tenant holds.
+#[cfg(feature = "tenancy")]
+fn claim_refusal(
+    model: &'static crate::core::ModelSchema,
+    e: crate::tenancy::org_host::ClaimError,
+) -> String {
+    use crate::tenancy::org_host::ClaimError;
+    match e {
+        ClaimError::Taken(key) => format!("{key} is already used by another tenant."),
+        ClaimError::Driver(e) => write_error(model, &e),
+    }
 }
 
 /// The form error for a failed write. Never the driver's text: it holds
@@ -2343,6 +2371,18 @@ pub(crate) async fn update_submit(
         let html = render_form(&state, model, Some(&form), true, Some(e.as_str()));
         return Ok(Html(html).into_response());
     }
+    #[cfg(feature = "tenancy")]
+    let claims = match crate::tenancy::org_host::AdminClaims::of(
+        model.table,
+        &mut collected,
+        pre_update_row.as_ref(),
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            let html = render_form(&state, model, Some(&form), true, Some(e.as_str()));
+            return Ok(Html(html).into_response());
+        }
+    };
     let audit_form = super::audit::audit_form(model, &admin_cfg, &form, &collected);
     let assignments: Vec<Assignment> = collected
         .into_iter()
@@ -2396,6 +2436,12 @@ pub(crate) async fn update_submit(
     // Parent and inline writes share one transaction: a refused inline
     // row rolls the parent back too (#2339).
     let refused = |msg: String| Html(render_form(&state, model, Some(&form), true, Some(&msg)));
+    #[cfg(feature = "tenancy")]
+    let mut tx = match claims.begin(&state.pool, &pk_value).await {
+        Ok(tx) => tx,
+        Err(e) => return Ok(refused(claim_refusal(model, e)).into_response()),
+    };
+    #[cfg(not(feature = "tenancy"))]
     let mut tx = match crate::sql::write_transaction(&state.pool).await {
         Ok(tx) => tx,
         Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
@@ -2421,6 +2467,11 @@ pub(crate) async fn update_submit(
             return Ok(refused(write_error(model, &e)).into_response());
         }
     };
+    #[cfg(feature = "tenancy")]
+    if let Err(e) = claims.after_write(&mut tx, &pk_value).await {
+        rollback_quietly(tx, model.table).await;
+        return Ok(refused(claim_refusal(model, e)).into_response());
+    }
     match admits_written(&mut tx, &parts, model, pk_field, pk_value, Written::Edited).await {
         Ok(true) => {}
         Ok(false) => {

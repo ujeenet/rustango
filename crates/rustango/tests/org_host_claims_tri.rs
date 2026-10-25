@@ -204,6 +204,65 @@ async fn two_base_claims_at_once_one_wins(pool: &Pool) {
     }
 }
 
+/// Run `apply(slug, patch)` for both slugs at once, `rounds` times with a
+/// fresh patch each round; exactly one may win every round.
+async fn two_edits_at_once_one_wins(pool: &Pool, tag: &str, patch: impl Fn(usize) -> OrgPatch) {
+    let (a, b) = (name(&format!("{tag}-a")), name(&format!("{tag}-b")));
+    org(pool, &a).await;
+    org(pool, &b).await;
+    for i in 0..10 {
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let edit = |slug: String| {
+            let (pool, barrier, patch) = (pool.clone(), barrier.clone(), patch(i));
+            tokio::spawn(async move {
+                barrier.wait().await;
+                apply(&pool, &slug, &patch).await
+            })
+        };
+        let (ra, rb) = (edit(a.clone()), edit(b.clone()));
+        let (ra, rb) = (ra.await.expect("join"), rb.await.expect("join"));
+        one_wins(
+            &ra,
+            &rb,
+            |e| matches!(e, TenancyError::Validation(m) if m.contains("already used")),
+        );
+    }
+}
+
+/// Two tenants take one free path prefix at once: only one gets it.
+async fn two_prefix_claims_at_once_one_wins(pool: &Pool) {
+    let tag = name("pfx");
+    two_edits_at_once_one_wins(pool, "pfx", |i| OrgPatch {
+        path_prefix: Some(format!("/{tag}-{i}")),
+        ..OrgPatch::default()
+    })
+    .await;
+}
+
+/// Two tenants take one free port at once: only one gets it.
+async fn two_port_claims_at_once_one_wins(pool: &Pool) {
+    // Per backend and run, so the shared registry's earlier rows never clash.
+    let run = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_micros()
+        % 1_000;
+    let base = 20_000 + run * 10 + port_offset(pool);
+    two_edits_at_once_one_wins(pool, "port", |i| OrgPatch {
+        port: Some((base as usize + i).to_string()),
+        ..OrgPatch::default()
+    })
+    .await;
+}
+
+fn port_offset(pool: &Pool) -> u32 {
+    match pool.dialect().name() {
+        "postgres" => 10_000,
+        "mysql" => 20_000,
+        _ => 30_000,
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
@@ -212,5 +271,7 @@ tri_dialect_test! {
         create_refuses_a_host_claimed_meanwhile,
         two_extra_claims_at_once_one_wins,
         two_base_claims_at_once_one_wins,
+        two_prefix_claims_at_once_one_wins,
+        two_port_claims_at_once_one_wins,
     ],
 }

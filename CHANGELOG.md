@@ -28,6 +28,26 @@ On PostgreSQL `is_in` / `__in` / `Op::In` over a list of one integer, string, bo
 
 `bulk_insert`, `bulk_update` and the audited bulk writes size their batches and run them all-or-none through one implementation.
 
+### Fixed — a busy schema-mode tenant blocked every tenant
+
+`Tenant`'s held connection (`TenantPools::acquire`) now comes from a per-tenant pool with the schema in its connect options, not the shared registry pool. Schema-mode tenants can use up to twice `scoped_pool_max_connections` each.
+
+### Fixed — `migrate-tenant-storage --to schema` could share a schema with a racing create
+
+The move creates the target schema before the tenant goes offline and refuses an existing one as `create-tenant` does; the restore replaces it in its own transaction.
+
+### Fixed — tenant path prefixes, ports and admin writes skipped the claim
+
+Path prefix and port changes are claimed like hosts, so two tenants can no longer take one at once. Generic admin writes of `rustango_orgs` and `rustango_org_hosts` now validate, normalize and claim hosts, prefixes and ports too.
+
+### Added — webhook signature v2 with a timestamp
+
+Deliveries now carry `X-Webhook-Timestamp` and `X-Webhook-Signature-V2`, an HMAC over the id, event, timestamp and body; check it with `webhook::verify_delivery`. The body-only `X-Webhook-Signature` is still sent for a transition.
+
+### Added — `PgJobQueue::queue_name`
+
+Queues sharing `rustango_jobs` picked each other's jobs. A named queue now runs only its own jobs, an unnamed one only unnamed jobs; `ensure_table_pool` adds the `queue_name` column.
+
 ## [0.61.1] — 2026-10-25
 
 ### Fixed — tenant logos 404'd under the default routes

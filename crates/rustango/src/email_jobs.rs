@@ -114,7 +114,8 @@ async fn send(mailer: &BoxedMailer, email: &Email) -> Result<(), JobError> {
 ///
 /// Each in-memory queue keeps its own mailer (#2334). Database queues
 /// share one `rustango_jobs` table, so any of them may send any queued
-/// mail: use one mailer per jobs table (#2338).
+/// mail: use one mailer per jobs table, or give each queue its own
+/// `PgJobQueue::queue_name`.
 pub async fn register_email_job<Q: JobQueue>(queue: &Q, cfg: EmailJobConfig) {
     #[cfg(feature = "jobs-postgres")]
     warn_on_second_db_mailer(queue, &cfg.mailer);
@@ -132,7 +133,7 @@ pub async fn register_email_job<Q: JobQueue>(queue: &Q, cfg: EmailJobConfig) {
         .await;
 }
 
-/// Warn once per database when two of its queues get different mailers.
+/// Warn once per database and queue name when two queues get different mailers.
 #[cfg(feature = "jobs-postgres")]
 fn warn_on_second_db_mailer<Q: JobQueue>(queue: &Q, mailer: &BoxedMailer) {
     let any: &dyn std::any::Any = queue;
@@ -149,12 +150,16 @@ fn warn_on_second_db_mailer<Q: JobQueue>(queue: &Q, mailer: &BoxedMailer) {
     }
 }
 
+/// A jobs table and a queue name on it: the jobs a queue may claim.
+#[cfg(feature = "jobs-postgres")]
+type DbQueue = (u64, Option<std::sync::Arc<str>>);
+
 /// Record `mailer` for `queue_id` on `db`. `true` the first time the
 /// queues of `db` disagree on their mailer.
 #[cfg(feature = "jobs-postgres")]
-fn mixed_db_mailers(db: u64, queue_id: usize, mailer: &BoxedMailer) -> bool {
+fn mixed_db_mailers(db: DbQueue, queue_id: usize, mailer: &BoxedMailer) -> bool {
     use std::collections::HashMap;
-    type Seen = HashMap<u64, (HashMap<usize, BoxedMailer>, bool)>;
+    type Seen = HashMap<DbQueue, (HashMap<usize, BoxedMailer>, bool)>;
     static SEEN: OnceLock<std::sync::Mutex<Seen>> = OnceLock::new();
     let mut seen = SEEN
         .get_or_init(Default::default)
@@ -341,13 +346,15 @@ mod tests {
         let (m1, m2): (BoxedMailer, BoxedMailer) =
             (StdArc::new(NullMailer), StdArc::new(NullMailer));
         // Distinct `db` keys keep this test apart from any other.
-        let db = 0xD8_2337;
-        assert!(!mixed_db_mailers(db, 1, &m1), "first queue");
-        assert!(!mixed_db_mailers(db, 1, &m2), "same queue re-registered");
-        assert!(!mixed_db_mailers(db + 1, 2, &m1), "own database");
-        assert!(!mixed_db_mailers(db, 2, &m2), "same mailer on the database");
-        assert!(mixed_db_mailers(db, 3, &m1), "two mailers on one table");
-        assert!(!mixed_db_mailers(db, 4, &m1), "warned once");
+        let (n, named) = (0xD8_2337, Some(StdArc::<str>::from("mailer")));
+        let db = || (n, None);
+        assert!(!mixed_db_mailers(db(), 1, &m1), "first queue");
+        assert!(!mixed_db_mailers(db(), 1, &m2), "same queue re-registered");
+        assert!(!mixed_db_mailers((n + 1, None), 2, &m1), "own database");
+        assert!(!mixed_db_mailers((n, named), 5, &m1), "own queue name");
+        assert!(!mixed_db_mailers(db(), 2, &m2), "same mailer on the database");
+        assert!(mixed_db_mailers(db(), 3, &m1), "two mailers on one table");
+        assert!(!mixed_db_mailers(db(), 4, &m1), "warned once");
     }
 
     /// Retries span minutes, so a short relay outage does not dead-letter
