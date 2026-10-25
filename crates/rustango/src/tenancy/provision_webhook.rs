@@ -232,6 +232,8 @@ impl std::fmt::Debug for ProvisionPayload {
                 "database_url",
                 &super::org::redacted_url(self.database_url.as_deref()),
             )
+            .field("admin_email", &self.admin_email)
+            .field("admin_username", &self.admin_username)
             .finish()
     }
 }
