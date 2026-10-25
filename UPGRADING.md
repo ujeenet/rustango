@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Schema-mode creates check `CREATE` on the registry database
+
+A registry login without it is now refused before `CREATE SCHEMA`, with the `GRANT` to run. `Dialect::login_privileges_sql` on MySQL now returns `SHOW GRANTS` lines.
+
 ### Scaffold taglines lose their brackets
 
 `cargo rustango new` now writes `tagline = "dev"` / `"staging"`, not `"(dev)"` / `"(staging)"`. Existing projects keep theirs; edit the line to match.

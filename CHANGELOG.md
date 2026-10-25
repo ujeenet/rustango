@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — tenant creates say which database rights are missing
+
+The server Test, the New tenant Test, the run and the CLI (`test-db-server`, `create-tenant`) share one rights report: each right yes, no or unknown, what is missing, and the `GRANT` / `ALTER ROLE` that fixes it. Schema mode now checks the registry login's `CREATE` before `CREATE SCHEMA`; the form explains each option's login and rights.
+
+### Fixed — MySQL admins whose rights come from a role were refused
+
+The probe reads `SHOW GRANTS`, so active roles count, nested ones too, on MySQL and MariaDB. Rights the server will not report are "unknown" and no longer block. Refusals are logged, and console errors drop the `tenancy validation:` prefix.
+
 ### Fixed — tenant logos 404'd under the default routes
 
 Tenant pages link uploaded logos and favicons under `RouteConfig::brand_url` (`/_brand` by default), the prefix tenant hosts serve, via the new `RouteConfig::brand_asset_url`. Tenant admin pages now use the tenant favicon too.

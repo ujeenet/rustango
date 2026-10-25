@@ -140,9 +140,17 @@ Tenants created from the CLI are recorded too, tagged `requested_by = cli`, so t
 
 ### Creating a tenant
 
-**Organizations → New tenant**. In database mode, pick one:
+**Organizations → New tenant**. Each option says on the form where the data
+lives, which login is used and which rights it needs:
 
-- **Create a new database on a saved server**: choose the server. The
+- **Schema** (PostgreSQL registry only): a schema in the registry database.
+  It uses the registry's login (`DATABASE_URL`); tenants share it and get no
+  login of their own. Needs `CREATE` on the registry database.
+
+In database mode, pick one:
+
+- **Create a new database on a saved server**: choose the server. It uses the
+  server's admin login once; the tenant gets its own login. The
   database is named exactly as the slug and gets a login of its own with a
   random password, granted that database only. The run shows
   `create_database`, `create_login`, `grant` and `check_login` (the new login
@@ -150,13 +158,20 @@ Tenants created from the CLI are recorded too, tagged `requested_by = cli`, so t
   fails, the run's `rollback` step drops the new database, login and tenant
   row, and the form comes back with the reason. This is the default once a
   server is saved.
-- **Use an existing database URL**: masked, and never sent back to the page.
+- **Use an existing database URL**: nothing is created; the database must
+  exist. Masked, and never sent back to the page. No admin rights needed.
 - **A database on the registry's server**: a database name; it uses the
-  registry's login, so tenants are not isolated from each other.
+  registry's login (`DATABASE_URL`), so tenants are not isolated from each
+  other. Nothing is created.
 
-**Test connection** on a saved server runs every check a submit runs before
-creating anything (slug free, routing, admin rights, no database or login of
-that name) and reports the rights. Otherwise it reaches the database. The
+**Test connection** checks what the chosen option needs and creates nothing.
+On a saved server it runs every check a submit runs before creating anything
+(slug free, routing, admin rights, no database or login of that name) and
+lists each right as yes, no or unknown. In schema mode it checks the
+registry login's `CREATE` on the registry database. A missing right comes
+with the statements that fix it, and the create is refused with the same
+text before anything is made. See
+[Rights](tenant-databases.md#rights). Otherwise it reaches the database. The
 backend is always the registry's.
 
 ### First admin
@@ -193,16 +208,19 @@ set; without it the save is refused and the page shows a warning. It is never sh
 leaves the field empty, and a blank field keeps the saved one. Audit rows name
 the fields that changed, never their values.
 
-**Test** logs in and reports the server version and whether the admin login may
-create databases, create logins and grant rights, plus the first reason it
-cannot provision tenants (for example PostgreSQL before 15).
+**Test** logs in and lists the server version and, one line each, whether the
+admin login may create databases, create logins and grant rights. When it
+cannot provision tenants it says why (a missing right, or PostgreSQL before
+15) and shows the `GRANT` / `ALTER ROLE` statements that fix it. Rights from
+active MySQL roles count.
 
 TLS defaults to `require` for a new server. An edit made from a page that
 someone else changed in the meantime is refused; reload and edit again.
 
 In the scaffolded `docker compose` dev stack, Postgres has no TLS, so save it
-with TLS `disable`. The compose MySQL `rustango` user cannot create users or
-grant rights; save that server as `root`.
+with TLS `disable`; MySQL 8 serves TLS, so `require` works. The compose MySQL
+`rustango` user cannot create users or grant rights; save that server as
+`root`.
 
 Delete is refused while a database-mode tenant's URL points at the server's
 host and port (SQLite: a file in its directory), or cannot be resolved, while

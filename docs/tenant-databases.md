@@ -12,6 +12,7 @@ its password changed by rustango.
 ## Table of contents
 
 - [Before you start](#before-you-start)
+- [Rights](#rights)
 - [1. Set the secret key](#1-set-the-secret-key)
 - [2. Save the server](#2-save-the-server)
 - [3. Test it](#3-test-it)
@@ -38,6 +39,43 @@ its password changed by rustango.
 | PostgreSQL | `CREATEDB` and `CREATEROLE`, or superuser |
 | MySQL / MariaDB | global `CREATE`, `DROP`, `CREATE USER`, and every database privilege `WITH GRANT OPTION` |
 | SQLite | a writable directory; tenants are `<dir>/<slug>.db` |
+
+Rights from MySQL roles count when the role is active by default
+(`SET DEFAULT ROLE`). See [Rights](#rights) for the full picture.
+
+## Rights
+
+Each way of creating a tenant uses a different login and needs different
+rights. **Test connection**, `test-db-server` and the create itself check
+the same list, name what is missing and print the statements that fix it.
+A create is refused before anything is made.
+
+| Option | Where the data lives | Login used | Tenant's own login | Rights needed |
+|---|---|---|---|---|
+| Database, new on a saved server | a new database named as the slug | the server's admin login, once | yes | create databases, create logins, grant |
+| Database, existing URL | the database in the URL | the login in the URL | the URL's | none: nothing is created; the login must create tables |
+| Database on the registry's server | an existing database there | the registry's (`DATABASE_URL`), shared | no, not isolated | none: nothing is created |
+| Schema (PostgreSQL only) | a schema in the registry database | the registry's (`DATABASE_URL`), shared | no | `CREATE` on the registry database |
+
+To give a login the rights, run as an admin. MySQL / MariaDB, as `root`:
+
+```sql
+GRANT CREATE, DROP, CREATE USER ON *.* TO 'rustango'@'%';
+GRANT ALL PRIVILEGES ON *.* TO 'rustango'@'%' WITH GRANT OPTION;
+```
+
+PostgreSQL, as a superuser:
+
+```sql
+ALTER ROLE rustango CREATEDB CREATEROLE;
+-- schema mode: the registry's login
+GRANT CREATE ON DATABASE app TO rustango;
+```
+
+The generated docker-compose's MySQL login `rustango` has rights on its own
+database only: save the server with `root` as its admin login instead. When
+the server will not say what a login may do, the check reports "unknown" and
+lets the create try. Or skip all of this: use an existing database URL.
 
 ## 1. Set the secret key
 
@@ -70,8 +108,10 @@ The password is asked at a hidden prompt and stored sealed. TLS defaults to
 cargo run -- test-db-server main
 ```
 
-It logs in and reports the server version and whether the admin may create
-databases, create logins and grant rights. On the console's **New tenant**
+It logs in and reports the server version and, one line each, whether the
+admin may create databases, create logins and grant rights. When one is
+missing it names it and prints the statements that fix it (see
+[Rights](#rights)). On the console's **New tenant**
 page, **Test connection** with a slug also runs every check a create runs
 before any DDL: slug free, routing free, and no database or login of that
 name.
@@ -243,15 +283,17 @@ point the saved server at the new host with `edit-db-server`.
 
 ## Local development with Docker
 
-Local database containers usually have no TLS, so save the server with
-`--tls disable`. On MySQL the `root` login has every right the admin needs.
+The stock `postgres` image has no TLS, so save it with `--tls disable`.
+`mysql:8` serves TLS with a self-signed certificate: `--tls require` works,
+`verify-ca` needs that certificate. On MySQL use `root`: the generated
+docker-compose's `rustango` login lacks the rights (see [Rights](#rights)).
 
 ```bash
 docker run -d --name pg -e POSTGRES_PASSWORD=pw -p 5432:5432 postgres:16
 cargo run -- add-db-server local --host 127.0.0.1 --port 5432 --user postgres --tls disable
 
 docker run -d --name my -e MYSQL_ROOT_PASSWORD=pw -p 3306:3306 mysql:8
-cargo run -- add-db-server local --host 127.0.0.1 --port 3306 --user root --tls disable
+cargo run -- add-db-server local --host 127.0.0.1 --port 3306 --user root --tls require
 ```
 
 Never use `--tls disable` for a server reached over a network you do not
