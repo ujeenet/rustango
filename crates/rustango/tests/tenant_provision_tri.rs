@@ -981,6 +981,10 @@ async fn late_failures_roll_back(pool: &Pool) {
     let env = Env::new(pool).await;
     env.add_server("main").await;
     for step in ["check_login", "activate"] {
+        // A SQLite tenant has no login, so nothing to check.
+        if step == "check_login" && !env.server_backend() {
+            continue;
+        }
         let a = slug(&format!("late-{}", &step[..3]));
         env.clean(&[&a]).await;
         std::env::set_var("RUSTANGO_PROVISION_FAIL_AT", step);
