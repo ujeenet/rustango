@@ -637,12 +637,12 @@ use rustango::webhook::{verify_delivery, DeliveryHeaders, SignatureFormat};
 
 fn check(secret: &[u8], headers: &HeaderMap, body: &Bytes) -> StatusCode {
     let h = |name| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("");
-    let signed = DeliveryHeaders {
-        id: h("x-webhook-id"),
-        event: h("x-webhook-event"),
-        timestamp: h("x-webhook-timestamp"),
-        signature: h("x-webhook-signature-v2"),
-    };
+    let signed = DeliveryHeaders::new(
+        h("x-webhook-id"),
+        h("x-webhook-event"),
+        h("x-webhook-timestamp"),
+        h("x-webhook-signature-v2"),
+    );
     let max_age = std::time::Duration::from_secs(600);
     if !verify_delivery(SignatureFormat::HexSha256WithPrefix, secret, &signed, body, max_age) {
         return StatusCode::UNAUTHORIZED;

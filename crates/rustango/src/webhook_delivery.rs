@@ -34,6 +34,9 @@
 //! - `X-Webhook-Timestamp: <unix seconds at dispatch>`
 //! - `X-Webhook-Signature-V2: <signature>` over the id, event, timestamp
 //!   and body; check it with [`verify_delivery`], which also bounds the age.
+//!   The timestamp is set at dispatch and retries reuse it: the default
+//!   retries span about two minutes, so `max_age` must cover that plus
+//!   any queue backlog.
 //! - `X-Webhook-Signature: <signature>` over the body only, for receivers
 //!   not yet on v2. It does not stop a replay under a new id or event:
 //!   move receivers to v2. Both are in your chosen [`SignatureFormat`].

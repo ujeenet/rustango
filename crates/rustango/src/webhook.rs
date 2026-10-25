@@ -110,6 +110,7 @@ pub fn sign(
 /// The signed headers of a delivery from `rustango::webhook_delivery`,
 /// as received.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct DeliveryHeaders<'a> {
     /// `X-Webhook-Id`.
     pub id: &'a str,
@@ -119,6 +120,19 @@ pub struct DeliveryHeaders<'a> {
     pub timestamp: &'a str,
     /// `X-Webhook-Signature-V2`.
     pub signature: &'a str,
+}
+
+impl<'a> DeliveryHeaders<'a> {
+    /// The four header values, as received.
+    #[must_use]
+    pub fn new(id: &'a str, event: &'a str, timestamp: &'a str, signature: &'a str) -> Self {
+        Self {
+            id,
+            event,
+            timestamp,
+            signature,
+        }
+    }
 }
 
 /// The v2 signed string. Header values hold no newline, so no two
@@ -148,7 +162,8 @@ pub fn sign_delivery(
 
 /// Check a delivery's v2 signature, and that its timestamp is within
 /// `max_age` of now. Drop repeated `X-Webhook-Id`s seen within `max_age`
-/// to refuse replays; `max_age` must cover how long jobs may queue.
+/// to refuse replays. Retries reuse the dispatch timestamp, so `max_age`
+/// must cover queue backlog plus the retry window (about two minutes).
 ///
 /// ```
 /// use rustango::webhook::{sign_delivery, verify_delivery, DeliveryHeaders, SignatureFormat};
@@ -157,9 +172,9 @@ pub fn sign_delivery(
 /// let f = SignatureFormat::HexSha256WithPrefix;
 /// let sig = sign_delivery(f, b"s", "id-1", "order.created", now, b"{}").unwrap();
 /// let ts = now.to_string();
-/// let h = DeliveryHeaders { id: "id-1", event: "order.created", timestamp: &ts, signature: &sig };
+/// let h = DeliveryHeaders::new("id-1", "order.created", &ts, &sig);
 /// assert!(verify_delivery(f, b"s", &h, b"{}", std::time::Duration::from_secs(300)));
-/// let replayed = DeliveryHeaders { id: "id-2", ..h };
+/// let replayed = DeliveryHeaders::new("id-2", "order.created", &ts, &sig);
 /// assert!(!verify_delivery(f, b"s", &replayed, b"{}", std::time::Duration::from_secs(300)));
 /// ```
 #[must_use]
