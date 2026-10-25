@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+### `api::create_tenant` goes through the provisioning engine
+
+A failed migration now returns `TenancyError::Validation` (with the cause in the text), not `TenancyError::Migrate`. If the run record cannot be written, the create fails, as on the CLI.
+`provision_tenant` given a project root now applies `migrations/` and every `<app>/migrations/` under it; a flat migrations dir works as before.
+
 ### Built-in logo is square
 
 `/__static__/rustango.png` and `icon.png` now serve a 256 px / 64 px square logo instead of the wide banner. A custom template sized for the banner may need new image dimensions.

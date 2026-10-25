@@ -6,6 +6,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set; `ProvisionRequest` takes a `TenantStorage` and an optional backend, which must be the registry's; a blank `RUSTANGO_SECRET_KEY` no longer seals; `RunKind` is `#[non_exhaustive]`; provisioning types gain a `first_admin` field; `S3Storage::new` takes an `S3Config` and credentials apart; `CreateView`, `UpdateView`, `ViewSet::for_model` and `#[viewset]` require the writable field list and lose `.fields()`; `PoolTuning` and `DatabaseSettings` are `#[non_exhaustive]`; `Debug` on auth, SSO and tenancy structs hides secrets. See UPGRADING.
 
+### Changed — `api::create_tenant` runs the provisioning engine
+
+It no longer repeats the engine's steps: the run records each step like the CLI and console, and a resume goes through the engine too. The engine takes a project root and migrates every app's `migrations/` dir.
+
 ### Fixed — racing schema-mode creates got a driver error
 
 Of two creates racing for one schema, the loser now gets the usual `already exists` refusal instead of a raw unique-violation.
