@@ -55,6 +55,34 @@ pub(crate) fn text(
         .or_else(|| before?.get(column)?.as_str().map(str::to_owned))
 }
 
+/// The admin writes `active` itself; a deactivation there ends the account's
+/// sessions and JWT refresh in the same UPDATE, at the logout cut-off.
+pub(crate) fn revoke_on_deactivate<'a>(
+    values: &'a mut Vec<(&'static str, SqlValue)>,
+    before: Option<&'a serde_json::Value>,
+) -> DeriveFuture<'a> {
+    use crate::session::SESSIONS_REVOKED_AT;
+    Box::pin(async move {
+        let was_active = before
+            .and_then(|r| r.get("active"))
+            .is_some_and(|v| v.as_bool() == Some(true) || v.as_i64().is_some_and(|n| n != 0));
+        let deactivates = values
+            .iter()
+            .any(|(c, v)| *c == "active" && matches!(v, SqlValue::Bool(false)));
+        if !(was_active && deactivates) {
+            return Ok(());
+        }
+        let prev = before
+            .and_then(|r| r.get(SESSIONS_REVOKED_AT)?.as_str())
+            .and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
+        let cutoff = crate::session::logout_cutoff(prev, 0);
+        let cutoff = chrono::DateTime::from_timestamp(cutoff, 0).unwrap_or_else(chrono::Utc::now);
+        values.retain(|(c, _)| *c != SESSIONS_REVOKED_AT);
+        values.push((SESSIONS_REVOKED_AT, SqlValue::DateTime(cutoff)));
+        Ok::<(), String>(())
+    })
+}
+
 /// The submitted plaintext of a `password`-widget column, taken out of
 /// `values`. The admin already dropped it when an edit left it empty.
 pub(crate) fn take_secret(
