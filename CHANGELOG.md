@@ -4,6 +4,63 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.1] — 2026-10-25
+
+### Fixed — tenant logos 404'd under the default routes
+
+Tenant pages link uploaded logos and favicons under `RouteConfig::brand_url` (`/_brand` by default), the prefix tenant hosts serve, via the new `RouteConfig::brand_asset_url`. Tenant admin pages now use the tenant favicon too.
+
+### Added — `[brand] logo_path` for the operator console
+
+A local logo file (env `RUSTANGO_OPERATOR_LOGO_PATH`), read once at boot with the tenant upload checks and served by the console under a content-hashed, long-cached URL. `logo_url` still wins within the same source.
+
+### Changed — scaffold tier taglines are `dev` / `staging`
+
+New projects get plain `dev` / `staging` taglines (they render as a badge), and the commented `[brand]` example in `default.toml` shows `logo_url` and `logo_path`.
+
+### Fixed — ORM and MySQL
+
+- MariaDB: JSON writes and text JSON paths no longer send `CAST(… AS JSON)`, which it rejects.
+- MySQL: an `update()` / `delete()` filtered by `EXISTS` or `where_has` over its own table no longer fails with error 1093; one nested deeper still does, rather than see its own writes.
+- MySQL: an auto M2M junction over an `i32` / `i16` pk keeps the pk's width, so its foreign keys are accepted.
+- `ForeignKey::get_pool` no longer needs the `postgres` feature.
+- MySQL / SQLite: `distinct_on` picks each row by the NULLS FIRST / LAST order too.
+
+### Fixed — deactivating an admin user ends their sessions
+
+Unchecking **active** on a `rustango_admin_users` row stamps the logout cut-off, as for operators and tenant users, so reactivating revives no old cookie.
+New `session::deactivate::<T>(pool, id)` does the same from code; a direct ORM write to `active` does not stamp.
+
+### Fixed — `create-api-key` could write its own key file
+
+The verb only loads the server's key (`RUSTANGO_SESSION_SECRET` or the dev key file) and fails when there is none, so every key it prints matches the server. Off the prod tier a malformed secret falls back to the dev key file, as the server does.
+
+### Fixed — pages with a CSRF token could be shared by a cache
+
+Template views that render `csrf_input` send `Cache-Control: private` and `Vary: Cookie`, so a cache never serves one user's token to another.
+
+### Fixed — `X-Forwarded-Proto` / `-Host` read the client's hop
+
+Behind a trusted proxy the SSO and MCP redirect builders take the value set by the outermost trusted proxy, read from the right, not the first.
+
+### Added — `--current-stdin` and `RUSTANGO_CURRENT_PASSWORD` for change-password verbs
+
+`change-password` and `change-operator-password` read the current password from stdin or the env off a terminal, and warn when `--current` is in argv.
+
+### Changed — `api::create_tenant` runs the provisioning engine
+
+It no longer repeats the engine's steps: the run records each step like the CLI and console, and a resume goes through the engine too. The engine takes a project root and migrates every app's `migrations/` dir. A create of a taken slug no longer leaves a failed run.
+
+**Behaviour change:** a failed migration returns `TenancyError::Validation` instead of `TenancyError::Migrate`, and the registry must be migrated first, since the run record is required. See UPGRADING.
+
+### Fixed — racing schema-mode creates got a driver error
+
+Of two creates racing for one schema, the loser now gets the usual `already exists` refusal instead of a raw unique-violation.
+
+### Fixed — scaffolded apps warned on every start
+
+The api, fullstack and tenant templates no longer chain `.with_welcome()`: their own `/` route made it skip with a warning each boot.
+
 ## [0.61.0] — 2026-10-25
 
 **Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set; `ProvisionRequest` takes a `TenantStorage` and an optional backend, which must be the registry's; a blank `RUSTANGO_SECRET_KEY` no longer seals; `RunKind` is `#[non_exhaustive]`; provisioning types gain a `first_admin` field; `S3Storage::new` takes an `S3Config` and credentials apart; `CreateView`, `UpdateView`, `ViewSet::for_model` and `#[viewset]` require the writable field list and lose `.fields()`; `PoolTuning` and `DatabaseSettings` are `#[non_exhaustive]`; `Debug` on auth, SSO and tenancy structs hides secrets. See UPGRADING.

@@ -391,8 +391,8 @@ async fn migrate_tenants_opts(
         // Surface the most likely cause for an `applied=0` report: caller
         // passed a path with no tenant-scoped migrations. Common footgun
         // is passing the project root when a flat `migrations/` subdir
-        // was meant. The typed `tenancy::manage::api` auto-detects via
-        // `resolve_migration_dirs`, but raw callers can still hit this.
+        // was meant. Tenant provisioning auto-detects via
+        // `provision::migration_dirs`, but raw callers can still hit this.
         warn!(
             target: "rustango::tenancy",
             dir = %dir.display(),

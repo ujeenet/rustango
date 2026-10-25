@@ -332,7 +332,7 @@ pub fn secure_cookies() -> bool {
 /// Goes to both `tracing` (for the logs) and stderr (for whoever is
 /// watching the boot). Staying quiet here makes a failed key rotation
 /// look like it worked.
-fn warn_unusable_secret(reason: &str) {
+pub(crate) fn warn_unusable_secret(reason: &str) {
     tracing::warn!(
         reason,
         "RUSTANGO_SESSION_SECRET is set but unusable — falling back to the persisted key",
@@ -443,6 +443,17 @@ pub(crate) fn logout_cutoff(
     issued_at(sessions_revoked_at).max(cookie_iat.saturating_add(1))
 }
 
+/// [`logout_cutoff`] as the timestamp stored in `sessions_revoked_at`.
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+#[must_use]
+pub(crate) fn logout_cutoff_at(
+    sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    cookie_iat: i64,
+) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp(logout_cutoff(sessions_revoked_at, cookie_iat), 0)
+        .unwrap_or_else(chrono::Utc::now)
+}
+
 /// End every session of row `id` of `T`, on every device, at [`logout_cutoff`].
 /// `sessions_revoked_at` is the row's current value; the WHERE never moves it back.
 ///
@@ -457,9 +468,7 @@ pub(crate) async fn revoke_sessions<T: crate::core::Model + Send>(
 ) -> Result<u64, crate::sql::ExecError> {
     use crate::query::Q;
     use crate::sql::UpdaterPool as _;
-    let cutoff =
-        chrono::DateTime::from_timestamp(logout_cutoff(sessions_revoked_at, cookie_iat), 0)
-            .unwrap_or_else(chrono::Utc::now);
+    let cutoff = logout_cutoff_at(sessions_revoked_at, cookie_iat);
     crate::query::QuerySet::<T>::default()
         .filter("id", id)
         .where_(Q::is_null(SESSIONS_REVOKED_AT) | Q::lt(SESSIONS_REVOKED_AT, cutoff))
@@ -467,6 +476,47 @@ pub(crate) async fn revoke_sessions<T: crate::core::Model + Send>(
         .set(SESSIONS_REVOKED_AT, cutoff)
         .execute_pool(pool)
         .await
+}
+
+/// Deactivate row `id` of a session principal (`AdminUser`, `Operator`, a
+/// tenant user) and end its sessions, so a later reactivation revives none.
+/// Writing `active = false` through the ORM directly does not stamp them.
+///
+/// Returns `false` when there is no such row. `T` needs the `active` and
+/// `sessions_revoked_at` columns.
+///
+/// # Errors
+/// [`crate::sql::ExecError`] from the read or the updates.
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+pub async fn deactivate<T: crate::core::Model + Send>(
+    pool: &crate::sql::Pool,
+    id: i64,
+) -> Result<bool, crate::sql::ExecError> {
+    use crate::core::{SelectQuery, SqlValue};
+    use crate::sql::UpdaterPool as _;
+    let fields: Vec<&'static crate::core::FieldSchema> = T::SCHEMA
+        .fields
+        .iter()
+        .filter(|f| f.column == SESSIONS_REVOKED_AT)
+        .collect();
+    let select = SelectQuery::by_pk(T::SCHEMA, "id", SqlValue::I64(id));
+    let Some(row) = crate::sql::select_one_row_as_json(pool, &select, &fields).await? else {
+        return Ok(false);
+    };
+    let prev = row
+        .get(SESSIONS_REVOKED_AT)
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc));
+    // Stamp first: a failure in between leaves an active, logged-out account.
+    revoke_sessions::<T>(pool, id, prev, 0).await?;
+    crate::query::QuerySet::<T>::default()
+        .filter("id", id)
+        .update()
+        .set("active", false)
+        .execute_pool(pool)
+        .await?;
+    Ok(true)
 }
 
 #[cfg(test)]

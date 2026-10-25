@@ -658,6 +658,18 @@ where
     use super::provision_store as store;
 
     let registry = pools.registry_pool();
+    // A taken slug leaves no failed run behind. A lookup error falls
+    // through, so Validate records it; Validate also checks again.
+    let taken = Org::objects()
+        .where_(Org::slug.eq(request.slug.clone()))
+        .first(&registry)
+        .await;
+    if matches!(taken, Ok(Some(_))) {
+        return Err(TenancyError::Validation(format!(
+            "tenant slug `{}` already exists",
+            request.slug
+        )));
+    }
     let run = store::open_run(
         &registry,
         &request.slug,
@@ -1967,8 +1979,13 @@ pub(crate) async fn provision_schema<DB: Database>(
             .await
         {
             Ok(_) => Ok(()),
-            // duplicate_schema
-            Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("42P06") => {
+            // duplicate_schema; or unique_violation when a concurrent create
+            // inserted the same name first.
+            Err(sqlx::Error::Database(e))
+                if e.code().as_deref() == Some("42P06")
+                    || (e.code().as_deref() == Some("23505")
+                        && e.constraint() == Some("pg_namespace_nspname_index")) =>
+            {
                 Err(TenancyError::Validation(format!(
                     "schema `{schema}` already exists — choose another schema name, or, if a \
                      failed create left it empty, run `DROP SCHEMA {}`",
@@ -2637,11 +2654,26 @@ where
     let forward = move |event: tenant_migrate::TenantMigrationEvent| rep.migration(event);
     let forward: Option<&dyn tenant_migrate::TenantMigrationObserver> = Some(&forward);
 
-    // One call, no backend branch: `migrate_one_tenant` owns the
+    // No backend branch: `migrate_one_tenant` owns the
     // schema-mode-is-PG-only dispatch that used to be duplicated here.
-    match tenant_migrate::migrate_one_tenant(pools, org, dir, registry_url, forward).await {
-        Ok(applied) => MigrationsOutcome::Applied(applied),
-        Err(e) => MigrationsOutcome::Failed(e.to_string()),
+    let mut applied = Vec::new();
+    for dir in migration_dirs(dir) {
+        match tenant_migrate::migrate_one_tenant(pools, org, &dir, registry_url, forward).await {
+            Ok(mut more) => applied.append(&mut more),
+            Err(e) => return MigrationsOutcome::Failed(e.to_string()),
+        }
+    }
+    MigrationsOutcome::Applied(applied)
+}
+
+/// A project root's `migrations/` and `<app>/migrations/` dirs, else `dir`
+/// itself as a flat migrations dir. The same shape `Builder::migrate` takes.
+fn migration_dirs(dir: &Path) -> Vec<std::path::PathBuf> {
+    let dirs = crate::migrate::file::discover_migration_dirs(dir);
+    if dirs.is_empty() {
+        vec![dir.to_path_buf()]
+    } else {
+        dirs
     }
 }
 

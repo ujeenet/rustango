@@ -300,13 +300,22 @@ where
         })
         .transpose()?;
 
+    // The server's key, loaded only: a key made here would match no server.
+    let (mac_key, source) = auth_backends::existing_api_key_secret()?;
     let pool = tenant_pool_for_slug(pools, &slug).await?;
     auth_backends::ensure_api_keys_table_pool(&pool)
         .await
         .map_err(TenancyError::Driver)?;
     let user_id = user_id_by_username(&username, &pool).await?;
-    let token = auth_backends::create_api_key(user_id, &label, expires_at, &pool).await?;
+    let token =
+        auth_backends::create_api_key_signed(mac_key, user_id, &label, expires_at, &pool).await?;
 
+    if source == Some(crate::tenancy::session::KeySource::DevFile) {
+        writeln!(
+            w,
+            "note: the key is signed with the dev key file; it works only on a server using the same file"
+        )?;
+    }
     writeln!(w, "API key for `{username}` on tenant `{slug}`:")?;
     writeln!(w, "  {token}")?;
     writeln!(w, "Store this — it won't be shown again.")?;

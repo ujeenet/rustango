@@ -2655,9 +2655,11 @@ fn csrf_protected(router: Router<()>) -> Router<()> {
 }
 
 /// Append a `Set-Cookie` header to a ready response when
-/// [`stamp_csrf`] minted a fresh token. No-op for the common case
-/// where the cookie was already present.
+/// [`stamp_csrf`] minted a fresh token. The page holds the user's token,
+/// so it is always marked private to shared caches.
 fn apply_csrf_cookie(resp: &mut Response, set_cookie: Option<String>) {
+    crate::vary::mark_private(resp.headers_mut());
+    crate::vary::add_vary(resp.headers_mut(), "Cookie");
     let Some(c) = set_cookie else { return };
     if let Ok(hv) = axum::http::HeaderValue::from_str(&c) {
         resp.headers_mut()
@@ -6128,6 +6130,48 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
         assert_eq!(std::str::from_utf8(&body).unwrap(), "errors:0");
+    }
+
+    /// A page carrying the user's CSRF token is never shared by a cache.
+    #[tokio::test]
+    async fn csrf_stamped_page_is_private_and_varies_on_cookie() {
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "{{ csrf_input | safe }}")
+            .unwrap();
+        let app = FormView::<AnyForm>::for_form(|_| async { Ok(()) })
+            .template("f.html")
+            .router("/", Arc::new(tera));
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(
+                        "cookie",
+                        "rustango_csrf=existing-token-existing-token-existing-toke",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let header = |name| {
+            res.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+        };
+        assert!(
+            header(axum::http::header::CACHE_CONTROL).contains("private"),
+            "{:?}",
+            res.headers()
+        );
+        assert!(
+            header(axum::http::header::VARY).contains("cookie"),
+            "{:?}",
+            res.headers()
+        );
     }
 
     #[tokio::test]

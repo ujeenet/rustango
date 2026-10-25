@@ -19,5 +19,5 @@ hsts_max_age_secs = 0
 secure_cookies    = false
 
 [brand]
-# Make the dev tier visually distinguishable from prod.
-tagline = "(dev)"
+# Make the dev tier visually distinguishable from prod (shown as a badge).
+tagline = "dev"

@@ -1,4 +1,4 @@
-//! [`RouteConfig`] — apex / tenant URL prefixes (#74, v0.28.0).
+//! [`RouteConfig`] — apex / tenant URL prefixes (v0.28.0).
 //!
 //! Pre-0.28, every framework-internal URL was hardcoded:
 //! `/__login`, `/__logout`, `/__admin`, `/__audit`, `/__static__`,
@@ -6,7 +6,7 @@
 //! user routes, but apps shipping to production want friendly URLs
 //! (`/login`, `/admin`) that match user expectations.
 //!
-//! **v0.29 default flip (#85):** [`RouteConfig::default`] now
+//! **v0.29 default flip:** [`RouteConfig::default`] now
 //! returns the friendly preset (`/login`, `/admin`, `/audit`, …).
 //! Projects that need to keep the v0.28 `__`-prefixed paths must
 //! opt in via `RouteConfig::legacy()` or set the relevant fields
@@ -57,7 +57,7 @@ pub struct RouteConfig {
     /// Default `/logout` (since v0.29; was `/__logout` pre-flip).
     pub logout_url: String,
     /// URL prefix for the per-tenant admin Router. Same value
-    /// the `admin_prefix` template variable carries (#59). The
+    /// the `admin_prefix` template variable carries. The
     /// tenant admin mounts under `<admin_url>/{*rest}`. Must
     /// match between the tenant admin and operator console
     /// when impersonation is enabled, since the operator
@@ -81,7 +81,7 @@ pub struct RouteConfig {
     /// `/_brand` (since v0.29; was `/__brand__`).
     pub brand_url: String,
     /// URL of the self-serve change-password page on the tenant
-    /// admin (#77, v0.28.2). GET renders a form (current password
+    /// admin (v0.28.2). GET renders a form (current password
     /// + new password + confirm); POST verifies the current
     /// password and updates `rustango_users.password_hash`. The
     /// route lives outside [`Self::admin_url`] so it stays a
@@ -90,7 +90,7 @@ pub struct RouteConfig {
     pub change_password_url: String,
     /// URL on the tenant admin where the operator console's
     /// impersonation flow lands the browser to redeem a signed
-    /// handoff token (#88). Solves the Chromium-localhost
+    /// handoff token. Solves the Chromium-localhost
     /// public-suffix-list cookie problem: the operator console
     /// can't set a `Domain=.localhost` cookie that subdomains
     /// receive, so it instead 302s to this URL with a `?token=`
@@ -109,8 +109,8 @@ pub struct RouteConfig {
     pub tenant_session_ttl: Duration,
     /// Operator-console session lifetime. Default 7 days.
     pub operator_session_ttl: Duration,
-    /// Operator-as-superuser impersonation cookie lifetime
-    /// (#78). Default 1 hour. Short by design — long enough
+    /// Operator-as-superuser impersonation cookie lifetime.
+    /// Default 1 hour. Short by design — long enough
     /// for a debugging session, short enough that an idle
     /// operator gets dropped before they can forget they're
     /// impersonating.
@@ -176,7 +176,7 @@ impl RouteConfig {
             brand_url: "/__brand__".to_owned(),
             change_password_url: "/__change-password".to_owned(),
             // Note: keep the underscore-prefixed handoff URL even on
-            // the legacy preset — pre-#88 deployments didn't have
+            // the legacy preset — older deployments didn't have
             // this surface at all, so any path is non-breaking; the
             // single underscore matches the rest of `legacy()` style.
             impersonation_handoff_url: "/__impersonation_handoff".to_owned(),
@@ -192,8 +192,26 @@ impl RouteConfig {
         format!("{}{}", self.admin_url, self.audit_url)
     }
 
+    /// Public URL of a tenant's logo / favicon on a tenant host, built
+    /// from [`Self::brand_url`], the prefix the tenant host serves.
+    /// A direct storage URL wins. `None` when `path` is unset or unsafe.
+    #[must_use]
+    pub fn brand_asset_url(
+        &self,
+        slug: &str,
+        path: Option<&str>,
+        storage: &crate::storage::BoxedStorage,
+    ) -> Option<String> {
+        super::branding::brand_asset_url_at(self.brand_prefix(), slug, path, storage)
+    }
+
+    /// [`Self::brand_url`] without a trailing `/`, so links and routes never get `//`.
+    pub(crate) fn brand_prefix(&self) -> &str {
+        self.brand_url.trim_end_matches('/')
+    }
+
     /// The tenant-admin URLs as seen under a path-prefix tenant's
-    /// `prefix`, so routes match and links keep the prefix (#2059).
+    /// `prefix`, so routes match and links keep the prefix.
     /// `brand_url` is served before the tenant resolves, so it stays.
     #[must_use]
     pub(crate) fn under_prefix(&self, prefix: &str) -> Self {
@@ -212,7 +230,7 @@ impl RouteConfig {
 }
 
 /// The cookie `Path` for `org` at request `path`: its prefix when `path`
-/// is under it, so prefix tenants on one host keep apart; else `/` (#2098).
+/// is under it, so prefix tenants on one host keep apart; else `/`.
 pub(crate) fn cookie_path<'a>(org: &'a super::Org, path: &str) -> &'a str {
     org.path_prefix
         .as_deref()
@@ -233,7 +251,28 @@ pub(crate) fn path_is_under(path: &str, prefix: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// #2098 — cookies scope to the prefix only when the request is under it.
+    /// Tenant brand URLs follow the prefix the tenant host serves.
+    #[test]
+    fn brand_asset_url_uses_brand_url() {
+        let storage: crate::storage::BoxedStorage =
+            std::sync::Arc::new(crate::storage::InMemoryStorage::new());
+        let url = |r: &RouteConfig| r.brand_asset_url("acme", Some("logo.png"), &storage);
+        assert_eq!(
+            url(&RouteConfig::default()).as_deref(),
+            Some("/_brand/acme/logo.png")
+        );
+        assert_eq!(
+            url(&RouteConfig::legacy()).as_deref(),
+            Some("/__brand__/acme/logo.png")
+        );
+        let slash = RouteConfig {
+            brand_url: "/_brand/".to_owned(),
+            ..RouteConfig::default()
+        };
+        assert_eq!(url(&slash).as_deref(), Some("/_brand/acme/logo.png"));
+    }
+
+    /// Cookies scope to the prefix only when the request is under it.
     #[test]
     fn cookie_path_follows_the_request() {
         let org = crate::tenancy::Org {
@@ -257,7 +296,7 @@ mod tests {
         assert_eq!(r.brand_url, "/_brand");
     }
 
-    /// Since v0.29 (#85), `Default::default()` returns the
+    /// Since v0.29, `Default::default()` returns the
     /// friendly preset. Apps that haven't opted into `.routes(...)`
     /// see `/login`, `/admin`, `/audit`, etc.
     #[test]

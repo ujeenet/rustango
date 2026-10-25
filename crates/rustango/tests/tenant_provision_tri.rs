@@ -371,28 +371,34 @@ async fn scratch(guards: &mut Vec<Box<dyn std::any::Any>>, var: &str) -> String 
 /// Tenant migrations each creating table `tp_notes`.
 fn write_migrations(dir: &Path, names: &[&str]) {
     for name in names {
-        let mig = rustango::migrate::Migration {
-            name: (*name).to_owned(),
-            created_at: "2026-10-25T00:00:00Z".into(),
-            prev: None,
-            atomic: true,
-            scope: rustango::migrate::MigrationScope::Tenant,
-            replaces: Vec::new(),
-            merges: Vec::new(),
-            snapshot: serde_json::from_value(serde_json::json!({
-                "tables": [{
-                    "name": "tp_notes", "model": "T",
-                    "fields": [{"name": "id", "column": "id", "ty": "i64",
-                                "nullable": false, "primary_key": true}]
-                }]
-            }))
-            .unwrap(),
-            forward: vec![rustango::migrate::Operation::Schema(
-                rustango::migrate::SchemaChange::CreateTable("tp_notes".into()),
-            )],
-        };
-        rustango::migrate::file::write(&dir.join(format!("{name}.json")), &mig).unwrap();
+        write_table_migration(dir, name, "tp_notes");
     }
+}
+
+/// A tenant migration `name` creating `table`.
+fn write_table_migration(dir: &Path, name: &str, table: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    let mig = rustango::migrate::Migration {
+        name: name.to_owned(),
+        created_at: "2026-10-25T00:00:00Z".into(),
+        prev: None,
+        atomic: true,
+        scope: rustango::migrate::MigrationScope::Tenant,
+        replaces: Vec::new(),
+        merges: Vec::new(),
+        snapshot: serde_json::from_value(serde_json::json!({
+            "tables": [{
+                "name": table, "model": "T",
+                "fields": [{"name": "id", "column": "id", "ty": "i64",
+                            "nullable": false, "primary_key": true}]
+            }]
+        }))
+        .unwrap(),
+        forward: vec![rustango::migrate::Operation::Schema(
+            rustango::migrate::SchemaChange::CreateTable(table.into()),
+        )],
+    };
+    rustango::migrate::file::write(&dir.join(format!("{name}.json")), &mig).unwrap();
 }
 
 /// A tenant data migration inserting user `username`. Runs after the
@@ -1231,6 +1237,76 @@ async fn an_interrupted_run_is_reclaimed(pool: &Pool) {
     env.clean(&[&a]).await;
 }
 
+/// A project root with an app's migrations: `migrations/` and `blog/migrations/`.
+fn project_root(env: &Env) -> PathBuf {
+    let root = env.dir("project");
+    write_migrations(&root.join("migrations"), &["0001_notes"]);
+    write_table_migration(
+        &root.join("blog").join("migrations"),
+        "0001_posts",
+        "tp_posts",
+    );
+    root
+}
+
+/// The tenant at `url` has the app's table too.
+async fn assert_app_migrated(url: &str) {
+    let tenant = Pool::connect(url).await.expect("tenant connects");
+    rustango::sql::raw_query_pool::<(i64,)>("SELECT COUNT(*) FROM tp_posts", vec![], &tenant)
+        .await
+        .expect("the app's migration ran");
+    tenant.close().await;
+}
+
+/// The engine takes a project root and migrates every app dir in it.
+async fn the_engine_migrates_every_app_dir(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+    let env = Env::new(pool).await;
+    let a = slug("root");
+    env.clean(&[&a]).await;
+    env.add_server("main").await;
+    env.provision(
+        &project_root(&env),
+        &ProvisionRequest::on_server(&a, "main"),
+    )
+    .await
+    .expect("created");
+    let url = assert_provisioned(&env, &a).await;
+    assert_app_migrated(&url).await;
+    env.clean(&[&a]).await;
+}
+
+/// `api::create_tenant` runs the engine: its run records every step.
+async fn the_api_runs_the_engine_steps(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+    let env = Env::new(pool).await;
+    let a = slug("apisteps");
+    env.clean(&[&a]).await;
+    env.add_server("main").await;
+    let opts = CreateTenantOpts {
+        mode: StorageMode::Database,
+        database_server: Some("main".into()),
+        ..CreateTenantOpts::default()
+    };
+    let root = project_root(&env);
+    typed!(env.registry, p => create_tenant(&p, &env.url, &root, &a, opts).await).expect("created");
+    let url = assert_provisioned(&env, &a).await;
+    assert_app_migrated(&url).await;
+    let steps = env.steps(&a).await;
+    for step in [
+        "validate:ok",
+        "check_connection:ok",
+        "register_org:ok",
+        "migrate:ok",
+        "activate:ok",
+    ] {
+        assert!(steps.iter().any(|s| s == step), "{step}: {steps:?}");
+    }
+    env.clean(&[&a]).await;
+}
+
 /// Two creates of one slug at once: one tenant, one clear refusal.
 async fn concurrent_creates_make_one_tenant(pool: &Pool) {
     let _g = env_lock().lock().await;
@@ -1264,5 +1340,7 @@ tri_dialect_test! {
         late_failures_roll_back,
         an_interrupted_run_is_reclaimed,
         concurrent_creates_make_one_tenant,
+        the_engine_migrates_every_app_dir,
+        the_api_runs_the_engine_steps,
     ],
 }

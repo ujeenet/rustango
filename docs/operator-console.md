@@ -22,6 +22,7 @@ and runs the whole registry. There is no per-tenant migrate on the command line.
 - [The audit log](#the-audit-log)
 - [Provisioning runs](#provisioning-runs)
 - [Database servers](#database-servers)
+- [Branding](#branding)
 - [The three capability levels](#the-three-capability-levels)
 
 ---
@@ -214,6 +215,103 @@ like a create. The whole flow is in
 [Tenant databases on a saved server](tenant-databases.md).
 
 From the CLI: [`add-db-server` and friends](manage.md#database-servers).
+
+---
+
+## Branding
+
+The console's name, tagline, logo, accent colour and theme come from
+`[brand]` in `config/default.toml` or `config/<env>_settings.toml`:
+
+```toml
+[brand]
+name          = "Acme Operator"
+tagline       = "Production"
+logo_url      = "https://cdn.example.com/acme-logo.png"
+primary_color = "#2c6fb0"
+theme_mode    = "auto"
+```
+
+| Key | Default | What it does |
+|---|---|---|
+| `name` | `Rustango` | Name in the header and on the sign-in page |
+| `tagline` | none; the sign-in page shows "Operator console" | Line under the name |
+| `logo_url` | `/__static__/rustango.png` | Logo image; the default is the bundled logo, served by the console |
+| `logo_path` | none | Local logo file the console serves itself; see [Your own logo](#your-own-logo) |
+| `primary_color` | the theme's colour | Tints primary buttons and links. Hex: `#rrggbb` or `#rgb` |
+| `theme_mode` | `auto` | Starting theme: `auto`, `light` or `dark` |
+
+An empty value counts as unset. A `primary_color` or `theme_mode` that does
+not parse is ignored, and the default stays.
+
+Environment variables override the file, so you can rebrand one deploy
+without a config change:
+
+| Variable | Overrides |
+|---|---|
+| `RUSTANGO_OPERATOR_BRAND_NAME` | `name` |
+| `RUSTANGO_OPERATOR_TAGLINE` | `tagline` |
+| `RUSTANGO_OPERATOR_LOGO_URL` | `logo_url` |
+| `RUSTANGO_OPERATOR_LOGO_PATH` | `logo_path` |
+| `RUSTANGO_OPERATOR_PRIMARY_COLOR` | `primary_color` |
+| `RUSTANGO_OPERATOR_THEME_MODE` | `theme_mode` |
+
+The order is: env variable, then `[brand]` (the tier file over
+`default.toml`), then the default. An empty variable is ignored. The console
+reads all of this once at boot, so restart it after a change.
+
+### Your own logo
+
+The apex domain serves only the console: a `Cli::with_static` mount is served
+on tenant hosts, not on the apex. So a logo is either a file the console
+serves, or a full URL.
+
+`logo_path = "assets/acme-logo.png"` names a local file, relative to the
+working directory. The console reads it once at boot, with the same checks as
+a tenant logo upload: PNG, JPEG, WebP or ICO (no SVG), at most
+`RUSTANGO_BRAND_MAX_BYTES` (1 MiB). It serves the file at
+`/__static__/brand-logo.<ext>?v=<hash>` with a year-long cache; the hash
+changes with the file. A missing or refused file logs a warning and the
+bundled logo stays.
+
+`logo_url` goes straight into `<img src>`, so the browser must be able to load
+it: a CDN, an object-storage bucket or your website. If you set
+`[security] csp`, allow that host in `img-src`.
+
+If both are set, the env variables win over the file, and within one of them
+`logo_url` wins over `logo_path`.
+
+In a project without tenancy the admin shares a host with your routes, so a
+static mount works there; see [the admin's branding section](admin.md#config-admin-and-brand).
+
+The console sets no favicon, and there is no key for one.
+
+### The `dev` and `staging` taglines
+
+`cargo rustango new` writes `tagline = "dev"` under `[brand]` in
+`config/dev_settings.toml` and `tagline = "staging"` in
+`staging_settings.toml`, so you can tell the tiers apart at a glance; the
+tagline shows as a badge.
+`prod_settings.toml` sets none. The tier file wins over `default.toml`, so this
+replaces a tagline you set there.
+
+To change it, edit the line, for example `tagline = "Acme dev"`. To remove
+it, delete the line or set `tagline = ""`. In a project with the admin, the
+same tagline is the admin's subtitle.
+
+### Per-tenant branding
+
+Each tenant has its own brand on its `Org` row, set on
+**Organizations → Edit**: `brand_name`, `brand_tagline`, `primary_color` and
+`theme_mode`. The **Branding assets** form on the same page uploads a logo
+(PNG, JPEG or WebP) and a favicon (PNG or ICO), up to 1 MB each
+(`RUSTANGO_BRAND_MAX_BYTES`). Files are stored under
+`RUSTANGO_BRAND_STORAGE_DIR`, default `./var/brand`.
+
+The tenant admin and its sign-in page use these; `[brand]` does not reach
+them. Without `brand_name` the tenant's display name is shown, and without an
+uploaded logo the framework logo. The favicon shows on the tenant's sign-in and
+change-password pages. See [the admin's branding section](admin.md#the-tenant-admin).
 
 ---
 

@@ -875,14 +875,23 @@ mod tests {
                 "config_default_toml({name}) must mention the project name; got: {default_body}"
             );
             let dev = templates::config_dev_settings_toml(name, Backend::Postgres);
+            // Plain words: the tagline renders as a badge.
             assert!(
-                dev.contains("(dev)") || dev.contains("dev_settings"),
+                dev.contains("tagline = \"dev\""),
                 "dev tier should be visually distinguishable; got: {dev}"
+            );
+            assert!(
+                default_body.contains("# logo_url") && default_body.contains("# logo_path"),
+                "default.toml [brand] example names both logo keys; got: {default_body}"
             );
             let staging = templates::config_staging_settings_toml(name, Backend::Postgres);
             assert!(
                 staging.contains("staging") && staging.contains("retention_days"),
                 "staging tier missing retention_days; got: {staging}"
+            );
+            assert!(
+                staging.contains("tagline = \"staging\""),
+                "staging tier tagline; got: {staging}"
             );
             let prod = templates::config_prod_settings_toml(name);
             assert!(
@@ -1216,19 +1225,16 @@ mod tests {
         );
     }
 
-    /// Every scaffolded `src/main.rs` mounts `.with_welcome()` so a
-    /// fresh `cargo run` boots to the friendly "rustango — it works!"
-    /// page rather than a 404. Recommended for first-run UX since
-    /// v0.29.12 — drop the call manually once a real `/` handler is
-    /// wired.
+    /// The welcome page is skipped, with a warning on every start, when
+    /// the project's own router already routes `GET /`.
     #[test]
-    fn every_main_template_mounts_with_welcome() {
+    fn no_main_template_mounts_welcome_over_its_own_root() {
         for template in [Template::Api, Template::Fullstack, Template::Tenant] {
-            let body = templates::main_rs(template, "my_app");
+            let main = templates::main_rs(template, "my_app");
+            let routes_root = templates::urls_rs(template).contains(".route(\"/\",");
             assert!(
-                body.contains(".with_welcome()"),
-                "template {template:?} src/main.rs should chain `.with_welcome()` \
-                 — the scaffolded entrypoint, got:\n{body}"
+                !(routes_root && main.contains(".with_welcome()")),
+                "template {template:?} routes `/` and also chains `.with_welcome()`"
             );
         }
     }

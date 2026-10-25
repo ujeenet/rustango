@@ -523,6 +523,21 @@ fn api_key_secret() -> Result<&'static crate::session::SessionSecret, super::Ten
     Ok(API_KEY_SECRET.get_or_init(|| secret))
 }
 
+/// The CLI's key: a set one, else the server's, loaded only, never written.
+pub(crate) fn existing_api_key_secret() -> Result<
+    (
+        &'static crate::session::SessionSecret,
+        Option<super::session::KeySource>,
+    ),
+    super::TenancyError,
+> {
+    if let Some(s) = API_KEY_SECRET.get() {
+        return Ok((s, None));
+    }
+    let (secret, source) = super::session::existing_tenant_secret()?;
+    Ok((API_KEY_SECRET.get_or_init(|| secret), Some(source)))
+}
+
 /// `hmac-sha256$<hex>` of the secret half; the prefix is only the lookup.
 fn api_key_mac(key: &crate::session::SessionSecret, secret: &str) -> String {
     let msg = [API_KEY_MAC_TAG, secret.as_bytes()].concat();
@@ -567,6 +582,17 @@ pub async fn create_api_key(
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pool: &Pool,
 ) -> Result<String, crate::tenancy::error::TenancyError> {
+    create_api_key_signed(api_key_secret()?, user_id, label, expires_at, pool).await
+}
+
+/// [`create_api_key`] with the MAC key given, so the CLI can pass a loaded one.
+pub(crate) async fn create_api_key_signed(
+    mac_key: &crate::session::SessionSecret,
+    user_id: i64,
+    label: &str,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pool: &Pool,
+) -> Result<String, crate::tenancy::error::TenancyError> {
     use crate::sql::Auto;
     use rand::rngs::OsRng;
     use rand::RngCore;
@@ -582,7 +608,7 @@ pub async fn create_api_key(
     OsRng.fill_bytes(&mut secret_bytes);
     let secret = to_hex(&secret_bytes);
 
-    let hash = api_key_mac(api_key_secret()?, &secret);
+    let hash = api_key_mac(mac_key, &secret);
 
     let mut key = ApiKey {
         id: Auto::default(),

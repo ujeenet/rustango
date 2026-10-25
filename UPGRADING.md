@@ -150,6 +150,42 @@ untouched.
 
 ## Unreleased
 
+## 0.61.1
+
+### Scaffold taglines lose their brackets
+
+`cargo rustango new` now writes `tagline = "dev"` / `"staging"`, not `"(dev)"` / `"(staging)"`. Existing projects keep theirs; edit the line to match.
+
+### `BrandSettings` has a new `logo_path` field
+
+A struct literal of `BrandSettings` needs `..Default::default()` (or the new field).
+
+### MySQL 5.7 no longer gets JSON casts
+
+JSON binds are cast only on MySQL 8.0+ (and not on MariaDB); MySQL 5.7 is not supported.
+
+### MySQL M2M junctions keep an `i32` / `i16` pk's width
+
+New auto junctions over such pks get `INT` / `SMALLINT` columns, not `BIGINT`, which MySQL refused as a foreign key. Existing junctions are unchanged.
+
+### Forwarded proto and host are read from the right
+
+Behind `trust_proxies`, a comma list in `X-Forwarded-Proto` / `X-Forwarded-Host` now yields the value of the outermost trusted proxy: one value is skipped per trusted hop in `X-Forwarded-For`. Before, the first (client-sent) value won.
+
+### Template views are `private` to shared caches
+
+Their pages carry the CSRF token, so they now send `Cache-Control: private` (any `public` is dropped) and `Vary: Cookie`.
+
+### `create-api-key` needs the server's key
+
+Set `RUSTANGO_SESSION_SECRET`, or start the server once so it writes the dev key file; the verb no longer creates one.
+
+### `api::create_tenant` goes through the provisioning engine
+
+A failed migration now returns `TenancyError::Validation`, not `TenancyError::Migrate`. With a database URL or schema the text carries the cause; on a saved server everything is rolled back and the cause is in the run log.
+Run the registry migrations (the provisioning-runs table) before calling it: the run record is no longer best effort, so a missing table fails the create, as on the CLI.
+`provision_tenant` given a project root now applies `migrations/` and every `<app>/migrations/` under it; a flat migrations dir works as before.
+
 ## 0.61.0
 
 ### Built-in logo is square

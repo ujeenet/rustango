@@ -19,9 +19,9 @@
 //!
 //! * Multipart parsing — the operator console handler peels bytes
 //!   out of `axum::extract::Multipart` and passes them in.
-//! * The HTTP route — both the operator console
-//!   (`/__brand__/{slug}/{filename}`) and the tenant admin (same
-//!   path under each tenant host) wire their own handlers; this
+//! * The HTTP route — the operator console
+//!   (`/__brand__/{slug}/{filename}`) and each tenant host
+//!   (`RouteConfig::brand_url`) wire their own handlers; this
 //!   module just supplies the storage + content-type lookups.
 
 use std::path::PathBuf;
@@ -192,13 +192,7 @@ pub async fn save_brand_asset(
     content_type: Option<&str>,
     storage: &BoxedStorage,
 ) -> Result<String, BrandError> {
-    let max = max_brand_bytes();
-    if bytes.len() > max {
-        return Err(BrandError::TooLarge {
-            actual: bytes.len(),
-            max,
-        });
-    }
+    check_brand_size(bytes.len())?;
     let ct = content_type.unwrap_or("application/octet-stream").trim();
     let ext = ALLOWED_CONTENT_TYPES
         .iter()
@@ -210,8 +204,17 @@ pub async fn save_brand_asset(
     Ok(filename)
 }
 
+/// The [`max_brand_bytes`] cap every brand asset must fit.
+pub(crate) fn check_brand_size(len: usize) -> Result<(), BrandError> {
+    let max = max_brand_bytes();
+    if len > max {
+        return Err(BrandError::TooLarge { actual: len, max });
+    }
+    Ok(())
+}
+
 /// Delete the `kind` files other than `kept` (a [`save_brand_asset`] result).
-/// Call it only after the `Org` column names `kept`, or the old path dangles (#1933).
+/// Call it only after the `Org` column names `kept`, or the old path dangles.
 ///
 /// # Errors
 /// [`BrandError::InvalidSlug`] or a storage failure.
@@ -382,18 +385,28 @@ fn parse_rgb(hex: &str) -> Option<(u8, u8, u8)> {
     Some((r, g, b))
 }
 
-/// Build the public URL for a tenant's brand asset.
+/// Where the operator console serves brand assets. Tenant hosts serve
+/// them at [`RouteConfig::brand_url`](super::RouteConfig::brand_url).
+pub const CONSOLE_BRAND_URL: &str = "/__brand__";
+
+/// Public URL of a tenant's brand asset **on the operator console**.
+/// Tenant pages use [`RouteConfig::brand_asset_url`](super::RouteConfig::brand_asset_url).
 ///
-/// 1. If `storage` exposes a direct URL for the key (S3/CDN-backed
-///    or `LocalStorage::with_base_url`), use that — the browser
-///    fetches the asset directly without proxying through the
-///    framework.
-/// 2. Otherwise fall back to the path-based handler the framework
-///    mounts at `GET /__brand__/{slug}/{filename}`.
-///
+/// A direct storage URL (S3/CDN or `LocalStorage::with_base_url`) wins;
+/// otherwise the console's [`CONSOLE_BRAND_URL`] handler serves it.
 /// Returns `None` when `path` is empty / unset / unsafe.
 #[must_use]
 pub fn brand_asset_url(slug: &str, path: Option<&str>, storage: &BoxedStorage) -> Option<String> {
+    brand_asset_url_at(CONSOLE_BRAND_URL, slug, path, storage)
+}
+
+/// [`brand_asset_url`] against the route prefix `brand_url` that serves it.
+pub(crate) fn brand_asset_url_at(
+    brand_url: &str,
+    slug: &str,
+    path: Option<&str>,
+    storage: &BoxedStorage,
+) -> Option<String> {
     let p = path?;
     if p.is_empty() || !is_safe_filename(p) || !is_safe_slug(slug) {
         return None;
@@ -402,7 +415,7 @@ pub fn brand_asset_url(slug: &str, path: Option<&str>, storage: &BoxedStorage) -
     if let Some(direct) = storage.url(&key) {
         return Some(direct);
     }
-    Some(format!("/__brand__/{slug}/{p}"))
+    Some(format!("{brand_url}/{slug}/{p}"))
 }
 
 #[cfg(test)]

@@ -487,7 +487,7 @@ where
                 if let Ok(stored) = CachedPage::decode(frame) {
                     let mut resp = stored.into_response(&vary);
                     if is_query {
-                        mark_query_response_private(resp.headers_mut());
+                        crate::vary::mark_private(resp.headers_mut());
                     }
                     return Ok(resp);
                 }
@@ -582,7 +582,7 @@ where
             // QUERY partitions on the request body, which `Vary`
             // cannot express, so keep it out of shared caches.
             if is_query {
-                mark_query_response_private(headers);
+                crate::vary::mark_private(headers);
             }
             Ok(rebuilt)
         })
@@ -736,31 +736,6 @@ fn build_key<'a>(
         write_lp(&mut k, digest);
     }
     k
-}
-
-/// Mark a QUERY response `private` so a CDN or proxy never stores it.
-///
-/// This layer keys QUERY on the request body, but `Vary` cannot name a
-/// body, so a shared cache keying on URL and headers alone would serve
-/// one query's result for a different query. Any `public` the handler
-/// set is downgraded. Freshness directives such as `max-age` are kept.
-fn mark_query_response_private(headers: &mut HeaderMap) {
-    use axum::http::header::CACHE_CONTROL;
-    let existing = headers
-        .get(CACHE_CONTROL)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let mut directives: Vec<String> = existing
-        .split(',')
-        .map(|d| d.trim().to_owned())
-        .filter(|d| {
-            !d.is_empty() && !d.eq_ignore_ascii_case("public") && !d.eq_ignore_ascii_case("private")
-        })
-        .collect();
-    directives.insert(0, "private".to_owned());
-    if let Ok(v) = HeaderValue::from_str(&directives.join(", ")) {
-        headers.insert(CACHE_CONTROL, v);
-    }
 }
 
 /// Base64 SHA-256 of a QUERY body. This key component makes only a
