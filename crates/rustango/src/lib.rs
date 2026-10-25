@@ -526,6 +526,10 @@ pub mod jsonapi;
 ))]
 pub(crate) mod crypto;
 
+/// AEAD sealing shared by `EncryptedString` and sealed tenant secrets.
+#[cfg(feature = "_aead")]
+pub(crate) mod aead;
+
 /// Attribute casts — `Cast<C>` field wrapper + `CastValue` trait, with the
 /// `EncryptedString` AEAD-at-rest built-in.
 #[cfg(feature = "casts")]

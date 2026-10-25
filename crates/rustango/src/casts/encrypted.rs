@@ -6,15 +6,9 @@
 //! XChaCha nonce is random per write, so nonce reuse isn't a concern even
 //! across many encryptions under one key.
 
-use base64::Engine as _;
-use chacha20poly1305::aead::Aead;
-use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce};
-use sha2::{Digest, Sha256};
+use crate::aead::AeadError;
 
 use super::{CastError, CastValue};
-
-/// 192-bit XChaCha nonce.
-const NONCE_LEN: usize = 24;
 
 /// Marker type for the encrypted-string cast — use as
 /// [`Cast<EncryptedString>`](super::Cast). The logical value is a
@@ -39,48 +33,26 @@ impl CastValue for EncryptedString {
     }
 }
 
-/// 32-byte key = SHA-256 of `RUSTANGO_SECRET_KEY` (accepts any-length
-/// secret). Read per call so tests / key rotation see the current value.
-fn derive_key() -> Result<[u8; 32], CastError> {
-    let secret = std::env::var("RUSTANGO_SECRET_KEY").map_err(|_| {
-        CastError("RUSTANGO_SECRET_KEY is not set (required for `EncryptedString` casts)".into())
-    })?;
-    let digest = Sha256::digest(secret.as_bytes());
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&digest);
-    Ok(key)
+/// The cast's wording for each failure; unchanged since the code moved.
+fn cast_error(e: AeadError) -> CastError {
+    CastError(match e {
+        AeadError::MissingKey => {
+            "RUSTANGO_SECRET_KEY is not set (required for `EncryptedString` casts)".into()
+        }
+        AeadError::Encrypt(e) => format!("encrypt: {e}"),
+        AeadError::Decode(e) => format!("base64 decode: {e}"),
+        AeadError::Short => "ciphertext shorter than nonce".into(),
+        AeadError::Decrypt => "decryption failed (wrong key or tampered data)".into(),
+    })
 }
 
-fn cipher() -> Result<XChaCha20Poly1305, CastError> {
-    let key = derive_key()?;
-    Ok(XChaCha20Poly1305::new(Key::from_slice(&key)))
-}
-
+/// No AAD: rows written before AEAD was shared must still open.
 pub(crate) fn encrypt(plaintext: &[u8]) -> Result<String, CastError> {
-    let cipher = cipher()?;
-    let mut nonce = [0u8; NONCE_LEN];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
-    let ciphertext = cipher
-        .encrypt(XNonce::from_slice(&nonce), plaintext)
-        .map_err(|e| CastError(format!("encrypt: {e}")))?;
-    let mut framed = Vec::with_capacity(NONCE_LEN + ciphertext.len());
-    framed.extend_from_slice(&nonce);
-    framed.extend_from_slice(&ciphertext);
-    Ok(base64::engine::general_purpose::STANDARD.encode(framed))
+    crate::aead::encrypt(plaintext, b"").map_err(cast_error)
 }
 
 fn decrypt(stored: &str) -> Result<Vec<u8>, CastError> {
-    let framed = base64::engine::general_purpose::STANDARD
-        .decode(stored)
-        .map_err(|e| CastError(format!("base64 decode: {e}")))?;
-    if framed.len() < NONCE_LEN {
-        return Err(CastError("ciphertext shorter than nonce".into()));
-    }
-    let (nonce, ciphertext) = framed.split_at(NONCE_LEN);
-    let cipher = cipher()?;
-    cipher
-        .decrypt(XNonce::from_slice(nonce), ciphertext)
-        .map_err(|_| CastError("decryption failed (wrong key or tampered data)".into()))
+    crate::aead::decrypt(stored, b"").map_err(cast_error)
 }
 
 #[cfg(test)]

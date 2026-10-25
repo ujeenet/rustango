@@ -1,9 +1,9 @@
 //! Pluggable secret resolution — `Org.database_url` is a *reference*,
 //! not necessarily a literal connection string.
 //!
-//! Default impl is [`LiteralSecretsResolver`] (pass-through), which
-//! makes the abstraction zero-cost for users who don't need vault
-//! integration. Users add HashiCorp Vault / AWS Secrets Manager /
+//! Default is [`ChainSecretsResolver::standard`]: `env://VAR`, sealed
+//! `enc:v1:` values (see [`seal`]), and literal URLs as a fallback.
+//! Users add HashiCorp Vault / AWS Secrets Manager /
 //! Azure Key Vault / GCP Secret Manager / 1Password by implementing
 //! the trait themselves or pulling in a future
 //! `rustango-tenancy-vault` / `-aws-sm` / etc. crate.
@@ -25,6 +25,8 @@
 //! resolver wrapper can land as a follow-up; not in slice 3.
 
 use async_trait::async_trait;
+
+use crate::sql::connect_diagnosis::SEALED_SCHEME;
 
 /// Errors raised while resolving a secret reference.
 #[derive(Debug, thiserror::Error)]
@@ -60,8 +62,8 @@ pub trait SecretsResolver: Send + Sync + 'static {
 
 // ---------------- LiteralSecretsResolver ----------------
 
-/// Pass-through resolver. The reference IS the value. Default for
-/// [`super::TenantPools`] when the operator doesn't supply one.
+/// Pass-through resolver. The reference IS the value. The fallback of
+/// [`ChainSecretsResolver::standard`].
 ///
 /// Use this when `Org.database_url` carries the actual connection URL
 /// (typical hobby / pre-production setups). Move to
@@ -135,11 +137,126 @@ impl ChainSecretsResolver {
         self
     }
 
-    /// Standard chain: `env://` → [`EnvSecretsResolver`], everything
-    /// else → [`LiteralSecretsResolver`]. Recommended starting point.
+    /// Standard chain: `env://` → [`EnvSecretsResolver`], `enc:` →
+    /// [`SealedSecretsResolver`], everything else →
+    /// [`LiteralSecretsResolver`]. The default for [`super::TenantPools`].
     #[must_use]
     pub fn standard() -> Self {
-        Self::new(LiteralSecretsResolver).push("env://", EnvSecretsResolver)
+        Self::new(LiteralSecretsResolver)
+            .push(ENV_SCHEME, EnvSecretsResolver)
+            .push(SEALED_SCHEME, SealedSecretsResolver)
+    }
+}
+
+/// A shared resolver is a resolver, so one can be handed to several pools.
+#[async_trait]
+impl<R: SecretsResolver + ?Sized> SecretsResolver for std::sync::Arc<R> {
+    async fn resolve(&self, reference: &str) -> Result<String, SecretsError> {
+        (**self).resolve(reference).await
+    }
+}
+
+// ---------------- SealedSecretsResolver ----------------
+
+const ENV_SCHEME: &str = "env://";
+/// The only sealed format so far.
+const SEALED_V1: &str = "enc:v1:";
+/// Binds a sealed secret to this use, so an `EncryptedString` column
+/// value cannot be pasted in as a tenant URL.
+const SEALED_AAD: &[u8] = b"rustango:tenancy-secret:v1";
+
+/// Seal `plaintext` as `enc:v1:<base64>` (XChaCha20-Poly1305, key from
+/// `RUSTANGO_SECRET_KEY`). [`ChainSecretsResolver::standard`] opens it.
+///
+/// # Errors
+/// [`SecretsError::Backend`] when `RUSTANGO_SECRET_KEY` is not set.
+pub fn seal(plaintext: &str) -> Result<String, SecretsError> {
+    crate::aead::encrypt(plaintext.as_bytes(), SEALED_AAD)
+        .map(|b64| format!("{SEALED_V1}{b64}"))
+        .map_err(sealed_error)
+}
+
+/// Open an `enc:` reference made by [`seal`]. In the standard chain.
+pub struct SealedSecretsResolver;
+
+#[async_trait]
+impl SecretsResolver for SealedSecretsResolver {
+    async fn resolve(&self, reference: &str) -> Result<String, SecretsError> {
+        let b64 = reference.strip_prefix(SEALED_V1).ok_or_else(|| {
+            SecretsError::Invalid("unsupported sealed secret; expected `enc:v1:`".into())
+        })?;
+        let plain = crate::aead::decrypt(b64, SEALED_AAD).map_err(sealed_error)?;
+        String::from_utf8(plain)
+            .map_err(|_| SecretsError::Invalid("sealed secret is not UTF-8".into()))
+    }
+}
+
+/// Never carries the plaintext or the ciphertext.
+fn sealed_error(e: crate::aead::AeadError) -> SecretsError {
+    use crate::aead::AeadError;
+    match e {
+        AeadError::MissingKey => SecretsError::Backend(
+            format!(
+                "{} is not set; it is needed to seal and open `enc:` secrets",
+                crate::aead::KEY_VAR
+            )
+            .into(),
+        ),
+        AeadError::Encrypt(e) => SecretsError::Backend(format!("sealing failed: {e}").into()),
+        AeadError::Decode(e) => SecretsError::Invalid(format!("sealed secret is not base64: {e}")),
+        AeadError::Short => SecretsError::Invalid("sealed secret is too short".into()),
+        AeadError::Decrypt => SecretsError::Invalid(format!(
+            "sealed secret does not open: wrong {} or a tampered value",
+            crate::aead::KEY_VAR
+        )),
+    }
+}
+
+/// What to store for an operator-entered `reference` that resolved to
+/// `resolved` under `secrets`.
+///
+/// A literal URL with a password is sealed, if a key is set and `secrets`
+/// opens the result back to the same URL; otherwise it is kept as given.
+pub(crate) async fn stored_form(
+    reference: &str,
+    resolved: &str,
+    secrets: &dyn SecretsResolver,
+) -> String {
+    // A reference the resolver passed through unchanged is the literal itself.
+    let literal_with_password =
+        reference == resolved && crate::sql::connect_diagnosis::redact(reference) != reference;
+    if !literal_with_password {
+        return reference.to_owned();
+    }
+    let sealed = match seal(reference) {
+        Ok(s) => s,
+        Err(e) => {
+            static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(target: "rustango::tenancy::secrets", error = %e, "tenant database URL stored unsealed");
+            }
+            return reference.to_owned();
+        }
+    };
+    match secrets.resolve(&sealed).await {
+        Ok(back) if back == resolved => sealed,
+        // A custom resolver that does not know `enc:` would break the tenant.
+        _ => {
+            tracing::warn!(target: "rustango::tenancy::secrets", "the secrets resolver cannot open `enc:`; tenant database URL stored unsealed");
+            reference.to_owned()
+        }
+    }
+}
+
+/// How a stored `database_url` may be shown: an `env://` name as is,
+/// anything else never.
+pub(crate) fn shown_reference(stored: &str) -> String {
+    if stored.starts_with(ENV_SCHEME) {
+        stored.to_owned()
+    } else if stored.starts_with(SEALED_SCHEME) {
+        crate::sql::connect_diagnosis::ENCRYPTED_LABEL.to_owned()
+    } else {
+        "<literal connection URL — masked>".to_owned()
     }
 }
 
@@ -179,6 +296,89 @@ mod tests {
         let r = EnvSecretsResolver;
         let v = r.resolve(&format!("env://{key}")).await.unwrap();
         assert!(!v.is_empty(), "{key} should be a non-empty env var");
+    }
+
+    /// The value the casts unit tests set too, so parallel tests agree.
+    fn with_key() {
+        std::env::set_var("RUSTANGO_SECRET_KEY", "unit-test-secret-key");
+    }
+
+    #[tokio::test]
+    async fn the_standard_chain_opens_a_sealed_secret() {
+        with_key();
+        let sealed = seal("postgres://u:hunter2@h/db").unwrap();
+        assert!(sealed.starts_with("enc:v1:"), "{sealed}");
+        assert!(!sealed.contains("hunter2"));
+        let back = ChainSecretsResolver::standard()
+            .resolve(&sealed)
+            .await
+            .unwrap();
+        assert_eq!(back, "postgres://u:hunter2@h/db");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_sealed_version_is_refused_not_used_literally() {
+        let err = ChainSecretsResolver::standard()
+            .resolve("enc:v9:AAAA")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SecretsError::Invalid(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_tampered_sealed_secret_does_not_open() {
+        with_key();
+        let mut sealed = seal("postgres://u:p@h/db").unwrap();
+        let i = sealed.len() - 3;
+        let flip = if &sealed[i..=i] == "A" { "B" } else { "A" };
+        sealed.replace_range(i..=i, flip);
+        let err = SealedSecretsResolver.resolve(&sealed).await.unwrap_err();
+        assert!(err.to_string().contains("does not open"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_key_names_the_variable() {
+        let err = sealed_error(crate::aead::AeadError::MissingKey);
+        assert!(err.to_string().contains("RUSTANGO_SECRET_KEY"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_literal_with_a_password_is_stored_sealed() {
+        with_key();
+        let url = "postgres://u:hunter2@h/db";
+        let chain = ChainSecretsResolver::standard();
+        let stored = stored_form(url, url, &chain).await;
+        assert!(stored.starts_with("enc:v1:"), "{stored}");
+        assert_eq!(chain.resolve(&stored).await.unwrap(), url);
+    }
+
+    #[tokio::test]
+    async fn references_and_password_free_urls_are_stored_as_given() {
+        with_key();
+        let chain = ChainSecretsResolver::standard();
+        for (reference, resolved) in [
+            ("env://TENANT_URL", "postgres://u:p@h/db"),
+            ("sqlite:///tmp/t.db?mode=rwc", "sqlite:///tmp/t.db?mode=rwc"),
+            ("postgres://u@h/db", "postgres://u@h/db"),
+        ] {
+            assert_eq!(stored_form(reference, resolved, &chain).await, reference);
+        }
+    }
+
+    /// A resolver without `enc:` support must not get a value it cannot open.
+    #[tokio::test]
+    async fn a_resolver_that_cannot_open_enc_gets_the_literal() {
+        with_key();
+        let url = "postgres://u:p@h/db";
+        assert_eq!(stored_form(url, url, &LiteralSecretsResolver).await, url);
+    }
+
+    #[test]
+    fn only_an_env_name_is_shown() {
+        assert_eq!(shown_reference("env://X"), "env://X");
+        assert_eq!(shown_reference("enc:v1:QUJD"), "<encrypted>");
+        assert!(!shown_reference("postgres://u:p@h/db").contains("u:p"));
+        assert!(!shown_reference("vault://secret/x").contains("vault"));
     }
 
     #[tokio::test]
