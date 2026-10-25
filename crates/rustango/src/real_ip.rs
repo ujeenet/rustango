@@ -562,7 +562,10 @@ mod tests {
             trusted_forwarded(&h, &ext, "x-forwarded-proto"),
             Some("http")
         );
-        h.insert("x-forwarded-host", HeaderValue::from_static("evil.test, app.test"));
+        h.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("evil.test, app.test"),
+        );
         assert_eq!(
             trusted_forwarded(&h, &ext, "x-forwarded-host"),
             Some("app.test")
@@ -610,19 +613,32 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                let b = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
+                let b = axum::body::to_bytes(res.into_body(), 1 << 16)
+                    .await
+                    .unwrap();
                 String::from_utf8(b.to_vec()).unwrap()
             }
         };
         // client -> CDN (10.0.0.1) -> nginx (peer 10.0.0.2) -> app.
         assert_eq!(
-            send("203.0.113.7, 10.0.0.1", "http, https, http", "evil.test, app.test, app.test").await,
+            send(
+                "203.0.113.7, 10.0.0.1",
+                "http, https, http",
+                "evil.test, app.test, app.test"
+            )
+            .await,
             "https app.test"
         );
         // One trusted proxy: its own value, the last.
-        assert_eq!(send("203.0.113.7", "http, https", "evil.test, app.test").await, "https app.test");
+        assert_eq!(
+            send("203.0.113.7", "http, https", "evil.test, app.test").await,
+            "https app.test"
+        );
         // The CDN overwrote instead of appending: its lone value stands.
-        assert_eq!(send("203.0.113.7, 10.0.0.1", "https", "app.test").await, "https app.test");
+        assert_eq!(
+            send("203.0.113.7, 10.0.0.1", "https", "app.test").await,
+            "https app.test"
+        );
     }
 
     #[test]

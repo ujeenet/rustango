@@ -73,7 +73,10 @@ mod tests {
     fn mark_private_keeps_directives_from_every_line() {
         use axum::http::header::CACHE_CONTROL;
         let mut h = HeaderMap::new();
-        h.append(CACHE_CONTROL, HeaderValue::from_static("public, max-age=60"));
+        h.append(
+            CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=60"),
+        );
         h.append(CACHE_CONTROL, HeaderValue::from_static("no-store"));
         mark_private(&mut h);
         assert_eq!(h.get_all(CACHE_CONTROL).iter().count(), 1);

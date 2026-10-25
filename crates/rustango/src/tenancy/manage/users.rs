@@ -36,12 +36,12 @@ const CHANGE_PASSWORD_SWITCHES: [&str; 4] = [
 fn current_password(verb: &str, parsed: &Parsed) -> Result<String, TenancyError> {
     use manage_interactive::NewPasswordError;
     let current = parsed.value("--current")?.map(str::to_owned);
-    manage_interactive::read_current_password(current, parsed.has("--current-stdin")).map_err(
-        |e| match e {
+    manage_interactive::read_current_password(current, parsed.has("--current-stdin")).map_err(|e| {
+        match e {
             NewPasswordError::Io(e) => TenancyError::Io(e),
             e => TenancyError::Validation(format!("{verb}: {e}")),
-        },
-    )
+        }
+    })
 }
 
 /// A generated password, or one read and validated like the forms (#2589).

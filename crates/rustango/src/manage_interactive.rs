@@ -453,12 +453,18 @@ mod tests {
             stdin: "old pw\n".into(),
             ..Script::default()
         };
-        assert_eq!(read_current_password_on(&mut c, None, true).unwrap(), "old pw");
+        assert_eq!(
+            read_current_password_on(&mut c, None, true).unwrap(),
+            "old pw"
+        );
         let mut c = Script {
             env: Some("from-env".into()),
             ..Script::default()
         };
-        assert_eq!(read_current_password_on(&mut c, None, false).unwrap(), "from-env");
+        assert_eq!(
+            read_current_password_on(&mut c, None, false).unwrap(),
+            "from-env"
+        );
         assert!(matches!(
             read_current_password_on(&mut Script::default(), None, false),
             Err(NewPasswordError::MissingCurrent)
@@ -471,7 +477,10 @@ mod tests {
             argv: vec!["old".into()],
             ..Script::default()
         };
-        assert_eq!(read_current_password_on(&mut c, Some("old".into()), false).unwrap(), "old");
+        assert_eq!(
+            read_current_password_on(&mut c, Some("old".into()), false).unwrap(),
+            "old"
+        );
         assert_eq!(c.warnings.len(), 1);
     }
 

@@ -340,7 +340,11 @@ async fn json_round_trips_on_every_mysql_flavour(pool: &Pool) {
         .expect("fetch");
     assert_eq!(back[0].data, data);
     assert_eq!(count_text_eq(pool, "s", "x").await, 1);
-    assert_eq!(count_text_eq(pool, "z", "null").await, 0, "JSON null is NULL");
+    assert_eq!(
+        count_text_eq(pool, "z", "null").await,
+        0,
+        "JSON null is NULL"
+    );
 }
 
 tri_dialect_test! {

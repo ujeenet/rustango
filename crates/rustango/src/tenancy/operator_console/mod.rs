@@ -165,7 +165,9 @@ enum LogoSource {
 impl LogoSource {
     /// Empty values count as unset.
     fn pick(url: Option<&str>, path: Option<&std::path::Path>) -> Option<Self> {
-        let url = url.filter(|u| !u.is_empty()).map(|u| Self::Url(u.to_owned()));
+        let url = url
+            .filter(|u| !u.is_empty())
+            .map(|u| Self::Url(u.to_owned()));
         url.or_else(|| {
             path.filter(|p| !p.as_os_str().is_empty())
                 .map(|p| Self::Path(p.to_owned()))
@@ -296,7 +298,8 @@ impl OpBrand {
         match crate::config::Settings::load_from_env() {
             Ok(s) => {
                 Self::apply_brand_settings(&mut out, &s.brand);
-                toml_logo = LogoSource::pick(s.brand.logo_url.as_deref(), s.brand.logo_path.as_deref());
+                toml_logo =
+                    LogoSource::pick(s.brand.logo_url.as_deref(), s.brand.logo_path.as_deref());
             }
             Err(e) if e.is_missing_config() => {}
             // A broken config should say so, not silently drop the brand (#1948).
@@ -2894,7 +2897,10 @@ mod opbrand_tests {
         let url = LogoSource::Url("https://cdn.example/l.png".into());
         let file = LogoSource::Path("logo.png".into());
         let pick = |u, p: Option<&str>| LogoSource::pick(u, p.map(Path::new));
-        assert_eq!(pick(Some("https://cdn.example/l.png"), Some("logo.png")), Some(url));
+        assert_eq!(
+            pick(Some("https://cdn.example/l.png"), Some("logo.png")),
+            Some(url)
+        );
         assert_eq!(pick(Some(""), Some("logo.png")), Some(file));
         assert_eq!(pick(None, Some("")), None);
     }

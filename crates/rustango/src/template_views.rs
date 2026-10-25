@@ -6145,7 +6145,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/")
-                    .header("cookie", "rustango_csrf=existing-token-existing-token-existing-toke")
+                    .header(
+                        "cookie",
+                        "rustango_csrf=existing-token-existing-token-existing-toke",
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )

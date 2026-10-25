@@ -201,7 +201,11 @@ async fn caller_set_uuid_pk_never_updates_another_row(pool: &Pool) {
     Doc::bulk_upsert_pool(&fresh, &["slug"], &["title"], pool)
         .await
         .expect("generated pks never clash");
-    let a: Vec<Doc> = Doc::objects().filter("slug", "a").fetch(pool).await.unwrap();
+    let a: Vec<Doc> = Doc::objects()
+        .filter("slug", "a")
+        .fetch(pool)
+        .await
+        .unwrap();
     let a_id = a[0].id.get().copied().expect("id");
     let r = Doc::bulk_upsert_pool(
         &[doc(Auto::Set(a_id), "c", "X")],

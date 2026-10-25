@@ -157,7 +157,10 @@ async fn tenant() -> Tenant {
 async fn assert_png(app: &axum::Router, host: &str, src: &str) {
     let resp = send(app, host, src).await;
     assert_eq!(resp.status(), StatusCode::OK, "GET {src} on {host}");
-    let ct = resp.headers()[header::CONTENT_TYPE].to_str().unwrap().to_owned();
+    let ct = resp.headers()[header::CONTENT_TYPE]
+        .to_str()
+        .unwrap()
+        .to_owned();
     assert_eq!(ct, "image/png", "GET {src}");
     let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
     assert_eq!(&bytes[..], PNG, "GET {src} body");
@@ -180,7 +183,10 @@ async fn tenant_login_brand_images_load_under_default_routes() {
     let html = text(resp).await;
     let logo = attr_after(&html, "class=\"brand-logo\"", "src").expect("logo img");
     let favicon = attr_after(&html, "rel=\"icon\"", "href").expect("favicon link");
-    assert!(favicon.contains("favicon"), "uploaded favicon linked: {favicon}");
+    assert!(
+        favicon.contains("favicon"),
+        "uploaded favicon linked: {favicon}"
+    );
     assert_png(&app, &host, &logo).await;
     assert_png(&app, &host, &favicon).await;
     std::env::remove_var(branding::BRAND_STORAGE_ROOT_ENV);
@@ -191,15 +197,18 @@ async fn tenant_login_brand_images_load_under_default_routes() {
 async fn tenant_admin_pages_use_the_tenant_favicon() {
     let _g = SUITE.lock().await;
     let t = tenant().await;
-    let app = TenantAdminBuilder::new(t.pools.clone(), t.url.clone(), HeaderResolver::default())
-        .build();
+    let app =
+        TenantAdminBuilder::new(t.pools.clone(), t.url.clone(), HeaderResolver::default()).build();
     let host = format!("{}.localhost", t.slug);
 
     let resp = send(&app, &host, "/").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let html = text(resp).await;
     let favicon = attr_after(&html, "rel=\"icon\"", "href").expect("favicon link");
-    assert!(favicon.contains("favicon"), "tenant favicon linked: {favicon}");
+    assert!(
+        favicon.contains("favicon"),
+        "tenant favicon linked: {favicon}"
+    );
     assert_png(&app, &host, &favicon).await;
     std::env::remove_var(branding::BRAND_STORAGE_ROOT_ENV);
 }
@@ -297,7 +306,10 @@ async fn console_logo_url_beats_logo_path() {
         "RUSTANGO_OPERATOR_LOGO_PATH",
         write_file(files.path(), "acme.png", PNG),
     );
-    std::env::set_var("RUSTANGO_OPERATOR_LOGO_URL", "https://cdn.example.com/l.png");
+    std::env::set_var(
+        "RUSTANGO_OPERATOR_LOGO_URL",
+        "https://cdn.example.com/l.png",
+    );
     let (app, _tmp) = console().await;
     clear_op_env();
     assert_eq!(console_logo(&app).await, "https://cdn.example.com/l.png");

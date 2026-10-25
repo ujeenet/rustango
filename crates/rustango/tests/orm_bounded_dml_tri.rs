@@ -377,7 +377,12 @@ async fn self_relation_where_has_dml(pool: &Pool) {
         .where_raw(children(true))
         .compile_delete()
         .unwrap();
-    assert_eq!(delete_pool(pool, &q).await.expect("delete where_doesnt_have"), 2);
+    assert_eq!(
+        delete_pool(pool, &q)
+            .await
+            .expect("delete where_doesnt_have"),
+        2
+    );
     let left: Vec<Node> = Node::objects()
         .order_by(&[("id", false)])
         .fetch(pool)

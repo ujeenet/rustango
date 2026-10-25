@@ -252,8 +252,14 @@ mod tests {
         let storage: crate::storage::BoxedStorage =
             std::sync::Arc::new(crate::storage::InMemoryStorage::new());
         let url = |r: &RouteConfig| r.brand_asset_url("acme", Some("logo.png"), &storage);
-        assert_eq!(url(&RouteConfig::default()).as_deref(), Some("/_brand/acme/logo.png"));
-        assert_eq!(url(&RouteConfig::legacy()).as_deref(), Some("/__brand__/acme/logo.png"));
+        assert_eq!(
+            url(&RouteConfig::default()).as_deref(),
+            Some("/_brand/acme/logo.png")
+        );
+        assert_eq!(
+            url(&RouteConfig::legacy()).as_deref(),
+            Some("/__brand__/acme/logo.png")
+        );
     }
 
     /// #2098 — cookies scope to the prefix only when the request is under it.

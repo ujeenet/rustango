@@ -524,9 +524,13 @@ fn api_key_secret() -> Result<&'static crate::session::SessionSecret, super::Ten
 }
 
 /// The CLI's key: a set one, else the server's, loaded only, never written.
-pub(crate) fn existing_api_key_secret(
-) -> Result<(&'static crate::session::SessionSecret, Option<super::session::KeySource>), super::TenancyError>
-{
+pub(crate) fn existing_api_key_secret() -> Result<
+    (
+        &'static crate::session::SessionSecret,
+        Option<super::session::KeySource>,
+    ),
+    super::TenancyError,
+> {
     if let Some(s) = API_KEY_SECRET.get() {
         return Ok((s, None));
     }

@@ -651,7 +651,9 @@ async fn concurrent_creates_never_share_a_schema(pool: &Pool) {
                 schema_name: api_schema,
                 ..schema_opts(BackendKind::Postgres, "unused")
             };
-            env.create(Path::new("none"), &api_slug, opts).await.map(drop)
+            env.create(Path::new("none"), &api_slug, opts)
+                .await
+                .map(drop)
         };
         let (x, y) = tokio::join!(engine, api);
         assert_eq!(

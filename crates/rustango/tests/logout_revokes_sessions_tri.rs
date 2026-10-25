@@ -254,7 +254,10 @@ async fn deactivating_a_bare_admin_ends_their_sessions(pool: &Pool) {
         env.status(&theirs).await.is_redirection(),
         "a cookie from before the deactivation came back"
     );
-    assert!(row.sessions_revoked_at.is_some(), "deactivation not stamped");
+    assert!(
+        row.sessions_revoked_at.is_some(),
+        "deactivation not stamped"
+    );
 }
 
 /// `session::deactivate` ends the sessions; reactivating with a plain ORM
@@ -268,7 +271,10 @@ async fn the_deactivate_helper_ends_sessions(pool: &Pool) {
         .unwrap());
     let mut row = env.row().await;
     assert!(!row.active);
-    assert!(row.sessions_revoked_at.is_some(), "deactivation not stamped");
+    assert!(
+        row.sessions_revoked_at.is_some(),
+        "deactivation not stamped"
+    );
     row.active = true;
     row.save_pool(pool).await.unwrap();
     assert!(

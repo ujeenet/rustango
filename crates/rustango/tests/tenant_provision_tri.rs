@@ -1241,7 +1241,11 @@ async fn an_interrupted_run_is_reclaimed(pool: &Pool) {
 fn project_root(env: &Env) -> PathBuf {
     let root = env.dir("project");
     write_migrations(&root.join("migrations"), &["0001_notes"]);
-    write_table_migration(&root.join("blog").join("migrations"), "0001_posts", "tp_posts");
+    write_table_migration(
+        &root.join("blog").join("migrations"),
+        "0001_posts",
+        "tp_posts",
+    );
     root
 }
 
@@ -1262,9 +1266,12 @@ async fn the_engine_migrates_every_app_dir(pool: &Pool) {
     let a = slug("root");
     env.clean(&[&a]).await;
     env.add_server("main").await;
-    env.provision(&project_root(&env), &ProvisionRequest::on_server(&a, "main"))
-        .await
-        .expect("created");
+    env.provision(
+        &project_root(&env),
+        &ProvisionRequest::on_server(&a, "main"),
+    )
+    .await
+    .expect("created");
     let url = assert_provisioned(&env, &a).await;
     assert_app_migrated(&url).await;
     env.clean(&[&a]).await;
