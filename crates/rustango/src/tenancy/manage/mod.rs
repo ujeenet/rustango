@@ -186,6 +186,39 @@ where
     .await
 }
 
+/// What `Cli` knows about the deployment that a verb cannot see.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CliFacts {
+    /// `with_tenant_provisioning` was called.
+    pub(crate) provisioning: bool,
+}
+
+/// [`run_with_writer_and_init`] with the `Cli`'s [`CliFacts`].
+#[cfg(feature = "manage")]
+pub(crate) async fn run_from_cli<W: Write + Send, DB: sqlx::Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    args: Vec<String>,
+    writer: &mut W,
+    init_fn: InitTenancyFn,
+    facts: CliFacts,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    Box::pin(dispatch_with(
+        pools,
+        registry_url,
+        dir,
+        args,
+        writer,
+        init_fn,
+        facts,
+    ))
+    .await
+}
+
 /// One verb, dispatched. Split out so `menu` can run a chosen verb through
 /// the same match rather than shelling out or duplicating the table.
 pub(super) async fn dispatch<W: Write + Send, DB: sqlx::Database>(
@@ -195,6 +228,30 @@ pub(super) async fn dispatch<W: Write + Send, DB: sqlx::Database>(
     args: Vec<String>,
     writer: &mut W,
     init_fn: InitTenancyFn,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    dispatch_with(
+        pools,
+        registry_url,
+        dir,
+        args,
+        writer,
+        init_fn,
+        CliFacts::default(),
+    )
+    .await
+}
+
+async fn dispatch_with<W: Write + Send, DB: sqlx::Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    args: Vec<String>,
+    writer: &mut W,
+    init_fn: InitTenancyFn,
+    facts: CliFacts,
 ) -> Result<(), TenancyError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
@@ -396,7 +453,7 @@ where
             dir,
             &args[1..],
             writer,
-            tenancy_deploy_findings(pools),
+            tenancy_deploy_findings(pools, facts),
         )
         .await
         .map_err(TenancyError::Migrate),
@@ -936,6 +993,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
 /// `check --deploy` findings only a tenancy deploy has.
 async fn tenancy_deploy_findings<DB: sqlx::Database>(
     pools: &TenantPools<DB>,
+    facts: CliFacts,
 ) -> rustango::migrate::manage::DeployAuditFindings
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
@@ -951,7 +1009,33 @@ where
         crate::tenancy::server::tenant_scheme_setting().as_deref(),
         &mut out,
     );
+    if facts.provisioning {
+        secret_key_audit(crate::aead::key_status(), &mut out);
+    }
     out
+}
+
+/// Provisioning seals server passwords and tenant URLs with this key.
+fn secret_key_audit(
+    status: crate::aead::KeyStatus,
+    out: &mut rustango::migrate::manage::DeployAuditFindings,
+) {
+    use crate::aead::KeyStatus;
+    match status {
+        KeyStatus::Missing => out.warnings.push(
+            "RUSTANGO_SECRET_KEY is unset — tenant provisioning is mounted but cannot save \
+             server passwords, and new tenant URLs are stored unsealed; set 32+ random bytes \
+             (`openssl rand -base64 48`) and back it up"
+                .into(),
+        ),
+        KeyStatus::Short => out.warnings.push(
+            "RUSTANGO_SECRET_KEY is shorter than 32 bytes — sealed secrets use a weak key"
+                .into(),
+        ),
+        KeyStatus::Ok => out
+            .info
+            .push("RUSTANGO_SECRET_KEY is set for sealed secrets".into()),
+    }
 }
 
 /// The impersonation handoff carries a one-time superuser login (#2425).
@@ -976,6 +1060,25 @@ fn tenant_scheme_audit(
 #[cfg(test)]
 mod deploy_tests {
     use super::*;
+
+    /// A missing or short secret key is flagged when provisioning is mounted.
+    #[test]
+    fn a_missing_or_short_secret_key_is_flagged() {
+        use crate::aead::KeyStatus;
+        for (status, flagged) in [
+            (KeyStatus::Missing, true),
+            (KeyStatus::Short, true),
+            (KeyStatus::Ok, false),
+        ] {
+            let mut out = rustango::migrate::manage::DeployAuditFindings::default();
+            secret_key_audit(status, &mut out);
+            assert_eq!(
+                out.warnings.iter().any(|w| w.contains("RUSTANGO_SECRET_KEY")),
+                flagged,
+                "{status:?}"
+            );
+        }
+    }
 
     /// #2425 — an unset or non-https tenant scheme is flagged; https is not.
     #[test]

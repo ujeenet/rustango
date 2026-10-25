@@ -3,6 +3,7 @@
 {% block content %}
 <h1>Database server <code>{{ server.name }}</code></h1>
 <p><a href="{{ console_prefix }}/db-servers">← All database servers</a></p>
+{% if key_warning %}<div class="alert alert-error key-warning">{{ key_warning }}</div>{% endif %}
 {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
 {% if notice %}<div class="alert alert-notice">{{ notice }}</div>{% endif %}
 

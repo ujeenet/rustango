@@ -2,6 +2,7 @@
 {% block title %}Database servers — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
 {% block content %}
 <h1>Database servers</h1>
+{% if key_warning %}<div class="alert alert-error key-warning">{{ key_warning }}</div>{% endif %}
 {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
 {% if notice %}<div class="alert alert-notice">{{ notice }}</div>{% endif %}
 

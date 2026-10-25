@@ -172,6 +172,10 @@ A saved-server create needs `RUSTANGO_SECRET_KEY`: the tenant login it creates i
 `UrlPolicy` has a new `Server(name)` variant, so an exhaustive match needs an arm.
 `create-tenant --database-url` without `--mode` now means database mode; `api::create_tenant` refuses a database URL or server in schema mode. Database mode on a saved server returns `Err` when migrations fail, since the tenant was removed again.
 
+### New tenant projects mount provisioning
+
+`cargo rustango new --template tenant` now adds `.with_tenant_provisioning("migrations")` to `main.rs`; delete the line to keep the console read-only. Existing projects add the call themselves to get **New tenant** and **Database servers**, plus `RUSTANGO_SECRET_KEY` in their env.
+
 ### `TenantPoolInvalidator::tenant_secrets` has no default
 
 A custom implementor must return its `TenantSecrets`; the old default ignored `require_sealed_secrets()`.

@@ -17,9 +17,24 @@ pub(crate) const KEY_VAR: &str = "RUSTANGO_SECRET_KEY";
 /// Shorter keys are guessable; 32 random bytes is the documented floor.
 pub(crate) const MIN_KEY_LEN: usize = 32;
 
-/// `true` when the current key is set but below [`MIN_KEY_LEN`].
-pub(crate) fn key_is_short() -> bool {
-    env_key().is_some_and(|k| k.len() < MIN_KEY_LEN)
+/// The current key as the console and `check --deploy` report it.
+#[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyStatus {
+    /// Unset: nothing can be sealed.
+    Missing,
+    /// Set, but below [`MIN_KEY_LEN`].
+    Short,
+    Ok,
+}
+
+#[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+pub(crate) fn key_status() -> KeyStatus {
+    match env_key() {
+        None => KeyStatus::Missing,
+        Some(k) if k.len() < MIN_KEY_LEN => KeyStatus::Short,
+        Some(_) => KeyStatus::Ok,
+    }
 }
 
 /// The one key every in-crate unit test uses: they share a process
