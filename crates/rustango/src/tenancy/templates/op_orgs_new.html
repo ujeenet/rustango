@@ -65,26 +65,48 @@ connection check passes.</p>
         </td>
       </tr>
       <tr>
-        <th><label for="backend_kind">backend_kind</label></th>
+        <th>backend</th>
         <td>
-          {#- Only what this binary was built with. Offering a backend
-              it cannot speak produced an error telling the operator to
-              edit Cargo.toml. -#}
-          <select id="backend_kind" name="backend_kind">
-            {% for b in backends %}
-            <option value="{{ b }}" {% if prefill.backend_kind | default(value=backends[0]) == b %}selected{% endif %}>{{ b }}</option>
-            {% endfor %}
-          </select>
-          {% if backends | length == 1 %}
-          <div class="field-helper">This build supports
-          <code>{{ backends[0] }}</code> only.</div>
-          {% endif %}
+          <code id="backend">{{ backend }}</code>
+          <div class="field-helper">A tenant uses the registry's backend.</div>
         </td>
       </tr>
 
-      {# ---- database mode: name the database, do not retype a URL ---- #}
+      {# ---- database mode: a new database on a saved server, or one that exists ---- #}
+      {% set source = prefill.database_source | default(value=default_source) %}
       <tr class="mode-database">
-        <th><label for="database_name">database</label></th>
+        <th>database</th>
+        <td>
+          <label><input type="radio" name="database_source" value="server"
+                 {% if source == "server" %}checked{% endif %}
+                 {% if not servers %}disabled{% endif %}>
+            Create a new database on a saved server</label><br>
+          <label><input type="radio" name="database_source" value="url"
+                 {% if source != "server" %}checked{% endif %}>
+            Use an existing database</label>
+          {% if not servers %}
+          <div class="field-helper">No saved database server yet —
+          <a href="{{ console_prefix }}/db-servers">add one</a> to create
+          databases from here.</div>
+          {% endif %}
+        </td>
+      </tr>
+      <tr class="mode-database source-server">
+        <th><label for="server">server</label></th>
+        <td>
+          <select id="server" name="server">
+            {% for s in servers %}
+            <option value="{{ s }}" {% if prefill.server | default(value="") == s %}selected{% endif %}>{{ s }}</option>
+            {% endfor %}
+          </select>
+          <div class="field-helper">The database is named
+          <code class="slug-echo">&lt;slug&gt;</code>, and gets a login of
+          its own with a random password, granted that database only.
+          It must not exist yet.</div>
+        </td>
+      </tr>
+      <tr class="mode-database source-url">
+        <th><label for="database_name">database name</label></th>
         <td>
           <input type="text" id="database_name" name="database_name"
                  value="{{ prefill.database_name | default(value='') }}"
@@ -98,14 +120,20 @@ connection check passes.</p>
           </div>
         </td>
       </tr>
-      <tr class="mode-database">
+      <tr class="mode-database source-url">
         <th><label for="database_url">or a full URL</label></th>
         <td>
-          <input type="text" id="database_url" name="database_url"
-                 value="{{ prefill.database_url | default(value='') }}"
+          {#- A URL may hold a password: masked, and never sent back. -#}
+          <input type="password" id="database_url" name="database_url"
+                 autocomplete="off"
                  placeholder="leave blank unless the tenant lives elsewhere">
           <div class="field-helper">Only for a tenant on a different
           server. Overrides the database name above.</div>
+        </td>
+      </tr>
+      <tr class="mode-database">
+        <th></th>
+        <td>
           <p class="form-actions">
             <button type="button" class="btn btn-secondary" id="test-connection">Test connection</button>
             <span id="probe-result"></span>
@@ -205,8 +233,15 @@ connection check passes.</p>
   // mode. Everything here is presentation — the server validates
   // regardless, so a browser with JS off gets every field and a
   // correct answer, just a noisier one.
+  const mode = document.getElementById("storage_mode");
+  const serverPick = document.getElementById("server");
+
+  function source() {
+    const picked = document.querySelector('input[name="database_source"]:checked');
+    return picked ? picked.value : "url";
+  }
+
   (function () {
-    const mode = document.getElementById("storage_mode");
     const slug = document.getElementById("slug");
     const dbName = document.getElementById("database_name");
     const derived = document.getElementById("derived-url");
@@ -223,10 +258,19 @@ connection check passes.</p>
       for (const row of document.querySelectorAll(".mode-schema")) {
         row.hidden = !schema;
       }
+      for (const row of document.querySelectorAll(".source-server")) {
+        row.hidden = schema || source() !== "server";
+      }
+      for (const row of document.querySelectorAll(".source-url")) {
+        row.hidden = schema || source() === "server";
+      }
     }
 
     function applySlug() {
       const s = slug.value.trim() || "<slug>";
+      for (const echo of document.querySelectorAll(".slug-echo")) {
+        echo.textContent = s;
+      }
       const name = dbName.value.trim() || "tenant_" + s;
       if (nameDefault) { nameDefault.textContent = "tenant_" + s; }
       if (derived && derivedTemplate) {
@@ -235,6 +279,9 @@ connection check passes.</p>
     }
 
     mode.addEventListener("change", applyMode);
+    for (const radio of document.querySelectorAll('input[name="database_source"]')) {
+      radio.addEventListener("change", applyMode);
+    }
     slug.addEventListener("input", applySlug);
     dbName.addEventListener("input", applySlug);
     applyMode();
@@ -260,6 +307,9 @@ connection check passes.</p>
           "X-CSRF-Token": csrfToken(),
         },
         body: new URLSearchParams({
+          storage_mode: mode.value,
+          database_source: source(),
+          server: serverPick ? serverPick.value : "",
           database_url: document.getElementById("database_url").value,
           database_name: document.getElementById("database_name").value,
           slug: document.getElementById("slug").value,

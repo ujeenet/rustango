@@ -42,7 +42,7 @@ use crate::sql::connect_diagnosis::redact;
 use crate::tenancy::auth;
 use crate::tenancy::org::{BackendKind, StorageMode};
 use crate::tenancy::preflight::{self, Preflight};
-use crate::tenancy::provision::{self, ProvisionRequest};
+use crate::tenancy::provision::{self, DatabaseSource, ProvisionRequest, TenantStorage};
 use crate::tenancy::provision_store::{self as store, RunState};
 
 /// How often the stream looks for new events.
@@ -65,20 +65,23 @@ pub(super) async fn org_new_form(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
 ) -> Response<Body> {
-    render_form(&state, &op, &HashMap::new(), None)
+    render_form(&state, &op, &HashMap::new(), None).await
 }
 
-fn render_form(
+async fn render_form(
     state: &ConsoleState,
     op: &auth::Operator,
-    prefill: &HashMap<String, String>,
+    form: &HashMap<String, String>,
     error: Option<&str>,
 ) -> Response<Body> {
     let mut ctx = Context::new();
     inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("section", "orgs");
     ctx.insert("operator_username", &op.username);
-    ctx.insert("prefill", prefill);
+    // A URL may carry a password, so it is never sent back.
+    let prefill: HashMap<&String, &String> =
+        form.iter().filter(|(k, _)| *k != "database_url").collect();
+    ctx.insert("prefill", &prefill);
     ctx.insert("error", &error);
     // Schema-mode is Postgres-only by language. Offering it on a
     // SQLite or MySQL registry would be offering a choice that can
@@ -87,11 +90,20 @@ fn render_form(
         "schema_mode_available",
         &(state.registry.dialect().name() == "postgres"),
     );
-    // Only backends this binary can actually speak. Listing all three
-    // unconditionally meant an operator could pick `sqlite` on a
-    // Postgres-only build and be told to edit `Cargo.toml` — advice
-    // aimed at a developer, for a choice the form itself offered.
-    ctx.insert("backends", &compiled_backends());
+    // A tenant always uses the registry's backend.
+    ctx.insert("backend", BackendKind::of_pool(&state.registry).as_str());
+    let servers: Vec<String> = crate::tenancy::db_server::list(&state.registry)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| s.active)
+        .map(|s| s.name)
+        .collect();
+    ctx.insert(
+        "default_source",
+        if servers.is_empty() { "url" } else { "server" },
+    );
+    ctx.insert("servers", &servers);
     // What a derived URL will look like, with the password removed.
     // The real one is built server-side at submit time; the browser
     // never sees the registry's credentials.
@@ -106,27 +118,6 @@ fn render_form(
             .map(|u| redact(&u)),
     );
     render(state, "op_orgs_new.html", &ctx)
-}
-
-/// The backends this binary was built with.
-///
-/// Compile-time truth, not a hardcoded list: a form must not offer a
-/// choice the binary cannot honour.
-fn compiled_backends() -> Vec<&'static str> {
-    // Written as pushes rather than one `vec![]` because each entry is
-    // independently `#[cfg]`-gated; clippy's `vec![]` suggestion does
-    // not apply to a conditionally-built list.
-    #[allow(clippy::vec_init_then_push)]
-    {
-        let mut out = Vec::new();
-        #[cfg(feature = "postgres")]
-        out.push("postgres");
-        #[cfg(feature = "mysql")]
-        out.push("mysql");
-        #[cfg(feature = "sqlite")]
-        out.push("sqlite");
-        out
-    }
 }
 
 use super::render;
@@ -150,11 +141,16 @@ fn request_from_form(
         "schema" => StorageMode::Schema,
         _ => StorageMode::Database,
     };
-    let backend = BackendKind::parse(field("backend_kind").unwrap_or("postgres"))
-        .map_err(|got| format!("Unknown backend `{got}`."))?;
-    backend
-        .validate_storage_mode(mode)
-        .map_err(ToOwned::to_owned)?;
+    // The form shows the registry's backend; a posted one is checked
+    // against it by the provisioner.
+    let backend = field("backend_kind")
+        .map(|b| BackendKind::parse(b).map_err(|got| format!("Unknown backend `{got}`.")))
+        .transpose()?;
+    if let Some(backend) = backend {
+        backend
+            .validate_storage_mode(mode)
+            .map_err(ToOwned::to_owned)?;
+    }
 
     let port = match field("port") {
         Some(raw) => Some(
@@ -172,10 +168,41 @@ fn request_from_form(
     //    the registry password never reaches the browser and never
     //    travels back in a form post;
     // 3. nothing, for schema-mode, which has no separate database.
-    let database_url = match (mode, field("database_url")) {
-        (StorageMode::Schema, _) => None,
-        (_, Some(explicit)) => Some(explicit.to_owned()),
-        (_, None) => {
+    let storage = match (mode, field("database_source")) {
+        (StorageMode::Schema, _) => {
+            TenantStorage::Schema(field("schema_name").map(ToOwned::to_owned))
+        }
+        (_, Some("server")) => TenantStorage::Database(DatabaseSource::Server(
+            field("server")
+                .ok_or("Choose the saved database server to create the database on.")?
+                .to_owned(),
+        )),
+        (_, _) => TenantStorage::Database(DatabaseSource::Url(existing_database_url(
+            &field, &slug, registry_url,
+        )?)),
+    };
+
+    Ok(ProvisionRequest {
+        backend,
+        display_name: field("display_name").map(ToOwned::to_owned),
+        host_pattern: field("host_pattern").map(ToOwned::to_owned),
+        port,
+        path_prefix: field("path_prefix").map(ToOwned::to_owned),
+        run_migrations: !form.contains_key("no_migrate"),
+        ..ProvisionRequest::new(slug, storage)
+    })
+}
+
+/// An existing database: the URL given, or a database name derived on
+/// the registry's server.
+fn existing_database_url<'a>(
+    field: &impl Fn(&str) -> Option<&'a str>,
+    slug: &str,
+    registry_url: Option<&str>,
+) -> Result<String, String> {
+    match field("database_url") {
+        Some(explicit) => Ok(explicit.to_owned()),
+        None => {
             // A blank database name means the default the form shows:
             // `tenant_<slug>`. Applying it here and not only in the
             // helper text matters — the page promises it, and a
@@ -187,30 +214,14 @@ fn request_from_form(
                 field("database_name").map_or_else(|| format!("tenant_{slug}"), ToOwned::to_owned);
             let registry = registry_url
                 .ok_or("This console cannot derive a database URL — supply a full URL instead.")?;
-            Some(
-                provision::tenant_url_on_registry_server(registry, &name).ok_or_else(|| {
-                    format!(
-                        "Could not derive a URL for database `{name}` from the registry's own \
-                         connection. Supply a full URL instead."
-                    )
-                })?,
-            )
+            provision::tenant_url_on_registry_server(registry, &name).ok_or_else(|| {
+                format!(
+                    "Could not derive a URL for database `{name}` from the registry's own \
+                     connection. Supply a full URL instead."
+                )
+            })
         }
-    };
-
-    Ok(ProvisionRequest {
-        slug,
-        mode,
-        backend,
-        display_name: field("display_name").map(ToOwned::to_owned),
-        database_url,
-        schema_name: field("schema_name").map(ToOwned::to_owned),
-        host_pattern: field("host_pattern").map(ToOwned::to_owned),
-        port,
-        path_prefix: field("path_prefix").map(ToOwned::to_owned),
-        run_migrations: !form.contains_key("no_migrate"),
-        preflight: Preflight::default(),
-    })
+    }
 }
 
 /// Create the tenant, then redirect to its run.
@@ -227,7 +238,7 @@ pub(super) async fn org_new_submit(
     let registry_url = provisioner.registry_url();
     let request = match request_from_form(&form, Some(&registry_url)) {
         Ok(r) => r,
-        Err(msg) => return render_form(&state, &op, &form, Some(&msg)),
+        Err(msg) => return render_form(&state, &op, &form, Some(&msg)).await,
     };
 
     // Provisioning runs inline. It is slower than a request should be
@@ -268,7 +279,7 @@ pub(super) async fn org_new_submit(
                     &e,
                 )
             });
-            render_form(&state, &op, &form, Some(&msg))
+            render_form(&state, &op, &form, Some(&msg)).await
         }
     }
 }
@@ -281,10 +292,18 @@ pub(super) async fn org_new_submit(
 /// in place, so this is usable from a button without a page reload.
 pub(super) async fn test_connection(
     State(state): State<ConsoleState>,
-    Extension(_op): Extension<auth::Operator>,
+    Extension(op): Extension<auth::Operator>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response<Body> {
     let field = |k: &str| form.get(k).map(|s| s.trim()).filter(|s| !s.is_empty());
+
+    // A new database on a saved server: report its admin's rights.
+    if field("storage_mode") != Some("schema") && field("database_source") == Some("server") {
+        let Some(name) = field("server") else {
+            return probe_bad("Choose a saved database server first.");
+        };
+        return super::db_servers::probe_response(&state, &op, name).await;
+    }
 
     // Probe exactly what a submit would use — an explicit URL, or the
     // one derived from the database name. Probing a different target
@@ -726,8 +745,31 @@ mod tests {
         )
         .expect("valid");
         assert_eq!(r.slug, "acme");
-        assert_eq!(r.mode, StorageMode::Database);
+        assert_eq!(r.mode(), StorageMode::Database);
         assert!(r.run_migrations, "migrations run unless opted out");
+    }
+
+    /// The saved-server choice names the server, and only that.
+    #[test]
+    fn the_server_choice_becomes_a_server_source() {
+        let r = request_from_form(
+            &form(&[
+                ("slug", "acme"),
+                ("database_source", "server"),
+                ("server", "main"),
+                ("database_url", "postgres://u:p@h/ignored"),
+            ]),
+            Some(TEST_REGISTRY),
+        )
+        .expect("valid");
+        assert_eq!(r.server(), Some("main"));
+        assert_eq!(r.database_url(), None);
+        let err = request_from_form(
+            &form(&[("slug", "acme"), ("database_source", "server")]),
+            Some(TEST_REGISTRY),
+        )
+        .expect_err("no server chosen");
+        assert!(err.contains("server"), "{err}");
     }
 
     /// Blank fields are absent fields. A form posts every input it
@@ -817,7 +859,7 @@ mod derivation_tests {
     fn a_slug_alone_derives_a_url_on_the_registry_server() {
         let r = request_from_form(&form(&[("slug", "globex")]), Some(REGISTRY)).expect("valid");
         assert_eq!(
-            r.database_url.as_deref(),
+            r.database_url(),
             Some("postgres://app:pw@db.internal:5432/tenant_globex")
         );
     }
@@ -833,11 +875,7 @@ mod derivation_tests {
             Some(REGISTRY),
         )
         .expect("valid");
-        assert!(r
-            .database_url
-            .as_deref()
-            .unwrap()
-            .ends_with("/tenant_globex"));
+        assert!(r.database_url().unwrap().ends_with("/tenant_globex"));
     }
 
     #[test]
@@ -847,7 +885,7 @@ mod derivation_tests {
             Some(REGISTRY),
         )
         .unwrap();
-        assert!(r.database_url.as_deref().unwrap().ends_with("/acme_prod"));
+        assert!(r.database_url().unwrap().ends_with("/acme_prod"));
     }
 
     /// The escape hatch: a tenant on another server entirely.
@@ -862,10 +900,7 @@ mod derivation_tests {
             Some(REGISTRY),
         )
         .unwrap();
-        assert_eq!(
-            r.database_url.as_deref(),
-            Some("postgres://u:p@elsewhere:5432/own")
-        );
+        assert_eq!(r.database_url(), Some("postgres://u:p@elsewhere:5432/own"));
     }
 
     /// Schema mode has no separate database, so nothing is derived —
@@ -881,6 +916,6 @@ mod derivation_tests {
             Some(REGISTRY),
         )
         .unwrap();
-        assert_eq!(r.database_url, None);
+        assert_eq!(r.database_url(), None);
     }
 }

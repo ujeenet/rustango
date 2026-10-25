@@ -365,8 +365,18 @@ pub(super) async fn test(
     Extension(op): Extension<auth::Operator>,
     Path(name): Path<String>,
 ) -> Response<Body> {
+    probe_response(&state, &op, &name).await
+}
+
+/// Log in to server `name` and report its admin's rights as JSON. Also
+/// the create form's test for a new database on a saved server.
+pub(super) async fn probe_response(
+    state: &ConsoleState,
+    op: &auth::Operator,
+    name: &str,
+) -> Response<Body> {
     // A probe logs in with the saved password, so it is on the trail too.
-    audit(&state, &op, &name, "db_server_test", &[]).await;
+    audit(state, op, name, "db_server_test", &[]).await;
     let bad = |message: String| ServerProbe {
         status: "bad",
         message,
@@ -377,7 +387,7 @@ pub(super) async fn test(
         can_grant: false,
         blocker: None,
     };
-    let probe = match db_server::get(&state.registry, &name).await {
+    let probe = match db_server::get(&state.registry, name).await {
         Ok(row) => match row.probe(PROBE_TIMEOUT).await {
             Ok(r) => {
                 let blocker = r.blocker();
@@ -412,9 +422,9 @@ pub(super) async fn test(
                     blocker,
                 }
             }
-            Err(e) => bad(explain(&e, &name)),
+            Err(e) => bad(explain(&e, name)),
         },
-        Err(e) => bad(explain(&e, &name)),
+        Err(e) => bad(explain(&e, name)),
     };
     axum::Json(probe).into_response()
 }
