@@ -219,7 +219,7 @@ pub(crate) async fn apply_values_if(
     let mut set: Vec<crate::core::Assignment> = Vec::new();
     let mut touched: Vec<&'static str> = Vec::new();
     let mut database_url_rotated = false;
-    // Claimed in the UPDATE's transaction below (#2099).
+    // Claimed in the UPDATE's transaction below.
     let mut claims: Vec<ClaimKey> = Vec::new();
     // An operator activated it, so no provisioning retry may resume it (#2292).
     let activating = values

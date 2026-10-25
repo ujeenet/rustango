@@ -239,7 +239,7 @@ struct Claimed {
 }
 
 /// Claim `host` as an extra host of `org_id` in a transaction this opens,
-/// so nothing reads before it (#2099).
+/// so nothing reads before it.
 ///
 /// The claim is the hostname's `rustango_org_hosts` row: its unique index
 /// makes a concurrent claim wait for the transaction, then fail. MySQL
@@ -485,7 +485,7 @@ async fn held_elsewhere(
 }
 
 /// Insert a new `org`, claiming its host, path prefix and port in the same
-/// transaction (#2099).
+/// transaction.
 ///
 /// # Errors
 /// The first value another tenant holds, or the INSERT's driver failure.
