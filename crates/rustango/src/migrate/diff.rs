@@ -3757,7 +3757,8 @@ mod sql_type_tests {
         assert!(gone.rebuild.is_none() && gone.immediate.is_empty());
     }
 
-    /// MySQL spells a check drop `DROP CHECK`, with no `IF EXISTS`.
+    /// MySQL spells a check drop `DROP CHECK` (MariaDB `DROP CONSTRAINT`),
+    /// with no `IF EXISTS`.
     ///
     /// This test previously asserted
     /// `` ALTER TABLE `t` DROP CONSTRAINT IF EXISTS `ck_x` ``, which
@@ -3783,7 +3784,7 @@ mod sql_type_tests {
         let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql).unwrap();
         assert_eq!(
             out.immediate,
-            vec!["ALTER TABLE `t` DROP CHECK `ck_x`".to_string()]
+            vec!["ALTER TABLE `t` DROP /*!80000 CHECK */ /*M! CONSTRAINT */ `ck_x`".to_string()]
         );
         assert!(
             !out.immediate[0].contains("IF EXISTS"),

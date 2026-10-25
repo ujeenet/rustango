@@ -8,6 +8,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - MySQL: a correlated `IN` over the table an `update()` / `delete()` writes is no longer read through a derived table, which saw the write's own changes and hit wrong rows; it fails with error 1093 instead.
 - MySQL: widening a pk an M2M junction references widens the junction column too, so the junction keeps its foreign key.
+- MariaDB: JSON `=` / `<>` compare by value (`JSON_EQUALS`), not as text; `explain` returns its JSON plan instead of failing on `FORMAT=TREE` / `EXPLAIN ANALYZE`; check constraints drop with `DROP CONSTRAINT`; `bulk_update` no longer sends `VALUES ROW(…)`.
 
 ### Fixed — tenant logos 404'd under the default routes
 

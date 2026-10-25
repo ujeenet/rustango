@@ -646,6 +646,27 @@ async fn bulk_update_sets_null_in_every_row(pool: &Pool) {
     assert!(posts(pool).await.iter().all(|p| p.parent_id.is_none()));
 }
 
+/// Each row gets its own values; MariaDB has no `VALUES ROW(…)`.
+async fn bulk_update_writes_each_rows_values(pool: &Pool) {
+    post("a", None).insert_pool(pool).await.expect("seed a");
+    post("b", Some(1)).insert_pool(pool).await.expect("seed b");
+    let mut rows = posts(pool).await;
+    for r in &mut rows {
+        r.title = format!("t-{}", r.slug);
+        r.parent_id = (r.slug == "a").then_some(7);
+    }
+    let n = Post::bulk_update(&rows, &["title", "parent_id"], pool)
+        .await
+        .expect("bulk_update");
+    assert_eq!(n, 2);
+    let got: Vec<(String, Option<i64>)> = posts(pool)
+        .await
+        .into_iter()
+        .map(|p| (p.title, p.parent_id))
+        .collect();
+    assert_eq!(got, vec![("t-a".into(), Some(7)), ("t-b".into(), None)]);
+}
+
 /// Seed `(slug, title)` rows in order.
 async fn seed(pool: &Pool, rows: &[(&str, &str)]) {
     for (slug, title) in rows {
@@ -1233,6 +1254,7 @@ tri_dialect_test! {
         upsert_reports_the_updated_row,
         batch_conflicts_inside_one_insert,
         bulk_update_sets_null_in_every_row,
+        bulk_update_writes_each_rows_values,
         union_keeps_the_first_branch_join,
         union_values_list_flat_in_a_subquery,
         paginated_union_counts_every_branch,

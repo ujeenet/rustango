@@ -4425,7 +4425,15 @@ fn write_expr_compare(
         return Ok(());
     }
     if let Some(kw) = binary_op_str {
+        let start = b.sql.len();
         write_expr(b, lhs, None)?;
+        if let Expr::Literal(v @ SqlValue::Json(_)) = rhs {
+            let lhs_sql = b.sql.split_off(start);
+            if try_json_eq(b, &lhs_sql, op, v) {
+                return Ok(());
+            }
+            b.sql.push_str(&lhs_sql);
+        }
         b.sql.push_str(kw);
         return write_compare_rhs(b, lhs, rhs);
     }
@@ -4734,6 +4742,9 @@ fn write_filter(
         b.sql.push_str(test);
         return Ok(());
     }
+    if try_json_eq(b, &qualified_col, filter.op, &filter.value) {
+        return Ok(());
+    }
     let cast = model.and_then(|m| null_cast_for(b.d, m, filter.column));
 
     match filter.op {
@@ -4983,6 +4994,23 @@ fn write_filter(
         }
     }
     Ok(())
+}
+
+/// `<lhs> = <json>` / `<>` written by the dialect, when it has its own
+/// JSON equality ([`Dialect::write_json_eq`]). `lhs` is written SQL whose
+/// binds are already in. Whether it wrote.
+fn try_json_eq(b: &mut Sql<'_>, lhs: &str, op: Op, value: &SqlValue) -> bool {
+    let (Op::Eq | Op::Ne, SqlValue::Json(_)) = (op, value) else {
+        return false;
+    };
+    let p = b.d.placeholder(b.params.len() + 1);
+    let mut out = String::new();
+    if !b.d.write_json_eq(&mut out, lhs, &p, matches!(op, Op::Ne)) {
+        return false;
+    }
+    b.params.push(value.clone());
+    b.sql.push_str(&out);
+    true
 }
 
 fn simple_op(
