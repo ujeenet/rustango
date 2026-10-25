@@ -225,6 +225,8 @@ async fn fetch_row_as_json_pool_returns_none_for_missing_pk() {
     assert!(row.is_none(), "no row with id=9999 should return None");
 }
 
+// Kept for coverage until the deprecated helper is removed.
+#[allow(deprecated)]
 #[tokio::test]
 async fn render_generic_fk_link_pool_emits_clickable_html_on_sqlite() {
     // Coverage for `render_generic_fk_link_pool` — slice 26c. Renders
