@@ -202,6 +202,10 @@ It no longer seals anything. Values it sealed still open with `RUSTANGO_SECRET_K
 With a provisioning console, **Purge** opens a recorded run and redirects to its page instead of flashing the result; `purge-tenant` prints each step.
 `RunKind` has `Purge` and `RotatePassword` and is `#[non_exhaustive]`, so a match needs a wildcard arm. `TenantProvisioner` has `purge_in_run` and `rotate_password_in_run`, with defaults that refuse.
 
+### `passkey` uses `p256` 0.14
+
+`passkey::verify::cose_es256_key` returns a `p256` 0.14 `VerifyingKey`. If you use that key with your own `p256`, move it to 0.14 too (`to_encoded_point` is now `to_sec1_point`).
+
 ## 0.60.12
 
 ### `makemigrations --merge` refuses conflicts
