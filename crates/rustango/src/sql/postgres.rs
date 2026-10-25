@@ -134,6 +134,69 @@ impl Dialect for Postgres {
         ))
     }
 
+    /// No dual passwords: the old one stops working at once.
+    fn alter_login_password_sql(
+        &self,
+        login: &Login,
+        password: &LoginPassword,
+        _retain_current: bool,
+    ) -> Option<String> {
+        Some(format!(
+            "ALTER ROLE {} PASSWORD {}",
+            self.quote_ident(login.name().as_str()),
+            escape_string_literal(&password.pg_secret())
+        ))
+    }
+
+    /// PG 16+ lets a CREATEROLE login alter or drop only roles it holds
+    /// ADMIN OPTION on, so a replaced admin may not touch older logins.
+    /// Ending sessions needs membership or `pg_signal_backend`.
+    fn tenant_rights_sql(&self, db: &DatabaseName, login: &Login) -> Option<CompiledStatement> {
+        Some(CompiledStatement {
+            sql: "SELECT \
+                  (SELECT me.rolsuper OR pg_has_role(current_user, d.datdba, 'USAGE') \
+                     FROM pg_database d WHERE d.datname = $1), \
+                  (SELECT CASE WHEN current_setting('server_version_num')::int >= 160000 \
+                     THEN pg_has_role(current_user, t.oid, 'MEMBER WITH ADMIN OPTION') \
+                     ELSE me.rolsuper OR me.rolcreaterole END \
+                     FROM pg_roles t WHERE t.rolname = $2), \
+                  me.rolsuper OR pg_has_role(current_user, 'pg_signal_backend', 'USAGE') \
+                     OR COALESCE((SELECT pg_has_role(current_user, t.oid, 'USAGE') \
+                     FROM pg_roles t WHERE t.rolname = $2), false) \
+                  FROM pg_roles me WHERE me.rolname = current_user"
+                .to_owned(),
+            params: vec![
+                crate::core::SqlValue::String(db.as_str().to_owned()),
+                crate::core::SqlValue::String(login.name().as_str().to_owned()),
+            ],
+        })
+    }
+
+    fn database_sessions_sql(&self, db: &DatabaseName, tag: &str) -> Option<CompiledStatement> {
+        Some(CompiledStatement {
+            sql: "SELECT count(*) FILTER (WHERE application_name = $2), \
+                  count(*) FILTER (WHERE application_name IS DISTINCT FROM $2) \
+                  FROM pg_stat_activity WHERE datname = $1"
+                .to_owned(),
+            params: vec![
+                crate::core::SqlValue::String(db.as_str().to_owned()),
+                crate::core::SqlValue::String(tag.to_owned()),
+            ],
+        })
+    }
+
+    fn end_sessions_sql(&self, db: &DatabaseName, tag: &str) -> Option<CompiledStatement> {
+        Some(CompiledStatement {
+            sql: "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity \
+                  WHERE datname = $1 AND application_name = $2"
+                .to_owned(),
+            params: vec![
+                crate::core::SqlValue::String(db.as_str().to_owned()),
+                crate::core::SqlValue::String(tag.to_owned()),
+            ],
+        })
+    }
+
     /// PUBLIC has CONNECT on every new database; revoking it keeps the
     /// other tenants' logins out.
     fn grant_database_sql(&self, db: &DatabaseName, login: &Login) -> Vec<String> {

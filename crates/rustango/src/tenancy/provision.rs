@@ -2632,6 +2632,25 @@ pub trait TenantProvisioner: Send + Sync {
     /// `DB` to name.
     fn migrate_in_run<'a>(&'a self, run_id: i64, slug: Option<&'a str>) -> BoxFuture<'a, ()>;
 
+    /// Purge a tenant into an open run of kind `purge`. The default
+    /// refuses and closes the run, so older implementors still build.
+    fn purge_in_run<'a>(
+        &'a self,
+        run_id: i64,
+        slug: &'a str,
+        purge_database: bool,
+    ) -> BoxFuture<'a, super::decommission::Report> {
+        let _ = (slug, purge_database);
+        Box::pin(async move { Err(unsupported_run(&self.registry(), run_id).await) })
+    }
+
+    /// Rotate a server-made tenant's login password into an open run of
+    /// kind `rotate_password`. The default refuses and closes the run.
+    fn rotate_password_in_run<'a>(&'a self, run_id: i64, slug: &'a str) -> BoxFuture<'a, ()> {
+        let _ = slug;
+        Box::pin(async move { Err(unsupported_run(&self.registry(), run_id).await) })
+    }
+
     /// The registry's own connection URL, for deriving a tenant URL on
     /// the same server. **Never render it**: it carries credentials.
     /// Derive first, then redact for display.
@@ -2639,6 +2658,17 @@ pub trait TenantProvisioner: Send + Sync {
 
     /// The registry pool, so a caller can read runs and events back.
     fn registry(&self) -> crate::sql::Pool;
+}
+
+/// Close `run_id` as failed: this provisioner cannot do that work.
+async fn unsupported_run(registry: &crate::sql::Pool, run_id: i64) -> TenancyError {
+    const WHY: &str = "this provisioner cannot run that operation";
+    let text = RunText::fixed(WHY);
+    let state = super::provision_store::RunState::Failed;
+    if let Err(e) = super::provision_store::finish_run_text(registry, run_id, state, Some(&text)).await {
+        tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not close provisioning run");
+    }
+    TenancyError::Validation(WHY.to_owned())
 }
 
 /// The boxed-future shape an object-safe async method has to return.
@@ -2742,6 +2772,25 @@ where
                 slug,
             )
             .await
+        })
+    }
+
+    fn purge_in_run<'a>(
+        &'a self,
+        run_id: i64,
+        slug: &'a str,
+        purge_database: bool,
+    ) -> BoxFuture<'a, super::decommission::Report> {
+        Box::pin(async move {
+            super::decommission::purge_in_run(self.pools.as_ref(), slug, purge_database, None, run_id)
+                .await
+        })
+    }
+
+    fn rotate_password_in_run<'a>(&'a self, run_id: i64, slug: &'a str) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            super::server_tenant::rotate_password_in_run(self.pools.as_ref(), slug, None, run_id)
+                .await
         })
     }
 

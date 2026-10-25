@@ -54,15 +54,36 @@ pub(crate) enum AeadError {
     Decrypt,
 }
 
-/// The current key. Read per call so key rotation and tests see the live value.
+/// The current key. Read per call so key rotation and tests see the live
+/// value. An empty or blank value counts as unset.
 fn env_key() -> Option<String> {
-    std::env::var(KEY_VAR).ok()
+    std::env::var(KEY_VAR).ok().filter(|k| !k.trim().is_empty())
 }
 
-fn cipher(secret: Option<&str>) -> Result<XChaCha20Poly1305, AeadError> {
-    // SHA-256 of the secret, so any length works.
-    let digest = Sha256::digest(secret.ok_or(AeadError::MissingKey)?.as_bytes());
-    Ok(XChaCha20Poly1305::new(Key::from_slice(&digest)))
+/// A key that may seal: set and not blank. A blank one would seal under
+/// SHA-256 of nothing, which anyone can open.
+#[derive(Clone, Copy)]
+struct AeadKey<'a>(&'a str);
+
+impl<'a> AeadKey<'a> {
+    fn new(secret: Option<&'a str>) -> Result<Self, AeadError> {
+        match secret {
+            Some(s) if !s.trim().is_empty() => Ok(Self(s)),
+            _ => Err(AeadError::MissingKey),
+        }
+    }
+
+    /// Opening only: an explicitly set blank previous key, so values sealed
+    /// under one before it was refused can still be re-sealed.
+    fn previous(secret: Option<&'a str>) -> Result<Self, AeadError> {
+        secret.map(Self).ok_or(AeadError::MissingKey)
+    }
+
+    fn cipher(self) -> XChaCha20Poly1305 {
+        // SHA-256 of the secret, so any length works.
+        let digest = Sha256::digest(self.0.as_bytes());
+        XChaCha20Poly1305::new(Key::from_slice(&digest))
+    }
 }
 
 /// Encrypt `plaintext`, binding `aad` (empty for the cast).
@@ -88,9 +109,9 @@ pub(crate) fn decrypt_either(
     stored: &str,
     aad: &[u8],
 ) -> Result<Vec<u8>, AeadError> {
-    match decrypt_with(current, stored, aad) {
+    match AeadKey::new(current).and_then(|k| open(k, stored, aad)) {
         Err(AeadError::Decrypt | AeadError::MissingKey) if previous.is_some() => {
-            decrypt_with(previous, stored, aad)
+            open(AeadKey::previous(previous)?, stored, aad)
         }
         other => other,
     }
@@ -101,7 +122,7 @@ pub(crate) fn encrypt_with(
     plaintext: &[u8],
     aad: &[u8],
 ) -> Result<String, AeadError> {
-    let cipher = cipher(secret)?;
+    let cipher = AeadKey::new(secret)?.cipher();
     let mut nonce = [0u8; NONCE_LEN];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
     let ciphertext = cipher
@@ -119,11 +140,16 @@ pub(crate) fn encrypt_with(
     Ok(base64::engine::general_purpose::STANDARD.encode(framed))
 }
 
+#[cfg(test)]
 pub(crate) fn decrypt_with(
     secret: Option<&str>,
     stored: &str,
     aad: &[u8],
 ) -> Result<Vec<u8>, AeadError> {
+    open(AeadKey::new(secret)?, stored, aad)
+}
+
+fn open(key: AeadKey<'_>, stored: &str, aad: &[u8]) -> Result<Vec<u8>, AeadError> {
     let framed = base64::engine::general_purpose::STANDARD
         .decode(stored)
         .map_err(|e| AeadError::Decode(e.to_string()))?;
@@ -131,7 +157,7 @@ pub(crate) fn decrypt_with(
         return Err(AeadError::Short);
     }
     let (nonce, ciphertext) = framed.split_at(NONCE_LEN);
-    cipher(secret)?
+    key.cipher()
         .decrypt(
             XNonce::from_slice(nonce),
             Payload {
@@ -170,6 +196,27 @@ mod tests {
             Err(AeadError::Decrypt)
         ));
         assert_eq!(decrypt_with(KEY, &stored, b"one").unwrap(), b"x");
+    }
+
+    /// A blank key seals under a hash anyone can compute, so it is unset;
+    /// a blank previous key still opens what it sealed, for re-sealing.
+    #[test]
+    fn a_blank_key_never_seals() {
+        for blank in ["", "  "] {
+            assert!(matches!(
+                encrypt_with(Some(blank), b"x", b""),
+                Err(AeadError::MissingKey)
+            ));
+        }
+        let digest = Sha256::digest(b"");
+        let nonce = [1u8; NONCE_LEN];
+        let ct = XChaCha20Poly1305::new(Key::from_slice(&digest))
+            .encrypt(XNonce::from_slice(&nonce), b"old".as_slice())
+            .unwrap();
+        let stored =
+            base64::engine::general_purpose::STANDARD.encode([nonce.as_slice(), &ct].concat());
+        assert!(decrypt_either(Some(""), None, &stored, b"").is_err());
+        assert_eq!(decrypt_either(KEY, Some(""), &stored, b"").unwrap(), b"old");
     }
 
     #[test]

@@ -259,6 +259,13 @@ async fn without_a_key_a_password_is_refused(pool: &Pool) {
     assert!(err.to_string().contains("RUSTANGO_SECRET_KEY") && !err.to_string().contains(SECRET), "{err}");
     let gone = db_server::get(&env.registry, "nokey").await.expect_err("not stored");
     assert!(matches!(gone, DbServerError::NotFound(_)), "{gone:?}");
+    // A blank key would seal under SHA-256 of nothing.
+    std::env::set_var("RUSTANGO_SECRET_KEY", "");
+    let err = db_server::add(&env.registry, &env.spec("blankkey"), Some(&pw(SECRET)))
+        .await
+        .expect_err("blank key");
+    with_key();
+    assert!(matches!(err, DbServerError::Seal(_)), "{err:?}");
 }
 
 /// The live login and its rights; a maintenance database is honoured.
@@ -812,12 +819,17 @@ async fn the_console_warns_without_a_good_key(pool: &Pool) {
     db_server::add(&env.registry, &env.spec("warned"), None).await.unwrap();
     let c = Console::boot(&env, true).await;
     const SHORT: &str = "short-key-q7Zx";
-    for (key, warned) in [(None, true), (Some(SHORT), true), (Some(KEY), false)] {
+    for (key, warned) in [
+        (None, true),
+        (Some(""), true),
+        (Some(SHORT), true),
+        (Some(KEY), false),
+    ] {
         match key {
             Some(k) => std::env::set_var("RUSTANGO_SECRET_KEY", k),
             None => std::env::remove_var("RUSTANGO_SECRET_KEY"),
         }
-        for uri in ["/db-servers", "/db-servers/warned/edit"] {
+        for uri in ["/db-servers", "/db-servers/warned/edit", "/orgs/new"] {
             let (status, page) = c.get(uri).await;
             assert_eq!(status, 200, "{page}");
             assert_eq!(page.contains("key-warning"), warned, "{key:?} {uri}: {page}");

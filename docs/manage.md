@@ -146,6 +146,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 |---|---|
 | `create-tenant` / `edit-tenant` / `list-tenants` | Provision, edit, list |
 | `drop-tenant` / `purge-tenant` | Deactivate (reversible) / destroy (not) |
+| `rotate-tenant-password <slug>` | New password for a login rustango made on a saved server |
 | `migrate-tenants` / `migrate-registry` | Apply migrations across tenants, or to the registry |
 | `migrate-tenant-storage <slug> --to schema\|database` | Move a tenant between storage modes |
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host routing |
@@ -1031,10 +1032,29 @@ cargo run -- purge-tenant acme --confirm acme
 cargo run -- purge-tenant beta --confirm beta --purge-database   # database-mode: also DROP DATABASE
 ```
 
+Each step prints as it ends and the purge is recorded as a run of kind
+`purge` (`list-runs --kind purge`). A database rustango made on a saved
+server is dropped by that server's admin, with its login and record; every
+refusal runs before anything changes. See
+[Tenant databases on a saved server](tenant-databases.md).
+
 With several servers, deactivate first (`drop-tenant`) and wait 30 s. A
 server whose tenant cache still holds a schema-mode tenant keeps
 `search_path = <schema>, public`; once the schema is dropped, its queries
 fall through to `public` until the cache refreshes.
+
+### `rotate-tenant-password <slug>`
+
+Gives the login rustango made for the tenant on a saved server a new random
+password: altered on the server, then sealed and stored over the old URL,
+then the tenant's pools reopen. Steps print as they end; the run is recorded
+as `rotate_password`. Other pods pick the new URL up within one fingerprint
+poll; see [Tenant databases on a saved server](tenant-databases.md) for that
+window.
+
+```bash
+cargo run -- rotate-tenant-password acme
+```
 
 ### `list-tenants`
 

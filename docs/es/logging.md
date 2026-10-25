@@ -152,11 +152,13 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::tenancy::admin` | Admin de inquilino |
 | `rustango::tenancy::decommission` | Baja y purga de inquilinos |
 | `rustango::tenancy::migrate_run` | Migraciones por inquilino |
+| `rustango::tenancy::operation` | Purga y rotación de contraseña de inquilinos |
 | `rustango::tenancy::operator_console` | Consola de operador |
 | `rustango::tenancy::pools` | Ciclo de vida de los pools de inquilino |
 | `rustango::tenancy::provision` | Aprovisionamiento de inquilinos |
 | `rustango::tenancy::provision_webhook` | Webhooks de aprovisionamiento |
 | `rustango::tenancy::resolver` | Resolución de inquilino |
+| `rustango::tenancy::secrets` | Secretos sellados de inquilino |
 | `rustango::tenancy::sso` | SSO de inquilino |
 | `rustango::tenancy::sweep` | Barridos de retención |
 | `rustango::viewset` | ViewSets montados con escrituras abiertas |

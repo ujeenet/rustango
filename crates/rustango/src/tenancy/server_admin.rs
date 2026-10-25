@@ -128,6 +128,17 @@ impl PrivilegeReport {
         }
     }
 
+    /// MySQL 8.0.14+ keeps a retained password valid until it is
+    /// discarded; MariaDB and Postgres have no dual passwords.
+    #[must_use]
+    pub fn dual_passwords(&self) -> bool {
+        self.backend == "mysql"
+            && self
+                .server_version
+                .as_deref()
+                .is_some_and(|v| !v.contains("MariaDB") && mysql_at_least(v, (8, 0, 14)))
+    }
+
     fn refused(backend: &'static str, why: ConnectDiagnosis) -> Self {
         Self {
             backend,
@@ -231,6 +242,39 @@ fn mysql_can_grant(rows: &[(String, String)], mariadb: bool) -> bool {
     };
     let extra: &[&str] = if mariadb { MARIADB_DB_PRIVILEGES } else { &[] };
     MYSQL_DB_PRIVILEGES.iter().chain(extra).all(|p| grantable(p))
+}
+
+/// `8.0.36-log` against `(8, 0, 14)`; an unreadable version is too old.
+fn mysql_at_least(version: &str, min: (u32, u32, u32)) -> bool {
+    let mut parts = version.split(['.', '-']).map(|p| {
+        p.chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse::<u32>()
+            .ok()
+    });
+    let mut next = || parts.next().flatten();
+    match (next(), next(), next()) {
+        (Some(a), Some(b), Some(c)) => (a, b, c) >= min,
+        _ => false,
+    }
+}
+
+/// What the admin may do to one tenant's database and login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TenantRights {
+    pub(crate) drop_database: bool,
+    pub(crate) alter_login: bool,
+    pub(crate) end_sessions: bool,
+}
+
+/// Sessions open in a tenant database.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Sessions {
+    /// Tagged as this tenant's pools, on any pod.
+    pub(crate) own: i64,
+    /// Anything else: an operator, a backup, another app.
+    pub(crate) foreign: i64,
 }
 
 /// `16` from `16.15` or `14.9 (Debian 14.9-1)`.
@@ -565,18 +609,150 @@ impl ServerAdmin {
         name: &DatabaseName,
         login: &Login,
     ) -> Result<(), TenantDbError> {
+        if matches!(self.target, Target::Server { .. }) && self.is_protected(login.name().as_str())
+        {
+            return Err(TenantDbError::Protected(login.name().to_string()));
+        }
+        self.drop_database(name, None).await?;
+        self.drop_login(login).await
+    }
+
+    /// Drop `name`, first ending the sessions tagged `tag` (a tenant's
+    /// pools on every pod). Any other session still makes it
+    /// [`TenantDbError::InUse`]. SQLite deletes the files.
+    ///
+    /// # Errors
+    /// [`TenantDbError::Protected`], [`TenantDbError::InUse`],
+    /// [`TenantDbError::Denied`], or the step's error.
+    pub async fn drop_database(
+        &self,
+        name: &DatabaseName,
+        tag: Option<&str>,
+    ) -> Result<(), TenantDbError> {
         if self.is_protected(name.as_str()) {
             return Err(TenantDbError::Protected(name.to_string()));
         }
-        match &self.target {
-            Target::Sqlite { dir } => drop_sqlite(dir, name),
-            Target::Server { pool, .. } => {
-                if self.is_protected(login.name().as_str()) {
-                    return Err(TenantDbError::Protected(login.name().to_string()));
-                }
-                drop_server(pool, name, Some(login), false).await
-            }
+        let pool = match &self.target {
+            Target::Sqlite { dir } => return drop_sqlite(dir, name),
+            Target::Server { pool, .. } => pool,
+        };
+        let d = pool.dialect();
+        if let Some(stmt) = tag.and_then(|t| d.end_sessions_sql(name, t)) {
+            crate::sql::raw_query_pool::<(i64,)>(&stmt.sql, stmt.params, pool)
+                .await
+                .map_err(|e| denied_or_exec(e, "end the tenant's sessions"))?;
         }
+        drop_server(pool, name, None, false).await
+    }
+
+    /// Drop `login` if it exists. Nothing on SQLite.
+    ///
+    /// # Errors
+    /// [`TenantDbError::Protected`], [`TenantDbError::Denied`], or the
+    /// driver's error.
+    pub async fn drop_login(&self, login: &Login) -> Result<(), TenantDbError> {
+        let Target::Server { pool, .. } = &self.target else {
+            return Ok(());
+        };
+        if self.is_protected(login.name().as_str()) {
+            return Err(TenantDbError::Protected(login.name().to_string()));
+        }
+        match pool.dialect().drop_login_sql(login) {
+            Some(sql) => step(pool, &sql, "drop a login").await,
+            None => Ok(()),
+        }
+    }
+
+    /// Give `login` `password`. `retain_current` keeps the old password
+    /// valid until [`Self::discard_old_password`], where the server can.
+    ///
+    /// # Errors
+    /// [`TenantDbError::Unsupported`] on SQLite, [`TenantDbError::Denied`],
+    /// or the driver's error.
+    pub async fn alter_password(
+        &self,
+        login: &Login,
+        password: &LoginPassword,
+        retain_current: bool,
+    ) -> Result<(), TenantDbError> {
+        let Target::Server { pool, .. } = &self.target else {
+            return Err(TenantDbError::Unsupported("a SQLite tenant has no login"));
+        };
+        if self.is_protected(login.name().as_str()) {
+            return Err(TenantDbError::Protected(login.name().to_string()));
+        }
+        let sql = pool
+            .dialect()
+            .alter_login_password_sql(login, password, retain_current)
+            .ok_or(TenantDbError::Unsupported("this backend has no logins"))?;
+        step(pool, &sql, "change a login's password").await
+    }
+
+    /// Forget the password [`Self::alter_password`] retained. `Ok` where
+    /// nothing is retained.
+    ///
+    /// # Errors
+    /// [`TenantDbError::Denied`], or the driver's error.
+    pub async fn discard_old_password(&self, login: &Login) -> Result<(), TenantDbError> {
+        let Target::Server { pool, .. } = &self.target else {
+            return Ok(());
+        };
+        match pool.dialect().discard_old_password_sql(login) {
+            Some(sql) => step(pool, &sql, "discard a login's old password").await,
+            None => Ok(()),
+        }
+    }
+
+    /// What this admin may do to `name` and `login`. `true` where the
+    /// server-wide rights [`Self::probe`] reads decide it.
+    pub(crate) async fn tenant_rights(
+        &self,
+        name: &DatabaseName,
+        login: Option<&Login>,
+    ) -> Result<TenantRights, TenantDbError> {
+        let all = TenantRights {
+            drop_database: true,
+            alter_login: true,
+            end_sessions: true,
+        };
+        let (Target::Server { pool, .. }, Some(login)) = (&self.target, login) else {
+            return Ok(all);
+        };
+        let Some(stmt) = pool.dialect().tenant_rights_sql(name, login) else {
+            return Ok(all);
+        };
+        let rows: Vec<(Option<bool>, Option<bool>, Option<bool>)> =
+            crate::sql::raw_query_pool(&stmt.sql, stmt.params, pool).await?;
+        let Some((db, user, end)) = rows.into_iter().next() else {
+            return Ok(all);
+        };
+        // Absent objects are dropped `IF EXISTS`, so they need no right.
+        Ok(TenantRights {
+            drop_database: db.unwrap_or(true),
+            alter_login: user.unwrap_or(true),
+            end_sessions: end.unwrap_or(true),
+        })
+    }
+
+    /// Sessions open in `name`, split by the `tag` a tenant's pools use.
+    /// Zero where the backend cannot tell.
+    pub(crate) async fn sessions(
+        &self,
+        name: &DatabaseName,
+        tag: &str,
+    ) -> Result<Sessions, TenantDbError> {
+        let Target::Server { pool, .. } = &self.target else {
+            return Ok(Sessions::default());
+        };
+        let Some(stmt) = pool.dialect().database_sessions_sql(name, tag) else {
+            return Ok(Sessions::default());
+        };
+        let rows: Vec<(i64, i64)> = crate::sql::raw_query_pool(&stmt.sql, stmt.params, pool).await?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .map(|(own, foreign)| Sessions { own, foreign })
+            .unwrap_or_default())
     }
 
     /// Whether the server knows `collation`; `None` when it cannot tell.
@@ -768,13 +944,17 @@ fn exists_as(e: TenantDbError, typed: impl FnOnce() -> TenantDbError) -> TenantD
 async fn step(pool: &Pool, sql: &str, what: &'static str) -> Result<(), TenantDbError> {
     match crate::sql::raw_execute_pool(pool, sql, Vec::new()).await {
         Ok(_) => Ok(()),
-        Err(e) => Err(match fault(&e) {
-            Fault::Denied => TenantDbError::Denied {
-                step: what,
-                detail: e.to_string(),
-            },
-            _ => TenantDbError::Exec(e),
-        }),
+        Err(e) => Err(denied_or_exec(e, what)),
+    }
+}
+
+fn denied_or_exec(e: ExecError, what: &'static str) -> TenantDbError {
+    match fault(&e) {
+        Fault::Denied => TenantDbError::Denied {
+            step: what,
+            detail: e.to_string(),
+        },
+        _ => TenantDbError::Exec(e),
     }
 }
 
@@ -930,6 +1110,25 @@ mod tests {
         assert!(!undo_login_after_failure(Fault::Other, None));
         assert!(!undo_login_after_failure(Fault::Exists, Some(false)));
         assert!(!undo_login_after_failure(Fault::Denied, Some(false)));
+    }
+
+    #[test]
+    fn dual_passwords_need_mysql_8_0_14() {
+        let report = |backend, v: &str| PrivilegeReport {
+            backend,
+            server_version: Some(v.into()),
+            ..PrivilegeReport::refused(backend, ConnectDiagnosis {
+                fault: ConnectFault::AuthFailed,
+                endpoint: String::new(),
+                detail: String::new(),
+            })
+        };
+        assert!(report("mysql", "8.0.14").dual_passwords());
+        assert!(report("mysql", "8.4.2-log").dual_passwords());
+        assert!(!report("mysql", "8.0.13").dual_passwords());
+        assert!(!report("mysql", "5.7.44").dual_passwords());
+        assert!(!report("mysql", "11.4.2-MariaDB-ubu2404").dual_passwords());
+        assert!(!report("postgres", "16.4").dual_passwords());
     }
 
     #[test]

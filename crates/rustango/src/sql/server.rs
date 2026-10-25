@@ -383,6 +383,52 @@ mod tests {
             d.grant_in_database_sql(&login("u")),
             vec![r#"GRANT ALL ON SCHEMA public TO "u""#.to_owned()]
         );
+        // No dual passwords on Postgres: retaining is ignored.
+        assert_eq!(
+            d.alter_login_password_sql(&login("u"), &LoginPassword::new("é'y").unwrap(), true)
+                .unwrap(),
+            r#"ALTER ROLE "u" PASSWORD 'é''y'"#
+        );
+        assert!(d.discard_old_password_sql(&login("u")).is_none());
+        let rights = d.tenant_rights_sql(&db("acme-shop"), &login("u")).unwrap();
+        assert!(rights.sql.contains("ADMIN OPTION") && rights.sql.contains("pg_signal_backend"));
+        assert_eq!(rights.params.len(), 2);
+        let sessions = d.database_sessions_sql(&db("a"), "rustango-tenant:7").unwrap();
+        assert!(sessions.sql.contains("IS DISTINCT FROM $2"), "{}", sessions.sql);
+        let end = d.end_sessions_sql(&db("a"), "rustango-tenant:7").unwrap();
+        assert!(end.sql.contains("pg_terminate_backend") && end.sql.contains("= $2"));
+    }
+
+    #[test]
+    fn mysql_rotation_can_keep_the_old_password() {
+        let d = MySql;
+        let u = login("u");
+        let pw = LoginPassword::new("a'b").unwrap();
+        assert_eq!(
+            d.alter_login_password_sql(&u, &pw, false).unwrap(),
+            "ALTER USER `u`@`%` IDENTIFIED BY 'a''b'"
+        );
+        assert_eq!(
+            d.alter_login_password_sql(&u, &pw, true).unwrap(),
+            "ALTER USER `u`@`%` IDENTIFIED BY 'a''b' RETAIN CURRENT PASSWORD"
+        );
+        assert_eq!(
+            d.discard_old_password_sql(&u).unwrap(),
+            "ALTER USER `u`@`%` DISCARD OLD PASSWORD"
+        );
+        assert!(d.tenant_rights_sql(&db("a"), &u).is_none());
+        assert!(d.end_sessions_sql(&db("a"), "t").is_none());
+    }
+
+    /// The new password never reaches the statement as text on Postgres.
+    #[cfg(feature = "tenancy")]
+    #[test]
+    fn postgres_rotation_sends_a_verifier() {
+        let sql = Postgres
+            .alter_login_password_sql(&login("u"), &LoginPassword::new("n3w-secret").unwrap(), false)
+            .unwrap();
+        assert!(sql.starts_with(r#"ALTER ROLE "u" PASSWORD 'SCRAM-SHA-256$4096:"#), "{sql}");
+        assert!(!sql.contains("n3w-secret"), "{sql}");
     }
 
     #[test]
@@ -460,5 +506,8 @@ mod tests {
         assert!(d.create_database_sql(&db("a"), None).is_none());
         assert!(d.create_login_sql(&login("a"), &LoginPassword::new("x").unwrap()).is_none());
         assert!(d.grant_database_sql(&db("a"), &login("a")).is_empty());
+        let pw = LoginPassword::new("x").unwrap();
+        assert!(d.alter_login_password_sql(&login("a"), &pw, true).is_none());
+        assert!(d.database_sessions_sql(&db("a"), "t").is_none());
     }
 }

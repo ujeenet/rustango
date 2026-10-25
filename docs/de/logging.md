@@ -152,11 +152,13 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::tenancy::admin` | Mandanten-Admin |
 | `rustango::tenancy::decommission` | Mandanten-Stilllegung und -Bereinigung |
 | `rustango::tenancy::migrate_run` | Migrationen pro Mandant |
+| `rustango::tenancy::operation` | Mandanten-Purge und Passwortrotation |
 | `rustango::tenancy::operator_console` | Operator-Konsole |
 | `rustango::tenancy::pools` | Lebenszyklus der Mandanten-Pools |
 | `rustango::tenancy::provision` | Mandanten-Provisionierung |
 | `rustango::tenancy::provision_webhook` | Provisionierungs-Webhooks |
 | `rustango::tenancy::resolver` | Mandanten-Auflösung |
+| `rustango::tenancy::secrets` | Versiegelte Mandanten-Geheimnisse |
 | `rustango::tenancy::sso` | Mandanten-SSO |
 | `rustango::tenancy::sweep` | Aufbewahrungs-Sweeps |
 | `rustango::viewset` | ViewSets mit offenen Schreibaktionen |

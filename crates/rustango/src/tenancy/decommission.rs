@@ -23,9 +23,13 @@
 use sqlx::Database;
 
 use super::error::TenancyError;
+use super::operation::{OpReporter, OperationObserver, OperationStep as Step};
 use super::org::{Org, StorageMode};
 use super::org_host::OrgHost;
 use super::pools::TenantPools;
+use super::provision_store::{RunKind, RunText};
+use super::server_admin::ServerAdmin;
+use super::server_tenant::ServerTenant;
 use crate::core::Column as _;
 use crate::sql::{FetcherPool as _, UpdaterPool as _};
 
@@ -113,10 +117,91 @@ where
             report.deactivated = true;
         }
         Action::Purge { purge_database } => {
-            purge(pools, &registry, &org, purge_database, &mut report).await?;
+            let rep = OpReporter::new(None);
+            purge(pools, &registry, &org, purge_database, &mut report, &rep).await?;
         }
     }
     Ok(report)
+}
+
+/// Purge `slug`, reporting each step to `observer` and recording a run of
+/// kind [`RunKind::Purge`], as the console's run page and `purge-tenant` show.
+///
+/// # Errors
+/// As [`decommission`] with [`Action::Purge`]; the run is closed either way.
+pub async fn purge_recorded<DB: Database>(
+    pools: &TenantPools<DB>,
+    slug: &str,
+    purge_database: bool,
+    observer: Option<&dyn OperationObserver>,
+    requested_by: Option<&str>,
+) -> Result<(super::provision_store::ProvisioningRun, Report), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    use super::provision_store as store;
+    let registry = pools.registry_pool();
+    let org = tenant(&registry, slug).await?;
+    let run = store::open_operation_run(&registry, RunKind::Purge, &org, requested_by).await?;
+    let run_id = run.id.get().copied().unwrap_or_default();
+    let report = purge_org_in_run(pools, &org, purge_database, observer, run_id).await;
+    let run = store::run_by_id(&registry, run_id).await?.unwrap_or(run);
+    report.map(|r| (run, r))
+}
+
+/// [`purge_recorded`] into a run the caller opened.
+///
+/// # Errors
+/// As [`purge_recorded`].
+pub async fn purge_in_run<DB: Database>(
+    pools: &TenantPools<DB>,
+    slug: &str,
+    purge_database: bool,
+    observer: Option<&dyn OperationObserver>,
+    run_id: i64,
+) -> Result<Report, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let registry = pools.registry_pool();
+    match tenant(&registry, slug).await {
+        Ok(org) => purge_org_in_run(pools, &org, purge_database, observer, run_id).await,
+        Err(e) => {
+            let rep = OpReporter::new(observer).persisting(&registry, run_id, slug);
+            let failed = rep.fail(Step::Check, e).await;
+            rep.finish(failed.as_ref().err()).await;
+            failed
+        }
+    }
+}
+
+async fn purge_org_in_run<DB: Database>(
+    pools: &TenantPools<DB>,
+    org: &Org,
+    purge_database: bool,
+    observer: Option<&dyn OperationObserver>,
+    run_id: i64,
+) -> Result<Report, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let registry = pools.registry_pool();
+    let rep = OpReporter::new(observer).persisting(&registry, run_id, &org.slug);
+    let mut report = Report {
+        slug: org.slug.clone(),
+        ..Report::default()
+    };
+    let result = purge(pools, &registry, org, purge_database, &mut report, &rep).await;
+    rep.finish(result.as_ref().err()).await;
+    result.map(|()| report)
+}
+
+async fn tenant(registry: &crate::sql::Pool, slug: &str) -> Result<Org, TenancyError> {
+    Org::objects()
+        .where_(Org::slug.eq(slug.to_owned()))
+        .first(registry)
+        .await?
+        .ok_or_else(|| TenancyError::Validation(format!("no tenant with slug `{slug}`")))
 }
 
 /// `active = false` and unlink its unsucceeded runs, in one transaction:
@@ -375,13 +460,60 @@ impl DbIdentity {
     }
 }
 
+/// How a database-mode tenant's database goes, decided before anything
+/// changes.
+enum DropPlan {
+    /// No database to drop (schema mode).
+    None,
+    /// Made by rustango on a saved server: dropped by that server's admin.
+    Server(ServerDrop),
+    /// Brought by the operator, on Postgres: dropped through its own URL.
+    #[cfg(feature = "postgres")]
+    Brought(PgDropTarget),
+    /// Brought, elsewhere: left in place.
+    Left,
+}
+
+/// A recorded tenant database, checked and with its admin connected.
+struct ServerDrop {
+    tenant: ServerTenant,
+    admin: ServerAdmin,
+    /// The `application_name` this tenant's pools connect with.
+    tag: String,
+}
+
 async fn purge<DB: Database>(
     pools: &TenantPools<DB>,
     registry: &crate::sql::Pool,
     org: &Org,
     purge_database: bool,
     report: &mut Report,
+    rep: &OpReporter<'_>,
 ) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    // Every refusal before the org is touched, so a refused purge leaves it active.
+    rep.started(Step::Check).await;
+    let (mode, id, plan) = match check_purge(pools, registry, org, purge_database).await {
+        Ok(checked) => checked,
+        Err(e) => return rep.fail(Step::Check, e).await,
+    };
+    rep.ok(Step::Check).await;
+    let mut plan = plan;
+    let result = destroy(pools, registry, org, mode, id, &mut plan, report, rep).await;
+    if let DropPlan::Server(s) = plan {
+        s.admin.close().await;
+    }
+    result
+}
+
+async fn check_purge<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry: &crate::sql::Pool,
+    org: &Org,
+    purge_database: bool,
+) -> Result<(StorageMode, i64, DropPlan), TenancyError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
@@ -400,13 +532,18 @@ where
         .get()
         .copied()
         .ok_or_else(|| TenancyError::Validation("Org row has no PK".into()))?;
-    // Every refusal before the org is touched, so a refused purge leaves it active.
     if mode == StorageMode::Schema {
         refuse_shared_schema(registry, org.effective_schema(), id).await?;
+        return Ok((mode, id, DropPlan::None));
+    }
+    let url = pools.resolved_database_url(org).await?;
+    if let Some(tenant) = ServerTenant::of(registry, org, &url).await? {
+        let plan = check_server_drop(pools, registry, id, tenant).await?;
+        return Ok((mode, id, DropPlan::Server(plan)));
     }
     #[cfg(feature = "postgres")]
-    let pg_target = if mode == StorageMode::Database && org.backend_kind == "postgres" {
-        let opts = parse_pg_url(org, &pools.resolved_database_url(org).await?)?;
+    if org.backend_kind == "postgres" {
+        let opts = parse_pg_url(org, &url)?;
         refuse_registry_database(pools, &opts)?;
         if let Some(other) = database_claimed(pools, registry, id, &opts).await? {
             return Err(TenancyError::Validation(format!(
@@ -415,28 +552,142 @@ where
         }
         let mut target = PgDropTarget::connect(&opts, super::pools::tenant_session_tag(id)).await?;
         target.refuse_foreign_sessions().await?;
-        Some(target)
-    } else {
-        None
-    };
+        return Ok((mode, id, DropPlan::Brought(target)));
+    }
+    Ok((mode, id, DropPlan::Left))
+}
+
+/// The refusals for a database rustango made: no other tenant names it,
+/// the admin may drop it and its login, and no foreign session is open.
+async fn check_server_drop<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry: &crate::sql::Pool,
+    id: i64,
+    tenant: ServerTenant,
+) -> Result<ServerDrop, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let backend = tenant.server.backend_kind()?;
+    let others: Vec<Org> = Org::objects()
+        .where_(Org::storage_mode.eq(StorageMode::Database.as_str().to_owned()))
+        .fetch(registry)
+        .await?;
+    for other in others.iter().filter(|o| o.id.get().copied() != Some(id)) {
+        let url = pools.resolved_database_url(other).await.map_err(|_| {
+            TenancyError::Validation(format!(
+                "cannot resolve tenant `{}`'s database URL to rule out a shared database",
+                other.slug
+            ))
+        })?;
+        if tenant
+            .server
+            .names_database(backend, &url, tenant.database.as_str())
+            .is_ok()
+        {
+            return Err(TenancyError::Validation(format!(
+                "refusing to drop this tenant's database — tenant `{}` uses it too",
+                other.slug
+            )));
+        }
+    }
+    let admin = tenant.connect().await?;
+    let tag = super::pools::tenant_session_tag(id);
+    let checked = async {
+        let report = admin.probe().await?;
+        if let Some(why) = report.login_error.as_ref().map(|d| d.summary()) {
+            return Err(TenancyError::Validation(format!(
+                "the admin login of server `{}` is refused: {why}",
+                tenant.server.name
+            )));
+        }
+        let rights = admin.tenant_rights(&tenant.database, tenant.login.as_ref()).await?;
+        if !rights.drop_database {
+            return Err(TenancyError::Validation(format!(
+                "the admin login of server `{}` does not own database `{}` and is not a \
+                 superuser, so it may not drop it; drop it as its owner or a superuser",
+                tenant.server.name, tenant.database
+            )));
+        }
+        if let (false, Some(login)) = (rights.alter_login, &tenant.login) {
+            return Err(super::server_tenant::admin_option_refusal(
+                login.name(),
+                &tenant.server.name,
+            ));
+        }
+        let sessions = admin.sessions(&tenant.database, &tag).await?;
+        if sessions.foreign > 0 {
+            return Err(TenancyError::Validation(format!(
+                "database `{}` has sessions this tenant's pools did not open (an operator, a \
+                 backup or another app); close them and purge again",
+                tenant.database
+            )));
+        }
+        if sessions.own > 0 && !rights.end_sessions {
+            return Err(TenancyError::Validation(format!(
+                "the admin login of server `{}` may not end this tenant's open sessions; grant \
+                 it pg_signal_backend, or stop the app, and purge again",
+                tenant.server.name
+            )));
+        }
+        Ok(())
+    }
+    .await;
+    match checked {
+        Ok(()) => Ok(ServerDrop { tenant, admin, tag }),
+        Err(e) => {
+            admin.close().await;
+            Err(e)
+        }
+    }
+}
+
+/// Everything after the checks. Each drop is `IF EXISTS`, so a retry
+/// after a partial purge is safe.
+#[allow(clippy::too_many_arguments)]
+async fn destroy<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry: &crate::sql::Pool,
+    org: &Org,
+    mode: StorageMode,
+    id: i64,
+    plan: &mut DropPlan,
+    report: &mut Report,
+    rep: &OpReporter<'_>,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let slug = &org.slug;
     // Out of service before anything is destroyed (#1930): if a later
     // step fails, the tenant is inactive and a retry finishes the job.
-    deactivate(registry, id).await?;
+    rep.started(Step::Deactivate).await;
+    if let Err(e) = deactivate(registry, id).await {
+        return rep.fail(Step::Deactivate, e).await;
+    }
     super::invalidate_org_cache();
     pools.invalidate(slug).await;
+    rep.ok(Step::Deactivate).await;
+
     // While the rows that name the keys still exist (#2569).
     #[cfg(feature = "media")]
     {
+        rep.started(Step::PurgeMedia).await;
         #[cfg(feature = "postgres")]
-        let pg_exclusive = pg_target.is_some();
+        let brought_pg = matches!(plan, DropPlan::Brought(_));
         #[cfg(not(feature = "postgres"))]
-        let pg_exclusive = false;
-        purge_media(pools, registry, org, mode, pg_exclusive, report).await;
+        let brought_pg = false;
+        let exclusive = brought_pg || matches!(plan, DropPlan::Server(_));
+        purge_media(pools, registry, org, mode, exclusive, report).await;
+        rep.ok(Step::PurgeMedia).await;
     }
+    #[cfg(not(feature = "media"))]
+    rep.skipped(Step::PurgeMedia, "this build has no media feature")
+        .await;
 
-    // Every drop is `IF EXISTS`, so a retry after a partial purge is safe.
-    match mode {
-        StorageMode::Schema => {
+    match plan {
+        DropPlan::None => {
+            rep.started(Step::DropSchema).await;
             let schema = org.effective_schema().to_owned();
             // Quoted: the name is an identifier, and validation only
             // started covering it recently — older rows may hold
@@ -445,36 +696,97 @@ where
                 "DROP SCHEMA IF EXISTS {} CASCADE",
                 registry.dialect().quote_ident(&schema)
             );
-            crate::sql::raw_execute_pool(registry, &sql, Vec::new()).await?;
-            report.schema_dropped = Some(schema);
-        }
-        StorageMode::Database => {
-            let url = pools.resolved_database_url(org).await?;
-            if org.backend_kind == "postgres" {
-                #[cfg(feature = "postgres")]
-                if let Some(target) = pg_target {
-                    target.drop().await?;
-                    report.database_dropped = Some(crate::sql::connect_diagnosis::redact(&url));
-                }
-                #[cfg(not(feature = "postgres"))]
-                report.notes.push(format!(
-                    "the tenant database at {} was left in place — this build has no \
-                     `postgres` feature",
-                    crate::sql::connect_diagnosis::redact(&url)
-                ));
-            } else {
-                report.notes.push(format!(
-                    "delete the tenant database at {} by hand — dropping a `{}` database \
-                     is not wired up",
-                    crate::sql::connect_diagnosis::redact(&url),
-                    org.backend_kind
-                ));
+            if let Err(e) = crate::sql::raw_execute_pool(registry, &sql, Vec::new()).await {
+                return rep.fail(Step::DropSchema, e.into()).await;
             }
+            report.schema_dropped = Some(schema);
+            rep.ok(Step::DropSchema).await;
+        }
+        DropPlan::Server(s) => drop_server_database(registry, s, report, rep).await?,
+        #[cfg(feature = "postgres")]
+        DropPlan::Brought(target) => {
+            rep.started(Step::DropDatabase).await;
+            if let Err(e) = target.drop().await {
+                return rep.fail(Step::DropDatabase, e).await;
+            }
+            let url = pools.resolved_database_url(org).await.unwrap_or_default();
+            report.database_dropped = Some(crate::sql::connect_diagnosis::redact(&url));
+            rep.ok(Step::DropDatabase).await;
+            leave_login_and_record(rep).await;
+        }
+        DropPlan::Left => {
+            let url = pools.resolved_database_url(org).await?;
+            report.notes.push(format!(
+                "delete the tenant database at {} by hand — rustango did not create it, \
+                 and dropping a brought `{}` database is not wired up",
+                crate::sql::connect_diagnosis::redact(&url),
+                org.backend_kind
+            ));
+            rep.skipped(
+                Step::DropDatabase,
+                "rustango did not create this database; delete it by hand",
+            )
+            .await;
+            leave_login_and_record(rep).await;
         }
     }
+    #[cfg(not(feature = "media"))]
+    let _ = mode;
 
-    remove_org_row(registry, org).await?;
+    rep.started(Step::RemoveOrg).await;
+    if let Err(e) = remove_org_row(registry, org).await {
+        return rep.fail(Step::RemoveOrg, e).await;
+    }
     report.row_deleted = true;
+    rep.ok(Step::RemoveOrg).await;
+    Ok(())
+}
+
+async fn leave_login_and_record(rep: &OpReporter<'_>) {
+    rep.skipped(Step::DropLogin, "rustango did not create the login; it is left alone")
+        .await;
+    rep.skipped(Step::DeleteRecord, "rustango did not create this database")
+        .await;
+}
+
+/// Drop a recorded database, then its login, then the record: sessions
+/// tagged as this tenant's pools, on any pod, are ended first.
+async fn drop_server_database(
+    registry: &crate::sql::Pool,
+    s: &ServerDrop,
+    report: &mut Report,
+    rep: &OpReporter<'_>,
+) -> Result<(), TenancyError> {
+    let t = &s.tenant;
+    let login = t.login.as_ref().map(|l| l.name());
+    rep.started(Step::DropDatabase).await;
+    if let Err(e) = s.admin.drop_database(&t.database, Some(&s.tag)).await {
+        return rep.fail(Step::DropDatabase, e.into()).await;
+    }
+    report.database_dropped = Some(format!("database `{}` on server `{}`", t.database, t.server.name));
+    rep.done(
+        Step::DropDatabase,
+        RunText::about_database("dropped", &t.database, None),
+    )
+    .await;
+
+    match &t.login {
+        Some(l) => {
+            rep.started(Step::DropLogin).await;
+            if let Err(e) = s.admin.drop_login(l).await {
+                return rep.fail(Step::DropLogin, e.into()).await;
+            }
+            rep.done(Step::DropLogin, RunText::about_database("dropped", &t.database, login))
+                .await;
+        }
+        None => rep.skipped(Step::DropLogin, "a SQLite tenant has no login").await,
+    }
+
+    rep.started(Step::DeleteRecord).await;
+    if let Err(e) = t.record.clone().delete_pool(registry).await {
+        return rep.fail(Step::DeleteRecord, e.into()).await;
+    }
+    rep.ok(Step::DeleteRecord).await;
     Ok(())
 }
 
@@ -764,7 +1076,7 @@ impl PgDropTarget {
 
     /// End this tenant's own sessions, on any pod, then a plain drop: a
     /// session that appeared since the check still blocks it (#2291).
-    async fn drop(mut self) -> Result<(), TenancyError> {
+    async fn drop(&mut self) -> Result<(), TenancyError> {
         crate::sql::sqlx::query(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
              WHERE datname = $1 AND application_name = $2",

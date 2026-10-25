@@ -18,6 +18,7 @@ use serde::Deserialize;
 
 use super::super::auth;
 use super::super::decommission::Action;
+use super::super::provision_store::{self as store, RunKind};
 use super::flash::{self, Flash};
 use super::{urlencoding_lite, withheld, ConsoleState};
 
@@ -84,6 +85,10 @@ pub(super) async fn purge(
         );
     }
 
+    // With a provisioner the purge is a recorded run, followed live.
+    if let Some(provisioner) = state.provisioner.clone() {
+        return purge_in_run(&state, &op, provisioner, slug, form.purge_database.is_some()).await;
+    }
     let action = Action::Purge {
         purge_database: form.purge_database.is_some(),
     };
@@ -129,6 +134,86 @@ pub(super) async fn purge(
             back_to_tenant(&slug, &msg)
         }
     }
+}
+
+/// Open a purge run, start it detached, and send the operator to its
+/// page. A refusal shows there, on the `check` step.
+async fn purge_in_run(
+    state: &ConsoleState,
+    op: &auth::Operator,
+    provisioner: std::sync::Arc<dyn super::super::provision::TenantProvisioner>,
+    slug: String,
+    purge_database: bool,
+) -> Response<Body> {
+    let run = match open_run(state, op, &slug, RunKind::Purge).await {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let brand_storage = state.brand_storage.clone();
+    tokio::spawn(async move {
+        if provisioner
+            .purge_in_run(run, &slug, purge_database)
+            .await
+            .is_ok()
+        {
+            if let Err(e) = super::super::branding::delete_brand_assets(&slug, &brand_storage).await
+            {
+                tracing::warn!(target: "rustango::tenancy::operator_console", tenant = %slug, error = %e, "brand files left in place");
+            }
+        }
+    });
+    Redirect::to(&format!("/orgs/provision/{run}")).into_response()
+}
+
+/// Give a server-made tenant's login a new password, as a recorded run.
+pub(super) async fn rotate_password(
+    State(state): State<ConsoleState>,
+    Extension(op): Extension<auth::Operator>,
+    Path(slug): Path<String>,
+) -> Response<Body> {
+    let Some(provisioner) = state.provisioner.clone() else {
+        return not_available();
+    };
+    let run = match open_run(&state, &op, &slug, RunKind::RotatePassword).await {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    tokio::spawn(async move {
+        let _ = provisioner.rotate_password_in_run(run, &slug).await;
+    });
+    Redirect::to(&format!("/orgs/provision/{run}")).into_response()
+}
+
+/// Open a run of `kind` for `slug` and audit it with the run id.
+async fn open_run(
+    state: &ConsoleState,
+    op: &auth::Operator,
+    slug: &str,
+    kind: RunKind,
+) -> Result<i64, Response<Body>> {
+    use crate::core::Column as _;
+    let org = match super::super::Org::objects()
+        .where_(super::super::Org::slug.eq(slug.to_owned()))
+        .first(&state.registry)
+        .await
+    {
+        Ok(Some(org)) => org,
+        Ok(None) => return Err(back_to_orgs(None, Some(&format!("no tenant `{slug}`")))),
+        Err(e) => return Err(super::server_error("could not read the tenant", &e)),
+    };
+    let run = store::open_operation_run(&state.registry, kind, &org, Some(&op.username))
+        .await
+        .map_err(|e| super::server_error("could not open a run", &e))?;
+    let run_id = run.id.get().copied().unwrap_or_default();
+    let mut extra = serde_json::Map::new();
+    extra.insert("run_id".into(), serde_json::json!(run_id));
+    let verb = match kind {
+        RunKind::RotatePassword => "tenant_rotate_password",
+        _ => "tenant_purge",
+    };
+    let operator_id = op.id.get().copied().unwrap_or_default();
+    super::emit_op_audit(&state.registry, slug, operator_id, verb, extra).await;
+    Ok(run_id)
 }
 
 fn not_available() -> Response<Body> {

@@ -183,6 +183,17 @@ A custom implementor must return its `TenantSecrets`; the old default ignored `r
 ### `Dialect` has server DDL methods
 
 `create_database_sql`, `create_login_sql`, `grant_database_sql` and friends have defaults; a custom `Dialect` with a method of the same name must rename it.
+The same goes for `alter_login_password_sql`, `discard_old_password_sql`, `tenant_rights_sql`, `database_sessions_sql` and `end_sessions_sql`.
+
+### A blank `RUSTANGO_SECRET_KEY` is unset
+
+It no longer seals anything. Values it sealed still open with `RUSTANGO_SECRET_KEY_PREVIOUS` set and empty: set a real key and run `reseal-tenant-secrets --apply`.
+
+### Purge of a server-made tenant; purge and rotation runs
+
+`purge-tenant` and the console drop a database rustango made on a saved server as that server's admin, with its login and record; it is refused, changing nothing, when the tenant's URL no longer names that database. Brought databases behave as before.
+With a provisioning console, **Purge** opens a recorded run and redirects to its page instead of flashing the result; `purge-tenant` prints each step.
+`RunKind` has `Purge` and `RotatePassword` and is `#[non_exhaustive]`, so a match needs a wildcard arm. `TenantProvisioner` has `purge_in_run` and `rotate_password_in_run`, with defaults that refuse.
 
 ## 0.60.12
 

@@ -148,6 +148,29 @@ impl Dialect for MySql {
         })
     }
 
+    /// `retain_current` needs MySQL 8.0.14+; MariaDB has no dual passwords.
+    fn alter_login_password_sql(
+        &self,
+        login: &Login,
+        password: &LoginPassword,
+        retain_current: bool,
+    ) -> Option<String> {
+        let retain = if retain_current {
+            " RETAIN CURRENT PASSWORD"
+        } else {
+            ""
+        };
+        Some(format!(
+            "ALTER USER {} IDENTIFIED BY {}{retain}",
+            self.account(login),
+            self.quote_literal(password.expose())
+        ))
+    }
+
+    fn discard_old_password_sql(&self, login: &Login) -> Option<String> {
+        Some(format!("ALTER USER {} DISCARD OLD PASSWORD", self.account(login)))
+    }
+
     fn database_exists_sql(&self, db: &DatabaseName) -> Option<CompiledStatement> {
         Some(CompiledStatement {
             sql: "SELECT count(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?".to_owned(),

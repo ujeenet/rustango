@@ -754,6 +754,11 @@ fn router_unlogged(
                 "/orgs/{slug}/migrate",
                 get(org_post_only_redirect).post(migrate::migrate_one),
             )
+            // A new password for a login rustango made on a saved server.
+            .route(
+                "/orgs/{slug}/rotate-password",
+                get(org_post_only_redirect).post(decommission::rotate_password),
+            )
             // The index has to come before the `{run_id}` route it
             // shares a prefix with, and be a distinct path: a run id is
             // numeric, so `/orgs/provision` cannot be confused for one.
@@ -1946,6 +1951,13 @@ async fn org_edit_form(
     // Drives the "Run migrations" button: migrations ride with the
     // provisioner, which owns the migrations directory.
     ctx.insert("provisioning_enabled", &state.provisioner.is_some());
+    // Only a login rustango made on a saved server can be rotated.
+    let rotatable = state.provisioner.is_some()
+        && matches!(
+            super::TenantDatabase::of_org(&state.registry, &org_row).await,
+            Ok(Some(ref r)) if r.login_name.is_some()
+        );
+    ctx.insert("rotatable", &rotatable);
     ctx.insert("editable_rows", &editable_rows);
     ctx.insert("locked_rows", &locked_rows);
     ctx.insert("logo_url", &logo_url);

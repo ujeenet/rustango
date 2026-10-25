@@ -84,17 +84,31 @@ impl RunState {
 /// One attempt to stand up a tenant.
 /// What a run was for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RunKind {
     Provision,
     Migrate,
+    /// Destroying a tenant's storage and row.
+    Purge,
+    /// A new password for a server-made tenant's login.
+    RotatePassword,
 }
 
 impl RunKind {
+    pub const ALL: [Self; 4] = [
+        Self::Provision,
+        Self::Migrate,
+        Self::Purge,
+        Self::RotatePassword,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Provision => "provision",
             Self::Migrate => "migrate",
+            Self::Purge => "purge",
+            Self::RotatePassword => "rotate_password",
         }
     }
 
@@ -104,7 +118,20 @@ impl RunKind {
     pub fn parse(raw: &str) -> Self {
         match raw {
             "migrate" => Self::Migrate,
+            "purge" => Self::Purge,
+            "rotate_password" => Self::RotatePassword,
             _ => Self::Provision,
+        }
+    }
+
+    /// What a run page calls the work, before the tenant's slug.
+    #[must_use]
+    pub const fn verb(self) -> &'static str {
+        match self {
+            Self::Provision => "Provisioning",
+            Self::Migrate => "Migrating",
+            Self::Purge => "Purging",
+            Self::RotatePassword => "Rotating the database password of",
         }
     }
 }
@@ -630,6 +657,36 @@ pub async fn open_migrate_run(
         state: RunState::Running.as_str().to_owned(),
         storage_mode: String::new(),
         backend_kind: String::new(),
+        database_url: None,
+        requested_by: requested_by.map(ToOwned::to_owned),
+        idempotency_key: None,
+        error: None,
+        started_at: Auto::default(),
+        finished_at: None,
+    };
+    run.insert_pool(registry).await?;
+    Ok(run)
+}
+
+/// Open a run of `kind` for work on an existing tenant: a purge or a
+/// password rotation.
+///
+/// # Errors
+/// Driver / insert failures.
+pub async fn open_operation_run(
+    registry: &Pool,
+    kind: RunKind,
+    org: &super::Org,
+    requested_by: Option<&str>,
+) -> Result<ProvisioningRun, TenancyError> {
+    let mut run = ProvisioningRun {
+        id: Auto::default(),
+        kind: kind.as_str().to_owned(),
+        slug: org.slug.clone(),
+        org_id: org.id.get().copied(),
+        state: RunState::Running.as_str().to_owned(),
+        storage_mode: org.storage_mode.clone(),
+        backend_kind: org.backend_kind.clone(),
         database_url: None,
         requested_by: requested_by.map(ToOwned::to_owned),
         idempotency_key: None,

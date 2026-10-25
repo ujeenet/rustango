@@ -7,6 +7,7 @@
 migrations, and only then makes it live. Nothing is written until the
 connection check passes.</p>
 
+{% if key_warning %}<div class="alert alert-error key-warning">{{ key_warning }}</div>{% endif %}
 {% if error %}
 <div class="alert alert-error">{{ error }}</div>
 {% endif %}
