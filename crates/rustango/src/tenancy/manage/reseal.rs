@@ -10,7 +10,8 @@ use sqlx::Database;
 use crate::sql::connect_diagnosis::{redact, SEALED_SCHEME};
 use crate::sql::FetcherPool as _;
 use crate::tenancy::error::TenancyError;
-use crate::tenancy::org_edit::{apply_with_secrets, OrgPatch};
+use crate::core::SqlValue;
+use crate::tenancy::org_edit::apply_values_if;
 use crate::tenancy::pools::TenantPools;
 use crate::tenancy::{Org, SecretsResolver as _};
 
@@ -43,7 +44,7 @@ where
     let mut orgs: Vec<Org> = Org::objects().fetch(&registry).await?;
     orgs.sort_by(|a, b| a.slug.cmp(&b.slug));
 
-    let (mut todo, mut done, mut failed) = (0usize, 0usize, 0usize);
+    let (mut todo, mut done, mut skipped, mut failed) = (0usize, 0usize, 0usize, 0usize);
     for org in orgs {
         let Some(stored) = org.database_url.as_deref() else {
             continue;
@@ -71,14 +72,16 @@ where
             writeln!(w, "  {}: would {action}", org.slug)?;
             continue;
         }
-        let patch = OrgPatch {
-            database_url: Some(resolved),
-            ..OrgPatch::default()
-        };
-        match apply_with_secrets(&registry, &secrets, &org.slug, &patch).await {
-            Ok(_) => {
+        let values = vec![("database_url", SqlValue::String(resolved))];
+        // Only over the value read above: a concurrent edit wins.
+        match apply_values_if(&registry, &secrets, &org.slug, values, Some(stored)).await {
+            Ok(Some(_)) => {
                 done += 1;
                 writeln!(w, "  {}: {action}ed", org.slug)?;
+            }
+            Ok(None) => {
+                skipped += 1;
+                writeln!(w, "  {}: skipped, changed meanwhile", org.slug)?;
             }
             Err(e) => {
                 failed += 1;
@@ -87,7 +90,10 @@ where
         }
     }
     if apply {
-        writeln!(w, "reseal-tenant-secrets: {done} done, {failed} failed")?;
+        writeln!(
+            w,
+            "reseal-tenant-secrets: {done} done, {skipped} skipped, {failed} failed"
+        )?;
     } else {
         writeln!(w, "reseal-tenant-secrets: {todo} to change (dry run; pass --apply)")?;
     }

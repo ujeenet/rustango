@@ -167,6 +167,20 @@ pub(crate) async fn apply_values(
     slug: &str,
     values: Vec<(&'static str, crate::core::SqlValue)>,
 ) -> Result<Applied, TenancyError> {
+    apply_values_if(registry, secrets, slug, values, None)
+        .await?
+        .ok_or_else(|| TenancyError::Validation(format!("tenant `{slug}` not found")))
+}
+
+/// [`apply_values`], written only while `database_url` still holds
+/// `expected` when that is `Some`; `Ok(None)` when it changed meanwhile.
+pub(crate) async fn apply_values_if(
+    registry: &Pool,
+    secrets: &TenantSecrets,
+    slug: &str,
+    values: Vec<(&'static str, crate::core::SqlValue)>,
+    expected: Option<&str>,
+) -> Result<Option<Applied>, TenancyError> {
     use crate::core::SqlValue;
     let existing = Org::objects()
         .where_(Org::slug.eq(slug.to_owned()))
@@ -250,14 +264,22 @@ pub(crate) async fn apply_values(
         ));
     }
 
+    let mut filters = vec![crate::core::Filter {
+        column: "slug",
+        op: crate::core::Op::Eq,
+        value: crate::core::SqlValue::String(slug.to_owned()),
+    }];
+    if let Some(old) = expected {
+        filters.push(crate::core::Filter {
+            column: "database_url",
+            op: crate::core::Op::Eq,
+            value: crate::core::SqlValue::String(old.to_owned()),
+        });
+    }
     let update = crate::core::UpdateQuery {
         model: Org::SCHEMA,
         set,
-        where_clause: crate::core::WhereExpr::and_predicates(vec![crate::core::Filter {
-            column: "slug",
-            op: crate::core::Op::Eq,
-            value: crate::core::SqlValue::String(slug.to_owned()),
-        }]),
+        where_clause: crate::core::WhereExpr::and_predicates(filters),
     };
     use crate::tenancy::org_host::{claim_error, claim_host, Claimant};
     let mut tx = match &claim {
@@ -269,7 +291,9 @@ pub(crate) async fn apply_values(
         }
         None => crate::sql::write_transaction(registry).await?,
     };
-    crate::sql::update_tx(&mut tx, &update).await?;
+    if crate::sql::update_tx(&mut tx, &update).await? == 0 && expected.is_some() {
+        return Ok(None);
+    }
     if existing.active || activating {
         let forget = crate::tenancy::provision_store::forget_unsucceeded_runs(existing_id)?;
         crate::sql::update_tx(&mut tx, &forget).await?;
@@ -279,10 +303,10 @@ pub(crate) async fn apply_values(
     // Before anything else acts on the write — see the module docs.
     crate::tenancy::invalidate_org_cache();
 
-    Ok(Applied {
+    Ok(Some(Applied {
         touched,
         database_url_rotated,
-    })
+    }))
 }
 
 fn assign(column: &'static str, value: crate::core::SqlValue) -> crate::core::Assignment {
@@ -295,6 +319,36 @@ fn assign(column: &'static str, value: crate::core::SqlValue) -> crate::core::As
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A write over a `database_url` that changed since it was read is skipped.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_conditional_write_skips_a_changed_url() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        crate::testkit::migrate_framework(&pool).await.unwrap();
+        let first = "sqlite:///tmp/first.db?mode=rwc";
+        let mut org = Org {
+            slug: "cas".into(),
+            backend_kind: "sqlite".into(),
+            database_url: Some(first.into()),
+            ..crate::testkit::org()
+        };
+        org.save_pool(&pool).await.unwrap();
+        let secrets = TenantSecrets::standard();
+        let tmp = tempfile::tempdir().unwrap();
+        let next = format!("sqlite://{}?mode=rwc", tmp.path().join("b.db").display());
+        let set = || vec![("database_url", crate::core::SqlValue::String(next.clone()))];
+        let stale = apply_values_if(&pool, &secrets, "cas", set(), Some("old"))
+            .await
+            .unwrap();
+        assert!(stale.is_none());
+        let rows: Vec<Org> = Org::objects().fetch(&pool).await.unwrap();
+        assert_eq!(rows[0].database_url.as_deref(), Some(first));
+        let fresh = apply_values_if(&pool, &secrets, "cas", set(), Some(first))
+            .await
+            .unwrap();
+        assert!(fresh.is_some());
+    }
 
     #[test]
     fn an_empty_patch_is_refused_rather_than_run() {
