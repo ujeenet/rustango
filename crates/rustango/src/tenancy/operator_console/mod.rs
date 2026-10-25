@@ -1826,6 +1826,17 @@ const LOCKED_ORG_FIELDS: &[&str] = &[
 /// current", and we never render the existing value into the input.
 const DATABASE_URL_FIELD: &str = "database_url";
 
+/// The edit form's note on the stored `database_url`: an `env://` name is
+/// shown, a sealed or literal value never is.
+fn database_url_hint(stored: &str) -> String {
+    let current = if stored.is_empty() {
+        "no value set".to_owned()
+    } else {
+        format!("current: {}", super::secrets::shown_reference(stored))
+    };
+    format!("{current} — leave blank to keep current; new value evicts the cached pool")
+}
+
 #[derive(Deserialize, Default)]
 struct OrgEditQuery {
     #[serde(default)]
@@ -1877,20 +1888,7 @@ async fn org_edit_form(
         // database_url: mask the prefill, supply a placeholder, and
         // surface the secret-reference shape separately.
         let (prefill_for_input, helper) = if field.name == DATABASE_URL_FIELD {
-            let hint = if prefill.starts_with("env:") || prefill.starts_with("vault:") {
-                Some(format!("current: {prefill}"))
-            } else if !prefill.is_empty() {
-                Some("current: <literal connection URL — masked>".to_owned())
-            } else {
-                None
-            };
-            (
-                String::new(),
-                Some(format!(
-                    "{} — leave blank to keep current; new value evicts the cached pool",
-                    hint.unwrap_or_else(|| "no value set".to_owned())
-                )),
-            )
+            (String::new(), Some(database_url_hint(&prefill)))
         } else {
             (prefill, None::<String>)
         };
@@ -2564,6 +2562,25 @@ mod withheld_tests {
         let logged = out.contents();
         assert!(logged.contains("disk full"), "{logged}");
         assert!(logged.contains("org=acme-org"), "{logged}");
+    }
+}
+
+#[cfg(test)]
+mod database_url_hint_tests {
+    use super::database_url_hint;
+
+    /// The hint follows the resolver's schemes: `env://` shown, `enc:` and
+    /// every other value masked.
+    #[test]
+    fn only_an_env_reference_is_shown() {
+        assert!(database_url_hint("env://ACME_DB").contains("current: env://ACME_DB"));
+        let sealed = database_url_hint("enc:v1:QUJDREVG");
+        assert!(sealed.contains("<encrypted>") && !sealed.contains("QUJD"), "{sealed}");
+        for hidden in ["env:ACME_DB", "vault:secret/acme", "postgres://u:pw@h/db"] {
+            let hint = database_url_hint(hidden);
+            assert!(!hint.contains(hidden), "{hint}");
+        }
+        assert!(database_url_hint("").contains("no value set"));
     }
 }
 
