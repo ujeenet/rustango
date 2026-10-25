@@ -20,7 +20,7 @@ Template views that render `csrf_input` send `Cache-Control: private` and `Vary:
 
 ### Fixed — `X-Forwarded-Proto` / `-Host` read the client's hop
 
-Behind a trusted proxy the SSO and MCP redirect builders take the last value, the one the proxy appended, not the first.
+Behind a trusted proxy the SSO and MCP redirect builders take the value set by the outermost trusted proxy, read from the right, not the first.
 
 ### Added — `--current-stdin` and `RUSTANGO_CURRENT_PASSWORD` for change-password verbs
 

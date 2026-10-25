@@ -150,9 +150,9 @@ untouched.
 
 ## Unreleased
 
-### Forwarded proto and host use the last value
+### Forwarded proto and host are read from the right
 
-Behind `trust_proxies`, a comma list in `X-Forwarded-Proto` / `X-Forwarded-Host` now yields its last value. A proxy chain whose inner hops append their own value should overwrite the header at the edge instead.
+Behind `trust_proxies`, a comma list in `X-Forwarded-Proto` / `X-Forwarded-Host` now yields the value of the outermost trusted proxy: one value is skipped per trusted hop in `X-Forwarded-For`. Before, the first (client-sent) value won.
 
 ### Template views are `private` to shared caches
 
