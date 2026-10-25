@@ -153,11 +153,13 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::tenancy::admin` | Admin de locataire |
 | `rustango::tenancy::decommission` | Désactivation et purge de locataire |
 | `rustango::tenancy::migrate_run` | Migrations par locataire |
+| `rustango::tenancy::operation` | Purge et rotation de mot de passe des locataires |
 | `rustango::tenancy::operator_console` | Console opérateur |
 | `rustango::tenancy::pools` | Cycle de vie des pools de locataire |
 | `rustango::tenancy::provision` | Provisionnement de locataires |
 | `rustango::tenancy::provision_webhook` | Webhooks de provisionnement |
 | `rustango::tenancy::resolver` | Résolution de locataire |
+| `rustango::tenancy::secrets` | Secrets de locataire scellés |
 | `rustango::tenancy::sso` | SSO de locataire |
 | `rustango::tenancy::sweep` | Balayages de rétention |
 | `rustango::viewset` | ViewSets montés avec des écritures ouvertes |

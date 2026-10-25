@@ -4,7 +4,17 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-**Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set; `ProvisionRequest` takes a `TenantStorage` and an optional backend, which must be the registry's. See UPGRADING.
+**Breaking:** `TenantPools::new` resolves `env://` and `enc:` tenant URLs; create, edit and `migrate-tenant-storage` refuse a URL of another backend or an unresolvable reference; `api::create_tenant` probes the tenant database before writing; a new password URL is stored sealed when `RUSTANGO_SECRET_KEY` is set; `ProvisionRequest` takes a `TenantStorage` and an optional backend, which must be the registry's; a blank `RUSTANGO_SECRET_KEY` no longer seals; `RunKind` is `#[non_exhaustive]`. See UPGRADING.
+
+### Added — purge and password rotation for tenants on a saved server
+
+`purge-tenant` and the console drop a database rustango made as the saved server's admin, then its login and record; every refusal (URL moved off the record, a shared database, missing owner or PG 16 ADMIN OPTION, a foreign session) runs before anything changes, and the tenant's own sessions on other pods are ended.
+`rotate-tenant-password <slug>` and the console's **Rotate database password** set a new password, store it sealed by compare-and-set and reopen pools; MySQL 8.0.14+ keeps the old one until other pods catch up.
+Both run as recorded runs (`purge`, `rotate_password`) on the console's run page, and the CLI prints each step. New page: `docs/tenant-databases.md`.
+
+### Fixed — a blank `RUSTANGO_SECRET_KEY` sealed with a known key
+
+It now counts as unset. The **New tenant** page shows the missing-key banner too.
 
 ### Added — create a database-mode tenant on a saved server
 

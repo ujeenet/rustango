@@ -186,6 +186,11 @@ host and port (SQLite: a file in its directory), or cannot be resolved, while
 a database rustango created there is still recorded, and on a console built
 without tenant pools.
 
+A tenant whose database was made on a saved server gets **Rotate database
+password** on its page. That and **Purge** run as recorded runs, followed live
+like a create. The whole flow is in
+[Tenant databases on a saved server](tenant-databases.md).
+
 From the CLI: [`add-db-server` and friends](manage.md#database-servers).
 
 ---

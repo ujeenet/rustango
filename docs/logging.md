@@ -151,11 +151,13 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::tenancy::admin` | Tenant admin |
 | `rustango::tenancy::decommission` | Tenant decommission and purge |
 | `rustango::tenancy::migrate_run` | Per-tenant migrations |
+| `rustango::tenancy::operation` | Tenant purge and password rotation runs |
 | `rustango::tenancy::operator_console` | Operator console |
 | `rustango::tenancy::pools` | Tenant pool lifecycle |
 | `rustango::tenancy::provision` | Tenant provisioning |
 | `rustango::tenancy::provision_webhook` | Provisioning webhooks |
 | `rustango::tenancy::resolver` | Tenant resolution |
+| `rustango::tenancy::secrets` | Sealed tenant secrets |
 | `rustango::tenancy::sso` | Tenant SSO |
 | `rustango::tenancy::sweep` | Retention sweeps |
 | `rustango::viewset` | ViewSets mounted with open write actions |
