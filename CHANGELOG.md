@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — SSO, auth and cache edges
+
+- `InMemoryCache`: a TTL too large for the clock (e.g. a huge `lockout_duration_secs`) is capped at a century instead of panicking.
+
 ## [0.61.2] — 2026-10-26
 
 ### Fixed — migrations, MySQL and MariaDB
