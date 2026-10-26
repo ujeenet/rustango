@@ -160,7 +160,7 @@ untouched.
 
 ### Tenancy: path-prefix routing and REST claims
 
-`server::Builder` now sends an apex request whose first path segment is an active tenant's `path_prefix` to that tenant, not the console, at one registry lookup per apex request. Do not give a tenant a prefix the console uses (`/orgs`, `/login`). REST writes to `rustango_orgs` / `rustango_org_hosts` now validate and lowercase host, path prefix and port like the admin, and answer `409` for one another tenant holds.
+`server::Builder` now sends an apex request the console does not serve, under an active tenant's `path_prefix`, to that tenant; the console's own routes always win, and a shadowed prefix logs one warning. The prefix lookup is cached like host lookups. REST writes to `rustango_orgs` / `rustango_org_hosts` now validate and lowercase host, path prefix and port like the admin, and answer `409` for one another tenant holds.
 
 ### Template views hide credential columns
 

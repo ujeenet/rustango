@@ -938,6 +938,26 @@ impl<DB: Database> Builder<DB> {
             use crate::access_log::AccessLogRouterExt as _;
             operator_admin.access_log(operator_console::access_log_layer())
         };
+        // The console's routes win on the apex: only a path it does not serve
+        // reaches a path-prefix tenant. Added after its layers, so they skip it.
+        let operator_admin = operator_admin.fallback_service(tower::service_fn({
+            let prefixed = prefix_app.clone();
+            move |req: axum::http::Request<axum::body::Body>| {
+                let mut prefixed = prefixed.clone();
+                async move {
+                    let mut resp = if req.extensions().get::<PrefixTenant>().is_some() {
+                        prefixed.as_service().oneshot(req).await?
+                    } else {
+                        axum::response::IntoResponse::into_response(
+                            axum::http::StatusCode::NOT_FOUND,
+                        )
+                    };
+                    resp.extensions_mut().insert(ConsoleUnmatched);
+                    Ok::<_, std::convert::Infallible>(resp)
+                }
+            }
+        }));
+        let shadowed = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
         let app = Router::new().fallback_service(tower::service_fn({
             let operator = operator_admin.clone();
@@ -951,13 +971,25 @@ impl<DB: Database> Builder<DB> {
                 let apex = apex.clone();
                 let registry = registry_pool.clone();
                 let resolver = dispatch_resolver.clone();
+                let shadowed = shadowed.clone();
                 async move {
                     let on_apex = crate::tenancy::host_is_apex(req.headers(), req.uri(), &apex);
-                    let (req, prefixed_path) = under_tenant_prefix(req, &resolver, &registry).await;
-                    let response = if prefixed_path {
+                    let (mut req, prefixed_path) =
+                        under_tenant_prefix(req, &resolver, &registry).await;
+                    let response = if on_apex {
+                        let path = req.uri().path().to_owned();
+                        if prefixed_path {
+                            req.extensions_mut().insert(PrefixTenant);
+                        }
+                        let resp = operator.as_service().oneshot(req).await;
+                        if let Ok(r) = &resp {
+                            if prefixed_path && r.extensions().get::<ConsoleUnmatched>().is_none() {
+                                warn_shadowed(&shadowed, &path);
+                            }
+                        }
+                        resp
+                    } else if prefixed_path {
                         prefixed.as_service().oneshot(req).await
-                    } else if on_apex {
-                        operator.as_service().oneshot(req).await
                     } else {
                         tenants.as_service().oneshot(req).await
                     };
@@ -1081,6 +1113,32 @@ impl<DB: Database> Builder<DB> {
         let app = tag_listener_port(app, &listener)?;
         crate::shutdown::serve_until_drained(listener, app, drain).await?;
         Ok(())
+    }
+}
+
+/// Marks an apex request under a tenant's path prefix, for the console's fallback.
+#[derive(Clone, Copy)]
+struct PrefixTenant;
+
+/// Marks a response from the console's fallback: no console route matched.
+#[derive(Clone, Copy)]
+struct ConsoleUnmatched;
+
+/// Warn once per prefix that a console route keeps a tenant's path.
+fn warn_shadowed(shadowed: &std::sync::Mutex<std::collections::HashSet<String>>, path: &str) {
+    let first = path.trim_start_matches('/').split('/').next().unwrap_or("");
+    let prefix = format!("/{first}");
+    let new = shadowed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(prefix.clone());
+    if new {
+        tracing::warn!(
+            target: "rustango::server",
+            prefix = %prefix,
+            "a tenant's path prefix is shadowed by an operator console route on the apex; \
+             the console keeps it — give the tenant another prefix"
+        );
     }
 }
 
