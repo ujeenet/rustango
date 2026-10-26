@@ -1133,7 +1133,7 @@ fn unknown_column_warnings(
         if !is_column(col) && !collected.field_names.iter().any(|n| n == col) {
             found.push((
                 *span,
-                format!("`get_latest_by = \"{col}\"` is not a field of this model"),
+                format!("`get_latest_by`: `{col}` is not a field of this model"),
             ));
         }
     }

@@ -253,7 +253,7 @@ async fn create_tables_builds_declared_indexes(pool: &Pool) {
             .await
             .expect("create_tables");
     }
-    let mut row = || Pair {
+    let row = || Pair {
         id: Auto::default(),
         a: 1,
         b: 2,

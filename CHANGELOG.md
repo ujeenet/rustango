@@ -33,7 +33,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `#[derive(Model)]` warns when an index, `unique_together`, `index_together` or `get_latest_by` names no column; `#[rustango::main]` warns on an argument it ignores.
 - The livereload script and the debug panel's inline tags carry the request's CSP nonce; the panel has no inline `onclick`.
 - `tri_dialect_test!`'s SQLite arm takes the suite lock, as it shares global signals and caches with the live arms.
-- New `Tenant::for_test_pool` (SQLite / MySQL) and `Tenant::for_test_pools` (Postgres) build a test `Tenant` from one source; `Tenant::for_test` is deprecated.
+- New `Tenant::for_test_sqlite`, `for_test_mysql` and `for_test_pools` (Postgres) build a test `Tenant` from one source; `Tenant::for_test` is deprecated.
 - `TestClient` panics on an invalid request header or an unreadable / over-16 MiB response body instead of dropping it; `text()` is lossy, not empty, on non-UTF-8.
 - `cargo rustango new` ignores `.env.*` (keeping `.env.example`).
 

@@ -161,12 +161,12 @@ impl<DB: Database> Tenant<DB> {
     /// reach it.
     ///
     /// Nothing checks that `conn` and `pool` are the same tenant's:
-    /// prefer `for_test_pools` (Postgres) or `for_test_pool`.
+    /// prefer `for_test_pools`, `for_test_sqlite` or `for_test_mysql`.
     #[cfg(any(test, feature = "test_utils"))]
     #[deprecated(
         since = "0.61.6",
-        note = "conn and pool can name different tenants; use `Tenant::for_test_pools` \
-                (Postgres) or `Tenant::for_test_pool` (SQLite / MySQL)"
+        note = "conn and pool can name different tenants; use `Tenant::for_test_pools`, \
+                `Tenant::for_test_sqlite` or `Tenant::for_test_mysql`"
     )]
     #[must_use]
     pub fn for_test(org: Org, conn: TenantConn<DB>, pool: crate::sql::Pool) -> Self {
@@ -192,23 +192,24 @@ impl<DB: Database> Tenant<DB> {
     }
 }
 
-/// **For tests only.** A `Tenant` over one tenant pool, as the extractor
-/// builds it, so its connection and `pool()` cannot disagree.
-macro_rules! for_test_pool {
-    ($db:ty, $pool:ty, $feature:literal) => {
-        #[cfg(all(feature = $feature, any(test, feature = "test_utils")))]
-        impl Tenant<$db> {
-            /// **For tests only.** `org`'s `Tenant` over its own `pool`,
-            /// built as the extractor does.
-            #[must_use]
-            pub fn for_test_pool(org: Org, pool: $pool) -> Self {
-                Self::deferred(org, pool)
-            }
-        }
-    };
+#[cfg(all(feature = "sqlite", any(test, feature = "test_utils")))]
+impl Tenant<sqlx::Sqlite> {
+    /// **For tests only.** `org`'s `Tenant` over its own `pool`, built
+    /// as the extractor does, so its connection and `pool()` agree.
+    #[must_use]
+    pub fn for_test_sqlite(org: Org, pool: sqlx::SqlitePool) -> Self {
+        Self::deferred(org, pool)
+    }
 }
-for_test_pool!(sqlx::Sqlite, sqlx::SqlitePool, "sqlite");
-for_test_pool!(sqlx::MySql, sqlx::MySqlPool, "mysql");
+
+#[cfg(all(feature = "mysql", any(test, feature = "test_utils")))]
+impl Tenant<sqlx::MySql> {
+    /// **For tests only.** As [`Tenant::for_test_sqlite`], on MySQL.
+    #[must_use]
+    pub fn for_test_mysql(org: Org, pool: sqlx::MySqlPool) -> Self {
+        Self::deferred(org, pool)
+    }
+}
 
 #[cfg(all(feature = "postgres", any(test, feature = "test_utils")))]
 impl Tenant<sqlx::Postgres> {
@@ -589,11 +590,11 @@ mod tests {
 
     /// The held connection and `pool()` reach the same database.
     #[tokio::test]
-    async fn for_test_pool_conn_and_pool_agree() {
+    async fn for_test_sqlite_conn_and_pool_agree() {
         let sq = sqlx::SqlitePool::connect("sqlite:file:tft_agree?mode=memory&cache=shared")
             .await
             .unwrap();
-        let mut t = Tenant::for_test_pool(crate::testkit::org(), sq);
+        let mut t = Tenant::for_test_sqlite(crate::testkit::org(), sq);
         crate::sql::raw_execute_pool(t.pool(), "CREATE TABLE t (id INTEGER)", Vec::new())
             .await
             .unwrap();
