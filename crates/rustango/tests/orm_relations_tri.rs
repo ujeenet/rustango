@@ -727,7 +727,7 @@ async fn filter_joins_project_nothing(pool: &Pool) {
     assert_eq!(eds, vec![1, 2]);
 }
 
-/// `None` as a filter value means `IS NULL`, as in Django (#2413).
+/// `None` as a filter value means `IS NULL`.
 async fn none_filter_is_null(pool: &Pool) {
     seed_articles(pool).await;
     let ids = |qs: rustango::query::QuerySet<Article>| async move {
