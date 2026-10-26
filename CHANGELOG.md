@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — security edges
+
+- The persisted session key files (admin, operator, tenant; API keys are MACed with the tenant one) are created 0600 from the start and never written through an existing link; a saved key other users can read is set to 0600 on load, with a warning.
+
 ### Fixed — migrations, MySQL and MariaDB
 
 - MySQL: a correlated `IN` over the table an `update()` / `delete()` writes is no longer read through a derived table, which saw the write's own changes and hit wrong rows; it fails with error 1093 instead.

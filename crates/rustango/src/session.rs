@@ -123,6 +123,7 @@ impl SessionSecret {
         }
         if let Ok(bytes) = std::fs::read(disk_path) {
             if bytes.len() >= 32 {
+                restrict_session_secret_perms(disk_path);
                 tracing::info!(
                     path = %disk_path.display(),
                     "loaded persisted session secret from disk",
@@ -135,10 +136,8 @@ impl SessionSecret {
         if let Some(parent) = disk_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let tmp_path = disk_path.with_extension("tmp");
-        match std::fs::write(&tmp_path, &buf).and_then(|_| std::fs::rename(&tmp_path, disk_path)) {
+        match persist_secret(disk_path, &buf) {
             Ok(()) => {
-                restrict_session_secret_perms(disk_path);
                 tracing::info!(
                     path = %disk_path.display(),
                     "generated new session secret and persisted to disk \
@@ -152,7 +151,6 @@ impl SessionSecret {
                     error = %e,
                     "could not persist session secret to disk — using ephemeral random key",
                 );
-                let _ = std::fs::remove_file(&tmp_path);
             }
         }
         Self(buf)
@@ -344,15 +342,56 @@ pub(crate) fn warn_unusable_secret(reason: &str) {
     );
 }
 
-/// Set the saved secret file to 0600 on Unix, so other users on the
-/// host cannot read the signing key. Windows needs its own ACL work.
+/// Write `bytes` to `path` through a temp file that is owner-only from
+/// creation and never opened through an existing link.
+fn persist_secret(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let tmp = path.with_extension("tmp");
+    let mut file = match create_owner_only(&tmp) {
+        // A crashed boot's leftover, or a planted link: unlink, never follow.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(&tmp)?;
+            create_owner_only(&tmp)?
+        }
+        r => r?,
+    };
+    let written = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// `O_CREAT | O_EXCL`, mode 0600 on Unix. Windows has no mode bits here.
+fn create_owner_only(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    opts.open(path)
+}
+
+/// Make a saved secret other users can read owner-only, and say so.
+/// Windows needs its own ACL work.
 #[cfg(unix)]
 fn restrict_session_secret_perms(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
-    if let Ok(mut perms) = std::fs::metadata(path).map(|m| m.permissions()) {
-        perms.set_mode(0o600);
-        let _ = std::fs::set_permissions(path, perms);
+    let Ok(mut perms) = std::fs::metadata(path).map(|m| m.permissions()) else {
+        return;
+    };
+    if perms.mode() & 0o077 == 0 {
+        return;
     }
+    tracing::warn!(
+        path = %path.display(),
+        mode = format!("{:o}", perms.mode() & 0o777),
+        "session secret file was readable by other users; setting it to 0600",
+    );
+    perms.set_mode(0o600);
+    let _ = std::fs::set_permissions(path, perms);
 }
 
 #[cfg(not(unix))]
@@ -648,5 +687,60 @@ mod tests {
         let s = load_session_secret_for_tier("dev", &path);
         assert!(s.key().len() >= 32);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// A link planted at the temp name must not receive the key.
+    #[cfg(unix)]
+    #[test]
+    fn persisting_a_secret_never_writes_through_a_planted_temp_link() {
+        assert!(std::env::var_os("RUSTANGO_SESSION_SECRET").is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.key");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"").unwrap();
+        std::os::unix::fs::symlink(&victim, path.with_extension("tmp")).unwrap();
+
+        let s = SessionSecret::from_env_or_disk(&path);
+        assert!(std::fs::read(&victim).unwrap().is_empty(), "key leaked");
+        assert!(std::fs::symlink_metadata(&path).unwrap().is_file());
+        assert_eq!(std::fs::read(&path).unwrap(), s.key());
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    /// A saved key other users can read is made owner-only on load.
+    #[cfg(unix)]
+    #[test]
+    fn a_loose_saved_secret_is_made_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert!(std::env::var_os("RUSTANGO_SESSION_SECRET").is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.key");
+        std::fs::write(&path, [9u8; 32]).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let s = SessionSecret::from_env_or_disk(&path);
+        assert_eq!(s.key(), [9u8; 32]);
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    /// A new key file is created owner-only, not chmod'ed after the fact.
+    #[test]
+    fn a_new_secret_file_holds_the_key() {
+        assert!(std::env::var_os("RUSTANGO_SESSION_SECRET").is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub").join("s.key");
+        let s = SessionSecret::from_env_or_disk(&path);
+        assert_eq!(std::fs::read(&path).unwrap(), s.key());
+        assert!(!path.with_extension("tmp").exists());
+        #[cfg(unix)]
+        assert_eq!(mode(&path), 0o600);
+        // Read back on the next boot.
+        assert_eq!(SessionSecret::from_env_or_disk(&path).key(), s.key());
     }
 }
