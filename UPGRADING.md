@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.61.6
+
 ### Jobs: unregistered in-memory jobs are dead-lettered
 
 `InMemoryJobQueue` now passes a job with no registered handler to `on_dead_letter` (error `no handler registered`, 0 attempts). It was dropped before; the DB queue is unchanged.

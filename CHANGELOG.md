@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.6] — 2026-10-26
+
 ### Added — ORM
 
 - `fetch_with_prefetch_related` / `_filtered` prefetch a many-to-many or `reverse_has` relation by name for a list of parents in one query per relation, chunked under the bind limit (new `ExecError::PrefetchTargetMismatch`).
