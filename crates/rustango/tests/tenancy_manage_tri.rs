@@ -1074,16 +1074,12 @@ async fn migrate_storage_checks_the_target_url(pool: &Pool) {
     assert!(err.to_string().contains("registry runs on"), "{err}");
 }
 
-/// The registry under another host name, or a SQLite hard link, passes
-/// the endpoint check; the connection check names it (a warning for now).
+/// The registry under another host name passes the endpoint check; the
+/// connection check names it (a warning for now). SQLite: a hard link to
+/// the open registry does not even connect.
 async fn the_registry_under_an_alias_is_flagged(pool: &Pool) {
     let env = Env::new(pool).await;
     let alias = match env.backend() {
-        BackendKind::Sqlite if cfg!(unix) => {
-            let link = env.tmp.path().join("alias.db");
-            std::fs::hard_link(env.tmp.path().join("reg.db"), &link).unwrap();
-            format!("sqlite://{}", link.display())
-        }
         BackendKind::Sqlite => return,
         _ if env.url.contains("127.0.0.1") => env.url.replace("127.0.0.1", "localhost"),
         _ => env.url.replace("localhost", "127.0.0.1"),
