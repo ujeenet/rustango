@@ -209,13 +209,14 @@ async fn a_superuser_writes_them(pool: &Pool) {
     assert_eq!(u.password_hash, "new-hash");
 }
 
-/// A create runs the admin's `add` hooks: on the request, then on each
-/// written row, single or bulk; a denied row writes nothing.
+/// Opted in, a create runs the admin's `add` hooks: on the request, then on
+/// each written row, single or bulk; a denied row writes nothing. By
+/// default it does not.
 async fn create_runs_the_admin_add_hooks(pool: &Pool) {
-    let app = ViewSet::for_model(Hooked::SCHEMA, &["id", "label"])
-        .allow_anonymous()
-        .router_pool("/hooked", pool.clone());
-    let post = |body: serde_json::Value, deny: bool| {
+    let vs = || ViewSet::for_model(Hooked::SCHEMA, &["id", "label"]).allow_anonymous();
+    let default_app = vs().router_pool("/hooked", pool.clone());
+    let app = vs().admin_add_hooks().router_pool("/hooked", pool.clone());
+    let post_to = |app: &axum::Router, body: serde_json::Value, deny: bool| {
         let mut req = Request::builder()
             .method("POST")
             .uri("/hooked")
@@ -226,6 +227,7 @@ async fn create_runs_the_admin_add_hooks(pool: &Pool) {
         app.clone()
             .oneshot(req.body(Body::from(body.to_string())).unwrap())
     };
+    let post = |body, deny| post_to(&app, body, deny);
     let ok = serde_json::json!({ "label": "ok" });
     let res = post(ok.clone(), true).await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
@@ -241,12 +243,19 @@ async fn create_runs_the_admin_add_hooks(pool: &Pool) {
             .expect("fetch")
             .into_iter()
             .map(|h| h.label)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
             .collect::<Vec<_>>()
     };
     assert!(labels().await.is_empty(), "a denied create wrote a row");
     let res = post(ok, false).await.unwrap();
     assert_eq!(res.status(), StatusCode::CREATED);
     assert_eq!(labels().await, ["ok"]);
+    // Not opted in: the hooks do not apply.
+    let blocked = serde_json::json!({ "label": "blocked" });
+    let res = post_to(&default_app, blocked, true).await.unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    assert_eq!(labels().await, ["blocked", "ok"]);
 }
 
 tri_dialect_test!(

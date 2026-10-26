@@ -722,6 +722,8 @@ pub struct ViewSet {
     pk_param: String,
     /// Most rows one bulk create may carry. See [`ViewSet::max_bulk_create`].
     max_bulk_create: usize,
+    /// Run the admin's `add` hooks on create. See [`ViewSet::admin_add_hooks`].
+    admin_add_hooks: bool,
 }
 
 impl ViewSet {
@@ -758,6 +760,7 @@ impl ViewSet {
             max_page_size: 100,
             pk_param: "pk".to_owned(),
             max_bulk_create: 1000,
+            admin_add_hooks: false,
         }
     }
 
@@ -990,6 +993,15 @@ impl ViewSet {
     #[must_use]
     pub fn max_bulk_create(mut self, n: usize) -> Self {
         self.max_bulk_create = n.max(1);
+        self
+    }
+
+    /// Run the admin's `register_admin_object_permission!(table, "add", …)`
+    /// hooks on create: on the request, then on each written row; a refusal
+    /// is a `403` and writes nothing. Off by default.
+    #[must_use]
+    pub fn admin_add_hooks(mut self) -> Self {
+        self.admin_add_hooks = true;
         self
     }
 
@@ -3202,7 +3214,7 @@ async fn handle_create(
         Ok(w) => w,
         Err(resp) => return resp,
     };
-    let add_hooks = match AddHooks::of(state.vs.schema.table, &parts) {
+    let add_hooks = match AddHooks::of(&state.vs, &parts) {
         Ok(h) => h,
         Err(resp) => return resp,
     };
@@ -3340,9 +3352,14 @@ struct AddHooks {
 }
 
 impl AddHooks {
-    /// `Err` is a `403` when a hook refuses the request itself.
-    fn of(table: &'static str, parts: &axum::http::request::Parts) -> Result<Self, Response> {
+    /// None unless the ViewSet opted in. `Err` is a `403` when a hook
+    /// refuses the request itself.
+    fn of(vs: &ViewSet, parts: &axum::http::request::Parts) -> Result<Self, Response> {
         use crate::admin::object_permissions::{has_hook, is_allowed};
+        let table = vs.schema.table;
+        if !vs.admin_add_hooks {
+            return Ok(Self { parts: None });
+        }
         if !is_allowed(table, "add", parts, None) {
             return Err(json_error(StatusCode::FORBIDDEN, "forbidden"));
         }
