@@ -385,9 +385,10 @@ Three more registration macros hook into a model's admin pages:
   `check: fn(&Parts, Option<&Value>) -> bool` allows or denies per row. Built-in
   handlers consult the `add`, `change`, `delete` and `view` actions; multiple
   hooks AND together. A `view` hook also hides rows from the list, autocomplete,
-  FK facet names and FK cell names. The list runs it over every row in scope, so
-  totals, facets, date buckets and search leave hidden rows out; past 10 000 rows
-  it withholds them instead. A queryset hook does this in SQL and scales.
+  FK facet names and FK cell names. The list runs it over every row its filters
+  and search match, so totals, facets, date buckets and search leave hidden rows
+  out; past 10 000 rows (`Builder::view_hook_scan_cap`) it withholds them instead.
+  A queryset hook does this in SQL and scales.
 - **Secret fields** — a field with the `password` widget
   (`formfield_overrides = "x: password"`) never shows its value and is never
   searched, filtered or faceted. Nothing else marks a secret: give `token` / `api_key` fields that

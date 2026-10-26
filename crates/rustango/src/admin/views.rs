@@ -420,16 +420,6 @@ pub(crate) async fn table_view(
         RowScope::of(model, &parts)
     };
     filters.extend(scope.filters().iter().cloned());
-    // The "view" hook as a PK filter, so totals, pages, facets, date
-    // buckets and search all leave its denied rows out.
-    let aggregates_withheld = match view_hook_rows(&state, &parts, model, &scope).await? {
-        ViewHookRows::All => false,
-        ViewHookRows::Only(f) => {
-            filters.push(f);
-            false
-        }
-        ViewHookRows::TooMany => true,
-    };
 
     // Date hierarchy. With `admin(date_hierarchy = "field")` set and
     // `?year[&month[&day]]` in the URL, add the half-open `[lo, hi)`
@@ -448,6 +438,19 @@ pub(crate) async fn table_view(
         columns: search_columns.clone(),
         query: qstr.clone(),
     });
+
+    // The "view" hook as a PK filter, so totals, pages, facets, date
+    // buckets and search all leave its denied rows out. Every list query
+    // shares `filters` and the search, so the scan reads only those rows.
+    let aggregates_withheld =
+        match view_hook_rows(&state, &parts, model, &filters, search.as_ref()).await? {
+            ViewHookRows::All => false,
+            ViewHookRows::Only(f) => {
+                filters.push(f);
+                false
+            }
+            ViewHookRows::TooMany => true,
+        };
 
     let where_clause = WhereExpr::and_predicates(
         field_filters
@@ -1117,9 +1120,6 @@ async fn compute_facets(
     Ok(out)
 }
 
-/// Most rows the list reads to run a "view" hook over the whole scope.
-const VIEW_HOOK_SCAN_CAP: i64 = 10_000;
-
 /// The rows a "view" hook admits, as a filter SQL can apply.
 enum ViewHookRows {
     /// No hook, or it denies nothing.
@@ -1130,13 +1130,16 @@ enum ViewHookRows {
     TooMany,
 }
 
-/// Run the table's "view" hook over every row in `scope` and fold the
-/// answer into one PK filter, the shorter of `IN` admitted or `NOT IN` denied.
+/// Run the table's "view" hook over every row matching `filters` and
+/// `search`, and fold the answer into one PK filter: the shorter of `IN`
+/// admitted or `NOT IN` denied. The hook takes the whole row, so all
+/// scalar columns are read.
 async fn view_hook_rows(
     state: &AppState,
     parts: &axum::http::request::Parts,
     model: &'static crate::core::ModelSchema,
-    scope: &RowScope,
+    filters: &[Filter],
+    search: Option<&SearchClause>,
 ) -> Result<ViewHookRows, AdminError> {
     if !crate::admin::object_permissions::has_hook(model.table, "view") {
         return Ok(ViewHookRows::All);
@@ -1144,18 +1147,21 @@ async fn view_hook_rows(
     let Some(pk_field) = model.primary_key() else {
         return Ok(ViewHookRows::TooMany);
     };
+    let cap = state.view_hook_scan_cap();
     let fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let rows = crate::sql::select_rows_as_json(
         &state.pool,
         &SelectQuery {
-            where_clause: WhereExpr::and_predicates(scope.filters().to_vec()),
-            limit: Some(VIEW_HOOK_SCAN_CAP + 1),
+            where_clause: WhereExpr::and_predicates(filters.to_vec()),
+            search: search.cloned(),
+            limit: Some(i64::try_from(cap).unwrap_or(i64::MAX).saturating_add(1)),
             ..SelectQuery::new(model)
         },
         &fields,
     )
     .await?;
-    if rows.len() as i64 > VIEW_HOOK_SCAN_CAP {
+    if rows.len() > cap {
+        warn_scan_cap(model.table, cap);
         return Ok(ViewHookRows::TooMany);
     }
     let (mut admitted, mut denied) = (Vec::new(), Vec::new());
@@ -1186,6 +1192,22 @@ async fn view_hook_rows(
     } else {
         ViewHookRows::Only(filter(Op::In, SqlValue::List(admitted)))
     })
+}
+
+/// Log once per table that the scan cap hid its counts.
+fn warn_scan_cap(table: &'static str, cap: usize) {
+    static WARNED: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut warned = WARNED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !warned.contains(&table) {
+        warned.push(table);
+        tracing::warn!(
+            target: "rustango::admin",
+            table,
+            cap,
+            "the \"view\" hook matches more rows than the scan cap: total, facets and \
+             dates are hidden. Use register_admin_queryset! or raise view_hook_scan_cap"
+        );
+    }
 }
 
 /// One facet value: the stored key, its URL form, the FK display name and the count.

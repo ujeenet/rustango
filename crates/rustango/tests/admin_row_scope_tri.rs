@@ -265,9 +265,15 @@ async fn post_as(
 }
 
 async fn get(pool: &Pool, uri: &str) -> (StatusCode, String) {
-    let app = rustango::admin::Builder::new(pool.clone())
-        .admin_prefix("")
-        .build();
+    get_as(pool, uri, |b| b).await
+}
+
+async fn get_as(
+    pool: &Pool,
+    uri: &str,
+    admin: impl FnOnce(rustango::admin::Builder) -> rustango::admin::Builder,
+) -> (StatusCode, String) {
+    let app = admin(rustango::admin::Builder::new(pool.clone()).admin_prefix("")).build();
     let res = app
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
@@ -499,8 +505,21 @@ async fn view_hook_rows_are_uncounted(pool: &Pool) {
     assert!(body.contains("kind=a"), "facet: {body}");
     assert!(!body.contains("leaked"), "denied facet value: {body}");
     assert!(!body.contains("2019"), "denied date bucket: {body}");
+    // Every searched row is denied: the `IS NULL` filter matches none.
     let (_, body) = get(pool, "/rowscope_doc?q=hide").await;
     assert!(body.contains("0 rows"), "search oracle: {body}");
+
+    // Past the scan cap the counts are withheld, never leaked.
+    let (status, body) = get_as(pool, "/rowscope_doc", |b| b.view_hook_scan_cap(2)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("row count hidden"), "total: {body}");
+    assert!(!body.contains("3 rows") && !body.contains("2 rows"), "a total leaked: {body}");
+    assert!(!body.contains("kind=a"), "facets kept: {body}");
+    assert!(!body.contains(r#"<nav class="date-hierarchy""#), "date strip kept: {body}");
+    assert!(!body.contains("hide-1"), "denied row shown: {body}");
+    // A search that narrows the scan under the cap counts again.
+    let (_, body) = get_as(pool, "/rowscope_doc?q=ok-1", |b| b.view_hook_scan_cap(2)).await;
+    assert!(body.contains("1 row"), "filtered scan: {body}");
 }
 
 /// An FK facet labels a hidden target by its key, not its title (#2029).
