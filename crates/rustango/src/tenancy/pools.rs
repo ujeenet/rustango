@@ -1449,10 +1449,34 @@ impl TenantPools<sqlx::Postgres> {
         schema: &str,
         registry: &PgPool,
     ) -> Result<PgPool, TenancyError> {
-        let mut opts = (*registry.connect_options()).clone();
-        opts = opts.options([("search_path", search_path_option(schema))]);
+        let opts = with_search_path((*registry.connect_options()).clone(), schema);
         Ok(scoped_pool_options(&self.config).connect_with(opts).await?)
     }
+}
+
+/// `opts` with `schema` first on the `search_path`. In the connect options,
+/// not a `SET` on connect, so [`crate::sql::Pool::scope_key`] tells schemas apart.
+#[cfg(feature = "postgres")]
+fn with_search_path(
+    opts: sqlx::postgres::PgConnectOptions,
+    schema: &str,
+) -> sqlx::postgres::PgConnectOptions {
+    opts.options([("search_path", search_path_option(schema))])
+}
+
+/// A short-lived pool of at most `max` connections to the registry
+/// server, scoped to `schema`. For migrations and manage commands.
+#[cfg(feature = "postgres")]
+pub(crate) async fn connect_schema_scoped(
+    registry_url: &str,
+    schema: &str,
+    max: u32,
+) -> Result<PgPool, TenancyError> {
+    let opts = with_search_path(registry_url.parse()?, schema);
+    Ok(PgPoolOptions::new()
+        .max_connections(max)
+        .connect_with(opts)
+        .await?)
 }
 
 /// Options of a schema-mode tenant pool.

@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — ORM, migrations and jobs
+
+- Schema-mode pools that migrations and `manage` build set `search_path` in their connect options, so `Pool::scope_key` (and the ContentType cache) tells them apart from the registry.
+
 ## [0.61.2] — 2026-10-26
 
 ### Fixed — migrations, MySQL and MariaDB

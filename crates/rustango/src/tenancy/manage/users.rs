@@ -17,8 +17,6 @@ use crate::core::Column as _;
 use crate::sql::{Auto, FetcherPool, UpdaterPool as _};
 
 use crate::tenancy::error::TenancyError;
-#[cfg(feature = "postgres")]
-use crate::tenancy::manage::args::quote_ident;
 use crate::tenancy::manage::args::{parse, Parsed, Spec};
 use crate::tenancy::manage_interactive;
 use crate::tenancy::pools::TenantPools;
@@ -683,7 +681,12 @@ where
         StorageMode::Schema => {
             #[cfg(feature = "postgres")]
             {
-                let pg = build_schema_scoped_pool(registry_url, org.effective_schema()).await?;
+                let pg = crate::tenancy::pools::connect_schema_scoped(
+                    registry_url,
+                    org.effective_schema(),
+                    1,
+                )
+                .await?;
                 Ok(rustango::sql::Pool::Postgres(pg))
             }
             #[cfg(not(feature = "postgres"))]
@@ -707,31 +710,4 @@ where
             }
         }
     }
-}
-
-/// Mirror of the migration helper — build a short-lived pool whose
-/// connections have `search_path` pre-set. Local copy so manage
-/// doesn't need a public reference into [`crate::migrate`].
-/// PG-only by language.
-#[cfg(feature = "postgres")]
-async fn build_schema_scoped_pool(
-    registry_url: &str,
-    schema: &str,
-) -> Result<rustango::sql::sqlx::PgPool, TenancyError> {
-    use crate::sql::sqlx::postgres::PgPoolOptions;
-    use std::sync::Arc;
-    let schema_owned: Arc<str> = Arc::from(schema);
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .after_connect(move |conn, _meta| {
-            let schema = Arc::clone(&schema_owned);
-            Box::pin(async move {
-                let stmt = format!("SET search_path TO {}, public", quote_ident(&schema));
-                rustango::sql::sqlx::query(&stmt).execute(conn).await?;
-                Ok(())
-            })
-        })
-        .connect(registry_url)
-        .await?;
-    Ok(pool)
 }

@@ -509,7 +509,8 @@ impl Pool {
     /// part is load-bearing.** Schema-mode tenants share one host,
     /// port and database, and differ only in their `search_path`.
     /// Hashing the connection details alone would collide across all
-    /// of them.
+    /// of them. A `search_path` set by an `after_connect` `SET` is not
+    /// seen here; put it in the connect options instead.
     ///
     /// Two pools to the same database hash the same, which is what a
     /// cache wants. Cheap enough for a hot path.

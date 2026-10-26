@@ -19,9 +19,8 @@
 //! marked `scope = "tenant"` to that tenant's storage:
 //!
 //! * **Schema mode** — the runner spins up an *ephemeral* PgPool
-//!   bound to the registry URL with an `after_connect` hook that
-//!   issues `SET search_path TO <schema>, public` on every fresh
-//!   connection. The migration runner from `rustango-migrate` runs
+//!   bound to the registry URL with `search_path = <schema>, public`
+//!   in its connect options. The migration runner from `rustango-migrate` runs
 //!   unchanged against this pool; its ledger queries
 //!   (`__rustango_migrations__`) resolve to `<schema>.__rustango_migrations__`
 //!   thanks to search_path. Each tenant gets its own ledger row set.
@@ -49,13 +48,9 @@
 
 use crate::migrate::{Migration, MigrationScope};
 use std::path::Path;
-#[cfg(feature = "postgres")]
-use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::core::Column as _;
-#[cfg(feature = "postgres")]
-use crate::sql::sqlx::postgres::PgPoolOptions;
 #[cfg(feature = "postgres")]
 use crate::sql::sqlx::PgPool;
 use sqlx::Database;
@@ -958,8 +953,7 @@ async fn run_for_one_tenant(
 }
 
 /// Build a short-lived `PgPool` whose every connection has its
-/// `search_path` pre-set to `<schema>, public` via an
-/// `after_connect` hook. Used only for schema-mode migrations —
+/// `search_path` pre-set to `<schema>, public`. Used only for schema-mode migrations —
 /// runtime requests use the shared registry pool with per-checkout
 /// `SET`.
 ///
@@ -984,27 +978,7 @@ async fn build_schema_scoped_pool(
         .await?;
     bootstrap.close().await;
 
-    // Now build the migration pool. Every connection gets
-    // `SET search_path` once on connect; sqlx caches this per
-    // connection so subsequent migration queries against this pool
-    // see the right schema without further bookkeeping.
-    let schema_owned: Arc<str> = Arc::from(schema);
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .after_connect(move |conn, _meta| {
-            let schema = Arc::clone(&schema_owned);
-            Box::pin(async move {
-                let stmt = format!(
-                    "SET search_path TO {}, public",
-                    quote_ident_for_schema(&schema)
-                );
-                rustango::sql::sqlx::query(&stmt).execute(conn).await?;
-                Ok(())
-            })
-        })
-        .connect(registry_url)
-        .await?;
-    Ok(pool)
+    super::pools::connect_schema_scoped(registry_url, schema, 2).await
 }
 
 /// Prep a directory of migrations filtered by scope. If every
@@ -1086,4 +1060,36 @@ fn tempdir_under_target() -> Result<TempDir, TenancyError> {
 fn quote_ident_for_schema(name: &str) -> String {
     let escaped = name.replace('"', "\"\"");
     format!("\"{escaped}\"")
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod schema_pool_tests {
+    use super::build_schema_scoped_pool;
+
+    /// Schema pools must not share a cache scope with each other or the registry.
+    #[tokio::test]
+    async fn schema_scoped_pools_have_their_own_scope_key() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pid = std::process::id();
+        let (a, b) = (format!("scope_a_{pid}"), format!("scope_b_{pid}"));
+        let registry = crate::sql::Pool::connect(&url).await.expect("registry");
+        let pa = crate::sql::Pool::Postgres(build_schema_scoped_pool(&url, &a).await.expect("a"));
+        let pb = crate::sql::Pool::Postgres(build_schema_scoped_pool(&url, &b).await.expect("b"));
+        let current: (String,) = sqlx::query_as("SELECT current_schema()::text")
+            .fetch_one(pa.as_postgres().expect("pg"))
+            .await
+            .expect("current_schema");
+        assert_eq!(current.0, a, "search_path not applied");
+        let keys = [registry.scope_key(), pa.scope_key(), pb.scope_key()];
+        pa.close().await;
+        pb.close().await;
+        for s in [&a, &b] {
+            let drop = format!("DROP SCHEMA IF EXISTS {} CASCADE", super::quote_ident_for_schema(s));
+            let _ = sqlx::query(&drop).execute(registry.as_postgres().expect("pg")).await;
+        }
+        assert_ne!(keys[0], keys[1], "schema pool shares the registry's scope");
+        assert_ne!(keys[1], keys[2], "two schema pools share a scope");
+    }
 }
