@@ -22,7 +22,7 @@ A query key is redacted when its words contain a listed name, or, for long names
 
 ### Fixed — API key and agent owners are superuser-only on create
 
-A non-superuser can no longer choose `user_id` when creating an API key or MCP agent through a ViewSet or `ModelForm`; it was locked on edit only.
+A non-superuser can no longer choose `user_id` when creating an API key or MCP agent through a ViewSet or `ModelForm`; it was locked on edit only. A ViewSet create that sets a locked NOT NULL field is now a `403`.
 
 ### Fixed — migrations, MySQL and MariaDB
 

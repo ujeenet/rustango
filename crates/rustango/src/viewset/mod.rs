@@ -34,6 +34,7 @@
 //!
 //! Fields locked with `register_admin_superuser_fields!` are silently ignored
 //! in a write body unless the request's `AuthenticatedUser` is a superuser.
+//! A create that sets a locked NOT NULL field with no default is a `403`.
 //!
 //! ## Query parameters (list endpoint)
 //!
@@ -1931,6 +1932,21 @@ impl WriteSet {
         self.superuser_only.iter().any(|n| form.contains_key(*n))
     }
 
+    /// `true` when `form` sets a locked field the INSERT cannot leave out
+    /// (NOT NULL, no default): the create could only fail, so it is a 403.
+    fn sends_required_locked(&self, form: &HashMap<String, String>) -> bool {
+        self.superuser_only
+            .iter()
+            .filter(|n| form.contains_key(**n))
+            .filter_map(|n| self.schema.field(n))
+            .any(|f| {
+                !f.nullable
+                    && f.default.is_none()
+                    && !f.auto
+                    && f.ty != crate::core::FieldType::Bool
+            })
+    }
+
     /// The fields an UPDATE writes when the body carries them.
     fn updatable(&self) -> impl Iterator<Item = &'static crate::core::FieldSchema> + '_ {
         self.writable
@@ -3345,6 +3361,9 @@ async fn create_one(
     // model column) so the client can POST the serializer field name.
     let renamed = serializer_input_renamed_form(state, form);
     let form = renamed.as_ref().unwrap_or(form);
+    if write_set.sends_required_locked(form) {
+        return json_error(StatusCode::FORBIDDEN, "forbidden");
+    }
     let collected = match write_set.insert_values(form, encoding) {
         Ok(v) => v,
         Err(e) => return e.into_response(state, None),
@@ -3389,6 +3408,9 @@ async fn create_many(
         }
         let renamed = serializer_input_renamed_form(state, row);
         let row = renamed.as_ref().unwrap_or(row);
+        if write_set.sends_required_locked(row) {
+            return json_error(StatusCode::FORBIDDEN, "forbidden");
+        }
         // A bulk body is always JSON.
         let collected = match write_set.insert_values(row, Encoding::Json) {
             Ok(v) => v,

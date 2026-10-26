@@ -1,5 +1,6 @@
 //! Admin permission edges on every backend: a gate's extension session,
-//! a locked flag on an inline add, and a child table the user cannot view.
+//! a locked flag on an inline add, a child table the user cannot view, and
+//! a ViewSet create that sets a locked required field.
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -51,6 +52,19 @@ pub struct Line {
 
 rustango::register_admin_superuser_fields!(Line, Add, [flag]);
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aae_key")]
+#[allow(dead_code)]
+pub struct Key {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub owner_id: i64,
+    #[rustango(max_length = 32)]
+    pub label: String,
+}
+
+rustango::register_admin_superuser_fields!(Key, Add, [owner_id]);
+
 rustango::register_admin_inline!(
     parent = "aae_order",
     child = "aae_line",
@@ -64,6 +78,7 @@ async fn setup(pool: &Pool) {
     drop_table(pool, "aae_line").await;
     fresh_table::<Order>(pool).await;
     fresh_table::<Line>(pool).await;
+    fresh_table::<Key>(pool).await;
 }
 
 async fn send(app: axum::Router, method: &str, uri: &str, form: &str) -> (StatusCode, String) {
@@ -196,11 +211,37 @@ async fn hidden_child_is_not_rendered_or_written(pool: &Pool) {
     assert_eq!(lines.iter().filter(|l| l.order_id == o).count(), 1);
 }
 
+/// A non-superuser create that sets a locked NOT NULL field is a 403,
+/// single or bulk, and writes nothing.
+async fn viewset_create_with_a_locked_required_field_is_forbidden(pool: &Pool) {
+    let app = rustango::viewset::ViewSet::for_model(
+        <Key as rustango::core::Model>::SCHEMA,
+        &["id", "owner_id", "label"],
+    )
+    .router_pool("/keys", pool.clone());
+    for body in [
+        r#"{"owner_id": 9, "label": "k"}"#,
+        r#"[{"owner_id": 9, "label": "k"}]"#,
+    ] {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/keys")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{body}");
+    }
+    let keys = Key::objects().fetch(pool).await.expect("keys");
+    assert!(keys.is_empty(), "a forbidden create wrote a row");
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
         extension_session_locks_superuser_fields,
         inline_add_defaults_a_locked_flag,
         hidden_child_is_not_rendered_or_written,
+        viewset_create_with_a_locked_required_field_is_forbidden,
     ],
 );
