@@ -23,7 +23,7 @@ A `url` field refuses `javascript:`, `vbscript:` and `data:` values, however a b
 
 ### Fixed — WebSocket keepalive closes half-open peers
 
-`ws_handler` pings every `keepalive` even while messages flow, closes a peer that sends nothing for a whole interval after a ping, and gives each send `keepalive` to finish.
+`ws_handler` pings every `keepalive` even while messages flow, closes a peer that sends nothing for a whole interval after a ping, and gives each send `max(keepalive, 10 s)` to finish.
 
 ## [0.61.3] — 2026-10-26
 

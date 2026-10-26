@@ -164,7 +164,7 @@ A `url` answer with a `javascript:`, `vbscript:` or `data:` scheme is refused. O
 
 ### WebSocket peers must answer pings
 
-`ws_handler` now closes a socket that sends no frame within one `keepalive` after a ping, or whose send stalls that long. Browsers answer pings on their own; a custom client must too.
+`ws_handler` now closes a socket that sends no frame within one `keepalive` after a ping. Browsers answer pings on their own; a custom client must too. A send that stalls past `max(keepalive, 10 s)` also closes it, so a short keepalive does not drop slow readers.
 
 ## 0.61.3
 

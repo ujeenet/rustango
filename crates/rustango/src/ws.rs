@@ -67,8 +67,8 @@ pub struct WsHub<T: Clone + Send + 'static> {
 #[derive(Clone, Debug)]
 pub struct WsConfig {
     /// How often to send a `Ping` frame, busy or idle. A peer silent for a
-    /// whole interval after a ping, or a send slower than this, closes the
-    /// socket. Default: 30 seconds.
+    /// whole interval after a ping is closed. A send may take the larger of
+    /// this and 10 seconds. Default: 30 seconds.
     pub keepalive: Duration,
     /// Called for every text message from the client. Return
     /// `Some(reply)` to answer, `None` to ignore. Default: `None`,
@@ -169,7 +169,7 @@ impl<T: Clone + Send + Serialize + 'static> WsHub<T> {
 ///
 /// A ping goes out every `keepalive`, traffic or not. It returns when the
 /// client disconnects, sends nothing for a whole interval after a ping,
-/// a send takes longer than `keepalive`, or the bus closes.
+/// a send outlasts `max(keepalive, 10 s)`, or the bus closes.
 pub async fn ws_handler<T>(mut socket: WebSocket, hub: WsHub<T>)
 where
     T: Clone + Send + Serialize + DeserializeOwned + 'static,
@@ -177,6 +177,7 @@ where
     let mut rx = hub.bus.subscribe();
     // `interval` panics on zero.
     let keepalive = hub.config.keepalive.max(Duration::from_millis(1));
+    let send_limit = send_timeout(keepalive);
     let on_message = hub.config.on_message;
     let max_bytes = hub.config.max_message_bytes;
     // Not reset by traffic, so a busy socket is pinged too.
@@ -197,14 +198,14 @@ where
                             continue;
                         }
                     };
-                    if !send(&mut socket, Message::Text(json.into()), keepalive).await {
+                    if !send(&mut socket, Message::Text(json.into()), send_limit).await {
                         return;
                     }
                 }
                 Err(RecvError::Lagged(n)) => {
                     // Tell the client it missed `n` events so it can resync.
                     let lagged = Message::Text(format!(r#"{{"_lagged":{n}}}"#).into());
-                    if !send(&mut socket, lagged, keepalive).await {
+                    if !send(&mut socket, lagged, send_limit).await {
                         return;
                     }
                 }
@@ -220,12 +221,12 @@ where
                 match incoming {
                     Some(Ok(Message::Text(t))) => {
                         if t.len() > max_bytes {
-                            let _ = send(&mut socket, Message::Close(None), keepalive).await;
+                            let _ = send(&mut socket, Message::Close(None), send_limit).await;
                             return;
                         }
                         if let Some(handler) = on_message {
                             if let Some(reply) = handler(t.as_str()) {
-                                if !send(&mut socket, Message::Text(reply.into()), keepalive).await {
+                                if !send(&mut socket, Message::Text(reply.into()), send_limit).await {
                                     return;
                                 }
                             }
@@ -233,13 +234,13 @@ where
                     }
                     Some(Ok(Message::Binary(b))) => {
                         if b.len() > max_bytes {
-                            let _ = send(&mut socket, Message::Close(None), keepalive).await;
+                            let _ = send(&mut socket, Message::Close(None), send_limit).await;
                             return;
                         }
                         // Binary frames are dropped; wrap ws_handler to handle them.
                     }
                     Some(Ok(Message::Ping(p))) => {
-                        if !send(&mut socket, Message::Pong(p), keepalive).await {
+                        if !send(&mut socket, Message::Pong(p), send_limit).await {
                             return;
                         }
                     }
@@ -259,13 +260,20 @@ where
                     tracing::debug!("ws: no pong within keepalive, closing");
                     return;
                 }
-                if !send(&mut socket, Message::Ping(Vec::new().into()), keepalive).await {
+                if !send(&mut socket, Message::Ping(Vec::new().into()), send_limit).await {
                     return;
                 }
                 awaiting_reply = true;
             }
         }
     }
+}
+
+/// Shortest time a send may take; a short keepalive must not drop slow readers.
+const SEND_TIMEOUT_FLOOR: Duration = Duration::from_secs(10);
+
+fn send_timeout(keepalive: Duration) -> Duration {
+    keepalive.max(SEND_TIMEOUT_FLOOR)
 }
 
 /// Send `msg`, giving up after `limit` so a peer that stops reading
@@ -423,7 +431,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let big = "y".repeat(64 * 1024);
-        let dropped = tokio::time::timeout(Duration::from_secs(10), async {
+        // The send floor is 10 s, so allow well past it.
+        let dropped = tokio::time::timeout(Duration::from_secs(30), async {
             while hub.receiver_count() > 0 {
                 hub.broadcast(big.clone());
                 tokio::time::sleep(Duration::from_millis(2)).await;
@@ -432,6 +441,46 @@ mod tests {
         .await;
         talker.abort();
         assert!(dropped.is_ok(), "a stalled send held the connection");
+    }
+
+    /// A short keepalive does not shorten the send timeout: a reader that
+    /// pauses longer than keepalive but under the floor stays connected.
+    #[tokio::test]
+    async fn a_short_keepalive_keeps_a_slow_reader() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let hub = WsHub::new(EventBus::<String>::new(4)).keepalive(Duration::from_millis(100));
+        let tcp = open(hub.clone()).await;
+        let (mut read, mut write) = tcp.into_split();
+        let talker = tokio::spawn(async move {
+            while write.write_all(&[0x89, 0x80, 1, 2, 3, 4]).await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        });
+        while hub.receiver_count() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Fill the socket buffers, then stall reading for 1.5 s.
+        let big = "y".repeat(64 * 1024);
+        let stall_until = tokio::time::Instant::now() + Duration::from_millis(1500);
+        while tokio::time::Instant::now() < stall_until {
+            hub.broadcast(big.clone());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let drain = tokio::spawn(async move {
+            let mut buf = vec![0u8; 64 * 1024];
+            while read.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let alive = hub.receiver_count();
+        talker.abort();
+        drain.abort();
+        assert_eq!(alive, 1, "a slow reader was dropped at the keepalive interval");
+    }
+
+    #[test]
+    fn send_timeout_has_a_floor() {
+        assert_eq!(send_timeout(Duration::from_secs(1)), SEND_TIMEOUT_FLOOR);
+        assert_eq!(send_timeout(Duration::from_secs(60)), Duration::from_secs(60));
     }
 
     #[tokio::test]
