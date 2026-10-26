@@ -16,17 +16,13 @@ on:
     # was covered. PRs were checked, which hides the gap right up until
     # a squash-merge combination behaves differently from its PR.
     #
-    # Release branches are named here too. They used to be covered only
-    # through their PR, so a push straight to a release branch — which is
-    # the one place this repo allows it — ran nothing. The glob is loose
-    # on purpose: `release/v0.57.6`, `releases/x`, `hotfix-release` all
-    # match, because the cost of missing a release branch is a tagged
-    # build nobody checked.
+    # Release branches are not listed: every release branch has a PR, and
+    # a push run next to the PR run built the same commit twice and halved
+    # the runners each got. Check a release branch with no PR through
+    # `workflow_dispatch`.
     branches:
       - main
       - develop
-      - '**release**'
-      - '**Release**'
   # Every PR reaches the workflow, whatever its base.
   #
   # There used to be a `branches:` filter here restricting this to
