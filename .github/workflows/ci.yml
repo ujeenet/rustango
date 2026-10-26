@@ -808,10 +808,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # A pinned release, checked against its published sha256: never a
+      # script from `main` or an unpinned latest.
       - name: Install Trivy
+        env:
+          TRIVY_VERSION: 0.75.0
+          TRIVY_SHA256: c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
         run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sudo sh -s -- -b /usr/local/bin
+          tarball="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sfLO "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${tarball}"
+          echo "${TRIVY_SHA256}  ${tarball}" | sha256sum -c -
+          sudo tar -xzf "${tarball}" -C /usr/local/bin trivy
           trivy --version
       - name: Vulnerabilities + secrets (blocking)
         run: |
