@@ -1242,17 +1242,7 @@ let author_posts = author.post_set(&pool).await?;
 
 For a list of parents, `fetch_with_prefetch_related` loads a many-to-many (`m2m(name = "tags", ...)`) or reverse-FK (`reverse_has(name = "items", ...)`) relation by name. It runs one query for the parents and one for the relation, whatever the number of parents, like Django's `prefetch_related("tags")`.
 
-```rust
-use rustango::sql::{fetch_with_prefetch_related, fetch_with_prefetch_related_filtered};
-
-let posts: Vec<(Post, Vec<Tag>)> =
-    fetch_with_prefetch_related(Post::objects(), "tags", &pool).await?;
-
-// Filter or order the related rows; a limit applies to all parents together.
-let tags = Tag::objects().order_by(&[("name", false)]);
-let posts: Vec<(Post, Vec<Tag>)> =
-    fetch_with_prefetch_related_filtered(Post::objects(), "tags", tags, &pool).await?;
-```
+`rustango::sql::fetch_with_prefetch_related(Post::objects(), "tags", &pool)` returns `Vec<(Post, Vec<Tag>)>`. To filter or order the related rows, pass a queryset to `fetch_with_prefetch_related_filtered(Post::objects(), "tags", Tag::objects().order_by(&[("name", false)]), &pool)`; a limit on it applies to all parents together. `crates/rustango/tests/prefetch_related_tri.rs` runs both on PostgreSQL, MySQL and SQLite.
 
 - The parent keys go in one `IN` list, split into batches past the backend's bind limit (65,535 on MySQL, 32,766 on SQLite; PostgreSQL binds one array).
 - A many-to-many joins its through table, so a tag shared by many posts comes back once under each post. Integer, `String` and `Uuid` keys all work.

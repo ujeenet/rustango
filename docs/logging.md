@@ -142,6 +142,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::rate_limit` | Rate limiting |
 | `rustango::request_timeout` | Per-request timeout |
 | `rustango::scheduler` | Cron / scheduled tasks |
+| `rustango::security_headers` | Security-header settings (HSTS) |
 | `rustango::server` | Server boot and shutdown |
 | `rustango::shutdown` | Signal handling and shutdown hooks |
 | `rustango::sql` | Query execution |
