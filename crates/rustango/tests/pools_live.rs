@@ -858,6 +858,63 @@ async fn schema_mode_tenants_using_pool_do_not_starve_it() {
     drop_schema(&admin, "acme_tp_many").await;
 }
 
+/// The same in database mode: each held `Tenant` used to pin a slot of the
+/// pool `t.pool()` queries, so at its max size every query timed out.
+#[tokio::test]
+async fn database_mode_tenants_using_pool_do_not_starve_it() {
+    use axum::extract::FromRequestParts as _;
+    use std::sync::Arc;
+    let _g = live_lock().lock().await;
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let registry = pool().await.unwrap();
+    let cfg = rustango::tenancy::TenantPoolsConfig {
+        database_pool_max_connections: 2,
+        database_pool_acquire_timeout: std::time::Duration::from_secs(3),
+        ..Default::default()
+    };
+    let n = cfg.database_pool_max_connections as usize;
+    let pools = Arc::new(TenantPools::new(registry).config(cfg));
+    let org = Org {
+        slug: "dbm_tp_many".into(),
+        storage_mode: StorageMode::Database.as_str().into(),
+        backend_kind: "postgres".to_owned(),
+        database_url: Some(url),
+        ..rustango::testkit::org()
+    };
+    let barrier = Arc::new(tokio::sync::Barrier::new(n));
+    let tasks: Vec<_> = (0..n)
+        .map(|_| {
+            let mut parts = tenant_parts(pools.clone(), org.clone());
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                let mut t = rustango::extractors::Tenant::<sqlx::Postgres>::from_request_parts(
+                    &mut parts,
+                    &(),
+                )
+                .await
+                .map_err(|_| "extractor rejected".to_owned())?;
+                barrier.wait().await;
+                let pg = t.pool().as_postgres().expect("a Postgres pool").clone();
+                let row: (i32,) = sqlx::query_as("SELECT 1")
+                    .fetch_one(&pg)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let _ = current_schema(t.conn()).await;
+                Ok::<_, String>(row.0)
+            })
+        })
+        .collect();
+    for task in tasks {
+        let got = tokio::time::timeout(std::time::Duration::from_secs(30), task)
+            .await
+            .expect("request hung")
+            .unwrap();
+        assert_eq!(got.expect("t.pool() query"), 1);
+    }
+}
+
 /// `TenantScope` holds no connection, so many of them fit a one-slot pool.
 #[tokio::test]
 async fn tenant_scope_holds_no_connection() {

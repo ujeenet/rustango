@@ -740,13 +740,37 @@ impl Held {
     }
 }
 
+/// Forget the account locks of tenant `slug`'s logins, so a new tenant
+/// reusing the slug does not inherit them.
+///
+/// # Errors
+/// The lockout cache's `delete_prefix` error.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn forget_tenant(slug: &str) -> Result<(), crate::cache::CacheError> {
+    let lockout = crate::account_lockout::shared();
+    for scope in [
+        LoginScope::Tenant(slug.to_owned()),
+        LoginScope::TenantBasic(slug.to_owned()),
+    ] {
+        lockout
+            .clear_accounts_with_prefix(&account_key_prefix(&scope.key()))
+            .await?;
+    }
+    Ok(())
+}
+
+/// Every [`account_key`] of `scope_key` starts with this.
+fn account_key_prefix(scope_key: &str) -> String {
+    format!("login:{scope_key}:")
+}
+
 /// `login:<scope>:<sha256 of the trimmed, lowercased username>`. Hashed
 /// so the key has a fixed size and a shared cache never holds the name.
 fn account_key(scope_key: &str, username: &str) -> String {
     use sha2::{Digest as _, Sha256};
     use std::fmt::Write as _;
     let digest = Sha256::digest(username.trim().to_lowercase().as_bytes());
-    let mut key = format!("login:{scope_key}:");
+    let mut key = account_key_prefix(scope_key);
     for b in digest {
         let _ = write!(key, "{b:02x}");
     }

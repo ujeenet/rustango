@@ -364,6 +364,16 @@ impl Lockout {
         let _ = self.cache.delete(&self.lock_key(account)).await;
     }
 
+    /// Clear the counters and locks of every account starting with `prefix`.
+    pub(crate) async fn clear_accounts_with_prefix(&self, prefix: &str) -> Result<(), CacheError> {
+        for kind in ["attempts", "failures", "window", "locked"] {
+            self.cache
+                .delete_prefix(&format!("{}{kind}:{prefix}", self.key_prefix))
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Attempts counted in the current window: failures, plus reserved
     /// attempts not yet reported. 0 when absent.
     pub async fn attempt_count(&self, account: &str) -> u32 {

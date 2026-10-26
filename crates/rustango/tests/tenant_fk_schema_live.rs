@@ -349,3 +349,74 @@ async fn migrate_is_quiet_about_passkeys_for_a_new_tenant() {
         "a new tenant was warned:\n{logs}"
     );
 }
+
+/// Warnings logged while a fresh `TenantPools` builds `org`'s scoped pool.
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+async fn scoped_pool_warnings(registry: &sqlx::PgPool, org: &Org) -> String {
+    use tracing::instrument::WithSubscriber as _;
+    let buf = rustango::testkit::CaptureWriter::default();
+    let sink = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let pools = TenantPools::new(registry.clone());
+    let scoped = pools
+        .scoped_pool_dyn(org)
+        .with_subscriber(subscriber)
+        .await
+        .unwrap();
+    // The premise: a table the schema lacks resolves to `public`'s copy.
+    rustango::sql::raw_execute_pool(&scoped, "SELECT 1 FROM rustango_users LIMIT 1", Vec::new())
+        .await
+        .expect("search_path falls through to public");
+    scoped.close().await;
+    buf.contents()
+}
+
+/// A schema tenant missing a tenant table reads `public`'s copy through
+/// `search_path`; building its pool must say so, a migrated one stays quiet.
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+#[tokio::test]
+async fn a_tenant_schema_missing_tables_warns_about_public_fallthrough() {
+    let Ok(admin_url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let db = ScratchDb::create(&admin_url, "rustango_tfallthrough").await;
+    let url = db.url().to_owned();
+    let registry = sqlx::PgPool::connect(&url).await.unwrap();
+    rustango::testkit::migrate_framework(&rustango::sql::Pool::from(registry.clone()))
+        .await
+        .unwrap();
+    let pools = TenantPools::new(registry.clone());
+    let slug = "tfall-acme";
+    run(
+        &pools,
+        &url,
+        &["create-tenant", slug, "--mode", "schema", "--no-migrate"],
+    )
+    .await
+    .unwrap();
+    let org = Org::objects()
+        .where_(Org::slug.eq(slug.to_owned()))
+        .fetch(&rustango::sql::Pool::from(registry.clone()))
+        .await
+        .unwrap()
+        .remove(0);
+
+    let logs = scoped_pool_warnings(&registry, &org).await;
+    assert!(
+        logs.contains("rustango_users") && logs.contains(slug),
+        "no warning about tables read from public:\n{logs}"
+    );
+
+    run(&pools, &url, &["migrate-tenants"]).await.unwrap();
+    let logs = scoped_pool_warnings(&registry, &org).await;
+    assert!(
+        !logs.contains("rustango_users"),
+        "a migrated tenant was warned:\n{logs}"
+    );
+    drop(pools);
+    registry.close().await;
+}

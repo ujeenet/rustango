@@ -34,6 +34,46 @@ use super::server_tenant::ServerTenant;
 use crate::core::Column as _;
 use crate::sql::{FetcherPool as _, UpdaterPool as _};
 
+/// Caches whose `tenant:{slug}:` keys a purge deletes.
+static PURGE_CACHES: std::sync::RwLock<Vec<crate::cache::BoxedCache>> =
+    std::sync::RwLock::new(Vec::new());
+
+/// Make every purge delete the tenant's [`crate::cache::ScopedCache::for_tenant`]
+/// keys from `cache`, so a new tenant reusing the slug cannot read them.
+/// Call at boot for each cache holding tenant-scoped entries.
+pub fn clear_on_purge(cache: crate::cache::BoxedCache) {
+    PURGE_CACHES
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(cache);
+}
+
+/// Forget the state keyed by the slug alone, which a new tenant may reuse.
+/// Best-effort: what stays is noted in the report.
+async fn forget_slug(slug: &str, report: &mut Report) {
+    use crate::cache::Cache as _;
+    crate::contenttypes::clear_cache();
+    if let Err(e) = crate::login_throttle::forget_tenant(slug).await {
+        report
+            .notes
+            .push(format!("the tenant's account locks were not cleared: {e}"));
+    }
+    let caches = PURGE_CACHES
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    for cache in caches {
+        if let Err(e) = crate::cache::ScopedCache::for_tenant(cache, slug)
+            .clear()
+            .await
+        {
+            report
+                .notes
+                .push(format!("the tenant's cache entries were not cleared: {e}"));
+        }
+    }
+}
+
 /// What to do to the tenant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -783,6 +823,7 @@ where
         return rep.fail(Step::RemoveOrg, e).await;
     }
     report.row_deleted = true;
+    forget_slug(slug, report).await;
     rep.ok(Step::RemoveOrg).await;
 
     // Last: while the org stays, a retry finds the record and goes by the
@@ -893,7 +934,7 @@ async fn refuse_shared_schema(
     schema: &str,
     org_id: i64,
 ) -> Result<(), TenancyError> {
-    if let Err(why) = super::provision::validate_schema_name(schema) {
+    if let Err(why) = super::provision::validate_stored_schema_name(schema) {
         return Err(TenancyError::Validation(format!(
             "refusing to drop schema `{schema}`: {why}"
         )));

@@ -12,7 +12,9 @@
 //!   lives in a separate Postgres database. `Org.database_url` is a
 //!   *secret reference* — [`SecretsResolver`] turns it into the actual
 //!   connection URL, then we lazy-build a dedicated `PgPool` and cache
-//!   it. Strong isolation, per-tenant connection budget.
+//!   it. Strong isolation, per-tenant connection budget. On Postgres
+//!   [`TenantPools::acquire`] takes from a second pool of its own, so a
+//!   held connection never waits on the queries' pool.
 //!
 //! ## Cache shape
 //!
@@ -57,7 +59,9 @@ pub struct TenantPoolsConfig {
     /// times `database_pool_max_connections`. `0` disables caching.
     /// Default: 64.
     pub max_cached_database_pools: usize,
-    /// Per-pool `max_connections` for database-mode tenants. Keep
+    /// Per-pool `max_connections` for database-mode tenants. On Postgres
+    /// each tenant has two such pools, its queries' and the held
+    /// connections' (no idle ones), so budget twice this. Keep
     /// small enough that a fleet fan-out doesn't exhaust Postgres'
     /// `max_connections`, but large enough that a single tenant's
     /// concurrent admin traffic (page render + thumbnail fan-out
@@ -520,22 +524,27 @@ pub struct TenantPools<DB: Database = DefaultTenantDb> {
     /// Schema-mode pools [`TenantPools::acquire`] takes held connections
     /// from: per tenant, so a busy one never takes the registry's.
     held_cache: RwLock<HashMap<String, CachedPool<DB>>>,
+    /// Database-mode pools [`TenantPools::acquire`] takes held connections
+    /// from, apart from `cache`'s: one shared pool deadlocked at its max.
+    held_database_cache: RwLock<HashMap<String, CachedPool<DB>>>,
     /// Single-flight for `cache` and `scoped_cache` misses.
     building: SingleFlight<Arc<sqlx::Pool<DB>>>,
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    building_held_database: SingleFlight<Arc<sqlx::Pool<DB>>>,
     #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     building_scoped: SingleFlight<sqlx::Pool<DB>>,
     #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     building_held: SingleFlight<sqlx::Pool<DB>>,
 }
 
-/// Which of a schema-mode tenant's two pools. Two, so a request holding
-/// a connection can still query through `t.pool()` at its max size.
-#[cfg(feature = "postgres")]
-#[derive(Clone, Copy)]
-enum ScopedUse {
+/// Which of a tenant's two pools. Two, so a request holding a
+/// connection can still query through `t.pool()` at its max size.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PoolUse {
     /// [`TenantPools::scoped_pool`]'s.
     Queries,
     /// [`TenantPools::acquire`]'s.
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     Held,
 }
 
@@ -563,7 +572,9 @@ impl<DB: Database> TenantPools<DB> {
             cache: RwLock::new(HashMap::new()),
             scoped_cache: RwLock::new(HashMap::new()),
             held_cache: RwLock::new(HashMap::new()),
+            held_database_cache: RwLock::new(HashMap::new()),
             building: SingleFlight::default(),
+            building_held_database: SingleFlight::default(),
             building_scoped: SingleFlight::default(),
             building_held: SingleFlight::default(),
         }
@@ -759,6 +770,7 @@ impl<DB: Database> TenantPools<DB> {
         self.cache.write().await.remove(slug);
         self.scoped_cache.write().await.remove(slug);
         self.held_cache.write().await.remove(slug);
+        self.held_database_cache.write().await.remove(slug);
     }
 }
 
@@ -962,37 +974,59 @@ impl<DB: Database> TenantPools<DB> {
 
     /// A cache hit. Recording it needs only `&`, so the LRU stamp costs
     /// no write lock.
+    fn database_cache_for(&self, of: PoolUse) -> &RwLock<HashMap<String, CachedPool<DB>>> {
+        match of {
+            PoolUse::Queries => &self.cache,
+            PoolUse::Held => &self.held_database_cache,
+        }
+    }
+
     async fn cached_database_pool(
         &self,
         slug: &str,
         source: &PoolSource,
+        of: PoolUse,
     ) -> Option<Arc<sqlx::Pool<DB>>> {
-        let cache = self.cache.read().await;
+        let cache = self.database_cache_for(of).read().await;
         let entry = CachedPool::lookup(&cache, slug, source)?;
         entry.touch(self.next_tick());
         Some(Arc::clone(&entry.pool))
     }
 
     async fn pool_for_database_mode(&self, org: &Org) -> Result<Arc<sqlx::Pool<DB>>, TenancyError> {
+        self.database_mode_pool(org, PoolUse::Queries).await
+    }
+
+    /// The tenant's cached `of` pool, built on a miss.
+    async fn database_mode_pool(
+        &self,
+        org: &Org,
+        of: PoolUse,
+    ) -> Result<Arc<sqlx::Pool<DB>>, TenancyError> {
         let source = PoolSource::database(org);
-        if let Some(pool) = self.cached_database_pool(&org.slug, &source).await {
+        if let Some(pool) = self.cached_database_pool(&org.slug, &source, of).await {
             return Ok(pool);
         }
-        let build = self.build_database_mode(org, source.clone());
+        let build = self.build_database_mode(org, source.clone(), of);
         if self.config.max_cached_database_pools == 0 {
             // Nothing is cached, so there is nothing to share.
             return build.await;
         }
-        self.building.run(&org.slug, &source, build).await
+        let flight = match of {
+            PoolUse::Queries => &self.building,
+            PoolUse::Held => &self.building_held_database,
+        };
+        flight.run(&org.slug, &source, build).await
     }
 
     async fn build_database_mode(
         &self,
         org: &Org,
         source: PoolSource,
+        of: PoolUse,
     ) -> Result<Arc<sqlx::Pool<DB>>, TenancyError> {
         // A flight that started after another finished finds its pool here.
-        if let Some(pool) = self.cached_database_pool(&org.slug, &source).await {
+        if let Some(pool) = self.cached_database_pool(&org.slug, &source, of).await {
             return Ok(pool);
         }
         // Cache miss — instrument so the cold path is visible in
@@ -1020,7 +1054,12 @@ impl<DB: Database> TenantPools<DB> {
             let connect_start = std::time::Instant::now();
             let tag = org.id.get().map(|id| tenant_session_tag(*id));
             let url = tag_postgres_url(&url, tag.as_deref());
-            let pool = build_database_pool::<DB>(&url, &self.config).await?;
+            // Held connections keep no idle ones: `min` is the queries' pool's.
+            let min = match of {
+                PoolUse::Queries => self.config.database_pool_min_connections,
+                PoolUse::Held => 0,
+            };
+            let pool = build_database_pool::<DB>(&url, &self.config, min).await?;
             tracing::info!(
                 target: "rustango::tenancy::pools",
                 slug = %org.slug,
@@ -1032,7 +1071,7 @@ impl<DB: Database> TenantPools<DB> {
             let pool = Arc::new(pool);
 
             // Insert under write lock; check for race, then make room.
-            let mut cache = self.cache.write().await;
+            let mut cache = self.database_cache_for(of).write().await;
             if let Some(existing) = CachedPool::lookup(&cache, &org.slug, &source) {
                 existing.touch(self.next_tick());
                 return Ok(Arc::clone(&existing.pool));
@@ -1058,11 +1097,13 @@ impl<DB: Database> TenantPools<DB> {
                 org.slug.clone(),
                 CachedPool::new(Arc::clone(&pool), source, self.next_tick()),
             );
-            self.warn_if_near_cap(
-                cache.len(),
-                self.config.max_cached_database_pools,
-                "database",
-            );
+            if of == PoolUse::Queries {
+                self.warn_if_near_cap(
+                    cache.len(),
+                    self.config.max_cached_database_pools,
+                    "database",
+                );
+            }
             Ok(pool)
         }
         .instrument(span)
@@ -1263,7 +1304,8 @@ impl TenantPools<sqlx::Postgres> {
     /// tenant can block neither the others nor its own `t.pool()`.
     /// With `max_cached_scoped_pools = 0` it is a registry connection
     /// with `SET search_path`, reset on release.
-    /// For database mode it just acquires from the dedicated pool.
+    /// For database mode it comes from the tenant's second pool, apart
+    /// from the one `t.pool()` uses, for the same reason.
     ///
     /// # Errors
     /// As [`Self::pool_for_org`] plus a [`TenancyError::Driver`] for
@@ -1289,7 +1331,7 @@ impl TenantPools<sqlx::Postgres> {
             }
             TenantPool::Schema { schema, registry } => {
                 let pool = self
-                    .schema_mode_pool(org, schema.clone(), registry, ScopedUse::Held)
+                    .schema_mode_pool(org, schema.clone(), registry, PoolUse::Held)
                     .await?;
                 // The reset restores the connect-time `search_path`,
                 // undoing a handler's own `SET` before the next borrower.
@@ -1299,7 +1341,14 @@ impl TenantPools<sqlx::Postgres> {
                     reset: Some(reset_pg_search_path),
                 })
             }
-            TenantPool::Database { pool } => Ok(TenantConn::database(pool.acquire().await?)),
+            // Uncached, each call builds its own pool, so none is shared.
+            TenantPool::Database { pool } if self.config.max_cached_database_pools == 0 => {
+                Ok(TenantConn::database(pool.acquire().await?))
+            }
+            TenantPool::Database { .. } => {
+                let held = self.database_mode_pool(org, PoolUse::Held).await?;
+                Ok(TenantConn::database(held.acquire().await?))
+            }
         }
     }
 
@@ -1334,7 +1383,7 @@ impl TenantPools<sqlx::Postgres> {
     pub async fn scoped_pool(&self, org: &Org) -> Result<PgPool, TenancyError> {
         match self.pool_for_org(org).await? {
             TenantPool::Schema { schema, registry } => {
-                self.schema_mode_pool(org, schema, registry, ScopedUse::Queries)
+                self.schema_mode_pool(org, schema, registry, PoolUse::Queries)
                     .await
             }
             TenantPool::Database { pool } => Ok((*pool).clone()),
@@ -1343,11 +1392,11 @@ impl TenantPools<sqlx::Postgres> {
 
     fn scoped_cache_for(
         &self,
-        of: ScopedUse,
+        of: PoolUse,
     ) -> &RwLock<HashMap<String, CachedPool<sqlx::Postgres>>> {
         match of {
-            ScopedUse::Queries => &self.scoped_cache,
-            ScopedUse::Held => &self.held_cache,
+            PoolUse::Queries => &self.scoped_cache,
+            PoolUse::Held => &self.held_cache,
         }
     }
 
@@ -1357,7 +1406,7 @@ impl TenantPools<sqlx::Postgres> {
         org: &Org,
         schema: String,
         registry: PgPool,
-        of: ScopedUse,
+        of: PoolUse,
     ) -> Result<PgPool, TenancyError> {
         // Fast path and single-flight, as in `pool_for_database_mode`.
         let source = PoolSource::Schema(schema.clone());
@@ -1369,8 +1418,8 @@ impl TenantPools<sqlx::Postgres> {
             return build.await;
         }
         let flight = match of {
-            ScopedUse::Queries => &self.building_scoped,
-            ScopedUse::Held => &self.building_held,
+            PoolUse::Queries => &self.building_scoped,
+            PoolUse::Held => &self.building_held,
         };
         flight.run(&org.slug, &source, build).await
     }
@@ -1381,7 +1430,7 @@ impl TenantPools<sqlx::Postgres> {
         schema: String,
         registry: PgPool,
         source: PoolSource,
-        of: ScopedUse,
+        of: PoolUse,
     ) -> Result<PgPool, TenancyError> {
         if let Some(pool) = self.cached_scoped_pool(&org.slug, &source, of).await {
             return Ok(pool);
@@ -1390,6 +1439,9 @@ impl TenantPools<sqlx::Postgres> {
         async {
             let connect_start = std::time::Instant::now();
             let scoped = self.build_scoped_pool(&schema, &registry).await?;
+            if of == PoolUse::Queries {
+                warn_on_public_fallthrough(&registry, &org.slug, &schema).await;
+            }
             tracing::info!(
                 target: "rustango::tenancy::pools",
                 slug = %org.slug,
@@ -1436,7 +1488,7 @@ impl TenantPools<sqlx::Postgres> {
         &self,
         slug: &str,
         source: &PoolSource,
-        of: ScopedUse,
+        of: PoolUse,
     ) -> Option<PgPool> {
         let cache = self.scoped_cache_for(of).read().await;
         let entry = CachedPool::lookup(&cache, slug, source)?;
@@ -1456,6 +1508,57 @@ impl TenantPools<sqlx::Postgres> {
         opts = opts.options([("search_path", search_path_option(schema))]);
         Ok(scoped_pool_options(&self.config).connect_with(opts).await?)
     }
+}
+
+/// Warn when `public` has tenant tables `schema` lacks: `search_path` ends
+/// in `public`, so the tenant reads and writes those shared copies.
+#[cfg(feature = "postgres")]
+async fn warn_on_public_fallthrough(registry: &PgPool, slug: &str, schema: &str) {
+    match tables_read_from_public(registry, schema).await {
+        Ok(tables) if tables.is_empty() => {}
+        Ok(tables) => tracing::warn!(
+            target: "rustango::tenancy::pools",
+            slug,
+            schema,
+            tables = %tables.join(", "),
+            "the tenant's schema lacks tables that `public` has, so its queries read and \
+             write those shared copies; run `migrate-tenants` for it or deactivate it. \
+             A later release stops falling through to `public`",
+        ),
+        Err(e) => tracing::debug!(
+            target: "rustango::tenancy::pools",
+            slug,
+            error = %e,
+            "could not compare the tenant's tables with `public`",
+        ),
+    }
+}
+
+/// The tenant-scoped model tables in `public` but not in `schema`.
+#[cfg(feature = "postgres")]
+async fn tables_read_from_public(
+    registry: &PgPool,
+    schema: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    let tenant: Vec<String> = inventory::iter::<crate::core::ModelEntry>
+        .into_iter()
+        .map(|e| e.schema)
+        .filter(|s| s.scope == crate::core::ModelScope::Tenant && s.managed && !s.is_view)
+        .map(|s| s.table.to_owned())
+        .collect();
+    sqlx::query_scalar(
+        "SELECT c.relname::text FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND c.relname = ANY($2) AND c.relkind IN ('r', 'p') \
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class t \
+           JOIN pg_catalog.pg_namespace tn ON tn.oid = t.relnamespace \
+           WHERE tn.nspname = $1 AND t.relname = c.relname) \
+         ORDER BY 1",
+    )
+    .bind(schema)
+    .bind(tenant)
+    .fetch_all(registry)
+    .await
 }
 
 /// A short-lived pool of at most `max` connections to the registry
@@ -1527,12 +1630,9 @@ pub(crate) fn tenant_pool_options<DB: Database>(
 pub(crate) async fn build_database_pool<DB: Database>(
     url: &str,
     config: &TenantPoolsConfig,
+    min: u32,
 ) -> Result<sqlx::Pool<DB>, TenancyError> {
-    let opts = tenant_pool_options::<DB>(
-        config,
-        config.database_pool_max_connections,
-        config.database_pool_min_connections,
-    );
+    let opts = tenant_pool_options::<DB>(config, config.database_pool_max_connections, min);
     let url = ensure_sqlite_creates(url);
     Ok(opts.connect(&url).await?)
 }

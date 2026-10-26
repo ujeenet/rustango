@@ -442,8 +442,8 @@ where
             .ok_or(TenantRejection::MissingContext)?
             .clone();
         let org = resolved_org(mounted, parts).await?;
-        // In schema mode the held connection comes from the tenant's own
-        // held pool, never the registry's or the one `t.pool()` uses:
+        // The held connection comes from the tenant's own held pool, in
+        // both modes, never the registry's or the one `t.pool()` uses:
         // a busy tenant would block the others, or deadlock at max size.
         let conn = ctx
             .pools
