@@ -1,10 +1,12 @@
 //! Notifications from server to client, **scoped** so they never
 //! cross a tenant or agent boundary.
 //!
-//! One [`EventBus`] per process carries [`ScopedFrame`]s: a JSON-RPC
+//! Each tenant has its own [`EventBus`] of [`ScopedFrame`]s: a JSON-RPC
 //! notification tagged with its `tenant` and, for a per-agent event,
-//! its `agent_id`. The SSE stream subscribes once and relays a frame
-//! only when [`frame_visible`] says the connected agent may see it.
+//! its `agent_id`. One tenant's burst cannot push another tenant's frames
+//! out of a shared buffer. The SSE stream subscribes to its tenant with
+//! [`subscribe`] and relays a frame only when [`frame_visible`] says the
+//! connected agent may see it.
 //!
 //! A change to one agent's grants carries `agent_id: Some`. A change
 //! to the whole tenant's catalog carries `None`, so every agent in
@@ -18,7 +20,8 @@
 //! processes the client has to re-list on its next `initialize`. A
 //! shared bus, on Redis, would remove this limit.
 
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::json;
 
@@ -35,11 +38,49 @@ pub struct ScopedFrame {
     pub body: String,
 }
 
-/// This process's notification bus.
+/// Frames each tenant's channel buffers for a slow stream.
+const TENANT_CAPACITY: usize = 256;
+
+/// Every tenant's frames, for in-process observers. SSE streams read
+/// their tenant's channel instead; reach them with [`send`].
 #[must_use]
 pub fn bus() -> &'static EventBus<ScopedFrame> {
     static BUS: OnceLock<EventBus<ScopedFrame>> = OnceLock::new();
-    BUS.get_or_init(|| EventBus::new(256))
+    BUS.get_or_init(|| EventBus::new(TENANT_CAPACITY))
+}
+
+fn tenant_buses() -> &'static Mutex<HashMap<String, EventBus<ScopedFrame>>> {
+    static BUSES: OnceLock<Mutex<HashMap<String, EventBus<ScopedFrame>>>> = OnceLock::new();
+    BUSES.get_or_init(Mutex::default)
+}
+
+/// Send `frame` to the streams of `frame.tenant`, and to [`bus`].
+/// Returns how many streams got it.
+pub fn send(frame: ScopedFrame) -> usize {
+    if bus().receiver_count() > 0 {
+        bus().send(frame.clone());
+    }
+    let bus = tenant_buses()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&frame.tenant)
+        .cloned();
+    // No channel means no stream is open for this tenant.
+    bus.map_or(0, |b| b.send(frame))
+}
+
+/// A receiver of `tenant`'s frames only.
+#[must_use]
+pub fn subscribe(tenant: &str) -> tokio::sync::broadcast::Receiver<ScopedFrame> {
+    let mut buses = tenant_buses()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Channels of tenants with no open stream are dropped here.
+    buses.retain(|_, b| b.receiver_count() > 0);
+    buses
+        .entry(tenant.to_owned())
+        .or_insert_with(|| EventBus::new(TENANT_CAPACITY))
+        .subscribe()
 }
 
 /// Whether this agent may see a frame: it must be the same tenant,
@@ -51,7 +92,7 @@ pub fn frame_visible(frame: &ScopedFrame, tenant: &str, agent_id: i64) -> bool {
 
 fn notify(tenant: &str, agent_id: Option<i64>, method: &str) {
     let body = json!({ "jsonrpc": "2.0", "method": method }).to_string();
-    bus().send(ScopedFrame {
+    send(ScopedFrame {
         tenant: tenant.to_owned(),
         agent_id,
         body,
@@ -101,7 +142,7 @@ mod tests {
 
     #[tokio::test]
     async fn notify_emits_a_scoped_jsonrpc_frame() {
-        let mut rx = bus().subscribe();
+        let mut rx = subscribe("acme");
         notify_prompts_list_changed("acme", Some(7));
         for _ in 0..200 {
             let Ok(frame) = rx.recv().await else { continue };

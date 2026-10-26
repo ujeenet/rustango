@@ -150,6 +150,18 @@ untouched.
 
 ## Unreleased
 
+### Nonced pages and the page cache
+
+Behind `CachePageLayer` placed outside the CSP nonce layer, a page whose CSP names a nonce is no longer cached (`x-cache-status: BYPASS`). Mount the cache inside the nonce layer to keep caching it.
+
+### MCP notifications per tenant
+
+SSE streams read their tenant's channel. Send with `mcp::notifications::send` (the `notify_*` helpers do); a frame sent straight to `notifications::bus()` now reaches only in-process observers, not streams.
+
+### OpenAPI viewers
+
+Nested under a prefix, `/docs` and `/redoc` fetch `<prefix>/openapi.json`, no longer the root `/openapi.json`. The pages pin Swagger UI 5.34.0 and Redoc 2.5.4.
+
 ## 0.61.5
 
 ### ViewSet OpenAPI: Binary is hex

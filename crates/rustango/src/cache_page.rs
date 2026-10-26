@@ -57,6 +57,10 @@
 //!   `Vary` is `*` or names a request header outside the key (such as
 //!   `Accept-Encoding` from compression) is not cached; add that header
 //!   with [`CachePageLayer::vary_on`] to cache it per value.
+//! - **CSP nonces are never replayed.** Inside the CSP nonce layer, a
+//!   hit gets the current request's nonce in place of the stored one.
+//!   A response whose CSP already names a nonce the layer did not see
+//!   (the layer sits outside the nonce layer) is not cached.
 //! - **The body is buffered.** A response loses its streaming
 //!   behaviour under this layer. Use [`never_cache`] on streaming
 //!   handlers, or leave the layer off those routes.
@@ -505,10 +509,15 @@ where
                 &vary,
                 body_digest.as_deref(),
             );
+            let nonce = req.extensions().get::<crate::csp_nonce::Nonce>().cloned();
+            let nonce = nonce.as_ref().map(crate::csp_nonce::Nonce::value);
 
             // Cache hit?
             if let Ok(Some(frame)) = cache.get_bytes(&key).await {
-                if let Ok(stored) = CachedPage::decode(frame) {
+                if let Some(stored) = CachedPage::decode(frame)
+                    .ok()
+                    .and_then(|p| p.with_nonce(nonce))
+                {
                     let mut resp = stored.into_response(&vary);
                     if is_query {
                         crate::vary::mark_private(resp.headers_mut());
@@ -584,6 +593,13 @@ where
                 status: parts.status,
                 headers: parts.headers.clone(),
                 body: bytes.clone(),
+            }
+            .without_nonce(nonce);
+            let Some(stored) = stored else {
+                let mut resp = Response::from_parts(parts, Body::from(bytes));
+                resp.headers_mut()
+                    .insert(X_CACHE_STATUS, HeaderValue::from_static("BYPASS"));
+                return Ok(resp);
             };
             if let Some(frame) = stored.encode() {
                 if let Err(e) = cache.set_bytes(&key, &frame, Some(timeout)).await {
@@ -620,6 +636,36 @@ const MAX_CACHEABLE_BODY_BYTES: usize = 1 << 20;
 /// Header naming where the response came from: `HIT` from the cache,
 /// `MISS` freshly computed.
 const X_CACHE_STATUS: HeaderName = HeaderName::from_static("x-cache-status");
+
+/// Stands in for the request's CSP nonce in a stored page.
+const CACHED_NONCE: &str = "__RUSTANGO_CACHED_NONCE__";
+
+/// Marks a stored page holding [`CACHED_NONCE`]; never sent.
+const NONCE_MARK: HeaderName = HeaderName::from_static("x-rustango-cached-nonce");
+
+/// `hay` with every `from` replaced by `to`; `None` when there is none.
+fn replace_bytes(hay: &[u8], from: &[u8], to: &[u8]) -> Option<Vec<u8>> {
+    if from.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    let (mut i, mut copied) = (0, 0);
+    while i + from.len() <= hay.len() {
+        if hay[i..].starts_with(from) {
+            out.extend_from_slice(&hay[copied..i]);
+            out.extend_from_slice(to);
+            i += from.len();
+            copied = i;
+        } else {
+            i += 1;
+        }
+    }
+    if copied == 0 {
+        return None;
+    }
+    out.extend_from_slice(&hay[copied..]);
+    Some(out)
+}
 
 /// The tenant a page is cached for.
 #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
@@ -910,6 +956,62 @@ impl CachedPage {
             headers,
             body: frame,
         })
+    }
+
+    /// Swap every `from` for `to`, in the body and each header value.
+    /// `true` when something changed.
+    fn swap(&mut self, from: &str, to: &str) -> bool {
+        let mut changed = false;
+        if let Some(body) = replace_bytes(&self.body, from.as_bytes(), to.as_bytes()) {
+            self.body = body.into();
+            // The length changed; hyper sets it from the body.
+            self.headers.remove(axum::http::header::CONTENT_LENGTH);
+            changed = true;
+        }
+        for value in self.headers.values_mut() {
+            if let Some(v) = replace_bytes(value.as_bytes(), from.as_bytes(), to.as_bytes()) {
+                if let Ok(v) = HeaderValue::from_bytes(&v) {
+                    *value = v;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// The page to store: the request's nonce (if any) swapped out.
+    /// `None` when its CSP names a nonce this layer did not mint into it.
+    fn without_nonce(mut self, nonce: Option<&str>) -> Option<Self> {
+        if let Some(n) = nonce {
+            if self.swap(n, CACHED_NONCE) {
+                self.headers
+                    .insert(NONCE_MARK, HeaderValue::from_static("1"));
+            }
+        }
+        let ours = format!("'nonce-{CACHED_NONCE}'");
+        let foreign = [
+            "content-security-policy",
+            "content-security-policy-report-only",
+        ]
+        .iter()
+        .flat_map(|name| self.headers.get_all(*name))
+        .any(|v| {
+            String::from_utf8_lossy(v.as_bytes())
+                .replace(crate::csp_nonce::CSP_NONCE_PLACEHOLDER, "")
+                .replace(&ours, "")
+                .to_ascii_lowercase()
+                .contains("'nonce-")
+        });
+        (!foreign).then_some(self)
+    }
+
+    /// A stored page for this request: its nonce swapped back in.
+    /// `None` (a miss) when the page needs a nonce the request lacks.
+    fn with_nonce(mut self, nonce: Option<&str>) -> Option<Self> {
+        if self.headers.remove(NONCE_MARK).is_some() {
+            self.swap(CACHED_NONCE, nonce?);
+        }
+        Some(self)
     }
 
     /// The response for a hit. `vary_on` comes from the live layer

@@ -71,7 +71,7 @@ impl ProgressReporter {
             "params": params,
         })
         .to_string();
-        super::notifications::bus().send(super::notifications::ScopedFrame {
+        super::notifications::send(super::notifications::ScopedFrame {
             tenant: self.tenant.clone(),
             agent_id: Some(self.agent_id),
             body,
@@ -200,7 +200,7 @@ mod tests {
 
     #[tokio::test]
     async fn progress_emits_when_token_present_and_silent_otherwise() {
-        let mut rx = super::super::notifications::bus().subscribe();
+        let mut rx = super::super::notifications::subscribe("acme");
         ProgressReporter::disabled().report(0.5, Some(1.0), Some("half"));
         ProgressReporter::for_agent(Some(json!("p1-unit")), "acme".into(), 5).report(
             0.5,

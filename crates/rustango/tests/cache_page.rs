@@ -1339,3 +1339,80 @@ async fn an_old_json_entry_is_a_miss_then_replaced() {
     assert_eq!(cache_status(&resp), Some("HIT"));
     assert_eq!(hits.load(Ordering::SeqCst), 2);
 }
+
+// ---------------------------------------------------------------- CSP nonce
+
+fn csp_nonce_of(resp: &axum::response::Response) -> String {
+    let csp = resp.headers()["content-security-policy"].to_str().unwrap();
+    let start = csp.find("'nonce-").expect("a nonce source") + "'nonce-".len();
+    csp[start..].split('\'').next().unwrap().to_owned()
+}
+
+/// GET the page twice; each response's body nonce, header nonce and cache status.
+async fn two_nonced_gets(app: Router) -> Vec<(String, String, Option<String>)> {
+    let mut seen = Vec::new();
+    for _ in 0..2 {
+        let resp = app.clone().oneshot(get_req("/n", &[])).await.unwrap();
+        let header = csp_nonce_of(&resp);
+        let status = cache_status(&resp).map(str::to_owned);
+        let body = body_to_string(resp.into_body()).await;
+        let body = body.strip_prefix("<script nonce=\"").unwrap();
+        seen.push((body[..body.find('"').unwrap()].to_owned(), header, status));
+    }
+    seen
+}
+
+fn nonced_route() -> Router {
+    use axum::Extension;
+    use rustango::csp_nonce::{Nonce, CSP_NONCE_PLACEHOLDER};
+    Router::new().route(
+        "/n",
+        get(|Extension(n): Extension<Nonce>| async move {
+            (
+                [(
+                    header::CONTENT_SECURITY_POLICY,
+                    format!("script-src {CSP_NONCE_PLACEHOLDER}"),
+                )],
+                format!("<script nonce=\"{}\">go()</script>", n.value()),
+            )
+        }),
+    )
+}
+
+/// Cache inside the nonce layer: a hit carries this request's nonce in
+/// the body too, so its inline scripts still run.
+#[tokio::test]
+async fn a_cached_page_inside_the_nonce_layer_gets_the_new_nonce() {
+    use rustango::csp_nonce::{CspNonceLayer, CspNonceRouterExt as _};
+    let cache = Arc::new(InMemoryCache::new());
+    let app = nonced_route()
+        .layer(CachePageLayer::new(cache).tenant_agnostic(true))
+        .csp_nonce(CspNonceLayer::default());
+    let seen = two_nonced_gets(app).await;
+    assert_eq!(
+        seen[1].2.as_deref(),
+        Some("HIT"),
+        "the page is still cached"
+    );
+    for (body, header, _) in &seen {
+        assert_eq!(body, header, "body nonce must match the CSP header");
+    }
+    assert_ne!(seen[0].1, seen[1].1, "each response has its own nonce");
+}
+
+/// Cache outside the nonce layer: one nonce must not be replayed to
+/// every visitor, so the page is not stored.
+#[tokio::test]
+async fn a_nonced_page_outside_the_nonce_layer_is_not_cached() {
+    use rustango::csp_nonce::{CspNonceLayer, CspNonceRouterExt as _};
+    let cache = Arc::new(InMemoryCache::new());
+    let app = nonced_route()
+        .csp_nonce(CspNonceLayer::default())
+        .layer(CachePageLayer::new(cache).tenant_agnostic(true));
+    let seen = two_nonced_gets(app).await;
+    assert_ne!(seen[0].1, seen[1].1, "a nonce was served twice");
+    for (body, header, status) in &seen {
+        assert_eq!(body, header);
+        assert_ne!(status.as_deref(), Some("HIT"));
+    }
+}

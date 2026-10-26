@@ -813,7 +813,9 @@ where
                 )
                 .await;
         }
-        rep.step(ProvisionStep::Validate, Progress::Ok).await;
+        let warned = resumed_on_registry(pools, registry_url, &org).await;
+        let validated = warned.map_or(Progress::Ok, |w| Progress::Done(RunText::fixed(w)));
+        rep.step(ProvisionStep::Validate, validated).await;
         rep.step(
             ProvisionStep::RegisterOrg,
             Progress::Skipped("resuming the tenant an earlier run left inactive"),
@@ -1106,6 +1108,37 @@ pub(crate) async fn registry_alias(url: &str, registry: &crate::sql::Pool) -> Op
     }
     tracing::warn!(target: "rustango::tenancy::provision", "{REGISTRY_ALIAS}");
     Some(REGISTRY_ALIAS)
+}
+
+/// What [`resumed_on_registry`] reports.
+const RESUMED_ON_REGISTRY: &str = "warning: this tenant's database URL now reaches \
+     the registry's own database; its migrations run there (a later release refuses it)";
+
+/// A resumed tenant skips [`checked_request`], and its secret may resolve
+/// elsewhere since: the same registry checks, on the URL as it resolves now.
+async fn resumed_on_registry<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    org: &Org,
+) -> Option<&'static str>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let reference = org.database_url.as_deref()?;
+    // An unresolvable URL fails at migrate, with its own error.
+    let url = pools.resolve_secret(reference).await.ok()?;
+    let registry = pools.registry_pool();
+    let (kind, pooled) = Endpoint::of_pool(&registry);
+    let named = Endpoint::scheme_kind(registry_url)
+        .and_then(|k| Some((k, Endpoint::parse(registry_url, k).ok()?)));
+    let reaches = |kind, registry: &Endpoint| {
+        Endpoint::of_url(&url, kind).ok().flatten().as_ref() == Some(registry)
+    };
+    if reaches(kind, &pooled) || named.is_some_and(|(k, e)| reaches(k, &e)) {
+        tracing::warn!(target: "rustango::tenancy::provision", org = %org.slug, "{RESUMED_ON_REGISTRY}");
+        return Some(RESUMED_ON_REGISTRY);
+    }
+    registry_alias(&url, &registry).await
 }
 
 /// Why the registry's login may not create a tenant schema; `None` when
