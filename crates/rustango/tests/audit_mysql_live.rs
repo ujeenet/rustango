@@ -215,3 +215,29 @@ async fn facet_counts_rejects_non_allowlisted_column_on_mysql() {
     let r = audit::facet_counts(&pool, "no_such_column").await;
     assert!(r.is_err(), "non-allowlisted column should be rejected");
 }
+
+/// A cutoff past chrono's range, or before 1970, keeps every row.
+#[tokio::test]
+async fn cleanup_older_than_huge_days_keeps_rows_on_mysql() {
+    let _serial = serial_lock().lock().await;
+    let Some(pool) = mysql_pool().await else {
+        return;
+    };
+    emit_one_pool(&pool, &entry("post", "1", AuditOp::Create, json!({})))
+        .await
+        .unwrap();
+    for days in [1_000_000, 200_000_000, i64::MAX] {
+        assert_eq!(
+            cleanup_older_than_pool(&pool, days).await.unwrap(),
+            0,
+            "{days}"
+        );
+    }
+    assert_eq!(
+        fetch_for_entity_pool(&pool, "post", "1")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}

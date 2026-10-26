@@ -1278,8 +1278,11 @@ impl TenantPools<sqlx::Postgres> {
                 let mut tc = TenantConn {
                     inner: Some(conn),
                     schema: Some(schema.clone()),
-                    reset: Some(reset_pg_search_path),
+                    reset: Some(reset_pg_registry_conn),
                 };
+                // Statements prepared under another `search_path` keep its
+                // result type: reused here they fail with 0A000.
+                sqlx::Connection::clear_cached_statements(&mut **tc).await?;
                 let stmt = format!("SET search_path TO {}", search_path(&schema));
                 rustango::sql::sqlx::query(&stmt).execute(&mut **tc).await?;
                 Ok(tc)
@@ -1778,6 +1781,28 @@ fn reset_pg_search_path(
                     %error,
                     "could not reset search_path on release; closing the connection \
                      rather than returning it to its pool",
+                );
+                let _ = conn.close().await;
+            }
+        }
+    })
+}
+
+/// [`reset_pg_search_path`] for a registry connection a tenant borrowed:
+/// also drops the statements it prepared in the tenant's schema.
+#[cfg(feature = "postgres")]
+fn reset_pg_registry_conn(
+    mut conn: sqlx::pool::PoolConnection<sqlx::Postgres>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        match sqlx::Connection::clear_cached_statements(&mut *conn).await {
+            Ok(()) => reset_pg_search_path(conn).await,
+            Err(error) => {
+                tracing::warn!(
+                    target: "rustango::tenancy::pools",
+                    %error,
+                    "could not drop a tenant's prepared statements on release; closing the \
+                     connection rather than returning it to its pool",
                 );
                 let _ = conn.close().await;
             }

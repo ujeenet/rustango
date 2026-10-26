@@ -226,6 +226,19 @@ where
     Ok(out)
 }
 
+/// The value `C.child_fk_column` stores for `parent`, for the reverse
+/// `<parent>::<child>_set` helpers: its `on` column, else its pk.
+///
+/// # Errors
+/// [`ExecError::PrefetchColumnUnreadable`] when `P` cannot read that column.
+#[doc(hidden)]
+pub fn __reverse_fk_key<P: Model + HasPkValue, C: Model>(
+    parent: &P,
+    child_fk_column: &str,
+) -> Result<crate::core::SqlValue, ExecError> {
+    parent_key(parent, target_column::<P, C>(child_fk_column))
+}
+
 /// The parent column `C.child_fk_column` points at, when not `P`'s pk.
 fn target_column<P: Model, C: Model>(child_fk_column: &str) -> Option<&'static str> {
     use crate::core::Relation;

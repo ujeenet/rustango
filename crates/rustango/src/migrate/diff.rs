@@ -2891,6 +2891,44 @@ mod sql_type_tests {
         assert_eq!(out.immediate, [r#"DROP INDEX IF EXISTS "a_b_c_key""#]);
     }
 
+    /// An FK action set where none was is detected, not taken as the upgrade
+    /// allowance; no clause and `NO ACTION` stay the same action.
+    #[test]
+    fn on_delete_from_none_is_detected() {
+        use crate::migrate::{RelationSnapshot, SchemaChange};
+        let snap = |on_delete: Option<&str>| SchemaSnapshot {
+            tables: vec![TableSnapshot {
+                name: "c".into(),
+                model: "c".into(),
+                fields: vec![
+                    fs("i64", true),
+                    FieldSnapshot {
+                        name: "p_id".into(),
+                        column: "p_id".into(),
+                        fk: Some(RelationSnapshot {
+                            kind: "fk".into(),
+                            to: "p".into(),
+                            on: "id".into(),
+                            on_delete: on_delete.map(str::to_owned),
+                        }),
+                        ..fs("i64", false)
+                    },
+                ],
+                composite_fks: vec![],
+            }],
+            ..SchemaSnapshot::default()
+        };
+        let changes = crate::migrate::detect_changes(&snap(None), &snap(Some("CASCADE")));
+        assert!(
+            changes.iter().any(|c| matches!(
+                c,
+                SchemaChange::AlterFkOnDelete { from: None, to: Some(to), .. } if to == "CASCADE"
+            )),
+            "{changes:?}"
+        );
+        assert!(crate::migrate::detect_changes(&snap(None), &snap(Some("no action"))).is_empty());
+    }
+
     /// SQLite changes an FK action by rebuilding; PG and MySQL re-add the FK
     /// after the runner drops the live one (#1557).
     #[test]

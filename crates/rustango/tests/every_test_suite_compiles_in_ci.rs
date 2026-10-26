@@ -189,13 +189,29 @@ const NARROWING: &[&str] = &[
 /// `--no-run` is deliberately not required: a job that actually ran the
 /// suites would satisfy the invariant too, and demanding the exact flag
 /// would fail on a future job that does more rather than less.
+///
+/// `cargo nextest archive` builds what `cargo test --no-run` builds, and
+/// `cargo nextest run` builds before it runs. A run from `--archive-file`
+/// builds nothing, so it does not count.
 fn builds_every_suite(body: &str) -> bool {
-    body.lines().filter(|l| l.contains("cargo test")).any(|l| {
+    body.lines().filter(|l| builds_tests(l)).any(|l| {
         let tok: Vec<&str> = l.split_whitespace().collect();
         tok.contains(&"--workspace")
             && tok.contains(&"--all-features")
             && !tok.iter().any(|t| NARROWING.contains(t))
     })
+}
+
+/// Is this line a cargo command that compiles test targets?
+fn builds_tests(line: &str) -> bool {
+    let tok: Vec<&str> = line.split_whitespace().collect();
+    let has = |pair: [&str; 2]| tok.windows(2).any(|w| w == pair);
+    has(["cargo", "test"])
+        || has(["nextest", "archive"])
+        || (has(["nextest", "run"])
+            && !tok
+                .iter()
+                .any(|t| *t == "--archive-file" || t.starts_with("--archive-file=")))
 }
 
 /// Every way this workflow can stop a job running on an ordinary PR.
@@ -230,7 +246,8 @@ fn some_ungated_job_compiles_every_test_suite() {
         .collect();
     assert!(
         !builders.is_empty(),
-        "no CI job runs `cargo test --workspace --all-features` without a narrowing selector. \
+        "no CI job builds `--workspace --all-features` tests (`cargo test` or `cargo nextest \
+         archive`/`run`) without a narrowing selector. \
          Roughly half the suites in tests/ are gated on a feature the default set omits, so they \
          compile to empty crates in the only jobs an unlabelled PR runs — and a test file that \
          does not build merges green (#1572). Note that adding `--lib`, `--test <one>` or \
@@ -256,4 +273,30 @@ fn some_ungated_job_compiles_every_test_suite() {
             .map(|(n, body)| format!("{n} (gated by {:?})", gating_keys(body)))
             .collect::<Vec<_>>()
     );
+}
+
+mod parser_tests {
+    use super::*;
+
+    #[test]
+    fn nextest_builds_count_and_archive_runs_do_not() {
+        let yes = [
+            "cargo test --workspace --all-features --no-run",
+            "cargo nextest archive --workspace --all-features --archive-file a.tar.zst",
+            "cargo nextest run --workspace --all-features",
+        ];
+        for l in yes {
+            assert!(builds_every_suite(l), "should count: {l}");
+        }
+        let no = [
+            "cargo nextest run --workspace --all-features --archive-file a.tar.zst",
+            "cargo nextest run --workspace --all-features --archive-file=a.tar.zst",
+            "cargo test --workspace --all-features --doc",
+            "cargo nextest archive --workspace --all-features --exclude rustango",
+            "cargo check --workspace --all-features",
+        ];
+        for l in no {
+            assert!(!builds_every_suite(l), "should not count: {l}");
+        }
+    }
 }

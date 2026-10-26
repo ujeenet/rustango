@@ -135,7 +135,6 @@ impl PoolId {
     }
 
     /// `true` once the pool has been closed.
-    #[cfg(feature = "tenancy")]
     pub(crate) fn is_closed(&self) -> bool {
         match &self.0 {
             #[cfg(feature = "postgres")]

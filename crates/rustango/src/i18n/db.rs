@@ -61,6 +61,10 @@ pub struct Translation {
     pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 
+/// `max_length` of `locale` and `key`.
+const LOCALE_LEN: u32 = 16;
+const KEY_LEN: u32 = 200;
+
 /// The `CREATE TABLE` for this dialect.
 ///
 /// Both timestamp columns take type *and* `DEFAULT` from
@@ -74,13 +78,18 @@ pub struct Translation {
 /// the statement and SQLite rejects it with `incomplete input`.
 pub(crate) fn ddl(dialect: &dyn crate::sql::Dialect) -> String {
     let ts = dialect.timestamp_now_column();
+    // Case-sensitive keys: a MySQL `_ci` default would make `Key` and `key` collide.
+    let (locale, key) = (
+        dialect.cs_text_type(LOCALE_LEN),
+        dialect.cs_text_type(KEY_LEN),
+    );
     match dialect.name() {
         "mysql" => format!(
             r"
 CREATE TABLE IF NOT EXISTS `rustango_translations` (
     `id`         BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `locale`     VARCHAR(16) NOT NULL,
-    `key`        VARCHAR(200) NOT NULL,
+    `locale`     {locale} NOT NULL,
+    `key`        {key} NOT NULL,
     `value`      TEXT NOT NULL,
     `updated_by` VARCHAR(200) NOT NULL DEFAULT '',
     `created_at` {ts},
@@ -108,8 +117,8 @@ CREATE TABLE IF NOT EXISTS "rustango_translations" (
             r#"
 CREATE TABLE IF NOT EXISTS "rustango_translations" (
     "id"         BIGSERIAL PRIMARY KEY,
-    "locale"     VARCHAR(16) NOT NULL,
-    "key"        VARCHAR(200) NOT NULL,
+    "locale"     {locale} NOT NULL,
+    "key"        {key} NOT NULL,
     "value"      TEXT NOT NULL,
     "updated_by" VARCHAR(200) NOT NULL DEFAULT '',
     "created_at" {ts},
@@ -127,9 +136,61 @@ CREATE TABLE IF NOT EXISTS "rustango_translations" (
 ///
 /// # Errors
 /// Driver / SQL failures other than the duplicate-object errors that
-/// [`crate::sql::run_ddl_idempotent`] swallows.
+/// [`crate::sql::run_ddl_idempotent`] swallows. A refused collation upgrade
+/// only warns: the table keeps working, case-insensitively.
 pub async fn ensure_table_pool(pool: &Pool) -> Result<(), sqlx::Error> {
-    crate::sql::run_ddl_idempotent(pool, &ddl(pool.dialect())).await
+    crate::sql::run_ddl_idempotent(pool, &ddl(pool.dialect())).await?;
+    if refused(pool) {
+        return Ok(());
+    }
+    if let Err(e) = case_sensitive_keys(pool).await {
+        tracing::warn!(
+            error = %e,
+            "rustango_translations keeps case-insensitive keys: moving them needs ALTER"
+        );
+        // Each pool tries once per process, not on every ensure call.
+        refused_pools().push(crate::sql::PoolId::of(pool));
+    }
+    Ok(())
+}
+
+fn refused_pools() -> std::sync::MutexGuard<'static, Vec<crate::sql::PoolId>> {
+    static REFUSED: std::sync::Mutex<Vec<crate::sql::PoolId>> = std::sync::Mutex::new(Vec::new());
+    REFUSED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `true` when this pool's upgrade already failed; drops closed pools' entries.
+fn refused(pool: &Pool) -> bool {
+    let mut ids = refused_pools();
+    ids.retain(|id| !id.is_closed());
+    ids.iter().any(|id| id.is(pool))
+}
+
+/// A table an older release created took the database's collation, which
+/// may ignore case: move its `locale` / `key` to [`ddl`]'s.
+async fn case_sensitive_keys(pool: &Pool) -> Result<(), ExecError> {
+    let d = pool.dialect();
+    let Some(probe) = d.ci_columns_sql("rustango_translations") else {
+        return Ok(());
+    };
+    let found: Vec<(String,)> = crate::sql::raw_query_pool(&probe.sql, probe.params, pool).await?;
+    for (column,) in found {
+        let len = match column.as_str() {
+            "locale" => LOCALE_LEN,
+            "key" => KEY_LEN,
+            _ => continue,
+        };
+        let sql = format!(
+            "ALTER TABLE {} MODIFY COLUMN {} {} NOT NULL",
+            d.quote_ident("rustango_translations"),
+            d.quote_ident(&column),
+            d.cs_text_type(len),
+        );
+        crate::sql::raw_execute_pool(pool, &sql, Vec::new()).await?;
+    }
+    Ok(())
 }
 
 /// Every override row, for the admin list view / [`refresh_overrides_pool`].

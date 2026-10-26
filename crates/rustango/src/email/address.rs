@@ -16,6 +16,14 @@ pub(super) fn is_mailbox(input: &str) -> bool {
         && valid_domain(&domain)
 }
 
+/// `true` when lettre would parse `input` as a bare `Address`.
+#[cfg(any(feature = "forms", all(test, feature = "email-smtp")))]
+pub(super) fn is_address(input: &str) -> bool {
+    input
+        .rsplit_once('@')
+        .is_some_and(|(user, domain)| valid_user(user) && valid_domain(domain))
+}
+
 type Parsed<'a, T> = Option<(T, &'a str)>;
 
 fn skip_fws(s: &str) -> &str {

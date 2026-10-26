@@ -150,6 +150,56 @@ untouched.
 
 ## Unreleased
 
+## 0.61.4
+
+### Schema names equal to a database role are refused
+
+`create-tenant` and `migrate-tenant-storage` reject a schema named like any role. An existing tenant in such a schema keeps working but shadows that role's `public` tables; move it to another schema.
+
+### ViewSet: FK targets are checked, echo needs `retrieve`
+
+A body FK to a row hidden by the target's global scopes or soft delete is now a `422`, unless an update resends the value the row already holds. A caller without the `retrieve` codenames gets only `{"<pk>": …}` back (bulk: one per row) instead of the full row.
+
+### Admin lists with a `view` hook read the whole scope
+
+Each list request reads every row its filters and search match, all columns, and runs the hook on each. Past 10 000 rows (`Builder::view_hook_scan_cap`) the total, facets and date strip are hidden and a warning is logged once per table. For big tables, prefer `register_admin_queryset!`, which filters in SQL.
+
+### Generic relation reads hide scoped-out rows
+
+`get_object` and the reverse generic helpers now return what a `QuerySet` returns. To read hidden rows, query the model with `without_global_scopes()`.
+
+### `cache_page` bypasses `X-Api-Key` requests
+
+Such responses are no longer cached. A route that is truly public can opt back in with `cache_authenticated(true)`.
+
+### More audit rows for FK side effects
+
+Rows an `ON DELETE SET NULL` / `SET DEFAULT` changes in an audited model now get an `update` entry, and a `truncate` adds a bulk `delete` entry for each audited table it takes rows from through FKs. On MySQL/SQLite, rows a truncate sets through `SET NULL` / `SET DEFAULT` get no entry.
+
+### MySQL: translation keys become case-sensitive
+
+The first `migrate` runs `ALTER TABLE rustango_translations MODIFY COLUMN` on `locale` and `key` when they ignore case. After it, `Key` no longer matches a `key` override. This needs the ALTER privilege on that table; without it, `ensure_table_pool` logs a warning once per pool and the keys stay case-insensitive.
+
+### PG: one migrate lock per schema
+
+A schema-mode tenant's migrate takes its own advisory lock; the registry keeps the old key. During a rolling upgrade, do not migrate the same tenant from 0.61.3 and a newer release at once: they no longer share a lock.
+
+### `check --deploy` has new prod warnings
+
+An unset or `console` `[mail] backend` now warns on the prod tier. Set `smtp`, or `null` if the app sends no mail. `"*"` in `allowed_hosts` or `cors_allowed_origins` and an unset `request_timeout_secs` warn too.
+
+### `FileCache` permissions
+
+New cache directories are 0700 and entries 0600. An existing directory keeps its mode; `chmod 700` it, since entry files hold keys in clear.
+
+### `DynamicForm` URL and email answers
+
+A `url` answer with a `javascript:`, `vbscript:` or `data:` scheme is refused. Other non-http(s) URLs, and emails that `validate_email` or `SmtpMailer` would refuse, are still accepted with a `rustango::forms` warning; a later minor release will refuse them.
+
+### WebSocket peers must answer pings
+
+`ws_handler` now closes a socket that sends no frame within one `keepalive` after a ping. Browsers answer pings on their own; a custom client must too. A send that stalls past `max(keepalive, 10 s)` also closes it, so a short keepalive does not drop slow readers.
+
 ## 0.61.3
 
 ### `[cache] backend` should be a known lowercase name

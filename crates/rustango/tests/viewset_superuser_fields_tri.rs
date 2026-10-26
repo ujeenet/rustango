@@ -260,9 +260,88 @@ async fn create_runs_the_admin_add_hooks(pool: &Pool) {
     assert_eq!(labels().await, ["blocked", "ok"]);
 }
 
+/// A write echoes its row only to a caller who may retrieve it; anyone
+/// else gets the new pk, and a create its `Location`.
+async fn a_write_echoes_only_with_the_view_perm(pool: &Pool) {
+    use rustango::tenancy::permissions::set_user_perm_pool;
+    use rustango::viewset::ViewSetPerms;
+    let (uid, _) = seed(pool).await;
+    for cn in ["vsf_hooked.add", "vsf_hooked.change"] {
+        set_user_perm_pool(uid, cn, true, pool)
+            .await
+            .expect("grant");
+    }
+    let app = || {
+        let cn = |c: &str| vec![format!("vsf_hooked.{c}")];
+        ViewSet::for_model(Hooked::SCHEMA, &["id", "label"])
+            .permissions(ViewSetPerms {
+                list: cn("view"),
+                retrieve: cn("view"),
+                create: cn("add"),
+                update: cn("change"),
+                destroy: cn("delete"),
+            })
+            .router_pool("/hooked", pool.clone())
+            .layer(axum::Extension(AuthenticatedUser {
+                id: uid,
+                username: "member".into(),
+                is_superuser: false,
+            }))
+    };
+    let nested = axum::Router::new().nest("/api", app());
+    let res = nested
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/hooked")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"label":"a"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let id = Hooked::objects().fetch(pool).await.expect("fetch")[0]
+        .id
+        .get()
+        .copied()
+        .expect("pk");
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some(format!("/api/hooked/{id}").as_str())
+    );
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let only_pk = serde_json::json!({ "id": id });
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body, only_pk, "create echoed more than the pk");
+    let patch = serde_json::json!({ "label": "b" });
+    let (status, body) = send(app(), "PATCH", &format!("/hooked/{id}"), patch.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        only_pk
+    );
+    let bulk = serde_json::json!([{ "label": "c" }]);
+    let (status, body) = send(app(), "POST", "/hooked", bulk).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let rows: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let keys: Vec<_> = rows[0].as_object().expect("pk object").keys().collect();
+    assert_eq!(keys, ["id"], "{body}");
+
+    set_user_perm_pool(uid, "vsf_hooked.view", true, pool)
+        .await
+        .expect("grant view");
+    let (status, body) = send(app(), "PATCH", &format!("/hooked/{id}"), patch).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"b\""), "{body}");
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
+        a_write_echoes_only_with_the_view_perm,
         create_runs_the_admin_add_hooks,
         a_member_cannot_grant_superuser_or_set_a_hash,
         a_member_cannot_create_a_superuser,

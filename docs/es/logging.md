@@ -126,6 +126,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::email::smtp` | Transporte SMTP |
 | `rustango::email_jobs` | Dos colas en una tabla de jobs con mailers distintos |
 | `rustango::error` | La causa de un 5xx, que el cuerpo de la respuesta omite |
+| `rustango::forms` | Valores de `DynamicForm` aceptados hoy pero rechazados en una versión futura |
 | `rustango::auth_flows` | Enlaces de autenticación de un solo uso rechazados por el caché |
 | `rustango::aead` | Una clave secreta anterior vacía |
 | `rustango::hmac_auth` | Configuración de la autenticación HMAC de peticiones |

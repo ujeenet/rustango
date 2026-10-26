@@ -570,20 +570,41 @@ mod cascade {
         pub parent_id: Option<i64>,
     }
 
+    /// Audited, with an FK the shelf delete sets to NULL.
+    #[derive(Model, Debug, Clone)]
+    #[rustango(
+        table = "audit_casc_note",
+        app = "audit1747",
+        audit(track = "body, shelf_id")
+    )]
+    #[allow(dead_code)]
+    pub struct Note {
+        #[rustango(primary_key)]
+        pub id: i64,
+        #[rustango(max_length = 16)]
+        pub body: String,
+        #[rustango(fk = "audit_casc_shelf", on = "id", on_delete = "set_null")]
+        pub shelf_id: Option<i64>,
+    }
+
     const CRATE: &str = "audit_casc_crate";
+    const NOTE: &str = "audit_casc_note";
 
     async fn setup(pool: &Pool) {
         use rustango::testkit::matrix::{drop_table, fresh_table};
-        for t in [CRATE, "audit_casc_rack", "audit_casc_shelf"] {
+        for t in [NOTE, CRATE, "audit_casc_rack", "audit_casc_shelf"] {
             drop_table(pool, t).await;
         }
         fresh_table::<Shelf>(pool).await;
         fresh_table::<Rack>(pool).await;
         fresh_table::<Crate>(pool).await;
+        fresh_table::<Note>(pool).await;
         audit::ensure_table_pool(pool).await.expect("audit table");
-        AuditLog::delete_where("entity_table", CRATE, pool)
-            .await
-            .expect("clear audit rows");
+        for t in [CRATE, NOTE] {
+            AuditLog::delete_where("entity_table", t, pool)
+                .await
+                .expect("clear audit rows");
+        }
         for id in [1, 2] {
             Shelf { id }.insert_pool(pool).await.expect("shelf");
             Rack {
@@ -611,6 +632,72 @@ mod cascade {
             .await
             .expect("crate");
         }
+    }
+
+    /// `operation` entries for `table` row `pk` (`""` for a bulk one).
+    async fn entries(pool: &Pool, table: &str, pk: &str, operation: &str) -> i64 {
+        AuditLog::objects()
+            .filter("entity_table", table)
+            .filter("entity_pk", pk)
+            .filter("operation", operation)
+            .count(pool)
+            .await
+            .expect("count")
+    }
+
+    /// `ON DELETE SET NULL` writes an `update` entry with the nulled FK,
+    /// only for the rows it changed.
+    async fn fk_set_null_audits_each_changed_child(pool: &Pool) {
+        for (id, shelf_id) in [(1, Some(1)), (2, Some(2)), (3, None)] {
+            Note {
+                id,
+                body: format!("n{id}"),
+                shelf_id,
+            }
+            .insert_pool(pool)
+            .await
+            .expect("note");
+        }
+        AuditLog::delete_where("entity_table", NOTE, pool)
+            .await
+            .expect("clear");
+        assert_eq!(Shelf::delete_where("id", 1_i64, pool).await.unwrap(), 1);
+        assert_eq!(entries(pool, NOTE, "1", "update").await, 1);
+        assert_eq!(entries(pool, NOTE, "2", "update").await, 0);
+        assert_eq!(entries(pool, NOTE, "3", "update").await, 0);
+        let entry = latest(pool, NOTE, "1").await;
+        assert_eq!(entry.changes["shelf_id"], serde_json::Value::Null);
+        assert_eq!(entry.changes["body"], "n1");
+    }
+
+    /// A truncate's FK cascade gets a bulk entry on each audited table it
+    /// empties: every FK on PG (`TRUNCATE … CASCADE`), `ON DELETE CASCADE`
+    /// elsewhere (a `DELETE`).
+    async fn truncate_cascade_audits_the_tables_it_empties(pool: &Pool) {
+        Note {
+            id: 1,
+            body: "n".into(),
+            shelf_id: Some(1),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("note");
+        Shelf::truncate(pool).await.expect("truncate");
+        assert_eq!(Crate::objects().count(pool).await.unwrap(), 0);
+        assert_eq!(entries(pool, CRATE, "", "delete").await, 1);
+        let pg = pool.dialect().name() == "postgres";
+        assert_eq!(entries(pool, NOTE, "", "delete").await, i64::from(pg));
+    }
+
+    /// Audited tables the truncate reaches but takes no rows from get no entry.
+    async fn truncate_skips_reached_tables_without_rows(pool: &Pool) {
+        Crate::truncate(pool).await.expect("empty crates");
+        AuditLog::delete_where("entity_table", CRATE, pool)
+            .await
+            .expect("clear");
+        Shelf::truncate(pool).await.expect("truncate");
+        assert_eq!(entries(pool, CRATE, "", "delete").await, 0);
+        assert_eq!(entries(pool, NOTE, "", "delete").await, 0);
     }
 
     /// `delete` entries per crate pk.
@@ -703,6 +790,9 @@ mod cascade {
             audited_delete_audits_each_row_once,
             cascade_audit_follows_the_atomic_block,
             single_statement_pg_paths_still_delete,
+            fk_set_null_audits_each_changed_child,
+            truncate_cascade_audits_the_tables_it_empties,
+            truncate_skips_reached_tables_without_rows,
         ],
     }
 }

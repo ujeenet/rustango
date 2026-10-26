@@ -49,7 +49,7 @@
 //!   `private` counts as an opt-out.
 //! - **Per-user responses are never shared.** A response with
 //!   `Set-Cookie` is never cached, and by default a request with
-//!   `Authorization` or `Cookie` is neither served from nor stored in
+//!   `Authorization`, `Cookie` or `X-Api-Key` is neither served from nor stored in
 //!   the cache, since its response probably depends on the caller.
 //!   Only [`CachePageLayer::cache_authenticated`] changes that, and
 //!   only for a route you know is public.
@@ -134,8 +134,8 @@ pub struct CachePageLayer {
     key_prefix: String,
     vary_on: Vec<HeaderName>,
     cache_query: bool,
-    /// When `false` (the default), a request with `Authorization` or
-    /// `Cookie` is neither served from nor stored in the shared
+    /// When `false` (the default), a request with `Authorization`,
+    /// `Cookie` or `X-Api-Key` is neither served from nor stored in the shared
     /// cache, because its response is probably per-user. See
     /// [`Self::cache_authenticated`].
     cache_authenticated: bool,
@@ -197,8 +197,8 @@ impl CachePageLayer {
         self
     }
 
-    /// Allow caching responses to requests that carry `Authorization`
-    /// or `Cookie`.
+    /// Allow caching responses to requests that carry `Authorization`,
+    /// `Cookie` or `X-Api-Key`.
     ///
     /// **Off by default. Leave it off unless you are sure.** The
     /// default treats such a request as per-user and keeps it out of
@@ -451,15 +451,10 @@ where
                 (req, None)
             };
 
-            // Unless the route opted in, a request with `Authorization`
-            // or `Cookie` is per-user: never served from and never
-            // stored in the shared cache, so one user's response
-            // cannot reach another user.
-            let req_is_authed = !cache_authenticated
-                && (req
-                    .headers()
-                    .contains_key(axum::http::header::AUTHORIZATION)
-                    || req.headers().contains_key(axum::http::header::COOKIE));
+            // Unless the route opted in, a request with a credential
+            // header is per-user: never served from and never stored
+            // in the shared cache.
+            let req_is_authed = !cache_authenticated && crate::vary::has_credential(req.headers());
             if req_is_authed {
                 return inner.call(req).await;
             }
@@ -757,7 +752,7 @@ fn payload_too_large() -> Response<Body> {
 }
 
 /// The first `Vary` token outside the key, if any (#2219).
-/// `Cookie` and `Authorization` count unless `cache_authenticated`: such
+/// Credential headers count unless `cache_authenticated`: such
 /// requests skip this cache, so every entry was made without them.
 fn unkeyed_vary(
     headers: &HeaderMap,
@@ -774,8 +769,9 @@ fn unkeyed_vary(
             !(t.eq_ignore_ascii_case("host")
                 || vary_on.iter().any(|n| t.eq_ignore_ascii_case(n.as_str()))
                 || (!cache_authenticated
-                    && (t.eq_ignore_ascii_case("cookie")
-                        || t.eq_ignore_ascii_case("authorization"))))
+                    && crate::vary::CREDENTIAL_HEADERS
+                        .iter()
+                        .any(|n| t.eq_ignore_ascii_case(n.as_str()))))
         })
         .map(str::to_owned)
 }

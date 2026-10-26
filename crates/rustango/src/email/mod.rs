@@ -467,6 +467,18 @@ fn check_mailbox(addr: &str) -> Result<(), MailError> {
     smtp::parse_mailbox(addr).map(drop)
 }
 
+/// `true` when `SmtpMailer` would accept `s` as a bare address (no display name).
+#[cfg(all(feature = "email-smtp", feature = "forms"))]
+pub(crate) fn is_address(s: &str) -> bool {
+    s.parse::<lettre::Address>().is_ok()
+}
+
+/// `true` when `SmtpMailer` would accept `s` as a bare address (no display name).
+#[cfg(all(not(feature = "email-smtp"), feature = "forms"))]
+pub(crate) fn is_address(s: &str) -> bool {
+    address::is_address(s)
+}
+
 #[cfg(not(feature = "email-smtp"))]
 fn check_mailbox(addr: &str) -> Result<(), MailError> {
     if address::is_mailbox(addr) {
@@ -1184,6 +1196,11 @@ mod tests {
             assert_eq!(
                 address::is_mailbox(c),
                 smtp::parse_mailbox(c).is_ok(),
+                "{c:?}"
+            );
+            assert_eq!(
+                address::is_address(c),
+                c.parse::<lettre::Address>().is_ok(),
                 "{c:?}"
             );
         }

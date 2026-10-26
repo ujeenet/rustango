@@ -541,33 +541,44 @@ mod tests {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
         let l = DistributedLock::new(cache.clone());
         let period = Duration::from_millis(100);
-        let w = loop {
+        // A fresh name per attempt: a retry after the window moved could
+        // land in the window the last attempt already claimed.
+        let mut attempt = 0;
+        let (name, w) = loop {
+            attempt += 1;
+            let name = format!("t{attempt}");
             let w = window_now(period);
             for old in [w - 2, w - 1] {
                 cache
-                    .set(&format!("lock:t@{old}"), "old", None)
+                    .set(&format!("lock:{name}@{old}"), "old", None)
                     .await
                     .unwrap();
             }
-            let r = l.once_per_period("t", period, || async { Ok::<_, ()>(()) });
+            let r = l.once_per_period(&name, period, || async { Ok::<_, ()>(()) });
             assert!(r.await.is_some());
             if window_now(period) == w {
-                break w;
+                break (name, w);
             }
         };
-        assert!(!cache.exists(&format!("lock:t@{}", w - 2)).await.unwrap());
+        assert!(!cache
+            .exists(&format!("lock:{name}@{}", w - 2))
+            .await
+            .unwrap());
         assert!(
-            cache.exists(&format!("lock:t@{}", w - 1)).await.unwrap(),
+            cache
+                .exists(&format!("lock:{name}@{}", w - 1))
+                .await
+                .unwrap(),
             "the last window's key is kept for skew"
         );
         tokio::time::sleep(Duration::from_millis(140)).await;
         assert!(
-            cache.exists(&format!("lock:t@{w}")).await.unwrap(),
+            cache.exists(&format!("lock:{name}@{w}")).await.unwrap(),
             "TTL shorter than twice the period"
         );
         tokio::time::sleep(Duration::from_millis(120)).await;
         assert!(
-            !cache.exists(&format!("lock:t@{w}")).await.unwrap(),
+            !cache.exists(&format!("lock:{name}@{w}")).await.unwrap(),
             "TTL longer than twice the period"
         );
     }

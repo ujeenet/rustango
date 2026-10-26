@@ -430,6 +430,28 @@ impl Dialect for MySql {
         }
     }
 
+    // Not `_bin`: MySQL flags those columns BINARY and sqlx refuses `String`.
+    fn cs_text_type(&self, max_length: u32) -> String {
+        format!(
+            "VARCHAR({max_length}) CHARACTER SET utf8mb4 /*!80000 COLLATE utf8mb4_0900_as_cs */ \
+             /*M!101000 COLLATE utf8mb4_uca1400_as_cs */"
+        )
+    }
+
+    // None where `cs_text_type` gets no collation (MariaDB before 10.10),
+    // or every run would restate the column.
+    fn ci_columns_sql(&self, table: &str) -> Option<CompiledStatement> {
+        Some(CompiledStatement {
+            sql: "SELECT CAST(COLUMN_NAME AS CHAR) FROM information_schema.COLUMNS \
+                  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? \
+                  AND RIGHT(COLLATION_NAME, 3) = '_ci' \
+                  AND EXISTS (SELECT 1 FROM information_schema.COLLATIONS WHERE COLLATION_NAME \
+                  IN ('utf8mb4_0900_as_cs', 'utf8mb4_uca1400_as_cs'))"
+                .to_owned(),
+            params: vec![crate::core::SqlValue::String(table.to_owned())],
+        })
+    }
+
     // Columns inherit it, and a `_ci` one makes `=` and `unique` ignore
     // case and accents, unlike PG and SQLite (#1742).
     fn default_collation_sql(&self) -> Option<&'static str> {
