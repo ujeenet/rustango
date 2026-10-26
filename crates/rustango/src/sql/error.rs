@@ -314,6 +314,13 @@ pub enum ExecError {
     /// or build a `WHERE pk = …` filter — the target model declares
     /// no `#[rustango(primary_key)]` field. Programming error;
     /// surfaces only if a model deriving `Model` somehow lacks a PK.
+    /// Prefetch needs the parent column a child FK points at (`on`), and
+    /// the parent's hand-written `HasPkValue` cannot read it.
+    #[error("prefetch cannot read `{table}.{column}`, the column the child FK points at; derive `Model` for `{table}`")]
+    PrefetchColumnUnreadable {
+        table: &'static str,
+        column: &'static str,
+    },
     #[error("model `{table}` has no `#[rustango(primary_key)]` field — required for FK lookup")]
     MissingPrimaryKey { table: &'static str },
 

@@ -273,6 +273,78 @@ async fn composite_referenced_key_widens(pool: &Pool) {
     }
 }
 
+/// Retyping an FK column, then the key it references, then renaming the
+/// column: the FK comes back once, after the key has its new type.
+async fn retyped_fk_waits_for_its_key_before_a_rename(pool: &Pool) {
+    let (p, c) = ("mr_rr_parent", "mr_rr_child");
+    let ledger = "mr_rr_ledger";
+    let dir = fresh(pool, &[c, p], ledger).await;
+    let with = |ty: &str, fk_col: &str| {
+        let key = json!({"name": "id", "column": "id", "ty": ty,
+            "nullable": false, "primary_key": true});
+        let fk = json!({"name": fk_col, "column": fk_col, "ty": ty, "nullable": false,
+            "primary_key": false, "fk": {"kind": "fk", "to": p, "on": "id"}});
+        let child_id = json!({"name": "id", "column": "id", "ty": "i64",
+            "nullable": false, "primary_key": true});
+        snap(vec![table(p, vec![key]), table(c, vec![child_id, fk])])
+    };
+    let initial = make_migrations_from(dir.path(), &with("i32", "a"), None)
+        .expect("makemigrations")
+        .expect("a migration");
+    let retype = |table: &str, column: &str| {
+        Operation::Schema(SchemaChange::AlterColumnType {
+            table: table.into(),
+            column: column.into(),
+            from: "i32".into(),
+            to: "i64".into(),
+        })
+    };
+    let mig = Migration {
+        name: "0002_retype_rename".into(),
+        prev: Some(initial.name.clone()),
+        snapshot: with("i64", "b"),
+        forward: vec![
+            retype(c, "a"),
+            retype(p, "id"),
+            Operation::Schema(SchemaChange::RenameColumn {
+                table: c.into(),
+                old_column: "a".into(),
+                new_column: "b".into(),
+            }),
+        ],
+        ..initial
+    };
+    write(dir.path(), &mig);
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("migrate on {}: {e}", pool.dialect().name()));
+    assert_eq!(fk_count(pool, c).await, 1, "one FK on {}", pool.dialect().name());
+    let d = pool.dialect();
+    let (qp, qc) = (d.quote_ident(p), d.quote_ident(c));
+    exec(pool, &format!("INSERT INTO {qp} (id) VALUES (3000000000)"))
+        .await
+        .expect("the key is BIGINT");
+    exec(pool, &format!("INSERT INTO {qc} (id, b) VALUES (1, 3000000000)"))
+        .await
+        .expect("the FK column is BIGINT and named b");
+    assert!(
+        exec(pool, &format!("INSERT INTO {qc} (id, b) VALUES (2, 7)"))
+            .await
+            .is_err(),
+        "the FK is back on {}",
+        d.name()
+    );
+    exec(pool, &format!("DELETE FROM {qc}")).await.unwrap();
+    exec(pool, &format!("DELETE FROM {qp}")).await.unwrap();
+    unapply_pool_with_ledger(pool, dir.path(), &mig.name, ledger)
+        .await
+        .unwrap_or_else(|e| panic!("unapply on {}: {e}", d.name()));
+    assert_eq!(fk_count(pool, c).await, 1, "one FK after unapply");
+    for t in [c, p, ledger] {
+        drop_table(pool, t).await;
+    }
+}
+
 /// FKs on `t`, from the catalog.
 async fn fk_count(pool: &Pool, t: &str) -> i64 {
     let sql = match pool.dialect().name() {
@@ -1056,6 +1128,7 @@ tri_dialect_test!(
         composite_referenced_key_widens,
         referenced_key_widens_beside_new_fks,
         referenced_key_widens_its_junction,
+        retyped_fk_waits_for_its_key_before_a_rename,
         rollback_after_rename_restores_check_and_partial_index,
         rollback_of_a_renamed_dropped_table_restores_its_check_once,
         unapplying_one_branch_keeps_the_others_column,

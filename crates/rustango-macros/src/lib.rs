@@ -7923,12 +7923,32 @@ fn inherent_impl_tokens(
     });
 
     let has_pk_value_impl = primary_key.map(|(pk_ident, _)| {
+        let column_arms = fields.column_entries.iter().map(|entry| {
+            let col = &entry.column;
+            let ident = &entry.ident;
+            quote! {
+                #col => ::core::option::Option::Some(
+                    ::core::convert::Into::<#root::core::SqlValue>::into(
+                        ::core::clone::Clone::clone(&self.#ident)
+                    )
+                ),
+            }
+        });
         quote! {
             impl #root::sql::HasPkValue for #struct_name {
                 fn __rustango_pk_value_impl(&self) -> #root::core::SqlValue {
                     ::core::convert::Into::<#root::core::SqlValue>::into(
                         ::core::clone::Clone::clone(&self.#pk_ident)
                     )
+                }
+                fn __rustango_column_value(
+                    &self,
+                    column: &str,
+                ) -> ::core::option::Option<#root::core::SqlValue> {
+                    match column {
+                        #( #column_arms )*
+                        _ => ::core::option::Option::None,
+                    }
                 }
             }
         }

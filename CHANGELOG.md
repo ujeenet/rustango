@@ -55,6 +55,18 @@ Inline rows (plain and generic) read their cells and key by field name. With `#[
 - `TracingLayer` records at most 512 bytes of `User-Agent` on the request span.
 - Two operators deactivating each other at once can no longer leave zero active operators: `operators::set_active` locks the active rows and deactivates in one transaction.
 
+### Fixed — ORM, migrations and jobs
+
+- `Pool::scope_key` (and so the ContentType cache) tells the schema-mode pools that migrations and `manage` build apart from the registry; they still set `search_path` with a `SET` on connect.
+- Jobs: a retry's `last_error` is cut to 64 KiB on a UTF-8 boundary, so a long error no longer fails the write on MySQL (`TEXT`) and leaves the job locked.
+- `prefetch_related` matches children whose FK points at a unique column (`on = "code"`) by that column; they got no children before. A parent whose hand-written `HasPkValue` cannot read that column now fails with `ExecError::PrefetchColumnUnreadable`.
+- `sqlmigrate` on MySQL shows the drops of the FKs that reference a retyped key, which apply finds in the catalog.
+- MySQL: a migration (or unapply) that retypes an FK column, then the key it references, then renames the column no longer fails with error 3780; the FK comes back once, at the end, under the new name.
+
+### Documented — JSON lookups per backend
+
+`json_contains` and LIKE lookups over a JSON column (`contains`, `icontains`, admin search) give the same rows on every backend only in a stated subset; the ORM guide lists it and a tri-dialect test pins it.
+
 ## [0.61.2] — 2026-10-26
 
 ### Fixed — migrations, MySQL and MariaDB

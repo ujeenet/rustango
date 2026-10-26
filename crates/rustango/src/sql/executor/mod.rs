@@ -515,6 +515,13 @@ pub(super) fn extract_pk_value<P: HasPkValue>(parent: &P) -> crate::core::SqlVal
 #[doc(hidden)]
 pub trait HasPkValue {
     fn __rustango_pk_value_impl(&self) -> crate::core::SqlValue;
+
+    /// The value in SQL column `column`, for a child FK `on` a non-pk
+    /// column. `None` for an unknown column.
+    fn __rustango_column_value(&self, column: &str) -> Option<crate::core::SqlValue> {
+        let _ = column;
+        None
+    }
 }
 
 #[cfg(feature = "postgres")]

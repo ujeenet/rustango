@@ -159,7 +159,7 @@ async fn stitch<P, C, F, Fut>(
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
     P: Model + HasPkValue,
-    C: FkPkAccess,
+    C: Model + FkPkAccess,
     F: FnMut(Vec<crate::core::SqlValue>) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
 {
@@ -172,11 +172,12 @@ where
         .ok_or(ExecError::MissingPrimaryKey {
             table: P::SCHEMA.table,
         })?;
+    let on = target_column::<P, C>(child_fk_column);
     // Each distinct key in first-seen order, with how many parents carry it.
     let mut keys: Vec<(String, crate::core::SqlValue, usize)> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
     for parent in &parents {
-        let pk = extract_pk_value(parent);
+        let pk = parent_key(parent, on)?;
         if matches!(pk, crate::core::SqlValue::Null) {
             continue;
         }
@@ -209,18 +210,76 @@ where
         rounds.push(grouped);
     }
     let mut taken: HashMap<String, usize> = HashMap::new();
-    Ok(parents
-        .into_iter()
-        .map(|parent| {
-            let pk = extract_pk_value(&parent);
-            if matches!(pk, crate::core::SqlValue::Null) {
-                return (parent, Vec::new());
-            }
-            let text = pk.to_display_string();
-            let copy = taken.entry(text.clone()).or_insert(0);
-            let kids = rounds[*copy].remove(&text).unwrap_or_default();
-            *copy += 1;
-            (parent, kids)
-        })
-        .collect())
+    let mut out = Vec::with_capacity(parents.len());
+    for parent in parents {
+        let pk = parent_key(&parent, on)?;
+        if matches!(pk, crate::core::SqlValue::Null) {
+            out.push((parent, Vec::new()));
+            continue;
+        }
+        let text = pk.to_display_string();
+        let copy = taken.entry(text.clone()).or_insert(0);
+        let kids = rounds[*copy].remove(&text).unwrap_or_default();
+        *copy += 1;
+        out.push((parent, kids));
+    }
+    Ok(out)
+}
+
+/// The parent column `C.child_fk_column` points at, when not `P`'s pk.
+fn target_column<P: Model, C: Model>(child_fk_column: &str) -> Option<&'static str> {
+    use crate::core::Relation;
+    let field = C::SCHEMA
+        .field(child_fk_column)
+        .or_else(|| C::SCHEMA.field_by_column(child_fk_column))?;
+    let on = match field.relation? {
+        Relation::Fk { on, .. } | Relation::O2O { on, .. } => on,
+    };
+    (Some(on) != P::SCHEMA.pk_column()).then_some(on)
+}
+
+/// The value children store for `parent`: its `on` column, else its pk.
+fn parent_key<P: Model + HasPkValue>(
+    parent: &P,
+    on: Option<&'static str>,
+) -> Result<crate::core::SqlValue, ExecError> {
+    match on {
+        None => Ok(extract_pk_value(parent)),
+        Some(column) => parent
+            .__rustango_column_value(column)
+            .ok_or(ExecError::PrefetchColumnUnreadable {
+                table: P::SCHEMA.table,
+                column,
+            }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parent_key, ExecError, HasPkValue};
+    use crate::core::{Model, ModelSchema, SqlValue};
+
+    /// A parent with a hand-written `HasPkValue`, which reads only its pk.
+    struct HandWritten;
+
+    impl Model for HandWritten {
+        const SCHEMA: &'static ModelSchema = <crate::contenttypes::ContentType as Model>::SCHEMA;
+    }
+
+    impl HasPkValue for HandWritten {
+        fn __rustango_pk_value_impl(&self) -> SqlValue {
+            SqlValue::I64(1)
+        }
+    }
+
+    #[test]
+    fn an_unreadable_fk_target_column_is_an_error_not_the_pk() {
+        let err = parent_key(&HandWritten, Some("code")).expect_err("not the pk");
+        assert!(
+            matches!(err, ExecError::PrefetchColumnUnreadable { column: "code", .. }),
+            "{err}"
+        );
+        assert!(err.to_string().contains(".code`"), "{err}");
+        assert_eq!(parent_key(&HandWritten, None).unwrap(), SqlValue::I64(1));
+    }
 }

@@ -185,6 +185,8 @@ pub use foreign_key::ForeignKey;
 pub use m2m::{GenericM2MManager, M2MManager};
 pub use mysql::MySql;
 pub(crate) use pool::PoolId;
+#[cfg(all(feature = "postgres", feature = "tenancy"))]
+pub(crate) use pool::tag_schema_scope;
 #[cfg(feature = "tenancy")]
 pub(crate) use pool::{checkout_check, tuning as pool_tuning};
 pub use pool::{configure_pools, Pool, PoolError, PoolTuning};
