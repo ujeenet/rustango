@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### More audit rows for FK side effects
+
+Rows an `ON DELETE SET NULL` / `SET DEFAULT` changes in an audited model now get an `update` entry, and a `truncate` adds a bulk `delete` entry for each audited table its FKs empty.
+
 ## 0.61.3
 
 ### `[cache] backend` should be a known lowercase name

@@ -96,7 +96,7 @@ pub use executor::{
 pub(crate) use executor::{
     bulk_insert_pks_tx, compile_bulk_update_batches, execute_batches_tx, fetch_in_chunks,
     fetch_select_in_chunks, fetch_values_list_on, inserted_pk, rows_per_batch,
-    run_delete_statements_tx, truncate_tx,
+    run_delete_statements_tx, truncate_cascades_every_fk, truncate_tx,
 };
 #[cfg(feature = "admin")]
 pub(crate) use executor::{select_one_row_as_json_tx, select_rows_as_json_tx};

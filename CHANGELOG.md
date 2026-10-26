@@ -10,6 +10,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `<parent>::<child>_set` / `_set_pool` match children on the column the FK points at (`on = "code"`); they read the parent's PK and found none.
 - `filter("data__contains", …)` on a JSON column works: a string matches the JSON text, as `Model::data.contains(…)`; a `SqlValue::Json` value is a containment test, as `json_contains`. Both were refused.
 
+### Fixed — audit rows for FK side effects, one-bind key lists on PG
+
+- A delete whose `ON DELETE SET NULL` / `SET DEFAULT` changes rows of an audited model writes an `update` entry for each of them.
+- `Model::truncate` writes a bulk `delete` entry (`{"bulk": "truncate", "cascade_from": …}`) on each audited table its FKs empty: every referencing table on PG (`TRUNCATE … CASCADE`), the `ON DELETE CASCADE` ones elsewhere.
+- PG: `in_bulk`, `in_bulk_on` and prefetch send a key list as one `= ANY($1)` bind instead of splitting it at the bind limit, so a sliced `in_bulk` past 65 535 keys works.
+
 ## [0.61.3] — 2026-10-26
 
 ### Changed — unknown `cache.backend` values are logged as errors

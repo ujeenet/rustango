@@ -123,10 +123,11 @@ where
     Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
 {
     let room = bind_room(pool.dialect(), base)?;
-    let size = in_chunk_size(base.model.table, keys.len(), room, sliced)?;
-    if keys.len() <= size {
+    // One `= ANY($n)` bind holds the whole list where arrays bind.
+    if room > 0 && crate::sql::writers::in_list_binds(pool.dialect(), &keys) <= room {
         return fetch(keys).await;
     }
+    let size = in_chunk_size(base.model.table, keys.len(), room, sliced)?;
     let mut out = Vec::new();
     for chunk in keys.chunks(size) {
         out.extend(fetch(chunk.to_vec()).await?);
@@ -303,7 +304,7 @@ where
             return Ok(std::collections::HashMap::new());
         }
         let room = bind_room(executor.dialect(), &self.clone().compile()?)?;
-        if id_values.len() > room {
+        if crate::sql::writers::in_list_binds(executor.dialect(), &id_values) > room {
             return Err(ExecError::InListUnsplittable {
                 table: T::SCHEMA.table,
                 keys: id_values.len(),
@@ -1840,15 +1841,22 @@ pub async fn delete_tx(tx: &mut PoolTx<'_>, query: &DeleteQuery) -> Result<u64, 
 #[must_use]
 pub fn truncate_sql(d: &dyn crate::sql::Dialect, table: &str) -> String {
     let quoted = d.quote_ident(table);
-    if d.name() == "postgres" {
+    if truncate_cascades_every_fk(d) {
         format!("TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE")
     } else {
         format!("DELETE FROM {quoted}")
     }
 }
 
+/// Whether [`truncate_sql`] is PG's `TRUNCATE … CASCADE`, which empties
+/// every table with an FK to it, whatever its `ON DELETE`.
+pub(crate) fn truncate_cascades_every_fk(d: &dyn crate::sql::Dialect) -> bool {
+    d.name() == "postgres"
+}
+
 /// Run `sql` (a [`truncate_sql`]) in `tx` after clearing the table's
-/// generic M2M junction rows, so a reused id inherits no links.
+/// generic M2M junction rows, so a reused id inherits no links. The
+/// audited tables it empties through FKs get a bulk `delete` entry.
 pub(crate) async fn truncate_tx(
     tx: &mut PoolTx<'_>,
     table: &str,
@@ -1858,7 +1866,9 @@ pub(crate) async fn truncate_tx(
         let stmt = tx.dialect().compile_delete(&link)?;
         execute_tx(tx, &stmt.sql, stmt.params).await?;
     }
-    execute_tx(tx, sql, Vec::new()).await
+    let affected = execute_tx(tx, sql, Vec::new()).await?;
+    crate::audit::cascade::emit_truncated(tx, table).await?;
+    Ok(affected)
 }
 
 /// Empty `model`'s table and its generic M2M junction rows in one
@@ -1870,11 +1880,14 @@ pub async fn truncate(
     pool: &Pool,
     model: &'static crate::core::ModelSchema,
 ) -> Result<u64, ExecError> {
-    let mut tx = tx::write_transaction(pool).await?;
-    let sql = truncate_sql(tx.dialect(), model.table);
-    let affected = truncate_tx(&mut tx, model.table, &sql).await?;
-    tx.commit().await?;
-    Ok(affected)
+    crate::audit::cascade::via_pool(pool, async {
+        let mut tx = tx::write_transaction(pool).await?;
+        let sql = truncate_sql(tx.dialect(), model.table);
+        let affected = truncate_tx(&mut tx, model.table, &sql).await?;
+        tx.commit().await?;
+        Ok(affected)
+    })
+    .await
 }
 
 /// Validated multi-row `INSERT` inside an open transaction, split to fit

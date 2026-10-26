@@ -270,7 +270,8 @@ async fn long_select_related_chains(pool: &Pool) {
     assert_eq!(label(&mid.second_hop_relation_two).as_deref(), Some("two"));
 }
 
-/// `in_bulk_on` refuses one `IN` list past the bind cap instead of sending it.
+/// `in_bulk_on` refuses one `IN` list past the bind cap instead of sending it;
+/// PG binds the keys as one array.
 async fn in_bulk_on_past_the_bind_cap(pool: &Pool) {
     for id in [1, 2] {
         Bucket { id }.insert_pool(pool).await.expect("bucket");
@@ -281,10 +282,14 @@ async fn in_bulk_on_past_the_bind_cap(pool: &Pool) {
         .await
         .expect("small in_bulk_on");
     assert_eq!(small.len(), 2);
-    let err = Bucket::objects()
+    let got = Bucket::objects()
         .in_bulk_on(Bucket::id, 0..70_000_i64, |b| b.id, &mut conn)
-        .await
-        .expect_err("past the bind cap");
+        .await;
+    if pool.dialect().name() == "postgres" {
+        assert_eq!(got.expect("one array bind on PG").len(), 2);
+        return;
+    }
+    let err = got.expect_err("past the bind cap");
     assert!(
         matches!(err, ExecError::InListUnsplittable { .. }),
         "{err:?}"
