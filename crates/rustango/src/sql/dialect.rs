@@ -445,8 +445,10 @@ pub trait Dialect: Send + Sync {
         None
     }
 
-    /// Query for `(table, name)` of the composite FKs on or referencing one
-    /// column, binding `(table, column, table, column)`. `None` where a MODIFY needs none.
+    /// Query for the composite FKs on or referencing one column, binding
+    /// `(table, column, table, column)`: one `(table, name, column, referenced
+    /// table, referenced column, ON DELETE, ON UPDATE)` row per key column,
+    /// in key order. `None` where a MODIFY needs none.
     fn composite_foreign_keys_sql(&self) -> Option<&'static str> {
         None
     }

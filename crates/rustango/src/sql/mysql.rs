@@ -597,15 +597,24 @@ impl Dialect for MySql {
 
     fn composite_foreign_keys_sql(&self) -> Option<&'static str> {
         Some(
-            "SELECT DISTINCT CAST(k.TABLE_NAME AS CHAR), CAST(k.CONSTRAINT_NAME AS CHAR) \
+            "SELECT CAST(k.TABLE_NAME AS CHAR), CAST(k.CONSTRAINT_NAME AS CHAR), \
+             CAST(k.COLUMN_NAME AS CHAR), CAST(k.REFERENCED_TABLE_NAME AS CHAR), \
+             CAST(k.REFERENCED_COLUMN_NAME AS CHAR), CAST(r.DELETE_RULE AS CHAR), \
+             CAST(r.UPDATE_RULE AS CHAR) \
              FROM information_schema.KEY_COLUMN_USAGE k \
-             WHERE k.TABLE_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME IS NOT NULL \
-             AND ((k.TABLE_NAME = ? AND k.COLUMN_NAME = ?) \
-             OR (k.REFERENCED_TABLE_SCHEMA = DATABASE() \
-             AND k.REFERENCED_TABLE_NAME = ? AND k.REFERENCED_COLUMN_NAME = ?)) \
+             JOIN information_schema.REFERENTIAL_CONSTRAINTS r \
+             ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.TABLE_NAME = k.TABLE_NAME \
+             AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME \
+             WHERE k.TABLE_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_SCHEMA = DATABASE() \
+             AND EXISTS (SELECT 1 FROM information_schema.KEY_COLUMN_USAGE m \
+             WHERE m.TABLE_SCHEMA = k.TABLE_SCHEMA AND m.TABLE_NAME = k.TABLE_NAME \
+             AND m.CONSTRAINT_NAME = k.CONSTRAINT_NAME \
+             AND ((m.TABLE_NAME = ? AND m.COLUMN_NAME = ?) \
+             OR (m.REFERENCED_TABLE_NAME = ? AND m.REFERENCED_COLUMN_NAME = ?))) \
              AND EXISTS (SELECT 1 FROM information_schema.KEY_COLUMN_USAGE o \
              WHERE o.TABLE_SCHEMA = k.TABLE_SCHEMA AND o.TABLE_NAME = k.TABLE_NAME \
-             AND o.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND o.ORDINAL_POSITION > 1)",
+             AND o.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND o.ORDINAL_POSITION > 1) \
+             ORDER BY k.TABLE_NAME, k.CONSTRAINT_NAME, k.ORDINAL_POSITION",
         )
     }
 
