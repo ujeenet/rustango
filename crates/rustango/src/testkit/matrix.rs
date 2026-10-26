@@ -188,10 +188,12 @@ pub fn required_env(var: &str) -> Option<String> {
 }
 
 /// PG extensions a CI job's image declares it lacks.
+#[cfg(feature = "postgres")]
 const MISSING_PG_EXTENSIONS: &str = "RUSTANGO_TEST_MISSING_PG_EXTENSIONS";
 
 /// May a failed `CREATE EXTENSION name` skip? Locally always; in CI only
 /// when the job lists `name` in [`MISSING_PG_EXTENSIONS`].
+#[cfg(feature = "postgres")]
 fn extension_may_skip(ci: bool, missing: Option<&str>, name: &str) -> bool {
     !ci || missing.is_some_and(|m| m.split(',').any(|x| x.trim() == name))
 }
@@ -747,6 +749,7 @@ mod tests {
     }
 
     /// In CI a missing extension fails unless the job's image declares it.
+    #[cfg(feature = "postgres")]
     #[test]
     fn a_missing_extension_skips_only_outside_ci_or_when_declared() {
         assert!(extension_may_skip(false, None, "vector"));
