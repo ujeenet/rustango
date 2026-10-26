@@ -365,6 +365,7 @@ impl Lockout {
     }
 
     /// Clear the counters and locks of every account starting with `prefix`.
+    #[cfg(feature = "tenancy")]
     pub(crate) async fn clear_accounts_with_prefix(&self, prefix: &str) -> Result<(), CacheError> {
         for kind in ["attempts", "failures", "window", "locked"] {
             self.cache
