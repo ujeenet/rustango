@@ -20,8 +20,8 @@ pub(crate) enum DbIdentity {
     },
 }
 
-/// How long a probe waits for a server.
-const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long a probe waits for a server: it only adds a check, so it is short.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl DbIdentity {
     /// Database `name` on the server behind an admin `pool`: known
@@ -62,6 +62,18 @@ impl DbIdentity {
             #[cfg(feature = "sqlite")]
             crate::sql::Pool::Sqlite(p) => Ok(Self::file(p.connect_options().get_filename())),
             _ => Self::server(pool, None).await,
+        }
+    }
+
+    /// Whether `url` may land on this database, read from its text: only a
+    /// probe can tell an alias, but another database name rules one out.
+    pub(crate) fn may_be(&self, url: &str) -> bool {
+        match self {
+            Self::File(_) => self.same_backend(url),
+            Self::Server { database, .. } => {
+                self.same_backend(url)
+                    && url_database(url).is_none_or(|d| d.eq_ignore_ascii_case(database))
+            }
         }
     }
 
@@ -113,5 +125,25 @@ impl DbIdentity {
             key,
             database,
         }))
+    }
+}
+
+/// The database a server URL names, as its driver reads it; `None` when
+/// unreadable or another backend.
+fn url_database(url: &str) -> Option<String> {
+    match BackendKind::of_url(url)? {
+        #[cfg(feature = "postgres")]
+        BackendKind::Postgres => url
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .ok()
+            .map(|o| o.get_database().unwrap_or(o.get_username()).to_owned()),
+        #[cfg(feature = "mysql")]
+        BackendKind::MySql => url
+            .parse::<sqlx::mysql::MySqlConnectOptions>()
+            .ok()?
+            .get_database()
+            .map(str::to_owned),
+        #[allow(unreachable_patterns)]
+        _ => None,
     }
 }

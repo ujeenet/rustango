@@ -1074,7 +1074,8 @@ async fn database_purge_refuses_an_idle_tenant_on_a_host_alias() {
     b.save_pool(&pool).await.unwrap();
 
     let err = purge_on(&pool, &a.slug).await.expect_err("an alias of A's database");
-    assert!(err.to_string().contains(&b.slug), "{err}");
+    let twin = format!("tenant `{}` uses it too", b.slug);
+    assert!(err.to_string().contains(&twin), "{err}");
     let check = PgConnection::connect(&url)
         .await
         .expect("the database survived");
@@ -1083,6 +1084,33 @@ async fn database_purge_refuses_an_idle_tenant_on_a_host_alias() {
 
     b.delete_pool(&pool).await.unwrap();
     purge_on(&pool, &a.slug).await.expect("purge once A is alone");
+    assert!(!database_exists(&pool, &db).await);
+}
+
+/// Another tenant whose URL no longer resolves (a rotated key, an unset
+/// variable) is logged, not a reason to keep A's database.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[allow(irrefutable_let_patterns)]
+async fn database_purge_skips_a_tenant_whose_url_does_not_resolve() {
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    setup(&pool).await;
+    let (a, db) = org_with_database(&pool, "unres").await;
+    let mut b = Org {
+        slug: format!("{}-b", a.slug),
+        display_name: "b".into(),
+        backend_kind: "mysql".into(),
+        database_url: Some("env://RUSTANGO_PURGE_TEST_UNSET_URL".into()),
+        ..rustango::testkit::org()
+    };
+    b.save_pool(&pool).await.unwrap();
+    let purged = purge_on(&pool, &a.slug).await;
+    b.delete_pool(&pool).await.unwrap();
+    purged.expect("an unresolvable other tenant does not block the purge");
     assert!(!database_exists(&pool, &db).await);
 }
 

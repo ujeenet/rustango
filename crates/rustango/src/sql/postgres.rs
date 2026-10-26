@@ -231,7 +231,9 @@ impl Dialect for Postgres {
         Some("SELECT current_setting('server_version')")
     }
 
-    /// The cluster's `system_identifier`; any role may read it.
+    /// The cluster's `system_identifier`, which a restored copy or replica
+    /// shares, with the postmaster's start time, which it does not. Any role
+    /// may read both; the epoch keeps the session's `TimeZone` out.
     fn database_identity_sql(&self, _version: &str, db: Option<&str>) -> Option<CompiledStatement> {
         let (database, params) = match db {
             Some(db) => (
@@ -241,7 +243,11 @@ impl Dialect for Postgres {
             None => ("current_database()::text".to_owned(), Vec::new()),
         };
         Some(CompiledStatement {
-            sql: format!("SELECT system_identifier::text, {database} FROM pg_control_system()"),
+            sql: format!(
+                "SELECT system_identifier::text || ':' || \
+                 extract(epoch FROM pg_postmaster_start_time())::text, {database} \
+                 FROM pg_control_system()"
+            ),
             params,
         })
     }

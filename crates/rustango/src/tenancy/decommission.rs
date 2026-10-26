@@ -394,28 +394,46 @@ where
         .fetch(registry)
         .await
         .map_err(|e| e.to_string())?;
-    for other in others
+    // A few at a time: each probe may wait for its connect timeout.
+    use futures_util::StreamExt as _;
+    let checks = others
         .iter()
         .filter(|o| o.id.get() != org.id.get() && o.database_url.is_some())
-    {
-        let cant = |e: String| shared(format!("tenant `{}` can't be checked: {e}", other.slug));
-        let url = pools
-            .resolved_database_url(other)
-            .await
-            .map_err(|e| cant(e.to_string()))?;
-        if !me.same_backend(&url) {
-            continue;
-        }
-        match DbIdentity::of_url(&url).await {
+        .map(|other| identity_of(pools, me, other))
+        .collect::<Vec<_>>();
+    let mut checks = futures_util::stream::iter(checks).buffer_unordered(8);
+    while let Some((other, id)) = checks.next().await {
+        match id {
             Ok(id) if id.as_ref() == Some(me) => {
                 return Err(shared(format!("tenant `{}` uses it too", other.slug)))
             }
             Ok(_) => {}
             Err(e) if lenient => unread(&format!("tenant `{}`", other.slug), e),
-            Err(e) => return Err(cant(e)),
+            Err(e) => {
+                return Err(shared(format!("tenant `{}` can't be checked: {e}", other.slug)))
+            }
         }
     }
     Ok(())
+}
+
+/// `other`'s database identity, unless its URL text already rules out `me`.
+async fn identity_of<'a, DB: Database>(
+    pools: &TenantPools<DB>,
+    me: &DbIdentity,
+    other: &'a Org,
+) -> (&'a Org, Result<Option<DbIdentity>, String>)
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let url = match pools.resolved_database_url(other).await {
+        Ok(url) => url,
+        Err(e) => return (other, Err(e.to_string())),
+    };
+    if !me.may_be(&url) {
+        return (other, Ok(None));
+    }
+    (other, DbIdentity::of_url(&url).await)
 }
 
 /// How a database-mode tenant's database goes, decided before anything
