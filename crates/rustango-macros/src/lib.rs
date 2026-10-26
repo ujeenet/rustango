@@ -12314,8 +12314,18 @@ impl FormFieldKind {
     }
 }
 
+/// A generated `derive(Form)` local; mixed-site so a same-named field can't shadow it.
+fn form_local(name: &str) -> syn::Ident {
+    syn::Ident::new(name, proc_macro2::Span::mixed_site())
+}
+
 fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let root = rustango_root();
+    let (errs, cleaned, data_param) = (
+        form_local("__errors"),
+        form_local("__cleaned"),
+        form_local("data"),
+    );
     let struct_name = &input.ident;
 
     let Data::Struct(data) = &input.data else {
@@ -12370,11 +12380,11 @@ fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
         // the caller sees every field error at once.
         let clean_block = if let Some(clean_fn) = &attrs.clean {
             quote! {
-                if __errors.fields().get(#name_lit).is_none() {
+                if #errs.fields().get(#name_lit).is_none() {
                     match Self::#clean_fn(&#ident) {
-                        ::core::result::Result::Ok(__cleaned) => { #ident = __cleaned; }
+                        ::core::result::Result::Ok(#cleaned) => { #ident = #cleaned; }
                         ::core::result::Result::Err(__msg) => {
-                            __errors.add(#name_lit, __msg);
+                            #errs.add(#name_lit, __msg);
                         }
                     }
                 }
@@ -12395,13 +12405,13 @@ fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // (same primitive the serializer cross-field hook uses).
     let cross_field_call = if let Some(validate_fn) = &container.validate {
         quote! {
-            if __errors.is_empty() {
+            if #errs.is_empty() {
                 let __candidate = Self { #( #field_idents ),* };
                 if let ::core::result::Result::Err(__other) = Self::#validate_fn(&__candidate) {
-                    __errors.merge(__other);
+                    #errs.merge(__other);
                 }
-                if !__errors.is_empty() {
-                    return ::core::result::Result::Err(__errors);
+                if !#errs.is_empty() {
+                    return ::core::result::Result::Err(#errs);
                 }
                 return ::core::result::Result::Ok(__candidate);
             }
@@ -12413,13 +12423,13 @@ fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
     Ok(quote! {
         impl #root::forms::Form for #struct_name {
             fn parse(
-                data: &::std::collections::HashMap<::std::string::String, ::std::string::String>,
+                #data_param: &::std::collections::HashMap<::std::string::String, ::std::string::String>,
             ) -> ::core::result::Result<Self, #root::forms::FormErrors> {
-                let mut __errors = #root::forms::FormErrors::default();
+                let mut #errs = #root::forms::FormErrors::default();
                 #( #field_blocks )*
                 #cross_field_call
-                if !__errors.is_empty() {
-                    return ::core::result::Result::Err(__errors);
+                if !#errs.is_empty() {
+                    return ::core::result::Result::Err(#errs);
                 }
                 ::core::result::Result::Ok(Self {
                     #( #field_idents ),*
@@ -12540,10 +12550,10 @@ fn render_form_field_parse(
     nullable: bool,
     attrs: &FormFieldAttrs,
 ) -> TokenStream2 {
-    // Pull the raw &str from the payload. Uses variable name `data` to
-    // match the new `Form::parse(data: &HashMap<…>)` signature.
+    let (errs, data_param) = (form_local("__errors"), form_local("data"));
+    // Pull the raw &str from the payload `Form::parse(data: &HashMap<…>)`.
     let lookup = quote! {
-        let __raw: ::core::option::Option<&::std::string::String> = data.get(#name_lit);
+        let __raw: ::core::option::Option<&::std::string::String> = #data_param.get(#name_lit);
     };
 
     let parsed_value = match kind {
@@ -12589,7 +12599,7 @@ fn render_form_field_parse(
                             ::core::clone::Clone::clone(__s)
                         }
                         _ => {
-                            __errors.add(#name_lit, "This field is required.");
+                            #errs.add(#name_lit, "This field is required.");
                             ::std::string::String::new()
                         }
                     };
@@ -12636,7 +12646,7 @@ fn render_form_field_parse(
                                     ::core::option::Option::Some(__n)
                                 }
                                 ::core::result::Result::Err(__e) => {
-                                    __errors.add(
+                                    #errs.add(
                                         #name_lit,
                                         ::std::format!("Enter a valid {} value: {}", #ty_lit, __e),
                                     );
@@ -12653,7 +12663,7 @@ fn render_form_field_parse(
                             match __s.parse::<#parse_ty>().map_err(|__e| ::std::string::ToString::to_string(&__e)) #finite {
                                 ::core::result::Result::Ok(__n) => __n,
                                 ::core::result::Result::Err(__e) => {
-                                    __errors.add(
+                                    #errs.add(
                                         #name_lit,
                                         ::std::format!("Enter a valid {} value: {}", #ty_lit, __e),
                                     );
@@ -12662,7 +12672,7 @@ fn render_form_field_parse(
                             }
                         }
                         _ => {
-                            __errors.add(#name_lit, "This field is required.");
+                            #errs.add(#name_lit, "This field is required.");
                             #default_val
                         }
                     };
@@ -12692,6 +12702,7 @@ fn render_form_validators(
     nullable: bool,
     attrs: &FormFieldAttrs,
 ) -> TokenStream2 {
+    let errs = form_local("__errors");
     let mut checks: Vec<TokenStream2> = Vec::new();
 
     let val_ref = if nullable {
@@ -12716,7 +12727,7 @@ fn render_form_validators(
             checks.push(quote! {
                 if let ::core::option::Option::Some(__s) = #val_ref {
                     if __s.chars().count() < #min_len_usize {
-                        __errors.add(
+                        #errs.add(
                             #name_lit,
                             ::std::format!("Ensure this value has at least {} characters.", #min_len_usize),
                         );
@@ -12729,7 +12740,7 @@ fn render_form_validators(
             checks.push(quote! {
                 if let ::core::option::Option::Some(__s) = #val_ref {
                     if __s.chars().count() > #max_len_usize {
-                        __errors.add(
+                        #errs.add(
                             #name_lit,
                             ::std::format!("Ensure this value has at most {} characters.", #max_len_usize),
                         );
@@ -12744,7 +12755,7 @@ fn render_form_validators(
             checks.push(quote! {
                 if let ::core::option::Option::Some(__n) = #val_ref {
                     if (*__n as f64) < (#min as f64) {
-                        __errors.add(
+                        #errs.add(
                             #name_lit,
                             ::std::format!("Ensure this value is greater than or equal to {}.", #min),
                         );
@@ -12756,7 +12767,7 @@ fn render_form_validators(
             checks.push(quote! {
                 if let ::core::option::Option::Some(__n) = #val_ref {
                     if (*__n as f64) > (#max as f64) {
-                        __errors.add(
+                        #errs.add(
                             #name_lit,
                             ::std::format!("Ensure this value is less than or equal to {}.", #max),
                         );

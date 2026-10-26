@@ -336,15 +336,12 @@ pub(crate) fn admin_config_or_default(model: &'static ModelSchema) -> crate::cor
         .unwrap_or(crate::core::AdminConfig::DEFAULT)
 }
 
-/// Credential columns, secret whatever the model's widgets say.
-const SECRET_COLUMNS: &[&str] = &["password_hash", "password", "database_url"];
-
 /// `true` for a credential column or one with a `password` widget override.
 /// Its value is never echoed: forms render it empty, lists and detail show
 /// only whether it is set, and the audit log records only that it changed.
 #[must_use]
 pub(crate) fn is_secret_field(admin_cfg: &crate::core::AdminConfig, name: &str) -> bool {
-    SECRET_COLUMNS.contains(&name)
+    crate::core::is_credential_column(name)
         || admin_cfg
             .formfield_overrides
             .iter()

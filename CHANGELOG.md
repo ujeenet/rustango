@@ -4,6 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — ORM and forms
+
+- M2M `annotate_sum` / `_avg` / `_max` / `_min` join on the target model's real PK column, not a hard-coded `id`.
+- `#[derive(Form)]` accepts fields named `data`, `__errors` or `__cleaned`; they shadowed the generated locals.
+- Template views leave `password_hash`, `password` and `database_url` out of `object` / `objects` / `object_list` unless the view lists them. UpdateView and the bulk-delete confirm page still carry unlisted columns and warn at mount; 0.62.0 drops them.
+- Admin inline `max_num` is recounted inside the save transaction with the parent row locked, so two concurrent saves cannot both add past it.
+
 ## [0.61.5] — 2026-10-26
 
 ### Fixed — auth

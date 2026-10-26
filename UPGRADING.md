@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Template views hide credential columns
+
+`ListView`, `DetailView`, `DeleteView`, `UpdateView` and the bulk-delete confirm page no longer put `password_hash`, `password` or `database_url` into the Tera context unless `.fields()` (or UpdateView's field list) names them. UpdateView and the bulk-delete confirm page warn at mount when they still carry columns outside their list; 0.62.0 will drop those.
+
 ## 0.61.5
 
 ### ViewSet OpenAPI: Binary is hex

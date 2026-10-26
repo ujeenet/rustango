@@ -664,6 +664,7 @@ impl ListView {
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
         let bulk = self.bulk_actions_enabled;
+        self.warn_wide_confirm();
         let state = Arc::new(ListViewState {
             vs: self,
             tera,
@@ -687,6 +688,7 @@ impl ListView {
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
         let bulk = self.bulk_actions_enabled;
+        self.warn_wide_confirm();
         let state = Arc::new(TenantListViewState { vs: self, tera });
         let route = if bulk {
             get(handle_list_tenant).post(handle_list_action_tenant)
@@ -694,6 +696,16 @@ impl ListView {
             get(handle_list_tenant)
         };
         csrf_protected(Router::new().route(prefix, route).with_state(state))
+    }
+
+    fn warn_wide_confirm(&self) {
+        if let (true, true, Some(listed)) = (
+            self.bulk_actions_enabled,
+            self.confirm_delete,
+            self.fields.as_deref(),
+        ) {
+            warn_wide_context("ListView bulk-delete confirm", self.schema, listed);
+        }
     }
 }
 
@@ -898,11 +910,18 @@ async fn handle_list_action(
     // instead of running the DELETE. Custom actions are NOT gated
     // by this flag.
     if state.vs.confirm_delete && action == BUILTIN_DELETE_SELECTED && !is_form_confirmed(&form) {
-        let objects =
-            match fetch_pks_as_objects_pool(state.vs.schema, pk_field, &state.pool, &pks).await {
-                Ok(o) => o,
-                Err(e) => return template_error(&format!("fetch confirm rows: {e}")),
-            };
+        let objects = match fetch_pks_as_objects_pool(
+            state.vs.schema,
+            pk_field,
+            &state.pool,
+            &pks,
+            state.vs.fields.as_deref().unwrap_or_default(),
+        )
+        .await
+        {
+            Ok(o) => o,
+            Err(e) => return template_error(&format!("fetch confirm rows: {e}")),
+        };
         return render_bulk_delete_confirm(
             &state.tera,
             confirm_delete_template_name(&state.vs),
@@ -1507,6 +1526,7 @@ impl UpdateView {
     /// Mount as `GET`/`POST <prefix>/{pk}/edit`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
+        warn_wide_context("UpdateView", self.schema, &self.fields);
         let state = Arc::new(FormViewState {
             schema: self.schema,
             template: self.template.clone(),
@@ -1531,6 +1551,7 @@ impl UpdateView {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        warn_wide_context("UpdateView", self.schema, &self.fields);
         let state = Arc::new(TenantFormViewState {
             schema: self.schema,
             template: self.template,
@@ -2158,7 +2179,7 @@ async fn handle_update_get(
         pk_or_404!(&state.pool, state.schema, pk_field, &pk),
     )
     .visible();
-    let scalars: Vec<&'static crate::core::FieldSchema> = state.schema.scalar_fields().collect();
+    let scalars = context_scalars(state.schema, &state.fields);
     let row_json = match select_one_row_as_json(&state.pool, &select_q, &scalars).await {
         Ok(Some(r)) => r,
         Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
@@ -3123,8 +3144,8 @@ fn render_bulk_delete_confirm(
 }
 
 /// Fetch the rows for the selected PKs so the confirmation
-/// template can render them. Selects every scalar field — the
-/// template branches on what to display. Errors here surface as
+/// template can render them. Selects every scalar field but an unlisted
+/// credential (see [`context_scalars`]). Errors here surface as
 /// 500 rather than 400 because they indicate a backend problem,
 /// not a bad request.
 async fn fetch_pks_as_objects_pool(
@@ -3132,10 +3153,11 @@ async fn fetch_pks_as_objects_pool(
     pk_field: &'static crate::core::FieldSchema,
     pool: &Pool,
     pks: &[SqlValue],
+    listed: &[String],
 ) -> Result<Vec<Value>, String> {
     // #810 — IN-list lookup via the `by_pk_in` constructor.
     let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).visible();
-    let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
+    let fields = context_scalars(schema, listed);
     let rows = select_rows_as_json(pool, &q, &fields)
         .await
         .map_err(|e| e.to_string())?;
@@ -3197,8 +3219,8 @@ async fn run_delete_selected_pool(
 // v0.38 — `run_delete_selected_conn` removed; tenant handlers now
 // use `run_delete_selected_pool` against `Tenant::pool()`.
 
-/// Resolve the projection set — either every scalar field or the
-/// caller's explicit `fields` allowlist.
+/// Resolve the projection set — the caller's explicit `fields`
+/// allowlist, or every scalar field but credentials.
 fn resolved_fields(
     schema: &'static ModelSchema,
     explicit: Option<&[String]>,
@@ -3206,9 +3228,40 @@ fn resolved_fields(
     match explicit {
         Some(names) => schema
             .scalar_fields()
-            .filter(|f| names.iter().any(|n| n == f.name || n == f.column))
+            .filter(|f| is_listed(names, f))
             .collect(),
-        None => schema.scalar_fields().collect(),
+        None => context_scalars(schema, &[]),
+    }
+}
+
+/// Every scalar field for the Tera context; a credential column only when `listed`.
+fn context_scalars(
+    schema: &'static ModelSchema,
+    listed: &[String],
+) -> Vec<&'static crate::core::FieldSchema> {
+    schema
+        .scalar_fields()
+        .filter(|f| {
+            !(crate::core::is_credential_column(f.name)
+                || crate::core::is_credential_column(f.column))
+                || is_listed(listed, f)
+        })
+        .collect()
+}
+
+/// Warn once per mounted view whose context carries columns beyond its list.
+fn warn_wide_context(view: &str, schema: &'static ModelSchema, listed: &[String]) {
+    let extra: Vec<&str> = context_scalars(schema, listed)
+        .into_iter()
+        .filter(|f| !f.primary_key && !is_listed(listed, f))
+        .map(|f| f.name)
+        .collect();
+    if !extra.is_empty() {
+        tracing::warn!(
+            table = schema.table,
+            ?extra,
+            "{view} puts columns outside its field list into the template context; 0.62.0 drops them"
+        );
     }
 }
 
@@ -3765,6 +3818,7 @@ mod tenant {
                 pk_field,
                 &pool,
                 &pks,
+                state.vs.fields.as_deref().unwrap_or_default(),
             )
             .await
             {
@@ -4044,8 +4098,7 @@ mod tenant {
             pk_or_404!(t.pool(), state.schema, pk_field, &pk),
         )
         .visible();
-        let scalars: Vec<&'static crate::core::FieldSchema> =
-            state.schema.scalar_fields().collect();
+        let scalars = super::context_scalars(state.schema, &state.fields);
         let row_json = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &scalars).await
         {
             Ok(Some(r)) => r,

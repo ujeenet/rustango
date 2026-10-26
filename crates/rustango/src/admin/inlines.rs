@@ -1264,6 +1264,8 @@ impl From<ExecError> for InlinePlanError {
 /// UPDATE and DELETE is keyed on the parent; every INSERT pins it.
 pub(crate) struct InlinePlan {
     targets: Vec<TargetPlan>,
+    /// The parent row, locked in the save tx before any `max_num` recount.
+    parent: (&'static ModelSchema, SqlValue),
 }
 
 /// One inline's writes: existing rows first, then inserts.
@@ -1272,8 +1274,8 @@ struct TargetPlan {
     pk: &'static FieldSchema,
     existing: Vec<InlineWrite>,
     inserts: Vec<InlineInsert>,
-    /// Deletes the inserts rely on to stay within `max_num`.
-    deletes_needed: usize,
+    /// `max_num` and every live row of the parent, recounted in the save tx.
+    cap: Option<(usize, WhereExpr)>,
 }
 
 /// Each `audit` is `Some` only for an `audit(...)` child (#2389).
@@ -1436,6 +1438,7 @@ pub(crate) async fn plan_post(
 ) -> Result<InlinePlan, InlinePlanError> {
     let mut plan = InlinePlan {
         targets: Vec::new(),
+        parent: (parent_model, parent_pk.clone()),
     };
     for target in inline_targets(state, parts, parent_model, parent_pk).await? {
         plan_target(state, parts, &target, form, &mut plan).await?;
@@ -1550,7 +1553,7 @@ async fn plan_target(
         pk: target.pk,
         existing: Vec::new(),
         inserts: Vec::new(),
-        deletes_needed: 0,
+        cap: None,
     };
     let is_new = |idx: usize, raw_pk: &str| initial.map_or(raw_pk.trim().is_empty(), |n| idx >= n);
     let rows = crate::forms::formset::row_payloads(form, table, total_forms);
@@ -1744,12 +1747,10 @@ async fn plan_target(
     // `max_num` caps the rows a POST that adds any may leave (#1717):
     // every live row of the parent, not only those the hooks show.
     if let Some(max) = target.max_num.filter(|_| !out.inserts.is_empty()) {
+        let live = crate::soft_delete::compose_with_active(target.child, target.scope.all_where());
         let count = crate::core::CountQuery {
             model: target.child,
-            where_clause: crate::soft_delete::compose_with_active(
-                target.child,
-                target.scope.all_where(),
-            ),
+            where_clause: live.clone(),
             search: None,
             source: None,
         };
@@ -1760,10 +1761,11 @@ async fn plan_target(
             .iter()
             .filter(|w| matches!(w, InlineWrite::Delete { .. }))
             .count();
-        out.deletes_needed = existing
+        let deletes_needed = existing
             .saturating_add(out.inserts.len())
             .saturating_sub(max);
-        if out.deletes_needed > deletes {
+        out.cap = Some((max, live));
+        if deletes_needed > deletes {
             return Err(InlinePlanError::Rejected(format!(
                 "{name} allows at most {max} rows here."
             )));
@@ -1807,6 +1809,25 @@ pub(crate) async fn apply_plan_tx(
     let mut outcome = InlineApplyOutcome::default();
     // The rows written, for `admin_post_*` after the commit.
     let mut written_rows = Vec::new();
+    // Concurrent saves of this parent queue here, so each recount sees the last commit.
+    if let Some(first) = plan.targets.iter().find(|t| t.cap.is_some()) {
+        let (model, pk) = plan.parent;
+        if let Some(pk_field) = model.primary_key() {
+            let parent = SelectQuery {
+                lock_mode: Some(crate::core::LockMode {
+                    silent_on_sqlite: true,
+                    ..crate::core::LockMode::default()
+                }),
+                ..SelectQuery::by_pk(model, pk_field.column, pk)
+            };
+            crate::sql::select_one_row_as_json_tx(tx, &parent, &[pk_field])
+                .await
+                .map_err(|error| InlineApplyError::Write {
+                    child: first.child,
+                    error,
+                })?;
+        }
+    }
     for target in plan.targets {
         let child = target.child;
         let table = child.table;
@@ -1908,9 +1929,17 @@ pub(crate) async fn apply_plan_tx(
             }
         }
         outcome.deleted += deleted;
-        // A delete that removed nothing frees no room under `max_num`.
-        if deleted < target.deletes_needed {
-            return Err(InlineApplyError::MaxNum { child });
+        // Recount in `tx`, after the deletes: a delete that removed nothing
+        // frees no room, and a racing save's rows count. A locking read, so
+        // MySQL reads the latest commit rather than its snapshot.
+        if let Some((max, live)) = &target.cap {
+            let live_rows = crate::sql::select_rows_as_json_tx(tx, &locked(live), &[target.pk])
+                .await
+                .map_err(refused)?
+                .len();
+            if live_rows.saturating_add(target.inserts.len()) > *max {
+                return Err(InlineApplyError::MaxNum { child });
+            }
         }
         for insert in &target.inserts {
             let pk = match &insert.audit {
