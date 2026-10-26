@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the registry check reads SQLite paths as SQLite does
+
+A symlink whose target passes through a missing directory, or a chain longer than the kernel follows, now resolves to the file SQLite opens. On Windows paths are compared as `GetFullPathNameW` builds them, without following links.
+
 ## [0.61.4] — 2026-10-26
 
 ### Fixed — a schema-mode tenant cannot take a role's name
