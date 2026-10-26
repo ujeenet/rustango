@@ -119,7 +119,10 @@ pub(crate) struct Reached {
 /// The audited tables a truncate of `table` reaches besides it: PG's
 /// `TRUNCATE … CASCADE` empties every FK child, a `DELETE` only follows
 /// `ON DELETE CASCADE` and sets the `SET NULL` / `SET DEFAULT` children.
-fn truncate_reach(table: &str, every_fk: bool) -> Vec<(&'static ModelSchema, Option<&'static str>)> {
+fn truncate_reach(
+    table: &str,
+    every_fk: bool,
+) -> Vec<(&'static ModelSchema, Option<&'static str>)> {
     let entries = canonical_entries();
     let mut out = Vec::new();
     let mut done: HashSet<&str> = HashSet::from([table]);
@@ -128,18 +131,28 @@ fn truncate_reach(table: &str, every_fk: bool) -> Vec<(&'static ModelSchema, Opt
     while let Some(parent) = frontier.pop() {
         for entry in &entries {
             let schema = entry.schema;
-            let refs = |f: &&crate::core::FieldSchema| {
-                matches!(f.relation, Some(Relation::Fk { to, .. } | Relation::O2O { to, .. }) if to == parent)
-            };
-            let by_field = schema.fields.iter().filter(refs).any(|f| {
-                every_fk || f.fk_on_delete == Some(OnDeleteAction::Cascade)
-            });
+            let refs = |f: &&crate::core::FieldSchema| matches!(f.relation, Some(Relation::Fk { to, .. } | Relation::O2O { to, .. }) if to == parent);
+            let by_field = schema
+                .fields
+                .iter()
+                .filter(refs)
+                .any(|f| every_fk || f.fk_on_delete == Some(OnDeleteAction::Cascade));
             let by_composite =
                 every_fk && schema.composite_relations.iter().any(|r| r.to == parent);
             if !every_fk && schema.audit_track.is_some() {
-                sets.extend(schema.fields.iter().filter(refs).filter(|f| {
-                    matches!(f.fk_on_delete, Some(OnDeleteAction::SetNull | OnDeleteAction::SetDefault))
-                }).map(|f| (schema, f.column)));
+                sets.extend(
+                    schema
+                        .fields
+                        .iter()
+                        .filter(refs)
+                        .filter(|f| {
+                            matches!(
+                                f.fk_on_delete,
+                                Some(OnDeleteAction::SetNull | OnDeleteAction::SetDefault)
+                            )
+                        })
+                        .map(|f| (schema, f.column)),
+                );
             }
             if (by_field || by_composite) && done.insert(schema.table) {
                 if schema.audit_track.is_some() {
@@ -168,7 +181,11 @@ pub(crate) async fn truncate_counts(
     let mut out = Vec::new();
     for (schema, set) in truncate_reach(table, every_fk) {
         let before = row_count(tx, schema, set).await?;
-        out.push(Reached { schema, set, before });
+        out.push(Reached {
+            schema,
+            set,
+            before,
+        });
     }
     Ok(out)
 }

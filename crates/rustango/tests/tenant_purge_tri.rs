@@ -1063,7 +1063,10 @@ async fn database_purge_refuses_an_idle_tenant_on_a_host_alias() {
     } else {
         url.replace("localhost", "127.0.0.1")
     };
-    assert_ne!(alias, url, "DATABASE_URL names neither localhost nor 127.0.0.1");
+    assert_ne!(
+        alias, url,
+        "DATABASE_URL names neither localhost nor 127.0.0.1"
+    );
     let mut b = Org {
         slug: format!("{}-b", a.slug),
         display_name: "b".into(),
@@ -1073,17 +1076,24 @@ async fn database_purge_refuses_an_idle_tenant_on_a_host_alias() {
     };
     b.save_pool(&pool).await.unwrap();
 
-    let err = purge_on(&pool, &a.slug).await.expect_err("an alias of A's database");
+    let err = purge_on(&pool, &a.slug)
+        .await
+        .expect_err("an alias of A's database");
     let twin = format!("tenant `{}` uses it too", b.slug);
     assert!(err.to_string().contains(&twin), "{err}");
     let check = PgConnection::connect(&url)
         .await
         .expect("the database survived");
     check.close().await.unwrap();
-    assert!(org_active(&pool, &a.slug).await, "the refused purge deactivated A");
+    assert!(
+        org_active(&pool, &a.slug).await,
+        "the refused purge deactivated A"
+    );
 
     b.delete_pool(&pool).await.unwrap();
-    purge_on(&pool, &a.slug).await.expect("purge once A is alone");
+    purge_on(&pool, &a.slug)
+        .await
+        .expect("purge once A is alone");
     assert!(!database_exists(&pool, &db).await);
 }
 

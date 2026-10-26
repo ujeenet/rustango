@@ -431,11 +431,20 @@ fn postgres_test_declares_only_postgis_missing() {
     let yaml = std::fs::read_to_string(&path).expect("read ci.yml");
     let declared: Vec<String> = yaml
         .lines()
-        .filter_map(|l| l.trim().strip_prefix("RUSTANGO_TEST_MISSING_PG_EXTENSIONS:"))
+        .filter_map(|l| {
+            l.trim()
+                .strip_prefix("RUSTANGO_TEST_MISSING_PG_EXTENSIONS:")
+        })
         .map(|v| v.trim().to_owned())
         .collect();
-    assert_eq!(declared, ["postgis"], "only `postgres_test` may declare one");
-    assert!(job_block(&yaml, "postgres_test").contains("RUSTANGO_TEST_MISSING_PG_EXTENSIONS: postgis"));
+    assert_eq!(
+        declared,
+        ["postgis"],
+        "only `postgres_test` may declare one"
+    );
+    assert!(
+        job_block(&yaml, "postgres_test").contains("RUSTANGO_TEST_MISSING_PG_EXTENSIONS: postgis")
+    );
 }
 
 /// `postgres_test` and `mysql_live` run the `tests_compile` archive in N
@@ -1206,17 +1215,27 @@ fn no_workflow_pipes_a_download_into_a_shell() {
             }
         }
     }
-    assert!(found.is_empty(), "download piped into a shell:\n  {}", found.join("\n  "));
+    assert!(
+        found.is_empty(),
+        "download piped into a shell:\n  {}",
+        found.join("\n  ")
+    );
 }
 
 /// Trivy is a pinned release whose checksum is verified before it runs.
 #[test]
 fn trivy_is_pinned_and_verified() {
-    let yaml = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml"))
-        .expect("read ci.yml");
+    let yaml =
+        std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
     let block = job_block(&yaml, "trivy");
-    assert!(block.contains("TRIVY_VERSION:"), "no pinned version:\n{block}");
-    assert!(block.contains("sha256sum -c"), "no checksum check:\n{block}");
+    assert!(
+        block.contains("TRIVY_VERSION:"),
+        "no pinned version:\n{block}"
+    );
+    assert!(
+        block.contains("sha256sum -c"),
+        "no checksum check:\n{block}"
+    );
 }
 
 /// Advisories land without a push, so `deny` also runs on a schedule.
@@ -1224,7 +1243,10 @@ fn trivy_is_pinned_and_verified() {
 fn advisories_are_scanned_weekly() {
     let text = std::fs::read_to_string(repo_root().join(".github/workflows/advisories.yml"))
         .unwrap_or_default();
-    assert!(text.contains("schedule:") && text.contains("cron:"), "no schedule");
+    assert!(
+        text.contains("schedule:") && text.contains("cron:"),
+        "no schedule"
+    );
     assert!(text.contains("check advisories"), "no advisory check");
     assert!(text.contains("examples"), "examples not scanned");
 }

@@ -1755,17 +1755,20 @@ fn reverse_has_accessor_tokens(
         let child_fk_column = rel.child_fk_column.as_str();
         let self_pk_column = rel.self_pk_column();
         // The instance helpers filter on the value the EXISTS form joins on.
-        let self_value = columns.iter().find(|c| c.column == self_pk_column).map_or_else(
-            || quote! { self.__rustango_pk_value() },
-            |c| {
-                let ident = &c.ident;
-                quote! {
-                    ::core::convert::Into::<#root::core::SqlValue>::into(
-                        ::core::clone::Clone::clone(&self.#ident)
-                    )
-                }
-            },
-        );
+        let self_value = columns
+            .iter()
+            .find(|c| c.column == self_pk_column)
+            .map_or_else(
+                || quote! { self.__rustango_pk_value() },
+                |c| {
+                    let ident = &c.ident;
+                    quote! {
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#ident)
+                        )
+                    }
+                },
+            );
         let exists_doc = format!(
             "Eloquent `whereHas` analog — yields `EXISTS (SELECT 1 \
              FROM <{child}> WHERE {child_fk_column} = <outer>.{self_pk_column})`. \

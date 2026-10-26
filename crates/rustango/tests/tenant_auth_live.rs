@@ -507,8 +507,12 @@ async fn non_superuser_session_forces_read_only_admin() {
     {
         use rustango::tenancy::permissions::{assign_role, get_or_create_role, grant_role_perm};
         let role = get_or_create_role("viewer", "", &pool).await.unwrap();
-        grant_role_perm(role, "tenauth_widget.view", &pool).await.unwrap();
-        assign_role(*bob.id.get().unwrap(), role, &pool).await.unwrap();
+        grant_role_perm(role, "tenauth_widget.view", &pool)
+            .await
+            .unwrap();
+        assign_role(*bob.id.get().unwrap(), role, &pool)
+            .await
+            .unwrap();
     }
 
     let mut w = Widget {

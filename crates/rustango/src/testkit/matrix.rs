@@ -756,7 +756,11 @@ mod tests {
         assert!(!extension_may_skip(true, None, "vector"));
         assert!(!extension_may_skip(true, Some("postgis"), "vector"));
         assert!(extension_may_skip(true, Some("hstore, postgis"), "postgis"));
-        assert!(!extension_may_skip(true, Some("postgis_topology"), "postgis"));
+        assert!(!extension_may_skip(
+            true,
+            Some("postgis_topology"),
+            "postgis"
+        ));
     }
 
     /// An unset backend skips; it does not fail and does not fabricate a

@@ -118,7 +118,10 @@ impl DbIdentity {
             crate::sql::raw_query_pool(&stmt.sql, stmt.params, pool)
                 .await
                 .map_err(|e| e.to_string())?;
-        let (key, database) = rows.into_iter().next().ok_or("the server sent no identity")?;
+        let (key, database) = rows
+            .into_iter()
+            .next()
+            .ok_or("the server sent no identity")?;
         let database = database.ok_or("the connection selects no database")?;
         Ok(Some(Self::Server {
             backend: BackendKind::of_pool(pool),

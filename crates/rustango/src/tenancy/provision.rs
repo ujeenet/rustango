@@ -3763,7 +3763,10 @@ mod registry_endpoint_tests {
                 .expect("lazy"),
         );
         let d = dir.path().display();
-        for same in [format!("sqlite:{d}/skip/reg.db"), format!("sqlite:{d}/l0/reg.db")] {
+        for same in [
+            format!("sqlite:{d}/skip/reg.db"),
+            format!("sqlite:{d}/l0/reg.db"),
+        ] {
             assert!(refuse_registry_pool(&same, &pool).is_err(), "{same}");
         }
         assert!(refuse_registry_pool(&format!("sqlite:{d}/l0/t.db"), &pool).is_ok());

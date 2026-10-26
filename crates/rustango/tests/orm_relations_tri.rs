@@ -1088,7 +1088,13 @@ async fn reverse_has_helpers_follow_self_pk_column(pool: &Pool) {
         code: "b".into(),
     };
     assert_eq!(shop.items_count(pool).await.unwrap(), 1);
-    let ids: Vec<i64> = shop.items_fetch(pool).await.unwrap().iter().map(|i| i.id).collect();
+    let ids: Vec<i64> = shop
+        .items_fetch(pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|i| i.id)
+        .collect();
     assert_eq!(ids, [12]);
     let with: Vec<i64> = Shop::objects()
         .where_raw(Shop::items_exists_expr())

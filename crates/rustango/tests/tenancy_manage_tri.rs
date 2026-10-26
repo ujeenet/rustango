@@ -552,10 +552,13 @@ async fn check_deploy_names_a_role_named_schema(pool: &Pool) {
     if env.backend() != BackendKind::Postgres {
         return;
     }
-    let role: Vec<(String,)> =
-        rustango::sql::raw_query_pool("SELECT CAST(current_user AS TEXT)", Vec::new(), &env.registry)
-            .await
-            .unwrap();
+    let role: Vec<(String,)> = rustango::sql::raw_query_pool(
+        "SELECT CAST(current_user AS TEXT)",
+        Vec::new(),
+        &env.registry,
+    )
+    .await
+    .unwrap();
     let mut org = Org {
         slug: "rolehome".into(),
         display_name: "rolehome".into(),
@@ -569,7 +572,10 @@ async fn check_deploy_names_a_role_named_schema(pool: &Pool) {
     let args = vec!["check".to_owned(), "--deploy".to_owned()];
     let _ = typed!(env.registry, p => rustango::tenancy::manage::run_with_writer(&p, &env.url, &dir, args, &mut out).await);
     let out = String::from_utf8_lossy(&out);
-    assert!(out.contains("`rolehome`") && out.contains("database role"), "{out}");
+    assert!(
+        out.contains("`rolehome`") && out.contains("database role"),
+        "{out}"
+    );
 }
 
 /// Run `create` while an uncommitted extra-host row holds `host`; commit it
@@ -1084,17 +1090,21 @@ async fn the_registry_under_an_alias_is_flagged(pool: &Pool) {
         _ if env.url.contains("127.0.0.1") => env.url.replace("127.0.0.1", "localhost"),
         _ => env.url.replace("localhost", "127.0.0.1"),
     };
-    assert_ne!(alias, env.url, "the URL names neither localhost nor 127.0.0.1");
+    assert_ne!(
+        alias, env.url,
+        "the URL names neither localhost nor 127.0.0.1"
+    );
     let request = ProvisionRequest {
         run_migrations: false,
         ..env.db_request("alias", &alias)
     };
     let dir = env.dir("migrations");
-    let (run, _) = typed!(env.registry, p => rustango::tenancy::provision::provision_tenant_recorded(
+    let (run, _) =
+        typed!(env.registry, p => rustango::tenancy::provision::provision_tenant_recorded(
         &p, &env.url, &dir, &request, None, None, None,
     )
     .await)
-    .expect("only warned in this release");
+        .expect("only warned in this release");
     let events =
         rustango::tenancy::provision_store::events_since(&env.registry, *run.id.get().unwrap(), 0)
             .await

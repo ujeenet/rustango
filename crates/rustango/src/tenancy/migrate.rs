@@ -938,8 +938,8 @@ async fn run_for_one_tenant(
                 dir,
                 system_progress,
                 crate::migrate::Signals::Fire {
-                        tenant: Some(&org.slug),
-                    },
+                    tenant: Some(&org.slug),
+                },
                 |held| {
                     let observer = project_progress
                         .as_ref()
@@ -1166,10 +1166,14 @@ mod schema_pool_tests {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             return;
         };
-        let pg = crate::sql::sqlx::PgPool::connect(&url).await.expect("registry");
+        let pg = crate::sql::sqlx::PgPool::connect(&url)
+            .await
+            .expect("registry");
         let s = format!("origin_{}", std::process::id());
         let q = super::quote_ident_for_schema(&s);
-        let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {q} CASCADE")).execute(&pg).await;
+        let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {q} CASCADE"))
+            .execute(&pg)
+            .await;
         assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Created);
         assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Kept);
         sqlx::query(&format!("CREATE TABLE {q}.app_data (id INT)"))
@@ -1183,6 +1187,8 @@ mod schema_pool_tests {
             .await
             .unwrap();
         assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Kept);
-        let _ = sqlx::query(&format!("DROP SCHEMA {q} CASCADE")).execute(&pg).await;
+        let _ = sqlx::query(&format!("DROP SCHEMA {q} CASCADE"))
+            .execute(&pg)
+            .await;
     }
 }

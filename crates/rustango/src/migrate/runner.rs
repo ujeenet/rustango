@@ -553,7 +553,9 @@ pub(crate) enum Signals<'a> {
         not(all(feature = "postgres", any(feature = "manage", feature = "tenancy"))),
         allow(dead_code)
     )]
-    Fire { tenant: Option<&'a str> },
+    Fire {
+        tenant: Option<&'a str>,
+    },
     Skip,
 }
 

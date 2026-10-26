@@ -227,7 +227,10 @@ async fn the_enroll_page_is_never_cached() {
         };
         let resp = app.clone().oneshot(req.unwrap()).await.unwrap();
         assert!(post || resp.status() == StatusCode::OK, "{}", resp.status());
-        let cc = resp.headers().get(header::CACHE_CONTROL).map(|v| v.to_str().unwrap().to_owned());
+        let cc = resp
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .map(|v| v.to_str().unwrap().to_owned());
         assert!(
             cc.as_deref().is_some_and(|v| v.contains("no-store")),
             "post={post}: Cache-Control {cc:?}"

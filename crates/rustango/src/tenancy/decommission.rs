@@ -410,7 +410,10 @@ where
             Ok(_) => {}
             Err(e) if lenient => unread(&format!("tenant `{}`", other.slug), e),
             Err(e) => {
-                return Err(shared(format!("tenant `{}` can't be checked: {e}", other.slug)))
+                return Err(shared(format!(
+                    "tenant `{}` can't be checked: {e}",
+                    other.slug
+                )))
             }
         }
     }

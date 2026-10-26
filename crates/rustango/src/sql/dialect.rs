@@ -1142,7 +1142,11 @@ pub trait Dialect: Send + Sync {
     /// (the current one when `None`), folded as the server compares names,
     /// so aliases of one server compare equal. `version` is
     /// [`Self::server_version_sql`]'s answer.
-    fn database_identity_sql(&self, _version: &str, _db: Option<&str>) -> Option<CompiledStatement> {
+    fn database_identity_sql(
+        &self,
+        _version: &str,
+        _db: Option<&str>,
+    ) -> Option<CompiledStatement> {
         None
     }
 

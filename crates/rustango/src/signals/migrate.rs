@@ -270,6 +270,6 @@ pub fn receiver_count() -> usize {
         SignalKind::PostMigrateTarget,
     ]
     .iter()
-        .map(|kind| reg.get(kind).map_or(0, Vec::len))
-        .sum()
+    .map(|kind| reg.get(kind).map_or(0, Vec::len))
+    .sum()
 }
