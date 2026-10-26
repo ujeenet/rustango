@@ -465,8 +465,8 @@ pub struct CacheSettings {
     /// and cannot build `"redis"` or `"db"`; it panics rather than
     /// swap in another backend. Use `cache::from_settings_async` for
     /// redis, and build the DB backend where the `Pool` is. Any other
-    /// value, including a mis-cased one, is an error from the async
-    /// resolver; the sync one logs it and uses `InMemoryCache`.
+    /// value, including a mis-cased one, logs an error and uses
+    /// `InMemoryCache`.
     pub backend: Option<String>,
     /// Redis connection URL when `backend = "redis"`.
     pub redis_url: Option<String>,
