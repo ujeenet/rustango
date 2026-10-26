@@ -12,6 +12,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `sqlmigrate` on MySQL shows the drops of the FKs that reference a retyped key, which apply finds in the catalog.
 - MySQL: a migration (or unapply) that retypes an FK column, then the key it references, then renames the column no longer fails with error 3780; the FK comes back once, at the end, under the new name.
 
+### Documented — JSON lookups per backend
+
+`json_contains` and LIKE lookups over a JSON column (`contains`, `icontains`, admin search) give the same rows on every backend only in a stated subset; the ORM guide lists it and a tri-dialect test pins it.
+
 ## [0.61.2] — 2026-10-26
 
 ### Fixed — migrations, MySQL and MariaDB

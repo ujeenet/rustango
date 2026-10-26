@@ -81,6 +81,10 @@ pub trait Column: Copy + 'static {
     /// `%` and `_` in it match themselves: they are escaped and the
     /// SQL carries `ESCAPE '!'` on every dialect. Use [`Column::like`]
     /// for a raw pattern you build yourself.
+    ///
+    /// On a JSON column it matches the stored text, which only agrees across
+    /// backends inside one key or string value: SQLite stores `{"a":1}`,
+    /// PostgreSQL and MySQL print `{"a": 1}`.
     fn contains(self, value: impl AsRef<str>) -> TypedFilter<Self::Model> {
         Self::escaped_like(self, "%", "%", value, false)
     }
@@ -373,6 +377,10 @@ pub trait Column: Copy + 'static {
 
     /// JSONB `@>` — column contains the given JSON value.
     /// Bind a `serde_json::Value`.
+    ///
+    /// PostgreSQL and MySQL agree when the value has the column's shape at
+    /// each key. MySQL also matches a scalar inside an array
+    /// (`{"tags": "a"}` in `{"tags": ["a"]}`); SQLite has no containment.
     fn json_contains(self, value: serde_json::Value) -> TypedFilter<Self::Model> {
         TypedFilter::scalar(Self::COLUMN, Op::JsonContains, SqlValue::Json(value))
     }
