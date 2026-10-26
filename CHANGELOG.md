@@ -4,14 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.5] — 2026-10-26
+
 ### Fixed — auth
 
 - A user who signed in from an IP before still signs in from it while a spray from many IPs spends the global login limit; per-IP limits and account locks still apply.
 - Failed MCP agent secrets (`/token`, `/oauth/token`, raw bearer keys) are limited per IP and per tenant through the login gate (new `LoginScope::TenantAgent`), so a flood cannot fill the hashing queue.
 - A `RUSTANGO_SESSION_SECRET` that is not valid base64 of 32+ bytes now logs a warning when it signs MCP agent tokens; it is still used, so issued tokens keep working.
 - `cookies::Cookie::build` writes a `;` in the name, value or attributes as `%3B`, so a request value cannot add cookie attributes.
-
-## [0.61.5] — 2026-10-26
 
 ### Fixed — migrations
 

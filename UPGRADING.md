@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.61.5
+
 ### MCP agent secrets are rate limited
 
 After `[auth] login_ip_limit` failed agent secrets from one IP, the MCP token endpoints and raw-key bearer answer `429` with `Retry-After`. They count per IP in their own bucket, apart from human logins; behind a proxy mount `RealIpLayer::trust_proxies(...)`, or every client shares the proxy's bucket. A passphrase (non-base64) `RUSTANGO_SESSION_SECRET` still signs agent tokens but warns; 0.62.0 will refuse it, so set `openssl rand -base64 32`.
@@ -157,8 +159,6 @@ After `[auth] login_ip_limit` failed agent secrets from one IP, the MCP token en
 ### `Cookie::build` encodes `;`
 
 A `;` in a cookie's name, value or attributes is written as `%3B`; read it back with a percent-decode if you stored one.
-
-## 0.61.5
 
 ### The bootstrap walk creates declared indexes
 
