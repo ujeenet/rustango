@@ -482,7 +482,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
 }
 
 /// Warnings for the dropped NOT NULL columns with no default in `changes`:
-/// their re-add on downgrade is refused, as for any such AddColumn.
+/// their re-add on downgrade is refused once the table has rows.
 pub(crate) fn irreversible_drops(prev: &SchemaSnapshot, changes: &[SchemaChange]) -> Vec<String> {
     changes
         .iter()
@@ -494,7 +494,8 @@ pub(crate) fn irreversible_drops(prev: &SchemaSnapshot, changes: &[SchemaChange]
                 .map(|_| {
                     format!(
                         "dropping NOT NULL `{table}.{column}` with no default: this migration \
-                         cannot be unapplied; add a `default` first to keep it reversible"
+                         cannot be unapplied once the table has rows; add a `default` first \
+                         to keep it reversible"
                     )
                 }),
             _ => None,

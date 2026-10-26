@@ -290,8 +290,29 @@ fn bootstrap_models() -> Vec<&'static ModelSchema> {
         .collect()
 }
 
-/// Run `CREATE TABLE` for every registered model, then every model's FK
-/// `ALTER TABLE` constraints. Two-phase so create order doesn't matter.
+/// `CREATE INDEX` for the declared indexes of `models`, `unique_together`
+/// included, as the migration writer renders them.
+fn bootstrap_index_sql(
+    dialect: &dyn crate::sql::Dialect,
+    models: &[&'static ModelSchema],
+) -> Result<Vec<String>, MigrateError> {
+    let snapshot = SchemaSnapshot::from_models(models);
+    let changes: Vec<_> = snapshot
+        .indexes
+        .iter()
+        .map(super::diff::create_index)
+        .collect();
+    let batch = super::diff::render_changes_split_with_dialect(&changes, &snapshot, dialect)
+        .map_err(MigrateError::Validation)?;
+    for w in &batch.warnings {
+        tracing::warn!(target: "rustango::migrate", "{w}");
+    }
+    Ok(batch.immediate)
+}
+
+/// Run `CREATE TABLE` for every registered model, then its declared
+/// indexes, then every model's FK `ALTER TABLE` constraints. FKs last so
+/// create order doesn't matter.
 /// PG-typed back-compat; for non-PG use [`apply_all_pool`].
 ///
 /// # Errors
@@ -320,6 +341,9 @@ pub async fn apply_all(pool: &PgPool) -> Result<(), MigrateError> {
 
     for model in &models {
         let sql = ddl::create_table_sql(model);
+        sqlx::query(&sql).execute(pool).await?;
+    }
+    for sql in bootstrap_index_sql(&crate::sql::Postgres, &models)? {
         sqlx::query(&sql).execute(pool).await?;
     }
     for model in &models {
@@ -394,6 +418,9 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
     }
     for model in &models {
         let sql = ddl::create_table_sql_with_dialect(dialect, model);
+        crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
+    }
+    for sql in bootstrap_index_sql(dialect, &models)? {
         crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
     }
     for model in &models {
@@ -548,9 +575,10 @@ pub(crate) async fn migrate_locked(
 /// the migrate lock, so a handler may migrate again.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Signals<'a> {
-    /// The PG `migrate` runner's contract; `tenant` names the run's tenant.
+    /// The PG `migrate` runner's and every tenant run's contract; `tenant`
+    /// names the run's tenant.
     #[cfg_attr(
-        not(all(feature = "postgres", any(feature = "manage", feature = "tenancy"))),
+        not(any(feature = "tenancy", all(feature = "postgres", feature = "manage"))),
         allow(dead_code)
     )]
     Fire {
@@ -998,7 +1026,7 @@ fn preview_schema_op(
     live: &mut LiveFks,
     statements: &mut Vec<String>,
 ) -> Result<Vec<String>, MigrateError> {
-    let step = render_step(change, ops, after, dialect, None)?;
+    let step = render_step(change, ops, after, dialect, None, &EmptyTables::default())?;
     // The runner looks these names up live; this is the name it has then.
     if let (Some(fk), Some(_)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
         if let Some(name) = live.take(&fk.table, &fk.column) {
@@ -1230,6 +1258,7 @@ pub fn render_changes_between(
 async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (atomic)");
     let schema = pg_creation_schema(pool).await?;
+    let empty = EmptyTables::probe(&pool.clone().into(), &mig.forward, &mig.snapshot).await;
     let mut tx = pool.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in &mig.forward {
@@ -1241,6 +1270,7 @@ async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<()
                     &mig.snapshot,
                     &crate::sql::Postgres,
                     schema.as_deref(),
+                    &empty,
                 )?;
                 for stmt in pg_statements(&mut tx, &step).await? {
                     sqlx::query(&stmt).execute(&mut *tx).await?;
@@ -1646,6 +1676,7 @@ async fn unapply_atomic(
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %target.name, "unapplying (atomic)");
     let schema = pg_creation_schema(pool).await?;
+    let empty = EmptyTables::probe(&pool.clone().into(), inverted, snapshot).await;
     let mut tx = pool.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in inverted {
@@ -1657,6 +1688,7 @@ async fn unapply_atomic(
                     snapshot,
                     &crate::sql::Postgres,
                     schema.as_deref(),
+                    &empty,
                 )?;
                 for stmt in pg_statements(&mut tx, &step).await? {
                     sqlx::query(&stmt).execute(&mut *tx).await?;
@@ -1691,7 +1723,14 @@ async fn unapply_loose(
     let callbacks = Callbacks::resolve(inverted)?;
     tracing::info!(migration = %target.name, "unapplying (non-atomic)");
     let schema = pg_creation_schema(pool).await?;
-    let mut steps = render_steps(inverted, snapshot, &crate::sql::Postgres, schema.as_deref())?;
+    let empty = EmptyTables::probe(&pool.clone().into(), inverted, snapshot).await;
+    let mut steps = render_steps(
+        inverted,
+        snapshot,
+        &crate::sql::Postgres,
+        schema.as_deref(),
+        &empty,
+    )?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in inverted {
         match op {
@@ -1726,11 +1765,13 @@ async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(),
     let callbacks = Callbacks::resolve(&mig.forward)?;
     tracing::info!(migration = %mig.name, "applying (non-atomic)");
     let schema = pg_creation_schema(pool).await?;
+    let empty = EmptyTables::probe(&pool.clone().into(), &mig.forward, &mig.snapshot).await;
     let mut steps = render_steps(
         &mig.forward,
         &mig.snapshot,
         &crate::sql::Postgres,
         schema.as_deref(),
+        &empty,
     )?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in &mig.forward {
@@ -3493,6 +3534,7 @@ fn render_step(
     after: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
+    empty: &EmptyTables,
 ) -> Result<Step, MigrateError> {
     use super::SchemaChange as SC;
     // The ops after `change`, which is borrowed from `ops`.
@@ -3519,7 +3561,11 @@ fn render_step(
     };
     let changes = std::slice::from_ref(ended.as_ref().unwrap_or(change));
     let render = |snap: &SchemaSnapshot| {
-        super::diff::render_changes_split_in_schema(changes, snap, dialect, schema)
+        if empty.holds(change) {
+            super::diff::render_changes_split_for_empty(changes, snap, dialect, schema)
+        } else {
+            super::diff::render_changes_split_in_schema(changes, snap, dialect, schema)
+        }
     };
     let retry = super::ensure::filled_table_retry(dialect, after, changes, render)
         .transpose()
@@ -3671,6 +3717,33 @@ fn render_step(
             batch.immediate = first.immediate;
         }
     }
+    if let Some(at) = at_op.filter(|_| dialect.sole_leading_column_sql().is_some()) {
+        let hoisted = hoisted_composite_drops(ops);
+        if hoisted.iter().any(|(_, drop)| *drop == at) {
+            batch = super::diff::render_changes_split_in_schema(&[], snap, dialect, schema)
+                .map_err(MigrateError::Validation)?;
+        }
+        if let SC::DropIndex { table, .. } = change {
+            let drops: Vec<SC> = hoisted
+                .iter()
+                .filter(|(index, _)| *index == at)
+                .filter_map(|(_, drop)| match &ops[*drop] {
+                    Operation::Schema(SC::DropCompositeFk { name, .. }) => {
+                        Some(SC::DropCompositeFk {
+                            table: table.clone(),
+                            name: name.clone(),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+            let mut first =
+                super::diff::render_changes_split_in_schema(&drops, snap, dialect, schema)
+                    .map_err(MigrateError::Validation)?;
+            first.immediate.append(&mut batch.immediate);
+            batch.immediate = first.immediate;
+        }
+    }
     if let Some((true, sql)) = renamed_fk {
         batch.deferred_fks.push(sql);
     }
@@ -3759,6 +3832,51 @@ fn render_step(
     })
 }
 
+/// The tables a migration's NOT NULL AddColumns with no default go to that
+/// hold no rows when it starts, so the column needs no value.
+#[derive(Default)]
+struct EmptyTables(Vec<String>);
+
+impl EmptyTables {
+    /// Probe `pool` for the tables of `ops`, which move the schema to `after`.
+    async fn probe(pool: &crate::sql::Pool, ops: &[Operation], after: &SchemaSnapshot) -> Self {
+        use super::SchemaChange as SC;
+        let mut out: Vec<String> = Vec::new();
+        for (i, op) in ops.iter().enumerate() {
+            let Operation::Schema(SC::AddColumn { table, column }) = op else {
+                continue;
+            };
+            let unfilled = after
+                .table(table)
+                .and_then(|t| t.field(column))
+                .is_some_and(|f| !f.nullable && f.default.is_none() && !f.primary_key);
+            // An earlier op may fill the table, or put another one under its name.
+            let moved = ops[..i].iter().any(|op| match op {
+                Operation::Schema(SC::CreateTable(t) | SC::RenameTable { new_name: t, .. }) => {
+                    t == table
+                }
+                Operation::Schema(_) => false,
+                Operation::Data(_) | Operation::Callback(_) => true,
+            });
+            if !unfilled || moved || out.contains(table) {
+                continue;
+            }
+            // A failed probe counts as rows, so the render refuses as before.
+            if super::ensure::has_no_values(pool, table, None)
+                .await
+                .unwrap_or(false)
+            {
+                out.push(table.clone());
+            }
+        }
+        Self(out)
+    }
+
+    fn holds(&self, change: &super::SchemaChange) -> bool {
+        matches!(change, super::SchemaChange::AddColumn { table, .. } if self.0.contains(table))
+    }
+}
+
 /// The steps of `ops`' schema ops, rendered before any runs: a refusal after
 /// MySQL or a non-atomic run committed the first ones left them applied.
 struct Rendered(std::vec::IntoIter<Step>);
@@ -3775,11 +3893,14 @@ fn render_steps(
     after: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
+    empty: &EmptyTables,
 ) -> Result<Rendered, MigrateError> {
     let steps: Result<Vec<Step>, MigrateError> = ops
         .iter()
         .filter_map(|op| match op {
-            Operation::Schema(change) => Some(render_step(change, ops, after, dialect, schema)),
+            Operation::Schema(change) => {
+                Some(render_step(change, ops, after, dialect, schema, empty))
+            }
             _ => None,
         })
         .collect();
@@ -4060,6 +4181,33 @@ fn hoisted_check_drops(ops: &[Operation]) -> Vec<(usize, usize)> {
         .collect()
 }
 
+/// MySQL refuses to drop an index a composite FK still uses (1553), so a
+/// composite FK `ops` drop goes before the first earlier index drop on its
+/// table, as `(index drop, FK drop)` pairs.
+fn hoisted_composite_drops(ops: &[Operation]) -> Vec<(usize, usize)> {
+    use super::SchemaChange as SC;
+    ops.iter()
+        .enumerate()
+        .filter_map(|(j, op)| match op {
+            Operation::Schema(SC::DropCompositeFk { table: t, name }) => (0..j)
+                .find(|&i| match &ops[i] {
+                    Operation::Schema(SC::DropIndex { table, .. }) => {
+                        super::rebuild::name_at_end(table, &ops[i + 1..j]) == *t
+                    }
+                    _ => false,
+                })
+                // Not one the migration adds in between.
+                .filter(|&i| {
+                    !ops[i..j].iter().any(|op| {
+                        matches!(op, Operation::Schema(SC::AddCompositeFk { name: n, .. }) if n == name)
+                    })
+                })
+                .map(|i| (i, j)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Whether `op` changes `table` or renames it.
 fn touches_table(op: &Operation, table: &str) -> bool {
     matches!(op, Operation::Schema(c) if c.table() == table)
@@ -4071,14 +4219,17 @@ fn rebuilds(
     op: &Operation,
     ops: &[Operation],
     after: &SchemaSnapshot,
+    empty: &EmptyTables,
 ) -> Result<bool, MigrateError> {
     let Operation::Schema(change) = op else {
         return Ok(false);
     };
-    Ok(render_step(change, ops, after, &crate::sql::Sqlite, None)?
-        .batch
-        .rebuild
-        .is_some())
+    Ok(
+        render_step(change, ops, after, &crate::sql::Sqlite, None, empty)?
+            .batch
+            .rebuild
+            .is_some(),
+    )
 }
 
 /// Run `step` on SQLite, retrying an ADD COLUMN refused for a non-constant
@@ -4303,7 +4454,8 @@ async fn atomic_mysql(
     {
         return Err(callback_in_atomic(name, c));
     }
-    let mut steps = render_steps(ops, after, &crate::sql::MySql, schema)?;
+    let empty = EmptyTables::probe(&my.clone().into(), ops, after).await;
+    let mut steps = render_steps(ops, after, &crate::sql::MySql, schema, &empty)?;
     let mut tx = my.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     let mut dropped = DroppedFks::default();
@@ -4418,7 +4570,8 @@ async fn atomic_sqlite(
     {
         return Err(callback_in_atomic(name, c));
     }
-    let segments = sqlite_segments(ops, after)?;
+    let empty = EmptyTables::probe(&sq.clone().into(), ops, after).await;
+    let segments = sqlite_segments(ops, after, &empty)?;
     let total = ops.len();
     let mut deferred_fks: Vec<String> = Vec::new();
     let mut applied = 0usize;
@@ -4433,6 +4586,7 @@ async fn atomic_sqlite(
             range.clone(),
             *rebuilds,
             after,
+            &empty,
             &mut deferred_fks,
             ledger,
         )
@@ -4490,12 +4644,13 @@ struct SegmentFailed {
 fn sqlite_segments(
     ops: &[Operation],
     after: &SchemaSnapshot,
+    empty: &EmptyTables,
 ) -> Result<Vec<(std::ops::Range<usize>, bool)>, MigrateError> {
     let mut out: Vec<(std::ops::Range<usize>, bool)> = Vec::new();
     let (mut start, mut rebuilt, mut data) = (0, false, false);
     for (i, op) in ops.iter().enumerate() {
         let is_data = matches!(op, Operation::Data(_));
-        let is_rebuild = rebuilds(op, ops, after)?;
+        let is_rebuild = rebuilds(op, ops, after, empty)?;
         if (is_data && rebuilt) || (is_rebuild && data) {
             out.push((start..i, rebuilt));
             (start, rebuilt, data) = (i, false, false);
@@ -4518,6 +4673,7 @@ async fn atomic_sqlite_segment(
     range: std::ops::Range<usize>,
     rebuilds: bool,
     after: &SchemaSnapshot,
+    empty: &EmptyTables,
     deferred_fks: &mut Vec<String>,
     ledger: Option<LedgerWrite<'_>>,
 ) -> Result<(), SegmentFailed> {
@@ -4530,7 +4686,7 @@ async fn atomic_sqlite_segment(
         for op in &ops[range] {
             match op {
                 Operation::Schema(change) => {
-                    let step = render_step(change, ops, after, &crate::sql::Sqlite, None)?;
+                    let step = render_step(change, ops, after, &crate::sql::Sqlite, None, empty)?;
                     deferred_fks.extend(run_step_sqlite(&mut tx, step).await?);
                 }
                 Operation::Data(d) => {
@@ -4639,6 +4795,7 @@ async fn apply_atomic_pool(
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
+            let empty = EmptyTables::probe(pool, &mig.forward, &mig.snapshot).await;
             let mut tx = pg.begin().await?;
             let mut deferred_fks: Vec<String> = Vec::new();
             for op in &mig.forward {
@@ -4650,6 +4807,7 @@ async fn apply_atomic_pool(
                             &mig.snapshot,
                             dialect,
                             schema.as_deref(),
+                            &empty,
                         )?;
                         for stmt in pg_statements(&mut tx, &step).await? {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
@@ -4719,11 +4877,13 @@ async fn apply_nonatomic_pool(
     let callbacks = Callbacks::resolve(&mig.forward)?;
     tracing::info!(migration = %mig.name, "applying (non-atomic, _pool)");
     let schema = super::ensure::creation_schema(pool).await?;
+    let empty = EmptyTables::probe(pool, &mig.forward, &mig.snapshot).await;
     let mut steps = render_steps(
         &mig.forward,
         &mig.snapshot,
         pool.dialect(),
         schema.as_deref(),
+        &empty,
     )?;
     let mut deferred_fks: Vec<String> = Vec::new();
     let mut dropped = DroppedFks::default();
@@ -5149,6 +5309,7 @@ async fn unapply_atomic_pool(
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
+            let empty = EmptyTables::probe(pool, inverted, snapshot).await;
             let mut tx = pg.begin().await?;
             let mut deferred_fks: Vec<String> = Vec::new();
             for op in inverted {
@@ -5160,6 +5321,7 @@ async fn unapply_atomic_pool(
                             snapshot,
                             pool.dialect(),
                             schema.as_deref(),
+                            &empty,
                         )?;
                         for stmt in pg_statements(&mut tx, &step).await? {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
@@ -5285,7 +5447,14 @@ async fn unapply_nonatomic_pool(
     let callbacks = Callbacks::resolve(inverted)?;
     tracing::info!(migration = %target.name, "unapplying (non-atomic, _pool)");
     let schema = super::ensure::creation_schema(pool).await?;
-    let mut steps = render_steps(inverted, snapshot, pool.dialect(), schema.as_deref())?;
+    let empty = EmptyTables::probe(pool, inverted, snapshot).await;
+    let mut steps = render_steps(
+        inverted,
+        snapshot,
+        pool.dialect(),
+        schema.as_deref(),
+        &empty,
+    )?;
     let mut deferred_fks: Vec<String> = Vec::new();
     let mut dropped = DroppedFks::default();
     for op in inverted {

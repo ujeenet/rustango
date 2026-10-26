@@ -700,7 +700,9 @@ where
         system_progress
             .as_ref()
             .map(|o| o as &dyn crate::migrate::MigrationObserver),
-        crate::migrate::Signals::Skip,
+        crate::migrate::Signals::Fire {
+            tenant: Some(&org.slug),
+        },
         |held| {
             let observer = project_progress
                 .as_ref()

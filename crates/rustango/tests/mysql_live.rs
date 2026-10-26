@@ -57,6 +57,17 @@ pub struct LiveAudited {
     name: String,
 }
 
+/// `unique_together`, which the bootstrap walk did not create.
+#[derive(Model, Debug)]
+#[rustango(table = "live_pairs", unique_together = "a, b")]
+#[allow(dead_code)]
+pub struct LivePair {
+    #[rustango(primary_key)]
+    id: Auto<i64>,
+    a: i64,
+    b: i64,
+}
+
 async fn pool_or_skip() -> Option<Pool> {
     let url = std::env::var("MYSQL_TEST_URL").ok()?;
     Some(
@@ -324,4 +335,25 @@ async fn check_deploy_probes_named_time_zones() {
     .await;
     let out = String::from_utf8(out).unwrap();
     assert!(!out.contains("time zone"), "{out}");
+}
+
+/// The bootstrap walk creates `unique_together` indexes too.
+#[tokio::test]
+async fn apply_all_pool_creates_unique_together() {
+    let Some(pool) = pool_or_skip().await else {
+        eprintln!("MYSQL_TEST_URL unset — skipping");
+        return;
+    };
+    let _g = live_lock().lock().await;
+    fresh_schema(&pool).await;
+    let pair = || LivePair {
+        id: Auto::Unset,
+        a: 1,
+        b: 2,
+    };
+    pair().insert_pool(&pool).await.expect("first row");
+    assert!(
+        pair().insert_pool(&pool).await.is_err(),
+        "apply_all_pool left `unique_together` out"
+    );
 }
