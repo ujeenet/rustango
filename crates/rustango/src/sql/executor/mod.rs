@@ -571,7 +571,12 @@ impl<T: Model + Send> QuerySet<T> {
         refuse_audited::<T>("`delete_on` cannot audit; use `Model::delete_where`")?;
         let query = self.compile_delete()?;
         let plan = crate::sql::compile_delete_plan(executor.dialect(), &query)?;
-        if plan.links.is_empty() {
+        // A raw sqlx executor runs one statement: delete as before, unaudited cascade.
+        let single = plan.links.is_empty() && !executor.runs_plans();
+        if plan.is_one_statement() || single {
+            if plan.cascade.is_some() {
+                crate::audit::cascade::warn_unaudited(query.model.table);
+            }
             return write_on(executor, &plan.owner.sql, plan.owner.params).await;
         }
         executor.run_delete_plan(plan).await
@@ -700,10 +705,24 @@ macro_rules! bind_match {
                 $q.bind(crate::sql::Point { x, y, srid })
             }
             // PG arrays are typed, so elements must be homogeneous.
-            // I32/I64/String/Bool are supported; anything else panics
+            // I16/I32/I64/String/Bool/Uuid are supported; anything else panics
             // at bind time.
             SqlValue::Array(elems) => match elems.first() {
                 None => $q.bind(Vec::<i32>::new()),
+                Some(SqlValue::I16(_)) => {
+                    let v: Vec<i16> = elems
+                        .into_iter()
+                        .filter_map(|e| if let SqlValue::I16(n) = e { Some(n) } else { None })
+                        .collect();
+                    $q.bind(v)
+                }
+                Some(SqlValue::Uuid(_)) => {
+                    let v: Vec<::uuid::Uuid> = elems
+                        .into_iter()
+                        .filter_map(|e| if let SqlValue::Uuid(u) = e { Some(u) } else { None })
+                        .collect();
+                    $q.bind(v)
+                }
                 Some(SqlValue::I64(_)) => {
                     let v: Vec<i64> = elems
                         .into_iter()
@@ -739,7 +758,7 @@ macro_rules! bind_match {
                     $q.bind(v)
                 }
                 Some(_) => unreachable!(
-                    "SqlValue::Array elements other than I32/I64/String/Bool are not yet supported (v1, issue #30)"
+                    "SqlValue::Array elements other than I16/I32/I64/String/Bool/Uuid are not yet supported (v1, issue #30)"
                 ),
             },
         }
@@ -1299,20 +1318,32 @@ pub(crate) async fn delete_plan_pool(
     pool: &Pool,
     plan: crate::sql::DeletePlan,
 ) -> Result<u64, ExecError> {
-    if plan.links.is_empty() {
+    if plan.is_one_statement() {
         return execute_pool(pool, &plan.owner.sql, plan.owner.params).await;
     }
-    atomic(pool, move |tx| {
+    let run = atomic(pool, move |tx| {
         Box::pin(async move {
             let mut guard = tx.lock().await?;
             run_delete_plan_tx(&mut guard, plan).await
         })
-    })
-    .await
+    });
+    crate::audit::cascade::via_pool(pool, run).await
 }
 
-/// Run a [`DeletePlan`](crate::sql::DeletePlan) in `tx`: links, then the owner.
+/// Run a [`DeletePlan`](crate::sql::DeletePlan) in `tx`: links, then the
+/// owner, auditing the audited rows it cascades to.
 pub(crate) async fn run_delete_plan_tx(
+    tx: &mut PoolTx<'_>,
+    plan: crate::sql::DeletePlan,
+) -> Result<u64, ExecError> {
+    match plan.cascade {
+        Some(query) => crate::audit::cascade::delete_with_audit(tx, &query).await,
+        None => run_delete_statements_tx(tx, plan).await,
+    }
+}
+
+/// A plan's statements in `tx`: links, then the owner; returns the owner's count.
+pub(crate) async fn run_delete_statements_tx(
     tx: &mut PoolTx<'_>,
     plan: crate::sql::DeletePlan,
 ) -> Result<u64, ExecError> {
@@ -1348,26 +1379,46 @@ pub async fn bulk_insert_pool(pool: &Pool, query: &BulkInsertQuery) -> Result<()
     // Keep every `pool.dialect()` a temporary: it yields `&dyn Dialect`,
     // which is not `Sync`, so holding one across an `.await` would make
     // this future non-Send.
-    let mut stmts = compile_bulk_insert_batches(pool.dialect(), query)?;
+    let stmts = compile_bulk_insert_batches(pool.dialect(), query)?;
+    execute_all_or_none(pool, stmts).await.map(drop)
+}
 
-    // One statement is atomic alone, but inside an outer `atomic` it must
-    // join that transaction like a multi-batch insert does.
+/// Rows per batched statement: `binds_per_row` binds each under the
+/// dialect's cap, and at most `max`.
+pub(crate) fn rows_per_batch(dialect: &dyn Dialect, binds_per_row: usize, max: usize) -> usize {
+    (dialect.max_bind_params() / binds_per_row.max(1)).clamp(1, max.max(1))
+}
+
+/// Run `stmts` all or none; returns rows affected. One statement alone
+/// needs no transaction, but inside an [`atomic`] on `pool` any count
+/// joins it as a savepoint.
+pub(crate) async fn execute_all_or_none(
+    pool: &Pool,
+    mut stmts: Vec<super::CompiledStatement>,
+) -> Result<u64, ExecError> {
     if stmts.len() == 1 && !atomic::in_block(pool) {
         let stmt = stmts.remove(0);
-        execute_pool(pool, &stmt.sql, stmt.params).await?;
-        return Ok(());
+        return execute_pool(pool, &stmt.sql, stmt.params).await;
     }
-    // All batches or none; inside an outer `atomic` on this pool this is a savepoint.
     atomic(pool, move |tx| {
         Box::pin(async move {
             let mut guard = tx.lock().await?;
-            for stmt in stmts {
-                execute_tx(&mut guard, &stmt.sql, stmt.params).await?;
-            }
-            Ok(())
+            execute_batches_tx(&mut guard, stmts).await
         })
     })
     .await
+}
+
+/// Run `stmts` in order in `tx`; returns the rows they affected.
+pub(crate) async fn execute_batches_tx(
+    tx: &mut PoolTx<'_>,
+    stmts: Vec<super::CompiledStatement>,
+) -> Result<u64, ExecError> {
+    let mut affected = 0;
+    for stmt in stmts {
+        affected += execute_tx(tx, &stmt.sql, stmt.params).await?;
+    }
+    Ok(affected)
 }
 
 /// Check `query` against field limits like [`insert_pool`] does (#2153),
@@ -1384,7 +1435,7 @@ pub(crate) fn compile_bulk_insert_batches(
     if query.rows.is_empty() {
         return Ok(Vec::new());
     }
-    let max_rows = (dialect.max_bind_params() / query.columns.len().max(1)).max(1);
+    let max_rows = rows_per_batch(dialect, query.columns.len(), usize::MAX);
     if query.rows.len() <= max_rows {
         return Ok(vec![dialect.compile_bulk_insert(query)?]);
     }
@@ -1417,33 +1468,27 @@ pub async fn bulk_update_pool(pool: &Pool, query: &BulkUpdateQuery) -> Result<u6
     if query.rows.is_empty() {
         return Ok(0);
     }
-    // Each row binds its PK plus one value per column; past the cap, batch (#2295).
-    let max_rows = (pool.dialect().max_bind_params() / (query.update_columns.len() + 1)).max(1);
-    let mut stmts = query
+    let stmts = compile_bulk_update_batches(pool.dialect(), query, usize::MAX)?;
+    execute_all_or_none(pool, stmts).await
+}
+
+/// Compile `query` in batches of at most `max` rows that fit the bind cap.
+pub(crate) fn compile_bulk_update_batches(
+    dialect: &dyn Dialect,
+    query: &BulkUpdateQuery,
+    max: usize,
+) -> Result<Vec<super::CompiledStatement>, ExecError> {
+    // Each row binds its PK plus one value per column (#2295).
+    let max_rows = rows_per_batch(dialect, query.update_columns.len() + 1, max);
+    query
         .rows
         .chunks(max_rows)
         .map(|chunk| {
             let batch =
                 BulkUpdateQuery::new(query.model, query.update_columns.clone(), chunk.to_vec());
-            pool.dialect().compile_bulk_update(&batch)
+            dialect.compile_bulk_update(&batch).map_err(ExecError::from)
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    if stmts.len() == 1 && !atomic::in_block(pool) {
-        let stmt = stmts.remove(0);
-        return execute_pool(pool, &stmt.sql, stmt.params).await;
-    }
-    // All batches or none, like `bulk_insert_pool`.
-    atomic(pool, move |tx| {
-        Box::pin(async move {
-            let mut guard = tx.lock().await?;
-            let mut affected = 0;
-            for stmt in stmts {
-                affected += execute_tx(&mut guard, &stmt.sql, stmt.params).await?;
-            }
-            Ok(affected)
-        })
-    })
-    .await
+        .collect()
 }
 
 /// Run arbitrary SQL with bound `SqlValue` params; returns rows
@@ -1832,10 +1877,7 @@ pub(crate) async fn bulk_insert_tx(
     query: &BulkInsertQuery,
 ) -> Result<(), ExecError> {
     let stmts = compile_bulk_insert_batches(tx.dialect(), query)?;
-    for stmt in stmts {
-        execute_tx(tx, &stmt.sql, stmt.params).await?;
-    }
-    Ok(())
+    execute_batches_tx(tx, stmts).await.map(drop)
 }
 
 /// `SELECT` inside an open transaction, with optional `select_related`
@@ -2103,12 +2145,12 @@ where
 
 // `.values_dict()` / `.values_list()` projection.
 mod values;
-pub(crate) use values::fetch_values_flat_on;
 #[allow(unused_imports)]
 pub use values::{
     fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, try_get_flat_my,
     try_get_flat_sqlite, FlatScalar, MaybeMyScalar, MaybePgScalar, MaybeSqliteScalar,
 };
+pub(crate) use values::{fetch_values_flat_on, fetch_values_list_on};
 
 /// Raw SQL on any backend: runs it with bound `SqlValue`
 /// params and decodes each row into `T`.
@@ -3003,6 +3045,20 @@ mod in_chunk_tests {
             in_chunk_size("t", 5, 0, false),
             Err(ExecError::InListUnsplittable { max: 0, .. })
         ));
+    }
+
+    #[test]
+    fn rows_per_batch_fits_the_bind_cap_and_the_row_cap() {
+        let pg = &crate::sql::Postgres;
+        assert_eq!(rows_per_batch(pg, 6, 100), 100);
+        assert_eq!(rows_per_batch(pg, 6, usize::MAX), 65535 / 6);
+        assert_eq!(
+            rows_per_batch(&crate::sql::Sqlite, 3, usize::MAX),
+            32766 / 3
+        );
+        // A row wider than the cap still gets a batch of its own.
+        assert_eq!(rows_per_batch(pg, 70_000, usize::MAX), 1);
+        assert_eq!(rows_per_batch(pg, 0, 0), 1);
     }
 }
 

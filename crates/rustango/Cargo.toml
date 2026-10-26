@@ -469,6 +469,8 @@ tenancy = [
     # depending on the target deployment. Apps that *also* want
     # schema-mode tenants get `postgres` automatically by including it.
     "runtime",
+    # Named, not only reached through `uploads`: the tenant admin and its field locks need it.
+    "admin",
     # #414 — tenant admin + operator console login_submit / logout
     # fire the auth lifecycle signals.
     "signals",
@@ -523,7 +525,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.61.1", path = "../rustango-macros" }
+rustango-macros = { version = "0.61.2", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }

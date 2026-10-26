@@ -47,11 +47,11 @@ fn in_bulk_emits_where_in_on_pg() {
     );
     let stmt = Postgres.compile_select(&q).unwrap();
     assert!(
-        stmt.sql.contains(r#"WHERE "id" IN ($1, $2, $3)"#),
-        "PG: WHERE id IN list: {}",
+        stmt.sql.contains(r#"WHERE "id" = ANY($1)"#),
+        "PG: WHERE id = ANY(array): {}",
         stmt.sql
     );
-    assert_eq!(stmt.params.len(), 3);
+    assert_eq!(stmt.params.len(), 1);
 }
 
 #[cfg(feature = "mysql")]

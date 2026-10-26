@@ -68,8 +68,10 @@ async fn pool_with_user() -> Pool {
 
 async fn current_hash(pool: &Pool) -> String {
     use sqlx::Row;
-    let Pool::Sqlite(sq) = pool else {
-        unreachable!("test is sqlite-only")
+    let sq = match pool {
+        Pool::Sqlite(sq) => sq,
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("test is sqlite-only"),
     };
     sqlx::query(r#"SELECT "password_hash" FROM "prp_users" WHERE "id" = 1"#)
         .fetch_one(sq)

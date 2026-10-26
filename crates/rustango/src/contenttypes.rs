@@ -599,6 +599,11 @@ impl GenericForeignKey {
 ///
 /// # Errors
 /// Driver failures from the ContentType lookup.
+#[deprecated(
+    since = "0.61.2",
+    note = "the link ignores the mount prefix and view permissions; \
+            build your own from `ContentType::by_id`"
+)]
 pub async fn render_generic_fk_link(
     pool: &crate::sql::Pool,
     gfk: GenericForeignKey,

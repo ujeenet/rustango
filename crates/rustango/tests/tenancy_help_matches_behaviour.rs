@@ -73,6 +73,14 @@ fn init_tenancy_help_does_not_promise_files() {
     );
 }
 
+/// `create-tenant --server <name>` exists; help must list it.
+#[cfg(all(feature = "tenancy", feature = "manage"))]
+#[test]
+fn create_tenant_help_lists_server() {
+    let h = help();
+    assert!(h.contains("--server <name>"), "{h}");
+}
+
 /// The parser takes two positionals and then **flags only** — a third
 /// positional is rejected with "unexpected argument". Help used to
 /// advertise `create-user-key <slug> <username> [label]`.

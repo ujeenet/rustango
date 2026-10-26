@@ -85,6 +85,17 @@ pub struct Memo {
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// A custom action that writes in the admin's transaction.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aaw_card", audit(track = "body"), admin(actions = "stamp"))]
+#[allow(dead_code)]
+pub struct Card {
+    #[rustango(primary_key, max_length = 300)]
+    pub code: String,
+    #[rustango(max_length = 32)]
+    pub body: String,
+}
+
 rustango::register_admin_inline!(
     parent = "aaw_order",
     child = "aaw_line",
@@ -134,6 +145,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Step>(pool).await;
     fresh_table::<Note>(pool).await;
     fresh_table::<Memo>(pool).await;
+    fresh_table::<Card>(pool).await;
     rustango::audit::ensure_table_pool(pool)
         .await
         .expect("audit table");
@@ -144,6 +156,7 @@ async fn setup(pool: &Pool) {
         "aaw_note",
         "aaw_memo",
         "aaw_step",
+        "aaw_card",
     ] {
         AuditLog::delete_where("entity_table", t, pool)
             .await
@@ -164,6 +177,10 @@ async fn post(pool: &Pool, uri: &str, form: &str) -> (StatusCode, String) {
     let app = rustango::admin::Builder::new(pool.clone())
         .admin_prefix("")
         .build();
+    post_to(app, uri, form).await
+}
+
+async fn post_to(app: axum::Router, uri: &str, form: &str) -> (StatusCode, String) {
     let req = Request::builder()
         .method("POST")
         .uri(uri)
@@ -476,6 +493,70 @@ async fn delete_audit_failure_keeps_the_row(pool: &Pool) {
     );
 }
 
+/// An admin whose `stamp` action writes in the admin's transaction.
+fn stamping_admin(pool: &Pool) -> axum::Router {
+    use rustango::core::{Assignment, Filter, Op, SqlValue, UpdateQuery, WhereExpr};
+    rustango::admin::Builder::new(pool.clone())
+        .admin_prefix("")
+        .register_tx_action("aaw_card", "stamp", |tx, pks| {
+            let pks = pks.to_vec();
+            Box::pin(async move {
+                let q = UpdateQuery::new(
+                    Card::SCHEMA,
+                    vec![Assignment::new("body", SqlValue::String("stamped".into()))],
+                    WhereExpr::Predicate(Filter::new("code", Op::In, SqlValue::List(pks))),
+                );
+                rustango::sql::update_tx(tx, &q)
+                    .await
+                    .map_err(|e| rustango::admin::AdminError::Internal(e.to_string()))?;
+                Ok(())
+            })
+        })
+        .build()
+}
+
+async fn card_body(pool: &Pool, code: &str) -> String {
+    let cards = Card::objects().filter("code", code).fetch(pool).await;
+    cards.expect("fetch cards")[0].body.clone()
+}
+
+/// A tx action audits in its own write's transaction, so a failed audit
+/// row undoes the action's write.
+async fn tx_action_audits_in_its_transaction(pool: &Pool) {
+    use rustango::core::InsertQuery;
+    let long = "k".repeat(300);
+    for code in ["a", long.as_str()] {
+        let q = InsertQuery::new(
+            Card::SCHEMA,
+            vec!["code", "body"],
+            vec![code.into(), "card".into()],
+        );
+        rustango::sql::insert_pool(pool, &q).await.expect("seed");
+    }
+    let (status, body) = post_to(
+        stamping_admin(pool),
+        "/aaw_card/__action",
+        "action=stamp&_selected=a",
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+    assert_eq!(card_body(pool, "a").await, "stamped");
+    let rows = audit_rows(pool, "aaw_card").await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0].0.as_str(), rows[0].1.as_str()), ("update", "a"));
+    assert_eq!(rows[0].2["__action"], "stamp", "{rows:?}");
+
+    let key = break_audit(pool).await;
+    let form = format!("action=stamp&_selected={key}");
+    let (status, body) = post_to(stamping_admin(pool), "/aaw_card/__action", &form).await;
+    assert_eq!(status, refusal_status(pool), "{body}");
+    assert_eq!(
+        card_body(pool, &key).await,
+        "card",
+        "committed without an audit row"
+    );
+}
+
 /// An inline DELETE stamps a `soft_delete` child and audits it as a
 /// soft delete; the stamped row frees its `max_num` slot (#2453).
 async fn inline_delete_stamps_a_soft_delete_child(pool: &Pool) {
@@ -524,5 +605,6 @@ tri_dialect_test! {
         deletes_and_bulk_actions_are_audited,
         delete_audit_failure_keeps_the_row,
         inline_delete_stamps_a_soft_delete_child,
+        tx_action_audits_in_its_transaction,
     ],
 }

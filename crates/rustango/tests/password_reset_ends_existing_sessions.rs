@@ -30,8 +30,10 @@ async fn pool() -> Pool {
     rustango::testkit::create_tables_for::<rustango::tenancy::User>(&pool)
         .await
         .expect("create rustango_users");
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!("connected to sqlite")
+    let sq = match &pool {
+        Pool::Sqlite(sq) => sq,
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("connected to sqlite"),
     };
     sqlx::query(
         "INSERT INTO rustango_users \
@@ -46,8 +48,10 @@ async fn pool() -> Pool {
 
 async fn password_changed_at(pool: &Pool) -> Option<String> {
     use sqlx::Row;
-    let Pool::Sqlite(sq) = pool else {
-        unreachable!()
+    let sq = match pool {
+        Pool::Sqlite(sq) => sq,
+        #[allow(unreachable_patterns)]
+        _ => unreachable!(),
     };
     sqlx::query("SELECT password_changed_at FROM rustango_users WHERE id = 1")
         .fetch_one(sq)
@@ -124,8 +128,10 @@ async fn the_hash_still_rotates_alongside_the_stamp() {
         .await
         .expect("reset");
 
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
+    let sq = match &pool {
+        Pool::Sqlite(sq) => sq,
+        #[allow(unreachable_patterns)]
+        _ => unreachable!(),
     };
     let stored: String = sqlx::query("SELECT password_hash FROM rustango_users WHERE id = 1")
         .fetch_one(sq)

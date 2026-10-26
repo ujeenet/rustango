@@ -547,6 +547,8 @@ fn generic_fk_relation_is_emitted_on_model_schema() {
     assert_eq!(rel.pk_column, "target_object_pk");
 }
 
+// Kept for coverage until the deprecated helper is removed.
+#[allow(deprecated)]
 #[tokio::test]
 async fn render_generic_fk_link_resolves_via_content_type() {
     use rustango::contenttypes::{render_generic_fk_link, GenericForeignKey};
@@ -579,6 +581,8 @@ async fn render_generic_fk_link_resolves_via_content_type() {
     assert!(html.contains(&format!("#{pk}")));
 }
 
+// Kept for coverage until the deprecated helper is removed.
+#[allow(deprecated)]
 #[tokio::test]
 async fn render_generic_fk_link_falls_back_on_unknown_ct_id() {
     use rustango::contenttypes::{render_generic_fk_link, GenericForeignKey};

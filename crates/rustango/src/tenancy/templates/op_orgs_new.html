@@ -9,7 +9,7 @@ connection check passes.</p>
 
 {% if key_warning %}<div class="alert alert-error key-warning">{{ key_warning }}</div>{% endif %}
 {% if error %}
-<div class="alert alert-error">{{ error }}</div>
+<div class="alert alert-error alert-lines">{{ error }}</div>
 {% endif %}
 
 <form method="post" action="{{ console_prefix }}/orgs/new" class="edit-form">
@@ -59,6 +59,12 @@ connection check passes.</p>
             <option value="schema" {% if prefill.storage_mode | default(value="") == "schema" %}selected{% endif %}>schema — a schema in the registry database</option>
             {% endif %}
           </select>
+          <div class="field-helper mode-database">Database: the tenant's data lives in a
+          database of its own. Choose below where it comes from.</div>
+          <div class="field-helper mode-schema" hidden>Schema: the data lives in a
+          schema in the registry database. It uses the registry's login
+          (<code>DATABASE_URL</code>); tenants share it and get no login of their own.
+          Needs: that login may create schemas there (<code>CREATE</code> on the database).</div>
           {% if not schema_mode_available %}
           <div class="field-helper">Schema mode needs a Postgres
           registry — this one is not, so only database mode is offered.</div>
@@ -81,13 +87,22 @@ connection check passes.</p>
           <label><input type="radio" name="database_source" value="server"
                  {% if source == "server" %}checked{% endif %}
                  {% if not servers %}disabled{% endif %}>
-            Create a new database on a saved server</label><br>
+            Create a new database on a saved server</label>
+          <div class="field-helper">{% if backend == "sqlite" %}A new file in the
+          server's directory; the app must be able to write there.{% else %}Uses the
+          server's admin login once to create the database; the tenant gets its own
+          login. Needs: create databases, create logins, grant rights.{% endif %}</div>
           <label><input type="radio" name="database_source" value="url"
                  {% if source == "url" %}checked{% endif %}>
-            Use an existing database URL</label><br>
+            Use an existing database URL</label>
+          <div class="field-helper">Nothing is created; the database must exist. The
+          tenant uses the login in the URL. No admin rights needed.</div>
           <label><input type="radio" name="database_source" value="registry"
                  {% if source == "registry" %}checked{% endif %}>
             A database on the registry's server (uses the registry's login — not isolated)</label>
+          <div class="field-helper">Not isolated: the tenant uses the registry's login
+          (<code>DATABASE_URL</code>) and shares it. Nothing is created; the database
+          must exist.</div>
           {% if not servers %}
           <div class="field-helper">No saved database server yet —
           <a href="{{ console_prefix }}/db-servers">add one</a> to create
@@ -135,13 +150,6 @@ connection check passes.</p>
           login. An <code>env://</code> reference works too.</div>
         </td>
       </tr>
-      <tr class="mode-database">
-        <th></th>
-        <td>
-          <button type="button" class="btn btn-secondary" id="test-connection">Test connection</button>
-          <div id="probe-result"></div>
-        </td>
-      </tr>
 
       {# ---- schema mode: nothing to name but the schema ---- #}
       <tr class="mode-schema" hidden>
@@ -161,6 +169,14 @@ connection check passes.</p>
           <div class="field-helper">The tenant lives in the registry's
           own database, isolated by <code>search_path</code>. There is no
           separate connection to configure.</div>
+        </td>
+      </tr>
+      <tr>
+        <th></th>
+        <td>
+          <button type="button" class="btn btn-secondary" id="test-connection">Test connection</button>
+          <div class="field-helper">Checks the rights the chosen option needs. Creates nothing.</div>
+          <div id="probe-result"></div>
         </td>
       </tr>
     </table>

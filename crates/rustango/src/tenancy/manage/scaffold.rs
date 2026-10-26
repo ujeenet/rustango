@@ -24,24 +24,33 @@ pub const TENANCY_MANAGE_BIN: &str =
 //! `cargo run -- run-server`, plus everything the
 //! single-tenant dispatcher offers (`migrate`, `makemigrations`, …).
 
-use crate::tenancy::TenantPools;
+use rustango::tenancy::TenantPools;
 
+// Errors print with Display, so a multi-line CLI error reads as lines.
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::process::ExitCode {
+    if let Err(e) = run().await {
+        eprintln!(\"Error: {e}\");
+        return std::process::ExitCode::FAILURE;
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Pull your models into this binary so `inventory` registers
     // them. For the `manage startapp <name>` shape:
     //   #[allow(unused_imports)]
     //   use super::<name>::models::*;
     // Tenancy registry models (Org / Operator / User) come along
-    // automatically via the `crate::tenancy` crate import.
+    // automatically via the `rustango::tenancy` crate import.
 
     let registry_url = std::env::var(\"DATABASE_URL\")?;
     // `Pool::connect_postgres`, not `PgPool::connect`: the framework's
     // constructor applies the pool options your settings configure.
-    let pool = crate::sql::Pool::connect_postgres(&registry_url).await?;
+    let pool = rustango::sql::Pool::connect_postgres(&registry_url).await?;
     let pools = TenantPools::new(pool);
     let dir: &std::path::Path = \"./migrations\".as_ref();
-    crate::tenancy::manage::run(&pools, &registry_url, dir, std::env::args().skip(1)).await?;
+    rustango::tenancy::manage::run(&pools, &registry_url, dir, std::env::args().skip(1)).await?;
     Ok(())
 }
 ";
@@ -215,4 +224,26 @@ fn usage() -> String {
      is `cargo run`-ready out of the gate — no separate `init-tenancy`\n  \
      step. Idempotent."
         .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    /// The bin is its own crate, and a `Result` main prints its error with Debug.
+    #[test]
+    fn manage_bins_print_errors_with_display() {
+        for bin in [
+            super::TENANCY_MANAGE_BIN,
+            crate::migrate::scaffold::SINGLE_TENANT_MANAGE_BIN,
+        ] {
+            assert!(
+                bin.contains("async fn main() -> std::process::ExitCode"),
+                "{bin}"
+            );
+            assert!(bin.contains("eprintln!(\"Error: {e}\")"), "{bin}");
+            assert!(
+                !bin.contains("crate::"),
+                "a bin can't name the library as crate:\n{bin}"
+            );
+        }
+    }
 }

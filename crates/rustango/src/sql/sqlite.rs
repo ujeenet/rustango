@@ -280,6 +280,28 @@ impl Dialect for Sqlite {
         String::new()
     }
 
+    /// JSON is text, so `=` would compare key order and `1` vs `1.0`. Both
+    /// sides' json_tree rows must match, numbers as one type; each is
+    /// written once, so positional binds keep their order.
+    fn write_json_eq(&self, sql: &mut String, lhs: &str, placeholder: &str, ne: bool) -> bool {
+        let rows = |of: &str| {
+            format!(
+                "SELECT fullkey, CASE WHEN type IN ('integer', 'real') THEN 'number' \
+                 ELSE type END, atom FROM json_tree({of})"
+            )
+        };
+        let (l, r) = (rows("rq_json_l"), rows("rq_json_r"));
+        if ne {
+            sql.push_str("NOT ");
+        }
+        sql.push_str(&format!(
+            "(SELECT CASE WHEN rq_json_l IS NULL THEN NULL ELSE \
+             NOT EXISTS ({l} EXCEPT {r}) AND NOT EXISTS ({r} EXCEPT {l}) END \
+             FROM (SELECT {lhs} AS rq_json_l, {placeholder} AS rq_json_r))"
+        ));
+        true
+    }
+
     /// A Decimal binds as text, and text sorts above every number in an
     /// expression with no affinity such as `SUM(x)` or `x * 2`.
     fn write_decimal_param(&self, sql: &mut String, placeholder: &str) {

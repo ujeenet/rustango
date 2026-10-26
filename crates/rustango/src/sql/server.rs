@@ -295,6 +295,27 @@ impl fmt::Debug for LoginPassword {
     }
 }
 
+/// A server-level right a tenant create needs from the login doing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AdminRight {
+    /// Create and drop databases. SQLite: write files in the directory.
+    CreateDatabase,
+    /// Create and drop logins.
+    CreateLogin,
+    /// Grant a new login all rights on its database.
+    Grant,
+    /// Create a schema in the current database.
+    CreateSchema,
+}
+
+/// A login as its server names it. `host` is MySQL's account host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerAccount {
+    pub user: String,
+    pub host: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

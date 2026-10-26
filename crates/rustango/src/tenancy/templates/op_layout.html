@@ -16,7 +16,7 @@
     // Shows a connection probe's JSON as text nodes, never as HTML (#2144).
     async function showProbe(out, res) {
       const p = await res.json().catch(() => null);
-      const el = document.createElement("p");
+      const el = document.createElement("div");
       el.className = "probe " + (p && p.status === "ok" ? "probe-ok" : "probe-bad");
       if (!p) {
         el.textContent = "unexpected response: HTTP " + res.status;
@@ -26,7 +26,39 @@
           code.textContent = p.endpoint;
           el.append("Reached ", code, ". ");
         }
-        el.append(String(p.message || ""));
+        const msg = document.createElement("span");
+        msg.textContent = String(p.message || "");
+        el.append(msg);
+        // A rights report: each right, then how to fix what is missing.
+        if (Array.isArray(p.rights) && p.rights.length) {
+          const ul = document.createElement("ul");
+          ul.className = "rights";
+          for (const r of p.rights) {
+            const li = document.createElement("li");
+            li.className = "right-" + String(r.has);
+            li.textContent = String(r.label) + ": " + String(r.has);
+            ul.append(li);
+          }
+          el.append(ul);
+        }
+        for (const key of ["note", "fix"]) {
+          if (p[key]) {
+            const d = document.createElement("div");
+            d.textContent = String(p[key]);
+            el.append(d);
+          }
+        }
+        if (Array.isArray(p.fix_sql) && p.fix_sql.length) {
+          const pre = document.createElement("pre");
+          pre.className = "fix-sql";
+          pre.textContent = p.fix_sql.map(String).join("\n");
+          el.append(pre);
+        }
+        if (p.alternative) {
+          const d = document.createElement("div");
+          d.textContent = String(p.alternative);
+          el.append(d);
+        }
       }
       out.replaceChildren(el);
     }

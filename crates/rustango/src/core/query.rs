@@ -632,7 +632,8 @@ pub struct SelectQuery {
     /// `.values_list()`. `None` emits every scalar field on the
     /// model; `Some(cols)` emits exactly `cols`, in that order. Joins
     /// still add their `project` columns. Checked when the query is
-    /// built, so every column resolves on the model schema.
+    /// built, so every column resolves on the model schema. A dotted
+    /// `alias.col` reads a joined column, labelled `alias__col`.
     pub projection: Option<Vec<&'static str>>,
     /// DISTINCT mode. `None` emits no DISTINCT clause.
     /// `Some(DistinctMode::All)` emits `SELECT DISTINCT ...`.

@@ -1022,6 +1022,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .with_audited_update_record(
                 <#struct_name as #root::core::Model>::__rustango_audited_update_record,
             )
+            .with_audited_cascade(<#struct_name as #root::core::Model>::__rustango_audited_cascade)
         }
     })
 }
@@ -2851,6 +2852,9 @@ fn model_impl_tokens(
             ) -> ::core::option::Option<#root::audit::AuditedUpdateRecord> {
                 ::core::option::Option::Some(Self::__rustango_update_record_audited)
             }
+            fn __rustango_audited_cascade() -> ::core::option::Option<#root::audit::AuditedCascade> {
+                ::core::option::Option::Some(Self::__rustango_cascade_audited)
+            }
         }
     } else {
         quote!()
@@ -3456,6 +3460,25 @@ fn inherent_impl_tokens(
             })
         }
     };
+    let cascade_audited_body = if primary_key.is_some() {
+        quote! {
+            ::std::boxed::Box::pin(#root::audit::cascade_rows::<Self>(
+                tx,
+                <Self as #root::core::Model>::SCHEMA,
+                rows,
+                |_r: &Self| _r.__rustango_audit_entry(#root::audit::AuditOp::Delete),
+            ))
+        }
+    } else {
+        quote! {
+            let _ = (tx, rows);
+            ::std::boxed::Box::pin(async {
+                ::core::result::Result::Err(#root::sql::ExecError::MissingPrimaryKey {
+                    table: <Self as #root::core::Model>::SCHEMA.table,
+                })
+            })
+        }
+    };
     let update_audited_body = if primary_key.is_some() {
         quote! {
             ::std::boxed::Box::pin(#root::audit::update_many_with_audit::<Self>(
@@ -3555,6 +3578,22 @@ fn inherent_impl_tokens(
                     pk,
                     |_r: &Self| _r.__rustango_audit_entry(#root::audit::AuditOp::Update),
                 ))
+            }
+
+            /// Rows an FK cascade will delete, behind `Model::__rustango_audited_cascade`.
+            #[doc(hidden)]
+            pub fn __rustango_cascade_audited<'a, 't>(
+                tx: &'a mut #root::sql::PoolTx<'t>,
+                rows: #root::core::WhereExpr,
+            ) -> ::std::pin::Pin<::std::boxed::Box<
+                dyn ::core::future::Future<
+                    Output = ::core::result::Result<
+                        ::std::vec::Vec<(#root::core::SqlValue, #root::audit::PendingEntry)>,
+                        #root::sql::ExecError,
+                    >,
+                > + ::core::marker::Send + 'a,
+            >> {
+                #cascade_audited_body
             }
 
             /// Audited bulk `DELETE`, behind `Model::__rustango_audited_delete`.

@@ -25,7 +25,7 @@ use super::object_permissions::AdminWrite;
 use super::queryset_hooks::RowScope;
 use super::render;
 use super::templates::render_with_chrome;
-use super::urls::{ActionPerm, AppState, CREATE_SEGMENT};
+use super::urls::{ActionHandler, ActionPerm, AppState, CREATE_SEGMENT};
 
 /// Render a `data.<key>` cell: read a JSON column at the given key
 /// path and emit an HTML-escaped scalar.
@@ -1998,6 +1998,16 @@ pub(crate) async fn create_submit(
         let html = render_form(&state, model, Some(&form), false, Some(e.as_str()));
         return Ok(Html(html).into_response());
     }
+    // A tenant's host, path prefix and port, claimed as the console does.
+    #[cfg(feature = "tenancy")]
+    let claims = match crate::tenancy::org_host::AdminClaims::of(model.table, &mut collected, None)
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let html = render_form(&state, model, Some(&form), false, Some(e.as_str()));
+            return Ok(Html(html).into_response());
+        }
+    };
     let audit_form = super::audit::audit_form(model, &admin_cfg, &form, &collected);
     let (columns, values): (Vec<&'static str>, Vec<SqlValue>) = collected.into_iter().unzip();
 
@@ -2025,28 +2035,50 @@ pub(crate) async fn create_submit(
     // An `audit(...)` model's entry commits with the INSERT, as on edit (#2101).
     let emit = crate::audit::DiffEmit::for_model(model);
     let refused = |msg: String| Html(render_form(&state, model, Some(&form), false, Some(&msg)));
-    let mut tx = match crate::sql::write_transaction(&state.pool).await {
-        Ok(tx) => tx,
-        Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
-    };
-    let written = crate::audit::insert_one_with_entry_tx(
-        &mut tx,
-        &state.pool,
-        &query,
-        pk_field,
-        |pk| {
-            let pk = pk.to_display_string();
-            super::audit::admin_audit_entry(model, &pk, crate::audit::AuditOp::Create, &audit_form)
-        },
-        emit,
-    )
-    .await;
-    let (pk, deferred) = match written {
-        Ok(w) => w,
-        Err(e) => {
+    // MySQL breaks two claims of one free value with a deadlock: retry once.
+    #[cfg(feature = "tenancy")]
+    let mut retry = claims.retries();
+    let (mut tx, pk, deferred) = loop {
+        let mut tx = match crate::audit::PoolBoundTx::begin_write(&state.pool).await {
+            Ok(tx) => tx,
+            Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
+        };
+        let written = crate::audit::insert_one_with_entry_tx(
+            &mut tx,
+            &query,
+            pk_field,
+            |pk| {
+                let pk = pk.to_display_string();
+                super::audit::admin_audit_entry(
+                    model,
+                    &pk,
+                    crate::audit::AuditOp::Create,
+                    &audit_form,
+                )
+            },
+            emit,
+        )
+        .await;
+        let (pk, deferred) = match written {
+            Ok(w) => w,
+            Err(e) => {
+                rollback_quietly(tx, model.table).await;
+                #[cfg(feature = "tenancy")]
+                if std::mem::take(&mut retry) && e.is_deadlock() {
+                    continue;
+                }
+                return Ok(refused(write_error(model, &e)).into_response());
+            }
+        };
+        #[cfg(feature = "tenancy")]
+        if let Err(e) = claims.after_write(&mut tx, &pk).await {
             rollback_quietly(tx, model.table).await;
-            return Ok(refused(write_error(model, &e)).into_response());
+            if std::mem::take(&mut retry) && e.is_deadlock() {
+                continue;
+            }
+            return Ok(refused(claim_refusal(model, e)).into_response());
         }
+        break (tx, pk, deferred);
     };
     match admits_written(
         &mut tx,
@@ -2088,6 +2120,19 @@ pub(crate) async fn create_submit(
     .await;
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_value, &form);
     Ok(Redirect::to(&target).into_response())
+}
+
+/// The form error for a routing claim another tenant holds.
+#[cfg(feature = "tenancy")]
+fn claim_refusal(
+    model: &'static crate::core::ModelSchema,
+    e: crate::tenancy::org_host::ClaimError,
+) -> String {
+    use crate::tenancy::org_host::ClaimError;
+    match e {
+        ClaimError::Taken(key) => format!("{key} is already used by another tenant."),
+        ClaimError::Driver(e) => write_error(model, &e),
+    }
 }
 
 /// The form error for a failed write. Never the driver's text: it holds
@@ -2343,6 +2388,18 @@ pub(crate) async fn update_submit(
         let html = render_form(&state, model, Some(&form), true, Some(e.as_str()));
         return Ok(Html(html).into_response());
     }
+    #[cfg(feature = "tenancy")]
+    let claims = match crate::tenancy::org_host::AdminClaims::of(
+        model.table,
+        &mut collected,
+        pre_update_row.as_ref(),
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            let html = render_form(&state, model, Some(&form), true, Some(e.as_str()));
+            return Ok(Html(html).into_response());
+        }
+    };
     let audit_form = super::audit::audit_form(model, &admin_cfg, &form, &collected);
     let assignments: Vec<Assignment> = collected
         .into_iter()
@@ -2396,30 +2453,53 @@ pub(crate) async fn update_submit(
     // Parent and inline writes share one transaction: a refused inline
     // row rolls the parent back too (#2339).
     let refused = |msg: String| Html(render_form(&state, model, Some(&form), true, Some(&msg)));
-    let mut tx = match crate::sql::write_transaction(&state.pool).await {
-        Ok(tx) => tx,
-        Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
-    };
-    let written = crate::audit::update_one_with_row_diff_tx(
-        &mut tx,
-        &state.pool,
-        &query,
-        before_select,
-        &pre_update_fields,
-        |row| super::audit::admin_audit_diff_entry(model, &pk_raw, row, &audit_form),
-        emit,
-    )
-    .await;
-    let deferred = match written {
-        Ok(crate::audit::RowDiffWrite::Written { deferred }) => deferred,
-        Ok(crate::audit::RowDiffWrite::Gone) => {
+    // An extra host is checked after its UPDATE: retried once, as on create.
+    #[cfg(feature = "tenancy")]
+    let mut retry = claims.retries();
+    let (mut tx, deferred) = loop {
+        #[cfg(feature = "tenancy")]
+        let mut tx = match claims.begin(&state.pool, &pk_value).await {
+            Ok(tx) => crate::audit::PoolBoundTx::opened_on(&state.pool, tx),
+            Err(e) => return Ok(refused(claim_refusal(model, e)).into_response()),
+        };
+        #[cfg(not(feature = "tenancy"))]
+        let mut tx = match crate::audit::PoolBoundTx::begin_write(&state.pool).await {
+            Ok(tx) => tx,
+            Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
+        };
+        let written = crate::audit::update_one_with_row_diff_tx(
+            &mut tx,
+            &query,
+            before_select.clone(),
+            &pre_update_fields,
+            |row| super::audit::admin_audit_diff_entry(model, &pk_raw, row, &audit_form),
+            emit,
+        )
+        .await;
+        let deferred = match written {
+            Ok(crate::audit::RowDiffWrite::Written { deferred }) => deferred,
+            Ok(crate::audit::RowDiffWrite::Gone) => {
+                rollback_quietly(tx, model.table).await;
+                return Err(AdminError::RowNotFound { table, pk: pk_raw });
+            }
+            Err(e) => {
+                rollback_quietly(tx, model.table).await;
+                #[cfg(feature = "tenancy")]
+                if std::mem::take(&mut retry) && e.is_deadlock() {
+                    continue;
+                }
+                return Ok(refused(write_error(model, &e)).into_response());
+            }
+        };
+        #[cfg(feature = "tenancy")]
+        if let Err(e) = claims.after_write(&mut tx, &pk_value).await {
             rollback_quietly(tx, model.table).await;
-            return Err(AdminError::RowNotFound { table, pk: pk_raw });
+            if std::mem::take(&mut retry) && e.is_deadlock() {
+                continue;
+            }
+            return Ok(refused(claim_refusal(model, e)).into_response());
         }
-        Err(e) => {
-            rollback_quietly(tx, model.table).await;
-            return Ok(refused(write_error(model, &e)).into_response());
-        }
+        break (tx, deferred);
     };
     match admits_written(&mut tx, &parts, model, pk_field, pk_value, Written::Edited).await {
         Ok(true) => {}
@@ -2435,25 +2515,26 @@ pub(crate) async fn update_submit(
             return Ok(refused(write_error(model, &e)).into_response());
         }
     }
-    let child_rows =
-        match super::inlines::apply_plan_tx(&mut tx, &state.pool, &parts, inline_plan).await {
-            Ok((_, rows)) => rows,
-            Err(e) => {
-                use super::inlines::InlineApplyError as E;
-                rollback_quietly(tx, model.table).await;
-                let why = match e {
-                    E::Write { child, error } => write_error(child, &error),
-                    E::MaxNum { child } => format!("{} allows no more rows here.", child.name),
-                    E::Forbidden { child, action } => {
-                        return Err(AdminError::Forbidden {
-                            table: child.table.to_owned(),
-                            action,
-                        })
-                    }
-                };
-                return Ok(refused(format!("Nothing was saved: {why}")).into_response());
-            }
-        };
+    let child_rows = match super::inlines::apply_plan_tx(&mut tx, &parts, inline_plan).await {
+        Ok((_, rows)) => rows,
+        Err(e) => {
+            use super::inlines::InlineApplyError as E;
+            rollback_quietly(tx, model.table).await;
+            let why = match e {
+                E::Write { child, error } => write_error(child, &error),
+                E::MaxNum { child } => format!("{} allows no more rows here.", child.name),
+                #[cfg(feature = "tenancy")]
+                E::Claim { child, error } => claim_refusal(child, error),
+                E::Forbidden { child, action } => {
+                    return Err(AdminError::Forbidden {
+                        table: child.table.to_owned(),
+                        action,
+                    })
+                }
+            };
+            return Ok(refused(format!("Nothing was saved: {why}")).into_response());
+        }
+    };
     if let Err(e) = tx.commit().await {
         return Ok(refused(write_error(model, &e.into())).into_response());
     }
@@ -2525,7 +2606,7 @@ pub(super) async fn admits_written(
 
 /// A failed ROLLBACK must not replace the refusal with a 500; dropping
 /// the connection discards the tx anyway.
-async fn rollback_quietly(tx: crate::sql::PoolTx<'_>, table: &str) {
+async fn rollback_quietly(tx: crate::audit::PoolBoundTx<'_>, table: &str) {
     if let Err(e) = tx.rollback().await {
         tracing::warn!(target: "rustango::admin", error = %e, table, "admin edit rollback failed");
     }
@@ -2591,7 +2672,7 @@ pub(crate) async fn delete_submit(
         super::audit::admin_row_snapshot_entry(model, pk_raw.clone(), audit_op, &before_row, None);
     // An `audit(...)` model's entry commits with the write, as on edit (#2390).
     let emit = crate::audit::DiffEmit::for_model(model);
-    let mut tx = crate::sql::write_transaction(&state.pool).await?;
+    let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
     let written = if let Some(col) = model.soft_delete_column {
         let now = Some(chrono::Utc::now());
         let stamp = crate::soft_delete::__mark_query(model, col, pk_field.column, pk_value, now);
@@ -2613,9 +2694,7 @@ pub(crate) async fn delete_submit(
         return Ok(Redirect::to(&list_url).into_response());
     }
     if emit == crate::audit::DiffEmit::InTx {
-        if let Err(e) =
-            crate::audit::emit_in_tx(&mut tx, &state.pool, std::slice::from_ref(&entry)).await
-        {
+        if let Err(e) = crate::audit::emit_in_tx(&mut tx, std::slice::from_ref(&entry)).await {
             rollback_quietly(tx, model.table).await;
             return Err(e.into());
         }
@@ -2851,11 +2930,32 @@ pub(crate) async fn action_submit(
     };
     let builtin = match &write {
         BulkWrite::Custom(a) => {
-            // Handlers get the `Pool` enum, so a user action can match on the
-            // backend. It writes on its own connection, so its audit follows it.
-            (a.handler)(&state.pool, &pk_values).await?;
             let entries = entries_for(&before_rows, &row_pks);
-            super::audit::emit_many_best_effort(&state, &entries, &action).await;
+            match &a.handler {
+                // A pool handler writes on its own connection, so its audit follows it.
+                ActionHandler::Pool(handler) => {
+                    handler(&state.pool, &pk_values).await?;
+                    super::audit::emit_many_best_effort(&state, &entries, &action).await;
+                }
+                ActionHandler::Tx(handler) => {
+                    let emit = crate::audit::DiffEmit::for_model(model);
+                    let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
+                    if let Err(e) = handler(&mut tx, &pk_values).await {
+                        rollback_quietly(tx, model.table).await;
+                        return Err(e);
+                    }
+                    if emit == crate::audit::DiffEmit::InTx {
+                        if let Err(e) = crate::audit::emit_in_tx(&mut tx, &entries).await {
+                            rollback_quietly(tx, model.table).await;
+                            return Err(e.into());
+                        }
+                    }
+                    tx.commit().await.map_err(crate::sql::ExecError::from)?;
+                    if emit == crate::audit::DiffEmit::Deferred {
+                        super::audit::emit_many_best_effort(&state, &entries, &action).await;
+                    }
+                }
+            }
             send_row_signals(model.table, &row_pks, is_delete, false).await;
             return back();
         }
@@ -2869,7 +2969,7 @@ pub(crate) async fn action_submit(
     };
     // An `audit(...)` model's entries commit with the write (#2390).
     let emit = crate::audit::DiffEmit::for_model(model);
-    let mut tx = crate::sql::write_transaction(&state.pool).await?;
+    let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
     let changed = match builtin.run(&mut tx, model, pk_field, &pk_values).await {
         Ok(changed) => changed,
         Err(e) => {
@@ -2887,7 +2987,7 @@ pub(crate) async fn action_submit(
         .unzip();
     let entries = entries_for(&before_rows, &row_pks);
     if emit == crate::audit::DiffEmit::InTx {
-        if let Err(e) = crate::audit::emit_in_tx(&mut tx, &state.pool, &entries).await {
+        if let Err(e) = crate::audit::emit_in_tx(&mut tx, &entries).await {
             rollback_quietly(tx, model.table).await;
             return Err(e.into());
         }

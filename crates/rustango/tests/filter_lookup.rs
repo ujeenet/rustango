@@ -259,7 +259,7 @@ fn in_emits_in_clause_with_list_value() {
     );
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
     assert!(
-        stmt.sql.contains(r#""author_id" IN ($1, $2, $3)"#),
+        stmt.sql.contains(r#""author_id" = ANY($1)"#),
         "got: {}",
         stmt.sql
     );
@@ -451,8 +451,8 @@ fn not_in_emits_not_in_clause() {
     let qs = Post::objects().filter("author_id__not_in", list);
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
     assert!(
-        stmt.sql.contains(r#""author_id" NOT IN"#),
-        "expected NOT IN clause, got: {}",
+        stmt.sql.contains(r#""author_id" <> ALL($1)"#),
+        "expected <> ALL on PG, got: {}",
         stmt.sql
     );
 }

@@ -150,6 +150,69 @@ untouched.
 
 ## Unreleased
 
+## 0.61.2
+
+### SQLite: JSON column equality compares values
+
+`filter(data = json)` on SQLite now matches `1` to `1.0` and objects in any key order, as PostgreSQL and MySQL do; a filter that relied on text equality may match more rows.
+
+### MySQL: correlated `IN` over the written table
+
+In `update()` / `delete()`, a `where_in_subquery` over the same table that uses `outer_ref` now returns MySQL error 1093. Before, it ran but could see rows the same statement had already changed. A `where_exists` / `where_not_exists` with `outer_ref`, placed directly in the write's filter, still runs.
+
+### Deletes that cascade to audited models
+
+Such a delete now runs in a transaction and first reads (and locks) the rows it will cascade to. Cascade audit happens on pool / transaction paths (`delete_pool`, `PoolTx`, `PoolConn`); a raw sqlx executor still runs the plain DELETE and logs a one-time warning.
+
+### PostgreSQL `IN` lists compile to `= ANY($1)`
+
+Code that inspects compiled PG SQL sees `col = ANY($1)` with one `SqlValue::Array` bind instead of `col IN ($1, …)`. Results are the same.
+
+### Schema-mode tenants get a second pool
+
+`TenantPools::acquire` (and so `Tenant`) takes its connection from a per-tenant pool, not the registry pool. Budget `2 * max_cached_scoped_pools * scoped_pool_max_connections` connections on the registry server.
+
+### `migrate-tenant-storage --to schema` creates the schema first
+
+It refuses a target schema that already exists, before the tenant goes offline, and drops the empty schema again if the move fails.
+
+### Admin edits of tenants are checked
+
+Saving a `rustango_orgs` or `rustango_org_hosts` row in the generic admin now refuses a host, path prefix or port another tenant uses, and stores hosts lowercased.
+
+### Webhook receivers: move to signature v2
+
+Verify `X-Webhook-Signature-V2` with `webhook::verify_delivery` and drop repeated `X-Webhook-Id`s within its `max_age`. The body-only `X-Webhook-Signature` stays for now but does not stop replays.
+
+### `rustango_jobs` gets a `queue_name` column
+
+`PgJobQueue::ensure_table_pool` adds it. With a hand-written migration, add `queue_name` (`TEXT`, `VARCHAR(255)` on MySQL) before naming a queue. Once the column exists, unnamed queues no longer run jobs of named ones.
+Old workers ignore the column and still run named jobs: drain them before you dispatch on a named queue.
+
+### Schema-mode creates check `CREATE` on the registry database
+
+A registry login without it is now refused before `CREATE SCHEMA`, with the `GRANT` to run.
+
+### `render_generic_fk_link` is deprecated
+
+It renders a root-relative link with no permission check. Look up the target with `ContentType::by_id` and build the link under your own prefix.
+
+### Audited bulk actions: prefer `register_tx_action`
+
+A `register_action` handler writes on its own connection, so its audit rows are best effort. `register_tx_action` takes `&mut PoolTx` and audits in the same transaction; write only through that transaction (a second connection can deadlock a single-connection SQLite pool).
+
+### `ModelForm` over a user table
+
+Call `.acting_superuser(user.is_superuser)` so a non-superuser cannot set the table's registered superuser-only fields (the tenant `rustango_users` locks `is_superuser` and the password); without it the form locks nothing.
+
+### Generated `main.rs` prints errors with Display
+
+New projects wrap the `Cli` in `async fn run()` and print its error with `{e}`. Existing projects can copy that shape to stop `Validation("…")` output.
+
+### API keys get a new stored hash
+
+New keys are stored as `hmac-sha256v2$…` and do not verify on 0.61.1 or older; existing `hmac-sha256$…` keys keep working on both.
+
 ## 0.61.1
 
 ### Scaffold taglines lose their brackets

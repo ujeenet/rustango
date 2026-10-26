@@ -2208,6 +2208,25 @@ pub(crate) fn column_fk_sql(
         .transpose()
 }
 
+/// MySQL's `MODIFY` of junction column `through.column` to the width of the
+/// pk it references in `snap`, so a widened pk takes the FK back (MySQL error 3780).
+pub(crate) fn junction_modify_sql(
+    snap: &SchemaSnapshot,
+    through: &str,
+    column: &str,
+    dialect: &dyn crate::sql::Dialect,
+) -> Option<String> {
+    let Some(ColumnFk::Junction(to)) = column_fk(snap, through, column) else {
+        return None;
+    };
+    let (ty, _, _) = m2m_end(snap, to, dialect);
+    Some(format!(
+        "ALTER TABLE {} MODIFY COLUMN {} {ty} NOT NULL",
+        dialect.quote_ident(through),
+        dialect.quote_ident(column),
+    ))
+}
+
 /// A junction column's FK, which cascades.
 fn m2m_fk_sql(
     through: &str,
@@ -3738,7 +3757,8 @@ mod sql_type_tests {
         assert!(gone.rebuild.is_none() && gone.immediate.is_empty());
     }
 
-    /// MySQL spells a check drop `DROP CHECK`, with no `IF EXISTS`.
+    /// MySQL spells a check drop `DROP CHECK` (MariaDB `DROP CONSTRAINT`),
+    /// with no `IF EXISTS`.
     ///
     /// This test previously asserted
     /// `` ALTER TABLE `t` DROP CONSTRAINT IF EXISTS `ck_x` ``, which
@@ -3764,7 +3784,7 @@ mod sql_type_tests {
         let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql).unwrap();
         assert_eq!(
             out.immediate,
-            vec!["ALTER TABLE `t` DROP CHECK `ck_x`".to_string()]
+            vec!["ALTER TABLE `t` DROP /*!80000 CHECK */ /*M! CONSTRAINT */ `ck_x`".to_string()]
         );
         assert!(
             !out.immediate[0].contains("IF EXISTS"),

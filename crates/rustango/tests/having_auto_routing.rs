@@ -205,7 +205,7 @@ fn sqlite_emits_having_with_double_quotes() {
 
 // ---------- Richer ops on alias-routed filter (issue #87) ----------
 
-/// `Op::In` against an annotation alias emits `HAVING <agg> IN ($1, $2, …)`.
+/// `Op::In` against an annotation alias emits `HAVING <agg> = ANY($1)` on PG.
 /// Pre-#87 this rejected at `compile()` with `HavingOpNotSupported`.
 #[test]
 fn op_in_against_alias_emits_having_in() {
@@ -223,11 +223,11 @@ fn op_in_against_alias_emits_having_in() {
         .unwrap();
     let stmt = Postgres.compile_aggregate(&q).unwrap();
     assert!(
-        stmt.sql.contains("HAVING COUNT(*) IN ($1, $2, $3)"),
-        "PG: HAVING aggregate IN (...): {}",
+        stmt.sql.contains("HAVING COUNT(*) = ANY($1)"),
+        "PG: HAVING aggregate = ANY(...): {}",
         stmt.sql
     );
-    assert_eq!(stmt.params.len(), 3);
+    assert_eq!(stmt.params.len(), 1);
 }
 
 #[test]
@@ -246,8 +246,8 @@ fn op_not_in_against_alias_emits_having_not_in() {
         .unwrap();
     let stmt = Postgres.compile_aggregate(&q).unwrap();
     assert!(
-        stmt.sql.contains("HAVING COUNT(*) NOT IN ($1, $2)"),
-        "PG: HAVING aggregate NOT IN (...): {}",
+        stmt.sql.contains("HAVING COUNT(*) <> ALL($1)"),
+        "PG: HAVING aggregate <> ALL(...): {}",
         stmt.sql
     );
 }

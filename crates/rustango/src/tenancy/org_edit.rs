@@ -24,6 +24,7 @@
 use crate::core::{Column as _, Model as _};
 use crate::sql::{FetcherPool as _, Pool};
 use crate::tenancy::error::TenancyError;
+use crate::tenancy::org_host::{claim_routing, ClaimError, ClaimKey, Claimant};
 use crate::tenancy::{Org, SecretsResolver as _, TenantSecrets};
 
 /// Which fields an edit touches. `None` means "leave alone" — distinct
@@ -218,7 +219,8 @@ pub(crate) async fn apply_values_if(
     let mut set: Vec<crate::core::Assignment> = Vec::new();
     let mut touched: Vec<&'static str> = Vec::new();
     let mut database_url_rotated = false;
-    let mut claim: Option<String> = None;
+    // Claimed in the UPDATE's transaction below.
+    let mut claims: Vec<ClaimKey> = Vec::new();
     // An operator activated it, so no provisioning retry may resume it (#2292).
     let activating = values
         .iter()
@@ -244,29 +246,19 @@ pub(crate) async fn apply_values_if(
                 // Store the normalized form so it matches a `Host` header byte-for-byte.
                 let host = crate::tenancy::provision::validate_host_pattern(&v)
                     .map_err(TenancyError::Validation)?;
-                // Claimed in the UPDATE's transaction below (#2099).
-                claim = Some(host.clone());
+                claims.push(ClaimKey::Host(host.clone()));
                 SqlValue::String(host)
             }
             ("path_prefix", SqlValue::String(v)) => {
                 let v = v.trim().to_owned();
                 crate::tenancy::provision::validate_path_prefix(&v)
                     .map_err(TenancyError::Validation)?;
-                if crate::tenancy::org_host::prefix_claimed(registry, &v, Some(existing_id)).await?
-                {
-                    return Err(TenancyError::Validation(format!(
-                        "path prefix `{v}` is already used by another tenant"
-                    )));
-                }
+                claims.push(ClaimKey::PathPrefix(v.clone()));
                 SqlValue::String(v)
             }
             ("port", SqlValue::I32(n)) => {
                 crate::tenancy::provision::validate_port(n).map_err(TenancyError::Validation)?;
-                if crate::tenancy::org_host::port_claimed(registry, n, Some(existing_id)).await? {
-                    return Err(TenancyError::Validation(format!(
-                        "port {n} is already used by another tenant"
-                    )));
-                }
+                claims.push(ClaimKey::Port(n));
                 SqlValue::I32(n)
             }
             (_, v) => v,
@@ -298,15 +290,12 @@ pub(crate) async fn apply_values_if(
         set,
         where_clause: crate::core::WhereExpr::and_predicates(filters),
     };
-    use crate::tenancy::org_host::{claim_error, claim_host, Claimant};
-    let mut tx = match &claim {
-        Some(host) => {
-            claim_host(registry, host, Claimant::Base(existing_id))
-                .await
-                .map_err(claim_error)?
-                .tx
-        }
-        None => crate::sql::write_transaction(registry).await?,
+    let mut tx = if claims.is_empty() {
+        crate::sql::write_transaction(registry).await?
+    } else {
+        claim_routing(registry, &claims, Claimant::Base(existing_id))
+            .await
+            .map_err(ClaimError::into_tenancy)?
     };
     if crate::sql::update_tx(&mut tx, &update).await? == 0 && expected.is_some() {
         return Ok(None);

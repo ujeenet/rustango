@@ -368,11 +368,29 @@ pub(super) async fn test_connection(
 ) -> Response<Body> {
     let field = |k: &str| form.get(k).map(|s| s.trim()).filter(|s| !s.is_empty());
 
+    // Schema mode: the registry's own login creates the schema.
+    if field("storage_mode") == Some("schema") {
+        if state.registry.dialect().name() != "postgres" {
+            return probe_bad("Schema mode needs a Postgres registry; choose database mode.");
+        }
+        let rights = crate::tenancy::rights::RightsReport::for_new_schema(&state.registry).await;
+        let probe = super::db_servers::ServerProbe::of(
+            &rights,
+            "Schema mode uses the registry's login (DATABASE_URL).".to_owned(),
+        );
+        return axum::Json(probe).into_response();
+    }
+
     // A new database on a saved server: report its admin's rights.
     if field("storage_mode") != Some("schema") && field("database_source") == Some("server") {
         let Some(name) = field("server") else {
             return probe_bad("Choose a saved database server first.");
         };
+        // The rights first, listed; a refused server needs no dry run.
+        let probe = super::db_servers::server_probe(&state, &op, name).await;
+        if !probe.is_ok() {
+            return axum::Json(probe).into_response();
+        }
         // With a slug, everything a submit checks before DDL, dry.
         if field("slug").is_some() {
             let Some(p) = state.provisioner.as_ref() else {
@@ -407,7 +425,7 @@ pub(super) async fn test_connection(
                 return probe_bad(&msg);
             }
         }
-        return super::db_servers::probe_response(&state, &op, name).await;
+        return axum::Json(probe).into_response();
     }
 
     // Probe exactly what a submit would use — an explicit URL, or the

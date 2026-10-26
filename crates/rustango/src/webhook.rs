@@ -107,6 +107,98 @@ pub fn sign(
     })
 }
 
+/// The signed headers of a delivery from `rustango::webhook_delivery`,
+/// as received.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct DeliveryHeaders<'a> {
+    /// `X-Webhook-Id`.
+    pub id: &'a str,
+    /// `X-Webhook-Event`.
+    pub event: &'a str,
+    /// `X-Webhook-Timestamp`, unix seconds at dispatch.
+    pub timestamp: &'a str,
+    /// `X-Webhook-Signature-V2`.
+    pub signature: &'a str,
+}
+
+impl<'a> DeliveryHeaders<'a> {
+    /// The four header values, as received.
+    #[must_use]
+    pub fn new(id: &'a str, event: &'a str, timestamp: &'a str, signature: &'a str) -> Self {
+        Self {
+            id,
+            event,
+            timestamp,
+            signature,
+        }
+    }
+}
+
+/// The v2 signed string. Header values hold no newline, so no two
+/// deliveries share one.
+fn delivery_message(id: &str, event: &str, timestamp: &str, body: &[u8]) -> Vec<u8> {
+    let mut msg = format!("v2\n{id}\n{event}\n{timestamp}\n").into_bytes();
+    msg.extend_from_slice(body);
+    msg
+}
+
+/// The `X-Webhook-Signature-V2` of a delivery: it covers the id, event,
+/// timestamp and body, so none can be swapped or replayed under a new id.
+///
+/// # Errors
+/// [`EmptySigningKey`] when `secret` is empty.
+pub fn sign_delivery(
+    format: SignatureFormat,
+    secret: &[u8],
+    id: &str,
+    event: &str,
+    timestamp: i64,
+    body: &[u8],
+) -> Result<String, EmptySigningKey> {
+    let msg = delivery_message(id, event, &timestamp.to_string(), body);
+    sign(format, secret, &msg)
+}
+
+/// Check a delivery's v2 signature, and that its timestamp is within
+/// `max_age` of now. Drop repeated `X-Webhook-Id`s seen within `max_age`
+/// to refuse replays. Retries reuse the dispatch timestamp, so `max_age`
+/// must cover queue backlog plus the retry window (about two minutes).
+///
+/// ```
+/// use rustango::webhook::{sign_delivery, verify_delivery, DeliveryHeaders, SignatureFormat};
+/// let now = std::time::SystemTime::now()
+///     .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+/// let f = SignatureFormat::HexSha256WithPrefix;
+/// let sig = sign_delivery(f, b"s", "id-1", "order.created", now, b"{}").unwrap();
+/// let ts = now.to_string();
+/// let h = DeliveryHeaders::new("id-1", "order.created", &ts, &sig);
+/// assert!(verify_delivery(f, b"s", &h, b"{}", std::time::Duration::from_secs(300)));
+/// let replayed = DeliveryHeaders::new("id-2", "order.created", &ts, &sig);
+/// assert!(!verify_delivery(f, b"s", &replayed, b"{}", std::time::Duration::from_secs(300)));
+/// ```
+#[must_use]
+pub fn verify_delivery(
+    format: SignatureFormat,
+    secret: &[u8],
+    headers: &DeliveryHeaders<'_>,
+    body: &[u8],
+    max_age: std::time::Duration,
+) -> bool {
+    let Ok(at) = headers.timestamp.parse::<i64>() else {
+        return false;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    let max_age = i64::try_from(max_age.as_secs()).unwrap_or(i64::MAX);
+    if now.abs_diff(at) > max_age.unsigned_abs() {
+        return false;
+    }
+    let msg = delivery_message(headers.id, headers.event, headers.timestamp, body);
+    verify_signature(format, secret, &msg, headers.signature)
+}
+
 /// `None` for an empty key.
 fn compute_hmac(secret: &[u8], body: &[u8]) -> Option<Vec<u8>> {
     if secret.is_empty() {
@@ -152,6 +244,76 @@ fn from_hex(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn now() -> i64 {
+        chrono::Utc::now().timestamp()
+    }
+
+    #[test]
+    fn a_delivery_verifies_only_as_signed_and_fresh() {
+        let f = SignatureFormat::HexSha256;
+        let age = std::time::Duration::from_secs(300);
+        let at = now();
+        let sig = sign_delivery(f, SECRET, "id-1", "ping", at, BODY).unwrap();
+        let ts = at.to_string();
+        let h = DeliveryHeaders {
+            id: "id-1",
+            event: "ping",
+            timestamp: &ts,
+            signature: &sig,
+        };
+        assert!(verify_delivery(f, SECRET, &h, BODY, age));
+        assert!(!verify_delivery(
+            f,
+            SECRET,
+            &DeliveryHeaders { id: "id-2", ..h },
+            BODY,
+            age
+        ));
+        assert!(!verify_delivery(
+            f,
+            SECRET,
+            &DeliveryHeaders { event: "pong", ..h },
+            BODY,
+            age
+        ));
+        assert!(!verify_delivery(f, SECRET, &h, b"{}", age));
+        assert!(!verify_delivery(f, b"other", &h, BODY, age));
+        // The v1 body-only signature is not a v2 one.
+        let v1 = sign(f, SECRET, BODY).unwrap();
+        assert!(!verify_delivery(
+            f,
+            SECRET,
+            &DeliveryHeaders {
+                signature: &v1,
+                ..h
+            },
+            BODY,
+            age
+        ));
+        // A stale or future timestamp fails even with its own signature.
+        for off in [-301, 301] {
+            let at = now() + off;
+            let sig = sign_delivery(f, SECRET, "id-1", "ping", at, BODY).unwrap();
+            let ts = at.to_string();
+            let old = DeliveryHeaders {
+                timestamp: &ts,
+                signature: &sig,
+                ..h
+            };
+            assert!(!verify_delivery(f, SECRET, &old, BODY, age), "{off}");
+        }
+        assert!(!verify_delivery(
+            f,
+            SECRET,
+            &DeliveryHeaders {
+                timestamp: "x",
+                ..h
+            },
+            BODY,
+            age
+        ));
+    }
 
     const SECRET: &[u8] = b"my-test-secret";
     const BODY: &[u8] = b"{\"event\":\"ping\"}";

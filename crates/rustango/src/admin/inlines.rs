@@ -1283,6 +1283,9 @@ enum InlineWrite {
         /// Re-read after the write to check the row is still in scope.
         pk: SqlValue,
         audit: Option<ChildAudit>,
+        /// An extra host's claim, as on its own page.
+        #[cfg(feature = "tenancy")]
+        claims: crate::tenancy::org_host::AdminClaims,
     },
     Delete {
         query: InlineRemove,
@@ -1398,6 +1401,8 @@ struct InlineInsert {
     query: crate::core::InsertQuery,
     /// The audit form of an `audit(...)` child.
     audit: Option<HashMap<String, String>>,
+    #[cfg(feature = "tenancy")]
+    claims: crate::tenancy::org_host::AdminClaims,
 }
 
 /// What an audited child UPDATE diffs its locked row against.
@@ -1595,6 +1600,9 @@ async fn plan_target(
                 return Err(refused("add").into());
             }
             let mut values = target.values(&row, false).map_err(|e| bad_row(idx, e))?;
+            #[cfg(feature = "tenancy")]
+            let claims = crate::tenancy::org_host::AdminClaims::of(table, &mut values, None)
+                .map_err(|e| InlinePlanError::Rejected(format!("{name} row {}: {e}", idx + 1)))?;
             if let Some(pk) = natural_pk {
                 let value =
                     crate::forms::parse_pk_string(pk, &raw_pk).map_err(|e| bad_row(idx, e))?;
@@ -1638,7 +1646,12 @@ async fn plan_target(
             // The new PK feeds the scope re-read, audit entry and `admin_post_save`.
             let mut query = crate::core::InsertQuery::new(target.child, columns, sql_values);
             query.returning = vec![target.pk.column];
-            out.inserts.push(InlineInsert { query, audit });
+            out.inserts.push(InlineInsert {
+                query,
+                audit,
+                #[cfg(feature = "tenancy")]
+                claims,
+            });
             continue;
         }
 
@@ -1689,7 +1702,8 @@ async fn plan_target(
             continue;
         }
 
-        let values = target.values(&row, true).map_err(|e| bad_row(idx, e))?;
+        #[cfg_attr(not(feature = "tenancy"), allow(unused_mut))]
+        let mut values = target.values(&row, true).map_err(|e| bad_row(idx, e))?;
         if values.is_empty() {
             continue;
         }
@@ -1698,6 +1712,9 @@ async fn plan_target(
                 "{name} row {raw_pk} was deleted after this page loaded. Reload the page and try again."
             )));
         };
+        #[cfg(feature = "tenancy")]
+        let claims = crate::tenancy::org_host::AdminClaims::of(table, &mut values, Some(&before))
+            .map_err(|e| InlinePlanError::Rejected(format!("{name} row {raw_pk}: {e}")))?;
         if target.unchanged(&before, &values) {
             continue;
         }
@@ -1719,6 +1736,8 @@ async fn plan_target(
             query: crate::core::UpdateQuery::new(target.child, set, target.row_where(pk.clone())),
             pk,
             audit,
+            #[cfg(feature = "tenancy")]
+            claims,
         });
     }
     // `max_num` caps the rows a POST that adds any may leave (#1717):
@@ -1767,13 +1786,18 @@ pub(crate) enum InlineApplyError {
         child: &'static ModelSchema,
         action: &'static str,
     },
+    /// A routing value another tenant holds.
+    #[cfg(feature = "tenancy")]
+    Claim {
+        child: &'static ModelSchema,
+        error: crate::tenancy::org_host::ClaimError,
+    },
 }
 
 /// Run a checked plan in the parent's `tx`; the caller rolls back on error.
 /// An `audit(...)` child's entries go in `tx` too, one batch per inline (#2389).
 pub(crate) async fn apply_plan_tx(
-    tx: &mut crate::sql::PoolTx<'_>,
-    pool: &Pool,
+    tx: &mut crate::audit::PoolBoundTx<'_>,
     parts: &Parts,
     plan: InlinePlan,
 ) -> Result<(InlineApplyOutcome, Vec<ChildSignal>), InlineApplyError> {
@@ -1804,9 +1828,13 @@ pub(crate) async fn apply_plan_tx(
                     query,
                     pk,
                     audit: None,
+                    #[cfg(feature = "tenancy")]
+                    claims,
                 } => {
                     if crate::sql::update_tx(tx, &query).await.map_err(refused)? > 0 {
                         let key = pk.to_display_string();
+                        #[cfg(feature = "tenancy")]
+                        claim_written(tx, child, &claims, &pk).await?;
                         admit_written(tx, parts, child, target.pk, pk, Written::Edited).await?;
                         written_rows.push(ChildSignal::Save {
                             table,
@@ -1820,10 +1848,11 @@ pub(crate) async fn apply_plan_tx(
                     query,
                     pk,
                     audit: Some(audit),
+                    #[cfg(feature = "tenancy")]
+                    claims,
                 } => {
                     let written = crate::audit::update_one_with_row_diff_tx(
                         tx,
-                        pool,
                         &query,
                         locked(&query.where_clause),
                         &fields,
@@ -1836,6 +1865,8 @@ pub(crate) async fn apply_plan_tx(
                     .map_err(refused)?;
                     if let RowDiffWrite::Written { deferred } = written {
                         let key = pk.to_display_string();
+                        #[cfg(feature = "tenancy")]
+                        claim_written(tx, child, &claims, &pk).await?;
                         admit_written(tx, parts, child, target.pk, pk, Written::Edited).await?;
                         entries.extend(deferred);
                         written_rows.push(ChildSignal::Save {
@@ -1892,7 +1923,6 @@ pub(crate) async fn apply_plan_tx(
                 Some(form) => {
                     let (pk, entry) = crate::audit::insert_one_with_entry_tx(
                         tx,
-                        pool,
                         &insert.query,
                         target.pk,
                         |pk| {
@@ -1908,6 +1938,8 @@ pub(crate) async fn apply_plan_tx(
                 }
             };
             let key = pk.to_display_string();
+            #[cfg(feature = "tenancy")]
+            claim_written(tx, child, &insert.claims, &pk).await?;
             admit_written(tx, parts, child, target.pk, pk, Written::Created).await?;
             written_rows.push(ChildSignal::Save {
                 table,
@@ -1917,12 +1949,26 @@ pub(crate) async fn apply_plan_tx(
             outcome.inserted += 1;
         }
         if !entries.is_empty() {
-            crate::audit::emit_in_tx(tx, pool, &entries)
+            crate::audit::emit_in_tx(tx, &entries)
                 .await
                 .map_err(refused)?;
         }
     }
     Ok((outcome, written_rows))
+}
+
+/// An extra host written inline is checked as on its own page.
+#[cfg(feature = "tenancy")]
+async fn claim_written(
+    tx: &mut crate::sql::PoolTx<'_>,
+    child: &'static ModelSchema,
+    claims: &crate::tenancy::org_host::AdminClaims,
+    pk: &SqlValue,
+) -> Result<(), InlineApplyError> {
+    claims
+        .after_write(tx, pk)
+        .await
+        .map_err(|error| InlineApplyError::Claim { child, error })
 }
 
 /// The plan only saw the row before the write; re-check what was written.

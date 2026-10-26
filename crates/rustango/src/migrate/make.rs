@@ -580,6 +580,112 @@ fn ancestry<'a>(chain: &[&'a Migration], m: &'a Migration) -> Vec<&'a Migration>
     out
 }
 
+/// The schema rolling back `target` leaves: `prev` (its parent's snapshot)
+/// plus the other branches still applied, which `prev` does not know. Falls
+/// back to `prev` when those branches cannot be merged into it.
+pub(super) fn rollback_snapshot(
+    all: &[Migration],
+    applied: &std::collections::HashSet<String>,
+    target: &Migration,
+    prev: SchemaSnapshot,
+) -> SchemaSnapshot {
+    let chain: Vec<&Migration> = all
+        .iter()
+        .filter(|m| m.name != target.name && applied.contains(&m.name))
+        .collect();
+    let Some(parent) = target
+        .prev
+        .as_deref()
+        .and_then(|p| chain.iter().copied().find(|m| m.name == p))
+    else {
+        return prev;
+    };
+    with_other_branches(
+        &chain,
+        parent,
+        Some(&target.name),
+        prev,
+        "unapplying",
+        &target.name,
+    )
+}
+
+/// The schema applying `mig` leaves: its own snapshot plus the other branches
+/// already applied, so a SQLite rebuild keeps their columns.
+pub(super) fn apply_snapshot(
+    all: &[Migration],
+    applied: &std::collections::HashSet<String>,
+    mig: &Migration,
+) -> SchemaSnapshot {
+    let chain: Vec<&Migration> = all
+        .iter()
+        .filter(|m| m.name == mig.name || applied.contains(&m.name))
+        .collect();
+    let Some(tip) = chain.iter().copied().find(|m| m.name == mig.name) else {
+        return mig.snapshot.clone();
+    };
+    with_other_branches(
+        &chain,
+        tip,
+        None,
+        mig.snapshot.clone(),
+        "applying",
+        &mig.name,
+    )
+}
+
+/// `own` (the schema along `tip`'s line) merged with every other leaf of
+/// `chain`, skipping leaves built on `skip`. Falls back to `own` on a conflict.
+fn with_other_branches(
+    chain: &[&Migration],
+    tip: &Migration,
+    skip: Option<&str>,
+    own: SchemaSnapshot,
+    verb: &str,
+    name: &str,
+) -> SchemaSnapshot {
+    let line = ancestry(chain, tip);
+    let mut snap = own.clone();
+    for leaf in leaves(chain) {
+        let reach = reachable(chain, leaf);
+        if leaf.name == tip.name || skip.is_some_and(|s| reach.contains(s)) {
+            continue;
+        }
+        let Some(base) = line.iter().find(|a| reach.contains(&a.name)) else {
+            continue;
+        };
+        let theirs = effective_snapshot(chain, leaf);
+        if let Err(conflicts) = snap.merge_branch(&effective_snapshot(chain, base), &theirs) {
+            tracing::warn!(
+                target: "rustango::migrate",
+                "{verb} `{name}`: branch `{}` conflicts ({}); rebuilding from `{}` alone",
+                leaf.name,
+                conflicts.join("; "),
+                tip.name,
+            );
+            return own;
+        }
+    }
+    snap
+}
+
+/// Names reachable from `m` through `prev` and merged branches, `m`'s own
+/// and names missing from `chain` included.
+fn reachable(chain: &[&Migration], m: &Migration) -> std::collections::HashSet<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut todo = vec![m.name.as_str()];
+    while let Some(name) = todo.pop() {
+        if !seen.insert(name.to_owned()) {
+            continue;
+        }
+        if let Some(c) = chain.iter().find(|c| c.name == name) {
+            todo.extend(c.prev.as_deref());
+            todo.extend(merged_branches(chain, c));
+        }
+    }
+    seen
+}
+
 /// Migrations no `prev`, merged branch or `replaces` names.
 fn leaves<'a>(chain: &[&'a Migration]) -> Vec<&'a Migration> {
     let joined: std::collections::HashSet<&str> = chain

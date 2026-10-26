@@ -48,9 +48,16 @@
 //!     locked_by    TEXT,
 //!     last_error   TEXT,
 //!     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-//!     context      JSONB  -- the enqueuer's audit source and timezone
+//!     context      JSONB, -- the enqueuer's audit source and timezone
+//!     queue_name   TEXT   -- see `PgJobQueue::queue_name`
 //! );
 //! ```
+//!
+//! ## Several queues on one table
+//!
+//! Queues sharing `rustango_jobs` pick each other's jobs unless each has
+//! its own [`PgJobQueue::queue_name`]. A named queue runs only its own
+//! jobs; an unnamed one only unnamed jobs.
 //!
 //! Call [`PgJobQueue::ensure_table_pool`] at boot, or write your own
 //! migration that emits the same DDL.
@@ -100,8 +107,75 @@ pub struct PgJobQueue {
     worker_id_prefix: String,
     heartbeat_interval: Duration,
     context_column: ContextColumn,
+    queue_name: Option<Arc<str>>,
+    queue_column: QueueColumn,
     reclaim_after: Option<Duration>,
     sweeper: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+/// Whether `rustango_jobs` has the `queue_name` column. Decided once per queue.
+#[derive(Clone, Default)]
+struct QueueColumn(Arc<tokio::sync::OnceCell<bool>>);
+
+impl QueueColumn {
+    async fn present(&self, pool: &Pool) -> bool {
+        let probe = || async {
+            let cols = crate::migrate::ensure::live_columns(pool, "rustango_jobs")
+                .await
+                .map_err(|_| ())?;
+            // No table yet: ask again once `ensure_table_pool` ran.
+            if cols.is_empty() {
+                return Err(());
+            }
+            Ok(cols.contains("queue_name"))
+        };
+        self.0.get_or_try_init(probe).await.is_ok_and(|p| *p)
+    }
+}
+
+/// Which rows a queue claims and counts.
+#[derive(Clone, Copy)]
+enum QueueFilter<'a> {
+    /// A table without `queue_name`: every row, as before it existed.
+    All,
+    /// `queue_name IS NULL`.
+    Unnamed,
+    /// `queue_name = <name>`.
+    Named(&'a str),
+}
+
+const NO_QUEUE_COLUMN: &str = "rustango_jobs has no `queue_name` column, so a named queue \
+     cannot run; call PgJobQueue::ensure_table_pool, then restart";
+
+impl<'a> QueueFilter<'a> {
+    async fn of(
+        name: Option<&'a str>,
+        column: &QueueColumn,
+        pool: &Pool,
+    ) -> Result<QueueFilter<'a>, &'static str> {
+        match (name, column.present(pool).await) {
+            (Some(name), true) => Ok(Self::Named(name)),
+            (Some(_), false) => Err(NO_QUEUE_COLUMN),
+            (None, true) => Ok(Self::Unnamed),
+            (None, false) => Ok(Self::All),
+        }
+    }
+
+    /// The ` AND …` to append to a `WHERE`, its name bound at `placeholder`.
+    fn and(self, placeholder: &str) -> String {
+        match self {
+            Self::All => String::new(),
+            Self::Unnamed => " AND queue_name IS NULL".to_owned(),
+            Self::Named(_) => format!(" AND queue_name = {placeholder}"),
+        }
+    }
+
+    fn name(self) -> Option<&'a str> {
+        match self {
+            Self::Named(name) => Some(name),
+            Self::All | Self::Unnamed => None,
+        }
+    }
 }
 
 /// Whether `rustango_jobs` has a usable `context` column. A table from a
@@ -165,7 +239,8 @@ CREATE TABLE IF NOT EXISTS rustango_jobs (
     locked_by    TEXT,
     last_error   TEXT,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    context      JSONB
+    context      JSONB,
+    queue_name   TEXT
 );
 CREATE INDEX IF NOT EXISTS rustango_jobs_pickup_idx
     ON rustango_jobs (run_at)
@@ -186,7 +261,8 @@ CREATE TABLE IF NOT EXISTS `rustango_jobs` (
     `locked_by`    VARCHAR(255),
     `last_error`   TEXT,
     `created_at`   DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    `context`      JSON
+    `context`      JSON,
+    `queue_name`   VARCHAR(255)
 );
 CREATE INDEX `rustango_jobs_pickup_idx` ON `rustango_jobs` (`run_at`);
 CREATE INDEX `rustango_jobs_locked_idx` ON `rustango_jobs` (`locked_at`)";
@@ -210,7 +286,8 @@ CREATE TABLE IF NOT EXISTS rustango_jobs (
     locked_by    TEXT,
     last_error   TEXT,
     created_at   TEXT     NOT NULL DEFAULT {now},
-    context      TEXT
+    context      TEXT,
+    queue_name   TEXT
 );
 CREATE INDEX IF NOT EXISTS rustango_jobs_pickup_idx
     ON rustango_jobs (run_at) WHERE locked_at IS NULL;
@@ -220,11 +297,14 @@ CREATE INDEX IF NOT EXISTS rustango_jobs_locked_idx
 }
 
 impl PgJobQueue {
-    /// `(database, queue)`: the jobs table this queue claims from, and
+    /// `((database, queue name), queue)`: the jobs this queue claims, and
     /// this queue across its clones.
     #[cfg(feature = "email")]
-    pub(crate) fn identity(&self) -> (u64, usize) {
-        (self.pool.scope_key(), Arc::as_ptr(&self.registry) as usize)
+    pub(crate) fn identity(&self) -> ((u64, Option<Arc<str>>), usize) {
+        (
+            (self.pool.scope_key(), self.queue_name.clone()),
+            Arc::as_ptr(&self.registry) as usize,
+        )
     }
 
     /// Build a queue from a [`crate::sql::Pool`] with `worker_count`
@@ -251,6 +331,8 @@ impl PgJobQueue {
             worker_id_prefix: id_prefix,
             heartbeat_interval: Duration::from_secs(10),
             context_column: ContextColumn::default(),
+            queue_name: None,
+            queue_column: QueueColumn::default(),
             reclaim_after: None,
             sweeper: Mutex::new(None),
         }
@@ -274,6 +356,16 @@ impl PgJobQueue {
     #[must_use]
     pub fn new_pool(pool: impl Into<Pool>) -> Self {
         Self::with_workers_pool(pool, 4)
+    }
+
+    /// Run only jobs dispatched through a queue of this name, so queues
+    /// sharing `rustango_jobs` (and their handlers) keep apart. An unnamed
+    /// queue then runs only unnamed jobs. Needs the `queue_name` column
+    /// [`Self::ensure_table_pool`] adds.
+    #[must_use]
+    pub fn queue_name(mut self, name: impl Into<String>) -> Self {
+        self.queue_name = Some(name.into().into());
+        self
     }
 
     /// How long a worker waits between checks when the queue is empty.
@@ -355,19 +447,34 @@ impl PgJobQueue {
             _ => CREATE_JOBS_TABLE_SQL_PG.to_owned(),
         };
         crate::sql::run_ddl_idempotent(pool, &ddl).await?;
-        // A table from before 0.60.1 lacks the context column (#1229).
-        // Look first: on PG even a no-op ADD COLUMN takes ACCESS EXCLUSIVE.
+        // An older table lacks `context` (before 0.60.1) or
+        // `queue_name` (before 0.61.2). Look first: on PG even a no-op
+        // ADD COLUMN takes ACCESS EXCLUSIVE.
         let cols = crate::migrate::ensure::live_columns(pool, "rustango_jobs")
             .await
             .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-        if cols.contains("context") {
-            return Ok(());
+        let queue_type = if pool.dialect().name() == "mysql" {
+            "VARCHAR(255)"
+        } else {
+            "TEXT"
+        };
+        let add: Vec<String> = [("context", context_type(pool)), ("queue_name", queue_type)]
+            .into_iter()
+            .filter(|(col, _)| !cols.contains(*col))
+            .map(|(col, ty)| format!("ALTER TABLE rustango_jobs ADD COLUMN {col} {ty}"))
+            .collect();
+        if !add.is_empty() {
+            crate::migrate::ensure::run_statements(pool, &add).await?;
         }
-        let add = format!(
-            "ALTER TABLE rustango_jobs ADD COLUMN context {}",
-            context_type(pool)
-        );
-        crate::migrate::ensure::run_statements(pool, &[add]).await
+        // After the column exists: a named queue's pickup stays fast
+        // however busy its neighbours are.
+        let queue_idx = if pool.dialect().name() == "mysql" {
+            "CREATE INDEX `rustango_jobs_queue_idx` ON `rustango_jobs` (`queue_name`, `run_at`)"
+        } else {
+            "CREATE INDEX IF NOT EXISTS rustango_jobs_queue_idx \
+             ON rustango_jobs (queue_name, run_at) WHERE locked_at IS NULL"
+        };
+        crate::sql::run_ddl_idempotent(pool, queue_idx).await
     }
 
     /// PG-typed shim around [`Self::reclaim_stuck_jobs_pool`].
@@ -476,12 +583,21 @@ impl JobQueue for PgJobQueue {
             SqlValue::DateTime(now),
         ];
         let (mut cols, mut vals) = (String::new(), String::new());
+        let mut add = |col: &str, v: SqlValue| {
+            binds.push(v);
+            cols.push_str(&format!(", {col}"));
+            vals.push_str(&format!(", {}", dialect.placeholder(binds.len())));
+        };
         if let Some(ctx) = crate::task_context::TaskContext::capture().to_stored() {
             if self.context_column.present(&self.pool).await {
-                cols = ", context".into();
-                vals = format!(", {}", dialect.placeholder(6));
-                binds.push(SqlValue::Json(ctx));
+                add("context", SqlValue::Json(ctx));
             }
+        }
+        let queue = QueueFilter::of(self.queue_name.as_deref(), &self.queue_column, &self.pool)
+            .await
+            .map_err(|e| JobError::Queue(e.to_owned()))?;
+        if let Some(name) = queue.name() {
+            add("queue_name", SqlValue::String(name.to_owned()));
         }
         let sql = format!(
             "INSERT INTO rustango_jobs (name, payload, max_attempts, run_at, created_at{cols}) \
@@ -527,6 +643,8 @@ impl JobQueue for PgJobQueue {
                 id: self.worker_id(n),
                 heartbeat: self.heartbeat_interval,
                 context_column: self.context_column.clone(),
+                queue_name: self.queue_name.clone(),
+                queue_column: self.queue_column.clone(),
             };
             let h = tokio::spawn(async move {
                 worker_loop(pool, registry, dead_letter, stop, notify, poll, worker).await;
@@ -555,8 +673,22 @@ impl JobQueue for PgJobQueue {
     }
 
     async fn pending_count(&self) -> usize {
-        let sql = "SELECT COUNT(*) AS n FROM rustango_jobs WHERE locked_at IS NULL";
-        crate::sql::raw_query_pool::<(i64,)>(sql, Vec::new(), &self.pool)
+        use crate::core::SqlValue;
+        let Ok(queue) =
+            QueueFilter::of(self.queue_name.as_deref(), &self.queue_column, &self.pool).await
+        else {
+            return 0;
+        };
+        let sql = format!(
+            "SELECT COUNT(*) AS n FROM rustango_jobs WHERE locked_at IS NULL{}",
+            queue.and(&self.pool.dialect().placeholder(1))
+        );
+        let binds = queue
+            .name()
+            .map(|n| SqlValue::String(n.to_owned()))
+            .into_iter()
+            .collect();
+        crate::sql::raw_query_pool::<(i64,)>(&sql, binds, &self.pool)
             .await
             .ok()
             .and_then(|rows| rows.into_iter().next())
@@ -571,6 +703,8 @@ struct Worker {
     id: String,
     heartbeat: Duration,
     context_column: ContextColumn,
+    queue_name: Option<Arc<str>>,
+    queue_column: QueueColumn,
 }
 
 async fn worker_loop(
@@ -584,7 +718,17 @@ async fn worker_loop(
 ) {
     while !stop.is_set() {
         let with_context = worker.context_column.present(&pool).await;
-        match pick_one(&pool, &worker.id, with_context).await {
+        let picked = match QueueFilter::of(
+            worker.queue_name.as_deref(),
+            &worker.queue_column,
+            &pool,
+        )
+        .await
+        {
+            Ok(queue) => pick_one(&pool, &worker.id, with_context, queue).await,
+            Err(e) => Err(sqlx::Error::Protocol(e.to_owned())),
+        };
+        match picked {
             // Stop fired during the pick: hand the row back unrun.
             Ok(Some(row)) if stop.is_set() => unpick(&pool, &worker, row.id).await,
             Ok(Some(row)) => {
@@ -640,6 +784,7 @@ async fn pick_one(
     pool: &Pool,
     worker_id: &str,
     with_context: bool,
+    queue: QueueFilter<'_>,
 ) -> Result<Option<PickedJob>, sqlx::Error> {
     use crate::task_context::TaskContext;
     let now: DateTime<Utc> = Utc::now();
@@ -655,7 +800,7 @@ async fn pick_one(
             let sql = format!(
                 "WITH next AS (
                      SELECT id FROM rustango_jobs
-                      WHERE locked_at IS NULL AND run_at <= $2
+                      WHERE locked_at IS NULL AND run_at <= $2{q}
                       ORDER BY run_at, id
                       FOR UPDATE SKIP LOCKED
                       LIMIT 1
@@ -663,14 +808,14 @@ async fn pick_one(
                  UPDATE rustango_jobs
                     SET locked_at = $3, locked_by = $1, attempt = attempt + 1
                   WHERE id IN (SELECT id FROM next)
-                 RETURNING {cols}"
+                 RETURNING {cols}",
+                q = queue.and("$4"),
             );
-            let row = sqlx::query(&sql)
-                .bind(worker_id)
-                .bind(now)
-                .bind(now)
-                .fetch_optional(pg)
-                .await?;
+            let mut pick = sqlx::query(&sql).bind(worker_id).bind(now).bind(now);
+            if let Some(name) = queue.name() {
+                pick = pick.bind(name);
+            }
+            let row = pick.fetch_optional(pg).await?;
             let Some(row) = row else { return Ok(None) };
             Ok(Some(PickedJob {
                 id: row.try_get("id")?,
@@ -695,16 +840,19 @@ async fn pick_one(
             // `LIMIT` must come before `FOR UPDATE SKIP LOCKED`.
             // MySQL rejects the other order with a 1064 syntax error,
             // even though PG and SQLite accept both.
-            let id_row: Option<(i64,)> = sqlx::query_as(
+            let pick = format!(
                 "SELECT id FROM `rustango_jobs`
-                  WHERE locked_at IS NULL AND run_at <= ?
+                  WHERE locked_at IS NULL AND run_at <= ?{q}
                   ORDER BY run_at, id
                   LIMIT 1
                   FOR UPDATE SKIP LOCKED",
-            )
-            .bind(now)
-            .fetch_optional(&mut *tx)
-            .await?;
+                q = queue.and("?"),
+            );
+            let mut pick = sqlx::query_as(&pick).bind(now);
+            if let Some(name) = queue.name() {
+                pick = pick.bind(name);
+            }
+            let id_row: Option<(i64,)> = pick.fetch_optional(&mut *tx).await?;
             let Some((id,)) = id_row else {
                 tx.commit().await?;
                 return Ok(None);
@@ -754,18 +902,21 @@ async fn pick_one(
                     SET locked_at = ?, locked_by = ?, attempt = attempt + 1
                   WHERE id = (
                       SELECT id FROM rustango_jobs
-                       WHERE locked_at IS NULL AND run_at <= ?
+                       WHERE locked_at IS NULL AND run_at <= ?{q}
                        ORDER BY run_at, id
                        LIMIT 1
                   )
-                  RETURNING {cols}"
+                  RETURNING {cols}",
+                q = queue.and("?"),
             );
-            let row = sqlx::query(&sql)
+            let mut pick = sqlx::query(&sql)
                 .bind(&now_str)
                 .bind(worker_id)
-                .bind(&now_str)
-                .fetch_optional(&mut *tx)
-                .await?;
+                .bind(&now_str);
+            if let Some(name) = queue.name() {
+                pick = pick.bind(name);
+            }
+            let row = pick.fetch_optional(&mut *tx).await?;
             tx.commit().await?;
             let Some(row) = row else { return Ok(None) };
             let payload_text: String = row.try_get("payload")?;
@@ -1158,6 +1309,8 @@ mod tests {
             id: "w".into(),
             heartbeat: Duration::from_millis(20),
             context_column: ContextColumn::default(),
+            queue_name: None,
+            queue_column: QueueColumn::default(),
         };
         let job = async {
             let _conn = sqlite.acquire().await.expect("conn");
