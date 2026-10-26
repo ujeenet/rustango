@@ -267,3 +267,27 @@ async fn a_retention_mode_is_required() {
         .expect_err("both modes");
     assert!(err.contains("mutually exclusive"), "{err}");
 }
+
+/// `--days 0` or `--keep-last 0` deletes every entry, so it needs `--yes`.
+#[tokio::test]
+async fn a_retention_that_deletes_everything_needs_yes() {
+    let b = boot().await;
+    b.seed("today", 0).await;
+    b.seed("old", 3).await;
+
+    for args in [
+        &["audit-cleanup", "--days", "0"][..],
+        &["audit-cleanup", "--days", "-5"],
+        &["audit-cleanup", "--keep-last", "0"],
+        &["audit-cleanup", "--keep-last", "-1", "--registry"],
+    ] {
+        let err = b.run(args).await.expect_err("refused without --yes");
+        assert!(err.contains("--yes"), "{args:?}: {err}");
+    }
+    assert_eq!(b.registry_entries().await.len(), 2, "nothing deleted");
+
+    b.run(&["audit-cleanup", "--keep-last", "0", "--yes"])
+        .await
+        .expect("confirmed");
+    assert!(b.registry_entries().await.is_empty());
+}

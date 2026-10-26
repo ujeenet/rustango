@@ -147,16 +147,59 @@ impl Color {
     /// default that would otherwise handle it.
     #[must_use]
     pub fn should_colour(self) -> bool {
+        self.colours(Console::Stdout)
+    }
+
+    /// [`Self::should_colour`] for the stream the terminal layer uses.
+    fn colours(self, console: Console) -> bool {
         use std::io::IsTerminal as _;
         match self {
             Color::Always => true,
             Color::Never => false,
             Color::Auto => {
                 let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
-                !no_color && std::io::stdout().is_terminal()
+                !no_color
+                    && match console {
+                        Console::Stdout => std::io::stdout().is_terminal(),
+                        Console::Stderr => std::io::stderr().is_terminal(),
+                    }
             }
         }
     }
+}
+
+/// Which stream the terminal layer writes to.
+///
+/// `#[non_exhaustive]` — see [`Format`].
+#[cfg(feature = "runtime")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Console {
+    /// Standard output. The default, and where the server logs.
+    #[default]
+    Stdout,
+    /// Standard error, so a verb's stdout (`dumpdata > fx.json`) holds only its output.
+    Stderr,
+}
+
+#[cfg(feature = "runtime")]
+impl Console {
+    /// `Stdout` for the server (no verb, `runserver`, `run-server`), `Stderr`
+    /// for a management verb. `#[rustango::main]` and `Cli` both use it.
+    #[must_use]
+    pub fn for_verb(verb: Option<&str>) -> Self {
+        if is_server_verb(verb.unwrap_or("")) {
+            Self::Stdout
+        } else {
+            Self::Stderr
+        }
+    }
+}
+
+/// The argv verbs `Cli::run` serves on.
+#[cfg(feature = "runtime")]
+pub(crate) fn is_server_verb(verb: &str) -> bool {
+    matches!(verb, "" | "runserver" | "run-server")
 }
 
 /// A `fmt` layer with its formatter type erased.
@@ -173,8 +216,10 @@ type Erased = Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + 
 /// The caller resolves `ansi`, and passes false for a file sink: escape
 /// codes in a log file break every later grep.
 #[cfg(feature = "runtime")]
+#[allow(clippy::too_many_arguments)]
 fn fmt_layer<W>(
     format: Format,
+    console: Console,
     ansi: bool,
     targets: bool,
     thread_ids: bool,
@@ -187,9 +232,10 @@ where
     use tracing_subscriber::Layer as _;
     macro_rules! sink {
         ($l:expr) => {
-            match writer.clone() {
-                Some(w) => $l.with_writer(w).boxed(),
-                None => $l.boxed(),
+            match (writer.clone(), console) {
+                (Some(w), _) => $l.with_writer(w).boxed(),
+                (None, Console::Stdout) => $l.boxed(),
+                (None, Console::Stderr) => $l.with_writer(std::io::stderr).boxed(),
             }
         };
     }
@@ -222,6 +268,8 @@ pub struct Setup {
     /// Keep the stdout layer next to the file output. [`Setup::file_only`]
     /// clears it.
     keep_stdout: bool,
+    /// The stream that terminal layer writes to.
+    console: Console,
 }
 
 #[cfg(feature = "runtime")]
@@ -239,6 +287,7 @@ impl Setup {
             with_line_numbers: false,
             file_sink: None,
             keep_stdout: true,
+            console: Console::Stdout,
         }
     }
 
@@ -322,6 +371,13 @@ impl Setup {
             filename_prefix: filename_prefix.into(),
             rotation,
         });
+        self
+    }
+
+    /// Write terminal output to `console`. Defaults to [`Console::Stdout`].
+    #[must_use]
+    pub fn with_console(mut self, console: Console) -> Self {
+        self.console = console;
         self
     }
 
@@ -424,7 +480,7 @@ impl Setup {
 
         // Colour is a stdout-only decision, resolved once so every
         // branch agrees and `Auto` asks about the terminal once.
-        let ansi = self.format != Format::Json && self.color.should_colour();
+        let ansi = self.format != Format::Json && self.color.colours(self.console);
 
         let Some(file_sink) = self.file_sink else {
             // Stdout only: the simple `fmt::init` path.
@@ -433,11 +489,19 @@ impl Setup {
                 .with_target(self.with_targets)
                 .with_thread_ids(self.with_thread_ids)
                 .with_line_number(self.with_line_numbers);
-            let outcome = match self.format {
-                Format::Json => b.json().try_init(),
-                Format::Pretty => b.pretty().with_ansi(ansi).try_init(),
-                Format::Compact => b.compact().with_ansi(ansi).try_init(),
-                Format::Full => b.with_ansi(ansi).try_init(),
+            macro_rules! init {
+                ($b:expr) => {
+                    match self.format {
+                        Format::Json => $b.json().try_init(),
+                        Format::Pretty => $b.pretty().with_ansi(ansi).try_init(),
+                        Format::Compact => $b.compact().with_ansi(ansi).try_init(),
+                        Format::Full => $b.with_ansi(ansi).try_init(),
+                    }
+                };
+            }
+            let outcome = match self.console {
+                Console::Stdout => init!(b),
+                Console::Stderr => init!(b.with_writer(std::io::stderr)),
             };
             warn_if_already_installed(&outcome);
             return None;
@@ -460,6 +524,7 @@ impl Setup {
             let to_file = writer.is_some();
             fmt_layer(
                 self.format,
+                self.console,
                 ansi && !to_file,
                 self.with_targets,
                 self.with_thread_ids,
@@ -738,6 +803,20 @@ mod tests {
         assert!(s.keep_stdout, "default keeps stdout alongside file");
     }
 
+    /// A management verb logs to stderr, so `dumpdata > fx.json` holds
+    /// only data; the server keeps stdout.
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn verbs_log_to_stderr_and_the_server_to_stdout() {
+        for verb in [None, Some(""), Some("runserver"), Some("run-server")] {
+            assert_eq!(Console::for_verb(verb), Console::Stdout, "{verb:?}");
+        }
+        for verb in ["dumpdata", "sqlmigrate", "migrate", "audit-cleanup"] {
+            assert_eq!(Console::for_verb(Some(verb)), Console::Stderr, "{verb}");
+        }
+        assert_eq!(Setup::new().console, Console::Stdout);
+    }
+
     #[cfg(feature = "runtime")]
     #[test]
     fn file_only_drops_stdout() {
@@ -859,7 +938,15 @@ mod rendered {
     /// Emit one event through `fmt_layer` and return what was written.
     fn render(format: Format, ansi: bool) -> String {
         let buf = crate::testkit::CaptureWriter::default();
-        let layer = fmt_layer(format, ansi, true, false, false, Some(buf.clone()));
+        let layer = fmt_layer(
+            format,
+            Console::Stdout,
+            ansi,
+            true,
+            false,
+            false,
+            Some(buf.clone()),
+        );
         let subscriber = tracing_subscriber::registry().with(layer);
         tracing::subscriber::with_default(subscriber, || {
             // Inside a span and with a target: `Compact` differs from

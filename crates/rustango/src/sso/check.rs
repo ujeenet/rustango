@@ -13,6 +13,7 @@ use super::link::{any_link, LinkSource, ProviderKey};
 use super::provider::load_rows;
 
 /// Why a provider refuses every existing user.
+#[cfg(feature = "tenancy")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum Refusal {
@@ -23,6 +24,7 @@ pub enum Refusal {
 }
 
 /// A provider that refuses every existing user.
+#[cfg(feature = "tenancy")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Stranded {
@@ -35,11 +37,14 @@ pub struct Stranded {
 struct Candidate {
     slug: String,
     key: ProviderKey,
+    /// Only tenant users link by email; the admin never does.
+    #[cfg(feature = "tenancy")]
     allow_email_link: bool,
 }
 
 /// Ids of the `P` rows with email linking on. Read apart from the row, as at
 /// sign-in, so a table without the column reads as off.
+#[cfg(feature = "tenancy")]
 async fn email_linking<P: Model + Send>(pool: &Pool) -> Vec<i64> {
     QuerySet::<P>::new()
         .filter("allow_email_link", true)
@@ -62,6 +67,7 @@ async fn candidates<P: Model + Send>(
         return Ok(Vec::new());
     }
     // The admin never links by email, whatever the row says.
+    #[cfg(feature = "tenancy")]
     let linking = if source == LinkSource::Admin {
         Vec::new()
     } else {
@@ -71,6 +77,7 @@ async fn candidates<P: Model + Send>(
         .into_iter()
         .map(|r| Candidate {
             key: ProviderKey::for_row(source, r.id, &r.kind, r.issuer_url.as_deref()),
+            #[cfg(feature = "tenancy")]
             allow_email_link: linking.contains(&r.id),
             slug: r.slug,
         })
