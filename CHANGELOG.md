@@ -7,6 +7,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — ORM, migrations and jobs
 
 - Schema-mode pools that migrations and `manage` build set `search_path` in their connect options, so `Pool::scope_key` (and the ContentType cache) tells them apart from the registry.
+- Jobs: a retry's `last_error` is cut to 64 KiB on a UTF-8 boundary, so a long error no longer fails the write on MySQL (`TEXT`) and leaves the job locked.
 
 ## [0.61.2] — 2026-10-26
 

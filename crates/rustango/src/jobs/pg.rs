@@ -1135,6 +1135,9 @@ async fn finish_job(pool: &Pool, worker: &Worker, id: i64) {
     );
 }
 
+/// MySQL's `TEXT` holds 65,535 bytes; a longer write fails in strict mode.
+const LAST_ERROR_MAX_BYTES: usize = 65_535;
+
 async fn schedule_retry(
     pool: &Pool,
     worker: &Worker,
@@ -1155,7 +1158,8 @@ async fn schedule_retry(
     );
     let binds = vec![
         SqlValue::DateTime(next_run),
-        SqlValue::String(last_error.to_owned()),
+        // Cut on every backend, so the stored error reads the same anywhere.
+        SqlValue::String(crate::migrate::ddl::clip(last_error, LAST_ERROR_MAX_BYTES).to_owned()),
         SqlValue::I64(id),
         SqlValue::String(worker.id.clone()),
     ];

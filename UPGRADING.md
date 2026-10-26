@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Jobs: `last_error` is cut to 64 KiB
+
+A retry stores at most 65,535 bytes of the error on every backend; read full errors from your logs or dead-letter callback.
+
 ## 0.61.2
 
 ### SQLite: JSON column equality compares values
