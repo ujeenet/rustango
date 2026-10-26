@@ -1045,6 +1045,7 @@ async fn role_schema_audit(
     out: &mut rustango::migrate::manage::DeployAuditFindings,
 ) {
     #[cfg(feature = "postgres")]
+    #[allow(irrefutable_let_patterns)]
     if let crate::sql::Pool::Postgres(pg) = registry {
         use crate::core::Column as _;
         use crate::sql::FetcherPool as _;
