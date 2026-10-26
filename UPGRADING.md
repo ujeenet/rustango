@@ -150,6 +150,67 @@ untouched.
 
 ## Unreleased
 
+## 0.61.3
+
+### `[cache] backend` should be a known lowercase name
+
+Use `memory`, `null` / `none`, `file` (with `file_cache_dir`), `redis` or `db`. Anything else now logs an `error` from both resolvers and still falls back to an in-memory cache. A later minor release will refuse it.
+
+### Slack plain strings are sent literally
+
+A string payload no longer renders Slack markup such as `<@U123>` or `<url|label>`. Send a JSON object (`{"text": …}` or `blocks`) to keep markup; objects pass through unchanged.
+
+### Access-log query redaction is word-based
+
+`redact_query_params` entries now match any key containing them as words (`client_secret` also hides `x-client-secret`), long names also match inside joined keys (`accesstoken`), and the defaults are wider. Logs may show `[redacted]` for keys like `sort_key`, `zip_code` or `tokenizer` that were visible before.
+
+### Mail test doubles check addresses
+
+`InMemoryMailer`, `ConsoleMailer` and `FileMailer` return `MailError::InvalidMessage` for an address `SmtpMailer` refuses, so a test sending such mail now fails.
+
+### `derive(Form)` refuses non-finite floats
+
+`NaN` or `inf` in an `f32` / `f64` field is now a field error.
+
+### Uploads and media sweeps
+
+`with_uploads` / `StaticFiles::user_content` now sends uploaded `.js`, `.css` and `.wasm` as untyped downloads; serve your own assets from a plain static mount. `purge_pending` never deletes rows younger than 1 h 15 min; an `UploadIntent::ttl` over 1 h is kept but logs a warning, since its row may be purged before the URL expires. `purge_orphans` and `purge_pending` purge at most 10 000 rows per call (call again when you get 10 000), and `purge_orphans_dry_run` returns at most 10 000.
+
+### Jobs: `last_error` is cut to 64 KiB
+
+A retry stores at most 65,535 bytes of the error on every backend; read full errors from your logs or dead-letter callback.
+
+### Forms: stricter checkboxes and JSON null
+
+A `DynamicForm` boolean with a value other than `true/false/1/0/on/off/yes/no` is now a validation error. `ModelFormFor::from_json` refuses `null` on a NOT NULL Bool.
+
+### Admin create: absent defaulted fields
+
+A create POST that leaves out a field with a column default now stores the default; a field sent empty still stores `""` or NULL.
+
+### Array fields read a JSON array whole
+
+A form value for an `Array` field that parses as a JSON array (`["a,b", "c"]`, `[1, 2]`) is read item by item; other text still splits on commas.
+
+### `signals::clear_all` clears m2m and admin receivers
+
+It now also empties `signals::m2m` and `signals::admin`. Re-connect those after calling it if you relied on them staying.
+
+### SSO: stale links and discovery failures
+
+A sign-in link created more than 5 minutes before its local account now logs a warning (ids only) and still signs in. `rustango::sso::link::set_stale_links(StaleLinks::Drop)` deletes such links instead; use it only when account `created_at` values are not imported or backfilled. A failed OIDC discovery is now reused for 30 s before the next login retries it.
+
+### MCP: unique keys on agent grants
+
+The next `migrate` adds unique indexes on `rustango_agent_grants (agent_id, skill_id)` and `rustango_agent_skill_permissions (skill_id, permission_codename)`. If duplicate rows exist, `migrate` stops before any DDL and names the table. Keep the oldest row per key, then run it again (PostgreSQL, MySQL and SQLite):
+
+```sql
+DELETE FROM rustango_agent_grants WHERE id NOT IN
+  (SELECT keep FROM (SELECT MIN(id) AS keep FROM rustango_agent_grants GROUP BY agent_id, skill_id) AS k);
+DELETE FROM rustango_agent_skill_permissions WHERE id NOT IN
+  (SELECT keep FROM (SELECT MIN(id) AS keep FROM rustango_agent_skill_permissions GROUP BY skill_id, permission_codename) AS k);
+```
+
 ## 0.61.2
 
 ### SQLite: JSON column equality compares values

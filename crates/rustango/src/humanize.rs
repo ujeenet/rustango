@@ -488,16 +488,19 @@ pub fn intword(n: f64) -> String {
         (1e30, "nonillion"),
         (1e33, "decillion"),
     ];
-    let mut chosen = scales[0];
-    for &(s, name) in scales {
-        if n.abs() >= s {
-            chosen = (s, name);
-        } else {
-            break;
-        }
+    let (scaled, step) = scale_down(n / 1e6, 1000.0, scales.len() - 1);
+    format!("{:.1} {}", scaled, scales[step].1)
+}
+
+/// Divide by `base` while the value, rounded to one decimal, is still
+/// `>= base`, so `999.96` million shows as `1.0 billion`.
+fn scale_down(mut scaled: f64, base: f64, max_step: usize) -> (f64, usize) {
+    let mut step = 0;
+    while ((scaled * 10.0).round() / 10.0).abs() >= base && step < max_step {
+        scaled /= base;
+        step += 1;
     }
-    let scaled = n / chosen.0;
-    format!("{:.1} {}", scaled, chosen.1)
+    (scaled, step)
 }
 
 fn intword_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
@@ -539,13 +542,8 @@ pub fn naturalsize(n: f64) -> String {
         }
         return format!("{} bytes", n as u64);
     }
-    let mut scale = 0_usize;
-    let mut scaled = n;
-    while scaled >= 1024.0 && scale < units.len() - 1 {
-        scaled /= 1024.0;
-        scale += 1;
-    }
-    format!("{:.1} {}", scaled, units[scale])
+    let (scaled, step) = scale_down(n / 1024.0, 1024.0, units.len() - 2);
+    format!("{:.1} {}", scaled, units[step + 1])
 }
 
 /// [`naturalsize`] on the 1000 scale instead of 1024. Use it when
@@ -573,13 +571,8 @@ pub fn naturalsize_si(n: f64) -> String {
         }
         return format!("{} bytes", n as u64);
     }
-    let mut scale = 0_usize;
-    let mut scaled = n;
-    while scaled >= 1000.0 && scale < units.len() - 1 {
-        scaled /= 1000.0;
-        scale += 1;
-    }
-    format!("{:.1} {}", scaled, units[scale])
+    let (scaled, step) = scale_down(n / 1000.0, 1000.0, units.len() - 2);
+    format!("{:.1} {}", scaled, units[step + 1])
 }
 
 fn naturalsize_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
@@ -1542,6 +1535,18 @@ mod tests {
     #[test]
     fn intword_public_negative() {
         assert_eq!(intword(-1_500_000.0), "-1.5 million");
+    }
+
+    /// Rounding up to 1000 of a scale moves to the next scale.
+    #[test]
+    fn scales_roll_over_after_rounding() {
+        assert_eq!(intword(999_999_999.0), "1.0 billion");
+        assert_eq!(intword(-999_999_999.0), "-1.0 billion");
+        assert_eq!(intword(999_949_999.0), "999.9 million");
+        assert_eq!(naturalsize(1024.0 * 1024.0 - 1.0), "1.0 MB");
+        assert_eq!(naturalsize(1023.9 * 1024.0), "1023.9 KB");
+        assert_eq!(naturalsize_si(999_999.0), "1.0 MB");
+        assert_eq!(naturalsize_si(999_949.0), "999.9 kB");
     }
 
     #[test]

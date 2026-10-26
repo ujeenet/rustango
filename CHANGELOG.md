@@ -4,10 +4,100 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.3] — 2026-10-26
+
+### Changed — unknown `cache.backend` values are logged as errors
+
+`cache::from_settings` logs an `error` naming an unknown or mis-cased backend (`Redis`, a typo), or `file` without `file_cache_dir`, then falls back to an in-memory cache as before; `from_settings_async` does the same. A later minor release will refuse them.
+
+### Fixed — `time` is no longer capped below 0.3.48
+
+Apps can resolve `time` 0.3.49 and 0.3.51+ again (the yanked 0.3.48 / 0.3.50 are skipped); the floor is now 0.3.47, and `rand` 0.8.6, to keep pre-advisory releases out.
+
+### Changed — Slack plain-text notifications are escaped
+
+Behaviour change: a plain string sent through `slack::webhook_callback` has `&`, `<` and `>` escaped, so message content cannot ping a channel or disguise a link. To keep mentions and links, send an object: `json!({"text": "<!here> …"})` or `blocks`.
+
+### Fixed — access-log and span query redaction matches by word
+
+A query key is redacted when its words contain a listed name, or, for long names, when the joined-up key contains it. So `X-Api-Key`, `reset_token`, `user[password]`, `password2`, `JSESSIONID` and `oauth_client_secret` are hidden too; the defaults also cover `key`, `jwt`, `otp`, `sig`, `ssn` and `sessionid`. MCP audit uses the same matcher, and names are split once per layer.
+
+### Fixed — API key and agent owners are superuser-only on create
+
+A non-superuser can no longer choose `user_id` when creating an API key or MCP agent through a ViewSet or `ModelForm`; it was locked on edit only. A ViewSet create that sets a locked NOT NULL field is now a `403`.
+
+### Fixed — forms, mail and admin
+
+- Admin time inputs show a stored time to the millisecond and forms parse fractional seconds, so saving a time with microseconds no longer clears or refuses it; an untouched time keeps its stored value.
+- `#[derive(Form)]` refuses `NaN` and `inf` in float fields; they passed every `min` / `max` check.
+- Email attachment content also reads as base64 text; it is still written as an integer array, so 0.62.0 can switch writes to base64 without failing jobs on workers not yet upgraded.
+- `InMemoryMailer`, `ConsoleMailer` and `FileMailer` refuse addresses `SmtpMailer` cannot parse, with or without the `email-smtp` feature; `NullMailer` stays a silent no-op. `InMemoryMailer::require_from()` also refuses mail with no `from`.
+- `testkit::create_junctions` creates models' M2M junctions as migrations build them.
+- Generic admin inlines read the parent's content type from the cache instead of the database on every render.
+
+### Fixed — admin inlines on fields with their own `column`
+
+Inline rows (plain and generic) read their cells and key by field name. With `#[rustango(column = "…")]` a cell showed blank and the inline edit form lost the row's key.
+
+### Added — `atomic_immediate`
+
+`sql::atomic_immediate` is `atomic` whose top-level SQLite block starts with `BEGIN IMMEDIATE`, so a read-then-write block (`select_for_update`) waits for the write lock instead of failing with "database is locked". `atomic` itself is unchanged.
+
+### Fixed — prefetch fills every copy of a parent
+
+`fetch_with_prefetch_pool` / `fetch_with_prefetch_filtered` give children to each copy of a parent the parent query returns more than once (a join); only the first copy got them. Each extra copy costs one more child query.
+
+### Fixed — security edges
+
+- The persisted session key files (admin, operator, tenant; API keys are MACed with the tenant one) are created 0600 from the start, in a 0700 directory when it is new, and never written through an existing link. Concurrent first boots now agree on one key (first writer wins). A saved key other users can read is set to 0600 on load with a warning to rotate it; a symlinked key is never chmod'ed.
+- `StaticFiles::user_content` (and `with_uploads`) serves `.js`, `.mjs`, `.css` and `.wasm` as an `application/octet-stream` attachment, so a page on the app origin cannot load an uploaded script or stylesheet.
+- Media: `purge_pending` keeps rows younger than 1 h 15 min whatever `older_than` says, so a live upload URL (up to 1 h) cannot land an object after its row is gone; `begin_upload` warns once when asked for a longer URL. `purge_orphans` and `purge_pending` page through rows in id order, pass over rows they fail on, and stop after 10 000 purged; the dry run returns the first 10 000.
+- `CsvResponse::filename` replaces control characters with `_`; one used to drop the whole `Content-Disposition` header.
+- Logging: `RUST_LOG` reads `warning` / `critical` / `fatal` as levels too, as `[logging] level` already did; a bare `warning` used to silence every event.
+- `TracingLayer` records at most 512 bytes of `User-Agent` on the request span.
+- Two operators deactivating each other at once can no longer leave zero active operators: `operators::set_active` locks the active rows and deactivates in one transaction.
+
+### Fixed — ORM, migrations and jobs
+
+- `Pool::scope_key` (and so the ContentType cache) tells the schema-mode pools that migrations and `manage` build apart from the registry; they still set `search_path` with a `SET` on connect.
+- Jobs: a retry's `last_error` is cut to 64 KiB on a UTF-8 boundary, so a long error no longer fails the write on MySQL (`TEXT`) and leaves the job locked.
+- `prefetch_related` matches children whose FK points at a unique column (`on = "code"`) by that column; they got no children before. A parent whose hand-written `HasPkValue` cannot read that column now fails with `ExecError::PrefetchColumnUnreadable`.
+- `sqlmigrate` on MySQL shows the drops of the FKs that reference a retyped key, which apply finds in the catalog.
+- MySQL: a migration (or unapply) that retypes an FK column, then the key it references, then renames the column no longer fails with error 3780; the FK comes back once, at the end, under the new name.
+
+### Documented — JSON lookups per backend
+
+`json_contains` and LIKE lookups over a JSON column (`contains`, `icontains`, admin search) give the same rows on every backend only in a stated subset; the ORM guide lists it and a tri-dialect test pins it.
+
+### Fixed — REST, forms and admin
+
+- `messages::Outbox` stages several flash messages in one response; two `messages::push` calls in one handler kept only the last.
+- `intword` / `naturalsize` / `naturalsize_si` move to the next unit when rounding reaches 1000 (1024): `999_999_999` is `1.0 billion`, not `1000.0 million`.
+- `ViewSet::admin_add_hooks()` opts a ViewSet into the admin's `add` object-permission hooks on create, on the request and on each written row (single or bulk); off by default.
+- The registry admin refuses an edit, delete or bulk delete that would leave no active operator, as the console and CLI do, and locks the active rows as they do.
+- `ModelFormFor::from_json` refuses JSON null on a NOT NULL Bool instead of storing `false`.
+- `DynamicForm` checkboxes accept only `true/false/1/0/on/off/yes/no`; any other value is an error, not ticked.
+- An admin create that does not send a defaulted field leaves it to its column default instead of storing NULL or refusing it as missing.
+- A JSON array sent to an `Array` field (ViewSet, `ModelForm`) is read item by item; commas inside an item no longer split it.
+- A bulk ViewSet create's serializer validation error names the failing entry (`bulk entry N: invalid input`).
+- Formsets and admin inlines read their rows in one pass over the form keys; a POST with many keys no longer costs keys times rows.
+- `signals::clear_all` also removes `m2m_changed` and admin receivers, so they no longer leak across tests; the `Observer` example compiles.
+
+### Fixed — SSO, auth and cache edges
+
+- MCP: a skill grant (`agent_id, skill_id`) and a skill-to-permission mapping (`skill_id, permission_codename`) are unique keys now, so concurrent grants no longer leave duplicate rows.
+- `migrate` refuses a new unique index whose columns existing rows already repeat, before any DDL, with the query that lists the duplicates; MySQL no longer keeps half the migration.
+- SSO: a link older than the account it points at (an id reused after a sequence reset or restore) logs a warning; `set_stale_links(StaleLinks::Drop)` deletes it instead of signing that account in. Custom `AccountLookup`s pass the time with `Account::with_created_at`.
+- SSO: OIDC discovery fetches each issuer once at a time (per outbound policy) and caches a failure for 30 s, so logins against a slow or down IdP no longer each wait on their own fetch.
+- Auth links: `LinkScope` and `LinkTarget` convert from `&TenantScope` too, so a `TenantScope` handler binds reset and verify links to its tenant instead of reaching for `LinkTarget::audience`.
+- `migrate-tenants`: the warning about passkeys hidden in `public` is logged even when the run fails after the tenant's passkey table was made; the next run could not tell and stayed quiet.
+- `InMemoryCache`: a TTL too large for the clock (e.g. a huge `lockout_duration_secs`) is capped at a century instead of panicking.
+
 ## [0.61.2] — 2026-10-26
 
 ### Fixed — migrations, MySQL and MariaDB
 
+- MySQL: changing the type or length of a column a composite FK uses or references drops that FK first (logged) and adds it back at the end exactly as the catalog had it; the `MODIFY` failed with error 3780. A run that stops in between logs the SQL that restores them.
 - MySQL: a correlated `IN` over the table an `update()` / `delete()` writes is no longer read through a derived table, which saw the write's own changes and hit wrong rows; it fails with error 1093 instead.
 - MySQL: widening a pk an M2M junction references widens the junction column too, so the junction keeps its foreign key.
 - MariaDB: JSON `=` / `<>` compare by value (`JSON_EQUALS`), not as text; `explain` returns its JSON plan instead of failing on `FORMAT=TREE` / `EXPLAIN ANALYZE`; check constraints drop with `DROP CONSTRAINT`; `bulk_update` no longer sends `VALUES ROW(…)`.

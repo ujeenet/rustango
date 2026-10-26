@@ -83,7 +83,7 @@ pub struct TracingLayer {
     /// the list through `[audit] redact_query_params`. The span must
     /// use the same set: the span renders on the same line as the
     /// event, so a key hidden in one and shown in the other leaks.
-    redact_query_params: std::sync::Arc<Vec<String>>,
+    redact_query_params: std::sync::Arc<crate::secret_keys::SecretNames>,
 }
 
 impl Default for TracingLayer {
@@ -96,7 +96,9 @@ impl TracingLayer {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            redact_query_params: std::sync::Arc::new(crate::access_log::default_redact_params()),
+            redact_query_params: std::sync::Arc::new(crate::access_log::query_names(
+                &crate::access_log::default_redact_params(),
+            )),
         }
     }
 
@@ -106,7 +108,7 @@ impl TracingLayer {
     /// agree. The framework's serving paths already do that.
     #[must_use]
     pub fn redact(mut self, params: Vec<String>) -> Self {
-        self.redact_query_params = std::sync::Arc::new(params);
+        self.redact_query_params = std::sync::Arc::new(crate::access_log::query_names(&params));
         self
     }
 }
@@ -129,7 +131,7 @@ impl<S> tower::Layer<S> for TracingLayer {
 #[derive(Clone)]
 pub struct TracingService<S> {
     inner: S,
-    redact_query_params: std::sync::Arc<Vec<String>>,
+    redact_query_params: std::sync::Arc<crate::secret_keys::SecretNames>,
 }
 
 impl<S> Service<Request<Body>> for TracingService<S>
@@ -168,16 +170,24 @@ where
     }
 }
 
-fn build_request_span(req: &Request<Body>, redact: &[String]) -> tracing::Span {
+/// Longest `user_agent.original` the span records, in bytes.
+const MAX_USER_AGENT_LEN: usize = 512;
+
+fn build_request_span(
+    req: &Request<Body>,
+    redact: &crate::secret_keys::SecretNames,
+) -> tracing::Span {
     let method = req.method().as_str();
     let path = req.uri().path();
     let query = req.uri().query().unwrap_or_default();
     let proto = http_version_str(req.version());
+    // Client-sized: cut it so it cannot bloat every event under the span.
+    // `to_str` is visible ASCII only, so any byte index is a char boundary.
     let user_agent = req
         .headers()
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+        .map_or("", |ua| &ua[..ua.len().min(MAX_USER_AGENT_LEN)]);
 
     let span = info_span!(
         "http.request",
@@ -414,7 +424,10 @@ mod tests {
             .header(header::USER_AGENT, "test-ua/1.0")
             .body(Body::empty())
             .unwrap();
-        let span = build_request_span(&req, &crate::access_log::default_redact_params());
+        let span = build_request_span(
+            &req,
+            &crate::access_log::query_names(&crate::access_log::default_redact_params()),
+        );
         let _enter = span.enter();
         let resp: Response<Body> = Response::builder()
             .status(StatusCode::CREATED)
@@ -435,22 +448,22 @@ mod tests {
             .uri("/cb?client_secret=shhh&page=2")
             .body(Body::empty())
             .unwrap();
-        let span = build_request_span(&req, &redact);
+        let span = build_request_span(&req, &crate::access_log::query_names(&redact));
         drop(span);
 
-        let out = crate::access_log::redact_query("client_secret=shhh&page=2", &redact);
+        let out = crate::access_log::redact_query_list("client_secret=shhh&page=2", &redact);
         assert!(!out.contains("shhh"), "configured key not redacted: {out}");
         assert!(out.contains("page=2"), "non-credential param lost: {out}");
     }
 
     /// OAuth callbacks such as `/sso/callback?code=…&state=…` carry
-    /// credentials under their own names. Matching is exact, so
-    /// `access_token` does not cover `id_token`.
+    /// credentials under their own names.
     #[test]
     fn the_defaults_cover_the_oauth_parameters_this_framework_emits() {
         let raw = "code=AUTHCODE&state=STATEVAL&id_token=IDTOK&code_verifier=VERIFIER\
 &client_secret=CS&page=2";
-        let out = crate::access_log::redact_query(raw, &crate::access_log::default_redact_params());
+        let out =
+            crate::access_log::redact_query_list(raw, &crate::access_log::default_redact_params());
         for leaked in ["AUTHCODE", "STATEVAL", "IDTOK", "VERIFIER", "CS"] {
             assert!(
                 !out.contains(leaked),
@@ -485,7 +498,10 @@ mod tests {
                 .uri("/reset?password=hunter2&token=abc123XYZ&page=2")
                 .body(Body::empty())
                 .unwrap();
-            let span = build_request_span(&req, &crate::access_log::default_redact_params());
+            let span = build_request_span(
+                &req,
+                &crate::access_log::query_names(&crate::access_log::default_redact_params()),
+            );
             let _e = span.enter();
             // Any event inside the span renders the span's context,
             // which is where the leak showed up.
@@ -509,5 +525,32 @@ mod tests {
             out.contains("page=2"),
             "a non-credential query param must survive:\n{out}"
         );
+    }
+
+    /// A client-sized User-Agent is cut, so one request cannot bloat every
+    /// log line under its span.
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn the_span_bounds_the_user_agent() {
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let ua = "A".repeat(8_000);
+        tracing::subscriber::with_default(subscriber, || {
+            let req = Request::builder()
+                .uri("/")
+                .header(header::USER_AGENT, ua.as_str())
+                .body(Body::empty())
+                .unwrap();
+            let span = build_request_span(&req, &crate::access_log::query_names(&[]));
+            let _e = span.enter();
+            tracing::info!("handled");
+        });
+        let out = buf.contents();
+        assert!(out.contains("user_agent.original"), "{out}");
+        assert!(out.contains(&"A".repeat(100)), "{out}");
+        assert!(out.len() < 2_000, "UA not bounded: {} bytes", out.len());
     }
 }

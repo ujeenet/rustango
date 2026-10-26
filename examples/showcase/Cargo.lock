@@ -1735,7 +1735,7 @@ dependencies = [
 
 [[package]]
 name = "rustango"
-version = "0.61.2"
+version = "0.61.3"
 dependencies = [
  "argon2",
  "async-trait",
@@ -1754,6 +1754,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "idna",
  "indexmap",
  "inventory",
  "libc",
@@ -1787,7 +1788,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-macros"
-version = "0.61.2"
+version = "0.61.3"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

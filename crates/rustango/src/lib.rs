@@ -540,6 +540,10 @@ pub mod casts;
 /// `row_to_json` binary arms) can use it without the crypto deps.
 pub(crate) mod hex;
 
+/// Word-based secret-key matcher for log and audit redaction.
+#[cfg(any(feature = "mcp", feature = "_http_layers"))]
+pub(crate) mod secret_keys;
+
 /// URL / IRI / URI helpers — `url_encode`, `uri_to_iri`, `iri_to_uri`,
 /// `escape_uri_path`, `filepath_to_uri`, `urlsafe_base64_encode` /
 /// `_decode` and friends. Pure `std`, so it is always compiled.

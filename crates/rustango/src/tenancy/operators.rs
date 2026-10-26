@@ -101,6 +101,61 @@ pub async fn active_count(registry: &Pool, except: Option<i64>) -> Result<i64, O
     Ok(q.count(registry).await?)
 }
 
+/// The last-active rule for one admin write on `table`, in its `tx`:
+/// [`Self::lock`] before the write, [`Self::check`] after it.
+pub(crate) struct AdminOperatorWrite {
+    /// `false` when the write cannot drop an active operator.
+    guarded: bool,
+}
+
+impl AdminOperatorWrite {
+    /// Lock every active operator row in id order, as [`set_active`] does,
+    /// when `before` (the rows written) holds an active operator.
+    ///
+    /// # Errors
+    /// Driver errors, a deadlock among them.
+    pub(crate) async fn lock(
+        tx: &mut crate::sql::PoolTx<'_>,
+        table: &str,
+        before: &[serde_json::Value],
+    ) -> Result<Self, crate::sql::ExecError> {
+        use crate::core::Model as _;
+        let was_active = |row: &serde_json::Value| {
+            row.get("active")
+                .is_some_and(|v| v.as_bool() == Some(true) || v.as_i64().is_some_and(|n| n != 0))
+        };
+        let guarded = table == Operator::SCHEMA.table && before.iter().any(was_active);
+        if guarded {
+            Self::locked_active(tx).await?;
+        }
+        Ok(Self { guarded })
+    }
+
+    /// Refuse the write when no active operator is left.
+    ///
+    /// # Errors
+    /// [`OperatorError::LastActive`], or a driver error.
+    pub(crate) async fn check(self, tx: &mut crate::sql::PoolTx<'_>) -> Result<(), OperatorError> {
+        if self.guarded && Self::locked_active(tx).await?.is_empty() {
+            return Err(OperatorError::LastActive);
+        }
+        Ok(())
+    }
+
+    async fn locked_active(
+        tx: &mut crate::sql::PoolTx<'_>,
+    ) -> Result<Vec<Operator>, crate::sql::ExecError> {
+        use crate::sql::FetcherTx as _;
+        Operator::objects()
+            .where_(Operator::active.eq(true))
+            .order_by(&[("id", false)])
+            .select_for_update()
+            .silent_on_sqlite()
+            .fetch_tx(tx)
+            .await
+    }
+}
+
 /// Activate or deactivate `target`, enforcing both lockout rules.
 /// Deactivating also ends the operator's sessions.
 ///
@@ -128,29 +183,59 @@ pub async fn set_active(
         if actor == Some(id) {
             return Err(OperatorError::SelfDeactivation);
         }
-        // Everyone active *except* the target. With the self-check above this
-        // is unreachable single-handed; it covers two operators deactivating
-        // each other at once, where both read "two active". A narrow window,
-        // not a closed one.
-        if active_count(registry, Some(id)).await? == 0 {
-            return Err(OperatorError::LastActive);
-        }
+        return deactivate_unless_last(registry, target, id).await;
     }
 
     // Only `active`: a whole-row save would undo a password reset that
     // landed since `target` was read (#2467).
-    if active {
-        Operator::objects()
-            .where_(Operator::id.eq(id))
-            .update()
-            .set_typed(Operator::active.set(true))
-            .execute_pool(registry)
-            .await?;
-    } else {
-        // So a later reactivation does not revive today's cookies.
-        crate::session::deactivate::<Operator>(registry, id).await?;
-    }
+    Operator::objects()
+        .where_(Operator::id.eq(id))
+        .update()
+        .set_typed(Operator::active.set(true))
+        .execute_pool(registry)
+        .await?;
     target.active = active;
+    Ok(Outcome::Changed)
+}
+
+/// Deactivate `id` and end its sessions, unless no other operator would
+/// stay active. Every active row is locked first, in id order, so two
+/// operators deactivating each other run one after the other.
+async fn deactivate_unless_last(
+    registry: &Pool,
+    target: &mut Operator,
+    id: i64,
+) -> Result<Outcome, OperatorError> {
+    use crate::sql::FetcherTx as _;
+    let mut tx = crate::sql::write_transaction(registry).await?;
+    // A locking read: MySQL sees the latest rows, PG re-checks `active`.
+    let active = Operator::objects()
+        .where_(Operator::active.eq(true))
+        .order_by(&[("id", false)])
+        .select_for_update()
+        .silent_on_sqlite()
+        .fetch_tx(&mut tx)
+        .await?;
+    let Some(current) = active.iter().find(|o| o.id.get() == Some(&id)) else {
+        target.active = false;
+        return Ok(Outcome::AlreadySo);
+    };
+    if active.len() == 1 {
+        return Err(OperatorError::LastActive);
+    }
+    // Only these two columns, so a concurrent password reset stands; the
+    // stamp is read under the lock, so it only moves forward.
+    let cutoff = crate::session::logout_cutoff_at(current.sessions_revoked_at, 0);
+    let update = Operator::objects()
+        .where_(Operator::id.eq(id))
+        .update()
+        .set_typed(Operator::active.set(false))
+        .set_typed(Operator::sessions_revoked_at.set(Some(cutoff)))
+        .compile()
+        .map_err(crate::sql::ExecError::from)?;
+    crate::sql::update_tx(&mut tx, &update).await?;
+    tx.commit().await.map_err(crate::sql::ExecError::from)?;
+    target.active = false;
     Ok(Outcome::Changed)
 }
 
@@ -240,5 +325,39 @@ mod tests {
             let stamped = values.iter().any(|(c, _)| *c == "sessions_revoked_at");
             assert_eq!(stamped, stamps, "active was {was}: {values:?}");
         }
+    }
+
+    /// A bulk delete of every active operator is refused; of some, allowed.
+    #[tokio::test]
+    async fn delete_selected_on_every_operator_is_refused() {
+        use crate::core::Model as _;
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        crate::testkit::create_tables_for::<Operator>(&pool)
+            .await
+            .unwrap();
+        let (a, b) = (operator(&pool, "a").await, operator(&pool, "b").await);
+        let row = |o: &Operator| serde_json::json!({ "id": o.id.get(), "active": true });
+        let delete_and_check = |rows: Vec<serde_json::Value>, ids: Vec<i64>| {
+            let pool = pool.clone();
+            async move {
+                let mut tx = crate::sql::write_transaction(&pool).await.unwrap();
+                let w = AdminOperatorWrite::lock(&mut tx, Operator::SCHEMA.table, &rows)
+                    .await
+                    .unwrap();
+                let q = Operator::objects()
+                    .where_(Operator::id.is_in(ids))
+                    .compile_delete()
+                    .unwrap();
+                crate::sql::delete_tx(&mut tx, &q).await.unwrap();
+                let out = w.check(&mut tx).await;
+                tx.rollback().await.unwrap();
+                out
+            }
+        };
+        let (ai, bi) = (*a.id.get().unwrap(), *b.id.get().unwrap());
+        let all = delete_and_check(vec![row(&a), row(&b)], vec![ai, bi]).await;
+        assert!(matches!(all, Err(OperatorError::LastActive)), "{all:?}");
+        let one = delete_and_check(vec![row(&a)], vec![ai]).await;
+        assert!(one.is_ok(), "{one:?}");
     }
 }

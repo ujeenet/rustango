@@ -86,6 +86,21 @@ async fn json_body(resp: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
 }
 
+/// A bulk create's validation error names the failing entry.
+#[tokio::test]
+async fn bulk_create_validation_error_names_the_entry() {
+    let app = router().await;
+    let body = r#"[{"name":"good","slug":"a"},{"name":"ab","slug":"b"}]"#;
+    let resp = app.oneshot(post("/items", body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let v = json_body(resp).await;
+    assert!(
+        v["message"].as_str().unwrap_or("").contains("bulk entry 1"),
+        "{v}"
+    );
+    assert!(v["details"]["name"].is_array(), "{v}");
+}
+
 #[tokio::test]
 async fn create_runs_serializer_validate_and_400s_on_failure() {
     let app = router().await;

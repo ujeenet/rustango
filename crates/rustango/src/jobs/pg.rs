@@ -887,9 +887,9 @@ async fn pick_one(
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
             use sqlx::Row as _;
-            // sqlx's `begin()` takes a write lock on SQLite, and
-            // SQLite serializes writers anyway, so this pickup is
-            // exclusive on its own.
+            // sqlx's `begin()` is a deferred `BEGIN`, so no lock yet; the
+            // single `UPDATE … RETURNING` takes the write lock, and SQLite
+            // serializes writers, so the pickup is exclusive.
             let mut tx = sq.begin().await?;
             // Use the canonical encoding, not `to_rfc3339()`. This
             // string is compared against `run_at`, which has a fixed
@@ -1135,6 +1135,9 @@ async fn finish_job(pool: &Pool, worker: &Worker, id: i64) {
     );
 }
 
+/// MySQL's `TEXT` holds 65,535 bytes; a longer write fails in strict mode.
+const LAST_ERROR_MAX_BYTES: usize = 65_535;
+
 async fn schedule_retry(
     pool: &Pool,
     worker: &Worker,
@@ -1155,7 +1158,8 @@ async fn schedule_retry(
     );
     let binds = vec![
         SqlValue::DateTime(next_run),
-        SqlValue::String(last_error.to_owned()),
+        // Cut on every backend, so the stored error reads the same anywhere.
+        SqlValue::String(crate::migrate::ddl::clip(last_error, LAST_ERROR_MAX_BYTES).to_owned()),
         SqlValue::I64(id),
         SqlValue::String(worker.id.clone()),
     ];

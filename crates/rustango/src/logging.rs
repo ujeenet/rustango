@@ -417,8 +417,10 @@ impl Setup {
     /// process. Returns `None` when there is no file sink.
     #[must_use = "the returned WorkerGuard must outlive the process so file writes flush"]
     pub fn install(self) -> Option<tracing_appender::non_blocking::WorkerGuard> {
-        let env_filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| default_env_filter(&self.default_filter));
+        let env_filter = env_filter_from(
+            std::env::var(EnvFilter::DEFAULT_ENV).ok().as_deref(),
+            &self.default_filter,
+        );
 
         // Colour is a stdout-only decision, resolved once so every
         // branch agrees and `Auto` asks about the terminal once.
@@ -537,6 +539,19 @@ pub fn setup_for_env() {
 /// would take a bare one as a target and silence everything else.
 #[cfg(feature = "runtime")]
 fn default_env_filter(spec: &str) -> EnvFilter {
+    EnvFilter::new(alias_levels(spec))
+}
+
+/// `RUST_LOG` when it parses, else `default`; both read level aliases.
+#[cfg(feature = "runtime")]
+fn env_filter_from(rust_log: Option<&str>, default: &str) -> EnvFilter {
+    rust_log
+        .and_then(|s| EnvFilter::try_new(alias_levels(s)).ok())
+        .unwrap_or_else(|| default_env_filter(default))
+}
+
+#[cfg(feature = "runtime")]
+fn alias_levels(spec: &str) -> String {
     let alias = |level: &str| match level.to_ascii_lowercase().as_str() {
         "warning" => Some("warn"),
         "critical" | "fatal" => Some("error"),
@@ -551,7 +566,7 @@ fn default_env_filter(spec: &str) -> EnvFilter {
             None => alias(d.trim()).map_or_else(|| d.to_owned(), str::to_owned),
         })
         .collect();
-    EnvFilter::new(directives.join(","))
+    directives.join(",")
 }
 
 #[cfg(test)]
@@ -572,6 +587,17 @@ mod tests {
         let f = default_env_filter("error,app=warning").to_string();
         assert!(f.contains("app=warn"), "{f}");
         assert_eq!(hint("info,sqlx=warn"), Some(LevelFilter::INFO));
+    }
+
+    /// `RUST_LOG=warning` reads the aliases too, instead of silencing all.
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn rust_log_reads_level_aliases() {
+        use tracing_subscriber::filter::LevelFilter;
+        let hint = |s: Option<&str>| env_filter_from(s, "info").max_level_hint();
+        assert_eq!(hint(Some("warning")), Some(LevelFilter::WARN));
+        assert_eq!(hint(Some("debug,sqlx=critical")), Some(LevelFilter::DEBUG));
+        assert_eq!(hint(None), Some(LevelFilter::INFO));
     }
 
     /// The suite-wide env lock, shared with `error` and

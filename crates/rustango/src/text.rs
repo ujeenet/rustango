@@ -224,6 +224,21 @@ pub(crate) fn xml_escape_into(out: &mut String, s: &str) {
     }
 }
 
+/// Escape only `&`, `<` and `>`, Slack's text control characters; quotes stay literal.
+#[cfg(all(feature = "notifications", feature = "http-client"))]
+pub(crate) fn slack_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Inverse of [`html_escape`] — decode HTML entities back to their
 /// characters.
 ///

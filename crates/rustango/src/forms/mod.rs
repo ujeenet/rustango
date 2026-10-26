@@ -319,11 +319,9 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
     };
     match field.ty {
         // Strict: junk such as `nope` is an error, not `true` (#2530).
-        FieldType::Bool => match raw.to_ascii_lowercase().as_str() {
-            "true" | "1" | "on" | "yes" => Ok(SqlValue::Bool(true)),
-            "" | "false" | "0" | "off" | "no" => Ok(SqlValue::Bool(false)),
-            _ => Err(make_parse_err("bool", &"expected true or false")),
-        },
+        FieldType::Bool => checkbox(raw)
+            .map(SqlValue::Bool)
+            .ok_or_else(|| make_parse_err("bool", &"expected true or false")),
         FieldType::I16 => raw
             .parse::<i16>()
             .map(SqlValue::I16)
@@ -402,24 +400,30 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
                 .collect::<Vec<u8>>();
             Ok(SqlValue::Binary(bytes))
         }
-        FieldType::Time => chrono::NaiveTime::parse_from_str(raw, "%H:%M:%S")
+        // A time input may post milliseconds; a stored value has micros.
+        FieldType::Time => chrono::NaiveTime::parse_from_str(raw, "%H:%M:%S%.f")
             .or_else(|_| chrono::NaiveTime::parse_from_str(raw, "%H:%M"))
             .map(SqlValue::Time)
             .map_err(|e| make_parse_err("Time", &e)),
         // #341 — PG array column from a form field: comma-separated
         // input (`a, b, c`). Empty / whitespace-only input → empty array.
+        // A JSON array (a REST body) is read as one, so items keep commas.
         FieldType::Array(elem) => {
-            let parts: Vec<&str> = if raw.trim().is_empty() {
-                Vec::new()
-            } else {
-                raw.split(',').map(str::trim).collect()
-            };
+            let parts: Vec<String> =
+                match serde_json::from_str::<Vec<serde_json::Value>>(raw.trim()) {
+                    Ok(items) => items
+                        .into_iter()
+                        .map(|v| match v {
+                            serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        })
+                        .collect(),
+                    Err(_) if raw.trim().is_empty() => Vec::new(),
+                    Err(_) => raw.split(',').map(|p| p.trim().to_owned()).collect(),
+                };
             match elem {
                 crate::core::ArrayElem::Text => Ok(SqlValue::Array(
-                    parts
-                        .into_iter()
-                        .map(|s| SqlValue::String(s.to_owned()))
-                        .collect(),
+                    parts.into_iter().map(SqlValue::String).collect(),
                 )),
                 crate::core::ArrayElem::Int => parts
                     .into_iter()
@@ -1174,7 +1178,7 @@ impl DynamicForm {
             let raw_str = values.last().map_or("", String::as_str);
             // A required checkbox must be ticked.
             let missing = match field.field_type {
-                DynamicFieldType::Boolean => !is_truthy(raw_str),
+                DynamicFieldType::Boolean => checkbox(raw_str) != Some(true),
                 DynamicFieldType::MultiSelect => values.iter().all(String::is_empty),
                 _ => raw_str.is_empty(),
             };
@@ -1293,7 +1297,11 @@ impl DynamicForm {
                         }
                     }
                 }
-                DynamicFieldType::Boolean => {}
+                DynamicFieldType::Boolean => {
+                    if checkbox(raw_str).is_none() {
+                        errors.add(&field.name, "Enter true or false.");
+                    }
+                }
             }
         }
         errors
@@ -1341,7 +1349,7 @@ impl DynamicForm {
                         serde_json::json!(raw.parse::<f64>().unwrap_or(0.0))
                     }
                 }
-                DynamicFieldType::Boolean => serde_json::Value::Bool(is_truthy(raw)),
+                DynamicFieldType::Boolean => serde_json::Value::Bool(checkbox(raw) == Some(true)),
                 DynamicFieldType::MultiSelect => {
                     let parts: Vec<serde_json::Value> = values
                         .iter()
@@ -1364,12 +1372,13 @@ impl DynamicForm {
     }
 }
 
-/// A checkbox value that counts as ticked.
-fn is_truthy(raw: &str) -> bool {
-    !matches!(
-        raw.to_ascii_lowercase().as_str(),
-        "" | "false" | "0" | "off" | "no"
-    )
+/// A Bool form value: ticked, unticked, or `None` for anything else.
+fn checkbox(raw: &str) -> Option<bool> {
+    match raw.to_ascii_lowercase().as_str() {
+        "true" | "1" | "on" | "yes" => Some(true),
+        "" | "false" | "0" | "off" | "no" => Some(false),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1378,6 +1387,26 @@ mod dynamic_form_tests {
 
     fn form(schema: serde_json::Value) -> DynamicForm {
         DynamicForm::from_json(schema).unwrap()
+    }
+
+    /// A time input may post milliseconds; a template form the stored micros.
+    #[test]
+    fn time_accepts_fractional_seconds() {
+        let f = crate::core::FieldSchema::new("at", "at", FieldType::Time);
+        let t = |s| chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f").unwrap();
+        for (raw, want) in [
+            ("10:00:00.123", t("10:00:00.123")),
+            ("10:00:00.123456", t("10:00:00.123456")),
+            ("10:00:05", t("10:00:05")),
+            ("10:00", t("10:00:00")),
+        ] {
+            assert_eq!(
+                parse_form_value(&f, Some(raw)).unwrap(),
+                SqlValue::Time(want),
+                "{raw}"
+            );
+        }
+        assert!(parse_form_value(&f, Some("10:00:00.")).is_err());
     }
 
     #[test]
@@ -1442,6 +1471,21 @@ mod dynamic_form_tests {
         assert!(f.is_valid());
     }
 
+    /// Junk in a checkbox is an error, not ticked.
+    #[test]
+    fn a_checkbox_refuses_an_unknown_value() {
+        let mut f = form(serde_json::json!([{"name": "ok", "field_type": "boolean"}]));
+        f.bind(HashMap::from([("ok".into(), "nope".into())]));
+        assert!(!f.errors().get("ok").is_empty(), "nope accepted");
+        let required =
+            serde_json::json!([{"name": "ok", "field_type": "boolean", "required": true}]);
+        let mut f = form(required);
+        f.bind(HashMap::from([("ok".into(), "nope".into())]));
+        assert!(!f.is_valid(), "nope ticked a required box");
+        f.bind(HashMap::from([("ok".into(), "Yes".into())]));
+        assert_eq!(f.cleaned_data().unwrap()["ok"], serde_json::json!(true));
+    }
+
     #[test]
     fn a_checkbox_is_optional_by_default() {
         let mut f = form(serde_json::json!([
@@ -1494,8 +1538,7 @@ impl<T: crate::core::Model> ModelFormFor<T> {
     /// and dispatches to the same per-field parser the form-encoded
     /// path uses.
     ///
-    /// JSON null + missing keys map to absent (the field's nullable
-    /// rule decides whether that's an error). Strings pass through
+    /// A missing key or `null` is absent; `null` on a NOT NULL Bool is an error. Strings pass through
     /// directly; numbers/bools/Arrays/objects get JSON-stringified
     /// then parsed by `parse_form_value` via the field's declared
     /// type — so an i64 field accepts both `42` and `"42"`, and a
@@ -1514,17 +1557,26 @@ impl<T: crate::core::Model> ModelFormFor<T> {
                 return Err(errors);
             }
         };
-        let mut unknown = FormErrors::default();
+        let mut rejected = FormErrors::default();
         let mut payload: HashMap<String, String> = HashMap::with_capacity(obj.len());
         for (k, v) in obj {
-            if !T::SCHEMA.scalar_fields().any(|f| f.name == k.as_str()) {
-                unknown.add(k.clone(), "unknown field");
+            let Some(field) = T::SCHEMA.scalar_fields().find(|f| f.name == k.as_str()) else {
+                rejected.add(k.clone(), "unknown field");
+                continue;
+            };
+            // Absent, a NOT NULL Bool reads as `false`; null must not. Other
+            // NOT NULL fields already report null as missing.
+            if v.is_null()
+                && !field.nullable
+                && !absent_is_missing(field)
+                && field.accepts_input(crate::core::WriteKind::Insert)
+            {
+                rejected.add(k.clone(), "This field may not be null.");
                 continue;
             }
             // serde_json::Value -> String for parse_form_value's
             // string-keyed contract:
-            //   - null  → absent (skip insert; field's nullable
-            //             rule decides whether parse errors)
+            //   - null  → absent
             //   - String→ raw inner value (no JSON quotes)
             //   - other → compact JSON serialization (numbers,
             //             bools, arrays, objects)
@@ -1539,10 +1591,10 @@ impl<T: crate::core::Model> ModelFormFor<T> {
             }
         }
         match Self::parse(&payload) {
-            Ok(form) if unknown.is_empty() => Ok(form),
-            Ok(_) => Err(unknown),
+            Ok(form) if rejected.is_empty() => Ok(form),
+            Ok(_) => Err(rejected),
             Err(mut errors) => {
-                errors.merge(unknown);
+                errors.merge(rejected);
                 Err(errors)
             }
         }
@@ -1854,6 +1906,18 @@ mod model_form_tests {
             .position(|c| *c == "body")
             .and_then(|i| mf.values().get(i));
         assert!(matches!(body_value, Some(crate::core::SqlValue::Null)));
+    }
+
+    /// JSON null on a NOT NULL field is an error, not an unticked box.
+    #[test]
+    fn from_json_refuses_null_on_a_not_null_field() {
+        let err = ModelFormFor::<Flags>::from_json(&serde_json::json!({ "on": null }))
+            .expect_err("null on a NOT NULL bool");
+        assert!(!err.get("on").is_empty(), "{err}");
+        let mf =
+            ModelFormFor::<Flags>::from_json(&serde_json::json!({ "on": true, "maybe": null }))
+                .expect("null on a nullable bool");
+        assert_eq!(mf.values(), [SqlValue::Bool(true), SqlValue::Null]);
     }
 
     #[derive(crate::Model, Debug)]

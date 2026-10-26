@@ -86,7 +86,16 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
             .unwrap_or_else(|| v.as_str().unwrap_or("").to_owned()),
         FieldType::String | FieldType::Uuid => v.as_str().unwrap_or("").to_owned(),
         FieldType::Date => v.as_str().unwrap_or("").to_owned(),
-        FieldType::Time => v.as_str().unwrap_or("").to_owned(),
+        FieldType::Time => {
+            // A time input clears a value with more than 3 fraction digits.
+            let s = v.as_str().unwrap_or("");
+            match chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f") {
+                Ok(t) if chrono::Timelike::nanosecond(&t) != 0 => {
+                    t.format("%H:%M:%S%.3f").to_string()
+                }
+                _ => s.to_owned(),
+            }
+        }
         FieldType::DateTime => {
             // Truncate to `YYYY-MM-DDTHH:MM:SS` (no fractional / TZ)
             // for the datetime-local input. Accept both with-T and
@@ -349,9 +358,13 @@ fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> St
         FieldType::DateTime => format!(
             r#"<input type="datetime-local" name="{name}" id="{name}" value="{val}"{required}{readonly}>"#
         ),
-        FieldType::Time => format!(
-            r#"<input type="time" name="{name}" id="{name}" value="{val}" step="1"{required}{readonly}>"#
-        ),
+        FieldType::Time => {
+            // A 1-second step makes a millisecond value invalid.
+            let step = if value.contains('.') { "0.001" } else { "1" };
+            format!(
+                r#"<input type="time" name="{name}" id="{name}" value="{val}" step="{step}"{required}{readonly}>"#
+            )
+        }
         FieldType::Uuid => format!(
             r#"<input type="text" name="{name}" id="{name}" value="{val}" pattern="[0-9a-fA-F\-]+"{required}{readonly}>"#
         ),
@@ -718,6 +731,25 @@ mod tests {
             fk_on_delete: None,
             validators: &[],
         }
+    }
+
+    /// Browsers clear a time input with more than 3 fraction digits.
+    #[test]
+    fn time_prefill_fits_a_time_input() {
+        let f = field("at", "at", FieldType::Time);
+        for (stored, shown) in [
+            ("10:00:00.123456", "10:00:00.123"),
+            ("10:00:00.1", "10:00:00.100"),
+            ("10:00:05", "10:00:05"),
+        ] {
+            assert_eq!(
+                render_value_for_input_json(&json!({ "at": stored }), &f),
+                shown
+            );
+        }
+        // A step of 1 second would make a millisecond value invalid.
+        assert!(render_input(&f, "10:00:00.123", false).contains(r#"step="0.001""#));
+        assert!(render_input(&f, "10:00:05", false).contains(r#"step="1""#));
     }
 
     #[test]

@@ -183,7 +183,7 @@ signals = []
 # Email backends (`rustango::email`) — Mailer trait + ConsoleMailer +
 # InMemoryMailer + NullMailer. SMTP and external transports plug in via
 # the trait.
-email = ["_async_trait"]
+email = ["_async_trait", "_base64", "dep:idna"]
 
 # Production SMTP backend (`rustango::email::SmtpMailer`, issue #48).
 # Implies `email`. Pulls `lettre` with rustls TLS (no openssl).
@@ -525,7 +525,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.61.2", path = "../rustango-macros" }
+rustango-macros = { version = "0.61.3", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }
@@ -614,6 +614,10 @@ lettre = { version = "0.11", default-features = false, features = [
     "builder",
 ], optional = true }
 
+# `email` feature dep: the IDNA step of lettre's address check, for
+# the mail doubles in builds without `email-smtp`.
+idna = { version = "1", optional = true }
+
 # `runtime` feature dep — used by `#[rustango::main]` to install a
 # default tracing subscriber (env-filter) before the user body runs.
 # `ansi` is what makes colour possible at all. Without it
@@ -628,9 +632,8 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 tracing-appender = { workspace = true, optional = true }
 # `#[rustango::main]` loads `.env` before installing its subscriber (#2204).
 dotenvy = { workspace = true, optional = true }
-# Not used directly — declared only to pin the transitive `time` away from
-# the broken 0.3.48 (see the workspace.dependencies note). `time` is
-# already pulled by cookie / tracing-appender / sqlx in every real build.
+# Not used directly — declared only to floor the transitive `time` past
+# pre-advisory releases (see the workspace.dependencies note).
 time = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]

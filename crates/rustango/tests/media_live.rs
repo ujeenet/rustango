@@ -410,9 +410,9 @@ async fn purge_pending_clears_abandoned_uploads() {
     let intent = UploadIntent::new(DISK_NAME, "image/png", "abandoned.png", 100);
     let ticket = manager.begin_upload(intent).await.expect("begin");
 
-    // Backdate so the sweep picks it up.
+    // Older than the longest upload URL, which `purge_pending` waits out.
     sqlx::query(
-        "UPDATE rustango_media SET uploaded_at = NOW() - INTERVAL '1 hour'
+        "UPDATE rustango_media SET uploaded_at = NOW() - INTERVAL '2 hours'
           WHERE id = $1",
     )
     .bind(ticket.media_id)

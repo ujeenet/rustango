@@ -325,17 +325,48 @@ pub(crate) async fn assert_overrides_touch(cache: &dyn Cache, name: &str) {
     assert_eq!(runs, 0, "{name} uses the racy `touch` default");
 }
 
+/// A `[cache].backend` value, parsed once so both resolvers agree.
+#[cfg(feature = "config")]
+enum SettingsBackend<'a> {
+    Memory,
+    Null,
+    File(&'a std::path::Path),
+    Redis,
+    Db,
+}
+
+/// Parse `[cache]`. An unknown name or `file` without a directory is an
+/// error: an in-memory stand-in drops what a shared cache guarantees.
+/// Both resolvers still fall back for now, logging at `error`.
+#[cfg(feature = "config")]
+fn settings_backend(s: &crate::config::CacheSettings) -> Result<SettingsBackend<'_>, CacheError> {
+    Ok(match s.backend.as_deref() {
+        Some("memory") | None => SettingsBackend::Memory,
+        Some("null" | "none") => SettingsBackend::Null,
+        Some("file") => SettingsBackend::File(s.file_cache_dir.as_deref().ok_or_else(|| {
+            CacheError::Connection(
+                "cache.backend = \"file\" but [cache].file_cache_dir is unset".into(),
+            )
+        })?),
+        Some("redis") => SettingsBackend::Redis,
+        Some("db" | "database") => SettingsBackend::Db,
+        Some(other) => {
+            return Err(CacheError::Connection(format!(
+                "unknown cache.backend `{other}`; use memory, null, file, redis or db (lowercase)"
+            )))
+        }
+    })
+}
+
 /// Build a [`BoxedCache`] from a loaded
 /// [`crate::config::CacheSettings`] section (#87 wiring, v0.29).
 ///
 /// Backend selection from `s.backend`:
 /// - `"memory"` (default) / unset → [`InMemoryCache`]
 /// - `"null"` / `"none"` → [`NullCache`]
-/// - `"file"` → [`FileCache`]. Needs `file_cache_dir`; without it,
-///   warns and uses [`InMemoryCache`], which is colder but gives the
-///   same guarantees.
+/// - `"file"` → [`FileCache`]. Needs `file_cache_dir`.
 /// - `"redis"`, `"db"` / `"database"` → **panics**, see below
-/// - any other value → [`InMemoryCache`] with a warning (typo defense)
+/// - anything else → [`InMemoryCache`], logged at `error`
 ///
 /// # Panics
 /// On `backend = "redis"` or `"db"`. Both need to connect, which this
@@ -346,6 +377,10 @@ pub(crate) async fn assert_overrides_touch(cache: &dyn Cache, name: &str) {
 /// [`from_settings_async`] for redis, and build the DB backend where
 /// the `Pool` is.
 ///
+/// An unknown or mis-cased name, or `file` without `file_cache_dir`,
+/// logs an error and gives an [`InMemoryCache`]. A later minor release
+/// will refuse them.
+///
 /// ```ignore
 /// let cfg = rustango::config::Settings::load_from_env()?;
 /// let cache: rustango::cache::BoxedCache =
@@ -354,12 +389,21 @@ pub(crate) async fn assert_overrides_touch(cache: &dyn Cache, name: &str) {
 #[cfg(feature = "config")]
 #[must_use]
 pub fn from_settings(s: &crate::config::CacheSettings) -> BoxedCache {
-    match s.backend.as_deref() {
+    match settings_backend(s) {
+        // Kept a fallback so an app that booted before keeps booting.
+        Err(e) => {
+            tracing::error!(
+                target: "rustango::cache",
+                error = %e,
+                "falling back to a per-process InMemoryCache; replicas will not share it",
+            );
+            Arc::new(InMemoryCache::new())
+        }
         // `redis` and `db` need to connect, so this sync resolver
         // cannot build either. Panic rather than pretend: silently
         // handing back a per-process cache voids every protection that
         // works only because the cache is shared.
-        Some("redis") => panic!(
+        Ok(SettingsBackend::Redis) => panic!(
             "cache.backend = \"redis\" cannot be built by `from_settings`, which is \
              sync — `RedisCache::new(url)` is async because it pings the server to \
              surface a bad URL at boot.\n\n\
@@ -368,12 +412,12 @@ pub fn from_settings(s: &crate::config::CacheSettings) -> BoxedCache {
              This used to fall back to an in-memory cache, which silently voided \
              every protection that depends on the cache being shared across replicas."
         ),
-        Some("null" | "none") => Arc::new(NullCache),
-        Some("file") => file_from_settings_or_warn(s),
+        Ok(SettingsBackend::Null) => Arc::new(NullCache),
+        Ok(SettingsBackend::File(dir)) => Arc::new(FileCache::new(dir)),
         // `DatabaseCache` needs a runtime `Pool` and an async
         // `ensure_table()`. Settings alone cannot describe it, so even
         // the async resolver cannot build this one.
-        Some("db" | "database") => panic!(
+        Ok(SettingsBackend::Db) => panic!(
             "cache.backend = \"db\" cannot be built from settings: `DatabaseCache` \
              needs a runtime `&Pool`, which `[cache]` does not carry, plus an async \
              `ensure_table()` call.\n\n\
@@ -384,15 +428,7 @@ pub fn from_settings(s: &crate::config::CacheSettings) -> BoxedCache {
              This used to fall back to an in-memory cache, which silently voided \
              every protection that depends on the cache being shared across replicas."
         ),
-        Some("memory") | None => Arc::new(InMemoryCache::new()),
-        Some(other) => {
-            tracing::warn!(
-                target: "rustango::cache",
-                backend = %other,
-                "unknown cache.backend value; falling back to InMemoryCache",
-            );
-            Arc::new(InMemoryCache::new())
-        }
+        Ok(SettingsBackend::Memory) => Arc::new(InMemoryCache::new()),
     }
 }
 
@@ -413,13 +449,15 @@ pub fn from_settings(s: &crate::config::CacheSettings) -> BoxedCache {
 ///
 /// # Errors
 /// Returns [`CacheError`] when the configured backend cannot be built:
-/// an unreachable Redis, a missing `redis_url`, or `db`.
+/// an unreachable Redis, a missing `redis_url`, or `db`. An unknown name
+/// or `file` without `file_cache_dir` logs an error and falls back, as
+/// in [`from_settings`].
 #[cfg(feature = "config")]
 pub async fn from_settings_async(
     s: &crate::config::CacheSettings,
 ) -> Result<BoxedCache, CacheError> {
-    match s.backend.as_deref() {
-        Some("redis") => {
+    match settings_backend(s) {
+        Ok(SettingsBackend::Redis) => {
             #[cfg(feature = "cache-redis")]
             {
                 let url = s
@@ -442,30 +480,14 @@ pub async fn from_settings_async(
                 ))
             }
         }
-        Some("db" | "database") => Err(CacheError::Connection(
+        Ok(SettingsBackend::Db) => Err(CacheError::Connection(
             "cache.backend = \"db\" cannot be built from settings: `DatabaseCache` needs \
              a runtime `&Pool`. Build it where the pool exists and pass the Arc directly."
                 .into(),
         )),
-        // Everything else builds synchronously and behaves the same.
+        // Everything else builds synchronously and behaves the same; a
+        // bad value logs and falls back there, so a patch never stops boot.
         _ => Ok(from_settings(s)),
-    }
-}
-
-/// Build a [`FileCache`] from `[cache].file_cache_dir`. If that is
-/// unset, warn and fall back to `InMemoryCache` so the app still boots.
-#[cfg(feature = "config")]
-fn file_from_settings_or_warn(s: &crate::config::CacheSettings) -> BoxedCache {
-    match s.file_cache_dir.as_deref() {
-        Some(dir) => Arc::new(FileCache::new(dir)),
-        None => {
-            tracing::warn!(
-                target: "rustango::cache",
-                "cache.backend = \"file\" but [cache].file_cache_dir is unset; \
-                 falling back to InMemoryCache.",
-            );
-            Arc::new(InMemoryCache::new())
-        }
     }
 }
 
@@ -809,8 +831,10 @@ impl InMemoryCache {
     }
 
     fn resolve_ttl(&self, ttl: Option<Duration>) -> Option<Instant> {
+        // Saturate at a century: `Instant + Duration` panics past the platform's range.
+        const FAR_FUTURE: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
         let effective = ttl.or(self.default_ttl)?;
-        Some(Instant::now() + effective)
+        Instant::now().checked_add(effective.min(FAR_FUTURE))
     }
 
     /// Store `value` expiring at `expires_at` (`None` = never).
@@ -1601,15 +1625,64 @@ mod settings_tests {
         assert!(cache.get("k").await.unwrap().is_none());
     }
 
-    /// An unknown name falls back to InMemoryCache, where writes land
-    /// — unlike the null backend.
+    /// An unknown name still gives a working cache, but logs an error
+    /// naming the value.
+    #[cfg(feature = "runtime")]
     #[tokio::test]
-    async fn unknown_backend_falls_back_to_inmemory() {
-        let mut s = crate::config::CacheSettings::default();
-        s.backend = Some("typo".into());
-        let cache = from_settings(&s);
-        cache.set("k", "v", None).await.unwrap();
-        assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+    async fn unknown_backend_logs_an_error_and_falls_back() {
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let mut caches = Vec::new();
+        tracing::subscriber::with_default(subscriber, || {
+            for (backend, dir) in [("Redis", None), ("file", None::<std::path::PathBuf>)] {
+                let s = crate::config::CacheSettings {
+                    backend: Some(backend.into()),
+                    redis_url: Some("redis://user:hunter2@cache.test".into()),
+                    file_cache_dir: dir,
+                };
+                caches.push(from_settings(&s));
+            }
+        });
+        let out = buf.contents();
+        assert!(out.contains("ERROR"), "{out}");
+        assert!(out.contains("unknown cache.backend `Redis`"), "{out}");
+        assert!(out.contains("file_cache_dir is unset"), "{out}");
+        assert!(!out.contains("hunter2"), "{out}");
+        for cache in caches {
+            cache.set("k", "v", None).await.unwrap();
+            assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+        }
+    }
+
+    /// The async resolver logs and falls back the same way; it must not
+    /// stop an app that booted on an earlier patch.
+    #[cfg(feature = "runtime")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_resolver_logs_unknown_and_incomplete_backends_and_falls_back() {
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        for backend in ["Redis", "typo", "file"] {
+            let s = crate::config::CacheSettings {
+                backend: Some(backend.into()),
+                ..Default::default()
+            };
+            let Ok(cache) = from_settings_async(&s).await else {
+                panic!("`{backend}` must fall back, not fail");
+            };
+            cache.set("k", "v", None).await.unwrap();
+            assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+        }
+        let out = buf.contents();
+        assert!(out.contains("unknown cache.backend `Redis`"), "{out}");
+        assert!(out.contains("unknown cache.backend `typo`"), "{out}");
+        assert!(out.contains("file_cache_dir is unset"), "{out}");
     }
 
     /// The sync resolver must refuse `redis`, not hand back an
@@ -2232,5 +2305,20 @@ mod bytes_tests {
             Some("plain"),
             "inner must hold raw bytes, not base64"
         );
+    }
+
+    /// A TTL past `Instant`'s range saturates to "no expiry" instead of panicking.
+    #[tokio::test]
+    async fn huge_ttl_saturates_instead_of_panicking() {
+        let cache = InMemoryCache::new();
+        let huge = Some(Duration::from_secs(u64::MAX));
+        cache.set("k", "v", huge).await.unwrap();
+        assert_eq!(cache.incr("n", 1, huge).await.unwrap(), 1);
+        assert!(cache.add("a", "v", huge).await.unwrap());
+        assert!(cache.touch("k", huge).await.unwrap());
+        assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+        let defaulted = InMemoryCache::with_default_ttl(Duration::MAX);
+        defaulted.set("k", "v", None).await.unwrap();
+        assert!(defaulted.exists("k").await.unwrap());
     }
 }
