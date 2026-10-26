@@ -1104,6 +1104,22 @@ struct Sweep {
     busy: std::sync::atomic::AtomicBool,
 }
 
+impl Sweep {
+    /// Claim the sweep; `None` when one is already running.
+    fn try_begin(&self) -> Option<SweepTurn<'_>> {
+        (!self.busy.swap(true, std::sync::atomic::Ordering::Acquire)).then_some(SweepTurn(self))
+    }
+}
+
+/// Clears `busy` on drop, so a panicking sweep cannot stop sweeping for good.
+struct SweepTurn<'a>(&'a Sweep);
+
+impl Drop for SweepTurn<'_> {
+    fn drop(&mut self) {
+        self.0.busy.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// One sweep every this many writes; each covers one of 16 hex stripes.
 const SWEEP_EVERY: u32 = 16;
 
@@ -1281,13 +1297,15 @@ impl FileCache {
         };
         let mut removed = 0;
         for entry in entries.flatten() {
-            let path = entry.path();
+            // Name first: entries outside the stripe cost no stat or path.
             let name = entry.file_name();
             let name = name.to_str().unwrap_or("");
-            let in_stripe = stripe.is_none_or(|c| name.starts_with(c));
-            if !in_stripe
-                || path.extension().and_then(|s| s.to_str()) != Some("cache")
-                || !entry.file_type().is_ok_and(|t| t.is_file())
+            if !stripe.is_none_or(|c| name.starts_with(c)) || std::path::Path::new(name).extension().and_then(|s| s.to_str()) != Some("cache")
+            {
+                continue;
+            }
+            let path = entry.path();
+            if !entry.file_type().is_ok_and(|t| t.is_file())
                 || !Self::header_dead(&path)
             {
                 continue;
@@ -1304,12 +1322,14 @@ impl FileCache {
     fn after_write(&self) {
         use std::sync::atomic::Ordering;
         let n = self.sweep.writes.fetch_add(1, Ordering::Relaxed);
-        if n % SWEEP_EVERY != SWEEP_EVERY - 1 || self.sweep.busy.swap(true, Ordering::Acquire) {
+        if n % SWEEP_EVERY != SWEEP_EVERY - 1 {
             return;
         }
+        let Some(_turn) = self.sweep.try_begin() else {
+            return;
+        };
         let stripe = char::from_digit((n / SWEEP_EVERY) % 16, 16).unwrap_or('0');
         let _ = self.sweep_dir(Some(stripe));
-        self.sweep.busy.store(false, Ordering::Release);
     }
 
     /// Longest wait for a stripe lock before the call fails.
@@ -1871,6 +1891,21 @@ mod file_cache_tests {
     #[test]
     fn file_cache_reports_process_local() {
         assert!(FileCache::new("unused").is_process_local());
+    }
+
+    /// One sweep at a time, and a panic mid-sweep still frees the next one.
+    #[test]
+    fn a_panicking_sweep_releases_the_turn() {
+        let sweep = Sweep::default();
+        let turn = sweep.try_begin().expect("first turn");
+        assert!(sweep.try_begin().is_none(), "two sweeps ran at once");
+        drop(turn);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _turn = sweep.try_begin().expect("turn after release");
+            panic!("sweep failed");
+        }));
+        assert!(r.is_err());
+        assert!(sweep.try_begin().is_some(), "a panic left the sweep busy");
     }
 
     fn tmp_dir(label: &str) -> std::path::PathBuf {
