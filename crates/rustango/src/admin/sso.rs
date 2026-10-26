@@ -490,7 +490,7 @@ impl AdminAccounts<'_> {
 }
 
 fn admin_account(u: &AdminUser) -> Option<Account> {
-    Some(Account::new(u.id.get().copied()?, true, u.active))
+    Some(Account::new(u.id.get().copied()?, true, u.active).with_created_at(u.created_at))
 }
 
 impl AccountLookup for AdminAccounts<'_> {

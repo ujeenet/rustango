@@ -98,6 +98,18 @@ mod tests {
         assert!(open(Some("new-key"), Some("wrong")).is_err());
     }
 
+    /// The cast itself opens a value sealed under the previous key.
+    #[test]
+    fn the_cast_opens_a_value_under_the_previous_key() {
+        with_key();
+        let old = crate::aead::encrypt_with(Some("rotated-out"), b"client-secret", b"").unwrap();
+        assert!(EncryptedString::from_db(&old).is_err());
+        std::env::set_var(crate::aead::PREVIOUS_KEY_VAR, "rotated-out");
+        let back = EncryptedString::from_db(&old);
+        std::env::remove_var(crate::aead::PREVIOUS_KEY_VAR);
+        assert_eq!(back.unwrap(), "client-secret");
+    }
+
     #[test]
     fn tampered_ciphertext_fails() {
         with_key();

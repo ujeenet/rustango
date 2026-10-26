@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### SSO: stale links and discovery failures
+
+A sign-in link created more than 5 minutes before its local account is deleted, and the sign-in goes on as if unlinked; built-in lookups pass the account's `created_at`. A failed OIDC discovery is now reused for 30 s before the next login retries it.
+
 ### MCP: unique keys on agent grants
 
 The next `migrate` adds unique indexes on `rustango_agent_grants (agent_id, skill_id)` and `rustango_agent_skill_permissions (skill_id, permission_codename)`. If duplicate rows exist, `migrate` stops before any DDL and names the table: delete the extra rows (keep one per key) and run it again.

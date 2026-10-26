@@ -364,6 +364,37 @@ async fn a_link_to_a_deleted_user_is_dropped(pool: &Pool) {
     assert!(linked_user(pool, &key, "sub-gone").await.unwrap().is_none());
 }
 
+/// A link made before its account belongs to an earlier user with that id
+/// (a reset sequence, a restore): it is dropped, not signed in through.
+async fn a_link_older_than_its_account_is_dropped(pool: &Pool) {
+    use chrono::{TimeDelta, Utc};
+    use rustango::sql::UpdaterPool as _;
+    let key = app_key();
+    create_link(pool, &key, "sub-old", 42).await.unwrap();
+    SsoLink::objects()
+        .filter("subject", "sub-old")
+        .update()
+        .set("created_at", Utc::now() - TimeDelta::days(365))
+        .execute_pool(pool)
+        .await
+        .unwrap();
+    let reused = Account::new(42, false, true).with_created_at(Utc::now());
+    let p = profile("sub-old", "new@example.com");
+    assert!(matches!(
+        sign_in(pool, &key, false, &p, &One(Some(reused))).await,
+        Err(LinkRefusal::EmailLinkDisabled)
+    ));
+    assert!(linked_user(pool, &key, "sub-old").await.unwrap().is_none());
+
+    create_link(pool, &key, "sub-new", 43).await.unwrap();
+    let older = Account::new(43, false, true).with_created_at(Utc::now() - TimeDelta::days(1));
+    let p = profile("sub-new", "x@example.com");
+    assert_eq!(
+        sign_in(pool, &key, false, &p, &One(Some(older))).await.unwrap(),
+        43
+    );
+}
+
 async fn provider_changes_drop_links(pool: &Pool) {
     use rustango::sql::FetcherPool as _;
     let key_of = |slug: &'static str| async move {
@@ -601,6 +632,7 @@ tri_dialect_test!(
         a_concurrent_first_login_reuses_the_link,
         sign_in_rules,
         a_link_to_a_deleted_user_is_dropped,
+        a_link_older_than_its_account_is_dropped,
         provider_changes_drop_links,
         resolve_reads_row_secret_and_flag,
         a_table_without_the_flag_still_serves_logins,

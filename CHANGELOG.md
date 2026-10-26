@@ -8,6 +8,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - MCP: a skill grant (`agent_id, skill_id`) and a skill-to-permission mapping (`skill_id, permission_codename`) are unique keys now, so concurrent grants no longer leave duplicate rows.
 - `migrate` refuses a new unique index whose columns existing rows already repeat, before any DDL, naming the index and table; MySQL no longer keeps half the migration.
+- SSO: a link older than the account it points at (an id reused after a sequence reset or restore) is dropped instead of signing that account in. Custom `AccountLookup`s opt in with `Account::with_created_at`.
+- SSO: OIDC discovery fetches each issuer once at a time and caches a failure for 30 s, so logins against a slow or down IdP no longer each wait on their own fetch.
 - Auth links: `LinkScope` and `LinkTarget` convert from `&TenantScope` too, so a `TenantScope` handler binds reset and verify links to its tenant instead of reaching for `LinkTarget::audience`.
 - `migrate-tenants`: the warning about passkeys hidden in `public` is logged even when the run fails after the tenant's passkey table was made; the next run could not tell and stayed quiet.
 - `InMemoryCache`: a TTL too large for the clock (e.g. a huge `lockout_duration_secs`) is capped at a century instead of panicking.

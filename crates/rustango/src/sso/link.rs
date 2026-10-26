@@ -306,6 +306,9 @@ pub struct Account {
     /// Superuser or staff: never linked by email.
     pub privileged: bool,
     pub active: bool,
+    /// When the account was made. A link older than its account was made for
+    /// an earlier user with the same id (a reset sequence, a restore).
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl Account {
@@ -315,6 +318,23 @@ impl Account {
             user_id,
             privileged,
             active,
+            created_at: None,
+        }
+    }
+
+    /// Set [`Self::created_at`], so a link older than the account is dropped.
+    #[must_use]
+    pub const fn with_created_at(mut self, at: chrono::DateTime<chrono::Utc>) -> Self {
+        self.created_at = Some(at);
+        self
+    }
+
+    /// Whether `link` predates this account by more than clock skew.
+    fn outlived_by(&self, link: &SsoLink) -> bool {
+        const SKEW: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
+        match (self.created_at, link.created_at.get()) {
+            (Some(account), Some(linked)) => account > *linked + SKEW,
+            _ => false,
         }
     }
 }
@@ -475,6 +495,10 @@ pub async fn sign_in(
             .await
             .map_err(LinkRefusal::Storage)?
         {
+            // A link older than its account was an earlier user's: drop it.
+            Some(a) if a.outlived_by(&link) => {
+                link.delete_pool(pool).await.map_err(storage)?;
+            }
             Some(a) if a.active => return Ok(a.user_id),
             Some(_) => return Err(LinkRefusal::Inactive),
             // The user is gone (a clean miss, not an error): drop the stale link.
