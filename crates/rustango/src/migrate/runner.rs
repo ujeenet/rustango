@@ -3615,10 +3615,17 @@ fn render_step(
             super::rebuild::columns_at_end(table, &[column.to_owned()], later)[0] != column
         });
     let readded_now = readds_fk(change, dialect)
-        .filter(|_| (renamed || column_renamed) && drop_fks.is_some())
+        .filter(|_| renamed && !column_renamed && drop_fks.is_some())
         .map(|(t, c)| (t.to_owned(), c.to_owned()));
-    // Its FKs carry the names at this op, which a later rename changes.
-    if renamed || column_renamed {
+    // The column's last rename adds it back at the end, under the end names;
+    // a re-add here could precede a later retype of its key (3780).
+    if let Some((table, column)) = readds_fk(change, dialect).filter(|_| column_renamed) {
+        let own = super::diff::column_fk_sql(snap, table, column, dialect, schema)
+            .map_err(MigrateError::Validation)?;
+        batch.deferred_fks.retain(|sql| Some(sql) != own.as_ref());
+    }
+    // Its other FKs carry the names at this op, which a later table rename keeps.
+    if renamed {
         let fks = std::mem::take(&mut batch.deferred_fks);
         batch.immediate.extend(fks);
     }
@@ -5206,15 +5213,15 @@ mod tests {
                         .map(|_| op)
                 })
                 .collect();
-            assert_eq!(fk_ops, ["drop", "add", "drop", "add"], "{out:?}");
+            // The last rename adds it back once, under the end name.
+            assert_eq!(fk_ops, ["drop", "add"], "{out:?}");
             let named = |i: usize, c: &str| {
                 out.iter()
                     .filter(|s| s.contains("CONSTRAINT") || s.contains("FOREIGN KEY"))
                     .nth(i)
                     .is_some_and(|s| s.contains(&format!("book_{c}_fkey")))
             };
-            assert!(named(0, "author_id") && named(1, "writer_id"), "{out:?}");
-            assert!(named(2, "writer_id") && named(3, "owner_id"), "{out:?}");
+            assert!(named(0, "author_id") && named(1, "owner_id"), "{out:?}");
         }
     }
 
@@ -5250,5 +5257,55 @@ mod tests {
         let modify = at("ALTER TABLE `author` MODIFY");
         assert!(drop.is_some() && drop < modify, "{out:?}");
         assert!(at("ADD CONSTRAINT `book_author_id_fkey`") > modify, "{out:?}");
+    }
+
+    /// MySQL: a retyped FK column renamed later comes back once, after the
+    /// key it references is retyped too, not before it (3780).
+    #[test]
+    fn render_between_readds_a_retyped_renamed_fk_after_its_key() {
+        use crate::migrate::{SchemaChange, SchemaSnapshot};
+        let snap = |ty: &str, column: &str| -> SchemaSnapshot {
+            serde_json::from_value(serde_json::json!({ "tables": [
+                { "name": "parent", "model": "Parent", "fields": [
+                    { "name": "id", "column": "id", "ty": ty,
+                      "nullable": false, "primary_key": true }] },
+                { "name": "child", "model": "Child", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64",
+                      "nullable": false, "primary_key": true },
+                    { "name": column, "column": column, "ty": ty, "nullable": false,
+                      "primary_key": false,
+                      "fk": { "kind": "fk", "to": "parent", "on": "id" } }] }] }))
+            .unwrap()
+        };
+        let retype = |table: &str, column: &str| SchemaChange::AlterColumnType {
+            table: table.into(),
+            column: column.into(),
+            from: "i32".into(),
+            to: "i64".into(),
+        };
+        let changes = [
+            retype("child", "a"),
+            retype("parent", "id"),
+            SchemaChange::RenameColumn {
+                table: "child".into(),
+                old_column: "a".into(),
+                new_column: "b".into(),
+            },
+        ];
+        let out = super::render_changes_between(
+            &changes,
+            &snap("i32", "a"),
+            &snap("i64", "b"),
+            &crate::sql::MySql,
+        )
+        .unwrap();
+        let at = |p: &dyn Fn(&String) -> bool| out.iter().position(|s| p(s));
+        let key = at(&|s| s.starts_with("ALTER TABLE `parent` MODIFY")).expect("key MODIFY");
+        let adds: Vec<usize> = (0..out.len())
+            .filter(|&i| out[i].contains("ADD CONSTRAINT"))
+            .collect();
+        assert_eq!(adds.len(), 1, "{out:?}");
+        assert!(adds[0] > key, "FK re-added before its key's retype: {out:?}");
+        assert!(out[adds[0]].contains("`child_b_fkey`"), "{out:?}");
     }
 }

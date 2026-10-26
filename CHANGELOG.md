@@ -10,6 +10,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Jobs: a retry's `last_error` is cut to 64 KiB on a UTF-8 boundary, so a long error no longer fails the write on MySQL (`TEXT`) and leaves the job locked.
 - `prefetch_related` matches children whose FK points at a unique column (`on = "code"`) by that column; they got no children before.
 - `sqlmigrate` on MySQL shows the drops of the FKs that reference a retyped key, which apply finds in the catalog.
+- MySQL: a migration (or unapply) that retypes an FK column, then the key it references, then renames the column no longer fails with error 3780; the FK comes back once, at the end, under the new name.
 
 ## [0.61.2] — 2026-10-26
 
