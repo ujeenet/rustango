@@ -887,9 +887,9 @@ async fn pick_one(
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
             use sqlx::Row as _;
-            // sqlx's `begin()` takes a write lock on SQLite, and
-            // SQLite serializes writers anyway, so this pickup is
-            // exclusive on its own.
+            // sqlx's `begin()` is a deferred `BEGIN`, so no lock yet; the
+            // single `UPDATE … RETURNING` takes the write lock, and SQLite
+            // serializes writers, so the pickup is exclusive.
             let mut tx = sq.begin().await?;
             // Use the canonical encoding, not `to_rfc3339()`. This
             // string is compared against `run_at`, which has a fixed

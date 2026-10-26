@@ -949,6 +949,29 @@ fn preview_schema_op(
             statements.extend(dialect.drop_foreign_key_sql(&fk.table, &name));
         }
     }
+    // So does a MySQL key MODIFY with the FKs other tables point at it.
+    if let (Some((table, column)), Some(_)) = (
+        &step.drop_referencing,
+        dialect.referencing_foreign_keys_sql(),
+    ) {
+        let later = ops
+            .iter()
+            .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)))
+            .map_or(&[][..], |i| &ops[i + 1..]);
+        let at_end = |t: &str, c: &str| {
+            let c = super::rebuild::columns_at_end(t, &[c.to_owned()], later).remove(0);
+            (super::rebuild::name_at_end(t, later), c)
+        };
+        let (end, end_column) = at_end(table, column);
+        let refs = referencing_columns(after, &end, &end_column);
+        for (t, c) in live.columns() {
+            if refs.contains(&at_end(&t, &c)) {
+                if let Some(name) = live.take(&t, &c) {
+                    statements.extend(dialect.drop_foreign_key_sql(&t, &name));
+                }
+            }
+        }
+    }
     if let Some((table, column)) = &step.readded_now {
         live.added(table, column);
     }
@@ -1058,6 +1081,13 @@ impl LiveFks {
 
     fn get(&self, table: &str, column: &str) -> Option<String> {
         self.0.get(&(table.to_owned(), column.to_owned())).cloned()
+    }
+
+    /// The columns with a live FK, sorted.
+    fn columns(&self) -> Vec<(String, String)> {
+        let mut out: Vec<_> = self.0.keys().cloned().collect();
+        out.sort();
+        out
     }
 
     /// The live FK on `table.column`, which the op drops.
@@ -5186,5 +5216,39 @@ mod tests {
             assert!(named(0, "author_id") && named(1, "writer_id"), "{out:?}");
             assert!(named(2, "writer_id") && named(3, "owner_id"), "{out:?}");
         }
+    }
+
+    /// MySQL: the preview shows the referencing FKs apply drops, from the
+    /// catalog, before it retypes the key they point at.
+    #[test]
+    fn render_between_drops_the_fks_on_a_retyped_key() {
+        use crate::migrate::{SchemaChange, SchemaSnapshot};
+        let snap = |ty: &str| -> SchemaSnapshot {
+            serde_json::from_value(serde_json::json!({ "tables": [
+                { "name": "author", "model": "Author", "fields": [
+                    { "name": "id", "column": "id", "ty": ty,
+                      "nullable": false, "primary_key": true }] },
+                { "name": "book", "model": "Book", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64",
+                      "nullable": false, "primary_key": true },
+                    { "name": "author_id", "column": "author_id", "ty": ty,
+                      "nullable": false, "primary_key": false,
+                      "fk": { "kind": "fk", "to": "author", "on": "id" } }] }] }))
+            .unwrap()
+        };
+        let widen = [SchemaChange::AlterColumnType {
+            table: "author".into(),
+            column: "id".into(),
+            from: "i32".into(),
+            to: "i64".into(),
+        }];
+        let out =
+            super::render_changes_between(&widen, &snap("i32"), &snap("i64"), &crate::sql::MySql)
+                .unwrap();
+        let at = |p: &str| out.iter().position(|s| s.contains(p));
+        let drop = at("ALTER TABLE `book` DROP FOREIGN KEY `book_author_id_fkey`");
+        let modify = at("ALTER TABLE `author` MODIFY");
+        assert!(drop.is_some() && drop < modify, "{out:?}");
+        assert!(at("ADD CONSTRAINT `book_author_id_fkey`") > modify, "{out:?}");
     }
 }

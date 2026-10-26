@@ -67,9 +67,10 @@ where
         .ok_or(ExecError::MissingPrimaryKey {
             table: P::SCHEMA.table,
         })?;
+    let on = target_column::<P, C>(child_fk_column);
     let mut parent_pks: Vec<crate::core::SqlValue> = Vec::with_capacity(parents.len());
     for parent in &parents {
-        let pk = extract_pk_value(parent);
+        let pk = parent_key(parent, on);
         if !matches!(pk, crate::core::SqlValue::Null) {
             parent_pks.push(pk);
         }
@@ -111,7 +112,7 @@ where
 
     let mut out = Vec::with_capacity(parents.len());
     for parent in parents {
-        let pk = extract_pk_value(&parent).to_display_string();
+        let pk = parent_key(&parent, on).to_display_string();
         let kids = grouped.remove(&pk).unwrap_or_default();
         out.push((parent, kids));
     }
@@ -190,9 +191,10 @@ where
         .ok_or(ExecError::MissingPrimaryKey {
             table: P::SCHEMA.table,
         })?;
+    let on = target_column::<P, C>(child_fk_column);
     let mut parent_pks: Vec<crate::core::SqlValue> = Vec::with_capacity(parents.len());
     for parent in &parents {
-        let pk = extract_pk_value(parent);
+        let pk = parent_key(parent, on);
         if !matches!(pk, crate::core::SqlValue::Null) {
             parent_pks.push(pk);
         }
@@ -235,10 +237,28 @@ where
 
     let mut out = Vec::with_capacity(parents.len());
     for parent in parents {
-        let pk = extract_pk_value(&parent).to_display_string();
+        let pk = parent_key(&parent, on).to_display_string();
         let kids = grouped.remove(&pk).unwrap_or_default();
         out.push((parent, kids));
     }
     let _ = pk_field;
     Ok(out)
+}
+
+/// The parent column `C.child_fk_column` points at, when not `P`'s pk.
+fn target_column<P: Model, C: Model>(child_fk_column: &str) -> Option<&'static str> {
+    use crate::core::Relation;
+    let field = C::SCHEMA
+        .field(child_fk_column)
+        .or_else(|| C::SCHEMA.field_by_column(child_fk_column))?;
+    let on = match field.relation? {
+        Relation::Fk { on, .. } | Relation::O2O { on, .. } => on,
+    };
+    (Some(on) != P::SCHEMA.pk_column()).then_some(on)
+}
+
+/// The value children store for `parent`: its `on` column, else its pk.
+fn parent_key<P: HasPkValue>(parent: &P, on: Option<&str>) -> crate::core::SqlValue {
+    on.and_then(|c| parent.__rustango_column_value(c))
+        .unwrap_or_else(|| extract_pk_value(parent))
 }

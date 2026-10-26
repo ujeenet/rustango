@@ -85,6 +85,25 @@ pub struct Child {
     pub row: ForeignKey<Row>,
 }
 
+/// A parent whose children point at its unique `code`, not its pk.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rel2293_shop", app = "rel2293")]
+pub struct Shop {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(unique, max_length = 16)]
+    pub code: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rel2293_item", app = "rel2293")]
+pub struct Item {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 16, on = "code")]
+    pub shop: ForeignKey<Shop, String>,
+}
+
 /// Points at any model through a generic FK.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "rel2293_note", app = "rel2293")]
@@ -287,6 +306,7 @@ async fn setup(pool: &Pool) {
         Editor::SCHEMA,
         Profile::SCHEMA,
         Child::SCHEMA,
+        Item::SCHEMA,
         Shift::SCHEMA,
         TAGGABLES,
     ] {
@@ -300,6 +320,8 @@ async fn setup(pool: &Pool) {
     fresh_table::<Article>(pool).await;
     fresh_table::<Row>(pool).await;
     fresh_table::<Child>(pool).await;
+    fresh_table::<Shop>(pool).await;
+    fresh_table::<Item>(pool).await;
     fresh_table::<Uniq>(pool).await;
     fresh_table::<PostTag>(pool).await;
     fresh_table::<Badge>(pool).await;
@@ -987,6 +1009,50 @@ async fn prefetch_past_the_bind_cap(pool: &Pool) {
     }
 }
 
+/// A child FK `on` a unique column is matched by that column, not the pk.
+async fn prefetch_matches_an_fk_on_a_unique_column(pool: &Pool) {
+    for (id, code) in [(1, "b"), (2, "a")] {
+        Shop {
+            id,
+            code: code.into(),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("shop");
+    }
+    for (id, code) in [(10, "a"), (11, "a"), (12, "b")] {
+        Item {
+            id,
+            shop: ForeignKey::unloaded(code.to_owned()),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("item");
+    }
+    let ids = |rows: Vec<(Shop, Vec<Item>)>| -> Vec<(i64, Vec<i64>)> {
+        let mut out: Vec<(i64, Vec<i64>)> = rows
+            .into_iter()
+            .map(|(s, kids)| {
+                let mut k: Vec<i64> = kids.iter().map(|i| i.id).collect();
+                k.sort_unstable();
+                (s.id, k)
+            })
+            .collect();
+        out.sort_unstable();
+        out
+    };
+    let want = vec![(1, vec![12]), (2, vec![10, 11])];
+    let all = fetch_with_prefetch_pool::<Shop, Item>(Shop::objects(), "shop", pool)
+        .await
+        .expect("prefetch");
+    assert_eq!(ids(all), want);
+    let filtered =
+        fetch_with_prefetch_filtered::<Shop, Item>(Shop::objects(), "shop", Item::objects(), pool)
+            .await
+            .expect("filtered prefetch");
+    assert_eq!(ids(filtered), want);
+}
+
 /// `prefetch_soft` splits its keys too.
 async fn prefetch_soft_past_the_bind_cap(pool: &Pool) {
     // Hits in the first and the last batch.
@@ -1417,6 +1483,7 @@ tri_dialect_test! {
         carried_binds_alone_over_the_cap_are_refused,
         prefetch_past_the_bind_cap,
         prefetch_soft_past_the_bind_cap,
+        prefetch_matches_an_fk_on_a_unique_column,
         bulk_update_is_all_or_none,
         m2m_set_ignores_repeated_ids,
         self_relation_correlates_to_the_outer_row,
