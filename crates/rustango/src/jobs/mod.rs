@@ -663,8 +663,11 @@ async fn worker_loop(w: InMemoryWorker) {
 
         let Some(entry) = handler else {
             current.lock().unwrap().take();
-            tracing::error!(job = envelope.name, "no handler registered");
             pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            // Memory is its only copy: hand it to the dead-letter callback.
+            let attempts = envelope.attempt;
+            let error = "no handler registered".to_owned();
+            dead_letter_job(&dead_letter, None, envelope, attempts, error).await;
             continue;
         };
 
