@@ -273,6 +273,8 @@ pub(crate) struct Config {
     /// with millions of rows, where the count takes seconds even
     /// with indexes. `?count=skip` does the same per request.
     pub(crate) skip_count_tables: HashSet<String>,
+    /// Most rows a list scans to run a `"view"` hook. `None`: 10 000.
+    pub(crate) view_hook_scan_cap: Option<usize>,
     /// Opt-in session auth. When `Some`, the Builder mounts
     /// `/login` and `/logout` and puts every other admin route
     /// behind a valid signed-cookie session. Set it with
@@ -553,6 +555,15 @@ impl Builder {
         self.config
             .skip_count_tables
             .extend(tables.into_iter().map(Into::into));
+        self
+    }
+
+    /// Most rows a list view reads to run a `"view"` object-permission
+    /// hook (default 10 000). Past it the total, facets and date strip are
+    /// withheld rather than count rows the hook denies.
+    #[must_use]
+    pub fn view_hook_scan_cap(mut self, rows: usize) -> Self {
+        self.config.view_hook_scan_cap = Some(rows);
         self
     }
 
@@ -1028,6 +1039,11 @@ impl AppState {
             return !perms.contains(&format!("{table}.change"));
         }
         false
+    }
+
+    /// See [`Builder::view_hook_scan_cap`].
+    pub(crate) fn view_hook_scan_cap(&self) -> usize {
+        self.config.view_hook_scan_cap.unwrap_or(10_000)
     }
 
     /// `true` when [`Builder::skip_count_for`] tagged this table,

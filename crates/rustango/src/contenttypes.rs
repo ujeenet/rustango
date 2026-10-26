@@ -405,8 +405,9 @@ pub async fn fetch_row_as_json(
             table: entry.schema.table,
         })?;
 
-    // #562 — by_pk constructor for single-PK-lookup shape.
-    let select_q = SelectQuery::by_pk(entry.schema, pk_field.column, pk.into());
+    // Scoped like `prefetch_generic`: a row a `QuerySet` hides stays hidden.
+    let select_q =
+        SelectQuery::by_pk(entry.schema, pk_field.column, pk.into()).with_global_scopes();
     let fields: Vec<&'static crate::core::FieldSchema> = entry.schema.scalar_fields().collect();
     crate::sql::select_one_row_as_json(pool, &select_q, &fields).await
 }
@@ -850,7 +851,8 @@ pub async fn fetch_reverse_generic(
             }),
         ]),
         ..SelectQuery::new(child_schema)
-    };
+    }
+    .with_global_scopes();
     let fields: Vec<&'static crate::core::FieldSchema> = child_schema.scalar_fields().collect();
     crate::sql::select_rows_as_json(pool, &select_q, &fields).await
 }
@@ -947,7 +949,8 @@ pub async fn prefetch_reverse_generic_for<Parent: crate::core::Model>(
             value: crate::core::SqlValue::I64(ct_id),
         }),
         ..SelectQuery::new(child_schema)
-    };
+    }
+    .with_global_scopes();
     let fields: Vec<&'static crate::core::FieldSchema> = child_schema.scalar_fields().collect();
     let rows = crate::sql::fetch_select_in_chunks(pool, &base, false, pk_values, |keys| {
         let select_q = SelectQuery {

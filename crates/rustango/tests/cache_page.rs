@@ -890,6 +890,51 @@ async fn request_with_cookie_bypasses_shared_cache_by_default() {
     );
 }
 
+/// An `X-Api-Key` request is per-user like a cookie one: it is neither
+/// stored nor served from the shared cache.
+#[tokio::test]
+async fn request_with_api_key_bypasses_shared_cache_by_default() {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    COUNTER.store(0, Ordering::SeqCst);
+
+    let cache = Arc::new(InMemoryCache::new());
+    let app: Router = Router::new()
+        .route(
+            "/k",
+            get(|headers: axum::http::HeaderMap| async move {
+                let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+                let who = headers
+                    .get("x-api-key")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("anon")
+                    .to_owned();
+                format!("{who}-{n}")
+            }),
+        )
+        .layer(CachePageLayer::new(cache).tenant_agnostic(true));
+
+    let keyed = || {
+        Request::builder()
+            .uri("/k")
+            .header("x-api-key", "live_1")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let r1 = app.clone().oneshot(keyed()).await.unwrap();
+    assert_eq!(body_to_string(r1.into_body()).await, "live_1-0");
+    // No key: must not get the keyed body.
+    let anon = app
+        .clone()
+        .oneshot(Request::builder().uri("/k").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(body_to_string(anon.into_body()).await, "anon-1");
+    // A keyed request is not served the anonymous entry either.
+    let r2 = app.clone().oneshot(keyed()).await.unwrap();
+    assert_eq!(r2.headers().get("x-cache-status"), None);
+    assert_eq!(body_to_string(r2.into_body()).await, "live_1-2");
+}
+
 /// Opt-in restores caching for cookie-bearing requests on a route the
 /// app has declared public.
 #[tokio::test]

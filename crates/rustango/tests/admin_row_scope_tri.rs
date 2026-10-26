@@ -192,8 +192,38 @@ rustango::register_admin_inline!(
     extra = 3,
 );
 
+/// The view hook hides `hide*` titles; nothing on the list may count them.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "rowscope_doc",
+    admin(
+        list_display = "title",
+        list_filter = "kind",
+        search_fields = "title",
+        date_hierarchy = "filed_on",
+        list_per_page = 1
+    )
+)]
+#[allow(dead_code)]
+pub struct Doc {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 64)]
+    pub title: String,
+    #[rustango(max_length = 16)]
+    pub kind: String,
+    pub filed_on: chrono::NaiveDate,
+}
+
+fn not_hide_title(_: &axum::http::request::Parts, row: Option<&serde_json::Value>) -> bool {
+    row.and_then(|r| r["title"].as_str())
+        .is_none_or(|t| !t.starts_with("hide"))
+}
+rustango::register_admin_object_permission!("rowscope_doc", "view", not_hide_title);
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
+    fresh_table::<Doc>(pool).await;
     drop_table(pool, "rowscope_note").await;
     fresh_table::<Item>(pool).await;
     fresh_table::<Note>(pool).await;
@@ -235,9 +265,15 @@ async fn post_as(
 }
 
 async fn get(pool: &Pool, uri: &str) -> (StatusCode, String) {
-    let app = rustango::admin::Builder::new(pool.clone())
-        .admin_prefix("")
-        .build();
+    get_as(pool, uri, |b| b).await
+}
+
+async fn get_as(
+    pool: &Pool,
+    uri: &str,
+    admin: impl FnOnce(rustango::admin::Builder) -> rustango::admin::Builder,
+) -> (StatusCode, String) {
+    let app = admin(rustango::admin::Builder::new(pool.clone()).admin_prefix("")).build();
     let res = app
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
@@ -447,6 +483,43 @@ async fn audited_inline_child_outside_scope_is_refused(pool: &Pool) {
     assert!(status.is_redirection(), "{status}: {body}");
     assert_eq!(label("a").await.as_deref(), Some("two"));
     assert_eq!(label("n").await.as_deref(), Some("fine"));
+}
+
+/// Totals, pages, facets, date buckets and search all leave out the rows
+/// the view hook denies.
+async fn view_hook_rows_are_uncounted(pool: &Pool) {
+    let day = |y| chrono::NaiveDate::from_ymd_opt(y, 5, 5).unwrap();
+    for (title, kind, y) in [("hide-1", "leaked", 2019), ("ok-1", "a", 2024), ("ok-2", "a", 2024)] {
+        let mut d = Doc {
+            id: Auto::default(),
+            title: title.into(),
+            kind: kind.into(),
+            filed_on: day(y),
+        };
+        d.insert_pool(pool).await.expect("insert doc");
+    }
+    let (status, body) = get(pool, "/rowscope_doc").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("2 rows"), "total: {body}");
+    assert!(body.contains("ok-1"), "page 1 is the first visible row: {body}");
+    assert!(body.contains("kind=a"), "facet: {body}");
+    assert!(!body.contains("leaked"), "denied facet value: {body}");
+    assert!(!body.contains("2019"), "denied date bucket: {body}");
+    // Every searched row is denied: the `IS NULL` filter matches none.
+    let (_, body) = get(pool, "/rowscope_doc?q=hide").await;
+    assert!(body.contains("0 rows"), "search oracle: {body}");
+
+    // Past the scan cap the counts are withheld, never leaked.
+    let (status, body) = get_as(pool, "/rowscope_doc", |b| b.view_hook_scan_cap(2)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("row count hidden"), "total: {body}");
+    assert!(!body.contains("3 rows") && !body.contains("2 rows"), "a total leaked: {body}");
+    assert!(!body.contains("kind=a"), "facets kept: {body}");
+    assert!(!body.contains(r#"<nav class="date-hierarchy""#), "date strip kept: {body}");
+    assert!(!body.contains("hide-1"), "denied row shown: {body}");
+    // A search that narrows the scan under the cap counts again.
+    let (_, body) = get_as(pool, "/rowscope_doc?q=ok-1", |b| b.view_hook_scan_cap(2)).await;
+    assert!(body.contains("1 row"), "filtered scan: {body}");
 }
 
 /// An FK facet labels a hidden target by its key, not its title (#2029).
@@ -770,6 +843,7 @@ tri_dialect_test! {
         nullable_bool_round_trips_in_admin_form,
         nullable_bool_round_trips_in_inline,
         hidden_rows_are_404_and_uncounted,
+        view_hook_rows_are_uncounted,
         create_outside_scope_is_refused,
         update_out_of_scope_is_refused,
         change_hook_sees_the_row_before_the_edit,

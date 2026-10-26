@@ -4,6 +4,26 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a schema-mode tenant cannot take a role's name
+
+Creating or moving a tenant into a schema named like a database role is refused: the default `search_path` would put that schema first for the role, the registry's included.
+
+### Fixed — ViewSet writes check FK targets and the view permission
+
+An FK in a create or update body must name a row the target's global scopes and soft delete show, else `422`; an update may resend the value it already holds. The new `ViewSet::related_filter` narrows it further. A write echoes its full row only to a caller with the `retrieve` permission; others get just the primary key. A single create also sends `Location`.
+
+### Fixed — admin lists leave out rows the `view` hook denies
+
+Totals, pages, facets, date buckets and search no longer count rows a `"view"` object-permission hook refuses. The list runs the hook over the rows its filters and search match, up to 10 000 (`Builder::view_hook_scan_cap`); past that it withholds the total, facets and date strip and logs a warning once per table.
+
+### Fixed — generic relation reads apply global scopes
+
+`GenericForeignKey::get_object`, `fetch_row_as_json`, `fetch_reverse_generic` and `prefetch_reverse_generic_for` apply the model's global scopes, as `prefetch_generic` already did.
+
+### Fixed — `cache_page` skips requests with `X-Api-Key`
+
+Like `Authorization` and `Cookie`, a request with `X-Api-Key` is neither served from nor stored in the shared cache unless the route sets `cache_authenticated(true)`.
+
 ## [0.61.3] — 2026-10-26
 
 ### Changed — unknown `cache.backend` values are logged as errors

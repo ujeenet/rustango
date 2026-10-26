@@ -150,6 +150,26 @@ untouched.
 
 ## Unreleased
 
+### Schema names equal to a database role are refused
+
+`create-tenant` and `migrate-tenant-storage` reject a schema named like any role. An existing tenant in such a schema keeps working but shadows that role's `public` tables; move it to another schema.
+
+### ViewSet: FK targets are checked, echo needs `retrieve`
+
+A body FK to a row hidden by the target's global scopes or soft delete is now a `422`, unless an update resends the value the row already holds. A caller without the `retrieve` codenames gets only `{"<pk>": …}` back (bulk: one per row) instead of the full row.
+
+### Admin lists with a `view` hook read the whole scope
+
+Each list request reads every row its filters and search match, all columns, and runs the hook on each. Past 10 000 rows (`Builder::view_hook_scan_cap`) the total, facets and date strip are hidden and a warning is logged once per table. For big tables, prefer `register_admin_queryset!`, which filters in SQL.
+
+### Generic relation reads hide scoped-out rows
+
+`get_object` and the reverse generic helpers now return what a `QuerySet` returns. To read hidden rows, query the model with `without_global_scopes()`.
+
+### `cache_page` bypasses `X-Api-Key` requests
+
+Such responses are no longer cached. A route that is truly public can opt back in with `cache_authenticated(true)`.
+
 ## 0.61.3
 
 ### `[cache] backend` should be a known lowercase name
