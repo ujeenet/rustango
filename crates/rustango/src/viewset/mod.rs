@@ -1486,6 +1486,30 @@ impl ViewSet {
             .collect()
     }
 
+    /// The fields a response shows: the field list, narrowed to what the
+    /// serializer renders when one is set.
+    fn rendered_fields(&self) -> Vec<&'static crate::core::FieldSchema> {
+        let mut fields = self.effective_fields();
+        if let Some(bridge) = &self.serializer {
+            let readable = bridge.readable_model_fields();
+            fields.retain(|f| readable.contains(&f.name));
+        }
+        fields
+    }
+
+    /// The names `?ordering=` accepts: `ordering_fields`, else the
+    /// rendered fields, so no sort oracle over a column the API hides.
+    fn ordering_allowlist(&self) -> Vec<String> {
+        match &self.ordering_fields {
+            Some(allowed) => allowed.clone(),
+            None => self
+                .rendered_fields()
+                .iter()
+                .map(|f| f.name.to_owned())
+                .collect(),
+        }
+    }
+
     /// The fields a request body may set, before per-request pins.
     /// [`WriteSet`] and the OpenAPI request schemas both read this (#1922).
     fn body_fields(&self) -> Vec<&'static crate::core::FieldSchema> {
@@ -1520,17 +1544,6 @@ impl ViewSet {
 impl ViewSetState {
     fn effective_fields(&self) -> Vec<&'static crate::core::FieldSchema> {
         self.vs.effective_fields()
-    }
-
-    /// The fields a response shows: the field list, narrowed to what the
-    /// serializer renders when one is set.
-    fn rendered_fields(&self) -> Vec<&'static crate::core::FieldSchema> {
-        let mut fields = self.effective_fields();
-        if let Some(bridge) = &self.vs.serializer {
-            let readable = bridge.readable_model_fields();
-            fields.retain(|f| readable.contains(&f.name));
-        }
-        fields
     }
 
     /// Resolve the request's tenant through the mounted context, the
@@ -2761,14 +2774,7 @@ async fn run_list(
     //
     // `list_params::parse_ordering` is the single source of truth,
     // shared with `template_views::ListView`.
-    let ordering_allowlist: Vec<String> = match &state.vs.ordering_fields {
-        Some(allowed) => allowed.clone(),
-        None => state
-            .rendered_fields()
-            .iter()
-            .map(|f| f.name.to_owned())
-            .collect(),
-    };
+    let ordering_allowlist = state.vs.ordering_allowlist();
     let order_by: Vec<crate::core::OrderItem> = params
         .get("ordering")
         .map(|raw| crate::list_params::parse_ordering(raw, &ordering_allowlist, state.vs.schema))

@@ -36,6 +36,26 @@ fn moved_out_of_scope() -> Response {
     Response::new("updated; the row is now outside your scope")
 }
 
+/// `extract_create_body` reads JSON, and anything else as urlencoded.
+fn write_body(schema: Schema) -> RequestBody {
+    RequestBody::json(schema.clone()).and_content("application/x-www-form-urlencoded", schema)
+}
+
+/// `BodyError::Bad` and a field value that does not parse.
+fn malformed_body() -> Response {
+    Response::new("malformed body or a value that does not parse")
+}
+
+/// A serializer or field-rule refusal (`validation_failed`).
+fn validation_failed() -> Response {
+    Response::new("validation failed; `details` maps each field to its errors")
+}
+
+/// `run_list` refuses an unknown lookup, a bad value, an oversized IN list or a bad cursor.
+fn bad_list_criteria() -> Response {
+    Response::new("bad filter lookup or value, IN list too long, or invalid cursor")
+}
+
 /// Which write a request schema describes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Body {
@@ -86,6 +106,9 @@ impl ViewSet {
         for param in self.list_query_params() {
             list_op = list_op.parameter(param);
         }
+        if self.list_can_refuse() {
+            list_op = list_op.response("400", bad_list_criteria());
+        }
         p = p.get(list_op);
 
         // -------- create (POST)
@@ -94,15 +117,16 @@ impl ViewSet {
                 .summary(format!("Create {tag}"))
                 .operation_id(format!("create_{}", snake(tag)))
                 .tag(tag)
-                .request_body(RequestBody::json(self.request_schema(Body::Create)))
+                .request_body(write_body(self.request_schema(Body::Create)))
                 .response(
                     "201",
                     // `create_one` answers a bare 201 when the read-back is scoped out.
                     Response::new("created; empty body when the new row is outside your scope")
                         .json_content(Schema::ref_(item_ref)),
                 )
-                .response("400", Response::new("validation error"))
-                .response("409", conflict());
+                .response("400", malformed_body())
+                .response("409", conflict())
+                .response("422", validation_failed());
             p = p.post(create_op);
         }
 
@@ -148,6 +172,10 @@ impl ViewSet {
                     Response::new("paginated list")
                         .json_content(self.list_response_schema(item_ref)),
                 )
+                .response(
+                    "400",
+                    Response::new("malformed urlencoded body, bad filter value or invalid cursor"),
+                )
                 .response("413", Response::new("body larger than 1 MiB"))
                 .response(
                     "415",
@@ -183,30 +211,32 @@ impl ViewSet {
                 .summary(format!("Replace {tag}"))
                 .operation_id(format!("update_{}", snake(tag)))
                 .tag(tag)
-                .request_body(RequestBody::json(self.request_schema(Body::Replace)))
+                .request_body(write_body(self.request_schema(Body::Replace)))
                 .response(
                     "200",
                     Response::new("updated").json_content(Schema::ref_(item_ref)),
                 )
                 .response("204", moved_out_of_scope())
-                .response("400", Response::new("validation error"))
+                .response("400", malformed_body())
                 .response("404", Response::new("not found"))
-                .response("409", conflict());
+                .response("409", conflict())
+                .response("422", validation_failed());
             p = p.put(update_op);
 
             let patch_op = Operation::new()
                 .summary(format!("Partially update {tag}"))
                 .operation_id(format!("partial_update_{}", snake(tag)))
                 .tag(tag)
-                .request_body(RequestBody::json(self.request_schema(Body::Patch)))
+                .request_body(write_body(self.request_schema(Body::Patch)))
                 .response(
                     "200",
                     Response::new("updated").json_content(Schema::ref_(item_ref)),
                 )
                 .response("204", moved_out_of_scope())
-                .response("400", Response::new("validation error"))
+                .response("400", malformed_body())
                 .response("404", Response::new("not found"))
-                .response("409", conflict());
+                .response("409", conflict())
+                .response("422", validation_failed());
             p = p.patch(patch_op);
 
             let destroy_op = Operation::new()
@@ -257,31 +287,35 @@ impl ViewSet {
 
     fn list_query_params(&self) -> Vec<Parameter> {
         let mut out = Vec::new();
+        // `run_list` clamps to `max_page_size` rather than refusing, so no `maximum`.
+        let cap = self.max_page_size;
+        let default = self.default_page_size.clamp(1, cap);
+        let page_size = || {
+            Parameter::query("page_size", Schema::int32()).description(format!(
+                "Items per page (default {default}; values above {cap} are clamped to {cap})"
+            ))
+        };
         // Pagination params
         match self.pagination {
             PaginationStyle::PageNumber => {
                 out.push(
                     Parameter::query("page", Schema::int32()).description("1-based page number"),
                 );
-                out.push(
-                    Parameter::query("page_size", Schema::int32())
-                        .description("Items per page (max 1000)"),
-                );
+                out.push(page_size());
             }
             PaginationStyle::Cursor { .. } => {
                 out.push(
                     Parameter::query("cursor", Schema::string())
                         .description("Opaque token from the previous response's `next` field"),
                 );
-                out.push(
-                    Parameter::query("page_size", Schema::int32())
-                        .description("Items per page (max 1000)"),
-                );
+                out.push(page_size());
             }
             PaginationStyle::LimitOffset => {
                 out.push(
-                    Parameter::query("limit", Schema::int32())
-                        .description("Items to return (max 1000)"),
+                    Parameter::query("limit", Schema::int32()).description(format!(
+                        "Items to return (default {default}; values above {cap} are \
+                         clamped to {cap})"
+                    )),
                 );
                 out.push(
                     Parameter::query("offset", Schema::int32())
@@ -298,22 +332,22 @@ impl ViewSet {
                 )),
             );
         }
-        // Ordering — surface the `?ordering=` parameter when EITHER a
-        // default ordering is configured OR an explicit
-        // `ordering_fields` whitelist is set (#439). The description
-        // enumerates the allowed fields when a whitelist is in play
-        // so clients can discover the API surface without reading code.
-        let allowed = self.ordering_fields.as_deref().filter(|f| !f.is_empty());
-        if !self.default_ordering.is_empty() || allowed.is_some() {
-            let description = match allowed {
-                None => "Comma-separated field names; prefix `-` for DESC".to_owned(),
-                Some(allowed) => format!(
+        // Ordering: `run_list` always reads it from the same allow-list;
+        // cursor pages always sort by the cursor column.
+        let allowed: Vec<String> = self
+            .ordering_allowlist()
+            .into_iter()
+            .filter(|n| self.schema.field(n).is_some())
+            .collect();
+        let cursor = matches!(self.pagination, PaginationStyle::Cursor { .. });
+        if !cursor && !allowed.is_empty() {
+            out.push(
+                Parameter::query("ordering", Schema::string()).description(format!(
                     "Comma-separated field names from: {}. Prefix `-` for DESC. \
                      Unknown / off-whitelist names are silently dropped.",
                     allowed.join(", "),
-                ),
-            };
-            out.push(Parameter::query("ordering", Schema::string()).description(description));
+                )),
+            );
         }
         // One filter param per filter_field. The `__`-suffixed lookups
         // are not listed as separate params — the description names
@@ -334,6 +368,11 @@ impl ViewSet {
             );
         }
         out
+    }
+
+    /// Only filter params and a cursor token can make a GET list a 400.
+    fn list_can_refuse(&self) -> bool {
+        !self.filter_fields.is_empty() || matches!(self.pagination, PaginationStyle::Cursor { .. })
     }
 
     fn list_response_schema(&self, item_ref: &str) -> Schema {
@@ -392,7 +431,12 @@ fn field_type_to_schema(t: FieldType) -> Schema {
         FieldType::Uuid => Schema::uuid(),
         FieldType::Json => Schema::default(), // free-form
         FieldType::Decimal => Schema::decimal(),
-        FieldType::Binary => Schema::binary(),
+        // Forms read and `row_to_json` writes hex; `Schema::binary` would say base64.
+        FieldType::Binary => {
+            let mut s = Schema::string().description("hex-encoded bytes, even length");
+            s.format = Some("hex".into());
+            s
+        }
         // #341 — PG array column: `type: array` with element-typed items.
         FieldType::Array(elem) => {
             use crate::core::ArrayElem;
@@ -416,7 +460,9 @@ fn field_type_to_schema(t: FieldType) -> Schema {
         // #824 — pgvector embedding: a JSON array of numbers.
         FieldType::Vector(_) => Schema::array_of(Schema::number()),
         // #443 — PostGIS Point: a JSON object `{ x, y, srid }`.
-        FieldType::Geometry(_) => Schema::object(),
+        FieldType::Geometry(_) => {
+            <crate::sql::Point as crate::openapi::OpenApiSchema>::openapi_schema()
+        }
     }
 }
 
@@ -980,6 +1026,114 @@ mod tests {
             );
         }
         assert!(!props.is_empty(), "criteria schema must not be empty");
+    }
+
+    fn list_op(vs: &ViewSet) -> serde_json::Value {
+        let paths = vs.openapi_paths("/api/posts", "Post");
+        let coll = &paths.iter().find(|(p, _)| p == "/api/posts").unwrap().1;
+        serde_json::to_value(coll.get.as_ref().unwrap()).unwrap()
+    }
+
+    fn param<'a>(op: &'a serde_json::Value, name: &str) -> Option<&'a serde_json::Value> {
+        op["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == name)
+    }
+
+    /// The forms layer reads hex and `row_to_json` writes hex; `byte` means base64.
+    #[test]
+    fn binary_fields_are_documented_as_hex() {
+        let v = serde_json::to_value(field_type_to_schema(FieldType::Binary)).unwrap();
+        assert_eq!(v["type"], "string");
+        assert_eq!(v["format"], "hex", "{v}");
+    }
+
+    /// The page cap is `max_page_size`, not a fixed 1000.
+    #[test]
+    fn page_size_params_name_the_configured_cap() {
+        for (vs, name) in [
+            (vs().max_page_size(250), "page_size"),
+            (vs().max_page_size(250).cursor_pagination("id"), "page_size"),
+            (vs().max_page_size(250).limit_offset_pagination(), "limit"),
+        ] {
+            let op = list_op(&vs);
+            let desc = param(&op, name).unwrap()["description"].as_str().unwrap();
+            assert!(
+                desc.contains("250") && !desc.contains("1000"),
+                "{name}: {desc}"
+            );
+        }
+    }
+
+    /// Cursor pages always sort by the cursor column.
+    #[test]
+    fn cursor_pagination_lists_no_ordering_param() {
+        let op = list_op(&vs().cursor_pagination("id"));
+        assert!(param(&op, "ordering").is_none(), "{op}");
+    }
+
+    /// `run_list` honours `?ordering=` over the rendered fields with no config at all.
+    #[test]
+    fn ordering_is_listed_without_any_ordering_config() {
+        let op = list_op(&ViewSet::for_model(schema(), &["id", "title"]));
+        let desc = param(&op, "ordering").expect("ordering")["description"]
+            .as_str()
+            .unwrap();
+        assert!(desc.contains("id, title"), "{desc}");
+        let none = list_op(&ViewSet::for_model(schema(), &["id"]).ordering_fields(&[]));
+        assert!(
+            param(&none, "ordering").is_none(),
+            "empty allow-list sorts nothing"
+        );
+    }
+
+    /// A bad filter value or cursor is a 400.
+    #[test]
+    fn list_documents_the_400_it_can_return() {
+        assert!(list_op(&vs()).pointer("/responses/400").is_some());
+        let plain = ViewSet::for_model(schema(), &["id"]);
+        assert!(list_op(&plain.clone().cursor_pagination("id"))
+            .pointer("/responses/400")
+            .is_some());
+        assert!(list_op(&plain).pointer("/responses/400").is_none());
+    }
+
+    /// Writes take urlencoded bodies too, and a field-rule refusal is a 422.
+    #[test]
+    fn writes_document_urlencoded_bodies_and_422() {
+        let paths = vs().openapi_paths("/api/posts", "Post");
+        let coll = &paths.iter().find(|(p, _)| p == "/api/posts").unwrap().1;
+        let item = &paths
+            .iter()
+            .find(|(p, _)| p == "/api/posts/{pk}")
+            .unwrap()
+            .1;
+        for (name, op) in [
+            ("POST", &coll.post),
+            ("PUT", &item.put),
+            ("PATCH", &item.patch),
+        ] {
+            let v = serde_json::to_value(op.as_ref().unwrap()).unwrap();
+            let content = &v["requestBody"]["content"];
+            assert_eq!(
+                content["application/x-www-form-urlencoded"]["schema"],
+                content["application/json"]["schema"],
+                "{name}: {v}"
+            );
+            assert!(v["responses"]["422"].is_object(), "{name}: {v}");
+        }
+    }
+
+    /// A malformed urlencoded QUERY body is a 400.
+    #[cfg(feature = "admin")]
+    #[test]
+    fn the_query_operation_documents_400() {
+        let paths = vs().openapi_query(true).openapi_paths("/api/posts", "Post");
+        let coll = &paths.iter().find(|(p, _)| p == "/api/posts").unwrap().1;
+        let v = serde_json::to_value(coll.query.as_ref().unwrap()).unwrap();
+        assert!(v["responses"]["400"].is_object(), "{v}");
     }
 
     /// The spec version has to follow the operation, or tooling
