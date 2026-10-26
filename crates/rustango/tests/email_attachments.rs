@@ -148,7 +148,10 @@ async fn unattached_email_still_serializes_cleanly() {
 fn attachment_still_writes_an_integer_array() {
     let e = base_email().attach("a.bin", vec![0u8, 1, 2, 255], None::<&str>);
     let v = serde_json::to_value(&e).unwrap();
-    assert_eq!(v["attachments"][0]["content"], serde_json::json!([0, 1, 2, 255]));
+    assert_eq!(
+        v["attachments"][0]["content"],
+        serde_json::json!([0, 1, 2, 255])
+    );
     let back: Email = serde_json::from_value(v).unwrap();
     assert_eq!(back.attachments[0].content, vec![0u8, 1, 2, 255]);
 }
@@ -156,7 +159,10 @@ fn attachment_still_writes_an_integer_array() {
 /// Both forms read: the array written now and the base64 a later release writes.
 #[test]
 fn attachment_reads_an_array_or_base64() {
-    for content in [serde_json::json!([0, 1, 2, 255]), serde_json::json!("AAEC/w==")] {
+    for content in [
+        serde_json::json!([0, 1, 2, 255]),
+        serde_json::json!("AAEC/w=="),
+    ] {
         let v = serde_json::json!({ "filename": "a.bin", "content": content, "mimetype": null });
         let a: Attachment = serde_json::from_value(v).unwrap();
         assert_eq!(a.content, vec![0u8, 1, 2, 255]);

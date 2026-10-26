@@ -385,10 +385,7 @@ pub(crate) async fn render_for_parent_in(
                 let cells: Vec<serde_json::Value> = display_fields
                     .iter()
                     .map(|f| {
-                        let raw = row
-                            .get(f.name)
-                            .cloned()
-                            .unwrap_or(serde_json::Value::Null);
+                        let raw = row.get(f.name).cloned().unwrap_or(serde_json::Value::Null);
                         serde_json::json!({
                             "label": f.display_label(),
                             "value": render_cell(&child_cfg, f, &raw),
@@ -550,10 +547,7 @@ pub(crate) async fn render_generic_for_parent_in(
                 let cells: Vec<serde_json::Value> = display_fields
                     .iter()
                     .map(|f| {
-                        let raw = row
-                            .get(f.name)
-                            .cloned()
-                            .unwrap_or(serde_json::Value::Null);
+                        let raw = row.get(f.name).cloned().unwrap_or(serde_json::Value::Null);
                         serde_json::json!({
                             "label": f.display_label(),
                             "value": render_cell(&child_cfg, f, &raw),
@@ -2215,12 +2209,20 @@ mod tests {
     #[tokio::test]
     async fn parent_content_type_lookup_is_cached() {
         use crate::core::Model as _;
-        let pool = Pool::Sqlite(crate::sql::sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap());
+        let pool = Pool::Sqlite(
+            crate::sql::sqlx::SqlitePool::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
         crate::contenttypes::ensure_seeded(&pool).await.unwrap();
-        let first = resolve_ct_id_for_schema(&pool, CtParent::SCHEMA).await.unwrap();
+        let first = resolve_ct_id_for_schema(&pool, CtParent::SCHEMA)
+            .await
+            .unwrap();
         assert!(first.is_some());
         let (again, queries) = crate::test_assertions::QueryCounter::scope(async {
-            let id = resolve_ct_id_for_schema(&pool, CtParent::SCHEMA).await.unwrap();
+            let id = resolve_ct_id_for_schema(&pool, CtParent::SCHEMA)
+                .await
+                .unwrap();
             (id, crate::test_assertions::QueryCounter::current())
         })
         .await;

@@ -55,10 +55,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-#[cfg(feature = "email-smtp")]
-pub mod smtp;
 #[cfg(any(test, not(feature = "email-smtp")))]
 mod address;
+#[cfg(feature = "email-smtp")]
+pub mod smtp;
 
 #[cfg(feature = "email-smtp")]
 pub use smtp::{SmtpMailer, SmtpMailerBuilder, TlsMode};
@@ -119,7 +119,10 @@ mod base64_bytes {
                     .decode(v)
                     .map_err(E::custom)
             }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Vec<u8>, A::Error> {
                 let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
                 while let Some(b) = seq.next_element::<u8>()? {
                     out.push(b);
@@ -1089,7 +1092,10 @@ mod tests {
             (format!("a@{}.com", "b".repeat(63)), true),
             (format!("a@{}.com", "b".repeat(64)), false),
             (format!("a@{}.com", vec![label.as_str(); 4].join(".")), true),
-            (format!("a@{}.com", vec![label.as_str(); 5].join(".")), false),
+            (
+                format!("a@{}.com", vec![label.as_str(); 5].join(".")),
+                false,
+            ),
         ]
     }
 
@@ -1131,9 +1137,42 @@ mod tests {
     fn fallback_matches_lettre() {
         let mut cases: Vec<String> = MAILBOXES.iter().map(|(a, _)| (*a).to_owned()).collect();
         cases.extend(long_mailboxes().into_iter().map(|(a, _)| a));
-        let locals = ["a", "a.b", "\"a\"", "\"a b\"", "\"a\\\"b\"", "ä", "☃", "a..b", "", "a(b)", " a"];
-        let domains = ["x", "x.com", "1.2.3.4", "[1.2.3.4]", "x_y", "-x", "ä.de", "☃", "x.", " x", "😀.com"];
-        let wraps = ["{}", "<{}>", "N <{}>", "\"N, M\" <{}>", " {} ", "<{}> ", "N<{}>", "N <{}"];
+        let locals = [
+            "a",
+            "a.b",
+            "\"a\"",
+            "\"a b\"",
+            "\"a\\\"b\"",
+            "ä",
+            "☃",
+            "a..b",
+            "",
+            "a(b)",
+            " a",
+        ];
+        let domains = [
+            "x",
+            "x.com",
+            "1.2.3.4",
+            "[1.2.3.4]",
+            "x_y",
+            "-x",
+            "ä.de",
+            "☃",
+            "x.",
+            " x",
+            "😀.com",
+        ];
+        let wraps = [
+            "{}",
+            "<{}>",
+            "N <{}>",
+            "\"N, M\" <{}>",
+            " {} ",
+            "<{}> ",
+            "N<{}>",
+            "N <{}",
+        ];
         for l in locals {
             for d in domains {
                 for w in wraps {
@@ -1162,7 +1201,10 @@ mod tests {
     async fn in_memory_require_from_refuses_mail_without_from() {
         let m = InMemoryMailer::new().require_from();
         let e = Email::new().to("a@x").subject("s").body("b");
-        assert!(matches!(m.send(&e).await, Err(MailError::InvalidMessage(_))));
+        assert!(matches!(
+            m.send(&e).await,
+            Err(MailError::InvalidMessage(_))
+        ));
         m.send(&e.from("noreply@x")).await.unwrap();
         assert_eq!(m.count(), 1);
     }

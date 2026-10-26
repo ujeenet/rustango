@@ -11,7 +11,9 @@ pub(super) fn is_mailbox(input: &str) -> bool {
     let Some(((user, domain), rest)) = parsed else {
         return false;
     };
-    rest.trim_start_matches(char::is_whitespace).is_empty() && valid_user(&user) && valid_domain(&domain)
+    rest.trim_start_matches(char::is_whitespace).is_empty()
+        && valid_user(&user)
+        && valid_domain(&domain)
 }
 
 type Parsed<'a, T> = Option<(T, &'a str)>;
@@ -81,7 +83,9 @@ fn quoted_string(s: &str) -> Parsed<'_, String> {
 
 /// `atom / quoted-string`.
 fn word(s: &str) -> Parsed<'_, ()> {
-    quoted_string(s).map(|(_, r)| ((), r)).or_else(|| atom(s).map(|(_, r)| ((), r)))
+    quoted_string(s)
+        .map(|(_, r)| ((), r))
+        .or_else(|| atom(s).map(|(_, r)| ((), r)))
 }
 
 /// `word *([FWS] (word / "."))`, lettre's display name.
@@ -119,7 +123,10 @@ fn is_atext(c: char) -> bool {
 
 /// `email_address` tests the code point's bytes, not its UTF-8 form.
 fn is_utf8_non_ascii(c: char) -> bool {
-    matches!((c as u32).to_be_bytes(), [0x00, 0x00, 0xC2..=0xDF, 0x80..=0xBF])
+    matches!(
+        (c as u32).to_be_bytes(),
+        [0x00, 0x00, 0xC2..=0xDF, 0x80..=0xBF]
+    )
 }
 
 fn is_atom(s: &str) -> bool {
@@ -141,7 +148,10 @@ fn valid_user(user: &str) -> bool {
 
 fn is_qcontent(s: &str) -> bool {
     let qtext = |c: char| {
-        c == '\x21' || ('\x23'..='\x5B').contains(&c) || ('\x5D'..='\x7E').contains(&c) || is_utf8_non_ascii(c)
+        c == '\x21'
+            || ('\x23'..='\x5B').contains(&c)
+            || ('\x5D'..='\x7E').contains(&c)
+            || is_utf8_non_ascii(c)
     };
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
@@ -167,7 +177,9 @@ fn valid_ascii_domain(domain: &str) -> bool {
         && domain.len() <= 254
         && if let Some(lit) = domain.strip_prefix('[').and_then(|d| d.strip_suffix(']')) {
             lit.chars().all(|c| {
-                ('\x21'..='\x5A').contains(&c) || ('\x5E'..='\x7E').contains(&c) || is_utf8_non_ascii(c)
+                ('\x21'..='\x5A').contains(&c)
+                    || ('\x5E'..='\x7E').contains(&c)
+                    || is_utf8_non_ascii(c)
             })
         } else {
             domain.split('.').all(|l| {

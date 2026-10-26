@@ -170,12 +170,14 @@ async fn composite_referenced_key_widens(pool: &Pool) {
     let ledger = "mr_wc_ledger";
     let dir = fresh(pool, &[b, a], ledger).await;
     let with = |ty: &str| {
-        let f = |name: &str, ty: &str, pk: bool| {
-            json!({"name": name, "column": name, "ty": ty, "nullable": false, "primary_key": pk})
-        };
+        let f = |name: &str, ty: &str, pk: bool| json!({"name": name, "column": name, "ty": ty, "nullable": false, "primary_key": pk});
         let mut book = table(
             b,
-            vec![f("id", "i64", true), f("author_id", ty, false), f("region", "i64", false)],
+            vec![
+                f("id", "i64", true),
+                f("author_id", ty, false),
+                f("region", "i64", false),
+            ],
         );
         book["composite_fks"] = json!([{"name": "author", "to": a,
             "from": ["author_id", "region"], "on": ["id", "region"]}]);
@@ -244,10 +246,18 @@ async fn composite_referenced_key_widens(pool: &Pool) {
     unapply_pool_with_ledger(pool, dir.path(), &widen.name, ledger)
         .await
         .unwrap_or_else(|e| panic!("narrowing on {}: {e}", d.name()));
-    assert_eq!(fk_count(pool, b).await, fks, "FKs kept narrowing on {}", d.name());
-    exec(pool, &format!("INSERT INTO {qa} (id, region) VALUES (5, 1)"))
-        .await
-        .expect("author");
+    assert_eq!(
+        fk_count(pool, b).await,
+        fks,
+        "FKs kept narrowing on {}",
+        d.name()
+    );
+    exec(
+        pool,
+        &format!("INSERT INTO {qa} (id, region) VALUES (5, 1)"),
+    )
+    .await
+    .expect("author");
     assert!(
         exec(
             pool,

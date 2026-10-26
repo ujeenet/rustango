@@ -308,7 +308,10 @@ async fn finalize_and_purge_pending_respect_the_status_on_mysql() {
         rustango::media::Media::objects()
             .where_(rustango::media::Media::id.eq(gone))
             .update()
-            .set("uploaded_at", chrono::Utc::now() - chrono::Duration::hours(2))
+            .set(
+                "uploaded_at",
+                chrono::Utc::now() - chrono::Duration::hours(2),
+            )
             .execute_pool(&pool)
             .await
             .expect("age it");

@@ -90,7 +90,9 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
             // A time input clears a value with more than 3 fraction digits.
             let s = v.as_str().unwrap_or("");
             match chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f") {
-                Ok(t) if chrono::Timelike::nanosecond(&t) != 0 => t.format("%H:%M:%S%.3f").to_string(),
+                Ok(t) if chrono::Timelike::nanosecond(&t) != 0 => {
+                    t.format("%H:%M:%S%.3f").to_string()
+                }
                 _ => s.to_owned(),
             }
         }
@@ -740,7 +742,10 @@ mod tests {
             ("10:00:00.1", "10:00:00.100"),
             ("10:00:05", "10:00:05"),
         ] {
-            assert_eq!(render_value_for_input_json(&json!({ "at": stored }), &f), shown);
+            assert_eq!(
+                render_value_for_input_json(&json!({ "at": stored }), &f),
+                shown
+            );
         }
         // A step of 1 second would make a millisecond value invalid.
         assert!(render_input(&f, "10:00:00.123", false).contains(r#"step="0.001""#));

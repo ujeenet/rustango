@@ -751,7 +751,11 @@ mod tests {
     #[cfg(unix)]
     fn mode(path: &std::path::Path) -> u32 {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
     }
 
     /// A link planted at the key path must not receive the key.

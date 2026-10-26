@@ -43,28 +43,30 @@ async fn claim(pool: &Pool, worker: i64) -> Result<Option<i64>, ExecError> {
 
 /// [`claim`] inside `atomic_immediate`, which takes the write lock at `BEGIN` too.
 async fn claim_atomic(pool: &Pool, worker: i64) -> Result<Option<i64>, ExecError> {
-    rustango::sql::atomic_immediate(pool, move |tx| Box::pin(async move {
-        let mut guard = tx.lock().await?;
-        let free: Vec<Job> = Job::objects()
-            .filter("worker__isnull", true)
-            .order_by(&[("id", false)])
-            .limit(1)
-            .select_for_update()
-            .skip_locked()
-            .silent_on_sqlite()
-            .fetch_on(&mut *guard)
-            .await?;
-        let Some(job) = free.first() else {
-            return Ok(None);
-        };
-        Job::objects()
-            .filter("id", job.id)
-            .update()
-            .set("worker", worker)
-            .execute_on(&mut *guard)
-            .await?;
-        Ok(Some(job.id))
-    }))
+    rustango::sql::atomic_immediate(pool, move |tx| {
+        Box::pin(async move {
+            let mut guard = tx.lock().await?;
+            let free: Vec<Job> = Job::objects()
+                .filter("worker__isnull", true)
+                .order_by(&[("id", false)])
+                .limit(1)
+                .select_for_update()
+                .skip_locked()
+                .silent_on_sqlite()
+                .fetch_on(&mut *guard)
+                .await?;
+            let Some(job) = free.first() else {
+                return Ok(None);
+            };
+            Job::objects()
+                .filter("id", job.id)
+                .update()
+                .set("worker", worker)
+                .execute_on(&mut *guard)
+                .await?;
+            Ok(Some(job.id))
+        })
+    })
     .await
 }
 
@@ -76,7 +78,12 @@ async fn pool_write_inside_a_default_atomic(pool: &Pool) {
     rustango::atomic!(pool, |tx| {
         let seen = Job::objects().fetch_on(&mut *tx.lock().await?).await?;
         assert!(seen.is_empty());
-        Job { id: 1, worker: None }.insert_pool(&p).await?;
+        Job {
+            id: 1,
+            worker: None,
+        }
+        .insert_pool(&p)
+        .await?;
         Ok(())
     })
     .await

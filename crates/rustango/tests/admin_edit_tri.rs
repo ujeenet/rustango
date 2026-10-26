@@ -544,7 +544,10 @@ async fn inline_rows_read_renamed_columns(pool: &Pool) {
 
     let (status, html) = send(pool, "GET", &format!("/aed_cparent/{p}"), "").await;
     assert_eq!(status, StatusCode::OK, "{html}");
-    assert!(html.contains(&format!(r#"href="/aed_cline/{l}""#)), "{html}");
+    assert!(
+        html.contains(&format!(r#"href="/aed_cline/{l}""#)),
+        "{html}"
+    );
     assert!(html.contains("4242"), "the shown field is blank: {html}");
 
     let (status, html) = send(pool, "GET", &format!("/aed_cparent/{p}/edit"), "").await;

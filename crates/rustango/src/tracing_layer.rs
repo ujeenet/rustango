@@ -462,7 +462,8 @@ mod tests {
     fn the_defaults_cover_the_oauth_parameters_this_framework_emits() {
         let raw = "code=AUTHCODE&state=STATEVAL&id_token=IDTOK&code_verifier=VERIFIER\
 &client_secret=CS&page=2";
-        let out = crate::access_log::redact_query_list(raw, &crate::access_log::default_redact_params());
+        let out =
+            crate::access_log::redact_query_list(raw, &crate::access_log::default_redact_params());
         for leaked in ["AUTHCODE", "STATEVAL", "IDTOK", "VERIFIER", "CS"] {
             assert!(
                 !out.contains(leaked),
@@ -498,9 +499,9 @@ mod tests {
                 .body(Body::empty())
                 .unwrap();
             let span = build_request_span(
-            &req,
-            &crate::access_log::query_names(&crate::access_log::default_redact_params()),
-        );
+                &req,
+                &crate::access_log::query_names(&crate::access_log::default_redact_params()),
+            );
             let _e = span.enter();
             // Any event inside the span renders the span's context,
             // which is where the leak showed up.

@@ -72,9 +72,7 @@ fn word_ranges(key: &str) -> Vec<(usize, usize)> {
         let split = prev.is_some_and(|p| {
             (p.is_lowercase() && c.is_uppercase())
                 || (p.is_alphabetic() != c.is_alphabetic())
-                || (p.is_uppercase()
-                    && c.is_uppercase()
-                    && next.is_some_and(char::is_lowercase))
+                || (p.is_uppercase() && c.is_uppercase() && next.is_some_and(char::is_lowercase))
         });
         if split {
             if let Some(s) = start.take() {
@@ -196,7 +194,9 @@ mod tests {
     #[test]
     fn leaves_ordinary_names_alone() {
         let names = defaults();
-        for k in ["keyboard", "page", "sort_by", "monkey", "author", "pinned", "passport"] {
+        for k in [
+            "keyboard", "page", "sort_by", "monkey", "author", "pinned", "passport",
+        ] {
             assert!(!names.matches(k), "{k} must stay visible");
         }
     }
@@ -204,7 +204,10 @@ mod tests {
     #[test]
     fn splits_on_every_boundary() {
         let words = |k: &str| -> Vec<String> {
-            word_ranges(k).iter().map(|&(a, b)| k[a..b].to_owned()).collect()
+            word_ranges(k)
+                .iter()
+                .map(|&(a, b)| k[a..b].to_owned())
+                .collect()
         };
         assert_eq!(words("PASSWORDConfirm"), ["PASSWORD", "Confirm"]);
         assert_eq!(words("token2"), ["token", "2"]);

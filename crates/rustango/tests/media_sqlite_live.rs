@@ -600,7 +600,10 @@ async fn purge_pending_deletes_unconfirmed_objects() {
         Media::objects()
             .where_(Media::id.gt(0))
             .update()
-            .set("uploaded_at", chrono::Utc::now() - chrono::Duration::hours(2))
+            .set(
+                "uploaded_at",
+                chrono::Utc::now() - chrono::Duration::hours(2),
+            )
             .execute_pool(&Pool::Sqlite(sq))
             .await
             .expect("age them");

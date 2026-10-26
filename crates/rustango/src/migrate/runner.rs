@@ -3757,7 +3757,10 @@ impl LiveCompositeFk {
         };
         // Rules come from the catalog: CASCADE, SET NULL, RESTRICT, NO ACTION, SET DEFAULT.
         let rule = |r: &str| {
-            if matches!(r, "CASCADE" | "SET NULL" | "RESTRICT" | "NO ACTION" | "SET DEFAULT") {
+            if matches!(
+                r,
+                "CASCADE" | "SET NULL" | "RESTRICT" | "NO ACTION" | "SET DEFAULT"
+            ) {
                 r.to_owned()
             } else {
                 "NO ACTION".to_owned()
@@ -4090,7 +4093,10 @@ async fn mysql_composite_drops(
         .await?;
     let fks = LiveCompositeFk::from_rows(rows);
     if !fks.is_empty() {
-        let names: Vec<String> = fks.iter().map(|f| format!("{}.{}", f.table, f.name)).collect();
+        let names: Vec<String> = fks
+            .iter()
+            .map(|f| format!("{}.{}", f.table, f.name))
+            .collect();
         tracing::warn!(
             target: "rustango::migrate",
             fks = %names.join(", "),

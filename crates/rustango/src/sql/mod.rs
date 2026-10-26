@@ -78,19 +78,20 @@ pub use executor::row_to_json_sqlite;
 #[cfg(feature = "template_views")]
 pub(crate) use executor::select_stored_uuids;
 pub use executor::{
-    __rustango_require_join, atomic, atomic_immediate, bulk_insert_pool, bulk_update_pool, count_rows_pool,
-    delete_pool, delete_tx, explain_pool, fetch_aggregate_dict, fetch_aggregate_pool,
-    fetch_dates_pool, fetch_datetimes_pool, fetch_paginated_pool, fetch_with_prefetch_filtered,
-    fetch_with_prefetch_pool, get_or_create, insert_or_ignore, insert_pool, insert_returning_pool,
-    insert_returning_tx, insert_tx, on_commit, on_commit_pending, raw_execute_pool, raw_execute_tx,
-    raw_query_pool, raw_query_tx, run_ddl_idempotent, select_one_row_as_json, select_one_row_pool,
-    select_rows_as_json, select_rows_pool, select_rows_pool_with_related,
-    select_rows_tx_with_related, transaction_pool, try_get_flat_my, try_get_flat_sqlite,
-    update_or_create, update_pool, update_tx, write_transaction, AtomicTx, CounterPool, ExistsPool,
-    ExplainFormat, ExplainOptions, FetcherPool, FetcherTx, FkPkAccess, FlatScalar, HasPkValue,
-    InsertReturningPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated, MaybeMyScalar,
-    MaybePgFromRow, MaybePgScalar, MaybeSqliteFromRow, MaybeSqliteLoadRelated, MaybeSqliteScalar,
-    Page, PoolConn, PoolTx, SqlExecutor, TxGuard, UpdaterPool,
+    __rustango_require_join, atomic, atomic_immediate, bulk_insert_pool, bulk_update_pool,
+    count_rows_pool, delete_pool, delete_tx, explain_pool, fetch_aggregate_dict,
+    fetch_aggregate_pool, fetch_dates_pool, fetch_datetimes_pool, fetch_paginated_pool,
+    fetch_with_prefetch_filtered, fetch_with_prefetch_pool, get_or_create, insert_or_ignore,
+    insert_pool, insert_returning_pool, insert_returning_tx, insert_tx, on_commit,
+    on_commit_pending, raw_execute_pool, raw_execute_tx, raw_query_pool, raw_query_tx,
+    run_ddl_idempotent, select_one_row_as_json, select_one_row_pool, select_rows_as_json,
+    select_rows_pool, select_rows_pool_with_related, select_rows_tx_with_related, transaction_pool,
+    try_get_flat_my, try_get_flat_sqlite, update_or_create, update_pool, update_tx,
+    write_transaction, AtomicTx, CounterPool, ExistsPool, ExplainFormat, ExplainOptions,
+    FetcherPool, FetcherTx, FkPkAccess, FlatScalar, HasPkValue, InsertReturningPool, LoadRelated,
+    MaybeMyFromRow, MaybeMyLoadRelated, MaybeMyScalar, MaybePgFromRow, MaybePgScalar,
+    MaybeSqliteFromRow, MaybeSqliteLoadRelated, MaybeSqliteScalar, Page, PoolConn, PoolTx,
+    SqlExecutor, TxGuard, UpdaterPool,
 };
 pub(crate) use executor::{
     bulk_insert_pks_tx, compile_bulk_update_batches, execute_batches_tx, fetch_in_chunks,
