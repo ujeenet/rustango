@@ -74,6 +74,10 @@ Applies the admin's superuser-only field locks to a `ModelForm`: for a non-super
 
 `NullCache` gets its own `touch` (no behaviour change), and a test fails if a backend falls back to the racy `get`-then-`set` default.
 
+### Internal — CI runs tests with nextest
+
+`postgres_test` runs the `tests_compile` build as a nextest archive in five partitions, so the full suite builds once instead of twice. Build caches are saved only from `develop`.
+
 ### Deprecated — `contenttypes::render_generic_fk_link`
 
 Its link ignores the admin prefix and view permissions. Build your own from `ContentType::by_id`.
