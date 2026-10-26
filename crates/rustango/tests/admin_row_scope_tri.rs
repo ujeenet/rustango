@@ -796,6 +796,33 @@ async fn inline_lowered_initial_forms_is_an_insert(pool: &Pool) {
     assert_eq!(rows[0].note, "old", "row updated");
 }
 
+/// A row another save commits after the plan counted still counts under `max_num`.
+async fn inline_max_num_recounts_in_the_save_tx(pool: &Pool) {
+    use rustango::signals::admin as sig;
+    let p = seed_parent(pool).await;
+    seed_child(pool, "a", p, "one", false).await;
+    // Runs after the plan counted, before the save tx: a racing save's row.
+    let racer = pool.clone();
+    let id = sig::connect_admin_pre_save(move |ctx| {
+        let racer = racer.clone();
+        async move {
+            if ctx.table == "rowscope_child" && !ctx.change {
+                seed_child(&racer, "r", p, "racer", false).await;
+            }
+        }
+    });
+    let form = "name=p&rowscope_child-TOTAL_FORMS=2&rowscope_child-INITIAL_FORMS=1\
+        &rowscope_child-0-code=a&rowscope_child-0-label=one\
+        &rowscope_child-1-code=c&rowscope_child-1-label=mine&rowscope_child-1-secret=s";
+    let (status, body) = post(pool, &format!("/rowscope_parent/{p}"), form).await;
+    sig::disconnect_admin_pre_save(id);
+    assert!(body.contains("allows no more rows"), "{status}: {body}");
+    assert!(
+        child(pool, "c").await.is_none(),
+        "row past max_num was written"
+    );
+}
+
 /// `?<secret>__isnull=1` is ignored, so it cannot probe whether a secret is set.
 async fn list_ignores_isnull_on_a_secret(pool: &Pool) {
     let p = seed_parent(pool).await;
@@ -888,6 +915,7 @@ tri_dialect_test! {
         inline_post_refuses_hidden_children,
         inline_max_num_counts_hidden_rows,
         inline_lowered_initial_forms_is_an_insert,
+        inline_max_num_recounts_in_the_save_tx,
         list_ignores_isnull_on_a_secret,
     ],
 }
