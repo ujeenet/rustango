@@ -244,6 +244,76 @@ async fn storage_error_keeps_the_row_for_the_next_sweep(pool: &Pool) {
     assert_eq!(row_count(pool, id).await, 0);
 }
 
+/// A pending row younger than the longest upload URL is kept: its URL
+/// may still land an object, which nothing would then track.
+async fn a_pending_row_outlives_its_upload_url(pool: &Pool) {
+    let mgr = manager(pool, GatedStorage::default());
+    let id = seed_pending(&mgr, pool).await;
+    Media::objects()
+        .where_(Media::id.eq(id))
+        .update()
+        .set("uploaded_at", Utc::now() - chrono::Duration::minutes(10))
+        .execute_pool(pool)
+        .await
+        .expect("make it recent");
+    assert_eq!(mgr.purge_pending(Duration::ZERO).await.expect("sweep"), 0);
+    assert_eq!(row_count(pool, id).await, 1, "purged under a live URL");
+
+    let old = seed_pending(&mgr, pool).await;
+    assert_eq!(mgr.purge_pending(Duration::ZERO).await.expect("sweep"), 1);
+    assert_eq!(row_count(pool, old).await, 0);
+}
+
+/// One orphan sweep reads a bounded page, not every soft-deleted row.
+async fn the_orphan_sweep_reads_a_bounded_page(pool: &Pool) {
+    use rustango::core::{BulkInsertQuery, Model as _, SqlValue};
+    let gone = Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap();
+    let total = 10_050;
+    for start in (0..total).step_by(1_000) {
+        let rows = (start..(start + 1_000).min(total))
+            .map(|i| {
+                vec![
+                    SqlValue::String("default".into()),
+                    SqlValue::String(format!("o/{i}")),
+                    SqlValue::String("text/plain".into()),
+                    SqlValue::I64(1),
+                    SqlValue::String("o.txt".into()),
+                    SqlValue::String("ready".into()),
+                    SqlValue::Json(serde_json::json!({})),
+                    SqlValue::DateTime(gone),
+                ]
+            })
+            .collect();
+        let q = BulkInsertQuery::new(
+            Media::SCHEMA,
+            vec![
+                "disk",
+                "storage_key",
+                "mime",
+                "size_bytes",
+                "original_filename",
+                "status",
+                "metadata",
+                "deleted_at",
+            ],
+            rows,
+        );
+        rustango::sql::bulk_insert_pool(pool, &q)
+            .await
+            .expect("seed orphans");
+    }
+    let mgr = manager(pool, GatedStorage::default());
+    let page = mgr
+        .purge_orphans_dry_run(Duration::ZERO)
+        .await
+        .expect("dry run");
+    assert!(
+        !page.is_empty() && page.len() < total,
+        "read {} rows",
+        page.len()
+    );
+}
+
 tri_dialect_test!(
     setup: setup,
     sqlite: file,
@@ -251,5 +321,7 @@ tri_dialect_test!(
         storage_call_holds_no_lock,
         finalize_cannot_revive_a_claimed_row,
         storage_error_keeps_the_row_for_the_next_sweep,
+        a_pending_row_outlives_its_upload_url,
+        the_orphan_sweep_reads_a_bounded_page,
     ]
 );

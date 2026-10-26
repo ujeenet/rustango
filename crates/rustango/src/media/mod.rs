@@ -108,7 +108,7 @@ const _: () = assert!(MAX_TAGS_PER_CALL * 2 <= 32766);
 /// than one `IN` list: each list then loads `offset + limit` rows.
 const MAX_WIDE_OFFSET: i64 = 10_000;
 
-/// Rows [`MediaManager::purge_pending`] deletes per call.
+/// Rows [`MediaManager::purge_pending`] and [`MediaManager::purge_orphans`] delete per call.
 ///
 /// Bounds how much one run does: the sweep reads this many rows, then
 /// deletes each with its object.
@@ -116,6 +116,10 @@ const MAX_WIDE_OFFSET: i64 = 10_000;
 /// A bigger backlog drains over several runs. A sweep that finishes
 /// late beats one that blocks every other writer.
 const PURGE_PENDING_BATCH: i64 = 10_000;
+
+/// Longest a direct-upload URL lives. `purge_pending` keeps younger rows,
+/// so no live URL can land an object after its row is gone.
+const UPLOAD_URL_MAX_TTL: Duration = Duration::from_secs(3600);
 
 /// Default cap on a direct upload's declared size: 100 MiB.
 pub const DEFAULT_MAX_UPLOAD_BYTES: u64 = 100 << 20;
@@ -275,7 +279,7 @@ pub struct UploadIntent {
     pub size_bytes: i64,
     pub uploaded_by_id: Option<i64>,
     pub collection_id: Option<i64>,
-    /// How long the presigned PUT URL stays valid. Default 5 min.
+    /// How long the presigned PUT URL stays valid. Default 5 min, at most 1 h.
     pub ttl: Duration,
 }
 
@@ -454,6 +458,7 @@ impl MediaManager {
             )));
         }
         let key = build_key(&intent.key_prefix, &intent.original_filename);
+        let ttl = intent.ttl.min(UPLOAD_URL_MAX_TTL);
         // Sign a safe type and the declared size: the bucket stores no
         // active MIME and refuses a bigger body (#2057, #1851).
         let content_type = stored_content_type(&intent.mime).to_owned();
@@ -463,7 +468,7 @@ impl MediaManager {
             .content_length(size)
             .create_only();
         let upload_url = storage
-            .presigned_put_url(&key, intent.ttl, &put)
+            .presigned_put_url(&key, ttl, &put)
             .await
             .ok_or_else(|| {
                 MediaError::Other(format!(
@@ -493,7 +498,7 @@ impl MediaManager {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         let expires_at = DateTime::<Utc>::from_timestamp(
-            i64::try_from(now + intent.ttl.as_secs()).unwrap_or(i64::MAX),
+            i64::try_from(now + ttl.as_secs()).unwrap_or(i64::MAX),
             0,
         )
         .unwrap_or_else(Utc::now);
@@ -731,9 +736,9 @@ impl MediaManager {
         Ok(())
     }
 
-    /// Hard-delete every soft-deleted Media row older than
-    /// `older_than`, removing the storage object as we go. Returns
-    /// the count of rows purged.
+    /// Hard-delete soft-deleted Media rows older than `older_than`, up
+    /// to `PURGE_PENDING_BATCH` per call, removing the storage object as
+    /// we go. Returns the count of rows purged; a full batch means more.
     ///
     /// Run from the [`crate::scheduler`] (e.g. nightly) to keep
     /// orphan storage objects from accumulating.
@@ -813,14 +818,16 @@ impl MediaManager {
         Media::objects()
             .where_(Media::deleted_at.is_not_null())
             .where_(Media::deleted_at.lt(cutoff))
+            .order_by(&[("id", false)])
+            .limit(PURGE_PENDING_BATCH)
             .fetch(&self.pool)
             .await
             .map_err(media_err_from_exec)
     }
 
     /// Hard-delete Media rows still `Pending`, or `Failed`, after
-    /// `older_than`, with their storage objects, up to
-    /// `PURGE_PENDING_BATCH` per call.
+    /// `older_than` (at least the 1 h upload URL lifetime), with their
+    /// storage objects, up to `PURGE_PENDING_BATCH` per call.
     ///
     /// Direct browser uploads leave `Pending` rows behind when the
     /// browser gives up before calling `finalize_upload`, and a PUT can
@@ -839,6 +846,7 @@ impl MediaManager {
     /// The first failure, after trying every row.
     pub async fn purge_pending(&self, older_than: Duration) -> Result<u64, MediaError> {
         use crate::sql::FetcherPool as _;
+        let older_than = older_than.max(UPLOAD_URL_MAX_TTL);
         let cutoff = Utc::now()
             - chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::seconds(0));
         let unconfirmed =

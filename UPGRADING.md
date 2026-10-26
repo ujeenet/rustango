@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Uploads and media sweeps
+
+`with_uploads` / `StaticFiles::user_content` now sends uploaded `.js`, `.css` and `.wasm` as untyped downloads; serve your own assets from a plain static mount. `UploadIntent::ttl` is capped at one hour, `purge_pending` never deletes rows younger than that, and `purge_orphans` does at most 10 000 rows per call (call again on a full batch).
+
 ### SQLite: JSON column equality compares values
 
 `filter(data = json)` on SQLite now matches `1` to `1.0` and objects in any key order, as PostgreSQL and MySQL do; a filter that relied on text equality may match more rows.
