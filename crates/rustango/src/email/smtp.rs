@@ -388,7 +388,7 @@ fn custom_header(name: &str, value: &str) -> Result<HeaderValue, MailError> {
     Ok(HeaderValue::new(name, value.to_owned()))
 }
 
-fn parse_mailbox(addr: &str) -> Result<Mailbox, MailError> {
+pub(super) fn parse_mailbox(addr: &str) -> Result<Mailbox, MailError> {
     addr.parse::<Mailbox>()
         .map_err(|e| MailError::InvalidMessage(format!("bad address `{addr}`: {e}")))
 }

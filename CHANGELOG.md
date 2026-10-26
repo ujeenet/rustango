@@ -24,6 +24,15 @@ A query key is redacted when its words contain a listed name, or, for long names
 
 A non-superuser can no longer choose `user_id` when creating an API key or MCP agent through a ViewSet or `ModelForm`; it was locked on edit only. A ViewSet create that sets a locked NOT NULL field is now a `403`.
 
+### Fixed — forms, mail and admin
+
+- Admin time inputs show a stored time to the millisecond and forms parse fractional seconds, so saving a time with microseconds no longer clears or refuses it; an untouched time keeps its stored value.
+- `#[derive(Form)]` refuses `NaN` and `inf` in float fields; they passed every `min` / `max` check.
+- Email attachment content also reads as base64 text; it is still written as an integer array, so 0.62.0 can switch writes to base64 without failing jobs on workers not yet upgraded.
+- `InMemoryMailer`, `ConsoleMailer` and `FileMailer` refuse addresses `SmtpMailer` cannot parse, with or without the `email-smtp` feature; `NullMailer` stays a silent no-op. `InMemoryMailer::require_from()` also refuses mail with no `from`.
+- `testkit::create_junctions` creates models' M2M junctions as migrations build them.
+- Generic admin inlines read the parent's content type from the cache instead of the database on every render.
+
 ## [0.61.2] — 2026-10-26
 
 ### Fixed — migrations, MySQL and MariaDB

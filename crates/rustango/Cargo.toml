@@ -183,7 +183,7 @@ signals = []
 # Email backends (`rustango::email`) — Mailer trait + ConsoleMailer +
 # InMemoryMailer + NullMailer. SMTP and external transports plug in via
 # the trait.
-email = ["_async_trait"]
+email = ["_async_trait", "_base64", "dep:idna"]
 
 # Production SMTP backend (`rustango::email::SmtpMailer`, issue #48).
 # Implies `email`. Pulls `lettre` with rustls TLS (no openssl).
@@ -613,6 +613,10 @@ lettre = { version = "0.11", default-features = false, features = [
     "smtp-transport",
     "builder",
 ], optional = true }
+
+# `email` feature dep: the IDNA step of lettre's address check, for
+# the mail doubles in builds without `email-smtp`.
+idna = { version = "1", optional = true }
 
 # `runtime` feature dep — used by `#[rustango::main]` to install a
 # default tracing subscriber (env-filter) before the user body runs.

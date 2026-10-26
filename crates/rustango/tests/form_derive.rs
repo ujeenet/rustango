@@ -139,3 +139,23 @@ fn checkbox_falsy_aliases_recognized() {
         assert!(!parsed.active, "expected `{falsy}` to parse as false");
     }
 }
+
+#[derive(Form, Debug, PartialEq)]
+pub struct RatioForm {
+    #[form(min = 0, max = 1)]
+    pub ratio: f64,
+    pub weight: Option<f32>,
+}
+
+/// NaN and inf pass every bound and serialize as null.
+#[test]
+fn non_finite_floats_are_refused() {
+    for bad in ["NaN", "inf", "-inf", "infinity"] {
+        let errors = RatioForm::parse(&payload(&[("ratio", bad)])).unwrap_err();
+        assert!(!errors.get("ratio").is_empty(), "ratio accepted `{bad}`");
+        let errors = RatioForm::parse(&payload(&[("ratio", "0.5"), ("weight", bad)])).unwrap_err();
+        assert!(!errors.get("weight").is_empty(), "weight accepted `{bad}`");
+    }
+    let ok = RatioForm::parse(&payload(&[("ratio", "0.5"), ("weight", "2.5")])).unwrap();
+    assert_eq!(ok.weight, Some(2.5));
+}

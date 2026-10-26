@@ -402,7 +402,8 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
                 .collect::<Vec<u8>>();
             Ok(SqlValue::Binary(bytes))
         }
-        FieldType::Time => chrono::NaiveTime::parse_from_str(raw, "%H:%M:%S")
+        // A time input may post milliseconds; a stored value has micros.
+        FieldType::Time => chrono::NaiveTime::parse_from_str(raw, "%H:%M:%S%.f")
             .or_else(|_| chrono::NaiveTime::parse_from_str(raw, "%H:%M"))
             .map(SqlValue::Time)
             .map_err(|e| make_parse_err("Time", &e)),
@@ -1378,6 +1379,26 @@ mod dynamic_form_tests {
 
     fn form(schema: serde_json::Value) -> DynamicForm {
         DynamicForm::from_json(schema).unwrap()
+    }
+
+    /// A time input may post milliseconds; a template form the stored micros.
+    #[test]
+    fn time_accepts_fractional_seconds() {
+        let f = crate::core::FieldSchema::new("at", "at", FieldType::Time);
+        let t = |s| chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f").unwrap();
+        for (raw, want) in [
+            ("10:00:00.123", t("10:00:00.123")),
+            ("10:00:00.123456", t("10:00:00.123456")),
+            ("10:00:05", t("10:00:05")),
+            ("10:00", t("10:00:00")),
+        ] {
+            assert_eq!(
+                parse_form_value(&f, Some(raw)).unwrap(),
+                SqlValue::Time(want),
+                "{raw}"
+            );
+        }
+        assert!(parse_form_value(&f, Some("10:00:00.")).is_err());
     }
 
     #[test]

@@ -162,6 +162,14 @@ A string payload no longer renders Slack markup such as `<@U123>` or `<url|label
 
 `redact_query_params` entries now match any key containing them as words (`client_secret` also hides `x-client-secret`), long names also match inside joined keys (`accesstoken`), and the defaults are wider. Logs may show `[redacted]` for keys like `sort_key`, `zip_code` or `tokenizer` that were visible before.
 
+### Mail test doubles check addresses
+
+`InMemoryMailer`, `ConsoleMailer` and `FileMailer` return `MailError::InvalidMessage` for an address `SmtpMailer` refuses, so a test sending such mail now fails.
+
+### `derive(Form)` refuses non-finite floats
+
+`NaN` or `inf` in an `f32` / `f64` field is now a field error.
+
 ## 0.61.2
 
 ### SQLite: JSON column equality compares values
