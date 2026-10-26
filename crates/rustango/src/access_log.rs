@@ -59,6 +59,8 @@ pub struct AccessLogLayer {
     /// Query parameters whose values are replaced with `[redacted]`.
     /// The default list covers the usual credential names such as
     /// `password`, `token`, `secret`, `api_key` and `access_token`.
+    /// A name matches as a run of words, so `client_secret` also hides
+    /// `x-client-secret`.
     pub redact_query_params: Vec<String>,
     /// Log the `TrustedRealIp` that `RealIpLayer::trust_proxies`
     /// resolved, over the TCP peer. Raw forwarding headers are never
@@ -259,17 +261,24 @@ pub trait AccessLogRouterExt {
 
 impl<S: Clone + Send + Sync + 'static> AccessLogRouterExt for Router<S> {
     fn access_log(self, layer: AccessLogLayer) -> Self {
+        let names = Arc::new(query_names(&layer.redact_query_params));
         let cfg = Arc::new(layer);
         self.layer(axum::middleware::from_fn(
             move |req: Request<Body>, next: Next| {
                 let cfg = cfg.clone();
-                async move { handle(cfg, req, next).await }
+                let names = names.clone();
+                async move { handle(cfg, names, req, next).await }
             },
         ))
     }
 }
 
-async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Response<Body> {
+async fn handle(
+    cfg: Arc<AccessLogLayer>,
+    names: Arc<crate::secret_keys::SecretNames>,
+    req: Request<Body>,
+    next: Next,
+) -> Response<Body> {
     let started = Instant::now();
     let method = req.method().clone();
     // `next.run` takes the request; path and query borrow this copy.
@@ -280,7 +289,7 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
     let path = uri.path();
     let query = uri
         .query()
-        .map(|q| redact_query(q, &cfg.redact_query_params))
+        .map(|q| redact_query(q, &names))
         .unwrap_or_default();
     let ip = if cfg.include_ip {
         resolve_client_ip(&req, cfg.use_real_ip)
@@ -391,31 +400,14 @@ fn resolve_client_ip(req: &Request, use_real_ip: bool) -> Option<String> {
     ip.map(|ip| ip.to_string())
 }
 
-/// Query parameters whose values are redacted by default.
+/// Query parameters whose values are redacted by default: the shared
+/// secret words plus the OAuth / OIDC callback names they miss.
 pub(crate) fn default_redact_params() -> Vec<String> {
-    vec![
-        "password".into(),
-        "passwd".into(),
-        "token".into(),
-        "secret".into(),
-        "api_key".into(),
-        "apikey".into(),
-        "access_token".into(),
-        "refresh_token".into(),
-        "signature".into(),
-        "auth".into(),
-        // OAuth2 / OIDC. The framework's own `/sso/callback?code=…`
-        // URLs carry credentials that none of the names above match.
-        // Matching is exact, not substring, so `access_token` does
-        // not cover `id_token`.
-        "code".into(),
-        "client_secret".into(),
-        "id_token".into(),
-        "code_verifier".into(),
-        "state".into(),
-        "assertion".into(),
-        "session_state".into(),
-    ]
+    crate::secret_keys::SECRET_WORDS
+        .iter()
+        .chain(&["code", "state", "assertion"])
+        .map(|w| (*w).to_owned())
+        .collect()
 }
 
 /// Params the framework itself puts credentials in (the console's
@@ -423,8 +415,19 @@ pub(crate) fn default_redact_params() -> Vec<String> {
 /// cannot drop them (#1818).
 const ALWAYS_REDACTED: &[&str] = &["token", "signature", "code"];
 
+/// The configured list plus [`ALWAYS_REDACTED`], split once per layer.
+pub(crate) fn query_names(redact_keys: &[String]) -> crate::secret_keys::SecretNames {
+    crate::secret_keys::SecretNames::new(
+        ALWAYS_REDACTED
+            .iter()
+            .copied()
+            .chain(redact_keys.iter().map(String::as_str)),
+    )
+}
+
 /// Replace the values of redacted params with `[redacted]` in a raw
-/// query string.
+/// query string. A key matches by word, so `X-Api-Key` and
+/// `reset_token` count.
 ///
 /// `pub(crate)` so [`crate::tracing_layer`] can redact the span's
 /// `url.query` the same way. The span renders next to the event
@@ -432,33 +435,54 @@ const ALWAYS_REDACTED: &[&str] = &["token", "signature", "code"];
 /// this function just cleaned.
 ///
 /// Borrows when nothing needs hiding: it runs twice on every request.
-pub(crate) fn redact_query<'a>(raw: &'a str, redact_keys: &[String]) -> std::borrow::Cow<'a, str> {
+pub(crate) fn redact_query<'a>(
+    raw: &'a str,
+    names: &crate::secret_keys::SecretNames,
+) -> std::borrow::Cow<'a, str> {
     // Decode the key: `pass%77ord=` is `password=` to the handler (#1957).
-    let hidden = |k: &str| {
-        let key: std::borrow::Cow<'_, str> = if k.contains(['%', '+']) {
-            crate::url_codec::url_decode(k).into()
-        } else {
-            k.into()
-        };
-        ALWAYS_REDACTED.iter().any(|r| r.eq_ignore_ascii_case(&key))
-            || redact_keys.iter().any(|r| r.eq_ignore_ascii_case(&key))
+    let hidden = |pair: &str| {
+        pair.split_once('=').is_some_and(|(k, _)| {
+            if k.contains(['%', '+']) {
+                names.matches(&crate::url_codec::url_decode(k))
+            } else {
+                names.matches(k)
+            }
+        })
     };
-    let any_hidden = raw
-        .split('&')
-        .any(|pair| pair.split_once('=').is_some_and(|(k, _)| hidden(k)));
-    if !any_hidden {
+    // Each key is checked once: everything before the first hidden
+    // pair is copied as is.
+    let mut offset = 0;
+    let first = raw.split('&').find(|pair| {
+        let found = hidden(pair);
+        if !found {
+            offset += pair.len() + 1;
+        }
+        found
+    });
+    if first.is_none() {
         return std::borrow::Cow::Borrowed(raw);
     }
-    raw.split('&')
-        .map(|pair| match pair.split_once('=') {
-            Some((k, _)) if hidden(k) => {
-                format!("{k}=[redacted]")
+    let mut out = String::with_capacity(raw.len());
+    out.push_str(&raw[..offset]);
+    for (i, pair) in raw[offset..].split('&').enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        match pair.split_once('=') {
+            Some((k, _)) if i == 0 || hidden(pair) => {
+                out.push_str(k);
+                out.push_str("=[redacted]");
             }
-            _ => pair.to_owned(),
-        })
-        .collect::<Vec<_>>()
-        .join("&")
-        .into()
+            _ => out.push_str(pair),
+        }
+    }
+    out.into()
+}
+
+/// [`redact_query`] over a plain list, for tests.
+#[cfg(test)]
+pub(crate) fn redact_query_list<'a>(raw: &'a str, keys: &[String]) -> std::borrow::Cow<'a, str> {
+    redact_query(raw, &query_names(keys))
 }
 
 #[cfg(test)]
@@ -553,22 +577,23 @@ mod tests {
     fn defaults_include_common_credential_params() {
         let l = AccessLogLayer::default();
         for required in &["password", "token", "secret", "api_key", "access_token"] {
-            assert!(
-                l.redact_query_params.iter().any(|k| k == required),
-                "default redact list must include `{required}`"
+            let q = format!("{required}=x");
+            assert_eq!(
+                redact_query_list(&q, &l.redact_query_params),
+                format!("{required}=[redacted]")
             );
         }
     }
 
     #[test]
     fn redact_query_replaces_password() {
-        let r = redact_query("user=alice&password=hunter2", &["password".to_owned()]);
+        let r = redact_query_list("user=alice&password=hunter2", &["password".to_owned()]);
         assert_eq!(r, "user=alice&password=[redacted]");
     }
 
     #[test]
     fn redact_query_handles_multiple_redacted_keys() {
-        let r = redact_query(
+        let r = redact_query_list(
             "u=a&token=xxx&password=yyy&q=z",
             &["password".into(), "token".into()],
         );
@@ -580,33 +605,33 @@ mod tests {
 
     #[test]
     fn redact_query_is_case_insensitive_on_keys() {
-        let r = redact_query("PASSWORD=x", &["password".to_owned()]);
+        let r = redact_query_list("PASSWORD=x", &["password".to_owned()]);
         assert_eq!(r, "PASSWORD=[redacted]");
     }
 
     #[test]
     fn redact_query_matches_percent_encoded_keys() {
-        let r = redact_query("pass%77ord=hunter2&x=1", &["password".to_owned()]);
+        let r = redact_query_list("pass%77ord=hunter2&x=1", &["password".to_owned()]);
         assert_eq!(r, "pass%77ord=[redacted]&x=1");
     }
 
     #[test]
     fn redact_query_passes_through_when_no_match() {
-        let r = redact_query("a=1&b=2", &["password".to_owned()]);
+        let r = redact_query_list("a=1&b=2", &["password".to_owned()]);
         assert_eq!(r, "a=1&b=2");
     }
 
     /// Runs twice per request, so a clean query is not copied (#1493).
     #[test]
     fn redact_query_borrows_a_clean_query() {
-        let r = redact_query("page=2&sort=name&q=a%20b", &default_redact_params());
+        let r = redact_query_list("page=2&sort=name&q=a%20b", &default_redact_params());
         assert!(matches!(r, std::borrow::Cow::Borrowed(_)), "{r:?}");
     }
 
     /// #1818 — a custom list without `token` still hides the handoff token.
     #[test]
     fn a_custom_list_still_redacts_the_framework_token() {
-        let r = redact_query(
+        let r = redact_query_list(
             "token=t&signature=s&code=c&page=2",
             &["only_this".to_owned()],
         );
@@ -616,9 +641,52 @@ mod tests {
         );
     }
 
+    /// A secret word anywhere in a key is hidden, in any case style.
+    #[test]
+    fn the_defaults_hide_secret_words_in_any_key_style() {
+        let leaks = [
+            "auth_token",
+            "reset_token",
+            "jwt",
+            "key",
+            "api-key",
+            "access-token",
+            "sessionid",
+            "sig",
+            "otp",
+            "X-Api-Key",
+            "oauth_client_secret",
+            "apiKey",
+            "newPassword",
+        ];
+        let raw: Vec<String> = leaks
+            .iter()
+            .enumerate()
+            .map(|(i, k)| format!("{k}=zzleak{i:02}"))
+            .chain(["page=2".to_owned(), "keyboard=qwerty".to_owned()])
+            .collect();
+        let raw = raw.join("&");
+        let out = redact_query_list(&raw, &default_redact_params());
+        assert!(!out.contains("zzleak"), "{out}");
+        assert!(out.ends_with("page=2&keyboard=qwerty"), "{out}");
+    }
+
+    /// A configured key matches as a word run, so prefixed and kebab names count.
+    #[test]
+    fn a_configured_key_matches_prefixed_and_kebab_names() {
+        let r = redact_query_list(
+            "x-client-secret=s&my_client_secret=t&client=c&secretary=d",
+            &["client_secret".to_owned()],
+        );
+        assert_eq!(
+            r,
+            "x-client-secret=[redacted]&my_client_secret=[redacted]&client=c&secretary=d"
+        );
+    }
+
     #[test]
     fn redact_query_handles_empty_list() {
-        let r = redact_query("password=x", &[]);
+        let r = redact_query_list("password=x", &[]);
         assert_eq!(r, "password=x");
     }
 

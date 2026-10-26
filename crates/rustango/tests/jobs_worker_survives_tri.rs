@@ -184,6 +184,24 @@ impl Job for SlowRetry {
     }
 }
 
+/// Fails with an error longer than MySQL's 64 KiB `TEXT`, in multi-byte chars.
+#[derive(Serialize, Deserialize)]
+struct LongError {
+    token: String,
+}
+
+#[async_trait::async_trait]
+impl Job for LongError {
+    const NAME: &'static str = "tri:long_error";
+    fn retry_backoff(_: u32) -> Duration {
+        Duration::from_secs(3600)
+    }
+    async fn run(&self) -> Result<(), JobError> {
+        start(&self.token);
+        Err(JobError::Retryable("é".repeat(50_000)))
+    }
+}
+
 async fn queue(pool: &Pool, workers: usize, heartbeat: Duration) -> PgJobQueue {
     let q = PgJobQueue::with_workers_pool(pool.clone(), workers)
         .poll_interval(Duration::from_millis(20))
@@ -194,7 +212,35 @@ async fn queue(pool: &Pool, workers: usize, heartbeat: Duration) -> PgJobQueue {
     q.register::<FailFirst>().await;
     q.register::<NoAttempts>().await;
     q.register::<SlowRetry>().await;
+    q.register::<LongError>().await;
     q
+}
+
+/// A retry's error over 64 KiB is stored cut on a char boundary, not lost.
+async fn a_long_error_is_stored_cut(pool: &Pool) {
+    let tok = token(pool, "long_error");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.dispatch(&LongError { token: tok.clone() }).await.unwrap();
+    q.start().await;
+    wait_for("the first run", || counts(&tok).0 == 1).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while the_row(pool).await.1 {
+        assert!(Instant::now() < deadline, "retry never scheduled");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    q.shutdown().await;
+    let rows: Vec<(Option<String>,)> =
+        rustango::sql::raw_query_pool("SELECT last_error FROM rustango_jobs", Vec::new(), pool)
+            .await
+            .expect("last_error");
+    let stored = rows[0].0.clone().expect("last_error stored");
+    assert!(stored.len() <= 65_535, "{} bytes", stored.len());
+    assert!(
+        stored.len() > 60_000,
+        "cut too short: {} bytes",
+        stored.len()
+    );
+    assert!(stored.chars().all(|c| c == 'é'), "cut inside a char");
 }
 
 async fn a_jobs_backoff_hook_sets_its_retry_time(pool: &Pool) {
@@ -1111,6 +1157,7 @@ tri_dialect_test! {
         a_dropped_queue_stops_its_workers,
         zero_max_attempts_runs_once,
         a_jobs_backoff_hook_sets_its_retry_time,
+        a_long_error_is_stored_cut,
         a_db_queue_sends_with_its_registered_mailer,
         a_dispatch_rolls_back_with_its_atomic_block,
         a_dispatch_after_a_write_commits_with_its_block,

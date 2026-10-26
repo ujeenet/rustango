@@ -26,7 +26,8 @@
 //! - A name starting with `.` gets a 404 unless
 //!   [`StaticFiles::serve_hidden`] is on.
 //! - Mount user uploads with [`StaticFiles::user_content`]: HTML, SVG
-//!   and XML then download instead of running script on your origin.
+//!   and XML then download instead of running script on your origin, and
+//!   JS, CSS and WASM go out untyped so no page here can load them.
 //!
 //! ## Caching
 //!
@@ -82,7 +83,8 @@ impl StaticFiles {
     }
 
     /// Serve files users uploaded: HTML, SVG and XML go out as
-    /// `attachment`, and every response carries `nosniff` (#1849).
+    /// `attachment`, JS, CSS and WASM as an untyped `attachment`, and
+    /// every response carries `nosniff` (#1849).
     #[must_use]
     pub fn user_content(mut self) -> Self {
         self.user_content = true;
@@ -241,7 +243,10 @@ async fn serve(
         })
     };
 
-    let mime = mime_for(&path);
+    let mut mime = mime_for(&path);
+    if files.user_content && loads_as_code(&mime) {
+        mime = HeaderValue::from_static("application/octet-stream");
+    }
     let status = if range.is_some() {
         StatusCode::PARTIAL_CONTENT
     } else {
@@ -257,7 +262,7 @@ async fn serve(
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
         );
-        if runs_script(&mime) {
+        if runs_script(&mime) || mime == "application/octet-stream" {
             h.insert(
                 header::CONTENT_DISPOSITION,
                 HeaderValue::from_static("attachment"),
@@ -531,6 +536,15 @@ fn mime_for(path: &Path) -> HeaderValue {
 fn runs_script(mime: &HeaderValue) -> bool {
     let m = mime.to_str().unwrap_or_default();
     ["text/html", "image/svg+xml", "application/xml"]
+        .iter()
+        .any(|t| m.starts_with(t))
+}
+
+/// A type a page on this origin can load and run by `<script>`, `<link>`
+/// or `WebAssembly`; nosniff only blocks that when the type is wrong.
+fn loads_as_code(mime: &HeaderValue) -> bool {
+    let m = mime.to_str().unwrap_or_default();
+    ["application/javascript", "text/css", "application/wasm"]
         .iter()
         .any(|t| m.starts_with(t))
 }
@@ -825,6 +839,33 @@ mod tests {
         // Plain static mounts keep serving HTML inline.
         let r = get(server(&dir), "/x.html").await;
         assert!(r.headers().get(header::CONTENT_DISPOSITION).is_none());
+    }
+
+    /// An uploaded script or stylesheet cannot be loaded by a page on
+    /// this origin: it goes out untyped, as a download.
+    #[tokio::test]
+    async fn user_content_never_serves_code_types() {
+        let dir = TempDir::new().unwrap();
+        for f in ["x.js", "x.MJS", "x.css", "x.wasm"] {
+            write_file(&dir, f, b"alert(1)");
+        }
+        let app = static_router(StaticFiles::new(dir.path()).user_content());
+        for f in ["x.js", "x.MJS", "x.css", "x.wasm"] {
+            let r = get(app.clone(), &format!("/{f}")).await;
+            assert_eq!(
+                r.headers()[header::CONTENT_TYPE],
+                "application/octet-stream",
+                "{f}"
+            );
+            assert_eq!(r.headers()[header::CONTENT_DISPOSITION], "attachment");
+            assert_eq!(r.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        }
+        // A plain static mount still serves them typed.
+        let r = get(server(&dir), "/x.js").await;
+        assert!(r.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("application/javascript"));
     }
 
     /// What `warn_if_uploads_prefix(prefix)` logs.

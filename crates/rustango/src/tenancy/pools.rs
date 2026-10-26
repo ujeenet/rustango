@@ -1455,6 +1455,40 @@ impl TenantPools<sqlx::Postgres> {
     }
 }
 
+/// A short-lived pool of at most `max` connections to the registry
+/// server, scoped to `schema`. For migrations and manage commands.
+///
+/// `search_path` is a `SET` on connect, not a startup option, which
+/// PgBouncer's transaction mode refuses; the pool is tagged so
+/// [`crate::sql::Pool::scope_key`] still tells schemas apart.
+#[cfg(feature = "postgres")]
+pub(crate) async fn connect_schema_scoped(
+    registry_url: &str,
+    schema: &str,
+    max: u32,
+) -> Result<PgPool, TenancyError> {
+    let stmt: Arc<str> = Arc::from(set_search_path_sql(schema));
+    let pool = PgPoolOptions::new()
+        .max_connections(max)
+        .after_connect(move |conn, _meta| {
+            let stmt = Arc::clone(&stmt);
+            Box::pin(async move {
+                sqlx::query(&stmt).execute(conn).await?;
+                Ok(())
+            })
+        })
+        .connect(registry_url)
+        .await?;
+    crate::sql::tag_schema_scope(&pool, schema);
+    Ok(pool)
+}
+
+/// `SET search_path TO "<schema>", public`, the schema quoted.
+#[cfg(feature = "postgres")]
+fn set_search_path_sql(schema: &str) -> String {
+    format!("SET search_path TO {}, public", quote_ident(schema))
+}
+
 /// Options of a schema-mode tenant pool.
 #[cfg(feature = "postgres")]
 pub(crate) fn scoped_pool_options(config: &TenantPoolsConfig) -> PgPoolOptions {
@@ -2253,6 +2287,15 @@ mod tests {
             .find(|l| l.contains("other-task-event"))
             .expect("logged");
         assert!(!line.contains("tenant_pool_init"), "span leaked: {line}");
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn set_search_path_quotes_odd_schema_names() {
+        assert_eq!(
+            set_search_path_sql("a\"b c\\d\x0Be"),
+            "SET search_path TO \"a\"\"b c\\d\x0Be\", public"
+        );
     }
 
     #[cfg(feature = "postgres")]

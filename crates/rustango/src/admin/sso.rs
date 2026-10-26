@@ -490,7 +490,7 @@ impl AdminAccounts<'_> {
 }
 
 fn admin_account(u: &AdminUser) -> Option<Account> {
-    Some(Account::new(u.id.get().copied()?, true, u.active))
+    Some(Account::new(u.id.get().copied()?, true, u.active).with_created_at(u.created_at))
 }
 
 impl AccountLookup for AdminAccounts<'_> {
@@ -512,5 +512,22 @@ impl AccountLookup for AdminAccounts<'_> {
                 Err(()) => EmailLookup::Collides,
             },
         )
+    }
+}
+
+#[cfg(all(test, feature = "testkit"))]
+mod tests {
+    use super::AdminUser;
+
+    /// The admin account carries its creation time, so stale links are noticed.
+    #[test]
+    fn admin_account_carries_created_at() {
+        let at = chrono::Utc::now() - chrono::TimeDelta::days(3);
+        let u = AdminUser {
+            id: crate::sql::Auto::Set(7),
+            created_at: at,
+            ..crate::testkit::admin_user()
+        };
+        assert_eq!(super::admin_account(&u).unwrap().created_at, Some(at));
     }
 }

@@ -949,6 +949,29 @@ fn preview_schema_op(
             statements.extend(dialect.drop_foreign_key_sql(&fk.table, &name));
         }
     }
+    // So does a MySQL key MODIFY with the FKs other tables point at it.
+    if let (Some((table, column)), Some(_)) = (
+        &step.drop_referencing,
+        dialect.referencing_foreign_keys_sql(),
+    ) {
+        let later = ops
+            .iter()
+            .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)))
+            .map_or(&[][..], |i| &ops[i + 1..]);
+        let at_end = |t: &str, c: &str| {
+            let c = super::rebuild::columns_at_end(t, &[c.to_owned()], later).remove(0);
+            (super::rebuild::name_at_end(t, later), c)
+        };
+        let (end, end_column) = at_end(table, column);
+        let refs = referencing_columns(after, &end, &end_column);
+        for (t, c) in live.columns() {
+            if refs.contains(&at_end(&t, &c)) {
+                if let Some(name) = live.take(&t, &c) {
+                    statements.extend(dialect.drop_foreign_key_sql(&t, &name));
+                }
+            }
+        }
+    }
     if let Some((table, column)) = &step.readded_now {
         live.added(table, column);
     }
@@ -1058,6 +1081,13 @@ impl LiveFks {
 
     fn get(&self, table: &str, column: &str) -> Option<String> {
         self.0.get(&(table.to_owned(), column.to_owned())).cloned()
+    }
+
+    /// The columns with a live FK, sorted.
+    fn columns(&self) -> Vec<(String, String)> {
+        let mut out: Vec<_> = self.0.keys().cloned().collect();
+        out.sort();
+        out
     }
 
     /// The live FK on `table.column`, which the op drops.
@@ -1372,6 +1402,7 @@ async fn downgrade_with_ledger(
 
 #[cfg(feature = "postgres")]
 async fn apply_one(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
+    refuse_duplicate_keys(&pool.clone().into(), mig).await?;
     if mig.atomic {
         apply_atomic(pool, mig, ledger).await
     } else {
@@ -3150,6 +3181,9 @@ struct Step {
     /// A column whose referencing FKs are dropped first, found in the catalog.
     #[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
     drop_referencing: Option<(String, String)>,
+    /// A MySQL MODIFY's column: composite FKs on or to it drop first, from the catalog.
+    #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
+    drop_composites: Option<Box<CompositeDrop>>,
     /// A dropped single-column UNIQUE, found by name in the catalog (#1676).
     #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
     drop_unique: Option<ColumnRef>,
@@ -3532,6 +3566,13 @@ fn render_step(
         }
         _ => None,
     };
+    let drop_composites = modified_column(change, dialect).map(|(table, column)| {
+        Box::new(CompositeDrop {
+            table: table.to_owned(),
+            column: column.to_owned(),
+            renames: later.iter().filter(|op| is_rename(op)).cloned().collect(),
+        })
+    });
     let drop_unique = match change {
         SC::AlterColumnUnique {
             table,
@@ -3585,10 +3626,17 @@ fn render_step(
             super::rebuild::columns_at_end(table, &[column.to_owned()], later)[0] != column
         });
     let readded_now = readds_fk(change, dialect)
-        .filter(|_| (renamed || column_renamed) && drop_fks.is_some())
+        .filter(|_| renamed && !column_renamed && drop_fks.is_some())
         .map(|(t, c)| (t.to_owned(), c.to_owned()));
-    // Its FKs carry the names at this op, which a later rename changes.
-    if renamed || column_renamed {
+    // The column's last rename adds it back at the end, under the end names;
+    // a re-add here could precede a later retype of its key (MySQL error 3780).
+    if let Some((table, column)) = readds_fk(change, dialect).filter(|_| column_renamed) {
+        let own = super::diff::column_fk_sql(snap, table, column, dialect, schema)
+            .map_err(MigrateError::Validation)?;
+        batch.deferred_fks.retain(|sql| Some(sql) != own.as_ref());
+    }
+    // Its other FKs carry the names at this op, which a later table rename keeps.
+    if renamed {
         let fks = std::mem::take(&mut batch.deferred_fks);
         batch.immediate.extend(fks);
     }
@@ -3630,6 +3678,7 @@ fn render_step(
         retry,
         drop_fks,
         drop_referencing,
+        drop_composites,
         drop_unique,
         index_fks,
         readded_now,
@@ -3661,6 +3710,147 @@ fn render_steps(
         })
         .collect();
     Ok(Rendered(steps?.into_iter()))
+}
+
+/// The column a MySQL `MODIFY` restates: a composite FK on or to it fails 3780.
+fn modified_column<'a>(
+    change: &'a super::SchemaChange,
+    dialect: &dyn crate::sql::Dialect,
+) -> Option<(&'a str, &'a str)> {
+    use super::SchemaChange as SC;
+    match change {
+        SC::AlterColumnType { table, column, .. }
+        | SC::AlterColumnMaxLength { table, column, .. }
+            if dialect.modifies_whole_column() =>
+        {
+            Some((table, column))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `op` renames a table or column.
+fn is_rename(op: &Operation) -> bool {
+    use super::SchemaChange as SC;
+    matches!(
+        op,
+        Operation::Schema(SC::RenameTable { .. } | SC::RenameColumn { .. })
+    )
+}
+
+/// The column of a MySQL `MODIFY`, whose composite FKs come off first and
+/// back, as the catalog had them, at the migration's end. Boxed in [`Step`].
+#[cfg_attr(not(feature = "mysql"), allow(dead_code))]
+struct CompositeDrop {
+    table: String,
+    column: String,
+    /// The migration's renames after the op, for the names at the end.
+    renames: Vec<Operation>,
+}
+
+/// One live composite FK, as the catalog describes it.
+#[cfg_attr(not(feature = "mysql"), allow(dead_code))]
+struct LiveCompositeFk {
+    table: String,
+    name: String,
+    columns: Vec<String>,
+    to: String,
+    to_columns: Vec<String>,
+    on_delete: String,
+    on_update: String,
+}
+
+#[cfg_attr(not(feature = "mysql"), allow(dead_code))]
+impl LiveCompositeFk {
+    /// Group the catalog's rows, one per column in key order, by constraint.
+    fn from_rows(rows: Vec<(String, String, String, String, String, String, String)>) -> Vec<Self> {
+        let mut out: Vec<Self> = Vec::new();
+        for (table, name, column, to, to_column, on_delete, on_update) in rows {
+            match out.last_mut() {
+                Some(fk) if fk.table == table && fk.name == name => {
+                    fk.columns.push(column);
+                    fk.to_columns.push(to_column);
+                }
+                _ => out.push(Self {
+                    table,
+                    name,
+                    columns: vec![column],
+                    to,
+                    to_columns: vec![to_column],
+                    on_delete,
+                    on_update,
+                }),
+            }
+        }
+        out
+    }
+
+    /// `ADD CONSTRAINT` restoring it as it was, under the names after `renames`.
+    fn add_sql(&self, dialect: &dyn crate::sql::Dialect, renames: &[Operation]) -> String {
+        let cols = |cs: &[String]| {
+            cs.iter()
+                .map(|c| dialect.quote_ident(c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        // Rules come from the catalog: CASCADE, SET NULL, RESTRICT, NO ACTION, SET DEFAULT.
+        let rule = |r: &str| {
+            if matches!(
+                r,
+                "CASCADE" | "SET NULL" | "RESTRICT" | "NO ACTION" | "SET DEFAULT"
+            ) {
+                r.to_owned()
+            } else {
+                "NO ACTION".to_owned()
+            }
+        };
+        format!(
+            "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {} ON UPDATE {}",
+            dialect.quote_ident(&super::rebuild::name_at_end(&self.table, renames)),
+            dialect.quote_ident(&self.name),
+            cols(&super::rebuild::columns_at_end(&self.table, &self.columns, renames)),
+            dialect.quote_ident(&super::rebuild::name_at_end(&self.to, renames)),
+            cols(&super::rebuild::columns_at_end(&self.to, &self.to_columns, renames)),
+            rule(&self.on_delete),
+            rule(&self.on_update),
+        )
+    }
+}
+
+/// Live FKs a MySQL `MODIFY` dropped and the migration has not added back.
+/// DDL commits as it runs, so if it stops first, dropping this logs the
+/// statements that restore them.
+#[derive(Default)]
+struct DroppedFks(std::collections::VecDeque<String>);
+
+#[cfg_attr(not(feature = "mysql"), allow(dead_code))]
+impl DroppedFks {
+    fn push(&mut self, sql: String) {
+        self.0.push_back(sql);
+    }
+
+    /// The next re-add to run; [`Self::restored`] once it ran.
+    fn next(&self) -> Option<String> {
+        self.0.front().cloned()
+    }
+
+    fn restored(&mut self) {
+        self.0.pop_front();
+    }
+}
+
+impl Drop for DroppedFks {
+    fn drop(&mut self) {
+        if !self.0.is_empty() {
+            let restore: Vec<&str> = self.0.iter().map(String::as_str).collect();
+            tracing::error!(
+                target: "rustango::migrate",
+                restore = %restore.join(";\n"),
+                "the migration stopped with {} foreign keys dropped; run the statements in `restore` to add them back",
+                restore.len(),
+            );
+        }
+    }
 }
 
 /// The column whose live FK `change` drops and adds back: ON DELETE
@@ -3898,19 +4088,67 @@ macro_rules! step_statements {
     }};
 }
 
+/// `step`'s statements on MySQL. The composite FKs its MODIFY drops go to
+/// `dropped`, to be added back as they were once the migration's ops ran.
 #[cfg(feature = "mysql")]
 async fn mysql_statements(
     conn: &mut sqlx::MySqlConnection,
     step: &Step,
+    dropped: &mut DroppedFks,
 ) -> Result<Vec<String>, sqlx::Error> {
     let (mut out, readd) = match &step.index_fks {
         Some(ix) => Box::pin(mysql_index_fks(conn, ix)).await?,
         None => (Vec::new(), Vec::new()),
     };
+    if let Some(cd) = &step.drop_composites {
+        out.extend(Box::pin(mysql_composite_drops(conn, cd, dropped)).await?);
+    }
     let rest: Result<Vec<String>, sqlx::Error> = step_statements!(conn, step, crate::sql::MySql);
     out.extend(rest?);
     out.extend(readd);
     Ok(out)
+}
+
+/// Drops of the live composite FKs on or to `cd`'s column, each one's exact
+/// re-add pushed to `dropped`. Boxed by the caller.
+#[cfg(feature = "mysql")]
+async fn mysql_composite_drops(
+    conn: &mut sqlx::MySqlConnection,
+    cd: &CompositeDrop,
+    dropped: &mut DroppedFks,
+) -> Result<Vec<String>, sqlx::Error> {
+    use crate::sql::Dialect as _;
+    let dialect = crate::sql::MySql;
+    let Some(sql) = dialect.composite_foreign_keys_sql() else {
+        return Ok(Vec::new());
+    };
+    let rows = sqlx::query_as(sql)
+        .bind(&cd.table)
+        .bind(&cd.column)
+        .bind(&cd.table)
+        .bind(&cd.column)
+        .fetch_all(&mut *conn)
+        .await?;
+    let fks = LiveCompositeFk::from_rows(rows);
+    if !fks.is_empty() {
+        let names: Vec<String> = fks
+            .iter()
+            .map(|f| format!("{}.{}", f.table, f.name))
+            .collect();
+        tracing::warn!(
+            target: "rustango::migrate",
+            fks = %names.join(", "),
+            "changing `{}.{}` drops these composite foreign keys; they are added back when the migration ends",
+            cd.table,
+            cd.column,
+        );
+    }
+    let mut drops = Vec::new();
+    for fk in fks {
+        drops.extend(dialect.drop_foreign_key_sql(&fk.table, &fk.name));
+        dropped.push(fk.add_sql(&dialect, &cd.renames));
+    }
+    Ok(drops)
 }
 
 /// [`IndexFks::plan`] for the index's first column, when no other index
@@ -3994,6 +4232,7 @@ async fn atomic_mysql(
     let mut steps = render_steps(ops, after, &crate::sql::MySql, schema)?;
     let mut tx = my.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
+    let mut dropped = DroppedFks::default();
     // What has already committed when something fails.
     //
     // Once a DDL statement was sent, every finished operation
@@ -4024,7 +4263,7 @@ async fn atomic_mysql(
         match op {
             Operation::Schema(_) => {
                 let step = steps.next_step();
-                let stmts = mysql_statements(&mut tx, &step)
+                let stmts = mysql_statements(&mut tx, &step, &mut dropped)
                     .await
                     .map_err(|e| stuck!(e))?;
                 // Counted per *statement*, not per operation:
@@ -4064,6 +4303,13 @@ async fn atomic_mysql(
             .execute(&mut *tx)
             .await
             .map_err(|e| stuck!(e))?;
+    }
+    while let Some(stmt) = dropped.next() {
+        sqlx::query(&stmt)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| stuck!(e))?;
+        dropped.restored();
     }
     match ledger {
         LedgerWrite::Insert(ledger) => sqlx::query(&ledger_insert_sql(&crate::sql::MySql, ledger))
@@ -4253,7 +4499,12 @@ async fn atomic_sqlite_segment(
 }
 
 /// Run `step` for the non-atomic runners, on any backend.
-async fn run_step_pool(pool: &crate::sql::Pool, step: Step) -> Result<Vec<String>, MigrateError> {
+async fn run_step_pool(
+    pool: &crate::sql::Pool,
+    step: Step,
+    dropped: &mut DroppedFks,
+) -> Result<Vec<String>, MigrateError> {
+    let _ = &dropped;
     match pool {
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
@@ -4275,7 +4526,7 @@ async fn run_step_pool(pool: &crate::sql::Pool, step: Step) -> Result<Vec<String
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
             let mut conn = my.acquire().await?;
-            for stmt in mysql_statements(&mut conn, &step).await? {
+            for stmt in mysql_statements(&mut conn, &step, dropped).await? {
                 sqlx::query(&stmt).execute(&mut *conn).await?;
             }
             Ok(step.batch.deferred_fks)
@@ -4401,10 +4652,11 @@ async fn apply_nonatomic_pool(
         schema.as_deref(),
     )?;
     let mut deferred_fks: Vec<String> = Vec::new();
+    let mut dropped = DroppedFks::default();
     for op in &mig.forward {
         match op {
             Operation::Schema(_) => {
-                deferred_fks.extend(run_step_pool(pool, steps.next_step()).await?);
+                deferred_fks.extend(run_step_pool(pool, steps.next_step(), &mut dropped).await?);
             }
             Operation::Data(d) => {
                 crate::sql::raw_execute_pool(pool, &d.sql, ::std::vec::Vec::new()).await?;
@@ -4416,6 +4668,10 @@ async fn apply_nonatomic_pool(
     }
     for stmt in deferred_fks {
         crate::sql::raw_execute_pool(pool, &stmt, ::std::vec::Vec::new()).await?;
+    }
+    while let Some(stmt) = dropped.next() {
+        crate::sql::raw_execute_pool(pool, &stmt, ::std::vec::Vec::new()).await?;
+        dropped.restored();
     }
     let insert_sql = ledger_insert_sql(pool.dialect(), ledger);
     crate::sql::raw_execute_pool(
@@ -4639,11 +4895,88 @@ async fn apply_one_pool(
     mig: &Migration,
     ledger: &str,
 ) -> Result<(), MigrateError> {
+    refuse_duplicate_keys(pool, mig).await?;
     if mig.atomic {
         apply_atomic_pool(pool, mig, ledger).await
     } else {
         apply_nonatomic_pool(pool, mig, ledger).await
     }
+}
+
+/// Refuse, before any DDL, a unique key that rows already repeat: the index
+/// would fail midway (MySQL keeps what ran). Each probe scans the table.
+/// Stops at the first data step, which may remove the duplicates; skips keys
+/// on tables or columns this migration makes or renames.
+async fn refuse_duplicate_keys(
+    pool: &crate::sql::Pool,
+    mig: &Migration,
+) -> Result<(), MigrateError> {
+    use super::diff::SchemaChange as SC;
+    let mut new_tables: Vec<&str> = Vec::new();
+    let mut new_columns: Vec<(&str, &str)> = Vec::new();
+    for op in &mig.forward {
+        let Operation::Schema(change) = op else {
+            return Ok(());
+        };
+        let (name, table, columns): (&str, &str, Vec<&str>) = match change {
+            SC::CreateTable(t)
+            | SC::CreateM2MTable { through: t, .. }
+            | SC::RenameTable { new_name: t, .. } => {
+                new_tables.push(t);
+                continue;
+            }
+            SC::AddColumn { table, column }
+            | SC::RenameColumn {
+                table,
+                new_column: column,
+                ..
+            } => {
+                new_columns.push((table, column));
+                continue;
+            }
+            SC::CreateIndex {
+                name,
+                table,
+                columns,
+                unique: true,
+                where_clause: None,
+                ..
+            } => (name, table, columns.iter().map(String::as_str).collect()),
+            SC::AlterColumnUnique {
+                table,
+                column,
+                unique: true,
+            } => (column, table, vec![column.as_str()]),
+            _ => continue,
+        };
+        if new_tables.contains(&table) || columns.iter().any(|c| new_columns.contains(&(table, *c)))
+        {
+            continue;
+        }
+        match super::ensure::has_duplicate_keys(pool, table, &columns).await {
+            Ok(false) => {}
+            Ok(true) => {
+                let q = |n: &str| pool.dialect().quote_ident(n);
+                let cols: Vec<String> = columns.iter().map(|c| q(c)).collect();
+                let set: Vec<String> = cols.iter().map(|c| format!("{c} IS NOT NULL")).collect();
+                let cols = cols.join(", ");
+                return Err(MigrateError::Validation(format!(
+                    "{}: cannot add unique `{name}` on `{table}`: existing rows repeat those \
+                     values. Remove the extra rows, then run migrate again. They are:\n  \
+                     SELECT {cols}, COUNT(*) FROM {} WHERE {} GROUP BY {cols} HAVING COUNT(*) > 1",
+                    mig.name,
+                    q(table),
+                    set.join(" AND "),
+                )));
+            }
+            Err(e) => tracing::warn!(
+                target: "rustango::migrate",
+                migration = %mig.name,
+                "duplicate check for unique `{name}` on `{table}` skipped: {e}"
+            ),
+        }
+    }
+    Ok(())
 }
 
 async fn unapply_all_in_order_pool(
@@ -4880,10 +5213,11 @@ async fn unapply_nonatomic_pool(
     let schema = super::ensure::creation_schema(pool).await?;
     let mut steps = render_steps(inverted, snapshot, pool.dialect(), schema.as_deref())?;
     let mut deferred_fks: Vec<String> = Vec::new();
+    let mut dropped = DroppedFks::default();
     for op in inverted {
         match op {
             Operation::Schema(_) => {
-                deferred_fks.extend(run_step_pool(pool, steps.next_step()).await?);
+                deferred_fks.extend(run_step_pool(pool, steps.next_step(), &mut dropped).await?);
             }
             Operation::Data(d) => {
                 crate::sql::raw_execute_pool(pool, &d.sql, ::std::vec::Vec::new()).await?;
@@ -4895,6 +5229,10 @@ async fn unapply_nonatomic_pool(
     }
     for stmt in deferred_fks {
         crate::sql::raw_execute_pool(pool, &stmt, ::std::vec::Vec::new()).await?;
+    }
+    while let Some(stmt) = dropped.next() {
+        crate::sql::raw_execute_pool(pool, &stmt, ::std::vec::Vec::new()).await?;
+        dropped.restored();
     }
     let placeholder = pool.dialect().placeholder(1);
     let delete_sql = format!("DELETE FROM {ledger} WHERE name = {placeholder}");
@@ -5176,15 +5514,105 @@ mod tests {
                         .map(|_| op)
                 })
                 .collect();
-            assert_eq!(fk_ops, ["drop", "add", "drop", "add"], "{out:?}");
+            // The last rename adds it back once, under the end name.
+            assert_eq!(fk_ops, ["drop", "add"], "{out:?}");
             let named = |i: usize, c: &str| {
                 out.iter()
                     .filter(|s| s.contains("CONSTRAINT") || s.contains("FOREIGN KEY"))
                     .nth(i)
                     .is_some_and(|s| s.contains(&format!("book_{c}_fkey")))
             };
-            assert!(named(0, "author_id") && named(1, "writer_id"), "{out:?}");
-            assert!(named(2, "writer_id") && named(3, "owner_id"), "{out:?}");
+            assert!(named(0, "author_id") && named(1, "owner_id"), "{out:?}");
         }
+    }
+
+    /// MySQL: the preview shows the referencing FKs apply drops, from the
+    /// catalog, before it retypes the key they point at.
+    #[test]
+    fn render_between_drops_the_fks_on_a_retyped_key() {
+        use crate::migrate::{SchemaChange, SchemaSnapshot};
+        let snap = |ty: &str| -> SchemaSnapshot {
+            serde_json::from_value(serde_json::json!({ "tables": [
+                { "name": "author", "model": "Author", "fields": [
+                    { "name": "id", "column": "id", "ty": ty,
+                      "nullable": false, "primary_key": true }] },
+                { "name": "book", "model": "Book", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64",
+                      "nullable": false, "primary_key": true },
+                    { "name": "author_id", "column": "author_id", "ty": ty,
+                      "nullable": false, "primary_key": false,
+                      "fk": { "kind": "fk", "to": "author", "on": "id" } }] }] }))
+            .unwrap()
+        };
+        let widen = [SchemaChange::AlterColumnType {
+            table: "author".into(),
+            column: "id".into(),
+            from: "i32".into(),
+            to: "i64".into(),
+        }];
+        let out =
+            super::render_changes_between(&widen, &snap("i32"), &snap("i64"), &crate::sql::MySql)
+                .unwrap();
+        let at = |p: &str| out.iter().position(|s| s.contains(p));
+        let drop = at("ALTER TABLE `book` DROP FOREIGN KEY `book_author_id_fkey`");
+        let modify = at("ALTER TABLE `author` MODIFY");
+        assert!(drop.is_some() && drop < modify, "{out:?}");
+        assert!(
+            at("ADD CONSTRAINT `book_author_id_fkey`") > modify,
+            "{out:?}"
+        );
+    }
+
+    /// MySQL: a retyped FK column renamed later comes back once, after the
+    /// key it references is retyped too, not before it (MySQL error 3780).
+    #[test]
+    fn render_between_readds_a_retyped_renamed_fk_after_its_key() {
+        use crate::migrate::{SchemaChange, SchemaSnapshot};
+        let snap = |ty: &str, column: &str| -> SchemaSnapshot {
+            serde_json::from_value(serde_json::json!({ "tables": [
+                { "name": "parent", "model": "Parent", "fields": [
+                    { "name": "id", "column": "id", "ty": ty,
+                      "nullable": false, "primary_key": true }] },
+                { "name": "child", "model": "Child", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64",
+                      "nullable": false, "primary_key": true },
+                    { "name": column, "column": column, "ty": ty, "nullable": false,
+                      "primary_key": false,
+                      "fk": { "kind": "fk", "to": "parent", "on": "id" } }] }] }))
+            .unwrap()
+        };
+        let retype = |table: &str, column: &str| SchemaChange::AlterColumnType {
+            table: table.into(),
+            column: column.into(),
+            from: "i32".into(),
+            to: "i64".into(),
+        };
+        let changes = [
+            retype("child", "a"),
+            retype("parent", "id"),
+            SchemaChange::RenameColumn {
+                table: "child".into(),
+                old_column: "a".into(),
+                new_column: "b".into(),
+            },
+        ];
+        let out = super::render_changes_between(
+            &changes,
+            &snap("i32", "a"),
+            &snap("i64", "b"),
+            &crate::sql::MySql,
+        )
+        .unwrap();
+        let at = |p: &dyn Fn(&String) -> bool| out.iter().position(|s| p(s));
+        let key = at(&|s| s.starts_with("ALTER TABLE `parent` MODIFY")).expect("key MODIFY");
+        let adds: Vec<usize> = (0..out.len())
+            .filter(|&i| out[i].contains("ADD CONSTRAINT"))
+            .collect();
+        assert_eq!(adds.len(), 1, "{out:?}");
+        assert!(
+            adds[0] > key,
+            "FK re-added before its key's retype: {out:?}"
+        );
+        assert!(out[adds[0]].contains("`child_b_fkey`"), "{out:?}");
     }
 }

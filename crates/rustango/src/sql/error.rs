@@ -310,6 +310,14 @@ pub enum ExecError {
         pk: String,
     },
 
+    /// Prefetch needs the parent column a child FK points at (`on`), and
+    /// the parent's hand-written `HasPkValue` cannot read it.
+    #[error("prefetch cannot read `{table}.{column}`, the column the child FK points at; derive `Model` for `{table}`")]
+    PrefetchColumnUnreadable {
+        table: &'static str,
+        column: &'static str,
+    },
+
     /// Used when traversing schema metadata to resolve a foreign key
     /// or build a `WHERE pk = …` filter — the target model declares
     /// no `#[rustango(primary_key)]` field. Programming error;

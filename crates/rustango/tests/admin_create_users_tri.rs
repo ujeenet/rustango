@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use rustango::casts::{CastValue as _, EncryptedString};
 use rustango::core::{Column as _, Filter, Op, SelectQuery, WhereExpr};
-use rustango::sql::{FetcherPool as _, Pool};
+use rustango::sql::{FetcherPool as _, Pool, UpdaterPool as _};
 use rustango::tenancy::auth::authenticate_user_pool;
 use rustango::tenancy::User;
 use rustango::tri_dialect_test;
@@ -160,7 +160,6 @@ async fn admin_created_user_can_log_in(pool: &Pool) {
 /// only once it completes: a password alone writes nothing (#2093).
 async fn a_login_upgrades_a_weak_hash(pool: &Pool) {
     use rustango::passwords::needs_rehash;
-    use rustango::sql::UpdaterPool as _;
     // argon2id m=8,t=1,p=1 of "pw-weak-hash".
     const WEAK: &str = "$argon2id$v=19$m=8,t=1,p=1$c2FsdHNhbHRzYWx0c2FsdA$Tk2Yd9kayx5c9Zj6ox/S6WGhYHdSHI6LCO1srlux3Ns";
     let name = unique("weak");
@@ -551,9 +550,158 @@ async fn superuser_rows_are_superuser_only(pool: &Pool) {
     );
 }
 
+async fn seed_operator(pool: &Pool, name: &str) -> i64 {
+    let mut op = rustango::tenancy::Operator {
+        id: rustango::sql::Auto::default(),
+        username: name.to_owned(),
+        password_hash: "x".into(),
+        active: true,
+        created_at: chrono::Utc::now(),
+        password_changed_at: None,
+        sessions_revoked_at: None,
+    };
+    op.insert_pool(pool).await.expect("seed operator");
+    op.id.get().copied().unwrap()
+}
+
+async fn active_operators(pool: &Pool) -> Vec<i64> {
+    use rustango::tenancy::Operator;
+    Operator::objects()
+        .where_(Operator::active.eq(true))
+        .fetch(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|o| o.id.get().copied().unwrap())
+        .collect()
+}
+
+/// The registry admin cannot deactivate or delete the last active operator.
+async fn admin_keeps_the_last_active_operator(pool: &Pool) {
+    let (a, b, c) = (unique("la"), unique("lb"), unique("lc"));
+    // Earlier rows are shared: only the two seeded here stay active.
+    use rustango::tenancy::Operator;
+    Operator::objects()
+        .where_(Operator::active.eq(true))
+        .update()
+        .set_typed(Operator::active.set(false))
+        .execute_pool(pool)
+        .await
+        .unwrap();
+    let (a_id, b_id) = (seed_operator(pool, &a).await, seed_operator(pool, &b).await);
+    let at = "2024-01-01T00:00";
+    let off = |name: &str| {
+        form(&[
+            ("username", name),
+            ("password_hash", ""),
+            ("created_at", at),
+        ])
+    };
+    // One of two: allowed.
+    let (status, html) = send(
+        pool,
+        Method::POST,
+        &format!("/rustango_operators/{a_id}"),
+        off(&a),
+    )
+    .await;
+    assert!(status.is_redirection(), "{status}: {html}");
+    assert_eq!(active_operators(pool).await, [b_id]);
+    // The last one: neither an edit nor a delete.
+    let uri = format!("/rustango_operators/{b_id}");
+    let (status, html) = send(pool, Method::POST, &uri, off(&b)).await;
+    assert!(!status.is_redirection(), "{status}: {html}");
+    assert!(html.contains("last active operator"), "{html}");
+    let (status, _) = send(pool, Method::POST, &format!("{uri}/delete"), String::new()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(active_operators(pool).await, [b_id]);
+    let c_id = seed_operator(pool, &c).await;
+    // Deleting one of two, and editing the last without deactivating, work.
+    let (status, _) = send(
+        pool,
+        Method::POST,
+        &format!("/rustango_operators/{c_id}/delete"),
+        String::new(),
+    )
+    .await;
+    assert!(status.is_redirection(), "{status}");
+    let on = form(&[
+        ("username", b.as_str()),
+        ("password_hash", ""),
+        ("created_at", at),
+        ("active", "true"),
+    ]);
+    let (status, html) = send(pool, Method::POST, &uri, on).await;
+    assert!(status.is_redirection(), "{status}: {html}");
+    assert_eq!(active_operators(pool).await, [b_id]);
+}
+
+/// The console and the admin deactivating the last two operators at once
+/// leave one active: both lock the active rows in id order.
+async fn console_and_admin_race_keeps_one_active(pool: &Pool) {
+    use rustango::tenancy::Operator;
+    let at = "2024-01-01T00:00";
+    for round in 0..10 {
+        Operator::objects()
+            .where_(Operator::active.eq(true))
+            .update()
+            .set_typed(Operator::active.set(false))
+            .execute_pool(pool)
+            .await
+            .unwrap();
+        let (a, b) = (
+            unique(&format!("ra{round}x")),
+            unique(&format!("rb{round}x")),
+        );
+        let a_id = seed_operator(pool, &a).await;
+        let b_id = seed_operator(pool, &b).await;
+        let mut b_op = Operator::objects()
+            .where_(Operator::id.eq(b_id))
+            .fetch(pool)
+            .await
+            .unwrap()
+            .remove(0);
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let console = {
+            let (pool, barrier) = (pool.clone(), barrier.clone());
+            tokio::spawn(async move {
+                barrier.wait().await;
+                rustango::tenancy::operators::set_active(&pool, &mut b_op, false, None)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+        };
+        let admin = {
+            let (pool, barrier) = (pool.clone(), barrier.clone());
+            let body = form(&[
+                ("username", a.as_str()),
+                ("password_hash", ""),
+                ("created_at", at),
+            ]);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                send(
+                    &pool,
+                    Method::POST,
+                    &format!("/rustango_operators/{a_id}"),
+                    body,
+                )
+                .await
+                .0
+            })
+        };
+        let (c, s) = (console.await.unwrap(), admin.await.unwrap());
+        let left = active_operators(pool).await;
+        assert_eq!(left.len(), 1, "round {round}: console {c:?}, admin {s}");
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        console_and_admin_race_keeps_one_active,
+        admin_keeps_the_last_active_operator,
         new_user_form_does_not_block_submit,
         admin_created_user_can_log_in,
         a_login_upgrades_a_weak_hash,

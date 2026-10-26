@@ -34,6 +34,7 @@
 //!
 //! Fields locked with `register_admin_superuser_fields!` are silently ignored
 //! in a write body unless the request's `AuthenticatedUser` is a superuser.
+//! A create that sets a locked NOT NULL field with no default is a `403`.
 //!
 //! ## Query parameters (list endpoint)
 //!
@@ -722,6 +723,8 @@ pub struct ViewSet {
     pk_param: String,
     /// Most rows one bulk create may carry. See [`ViewSet::max_bulk_create`].
     max_bulk_create: usize,
+    /// Run the admin's `add` hooks on create. See [`ViewSet::admin_add_hooks`].
+    admin_add_hooks: bool,
 }
 
 impl ViewSet {
@@ -758,6 +761,7 @@ impl ViewSet {
             max_page_size: 100,
             pk_param: "pk".to_owned(),
             max_bulk_create: 1000,
+            admin_add_hooks: false,
         }
     }
 
@@ -990,6 +994,15 @@ impl ViewSet {
     #[must_use]
     pub fn max_bulk_create(mut self, n: usize) -> Self {
         self.max_bulk_create = n.max(1);
+        self
+    }
+
+    /// Run the admin's `register_admin_object_permission!(table, "add", …)`
+    /// hooks on create: on the request, then on each written row; a refusal
+    /// is a `403` and writes nothing. Off by default.
+    #[must_use]
+    pub fn admin_add_hooks(mut self) -> Self {
+        self.admin_add_hooks = true;
         self
     }
 
@@ -1747,11 +1760,17 @@ fn public_form_error(state: &ViewSetState, e: FormError) -> FormError {
 }
 
 /// Run the serializer's input validation on the body.
-fn serializer_validate(state: &ViewSetState, json: &Value) -> Result<(), Response> {
+/// `entry` is a bulk index, named in the error.
+fn serializer_validate(
+    state: &ViewSetState,
+    json: &Value,
+    entry: Option<usize>,
+) -> Result<(), Response> {
     if let Some(bridge) = &state.vs.serializer {
-        bridge
-            .validate_body(json)
-            .map_err(|errs| json_form_errors(&errs))?;
+        bridge.validate_body(json).map_err(|errs| match entry {
+            Some(i) => json_form_errors_msg(&format!("bulk entry {i}: invalid input"), &errs),
+            None => json_form_errors(&errs),
+        })?;
     }
     Ok(())
 }
@@ -1929,6 +1948,21 @@ impl WriteSet {
     /// `true` when `form` carries a field this principal may not write.
     fn sends_locked(&self, form: &HashMap<String, String>) -> bool {
         self.superuser_only.iter().any(|n| form.contains_key(*n))
+    }
+
+    /// `true` when `form` sets a locked field the INSERT cannot leave out
+    /// (NOT NULL, no default): the create could only fail, so it is a 403.
+    fn sends_required_locked(&self, form: &HashMap<String, String>) -> bool {
+        self.superuser_only
+            .iter()
+            .filter(|n| form.contains_key(**n))
+            .filter_map(|n| self.schema.field(n))
+            .any(|f| {
+                !f.nullable
+                    && f.default.is_none()
+                    && !f.auto
+                    && f.ty != crate::core::FieldType::Bool
+            })
     }
 
     /// The fields an UPDATE writes when the body carries them.
@@ -3196,6 +3230,10 @@ async fn handle_create(
         Ok(w) => w,
         Err(resp) => return resp,
     };
+    let add_hooks = match AddHooks::of(&state.vs, &parts) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
     // A bulk create spends one throttle unit per row (#1999).
     let client = state
         .vs
@@ -3224,7 +3262,7 @@ async fn handle_create(
             create_one(
                 &state,
                 &mut acq,
-                &write_set,
+                (&write_set, &add_hooks),
                 (&form, &json, encoding),
                 pk_field,
                 &scope,
@@ -3264,7 +3302,15 @@ async fn handle_create(
                     (form, json)
                 })
                 .collect();
-            create_many(&state, &mut acq, &write_set, &rows, pk_field, &scope).await
+            create_many(
+                &state,
+                &mut acq,
+                (&write_set, &add_hooks),
+                &rows,
+                pk_field,
+                &scope,
+            )
+            .await
         }
     }
 }
@@ -3282,8 +3328,8 @@ async fn handle_create(
 async fn insert_and_fetch_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
-    columns: Vec<&'static str>,
-    values: Vec<SqlValue>,
+    add_hooks: &AddHooks,
+    (columns, values): (Vec<&'static str>, Vec<SqlValue>),
     pk_field: &'static crate::core::FieldSchema,
     fields: &[&'static crate::core::FieldSchema],
     scope: &[WhereExpr],
@@ -3296,10 +3342,13 @@ async fn insert_and_fetch_one(
         on_conflict: None,
         generated: vec![],
     };
-    let pk_val = acq
-        .insert_returning_pk(&query, pk_field)
-        .await
-        .map_err(|e| write_failure("viewset::create", &e))?;
+    let pk_val = if add_hooks.on_rows() {
+        insert_admitted(acq, add_hooks, &query, pk_field).await?
+    } else {
+        acq.insert_returning_pk(&query, pk_field)
+            .await
+            .map_err(|e| write_failure("viewset::create", &e))?
+    };
     wrote(state);
     fetch_by_pk_scoped(state, acq, pk_field, pk_val, fields, scope)
         .await
@@ -3309,6 +3358,94 @@ async fn insert_and_fetch_one(
                 crate::error::client_error_body("viewset::create::read_back", &e, false),
             )
         })
+}
+
+/// The admin's `add` hooks for a create, run as the admin runs them: on
+/// the request, then on each written row inside the write's transaction.
+struct AddHooks {
+    /// The request, kept only when a hook is registered for a row check.
+    parts: Option<axum::http::request::Parts>,
+}
+
+impl AddHooks {
+    /// None unless the ViewSet opted in. `Err` is a `403` when a hook
+    /// refuses the request itself.
+    fn of(vs: &ViewSet, parts: &axum::http::request::Parts) -> Result<Self, Response> {
+        use crate::admin::object_permissions::{has_hook, is_allowed};
+        let table = vs.schema.table;
+        if !vs.admin_add_hooks {
+            return Ok(Self { parts: None });
+        }
+        if !is_allowed(table, "add", parts, None) {
+            return Err(json_error(StatusCode::FORBIDDEN, "forbidden"));
+        }
+        Ok(Self {
+            parts: has_hook(table, "add").then(|| parts.clone()),
+        })
+    }
+
+    fn on_rows(&self) -> bool {
+        self.parts.is_some()
+    }
+
+    /// Whether every hook admits the row `pk` as written in `tx`.
+    async fn admit(
+        &self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        model: &'static ModelSchema,
+        pk_field: &'static crate::core::FieldSchema,
+        pk: SqlValue,
+    ) -> Result<bool, crate::sql::ExecError> {
+        let Some(parts) = &self.parts else {
+            return Ok(true);
+        };
+        let fields: Vec<_> = model.scalar_fields().collect();
+        let select = SelectQuery::by_pk(model, pk_field.column, pk);
+        let row = crate::sql::select_one_row_as_json_tx(tx, &select, &fields).await?;
+        Ok(row.is_some_and(|row| {
+            crate::admin::object_permissions::is_allowed(model.table, "add", parts, Some(&row))
+        }))
+    }
+}
+
+/// One INSERT in its own transaction, committed only when `add_hooks`
+/// admit the written row.
+async fn insert_admitted(
+    acq: &AcquiredConn,
+    add_hooks: &AddHooks,
+    query: &InsertQuery,
+    pk_field: &'static crate::core::FieldSchema,
+) -> Result<SqlValue, (StatusCode, String)> {
+    let server = |e: &crate::sql::ExecError| {
+        let body = crate::error::client_error_body("viewset::create", e, false);
+        (StatusCode::INTERNAL_SERVER_ERROR, body)
+    };
+    let mut tx = crate::sql::write_transaction(&acq.pool)
+        .await
+        .map_err(|e| server(&e))?;
+    let pk = match crate::audit::insert_tx_on(&acq.pool, &mut tx, query, pk_field).await {
+        Ok(pk) => pk,
+        Err(e) => {
+            let _ = tx.rollback().await;
+            return Err(write_failure("viewset::create", &e));
+        }
+    };
+    match add_hooks
+        .admit(&mut tx, query.model, pk_field, pk.clone())
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            let _ = tx.rollback().await;
+            return Err((StatusCode::FORBIDDEN, "forbidden".to_owned()));
+        }
+        Err(e) => {
+            let _ = tx.rollback().await;
+            return Err(server(&e));
+        }
+    }
+    tx.commit().await.map_err(|e| server(&e.into()))?;
+    Ok(pk)
 }
 
 /// A failed INSERT/UPDATE: a duplicate key is a `409`, any other database
@@ -3333,25 +3470,28 @@ fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, Strin
 async fn create_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
-    write_set: &WriteSet,
+    (write_set, add_hooks): (&WriteSet, &AddHooks),
     (form, json, encoding): (&HashMap<String, String>, &Value, Encoding),
     pk_field: &'static crate::core::FieldSchema,
     scope: &[WhereExpr],
 ) -> Response {
-    if let Err(resp) = serializer_validate(state, json) {
+    if let Err(resp) = serializer_validate(state, json, None) {
         return resp;
     }
     // Translate `source`-renamed writable keys (serializer field name →
     // model column) so the client can POST the serializer field name.
     let renamed = serializer_input_renamed_form(state, form);
     let form = renamed.as_ref().unwrap_or(form);
+    if write_set.sends_required_locked(form) {
+        return json_error(StatusCode::FORBIDDEN, "forbidden");
+    }
     let collected = match write_set.insert_values(form, encoding) {
         Ok(v) => v,
         Err(e) => return e.into_response(state, None),
     };
-    let (columns, values): (Vec<_>, Vec<_>) = collected.into_iter().unzip();
     let fields = state.effective_fields();
-    match insert_and_fetch_one(state, acq, columns, values, pk_field, &fields, scope).await {
+    let row = collected.into_iter().unzip();
+    match insert_and_fetch_one(state, acq, add_hooks, row, pk_field, &fields, scope).await {
         Ok(Some(obj)) => json_created(obj),
         Ok(None) => StatusCode::CREATED.into_response(),
         Err((code, msg)) => json_error(code, &msg),
@@ -3370,7 +3510,7 @@ async fn create_one(
 async fn create_many(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
-    write_set: &WriteSet,
+    (write_set, add_hooks): (&WriteSet, &AddHooks),
     rows: &[(HashMap<String, String>, Value)],
     pk_field: &'static crate::core::FieldSchema,
     scope: &[WhereExpr],
@@ -3384,11 +3524,14 @@ async fn create_many(
     // INSERTs committed: validate the whole list before any save.
     let mut prepared: Vec<(Vec<&'static str>, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
     for (i, (row, json)) in rows.iter().enumerate() {
-        if let Err(resp) = serializer_validate(state, json) {
+        if let Err(resp) = serializer_validate(state, json, Some(i)) {
             return resp;
         }
         let renamed = serializer_input_renamed_form(state, row);
         let row = renamed.as_ref().unwrap_or(row);
+        if write_set.sends_required_locked(row) {
+            return json_error(StatusCode::FORBIDDEN, "forbidden");
+        }
         // A bulk body is always JSON.
         let collected = match write_set.insert_values(row, Encoding::Json) {
             Ok(v) => v,
@@ -3438,7 +3581,23 @@ async fn create_many(
             generated: vec![],
         };
         match crate::audit::insert_tx(&mut tx, &query, pk_field).await {
-            Ok(pk) => pks.push(pk),
+            Ok(pk) => match add_hooks
+                .admit(&mut tx, query.model, pk_field, pk.clone())
+                .await
+            {
+                Ok(true) => pks.push(pk),
+                Ok(false) => {
+                    let _ = tx.rollback().await;
+                    return json_error(
+                        StatusCode::FORBIDDEN,
+                        &format!("bulk entry {i}: forbidden"),
+                    );
+                }
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    return json_server_error("viewset::bulk_create::add_hook", &e);
+                }
+            },
             Err(e) => {
                 // Drop every row this request wrote, including the ones
                 // that succeeded before entry `i`.
@@ -3596,7 +3755,7 @@ async fn update_inner(
             locked = crate::audit::TxUpdate::for_model(state.vs.schema).map(|u| (u, tx));
             checked
         }
-        _ => serializer_validate(&state, &json),
+        _ => serializer_validate(&state, &json, None),
     };
     if let Err(resp) = validated {
         return resp;
@@ -4675,5 +4834,39 @@ mod default_order_tests {
         )));
         let sql = crate::sql::Sqlite.compile_select(&q).unwrap().sql;
         assert!(sql.ends_with(r#"ORDER BY "title" DESC, "id""#), "{sql}");
+    }
+}
+
+#[cfg(all(test, feature = "admin", feature = "mcp"))]
+mod credential_owner_tests {
+    use super::superuser_only_fields;
+    use crate::core::WriteKind;
+
+    fn parts(superuser: Option<bool>) -> axum::http::request::Parts {
+        let (mut p, ()) = axum::http::Request::new(()).into_parts();
+        if let Some(s) = superuser {
+            p.extensions
+                .insert(crate::tenancy::middleware::AuthenticatedUser {
+                    id: 7,
+                    username: "u".into(),
+                    is_superuser: s,
+                });
+        }
+        p
+    }
+
+    /// A non-superuser cannot pick the owner of a new credential either.
+    #[test]
+    fn create_locks_the_credential_owner() {
+        for table in ["rustango_api_keys", "rustango_agents"] {
+            for write in [WriteKind::Insert, WriteKind::Update] {
+                assert_eq!(
+                    superuser_only_fields(table, write, &parts(Some(false))),
+                    ["user_id"],
+                    "{table}"
+                );
+                assert!(superuser_only_fields(table, write, &parts(Some(true))).is_empty());
+            }
+        }
     }
 }

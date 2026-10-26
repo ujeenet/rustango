@@ -49,13 +49,9 @@
 
 use crate::migrate::{Migration, MigrationScope};
 use std::path::Path;
-#[cfg(feature = "postgres")]
-use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::core::Column as _;
-#[cfg(feature = "postgres")]
-use crate::sql::sqlx::postgres::PgPoolOptions;
 #[cfg(feature = "postgres")]
 use crate::sql::sqlx::PgPool;
 use sqlx::Database;
@@ -883,27 +879,34 @@ async fn run_for_one_tenant(
             #[cfg(feature = "passkey")]
             let reads_public_passkeys = existed_here(&dbpool, "rustango_users").await
                 && !existed_here(&dbpool, PASSKEY_TABLE).await;
-            let applied = migrate_with_system(
-                &dbpool,
-                chain,
-                MigrationScope::Tenant,
-                dir,
-                system_progress,
-                crate::migrate::Signals::Fire,
-                |held| {
-                    let observer = project_progress
-                        .as_ref()
-                        .map(|o| o as &dyn crate::migrate::MigrationObserver);
-                    crate::migrate::migrate_locked(held, &pool, dir, observer)
-                },
-            )
-            .await?;
-            // Lands in the tenant schema, not `public` (#2364).
-            crate::migrate::manage::ensure_tenant_bootstrap_tables(&dbpool).await?;
+            let run = async {
+                let applied = migrate_with_system(
+                    &dbpool,
+                    chain,
+                    MigrationScope::Tenant,
+                    dir,
+                    system_progress,
+                    crate::migrate::Signals::Fire,
+                    |held| {
+                        let observer = project_progress
+                            .as_ref()
+                            .map(|o| o as &dyn crate::migrate::MigrationObserver);
+                        crate::migrate::migrate_locked(held, &pool, dir, observer)
+                    },
+                )
+                .await?;
+                // Lands in the tenant schema, not `public` (#2364).
+                crate::migrate::manage::ensure_tenant_bootstrap_tables(&dbpool).await?;
+                Ok::<_, TenancyError>(applied)
+            }
+            .await;
+            // Warn even if the run failed: once the tenant's passkey table exists,
+            // the next run sees no change and would never warn.
             #[cfg(feature = "passkey")]
-            if reads_public_passkeys {
+            if reads_public_passkeys && existed_here(&dbpool, PASSKEY_TABLE).await {
                 warn_hidden_public_passkeys(&pools.registry_pool(), &org.slug, &schema).await;
             }
+            let applied = run?;
             // Data seeders (rows, not DDL — kept): CRUD permission
             // codenames for every registered model (#61) + the
             // content-type catalog (#89). Idempotent.
@@ -984,27 +987,7 @@ async fn build_schema_scoped_pool(
         .await?;
     bootstrap.close().await;
 
-    // Now build the migration pool. Every connection gets
-    // `SET search_path` once on connect; sqlx caches this per
-    // connection so subsequent migration queries against this pool
-    // see the right schema without further bookkeeping.
-    let schema_owned: Arc<str> = Arc::from(schema);
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .after_connect(move |conn, _meta| {
-            let schema = Arc::clone(&schema_owned);
-            Box::pin(async move {
-                let stmt = format!(
-                    "SET search_path TO {}, public",
-                    quote_ident_for_schema(&schema)
-                );
-                rustango::sql::sqlx::query(&stmt).execute(conn).await?;
-                Ok(())
-            })
-        })
-        .connect(registry_url)
-        .await?;
-    Ok(pool)
+    super::pools::connect_schema_scoped(registry_url, schema, 2).await
 }
 
 /// Prep a directory of migrations filtered by scope. If every
@@ -1086,4 +1069,42 @@ fn tempdir_under_target() -> Result<TempDir, TenancyError> {
 fn quote_ident_for_schema(name: &str) -> String {
     let escaped = name.replace('"', "\"\"");
     format!("\"{escaped}\"")
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod schema_pool_tests {
+    use super::build_schema_scoped_pool;
+
+    /// Schema pools must not share a cache scope with each other or the registry.
+    #[tokio::test]
+    async fn schema_scoped_pools_have_their_own_scope_key() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pid = std::process::id();
+        let (a, b) = (format!("scope \"a\" {pid}"), format!("scope_b_{pid}"));
+        let registry = crate::sql::Pool::connect(&url).await.expect("registry");
+        let pa = crate::sql::Pool::Postgres(build_schema_scoped_pool(&url, &a).await.expect("a"));
+        let pb = crate::sql::Pool::Postgres(build_schema_scoped_pool(&url, &b).await.expect("b"));
+        let current: (String,) = sqlx::query_as("SELECT current_schema()::text")
+            .fetch_one(pa.as_postgres().expect("pg"))
+            .await
+            .expect("current_schema");
+        assert_eq!(current.0, a, "search_path not applied");
+        let keys = [registry.scope_key(), pa.scope_key(), pb.scope_key()];
+        assert_eq!(pa.clone().scope_key(), keys[1], "a clone keeps its scope");
+        pa.close().await;
+        pb.close().await;
+        for s in [&a, &b] {
+            let drop = format!(
+                "DROP SCHEMA IF EXISTS {} CASCADE",
+                super::quote_ident_for_schema(s)
+            );
+            let _ = sqlx::query(&drop)
+                .execute(registry.as_postgres().expect("pg"))
+                .await;
+        }
+        assert_ne!(keys[0], keys[1], "schema pool shares the registry's scope");
+        assert_ne!(keys[1], keys[2], "two schema pools share a scope");
+    }
 }

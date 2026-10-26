@@ -878,7 +878,9 @@ impl TenantAccounts<'_> {
             return Ok(None);
         };
         let privileged = user.is_superuser || holds_permissions(self.0, user_id).await;
-        Ok(Some(Account::new(user_id, privileged, user.active)))
+        Ok(Some(
+            Account::new(user_id, privileged, user.active).with_created_at(user.created_at),
+        ))
     }
 }
 

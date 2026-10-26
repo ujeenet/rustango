@@ -92,11 +92,16 @@ impl IntoResponse for CsvResponse {
     }
 }
 
-/// Escape `"` and `\` so the name is safe inside the quoted
-/// `Content-Disposition` filename. Non-ASCII names would need the
-/// RFC 5987 `filename*=` form, which this helper does not emit.
+/// Escape `"` and `\` and replace control characters with `_`, so the
+/// name is safe inside the quoted `Content-Disposition` filename.
+/// Non-ASCII names would need the RFC 5987 `filename*=` form, which
+/// this helper does not emit.
 fn escape_filename(name: &str) -> String {
-    name.replace('\\', "\\\\").replace('"', "\\\"")
+    name.chars()
+        .map(|c| if c.is_control() { '_' } else { c })
+        .collect::<String>()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }
 
 #[cfg(test)]
@@ -179,6 +184,20 @@ mod tests {
             .to_str()
             .unwrap();
         assert_eq!(v, r#"attachment; filename="oddly named \"users\".csv""#);
+    }
+
+    /// A control character in the name cannot drop the whole header,
+    /// which would serve the export inline.
+    #[tokio::test]
+    async fn filename_with_control_chars_keeps_the_header() {
+        let resp = CsvResponse::new(writer())
+            .filename("a\r\nb\u{7f}\t.csv")
+            .into_response();
+        let v = resp.headers().get(header::CONTENT_DISPOSITION);
+        assert_eq!(
+            v.and_then(|v| v.to_str().ok()),
+            Some(r#"attachment; filename="a__b__.csv""#)
+        );
     }
 
     #[tokio::test]

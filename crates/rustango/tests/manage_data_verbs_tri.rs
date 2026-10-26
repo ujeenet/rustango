@@ -553,26 +553,14 @@ async fn flush_breaks_a_nullable_cycle(pool: &Pool) {
 
 /// Empty post and tag tables, joined by the junction migrations build.
 async fn fresh_m2m(pool: &Pool) {
-    use rustango::migrate::{render_changes_split_with_dialect, SchemaChange, SchemaSnapshot};
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, "cli2317_post_tags").await;
     fresh_table::<M2mPost>(pool).await;
     fresh_table::<M2mTag>(pool).await;
     // The junction as migrations build it, FKs included.
-    let create = SchemaChange::CreateM2MTable {
-        through: "cli2317_post_tags".into(),
-        src_table: M2mPost::SCHEMA.table.into(),
-        src_col: "post_id".into(),
-        dst_table: M2mTag::SCHEMA.table.into(),
-        dst_col: "tag_id".into(),
-    };
-    let snap = SchemaSnapshot::from_models(&[M2mPost::SCHEMA, M2mTag::SCHEMA]);
-    let ddl = render_changes_split_with_dialect(&[create], &snap, pool.dialect()).expect("ddl");
-    for sql in ddl.immediate.iter().chain(&ddl.deferred_fks) {
-        raw_execute_pool(pool, sql, vec![])
-            .await
-            .expect("junction ddl");
-    }
+    rustango::testkit::create_junctions(pool, &[M2mPost::SCHEMA, M2mTag::SCHEMA])
+        .await
+        .expect("junction ddl");
 }
 
 /// An auto-created M2M junction with rows does not block the flush; it clears too.
@@ -652,25 +640,13 @@ async fn dump_and_load_keeps_m2m_links(pool: &Pool) {
 
 /// Empty shelf and label tables and the text-keyed junction migrations build.
 async fn fresh_text_m2m(pool: &Pool) {
-    use rustango::migrate::{render_changes_split_with_dialect, SchemaChange, SchemaSnapshot};
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, "cli1393_shelf_labels").await;
     fresh_table::<TextShelf>(pool).await;
     fresh_table::<TextLabel>(pool).await;
-    let create = SchemaChange::CreateM2MTable {
-        through: "cli1393_shelf_labels".into(),
-        src_table: TextShelf::SCHEMA.table.into(),
-        src_col: "shelf_code".into(),
-        dst_table: TextLabel::SCHEMA.table.into(),
-        dst_col: "label_code".into(),
-    };
-    let snap = SchemaSnapshot::from_models(&[TextShelf::SCHEMA, TextLabel::SCHEMA]);
-    let ddl = render_changes_split_with_dialect(&[create], &snap, pool.dialect()).expect("ddl");
-    for sql in ddl.immediate.iter().chain(&ddl.deferred_fks) {
-        raw_execute_pool(pool, sql, vec![])
-            .await
-            .expect("junction ddl");
-    }
+    rustango::testkit::create_junctions(pool, &[TextShelf::SCHEMA, TextLabel::SCHEMA])
+        .await
+        .expect("junction ddl");
 }
 
 /// dumpdata reads rows and their links a page at a time.

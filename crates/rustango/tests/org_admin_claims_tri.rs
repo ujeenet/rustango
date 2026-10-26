@@ -6,7 +6,7 @@
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use rustango::core::Column as _;
-use rustango::sql::{FetcherPool as _, Pool};
+use rustango::sql::{CounterPool as _, FetcherPool as _, Pool};
 use rustango::tenancy::org_edit::{apply, OrgPatch};
 use rustango::tenancy::{Org, OrgHost, OrgResolver as _, RegisteredHostResolver, TenancyError};
 use rustango::tri_dialect_test;
@@ -36,8 +36,8 @@ fn name(pool: &Pool, tag: &str) -> String {
     format!("adm-{tag}-{}-{n}", pool.dialect().name())
 }
 
-/// A port nobody else in this run uses.
-fn port(pool: &Pool, i: u32) -> i32 {
+/// A port no tenant in the shared registry holds yet.
+async fn port(pool: &Pool, i: u32) -> i32 {
     let run = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -48,7 +48,17 @@ fn port(pool: &Pool, i: u32) -> i32 {
         "mysql" => 1,
         _ => 2,
     };
-    i32::try_from(1_000 + backend * 6_000 + run * 10 + i).unwrap()
+    let mut p = i32::try_from(1_000 + backend * 6_000 + run * 10 + i).unwrap();
+    while Org::objects()
+        .filter("port", p)
+        .count(pool)
+        .await
+        .expect("count ports")
+        > 0
+    {
+        p += 2;
+    }
+    p
 }
 
 async fn send(pool: &Pool, method: Method, uri: &str, body: String) -> (StatusCode, String) {
@@ -122,7 +132,7 @@ async fn owner(pool: &Pool) -> (String, String, i32) {
     org(pool, &slug).await;
     let host = format!("{slug}.example.test");
     let prefix = format!("/{slug}");
-    let port = port(pool, 0);
+    let port = port(pool, 0).await;
     let patch = OrgPatch {
         host_pattern: Some(host.clone()),
         path_prefix: Some(prefix.clone()),
@@ -194,7 +204,7 @@ async fn admin_org_edit_keeps_and_normalizes_its_own_routing(pool: &Pool) {
     let slug = name(pool, "own");
     let id = org(pool, &slug).await;
     let host = format!("{slug}.example.test");
-    let port = port(pool, 1).to_string();
+    let port = port(pool, 1).await.to_string();
     let uri = format!("/rustango_orgs/{id}");
     let prefix = format!("/{slug}");
     let form = org_form(&slug, &host.to_uppercase(), &prefix, &port);

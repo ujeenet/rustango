@@ -108,14 +108,21 @@ const _: () = assert!(MAX_TAGS_PER_CALL * 2 <= 32766);
 /// than one `IN` list: each list then loads `offset + limit` rows.
 const MAX_WIDE_OFFSET: i64 = 10_000;
 
-/// Rows [`MediaManager::purge_pending`] deletes per call.
+/// Page size, and purged-row budget per call, of
+/// [`MediaManager::purge_pending`] and [`MediaManager::purge_orphans`].
 ///
-/// Bounds how much one run does: the sweep reads this many rows, then
-/// deletes each with its object.
-///
-/// A bigger backlog drains over several runs. A sweep that finishes
-/// late beats one that blocks every other writer.
+/// A sweep reads pages of this many rows in id order and stops once it
+/// has purged this many. A row it fails on is passed over, so a stuck
+/// page cannot starve the rows after it. A bigger backlog drains over
+/// several runs.
 const PURGE_PENDING_BATCH: i64 = 10_000;
+
+/// Longest upload URL `purge_pending` waits out. A caller TTL above it
+/// is kept but warned about: its pending row may go before the URL does.
+const UPLOAD_URL_MAX_TTL: Duration = Duration::from_secs(3600);
+
+/// Slack on top of [`UPLOAD_URL_MAX_TTL`] for a slow PUT and clock skew.
+const UPLOAD_PURGE_MARGIN: Duration = Duration::from_secs(15 * 60);
 
 /// Default cap on a direct upload's declared size: 100 MiB.
 pub const DEFAULT_MAX_UPLOAD_BYTES: u64 = 100 << 20;
@@ -275,7 +282,8 @@ pub struct UploadIntent {
     pub size_bytes: i64,
     pub uploaded_by_id: Option<i64>,
     pub collection_id: Option<i64>,
-    /// How long the presigned PUT URL stays valid. Default 5 min.
+    /// How long the presigned PUT URL stays valid. Default 5 min. Over 1 h,
+    /// `purge_pending` may delete the row before the URL expires.
     pub ttl: Duration,
 }
 
@@ -454,6 +462,18 @@ impl MediaManager {
             )));
         }
         let key = build_key(&intent.key_prefix, &intent.original_filename);
+        let ttl = intent.ttl;
+        if ttl > UPLOAD_URL_MAX_TTL {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    ttl_secs = ttl.as_secs(),
+                    max_secs = UPLOAD_URL_MAX_TTL.as_secs(),
+                    "upload URL TTL is over the 1 h purge_pending waits out; its pending row \
+                     may be purged while the URL still works, leaving an untracked object"
+                );
+            });
+        }
         // Sign a safe type and the declared size: the bucket stores no
         // active MIME and refuses a bigger body (#2057, #1851).
         let content_type = stored_content_type(&intent.mime).to_owned();
@@ -463,7 +483,7 @@ impl MediaManager {
             .content_length(size)
             .create_only();
         let upload_url = storage
-            .presigned_put_url(&key, intent.ttl, &put)
+            .presigned_put_url(&key, ttl, &put)
             .await
             .ok_or_else(|| {
                 MediaError::Other(format!(
@@ -493,7 +513,7 @@ impl MediaManager {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         let expires_at = DateTime::<Utc>::from_timestamp(
-            i64::try_from(now + intent.ttl.as_secs()).unwrap_or(i64::MAX),
+            i64::try_from(now + ttl.as_secs()).unwrap_or(i64::MAX),
             0,
         )
         .unwrap_or_else(Utc::now);
@@ -731,9 +751,10 @@ impl MediaManager {
         Ok(())
     }
 
-    /// Hard-delete every soft-deleted Media row older than
-    /// `older_than`, removing the storage object as we go. Returns
-    /// the count of rows purged.
+    /// Hard-delete soft-deleted Media rows older than `older_than`,
+    /// removing the storage object as we go. Pages through the rows in id
+    /// order, passing over any it fails on, and stops once it has purged
+    /// `PURGE_PENDING_BATCH`. Returns the count of rows purged.
     ///
     /// Run from the [`crate::scheduler`] (e.g. nightly) to keep
     /// orphan storage objects from accumulating.
@@ -753,24 +774,30 @@ impl MediaManager {
     /// is summarised at `error`, because the purged count does not
     /// survive the `Err`.
     pub async fn purge_orphans(&self, older_than: Duration) -> Result<u64, MediaError> {
-        let rows = self.orphans_older_than(older_than).await?;
-        let total = rows.len();
-        let mut purged = 0u64;
+        let cutoff = cutoff_before(older_than);
+        let (mut total, mut purged, mut after) = (0usize, 0u64, None);
         let mut first_err: Option<MediaError> = None;
-        for m in rows {
-            match self.purge(&m).await {
-                Ok(()) => purged += 1,
-                Err(e) => {
-                    tracing::warn!(
-                        disk = %m.disk,
-                        storage_key = %m.storage_key,
-                        error = %e,
-                        "media purge_orphans: row left in place, will retry next sweep"
-                    );
-                    if first_err.is_none() {
-                        first_err = Some(e);
+        loop {
+            let rows = self.orphans_page(cutoff, after).await?;
+            let full = rows.len() as i64 == PURGE_PENDING_BATCH;
+            after = rows.last().and_then(|m| m.id.get().copied());
+            total += rows.len();
+            for m in rows {
+                match self.purge(&m).await {
+                    Ok(()) => purged += 1,
+                    Err(e) => {
+                        tracing::warn!(
+                            disk = %m.disk,
+                            storage_key = %m.storage_key,
+                            error = %e,
+                            "media purge_orphans: row left in place, will retry next sweep"
+                        );
+                        first_err.get_or_insert(e);
                     }
                 }
+            }
+            if !full || purged >= PURGE_PENDING_BATCH as u64 {
+                break;
             }
         }
         if let Some(e) = first_err {
@@ -786,8 +813,9 @@ impl MediaManager {
         Ok(purged)
     }
 
-    /// What [`Self::purge_orphans`] *would* delete. Same query, no
-    /// `purge` call, so no rows and no storage objects are removed.
+    /// The first page [`Self::purge_orphans`] *would* delete, at most
+    /// `PURGE_PENDING_BATCH` rows. Same query, no `purge` call, so no rows
+    /// and no storage objects are removed.
     ///
     /// Run it before wiring the real sweep in a tenancy app: the rows
     /// carry their `disk` and `storage_key`, so you can see whether
@@ -799,36 +827,43 @@ impl MediaManager {
         &self,
         older_than: Duration,
     ) -> Result<Vec<Media>, MediaError> {
-        self.orphans_older_than(older_than).await
+        self.orphans_page(cutoff_before(older_than), None).await
     }
 
-    /// The soft-deleted rows older than `older_than`. Shared by
-    /// [`Self::purge_orphans`] and [`Self::purge_orphans_dry_run`] so
-    /// the dry run cannot drift from the real sweep.
-    async fn orphans_older_than(&self, older_than: Duration) -> Result<Vec<Media>, MediaError> {
+    /// One id-ordered page of rows soft-deleted before `cutoff`, after id
+    /// `after`. Shared by [`Self::purge_orphans`] and
+    /// [`Self::purge_orphans_dry_run`] so the dry run cannot drift.
+    async fn orphans_page(
+        &self,
+        cutoff: DateTime<Utc>,
+        after: Option<i64>,
+    ) -> Result<Vec<Media>, MediaError> {
         use crate::sql::FetcherPool as _;
-        // Cutoff computed in Rust, so no per-dialect `NOW() - INTERVAL`.
-        let cutoff = Utc::now()
-            - chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::seconds(0));
-        Media::objects()
+        let mut q = Media::objects()
             .where_(Media::deleted_at.is_not_null())
-            .where_(Media::deleted_at.lt(cutoff))
+            .where_(Media::deleted_at.lt(cutoff));
+        if let Some(id) = after {
+            q = q.where_(Media::id.gt(id));
+        }
+        q.order_by(&[("id", false)])
+            .limit(PURGE_PENDING_BATCH)
             .fetch(&self.pool)
             .await
             .map_err(media_err_from_exec)
     }
 
     /// Hard-delete Media rows still `Pending`, or `Failed`, after
-    /// `older_than`, with their storage objects, up to
-    /// `PURGE_PENDING_BATCH` per call.
+    /// `older_than` (at least 1 h 15 min, so a live upload URL cannot land
+    /// an object after its row is gone), with their storage objects. Pages
+    /// like [`Self::purge_orphans`].
     ///
     /// Direct browser uploads leave `Pending` rows behind when the
     /// browser gives up before calling `finalize_upload`, and a PUT can
     /// still land under a `Failed` row. Run this from the
     /// [`crate::scheduler`].
     ///
-    /// Returns the number of media rows deleted. A full batch means
-    /// there is more work — call again, or let the next run take it.
+    /// Returns the number of media rows deleted. `PURGE_PENDING_BATCH`
+    /// means there may be more work — call again, or let the next run take it.
     ///
     /// Each row is claimed (soft-deleted) on `id` and the status it was
     /// read with, so one finalized in between is kept. Then its object is
@@ -839,32 +874,43 @@ impl MediaManager {
     /// The first failure, after trying every row.
     pub async fn purge_pending(&self, older_than: Duration) -> Result<u64, MediaError> {
         use crate::sql::FetcherPool as _;
-        let cutoff = Utc::now()
-            - chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::seconds(0));
-        let unconfirmed =
-            [MediaStatus::Pending, MediaStatus::Failed].map(|s| s.as_str().to_owned());
-        let rows = Media::objects()
-            .where_(Media::status.is_in(unconfirmed))
-            .where_(Media::uploaded_at.lt(cutoff))
-            .limit(PURGE_PENDING_BATCH)
-            .fetch(&self.pool)
-            .await
-            .map_err(media_err_from_exec)?;
-        let mut purged = 0u64;
+        let cutoff = cutoff_before(older_than.max(UPLOAD_URL_MAX_TTL + UPLOAD_PURGE_MARGIN));
+        let (mut purged, mut after) = (0u64, None);
         let mut first_err: Option<MediaError> = None;
-        for m in rows {
-            match self.purge_unconfirmed(&m).await {
-                Ok(true) => purged += 1,
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        disk = %m.disk,
-                        storage_key = %m.storage_key,
-                        error = %e,
-                        "media purge_pending: row left in place, will retry next sweep"
-                    );
-                    first_err.get_or_insert(e);
+        loop {
+            let unconfirmed =
+                [MediaStatus::Pending, MediaStatus::Failed].map(|s| s.as_str().to_owned());
+            let mut q = Media::objects()
+                .where_(Media::status.is_in(unconfirmed))
+                .where_(Media::uploaded_at.lt(cutoff));
+            if let Some(id) = after {
+                q = q.where_(Media::id.gt(id));
+            }
+            let rows = q
+                .order_by(&[("id", false)])
+                .limit(PURGE_PENDING_BATCH)
+                .fetch(&self.pool)
+                .await
+                .map_err(media_err_from_exec)?;
+            let full = rows.len() as i64 == PURGE_PENDING_BATCH;
+            after = rows.last().and_then(|m| m.id.get().copied());
+            for m in rows {
+                match self.purge_unconfirmed(&m).await {
+                    Ok(true) => purged += 1,
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            disk = %m.disk,
+                            storage_key = %m.storage_key,
+                            error = %e,
+                            "media purge_pending: row left in place, will retry next sweep"
+                        );
+                        first_err.get_or_insert(e);
+                    }
                 }
+            }
+            if !full || purged >= PURGE_PENDING_BATCH as u64 {
+                break;
             }
         }
         // Reclaim tag links whose media row is gone.
@@ -1915,6 +1961,11 @@ fn decode_tag_with_count_sq(row: &sqlx::sqlite::SqliteRow) -> Result<(MediaTag, 
     let count: i64 = row.try_get("use_count").map_err(MediaError::Db)?;
     let tag = MediaTag::from_row(row).map_err(MediaError::Db)?;
     Ok((tag, count))
+}
+
+/// `now - age`, computed in Rust so no per-dialect `NOW() - INTERVAL`.
+fn cutoff_before(age: Duration) -> DateTime<Utc> {
+    Utc::now() - chrono::Duration::from_std(age).unwrap_or(chrono::Duration::seconds(0))
 }
 
 /// The `Content-Type` stored with an upload. A client-declared type that

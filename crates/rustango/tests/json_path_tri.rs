@@ -386,6 +386,86 @@ async fn json_round_trips_on_every_mysql_flavour(pool: &Pool) {
     );
 }
 
+/// Rows matching `Demo::data.<lookup>(needle)`, a LIKE over the JSON text.
+async fn count_like(pool: &Pool, lookup: &str, needle: &str) -> i64 {
+    use rustango::core::Column as _;
+    use rustango::sql::CounterPool as _;
+    let filter = match lookup {
+        "contains" => Demo::data.contains(needle),
+        _ => Demo::data.icontains(needle),
+    };
+    rustango::query::QuerySet::<Demo>::default()
+        .where_(filter)
+        .count(pool)
+        .await
+        .expect("count")
+}
+
+/// LIKE over a JSON column agrees across backends for a substring of one
+/// key or string value; the text around values differs (SQLite is compact).
+async fn json_text_search_agrees_inside_a_value(pool: &Pool) {
+    Demo {
+        id: Auto::Unset,
+        data: serde_json::json!({"name": "Alice Smith", "tags": ["red"]}),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("seed");
+    assert_eq!(count_like(pool, "icontains", "alice").await, 1);
+    assert_eq!(count_like(pool, "contains", "Alice Sm").await, 1);
+    assert_eq!(count_like(pool, "contains", "red").await, 1);
+    assert_eq!(count_like(pool, "icontains", "nobody").await, 0);
+    // Outside the subset: PG and MySQL 8 print `": "`, SQLite (and MariaDB,
+    // which keeps the text as sent) `":"`.
+    let spaced = count_like(pool, "contains", "\"name\": \"Alice").await;
+    match pool.dialect().name() {
+        "postgres" => assert_eq!(spaced, 1, "documented spacing difference"),
+        "sqlite" => assert_eq!(spaced, 0, "documented spacing difference"),
+        _ => {}
+    }
+}
+
+/// Rows whose `data` contains `v`.
+async fn count_contains(pool: &Pool, v: serde_json::Value) -> Result<i64, String> {
+    use rustango::sql::CounterPool as _;
+    rustango::query::QuerySet::<Demo>::default()
+        .filter_op("data", Op::JsonContains, SqlValue::Json(v))
+        .count(pool)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `json_contains` agrees on PG and MySQL when the candidate has the
+/// target's shape at each key; SQLite has no containment operator.
+async fn json_containment_agrees_on_matching_shapes(pool: &Pool) {
+    Demo {
+        id: Auto::Unset,
+        data: serde_json::json!({"tags": ["a", "b"], "n": 1, "o": {"k": "v"}}),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("seed");
+    if pool.dialect().name() == "sqlite" {
+        let err = count_contains(pool, serde_json::json!({"n": 1})).await;
+        assert!(err.is_err(), "SQLite refuses containment: {err:?}");
+        return;
+    }
+    for (v, want) in [
+        (serde_json::json!({"tags": ["a"]}), 1),
+        (serde_json::json!({"tags": ["b", "a"]}), 1),
+        (serde_json::json!({"o": {"k": "v"}}), 1),
+        (serde_json::json!({"n": 1}), 1),
+        (serde_json::json!({"n": 2}), 0),
+        (serde_json::json!({"tags": ["c"]}), 0),
+    ] {
+        assert_eq!(count_contains(pool, v.clone()).await, Ok(want), "{v}");
+    }
+    // Outside the subset: MySQL matches a scalar inside an array, PG does not.
+    let loose = count_contains(pool, serde_json::json!({"tags": "a"})).await;
+    let want = i64::from(pool.dialect().name() == "mysql");
+    assert_eq!(loose, Ok(want), "documented MySQL difference");
+}
+
 tri_dialect_test! {
     setup: seeded,
     scenarios: [
@@ -401,5 +481,7 @@ tri_dialect_test! {
         json_equality_matches,
         json_column_equality_compares_values,
         json_as_text_is_text,
+        json_text_search_agrees_inside_a_value,
+        json_containment_agrees_on_matching_shapes,
     ],
 }

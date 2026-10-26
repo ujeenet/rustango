@@ -378,7 +378,6 @@ pub(crate) async fn render_for_parent_in(
         });
 
         let field_labels = display_fields.iter().map(|f| f.name.to_owned()).collect();
-        let pk_column = pk_field.map(|p| p.column).unwrap_or("id");
         let child_cfg = admin_config_or_default(child_model);
         let rendered_rows: Vec<serde_json::Value> = rows
             .iter()
@@ -386,17 +385,14 @@ pub(crate) async fn render_for_parent_in(
                 let cells: Vec<serde_json::Value> = display_fields
                     .iter()
                     .map(|f| {
-                        let raw = row
-                            .get(f.column)
-                            .cloned()
-                            .unwrap_or(serde_json::Value::Null);
+                        let raw = row.get(f.name).cloned().unwrap_or(serde_json::Value::Null);
                         serde_json::json!({
                             "label": f.display_label(),
                             "value": render_cell(&child_cfg, f, &raw),
                         })
                     })
                     .collect();
-                let pk_text = row.get(pk_column).map(stringify_pk).unwrap_or_default();
+                let pk_text = row_pk_text(row, pk_field);
                 serde_json::json!({
                     "pk": pk_text,
                     // The View link's path segment; a raw `/` or `?` would break it (#2079).
@@ -434,7 +430,7 @@ pub(crate) async fn render_for_parent_in(
 /// whose `(content_type_id, object_pk)` matches the parent.
 ///
 /// Resolves the parent's `ContentType` via the inventory registry +
-/// `ContentType::by_natural_key` (cache-hot after the first call). The
+/// `ContentType::get_by_natural_key` (cached after the first call). The
 /// resulting WHERE pins both `ct_column` and `pk_column` on the child.
 ///
 /// # Errors
@@ -544,7 +540,6 @@ pub(crate) async fn render_generic_for_parent_in(
         });
 
         let field_labels = display_fields.iter().map(|f| f.name.to_owned()).collect();
-        let pk_column = pk_field.map(|p| p.column).unwrap_or("id");
         let child_cfg = admin_config_or_default(child_model);
         let rendered_rows: Vec<serde_json::Value> = rows
             .iter()
@@ -552,17 +547,14 @@ pub(crate) async fn render_generic_for_parent_in(
                 let cells: Vec<serde_json::Value> = display_fields
                     .iter()
                     .map(|f| {
-                        let raw = row
-                            .get(f.column)
-                            .cloned()
-                            .unwrap_or(serde_json::Value::Null);
+                        let raw = row.get(f.name).cloned().unwrap_or(serde_json::Value::Null);
                         serde_json::json!({
                             "label": f.display_label(),
                             "value": render_cell(&child_cfg, f, &raw),
                         })
                     })
                     .collect();
-                let pk_text = row.get(pk_column).map(stringify_pk).unwrap_or_default();
+                let pk_text = row_pk_text(row, pk_field);
                 serde_json::json!({
                     "pk": pk_text,
                     // The View link's path segment; a raw `/` or `?` would break it (#2079).
@@ -629,7 +621,8 @@ async fn resolve_ct_id_for_schema(
     };
     let app = entry.resolved_app_label().unwrap_or("project");
     let name = schema.name.to_ascii_lowercase();
-    let ct = crate::contenttypes::ContentType::by_natural_key(pool, app, &name).await?;
+    // Cached per database, like every other content-type lookup.
+    let ct = crate::contenttypes::ContentType::get_by_natural_key(pool, app, &name).await?;
     Ok(ct.and_then(|c| c.id.get().copied()))
 }
 
@@ -827,7 +820,6 @@ pub(crate) async fn render_form_for_parent_in(
         let prefix = child_model.table.to_owned();
         let initial_forms = rows.len();
         let total_forms = initial_forms + extra;
-        let pk_column = pk_field.map(|p| p.column).unwrap_or("id");
         let child_cfg = admin_config_or_default(child_model);
 
         let mut field_labels: Vec<String> =
@@ -839,7 +831,7 @@ pub(crate) async fn render_form_for_parent_in(
 
         let mut rendered_rows: Vec<serde_json::Value> = Vec::with_capacity(total_forms);
         for (idx, row) in rows.iter().enumerate() {
-            let pk_text = row.get(pk_column).map(stringify_pk).unwrap_or_default();
+            let pk_text = row_pk_text(row, pk_field);
             let cells: Vec<serde_json::Value> = display_fields
                 .iter()
                 .map(|f| {
@@ -1228,6 +1220,14 @@ impl OwnRows {
     }
 }
 
+/// A fetched row's PK text; rows are keyed by field name.
+fn row_pk_text(row: &serde_json::Value, pk: Option<&FieldSchema>) -> String {
+    pk.map_or_else(
+        || row.get("id").map(stringify_pk).unwrap_or_default(),
+        |pk| pk_key(row, pk),
+    )
+}
+
 /// A fetched row's PK as [`SqlValue::to_display_string`] spells it.
 fn pk_key(row: &serde_json::Value, pk: &FieldSchema) -> String {
     row.get(pk.name)
@@ -1553,10 +1553,12 @@ async fn plan_target(
         deletes_needed: 0,
     };
     let is_new = |idx: usize, raw_pk: &str| initial.map_or(raw_pk.trim().is_empty(), |n| idx >= n);
+    let rows = crate::forms::formset::row_payloads(form, table, total_forms);
     // Every existing row's stored state in one read, not one per row.
-    let existing_raw: Vec<String> = (0..total_forms)
-        .filter_map(|idx| {
-            let row = crate::forms::formset::row_payload(form, table, idx);
+    let existing_raw: Vec<String> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, row)| {
             let raw_pk = row.get(target.pk.name)?;
             (!is_new(idx, raw_pk)).then(|| raw_pk.clone())
         })
@@ -1576,8 +1578,7 @@ async fn plan_target(
         .await?;
     // Distinct PKs: a repeated DELETE slot removes one row (#1717).
     let mut deleted: HashSet<String> = HashSet::new();
-    for idx in 0..total_forms {
-        let row = crate::forms::formset::row_payload(form, table, idx);
+    for (idx, row) in rows.into_iter().enumerate() {
         let raw_pk = row.get(target.pk.name).cloned().unwrap_or_default();
         let delete_flag = row
             .get("DELETE")
@@ -2092,7 +2093,6 @@ pub(crate) async fn render_form_generic_for_parent_in(
         let prefix = child_model.table.to_owned();
         let initial_forms = rows.len();
         let total_forms = initial_forms + extra;
-        let pk_column = pk_field.map(|p| p.column).unwrap_or("id");
         let child_cfg = admin_config_or_default(child_model);
 
         let mut field_labels: Vec<String> =
@@ -2103,7 +2103,7 @@ pub(crate) async fn render_form_generic_for_parent_in(
 
         let mut rendered_rows: Vec<serde_json::Value> = Vec::with_capacity(total_forms);
         for (idx, row) in rows.iter().enumerate() {
-            let pk_text = row.get(pk_column).map(stringify_pk).unwrap_or_default();
+            let pk_text = row_pk_text(row, pk_field);
             let cells: Vec<serde_json::Value> = display_fields
                 .iter()
                 .map(|f| {
@@ -2196,6 +2196,39 @@ use crate::text::html_escape;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "inl_ct_parent", app = "inl_ct")]
+    #[allow(dead_code)]
+    pub struct CtParent {
+        #[rustango(primary_key)]
+        pub id: i64,
+    }
+
+    /// A generic inline resolves its parent's content type from the cache.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn parent_content_type_lookup_is_cached() {
+        use crate::core::Model as _;
+        let pool = Pool::Sqlite(
+            crate::sql::sqlx::SqlitePool::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        crate::contenttypes::ensure_seeded(&pool).await.unwrap();
+        let first = resolve_ct_id_for_schema(&pool, CtParent::SCHEMA)
+            .await
+            .unwrap();
+        assert!(first.is_some());
+        let (again, queries) = crate::test_assertions::QueryCounter::scope(async {
+            let id = resolve_ct_id_for_schema(&pool, CtParent::SCHEMA)
+                .await
+                .unwrap();
+            (id, crate::test_assertions::QueryCounter::current())
+        })
+        .await;
+        assert_eq!((again, queries), (first, 0));
+    }
 
     #[test]
     fn cut_rows_links_the_rest_only_past_the_cap() {

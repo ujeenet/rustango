@@ -407,6 +407,31 @@ pub(super) async fn has_no_values(
     Ok(rows.first().is_some_and(|(n,)| *n == 0))
 }
 
+/// Whether two rows of `table` share a non-NULL value of every `columns`.
+pub(super) async fn has_duplicate_keys(
+    pool: &Pool,
+    table: &str,
+    columns: &[&str],
+) -> Result<bool, sqlx::Error> {
+    let q = |n: &str| pool.dialect().quote_ident(n);
+    let cols: Vec<String> = columns.iter().map(|c| q(c)).collect();
+    let not_null: Vec<String> = cols.iter().map(|c| format!("{c} IS NOT NULL")).collect();
+    let sql = format!(
+        "SELECT COUNT(*) FROM (SELECT 1 AS one FROM {} WHERE {} GROUP BY {} \
+         HAVING COUNT(*) > 1 LIMIT 1) AS probe",
+        q(table),
+        not_null.join(" AND "),
+        cols.join(", "),
+    );
+    let rows: Vec<(i64,)> = crate::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .map_err(|e| match e {
+            crate::sql::ExecError::Driver(d) => d,
+            other => sqlx::Error::Protocol(other.to_string()),
+        })?;
+    Ok(rows.first().is_some_and(|(n,)| *n > 0))
+}
+
 /// SQLite's error for a non-constant DEFAULT added to a table with rows.
 pub(super) fn is_non_constant_default(e: &sqlx::Error) -> bool {
     e.as_database_error()

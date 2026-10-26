@@ -305,7 +305,8 @@ pub fn fk_constraint_name(table: &str, column: &str) -> String {
     clip(&name, 63).to_owned()
 }
 
-fn clip(s: &str, n: usize) -> &str {
+/// `s` cut to at most `n` bytes, on a char boundary.
+pub(crate) fn clip(s: &str, n: usize) -> &str {
     let mut n = n.min(s.len());
     while !s.is_char_boundary(n) {
         n -= 1;

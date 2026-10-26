@@ -364,6 +364,107 @@ async fn a_link_to_a_deleted_user_is_dropped(pool: &Pool) {
     assert!(linked_user(pool, &key, "sub-gone").await.unwrap().is_none());
 }
 
+/// Backdate a link, as one made for an earlier user with the same id.
+async fn age_link(pool: &Pool, subject: &str) {
+    use rustango::sql::UpdaterPool as _;
+    SsoLink::objects()
+        .filter("subject", subject.to_owned())
+        .update()
+        .set(
+            "created_at",
+            chrono::Utc::now() - chrono::TimeDelta::days(365),
+        )
+        .execute_pool(pool)
+        .await
+        .unwrap();
+}
+
+/// The stale-link policy is process-wide; the SQLite arm takes no live lock.
+fn policy_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// A link older than its account: by default it warns and still signs in
+/// (an imported `created_at` looks the same); with `StaleLinks::Drop` it is
+/// deleted and sign-in goes on as if unlinked.
+async fn a_link_older_than_its_account(pool: &Pool) {
+    use chrono::{TimeDelta, Utc};
+    use rustango::sso::link::{set_stale_links, StaleLinks};
+    let _g = policy_lock().lock().await;
+    let key = app_key();
+    let p = profile("sub-old", "new@example.com");
+    let reused = Account::new(42, false, true).with_created_at(Utc::now());
+
+    set_stale_links(StaleLinks::Warn);
+    create_link(pool, &key, "sub-old", 42).await.unwrap();
+    age_link(pool, "sub-old").await;
+    #[cfg(feature = "runtime")]
+    let logs = {
+        use tracing::instrument::WithSubscriber as _;
+        let buf = rustango::testkit::CaptureWriter::default();
+        let sink = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || sink.clone())
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let got = sign_in(pool, &key, false, &p, &One(Some(reused)))
+            .with_subscriber(subscriber)
+            .await;
+        assert_eq!(got.unwrap(), 42, "the default keeps signing in");
+        buf.contents()
+    };
+    #[cfg(not(feature = "runtime"))]
+    assert_eq!(
+        sign_in(pool, &key, false, &p, &One(Some(reused)))
+            .await
+            .unwrap(),
+        42
+    );
+    #[cfg(feature = "runtime")]
+    assert!(
+        logs.contains("older than its account") && logs.contains("42"),
+        "{logs}"
+    );
+    assert!(linked_user(pool, &key, "sub-old").await.unwrap().is_some());
+
+    set_stale_links(StaleLinks::Drop);
+    let dropped = sign_in(pool, &key, false, &p, &One(Some(reused))).await;
+    assert!(
+        matches!(dropped, Err(LinkRefusal::EmailLinkDisabled)),
+        "{dropped:?}"
+    );
+    assert!(linked_user(pool, &key, "sub-old").await.unwrap().is_none());
+
+    // A link made after its account still signs in.
+    create_link(pool, &key, "sub-new", 43).await.unwrap();
+    let older = Account::new(43, false, true).with_created_at(Utc::now() - TimeDelta::days(1));
+    let p2 = profile("sub-new", "x@example.com");
+    assert_eq!(
+        sign_in(pool, &key, false, &p2, &One(Some(older)))
+            .await
+            .unwrap(),
+        43
+    );
+
+    // The built-in tenant lookup passes the user's `created_at`.
+    // `rustango_users` outlives the run: a fresh name each time.
+    let name = format!("stale-{}", Utc::now().timestamp_micros());
+    let email = format!("{name}@example.com");
+    let uid = user(pool, &name, &email).await;
+    create_link(pool, &key, "sub-tenant", uid).await.unwrap();
+    age_link(pool, "sub-tenant").await;
+    let p3 = profile("sub-tenant", &email);
+    let got = find_or_provision_member(pool, &key, false, &p3, false).await;
+    set_stale_links(StaleLinks::Warn);
+    assert!(matches!(got, Ok(MemberSignIn::NotLinked)), "{got:?}");
+    assert!(linked_user(pool, &key, "sub-tenant")
+        .await
+        .unwrap()
+        .is_none());
+}
+
 async fn provider_changes_drop_links(pool: &Pool) {
     use rustango::sql::FetcherPool as _;
     let key_of = |slug: &'static str| async move {
@@ -601,6 +702,7 @@ tri_dialect_test!(
         a_concurrent_first_login_reuses_the_link,
         sign_in_rules,
         a_link_to_a_deleted_user_is_dropped,
+        a_link_older_than_its_account,
         provider_changes_drop_links,
         resolve_reads_row_secret_and_flag,
         a_table_without_the_flag_still_serves_logins,

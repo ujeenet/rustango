@@ -7923,12 +7923,32 @@ fn inherent_impl_tokens(
     });
 
     let has_pk_value_impl = primary_key.map(|(pk_ident, _)| {
+        let column_arms = fields.column_entries.iter().map(|entry| {
+            let col = &entry.column;
+            let ident = &entry.ident;
+            quote! {
+                #col => ::core::option::Option::Some(
+                    ::core::convert::Into::<#root::core::SqlValue>::into(
+                        ::core::clone::Clone::clone(&self.#ident)
+                    )
+                ),
+            }
+        });
         quote! {
             impl #root::sql::HasPkValue for #struct_name {
                 fn __rustango_pk_value_impl(&self) -> #root::core::SqlValue {
                     ::core::convert::Into::<#root::core::SqlValue>::into(
                         ::core::clone::Clone::clone(&self.#pk_ident)
                     )
+                }
+                fn __rustango_column_value(
+                    &self,
+                    column: &str,
+                ) -> ::core::option::Option<#root::core::SqlValue> {
+                    match column {
+                        #( #column_arms )*
+                        _ => ::core::option::Option::None,
+                    }
                 }
             }
         }
@@ -12566,6 +12586,18 @@ fn render_form_field_parse(
                 FormFieldKind::F64 => quote! { 0f64 },
                 _ => quote! { Default::default() },
             };
+            // NaN and inf parse, then pass every min/max compare.
+            let finite = if matches!(kind, FormFieldKind::F32 | FormFieldKind::F64) {
+                quote! {
+                    .and_then(|__n| if __n.is_finite() {
+                        ::core::result::Result::Ok(__n)
+                    } else {
+                        ::core::result::Result::Err(::std::string::String::from("not a finite number"))
+                    })
+                }
+            } else {
+                quote! {}
+            };
             if nullable {
                 quote! {
                     let __v: ::core::option::Option<#parse_ty> = match __raw {
@@ -12574,7 +12606,7 @@ fn render_form_field_parse(
                             ::core::option::Option::None
                         }
                         ::core::option::Option::Some(__s) => {
-                            match __s.parse::<#parse_ty>() {
+                            match __s.parse::<#parse_ty>().map_err(|__e| ::std::string::ToString::to_string(&__e)) #finite {
                                 ::core::result::Result::Ok(__n) => {
                                     ::core::option::Option::Some(__n)
                                 }
@@ -12593,7 +12625,7 @@ fn render_form_field_parse(
                 quote! {
                     let __v: #parse_ty = match __raw {
                         ::core::option::Option::Some(__s) if !__s.is_empty() => {
-                            match __s.parse::<#parse_ty>() {
+                            match __s.parse::<#parse_ty>().map_err(|__e| ::std::string::ToString::to_string(&__e)) #finite {
                                 ::core::result::Result::Ok(__n) => __n,
                                 ::core::result::Result::Err(__e) => {
                                     __errors.add(

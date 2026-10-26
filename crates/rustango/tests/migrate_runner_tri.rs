@@ -164,6 +164,195 @@ async fn referenced_key_widens(pool: &Pool) {
     }
 }
 
+/// Widening a key that a composite FK references, with its FK column.
+async fn composite_referenced_key_widens(pool: &Pool) {
+    let (a, b) = ("mr_wc_author", "mr_wc_book");
+    let ledger = "mr_wc_ledger";
+    let dir = fresh(pool, &[b, a], ledger).await;
+    let with = |ty: &str| {
+        let f = |name: &str, ty: &str, pk: bool| json!({"name": name, "column": name, "ty": ty, "nullable": false, "primary_key": pk});
+        let mut book = table(
+            b,
+            vec![
+                f("id", "i64", true),
+                f("author_id", ty, false),
+                f("region", "i64", false),
+            ],
+        );
+        book["composite_fks"] = json!([{"name": "author", "to": a,
+            "from": ["author_id", "region"], "on": ["id", "region"]}]);
+        let mut s = json!({"tables": [
+            table(a, vec![f("id", ty, true), f("region", "i64", false)]),
+            book,
+        ]});
+        s["indexes"] = json!([{"name": "mr_wc_author_key", "table": a,
+            "columns": ["id", "region"], "unique": true}]);
+        serde_json::from_value::<rustango::migrate::SchemaSnapshot>(s).expect("snapshot")
+    };
+    let step = |ty: &str| {
+        make_migrations_from(dir.path(), &with(ty), None)
+            .expect("makemigrations")
+            .expect("a migration")
+    };
+    step("i32");
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .expect("initial");
+    let d = pool.dialect();
+    let (qa, qb) = (d.quote_ident(a), d.quote_ident(b));
+    // A live FK the snapshot does not know comes back as it was.
+    let mysql = d.name() == "mysql";
+    if mysql {
+        exec(
+            pool,
+            &format!(
+                "ALTER TABLE {qb} ADD CONSTRAINT mr_wc_extra FOREIGN KEY (author_id, region) \
+                 REFERENCES {qa} (id, region) ON DELETE CASCADE"
+            ),
+        )
+        .await
+        .expect("extra FK");
+    }
+    let fks = fk_count(pool, b).await;
+    let widen = step("i64");
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("widening on {}: {e}", pool.dialect().name()));
+    assert_eq!(fk_count(pool, b).await, fks, "FKs kept on {}", d.name());
+    exec(
+        pool,
+        &format!("INSERT INTO {qa} (id, region) VALUES (3000000000, 1)"),
+    )
+    .await
+    .expect("the key is BIGINT");
+    exec(
+        pool,
+        &format!("INSERT INTO {qb} (id, author_id, region) VALUES (1, 3000000000, 1)"),
+    )
+    .await
+    .expect("the FK column is BIGINT");
+    assert!(
+        exec(
+            pool,
+            &format!("INSERT INTO {qb} (id, author_id, region) VALUES (2, 3000000000, 2)")
+        )
+        .await
+        .is_err(),
+        "the composite FK is back on {}",
+        d.name()
+    );
+    exec(pool, &format!("DELETE FROM {qb}")).await.unwrap();
+    exec(pool, &format!("DELETE FROM {qa}")).await.unwrap();
+    unapply_pool_with_ledger(pool, dir.path(), &widen.name, ledger)
+        .await
+        .unwrap_or_else(|e| panic!("narrowing on {}: {e}", d.name()));
+    assert_eq!(
+        fk_count(pool, b).await,
+        fks,
+        "FKs kept narrowing on {}",
+        d.name()
+    );
+    exec(
+        pool,
+        &format!("INSERT INTO {qa} (id, region) VALUES (5, 1)"),
+    )
+    .await
+    .expect("author");
+    assert!(
+        exec(
+            pool,
+            &format!("INSERT INTO {qb} (id, author_id, region) VALUES (3, 5, 2)")
+        )
+        .await
+        .is_err(),
+        "the composite FK survives the narrowing on {}",
+        d.name()
+    );
+    for t in [b, a, ledger] {
+        drop_table(pool, t).await;
+    }
+}
+
+/// Retyping an FK column, then the key it references, then renaming the
+/// column: the FK comes back once, after the key has its new type.
+async fn retyped_fk_waits_for_its_key_before_a_rename(pool: &Pool) {
+    let (p, c) = ("mr_rr_parent", "mr_rr_child");
+    let ledger = "mr_rr_ledger";
+    let dir = fresh(pool, &[c, p], ledger).await;
+    let with = |ty: &str, fk_col: &str| {
+        let key = json!({"name": "id", "column": "id", "ty": ty,
+            "nullable": false, "primary_key": true});
+        let fk = json!({"name": fk_col, "column": fk_col, "ty": ty, "nullable": false,
+            "primary_key": false, "fk": {"kind": "fk", "to": p, "on": "id"}});
+        let child_id = json!({"name": "id", "column": "id", "ty": "i64",
+            "nullable": false, "primary_key": true});
+        snap(vec![table(p, vec![key]), table(c, vec![child_id, fk])])
+    };
+    let initial = make_migrations_from(dir.path(), &with("i32", "a"), None)
+        .expect("makemigrations")
+        .expect("a migration");
+    let retype = |table: &str, column: &str| {
+        Operation::Schema(SchemaChange::AlterColumnType {
+            table: table.into(),
+            column: column.into(),
+            from: "i32".into(),
+            to: "i64".into(),
+        })
+    };
+    let mig = Migration {
+        name: "0002_retype_rename".into(),
+        prev: Some(initial.name.clone()),
+        snapshot: with("i64", "b"),
+        forward: vec![
+            retype(c, "a"),
+            retype(p, "id"),
+            Operation::Schema(SchemaChange::RenameColumn {
+                table: c.into(),
+                old_column: "a".into(),
+                new_column: "b".into(),
+            }),
+        ],
+        ..initial
+    };
+    write(dir.path(), &mig);
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("migrate on {}: {e}", pool.dialect().name()));
+    assert_eq!(
+        fk_count(pool, c).await,
+        1,
+        "one FK on {}",
+        pool.dialect().name()
+    );
+    let d = pool.dialect();
+    let (qp, qc) = (d.quote_ident(p), d.quote_ident(c));
+    exec(pool, &format!("INSERT INTO {qp} (id) VALUES (3000000000)"))
+        .await
+        .expect("the key is BIGINT");
+    exec(
+        pool,
+        &format!("INSERT INTO {qc} (id, b) VALUES (1, 3000000000)"),
+    )
+    .await
+    .expect("the FK column is BIGINT and named b");
+    assert!(
+        exec(pool, &format!("INSERT INTO {qc} (id, b) VALUES (2, 7)"))
+            .await
+            .is_err(),
+        "the FK is back on {}",
+        d.name()
+    );
+    exec(pool, &format!("DELETE FROM {qc}")).await.unwrap();
+    exec(pool, &format!("DELETE FROM {qp}")).await.unwrap();
+    unapply_pool_with_ledger(pool, dir.path(), &mig.name, ledger)
+        .await
+        .unwrap_or_else(|e| panic!("unapply on {}: {e}", d.name()));
+    assert_eq!(fk_count(pool, c).await, 1, "one FK after unapply");
+    for t in [c, p, ledger] {
+        drop_table(pool, t).await;
+    }
+}
+
 /// FKs on `t`, from the catalog.
 async fn fk_count(pool: &Pool, t: &str) -> i64 {
     let sql = match pool.dialect().name() {
@@ -739,6 +928,84 @@ async fn refused_downgrade(pool: &Pool, t: &str, atomic: bool) {
     }
 }
 
+/// A unique key over rows that repeat it is refused before any DDL, with
+/// the fix in the message; rows with a NULL in the key do not count.
+async fn unique_key_over_duplicates_is_refused(pool: &Pool) {
+    let t = "mr_uq_grant";
+    let ledger = "mr_uq_ledger";
+    let dir = fresh(pool, &[t], ledger).await;
+    let cols = || vec![id(), col("a", false), col("b", true)];
+    let initial = make_migrations_from(dir.path(), &snap(vec![table(t, cols())]), None)
+        .expect("makemigrations")
+        .expect("a migration");
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .expect("migrate");
+    let q = pool.dialect().quote_ident(t);
+    for (a, b) in [("1", "1"), ("1", "1"), ("2", "NULL"), ("2", "NULL")] {
+        exec(pool, &format!("INSERT INTO {q} (a, b) VALUES ({a}, {b})"))
+            .await
+            .unwrap();
+    }
+    let with_key = serde_json::from_value(json!({
+        "tables": [table(t, cols())],
+        "indexes": [{"name": "mr_uq_grant_ab", "table": t, "columns": ["a", "b"], "unique": true}],
+    }))
+    .expect("snapshot");
+    let mig = Migration {
+        name: "0002_unique".into(),
+        prev: Some(initial.name.clone()),
+        snapshot: with_key,
+        forward: vec![Operation::Schema(SchemaChange::CreateIndex {
+            name: "mr_uq_grant_ab".into(),
+            table: t.into(),
+            columns: vec!["a".into(), "b".into()],
+            unique: true,
+            method: "btree".into(),
+            where_clause: None,
+            include: Vec::new(),
+        })],
+        ..initial
+    };
+    write(dir.path(), &mig);
+    let err = migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .expect_err("duplicates refuse the key");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("mr_uq_grant_ab") && msg.contains("Remove the extra rows"),
+        "{} said: {msg}",
+        pool.dialect().name()
+    );
+    // The query in the message runs as given and finds the repeated key.
+    let find = msg
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("SELECT"))
+        .expect("a query");
+    let dups: Vec<(i64, i64, i64)> = rustango::sql::raw_query_pool(find, Vec::new(), pool)
+        .await
+        .unwrap_or_else(|e| panic!("{find} on {}: {e}", pool.dialect().name()));
+    assert_eq!(dups, vec![(1, 1, 2)], "{find}");
+    exec(pool, &format!("DELETE FROM {q} WHERE id = 2"))
+        .await
+        .unwrap();
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "NULLs do not block the key on {}: {e}",
+                pool.dialect().name()
+            )
+        });
+    assert!(exec(pool, &format!("INSERT INTO {q} (a, b) VALUES (1, 1)"))
+        .await
+        .is_err());
+    for d in [t, ledger] {
+        drop_table(pool, d).await;
+    }
+}
+
 /// The URL of `pool`'s server, or a fresh SQLite file.
 fn url_of(pool: &Pool, file: &std::path::Path) -> String {
     match pool.dialect().name() {
@@ -944,14 +1211,17 @@ tri_dialect_test!(
     scenarios: [
         long_index_names_apply,
         referenced_key_widens,
+        composite_referenced_key_widens,
         referenced_key_widens_beside_new_fks,
         referenced_key_widens_its_junction,
+        retyped_fk_waits_for_its_key_before_a_rename,
         rollback_after_rename_restores_check_and_partial_index,
         rollback_of_a_renamed_dropped_table_restores_its_check_once,
         unapplying_one_branch_keeps_the_others_column,
         applying_a_branch_keeps_the_others_column,
         refused_downgrade_runs_nothing,
         refused_loose_downgrade_runs_nothing,
+        unique_key_over_duplicates_is_refused,
         one_connection_pool_migrates,
         concurrent_runs_apply_once,
     ]
