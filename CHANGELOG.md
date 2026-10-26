@@ -10,6 +10,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `StaticFiles::user_content` (and `with_uploads`) serves `.js`, `.mjs`, `.css` and `.wasm` as an `application/octet-stream` attachment, so a page on the app origin cannot load an uploaded script or stylesheet.
 - Media: `purge_pending` keeps rows younger than one hour whatever `older_than` says, and `begin_upload` caps its URL at one hour, so a live upload URL cannot land an object after its row is gone. `purge_orphans` (and its dry run) handles at most 10 000 rows per call.
 - `CsvResponse::filename` replaces control characters with `_`; one used to drop the whole `Content-Disposition` header.
+- Logging: `RUST_LOG` reads `warning` / `critical` / `fatal` as levels too, as `[logging] level` already did; a bare `warning` used to silence every event.
+- `TracingLayer` records at most 512 bytes of `User-Agent` on the request span.
 
 ### Fixed — migrations, MySQL and MariaDB
 

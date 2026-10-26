@@ -168,16 +168,21 @@ where
     }
 }
 
+/// Longest `user_agent.original` the span records, in bytes.
+const MAX_USER_AGENT_LEN: usize = 512;
+
 fn build_request_span(req: &Request<Body>, redact: &[String]) -> tracing::Span {
     let method = req.method().as_str();
     let path = req.uri().path();
     let query = req.uri().query().unwrap_or_default();
     let proto = http_version_str(req.version());
+    // Client-sized: cut it so it cannot bloat every event under the span.
+    // `to_str` is visible ASCII only, so any byte index is a char boundary.
     let user_agent = req
         .headers()
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+        .map_or("", |ua| &ua[..ua.len().min(MAX_USER_AGENT_LEN)]);
 
     let span = info_span!(
         "http.request",
@@ -509,5 +514,32 @@ mod tests {
             out.contains("page=2"),
             "a non-credential query param must survive:\n{out}"
         );
+    }
+
+    /// A client-sized User-Agent is cut, so one request cannot bloat every
+    /// log line under its span.
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn the_span_bounds_the_user_agent() {
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let ua = "A".repeat(8_000);
+        tracing::subscriber::with_default(subscriber, || {
+            let req = Request::builder()
+                .uri("/")
+                .header(header::USER_AGENT, ua.as_str())
+                .body(Body::empty())
+                .unwrap();
+            let span = build_request_span(&req, &[]);
+            let _e = span.enter();
+            tracing::info!("handled");
+        });
+        let out = buf.contents();
+        assert!(out.contains("user_agent.original"), "{out}");
+        assert!(out.contains(&"A".repeat(100)), "{out}");
+        assert!(out.len() < 2_000, "UA not bounded: {} bytes", out.len());
     }
 }
