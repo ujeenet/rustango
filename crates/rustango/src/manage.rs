@@ -1195,19 +1195,7 @@ impl Cli {
         #[cfg(feature = "config")]
         let settings = self.settings_for_layers.as_ref();
         #[cfg(feature = "config")]
-        let (api, outer) = apply_settings_layers_or_warn(api, settings);
-        // Outside the timeout and body limit so their 408/413 are dressed,
-        // inside the security headers so the page gets the CSP nonce.
-        #[cfg(all(feature = "config", feature = "template_views"))]
-        let api = match settings.and_then(crate::errors::ErrorPagesLayer::from_settings) {
-            Some(layer) => {
-                use crate::errors::ErrorPagesRouterExt as _;
-                api.error_pages(layer)
-            }
-            None => api,
-        };
-        #[cfg(feature = "config")]
-        let api = wrap_outer((api, outer));
+        let api = dress_errors(apply_settings_layers_or_warn(api, settings), settings);
         let api = self.mount_observability(api);
         let api = match self.real_ip.clone() {
             Some(layer) => {
@@ -1942,6 +1930,28 @@ fn wrap_outer((app, outer): (Router, Option<OuterLayers>)) -> Router {
         Some(o) => o.apply(app),
         None => app,
     }
+}
+
+/// [`wrap_outer`] with the `[errors]` pages between the settings layers
+/// and the outer ones: outside the timeout and body limit so their
+/// 408/413 are dressed, inside the security headers so the page gets
+/// the CSP nonce.
+#[cfg(feature = "config")]
+fn dress_errors(
+    (app, outer): (Router, Option<OuterLayers>),
+    settings: Option<&crate::config::Settings>,
+) -> Router {
+    #[cfg(feature = "template_views")]
+    let app = match settings.and_then(crate::errors::ErrorPagesLayer::from_settings) {
+        Some(layer) => {
+            use crate::errors::ErrorPagesRouterExt as _;
+            app.error_pages(layer)
+        }
+        None => app,
+    };
+    #[cfg(not(feature = "template_views"))]
+    let _ = settings;
+    wrap_outer((app, outer))
 }
 
 #[cfg(feature = "config")]
