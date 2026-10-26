@@ -271,15 +271,13 @@ mod tests {
     #[test]
     fn credential_owner_is_superuser_only() {
         for table in ["rustango_api_keys", "rustango_agents"] {
-            assert_eq!(
-                superuser_fields(table, AdminWrite::Change),
-                ["user_id"],
-                "{table}"
-            );
-            assert!(
-                superuser_fields(table, AdminWrite::Add).is_empty(),
-                "{table}"
-            );
+            for action in [AdminWrite::Add, AdminWrite::Change] {
+                assert_eq!(
+                    superuser_fields(table, action),
+                    ["user_id"],
+                    "{table} {action:?}"
+                );
+            }
         }
     }
 

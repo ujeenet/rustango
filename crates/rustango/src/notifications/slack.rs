@@ -13,7 +13,10 @@
 //! The callback POSTs `{"text": "..."}` to the configured webhook URL.
 //! Payload shape:
 //!
-//! - If `serde_json::Value` is a plain string, it's sent as `{"text": value}`.
+//! - If `serde_json::Value` is a plain string, it's sent as `{"text": value}`
+//!   with `&`, `<` and `>` escaped, so it is shown as typed. To keep
+//!   mentions and links, send `json!({"text": "<!here> <https://x|Docs>"})`
+//!   or `blocks` instead.
 //! - Otherwise the value is sent through unchanged (lets apps build
 //!   richer Slack `blocks` / attachments by passing a full JSON
 //!   object).
@@ -102,11 +105,19 @@ async fn send(req: reqwest::RequestBuilder, value: Value) -> Result<(), String> 
 
 /// Wrap a bare string as Slack's `{"text": "..."}` envelope; pass
 /// through anything else (`{"blocks": [...]}` etc.) unchanged.
+/// The string is escaped, so `<!channel>` or `<url|label>` stay literal.
 fn build_payload(value: Value) -> Value {
     match value {
-        Value::String(s) => serde_json::json!({ "text": s }),
+        Value::String(s) => serde_json::json!({ "text": escape_text(&s) }),
         other => other,
     }
+}
+
+/// Slack's three control characters, per its text-formatting rules.
+fn escape_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(test)]
@@ -130,6 +141,16 @@ mod tests {
     fn string_value_wraps_into_text_envelope() {
         let v = build_payload(json!("hello world"));
         assert_eq!(v, json!({ "text": "hello world" }));
+    }
+
+    /// Plain text cannot ping a channel or disguise a link.
+    #[test]
+    fn string_value_escapes_slack_control_characters() {
+        let v = build_payload(json!("<!channel> <https://x.test|Invoice> a&b"));
+        assert_eq!(
+            v,
+            json!({ "text": "&lt;!channel&gt; &lt;https://x.test|Invoice&gt; a&amp;b" })
+        );
     }
 
     #[test]

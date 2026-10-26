@@ -150,6 +150,18 @@ untouched.
 
 ## Unreleased
 
+### `[cache] backend` should be a known lowercase name
+
+Use `memory`, `null` / `none`, `file` (with `file_cache_dir`), `redis` or `db`. Anything else now logs an `error` from both resolvers and still falls back to an in-memory cache. A later minor release will refuse it.
+
+### Slack plain strings are sent literally
+
+A string payload no longer renders Slack markup such as `<@U123>` or `<url|label>`. Send a JSON object (`{"text": …}` or `blocks`) to keep markup; objects pass through unchanged.
+
+### Access-log query redaction is word-based
+
+`redact_query_params` entries now match any key containing them as words (`client_secret` also hides `x-client-secret`), long names also match inside joined keys (`accesstoken`), and the defaults are wider. Logs may show `[redacted]` for keys like `sort_key`, `zip_code` or `tokenizer` that were visible before.
+
 ## 0.61.2
 
 ### SQLite: JSON column equality compares values

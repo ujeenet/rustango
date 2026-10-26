@@ -4,6 +4,26 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed — unknown `cache.backend` values are logged as errors
+
+`cache::from_settings` logs an `error` naming an unknown or mis-cased backend (`Redis`, a typo), or `file` without `file_cache_dir`, then falls back to an in-memory cache as before; `from_settings_async` does the same. A later minor release will refuse them.
+
+### Fixed — `time` is no longer capped below 0.3.48
+
+Apps can resolve `time` 0.3.49 and 0.3.51+ again (the yanked 0.3.48 / 0.3.50 are skipped); the floor is now 0.3.47, and `rand` 0.8.6, to keep pre-advisory releases out.
+
+### Changed — Slack plain-text notifications are escaped
+
+Behaviour change: a plain string sent through `slack::webhook_callback` has `&`, `<` and `>` escaped, so message content cannot ping a channel or disguise a link. To keep mentions and links, send an object: `json!({"text": "<!here> …"})` or `blocks`.
+
+### Fixed — access-log and span query redaction matches by word
+
+A query key is redacted when its words contain a listed name, or, for long names, when the joined-up key contains it. So `X-Api-Key`, `reset_token`, `user[password]`, `password2`, `JSESSIONID` and `oauth_client_secret` are hidden too; the defaults also cover `key`, `jwt`, `otp`, `sig`, `ssn` and `sessionid`. MCP audit uses the same matcher, and names are split once per layer.
+
+### Fixed — API key and agent owners are superuser-only on create
+
+A non-superuser can no longer choose `user_id` when creating an API key or MCP agent through a ViewSet or `ModelForm`; it was locked on edit only. A ViewSet create that sets a locked NOT NULL field is now a `403`.
+
 ## [0.61.2] — 2026-10-26
 
 ### Fixed — migrations, MySQL and MariaDB
