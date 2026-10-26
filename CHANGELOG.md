@@ -17,6 +17,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - A bulk ViewSet create's serializer validation error names the failing entry (`bulk entry N: invalid input`).
 - Formsets and admin inlines read their rows in one pass over the form keys; a POST with many keys no longer costs keys times rows.
 - `signals::clear_all` also removes `m2m_changed` and admin receivers, so they no longer leak across tests; the `Observer` example compiles.
+- Two operators deactivating each other at once can no longer leave zero active operators: `operators::set_active` locks the active rows and deactivates in one transaction.
 
 ## [0.61.2] — 2026-10-26
 
