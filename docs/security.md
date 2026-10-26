@@ -90,6 +90,8 @@ let csp = CspBuilder::new()
 let layer = SecurityHeadersLayer::strict().csp(csp);
 ```
 
+The built-in [error pages](html-views.md#error-pages) put the same nonce on their inline style, so they pass this policy.
+
 ### Staged CSP rollout
 
 Use `csp_report_only` to monitor without breaking production:

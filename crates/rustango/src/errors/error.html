@@ -1,0 +1,48 @@
+{# Built-in error page: self-contained, theme tokens shared with the admin. #}
+<!doctype html>
+<html lang="en" data-theme="{{ theme_mode }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{{ code }} · {{ title }}{% if brand_name %} · {{ brand_name }}{% endif %}</title>
+{% include "_theme_tokens.html" %}
+{% if brand_css %}<style nonce="{{ csp_nonce }}">:root { {{ brand_css | safe }} }</style>{% endif %}
+<style nonce="{{ csp_nonce }}">
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  padding: var(--space-4); background: var(--color-bg); color: var(--color-fg);
+  font-family: var(--font-family-base); font-size: var(--font-size-base); line-height: var(--line-height-base);
+}
+main {
+  width: min(100%, 460px); background: var(--color-bg-surface); border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-md); padding: var(--space-6); text-align: center;
+}
+.brand { display: flex; align-items: center; justify-content: center; gap: var(--space-2); margin: 0 0 var(--space-5); color: var(--color-accent); font-weight: var(--font-weight-bold); }
+.brand img { height: 32px; width: auto; max-width: 100%; object-fit: contain; }
+.code { margin: 0; font-size: 3.5rem; font-weight: var(--font-weight-bold); line-height: 1; color: var(--color-accent); }
+h1 { margin: var(--space-4) 0 var(--space-2); font-size: 1.4rem; }
+.message { margin: 0 auto; color: var(--color-fg-muted); overflow-wrap: anywhere; }
+.actions { margin: var(--space-5) 0 0; }
+.actions a {
+  display: inline-block; padding: var(--space-2) var(--space-4); border-radius: var(--radius-md);
+  background: var(--color-accent); color: var(--color-fg-on-accent); text-decoration: none;
+}
+.actions a:hover, .actions a:focus-visible { background: var(--color-accent-hover); }
+.actions a:focus-visible { outline: 2px solid var(--color-fg); outline-offset: 2px; }
+.meta { margin: var(--space-5) 0 0; font-size: var(--font-size-sm); color: var(--color-fg-subtle); overflow-wrap: anywhere; }
+.meta code { font-family: var(--font-family-mono); }
+</style>
+</head>
+<body>
+<main aria-labelledby="error-title">
+  {% if brand_logo_url or brand_name %}<p class="brand">{% if brand_logo_url %}<img src="{{ brand_logo_url }}" alt="">{% endif %}{% if brand_name %}<span>{{ brand_name }}</span>{% endif %}</p>{% endif %}
+  <p class="code" aria-hidden="true">{{ code }}</p>
+  <h1 id="error-title">{{ title }}</h1>
+  <p class="message">{{ message }}</p>
+  <p class="actions"><a href="/">Go to the home page</a></p>
+  <p class="meta">Error {{ code }}{% if path %} · <code>{{ path }}</code>{% endif %}</p>
+</main>
+</body>
+</html>

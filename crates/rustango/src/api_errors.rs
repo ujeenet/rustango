@@ -153,8 +153,13 @@ impl ApiError {
     /// limiter sends it.
     #[must_use]
     pub fn rate_limited_response(message: impl Into<String>, retry_after_secs: u64) -> Response {
-        let mut resp = Self::rate_limited(message)
-            .with_details(json!({ "retry_after": retry_after_secs }))
+        let message = message.into();
+        // The words let an error page dress this JSON for a browser.
+        let words = crate::errors::Message::new(message.clone());
+        let mut resp = (
+            words,
+            Self::rate_limited(message).with_details(json!({ "retry_after": retry_after_secs })),
+        )
             .into_response();
         resp.headers_mut()
             .insert(axum::http::header::RETRY_AFTER, retry_after_secs.into());

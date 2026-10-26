@@ -80,6 +80,31 @@ impl<'a> MountedTenantContext<'a> {
         None
     }
 
+    /// Copy every tenant context mounted on `ext` into `out`, so a later
+    /// lookup on `out` picks the same one as on `ext`.
+    #[cfg(feature = "template_views")]
+    pub(crate) fn copy_all(ext: &Extensions, out: &mut Extensions) {
+        macro_rules! copy {
+            ($ctx:ty) => {
+                if let Some(c) = ext.get::<Arc<$ctx>>() {
+                    out.insert(c.clone());
+                }
+            };
+        }
+        #[cfg(feature = "postgres")]
+        copy!(TenantContext<sqlx::Postgres>);
+        #[cfg(feature = "sqlite")]
+        copy!(TenantContext<sqlx::Sqlite>);
+        #[cfg(feature = "mysql")]
+        copy!(TenantContext<sqlx::MySql>);
+        #[cfg(feature = "postgres")]
+        copy!(DatabaseTenantContext<sqlx::Postgres>);
+        #[cfg(feature = "sqlite")]
+        copy!(DatabaseTenantContext<sqlx::Sqlite>);
+        #[cfg(feature = "mysql")]
+        copy!(DatabaseTenantContext<sqlx::MySql>);
+    }
+
     fn erased(self) -> &'a dyn Any {
         each!(self, |c| full => c as &dyn Any, db => c as &dyn Any)
     }
