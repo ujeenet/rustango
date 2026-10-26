@@ -424,6 +424,9 @@ eingebauten Seiten werden verwendet.
 | `HEAD` | Unverändert |
 | Eine mit `rustango::errors::KeepBody` markierte Antwort | Unverändert |
 
+**Auch ein `text/html`-Fehler-Body wird ersetzt**, außer die Antwort ist mit
+`KeepBody` markiert: markiere jede HTML-Fehlerseite, die du selbst baust.
+
 Ersetzt werden nur Text-Bodies (`text/plain`, `text/html`, keiner) und JSON mit
 Meldung; Bilder und andere Typen gehen durch. Eine ersetzte Antwort behält
 Status und Header (auch `Retry-After`) und bekommt `Vary: Accept, HX-Request`.
@@ -481,7 +484,7 @@ Kontext:
 | `path` | Der Request-Pfad |
 | `user` | `{ username, is_superuser }` des angemeldeten Tenant-Nutzers, oder null |
 | `username`, `is_superuser` | Dasselbe, flach |
-| `csrf_token`, `csrf_input` | Ein CSRF-Token und sein Hidden-Input; das Cookie reist mit der Antwort |
+| `csrf_token`, `csrf_input` | Ein CSRF-Token und sein Hidden-Input, unter dem Cookie-Namen deines CSRF-Layers. Das Cookie wird nur gesetzt, wenn das Template sie nutzt |
 | `csp_nonce` | Der CSP-Nonce dieser Anfrage, oder `""` |
 | `brand_name`, `brand_logo_url`, `brand_css`, `theme_mode` | Aus `[brand]` |
 

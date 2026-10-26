@@ -11,6 +11,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `rustango::errors::ErrorPagesLayer` dresses 4xx/5xx as a page (browser), a fragment with `HX-Retarget` (htmx) or leaves the body (other clients); JSON, `HEAD` and `KeepBody` responses pass through. Off by default.
 - Overrides `errors/{code}.html` → `errors/{4|5}xx.html` → `errors/default.html` → a built-in page in the admin's look with `[brand]`; enable via `Builder::error_pages`, `AppBuilder::error_pages` or `[errors] enabled = true`.
 - `errors::Message` (response extension), `PageError` and `errors::not_found`; 5xx text stays hidden unless `RUSTANGO_DISCLOSE_ERRORS`. Admin denials, the body-limit 413 and 429s carry a `Message`.
+- Error pages set a CSRF cookie only when the template uses the token, under the CSRF layer's own cookie name, reusing a cookie the response already sets; every 4xx/5xx gets `Vary: Accept, HX-Request`.
 
 ### Added — ORM
 

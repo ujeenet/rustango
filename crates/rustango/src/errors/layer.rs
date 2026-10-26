@@ -167,9 +167,11 @@ enum Asker {
     Other,
 }
 
-/// What a page needs from the request: headers, URI and a few `Arc`s,
-/// never the whole extension map. Kept only for HTML and htmx requests.
+/// What a page needs from the request: path, headers, URI and a few
+/// `Arc`s, never the whole extension map. Kept only for HTML and htmx
+/// requests. `csrf` is the fallback when no CSRF layer runs inside.
 struct Kept {
+    path: String,
     headers: HeaderMap,
     csrf: crate::forms::csrf::CsrfCookieSpec,
     nonce: String,
@@ -184,6 +186,7 @@ impl Kept {
         #[cfg(not(feature = "tenancy"))]
         let _ = asker;
         Self {
+            path: req.uri().path().to_owned(),
             headers: req.headers().clone(),
             csrf: crate::forms::csrf::CsrfCookieSpec::active(req.extensions()),
             nonce: request_nonce(req.extensions()),
@@ -215,14 +218,16 @@ async fn handle(cfg: &ErrorPagesLayer, req: Request<Body>, next: Next) -> Respon
     } else {
         Asker::Other
     };
-    let path = req.uri().path().to_owned();
     let kept = (asker != Asker::Other).then(|| Kept::of(&req, asker));
 
-    let res = next.run(req).await;
+    let mut res = next.run(req).await;
     let status = res.status();
-    if !(status.is_client_error() || status.is_server_error())
-        || res.extensions().get::<KeepBody>().is_some()
-    {
+    if !(status.is_client_error() || status.is_server_error()) {
+        return res;
+    }
+    // Who asked picks the body, so caches must key on it, passthroughs too.
+    add_vary(res.headers_mut());
+    if res.extensions().get::<KeepBody>().is_some() {
         return res;
     }
     let content_type = res
@@ -277,26 +282,29 @@ async fn handle(cfg: &ErrorPagesLayer, req: Request<Body>, next: Next) -> Respon
     ctx.insert("code", &status.as_u16());
     ctx.insert("title", title);
     ctx.insert("message", &message);
-    ctx.insert("path", &path);
+    ctx.insert("path", &kept.path);
     ctx.insert("csp_nonce", &kept.nonce);
     ctx.insert("brand_name", &cfg.brand_name);
     ctx.insert("brand_logo_url", &cfg.brand_logo_url);
     ctx.insert("brand_css", &cfg.brand_css);
     ctx.insert("theme_mode", cfg.theme_mode);
-    let set_cookie =
-        crate::forms::csrf::stamp_cookie_into_context(&kept.headers, &kept.csrf, &mut ctx);
-    if let Some(c) = set_cookie.and_then(|c| HeaderValue::from_str(&c).ok()) {
-        parts.headers.append(header::SET_COOKIE, c);
-    }
-    let html = if asker == Asker::Browser {
-        insert_user(cfg, kept, &mut ctx).await;
+    // The CSRF layer this response came through names the cookie; it ran
+    // after `Kept::of`, so the request could not say.
+    let csrf = crate::forms::csrf::CsrfCookieSpec::on_response(&parts.extensions)
+        .unwrap_or_else(|| kept.csrf.clone());
+    let response_headers = parts.headers.clone();
+    let mut stamp = |ctx: &mut Context| {
+        crate::forms::csrf::stamp_onto_response(&kept.headers, &response_headers, &csrf, ctx)
+    };
+    let (html, set_cookie) = if asker == Asker::Browser {
+        insert_user(cfg, &kept, &mut ctx).await;
         let code = status.as_u16();
         let names = [
             format!("errors/{code}.html"),
             format!("errors/{}xx.html", code / 100),
             "errors/default.html".to_owned(),
         ];
-        render(cfg, &names, "error.html", &ctx)
+        render(cfg, &names, "error.html", &ctx, &mut stamp)
     } else {
         insert_no_user(&mut ctx);
         if let Some(target) = cfg
@@ -314,8 +322,12 @@ async fn handle(cfg: &ErrorPagesLayer, req: Request<Body>, next: Next) -> Respon
             &["errors/partial.html".to_owned()],
             "partial.html",
             &ctx,
+            &mut stamp,
         )
     };
+    if let Some(c) = set_cookie.and_then(|c| HeaderValue::from_str(&c).ok()) {
+        parts.headers.append(header::SET_COOKIE, c);
+    }
     let (content_type, body) = match html {
         Some(html) => ("text/html; charset=utf-8", html),
         None => ("text/plain; charset=utf-8", message),
@@ -324,11 +336,37 @@ async fn handle(cfg: &ErrorPagesLayer, req: Request<Body>, next: Next) -> Respon
     Response::from_parts(parts, Body::from(body))
 }
 
+/// The old body's length, encoding, validators and range go with it.
 fn set_body_headers(headers: &mut HeaderMap, content_type: &'static str) {
-    headers.remove(header::CONTENT_LENGTH);
-    headers.remove(header::CONTENT_ENCODING);
+    for h in [
+        header::CONTENT_LENGTH,
+        header::CONTENT_ENCODING,
+        header::ETAG,
+        header::LAST_MODIFIED,
+        header::CONTENT_RANGE,
+    ] {
+        headers.remove(h);
+    }
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    headers.append(header::VARY, HeaderValue::from_static("Accept, HX-Request"));
+}
+
+/// Add `Accept` and `HX-Request` to `Vary`, keeping the tokens already there.
+fn add_vary(headers: &mut HeaderMap) {
+    let present: Vec<String> = headers
+        .get_all(header::VARY)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(|t| t.trim().to_ascii_lowercase())
+        .collect();
+    if present.iter().any(|t| t == "*") {
+        return;
+    }
+    for name in ["Accept", "HX-Request"] {
+        if !present.iter().any(|t| t.eq_ignore_ascii_case(name)) {
+            headers.append(header::VARY, HeaderValue::from_static(name));
+        }
+    }
 }
 
 fn accepts_html(headers: &HeaderMap) -> bool {
@@ -358,12 +396,12 @@ fn insert_no_user(ctx: &mut Context) {
 }
 
 #[cfg(feature = "tenancy")]
-async fn insert_user(cfg: &ErrorPagesLayer, kept: Kept, ctx: &mut Context) {
+async fn insert_user(cfg: &ErrorPagesLayer, kept: &Kept, ctx: &mut Context) {
     use axum::extract::FromRequestParts as _;
     let mut req = Request::new(());
-    *req.headers_mut() = kept.headers;
-    *req.uri_mut() = kept.uri;
-    *req.extensions_mut() = kept.tenant;
+    *req.headers_mut() = kept.headers.clone();
+    *req.uri_mut() = kept.uri.clone();
+    *req.extensions_mut() = kept.tenant.clone();
     if req.extensions().is_empty() {
         req.extensions_mut().extend(cfg.user_context.clone());
     }
@@ -382,21 +420,34 @@ async fn insert_user(cfg: &ErrorPagesLayer, kept: Kept, ctx: &mut Context) {
 }
 
 #[cfg(not(feature = "tenancy"))]
-async fn insert_user(_cfg: &ErrorPagesLayer, _kept: Kept, ctx: &mut Context) {
+async fn insert_user(_cfg: &ErrorPagesLayer, _kept: &Kept, ctx: &mut Context) {
     insert_no_user(ctx);
 }
 
-/// The first app template in `names` that exists, else `builtin`. A
-/// failed app render falls back to the built-in one; `None` only when
-/// that fails too.
-fn render(cfg: &ErrorPagesLayer, names: &[String], builtin: &str, ctx: &Context) -> Option<String> {
+/// The first app template in `names` that exists, else `builtin`, and
+/// the CSRF `Set-Cookie` it needs. `stamp` runs only for a template that
+/// fails without `csrf_token` / `csrf_input`, so a page with no form sets
+/// no cookie; the built-in pages have none. A failed app render falls back
+/// to the built-in one; `None` only when that fails too.
+fn render(
+    cfg: &ErrorPagesLayer,
+    names: &[String],
+    builtin: &str,
+    ctx: &Context,
+    stamp: &mut dyn FnMut(&mut Context) -> Option<String>,
+) -> (Option<String>, Option<String>) {
     if let Some(tera) = &cfg.templates {
         if let Some(name) = names
             .iter()
             .find(|n| tera.get_template_names().any(|t| t == n.as_str()))
         {
-            match tera.render(name, ctx) {
-                Ok(html) => return Some(html),
+            if let Ok(html) = tera.render(name, ctx) {
+                return (Some(html), None);
+            }
+            let mut with_csrf = ctx.clone();
+            let set_cookie = stamp(&mut with_csrf);
+            match tera.render(name, &with_csrf) {
+                Ok(html) => return (Some(html), set_cookie),
                 Err(e) => tracing::error!(
                     target: "rustango::errors",
                     template = %name,
@@ -406,12 +457,13 @@ fn render(cfg: &ErrorPagesLayer, names: &[String], builtin: &str, ctx: &Context)
             }
         }
     }
-    builtin_tera()
+    let html = builtin_tera()
         .render(builtin, ctx)
         .map_err(|e| {
             tracing::error!(target: "rustango::errors", error = ?e, "built-in error page failed to render");
         })
-        .ok()
+        .ok();
+    (html, None)
 }
 
 fn builtin_tera() -> &'static Tera {
@@ -841,5 +893,157 @@ mod tests {
         let got = call(app, get_req("/nowhere", "text/html", false)).await;
         assert_eq!(got.status, StatusCode::NOT_FOUND);
         assert!(got.body.is_empty());
+    }
+
+    fn set_cookies(h: &HeaderMap) -> Vec<String> {
+        h.get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// An app CSRF layer with its own cookie name, inside the error pages.
+    fn csrf_app() -> Router {
+        let csrf = crate::forms::csrf::with_config(crate::forms::csrf::CsrfConfig {
+            cookie_name: "app_csrf".into(),
+            secure: false,
+            ..Default::default()
+        });
+        Router::new()
+            .route("/form", axum::routing::post(|| async { "saved" }))
+            .fallback(not_found)
+            .layer(csrf)
+            .error_pages(
+                ErrorPagesLayer::new()
+                    .templates(tera(&[("errors/default.html", "token={{ csrf_token }}")])),
+            )
+    }
+
+    /// The page's token and the one cookie agree, under the app's name.
+    fn one_app_cookie(got: &Got) {
+        let cookies = set_cookies(&got.headers);
+        assert_eq!(cookies.len(), 1, "{cookies:?}");
+        let value = cookies[0]
+            .strip_prefix("app_csrf=")
+            .expect("app's cookie name");
+        let value = value.split(';').next().unwrap();
+        assert_eq!(got.body, format!("token={value}"));
+    }
+
+    #[tokio::test]
+    async fn a_csrf_403_sets_one_cookie_under_the_apps_name() {
+        let req = Request::post("/form")
+            .header(header::ACCEPT, "text/html")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("a=b"))
+            .unwrap();
+        let got = call(csrf_app(), req).await;
+        assert_eq!(got.status, StatusCode::FORBIDDEN);
+        one_app_cookie(&got);
+    }
+
+    /// The CSRF layer seeds its cookie on the 404; the page reuses that token.
+    #[tokio::test]
+    async fn a_page_behind_the_csrf_layer_reuses_its_cookie() {
+        let got = call(csrf_app(), get_req("/nowhere", "text/html", false)).await;
+        assert_eq!(got.status, StatusCode::NOT_FOUND);
+        one_app_cookie(&got);
+    }
+
+    /// A first visit's built-in 404 has no form, so it sets no cookie.
+    #[tokio::test]
+    async fn the_built_in_page_sets_no_csrf_cookie() {
+        let got = call(
+            app(ErrorPagesLayer::new()),
+            get_req("/nowhere", "text/html", false),
+        )
+        .await;
+        assert!(set_cookies(&got.headers).is_empty(), "{:?}", got.headers);
+        let partial = call(
+            app(ErrorPagesLayer::new()),
+            get_req("/nowhere", "*/*", true),
+        )
+        .await;
+        assert!(set_cookies(&partial.headers).is_empty());
+    }
+
+    /// A template without a form sets no cookie either.
+    #[tokio::test]
+    async fn a_template_without_csrf_sets_no_cookie() {
+        let layer =
+            ErrorPagesLayer::new().templates(tera(&[("errors/default.html", "plain {{ code }}")]));
+        let got = call(app(layer), get_req("/nowhere", "text/html", false)).await;
+        assert_eq!(got.body, "plain 404");
+        assert!(set_cookies(&got.headers).is_empty());
+    }
+
+    /// Every inspected error varies on Accept/HX-Request, passthroughs too,
+    /// merged with the handler's own Vary.
+    #[tokio::test]
+    async fn errors_vary_on_accept_and_hx_request() {
+        let app = Router::new()
+            .route(
+                "/json",
+                get(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        [(header::VARY, "Origin")],
+                        axum::Json(json!({"e": 1})),
+                    )
+                }),
+            )
+            .fallback(not_found)
+            .error_pages(ErrorPagesLayer::new());
+        for path in ["/json", "/nowhere"] {
+            let got = call(app.clone(), get_req(path, "application/json", false)).await;
+            let vary: Vec<String> = got
+                .headers
+                .get_all(header::VARY)
+                .iter()
+                .flat_map(|v| {
+                    v.to_str()
+                        .unwrap()
+                        .split(',')
+                        .map(|t| t.trim().to_ascii_lowercase())
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            for want in ["accept", "hx-request"] {
+                assert_eq!(
+                    vary.iter().filter(|t| *t == want).count(),
+                    1,
+                    "{path}: {vary:?}"
+                );
+            }
+            if path == "/json" {
+                assert!(vary.contains(&"origin".to_owned()), "{vary:?}");
+            }
+        }
+    }
+
+    /// A replaced body drops the validators and range of the old one.
+    #[tokio::test]
+    async fn a_replaced_body_drops_etag_last_modified_and_range() {
+        let app = Router::new()
+            .route(
+                "/gone",
+                get(|| async {
+                    (
+                        StatusCode::NOT_FOUND,
+                        [
+                            (header::ETAG, "\"abc\""),
+                            (header::LAST_MODIFIED, "Wed, 21 Oct 2015 07:28:00 GMT"),
+                            (header::CONTENT_RANGE, "bytes 0-1/2"),
+                        ],
+                        "gone",
+                    )
+                }),
+            )
+            .error_pages(ErrorPagesLayer::new());
+        let got = call(app, get_req("/gone", "text/html", false)).await;
+        assert!(got.body.contains("<!doctype html>"));
+        for h in [header::ETAG, header::LAST_MODIFIED, header::CONTENT_RANGE] {
+            assert!(got.headers.get(&h).is_none(), "{h} kept");
+        }
     }
 }
