@@ -1103,6 +1103,15 @@ pub fn config_default_toml(name: &str, backend: Backend) -> String {
 # hsts_max_age_secs    = 31536000     # 1 year
 # cors_allowed_origins = []
 
+[errors]
+# Styled 4xx/5xx pages for browsers, htmx fragments, plain text for other
+# clients; JSON responses are never touched. Uses [brand] for the look.
+# Override any page with templates/errors/404.html, errors/5xx.html or
+# errors/default.html.
+enabled = true
+# templates   = "templates"    # template root holding errors/*.html
+# htmx_target = "#flash"       # where htmx error fragments are swapped in
+
 # [routes]
 # legacy_preset = false
 # # Per-field overrides: login_url / admin_url / audit_url / static_url /
