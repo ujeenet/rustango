@@ -4034,6 +4034,144 @@ async fn create_then_drop_in_one_file_is_refused(pool: &Pool) {
     }
 }
 
+/// A hand-ordered `[DropIndex, DropCompositeFk]`, the FK served only by that
+/// index: MySQL refused the index drop (1553), so the FK now comes off first.
+async fn composite_fk_drop_after_its_index(pool: &Pool) {
+    let (a, b) = ("mad_cx_author", "mad_cx_book");
+    let chain = Chain::new(pool, "cx", &[b, a]).await;
+    let with = |linked: bool| {
+        let mut book = table(
+            b,
+            vec![
+                id(),
+                col("author_id", "i64", json!({})),
+                col("code", "i64", json!({})),
+            ],
+        );
+        let mut idx = vec![json!({"name": "mad_cx_author_id_code", "table": a,
+                                  "columns": ["id", "code"], "unique": true})];
+        if linked {
+            book["composite_fks"] = json!([{"name": "mad_cx_fk", "to": a,
+                "from": ["author_id", "code"], "on": ["id", "code"]}]);
+            idx.push(json!({"name": "mad_cx_book_ac_idx", "table": b,
+                            "columns": ["author_id", "code"], "unique": false}));
+        }
+        json!({"tables": [table(a, vec![id(), col("code", "i64", json!({}))]), book],
+               "indexes": idx})
+    };
+    chain.step(pool, with(true)).await.expect("initial");
+    chain
+        .hand(
+            pool,
+            with(false),
+            vec![
+                SchemaChange::DropIndex {
+                    name: "mad_cx_book_ac_idx".into(),
+                    table: b.into(),
+                },
+                SchemaChange::DropCompositeFk {
+                    table: b.into(),
+                    name: "mad_cx_fk".into(),
+                },
+            ],
+            None,
+        )
+        .await
+        .expect("the index and its composite FK drop");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (1, 99, 1)",
+        &[b, "id", "author_id", "code"],
+    )
+    .await
+    .expect("the composite FK is gone");
+}
+
+/// A renamed FK column, then a new FK column under the old name: MySQL's
+/// implicit index for the first FK must not hold the old name (1061).
+async fn fk_column_rename_frees_the_old_name(pool: &Pool) {
+    let (a, b) = ("mad_fo_author", "mad_fo_book");
+    let chain = Chain::new(pool, "fo", &[b, a]).await;
+    let with = |fields: Vec<Value>| json!({"tables": [table(a, vec![id()]), table(b, fields)]});
+    chain
+        .step(pool, with(vec![id(), col("author_id", "i64", fk(a))]))
+        .await
+        .expect("initial");
+    chain
+        .hand(
+            pool,
+            with(vec![id(), col("writer_id", "i64", fk(a))]),
+            vec![SchemaChange::RenameColumn {
+                table: b.into(),
+                old_column: "author_id".into(),
+                new_column: "writer_id".into(),
+            }],
+            None,
+        )
+        .await
+        .expect("RenameColumn");
+    chain
+        .step(
+            pool,
+            with(vec![
+                id(),
+                col("writer_id", "i64", fk(a)),
+                col("author_id", "i64", fk(a)),
+            ]),
+        )
+        .await
+        .expect("a new FK column under the old name");
+    orphan_refused(pool, b, "author_id").await;
+    orphan_refused(pool, b, "writer_id").await;
+}
+
+/// A dropped NOT NULL column with no default comes back on an empty table;
+/// with rows its unapply is still refused.
+async fn not_null_drop_unapplies_on_an_empty_table(pool: &Pool) {
+    not_null_drop_unapplies(pool, "mad_ne_item", true).await;
+}
+
+/// As above through the non-atomic runners.
+async fn not_null_drop_unapplies_without_a_transaction(pool: &Pool) {
+    not_null_drop_unapplies(pool, "mad_nen_item", false).await;
+}
+
+async fn not_null_drop_unapplies(pool: &Pool, t: &str, atomic: bool) {
+    let chain = Chain::new(pool, t, &[t]).await;
+    let n = col("n", "i32", json!({"nullable": false}));
+    chain
+        .step(pool, json!({"tables": [table(t, vec![id(), n])]}))
+        .await
+        .expect("initial");
+    let dropped = chain
+        .step_with(pool, json!({"tables": [table(t, vec![id()])]}), atomic)
+        .await
+        .expect("DropColumn");
+    chain
+        .undo(pool, &dropped)
+        .await
+        .expect("an empty table takes the column back");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 5)",
+        &[t, "id", "n"],
+    )
+    .await
+    .expect("the column is back");
+    assert!(
+        exec(pool, "INSERT INTO {} ({}) VALUES (2)", &[t, "id"])
+            .await
+            .is_err(),
+        "the column is NOT NULL again"
+    );
+    chain.migrate(pool).await.expect("the drop again");
+    let err = chain
+        .undo(pool, &dropped)
+        .await
+        .expect_err("rows have no value for the column");
+    assert!(err.contains("NOT NULL"), "{err}");
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
@@ -4116,5 +4254,9 @@ tri_dialect_test!(
         edited_exclude_is_replaced,
         not_null_with_default_backfills,
         dry_run_follows_a_squash,
+        composite_fk_drop_after_its_index,
+        fk_column_rename_frees_the_old_name,
+        not_null_drop_unapplies_on_an_empty_table,
+        not_null_drop_unapplies_without_a_transaction,
     ]
 );

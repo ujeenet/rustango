@@ -44,6 +44,16 @@ pub struct MigPost {
     author_id: i64,
 }
 
+/// `unique_together`, which `apply_all` did not create.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "mig_pair", unique_together = "a, b")]
+pub struct MigPair {
+    #[rustango(primary_key)]
+    id: rustango::Auto<i64>,
+    a: i64,
+    b: i64,
+}
+
 fn live_lock() -> &'static Mutex<()> {
     static M: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
     M.get_or_init(|| Mutex::new(()))
@@ -182,6 +192,29 @@ async fn varchar_length_is_enforced_by_db() {
         "expected length violation, got: {result:?}"
     );
 
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+/// The bootstrap walk creates `unique_together` indexes too, so an
+/// `ON CONFLICT` on them has its target.
+#[tokio::test]
+async fn apply_all_creates_unique_together() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+    let pair = || MigPair {
+        id: Auto::Unset,
+        a: 1,
+        b: 2,
+    };
+    pair().insert(&pool).await.expect("first row");
+    assert!(
+        pair().insert(&pool).await.is_err(),
+        "apply_all left `unique_together` out"
+    );
     migrate::drop_all(&pool).await.unwrap();
 }
 
