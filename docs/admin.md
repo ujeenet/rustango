@@ -493,6 +493,8 @@ read_only_tables = ["orders"]
 | `csrf_cookie_secure` | | | No effect yet; the CSRF cookie follows `[security] secure_cookies` |
 | `session_timeout_minutes` | | | No effect yet; the admin has no idle timeout |
 
+`[brand]` also styles the built-in error pages, which `[errors]` turns on; see [Error pages](html-views.md#error-pages).
+
 `[brand] primary_color` does not tint this admin either; it is for the
 [operator console](operator-console.md#branding). The session cookie is
 `Secure` unless `[security] secure_cookies = false`.

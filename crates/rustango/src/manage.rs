@@ -1195,7 +1195,19 @@ impl Cli {
         #[cfg(feature = "config")]
         let settings = self.settings_for_layers.as_ref();
         #[cfg(feature = "config")]
-        let api = wrap_outer(apply_settings_layers_or_warn(api, settings));
+        let (api, outer) = apply_settings_layers_or_warn(api, settings);
+        // Outside the timeout and body limit so their 408/413 are dressed,
+        // inside the security headers so the page gets the CSP nonce.
+        #[cfg(all(feature = "config", feature = "template_views"))]
+        let api = match settings.and_then(crate::errors::ErrorPagesLayer::from_settings) {
+            Some(layer) => {
+                use crate::errors::ErrorPagesRouterExt as _;
+                api.error_pages(layer)
+            }
+            None => api,
+        };
+        #[cfg(feature = "config")]
+        let api = wrap_outer((api, outer));
         let api = self.mount_observability(api);
         let api = match self.real_ip.clone() {
             Some(layer) => {
@@ -1234,6 +1246,14 @@ impl Cli {
             .and_then(|s| crate::body_limit::BodyLimitLayer::from_settings(&s.server))
         {
             builder = builder.body_limit(layer);
+        }
+        #[cfg(all(feature = "config", feature = "template_views"))]
+        if let Some(layer) = self
+            .settings_for_layers
+            .as_ref()
+            .and_then(crate::errors::ErrorPagesLayer::from_settings)
+        {
+            builder = builder.error_pages(layer);
         }
         match outer {
             Some(o) => o.apply_to(builder),

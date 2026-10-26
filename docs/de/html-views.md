@@ -37,6 +37,7 @@ Die einzelnen View-Typen (`ListView`, `DetailView`, `CreateView`, `UpdateView`,
 - [TemplateView und RedirectView](#templateview-und-redirectview)
 - [Single-Tenant vs Multi-Tenant](#single-tenant-vs-multi-tenant)
 - [Ein Modell auf beide Arten ausliefern](#ein-modell-auf-beide-arten-ausliefern)
+- [Fehlerseiten](#fehlerseiten)
 - [Siehe auch](#siehe-auch)
 
 ---
@@ -362,6 +363,199 @@ Jetzt gibt `GET /api/posts` die paginierte JSON-Hülle zurück und `GET /posts`
 gibt eine gerenderte HTML-Liste zurück — dieselben Zeilen, derselbe Pool, zwei Formen. Genau dieses
 Setup ist es, was der [zugrunde liegende Test](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/html_and_api_contrast_sqlite_live.rs)
 behauptet.
+
+---
+
+## Fehlerseiten
+
+Ein Layer macht aus jedem 4xx/5xx deiner App eine Seite für Menschen und lässt
+API-Clients in Ruhe. Er ist **standardmäßig aus**; nichts ändert sich, bis du
+ihn einschaltest. Braucht das Feature `template_views`.
+
+### Einschalten
+
+Auf dem Multi-Tenant-Server umschließt der Layer alles: deine API, den
+Tenant-Login, den Tenant-Admin, die Operator-Konsole und die eigenen Layer des
+Frameworks.
+
+```rust
+use std::sync::Arc;
+use rustango::errors::ErrorPagesLayer;
+
+let tera = Arc::new(rustango::template_extensions::html_tera_from_glob("templates/**/*.html")?);
+let app = rustango::server::Builder::from_env().await?
+    .api(my_app::urls::api())
+    .error_pages(ErrorPagesLayer::new().templates(tera));
+```
+
+`AppBuilder::error_pages` macht dasselbe für eine Single-Pool-App. Auf einem
+eigenen Router hängst du ihn mit `ErrorPagesRouterExt` an und ergänzt den
+404-Fallback:
+
+```rust
+use rustango::errors::{ErrorPagesLayer, ErrorPagesRouterExt as _};
+
+let app = Router::new()
+    .route("/projects", get(projects))
+    .fallback(rustango::errors::not_found)
+    .error_pages(ErrorPagesLayer::new().templates(tera.clone()));
+```
+
+Mit `Cli` und einer Config-Datei nimmst du stattdessen den Abschnitt `[errors]`:
+
+```toml
+[errors]
+enabled = true            # default false
+templates = "templates"   # template root holding errors/404.html etc.; default "templates"
+htmx_target = "#flash"    # HX-Retarget for htmx errors; default "#flash", "" sends none
+```
+
+Ein `templates`-Verzeichnis, das fehlt oder nicht parst, wird geloggt, und die
+eingebauten Seiten werden verwendet.
+
+### Was jeder Client bekommt
+
+| Anfrage | Antwort |
+|---|---|
+| Browser-Navigation (`Accept: text/html`, kein `HX-Request`) | Vollständige HTML-Seite |
+| htmx (`HX-Request`) | HTML-Fragment, plus `HX-Retarget: <htmx_target>` und `HX-Reswap: innerHTML show:window:top` |
+| Jeder andere Client (`fetch`, curl) | Body unverändert; ein leerer Body bekommt die Meldung als Klartext |
+| JSON / problem+json | Unverändert, außer es trägt eine `Message` und ein Browser oder htmx fragt |
+| `HEAD` | Unverändert |
+| Eine mit `rustango::errors::KeepBody` markierte Antwort | Unverändert |
+
+Ersetzt werden nur Text-Bodies (`text/plain`, `text/html`, keiner) und JSON mit
+Meldung; Bilder und andere Typen gehen durch. Eine ersetzte Antwort behält
+Status und Header (auch `Retry-After`) und bekommt `Vary: Accept, HX-Request`.
+
+### Templates
+
+Das erste Template, das in deinem Tera existiert, gewinnt:
+
+1. `errors/<code>.html`, z. B. `errors/404.html`
+2. `errors/4xx.html` oder `errors/5xx.html`
+3. `errors/default.html`
+4. die eingebaute Seite
+
+htmx-Fragmente nutzen `errors/partial.html`, dann das eingebaute Fragment. Ein
+Template, das beim Rendern scheitert, wird geloggt und die eingebaute Seite
+verwendet; eine Fehlerseite kommt nie leer zurück.
+
+`templates/errors/404.html`:
+
+```html
+{% extends "base.html" %}
+{% block content %}
+<section class="error">
+  <h1>{{ code }} · {{ title }}</h1>
+  <p>{{ message }}</p>
+  <p>Nothing at <code>{{ path }}</code>.</p>
+  {% if user %}<p>Signed in as {{ user.username }}.</p>{% endif %}
+  <a href="/">Back to the start</a>
+</section>
+{% endblock content %}
+```
+
+`templates/errors/5xx.html`:
+
+```html
+{% extends "base.html" %}
+{% block content %}
+<section class="error">
+  <h1>{{ title }}</h1>
+  <p>{{ message }}</p>
+  <form method="post" action="/feedback">{{ csrf_input | safe }}
+    <button>Tell us what you were doing</button>
+  </form>
+</section>
+{% endblock content %}
+```
+
+Kontext:
+
+| Schlüssel | Wert |
+|---|---|
+| `code` | Der Status, z. B. `404` |
+| `title` | Ein kurzer Titel pro Status („Not found") |
+| `message` | Was schiefging, für den Nutzer (siehe unten) |
+| `path` | Der Request-Pfad |
+| `user` | `{ username, is_superuser }` des angemeldeten Tenant-Nutzers, oder null |
+| `username`, `is_superuser` | Dasselbe, flach |
+| `csrf_token`, `csrf_input` | Ein CSRF-Token und sein Hidden-Input; das Cookie reist mit der Antwort |
+| `csp_nonce` | Der CSP-Nonce dieser Anfrage, oder `""` |
+| `brand_name`, `brand_logo_url`, `brand_css`, `theme_mode` | Aus `[brand]` |
+
+`user` braucht das Feature `tenancy` und einen Tenant-Host; sonst ist es null.
+Templates gelten pro App: jeder Tenant bekommt dieselben.
+
+### Die eingebaute Seite
+
+Eigenständiges HTML: kein CDN, kein Script, Inline-CSS mit dem CSP-Nonce der
+Anfrage, die Theme-Tokens des Admins (hell und dunkel). Mit `[errors]` in den
+Settings zeigt sie `[brand] name` und `logo_url`; `primary_color` und
+`theme_mode` setzen die Farben (sie brauchen das Feature `tenancy`, dessen
+Brand-Code wiederverwendet wird). `ErrorPagesLayer::brand(&settings.brand)`
+macht dasselbe im Code.
+
+### Die Meldung
+
+Ein Handler gibt der Seite Worte mit `rustango::errors::Message`, einer
+Response-Extension, oder mit `PageError`, das eine trägt:
+
+```rust
+use rustango::errors::{Message, PageError};
+
+async fn project(Path(slug): Path<String>) -> Result<Html<String>, PageError> {
+    let project = find_project(&slug)
+        .await
+        .map_err(PageError::server)?            // logged; the page says something generic
+        .ok_or_else(|| PageError::not_found("No project with that name."))?;
+    Ok(Html(render_project(&project)))
+}
+
+async fn archived() -> impl IntoResponse {
+    (StatusCode::GONE, Message::new("This project was archived."))
+}
+```
+
+Ohne `Message` ist ein 4xx-`text/plain`-Body bis 2 KiB die Meldung (axums
+Rejections, der CSRF-Check), sonst der Standardtext des Status. Der erste
+Buchstabe wird großgeschrieben.
+
+Ein 5xx zeigt nie seine Ursache: Die Seite nutzt den generischen Text, und
+`PageError::server(e)` loggt `e` und sendet denselben undurchsichtigen Body wie
+jedes andere 5xx. Nur wenn `RUSTANGO_DISCLOSE_ERRORS` gesetzt ist, zeigt eine
+5xx-Seite ihre Meldung oder ihren Body — dieselbe Regel wie für jeden 5xx-Body
+im Framework.
+
+### Was abgedeckt ist
+
+Über `Builder::error_pages` (oder `[errors]`) eingehängt, sitzt der Layer
+innerhalb der Security-Header und außerhalb von allem anderen, er ersetzt also:
+
+- unbekannte Pfade und unbekannte Hosts (404) sowie 405;
+- das 500 des Panic-Guards;
+- das 403 des CSRF-Layers, mit seinem Grund;
+- die Gates `login_required_or_401` / `*_or_403` (401, 403);
+- Body-Limit (413), Request-Timeout (504), Rate-Limit und Login-Throttle (429);
+- axums Rejections (400, 415, 422);
+- die Ablehnungen und 404 des Tenant-Admins sowie unbekannte Pfade der Operator-Konsole.
+
+Seiten mit eigenen Bedienelementen behalten ihr Aussehen: die Admin-Seite
+„admin access required" (sie hat ein Abmelde-Formular) und die Seite „table not
+migrated". Markiere eigene Antworten mit `KeepBody`, um dasselbe zu tun.
+
+### Umstieg von einer selbst geschriebenen Fehler-Middleware
+
+Eine App mit eigener `error_pages`-Middleware kann löschen:
+
+- die Middleware (`from_fn(error_pages)`) und ihr `.fallback(not_found)`;
+- ihre Titel/Meldungs-Tabelle: `rustango::errors::error_words` ist dieselbe Tabelle;
+- ihre private Meldungs-Extension: gib `PageError` oder `Message` zurück;
+- das Klonen von Headern/Extensions, um CSRF zu stempeln und den Nutzer zu finden.
+
+Behalte `templates/error.html` als `templates/errors/default.html` und den
+htmx-Alert als `templates/errors/partial.html`; die Kontext-Schlüssel sind dieselben.
 
 ---
 

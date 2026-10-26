@@ -1038,9 +1038,8 @@ fn forbidden_page(session: &AdminSession, logout_path: &str) -> Response {
          </form>\
          </body></html>"
     );
-    let mut resp = Html(body).into_response();
-    *resp.status_mut() = StatusCode::FORBIDDEN;
-    resp
+    // Its sign-out form beats a generic error page.
+    (StatusCode::FORBIDDEN, crate::errors::KeepBody, Html(body)).into_response()
 }
 
 fn read_session_cookie(

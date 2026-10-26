@@ -66,6 +66,9 @@ pub struct Settings {
     /// `storage::StorageRegistry::from_settings` reads it.
     pub storage: StorageSettings,
 
+    /// `[errors]`: HTML error pages. Off unless `enabled = true`.
+    pub errors: ErrorsSettings,
+
     /// `[sso]`: **has no effect yet** — nothing reads it (#1379).
     /// Configure admin SSO in the admin UI instead.
     pub sso: SsoSettings,
@@ -733,6 +736,26 @@ pub struct BrandSettings {
     /// operator console and the plain admin read it; the tenant admin
     /// uses `Org.theme_mode` instead.
     pub theme_mode: Option<String>,
+}
+
+/// `[errors]`: HTML pages for 4xx/5xx responses. Read by `Cli` and
+/// `rustango::errors::ErrorPagesLayer::from_settings`.
+///
+/// ```toml
+/// [errors]
+/// enabled = true             # default false
+/// templates = "templates"    # template root holding errors/404.html etc.
+/// htmx_target = "#flash"     # HX-Retarget for htmx errors; "" sends none
+/// ```
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ErrorsSettings {
+    /// Turn the error pages on. Default `false`.
+    pub enabled: Option<bool>,
+    /// Template root searched for `errors/*.html`. Default `"templates"`.
+    pub templates: Option<String>,
+    /// CSS selector htmx errors are swapped into. Default `"#flash"`.
+    pub htmx_target: Option<String>,
 }
 
 /// Security headers, CSP and CORS. The defaults match

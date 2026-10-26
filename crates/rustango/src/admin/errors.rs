@@ -169,9 +169,10 @@ impl From<crate::sql::ExecError> for AdminError {
 impl IntoResponse for AdminError {
     fn into_response(self) -> Response {
         match self {
-            Self::TableNotFound { table } => ApiError::not_found("table not found")
-                .with_details(json!({ "table": table }))
-                .into_response(),
+            Self::TableNotFound { table } => page_message(
+                "No such table in the admin.",
+                ApiError::not_found("table not found").with_details(json!({ "table": table })),
+            ),
             Self::TableMissing { table } => {
                 let body = format!(
                     r##"<!doctype html>
@@ -195,19 +196,33 @@ applied yet for this tenant / database.</p>
                     table = html_escape(&table),
                     nonce = crate::csp_nonce::nonce_attr(),
                 );
-                (StatusCode::SERVICE_UNAVAILABLE, Html(body)).into_response()
+                // Its migrate hint beats a generic error page.
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    crate::errors::KeepBody,
+                    Html(body),
+                )
+                    .into_response()
             }
-            Self::RowNotFound { table, pk } => ApiError::not_found("row not found")
-                .with_details(json!({ "table": table, "pk": pk }))
-                .into_response(),
-            Self::ReadOnly { table } => ApiError::forbidden("table is read-only")
-                .with_details(json!({ "table": table }))
-                .into_response(),
-            Self::Forbidden { table, action } => ApiError::forbidden("permission denied")
-                .with_details(json!({ "table": table, "action": action }))
-                .into_response(),
+            Self::RowNotFound { table, pk } => page_message(
+                "This record doesn't exist, or it was deleted.",
+                ApiError::not_found("row not found")
+                    .with_details(json!({ "table": table, "pk": pk })),
+            ),
+            Self::ReadOnly { table } => page_message(
+                "This table is read-only in the admin.",
+                ApiError::forbidden("table is read-only").with_details(json!({ "table": table })),
+            ),
+            Self::Forbidden { table, action } => page_message(
+                "You don't have permission for this. Ask an admin for a role that includes it.",
+                ApiError::forbidden("permission denied")
+                    .with_details(json!({ "table": table, "action": action })),
+            ),
             // Mostly an unparseable pk in the URL: a bad request.
-            Self::Form(e) => ApiError::bad_request(e.to_string()).into_response(),
+            Self::Form(e) => {
+                let text = e.to_string();
+                page_message(&text, ApiError::bad_request(text.clone()))
+            }
             Self::Internal(msg) => {
                 // Log the raw message for the operator and return a
                 // generic body. The raw text can hold table names,
@@ -221,6 +236,11 @@ applied yet for this tenant / database.</p>
             }
         }
     }
+}
+
+/// The JSON body, plus words for an error page to show a browser.
+fn page_message(message: &str, body: ApiError) -> Response {
+    (crate::errors::Message::new(message), body).into_response()
 }
 
 /// Short id put in both the log line and the client response, so an

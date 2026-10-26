@@ -152,6 +152,10 @@ untouched.
 
 ## 0.61.6
 
+### Error pages (opt-in)
+
+New `rustango::errors` and `[errors]` settings; nothing changes until you enable them. `Settings` has a new public `errors` field, so a `Settings { .. }` literal without `..Default::default()` stops compiling.
+
 ### Jobs: unregistered in-memory jobs are dead-lettered
 
 `InMemoryJobQueue` now passes a job with no registered handler to `on_dead_letter` (error `no handler registered`, 0 attempts). It was dropped before; the DB queue is unchanged.

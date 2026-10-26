@@ -114,6 +114,9 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     real_ip: Option<crate::real_ip::RealIpLayer>,
     /// Opt-in `X-Org`-style fallback after the host resolvers (#1856).
     header_resolver: Option<HeaderResolver>,
+    /// Wraps both Host branches, inside the security headers.
+    #[cfg(feature = "template_views")]
+    error_pages: Option<crate::errors::ErrorPagesLayer>,
     _phantom: PhantomData<DB>,
 }
 
@@ -194,8 +197,20 @@ impl<DB: Database> Builder<DB> {
             #[cfg(feature = "_http_layers")]
             real_ip: None,
             header_resolver: None,
+            #[cfg(feature = "template_views")]
+            error_pages: None,
             _phantom: PhantomData,
         }
+    }
+
+    /// Dress every 4xx/5xx with an error page: the api, login, tenant
+    /// admin and console denials, unknown paths, unknown hosts and the
+    /// framework layers (panics, body limit, CSRF, timeouts). Off by default.
+    #[cfg(feature = "template_views")]
+    #[must_use]
+    pub fn error_pages(mut self, layer: crate::errors::ErrorPagesLayer) -> Self {
+        self.error_pages = Some(layer);
+        self
     }
 
     /// Send these security headers on every response, the tenant
@@ -1002,6 +1017,17 @@ impl<DB: Database> Builder<DB> {
 
         // Inside the security headers, so a panic's 500 carries them (#1541).
         let app = crate::panic_guard::catch_panics(app);
+        // Outside the panic guard so its 500 is dressed; inside the CSP
+        // nonce, so the page's inline style carries it.
+        #[cfg(feature = "template_views")]
+        let app = match self.error_pages {
+            Some(mut layer) => {
+                use crate::errors::ErrorPagesRouterExt as _;
+                layer.user_context.insert(ctx.clone());
+                app.error_pages(layer)
+            }
+            None => app,
+        };
         #[cfg(feature = "admin")]
         let app = match self.security_headers {
             Some(layer) => {
@@ -1362,6 +1388,96 @@ pub(crate) mod resolver_tests {
         let opted = Builder::<sqlx::Sqlite>::from_pool(sq.clone(), url, "localhost")
             .header_resolver(HeaderResolver::default());
         assert_eq!(x_org_pick(&opted, &sq).await.as_deref(), Some("acme"));
+    }
+
+    /// One request through a Builder router; status and body.
+    #[cfg(feature = "template_views")]
+    async fn send(app: &Router, req: axum::http::Request<axum::body::Body>) -> (u16, String) {
+        let res = app.clone().oneshot(req).await.unwrap();
+        let status = res.status().as_u16();
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    #[cfg(feature = "template_views")]
+    fn html(method: &str, host: &str, path: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", host)
+            .header("accept", "text/html")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(axum::body::Body::from("username=a&password=b"))
+            .unwrap()
+    }
+
+    /// Mounted outermost, the error pages dress what the framework makes:
+    /// unknown paths and hosts, the login's CSRF 403 and a panic.
+    #[cfg(feature = "template_views")]
+    #[tokio::test]
+    async fn builder_error_pages_dress_framework_errors() {
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = registry().await;
+        let api = Router::new().route(
+            "/boom",
+            axum::routing::get(|| async {
+                if std::hint::black_box(true) {
+                    panic!("boom password=hunter2");
+                }
+                "unreachable"
+            }),
+        );
+        let app = Builder::<sqlx::Sqlite>::from_pool(sq, url, "localhost")
+            .api(api)
+            .error_pages(crate::errors::ErrorPagesLayer::new())
+            .into_router()
+            .await
+            .unwrap();
+        let page = |body: &str| body.contains("<!doctype html>");
+
+        let (status, body) = send(&app, html("GET", "localhost", "/nowhere")).await;
+        assert_eq!(status, 404);
+        assert!(
+            page(&body) && body.contains("&#x2F;nowhere"),
+            "apex: {body}"
+        );
+
+        let (status, body) = send(&app, html("GET", "ghost.localhost", "/nowhere")).await;
+        assert_eq!(status, 404);
+        assert!(page(&body), "unknown host: {body}");
+
+        let (status, body) = send(&app, html("POST", "acme.localhost", "/login")).await;
+        assert_eq!(status, 403);
+        assert!(
+            page(&body) && body.contains("CSRF token missing or mismatched"),
+            "csrf: {body}"
+        );
+
+        let (status, body) = send(&app, html("GET", "acme.localhost", "/boom")).await;
+        assert_eq!(status, 500);
+        assert!(page(&body) && !body.contains("hunter2"), "panic: {body}");
+    }
+
+    /// Off by default: the same 404 and 403 keep their old bodies.
+    #[cfg(feature = "template_views")]
+    #[tokio::test]
+    async fn without_error_pages_the_builder_is_unchanged() {
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = registry().await;
+        let app = Builder::<sqlx::Sqlite>::from_pool(sq, url, "localhost")
+            .api(Router::new())
+            .into_router()
+            .await
+            .unwrap();
+        let (status, body) = send(&app, html("GET", "acme.localhost", "/nowhere")).await;
+        assert_eq!((status, body.as_str()), (404, ""));
+        let (status, body) = send(&app, html("POST", "acme.localhost", "/login")).await;
+        assert_eq!(
+            (status, body.as_str()),
+            (403, "CSRF token missing or mismatched")
+        );
     }
 
     /// #1856 — handlers see the port the listener accepted on.
