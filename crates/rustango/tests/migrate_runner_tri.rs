@@ -353,6 +353,77 @@ async fn retyped_fk_waits_for_its_key_before_a_rename(pool: &Pool) {
     }
 }
 
+/// Retyping an FK column, then its key, then renaming the table: the FK
+/// comes back after the key has its new type (MySQL error 3780 otherwise).
+async fn retyped_fk_waits_for_its_key_before_a_table_rename(pool: &Pool) {
+    let (p, c, k) = ("mr_rt_parent", "mr_rt_child", "mr_rt_kid");
+    let ledger = "mr_rt_ledger";
+    let dir = fresh(pool, &[k, c, p], ledger).await;
+    let with = |ty: &str, child: &str| {
+        let key = json!({"name": "id", "column": "id", "ty": ty,
+            "nullable": false, "primary_key": true});
+        let fk = json!({"name": "a", "column": "a", "ty": ty, "nullable": false,
+            "primary_key": false, "fk": {"kind": "fk", "to": p, "on": "id"}});
+        let child_id = json!({"name": "id", "column": "id", "ty": "i64",
+            "nullable": false, "primary_key": true});
+        snap(vec![table(p, vec![key]), table(child, vec![child_id, fk])])
+    };
+    let initial = make_migrations_from(dir.path(), &with("i32", c), None)
+        .expect("makemigrations")
+        .expect("a migration");
+    let retype = |table: &str, column: &str| {
+        Operation::Schema(SchemaChange::AlterColumnType {
+            table: table.into(),
+            column: column.into(),
+            from: "i32".into(),
+            to: "i64".into(),
+        })
+    };
+    let mig = Migration {
+        name: "0002_retype_rename_table".into(),
+        prev: Some(initial.name.clone()),
+        snapshot: with("i64", k),
+        forward: vec![
+            retype(c, "a"),
+            retype(p, "id"),
+            Operation::Schema(SchemaChange::RenameTable {
+                old_name: c.into(),
+                new_name: k.into(),
+            }),
+        ],
+        ..initial
+    };
+    write(dir.path(), &mig);
+    let d = pool.dialect();
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("migrate on {}: {e}", d.name()));
+    assert_eq!(fk_count(pool, k).await, 1, "one FK on {}", d.name());
+    let (qp, qk) = (d.quote_ident(p), d.quote_ident(k));
+    exec(pool, &format!("INSERT INTO {qp} (id) VALUES (3000000000)"))
+        .await
+        .expect("the key is BIGINT");
+    exec(pool, &format!("INSERT INTO {qk} (id, a) VALUES (1, 3000000000)"))
+        .await
+        .expect("the FK column is BIGINT");
+    assert!(
+        exec(pool, &format!("INSERT INTO {qk} (id, a) VALUES (2, 7)"))
+            .await
+            .is_err(),
+        "the FK is back on {}",
+        d.name()
+    );
+    exec(pool, &format!("DELETE FROM {qk}")).await.unwrap();
+    exec(pool, &format!("DELETE FROM {qp}")).await.unwrap();
+    unapply_pool_with_ledger(pool, dir.path(), &mig.name, ledger)
+        .await
+        .unwrap_or_else(|e| panic!("unapply on {}: {e}", d.name()));
+    assert_eq!(fk_count(pool, c).await, 1, "one FK after unapply");
+    for t in [k, c, p, ledger] {
+        drop_table(pool, t).await;
+    }
+}
+
 /// FKs on `t`, from the catalog.
 async fn fk_count(pool: &Pool, t: &str) -> i64 {
     let sql = match pool.dialect().name() {
@@ -1215,6 +1286,7 @@ tri_dialect_test!(
         referenced_key_widens_beside_new_fks,
         referenced_key_widens_its_junction,
         retyped_fk_waits_for_its_key_before_a_rename,
+        retyped_fk_waits_for_its_key_before_a_table_rename,
         rollback_after_rename_restores_check_and_partial_index,
         rollback_of_a_renamed_dropped_table_restores_its_check_once,
         unapplying_one_branch_keeps_the_others_column,

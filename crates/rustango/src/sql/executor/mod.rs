@@ -2454,7 +2454,7 @@ where
 }
 
 mod prefetch;
-pub use prefetch::{fetch_with_prefetch_filtered, fetch_with_prefetch_pool};
+pub use prefetch::{__reverse_fk_key, fetch_with_prefetch_filtered, fetch_with_prefetch_pool};
 
 /// [`select_rows_pool`] that also decodes `select_related` joins.
 /// With no joins it takes the same fast path. With joins it fetches

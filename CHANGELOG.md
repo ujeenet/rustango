@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — ORM and migrations
+
+- MySQL: a migration that retypes an FK column, then the key it references, then renames the column's table no longer fails with error 3780; the FK comes back at the end, on the new table name.
+- `<parent>::<child>_set` / `_set_pool` match children on the column the FK points at (`on = "code"`); they read the parent's PK and found none.
+- `filter("data__contains", …)` on a JSON column works: a string matches the JSON text, as `Model::data.contains(…)`; a `SqlValue::Json` value is a containment test, as `json_contains`. Both were refused.
+
 ## [0.61.3] — 2026-10-26
 
 ### Changed — unknown `cache.backend` values are logged as errors
