@@ -589,7 +589,8 @@ async fn admin_keeps_the_last_active_operator(pool: &Pool) {
         .await
         .unwrap();
     let (a_id, b_id) = (seed_operator(pool, &a).await, seed_operator(pool, &b).await);
-    let off = |name: &str| form(&[("username", name), ("password_hash", "")]);
+    let at = "2024-01-01T00:00";
+    let off = |name: &str| form(&[("username", name), ("password_hash", ""), ("created_at", at)]);
     // One of two: allowed.
     let (status, html) = send(pool, Method::POST, &format!("/rustango_operators/{a_id}"), off(&a)).await;
     assert!(status.is_redirection(), "{status}: {html}");
@@ -606,7 +607,12 @@ async fn admin_keeps_the_last_active_operator(pool: &Pool) {
     // Deleting one of two, and editing the last without deactivating, work.
     let (status, _) = send(pool, Method::POST, &format!("/rustango_operators/{c_id}/delete"), String::new()).await;
     assert!(status.is_redirection(), "{status}");
-    let on = form(&[("username", b.as_str()), ("password_hash", ""), ("active", "true")]);
+    let on = form(&[
+        ("username", b.as_str()),
+        ("password_hash", ""),
+        ("created_at", at),
+        ("active", "true"),
+    ]);
     let (status, html) = send(pool, Method::POST, &uri, on).await;
     assert!(status.is_redirection(), "{status}: {html}");
     assert_eq!(active_operators(pool).await, [b_id]);
