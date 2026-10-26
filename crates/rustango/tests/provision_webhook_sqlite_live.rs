@@ -693,6 +693,12 @@ async fn half_made(
     key: &str,
     own: bool,
 ) -> i64 {
+    let url = format!("sqlite://{}/t_{slug}.db?mode=rwc", holder.path().display());
+    half_made_at(b, &url, slug, key, own).await
+}
+
+/// [`half_made`], the Org's `database_url` set to `url`.
+async fn half_made_at(b: &Booted, url: &str, slug: &str, key: &str, own: bool) -> i64 {
     let registry = b.pools.registry_pool();
     let run = store::open_run(&registry, slug, "database", "sqlite", None, None, Some(key))
         .await
@@ -702,10 +708,7 @@ async fn half_made(
         slug: slug.to_owned(),
         display_name: slug.to_owned(),
         backend_kind: "sqlite".into(),
-        database_url: Some(format!(
-            "sqlite://{}/t_{slug}.db?mode=rwc",
-            holder.path().display()
-        )),
+        database_url: Some(url.to_owned()),
         active: false,
         ..rustango::testkit::org()
     };
@@ -753,6 +756,40 @@ async fn a_retry_resumes_the_tenant_a_failed_run_left_behind() {
         .unwrap();
     assert_eq!(orgs.len(), 1);
     assert!(orgs[0].active, "the resumed tenant was not activated");
+}
+
+/// A resumed tenant whose URL reaches the registry skips the create-time
+/// check, so the run log must say so.
+#[tokio::test]
+async fn a_resume_onto_the_registry_database_is_flagged() {
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let slug = unique("onreg");
+    let registry_url = format!(
+        "sqlite://{}?mode=rwc",
+        b.tmp.path().join("reg.db").display()
+    );
+    let _ = half_made_at(&b, &registry_url, &slug, "evt-onreg", true).await;
+
+    let body = body_for(&slug, "evt-onreg", chrono::Utc::now().timestamp());
+    let sig = signed(&body);
+    let resp = b.app.clone().oneshot(post(body, Some(&sig))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let run_id = json_of(resp).await["run_id"].as_i64().unwrap();
+    let _ = await_run(&b, run_id).await;
+    let events = store::events_since(&b.pools.registry_pool(), run_id, 0)
+        .await
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.step == "validate" && e.message.contains("registry's own database")),
+        "no registry warning in {:?}",
+        events
+            .iter()
+            .map(|e| (&e.step, &e.message))
+            .collect::<Vec<_>>()
+    );
 }
 
 /// An inactive Org no failed run made is not taken over.

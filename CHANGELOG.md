@@ -37,6 +37,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Config loading skips non-UTF-8 env vars instead of panicking; an all-digit `RUSTANGO__*` secret loads into a string field; a bad override names its env var (`ConfigError::EnvOverride`).
 - `sqlite,admin-sso` builds without dead-code warnings.
 
+### Fixed — security
+
+- `CachePageLayer` no longer replays one CSP nonce: inside the nonce layer a hit gets the request's own nonce; a page whose CSP carries a nonce the layer cannot swap is not cached.
+- Resuming a tenant a failed run left behind checks its database URL, as it resolves now, against the registry and warns in the run log when it matches.
+- MCP notifications go out on one channel per tenant, so one tenant's burst cannot make another tenant's SSE stream skip frames.
+- `openapi_router` loads exact Swagger UI and Redoc versions with Subresource Integrity, and fetches the spec under the prefix it is nested at.
+
 ## [0.61.5] — 2026-10-26
 
 ### Fixed — auth

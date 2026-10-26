@@ -168,7 +168,8 @@ fn agent_sse(
     recheck_every: Duration,
 ) -> Response {
     use tokio::sync::broadcast::error::RecvError;
-    let mut rx = super::notifications::bus().subscribe();
+    // Own tenant's channel: another tenant's burst cannot make it lag.
+    let mut rx = super::notifications::subscribe(&agent.tenant);
     let exp = token.as_ref().map(|t| t.exp);
     let stream = async_stream::stream! {
         let expired = async move {
@@ -347,6 +348,30 @@ mod tests {
         let (pool, agent, token, _) = world(jwt(), true).await;
         assert!(token.is_none());
         assert_ends_on_revoke(pool, agent, token).await;
+    }
+
+    /// Another tenant's burst, past the buffer, does not drop this tenant's frame.
+    #[tokio::test]
+    async fn another_tenants_burst_does_not_drop_this_tenants_frames() {
+        use http_body_util::BodyExt as _;
+        let (pool, agent, token, _) = world(jwt(), false).await;
+        let tenant = agent.tenant.clone();
+        let mut body = agent_sse(pool, agent, token, Duration::from_secs(3600)).into_body();
+        super::super::notifications::notify_resources_list_changed(&tenant, None);
+        for _ in 0..1000 {
+            super::super::notifications::notify_tools_list_changed("other-tenant", None);
+        }
+        let found = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(Ok(frame)) = body.frame().await {
+                let data = frame.into_data().unwrap_or_default();
+                if String::from_utf8_lossy(&data).contains("resources/list_changed") {
+                    return true;
+                }
+            }
+            false
+        })
+        .await;
+        assert_eq!(found, Ok(true), "this tenant's frame was lost");
     }
 
     /// A failing re-check keeps the stream open; a later revoke still ends it.
