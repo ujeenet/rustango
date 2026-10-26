@@ -1193,6 +1193,19 @@ mod tests {
         assert!(checked > 0, "no generated example found");
     }
 
+    /// Every `.env` variant holds secrets; only the template is committed.
+    #[test]
+    fn gitignore_excludes_env_variants_but_keeps_the_example() {
+        let lines: Vec<&str> = templates::GITIGNORE.lines().collect();
+        for needle in ["/.env", "/.env.*", "!/.env.example"] {
+            assert!(
+                lines.contains(&needle),
+                "missing `{needle}`:\n{}",
+                templates::GITIGNORE
+            );
+        }
+    }
+
     /// `.dockerignore` decides what reaches the daemon at all. Without
     /// it `target/` (gigabytes) and `.env` (secrets) are uploaded on
     /// every build and land in the image.

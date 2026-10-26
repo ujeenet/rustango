@@ -945,8 +945,7 @@ mod tests {
         };
         u.insert_pool(&pool).await.unwrap();
         let id = *u.id.get().unwrap();
-        let conn = crate::tenancy::TenantConn::database(sq.acquire().await.unwrap());
-        let tenant = crate::extractors::Tenant::for_test(org("b", 2), conn, pool);
+        let tenant = crate::extractors::Tenant::for_test_pool(org("b", 2), sq);
         let ttl = Duration::from_secs(600);
         let strong = "brand-new-strong-password-7!";
 

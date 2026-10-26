@@ -160,17 +160,14 @@ impl<DB: Database> Tenant<DB> {
     /// behind the `test_utils` feature so a production build cannot
     /// reach it.
     ///
-    /// ```ignore
-    /// let pools = TenantPools::new(registry_pool);
-    /// let conn  = pools.acquire(&org).await?;
-    /// let pool  = pools.scoped_pool_dyn(&org).await?;
-    /// let mut t = Tenant::for_test(org, conn, pool);
-    /// my_function_under_test(&mut t).await?;
-    /// ```
-    ///
-    /// Take the connection from `pools.acquire(&org)` and the pool from
-    /// `pools.scoped_pool_dyn(&org)`, as the Postgres extractor does.
+    /// Nothing checks that `conn` and `pool` are the same tenant's:
+    /// prefer `for_test_pools` (Postgres) or `for_test_pool`.
     #[cfg(any(test, feature = "test_utils"))]
+    #[deprecated(
+        since = "0.61.6",
+        note = "conn and pool can name different tenants; use `Tenant::for_test_pools` \
+                (Postgres) or `Tenant::for_test_pool` (SQLite / MySQL)"
+    )]
     #[must_use]
     pub fn for_test(org: Org, conn: TenantConn<DB>, pool: crate::sql::Pool) -> Self {
         Self {
@@ -178,6 +175,78 @@ impl<DB: Database> Tenant<DB> {
             conn: TenantConnCell::Ready(conn),
             pool,
         }
+    }
+
+    /// No connection yet, taken from `pool` when asked: the SQLite /
+    /// MySQL extractor's shape.
+    #[cfg(any(feature = "sqlite", feature = "mysql"))]
+    fn deferred(org: Org, pool: sqlx::Pool<DB>) -> Self
+    where
+        crate::sql::Pool: From<sqlx::Pool<DB>>,
+    {
+        Self {
+            org,
+            pool: crate::sql::Pool::from(pool.clone()),
+            conn: TenantConnCell::Deferred(pool),
+        }
+    }
+}
+
+/// **For tests only.** A `Tenant` over one tenant pool, as the extractor
+/// builds it, so its connection and `pool()` cannot disagree.
+macro_rules! for_test_pool {
+    ($db:ty, $pool:ty, $feature:literal) => {
+        #[cfg(all(feature = $feature, any(test, feature = "test_utils")))]
+        impl Tenant<$db> {
+            /// **For tests only.** `org`'s `Tenant` over its own `pool`,
+            /// built as the extractor does.
+            #[must_use]
+            pub fn for_test_pool(org: Org, pool: $pool) -> Self {
+                Self::deferred(org, pool)
+            }
+        }
+    };
+}
+for_test_pool!(sqlx::Sqlite, sqlx::SqlitePool, "sqlite");
+for_test_pool!(sqlx::MySql, sqlx::MySqlPool, "mysql");
+
+#[cfg(all(feature = "postgres", any(test, feature = "test_utils")))]
+impl Tenant<sqlx::Postgres> {
+    /// **For tests only.** `org`'s `Tenant` from `pools`, built as the
+    /// extractor does, so its connection and `pool()` cannot disagree.
+    ///
+    /// ```ignore
+    /// let mut t = Tenant::for_test_pools(org, &pools).await?;
+    /// my_function_under_test(&mut t).await?;
+    /// ```
+    ///
+    /// # Errors
+    /// The pool lookup or acquire failing.
+    pub async fn for_test_pools(
+        org: Org,
+        pools: &TenantPools<sqlx::Postgres>,
+    ) -> Result<Self, TenancyError> {
+        Self::from_pools(org, pools).await
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl Tenant<sqlx::Postgres> {
+    /// The held connection and the scoped pool, both from `org`'s pools.
+    async fn from_pools(
+        org: Org,
+        pools: &TenantPools<sqlx::Postgres>,
+    ) -> Result<Self, TenancyError> {
+        // The held connection comes from the tenant's own held pool, in
+        // both modes, never the registry's or the one `t.pool()` uses:
+        // a busy tenant would block the others, or deadlock at max size.
+        let conn = pools.acquire(&org).await?;
+        let pool = pools.scoped_pool_dyn(&org).await?;
+        Ok(Self {
+            org,
+            conn: TenantConnCell::Ready(conn),
+            pool,
+        })
     }
 }
 
@@ -442,24 +511,9 @@ where
             .ok_or(TenantRejection::MissingContext)?
             .clone();
         let org = resolved_org(mounted, parts).await?;
-        // The held connection comes from the tenant's own held pool, in
-        // both modes, never the registry's or the one `t.pool()` uses:
-        // a busy tenant would block the others, or deadlock at max size.
-        let conn = ctx
-            .pools
-            .acquire(&org)
+        Tenant::from_pools(org, &ctx.pools)
             .await
-            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        let pool = ctx
-            .pools
-            .scoped_pool_dyn(&org)
-            .await
-            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        Ok(Tenant {
-            org,
-            conn: TenantConnCell::Ready(conn),
-            pool,
-        })
+            .map_err(|e| TenantRejection::Internal(e.to_string()))
     }
 }
 
@@ -502,11 +556,7 @@ where
         let pool = ctx.pools.pool_for_org(&org).await.map_err(internal)?;
         pool.pool().clone()
     };
-    Ok(Tenant {
-        org,
-        pool: crate::sql::Pool::from(pool.clone()),
-        conn: TenantConnCell::Deferred(pool),
-    })
+    Ok(Tenant::deferred(org, pool))
 }
 
 #[cfg(feature = "sqlite")]
@@ -530,5 +580,31 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         deferred_tenant(parts).await
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use super::*;
+
+    /// The held connection and `pool()` reach the same database.
+    #[tokio::test]
+    async fn for_test_pool_conn_and_pool_agree() {
+        let sq = sqlx::SqlitePool::connect("sqlite:file:tft_agree?mode=memory&cache=shared")
+            .await
+            .unwrap();
+        let mut t = Tenant::for_test_pool(crate::testkit::org(), sq);
+        crate::sql::raw_execute_pool(t.pool(), "CREATE TABLE t (id INTEGER)", Vec::new())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t VALUES (1)")
+            .execute(&mut **t.pool_conn().await.unwrap())
+            .await
+            .unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM t")
+            .fetch_one(t.pool().as_sqlite().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
     }
 }

@@ -166,6 +166,10 @@ untouched.
 
 An admin inline with `max_num` now recounts its rows inside the save transaction. On MySQL that is a locking read of the parent's child rows; without an index on the inline's FK column it locks the whole child table until the save commits, so index that column.
 
+### Testkit and macros
+
+`TestClient` now panics where it used to drop an invalid request header or read a failed or over-16 MiB body as empty. `Tenant::for_test` is deprecated: use `Tenant::for_test_pool(org, pool)` or `Tenant::for_test_pools(org, &pools).await`. A `generic_has` on a model whose PK column is not `id` now joins on that column; set `self_pk_column = "id"` to keep the old join. New warnings for unknown index columns and `#[rustango::main]` arguments are planned to become errors in 0.62.0.
+
 ## 0.61.5
 
 ### ViewSet OpenAPI: Binary is hex

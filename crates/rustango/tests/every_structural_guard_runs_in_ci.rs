@@ -83,11 +83,8 @@ fn reads_the_source_tree(src: &str) -> bool {
 /// Every test in the file is `#[ignore]`d, so it runs nowhere by
 /// design and a CI line for it would add zero coverage.
 ///
-/// One file is in this state: `macro_no_backend_cfg`, disabled with a
-/// reason dated v0.38 against a crate now at 0.57.x. Naming it in the
-/// job would satisfy this guard while running nothing — the exact
-/// shape of the problem, so it is excluded rather than swept in. If it
-/// is re-enabled it re-enters this guard automatically.
+/// Naming such a file in the job would satisfy this guard while
+/// running nothing, so it is excluded rather than swept in.
 fn every_test_ignored(src: &str) -> bool {
     let tests = src.matches("#[test]").count() + src.matches("#[tokio::test]").count();
     tests > 0 && src.matches("#[ignore").count() >= tests

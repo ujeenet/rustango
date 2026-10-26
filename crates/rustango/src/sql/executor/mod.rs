@@ -1875,6 +1875,9 @@ pub(crate) async fn truncate_tx(
 /// Empty `model`'s table and its generic M2M junction rows in one
 /// transaction. Backs the derived `Model::truncate`.
 ///
+/// On Postgres `CASCADE` also empties every table with an FK to it, even
+/// `ON DELETE RESTRICT`; MySQL / SQLite follow each FK's `ON DELETE`.
+///
 /// # Errors
 /// As [`raw_execute_tx`].
 pub async fn truncate(

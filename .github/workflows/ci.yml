@@ -324,6 +324,7 @@ jobs:
             --test live_profile_stays_serial \
             --test live_suites_fail_loudly \
             --test macro_internals_stays_internal \
+            --test macro_no_backend_cfg \
             --test no_orphaned_doc_comments \
             --test one_redirect_sanitizer \
             --test one_html_escaper \
