@@ -65,6 +65,13 @@ Creating a tenant, editing its URL, the console's URL check and `migrate-tenant-
 
 A symlink whose target passes through a missing directory, or a chain longer than the kernel follows, now resolves to the file SQLite opens. On Windows paths are compared as `GetFullPathNameW` builds them, without following links.
 
+### Fixed — tenancy pools and purge
+
+- A Postgres database-mode `Tenant` takes its held connection from a second pool of the tenant's, so requests that hold one and query `t.pool()` no longer time out at the pool's max size.
+- Building a schema-mode tenant's pool warns when its schema lacks tenant tables that `public` has, since `search_path` then reads and writes the shared copies.
+- `purge-tenant` and `migrate-tenant-storage` accept an existing tenant's stored schema name that new tenants may not use (`Acme`), quoted; reserved ones are still refused.
+- A purge clears the slug's account locks and the content-type cache, and `decommission::clear_on_purge(cache)` makes it delete the tenant's `ScopedCache::for_tenant` keys, so a new tenant reusing the slug starts clean.
+
 ### Added — streaming storage
 
 `Storage::save_stream(key, len, body, &put)` writes exactly `len` bytes from a `ByteStream` as they arrive, and `Storage::load_stream(key)` reads one back in chunks, so an app can proxy large uploads to a private bucket. `LocalStorage`, `S3Storage` (one PUT up to 5 GiB, a multipart upload above, up to 5 TiB; unsigned payload over https, chunk-signed over http) and `AzureBlobStorage` (one Put Blob up to 5000 MiB, staged blocks above) stream; other backends get defaults that buffer. A wrong length is refused, `create_only` refuses an existing key, and a failed or dropped body leaves no object: a multipart upload is aborted, uncommitted blocks are never visible.

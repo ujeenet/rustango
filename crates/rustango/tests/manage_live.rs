@@ -686,6 +686,165 @@ async fn purge_tenant_schema_mode_drops_schema_and_org_row() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A schema stored before names were validated (`Legacy_Acme`) is
+/// still purged, quoted; a reserved one is still refused.
+#[tokio::test]
+async fn purge_tenant_drops_a_legacy_schema_name() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rmig::drop_all(&pool).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+    let dir = fresh_dir("purge_legacy");
+    let pools = TenantPools::new(pool.clone());
+    let slug = unique("legacy");
+    let legacy = format!("Legacy_{}", slug.replace('-', "_"));
+    run(
+        &pools,
+        &url,
+        &dir,
+        &["create-tenant", &slug, "--mode", "schema", "--no-migrate"],
+    )
+    .await
+    .1
+    .unwrap();
+    drop_schema(&pool, &slug).await;
+    sqlx::query(&format!(r#"CREATE SCHEMA "{legacy}""#))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE rustango_orgs SET schema_name = $1 WHERE slug = $2")
+        .bind(&legacy)
+        .bind(&slug)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (out, res) = run(
+        &pools,
+        &url,
+        &dir,
+        &["purge-tenant", &slug, "--confirm", &slug],
+    )
+    .await;
+    res.unwrap_or_else(|e| panic!("{e}: {out}"));
+    let left: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)",
+    )
+    .bind(&legacy)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!left, "schema `{legacy}` survived the purge");
+
+    // `public` is never a tenant's to drop.
+    let reserved = unique("reserved");
+    run(
+        &pools,
+        &url,
+        &dir,
+        &[
+            "create-tenant",
+            &reserved,
+            "--mode",
+            "schema",
+            "--no-migrate",
+        ],
+    )
+    .await
+    .1
+    .unwrap();
+    drop_schema(&pool, &reserved).await;
+    sqlx::query("UPDATE rustango_orgs SET schema_name = 'public' WHERE slug = $1")
+        .bind(&reserved)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, res) = run(
+        &pools,
+        &url,
+        &dir,
+        &["purge-tenant", &reserved, "--confirm", &reserved],
+    )
+    .await;
+    let err = res
+        .expect_err("a purge of `public` must be refused")
+        .to_string();
+    assert!(err.contains("public"), "{err}");
+
+    rmig::drop_all(&pool).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A new tenant reusing a purged slug starts clean: no account locks and
+/// no `tenant:{slug}:` cache entries of the old one.
+#[tokio::test]
+async fn purge_tenant_forgets_slug_keyed_state() {
+    use rustango::cache::{BoxedCache, Cache as _, InMemoryCache, ScopedCache};
+    use rustango::login_throttle::{shared, ClientIp, LoginScope};
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rmig::drop_all(&pool).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+    let dir = fresh_dir("purge_state");
+    let pools = TenantPools::new(pool.clone());
+    let slug = unique("forget");
+    run(
+        &pools,
+        &url,
+        &dir,
+        &["create-tenant", &slug, "--mode", "schema", "--no-migrate"],
+    )
+    .await
+    .1
+    .unwrap();
+
+    let cache: BoxedCache = std::sync::Arc::new(InMemoryCache::new());
+    rustango::tenancy::decommission::clear_on_purge(cache.clone());
+    let mine = ScopedCache::for_tenant(cache.clone(), &slug);
+    let theirs = ScopedCache::for_tenant(cache.clone(), format!("{slug}x"));
+    mine.set_forever("stats", "old").await.unwrap();
+    theirs.set_forever("stats", "kept").await.unwrap();
+
+    let scope = LoginScope::Tenant(slug.clone());
+    let ip = ClientIp::from_parts(
+        &axum::http::Extensions::new(),
+        &axum::http::HeaderMap::new(),
+    );
+    while shared().check(&scope, &ip, "alice").await.is_ok() {
+        shared()
+            .begin(&scope, &ip, "alice")
+            .await
+            .unwrap()
+            .failed()
+            .await;
+    }
+
+    let (out, res) = run(
+        &pools,
+        &url,
+        &dir,
+        &["purge-tenant", &slug, "--confirm", &slug],
+    )
+    .await;
+    res.unwrap_or_else(|e| panic!("{e}: {out}"));
+
+    assert!(
+        shared().check(&scope, &ip, "alice").await.is_ok(),
+        "the purged tenant's account lock survived"
+    );
+    assert_eq!(mine.get("stats").await.unwrap(), None);
+    assert_eq!(theirs.get("stats").await.unwrap().as_deref(), Some("kept"));
+
+    rmig::drop_all(&pool).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `purge-tenant` rejects `--confirm` mismatch loudly.
 #[tokio::test]
 async fn purge_tenant_rejects_confirm_mismatch() {

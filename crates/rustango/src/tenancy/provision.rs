@@ -1229,17 +1229,7 @@ fn validate_fields(request: &ProvisionRequest) -> Result<ProvisionRequest, Strin
 /// The rule is the slug's, plus underscores: a schema name is not a
 /// hostname label, and Postgres is happy with `_`.
 pub(crate) fn validate_schema_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("a schema name is required".into());
-    }
-    if name.len() > 63 {
-        // Postgres truncates identifiers at NAMEDATALEN-1 silently,
-        // which would make the stored name and the real schema differ.
-        return Err(format!(
-            "schema name `{name}` is {} characters; Postgres allows at most 63",
-            name.len()
-        ));
-    }
+    validate_stored_schema_name(name)?;
     let legal = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-';
     if let Some(bad) = name.bytes().find(|b| !legal(*b)) {
         return Err(format!(
@@ -1253,6 +1243,23 @@ pub(crate) fn validate_schema_name(name: &str) -> Result<(), String> {
     // refused, since it reads as a flag.
     if name.starts_with('-') {
         return Err(format!("schema name `{name}` may not start with a hyphen"));
+    }
+    Ok(())
+}
+
+/// What an existing row's schema must still pass to be purged or moved:
+/// older rows may hold any name, used quoted, but never a reserved one.
+pub(crate) fn validate_stored_schema_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("a schema name is required".into());
+    }
+    if name.len() > 63 {
+        // Postgres truncates identifiers at NAMEDATALEN-1 silently,
+        // which would make the stored name and the real schema differ.
+        return Err(format!(
+            "schema name `{name}` is {} characters; Postgres allows at most 63",
+            name.len()
+        ));
     }
     // `pg_*` is reserved. Catch it here so it reads as a validation
     // error rather than a failed run.

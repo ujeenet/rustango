@@ -180,6 +180,18 @@ Provisioning still accepts it but logs and shows a warning. Give such a tenant i
 
 A struct literal of `Applied` needs `warning: None`; matching code is unaffected.
 
+### Postgres database-mode tenants open a second pool
+
+`TenantPools::acquire`, which the `Tenant` extractor uses, takes from a held-connection pool of its own, with no idle connections. Budget up to twice `database_pool_max_connections` per busy tenant on its server.
+
+### Schema tenants missing tables warn
+
+A tenant schema without a tenant table that `public` has logs a warning when its pool is built. Run `migrate-tenants` for it: a later release stops falling through to `public`.
+
+### Purge clears tenant cache keys you register
+
+Call `rustango::tenancy::decommission::clear_on_purge(cache)` at boot for each cache with `ScopedCache::for_tenant` entries; a purge then deletes them.
+
 ### Storage: `save_stream` and `load_stream`
 
 New trait methods with defaults, so existing backends compile. A wrapper around another `Storage` must forward both, or it buffers whole objects and refuses `create_only`.
