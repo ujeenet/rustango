@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — REST, forms and admin
+
+- `messages::Outbox` stages several flash messages in one response; two `messages::push` calls in one handler kept only the last.
+- `intword` / `naturalsize` / `naturalsize_si` move to the next unit when rounding reaches 1000 (1024): `999_999_999` is `1.0 billion`, not `1000.0 million`.
+- ViewSet create runs the admin's `add` object-permission hooks, on the request and on each written row (single or bulk), as the admin does.
+
 ## [0.61.2] — 2026-10-26
 
 ### Fixed — migrations, MySQL and MariaDB

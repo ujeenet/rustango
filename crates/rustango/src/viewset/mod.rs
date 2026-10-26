@@ -3196,6 +3196,10 @@ async fn handle_create(
         Ok(w) => w,
         Err(resp) => return resp,
     };
+    let add_hooks = match AddHooks::of(state.vs.schema.table, &parts) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
     // A bulk create spends one throttle unit per row (#1999).
     let client = state
         .vs
@@ -3224,7 +3228,7 @@ async fn handle_create(
             create_one(
                 &state,
                 &mut acq,
-                &write_set,
+                (&write_set, &add_hooks),
                 (&form, &json, encoding),
                 pk_field,
                 &scope,
@@ -3264,7 +3268,15 @@ async fn handle_create(
                     (form, json)
                 })
                 .collect();
-            create_many(&state, &mut acq, &write_set, &rows, pk_field, &scope).await
+            create_many(
+                &state,
+                &mut acq,
+                (&write_set, &add_hooks),
+                &rows,
+                pk_field,
+                &scope,
+            )
+            .await
         }
     }
 }
@@ -3282,8 +3294,8 @@ async fn handle_create(
 async fn insert_and_fetch_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
-    columns: Vec<&'static str>,
-    values: Vec<SqlValue>,
+    add_hooks: &AddHooks,
+    (columns, values): (Vec<&'static str>, Vec<SqlValue>),
     pk_field: &'static crate::core::FieldSchema,
     fields: &[&'static crate::core::FieldSchema],
     scope: &[WhereExpr],
@@ -3296,10 +3308,13 @@ async fn insert_and_fetch_one(
         on_conflict: None,
         generated: vec![],
     };
-    let pk_val = acq
-        .insert_returning_pk(&query, pk_field)
-        .await
-        .map_err(|e| write_failure("viewset::create", &e))?;
+    let pk_val = if add_hooks.on_rows() {
+        insert_admitted(acq, add_hooks, &query, pk_field).await?
+    } else {
+        acq.insert_returning_pk(&query, pk_field)
+            .await
+            .map_err(|e| write_failure("viewset::create", &e))?
+    };
     wrote(state);
     fetch_by_pk_scoped(state, acq, pk_field, pk_val, fields, scope)
         .await
@@ -3309,6 +3324,86 @@ async fn insert_and_fetch_one(
                 crate::error::client_error_body("viewset::create::read_back", &e, false),
             )
         })
+}
+
+/// The admin's `add` hooks for a create, run as the admin runs them: on
+/// the request, then on each written row inside the write's transaction.
+struct AddHooks {
+    /// The request, kept only when a hook is registered for a row check.
+    parts: Option<axum::http::request::Parts>,
+}
+
+impl AddHooks {
+    /// `Err` is a `403` when a hook refuses the request itself.
+    fn of(table: &'static str, parts: &axum::http::request::Parts) -> Result<Self, Response> {
+        use crate::admin::object_permissions::{has_hook, is_allowed};
+        if !is_allowed(table, "add", parts, None) {
+            return Err(json_error(StatusCode::FORBIDDEN, "forbidden"));
+        }
+        Ok(Self {
+            parts: has_hook(table, "add").then(|| parts.clone()),
+        })
+    }
+
+    fn on_rows(&self) -> bool {
+        self.parts.is_some()
+    }
+
+    /// Whether every hook admits the row `pk` as written in `tx`.
+    async fn admit(
+        &self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        model: &'static ModelSchema,
+        pk_field: &'static crate::core::FieldSchema,
+        pk: SqlValue,
+    ) -> Result<bool, crate::sql::ExecError> {
+        let Some(parts) = &self.parts else {
+            return Ok(true);
+        };
+        let fields: Vec<_> = model.scalar_fields().collect();
+        let select = SelectQuery::by_pk(model, pk_field.column, pk);
+        let row = crate::sql::select_one_row_as_json_tx(tx, &select, &fields).await?;
+        Ok(row.is_some_and(|row| {
+            crate::admin::object_permissions::is_allowed(model.table, "add", parts, Some(&row))
+        }))
+    }
+}
+
+/// One INSERT in its own transaction, committed only when `add_hooks`
+/// admit the written row.
+async fn insert_admitted(
+    acq: &AcquiredConn,
+    add_hooks: &AddHooks,
+    query: &InsertQuery,
+    pk_field: &'static crate::core::FieldSchema,
+) -> Result<SqlValue, (StatusCode, String)> {
+    let server = |e: &crate::sql::ExecError| {
+        let body = crate::error::client_error_body("viewset::create", e, false);
+        (StatusCode::INTERNAL_SERVER_ERROR, body)
+    };
+    let mut tx = crate::sql::write_transaction(&acq.pool)
+        .await
+        .map_err(|e| server(&e))?;
+    let pk = match crate::audit::insert_tx(&mut tx, query, pk_field).await {
+        Ok(pk) => pk,
+        Err(e) => {
+            let _ = tx.rollback().await;
+            return Err(write_failure("viewset::create", &e));
+        }
+    };
+    match add_hooks.admit(&mut tx, query.model, pk_field, pk.clone()).await {
+        Ok(true) => {}
+        Ok(false) => {
+            let _ = tx.rollback().await;
+            return Err((StatusCode::FORBIDDEN, "forbidden".to_owned()));
+        }
+        Err(e) => {
+            let _ = tx.rollback().await;
+            return Err(server(&e));
+        }
+    }
+    tx.commit().await.map_err(|e| server(&e.into()))?;
+    Ok(pk)
 }
 
 /// A failed INSERT/UPDATE: a duplicate key is a `409`, any other database
@@ -3333,7 +3428,7 @@ fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, Strin
 async fn create_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
-    write_set: &WriteSet,
+    (write_set, add_hooks): (&WriteSet, &AddHooks),
     (form, json, encoding): (&HashMap<String, String>, &Value, Encoding),
     pk_field: &'static crate::core::FieldSchema,
     scope: &[WhereExpr],
@@ -3349,9 +3444,9 @@ async fn create_one(
         Ok(v) => v,
         Err(e) => return e.into_response(state, None),
     };
-    let (columns, values): (Vec<_>, Vec<_>) = collected.into_iter().unzip();
     let fields = state.effective_fields();
-    match insert_and_fetch_one(state, acq, columns, values, pk_field, &fields, scope).await {
+    let row = collected.into_iter().unzip();
+    match insert_and_fetch_one(state, acq, add_hooks, row, pk_field, &fields, scope).await {
         Ok(Some(obj)) => json_created(obj),
         Ok(None) => StatusCode::CREATED.into_response(),
         Err((code, msg)) => json_error(code, &msg),
@@ -3370,7 +3465,7 @@ async fn create_one(
 async fn create_many(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
-    write_set: &WriteSet,
+    (write_set, add_hooks): (&WriteSet, &AddHooks),
     rows: &[(HashMap<String, String>, Value)],
     pk_field: &'static crate::core::FieldSchema,
     scope: &[WhereExpr],
@@ -3438,7 +3533,17 @@ async fn create_many(
             generated: vec![],
         };
         match crate::audit::insert_tx(&mut tx, &query, pk_field).await {
-            Ok(pk) => pks.push(pk),
+            Ok(pk) => match add_hooks.admit(&mut tx, query.model, pk_field, pk.clone()).await {
+                Ok(true) => pks.push(pk),
+                Ok(false) => {
+                    let _ = tx.rollback().await;
+                    return json_error(StatusCode::FORBIDDEN, &format!("bulk entry {i}: forbidden"));
+                }
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    return json_server_error("viewset::bulk_create::add_hook", &e);
+                }
+            },
             Err(e) => {
                 // Drop every row this request wrote, including the ones
                 // that succeeded before entry `i`.

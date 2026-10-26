@@ -146,6 +146,10 @@ pub const MAX_COOKIE_BYTES: usize = 4000;
 ///     "fade-in",
 /// );
 /// ```
+///
+/// Each call starts from the request's cookie, so two calls in one
+/// handler give two cookies and the browser keeps only the last. Use
+/// [`Outbox`] to stage several messages in one response.
 #[must_use]
 pub fn push(
     secret: &[u8],
@@ -154,12 +158,54 @@ pub fn push(
     body: &str,
     extra_tags: &str,
 ) -> String {
-    let mut existing = read_cookie(secret, headers).unwrap_or_default();
-    existing.push(Message {
-        level,
-        body: body.to_owned(),
-        tags: extra_tags.to_owned(),
-    });
+    let mut outbox = Outbox::new(secret, headers);
+    outbox.push(level, body, extra_tags);
+    outbox.set_cookie()
+}
+
+/// The messages one response stages: the request's cookie plus every
+/// [`Outbox::push`], written as a single `Set-Cookie`.
+///
+/// ```ignore
+/// let mut out = messages::Outbox::new(SECRET, &headers);
+/// out.push(messages::Level::Success, "Saved.", "");
+/// out.push(messages::Level::Warning, "Email not verified.", "");
+/// let cookie = out.set_cookie();
+/// ```
+#[derive(Debug)]
+pub struct Outbox<'a> {
+    secret: &'a [u8],
+    messages: Vec<Message>,
+}
+
+impl<'a> Outbox<'a> {
+    /// Start from the messages already in the request's cookie.
+    #[must_use]
+    pub fn new(secret: &'a [u8], headers: &axum::http::HeaderMap) -> Self {
+        Self {
+            secret,
+            messages: read_cookie(secret, headers).unwrap_or_default(),
+        }
+    }
+
+    /// Stage one more message.
+    pub fn push(&mut self, level: Level, body: &str, extra_tags: &str) -> &mut Self {
+        self.messages.push(Message {
+            level,
+            body: body.to_owned(),
+            tags: extra_tags.to_owned(),
+        });
+        self
+    }
+
+    /// The `Set-Cookie` value carrying every staged message.
+    #[must_use]
+    pub fn set_cookie(self) -> String {
+        capped_cookie(self.secret, self.messages)
+    }
+}
+
+fn capped_cookie(secret: &[u8], mut existing: Vec<Message>) -> String {
     // Drop oldest first, by count and then by size: a browser drops a
     // cookie over 4 KB whole, taking every message with it (#1957).
     loop {
@@ -167,9 +213,12 @@ pub fn push(
         if existing.len() <= MAX_MESSAGES && cookie.len() <= MAX_COOKIE_BYTES {
             return cookie;
         }
-        if existing.len() == 1 {
+        if existing.len() <= 1 {
             // Never drop the newest: shorten it until it fits.
-            return truncate_to_fit(secret, existing.remove(0));
+            let Some(newest) = existing.pop() else {
+                return cookie;
+            };
+            return truncate_to_fit(secret, newest);
         }
         let dropped = existing.remove(0);
         tracing::warn!(
@@ -475,6 +524,21 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].body, "one");
         assert_eq!(msgs[1].body, "two");
+    }
+
+    /// Two messages staged in one handler both reach the next request.
+    #[test]
+    fn outbox_keeps_every_message_of_one_response() {
+        let first = push(SECRET, &empty_headers(), Level::Info, "older", "");
+        let inbound = headers_with(&cookie_from_set(&first));
+        let mut out = Outbox::new(SECRET, &inbound);
+        out.push(Level::Success, "one", "")
+            .push(Level::Warning, "two", "x");
+        let set = out.set_cookie();
+        let (msgs, _) = drain(SECRET, &headers_with(&cookie_from_set(&set)));
+        let bodies: Vec<_> = msgs.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(bodies, ["older", "one", "two"]);
+        assert_eq!(msgs[2].tags, "x");
     }
 
     #[test]

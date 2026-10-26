@@ -13,11 +13,29 @@ use rustango::tri_dialect_test;
 use rustango::viewset::ViewSet;
 use tower::ServiceExt as _;
 
+/// A model with an admin `add` hook, to check the ViewSet runs it.
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "vsf_hooked")]
+#[allow(dead_code)]
+pub struct Hooked {
+    #[rustango(primary_key)]
+    pub id: rustango::sql::Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub label: String,
+}
+
+/// Denies a request with `x-deny`, and a row labelled `blocked`.
+fn add_hook(parts: &axum::http::request::Parts, row: Option<&serde_json::Value>) -> bool {
+    !parts.headers.contains_key("x-deny") && row.is_none_or(|r| r["label"] != "blocked")
+}
+rustango::register_admin_object_permission!("vsf_hooked", "add", add_hook);
+
 async fn setup(pool: &Pool) {
     // Shared with other suites: create what is missing, never drop.
     rustango::testkit::migrate_framework(pool)
         .await
         .expect("framework tables");
+    rustango::testkit::matrix::fresh_table::<Hooked>(pool).await;
 }
 
 fn unique(prefix: &str) -> String {
@@ -191,9 +209,50 @@ async fn a_superuser_writes_them(pool: &Pool) {
     assert_eq!(u.password_hash, "new-hash");
 }
 
+/// A create runs the admin's `add` hooks: on the request, then on each
+/// written row, single or bulk; a denied row writes nothing.
+async fn create_runs_the_admin_add_hooks(pool: &Pool) {
+    let app = ViewSet::for_model(Hooked::SCHEMA, &["id", "label"])
+        .allow_anonymous()
+        .router_pool("/hooked", pool.clone());
+    let post = |body: serde_json::Value, deny: bool| {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/hooked")
+            .header("content-type", "application/json");
+        if deny {
+            req = req.header("x-deny", "1");
+        }
+        app.clone()
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
+    };
+    let ok = serde_json::json!({ "label": "ok" });
+    let res = post(ok.clone(), true).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let res = post(serde_json::json!({ "label": "blocked" }), false).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let bulk = serde_json::json!([{ "label": "first" }, { "label": "blocked" }]);
+    let res = post(bulk, false).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let labels = || async {
+        Hooked::objects()
+            .fetch(pool)
+            .await
+            .expect("fetch")
+            .into_iter()
+            .map(|h| h.label)
+            .collect::<Vec<_>>()
+    };
+    assert!(labels().await.is_empty(), "a denied create wrote a row");
+    let res = post(ok, false).await.unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    assert_eq!(labels().await, ["ok"]);
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
+        create_runs_the_admin_add_hooks,
         a_member_cannot_grant_superuser_or_set_a_hash,
         a_member_cannot_create_a_superuser,
         a_member_put_keeps_them,

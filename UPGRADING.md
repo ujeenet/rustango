@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### ViewSet create runs admin `add` hooks
+
+A `register_admin_object_permission!(table, "add", …)` hook now also gates `POST` on a ViewSet of that table: a refusal is a `403` and writes nothing.
+
 ## 0.61.2
 
 ### SQLite: JSON column equality compares values
