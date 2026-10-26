@@ -9,6 +9,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - An unset or `console` `[mail] backend` is a warning: it prints reset and magic-link URLs to stdout.
 - `"*"` in `allowed_hosts` or `cors_allowed_origins`, and an unset or zero `request_timeout_secs`, are warnings; an unset `max_body_bytes` is info.
 
+### Fixed — huge audit retention days and durations no longer panic
+
+`audit-cleanup --days`, the admin cleanup form and `cleanup_older_than*` keep every row when the cutoff falls before 1970 or past chrono's range; `format_duration_long` / `_short` filters pass out-of-range seconds through unchanged.
+
 ## [0.61.3] — 2026-10-26
 
 ### Changed — unknown `cache.backend` values are logged as errors
