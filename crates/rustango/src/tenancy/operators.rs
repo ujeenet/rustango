@@ -128,29 +128,59 @@ pub async fn set_active(
         if actor == Some(id) {
             return Err(OperatorError::SelfDeactivation);
         }
-        // Everyone active *except* the target. With the self-check above this
-        // is unreachable single-handed; it covers two operators deactivating
-        // each other at once, where both read "two active". A narrow window,
-        // not a closed one.
-        if active_count(registry, Some(id)).await? == 0 {
-            return Err(OperatorError::LastActive);
-        }
+        return deactivate_unless_last(registry, target, id).await;
     }
 
     // Only `active`: a whole-row save would undo a password reset that
     // landed since `target` was read (#2467).
-    if active {
-        Operator::objects()
-            .where_(Operator::id.eq(id))
-            .update()
-            .set_typed(Operator::active.set(true))
-            .execute_pool(registry)
-            .await?;
-    } else {
-        // So a later reactivation does not revive today's cookies.
-        crate::session::deactivate::<Operator>(registry, id).await?;
-    }
+    Operator::objects()
+        .where_(Operator::id.eq(id))
+        .update()
+        .set_typed(Operator::active.set(true))
+        .execute_pool(registry)
+        .await?;
     target.active = active;
+    Ok(Outcome::Changed)
+}
+
+/// Deactivate `id` and end its sessions, unless no other operator would
+/// stay active. Every active row is locked first, in id order, so two
+/// operators deactivating each other run one after the other.
+async fn deactivate_unless_last(
+    registry: &Pool,
+    target: &mut Operator,
+    id: i64,
+) -> Result<Outcome, OperatorError> {
+    use crate::sql::FetcherTx as _;
+    let mut tx = crate::sql::write_transaction(registry).await?;
+    // A locking read: MySQL sees the latest rows, PG re-checks `active`.
+    let active = Operator::objects()
+        .where_(Operator::active.eq(true))
+        .order_by(&[("id", false)])
+        .select_for_update()
+        .silent_on_sqlite()
+        .fetch_tx(&mut tx)
+        .await?;
+    let Some(current) = active.iter().find(|o| o.id.get() == Some(&id)) else {
+        target.active = false;
+        return Ok(Outcome::AlreadySo);
+    };
+    if active.len() == 1 {
+        return Err(OperatorError::LastActive);
+    }
+    // Only these two columns, so a concurrent password reset stands; the
+    // stamp is read under the lock, so it only moves forward.
+    let cutoff = crate::session::logout_cutoff_at(current.sessions_revoked_at, 0);
+    let update = Operator::objects()
+        .where_(Operator::id.eq(id))
+        .update()
+        .set_typed(Operator::active.set(false))
+        .set_typed(Operator::sessions_revoked_at.set(Some(cutoff)))
+        .compile()
+        .map_err(crate::sql::ExecError::from)?;
+    crate::sql::update_tx(&mut tx, &update).await?;
+    tx.commit().await.map_err(crate::sql::ExecError::from)?;
+    target.active = false;
     Ok(Outcome::Changed)
 }
 

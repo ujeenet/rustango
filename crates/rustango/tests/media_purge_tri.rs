@@ -58,6 +58,8 @@ struct GatedStorage {
     delete: Option<Arc<Gate>>,
     metadata: Option<Arc<Gate>>,
     fail_delete: std::sync::atomic::AtomicBool,
+    /// Keys whose delete fails.
+    fail_key: Option<fn(&str) -> bool>,
 }
 
 #[async_trait]
@@ -82,7 +84,9 @@ impl Storage for GatedStorage {
         if let Some(g) = &self.delete {
             g.pass().await;
         }
-        if self.fail_delete.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.fail_delete.load(std::sync::atomic::Ordering::SeqCst)
+            || self.fail_key.is_some_and(|f| f(key))
+        {
             return Err(StorageError::Io("bucket unreachable".into()));
         }
         self.inner.delete(key).await
@@ -244,6 +248,100 @@ async fn storage_error_keeps_the_row_for_the_next_sweep(pool: &Pool) {
     assert_eq!(row_count(pool, id).await, 0);
 }
 
+/// A pending row younger than the longest upload URL is kept: its URL
+/// may still land an object, which nothing would then track.
+async fn a_pending_row_outlives_its_upload_url(pool: &Pool) {
+    let mgr = manager(pool, GatedStorage::default());
+    // Ten minutes in, and just past the 1 h URL (a slow PUT, a skewed clock).
+    for age in [10, 70] {
+        let id = seed_pending(&mgr, pool).await;
+        Media::objects()
+            .where_(Media::id.eq(id))
+            .update()
+            .set("uploaded_at", Utc::now() - chrono::Duration::minutes(age))
+            .execute_pool(pool)
+            .await
+            .expect("make it recent");
+        assert_eq!(mgr.purge_pending(Duration::ZERO).await.expect("sweep"), 0);
+        assert_eq!(row_count(pool, id).await, 1, "purged {age} min in");
+    }
+
+    let old = seed_pending(&mgr, pool).await;
+    assert_eq!(mgr.purge_pending(Duration::ZERO).await.expect("sweep"), 1);
+    assert_eq!(row_count(pool, old).await, 0);
+}
+
+/// `total` soft-deleted rows with keys `o/0`.. in id order.
+async fn seed_orphans(pool: &Pool, total: usize) {
+    use rustango::core::{BulkInsertQuery, Model as _, SqlValue};
+    let gone = Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap();
+    for start in (0..total).step_by(1_000) {
+        let rows = (start..(start + 1_000).min(total))
+            .map(|i| {
+                vec![
+                    SqlValue::String("default".into()),
+                    SqlValue::String(format!("o/{i}")),
+                    SqlValue::String("text/plain".into()),
+                    SqlValue::I64(1),
+                    SqlValue::String("o.txt".into()),
+                    SqlValue::String("ready".into()),
+                    SqlValue::Json(serde_json::json!({})),
+                    SqlValue::DateTime(gone),
+                ]
+            })
+            .collect();
+        let q = BulkInsertQuery::new(
+            Media::SCHEMA,
+            vec![
+                "disk",
+                "storage_key",
+                "mime",
+                "size_bytes",
+                "original_filename",
+                "status",
+                "metadata",
+                "deleted_at",
+            ],
+            rows,
+        );
+        rustango::sql::bulk_insert_pool(pool, &q)
+            .await
+            .expect("seed orphans");
+    }
+}
+
+/// One orphan sweep reads a bounded page, not every soft-deleted row.
+async fn the_orphan_sweep_reads_a_bounded_page(pool: &Pool) {
+    seed_orphans(pool, 10_050).await;
+    let mgr = manager(pool, GatedStorage::default());
+    let page = mgr
+        .purge_orphans_dry_run(Duration::ZERO)
+        .await
+        .expect("dry run");
+    assert_eq!(page.len(), 10_000);
+}
+
+/// A full page of rows the sweep fails on does not starve the rows after it.
+async fn failed_orphans_do_not_starve_the_rest(pool: &Pool) {
+    seed_orphans(pool, 10_050).await;
+    let fail_first_page = |key: &str| {
+        key.strip_prefix("o/")
+            .and_then(|n| n.parse::<usize>().ok())
+            .is_some_and(|n| n < 10_000)
+    };
+    let mgr = manager(
+        pool,
+        GatedStorage {
+            fail_key: Some(fail_first_page),
+            ..GatedStorage::default()
+        },
+    );
+    assert!(mgr.purge_orphans(Duration::ZERO).await.is_err());
+    use rustango::sql::CounterPool as _;
+    let left = Media::objects().count(pool).await.expect("count");
+    assert_eq!(left, 10_000, "rows past the failed page were not purged");
+}
+
 tri_dialect_test!(
     setup: setup,
     sqlite: file,
@@ -251,5 +349,8 @@ tri_dialect_test!(
         storage_call_holds_no_lock,
         finalize_cannot_revive_a_claimed_row,
         storage_error_keeps_the_row_for_the_next_sweep,
+        a_pending_row_outlives_its_upload_url,
+        the_orphan_sweep_reads_a_bounded_page,
+        failed_orphans_do_not_starve_the_rest,
     ]
 );
