@@ -4,14 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.5] — 2026-10-26
+
 ### Fixed — migrations
 
 - `apply_all` / `apply_all_pool` create each model's declared indexes, `unique_together` included, so an `ON CONFLICT` on them finds its target. One that cannot be built only warns.
 - Database-mode tenant runs on MySQL and SQLite send `pre_migrate` / `post_migrate` with the tenant's slug, as PG tenant runs do.
 - A hand-written `[DropIndex, DropCompositeFk]` on MySQL drops the FK first; the index drop failed with 1553.
 - Unapplying a dropped NOT NULL column with no default works when the table is empty; with rows it is still refused.
-
-## [0.61.5] — 2026-10-26
 
 ### Added — migrate signals know their database
 

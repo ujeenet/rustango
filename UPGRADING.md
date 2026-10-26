@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.61.5
+
 ### The bootstrap walk creates declared indexes
 
 `apply_all` / `apply_all_pool` now also create `#[rustango(index)]` and `unique_together` indexes. One that cannot be built (a MySQL TEXT column) warns now and is skipped; a later release refuses it, as `migrate` does.
@@ -157,8 +159,6 @@ untouched.
 ### MySQL and SQLite tenant runs send migrate signals
 
 `migrate_tenants_db` / `migrate_one_tenant` now send `pre_migrate` / `post_migrate` once per tenant on every backend, so those receivers run for MySQL and SQLite tenants too.
-
-## 0.61.5
 
 ### `reverse_has` follows `self_pk_column`
 
