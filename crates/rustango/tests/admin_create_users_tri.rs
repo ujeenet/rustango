@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use rustango::casts::{CastValue as _, EncryptedString};
 use rustango::core::{Column as _, Filter, Op, SelectQuery, WhereExpr};
-use rustango::sql::{FetcherPool as _, Pool};
+use rustango::sql::{FetcherPool as _, Pool, UpdaterPool as _};
 use rustango::tenancy::auth::authenticate_user_pool;
 use rustango::tenancy::User;
 use rustango::tri_dialect_test;
@@ -160,7 +160,6 @@ async fn admin_created_user_can_log_in(pool: &Pool) {
 /// only once it completes: a password alone writes nothing (#2093).
 async fn a_login_upgrades_a_weak_hash(pool: &Pool) {
     use rustango::passwords::needs_rehash;
-    use rustango::sql::UpdaterPool as _;
     // argon2id m=8,t=1,p=1 of "pw-weak-hash".
     const WEAK: &str = "$argon2id$v=19$m=8,t=1,p=1$c2FsdHNhbHRzYWx0c2FsdA$Tk2Yd9kayx5c9Zj6ox/S6WGhYHdSHI6LCO1srlux3Ns";
     let name = unique("weak");
@@ -551,9 +550,72 @@ async fn superuser_rows_are_superuser_only(pool: &Pool) {
     );
 }
 
+async fn seed_operator(pool: &Pool, name: &str) -> i64 {
+    let mut op = rustango::tenancy::Operator {
+        id: rustango::sql::Auto::default(),
+        username: name.to_owned(),
+        password_hash: "x".into(),
+        active: true,
+        created_at: chrono::Utc::now(),
+        password_changed_at: None,
+        sessions_revoked_at: None,
+    };
+    op.insert_pool(pool).await.expect("seed operator");
+    op.id.get().copied().unwrap()
+}
+
+async fn active_operators(pool: &Pool) -> Vec<i64> {
+    use rustango::tenancy::Operator;
+    Operator::objects()
+        .where_(Operator::active.eq(true))
+        .fetch(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|o| o.id.get().copied().unwrap())
+        .collect()
+}
+
+/// The registry admin cannot deactivate or delete the last active operator.
+async fn admin_keeps_the_last_active_operator(pool: &Pool) {
+    let (a, b, c) = (unique("la"), unique("lb"), unique("lc"));
+    // Earlier rows are shared: only the two seeded here stay active.
+    use rustango::tenancy::Operator;
+    Operator::objects()
+        .where_(Operator::active.eq(true))
+        .update()
+        .set_typed(Operator::active.set(false))
+        .execute_pool(pool)
+        .await
+        .unwrap();
+    let (a_id, b_id) = (seed_operator(pool, &a).await, seed_operator(pool, &b).await);
+    let off = |name: &str| form(&[("username", name), ("password_hash", "")]);
+    // One of two: allowed.
+    let (status, html) = send(pool, Method::POST, &format!("/rustango_operators/{a_id}"), off(&a)).await;
+    assert!(status.is_redirection(), "{status}: {html}");
+    assert_eq!(active_operators(pool).await, [b_id]);
+    // The last one: neither an edit nor a delete.
+    let uri = format!("/rustango_operators/{b_id}");
+    let (status, html) = send(pool, Method::POST, &uri, off(&b)).await;
+    assert!(!status.is_redirection(), "{status}: {html}");
+    assert!(html.contains("last active operator"), "{html}");
+    let (status, _) = send(pool, Method::POST, &format!("{uri}/delete"), String::new()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(active_operators(pool).await, [b_id]);
+    let c_id = seed_operator(pool, &c).await;
+    // Deleting one of two, and editing the last without deactivating, work.
+    let (status, _) = send(pool, Method::POST, &format!("/rustango_operators/{c_id}/delete"), String::new()).await;
+    assert!(status.is_redirection(), "{status}");
+    let on = form(&[("username", b.as_str()), ("password_hash", ""), ("active", "true")]);
+    let (status, html) = send(pool, Method::POST, &uri, on).await;
+    assert!(status.is_redirection(), "{status}: {html}");
+    assert_eq!(active_operators(pool).await, [b_id]);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        admin_keeps_the_last_active_operator,
         new_user_form_does_not_block_submit,
         admin_created_user_can_log_in,
         a_login_upgrades_a_weak_hash,

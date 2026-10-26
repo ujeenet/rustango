@@ -2501,6 +2501,17 @@ pub(crate) async fn update_submit(
         }
         break (tx, deferred);
     };
+    #[cfg(feature = "tenancy")]
+    if let Err(e) = crate::tenancy::operators::admin_write_keeps_one_active(
+        &mut tx,
+        model.table,
+        pre_update_row.as_slice(),
+    )
+    .await
+    {
+        rollback_quietly(tx, model.table).await;
+        return Ok(refused(e.to_string()).into_response());
+    }
     match admits_written(&mut tx, &parts, model, pk_field, pk_value, Written::Edited).await {
         Ok(true) => {}
         Ok(false) => {
@@ -2692,6 +2703,20 @@ pub(crate) async fn delete_submit(
     if affected == 0 {
         rollback_quietly(tx, model.table).await;
         return Ok(Redirect::to(&list_url).into_response());
+    }
+    #[cfg(feature = "tenancy")]
+    if let Err(e) = crate::tenancy::operators::admin_write_keeps_one_active(
+        &mut tx,
+        model.table,
+        std::slice::from_ref(&before_row),
+    )
+    .await
+    {
+        rollback_quietly(tx, model.table).await;
+        return Err(match e {
+            crate::tenancy::operators::OperatorError::Driver(e) => e.into(),
+            e => bad_action_form("active", "operator", pk_raw, e.to_string()),
+        });
     }
     if emit == crate::audit::DiffEmit::InTx {
         if let Err(e) = crate::audit::emit_in_tx(&mut tx, std::slice::from_ref(&entry)).await {

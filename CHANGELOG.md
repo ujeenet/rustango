@@ -9,6 +9,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `messages::Outbox` stages several flash messages in one response; two `messages::push` calls in one handler kept only the last.
 - `intword` / `naturalsize` / `naturalsize_si` move to the next unit when rounding reaches 1000 (1024): `999_999_999` is `1.0 billion`, not `1000.0 million`.
 - ViewSet create runs the admin's `add` object-permission hooks, on the request and on each written row (single or bulk), as the admin does.
+- The registry admin refuses an edit or delete that would leave no active operator, as the console and CLI do.
 
 ## [0.61.2] — 2026-10-26
 

@@ -101,6 +101,39 @@ pub async fn active_count(registry: &Pool, except: Option<i64>) -> Result<i64, O
     Ok(q.count(registry).await?)
 }
 
+/// The last-active rule for an admin write on `table`, run in its `tx`
+/// after the write: refused when `before` had an active operator and none
+/// is left. The active rows are read locked, so two such writes serialize.
+///
+/// # Errors
+/// [`OperatorError::LastActive`], or a driver error.
+pub(crate) async fn admin_write_keeps_one_active(
+    tx: &mut crate::sql::PoolTx<'_>,
+    table: &str,
+    before: &[serde_json::Value],
+) -> Result<(), OperatorError> {
+    use crate::core::Model as _;
+    use crate::sql::FetcherTx as _;
+    let was_active = |row: &serde_json::Value| {
+        row.get("active")
+            .is_some_and(|v| v.as_bool() == Some(true) || v.as_i64().is_some_and(|n| n != 0))
+    };
+    if table != Operator::SCHEMA.table || !before.iter().any(was_active) {
+        return Ok(());
+    }
+    let left = Operator::objects()
+        .where_(Operator::active.eq(true))
+        .order_by(&[("id", false)])
+        .select_for_update()
+        .silent_on_sqlite()
+        .fetch_tx(tx)
+        .await?;
+    if left.is_empty() {
+        return Err(OperatorError::LastActive);
+    }
+    Ok(())
+}
+
 /// Activate or deactivate `target`, enforcing both lockout rules.
 /// Deactivating also ends the operator's sessions.
 ///
