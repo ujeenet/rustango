@@ -465,7 +465,7 @@ jobs:
         with:
           tool: nextest@0.9.114
       - run: cargo nextest archive --workspace --all-features --archive-file ${{ runner.temp }}/nextest-archive.tar.zst
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: nextest-archive
           path: ${{ runner.temp }}/nextest-archive.tar.zst
@@ -575,7 +575,7 @@ jobs:
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: nextest@0.9.114
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v4
         with:
           name: nextest-archive
           path: ${{ runner.temp }}
@@ -1515,7 +1515,7 @@ jobs:
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: nextest@0.9.114
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v4
         with:
           name: nextest-archive
           path: ${{ runner.temp }}
