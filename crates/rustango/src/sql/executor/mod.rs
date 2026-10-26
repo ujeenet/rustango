@@ -2468,7 +2468,10 @@ where
 }
 
 mod prefetch;
-pub use prefetch::{__reverse_fk_key, fetch_with_prefetch_filtered, fetch_with_prefetch_pool};
+pub use prefetch::{
+    __reverse_fk_key, fetch_with_prefetch_filtered, fetch_with_prefetch_pool,
+    fetch_with_prefetch_related, fetch_with_prefetch_related_filtered,
+};
 
 /// [`select_rows_pool`] that also decodes `select_related` joins.
 /// With no joins it takes the same fast path. With joins it fetches
@@ -2512,6 +2515,49 @@ where
         + Send
         + Unpin,
 {
+    select_rows_mapped_on(exec, query, None, |_, t| t).await
+}
+
+/// [`select_rows_with_related_on`], each row paired with its `key` result
+/// column decoded as the given type.
+pub(crate) async fn select_rows_keyed_on<'c, T, E>(
+    exec: E,
+    query: &SelectQuery,
+    key: (&str, Option<crate::core::FieldType>),
+) -> Result<Vec<(SqlValue, T)>, ExecError>
+where
+    E: SqlExecutor<'c>,
+    T: MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    select_rows_mapped_on(exec, query, Some(key), |k, t| (k, t)).await
+}
+
+/// Decode each row and its `key` cell (`Null` without one) through `out`.
+async fn select_rows_mapped_on<'c, T, E, U>(
+    exec: E,
+    query: &SelectQuery,
+    key: Option<(&str, Option<crate::core::FieldType>)>,
+    out: fn(SqlValue, T) -> U,
+) -> Result<Vec<U>, ExecError>
+where
+    E: SqlExecutor<'c>,
+    U: Send,
+    T: MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
     let stmt = exec.dialect().compile_select(query)?;
     // Each JOIN target is stitched from the same row, once per FK chain
     // (from its leaf alias). No joins: plain decode.
@@ -2524,7 +2570,7 @@ where
             for &(alias, first_hop) in leaves {
                 let _ = t.__rustango_load_related(row, alias, first_hop)?;
             }
-            Ok(t)
+            Ok(out(key_cell(row, key)?, t))
         }
         #[cfg(feature = "mysql")]
         RowRef::Mysql(row) => {
@@ -2532,7 +2578,7 @@ where
             for &(alias, first_hop) in leaves {
                 let _ = t.__rustango_load_related_my(row, alias, first_hop)?;
             }
-            Ok(t)
+            Ok(out(key_cell(row, key)?, t))
         }
         #[cfg(feature = "sqlite")]
         RowRef::Sqlite(row) => {
@@ -2540,10 +2586,23 @@ where
             for &(alias, first_hop) in leaves {
                 let _ = t.__rustango_load_related_sqlite(row, alias, first_hop)?;
             }
-            Ok(t)
+            Ok(out(key_cell(row, key)?, t))
         }
     })
     .await
+}
+
+/// The `key` column of `row`; `Null` when there is none.
+fn key_cell<R: decode::DecodeRow>(
+    row: &R,
+    key: Option<(&str, Option<crate::core::FieldType>)>,
+) -> Result<SqlValue, sqlx::Error>
+where
+    for<'a> &'a str: sqlx::ColumnIndex<R>,
+{
+    key.map_or(Ok(SqlValue::Null), |(name, ty)| {
+        decode::named_cell(row, name, ty)
+    })
 }
 
 /// Gives `QuerySet` a `fetch(&Pool)` method that works on any

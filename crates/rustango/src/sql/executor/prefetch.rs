@@ -55,19 +55,12 @@ where
         + Send
         + Unpin,
 {
-    let parents: Vec<P> = parent_qs.fetch(pool).await?;
-    let base = crate::query::QuerySet::<C>::new();
-    stitch(parents, child_fk_column, |keys| {
-        super::fetch_in_chunks(pool, &base, keys, |keys| {
-            crate::query::QuerySet::<C>::new()
-                .filter_op(
-                    child_fk_column,
-                    crate::core::Op::In,
-                    crate::core::SqlValue::List(keys),
-                )
-                .fetch(pool)
-        })
-    })
+    fetch_with_prefetch_filtered(
+        parent_qs,
+        child_fk_column,
+        crate::query::QuerySet::<C>::new(),
+        pool,
+    )
     .await
 }
 
@@ -133,35 +126,284 @@ where
         + Unpin,
 {
     let parents: Vec<P> = parent_qs.fetch(pool).await?;
+    let on = target_column::<P, C>(child_fk_column);
     // The IN list AND-composes with the caller's filters, order and limit.
     // Over the bind cap the keys go in batches; a limit or offset then refuses.
-    stitch(parents, child_fk_column, |keys| {
-        super::fetch_in_chunks(pool, &child_qs, keys, |keys| {
-            child_qs
-                .clone()
-                .filter_op(
-                    child_fk_column,
-                    crate::core::Op::In,
-                    crate::core::SqlValue::List(keys),
-                )
-                .fetch(pool)
-        })
+    stitch(parents, on, |keys| async {
+        let children = reverse_children(pool, &child_qs, child_fk_column, keys).await?;
+        Ok(children
+            .into_iter()
+            .filter_map(|c| Some((c.__rustango_fk_pk_value(child_fk_column)?, c)))
+            .collect())
     })
     .await
 }
 
-/// Pair each parent with the children `fetch` returns for its key. A parent
-/// the query returned `n` times costs `n` child fetches: `C` is not `Clone`.
+/// `child_qs` narrowed to rows whose `child_fk_column` is one of `keys`.
+async fn reverse_children<C>(
+    pool: &Pool,
+    child_qs: &crate::query::QuerySet<C>,
+    child_fk_column: &'static str,
+    keys: Vec<crate::core::SqlValue>,
+) -> Result<Vec<C>, ExecError>
+where
+    C: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    super::fetch_in_chunks(pool, child_qs, keys, |keys| {
+        child_qs
+            .clone()
+            .filter_op(
+                child_fk_column,
+                crate::core::Op::In,
+                crate::core::SqlValue::List(keys),
+            )
+            .fetch(pool)
+    })
+    .await
+}
+
+/// Prefetch the relation `relation` of every parent: a many-to-many or a
+/// `reverse_has` reverse FK, by name, as Django's `prefetch_related("tags")`.
+///
+/// ```ignore
+/// let posts: Vec<(Post, Vec<Tag>)> =
+///     fetch_with_prefetch_related(Post::objects(), "tags", &pool).await?;
+/// ```
+///
+/// One query for the parents and one per relation, its `IN` list chunked
+/// under the backend's bind cap. A reverse FK keys on the relation's
+/// `self_pk_column`; a many-to-many joins its through table, so a target
+/// shared by several parents is a copy under each.
+///
+/// # Errors
+/// As [`fetch_with_prefetch_filtered`];
+/// [`QueryError::UnknownField`](crate::core::QueryError::UnknownField) for
+/// an unknown name and [`ExecError::PrefetchTargetMismatch`] when the
+/// relation does not point at `C`.
+pub async fn fetch_with_prefetch_related<P, C>(
+    parent_qs: crate::query::QuerySet<P>,
+    relation: &str,
+    pool: &Pool,
+) -> Result<Vec<(P, Vec<C>)>, ExecError>
+where
+    P: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + HasPkValue
+        + Send
+        + Unpin,
+    C: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + HasPkValue
+        + Send
+        + Unpin,
+{
+    let child_qs = crate::query::QuerySet::<C>::new();
+    fetch_with_prefetch_related_filtered(parent_qs, relation, child_qs, pool).await
+}
+
+/// [`fetch_with_prefetch_related`] with a filtered, ordered child queryset.
+/// A limit on `child_qs` is global, not per parent.
+///
+/// # Errors
+/// As [`fetch_with_prefetch_related`].
+pub async fn fetch_with_prefetch_related_filtered<P, C>(
+    parent_qs: crate::query::QuerySet<P>,
+    relation: &str,
+    child_qs: crate::query::QuerySet<C>,
+    pool: &Pool,
+) -> Result<Vec<(P, Vec<C>)>, ExecError>
+where
+    P: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + HasPkValue
+        + Send
+        + Unpin,
+    C: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + HasPkValue
+        + Send
+        + Unpin,
+{
+    // Resolved first, so a bad name costs no query.
+    let named = Named::resolve::<P, C>(relation)?;
+    let parents: Vec<P> = parent_qs.fetch(pool).await?;
+    match named {
+        Named::Reverse { field, column, on } => {
+            stitch(parents, on, |keys| async {
+                let children = reverse_children(pool, &child_qs, field, keys).await?;
+                Ok(children
+                    .into_iter()
+                    .filter_map(|c| Some((c.__rustango_column_value(column)?, c)))
+                    .collect())
+            })
+            .await
+        }
+        Named::M2m(rel) => {
+            stitch(parents, None, |keys| {
+                m2m_children(pool, rel, &child_qs, keys)
+            })
+            .await
+        }
+    }
+}
+
+/// A relation [`fetch_with_prefetch_related`] loads, resolved by name.
+enum Named {
+    /// Children whose `field` (SQL `column`) holds the parent's `on` value.
+    Reverse {
+        field: &'static str,
+        column: &'static str,
+        on: Option<&'static str>,
+    },
+    /// Targets linked through a junction keyed by the parent's pk.
+    M2m(&'static crate::core::M2MRelation),
+}
+
+impl Named {
+    /// Reverse FK first, then M2M: the order `where_has` resolves names in.
+    fn resolve<P: Model, C: Model>(relation: &str) -> Result<Self, ExecError> {
+        let mismatch = |expected: &'static str| ExecError::PrefetchTargetMismatch {
+            model: P::SCHEMA.name,
+            relation: relation.to_owned(),
+            expected,
+            got: C::SCHEMA.table,
+        };
+        if let Some(rel) = P::reverse_relations().iter().find(|r| r.name == relation) {
+            if rel.child_schema.table != C::SCHEMA.table {
+                return Err(mismatch(rel.child_schema.table));
+            }
+            let field = C::SCHEMA
+                .field(rel.child_fk_column)
+                .or_else(|| C::SCHEMA.field_by_column(rel.child_fk_column))
+                .ok_or_else(|| {
+                    ExecError::Query(crate::core::QueryError::UnknownField {
+                        model: C::SCHEMA.name,
+                        field: rel.child_fk_column.to_owned(),
+                    })
+                })?;
+            let on =
+                (Some(rel.self_pk_column) != P::SCHEMA.pk_column()).then_some(rel.self_pk_column);
+            return Ok(Self::Reverse {
+                field: field.name,
+                column: field.column,
+                on,
+            });
+        }
+        if let Some(rel) = P::SCHEMA.m2m.iter().find(|m| m.name == relation) {
+            if rel.to != C::SCHEMA.table {
+                return Err(mismatch(rel.to));
+            }
+            return Ok(Self::M2m(rel));
+        }
+        Err(ExecError::Query(crate::core::QueryError::UnknownField {
+            model: P::SCHEMA.name,
+            field: relation.to_owned(),
+        }))
+    }
+}
+
+/// The junction's alias in the many-to-many prefetch join.
+const M2M_ALIAS: &str = "__rustango_m2m";
+
+/// `child_qs` inner-joined to `rel`'s junction on rows whose source is one
+/// of `keys`, each target paired with that source: one row per link.
+async fn m2m_children<C>(
+    pool: &Pool,
+    rel: &'static crate::core::M2MRelation,
+    child_qs: &crate::query::QuerySet<C>,
+    keys: Vec<crate::core::SqlValue>,
+) -> Result<Vec<(crate::core::SqlValue, C)>, ExecError>
+where
+    C: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    use crate::core::joins::aliased;
+    use crate::core::{Filter, Join, JoinKind, Op, SqlValue, WhereExpr};
+    let pk = C::SCHEMA.pk_column().ok_or(ExecError::MissingPrimaryKey {
+        table: C::SCHEMA.table,
+    })?;
+    let junction = crate::sql::m2m::junction(rel.through, &[rel.src_col, rel.dst_col]);
+    let src_ty = junction.field_by_column(rel.src_col).map(|f| f.ty);
+    let base = child_qs.clone().compile()?;
+    let linked = |keys: Option<Vec<SqlValue>>| {
+        let mut on = vec![WhereExpr::ExprCompare {
+            lhs: aliased(M2M_ALIAS, rel.dst_col),
+            op: Op::Eq,
+            rhs: aliased(C::SCHEMA.table, pk),
+        }];
+        if let Some(keys) = keys {
+            on.push(WhereExpr::Predicate(Filter {
+                column: rel.src_col,
+                op: Op::In,
+                value: SqlValue::List(keys),
+            }));
+        }
+        let mut q = base.clone();
+        q.joins.push(Join {
+            target: junction,
+            alias: M2M_ALIAS,
+            kind: JoinKind::Inner,
+            on: WhereExpr::And(on),
+            project: vec![rel.src_col],
+        });
+        q
+    };
+    let label = crate::core::joins::joined_label(M2M_ALIAS, rel.src_col);
+    let key = (label.as_str(), src_ty);
+    super::fetch_select_in_chunks(pool, &linked(None), child_qs.is_sliced(), keys, |keys| {
+        let q = linked(Some(keys));
+        async move { super::select_rows_keyed_on(pool, &q, key).await }
+    })
+    .await
+}
+
+/// Pair each parent with the children `fetch` returns keyed by its `on`
+/// value (else its pk). A parent the query returned `n` times costs `n`
+/// child fetches: `C` is not `Clone`.
 async fn stitch<P, C, F, Fut>(
     parents: Vec<P>,
-    child_fk_column: &'static str,
+    on: Option<&'static str>,
     mut fetch: F,
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
     P: Model + HasPkValue,
-    C: Model + FkPkAccess,
     F: FnMut(Vec<crate::core::SqlValue>) -> Fut,
-    Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
+    Fut: std::future::Future<Output = Result<Vec<(crate::core::SqlValue, C)>, ExecError>>,
 {
     use std::collections::HashMap;
     if parents.is_empty() {
@@ -172,7 +414,6 @@ where
         .ok_or(ExecError::MissingPrimaryKey {
             table: P::SCHEMA.table,
         })?;
-    let on = target_column::<P, C>(child_fk_column);
     // Each distinct key in first-seen order, with how many parents carry it.
     let mut keys: Vec<(String, crate::core::SqlValue, usize)> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
@@ -199,13 +440,11 @@ where
             .map(|k| k.1.clone())
             .collect();
         let mut grouped: HashMap<String, Vec<C>> = HashMap::new();
-        for child in fetch(batch).await? {
-            if let Some(fk) = child.__rustango_fk_pk_value(child_fk_column) {
-                grouped
-                    .entry(fk.to_display_string())
-                    .or_default()
-                    .push(child);
-            }
+        for (fk, child) in fetch(batch).await? {
+            grouped
+                .entry(fk.to_display_string())
+                .or_default()
+                .push(child);
         }
         rounds.push(grouped);
     }
