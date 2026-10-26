@@ -1075,8 +1075,10 @@ impl Cache for InMemoryCache {
 ///
 /// `[magic "RCF1"][expires_at: i64 BE epoch-millis][key_len: u32 BE]
 /// [key bytes][value bytes]`. `expires_at = 0` means no TTL. Expired
-/// entries are removed on the next `get` or `exists`; there is no
-/// background reaper.
+/// entries are removed on the next `get` or `exists`, by
+/// [`FileCache::purge_expired`], and by a sweep of one sixteenth of the
+/// directory every 16 writes. The directory is created 0700 and entries
+/// 0600 on Unix.
 ///
 /// ## Limits
 ///
@@ -1092,7 +1094,18 @@ impl Cache for InMemoryCache {
 /// File I/O runs on tokio's blocking pool, or inline outside a tokio runtime.
 pub struct FileCache {
     dir: std::path::PathBuf,
+    sweep: Arc<Sweep>,
 }
+
+/// Write count and next stripe for the bounded expiry sweep.
+#[derive(Default)]
+struct Sweep {
+    writes: std::sync::atomic::AtomicU32,
+    busy: std::sync::atomic::AtomicBool,
+}
+
+/// One sweep every this many writes; each covers one of 16 hex stripes.
+const SWEEP_EVERY: u32 = 16;
 
 impl FileCache {
     /// File-format marker. Bump the digit when the layout changes.
@@ -1104,13 +1117,36 @@ impl FileCache {
     /// Store entries under `dir`, which is created on the first `set`.
     #[must_use]
     pub fn new(dir: impl Into<std::path::PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self {
+            dir: dir.into(),
+            sweep: Arc::default(),
+        }
+    }
+
+    /// Create the cache dir, owner-only on Unix: entries hold keys in clear.
+    fn make_dir(&self) -> Result<(), CacheError> {
+        let mut b = std::fs::DirBuilder::new();
+        b.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+        b.create(&self.dir)
+            .map_err(|e| CacheError::Connection(format!("create_dir_all: {e}")))
     }
 
     /// The directory entries are stored under.
     #[must_use]
     pub fn dir(&self) -> &std::path::Path {
         &self.dir
+    }
+
+    /// Delete every expired or unreadable entry now and return how many
+    /// went. Writes already sweep a sixteenth of the directory every 16
+    /// calls; run this on a schedule to reclaim space sooner.
+    ///
+    /// # Errors
+    /// [`CacheError::Connection`] when the directory cannot be read.
+    pub async fn purge_expired(&self) -> Result<u64, CacheError> {
+        self.blocking(|c| c.sweep_dir(None)).await
     }
 
     /// Hash the key into a stable, filesystem-safe filename: SHA-256
@@ -1198,16 +1234,82 @@ impl FileCache {
     /// Write an entry to a fresh temp file in the cache dir, ready to be
     /// renamed into place. The name has no `.cache` extension.
     fn write_tmp(&self, bytes: &[u8]) -> Result<std::path::PathBuf, CacheError> {
-        std::fs::create_dir_all(&self.dir)
-            .map_err(|e| CacheError::Connection(format!("create_dir_all: {e}")))?;
+        use std::io::Write as _;
+        self.make_dir()?;
         let tmp = self
             .dir
             .join(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
-        std::fs::write(&tmp, bytes).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            CacheError::Connection(format!("write: {e}"))
-        })?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        opts.open(&tmp)
+            .and_then(|mut f| f.write_all(bytes))
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                CacheError::Connection(format!("write: {e}"))
+            })?;
         Ok(tmp)
+    }
+
+    /// `true` when the entry file at `path` is expired or unreadable, from
+    /// its header alone. Non-regular files are skipped by the callers.
+    fn header_dead(path: &std::path::Path) -> bool {
+        use std::io::Read as _;
+        let mut head = [0u8; 12];
+        let Ok(mut f) = std::fs::File::open(path) else {
+            return false;
+        };
+        if f.read_exact(&mut head).is_err() || &head[..4] != Self::MAGIC {
+            return true;
+        }
+        let mut ts = [0u8; 8];
+        ts.copy_from_slice(&head[4..]);
+        let at = i64::from_be_bytes(ts);
+        at != 0 && Self::now_unix_millis() > at
+    }
+
+    /// Remove dead entries whose name starts with `stripe` (all when `None`).
+    fn sweep_dir(&self, stripe: Option<char>) -> Result<u64, CacheError> {
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(CacheError::Connection(format!("read_dir: {e}"))),
+        };
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_str().unwrap_or("");
+            let in_stripe = stripe.is_none_or(|c| name.starts_with(c));
+            if !in_stripe
+                || path.extension().and_then(|s| s.to_str()) != Some("cache")
+                || !entry.file_type().is_ok_and(|t| t.is_file())
+                || !Self::header_dead(&path)
+            {
+                continue;
+            }
+            // Re-checked under the stripe lock, so a racing `set` survives.
+            if self.clear_dead(&path).is_ok() && !path.exists() {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Every `SWEEP_EVERY` writes, sweep the next stripe. Best effort.
+    fn after_write(&self) {
+        use std::sync::atomic::Ordering;
+        let n = self.sweep.writes.fetch_add(1, Ordering::Relaxed);
+        if n % SWEEP_EVERY != SWEEP_EVERY - 1 || self.sweep.busy.swap(true, Ordering::Acquire) {
+            return;
+        }
+        let stripe = char::from_digit((n / SWEEP_EVERY) % 16, 16).unwrap_or('0');
+        let _ = self.sweep_dir(Some(stripe));
+        self.sweep.busy.store(false, Ordering::Release);
     }
 
     /// Longest wait for a stripe lock before the call fails.
@@ -1224,7 +1326,10 @@ impl FileCache {
         let Ok(rt) = tokio::runtime::Handle::try_current() else {
             return op(self);
         };
-        let me = Self::new(self.dir.clone());
+        let me = Self {
+            dir: self.dir.clone(),
+            sweep: self.sweep.clone(),
+        };
         rt.spawn_blocking(move || op(&me))
             .await
             .map_err(|e| CacheError::Connection(format!("blocking task: {e}")))?
@@ -1260,8 +1365,7 @@ impl FileCache {
             .and_then(|n| n.to_str())
             .and_then(|n| n.get(..2))
             .unwrap_or("00");
-        std::fs::create_dir_all(&self.dir)
-            .map_err(|e| CacheError::Connection(format!("create_dir_all: {e}")))?;
+        self.make_dir()?;
         let mut opts = std::fs::OpenOptions::new();
         opts.create(true).truncate(false).write(true);
         #[cfg(unix)]
@@ -1363,8 +1467,11 @@ impl FileCache {
     fn set_entry(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<(), CacheError> {
         let path = self.key_path(key);
         let tmp = self.write_tmp(&Self::encode(key, value, ttl))?;
-        let _lock = self.lock_for(&tmp, &path)?;
-        Self::put(&tmp, &path)
+        let lock = self.lock_for(&tmp, &path)?;
+        Self::put(&tmp, &path)?;
+        drop(lock);
+        self.after_write();
+        Ok(())
     }
 
     fn incr_entry(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
@@ -1423,7 +1530,7 @@ impl FileCache {
     ) -> Result<bool, CacheError> {
         let path = self.key_path(key);
         let tmp = self.write_tmp(&Self::encode(key, value, ttl))?;
-        let _lock = self.lock_for(&tmp, &path)?;
+        let lock = self.lock_for(&tmp, &path)?;
         let live = match Self::read_entry(&path) {
             Ok(entry) => matches!(entry, Entry::Live(..)),
             Err(e) => {
@@ -1435,7 +1542,10 @@ impl FileCache {
             let _ = std::fs::remove_file(&tmp);
             return Ok(false);
         }
-        Self::put(&tmp, &path).map(|()| true)
+        Self::put(&tmp, &path)?;
+        drop(lock);
+        self.after_write();
+        Ok(true)
     }
 
     fn clear_entries(&self) -> Result<(), CacheError> {
@@ -1765,6 +1875,25 @@ mod file_cache_tests {
 
     fn tmp_dir(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("rustango-fc-{label}-{}", uuid::Uuid::new_v4()))
+    }
+
+    /// `purge_expired` drops expired and unreadable entries, keeps the rest.
+    #[tokio::test]
+    async fn file_cache_purge_expired_keeps_live_entries() {
+        let dir = tmp_dir("purge");
+        let cache = FileCache::new(&dir);
+        cache.set("live", "v", None).await.unwrap();
+        cache.set("ttl", "v", Some(Duration::from_secs(60))).await.unwrap();
+        cache.set("old", "v", Some(Duration::from_millis(20))).await.unwrap();
+        std::fs::write(cache.key_path("junk"), b"not an entry").unwrap();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let removed = cache.purge_expired().await.unwrap();
+        let live = (cache.get("live").await.unwrap(), cache.get("ttl").await.unwrap());
+        let gone = !cache.key_path("old").exists() && !cache.key_path("junk").exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(removed, 2);
+        assert!(gone);
+        assert_eq!(live, (Some("v".into()), Some("v".into())));
     }
 
     /// Hold `key`'s stripe lock from outside the cache.

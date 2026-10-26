@@ -154,6 +154,10 @@ untouched.
 
 An unset or `console` `[mail] backend` now warns on the prod tier. Set `smtp`, or `null` if the app sends no mail. `"*"` in `allowed_hosts` or `cors_allowed_origins` and an unset `request_timeout_secs` warn too.
 
+### `FileCache` permissions
+
+New cache directories are 0700 and entries 0600. An existing directory keeps its mode; `chmod 700` it, since entry files name keys in clear.
+
 ## 0.61.3
 
 ### `[cache] backend` should be a known lowercase name

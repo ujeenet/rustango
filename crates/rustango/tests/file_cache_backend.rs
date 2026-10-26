@@ -411,3 +411,55 @@ async fn incr_without_ttl_keeps_the_expiry() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(left, None, "the counter lost its expiry");
 }
+
+/// `.cache` entry files under `dir`.
+fn entry_files(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("cache"))
+        .count()
+}
+
+/// Expired entries nobody reads again are swept by later writes.
+#[tokio::test]
+async fn writes_sweep_expired_entries_nobody_reads() {
+    let dir = unique_tmp_dir("sweep");
+    let cache = FileCache::new(&dir);
+    for i in 0..40 {
+        cache
+            .set(&format!("old{i}"), "v", Some(Duration::from_millis(50)))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    // 16 stripes x 16 writes: one full pass.
+    for i in 0..256 {
+        cache.set(&format!("new{i}"), "v", None).await.unwrap();
+    }
+    let left = entry_files(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(left, 256, "expired entries were left on disk");
+}
+
+/// Entries hold keys such as session ids in clear: owner-only.
+#[cfg(unix)]
+#[tokio::test]
+async fn dir_and_entries_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = unique_tmp_dir("perms").join("nested");
+    let cache = FileCache::new(&dir);
+    cache.set("session:abc", "v", None).await.unwrap();
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let dir_mode = mode(&dir);
+    let file = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().and_then(|s| s.to_str()) == Some("cache"))
+        .unwrap();
+    let file_mode = mode(&file);
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    assert_eq!(dir_mode, 0o700, "dir {dir_mode:o}");
+    assert_eq!(file_mode, 0o600, "file {file_mode:o}");
+}

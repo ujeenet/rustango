@@ -13,6 +13,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `audit-cleanup --days`, the admin cleanup form and `cleanup_older_than*` keep every row when the cutoff falls before 1970 or past chrono's range; `format_duration_long` / `_short` filters pass out-of-range seconds through unchanged.
 
+### Fixed — `FileCache` reaps expired entries and is owner-only
+
+Every 16 writes sweep one sixteenth of the directory for expired entries, and the new `FileCache::purge_expired` sweeps it all. New directories are created 0700 and entries 0600 on Unix; entries held keys such as session ids readable to other local users.
+
 ## [0.61.3] — 2026-10-26
 
 ### Changed — unknown `cache.backend` values are logged as errors
