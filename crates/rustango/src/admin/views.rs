@@ -1984,12 +1984,13 @@ pub(crate) async fn create_submit(
     let locked = state.locked_fields(model, AdminWrite::Add);
     let mut skip: Vec<&str> = locked.all().collect();
     skip.extend(FormLayout::of(model, &admin_cfg, false).unrendered(model));
-    // An empty or absent defaulted field is left to its column default.
+    // A defaulted field the form does not send is left to its column
+    // default; a sent empty value still means "" or NULL.
     skip.extend(
         model
             .scalar_fields()
             .filter(|f| crate::forms::absent_takes_default(f, crate::forms::Encoding::Form))
-            .filter(|f| form.get(f.name).is_none_or(String::is_empty))
+            .filter(|f| !form.contains_key(f.name))
             .map(|f| f.name),
     );
     let mut collected = match forms::collect_insert_values(model, &form, &skip) {
@@ -2464,6 +2465,9 @@ pub(crate) async fn update_submit(
     // An extra host is checked after its UPDATE: retried once, as on create.
     #[cfg(feature = "tenancy")]
     let mut retry = claims.retries();
+    // The operator lock can deadlock with another admin write: retried once.
+    #[cfg(feature = "tenancy")]
+    let mut lock_retry = true;
     let (mut tx, deferred) = loop {
         #[cfg(feature = "tenancy")]
         let mut tx = match claims.begin(&state.pool, &pk_value).await {
@@ -2474,6 +2478,23 @@ pub(crate) async fn update_submit(
         let mut tx = match crate::audit::PoolBoundTx::begin_write(&state.pool).await {
             Ok(tx) => tx,
             Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
+        };
+        #[cfg(feature = "tenancy")]
+        let operators = match crate::tenancy::operators::AdminOperatorWrite::lock(
+            &mut tx,
+            model.table,
+            pre_update_row.as_slice(),
+        )
+        .await
+        {
+            Ok(w) => w,
+            Err(e) => {
+                rollback_quietly(tx, model.table).await;
+                if e.is_deadlock() && std::mem::take(&mut lock_retry) {
+                    continue;
+                }
+                return Err(e.into());
+            }
         };
         let written = crate::audit::update_one_with_row_diff_tx(
             &mut tx,
@@ -2507,19 +2528,23 @@ pub(crate) async fn update_submit(
             }
             return Ok(refused(claim_refusal(model, e)).into_response());
         }
+        #[cfg(feature = "tenancy")]
+        match operators.check(&mut tx).await {
+            Ok(()) => {}
+            Err(crate::tenancy::operators::OperatorError::Driver(e)) => {
+                rollback_quietly(tx, model.table).await;
+                if e.is_deadlock() && std::mem::take(&mut lock_retry) {
+                    continue;
+                }
+                return Err(e.into());
+            }
+            Err(e) => {
+                rollback_quietly(tx, model.table).await;
+                return Ok(refused(e.to_string()).into_response());
+            }
+        }
         break (tx, deferred);
     };
-    #[cfg(feature = "tenancy")]
-    if let Err(e) = crate::tenancy::operators::admin_write_keeps_one_active(
-        &mut tx,
-        model.table,
-        pre_update_row.as_slice(),
-    )
-    .await
-    {
-        rollback_quietly(tx, model.table).await;
-        return Ok(refused(e.to_string()).into_response());
-    }
     match admits_written(&mut tx, &parts, model, pk_field, pk_value, Written::Edited).await {
         Ok(true) => {}
         Ok(false) => {
@@ -2692,6 +2717,20 @@ pub(crate) async fn delete_submit(
     // An `audit(...)` model's entry commits with the write, as on edit (#2390).
     let emit = crate::audit::DiffEmit::for_model(model);
     let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
+    #[cfg(feature = "tenancy")]
+    let operators = match crate::tenancy::operators::AdminOperatorWrite::lock(
+        &mut tx,
+        model.table,
+        std::slice::from_ref(&before_row),
+    )
+    .await
+    {
+        Ok(w) => w,
+        Err(e) => {
+            rollback_quietly(tx, model.table).await;
+            return Err(e.into());
+        }
+    };
     let written = if let Some(col) = model.soft_delete_column {
         let now = Some(chrono::Utc::now());
         let stamp = crate::soft_delete::__mark_query(model, col, pk_field.column, pk_value, now);
@@ -2713,18 +2752,9 @@ pub(crate) async fn delete_submit(
         return Ok(Redirect::to(&list_url).into_response());
     }
     #[cfg(feature = "tenancy")]
-    if let Err(e) = crate::tenancy::operators::admin_write_keeps_one_active(
-        &mut tx,
-        model.table,
-        std::slice::from_ref(&before_row),
-    )
-    .await
-    {
+    if let Err(e) = operators.check(&mut tx).await {
         rollback_quietly(tx, model.table).await;
-        return Err(match e {
-            crate::tenancy::operators::OperatorError::Driver(e) => e.into(),
-            e => bad_action_form("active", "operator", pk_raw, e.to_string()),
-        });
+        return Err(operator_refusal(e, pk_raw));
     }
     if emit == crate::audit::DiffEmit::InTx {
         if let Err(e) = crate::audit::emit_in_tx(&mut tx, std::slice::from_ref(&entry)).await {
@@ -3003,6 +3033,20 @@ pub(crate) async fn action_submit(
     // An `audit(...)` model's entries commit with the write (#2390).
     let emit = crate::audit::DiffEmit::for_model(model);
     let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
+    #[cfg(feature = "tenancy")]
+    let operators = match crate::tenancy::operators::AdminOperatorWrite::lock(
+        &mut tx,
+        model.table,
+        &before_rows,
+    )
+    .await
+    {
+        Ok(w) => w,
+        Err(e) => {
+            rollback_quietly(tx, model.table).await;
+            return Err(e.into());
+        }
+    };
     let changed = match builtin.run(&mut tx, model, pk_field, &pk_values).await {
         Ok(changed) => changed,
         Err(e) => {
@@ -3011,6 +3055,11 @@ pub(crate) async fn action_submit(
             return refused_delete(&state, model, e);
         }
     };
+    #[cfg(feature = "tenancy")]
+    if let Err(e) = operators.check(&mut tx).await {
+        rollback_quietly(tx, model.table).await;
+        return Err(operator_refusal(e, String::new()));
+    }
     // A row someone else deleted or marked since the read keeps their
     // stamp and audit row (#1929).
     let (before_rows, row_pks): (Vec<_>, Vec<_>) = before_rows
@@ -3032,6 +3081,15 @@ pub(crate) async fn action_submit(
     send_row_signals(model.table, &row_pks, is_delete, false).await;
 
     back()
+}
+
+/// A refused last-active-operator write: a 400; a driver error stays one.
+#[cfg(feature = "tenancy")]
+fn operator_refusal(e: crate::tenancy::operators::OperatorError, pk: String) -> AdminError {
+    match e {
+        crate::tenancy::operators::OperatorError::Driver(e) => e.into(),
+        e => bad_action_form("active", "operator", pk, e.to_string()),
+    }
 }
 
 /// A malformed action POST: a 400, not a 500 (#2346).
