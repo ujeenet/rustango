@@ -378,7 +378,6 @@ pub(crate) async fn render_for_parent_in(
         });
 
         let field_labels = display_fields.iter().map(|f| f.name.to_owned()).collect();
-        let pk_column = pk_field.map(|p| p.column).unwrap_or("id");
         let child_cfg = admin_config_or_default(child_model);
         let rendered_rows: Vec<serde_json::Value> = rows
             .iter()
@@ -387,7 +386,7 @@ pub(crate) async fn render_for_parent_in(
                     .iter()
                     .map(|f| {
                         let raw = row
-                            .get(f.column)
+                            .get(f.name)
                             .cloned()
                             .unwrap_or(serde_json::Value::Null);
                         serde_json::json!({
@@ -396,7 +395,7 @@ pub(crate) async fn render_for_parent_in(
                         })
                     })
                     .collect();
-                let pk_text = row.get(pk_column).map(stringify_pk).unwrap_or_default();
+                let pk_text = row_pk_text(row, pk_field);
                 serde_json::json!({
                     "pk": pk_text,
                     // The View link's path segment; a raw `/` or `?` would break it (#2079).
@@ -544,7 +543,6 @@ pub(crate) async fn render_generic_for_parent_in(
         });
 
         let field_labels = display_fields.iter().map(|f| f.name.to_owned()).collect();
-        let pk_column = pk_field.map(|p| p.column).unwrap_or("id");
         let child_cfg = admin_config_or_default(child_model);
         let rendered_rows: Vec<serde_json::Value> = rows
             .iter()
@@ -553,7 +551,7 @@ pub(crate) async fn render_generic_for_parent_in(
                     .iter()
                     .map(|f| {
                         let raw = row
-                            .get(f.column)
+                            .get(f.name)
                             .cloned()
                             .unwrap_or(serde_json::Value::Null);
                         serde_json::json!({
@@ -562,7 +560,7 @@ pub(crate) async fn render_generic_for_parent_in(
                         })
                     })
                     .collect();
-                let pk_text = row.get(pk_column).map(stringify_pk).unwrap_or_default();
+                let pk_text = row_pk_text(row, pk_field);
                 serde_json::json!({
                     "pk": pk_text,
                     // The View link's path segment; a raw `/` or `?` would break it (#2079).
@@ -828,7 +826,6 @@ pub(crate) async fn render_form_for_parent_in(
         let prefix = child_model.table.to_owned();
         let initial_forms = rows.len();
         let total_forms = initial_forms + extra;
-        let pk_column = pk_field.map(|p| p.column).unwrap_or("id");
         let child_cfg = admin_config_or_default(child_model);
 
         let mut field_labels: Vec<String> =
@@ -840,7 +837,7 @@ pub(crate) async fn render_form_for_parent_in(
 
         let mut rendered_rows: Vec<serde_json::Value> = Vec::with_capacity(total_forms);
         for (idx, row) in rows.iter().enumerate() {
-            let pk_text = row.get(pk_column).map(stringify_pk).unwrap_or_default();
+            let pk_text = row_pk_text(row, pk_field);
             let cells: Vec<serde_json::Value> = display_fields
                 .iter()
                 .map(|f| {
@@ -1227,6 +1224,14 @@ impl OwnRows {
             None => Ok(None),
         }
     }
+}
+
+/// A fetched row's PK text; rows are keyed by field name.
+fn row_pk_text(row: &serde_json::Value, pk: Option<&FieldSchema>) -> String {
+    pk.map_or_else(
+        || row.get("id").map(stringify_pk).unwrap_or_default(),
+        |pk| pk_key(row, pk),
+    )
 }
 
 /// A fetched row's PK as [`SqlValue::to_display_string`] spells it.
@@ -2093,7 +2098,6 @@ pub(crate) async fn render_form_generic_for_parent_in(
         let prefix = child_model.table.to_owned();
         let initial_forms = rows.len();
         let total_forms = initial_forms + extra;
-        let pk_column = pk_field.map(|p| p.column).unwrap_or("id");
         let child_cfg = admin_config_or_default(child_model);
 
         let mut field_labels: Vec<String> =
@@ -2104,7 +2108,7 @@ pub(crate) async fn render_form_generic_for_parent_in(
 
         let mut rendered_rows: Vec<serde_json::Value> = Vec::with_capacity(total_forms);
         for (idx, row) in rows.iter().enumerate() {
-            let pk_text = row.get(pk_column).map(stringify_pk).unwrap_or_default();
+            let pk_text = row_pk_text(row, pk_field);
             let cells: Vec<serde_json::Value> = display_fields
                 .iter()
                 .map(|f| {

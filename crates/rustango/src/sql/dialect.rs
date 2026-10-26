@@ -445,6 +445,14 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// Query for the composite FKs on or referencing one column, binding
+    /// `(table, column, table, column)`: one `(table, name, column, referenced
+    /// table, referenced column, ON DELETE, ON UPDATE)` row per key column,
+    /// in key order. `None` where a MODIFY needs none.
+    fn composite_foreign_keys_sql(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Query for an index's first column when no other index starts with it,
     /// binding `(table, index)`, where an FK refuses to lose the only index
     /// it can use (MySQL, 1553; #2244).

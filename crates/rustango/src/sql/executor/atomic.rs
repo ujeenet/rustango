@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::OwnedMutexGuard;
 
-use super::{transaction_pool, ExecError, PoolTx};
+use super::{transaction_pool, write_transaction, ExecError, PoolTx};
 use crate::sql::{Pool, PoolId};
 
 type Callback = Box<dyn FnOnce() + Send>;
@@ -454,7 +454,36 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    run(pool, End::Commit, f).await
+    run(pool, End::Commit, Begin::Deferred, f).await
+}
+
+/// [`atomic`] whose top-level SQLite block starts with `BEGIN IMMEDIATE`, as
+/// [`write_transaction`] does: a read-then-write block (`select_for_update`)
+/// then waits for the write lock instead of failing with `SQLITE_BUSY`.
+///
+/// Inside a block on the same pool it is a savepoint, like [`atomic`];
+/// inside another pool's block it begins deferred, as that pool may hold
+/// the file's lock. Other backends: exactly [`atomic`]. Writes that bypass
+/// the block (a spawned task, a pool write) wait for its lock.
+///
+/// # Errors
+/// As [`atomic`].
+pub async fn atomic_immediate<F, T>(pool: &Pool, f: F) -> Result<T, ExecError>
+where
+    F: for<'tx> FnOnce(
+        &'tx AtomicTx,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
+    >,
+{
+    run(pool, End::Commit, Begin::Immediate, f).await
+}
+
+/// How a top-level SQLite block begins.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Begin {
+    Deferred,
+    Immediate,
 }
 
 /// How a block ends when its closure returns `Ok`.
@@ -475,10 +504,10 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    run(pool, End::Rollback, f).await
+    run(pool, End::Rollback, Begin::Deferred, f).await
 }
 
-async fn run<F, T>(pool: &Pool, end: End, f: F) -> Result<T, ExecError>
+async fn run<F, T>(pool: &Pool, end: End, begin: Begin, f: F) -> Result<T, ExecError>
 where
     F: for<'tx> FnOnce(
         &'tx AtomicTx,
@@ -492,7 +521,7 @@ where
         std::iter::successors(current.clone(), |b| b.enclosing.clone()).find(|b| b.pool.same(&id));
     match same_pool {
         Some(parent) => nested(parent, current, end, f).await,
-        None => outermost(pool, id, current, end, f).await,
+        None => outermost(pool, id, current, end, begin, f).await,
     }
 }
 
@@ -501,6 +530,7 @@ async fn outermost<F, T>(
     id: PoolId,
     enclosing: Option<Arc<Block>>,
     end: End,
+    begin: Begin,
     f: F,
 ) -> Result<T, ExecError>
 where
@@ -511,7 +541,11 @@ where
     >,
 {
     let fatal = Arc::new(AtomicBool::new(false));
-    let mut tx = transaction_pool(pool).await?;
+    let mut tx = if begin == Begin::Immediate && enclosing.is_none() {
+        write_transaction(pool).await?
+    } else {
+        transaction_pool(pool).await?
+    };
     let hook = Arc::clone(&fatal);
     tx.on_sqlite_rollback(move || hook.store(true, Ordering::SeqCst))
         .await?;
