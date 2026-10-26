@@ -1416,3 +1416,47 @@ async fn a_nonced_page_outside_the_nonce_layer_is_not_cached() {
         assert_ne!(status.as_deref(), Some("HIT"));
     }
 }
+
+/// A reflected stand-in token must never come back as a visitor's nonce.
+#[tokio::test]
+async fn a_reflected_cache_token_never_gets_the_visitors_nonce() {
+    use axum::extract::RawQuery;
+    use axum::Extension;
+    use rustango::csp_nonce::{
+        CspNonceLayer, CspNonceRouterExt as _, Nonce, CSP_NONCE_PLACEHOLDER,
+    };
+    let cache = Arc::new(InMemoryCache::new());
+    let app = Router::new()
+        .route(
+            "/r",
+            get(
+                |Extension(n): Extension<Nonce>, RawQuery(q): RawQuery| async move {
+                    (
+                        [(
+                            header::CONTENT_SECURITY_POLICY,
+                            format!("script-src {CSP_NONCE_PLACEHOLDER}"),
+                        )],
+                        format!(
+                            "<script nonce=\"{}\"></script>{}",
+                            n.value(),
+                            q.unwrap_or_default()
+                        ),
+                    )
+                },
+            ),
+        )
+        .layer(CachePageLayer::new(cache).tenant_agnostic(true))
+        .csp_nonce(CspNonceLayer::default());
+    let uri = "/r?__RUSTANGO_CACHED_NONCE__";
+    for _ in 0..2 {
+        let resp = app.clone().oneshot(get_req(uri, &[])).await.unwrap();
+        let nonce = csp_nonce_of(&resp);
+        let body = body_to_string(resp.into_body()).await;
+        assert_eq!(
+            body.matches(&nonce).count(),
+            1,
+            "reflected text got the nonce: {body}"
+        );
+        assert!(body.ends_with("__RUSTANGO_CACHED_NONCE__"), "{body}");
+    }
+}

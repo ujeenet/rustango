@@ -637,10 +637,21 @@ const MAX_CACHEABLE_BODY_BYTES: usize = 1 << 20;
 /// `MISS` freshly computed.
 const X_CACHE_STATUS: HeaderName = HeaderName::from_static("x-cache-status");
 
-/// Stands in for the request's CSP nonce in a stored page.
-const CACHED_NONCE: &str = "__RUSTANGO_CACHED_NONCE__";
+/// Stands in for the request's CSP nonce in a stored page. Random per
+/// process, so a page cannot carry it on purpose.
+fn cached_nonce() -> &'static str {
+    use rand::RngCore as _;
+    static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TOKEN.get_or_init(|| {
+        let mut raw = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut raw);
+        let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        format!("__RUSTANGO_CACHED_NONCE_{hex}__")
+    })
+}
 
-/// Marks a stored page holding [`CACHED_NONCE`]; never sent.
+/// Marks a stored page holding a [`cached_nonce`] token, and names it, so
+/// another process sharing the cache swaps the right one. Never sent.
 const NONCE_MARK: HeaderName = HeaderName::from_static("x-rustango-cached-nonce");
 
 /// `hay` with every `from` replaced by `to`; `None` when there is none.
@@ -958,6 +969,13 @@ impl CachedPage {
         })
     }
 
+    /// Whether the body or a header value contains `needle`.
+    fn holds(&self, needle: &str) -> bool {
+        let n = needle.as_bytes();
+        let has = |hay: &[u8]| hay.windows(n.len()).any(|w| w == n);
+        has(&self.body) || self.headers.values().any(|v| has(v.as_bytes()))
+    }
+
     /// Swap every `from` for `to`, in the body and each header value.
     /// `true` when something changed.
     fn swap(&mut self, from: &str, to: &str) -> bool {
@@ -982,13 +1000,18 @@ impl CachedPage {
     /// The page to store: the request's nonce (if any) swapped out.
     /// `None` when its CSP names a nonce this layer did not mint into it.
     fn without_nonce(mut self, nonce: Option<&str>) -> Option<Self> {
+        let token = cached_nonce();
+        // Already there: a hit would hand it this visitor's nonce.
+        if self.holds(token) {
+            return None;
+        }
         if let Some(n) = nonce {
-            if self.swap(n, CACHED_NONCE) {
+            if self.swap(n, token) {
                 self.headers
-                    .insert(NONCE_MARK, HeaderValue::from_static("1"));
+                    .insert(NONCE_MARK, HeaderValue::from_str(token).ok()?);
             }
         }
-        let ours = format!("'nonce-{CACHED_NONCE}'");
+        let ours = format!("'nonce-{token}'");
         let foreign = [
             "content-security-policy",
             "content-security-policy-report-only",
@@ -1008,8 +1031,8 @@ impl CachedPage {
     /// A stored page for this request: its nonce swapped back in.
     /// `None` (a miss) when the page needs a nonce the request lacks.
     fn with_nonce(mut self, nonce: Option<&str>) -> Option<Self> {
-        if self.headers.remove(NONCE_MARK).is_some() {
-            self.swap(CACHED_NONCE, nonce?);
+        if let Some(token) = self.headers.remove(NONCE_MARK) {
+            self.swap(token.to_str().ok()?, nonce?);
         }
         Some(self)
     }
@@ -1255,6 +1278,34 @@ mod tests {
             headers,
             body: bytes::Bytes::from_static(b"\xff\x00\xfe binary \xc3"),
         }
+    }
+
+    /// A page already holding the stand-in token is not stored, so the
+    /// token in it cannot turn into a later visitor's nonce.
+    #[test]
+    fn a_page_holding_the_token_is_not_stored() {
+        let token = cached_nonce();
+        let mut in_body = sample_page();
+        in_body.body = format!("<script nonce=\"{token}\">").into();
+        assert!(in_body.without_nonce(Some("abc")).is_none());
+        let mut in_header = sample_page();
+        in_header
+            .headers
+            .insert("link", HeaderValue::from_str(token).unwrap());
+        assert!(in_header.without_nonce(Some("abc")).is_none());
+        assert!(sample_page().without_nonce(Some("abc")).is_some());
+    }
+
+    /// The token is not a constant anyone can write into a page.
+    #[test]
+    fn the_token_is_random() {
+        let token = cached_nonce();
+        let hex = token
+            .strip_prefix("__RUSTANGO_CACHED_NONCE_")
+            .and_then(|t| t.strip_suffix("__"))
+            .unwrap();
+        assert_eq!(hex.len(), 32);
+        assert!(hex.bytes().all(|b| b.is_ascii_hexdigit()));
     }
 
     /// The frame round-trips status, every header (duplicates and
