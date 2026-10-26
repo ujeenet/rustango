@@ -663,10 +663,9 @@ fn cap_an_unbounded_read(req: &mut Request) {
 /// `true` when `path` is under any configured exempt prefix, by whole
 /// segment, so `/beacon` does not exempt `/beacon-admin`.
 fn path_is_exempt(path: &str, prefixes: &[String]) -> bool {
-    prefixes.iter().any(|p| {
-        path.strip_prefix(p.as_str())
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/') || p.ends_with('/'))
-    })
+    prefixes
+        .iter()
+        .any(|p| crate::urls::path_under_prefix(path, p))
 }
 
 fn is_safe_method(m: &Method) -> bool {

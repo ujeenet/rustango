@@ -1167,3 +1167,102 @@ tri_dialect_test! {
         an_older_table_gets_the_queue_index,
     ],
 }
+
+/// Blocks its thread (no `.await`) for `first_ms` on its first run.
+#[derive(Serialize, Deserialize)]
+struct Blocking {
+    token: String,
+    first_ms: u64,
+}
+
+#[async_trait::async_trait]
+impl Job for Blocking {
+    const NAME: &'static str = "tri:blocking";
+    async fn run(&self) -> Result<(), JobError> {
+        if start(&self.token) == 1 {
+            std::thread::sleep(Duration::from_millis(self.first_ms));
+        }
+        finish(&self.token);
+        Ok(())
+    }
+}
+
+/// A handler blocking its thread past the reclaim threshold keeps its
+/// lease: the heartbeat runs in its own task.
+async fn a_blocking_handler_is_not_run_twice(pool: &Pool) {
+    let tok = token(pool, "blocking");
+    let q = PgJobQueue::with_workers_pool(pool.clone(), 2)
+        .poll_interval(Duration::from_millis(20))
+        .heartbeat_interval(Duration::from_millis(100));
+    q.register::<Blocking>().await;
+    // Wakes from outside the runtime, as live traffic does: with every worker
+    // idle or blocked, nothing else drives the timers.
+    let traffic = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (on, rt) = (traffic.clone(), tokio::runtime::Handle::current());
+    let feeder = std::thread::spawn(move || {
+        while on.load(std::sync::atomic::Ordering::Relaxed) {
+            rt.spawn(async {});
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    q.dispatch(&Blocking {
+        token: tok.clone(),
+        first_ms: 2000,
+    })
+    .await
+    .unwrap();
+    q.start().await;
+    wait_for("the run to start", || counts(&tok).0 == 1).await;
+    // Swept from the test's own thread, which no blocked worker can starve.
+    let mut reclaimed = 0;
+    while counts(&tok).1 == 0 {
+        reclaimed += PgJobQueue::reclaim_stuck_jobs_pool(pool, Duration::from_millis(400))
+            .await
+            .expect("reclaim");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    q.shutdown().await;
+    traffic.store(false, std::sync::atomic::Ordering::Relaxed);
+    feeder.join().unwrap();
+    assert_eq!(reclaimed, 0, "a blocked run lost its lease");
+    assert_eq!(counts(&tok).0, 1, "a blocked run was run again");
+}
+
+// Multi-thread: a blocked thread must leave others for the heartbeat.
+mod multi_thread {
+    use super::*;
+    use rustango::testkit::matrix::{live_lock, Backend};
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_a_blocking_handler_is_not_run_twice() {
+        let _guard = live_lock().lock().await;
+        let Some(pool) = Backend::Postgres.pool().await else {
+            eprintln!("DATABASE_URL not set — skipping");
+            return;
+        };
+        setup(&pool).await;
+        a_blocking_handler_is_not_run_twice(&pool).await;
+    }
+
+    #[cfg(feature = "mysql")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mysql_a_blocking_handler_is_not_run_twice() {
+        let _guard = live_lock().lock().await;
+        let Some(pool) = Backend::MySql.pool().await else {
+            eprintln!("MYSQL_TEST_URL not set — skipping");
+            return;
+        };
+        setup(&pool).await;
+        a_blocking_handler_is_not_run_twice(&pool).await;
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sqlite_a_blocking_handler_is_not_run_twice() {
+        let pool = rustango::testkit::matrix::sqlite_file_pool().await;
+        setup(&pool).await;
+        a_blocking_handler_is_not_run_twice(&pool).await;
+    }
+}

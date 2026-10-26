@@ -8,6 +8,18 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - `fetch_with_prefetch_related` / `_filtered` prefetch a many-to-many or `reverse_has` relation by name for a list of parents in one query per relation, chunked under the bind limit (new `ExecError::PrefetchTargetMismatch`).
 
+### Fixed — jobs
+
+- A DB-queue job's heartbeat runs in its own task, so a handler that blocks its thread keeps its lease instead of being reclaimed and run twice.
+- Worker ids (`locked_by`) carry a random per-process part, so two hosts with no `HOSTNAME` and the same pid no longer share or release each other's rows.
+- `InMemoryJobQueue` hands a job with no registered handler to the dead-letter callback instead of dropping it with a log line.
+
+### Fixed — HTTP middleware
+
+- `SslRedirectLayer::exempt` warns once per prefix when it matches mid-segment (`/health` for `/healthz`); such paths are still exempt in 0.61.
+- `CompressionLayer` sends zlib for `Content-Encoding: deflate` (raw DEFLATE before), and compresses bodies from 64 KiB on the blocking pool, not the async worker.
+- `RedirectMap` joins the request query onto a target's own query and keeps the target's `#fragment`; non-GET/HEAD requests get 308/307 so their method survives.
+
 ## [0.61.5] — 2026-10-26
 
 ### Fixed — auth

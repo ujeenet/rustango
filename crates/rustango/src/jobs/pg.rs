@@ -311,11 +311,16 @@ impl PgJobQueue {
     /// worker tasks. Call [`Self::start`] to spawn them.
     #[must_use]
     pub fn with_workers_pool(pool: impl Into<Pool>, worker_count: usize) -> Self {
-        // `q<n>` keeps two queues in one process from sharing a lease owner.
+        // `q<n>` keeps two queues in one process from sharing a lease owner;
+        // the nonce keeps two hosts with no `HOSTNAME` and one pid apart.
         static QUEUE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let nonce = NONCE.get_or_init(|| uuid::Uuid::new_v4().simple().to_string());
+        let host = hostname().unwrap_or_else(|| "unknown".into());
         let id_prefix = format!(
-            "host:{}:pid:{}:q{}",
-            hostname().unwrap_or_else(|| "unknown".into()),
+            "host:{}:pid:{}:{nonce}:q{}",
+            // Room for the rest inside MySQL's `VARCHAR(255)`.
+            crate::migrate::ddl::clip(&host, 128),
             std::process::id(),
             QUEUE_SEQ.fetch_add(1, Ordering::Relaxed)
         );
@@ -393,7 +398,8 @@ impl PgJobQueue {
     ///
     /// A worker killed mid-job never reaches `shutdown`, so this is what
     /// frees its rows. `older_than` is raised to three of this queue's
-    /// heartbeats. A handler that blocks its thread past that loses its lease (#2374).
+    /// heartbeats. The heartbeat runs in its own task, so a handler that
+    /// blocks its thread keeps its lease, except on a current-thread runtime.
     #[must_use]
     pub fn reclaim_stuck_after(mut self, older_than: Duration) -> Self {
         self.reclaim_after = Some(older_than);
@@ -1013,28 +1019,42 @@ async fn run_with_heartbeat<F>(pool: &Pool, worker: &Worker, id: i64, run: F) ->
 where
     F: std::future::Future,
 {
-    let mut run = std::pin::pin!(run);
-    // Its own future, so a heartbeat waiting on a connection never stops `run` (#1961).
-    let lease = std::pin::pin!(async {
-        let mut beat = tokio::time::interval(worker.heartbeat);
+    // Its own task: a handler that blocks its thread cannot starve the
+    // lease, and a heartbeat waiting on a connection never stops `run` (#1961).
+    let (pool, worker_id, every) = (pool.clone(), worker.id.clone(), worker.heartbeat);
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let lease = AbortOnDrop(tokio::spawn(async move {
+        let mut beat = tokio::time::interval(every);
         beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         beat.tick().await; // the first tick is immediate
+        let _ = started.send(());
         loop {
             beat.tick().await;
-            if !heartbeat(pool, worker, id).await {
+            if !heartbeat(&pool, &worker_id, id).await {
                 return;
             }
         }
-    });
-    tokio::select! {
-        out = &mut run => (out, true),
-        () = lease => (run.await, false),
+    }));
+    // Until it has run once the task sits in this thread's LIFO slot, which
+    // no other worker steals; a blocking `run` would then starve it.
+    let _ = ready.await;
+    let out = run.await;
+    // The beat only ends by finding the lease gone.
+    (out, !lease.0.is_finished())
+}
+
+/// Aborts the task when dropped, so an aborted worker stops its heartbeat.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
 /// Refresh the lease. `false` only when the row is no longer this
 /// worker's; a failed write is logged and treated as still held.
-async fn heartbeat(pool: &Pool, worker: &Worker, id: i64) -> bool {
+async fn heartbeat(pool: &Pool, worker_id: &str, id: i64) -> bool {
     use crate::core::SqlValue;
     let d = pool.dialect();
     let sql = format!(
@@ -1046,11 +1066,11 @@ async fn heartbeat(pool: &Pool, worker: &Worker, id: i64) -> bool {
     let binds = vec![
         SqlValue::DateTime(Utc::now()),
         SqlValue::I64(id),
-        SqlValue::String(worker.id.clone()),
+        SqlValue::String(worker_id.to_owned()),
     ];
     match crate::sql::raw_execute_pool(pool, &sql, binds).await {
         Ok(0) => {
-            tracing::warn!(id, worker = %worker.id, "job lease lost while running");
+            tracing::warn!(id, worker = worker_id, "job lease lost while running");
             false
         }
         Ok(_) => true,
@@ -1181,7 +1201,7 @@ async fn handle_dead_letter(
 ) {
     // Confirm the lease first: the callback must not fire for a row
     // another worker now owns.
-    if !heartbeat(pool, worker, job.id).await {
+    if !heartbeat(pool, &worker.id, job.id).await {
         return;
     }
     let cb = dead_letter.lock().await.clone();
@@ -1253,6 +1273,20 @@ mod tests {
     async fn worker_id_prefix_includes_pid() {
         let q = PgJobQueue::with_workers_pool(dummy_pool(), 0);
         assert!(q.worker_id_prefix.contains("pid:"));
+    }
+
+    /// Two hosts with no `HOSTNAME` and the same pid must not share a `locked_by`.
+    #[tokio::test]
+    async fn worker_id_prefix_has_a_per_process_nonce() {
+        let q = PgJobQueue::with_workers_pool(dummy_pool(), 0);
+        let pid = format!("pid:{}:", std::process::id());
+        let after_pid = q.worker_id_prefix.split_once(&pid).expect("pid").1;
+        let nonce = after_pid.split(':').next().unwrap();
+        assert!(
+            nonce.len() >= 16 && nonce.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{}",
+            q.worker_id_prefix
+        );
     }
 
     #[tokio::test]

@@ -663,8 +663,11 @@ async fn worker_loop(w: InMemoryWorker) {
 
         let Some(entry) = handler else {
             current.lock().unwrap().take();
-            tracing::error!(job = envelope.name, "no handler registered");
             pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            // Memory is its only copy: hand it to the dead-letter callback.
+            let attempts = envelope.attempt;
+            let error = "no handler registered".to_owned();
+            dead_letter_job(&dead_letter, None, envelope, attempts, error).await;
             continue;
         };
 
@@ -1206,11 +1209,20 @@ mod tests {
         }
 
         let q = InMemoryJobQueue::with_workers(1);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s = seen.clone();
+        q.on_dead_letter(move |dl| {
+            s.lock().unwrap().push((dl.name, dl.attempts));
+            async {}
+        })
+        .await;
         // Deliberately don't register
         q.start().await;
         q.dispatch(&UnregisteredJob).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        // No panic = pass
+        wait_until("the dead letter", || !seen.lock().unwrap().is_empty()).await;
+        // Dropped from memory, so the callback is its only record.
+        assert_eq!(*seen.lock().unwrap(), [("test:unregistered", 0)]);
+        assert_eq!(q.pending_count().await, 0);
         q.shutdown().await;
     }
 
