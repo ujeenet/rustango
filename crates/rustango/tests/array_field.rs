@@ -29,6 +29,27 @@ fn field(name: &str) -> &'static rustango::core::FieldSchema {
         .unwrap_or_else(|| panic!("no field {name}"))
 }
 
+/// A JSON array is one value per item, commas kept; a form value splits.
+#[cfg(feature = "forms")]
+#[test]
+fn form_value_reads_a_json_array_whole() {
+    use rustango::core::SqlValue;
+    use rustango::forms::parse_form_value;
+    let s = |v: &str| SqlValue::String(v.to_owned());
+    assert_eq!(
+        parse_form_value(field("tags"), Some(r#"["a,b", "c"]"#)).unwrap(),
+        SqlValue::Array(vec![s("a,b"), s("c")])
+    );
+    assert_eq!(
+        parse_form_value(field("tags"), Some("a, b")).unwrap(),
+        SqlValue::Array(vec![s("a"), s("b")])
+    );
+    assert_eq!(
+        parse_form_value(field("scores"), Some("[1, 2]")).unwrap(),
+        SqlValue::Array(vec![SqlValue::I32(1), SqlValue::I32(2)])
+    );
+}
+
 #[test]
 fn derive_maps_array_fields_to_array_field_type() {
     assert_eq!(field("tags").ty, FieldType::Array(ArrayElem::Text));

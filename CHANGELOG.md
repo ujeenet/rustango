@@ -67,6 +67,20 @@ Inline rows (plain and generic) read their cells and key by field name. With `#[
 
 `json_contains` and LIKE lookups over a JSON column (`contains`, `icontains`, admin search) give the same rows on every backend only in a stated subset; the ORM guide lists it and a tri-dialect test pins it.
 
+### Fixed — REST, forms and admin
+
+- `messages::Outbox` stages several flash messages in one response; two `messages::push` calls in one handler kept only the last.
+- `intword` / `naturalsize` / `naturalsize_si` move to the next unit when rounding reaches 1000 (1024): `999_999_999` is `1.0 billion`, not `1000.0 million`.
+- `ViewSet::admin_add_hooks()` opts a ViewSet into the admin's `add` object-permission hooks on create, on the request and on each written row (single or bulk); off by default.
+- The registry admin refuses an edit, delete or bulk delete that would leave no active operator, as the console and CLI do, and locks the active rows as they do.
+- `ModelFormFor::from_json` refuses JSON null on a NOT NULL Bool instead of storing `false`.
+- `DynamicForm` checkboxes accept only `true/false/1/0/on/off/yes/no`; any other value is an error, not ticked.
+- An admin create that does not send a defaulted field leaves it to its column default instead of storing NULL or refusing it as missing.
+- A JSON array sent to an `Array` field (ViewSet, `ModelForm`) is read item by item; commas inside an item no longer split it.
+- A bulk ViewSet create's serializer validation error names the failing entry (`bulk entry N: invalid input`).
+- Formsets and admin inlines read their rows in one pass over the form keys; a POST with many keys no longer costs keys times rows.
+- `signals::clear_all` also removes `m2m_changed` and admin receivers, so they no longer leak across tests; the `Observer` example compiles.
+
 ## [0.61.2] — 2026-10-26
 
 ### Fixed — migrations, MySQL and MariaDB

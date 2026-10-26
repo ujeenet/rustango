@@ -282,13 +282,16 @@ pub async fn send_post_delete<T: Model + Clone + 'static>(instance: &T) {
 
 // ------------------------------------------------------------------ Maintenance
 
-/// Remove every receiver, for every model and every signal. Mostly
-/// for resetting state between tests.
+/// Remove every model, `m2m_changed` and admin receiver. Mostly for
+/// resetting state between tests. The request, auth, migrate and setting
+/// signals keep theirs; each module has its own `clear_all`.
 pub fn clear_all() {
     registry()
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
+    m2m::clear_all();
+    admin::clear_all();
 }
 
 /// How many receivers are registered for `T` across all signals.
@@ -397,16 +400,24 @@ pub struct ObserverHandle {
 ///
 /// Register with [`observe`], remove with [`disconnect_observer`].
 ///
-/// ```ignore
+/// ```
+/// # #[derive(rustango::Model, Clone)] #[rustango(table = "obs_post")] pub struct Post { #[rustango(primary_key)] id: i64 }
+/// use std::sync::Arc;
+/// use rustango::signals::{Observer, PostSaveContext, ReceiverFuture};
+///
 /// struct AuditLog;
-/// impl rustango::signals::Observer<Post> for AuditLog {
-///     async fn post_save(&self, post: std::sync::Arc<Post>, ctx: rustango::signals::PostSaveContext) {
-///         tracing::info!(?ctx.created, post_id = ?post.id, "post saved");
+/// impl Observer<Post> for AuditLog {
+///     fn post_save(&self, post: Arc<Post>, ctx: PostSaveContext) -> ReceiverFuture {
+///         Box::pin(async move {
+///             println!("post {} saved, created: {}", post.id, ctx.created);
+///         })
 ///     }
 /// }
+/// # fn main() {
 /// let handle = rustango::signals::observe::<Post, _>(AuditLog);
 /// // ...
 /// rustango::signals::disconnect_observer::<Post>(&handle);
+/// # }
 /// ```
 pub trait Observer<T: Model + Clone + 'static>: Send + Sync + 'static {
     /// Runs before an INSERT or UPDATE. Does nothing by default.

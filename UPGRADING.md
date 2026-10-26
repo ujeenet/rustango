@@ -178,6 +178,22 @@ A string payload no longer renders Slack markup such as `<@U123>` or `<url|label
 
 A retry stores at most 65,535 bytes of the error on every backend; read full errors from your logs or dead-letter callback.
 
+### Forms: stricter checkboxes and JSON null
+
+A `DynamicForm` boolean with a value other than `true/false/1/0/on/off/yes/no` is now a validation error. `ModelFormFor::from_json` refuses `null` on a NOT NULL Bool.
+
+### Admin create: absent defaulted fields
+
+A create POST that leaves out a field with a column default now stores the default; a field sent empty still stores `""` or NULL.
+
+### Array fields read a JSON array whole
+
+A form value for an `Array` field that parses as a JSON array (`["a,b", "c"]`, `[1, 2]`) is read item by item; other text still splits on commas.
+
+### `signals::clear_all` clears m2m and admin receivers
+
+It now also empties `signals::m2m` and `signals::admin`. Re-connect those after calling it if you relied on them staying.
+
 ## 0.61.2
 
 ### SQLite: JSON column equality compares values
