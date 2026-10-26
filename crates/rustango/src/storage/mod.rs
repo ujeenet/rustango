@@ -1308,7 +1308,9 @@ mod tests {
                     .into_iter()
                     .flatten()
                     .flatten()
-                    .filter_map(|e| e.metadata().ok())
+                    // Not `DirEntry::metadata`: on Windows that is the
+                    // directory's copy, stale while the file is open.
+                    .filter_map(|e| std::fs::metadata(e.path()).ok())
                     .map(|m| m.len())
                     .sum()
             }
