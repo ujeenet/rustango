@@ -150,9 +150,9 @@ untouched.
 
 ## Unreleased
 
-### `[cache] backend` must be a known lowercase name
+### `[cache] backend` should be a known lowercase name
 
-Use `memory`, `null` / `none`, `file` (with `file_cache_dir`), `redis` or `db`. Anything else now fails at startup instead of falling back to an in-memory cache.
+Use `memory`, `null` / `none`, `file` (with `file_cache_dir`), `redis` or `db`. Anything else now logs an `error` from `from_settings` (still an in-memory fallback) and is an error from `from_settings_async`. A later minor release will refuse it in both.
 
 ### Slack plain strings are sent literally
 
