@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a schema-mode tenant cannot take a role's name
+
+Creating or moving a tenant into a schema named like a database role is refused: the default `search_path` would put that schema first for the role, the registry's included.
+
 ### Fixed — ViewSet writes check FK targets and the view permission
 
 An FK in a create or update body must name a row the target's global scopes and soft delete show, else `422`; the new `ViewSet::related_filter` narrows it further. A write echoes its row only to a caller with the `retrieve` permission: otherwise `201` with no body, `null` per bulk row, or `204`.

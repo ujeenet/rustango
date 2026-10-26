@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Schema names equal to a database role are refused
+
+`create-tenant` and `migrate-tenant-storage` reject a schema named like any role. An existing tenant in such a schema keeps working but shadows that role's `public` tables; move it to another schema.
+
 ### ViewSet: FK targets are checked, echo needs `retrieve`
 
 A body FK to a row hidden by the target's global scopes or soft delete is now a `422`. A caller without the `retrieve` codenames gets `201` with no body (bulk: `null` rows) or `204` instead of the row.
