@@ -6,9 +6,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — security edges
 
-- The persisted session key files (admin, operator, tenant; API keys are MACed with the tenant one) are created 0600 from the start and never written through an existing link; a saved key other users can read is set to 0600 on load, with a warning.
+- The persisted session key files (admin, operator, tenant; API keys are MACed with the tenant one) are created 0600 from the start, in a 0700 directory when it is new, and never written through an existing link. Concurrent first boots now agree on one key (first writer wins). A saved key other users can read is set to 0600 on load with a warning to rotate it; a symlinked key is never chmod'ed.
 - `StaticFiles::user_content` (and `with_uploads`) serves `.js`, `.mjs`, `.css` and `.wasm` as an `application/octet-stream` attachment, so a page on the app origin cannot load an uploaded script or stylesheet.
-- Media: `purge_pending` keeps rows younger than one hour whatever `older_than` says, and `begin_upload` caps its URL at one hour, so a live upload URL cannot land an object after its row is gone. `purge_orphans` (and its dry run) handles at most 10 000 rows per call.
+- Media: `purge_pending` keeps rows younger than 1 h 15 min whatever `older_than` says, so a live upload URL (up to 1 h) cannot land an object after its row is gone; `begin_upload` warns once when asked for a longer URL. `purge_orphans` and `purge_pending` page through rows in id order, pass over rows they fail on, and stop after 10 000 purged; the dry run returns the first 10 000.
 - `CsvResponse::filename` replaces control characters with `_`; one used to drop the whole `Content-Disposition` header.
 - Logging: `RUST_LOG` reads `warning` / `critical` / `fatal` as levels too, as `[logging] level` already did; a bare `warning` used to silence every event.
 - `TracingLayer` records at most 512 bytes of `User-Agent` on the request span.

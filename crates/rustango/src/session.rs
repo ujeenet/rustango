@@ -134,16 +134,18 @@ impl SessionSecret {
         let mut buf = vec![0u8; 32];
         OsRng.fill_bytes(&mut buf);
         if let Some(parent) = disk_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            create_private_dir(parent);
         }
         match persist_secret(disk_path, &buf) {
-            Ok(()) => {
+            Ok(on_disk) => {
                 tracing::info!(
                     path = %disk_path.display(),
                     "generated new session secret and persisted to disk \
                      (set RUSTANGO_SESSION_SECRET to override; this message \
                      only fires on first boot)",
                 );
+                // Another first boot may have won; everyone uses its key.
+                return Self(on_disk);
             }
             Err(e) => {
                 tracing::warn!(
@@ -342,27 +344,70 @@ pub(crate) fn warn_unusable_secret(reason: &str) {
     );
 }
 
-/// Write `bytes` to `path` through a temp file that is owner-only from
-/// creation and never opened through an existing link.
-fn persist_secret(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+/// Publish `bytes` at `path` unless another boot got there first, and
+/// return the key that is on disk. The temp file has a unique name, is
+/// owner-only from creation, and is never opened through a link.
+fn persist_secret(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     use std::io::Write as _;
-    let tmp = path.with_extension("tmp");
-    let mut file = match create_owner_only(&tmp) {
-        // A crashed boot's leftover, or a planted link: unlink, never follow.
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            std::fs::remove_file(&tmp)?;
-            create_owner_only(&tmp)?
-        }
-        r => r?,
-    };
-    let written = file
+    let mut nonce = [0u8; 8];
+    OsRng.fill_bytes(&mut nonce);
+    let suffix: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(format!(".{}.{suffix}.tmp", std::process::id()));
+    let tmp = path.with_file_name(tmp_name);
+    let mut file = create_owner_only(&tmp)?;
+    let published = file
         .write_all(bytes)
         .and_then(|()| file.sync_all())
-        .and_then(|()| std::fs::rename(&tmp, path));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+        .and_then(|()| publish_first(&tmp, path));
+    let _ = std::fs::remove_file(&tmp);
+    let won = published?;
+    sync_parent(path);
+    if won {
+        return Ok(bytes.to_vec());
     }
-    written
+    let on_disk = std::fs::read(path)?;
+    if on_disk.len() >= 32 {
+        return Ok(on_disk);
+    }
+    Err(std::io::Error::other("session secret file is too short"))
+}
+
+/// Link `tmp` at `path` only if nothing is there: `false` when another
+/// writer already published. A filesystem without hard links falls back
+/// to a check-then-rename.
+fn publish_first(tmp: &std::path::Path, path: &std::path::Path) -> std::io::Result<bool> {
+    match std::fs::hard_link(tmp, path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // A stale short file (the loader skipped it) is replaced.
+            match std::fs::read(path) {
+                Ok(b) if b.len() >= 32 => Ok(false),
+                _ => std::fs::rename(tmp, path).map(|()| true),
+            }
+        }
+        Err(_) if std::fs::symlink_metadata(path).is_ok() => Ok(false),
+        Err(_) => std::fs::rename(tmp, path).map(|()| true),
+    }
+}
+
+/// Create `dir` (and missing parents) owner-only on Unix.
+fn create_private_dir(dir: &std::path::Path) {
+    let mut b = std::fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    let _ = b.create(dir);
+}
+
+/// Flush the directory entry so a crash cannot lose the published name.
+fn sync_parent(path: &std::path::Path) {
+    #[cfg(unix)]
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// `O_CREAT | O_EXCL`, mode 0600 on Unix. Windows has no mode bits here.
@@ -374,21 +419,35 @@ fn create_owner_only(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     opts.open(path)
 }
 
-/// Make a saved secret other users can read owner-only, and say so.
-/// Windows needs its own ACL work.
+/// Make a saved secret other users can read owner-only, and say so. A
+/// link is left alone: its target may be shared on purpose. Windows needs
+/// its own ACL work.
 #[cfg(unix)]
 fn restrict_session_secret_perms(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
-    let Ok(mut perms) = std::fs::metadata(path).map(|m| m.permissions()) else {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
         return;
     };
+    if meta.file_type().is_symlink() {
+        let loose = std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o077 != 0);
+        if loose {
+            tracing::warn!(
+                path = %path.display(),
+                "session secret link points to a file other users can read; not changed. \
+                 Restrict it and rotate the key",
+            );
+        }
+        return;
+    }
+    let mut perms = meta.permissions();
     if perms.mode() & 0o077 == 0 {
         return;
     }
     tracing::warn!(
         path = %path.display(),
         mode = format!("{:o}", perms.mode() & 0o777),
-        "session secret file was readable by other users; setting it to 0600",
+        "session secret file was readable by other users; setting it to 0600. \
+         Rotate the key: it may have been read",
     );
     perms.set_mode(0o600);
     let _ = std::fs::set_permissions(path, perms);
@@ -695,16 +754,16 @@ mod tests {
         std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
     }
 
-    /// A link planted at the temp name must not receive the key.
+    /// A link planted at the key path must not receive the key.
     #[cfg(unix)]
     #[test]
-    fn persisting_a_secret_never_writes_through_a_planted_temp_link() {
+    fn persisting_a_secret_never_writes_through_a_planted_link() {
         assert!(std::env::var_os("RUSTANGO_SESSION_SECRET").is_none());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.key");
         let victim = dir.path().join("victim");
         std::fs::write(&victim, b"").unwrap();
-        std::os::unix::fs::symlink(&victim, path.with_extension("tmp")).unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
 
         let s = SessionSecret::from_env_or_disk(&path);
         assert!(std::fs::read(&victim).unwrap().is_empty(), "key leaked");
@@ -727,6 +786,54 @@ mod tests {
         let s = SessionSecret::from_env_or_disk(&path);
         assert_eq!(s.key(), [9u8; 32]);
         assert_eq!(mode(&path), 0o600);
+    }
+
+    /// Concurrent first boots agree on one key, in memory and on disk.
+    #[test]
+    fn concurrent_first_boots_share_one_key() {
+        assert!(std::env::var_os("RUSTANGO_SESSION_SECRET").is_none());
+        for _ in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = std::sync::Arc::new(dir.path().join("var").join("s.key"));
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let keys: Vec<Vec<u8>> = (0..8)
+                .map(|_| {
+                    let (path, barrier) = (path.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        SessionSecret::from_env_or_disk(&path).key().to_vec()
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect();
+            let on_disk = std::fs::read(&*path).unwrap();
+            assert!(keys.iter().all(|k| *k == on_disk), "boots diverged");
+            let left: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            assert_eq!(left.len(), 1, "temp files left: {left:?}");
+            #[cfg(unix)]
+            assert_eq!(mode(path.parent().unwrap()), 0o700);
+        }
+    }
+
+    /// A link to a shared key is never chmod'ed through.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_secret_is_not_chmoded() {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert!(std::env::var_os("RUSTANGO_SESSION_SECRET").is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("mounted");
+        std::fs::write(&target, [5u8; 32]).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let path = dir.path().join("s.key");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert_eq!(SessionSecret::from_env_or_disk(&path).key(), [5u8; 32]);
+        assert_eq!(mode(&target), 0o644);
     }
 
     /// A new key file is created owner-only, not chmod'ed after the fact.
