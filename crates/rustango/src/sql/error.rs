@@ -318,6 +318,16 @@ pub enum ExecError {
         column: &'static str,
     },
 
+    /// A named prefetch was asked to load rows of a model its relation
+    /// does not point at.
+    #[error("prefetch `{model}.{relation}` loads `{expected}` rows, not `{got}`")]
+    PrefetchTargetMismatch {
+        model: &'static str,
+        relation: String,
+        expected: &'static str,
+        got: &'static str,
+    },
+
     /// Used when traversing schema metadata to resolve a foreign key
     /// or build a `WHERE pk = …` filter — the target model declares
     /// no `#[rustango(primary_key)]` field. Programming error;
