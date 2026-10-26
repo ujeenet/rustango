@@ -3462,7 +3462,7 @@ async fn handle_create(
 async fn insert_and_fetch_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
-    add_hooks: &AddHooks,
+    (add_hooks, claims): (&AddHooks, &RoutingClaims),
     (columns, values): (Vec<&'static str>, Vec<SqlValue>),
     pk_field: &'static crate::core::FieldSchema,
     fields: &[&'static crate::core::FieldSchema],
@@ -3476,8 +3476,8 @@ async fn insert_and_fetch_one(
         on_conflict: None,
         generated: vec![],
     };
-    let pk_val = if add_hooks.on_rows() {
-        insert_admitted(acq, add_hooks, &query, pk_field).await?
+    let pk_val = if add_hooks.on_rows() || claims.any() {
+        insert_admitted(acq, add_hooks, claims, &query, pk_field).await?
     } else {
         acq.insert_returning_pk(&query, pk_field)
             .await
@@ -3543,11 +3543,141 @@ impl AddHooks {
     }
 }
 
+/// The host, path prefix and port a write to `rustango_orgs` or
+/// `rustango_org_hosts` claims, as the admin's; nothing for other tables.
+struct RoutingClaims {
+    #[cfg(feature = "tenancy")]
+    claims: crate::tenancy::org_host::AdminClaims,
+}
+
+/// Why a claimed write failed.
+enum ClaimFailed {
+    /// Another tenant holds the value; the message names it.
+    #[cfg(feature = "tenancy")]
+    Taken(String),
+    Driver(crate::sql::ExecError),
+}
+
+impl ClaimFailed {
+    fn is_deadlock(&self) -> bool {
+        matches!(self, Self::Driver(e) if e.is_deadlock())
+    }
+
+    fn into_failure(self, context: &str) -> (StatusCode, String) {
+        match self {
+            #[cfg(feature = "tenancy")]
+            Self::Taken(msg) => (StatusCode::CONFLICT, msg),
+            Self::Driver(e) => write_failure(context, &e),
+        }
+    }
+}
+
+impl From<crate::sql::ExecError> for ClaimFailed {
+    fn from(e: crate::sql::ExecError) -> Self {
+        Self::Driver(e)
+    }
+}
+
+#[cfg(feature = "tenancy")]
+impl From<crate::tenancy::org_host::ClaimError> for ClaimFailed {
+    fn from(e: crate::tenancy::org_host::ClaimError) -> Self {
+        use crate::tenancy::org_host::ClaimError;
+        match e {
+            ClaimError::Taken(key) => {
+                Self::Taken(format!("{key} is already used by another tenant"))
+            }
+            ClaimError::Driver(e) => Self::Driver(e),
+        }
+    }
+}
+
+impl RoutingClaims {
+    /// Validate and normalize `values` as the console does. `Err` is a `400`.
+    #[cfg_attr(not(feature = "tenancy"), allow(clippy::unnecessary_wraps))]
+    fn of(
+        table: &str,
+        values: &mut [(&'static str, SqlValue)],
+        edit: bool,
+    ) -> Result<Self, Response> {
+        #[cfg(feature = "tenancy")]
+        {
+            use crate::tenancy::org_host::AdminClaims;
+            let claims = if edit {
+                AdminClaims::of_edit(table, values)
+            } else {
+                AdminClaims::of(table, values, None)
+            };
+            claims
+                .map(|claims| Self { claims })
+                .map_err(|msg| json_error(StatusCode::BAD_REQUEST, &msg))
+        }
+        #[cfg(not(feature = "tenancy"))]
+        {
+            let _ = (table, values, edit);
+            Ok(Self {})
+        }
+    }
+
+    /// Whether the write claims anything, and so needs its own transaction.
+    fn any(&self) -> bool {
+        #[cfg(feature = "tenancy")]
+        return self.claims.retries();
+        #[cfg(not(feature = "tenancy"))]
+        false
+    }
+
+    /// The write's transaction, an edited tenant's values already claimed.
+    async fn begin(
+        &self,
+        pool: &Pool,
+        pk: &SqlValue,
+    ) -> Result<crate::sql::PoolTx<'static>, ClaimFailed> {
+        #[cfg(feature = "tenancy")]
+        return Ok(self.claims.begin(pool, pk).await?);
+        #[cfg(not(feature = "tenancy"))]
+        {
+            let _ = pk;
+            Ok(crate::sql::write_transaction(pool).await?)
+        }
+    }
+
+    /// Claim or check what only the written row in `tx` could claim.
+    async fn after_write(
+        &self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        pk: &SqlValue,
+    ) -> Result<(), ClaimFailed> {
+        #[cfg(feature = "tenancy")]
+        return Ok(self.claims.after_write(tx, pk).await?);
+        #[cfg(not(feature = "tenancy"))]
+        {
+            let _ = (tx, pk);
+            Ok(())
+        }
+    }
+
+    /// Claim all of it in a `tx` opened before the claim was known.
+    async fn claim_in(
+        &self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        pk: &SqlValue,
+    ) -> Result<(), ClaimFailed> {
+        #[cfg(feature = "tenancy")]
+        return Ok(self.claims.claim_in(tx, pk).await?);
+        #[cfg(not(feature = "tenancy"))]
+        {
+            let _ = (tx, pk);
+            Ok(())
+        }
+    }
+}
+
 /// One INSERT in its own transaction, committed only when `add_hooks`
-/// admit the written row.
+/// admit the written row and its routing claim holds.
 async fn insert_admitted(
     acq: &AcquiredConn,
     add_hooks: &AddHooks,
+    claims: &RoutingClaims,
     query: &InsertQuery,
     pk_field: &'static crate::core::FieldSchema,
 ) -> Result<SqlValue, (StatusCode, String)> {
@@ -3555,32 +3685,96 @@ async fn insert_admitted(
         let body = crate::error::client_error_body("viewset::create", e, false);
         (StatusCode::INTERNAL_SERVER_ERROR, body)
     };
-    let mut tx = crate::sql::write_transaction(&acq.pool)
-        .await
-        .map_err(|e| server(&e))?;
-    let pk = match crate::audit::insert_tx_on(&acq.pool, &mut tx, query, pk_field).await {
-        Ok(pk) => pk,
-        Err(e) => {
-            let _ = tx.rollback().await;
-            return Err(write_failure("viewset::create", &e));
+    // MySQL breaks two claims of one free value with a deadlock: retry once.
+    let mut retry = claims.any();
+    loop {
+        let mut tx = claims
+            .begin(&acq.pool, &SqlValue::Null)
+            .await
+            .map_err(|e| e.into_failure("viewset::create"))?;
+        let pk = match crate::audit::insert_tx_on(&acq.pool, &mut tx, query, pk_field).await {
+            Ok(pk) => pk,
+            Err(e) => {
+                let _ = tx.rollback().await;
+                if e.is_deadlock() && std::mem::take(&mut retry) {
+                    continue;
+                }
+                return Err(write_failure("viewset::create", &e));
+            }
+        };
+        match add_hooks
+            .admit(&mut tx, query.model, pk_field, pk.clone())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = tx.rollback().await;
+                return Err((StatusCode::FORBIDDEN, "forbidden".to_owned()));
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(server(&e));
+            }
         }
-    };
-    match add_hooks
-        .admit(&mut tx, query.model, pk_field, pk.clone())
-        .await
-    {
-        Ok(true) => {}
-        Ok(false) => {
+        if let Err(e) = claims.after_write(&mut tx, &pk).await {
             let _ = tx.rollback().await;
-            return Err((StatusCode::FORBIDDEN, "forbidden".to_owned()));
+            if e.is_deadlock() && std::mem::take(&mut retry) {
+                continue;
+            }
+            return Err(e.into_failure("viewset::create"));
         }
-        Err(e) => {
-            let _ = tx.rollback().await;
-            return Err(server(&e));
-        }
+        tx.commit().await.map_err(|e| server(&e.into()))?;
+        return Ok(pk);
     }
-    tx.commit().await.map_err(|e| server(&e.into()))?;
-    Ok(pk)
+}
+
+/// A claimed UPDATE in a transaction of its own, retried once on a MySQL
+/// deadlock as the admin's edit is.
+async fn update_claimed(
+    pool: &Pool,
+    claims: &RoutingClaims,
+    query: &UpdateQuery,
+    pk: &SqlValue,
+) -> Result<u64, (StatusCode, String)> {
+    let Some(update) = crate::audit::TxUpdate::for_model(query.model) else {
+        // Not the routing tables: they have no pool-only audit.
+        let e = crate::sql::ExecError::AuditUnsupported {
+            table: query.model.table,
+            reason: "a claimed update needs an in-transaction audit",
+        };
+        return Err(write_failure("viewset::update", &e));
+    };
+    let mut retry = true;
+    loop {
+        let mut tx = match claims.begin(pool, pk).await {
+            Ok(tx) => tx,
+            Err(e) if e.is_deadlock() && std::mem::take(&mut retry) => continue,
+            Err(e) => return Err(e.into_failure("viewset::update")),
+        };
+        let n = match update.run(&mut tx, pool, query, pk.clone()).await {
+            Ok(n) => n,
+            Err(e) => {
+                let _ = tx.rollback().await;
+                if e.is_deadlock() && std::mem::take(&mut retry) {
+                    continue;
+                }
+                return Err(write_failure("viewset::update", &e));
+            }
+        };
+        if n > 0 {
+            if let Err(e) = claims.after_write(&mut tx, pk).await {
+                let _ = tx.rollback().await;
+                if e.is_deadlock() && std::mem::take(&mut retry) {
+                    continue;
+                }
+                return Err(e.into_failure("viewset::update"));
+            }
+        }
+        tx.commit()
+            .await
+            .map_err(|e| write_failure("viewset::update::commit", &e.into()))?;
+        return Ok(n);
+    }
 }
 
 /// A failed INSERT/UPDATE: a duplicate key is a `409`, any other database
@@ -3621,9 +3815,13 @@ async fn create_one(
     if write_set.sends_required_locked(form) {
         return json_error(StatusCode::FORBIDDEN, "forbidden");
     }
-    let collected = match write_set.insert_values(form, encoding) {
+    let mut collected = match write_set.insert_values(form, encoding) {
         Ok(v) => v,
         Err(e) => return e.into_response(state, None),
+    };
+    let claims = match RoutingClaims::of(state.vs.schema.table, &mut collected, false) {
+        Ok(c) => c,
+        Err(resp) => return resp,
     };
     match write_set
         .check_fk_targets(acq, None, &collected, None)
@@ -3635,7 +3833,8 @@ async fn create_one(
     }
     let fields = state.effective_fields();
     let row = collected.into_iter().unzip();
-    match insert_and_fetch_one(state, acq, add_hooks, row, pk_field, &fields, read_back).await {
+    let hooks = (add_hooks, &claims);
+    match insert_and_fetch_one(state, acq, hooks, row, pk_field, &fields, read_back).await {
         Ok((pk, Some(obj))) => {
             let mut resp = json_created(obj);
             let location = format!(
@@ -3677,7 +3876,8 @@ async fn create_many(
     // Atomic validation: collect every (columns, values) up front
     // so a bad row near the end of the list doesn't leave half the
     // INSERTs committed: validate the whole list before any save.
-    let mut prepared: Vec<(Vec<&'static str>, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
+    let mut prepared: Vec<((Vec<&'static str>, Vec<SqlValue>), RoutingClaims)> =
+        Vec::with_capacity(rows.len());
     for (i, (row, json)) in rows.iter().enumerate() {
         if let Err(resp) = serializer_validate(state, json, Some(i)) {
             return resp;
@@ -3688,9 +3888,13 @@ async fn create_many(
             return json_error(StatusCode::FORBIDDEN, "forbidden");
         }
         // A bulk body is always JSON.
-        let collected = match write_set.insert_values(row, Encoding::Json) {
+        let mut collected = match write_set.insert_values(row, Encoding::Json) {
             Ok(v) => v,
             Err(e) => return e.into_response(state, Some(i)),
+        };
+        let claims = match RoutingClaims::of(state.vs.schema.table, &mut collected, false) {
+            Ok(c) => c,
+            Err(resp) => return resp,
         };
         match write_set
             .check_fk_targets(acq, None, &collected, None)
@@ -3700,7 +3904,7 @@ async fn create_many(
             Ok(Err(e)) => return e.into_response(state, Some(i)),
             Err(e) => return json_server_error("viewset::bulk_create::fk", &e),
         }
-        prepared.push(collected.into_iter().unzip());
+        prepared.push((collected.into_iter().unzip(), claims));
     }
 
     // Insert sequentially. We loop INSERT-RETURNING rather than
@@ -3726,60 +3930,78 @@ async fn create_many(
     // the response says which. Those constraints are exactly the class
     // validation cannot decide up front.
     let fields = state.effective_fields();
-    let mut tx = match crate::sql::transaction_pool(&acq.pool).await {
-        Ok(tx) => tx,
-        Err(e) => {
-            return json_server_error("viewset::bulk_create::begin", &e);
-        }
-    };
-
-    let mut pks: Vec<SqlValue> = Vec::with_capacity(prepared.len());
-    for (i, (columns, values)) in prepared.into_iter().enumerate() {
-        let query = InsertQuery {
-            model: state.vs.schema,
-            columns,
-            values,
-            returning: vec![pk_field.column],
-            on_conflict: None,
-            generated: vec![],
-        };
-        match crate::audit::insert_tx(&mut tx, &query, pk_field).await {
-            Ok(pk) => match add_hooks
-                .admit(&mut tx, query.model, pk_field, pk.clone())
-                .await
-            {
-                Ok(true) => pks.push(pk),
-                Ok(false) => {
-                    let _ = tx.rollback().await;
-                    return json_error(
-                        StatusCode::FORBIDDEN,
-                        &format!("bulk entry {i}: forbidden"),
-                    );
-                }
-                Err(e) => {
-                    let _ = tx.rollback().await;
-                    return json_server_error("viewset::bulk_create::add_hook", &e);
-                }
-            },
+    // A claim MySQL broke with a deadlock: the whole batch is retried once.
+    let mut retry = prepared.iter().any(|(_, c)| c.any());
+    let (tx, pks) = 'attempt: loop {
+        let mut tx = match crate::sql::transaction_pool(&acq.pool).await {
+            Ok(tx) => tx,
             Err(e) => {
-                // Drop every row this request wrote, including the ones
-                // that succeeded before entry `i`.
-                let _ = tx.rollback().await;
-                // The entry index is what the caller can act on; the
-                // driver text behind it names tables and constraints,
-                // so it goes to the log only (#1525). The body must
-                // not claim a server fault on a 400.
-                //
-                // Only a *database rejection* is the client's doing.
-                // This arm also catches pool timeouts and dropped
-                // connections, and logging those at `warn` left an
-                // outage with no ERROR record anywhere (#1604 review,
-                // correctness-003).
-                let (status, detail) = write_failure("viewset::bulk_create::entry", &e);
-                return json_error(status, &format!("bulk entry {i}: {detail}"));
+                return json_server_error("viewset::bulk_create::begin", &e);
+            }
+        };
+
+        let mut pks: Vec<SqlValue> = Vec::with_capacity(prepared.len());
+        for (i, ((columns, values), claims)) in prepared.iter().enumerate() {
+            let query = InsertQuery {
+                model: state.vs.schema,
+                columns: columns.clone(),
+                values: values.clone(),
+                returning: vec![pk_field.column],
+                on_conflict: None,
+                generated: vec![],
+            };
+            match crate::audit::insert_tx(&mut tx, &query, pk_field).await {
+                Ok(pk) => match add_hooks
+                    .admit(&mut tx, query.model, pk_field, pk.clone())
+                    .await
+                {
+                    Ok(true) => {
+                        if let Err(e) = claims.after_write(&mut tx, &pk).await {
+                            let _ = tx.rollback().await;
+                            if e.is_deadlock() && std::mem::take(&mut retry) {
+                                continue 'attempt;
+                            }
+                            let (status, detail) = e.into_failure("viewset::bulk_create::entry");
+                            return json_error(status, &format!("bulk entry {i}: {detail}"));
+                        }
+                        pks.push(pk);
+                    }
+                    Ok(false) => {
+                        let _ = tx.rollback().await;
+                        return json_error(
+                            StatusCode::FORBIDDEN,
+                            &format!("bulk entry {i}: forbidden"),
+                        );
+                    }
+                    Err(e) => {
+                        let _ = tx.rollback().await;
+                        return json_server_error("viewset::bulk_create::add_hook", &e);
+                    }
+                },
+                Err(e) => {
+                    // Drop every row this request wrote, including the ones
+                    // that succeeded before entry `i`.
+                    let _ = tx.rollback().await;
+                    if e.is_deadlock() && std::mem::take(&mut retry) {
+                        continue 'attempt;
+                    }
+                    // The entry index is what the caller can act on; the
+                    // driver text behind it names tables and constraints,
+                    // so it goes to the log only (#1525). The body must
+                    // not claim a server fault on a 400.
+                    //
+                    // Only a *database rejection* is the client's doing.
+                    // This arm also catches pool timeouts and dropped
+                    // connections, and logging those at `warn` left an
+                    // outage with no ERROR record anywhere (#1604 review,
+                    // correctness-003).
+                    let (status, detail) = write_failure("viewset::bulk_create::entry", &e);
+                    return json_error(status, &format!("bulk entry {i}: {detail}"));
+                }
             }
         }
-    }
+        break (tx, pks);
+    };
     if let Err(e) = tx.commit().await {
         return json_server_error("viewset::bulk_create::commit", &e);
     }
@@ -3931,17 +4153,29 @@ async fn update_inner(
     let renamed = serializer_input_renamed_form(&state, &form);
     let form = renamed.as_ref().unwrap_or(&form);
 
-    let assignments = match write_set.update_assignments(form, partial) {
+    let mut assignments = match write_set.update_assignments(form, partial) {
         Ok(a) => a,
         Err(e) => return e.into_response(&state, None),
     };
-    let written: Vec<(&'static str, SqlValue)> = assignments
+    let mut written: Vec<(&'static str, SqlValue)> = assignments
         .iter()
         .filter_map(|a| match &a.value {
             crate::core::Expr::Literal(v) => Some((a.column, v.clone())),
             _ => None,
         })
         .collect();
+    let claims = match RoutingClaims::of(state.vs.schema.table, &mut written, true) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    // Stored as claimed: a host matches the `Host` header byte for byte.
+    for a in &mut assignments {
+        if let crate::core::Expr::Literal(v) = &mut a.value {
+            if let Some((_, claimed)) = written.iter().find(|(c, _)| *c == a.column) {
+                v.clone_from(claimed);
+            }
+        }
+    }
     let tx = locked.as_mut().map(|(_, tx)| tx);
     let stored = Some((pk_field, &pk_val));
     match write_set
@@ -3982,18 +4216,26 @@ async fn update_inner(
     };
 
     let updated = match locked.as_mut() {
-        Some((u, tx)) => u.run(tx, &acq.pool, &query, pk_val.clone()).await,
-        None => acq.update(&query).await,
+        Some((u, tx)) => match u.run(tx, &acq.pool, &query, pk_val.clone()).await {
+            Ok(0) => Ok(0),
+            Ok(n) => match claims.claim_in(tx, &pk_val).await {
+                Ok(()) => Ok(n),
+                Err(e) => Err(e.into_failure("viewset::update")),
+            },
+            Err(e) => Err(write_failure("viewset::update", &e)),
+        },
+        None if claims.any() => update_claimed(&acq.pool, &claims, &query, &pk_val).await,
+        None => acq
+            .update(&query)
+            .await
+            .map_err(|e| write_failure("viewset::update", &e)),
     };
     match updated {
         // Nothing matched: either no such row, or one this principal is
         // scoped out of. Both are a 404 — see `handle_retrieve`.
         Ok(0) => return json_error(StatusCode::NOT_FOUND, "not found"),
         Ok(_) => {}
-        Err(e) => {
-            let (status, msg) = write_failure("viewset::update", &e);
-            return json_error(status, &msg);
-        }
+        Err((status, msg)) => return json_error(status, &msg),
     }
     if let Some((_, tx)) = locked {
         if let Err(e) = tx.commit().await {

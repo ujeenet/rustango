@@ -938,6 +938,37 @@ impl AdminClaims {
         Ok(Self::Nothing)
     }
 
+    /// [`Self::of`] for an edit without its stored row: every routing value
+    /// sent is claimed, before the UPDATE.
+    ///
+    /// # Errors
+    /// As [`Self::of`].
+    pub(crate) fn of_edit(
+        table: &str,
+        values: &mut [(&'static str, crate::core::SqlValue)],
+    ) -> Result<Self, String> {
+        Ok(match Self::of(table, values, None)? {
+            Self::OrgAfter(keys) => Self::OrgBefore(keys),
+            other => other,
+        })
+    }
+
+    /// Claim all of it in `tx`, already open and written: no retry, and on
+    /// MySQL only as fresh as `tx`'s first plain read.
+    ///
+    /// # Errors
+    /// As [`claim_routing_tx`].
+    pub(crate) async fn claim_in(
+        &self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        pk: &crate::core::SqlValue,
+    ) -> Result<(), ClaimError> {
+        match (self, pk_id(pk)) {
+            (Self::OrgBefore(keys), Some(id)) => claim_routing_tx(tx, keys, id).await,
+            _ => self.after_write(tx, pk).await,
+        }
+    }
+
     /// Whether a write deadlocked on this claim is worth one retry.
     pub(crate) fn retries(&self) -> bool {
         !matches!(self, Self::Nothing)

@@ -83,6 +83,7 @@ pub struct TenantAdminBuilder<DB: Database = DefaultTenantDb> {
     brand_storage: Option<BoxedStorage>,
     /// URL prefixes. Defaults to `RouteConfig::default()`.
     routes: Arc<super::routes::RouteConfig>,
+    link_apex: super::server::LinkApex,
     _phantom: PhantomData<DB>,
 }
 
@@ -104,6 +105,8 @@ struct TenantSessionConfig {
     ///
     /// [`JtiBlacklist::shared`]: super::impersonation_handoff::JtiBlacklist::shared
     jti: Option<super::impersonation_handoff::JtiBlacklist>,
+    /// Where an ended impersonation goes back to.
+    link_apex: super::server::LinkApex,
 }
 
 impl TenantSessionConfig {
@@ -139,8 +142,17 @@ impl<DB: Database> TenantAdminBuilder<DB> {
             subtitle: None,
             brand_storage: None,
             routes: Arc::new(super::routes::RouteConfig::default()),
+            link_apex: super::server::LinkApex::default(),
             _phantom: PhantomData,
         }
+    }
+
+    /// The apex an ended impersonation goes back to, the one the server
+    /// dispatches on. Default: `RUSTANGO_APEX_DOMAIN` / settings.
+    #[must_use]
+    pub(crate) fn link_apex(mut self, apex: super::server::LinkApex) -> Self {
+        self.link_apex = apex;
+        self
     }
 
     /// Override the default URL prefixes. If your app also mounts the
@@ -214,6 +226,7 @@ impl<DB: Database> TenantAdminBuilder<DB> {
             secret,
             tera,
             jti: None,
+            link_apex: super::server::LinkApex::default(),
         });
         self
     }
@@ -330,8 +343,10 @@ where
                 "impersonation_jti_store is unused: the tenant admin has no with_session",
             );
         }
+        let link_apex = self.link_apex;
         let session = self.session.map(|mut s| {
             s.jti = jti_store.map(super::impersonation_handoff::JtiBlacklist::with_store);
+            s.link_apex = link_apex;
             Arc::new(s)
         });
         let actions = Arc::new(self.actions);
@@ -671,7 +686,7 @@ where
             && method == axum::http::Method::POST
         {
             end_impersonation_session(&parts.headers, cfg, &org.slug).await;
-            return end_impersonation_response(cookie_path);
+            return end_impersonation_response(cookie_path, &cfg.link_apex);
         }
 
         // Private surface — require a valid session cookie.
@@ -1487,7 +1502,7 @@ async fn end_impersonation_session(headers: &HeaderMap, cfg: &TenantSessionConfi
 /// The apex URL comes from `RUSTANGO_APEX_DOMAIN`,
 /// `RUSTANGO_TENANT_SCHEME` and `RUSTANGO_TENANT_PORT`. With none of
 /// them set it falls back to `/`, which still clears the cookie.
-fn end_impersonation_response(cookie_path: &str) -> Response {
+fn end_impersonation_response(cookie_path: &str, apex: &super::server::LinkApex) -> Response {
     // Also the legacy `Path=/` one, from before the cookie was path-scoped.
     let mut paths = vec![cookie_path];
     if cookie_path != "/" {
@@ -1508,7 +1523,7 @@ fn end_impersonation_response(cookie_path: &str) -> Response {
                 .to_string()
         })
         .collect();
-    let apex = crate::tenancy::server::apex_domain();
+    let apex = apex.get();
     let port_suffix = std::env::var("RUSTANGO_TENANT_PORT")
         .ok()
         .filter(|s| !s.is_empty() && s != "80" && s != "443")

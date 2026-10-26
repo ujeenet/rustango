@@ -397,10 +397,157 @@ async fn viewset_writes_clear_the_host_cache(pool: &Pool) {
     );
 }
 
+const ORG_FIELDS: &[&str] = &[
+    "id",
+    "slug",
+    "display_name",
+    "storage_mode",
+    "backend_kind",
+    "database_url",
+    "host_pattern",
+    "path_prefix",
+    "port",
+    "active",
+    "created_at",
+];
+
+/// A JSON request to REST ViewSets over the two routing tables.
+async fn api(
+    pool: &Pool,
+    method: Method,
+    uri: &str,
+    body: serde_json::Value,
+) -> (StatusCode, String) {
+    use rustango::core::Model as _;
+    use rustango::viewset::ViewSet;
+    let app = ViewSet::for_model(Org::SCHEMA, ORG_FIELDS)
+        .router_pool("/orgs", pool.clone())
+        .merge(
+            ViewSet::for_model(OrgHost::SCHEMA, &["id", "org_id", "hostname", "enabled"])
+                .router_pool("/hosts", pool.clone()),
+        );
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn api_refused(status: StatusCode, body: &str, what: &str) {
+    assert_eq!(status, StatusCode::CONFLICT, "{what}: {body}");
+    assert!(body.contains("already used"), "{what}: {body}");
+}
+
+fn org_json(slug: &str, host: &str) -> serde_json::Value {
+    serde_json::json!({
+        "slug": slug,
+        "display_name": slug,
+        "storage_mode": "database",
+        "backend_kind": "sqlite",
+        "database_url": "sqlite::memory:",
+        "host_pattern": host,
+        "active": true,
+        "created_at": "2026-01-01T00:00:00Z",
+    })
+}
+
+/// A REST extra host cannot take another tenant's base host.
+async fn viewset_host_create_refuses_a_base_host(pool: &Pool) {
+    let (host, _, _) = owner(pool).await;
+    let id = org(pool, &name(pool, "vs-extra")).await;
+    let body = serde_json::json!({"org_id": id, "hostname": host.to_uppercase(), "enabled": true});
+    let (status, text) = api(pool, Method::POST, "/hosts", body).await;
+    api_refused(status, &text, "REST extra host");
+    let rows: Vec<OrgHost> = OrgHost::objects()
+        .where_(OrgHost::org_id.eq(id))
+        .fetch(pool)
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "{rows:?}");
+}
+
+/// A REST edit cannot take another tenant's host, path prefix or port.
+async fn viewset_org_edit_refuses_another_tenants_routing(pool: &Pool) {
+    let (host, prefix, port) = owner(pool).await;
+    let slug = name(pool, "vs-edit");
+    let id = org(pool, &slug).await;
+    let uri = format!("/orgs/{id}");
+    for (what, body) in [
+        ("host", serde_json::json!({"host_pattern": host})),
+        ("prefix", serde_json::json!({"path_prefix": prefix})),
+        ("port", serde_json::json!({"port": port})),
+    ] {
+        let (status, text) = api(pool, Method::PATCH, &uri, body).await;
+        api_refused(status, &text, what);
+    }
+    let row = org_named(pool, &slug).await.unwrap();
+    assert_eq!(
+        (row.host_pattern, row.path_prefix, row.port),
+        (None, None, None)
+    );
+    // Its own values are no clash.
+    let own = format!("{slug}.example.test");
+    let (status, text) = api(
+        pool,
+        Method::PATCH,
+        &uri,
+        serde_json::json!({"host_pattern": own.to_uppercase()}),
+    )
+    .await;
+    assert!(status.is_success(), "{status}: {text}");
+    let (status, text) = api(
+        pool,
+        Method::PATCH,
+        &uri,
+        serde_json::json!({"host_pattern": own}),
+    )
+    .await;
+    assert!(status.is_success(), "resaving clashed: {status}: {text}");
+    let row = org_named(pool, &slug).await.unwrap();
+    assert_eq!(row.host_pattern.as_deref(), Some(own.as_str()));
+}
+
+/// Two REST creates of one free host: one gets it, the other is refused
+/// (MySQL's deadlock is retried), never both.
+async fn viewset_org_creates_racing_for_a_host_one_wins(pool: &Pool) {
+    for i in 0..10 {
+        let host = format!("{}.vsrace.test", name(pool, &format!("vh{i}")));
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let create = |slug: String| {
+            let (pool, barrier, body) = (pool.clone(), barrier.clone(), org_json(&slug, &host));
+            tokio::spawn(async move {
+                barrier.wait().await;
+                api(&pool, Method::POST, "/orgs", body).await
+            })
+        };
+        let a = create(name(pool, &format!("va{i}")));
+        let b = create(name(pool, &format!("vb{i}")));
+        let results = [a.await.unwrap(), b.await.unwrap()];
+        let won = results.iter().filter(|(s, _)| s.is_success()).count();
+        assert_eq!(won, 1, "round {i}: {results:?}");
+        let (status, text) = results.iter().find(|(s, _)| !s.is_success()).unwrap();
+        api_refused(*status, text, "racing REST create");
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
     scenarios: [
+        viewset_host_create_refuses_a_base_host,
+        viewset_org_edit_refuses_another_tenants_routing,
+        viewset_org_creates_racing_for_a_host_one_wins,
         admin_org_creates_racing_for_a_host_one_wins,
         admin_inline_host_refuses_a_base_host,
         admin_writes_clear_the_org_cache,

@@ -437,7 +437,7 @@ impl ExecError {
 
     /// A deadlock the database broke by aborting this transaction:
     /// MySQL 1213, PG 40P01.
-    #[cfg(feature = "tenancy")]
+    #[cfg(any(feature = "tenancy", feature = "admin"))]
     pub(crate) fn is_deadlock(&self) -> bool {
         let Self::Driver(sqlx::Error::Database(db)) = self else {
             return false;

@@ -709,6 +709,8 @@ impl<DB: Database> Builder<DB> {
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
         let resolver_for_admin = self.resolver();
+        // Picks the prefixed admin routes for a path under its tenant's prefix.
+        let dispatch_resolver = Arc::new(self.resolver());
 
         // v0.27.7 (#60) — pre-warm tenant pools on boot when the
         // app's `TenantPoolsConfig.prewarm_active_tenants` flag
@@ -759,12 +761,14 @@ impl<DB: Database> Builder<DB> {
             session_secret: session_secret_for_tenant.clone(),
             operator_secret: operator_secret.clone(),
         });
+        let link_apex = crate::tenancy::server::LinkApex::new(self.apex.clone());
         let mut tenant_admin_builder = TenantAdminBuilder::new(
             self.pools.clone(),
             self.registry_url.clone(),
             resolver_for_admin,
         )
-        .routes(self.routes.clone());
+        .routes(self.routes.clone())
+        .link_apex(link_apex.clone());
         if !self.show_only.is_empty() {
             tenant_admin_builder = tenant_admin_builder.show_only(self.show_only.clone());
         }
@@ -839,6 +843,13 @@ impl<DB: Database> Builder<DB> {
             Some(router) => router.layer(Extension(ctx.clone())).merge(admin_routes),
             None => admin_routes,
         };
+        // A path-prefix tenant lives at `<apex>/<prefix>`: its admin paths
+        // under the prefix, the rest to the same tenant app.
+        let prefixed = build_admin_routes(&tenant_admin, &self.routes.under_prefix("/{prefix}"));
+        #[cfg(feature = "_http_layers")]
+        let prefixed = with_body_limit(prefixed, self.body_limit.clone());
+        let prefix_app = prefixed.fallback_service(tenant_app.clone());
+        let registry_pool: crate::sql::Pool = self.registry.clone().into();
 
         // `router_with_pools` (rather than `router`) so the operator
         // console exposes /orgs/{slug}/edit. The pool handle is needed
@@ -881,7 +892,8 @@ impl<DB: Database> Builder<DB> {
         }
         // Links are signed with the tenant admin's own secret and path.
         let handover = crate::tenancy::FirstAdminHandover::new(&session_secret_for_tenant)
-            .set_password_path(self.routes.change_password_url.clone());
+            .set_password_path(self.routes.change_password_url.clone())
+            .apex(link_apex.clone());
         #[cfg(feature = "email")]
         let handover = match self.first_admin_mail {
             Some((mailer, from)) => handover.mailer(mailer, from),
@@ -915,7 +927,8 @@ impl<DB: Database> Builder<DB> {
         let operator_admin = match health {
             Some(health) => operator_admin.merge(health),
             None => operator_admin,
-        };
+        }
+        .layer(Extension(link_apex));
         #[cfg(feature = "_http_layers")]
         let operator_admin = with_body_limit(operator_admin, self.body_limit);
         // With an outer access log, it logs the console (#1788).
@@ -925,19 +938,58 @@ impl<DB: Database> Builder<DB> {
             use crate::access_log::AccessLogRouterExt as _;
             operator_admin.access_log(operator_console::access_log_layer())
         };
+        // The console's routes win on the apex: only a path it does not serve
+        // reaches a path-prefix tenant. Added after its layers, so they skip it.
+        let operator_admin = operator_admin.fallback_service(tower::service_fn({
+            let prefixed = prefix_app.clone();
+            move |req: axum::http::Request<axum::body::Body>| {
+                let mut prefixed = prefixed.clone();
+                async move {
+                    let mut resp = if req.extensions().get::<PrefixTenant>().is_some() {
+                        prefixed.as_service().oneshot(req).await?
+                    } else {
+                        axum::response::IntoResponse::into_response(
+                            axum::http::StatusCode::NOT_FOUND,
+                        )
+                    };
+                    resp.extensions_mut().insert(ConsoleUnmatched);
+                    Ok::<_, std::convert::Infallible>(resp)
+                }
+            }
+        }));
+        let shadowed = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
         let app = Router::new().fallback_service(tower::service_fn({
             let operator = operator_admin.clone();
             let tenants = tenant_app.clone();
+            let prefixed = prefix_app.clone();
             let apex = self.apex.clone();
             move |req: axum::http::Request<axum::body::Body>| {
                 let mut operator = operator.clone();
                 let mut tenants = tenants.clone();
+                let mut prefixed = prefixed.clone();
                 let apex = apex.clone();
+                let registry = registry_pool.clone();
+                let resolver = dispatch_resolver.clone();
+                let shadowed = shadowed.clone();
                 async move {
                     let on_apex = crate::tenancy::host_is_apex(req.headers(), req.uri(), &apex);
+                    let (mut req, prefixed_path) =
+                        under_tenant_prefix(req, &resolver, &registry).await;
                     let response = if on_apex {
-                        operator.as_service().oneshot(req).await
+                        let path = req.uri().path().to_owned();
+                        if prefixed_path {
+                            req.extensions_mut().insert(PrefixTenant);
+                        }
+                        let resp = operator.as_service().oneshot(req).await;
+                        if let Ok(r) = &resp {
+                            if prefixed_path && r.extensions().get::<ConsoleUnmatched>().is_none() {
+                                warn_shadowed(&shadowed, &path);
+                            }
+                        }
+                        resp
+                    } else if prefixed_path {
+                        prefixed.as_service().oneshot(req).await
                     } else {
                         tenants.as_service().oneshot(req).await
                     };
@@ -1017,9 +1069,12 @@ impl<DB: Database> Builder<DB> {
         Ok(app)
     }
 
-    /// The standard chain, plus the opt-in header fallback.
+    /// The standard chain, path-prefix tenants on the apex, plus the
+    /// opt-in header fallback.
     pub(crate) fn resolver(&self) -> ChainResolver {
-        let chain = ChainResolver::standard(self.apex.clone());
+        let chain = ChainResolver::standard(self.apex.clone()).push(
+            crate::tenancy::ApexPathPrefixResolver::new(self.apex.clone()),
+        );
         match &self.header_resolver {
             Some(h) => chain.push(h.clone()),
             None => chain,
@@ -1059,6 +1114,53 @@ impl<DB: Database> Builder<DB> {
         crate::shutdown::serve_until_drained(listener, app, drain).await?;
         Ok(())
     }
+}
+
+/// Marks an apex request under a tenant's path prefix, for the console's fallback.
+#[derive(Clone, Copy)]
+struct PrefixTenant;
+
+/// Marks a response from the console's fallback: no console route matched.
+#[derive(Clone, Copy)]
+struct ConsoleUnmatched;
+
+/// Warn once per prefix that a console route keeps a tenant's path.
+fn warn_shadowed(shadowed: &std::sync::Mutex<std::collections::HashSet<String>>, path: &str) {
+    let first = path.trim_start_matches('/').split('/').next().unwrap_or("");
+    let prefix = format!("/{first}");
+    let new = shadowed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(prefix.clone());
+    if new {
+        tracing::warn!(
+            target: "rustango::server",
+            prefix = %prefix,
+            "a tenant's path prefix is shadowed by an operator console route on the apex; \
+             the console keeps it — give the tenant another prefix"
+        );
+    }
+}
+
+/// Whether `req` is under the path prefix of the tenant it resolves to, on
+/// the apex or on the tenant's host. A failed lookup routes as before.
+async fn under_tenant_prefix(
+    req: axum::http::Request<axum::body::Body>,
+    resolver: &ChainResolver,
+    registry: &crate::sql::Pool,
+) -> (axum::http::Request<axum::body::Body>, bool) {
+    use crate::tenancy::OrgResolver as _;
+    let (parts, body) = req.into_parts();
+    let under = match resolver.resolve(&parts, registry).await {
+        Ok(org) => org
+            .and_then(|o| o.path_prefix)
+            .is_some_and(|p| crate::tenancy::routes::path_is_under(parts.uri.path(), &p)),
+        Err(e) => {
+            tracing::debug!(target: "rustango::server", error = %e, "tenant lookup failed");
+            false
+        }
+    };
+    (axum::http::Request::from_parts(parts, body), under)
 }
 
 #[cfg(feature = "_http_layers")]
