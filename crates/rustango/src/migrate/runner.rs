@@ -3650,9 +3650,11 @@ fn render_step(
         });
     let readded =
         readds_fk(change, dialect).filter(|_| renamed && !column_renamed && drop_fks.is_some());
-    // Unless a later op re-adds it, it waits for the end under the end names:
-    // re-added now, it could precede a later retype of its key (MySQL 3780).
-    let at_end = readded.filter(|(t, c)| !fk_readded_later(t, c, later, dialect));
+    // On MySQL, unless a later op re-adds it, it waits for the end under the end
+    // names: re-added now, it could precede a later retype of its key (3780).
+    let at_end = readded
+        .filter(|_| dialect.modifies_whole_column())
+        .filter(|(t, c)| !fk_readded_later(t, c, later, dialect));
     let readded_now = readded
         .filter(|_| at_end.is_none())
         .map(|(t, c)| (t.to_owned(), c.to_owned()));
@@ -5709,5 +5711,56 @@ mod tests {
             "FK re-added before its key's retype: {out:?}"
         );
         assert!(out[adds[0]].starts_with("ALTER TABLE `kid`"), "{out:?}");
+    }
+
+    /// An ON DELETE change before its table's rename adds no FK after it on
+    /// PG or SQLite: SQLite rebuilds, and PG re-adds it in place.
+    #[test]
+    fn render_between_keeps_on_delete_before_rename_in_place_off_mysql() {
+        use crate::migrate::{SchemaChange, SchemaSnapshot};
+        let snap = |child: &str, action: &str| -> SchemaSnapshot {
+            serde_json::from_value(serde_json::json!({ "tables": [
+                { "name": "parent", "model": "Parent", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64",
+                      "nullable": false, "primary_key": true }] },
+                { "name": child, "model": "Child", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64",
+                      "nullable": false, "primary_key": true },
+                    { "name": "a", "column": "a", "ty": "i64", "nullable": true,
+                      "primary_key": false,
+                      "fk": { "kind": "fk", "to": "parent", "on": "id",
+                              "on_delete": action } }] }] }))
+            .unwrap()
+        };
+        let changes = [
+            SchemaChange::AlterFkOnDelete {
+                table: "child".into(),
+                column: "a".into(),
+                from: Some("CASCADE".into()),
+                to: Some("SET NULL".into()),
+            },
+            SchemaChange::RenameTable {
+                old_name: "child".into(),
+                new_name: "kid".into(),
+            },
+        ];
+        let (before, after) = (snap("child", "CASCADE"), snap("kid", "SET NULL"));
+        let sqlite =
+            super::render_changes_between(&changes, &before, &after, &crate::sql::Sqlite).unwrap();
+        assert!(
+            !sqlite.iter().any(|s| s.contains("ADD CONSTRAINT")),
+            "{sqlite:?}"
+        );
+        let pg = super::render_changes_between(&changes, &before, &after, &crate::sql::Postgres)
+            .unwrap();
+        let rename = pg
+            .iter()
+            .position(|s| s.contains("RENAME TO"))
+            .expect("rename");
+        let add = pg
+            .iter()
+            .position(|s| s.contains("ADD CONSTRAINT"))
+            .expect("add");
+        assert!(add < rename, "{pg:?}");
     }
 }
