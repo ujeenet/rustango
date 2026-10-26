@@ -136,6 +136,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Debug-build futures of the CLI and provisioning paths are large; the
+  # default 2 MiB test-thread stack can overflow (SIGABRT).
+  RUST_MIN_STACK: "16777216"
   # v0.30.23 — dropped global `RUSTFLAGS: "-D warnings"`. It was
   # promoting every clippy + test warning (812 in clippy, dead-code
   # in test fixtures, etc.) to a build error. The matching local
