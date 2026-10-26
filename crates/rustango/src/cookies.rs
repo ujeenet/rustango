@@ -195,19 +195,22 @@ impl Cookie {
     /// Render the `Set-Cookie` header value. Attributes come out in
     /// a fixed order: `<name>=<value>; Path; Domain; Max-Age;
     /// Expires; HttpOnly; Secure; SameSite`.
+    ///
+    /// A `;` in the name, value, path, domain or expiry is written as
+    /// `%3B`, so a value from a request cannot add an attribute.
     #[must_use]
     pub fn build(&self) -> String {
         let mut s = String::with_capacity(64);
-        s.push_str(&self.name);
+        push_part(&mut s, &self.name);
         s.push('=');
-        s.push_str(&self.value);
+        push_part(&mut s, &self.value);
         if let Some(p) = &self.path {
             s.push_str("; Path=");
-            s.push_str(p);
+            push_part(&mut s, p);
         }
         if let Some(d) = &self.domain {
             s.push_str("; Domain=");
-            s.push_str(d);
+            push_part(&mut s, d);
         }
         if let Some(m) = self.max_age {
             use std::fmt::Write as _;
@@ -215,7 +218,7 @@ impl Cookie {
         }
         if let Some(e) = &self.expires {
             s.push_str("; Expires=");
-            s.push_str(e);
+            push_part(&mut s, e);
         }
         if self.http_only {
             s.push_str("; HttpOnly");
@@ -244,6 +247,11 @@ impl Cookie {
     pub fn header_value(&self) -> Option<axum::http::HeaderValue> {
         axum::http::HeaderValue::from_str(&self.build()).ok()
     }
+}
+
+/// Append one part of the header, with `;`, which would end it, encoded.
+fn push_part(out: &mut String, part: &str) {
+    out.push_str(&part.replace(';', "%3B"));
 }
 
 /// Parse a `Cookie:` header value into a name → value map.
@@ -461,6 +469,20 @@ mod tests {
             .build();
         assert!(s.contains("Domain=.example.com"));
         assert!(s.contains("Max-Age=0"));
+    }
+
+    /// A `;` in any part cannot add an attribute.
+    #[test]
+    fn a_semicolon_cannot_inject_an_attribute() {
+        let s = Cookie::new("q", "x; Domain=.example.com")
+            .path("/a;Secure")
+            .domain("h;HttpOnly")
+            .build();
+        assert_eq!(
+            s,
+            "q=x%3B Domain=.example.com; Path=/a%3BSecure; Domain=h%3BHttpOnly"
+        );
+        assert_eq!(Cookie::new("a;b", "v").build(), "a%3Bb=v");
     }
 
     // -------- header_value --------

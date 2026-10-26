@@ -26,6 +26,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::extractors::{Tenant, TenantScope};
+use crate::login_throttle::{ClientIp, LoginRefused};
 
 use super::auth::{mint_agent_jwt, MintError};
 use super::router::AuthedMcpState;
@@ -130,15 +131,17 @@ fn basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
 pub(crate) fn oauth_token<DB: crate::sql::sqlx::Database>(
     t: Tenant<DB>,
     State(state): State<AuthedMcpState>,
+    ip: ClientIp,
     headers: HeaderMap,
     Form(form): Form<OAuthTokenForm>,
 ) -> impl std::future::Future<Output = Response> + Send {
-    oauth_token_in(t.into(), state, headers, form)
+    oauth_token_in(t.into(), state, ip, headers, form)
 }
 
 async fn oauth_token_in(
     t: TenantScope,
     state: AuthedMcpState,
+    ip: ClientIp,
     headers: HeaderMap,
     form: OAuthTokenForm,
 ) -> Response {
@@ -162,7 +165,8 @@ async fn oauth_token_in(
             "missing client credentials (HTTP Basic or client_id/client_secret)",
         );
     };
-    match mint_agent_jwt(jwt, t.pool(), &t.org.slug, &client_id, &client_secret).await {
+    let minted = mint_agent_jwt(jwt, t.pool(), &t.org.slug, &client_id, &client_secret, &ip);
+    match minted.await {
         Ok(m) => Json(json!({
             "access_token": m.token,
             "token_type": "Bearer",
@@ -180,14 +184,16 @@ async fn oauth_token_in(
             "server_error",
             "token issuance failed",
         ),
-        Err(MintError::Busy) => {
-            let mut resp = oauth_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "temporarily_unavailable",
-                "try again",
-            );
+        Err(MintError::Refused(refused)) => {
+            let (status, retry_after) = match refused {
+                LoginRefused::Busy => (StatusCode::SERVICE_UNAVAILABLE, 1),
+                LoginRefused::Throttled { retry_after_secs } => {
+                    (StatusCode::TOO_MANY_REQUESTS, retry_after_secs)
+                }
+            };
+            let mut resp = oauth_error(status, "temporarily_unavailable", "try again");
             resp.headers_mut()
-                .insert(axum::http::header::RETRY_AFTER, 1u64.into());
+                .insert(axum::http::header::RETRY_AFTER, retry_after.into());
             resp
         }
     }
