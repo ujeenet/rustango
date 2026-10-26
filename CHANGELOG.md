@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — streaming storage
+
+`Storage::save_stream(key, len, body, &put)` writes exactly `len` bytes from a `ByteStream` as they arrive, and `Storage::load_stream(key)` reads one back in chunks, so an app can proxy large uploads to a private bucket. `LocalStorage`, `S3Storage` (one PUT up to 5 GiB; unsigned payload over https, chunk-signed over http) and `AzureBlobStorage` (one Put Blob up to 5000 MiB) stream; other backends get defaults that buffer. A wrong length is refused, `create_only` refuses an existing key, and a failed body leaves no object.
+
 ## [0.61.4] — 2026-10-26
 
 ### Fixed — a schema-mode tenant cannot take a role's name
