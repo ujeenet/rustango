@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### SQLite: `atomic` blocks take the write lock
+
+A top-level `atomic` on SQLite now starts with `BEGIN IMMEDIATE`, so two blocks on one database run one after the other, even read-only ones; a block waits up to the busy timeout for the lock.
+
 ### SQLite: JSON column equality compares values
 
 `filter(data = json)` on SQLite now matches `1` to `1.0` and objects in any key order, as PostgreSQL and MySQL do; a filter that relied on text equality may match more rows.

@@ -41,8 +41,47 @@ async fn claim(pool: &Pool, worker: i64) -> Result<Option<i64>, ExecError> {
     Ok(Some(job.id))
 }
 
+/// [`claim`] inside `atomic`, which must take the write lock at `BEGIN` too.
+async fn claim_atomic(pool: &Pool, worker: i64) -> Result<Option<i64>, ExecError> {
+    rustango::atomic!(pool, |tx| {
+        let mut guard = tx.lock().await?;
+        let free: Vec<Job> = Job::objects()
+            .filter("worker__isnull", true)
+            .order_by(&[("id", false)])
+            .limit(1)
+            .select_for_update()
+            .skip_locked()
+            .silent_on_sqlite()
+            .fetch_on(&mut *guard)
+            .await?;
+        let Some(job) = free.first() else {
+            return Ok(None);
+        };
+        Job::objects()
+            .filter("id", job.id)
+            .update()
+            .set("worker", worker)
+            .execute_on(&mut *guard)
+            .await?;
+        Ok(Some(job.id))
+    })
+    .await
+}
+
 /// Two workers racing over two jobs each claim one, every round.
 async fn racing_workers_claim_distinct_jobs(pool: &Pool) {
+    race(pool, |pool, worker| Box::pin(claim(pool, worker))).await;
+}
+
+/// The same race in `atomic` blocks.
+async fn racing_atomic_workers_claim_distinct_jobs(pool: &Pool) {
+    race(pool, |pool, worker| Box::pin(claim_atomic(pool, worker))).await;
+}
+
+type Claim<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<i64>, ExecError>> + 'a>>;
+
+async fn race(pool: &Pool, claim: impl for<'a> Fn(&'a Pool, i64) -> Claim<'a>) {
     for round in 0..20 {
         Job::objects().delete_on(pool).await.expect("clear");
         for id in [1, 2] {
@@ -54,6 +93,7 @@ async fn racing_workers_claim_distinct_jobs(pool: &Pool) {
         let barrier = tokio::sync::Barrier::new(2);
         let run = |worker: i64| {
             let barrier = &barrier;
+            let claim = &claim;
             async move {
                 barrier.wait().await;
                 claim(pool, worker).await
@@ -72,5 +112,8 @@ async fn racing_workers_claim_distinct_jobs(pool: &Pool) {
 tri_dialect_test! {
     model: Job,
     sqlite: file,
-    scenarios: [racing_workers_claim_distinct_jobs],
+    scenarios: [
+        racing_workers_claim_distinct_jobs,
+        racing_atomic_workers_claim_distinct_jobs,
+    ],
 }

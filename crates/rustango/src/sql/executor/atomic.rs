@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::OwnedMutexGuard;
 
-use super::{transaction_pool, ExecError, PoolTx};
+use super::{transaction_pool, write_transaction, ExecError, PoolTx};
 use crate::sql::{Pool, PoolId};
 
 type Callback = Box<dyn FnOnce() + Send>;
@@ -431,6 +431,11 @@ pub(crate) fn in_any_block() -> bool {
 /// `Ok`, the other writes commit. A MySQL lock-wait timeout (1205) always
 /// aborts the block.
 ///
+/// **SQLite** opens the block with `BEGIN IMMEDIATE`, as
+/// [`write_transaction`] does, so one writer runs at a time. A block opened
+/// inside another pool's block keeps a deferred `BEGIN`: that pool may hold
+/// the same file's lock.
+///
 /// **Costs:** past 64 open savepoints in one transaction PostgreSQL
 /// spills its subtransaction cache, so avoid nesting in hot loops. On
 /// MySQL a deadlock inside a nested block rolls back the whole outer
@@ -511,7 +516,13 @@ where
     >,
 {
     let fatal = Arc::new(AtomicBool::new(false));
-    let mut tx = transaction_pool(pool).await?;
+    // SQLite: the write lock at BEGIN, or a read-then-write block fails
+    // SQLITE_BUSY. Not under another pool's block, which may hold it.
+    let mut tx = if enclosing.is_none() {
+        write_transaction(pool).await?
+    } else {
+        transaction_pool(pool).await?
+    };
     let hook = Arc::clone(&fatal);
     tx.on_sqlite_rollback(move || hook.store(true, Ordering::SeqCst))
         .await?;
