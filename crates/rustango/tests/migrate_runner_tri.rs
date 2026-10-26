@@ -424,6 +424,54 @@ async fn retyped_fk_waits_for_its_key_before_a_table_rename(pool: &Pool) {
     }
 }
 
+/// MySQL caps a key at 3072 bytes: a unique `VARCHAR(1000)` or a unique
+/// pair of `VARCHAR(500)` is refused by name before any DDL runs.
+async fn keys_over_the_mysql_byte_cap_are_refused_up_front(pool: &Pool) {
+    let ledger = "mr_wk_ledger";
+    let string = |name: &str, len: u32, unique: bool| {
+        json!({"name": name, "column": name, "ty": "string", "nullable": false,
+            "primary_key": false, "unique": unique, "max_length": len})
+    };
+    let cases = [
+        (
+            "mr_wk_one",
+            json!({"tables": [table("mr_wk_one", vec![id(), string("code", 1000, true)])]}),
+        ),
+        (
+            "mr_wk_pair",
+            json!({
+                "tables": [table("mr_wk_pair", vec![id(), string("a", 500, false),
+                    string("b", 500, false)])],
+                "indexes": [{"name": "mr_wk_pair_a_b_uq", "table": "mr_wk_pair",
+                    "columns": ["a", "b"], "unique": true}],
+            }),
+        ),
+    ];
+    for (t, snapshot) in cases {
+        let dir = fresh(pool, &[t], ledger).await;
+        let snapshot: rustango::migrate::SchemaSnapshot =
+            serde_json::from_value(snapshot).expect("snapshot");
+        make_migrations_from(dir.path(), &snapshot, None)
+            .expect("makemigrations")
+            .expect("a migration");
+        let ran = migrate_pool_with_ledger(pool, dir.path(), ledger).await;
+        let d = pool.dialect();
+        let created = exec(pool, &format!("SELECT 1 FROM {}", d.quote_ident(t)))
+            .await
+            .is_ok();
+        if d.name() == "mysql" {
+            let err = ran.expect_err("over 3072 bytes").to_string();
+            assert!(err.contains("3072") && err.contains(t), "{err}");
+            assert!(!created, "nothing ran on MySQL");
+        } else {
+            ran.unwrap_or_else(|e| panic!("{t} on {}: {e}", d.name()));
+            assert!(created, "{t} on {}", d.name());
+        }
+        drop_table(pool, t).await;
+        drop_table(pool, ledger).await;
+    }
+}
+
 /// FKs on `t`, from the catalog.
 async fn fk_count(pool: &Pool, t: &str) -> i64 {
     let sql = match pool.dialect().name() {
@@ -1294,6 +1342,7 @@ tri_dialect_test!(
         refused_downgrade_runs_nothing,
         refused_loose_downgrade_runs_nothing,
         unique_key_over_duplicates_is_refused,
+        keys_over_the_mysql_byte_cap_are_refused_up_front,
         one_connection_pool_migrates,
         concurrent_runs_apply_once,
     ]
