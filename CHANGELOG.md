@@ -20,6 +20,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `rustango_translations.locale` / `key` use an `_as_cs` collation on MySQL and MariaDB 10.10+, so `Key` and `key` are two overrides as on PG and SQLite; `migrate` moves an existing table's `_ci` columns.
 
+### Fixed — PG schema-mode tenants: migrate lock and prepared statements
+
+- The migrate lock is per schema, so a schema-mode tenant's migration no longer waits on (or blocks) the registry's or another tenant's.
+- With `max_cached_scoped_pools = 0`, a registry connection a tenant borrows drops its prepared statements on the way in and out, so one query on tenants whose tables differ no longer fails with `cached plan must not change result type`.
+
 ## [0.61.3] — 2026-10-26
 
 ### Changed — unknown `cache.backend` values are logged as errors

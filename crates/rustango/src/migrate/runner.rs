@@ -240,6 +240,30 @@ fn validate_ledger_name(name: &str) {
 #[cfg(feature = "postgres")]
 const MIGRATE_LOCK_KEY: i64 = 0x5255_5354_4d49_4754;
 
+/// `pool`'s migrate lock key. PG advisory locks are per database, so a
+/// schema-mode tenant folds in the schema its sessions create in: one key
+/// for every schema made a tenant's run wait on all the others.
+#[cfg(feature = "postgres")]
+async fn pg_migrate_lock_key(pool: &PgPool) -> Result<i64, sqlx::Error> {
+    let schema: Option<String> = sqlx::query_scalar("SELECT current_schema()::text")
+        .fetch_one(pool)
+        .await?;
+    Ok(lock_key_for_schema(schema.as_deref()))
+}
+
+/// [`MIGRATE_LOCK_KEY`] for `public` (and no schema), as before; another
+/// schema's mixes in its FNV-1a hash, stable across processes and builds.
+#[cfg(feature = "postgres")]
+fn lock_key_for_schema(schema: Option<&str>) -> i64 {
+    let Some(schema) = schema.filter(|s| *s != "public") else {
+        return MIGRATE_LOCK_KEY;
+    };
+    let hash = schema.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    MIGRATE_LOCK_KEY ^ i64::from_ne_bytes(hash.to_ne_bytes())
+}
+
 /// Collect every registered model's schema into a `Vec`. Order is the
 /// order of registration (linker order); callers that care should sort.
 #[must_use]
@@ -711,13 +735,14 @@ pub async fn ensure_ledger(pool: &PgPool) -> Result<(), MigrateError> {
 async fn ensure_ledger_for(pool: &PgPool, ledger: &str) -> Result<(), MigrateError> {
     use crate::sql::{Dialect as _, Postgres};
     let dialect = Postgres;
+    let key = pg_migrate_lock_key(pool).await?;
     let mut tx = pool.begin().await?;
     // Postgres returns `pg_advisory_xact_lock(...)`. SQLite returns
     // `None` (its `BEGIN` already gates concurrent CREATE TABLE).
     if let Some(xact_lock_sql) = dialect.acquire_xact_lock_sql() {
         // The pool runners' key, so both bootstraps serialize (#1844).
         sqlx::query(&xact_lock_sql)
-            .bind(MIGRATE_LOCK_KEY)
+            .bind(key)
             .execute(&mut *tx)
             .await?;
     }
@@ -2899,8 +2924,8 @@ async fn fake_apply_pool(
 ///
 /// Backend-specific bind shapes:
 /// - **Postgres** — `pg_advisory_lock($1)` takes an `i64`; we bind
-///   [`MIGRATE_LOCK_KEY`] (the same key the legacy PgPool runner
-///   uses, so the two paths coordinate).
+///   [`pg_migrate_lock_key`] (the same key the legacy PgPool runner
+///   uses, so the two paths coordinate): one per schema-mode tenant.
 /// - **MySQL** — `GET_LOCK` names are server-wide, so the dialect
 ///   appends a hash of `DATABASE()` to the bound `rustango_migrate_`
 ///   prefix: one lock per database, like PG advisory locks.
@@ -3004,12 +3029,13 @@ where
         crate::sql::Pool::Postgres(pg) => {
             let opts = pg.connect_options();
             let connect_timeout = pg.options().get_acquire_timeout();
+            let key = pg_migrate_lock_key(pg).await?;
             let mut held =
                 LockSession::<sqlx::PgConnection>::wait(&opts, connect_timeout, |conn| {
                     let sql = acquire.clone();
                     Box::pin(async move {
                         sqlx::query_scalar::<_, bool>(&sql)
-                            .bind(MIGRATE_LOCK_KEY)
+                            .bind(key)
                             .fetch_one(&mut *conn)
                             .await
                     })
@@ -3018,7 +3044,7 @@ where
             let result = body.await;
             // Best-effort: PG releases on session close, and the session closes.
             let _ = sqlx::query(&release)
-                .bind(MIGRATE_LOCK_KEY)
+                .bind(key)
                 .execute(held.conn())
                 .await;
             held.close().await;

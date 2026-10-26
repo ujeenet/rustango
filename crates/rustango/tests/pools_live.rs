@@ -996,3 +996,100 @@ async fn uncached_schema_tenant_holds_a_registry_connection() {
     drop(plain);
     drop_schema(&admin, "acme_tp_nocache").await;
 }
+
+/// A registry connection switched between schemas drops its prepared
+/// statements: reused, one would keep the other table's result type (0A000).
+#[tokio::test]
+async fn uncached_schema_tenants_do_not_share_prepared_statements() {
+    use std::time::Duration;
+    let _g = live_lock().lock().await;
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let admin = pool().await.unwrap();
+    for (schema, ty) in [("acme_tp_stmt", "BIGINT"), ("globex_tp_stmt", "TEXT")] {
+        drop_schema(&admin, schema).await;
+        create_schema(&admin, schema).await;
+        let sql = format!(r#"CREATE TABLE "{schema}".tp_stmt (v {ty})"#);
+        sqlx::query(&sql).execute(&admin).await.unwrap();
+    }
+    let registry = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(&url)
+        .await
+        .unwrap();
+    let cfg = rustango::tenancy::TenantPoolsConfig {
+        max_cached_scoped_pools: 0,
+        ..Default::default()
+    };
+    let pools = TenantPools::new(registry.clone()).config(cfg);
+    for schema in ["acme_tp_stmt", "globex_tp_stmt", "acme_tp_stmt"] {
+        let mut conn = pools.acquire(&schema_org(schema)).await.unwrap();
+        sqlx::query("SELECT v FROM tp_stmt")
+            .fetch_all(&mut **conn)
+            .await
+            .unwrap_or_else(|e| panic!("{schema}: {e}"));
+    }
+    drop(pools);
+    registry.close().await;
+    for schema in ["acme_tp_stmt", "globex_tp_stmt"] {
+        drop_schema(&admin, schema).await;
+    }
+}
+
+/// A schema-mode tenant's migrate takes a lock of its own: another run
+/// holding the registry's does not make it wait.
+#[tokio::test]
+async fn schema_tenant_migrate_lock_is_its_own() {
+    use rustango::migrate::{migrate_pool_with_ledger, with_lock_timeout, MigrateError};
+    use std::time::Duration;
+    let _g = live_lock().lock().await;
+    let Some(admin) = pool().await else {
+        return;
+    };
+    let schema = "acme_tp_lock";
+    drop_schema(&admin, schema).await;
+    create_schema(&admin, schema).await;
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot: migrate::SchemaSnapshot = serde_json::from_value(serde_json::json!({
+        "tables": [{"name": "tp_lock_t", "model": "tp_lock_t", "fields": [
+            {"name": "id", "column": "id", "ty": "i64", "nullable": false,
+             "primary_key": true}]}]
+    }))
+    .unwrap();
+    migrate::make_migrations_from(dir.path(), &snapshot, None)
+        .unwrap()
+        .unwrap();
+    // Another run holds the registry's (`public`) lock.
+    let mut holder = admin.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(5932739705669502804)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let pools = TenantPools::new(admin.clone());
+    let tenant: rustango::sql::Pool = pools.scoped_pool(&schema_org(schema)).await.unwrap().into();
+    let limit = Duration::from_secs(2);
+    let ran = with_lock_timeout(
+        limit,
+        migrate_pool_with_ledger(&tenant, dir.path(), "tp_lock_ledger"),
+    )
+    .await;
+    let registry: rustango::sql::Pool = admin.clone().into();
+    let blocked = with_lock_timeout(
+        limit,
+        migrate_pool_with_ledger(&registry, dir.path(), "tp_lock_ledger"),
+    )
+    .await;
+    sqlx::query("SELECT pg_advisory_unlock(5932739705669502804)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    drop(holder);
+    drop_schema(&admin, schema).await;
+    ran.expect("the tenant's migrate waited on the registry's lock");
+    assert!(
+        matches!(blocked, Err(MigrateError::LockTimeout(_))),
+        "the registry's migrate still takes its lock: {blocked:?}"
+    );
+}
