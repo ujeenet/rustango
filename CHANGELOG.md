@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — prefetch fills every copy of a parent
+
+`fetch_with_prefetch_pool` / `fetch_with_prefetch_filtered` give children to each copy of a parent the parent query returns more than once (a join); only the first copy got them. Each extra copy costs one more child query.
+
 ### Fixed — migrations, MySQL and MariaDB
 
 - MySQL: a correlated `IN` over the table an `update()` / `delete()` writes is no longer read through a derived table, which saw the write's own changes and hit wrong rows; it fails with error 1093 instead.

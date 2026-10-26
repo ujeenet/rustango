@@ -987,6 +987,49 @@ async fn prefetch_past_the_bind_cap(pool: &Pool) {
     }
 }
 
+/// A parent the parent query returns twice gets its children on each copy.
+async fn prefetch_fills_every_copy_of_a_parent(pool: &Pool) {
+    use rustango::core::{joins::aliased, Join, JoinKind, WhereExpr};
+    seed_rows(pool, 1..3).await;
+    for id in [1, 2] {
+        Child {
+            id,
+            row: ForeignKey::unloaded(1),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("child");
+    }
+    // One parent row per child.
+    let parents = || {
+        Row::objects().join(Join {
+            target: Child::SCHEMA,
+            alias: "kid",
+            kind: JoinKind::Inner,
+            on: WhereExpr::ExprCompare {
+                lhs: aliased("kid", "row"),
+                op: Op::Eq,
+                rhs: aliased(Row::SCHEMA.table, "id"),
+            },
+            project: vec![],
+        })
+    };
+    let check = |groups: Vec<(Row, Vec<Child>)>| {
+        let kids: Vec<(i64, usize)> = groups.iter().map(|(p, k)| (p.id, k.len())).collect();
+        assert_eq!(kids, [(1, 2), (1, 2)], "on {}", pool.dialect().name());
+    };
+    check(
+        fetch_with_prefetch_pool::<Row, Child>(parents(), "row", pool)
+            .await
+            .expect("prefetch"),
+    );
+    check(
+        fetch_with_prefetch_filtered::<Row, Child>(parents(), "row", Child::objects(), pool)
+            .await
+            .expect("filtered prefetch"),
+    );
+}
+
 /// `prefetch_soft` splits its keys too.
 async fn prefetch_soft_past_the_bind_cap(pool: &Pool) {
     // Hits in the first and the last batch.
@@ -1416,6 +1459,7 @@ tri_dialect_test! {
         in_bulk_beside_carried_binds,
         carried_binds_alone_over_the_cap_are_refused,
         prefetch_past_the_bind_cap,
+        prefetch_fills_every_copy_of_a_parent,
         prefetch_soft_past_the_bind_cap,
         bulk_update_is_all_or_none,
         m2m_set_ignores_repeated_ids,

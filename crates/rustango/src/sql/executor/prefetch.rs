@@ -56,37 +56,9 @@ where
         + Unpin,
 {
     let parents: Vec<P> = parent_qs.fetch(pool).await?;
-    if parents.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Same `SqlValue`-keyed grouping as `fetch_with_prefetch` so
-    // non-i64 FK PKs work end-to-end on both Postgres and MySQL.
-    let pk_field = P::SCHEMA
-        .primary_key()
-        .ok_or(ExecError::MissingPrimaryKey {
-            table: P::SCHEMA.table,
-        })?;
-    let mut parent_pks: Vec<crate::core::SqlValue> = Vec::with_capacity(parents.len());
-    for parent in &parents {
-        let pk = extract_pk_value(parent);
-        if !matches!(pk, crate::core::SqlValue::Null) {
-            parent_pks.push(pk);
-        }
-    }
-    {
-        let mut seen = std::collections::HashSet::new();
-        parent_pks.retain(|v| seen.insert(v.to_display_string()));
-    }
-    if parent_pks.is_empty() {
-        return Ok(parents.into_iter().map(|p| (p, Vec::new())).collect());
-    }
-
-    let children: Vec<C> = super::fetch_in_chunks(
-        pool,
-        &crate::query::QuerySet::<C>::new(),
-        parent_pks,
-        |keys| {
+    let base = crate::query::QuerySet::<C>::new();
+    stitch(parents, child_fk_column, |keys| {
+        super::fetch_in_chunks(pool, &base, keys, |keys| {
             crate::query::QuerySet::<C>::new()
                 .filter_op(
                     child_fk_column,
@@ -94,29 +66,9 @@ where
                     crate::core::SqlValue::List(keys),
                 )
                 .fetch(pool)
-        },
-    )
-    .await?;
-
-    let mut grouped: std::collections::HashMap<String, Vec<C>> = std::collections::HashMap::new();
-    for child in children {
-        let Some(fk_pk) = child.__rustango_fk_pk_value(child_fk_column) else {
-            continue;
-        };
-        grouped
-            .entry(fk_pk.to_display_string())
-            .or_default()
-            .push(child);
-    }
-
-    let mut out = Vec::with_capacity(parents.len());
-    for parent in parents {
-        let pk = extract_pk_value(&parent).to_display_string();
-        let kids = grouped.remove(&pk).unwrap_or_default();
-        out.push((parent, kids));
-    }
-    let _ = pk_field;
-    Ok(out)
+        })
+    })
+    .await
 }
 
 /// `fetch_with_prefetch_pool` with a user-supplied **filtered** child
@@ -181,64 +133,94 @@ where
         + Unpin,
 {
     let parents: Vec<P> = parent_qs.fetch(pool).await?;
+    // The IN list AND-composes with the caller's filters, order and limit.
+    // Over the bind cap the keys go in batches; a limit or offset then refuses.
+    stitch(parents, child_fk_column, |keys| {
+        super::fetch_in_chunks(pool, &child_qs, keys, |keys| {
+            child_qs
+                .clone()
+                .filter_op(
+                    child_fk_column,
+                    crate::core::Op::In,
+                    crate::core::SqlValue::List(keys),
+                )
+                .fetch(pool)
+        })
+    })
+    .await
+}
+
+/// Pair each parent with the children `fetch` returns for its key. A parent
+/// the query returned `n` times costs `n` child fetches: `C` is not `Clone`.
+async fn stitch<P, C, F, Fut>(
+    parents: Vec<P>,
+    child_fk_column: &'static str,
+    mut fetch: F,
+) -> Result<Vec<(P, Vec<C>)>, ExecError>
+where
+    P: Model + HasPkValue,
+    C: FkPkAccess,
+    F: FnMut(Vec<crate::core::SqlValue>) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
+{
+    use std::collections::HashMap;
     if parents.is_empty() {
         return Ok(Vec::new());
     }
-
-    let pk_field = P::SCHEMA
+    P::SCHEMA
         .primary_key()
         .ok_or(ExecError::MissingPrimaryKey {
             table: P::SCHEMA.table,
         })?;
-    let mut parent_pks: Vec<crate::core::SqlValue> = Vec::with_capacity(parents.len());
+    // Each distinct key in first-seen order, with how many parents carry it.
+    let mut keys: Vec<(String, crate::core::SqlValue, usize)> = Vec::new();
+    let mut at: HashMap<String, usize> = HashMap::new();
     for parent in &parents {
         let pk = extract_pk_value(parent);
-        if !matches!(pk, crate::core::SqlValue::Null) {
-            parent_pks.push(pk);
+        if matches!(pk, crate::core::SqlValue::Null) {
+            continue;
+        }
+        let text = pk.to_display_string();
+        match at.get(&text) {
+            Some(&i) => keys[i].2 += 1,
+            None => {
+                at.insert(text.clone(), keys.len());
+                keys.push((text, pk, 1));
+            }
         }
     }
-    {
-        let mut seen = std::collections::HashSet::new();
-        parent_pks.retain(|v| seen.insert(v.to_display_string()));
+    let copies = keys.iter().map(|k| k.2).max().unwrap_or(0);
+    let mut rounds: Vec<HashMap<String, Vec<C>>> = Vec::with_capacity(copies);
+    for round in 0..copies {
+        let batch = keys
+            .iter()
+            .filter(|k| k.2 > round)
+            .map(|k| k.1.clone())
+            .collect();
+        let mut grouped: HashMap<String, Vec<C>> = HashMap::new();
+        for child in fetch(batch).await? {
+            if let Some(fk) = child.__rustango_fk_pk_value(child_fk_column) {
+                grouped
+                    .entry(fk.to_display_string())
+                    .or_default()
+                    .push(child);
+            }
+        }
+        rounds.push(grouped);
     }
-    if parent_pks.is_empty() {
-        return Ok(parents.into_iter().map(|p| (p, Vec::new())).collect());
-    }
-
-    // Inject the IN-predicate by `filter_op` on top of whatever the
-    // user already chained — preserves their order_by / limit /
-    // existing filters. The IN-predicate AND-composes with the user's
-    // WHERE clause (QuerySet default-ANDs raw filters).
-    // Over the bind cap the keys go in batches; a limit or offset then refuses.
-    let children: Vec<C> = super::fetch_in_chunks(pool, &child_qs, parent_pks, |keys| {
-        child_qs
-            .clone()
-            .filter_op(
-                child_fk_column,
-                crate::core::Op::In,
-                crate::core::SqlValue::List(keys),
-            )
-            .fetch(pool)
-    })
-    .await?;
-
-    let mut grouped: std::collections::HashMap<String, Vec<C>> = std::collections::HashMap::new();
-    for child in children {
-        let Some(fk_pk) = child.__rustango_fk_pk_value(child_fk_column) else {
-            continue;
-        };
-        grouped
-            .entry(fk_pk.to_display_string())
-            .or_default()
-            .push(child);
-    }
-
-    let mut out = Vec::with_capacity(parents.len());
-    for parent in parents {
-        let pk = extract_pk_value(&parent).to_display_string();
-        let kids = grouped.remove(&pk).unwrap_or_default();
-        out.push((parent, kids));
-    }
-    let _ = pk_field;
-    Ok(out)
+    let mut taken: HashMap<String, usize> = HashMap::new();
+    Ok(parents
+        .into_iter()
+        .map(|parent| {
+            let pk = extract_pk_value(&parent);
+            if matches!(pk, crate::core::SqlValue::Null) {
+                return (parent, Vec::new());
+            }
+            let text = pk.to_display_string();
+            let copy = taken.entry(text.clone()).or_insert(0);
+            let kids = rounds[*copy].remove(&text).unwrap_or_default();
+            *copy += 1;
+            (parent, kids)
+        })
+        .collect())
 }
