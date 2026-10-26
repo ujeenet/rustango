@@ -57,6 +57,9 @@ use async_trait::async_trait;
 
 #[cfg(feature = "email-smtp")]
 pub mod smtp;
+#[cfg(any(test, not(feature = "email-smtp")))]
+mod address;
+
 #[cfg(feature = "email-smtp")]
 pub use smtp::{SmtpMailer, SmtpMailerBuilder, TlsMode};
 
@@ -446,7 +449,7 @@ fn check_no_crlf(field: &str, value: &str) -> Result<(), MailError> {
 }
 
 /// [`Email::validate`] plus the address parse `SmtpMailer` does, so the
-/// non-sending backends refuse what production refuses.
+/// test and dev mailers refuse what production refuses.
 fn validate_like_smtp(email: &Email) -> Result<(), MailError> {
     email.validate()?;
     let addrs = email.to.iter().chain(&email.cc).chain(&email.bcc);
@@ -461,25 +464,9 @@ fn check_mailbox(addr: &str) -> Result<(), MailError> {
     smtp::parse_mailbox(addr).map(drop)
 }
 
-/// Without lettre: the `[Name] <local@domain>` shape its parser accepts.
 #[cfg(not(feature = "email-smtp"))]
 fn check_mailbox(addr: &str) -> Result<(), MailError> {
-    let atom = |s: &str| {
-        !s.is_empty()
-            && s.chars()
-                .all(|c| c.is_alphanumeric() || "!#$%&'*+-/=?^_`{|}~".contains(c))
-    };
-    let (_, address) = parseaddr(addr);
-    let ok = address.rsplit_once('@').is_some_and(|(local, domain)| {
-        let local_ok = (local.len() >= 2 && local.starts_with('"') && local.ends_with('"'))
-            || local.split('.').all(atom);
-        let domain_ok = (domain.starts_with('[') && domain.ends_with(']'))
-            || domain.split('.').all(|l| {
-                atom(l) && l.starts_with(char::is_alphanumeric) && l.ends_with(char::is_alphanumeric)
-            });
-        local_ok && domain_ok
-    });
-    if ok {
+    if address::is_mailbox(addr) {
         Ok(())
     } else {
         Err(MailError::InvalidMessage(format!("bad address `{addr}`")))
@@ -757,7 +744,8 @@ pub struct NullMailer;
 #[async_trait]
 impl Mailer for NullMailer {
     async fn send(&self, email: &Email) -> Result<(), MailError> {
-        validate_like_smtp(email)?;
+        // A production no-op too: no address parse.
+        email.validate()?;
         Ok(())
     }
 }
@@ -1053,36 +1041,120 @@ mod tests {
         assert_eq!(m.count(), 0);
     }
 
-    /// The doubles refuse an address SMTP cannot parse, so tests catch it.
+    /// `(address, lettre 0.11 parses it)`, verdicts read from lettre itself.
+    const MAILBOXES: &[(&str, bool)] = &[
+        ("a@x", true),
+        ("Alice <alice@example.com>", true),
+        ("\"Smith, J.\" <j@example.com>", true),
+        ("\"a b\" <a@x.com>", true),
+        ("A.B <a@x.com>", true),
+        (" a@x.com ", true),
+        ("a@ x.com", true),
+        ("jöhn@example.com", true),
+        ("例え@example.com", true),
+        ("jo☃hn@example.com", false),
+        ("\"john\"@example.com", true),
+        ("\"john doe\"@example.com", false),
+        ("\"\"@x.com", false),
+        ("\"a@b\"@c.com", false),
+        ("a@[127.0.0.1]", false),
+        ("a@[::1]", false),
+        ("a@1.2.3.4", true),
+        ("a@x_y.com", true),
+        ("a@x!y.com", true),
+        ("a@_x.com", false),
+        ("a@x-.com", false),
+        ("a@münchen.de", true),
+        ("a@☃.com", true),
+        ("a@x..com", false),
+        ("a..b@x.com", false),
+        ("a.@x.com", false),
+        ("< a@x.com >", false),
+        ("a@x .com", false),
+        ("a@x.com, b@x.com", false),
+        ("not an address", false),
+        ("alice@", false),
+        ("@example.com", false),
+        ("a b@example.com", false),
+        ("Alice <alice@example.com", false),
+        ("nope", false),
+    ];
+
+    /// Over the RFC length limits: local part 64, label 63, domain 254.
+    fn long_mailboxes() -> Vec<(String, bool)> {
+        let label = "b".repeat(60);
+        vec![
+            (format!("{}@x.com", "a".repeat(64)), true),
+            (format!("{}@x.com", "a".repeat(65)), false),
+            (format!("a@{}.com", "b".repeat(63)), true),
+            (format!("a@{}.com", "b".repeat(64)), false),
+            (format!("a@{}.com", vec![label.as_str(); 4].join(".")), true),
+            (format!("a@{}.com", vec![label.as_str(); 5].join(".")), false),
+        ]
+    }
+
+    /// The doubles refuse an address SMTP cannot parse, so tests catch it;
+    /// run with and without `email-smtp`, on the same verdicts.
     #[tokio::test]
     async fn doubles_refuse_what_smtp_refuses() {
         let dir = std::env::temp_dir().join(format!("rg-mail-{}", std::process::id()));
         let file = FileMailer::new(&dir);
-        let mailers: [&dyn Mailer; 4] = [&InMemoryMailer::new(), &NullMailer, &ConsoleMailer, &file];
+        let mailers: [&dyn Mailer; 3] = [&InMemoryMailer::new(), &ConsoleMailer, &file];
         let ok = || Email::new().to("a@x").subject("s").body("b");
-        for bad in [
-            ok().to("not an address"),
-            ok().to("alice@"),
-            ok().cc("@example.com"),
-            ok().bcc("a b@example.com"),
-            ok().from("Alice <alice@example.com"),
-            ok().reply_to("nope"),
-        ] {
-            for m in mailers {
-                assert!(
-                    matches!(m.send(&bad).await, Err(MailError::InvalidMessage(_))),
-                    "{bad:?}"
-                );
+        let cases = MAILBOXES
+            .iter()
+            .map(|(a, v)| ((*a).to_owned(), *v))
+            .chain(long_mailboxes());
+        for (addr, valid) in cases {
+            for email in [
+                ok().to(&addr),
+                ok().cc(&addr),
+                ok().bcc(&addr),
+                ok().from(&addr),
+                ok().reply_to(&addr),
+            ] {
+                for m in mailers {
+                    let sent = m.send(&email).await;
+                    assert_eq!(sent.is_ok(), valid, "{addr:?}: {sent:?}");
+                    if !valid {
+                        assert!(matches!(sent, Err(MailError::InvalidMessage(_))));
+                    }
+                }
             }
         }
-        let good = ok()
-            .to("Alice <alice@example.com>")
-            .cc("\"Smith, J.\" <j@example.com>")
-            .from("noreply@example.com");
-        for m in mailers {
-            m.send(&good).await.unwrap();
-        }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The fallback agrees with lettre on every case and their mixes.
+    #[cfg(feature = "email-smtp")]
+    #[test]
+    fn fallback_matches_lettre() {
+        let mut cases: Vec<String> = MAILBOXES.iter().map(|(a, _)| (*a).to_owned()).collect();
+        cases.extend(long_mailboxes().into_iter().map(|(a, _)| a));
+        let locals = ["a", "a.b", "\"a\"", "\"a b\"", "\"a\\\"b\"", "ä", "☃", "a..b", "", "a(b)", " a"];
+        let domains = ["x", "x.com", "1.2.3.4", "[1.2.3.4]", "x_y", "-x", "ä.de", "☃", "x.", " x", "😀.com"];
+        let wraps = ["{}", "<{}>", "N <{}>", "\"N, M\" <{}>", " {} ", "<{}> ", "N<{}>", "N <{}"];
+        for l in locals {
+            for d in domains {
+                for w in wraps {
+                    cases.push(w.replace("{}", &format!("{l}@{d}")));
+                }
+            }
+        }
+        for c in &cases {
+            assert_eq!(
+                address::is_mailbox(c),
+                smtp::parse_mailbox(c).is_ok(),
+                "{c:?}"
+            );
+        }
+    }
+
+    /// `NullMailer` also disables mail in production, so it stays silent.
+    #[tokio::test]
+    async fn null_mailer_does_not_parse_addresses() {
+        let e = Email::new().to("not an address").subject("s").body("b");
+        NullMailer.send(&e).await.unwrap();
     }
 
     /// `require_from` refuses what an `SmtpMailer` without `default_from` does.

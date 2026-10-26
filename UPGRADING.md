@@ -152,7 +152,7 @@ untouched.
 
 ### Mail test doubles check addresses
 
-`InMemoryMailer`, `ConsoleMailer`, `FileMailer` and `NullMailer` return `MailError::InvalidMessage` for an address `SmtpMailer` refuses, so a test sending such mail now fails.
+`InMemoryMailer`, `ConsoleMailer` and `FileMailer` return `MailError::InvalidMessage` for an address `SmtpMailer` refuses, so a test sending such mail now fails.
 
 ### `derive(Form)` refuses non-finite floats
 
