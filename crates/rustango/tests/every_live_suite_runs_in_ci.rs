@@ -26,7 +26,7 @@
 //!
 //! | arm | how it runs | cost of a new suite |
 //! |---|---|---|
-//! | PostgreSQL | `postgres_test` runs `cargo test --workspace --all-features` with `DATABASE_URL` set | nothing — it is picked up automatically |
+//! | PostgreSQL | `postgres_test` runs the `--workspace --all-features` nextest archive with `DATABASE_URL` set | nothing — it is picked up automatically |
 //! | SQLite | same job, in-memory | nothing |
 //! | **MySQL** | `mysql_live` names every target one at a time | **a line in `ci.yml`, or it never runs** |
 //!
@@ -198,7 +198,9 @@ fn run_commands(block: &str) -> Vec<String> {
 /// `--all-features` does. So does any `--features` list carrying `mysql`
 /// as a whole token — `mysql,testkit` yes, `mysqlish` no.
 fn enables_mysql(cmd: &str) -> bool {
-    if cmd.contains("--all-features") {
+    // An archive run executes the `--all-features` build; the partition
+    // guard below holds `tests_compile` to that.
+    if cmd.contains("--all-features") || is_archive_run(cmd) {
         return true;
     }
     // `--features` and its short form `-F`, and the list may be quoted:
@@ -234,7 +236,9 @@ fn named_test_targets(block: &str) -> BTreeMap<String, bool> {
     let mut out: BTreeMap<String, bool> = BTreeMap::new();
     for cmd in run_commands(block) {
         let mysql = enables_mysql(&cmd);
-        for (i, m) in cmd.match_indices("--test ") {
+        let flagged = cmd.match_indices("--test ");
+        let filtered = cmd.match_indices("binary(=");
+        for (i, m) in flagged.chain(filtered) {
             let name: String = cmd[i + m.len()..]
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
@@ -319,9 +323,8 @@ fn every_suite_with_a_mysql_arm_is_named_in_the_ci_job() {
          \n\n  {}\n\nA `*_mysql_live` suite does nothing at all without the URL; a \
          `*_tri` suite still runs its PostgreSQL and SQLite arms in `postgres_test`, \
          which is what makes a missing line here so easy to overlook — the suite \
-         looks covered.\n\nAdd a `- run: cargo test -p rustango --features \
-         mysql,<...> --test <name>` line to the `mysql_live` job in \
-         .github/workflows/ci.yml.",
+         looks covered.\n\nAdd `binary(=<name>)` to the `-E` filterset of the \
+         `mysql_live` job in .github/workflows/ci.yml.",
         missing
             .iter()
             .map(|s| s.as_str())
@@ -420,6 +423,141 @@ fn the_live_jobs_set_the_url_their_suites_read() {
     }
 }
 
+/// `postgres_test` and `mysql_live` run the `tests_compile` archive in N
+/// partitions. A matrix that skips a number, a filter on the PostgreSQL
+/// run, a parallel profile or another archive would leave suites unrun or
+/// racing, with every partition green.
+#[test]
+fn partitioned_jobs_run_the_archive_serially() {
+    let path = repo_root().join(".github/workflows/ci.yml");
+    let yaml = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let compile = job_block(&yaml, "tests_compile");
+    // PostgreSQL runs everything; MySQL filters to the suites it names.
+    for (job, filtered) in [("postgres_test", false), ("mysql_live", true)] {
+        let block = job_block(&yaml, job);
+        let problems = partition_problems(&block, &compile, filtered);
+        assert!(
+            problems.is_empty(),
+            "`{job}` does not run the archive soundly:\n  {}\n\n{block}",
+            problems.join("\n  ")
+        );
+    }
+}
+
+/// A `cargo nextest run` from an archive: it builds nothing, it runs what
+/// `tests_compile` built with `--workspace --all-features`.
+fn is_archive_run(cmd: &str) -> bool {
+    cmd.contains("nextest run") && cmd.contains("--archive-file")
+}
+
+/// Split a quoted `-E '…'` filterset out of a command.
+fn take_filter(cmd: &str) -> (String, Option<String>) {
+    if let Some(i) = cmd.find("-E '") {
+        let rest = &cmd[i + 4..];
+        if let Some(j) = rest.find('\'') {
+            let without = format!("{}{}", &cmd[..i], &rest[j + 1..]);
+            return (without, Some(rest[..j].to_owned()));
+        }
+    }
+    (cmd.to_owned(), None)
+}
+
+/// Everything wrong with a partitioned job, empty when it is sound.
+fn partition_problems(job: &str, compile_job: &str, filtered: bool) -> Vec<String> {
+    let mut out = Vec::new();
+
+    // `enables_mysql` trusts an archive run to be `--all-features`.
+    let builds_all = run_commands(compile_job).iter().any(|c| {
+        let tok: Vec<&str> = c.split_whitespace().collect();
+        c.contains("nextest archive")
+            && tok.contains(&"--workspace")
+            && tok.contains(&"--all-features")
+    });
+    if !builds_all {
+        out.push("`tests_compile` does not archive `--workspace --all-features`".into());
+    }
+    if !job.contains("needs: [gate, tests_compile]") {
+        out.push("does not `needs: [gate, tests_compile]`".into());
+    }
+    let listed: Option<Vec<u32>> = job
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("partition:"))
+        .and_then(|v| {
+            v.trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split(',')
+                .map(|x| x.trim().parse().ok())
+                .collect()
+        });
+
+    let cmds = run_commands(job);
+    let runs: Vec<&String> = cmds.iter().filter(|c| is_archive_run(c)).collect();
+    if runs.is_empty() || (!filtered && runs.len() != 1) {
+        out.push(format!("expected one archive run, found {}", runs.len()));
+        return out;
+    }
+    for run in runs {
+        // `${{ x }}` as one token, so its inner spaces do not split it.
+        let run = run.replace("${{ ", "${{").replace(" }}", "}}");
+        let (run, filter) = take_filter(&run);
+        if filter.is_some() && !filtered {
+            out.push("`-E` narrows a run that must cover the whole archive".into());
+        }
+        let tok: Vec<&str> = run.split_whitespace().collect();
+
+        // Every token is the command, a known flag, or that flag's value.
+        // Anything else (`--test`, a name filter) narrows the run.
+        const WITH_VALUE: &[&str] = &[
+            "--profile",
+            "--archive-file",
+            "--workspace-remap",
+            "--extract-to",
+            "--partition",
+        ];
+        let mut rest = tok.iter().skip_while(|t| **t != "run").skip(1);
+        let mut flags: BTreeMap<&str, &str> = BTreeMap::new();
+        while let Some(t) = rest.next() {
+            if WITH_VALUE.contains(t) {
+                flags.insert(*t, rest.next().copied().unwrap_or(""));
+            } else if *t != "--extract-overwrite" && *t != "--no-fail-fast" {
+                out.push(format!("unexpected `{t}` narrows or changes the run"));
+            }
+        }
+        if flags.get("--profile") != Some(&"live") {
+            out.push("not `--profile live`: the suites share the partition's database".into());
+        }
+        let archive = flags.get("--archive-file").copied().unwrap_or("");
+        let file = archive.rsplit('/').next().unwrap_or("");
+        if file.is_empty() || !compile_job.contains(file) {
+            out.push(format!(
+                "`--archive-file {archive}` is not what `tests_compile` builds"
+            ));
+        }
+
+        // `count:${{ matrix.partition }}/N` against `partition: [1, …, N]`.
+        let spec = flags.get("--partition").copied().unwrap_or("");
+        let Some(n) = spec
+            .strip_prefix("count:${{matrix.partition}}/")
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            out.push(format!(
+                "`--partition {spec}` is not `count:${{{{ matrix.partition }}}}/N`"
+            ));
+            continue;
+        };
+        let want: Vec<u32> = (1..=n).collect();
+        if listed.as_ref() != Some(&want) {
+            out.push(format!(
+                "matrix `partition:` is {listed:?}, but `count:…/{n}` needs {want:?}"
+            ));
+        }
+    }
+    out
+}
+
 /// Tests for the parse above, so a green guard means the parse worked
 /// rather than that it matched nothing.
 mod parser_tests {
@@ -457,6 +595,10 @@ jobs:
           echo 'a shell line that looks like a list item:'
           echo '- not a step'
           cargo test -p rustango --features mysql --test kappa_mysql_live
+      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test lambda_tri
+      - run: >-
+          MYSQL_TEST_URL=mysql://root@x/y
+          cargo nextest run --profile live -p rustango --features sqlite --test mu_tri
   deny-examples:
     runs-on: ubuntu-latest
     steps:
@@ -665,6 +807,109 @@ jobs:
         );
     }
 
+    /// `cargo nextest run` lines are read exactly like `cargo test` ones.
+    #[test]
+    fn nextest_steps_are_read_like_cargo_test() {
+        let found = named_test_targets(&job_block(SAMPLE, "mysql_live"));
+        assert_eq!(found.get("lambda_tri"), Some(&true), "{found:?}");
+        assert_eq!(
+            found.get("mu_tri"),
+            Some(&false),
+            "named without mysql: {found:?}"
+        );
+    }
+
+    const PG: &str = "
+  postgres_test:
+    needs: [gate, tests_compile]
+    strategy:
+      matrix:
+        partition: [1, 2, 3]
+    steps:
+      - run: >-
+          cargo nextest run --profile live
+          --archive-file ${{ runner.temp }}/nextest-archive.tar.zst
+          --workspace-remap ${{ github.workspace }}
+          --partition count:${{ matrix.partition }}/3
+";
+    const TC: &str = "      - run: cargo nextest archive --workspace --all-features --archive-file ${{ runner.temp }}/nextest-archive.tar.zst\n";
+
+    #[test]
+    fn a_sound_partitioned_run_passes() {
+        let block = job_block(PG, "postgres_test");
+        assert_eq!(partition_problems(&block, TC, false), Vec::<String>::new());
+    }
+
+    /// Each mutation leaves every partition green while running less.
+    #[test]
+    fn every_way_to_run_less_is_caught() {
+        for (from, to, why) in [
+            ("[1, 2, 3]", "[1, 2]", "a partition dropped from the matrix"),
+            ("/3", "/4", "count raised without the matrix"),
+            ("--profile live", "--profile ci", "parallel on one database"),
+            ("--partition", "-E 'test(x)' --partition", "a filter"),
+            (
+                "nextest-archive.tar.zst\n          --workspace",
+                "other.tar.zst\n          --workspace",
+                "an archive nobody builds",
+            ),
+            (
+                "[gate, tests_compile]",
+                "gate",
+                "not waiting for the archive",
+            ),
+        ] {
+            assert!(PG.contains(from), "bad mutation {from}");
+            let block = job_block(&PG.replace(from, to), "postgres_test");
+            assert!(
+                !partition_problems(&block, TC, false).is_empty(),
+                "missed: {why}"
+            );
+        }
+    }
+
+    const MY: &str = "
+  mysql_live:
+    needs: [gate, tests_compile]
+    strategy:
+      matrix:
+        partition: [1, 2]
+    steps:
+      - run: >-
+          cargo nextest run --profile live
+          --archive-file ${{ runner.temp }}/nextest-archive.tar.zst
+          --partition count:${{ matrix.partition }}/2
+          -E 'binary(=alpha_tri) |
+            binary(=beta_mysql_live)'
+      - run: >-
+          MYSQL_TEST_URL=mysql://root@x/y
+          cargo nextest run --profile live
+          --archive-file ${{ runner.temp }}/nextest-archive.tar.zst
+          --partition count:${{ matrix.partition }}/2
+          -E 'binary(=gamma_tri)'
+      - run: cargo nextest run --profile live -p rustango --features sqlite --test delta_tri
+";
+
+    /// Suites named in an archive run's filterset build with MySQL.
+    #[test]
+    fn filterset_names_count_as_mysql_runs() {
+        let found = named_test_targets(&job_block(MY, "mysql_live"));
+        for t in ["alpha_tri", "beta_mysql_live", "gamma_tri"] {
+            assert_eq!(found.get(t), Some(&true), "{t}: {found:?}");
+        }
+        assert_eq!(found.get("delta_tri"), Some(&false), "{found:?}");
+    }
+
+    #[test]
+    fn a_filtered_job_may_filter_but_not_skip_partitions() {
+        let block = job_block(MY, "mysql_live");
+        assert_eq!(partition_problems(&block, TC, true), Vec::<String>::new());
+        let bad = job_block(&MY.replacen("/2", "/3", 1), "mysql_live");
+        assert!(!partition_problems(&bad, TC, true).is_empty());
+        let not_all = TC.replace(" --all-features", "");
+        assert!(!partition_problems(&block, &not_all, true).is_empty());
+    }
+
     #[test]
     fn hyphenated_job_names_are_headers() {
         assert!(is_job_header("  deny-examples:"));
@@ -801,8 +1046,9 @@ fn every_env_gated_live_suite_is_named_in_its_job() {
         let runs = |stem: &str| {
             cmds.iter().any(|c| {
                 let words: Vec<&str> = c.split_whitespace().collect();
-                words.windows(2).any(|w| w == ["--test", stem])
-                    && (job != "mysql_live" || c.contains("mysql") || c.contains("--all-features"))
+                let named = words.windows(2).any(|w| w == ["--test", stem])
+                    || c.contains(&format!("binary(={stem})"));
+                named && (job != "mysql_live" || enables_mysql(c))
             })
         };
         for entry in std::fs::read_dir(&dir).expect("tests/ is readable") {
