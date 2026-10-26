@@ -1,5 +1,6 @@
 //! The `OpenApiSchema` trait, with impls for primitives, std types,
-//! chrono dates and times, uuid and `serde_json::Value`.
+//! chrono dates and times, uuid, `rust_decimal::Decimal`, the
+//! `sql` column wrappers and `serde_json::Value`.
 //!
 //! With the `openapi` feature on, `#[derive(Serializer)]` implements
 //! this trait for your serializer. That impl walks the fields and
@@ -187,6 +188,17 @@ impl OpenApiSchema for crate::sql::Vector {
     }
 }
 
+/// serde writes `{ "x", "y", "srid" }`; `srid` defaults to 4326 on input.
+impl OpenApiSchema for crate::sql::Point {
+    fn openapi_schema() -> Schema {
+        Schema::object()
+            .property("x", f64::openapi_schema())
+            .property("y", f64::openapi_schema())
+            .property("srid", u32::openapi_schema())
+            .required(["x", "y"])
+    }
+}
+
 impl<V: OpenApiSchema> OpenApiSchema for HashMap<String, V> {
     fn openapi_schema() -> Schema {
         let mut s = Schema::object();
@@ -212,7 +224,7 @@ impl<V: OpenApiSchema> OpenApiSchema for IndexMap<String, V> {
 }
 
 // =====================================================================
-// chrono, uuid and serde_json, which are always compiled in
+// chrono, uuid, rust_decimal and serde_json, which are always compiled in
 // =====================================================================
 
 impl OpenApiSchema for chrono::DateTime<chrono::Utc> {
@@ -246,6 +258,13 @@ impl OpenApiSchema for chrono::NaiveTime {
 impl OpenApiSchema for uuid::Uuid {
     fn openapi_schema() -> Schema {
         Schema::uuid()
+    }
+}
+
+/// rust_decimal's serde writes a string, so no precision is lost.
+impl OpenApiSchema for rust_decimal::Decimal {
+    fn openapi_schema() -> Schema {
+        Schema::decimal()
     }
 }
 

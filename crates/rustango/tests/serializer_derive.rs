@@ -304,6 +304,32 @@ mod openapi_auto_derive {
         assert!(!req.contains(&"secret"));
     }
 
+    // `skip` keeps the model sqlite-buildable; the schema still lists the fields.
+    #[derive(Serializer, Default)]
+    #[serializer(model = Post)]
+    struct PlaceSerializer {
+        pub title: String,
+        #[serializer(skip)]
+        pub price: rust_decimal::Decimal,
+        #[serializer(skip)]
+        pub location: Option<rustango::sql::Point>,
+    }
+
+    /// Decimal and Point fields compile, in the shapes serde writes.
+    #[test]
+    fn decimal_and_point_fields_have_schemas() {
+        let v = schema_value::<PlaceSerializer>();
+        assert_eq!(v["properties"]["price"]["type"], "string");
+        assert_eq!(v["properties"]["price"]["format"], "decimal");
+        let loc = &v["properties"]["location"];
+        assert_eq!(loc["properties"]["x"]["type"], "number");
+        assert_eq!(loc["properties"]["srid"]["type"], "integer");
+        let json = serde_json::to_value(rustango::sql::Point::new(1.0, 2.0)).unwrap();
+        for key in json.as_object().unwrap().keys() {
+            assert!(loc["properties"][key].is_object(), "{key}: {loc}");
+        }
+    }
+
     #[test]
     fn schema_for_serializer_helper_returns_the_same_schema() {
         let direct = serde_json::to_value(PostSerializer::openapi_schema()).unwrap();

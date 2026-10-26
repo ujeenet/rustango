@@ -34,6 +34,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `reverse_has` instance helpers (`<name>`, `_count`, `_fetch`, `_first`, `_pluck`) filter on `self_pk_column`, as the EXISTS form does. Without it they join on the primary-key column, not a literal `id`.
 - A MySQL/SQLite `truncate` writes a bulk `update` audit entry for an audited table whose FK its `DELETE` sets to NULL.
 
+### Fixed — OpenAPI
+
+- A `#[derive(Serializer)]` with a `Decimal` or `Point` field compiles with `openapi` on: both implement `OpenApiSchema`.
+- ViewSet specs document Binary fields as hex (`format: hex`), as the server reads and writes them, not base64.
+- List params name the real `max_page_size` cap, list `ordering` on every non-cursor ViewSet and drop it under cursor pagination, which ignores it.
+- List and QUERY document their 400; create/PUT/PATCH document urlencoded bodies and the 422 `validation_failed`.
+
 ### Fixed — tests and CI
 
 - Live suites no longer pass in CI when a PG extension is missing or a set URL is unreachable. New `testkit::matrix::{pg_extension, required_env, skip_outside_ci}` skip locally and fail when `CI` is set.

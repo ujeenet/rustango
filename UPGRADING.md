@@ -152,6 +152,10 @@ untouched.
 
 ## 0.61.5
 
+### ViewSet OpenAPI: Binary is hex
+
+ViewSet specs now give Binary fields `format: hex` instead of `byte`; the wire format was always hex. A client generated from an older spec that base64-encodes these fields was wrong before; regenerate it.
+
 ### MCP agent secrets are rate limited
 
 After `[auth] login_ip_limit` failed agent secrets from one IP, the MCP token endpoints and raw-key bearer answer `429` with `Retry-After`. They count per IP in their own bucket, apart from human logins; behind a proxy mount `RealIpLayer::trust_proxies(...)`, or every client shares the proxy's bucket. A passphrase (non-base64) `RUSTANGO_SESSION_SECRET` still signs agent tokens but warns; 0.62.0 will refuse it, so set `openssl rand -base64 32`.
