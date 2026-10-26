@@ -171,7 +171,7 @@ where
 }
 
 /// Prefetch the relation `relation` of every parent: a many-to-many or a
-/// `reverse_has` reverse FK, by name, as Django's `prefetch_related("tags")`.
+/// `reverse_has` reverse FK, by name.
 ///
 /// ```ignore
 /// let posts: Vec<(Post, Vec<Tag>)> =
