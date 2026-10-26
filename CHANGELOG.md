@@ -17,6 +17,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 Every 16 writes sweep one sixteenth of the directory for expired entries, and the new `FileCache::purge_expired` sweeps it all. New directories are created 0700 and entries 0600 on Unix; entries held keys such as session ids readable to other local users.
 
+### Security — `DynamicForm` refuses script URLs
+
+A `url` field refuses `javascript:`, `vbscript:` and `data:` values, however a browser would spell them; rendered as a link they were stored XSS. Other URLs failing `validate_url`, and emails failing `validate_email` or the `SmtpMailer` parser, log a warning for now.
+
 ## [0.61.3] — 2026-10-26
 
 ### Changed — unknown `cache.backend` values are logged as errors

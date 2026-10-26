@@ -156,7 +156,11 @@ An unset or `console` `[mail] backend` now warns on the prod tier. Set `smtp`, o
 
 ### `FileCache` permissions
 
-New cache directories are 0700 and entries 0600. An existing directory keeps its mode; `chmod 700` it, since entry files name keys in clear.
+New cache directories are 0700 and entries 0600. An existing directory keeps its mode; `chmod 700` it, since entry files hold keys in clear.
+
+### `DynamicForm` URL and email answers
+
+A `url` answer with a `javascript:`, `vbscript:` or `data:` scheme is refused. Other non-http(s) URLs, and emails that `validate_email` or `SmtpMailer` would refuse, are still accepted with a `rustango::forms` warning; a later minor release will refuse them.
 
 ## 0.61.3
 
