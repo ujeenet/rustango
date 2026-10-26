@@ -1,5 +1,5 @@
-//! The admin create form leaves an empty defaulted field to its column
-//! default, on every backend.
+//! An admin create that does not send a defaulted field leaves it to its
+//! column default, on every backend.
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -59,19 +59,19 @@ async fn item(pool: &Pool, title: &str) -> Item {
         .unwrap_or_else(|| panic!("no item {title}"))
 }
 
-async fn empty_defaulted_fields_take_the_column_default(pool: &Pool) {
-    let (status, html) = post(pool, "title=blank&status=&rank=&note=").await;
+async fn absent_defaulted_fields_take_the_column_default(pool: &Pool) {
+    let (status, html) = post(pool, "title=absent").await;
     assert!(status.is_redirection(), "{status}: {html}");
-    let i = item(pool, "blank").await;
+    let i = item(pool, "absent").await;
     assert_eq!(
         (i.status.as_str(), i.rank, i.note.as_deref()),
         ("draft", 7, Some("n/a"))
     );
-    // Absent keys too.
-    let (status, html) = post(pool, "title=absent").await;
+    // A sent empty value is kept: NULL here, not the default.
+    let (status, html) = post(pool, "title=cleared&status=s&rank=1&note=").await;
     assert!(status.is_redirection(), "{status}: {html}");
-    assert_eq!(item(pool, "absent").await.rank, 7);
-    // A typed value still wins.
+    assert_eq!(item(pool, "cleared").await.note, None);
+    // A typed value wins.
     let (status, html) = post(pool, "title=typed&status=live&rank=3&note=x").await;
     assert!(status.is_redirection(), "{status}: {html}");
     let i = item(pool, "typed").await;
@@ -83,5 +83,5 @@ async fn empty_defaulted_fields_take_the_column_default(pool: &Pool) {
 
 tri_dialect_test!(
     setup: setup,
-    scenarios: [empty_defaulted_fields_take_the_column_default],
+    scenarios: [absent_defaulted_fields_take_the_column_default],
 );

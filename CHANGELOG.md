@@ -8,11 +8,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - `messages::Outbox` stages several flash messages in one response; two `messages::push` calls in one handler kept only the last.
 - `intword` / `naturalsize` / `naturalsize_si` move to the next unit when rounding reaches 1000 (1024): `999_999_999` is `1.0 billion`, not `1000.0 million`.
-- ViewSet create runs the admin's `add` object-permission hooks, on the request and on each written row (single or bulk), as the admin does.
-- The registry admin refuses an edit or delete that would leave no active operator, as the console and CLI do.
+- `ViewSet::admin_add_hooks()` opts a ViewSet into the admin's `add` object-permission hooks on create, on the request and on each written row (single or bulk); off by default.
+- The registry admin refuses an edit, delete or bulk delete that would leave no active operator, as the console and CLI do, and locks the active rows as they do.
 - `ModelFormFor::from_json` refuses JSON null on a NOT NULL Bool instead of storing `false`.
 - `DynamicForm` checkboxes accept only `true/false/1/0/on/off/yes/no`; any other value is an error, not ticked.
-- The admin create form leaves an empty defaulted field to its column default instead of storing NULL or refusing it as missing.
+- An admin create that does not send a defaulted field leaves it to its column default instead of storing NULL or refusing it as missing.
 - A JSON array sent to an `Array` field (ViewSet, `ModelForm`) is read item by item; commas inside an item no longer split it.
 - A bulk ViewSet create's serializer validation error names the failing entry (`bulk entry N: invalid input`).
 - Formsets and admin inlines read their rows in one pass over the form keys; a POST with many keys no longer costs keys times rows.

@@ -150,17 +150,17 @@ untouched.
 
 ## Unreleased
 
-### ViewSet create runs admin `add` hooks
-
-A `register_admin_object_permission!(table, "add", …)` hook now also gates `POST` on a ViewSet of that table: a refusal is a `403` and writes nothing.
-
 ### Forms: stricter checkboxes and JSON null
 
 A `DynamicForm` boolean with a value other than `true/false/1/0/on/off/yes/no` is now a validation error. `ModelFormFor::from_json` refuses `null` on a NOT NULL Bool.
 
-### Admin create: empty defaulted fields
+### Admin create: absent defaulted fields
 
-An empty field that has a column default now stores the default on create, also for a nullable field that used to store NULL.
+A create POST that leaves out a field with a column default now stores the default; a field sent empty still stores `""` or NULL.
+
+### Array fields read a JSON array whole
+
+A form value for an `Array` field that parses as a JSON array (`["a,b", "c"]`, `[1, 2]`) is read item by item; other text still splits on commas.
 
 ### `signals::clear_all` clears m2m and admin receivers
 

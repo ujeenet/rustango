@@ -1516,8 +1516,7 @@ impl<T: crate::core::Model> ModelFormFor<T> {
     /// and dispatches to the same per-field parser the form-encoded
     /// path uses.
     ///
-    /// A missing key or null is absent (the field's nullable rule decides
-    /// whether that's an error), except that null on a NOT NULL Bool is an error. Strings pass through
+    /// A missing key or `null` is absent; `null` on a NOT NULL Bool is an error. Strings pass through
     /// directly; numbers/bools/Arrays/objects get JSON-stringified
     /// then parsed by `parse_form_value` via the field's declared
     /// type — so an i64 field accepts both `42` and `"42"`, and a
