@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin inlines on fields with their own `column`
+
+Inline rows (plain and generic) read their cells and key by field name. With `#[rustango(column = "…")]` a cell showed blank and the inline edit form lost the row's key.
+
 ### Fixed — SQLite `atomic` takes the write lock at `BEGIN`
 
 `atomic` on SQLite opens with `BEGIN IMMEDIATE`, as `write_transaction` does, so a read-then-write block (`select_for_update`) no longer fails with "database is locked". A block inside another pool's block stays deferred.

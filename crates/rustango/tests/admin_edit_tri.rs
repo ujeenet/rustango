@@ -9,7 +9,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use rustango::sql::{Auto, FetcherPool as _, Pool};
+use rustango::sql::{Auto, CounterPool as _, FetcherPool as _, Pool};
 use rustango::{tri_dialect_test, Model};
 use tower::ServiceExt as _;
 
@@ -86,11 +86,44 @@ rustango::register_admin_inline!(
     fields = &["qty"],
 );
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_cparent")]
+#[allow(dead_code)]
+pub struct CParent {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 8)]
+    pub name: String,
+}
+
+/// An inline child whose key and shown field have their own column names.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_cline")]
+#[allow(dead_code)]
+pub struct CLine {
+    #[rustango(primary_key, column = "line_pk")]
+    pub id: Auto<i64>,
+    #[rustango(fk = "aed_cparent", on = "id")]
+    pub parent_id: i64,
+    #[rustango(column = "amt")]
+    pub amount: i64,
+}
+
+rustango::register_admin_inline!(
+    parent = "aed_cparent",
+    child = "aed_cline",
+    fk = "parent_id",
+    fields = &["amount"],
+);
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     fresh_table::<Doc>(pool).await;
     drop_table(pool, "aed_line").await;
     drop_table(pool, "aed_sline").await;
+    drop_table(pool, "aed_cline").await;
+    fresh_table::<CParent>(pool).await;
+    fresh_table::<CLine>(pool).await;
     fresh_table::<Order>(pool).await;
     fresh_table::<Line>(pool).await;
     fresh_table::<SOrder>(pool).await;
@@ -492,9 +525,44 @@ async fn stale_form_still_wins(pool: &Pool) {
     assert_eq!(row.name, "a", "the submitted value lost to a later write");
 }
 
+/// Inline rows show a key and a field stored under other column names, and
+/// an untouched save keeps the row instead of adding a copy.
+async fn inline_rows_read_renamed_columns(pool: &Pool) {
+    let mut p = CParent {
+        id: Auto::default(),
+        name: "p".into(),
+    };
+    p.insert_pool(pool).await.expect("parent");
+    let p = *p.id.get().expect("pk");
+    let mut l = CLine {
+        id: Auto::default(),
+        parent_id: p,
+        amount: 4242,
+    };
+    l.insert_pool(pool).await.expect("line");
+    let l = *l.id.get().expect("pk");
+
+    let (status, html) = send(pool, "GET", &format!("/aed_cparent/{p}"), "").await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(html.contains(&format!(r#"href="/aed_cline/{l}""#)), "{html}");
+    assert!(html.contains("4242"), "the shown field is blank: {html}");
+
+    let (status, html) = send(pool, "GET", &format!("/aed_cparent/{p}/edit"), "").await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    let key = shown(&html, "aed_cline-0-id");
+    assert_eq!(key, l.to_string(), "the row's hidden key");
+    let form = format!(
+        "name=p&aed_cline-TOTAL_FORMS=1&aed_cline-INITIAL_FORMS=1&aed_cline-0-id={key}&aed_cline-0-amount=4242"
+    );
+    let (status, body) = send(pool, "POST", &format!("/aed_cparent/{p}"), &form).await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(CLine::objects().count(pool).await.expect("count"), 1);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        inline_rows_read_renamed_columns,
         untouched_nullable_json_object_is_kept,
         untouched_unknown_choice_is_kept,
         stale_form_still_wins,
