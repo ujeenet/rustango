@@ -514,6 +514,16 @@ where
         }
         let mut target = PgDropTarget::connect(&opts, super::pools::tenant_session_tag(id)).await?;
         target.refuse_foreign_sessions().await?;
+        // An idle alias holds no session and spells the host its own way.
+        if let Ok(Some(me)) = DbIdentity::of_url(&url).await {
+            refuse_twins(pools, registry, org, &me, true)
+                .await
+                .map_err(|why| {
+                    TenancyError::Validation(format!(
+                        "refusing to drop this tenant's database — {why}"
+                    ))
+                })?;
+        }
         return Ok((mode, id, DropPlan::Brought(target)));
     }
     Ok((mode, id, DropPlan::Left))

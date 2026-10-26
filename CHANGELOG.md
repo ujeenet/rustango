@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `purge-tenant` sees an idle tenant on a host alias
+
+Before dropping a brought Postgres database, the purge compares its server identity and name with every other database-mode tenant's and the registry's, so `db.internal` and `10.0.0.5` no longer slip past. A tenant that cannot be reached is logged, not refused.
+
 ### Fixed — a tenant URL that reaches the registry by another name is flagged
 
 Creating a tenant, editing its URL, the console's URL check and `migrate-tenant-storage` compare the server's identity (Postgres `system_identifier`, MySQL `server_uuid`, the SQLite file's device and inode) with the registry's. `localhost` for `127.0.0.1`, or a hard link, now gets a warning; a later release refuses it.
