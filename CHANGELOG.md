@@ -27,6 +27,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Template views leave `password_hash`, `password` and `database_url` out of `object` / `objects` / `object_list` unless the view lists them. UpdateView and the bulk-delete confirm page still carry unlisted columns; one warning per process names them, as a later release drops them.
 - Admin inline `max_num` is recounted inside the save transaction with the parent row locked, so two concurrent saves cannot both add past it.
 
+### Fixed — CLI and config
+
+- Management verbs log to stderr, so `dumpdata > fx.json` and `sqlmigrate` output hold no log lines (new `logging::Console`); the server keeps stdout.
+- `audit-cleanup` with a 0 or negative `--days` / `--keep-last` refuses without `--yes`; it deleted every audit entry.
+- A tenancy project's `startapp` reaches the tenancy scaffolder, so `--with-bootstrap-migration` works.
+- `[security] hsts_include_subdomains` / `hsts_preload = false` drop those HSTS directives, which `hsts_max_age_secs` adds even on `relaxed` (now with a warning).
+- A 0 pool bound from `[database]` is ignored with a warning, like its env var, instead of failing every query.
+- Config loading skips non-UTF-8 env vars instead of panicking; an all-digit `RUSTANGO__*` secret loads into a string field; a bad override names its env var (`ConfigError::EnvOverride`).
+- `sqlite,admin-sso` builds without dead-code warnings.
+
 ## [0.61.5] — 2026-10-26
 
 ### Fixed — auth

@@ -2883,6 +2883,22 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
     }
+
+    /// A tenancy project's `startapp` is the tenancy scaffolder, which
+    /// knows `--with-bootstrap-migration`; the plain one shadowed it.
+    #[cfg(feature = "tenancy")]
+    #[test]
+    fn tenancy_startapp_reaches_the_tenancy_scaffolder() {
+        let args: Vec<String> = ["startapp", "blog", "--help"].map(String::from).into();
+        let mut out = Vec::new();
+        Cli::new()
+            .tenancy()
+            .run_pool_free(&args, &mut out)
+            .expect("pool-free verb")
+            .expect("help");
+        let out = String::from_utf8_lossy(&out);
+        assert!(out.contains("--with-bootstrap-migration"), "{out}");
+    }
 }
 
 /// `Cli::with_health()` must reach every serving path (#1457).
@@ -3421,21 +3437,5 @@ mod observability_without_admin_tests {
             .expect("request");
         let body = axum::body::to_bytes(res.into_body(), 64).await.unwrap();
         assert_eq!(&body[..], b"sqlite");
-    }
-
-    /// A tenancy project's `startapp` is the tenancy scaffolder, which
-    /// knows `--with-bootstrap-migration`; the plain one shadowed it.
-    #[cfg(feature = "tenancy")]
-    #[test]
-    fn tenancy_startapp_reaches_the_tenancy_scaffolder() {
-        let args: Vec<String> = ["startapp", "blog", "--help"].map(String::from).into();
-        let mut out = Vec::new();
-        Cli::new()
-            .tenancy()
-            .run_pool_free(&args, &mut out)
-            .expect("pool-free verb")
-            .expect("help");
-        let out = String::from_utf8_lossy(&out);
-        assert!(out.contains("--with-bootstrap-migration"), "{out}");
     }
 }
