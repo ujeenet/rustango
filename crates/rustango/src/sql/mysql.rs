@@ -113,6 +113,10 @@ impl Dialect for MySql {
         true
     }
 
+    fn plain_reads_see_snapshot(&self) -> bool {
+        true
+    }
+
     /// MySQL quotes with backticks, and an embedded backtick is
     /// doubled, so any name comes out valid.
     fn quote_ident(&self, name: &str) -> String {

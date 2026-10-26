@@ -152,7 +152,11 @@ untouched.
 
 ### Template views hide credential columns
 
-`ListView`, `DetailView`, `DeleteView`, `UpdateView` and the bulk-delete confirm page no longer put `password_hash`, `password` or `database_url` into the Tera context unless `.fields()` (or UpdateView's field list) names them. UpdateView and the bulk-delete confirm page warn at mount when they still carry columns outside their list; 0.62.0 will drop those.
+`ListView`, `DetailView`, `DeleteView`, `UpdateView` and the bulk-delete confirm page no longer put `password_hash`, `password` or `database_url` into the Tera context unless `.fields()` (or UpdateView's field list) names them. A template that shows a column literally named `password` or `database_url` on purpose must now list it in `.fields()`. UpdateView and the bulk-delete confirm page still carry columns outside their list; one warning per process names those views, as a later release will drop the columns.
+
+### Index the inline FK column
+
+An admin inline with `max_num` now recounts its rows inside the save transaction. On MySQL that is a locking read of the parent's child rows; without an index on the inline's FK column it locks the whole child table until the save commits, so index that column.
 
 ## 0.61.5
 

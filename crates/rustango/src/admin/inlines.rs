@@ -1930,13 +1930,26 @@ pub(crate) async fn apply_plan_tx(
         }
         outcome.deleted += deleted;
         // Recount in `tx`, after the deletes: a delete that removed nothing
-        // frees no room, and a racing save's rows count. A locking read, so
-        // MySQL reads the latest commit rather than its snapshot.
+        // frees no room, and a racing save's rows count. MySQL needs a locking
+        // pk read to see the latest commit; elsewhere a plain COUNT does.
         if let Some((max, live)) = &target.cap {
-            let live_rows = crate::sql::select_rows_as_json_tx(tx, &locked(live), &[target.pk])
-                .await
-                .map_err(refused)?
-                .len();
+            let live_rows = if tx.dialect().plain_reads_see_snapshot() {
+                crate::sql::select_rows_as_json_tx(tx, &locked(live), &[target.pk])
+                    .await
+                    .map_err(refused)?
+                    .len()
+            } else {
+                let count = crate::core::CountQuery {
+                    model: child,
+                    where_clause: live.clone(),
+                    search: None,
+                    source: None,
+                };
+                let n = crate::sql::count_rows_on(&mut **tx, &count)
+                    .await
+                    .map_err(refused)?;
+                usize::try_from(n).unwrap_or(usize::MAX)
+            };
             if live_rows.saturating_add(target.inserts.len()) > *max {
                 return Err(InlineApplyError::MaxNum { child });
             }

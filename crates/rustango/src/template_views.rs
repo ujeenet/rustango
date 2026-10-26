@@ -3249,20 +3249,46 @@ fn context_scalars(
         .collect()
 }
 
-/// Warn once per mounted view whose context carries columns beyond its list.
+/// Mounted views whose context carries columns beyond their list, as `"<view> on <table>"`.
+static WIDE_VIEWS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static WIDE_VIEWS_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record a view whose context carries columns outside `listed`; logged by [`log_wide_views_once`].
 fn warn_wide_context(view: &str, schema: &'static ModelSchema, listed: &[String]) {
-    let extra: Vec<&str> = context_scalars(schema, listed)
+    let wide = context_scalars(schema, listed)
         .into_iter()
-        .filter(|f| !f.primary_key && !is_listed(listed, f))
-        .map(|f| f.name)
-        .collect();
-    if !extra.is_empty() {
-        tracing::warn!(
-            table = schema.table,
-            ?extra,
-            "{view} puts columns outside its field list into the template context; 0.62.0 drops them"
-        );
+        .any(|f| !f.primary_key && !is_listed(listed, f));
+    if wide {
+        let mut views = WIDE_VIEWS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        views.push(format!("{view} on {}", schema.table));
     }
+}
+
+/// One warning per process, at the first render, when every view is mounted.
+fn log_wide_views_once() {
+    use std::sync::atomic::Ordering;
+    if WIDE_VIEWS_LOGGED.load(Ordering::Relaxed) {
+        return;
+    }
+    let views = WIDE_VIEWS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if views.is_empty() || WIDE_VIEWS_LOGGED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    const SHOWN: usize = 5;
+    let more = views.len().saturating_sub(SHOWN);
+    let listed = views[..views.len().min(SHOWN)].join(", ");
+    let tail = if more > 0 {
+        format!(" and {more} more")
+    } else {
+        String::new()
+    };
+    tracing::warn!(
+        "{listed}{tail} put columns outside their field list into the template context; a later release drops them"
+    );
 }
 
 /// Render a Tera template, returning a 200 + HTML body on success
@@ -3274,6 +3300,7 @@ fn warn_wide_context(view: &str, schema: &'static ModelSchema, listed: &[String]
 /// Every view renders here, so `ExtraContext` and the registered
 /// context processors are merged in one place; view keys win.
 fn render(tera: &Tera, name: &str, mut ctx: Context, parts: &Parts) -> Response {
+    log_wide_views_once();
     ExtraContext::merge_into(parts.extensions.get::<ExtraContext>(), &mut ctx);
     crate::template_context_processors::apply_to_context(&mut ctx, parts);
     match tera.render(name, &ctx) {
