@@ -125,6 +125,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::email::smtp` | SMTP transport |
 | `rustango::email_jobs` | Two queues on one jobs table given different mailers |
 | `rustango::error` | The cause behind a 5xx, which the response body withholds |
+| `rustango::forms` | `DynamicForm` values accepted now but refused in a later release |
 | `rustango::auth_flows` | Single-use auth links refused by the cache |
 | `rustango::aead` | A blank previous secret key |
 | `rustango::hmac_auth` | HMAC request auth setup |
