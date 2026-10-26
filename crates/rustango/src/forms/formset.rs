@@ -127,6 +127,27 @@ pub fn row_payload(
     out
 }
 
+/// [`row_payload`] for rows `0..n`, in one pass over the keys.
+pub(crate) fn row_payloads(
+    data: &HashMap<String, String>,
+    prefix: &str,
+    n: usize,
+) -> Vec<HashMap<String, String>> {
+    let mut rows = vec![HashMap::new(); n];
+    let head = format!("{prefix}-");
+    for (k, v) in data {
+        let Some((idx, field)) = k.strip_prefix(&head).and_then(|r| r.split_once('-')) else {
+            continue;
+        };
+        // Only the index `format!` writes: no sign, no leading zero.
+        let canonical = idx.bytes().all(|b| b.is_ascii_digit()) && (idx == "0" || !idx.starts_with('0'));
+        if let Some(row) = idx.parse::<usize>().ok().filter(|_| canonical).and_then(|i| rows.get_mut(i)) {
+            row.insert(field.to_owned(), v.clone());
+        }
+    }
+    rows
+}
+
 /// Parse a formset payload into `Vec<F>`, one entry per row.
 ///
 /// On success: every row parsed cleanly, `Vec<F>` length equals
@@ -149,8 +170,7 @@ pub fn parse_formset<F: Form>(
     let mut rows: Vec<F> = Vec::with_capacity(n);
     let mut errors: Vec<FormErrors> = Vec::with_capacity(n);
     let mut any_err = false;
-    for idx in 0..n {
-        let row_data = row_payload(data, prefix, idx);
+    for row_data in row_payloads(data, prefix, n) {
         match F::parse(&row_data) {
             Ok(row) => {
                 rows.push(row);
@@ -278,6 +298,46 @@ mod tests {
         data.insert("form-0-title".into(), "x".into());
         let row = row_payload(&data, "form", 99);
         assert!(row.is_empty());
+    }
+
+    /// Every row from one pass over the keys, as `row_payload` reads each.
+    #[test]
+    fn row_payloads_match_row_payload() {
+        let data: HashMap<String, String> = [
+            ("form-0-title", "a"),
+            ("form-1-title", "b"),
+            ("form-1-x-y", "dash"),
+            ("form-01-title", "padded"),
+            ("form-+1-title", "plus"),
+            ("form-7-title", "past n"),
+            ("form-TOTAL_FORMS", "3"),
+            ("other-0-title", "z"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+        let rows = row_payloads(&data, "form", 3);
+        assert_eq!(rows.len(), 3);
+        for (idx, row) in rows.iter().enumerate() {
+            assert_eq!(*row, row_payload(&data, "form", idx), "row {idx}");
+        }
+    }
+
+    /// Many keys and many rows stay linear, not keys times rows.
+    #[test]
+    fn parse_formset_is_linear_in_keys() {
+        let mut data: HashMap<String, String> = (0..200_000)
+            .map(|i| (format!("junk{i}"), String::new()))
+            .collect();
+        data.insert("form-TOTAL_FORMS".into(), MAX_FORMS.to_string());
+        for i in 0..MAX_FORMS {
+            data.insert(format!("form-{i}-title"), "t".into());
+        }
+        let started = std::time::Instant::now();
+        let rows = parse_formset::<TitleRow>(&data, "form").unwrap().unwrap();
+        assert_eq!(rows.len(), MAX_FORMS);
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(3), "{took:?}");
     }
 
     // ---------- parse_formset ----------

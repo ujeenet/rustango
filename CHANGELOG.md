@@ -14,6 +14,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `DynamicForm` checkboxes accept only `true/false/1/0/on/off/yes/no`; any other value is an error, not ticked.
 - The admin create form leaves an empty defaulted field to its column default instead of storing NULL or refusing it as missing.
 - A JSON array sent to an `Array` field (ViewSet, `ModelForm`) is read item by item; commas inside an item no longer split it.
+- A bulk ViewSet create's serializer validation error names the failing entry (`bulk entry N: invalid input`).
+- Formsets and admin inlines read their rows in one pass over the form keys; a POST with many keys no longer costs keys times rows.
 
 ## [0.61.2] — 2026-10-26
 

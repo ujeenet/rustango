@@ -1553,10 +1553,12 @@ async fn plan_target(
         deletes_needed: 0,
     };
     let is_new = |idx: usize, raw_pk: &str| initial.map_or(raw_pk.trim().is_empty(), |n| idx >= n);
+    let rows = crate::forms::formset::row_payloads(form, table, total_forms);
     // Every existing row's stored state in one read, not one per row.
-    let existing_raw: Vec<String> = (0..total_forms)
-        .filter_map(|idx| {
-            let row = crate::forms::formset::row_payload(form, table, idx);
+    let existing_raw: Vec<String> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, row)| {
             let raw_pk = row.get(target.pk.name)?;
             (!is_new(idx, raw_pk)).then(|| raw_pk.clone())
         })
@@ -1576,8 +1578,7 @@ async fn plan_target(
         .await?;
     // Distinct PKs: a repeated DELETE slot removes one row (#1717).
     let mut deleted: HashSet<String> = HashSet::new();
-    for idx in 0..total_forms {
-        let row = crate::forms::formset::row_payload(form, table, idx);
+    for (idx, row) in rows.into_iter().enumerate() {
         let raw_pk = row.get(target.pk.name).cloned().unwrap_or_default();
         let delete_flag = row
             .get("DELETE")

@@ -1747,11 +1747,17 @@ fn public_form_error(state: &ViewSetState, e: FormError) -> FormError {
 }
 
 /// Run the serializer's input validation on the body.
-fn serializer_validate(state: &ViewSetState, json: &Value) -> Result<(), Response> {
+/// `entry` is a bulk index, named in the error.
+fn serializer_validate(
+    state: &ViewSetState,
+    json: &Value,
+    entry: Option<usize>,
+) -> Result<(), Response> {
     if let Some(bridge) = &state.vs.serializer {
-        bridge
-            .validate_body(json)
-            .map_err(|errs| json_form_errors(&errs))?;
+        bridge.validate_body(json).map_err(|errs| match entry {
+            Some(i) => json_form_errors_msg(&format!("bulk entry {i}: invalid input"), &errs),
+            None => json_form_errors(&errs),
+        })?;
     }
     Ok(())
 }
@@ -3433,7 +3439,7 @@ async fn create_one(
     pk_field: &'static crate::core::FieldSchema,
     scope: &[WhereExpr],
 ) -> Response {
-    if let Err(resp) = serializer_validate(state, json) {
+    if let Err(resp) = serializer_validate(state, json, None) {
         return resp;
     }
     // Translate `source`-renamed writable keys (serializer field name →
@@ -3479,7 +3485,7 @@ async fn create_many(
     // INSERTs committed: validate the whole list before any save.
     let mut prepared: Vec<(Vec<&'static str>, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
     for (i, (row, json)) in rows.iter().enumerate() {
-        if let Err(resp) = serializer_validate(state, json) {
+        if let Err(resp) = serializer_validate(state, json, Some(i)) {
             return resp;
         }
         let renamed = serializer_input_renamed_form(state, row);
@@ -3701,7 +3707,7 @@ async fn update_inner(
             locked = crate::audit::TxUpdate::for_model(state.vs.schema).map(|u| (u, tx));
             checked
         }
-        _ => serializer_validate(&state, &json),
+        _ => serializer_validate(&state, &json, None),
     };
     if let Err(resp) = validated {
         return resp;
