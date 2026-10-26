@@ -12,7 +12,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — HTTP middleware
 
-- `SslRedirectLayer::exempt` matches whole path segments: `/health` no longer exempts `/healthcheck-admin`.
+- `SslRedirectLayer::exempt` warns once per prefix when it matches mid-segment (`/health` for `/healthz`); such paths are still exempt in 0.61.
 - `CompressionLayer` sends zlib for `Content-Encoding: deflate` (raw DEFLATE before), and compresses bodies from 64 KiB on the blocking pool, not the async worker.
 - `RedirectMap` joins the request query onto a target's own query and keeps the target's `#fragment`; non-GET/HEAD requests get 308/307 so their method survives.
 

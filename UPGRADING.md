@@ -156,7 +156,7 @@ untouched.
 
 ### HTTP middleware
 
-`SslRedirectLayer::exempt` prefixes match by whole segment; end a prefix with `/` or list each path. `RedirectMap` answers POST, PUT and others with 308/307 instead of 301/302. `CompressionLayer`'s `deflate` is now zlib-wrapped, as browsers expect.
+`SslRedirectLayer::exempt` still matches raw prefixes, but warns when `/health` exempts `/healthz`; 0.62.0 will match whole segments only, so list such paths explicitly. `RedirectMap` answers POST, PUT and others with 308/307 instead of 301/302. `CompressionLayer`'s `deflate` is now zlib-wrapped, as browsers expect.
 
 ## 0.61.5
 
