@@ -509,8 +509,8 @@ impl Pool {
     /// part is load-bearing.** Schema-mode tenants share one host,
     /// port and database, and differ only in their `search_path`.
     /// Hashing the connection details alone would collide across all
-    /// of them. A `search_path` set by an `after_connect` `SET` is not
-    /// seen here; put it in the connect options instead.
+    /// of them. A pool that sets `search_path` with an `after_connect`
+    /// `SET` is told apart only if it was tagged with its schema.
     ///
     /// Two pools to the same database hash the same, which is what a
     /// cache wants. Cheap enough for a hot path.
@@ -527,6 +527,7 @@ impl Pool {
                 o.get_port().hash(&mut h);
                 o.get_database().hash(&mut h);
                 o.get_options().hash(&mut h);
+                schema_scope(&o).hash(&mut h);
             }
             #[cfg(feature = "mysql")]
             Pool::Mysql(p) => {
@@ -1355,6 +1356,42 @@ mod tuning_tests {
              the whole process on environment defaults"
         );
     }
+}
+
+/// Pools whose `search_path` comes from a `SET` on connect, keyed by their
+/// shared connect options (not a pool clone, which would keep it open), with
+/// that schema. A dead entry's `Weak` keeps the address from reuse.
+#[cfg(feature = "postgres")]
+type SchemaScopes = Vec<(std::sync::Weak<sqlx::postgres::PgConnectOptions>, String)>;
+
+#[cfg(feature = "postgres")]
+fn schema_scopes() -> &'static std::sync::RwLock<SchemaScopes> {
+    static SCOPES: std::sync::OnceLock<std::sync::RwLock<SchemaScopes>> =
+        std::sync::OnceLock::new();
+    SCOPES.get_or_init(Default::default)
+}
+
+/// Record that `pool` runs in `schema`, for [`Pool::scope_key`].
+#[cfg(all(feature = "postgres", feature = "tenancy"))]
+pub(crate) fn tag_schema_scope(pool: &sqlx::PgPool, schema: &str) {
+    let opts = pool.connect_options();
+    let mut scopes = schema_scopes()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    scopes.retain(|(w, _)| w.strong_count() > 0);
+    scopes.push((std::sync::Arc::downgrade(&opts), schema.to_owned()));
+}
+
+/// The schema `opts`' pool was tagged with, if any.
+#[cfg(feature = "postgres")]
+fn schema_scope(opts: &std::sync::Arc<sqlx::postgres::PgConnectOptions>) -> Option<String> {
+    let scopes = schema_scopes()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    scopes
+        .iter()
+        .find(|(w, _)| std::ptr::eq(w.as_ptr(), std::sync::Arc::as_ptr(opts)))
+        .map(|(_, s)| s.clone())
 }
 
 #[cfg(test)]

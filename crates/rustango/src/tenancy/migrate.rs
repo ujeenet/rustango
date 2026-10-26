@@ -19,8 +19,9 @@
 //! marked `scope = "tenant"` to that tenant's storage:
 //!
 //! * **Schema mode** — the runner spins up an *ephemeral* PgPool
-//!   bound to the registry URL with `search_path = <schema>, public`
-//!   in its connect options. The migration runner from `rustango-migrate` runs
+//!   bound to the registry URL with an `after_connect` hook that
+//!   issues `SET search_path TO <schema>, public` on every fresh
+//!   connection. The migration runner from `rustango-migrate` runs
 //!   unchanged against this pool; its ledger queries
 //!   (`__rustango_migrations__`) resolve to `<schema>.__rustango_migrations__`
 //!   thanks to search_path. Each tenant gets its own ledger row set.
@@ -953,7 +954,8 @@ async fn run_for_one_tenant(
 }
 
 /// Build a short-lived `PgPool` whose every connection has its
-/// `search_path` pre-set to `<schema>, public`. Used only for schema-mode migrations —
+/// `search_path` pre-set to `<schema>, public` via an
+/// `after_connect` hook. Used only for schema-mode migrations —
 /// runtime requests use the shared registry pool with per-checkout
 /// `SET`.
 ///
@@ -1073,7 +1075,7 @@ mod schema_pool_tests {
             return;
         };
         let pid = std::process::id();
-        let (a, b) = (format!("scope_a_{pid}"), format!("scope_b_{pid}"));
+        let (a, b) = (format!("scope \"a\" {pid}"), format!("scope_b_{pid}"));
         let registry = crate::sql::Pool::connect(&url).await.expect("registry");
         let pa = crate::sql::Pool::Postgres(build_schema_scoped_pool(&url, &a).await.expect("a"));
         let pb = crate::sql::Pool::Postgres(build_schema_scoped_pool(&url, &b).await.expect("b"));
@@ -1083,6 +1085,7 @@ mod schema_pool_tests {
             .expect("current_schema");
         assert_eq!(current.0, a, "search_path not applied");
         let keys = [registry.scope_key(), pa.scope_key(), pb.scope_key()];
+        assert_eq!(pa.clone().scope_key(), keys[1], "a clone keeps its scope");
         pa.close().await;
         pb.close().await;
         for s in [&a, &b] {

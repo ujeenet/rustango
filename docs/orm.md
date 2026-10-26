@@ -1558,7 +1558,7 @@ Read/write Rust types via `serde_json::from_value` / `to_value`.
 Backends differ in two places:
 
 - `json_contains` gives the same rows on PostgreSQL and MySQL when the value has the column's shape at each key (`{"tags": ["a"]}` against `{"tags": ["a", "b"]}`). MySQL also matches a scalar inside an array (`{"tags": "a"}`); PostgreSQL does not. SQLite has no containment.
-- `Event::data.contains(..)` / `icontains(..)` and admin `search_fields` match the stored JSON text. That agrees only inside one key or string value (`icontains("alice")`): SQLite stores `{"a":1}`, PostgreSQL and MySQL print `{"a": 1}` with keys sorted.
+- `Event::data.contains(..)` / `icontains(..)` and admin `search_fields` match the stored JSON text. That agrees only inside one key or string value (`icontains("alice")`): SQLite stores `{"a":1}`, PostgreSQL and MySQL print `{"a": 1}`, keys ordered shortest first, then bytewise; SQLite keeps the text rustango wrote.
 
 ---
 

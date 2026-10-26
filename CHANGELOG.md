@@ -6,9 +6,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — ORM, migrations and jobs
 
-- Schema-mode pools that migrations and `manage` build set `search_path` in their connect options, so `Pool::scope_key` (and the ContentType cache) tells them apart from the registry.
+- `Pool::scope_key` (and so the ContentType cache) tells the schema-mode pools that migrations and `manage` build apart from the registry; they still set `search_path` with a `SET` on connect.
 - Jobs: a retry's `last_error` is cut to 64 KiB on a UTF-8 boundary, so a long error no longer fails the write on MySQL (`TEXT`) and leaves the job locked.
-- `prefetch_related` matches children whose FK points at a unique column (`on = "code"`) by that column; they got no children before.
+- `prefetch_related` matches children whose FK points at a unique column (`on = "code"`) by that column; they got no children before. A parent whose hand-written `HasPkValue` cannot read that column now fails with `ExecError::PrefetchColumnUnreadable`.
 - `sqlmigrate` on MySQL shows the drops of the FKs that reference a retyped key, which apply finds in the catalog.
 - MySQL: a migration (or unapply) that retypes an FK column, then the key it references, then renames the column no longer fails with error 3780; the FK comes back once, at the end, under the new name.
 

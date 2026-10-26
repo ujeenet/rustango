@@ -3618,7 +3618,7 @@ fn render_step(
         .filter(|_| renamed && !column_renamed && drop_fks.is_some())
         .map(|(t, c)| (t.to_owned(), c.to_owned()));
     // The column's last rename adds it back at the end, under the end names;
-    // a re-add here could precede a later retype of its key (3780).
+    // a re-add here could precede a later retype of its key (MySQL error 3780).
     if let Some((table, column)) = readds_fk(change, dialect).filter(|_| column_renamed) {
         let own = super::diff::column_fk_sql(snap, table, column, dialect, schema)
             .map_err(MigrateError::Validation)?;
@@ -5260,7 +5260,7 @@ mod tests {
     }
 
     /// MySQL: a retyped FK column renamed later comes back once, after the
-    /// key it references is retyped too, not before it (3780).
+    /// key it references is retyped too, not before it (MySQL error 3780).
     #[test]
     fn render_between_readds_a_retyped_renamed_fk_after_its_key() {
         use crate::migrate::{SchemaChange, SchemaSnapshot};

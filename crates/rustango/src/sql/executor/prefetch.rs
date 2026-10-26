@@ -70,7 +70,7 @@ where
     let on = target_column::<P, C>(child_fk_column);
     let mut parent_pks: Vec<crate::core::SqlValue> = Vec::with_capacity(parents.len());
     for parent in &parents {
-        let pk = parent_key(parent, on);
+        let pk = parent_key(parent, on)?;
         if !matches!(pk, crate::core::SqlValue::Null) {
             parent_pks.push(pk);
         }
@@ -112,7 +112,7 @@ where
 
     let mut out = Vec::with_capacity(parents.len());
     for parent in parents {
-        let pk = parent_key(&parent, on).to_display_string();
+        let pk = parent_key(&parent, on)?.to_display_string();
         let kids = grouped.remove(&pk).unwrap_or_default();
         out.push((parent, kids));
     }
@@ -194,7 +194,7 @@ where
     let on = target_column::<P, C>(child_fk_column);
     let mut parent_pks: Vec<crate::core::SqlValue> = Vec::with_capacity(parents.len());
     for parent in &parents {
-        let pk = parent_key(parent, on);
+        let pk = parent_key(parent, on)?;
         if !matches!(pk, crate::core::SqlValue::Null) {
             parent_pks.push(pk);
         }
@@ -237,7 +237,7 @@ where
 
     let mut out = Vec::with_capacity(parents.len());
     for parent in parents {
-        let pk = parent_key(&parent, on).to_display_string();
+        let pk = parent_key(&parent, on)?.to_display_string();
         let kids = grouped.remove(&pk).unwrap_or_default();
         out.push((parent, kids));
     }
@@ -258,7 +258,47 @@ fn target_column<P: Model, C: Model>(child_fk_column: &str) -> Option<&'static s
 }
 
 /// The value children store for `parent`: its `on` column, else its pk.
-fn parent_key<P: HasPkValue>(parent: &P, on: Option<&str>) -> crate::core::SqlValue {
-    on.and_then(|c| parent.__rustango_column_value(c))
-        .unwrap_or_else(|| extract_pk_value(parent))
+fn parent_key<P: Model + HasPkValue>(
+    parent: &P,
+    on: Option<&'static str>,
+) -> Result<crate::core::SqlValue, ExecError> {
+    match on {
+        None => Ok(extract_pk_value(parent)),
+        Some(column) => parent
+            .__rustango_column_value(column)
+            .ok_or(ExecError::PrefetchColumnUnreadable {
+                table: P::SCHEMA.table,
+                column,
+            }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parent_key, ExecError, HasPkValue};
+    use crate::core::{Model, ModelSchema, SqlValue};
+
+    /// A parent with a hand-written `HasPkValue`, which reads only its pk.
+    struct HandWritten;
+
+    impl Model for HandWritten {
+        const SCHEMA: &'static ModelSchema = <crate::contenttypes::ContentType as Model>::SCHEMA;
+    }
+
+    impl HasPkValue for HandWritten {
+        fn __rustango_pk_value_impl(&self) -> SqlValue {
+            SqlValue::I64(1)
+        }
+    }
+
+    #[test]
+    fn an_unreadable_fk_target_column_is_an_error_not_the_pk() {
+        let err = parent_key(&HandWritten, Some("code")).expect_err("not the pk");
+        assert!(
+            matches!(err, ExecError::PrefetchColumnUnreadable { column: "code", .. }),
+            "{err}"
+        );
+        assert!(err.to_string().contains(".code`"), "{err}");
+        assert_eq!(parent_key(&HandWritten, None).unwrap(), SqlValue::I64(1));
+    }
 }

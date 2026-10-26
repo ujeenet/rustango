@@ -1449,34 +1449,44 @@ impl TenantPools<sqlx::Postgres> {
         schema: &str,
         registry: &PgPool,
     ) -> Result<PgPool, TenancyError> {
-        let opts = with_search_path((*registry.connect_options()).clone(), schema);
+        let mut opts = (*registry.connect_options()).clone();
+        opts = opts.options([("search_path", search_path_option(schema))]);
         Ok(scoped_pool_options(&self.config).connect_with(opts).await?)
     }
 }
 
-/// `opts` with `schema` first on the `search_path`. In the connect options,
-/// not a `SET` on connect, so [`crate::sql::Pool::scope_key`] tells schemas apart.
-#[cfg(feature = "postgres")]
-fn with_search_path(
-    opts: sqlx::postgres::PgConnectOptions,
-    schema: &str,
-) -> sqlx::postgres::PgConnectOptions {
-    opts.options([("search_path", search_path_option(schema))])
-}
-
 /// A short-lived pool of at most `max` connections to the registry
 /// server, scoped to `schema`. For migrations and manage commands.
+///
+/// `search_path` is a `SET` on connect, not a startup option, which
+/// PgBouncer's transaction mode refuses; the pool is tagged so
+/// [`crate::sql::Pool::scope_key`] still tells schemas apart.
 #[cfg(feature = "postgres")]
 pub(crate) async fn connect_schema_scoped(
     registry_url: &str,
     schema: &str,
     max: u32,
 ) -> Result<PgPool, TenancyError> {
-    let opts = with_search_path(registry_url.parse()?, schema);
-    Ok(PgPoolOptions::new()
+    let stmt: Arc<str> = Arc::from(set_search_path_sql(schema));
+    let pool = PgPoolOptions::new()
         .max_connections(max)
-        .connect_with(opts)
-        .await?)
+        .after_connect(move |conn, _meta| {
+            let stmt = Arc::clone(&stmt);
+            Box::pin(async move {
+                sqlx::query(&stmt).execute(conn).await?;
+                Ok(())
+            })
+        })
+        .connect(registry_url)
+        .await?;
+    crate::sql::tag_schema_scope(&pool, schema);
+    Ok(pool)
+}
+
+/// `SET search_path TO "<schema>", public`, the schema quoted.
+#[cfg(feature = "postgres")]
+fn set_search_path_sql(schema: &str) -> String {
+    format!("SET search_path TO {}, public", quote_ident(schema))
 }
 
 /// Options of a schema-mode tenant pool.
@@ -2277,6 +2287,15 @@ mod tests {
             .find(|l| l.contains("other-task-event"))
             .expect("logged");
         assert!(!line.contains("tenant_pool_init"), "span leaked: {line}");
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn set_search_path_quotes_odd_schema_names() {
+        assert_eq!(
+            set_search_path_sql("a\"b c\\d\x0Be"),
+            "SET search_path TO \"a\"\"b c\\d\x0Be\", public"
+        );
     }
 
     #[cfg(feature = "postgres")]
