@@ -4708,9 +4708,8 @@ async fn refuse_duplicate_keys(
                 let cols = cols.join(", ");
                 return Err(MigrateError::Validation(format!(
                     "{}: cannot add unique `{name}` on `{table}`: existing rows repeat those \
-                     values. Find them with `SELECT {cols}, COUNT(*) FROM {} WHERE {} \
-                     GROUP BY {cols} HAVING COUNT(*) > 1`, remove the extra rows, then run \
-                     migrate again.",
+                     values. Remove the extra rows, then run migrate again. They are:\n  \
+                     SELECT {cols}, COUNT(*) FROM {} WHERE {} GROUP BY {cols} HAVING COUNT(*) > 1",
                     mig.name,
                     q(table),
                     set.join(" AND "),

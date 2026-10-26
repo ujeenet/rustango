@@ -784,12 +784,12 @@ async fn unique_key_over_duplicates_is_refused(pool: &Pool) {
         .expect_err("duplicates refuse the key");
     let msg = err.to_string();
     assert!(
-        msg.contains("mr_uq_grant_ab") && msg.contains("remove the extra rows"),
+        msg.contains("mr_uq_grant_ab") && msg.contains("Remove the extra rows"),
         "{} said: {msg}",
         pool.dialect().name()
     );
     // The query in the message runs as given and finds the repeated key.
-    let find = msg.split('`').find(|p| p.starts_with("SELECT")).expect("a query");
+    let find = msg.lines().map(str::trim).find(|l| l.starts_with("SELECT")).expect("a query");
     let dups: Vec<(i64, i64, i64)> = rustango::sql::raw_query_pool(find, Vec::new(), pool)
         .await
         .unwrap_or_else(|e| panic!("{find} on {}: {e}", pool.dialect().name()));
