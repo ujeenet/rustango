@@ -182,14 +182,8 @@ async fn has_any_perm_and_has_all_perms_work_on_mysql() {
     assert!(all, "admin role should grant all four CRUD codenames");
 }
 
-// Framework gap: `set_user_perm_pool` emits `ConflictClause::DoUpdate`
-// with `target = ["user_id", "codename"]`, which the MySQL writer
-// intentionally rejects (`sql/mysql.rs:write_conflict_clause` — MySQL's
-// `ON DUPLICATE KEY UPDATE` has no target-column list and can't be
-// translated 1:1). Test is correct; the framework needs a separate
-// emit path (or a new IR variant) for the MySQL upsert shape.
+/// Grant, then deny, then clear: the upsert must overwrite on MySQL.
 #[tokio::test]
-#[ignore = "framework: ConflictClause::DoUpdate with target columns unsupported on MySQL writer"]
 async fn user_perm_overrides_and_clear_work_via_pool_on_mysql() {
     let _g = live_lock().lock().await;
     let Some(pool) = mysql_pool_or_skip().await else {
@@ -222,11 +216,7 @@ async fn user_perm_overrides_and_clear_work_via_pool_on_mysql() {
     assert!(!gone);
 }
 
-// Same framework gap as `user_perm_overrides_and_clear_work_via_pool_on_mysql`
-// — this test also drives `set_user_perm_pool` through the unsupported
-// MySQL upsert path.
 #[tokio::test]
-#[ignore = "framework: ConflictClause::DoUpdate with target columns unsupported on MySQL writer"]
 async fn user_roles_pool_and_user_permissions_pool_on_mysql() {
     let _g = live_lock().lock().await;
     let Some(pool) = mysql_pool_or_skip().await else {

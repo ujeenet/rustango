@@ -477,16 +477,9 @@ async fn superuser_login_grants_read_write_admin() {
 }
 
 /// Non-superuser login → cookie minted, but the admin renders in
-/// read-only mode (mutating routes 403, write-links hidden).
-///
-/// Ignored until the test fixture grants the non-superuser explicit
-/// `tenauth_widget.view` permission. Since v0.x (#62), the admin's
-/// `is_visible(table)` predicate checks `{table}.view ∈ user_perms`
-/// for non-superusers; without the grant, the list route 404s rather
-/// than rendering read-only. The behaviour is correct; the test just
-/// pre-dates the explicit-perm requirement and hasn't been updated.
+/// read-only mode (mutating routes 403, write-links hidden). The user
+/// holds only `tenauth_widget.view`, which the list needs.
 #[tokio::test]
-#[ignore = "fixture pre-dates the non-superuser-explicit-view-perm requirement (#62)"]
 async fn non_superuser_session_forces_read_only_admin() {
     let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
@@ -500,6 +493,20 @@ async fn non_superuser_session_forces_read_only_admin() {
     seed_db_mode_tenant(&pool, &slug, &url).await;
     reset_users_table(&pool).await;
     insert_user(&pool, "bob", "hunter2", false).await;
+    let bob = {
+        use rustango::core::Column as _;
+        use rustango::sql::FetcherPool as _;
+        use rustango::tenancy::User;
+        User::objects()
+            .where_(User::username.eq("bob".to_owned()))
+            .fetch(&rustango::sql::Pool::Postgres(pool.clone()))
+            .await
+            .unwrap()
+            .remove(0)
+    };
+    rustango::tenancy::permissions::set_user_perm(bob.id.get().copied().unwrap(), "tenauth_widget.view", true, &pool)
+        .await
+        .unwrap();
 
     let mut w = Widget {
         id: Auto::default(),
@@ -510,11 +517,18 @@ async fn non_superuser_session_forces_read_only_admin() {
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let app = build_app(pools, url);
 
-    let form = serde_urlencoded::to_string([("username", "bob"), ("password", "hunter2")]).unwrap();
+    let token = login_csrf(&app, &slug).await.unwrap_or_default();
+    let form = serde_urlencoded::to_string([
+        ("username", "bob"),
+        ("password", "hunter2"),
+        ("_csrf", token.as_str()),
+    ])
+    .unwrap();
     let login_req = Request::builder()
         .method("POST")
         .uri("/__login")
         .header("x-org", &slug)
+        .header("cookie", format!("rustango_csrf={token}"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(Body::from(form))
         .unwrap();
