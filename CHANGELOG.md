@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.5] — 2026-10-26
+
 ### Added — migrate signals know their database
 
 `connect_pre_migrate_with_target` / `connect_post_migrate_with_target` receivers also get a `MigrateTarget` with the run's pool and tenant slug, so a per-tenant `post_migrate` can seed that tenant.
