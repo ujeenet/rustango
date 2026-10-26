@@ -3390,7 +3390,7 @@ async fn insert_admitted(
     let mut tx = crate::sql::write_transaction(&acq.pool)
         .await
         .map_err(|e| server(&e))?;
-    let pk = match crate::audit::insert_tx(&mut tx, query, pk_field).await {
+    let pk = match crate::audit::insert_tx_on(&acq.pool, &mut tx, query, pk_field).await {
         Ok(pk) => pk,
         Err(e) => {
             let _ = tx.rollback().await;
