@@ -986,7 +986,7 @@ pub(crate) async fn migrate_with_framework<W, F, Fut>(
     pool: &Pool,
     dir: &Path,
     w: &mut W,
-    signals: super::Signals,
+    signals: super::Signals<'_>,
     project: F,
 ) -> Result<(), MigrateError>
 where

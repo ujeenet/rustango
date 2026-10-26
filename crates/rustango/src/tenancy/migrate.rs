@@ -201,7 +201,7 @@ async fn migrate_with_system<F, Fut>(
     scope: MigrationScope,
     dir: &Path,
     observer: Option<&dyn crate::migrate::MigrationObserver>,
-    signals: crate::migrate::Signals,
+    signals: crate::migrate::Signals<'_>,
     project: F,
 ) -> Result<Vec<Migration>, TenancyError>
 where
@@ -886,7 +886,9 @@ async fn run_for_one_tenant(
                     MigrationScope::Tenant,
                     dir,
                     system_progress,
-                    crate::migrate::Signals::Fire,
+                    crate::migrate::Signals::Fire {
+                        tenant: Some(&org.slug),
+                    },
                     |held| {
                         let observer = project_progress
                             .as_ref()
@@ -935,7 +937,9 @@ async fn run_for_one_tenant(
                 MigrationScope::Tenant,
                 dir,
                 system_progress,
-                crate::migrate::Signals::Fire,
+                crate::migrate::Signals::Fire {
+                        tenant: Some(&org.slug),
+                    },
                 |held| {
                     let observer = project_progress
                         .as_ref()

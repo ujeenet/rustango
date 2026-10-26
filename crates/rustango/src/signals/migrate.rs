@@ -35,8 +35,12 @@
 //!   `applied` lists the migration names that ran, in order. It is
 //!   empty for the bootstrap walk, which has no per-migration names.
 //!
-//! Receivers run one at a time, in registration order, each with its
-//! own clone of the context. To run work in parallel, or to keep a
+//! A tenant run sends both once per tenant. To write to the database just
+//! migrated, connect with `connect_*_migrate_with_target`: its receiver
+//! also gets a [`MigrateTarget`] with the run's pool and tenant slug.
+//!
+//! Receivers run one at a time, in registration order (plain ones before
+//! `_with_target` ones), each with its own clone of the context. To run work in parallel, or to keep a
 //! panic from stopping the chain, use `tokio::spawn`.
 
 use std::any::Any;
@@ -75,12 +79,33 @@ pub struct PostMigrateContext {
     pub applied: Vec<String>,
 }
 
+/// The database a migrate run writes to, for `*_with_target` receivers. A
+/// tenant run sends once per tenant, each with that tenant's pool.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct MigrateTarget {
+    /// The pool the run migrated: the tenant's for a tenant run.
+    pub pool: crate::sql::Pool,
+    /// The tenant's slug; `None` for a registry or single-database run.
+    pub tenant: Option<String>,
+}
+
+impl MigrateTarget {
+    /// A target for a custom runner's `send_*_with_target`.
+    #[must_use]
+    pub fn new(pool: crate::sql::Pool, tenant: Option<String>) -> Self {
+        Self { pool, tenant }
+    }
+}
+
 // ---------------------------------------------------------------- Internal storage
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SignalKind {
     PreMigrate,
     PostMigrate,
+    PreMigrateTarget,
+    PostMigrateTarget,
 }
 
 type ReceiverEntry = (ReceiverId, Box<dyn Any + Send + Sync>);
@@ -127,6 +152,10 @@ fn snapshot<R: Any + Send + Sync + Clone>(kind: SignalKind) -> Vec<R> {
 
 type PreReceiver = Arc<dyn Fn(PreMigrateContext) -> ReceiverFuture + Send + Sync>;
 type PostReceiver = Arc<dyn Fn(PostMigrateContext) -> ReceiverFuture + Send + Sync>;
+type PreTargetReceiver =
+    Arc<dyn Fn(PreMigrateContext, MigrateTarget) -> ReceiverFuture + Send + Sync>;
+type PostTargetReceiver =
+    Arc<dyn Fn(PostMigrateContext, MigrateTarget) -> ReceiverFuture + Send + Sync>;
 
 // ---------------------------------------------------------------- pre_migrate
 
@@ -140,17 +169,36 @@ where
     insert_receiver(SignalKind::PreMigrate, boxed)
 }
 
-/// Remove a `pre_migrate` receiver.
-pub fn disconnect_pre_migrate(id: ReceiverId) -> bool {
-    remove_receiver(SignalKind::PreMigrate, id)
+/// Register a `pre_migrate` receiver that also gets the run's pool and tenant.
+pub fn connect_pre_migrate_with_target<F, Fut>(receiver: F) -> ReceiverId
+where
+    F: Fn(PreMigrateContext, MigrateTarget) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let boxed: PreTargetReceiver = Arc::new(move |ctx, t| Box::pin(receiver(ctx, t)));
+    insert_receiver(SignalKind::PreMigrateTarget, boxed)
 }
 
-/// Send `pre_migrate`. The framework's migrate paths call this; it is
-/// public so tests and custom runners can too.
+/// Remove a `pre_migrate` receiver, either kind.
+pub fn disconnect_pre_migrate(id: ReceiverId) -> bool {
+    remove_receiver(SignalKind::PreMigrate, id) | remove_receiver(SignalKind::PreMigrateTarget, id)
+}
+
+/// Send `pre_migrate` to the receivers without a target. The framework
+/// sends [`send_pre_migrate_with_target`]; this is for tests and custom runners.
 pub async fn send_pre_migrate(ctx: PreMigrateContext) {
     let receivers: Vec<PreReceiver> = snapshot(SignalKind::PreMigrate);
     for r in receivers {
         r(ctx.clone()).await;
+    }
+}
+
+/// Send `pre_migrate` to every receiver, `target` to those that take one.
+pub async fn send_pre_migrate_with_target(ctx: PreMigrateContext, target: MigrateTarget) {
+    send_pre_migrate(ctx.clone()).await;
+    let receivers: Vec<PreTargetReceiver> = snapshot(SignalKind::PreMigrateTarget);
+    for r in receivers {
+        r(ctx.clone(), target.clone()).await;
     }
 }
 
@@ -166,16 +214,37 @@ where
     insert_receiver(SignalKind::PostMigrate, boxed)
 }
 
-/// Remove a `post_migrate` receiver.
-pub fn disconnect_post_migrate(id: ReceiverId) -> bool {
-    remove_receiver(SignalKind::PostMigrate, id)
+/// Register a `post_migrate` receiver that also gets the run's pool and
+/// tenant, so per-tenant seeding writes to that tenant.
+pub fn connect_post_migrate_with_target<F, Fut>(receiver: F) -> ReceiverId
+where
+    F: Fn(PostMigrateContext, MigrateTarget) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let boxed: PostTargetReceiver = Arc::new(move |ctx, t| Box::pin(receiver(ctx, t)));
+    insert_receiver(SignalKind::PostMigrateTarget, boxed)
 }
 
-/// Send `post_migrate` for `ctx`.
+/// Remove a `post_migrate` receiver, either kind.
+pub fn disconnect_post_migrate(id: ReceiverId) -> bool {
+    remove_receiver(SignalKind::PostMigrate, id)
+        | remove_receiver(SignalKind::PostMigrateTarget, id)
+}
+
+/// Send `post_migrate` to the receivers without a target.
 pub async fn send_post_migrate(ctx: PostMigrateContext) {
     let receivers: Vec<PostReceiver> = snapshot(SignalKind::PostMigrate);
     for r in receivers {
         r(ctx.clone()).await;
+    }
+}
+
+/// Send `post_migrate` to every receiver, `target` to those that take one.
+pub async fn send_post_migrate_with_target(ctx: PostMigrateContext, target: MigrateTarget) {
+    send_post_migrate(ctx.clone()).await;
+    let receivers: Vec<PostTargetReceiver> = snapshot(SignalKind::PostMigrateTarget);
+    for r in receivers {
+        r(ctx.clone(), target.clone()).await;
     }
 }
 
@@ -194,8 +263,13 @@ pub fn clear_all() {
 /// Mostly useful in tests.
 pub fn receiver_count() -> usize {
     let reg = registry().read().unwrap_or_else(|e| e.into_inner());
-    [SignalKind::PreMigrate, SignalKind::PostMigrate]
-        .iter()
+    [
+        SignalKind::PreMigrate,
+        SignalKind::PostMigrate,
+        SignalKind::PreMigrateTarget,
+        SignalKind::PostMigrateTarget,
+    ]
+    .iter()
         .map(|kind| reg.get(kind).map_or(0, Vec::len))
         .sum()
 }
