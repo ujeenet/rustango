@@ -16,6 +16,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - A JSON array sent to an `Array` field (ViewSet, `ModelForm`) is read item by item; commas inside an item no longer split it.
 - A bulk ViewSet create's serializer validation error names the failing entry (`bulk entry N: invalid input`).
 - Formsets and admin inlines read their rows in one pass over the form keys; a POST with many keys no longer costs keys times rows.
+- `signals::clear_all` also removes `m2m_changed` and admin receivers, so they no longer leak across tests; the `Observer` example compiles.
 
 ## [0.61.2] — 2026-10-26
 

@@ -162,6 +162,10 @@ A `DynamicForm` boolean with a value other than `true/false/1/0/on/off/yes/no` i
 
 An empty field that has a column default now stores the default on create, also for a nullable field that used to store NULL.
 
+### `signals::clear_all` clears m2m and admin receivers
+
+It now also empties `signals::m2m` and `signals::admin`. Re-connect those after calling it if you relied on them staying.
+
 ## 0.61.2
 
 ### SQLite: JSON column equality compares values

@@ -39,6 +39,19 @@ fn signal_lock() -> &'static Mutex<()> {
     G.get_or_init(|| Mutex::new(()))
 }
 
+/// `clear_all` empties the m2m and admin receivers too.
+#[tokio::test]
+async fn clear_all_removes_m2m_and_admin_receivers() {
+    use rustango::signals::{admin, m2m};
+    let _g = signal_lock().lock().await;
+    m2m::connect_m2m_changed(|_| async {});
+    admin::connect_admin_post_save(|_| async {});
+    assert!(m2m::receiver_count() > 0 && admin::receiver_count() > 0);
+    clear_all();
+    assert_eq!(m2m::receiver_count(), 0);
+    assert_eq!(admin::receiver_count(), 0);
+}
+
 #[tokio::test]
 async fn observer_receives_all_four_events() {
     let _g = signal_lock().lock().await;
