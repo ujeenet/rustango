@@ -3253,12 +3253,7 @@ fn resolve_filter(model: &'static ModelSchema, raw: RawFilter) -> Result<Filter,
         && matches!(raw.value, SqlValue::String(_))
         && matches!(
             raw.op,
-            Op::Like
-                | Op::NotLike
-                | Op::LikeEscaped
-                | Op::ILike
-                | Op::NotILike
-                | Op::ILikeEscaped
+            Op::Like | Op::NotLike | Op::LikeEscaped | Op::ILike | Op::NotILike | Op::ILikeEscaped
         );
     let skip_type_check = json_text || matches!(raw.op, Op::IsNull | Op::In | Op::JsonHasKey);
 

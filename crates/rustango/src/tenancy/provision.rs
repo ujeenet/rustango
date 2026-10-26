@@ -1993,11 +1993,12 @@ pub(crate) async fn provision_schema<DB: Database>(
             })?;
         // The default `search_path` starts with "$user": a schema named
         // after a role would lead that role's sessions, the registry's included.
-        let is_role: bool =
-            rustango::sql::sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)")
-                .bind(schema)
-                .fetch_one(pg_pools.registry())
-                .await?;
+        let is_role: bool = rustango::sql::sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)",
+        )
+        .bind(schema)
+        .fetch_one(pg_pools.registry())
+        .await?;
         if is_role {
             return Err(TenancyError::Validation(format!(
                 "schema name `{schema}` is the name of a database role — choose another"

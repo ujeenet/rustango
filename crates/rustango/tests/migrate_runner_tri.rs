@@ -403,9 +403,12 @@ async fn retyped_fk_waits_for_its_key_before_a_table_rename(pool: &Pool) {
     exec(pool, &format!("INSERT INTO {qp} (id) VALUES (3000000000)"))
         .await
         .expect("the key is BIGINT");
-    exec(pool, &format!("INSERT INTO {qk} (id, a) VALUES (1, 3000000000)"))
-        .await
-        .expect("the FK column is BIGINT");
+    exec(
+        pool,
+        &format!("INSERT INTO {qk} (id, a) VALUES (1, 3000000000)"),
+    )
+    .await
+    .expect("the FK column is BIGINT");
     assert!(
         exec(pool, &format!("INSERT INTO {qk} (id, a) VALUES (2, 7)"))
             .await

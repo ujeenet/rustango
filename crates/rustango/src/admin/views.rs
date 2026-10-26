@@ -783,35 +783,34 @@ pub(crate) async fn table_view(
         Vec::new()
     } else {
         compute_facets(
-        &state,
-        &parts,
-        model,
-        &field_filters,
-        &filters,
-        search.as_ref(),
-        &admin_cfg,
-        &active_field_filters,
-        &list_query,
-        show_all_facet,
-    )
-    .await?
+            &state,
+            &parts,
+            model,
+            &field_filters,
+            &filters,
+            search.as_ref(),
+            &admin_cfg,
+            &active_field_filters,
+            &list_query,
+            show_all_facet,
+        )
+        .await?
     };
 
     // Date-hierarchy strip: the breadcrumb plus the child buckets at
     // the current drill level (year, month or day). One GROUP BY
     // query, narrowed by the parent level's WHERE.
-    let date_hierarchy_ctx: Option<serde_json::Value> = if admin_cfg.date_hierarchy.is_empty()
-        || aggregates_withheld
-    {
-        None
-    } else {
-        let source = SelectQuery {
-            where_clause: where_clause.clone(),
-            search: search.clone(),
-            ..SelectQuery::new(model)
+    let date_hierarchy_ctx: Option<serde_json::Value> =
+        if admin_cfg.date_hierarchy.is_empty() || aggregates_withheld {
+            None
+        } else {
+            let source = SelectQuery {
+                where_clause: where_clause.clone(),
+                search: search.clone(),
+                ..SelectQuery::new(model)
+            };
+            compute_date_hierarchy(&state, model, &admin_cfg, date_sel, &list_query, source).await?
         };
-        compute_date_hierarchy(&state, model, &admin_cfg, date_sel, &list_query, source).await?
-    };
 
     // Right-rail card per custom list filter: the filter title and
     // its clickable options, with the active value marked.
@@ -1197,7 +1196,9 @@ async fn view_hook_rows(
 /// Log once per table that the scan cap hid its counts.
 fn warn_scan_cap(table: &'static str, cap: usize) {
     static WARNED: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
-    let mut warned = WARNED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut warned = WARNED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if !warned.contains(&table) {
         warned.push(table);
         tracing::warn!(

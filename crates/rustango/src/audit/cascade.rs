@@ -6,8 +6,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use crate::core::{
-    CountQuery, DeleteQuery, Filter, ModelEntry, ModelSchema, OnDeleteAction, Op, Relation, SelectQuery,
-    SqlValue, WhereExpr,
+    CountQuery, DeleteQuery, Filter, ModelEntry, ModelSchema, OnDeleteAction, Op, Relation,
+    SelectQuery, SqlValue, WhereExpr,
 };
 use crate::sql::{ExecError, PoolTx};
 
@@ -122,7 +122,8 @@ fn truncate_reach(table: &str, every_fk: bool) -> Vec<&'static ModelSchema> {
                 matches!(f.relation, Some(Relation::Fk { to, .. } | Relation::O2O { to, .. }) if to == parent)
                     && (every_fk || f.fk_on_delete == Some(OnDeleteAction::Cascade))
             });
-            let by_composite = every_fk && schema.composite_relations.iter().any(|r| r.to == parent);
+            let by_composite =
+                every_fk && schema.composite_relations.iter().any(|r| r.to == parent);
             if (by_field || by_composite) && done.insert(schema.table) {
                 if schema.audit_track.is_some() {
                     out.push(schema);

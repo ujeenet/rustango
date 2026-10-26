@@ -1116,7 +1116,9 @@ struct SweepTurn<'a>(&'a Sweep);
 
 impl Drop for SweepTurn<'_> {
     fn drop(&mut self) {
-        self.0.busy.store(false, std::sync::atomic::Ordering::Release);
+        self.0
+            .busy
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -1300,14 +1302,16 @@ impl FileCache {
             // Name first: entries outside the stripe cost no stat or path.
             let name = entry.file_name();
             let name = name.to_str().unwrap_or("");
-            if !stripe.is_none_or(|c| name.starts_with(c)) || std::path::Path::new(name).extension().and_then(|s| s.to_str()) != Some("cache")
+            if !stripe.is_none_or(|c| name.starts_with(c))
+                || std::path::Path::new(name)
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    != Some("cache")
             {
                 continue;
             }
             let path = entry.path();
-            if !entry.file_type().is_ok_and(|t| t.is_file())
-                || !Self::header_dead(&path)
-            {
+            if !entry.file_type().is_ok_and(|t| t.is_file()) || !Self::header_dead(&path) {
                 continue;
             }
             // Re-checked under the stripe lock, so a racing `set` survives.
@@ -1918,12 +1922,21 @@ mod file_cache_tests {
         let dir = tmp_dir("purge");
         let cache = FileCache::new(&dir);
         cache.set("live", "v", None).await.unwrap();
-        cache.set("ttl", "v", Some(Duration::from_secs(60))).await.unwrap();
-        cache.set("old", "v", Some(Duration::from_millis(20))).await.unwrap();
+        cache
+            .set("ttl", "v", Some(Duration::from_secs(60)))
+            .await
+            .unwrap();
+        cache
+            .set("old", "v", Some(Duration::from_millis(20)))
+            .await
+            .unwrap();
         std::fs::write(cache.key_path("junk"), b"not an entry").unwrap();
         tokio::time::sleep(Duration::from_millis(60)).await;
         let removed = cache.purge_expired().await.unwrap();
-        let live = (cache.get("live").await.unwrap(), cache.get("ttl").await.unwrap());
+        let live = (
+            cache.get("live").await.unwrap(),
+            cache.get("ttl").await.unwrap(),
+        );
         let gone = !cache.key_path("old").exists() && !cache.key_path("junk").exists();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(removed, 2);

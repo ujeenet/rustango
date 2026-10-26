@@ -6382,7 +6382,12 @@ pub fn settings_audit_check(
              host + subdomain wildcards before deploying."
                 .into(),
         );
-    } else if settings.security.allowed_hosts.iter().any(|h| h.trim() == "*") {
+    } else if settings
+        .security
+        .allowed_hosts
+        .iter()
+        .any(|h| h.trim() == "*")
+    {
         out.warnings.push(
             "[security] allowed_hosts contains \"*\" in prod tier — every Host header passes, \
              so host validation is off. List the real hosts instead."

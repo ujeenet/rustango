@@ -2030,7 +2030,11 @@ impl WriteSet {
                 let mut q = SelectQuery::by_pk(self.schema, pk_field.column, pk.clone());
                 q.where_clause = narrow(
                     q.where_clause,
-                    vec![WhereExpr::Predicate(Filter::new(*column, Op::Eq, value.clone()))],
+                    vec![WhereExpr::Predicate(Filter::new(
+                        *column,
+                        Op::Eq,
+                        value.clone(),
+                    ))],
                 );
                 probes.push((q, pk_field));
             }
@@ -3615,7 +3619,10 @@ async fn create_one(
         Ok(v) => v,
         Err(e) => return e.into_response(state, None),
     };
-    match write_set.check_fk_targets(acq, None, &collected, None).await {
+    match write_set
+        .check_fk_targets(acq, None, &collected, None)
+        .await
+    {
         Ok(Ok(())) => {}
         Ok(Err(e)) => return e.into_response(state, None),
         Err(e) => return json_server_error("viewset::create::fk", &e),
@@ -3679,7 +3686,10 @@ async fn create_many(
             Ok(v) => v,
             Err(e) => return e.into_response(state, Some(i)),
         };
-        match write_set.check_fk_targets(acq, None, &collected, None).await {
+        match write_set
+            .check_fk_targets(acq, None, &collected, None)
+            .await
+        {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return e.into_response(state, Some(i)),
             Err(e) => return json_server_error("viewset::bulk_create::fk", &e),
@@ -3928,7 +3938,10 @@ async fn update_inner(
         .collect();
     let tx = locked.as_mut().map(|(_, tx)| tx);
     let stored = Some((pk_field, &pk_val));
-    match write_set.check_fk_targets(&mut acq, tx, &written, stored).await {
+    match write_set
+        .check_fk_targets(&mut acq, tx, &written, stored)
+        .await
+    {
         Ok(Ok(())) => {}
         Ok(Err(e)) => return e.into_response(&state, None),
         Err(e) => return json_server_error("viewset::update::fk", &e),

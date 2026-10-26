@@ -454,8 +454,7 @@ where
             // Unless the route opted in, a request with a credential
             // header is per-user: never served from and never stored
             // in the shared cache.
-            let req_is_authed =
-                !cache_authenticated && crate::vary::has_credential(req.headers());
+            let req_is_authed = !cache_authenticated && crate::vary::has_credential(req.headers());
             if req_is_authed {
                 return inner.call(req).await;
             }

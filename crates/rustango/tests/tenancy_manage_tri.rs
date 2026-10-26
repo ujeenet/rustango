@@ -520,17 +520,22 @@ async fn a_schema_named_after_a_role_is_refused(pool: &Pool) {
     #[cfg(feature = "postgres")]
     {
         let dir = env.dir("migrations");
-        let role: Vec<(String,)> =
-            rustango::sql::raw_query_pool("SELECT CAST(current_user AS TEXT)", Vec::new(), &env.registry)
-                .await
-                .unwrap();
+        let role: Vec<(String,)> = rustango::sql::raw_query_pool(
+            "SELECT CAST(current_user AS TEXT)",
+            Vec::new(),
+            &env.registry,
+        )
+        .await
+        .unwrap();
         let role = role[0].0.clone();
         let err = env
             .create(&dir, "rolecli", schema_opts(BackendKind::Postgres, &role))
             .await
             .expect_err("create_tenant took the role's schema");
         assert!(err.to_string().contains("role"), "{err}");
-        let r = env.provision(&schema_request("roleprov", &role, None)).await;
+        let r = env
+            .provision(&schema_request("roleprov", &role, None))
+            .await;
         assert!(
             matches!(&r, Err(e) if e.to_string().contains("role")),
             "provision took the role's schema: {r:?}"

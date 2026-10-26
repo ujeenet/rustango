@@ -572,7 +572,11 @@ mod cascade {
 
     /// Audited, with an FK the shelf delete sets to NULL.
     #[derive(Model, Debug, Clone)]
-    #[rustango(table = "audit_casc_note", app = "audit1747", audit(track = "body, shelf_id"))]
+    #[rustango(
+        table = "audit_casc_note",
+        app = "audit1747",
+        audit(track = "body, shelf_id")
+    )]
     #[allow(dead_code)]
     pub struct Note {
         #[rustango(primary_key)]

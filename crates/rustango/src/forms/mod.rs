@@ -1510,7 +1510,12 @@ mod dynamic_form_tests {
             assert!(!f.is_valid(), "{bad:?} accepted");
         }
         // Accepted; the non-http(s) ones only log a warning for now.
-        for ok in ["https://example.com/a?b#c", "http://x:8080", "example.com", "mailto:a@b.co"] {
+        for ok in [
+            "https://example.com/a?b#c",
+            "http://x:8080",
+            "example.com",
+            "mailto:a@b.co",
+        ] {
             f.bind(HashMap::from([("u".into(), ok.into())]));
             assert!(f.is_valid(), "{ok:?}: {:?}", f.errors());
         }

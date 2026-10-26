@@ -3043,10 +3043,7 @@ where
                 .await?;
             let result = body.await;
             // Best-effort: PG releases on session close, and the session closes.
-            let _ = sqlx::query(&release)
-                .bind(key)
-                .execute(held.conn())
-                .await;
+            let _ = sqlx::query(&release).bind(key).execute(held.conn()).await;
             held.close().await;
             result
         }
@@ -3651,8 +3648,8 @@ fn render_step(
         && readds_fk(change, dialect).is_some_and(|(table, column)| {
             super::rebuild::columns_at_end(table, &[column.to_owned()], later)[0] != column
         });
-    let readded = readds_fk(change, dialect)
-        .filter(|_| renamed && !column_renamed && drop_fks.is_some());
+    let readded =
+        readds_fk(change, dialect).filter(|_| renamed && !column_renamed && drop_fks.is_some());
     // Unless a later op re-adds it, it waits for the end under the end names:
     // re-added now, it could precede a later retype of its key (MySQL 3780).
     let at_end = readded.filter(|(t, c)| !fk_readded_later(t, c, later, dialect));
@@ -5707,7 +5704,10 @@ mod tests {
             .filter(|&i| out[i].contains("ADD CONSTRAINT"))
             .collect();
         assert_eq!(adds.len(), 1, "{out:?}");
-        assert!(adds[0] > key, "FK re-added before its key's retype: {out:?}");
+        assert!(
+            adds[0] > key,
+            "FK re-added before its key's retype: {out:?}"
+        );
         assert!(out[adds[0]].starts_with("ALTER TABLE `kid`"), "{out:?}");
     }
 }

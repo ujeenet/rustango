@@ -489,7 +489,11 @@ async fn audited_inline_child_outside_scope_is_refused(pool: &Pool) {
 /// the view hook denies.
 async fn view_hook_rows_are_uncounted(pool: &Pool) {
     let day = |y| chrono::NaiveDate::from_ymd_opt(y, 5, 5).unwrap();
-    for (title, kind, y) in [("hide-1", "leaked", 2019), ("ok-1", "a", 2024), ("ok-2", "a", 2024)] {
+    for (title, kind, y) in [
+        ("hide-1", "leaked", 2019),
+        ("ok-1", "a", 2024),
+        ("ok-2", "a", 2024),
+    ] {
         let mut d = Doc {
             id: Auto::default(),
             title: title.into(),
@@ -501,7 +505,10 @@ async fn view_hook_rows_are_uncounted(pool: &Pool) {
     let (status, body) = get(pool, "/rowscope_doc").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("2 rows"), "total: {body}");
-    assert!(body.contains("ok-1"), "page 1 is the first visible row: {body}");
+    assert!(
+        body.contains("ok-1"),
+        "page 1 is the first visible row: {body}"
+    );
     assert!(body.contains("kind=a"), "facet: {body}");
     assert!(!body.contains("leaked"), "denied facet value: {body}");
     assert!(!body.contains("2019"), "denied date bucket: {body}");
@@ -513,9 +520,15 @@ async fn view_hook_rows_are_uncounted(pool: &Pool) {
     let (status, body) = get_as(pool, "/rowscope_doc", |b| b.view_hook_scan_cap(2)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("row count hidden"), "total: {body}");
-    assert!(!body.contains("3 rows") && !body.contains("2 rows"), "a total leaked: {body}");
+    assert!(
+        !body.contains("3 rows") && !body.contains("2 rows"),
+        "a total leaked: {body}"
+    );
     assert!(!body.contains("kind=a"), "facets kept: {body}");
-    assert!(!body.contains(r#"<nav class="date-hierarchy""#), "date strip kept: {body}");
+    assert!(
+        !body.contains(r#"<nav class="date-hierarchy""#),
+        "date strip kept: {body}"
+    );
     assert!(!body.contains("hide-1"), "denied row shown: {body}");
     // A search that narrows the scan under the cap counts again.
     let (_, body) = get_as(pool, "/rowscope_doc?q=ok-1", |b| b.view_hook_scan_cap(2)).await;

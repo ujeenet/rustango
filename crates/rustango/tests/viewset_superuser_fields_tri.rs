@@ -267,7 +267,9 @@ async fn a_write_echoes_only_with_the_view_perm(pool: &Pool) {
     use rustango::viewset::ViewSetPerms;
     let (uid, _) = seed(pool).await;
     for cn in ["vsf_hooked.add", "vsf_hooked.change"] {
-        set_user_perm_pool(uid, cn, true, pool).await.expect("grant");
+        set_user_perm_pool(uid, cn, true, pool)
+            .await
+            .expect("grant");
     }
     let app = || {
         let cn = |c: &str| vec![format!("vsf_hooked.{c}")];
@@ -308,14 +310,19 @@ async fn a_write_echoes_only_with_the_view_perm(pool: &Pool) {
         res.headers().get("location").and_then(|v| v.to_str().ok()),
         Some(format!("/api/hooked/{id}").as_str())
     );
-    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let only_pk = serde_json::json!({ "id": id });
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body, only_pk, "create echoed more than the pk");
     let patch = serde_json::json!({ "label": "b" });
     let (status, body) = send(app(), "PATCH", &format!("/hooked/{id}"), patch.clone()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap(), only_pk);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        only_pk
+    );
     let bulk = serde_json::json!([{ "label": "c" }]);
     let (status, body) = send(app(), "POST", "/hooked", bulk).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");

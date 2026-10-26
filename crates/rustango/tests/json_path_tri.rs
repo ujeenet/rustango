@@ -495,7 +495,10 @@ async fn string_contains_lookup_on_a_json_column(pool: &Pool) {
     let json = SqlValue::Json(serde_json::json!({"tags": ["red"]}));
     let contained = count("data__contains", json).await;
     if pool.dialect().name() == "sqlite" {
-        assert!(contained.is_err(), "SQLite refuses containment: {contained:?}");
+        assert!(
+            contained.is_err(),
+            "SQLite refuses containment: {contained:?}"
+        );
     } else {
         assert_eq!(contained, Ok(1));
     }

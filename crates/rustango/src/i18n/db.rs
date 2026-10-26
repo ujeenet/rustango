@@ -155,8 +155,7 @@ pub async fn ensure_table_pool(pool: &Pool) -> Result<(), sqlx::Error> {
 }
 
 fn refused_pools() -> std::sync::MutexGuard<'static, Vec<crate::sql::PoolId>> {
-    static REFUSED: std::sync::Mutex<Vec<crate::sql::PoolId>> =
-        std::sync::Mutex::new(Vec::new());
+    static REFUSED: std::sync::Mutex<Vec<crate::sql::PoolId>> = std::sync::Mutex::new(Vec::new());
     REFUSED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

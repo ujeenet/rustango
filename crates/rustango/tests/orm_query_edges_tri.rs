@@ -487,9 +487,10 @@ async fn generic_reads_apply_global_scopes(pool: &Pool) {
         .await
         .expect("reverse");
     assert_eq!(ids(&reverse), [1], "{reverse:?}");
-    let grouped = contenttypes::prefetch_reverse_generic_for::<Doc>(pool, Remark::SCHEMA, &[1], None)
-        .await
-        .expect("reverse prefetch");
+    let grouped =
+        contenttypes::prefetch_reverse_generic_for::<Doc>(pool, Remark::SCHEMA, &[1], None)
+            .await
+            .expect("reverse prefetch");
     assert_eq!(ids(&grouped[&1]), [1], "{grouped:?}");
 }
 

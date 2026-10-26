@@ -139,7 +139,9 @@ async fn a_refused_upgrade_only_warns(pool: &Pool) {
     let url = format!("{scheme}://rg_noalter:noalter@{host}");
     let limited = Pool::connect(&url).await.expect("limited pool");
 
-    ensure_table_pool(&limited).await.expect("refused ALTER only warns");
+    ensure_table_pool(&limited)
+        .await
+        .expect("refused ALTER only warns");
     assert!(key_collation(pool).await.ends_with("_ci"));
 
     // A table-level grant applies at once; the refused pool still skips.

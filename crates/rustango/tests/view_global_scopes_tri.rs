@@ -218,13 +218,16 @@ fn app(pool: &Pool) -> axum::Router {
         )
         .merge(
             ViewSet::for_model(Pet::SCHEMA, &["id", "tag", "owner_id"])
-                .related_filter("owner_id", |_: &std::collections::HashMap<String, String>, _| {
-                    vec![WhereExpr::Predicate(Filter::new(
-                        "name",
-                        Op::Eq,
-                        SqlValue::from("ann"),
-                    ))]
-                })
+                .related_filter(
+                    "owner_id",
+                    |_: &std::collections::HashMap<String, String>, _| {
+                        vec![WhereExpr::Predicate(Filter::new(
+                            "name",
+                            Op::Eq,
+                            SqlValue::from("ann"),
+                        ))]
+                    },
+                )
                 .router_pool("/api/ann-pets", pool.clone()),
         )
         .merge(
@@ -598,12 +601,20 @@ async fn viewset_fk_must_point_at_a_visible_row(pool: &Pool) {
         send(pool, Method::POST, uri, JSON, &body).await
     };
     let (status, body) = post("/api/pets", bob).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "hidden owner: {body}");
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "hidden owner: {body}"
+    );
     let bulk = format!(r#"[{{"tag":"t","owner_id":{ann}}},{{"tag":"t","owner_id":{bob}}}]"#);
     let (status, body) = send(pool, Method::POST, "/api/pets", JSON, &bulk).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "bulk: {body}");
     let (status, body) = post("/api/ann-pets", keep).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "related_filter: {body}");
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "related_filter: {body}"
+    );
     let pets = || async { Pet::objects().fetch(pool).await.expect("pets") };
     assert!(pets().await.is_empty(), "a refused write left a row");
 
@@ -621,10 +632,17 @@ async fn viewset_fk_must_point_at_a_visible_row(pool: &Pool) {
             &format!(r#"{{"owner_id":{bob}}}"#),
         )
         .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{uri} update: {body}");
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{uri} update: {body}"
+        );
     }
     let owners: Vec<i64> = pets().await.iter().map(|p| p.owner_id.pk()).collect();
-    assert!(!owners.contains(&bob), "an update moved a pet to a hidden owner");
+    assert!(
+        !owners.contains(&bob),
+        "an update moved a pet to a hidden owner"
+    );
 }
 
 /// An update may resend the FK it already holds, even to a hidden parent;
@@ -661,7 +679,11 @@ async fn viewset_update_keeps_an_unchanged_hidden_fk(pool: &Pool) {
     .await;
     assert_eq!(status, StatusCode::OK, "PUT with the unchanged FK: {body}");
     let (status, body) = patch(format!(r#"{{"owner_id":{cid}}}"#)).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "moved to hidden: {body}");
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "moved to hidden: {body}"
+    );
     let pets = Pet::objects().fetch(pool).await.expect("pets");
     assert_eq!((pets[0].tag.as_str(), pets[0].owner_id.pk()), ("put", bob));
 }

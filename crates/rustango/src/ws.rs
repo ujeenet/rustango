@@ -181,8 +181,7 @@ where
     let on_message = hub.config.on_message;
     let max_bytes = hub.config.max_message_bytes;
     // Not reset by traffic, so a busy socket is pinged too.
-    let mut ticks =
-        tokio::time::interval_at(tokio::time::Instant::now() + keepalive, keepalive);
+    let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + keepalive, keepalive);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut awaiting_reply = false;
 
@@ -474,13 +473,19 @@ mod tests {
         let alive = hub.receiver_count();
         talker.abort();
         drain.abort();
-        assert_eq!(alive, 1, "a slow reader was dropped at the keepalive interval");
+        assert_eq!(
+            alive, 1,
+            "a slow reader was dropped at the keepalive interval"
+        );
     }
 
     #[test]
     fn send_timeout_has_a_floor() {
         assert_eq!(send_timeout(Duration::from_secs(1)), SEND_TIMEOUT_FLOOR);
-        assert_eq!(send_timeout(Duration::from_secs(60)), Duration::from_secs(60));
+        assert_eq!(
+            send_timeout(Duration::from_secs(60)),
+            Duration::from_secs(60)
+        );
     }
 
     #[tokio::test]
