@@ -1106,6 +1106,20 @@ async fn the_registry_under_an_alias_is_flagged(pool: &Pool) {
         "{:?}",
         events.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
+    // An edit to the alias is saved and says so.
+    let mut other = Org {
+        slug: "aliased".into(),
+        display_name: "aliased".into(),
+        backend_kind: env.backend().as_str().into(),
+        database_url: Some("unused".into()),
+        ..rustango::testkit::org()
+    };
+    other.save_pool(&env.registry).await.expect("insert org");
+    let out = env
+        .run_out(&dir, &["edit-tenant", "aliased", "--database-url", &alias])
+        .await
+        .expect("only warned in this release");
+    assert!(out.contains("registry's own database"), "{out}");
 }
 
 /// `reseal-tenant-secrets` lists, then seals, a plain password URL.

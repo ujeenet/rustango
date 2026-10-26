@@ -154,6 +154,10 @@ untouched.
 
 Provisioning still accepts it but logs and shows a warning. Give such a tenant its own database: a later release refuses it.
 
+### `org_edit::Applied` has a `warning` field
+
+A struct literal of `Applied` needs `warning: None`; matching code is unaffected.
+
 ## 0.61.4
 
 ### Schema names equal to a database role are refused
