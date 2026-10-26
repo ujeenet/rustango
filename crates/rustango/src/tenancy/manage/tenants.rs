@@ -170,6 +170,15 @@ impl<W: Write + Send> provision::ProvisionObserver for CreateTenantProgress<'_, 
                 step: S::Rollback,
                 status: StepStatus::Failed(why),
             } => writeln!(out, "rollback failed: {why}"),
+            // A rights refusal is several lines; the caller's error is one.
+            E::Step {
+                step: S::CheckConnection,
+                status: StepStatus::Failed(why),
+            } => writeln!(
+                out,
+                "{}",
+                why.strip_prefix("tenancy validation: ").unwrap_or(&why)
+            ),
             // Validation and storage failures come back as `Err` from
             // the engine and are rendered by the caller; the remaining
             // steps are detail the CLI has never printed.

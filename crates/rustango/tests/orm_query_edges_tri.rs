@@ -107,6 +107,16 @@ pub struct Note {
     pub object_pk: i64,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "oqe_token", app = "oqe")]
+pub struct Token {
+    #[rustango(primary_key)]
+    pub id: uuid::Uuid,
+    #[rustango(max_length = 20)]
+    pub label: Option<String>,
+    pub rank: i32,
+}
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     for t in [City::SCHEMA, Top::SCHEMA, Mid::SCHEMA, Pet::SCHEMA] {
@@ -123,6 +133,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Note>(pool).await;
     fresh_table::<Day>(pool).await;
     fresh_table::<Gauge>(pool).await;
+    fresh_table::<Token>(pool).await;
     rustango::audit::ensure_table_pool(pool)
         .await
         .expect("audit table");
@@ -297,6 +308,82 @@ async fn prefetch_soft_by_a_renamed_column(pool: &Pool) {
     assert_eq!(grouped.get(&1).map(Vec::len), Some(1));
 }
 
+/// `IN` lists match the same rows on every backend, NULLs included; on PG
+/// they bind one array, so each list length reuses one statement.
+async fn in_lists_match_alike_and_share_a_statement(pool: &Pool) {
+    use rustango::core::SqlValue;
+    let ids: Vec<uuid::Uuid> = (0..4).map(|_| uuid::Uuid::new_v4()).collect();
+    for (i, id) in ids.iter().enumerate() {
+        let label = (i != 3).then(|| format!("t{i}"));
+        Token {
+            id: *id,
+            label,
+            rank: i as i32,
+        }
+        .insert_pool(pool)
+        .await
+        .expect("token");
+    }
+    let count = |col: &'static str, op: Op, list: Vec<SqlValue>| {
+        Token::objects().filter_op(col, op, SqlValue::List(list))
+    };
+    let uuids = |xs: &[usize]| {
+        xs.iter()
+            .map(|&i| SqlValue::Uuid(ids[i]))
+            .collect::<Vec<_>>()
+    };
+    let strs = |xs: &[&str]| {
+        xs.iter()
+            .map(|s| SqlValue::String((*s).into()))
+            .collect::<Vec<_>>()
+    };
+    let n = |qs: rustango::query::QuerySet<Token>| async move {
+        qs.fetch(pool).await.expect("fetch").len()
+    };
+    assert_eq!(n(count("id", Op::In, uuids(&[0, 2]))).await, 2);
+    assert_eq!(n(count("id", Op::NotIn, uuids(&[0]))).await, 3);
+    assert_eq!(
+        n(count(
+            "rank",
+            Op::In,
+            vec![SqlValue::I32(1), SqlValue::I32(3)]
+        ))
+        .await,
+        2
+    );
+    assert_eq!(
+        n(count(
+            "rank",
+            Op::In,
+            vec![SqlValue::I64(1), SqlValue::I64(9)]
+        ))
+        .await,
+        1
+    );
+    assert_eq!(
+        n(count("label", Op::In, strs(&["t0", "t1", "zz"]))).await,
+        2
+    );
+    // NOT IN over a NULL row or a NULL element matches nothing for that row.
+    assert_eq!(n(count("label", Op::NotIn, strs(&["t0"]))).await, 2);
+    let with_null = vec![SqlValue::String("t0".into()), SqlValue::Null];
+    assert_eq!(n(count("label", Op::NotIn, with_null)).await, 0);
+
+    let sql = |len: usize| {
+        let q = count("id", Op::In, uuids(&(0..len).collect::<Vec<_>>()))
+            .compile()
+            .expect("compile");
+        pool.dialect().compile_select(&q).expect("sql")
+    };
+    let (two, four) = (sql(2), sql(4));
+    if pool.dialect().name() == "postgres" {
+        assert_eq!(two.sql, four.sql);
+        assert_eq!(four.params.len(), 1);
+    } else {
+        assert_eq!(four.params.len(), 4);
+    }
+}
+
 /// Reverse generic prefetch groups by the PK column's row key.
 async fn prefetch_reverse_generic_by_a_renamed_column(pool: &Pool) {
     use rustango::contenttypes::{self, ContentType};
@@ -382,5 +469,6 @@ tri_dialect_test! {
         in_bulk_on_past_the_bind_cap,
         prefetch_soft_by_a_renamed_column,
         prefetch_reverse_generic_by_a_renamed_column,
+        in_lists_match_alike_and_share_a_statement,
     ],
 }

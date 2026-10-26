@@ -552,6 +552,7 @@ async fn migrate_with_ledger_body(
     let all = file::list_dir(dir)?;
     let applied = applied_set_for(pool, ledger).await?;
     let pending = pending_migrations(&all, &applied);
+    let mut done = applied.clone();
 
     let total = pending.len();
     emit(observer, || MigrationEvent::Planned { total });
@@ -566,7 +567,7 @@ async fn migrate_with_ledger_body(
         });
         let began = std::time::Instant::now();
 
-        let step = reconcile_and_apply_pg(pool, &mig, &applied, ledger).await;
+        let step = reconcile_and_apply_pg(pool, &all, &done, &mig, &applied, ledger).await;
 
         let outcome = match step {
             Ok(outcome) => outcome,
@@ -588,6 +589,7 @@ async fn migrate_with_ledger_body(
             outcome,
             elapsed: began.elapsed(),
         });
+        done.insert(mig.name.clone());
         newly.push(mig);
     }
     Ok(newly)
@@ -599,6 +601,8 @@ async fn migrate_with_ledger_body(
 #[cfg(feature = "postgres")]
 async fn reconcile_and_apply_pg(
     pool: &PgPool,
+    all: &[Migration],
+    done: &HashSet<String>,
     mig: &Migration,
     applied: &HashSet<String>,
     ledger: &str,
@@ -611,11 +615,12 @@ async fn reconcile_and_apply_pg(
         }
         // Unreachable with `fake_initial` off; a plain run for totality.
         ReconcileAction::Run | ReconcileAction::RunPartial(_) => {
-            apply_one(pool, mig, ledger).await?;
+            apply_one(pool, &on_live_branches(all, done, mig), ledger).await?;
             Outcome::Ran
         }
         ReconcileAction::RunOutside(existing) => {
-            apply_one(pool, &outside_tables(mig, &existing), ledger).await?;
+            let run = outside_tables(mig, &existing);
+            apply_one(pool, &on_live_branches(all, done, &run), ledger).await?;
             Outcome::RanPartial { skipped: existing }
         }
     })
@@ -1236,8 +1241,10 @@ async fn migrate_to_with_ledger(
             applied.remove(&mig.name);
             touched.push(mig);
         }
+        let mut done = applied.clone();
         for mig in forward_to(&all, &applied, target) {
-            reconcile_and_apply_pg(pool, &mig, &applied, ledger).await?;
+            reconcile_and_apply_pg(pool, &all, &done, &mig, &applied, ledger).await?;
+            done.insert(mig.name.clone());
             touched.push(mig);
         }
         Ok(touched)
@@ -1530,11 +1537,13 @@ async fn unapply_locked(
     let prev_snapshot = prev_snapshot(&all, &target, dir)?;
 
     let inverted = invert(&target.forward, &prev_snapshot)?;
+    let applied = applied_set_for(pool, ledger).await?;
+    let after = super::make::rollback_snapshot(&all, &applied, &target, prev_snapshot);
 
     if target.atomic {
-        unapply_atomic(pool, &target, &inverted, &prev_snapshot, ledger).await?;
+        unapply_atomic(pool, &target, &inverted, &after, ledger).await?;
     } else {
-        unapply_loose(pool, &target, &inverted, &prev_snapshot, ledger).await?;
+        unapply_loose(pool, &target, &inverted, &after, ledger).await?;
     }
 
     Ok(target)
@@ -1989,6 +1998,7 @@ async fn migrate_pool_body(
         }
     }
     let pending = pending_migrations(&all, &applied);
+    let mut done = applied.clone();
 
     let total = pending.len();
     emit(observer, || MigrationEvent::Planned { total });
@@ -2007,7 +2017,8 @@ async fn migrate_pool_body(
         // the observer before it propagates. `?` on its own would
         // leave a watcher looking at a migration stuck on "started"
         // forever, which is the state this exists to prevent.
-        let outcome = reconcile_and_apply(pool, &mig, &applied, ledger, fake_initial).await;
+        let outcome =
+            reconcile_and_apply(pool, &all, &done, &mig, &applied, ledger, fake_initial).await;
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(e) => {
@@ -2028,6 +2039,7 @@ async fn migrate_pool_body(
             outcome,
             elapsed: began.elapsed(),
         });
+        done.insert(mig.name.clone());
         newly.push(mig);
     }
     Ok(newly)
@@ -2041,6 +2053,8 @@ async fn migrate_pool_body(
 /// which file died.
 async fn reconcile_and_apply(
     pool: &crate::sql::Pool,
+    all: &[Migration],
+    done: &HashSet<String>,
     mig: &Migration,
     applied: &HashSet<String>,
     ledger: &str,
@@ -2063,9 +2077,27 @@ async fn reconcile_and_apply(
                 ),
                 _ => (std::borrow::Cow::Borrowed(mig), Outcome::Ran),
             };
-            apply_one_pool(pool, &effective, ledger).await?;
+            apply_one_pool(pool, &on_live_branches(all, done, &effective), ledger).await?;
             Ok(outcome)
         }
+    }
+}
+
+/// `mig` with its snapshot widened by the other applied branches, so a
+/// SQLite rebuild on one branch keeps a sibling branch's columns.
+fn on_live_branches<'a>(
+    all: &[Migration],
+    done: &HashSet<String>,
+    mig: &'a Migration,
+) -> std::borrow::Cow<'a, Migration> {
+    let snapshot = super::make::apply_snapshot(all, done, mig);
+    if snapshot == mig.snapshot {
+        std::borrow::Cow::Borrowed(mig)
+    } else {
+        std::borrow::Cow::Owned(Migration {
+            snapshot,
+            ..mig.clone()
+        })
     }
 }
 
@@ -3517,6 +3549,33 @@ fn render_step(
         _ => None,
     };
     let mut batch = render(snap).map_err(MigrateError::Validation)?;
+    if let Some(at) = at_op.filter(|_| dialect.check_blocks_column_rename()) {
+        let hoisted = hoisted_check_drops(ops);
+        if hoisted.iter().any(|(_, drop)| *drop == at) {
+            batch = super::diff::render_changes_split_in_schema(&[], snap, dialect, schema)
+                .map_err(MigrateError::Validation)?;
+        }
+        if let SC::RenameColumn { table, .. } = change {
+            let drops: Vec<SC> = hoisted
+                .iter()
+                .filter(|(rename, _)| *rename == at)
+                .filter_map(|(_, drop)| match &ops[*drop] {
+                    Operation::Schema(SC::DropCheckConstraint { name, .. }) => {
+                        Some(SC::DropCheckConstraint {
+                            name: name.clone(),
+                            table: table.clone(),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+            let mut first =
+                super::diff::render_changes_split_in_schema(&drops, snap, dialect, schema)
+                    .map_err(MigrateError::Validation)?;
+            first.immediate.append(&mut batch.immediate);
+            batch.immediate = first.immediate;
+        }
+    }
     if let Some((true, sql)) = renamed_fk {
         batch.deferred_fks.push(sql);
     }
@@ -3539,6 +3598,11 @@ fn render_step(
         let end_column = super::rebuild::columns_at_end(table, std::slice::from_ref(column), later);
         for (t, c) in referencing_columns(after, &end, &end_column[0]) {
             if !fk_comes_back_elsewhere(&t, &c, ops, at_op, dialect) {
+                if dialect.fk_needs_same_int_width() {
+                    batch
+                        .deferred_fks
+                        .extend(super::diff::junction_modify_sql(after, &t, &c, dialect));
+                }
                 batch.deferred_fks.extend(
                     super::diff::column_fk_sql(after, &t, &c, dialect, schema)
                         .map_err(MigrateError::Validation)?,
@@ -3641,7 +3705,9 @@ fn fk_comes_back_elsewhere(
         };
         match change {
             _ if Some(i) == at => false,
-            SC::CreateTable(table) => super::rebuild::name_at_end(table, rest) == t,
+            SC::CreateTable(table) | SC::CreateM2MTable { through: table, .. } => {
+                super::rebuild::name_at_end(table, rest) == t
+            }
             SC::AddColumn { table, column }
             | SC::RenameColumn {
                 table,
@@ -3653,17 +3719,34 @@ fn fk_comes_back_elsewhere(
     })
 }
 
-/// The model columns in `snap` whose FK references `table.column`.
+/// The model and junction columns in `snap` whose FK references `table.column`.
 fn referencing_columns(snap: &SchemaSnapshot, table: &str, column: &str) -> Vec<(String, String)> {
-    snap.tables
+    let fields = snap
+        .tables
         .iter()
         .flat_map(|t| t.fields.iter().map(move |f| (t, f)))
         .filter(|(_, f)| {
             f.fk.as_ref()
                 .is_some_and(|r| r.to == table && r.on == column)
         })
-        .map(|(t, f)| (t.name.clone(), f.column.clone()))
-        .collect()
+        .map(|(t, f)| (t.name.clone(), f.column.clone()));
+    // A junction references its end's single pk.
+    let mut pks = snap
+        .table(table)
+        .into_iter()
+        .flat_map(|t| t.fields.iter().filter(|f| f.primary_key));
+    let is_pk = pks
+        .next()
+        .filter(|_| pks.next().is_none())
+        .is_some_and(|f| f.column == column);
+    let junctions = snap
+        .m2m_tables
+        .iter()
+        .filter(|_| is_pk)
+        .flat_map(|m| [(&m.src_table, &m.src_col), (&m.dst_table, &m.dst_col)].map(|e| (m, e)))
+        .filter(|(_, (to, _))| *to == table)
+        .map(|(m, (_, c))| (m.through.clone(), c.clone()));
+    fields.chain(junctions).collect()
 }
 
 /// Whether one of `later` re-adds the FK of `table.column`, so a rename
@@ -3684,6 +3767,33 @@ fn fk_readded_later(
                 && super::rebuild::columns_at_end(table, &[column.to_owned()], before)[0] == c
         })
     })
+}
+
+/// MySQL refuses to rename a column a CHECK reads (3959), so a CHECK `ops`
+/// drop on a table goes before the first column rename on it, as
+/// `(rename index, drop index)` pairs.
+fn hoisted_check_drops(ops: &[Operation]) -> Vec<(usize, usize)> {
+    use super::SchemaChange as SC;
+    ops.iter()
+        .enumerate()
+        .filter_map(|(j, op)| match op {
+            Operation::Schema(SC::DropCheckConstraint { table: t, name }) => (0..j)
+                .find(|&i| match &ops[i] {
+                    Operation::Schema(SC::RenameColumn { table, .. }) => {
+                        super::rebuild::name_at_end(table, &ops[i + 1..j]) == *t
+                    }
+                    _ => false,
+                })
+                // Not one the migration adds in between.
+                .filter(|&i| {
+                    !ops[i..j].iter().any(|op| {
+                        matches!(op, Operation::Schema(SC::AddCheckConstraint { name: n, .. }) if n == name)
+                    })
+                })
+                .map(|i| (i, j)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Whether `op` changes `table` or renames it.
@@ -4379,8 +4489,10 @@ pub async fn migrate_to_pool_with_ledger(
             applied.remove(&mig.name);
             touched.push(mig);
         }
+        let mut done = applied.clone();
         for mig in forward_to(&all, &applied, target) {
-            reconcile_and_apply(pool, &mig, &applied, ledger, false).await?;
+            reconcile_and_apply(pool, &all, &done, &mig, &applied, ledger, false).await?;
+            done.insert(mig.name.clone());
             touched.push(mig);
         }
         Ok(touched)
@@ -4575,11 +4687,13 @@ async fn unapply_locked_pool(
     let prev_snapshot = prev_snapshot(&all, &target, dir)?;
 
     let inverted = invert(&target.forward, &prev_snapshot)?;
+    let applied = applied_set_pool_with_ledger(pool, ledger).await?;
+    let after = super::make::rollback_snapshot(&all, &applied, &target, prev_snapshot);
 
     if target.atomic {
-        unapply_atomic_pool(pool, &target, &inverted, &prev_snapshot, ledger).await?;
+        unapply_atomic_pool(pool, &target, &inverted, &after, ledger).await?;
     } else {
-        unapply_nonatomic_pool(pool, &target, &inverted, &prev_snapshot, ledger).await?;
+        unapply_nonatomic_pool(pool, &target, &inverted, &after, ledger).await?;
     }
 
     Ok(target)

@@ -166,6 +166,12 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
     where
         'c: 'e;
 
+    /// Whether [`Self::run_delete_plan`] can run several statements.
+    #[doc(hidden)]
+    fn runs_plans(&self) -> bool {
+        false
+    }
+
     /// Runs a delete plan's statements in one transaction. Only reached
     /// on dialects that split it, so never on a Postgres sqlx executor.
     #[doc(hidden)]
@@ -336,6 +342,10 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
         }
     }
 
+    fn runs_plans(&self) -> bool {
+        true
+    }
+
     fn run_delete_plan<'e>(self, plan: DeletePlan) -> BoxFuture<'e, Result<u64, ExecError>>
     where
         'c: 'e,
@@ -387,6 +397,10 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
             #[cfg(feature = "sqlite")]
             PoolConn::Sqlite(c) => sq_exec(&mut **c, sql, params),
         }
+    }
+
+    fn runs_plans(&self) -> bool {
+        true
     }
 
     fn run_delete_plan<'e>(self, plan: DeletePlan) -> BoxFuture<'e, Result<u64, ExecError>>
@@ -451,6 +465,10 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
         }
     }
 
+    fn runs_plans(&self) -> bool {
+        true
+    }
+
     fn run_delete_plan<'e>(self, plan: DeletePlan) -> BoxFuture<'e, Result<u64, ExecError>>
     where
         'c: 'e,
@@ -493,3 +511,72 @@ impl<'c, E: sqlx::Executor<'c, Database = sqlx::Postgres>> SqlExecutor<'c> for E
         pg_exec(self, sql, params)
     }
 }
+
+// A `DatabaseTenant` connection, so `fetch_on(t.conn())` works on every backend.
+macro_rules! database_conn_executor {
+    ($feature:literal, $db:ty, $rows:ident, $exec:ident, $variant:ident, $dialect:path) => {
+        #[cfg(all(feature = "tenancy", feature = $feature))]
+        impl<'c> sealed::Sealed<'c> for &'c mut crate::tenancy::DatabaseConn<$db> {}
+        #[cfg(all(feature = "tenancy", feature = $feature))]
+        impl<'c> SqlExecutor<'c> for &'c mut crate::tenancy::DatabaseConn<$db> {
+            fn dialect(&self) -> &'static dyn Dialect {
+                $dialect
+            }
+
+            fn fetch_rows<'e, 'q: 'e, U, F>(
+                self,
+                sql: &'q str,
+                params: Vec<SqlValue>,
+                decode: F,
+            ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+            where
+                'c: 'e,
+                U: Send + 'e,
+                F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
+            {
+                $rows(&mut ***self, sql, params, decode)
+            }
+
+            fn execute_rows<'e, 'q: 'e>(
+                self,
+                sql: &'q str,
+                params: Vec<SqlValue>,
+            ) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+            where
+                'c: 'e,
+            {
+                $exec(&mut ***self, sql, params)
+            }
+
+            fn run_delete_plan<'e>(self, plan: DeletePlan) -> BoxFuture<'e, Result<u64, ExecError>>
+            where
+                'c: 'e,
+            {
+                Box::pin(async move {
+                    use sqlx::Connection as _;
+                    let mut tx = PoolTx::$variant((***self).begin().await?);
+                    let n = super::run_delete_plan_tx(&mut tx, plan).await?;
+                    tx.commit().await?;
+                    Ok(n)
+                })
+            }
+        }
+    };
+}
+
+database_conn_executor!(
+    "mysql",
+    sqlx::MySql,
+    my_rows,
+    my_exec,
+    Mysql,
+    crate::sql::mysql::DIALECT
+);
+database_conn_executor!(
+    "sqlite",
+    sqlx::Sqlite,
+    sq_rows,
+    sq_exec,
+    Sqlite,
+    crate::sql::sqlite::DIALECT
+);

@@ -265,23 +265,39 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
     let slug = &parsed.slug;
     // Before going offline, so Ctrl-C reaches the code that comes back.
     let mut interrupt = Interrupt::listen()?;
-    if org.active {
-        writeln!(
-            writer,
-            "  deactivating the tenant; if this run dies, run `edit-tenant {slug} --activate`"
-        )?;
-        writeln!(
-            writer,
-            "  waiting {} s for running servers' tenant caches…",
-            parsed.drain_secs
-        )?;
-        set_active(pools, slug, id, false).await?;
-    } else {
-        writeln!(
-            writer,
-            "  the tenant is inactive and stays so; if an earlier move left it so, \
-             run `edit-tenant {slug} --activate` afterwards"
-        )?;
+    // Created now, refused like `create-tenant` if it exists: a racing
+    // create must not end up sharing it. The restore replaces it.
+    if let Some(schema) = &target_schema {
+        crate::tenancy::provision::provision_schema(pools, &schema.0).await?;
+    }
+    // Every way out before the move owns the schema drops it again.
+    let offline = async {
+        if org.active {
+            writeln!(
+                writer,
+                "  deactivating the tenant; if this run dies, run `edit-tenant {slug} --activate`"
+            )?;
+            writeln!(
+                writer,
+                "  waiting {} s for running servers' tenant caches…",
+                parsed.drain_secs
+            )?;
+            set_active(pools, slug, id, false).await
+        } else {
+            writeln!(
+                writer,
+                "  the tenant is inactive and stays so; if an earlier move left it so, \
+                 run `edit-tenant {slug} --activate` afterwards"
+            )?;
+            Ok(())
+        }
+    }
+    .await;
+    if let Err(e) = offline {
+        if let Some(schema) = &target_schema {
+            crate::tenancy::provision::release_schema(pools, &schema.0).await;
+        }
+        return Err(e);
     }
     MoveCtx {
         pools,
@@ -387,7 +403,7 @@ impl MoveCtx<'_> {
     /// No lock is held across the move: the switch and the reactivation
     /// are short updates guarded by `active = false`. A suspension made
     /// during the move is still undone by them; a "moved by migrate"
-    /// marker column would fix that (0.61.0).
+    /// marker column would fix that (0.62.0).
     async fn run<W: Write + Send>(
         self,
         restore: Restore,
@@ -396,7 +412,10 @@ impl MoveCtx<'_> {
     ) -> Result<(), TenancyError> {
         let done = tokio::select! {
             r = self.copy(restore, writer) => r,
-            () = interrupt.recv() => Err(TenancyError::Validation("interrupted".into())),
+            () = interrupt.recv() => {
+                self.release_claim().await;
+                Err(TenancyError::Validation("interrupted".into()))
+            }
         };
         let done = match done {
             Ok(()) => self.switch().await,
@@ -447,8 +466,30 @@ impl MoveCtx<'_> {
         }
     }
 
-    /// Drain, then 3. dump → restore and 4. smoke check.
+    /// Drop the target schema the move created, while still empty.
+    async fn release_claim(&self) {
+        if let Some(s) = self.target_schema {
+            crate::tenancy::provision::release_schema(self.pools, &s.0).await;
+        }
+    }
+
+    /// 3. and 4.; the claimed schema is released if the restore fails.
     async fn copy<W: Write + Send>(
+        &self,
+        restore: Restore,
+        writer: &mut W,
+    ) -> Result<(), TenancyError> {
+        if let Err(e) = self.restore(restore, writer).await {
+            self.release_claim().await;
+            return Err(e);
+        }
+
+        // 4. Before the Org row moves, so a bad restore leaves it in place.
+        self.smoke(writer).await
+    }
+
+    /// Drain, then 3. dump → restore.
+    async fn restore<W: Write + Send>(
         &self,
         restore: Restore,
         writer: &mut W,
@@ -475,8 +516,11 @@ impl MoveCtx<'_> {
             }
         }
         writeln!(writer, "  data move OK")?;
+        Ok(())
+    }
 
-        // 4. Before the Org row moves, so a bad restore leaves it in place.
+    /// Smoke-check what [`Self::restore`] moved.
+    async fn smoke<W: Write + Send>(&self, writer: &mut W) -> Result<(), TenancyError> {
         let target_name = self.target_schema.map(|s| s.0.as_str());
         if let Err(e) = smoke_check(self.target_url, target_name).await {
             // The restore created it, so a rerun would hit "schema exists".
@@ -954,8 +998,15 @@ async fn run_into_schema(
         .execute(registry)
         .await?;
     let stage = target.database(&staging);
+    // The dump creates the schema; drop the empty one the move claimed
+    // in the same transaction, so nobody else can take the name meanwhile.
+    let mut before = vec![format!(
+        "DROP SCHEMA {} RESTRICT",
+        quote_ident(&plan.schema.0)
+    )];
+    before.extend(plan.create);
     let moved = pg_dump_to_psql(source, None, &[], &stage, &[], &plan.moves)
-        .and_then(|()| pg_dump_to_psql(&stage, Some(&plan.schema), &[], target, &plan.create, &[]));
+        .and_then(|()| pg_dump_to_psql(&stage, Some(&plan.schema), &[], target, &before, &[]));
     let dropped = crate::sql::sqlx::query(&format!("DROP DATABASE {quoted} WITH (FORCE)"))
         .execute(registry)
         .await;

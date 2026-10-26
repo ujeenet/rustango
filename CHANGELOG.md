@@ -4,6 +4,101 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.2] — 2026-10-26
+
+### Fixed — migrations, MySQL and MariaDB
+
+- MySQL: a correlated `IN` over the table an `update()` / `delete()` writes is no longer read through a derived table, which saw the write's own changes and hit wrong rows; it fails with error 1093 instead.
+- MySQL: widening a pk an M2M junction references widens the junction column too, so the junction keeps its foreign key.
+- MariaDB: JSON `=` / `<>` compare by value (`JSON_EQUALS`), not as text; `explain` returns its JSON plan instead of failing on `FORMAT=TREE` / `EXPLAIN ANALYZE`; check constraints drop with `DROP CONSTRAINT`; `bulk_update` no longer sends `VALUES ROW(…)`.
+- Rolling back a migration that renamed a column and then dropped a CHECK, partial index or exclusion constraint recreates it after the rename is undone, so its SQL finds the old name.
+- SQLite: unapplying one branch of a merged history keeps the other branch's columns; the table rebuild used the shared parent's snapshot and refused.
+- SQLite: applying one branch of a merged history keeps the other applied branch's columns when it rebuilds a table.
+- MySQL: a migration that renames a column and then drops a CHECK reading it drops the CHECK first, so the rename no longer fails with error 3959.
+- SQLite: JSON column `=` / `<>` compare by value (`1` = `1.0`, any key order), not as text.
+- `DatabaseTenant` connections (`&mut DatabaseConn<Sqlite | MySql>`) are accepted by the ORM's `_on` queries, e.g. `fetch_on(t.conn())`.
+- Tenancy Basic auth: the verified-credential cache holds 256 entries per tenant instead of 1024 shared, so a busy tenant no longer evicts the others.
+
+### Fixed — FK cascades write audit rows
+
+Deleting rows whose `on_delete = "cascade"` children (at any depth, self-references included) are audited now writes one `delete` entry per child row removed, in the delete's transaction. Models with no audited model downstream pay nothing.
+
+### Added — related columns in `values_list` / `values_dict` / `only`
+
+A projection may name a column across FK hops, like `values_list(&["title", "author__name"])`: one LEFT JOIN per hop, only the named columns, in the caller's order, keyed by that name.
+
+### Changed — PostgreSQL `IN` lists bind one array
+
+On PostgreSQL `is_in` / `__in` / `Op::In` over a list of one integer, string, bool or uuid type compiles to `= ANY($1)` (`NOT IN` to `<> ALL($1)`), so every list length shares one prepared statement. Lists with NULLs or other types, and MySQL / SQLite, keep `IN (…)`.
+
+### Changed — bulk writes share one batching helper
+
+`bulk_insert`, `bulk_update` and the audited bulk writes size their batches and run them all-or-none through one implementation.
+
+### Fixed — a busy schema-mode tenant blocked every tenant
+
+`Tenant`'s held connection (`TenantPools::acquire`) now comes from a per-tenant pool with the schema in its connect options, not the shared registry pool. Schema-mode tenants can use up to twice `scoped_pool_max_connections` each.
+
+### Fixed — `migrate-tenant-storage --to schema` could share a schema with a racing create
+
+The move creates the target schema before the tenant goes offline and refuses an existing one as `create-tenant` does; the restore replaces it in its own transaction.
+
+### Fixed — tenant path prefixes, ports and admin writes skipped the claim
+
+Path prefix and port changes are claimed like hosts, so two tenants can no longer take one at once. Generic admin writes of `rustango_orgs` and `rustango_org_hosts` now validate, normalize and claim hosts, prefixes and ports too.
+Extra hosts edited inline on the Org page are claimed too; a MySQL deadlock between two admin claims is retried instead of showing "could not be saved"; admin and REST writes of those tables clear the resolver caches at once.
+
+### Added — webhook signature v2 with a timestamp
+
+Deliveries now carry `X-Webhook-Timestamp` and `X-Webhook-Signature-V2`, an HMAC over the id, event, timestamp and body; check it with `webhook::verify_delivery`. The body-only `X-Webhook-Signature` is still sent for a transition.
+
+### Added — `PgJobQueue::queue_name`
+
+Queues sharing `rustango_jobs` picked each other's jobs. A named queue now runs only its own jobs, an unnamed one only unnamed jobs; `ensure_table_pool` adds the `queue_name` column.
+
+### Fixed — tenant creates say which database rights are missing
+
+The server Test, the New tenant Test, the run and the CLI (`test-db-server`, `create-tenant`) share one rights report: each right yes, no or unknown, what is missing, and the `GRANT` / `ALTER ROLE` that fixes it. Schema mode now checks the registry login's `CREATE` before `CREATE SCHEMA`; the form explains each option's login and rights.
+
+### Fixed — MySQL admins whose rights come from a role were refused
+
+The probe reads `SHOW GRANTS`, so active roles count, nested ones too, on MySQL and MariaDB. Rights the server will not report are "unknown" and no longer block. Refusals are logged, and console errors drop the `tenancy validation:` prefix.
+
+### Added — admin bulk actions that write in the admin's transaction
+
+`admin::Builder::register_tx_action` (and `_with_perm`) hands the handler the write transaction, so an audited model's audit rows commit or roll back with the action. `register_action` handlers still audit best effort after they run.
+
+### Added — `ModelForm::acting_superuser`
+
+Applies the admin's superuser-only field locks to a `ModelForm`: for a non-superuser they are left out, and a locked NOT NULL flag stores `false`. Forms that don't call it lock nothing, as before.
+
+### Internal — every built-in cache backend overrides `touch`
+
+`NullCache` gets its own `touch` (no behaviour change), and a test fails if a backend falls back to the racy `get`-then-`set` default.
+
+### Deprecated — `contenttypes::render_generic_fk_link`
+
+Its link ignores the admin prefix and view permissions. Build your own from `ContentType::by_id`.
+
+### Fixed — admin audit writes are tied to their transaction's pool
+
+Admin create, edit, delete and bulk writes open a transaction that carries its own pool, so their audit source can no longer be judged against another pool. The S3 media test suites now need `storage-s3`, and the MySQL media suite builds under `-D warnings`.
+
+### Fixed — MariaDB purge and generated `main.rs`
+
+- MariaDB: purging a tenant made on a saved server no longer fails reading `@@server_uuid`, which MariaDB lacks.
+- A generated `main.rs` prints CLI errors with Display, not as `Validation("…")`.
+- MariaDB: re-running an `ensure_*` table helper no longer fails with `1005 … errno: 121`; MariaDB's code for a taken FK name now reads as "already exists".
+- `startapp --with-manage-bin` writes a `main.rs` that prints errors with Display and names `rustango::`, not `crate::`.
+
+### Changed — API keys are MACed with a derived sub-key
+
+New API keys are MACed with a key derived from the server secret, not the secret itself. Existing keys still verify unchanged; rotating `RUSTANGO_SESSION_SECRET` still invalidates every API key.
+
+### Changed — `cursor_pagination` on a nullable field warns until 0.62.0
+
+`cursor_pagination` / `cursor_pagination_desc` on a nullable field log a warning when the ViewSet is built; 0.62.0 will refuse it.
+
 ## [0.61.1] — 2026-10-25
 
 ### Fixed — tenant logos 404'd under the default routes

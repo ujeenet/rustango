@@ -8,7 +8,7 @@ import { journey, save, startJourney } from './journey';
 
 const sqlite = cfg.backend === 'sqlite';
 const ADMIN_PASSWORD = 'First-admin-pass-9876!';
-const RIGHTS_OK = /Create databases: yes, create logins: yes, grant: yes\./;
+const RIGHTS_OK = /Ready: the login has every right this needs\./;
 const SUCCEEDED = /Run #\d+ — succeeded/;
 const STEPS = sqlite
   ? ['create_database', 'register_org', 'migrate', 'create_admin', 'activate']

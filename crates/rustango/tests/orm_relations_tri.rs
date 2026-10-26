@@ -907,7 +907,11 @@ async fn in_bulk_beside_carried_binds(pool: &Pool) {
 
 /// A queryset whose own binds fill the cap cannot take any keys.
 async fn carried_binds_alone_over_the_cap_are_refused(pool: &Pool) {
-    let err = carrying(70_000)
+    // A NULL keeps the list one bind per value on PG too (no `= ANY`).
+    let mut vals: Vec<SqlValue> = (0..70_000_i64).map(SqlValue::from).collect();
+    vals.push(SqlValue::Null);
+    let err = Row::objects()
+        .filter_op("n", Op::In, SqlValue::List(vals))
         .in_bulk(Row::id, [1_i64], |r| r.id, pool)
         .await
         .expect_err("no room for an IN list");

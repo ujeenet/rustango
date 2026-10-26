@@ -60,10 +60,10 @@ pub struct DatabaseTenant<DB: Database> {
 }
 
 impl<DB: Database> DatabaseTenant<DB> {
-    /// Borrow the tenant's connection. Inside is a
-    /// `sqlx::pool::PoolConnection<DB>`, which works as an sqlx
-    /// executor through `&mut **t.conn()`, or straight with the query
-    /// macros that take `&mut Connection`.
+    /// Borrow the tenant's connection. The ORM's `_on` queries take it
+    /// as is (`Post::objects().fetch_on(t.conn())`); inside is a
+    /// `sqlx::pool::PoolConnection<DB>`, an sqlx executor through
+    /// `&mut **t.conn()`.
     pub fn conn(&mut self) -> &mut DatabaseConn<DB> {
         &mut self.conn
     }

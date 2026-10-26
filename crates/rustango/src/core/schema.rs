@@ -1617,6 +1617,12 @@ pub trait Model: Sized + Send + Sync + 'static {
     fn __rustango_audited_update_record() -> Option<crate::audit::AuditedUpdateRecord> {
         None
     }
+
+    /// Audited reader for rows an FK cascade is about to delete.
+    #[doc(hidden)]
+    fn __rustango_audited_cascade() -> Option<crate::audit::AuditedCascade> {
+        None
+    }
 }
 
 /// Inventory entry submitted by the `#[derive(Model)]` macro for each model.
@@ -1634,6 +1640,7 @@ pub struct ModelEntry {
     audited_delete: fn() -> Option<crate::audit::AuditedDelete>,
     audited_create: fn() -> Option<crate::audit::AuditedCreate>,
     audited_update_record: fn() -> Option<crate::audit::AuditedUpdateRecord>,
+    audited_cascade: fn() -> Option<crate::audit::AuditedCascade>,
 }
 
 impl ModelEntry {
@@ -1647,6 +1654,7 @@ impl ModelEntry {
             audited_delete: || None,
             audited_create: || None,
             audited_update_record: || None,
+            audited_cascade: || None,
         }
     }
 
@@ -1679,6 +1687,16 @@ impl ModelEntry {
         record: fn() -> Option<crate::audit::AuditedUpdateRecord>,
     ) -> Self {
         self.audited_update_record = record;
+        self
+    }
+
+    /// The model's audited cascade reader.
+    #[must_use]
+    pub const fn with_audited_cascade(
+        mut self,
+        cascade: fn() -> Option<crate::audit::AuditedCascade>,
+    ) -> Self {
+        self.audited_cascade = cascade;
         self
     }
 
@@ -1721,6 +1739,12 @@ impl ModelEntry {
     #[must_use]
     pub fn audited_update_record(&self) -> Option<crate::audit::AuditedUpdateRecord> {
         (self.audited_update_record)()
+    }
+
+    /// Audited cascade reader, `None` for a model without audit.
+    #[must_use]
+    pub fn audited_cascade(&self) -> Option<crate::audit::AuditedCascade> {
+        (self.audited_cascade)()
     }
 
     /// Audited `create` recorder, `None` for a model without audit.

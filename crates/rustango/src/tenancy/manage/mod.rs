@@ -527,7 +527,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
-        "                       [--host-pattern <s>] [--database-url <s>] [--no-migrate]"
+        "                       [--host-pattern <s>] [--database-url <s> | --server <name>] [--no-migrate]"
     )?;
     writeln!(
         w,
@@ -547,7 +547,11 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
-        "                       a fully separate DB via --database-url."
+        "                       a separate DB: an existing one via --database-url, or a new"
+    )?;
+    writeln!(
+        w,
+        "                       one with its own login on a saved server via --server."
     )?;
     writeln!(w, "  drop-tenant   <slug> [--confirm <slug>]")?;
     writeln!(

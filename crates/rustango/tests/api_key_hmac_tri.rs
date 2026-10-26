@@ -17,6 +17,8 @@ use rustango::tri_dialect_test;
 /// The throttle and the hash queue are process-global.
 static SUITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static UNIQ: AtomicU64 = AtomicU64::new(0);
+/// Keys MACed with a sub-key derived from the server secret.
+const MAC: &str = "hmac-sha256v2$";
 
 async fn setup(pool: &Pool) {
     set_api_key_secret(rustango::session::SessionSecret::from_bytes(vec![7; 32]));
@@ -86,7 +88,7 @@ async fn a_new_key_is_an_hmac_and_skips_argon2(pool: &Pool) {
     let token = create_api_key(uid, "t", None, pool).await.unwrap();
     let (prefix, _) = token.split_once('.').unwrap();
     assert!(
-        row(pool, prefix).await.key_hash.starts_with("hmac-sha256$"),
+        row(pool, prefix).await.key_hash.starts_with(MAC),
         "the key was not stored as an HMAC"
     );
 
@@ -130,16 +132,59 @@ async fn a_legacy_argon2_key_is_upgraded_on_use(pool: &Pool) {
 
     assert!(ok(pool, &token).await, "the legacy key was refused");
     assert!(
-        row(pool, &prefix)
-            .await
-            .key_hash
-            .starts_with("hmac-sha256$"),
+        row(pool, &prefix).await.key_hash.starts_with(MAC),
         "the legacy key was not upgraded"
     );
     let held = rustango::passwords::hold_all_hash_slots().await;
     let hit = ok(pool, &token).await;
     drop(held);
     assert!(hit, "the upgraded key ran argon2");
+}
+
+fn random_prefix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    format!("{:08x}", nanos ^ UNIQ.fetch_add(1, Ordering::SeqCst) as u32)
+}
+
+/// A key MACed with the server secret itself still verifies, and is kept
+/// as is so an older server still accepts it.
+async fn a_key_maced_with_the_raw_secret_still_verifies(pool: &Pool) {
+    let _g = SUITE.lock().await;
+    let uid = seed_user(pool, &unique(pool, "rawmac")).await;
+    let prefix = random_prefix();
+    let secret = "fedcba9876543210fedcba9876543210";
+    let raw = rustango::session::SessionSecret::from_bytes(vec![7; 32]);
+    let msg = [b"rustango-apikey-v1.".as_slice(), secret.as_bytes()].concat();
+    let hex: String = rustango::session::sign(&raw, &msg)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let old = format!("hmac-sha256${hex}");
+    let mut key = ApiKey {
+        id: Default::default(),
+        user_id: uid,
+        key_prefix: prefix.clone(),
+        key_hash: old.clone(),
+        label: "raw".into(),
+        expires_at: None,
+        created_at: Default::default(),
+    };
+    key.save_pool(pool).await.unwrap();
+
+    assert!(!ok(pool, &format!("{prefix}.{}", "0".repeat(32))).await);
+    let token = format!("{prefix}.{secret}");
+    let held = rustango::passwords::hold_all_hash_slots().await;
+    let hit = ok(pool, &token).await;
+    drop(held);
+    assert!(hit, "the raw-secret key was refused");
+    assert_eq!(
+        row(pool, &prefix).await.key_hash,
+        old,
+        "the raw-secret key was rewritten"
+    );
 }
 
 /// tenancy-001 — more parallel calls from one IP than the per-IP limit
@@ -164,6 +209,7 @@ tri_dialect_test! {
     scenarios: [
         a_new_key_is_an_hmac_and_skips_argon2,
         a_legacy_argon2_key_is_upgraded_on_use,
+        a_key_maced_with_the_raw_secret_still_verifies,
         parallel_calls_from_one_ip_all_pass,
     ],
 }

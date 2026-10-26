@@ -741,7 +741,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.1
+rustango 0.61.2
 ```
 
 ### `about`
@@ -753,7 +753,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.1
+  version:        0.61.2
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -952,6 +952,12 @@ cargo run -- create-tenant gamma --mode database --server main
 | `--port <n>` | Port the tenant is reachable on, for routing |
 | `--path-prefix <s>` | Path prefix the tenant is reachable under, for routing |
 
+Each mode checks its rights before anything is made and, when one is
+missing, names it and prints the statements that fix it: schema mode needs
+the registry login's `CREATE` on the registry database, `--server` needs the
+admin rights below, `--database-url` needs none. See
+[Rights](tenant-databases.md#rights).
+
 With `--server`, the server's admin rights are checked first, then a
 database named exactly as the slug is created with its own login (random
 password, granted that database only); SQLite creates `<dir>/<slug>.db`.
@@ -1123,7 +1129,7 @@ cargo run -- remove-db-server main
 |---|---|
 | `add-db-server <name> --host <h> [--port <n>] --user <u> [--tls <mode>] [--maintenance-db <db>]` | Save a server. SQLite: `--sqlite-dir <dir>` instead |
 | `list-db-servers` | Every saved server, without secrets |
-| `test-db-server <name>` | Log in and report the version and the admin login's rights; fails when it cannot provision |
+| `test-db-server <name>` | Log in and list the version and the admin login's rights, one line each; fails naming what is missing and the `GRANT` to run |
 | `edit-db-server <name> [same flags] [--prompt-password \| --clear-password] [--on\|--off]` | Change a server; `none` clears `--tls` or `--maintenance-db` |
 | `remove-db-server <name>` | Delete it; refused while a tenant's database is on it |
 

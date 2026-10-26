@@ -549,8 +549,17 @@ pub const SINGLE_TENANT_MANAGE_BIN: &str =
 //! defined in `rustango::migrate::manage`; this binary just hands it
 //! the pool and argv.
 
+// Errors print with Display, so a multi-line CLI error reads as lines.
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::process::ExitCode {
+    if let Err(e) = run().await {
+        eprintln!(\"Error: {e}\");
+        return std::process::ExitCode::FAILURE;
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Pull your models into this binary so `inventory` registers
     // them — replace the placeholder line below with whatever fits
     // your project layout. For the `manage startapp <name>` shape:

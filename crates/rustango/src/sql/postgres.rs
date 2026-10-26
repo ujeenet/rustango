@@ -13,7 +13,7 @@ use crate::core::{
     FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
 };
 
-use super::server::{Collation, DatabaseName, Login, LoginPassword};
+use super::server::{AdminRight, Collation, DatabaseName, Login, LoginPassword, ServerAccount};
 use super::writers::{
     write_aggregate, write_bulk_insert, write_bulk_update_pg, write_count, write_delete,
     write_insert, write_select, write_update, Sql,
@@ -237,6 +237,45 @@ impl Dialect for Postgres {
             "SELECT rolsuper, rolcreatedb, rolcreaterole FROM pg_roles \
              WHERE rolname = current_user",
         )
+    }
+
+    fn current_account_sql(&self) -> Option<&'static str> {
+        Some("SELECT current_user::text")
+    }
+
+    fn schema_privileges_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT current_user::text, current_database()::text, \
+             has_database_privilege(current_user, current_database(), 'CREATE')",
+        )
+    }
+
+    /// The creator owns the new database, so `CREATEDB` covers the grant.
+    fn grant_admin_rights_sql(
+        &self,
+        account: &ServerAccount,
+        database: Option<&str>,
+        rights: &[AdminRight],
+    ) -> Vec<String> {
+        let role = self.quote_ident(&account.user);
+        let mut attrs = Vec::new();
+        if rights.contains(&AdminRight::CreateDatabase) || rights.contains(&AdminRight::Grant) {
+            attrs.push("CREATEDB");
+        }
+        if rights.contains(&AdminRight::CreateLogin) {
+            attrs.push("CREATEROLE");
+        }
+        let mut out = Vec::new();
+        if !attrs.is_empty() {
+            out.push(format!("ALTER ROLE {role} {}", attrs.join(" ")));
+        }
+        if let (true, Some(db)) = (rights.contains(&AdminRight::CreateSchema), database) {
+            out.push(format!(
+                "GRANT CREATE ON DATABASE {} TO {role}",
+                self.quote_ident(db)
+            ));
+        }
+        out
     }
 
     fn clear_tables_sql(&self, tables: &[&str]) -> Vec<String> {

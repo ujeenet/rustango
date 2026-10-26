@@ -1,4 +1,9 @@
-#![cfg(all(feature = "postgres", feature = "media", feature = "testkit"))]
+#![cfg(all(
+    feature = "postgres",
+    feature = "media",
+    feature = "storage-s3",
+    feature = "testkit"
+))]
 //! Live integration tests for `MediaCollection` + `MediaTag` + the
 //! axum router. Same env-var contract as `media_live.rs` — skips
 //! silently when DATABASE_URL or RUSTANGO_S3_TEST_* are unset.

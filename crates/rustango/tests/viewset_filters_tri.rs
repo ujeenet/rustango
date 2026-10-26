@@ -178,7 +178,7 @@ async fn a_like_lookup_on_a_number_is_400(pool: &Pool) {
     }
 }
 
-/// #2230: a nullable cursor still pages; only a NULL at the page end fails.
+/// A nullable cursor still pages; only a NULL at the page end fails.
 async fn a_nullable_cursor_fails_only_on_a_null_row(pool: &Pool) {
     let (status, names, body) = get(pool, "/by_cat?category_id__isnull=false&page_size=1").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -219,7 +219,7 @@ tri_dialect_test! {
     ],
 }
 
-/// #2230: logged at build, not refused, until 0.61.0.
+/// Warned at build, not refused, until 0.62.0.
 #[cfg(feature = "runtime")]
 #[test]
 fn a_nullable_cursor_column_is_logged_at_build_time() {
@@ -228,7 +228,7 @@ fn a_nullable_cursor_column_is_logged_at_build_time() {
     let subscriber = tracing_subscriber::fmt()
         .with_ansi(false)
         .with_writer(move || writer.clone())
-        .with_max_level(tracing::Level::ERROR)
+        .with_max_level(tracing::Level::WARN)
         .finish();
     tracing::subscriber::with_default(subscriber, || {
         let _ = rustango::viewset::ViewSet::for_model(
@@ -239,7 +239,7 @@ fn a_nullable_cursor_column_is_logged_at_build_time() {
     });
     let logs = buf.contents();
     assert!(
-        logs.contains("ERROR") && logs.contains("is nullable"),
+        logs.contains("WARN") && logs.contains("is nullable"),
         "{logs}"
     );
 }

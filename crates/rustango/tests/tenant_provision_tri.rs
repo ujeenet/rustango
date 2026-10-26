@@ -482,6 +482,11 @@ struct Console {
 
 impl Console {
     async fn boot(env: &Env, migrations: &Path) -> Self {
+        Self::boot_on(&env.registry, &env.url, migrations).await
+    }
+
+    /// A console on `registry`, reached as `url`.
+    async fn boot_on(registry: &Pool, url: &str, migrations: &Path) -> Self {
         use rustango::tenancy::operator_console::{router_with_provisioning, SessionSecret};
         let mut op = rustango::tenancy::Operator {
             id: rustango::sql::Auto::default(),
@@ -492,12 +497,12 @@ impl Console {
             password_changed_at: None,
             sessions_revoked_at: None,
         };
-        op.insert_pool(&env.registry).await.expect("seed operator");
+        op.insert_pool(registry).await.expect("seed operator");
         let dir = migrations.to_owned();
-        let app = typed!(env.registry, p => {
+        let app = typed!(registry, p => {
             let pools = std::sync::Arc::new(p);
-            let provisioner = provision::Provisioner::new(pools.clone(), env.url.clone(), dir).erased();
-            router_with_provisioning(env.registry.clone(), pools, provisioner, SessionSecret::from_env_or_random())
+            let provisioner = provision::Provisioner::new(pools.clone(), url.to_owned(), dir).erased();
+            router_with_provisioning(registry.clone(), pools, provisioner, SessionSecret::from_env_or_random())
         });
         let mut c = Self {
             app,
@@ -968,6 +973,346 @@ async fn a_blocked_server_is_refused_before_any_ddl(pool: &Pool) {
     }
 }
 
+/// A login without the rights (the CI and docker-compose app login: its own
+/// databases only) is told what is missing and what to run, the same way
+/// by the server Test, the form Test, the run and the CLI; nothing is made.
+async fn a_limited_admin_is_told_what_to_grant(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+    let env = Env::new(pool).await;
+    let a = slug("lim");
+    env.clean(&[&a]).await;
+    let weak = format!("tp{}lim", std::process::id());
+    let (want, drop_weak): (Vec<String>, Option<String>) = match env.backend() {
+        BackendKind::Postgres => {
+            exec_text(&env.registry, &format!("DROP ROLE IF EXISTS \"{weak}\"")).await;
+            exec_text(
+                &env.registry,
+                &format!("CREATE ROLE \"{weak}\" LOGIN PASSWORD 'weakpw' NOCREATEDB NOCREATEROLE"),
+            )
+            .await;
+            (
+                vec![
+                    format!("The login `{weak}` cannot create databases (CREATEDB), create logins (CREATEROLE)"),
+                    format!("ALTER ROLE \"{weak}\" CREATEDB CREATEROLE;"),
+                ],
+                Some(format!("DROP ROLE \"{weak}\"")),
+            )
+        }
+        BackendKind::MySql => {
+            exec_text(&env.registry, &format!("DROP USER IF EXISTS '{weak}'@'%'")).await;
+            exec_text(
+                &env.registry,
+                &format!("CREATE USER '{weak}'@'%' IDENTIFIED BY 'weakpw'"),
+            )
+            .await;
+            exec_text(
+                &env.registry,
+                &format!("GRANT ALL PRIVILEGES ON `{weak}\\_%`.* TO '{weak}'@'%'"),
+            )
+            .await;
+            (
+                vec![
+                    format!("The login `{weak}` cannot create databases (CREATE, DROP), create logins (CREATE USER) or grant rights (GRANT OPTION)."),
+                    format!("GRANT CREATE, DROP, CREATE USER ON *.* TO '{weak}'@'%';"),
+                    format!("GRANT ALL PRIVILEGES ON *.* TO '{weak}'@'%' WITH GRANT OPTION;"),
+                    "use `root` as the server's admin login".to_owned(),
+                ],
+                Some(format!("DROP USER '{weak}'@'%'")),
+            )
+        }
+        BackendKind::Sqlite => (vec!["cannot write files in".to_owned()], None),
+    };
+    if env.server_backend() {
+        env.add_server_as("main", Some((&weak, "weakpw"))).await;
+    } else {
+        // A read-only directory needs Unix permission bits.
+        if cfg!(not(unix)) {
+            return;
+        }
+        // A directory the app may read but not write.
+        let ro = env.dir("readonly");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        let spec = DbServerSpec {
+            name: "main".into(),
+            backend: BackendKind::Sqlite,
+            active: true,
+            sqlite_dir: Some(ro.display().to_string()),
+            ..DbServerSpec::default()
+        };
+        db_server::add(&env.registry, &spec, None).await.unwrap();
+    }
+    let has_all = |text: &str| {
+        for w in &want {
+            assert!(text.contains(w.as_str()), "missing `{w}` in:\n{text}");
+        }
+        assert!(text.contains("existing database"), "{text}");
+        assert!(!text.contains("weakpw"), "{text}");
+    };
+
+    // The CLI.
+    let cli = env
+        .run(&env.dir("good"), &["test-db-server", "main"])
+        .await
+        .expect_err("not ready")
+        .to_string();
+    has_all(&cli);
+
+    // The console's server Test and the form's Test.
+    let c = Console::boot(&env, &env.dir("good")).await;
+    let unescape = |t: &str| {
+        t.replace("&#x27;", "'")
+            .replace("&quot;", "\"")
+            .replace("&#x2F;", "/")
+    };
+    for (uri, form) in [
+        ("/db-servers/main/test".to_owned(), String::new()),
+        (
+            "/orgs/test-connection".to_owned(),
+            "storage_mode=database&database_source=server&server=main".to_owned(),
+        ),
+        (
+            "/orgs/test-connection".to_owned(),
+            format!("slug={a}&storage_mode=database&database_source=server&server=main"),
+        ),
+    ] {
+        let probe = body(c.post(&uri, &form).await).await;
+        let json: serde_json::Value = serde_json::from_str(&probe).expect("json");
+        assert_eq!(json["status"], "bad", "{uri}: {probe}");
+        // The server Test lists each right; the dry run sends the refusal.
+        let text = if json["rights"].is_array() && !json["rights"].as_array().unwrap().is_empty() {
+            assert!(probe.contains(r#""has":"no""#), "{probe}");
+            format!(
+                "{} {} {} {}",
+                json["message"].as_str().unwrap(),
+                json["fix"].as_str().unwrap_or_default(),
+                json["fix_sql"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                json["alternative"].as_str().unwrap_or_default()
+            )
+        } else {
+            json["message"].as_str().unwrap().to_owned()
+        };
+        has_all(&text);
+    }
+
+    // The run: refused before any DDL, with the same text, escaped.
+    let page = body(c.create(&a).await).await;
+    assert!(page.contains("alert-lines"), "{page}");
+    assert!(!page.contains("tenancy validation"), "{page}");
+    has_all(&unescape(&page));
+    assert!(!env.database_exists(&a).await);
+    assert!(env.org(&a).await.is_none());
+    let steps = env.steps(&a).await;
+    assert!(
+        steps.iter().any(|s| s == "check_connection:failed"),
+        "{steps:?}"
+    );
+    assert!(
+        !steps.iter().any(|s| s.starts_with("create_database")),
+        "{steps:?}"
+    );
+    drop(c);
+    if let Some(sql) = drop_weak {
+        exec_text(&env.registry, &sql).await;
+    }
+}
+
+/// MySQL / MariaDB: an admin whose rights come from a role, also through a
+/// nested role, may provision.
+async fn a_role_based_admin_may_provision(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+    let env = Env::new(pool).await;
+    if env.backend() != BackendKind::MySql {
+        return;
+    }
+    let a = slug("role");
+    env.clean(&[&a]).await;
+    let pid = std::process::id();
+    let (dba, outer, direct, nested) = (
+        format!("tp{pid}dba"),
+        format!("tp{pid}outer"),
+        format!("tp{pid}u1"),
+        format!("tp{pid}u2"),
+    );
+    let version: Vec<(String,)> =
+        rustango::sql::raw_query_pool("SELECT VERSION()", vec![], &env.registry)
+            .await
+            .unwrap();
+    let mariadb = version[0].0.contains("MariaDB");
+    for sql in [
+        format!("DROP USER IF EXISTS '{direct}'@'%', '{nested}'@'%'"),
+        format!("DROP ROLE IF EXISTS '{outer}', '{dba}'"),
+        format!("CREATE ROLE '{dba}'"),
+        format!("GRANT ALL PRIVILEGES ON *.* TO '{dba}' WITH GRANT OPTION"),
+        format!("CREATE ROLE '{outer}'"),
+        format!("GRANT '{dba}' TO '{outer}'"),
+        format!("CREATE USER '{direct}'@'%' IDENTIFIED BY 'rolepw'"),
+        format!("CREATE USER '{nested}'@'%' IDENTIFIED BY 'rolepw'"),
+        format!("GRANT '{dba}' TO '{direct}'@'%'"),
+        format!("GRANT '{outer}' TO '{nested}'@'%'"),
+    ] {
+        exec_text(&env.registry, &sql).await;
+    }
+    if mariadb {
+        exec_text(
+            &env.registry,
+            &format!("SET DEFAULT ROLE '{dba}' FOR '{direct}'@'%'"),
+        )
+        .await;
+        exec_text(
+            &env.registry,
+            &format!("SET DEFAULT ROLE '{outer}' FOR '{nested}'@'%'"),
+        )
+        .await;
+    } else {
+        exec_text(
+            &env.registry,
+            &format!("SET DEFAULT ROLE ALL TO '{direct}'@'%', '{nested}'@'%'"),
+        )
+        .await;
+    }
+    env.add_server_as("direct", Some((&direct, "rolepw"))).await;
+    env.add_server_as("main", Some((&nested, "rolepw"))).await;
+    for name in ["direct", "main"] {
+        let row = db_server::get(&env.registry, name).await.unwrap();
+        let report = row.probe(T).await.expect("probe");
+        assert!(report.can_provision(), "{name}: {:?}", report.blocker());
+    }
+    env.provision(&env.dir("good"), &ProvisionRequest::on_server(&a, "main"))
+        .await
+        .expect("a role-based admin provisions");
+    assert_provisioned(&env, &a).await;
+    env.clean(&[&a]).await;
+    for sql in [
+        format!("DROP USER '{direct}'@'%', '{nested}'@'%'"),
+        format!("DROP ROLE '{outer}', '{dba}'"),
+    ] {
+        exec_text(&env.registry, &sql).await;
+    }
+}
+
+/// Schema mode: a registry login without CREATE on its database is
+/// refused before `CREATE SCHEMA`, by the run, the form Test and the CLI.
+async fn a_registry_login_without_create_is_refused_for_schemas(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+    let env = Env::new(pool).await;
+    if env.backend() != BackendKind::Postgres {
+        return;
+    }
+    let a = slug("sch");
+    let reg = format!("tp{}reg", std::process::id());
+    exec_text(&env.registry, &format!("DROP ROLE IF EXISTS \"{reg}\"")).await;
+    for sql in [
+        format!("CREATE ROLE \"{reg}\" LOGIN PASSWORD 'regpw'"),
+        format!("GRANT ALL ON ALL TABLES IN SCHEMA public TO \"{reg}\""),
+        format!("GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO \"{reg}\""),
+    ] {
+        exec_text(&env.registry, &sql).await;
+    }
+    let rest = env.url.split_once("://").unwrap().1;
+    let host_db = rest.rsplit_once('@').unwrap().1;
+    let url = format!("postgres://{reg}:regpw@{host_db}");
+    let db = host_db
+        .split('/')
+        .nth(1)
+        .unwrap()
+        .split('?')
+        .next()
+        .unwrap()
+        .to_owned();
+    let restricted = Pool::connect(&url).await.expect("restricted registry");
+    let want = [
+        format!("The registry's login `{reg}` (DATABASE_URL) cannot create schemas in database `{db}` (CREATE)."),
+        format!("GRANT CREATE ON DATABASE \"{db}\" TO \"{reg}\";"),
+    ];
+    let has_all = |text: &str| {
+        for w in &want {
+            assert!(text.contains(w.as_str()), "missing `{w}` in:\n{text}");
+        }
+        assert!(!text.contains("regpw"), "{text}");
+    };
+
+    let req = ProvisionRequest::new(
+        &a,
+        rustango::tenancy::provision::TenantStorage::Schema(None),
+    );
+    let err = typed!(restricted, p => provision::provision_tenant_recorded(
+        &p, &url, &env.dir("good"), &req, None, None, None,
+    )
+    .await)
+    .map(drop)
+    .expect_err("refused");
+    has_all(&err.to_string());
+    let cli = typed!(restricted, p => rustango::tenancy::manage::run_with_writer(
+        &p, &url, &env.dir("good"),
+        vec!["create-tenant".into(), a.clone(), "--mode".into(), "schema".into()],
+        &mut Vec::new(),
+    ).await)
+    .expect_err("refused")
+    .to_string();
+    has_all(&cli);
+    let c = Console::boot_on(&restricted, &url, &env.dir("good")).await;
+    let probe = body(
+        c.post(
+            "/orgs/test-connection",
+            &format!("slug={a}&storage_mode=schema"),
+        )
+        .await,
+    )
+    .await;
+    let json: serde_json::Value = serde_json::from_str(&probe).expect("json");
+    assert_eq!(json["status"], "bad", "{probe}");
+    has_all(&format!("{} {}", json["message"], json["fix_sql"]).replace("\\\"", "\""));
+
+    let schemas: Vec<(i64,)> = rustango::sql::raw_query_pool(
+        &format!("SELECT COUNT(*) FROM pg_namespace WHERE nspname = '{a}'"),
+        vec![],
+        &env.registry,
+    )
+    .await
+    .unwrap();
+    assert_eq!(schemas[0].0, 0, "a schema was made");
+    assert!(env.org(&a).await.is_none());
+    let steps = env.steps(&a).await;
+    assert!(
+        steps.iter().any(|s| s == "check_connection:failed"),
+        "{steps:?}"
+    );
+    assert!(
+        !steps.iter().any(|s| s.starts_with("provision_storage")),
+        "{steps:?}"
+    );
+
+    // With the right granted, the same request passes the check.
+    exec_text(
+        &env.registry,
+        &format!("GRANT CREATE ON DATABASE \"{db}\" TO \"{reg}\""),
+    )
+    .await;
+    let probe = body(c.post("/orgs/test-connection", "storage_mode=schema").await).await;
+    assert!(probe.contains(r#""status":"ok""#), "{probe}");
+    drop(c);
+    restricted.close().await;
+    for sql in [
+        format!("DROP OWNED BY \"{reg}\""),
+        format!("DROP ROLE \"{reg}\""),
+    ] {
+        exec_text(&env.registry, &sql).await;
+    }
+}
+
 /// `api::create_tenant` takes the server path too; a backend other than
 /// the registry's is refused.
 async fn the_api_creates_on_a_saved_server(pool: &Pool) {
@@ -1334,6 +1679,9 @@ tri_dialect_test! {
         a_failed_insert_drops_what_it_made,
         an_existing_database_is_refused_and_kept,
         a_blocked_server_is_refused_before_any_ddl,
+        a_limited_admin_is_told_what_to_grant,
+        a_role_based_admin_may_provision,
+        a_registry_login_without_create_is_refused_for_schemas,
         the_api_creates_on_a_saved_server,
         a_login_that_cannot_sign_in_is_rolled_back,
         the_tenant_database_takes_the_registry_collation,

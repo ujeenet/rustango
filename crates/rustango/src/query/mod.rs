@@ -2120,6 +2120,9 @@ impl<T: Model> QuerySet<T> {
     /// Columns are checked against the schema at `.compile()` time. A
     /// typo gives [`QueryError::UnknownField`], and empty `cols` gives
     /// [`QueryError::EmptyValuesProjection`].
+    ///
+    /// A related column such as `"author__name"` (FK hops, then a column)
+    /// is read through one LEFT JOIN per hop and keyed by that name.
     #[must_use]
     pub fn values_dict(self, cols: &[&'static str]) -> ValuesQuerySet<T> {
         ValuesQuerySet {
@@ -2181,19 +2184,21 @@ impl<T: Model> QuerySet<T> {
     pub fn defer(self, cols: &[&'static str]) -> ValuesQuerySet<T> {
         let model = T::SCHEMA;
         let exclude: std::collections::HashSet<&'static str> = cols.iter().copied().collect();
-        let mut projection: Vec<&'static str> = model
+        let projection: Vec<&'static str> = model
             .scalar_fields()
             .filter(|f| !exclude.contains(f.column))
             .map(|f| f.column)
             .collect();
-        // Pass unknown defer columns into the projection so
-        // `values_dict`'s `UnknownField` check rejects them.
-        for &col in cols {
-            if model.field_by_column(col).is_none() {
-                projection.push(col);
-            }
-        }
-        self.values_dict(&projection)
+        // An unknown name, related ones included, fails at `compile()`.
+        let unknown = cols.iter().find(|c| model.field_by_column(c).is_none());
+        let qs = match unknown {
+            Some(col) => self.with_pending_error(QueryError::UnknownField {
+                model: model.name,
+                field: (*col).to_owned(),
+            }),
+            None => self,
+        };
+        qs.values_dict(&projection)
     }
 
     /// Lower this queryset to a `DeleteQuery` — same WHERE clause, no projection.
@@ -4599,30 +4604,75 @@ fn compile_values_select<T: Model>(
         return Err(QueryError::EmptyValuesProjection);
     }
     let model: &'static ModelSchema = T::SCHEMA;
+    let mut projection = Vec::with_capacity(cols.len());
+    let mut joins: Vec<crate::core::Join> = Vec::new();
     for col in &cols {
-        if model.field_by_column(col).is_none() {
-            return Err(QueryError::UnknownField {
-                model: model.name,
-                field: (*col).to_owned(),
-            });
+        if model.field_by_column(col).is_some() {
+            projection.push(*col);
+            continue;
         }
+        let (span_joins, alias, column) = resolve_projected_span(model, col)?;
+        for j in span_joins {
+            if !joins.iter().any(|e| e.alias == j.alias) {
+                joins.push(j);
+            }
+        }
+        projection.push(intern_join_alias(&format!("{alias}.{column}"))?);
     }
     // A projection reads no related row, so `select_related` adds nothing.
     qs.select_related.clear();
     let mut q = qs.compile()?;
-    project_every_branch(&mut q, &cols);
+    project_every_branch(&mut q, &projection, &joins)?;
     Ok(q)
 }
 
+/// A projected `author__name`: its FK-chain JOINs, the alias holding the
+/// column, and the column. The last segment names a column, as own ones do.
+fn resolve_projected_span(
+    model: &'static ModelSchema,
+    col: &str,
+) -> Result<(Vec<crate::core::Join>, &'static str, &'static str), QueryError> {
+    let unknown = |m: &'static ModelSchema| QueryError::UnknownField {
+        model: m.name,
+        field: col.to_owned(),
+    };
+    if !col.contains("__") {
+        return Err(unknown(model));
+    }
+    let (joins, alias, current, term_i) =
+        resolve_span_chain(model, col).map_err(|_| unknown(model))?;
+    let segs: Vec<&str> = col.split("__").collect();
+    if term_i + 1 != segs.len() {
+        return Err(unknown(current));
+    }
+    let field = current
+        .field_by_column(segs[term_i])
+        .ok_or_else(|| unknown(current))?;
+    Ok((joins, alias, field.column))
+}
+
 /// Set `cols` on `q` and on each set-op branch that projects nothing,
-/// so every branch of a union returns the same columns.
-fn project_every_branch(q: &mut SelectQuery, cols: &[&'static str]) {
+/// so every branch of a union returns the same columns. Each one gets
+/// the JOINs its related columns read.
+fn project_every_branch(
+    q: &mut SelectQuery,
+    cols: &[&'static str],
+    joins: &[crate::core::Join],
+) -> Result<(), QueryError> {
+    for j in joins {
+        match q.joins.iter().find(|e| e.alias == j.alias) {
+            Some(e) if !same_join(e, j) => return Err(duplicate_join_alias(j.alias)),
+            Some(_) => {}
+            None => q.joins.push(j.clone()),
+        }
+    }
     q.projection = Some(cols.to_vec());
     for branch in &mut q.compound {
         if branch.query.projection.is_none() {
-            project_every_branch(&mut branch.query, cols);
+            project_every_branch(&mut branch.query, cols, joins)?;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
