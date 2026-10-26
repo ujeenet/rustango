@@ -1193,8 +1193,7 @@ async fn a_blocking_handler_is_not_run_twice(pool: &Pool) {
     let tok = token(pool, "blocking");
     let q = PgJobQueue::with_workers_pool(pool.clone(), 2)
         .poll_interval(Duration::from_millis(20))
-        .heartbeat_interval(Duration::from_millis(100))
-        .reclaim_stuck_after(Duration::from_millis(400));
+        .heartbeat_interval(Duration::from_millis(100));
     q.register::<Blocking>().await;
     q.dispatch(&Blocking {
         token: tok.clone(),
@@ -1203,14 +1202,19 @@ async fn a_blocking_handler_is_not_run_twice(pool: &Pool) {
     .await
     .unwrap();
     q.start().await;
-    wait_for("the run to finish", || counts(&tok).1 >= 1).await;
+    wait_for("the run to start", || counts(&tok).0 == 1).await;
+    // Swept from the test's own thread, which no blocked worker can starve.
+    let mut reclaimed = 0;
+    while counts(&tok).1 == 0 {
+        reclaimed += PgJobQueue::reclaim_stuck_jobs_pool(pool, Duration::from_millis(400))
+            .await
+            .expect("reclaim");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     tokio::time::sleep(Duration::from_millis(300)).await;
     q.shutdown().await;
-    assert_eq!(
-        counts(&tok).0,
-        1,
-        "a blocked run was reclaimed and run again"
-    );
+    assert_eq!(reclaimed, 0, "a blocked run lost its lease");
+    assert_eq!(counts(&tok).0, 1, "a blocked run was run again");
 }
 
 // Multi-thread: a blocked thread must leave others for the heartbeat.
