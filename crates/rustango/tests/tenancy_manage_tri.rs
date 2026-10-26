@@ -510,6 +510,42 @@ async fn an_existing_schema_is_not_adopted(pool: &Pool) {
     }
 }
 
+/// A schema named after a database role would lead that role's default
+/// `search_path` ("$user", public), so it is refused, and none is made.
+async fn a_schema_named_after_a_role_is_refused(pool: &Pool) {
+    let env = Env::new(pool).await;
+    if env.backend() != BackendKind::Postgres {
+        return;
+    }
+    #[cfg(feature = "postgres")]
+    {
+        let dir = env.dir("migrations");
+        let role: Vec<(String,)> = rustango::sql::raw_query_pool(
+            "SELECT CAST(current_user AS TEXT)",
+            Vec::new(),
+            &env.registry,
+        )
+        .await
+        .unwrap();
+        let role = role[0].0.clone();
+        let err = env
+            .create(&dir, "rolecli", schema_opts(BackendKind::Postgres, &role))
+            .await
+            .expect_err("create_tenant took the role's schema");
+        assert!(err.to_string().contains("role"), "{err}");
+        let r = env
+            .provision(&schema_request("roleprov", &role, None))
+            .await;
+        assert!(
+            matches!(&r, Err(e) if e.to_string().contains("role")),
+            "provision took the role's schema: {r:?}"
+        );
+        assert!(!schema_exists(&env.registry, &role).await, "schema made");
+        assert!(env.org("rolecli").await.is_none());
+        assert!(env.org("roleprov").await.is_none());
+    }
+}
+
 /// Run `create` while an uncommitted extra-host row holds `host`; commit it
 /// only once `schema` exists, so the INSERT loses after the schema is made.
 #[cfg(feature = "postgres")]
@@ -1114,6 +1150,7 @@ tri_dialect_test! {
         forget_pending_refuses_a_tenant_applied_migration,
         forget_pending_refuses_an_unreadable_tenant,
         an_existing_schema_is_not_adopted,
+        a_schema_named_after_a_role_is_refused,
         create_tenant_releases_its_schema_on_a_failed_insert,
         provision_releases_its_schema_on_a_failed_insert,
         concurrent_creates_never_share_a_schema,

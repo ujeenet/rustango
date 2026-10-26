@@ -388,7 +388,7 @@ pub(super) fn null_cast_for(
 /// shares one statement; NULLs keep the same meaning either way.
 fn write_in_list(b: &mut Sql<'_>, op: Op, elements: &[SqlValue], cast: Option<BindCast>) {
     let negated = matches!(op, Op::NotIn);
-    if b.d.binds_pg_only_values() && array_bindable(elements) {
+    if binds_as_array(b.d, elements) {
         b.sql.push_str(if negated { " <> ALL(" } else { " = ANY(" });
         let p = b.bind(SqlValue::Array(elements.to_vec()));
         b.sql.push_str(&p);
@@ -408,6 +408,20 @@ fn write_in_list(b: &mut Sql<'_>, op: Op, elements: &[SqlValue], cast: Option<Bi
         b.push_param_typed(elem.clone(), cast);
     }
     b.sql.push(')');
+}
+
+/// Whether `d` binds `elements` as one array, the `= ANY($1)` form.
+fn binds_as_array(d: &dyn Dialect, elements: &[SqlValue]) -> bool {
+    d.binds_pg_only_values() && array_bindable(elements)
+}
+
+/// The binds an `IN` list over `elements` takes on `d`.
+pub(crate) fn in_list_binds(d: &dyn Dialect, elements: &[SqlValue]) -> usize {
+    if binds_as_array(d, elements) {
+        1
+    } else {
+        elements.len()
+    }
 }
 
 /// Whether `elements` bind as one typed array: all one type the array

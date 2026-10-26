@@ -944,7 +944,8 @@ async fn carried_binds_alone_over_the_cap_are_refused(pool: &Pool) {
 }
 
 /// Batching would apply a limit or offset per batch, so it is refused
-/// instead, on the query or on the head of a set operation.
+/// instead, on the query or on the head of a set operation. PG binds the
+/// keys as one array, so it needs no batches.
 async fn sliced_in_bulk_past_the_bind_cap_is_refused(pool: &Pool) {
     let sliced = [
         ("limit", Row::objects().limit(5)),
@@ -956,10 +957,12 @@ async fn sliced_in_bulk_past_the_bind_cap_is_refused(pool: &Pool) {
         ),
     ];
     for (what, qs) in sliced {
-        let err = qs
-            .in_bulk(Row::id, 0..70_000_i64, |r| r.id, pool)
-            .await
-            .expect_err(what);
+        let got = qs.in_bulk(Row::id, 0..70_000_i64, |r| r.id, pool).await;
+        if pool.dialect().name() == "postgres" {
+            got.unwrap_or_else(|e| panic!("{what}: one array bind on PG: {e}"));
+            continue;
+        }
+        let err = got.expect_err(what);
         assert!(
             matches!(err, ExecError::InListUnsplittable { keys: 70_000, .. }),
             "{what}: {err}"

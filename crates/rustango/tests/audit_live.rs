@@ -771,3 +771,41 @@ async fn repeat_ensures_send_nothing_the_server_rejects() {
         "the second ensure had statements rejected — one PG log ERROR each"
     );
 }
+
+/// A cutoff past chrono's range, or before 1970, keeps every row.
+#[tokio::test]
+async fn cleanup_older_than_huge_days_keeps_rows() {
+    let _g = lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    reset(&pool).await;
+    let entry = PendingEntry {
+        entity_table: "post",
+        entity_pk: "1".into(),
+        operation: AuditOp::Create,
+        source: AuditSource::System,
+        changes: json!({}),
+    };
+    audit::emit_one(&pool, &entry).await.unwrap();
+    let any = rustango::sql::Pool::Postgres(pool.clone());
+    for days in [1_000_000, 200_000_000, i64::MAX] {
+        assert_eq!(
+            audit::cleanup_older_than(&pool, days).await.unwrap(),
+            0,
+            "{days}"
+        );
+        assert_eq!(
+            audit::cleanup_older_than_pool(&any, days).await.unwrap(),
+            0,
+            "{days}"
+        );
+    }
+    assert_eq!(
+        audit::fetch_for_entity(&pool, "post", "1")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}

@@ -654,6 +654,20 @@ pub trait Dialect: Send + Sync {
         "TEXT".to_owned()
     }
 
+    /// A `VARCHAR(max_length)` that compares case- and accent-sensitively,
+    /// as PG and SQLite text does. MySQL and MariaDB need an `_as_cs` collation.
+    fn cs_text_type(&self, max_length: u32) -> String {
+        format!("VARCHAR({max_length})")
+    }
+
+    /// One-column rows: the columns of `table` whose collation ignores
+    /// case, for an upgrade to [`Self::cs_text_type`]. `None` where text
+    /// compares byte-wise.
+    fn ci_columns_sql(&self, table: &str) -> Option<CompiledStatement> {
+        let _ = table;
+        None
+    }
+
     /// DDL a migration runs before it writes a case-insensitive column,
     /// such as `CREATE EXTENSION IF NOT EXISTS citext SCHEMA public` on
     /// Postgres. `None` when nothing is needed.

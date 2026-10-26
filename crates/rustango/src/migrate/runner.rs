@@ -240,6 +240,30 @@ fn validate_ledger_name(name: &str) {
 #[cfg(feature = "postgres")]
 const MIGRATE_LOCK_KEY: i64 = 0x5255_5354_4d49_4754;
 
+/// `pool`'s migrate lock key. PG advisory locks are per database, so a
+/// schema-mode tenant folds in the schema its sessions create in: one key
+/// for every schema made a tenant's run wait on all the others.
+#[cfg(feature = "postgres")]
+async fn pg_migrate_lock_key(pool: &PgPool) -> Result<i64, sqlx::Error> {
+    let schema: Option<String> = sqlx::query_scalar("SELECT current_schema()::text")
+        .fetch_one(pool)
+        .await?;
+    Ok(lock_key_for_schema(schema.as_deref()))
+}
+
+/// [`MIGRATE_LOCK_KEY`] for `public` (and no schema), as before; another
+/// schema's mixes in its FNV-1a hash, stable across processes and builds.
+#[cfg(feature = "postgres")]
+fn lock_key_for_schema(schema: Option<&str>) -> i64 {
+    let Some(schema) = schema.filter(|s| *s != "public") else {
+        return MIGRATE_LOCK_KEY;
+    };
+    let hash = schema.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    MIGRATE_LOCK_KEY ^ i64::from_ne_bytes(hash.to_ne_bytes())
+}
+
 /// Collect every registered model's schema into a `Vec`. Order is the
 /// order of registration (linker order); callers that care should sort.
 #[must_use]
@@ -711,13 +735,14 @@ pub async fn ensure_ledger(pool: &PgPool) -> Result<(), MigrateError> {
 async fn ensure_ledger_for(pool: &PgPool, ledger: &str) -> Result<(), MigrateError> {
     use crate::sql::{Dialect as _, Postgres};
     let dialect = Postgres;
+    let key = pg_migrate_lock_key(pool).await?;
     let mut tx = pool.begin().await?;
     // Postgres returns `pg_advisory_xact_lock(...)`. SQLite returns
     // `None` (its `BEGIN` already gates concurrent CREATE TABLE).
     if let Some(xact_lock_sql) = dialect.acquire_xact_lock_sql() {
         // The pool runners' key, so both bootstraps serialize (#1844).
         sqlx::query(&xact_lock_sql)
-            .bind(MIGRATE_LOCK_KEY)
+            .bind(key)
             .execute(&mut *tx)
             .await?;
     }
@@ -2899,8 +2924,8 @@ async fn fake_apply_pool(
 ///
 /// Backend-specific bind shapes:
 /// - **Postgres** — `pg_advisory_lock($1)` takes an `i64`; we bind
-///   [`MIGRATE_LOCK_KEY`] (the same key the legacy PgPool runner
-///   uses, so the two paths coordinate).
+///   [`pg_migrate_lock_key`] (the same key the legacy PgPool runner
+///   uses, so the two paths coordinate): one per schema-mode tenant.
 /// - **MySQL** — `GET_LOCK` names are server-wide, so the dialect
 ///   appends a hash of `DATABASE()` to the bound `rustango_migrate_`
 ///   prefix: one lock per database, like PG advisory locks.
@@ -3004,12 +3029,13 @@ where
         crate::sql::Pool::Postgres(pg) => {
             let opts = pg.connect_options();
             let connect_timeout = pg.options().get_acquire_timeout();
+            let key = pg_migrate_lock_key(pg).await?;
             let mut held =
                 LockSession::<sqlx::PgConnection>::wait(&opts, connect_timeout, |conn| {
                     let sql = acquire.clone();
                     Box::pin(async move {
                         sqlx::query_scalar::<_, bool>(&sql)
-                            .bind(MIGRATE_LOCK_KEY)
+                            .bind(key)
                             .fetch_one(&mut *conn)
                             .await
                     })
@@ -3017,10 +3043,7 @@ where
                 .await?;
             let result = body.await;
             // Best-effort: PG releases on session close, and the session closes.
-            let _ = sqlx::query(&release)
-                .bind(MIGRATE_LOCK_KEY)
-                .execute(held.conn())
-                .await;
+            let _ = sqlx::query(&release).bind(key).execute(held.conn()).await;
             held.close().await;
             result
         }
@@ -3625,9 +3648,28 @@ fn render_step(
         && readds_fk(change, dialect).is_some_and(|(table, column)| {
             super::rebuild::columns_at_end(table, &[column.to_owned()], later)[0] != column
         });
-    let readded_now = readds_fk(change, dialect)
-        .filter(|_| renamed && !column_renamed && drop_fks.is_some())
+    let readded =
+        readds_fk(change, dialect).filter(|_| renamed && !column_renamed && drop_fks.is_some());
+    // On MySQL, unless a later op re-adds it, it waits for the end under the end
+    // names: re-added now, it could precede a later retype of its key (3780).
+    let at_end = readded
+        .filter(|_| dialect.modifies_whole_column())
+        .filter(|(t, c)| !fk_readded_later(t, c, later, dialect));
+    let readded_now = readded
+        .filter(|_| at_end.is_none())
         .map(|(t, c)| (t.to_owned(), c.to_owned()));
+    let mut end_fks = Vec::new();
+    if let Some((table, column)) = at_end {
+        let own = super::diff::column_fk_sql(snap, table, column, dialect, schema)
+            .map_err(MigrateError::Validation)?;
+        batch.deferred_fks.retain(|sql| Some(sql) != own.as_ref());
+        let end = super::rebuild::name_at_end(table, later);
+        let end_column = super::rebuild::columns_at_end(table, &[column.to_owned()], later);
+        end_fks.extend(
+            super::diff::column_fk_sql(after, &end, &end_column[0], dialect, schema)
+                .map_err(MigrateError::Validation)?,
+        );
+    }
     // The column's last rename adds it back at the end, under the end names;
     // a re-add here could precede a later retype of its key (MySQL error 3780).
     if let Some((table, column)) = readds_fk(change, dialect).filter(|_| column_renamed) {
@@ -3640,6 +3682,7 @@ fn render_step(
         let fks = std::mem::take(&mut batch.deferred_fks);
         batch.immediate.extend(fks);
     }
+    batch.deferred_fks.extend(end_fks);
     // The declared ones come back at the end, unless another op brings them.
     if let Some((table, column)) = &drop_referencing {
         let end = super::rebuild::name_at_end(table, later);
@@ -5614,5 +5657,110 @@ mod tests {
             "FK re-added before its key's retype: {out:?}"
         );
         assert!(out[adds[0]].contains("`child_b_fkey`"), "{out:?}");
+    }
+
+    /// MySQL: a retyped FK column whose table is renamed later comes back
+    /// after its key's retype, under the end name (MySQL error 3780).
+    #[test]
+    fn render_between_readds_a_retyped_fk_of_a_renamed_table_after_its_key() {
+        use crate::migrate::{SchemaChange, SchemaSnapshot};
+        let snap = |ty: &str, child: &str| -> SchemaSnapshot {
+            serde_json::from_value(serde_json::json!({ "tables": [
+                { "name": "parent", "model": "Parent", "fields": [
+                    { "name": "id", "column": "id", "ty": ty,
+                      "nullable": false, "primary_key": true }] },
+                { "name": child, "model": "Child", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64",
+                      "nullable": false, "primary_key": true },
+                    { "name": "a", "column": "a", "ty": ty, "nullable": false,
+                      "primary_key": false,
+                      "fk": { "kind": "fk", "to": "parent", "on": "id" } }] }] }))
+            .unwrap()
+        };
+        let retype = |table: &str, column: &str| SchemaChange::AlterColumnType {
+            table: table.into(),
+            column: column.into(),
+            from: "i32".into(),
+            to: "i64".into(),
+        };
+        let changes = [
+            retype("child", "a"),
+            retype("parent", "id"),
+            SchemaChange::RenameTable {
+                old_name: "child".into(),
+                new_name: "kid".into(),
+            },
+        ];
+        let out = super::render_changes_between(
+            &changes,
+            &snap("i32", "child"),
+            &snap("i64", "kid"),
+            &crate::sql::MySql,
+        )
+        .unwrap();
+        let key = out
+            .iter()
+            .position(|s| s.starts_with("ALTER TABLE `parent` MODIFY"))
+            .expect("key MODIFY");
+        let adds: Vec<usize> = (0..out.len())
+            .filter(|&i| out[i].contains("ADD CONSTRAINT"))
+            .collect();
+        assert_eq!(adds.len(), 1, "{out:?}");
+        assert!(
+            adds[0] > key,
+            "FK re-added before its key's retype: {out:?}"
+        );
+        assert!(out[adds[0]].starts_with("ALTER TABLE `kid`"), "{out:?}");
+    }
+
+    /// An ON DELETE change before its table's rename adds no FK after it on
+    /// PG or SQLite: SQLite rebuilds, and PG re-adds it in place.
+    #[test]
+    fn render_between_keeps_on_delete_before_rename_in_place_off_mysql() {
+        use crate::migrate::{SchemaChange, SchemaSnapshot};
+        let snap = |child: &str, action: &str| -> SchemaSnapshot {
+            serde_json::from_value(serde_json::json!({ "tables": [
+                { "name": "parent", "model": "Parent", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64",
+                      "nullable": false, "primary_key": true }] },
+                { "name": child, "model": "Child", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64",
+                      "nullable": false, "primary_key": true },
+                    { "name": "a", "column": "a", "ty": "i64", "nullable": true,
+                      "primary_key": false,
+                      "fk": { "kind": "fk", "to": "parent", "on": "id",
+                              "on_delete": action } }] }] }))
+            .unwrap()
+        };
+        let changes = [
+            SchemaChange::AlterFkOnDelete {
+                table: "child".into(),
+                column: "a".into(),
+                from: Some("CASCADE".into()),
+                to: Some("SET NULL".into()),
+            },
+            SchemaChange::RenameTable {
+                old_name: "child".into(),
+                new_name: "kid".into(),
+            },
+        ];
+        let (before, after) = (snap("child", "CASCADE"), snap("kid", "SET NULL"));
+        let sqlite =
+            super::render_changes_between(&changes, &before, &after, &crate::sql::Sqlite).unwrap();
+        assert!(
+            !sqlite.iter().any(|s| s.contains("ADD CONSTRAINT")),
+            "{sqlite:?}"
+        );
+        let pg = super::render_changes_between(&changes, &before, &after, &crate::sql::Postgres)
+            .unwrap();
+        let rename = pg
+            .iter()
+            .position(|s| s.contains("RENAME TO"))
+            .expect("rename");
+        let add = pg
+            .iter()
+            .position(|s| s.contains("ADD CONSTRAINT"))
+            .expect("add");
+        assert!(add < rename, "{pg:?}");
     }
 }

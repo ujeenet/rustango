@@ -894,10 +894,11 @@ fn format_duration_short_filter(value: &Value, _: &HashMap<String, Value>) -> te
 
 fn duration_from_value(value: &Value) -> Option<chrono::Duration> {
     match value {
-        Value::Number(n) => n.as_i64().map(chrono::Duration::seconds),
+        // Past chrono's range (about ±292 million years) passes through unchanged.
+        Value::Number(n) => n.as_i64().and_then(chrono::Duration::try_seconds),
         Value::String(s) => {
             if let Ok(secs) = s.parse::<i64>() {
-                return Some(chrono::Duration::seconds(secs));
+                return chrono::Duration::try_seconds(secs);
             }
             // `parse_duration` gives a `std::time::Duration`.
             crate::dateparse::parse_duration(s).and_then(|d| chrono::Duration::from_std(d).ok())
@@ -1972,6 +1973,22 @@ mod tests {
             render(&tera, "{{ secs | format_duration_long }}", ctx),
             "1 hour, 2 minutes, 5 seconds"
         );
+    }
+
+    #[test]
+    fn format_duration_filters_pass_out_of_range_seconds_through() {
+        let mut tera = setup();
+        let mut ctx = tera::Context::new();
+        for v in [i64::MAX, i64::MIN + 1] {
+            for f in ["format_duration_long", "format_duration_short"] {
+                ctx.insert("n", &v);
+                ctx.insert("s", &v.to_string());
+                let out = tera
+                    .render_str(&format!("{{{{ n | {f} }}}} {{{{ s | {f} }}}}"), &ctx)
+                    .unwrap();
+                assert_eq!(out, format!("{v} {v}"), "{f}");
+            }
+        }
     }
 
     #[test]

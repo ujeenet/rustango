@@ -439,6 +439,19 @@ pub(crate) async fn table_view(
         query: qstr.clone(),
     });
 
+    // The "view" hook as a PK filter, so totals, pages, facets, date
+    // buckets and search all leave its denied rows out. Every list query
+    // shares `filters` and the search, so the scan reads only those rows.
+    let aggregates_withheld =
+        match view_hook_rows(&state, &parts, model, &filters, search.as_ref()).await? {
+            ViewHookRows::All => false,
+            ViewHookRows::Only(f) => {
+                filters.push(f);
+                false
+            }
+            ViewHookRows::TooMany => true,
+        };
+
     let where_clause = WhereExpr::and_predicates(
         field_filters
             .iter()
@@ -452,7 +465,8 @@ pub(crate) async fn table_view(
     // or `?count=0`. Without a total the pager shows "Page N" instead
     // of "Page N of M", and prev/next come from fetching one extra
     // row and trimming it.
-    let count_skipped = state.count_skipped_for_table(model.table)
+    let count_skipped = aggregates_withheld
+        || state.count_skipped_for_table(model.table)
         || matches!(
             params.get("count").map(String::as_str),
             Some("skip" | "0" | "false" | "no")
@@ -504,8 +518,8 @@ pub(crate) async fn table_view(
     } else {
         false
     };
-    // The detail page's "view" hook hides a row here too (#2231). It runs
-    // in Rust after the page is read, so the total still counts denied rows.
+    // The detail page's "view" hook hides a row here too (#2231); the
+    // PK filter above already did, unless the table was too big to scan.
     rows.retain(|row| {
         crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(row))
     });
@@ -765,33 +779,38 @@ pub(crate) async fn table_view(
     // toggles `?<col>=<value>`: clicking the active value clears the
     // filter, clicking another value swaps to it.
     let show_all_facet = params.get("facet_show_all").map(String::as_str);
-    let facets_ctx: Vec<serde_json::Value> = compute_facets(
-        &state,
-        &parts,
-        model,
-        &field_filters,
-        &filters,
-        search.as_ref(),
-        &admin_cfg,
-        &active_field_filters,
-        &list_query,
-        show_all_facet,
-    )
-    .await?;
+    let facets_ctx: Vec<serde_json::Value> = if aggregates_withheld {
+        Vec::new()
+    } else {
+        compute_facets(
+            &state,
+            &parts,
+            model,
+            &field_filters,
+            &filters,
+            search.as_ref(),
+            &admin_cfg,
+            &active_field_filters,
+            &list_query,
+            show_all_facet,
+        )
+        .await?
+    };
 
     // Date-hierarchy strip: the breadcrumb plus the child buckets at
     // the current drill level (year, month or day). One GROUP BY
     // query, narrowed by the parent level's WHERE.
-    let date_hierarchy_ctx: Option<serde_json::Value> = if admin_cfg.date_hierarchy.is_empty() {
-        None
-    } else {
-        let source = SelectQuery {
-            where_clause: where_clause.clone(),
-            search: search.clone(),
-            ..SelectQuery::new(model)
+    let date_hierarchy_ctx: Option<serde_json::Value> =
+        if admin_cfg.date_hierarchy.is_empty() || aggregates_withheld {
+            None
+        } else {
+            let source = SelectQuery {
+                where_clause: where_clause.clone(),
+                search: search.clone(),
+                ..SelectQuery::new(model)
+            };
+            compute_date_hierarchy(&state, model, &admin_cfg, date_sel, &list_query, source).await?
         };
-        compute_date_hierarchy(&state, model, &admin_cfg, date_sel, &list_query, source).await?
-    };
 
     // Right-rail card per custom list filter: the filter title and
     // its clickable options, with the active value marked.
@@ -1098,6 +1117,98 @@ async fn compute_facets(
         }));
     }
     Ok(out)
+}
+
+/// The rows a "view" hook admits, as a filter SQL can apply.
+enum ViewHookRows {
+    /// No hook, or it denies nothing.
+    All,
+    /// The admitted rows, by PK.
+    Only(Filter),
+    /// Too many rows to scan: counts, facets and dates are withheld.
+    TooMany,
+}
+
+/// Run the table's "view" hook over every row matching `filters` and
+/// `search`, and fold the answer into one PK filter: the shorter of `IN`
+/// admitted or `NOT IN` denied. The hook takes the whole row, so all
+/// scalar columns are read.
+async fn view_hook_rows(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    model: &'static crate::core::ModelSchema,
+    filters: &[Filter],
+    search: Option<&SearchClause>,
+) -> Result<ViewHookRows, AdminError> {
+    if !crate::admin::object_permissions::has_hook(model.table, "view") {
+        return Ok(ViewHookRows::All);
+    }
+    let Some(pk_field) = model.primary_key() else {
+        return Ok(ViewHookRows::TooMany);
+    };
+    let cap = state.view_hook_scan_cap();
+    let fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    let rows = crate::sql::select_rows_as_json(
+        &state.pool,
+        &SelectQuery {
+            where_clause: WhereExpr::and_predicates(filters.to_vec()),
+            search: search.cloned(),
+            limit: Some(i64::try_from(cap).unwrap_or(i64::MAX).saturating_add(1)),
+            ..SelectQuery::new(model)
+        },
+        &fields,
+    )
+    .await?;
+    if rows.len() > cap {
+        warn_scan_cap(model.table, cap);
+        return Ok(ViewHookRows::TooMany);
+    }
+    let (mut admitted, mut denied) = (Vec::new(), Vec::new());
+    for row in &rows {
+        let pk = render::read_value_as_string_json(row, pk_field)
+            .and_then(|raw| forms::parse_pk_string(pk_field, &raw).ok());
+        let Some(pk) = pk else {
+            return Ok(ViewHookRows::TooMany);
+        };
+        if crate::admin::object_permissions::is_allowed(model.table, "view", parts, Some(row)) {
+            admitted.push(pk);
+        } else {
+            denied.push(pk);
+        }
+    }
+    let filter = |op, value| Filter {
+        column: pk_field.column,
+        op,
+        value,
+    };
+    Ok(if denied.is_empty() {
+        ViewHookRows::All
+    } else if admitted.is_empty() {
+        // A PK is never NULL: no row.
+        ViewHookRows::Only(filter(Op::IsNull, SqlValue::Bool(true)))
+    } else if denied.len() <= admitted.len() {
+        ViewHookRows::Only(filter(Op::NotIn, SqlValue::List(denied)))
+    } else {
+        ViewHookRows::Only(filter(Op::In, SqlValue::List(admitted)))
+    })
+}
+
+/// Log once per table that the scan cap hid its counts.
+fn warn_scan_cap(table: &'static str, cap: usize) {
+    static WARNED: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut warned = WARNED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !warned.contains(&table) {
+        warned.push(table);
+        tracing::warn!(
+            target: "rustango::admin",
+            table,
+            cap,
+            "the \"view\" hook matches more rows than the scan cap: total, facets and \
+             dates are hidden. Use register_admin_queryset! or raise view_hook_scan_cap"
+        );
+    }
 }
 
 /// One facet value: the stored key, its URL form, the FK display name and the count.

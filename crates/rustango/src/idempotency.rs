@@ -64,7 +64,7 @@ use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::extract::{OriginalUri, Request};
-use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, COOKIE, HOST, SET_COOKIE};
+use axum::http::header::{CONTENT_LENGTH, HOST, SET_COOKIE};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
 use axum::middleware::Next;
@@ -76,6 +76,7 @@ use sha2::{Digest, Sha256};
 use crate::api_errors::ApiError;
 use crate::body_limit::{collect_capped, over_cap};
 use crate::cache::BoxedCache;
+use crate::vary::CREDENTIAL_HEADERS;
 
 const DEFAULT_HEADER: &str = "idempotency-key";
 const DEFAULT_BODY_CAP: usize = 4 * 1024 * 1024;
@@ -504,10 +505,6 @@ fn too_large() -> Response<Body> {
     )
     .into_response()
 }
-
-/// Headers that carry a credential, hashed only when no identity is resolved.
-const CREDENTIAL_HEADERS: [HeaderName; 3] =
-    [AUTHORIZATION, COOKIE, HeaderName::from_static("x-api-key")];
 
 /// Cache key for who sent the request, where, and with which client key.
 fn cache_key(scope: &str, parts: &Parts, tenant: Option<&str>, key: &str) -> String {

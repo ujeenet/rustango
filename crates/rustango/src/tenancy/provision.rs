@@ -1991,6 +1991,19 @@ pub(crate) async fn provision_schema<DB: Database>(
                         .into(),
                 )
             })?;
+        // The default `search_path` starts with "$user": a schema named
+        // after a role would lead that role's sessions, the registry's included.
+        let is_role: bool = rustango::sql::sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)",
+        )
+        .bind(schema)
+        .fetch_one(pg_pools.registry())
+        .await?;
+        if is_role {
+            return Err(TenancyError::Validation(format!(
+                "schema name `{schema}` is the name of a database role — choose another"
+            )));
+        }
         // Use the dialect's quoter, not a local copy: it doubles any
         // embedded `"`.
         let sql = format!("CREATE SCHEMA {}", crate::sql::Postgres.quote_ident(schema));

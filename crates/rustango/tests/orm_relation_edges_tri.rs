@@ -233,6 +233,18 @@ async fn select_related_keeps_the_fk_key(pool: &Pool) {
     assert_eq!(fk.pk(), 100, "the FK still holds the referenced key");
 }
 
+/// The reverse helper matches children on the `on` column, not the parent's PK.
+async fn reverse_set_reads_the_fk_target_column(pool: &Pool) {
+    seed_city(pool).await;
+    let country = Country::objects()
+        .fetch(pool)
+        .await
+        .expect("country")
+        .remove(0);
+    let cities = country.city_set_pool(pool).await.expect("city_set");
+    assert_eq!(cities.iter().map(|c| c.id).collect::<Vec<_>>(), [1]);
+}
+
 /// An ad-hoc join named like an FK field is not stitched as `select_related`.
 async fn ad_hoc_join_named_like_an_fk(pool: &Pool) {
     seed_city(pool).await;
@@ -393,6 +405,7 @@ tri_dialect_test! {
     scenarios: [
         fk_targets_a_renamed_pk_column,
         select_related_keeps_the_fk_key,
+        reverse_set_reads_the_fk_target_column,
         ad_hoc_join_named_like_an_fk,
         long_join_labels_decode,
         long_join_labels_keep_their_key,

@@ -6382,6 +6382,46 @@ pub fn settings_audit_check(
              host + subdomain wildcards before deploying."
                 .into(),
         );
+    } else if settings
+        .security
+        .allowed_hosts
+        .iter()
+        .any(|h| h.trim() == "*")
+    {
+        out.warnings.push(
+            "[security] allowed_hosts contains \"*\" in prod tier — every Host header passes, \
+             so host validation is off. List the real hosts instead."
+                .into(),
+        );
+    }
+
+    if settings
+        .security
+        .cors_allowed_origins
+        .iter()
+        .any(|o| o.trim() == "*")
+    {
+        out.warnings.push(
+            "[security] cors_allowed_origins contains \"*\" in prod tier — any site can read \
+             non-credentialed responses. List the real origins."
+                .into(),
+        );
+    }
+
+    // Both layers are opt-in: unset installs no layer.
+    if matches!(settings.server.request_timeout_secs, None | Some(0)) {
+        out.warnings.push(
+            "[server] request_timeout_secs unset or 0 in prod tier — no handler timeout, so \
+             stuck requests hold workers. Set about 30."
+                .into(),
+        );
+    }
+    if settings.server.max_body_bytes.is_none() {
+        out.info.push(
+            "[server] max_body_bytes unset in prod tier — no body-limit layer; only axum's \
+             2 MiB extractor default applies, and streamed bodies are unlimited."
+                .into(),
+        );
     }
 
     // Empty list = same-host only (#1529); a cross-host SPA's POSTs get 403.
@@ -6461,6 +6501,15 @@ pub fn settings_audit_check(
         out.info.push(
             "[routes] legacy_preset = true — using the pre-v0.29 `__`-prefixed URLs \
              (`/__login`, `/__admin`, …). Switch to the friendly defaults when bookmarks allow."
+                .into(),
+        );
+    }
+
+    // Unset means console too: reset and magic-link URLs land in stdout.
+    if matches!(settings.mail.backend.as_deref(), None | Some("console")) {
+        out.warnings.push(
+            "[mail] backend unset or `console` in prod tier — mail bodies, including reset \
+             and magic-link URLs, are printed to stdout. Set `smtp` (or `null`)."
                 .into(),
         );
     }
@@ -8951,6 +9000,8 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         // populate it here so this test stays focused on its
         // original concern (legacy_preset + retention_days info).
         s.security.allowed_hosts = vec!["example.com".into()];
+        s.mail.backend = Some("smtp".into());
+        s.server.request_timeout_secs = Some(30);
         let r = settings_run("prod", &s);
         assert!(
             r.info.iter().any(|i| i.contains("legacy_preset")),

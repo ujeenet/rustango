@@ -630,8 +630,8 @@ pub struct ServerSettings {
     /// to about 30 in production so one stuck handler cannot hold a
     /// worker.
     pub request_timeout_secs: Option<u64>,
-    /// Largest body accepted on POST, PUT and PATCH. `None` means
-    /// 2 MiB. Raise it for upload routes.
+    /// Largest body accepted on POST, PUT and PATCH. `None` installs no
+    /// body-limit layer; axum's 2 MiB default still caps typed extractors.
     pub max_body_bytes: Option<u64>,
     /// Seconds open connections get to finish after SIGTERM before they
     /// are closed. `None` means 20. Keep it under the orchestrator's

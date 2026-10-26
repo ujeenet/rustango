@@ -1222,7 +1222,7 @@ impl<T: Model> QuerySet<T> {
     /// |---|---|---|
     /// | (none) / `__exact` | `<col> = ?` | as-is; `None` gives `<col> IS NULL` |
     /// | `__iexact` | `<col> ILIKE ?` | as-is (no wildcards) |
-    /// | `__contains` | `<col> LIKE ?` | wrap `%value%` |
+    /// | `__contains` | `<col> LIKE ?` | wrap `%value%` (a JSON column's text); a `SqlValue::Json` value is JSON containment (`@>`) |
     /// | `__icontains` | `<col> ILIKE ?` | wrap `%value%` |
     /// | `__startswith` | `<col> LIKE ?` | wrap `value%` |
     /// | `__istartswith` | `<col> ILIKE ?` | wrap `value%` |
@@ -2801,6 +2801,10 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
             let v = wrap_like(&value, "", "", &field, suffix)?;
             Ok(pair(field, Op::ILikeEscaped, v))
         }
+        // A JSON value is a containment test, as `Column::contains` on a JSON column.
+        "contains" if matches!(value, SqlValue::Json(_)) => {
+            Ok(pair(field, Op::JsonContains, value))
+        }
         "contains" => {
             let v = wrap_like(&value, "%", "%", &field, suffix)?;
             Ok(pair(field, Op::LikeEscaped, v))
@@ -3244,7 +3248,14 @@ fn resolve_filter(model: &'static ModelSchema, raw: RawFilter) -> Result<Filter,
     // field, so skip the type check. `In` carries a List, whose
     // elements are not checked one by one. `JsonHasKey` binds a text key
     // against a JSON column.
-    let skip_type_check = matches!(raw.op, Op::IsNull | Op::In | Op::JsonHasKey);
+    // A text pattern on a JSON column matches its text, as `Column::contains`.
+    let json_text = field.ty == crate::core::FieldType::Json
+        && matches!(raw.value, SqlValue::String(_))
+        && matches!(
+            raw.op,
+            Op::Like | Op::NotLike | Op::LikeEscaped | Op::ILike | Op::NotILike | Op::ILikeEscaped
+        );
+    let skip_type_check = json_text || matches!(raw.op, Op::IsNull | Op::In | Op::JsonHasKey);
 
     if !skip_type_check {
         if let Some(value_ty) = raw.value.field_type() {

@@ -4,6 +4,70 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.4] — 2026-10-26
+
+### Fixed — a schema-mode tenant cannot take a role's name
+
+Creating or moving a tenant into a schema named like a database role is refused: the default `search_path` would put that schema first for the role, the registry's included.
+
+### Fixed — ViewSet writes check FK targets and the view permission
+
+An FK in a create or update body must name a row the target's global scopes and soft delete show, else `422`; an update may resend the value it already holds. The new `ViewSet::related_filter` narrows it further. A write echoes its full row only to a caller with the `retrieve` permission; others get just the primary key. A single create also sends `Location`.
+
+### Fixed — admin lists leave out rows the `view` hook denies
+
+Totals, pages, facets, date buckets and search no longer count rows a `"view"` object-permission hook refuses. The list runs the hook over the rows its filters and search match, up to 10 000 (`Builder::view_hook_scan_cap`); past that it withholds the total, facets and date strip and logs a warning once per table.
+
+### Fixed — generic relation reads apply global scopes
+
+`GenericForeignKey::get_object`, `fetch_row_as_json`, `fetch_reverse_generic` and `prefetch_reverse_generic_for` apply the model's global scopes, as `prefetch_generic` already did.
+
+### Fixed — `cache_page` skips requests with `X-Api-Key`
+
+Like `Authorization` and `Cookie`, a request with `X-Api-Key` is neither served from nor stored in the shared cache unless the route sets `cache_authenticated(true)`.
+
+### Fixed — ORM and migrations
+
+- MySQL: a migration that retypes an FK column, then the key it references, then renames the column's table no longer fails with error 3780; the FK comes back at the end, on the new table name.
+- `<parent>::<child>_set` / `_set_pool` match children on the column the FK points at (`on = "code"`); they read the parent's PK and found none.
+- `filter("data__contains", …)` on a JSON column works: a string matches the JSON text, as `Model::data.contains(…)`; a `SqlValue::Json` value is a containment test, as `json_contains`. Both were refused.
+
+### Fixed — audit rows for FK side effects, one-bind key lists on PG
+
+- A delete whose `ON DELETE SET NULL` / `SET DEFAULT` changes rows of an audited model writes an `update` entry for each of them.
+- `Model::truncate` writes a bulk `delete` entry (`{"bulk": "truncate", "cascade_from": …}`) on each audited table it took rows from through FKs: any referencing table on PG (`TRUNCATE … CASCADE`), `ON DELETE CASCADE` ones elsewhere. Rows a MySQL/SQLite truncate sets through `SET NULL` / `SET DEFAULT` are not audited.
+- PG: `in_bulk`, `in_bulk_on` and prefetch send a key list as one `= ANY($1)` bind instead of splitting it at the bind limit, so a sliced `in_bulk` past 65 535 keys works.
+
+### Fixed — MySQL translation keys are case-sensitive
+
+`rustango_translations.locale` / `key` use an `_as_cs` collation on MySQL and MariaDB 10.10+, so `Key` and `key` are two overrides as on PG and SQLite; `migrate` moves an existing table's `_ci` columns; without the ALTER privilege it warns once per pool and keeps them.
+
+### Fixed — PG schema-mode tenants: migrate lock and prepared statements
+
+- The migrate lock is per schema, so a schema-mode tenant's migration no longer waits on (or blocks) the registry's or another tenant's.
+- With `max_cached_scoped_pools = 0`, a registry connection a tenant borrows drops its prepared statements on the way in and out, so one query on tenants whose tables differ no longer fails with `cached plan must not change result type`.
+
+### Changed — `check --deploy` flags more prod defaults
+
+- An unset or `console` `[mail] backend` is a warning: it prints reset and magic-link URLs to stdout.
+- `"*"` in `allowed_hosts` or `cors_allowed_origins`, and an unset or zero `request_timeout_secs`, are warnings; an unset `max_body_bytes` is info.
+
+### Fixed — huge audit retention days and durations no longer panic
+
+`audit-cleanup --days`, the admin cleanup form and `cleanup_older_than*` keep every row when the cutoff falls before 1970 or past chrono's range; `format_duration_long` / `_short` filters pass out-of-range seconds through unchanged.
+
+### Fixed — `FileCache` reaps expired entries and is owner-only
+
+Every 16 writes sweep one sixteenth of the directory for expired entries, and the new `FileCache::purge_expired` sweeps it all. New directories are created 0700 and entries 0600 on Unix; entries held keys such as session ids readable to other local users.
+
+### Security — `DynamicForm` refuses script URLs
+
+A `url` field refuses `javascript:`, `vbscript:` and `data:` values, however a browser would spell them; rendered as a link they were stored XSS. Other URLs failing `validate_url`, and emails failing `validate_email` or the `SmtpMailer` parser, log a warning for now.
+
+### Fixed — WebSocket keepalive closes half-open peers
+
+`ws_handler` pings every `keepalive` even while messages flow, closes a peer that sends nothing for a whole interval after a ping, and gives each send `max(keepalive, 10 s)` to finish.
+
 ## [0.61.3] — 2026-10-26
 
 ### Changed — unknown `cache.backend` values are logged as errors
