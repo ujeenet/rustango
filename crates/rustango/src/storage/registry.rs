@@ -348,6 +348,20 @@ impl super::Storage for PresignVia {
     async fn metadata(&self, key: &str) -> Result<Option<super::ObjectMeta>, super::StorageError> {
         self.store.metadata(key).await
     }
+
+    async fn save_stream(
+        &self,
+        key: &str,
+        len: u64,
+        body: super::ByteStream,
+        put: &super::PutConditions,
+    ) -> Result<(), super::StorageError> {
+        self.store.save_stream(key, len, body, put).await
+    }
+
+    async fn load_stream(&self, key: &str) -> Result<super::ByteStream, super::StorageError> {
+        self.store.load_stream(key).await
+    }
 }
 
 impl RegistryInner {
@@ -618,6 +632,13 @@ mod tests {
         via.save("a.csv", b"abc").await.unwrap();
         assert_eq!(via.load("a.csv").await.unwrap(), b"abc");
         assert_eq!(via.metadata("a.csv").await.unwrap().unwrap().size, 3);
+        // Forwarded: the trait default would refuse create-only.
+        let once = crate::storage::PutConditions::new().create_only();
+        let body = crate::storage::ByteStream::from(b"xyz".to_vec());
+        via.save_stream("b.csv", 3, body, &once).await.unwrap();
+        let mut got = via.load_stream("b.csv").await.unwrap();
+        let chunk = futures_util::StreamExt::next(&mut got).await.unwrap();
+        assert_eq!(&chunk.unwrap()[..], b"xyz");
         let ttl = std::time::Duration::from_secs(60);
         let get = via.presigned_get_url("a.csv", ttl).await.unwrap();
         assert!(

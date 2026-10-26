@@ -162,6 +162,10 @@ Provisioning still accepts it but logs and shows a warning. Give such a tenant i
 
 A struct literal of `Applied` needs `warning: None`; matching code is unaffected.
 
+### Storage: `save_stream` and `load_stream`
+
+New trait methods with defaults, so existing backends compile. A wrapper around another `Storage` must forward both, or it buffers whole objects and refuses `create_only`.
+
 ## 0.61.4
 
 ### Schema names equal to a database role are refused

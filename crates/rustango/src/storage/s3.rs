@@ -69,6 +69,8 @@
 //!   when the bucket is public.
 //! - Presigned GET and PUT URLs, so a browser can download a private
 //!   file or upload straight to the bucket.
+//! - Streamed `save_stream` and `load_stream`. The PUT sends
+//!   `UNSIGNED-PAYLOAD` over https and signs each chunk over plain http.
 //!
 //! ## What it does not do
 //!
@@ -81,10 +83,32 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
-use super::transport::{canonical_header_value, encode_key, encode_query, Http, MAX_PRESIGN_SECS};
+use super::transport::{
+    canonical_header_value, encode_key, encode_query, send_error, stream_body, Http,
+    MAX_PRESIGN_SECS,
+};
 #[cfg(test)]
 use super::transport::{upload_timeout, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT};
-use super::{validate_key, ObjectMeta, PutConditions, Storage, StorageError};
+use super::{
+    already_exists, check_declared_len, validate_key, ByteStream, ObjectMeta, PutConditions,
+    Storage, StorageError,
+};
+
+/// The most one PUT takes: 5 GiB.
+const MAX_PUT: u64 = 5 << 30;
+
+/// Chunk size of a signed streaming upload; S3 wants at least 8 KiB.
+const SIGNED_CHUNK: usize = 64 * 1024;
+
+/// A request body.
+enum Body<'a> {
+    /// Hashed into the signature. Empty sends no body.
+    Bytes(&'a [u8]),
+    /// `UNSIGNED-PAYLOAD`: TLS guards the bytes.
+    Unsigned(ByteStream, u64),
+    /// `aws-chunked` with a signature per chunk, for plain-http endpoints.
+    Chunked(ByteStream, u64),
+}
 
 /// How to reach the bucket. Build it with [`S3Config::new`]; the keys
 /// are passed apart, as [`S3Credentials`].
@@ -342,8 +366,8 @@ impl S3Storage {
         &self,
         method: &str,
         key: &str,
-        body: &[u8],
-        content_type: Option<&str>,
+        body: Body<'_>,
+        put: &PutConditions,
     ) -> Result<reqwest::Response, StorageError> {
         validate_key(key)?;
         let creds = self.creds.credentials().await?;
@@ -351,12 +375,16 @@ impl S3Storage {
         let path = self.key_path(key);
         let amz_date = format_amz_date(unix_now()?);
         let date_stamp = &amz_date[..8];
-        let payload_hash = sha256_hex(body);
+        let payload_hash = match &body {
+            Body::Bytes(b) => sha256_hex(b),
+            Body::Unsigned(..) => "UNSIGNED-PAYLOAD".to_owned(),
+            Body::Chunked(..) => "STREAMING-AWS4-HMAC-SHA256-PAYLOAD".to_owned(),
+        };
 
         // Canonical headers: lowercase, sorted by name. A content type
         // is signed too, so S3 stores the one we sent (#1904).
-        let mut headers: Vec<(&str, String)> = Vec::with_capacity(6);
-        if let Some(ct) = canonical_header_value(content_type)? {
+        let mut headers: Vec<(&str, String)> = Vec::with_capacity(9);
+        if let Some(ct) = canonical_header_value(put.content_type.as_deref())? {
             headers.push(("content-type", ct));
         }
         headers.push(("host", self.host()));
@@ -365,6 +393,23 @@ impl S3Storage {
         if let Some(token) = &creds.session_token {
             headers.push(("x-amz-security-token", token.clone()));
         }
+        // A streamed body signs its length, so S3 refuses any other.
+        // No `Content-Encoding: aws-chunked`: SeaweedFS would store it.
+        let sent = match &body {
+            Body::Bytes(b) => b.len() as u64,
+            Body::Unsigned(_, len) => *len,
+            Body::Chunked(_, len) => {
+                headers.push(("x-amz-decoded-content-length", len.to_string()));
+                aws_chunked_len(*len, SIGNED_CHUNK as u64)
+            }
+        };
+        if !matches!(body, Body::Bytes(_)) {
+            headers.push(("content-length", sent.to_string()));
+        }
+        if put.create_only {
+            headers.push(("if-none-match", "*".to_owned()));
+        }
+        headers.sort_by(|a, b| a.0.cmp(b.0));
         let canonical_headers: String = headers.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
         let signed_headers = headers
             .iter()
@@ -391,18 +436,88 @@ impl S3Storage {
             reqwest::Method::from_bytes(method.as_bytes())
                 .map_err(|e| StorageError::Io(format!("method: {e}")))?,
             &url,
-            body.len(),
+            sent,
         );
         for (name, value) in headers {
             req = req.header(name, value);
         }
         req = req.header("authorization", auth);
-        if !body.is_empty() {
-            req = req.body(body.to_vec());
+        match body {
+            Body::Bytes([]) => {}
+            Body::Bytes(b) => req = req.body(b.to_vec()),
+            Body::Unsigned(body, len) => req = req.body(stream_body(body, len)),
+            Body::Chunked(body, len) => {
+                let signer = ChunkSigner {
+                    key: signing_key,
+                    amz_date,
+                    scope,
+                    prev: signature,
+                };
+                let framed = aws_chunked(body.exact(len), signer, SIGNED_CHUNK);
+                req = req.body(stream_body(framed, sent));
+            }
         }
-        req.send()
-            .await
-            .map_err(|e| StorageError::Io(format!("http: {e}")))
+        req.send().await.map_err(|e| send_error(&e))
+    }
+
+    /// One streamed PUT. `signed` chunk-signs the body instead of
+    /// sending it as `UNSIGNED-PAYLOAD`.
+    async fn put_stream(
+        &self,
+        key: &str,
+        len: u64,
+        body: ByteStream,
+        put: &PutConditions,
+        signed: bool,
+    ) -> Result<(), StorageError> {
+        validate_key(key)?;
+        check_declared_len(key, len, put)?;
+        if len > MAX_PUT {
+            return Err(StorageError::Io(format!(
+                "S3 PUT {key}: {len} bytes is over the 5 GiB one PUT takes"
+            )));
+        }
+        let body = if signed {
+            Body::Chunked(body, len)
+        } else {
+            Body::Unsigned(body, len)
+        };
+        let resp = self.signed_request("PUT", key, body, put).await?;
+        let status = resp.status();
+        // A racing conditional write can get 409 ConditionalRequestConflict.
+        if put.create_only
+            && matches!(
+                status,
+                reqwest::StatusCode::PRECONDITION_FAILED | reqwest::StatusCode::CONFLICT
+            )
+        {
+            return Err(already_exists(key));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(StorageError::Io(format!(
+                "S3 PUT {key} -> {status}: {body}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// GET, its status checked.
+    async fn get(&self, key: &str) -> Result<reqwest::Response, StorageError> {
+        let resp = self
+            .signed_request("GET", key, Body::Bytes(b""), &PutConditions::new())
+            .await?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(StorageError::NotFound(key.to_owned()));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(StorageError::Io(format!(
+                "S3 GET {key} -> {status}: {body}"
+            )));
+        }
+        Ok(resp)
     }
 
     /// Build a URL whose SigV4 signature lives in the query string.
@@ -511,7 +626,13 @@ impl Storage for S3Storage {
         data: &[u8],
         content_type: Option<&str>,
     ) -> Result<(), StorageError> {
-        let resp = self.signed_request("PUT", key, data, content_type).await?;
+        let put = PutConditions {
+            content_type: content_type.map(str::to_owned),
+            ..PutConditions::default()
+        };
+        let resp = self
+            .signed_request("PUT", key, Body::Bytes(data), &put)
+            .await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -522,19 +643,23 @@ impl Storage for S3Storage {
         Ok(())
     }
 
+    /// One PUT, so at most 5 GiB. Over https the body goes as
+    /// `UNSIGNED-PAYLOAD`; over plain http each chunk is signed.
+    async fn save_stream(
+        &self,
+        key: &str,
+        len: u64,
+        body: ByteStream,
+        put: &PutConditions,
+    ) -> Result<(), StorageError> {
+        self.put_stream(key, len, body, put, self.scheme() == "http")
+            .await
+    }
+
     async fn load(&self, key: &str) -> Result<Vec<u8>, StorageError> {
-        let resp = self.signed_request("GET", key, b"", None).await?;
-        let status = resp.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(StorageError::NotFound(key.to_owned()));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(StorageError::Io(format!(
-                "S3 GET {key} -> {status}: {body}"
-            )));
-        }
-        let bytes = resp
+        let bytes = self
+            .get(key)
+            .await?
             .bytes()
             .await
             .map_err(|e| StorageError::Io(format!("read body: {e}")))?;
@@ -542,8 +667,14 @@ impl Storage for S3Storage {
         Ok(Vec::from(bytes))
     }
 
+    async fn load_stream(&self, key: &str) -> Result<ByteStream, StorageError> {
+        Ok(ByteStream::from(self.get(key).await?))
+    }
+
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
-        let resp = self.signed_request("DELETE", key, b"", None).await?;
+        let resp = self
+            .signed_request("DELETE", key, Body::Bytes(b""), &PutConditions::new())
+            .await?;
         let status = resp.status();
         // S3 returns 204 on success. Treat 404 as done, as
         // LocalStorage does.
@@ -557,7 +688,9 @@ impl Storage for S3Storage {
     }
 
     async fn exists(&self, key: &str) -> Result<bool, StorageError> {
-        let resp = self.signed_request("HEAD", key, b"", None).await?;
+        let resp = self
+            .signed_request("HEAD", key, Body::Bytes(b""), &PutConditions::new())
+            .await?;
         let status = resp.status();
         // Only a 404 means absent; a 403 or 503 must not read as "gone" (#1904).
         if status == reqwest::StatusCode::NOT_FOUND {
@@ -593,7 +726,9 @@ impl Storage for S3Storage {
     /// Without `s3:ListBucket`, S3 answers a missing key with 403, not
     /// 404; that stays an error, so a finalize fails closed.
     async fn metadata(&self, key: &str) -> Result<Option<ObjectMeta>, StorageError> {
-        let resp = self.signed_request("HEAD", key, b"", None).await?;
+        let resp = self
+            .signed_request("HEAD", key, Body::Bytes(b""), &PutConditions::new())
+            .await?;
         let status = resp.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -632,6 +767,89 @@ fn format_amz_date(unix_secs: u64) -> String {
 // The SHA-256, HMAC and hex helpers live in `crate::crypto`.
 use crate::crypto::{hex_encode, hmac_sha256, sha256_hex};
 
+/// Signs each chunk of an `aws-chunked` body, chained from the
+/// request's own signature.
+struct ChunkSigner {
+    key: Arc<[u8]>,
+    amz_date: String,
+    scope: String,
+    /// The last signature: the request's, then each chunk's.
+    prev: String,
+}
+
+impl ChunkSigner {
+    /// `data` framed as `<hex len>;chunk-signature=<sig>\r\n<data>\r\n`.
+    fn frame(&mut self, data: &[u8]) -> bytes::Bytes {
+        let sts = format!(
+            "AWS4-HMAC-SHA256-PAYLOAD\n{}\n{}\n{}\n{}\n{}",
+            self.amz_date,
+            self.scope,
+            self.prev,
+            sha256_hex(b""),
+            sha256_hex(data)
+        );
+        self.prev = hex_encode(&hmac_sha256(&self.key, sts.as_bytes()));
+        let head = format!("{:x};chunk-signature={}\r\n", data.len(), self.prev);
+        let mut out = bytes::BytesMut::with_capacity(head.len() + data.len() + 2);
+        out.extend_from_slice(head.as_bytes());
+        out.extend_from_slice(data);
+        out.extend_from_slice(b"\r\n");
+        out.freeze()
+    }
+}
+
+/// The length of `len` bytes framed in `chunk`-sized `aws-chunked`
+/// pieces, the empty final one included.
+fn aws_chunked_len(len: u64, chunk: u64) -> u64 {
+    // `<hex>;chunk-signature=` + 64 hex + CRLF, the data, CRLF.
+    let frame = |n: u64| format!("{n:x}").len() as u64 + 17 + 64 + 2 + n + 2;
+    let rest = len % chunk;
+    (len / chunk) * frame(chunk) + if rest > 0 { frame(rest) } else { 0 } + frame(0)
+}
+
+/// Re-chunk `body` into `chunk`-sized signed frames, then the empty final
+/// one. Holds at most one chunk plus one incoming piece.
+fn aws_chunked(body: ByteStream, signer: ChunkSigner, chunk: usize) -> ByteStream {
+    struct State {
+        body: ByteStream,
+        signer: ChunkSigner,
+        buf: bytes::BytesMut,
+        ended: bool,
+        done: bool,
+    }
+    let state = State {
+        body,
+        signer,
+        buf: bytes::BytesMut::new(),
+        ended: false,
+        done: false,
+    };
+    ByteStream::new(futures_util::stream::unfold(
+        state,
+        move |mut st| async move {
+            use futures_util::StreamExt as _;
+            if st.done {
+                return None;
+            }
+            while !st.ended && st.buf.len() < chunk {
+                match st.body.next().await {
+                    Some(Ok(b)) => st.buf.extend_from_slice(&b),
+                    Some(Err(e)) => {
+                        st.done = true;
+                        return Some((Err(e), st));
+                    }
+                    None => st.ended = true,
+                }
+            }
+            let data = st.buf.split_to(st.buf.len().min(chunk));
+            // An empty frame only comes once the body has ended: the last one.
+            st.done = data.is_empty();
+            let frame = st.signer.frame(&data);
+            Some((Ok(frame), st))
+        },
+    ))
+}
+
 /// Derive the SigV4 signing key by hashing the secret through the
 /// scope chain: date, then region, then service.
 fn derive_signing_key(secret: &str, date: &str, region: &str, service: &str) -> Vec<u8> {
@@ -643,6 +861,7 @@ fn derive_signing_key(secret: &str, date: &str, region: &str, service: &str) -> 
 
 #[cfg(test)]
 mod tests {
+    use super::super::transport::testing::{header, paced_body, serve, serve_counted};
     use super::*;
 
     fn cfg() -> S3Config {
@@ -1061,46 +1280,11 @@ mod tests {
 
     /// [`mock`] with extra response header lines, each ending in `\r\n`.
     async fn mock_with(status: u16, extra: String) -> (String, tokio::task::JoinHandle<String>) {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = Vec::new();
-            let mut chunk = [0u8; 4096];
-            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                let n = sock.read(&mut chunk).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-            }
-            let end = buf
-                .windows(4)
-                .position(|w| w == b"\r\n\r\n")
-                .unwrap_or(buf.len());
-            let head = String::from_utf8_lossy(&buf[..end]).into_owned();
-            // Drain the body, so closing does not reset the connection.
-            let len: usize = head
-                .to_ascii_lowercase()
-                .lines()
-                .find_map(|l| l.strip_prefix("content-length:").map(str::to_owned))
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(0);
-            while buf.len() < end + 4 + len {
-                let n = sock.read(&mut chunk).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-            }
-            let reply = format!(
-                "HTTP/1.1 {status} X\r\n{extra}content-length: 0\r\nconnection: close\r\n\r\n"
-            );
-            sock.write_all(reply.as_bytes()).await.unwrap();
-            head
-        });
-        (endpoint, task)
+        let (endpoint, task) = serve(status, extra, Vec::new()).await;
+        (
+            endpoint,
+            tokio::spawn(async move { task.await.unwrap().head }),
+        )
     }
 
     fn mock_storage(endpoint: String) -> S3Storage {
@@ -1372,7 +1556,7 @@ mod tests {
         let storage = short_timeout_storage(&listener);
         let held = tokio::spawn(async move { listener.accept().await.unwrap().0 });
         let data = vec![0u8; UPLOAD_LEN];
-        let budget = upload_timeout(SHORT_READ, UPLOAD_LEN);
+        let budget = upload_timeout(SHORT_READ, UPLOAD_LEN as u64);
         let start = std::time::Instant::now();
         let call = tokio::time::timeout(budget * 2, storage.save("big.bin", &data));
         assert!(matches!(call.await, Ok(Err(_))), "no timeout fired");
@@ -1406,5 +1590,312 @@ mod tests {
             ..cfg()
         });
         assert_eq!(s.host(), "examplebucket.s3.us-east-1.amazonaws.com");
+    }
+
+    // -------- streamed uploads --------
+
+    fn pieces(data: &[u8], size: usize) -> ByteStream {
+        let parts: Vec<_> = data
+            .chunks(size)
+            .map(|c| Ok(bytes::Bytes::copy_from_slice(c)))
+            .collect();
+        ByteStream::new(futures_util::stream::iter(parts))
+    }
+
+    fn sample(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// AWS's chunked-upload example: 66560 bytes of `a` in 64 KiB chunks.
+    /// The seed comes from the documented canonical request.
+    #[tokio::test]
+    async fn chunk_signatures_match_the_aws_example() {
+        let amz_date = "20130524T000000Z";
+        let scope = "20130524/us-east-1/s3/aws4_request";
+        let key: Arc<[u8]> = derive_signing_key(SECRET, "20130524", "us-east-1", "s3").into();
+        let cr = "PUT\n/examplebucket/chunkObject.txt\n\n\
+                  content-encoding:aws-chunked\ncontent-length:66824\nhost:s3.amazonaws.com\n\
+                  x-amz-content-sha256:STREAMING-AWS4-HMAC-SHA256-PAYLOAD\n\
+                  x-amz-date:20130524T000000Z\nx-amz-decoded-content-length:66560\n\
+                  x-amz-storage-class:REDUCED_REDUNDANCY\n\n\
+                  content-encoding;content-length;host;x-amz-content-sha256;x-amz-date;\
+                  x-amz-decoded-content-length;x-amz-storage-class\n\
+                  STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
+        let sts = format!(
+            "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+            sha256_hex(cr.as_bytes())
+        );
+        let seed = hex_encode(&hmac_sha256(&key, sts.as_bytes()));
+        assert_eq!(
+            seed,
+            "4f232c4386841ef735655705268965c44a0e4690baa4adea153f7db9fa80a0a9"
+        );
+        let signer = ChunkSigner {
+            key,
+            amz_date: amz_date.into(),
+            scope: scope.into(),
+            prev: seed,
+        };
+        let mut framed = aws_chunked(pieces(&[b'a'; 66560], 10_000), signer, 65536);
+        let mut body = Vec::new();
+        while let Some(f) = futures_util::StreamExt::next(&mut framed).await {
+            body.extend_from_slice(&f.unwrap());
+        }
+        assert_eq!(body.len(), 66824);
+        assert_eq!(aws_chunked_len(66560, 65536), 66824);
+        let frames = decode_aws_chunked(&body);
+        let sigs: Vec<_> = frames
+            .iter()
+            .map(|(len, sig, _)| (*len, sig.as_str()))
+            .collect();
+        assert_eq!(
+            sigs,
+            [
+                (
+                    65536,
+                    "ad80c730a21e5b8d04586a2213dd63b9a0e99e0e2307b0ade35a65485a288648"
+                ),
+                (
+                    1024,
+                    "0055627c9e194cb4542bae2aa5492e3c1575bbb81b612b7d234b86a503ef5497"
+                ),
+                (
+                    0,
+                    "b6c6ea8a5354eaf15b3cb7646744f4275b71ea724fed81ceb9323e279d449df9"
+                ),
+            ]
+        );
+    }
+
+    /// `(len, signature, data)` per frame of an `aws-chunked` body.
+    fn decode_aws_chunked(mut body: &[u8]) -> Vec<(usize, String, Vec<u8>)> {
+        let mut out = Vec::new();
+        while !body.is_empty() {
+            let eol = body.windows(2).position(|w| w == b"\r\n").unwrap();
+            let line = std::str::from_utf8(&body[..eol]).unwrap();
+            let (hex, sig) = line.split_once(";chunk-signature=").unwrap();
+            let len = usize::from_str_radix(hex, 16).unwrap();
+            let data = body[eol + 2..eol + 2 + len].to_vec();
+            assert_eq!(&body[eol + 2 + len..eol + 4 + len], b"\r\n");
+            body = &body[eol + 4 + len..];
+            out.push((len, sig.to_owned(), data));
+        }
+        out
+    }
+
+    /// Plain http: each chunk is signed, chained from the request's
+    /// signature, and the length and `If-None-Match` are signed.
+    #[tokio::test]
+    async fn save_stream_over_http_signs_every_chunk() {
+        let (ep, req) = serve(200, String::new(), Vec::new()).await;
+        let data = sample(150_000);
+        let put = PutConditions::new()
+            .content_type("text/csv")
+            .content_length(150_000)
+            .create_only();
+        mock_storage(ep)
+            .save_stream("big.csv", 150_000, pieces(&data, 9_999), &put)
+            .await
+            .unwrap();
+        let got = req.await.unwrap();
+        let head = &got.head;
+        let h = |name| header(head, name).unwrap_or_default();
+        assert_eq!(
+            h("x-amz-content-sha256"),
+            "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+        );
+        assert_eq!(h("x-amz-decoded-content-length"), "150000");
+        assert_eq!(
+            h("content-length"),
+            aws_chunked_len(150_000, 65536).to_string()
+        );
+        assert_eq!(h("if-none-match"), "*");
+        assert_eq!(h("content-type"), "text/csv");
+        assert!(header(head, "transfer-encoding").is_none(), "{head}");
+        assert!(header(head, "content-encoding").is_none(), "{head}");
+        assert!(
+            h("authorization").contains(
+                "SignedHeaders=content-length;content-type;host;if-none-match;\
+                 x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length,"
+            ),
+            "{head}"
+        );
+        verify_sigv4(head);
+
+        let amz_date = h("x-amz-date");
+        let scope = format!("{}/us-east-1/s3/aws4_request", &amz_date[..8]);
+        let key = derive_signing_key(SECRET, &amz_date[..8], "us-east-1", "s3");
+        let auth = h("authorization");
+        let mut prev = auth.rsplit("Signature=").next().unwrap().to_owned();
+        let frames = decode_aws_chunked(&got.body);
+        let lens: Vec<_> = frames.iter().map(|f| f.0).collect();
+        assert_eq!(lens, [65536, 65536, 150_000 - 2 * 65536, 0]);
+        let mut sent = Vec::new();
+        for (_, sig, chunk) in &frames {
+            let sts = format!(
+                "AWS4-HMAC-SHA256-PAYLOAD\n{amz_date}\n{scope}\n{prev}\n{}\n{}",
+                sha256_hex(b""),
+                sha256_hex(chunk)
+            );
+            prev = hex_encode(&hmac_sha256(&key, sts.as_bytes()));
+            assert_eq!(sig, &prev, "a chunk signature does not chain");
+            sent.extend_from_slice(chunk);
+        }
+        assert_eq!(sent, data);
+    }
+
+    /// https sends the body as `UNSIGNED-PAYLOAD`, its length signed.
+    #[tokio::test]
+    async fn https_save_stream_sends_an_unsigned_payload() {
+        let (ep, req) = serve(200, String::new(), Vec::new()).await;
+        let data = sample(100_000);
+        mock_storage(ep)
+            .put_stream(
+                "a.bin",
+                100_000,
+                pieces(&data, 7_000),
+                &PutConditions::new(),
+                false,
+            )
+            .await
+            .unwrap();
+        let got = req.await.unwrap();
+        let head = &got.head;
+        let h = |name| header(head, name).unwrap_or_default();
+        assert_eq!(h("x-amz-content-sha256"), "UNSIGNED-PAYLOAD");
+        assert_eq!(h("content-length"), "100000");
+        assert!(header(head, "transfer-encoding").is_none(), "{head}");
+        assert!(header(head, "if-none-match").is_none(), "{head}");
+        assert!(
+            h("authorization")
+                .contains("SignedHeaders=content-length;host;x-amz-content-sha256;x-amz-date,"),
+            "{head}"
+        );
+        verify_sigv4(head);
+        assert_eq!(got.body, data);
+    }
+
+    #[tokio::test]
+    async fn create_only_save_stream_on_an_existing_key_is_refused() {
+        for (status, signed) in [(412, true), (412, false), (409, true)] {
+            let (ep, _req) = serve(status, String::new(), Vec::new()).await;
+            let err = mock_storage(ep)
+                .put_stream(
+                    "k",
+                    3,
+                    pieces(b"abc", 3),
+                    &PutConditions::new().create_only(),
+                    signed,
+                )
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("already exists"), "{err}");
+        }
+    }
+
+    /// Refused before any request: the endpoint is never reached.
+    #[tokio::test]
+    async fn save_stream_refuses_what_one_put_cannot_take() {
+        let s = mock_storage("http://127.0.0.1:9".into());
+        let err = s
+            .save_stream("k", MAX_PUT + 1, pieces(b"x", 1), &PutConditions::new())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("5 GiB"), "{err}");
+        let err = s
+            .save_stream(
+                "k",
+                3,
+                pieces(b"abc", 3),
+                &PutConditions::new().content_length(4),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+    }
+
+    /// A body that fails or ends short never completes the request, so
+    /// S3 stores nothing.
+    #[tokio::test]
+    async fn a_failed_or_short_stream_never_completes_the_upload() {
+        let data = sample(300_000);
+        for signed in [true, false] {
+            for fail in [true, false] {
+                let (ep, req) = serve(200, String::new(), Vec::new()).await;
+                let first = bytes::Bytes::copy_from_slice(&data[..100_000]);
+                let tail = if fail {
+                    Err(StorageError::Io("client went away".into()))
+                } else {
+                    Ok(bytes::Bytes::new())
+                };
+                // Later, so the head and the first chunk are on the wire.
+                let tail = futures_util::stream::once(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    tail
+                });
+                let body = ByteStream::new(futures_util::StreamExt::chain(
+                    futures_util::stream::iter([Ok(first)]),
+                    tail,
+                ));
+                let err = mock_storage(ep)
+                    .put_stream("k", 300_000, body, &PutConditions::new(), signed)
+                    .await
+                    .unwrap_err();
+                let want = if fail {
+                    "client went away"
+                } else {
+                    "bytes declared"
+                };
+                assert!(err.to_string().contains(want), "signed {signed}: {err}");
+                let got = tokio::time::timeout(std::time::Duration::from_secs(5), req);
+                let got = got.await.expect("no request was sent").unwrap();
+                assert!(
+                    !got.head.is_empty() && got.body_len < got.declared,
+                    "signed {signed}, fail {fail}: the server got the whole body"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn load_stream_streams_the_body_and_maps_404() {
+        let data = sample(200_000);
+        let (ep, _req) = serve(200, String::new(), data.clone()).await;
+        let mut stream = mock_storage(ep).load_stream("a.bin").await.unwrap();
+        let mut got = Vec::new();
+        while let Some(c) = futures_util::StreamExt::next(&mut stream).await {
+            got.extend_from_slice(&c.unwrap());
+        }
+        assert_eq!(got, data);
+        let (ep, _req) = serve(404, String::new(), Vec::new()).await;
+        let err = mock_storage(ep).load_stream("a.bin").await.unwrap_err();
+        assert!(matches!(err, StorageError::NotFound(_)), "{err}");
+        let (ep, _req) = serve(403, String::new(), Vec::new()).await;
+        let err = mock_storage(ep).load_stream("a.bin").await.unwrap_err();
+        assert!(matches!(err, StorageError::Io(_)), "{err}");
+    }
+
+    /// The body is pulled only as fast as the server takes it, so memory
+    /// stays flat however large the object.
+    #[tokio::test]
+    async fn save_stream_never_buffers_the_object() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // Chunk signing hashes in an unoptimized build, so less data there.
+        for (signed, mib) in [(false, 256usize), (true, 32)] {
+            let received = Arc::new(AtomicU64::new(0));
+            let ahead = Arc::new(AtomicU64::new(0));
+            let (ep, req) =
+                serve_counted(200, String::new(), Vec::new(), Some(received.clone())).await;
+            let body = paced_body(mib, 1 << 20, received, ahead.clone());
+            let len = (mib as u64) << 20;
+            mock_storage(ep)
+                .put_stream("big.bin", len, body, &PutConditions::new(), signed)
+                .await
+                .unwrap();
+            let got = req.await.unwrap();
+            assert_eq!(got.body_len, got.declared);
+            let ahead = ahead.load(Ordering::SeqCst);
+            assert!(ahead <= 16 << 20, "signed {signed}: {ahead} bytes held");
+        }
     }
 }

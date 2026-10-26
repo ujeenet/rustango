@@ -32,6 +32,7 @@ once against the trait; switch from local disk to S3 with a one-line change.
 - [Step 3 — Accept an upload](#step-3--accept-an-upload)
 - [Safe filenames](#safe-filenames)
 - [Production: S3-compatible storage](#production-s3-compatible-storage)
+- [Large files: stream them](#large-files-stream-them)
 - [The media library](#the-media-library)
 - [Reference](#reference)
 - [See also](#see-also)
@@ -188,6 +189,64 @@ Differences from S3 a direct upload has to respect:
   Azure disk; upload through the server with `save_bytes`. A create-only PUT is
   granted `c` without `w`, so the URL still cannot replace a blob.
 - A single PUT holds up to 5000 MiB.
+
+---
+
+## Large files: stream them
+
+`save` and `load` take and return whole buffers. For a large object, or to keep
+the bucket private and pass uploads through your server, use `save_stream` and
+`load_stream`: chunks go through as they arrive, so memory stays flat. A
+`ByteStream` comes from an axum `Body`, a `reqwest::Response`, `Bytes` or a
+`Vec<u8>`.
+
+```rust
+use axum::{body::Body, extract::{Path, State}, http::{header, HeaderMap, StatusCode}};
+use rustango::storage::{BoxedStorage, ByteStream, PutConditions, StorageError};
+
+// PUT /files: proxy the request body into storage.
+async fn upload(State(storage): State<BoxedStorage>, headers: HeaderMap, body: Body)
+    -> Result<String, StatusCode>
+{
+    let len = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok())
+        .ok_or(StatusCode::LENGTH_REQUIRED)?;
+    let key = format!("uploads/{}", uuid::Uuid::new_v4());
+    let put = PutConditions::new().create_only();
+    storage
+        .save_stream(&key, len, ByteStream::from(body), &put)
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok(key)
+}
+
+// GET /files/{*key}: stream it back.
+async fn download(State(storage): State<BoxedStorage>, Path(key): Path<String>)
+    -> Result<Body, StatusCode>
+{
+    let stream = storage.load_stream(&key).await.map_err(|e| match e {
+        StorageError::NotFound(_) => StatusCode::NOT_FOUND,
+        _ => StatusCode::BAD_GATEWAY,
+    })?;
+    Ok(Body::from_stream(stream))
+}
+```
+
+`save_stream` writes exactly `len` bytes. A body of another size, or a
+`put.content_length` other than `len`, is refused, and `create_only` refuses an
+existing key. A body that fails or is dropped leaves nothing behind. A
+body-limit layer on the route must allow the size you accept.
+
+| Backend | How it streams |
+|---------|----------------|
+| `LocalStorage` | temp file in the target directory, fsync, then rename; `create_only` links, so it never replaces a file |
+| `S3Storage` | one PUT, up to 5 GiB. Over https the body is sent as `UNSIGNED-PAYLOAD`; over plain http (local MinIO, SeaweedFS) every 64 KiB chunk is signed. `create_only` sends `If-None-Match: *`, which AWS, MinIO and SeaweedFS honour |
+| `AzureBlobStorage` | one Put Blob, up to 5000 MiB; `create_only` sends `If-None-Match: *` |
+| others | the trait default: collects the body in memory, then `save`; it refuses `create_only` |
+
+Larger objects are refused for now: block and multipart uploads are not
+supported yet.
 
 ---
 
@@ -396,7 +455,8 @@ tables, whenever you run `migrate` / provision a tenant. There is no lazy
 
 **`Storage` trait:** `save(key, &bytes)` · `load(key)` · `delete(key)` ·
 `exists(key)` · `url(key) -> Option<String>`, plus defaulted `save_with_content_type`,
-`presigned_get_url(key, ttl)`, `presigned_put_url(key, ttl, &put)`, `presigned_put_headers(&put)` and `metadata(key)`
+`presigned_get_url(key, ttl)`, `presigned_put_url(key, ttl, &put)`, `presigned_put_headers(&put)`, `metadata(key)`,
+`save_stream(key, len, body, &put)` and `load_stream(key)`
 (a signing backend overrides the presign pair; the defaults return `None`).
 
 **`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.max_files(n)` · `.allowed_extensions(&[..])`
