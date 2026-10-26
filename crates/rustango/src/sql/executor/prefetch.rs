@@ -259,10 +259,10 @@ where
         Named::Reverse { field, column, on } => {
             stitch(parents, on, |keys| async {
                 let children = reverse_children(pool, &child_qs, field, keys).await?;
-                Ok(children
+                children
                     .into_iter()
-                    .filter_map(|c| Some((c.__rustango_column_value(column)?, c)))
-                    .collect())
+                    .map(|c| Ok((child_key(&c, column)?, c)))
+                    .collect()
             })
             .await
         }
@@ -508,9 +508,22 @@ fn parent_key<P: Model + HasPkValue>(
     }
 }
 
+/// The value `child` stores in its FK `column`; unreadable is an error, not a dropped row.
+fn child_key<C: Model + HasPkValue>(
+    child: &C,
+    column: &'static str,
+) -> Result<crate::core::SqlValue, ExecError> {
+    child
+        .__rustango_column_value(column)
+        .ok_or(ExecError::PrefetchColumnUnreadable {
+            table: C::SCHEMA.table,
+            column,
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parent_key, ExecError, HasPkValue};
+    use super::{child_key, parent_key, ExecError, HasPkValue};
     use crate::core::{Model, ModelSchema, SqlValue};
 
     /// A parent with a hand-written `HasPkValue`, which reads only its pk.
@@ -538,5 +551,20 @@ mod tests {
         );
         assert!(err.to_string().contains(".code`"), "{err}");
         assert_eq!(parent_key(&HandWritten, None).unwrap(), SqlValue::I64(1));
+    }
+
+    #[test]
+    fn an_unreadable_child_fk_column_is_an_error_not_a_dropped_row() {
+        let err = child_key(&HandWritten, "parent_id").expect_err("no column reader");
+        assert!(
+            matches!(
+                err,
+                ExecError::PrefetchColumnUnreadable {
+                    column: "parent_id",
+                    ..
+                }
+            ),
+            "{err}"
+        );
     }
 }
