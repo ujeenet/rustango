@@ -1439,7 +1439,8 @@ impl TenantPools<sqlx::Postgres> {
         async {
             let connect_start = std::time::Instant::now();
             let scoped = self.build_scoped_pool(&schema, &registry).await?;
-            if of == PoolUse::Queries {
+            // Uncached, this runs per call: skip it rather than warn per request.
+            if of == PoolUse::Queries && self.config.max_cached_scoped_pools > 0 {
                 warn_on_public_fallthrough(&registry, &org.slug, &schema).await;
             }
             tracing::info!(
