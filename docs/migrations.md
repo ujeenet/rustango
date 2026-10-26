@@ -175,6 +175,12 @@ repeated to repair a stretch of rows in one command.
 
 ---
 
+## A new unique key over duplicate rows
+
+Before a migration adds a unique index or a unique column to an existing table, `migrate` checks that no two rows share the key (rows with a NULL in it are ignored). If some do, it stops before any DDL and prints a `SELECT … GROUP BY … HAVING COUNT(*) > 1` that lists them. The check scans the table once per new key, so on a large table it costs one full scan. It is skipped after a data step in the same migration, which may be the one removing the duplicates, and for tables or columns the migration itself creates or renames.
+
+---
+
 ## Upgrading to 0.51.2
 
 > **0.51.0 and 0.51.1 were yanked** — the reconcile they promised never
