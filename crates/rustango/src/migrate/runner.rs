@@ -3150,6 +3150,9 @@ struct Step {
     /// A column whose referencing FKs are dropped first, found in the catalog.
     #[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
     drop_referencing: Option<(String, String)>,
+    /// A MySQL MODIFY's column: composite FKs on or to it drop first, from the catalog.
+    #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
+    drop_composites: Option<(String, String)>,
     /// A dropped single-column UNIQUE, found by name in the catalog (#1676).
     #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
     drop_unique: Option<ColumnRef>,
@@ -3532,6 +3535,7 @@ fn render_step(
         }
         _ => None,
     };
+    let drop_composites = modified_column(change, dialect).map(|(t, c)| (t.to_owned(), c.to_owned()));
     let drop_unique = match change {
         SC::AlterColumnUnique {
             table,
@@ -3610,6 +3614,11 @@ fn render_step(
             }
         }
     }
+    if let (Some(at), Some((table, column))) = (at_op, &drop_composites) {
+        batch
+            .deferred_fks
+            .extend(composite_fk_readds(table, column, ops, at, after, dialect, schema));
+    }
     // A rebuild already leaves every column the later ops drop.
     batch.rebuild = batch.rebuild.map(|r| {
         let dropped: Vec<&str> = later
@@ -3630,6 +3639,7 @@ fn render_step(
         retry,
         drop_fks,
         drop_referencing,
+        drop_composites,
         drop_unique,
         index_fks,
         readded_now,
@@ -3661,6 +3671,93 @@ fn render_steps(
         })
         .collect();
     Ok(Rendered(steps?.into_iter()))
+}
+
+/// The column a MySQL `MODIFY` restates: a composite FK on or to it fails 3780.
+fn modified_column<'a>(
+    change: &'a super::SchemaChange,
+    dialect: &dyn crate::sql::Dialect,
+) -> Option<(&'a str, &'a str)> {
+    use super::SchemaChange as SC;
+    match change {
+        SC::AlterColumnType { table, column, .. }
+        | SC::AlterColumnMaxLength { table, column, .. }
+            if dialect.modifies_whole_column() =>
+        {
+            Some((table, column))
+        }
+        _ => None,
+    }
+}
+
+/// `(table, name)` at the end of the composite FKs in `after` on or to
+/// `table.column`, named at the op before `later`.
+fn composites_at<'a>(
+    after: &'a SchemaSnapshot,
+    table: &str,
+    column: &str,
+    later: &[Operation],
+) -> Vec<(&'a str, &'a super::snapshot::CompositeFkSnapshot)> {
+    let t = super::rebuild::name_at_end(table, later);
+    let c = &super::rebuild::columns_at_end(table, &[column.to_owned()], later)[0];
+    after
+        .tables
+        .iter()
+        .flat_map(|tb| tb.composite_fks.iter().map(move |cf| (tb.name.as_str(), cf)))
+        .filter(|(from, cf)| (*from == t && cf.from.contains(c)) || (cf.to == t && cf.on.contains(c)))
+        .collect()
+}
+
+/// The re-adds, at the end, of the composite FKs the MODIFY at `ops[at]` drops:
+/// only the first MODIFY to drop one adds it back, and none does when another
+/// op of `ops` creates, adds or drops it.
+fn composite_fk_readds(
+    table: &str,
+    column: &str,
+    ops: &[Operation],
+    at: usize,
+    after: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> Vec<String> {
+    use super::SchemaChange as SC;
+    let dropped_by = |i: usize, t: &str, name: &str| {
+        let Operation::Schema(change) = &ops[i] else {
+            return false;
+        };
+        let rest = &ops[i + 1..];
+        match change {
+            SC::CreateTable(created) => super::rebuild::name_at_end(created, rest) == t,
+            SC::AddCompositeFk { table, name: n, .. } | SC::DropCompositeFk { table, name: n } => {
+                n == name && super::rebuild::name_at_end(table, rest) == t
+            }
+            _ => false,
+        }
+    };
+    let earlier_modify = |i: usize, t: &str, name: &str| {
+        let Operation::Schema(change) = &ops[i] else {
+            return false;
+        };
+        modified_column(change, dialect).is_some_and(|(tb, c)| {
+            composites_at(after, tb, c, &ops[i + 1..])
+                .iter()
+                .any(|(from, cf)| *from == t && cf.name == name)
+        })
+    };
+    composites_at(after, table, column, &ops[at + 1..])
+        .into_iter()
+        .filter(|(t, cf)| {
+            !(0..ops.len()).any(|i| i != at && dropped_by(i, t, &cf.name))
+                && !(0..at).any(|i| earlier_modify(i, t, &cf.name))
+        })
+        .filter_map(|(t, cf)| {
+            let tb = after.table(t)?;
+            super::diff::composite_fks(tb, dialect, schema)
+                .into_iter()
+                .find(|(n, _)| *n == cf.name)
+                .map(|(_, sql)| sql)
+        })
+        .collect()
 }
 
 /// The column whose live FK `change` drops and adds back: ON DELETE
@@ -3871,6 +3968,21 @@ macro_rules! step_statements {
             dialect.referencing_foreign_keys_sql(),
         ) {
             let fks: Vec<(String, String)> = sqlx::query_as(sql)
+                .bind(table)
+                .bind(column)
+                .fetch_all(&mut *$conn)
+                .await?;
+            out.extend(
+                fks.iter()
+                    .filter_map(|(t, n)| dialect.drop_foreign_key_sql(t, n)),
+            );
+        }
+        if let (Some((table, column)), Some(sql)) =
+            (&step.drop_composites, dialect.composite_foreign_keys_sql())
+        {
+            let fks: Vec<(String, String)> = sqlx::query_as(sql)
+                .bind(table)
+                .bind(column)
                 .bind(table)
                 .bind(column)
                 .fetch_all(&mut *$conn)

@@ -164,6 +164,76 @@ async fn referenced_key_widens(pool: &Pool) {
     }
 }
 
+/// Widening a key that a composite FK references, with its FK column.
+async fn composite_referenced_key_widens(pool: &Pool) {
+    let (a, b) = ("mr_wc_author", "mr_wc_book");
+    let ledger = "mr_wc_ledger";
+    let dir = fresh(pool, &[b, a], ledger).await;
+    let with = |ty: &str| {
+        let f = |name: &str, ty: &str, pk: bool| {
+            json!({"name": name, "column": name, "ty": ty, "nullable": false, "primary_key": pk})
+        };
+        let mut book = table(
+            b,
+            vec![f("id", "i64", true), f("author_id", ty, false), f("region", "i64", false)],
+        );
+        book["composite_fks"] = json!([{"name": "author", "to": a,
+            "from": ["author_id", "region"], "on": ["id", "region"]}]);
+        let mut s = json!({"tables": [
+            table(a, vec![f("id", ty, true), f("region", "i64", false)]),
+            book,
+        ]});
+        s["indexes"] = json!([{"name": "mr_wc_author_key", "table": a,
+            "columns": ["id", "region"], "unique": true}]);
+        serde_json::from_value::<rustango::migrate::SchemaSnapshot>(s).expect("snapshot")
+    };
+    let step = |ty: &str| {
+        make_migrations_from(dir.path(), &with(ty), None)
+            .expect("makemigrations")
+            .expect("a migration")
+    };
+    step("i32");
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .expect("initial");
+    let widen = step("i64");
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("widening on {}: {e}", pool.dialect().name()));
+    let d = pool.dialect();
+    let (qa, qb) = (d.quote_ident(a), d.quote_ident(b));
+    exec(
+        pool,
+        &format!("INSERT INTO {qa} (id, region) VALUES (3000000000, 1)"),
+    )
+    .await
+    .expect("the key is BIGINT");
+    exec(
+        pool,
+        &format!("INSERT INTO {qb} (id, author_id, region) VALUES (1, 3000000000, 1)"),
+    )
+    .await
+    .expect("the FK column is BIGINT");
+    assert!(
+        exec(
+            pool,
+            &format!("INSERT INTO {qb} (id, author_id, region) VALUES (2, 3000000000, 2)")
+        )
+        .await
+        .is_err(),
+        "the composite FK is back on {}",
+        d.name()
+    );
+    exec(pool, &format!("DELETE FROM {qb}")).await.unwrap();
+    exec(pool, &format!("DELETE FROM {qa}")).await.unwrap();
+    unapply_pool_with_ledger(pool, dir.path(), &widen.name, ledger)
+        .await
+        .unwrap_or_else(|e| panic!("narrowing on {}: {e}", d.name()));
+    for t in [b, a, ledger] {
+        drop_table(pool, t).await;
+    }
+}
+
 /// FKs on `t`, from the catalog.
 async fn fk_count(pool: &Pool, t: &str) -> i64 {
     let sql = match pool.dialect().name() {
@@ -944,6 +1014,7 @@ tri_dialect_test!(
     scenarios: [
         long_index_names_apply,
         referenced_key_widens,
+        composite_referenced_key_widens,
         referenced_key_widens_beside_new_fks,
         referenced_key_widens_its_junction,
         rollback_after_rename_restores_check_and_partial_index,
