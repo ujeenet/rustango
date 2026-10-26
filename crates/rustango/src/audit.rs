@@ -2427,18 +2427,21 @@ pub async fn truncate_with_audit(
     entity_table: &'static str,
     sql: &str,
 ) -> Result<u64, crate::sql::ExecError> {
-    let mut tx = crate::sql::write_transaction(pool).await?;
-    let affected = crate::sql::truncate_tx(&mut tx, entity_table, sql).await?;
-    let entry = PendingEntry {
-        entity_table,
-        entity_pk: String::new(),
-        operation: AuditOp::Delete,
-        source: current_source(),
-        changes: serde_json::json!({ "bulk": "truncate" }),
-    };
-    emit_one_tx(&mut tx, Via::Pool(pool), &entry).await?;
-    tx.commit().await?;
-    Ok(affected)
+    writing_via(pool, async {
+        let mut tx = crate::sql::write_transaction(pool).await?;
+        let affected = crate::sql::truncate_tx(&mut tx, entity_table, sql).await?;
+        let entry = PendingEntry {
+            entity_table,
+            entity_pk: String::new(),
+            operation: AuditOp::Delete,
+            source: current_source(),
+            changes: serde_json::json!({ "bulk": "truncate" }),
+        };
+        emit_one_tx(&mut tx, Via::Pool(pool), &entry).await?;
+        tx.commit().await?;
+        Ok(affected)
+    })
+    .await
 }
 
 /// Postgres bind helper, exposed so generated bodies on the audited

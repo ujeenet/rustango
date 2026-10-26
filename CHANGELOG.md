@@ -24,6 +24,27 @@ Totals, pages, facets, date buckets and search no longer count rows a `"view"` o
 
 Like `Authorization` and `Cookie`, a request with `X-Api-Key` is neither served from nor stored in the shared cache unless the route sets `cache_authenticated(true)`.
 
+### Fixed — ORM and migrations
+
+- MySQL: a migration that retypes an FK column, then the key it references, then renames the column's table no longer fails with error 3780; the FK comes back at the end, on the new table name.
+- `<parent>::<child>_set` / `_set_pool` match children on the column the FK points at (`on = "code"`); they read the parent's PK and found none.
+- `filter("data__contains", …)` on a JSON column works: a string matches the JSON text, as `Model::data.contains(…)`; a `SqlValue::Json` value is a containment test, as `json_contains`. Both were refused.
+
+### Fixed — audit rows for FK side effects, one-bind key lists on PG
+
+- A delete whose `ON DELETE SET NULL` / `SET DEFAULT` changes rows of an audited model writes an `update` entry for each of them.
+- `Model::truncate` writes a bulk `delete` entry (`{"bulk": "truncate", "cascade_from": …}`) on each audited table it took rows from through FKs: any referencing table on PG (`TRUNCATE … CASCADE`), `ON DELETE CASCADE` ones elsewhere. Rows a MySQL/SQLite truncate sets through `SET NULL` / `SET DEFAULT` are not audited.
+- PG: `in_bulk`, `in_bulk_on` and prefetch send a key list as one `= ANY($1)` bind instead of splitting it at the bind limit, so a sliced `in_bulk` past 65 535 keys works.
+
+### Fixed — MySQL translation keys are case-sensitive
+
+`rustango_translations.locale` / `key` use an `_as_cs` collation on MySQL and MariaDB 10.10+, so `Key` and `key` are two overrides as on PG and SQLite; `migrate` moves an existing table's `_ci` columns; without the ALTER privilege it warns once per pool and keeps them.
+
+### Fixed — PG schema-mode tenants: migrate lock and prepared statements
+
+- The migrate lock is per schema, so a schema-mode tenant's migration no longer waits on (or blocks) the registry's or another tenant's.
+- With `max_cached_scoped_pools = 0`, a registry connection a tenant borrows drops its prepared statements on the way in and out, so one query on tenants whose tables differ no longer fails with `cached plan must not change result type`.
+
 ## [0.61.3] — 2026-10-26
 
 ### Changed — unknown `cache.backend` values are logged as errors

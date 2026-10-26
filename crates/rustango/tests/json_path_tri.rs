@@ -466,6 +466,41 @@ async fn json_containment_agrees_on_matching_shapes(pool: &Pool) {
     assert_eq!(loose, Ok(want), "documented MySQL difference");
 }
 
+/// The string lookup `data__contains` agrees with the typed one: a text
+/// value is a LIKE over the JSON text, a JSON value is containment.
+async fn string_contains_lookup_on_a_json_column(pool: &Pool) {
+    use rustango::sql::CounterPool as _;
+    Demo {
+        id: Auto::Unset,
+        data: serde_json::json!({"name": "Alice Smith", "tags": ["red"]}),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("seed");
+    let count = |key: &'static str, v: SqlValue| async move {
+        rustango::query::QuerySet::<Demo>::default()
+            .filter(key, v)
+            .count(pool)
+            .await
+            .map_err(|e| e.to_string())
+    };
+    assert_eq!(
+        count("data__contains", SqlValue::String("Alice Sm".into())).await,
+        Ok(count_like(pool, "contains", "Alice Sm").await)
+    );
+    assert_eq!(
+        count("data__icontains", SqlValue::String("alice".into())).await,
+        Ok(1)
+    );
+    let json = SqlValue::Json(serde_json::json!({"tags": ["red"]}));
+    let contained = count("data__contains", json).await;
+    if pool.dialect().name() == "sqlite" {
+        assert!(contained.is_err(), "SQLite refuses containment: {contained:?}");
+    } else {
+        assert_eq!(contained, Ok(1));
+    }
+}
+
 tri_dialect_test! {
     setup: seeded,
     scenarios: [
@@ -483,5 +518,6 @@ tri_dialect_test! {
         json_as_text_is_text,
         json_text_search_agrees_inside_a_value,
         json_containment_agrees_on_matching_shapes,
+        string_contains_lookup_on_a_json_column,
     ],
 }

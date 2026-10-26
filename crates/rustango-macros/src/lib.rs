@@ -1371,9 +1371,8 @@ const NO_REVERSE_ACCESSOR: &str = "+";
 
 /// For every `ForeignKey<Parent>` field on `Child`, emit
 /// `impl Parent { pub async fn <child_table>_set(&self, executor) -> Vec<Child> }`.
-/// Reads the parent's PK via the macro-generated `__rustango_pk_value`
-/// and runs a single `SELECT … FROM <child_table> WHERE <fk_column> = $1`
-/// — the canonical reverse-FK fetch. One round trip, no N+1.
+/// Reads the column the FK points at (`on`, else the PK) and runs one
+/// `SELECT … WHERE <fk_column> = $1`: one round trip, no N+1.
 ///
 /// **PG-only emission**: the accessor is bounded on
 /// `sqlx::Executor<Database = sqlx::Postgres>` and calls `fetch_on`,
@@ -1479,9 +1478,9 @@ fn reverse_helper_tokens(
                         Database = #root::sql::sqlx::Postgres,
                     >,
                 {
-                    let _pk: #root::core::SqlValue = self.__rustango_pk_value();
+                    let _key = #root::sql::__reverse_fk_key::<Self, #child_ident>(self, #fk_col)?;
                     #root::query::QuerySet::<#child_ident>::new()
-                        .filter_op(#fk_col, #root::core::Op::Eq, _pk)
+                        .filter_op(#fk_col, #root::core::Op::Eq, _key)
                         .fetch_on(_executor)
                         .await
                 }
@@ -1501,9 +1500,9 @@ fn reverse_helper_tokens(
                     #root::sql::ExecError,
                 > {
                     use #root::sql::FetcherPool as _;
-                    let _pk: #root::core::SqlValue = self.__rustango_pk_value();
+                    let _key = #root::sql::__reverse_fk_key::<Self, #child_ident>(self, #fk_col)?;
                     #root::query::QuerySet::<#child_ident>::new()
-                        .filter_op(#fk_col, #root::core::Op::Eq, _pk)
+                        .filter_op(#fk_col, #root::core::Op::Eq, _key)
                         .fetch(pool)
                         .await
                 }
