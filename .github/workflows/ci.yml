@@ -465,7 +465,7 @@ jobs:
         with:
           tool: nextest@0.9.114
       - run: cargo nextest archive --workspace --all-features --archive-file ${{ runner.temp }}/nextest-archive.tar.zst
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: nextest-archive
           path: ${{ runner.temp }}/nextest-archive.tar.zst
@@ -575,7 +575,7 @@ jobs:
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: nextest@0.9.114
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: nextest-archive
           path: ${{ runner.temp }}
@@ -1515,7 +1515,7 @@ jobs:
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: nextest@0.9.114
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: nextest-archive
           path: ${{ runner.temp }}
@@ -1580,7 +1580,6 @@ jobs:
           binary(=org_admin_claims_tri) |
           binary(=tenancy_manage_tri) |
           binary(=db_servers_tri) |
-          binary(=i18n_admin_editor_tri) |
           binary(=admin_create_users_tri) |
           binary(=logout_revokes_sessions_tri) |
           binary(=operator_last_active_tri) |
@@ -1658,7 +1657,8 @@ jobs:
           --partition count:${{ matrix.partition }}/3
           -E 'binary(=server_tenant_tri) |
           binary(=tenant_database_tri) |
-          binary(=tenant_provision_tri)'
+          binary(=tenant_provision_tri) |
+          binary(=i18n_admin_editor_tri)'
       # Builds the archive cannot stand in for, once per run. `--features
       # mysql` alone is the common config (#1277 needs both it and
       # `--all-features`), and the `decimal` modules compile only without
