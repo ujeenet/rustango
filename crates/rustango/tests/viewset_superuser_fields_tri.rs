@@ -260,9 +260,60 @@ async fn create_runs_the_admin_add_hooks(pool: &Pool) {
     assert_eq!(labels().await, ["blocked", "ok"]);
 }
 
+/// A write echoes its row only to a caller who may retrieve it.
+async fn a_write_echoes_only_with_the_view_perm(pool: &Pool) {
+    use rustango::tenancy::permissions::set_user_perm_pool;
+    use rustango::viewset::ViewSetPerms;
+    let (uid, _) = seed(pool).await;
+    for cn in ["vsf_hooked.add", "vsf_hooked.change"] {
+        set_user_perm_pool(uid, cn, true, pool).await.expect("grant");
+    }
+    let app = || {
+        let cn = |c: &str| vec![format!("vsf_hooked.{c}")];
+        ViewSet::for_model(Hooked::SCHEMA, &["id", "label"])
+            .permissions(ViewSetPerms {
+                list: cn("view"),
+                retrieve: cn("view"),
+                create: cn("add"),
+                update: cn("change"),
+                destroy: cn("delete"),
+            })
+            .router_pool("/hooked", pool.clone())
+            .layer(axum::Extension(AuthenticatedUser {
+                id: uid,
+                username: "member".into(),
+                is_superuser: false,
+            }))
+    };
+    let (status, body) = send(app(), "POST", "/hooked", serde_json::json!({ "label": "a" })).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body, "", "create echoed a row without the view perm");
+    let id = Hooked::objects().fetch(pool).await.expect("fetch")[0]
+        .id
+        .get()
+        .copied()
+        .expect("pk");
+    let patch = serde_json::json!({ "label": "b" });
+    let (status, body) = send(app(), "PATCH", &format!("/hooked/{id}"), patch.clone()).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(body, "");
+    let bulk = serde_json::json!([{ "label": "c" }]);
+    let (status, body) = send(app(), "POST", "/hooked", bulk).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body, "[null]");
+
+    set_user_perm_pool(uid, "vsf_hooked.view", true, pool)
+        .await
+        .expect("grant view");
+    let (status, body) = send(app(), "PATCH", &format!("/hooked/{id}"), patch).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"b\""), "{body}");
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
+        a_write_echoes_only_with_the_view_perm,
         create_runs_the_admin_add_hooks,
         a_member_cannot_grant_superuser_or_set_a_hash,
         a_member_cannot_create_a_superuser,

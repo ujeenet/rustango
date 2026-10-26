@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### ViewSet: FK targets are checked, echo needs `retrieve`
+
+A body FK to a row hidden by the target's global scopes or soft delete is now a `422`. A caller without the `retrieve` codenames gets `201` with no body (bulk: `null` rows) or `204` instead of the row.
+
 ### Admin lists with a `view` hook read the whole scope
 
 Each list request runs the hook over every row in scope (at most 10 000). For big tables, prefer `register_admin_queryset!`, which filters in SQL.

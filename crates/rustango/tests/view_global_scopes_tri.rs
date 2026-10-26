@@ -213,6 +213,21 @@ fn app(pool: &Pool) -> axum::Router {
                 .router_pool("/api/memos", pool.clone()),
         )
         .merge(
+            ViewSet::for_model(Pet::SCHEMA, &["id", "tag", "owner_id"])
+                .router_pool("/api/pets", pool.clone()),
+        )
+        .merge(
+            ViewSet::for_model(Pet::SCHEMA, &["id", "tag", "owner_id"])
+                .related_filter("owner_id", |_: &std::collections::HashMap<String, String>, _| {
+                    vec![WhereExpr::Predicate(Filter::new(
+                        "name",
+                        Op::Eq,
+                        SqlValue::from("ann"),
+                    ))]
+                })
+                .router_pool("/api/ann-pets", pool.clone()),
+        )
+        .merge(
             ListView::for_model(Memo::SCHEMA)
                 .template("list.html")
                 .bulk_actions(true)
@@ -573,6 +588,45 @@ async fn fk_display_skips_scoped_out_targets(pool: &Pool) {
     assert_eq!(body, "p1:ann;p2:-;");
 }
 
+/// A write may not point an FK at a row the target's scopes hide, nor
+/// outside a `related_filter`; nothing is written.
+async fn viewset_fk_must_point_at_a_visible_row(pool: &Pool) {
+    let owners = seed_owners(pool).await;
+    let (ann, bob, keep) = (owners[0], owners[1], owners[2]);
+    let post = |uri: &'static str, owner: i64| async move {
+        let body = format!(r#"{{"tag":"t","owner_id":{owner}}}"#);
+        send(pool, Method::POST, uri, JSON, &body).await
+    };
+    let (status, body) = post("/api/pets", bob).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "hidden owner: {body}");
+    let bulk = format!(r#"[{{"tag":"t","owner_id":{ann}}},{{"tag":"t","owner_id":{bob}}}]"#);
+    let (status, body) = send(pool, Method::POST, "/api/pets", JSON, &bulk).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "bulk: {body}");
+    let (status, body) = post("/api/ann-pets", keep).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "related_filter: {body}");
+    let pets = || async { Pet::objects().fetch(pool).await.expect("pets") };
+    assert!(pets().await.is_empty(), "a refused write left a row");
+
+    let (status, body) = post("/api/pets", keep).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = post("/api/ann-pets", ann).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let pk = pets().await[0].id.get().copied().expect("pk");
+    for uri in ["/api/pets", "/api/ann-pets"] {
+        let (status, body) = send(
+            pool,
+            Method::PATCH,
+            &format!("{uri}/{pk}"),
+            JSON,
+            &format!(r#"{{"owner_id":{bob}}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{uri} update: {body}");
+    }
+    let owners: Vec<i64> = pets().await.iter().map(|p| p.owner_id.pk()).collect();
+    assert!(!owners.contains(&bob), "an update moved a pet to a hidden owner");
+}
+
 async fn search_narrows_an_or_scope(pool: &Pool) {
     seed_owners(pool).await;
     let (_, body) = get(pool, "/api/owners").await;
@@ -798,6 +852,7 @@ tri_dialect_test! {
         custom_bulk_action_gets_only_visible_pks,
         template_writes_on_visible_rows_work,
         fk_display_skips_scoped_out_targets,
+        viewset_fk_must_point_at_a_visible_row,
         search_narrows_an_or_scope,
         viewset_soft_deletes_and_hides_deleted_rows,
         viewset_body_cannot_set_deleted_at,
