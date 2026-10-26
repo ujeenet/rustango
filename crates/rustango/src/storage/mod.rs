@@ -579,13 +579,25 @@ impl LocalStorage {
             // then drops the temp name.
             return match tokio::fs::hard_link(&tmp, &path).await {
                 Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(already_exists(key)),
-                Err(e) => Err(io(e)),
+                Err(e) => Err(link_error(key, &e)),
             };
         }
         tokio::fs::rename(&tmp, &path).await.map_err(io)?;
         guard.keep();
         Ok(())
+    }
+}
+
+/// A failed create-only link. FAT, SMB and some FUSE mounts have no
+/// hard links; say so rather than give a bare I/O error.
+fn link_error(key: &str, e: &std::io::Error) -> StorageError {
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::AlreadyExists => already_exists(key),
+        ErrorKind::Unsupported | ErrorKind::PermissionDenied => StorageError::Io(format!(
+            "`{key}`: create-only writes need hard links, which this filesystem may not support: {e}"
+        )),
+        _ => StorageError::Io(e.to_string()),
     }
 }
 
@@ -1237,6 +1249,18 @@ mod tests {
         assert_eq!(s.load("k").await.unwrap(), b"old");
         assert_eq!(walk(&dir), vec!["k".to_owned()]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No hard links (FAT, SMB, some FUSE) gives an error that says so.
+    #[test]
+    fn a_failed_create_only_link_names_the_cause() {
+        use std::io::{Error, ErrorKind};
+        for kind in [ErrorKind::Unsupported, ErrorKind::PermissionDenied] {
+            let err = link_error("k", &Error::from(kind)).to_string();
+            assert!(err.contains("need hard links"), "{kind:?}: {err}");
+        }
+        let err = link_error("k", &Error::from(ErrorKind::AlreadyExists)).to_string();
+        assert!(err.contains("already exists"), "{err}");
     }
 
     /// Racing create-only writers past the early check: one wins, the

@@ -53,7 +53,7 @@ A symlink whose target passes through a missing directory, or a chain longer tha
 
 ### Added — streaming storage
 
-`Storage::save_stream(key, len, body, &put)` writes exactly `len` bytes from a `ByteStream` as they arrive, and `Storage::load_stream(key)` reads one back in chunks, so an app can proxy large uploads to a private bucket. `LocalStorage`, `S3Storage` (one PUT up to 5 GiB; unsigned payload over https, chunk-signed over http) and `AzureBlobStorage` (one Put Blob up to 5000 MiB) stream; other backends get defaults that buffer. A wrong length is refused, `create_only` refuses an existing key, and a failed body leaves no object.
+`Storage::save_stream(key, len, body, &put)` writes exactly `len` bytes from a `ByteStream` as they arrive, and `Storage::load_stream(key)` reads one back in chunks, so an app can proxy large uploads to a private bucket. `LocalStorage`, `S3Storage` (one PUT up to 5 GiB, a multipart upload above, up to 5 TiB; unsigned payload over https, chunk-signed over http) and `AzureBlobStorage` (one Put Blob up to 5000 MiB, staged blocks above) stream; other backends get defaults that buffer. A wrong length is refused, `create_only` refuses an existing key, and a failed or dropped body leaves no object: a multipart upload is aborted, uncommitted blocks are never visible.
 
 ## [0.61.4] — 2026-10-26
 

@@ -188,7 +188,7 @@ Differences from S3 a direct upload has to respect:
   Confirm the upload with `metadata`. `MediaManager::begin_upload` refuses an
   Azure disk; upload through the server with `save_bytes`. A create-only PUT is
   granted `c` without `w`, so the URL still cannot replace a blob.
-- A single PUT holds up to 5000 MiB.
+- A single PUT holds up to 5000 MiB; `save_stream` stages blocks above that.
 
 ---
 
@@ -241,12 +241,15 @@ body-limit layer on the route must allow the size you accept.
 | Backend | How it streams |
 |---------|----------------|
 | `LocalStorage` | temp file in the target directory, fsync, then rename; `create_only` links, so it never replaces a file |
-| `S3Storage` | one PUT, up to 5 GiB. Over https the body is sent as `UNSIGNED-PAYLOAD`; over plain http (local MinIO, SeaweedFS) every 64 KiB chunk is signed. `create_only` sends `If-None-Match: *`, which AWS, MinIO and SeaweedFS honour |
-| `AzureBlobStorage` | one Put Blob, up to 5000 MiB; `create_only` sends `If-None-Match: *` |
+| `S3Storage` | one PUT up to 5 GiB; above, a multipart upload of up to 10,000 parts (5 TiB), one part in flight. Over https the body is sent as `UNSIGNED-PAYLOAD`; over plain http (local MinIO, SeaweedFS) every 64 KiB chunk is signed. `create_only` sends `If-None-Match: *` (on Complete for multipart), which AWS, MinIO and SeaweedFS honour |
+| `AzureBlobStorage` | one Put Blob up to 5000 MiB; above, Put Block for each part then one Put Block List. `create_only` sends `If-None-Match: *` (on the list) |
 | others | the trait default: collects the body in memory, then `save`; it refuses `create_only` |
 
-Larger objects are refused for now: block and multipart uploads are not
-supported yet.
+A failed or dropped multipart upload is aborted, and Azure never shows
+uncommitted blocks, so no partial object is ever visible. A server that keeps
+parts after a crash should still have a lifecycle rule that removes incomplete
+multipart uploads. `LocalStorage` `create_only` needs hard links; on FAT, SMB or
+some FUSE mounts it fails with an error that says so.
 
 ---
 

@@ -18,6 +18,7 @@ pub(super) const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration
 const MIN_UPLOAD_RATE: u64 = 256 * 1024;
 
 /// The HTTP clients. Only the defaults get a size-based upload timeout.
+#[derive(Clone)]
 pub(super) enum Http {
     /// reqwest's read timeout runs through an upload, so PUT uses a client without one.
     Default {
@@ -110,6 +111,128 @@ impl http_body::Body for StreamBody {
 
     fn size_hint(&self) -> http_body::SizeHint {
         http_body::SizeHint::with_exact(self.len)
+    }
+}
+
+/// When `save_stream` splits an upload into parts, and how large they are.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Split {
+    /// The most one request takes; larger bodies go in parts.
+    pub max_single: u64,
+    pub min_part: u64,
+    pub max_parts: u64,
+}
+
+impl Split {
+    /// The smallest part, at least `min_part`, that fits `len` in `max_parts`.
+    pub(super) fn part_size(&self, len: u64) -> u64 {
+        self.min_part.max(len.div_ceil(self.max_parts))
+    }
+}
+
+/// A body of a known length cut into consecutive parts. Each part streams
+/// as it arrives, so nothing is buffered beyond the chunk in hand.
+pub(super) struct Parts {
+    body: ByteStream,
+    /// What the last part's final chunk carried past its end.
+    rest: bytes::Bytes,
+}
+
+impl Parts {
+    /// `body` must hold exactly `len` bytes; any other size ends in an error.
+    pub(super) fn new(body: ByteStream, len: u64) -> Self {
+        Self {
+            body: body.exact(len),
+            rest: bytes::Bytes::new(),
+        }
+    }
+
+    /// The next `n` bytes. The remainder comes back on the receiver once
+    /// all `n` are handed out; a body that fails first drops it.
+    pub(super) fn take(self, n: u64) -> (ByteStream, tokio::sync::oneshot::Receiver<Parts>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let part = Part {
+            src: Some(self),
+            left: n,
+            tx: Some(tx),
+        };
+        (ByteStream::new(part), rx)
+    }
+
+    /// Ok once the body is used up; an error if it holds more.
+    pub(super) async fn finish(mut self) -> Result<(), StorageError> {
+        use futures_util::StreamExt as _;
+        let mut extra = !self.rest.is_empty();
+        while !extra {
+            match self.body.next().await {
+                None => return Ok(()),
+                Some(Err(e)) => return Err(e),
+                Some(Ok(b)) => extra = !b.is_empty(),
+            }
+        }
+        Err(StorageError::Io(
+            "body is longer than the bytes declared".into(),
+        ))
+    }
+}
+
+/// [`Parts::take`].
+struct Part {
+    src: Option<Parts>,
+    left: u64,
+    tx: Option<tokio::sync::oneshot::Sender<Parts>>,
+}
+
+impl Part {
+    /// Hand the rest back as soon as the last byte is out, so a client
+    /// that stops polling at the declared length still returns it.
+    fn give_back(&mut self) {
+        if let (Some(src), Some(tx)) = (self.src.take(), self.tx.take()) {
+            let _ = tx.send(src);
+        }
+    }
+}
+
+impl futures_util::Stream for Part {
+    type Item = Result<bytes::Bytes, StorageError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.left == 0 {
+            this.give_back();
+            return Poll::Ready(None);
+        }
+        let Some(src) = this.src.as_mut() else {
+            return Poll::Ready(None);
+        };
+        let mut chunk = if src.rest.is_empty() {
+            let next = futures_util::StreamExt::poll_next_unpin(&mut src.body, cx);
+            match std::task::ready!(next) {
+                Some(Ok(b)) => b,
+                Some(Err(e)) => {
+                    this.src = None;
+                    return Poll::Ready(Some(Err(e)));
+                }
+                // `exact` reports a short body before it ends.
+                None => {
+                    this.src = None;
+                    return Poll::Ready(Some(Err(StorageError::Io(
+                        "body ended before the bytes declared".into(),
+                    ))));
+                }
+            }
+        } else {
+            std::mem::take(&mut src.rest)
+        };
+        if chunk.len() as u64 > this.left {
+            // `left` is below `chunk.len()`, so it fits a usize.
+            src.rest = chunk.split_off(this.left as usize);
+        }
+        this.left -= chunk.len() as u64;
+        if this.left == 0 {
+            this.give_back();
+        }
+        Poll::Ready(Some(Ok(chunk)))
     }
 }
 
@@ -231,61 +354,114 @@ pub(super) mod testing {
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = Vec::new();
-            let mut chunk = vec![0u8; 64 * 1024];
-            // A client that gives up mid-body resets the connection.
-            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                let n = sock.read(&mut chunk).await.unwrap_or(0);
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
+            let served = read_request(&mut sock, count.as_deref()).await;
+            if served.whole() {
+                write_reply(&mut sock, (status, extra, reply)).await;
             }
-            let end = buf
-                .windows(4)
-                .position(|w| w == b"\r\n\r\n")
-                .unwrap_or(buf.len());
-            let head = String::from_utf8_lossy(&buf[..end]).into_owned();
-            let declared: u64 = head
-                .to_ascii_lowercase()
-                .lines()
-                .find_map(|l| l.strip_prefix("content-length:").map(str::to_owned))
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(0);
-            let mut body = buf.split_off((end + 4).min(buf.len()));
-            let mut body_len = body.len() as u64;
-            if count.is_some() {
-                body.clear();
-            }
-            while body_len < declared {
-                let n = sock.read(&mut chunk).await.unwrap_or(0);
-                if n == 0 {
-                    break;
-                }
-                body_len += n as u64;
-                match &count {
-                    Some(c) => {
-                        c.store(body_len, Ordering::SeqCst);
-                    }
-                    None => body.extend_from_slice(&chunk[..n]),
-                }
-            }
-            if body_len >= declared {
-                let reply_head = format!(
-                    "HTTP/1.1 {status} X\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n",
-                    reply.len()
-                );
-                let _ = sock.write_all(reply_head.as_bytes()).await;
-                let _ = sock.write_all(&reply).await;
-            }
-            Served {
-                head,
-                body,
-                body_len,
-                declared,
-            }
+            served
         });
         (endpoint, task)
+    }
+
+    /// The answer to one request: status, extra header lines, body.
+    pub(in crate::storage) type Reply = (u16, String, Vec<u8>);
+
+    /// Answer every request with `respond(head)`, one connection each.
+    /// Body bytes add up in `count` across requests, when given.
+    pub(in crate::storage) async fn serve_many<F>(
+        respond: F,
+        count: Option<Arc<AtomicU64>>,
+    ) -> (String, Arc<std::sync::Mutex<Vec<Served>>>)
+    where
+        F: Fn(&str) -> Reply + Send + Sync + 'static,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let respond = Arc::new(respond);
+        let log = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                let (respond, count, log) = (respond.clone(), count.clone(), log.clone());
+                tokio::spawn(async move {
+                    let mut sock = sock;
+                    let served = read_request(&mut sock, count.as_deref()).await;
+                    let reply = served.whole().then(|| respond(&served.head));
+                    // Logged before the reply, so a finished call sees it.
+                    log.lock().unwrap().push(served);
+                    if let Some(reply) = reply {
+                        write_reply(&mut sock, reply).await;
+                    }
+                });
+            }
+        });
+        (endpoint, seen)
+    }
+
+    impl Served {
+        /// Whether the head and the whole declared body arrived.
+        fn whole(&self) -> bool {
+            !self.head.is_empty() && self.body_len >= self.declared
+        }
+    }
+
+    async fn write_reply(sock: &mut tokio::net::TcpStream, (status, extra, reply): Reply) {
+        let head = format!(
+            "HTTP/1.1 {status} X\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n",
+            reply.len()
+        );
+        let _ = sock.write_all(head.as_bytes()).await;
+        let _ = sock.write_all(&reply).await;
+    }
+
+    /// Read one request off `sock`, its body counted into `count` if given.
+    async fn read_request(sock: &mut tokio::net::TcpStream, count: Option<&AtomicU64>) -> Served {
+        let mut buf = Vec::new();
+        let mut chunk = vec![0u8; 64 * 1024];
+        // A client that gives up mid-body resets the connection.
+        while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = sock.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let end = buf
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap_or(buf.len());
+        let head = String::from_utf8_lossy(&buf[..end]).into_owned();
+        let declared: u64 = head
+            .to_ascii_lowercase()
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:").map(str::to_owned))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+        let mut body = buf.split_off((end + 4).min(buf.len()));
+        let mut body_len = body.len() as u64;
+        if let Some(c) = count {
+            c.fetch_add(body_len, Ordering::SeqCst);
+            body.clear();
+        }
+        while body_len < declared {
+            let n = sock.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            body_len += n as u64;
+            match count {
+                Some(c) => {
+                    c.fetch_add(n as u64, Ordering::SeqCst);
+                }
+                None => body.extend_from_slice(&chunk[..n]),
+            }
+        }
+        Served {
+            head,
+            body,
+            body_len,
+            declared,
+        }
     }
 
     /// `chunks` pieces of `size` bytes. Records in `ahead` the most bytes
