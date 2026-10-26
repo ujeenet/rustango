@@ -160,6 +160,24 @@ fn mcp_prod_audit_flags_zero_rate_limit() {
 }
 
 #[test]
+fn unset_or_console_mail_backend_in_prod_warns() {
+    for backend in [None, Some("console")] {
+        let out = audit_prod(|s| s.mail.backend = backend.map(Into::into));
+        assert!(
+            out.warnings.iter().any(|w| w.contains("[mail] backend")),
+            "{backend:?}: {:?}",
+            out.warnings
+        );
+    }
+    let out = audit_prod(|s| s.mail.backend = Some("smtp".into()));
+    assert!(
+        !out.warnings.iter().any(|w| w.contains("[mail] backend")),
+        "{:?}",
+        out.warnings
+    );
+}
+
+#[test]
 fn dev_tier_does_not_run_security_audit() {
     let mut s = Settings::default();
     // Leave allowed_hosts empty — would be a prod warning.

@@ -6465,6 +6465,15 @@ pub fn settings_audit_check(
         );
     }
 
+    // Unset means console too: reset and magic-link URLs land in stdout.
+    if matches!(settings.mail.backend.as_deref(), None | Some("console")) {
+        out.warnings.push(
+            "[mail] backend unset or `console` in prod tier — mail bodies, including reset \
+             and magic-link URLs, are printed to stdout. Set `smtp` (or `null`)."
+                .into(),
+        );
+    }
+
     // [server] bind on loopback in prod. The env-var path catches
     // RUSTANGO_BIND; this catches the TOML case that bypasses it.
     if let Some(bind) = settings.server.bind.as_deref() {
@@ -8951,6 +8960,8 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         // populate it here so this test stays focused on its
         // original concern (legacy_preset + retention_days info).
         s.security.allowed_hosts = vec!["example.com".into()];
+        s.mail.backend = Some("smtp".into());
+        s.server.request_timeout_secs = Some(30);
         let r = settings_run("prod", &s);
         assert!(
             r.info.iter().any(|i| i.contains("legacy_preset")),

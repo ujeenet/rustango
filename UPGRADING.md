@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `check --deploy` has new prod warnings
+
+An unset or `console` `[mail] backend` now warns on the prod tier. Set `smtp`, or `null` if the app sends no mail.
+
 ## 0.61.3
 
 ### `[cache] backend` should be a known lowercase name

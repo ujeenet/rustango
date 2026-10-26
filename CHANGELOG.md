@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed — `check --deploy` flags more prod defaults
+
+- An unset or `console` `[mail] backend` is a warning: it prints reset and magic-link URLs to stdout.
+
 ## [0.61.3] — 2026-10-26
 
 ### Changed — unknown `cache.backend` values are logged as errors
