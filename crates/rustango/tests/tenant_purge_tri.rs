@@ -1075,7 +1075,7 @@ async fn database_purge_refuses_an_idle_tenant_on_a_host_alias() {
 
     let err = purge_on(&pool, &a.slug).await.expect_err("an alias of A's database");
     assert!(err.to_string().contains(&b.slug), "{err}");
-    let mut check = PgConnection::connect(&url)
+    let check = PgConnection::connect(&url)
         .await
         .expect("the database survived");
     check.close().await.unwrap();

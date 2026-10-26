@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — migrating a schema-mode tenant warns before adopting a foreign schema
+
+The tenant migration creates the schema with a plain `CREATE SCHEMA`. If the schema already exists and holds tables but no rustango ledger, it logs a warning before migrating into it. A later release refuses this.
+
 ### Fixed — `purge-tenant` sees an idle tenant on a host alias
 
 Before dropping a brought Postgres database, the purge compares its server identity and name with every other database-mode tenant's and the registry's, so `db.internal` and `10.0.0.5` no longer slip past. A tenant that cannot be reached is logged, not refused.
