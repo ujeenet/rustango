@@ -1195,6 +1195,16 @@ async fn a_blocking_handler_is_not_run_twice(pool: &Pool) {
         .poll_interval(Duration::from_millis(20))
         .heartbeat_interval(Duration::from_millis(100));
     q.register::<Blocking>().await;
+    // Wakes from outside the runtime, as live traffic does: with every worker
+    // idle or blocked, nothing else drives the timers.
+    let traffic = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (on, rt) = (traffic.clone(), tokio::runtime::Handle::current());
+    let feeder = std::thread::spawn(move || {
+        while on.load(std::sync::atomic::Ordering::Relaxed) {
+            rt.spawn(async {});
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
     q.dispatch(&Blocking {
         token: tok.clone(),
         first_ms: 2000,
@@ -1213,6 +1223,8 @@ async fn a_blocking_handler_is_not_run_twice(pool: &Pool) {
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
     q.shutdown().await;
+    traffic.store(false, std::sync::atomic::Ordering::Relaxed);
+    feeder.join().unwrap();
     assert_eq!(reclaimed, 0, "a blocked run lost its lease");
     assert_eq!(counts(&tok).0, 1, "a blocked run was run again");
 }
