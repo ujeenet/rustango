@@ -152,7 +152,7 @@ untouched.
 
 ### Uploads and media sweeps
 
-`with_uploads` / `StaticFiles::user_content` now sends uploaded `.js`, `.css` and `.wasm` as untyped downloads; serve your own assets from a plain static mount. `UploadIntent::ttl` is capped at one hour, `purge_pending` never deletes rows younger than that, and `purge_orphans` does at most 10 000 rows per call (call again on a full batch).
+`with_uploads` / `StaticFiles::user_content` now sends uploaded `.js`, `.css` and `.wasm` as untyped downloads; serve your own assets from a plain static mount. `purge_pending` never deletes rows younger than 1 h 15 min; an `UploadIntent::ttl` over 1 h is kept but logs a warning, since its row may be purged before the URL expires. `purge_orphans` and `purge_pending` purge at most 10 000 rows per call (call again when you get 10 000), and `purge_orphans_dry_run` returns at most 10 000.
 
 ### SQLite: JSON column equality compares values
 
