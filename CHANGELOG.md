@@ -18,7 +18,7 @@ A plain string sent through `slack::webhook_callback` has `&`, `<` and `>` escap
 
 ### Fixed — access-log and span query redaction matches by word
 
-A query key is redacted when its words contain a listed name, so `X-Api-Key`, `reset_token` or `oauth_client_secret` are hidden too; the defaults also cover `key`, `jwt`, `otp`, `sig` and `sessionid`. MCP audit uses the same matcher.
+A query key is redacted when its words contain a listed name, or, for long names, when the joined-up key contains it. So `X-Api-Key`, `reset_token`, `user[password]`, `password2`, `JSESSIONID` and `oauth_client_secret` are hidden too; the defaults also cover `key`, `jwt`, `otp`, `sig`, `ssn` and `sessionid`. MCP audit uses the same matcher, and names are split once per layer.
 
 ### Fixed — API key and agent owners are superuser-only on create
 

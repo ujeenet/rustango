@@ -410,6 +410,7 @@ mod tests {
             "passphrase",
             "pwd",
             "pin",
+            "passwords_match",
             "key",
             "encryption_key",
             "signing-key",
@@ -421,7 +422,6 @@ mod tests {
             "monkey",
             "pinned",
             "page_size",
-            "passwords_match",
             "oauth_provider",
         ];
         for k in hidden {
