@@ -154,6 +154,14 @@ untouched.
 
 A `register_admin_object_permission!(table, "add", …)` hook now also gates `POST` on a ViewSet of that table: a refusal is a `403` and writes nothing.
 
+### Forms: stricter checkboxes and JSON null
+
+A `DynamicForm` boolean with a value other than `true/false/1/0/on/off/yes/no` is now a validation error. `ModelFormFor::from_json` refuses `null` on a NOT NULL Bool.
+
+### Admin create: empty defaulted fields
+
+An empty field that has a column default now stores the default on create, also for a nullable field that used to store NULL.
+
 ## 0.61.2
 
 ### SQLite: JSON column equality compares values

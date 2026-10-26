@@ -1984,6 +1984,14 @@ pub(crate) async fn create_submit(
     let locked = state.locked_fields(model, AdminWrite::Add);
     let mut skip: Vec<&str> = locked.all().collect();
     skip.extend(FormLayout::of(model, &admin_cfg, false).unrendered(model));
+    // An empty or absent defaulted field is left to its column default.
+    skip.extend(
+        model
+            .scalar_fields()
+            .filter(|f| crate::forms::absent_takes_default(f, crate::forms::Encoding::Form))
+            .filter(|f| form.get(f.name).is_none_or(String::is_empty))
+            .map(|f| f.name),
+    );
     let mut collected = match forms::collect_insert_values(model, &form, &skip) {
         Ok(v) => v,
         Err(e) => {

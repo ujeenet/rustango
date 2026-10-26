@@ -10,6 +10,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `intword` / `naturalsize` / `naturalsize_si` move to the next unit when rounding reaches 1000 (1024): `999_999_999` is `1.0 billion`, not `1000.0 million`.
 - ViewSet create runs the admin's `add` object-permission hooks, on the request and on each written row (single or bulk), as the admin does.
 - The registry admin refuses an edit or delete that would leave no active operator, as the console and CLI do.
+- `ModelFormFor::from_json` refuses JSON null on a NOT NULL Bool instead of storing `false`.
+- `DynamicForm` checkboxes accept only `true/false/1/0/on/off/yes/no`; any other value is an error, not ticked.
+- The admin create form leaves an empty defaulted field to its column default instead of storing NULL or refusing it as missing.
+- A JSON array sent to an `Array` field (ViewSet, `ModelForm`) is read item by item; commas inside an item no longer split it.
 
 ## [0.61.2] — 2026-10-26
 
