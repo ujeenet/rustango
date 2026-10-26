@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.3] — 2026-10-26
+
 ### Changed — unknown `cache.backend` values are logged as errors
 
 `cache::from_settings` logs an `error` naming an unknown or mis-cased backend (`Redis`, a typo), or `file` without `file_cache_dir`, then falls back to an in-memory cache as before; `from_settings_async` does the same. A later minor release will refuse them.

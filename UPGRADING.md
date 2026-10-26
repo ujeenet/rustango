@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.61.3
+
 ### `[cache] backend` should be a known lowercase name
 
 Use `memory`, `null` / `none`, `file` (with `file_cache_dir`), `redis` or `db`. Anything else now logs an `error` from both resolvers and still falls back to an in-memory cache. A later minor release will refuse it.
