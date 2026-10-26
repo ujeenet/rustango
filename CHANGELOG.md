@@ -168,7 +168,7 @@ Applies the admin's superuser-only field locks to a `ModelForm`: for a non-super
 
 ### Internal — CI runs tests with nextest
 
-`postgres_test` runs the `tests_compile` build as a nextest archive in five partitions, so the full suite builds once instead of twice. Build caches are saved only from `develop`.
+`postgres_test` (five partitions) and `mysql_live` (three) run the `tests_compile` build as a nextest archive, so the full suite builds once instead of three times. Build caches are saved only from `develop`.
 
 ### Deprecated — `contenttypes::render_generic_fk_link`
 

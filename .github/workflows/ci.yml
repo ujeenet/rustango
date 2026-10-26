@@ -437,6 +437,8 @@ jobs:
     env:
       CARGO_PROFILE_DEV_STRIP: symbols
       CARGO_PROFILE_TEST_STRIP: symbols
+      # lld links the ~690 test binaries faster than GNU ld.
+      RUSTFLAGS: -C link-arg=-fuse-ld=lld
     steps:
       # The archive sits next to target/, so make room first. SHA-pinned for
       # the reason given on `e2e`'s copy of this step.
@@ -452,6 +454,8 @@ jobs:
           swap-storage: true
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
+      - name: Install lld
+        run: command -v ld.lld || sudo apt-get install -y --no-install-recommends lld
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: all-features
@@ -476,9 +480,14 @@ jobs:
   tests_compile_narrow:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      # As `tests_compile`: hundreds of test links.
+      RUSTFLAGS: -C link-arg=-fuse-ld=lld
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
+      - name: Install lld
+        run: command -v ld.lld || sudo apt-get install -y --no-install-recommends lld
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -610,9 +619,12 @@ jobs:
       # As `tests_compile`, so the build matches its cache.
       CARGO_PROFILE_DEV_STRIP: symbols
       CARGO_PROFILE_TEST_STRIP: symbols
+      RUSTFLAGS: -C link-arg=-fuse-ld=lld
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
+      - name: Install lld
+        run: command -v ld.lld || sudo apt-get install -y --no-install-recommends lld
       # Reads the `tests_compile` cache: same features, same dependency build.
       - uses: Swatinem/rust-cache@v2
         with:
@@ -1458,8 +1470,13 @@ jobs:
     permissions:
       contents: read
       packages: read
-    needs: gate
+    needs: [gate, tests_compile]
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Must be 1..N for the N in `count:…/N` below, or tests go unrun.
+        partition: [1, 2, 3]
     services:
       mysql:
         # GHCR mirror, see `postgres_test`.
@@ -1482,236 +1499,185 @@ jobs:
     env:
       MYSQL_TEST_URL: mysql://rustango:rustango@127.0.0.1:3306/rustango_test
     steps:
+      # Same disk reason and SHA pin as `postgres_test`.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: true
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: nextest@0.9.114
-      # Suites that make their own `rustango_*` databases (#1988) need CREATE rights.
+      - uses: actions/download-artifact@v8
+        with:
+          name: nextest-archive
+          path: ${{ runner.temp }}
+      # Suites that make their own `rustango_*` databases (#1988) need CREATE
+      # rights, and tenancy provisions into a second database the service
+      # does not grant.
       - name: Grant rustango_* databases
         run: |
           mysql -h 127.0.0.1 -P 3306 -uroot -prustango -e "
             GRANT ALL PRIVILEGES ON \`rustango\_%\`.* TO 'rustango'@'%';
-            FLUSH PRIVILEGES;"
-      - run: cargo nextest run --profile live -p rustango --features mysql,jobs-postgres --test jobs_mysql_live
-      - run: cargo nextest run --profile live -p rustango --features mysql,jobs-postgres,testkit,tenancy --test jobs_worker_survives_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql --test mysql_live
-      # Again under --all-features. #1277: MySQL enforces FKs and has no
-      # `DROP TABLE … CASCADE`, so `drop_all_pool` failed whenever it dropped
-      # a parent (`rustango_users`) before its child (`rustango_api_keys`).
-      # Which order that walk takes depends on how many models are registered,
-      # so only a full-feature build reliably provokes it — the bare
-      # `--features mysql` run above never did, which is why this went
-      # unnoticed. Keep both: the narrow run guards the common config, this
-      # one guards the FK-ordering regression.
-      - run: cargo nextest run --profile live -p rustango --all-features --test mysql_live
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test explain_pool_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test pool_acquire_ping_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test bulk_upsert_tri
-      # #1461 — the rest of the tri-dialect suites. A `_tri` file runs its
-      # PostgreSQL and SQLite arms for free in `postgres_test`, so a
-      # missing line here costs only the MySQL arm and the suite still
-      # looks covered. These three shipped that way;
-      # `every_live_suite_runs_in_ci` now fails when a `*_tri` or
-      # `*_mysql_live` target is absent from this job.
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test values_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test model_shortcut_scopes_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test audit_pool_writes_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test audit_bulk_writes_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit,tenancy --test audit_view_writes_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test admin_audit_scope_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test admin_row_scope_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,testkit --test admin_list_state_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,testkit --test admin_write_errors_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,testkit --test admin_edit_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,template_views,testkit --test crud_refusals_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,testkit --test admin_audit_writes_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test orm_bounded_dml_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test orm_relations_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test orm_relation_edges_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test orm_query_edges_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test orm_claim_lock_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test orm_core_counts_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test pool_conn_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test orm_dialect_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test atomic_savepoints_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test regex_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test testkit_matrix_forms_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,testkit --test viewset_natural_pk_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,testkit --test viewset_write_allowlist_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,testkit --test viewset_filters_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,tenancy,serializer,testkit --test viewset_serializer_patch_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,serializer,testkit --test unique_together_validator_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,testkit --test inserted_pk_readback_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin-sso,tenancy,testkit --test sso_link_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,tenancy,testkit --test tenant_purge_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,sqlite,tenancy,testkit --test resolver_per_registry_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,tenancy,testkit --test org_host_claims_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,tenancy,testkit --test org_admin_claims_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,sqlite,tenancy,testkit --test tenancy_manage_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,sqlite,tenancy,testkit --test db_servers_tri
-      # Creates databases and users, so it runs as root.
-      - run: >-
-          MYSQL_TEST_URL=mysql://root:rustango@127.0.0.1:3306/rustango_test
-          cargo nextest run --profile live -p rustango --features mysql,tenancy --test tenant_database_tri
-      - run: >-
-          MYSQL_TEST_URL=mysql://root:rustango@127.0.0.1:3306/rustango_test
-          cargo nextest run --profile live -p rustango --features mysql,sqlite,tenancy,testkit --test tenant_provision_tri
-      - run: >-
-          MYSQL_TEST_URL=mysql://root:rustango@127.0.0.1:3306/rustango_test
-          cargo nextest run --profile live -p rustango --features mysql,sqlite,tenancy,testkit --test server_tenant_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,testkit --test i18n_admin_editor_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin-sso,tenancy,testkit --test logout_revokes_sessions_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,tenancy,testkit --test operator_last_active_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin-sso,tenancy,testkit --test basic_auth_cache_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin-sso,tenancy,testkit --test api_key_hmac_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,tenancy,testkit --test system_chain_order_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,tenancy,mcp,testkit --test agent_grants_unique_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,tenancy,totp,passkey,testkit --test tenant_admin_tables_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,tenancy,passwords,auth_flows,testkit --test password_reset_links_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,testkit --test admin_authz_edges_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,testkit --test admin_create_defaults_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,tenancy,testkit --test permissions_inactive_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,tenancy,testkit --test viewset_superuser_fields_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin --test login_throttle_mysql_live
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin,template_views,testkit --test view_global_scopes_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,template_views,testkit --test template_views_typed_binds_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test row_to_json_nulls_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test column_types_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test m2m_non_int_pk_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,signals,testkit --test m2m_changed_noop_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,forms,testkit --test update_validation_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test uuid_v7_pk_writes_tri
-      # #1911 / #1912 — flush / dumpdata / loaddata; MySQL rejected `"t"`.
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test manage_data_verbs_tri
-      # #1959 — truncate quoting / FK order, typed atomic fixtures.
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test test_db_tri
-      # #559 — dropping a CHECK or a composite FK. MySQL takes no
-      # `IF EXISTS` on either, so this is the arm that was failing with
-      # error 1064 while the emission tests stayed green.
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test migrate_ddl_tri
-      # #1877–#1881 — makemigrations → migrate; MySQL auto-commits DDL, so a
-      # misordered drop cannot roll back.
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test migrate_autodetect_tri
-      # Runner lock outside the pool, pre-rendered steps, long index names, referenced key widening.
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test migrate_runner_tri
-      # The media tag surface had no MySQL coverage at all — `media_live`
-      # and `media_collections_tags_live` are PostgreSQL-typed and
-      # `media_sqlite_live` is SQLite, so `tag`'s `INSERT IGNORE` branch
-      # and `tags_for_many`'s positional-`?` `IN (…)` had never executed
-      # on this backend. `--test-threads=1`: every test drops and
-      # rebuilds the shared `rustango_media*` tables.
-      - run: >-
-          cargo nextest run --profile live -p rustango --features mysql,media,testkit
-          --test media_tags_mysql_live
-      # #1573 — collection delete/create under concurrent row locks.
-      - run: cargo nextest run --profile live -p rustango --features mysql,media,testkit --test media_collection_race_tri
-      # purge_pending holds no lock across the storage call.
-      - run: cargo nextest run --profile live -p rustango --features mysql,media,testkit --test media_purge_tri
-      # #1570 — media listings return a page; tagging is batched.
-      - run: cargo nextest run --profile live -p rustango --features mysql,media,testkit,admin --test media_listing_bounds_tri
-      # #1403 — bulk create must roll back on a constraint violation.
-      # `--all-features` so the MySQL arm of the tri-dialect guard is
-      # compiled in; the sqlite arm runs everywhere, this is the one that
-      # needs a server.
-      - run: cargo nextest run --profile live -p rustango --all-features --test viewset_bulk_create_is_atomic
-      # A second database for tenancy to provision *into*. The service
-      # grants `rustango` rights on `rustango_test` only, so the test
-      # cannot create this itself; and provisioning refuses a tenant
-      # pointed at the registry's own database, which is what the test
-      # used to do.
-      - name: Create the tenant database
-        run: |
-          mysql -h 127.0.0.1 -P 3306 -uroot -prustango -e "
             CREATE DATABASE IF NOT EXISTS rustango_tenant_test;
             GRANT ALL PRIVILEGES ON rustango_tenant_test.* TO 'rustango'@'%';
             FLUSH PRIVILEGES;"
-      - run: cargo nextest run --profile live -p rustango --features mysql,tenancy --test tenancy_manage_mysql_live
-      - run: cargo nextest run --profile live -p rustango --features mysql,tenancy,testkit --test permissions_mysql_live
-      - run: cargo nextest run --profile live -p rustango --features mysql,tenancy,testkit --test database_pools_mysql_live
-      # #1461 — these two were written, committed, and then run by no
-      # workflow at all. MySQL is the strict dialect for migrations: a
-      # re-run `CREATE TABLE` is error 1050 and `ALTER` rejects shapes
-      # PG accepts, so a broken reconcile bites here first and nowhere
-      # else. `every_live_suite_runs_in_ci` now fails if a
-      # `tests/*_mysql_live.rs` is missing from this list.
-      - run: cargo nextest run --profile live -p rustango --features mysql,tenancy --test migrate_fake_initial_mysql_live
-      - run: cargo nextest run --profile live -p rustango --features mysql,tenancy --test migrate_reconcile_mysql_live
-      # `--features mysql` alone: this suite needs no tenancy, and the
-      # narrower set is the honest one. MySQL is the only dialect that
-      # needs the table on DROP INDEX and the only one that rejects
-      # `IF EXISTS` there, so a render-only test elsewhere proves
-      # nothing about it (#1588).
-      - run: cargo nextest run --profile live -p rustango --features mysql --test migrate_drop_index_mysql_live
-      # The partial-apply state only exists on MySQL: PostgreSQL and
-      # SQLite roll a failed migration back completely, so neither can
-      # reach "schema moved, ledger did not" (#1588).
-      - run: cargo nextest run --profile live -p rustango --features mysql --test migrate_partial_apply_mysql_live
-      # #1281 — the MySQL arm of DatabaseCache::add is bespoke SQL
-      # (INSERT IGNORE + conditional UPDATE, since ON DUPLICATE KEY
-      # UPDATE takes no WHERE). It is also positional-`?`, so a bind
-      # ordering that Postgres' numbered `$n` tolerates breaks here.
-      #
-      # `--no-default-features` matters: the default set includes
-      # `postgres`, which would compile this file's Postgres case into a
-      # job that runs no Postgres service. `DATABASE_URL` is defined
-      # workflow-wide, so that case would find the variable set, dial a
-      # server that is not there, and spend 30s timing out. The test
-      # skips unreachable backends rather than failing, but not building
-      # the arm at all is both faster and more honest about what this
-      # job covers. Postgres is exercised by `postgres_test`.
-      - run: cargo nextest run --profile live -p rustango --no-default-features --features mysql,cache --test cache_db_backend_add_live
-      # These read `MYSQL_TEST_URL` but no job set it for them, so their
-      # MySQL arm never ran (#1678).
-      - run: cargo nextest run --profile live -p rustango --no-default-features --features mysql,cache --test cache_delete_prefix_live
-      # VARCHAR(255) truncated long keys only on MySQL (#1674).
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit,cache --test cache_db_long_keys_tri
-      # `incr` was get-then-set, so parallel failed logins were lost (#1871).
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit,cache --test cache_db_incr_tri
-      # Login per-IP/global limits shared through a database cache (#1809).
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit,admin --test login_throttle_cache_tri
-      - run: cargo nextest run --profile live -p rustango --features mysql --test like_escape_live
-      - run: cargo nextest run --profile live -p rustango --features mysql --test migrate_progress_live
-      - run: cargo nextest run --profile live -p rustango --features mysql,tenancy --test preflight_live
-      - run: cargo nextest run --profile live -p rustango --features mysql --test queryset_annotate_relation_live
-      - run: cargo nextest run --profile live -p rustango --features mysql --test queryset_rel_m2m_gfk_live
-      - run: cargo nextest run --profile live -p rustango --features mysql --test select_related_multihop
-      - run: cargo nextest run --profile live -p rustango --features mysql,admin-sso --test sso_provider_ddl
-      - run: cargo nextest run --profile live -p rustango --features mysql,tenancy,mcp,testkit --test mcp_user_keys_mysql_live
-      - run: cargo nextest run --profile live -p rustango --features mysql --test audit_mysql_live
-      - run: cargo nextest run --profile live -p rustango --features mysql --test fixtures_mysql_live
-      - run: cargo nextest run --profile live -p rustango --features mysql --test inspectdb_mysql_live
-      - run: cargo nextest run --profile live -p rustango --features mysql --test funcs_batch1_mysql_live
-      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test json_path_tri
-      # ORM execution-verification suite (audit §26). Shared scenario
-      # bodies; the mysql cfg-mod runs here, the sqlite and PG mods are
-      # compiled out.
-      #
-      # `--no-default-features` for the same reason as the cache test
-      # above, and these are where it actually cost something (#1435).
-      # `DATABASE_URL` is defined workflow-wide, so with the default
-      # feature set each of these eight compiled its PG arm in, found
-      # the variable set, dialled a Postgres this job does not run, and
-      # spent ~240s timing out — ~32 minutes per CI run, for eight
-      # suites that then reported green having connected to nothing.
-      #
-      # Verified against a real MySQL 8.0 before changing: all eight
-      # build and pass under `--no-default-features --features mysql`,
-      # same test counts, in under a second each.
-      - run: cargo nextest run --profile live -p rustango --no-default-features --features mysql --test orm_aggregation
-      - run: cargo nextest run --profile live -p rustango --no-default-features --features mysql --test orm_subquery
-      - run: cargo nextest run --profile live -p rustango --no-default-features --features mysql --test orm_window
-      - run: cargo nextest run --profile live -p rustango --no-default-features --features mysql --test orm_joins
-      - run: cargo nextest run --profile live -p rustango --no-default-features --features mysql --test orm_setops
-      - run: cargo nextest run --profile live -p rustango --no-default-features --features mysql --test orm_json_dates
-      - run: cargo nextest run --profile live -p rustango --no-default-features --features mysql --test orm_writes
-      - run: cargo nextest run --profile live -p rustango --no-default-features --features mysql --test orm_delta
+      # Every suite with a MySQL arm, from the `--all-features` archive
+      # `tests_compile` built; `every_live_suite_runs_in_ci` checks the list.
+      # `live` runs one test at a time: the suites share this database.
+      - run: >-
+          cargo nextest run --profile live
+          --archive-file ${{ runner.temp }}/nextest-archive.tar.zst
+          --workspace-remap ${{ github.workspace }}
+          --extract-to ${{ github.workspace }}
+          --partition count:${{ matrix.partition }}/3
+          -E 'binary(=jobs_mysql_live) |
+          binary(=jobs_worker_survives_tri) |
+          binary(=mysql_live) |
+          binary(=explain_pool_tri) |
+          binary(=pool_acquire_ping_tri) |
+          binary(=bulk_upsert_tri) |
+          binary(=values_tri) |
+          binary(=model_shortcut_scopes_tri) |
+          binary(=audit_pool_writes_tri) |
+          binary(=audit_bulk_writes_tri) |
+          binary(=audit_view_writes_tri) |
+          binary(=admin_audit_scope_tri) |
+          binary(=admin_row_scope_tri) |
+          binary(=admin_list_state_tri) |
+          binary(=admin_write_errors_tri) |
+          binary(=admin_edit_tri) |
+          binary(=crud_refusals_tri) |
+          binary(=admin_audit_writes_tri) |
+          binary(=orm_bounded_dml_tri) |
+          binary(=orm_relations_tri) |
+          binary(=orm_relation_edges_tri) |
+          binary(=orm_query_edges_tri) |
+          binary(=orm_claim_lock_tri) |
+          binary(=orm_core_counts_tri) |
+          binary(=pool_conn_tri) |
+          binary(=orm_dialect_tri) |
+          binary(=atomic_savepoints_tri) |
+          binary(=regex_tri) |
+          binary(=testkit_matrix_forms_tri) |
+          binary(=viewset_natural_pk_tri) |
+          binary(=viewset_write_allowlist_tri) |
+          binary(=viewset_filters_tri) |
+          binary(=viewset_serializer_patch_tri) |
+          binary(=unique_together_validator_tri) |
+          binary(=inserted_pk_readback_tri) |
+          binary(=sso_link_tri) |
+          binary(=tenant_purge_tri) |
+          binary(=resolver_per_registry_tri) |
+          binary(=org_host_claims_tri) |
+          binary(=org_admin_claims_tri) |
+          binary(=tenancy_manage_tri) |
+          binary(=db_servers_tri) |
+          binary(=i18n_admin_editor_tri) |
+          binary(=admin_create_users_tri) |
+          binary(=logout_revokes_sessions_tri) |
+          binary(=operator_last_active_tri) |
+          binary(=basic_auth_cache_tri) |
+          binary(=api_key_hmac_tri) |
+          binary(=system_chain_order_tri) |
+          binary(=agent_grants_unique_tri) |
+          binary(=admin_totp_replay_tri) |
+          binary(=tenant_admin_tables_tri) |
+          binary(=password_reset_links_tri) |
+          binary(=admin_authz_edges_tri) |
+          binary(=admin_create_defaults_tri) |
+          binary(=permissions_inactive_tri) |
+          binary(=viewset_superuser_fields_tri) |
+          binary(=login_throttle_mysql_live) |
+          binary(=view_global_scopes_tri) |
+          binary(=template_views_typed_binds_tri) |
+          binary(=row_to_json_nulls_tri) |
+          binary(=column_types_tri) |
+          binary(=m2m_non_int_pk_tri) |
+          binary(=m2m_changed_noop_tri) |
+          binary(=update_validation_tri) |
+          binary(=uuid_v7_pk_writes_tri) |
+          binary(=manage_data_verbs_tri) |
+          binary(=test_db_tri) |
+          binary(=migrate_ddl_tri) |
+          binary(=migrate_autodetect_tri) |
+          binary(=migrate_runner_tri) |
+          binary(=media_tags_mysql_live) |
+          binary(=media_collection_race_tri) |
+          binary(=media_purge_tri) |
+          binary(=media_listing_bounds_tri) |
+          binary(=viewset_bulk_create_is_atomic) |
+          binary(=tenancy_manage_mysql_live) |
+          binary(=permissions_mysql_live) |
+          binary(=database_pools_mysql_live) |
+          binary(=migrate_fake_initial_mysql_live) |
+          binary(=migrate_reconcile_mysql_live) |
+          binary(=migrate_drop_index_mysql_live) |
+          binary(=migrate_partial_apply_mysql_live) |
+          binary(=cache_db_backend_add_live) |
+          binary(=cache_delete_prefix_live) |
+          binary(=cache_db_long_keys_tri) |
+          binary(=cache_db_incr_tri) |
+          binary(=login_throttle_cache_tri) |
+          binary(=like_escape_live) |
+          binary(=migrate_progress_live) |
+          binary(=preflight_live) |
+          binary(=queryset_annotate_relation_live) |
+          binary(=queryset_rel_m2m_gfk_live) |
+          binary(=select_related_multihop) |
+          binary(=sso_provider_ddl) |
+          binary(=mcp_user_keys_mysql_live) |
+          binary(=audit_mysql_live) |
+          binary(=fixtures_mysql_live) |
+          binary(=inspectdb_mysql_live) |
+          binary(=funcs_batch1_mysql_live) |
+          binary(=json_path_tri) |
+          binary(=orm_aggregation) |
+          binary(=orm_subquery) |
+          binary(=orm_window) |
+          binary(=orm_joins) |
+          binary(=orm_setops) |
+          binary(=orm_json_dates) |
+          binary(=orm_writes) |
+          binary(=orm_delta)'
+      # These create databases and users, so they run as root. The archive
+      # is already extracted by the step above.
+      - run: >-
+          MYSQL_TEST_URL=mysql://root:rustango@127.0.0.1:3306/rustango_test
+          cargo nextest run --profile live
+          --archive-file ${{ runner.temp }}/nextest-archive.tar.zst
+          --workspace-remap ${{ github.workspace }}
+          --extract-to ${{ github.workspace }} --extract-overwrite
+          --partition count:${{ matrix.partition }}/3
+          -E 'binary(=server_tenant_tri) |
+          binary(=tenant_database_tri) |
+          binary(=tenant_provision_tri)'
+      # Builds the archive cannot stand in for, once per run. `--features
+      # mysql` alone is the common config (#1277 needs both it and
+      # `--all-features`), and the `decimal` modules compile only without
+      # `sqlite`, which `--all-features` turns on.
+      # Own target dir, so the cache never picks up the extracted archive.
+      - if: matrix.partition == 1
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target-narrow"
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+      - if: matrix.partition == 1
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target-narrow
+        run: cargo nextest run --profile live -p rustango --features mysql --test mysql_live
+      - if: matrix.partition == 1
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target-narrow
+        run: cargo nextest run --profile live -p rustango --features mysql,testkit --test orm_core_counts_tri --test values_tri decimal
 
   # PostGIS geometry live suite (#443). The regular `postgres_test` runs
   # against `pgvector/pgvector:pg16`, which has no PostGIS, so the
