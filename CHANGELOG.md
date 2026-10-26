@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — `CachePageLayer::credential_headers`
+
+Names more request headers that carry a credential, such as a custom token header. A request with one of them skips the shared cache, like `Authorization`, `Cookie` and `X-Api-Key`.
+
+### Fixed — leak follow-ups
+
+`check --deploy` warns about an existing tenant whose schema has a database role's name. When an admin list passes the `view` hook's scan cap, "next" only shows if a later row is one the hook admits.
+
 ### Fixed — migrating a schema-mode tenant warns before adopting a foreign schema
 
 The tenant migration creates the schema with a plain `CREATE SCHEMA`. If the schema already exists and holds tables but no rustango ledger, it logs a warning before migrating into it. A later release refuses this.

@@ -546,6 +546,32 @@ async fn a_schema_named_after_a_role_is_refused(pool: &Pool) {
     }
 }
 
+/// A tenant that already lives in a role-named schema is named by `check --deploy`.
+async fn check_deploy_names_a_role_named_schema(pool: &Pool) {
+    let env = Env::new(pool).await;
+    if env.backend() != BackendKind::Postgres {
+        return;
+    }
+    let role: Vec<(String,)> =
+        rustango::sql::raw_query_pool("SELECT CAST(current_user AS TEXT)", Vec::new(), &env.registry)
+            .await
+            .unwrap();
+    let mut org = Org {
+        slug: "rolehome".into(),
+        display_name: "rolehome".into(),
+        storage_mode: "schema".into(),
+        schema_name: Some(role[0].0.clone()),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&env.registry).await.expect("insert org");
+    let dir = env.dir("migrations");
+    let mut out = Vec::new();
+    let args = vec!["check".to_owned(), "--deploy".to_owned()];
+    let _ = typed!(env.registry, p => rustango::tenancy::manage::run_with_writer(&p, &env.url, &dir, args, &mut out).await);
+    let out = String::from_utf8_lossy(&out);
+    assert!(out.contains("`rolehome`") && out.contains("database role"), "{out}");
+}
+
 /// Run `create` while an uncommitted extra-host row holds `host`; commit it
 /// only once `schema` exists, so the INSERT loses after the schema is made.
 #[cfg(feature = "postgres")]
@@ -1194,5 +1220,6 @@ tri_dialect_test! {
         concurrent_creates_never_share_a_schema,
         a_duplicate_slug_leaves_no_run,
         the_registry_under_an_alias_is_flagged,
+        check_deploy_names_a_role_named_schema,
     ],
 }

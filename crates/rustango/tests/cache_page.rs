@@ -935,6 +935,50 @@ async fn request_with_api_key_bypasses_shared_cache_by_default() {
     assert_eq!(body_to_string(r2.into_body()).await, "live_1-2");
 }
 
+/// A header named with `credential_headers` makes a request per-user too.
+#[tokio::test]
+async fn an_added_credential_header_bypasses_shared_cache() {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    COUNTER.store(0, Ordering::SeqCst);
+
+    let cache = Arc::new(InMemoryCache::new());
+    let app: Router = Router::new()
+        .route(
+            "/t",
+            get(|headers: axum::http::HeaderMap| async move {
+                let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+                let who = headers
+                    .get("x-team-token")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("anon")
+                    .to_owned();
+                format!("{who}-{n}")
+            }),
+        )
+        .layer(
+            CachePageLayer::new(cache)
+                .tenant_agnostic(true)
+                .credential_headers(["X-Team-Token"]),
+        );
+    let keyed = || {
+        Request::builder()
+            .uri("/t")
+            .header("x-team-token", "t1")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let r1 = app.clone().oneshot(keyed()).await.unwrap();
+    assert_eq!(body_to_string(r1.into_body()).await, "t1-0");
+    let anon = app
+        .clone()
+        .oneshot(Request::builder().uri("/t").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(body_to_string(anon.into_body()).await, "anon-1");
+    let r2 = app.clone().oneshot(keyed()).await.unwrap();
+    assert_eq!(body_to_string(r2.into_body()).await, "t1-2");
+}
+
 /// Opt-in restores caching for cookie-bearing requests on a route the
 /// app has declared public.
 #[tokio::test]

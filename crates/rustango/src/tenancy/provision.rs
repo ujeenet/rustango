@@ -2059,13 +2059,7 @@ pub(crate) async fn provision_schema<DB: Database>(
             })?;
         // The default `search_path` starts with "$user": a schema named
         // after a role would lead that role's sessions, the registry's included.
-        let is_role: bool = rustango::sql::sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)",
-        )
-        .bind(schema)
-        .fetch_one(pg_pools.registry())
-        .await?;
-        if is_role {
+        if is_role_name(pg_pools.registry(), schema).await? {
             return Err(TenancyError::Validation(format!(
                 "schema name `{schema}` is the name of a database role — choose another"
             )));
@@ -2101,6 +2095,15 @@ pub(crate) async fn provision_schema<DB: Database>(
             "schema mode is not available on this server — choose the database storage mode".into(),
         ))
     }
+}
+
+/// Whether a database role is called `name`. Catalog SQL: schema mode is Postgres-only.
+#[cfg(feature = "postgres")]
+pub(crate) async fn is_role_name(pg: &sqlx::PgPool, name: &str) -> Result<bool, sqlx::Error> {
+    rustango::sql::sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)")
+        .bind(name)
+        .fetch_one(pg)
+        .await
 }
 
 /// Drop the schema [`provision_schema`] just made when its `Org` row failed,

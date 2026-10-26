@@ -533,6 +533,21 @@ async fn view_hook_rows_are_uncounted(pool: &Pool) {
     // A search that narrows the scan under the cap counts again.
     let (_, body) = get_as(pool, "/rowscope_doc?q=ok-1", |b| b.view_hook_scan_cap(2)).await;
     assert!(body.contains("1 row"), "filtered scan: {body}");
+
+    // Past the cap, "next" needs a following row the hook admits.
+    let mut d = Doc {
+        id: Auto::default(),
+        title: "hide-2".into(),
+        kind: "a".into(),
+        filed_on: day(2024),
+    };
+    d.insert_pool(pool).await.expect("insert doc");
+    let next = "next &rarr;</a>";
+    let (_, body) = get_as(pool, "/rowscope_doc?page=2", |b| b.view_hook_scan_cap(2)).await;
+    assert!(body.contains(next), "an admitted next row: {body}");
+    let (_, body) = get_as(pool, "/rowscope_doc?page=3", |b| b.view_hook_scan_cap(2)).await;
+    assert!(body.contains("ok-2"), "page 3: {body}");
+    assert!(!body.contains(next), "a denied next row leaked: {body}");
 }
 
 /// An FK facet labels a hidden target by its key, not its title (#2029).
