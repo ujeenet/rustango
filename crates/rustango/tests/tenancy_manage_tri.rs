@@ -397,6 +397,55 @@ async fn forget_pending_refuses_a_tenant_applied_migration(pool: &Pool) {
     );
 }
 
+/// Migrate-signal receivers are process-global.
+fn signals_lock() -> &'static tokio::sync::Mutex<()> {
+    static M: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// A tenant's run sends `pre_migrate` and `post_migrate` with its slug on
+/// every backend; MySQL and SQLite tenants sent neither.
+async fn tenant_migrate_sends_migrate_signals(pool: &Pool) {
+    use rustango::signals::migrate as sig;
+    use std::sync::{Arc, Mutex};
+    let _g = signals_lock().lock().await;
+    let mut env = Env::new(pool).await;
+    let mut org = env.own_tenant("sig").await;
+    org.save_pool(&env.registry).await.expect("insert org");
+    let dir = env.dir("migrations");
+    migration(&dir, "0001_sig", "SELECT 1");
+
+    let seen: Arc<Mutex<Vec<(&'static str, Option<String>)>>> = Arc::default();
+    let pre = {
+        let seen = seen.clone();
+        sig::connect_pre_migrate_with_target(move |_, t| {
+            seen.lock().unwrap().push(("pre", t.tenant));
+            async {}
+        })
+    };
+    let post = {
+        let seen = seen.clone();
+        sig::connect_post_migrate_with_target(move |ctx, t| {
+            if ctx.applied.iter().any(|m| m == "0001_sig") {
+                seen.lock().unwrap().push(("post", t.tenant));
+            }
+            async {}
+        })
+    };
+    env.migrate(&org, &dir).await;
+    sig::disconnect_pre_migrate(pre);
+    sig::disconnect_post_migrate(post);
+
+    let ours: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, t)| t.as_deref() == Some(org.slug.as_str()))
+        .map(|(k, _)| *k)
+        .collect();
+    assert_eq!(ours, ["pre", "post"], "{:?}", env.backend());
+}
+
 /// #2393 — a tenant whose ledger can't be read refuses, and a missing SQLite
 /// file is not created by looking.
 async fn forget_pending_refuses_an_unreadable_tenant(pool: &Pool) {
@@ -544,6 +593,38 @@ async fn a_schema_named_after_a_role_is_refused(pool: &Pool) {
         assert!(env.org("rolecli").await.is_none());
         assert!(env.org("roleprov").await.is_none());
     }
+}
+
+/// A tenant that already lives in a role-named schema is named by `check --deploy`.
+async fn check_deploy_names_a_role_named_schema(pool: &Pool) {
+    let env = Env::new(pool).await;
+    if env.backend() != BackendKind::Postgres {
+        return;
+    }
+    let role: Vec<(String,)> = rustango::sql::raw_query_pool(
+        "SELECT CAST(current_user AS TEXT)",
+        Vec::new(),
+        &env.registry,
+    )
+    .await
+    .unwrap();
+    let mut org = Org {
+        slug: "rolehome".into(),
+        display_name: "rolehome".into(),
+        storage_mode: "schema".into(),
+        schema_name: Some(role[0].0.clone()),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&env.registry).await.expect("insert org");
+    let dir = env.dir("migrations");
+    let mut out = Vec::new();
+    let args = vec!["check".to_owned(), "--deploy".to_owned()];
+    let _ = typed!(env.registry, p => rustango::tenancy::manage::run_with_writer(&p, &env.url, &dir, args, &mut out).await);
+    let out = String::from_utf8_lossy(&out);
+    assert!(
+        out.contains("`rolehome`") && out.contains("database role"),
+        "{out}"
+    );
 }
 
 /// Run `create` while an uncommitted extra-host row holds `host`; commit it
@@ -1048,6 +1129,58 @@ async fn migrate_storage_checks_the_target_url(pool: &Pool) {
     assert!(err.to_string().contains("registry runs on"), "{err}");
 }
 
+/// The registry under another host name passes the endpoint check; the
+/// connection check names it (a warning for now). SQLite: a hard link to
+/// the open registry does not even connect.
+async fn the_registry_under_an_alias_is_flagged(pool: &Pool) {
+    let env = Env::new(pool).await;
+    let alias = match env.backend() {
+        BackendKind::Sqlite => return,
+        _ if env.url.contains("127.0.0.1") => env.url.replace("127.0.0.1", "localhost"),
+        _ => env.url.replace("localhost", "127.0.0.1"),
+    };
+    assert_ne!(
+        alias, env.url,
+        "the URL names neither localhost nor 127.0.0.1"
+    );
+    let request = ProvisionRequest {
+        run_migrations: false,
+        ..env.db_request("alias", &alias)
+    };
+    let dir = env.dir("migrations");
+    let (run, _) =
+        typed!(env.registry, p => rustango::tenancy::provision::provision_tenant_recorded(
+        &p, &env.url, &dir, &request, None, None, None,
+    )
+    .await)
+        .expect("only warned in this release");
+    let events =
+        rustango::tenancy::provision_store::events_since(&env.registry, *run.id.get().unwrap(), 0)
+            .await
+            .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.message.contains("registry's own database")),
+        "{:?}",
+        events.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    // An edit to the alias is saved and says so.
+    let mut other = Org {
+        slug: "aliased".into(),
+        display_name: "aliased".into(),
+        backend_kind: env.backend().as_str().into(),
+        database_url: Some("unused".into()),
+        ..rustango::testkit::org()
+    };
+    other.save_pool(&env.registry).await.expect("insert org");
+    let out = env
+        .run_out(&dir, &["edit-tenant", "aliased", "--database-url", &alias])
+        .await
+        .expect("only warned in this release");
+    assert!(out.contains("registry's own database"), "{out}");
+}
+
 /// `reseal-tenant-secrets` lists, then seals, a plain password URL.
 async fn reseal_seals_a_plain_password_url(pool: &Pool) {
     with_secret_key();
@@ -1149,11 +1282,14 @@ tri_dialect_test! {
         create_tenant_migrates_only_the_new_tenant,
         forget_pending_refuses_a_tenant_applied_migration,
         forget_pending_refuses_an_unreadable_tenant,
+        tenant_migrate_sends_migrate_signals,
         an_existing_schema_is_not_adopted,
         a_schema_named_after_a_role_is_refused,
         create_tenant_releases_its_schema_on_a_failed_insert,
         provision_releases_its_schema_on_a_failed_insert,
         concurrent_creates_never_share_a_schema,
         a_duplicate_slug_leaves_no_run,
+        the_registry_under_an_alias_is_flagged,
+        check_deploy_names_a_role_named_schema,
     ],
 }

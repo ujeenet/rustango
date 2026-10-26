@@ -37,7 +37,7 @@ pub(crate) async fn migrate_chains<F, Fut>(
     scope: MigrationScope,
     project_dir: &Path,
     observer: Option<&dyn MigrationObserver>,
-    signals: Signals,
+    signals: Signals<'_>,
     project: F,
 ) -> Result<Applied, MigrateError>
 where
@@ -55,9 +55,9 @@ where
     ));
     match signals {
         Signals::Skip => run.await,
-        Signals::Fire => {
+        Signals::Fire { tenant } => {
             let names = |a: &Applied| a.project.iter().map(|m| m.name.clone()).collect();
-            runner::with_migrate_signals(run, names).await
+            runner::with_migrate_signals(run, names, pool, tenant).await
         }
     }
 }

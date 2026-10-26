@@ -11,12 +11,6 @@ pub(crate) const CREDENTIAL_HEADERS: [axum::http::HeaderName; 3] = [
     axum::http::HeaderName::from_static("x-api-key"),
 ];
 
-/// True when the request carries any [`CREDENTIAL_HEADERS`] entry.
-#[cfg(feature = "cache-page")]
-pub(crate) fn has_credential(headers: &HeaderMap) -> bool {
-    CREDENTIAL_HEADERS.iter().any(|n| headers.contains_key(n))
-}
-
 /// Add `token` to `Vary` unless it (or `*`) is already listed, folding
 /// every existing `Vary` value into one header.
 pub(crate) fn add_vary(headers: &mut HeaderMap, token: &str) {

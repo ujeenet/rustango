@@ -137,7 +137,7 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         ),
     };
     let source_schema = match current {
-        StorageMode::Schema => Some(SchemaName::parse(org.effective_schema())?),
+        StorageMode::Schema => Some(SchemaName::existing(org.effective_schema())?),
         StorageMode::Database => None,
     };
     let target_schema = match parsed.target {
@@ -171,6 +171,12 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         }
         _ => (registry_url.to_owned(), registry_url.to_owned()),
     };
+    let alias = match parsed.target {
+        StorageMode::Database if parsed.database_url.is_some() => {
+            crate::tenancy::provision::registry_alias(&target_url, &pools.registry_pool()).await
+        }
+        _ => None,
+    };
 
     writeln!(
         writer,
@@ -186,6 +192,9 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         writeln!(writer, "  target: {} (schema `{s}`)", shown(&target_ref))?;
     } else {
         writeln!(writer, "  target: {}", shown(&target_ref))?;
+    }
+    if let Some(w) = alias {
+        writeln!(writer, "  {w}")?;
     }
 
     if parsed.dry_run {
@@ -701,9 +710,8 @@ impl Conn {
     }
 }
 
-/// A target schema name that provisioning accepts (`[a-z0-9_-]`), so
-/// pg_dump's `--schema` pattern can neither fold its case nor match it
-/// as a wildcard.
+/// A schema name: a target one provisioning accepts (`[a-z0-9_-]`), or
+/// the source's as stored, which older rows may spell any unreserved way.
 #[derive(Clone)]
 struct SchemaName(String);
 
@@ -711,6 +719,17 @@ impl SchemaName {
     fn parse(name: &str) -> Result<Self, TenancyError> {
         crate::tenancy::provision::validate_schema_name(name).map_err(TenancyError::Validation)?;
         Ok(Self(name.to_owned()))
+    }
+
+    fn existing(name: &str) -> Result<Self, TenancyError> {
+        crate::tenancy::provision::validate_stored_schema_name(name)
+            .map_err(TenancyError::Validation)?;
+        Ok(Self(name.to_owned()))
+    }
+
+    /// Quoted, so pg_dump's `--schema` neither folds case nor reads wildcards.
+    fn dump_pattern(&self) -> String {
+        quote_ident(&self.0)
     }
 }
 
@@ -1034,7 +1053,7 @@ fn pg_dump_to_psql(
         .arg("--no-publications")
         .arg("--no-subscriptions");
     if let Some(s) = source_schema {
-        dump_cmd.arg(format!("--schema={}", s.0));
+        dump_cmd.arg(format!("--schema={}", s.dump_pattern()));
     }
     // Quoted, so the pattern is the literal name.
     for e in extensions {
@@ -1310,6 +1329,27 @@ mod tests {
         assert!(SchemaName::parse("acme_2-x").is_ok());
         for bad in ["", "Acme", "a*", "a.b", "a?", "a\"b", &"a".repeat(64)] {
             assert!(SchemaName::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// A stored source name is moved as it is, quoted so pg_dump matches it
+    /// literally; reserved schemas stay refused.
+    #[test]
+    fn a_stored_source_schema_is_matched_literally() {
+        let s = SchemaName::existing("Acme.x*").unwrap();
+        assert_eq!(s.dump_pattern(), "\"Acme.x*\"");
+        assert_eq!(
+            SchemaName::existing("a\"b").unwrap().dump_pattern(),
+            "\"a\"\"b\""
+        );
+        for bad in [
+            "",
+            "public",
+            "pg_toast",
+            "information_schema",
+            &"a".repeat(64),
+        ] {
+            assert!(SchemaName::existing(bad).is_err(), "{bad}");
         }
     }
 

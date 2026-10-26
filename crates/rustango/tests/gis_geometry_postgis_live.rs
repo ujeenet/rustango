@@ -29,21 +29,12 @@ pub struct Place {
 
 #[tokio::test]
 async fn point_column_round_trips_through_postgis() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!("DATABASE_URL unset — skipping PostGIS live test");
+    let Some(url) = rustango::testkit::matrix::required_env("DATABASE_URL") else {
         return;
     };
     let pg = sqlx::PgPool::connect(&url).await.expect("connect PG");
 
-    // PostGIS must be enabled; the `postgis_live` image ships it. If it's
-    // unavailable (e.g. the plain pgvector test image), skip rather than
-    // fail so a non-PostGIS PG doesn't break the suite.
-    if sqlx::query("CREATE EXTENSION IF NOT EXISTS postgis")
-        .execute(&pg)
-        .await
-        .is_err()
-    {
-        eprintln!("`postgis` extension unavailable — skipping PostGIS live test");
+    if !rustango::testkit::matrix::pg_extension(&pg.clone().into(), "postgis").await {
         return;
     }
     for ddl in [

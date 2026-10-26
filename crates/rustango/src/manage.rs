@@ -1439,7 +1439,7 @@ impl Cli {
                 &crate::sql::Pool::from(pool.clone()),
                 dir,
                 &mut std::io::stderr(),
-                crate::migrate::Signals::Fire,
+                crate::migrate::Signals::Fire { tenant: None },
                 |held| crate::migrate::migrate_locked(held, &pool, dir, None),
             )
             .await?;

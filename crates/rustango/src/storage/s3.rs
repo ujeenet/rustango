@@ -69,22 +69,58 @@
 //!   when the bucket is public.
 //! - Presigned GET and PUT URLs, so a browser can download a private
 //!   file or upload straight to the bucket.
+//! - Streamed `save_stream` and `load_stream`. The PUT sends
+//!   `UNSIGNED-PAYLOAD` over https and signs each chunk over plain http.
+//!   Above 5 GiB it is a multipart upload, up to 5 TiB, aborted on any
+//!   failure so no partial object shows.
 //!
 //! ## What it does not do
 //!
-//! - Multipart upload. A single PUT covers files up to about 5 GiB.
 //! - Creating or listing buckets.
 //! - Server-side encryption with your own keys (SSE-C).
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
-use super::transport::{canonical_header_value, encode_key, encode_query, Http, MAX_PRESIGN_SECS};
+use super::transport::{
+    canonical_header_value, encode_key, encode_query, send_error, stream_body, Http, Parts, Split,
+    MAX_PRESIGN_SECS,
+};
 #[cfg(test)]
 use super::transport::{upload_timeout, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT};
-use super::{validate_key, ObjectMeta, PutConditions, Storage, StorageError};
+use super::{
+    already_exists, check_declared_len, validate_key, ByteStream, ObjectMeta, PutConditions,
+    Storage, StorageError,
+};
+
+/// The most one PUT takes: 5 GiB.
+const MAX_PUT: u64 = 5 << 30;
+
+/// The largest object, which a multipart upload reaches: 5 TiB.
+const MAX_OBJECT: u64 = 5 << 40;
+
+/// Above one PUT, parts of at least 64 MiB; 10,000 of them reach 5 TiB.
+const MULTIPART: Split = Split {
+    max_single: MAX_PUT,
+    min_part: 64 << 20,
+    max_parts: 10_000,
+};
+
+/// Chunk size of a signed streaming upload; S3 wants at least 8 KiB.
+const SIGNED_CHUNK: usize = 64 * 1024;
+
+/// A request body.
+enum Body<'a> {
+    /// Hashed into the signature. Empty sends no body.
+    Bytes(&'a [u8]),
+    /// `UNSIGNED-PAYLOAD`: TLS guards the bytes.
+    Unsigned(ByteStream, u64),
+    /// `aws-chunked` with a signature per chunk, for plain-http endpoints.
+    Chunked(ByteStream, u64),
+}
 
 /// How to reach the bucket. Build it with [`S3Config::new`]; the keys
 /// are passed apart, as [`S3Credentials`].
@@ -207,6 +243,7 @@ pub struct S3Storage {
     /// The SigV4 key for one date stamp and secret, so a page of
     /// presigns derives it once and rotated keys derive anew.
     signing_key: std::sync::Mutex<Option<SigningKey>>,
+    multipart: Split,
     #[cfg(test)]
     derivations: std::sync::atomic::AtomicUsize,
 }
@@ -229,6 +266,20 @@ impl S3Storage {
             creds: Arc::new(creds),
             http: Http::defaults(),
             signing_key: std::sync::Mutex::new(None),
+            multipart: MULTIPART,
+            #[cfg(test)]
+            derivations: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// The same bucket and keys, owned, for a request that outlives `&self`.
+    fn detached(&self) -> Self {
+        Self {
+            cfg: self.cfg.clone(),
+            creds: self.creds.clone(),
+            http: self.http.clone(),
+            signing_key: std::sync::Mutex::new(None),
+            multipart: self.multipart,
             #[cfg(test)]
             derivations: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -342,21 +393,39 @@ impl S3Storage {
         &self,
         method: &str,
         key: &str,
-        body: &[u8],
-        content_type: Option<&str>,
+        query: &[(&str, &str)],
+        body: Body<'_>,
+        put: &PutConditions,
     ) -> Result<reqwest::Response, StorageError> {
         validate_key(key)?;
         let creds = self.creds.credentials().await?;
-        let url = self.full_url(key);
+        let mut query: Vec<(String, String)> = query
+            .iter()
+            .map(|(k, v)| (encode_query(k), encode_query(v)))
+            .collect();
+        query.sort();
+        let canonical_query = query
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let mut url = self.full_url(key);
+        if !canonical_query.is_empty() {
+            url = format!("{url}?{canonical_query}");
+        }
         let path = self.key_path(key);
         let amz_date = format_amz_date(unix_now()?);
         let date_stamp = &amz_date[..8];
-        let payload_hash = sha256_hex(body);
+        let payload_hash = match &body {
+            Body::Bytes(b) => sha256_hex(b),
+            Body::Unsigned(..) => "UNSIGNED-PAYLOAD".to_owned(),
+            Body::Chunked(..) => "STREAMING-AWS4-HMAC-SHA256-PAYLOAD".to_owned(),
+        };
 
         // Canonical headers: lowercase, sorted by name. A content type
         // is signed too, so S3 stores the one we sent (#1904).
-        let mut headers: Vec<(&str, String)> = Vec::with_capacity(6);
-        if let Some(ct) = canonical_header_value(content_type)? {
+        let mut headers: Vec<(&str, String)> = Vec::with_capacity(9);
+        if let Some(ct) = canonical_header_value(put.content_type.as_deref())? {
             headers.push(("content-type", ct));
         }
         headers.push(("host", self.host()));
@@ -365,6 +434,23 @@ impl S3Storage {
         if let Some(token) = &creds.session_token {
             headers.push(("x-amz-security-token", token.clone()));
         }
+        // A streamed body signs its length, so S3 refuses any other.
+        // No `Content-Encoding: aws-chunked`: SeaweedFS would store it.
+        let sent = match &body {
+            Body::Bytes(b) => b.len() as u64,
+            Body::Unsigned(_, len) => *len,
+            Body::Chunked(_, len) => {
+                headers.push(("x-amz-decoded-content-length", len.to_string()));
+                aws_chunked_len(*len, SIGNED_CHUNK as u64)
+            }
+        };
+        if !matches!(body, Body::Bytes(_)) {
+            headers.push(("content-length", sent.to_string()));
+        }
+        if put.create_only {
+            headers.push(("if-none-match", "*".to_owned()));
+        }
+        headers.sort_by(|a, b| a.0.cmp(b.0));
         let canonical_headers: String = headers.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
         let signed_headers = headers
             .iter()
@@ -373,7 +459,7 @@ impl S3Storage {
             .join(";");
 
         let canonical_request =
-            format!("{method}\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
+            format!("{method}\n{path}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
         let cr_hash = sha256_hex(canonical_request.as_bytes());
 
         let scope = format!("{date_stamp}/{}/s3/aws4_request", self.cfg.region);
@@ -391,18 +477,268 @@ impl S3Storage {
             reqwest::Method::from_bytes(method.as_bytes())
                 .map_err(|e| StorageError::Io(format!("method: {e}")))?,
             &url,
-            body.len(),
+            sent,
         );
         for (name, value) in headers {
             req = req.header(name, value);
         }
         req = req.header("authorization", auth);
-        if !body.is_empty() {
-            req = req.body(body.to_vec());
+        match body {
+            Body::Bytes([]) => {}
+            Body::Bytes(b) => req = req.body(b.to_vec()),
+            Body::Unsigned(body, len) => req = req.body(stream_body(body, len)),
+            Body::Chunked(body, len) => {
+                let signer = ChunkSigner {
+                    key: signing_key,
+                    amz_date,
+                    scope,
+                    prev: signature,
+                };
+                let framed = aws_chunked(body.exact(len), signer, SIGNED_CHUNK);
+                req = req.body(stream_body(framed, sent));
+            }
         }
-        req.send()
+        req.send().await.map_err(|e| send_error(&e))
+    }
+
+    /// One streamed PUT. `signed` chunk-signs the body instead of
+    /// sending it as `UNSIGNED-PAYLOAD`.
+    async fn put_stream(
+        &self,
+        key: &str,
+        len: u64,
+        body: ByteStream,
+        put: &PutConditions,
+        signed: bool,
+    ) -> Result<(), StorageError> {
+        let body = if signed {
+            Body::Chunked(body, len)
+        } else {
+            Body::Unsigned(body, len)
+        };
+        let resp = self.signed_request("PUT", key, &[], body, put).await?;
+        let status = resp.status();
+        // A racing conditional write can get 409 ConditionalRequestConflict.
+        if put.create_only
+            && matches!(
+                status,
+                reqwest::StatusCode::PRECONDITION_FAILED | reqwest::StatusCode::CONFLICT
+            )
+        {
+            return Err(already_exists(key));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(StorageError::Io(format!(
+                "S3 PUT {key} -> {status}: {body}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// A multipart upload, one part in flight. Any failure, or a dropped
+    /// future, aborts it, so S3 never shows a partial object.
+    async fn put_multipart(
+        &self,
+        key: &str,
+        len: u64,
+        body: ByteStream,
+        put: &PutConditions,
+        signed: bool,
+    ) -> Result<(), StorageError> {
+        if len > MAX_OBJECT {
+            return Err(StorageError::Io(format!(
+                "S3 PUT {key}: {len} bytes is over the 5 TiB S3 stores"
+            )));
+        }
+        // Fail fast on a key that is surely taken; Complete still decides.
+        if put.create_only && matches!(self.exists(key).await, Ok(true)) {
+            return Err(already_exists(key));
+        }
+        let upload_id = self.create_multipart(key, put).await?;
+        let mut guard = AbortOnDrop(Some((self.detached(), key.to_owned(), upload_id.clone())));
+        let result = self
+            .upload_parts(key, &upload_id, len, body, put, signed)
+            .await;
+        if result.is_err() {
+            // Best effort: the caller wants the upload's own error.
+            let _ = self.abort_multipart(key, &upload_id).await;
+        }
+        guard.0 = None;
+        result
+    }
+
+    /// CreateMultipartUpload; the content type is set here.
+    async fn create_multipart(
+        &self,
+        key: &str,
+        put: &PutConditions,
+    ) -> Result<String, StorageError> {
+        let create = PutConditions {
+            content_type: put.content_type.clone(),
+            ..PutConditions::default()
+        };
+        let resp = self
+            .signed_request("POST", key, &[("uploads", "")], Body::Bytes(b""), &create)
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(StorageError::Io(format!(
+                "S3 CreateMultipartUpload {key} -> {status}: {text}"
+            )));
+        }
+        xml_text(&text, "UploadId").ok_or_else(|| {
+            StorageError::Io(format!(
+                "S3 CreateMultipartUpload {key}: no UploadId in {text}"
+            ))
+        })
+    }
+
+    /// Every part, then CompleteMultipartUpload.
+    async fn upload_parts(
+        &self,
+        key: &str,
+        upload_id: &str,
+        len: u64,
+        body: ByteStream,
+        put: &PutConditions,
+        signed: bool,
+    ) -> Result<(), StorageError> {
+        let part = self.multipart.part_size(len);
+        let mut parts = Parts::new(body, len);
+        let mut etags = Vec::new();
+        let mut sent = 0;
+        while sent < len {
+            let size = part.min(len - sent);
+            let (stream, back) = parts.take(size);
+            let body = if signed {
+                Body::Chunked(stream, size)
+            } else {
+                Body::Unsigned(stream, size)
+            };
+            let number = (etags.len() + 1).to_string();
+            let query = [("partNumber", number.as_str()), ("uploadId", upload_id)];
+            let resp = self
+                .signed_request("PUT", key, &query, body, &PutConditions::new())
+                .await?;
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                return Err(StorageError::Io(format!(
+                    "S3 UploadPart {key} #{number} -> {status}: {text}"
+                )));
+            }
+            let etag = resp
+                .headers()
+                .get(reqwest::header::ETAG)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    StorageError::Io(format!("S3 UploadPart {key} #{number}: no ETag"))
+                })?;
+            parts = back.await.map_err(|_| {
+                StorageError::Io(format!(
+                    "S3 UploadPart {key} #{number}: part not fully sent"
+                ))
+            })?;
+            etags.push(etag);
+            sent += size;
+        }
+        parts.finish().await?;
+        self.complete_multipart(key, upload_id, &etags, put.create_only)
             .await
-            .map_err(|e| StorageError::Io(format!("http: {e}")))
+    }
+
+    /// CompleteMultipartUpload. `create_only` sends `If-None-Match: *`.
+    async fn complete_multipart(
+        &self,
+        key: &str,
+        upload_id: &str,
+        etags: &[String],
+        create_only: bool,
+    ) -> Result<(), StorageError> {
+        let mut xml = String::from("<CompleteMultipartUpload>");
+        for (i, etag) in etags.iter().enumerate() {
+            let _ = write!(
+                xml,
+                "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
+                i + 1,
+                xml_escape(etag)
+            );
+        }
+        xml.push_str("</CompleteMultipartUpload>");
+        let cond = PutConditions {
+            create_only,
+            ..PutConditions::default()
+        };
+        let resp = self
+            .signed_request(
+                "POST",
+                key,
+                &[("uploadId", upload_id)],
+                Body::Bytes(xml.as_bytes()),
+                &cond,
+            )
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        // S3 may answer 200 and still fail, with an `<Error>` body.
+        let code = xml_text(&text, "Code").filter(|_| text.contains("<Error>"));
+        let taken = matches!(
+            status,
+            reqwest::StatusCode::PRECONDITION_FAILED | reqwest::StatusCode::CONFLICT
+        ) || matches!(
+            code.as_deref(),
+            Some("PreconditionFailed" | "ConditionalRequestConflict")
+        );
+        if create_only && taken {
+            return Err(already_exists(key));
+        }
+        if !status.is_success() || code.is_some() {
+            return Err(StorageError::Io(format!(
+                "S3 CompleteMultipartUpload {key} -> {status}: {text}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// AbortMultipartUpload; a gone upload counts as done.
+    async fn abort_multipart(&self, key: &str, upload_id: &str) -> Result<(), StorageError> {
+        let resp = self
+            .signed_request(
+                "DELETE",
+                key,
+                &[("uploadId", upload_id)],
+                Body::Bytes(b""),
+                &PutConditions::new(),
+            )
+            .await?;
+        let status = resp.status();
+        if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        Err(StorageError::Io(format!(
+            "S3 AbortMultipartUpload {key} -> {status}"
+        )))
+    }
+
+    /// GET, its status checked.
+    async fn get(&self, key: &str) -> Result<reqwest::Response, StorageError> {
+        let resp = self
+            .signed_request("GET", key, &[], Body::Bytes(b""), &PutConditions::new())
+            .await?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(StorageError::NotFound(key.to_owned()));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(StorageError::Io(format!(
+                "S3 GET {key} -> {status}: {body}"
+            )));
+        }
+        Ok(resp)
     }
 
     /// Build a URL whose SigV4 signature lives in the query string.
@@ -511,7 +847,13 @@ impl Storage for S3Storage {
         data: &[u8],
         content_type: Option<&str>,
     ) -> Result<(), StorageError> {
-        let resp = self.signed_request("PUT", key, data, content_type).await?;
+        let put = PutConditions {
+            content_type: content_type.map(str::to_owned),
+            ..PutConditions::default()
+        };
+        let resp = self
+            .signed_request("PUT", key, &[], Body::Bytes(data), &put)
+            .await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -522,19 +864,29 @@ impl Storage for S3Storage {
         Ok(())
     }
 
+    /// One PUT up to 5 GiB, a multipart upload above, up to 5 TiB. Over
+    /// https the body goes as `UNSIGNED-PAYLOAD`; over plain http each
+    /// chunk is signed.
+    async fn save_stream(
+        &self,
+        key: &str,
+        len: u64,
+        body: ByteStream,
+        put: &PutConditions,
+    ) -> Result<(), StorageError> {
+        validate_key(key)?;
+        check_declared_len(key, len, put)?;
+        let signed = self.scheme() == "http";
+        if len > self.multipart.max_single {
+            return self.put_multipart(key, len, body, put, signed).await;
+        }
+        self.put_stream(key, len, body, put, signed).await
+    }
+
     async fn load(&self, key: &str) -> Result<Vec<u8>, StorageError> {
-        let resp = self.signed_request("GET", key, b"", None).await?;
-        let status = resp.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(StorageError::NotFound(key.to_owned()));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(StorageError::Io(format!(
-                "S3 GET {key} -> {status}: {body}"
-            )));
-        }
-        let bytes = resp
+        let bytes = self
+            .get(key)
+            .await?
             .bytes()
             .await
             .map_err(|e| StorageError::Io(format!("read body: {e}")))?;
@@ -542,8 +894,14 @@ impl Storage for S3Storage {
         Ok(Vec::from(bytes))
     }
 
+    async fn load_stream(&self, key: &str) -> Result<ByteStream, StorageError> {
+        Ok(ByteStream::from(self.get(key).await?))
+    }
+
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
-        let resp = self.signed_request("DELETE", key, b"", None).await?;
+        let resp = self
+            .signed_request("DELETE", key, &[], Body::Bytes(b""), &PutConditions::new())
+            .await?;
         let status = resp.status();
         // S3 returns 204 on success. Treat 404 as done, as
         // LocalStorage does.
@@ -557,7 +915,9 @@ impl Storage for S3Storage {
     }
 
     async fn exists(&self, key: &str) -> Result<bool, StorageError> {
-        let resp = self.signed_request("HEAD", key, b"", None).await?;
+        let resp = self
+            .signed_request("HEAD", key, &[], Body::Bytes(b""), &PutConditions::new())
+            .await?;
         let status = resp.status();
         // Only a 404 means absent; a 403 or 503 must not read as "gone" (#1904).
         if status == reqwest::StatusCode::NOT_FOUND {
@@ -593,7 +953,9 @@ impl Storage for S3Storage {
     /// Without `s3:ListBucket`, S3 answers a missing key with 403, not
     /// 404; that stays an error, so a finalize fails closed.
     async fn metadata(&self, key: &str) -> Result<Option<ObjectMeta>, StorageError> {
-        let resp = self.signed_request("HEAD", key, b"", None).await?;
+        let resp = self
+            .signed_request("HEAD", key, &[], Body::Bytes(b""), &PutConditions::new())
+            .await?;
         let status = resp.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -629,8 +991,128 @@ fn format_amz_date(unix_secs: u64) -> String {
     dt.format("%Y%m%dT%H%M%SZ").to_string()
 }
 
+/// Aborts a multipart upload whose future was dropped. Best effort: a
+/// spawned DELETE, so it needs a running tokio runtime.
+struct AbortOnDrop(Option<(S3Storage, String, String)>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        let Some((s3, key, upload_id)) = self.0.take() else {
+            return;
+        };
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                let _ = s3.abort_multipart(&key, &upload_id).await;
+            });
+        }
+    }
+}
+
+/// The text of the first `<tag>` in `xml`, unescaped.
+fn xml_text(xml: &str, tag: &str) -> Option<String> {
+    let start = xml.find(&format!("<{tag}>"))? + tag.len() + 2;
+    let end = start + xml[start..].find(&format!("</{tag}>"))?;
+    Some(
+        xml[start..end]
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&"),
+    )
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 // The SHA-256, HMAC and hex helpers live in `crate::crypto`.
 use crate::crypto::{hex_encode, hmac_sha256, sha256_hex};
+
+/// Signs each chunk of an `aws-chunked` body, chained from the
+/// request's own signature.
+struct ChunkSigner {
+    key: Arc<[u8]>,
+    amz_date: String,
+    scope: String,
+    /// The last signature: the request's, then each chunk's.
+    prev: String,
+}
+
+impl ChunkSigner {
+    /// `data` framed as `<hex len>;chunk-signature=<sig>\r\n<data>\r\n`.
+    fn frame(&mut self, data: &[u8]) -> bytes::Bytes {
+        let sts = format!(
+            "AWS4-HMAC-SHA256-PAYLOAD\n{}\n{}\n{}\n{}\n{}",
+            self.amz_date,
+            self.scope,
+            self.prev,
+            sha256_hex(b""),
+            sha256_hex(data)
+        );
+        self.prev = hex_encode(&hmac_sha256(&self.key, sts.as_bytes()));
+        let head = format!("{:x};chunk-signature={}\r\n", data.len(), self.prev);
+        let mut out = bytes::BytesMut::with_capacity(head.len() + data.len() + 2);
+        out.extend_from_slice(head.as_bytes());
+        out.extend_from_slice(data);
+        out.extend_from_slice(b"\r\n");
+        out.freeze()
+    }
+}
+
+/// The length of `len` bytes framed in `chunk`-sized `aws-chunked`
+/// pieces, the empty final one included.
+fn aws_chunked_len(len: u64, chunk: u64) -> u64 {
+    // `<hex>;chunk-signature=` + 64 hex + CRLF, the data, CRLF.
+    let frame = |n: u64| format!("{n:x}").len() as u64 + 17 + 64 + 2 + n + 2;
+    let rest = len % chunk;
+    (len / chunk) * frame(chunk) + if rest > 0 { frame(rest) } else { 0 } + frame(0)
+}
+
+/// Re-chunk `body` into `chunk`-sized signed frames, then the empty final
+/// one. Holds at most one chunk plus one incoming piece.
+fn aws_chunked(body: ByteStream, signer: ChunkSigner, chunk: usize) -> ByteStream {
+    struct State {
+        body: ByteStream,
+        signer: ChunkSigner,
+        buf: bytes::BytesMut,
+        ended: bool,
+        done: bool,
+    }
+    let state = State {
+        body,
+        signer,
+        buf: bytes::BytesMut::new(),
+        ended: false,
+        done: false,
+    };
+    ByteStream::new(futures_util::stream::unfold(
+        state,
+        move |mut st| async move {
+            use futures_util::StreamExt as _;
+            if st.done {
+                return None;
+            }
+            while !st.ended && st.buf.len() < chunk {
+                match st.body.next().await {
+                    Some(Ok(b)) => st.buf.extend_from_slice(&b),
+                    Some(Err(e)) => {
+                        st.done = true;
+                        return Some((Err(e), st));
+                    }
+                    None => st.ended = true,
+                }
+            }
+            let data = st.buf.split_to(st.buf.len().min(chunk));
+            // An empty frame only comes once the body has ended: the last one.
+            st.done = data.is_empty();
+            let frame = st.signer.frame(&data);
+            Some((Ok(frame), st))
+        },
+    ))
+}
 
 /// Derive the SigV4 signing key by hashing the secret through the
 /// scope chain: date, then region, then service.
@@ -643,6 +1125,9 @@ fn derive_signing_key(secret: &str, date: &str, region: &str, service: &str) -> 
 
 #[cfg(test)]
 mod tests {
+    use super::super::transport::testing::{
+        header, paced_body, serve, serve_counted, serve_many, Reply, Served,
+    };
     use super::*;
 
     fn cfg() -> S3Config {
@@ -1061,46 +1546,11 @@ mod tests {
 
     /// [`mock`] with extra response header lines, each ending in `\r\n`.
     async fn mock_with(status: u16, extra: String) -> (String, tokio::task::JoinHandle<String>) {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = Vec::new();
-            let mut chunk = [0u8; 4096];
-            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                let n = sock.read(&mut chunk).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-            }
-            let end = buf
-                .windows(4)
-                .position(|w| w == b"\r\n\r\n")
-                .unwrap_or(buf.len());
-            let head = String::from_utf8_lossy(&buf[..end]).into_owned();
-            // Drain the body, so closing does not reset the connection.
-            let len: usize = head
-                .to_ascii_lowercase()
-                .lines()
-                .find_map(|l| l.strip_prefix("content-length:").map(str::to_owned))
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(0);
-            while buf.len() < end + 4 + len {
-                let n = sock.read(&mut chunk).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-            }
-            let reply = format!(
-                "HTTP/1.1 {status} X\r\n{extra}content-length: 0\r\nconnection: close\r\n\r\n"
-            );
-            sock.write_all(reply.as_bytes()).await.unwrap();
-            head
-        });
-        (endpoint, task)
+        let (endpoint, task) = serve(status, extra, Vec::new()).await;
+        (
+            endpoint,
+            tokio::spawn(async move { task.await.unwrap().head }),
+        )
     }
 
     fn mock_storage(endpoint: String) -> S3Storage {
@@ -1116,7 +1566,8 @@ mod tests {
     fn verify_sigv4(head: &str) {
         let mut lines = head.split("\r\n");
         let mut req_line = lines.next().unwrap().split(' ');
-        let (method, path) = (req_line.next().unwrap(), req_line.next().unwrap());
+        let (method, target) = (req_line.next().unwrap(), req_line.next().unwrap());
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
         let headers: Vec<(String, String)> = lines
             .filter_map(|l| l.split_once(':'))
             .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.to_owned()))
@@ -1142,7 +1593,7 @@ mod tests {
             .collect();
         let amz_date = get("x-amz-date");
         let payload = get("x-amz-content-sha256");
-        let cr = format!("{method}\n{path}\n\n{canonical_headers}\n{signed}\n{payload}");
+        let cr = format!("{method}\n{path}\n{query}\n{canonical_headers}\n{signed}\n{payload}");
         let scope = format!("{}/us-east-1/s3/aws4_request", &amz_date[..8]);
         let sts = format!(
             "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
@@ -1372,7 +1823,7 @@ mod tests {
         let storage = short_timeout_storage(&listener);
         let held = tokio::spawn(async move { listener.accept().await.unwrap().0 });
         let data = vec![0u8; UPLOAD_LEN];
-        let budget = upload_timeout(SHORT_READ, UPLOAD_LEN);
+        let budget = upload_timeout(SHORT_READ, UPLOAD_LEN as u64);
         let start = std::time::Instant::now();
         let call = tokio::time::timeout(budget * 2, storage.save("big.bin", &data));
         assert!(matches!(call.await, Ok(Err(_))), "no timeout fired");
@@ -1406,5 +1857,702 @@ mod tests {
             ..cfg()
         });
         assert_eq!(s.host(), "examplebucket.s3.us-east-1.amazonaws.com");
+    }
+
+    // -------- streamed uploads --------
+
+    fn pieces(data: &[u8], size: usize) -> ByteStream {
+        let parts: Vec<_> = data
+            .chunks(size)
+            .map(|c| Ok(bytes::Bytes::copy_from_slice(c)))
+            .collect();
+        ByteStream::new(futures_util::stream::iter(parts))
+    }
+
+    fn sample(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// AWS's chunked-upload example: 66560 bytes of `a` in 64 KiB chunks.
+    /// The seed comes from the documented canonical request.
+    #[tokio::test]
+    async fn chunk_signatures_match_the_aws_example() {
+        let amz_date = "20130524T000000Z";
+        let scope = "20130524/us-east-1/s3/aws4_request";
+        let key: Arc<[u8]> = derive_signing_key(SECRET, "20130524", "us-east-1", "s3").into();
+        let cr = "PUT\n/examplebucket/chunkObject.txt\n\n\
+                  content-encoding:aws-chunked\ncontent-length:66824\nhost:s3.amazonaws.com\n\
+                  x-amz-content-sha256:STREAMING-AWS4-HMAC-SHA256-PAYLOAD\n\
+                  x-amz-date:20130524T000000Z\nx-amz-decoded-content-length:66560\n\
+                  x-amz-storage-class:REDUCED_REDUNDANCY\n\n\
+                  content-encoding;content-length;host;x-amz-content-sha256;x-amz-date;\
+                  x-amz-decoded-content-length;x-amz-storage-class\n\
+                  STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
+        let sts = format!(
+            "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+            sha256_hex(cr.as_bytes())
+        );
+        let seed = hex_encode(&hmac_sha256(&key, sts.as_bytes()));
+        assert_eq!(
+            seed,
+            "4f232c4386841ef735655705268965c44a0e4690baa4adea153f7db9fa80a0a9"
+        );
+        let signer = ChunkSigner {
+            key,
+            amz_date: amz_date.into(),
+            scope: scope.into(),
+            prev: seed,
+        };
+        let mut framed = aws_chunked(pieces(&[b'a'; 66560], 10_000), signer, 65536);
+        let mut body = Vec::new();
+        while let Some(f) = futures_util::StreamExt::next(&mut framed).await {
+            body.extend_from_slice(&f.unwrap());
+        }
+        assert_eq!(body.len(), 66824);
+        assert_eq!(aws_chunked_len(66560, 65536), 66824);
+        let frames = decode_aws_chunked(&body);
+        let sigs: Vec<_> = frames
+            .iter()
+            .map(|(len, sig, _)| (*len, sig.as_str()))
+            .collect();
+        assert_eq!(
+            sigs,
+            [
+                (
+                    65536,
+                    "ad80c730a21e5b8d04586a2213dd63b9a0e99e0e2307b0ade35a65485a288648"
+                ),
+                (
+                    1024,
+                    "0055627c9e194cb4542bae2aa5492e3c1575bbb81b612b7d234b86a503ef5497"
+                ),
+                (
+                    0,
+                    "b6c6ea8a5354eaf15b3cb7646744f4275b71ea724fed81ceb9323e279d449df9"
+                ),
+            ]
+        );
+    }
+
+    /// `(len, signature, data)` per frame of an `aws-chunked` body.
+    fn decode_aws_chunked(mut body: &[u8]) -> Vec<(usize, String, Vec<u8>)> {
+        let mut out = Vec::new();
+        while !body.is_empty() {
+            let eol = body.windows(2).position(|w| w == b"\r\n").unwrap();
+            let line = std::str::from_utf8(&body[..eol]).unwrap();
+            let (hex, sig) = line.split_once(";chunk-signature=").unwrap();
+            let len = usize::from_str_radix(hex, 16).unwrap();
+            let data = body[eol + 2..eol + 2 + len].to_vec();
+            assert_eq!(&body[eol + 2 + len..eol + 4 + len], b"\r\n");
+            body = &body[eol + 4 + len..];
+            out.push((len, sig.to_owned(), data));
+        }
+        out
+    }
+
+    /// Plain http: each chunk is signed, chained from the request's
+    /// signature, and the length and `If-None-Match` are signed.
+    #[tokio::test]
+    async fn save_stream_over_http_signs_every_chunk() {
+        let (ep, req) = serve(200, String::new(), Vec::new()).await;
+        let data = sample(150_000);
+        let put = PutConditions::new()
+            .content_type("text/csv")
+            .content_length(150_000)
+            .create_only();
+        mock_storage(ep)
+            .save_stream("big.csv", 150_000, pieces(&data, 9_999), &put)
+            .await
+            .unwrap();
+        let got = req.await.unwrap();
+        let head = &got.head;
+        let h = |name| header(head, name).unwrap_or_default();
+        assert_eq!(
+            h("x-amz-content-sha256"),
+            "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+        );
+        assert_eq!(h("x-amz-decoded-content-length"), "150000");
+        assert_eq!(
+            h("content-length"),
+            aws_chunked_len(150_000, 65536).to_string()
+        );
+        assert_eq!(h("if-none-match"), "*");
+        assert_eq!(h("content-type"), "text/csv");
+        assert!(header(head, "transfer-encoding").is_none(), "{head}");
+        assert!(header(head, "content-encoding").is_none(), "{head}");
+        assert!(
+            h("authorization").contains(
+                "SignedHeaders=content-length;content-type;host;if-none-match;\
+                 x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length,"
+            ),
+            "{head}"
+        );
+        verify_sigv4(head);
+
+        let amz_date = h("x-amz-date");
+        let scope = format!("{}/us-east-1/s3/aws4_request", &amz_date[..8]);
+        let key = derive_signing_key(SECRET, &amz_date[..8], "us-east-1", "s3");
+        let auth = h("authorization");
+        let mut prev = auth.rsplit("Signature=").next().unwrap().to_owned();
+        let frames = decode_aws_chunked(&got.body);
+        let lens: Vec<_> = frames.iter().map(|f| f.0).collect();
+        assert_eq!(lens, [65536, 65536, 150_000 - 2 * 65536, 0]);
+        let mut sent = Vec::new();
+        for (_, sig, chunk) in &frames {
+            let sts = format!(
+                "AWS4-HMAC-SHA256-PAYLOAD\n{amz_date}\n{scope}\n{prev}\n{}\n{}",
+                sha256_hex(b""),
+                sha256_hex(chunk)
+            );
+            prev = hex_encode(&hmac_sha256(&key, sts.as_bytes()));
+            assert_eq!(sig, &prev, "a chunk signature does not chain");
+            sent.extend_from_slice(chunk);
+        }
+        assert_eq!(sent, data);
+    }
+
+    /// https sends the body as `UNSIGNED-PAYLOAD`, its length signed.
+    #[tokio::test]
+    async fn https_save_stream_sends_an_unsigned_payload() {
+        let (ep, req) = serve(200, String::new(), Vec::new()).await;
+        let data = sample(100_000);
+        mock_storage(ep)
+            .put_stream(
+                "a.bin",
+                100_000,
+                pieces(&data, 7_000),
+                &PutConditions::new(),
+                false,
+            )
+            .await
+            .unwrap();
+        let got = req.await.unwrap();
+        let head = &got.head;
+        let h = |name| header(head, name).unwrap_or_default();
+        assert_eq!(h("x-amz-content-sha256"), "UNSIGNED-PAYLOAD");
+        assert_eq!(h("content-length"), "100000");
+        assert!(header(head, "transfer-encoding").is_none(), "{head}");
+        assert!(header(head, "if-none-match").is_none(), "{head}");
+        assert!(
+            h("authorization")
+                .contains("SignedHeaders=content-length;host;x-amz-content-sha256;x-amz-date,"),
+            "{head}"
+        );
+        verify_sigv4(head);
+        assert_eq!(got.body, data);
+    }
+
+    #[tokio::test]
+    async fn create_only_save_stream_on_an_existing_key_is_refused() {
+        for (status, signed) in [(412, true), (412, false), (409, true)] {
+            let (ep, _req) = serve(status, String::new(), Vec::new()).await;
+            let err = mock_storage(ep)
+                .put_stream(
+                    "k",
+                    3,
+                    pieces(b"abc", 3),
+                    &PutConditions::new().create_only(),
+                    signed,
+                )
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("already exists"), "{err}");
+        }
+    }
+
+    /// Refused before any request: the endpoint is never reached.
+    #[tokio::test]
+    async fn save_stream_refuses_what_s3_cannot_store() {
+        let s = mock_storage("http://127.0.0.1:9".into());
+        let err = s
+            .save_stream("k", MAX_OBJECT + 1, pieces(b"x", 1), &PutConditions::new())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("5 TiB"), "{err}");
+        let err = s
+            .save_stream(
+                "k",
+                3,
+                pieces(b"abc", 3),
+                &PutConditions::new().content_length(4),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+    }
+
+    /// A body that fails or ends short never completes the request, so
+    /// S3 stores nothing.
+    #[tokio::test]
+    async fn a_failed_or_short_stream_never_completes_the_upload() {
+        let data = sample(300_000);
+        for signed in [true, false] {
+            for fail in [true, false] {
+                let (ep, req) = serve(200, String::new(), Vec::new()).await;
+                let first = bytes::Bytes::copy_from_slice(&data[..100_000]);
+                let tail = if fail {
+                    Err(StorageError::Io("client went away".into()))
+                } else {
+                    Ok(bytes::Bytes::new())
+                };
+                // Later, so the head and the first chunk are on the wire.
+                let tail = futures_util::stream::once(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    tail
+                });
+                let body = ByteStream::new(futures_util::StreamExt::chain(
+                    futures_util::stream::iter([Ok(first)]),
+                    tail,
+                ));
+                let err = mock_storage(ep)
+                    .put_stream("k", 300_000, body, &PutConditions::new(), signed)
+                    .await
+                    .unwrap_err();
+                let want = if fail {
+                    "client went away"
+                } else {
+                    "bytes declared"
+                };
+                assert!(err.to_string().contains(want), "signed {signed}: {err}");
+                let got = tokio::time::timeout(std::time::Duration::from_secs(5), req);
+                let got = got.await.expect("no request was sent").unwrap();
+                assert!(
+                    !got.head.is_empty() && got.body_len < got.declared,
+                    "signed {signed}, fail {fail}: the server got the whole body"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn load_stream_streams_the_body_and_maps_404() {
+        let data = sample(200_000);
+        let (ep, _req) = serve(200, String::new(), data.clone()).await;
+        let mut stream = mock_storage(ep).load_stream("a.bin").await.unwrap();
+        let mut got = Vec::new();
+        while let Some(c) = futures_util::StreamExt::next(&mut stream).await {
+            got.extend_from_slice(&c.unwrap());
+        }
+        assert_eq!(got, data);
+        let (ep, _req) = serve(404, String::new(), Vec::new()).await;
+        let err = mock_storage(ep).load_stream("a.bin").await.unwrap_err();
+        assert!(matches!(err, StorageError::NotFound(_)), "{err}");
+        let (ep, _req) = serve(403, String::new(), Vec::new()).await;
+        let err = mock_storage(ep).load_stream("a.bin").await.unwrap_err();
+        assert!(matches!(err, StorageError::Io(_)), "{err}");
+    }
+
+    /// The body is pulled only as fast as the server takes it, so memory
+    /// stays flat however large the object.
+    #[tokio::test]
+    async fn save_stream_never_buffers_the_object() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // Chunk signing hashes in an unoptimized build, so less data there.
+        for (signed, mib) in [(false, 256usize), (true, 32)] {
+            let received = Arc::new(AtomicU64::new(0));
+            let ahead = Arc::new(AtomicU64::new(0));
+            let (ep, req) =
+                serve_counted(200, String::new(), Vec::new(), Some(received.clone())).await;
+            let body = paced_body(mib, 1 << 20, received, ahead.clone());
+            let len = (mib as u64) << 20;
+            mock_storage(ep)
+                .put_stream("big.bin", len, body, &PutConditions::new(), signed)
+                .await
+                .unwrap();
+            let got = req.await.unwrap();
+            assert_eq!(got.body_len, got.declared);
+            let ahead = ahead.load(Ordering::SeqCst);
+            assert!(ahead <= 16 << 20, "signed {signed}: {ahead} bytes held");
+        }
+    }
+
+    // -------- multipart uploads --------
+
+    /// Parts of 50,000 bytes: 5 parts cover anything up to 250,000.
+    const SMALL: Split = Split {
+        max_single: 100_000,
+        min_part: 10_000,
+        max_parts: 5,
+    };
+
+    const UPLOAD_ID: &str = "up/1+x";
+
+    fn request_line(s: &Served) -> String {
+        s.head.lines().next().unwrap_or_default().to_owned()
+    }
+
+    /// A bucket that takes a multipart upload; `complete` answers Complete
+    /// and `part` overrides the answer to a part by number.
+    fn s3_bucket(
+        complete: Reply,
+        part: impl Fn(u32) -> Option<Reply> + Send + Sync + 'static,
+    ) -> impl Fn(&str) -> Reply + Send + Sync + 'static {
+        move |head: &str| {
+            let line = head.lines().next().unwrap_or_default();
+            let (method, target) = line.split_once(' ').unwrap();
+            if method == "POST" && target.contains("?uploads=") {
+                let xml = format!(
+                    "<InitiateMultipartUploadResult><UploadId>{}</UploadId></InitiateMultipartUploadResult>",
+                    xml_escape(UPLOAD_ID)
+                );
+                return (200, String::new(), xml.into_bytes());
+            }
+            match method {
+                "PUT" => {
+                    let n: Option<u32> = target
+                        .split(['?', '&'])
+                        .find_map(|p| p.strip_prefix("partNumber="))
+                        .and_then(|v| v.split(' ').next()?.parse().ok());
+                    // No part number: a single PUT.
+                    let Some(n) = n else {
+                        return (200, String::new(), Vec::new());
+                    };
+                    part(n).unwrap_or((200, format!("etag: \"e{n}\"\r\n"), Vec::new()))
+                }
+                "POST" => complete.clone(),
+                "DELETE" => (204, String::new(), Vec::new()),
+                _ => (404, String::new(), Vec::new()),
+            }
+        }
+    }
+
+    fn ok_complete() -> Reply {
+        (
+            200,
+            String::new(),
+            b"<CompleteMultipartUploadResult><ETag>\"x-5\"</ETag></CompleteMultipartUploadResult>"
+                .to_vec(),
+        )
+    }
+
+    fn multipart_storage(ep: String, split: Split) -> S3Storage {
+        let mut s = mock_storage(ep);
+        s.multipart = split;
+        s
+    }
+
+    fn served(log: &std::sync::Mutex<Vec<Served>>) -> Vec<Served> {
+        std::mem::take(&mut *log.lock().unwrap())
+    }
+
+    fn aborted(log: &[Served]) -> bool {
+        log.iter().any(|s| {
+            request_line(s).starts_with(&format!(
+                "DELETE /examplebucket/k?uploadId={} ",
+                encode_query(UPLOAD_ID)
+            ))
+        })
+    }
+
+    fn completed(log: &[Served]) -> bool {
+        log.iter()
+            .any(|s| request_line(s).starts_with("POST /examplebucket/k?uploadId="))
+    }
+
+    #[test]
+    fn ten_thousand_parts_cover_the_largest_object() {
+        let part = MULTIPART.part_size(MAX_OBJECT);
+        assert!(MAX_OBJECT.div_ceil(part) <= 10_000, "{part}");
+        assert!(part <= MAX_PUT, "{part}");
+        assert_eq!(MULTIPART.part_size(MAX_PUT + 1), 64 << 20);
+        assert_eq!(MULTIPART.max_single, MAX_PUT);
+    }
+
+    /// Above one PUT: create, parts in order, Complete with every ETag.
+    /// The type goes on create, `If-None-Match` on Complete only.
+    #[tokio::test]
+    async fn multipart_upload_sends_every_part_then_completes() {
+        let data = sample(250_000);
+        for signed in [true, false] {
+            let (ep, log) = serve_many(s3_bucket(ok_complete(), |_| None), None).await;
+            let put = PutConditions::new()
+                .content_type("text/csv")
+                .content_length(250_000)
+                .create_only();
+            multipart_storage(ep, SMALL)
+                .put_multipart("k", 250_000, pieces(&data, 9_999), &put, signed)
+                .await
+                .unwrap();
+            let log = served(&log);
+            let lines: Vec<_> = log.iter().map(request_line).collect();
+            let id = encode_query(UPLOAD_ID);
+            let mut want = vec![
+                "HEAD /examplebucket/k HTTP/1.1".to_owned(),
+                "POST /examplebucket/k?uploads= HTTP/1.1".to_owned(),
+            ];
+            want.extend(
+                (1..=5)
+                    .map(|n| format!("PUT /examplebucket/k?partNumber={n}&uploadId={id} HTTP/1.1")),
+            );
+            want.push(format!("POST /examplebucket/k?uploadId={id} HTTP/1.1"));
+            assert_eq!(lines, want, "signed {signed}");
+            let mut sent = Vec::new();
+            for s in &log {
+                verify_sigv4(&s.head);
+                let h = |name| header(&s.head, name);
+                let create = request_line(s).contains("?uploads=");
+                let complete = request_line(s).starts_with("POST") && !create;
+                assert_eq!(h("content-type").is_some(), create, "{}", s.head);
+                assert_eq!(h("if-none-match").is_some(), complete, "{}", s.head);
+                if request_line(s).starts_with("PUT") {
+                    let part = if signed {
+                        let frames = decode_aws_chunked(&s.body);
+                        frames.into_iter().flat_map(|f| f.2).collect()
+                    } else {
+                        s.body.clone()
+                    };
+                    assert_eq!(part.len(), 50_000);
+                    sent.extend(part);
+                }
+            }
+            assert_eq!(sent, data, "signed {signed}");
+            let xml = String::from_utf8(log.last().unwrap().body.clone()).unwrap();
+            let want: String = (1..=5)
+                .map(|n| format!("<Part><PartNumber>{n}</PartNumber><ETag>\"e{n}\"</ETag></Part>"))
+                .collect();
+            assert_eq!(
+                xml,
+                format!("<CompleteMultipartUpload>{want}</CompleteMultipartUpload>")
+            );
+        }
+    }
+
+    /// `save_stream` keeps one PUT up to the limit and goes multipart above.
+    #[tokio::test]
+    async fn save_stream_goes_multipart_only_above_one_put() {
+        for (len, multipart) in [(100_000usize, false), (100_001, true)] {
+            let (ep, log) = serve_many(s3_bucket(ok_complete(), |_| None), None).await;
+            multipart_storage(ep, SMALL)
+                .save_stream(
+                    "k",
+                    len as u64,
+                    pieces(&sample(len), 7_000),
+                    &PutConditions::new(),
+                )
+                .await
+                .unwrap();
+            let lines: Vec<_> = served(&log).iter().map(request_line).collect();
+            let single = vec!["PUT /examplebucket/k HTTP/1.1".to_owned()];
+            assert_eq!(lines != single, multipart, "{len}: {lines:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_part_aborts_the_upload() {
+        let fail = |n| (n == 2).then(|| (500, String::new(), b"<Error/>".to_vec()));
+        let (ep, log) = serve_many(s3_bucket(ok_complete(), fail), None).await;
+        let err = multipart_storage(ep, SMALL)
+            .put_multipart(
+                "k",
+                250_000,
+                pieces(&sample(250_000), 9_999),
+                &PutConditions::new(),
+                true,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("#2 -> 500"), "{err}");
+        let log = served(&log);
+        assert!(aborted(&log), "no abort");
+        assert!(!completed(&log), "completed after a failed part");
+    }
+
+    /// A body shorter or longer than declared never completes.
+    #[tokio::test]
+    async fn a_body_of_another_size_aborts_the_upload() {
+        for (real, want) in [(180_000usize, "ended after"), (260_000, "longer than")] {
+            let (ep, log) = serve_many(s3_bucket(ok_complete(), |_| None), None).await;
+            let err = multipart_storage(ep, SMALL)
+                .put_multipart(
+                    "k",
+                    250_000,
+                    pieces(&sample(real), 9_999),
+                    &PutConditions::new(),
+                    false,
+                )
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains(want), "{real}: {err}");
+            let log = served(&log);
+            assert!(aborted(&log), "{real}: no abort");
+            assert!(!completed(&log), "{real}: completed");
+        }
+    }
+
+    /// A key taken before Complete lands: the upload is refused and aborted.
+    #[tokio::test]
+    async fn create_only_complete_on_a_taken_key_is_refused() {
+        let error = |code: &str| format!("<Error><Code>{code}</Code></Error>").into_bytes();
+        for (reply, taken) in [
+            ((412, String::new(), error("PreconditionFailed")), true),
+            (
+                (409, String::new(), error("ConditionalRequestConflict")),
+                true,
+            ),
+            ((200, String::new(), error("PreconditionFailed")), true),
+            ((200, String::new(), error("InternalError")), false),
+        ] {
+            let status = reply.0;
+            let (ep, log) = serve_many(s3_bucket(reply, |_| None), None).await;
+            let err = multipart_storage(ep, SMALL)
+                .put_multipart(
+                    "k",
+                    150_000,
+                    pieces(&sample(150_000), 9_999),
+                    &PutConditions::new().create_only(),
+                    true,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.to_string().contains("already exists"),
+                taken,
+                "{status}: {err}"
+            );
+            assert!(aborted(&served(&log)), "{status}: no abort");
+        }
+    }
+
+    /// A key that is surely there is refused before any part is sent.
+    #[tokio::test]
+    async fn create_only_multipart_checks_the_key_first() {
+        let bucket = s3_bucket(ok_complete(), |_| None);
+        let (ep, log) = serve_many(
+            move |head: &str| {
+                if head.starts_with("HEAD ") {
+                    (200, String::new(), Vec::new())
+                } else {
+                    bucket(head)
+                }
+            },
+            None,
+        )
+        .await;
+        let err = multipart_storage(ep, SMALL)
+            .save_stream(
+                "k",
+                150_000,
+                pieces(&sample(150_000), 9_999),
+                &PutConditions::new().create_only(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert_eq!(served(&log).len(), 1);
+    }
+
+    /// A caller that stops waiting still gets the upload aborted.
+    #[tokio::test]
+    async fn a_dropped_upload_is_aborted() {
+        let (ep, log) = serve_many(s3_bucket(ok_complete(), |_| None), None).await;
+        let s = multipart_storage(ep, SMALL);
+        let first = bytes::Bytes::from(sample(60_000));
+        let body = ByteStream::new(futures_util::StreamExt::chain(
+            futures_util::stream::iter([Ok(first)]),
+            futures_util::stream::pending(),
+        ));
+        let none = PutConditions::new();
+        let upload = s.put_multipart("k", 250_000, body, &none, true);
+        let cut = tokio::time::timeout(std::time::Duration::from_millis(500), upload);
+        assert!(cut.await.is_err(), "the upload finished");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !aborted(&log.lock().unwrap()) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no abort after a drop"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(!completed(&log.lock().unwrap()));
+    }
+
+    /// Parts stream as they arrive: memory stays well under one part.
+    #[tokio::test]
+    async fn multipart_never_buffers_a_part() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let received = Arc::new(AtomicU64::new(0));
+        let ahead = Arc::new(AtomicU64::new(0));
+        let (ep, log) =
+            serve_many(s3_bucket(ok_complete(), |_| None), Some(received.clone())).await;
+        let split = Split {
+            max_single: 8 << 20,
+            min_part: 32 << 20,
+            max_parts: 10_000,
+        };
+        let body = paced_body(128, 1 << 20, received, ahead.clone());
+        multipart_storage(ep, split)
+            .put_multipart("k", 128 << 20, body, &PutConditions::new(), false)
+            .await
+            .unwrap();
+        let parts: Vec<_> = served(&log)
+            .into_iter()
+            .filter(|s| s.head.starts_with("PUT "))
+            .map(|s| s.body_len)
+            .collect();
+        assert_eq!(parts, [32 << 20; 4]);
+        let ahead = ahead.load(Ordering::SeqCst);
+        assert!(ahead <= 16 << 20, "{ahead} bytes held");
+    }
+
+    /// Against MinIO: parts of 5 MiB, the least S3 takes. Skipped unless
+    /// `RUSTANGO_S3_TEST_*` is set.
+    #[tokio::test]
+    async fn live_multipart_skipped_without_env() {
+        let var = |k: &str| std::env::var(format!("RUSTANGO_S3_TEST_{k}")).ok();
+        let (Some(access), Some(secret), Some(bucket)) = (var("KEY"), var("SECRET"), var("BUCKET"))
+        else {
+            eprintln!(
+                "skipping live S3 multipart test — set RUSTANGO_S3_TEST_KEY / _SECRET / _BUCKET"
+            );
+            return;
+        };
+        let endpoint = var("ENDPOINT");
+        let mut c = S3Config::new(bucket, var("REGION").unwrap_or_else(|| "us-east-1".into()));
+        c.path_style = endpoint.is_some();
+        c.endpoint = endpoint;
+        let mut creds = S3Credentials::new(access, secret);
+        if let Some(token) = var("SESSION_TOKEN") {
+            creds = creds.with_session_token(token);
+        }
+        let mut s = S3Storage::new(c, creds);
+        s.multipart = Split {
+            max_single: 6 << 20,
+            min_part: 5 << 20,
+            max_parts: 10_000,
+        };
+        let key = format!("rustango-test/{}-multipart.bin", uuid::Uuid::new_v4());
+        let data = sample(12 << 20);
+        let once = PutConditions::new().content_type("text/csv").create_only();
+        s.save_stream(&key, data.len() as u64, pieces(&data, 100_000), &once)
+            .await
+            .expect("multipart save_stream");
+        assert_eq!(s.load(&key).await.unwrap(), data);
+        let meta = s.metadata(&key).await.unwrap().unwrap();
+        assert_eq!(meta.size, data.len() as u64);
+        assert_eq!(meta.content_type.as_deref(), Some("text/csv"));
+        // Past the pre-check, so Complete's `If-None-Match` decides.
+        let upload_id = s.create_multipart(&key, &once).await.unwrap();
+        let err = s
+            .upload_parts(&key, &upload_id, 3, pieces(b"new", 3), &once, true)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        s.abort_multipart(&key, &upload_id).await.unwrap();
+        assert_eq!(
+            s.load(&key).await.unwrap(),
+            data,
+            "Complete replaced the object"
+        );
+        let cut = format!("{key}.cut");
+        let short = pieces(&data[..(7 << 20)], 100_000);
+        assert!(s
+            .save_stream(&cut, data.len() as u64, short, &PutConditions::new())
+            .await
+            .is_err());
+        assert!(
+            !s.exists(&cut).await.unwrap(),
+            "a cut-short upload was stored"
+        );
+        s.delete(&key).await.unwrap();
     }
 }

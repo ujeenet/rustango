@@ -22,6 +22,17 @@ pub struct LiveUser {
     is_active: bool,
 }
 
+/// `unique_together`, which the bootstrap walk did not create.
+#[derive(Model, Debug)]
+#[rustango(table = "live_pairs_sqlite", unique_together = "a, b")]
+#[allow(dead_code)]
+pub struct LivePair {
+    #[rustango(primary_key)]
+    id: Auto<i64>,
+    a: i64,
+    b: i64,
+}
+
 async fn fresh_pool() -> Pool {
     use rustango::core::Model as _;
     use rustango::migrate::ddl;
@@ -136,4 +147,28 @@ async fn pool_connect_sqlite_in_memory() {
         .expect("Pool::connect sqlite::memory: should succeed in Phase 3");
     assert_eq!(pool.backend_name(), "sqlite");
     assert!(pool.as_sqlite().is_some());
+}
+
+/// The bootstrap walk creates `unique_together` indexes too.
+#[tokio::test]
+async fn apply_all_pool_creates_unique_together() {
+    let sqlite = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("connect sqlite::memory:");
+    let pool: Pool = sqlite.into();
+    rustango::migrate::apply_all_pool(&pool)
+        .await
+        .expect("apply_all_pool");
+    let pair = || LivePair {
+        id: Auto::Unset,
+        a: 1,
+        b: 2,
+    };
+    pair().insert_pool(&pool).await.expect("first row");
+    assert!(
+        pair().insert_pool(&pool).await.is_err(),
+        "apply_all_pool left `unique_together` out"
+    );
 }

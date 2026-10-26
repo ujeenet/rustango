@@ -64,6 +64,7 @@ pub mod auth_routes;
 pub mod bootstrap;
 pub mod branding;
 pub mod database_pools;
+mod db_identity;
 /// Saved database servers that tenant databases are provisioned on.
 pub mod db_server;
 /// Taking a tenant out of service — the steps `drop-tenant` and

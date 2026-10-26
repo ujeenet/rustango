@@ -10,5 +10,6 @@
 *.db-wal
 *.db-shm
 *.db-journal
+*-migrate.lock*
 
 *.log

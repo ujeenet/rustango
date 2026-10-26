@@ -201,7 +201,7 @@ async fn migrate_with_system<F, Fut>(
     scope: MigrationScope,
     dir: &Path,
     observer: Option<&dyn crate::migrate::MigrationObserver>,
-    signals: crate::migrate::Signals,
+    signals: crate::migrate::Signals<'_>,
     project: F,
 ) -> Result<Vec<Migration>, TenancyError>
 where
@@ -700,7 +700,9 @@ where
         system_progress
             .as_ref()
             .map(|o| o as &dyn crate::migrate::MigrationObserver),
-        crate::migrate::Signals::Skip,
+        crate::migrate::Signals::Fire {
+            tenant: Some(&org.slug),
+        },
         |held| {
             let observer = project_progress
                 .as_ref()
@@ -886,7 +888,9 @@ async fn run_for_one_tenant(
                     MigrationScope::Tenant,
                     dir,
                     system_progress,
-                    crate::migrate::Signals::Fire,
+                    crate::migrate::Signals::Fire {
+                        tenant: Some(&org.slug),
+                    },
                     |held| {
                         let observer = project_progress
                             .as_ref()
@@ -935,7 +939,9 @@ async fn run_for_one_tenant(
                 MigrationScope::Tenant,
                 dir,
                 system_progress,
-                crate::migrate::Signals::Fire,
+                crate::migrate::Signals::Fire {
+                    tenant: Some(&org.slug),
+                },
                 |held| {
                     let observer = project_progress
                         .as_ref()
@@ -968,8 +974,8 @@ async fn run_for_one_tenant(
 ///
 /// The schema is created if it doesn't exist before the migration
 /// runs (so a freshly-provisioned tenant works on its first
-/// `migrate_tenants` call). `CREATE SCHEMA IF NOT EXISTS` is
-/// idempotent.
+/// `migrate_tenants` call). One that holds tables but no ledger is
+/// adopted with a warning; a later release refuses it.
 #[cfg(feature = "postgres")]
 async fn build_schema_scoped_pool(
     registry_url: &str,
@@ -978,16 +984,62 @@ async fn build_schema_scoped_pool(
     // Ensure the schema exists. Use a one-shot connection so we don't
     // pollute the migration pool's connections.
     let bootstrap = PgPool::connect(registry_url).await?;
-    let create_sql = format!(
-        "CREATE SCHEMA IF NOT EXISTS {}",
-        quote_ident_for_schema(schema)
-    );
-    rustango::sql::sqlx::query(&create_sql)
-        .execute(&bootstrap)
-        .await?;
+    let origin = ensure_schema(&bootstrap, schema).await;
     bootstrap.close().await;
+    if origin? == SchemaOrigin::Foreign {
+        warn!(
+            target: "rustango::tenancy",
+            schema,
+            "the tenant's schema already holds tables but no rustango ledger, so another app \
+             may own it; migrating adopts it. Move the tenant to a schema of its own: a later \
+             release refuses this"
+        );
+    }
 
     super::pools::connect_schema_scoped(registry_url, schema, 2).await
+}
+
+/// Where a tenant's schema came from, by [`ensure_schema`].
+#[cfg(feature = "postgres")]
+#[derive(Debug, PartialEq, Eq)]
+enum SchemaOrigin {
+    Created,
+    /// Empty, or it has a rustango ledger.
+    Kept,
+    /// Tables, but no ledger: something else made it.
+    Foreign,
+}
+
+/// `CREATE SCHEMA`, and on a clash, whether the existing one looks like
+/// the tenant's. Catalog SQL: schema mode is Postgres-only.
+#[cfg(feature = "postgres")]
+async fn ensure_schema(pg: &PgPool, schema: &str) -> Result<SchemaOrigin, sqlx::Error> {
+    use crate::migrate::{LEDGER_TABLE, SYSTEM_LEDGER_TABLE};
+    let create = format!("CREATE SCHEMA {}", quote_ident_for_schema(schema));
+    match rustango::sql::sqlx::query(&create).execute(pg).await {
+        Ok(_) => return Ok(SchemaOrigin::Created),
+        // duplicate_schema, or a concurrent create's unique_violation.
+        Err(sqlx::Error::Database(e))
+            if e.code().as_deref() == Some("42P06")
+                || (e.code().as_deref() == Some("23505")
+                    && e.constraint() == Some("pg_namespace_nspname_index")) => {}
+        Err(e) => return Err(e),
+    }
+    let (tables, ledgers): (i64, i64) = rustango::sql::sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE c.relname IN ($2, $3)) \
+         FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')",
+    )
+    .bind(schema)
+    .bind(LEDGER_TABLE)
+    .bind(SYSTEM_LEDGER_TABLE)
+    .fetch_one(pg)
+    .await?;
+    Ok(if tables > 0 && ledgers == 0 {
+        SchemaOrigin::Foreign
+    } else {
+        SchemaOrigin::Kept
+    })
 }
 
 /// Prep a directory of migrations filtered by scope. If every
@@ -1106,5 +1158,39 @@ mod schema_pool_tests {
         }
         assert_ne!(keys[0], keys[1], "schema pool shares the registry's scope");
         assert_ne!(keys[1], keys[2], "two schema pools share a scope");
+    }
+
+    /// An existing schema with tables but no ledger was not made for the
+    /// tenant: migrating would adopt it, so it is told apart.
+    #[tokio::test]
+    async fn a_foreign_schema_is_told_from_the_tenants_own() {
+        use super::{ensure_schema, SchemaOrigin};
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pg = crate::sql::sqlx::PgPool::connect(&url)
+            .await
+            .expect("registry");
+        let s = format!("origin_{}", std::process::id());
+        let q = super::quote_ident_for_schema(&s);
+        let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {q} CASCADE"))
+            .execute(&pg)
+            .await;
+        assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Created);
+        assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Kept);
+        sqlx::query(&format!("CREATE TABLE {q}.app_data (id INT)"))
+            .execute(&pg)
+            .await
+            .unwrap();
+        assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Foreign);
+        let ledger = crate::migrate::LEDGER_TABLE;
+        sqlx::query(&format!("CREATE TABLE {q}.\"{ledger}\" (name TEXT)"))
+            .execute(&pg)
+            .await
+            .unwrap();
+        assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Kept);
+        let _ = sqlx::query(&format!("DROP SCHEMA {q} CASCADE"))
+            .execute(&pg)
+            .await;
     }
 }

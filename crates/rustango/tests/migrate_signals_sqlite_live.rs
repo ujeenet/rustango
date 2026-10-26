@@ -163,3 +163,32 @@ async fn disconnect_removes_only_named_receiver() {
 
     assert_eq!(*counter.lock().await, 2);
 }
+
+/// A `*_with_target` receiver gets the pool the run migrated, so it can
+/// seed that database rather than one it captured.
+#[tokio::test]
+async fn target_receivers_get_the_migrated_pool() {
+    let _g = suite_lock().lock().await;
+    clear_all();
+    let seen: Arc<Mutex<Vec<(bool, Option<String>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let s = seen.clone();
+    let id = rustango::signals::migrate::connect_post_migrate_with_target(move |_, target| {
+        let s = s.clone();
+        async move {
+            // The bootstrap walk has just made the widget table here.
+            let rows = Widget {
+                id: Auto::default(),
+                label: "seeded".into(),
+            }
+            .insert_pool(&target.pool)
+            .await
+            .is_ok();
+            s.lock().await.push((rows, target.tenant));
+        }
+    });
+    let pool = fresh_pool().await;
+    rustango::migrate::apply_all_pool(&pool).await.unwrap();
+    assert_eq!(*seen.lock().await, vec![(true, None)]);
+    assert!(rustango::signals::migrate::disconnect_post_migrate(id));
+    assert_eq!(receiver_count(), 0);
+}

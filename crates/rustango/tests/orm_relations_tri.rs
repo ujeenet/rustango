@@ -88,6 +88,12 @@ pub struct Child {
 /// A parent whose children point at its unique `code`, not its pk.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "rel2293_shop", app = "rel2293")]
+#[rustango(reverse_has(
+    name = "items",
+    child = "Item",
+    child_fk_column = "shop",
+    self_pk_column = "code"
+))]
 pub struct Shop {
     #[rustango(primary_key)]
     pub id: i64,
@@ -1056,6 +1062,51 @@ async fn prefetch_fills_every_copy_of_a_parent(pool: &Pool) {
 }
 
 /// A child FK `on` a unique column is matched by that column, not the pk.
+/// `reverse_has` helpers on a non-PK target filter on that column, as the
+/// EXISTS form joins on it.
+async fn reverse_has_helpers_follow_self_pk_column(pool: &Pool) {
+    for (id, code) in [(1, "b"), (2, "a")] {
+        Shop {
+            id,
+            code: code.into(),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("shop");
+    }
+    for (id, code) in [(10, "a"), (11, "a"), (12, "b")] {
+        Item {
+            id,
+            shop: ForeignKey::unloaded(code.to_owned()),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("item");
+    }
+    let shop = Shop {
+        id: 1,
+        code: "b".into(),
+    };
+    assert_eq!(shop.items_count(pool).await.unwrap(), 1);
+    let ids: Vec<i64> = shop
+        .items_fetch(pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(ids, [12]);
+    let with: Vec<i64> = Shop::objects()
+        .where_raw(Shop::items_exists_expr())
+        .fetch(pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(with.len(), 2);
+}
+
 async fn prefetch_matches_an_fk_on_a_unique_column(pool: &Pool) {
     for (id, code) in [(1, "b"), (2, "a")] {
         Shop {
@@ -1531,6 +1582,7 @@ tri_dialect_test! {
         prefetch_fills_every_copy_of_a_parent,
         prefetch_soft_past_the_bind_cap,
         prefetch_matches_an_fk_on_a_unique_column,
+        reverse_has_helpers_follow_self_pk_column,
         bulk_update_is_all_or_none,
         m2m_set_ignores_repeated_ids,
         self_relation_correlates_to_the_outer_row,

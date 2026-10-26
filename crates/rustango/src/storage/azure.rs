@@ -27,6 +27,8 @@
 //!   granted `c` (create) without `w` (write), so the URL cannot
 //!   replace an existing blob.
 //! - [`AzureBlobStorage::create_container`] for setup scripts and tests.
+//! - Streamed `save_stream` and `load_stream`. Above 5000 MiB the body
+//!   goes as staged blocks, committed by one Put Block List.
 //!
 //! ## What it does not do
 //!
@@ -34,8 +36,7 @@
 //!   [`PutConditions`] are not enforced by the URL, so confirm a direct
 //!   upload with [`Storage::metadata`]. `media` gives no direct-upload
 //!   ticket on an Azure disk; use `save_bytes`.
-//! - Microsoft Entra ID (user delegation SAS), staged block uploads,
-//!   listing.
+//! - Microsoft Entra ID (user delegation SAS), listing.
 
 use std::fmt::Write as _;
 
@@ -44,15 +45,41 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 
 use super::transport::{
-    canonical_header_value, encode_key, encode_query, split_endpoint, Http, MAX_PRESIGN_SECS,
+    canonical_header_value, encode_key, encode_query, send_error, split_endpoint, stream_body,
+    Http, Parts, Split, MAX_PRESIGN_SECS,
 };
-use super::{validate_key, ObjectMeta, PutConditions, Storage, StorageError};
+use super::{
+    already_exists, check_declared_len, validate_key, ByteStream, ObjectMeta, PutConditions,
+    Storage, StorageError,
+};
 use crate::crypto::hmac_sha256;
 
 /// REST version sent on every request and signed into every SAS.
 /// 2019-12-12 raised Put Blob to 5000 MiB; 2020-12-06 set the SAS
 /// string-to-sign layout used below.
 const API_VERSION: &str = "2021-08-06";
+
+/// The most one Put Blob takes: 5000 MiB.
+const MAX_PUT_BLOB: u64 = 5000 << 20;
+
+/// The most one block takes: 4000 MiB.
+const MAX_BLOCK: u64 = 4000 << 20;
+
+/// Above one Put Blob, blocks of at least 64 MiB; a blob holds 50,000.
+const BLOCKS: Split = Split {
+    max_single: MAX_PUT_BLOB,
+    min_part: 64 << 20,
+    max_parts: 50_000,
+};
+
+/// A request body.
+enum Payload<'a> {
+    /// No body at all.
+    None,
+    Bytes(&'a [u8]),
+    /// Exactly this many bytes, sent as they arrive.
+    Stream(ByteStream, u64),
+}
 
 /// How to reach the container. Build it with [`AzureConfig::new`].
 #[derive(Clone)]
@@ -113,6 +140,7 @@ pub struct AzureBlobStorage {
     /// The endpoint's path, such as `/devstoreaccount1` on Azurite.
     prefix: String,
     http: Http,
+    blocks: Split,
 }
 
 impl AzureBlobStorage {
@@ -139,6 +167,7 @@ impl AzureBlobStorage {
             origin,
             prefix,
             http: Http::defaults(),
+            blocks: BLOCKS,
         })
     }
 
@@ -161,8 +190,8 @@ impl AzureBlobStorage {
                 reqwest::Method::PUT,
                 &path,
                 &[("restype", "container")],
-                Some(b""),
-                None,
+                Payload::Bytes(b""),
+                &PutConditions::new(),
                 &[],
             )
             .await?;
@@ -185,18 +214,24 @@ impl AzureBlobStorage {
         B64.encode(hmac_sha256(&self.key, string_to_sign.as_bytes()))
     }
 
-    /// One Shared Key request. `body` is `None` for a request without one.
+    /// One Shared Key request. `put` gives the content type and
+    /// `If-None-Match: *`; its length is the body's own.
     async fn send(
         &self,
         method: reqwest::Method,
         path: &str,
         query: &[(&str, &str)],
-        body: Option<&[u8]>,
-        content_type: Option<&str>,
+        body: Payload<'_>,
+        put: &PutConditions,
         extra: &[(&'static str, &str)],
     ) -> Result<reqwest::Response, StorageError> {
-        let content_type = canonical_header_value(content_type)?;
-        let len = body.map_or(0, <[u8]>::len);
+        let content_type = canonical_header_value(put.content_type.as_deref())?;
+        let if_none_match = put.create_only.then_some("*");
+        let len = match &body {
+            Payload::None => 0,
+            Payload::Bytes(b) => b.len() as u64,
+            Payload::Stream(_, len) => *len,
+        };
         let date = chrono::Utc::now()
             .format("%a, %d %b %Y %H:%M:%S GMT")
             .to_string();
@@ -217,6 +252,7 @@ impl AzureBlobStorage {
             method.as_str(),
             len,
             content_type.as_deref(),
+            if_none_match,
             &ms,
             &resource,
         );
@@ -240,12 +276,19 @@ impl AzureBlobStorage {
         if let Some(ct) = content_type {
             req = req.header("content-type", ct);
         }
-        if let Some(body) = body {
-            req = req.body(body.to_vec());
+        if let Some(v) = if_none_match {
+            req = req.header("if-none-match", v);
         }
-        req.send()
-            .await
-            .map_err(|e| StorageError::Io(format!("http: {e}")))
+        match body {
+            Payload::None => {}
+            Payload::Bytes(b) => req = req.body(b.to_vec()),
+            Payload::Stream(body, len) => {
+                req = req
+                    .header("content-length", len)
+                    .body(stream_body(body, len));
+            }
+        }
+        req.send().await.map_err(|e| send_error(&e))
     }
 
     /// A service SAS URL for one blob with `permissions`.
@@ -291,23 +334,168 @@ impl AzureBlobStorage {
         format!("{}{}?{}", self.origin, self.path(key), query.join("&"))
     }
 
+    /// Put Block for each part, then Put Block List. Uncommitted blocks
+    /// are never visible and Azure discards them, so a failure stores nothing.
+    async fn put_blocks(
+        &self,
+        key: &str,
+        len: u64,
+        body: ByteStream,
+        put: &PutConditions,
+    ) -> Result<(), StorageError> {
+        if len > MAX_BLOCK.saturating_mul(self.blocks.max_parts) {
+            return Err(StorageError::Io(format!(
+                "Azure PUT {key}: {len} bytes is over what a block blob holds"
+            )));
+        }
+        // Fail fast on a blob that is surely there; the list still decides.
+        if put.create_only && matches!(self.exists(key).await, Ok(true)) {
+            return Err(already_exists(key));
+        }
+        self.commit_blocks(key, len, body, put).await
+    }
+
+    /// [`Self::put_blocks`] past its checks.
+    async fn commit_blocks(
+        &self,
+        key: &str,
+        len: u64,
+        body: ByteStream,
+        put: &PutConditions,
+    ) -> Result<(), StorageError> {
+        let path = self.path(key);
+        let block = self.blocks.part_size(len);
+        // A fresh prefix, so a concurrent upload to the key never commits ours.
+        let upload = uuid::Uuid::new_v4().simple().to_string();
+        let mut parts = Parts::new(body, len);
+        let mut ids = Vec::new();
+        let mut sent = 0;
+        while sent < len {
+            let size = block.min(len - sent);
+            // The same length for every id, as Azure wants.
+            let id = B64.encode(format!("{upload}-{:05}", ids.len()));
+            let (stream, back) = parts.take(size);
+            let resp = self
+                .send(
+                    reqwest::Method::PUT,
+                    &path,
+                    &[("comp", "block"), ("blockid", &id)],
+                    Payload::Stream(stream, size),
+                    &PutConditions::new(),
+                    &[],
+                )
+                .await?;
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                return Err(StorageError::Io(format!(
+                    "Azure Put Block {key} -> {status}: {text}"
+                )));
+            }
+            parts = back.await.map_err(|_| {
+                StorageError::Io(format!("Azure Put Block {key}: block not fully sent"))
+            })?;
+            ids.push(id);
+            sent += size;
+        }
+        parts.finish().await?;
+
+        let mut xml = String::from(r#"<?xml version="1.0" encoding="utf-8"?><BlockList>"#);
+        for id in &ids {
+            let _ = write!(xml, "<Latest>{id}</Latest>");
+        }
+        xml.push_str("</BlockList>");
+        let content_type = canonical_header_value(put.content_type.as_deref())?;
+        let mut extra = Vec::new();
+        if let Some(ct) = content_type.as_deref() {
+            extra.push(("x-ms-blob-content-type", ct));
+        }
+        let cond = PutConditions {
+            create_only: put.create_only,
+            ..PutConditions::default()
+        };
+        let resp = self
+            .send(
+                reqwest::Method::PUT,
+                &path,
+                &[("comp", "blocklist")],
+                Payload::Bytes(xml.as_bytes()),
+                &cond,
+                &extra,
+            )
+            .await?;
+        check_put(resp, key, put.create_only, "Put Block List").await
+    }
+
+    /// Get Blob, its status checked.
+    async fn get(&self, key: &str) -> Result<reqwest::Response, StorageError> {
+        let resp = self.blob(reqwest::Method::GET, key).await?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(StorageError::NotFound(key.to_owned()));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(StorageError::Io(format!(
+                "Azure GET {key} -> {status}: {body}"
+            )));
+        }
+        Ok(resp)
+    }
+
     async fn blob(
         &self,
         method: reqwest::Method,
         key: &str,
     ) -> Result<reqwest::Response, StorageError> {
         validate_key(key)?;
-        self.send(method, &self.path(key), &[], None, None, &[])
-            .await
+        self.send(
+            method,
+            &self.path(key),
+            &[],
+            Payload::None,
+            &PutConditions::new(),
+            &[],
+        )
+        .await
     }
+}
+
+/// A write's answer. Under `create_only`, 412 or 409 `BlobAlreadyExists`
+/// means the blob is there; a lease or immutability 409 stays an error.
+async fn check_put(
+    resp: reqwest::Response,
+    key: &str,
+    create_only: bool,
+    what: &str,
+) -> Result<(), StorageError> {
+    let status = resp.status();
+    let code = resp
+        .headers()
+        .get("x-ms-error-code")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let taken = status == reqwest::StatusCode::PRECONDITION_FAILED
+        || (status == reqwest::StatusCode::CONFLICT && code == "BlobAlreadyExists");
+    if create_only && taken {
+        return Err(already_exists(key));
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(StorageError::Io(format!(
+            "Azure {what} {key} -> {status}: {body}"
+        )));
+    }
+    Ok(())
 }
 
 /// The Shared Key string-to-sign for the Blob service. Content-Length
 /// is empty for an empty body (versions 2015-02-21 and later).
 fn shared_key_string(
     method: &str,
-    len: usize,
+    len: u64,
     content_type: Option<&str>,
+    if_none_match: Option<&str>,
     ms_headers: &[(&str, String)],
     resource: &str,
 ) -> String {
@@ -317,13 +505,14 @@ fn shared_key_string(
         len.to_string()
     };
     let ct = content_type.unwrap_or("");
+    let inm = if_none_match.unwrap_or("");
     let headers = ms_headers.iter().fold(String::new(), |mut out, (k, v)| {
         let _ = writeln!(out, "{k}:{v}");
         out
     });
     // VERB, Content-Encoding, -Language, -Length, -MD5, -Type, Date,
     // If-Modified-Since, If-Match, If-None-Match, If-Unmodified-Since, Range.
-    format!("{method}\n\n\n{len}\n\n{ct}\n\n\n\n\n\n\n{headers}{resource}")
+    format!("{method}\n\n\n{len}\n\n{ct}\n\n\n\n{inm}\n\n\n{headers}{resource}")
 }
 
 /// The service SAS string-to-sign (versions 2020-12-06 and later) with
@@ -363,13 +552,17 @@ impl Storage for AzureBlobStorage {
         content_type: Option<&str>,
     ) -> Result<(), StorageError> {
         validate_key(key)?;
+        let put = PutConditions {
+            content_type: content_type.map(str::to_owned),
+            ..PutConditions::default()
+        };
         let resp = self
             .send(
                 reqwest::Method::PUT,
                 &self.path(key),
                 &[],
-                Some(data),
-                content_type,
+                Payload::Bytes(data),
+                &put,
                 &[("x-ms-blob-type", "BlockBlob")],
             )
             .await?;
@@ -383,24 +576,45 @@ impl Storage for AzureBlobStorage {
         Ok(())
     }
 
+    /// One Put Blob up to 5000 MiB, staged blocks above.
+    async fn save_stream(
+        &self,
+        key: &str,
+        len: u64,
+        body: ByteStream,
+        put: &PutConditions,
+    ) -> Result<(), StorageError> {
+        validate_key(key)?;
+        check_declared_len(key, len, put)?;
+        if len > self.blocks.max_single {
+            return self.put_blocks(key, len, body, put).await;
+        }
+        let resp = self
+            .send(
+                reqwest::Method::PUT,
+                &self.path(key),
+                &[],
+                Payload::Stream(body, len),
+                put,
+                &[("x-ms-blob-type", "BlockBlob")],
+            )
+            .await?;
+        check_put(resp, key, put.create_only, "PUT").await
+    }
+
     async fn load(&self, key: &str) -> Result<Vec<u8>, StorageError> {
-        let resp = self.blob(reqwest::Method::GET, key).await?;
-        let status = resp.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(StorageError::NotFound(key.to_owned()));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(StorageError::Io(format!(
-                "Azure GET {key} -> {status}: {body}"
-            )));
-        }
-        let bytes = resp
+        let bytes = self
+            .get(key)
+            .await?
             .bytes()
             .await
             .map_err(|e| StorageError::Io(format!("read body: {e}")))?;
         // Reuses the buffer when the body is uniquely owned.
         Ok(Vec::from(bytes))
+    }
+
+    async fn load_stream(&self, key: &str) -> Result<ByteStream, StorageError> {
+        Ok(ByteStream::from(self.get(key).await?))
     }
 
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
@@ -480,6 +694,9 @@ impl Storage for AzureBlobStorage {
 
 #[cfg(test)]
 mod tests {
+    use super::super::transport::testing::{
+        self, paced_body, serve, serve_counted, serve_many, Reply, Served,
+    };
     use super::*;
 
     /// Azurite's well-known development key.
@@ -547,6 +764,7 @@ mod tests {
             "PUT",
             3,
             Some("text/plain"),
+            None,
             &[
                 ("x-ms-date", "D".into()),
                 ("x-ms-version", API_VERSION.into()),
@@ -560,7 +778,7 @@ mod tests {
             )
         );
         // An empty body signs an empty Content-Length.
-        assert!(shared_key_string("GET", 0, None, &[], "/r").starts_with("GET\n\n\n\n"));
+        assert!(shared_key_string("GET", 0, None, None, &[], "/r").starts_with("GET\n\n\n\n"));
     }
 
     // tests-003 — known answers. The strings follow Microsoft's documented
@@ -575,7 +793,7 @@ mod tests {
             ("x-ms-date", date.to_owned()),
             ("x-ms-version", API_VERSION.to_owned()),
         ];
-        let built = shared_key_string("GET", 0, None, &ms, "/acct/media/a%20b.txt");
+        let built = shared_key_string("GET", 0, None, None, &ms, "/acct/media/a%20b.txt");
         assert_eq!(built, sts);
         let s = AzureBlobStorage::new(cfg()).unwrap();
         assert_eq!(s.sign(sts), "5RsQE6wn+6G2f4efZ9R7ckXr5AoqTeph5BS8GkEBBnI=");
@@ -630,12 +848,7 @@ mod tests {
     }
 
     fn header(head: &str, name: &str) -> String {
-        head.lines()
-            .find_map(|l| {
-                let (k, v) = l.split_once(':')?;
-                k.eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| panic!("no {name} in {head}"))
+        testing::header(head, name).unwrap_or_else(|| panic!("no {name} in {head}"))
     }
 
     #[tokio::test]
@@ -703,41 +916,9 @@ mod tests {
 
     /// Answer one request with `status`; yields the raw request head.
     async fn mock(status: u16) -> (String, tokio::task::JoinHandle<String>) {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}/acct", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = Vec::new();
-            let mut chunk = [0u8; 4096];
-            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                let n = sock.read(&mut chunk).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-            }
-            let end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
-            let head = String::from_utf8_lossy(&buf[..end]).into_owned();
-            let len: usize = head
-                .to_ascii_lowercase()
-                .lines()
-                .find_map(|l| l.strip_prefix("content-length:").map(str::to_owned))
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(0);
-            while buf.len() < end + 4 + len {
-                let n = sock.read(&mut chunk).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-            }
-            let reply =
-                format!("HTTP/1.1 {status} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
-            sock.write_all(reply.as_bytes()).await.unwrap();
-            head
-        });
-        (endpoint, task)
+        let (endpoint, task) = serve(status, String::new(), Vec::new()).await;
+        let head = tokio::spawn(async move { task.await.unwrap().head });
+        (format!("{endpoint}/acct"), head)
     }
 
     fn mock_storage(endpoint: String) -> AzureBlobStorage {
@@ -768,6 +949,7 @@ mod tests {
             "PUT",
             get("content-length").parse().unwrap(),
             Some(&get("content-type")),
+            None,
             &ms,
             "/acct/acct/media/a%20b.txt",
         );
@@ -787,6 +969,197 @@ mod tests {
             let (ep, _req) = mock(status).await;
             assert!(mock_storage(ep).exists("a").await.is_err(), "{status}");
         }
+    }
+
+    fn pieces(data: &[u8], size: usize) -> ByteStream {
+        let parts: Vec<_> = data
+            .chunks(size)
+            .map(|c| Ok(bytes::Bytes::copy_from_slice(c)))
+            .collect();
+        ByteStream::new(futures_util::stream::iter(parts))
+    }
+
+    fn sample(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// Shared Key signs the length and `If-None-Match`, not the body.
+    #[tokio::test]
+    async fn save_stream_signs_its_length_and_if_none_match() {
+        let (ep, req) = serve(201, String::new(), Vec::new()).await;
+        let s = mock_storage(format!("{ep}/acct"));
+        let data = sample(150_000);
+        let put = PutConditions::new()
+            .content_type("text/csv")
+            .content_length(150_000)
+            .create_only();
+        s.save_stream("a b.csv", 150_000, pieces(&data, 9_999), &put)
+            .await
+            .unwrap();
+        let got = req.await.unwrap();
+        let head = &got.head;
+        let get = |name: &str| header(head, name);
+        assert!(head.starts_with("PUT /acct/media/a%20b.csv "), "{head}");
+        assert_eq!(get("content-length"), "150000");
+        assert_eq!(get("if-none-match"), "*");
+        assert_eq!(get("x-ms-blob-type"), "BlockBlob");
+        assert!(
+            !head.to_ascii_lowercase().contains("transfer-encoding"),
+            "{head}"
+        );
+        let ms = vec![
+            ("x-ms-blob-type", get("x-ms-blob-type")),
+            ("x-ms-date", get("x-ms-date")),
+            ("x-ms-version", get("x-ms-version")),
+        ];
+        let sts = shared_key_string(
+            "PUT",
+            150_000,
+            Some("text/csv"),
+            Some("*"),
+            &ms,
+            "/acct/acct/media/a%20b.csv",
+        );
+        assert_eq!(
+            get("authorization"),
+            format!("SharedKey acct:{}", s.sign(&sts))
+        );
+        assert_eq!(got.body, data);
+    }
+
+    /// Only 412 or 409 `BlobAlreadyExists` mean the blob is there; a
+    /// lease 409 is another error.
+    #[tokio::test]
+    async fn create_only_save_stream_on_an_existing_blob_is_refused() {
+        for (status, code, taken) in [
+            (409, "BlobAlreadyExists", true),
+            (412, "ConditionNotMet", true),
+            (409, "LeaseIdMissing", false),
+        ] {
+            let extra = format!("x-ms-error-code: {code}\r\n");
+            let (ep, _req) = serve(status, extra, Vec::new()).await;
+            let err = mock_storage(format!("{ep}/acct"))
+                .save_stream(
+                    "k",
+                    3,
+                    pieces(b"abc", 3),
+                    &PutConditions::new().create_only(),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.to_string().contains("already exists"),
+                taken,
+                "{code}: {err}"
+            );
+        }
+    }
+
+    /// Refused before any request: the endpoint is never reached.
+    #[tokio::test]
+    async fn save_stream_refuses_what_a_block_blob_cannot_hold() {
+        let s = mock_storage("http://127.0.0.1:9/acct".into());
+        let err = s
+            .save_stream(
+                "k",
+                MAX_BLOCK * 50_000 + 1,
+                pieces(b"x", 1),
+                &PutConditions::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("block blob holds"), "{err}");
+        let err = s
+            .save_stream(
+                "k",
+                3,
+                pieces(b"abc", 3),
+                &PutConditions::new().content_length(2),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+    }
+
+    /// A body that fails or ends short never completes the request, so
+    /// Azure stores nothing.
+    #[tokio::test]
+    async fn a_failed_or_short_stream_never_completes_the_upload() {
+        let data = sample(300_000);
+        for fail in [true, false] {
+            let (ep, req) = serve(201, String::new(), Vec::new()).await;
+            let first = bytes::Bytes::copy_from_slice(&data[..100_000]);
+            let tail = if fail {
+                Err(StorageError::Io("client went away".into()))
+            } else {
+                Ok(bytes::Bytes::new())
+            };
+            // Later, so the head and the first chunk are on the wire.
+            let tail = futures_util::stream::once(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tail
+            });
+            let body = ByteStream::new(futures_util::StreamExt::chain(
+                futures_util::stream::iter([Ok(first)]),
+                tail,
+            ));
+            let err = mock_storage(format!("{ep}/acct"))
+                .save_stream("k", 300_000, body, &PutConditions::new())
+                .await
+                .unwrap_err();
+            let want = if fail {
+                "client went away"
+            } else {
+                "bytes declared"
+            };
+            assert!(err.to_string().contains(want), "{err}");
+            let got = tokio::time::timeout(std::time::Duration::from_secs(5), req);
+            let got = got.await.expect("no request was sent").unwrap();
+            assert!(
+                !got.head.is_empty() && got.body_len < got.declared,
+                "fail {fail}: the server got the whole body"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn load_stream_streams_the_body_and_maps_404() {
+        let data = sample(200_000);
+        let (ep, _req) = serve(200, String::new(), data.clone()).await;
+        let mut stream = mock_storage(format!("{ep}/acct"))
+            .load_stream("a.bin")
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        while let Some(c) = futures_util::StreamExt::next(&mut stream).await {
+            got.extend_from_slice(&c.unwrap());
+        }
+        assert_eq!(got, data);
+        let (ep, _req) = serve(404, String::new(), Vec::new()).await;
+        let err = mock_storage(format!("{ep}/acct"))
+            .load_stream("a.bin")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::NotFound(_)), "{err}");
+    }
+
+    /// The body is pulled only as fast as the server takes it.
+    #[tokio::test]
+    async fn save_stream_never_buffers_the_object() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        let received = Arc::new(AtomicU64::new(0));
+        let ahead = Arc::new(AtomicU64::new(0));
+        let (ep, req) = serve_counted(201, String::new(), Vec::new(), Some(received.clone())).await;
+        let body = paced_body(256, 1 << 20, received, ahead.clone());
+        mock_storage(format!("{ep}/acct"))
+            .save_stream("big.bin", 256 << 20, body, &PutConditions::new())
+            .await
+            .unwrap();
+        let got = req.await.unwrap();
+        assert_eq!(got.body_len, got.declared);
+        let ahead = ahead.load(Ordering::SeqCst);
+        assert!(ahead <= 16 << 20, "{ahead} bytes held");
     }
 
     /// Against a real Azure account or Azurite. Skipped unless
@@ -854,10 +1227,366 @@ mod tests {
             "a,b"
         );
 
-        for k in [&key, &direct] {
+        // Streamed: create-only holds, a cut-short body stores nothing.
+        let streamed = format!("{key}.streamed");
+        let data = sample(3 << 20);
+        let once = PutConditions::new()
+            .content_type("application/octet-stream")
+            .create_only();
+        s.save_stream(&streamed, data.len() as u64, pieces(&data, 100_000), &once)
+            .await
+            .expect("save_stream");
+        let err = s
+            .save_stream(&streamed, 3, pieces(b"new", 3), &once)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        let mut got = Vec::new();
+        let mut stream = s.load_stream(&streamed).await.expect("load_stream");
+        while let Some(c) = futures_util::StreamExt::next(&mut stream).await {
+            got.extend_from_slice(&c.unwrap());
+        }
+        assert_eq!(got, data);
+        let cut = format!("{key}.cut");
+        let short = pieces(&data[..1 << 20], 100_000);
+        assert!(s
+            .save_stream(&cut, data.len() as u64, short, &PutConditions::new())
+            .await
+            .is_err());
+        assert!(
+            !s.exists(&cut).await.unwrap(),
+            "a cut-short upload was stored"
+        );
+
+        for k in [&key, &direct, &streamed] {
             s.delete(k).await.expect("delete");
             assert!(!s.exists(k).await.unwrap());
         }
         s.delete(&key).await.expect("delete is idempotent");
+    }
+
+    // -------- block uploads --------
+
+    /// Blocks of 50,000 bytes: 5 cover anything up to 250,000.
+    const SMALL: Split = Split {
+        max_single: 100_000,
+        min_part: 10_000,
+        max_parts: 5,
+    };
+
+    fn request_line(s: &Served) -> String {
+        s.head.lines().next().unwrap_or_default().to_owned()
+    }
+
+    /// A container that takes blocks; `list` answers Put Block List and
+    /// `block` overrides the answer to a block by index.
+    fn container(
+        list: Reply,
+        block: impl Fn(usize) -> Option<Reply> + Send + Sync + 'static,
+    ) -> impl Fn(&str) -> Reply + Send + Sync + 'static {
+        let n = std::sync::atomic::AtomicUsize::new(0);
+        move |head: &str| {
+            let line = head.lines().next().unwrap_or_default();
+            if line.contains("comp=blocklist") {
+                list.clone()
+            } else if line.contains("comp=block") {
+                let i = n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                block(i).unwrap_or((201, String::new(), Vec::new()))
+            } else if line.starts_with("PUT ") {
+                (201, String::new(), Vec::new())
+            } else {
+                (404, String::new(), Vec::new())
+            }
+        }
+    }
+
+    fn created() -> Reply {
+        (201, String::new(), Vec::new())
+    }
+
+    fn block_storage(ep: &str, split: Split) -> AzureBlobStorage {
+        let mut s = mock_storage(format!("{ep}/acct"));
+        s.blocks = split;
+        s
+    }
+
+    fn served(log: &std::sync::Mutex<Vec<Served>>) -> Vec<Served> {
+        std::mem::take(&mut *log.lock().unwrap())
+    }
+
+    fn committed(log: &[Served]) -> bool {
+        log.iter()
+            .any(|s| request_line(s).contains("comp=blocklist"))
+    }
+
+    #[test]
+    fn fifty_thousand_blocks_cover_the_largest_blob() {
+        let most = MAX_BLOCK * 50_000;
+        let block = BLOCKS.part_size(most);
+        assert!(
+            most.div_ceil(block) <= 50_000 && block <= MAX_BLOCK,
+            "{block}"
+        );
+        assert_eq!(BLOCKS.part_size(MAX_PUT_BLOB + 1), 64 << 20);
+        assert_eq!(BLOCKS.max_single, MAX_PUT_BLOB);
+    }
+
+    /// Above one Put Blob: blocks under one fresh id prefix, then a signed
+    /// list with the type and `If-None-Match`.
+    #[tokio::test]
+    async fn block_upload_stages_blocks_then_commits_the_list() {
+        let (ep, log) = serve_many(container(created(), |_| None), None).await;
+        let s = block_storage(&ep, SMALL);
+        let data = sample(250_000);
+        let put = PutConditions::new()
+            .content_type("text/csv")
+            .content_length(250_000)
+            .create_only();
+        s.save_stream("a b.csv", 250_000, pieces(&data, 9_999), &put)
+            .await
+            .unwrap();
+        let log = served(&log);
+        assert!(
+            request_line(&log[0]).starts_with("HEAD "),
+            "{}",
+            log[0].head
+        );
+        let (blocks, list) = (&log[1..6], &log[6]);
+        assert_eq!(log.len(), 7);
+        let mut ids = Vec::new();
+        let mut sent = Vec::new();
+        for b in blocks {
+            let line = request_line(b);
+            let id = line
+                .split(['?', '&', ' '])
+                .find_map(|p| p.strip_prefix("blockid="))
+                .unwrap();
+            let id = urlencoding::decode(id).unwrap().into_owned();
+            assert!(
+                testing::header(&b.head, "if-none-match").is_none(),
+                "{}",
+                b.head
+            );
+            assert_eq!(b.body.len(), 50_000);
+            sent.extend_from_slice(&b.body);
+            ids.push(id);
+        }
+        assert_eq!(sent, data);
+        let names: Vec<_> = ids
+            .iter()
+            .map(|id| String::from_utf8(B64.decode(id).unwrap()).unwrap())
+            .collect();
+        let prefix = names[0].split_once('-').unwrap().0;
+        for (i, name) in names.iter().enumerate() {
+            assert_eq!(name, &format!("{prefix}-{i:05}"));
+        }
+        assert!(ids.iter().all(|id| id.len() == ids[0].len()));
+
+        let head = &list.head;
+        let get = |name: &str| header(head, name);
+        assert!(
+            head.starts_with("PUT /acct/media/a%20b.csv?comp=blocklist "),
+            "{head}"
+        );
+        assert_eq!(get("if-none-match"), "*");
+        assert_eq!(get("x-ms-blob-content-type"), "text/csv");
+        let latest: String = ids
+            .iter()
+            .map(|id| format!("<Latest>{id}</Latest>"))
+            .collect();
+        assert_eq!(
+            String::from_utf8(list.body.clone()).unwrap(),
+            format!(r#"<?xml version="1.0" encoding="utf-8"?><BlockList>{latest}</BlockList>"#)
+        );
+        let ms = vec![
+            ("x-ms-blob-content-type", get("x-ms-blob-content-type")),
+            ("x-ms-date", get("x-ms-date")),
+            ("x-ms-version", get("x-ms-version")),
+        ];
+        let sts = shared_key_string(
+            "PUT",
+            list.body.len() as u64,
+            None,
+            Some("*"),
+            &ms,
+            "/acct/acct/media/a%20b.csv\ncomp:blocklist",
+        );
+        assert_eq!(
+            get("authorization"),
+            format!("SharedKey acct:{}", s.sign(&sts))
+        );
+    }
+
+    /// `save_stream` keeps one Put Blob up to the limit, blocks above.
+    #[tokio::test]
+    async fn save_stream_stages_blocks_only_above_one_put_blob() {
+        for (len, blocks) in [(100_000usize, false), (100_001, true)] {
+            let (ep, log) = serve_many(container(created(), |_| None), None).await;
+            block_storage(&ep, SMALL)
+                .save_stream(
+                    "k",
+                    len as u64,
+                    pieces(&sample(len), 7_000),
+                    &PutConditions::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(committed(&served(&log)), blocks, "{len}");
+        }
+    }
+
+    /// A failed block, or a body of another size, never commits a list.
+    #[tokio::test]
+    async fn a_failed_block_or_odd_body_never_commits() {
+        let fail = |i| (i == 1).then(|| (500, String::new(), Vec::new()));
+        let (ep, log) = serve_many(container(created(), fail), None).await;
+        let err = block_storage(&ep, SMALL)
+            .save_stream(
+                "k",
+                250_000,
+                pieces(&sample(250_000), 9_999),
+                &PutConditions::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("500"), "{err}");
+        assert!(!committed(&served(&log)), "committed after a failed block");
+        for (real, want) in [(180_000usize, "ended after"), (260_000, "longer than")] {
+            let (ep, log) = serve_many(container(created(), |_| None), None).await;
+            let err = block_storage(&ep, SMALL)
+                .save_stream(
+                    "k",
+                    250_000,
+                    pieces(&sample(real), 9_999),
+                    &PutConditions::new(),
+                )
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains(want), "{real}: {err}");
+            assert!(!committed(&served(&log)), "{real}: committed");
+        }
+    }
+
+    #[tokio::test]
+    async fn create_only_block_list_on_a_taken_blob_is_refused() {
+        for (status, code, taken) in [
+            (409, "BlobAlreadyExists", true),
+            (412, "ConditionNotMet", true),
+            (409, "LeaseIdMissing", false),
+        ] {
+            let list = (status, format!("x-ms-error-code: {code}\r\n"), Vec::new());
+            let (ep, _log) = serve_many(container(list, |_| None), None).await;
+            let err = block_storage(&ep, SMALL)
+                .save_stream(
+                    "k",
+                    150_000,
+                    pieces(&sample(150_000), 9_999),
+                    &PutConditions::new().create_only(),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.to_string().contains("already exists"),
+                taken,
+                "{code}: {err}"
+            );
+        }
+    }
+
+    /// Blocks stream as they arrive: memory stays well under one block.
+    #[tokio::test]
+    async fn block_upload_never_buffers_a_block() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        let received = Arc::new(AtomicU64::new(0));
+        let ahead = Arc::new(AtomicU64::new(0));
+        let (ep, log) = serve_many(container(created(), |_| None), Some(received.clone())).await;
+        let split = Split {
+            max_single: 8 << 20,
+            min_part: 32 << 20,
+            max_parts: 50_000,
+        };
+        let body = paced_body(128, 1 << 20, received, ahead.clone());
+        block_storage(&ep, split)
+            .save_stream("k", 128 << 20, body, &PutConditions::new())
+            .await
+            .unwrap();
+        let blocks: Vec<_> = served(&log)
+            .into_iter()
+            .filter(|s| request_line(s).contains("comp=block "))
+            .map(|s| s.body_len)
+            .collect();
+        assert_eq!(blocks, [32 << 20; 4]);
+        let ahead = ahead.load(Ordering::SeqCst);
+        assert!(ahead <= 16 << 20, "{ahead} bytes held");
+    }
+
+    /// Against Azurite or Azure, blocks of 1 MiB. Skipped unless
+    /// `RUSTANGO_AZURE_TEST_*` is set.
+    #[tokio::test]
+    async fn live_block_upload_skipped_without_env() {
+        let var = |k: &str| std::env::var(format!("RUSTANGO_AZURE_TEST_{k}")).ok();
+        let (Some(account), Some(account_key), Some(container)) =
+            (var("ACCOUNT"), var("KEY"), var("CONTAINER"))
+        else {
+            eprintln!("skipping live Azure block test — set RUSTANGO_AZURE_TEST_ACCOUNT / _KEY / _CONTAINER");
+            return;
+        };
+        let mut s = AzureBlobStorage::new(AzureConfig {
+            account,
+            account_key,
+            container,
+            endpoint: var("ENDPOINT"),
+        })
+        .unwrap();
+        s.blocks = Split {
+            max_single: 2 << 20,
+            min_part: 1 << 20,
+            max_parts: 50_000,
+        };
+        s.create_container().await.expect("create container");
+        let key = format!("rustango-test/{} blocks.bin", uuid::Uuid::new_v4());
+        let data = sample((3 << 20) + 1234);
+        let once = PutConditions::new().content_type("text/csv").create_only();
+        s.save_stream(&key, data.len() as u64, pieces(&data, 100_000), &once)
+            .await
+            .expect("block save_stream");
+        assert_eq!(s.load(&key).await.unwrap(), data);
+        let meta = s.metadata(&key).await.unwrap().unwrap();
+        assert_eq!(meta.size, data.len() as u64);
+        assert_eq!(meta.content_type.as_deref(), Some("text/csv"));
+        // Without `create_only` the blob is replaced.
+        let new = sample(3 << 20);
+        s.save_stream(
+            &key,
+            new.len() as u64,
+            pieces(&new, 100_000),
+            &PutConditions::new(),
+        )
+        .await
+        .expect("overwrite");
+        // Past the pre-check, so the list's `If-None-Match` decides.
+        let newer = sample((3 << 20) + 7);
+        let err = s
+            .commit_blocks(&key, newer.len() as u64, pieces(&newer, 100_000), &once)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert_eq!(
+            s.load(&key).await.unwrap(),
+            new,
+            "the list replaced the blob"
+        );
+        let cut = format!("{key}.cut");
+        let short = pieces(&data[..(2 << 20) + 10], 100_000);
+        assert!(s
+            .save_stream(&cut, data.len() as u64, short, &PutConditions::new())
+            .await
+            .is_err());
+        assert!(
+            !s.exists(&cut).await.unwrap(),
+            "a cut-short upload was stored"
+        );
+        s.delete(&key).await.unwrap();
     }
 }

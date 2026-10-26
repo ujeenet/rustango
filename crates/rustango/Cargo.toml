@@ -301,12 +301,12 @@ media = ["storage"]
 # Hand-rolled SigV4 over reqwest — works for AWS S3, Cloudflare R2,
 # Backblaze B2, MinIO, and any other S3-compatible API. No
 # `aws-sdk-s3` dependency.
-storage-s3 = ["storage", "dep:reqwest", "dep:hmac", "dep:sha2"]
+storage-s3 = ["storage", "dep:reqwest", "dep:http-body", "dep:hmac", "dep:sha2"]
 
 # Azure Blob Storage backend (`rustango::storage::azure::AzureBlobStorage`).
 # Shared Key for server calls, service SAS for presigned URLs; hand-rolled
 # over reqwest like `storage-s3`. No Azure SDK dependency.
-storage-azure = ["storage", "dep:reqwest", "dep:hmac", "dep:sha2", "dep:base64"]
+storage-azure = ["storage", "dep:reqwest", "dep:http-body", "dep:hmac", "dep:sha2", "dep:base64"]
 
 # OpenAPI 3.1 spec builder + Swagger UI router (`rustango::openapi`).
 # Pure-Rust types you assemble into a spec, serialized to JSON via serde.
@@ -317,7 +317,8 @@ openapi = ["rustango-macros/openapi"]
 
 # File storage backends (`rustango::storage`) — Storage trait + LocalStorage
 # (filesystem) + InMemoryStorage (tests). S3/GCS/Azure plug in via the trait.
-storage = ["_async_trait"]
+# `bytes` carries `ByteStream` chunks.
+storage = ["_async_trait", "dep:bytes"]
 
 # In-process scheduled task runner (`rustango::scheduler`) — fire async jobs
 # at fixed intervals with panic isolation per task.
@@ -525,7 +526,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.61.4", path = "../rustango-macros" }
+rustango-macros = { version = "0.61.5", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }

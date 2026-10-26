@@ -15,7 +15,7 @@
 //!   cargo test -p rustango --all-features --test cache_db_backend_add_live
 //! ```
 //!
-//! Each backend skips silently when its env var is unset.
+//! Each backend skips when its env var is unset and fails when unreachable.
 
 // The per-backend tests below carry their own gates; this one keeps the
 // shared helpers from going unused on a SQLite-only build.
@@ -101,33 +101,10 @@ async fn assert_add_semantics(pool: Pool, table: &str) {
     let _ = cache.drop_table().await;
 }
 
-/// Connect, or skip.
-///
-/// "The env var is set" does **not** mean "the server is reachable": this
-/// workflow defines `DATABASE_URL` once at the top level, so it is present in
-/// every job — including `mysql_live`, which runs no Postgres service. A
-/// presence-only guard therefore let the Postgres case run there and spend 30s
-/// timing out before failing the job.
-///
-/// Skipping on a *connection* failure keeps that honest without hiding
-/// anything: the backend that is actually provisioned still runs its
-/// assertions, and a genuine outage in the job that does provide the server
-/// fails on its own many other tests.
-async fn pool_or_skip(var: &str) -> Option<Pool> {
-    let url = std::env::var(var).ok()?;
-    match Pool::connect(&url).await {
-        Ok(pool) => Some(pool),
-        Err(e) => {
-            eprintln!("skipping: {var} is set but unreachable ({e})");
-            None
-        }
-    }
-}
-
 #[cfg(feature = "postgres")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn add_is_atomic_on_postgres() {
-    let Some(pool) = pool_or_skip("DATABASE_URL").await else {
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
         return;
     };
     assert_add_semantics(pool, "rustango_cache_add_pg").await;
@@ -136,7 +113,7 @@ async fn add_is_atomic_on_postgres() {
 #[cfg(feature = "mysql")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn add_is_atomic_on_mysql() {
-    let Some(pool) = pool_or_skip("MYSQL_TEST_URL").await else {
+    let Some(pool) = rustango::testkit::matrix::Backend::MySql.pool().await else {
         return;
     };
     assert_add_semantics(pool, "rustango_cache_add_my").await;

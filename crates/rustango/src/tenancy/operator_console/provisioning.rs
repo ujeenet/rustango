@@ -475,7 +475,9 @@ pub(super) async fn test_connection(
     match preflight::check(&url, &Preflight::default()).await {
         Ok(ok) => Probe::Ok {
             endpoint: Some(ok.endpoint),
-            message: "This role can create tables, so migrations will run.",
+            message: provision::registry_alias(&url, &state.registry)
+                .await
+                .unwrap_or("This role can create tables, so migrations will run."),
         }
         .into_response(),
         // The diagnosis already leads with what to change — see

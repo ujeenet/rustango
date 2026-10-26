@@ -512,12 +512,34 @@ pub(crate) async fn table_view(
         &scalar_fields,
     )
     .await?;
-    let has_next_skipped = if count_skipped && rows.len() as i64 > page_size {
+    let mut has_next_skipped = if count_skipped && rows.len() as i64 > page_size {
         rows.truncate(page_size as usize);
         true
     } else {
         false
     };
+    // Past the scan cap no PK filter applies: "next" only when a row the
+    // hook admits follows, else it reveals a denied one.
+    if aggregates_withheld && has_next_skipped {
+        let cap = i64::try_from(state.view_hook_scan_cap()).unwrap_or(i64::MAX);
+        let after = crate::sql::select_rows_as_json(
+            &state.pool,
+            &SelectQuery {
+                where_clause: where_clause.clone(),
+                search: search.clone(),
+                joins: build_fk_joins(&state, model, &parts),
+                order_by: list_order_by(model, &admin_cfg),
+                limit: Some(cap.max(1)),
+                offset: Some(offset + page_size),
+                ..SelectQuery::new(model)
+            },
+            &scalar_fields,
+        )
+        .await?;
+        has_next_skipped = after.iter().any(|row| {
+            crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(row))
+        });
+    }
     // The detail page's "view" hook hides a row here too (#2231); the
     // PK filter above already did, unless the table was too big to scan.
     rows.retain(|row| {
@@ -1972,6 +1994,8 @@ pub(crate) async fn detail_view(
             "label": model.display_label(),
             "label_plural": model.display_label_plural(),
         },
+        // Links carry the key as one encoded segment or query value.
+        "pk_path": crate::url_codec::url_encode(&pk_raw),
         "pk": pk_raw,
         "cells": cells_ctx,
         "read_only": state.is_read_only(model.table),
@@ -2372,7 +2396,13 @@ pub(crate) async fn edit_form(
     parts: axum::http::request::Parts,
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
-) -> Result<Html<String>, AdminError> {
+) -> Result<Response, AdminError> {
+    // No `{table}.change`: the save would be refused, so show the read-only detail.
+    if state.is_read_only(resolve_model(&state, &table)?.table) {
+        let pk = crate::url_codec::url_encode(&pk_raw);
+        let detail = format!("{}/{table}/{pk}", state.config.admin_prefix);
+        return Ok(Redirect::to(&detail).into_response());
+    }
     let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw).await?;
 
     let edit_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
@@ -2439,7 +2469,8 @@ pub(crate) async fn edit_form(
         None,
         inline_panels,
         &gfk_cts,
-    )))
+    ))
+    .into_response())
 }
 
 pub(crate) async fn update_submit(

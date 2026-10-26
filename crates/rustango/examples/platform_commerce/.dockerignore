@@ -13,6 +13,7 @@ target/
 *.db-wal
 *.db-shm
 *.db-journal
+*-migrate.lock*
 
 # Nothing in the image needs these.
 .git/

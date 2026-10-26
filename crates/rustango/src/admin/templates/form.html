@@ -5,7 +5,7 @@
   <ol>
     <li><a href="{{ admin_prefix }}/">{{ admin_title }}</a></li>
     <li><a href="{{ admin_prefix }}/{{ model.table }}">{{ model.label_plural | default(value=model.name) }}</a></li>
-    {% if edit_pk %}<li><a href="{{ admin_prefix }}/{{ model.table }}/{{ edit_pk }}">#{{ edit_pk }}</a></li>{% endif %}
+    {% if edit_pk %}<li><a href="{{ admin_prefix }}/{{ model.table }}/{{ edit_pk_path }}">#{{ edit_pk }}</a></li>{% endif %}
     <li><strong>{{ title }}</strong></li>
   </ol>
 </nav>

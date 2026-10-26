@@ -875,8 +875,7 @@ fn capfirst(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
 }
 
 /// `addslashes` — put a backslash before every quote and backslash.
-/// Useful for CSV or JS literals, where Tera's autoescape does not
-/// apply.
+/// Not safe inside `<script>`: it leaves `</script>` intact; use `escapejs`.
 fn addslashes(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let s = value.as_str().unwrap_or("");
     let mut out = String::with_capacity(s.len() + 8);
