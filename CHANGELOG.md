@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — ORM
+
+- `reverse_has` instance helpers (`<name>`, `_count`, `_fetch`, `_first`, `_pluck`) filter on `self_pk_column`, as the EXISTS form does. Without it they join on the primary-key column, not a literal `id`.
+- A MySQL/SQLite `truncate` writes a bulk `update` audit entry for an audited table whose FK its `DELETE` sets to NULL.
+
 ### Fixed — tests and CI
 
 - Live suites no longer pass in CI when a PG extension is missing or a set URL is unreachable. New `testkit::matrix::{pg_extension, required_env, skip_outside_ci}` skip locally and fail when `CI` is set.

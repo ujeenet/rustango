@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `reverse_has` follows `self_pk_column`
+
+Instance helpers now filter on `self_pk_column`, and an omitted one means the model's primary-key column rather than `id`. Only a relation whose FK targets a non-PK column, or a model whose PK column is not `id`, sees a change.
+
 ## 0.61.4
 
 ### Schema names equal to a database role are refused
