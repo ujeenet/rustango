@@ -392,6 +392,15 @@ enum Flavor {
     CurrentThread,
 }
 
+/// `#[tokio::main]` argument names, accepted without a warning.
+const TOKIO_MAIN_ARGS: &[&str] = &[
+    "flavor",
+    "worker_threads",
+    "start_paused",
+    "crate",
+    "unhandled_panic",
+];
+
 /// A warning per `#[rustango::main]` argument the parsers below ignore.
 fn main_arg_warnings(args: &TokenStream2) -> TokenStream2 {
     use syn::parse::Parser as _;
@@ -406,13 +415,6 @@ fn main_arg_warnings(args: &TokenStream2) -> TokenStream2 {
             )
         }
     };
-    let lit_str = |m: &syn::MetaNameValue| match &m.value {
-        syn::Expr::Lit(syn::ExprLit {
-            lit: syn::Lit::Str(s),
-            ..
-        }) => Some(s.value()),
-        _ => None,
-    };
     let lit_bool = |m: &syn::MetaNameValue| match &m.value {
         syn::Expr::Lit(syn::ExprLit {
             lit: syn::Lit::Bool(_),
@@ -423,15 +425,12 @@ fn main_arg_warnings(args: &TokenStream2) -> TokenStream2 {
     metas
         .iter()
         .filter_map(|meta| {
+            // `#[tokio::main]`'s own names stay silent: a `deny(warnings)`
+            // crate passing one must keep compiling in a patch release.
+            let tokio_arg = TOKIO_MAIN_ARGS.iter().any(|n| meta.path().is_ident(n));
             let ok = match meta {
-                syn::Meta::NameValue(m) if m.path.is_ident("flavor") => {
-                    matches!(
-                        lit_str(m).as_deref(),
-                        Some("current_thread" | "multi_thread")
-                    )
-                }
                 syn::Meta::NameValue(m) if m.path.is_ident("logging") => lit_bool(m),
-                _ => false,
+                _ => tokio_arg,
             };
             (!ok).then(|| {
                 deprecation_warning(
@@ -14096,12 +14095,7 @@ mod main_arg_warning_tests {
     /// A typo or unknown key used to be dropped without a word.
     #[test]
     fn unknown_or_misspelt_args_warn() {
-        for args in [
-            r#"flavor = "curent_thread""#,
-            "worker_threads = 4",
-            "logging = flase",
-            "multi_thread",
-        ] {
+        for args in ["logging = flase", "multi_thread", "workers = 4"] {
             let out = expand(args);
             assert!(out.contains("unknown argument"), "{args}:\n{out}");
         }
@@ -14114,6 +14108,9 @@ mod main_arg_warning_tests {
             r#"flavor = "current_thread""#,
             r#"flavor = "multi_thread", logging = false"#,
             "logging = true",
+            "worker_threads = 4, start_paused = true",
+            r#"crate = "tokio", unhandled_panic = "shutdown_runtime""#,
+            r#"flavor = "curent_thread""#,
         ] {
             assert!(!expand(args).contains("RUSTANGO_WARNING"), "{args}");
         }

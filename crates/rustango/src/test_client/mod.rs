@@ -955,13 +955,17 @@ impl TestResponse {
             .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
             .collect();
         let header_map = parts.headers;
-        // An unread body must fail the test, not read as empty.
-        let body = to_bytes(body, RESPONSE_BODY_LIMIT)
-            .await
-            .unwrap_or_else(|e| {
-                panic!("reading the response body failed (limit {RESPONSE_BODY_LIMIT} bytes): {e}")
-            })
-            .to_vec();
+        // Empty as before, but said out loud; 0.62.0 makes this a panic.
+        let body = match to_bytes(body, RESPONSE_BODY_LIMIT).await {
+            Ok(b) => b.to_vec(),
+            Err(e) => {
+                tracing::warn!(
+                    "TestClient: reading the response body failed (limit \
+                     {RESPONSE_BODY_LIMIT} bytes), using an empty body: {e}"
+                );
+                Vec::new()
+            }
+        };
         Self {
             status,
             headers,
@@ -1995,14 +1999,16 @@ mod tests {
         let _ = RequestFactory::new().get("/x").header("bad name", "v");
     }
 
+    /// Still empty in 0.61.x, as before; only a warning is new.
     #[tokio::test]
-    #[should_panic(expected = "reading the response body failed")]
-    async fn an_oversized_body_panics() {
+    async fn an_oversized_body_reads_as_empty() {
         let big = Router::new().route(
             "/big",
             get(|| async { vec![b'x'; RESPONSE_BODY_LIMIT + 1] }),
         );
-        let _ = TestClient::new(big).get("/big").send().await;
+        let res = TestClient::new(big).get("/big").send().await;
+        assert_eq!(res.status, 200);
+        assert!(res.body.is_empty());
     }
 
     #[tokio::test]
