@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.61.4
+
 ### Schema names equal to a database role are refused
 
 `create-tenant` and `migrate-tenant-storage` reject a schema named like any role. An existing tenant in such a schema keeps working but shadows that role's `public` tables; move it to another schema.

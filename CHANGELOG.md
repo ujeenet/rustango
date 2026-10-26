@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.4] — 2026-10-26
+
 ### Fixed — a schema-mode tenant cannot take a role's name
 
 Creating or moving a tenant into a schema named like a database role is refused: the default `search_path` would put that schema first for the role, the registry's included.
