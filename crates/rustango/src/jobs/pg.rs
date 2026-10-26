@@ -1255,6 +1255,20 @@ mod tests {
         assert!(q.worker_id_prefix.contains("pid:"));
     }
 
+    /// Two hosts with no `HOSTNAME` and the same pid must not share a `locked_by`.
+    #[tokio::test]
+    async fn worker_id_prefix_has_a_per_process_nonce() {
+        let q = PgJobQueue::with_workers_pool(dummy_pool(), 0);
+        let pid = format!("pid:{}:", std::process::id());
+        let after_pid = q.worker_id_prefix.split_once(&pid).expect("pid").1;
+        let nonce = after_pid.split(':').next().unwrap();
+        assert!(
+            nonce.len() >= 16 && nonce.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{}",
+            q.worker_id_prefix
+        );
+    }
+
     #[tokio::test]
     async fn poll_interval_is_overridable() {
         let q = PgJobQueue::with_workers_pool(dummy_pool(), 0)

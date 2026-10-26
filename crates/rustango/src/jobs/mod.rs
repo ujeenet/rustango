@@ -1206,11 +1206,20 @@ mod tests {
         }
 
         let q = InMemoryJobQueue::with_workers(1);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s = seen.clone();
+        q.on_dead_letter(move |dl| {
+            s.lock().unwrap().push((dl.name, dl.attempts));
+            async {}
+        })
+        .await;
         // Deliberately don't register
         q.start().await;
         q.dispatch(&UnregisteredJob).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        // No panic = pass
+        wait_until("the dead letter", || !seen.lock().unwrap().is_empty()).await;
+        // Dropped from memory, so the callback is its only record.
+        assert_eq!(*seen.lock().unwrap(), [("test:unregistered", 0)]);
+        assert_eq!(q.pending_count().await, 0);
         q.shutdown().await;
     }
 

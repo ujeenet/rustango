@@ -1167,3 +1167,86 @@ tri_dialect_test! {
         an_older_table_gets_the_queue_index,
     ],
 }
+
+/// Blocks its thread (no `.await`) for `first_ms` on its first run.
+#[derive(Serialize, Deserialize)]
+struct Blocking {
+    token: String,
+    first_ms: u64,
+}
+
+#[async_trait::async_trait]
+impl Job for Blocking {
+    const NAME: &'static str = "tri:blocking";
+    async fn run(&self) -> Result<(), JobError> {
+        if start(&self.token) == 1 {
+            std::thread::sleep(Duration::from_millis(self.first_ms));
+        }
+        finish(&self.token);
+        Ok(())
+    }
+}
+
+/// A handler blocking its thread past the reclaim threshold keeps its
+/// lease: the heartbeat runs in its own task.
+async fn a_blocking_handler_is_not_run_twice(pool: &Pool) {
+    let tok = token(pool, "blocking");
+    let q = PgJobQueue::with_workers_pool(pool.clone(), 2)
+        .poll_interval(Duration::from_millis(20))
+        .heartbeat_interval(Duration::from_millis(100))
+        .reclaim_stuck_after(Duration::from_millis(400));
+    q.register::<Blocking>().await;
+    q.dispatch(&Blocking {
+        token: tok.clone(),
+        first_ms: 2000,
+    })
+    .await
+    .unwrap();
+    q.start().await;
+    wait_for("the run to finish", || counts(&tok).1 >= 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    q.shutdown().await;
+    assert_eq!(
+        counts(&tok).0,
+        1,
+        "a blocked run was reclaimed and run again"
+    );
+}
+
+// Multi-thread: a blocked thread must leave others for the heartbeat.
+mod multi_thread {
+    use super::*;
+    use rustango::testkit::matrix::{live_lock, Backend};
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_a_blocking_handler_is_not_run_twice() {
+        let _guard = live_lock().lock().await;
+        let Some(pool) = Backend::Postgres.pool().await else {
+            eprintln!("DATABASE_URL not set — skipping");
+            return;
+        };
+        setup(&pool).await;
+        a_blocking_handler_is_not_run_twice(&pool).await;
+    }
+
+    #[cfg(feature = "mysql")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mysql_a_blocking_handler_is_not_run_twice() {
+        let _guard = live_lock().lock().await;
+        let Some(pool) = Backend::MySql.pool().await else {
+            eprintln!("MYSQL_TEST_URL not set — skipping");
+            return;
+        };
+        setup(&pool).await;
+        a_blocking_handler_is_not_run_twice(&pool).await;
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sqlite_a_blocking_handler_is_not_run_twice() {
+        let pool = rustango::testkit::matrix::sqlite_file_pool().await;
+        setup(&pool).await;
+        a_blocking_handler_is_not_run_twice(&pool).await;
+    }
+}

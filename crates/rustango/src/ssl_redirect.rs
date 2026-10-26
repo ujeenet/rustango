@@ -231,6 +231,16 @@ mod tests {
         assert!(!layer.is_exempt("/api/users"));
     }
 
+    /// A prefix matches whole segments: `/health` is not `/healthcheck-admin`.
+    #[test]
+    fn exempt_matches_on_a_segment_boundary() {
+        let layer = SslRedirectLayer::new().exempt(["/health", "/static/"]);
+        assert!(!layer.is_exempt("/healthcheck-admin"));
+        assert!(!layer.is_exempt("/health-admin/x"));
+        assert!(layer.is_exempt("/static/app.js"));
+        assert!(!layer.is_exempt("/staticfoo"));
+    }
+
     #[test]
     fn invalid_proxy_header_pair_silently_dropped() {
         let layer =

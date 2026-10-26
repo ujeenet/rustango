@@ -409,7 +409,7 @@ mod tests {
     use axum::http::header::VARY;
     use axum::response::IntoResponse;
     use axum::routing::get;
-    use flate2::read::{DeflateDecoder, GzDecoder};
+    use flate2::read::{GzDecoder, ZlibDecoder};
     use std::io::Read;
     use tower::ServiceExt;
 
@@ -474,7 +474,8 @@ mod tests {
         let resp = req(big_json_app(), Some("deflate"), "/big").await;
         assert_eq!(resp.headers().get(CONTENT_ENCODING).unwrap(), "deflate");
         let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-        let mut decoder = DeflateDecoder::new(&bytes[..]);
+        // HTTP `deflate` is the zlib format (RFC 9110), not raw DEFLATE.
+        let mut decoder = ZlibDecoder::new(&bytes[..]);
         let mut decoded = String::new();
         decoder.read_to_string(&mut decoded).unwrap();
         assert!(decoded.contains("\"k\""));
@@ -810,6 +811,30 @@ mod tests {
         let raw = req(app, None, "/f").await;
         assert_eq!(raw.headers()[ACCEPT_RANGES], "bytes");
         assert_eq!(raw.headers()[ETAG], "\"abc\"");
+    }
+
+    /// A large body is compressed off the runtime thread, so other tasks
+    /// keep running meanwhile.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_large_body_does_not_block_the_runtime() {
+        let body: String = (0..256 * 1024)
+            .map(|i| char::from(b'a' + ((i * 7919) % 26) as u8))
+            .collect();
+        let app = Router::new()
+            .route(
+                "/big",
+                get(move || async move { ([(CONTENT_TYPE, "text/plain")], body).into_response() }),
+            )
+            .compression(CompressionLayer::default());
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let r = ran.clone();
+        tokio::spawn(async move { r.store(true, std::sync::atomic::Ordering::SeqCst) });
+        let resp = req(app, Some("gzip"), "/big").await;
+        assert_eq!(resp.headers()[CONTENT_ENCODING], "gzip");
+        assert!(
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the compressor held the only runtime thread"
+        );
     }
 
     #[test]

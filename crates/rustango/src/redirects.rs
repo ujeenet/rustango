@@ -354,6 +354,45 @@ mod tests {
         assert_eq!(loc(&r), "/new?utm=test&ref=mail");
     }
 
+    /// A target with its own query or fragment keeps both, in order.
+    #[test]
+    fn query_merges_into_the_targets_query_and_precedes_its_fragment() {
+        let rule = |to: &str| RedirectRule {
+            to: to.into(),
+            permanent: false,
+        };
+        let at = |to, q| loc(&build_redirect_response(&rule(to), q)).to_owned();
+        assert_eq!(at("/new?ref=x", Some("a=1")), "/new?ref=x&a=1");
+        assert_eq!(at("/new#top", Some("a=1")), "/new?a=1#top");
+        assert_eq!(at("/new?ref=x#top", Some("a=1")), "/new?ref=x&a=1#top");
+        assert_eq!(at("/new?", Some("a=1")), "/new?a=1");
+        assert_eq!(at("/new#top", None), "/new#top");
+    }
+
+    /// A non-GET request keeps its method and body: 308/307, not 301/302.
+    #[tokio::test]
+    async fn a_post_gets_a_method_preserving_redirect() {
+        let map = Arc::new(RedirectMap::new().add_permanent("/p", "/P").add("/t", "/T"));
+        let app = app(map);
+        for (path, status) in [
+            ("/p", StatusCode::PERMANENT_REDIRECT),
+            ("/t", StatusCode::TEMPORARY_REDIRECT),
+        ] {
+            let r = app
+                .clone()
+                .oneshot(Request::post(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(r.status(), status, "{path}");
+        }
+        let head = app
+            .clone()
+            .oneshot(Request::head("/p").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(head.status(), StatusCode::MOVED_PERMANENTLY);
+    }
+
     #[tokio::test]
     async fn empty_map_is_a_no_op() {
         let map = Arc::new(RedirectMap::new());
