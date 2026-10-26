@@ -14,7 +14,9 @@
 //! Payload shape:
 //!
 //! - If `serde_json::Value` is a plain string, it's sent as `{"text": value}`
-//!   with `&`, `<` and `>` escaped, so it is shown as typed.
+//!   with `&`, `<` and `>` escaped, so it is shown as typed. To keep
+//!   mentions and links, send `json!({"text": "<!here> <https://x|Docs>"})`
+//!   or `blocks` instead.
 //! - Otherwise the value is sent through unchanged (lets apps build
 //!   richer Slack `blocks` / attachments by passing a full JSON
 //!   object).
