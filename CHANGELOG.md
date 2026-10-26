@@ -8,9 +8,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 Inline rows (plain and generic) read their cells and key by field name. With `#[rustango(column = "…")]` a cell showed blank and the inline edit form lost the row's key.
 
-### Fixed — SQLite `atomic` takes the write lock at `BEGIN`
+### Added — `atomic_immediate`
 
-`atomic` on SQLite opens with `BEGIN IMMEDIATE`, as `write_transaction` does, so a read-then-write block (`select_for_update`) no longer fails with "database is locked". A block inside another pool's block stays deferred.
+`sql::atomic_immediate` is `atomic` whose top-level SQLite block starts with `BEGIN IMMEDIATE`, so a read-then-write block (`select_for_update`) waits for the write lock instead of failing with "database is locked". `atomic` itself is unchanged.
 
 ### Fixed — prefetch fills every copy of a parent
 
@@ -18,7 +18,7 @@ Inline rows (plain and generic) read their cells and key by field name. With `#[
 
 ### Fixed — migrations, MySQL and MariaDB
 
-- MySQL: changing the type or length of a column a composite FK uses or references drops that FK first and adds it back at the end; the `MODIFY` failed with error 3780.
+- MySQL: changing the type or length of a column a composite FK uses or references drops that FK first (logged) and adds it back at the end exactly as the catalog had it; the `MODIFY` failed with error 3780. A run that stops in between logs the SQL that restores them.
 - MySQL: a correlated `IN` over the table an `update()` / `delete()` writes is no longer read through a derived table, which saw the write's own changes and hit wrong rows; it fails with error 1093 instead.
 - MySQL: widening a pk an M2M junction references widens the junction column too, so the junction keeps its foreign key.
 - MariaDB: JSON `=` / `<>` compare by value (`JSON_EQUALS`), not as text; `explain` returns its JSON plan instead of failing on `FORMAT=TREE` / `EXPLAIN ANALYZE`; check constraints drop with `DROP CONSTRAINT`; `bulk_update` no longer sends `VALUES ROW(…)`.

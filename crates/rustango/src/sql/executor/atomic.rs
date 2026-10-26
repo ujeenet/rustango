@@ -431,11 +431,6 @@ pub(crate) fn in_any_block() -> bool {
 /// `Ok`, the other writes commit. A MySQL lock-wait timeout (1205) always
 /// aborts the block.
 ///
-/// **SQLite** opens the block with `BEGIN IMMEDIATE`, as
-/// [`write_transaction`] does, so one writer runs at a time. A block opened
-/// inside another pool's block keeps a deferred `BEGIN`: that pool may hold
-/// the same file's lock.
-///
 /// **Costs:** past 64 open savepoints in one transaction PostgreSQL
 /// spills its subtransaction cache, so avoid nesting in hot loops. On
 /// MySQL a deadlock inside a nested block rolls back the whole outer
@@ -459,7 +454,36 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    run(pool, End::Commit, f).await
+    run(pool, End::Commit, Begin::Deferred, f).await
+}
+
+/// [`atomic`] whose top-level SQLite block starts with `BEGIN IMMEDIATE`, as
+/// [`write_transaction`] does: a read-then-write block (`select_for_update`)
+/// then waits for the write lock instead of failing with `SQLITE_BUSY`.
+///
+/// Inside a block on the same pool it is a savepoint, like [`atomic`];
+/// inside another pool's block it begins deferred, as that pool may hold
+/// the file's lock. Other backends: exactly [`atomic`]. Writes that bypass
+/// the block (a spawned task, a pool write) wait for its lock.
+///
+/// # Errors
+/// As [`atomic`].
+pub async fn atomic_immediate<F, T>(pool: &Pool, f: F) -> Result<T, ExecError>
+where
+    F: for<'tx> FnOnce(
+        &'tx AtomicTx,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
+    >,
+{
+    run(pool, End::Commit, Begin::Immediate, f).await
+}
+
+/// How a top-level SQLite block begins.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Begin {
+    Deferred,
+    Immediate,
 }
 
 /// How a block ends when its closure returns `Ok`.
@@ -480,10 +504,10 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    run(pool, End::Rollback, f).await
+    run(pool, End::Rollback, Begin::Deferred, f).await
 }
 
-async fn run<F, T>(pool: &Pool, end: End, f: F) -> Result<T, ExecError>
+async fn run<F, T>(pool: &Pool, end: End, begin: Begin, f: F) -> Result<T, ExecError>
 where
     F: for<'tx> FnOnce(
         &'tx AtomicTx,
@@ -497,7 +521,7 @@ where
         std::iter::successors(current.clone(), |b| b.enclosing.clone()).find(|b| b.pool.same(&id));
     match same_pool {
         Some(parent) => nested(parent, current, end, f).await,
-        None => outermost(pool, id, current, end, f).await,
+        None => outermost(pool, id, current, end, begin, f).await,
     }
 }
 
@@ -506,6 +530,7 @@ async fn outermost<F, T>(
     id: PoolId,
     enclosing: Option<Arc<Block>>,
     end: End,
+    begin: Begin,
     f: F,
 ) -> Result<T, ExecError>
 where
@@ -516,9 +541,7 @@ where
     >,
 {
     let fatal = Arc::new(AtomicBool::new(false));
-    // SQLite: the write lock at BEGIN, or a read-then-write block fails
-    // SQLITE_BUSY. Not under another pool's block, which may hold it.
-    let mut tx = if enclosing.is_none() {
+    let mut tx = if begin == Begin::Immediate && enclosing.is_none() {
         write_transaction(pool).await?
     } else {
         transaction_pool(pool).await?
