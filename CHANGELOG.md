@@ -8,6 +8,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `connect_pre_migrate_with_target` / `connect_post_migrate_with_target` receivers also get a `MigrateTarget` with the run's pool and tenant slug, so a per-tenant `post_migrate` can seed that tenant.
 
+### Fixed — admin
+
+- The admin TOTP enroll page (`/account/totp`) sends `Cache-Control: no-store`, so its setup key does not come back from a cache or the Back button.
+- The `addslashes` filter docs no longer suggest it for JS: inside `<script>` use `escapejs`.
+
 ### Fixed — ORM
 
 - `reverse_has` instance helpers (`<name>`, `_count`, `_fetch`, `_first`, `_pluck`) filter on `self_pk_column`, as the EXISTS form does. Without it they join on the primary-key column, not a literal `id`.
