@@ -2,8 +2,10 @@
 //! timeouts object storage needs, and the encodings both signers use.
 
 use std::fmt::Write as _;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use super::StorageError;
+use super::{ByteStream, StorageError};
 
 /// The longest a presigned URL lives: 7 days, S3's ceiling, used for Azure too.
 pub(super) const MAX_PRESIGN_SECS: u64 = 604_800;
@@ -54,7 +56,7 @@ impl Http {
         &self,
         method: reqwest::Method,
         url: &str,
-        len: usize,
+        len: u64,
     ) -> reqwest::RequestBuilder {
         match self {
             Self::Default {
@@ -70,9 +72,57 @@ impl Http {
 }
 
 /// The read timeout plus the time to send `len` bytes at [`MIN_UPLOAD_RATE`].
-pub(super) fn upload_timeout(read_timeout: std::time::Duration, len: usize) -> std::time::Duration {
-    let len = u64::try_from(len).unwrap_or(u64::MAX);
+pub(super) fn upload_timeout(read_timeout: std::time::Duration, len: u64) -> std::time::Duration {
     read_timeout + std::time::Duration::from_millis(len.saturating_mul(1000) / MIN_UPLOAD_RATE)
+}
+
+/// A request body of exactly `len` bytes, sent as they arrive.
+pub(super) fn stream_body(body: ByteStream, len: u64) -> reqwest::Body {
+    reqwest::Body::wrap(StreamBody {
+        body: std::sync::Mutex::new(body.exact(len)),
+        len,
+    })
+}
+
+/// reqwest wants a `Sync` body; the mutex gives that without locking,
+/// as `poll_frame` has `&mut self`.
+struct StreamBody {
+    body: std::sync::Mutex<ByteStream>,
+    len: u64,
+}
+
+impl http_body::Body for StreamBody {
+    type Data = bytes::Bytes;
+    type Error = StorageError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let body = self
+            .get_mut()
+            .body
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        futures_util::StreamExt::poll_next_unpin(body, cx)
+            .map(|next| next.map(|chunk| chunk.map(http_body::Frame::data)))
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(self.len)
+    }
+}
+
+/// A failed request, with its causes: a streamed body's own error is
+/// one of them.
+pub(super) fn send_error(e: &reqwest::Error) -> StorageError {
+    let mut msg = format!("http: {e}");
+    let mut cause = std::error::Error::source(e);
+    while let Some(c) = cause {
+        let _ = write!(msg, ": {c}");
+        cause = c.source();
+    }
+    StorageError::Io(msg)
 }
 
 /// A header value as the signers sign it: trimmed, inner runs of spaces
@@ -135,6 +185,134 @@ pub(super) fn split_endpoint(endpoint: &str) -> (String, String) {
     match rest.find('/') {
         Some(i) => (format!("{scheme}://{}", &rest[..i]), rest[i..].to_owned()),
         None => (format!("{scheme}://{rest}"), String::new()),
+    }
+}
+
+/// One-request HTTP servers for the backends' tests.
+#[cfg(test)]
+pub(super) mod testing {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use crate::storage::ByteStream;
+
+    /// What one request carried.
+    pub(in crate::storage) struct Served {
+        pub head: String,
+        /// Empty when counted instead.
+        pub body: Vec<u8>,
+        /// Body bytes that arrived before the client stopped.
+        pub body_len: u64,
+        /// The `content-length` the client declared.
+        pub declared: u64,
+    }
+
+    /// Answer one request with `status`, `extra` header lines (each
+    /// ending in `\r\n`) and `reply` as the body.
+    pub(in crate::storage) async fn serve(
+        status: u16,
+        extra: String,
+        reply: Vec<u8>,
+    ) -> (String, tokio::task::JoinHandle<Served>) {
+        serve_counted(status, extra, reply, None).await
+    }
+
+    /// [`serve`], counting the body into `count` instead of keeping it.
+    pub(in crate::storage) async fn serve_counted(
+        status: u16,
+        extra: String,
+        reply: Vec<u8>,
+        count: Option<Arc<AtomicU64>>,
+    ) -> (String, tokio::task::JoinHandle<Served>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = vec![0u8; 64 * 1024];
+            // A client that gives up mid-body resets the connection.
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let end = buf
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .unwrap_or(buf.len());
+            let head = String::from_utf8_lossy(&buf[..end]).into_owned();
+            let declared: u64 = head
+                .to_ascii_lowercase()
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:").map(str::to_owned))
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            let mut body = buf.split_off((end + 4).min(buf.len()));
+            let mut body_len = body.len() as u64;
+            if count.is_some() {
+                body.clear();
+            }
+            while body_len < declared {
+                let n = sock.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                body_len += n as u64;
+                match &count {
+                    Some(c) => {
+                        c.store(body_len, Ordering::SeqCst);
+                    }
+                    None => body.extend_from_slice(&chunk[..n]),
+                }
+            }
+            if body_len >= declared {
+                let reply_head = format!(
+                    "HTTP/1.1 {status} X\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n",
+                    reply.len()
+                );
+                let _ = sock.write_all(reply_head.as_bytes()).await;
+                let _ = sock.write_all(&reply).await;
+            }
+            Served {
+                head,
+                body,
+                body_len,
+                declared,
+            }
+        });
+        (endpoint, task)
+    }
+
+    /// `chunks` pieces of `size` bytes. Records in `ahead` the most bytes
+    /// it handed out beyond what `received` says the server had.
+    pub(in crate::storage) fn paced_body(
+        chunks: usize,
+        size: usize,
+        received: Arc<AtomicU64>,
+        ahead: Arc<AtomicU64>,
+    ) -> ByteStream {
+        let piece = Bytes::from(vec![b'z'; size]);
+        ByteStream::new(futures_util::StreamExt::map(
+            futures_util::stream::iter(0..chunks),
+            move |i| {
+                let lag = ((i * size) as u64).saturating_sub(received.load(Ordering::SeqCst));
+                ahead.fetch_max(lag, Ordering::SeqCst);
+                Ok(piece.clone())
+            },
+        ))
+    }
+
+    /// The head's value for `name`, or `None`.
+    pub(in crate::storage) fn header(head: &str, name: &str) -> Option<String> {
+        head.lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
+        })
     }
 }
 
