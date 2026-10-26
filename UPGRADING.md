@@ -158,6 +158,10 @@ untouched.
 
 `SslRedirectLayer::exempt` still matches raw prefixes, but warns when `/health` exempts `/healthz`; 0.62.0 will match whole segments only, so list such paths explicitly. `RedirectMap` answers POST, PUT and others with 308/307 instead of 301/302. `CompressionLayer`'s `deflate` is now zlib-wrapped, as browsers expect.
 
+### Tenancy: path-prefix routing and REST claims
+
+`server::Builder` now sends an apex request whose first path segment is an active tenant's `path_prefix` to that tenant, not the console, at one registry lookup per apex request. Do not give a tenant a prefix the console uses (`/orgs`, `/login`). REST writes to `rustango_orgs` / `rustango_org_hosts` now validate and lowercase host, path prefix and port like the admin, and answer `409` for one another tenant holds.
+
 ### Template views hide credential columns
 
 `ListView`, `DetailView`, `DeleteView`, `UpdateView` and the bulk-delete confirm page no longer put `password_hash`, `password` or `database_url` into the Tera context unless `.fields()` (or UpdateView's field list) names them. A template that shows a column literally named `password` or `database_url` on purpose must now list it in `.fields()`. UpdateView and the bulk-delete confirm page still carry columns outside their list; one warning per process names those views, as a later release will drop the columns.

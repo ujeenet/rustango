@@ -27,6 +27,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Template views leave `password_hash`, `password` and `database_url` out of `object` / `objects` / `object_list` unless the view lists them. UpdateView and the bulk-delete confirm page still carry unlisted columns; one warning per process names them, as a later release drops them.
 - Admin inline `max_num` is recounted inside the save transaction with the parent row locked, so two concurrent saves cannot both add past it.
 
+### Fixed — tenancy
+
+- `server::Builder` serves a path-prefix tenant at `<apex>/<prefix>`, and its admin under the prefix on its own host too; every apex request went to the operator console, so the impersonation handoff 404ed.
+- Console handoff, end-impersonation and first-admin links in a `server::Builder` stack use the apex given to `from_pool`, not `RUSTANGO_APEX_DOMAIN`. A link made for a tenant with no host, path prefix or port logs a warning: the standard resolvers do not route `<slug>.<apex>`.
+- REST ViewSet writes to `rustango_orgs` / `rustango_org_hosts` claim the host, path prefix and port in one transaction as the admin does: a value another tenant holds is a `409`, a malformed one a `400`; MySQL's deadlock between two claims is retried once.
+- `migrate-tenant-storage` shows psql's ERROR lines, not the NOTICEs before them, and refuses up front an extension on the target that another role owns, which the restore could not move.
+
 ## [0.61.5] — 2026-10-26
 
 ### Fixed — auth

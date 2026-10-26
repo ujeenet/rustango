@@ -547,6 +547,28 @@ impl OrgResolver for PathPrefixResolver {
     }
 }
 
+/// [`PathPrefixResolver`] on the apex host only, where a path-prefix
+/// tenant lives: another host's path never picks a tenant.
+pub(crate) struct ApexPathPrefixResolver {
+    apex: String,
+}
+
+impl ApexPathPrefixResolver {
+    pub(crate) fn new(apex: impl Into<String>) -> Self {
+        Self { apex: apex.into() }
+    }
+}
+
+#[async_trait]
+impl OrgResolver for ApexPathPrefixResolver {
+    async fn resolve(&self, parts: &Parts, registry: &Pool) -> Result<Option<Org>, TenancyError> {
+        if !host_is_apex(&parts.headers, &parts.uri, &self.apex) {
+            return Ok(None);
+        }
+        PathPrefixResolver.resolve(parts, registry).await
+    }
+}
+
 // ---------------- HeaderResolver ----------------
 
 /// Match a user-chosen HTTP header value against `Org.slug`.
