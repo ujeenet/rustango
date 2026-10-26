@@ -350,6 +350,7 @@ pub struct AgentSkillTool {
 #[derive(crate::Model, Debug, Clone)]
 #[rustango(
     table = "rustango_agent_grants",
+    unique_together = "agent_id, skill_id",
     admin(list_display = "agent_id, skill_id", ordering = "agent_id")
 )]
 pub struct AgentGrant {
@@ -371,6 +372,7 @@ pub struct AgentGrant {
 #[derive(crate::Model, Debug, Clone)]
 #[rustango(
     table = "rustango_agent_skill_permissions",
+    unique_together = "skill_id, permission_codename",
     admin(list_display = "skill_id, permission_codename", ordering = "skill_id")
 )]
 pub struct AgentSkillPermission {
@@ -472,8 +474,10 @@ pub async fn grant_skill_pool(
             skill_id,
             data: serde_json::json!({}),
         };
-        grant.insert_pool(pool).await?;
-        notify_grants_changed(slug, agent_id);
+        // A concurrent grant may have won the race; the unique key makes this a no-op.
+        if grant.insert_or_ignore(pool).await? {
+            notify_grants_changed(slug, agent_id);
+        }
     }
     Ok(())
 }
@@ -695,7 +699,7 @@ pub async fn map_skill_to_permission_pool(
             skill_id,
             permission_codename: permission_codename.to_owned(),
         };
-        row.insert_pool(pool).await?;
+        row.insert_or_ignore(pool).await?;
     }
     Ok(())
 }

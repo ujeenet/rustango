@@ -6,6 +6,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — SSO, auth and cache edges
 
+- MCP: a skill grant (`agent_id, skill_id`) and a skill-to-permission mapping (`skill_id, permission_codename`) are unique keys now, so concurrent grants no longer leave duplicate rows.
+- `migrate` refuses a new unique index whose columns existing rows already repeat, before any DDL, naming the index and table; MySQL no longer keeps half the migration.
 - `InMemoryCache`: a TTL too large for the clock (e.g. a huge `lockout_duration_secs`) is capped at a century instead of panicking.
 
 ## [0.61.2] — 2026-10-26

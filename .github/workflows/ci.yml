@@ -1120,6 +1120,7 @@ jobs:
           --test basic_auth_cache_tri
           --test api_key_hmac_tri
           --test system_chain_order_tri
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,mcp,testkit --test agent_grants_unique_tri
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,passwords,auth_flows,testkit --test password_reset_links_tri
 
   # Redis live suite. `cache-redis` is off by default, so until #1280
@@ -1399,6 +1400,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test basic_auth_cache_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test api_key_hmac_tri
       - run: cargo test -p rustango --features mysql,admin,tenancy,testkit --test system_chain_order_tri
+      - run: cargo test -p rustango --features mysql,tenancy,mcp,testkit --test agent_grants_unique_tri
       - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
       - run: cargo test -p rustango --features mysql,admin,tenancy,totp,passkey,testkit --test tenant_admin_tables_tri
       - run: cargo test -p rustango --features mysql,tenancy,passwords,auth_flows,testkit --test password_reset_links_tri

@@ -1372,6 +1372,7 @@ async fn downgrade_with_ledger(
 
 #[cfg(feature = "postgres")]
 async fn apply_one(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
+    refuse_duplicate_keys(&pool.clone().into(), mig).await?;
     if mig.atomic {
         apply_atomic(pool, mig, ledger).await
     } else {
@@ -4639,11 +4640,63 @@ async fn apply_one_pool(
     mig: &Migration,
     ledger: &str,
 ) -> Result<(), MigrateError> {
+    refuse_duplicate_keys(pool, mig).await?;
     if mig.atomic {
         apply_atomic_pool(pool, mig, ledger).await
     } else {
         apply_nonatomic_pool(pool, mig, ledger).await
     }
+}
+
+/// Refuse, before any DDL, a unique key that rows already repeat: the index
+/// would fail midway (MySQL keeps what ran). Stops at the first data step,
+/// which may remove the duplicates; a probe that fails defers to the DDL.
+async fn refuse_duplicate_keys(
+    pool: &crate::sql::Pool,
+    mig: &Migration,
+) -> Result<(), MigrateError> {
+    use super::diff::SchemaChange as SC;
+    let mut created: Vec<&str> = Vec::new();
+    for op in &mig.forward {
+        let Operation::Schema(change) = op else {
+            return Ok(());
+        };
+        let (name, table, columns): (&str, &str, Vec<&str>) = match change {
+            SC::CreateTable(t) | SC::CreateM2MTable { through: t, .. } => {
+                created.push(t);
+                continue;
+            }
+            SC::CreateIndex {
+                name,
+                table,
+                columns,
+                unique: true,
+                where_clause: None,
+                ..
+            } => (name, table, columns.iter().map(String::as_str).collect()),
+            SC::AlterColumnUnique {
+                table,
+                column,
+                unique: true,
+            } => (column, table, vec![column.as_str()]),
+            _ => continue,
+        };
+        if created.contains(&table) {
+            continue;
+        }
+        if super::ensure::has_duplicate_keys(pool, table, &columns)
+            .await
+            .unwrap_or(false)
+        {
+            return Err(MigrateError::Validation(format!(
+                "{}: cannot add unique `{name}` on `{table}` ({}): existing rows repeat \
+                 those values. Remove the duplicate rows, then run migrate again.",
+                mig.name,
+                columns.join(", "),
+            )));
+        }
+    }
+    Ok(())
 }
 
 async fn unapply_all_in_order_pool(

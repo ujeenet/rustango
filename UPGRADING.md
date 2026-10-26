@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### MCP: unique keys on agent grants
+
+The next `migrate` adds unique indexes on `rustango_agent_grants (agent_id, skill_id)` and `rustango_agent_skill_permissions (skill_id, permission_codename)`. If duplicate rows exist, `migrate` stops before any DDL and names the table: delete the extra rows (keep one per key) and run it again.
+
 ## 0.61.2
 
 ### SQLite: JSON column equality compares values
