@@ -9,10 +9,10 @@
 //! return 403 when a hook for that action denies.
 //!
 //! A `"view"` hook also drops denied rows from the list, autocomplete,
-//! FK facet names and FK cell names. It runs after the page is read, so a
-//! page may show fewer rows, and it does not hide denied rows from the
-//! totals, facet values and counts, date buckets or the "has next" link.
-//! A `register_admin_queryset!` filter hides them everywhere.
+//! FK facet names and FK cell names. The list runs it over every row in
+//! scope, so totals, facets, date buckets and search leave denied rows out;
+//! past 10 000 rows it withholds those instead. A `register_admin_queryset!`
+//! filter does the same in SQL and scales.
 //!
 //! `row` is `None` for a collection-level check, such as "may this
 //! user reach the add form?", and `Some(&json)` for a row check.

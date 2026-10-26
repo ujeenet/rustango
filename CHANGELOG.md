@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin lists leave out rows the `view` hook denies
+
+Totals, pages, facets, date buckets and search no longer count rows a `"view"` object-permission hook refuses. The list runs the hook over the whole scope, up to 10 000 rows; past that it withholds the total, facets and date strip.
+
 ### Fixed — generic relation reads apply global scopes
 
 `GenericForeignKey::get_object`, `fetch_row_as_json`, `fetch_reverse_generic` and `prefetch_reverse_generic_for` apply the model's global scopes, as `prefetch_generic` already did.

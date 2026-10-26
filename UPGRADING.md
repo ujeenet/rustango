@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Admin lists with a `view` hook read the whole scope
+
+Each list request runs the hook over every row in scope (at most 10 000). For big tables, prefer `register_admin_queryset!`, which filters in SQL.
+
 ### Generic relation reads hide scoped-out rows
 
 `get_object` and the reverse generic helpers now return what a `QuerySet` returns. To read hidden rows, query the model with `without_global_scopes()`.
