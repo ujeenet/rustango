@@ -1022,10 +1022,12 @@ where
     // Its own task: a handler that blocks its thread cannot starve the
     // lease, and a heartbeat waiting on a connection never stops `run` (#1961).
     let (pool, worker_id, every) = (pool.clone(), worker.id.clone(), worker.heartbeat);
+    let (started, ready) = tokio::sync::oneshot::channel();
     let lease = AbortOnDrop(tokio::spawn(async move {
         let mut beat = tokio::time::interval(every);
         beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         beat.tick().await; // the first tick is immediate
+        let _ = started.send(());
         loop {
             beat.tick().await;
             if !heartbeat(&pool, &worker_id, id).await {
@@ -1033,6 +1035,9 @@ where
             }
         }
     }));
+    // Until it has run once the task sits in this thread's LIFO slot, which
+    // no other worker steals; a blocking `run` would then starve it.
+    let _ = ready.await;
     let out = run.await;
     // The beat only ends by finding the lease gone.
     (out, !lease.0.is_finished())
