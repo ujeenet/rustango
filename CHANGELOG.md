@@ -10,11 +10,11 @@ Creating or moving a tenant into a schema named like a database role is refused:
 
 ### Fixed — ViewSet writes check FK targets and the view permission
 
-An FK in a create or update body must name a row the target's global scopes and soft delete show, else `422`; the new `ViewSet::related_filter` narrows it further. A write echoes its row only to a caller with the `retrieve` permission: otherwise `201` with no body, `null` per bulk row, or `204`.
+An FK in a create or update body must name a row the target's global scopes and soft delete show, else `422`; an update may resend the value it already holds. The new `ViewSet::related_filter` narrows it further. A write echoes its full row only to a caller with the `retrieve` permission; others get just the primary key. A single create also sends `Location`.
 
 ### Fixed — admin lists leave out rows the `view` hook denies
 
-Totals, pages, facets, date buckets and search no longer count rows a `"view"` object-permission hook refuses. The list runs the hook over the whole scope, up to 10 000 rows; past that it withholds the total, facets and date strip.
+Totals, pages, facets, date buckets and search no longer count rows a `"view"` object-permission hook refuses. The list runs the hook over the rows its filters and search match, up to 10 000 (`Builder::view_hook_scan_cap`); past that it withholds the total, facets and date strip and logs a warning once per table.
 
 ### Fixed — generic relation reads apply global scopes
 

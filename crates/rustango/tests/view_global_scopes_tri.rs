@@ -627,6 +627,45 @@ async fn viewset_fk_must_point_at_a_visible_row(pool: &Pool) {
     assert!(!owners.contains(&bob), "an update moved a pet to a hidden owner");
 }
 
+/// An update may resend the FK it already holds, even to a hidden parent;
+/// moving it to another hidden parent is still refused.
+async fn viewset_update_keeps_an_unchanged_hidden_fk(pool: &Pool) {
+    let owners = seed_owners(pool).await;
+    let bob = owners[1];
+    let mut cid = Owner {
+        id: Auto::default(),
+        name: "cid".into(),
+        visible: false,
+    };
+    cid.insert_pool(pool).await.expect("hidden owner");
+    let cid = *cid.id.get().expect("pk");
+    let mut pet = Pet {
+        id: Auto::default(),
+        tag: "old".into(),
+        owner_id: ForeignKey::unloaded(bob),
+    };
+    pet.insert_pool(pool).await.expect("pet of a hidden owner");
+    let pk = *pet.id.get().expect("pk");
+    let patch = |body: String| async move {
+        send(pool, Method::PATCH, &format!("/api/pets/{pk}"), JSON, &body).await
+    };
+    let (status, body) = patch(format!(r#"{{"tag":"new","owner_id":{bob}}}"#)).await;
+    assert_eq!(status, StatusCode::OK, "unchanged FK: {body}");
+    let (status, body) = send(
+        pool,
+        Method::PUT,
+        &format!("/api/pets/{pk}"),
+        JSON,
+        &format!(r#"{{"tag":"put","owner_id":{bob}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT with the unchanged FK: {body}");
+    let (status, body) = patch(format!(r#"{{"owner_id":{cid}}}"#)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "moved to hidden: {body}");
+    let pets = Pet::objects().fetch(pool).await.expect("pets");
+    assert_eq!((pets[0].tag.as_str(), pets[0].owner_id.pk()), ("put", bob));
+}
+
 async fn search_narrows_an_or_scope(pool: &Pool) {
     seed_owners(pool).await;
     let (_, body) = get(pool, "/api/owners").await;
@@ -853,6 +892,7 @@ tri_dialect_test! {
         template_writes_on_visible_rows_work,
         fk_display_skips_scoped_out_targets,
         viewset_fk_must_point_at_a_visible_row,
+        viewset_update_keeps_an_unchanged_hidden_fk,
         search_narrows_an_or_scope,
         viewset_soft_deletes_and_hides_deleted_rows,
         viewset_body_cannot_set_deleted_at,

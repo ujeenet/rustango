@@ -786,10 +786,12 @@ A model's static global scopes also limit what is read, not what is written: a
 create or update may leave the scope (201 with no body, or 204). For a security
 boundary, use a filter backend with `write_pins`.
 
-A write echoes its row only to a caller with the `retrieve` permission; others
-get 201 with no body, `null` per bulk row, or 204.
+A write echoes its full row only to a caller with the `retrieve` permission;
+others get just `{"<pk>": …}` (one per bulk row). A single create also sends a
+`Location` header pointing at the detail route.
 
-An FK a body sets must name a row the target's global scopes show. To narrow it
+An FK a body sets must name a row the target's global scopes show; an update
+may resend the value the row already holds. To narrow it
 further, as DRF's related queryset does, add a backend for that field; it runs
 against the target model, and any other row is a 422:
 
