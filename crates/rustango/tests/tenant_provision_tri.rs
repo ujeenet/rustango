@@ -1026,10 +1026,17 @@ async fn a_limited_admin_is_told_what_to_grant(pool: &Pool) {
     if env.server_backend() {
         env.add_server_as("main", Some((&weak, "weakpw"))).await;
     } else {
+        // A read-only directory needs Unix permission bits.
+        if cfg!(not(unix)) {
+            return;
+        }
         // A directory the app may read but not write.
         let ro = env.dir("readonly");
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
         let spec = DbServerSpec {
             name: "main".into(),
             backend: BackendKind::Sqlite,
