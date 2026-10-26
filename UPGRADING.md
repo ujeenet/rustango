@@ -168,9 +168,9 @@ An admin inline with `max_num` now recounts its rows inside the save transaction
 
 ### CLI and config
 
-`audit-cleanup --days 0`, `--keep-last 0` or a negative N deletes every audit entry, so it now refuses without `--yes`; add `--yes` to a job that means it. Management verbs (`dumpdata`, `migrate`, …) log to stderr, so their stdout holds only their output; the server still logs to stdout. A tenancy project's `startapp` is now the tenancy one, so `--with-manage-bin` writes the tenancy `manage` bin.
+`audit-cleanup --days 0`, `--keep-last 0` or a negative N deletes every audit entry, so it now refuses without `--yes`; add `--yes` to a job that means it. `Cli` management verbs (`dumpdata`, `migrate`, …) log to stderr, so their stdout holds only their output; `runserver` still logs to stdout. A tenancy project's `startapp` is now the tenancy one, so `--with-manage-bin` writes the tenancy `manage` bin.
 
-`[database] pool_max_size`, `pool_acquire_timeout_secs`, `pool_idle_timeout_secs` and `pool_max_lifetime_secs` of 0 are ignored with a warning, as their env vars already were. An all-digit or `true` `RUSTANGO__*` value fills a string field as text, and a bad override fails as `ConfigError::EnvOverride` instead of `Shape`. `SecuritySettings` has new `hsts_include_subdomains` / `hsts_preload` fields: a struct literal needs `..Default::default()`.
+`[database] pool_max_size`, `pool_acquire_timeout_secs`, `pool_idle_timeout_secs` and `pool_max_lifetime_secs` of 0 are ignored with a warning, as their env vars already were. An all-digit or `true` `RUSTANGO__*` value fills a string field as text, and a bad override fails as `ConfigError::EnvOverride` instead of `Shape`.
 
 ## 0.61.5
 

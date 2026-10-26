@@ -751,14 +751,8 @@ pub struct SecuritySettings {
     /// HSTS `max-age` in seconds. Default `31536000`, one year. `0`
     /// turns HSTS off, which helps in dev when switching between
     /// http and https. Setting it also adds `includeSubDomains` and
-    /// `preload`, whatever the preset; the two fields below opt out.
+    /// `preload`, whatever the preset (with a warning on `relaxed`).
     pub hsts_max_age_secs: Option<u64>,
-    /// `false` drops `includeSubDomains` from the HSTS header. `None`
-    /// keeps the preset's, or adds it when `hsts_max_age_secs` is set.
-    pub hsts_include_subdomains: Option<bool>,
-    /// `false` drops `preload` from the HSTS header. `None` keeps the
-    /// preset's, or adds it when `hsts_max_age_secs` is set.
-    pub hsts_preload: Option<bool>,
     /// Origins allowed by CORS. Empty means no CORS layer. `["*"]`
     /// allows everything, though browsers reject it with
     /// credentials.

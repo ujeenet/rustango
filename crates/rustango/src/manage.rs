@@ -820,6 +820,13 @@ impl Cli {
     /// # Errors
     /// Surfaces whatever the underlying dispatcher / server returns.
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let verb = args.first().map_or("", String::as_str);
+        // A management verb's stdout is its output (`dumpdata > fx.json`),
+        // so its logs go to stderr, also through `#[rustango::main]`'s subscriber.
+        if !crate::logging::is_server_verb(verb) {
+            crate::logging::console_to_stderr();
+        }
         #[cfg(feature = "config")]
         if let Some(e) = self.boot_settings_error() {
             return Err(format!("refusing to start on a broken config: {e}").into());
@@ -837,11 +844,7 @@ impl Cli {
                 .as_ref()
                 .map(|s| s.logging.clone())
                 .unwrap_or_default();
-            crate::logging::Setup::from_settings(&s)
-                .with_console(crate::logging::Console::for_verb(
-                    std::env::args().nth(1).as_deref(),
-                ))
-                .install()
+            crate::logging::Setup::from_settings(&s).install()
         } else {
             None
         };
@@ -850,9 +853,6 @@ impl Cli {
         if let Some(s) = self.settings_for_layers.as_ref() {
             warn_unread_settings(&s.inert_keys());
         }
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        let verb = args.first().map_or("", String::as_str);
-
         match verb {
             // v0.31.1 (#1): the hyphenated `run-server` form is what
             // `--help` has advertised since the start, but only the
@@ -1758,12 +1758,6 @@ fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
     }
     if s.security.hsts_max_age_secs.is_some() {
         inert.push("security.hsts_max_age_secs");
-    }
-    if s.security.hsts_include_subdomains.is_some() {
-        inert.push("security.hsts_include_subdomains");
-    }
-    if s.security.hsts_preload.is_some() {
-        inert.push("security.hsts_preload");
     }
     if !s.security.cors_allowed_origins.is_empty() {
         inert.push("security.cors_allowed_origins");

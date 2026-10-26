@@ -365,10 +365,6 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
             let _ = #root::logging::Setup::new()
                 .with_default_env_filter(#root::__private_runtime::main_default_filter())
                 .with_format(#root::__private_runtime::main_format())
-                // A verb's stdout is its output (`dumpdata > fx.json`).
-                .with_console(#root::logging::Console::for_verb(
-                    ::std::env::args().nth(1).as_deref(),
-                ))
                 .install();
         }
     } else {
@@ -13949,9 +13945,11 @@ mod main_attr_tests {
             out.contains("logging :: Setup"),
             "the default entrypoint must still install one:\n{out}",
         );
+        // `./app serve` or `./app --port 8080` must keep logging to stdout:
+        // only `Cli`, which knows its verbs, moves logs to stderr.
         assert!(
-            out.contains("Console :: for_verb"),
-            "a verb's logs must not land in its stdout:\n{out}",
+            !out.contains("args ()"),
+            "the entrypoint must not route logs by argv:\n{out}",
         );
     }
 
