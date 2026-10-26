@@ -164,6 +164,63 @@ fn assert_scheme(backend: Backend, var: &str, url: &str, expected: &[&str]) {
     );
 }
 
+/// Skip a live test locally, but fail it in CI, where a skip reads as a pass.
+///
+/// # Panics
+///
+/// When the `CI` env var is set.
+pub fn skip_outside_ci(why: &str) {
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "{why} — CI must provide it"
+    );
+    eprintln!("skipping: {why}");
+}
+
+/// `env::var(var)`, or a skip that fails in CI. For suites whose only
+/// backend is this server, so every CI job running them sets `var`.
+pub fn required_env(var: &str) -> Option<String> {
+    let v = std::env::var(var).ok();
+    if v.is_none() {
+        skip_outside_ci(&format!("{var} is not set"));
+    }
+    v
+}
+
+/// PG extensions a CI job's image declares it lacks.
+#[cfg(feature = "postgres")]
+const MISSING_PG_EXTENSIONS: &str = "RUSTANGO_TEST_MISSING_PG_EXTENSIONS";
+
+/// May a failed `CREATE EXTENSION name` skip? Locally always; in CI only
+/// when the job lists `name` in [`MISSING_PG_EXTENSIONS`].
+#[cfg(feature = "postgres")]
+fn extension_may_skip(ci: bool, missing: Option<&str>, name: &str) -> bool {
+    !ci || missing.is_some_and(|m| m.split(',').any(|x| x.trim() == name))
+}
+
+/// `CREATE EXTENSION IF NOT EXISTS name`; `false` means skip the test.
+///
+/// # Panics
+///
+/// In CI, when the extension cannot be created and the job does not
+/// declare it missing.
+#[cfg(feature = "postgres")]
+pub async fn pg_extension(pool: &Pool, name: &str) -> bool {
+    let sql = format!("CREATE EXTENSION IF NOT EXISTS {name}");
+    let Err(e) = crate::sql::raw_execute_pool(pool, &sql, Vec::new()).await else {
+        return true;
+    };
+    let ci = std::env::var_os("CI").is_some();
+    let missing = std::env::var(MISSING_PG_EXTENSIONS).ok();
+    assert!(
+        extension_may_skip(ci, missing.as_deref(), name),
+        "`{name}` extension unavailable in CI ({e}); use an image that ships it \
+         or list it in {MISSING_PG_EXTENSIONS}"
+    );
+    eprintln!("skipping: `{name}` extension unavailable ({e})");
+    false
+}
+
 /// Serializes the tests **within one suite** that share a live server.
 ///
 /// ## What this does not do
@@ -689,6 +746,17 @@ mod tests {
             "the reason must travel with the value — it is what a failing \
              assertion prints"
         );
+    }
+
+    /// In CI a missing extension fails unless the job's image declares it.
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn a_missing_extension_skips_only_outside_ci_or_when_declared() {
+        assert!(extension_may_skip(false, None, "vector"));
+        assert!(!extension_may_skip(true, None, "vector"));
+        assert!(!extension_may_skip(true, Some("postgis"), "vector"));
+        assert!(extension_may_skip(true, Some("hstore, postgis"), "postgis"));
+        assert!(!extension_may_skip(true, Some("postgis_topology"), "postgis"));
     }
 
     /// An unset backend skips; it does not fail and does not fabricate a

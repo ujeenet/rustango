@@ -689,6 +689,38 @@ mod cascade {
         assert_eq!(entries(pool, NOTE, "", "delete").await, i64::from(pg));
     }
 
+    /// A MySQL/SQLite truncate's `DELETE` sets `Note.shelf_id` to NULL: one
+    /// bulk `update` entry, none when no note pointed at a shelf.
+    async fn truncate_set_null_audits_the_table_it_changes(pool: &Pool) {
+        Note {
+            id: 1,
+            body: "n".into(),
+            shelf_id: None,
+        }
+        .insert_pool(pool)
+        .await
+        .expect("note");
+        Crate::truncate(pool).await.expect("empty crates");
+        Shelf::truncate(pool).await.expect("truncate");
+        assert_eq!(entries(pool, NOTE, "", "update").await, 0);
+        setup(pool).await;
+        Note {
+            id: 1,
+            body: "n".into(),
+            shelf_id: Some(1),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("note");
+        Shelf::truncate(pool).await.expect("truncate");
+        let pg = pool.dialect().name() == "postgres";
+        assert_eq!(entries(pool, NOTE, "", "update").await, i64::from(!pg));
+        if !pg {
+            let note = Note::objects().fetch(pool).await.unwrap();
+            assert_eq!(note[0].shelf_id, None);
+        }
+    }
+
     /// Audited tables the truncate reaches but takes no rows from get no entry.
     async fn truncate_skips_reached_tables_without_rows(pool: &Pool) {
         Crate::truncate(pool).await.expect("empty crates");
@@ -792,6 +824,7 @@ mod cascade {
             single_statement_pg_paths_still_delete,
             fk_set_null_audits_each_changed_child,
             truncate_cascade_audits_the_tables_it_empties,
+            truncate_set_null_audits_the_table_it_changes,
             truncate_skips_reached_tables_without_rows,
         ],
     }

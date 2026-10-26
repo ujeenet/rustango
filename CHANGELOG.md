@@ -4,6 +4,27 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — migrate signals know their database
+
+`connect_pre_migrate_with_target` / `connect_post_migrate_with_target` receivers also get a `MigrateTarget` with the run's pool and tenant slug, so a per-tenant `post_migrate` can seed that tenant.
+
+### Fixed — admin
+
+- The admin TOTP enroll page (`/account/totp`) sends `Cache-Control: no-store`, so its setup key does not come back from a cache or the Back button.
+- The `addslashes` filter docs no longer suggest it for JS: inside `<script>` use `escapejs`.
+
+### Fixed — ORM
+
+- `reverse_has` instance helpers (`<name>`, `_count`, `_fetch`, `_first`, `_pluck`) filter on `self_pk_column`, as the EXISTS form does. Without it they join on the primary-key column, not a literal `id`.
+- A MySQL/SQLite `truncate` writes a bulk `update` audit entry for an audited table whose FK its `DELETE` sets to NULL.
+
+### Fixed — tests and CI
+
+- Live suites no longer pass in CI when a PG extension is missing or a set URL is unreachable. New `testkit::matrix::{pg_extension, required_env, skip_outside_ci}` skip locally and fail when `CI` is set.
+- The MySQL permission upsert tests and the tenant read-only admin test run again; they were ignored with stale reasons.
+- The generated example projects' `.gitignore` / `.dockerignore` are regenerated with the scaffolder and now ignore the migrate lock file.
+- CI installs a pinned Trivy release and checks its sha256 instead of piping an install script from `main`; a weekly workflow re-runs the advisory scan.
+
 ## [0.61.4] — 2026-10-26
 
 ### Fixed — a schema-mode tenant cannot take a role's name

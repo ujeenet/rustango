@@ -119,7 +119,16 @@ fn measured(root: &Path) -> BTreeMap<String, usize> {
             if is_tri && matches!(*var, "DATABASE_URL" | "MYSQL_TEST_URL") {
                 continue;
             }
-            if text.contains(&format!("env::var(\"{var}\")")) {
+            // The testkit lookups read the same variables.
+            let via_backend = match *var {
+                "DATABASE_URL" => text.contains("Backend::Postgres.pool()"),
+                "MYSQL_TEST_URL" => text.contains("Backend::MySql.pool()"),
+                _ => false,
+            };
+            if text.contains(&format!("env::var(\"{var}\")"))
+                || text.contains(&format!("required_env(\"{var}\")"))
+                || via_backend
+            {
                 gated = true;
                 // `MYSQL_URL` is counted under its own name rather than
                 // folded into `MYSQL_TEST_URL`. Folding would hide the

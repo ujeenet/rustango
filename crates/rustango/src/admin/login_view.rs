@@ -52,9 +52,22 @@ pub(crate) fn protected_router(state: AppState) -> Router {
     #[cfg(feature = "totp")]
     let router = router.route(
         "/account/totp",
-        get(totp_enroll_form).post(totp_enroll_submit),
+        get(totp_enroll_form)
+            .post(totp_enroll_submit)
+            .layer(axum::middleware::map_response(no_store)),
     );
     router.with_state(state)
+}
+
+/// The enroll page carries the setup key: keep it out of every cache and
+/// the back/forward cache.
+#[cfg(feature = "totp")]
+async fn no_store(mut resp: Response) -> Response {
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store, max-age=0"),
+    );
+    resp
 }
 
 // ============================================================ Login form (GET)

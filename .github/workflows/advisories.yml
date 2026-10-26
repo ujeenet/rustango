@@ -1,0 +1,33 @@
+name: Advisories
+
+# `deny` in ci.yml runs only on push and PR; an advisory published on a quiet
+# week would wait for the next commit. This re-checks the workspace and every
+# example lockfile weekly.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
+      # Every example crate with a lockfile, found rather than listed.
+      - name: Examples (check advisories)
+        run: |
+          status=0
+          for lock in examples/*/Cargo.lock crates/rustango/examples/*/Cargo.lock; do
+            manifest="$(dirname "$lock")/Cargo.toml"
+            echo "::group::$manifest"
+            cargo deny --manifest-path "$manifest" check advisories || status=1
+            echo "::endgroup::"
+          done
+          exit $status

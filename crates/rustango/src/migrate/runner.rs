@@ -303,12 +303,18 @@ pub async fn apply_all(pool: &PgPool) -> Result<(), MigrateError> {
     // (#1208) — they were unconditional while the module is not.
     #[cfg(feature = "signals")]
     use crate::signals::migrate::{
-        send_post_migrate, send_pre_migrate, PostMigrateContext, PreMigrateContext,
+        send_post_migrate_with_target, send_pre_migrate_with_target, MigrateTarget,
+        PostMigrateContext, PreMigrateContext,
     };
     #[cfg(feature = "signals")]
-    send_pre_migrate(PreMigrateContext {
-        source: "apply_all",
-    })
+    let target = MigrateTarget::new(crate::sql::Pool::Postgres(pool.clone()), None);
+    #[cfg(feature = "signals")]
+    send_pre_migrate_with_target(
+        PreMigrateContext {
+            source: "apply_all",
+        },
+        target.clone(),
+    )
     .await;
     let models = bootstrap_models();
 
@@ -324,10 +330,13 @@ pub async fn apply_all(pool: &PgPool) -> Result<(), MigrateError> {
     // #411 — post_migrate fires once after the bootstrap walk
     // completes successfully.
     #[cfg(feature = "signals")]
-    send_post_migrate(PostMigrateContext {
-        source: "apply_all",
-        applied: Vec::new(),
-    })
+    send_post_migrate_with_target(
+        PostMigrateContext {
+            source: "apply_all",
+            applied: Vec::new(),
+        },
+        target,
+    )
     .await;
     Ok(())
 }
@@ -367,12 +376,16 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
     }
     #[cfg(feature = "signals")]
     use crate::signals::migrate::{
-        send_post_migrate, send_pre_migrate, PostMigrateContext, PreMigrateContext,
+        send_post_migrate_with_target, send_pre_migrate_with_target, MigrateTarget,
+        PostMigrateContext, PreMigrateContext,
     };
     #[cfg(feature = "signals")]
-    send_pre_migrate(PreMigrateContext {
-        source: "apply_all_pool",
-    })
+    send_pre_migrate_with_target(
+        PreMigrateContext {
+            source: "apply_all_pool",
+        },
+        MigrateTarget::new(pool.clone(), None),
+    )
     .await;
     let dialect = pool.dialect();
     let models = bootstrap_models();
@@ -408,10 +421,13 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
     // completes. `applied` is empty because apply_all_pool doesn't
     // carry per-migration names — it walks the model inventory.
     #[cfg(feature = "signals")]
-    send_post_migrate(PostMigrateContext {
-        source: "apply_all_pool",
-        applied: Vec::new(),
-    })
+    send_post_migrate_with_target(
+        PostMigrateContext {
+            source: "apply_all_pool",
+            applied: Vec::new(),
+        },
+        MigrateTarget::new(pool.clone(), None),
+    )
     .await;
     Ok(())
 }
@@ -507,6 +523,8 @@ async fn migrate_with_ledger(
             with_migrate_lock(pool, migrate_with_ledger_body(pool, dir, ledger, observer)).await
         },
         |newly| newly.iter().map(|m| m.name.clone()).collect(),
+        &crate::sql::Pool::Postgres(pool.clone()),
+        None,
     )
     .await
 }
@@ -529,36 +547,47 @@ pub(crate) async fn migrate_locked(
 /// Whether a run fires `pre_migrate` / `post_migrate`. They fire outside
 /// the migrate lock, so a handler may migrate again.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Signals {
-    /// The PG `migrate` runner's contract.
+pub(crate) enum Signals<'a> {
+    /// The PG `migrate` runner's contract; `tenant` names the run's tenant.
     #[cfg_attr(
         not(all(feature = "postgres", any(feature = "manage", feature = "tenancy"))),
         allow(dead_code)
     )]
-    Fire,
+    Fire { tenant: Option<&'a str> },
     Skip,
 }
 
-/// `pre_migrate` / `post_migrate` around `run`; `applied` names what it applied.
+/// `pre_migrate` / `post_migrate` around `run` on `pool` (`tenant`'s, if
+/// set); `applied` names what it applied.
 pub(crate) async fn with_migrate_signals<T>(
     run: impl std::future::Future<Output = Result<T, MigrateError>>,
     applied: impl FnOnce(&T) -> Vec<String>,
+    pool: &crate::sql::Pool,
+    tenant: Option<&str>,
 ) -> Result<T, MigrateError> {
     #[cfg(feature = "signals")]
     use crate::signals::migrate::{
-        send_post_migrate, send_pre_migrate, PostMigrateContext, PreMigrateContext,
+        send_post_migrate_with_target, send_pre_migrate_with_target, MigrateTarget,
+        PostMigrateContext, PreMigrateContext,
     };
     #[cfg(feature = "signals")]
-    send_pre_migrate(PreMigrateContext { source: "migrate" }).await;
+    let target = MigrateTarget::new(pool.clone(), tenant.map(str::to_owned));
+    #[cfg(not(feature = "signals"))]
+    let _ = (pool, tenant);
+    #[cfg(feature = "signals")]
+    send_pre_migrate_with_target(PreMigrateContext { source: "migrate" }, target.clone()).await;
     let out = run.await?;
     // #411 — post_migrate fires once after the file-based migrate
     // session completes. `applied` lists newly-applied migration
     // names (empty when everything was already applied).
     #[cfg(feature = "signals")]
-    send_post_migrate(PostMigrateContext {
-        source: "migrate",
-        applied: applied(&out),
-    })
+    send_post_migrate_with_target(
+        PostMigrateContext {
+            source: "migrate",
+            applied: applied(&out),
+        },
+        target,
+    )
     .await;
     #[cfg(not(feature = "signals"))]
     let _ = applied;

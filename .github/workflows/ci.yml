@@ -553,6 +553,9 @@ jobs:
           --health-retries 20
     env:
       DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
+      # In CI a missing extension fails its suite; this image has no PostGIS,
+      # whose suites run in `postgis_live`.
+      RUSTANGO_TEST_MISSING_PG_EXTENSIONS: postgis
     steps:
       # The archive and its extracted binaries together outgrow the default
       # free disk. Same SHA pin as `e2e`.
@@ -801,10 +804,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # A pinned release, checked against its published sha256: never a
+      # script from `main` or an unpinned latest.
       - name: Install Trivy
+        env:
+          TRIVY_VERSION: 0.75.0
+          TRIVY_SHA256: c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
         run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sudo sh -s -- -b /usr/local/bin
+          tarball="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sfLO "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${tarball}"
+          echo "${TRIVY_SHA256}  ${tarball}" | sha256sum -c -
+          sudo tar -xzf "${tarball}" -C /usr/local/bin trivy
           trivy --version
       - name: Vulnerabilities + secrets (blocking)
         run: |
@@ -1677,8 +1687,8 @@ jobs:
 
   # PostGIS geometry live suite (#443). The regular `postgres_test` runs
   # against `pgvector/pgvector:pg16`, which has no PostGIS, so the
-  # geometry round-trip test there skips (CREATE EXTENSION postgis fails →
-  # graceful skip). This job runs `postgis/postgis:16-3.4` so the
+  # geometry round-trip test there skips (the job declares postgis missing).
+  # This job runs `postgis/postgis:16-3.4` so the
   # `Point` column EWKB encode/decode is exercised end-to-end against a
   # real PostGIS (a GHCR mirror copy, see `postgres_test`).
   postgis_live:

@@ -201,6 +201,40 @@ async fn session_cookie(app: &axum::Router, csrf: &str, username: &str, code: &s
         .expect("session cookie")
 }
 
+/// The enroll page shows the setup key, so no cache may keep it.
+#[tokio::test]
+async fn the_enroll_page_is_never_cached() {
+    let (pool, _secret) = seed().await;
+    AdminUser::new_with_password("dave", "correct horse", true)
+        .unwrap()
+        .insert_pool(&pool)
+        .await
+        .unwrap();
+    let app = router(pool.clone());
+    let csrf = fetch_csrf(&app).await;
+    let session = session_cookie(&app, &csrf, "dave", "").await;
+    let cookies = format!("rustango_csrf={csrf}; {session}");
+    for post in [false, true] {
+        let req = Request::builder()
+            .uri(format!("{PREFIX}/account/totp"))
+            .header(header::COOKIE, &cookies);
+        let req = if post {
+            req.method("POST")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("_csrf={csrf}&totp_code=000000")))
+        } else {
+            req.body(Body::empty())
+        };
+        let resp = app.clone().oneshot(req.unwrap()).await.unwrap();
+        assert!(post || resp.status() == StatusCode::OK, "{}", resp.status());
+        let cc = resp.headers().get(header::CACHE_CONTROL).map(|v| v.to_str().unwrap().to_owned());
+        assert!(
+            cc.as_deref().is_some_and(|v| v.contains("no-store")),
+            "post={post}: Cache-Control {cc:?}"
+        );
+    }
+}
+
 /// #1672 — the code that confirms enrollment cannot then sign in.
 #[tokio::test]
 async fn the_enrollment_code_cannot_sign_in() {
