@@ -152,7 +152,7 @@ untouched.
 
 ### `check --deploy` has new prod warnings
 
-An unset or `console` `[mail] backend` now warns on the prod tier. Set `smtp`, or `null` if the app sends no mail.
+An unset or `console` `[mail] backend` now warns on the prod tier. Set `smtp`, or `null` if the app sends no mail. `"*"` in `allowed_hosts` or `cors_allowed_origins` and an unset `request_timeout_secs` warn too.
 
 ## 0.61.3
 

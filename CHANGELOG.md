@@ -7,6 +7,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Changed — `check --deploy` flags more prod defaults
 
 - An unset or `console` `[mail] backend` is a warning: it prints reset and magic-link URLs to stdout.
+- `"*"` in `allowed_hosts` or `cors_allowed_origins`, and an unset or zero `request_timeout_secs`, are warnings; an unset `max_body_bytes` is info.
 
 ## [0.61.3] — 2026-10-26
 

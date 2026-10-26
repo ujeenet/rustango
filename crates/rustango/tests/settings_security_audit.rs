@@ -178,6 +178,71 @@ fn unset_or_console_mail_backend_in_prod_warns() {
 }
 
 #[test]
+fn wildcard_hosts_and_cors_in_prod_warn() {
+    let out = audit_prod(|s| {
+        s.security.allowed_hosts = vec!["example.com".into(), "*".into()];
+        s.security.cors_allowed_origins = vec!["*".into()];
+    });
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("allowed_hosts") && w.contains("\"*\"")),
+        "{:?}",
+        out.warnings
+    );
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("cors_allowed_origins") && w.contains("\"*\"")),
+        "{:?}",
+        out.warnings
+    );
+    let out = audit_prod(|s| {
+        s.security.allowed_hosts = vec!["example.com".into()];
+        s.security.cors_allowed_origins = vec!["https://app.example.com".into()];
+    });
+    assert!(
+        !out.warnings
+            .iter()
+            .any(|w| w.contains("\"*\"") || w.contains("allowed_hosts")),
+        "{:?}",
+        out.warnings
+    );
+}
+
+#[test]
+fn unset_request_limits_in_prod_are_reported() {
+    for timeout in [None, Some(0)] {
+        let out = audit_prod(|s| s.server.request_timeout_secs = timeout);
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("request_timeout_secs")),
+            "{timeout:?}: {:?}",
+            out.warnings
+        );
+        assert!(
+            out.info.iter().any(|m| m.contains("max_body_bytes")),
+            "{:?}",
+            out.info
+        );
+    }
+    let out = audit_prod(|s| {
+        s.server.request_timeout_secs = Some(30);
+        s.server.max_body_bytes = Some(1_000_000);
+    });
+    assert!(
+        !out.warnings
+            .iter()
+            .any(|w| w.contains("request_timeout_secs"))
+            && !out.info.iter().any(|m| m.contains("max_body_bytes")),
+        "{:?} {:?}",
+        out.warnings,
+        out.info
+    );
+}
+
+#[test]
 fn dev_tier_does_not_run_security_audit() {
     let mut s = Settings::default();
     // Leave allowed_hosts empty — would be a prod warning.

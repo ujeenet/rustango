@@ -6382,6 +6382,41 @@ pub fn settings_audit_check(
              host + subdomain wildcards before deploying."
                 .into(),
         );
+    } else if settings.security.allowed_hosts.iter().any(|h| h.trim() == "*") {
+        out.warnings.push(
+            "[security] allowed_hosts contains \"*\" in prod tier — every Host header passes, \
+             so host validation is off. List the real hosts instead."
+                .into(),
+        );
+    }
+
+    if settings
+        .security
+        .cors_allowed_origins
+        .iter()
+        .any(|o| o.trim() == "*")
+    {
+        out.warnings.push(
+            "[security] cors_allowed_origins contains \"*\" in prod tier — any site can read \
+             non-credentialed responses. List the real origins."
+                .into(),
+        );
+    }
+
+    // Both layers are opt-in: unset installs no layer.
+    if matches!(settings.server.request_timeout_secs, None | Some(0)) {
+        out.warnings.push(
+            "[server] request_timeout_secs unset or 0 in prod tier — no handler timeout, so \
+             stuck requests hold workers. Set about 30."
+                .into(),
+        );
+    }
+    if settings.server.max_body_bytes.is_none() {
+        out.info.push(
+            "[server] max_body_bytes unset in prod tier — no body-limit layer; only axum's \
+             2 MiB extractor default applies, and streamed bodies are unlimited."
+                .into(),
+        );
     }
 
     // Empty list = same-host only (#1529); a cross-host SPA's POSTs get 403.
