@@ -26,7 +26,7 @@
 //!
 //! | arm | how it runs | cost of a new suite |
 //! |---|---|---|
-//! | PostgreSQL | `postgres_test` runs `cargo test --workspace --all-features` with `DATABASE_URL` set | nothing — it is picked up automatically |
+//! | PostgreSQL | `postgres_test` runs the `--workspace --all-features` nextest archive with `DATABASE_URL` set | nothing — it is picked up automatically |
 //! | SQLite | same job, in-memory | nothing |
 //! | **MySQL** | `mysql_live` names every target one at a time | **a line in `ci.yml`, or it never runs** |
 //!
@@ -420,6 +420,102 @@ fn the_live_jobs_set_the_url_their_suites_read() {
     }
 }
 
+/// `postgres_test` runs the `tests_compile` archive in N partitions. A
+/// matrix that skips a number, a filter on the run, or a parallel profile
+/// would leave suites unrun or racing, with every partition green.
+#[test]
+fn postgres_partitions_run_the_whole_archive_serially() {
+    let path = repo_root().join(".github/workflows/ci.yml");
+    let yaml = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let block = job_block(&yaml, "postgres_test");
+    let problems = partition_problems(&block, &job_block(&yaml, "tests_compile"));
+    assert!(
+        problems.is_empty(),
+        "`postgres_test` does not run the whole archive:\n  {}\n\n{block}",
+        problems.join("\n  ")
+    );
+}
+
+/// Everything wrong with the partitioned run, empty when it is sound.
+fn partition_problems(pg_job: &str, compile_job: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let cmds = run_commands(pg_job);
+    let runs: Vec<&String> = cmds.iter().filter(|c| c.contains("nextest run")).collect();
+    let [run] = runs.as_slice() else {
+        return vec![format!(
+            "expected one `cargo nextest run`, found {}",
+            runs.len()
+        )];
+    };
+    // `${{ x }}` as one token, so its inner spaces do not split it.
+    let run = run.replace("${{ ", "${{").replace(" }}", "}}");
+    let tok: Vec<&str> = run.split_whitespace().collect();
+
+    // Every token is the command, a known flag, or that flag's value.
+    // Anything else (`-E`, `--test`, a name filter) narrows the run.
+    const WITH_VALUE: &[&str] = &[
+        "--profile",
+        "--archive-file",
+        "--workspace-remap",
+        "--extract-to",
+        "--partition",
+    ];
+    let mut rest = tok.iter().skip_while(|t| **t != "run").skip(1);
+    let mut flags: BTreeMap<&str, &str> = BTreeMap::new();
+    while let Some(t) = rest.next() {
+        if WITH_VALUE.contains(t) {
+            flags.insert(*t, rest.next().copied().unwrap_or(""));
+        } else if *t != "--extract-overwrite" && *t != "--no-fail-fast" {
+            out.push(format!("unexpected `{t}` narrows or changes the run"));
+        }
+    }
+    if flags.get("--profile") != Some(&"live") {
+        out.push("not `--profile live`: the suites share the partition's database".into());
+    }
+    let archive = flags.get("--archive-file").copied().unwrap_or("");
+    let file = archive.rsplit('/').next().unwrap_or("");
+    if file.is_empty() || !compile_job.contains(file) {
+        out.push(format!(
+            "`--archive-file {archive}` is not what `tests_compile` builds"
+        ));
+    }
+    if !pg_job.contains("needs: [gate, tests_compile]") {
+        out.push("does not `needs: [gate, tests_compile]`".into());
+    }
+
+    // `count:${{ matrix.partition }}/N` against `partition: [1, …, N]`.
+    let spec = flags.get("--partition").copied().unwrap_or("");
+    let Some(n) = spec
+        .strip_prefix("count:${{matrix.partition}}/")
+        .and_then(|n| n.parse::<u32>().ok())
+    else {
+        out.push(format!(
+            "`--partition {spec}` is not `count:${{{{ matrix.partition }}}}/N`"
+        ));
+        return out;
+    };
+    let listed: Option<Vec<u32>> = pg_job
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("partition:"))
+        .and_then(|v| {
+            v.trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split(',')
+                .map(|x| x.trim().parse().ok())
+                .collect()
+        });
+    let want: Vec<u32> = (1..=n).collect();
+    if listed.as_ref() != Some(&want) {
+        out.push(format!(
+            "matrix `partition:` is {listed:?}, but `count:…/{n}` needs {want:?}"
+        ));
+    }
+    out
+}
+
 /// Tests for the parse above, so a green guard means the parse worked
 /// rather than that it matched nothing.
 mod parser_tests {
@@ -457,6 +553,10 @@ jobs:
           echo 'a shell line that looks like a list item:'
           echo '- not a step'
           cargo test -p rustango --features mysql --test kappa_mysql_live
+      - run: cargo nextest run --profile live -p rustango --features mysql,testkit --test lambda_tri
+      - run: >-
+          MYSQL_TEST_URL=mysql://root@x/y
+          cargo nextest run --profile live -p rustango --features sqlite --test mu_tri
   deny-examples:
     runs-on: ubuntu-latest
     steps:
@@ -663,6 +763,64 @@ jobs:
             !script.contains("other_tri"),
             "and it must still stop at the real next step: {script:?}"
         );
+    }
+
+    /// `cargo nextest run` lines are read exactly like `cargo test` ones.
+    #[test]
+    fn nextest_steps_are_read_like_cargo_test() {
+        let found = named_test_targets(&job_block(SAMPLE, "mysql_live"));
+        assert_eq!(found.get("lambda_tri"), Some(&true), "{found:?}");
+        assert_eq!(
+            found.get("mu_tri"),
+            Some(&false),
+            "named without mysql: {found:?}"
+        );
+    }
+
+    const PG: &str = "
+  postgres_test:
+    needs: [gate, tests_compile]
+    strategy:
+      matrix:
+        partition: [1, 2, 3]
+    steps:
+      - run: >-
+          cargo nextest run --profile live
+          --archive-file ${{ runner.temp }}/nextest-archive.tar.zst
+          --workspace-remap ${{ github.workspace }}
+          --partition count:${{ matrix.partition }}/3
+";
+    const TC: &str = "      - run: cargo nextest archive --workspace --all-features --archive-file ${{ runner.temp }}/nextest-archive.tar.zst\n";
+
+    #[test]
+    fn a_sound_partitioned_run_passes() {
+        let block = job_block(PG, "postgres_test");
+        assert_eq!(partition_problems(&block, TC), Vec::<String>::new());
+    }
+
+    /// Each mutation leaves every partition green while running less.
+    #[test]
+    fn every_way_to_run_less_is_caught() {
+        for (from, to, why) in [
+            ("[1, 2, 3]", "[1, 2]", "a partition dropped from the matrix"),
+            ("/3", "/4", "count raised without the matrix"),
+            ("--profile live", "--profile ci", "parallel on one database"),
+            ("--partition", "-E 'test(x)' --partition", "a filter"),
+            (
+                "nextest-archive.tar.zst\n          --workspace",
+                "other.tar.zst\n          --workspace",
+                "an archive nobody builds",
+            ),
+            (
+                "[gate, tests_compile]",
+                "gate",
+                "not waiting for the archive",
+            ),
+        ] {
+            assert!(PG.contains(from), "bad mutation {from}");
+            let block = job_block(&PG.replace(from, to), "postgres_test");
+            assert!(!partition_problems(&block, TC).is_empty(), "missed: {why}");
+        }
     }
 
     #[test]
