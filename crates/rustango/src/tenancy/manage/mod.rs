@@ -1034,7 +1034,49 @@ where
     if facts.provisioning {
         secret_key_audit(crate::aead::key_status(), &mut out);
     }
+    role_schema_audit(&pools.registry_pool(), &mut out).await;
     out
+}
+
+/// A tenant schema named like a role leads that role's default
+/// `search_path`; new ones are refused, existing ones are only named.
+async fn role_schema_audit(
+    registry: &crate::sql::Pool,
+    out: &mut rustango::migrate::manage::DeployAuditFindings,
+) {
+    #[cfg(feature = "postgres")]
+    if let crate::sql::Pool::Postgres(pg) = registry {
+        use crate::core::Column as _;
+        use crate::sql::FetcherPool as _;
+        let orgs: Vec<crate::tenancy::Org> = match crate::tenancy::Org::objects()
+            .where_(crate::tenancy::Org::storage_mode.eq(crate::tenancy::StorageMode::Schema.as_str().to_owned()))
+            .fetch(registry)
+            .await
+        {
+            Ok(orgs) => orgs,
+            Err(e) => {
+                out.warnings
+                    .push(format!("could not list schema-mode tenants: {e}"));
+                return;
+            }
+        };
+        for org in orgs {
+            let schema = org.effective_schema();
+            if crate::tenancy::provision::is_role_name(pg, schema)
+                .await
+                .unwrap_or(false)
+            {
+                out.warnings.push(format!(
+                    "tenant `{}` lives in schema `{schema}`, the name of a database role: that \
+                     role's sessions see this tenant's tables before `public`; move it to another \
+                     schema (a database move and back) or rename the role",
+                    org.slug
+                ));
+            }
+        }
+    }
+    #[cfg(not(feature = "postgres"))]
+    let _ = (registry, out);
 }
 
 /// Provisioning seals server passwords and tenant URLs with this key.

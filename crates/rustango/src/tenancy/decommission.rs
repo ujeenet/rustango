@@ -22,6 +22,7 @@
 
 use sqlx::Database;
 
+use super::db_identity::DbIdentity;
 use super::error::TenancyError;
 use super::operation::{OpReporter, OperationObserver, OperationStep as Step};
 use super::org::{Org, StorageMode};
@@ -362,152 +363,77 @@ where
     let me = DbIdentity::of_url(&url).await?.ok_or_else(|| {
         "the database may be shared: its URL names no existing file or server database".to_owned()
     })?;
-    refuse_twins(pools, registry, org, &me).await
+    refuse_twins(pools, registry, org, &me, false).await
 }
 
 /// `Ok` when neither the registry nor another tenant uses database `me`.
+/// `lenient` only logs what cannot be read: a brought Postgres database
+/// used to be checked by name alone.
 async fn refuse_twins<DB: Database>(
     pools: &TenantPools<DB>,
     registry: &crate::sql::Pool,
     org: &Org,
     me: &DbIdentity,
+    lenient: bool,
 ) -> Result<(), String>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     let shared = |why: String| format!("the database may be shared: {why}");
-    if DbIdentity::of_pool(registry).await?.as_ref() == Some(me) {
-        return Err(shared("it is the registry's".into()));
+    let unread = |who: &str, e: String| {
+        tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "{who}'s database identity is unknown; not compared");
+    };
+    match DbIdentity::of_pool(registry).await {
+        Ok(id) if id.as_ref() == Some(me) => return Err(shared("it is the registry's".into())),
+        Ok(_) => {}
+        Err(e) if lenient => unread("the registry", e),
+        Err(e) => return Err(e),
     }
     let others: Vec<Org> = Org::objects()
         .where_(Org::storage_mode.eq(StorageMode::Database.as_str().to_owned()))
         .fetch(registry)
         .await
         .map_err(|e| e.to_string())?;
-    for other in others
+    // A few at a time: each probe may wait for its connect timeout.
+    use futures_util::StreamExt as _;
+    let checks = others
         .iter()
         .filter(|o| o.id.get() != org.id.get() && o.database_url.is_some())
-    {
-        let cant = |e: String| shared(format!("tenant `{}` can't be checked: {e}", other.slug));
-        let url = pools
-            .resolved_database_url(other)
-            .await
-            .map_err(|e| cant(e.to_string()))?;
-        if !me.same_backend(&url) {
-            continue;
-        }
-        if DbIdentity::of_url(&url).await.map_err(cant)?.as_ref() == Some(me) {
-            return Err(shared(format!("tenant `{}` uses it too", other.slug)));
+        .map(|other| identity_of(pools, me, other))
+        .collect::<Vec<_>>();
+    let mut checks = futures_util::stream::iter(checks).buffer_unordered(8);
+    while let Some((other, id)) = checks.next().await {
+        match id {
+            Ok(id) if id.as_ref() == Some(me) => {
+                return Err(shared(format!("tenant `{}` uses it too", other.slug)))
+            }
+            Ok(_) => {}
+            Err(e) if lenient => unread(&format!("tenant `{}`", other.slug), e),
+            Err(e) => {
+                return Err(shared(format!("tenant `{}` can't be checked: {e}", other.slug)))
+            }
         }
     }
     Ok(())
 }
 
-/// Which database a SQLite or MySQL tenant uses: a canonical file, or the
-/// live server's key and database, so a host alias can't hide a twin.
-#[derive(Debug, PartialEq, Eq)]
-#[cfg_attr(not(all(feature = "sqlite", feature = "mysql")), allow(dead_code))]
-enum DbIdentity {
-    File(std::path::PathBuf),
-    Server { key: String, database: String },
-}
-
-impl DbIdentity {
-    /// Database `name` on the server behind a MySQL admin `pool`: known
-    /// without the tenant's login, which a retried purge may have dropped.
-    #[cfg(feature = "mysql")]
-    async fn on_server(pool: &crate::sql::Pool, name: &str) -> Result<Option<Self>, String> {
-        #[allow(unreachable_patterns)]
-        let p = match pool {
-            crate::sql::Pool::Mysql(p) => p,
-            _ => return Ok(None),
-        };
-        let (database,): (String,) =
-            sqlx::query_as("SELECT CAST(IF(@@lower_case_table_names = 0, ?, LOWER(?)) AS CHAR)")
-                .bind(name)
-                .bind(name)
-                .fetch_one(p)
-                .await
-                .map_err(|e| e.to_string())?;
-        let key = Self::server_key(p).await?;
-        Ok(Some(Self::Server { key, database }))
+/// `other`'s database identity, unless its URL text already rules out `me`.
+async fn identity_of<'a, DB: Database>(
+    pools: &TenantPools<DB>,
+    me: &DbIdentity,
+    other: &'a Org,
+) -> (&'a Org, Result<Option<DbIdentity>, String>)
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let url = match pools.resolved_database_url(other).await {
+        Ok(url) => url,
+        Err(e) => return (other, Err(e.to_string())),
+    };
+    if !me.may_be(&url) {
+        return (other, Ok(None));
     }
-
-    /// `Ok(None)` for another backend or a missing / in-memory SQLite file.
-    async fn of_url(url: &str) -> Result<Option<Self>, String> {
-        #[cfg(feature = "sqlite")]
-        if url.starts_with("sqlite:") {
-            let o = <sqlx::sqlite::SqliteConnectOptions as std::str::FromStr>::from_str(url)
-                .map_err(|e| e.to_string())?;
-            return Ok(Self::file(o.get_filename()));
-        }
-        #[cfg(feature = "mysql")]
-        if url.starts_with("mysql:") || url.starts_with("mariadb:") {
-            let pool = crate::sql::Pool::connect(url)
-                .await
-                .map_err(|e| e.to_string())?;
-            let id = Self::of_pool(&pool).await;
-            pool.close().await;
-            return id;
-        }
-        let _ = url;
-        Ok(None)
-    }
-
-    async fn of_pool(pool: &crate::sql::Pool) -> Result<Option<Self>, String> {
-        #[allow(unreachable_patterns)]
-        match pool {
-            #[cfg(feature = "sqlite")]
-            crate::sql::Pool::Sqlite(p) => Ok(Self::file(p.connect_options().get_filename())),
-            #[cfg(feature = "mysql")]
-            crate::sql::Pool::Mysql(p) => Self::server(p).await.map(Some),
-            _ => Ok(None),
-        }
-    }
-
-    fn same_backend(&self, url: &str) -> bool {
-        matches!(self, Self::File(_)) == url.starts_with("sqlite:")
-    }
-
-    /// An existing file, canonical: `None` for a missing or in-memory one.
-    #[cfg(feature = "sqlite")]
-    fn file(path: &std::path::Path) -> Option<Self> {
-        std::fs::canonicalize(path).ok().map(Self::File)
-    }
-
-    /// Raw SQL: server identity has no ORM model. Names fold as the server
-    /// folds them (`lower_case_table_names`).
-    #[cfg(feature = "mysql")]
-    async fn server(pool: &sqlx::MySqlPool) -> Result<Self, String> {
-        let (database,): (Option<String>,) = sqlx::query_as(
-            "SELECT CAST(IF(@@lower_case_table_names = 0, DATABASE(), LOWER(DATABASE())) AS CHAR)",
-        )
-        .fetch_one(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-        let database = database.ok_or("the connection selects no database")?;
-        let key = Self::server_key(pool).await?;
-        Ok(Self::Server { key, database })
-    }
-
-    /// `@@server_uuid`; MariaDB has none, so host, port and server id.
-    #[cfg(feature = "mysql")]
-    async fn server_key(pool: &sqlx::MySqlPool) -> Result<String, String> {
-        let (version,): (String,) = sqlx::query_as("SELECT CAST(VERSION() AS CHAR)")
-            .fetch_one(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-        let sql = if version.contains("MariaDB") {
-            "SELECT CAST(CONCAT(@@hostname, ':', @@port, ':', @@server_id) AS CHAR)"
-        } else {
-            "SELECT CAST(@@server_uuid AS CHAR)"
-        };
-        let (key,): (String,) = sqlx::query_as(sql)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(key)
-    }
+    (other, DbIdentity::of_url(&url).await)
 }
 
 /// How a database-mode tenant's database goes, decided before anything
@@ -606,6 +532,16 @@ where
         }
         let mut target = PgDropTarget::connect(&opts, super::pools::tenant_session_tag(id)).await?;
         target.refuse_foreign_sessions().await?;
+        // An idle alias holds no session and spells the host its own way.
+        if let Ok(Some(me)) = DbIdentity::of_url(&url).await {
+            refuse_twins(pools, registry, org, &me, true)
+                .await
+                .map_err(|why| {
+                    TenancyError::Validation(format!(
+                        "refusing to drop this tenant's database — {why}"
+                    ))
+                })?;
+        }
         return Ok((mode, id, DropPlan::Brought(target)));
     }
     Ok((mode, id, DropPlan::Left))
@@ -678,7 +614,7 @@ where
                 .await
                 .map_err(TenancyError::Validation)?;
             if let Some(me) = me {
-                refuse_twins(pools, registry, org, &me)
+                refuse_twins(pools, registry, org, &me, false)
                     .await
                     .map_err(|why| {
                         TenancyError::Validation(format!(

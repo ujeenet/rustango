@@ -139,6 +139,8 @@ pub struct CachePageLayer {
     /// cache, because its response is probably per-user. See
     /// [`Self::cache_authenticated`].
     cache_authenticated: bool,
+    /// Request headers that make a request per-user. See [`Self::credential_headers`].
+    credential_headers: Vec<HeaderName>,
     /// Skip tenant resolution. See [`Self::tenant_agnostic`].
     tenant_agnostic: bool,
 }
@@ -155,6 +157,7 @@ impl CachePageLayer {
             vary_on: Vec::new(),
             cache_query: false,
             cache_authenticated: false,
+            credential_headers: crate::vary::CREDENTIAL_HEADERS.to_vec(),
             tenant_agnostic: false,
         }
     }
@@ -213,6 +216,27 @@ impl CachePageLayer {
     #[must_use]
     pub fn cache_authenticated(mut self, enabled: bool) -> Self {
         self.cache_authenticated = enabled;
+        self
+    }
+
+    /// More request headers that carry a credential, such as a custom
+    /// API token header. Like `Authorization`, `Cookie` and `X-Api-Key`,
+    /// a request with one skips the cache unless [`Self::cache_authenticated`].
+    ///
+    /// # Panics
+    /// Panics on a name that is not a valid header name.
+    #[must_use]
+    pub fn credential_headers<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for n in names {
+            let lower = n.as_ref().to_ascii_lowercase();
+            let h = HeaderName::from_bytes(lower.as_bytes())
+                .expect("credential_headers: header name must be valid ASCII");
+            self.credential_headers.push(h);
+        }
         self
     }
 
@@ -372,7 +396,11 @@ impl<S> tower::Layer<S> for CachePageLayer {
             key_prefix: Arc::new(self.key_prefix.clone()),
             vary_on: Arc::new(self.vary_on.clone()),
             cache_query: self.cache_query,
-            cache_authenticated: self.cache_authenticated,
+            credentials: Arc::new(if self.cache_authenticated {
+                Vec::new()
+            } else {
+                self.credential_headers.clone()
+            }),
             tenant_agnostic: self.tenant_agnostic,
         }
     }
@@ -387,7 +415,8 @@ pub struct CachePageService<S> {
     key_prefix: Arc<String>,
     vary_on: Arc<Vec<HeaderName>>,
     cache_query: bool,
-    cache_authenticated: bool,
+    /// Credential headers that bypass the cache; empty with `cache_authenticated`.
+    credentials: Arc<Vec<HeaderName>>,
     tenant_agnostic: bool,
 }
 
@@ -414,7 +443,7 @@ where
         let prefix = self.key_prefix.clone();
         let vary = self.vary_on.clone();
         let cache_query = self.cache_query;
-        let cache_authenticated = self.cache_authenticated;
+        let credentials = self.credentials.clone();
         let tenant_agnostic = self.tenant_agnostic;
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
@@ -454,7 +483,7 @@ where
             // Unless the route opted in, a request with a credential
             // header is per-user: never served from and never stored
             // in the shared cache.
-            let req_is_authed = !cache_authenticated && crate::vary::has_credential(req.headers());
+            let req_is_authed = credentials.iter().any(|n| req.headers().contains_key(n));
             if req_is_authed {
                 return inner.call(req).await;
             }
@@ -519,7 +548,7 @@ where
             if status != StatusCode::OK || sets_cookie || cache_control_opt_out {
                 return Ok(resp);
             }
-            if let Some(token) = unkeyed_vary(resp.headers(), &vary, cache_authenticated) {
+            if let Some(token) = unkeyed_vary(resp.headers(), &vary, &credentials) {
                 warn_unkeyed_vary(&token);
                 let mut resp = resp;
                 resp.headers_mut()
@@ -752,12 +781,12 @@ fn payload_too_large() -> Response<Body> {
 }
 
 /// The first `Vary` token outside the key, if any (#2219).
-/// Credential headers count unless `cache_authenticated`: such
-/// requests skip this cache, so every entry was made without them.
+/// `credentials` count: such requests skip this cache, so every entry
+/// was made without them.
 fn unkeyed_vary(
     headers: &HeaderMap,
     vary_on: &[HeaderName],
-    cache_authenticated: bool,
+    credentials: &[HeaderName],
 ) -> Option<String> {
     headers
         .get_all(axum::http::header::VARY)
@@ -768,10 +797,9 @@ fn unkeyed_vary(
         .find(|t| {
             !(t.eq_ignore_ascii_case("host")
                 || vary_on.iter().any(|n| t.eq_ignore_ascii_case(n.as_str()))
-                || (!cache_authenticated
-                    && crate::vary::CREDENTIAL_HEADERS
-                        .iter()
-                        .any(|n| t.eq_ignore_ascii_case(n.as_str()))))
+                || credentials
+                    .iter()
+                    .any(|n| t.eq_ignore_ascii_case(n.as_str())))
         })
         .map(str::to_owned)
 }

@@ -512,12 +512,34 @@ pub(crate) async fn table_view(
         &scalar_fields,
     )
     .await?;
-    let has_next_skipped = if count_skipped && rows.len() as i64 > page_size {
+    let mut has_next_skipped = if count_skipped && rows.len() as i64 > page_size {
         rows.truncate(page_size as usize);
         true
     } else {
         false
     };
+    // Past the scan cap no PK filter applies: "next" only when a row the
+    // hook admits follows, else it reveals a denied one.
+    if aggregates_withheld && has_next_skipped {
+        let cap = i64::try_from(state.view_hook_scan_cap()).unwrap_or(i64::MAX);
+        let after = crate::sql::select_rows_as_json(
+            &state.pool,
+            &SelectQuery {
+                where_clause: where_clause.clone(),
+                search: search.clone(),
+                joins: build_fk_joins(&state, model, &parts),
+                order_by: list_order_by(model, &admin_cfg),
+                limit: Some(cap.max(1)),
+                offset: Some(offset + page_size),
+                ..SelectQuery::new(model)
+            },
+            &scalar_fields,
+        )
+        .await?;
+        has_next_skipped = after.iter().any(|row| {
+            crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(row))
+        });
+    }
     // The detail page's "view" hook hides a row here too (#2231); the
     // PK filter above already did, unless the table was too big to scan.
     rows.retain(|row| {

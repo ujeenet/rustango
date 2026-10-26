@@ -25,6 +25,30 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The generated example projects' `.gitignore` / `.dockerignore` are regenerated with the scaffolder and now ignore the migrate lock file.
 - CI installs a pinned Trivy release and checks its sha256 instead of piping an install script from `main`; a weekly workflow re-runs the advisory scan.
 
+### Added — `CachePageLayer::credential_headers`
+
+Names more request headers that carry a credential, such as a custom token header. A request with one of them skips the shared cache, like `Authorization`, `Cookie` and `X-Api-Key`.
+
+### Fixed — leak follow-ups
+
+`check --deploy` warns about an existing tenant whose schema has a database role's name. When an admin list passes the `view` hook's scan cap, "next" only shows if a later row is one the hook admits.
+
+### Fixed — migrating a schema-mode tenant warns before adopting a foreign schema
+
+The tenant migration creates the schema with a plain `CREATE SCHEMA`. If the schema already exists and holds tables but no rustango ledger, it logs a warning before migrating into it. A later release refuses this.
+
+### Fixed — `purge-tenant` sees an idle tenant on a host alias
+
+Before dropping a brought Postgres database, the purge compares its server identity and name with every other database-mode tenant's and the registry's, so `db.internal` and `10.0.0.5` no longer slip past. A restored copy or replica shares the cluster id but not the server's start time, so it is told apart. Only tenants whose URL names the same database are probed, eight at a time with a 3 s timeout; one that cannot be resolved or reached is logged, not refused.
+
+### Fixed — a tenant URL that reaches the registry by another name is flagged
+
+Creating a tenant, editing its URL, the console's URL check and `migrate-tenant-storage` compare the server's identity (Postgres `system_identifier`, MySQL `server_uuid`, the SQLite file's device and inode) with the registry's. `localhost` for `127.0.0.1`, or a hard link, now gets a warning, also in `edit-tenant` and the console's edit notice; a later release refuses it.
+
+### Fixed — the registry check reads SQLite paths as SQLite does
+
+A symlink whose target passes through a missing directory, or a chain longer than the kernel follows, now resolves to the file SQLite opens. On Windows paths are compared as `GetFullPathNameW` builds them, without following links.
+
 ## [0.61.4] — 2026-10-26
 
 ### Fixed — a schema-mode tenant cannot take a role's name
