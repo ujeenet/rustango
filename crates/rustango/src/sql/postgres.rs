@@ -231,6 +231,21 @@ impl Dialect for Postgres {
         Some("SELECT current_setting('server_version')")
     }
 
+    /// The cluster's `system_identifier`; any role may read it.
+    fn database_identity_sql(&self, _version: &str, db: Option<&str>) -> Option<CompiledStatement> {
+        let (database, params) = match db {
+            Some(db) => (
+                format!("{}::text", self.placeholder(1)),
+                vec![crate::core::SqlValue::String(db.to_owned())],
+            ),
+            None => ("current_database()::text".to_owned(), Vec::new()),
+        };
+        Some(CompiledStatement {
+            sql: format!("SELECT system_identifier::text, {database} FROM pg_control_system()"),
+            params,
+        })
+    }
+
     /// One row: `rolsuper`, `rolcreatedb`, `rolcreaterole`.
     fn login_privileges_sql(&self) -> Option<&'static str> {
         Some(

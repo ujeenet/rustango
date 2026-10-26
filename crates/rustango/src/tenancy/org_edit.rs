@@ -233,6 +233,7 @@ pub(crate) async fn apply_values_if(
                 let url =
                     crate::tenancy::provision::vet_database_url(&new, secrets, registry, None)
                         .await?;
+                crate::tenancy::provision::registry_alias(&url.resolved, registry).await;
                 // Compared resolved: re-sealing the same URL is not a rotation.
                 let old = match existing.database_url.as_deref() {
                     Some(old) => secrets.resolve(old).await.ok(),

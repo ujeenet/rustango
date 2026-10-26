@@ -1048,6 +1048,44 @@ async fn migrate_storage_checks_the_target_url(pool: &Pool) {
     assert!(err.to_string().contains("registry runs on"), "{err}");
 }
 
+/// The registry under another host name, or a SQLite hard link, passes
+/// the endpoint check; the connection check names it (a warning for now).
+async fn the_registry_under_an_alias_is_flagged(pool: &Pool) {
+    let env = Env::new(pool).await;
+    let alias = match env.backend() {
+        BackendKind::Sqlite if cfg!(unix) => {
+            let link = env.tmp.path().join("alias.db");
+            std::fs::hard_link(env.tmp.path().join("reg.db"), &link).unwrap();
+            format!("sqlite://{}", link.display())
+        }
+        BackendKind::Sqlite => return,
+        _ if env.url.contains("127.0.0.1") => env.url.replace("127.0.0.1", "localhost"),
+        _ => env.url.replace("localhost", "127.0.0.1"),
+    };
+    assert_ne!(alias, env.url, "the URL names neither localhost nor 127.0.0.1");
+    let request = ProvisionRequest {
+        run_migrations: false,
+        ..env.db_request("alias", &alias)
+    };
+    let dir = env.dir("migrations");
+    let (run, _) = typed!(env.registry, p => rustango::tenancy::provision::provision_tenant_recorded(
+        &p, &env.url, &dir, &request, None, None, None,
+    )
+    .await)
+    .expect("only warned in this release");
+    let events =
+        rustango::tenancy::provision_store::events_since(&env.registry, *run.id.get().unwrap(), 0)
+            .await
+            .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.message.contains("registry's own database")),
+        "{:?}",
+        events.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
 /// `reseal-tenant-secrets` lists, then seals, a plain password URL.
 async fn reseal_seals_a_plain_password_url(pool: &Pool) {
     with_secret_key();
@@ -1155,5 +1193,6 @@ tri_dialect_test! {
         provision_releases_its_schema_on_a_failed_insert,
         concurrent_creates_never_share_a_schema,
         a_duplicate_slug_leaves_no_run,
+        the_registry_under_an_alias_is_flagged,
     ],
 }

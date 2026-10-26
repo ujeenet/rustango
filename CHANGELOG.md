@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a tenant URL that reaches the registry by another name is flagged
+
+Creating a tenant, editing its URL, the console's URL check and `migrate-tenant-storage` compare the server's identity (Postgres `system_identifier`, MySQL `server_uuid`, the SQLite file's device and inode) with the registry's. `localhost` for `127.0.0.1`, or a hard link, now gets a warning; a later release refuses it.
+
 ### Fixed — the registry check reads SQLite paths as SQLite does
 
 A symlink whose target passes through a missing directory, or a chain longer than the kernel follows, now resolves to the file SQLite opens. On Windows paths are compared as `GetFullPathNameW` builds them, without following links.

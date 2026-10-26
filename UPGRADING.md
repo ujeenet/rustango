@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### A tenant URL that reaches the registry by another name warns
+
+Provisioning still accepts it but logs and shows a warning. Give such a tenant its own database: a later release refuses it.
+
 ## 0.61.4
 
 ### Schema names equal to a database role are refused

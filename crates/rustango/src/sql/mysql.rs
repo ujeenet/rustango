@@ -227,6 +227,29 @@ impl Dialect for MySql {
         Some("SELECT VERSION()")
     }
 
+    /// `@@server_uuid`; MariaDB has none, so host, port and server id.
+    fn database_identity_sql(&self, version: &str, db: Option<&str>) -> Option<CompiledStatement> {
+        let key = if version.contains("MariaDB") {
+            "CONCAT(@@hostname, ':', @@port, ':', @@server_id)"
+        } else {
+            "@@server_uuid"
+        };
+        let (name, params) = match db {
+            Some(db) => {
+                let v = crate::core::SqlValue::String(db.to_owned());
+                ("?", vec![v.clone(), v])
+            }
+            None => ("DATABASE()", Vec::new()),
+        };
+        Some(CompiledStatement {
+            sql: format!(
+                "SELECT CAST({key} AS CHAR), \
+                 CAST(IF(@@lower_case_table_names = 0, {name}, LOWER({name})) AS CHAR)"
+            ),
+            params,
+        })
+    }
+
     /// Rows of (`PRIVILEGE_TYPE`, `IS_GRANTABLE`): the current account's
     /// global privileges. MariaDB has the same view.
     fn login_privileges_sql(&self) -> Option<&'static str> {

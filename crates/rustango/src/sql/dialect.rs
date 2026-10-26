@@ -1138,6 +1138,14 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// One row, two text columns: the server's identity and database `db`
+    /// (the current one when `None`), folded as the server compares names,
+    /// so aliases of one server compare equal. `version` is
+    /// [`Self::server_version_sql`]'s answer.
+    fn database_identity_sql(&self, _version: &str, _db: Option<&str>) -> Option<CompiledStatement> {
+        None
+    }
+
     /// The current login's server-level rights. The row shape is the
     /// dialect's own; `tenancy::server_admin` reads it.
     fn login_privileges_sql(&self) -> Option<&'static str> {

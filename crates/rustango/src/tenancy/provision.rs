@@ -1079,11 +1079,33 @@ async fn check_connection(
         .await;
     match checked.preflight().await {
         Ok(()) => {
-            rep.step(ProvisionStep::CheckConnection, Progress::Ok).await;
+            let url = checked.probe_target().unwrap_or_default();
+            let done = registry_alias(url, registry)
+                .await
+                .map_or(Progress::Ok, |w| Progress::Done(RunText::fixed(w)));
+            rep.step(ProvisionStep::CheckConnection, done).await;
             Ok(())
         }
         Err(e) => rep.fail(ProvisionStep::CheckConnection, e).await,
     }
+}
+
+/// What [`registry_alias`] reports.
+pub(crate) const REGISTRY_ALIAS: &str = "warning: this URL reaches the registry's own database \
+     under another name; give the tenant a database of its own (a later release refuses it)";
+
+/// The registry's own database under another host name, link or mount,
+/// which the endpoint check cannot see: compared by server identity. Only
+/// warned in this release; `None` when it differs or cannot be read.
+pub(crate) async fn registry_alias(url: &str, registry: &crate::sql::Pool) -> Option<&'static str> {
+    use super::db_identity::DbIdentity;
+    let theirs = DbIdentity::of_pool(registry).await.ok()??;
+    let ours = DbIdentity::of_url(url).await.ok()??;
+    if ours != theirs {
+        return None;
+    }
+    tracing::warn!(target: "rustango::tenancy::provision", "{REGISTRY_ALIAS}");
+    Some(REGISTRY_ALIAS)
 }
 
 /// Why the registry's login may not create a tenant schema; `None` when
@@ -1794,7 +1816,7 @@ impl Place {
 
 /// The file SQLite opens: a `file:` URI names its path, percent-encoded, before `?`.
 #[cfg(feature = "sqlite")]
-fn sqlite_file(name: &Path) -> std::path::PathBuf {
+pub(crate) fn sqlite_file(name: &Path) -> std::path::PathBuf {
     let name = name.to_string_lossy();
     let Some(uri) = name.strip_prefix("file:") else {
         return file_identity(Path::new(&*name));

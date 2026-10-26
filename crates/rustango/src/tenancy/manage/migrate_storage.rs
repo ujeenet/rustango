@@ -171,6 +171,12 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         }
         _ => (registry_url.to_owned(), registry_url.to_owned()),
     };
+    let alias = match parsed.target {
+        StorageMode::Database if parsed.database_url.is_some() => {
+            crate::tenancy::provision::registry_alias(&target_url, &pools.registry_pool()).await
+        }
+        _ => None,
+    };
 
     writeln!(
         writer,
@@ -186,6 +192,9 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         writeln!(writer, "  target: {} (schema `{s}`)", shown(&target_ref))?;
     } else {
         writeln!(writer, "  target: {}", shown(&target_ref))?;
+    }
+    if let Some(w) = alias {
+        writeln!(writer, "  {w}")?;
     }
 
     if parsed.dry_run {
