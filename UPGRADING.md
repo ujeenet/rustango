@@ -154,6 +154,10 @@ untouched.
 
 Rows an `ON DELETE SET NULL` / `SET DEFAULT` changes in an audited model now get an `update` entry, and a `truncate` adds a bulk `delete` entry for each audited table its FKs empty.
 
+### MySQL: translation keys become case-sensitive
+
+The first `migrate` runs `ALTER TABLE rustango_translations MODIFY COLUMN` on `locale` and `key` when they ignore case. After it, `Key` no longer matches a `key` override.
+
 ## 0.61.3
 
 ### `[cache] backend` should be a known lowercase name

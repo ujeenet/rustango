@@ -16,6 +16,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `Model::truncate` writes a bulk `delete` entry (`{"bulk": "truncate", "cascade_from": …}`) on each audited table its FKs empty: every referencing table on PG (`TRUNCATE … CASCADE`), the `ON DELETE CASCADE` ones elsewhere.
 - PG: `in_bulk`, `in_bulk_on` and prefetch send a key list as one `= ANY($1)` bind instead of splitting it at the bind limit, so a sliced `in_bulk` past 65 535 keys works.
 
+### Fixed — MySQL translation keys are case-sensitive
+
+`rustango_translations.locale` / `key` use an `_as_cs` collation on MySQL and MariaDB 10.10+, so `Key` and `key` are two overrides as on PG and SQLite; `migrate` moves an existing table's `_ci` columns.
+
 ## [0.61.3] — 2026-10-26
 
 ### Changed — unknown `cache.backend` values are logged as errors

@@ -69,10 +69,44 @@ async fn stale_blank_keeps_an_override_filled_meanwhile(pool: &Pool) {
     );
 }
 
+/// Keys differing only in case or accents are two overrides, as on PG/SQLite.
+async fn keys_compare_case_sensitively(pool: &Pool) {
+    use rustango::i18n::db::{all_pool, upsert_pool};
+    for key in ["Key", "key", "kéy"] {
+        upsert_pool(pool, "en", key, key, "alice")
+            .await
+            .unwrap_or_else(|e| panic!("{key}: {e}"));
+    }
+    let mut keys: Vec<String> = all_pool(pool)
+        .await
+        .expect("rows")
+        .into_iter()
+        .map(|t| t.key)
+        .collect();
+    keys.sort();
+    assert_eq!(keys, ["Key", "key", "kéy"]);
+}
+
+/// MySQL: a table an older release made under a `_ci` collation is moved.
+async fn an_older_case_insensitive_table_is_upgraded(pool: &Pool) {
+    if pool.dialect().name() != "mysql" {
+        return;
+    }
+    let old = "ALTER TABLE `rustango_translations` MODIFY COLUMN `key` VARCHAR(200) \
+               CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL";
+    rustango::sql::raw_execute_pool(pool, old, Vec::new())
+        .await
+        .expect("old collation");
+    ensure_table_pool(pool).await.expect("upgrade");
+    keys_compare_case_sensitively(pool).await;
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         emptied_cell_drops_that_locales_override,
         stale_blank_keeps_an_override_filled_meanwhile,
+        keys_compare_case_sensitively,
+        an_older_case_insensitive_table_is_upgraded,
     ],
 }
