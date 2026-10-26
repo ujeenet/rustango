@@ -1519,9 +1519,12 @@ mod dynamic_form_tests {
     #[test]
     fn email_field_uses_the_framework_checks() {
         assert!(is_strict_email("a.b+c@example.com"));
-        for bad in ["a..b@example.com", "<a@example.com>", "a b@example.com", "a@localhost"] {
+        for bad in ["a..b@example.com", "a b@example.com", "a@localhost"] {
             assert!(!is_strict_email(bad), "{bad:?}");
         }
+        // Only the `email` feature's address parser refuses the bracketed form.
+        #[cfg(feature = "email")]
+        assert!(!is_strict_email("<a@example.com>"));
         let mut f = form(serde_json::json!([{"name": "e", "field_type": "email"}]));
         f.bind(HashMap::from([("e".into(), "nope".into())]));
         assert!(!f.is_valid());
