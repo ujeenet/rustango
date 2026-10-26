@@ -12,6 +12,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `CsvResponse::filename` replaces control characters with `_`; one used to drop the whole `Content-Disposition` header.
 - Logging: `RUST_LOG` reads `warning` / `critical` / `fatal` as levels too, as `[logging] level` already did; a bare `warning` used to silence every event.
 - `TracingLayer` records at most 512 bytes of `User-Agent` on the request span.
+- Two operators deactivating each other at once can no longer leave zero active operators: `operators::set_active` locks the active rows and deactivates in one transaction.
 
 ### Fixed — migrations, MySQL and MariaDB
 
