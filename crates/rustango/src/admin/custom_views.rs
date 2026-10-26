@@ -31,7 +31,9 @@
 //! `…/blog_post/copy/{id}`. It must not clash with a built-in route:
 //! `""`, `"new"`, `"__action"`, `"__autocomplete"`, `"{pk}"`,
 //! `"{pk}/edit"` or `"{pk}/delete"`. On a clash the Builder logs a
-//! warning and skips the view instead of panicking.
+//! warning and skips the view instead of panicking. A suffix whose
+//! params also match one, such as `"{id}"` or `"{id}/edit"`, wins that
+//! route for the table; the Builder warns about it.
 //!
 //! Handlers run inside the admin's session-auth scope when one is
 //! configured, so the operator must be signed in to reach them.
@@ -116,23 +118,53 @@ pub fn for_table(table: &str) -> Vec<&'static AdminCustomView> {
         .collect()
 }
 
-/// URL suffixes the admin Builder owns. A registration that uses one
-/// is skipped with a warning at build time. Shared by the Builder and
-/// the tests, so both read the same list.
-pub(crate) const RESERVED_SUFFIXES: &[&str] = &["", "new", "__action", "__autocomplete"];
+/// URL suffixes the admin Builder mounts under `/{table}/`, in the
+/// order a shadowing view is reported.
+const BUILT_IN_SUFFIXES: &[&str] = &[
+    "",
+    "new",
+    "__action",
+    "__autocomplete",
+    "{pk}",
+    "{pk}/edit",
+    "{pk}/delete",
+];
 
-/// `true` when `suffix` clashes with a built-in admin route: either a
-/// name in `RESERVED_SUFFIXES` or one of the pk paths `{pk}`,
-/// `{pk}/edit` and `{pk}/delete`.
+/// How a custom view's suffix meets the built-in admin routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Clash {
+    /// The exact path of a built-in route: the Builder skips the view.
+    Reserved,
+    /// Its params also match this built-in route, and axum routes the
+    /// view's static table segment first, so the view wins it.
+    Shadows(&'static str),
+}
+
+/// How `suffix` clashes with a built-in route, if it does.
 #[must_use]
-pub(crate) fn is_reserved(suffix: &str) -> bool {
+pub(crate) fn clash(suffix: &str) -> Option<Clash> {
     let trimmed = suffix.trim_matches('/');
-    if RESERVED_SUFFIXES.iter().any(|r| *r == trimmed) {
-        return true;
+    if BUILT_IN_SUFFIXES.contains(&trimmed) {
+        return Some(Clash::Reserved);
     }
-    // The framework also owns `/{table}/{pk}` and its `/edit` and
-    // `/delete` forms.
-    matches!(trimmed, "{pk}" | "{pk}/edit" | "{pk}/delete")
+    BUILT_IN_SUFFIXES
+        .iter()
+        .find(|b| !b.is_empty() && covers(trimmed, b))
+        .map(|b| Clash::Shadows(b))
+}
+
+/// `true` when every path `built_in` matches is also matched by `custom`.
+fn covers(custom: &str, built_in: &str) -> bool {
+    let is_param = |s: &str| s.starts_with('{') && s.ends_with('}');
+    let (mut c, mut b) = (custom.split('/'), built_in.split('/'));
+    loop {
+        match (c.next(), b.next()) {
+            (None, None) => return true,
+            (Some(cs), Some(_)) if cs.starts_with("{*") && cs.ends_with('}') => return true,
+            (Some(cs), Some(bs)) if is_param(cs) || (!is_param(bs) && cs == bs) => {}
+            _ => return false,
+        }
+    }
 }
 
 /// Register a custom admin view for one model.
@@ -191,28 +223,75 @@ mod tests {
 
     #[test]
     fn reserved_suffixes_includes_built_in_routes() {
-        assert!(is_reserved(""));
-        assert!(is_reserved("new"));
-        assert!(is_reserved("__action"));
-        assert!(is_reserved("__autocomplete"));
-        assert!(is_reserved("{pk}"));
-        assert!(is_reserved("{pk}/edit"));
-        assert!(is_reserved("{pk}/delete"));
+        for s in [
+            "",
+            "new",
+            "__action",
+            "__autocomplete",
+            "{pk}",
+            "{pk}/edit",
+            "{pk}/delete",
+        ] {
+            assert_eq!(clash(s), Some(Clash::Reserved), "{s}");
+        }
     }
 
     #[test]
     fn reserved_suffixes_strips_surrounding_slashes() {
-        assert!(is_reserved("/new"));
-        assert!(is_reserved("/new/"));
-        assert!(is_reserved("new/"));
+        for s in ["/new", "/new/", "new/"] {
+            assert_eq!(clash(s), Some(Clash::Reserved), "{s}");
+        }
     }
 
     #[test]
     fn user_suffixes_are_not_reserved() {
-        assert!(!is_reserved("duplicate"));
-        assert!(!is_reserved("copy/{id}"));
-        assert!(!is_reserved("export.csv"));
-        assert!(!is_reserved("preview"));
+        for s in ["duplicate", "copy/{id}", "export.csv", "preview"] {
+            assert_eq!(clash(s), None, "{s}");
+        }
+    }
+
+    #[test]
+    fn a_renamed_param_shadows_the_built_in_it_matches() {
+        assert_eq!(clash("{id}"), Some(Clash::Shadows("new")));
+        assert_eq!(clash("{id}/edit"), Some(Clash::Shadows("{pk}/edit")));
+        assert_eq!(
+            clash("/{slug}/delete/"),
+            Some(Clash::Shadows("{pk}/delete"))
+        );
+        assert_eq!(clash("{a}/{b}"), Some(Clash::Shadows("{pk}/edit")));
+        assert_eq!(clash("{*rest}"), Some(Clash::Shadows("new")));
+    }
+
+    #[test]
+    fn suffixes_that_match_no_built_in_do_not_clash() {
+        for s in [
+            "duplicate",
+            "copy/{id}",
+            "{id}/duplicate",
+            "export.csv",
+            "{id}/edit/x",
+        ] {
+            assert_eq!(clash(s), None, "{s}");
+        }
+    }
+
+    /// The premise: axum picks the custom view's static table segment over
+    /// `{table}`, then answers 405 rather than falling back to the built-in.
+    #[tokio::test]
+    async fn axum_routes_a_shadowing_view_over_the_built_in() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use axum::routing::{get, post};
+        use tower::ServiceExt as _;
+        let app = axum::Router::new()
+            .route("/{table}/new", get(|| async { "create" }))
+            .route("/{table}/{pk}", get(|| async { "detail" }))
+            .route("/post/{id}", post(|| async { "custom" }));
+        for uri in ["/post/7", "/post/new"] {
+            let req = Request::get(uri).body(Body::empty()).unwrap();
+            let res = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED, "{uri}");
+        }
     }
 
     #[test]

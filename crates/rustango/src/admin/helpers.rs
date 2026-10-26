@@ -676,14 +676,14 @@ pub(crate) fn render_cell_json(
         let Some(raw_value) = render::read_value_as_string_json(row, field) else {
             return "<em>NULL</em>".to_owned();
         };
-        let raw_esc = render::escape(&raw_value);
         let to_esc = render::escape(to);
-        return match fk_map.get(&(to.to_owned(), raw_value)) {
+        return match fk_map.get(&(to.to_owned(), raw_value.clone())) {
             Some(display) => format!(
-                r#"<a href="{prefix}/{to_esc}/{raw_esc}">{display}</a>"#,
+                r#"<a href="{prefix}/{to_esc}/{pk}">{display}</a>"#,
                 prefix = render::escape(admin_prefix),
+                pk = url_encode(&raw_value),
             ),
-            None => raw_esc,
+            None => render::escape(&raw_value),
         };
     }
     render::render_value_json(row, field)
@@ -743,11 +743,7 @@ fn render_form_with_inlines_and_pickers(
             .and_then(|m| m.get(pk_field.name).cloned())
             .unwrap_or_default();
         (
-            format!(
-                "{admin_prefix}/{}/{}",
-                model.table,
-                render::escape(&pk_value)
-            ),
+            format!("{admin_prefix}/{}/{}", model.table, url_encode(&pk_value)),
             Some(pk_value),
         )
     } else {
@@ -970,6 +966,7 @@ fn render_form_with_inlines_and_pickers(
         },
         "title": title,
         "action": action,
+        "edit_pk_path": edit_pk.as_deref().map(url_encode),
         "edit_pk": edit_pk,
         "error": error_msg,
         "fieldsets": fieldsets_ctx,

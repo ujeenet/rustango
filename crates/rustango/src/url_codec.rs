@@ -36,6 +36,14 @@ pub fn url_encode(s: &str) -> String {
     out
 }
 
+/// Replace every `{pk}` in a URL template with `pk` as one encoded path
+/// segment, so a key holding `/`, `?` or `#` cannot reroute the link.
+#[must_use]
+#[cfg(any(feature = "serializer", feature = "template_views"))]
+pub(crate) fn fill_pk_segment(template: &str, pk: &str) -> String {
+    template.replace("{pk}", &url_encode(pk))
+}
+
 /// Decode a `application/x-www-form-urlencoded` string.
 ///
 /// See module docs for malformed-input handling.
