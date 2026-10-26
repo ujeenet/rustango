@@ -31,7 +31,7 @@
 pub(crate) mod check;
 pub mod link;
 pub mod provider;
-pub use link::{LinkSource, ProviderKey, SsoLink};
+pub use link::{LinkSource, ProviderKey, SsoLink, StaleLinks};
 pub use provider::{list_enabled, resolve_by_slug, ResolvedProvider, SsoProvider};
 
 use crate::oauth2::{providers, OAuth2Provider, OAuthError};
@@ -204,12 +204,29 @@ struct Endpoints {
 /// A discovery outcome: the endpoints, or the failure's message.
 type Discovered = Result<Endpoints, String>;
 
-static DISCOVERED: LazyLock<Mutex<HashMap<String, (Instant, Discovered)>>> =
+/// Issuer URL and the outbound policy it was fetched under: an outcome under
+/// one policy says nothing about another.
+type DiscoveryKey = (String, TargetPolicy);
+
+type Gate = std::sync::Arc<tokio::sync::Mutex<()>>;
+
+static DISCOVERED: LazyLock<Mutex<HashMap<DiscoveryKey, (Instant, Discovered)>>> =
     LazyLock::new(Mutex::default);
 
-/// One fetch per issuer at a time; the others wait for its result.
-static IN_FLIGHT: LazyLock<Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>> =
-    LazyLock::new(Mutex::default);
+/// One fetch per key at a time; the others wait for its result.
+static IN_FLIGHT: LazyLock<Mutex<HashMap<DiscoveryKey, Gate>>> = LazyLock::new(Mutex::default);
+
+/// Held by the caller that fetches: drops its gate when done or cancelled.
+struct InFlight<'a>(&'a DiscoveryKey, &'a Gate);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        let mut map = IN_FLIGHT.lock().unwrap_or_else(PoisonError::into_inner);
+        if map.get(self.0).is_some_and(|g| std::sync::Arc::ptr_eq(g, self.1)) {
+            map.remove(self.0);
+        }
+    }
+}
 
 fn ttl_of(found: &Discovered) -> Duration {
     if found.is_ok() {
@@ -219,7 +236,7 @@ fn ttl_of(found: &Discovered) -> Duration {
     }
 }
 
-fn cached(key: &str) -> Option<Discovered> {
+fn cached(key: &DiscoveryKey) -> Option<Discovered> {
     let map = DISCOVERED.lock().unwrap_or_else(PoisonError::into_inner);
     map.get(key)
         .filter(|(at, found)| at.elapsed() < ttl_of(found))
@@ -235,7 +252,7 @@ async fn discovered(
     redirect: String,
     policy: &TargetPolicy,
 ) -> Result<OAuth2Provider, OAuthError> {
-    let key = issuer.trim_end_matches('/').to_owned();
+    let key: DiscoveryKey = (issuer.trim_end_matches('/').to_owned(), policy.clone());
     let found = match cached(&key) {
         Some(found) => found,
         None => {
@@ -249,8 +266,9 @@ async fn discovered(
             match cached(&key) {
                 Some(found) => found,
                 None => {
+                    let _in_flight = InFlight(&key, &gate);
                     let fetched = OAuth2Provider::new("oidc", "", "", "", "", "")
-                        .discover(&key, policy)
+                        .discover(&key.0, policy)
                         .await;
                     let found = fetched.as_ref().map_err(ToString::to_string).map(|p| Endpoints {
                         auth_url: p.auth_url.clone(),
@@ -263,10 +281,6 @@ async fn discovered(
                         found.clone(),
                         DISCOVERY_MAX,
                     );
-                    IN_FLIGHT
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .remove(&key);
                     // The fetcher keeps the original error; waiters get its message.
                     fetched?;
                     found
@@ -283,9 +297,9 @@ async fn discovered(
 }
 
 /// Insert `found`, dropping expired entries and then the oldest when `max` is reached.
-fn remember(
-    map: &mut HashMap<String, (Instant, Discovered)>,
-    key: String,
+fn remember<K: std::hash::Hash + Eq + Clone>(
+    map: &mut HashMap<K, (Instant, Discovered)>,
+    key: K,
     found: Discovered,
     max: usize,
 ) {
@@ -505,13 +519,33 @@ mod tests {
         DISCOVERED
             .lock()
             .unwrap()
-            .get_mut(base.as_str())
+            .get_mut(&(base.clone(), loopback()))
             .unwrap()
             .0 = aged;
         assert!(build_provider_with(&oidc(&base, "a"), &loopback())
             .await
             .is_ok());
         assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    /// A failure under one policy is not replayed under another.
+    #[tokio::test]
+    async fn the_policy_is_part_of_the_cache_key() {
+        let (base, hits) = issuer(1).await;
+        let strict = TargetPolicy::Public(crate::outbound::Allowlist::default());
+        assert!(build_provider_with(&oidc(&base, "a"), &strict).await.is_err());
+        assert!(build_provider_with(&oidc(&base, "a"), &loopback())
+            .await
+            .is_err());
+        assert!(
+            !IN_FLIGHT
+                .lock()
+                .unwrap()
+                .contains_key(&(base.clone(), loopback())),
+            "a finished fetch leaves no gate"
+        );
+        assert!(build_provider_with(&oidc(&base, "a"), &strict).await.is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "strict never reached the server");
     }
 
     /// Concurrent logins against a cold issuer share one fetch.

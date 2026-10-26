@@ -306,8 +306,8 @@ pub struct Account {
     /// Superuser or staff: never linked by email.
     pub privileged: bool,
     pub active: bool,
-    /// When the account was made. A link older than its account was made for
-    /// an earlier user with the same id (a reset sequence, a restore).
+    /// When the account was made. A link older than its account may be an
+    /// earlier user's with the same id (a reset sequence, a restore); see [`StaleLinks`].
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -322,7 +322,7 @@ impl Account {
         }
     }
 
-    /// Set [`Self::created_at`], so a link older than the account is dropped.
+    /// Set [`Self::created_at`], so a link older than the account is noticed.
     #[must_use]
     pub const fn with_created_at(mut self, at: chrono::DateTime<chrono::Utc>) -> Self {
         self.created_at = Some(at);
@@ -337,6 +337,61 @@ impl Account {
             _ => false,
         }
     }
+}
+
+/// What sign-in does with a link made before the account it points at.
+/// An imported or backfilled `created_at` looks the same, so the default only warns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum StaleLinks {
+    /// Log a warning and sign in through the link.
+    #[default]
+    Warn,
+    /// Delete the link and sign in as if unlinked. Only when account
+    /// creation times are trustworthy.
+    Drop,
+}
+
+static STALE_LINKS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set the process-wide [`StaleLinks`] policy, normally once at startup.
+pub fn set_stale_links(policy: StaleLinks) {
+    STALE_LINKS.store(
+        policy == StaleLinks::Drop,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// The current [`StaleLinks`] policy.
+#[must_use]
+pub fn stale_links() -> StaleLinks {
+    if STALE_LINKS.load(std::sync::atomic::Ordering::Relaxed) {
+        StaleLinks::Drop
+    } else {
+        StaleLinks::Warn
+    }
+}
+
+/// Apply [`stale_links`] to a link older than `account`: `true` when it was deleted.
+async fn stale(pool: &Pool, link: &SsoLink, account: &Account) -> Result<bool, LinkRefusal> {
+    if !account.outlived_by(link) {
+        return Ok(false);
+    }
+    let policy = stale_links();
+    tracing::warn!(
+        target: "rustango::sso",
+        user_id = account.user_id,
+        link_id = link.id.get().copied().unwrap_or_default(),
+        link_created = ?link.created_at.get(),
+        account_created = ?account.created_at,
+        ?policy,
+        "SSO link is older than its account: an earlier user with this id, or an imported created_at"
+    );
+    if policy != StaleLinks::Drop {
+        return Ok(false);
+    }
+    link.delete_pool(pool).await.map_err(storage)?;
+    Ok(true)
 }
 
 /// The user table a sign-in resolves against.
@@ -495,12 +550,15 @@ pub async fn sign_in(
             .await
             .map_err(LinkRefusal::Storage)?
         {
-            // A link older than its account was an earlier user's: drop it.
-            Some(a) if a.outlived_by(&link) => {
-                link.delete_pool(pool).await.map_err(storage)?;
+            Some(a) if !stale(pool, &link, &a).await? => {
+                return if a.active {
+                    Ok(a.user_id)
+                } else {
+                    Err(LinkRefusal::Inactive)
+                };
             }
-            Some(a) if a.active => return Ok(a.user_id),
-            Some(_) => return Err(LinkRefusal::Inactive),
+            // Dropped as stale: sign in as if unlinked.
+            Some(_) => {}
             // The user is gone (a clean miss, not an error): drop the stale link.
             None => {
                 link.delete_pool(pool).await.map_err(storage)?;
