@@ -631,7 +631,8 @@ pub struct ServerSettings {
     /// worker.
     pub request_timeout_secs: Option<u64>,
     /// Largest body accepted on POST, PUT and PATCH. `None` installs no
-    /// body-limit layer; axum's 2 MiB default still caps typed extractors.
+    /// body-limit layer: axum's 2 MiB default still caps typed extractors,
+    /// but a handler streaming the raw `Body` reads it uncapped.
     pub max_body_bytes: Option<u64>,
     /// Seconds open connections get to finish after SIGTERM before they
     /// are closed. `None` means 20. Keep it under the orchestrator's
@@ -749,7 +750,8 @@ pub struct SecuritySettings {
     pub csp: Option<String>,
     /// HSTS `max-age` in seconds. Default `31536000`, one year. `0`
     /// turns HSTS off, which helps in dev when switching between
-    /// http and https.
+    /// http and https. Setting it also adds `includeSubDomains` and
+    /// `preload`, whatever the preset (with a warning on `relaxed`).
     pub hsts_max_age_secs: Option<u64>,
     /// Origins allowed by CORS. Empty means no CORS layer. `["*"]`
     /// allows everything, though browsers reject it with

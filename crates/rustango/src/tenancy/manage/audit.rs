@@ -17,6 +17,8 @@
 //! cargo run -- audit-cleanup --keep-last 50
 //! cargo run -- audit-cleanup --tenant acme --days 90
 //! ```
+//!
+//! An `N` of 0 or less deletes every entry, so it needs `--yes`.
 
 use std::io::Write;
 
@@ -61,6 +63,7 @@ where
     let mut keep_last: Option<i64> = None;
     let mut tenant_slug: Option<String> = None;
     let mut registry_only = false;
+    let mut yes = false;
 
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
@@ -81,6 +84,7 @@ where
                 tenant_slug = Some(next_value(&mut iter, "--tenant")?);
             }
             "--registry" => registry_only = true,
+            "--yes" => yes = true,
             "--help" | "-h" => {
                 write_verb_help(w)?;
                 return Ok(());
@@ -105,6 +109,13 @@ where
             ))
         }
         _ => {}
+    }
+
+    // Zero or less keeps nothing: every entry in every log goes.
+    if !yes && days.or(keep_last).is_some_and(|n| n <= 0) {
+        return Err(TenancyError::Validation(
+            "a retention of 0 or less deletes every audit entry; pass --yes to confirm".into(),
+        ));
     }
 
     if registry_only && tenant_slug.is_some() {
@@ -199,6 +210,10 @@ fn write_verb_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         "  --tenant <slug>   that tenant's log only (default: the registry and every active tenant)"
     )?;
     writeln!(w, "  --registry        the registry's own log only")?;
+    writeln!(
+        w,
+        "  --yes             confirm a 0 (or negative) N, which deletes every entry"
+    )?;
     writeln!(w)?;
     writeln!(w, "EXAMPLES:")?;
     writeln!(w, "  cargo run -- audit-cleanup --days 90")?;

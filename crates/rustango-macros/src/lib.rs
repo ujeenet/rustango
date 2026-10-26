@@ -13945,6 +13945,12 @@ mod main_attr_tests {
             out.contains("logging :: Setup"),
             "the default entrypoint must still install one:\n{out}",
         );
+        // `./app serve` or `./app --port 8080` must keep logging to stdout:
+        // only `Cli`, which knows its verbs, moves logs to stderr.
+        assert!(
+            !out.contains("args ()"),
+            "the entrypoint must not route logs by argv:\n{out}",
+        );
     }
 
     #[test]

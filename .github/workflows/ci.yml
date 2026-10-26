@@ -915,6 +915,7 @@ jobs:
           - postgres,manage,admin
           - sqlite,template_views
           - sqlite,tenancy               # the pre-existing litmus
+          - sqlite,admin-sso             # SSO deploy check without tenancy
           # The media axis had no entry at all, so a change to the media
           # feature graph was compiled only by `--all-features`, where
           # every optional feature is on and nothing can be observed to

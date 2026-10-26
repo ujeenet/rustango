@@ -860,6 +860,13 @@ pub(crate) fn tuning() -> PoolTuning {
 /// Overlay the env vars onto `base`, warning about values that do not
 /// parse rather than failing a boot over a typo'd knob.
 fn merge_env_over(base: PoolTuning) -> PoolTuning {
+    let base = PoolTuning {
+        max_connections: nonzero(base.max_connections, "max_connections"),
+        acquire_timeout: nonzero(base.acquire_timeout, "acquire_timeout"),
+        idle_timeout: nonzero(base.idle_timeout, "idle_timeout"),
+        max_lifetime: nonzero(base.max_lifetime, "max_lifetime"),
+        ..base
+    };
     PoolTuning {
         max_connections: parse_env(MAX_CONNECTIONS_ENV).or(base.max_connections),
         min_connections: parse_env(MIN_CONNECTIONS_ENV).or(base.min_connections),
@@ -873,6 +880,21 @@ fn merge_env_over(base: PoolTuning) -> PoolTuning {
         max_lifetime: env_secs(MAX_LIFETIME_ENV).or(base.max_lifetime),
         test_before_acquire: env_bool(TEST_BEFORE_ACQUIRE_ENV).unwrap_or(base.test_before_acquire),
         idle_ping_after: env_secs(IDLE_PING_ENV).or(base.idle_ping_after),
+    }
+}
+
+/// `v` unless it is zero, which [`parse_env`] also refuses: a zero bound
+/// fails every query, so it falls back to the default with a warning.
+fn nonzero<T: PartialEq + Default>(v: Option<T>, field: &str) -> Option<T> {
+    match v {
+        Some(z) if z == T::default() => {
+            tracing::warn!(
+                target: "rustango::sql",
+                "pool {field} = 0 ([database] pool_* setting) is not a usable bound; ignoring it"
+            );
+            None
+        }
+        v => v,
     }
 }
 
@@ -1211,6 +1233,30 @@ mod tuning_tests {
             assert_eq!(t.max_connections, Some(20), "{bad:?} should be ignored");
         }
         clear();
+    }
+
+    /// A zero bound from `[database]` is ignored like the env's, not applied:
+    /// `max_connections = 0` or a 0 s acquire timeout fails every query.
+    #[test]
+    fn zero_bounds_from_settings_are_ignored() {
+        let _g = env_lock();
+        clear();
+        let t = merge_env_over(PoolTuning {
+            max_connections: Some(0),
+            min_connections: Some(0),
+            acquire_timeout: Some(Duration::ZERO),
+            idle_timeout: Some(Duration::ZERO),
+            max_lifetime: Some(Duration::ZERO),
+            ..PoolTuning::default()
+        });
+        assert_eq!(t.max_connections, None);
+        assert_eq!(t.min_connections, Some(0), "no idle connections is valid");
+        assert_eq!(
+            t.acquire_timeout,
+            Some(Duration::from_secs(ACQUIRE_TIMEOUT_DEFAULT_SECS))
+        );
+        assert_eq!(t.idle_timeout, None);
+        assert_eq!(t.max_lifetime, None);
     }
 
     #[test]

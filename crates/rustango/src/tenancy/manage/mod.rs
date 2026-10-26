@@ -79,6 +79,10 @@ use std::path::Path;
 use super::error::TenancyError;
 use super::pools::TenantPools;
 
+/// `Cli` runs it before any pool exists.
+#[cfg(feature = "manage")]
+pub(crate) use scaffold::startapp_cmd as startapp;
+
 /// Function pointer for the bootstrap initializer used by the
 /// `init-tenancy` verb. Defaults to
 /// [`crate::tenancy::bootstrap::init_tenancy`]; override via

@@ -55,7 +55,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 ";
 
-pub(super) fn startapp_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), TenancyError> {
+pub(crate) fn startapp_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), TenancyError> {
     let mut iter = args.iter();
     let app_name = iter
         .next()
