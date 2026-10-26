@@ -200,6 +200,17 @@ async fn migrate_logs_with_public_passkeys(
     slug: &str,
     existing: bool,
 ) -> Option<String> {
+    migrate_logs_with_public_passkeys_opts(db_name, slug, existing, false).await
+}
+
+/// As above; `fail_index` fails the run after the tenant's passkey table is made.
+#[cfg(all(feature = "passkey", feature = "runtime", feature = "testkit"))]
+async fn migrate_logs_with_public_passkeys_opts(
+    db_name: &str,
+    slug: &str,
+    existing: bool,
+    fail_index: bool,
+) -> Option<String> {
     use rustango::sql::Auto;
     use tracing::instrument::WithSubscriber as _;
     let admin_url = std::env::var("DATABASE_URL").ok()?;
@@ -253,13 +264,61 @@ async fn migrate_logs_with_public_passkeys(
         .with_writer(move || sink.clone())
         .with_max_level(tracing::Level::WARN)
         .finish();
-    run(&pools, &url, &["migrate-tenants"])
-        .with_subscriber(subscriber)
-        .await
-        .unwrap();
+    if fail_index {
+        // An event trigger fails the passkey table's index, after the table exists.
+        for sql in [
+            "CREATE FUNCTION t_fail_passkey_index() RETURNS event_trigger LANGUAGE plpgsql AS $$ \
+             BEGIN IF EXISTS (SELECT 1 FROM pg_event_trigger_ddl_commands() \
+             WHERE object_identity LIKE '%webauthn%') THEN RAISE EXCEPTION 'injected'; END IF; END $$",
+            "CREATE EVENT TRIGGER t_fail_passkey_index ON ddl_command_end \
+             WHEN TAG IN ('CREATE INDEX') EXECUTE FUNCTION t_fail_passkey_index()",
+        ] {
+            sqlx::query(sql).execute(&registry).await.unwrap();
+        }
+        run(&pools, &url, &["migrate-tenants"])
+            .with_subscriber(subscriber)
+            .await
+            .expect_err("the injected index failure fails the run");
+        sqlx::query("DROP EVENT TRIGGER t_fail_passkey_index")
+            .execute(&registry)
+            .await
+            .unwrap();
+        // The next run finds the table and must not be the first to stay quiet.
+        let sink = buf.clone();
+        let again = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || sink.clone())
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        run(&pools, &url, &["migrate-tenants"])
+            .with_subscriber(again)
+            .await
+            .unwrap();
+    } else {
+        run(&pools, &url, &["migrate-tenants"])
+            .with_subscriber(subscriber)
+            .await
+            .unwrap();
+    }
     drop(pools);
     registry.close().await;
     Some(buf.contents())
+}
+
+/// A run that fails after making the tenant's passkey table still warns, as
+/// no later run can tell the table is new.
+#[cfg(all(feature = "passkey", feature = "runtime", feature = "testkit"))]
+#[tokio::test]
+async fn a_failed_migrate_still_warns_about_hidden_passkeys() {
+    let Some(logs) =
+        migrate_logs_with_public_passkeys_opts("rustango_t2518c", "t2518-fail", true, true).await
+    else {
+        return;
+    };
+    assert!(
+        logs.contains("public.rustango_webauthn_credentials") && logs.contains("t2518-fail"),
+        "no warning about hidden passkeys:\n{logs}"
+    );
 }
 
 /// #2518 — an existing schema tenant's new passkey table hides the rows in

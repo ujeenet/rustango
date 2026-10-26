@@ -194,6 +194,21 @@ A form value for an `Array` field that parses as a JSON array (`["a,b", "c"]`, `
 
 It now also empties `signals::m2m` and `signals::admin`. Re-connect those after calling it if you relied on them staying.
 
+### SSO: stale links and discovery failures
+
+A sign-in link created more than 5 minutes before its local account now logs a warning (ids only) and still signs in. `rustango::sso::link::set_stale_links(StaleLinks::Drop)` deletes such links instead; use it only when account `created_at` values are not imported or backfilled. A failed OIDC discovery is now reused for 30 s before the next login retries it.
+
+### MCP: unique keys on agent grants
+
+The next `migrate` adds unique indexes on `rustango_agent_grants (agent_id, skill_id)` and `rustango_agent_skill_permissions (skill_id, permission_codename)`. If duplicate rows exist, `migrate` stops before any DDL and names the table. Keep the oldest row per key, then run it again (PostgreSQL, MySQL and SQLite):
+
+```sql
+DELETE FROM rustango_agent_grants WHERE id NOT IN
+  (SELECT keep FROM (SELECT MIN(id) AS keep FROM rustango_agent_grants GROUP BY agent_id, skill_id) AS k);
+DELETE FROM rustango_agent_skill_permissions WHERE id NOT IN
+  (SELECT keep FROM (SELECT MIN(id) AS keep FROM rustango_agent_skill_permissions GROUP BY skill_id, permission_codename) AS k);
+```
+
 ## 0.61.2
 
 ### SQLite: JSON column equality compares values

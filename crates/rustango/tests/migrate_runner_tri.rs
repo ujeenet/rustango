@@ -920,6 +920,75 @@ async fn refused_downgrade(pool: &Pool, t: &str, atomic: bool) {
     }
 }
 
+/// A unique key over rows that repeat it is refused before any DDL, with
+/// the fix in the message; rows with a NULL in the key do not count.
+async fn unique_key_over_duplicates_is_refused(pool: &Pool) {
+    let t = "mr_uq_grant";
+    let ledger = "mr_uq_ledger";
+    let dir = fresh(pool, &[t], ledger).await;
+    let cols = || vec![id(), col("a", false), col("b", true)];
+    let initial = make_migrations_from(dir.path(), &snap(vec![table(t, cols())]), None)
+        .expect("makemigrations")
+        .expect("a migration");
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .expect("migrate");
+    let q = pool.dialect().quote_ident(t);
+    for (a, b) in [("1", "1"), ("1", "1"), ("2", "NULL"), ("2", "NULL")] {
+        exec(pool, &format!("INSERT INTO {q} (a, b) VALUES ({a}, {b})"))
+            .await
+            .unwrap();
+    }
+    let with_key = serde_json::from_value(json!({
+        "tables": [table(t, cols())],
+        "indexes": [{"name": "mr_uq_grant_ab", "table": t, "columns": ["a", "b"], "unique": true}],
+    }))
+    .expect("snapshot");
+    let mig = Migration {
+        name: "0002_unique".into(),
+        prev: Some(initial.name.clone()),
+        snapshot: with_key,
+        forward: vec![Operation::Schema(SchemaChange::CreateIndex {
+            name: "mr_uq_grant_ab".into(),
+            table: t.into(),
+            columns: vec!["a".into(), "b".into()],
+            unique: true,
+            method: "btree".into(),
+            where_clause: None,
+            include: Vec::new(),
+        })],
+        ..initial
+    };
+    write(dir.path(), &mig);
+    let err = migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .expect_err("duplicates refuse the key");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("mr_uq_grant_ab") && msg.contains("Remove the extra rows"),
+        "{} said: {msg}",
+        pool.dialect().name()
+    );
+    // The query in the message runs as given and finds the repeated key.
+    let find = msg.lines().map(str::trim).find(|l| l.starts_with("SELECT")).expect("a query");
+    let dups: Vec<(i64, i64, i64)> = rustango::sql::raw_query_pool(find, Vec::new(), pool)
+        .await
+        .unwrap_or_else(|e| panic!("{find} on {}: {e}", pool.dialect().name()));
+    assert_eq!(dups, vec![(1, 1, 2)], "{find}");
+    exec(pool, &format!("DELETE FROM {q} WHERE id = 2"))
+        .await
+        .unwrap();
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("NULLs do not block the key on {}: {e}", pool.dialect().name()));
+    assert!(exec(pool, &format!("INSERT INTO {q} (a, b) VALUES (1, 1)"))
+        .await
+        .is_err());
+    for d in [t, ledger] {
+        drop_table(pool, d).await;
+    }
+}
+
 /// The URL of `pool`'s server, or a fresh SQLite file.
 fn url_of(pool: &Pool, file: &std::path::Path) -> String {
     match pool.dialect().name() {
@@ -1135,6 +1204,7 @@ tri_dialect_test!(
         applying_a_branch_keeps_the_others_column,
         refused_downgrade_runs_nothing,
         refused_loose_downgrade_runs_nothing,
+        unique_key_over_duplicates_is_refused,
         one_connection_pool_migrates,
         concurrent_runs_apply_once,
     ]

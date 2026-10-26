@@ -96,8 +96,9 @@ pub enum AuthFlowError {
 /// act on the same user id in another (#2472).
 ///
 /// A multi-tenant app takes it from the request's tenant
-/// (`LinkScope::from(&tenant)`) and confirms with [`LinkTarget::from`] the
-/// same `&tenant`. [`Self::audience`] is for single-database apps only.
+/// (`LinkScope::from(&tenant)`, a `Tenant` or `TenantScope`) and confirms
+/// with [`LinkTarget::from`] the same `&tenant`. [`Self::audience`] is for
+/// single-database apps only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkScope(String);
 
@@ -143,6 +144,13 @@ impl<DB: crate::sql::sqlx::Database> From<&crate::extractors::Tenant<DB>> for Li
     }
 }
 
+#[cfg(feature = "tenancy")]
+impl From<&crate::extractors::TenantScope> for LinkScope {
+    fn from(tenant: &crate::extractors::TenantScope) -> Self {
+        Self::from(&tenant.org)
+    }
+}
+
 /// The pool a confirm writes to, with the scope its links must carry.
 /// From `&Tenant` both come from one value, so they cannot disagree.
 #[cfg(feature = "passwords")]
@@ -179,6 +187,17 @@ impl<'a, DB: crate::sql::sqlx::Database> From<&'a crate::extractors::Tenant<DB>>
     for LinkTarget<'a>
 {
     fn from(tenant: &'a crate::extractors::Tenant<DB>) -> Self {
+        Self {
+            pool: tenant.pool(),
+            scope: LinkScope::from(tenant),
+        }
+    }
+}
+
+/// A [`crate::extractors::TenantScope`] handler's target: its pool and scope.
+#[cfg(all(feature = "passwords", feature = "tenancy"))]
+impl<'a> From<&'a crate::extractors::TenantScope> for LinkTarget<'a> {
+    fn from(tenant: &'a crate::extractors::TenantScope) -> Self {
         Self {
             pool: tenant.pool(),
             scope: LinkScope::from(tenant),
@@ -944,6 +963,39 @@ mod tests {
         let own = PasswordReset::issue(&LinkScope::from(&tenant), "https://b/r", id, SECRET, ttl);
         assert_eq!(
             confirm_password_reset_pool(&tenant, &own, strong, SECRET).await,
+            Ok(id)
+        );
+    }
+
+    /// A `TenantScope` handler confirms with its own pool and scope, so it
+    /// never needs `LinkTarget::audience` on a tenant pool.
+    #[cfg(all(feature = "tenancy", feature = "sqlite", feature = "testkit"))]
+    #[tokio::test]
+    async fn confirm_through_a_tenant_scope_checks_its_scope() {
+        use crate::sql::sqlx;
+        let sq = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = crate::sql::Pool::from(sq.clone());
+        crate::testkit::create_tables_for::<crate::tenancy::User>(&pool)
+            .await
+            .unwrap();
+        let mut u = crate::tenancy::User {
+            username: "ada".into(),
+            password_hash: "OLD".into(),
+            ..crate::testkit::user()
+        };
+        u.insert_pool(&pool).await.unwrap();
+        let id = *u.id.get().unwrap();
+        let scope = crate::extractors::TenantScope::for_test(org("b", 2), pool);
+        let ttl = Duration::from_secs(600);
+        let strong = "brand-new-strong-password-7!";
+
+        let audience = PasswordReset::issue(&LinkScope::audience("app"), "https://b/r", id, SECRET, ttl);
+        let r = confirm_password_reset_pool(&scope, &audience, strong, SECRET).await;
+        assert_eq!(r, Err(AuthFlowError::WrongScope));
+
+        let own = PasswordReset::issue(&LinkScope::from(&scope), "https://b/r", id, SECRET, ttl);
+        assert_eq!(
+            confirm_password_reset_pool(&scope, &own, strong, SECRET).await,
             Ok(id)
         );
     }

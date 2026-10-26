@@ -31,7 +31,7 @@
 pub(crate) mod check;
 pub mod link;
 pub mod provider;
-pub use link::{LinkSource, ProviderKey, SsoLink};
+pub use link::{LinkSource, ProviderKey, SsoLink, StaleLinks};
 pub use provider::{list_enabled, resolve_by_slug, ResolvedProvider, SsoProvider};
 
 use crate::oauth2::{providers, OAuth2Provider, OAuthError};
@@ -187,6 +187,8 @@ async fn build_provider_with(
 
 /// How long discovered endpoints are reused before the next login refetches them.
 const DISCOVERY_TTL: Duration = Duration::from_secs(3600);
+/// How long a failed discovery is reused, so logins do not each wait on a down IdP.
+const DISCOVERY_FAIL_TTL: Duration = Duration::from_secs(30);
 /// Most issuers cached at once; past it, the oldest is dropped.
 const DISCOVERY_MAX: usize = 1024;
 
@@ -199,10 +201,50 @@ struct Endpoints {
     userinfo_url: Option<String>,
 }
 
-static DISCOVERED: LazyLock<Mutex<HashMap<String, (Instant, Endpoints)>>> =
+/// A discovery outcome: the endpoints, or the failure's message.
+type Discovered = Result<Endpoints, String>;
+
+/// Issuer URL and the outbound policy it was fetched under: an outcome under
+/// one policy says nothing about another.
+type DiscoveryKey = (String, TargetPolicy);
+
+type Gate = std::sync::Arc<tokio::sync::Mutex<()>>;
+
+static DISCOVERED: LazyLock<Mutex<HashMap<DiscoveryKey, (Instant, Discovered)>>> =
     LazyLock::new(Mutex::default);
 
-/// An OIDC provider for `issuer`, running discovery at most once per [`DISCOVERY_TTL`].
+/// One fetch per key at a time; the others wait for its result.
+static IN_FLIGHT: LazyLock<Mutex<HashMap<DiscoveryKey, Gate>>> = LazyLock::new(Mutex::default);
+
+/// Held by the caller that fetches: drops its gate when done or cancelled.
+struct InFlight<'a>(&'a DiscoveryKey, &'a Gate);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        let mut map = IN_FLIGHT.lock().unwrap_or_else(PoisonError::into_inner);
+        if map.get(self.0).is_some_and(|g| std::sync::Arc::ptr_eq(g, self.1)) {
+            map.remove(self.0);
+        }
+    }
+}
+
+fn ttl_of(found: &Discovered) -> Duration {
+    if found.is_ok() {
+        DISCOVERY_TTL
+    } else {
+        DISCOVERY_FAIL_TTL
+    }
+}
+
+fn cached(key: &DiscoveryKey) -> Option<Discovered> {
+    let map = DISCOVERED.lock().unwrap_or_else(PoisonError::into_inner);
+    map.get(key)
+        .filter(|(at, found)| at.elapsed() < ttl_of(found))
+        .map(|(_, found)| found.clone())
+}
+
+/// An OIDC provider for `issuer`, running discovery at most once per [`DISCOVERY_TTL`]
+/// (a failure, once per [`DISCOVERY_FAIL_TTL`]).
 async fn discovered(
     issuer: &str,
     id: String,
@@ -210,41 +252,58 @@ async fn discovered(
     redirect: String,
     policy: &TargetPolicy,
 ) -> Result<OAuth2Provider, OAuthError> {
-    let key = issuer.trim_end_matches('/').to_owned();
-    let hit = {
-        let map = DISCOVERED.lock().unwrap_or_else(PoisonError::into_inner);
-        map.get(&key)
-            .filter(|(at, _)| at.elapsed() < DISCOVERY_TTL)
-            .map(|(_, e)| e.clone())
+    let key: DiscoveryKey = (issuer.trim_end_matches('/').to_owned(), policy.clone());
+    let found = match cached(&key) {
+        Some(found) => found,
+        None => {
+            let gate = IN_FLIGHT
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(key.clone())
+                .or_default()
+                .clone();
+            let _turn = gate.lock().await;
+            match cached(&key) {
+                Some(found) => found,
+                None => {
+                    let _in_flight = InFlight(&key, &gate);
+                    let fetched = OAuth2Provider::new("oidc", "", "", "", "", "")
+                        .discover(&key.0, policy)
+                        .await;
+                    let found = fetched.as_ref().map_err(ToString::to_string).map(|p| Endpoints {
+                        auth_url: p.auth_url.clone(),
+                        token_url: p.token_url.clone(),
+                        userinfo_url: p.userinfo_url.clone(),
+                    });
+                    remember(
+                        &mut DISCOVERED.lock().unwrap_or_else(PoisonError::into_inner),
+                        key.clone(),
+                        found.clone(),
+                        DISCOVERY_MAX,
+                    );
+                    // The fetcher keeps the original error; waiters get its message.
+                    fetched?;
+                    found
+                }
+            }
+        }
     };
-    if let Some(e) = hit {
-        let p = OAuth2Provider::new("oidc", id, secret, redirect, e.auth_url, e.token_url);
-        return Ok(match e.userinfo_url {
-            Some(u) => p.with_userinfo_url(u),
-            None => p,
-        });
-    }
-    let p = OAuth2Provider::new("oidc", id, secret, redirect, "", "")
-        .discover(&key, policy)
-        .await?;
-    let e = Endpoints {
-        auth_url: p.auth_url.clone(),
-        token_url: p.token_url.clone(),
-        userinfo_url: p.userinfo_url.clone(),
-    };
-    let mut map = DISCOVERED.lock().unwrap_or_else(PoisonError::into_inner);
-    remember(&mut map, key, e, DISCOVERY_MAX);
-    Ok(p)
+    let e = found.map_err(OAuthError::Discovery)?;
+    let p = OAuth2Provider::new("oidc", id, secret, redirect, e.auth_url, e.token_url);
+    Ok(match e.userinfo_url {
+        Some(u) => p.with_userinfo_url(u),
+        None => p,
+    })
 }
 
-/// Insert `e`, dropping expired entries and then the oldest when `max` is reached.
-fn remember(
-    map: &mut HashMap<String, (Instant, Endpoints)>,
-    key: String,
-    e: Endpoints,
+/// Insert `found`, dropping expired entries and then the oldest when `max` is reached.
+fn remember<K: std::hash::Hash + Eq + Clone>(
+    map: &mut HashMap<K, (Instant, Discovered)>,
+    key: K,
+    found: Discovered,
     max: usize,
 ) {
-    map.retain(|_, (at, _)| at.elapsed() < DISCOVERY_TTL);
+    map.retain(|_, (at, found)| at.elapsed() < ttl_of(found));
     if map.len() >= max && !map.contains_key(&key) {
         let oldest = map
             .iter()
@@ -254,7 +313,7 @@ fn remember(
             map.remove(&k);
         }
     }
-    map.insert(key, (Instant::now(), e));
+    map.insert(key, (Instant::now(), found));
 }
 
 /// One SSO button for a login page — the template loops over these.
@@ -437,7 +496,7 @@ mod tests {
         };
         let mut map = HashMap::new();
         for k in ["one", "two", "three"] {
-            remember(&mut map, k.into(), e(), 2);
+            remember(&mut map, k.into(), Ok(e()), 2);
             std::thread::sleep(Duration::from_millis(2));
         }
         let mut keys: Vec<_> = map.keys().map(String::as_str).collect();
@@ -445,17 +504,61 @@ mod tests {
         assert_eq!(keys, ["three", "two"]);
     }
 
-    /// A failed discovery is not cached; the next login retries.
+    /// A failed discovery is reused briefly, then retried.
     #[tokio::test]
-    async fn failed_discovery_is_retried() {
+    async fn failed_discovery_is_cached_briefly() {
         let (base, hits) = issuer(1).await;
-        assert!(build_provider_with(&oidc(&base, "a"), &loopback())
-            .await
-            .is_err());
+        for _ in 0..3 {
+            assert!(build_provider_with(&oidc(&base, "a"), &loopback())
+                .await
+                .is_err());
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "a failure is cached");
+        // Age the failure past its TTL.
+        let aged = Instant::now().checked_sub(DISCOVERY_FAIL_TTL).unwrap();
+        DISCOVERED
+            .lock()
+            .unwrap()
+            .get_mut(&(base.clone(), loopback()))
+            .unwrap()
+            .0 = aged;
         assert!(build_provider_with(&oidc(&base, "a"), &loopback())
             .await
             .is_ok());
         assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    /// A failure under one policy is not replayed under another.
+    #[tokio::test]
+    async fn the_policy_is_part_of_the_cache_key() {
+        let (base, hits) = issuer(1).await;
+        let strict = TargetPolicy::Public(crate::outbound::Allowlist::default());
+        assert!(build_provider_with(&oidc(&base, "a"), &strict).await.is_err());
+        assert!(build_provider_with(&oidc(&base, "a"), &loopback())
+            .await
+            .is_err());
+        assert!(
+            !IN_FLIGHT
+                .lock()
+                .unwrap()
+                .contains_key(&(base.clone(), loopback())),
+            "a finished fetch leaves no gate"
+        );
+        assert!(build_provider_with(&oidc(&base, "a"), &strict).await.is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "strict never reached the server");
+    }
+
+    /// Concurrent logins against a cold issuer share one fetch.
+    #[tokio::test]
+    async fn concurrent_discovery_fetches_once() {
+        let (base, hits) = issuer(0).await;
+        let cfg = oidc(&base, "a");
+        let policy = loopback();
+        let runs = (0..8).map(|_| build_provider_with(&cfg, &policy));
+        for r in futures_util::future::join_all(runs).await {
+            r.unwrap();
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

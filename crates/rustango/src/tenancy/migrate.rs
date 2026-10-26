@@ -879,27 +879,34 @@ async fn run_for_one_tenant(
             #[cfg(feature = "passkey")]
             let reads_public_passkeys = existed_here(&dbpool, "rustango_users").await
                 && !existed_here(&dbpool, PASSKEY_TABLE).await;
-            let applied = migrate_with_system(
-                &dbpool,
-                chain,
-                MigrationScope::Tenant,
-                dir,
-                system_progress,
-                crate::migrate::Signals::Fire,
-                |held| {
-                    let observer = project_progress
-                        .as_ref()
-                        .map(|o| o as &dyn crate::migrate::MigrationObserver);
-                    crate::migrate::migrate_locked(held, &pool, dir, observer)
-                },
-            )
-            .await?;
-            // Lands in the tenant schema, not `public` (#2364).
-            crate::migrate::manage::ensure_tenant_bootstrap_tables(&dbpool).await?;
+            let run = async {
+                let applied = migrate_with_system(
+                    &dbpool,
+                    chain,
+                    MigrationScope::Tenant,
+                    dir,
+                    system_progress,
+                    crate::migrate::Signals::Fire,
+                    |held| {
+                        let observer = project_progress
+                            .as_ref()
+                            .map(|o| o as &dyn crate::migrate::MigrationObserver);
+                        crate::migrate::migrate_locked(held, &pool, dir, observer)
+                    },
+                )
+                .await?;
+                // Lands in the tenant schema, not `public` (#2364).
+                crate::migrate::manage::ensure_tenant_bootstrap_tables(&dbpool).await?;
+                Ok::<_, TenancyError>(applied)
+            }
+            .await;
+            // Warn even if the run failed: once the tenant's passkey table exists,
+            // the next run sees no change and would never warn.
             #[cfg(feature = "passkey")]
-            if reads_public_passkeys {
+            if reads_public_passkeys && existed_here(&dbpool, PASSKEY_TABLE).await {
                 warn_hidden_public_passkeys(&pools.registry_pool(), &org.slug, &schema).await;
             }
+            let applied = run?;
             // Data seeders (rows, not DDL — kept): CRUD permission
             // codenames for every registered model (#61) + the
             // content-type catalog (#89). Idempotent.

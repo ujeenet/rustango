@@ -1402,6 +1402,7 @@ async fn downgrade_with_ledger(
 
 #[cfg(feature = "postgres")]
 async fn apply_one(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
+    refuse_duplicate_keys(&pool.clone().into(), mig).await?;
     if mig.atomic {
         apply_atomic(pool, mig, ledger).await
     } else {
@@ -4894,11 +4895,89 @@ async fn apply_one_pool(
     mig: &Migration,
     ledger: &str,
 ) -> Result<(), MigrateError> {
+    refuse_duplicate_keys(pool, mig).await?;
     if mig.atomic {
         apply_atomic_pool(pool, mig, ledger).await
     } else {
         apply_nonatomic_pool(pool, mig, ledger).await
     }
+}
+
+/// Refuse, before any DDL, a unique key that rows already repeat: the index
+/// would fail midway (MySQL keeps what ran). Each probe scans the table.
+/// Stops at the first data step, which may remove the duplicates; skips keys
+/// on tables or columns this migration makes or renames.
+async fn refuse_duplicate_keys(
+    pool: &crate::sql::Pool,
+    mig: &Migration,
+) -> Result<(), MigrateError> {
+    use super::diff::SchemaChange as SC;
+    let mut new_tables: Vec<&str> = Vec::new();
+    let mut new_columns: Vec<(&str, &str)> = Vec::new();
+    for op in &mig.forward {
+        let Operation::Schema(change) = op else {
+            return Ok(());
+        };
+        let (name, table, columns): (&str, &str, Vec<&str>) = match change {
+            SC::CreateTable(t)
+            | SC::CreateM2MTable { through: t, .. }
+            | SC::RenameTable { new_name: t, .. } => {
+                new_tables.push(t);
+                continue;
+            }
+            SC::AddColumn { table, column }
+            | SC::RenameColumn {
+                table,
+                new_column: column,
+                ..
+            } => {
+                new_columns.push((table, column));
+                continue;
+            }
+            SC::CreateIndex {
+                name,
+                table,
+                columns,
+                unique: true,
+                where_clause: None,
+                ..
+            } => (name, table, columns.iter().map(String::as_str).collect()),
+            SC::AlterColumnUnique {
+                table,
+                column,
+                unique: true,
+            } => (column, table, vec![column.as_str()]),
+            _ => continue,
+        };
+        if new_tables.contains(&table)
+            || columns.iter().any(|c| new_columns.contains(&(table, *c)))
+        {
+            continue;
+        }
+        match super::ensure::has_duplicate_keys(pool, table, &columns).await {
+            Ok(false) => {}
+            Ok(true) => {
+                let q = |n: &str| pool.dialect().quote_ident(n);
+                let cols: Vec<String> = columns.iter().map(|c| q(c)).collect();
+                let set: Vec<String> = cols.iter().map(|c| format!("{c} IS NOT NULL")).collect();
+                let cols = cols.join(", ");
+                return Err(MigrateError::Validation(format!(
+                    "{}: cannot add unique `{name}` on `{table}`: existing rows repeat those \
+                     values. Remove the extra rows, then run migrate again. They are:\n  \
+                     SELECT {cols}, COUNT(*) FROM {} WHERE {} GROUP BY {cols} HAVING COUNT(*) > 1",
+                    mig.name,
+                    q(table),
+                    set.join(" AND "),
+                )));
+            }
+            Err(e) => tracing::warn!(
+                target: "rustango::migrate",
+                migration = %mig.name,
+                "duplicate check for unique `{name}` on `{table}` skipped: {e}"
+            ),
+        }
+    }
+    Ok(())
 }
 
 async fn unapply_all_in_order_pool(

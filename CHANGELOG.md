@@ -81,6 +81,16 @@ Inline rows (plain and generic) read their cells and key by field name. With `#[
 - Formsets and admin inlines read their rows in one pass over the form keys; a POST with many keys no longer costs keys times rows.
 - `signals::clear_all` also removes `m2m_changed` and admin receivers, so they no longer leak across tests; the `Observer` example compiles.
 
+### Fixed — SSO, auth and cache edges
+
+- MCP: a skill grant (`agent_id, skill_id`) and a skill-to-permission mapping (`skill_id, permission_codename`) are unique keys now, so concurrent grants no longer leave duplicate rows.
+- `migrate` refuses a new unique index whose columns existing rows already repeat, before any DDL, with the query that lists the duplicates; MySQL no longer keeps half the migration.
+- SSO: a link older than the account it points at (an id reused after a sequence reset or restore) logs a warning; `set_stale_links(StaleLinks::Drop)` deletes it instead of signing that account in. Custom `AccountLookup`s pass the time with `Account::with_created_at`.
+- SSO: OIDC discovery fetches each issuer once at a time (per outbound policy) and caches a failure for 30 s, so logins against a slow or down IdP no longer each wait on their own fetch.
+- Auth links: `LinkScope` and `LinkTarget` convert from `&TenantScope` too, so a `TenantScope` handler binds reset and verify links to its tenant instead of reaching for `LinkTarget::audience`.
+- `migrate-tenants`: the warning about passkeys hidden in `public` is logged even when the run fails after the tenant's passkey table was made; the next run could not tell and stayed quiet.
+- `InMemoryCache`: a TTL too large for the clock (e.g. a huge `lockout_duration_secs`) is capped at a century instead of panicking.
+
 ## [0.61.2] — 2026-10-26
 
 ### Fixed — migrations, MySQL and MariaDB

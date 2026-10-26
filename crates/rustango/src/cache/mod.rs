@@ -831,8 +831,10 @@ impl InMemoryCache {
     }
 
     fn resolve_ttl(&self, ttl: Option<Duration>) -> Option<Instant> {
+        // Saturate at a century: `Instant + Duration` panics past the platform's range.
+        const FAR_FUTURE: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
         let effective = ttl.or(self.default_ttl)?;
-        Some(Instant::now() + effective)
+        Instant::now().checked_add(effective.min(FAR_FUTURE))
     }
 
     /// Store `value` expiring at `expires_at` (`None` = never).
@@ -2303,5 +2305,20 @@ mod bytes_tests {
             Some("plain"),
             "inner must hold raw bytes, not base64"
         );
+    }
+
+    /// A TTL past `Instant`'s range saturates to "no expiry" instead of panicking.
+    #[tokio::test]
+    async fn huge_ttl_saturates_instead_of_panicking() {
+        let cache = InMemoryCache::new();
+        let huge = Some(Duration::from_secs(u64::MAX));
+        cache.set("k", "v", huge).await.unwrap();
+        assert_eq!(cache.incr("n", 1, huge).await.unwrap(), 1);
+        assert!(cache.add("a", "v", huge).await.unwrap());
+        assert!(cache.touch("k", huge).await.unwrap());
+        assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+        let defaulted = InMemoryCache::with_default_ttl(Duration::MAX);
+        defaulted.set("k", "v", None).await.unwrap();
+        assert!(defaulted.exists("k").await.unwrap());
     }
 }
