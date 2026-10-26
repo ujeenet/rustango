@@ -1918,6 +1918,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "idna",
  "indexmap",
  "inventory",
  "libc",
