@@ -425,6 +425,9 @@ pages intégrées sont utilisées.
 | `HEAD` | Inchangé |
 | Une réponse marquée `rustango::errors::KeepBody` | Inchangée |
 
+**Un corps d'erreur `text/html` est remplacé lui aussi**, sauf si la réponse est
+marquée `KeepBody` : marquez toute page d'erreur HTML que vous construisez vous-même.
+
 Seuls les corps texte (`text/plain`, `text/html`, aucun) et le JSON avec message
 sont remplacés ; images et autres types passent. Une réponse habillée garde son
 statut et ses en-têtes (`Retry-After` aussi) et reçoit `Vary: Accept, HX-Request`.
@@ -482,7 +485,7 @@ Contexte :
 | `path` | Le chemin de la requête |
 | `user` | `{ username, is_superuser }` de l'utilisateur connecté du locataire, ou null |
 | `username`, `is_superuser` | La même chose, à plat |
-| `csrf_token`, `csrf_input` | Un jeton CSRF et son input caché ; le cookie part avec la réponse |
+| `csrf_token`, `csrf_input` | Un jeton CSRF et son input caché, sous le nom de cookie de votre layer CSRF. Le cookie n'est posé que si le template les utilise |
 | `csp_nonce` | Le nonce CSP de cette requête, ou `""` |
 | `brand_name`, `brand_logo_url`, `brand_css`, `theme_mode` | Depuis `[brand]` |
 

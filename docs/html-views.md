@@ -427,9 +427,13 @@ and the built-in pages are used.
 | `HEAD` | Unchanged |
 | A response marked `rustango::errors::KeepBody` | Unchanged |
 
+**A `text/html` error body is replaced too**, unless the response is marked
+`KeepBody`: mark any HTML error page you build yourself.
+
 Only text bodies (`text/plain`, `text/html`, none) and JSON with a message are
 replaced; images and other types pass through. A dressed response keeps its
-status and headers (`Retry-After` too) and gets `Vary: Accept, HX-Request`.
+status and headers (`Retry-After` too). Every 4xx/5xx the layer sees, passthroughs
+included, gets `Vary: Accept, HX-Request`, merged with the handler's own.
 
 ### Templates
 
@@ -484,7 +488,7 @@ Context:
 | `path` | The request path |
 | `user` | `{ username, is_superuser }` of the signed-in tenant user, or null |
 | `username`, `is_superuser` | The same, flat |
-| `csrf_token`, `csrf_input` | A CSRF token and its hidden input; the cookie rides on the response |
+| `csrf_token`, `csrf_input` | A CSRF token and its hidden input, under your CSRF layer's cookie name. The cookie is set only when the template uses them |
 | `csp_nonce` | This request's CSP nonce, or `""` |
 | `brand_name`, `brand_logo_url`, `brand_css`, `theme_mode` | From `[brand]` |
 
