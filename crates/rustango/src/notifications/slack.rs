@@ -108,16 +108,9 @@ async fn send(req: reqwest::RequestBuilder, value: Value) -> Result<(), String> 
 /// The string is escaped, so `<!channel>` or `<url|label>` stay literal.
 fn build_payload(value: Value) -> Value {
     match value {
-        Value::String(s) => serde_json::json!({ "text": escape_text(&s) }),
+        Value::String(s) => serde_json::json!({ "text": crate::text::slack_escape(&s) }),
         other => other,
     }
-}
-
-/// Slack's three control characters, per its text-formatting rules.
-fn escape_text(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 #[cfg(test)]
