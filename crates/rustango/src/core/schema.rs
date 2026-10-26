@@ -558,8 +558,8 @@ pub struct GenericReverseRelation {
     /// Column on the child table holding the parent's primary key,
     /// such as `"object_pk"`. This is what the `OuterRef` matches.
     pub pk_column: &'static str,
-    /// Primary-key column on **this** (parent) model's table.
-    /// Defaults to `"id"`.
+    /// Primary-key column on **this** (parent) model's table. The
+    /// derive defaults it to the model's PK column.
     pub self_pk_column: &'static str,
 }
 

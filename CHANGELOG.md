@@ -44,6 +44,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - MCP notifications go out on one channel per tenant, so one tenant's burst cannot make another tenant's SSE stream skip frames.
 - `openapi_router` loads exact Swagger UI and Redoc versions with Subresource Integrity, and fetches the spec under the prefix it is nested at.
 
+### Fixed — testkit and macros
+
+- `generic_has` without `self_pk_column` joins on the parent's PK column, not a hard-coded `id`.
+- `#[derive(Model)]` warns when an index, `unique_together`, `index_together` or `get_latest_by` names no column; `#[rustango::main]` warns on an argument it ignores (tokio's own names excepted).
+- The livereload script and the debug panel's inline tags carry the request's CSP nonce; the panel has no inline `onclick`.
+- `tri_dialect_test!`'s SQLite arm takes the suite lock, as it shares global signals and caches with the live arms.
+- New `Tenant::for_test_sqlite`, `for_test_mysql` and `for_test_pools` (Postgres) build a test `Tenant` from one source; `Tenant::for_test` is deprecated.
+- `TestClient` panics on an invalid request header instead of dropping it, and warns when a response body fails or passes 16 MiB; `text()` is lossy, not empty, on non-UTF-8.
+- `cargo rustango new` ignores `.env.*` (keeping `.env.example`).
+
 ## [0.61.5] — 2026-10-26
 
 ### Fixed — auth

@@ -1249,9 +1249,7 @@ mod tests {
     /// A `Tenant` for `testkit::org()` over `pool`, for `verify_for_tenant`.
     #[cfg(feature = "sqlite")]
     async fn sqlite_tenant(pool: &crate::sql::Pool) -> Tenant<sqlx::Sqlite> {
-        let conn = pool.as_sqlite().unwrap().acquire().await.unwrap();
-        let conn = crate::tenancy::TenantConn::database(conn);
-        Tenant::for_test(crate::testkit::org(), conn, pool.clone())
+        Tenant::for_test_sqlite(crate::testkit::org(), pool.as_sqlite().unwrap().clone())
     }
 
     /// A shared in-memory SQLite, so the held `Tenant` conn and the pool agree.

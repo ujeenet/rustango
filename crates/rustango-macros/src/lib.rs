@@ -335,9 +335,10 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     // `runtime` feature on rustango.
     //
     // Parse optional `flavor = "current_thread"` / `flavor =
-    // "multi_thread"` from the attribute args. Unknown args are
-    // tolerated (forward-compat with tokio's own arg surface).
+    // "multi_thread"` from the attribute args. Unknown args still
+    // compile, with a warning that they are ignored.
     let root = rustango_root();
+    let arg_warnings = main_arg_warnings(&args);
     let flavor = parse_flavor(&args);
     let builder_call = match flavor {
         Flavor::CurrentThread => quote! {
@@ -372,6 +373,7 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     };
 
     input.block = syn::parse2(quote! {{
+        #arg_warnings
         { #logging_prologue }
         let __rt = #builder_call
             .enable_all()
@@ -388,6 +390,69 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
 enum Flavor {
     MultiThread,
     CurrentThread,
+}
+
+/// `#[tokio::main]` argument names, accepted without a warning.
+const TOKIO_MAIN_ARGS: &[&str] = &[
+    "flavor",
+    "worker_threads",
+    "start_paused",
+    "crate",
+    "unhandled_panic",
+];
+
+/// A warning per `#[rustango::main]` argument the parsers below ignore.
+fn main_arg_warnings(args: &TokenStream2) -> TokenStream2 {
+    use syn::parse::Parser as _;
+    let parsed = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+        .parse2(args.clone());
+    let metas = match parsed {
+        Ok(m) => m,
+        Err(e) => {
+            return deprecation_warning(
+                e.span(),
+                &format!("#[rustango::main]: cannot parse the arguments ({e}); they are ignored"),
+            )
+        }
+    };
+    let lit_bool = |m: &syn::MetaNameValue| match &m.value {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Bool(_),
+            ..
+        }) => true,
+        _ => false,
+    };
+    metas
+        .iter()
+        .filter_map(|meta| {
+            // `#[tokio::main]`'s own names stay silent: a `deny(warnings)`
+            // crate passing one must keep compiling in a patch release.
+            let tokio_arg = TOKIO_MAIN_ARGS.iter().any(|n| meta.path().is_ident(n));
+            let ok = match meta {
+                syn::Meta::NameValue(m) if m.path.is_ident("logging") => lit_bool(m),
+                _ => tokio_arg,
+            };
+            (!ok).then(|| {
+                deprecation_warning(
+                    meta.span(),
+                    "#[rustango::main]: unknown argument, ignored (supported: \
+                     `flavor = \"current_thread\" | \"multi_thread\"`, `logging = false`)",
+                )
+            })
+        })
+        .collect()
+}
+
+/// A compile warning at `span`: a proc macro's only stable way to warn
+/// is a `#[deprecated]` item that its own output then uses.
+fn deprecation_warning(span: proc_macro2::Span, note: &str) -> TokenStream2 {
+    quote::quote_spanned! {span=>
+        const _: () = {
+            #[deprecated(note = #note)]
+            const RUSTANGO_WARNING: () = ();
+            RUSTANGO_WARNING
+        };
+    }
 }
 
 fn parse_flavor(args: &TokenStream2) -> Flavor {
@@ -735,9 +800,12 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let model_name = struct_name.to_string();
 
     let collected = collect_fields(named, &table)?;
-    // `reverse_has` joins on the PK column unless it names another.
+    // `reverse_has` / `generic_has` join on the PK column unless they name another.
     if let Some((_, pk_column)) = &collected.primary_key {
         for rel in &mut container.reverse_has_relations {
+            rel.self_pk_column.get_or_insert_with(|| pk_column.clone());
+        }
+        for rel in &mut container.generic_has_relations {
             rel.self_pk_column.get_or_insert_with(|| pk_column.clone());
         }
     }
@@ -838,6 +906,9 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     }
 
+    let column_warnings =
+        unknown_column_warnings(&container.indexes, &container.get_latest_by, &collected);
+
     // Build the audit_track list for ModelSchema: None when no audit attr,
     // Some(empty) when audit present without track, Some(names) when explicit.
     let audit_track_names: Option<Vec<String>> = container.audit.as_ref().map(|audit| {
@@ -872,6 +943,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     format!("{table}_{col_name}_idx")
                 });
                 all_indexes.push(IndexAttr {
+                    span: field.span(),
                     name: fa.index_name.or(Some(auto_name)),
                     columns: vec![col_name],
                     unique: fa.index_unique,
@@ -942,7 +1014,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         container
             .get_latest_by
             .as_ref()
-            .map(|(c, d)| (c.as_str(), *d)),
+            .map(|(c, d, _)| (c.as_str(), *d)),
         &container.extra_permissions,
         &container.default_permissions,
         &container.global_scopes,
@@ -1003,6 +1075,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     );
 
     Ok(quote! {
+        #column_warnings
         #model_impl
         #inherent_impl
         #from_row_impl
@@ -1034,6 +1107,39 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .with_audited_cascade(<#struct_name as #root::core::Model>::__rustango_audited_cascade)
         }
     })
+}
+
+/// A deprecation-style warning per index or `get_latest_by` name that is
+/// no column of the model: an error would break code that compiles today.
+fn unknown_column_warnings(
+    indexes: &[IndexAttr],
+    get_latest_by: &Option<(String, bool, proc_macro2::Span)>,
+    collected: &CollectedFields,
+) -> TokenStream2 {
+    let is_column = |c: &str| collected.column_entries.iter().any(|e| e.column == c);
+    // Only plain names: an expression index such as `lower(email)` is legal.
+    let plain = |c: &str| c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+    let mut found: Vec<(proc_macro2::Span, String)> = Vec::new();
+    for idx in indexes {
+        for col in idx.columns.iter().filter(|c| plain(c) && !is_column(c)) {
+            found.push((
+                idx.span,
+                format!("index column `{col}` is not a column of this model; its DDL will fail"),
+            ));
+        }
+    }
+    if let Some((col, _, span)) = get_latest_by {
+        if !is_column(col) && !collected.field_names.iter().any(|n| n == col) {
+            found.push((
+                *span,
+                format!("`get_latest_by`: `{col}` is not a field of this model"),
+            ));
+        }
+    }
+    found
+        .into_iter()
+        .map(|(span, note)| deprecation_warning(span, &note))
+        .collect()
 }
 
 /// Guard before decoding a `select_related` target (#2293): a NULL nullable
@@ -2827,7 +2933,7 @@ fn model_impl_tokens(
             let child = &rel.child;
             let ct_column = rel.ct_column.as_str();
             let pk_column = rel.pk_column.as_str();
-            let self_pk_column = rel.self_pk_column.as_str();
+            let self_pk_column = rel.self_pk_column();
             quote! {
                 #root::core::GenericReverseRelation::new(
                     #name,
@@ -8511,7 +8617,7 @@ struct ContainerAttrs {
     /// `(column, descending)` where `descending = true` when the
     /// attribute value starts with `-`. Threaded into
     /// `ModelSchema::get_latest_by`.
-    get_latest_by: Option<(String, bool)>,
+    get_latest_by: Option<(String, bool, proc_macro2::Span)>,
     /// Extra `(codename, label)` permissions
     /// from `#[rustango(extra_permissions = "approve:Can approve,
     /// archive:Can archive")]`. Comma-separated `codename:label`
@@ -8711,12 +8817,20 @@ struct GenericHasAttr {
     /// Optional; defaults to `"object_pk"`.
     pk_column: String,
     /// SQL primary-key column on **this** (parent) model's table.
-    /// Optional; defaults to `"id"`.
-    self_pk_column: String,
+    /// Defaults to the PK column (`"id"` without one).
+    self_pk_column: Option<String>,
+}
+
+impl GenericHasAttr {
+    fn self_pk_column(&self) -> &str {
+        self.self_pk_column.as_deref().unwrap_or("id")
+    }
 }
 
 /// Parsed form of one index declaration (field-level or container-level).
 struct IndexAttr {
+    /// The declaring attribute, for diagnostics.
+    span: proc_macro2::Span,
     /// Index name; auto-derived when `None` at parse time.
     name: Option<String>,
     /// Column names in the index.
@@ -9589,7 +9703,6 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 };
                 let ct_column = ct_column.unwrap_or_else(|| "content_type_id".to_owned());
                 let pk_column = pk_column.unwrap_or_else(|| "object_pk".to_owned());
-                let self_pk_column = self_pk_column.unwrap_or_else(|| "id".to_owned());
                 if out.generic_has_relations.iter().any(|r| r.name == name) {
                     return Err(syn::Error::new(
                         span,
@@ -9958,7 +10071,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 if col.is_empty() {
                     return Err(meta.error("`get_latest_by` must name a column"));
                 }
-                out.get_latest_by = Some((col, desc));
+                out.get_latest_by = Some((col, desc, s.span()));
                 return Ok(());
             }
             if meta.path.is_ident("unique_together") {
@@ -9972,6 +10085,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 // `<table>_<col1>_<col2>_uq` when not supplied.
                 let (columns, name) = parse_together_attr(&meta, "unique_together")?;
                 out.indexes.push(IndexAttr {
+                    span: meta.path.span(),
                     name,
                     columns,
                     unique: true,
@@ -9989,6 +10103,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 //   #[rustango(index_together(columns = "created_at, status", name = "x"))]
                 let (columns, name) = parse_together_attr(&meta, "index_together")?;
                 out.indexes.push(IndexAttr {
+                    span: meta.path.span(),
                     name,
                     columns,
                     unique: false,
@@ -10056,6 +10171,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     return Err(meta.error("`unique_when(columns = \"\")` is empty"));
                 }
                 out.indexes.push(IndexAttr {
+                    span: meta.path.span(),
                     name,
                     columns,
                     unique: true,
@@ -10132,6 +10248,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     return Err(meta.error("`index_when(columns = \"\")` is empty"));
                 }
                 out.indexes.push(IndexAttr {
+                    span: meta.path.span(),
                     name,
                     columns,
                     unique: false,
@@ -10198,6 +10315,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 }
                 let columns = split_field_list(&cols_lit.value());
                 out.indexes.push(IndexAttr {
+                    span: meta.path.span(),
                     name,
                     columns,
                     unique,
@@ -13970,6 +14088,42 @@ mod main_attr_tests {
 }
 
 #[cfg(test)]
+mod main_arg_warning_tests {
+    use super::*;
+
+    fn expand(args: &str) -> String {
+        let body = quote! { async fn main() { run().await } };
+        expand_main(args.parse().unwrap(), body)
+            .expect("expansion failed")
+            .to_string()
+    }
+
+    /// A typo or unknown key used to be dropped without a word.
+    #[test]
+    fn unknown_or_misspelt_args_warn() {
+        for args in ["logging = flase", "multi_thread", "workers = 4"] {
+            let out = expand(args);
+            assert!(out.contains("unknown argument"), "{args}:\n{out}");
+        }
+    }
+
+    #[test]
+    fn supported_args_do_not_warn() {
+        for args in [
+            "",
+            r#"flavor = "current_thread""#,
+            r#"flavor = "multi_thread", logging = false"#,
+            "logging = true",
+            "worker_threads = 4, start_paused = true",
+            r#"crate = "tokio", unhandled_panic = "shutdown_runtime""#,
+            r#"flavor = "curent_thread""#,
+        ] {
+            assert!(!expand(args).contains("RUSTANGO_WARNING"), "{args}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod embed_migrations_tests {
     use super::*;
 
@@ -14077,6 +14231,46 @@ mod field_attr_tests {
             }
         };
         assert!(expand(&input).is_ok());
+    }
+
+    /// An index or `get_latest_by` naming no column warns; it does not fail.
+    #[test]
+    fn unknown_index_columns_warn() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[rustango(
+                table = "w",
+                unique_together = "a, nope",
+                index_together = "a, b_typo",
+                index("missing"),
+                get_latest_by = "-when_typo"
+            )]
+            struct W { #[rustango(primary_key)] id: i64, a: i64, b: i64 }
+        };
+        let out = expand(&input).expect("still compiles").to_string();
+        for name in ["nope", "b_typo", "missing", "when_typo"] {
+            assert!(out.contains(&format!("`{name}`")), "{name}:\n{out}");
+        }
+    }
+
+    /// Real columns, field names for `get_latest_by` and expression
+    /// indexes emit nothing new.
+    #[test]
+    fn known_index_columns_do_not_warn() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[rustango(
+                table = "w",
+                unique_together = "a, b_col",
+                index("lower(a)"),
+                get_latest_by = "-b"
+            )]
+            struct W {
+                #[rustango(primary_key)] id: i64,
+                a: i64,
+                #[rustango(column = "b_col")] b: i64,
+            }
+        };
+        let out = expand(&input).expect("compiles").to_string();
+        assert!(!out.contains("RUSTANGO_WARNING"), "{out}");
     }
 
     /// Two FKs to one parent would emit the same reverse accessor twice.

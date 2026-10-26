@@ -198,12 +198,16 @@ RUSTANGO_APEX_DOMAIN=localhost
 /// committed a session signing key, on the very first run, in a
 /// three-line `.gitignore` that did not mention the directory.
 ///
+/// `.env.*` too (`.env.local`, `.env.prod`): only `.env.example` is safe.
+///
 /// `*.db*` for the same reason in a different register: a
 /// sqlite-backend project otherwise commits its development database.
 /// (The generated `.dockerignore` already excluded those and this file
 /// did not, which is the asymmetry that made it easy to miss.)
 pub const GITIGNORE: &str = "/target
 /.env
+/.env.*
+!/.env.example
 
 # Runtime state. The server writes generated session signing keys here
 # when RUSTANGO_SESSION_SECRET is unset — never commit them.

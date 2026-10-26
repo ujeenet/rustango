@@ -184,6 +184,10 @@ SSE streams read their tenant's channel. Send with `mcp::notifications::send` (t
 
 Nested under a prefix, `/docs` and `/redoc` fetch `<prefix>/openapi.json`, no longer the root `/openapi.json`. The pages pin Swagger UI 5.34.0 and Redoc 2.5.4.
 
+### Testkit and macros
+
+`TestClient` now panics on an invalid request header it used to drop. A failed or over-16 MiB response body still reads as empty, with a warning; 0.62.0 will panic there too. `Tenant::for_test` is deprecated: use `Tenant::for_test_sqlite(org, pool)`, `Tenant::for_test_mysql(org, pool)` or `Tenant::for_test_pools(org, &pools).await`. A `generic_has` on a model whose PK column is not `id` now joins on that column; set `self_pk_column = "id"` to keep the old join. New warnings for unknown index columns and `#[rustango::main]` arguments are planned to become errors in 0.62.0.
+
 ## 0.61.5
 
 ### ViewSet OpenAPI: Binary is hex

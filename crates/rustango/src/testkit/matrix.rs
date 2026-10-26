@@ -617,12 +617,9 @@ macro_rules! tri_dialect_test {
             $(
                 #[tokio::test]
                 async fn $name() {
-                    // No lock for the in-memory case: each test gets its
-                    // own private database, so there is nothing to
-                    // contend over, and taking the shared lock would
-                    // serialize the whole suite for no reason. A file-backed
-                    // pool is also per-test — a fresh path each call —
-                    // so the same holds.
+                    // The database is private, but signals and caches are
+                    // process-global and shared with the live arms.
+                    let _guard = $crate::testkit::matrix::live_lock().lock().await;
                     let pool = $sqlite_pool.await;
                     let Some(pool) = Into::<Option<$crate::sql::Pool>>::into(
                         $crate::testkit::matrix::IntoPoolOption(pool)
