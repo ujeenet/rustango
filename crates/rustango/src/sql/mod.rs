@@ -94,8 +94,8 @@ pub use executor::{
     SqlExecutor, TxGuard, UpdaterPool,
 };
 pub(crate) use executor::{
-    bulk_insert_pks_tx, compile_bulk_update_batches, execute_batches_tx, fetch_in_chunks,
-    fetch_select_in_chunks, fetch_values_list_on, inserted_pk, rows_per_batch,
+    bulk_insert_pks_tx, compile_bulk_update_batches, count_rows_on, execute_batches_tx,
+    fetch_in_chunks, fetch_select_in_chunks, fetch_values_list_on, inserted_pk, rows_per_batch,
     run_delete_statements_tx, truncate_cascades_every_fk, truncate_tx,
 };
 #[cfg(feature = "admin")]

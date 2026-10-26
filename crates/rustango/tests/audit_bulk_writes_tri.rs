@@ -685,6 +685,17 @@ mod cascade {
         assert_eq!(entries(pool, NOTE, "", "delete").await, i64::from(pg));
     }
 
+    /// Audited tables the truncate reaches but takes no rows from get no entry.
+    async fn truncate_skips_reached_tables_without_rows(pool: &Pool) {
+        Crate::truncate(pool).await.expect("empty crates");
+        AuditLog::delete_where("entity_table", CRATE, pool)
+            .await
+            .expect("clear");
+        Shelf::truncate(pool).await.expect("truncate");
+        assert_eq!(entries(pool, CRATE, "", "delete").await, 0);
+        assert_eq!(entries(pool, NOTE, "", "delete").await, 0);
+    }
+
     /// `delete` entries per crate pk.
     async fn deletes(pool: &Pool, pk: i64) -> i64 {
         AuditLog::objects()
@@ -777,6 +788,7 @@ mod cascade {
             single_statement_pg_paths_still_delete,
             fk_set_null_audits_each_changed_child,
             truncate_cascade_audits_the_tables_it_empties,
+            truncate_skips_reached_tables_without_rows,
         ],
     }
 }

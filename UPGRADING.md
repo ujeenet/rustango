@@ -152,11 +152,11 @@ untouched.
 
 ### More audit rows for FK side effects
 
-Rows an `ON DELETE SET NULL` / `SET DEFAULT` changes in an audited model now get an `update` entry, and a `truncate` adds a bulk `delete` entry for each audited table its FKs empty.
+Rows an `ON DELETE SET NULL` / `SET DEFAULT` changes in an audited model now get an `update` entry, and a `truncate` adds a bulk `delete` entry for each audited table it takes rows from through FKs. On MySQL/SQLite, rows a truncate sets through `SET NULL` / `SET DEFAULT` get no entry.
 
 ### MySQL: translation keys become case-sensitive
 
-The first `migrate` runs `ALTER TABLE rustango_translations MODIFY COLUMN` on `locale` and `key` when they ignore case. After it, `Key` no longer matches a `key` override.
+The first `migrate` runs `ALTER TABLE rustango_translations MODIFY COLUMN` on `locale` and `key` when they ignore case. After it, `Key` no longer matches a `key` override. This needs the ALTER privilege on that table; without it, `ensure_table_pool` logs a warning once per pool and the keys stay case-insensitive.
 
 ### PG: one migrate lock per schema
 

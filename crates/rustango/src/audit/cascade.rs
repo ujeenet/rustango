@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use crate::core::{
-    DeleteQuery, Filter, ModelEntry, ModelSchema, OnDeleteAction, Op, Relation, SelectQuery,
+    CountQuery, DeleteQuery, Filter, ModelEntry, ModelSchema, OnDeleteAction, Op, Relation, SelectQuery,
     SqlValue, WhereExpr,
 };
 use crate::sql::{ExecError, PoolTx};
@@ -110,7 +110,7 @@ fn build_graph() -> HashMap<&'static str, Vec<Edge>> {
 
 /// The audited tables a truncate of `table` empties besides it: PG's
 /// `TRUNCATE … CASCADE` follows every FK, a `DELETE` only `ON DELETE CASCADE`.
-fn truncate_reach(table: &str, every_fk: bool) -> Vec<&'static str> {
+fn truncate_reach(table: &str, every_fk: bool) -> Vec<&'static ModelSchema> {
     let entries = canonical_entries();
     let mut out = Vec::new();
     let mut done: HashSet<&str> = HashSet::from([table]);
@@ -125,7 +125,7 @@ fn truncate_reach(table: &str, every_fk: bool) -> Vec<&'static str> {
             let by_composite = every_fk && schema.composite_relations.iter().any(|r| r.to == parent);
             if (by_field || by_composite) && done.insert(schema.table) {
                 if schema.audit_track.is_some() {
-                    out.push(schema.table);
+                    out.push(schema);
                 }
                 frontier.push(schema.table.to_owned());
             }
@@ -134,20 +134,44 @@ fn truncate_reach(table: &str, every_fk: bool) -> Vec<&'static str> {
     out
 }
 
-/// One bulk `delete` entry per audited table a truncate of `table` emptied
-/// through its FKs, in its transaction.
-pub(crate) async fn emit_truncated(tx: &mut PoolTx<'_>, table: &str) -> Result<(), ExecError> {
+/// The audited tables a truncate of `table` reaches through its FKs, with
+/// their row counts; taken before it runs, for [`emit_truncated`].
+pub(crate) async fn truncate_counts(
+    tx: &mut PoolTx<'_>,
+    table: &str,
+) -> Result<Vec<(&'static ModelSchema, i64)>, ExecError> {
     let every_fk = crate::sql::truncate_cascades_every_fk(tx.dialect());
-    let entries: Vec<PendingEntry> = truncate_reach(table, every_fk)
-        .into_iter()
-        .map(|entity_table| PendingEntry {
-            entity_table,
-            entity_pk: String::new(),
-            operation: AuditOp::Delete,
-            source: super::current_source(),
-            changes: serde_json::json!({ "bulk": "truncate", "cascade_from": table }),
-        })
-        .collect();
+    let mut out = Vec::new();
+    for schema in truncate_reach(table, every_fk) {
+        out.push((schema, row_count(tx, schema).await?));
+    }
+    Ok(out)
+}
+
+async fn row_count(tx: &mut PoolTx<'_>, schema: &'static ModelSchema) -> Result<i64, ExecError> {
+    let query = CountQuery::from_select(SelectQuery::new(schema));
+    crate::sql::count_rows_on(&mut *tx, &query).await
+}
+
+/// One bulk `delete` entry per audited table the truncate of `table` took
+/// rows from. A MySQL/SQLite `SET NULL` / `SET DEFAULT` child is not audited.
+pub(crate) async fn emit_truncated(
+    tx: &mut PoolTx<'_>,
+    table: &str,
+    before: Vec<(&'static ModelSchema, i64)>,
+) -> Result<(), ExecError> {
+    let mut entries = Vec::new();
+    for (schema, rows) in before {
+        if rows > 0 && row_count(tx, schema).await? < rows {
+            entries.push(PendingEntry {
+                entity_table: schema.table,
+                entity_pk: String::new(),
+                operation: AuditOp::Delete,
+                source: super::current_source(),
+                changes: serde_json::json!({ "bulk": "truncate", "cascade_from": table }),
+            });
+        }
+    }
     emit_many_tx(tx, Via::Scoped, &entries).await
 }
 

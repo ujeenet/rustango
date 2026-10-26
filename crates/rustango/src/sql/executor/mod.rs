@@ -1856,7 +1856,7 @@ pub(crate) fn truncate_cascades_every_fk(d: &dyn crate::sql::Dialect) -> bool {
 
 /// Run `sql` (a [`truncate_sql`]) in `tx` after clearing the table's
 /// generic M2M junction rows, so a reused id inherits no links. The
-/// audited tables it empties through FKs get a bulk `delete` entry.
+/// audited tables it takes rows from through FKs get a bulk `delete` entry.
 pub(crate) async fn truncate_tx(
     tx: &mut PoolTx<'_>,
     table: &str,
@@ -1866,8 +1866,9 @@ pub(crate) async fn truncate_tx(
         let stmt = tx.dialect().compile_delete(&link)?;
         execute_tx(tx, &stmt.sql, stmt.params).await?;
     }
+    let before = crate::audit::cascade::truncate_counts(tx, table).await?;
     let affected = execute_tx(tx, sql, Vec::new()).await?;
-    crate::audit::cascade::emit_truncated(tx, table).await?;
+    crate::audit::cascade::emit_truncated(tx, table, before).await?;
     Ok(affected)
 }
 

@@ -1371,8 +1371,8 @@ const NO_REVERSE_ACCESSOR: &str = "+";
 
 /// For every `ForeignKey<Parent>` field on `Child`, emit
 /// `impl Parent { pub async fn <child_table>_set(&self, executor) -> Vec<Child> }`.
-/// Reads the column the FK points at (`on`, else the PK) and runs a single `SELECT … FROM <child_table> WHERE <fk_column> = $1`
-/// — the canonical reverse-FK fetch. One round trip, no N+1.
+/// Reads the column the FK points at (`on`, else the PK) and runs one
+/// `SELECT … WHERE <fk_column> = $1`: one round trip, no N+1.
 ///
 /// **PG-only emission**: the accessor is bounded on
 /// `sqlx::Executor<Database = sqlx::Postgres>` and calls `fetch_on`,

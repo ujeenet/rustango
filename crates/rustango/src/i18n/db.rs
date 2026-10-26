@@ -136,12 +136,37 @@ CREATE TABLE IF NOT EXISTS "rustango_translations" (
 ///
 /// # Errors
 /// Driver / SQL failures other than the duplicate-object errors that
-/// [`crate::sql::run_ddl_idempotent`] swallows.
+/// [`crate::sql::run_ddl_idempotent`] swallows. A refused collation upgrade
+/// only warns: the table keeps working, case-insensitively.
 pub async fn ensure_table_pool(pool: &Pool) -> Result<(), sqlx::Error> {
     crate::sql::run_ddl_idempotent(pool, &ddl(pool.dialect())).await?;
-    case_sensitive_keys(pool)
-        .await
-        .map_err(|e| sqlx::Error::Protocol(e.to_string()))
+    if refused(pool) {
+        return Ok(());
+    }
+    if let Err(e) = case_sensitive_keys(pool).await {
+        tracing::warn!(
+            error = %e,
+            "rustango_translations keeps case-insensitive keys: moving them needs ALTER"
+        );
+        // Each pool tries once per process, not on every ensure call.
+        refused_pools().push(crate::sql::PoolId::of(pool));
+    }
+    Ok(())
+}
+
+fn refused_pools() -> std::sync::MutexGuard<'static, Vec<crate::sql::PoolId>> {
+    static REFUSED: std::sync::Mutex<Vec<crate::sql::PoolId>> =
+        std::sync::Mutex::new(Vec::new());
+    REFUSED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `true` when this pool's upgrade already failed; drops closed pools' entries.
+fn refused(pool: &Pool) -> bool {
+    let mut ids = refused_pools();
+    ids.retain(|id| !id.is_closed());
+    ids.iter().any(|id| id.is(pool))
 }
 
 /// A table an older release created took the database's collation, which

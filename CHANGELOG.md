@@ -13,12 +13,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — audit rows for FK side effects, one-bind key lists on PG
 
 - A delete whose `ON DELETE SET NULL` / `SET DEFAULT` changes rows of an audited model writes an `update` entry for each of them.
-- `Model::truncate` writes a bulk `delete` entry (`{"bulk": "truncate", "cascade_from": …}`) on each audited table its FKs empty: every referencing table on PG (`TRUNCATE … CASCADE`), the `ON DELETE CASCADE` ones elsewhere.
+- `Model::truncate` writes a bulk `delete` entry (`{"bulk": "truncate", "cascade_from": …}`) on each audited table it took rows from through FKs: any referencing table on PG (`TRUNCATE … CASCADE`), `ON DELETE CASCADE` ones elsewhere. Rows a MySQL/SQLite truncate sets through `SET NULL` / `SET DEFAULT` are not audited.
 - PG: `in_bulk`, `in_bulk_on` and prefetch send a key list as one `= ANY($1)` bind instead of splitting it at the bind limit, so a sliced `in_bulk` past 65 535 keys works.
 
 ### Fixed — MySQL translation keys are case-sensitive
 
-`rustango_translations.locale` / `key` use an `_as_cs` collation on MySQL and MariaDB 10.10+, so `Key` and `key` are two overrides as on PG and SQLite; `migrate` moves an existing table's `_ci` columns.
+`rustango_translations.locale` / `key` use an `_as_cs` collation on MySQL and MariaDB 10.10+, so `Key` and `key` are two overrides as on PG and SQLite; `migrate` moves an existing table's `_ci` columns; without the ALTER privilege it warns once per pool and keeps them.
 
 ### Fixed — PG schema-mode tenants: migrate lock and prepared statements
 
