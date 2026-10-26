@@ -13,6 +13,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - Live suites no longer pass in CI when a PG extension is missing or a set URL is unreachable. New `testkit::matrix::{pg_extension, required_env, skip_outside_ci}` skip locally and fail when `CI` is set.
 - The MySQL permission upsert tests and the tenant read-only admin test run again; they were ignored with stale reasons.
+- The generated example projects' `.gitignore` / `.dockerignore` are regenerated with the scaffolder and now ignore the migrate lock file.
 
 ## [0.61.4] — 2026-10-26
 

@@ -1168,6 +1168,31 @@ mod tests {
         );
     }
 
+    /// Examples made by `cargo rustango new` keep the scaffolder's current
+    /// ignore files; regenerate them when a template changes.
+    #[test]
+    fn generated_examples_carry_the_current_ignore_files() {
+        let examples =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../rustango/examples");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&examples).expect("read examples") {
+            let dir = entry.expect("entry").path();
+            let readme = std::fs::read_to_string(dir.join("README.md")).unwrap_or_default();
+            if !readme.contains("Generated with `cargo rustango new") {
+                continue;
+            }
+            for (file, want) in [
+                (".gitignore", templates::GITIGNORE),
+                (".dockerignore", templates::DOCKERIGNORE),
+            ] {
+                let got = std::fs::read_to_string(dir.join(file)).unwrap_or_default();
+                assert_eq!(got, want, "{} is stale", dir.join(file).display());
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "no generated example found");
+    }
+
     /// `.dockerignore` decides what reaches the daemon at all. Without
     /// it `target/` (gigabytes) and `.env` (secrets) are uploaded on
     /// every build and land in the image.
