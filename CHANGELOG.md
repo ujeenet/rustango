@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.2] — 2026-10-26
+
 ### Fixed — migrations, MySQL and MariaDB
 
 - MySQL: a correlated `IN` over the table an `update()` / `delete()` writes is no longer read through a derived table, which saw the write's own changes and hit wrong rows; it fails with error 1093 instead.

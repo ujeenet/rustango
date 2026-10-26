@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.61.2
+
 ### SQLite: JSON column equality compares values
 
 `filter(data = json)` on SQLite now matches `1` to `1.0` and objects in any key order, as PostgreSQL and MySQL do; a filter that relied on text equality may match more rows.
