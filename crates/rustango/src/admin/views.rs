@@ -1994,6 +1994,8 @@ pub(crate) async fn detail_view(
             "label": model.display_label(),
             "label_plural": model.display_label_plural(),
         },
+        // Links carry the key as one encoded segment or query value.
+        "pk_path": crate::url_codec::url_encode(&pk_raw),
         "pk": pk_raw,
         "cells": cells_ctx,
         "read_only": state.is_read_only(model.table),
@@ -2394,7 +2396,13 @@ pub(crate) async fn edit_form(
     parts: axum::http::request::Parts,
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
-) -> Result<Html<String>, AdminError> {
+) -> Result<Response, AdminError> {
+    // No `{table}.change`: the save would be refused, so show the read-only detail.
+    if state.is_read_only(resolve_model(&state, &table)?.table) {
+        let pk = crate::url_codec::url_encode(&pk_raw);
+        let detail = format!("{}/{table}/{pk}", state.config.admin_prefix);
+        return Ok(Redirect::to(&detail).into_response());
+    }
     let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw).await?;
 
     let edit_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
@@ -2461,7 +2469,8 @@ pub(crate) async fn edit_form(
         None,
         inline_panels,
         &gfk_cts,
-    )))
+    ))
+    .into_response())
 }
 
 pub(crate) async fn update_submit(

@@ -200,6 +200,14 @@ Call `rustango::tenancy::decommission::clear_on_purge(cache)` at boot for each c
 
 New trait methods with defaults, so existing backends compile. A wrapper around another `Storage` must forward both, or it buffers whole objects and refuses `create_only`.
 
+### Admin and serializer links encode string keys
+
+Admin links and `serializer::hyperlink_url` / `hyperlinked_to_value` write the key percent-encoded (`a/b` becomes `a%2Fb`); integer and UUID keys are unchanged. A GET on the edit form without change permission now redirects to the detail page instead of rendering the form.
+
+### Custom admin views that shadow a built-in route warn
+
+A suffix such as `{id}` or `{id}/edit` still mounts but logs a warning; rename it, as a later release skips it like `{pk}`.
+
 ## 0.61.4
 
 ### Schema names equal to a database role are refused

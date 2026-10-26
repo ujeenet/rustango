@@ -510,9 +510,9 @@ impl Builder {
         self
     }
 
-    /// Mark these tables read-only. List/detail still render; create,
-    /// edit, and delete routes return 403, and the corresponding buttons
-    /// are hidden in the HTML.
+    /// Mark these tables read-only. List/detail still render; the edit
+    /// form redirects to the detail page; create, update and delete
+    /// return 403, and the corresponding buttons are hidden in the HTML.
     pub fn read_only<I, S>(mut self, tables: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -673,7 +673,7 @@ impl Builder {
     /// * Tables where the user lacks `{table}.view` are hidden from the
     ///   index and return 404 on direct hits.
     /// * Tables where the user lacks `{table}.change` are rendered
-    ///   read-only (edit form still renders; save returns 403).
+    ///   read-only (the edit link opens the detail page; save returns 403).
     /// * `{table}.add` gates the create form and create submit.
     /// * `{table}.delete` gates delete submit and `delete_selected`.
     ///
@@ -1117,14 +1117,27 @@ fn mount_custom_views(mut router: Router, state: AppState) -> Router {
     use axum::routing::MethodFilter;
 
     for view in inventory::iter::<super::custom_views::AdminCustomView> {
-        if super::custom_views::is_reserved(view.suffix) {
-            tracing::warn!(
+        match super::custom_views::clash(view.suffix) {
+            Some(super::custom_views::Clash::Reserved) => {
+                tracing::warn!(
+                    target: "rustango::admin",
+                    table = %view.table,
+                    suffix = %view.suffix,
+                    "custom admin view suffix collides with a built-in admin route — skipping"
+                );
+                continue;
+            }
+            // Still mounted: an app may rely on its view winning. A later
+            // release skips it like a reserved suffix.
+            Some(super::custom_views::Clash::Shadows(built_in)) => tracing::warn!(
                 target: "rustango::admin",
                 table = %view.table,
                 suffix = %view.suffix,
-                "custom admin view suffix collides with a built-in admin route — skipping"
-            );
-            continue;
+                built_in = %built_in,
+                "custom admin view shadows a built-in admin route — rename its suffix; \
+                 a future release will skip it"
+            ),
+            None => {}
         }
         // A hidden table, registry ones on a tenant admin included,
         // gets no custom routes either.

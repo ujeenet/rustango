@@ -28,6 +28,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - The admin TOTP enroll page (`/account/totp`) sends `Cache-Control: no-store`, so its setup key does not come back from a cache or the Back button.
 - The `addslashes` filter docs no longer suggest it for JS: inside `<script>` use `escapejs`.
+- Edit, delete and history links, the edit form's action and FK cell links percent-encode a string primary key, so a key with `/`, `?`, `#` or `%` reaches its own row.
+- A user without `{table}.change` (or on a read-only table) who opens an edit link is redirected to the read-only detail page instead of a form whose save fails.
+- A custom admin view whose suffix shadows a built-in route under another param name (`{id}`, `{id}/edit`) now logs a warning at build time.
+
+### Fixed — REST
+
+- `serializer::hyperlink_url` and `hyperlinked_to_value` percent-encode the key as one path segment.
 
 ### Fixed — ORM
 

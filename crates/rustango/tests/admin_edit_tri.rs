@@ -116,8 +116,31 @@ rustango::register_admin_inline!(
     fields = &["amount"],
 );
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_slug")]
+#[allow(dead_code)]
+pub struct Slugged {
+    #[rustango(primary_key, max_length = 64)]
+    pub slug: String,
+    #[rustango(max_length = 32)]
+    pub name: Option<String>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_slugref")]
+#[allow(dead_code)]
+pub struct SlugRef {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "aed_slug", on = "slug", max_length = 64)]
+    pub slug_id: String,
+}
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
+    drop_table(pool, "aed_slugref").await;
+    fresh_table::<Slugged>(pool).await;
+    fresh_table::<SlugRef>(pool).await;
     fresh_table::<Doc>(pool).await;
     drop_table(pool, "aed_line").await;
     drop_table(pool, "aed_sline").await;
@@ -562,9 +585,114 @@ async fn inline_rows_read_renamed_columns(pool: &Pool) {
     assert_eq!(CLine::objects().count(pool).await.expect("count"), 1);
 }
 
+/// Keys that a raw URL segment would misroute, split or reject.
+const AWKWARD_SLUGS: &[&str] = &["a/b", "a?b", "a#b", "50%", "a b", "café ü"];
+
+async fn seed_slugs(pool: &Pool) {
+    for slug in std::iter::once("a").chain(AWKWARD_SLUGS.iter().copied()) {
+        let row = Slugged {
+            slug: slug.to_owned(),
+            name: Some(format!("n-{slug}")),
+        };
+        row.insert_pool(pool).await.expect("insert slug");
+    }
+}
+
+async fn slug_name(pool: &Pool, slug: &str) -> Option<String> {
+    Slugged::objects()
+        .filter("slug", slug.to_owned())
+        .fetch(pool)
+        .await
+        .expect("fetch")
+        .remove(0)
+        .name
+}
+
+/// Detail, edit and delete links carry a string key as one encoded
+/// segment, and following them reaches that row only.
+async fn string_pk_links_are_encoded(pool: &Pool) {
+    seed_slugs(pool).await;
+    for slug in AWKWARD_SLUGS {
+        let enc = urlencoding::encode(slug).into_owned();
+        let (status, html) = send(pool, "GET", &format!("/aed_slug/{enc}"), "").await;
+        assert_eq!(status, StatusCode::OK, "{slug}: {html}");
+        for link in [
+            format!(r#"href="/aed_slug/{enc}/edit""#),
+            format!(r#"action="/aed_slug/{enc}/delete""#),
+        ] {
+            assert!(html.contains(&link), "{slug}: no {link}");
+        }
+        let (status, html) = send(pool, "GET", &format!("/aed_slug/{enc}/edit"), "").await;
+        assert_eq!(status, StatusCode::OK, "{slug}: {html}");
+        let html = html.replace("&#x2F;", "/");
+        for link in [
+            format!(r#"action="/aed_slug/{enc}""#),
+            format!(r#"href="/aed_slug/{enc}">"#),
+        ] {
+            assert!(html.contains(&link), "{slug}: no {link}");
+        }
+        let form = encode(&[("name", format!("renamed-{slug}"))]);
+        let (status, body) = send(pool, "POST", &format!("/aed_slug/{enc}"), &form).await;
+        assert!(status.is_redirection(), "{slug}: {status}: {body}");
+        assert_eq!(
+            slug_name(pool, slug).await.as_deref(),
+            Some(&*format!("renamed-{slug}"))
+        );
+    }
+    assert_eq!(
+        slug_name(pool, "a").await.as_deref(),
+        Some("n-a"),
+        "row `a` touched"
+    );
+}
+
+/// A string FK cell on the list links to the target row's encoded URL.
+async fn string_fk_cell_link_is_encoded(pool: &Pool) {
+    seed_slugs(pool).await;
+    for slug in AWKWARD_SLUGS {
+        let mut r = SlugRef {
+            id: Auto::default(),
+            slug_id: (*slug).to_owned(),
+        };
+        r.insert_pool(pool).await.expect("insert ref");
+    }
+    let (status, html) = send(pool, "GET", "/aed_slugref", "").await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    for slug in AWKWARD_SLUGS {
+        let enc = urlencoding::encode(slug).into_owned();
+        let link = format!(r#"href="/aed_slug/{enc}""#);
+        assert!(html.contains(&link), "{slug}: no {link} in {html}");
+    }
+}
+
+/// A user without `{table}.change` opening an edit link lands on the
+/// read-only detail page instead of a form whose save is refused.
+async fn read_only_edit_link_shows_detail(pool: &Pool) {
+    seed_slugs(pool).await;
+    let enc = urlencoding::encode("a/b").into_owned();
+    let builders = [
+        rustango::admin::Builder::new(pool.clone()).with_user_perms(["aed_slug.view".to_owned()]),
+        rustango::admin::Builder::new(pool.clone()).read_only(["aed_slug"]),
+    ];
+    for builder in builders {
+        let app = builder.admin_prefix("").build();
+        let req = Request::builder()
+            .uri(format!("/aed_slug/{enc}/edit"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert!(res.status().is_redirection(), "{}", res.status());
+        let to = res.headers()["location"].to_str().unwrap().to_owned();
+        assert_eq!(to, format!("/aed_slug/{enc}"));
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        string_pk_links_are_encoded,
+        string_fk_cell_link_is_encoded,
+        read_only_edit_link_shows_detail,
         inline_rows_read_renamed_columns,
         untouched_nullable_json_object_is_kept,
         untouched_unknown_choice_is_kept,
