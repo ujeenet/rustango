@@ -3430,7 +3430,10 @@ async fn insert_admitted(
             return Err(write_failure("viewset::create", &e));
         }
     };
-    match add_hooks.admit(&mut tx, query.model, pk_field, pk.clone()).await {
+    match add_hooks
+        .admit(&mut tx, query.model, pk_field, pk.clone())
+        .await
+    {
         Ok(true) => {}
         Ok(false) => {
             let _ = tx.rollback().await;
@@ -3578,11 +3581,17 @@ async fn create_many(
             generated: vec![],
         };
         match crate::audit::insert_tx(&mut tx, &query, pk_field).await {
-            Ok(pk) => match add_hooks.admit(&mut tx, query.model, pk_field, pk.clone()).await {
+            Ok(pk) => match add_hooks
+                .admit(&mut tx, query.model, pk_field, pk.clone())
+                .await
+            {
                 Ok(true) => pks.push(pk),
                 Ok(false) => {
                     let _ = tx.rollback().await;
-                    return json_error(StatusCode::FORBIDDEN, &format!("bulk entry {i}: forbidden"));
+                    return json_error(
+                        StatusCode::FORBIDDEN,
+                        &format!("bulk entry {i}: forbidden"),
+                    );
                 }
                 Err(e) => {
                     let _ = tx.rollback().await;

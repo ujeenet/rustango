@@ -140,8 +140,14 @@ pub(crate) fn row_payloads(
             continue;
         };
         // Only the index `format!` writes: no sign, no leading zero.
-        let canonical = idx.bytes().all(|b| b.is_ascii_digit()) && (idx == "0" || !idx.starts_with('0'));
-        if let Some(row) = idx.parse::<usize>().ok().filter(|_| canonical).and_then(|i| rows.get_mut(i)) {
+        let canonical =
+            idx.bytes().all(|b| b.is_ascii_digit()) && (idx == "0" || !idx.starts_with('0'));
+        if let Some(row) = idx
+            .parse::<usize>()
+            .ok()
+            .filter(|_| canonical)
+            .and_then(|i| rows.get_mut(i))
+        {
             row.insert(field.to_owned(), v.clone());
         }
     }

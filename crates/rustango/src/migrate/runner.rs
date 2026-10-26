@@ -4949,8 +4949,7 @@ async fn refuse_duplicate_keys(
             } => (column, table, vec![column.as_str()]),
             _ => continue,
         };
-        if new_tables.contains(&table)
-            || columns.iter().any(|c| new_columns.contains(&(table, *c)))
+        if new_tables.contains(&table) || columns.iter().any(|c| new_columns.contains(&(table, *c)))
         {
             continue;
         }
@@ -5558,7 +5557,10 @@ mod tests {
         let drop = at("ALTER TABLE `book` DROP FOREIGN KEY `book_author_id_fkey`");
         let modify = at("ALTER TABLE `author` MODIFY");
         assert!(drop.is_some() && drop < modify, "{out:?}");
-        assert!(at("ADD CONSTRAINT `book_author_id_fkey`") > modify, "{out:?}");
+        assert!(
+            at("ADD CONSTRAINT `book_author_id_fkey`") > modify,
+            "{out:?}"
+        );
     }
 
     /// MySQL: a retyped FK column renamed later comes back once, after the
@@ -5607,7 +5609,10 @@ mod tests {
             .filter(|&i| out[i].contains("ADD CONSTRAINT"))
             .collect();
         assert_eq!(adds.len(), 1, "{out:?}");
-        assert!(adds[0] > key, "FK re-added before its key's retype: {out:?}");
+        assert!(
+            adds[0] > key,
+            "FK re-added before its key's retype: {out:?}"
+        );
         assert!(out[adds[0]].contains("`child_b_fkey`"), "{out:?}");
     }
 }

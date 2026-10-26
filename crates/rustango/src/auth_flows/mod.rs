@@ -989,7 +989,8 @@ mod tests {
         let ttl = Duration::from_secs(600);
         let strong = "brand-new-strong-password-7!";
 
-        let audience = PasswordReset::issue(&LinkScope::audience("app"), "https://b/r", id, SECRET, ttl);
+        let audience =
+            PasswordReset::issue(&LinkScope::audience("app"), "https://b/r", id, SECRET, ttl);
         let r = confirm_password_reset_pool(&scope, &audience, strong, SECRET).await;
         assert_eq!(r, Err(AuthFlowError::WrongScope));
 

@@ -590,9 +590,21 @@ async fn admin_keeps_the_last_active_operator(pool: &Pool) {
         .unwrap();
     let (a_id, b_id) = (seed_operator(pool, &a).await, seed_operator(pool, &b).await);
     let at = "2024-01-01T00:00";
-    let off = |name: &str| form(&[("username", name), ("password_hash", ""), ("created_at", at)]);
+    let off = |name: &str| {
+        form(&[
+            ("username", name),
+            ("password_hash", ""),
+            ("created_at", at),
+        ])
+    };
     // One of two: allowed.
-    let (status, html) = send(pool, Method::POST, &format!("/rustango_operators/{a_id}"), off(&a)).await;
+    let (status, html) = send(
+        pool,
+        Method::POST,
+        &format!("/rustango_operators/{a_id}"),
+        off(&a),
+    )
+    .await;
     assert!(status.is_redirection(), "{status}: {html}");
     assert_eq!(active_operators(pool).await, [b_id]);
     // The last one: neither an edit nor a delete.
@@ -605,7 +617,13 @@ async fn admin_keeps_the_last_active_operator(pool: &Pool) {
     assert_eq!(active_operators(pool).await, [b_id]);
     let c_id = seed_operator(pool, &c).await;
     // Deleting one of two, and editing the last without deactivating, work.
-    let (status, _) = send(pool, Method::POST, &format!("/rustango_operators/{c_id}/delete"), String::new()).await;
+    let (status, _) = send(
+        pool,
+        Method::POST,
+        &format!("/rustango_operators/{c_id}/delete"),
+        String::new(),
+    )
+    .await;
     assert!(status.is_redirection(), "{status}");
     let on = form(&[
         ("username", b.as_str()),
@@ -631,7 +649,10 @@ async fn console_and_admin_race_keeps_one_active(pool: &Pool) {
             .execute_pool(pool)
             .await
             .unwrap();
-        let (a, b) = (unique(&format!("ra{round}x")), unique(&format!("rb{round}x")));
+        let (a, b) = (
+            unique(&format!("ra{round}x")),
+            unique(&format!("rb{round}x")),
+        );
         let a_id = seed_operator(pool, &a).await;
         let b_id = seed_operator(pool, &b).await;
         let mut b_op = Operator::objects()
@@ -653,10 +674,21 @@ async fn console_and_admin_race_keeps_one_active(pool: &Pool) {
         };
         let admin = {
             let (pool, barrier) = (pool.clone(), barrier.clone());
-            let body = form(&[("username", a.as_str()), ("password_hash", ""), ("created_at", at)]);
+            let body = form(&[
+                ("username", a.as_str()),
+                ("password_hash", ""),
+                ("created_at", at),
+            ]);
             tokio::spawn(async move {
                 barrier.wait().await;
-                send(&pool, Method::POST, &format!("/rustango_operators/{a_id}"), body).await.0
+                send(
+                    &pool,
+                    Method::POST,
+                    &format!("/rustango_operators/{a_id}"),
+                    body,
+                )
+                .await
+                .0
             })
         };
         let (c, s) = (console.await.unwrap(), admin.await.unwrap());

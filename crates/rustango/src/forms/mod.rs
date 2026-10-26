@@ -1477,7 +1477,8 @@ mod dynamic_form_tests {
         let mut f = form(serde_json::json!([{"name": "ok", "field_type": "boolean"}]));
         f.bind(HashMap::from([("ok".into(), "nope".into())]));
         assert!(!f.errors().get("ok").is_empty(), "nope accepted");
-        let required = serde_json::json!([{"name": "ok", "field_type": "boolean", "required": true}]);
+        let required =
+            serde_json::json!([{"name": "ok", "field_type": "boolean", "required": true}]);
         let mut f = form(required);
         f.bind(HashMap::from([("ok".into(), "nope".into())]));
         assert!(!f.is_valid(), "nope ticked a required box");
@@ -1913,8 +1914,9 @@ mod model_form_tests {
         let err = ModelFormFor::<Flags>::from_json(&serde_json::json!({ "on": null }))
             .expect_err("null on a NOT NULL bool");
         assert!(!err.get("on").is_empty(), "{err}");
-        let mf = ModelFormFor::<Flags>::from_json(&serde_json::json!({ "on": true, "maybe": null }))
-            .expect("null on a nullable bool");
+        let mf =
+            ModelFormFor::<Flags>::from_json(&serde_json::json!({ "on": true, "maybe": null }))
+                .expect("null on a nullable bool");
         assert_eq!(mf.values(), [SqlValue::Bool(true), SqlValue::Null]);
     }
 

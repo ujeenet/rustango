@@ -222,7 +222,10 @@ struct InFlight<'a>(&'a DiscoveryKey, &'a Gate);
 impl Drop for InFlight<'_> {
     fn drop(&mut self) {
         let mut map = IN_FLIGHT.lock().unwrap_or_else(PoisonError::into_inner);
-        if map.get(self.0).is_some_and(|g| std::sync::Arc::ptr_eq(g, self.1)) {
+        if map
+            .get(self.0)
+            .is_some_and(|g| std::sync::Arc::ptr_eq(g, self.1))
+        {
             map.remove(self.0);
         }
     }
@@ -270,11 +273,14 @@ async fn discovered(
                     let fetched = OAuth2Provider::new("oidc", "", "", "", "", "")
                         .discover(&key.0, policy)
                         .await;
-                    let found = fetched.as_ref().map_err(ToString::to_string).map(|p| Endpoints {
-                        auth_url: p.auth_url.clone(),
-                        token_url: p.token_url.clone(),
-                        userinfo_url: p.userinfo_url.clone(),
-                    });
+                    let found = fetched
+                        .as_ref()
+                        .map_err(ToString::to_string)
+                        .map(|p| Endpoints {
+                            auth_url: p.auth_url.clone(),
+                            token_url: p.token_url.clone(),
+                            userinfo_url: p.userinfo_url.clone(),
+                        });
                     remember(
                         &mut DISCOVERED.lock().unwrap_or_else(PoisonError::into_inner),
                         key.clone(),
@@ -533,7 +539,9 @@ mod tests {
     async fn the_policy_is_part_of_the_cache_key() {
         let (base, hits) = issuer(1).await;
         let strict = TargetPolicy::Public(crate::outbound::Allowlist::default());
-        assert!(build_provider_with(&oidc(&base, "a"), &strict).await.is_err());
+        assert!(build_provider_with(&oidc(&base, "a"), &strict)
+            .await
+            .is_err());
         assert!(build_provider_with(&oidc(&base, "a"), &loopback())
             .await
             .is_err());
@@ -544,8 +552,14 @@ mod tests {
                 .contains_key(&(base.clone(), loopback())),
             "a finished fetch leaves no gate"
         );
-        assert!(build_provider_with(&oidc(&base, "a"), &strict).await.is_err());
-        assert_eq!(hits.load(Ordering::SeqCst), 1, "strict never reached the server");
+        assert!(build_provider_with(&oidc(&base, "a"), &strict)
+            .await
+            .is_err());
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "strict never reached the server"
+        );
     }
 
     /// Concurrent logins against a cold issuer share one fetch.

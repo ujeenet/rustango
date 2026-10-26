@@ -318,15 +318,23 @@ async fn retyped_fk_waits_for_its_key_before_a_rename(pool: &Pool) {
     migrate_pool_with_ledger(pool, dir.path(), ledger)
         .await
         .unwrap_or_else(|e| panic!("migrate on {}: {e}", pool.dialect().name()));
-    assert_eq!(fk_count(pool, c).await, 1, "one FK on {}", pool.dialect().name());
+    assert_eq!(
+        fk_count(pool, c).await,
+        1,
+        "one FK on {}",
+        pool.dialect().name()
+    );
     let d = pool.dialect();
     let (qp, qc) = (d.quote_ident(p), d.quote_ident(c));
     exec(pool, &format!("INSERT INTO {qp} (id) VALUES (3000000000)"))
         .await
         .expect("the key is BIGINT");
-    exec(pool, &format!("INSERT INTO {qc} (id, b) VALUES (1, 3000000000)"))
-        .await
-        .expect("the FK column is BIGINT and named b");
+    exec(
+        pool,
+        &format!("INSERT INTO {qc} (id, b) VALUES (1, 3000000000)"),
+    )
+    .await
+    .expect("the FK column is BIGINT and named b");
     assert!(
         exec(pool, &format!("INSERT INTO {qc} (id, b) VALUES (2, 7)"))
             .await
@@ -970,7 +978,11 @@ async fn unique_key_over_duplicates_is_refused(pool: &Pool) {
         pool.dialect().name()
     );
     // The query in the message runs as given and finds the repeated key.
-    let find = msg.lines().map(str::trim).find(|l| l.starts_with("SELECT")).expect("a query");
+    let find = msg
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("SELECT"))
+        .expect("a query");
     let dups: Vec<(i64, i64, i64)> = rustango::sql::raw_query_pool(find, Vec::new(), pool)
         .await
         .unwrap_or_else(|e| panic!("{find} on {}: {e}", pool.dialect().name()));
@@ -980,7 +992,12 @@ async fn unique_key_over_duplicates_is_refused(pool: &Pool) {
         .unwrap();
     migrate_pool_with_ledger(pool, dir.path(), ledger)
         .await
-        .unwrap_or_else(|e| panic!("NULLs do not block the key on {}: {e}", pool.dialect().name()));
+        .unwrap_or_else(|e| {
+            panic!(
+                "NULLs do not block the key on {}: {e}",
+                pool.dialect().name()
+            )
+        });
     assert!(exec(pool, &format!("INSERT INTO {q} (a, b) VALUES (1, 1)"))
         .await
         .is_err());

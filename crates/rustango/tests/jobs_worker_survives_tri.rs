@@ -235,7 +235,11 @@ async fn a_long_error_is_stored_cut(pool: &Pool) {
             .expect("last_error");
     let stored = rows[0].0.clone().expect("last_error stored");
     assert!(stored.len() <= 65_535, "{} bytes", stored.len());
-    assert!(stored.len() > 60_000, "cut too short: {} bytes", stored.len());
+    assert!(
+        stored.len() > 60_000,
+        "cut too short: {} bytes",
+        stored.len()
+    );
     assert!(stored.chars().all(|c| c == 'é'), "cut inside a char");
 }
 

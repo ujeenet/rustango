@@ -231,7 +231,9 @@ async fn create_runs_the_admin_add_hooks(pool: &Pool) {
     let ok = serde_json::json!({ "label": "ok" });
     let res = post(ok.clone(), true).await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
-    let res = post(serde_json::json!({ "label": "blocked" }), false).await.unwrap();
+    let res = post(serde_json::json!({ "label": "blocked" }), false)
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
     let bulk = serde_json::json!([{ "label": "first" }, { "label": "blocked" }]);
     let res = post(bulk, false).await.unwrap();

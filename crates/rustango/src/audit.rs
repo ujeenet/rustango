@@ -2181,7 +2181,9 @@ pub(crate) async fn insert_tx_on(
     query: &crate::core::InsertQuery,
     pk_field: &crate::core::FieldSchema,
 ) -> Result<crate::core::SqlValue, crate::sql::ExecError> {
-    Ok(writing_via(pool, insert_returning_tx(tx, query, pk_field)).await?.0)
+    Ok(writing_via(pool, insert_returning_tx(tx, query, pk_field))
+        .await?
+        .0)
 }
 
 #[cfg_attr(

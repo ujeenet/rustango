@@ -245,12 +245,14 @@ fn parent_key<P: Model + HasPkValue>(
 ) -> Result<crate::core::SqlValue, ExecError> {
     match on {
         None => Ok(extract_pk_value(parent)),
-        Some(column) => parent
-            .__rustango_column_value(column)
-            .ok_or(ExecError::PrefetchColumnUnreadable {
-                table: P::SCHEMA.table,
-                column,
-            }),
+        Some(column) => {
+            parent
+                .__rustango_column_value(column)
+                .ok_or(ExecError::PrefetchColumnUnreadable {
+                    table: P::SCHEMA.table,
+                    column,
+                })
+        }
     }
 }
 
@@ -276,7 +278,10 @@ mod tests {
     fn an_unreadable_fk_target_column_is_an_error_not_the_pk() {
         let err = parent_key(&HandWritten, Some("code")).expect_err("not the pk");
         assert!(
-            matches!(err, ExecError::PrefetchColumnUnreadable { column: "code", .. }),
+            matches!(
+                err,
+                ExecError::PrefetchColumnUnreadable { column: "code", .. }
+            ),
             "{err}"
         );
         assert!(err.to_string().contains(".code`"), "{err}");

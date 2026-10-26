@@ -1096,8 +1096,13 @@ mod schema_pool_tests {
         pa.close().await;
         pb.close().await;
         for s in [&a, &b] {
-            let drop = format!("DROP SCHEMA IF EXISTS {} CASCADE", super::quote_ident_for_schema(s));
-            let _ = sqlx::query(&drop).execute(registry.as_postgres().expect("pg")).await;
+            let drop = format!(
+                "DROP SCHEMA IF EXISTS {} CASCADE",
+                super::quote_ident_for_schema(s)
+            );
+            let _ = sqlx::query(&drop)
+                .execute(registry.as_postgres().expect("pg"))
+                .await;
         }
         assert_ne!(keys[0], keys[1], "schema pool shares the registry's scope");
         assert_ne!(keys[1], keys[2], "two schema pools share a scope");

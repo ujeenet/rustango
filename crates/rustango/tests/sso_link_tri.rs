@@ -370,7 +370,10 @@ async fn age_link(pool: &Pool, subject: &str) {
     SsoLink::objects()
         .filter("subject", subject.to_owned())
         .update()
-        .set("created_at", chrono::Utc::now() - chrono::TimeDelta::days(365))
+        .set(
+            "created_at",
+            chrono::Utc::now() - chrono::TimeDelta::days(365),
+        )
         .execute_pool(pool)
         .await
         .unwrap();
@@ -414,23 +417,36 @@ async fn a_link_older_than_its_account(pool: &Pool) {
     };
     #[cfg(not(feature = "runtime"))]
     assert_eq!(
-        sign_in(pool, &key, false, &p, &One(Some(reused))).await.unwrap(),
+        sign_in(pool, &key, false, &p, &One(Some(reused)))
+            .await
+            .unwrap(),
         42
     );
     #[cfg(feature = "runtime")]
-    assert!(logs.contains("older than its account") && logs.contains("42"), "{logs}");
+    assert!(
+        logs.contains("older than its account") && logs.contains("42"),
+        "{logs}"
+    );
     assert!(linked_user(pool, &key, "sub-old").await.unwrap().is_some());
 
     set_stale_links(StaleLinks::Drop);
     let dropped = sign_in(pool, &key, false, &p, &One(Some(reused))).await;
-    assert!(matches!(dropped, Err(LinkRefusal::EmailLinkDisabled)), "{dropped:?}");
+    assert!(
+        matches!(dropped, Err(LinkRefusal::EmailLinkDisabled)),
+        "{dropped:?}"
+    );
     assert!(linked_user(pool, &key, "sub-old").await.unwrap().is_none());
 
     // A link made after its account still signs in.
     create_link(pool, &key, "sub-new", 43).await.unwrap();
     let older = Account::new(43, false, true).with_created_at(Utc::now() - TimeDelta::days(1));
     let p2 = profile("sub-new", "x@example.com");
-    assert_eq!(sign_in(pool, &key, false, &p2, &One(Some(older))).await.unwrap(), 43);
+    assert_eq!(
+        sign_in(pool, &key, false, &p2, &One(Some(older)))
+            .await
+            .unwrap(),
+        43
+    );
 
     // The built-in tenant lookup passes the user's `created_at`.
     // `rustango_users` outlives the run: a fresh name each time.
@@ -443,7 +459,10 @@ async fn a_link_older_than_its_account(pool: &Pool) {
     let got = find_or_provision_member(pool, &key, false, &p3, false).await;
     set_stale_links(StaleLinks::Warn);
     assert!(matches!(got, Ok(MemberSignIn::NotLinked)), "{got:?}");
-    assert!(linked_user(pool, &key, "sub-tenant").await.unwrap().is_none());
+    assert!(linked_user(pool, &key, "sub-tenant")
+        .await
+        .unwrap()
+        .is_none());
 }
 
 async fn provider_changes_drop_links(pool: &Pool) {
