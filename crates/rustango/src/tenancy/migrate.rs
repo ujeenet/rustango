@@ -904,7 +904,8 @@ async fn run_for_one_tenant(
                 Ok::<_, TenancyError>(applied)
             }
             .await;
-            // Even after a failure: a table made before it hides `public`'s on the next run too.
+            // Warn even if the run failed: once the tenant's passkey table exists,
+            // the next run sees no change and would never warn.
             #[cfg(feature = "passkey")]
             if reads_public_passkeys && existed_here(&dbpool, PASSKEY_TABLE).await {
                 warn_hidden_public_passkeys(&pools.registry_pool(), &org.slug, &schema).await;
