@@ -162,6 +162,10 @@ New cache directories are 0700 and entries 0600. An existing directory keeps its
 
 A `url` answer with a `javascript:`, `vbscript:` or `data:` scheme is refused. Other non-http(s) URLs, and emails that `validate_email` or `SmtpMailer` would refuse, are still accepted with a `rustango::forms` warning; a later minor release will refuse them.
 
+### WebSocket peers must answer pings
+
+`ws_handler` now closes a socket that sends no frame within one `keepalive` after a ping, or whose send stalls that long. Browsers answer pings on their own; a custom client must too.
+
 ## 0.61.3
 
 ### `[cache] backend` should be a known lowercase name

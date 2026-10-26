@@ -66,8 +66,9 @@ pub struct WsHub<T: Clone + Send + 'static> {
 /// Per-connection tuning knobs.
 #[derive(Clone, Debug)]
 pub struct WsConfig {
-    /// How often to send a `Ping` frame when the connection is idle.
-    /// Default: 30 seconds.
+    /// How often to send a `Ping` frame, busy or idle. A peer silent for a
+    /// whole interval after a ping, or a send slower than this, closes the
+    /// socket. Default: 30 seconds.
     pub keepalive: Duration,
     /// Called for every text message from the client. Return
     /// `Some(reply)` to answer, `None` to ignore. Default: `None`,
@@ -166,16 +167,23 @@ impl<T: Clone + Send + Serialize + 'static> WsHub<T> {
 /// ws.max_message_size(n).on_upgrade(move |socket| ws_handler(socket, hub.clone()))
 /// ```
 ///
-/// It returns when the client disconnects, a ping fails, or the bus
-/// closes.
+/// A ping goes out every `keepalive`, traffic or not. It returns when the
+/// client disconnects, sends nothing for a whole interval after a ping,
+/// a send takes longer than `keepalive`, or the bus closes.
 pub async fn ws_handler<T>(mut socket: WebSocket, hub: WsHub<T>)
 where
     T: Clone + Send + Serialize + DeserializeOwned + 'static,
 {
     let mut rx = hub.bus.subscribe();
-    let keepalive = hub.config.keepalive;
+    // `interval` panics on zero.
+    let keepalive = hub.config.keepalive.max(Duration::from_millis(1));
     let on_message = hub.config.on_message;
     let max_bytes = hub.config.max_message_bytes;
+    // Not reset by traffic, so a busy socket is pinged too.
+    let mut ticks =
+        tokio::time::interval_at(tokio::time::Instant::now() + keepalive, keepalive);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut awaiting_reply = false;
 
     loop {
         tokio::select! {
@@ -189,67 +197,84 @@ where
                             continue;
                         }
                     };
-                    if socket.send(Message::Text(json.into())).await.is_err() {
+                    if !send(&mut socket, Message::Text(json.into()), keepalive).await {
                         return;
                     }
                 }
                 Err(RecvError::Lagged(n)) => {
                     // Tell the client it missed `n` events so it can resync.
-                    let _ = socket
-                        .send(Message::Text(
-                            format!(r#"{{"_lagged":{n}}}"#).into(),
-                        ))
-                        .await;
+                    let lagged = Message::Text(format!(r#"{{"_lagged":{n}}}"#).into());
+                    if !send(&mut socket, lagged, keepalive).await {
+                        return;
+                    }
                 }
                 Err(RecvError::Closed) => return,
             },
 
             // Inbound: read the socket so disconnects show up quickly
-            // and `on_message` can run.
-            incoming = socket.recv() => match incoming {
-                Some(Ok(Message::Text(t))) => {
-                    if t.len() > max_bytes {
-                        let _ = socket.send(Message::Close(None)).await;
-                        return;
-                    }
-                    if let Some(handler) = on_message {
-                        if let Some(reply) = handler(t.as_str()) {
-                            if socket.send(Message::Text(reply.into())).await.is_err() {
-                                return;
+            // and `on_message` can run. Any frame proves the peer is alive.
+            incoming = socket.recv() => {
+                if matches!(incoming, Some(Ok(_))) {
+                    awaiting_reply = false;
+                }
+                match incoming {
+                    Some(Ok(Message::Text(t))) => {
+                        if t.len() > max_bytes {
+                            let _ = send(&mut socket, Message::Close(None), keepalive).await;
+                            return;
+                        }
+                        if let Some(handler) = on_message {
+                            if let Some(reply) = handler(t.as_str()) {
+                                if !send(&mut socket, Message::Text(reply.into()), keepalive).await {
+                                    return;
+                                }
                             }
                         }
                     }
-                }
-                Some(Ok(Message::Binary(b))) => {
-                    if b.len() > max_bytes {
-                        let _ = socket.send(Message::Close(None)).await;
+                    Some(Ok(Message::Binary(b))) => {
+                        if b.len() > max_bytes {
+                            let _ = send(&mut socket, Message::Close(None), keepalive).await;
+                            return;
+                        }
+                        // Binary frames are dropped; wrap ws_handler to handle them.
+                    }
+                    Some(Ok(Message::Ping(p))) => {
+                        if !send(&mut socket, Message::Pong(p), keepalive).await {
+                            return;
+                        }
+                    }
+                    Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Close(_))) | None => return,
+                    Some(Err(e)) => {
+                        tracing::debug!(error = %e, "ws: recv error, closing");
                         return;
                     }
-                    // Binary frames are dropped; wrap ws_handler to handle them.
-                }
-                Some(Ok(Message::Ping(p))) => {
-                    if socket.send(Message::Pong(p)).await.is_err() {
-                        return;
-                    }
-                }
-                Some(Ok(Message::Pong(_))) => {
-                    // Client responded to our keepalive ping.
-                }
-                Some(Ok(Message::Close(_))) | None => return,
-                Some(Err(e)) => {
-                    tracing::debug!(error = %e, "ws: recv error, closing");
-                    return;
                 }
             },
 
-            // Keepalive: send a ping every `keepalive`.
-            () = tokio::time::sleep(keepalive) => {
-                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+            // Keepalive: no answer to the last ping in a whole interval
+            // means a half-open peer.
+            _ = ticks.tick() => {
+                if awaiting_reply {
+                    tracing::debug!("ws: no pong within keepalive, closing");
                     return;
                 }
+                if !send(&mut socket, Message::Ping(Vec::new().into()), keepalive).await {
+                    return;
+                }
+                awaiting_reply = true;
             }
         }
     }
+}
+
+/// Send `msg`, giving up after `limit` so a peer that stops reading
+/// cannot hold the task. `false` means close.
+async fn send(socket: &mut WebSocket, msg: Message, limit: Duration) -> bool {
+    matches!(
+        tokio::time::timeout(limit, socket.send(msg)).await,
+        Ok(Ok(()))
+    )
 }
 
 #[cfg(test)]
@@ -310,6 +335,103 @@ mod tests {
             closed.is_ok(),
             "the server kept waiting for the oversized payload"
         );
+    }
+
+    /// Serve `hub` on a loopback port and finish the client handshake.
+    async fn open(hub: WsHub<String>) -> tokio::net::TcpStream {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let app = axum::Router::new().route(
+            "/ws",
+            axum::routing::get(move |ws: axum::extract::WebSocketUpgrade| {
+                let hub = hub.clone();
+                async move { hub.upgrade(ws) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        tcp.write_all(
+            b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut b = [0u8; 1];
+            tcp.read_exact(&mut b).await.unwrap();
+            head.push(b[0]);
+        }
+        assert!(head.starts_with(b"HTTP/1.1 101"));
+        tcp
+    }
+
+    /// A peer that never answers a ping is closed, not kept forever.
+    #[tokio::test]
+    async fn a_silent_peer_is_closed() {
+        use tokio::io::AsyncReadExt as _;
+        let hub = WsHub::new(EventBus::<String>::new(4)).keepalive(Duration::from_millis(100));
+        let mut tcp = open(hub).await;
+        let mut sink = Vec::new();
+        let closed = tokio::time::timeout(Duration::from_secs(3), tcp.read_to_end(&mut sink)).await;
+        assert!(closed.is_ok(), "a peer that never pongs was kept open");
+    }
+
+    /// Steady traffic does not push the ping back forever.
+    #[tokio::test]
+    async fn a_busy_socket_is_still_pinged() {
+        use tokio::io::AsyncReadExt as _;
+        let hub = WsHub::new(EventBus::<String>::new(64)).keepalive(Duration::from_millis(150));
+        let mut tcp = open(hub.clone()).await;
+        let ticker = tokio::spawn(async move {
+            loop {
+                hub.broadcast("x".into());
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        let pinged = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let mut h = [0u8; 2];
+                tcp.read_exact(&mut h).await.unwrap();
+                let mut body = vec![0u8; usize::from(h[1] & 0x7f)];
+                tcp.read_exact(&mut body).await.unwrap();
+                if h[0] & 0x0f == 0x9 {
+                    return;
+                }
+            }
+        })
+        .await;
+        ticker.abort();
+        assert!(pinged.is_ok(), "no ping while messages flowed");
+    }
+
+    /// A peer that keeps talking but stops reading is dropped once a send stalls.
+    #[tokio::test]
+    async fn a_peer_that_stops_reading_is_dropped() {
+        use tokio::io::AsyncWriteExt as _;
+        let hub = WsHub::new(EventBus::<String>::new(4)).keepalive(Duration::from_millis(200));
+        let tcp = open(hub.clone()).await;
+        let (_read, mut write) = tcp.into_split();
+        // Masked empty pings keep the peer "alive" without reading anything.
+        let talker = tokio::spawn(async move {
+            while write.write_all(&[0x89, 0x80, 1, 2, 3, 4]).await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        });
+        while hub.receiver_count() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let big = "y".repeat(64 * 1024);
+        let dropped = tokio::time::timeout(Duration::from_secs(10), async {
+            while hub.receiver_count() > 0 {
+                hub.broadcast(big.clone());
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await;
+        talker.abort();
+        assert!(dropped.is_ok(), "a stalled send held the connection");
     }
 
     #[tokio::test]

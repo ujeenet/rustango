@@ -21,6 +21,10 @@ Every 16 writes sweep one sixteenth of the directory for expired entries, and th
 
 A `url` field refuses `javascript:`, `vbscript:` and `data:` values, however a browser would spell them; rendered as a link they were stored XSS. Other URLs failing `validate_url`, and emails failing `validate_email` or the `SmtpMailer` parser, log a warning for now.
 
+### Fixed — WebSocket keepalive closes half-open peers
+
+`ws_handler` pings every `keepalive` even while messages flow, closes a peer that sends nothing for a whole interval after a ping, and gives each send `keepalive` to finish.
+
 ## [0.61.3] — 2026-10-26
 
 ### Changed — unknown `cache.backend` values are logged as errors
