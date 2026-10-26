@@ -143,24 +143,24 @@ async fn unattached_email_still_serializes_cleanly() {
 
 // ------------------------------------------------------------------ serde
 
-/// A job payload holds attachment bytes as base64, not a JSON number per byte.
+/// Still written as an integer array, so workers not yet upgraded can read it.
 #[test]
-fn attachment_serializes_content_as_base64() {
+fn attachment_still_writes_an_integer_array() {
     let e = base_email().attach("a.bin", vec![0u8, 1, 2, 255], None::<&str>);
     let v = serde_json::to_value(&e).unwrap();
-    assert_eq!(v["attachments"][0]["content"], serde_json::json!("AAEC/w=="));
+    assert_eq!(v["attachments"][0]["content"], serde_json::json!([0, 1, 2, 255]));
     let back: Email = serde_json::from_value(v).unwrap();
     assert_eq!(back.attachments[0].content, vec![0u8, 1, 2, 255]);
 }
 
-/// Jobs queued by an older release still carry the integer-array form.
+/// Both forms read: the array written now and the base64 a later release writes.
 #[test]
-fn attachment_reads_the_old_integer_array() {
-    let v = serde_json::json!({
-        "filename": "a.bin", "content": [0, 1, 2, 255], "mimetype": null
-    });
-    let a: Attachment = serde_json::from_value(v).unwrap();
-    assert_eq!(a.content, vec![0u8, 1, 2, 255]);
+fn attachment_reads_an_array_or_base64() {
+    for content in [serde_json::json!([0, 1, 2, 255]), serde_json::json!("AAEC/w==")] {
+        let v = serde_json::json!({ "filename": "a.bin", "content": content, "mimetype": null });
+        let a: Attachment = serde_json::from_value(v).unwrap();
+        assert_eq!(a.content, vec![0u8, 1, 2, 255]);
+    }
     let bad = serde_json::json!({ "filename": "a", "content": "!!", "mimetype": null });
     assert!(serde_json::from_value::<Attachment>(bad).is_err());
 }

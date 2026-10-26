@@ -154,10 +154,6 @@ untouched.
 
 `InMemoryMailer`, `ConsoleMailer`, `FileMailer` and `NullMailer` return `MailError::InvalidMessage` for an address `SmtpMailer` refuses, so a test sending such mail now fails.
 
-### Email attachments serialize as base64
-
-In JSON, `Attachment::content` is now a base64 string; binary serde formats keep bytes. The old integer array still deserializes. Code that reads the JSON itself must decode base64.
-
 ### `derive(Form)` refuses non-finite floats
 
 `NaN` or `inf` in an `f32` / `f64` field is now a field error.
