@@ -24,7 +24,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::extractors::{Tenant, TenantScope};
+use crate::login_throttle::{ClientIp, LoginRefused, LoginScope};
 use crate::tenancy::jwt_lifecycle::{JwtIssueError, JwtLifecycle};
+use crate::tenancy::{AgentError, TenancyError};
 
 use super::router::AuthedMcpState;
 use super::transport::handle_message;
@@ -174,8 +176,29 @@ pub(crate) enum MintError {
     Unauthorized,
     /// Something failed on our side.
     Internal,
-    /// No password-hashing slot freed up in time: `503`.
-    Busy,
+    /// Too many failed attempts (`429`), or no hashing slot freed up (`503`).
+    Refused(LoginRefused),
+}
+
+/// One agent-secret check through the login gate. Failures count per IP
+/// and per tenant, as API keys do; there is no account lock.
+async fn gated<T>(
+    slug: &str,
+    ip: &ClientIp,
+    check: impl std::future::Future<Output = Result<Option<T>, AgentError>>,
+) -> Result<Result<Option<T>, AgentError>, LoginRefused> {
+    let scope = LoginScope::TenantAgent(slug.to_owned());
+    let attempt = crate::login_throttle::shared()
+        .begin(&scope, ip, "")
+        .await?;
+    let checked = check.await;
+    match &checked {
+        Ok(Some(_)) => attempt.succeeded().await,
+        Ok(None) => attempt.failed().await,
+        // Busy or a DB error checked nothing: dropping gives the tokens back.
+        Err(_) => drop(attempt),
+    }
+    Ok(checked)
 }
 
 /// Check `{name, secret}` against the tenant, resolve the agent's
@@ -187,12 +210,14 @@ pub(crate) async fn mint_agent_jwt(
     slug: &str,
     name: &str,
     secret: &str,
+    ip: &ClientIp,
 ) -> Result<MintedToken, MintError> {
-    let agent = match crate::tenancy::authenticate_agent_pool(pool, name, secret).await {
+    let check = crate::tenancy::authenticate_agent_pool(pool, name, secret);
+    let agent = match gated(slug, ip, check).await.map_err(MintError::Refused)? {
         Ok(Some(a)) => a,
         Ok(None) => return Err(MintError::Unauthorized),
-        Err(crate::tenancy::AgentError::Tenancy(crate::tenancy::TenancyError::Busy)) => {
-            return Err(MintError::Busy)
+        Err(AgentError::Tenancy(TenancyError::Busy)) => {
+            return Err(MintError::Refused(LoginRefused::Busy))
         }
         Err(e) => {
             tracing::warn!(error = %e, "mcp agent authentication failed");
@@ -235,18 +260,25 @@ pub(crate) async fn mint_agent_jwt(
 pub(crate) fn agent_token<DB: crate::sql::sqlx::Database>(
     t: Tenant<DB>,
     State(state): State<AuthedMcpState>,
+    ip: ClientIp,
     Json(input): Json<AgentTokenInput>,
 ) -> impl std::future::Future<Output = Response> + Send {
-    agent_token_in(t.into(), state, input)
+    agent_token_in(t.into(), state, ip, input)
 }
 
-async fn agent_token_in(t: TenantScope, state: AuthedMcpState, input: AgentTokenInput) -> Response {
+async fn agent_token_in(
+    t: TenantScope,
+    state: AuthedMcpState,
+    ip: ClientIp,
+    input: AgentTokenInput,
+) -> Response {
     match mint_agent_jwt(
         &state.jwt,
         t.pool(),
         &t.org.slug,
         &input.name,
         &input.secret,
+        &ip,
     )
     .await
     {
@@ -262,7 +294,7 @@ async fn agent_token_in(t: TenantScope, state: AuthedMcpState, input: AgentToken
         Err(MintError::Internal) => {
             (StatusCode::INTERNAL_SERVER_ERROR, "token issuance failed").into_response()
         }
-        Err(MintError::Busy) => crate::login_throttle::LoginRefused::Busy.into_response(),
+        Err(MintError::Refused(r)) => r.into_response(),
     }
 }
 
@@ -277,18 +309,16 @@ pub(crate) enum BearerRejection {
     /// as "start an OAuth flow" and would chase a sign-in that was
     /// never the issue.
     CheckFailed,
-    /// No password-hashing slot freed up in time: `503`, not a 401.
-    Busy,
+    /// Too many failed raw keys (`429`), or no hashing slot freed up
+    /// (`503`); never a 401.
+    Refused(LoginRefused),
 }
 
 /// A raw-key check that failed: busy is 503, anything else 500.
-impl From<crate::tenancy::AgentError> for BearerRejection {
-    fn from(e: crate::tenancy::AgentError) -> Self {
-        if matches!(
-            e,
-            crate::tenancy::AgentError::Tenancy(crate::tenancy::TenancyError::Busy)
-        ) {
-            return Self::Busy;
+impl From<AgentError> for BearerRejection {
+    fn from(e: AgentError) -> Self {
+        if matches!(e, AgentError::Tenancy(TenancyError::Busy)) {
+            return Self::Refused(LoginRefused::Busy);
         }
         tracing::warn!(error = %e, "mcp raw-key check failed");
         Self::CheckFailed
@@ -307,7 +337,7 @@ impl BearerRejection {
             Self::CheckFailed => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "auth check failed").into_response()
             }
-            Self::Busy => crate::login_throttle::LoginRefused::Busy.into_response(),
+            Self::Refused(r) => r.into_response(),
         }
     }
 }
@@ -335,8 +365,9 @@ pub(crate) async fn authenticate_bearer(
     pool: &crate::sql::Pool,
     slug: &str,
     token: &str,
+    ip: &ClientIp,
 ) -> Result<McpAgent, BearerRejection> {
-    authenticate_bearer_until(jwt, pool, slug, token)
+    authenticate_bearer_until(jwt, pool, slug, token, ip)
         .await
         .map(|(agent, _)| agent)
 }
@@ -347,6 +378,7 @@ pub(crate) async fn authenticate_bearer_until(
     pool: &crate::sql::Pool,
     slug: &str,
     token: &str,
+    ip: &ClientIp,
 ) -> Result<(McpAgent, Option<i64>), BearerRejection> {
     match verify_agent_claims(jwt, token, slug).await {
         Some((mut agent, exp)) => {
@@ -380,11 +412,23 @@ pub(crate) async fn authenticate_bearer_until(
             (agent.skills, agent.tools) = grants?;
             Ok((agent, Some(exp)))
         }
-        None => match verify_raw_agent_credential(pool, slug, token).await {
-            Ok(Some(agent)) => Ok((agent, None)),
-            Ok(None) => Err(BearerRejection::Unauthorized),
-            Err(e) => Err(e.into()),
-        },
+        None => {
+            let Some((prefix, secret)) = split_raw_credential(token) else {
+                return Err(BearerRejection::Unauthorized);
+            };
+            // Only a cache miss runs this, so only Argon2 checks count.
+            let hash_check = async {
+                let check = crate::tenancy::authenticate_agent_by_prefix_pool(pool, prefix, secret);
+                match gated(slug, ip, check).await {
+                    Ok(checked) => checked.map_err(BearerRejection::from),
+                    Err(refused) => Err(BearerRejection::Refused(refused)),
+                }
+            };
+            match verify_raw_with(pool, slug, token, prefix, hash_check).await? {
+                Some(agent) => Ok((agent, None)),
+                None => Err(BearerRejection::Unauthorized),
+            }
+        }
     }
 }
 
@@ -413,7 +457,8 @@ async fn post_authed_in(
     let Some(token) = bearer(&headers) else {
         return unauthorized(&headers, &extensions, &uri);
     };
-    let agent = match authenticate_bearer(&state.jwt, t.pool(), &t.org.slug, token).await {
+    let ip = ClientIp::from_parts(&extensions, &headers);
+    let agent = match authenticate_bearer(&state.jwt, t.pool(), &t.org.slug, token, &ip).await {
         Ok(agent) => agent,
         Err(e) => return e.into_response(&headers, &extensions, &uri),
     };
@@ -453,32 +498,46 @@ async fn post_authed_in(
 /// dummy verification for an unknown prefix, so the timing gives
 /// nothing away.
 ///
+/// It does not count failures: the MCP routes do, per client IP, through
+/// [`crate::login_throttle`].
+///
 /// # Errors
 /// [`crate::tenancy::AgentError`] when a lookup or the hash check fails.
 pub async fn verify_raw_agent_credential(
     pool: &crate::sql::Pool,
     slug: &str,
     token: &str,
-) -> Result<Option<McpAgent>, crate::tenancy::AgentError> {
-    // A credential is `<8-hex prefix>.<hex secret>`; see
-    // `tenancy::agents::generate_credential`. Anything else, a JWT
-    // or a random string, is refused before any database or Argon2
-    // work happens.
-    let Some((prefix, secret)) = token.split_once('.') else {
+) -> Result<Option<McpAgent>, AgentError> {
+    let Some((prefix, secret)) = split_raw_credential(token) else {
         return Ok(None);
     };
-    let is_hex = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit());
-    if prefix.len() != 8 || !is_hex(prefix) || !is_hex(secret) {
-        return Ok(None);
-    }
+    let hash_check = crate::tenancy::authenticate_agent_by_prefix_pool(pool, prefix, secret);
+    verify_raw_with(pool, slug, token, prefix, hash_check).await
+}
 
+/// Split a credential `<8-hex prefix>.<hex secret>`; see
+/// `tenancy::agents::generate_credential`. Anything else, a JWT or a
+/// random string, is refused before any database or Argon2 work.
+fn split_raw_credential(token: &str) -> Option<(&str, &str)> {
+    let (prefix, secret) = token.split_once('.')?;
+    let is_hex = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit());
+    (prefix.len() == 8 && is_hex(prefix) && is_hex(secret)).then_some((prefix, secret))
+}
+
+/// [`verify_raw_agent_credential`] with the Argon2 check passed in; it
+/// is awaited only on a cache miss.
+async fn verify_raw_with<E: From<AgentError>>(
+    pool: &crate::sql::Pool,
+    slug: &str,
+    token: &str,
+    prefix: &str,
+    hash_check: impl std::future::Future<Output = Result<Option<crate::tenancy::Agent>, E>>,
+) -> Result<Option<McpAgent>, E> {
     let cache_key = raw_key_cache_key(slug, token);
     let agent_id = match raw_key_cache_get(&cache_key) {
         Some(id) => id,
         None => {
-            let Some(agent) =
-                crate::tenancy::authenticate_agent_by_prefix_pool(pool, prefix, secret).await?
-            else {
+            let Some(agent) = hash_check.await? else {
                 return Ok(None);
             };
             let agent_id = agent.id.get().copied().unwrap_or_default();
@@ -724,21 +783,50 @@ pub(crate) fn default_jwt() -> Arc<JwtLifecycle> {
 /// so dev works but nothing survives a restart. `manage check
 /// --deploy` reports a missing or short secret.
 pub(crate) fn jwt_secret() -> Vec<u8> {
-    std::env::var("RUSTANGO_SESSION_SECRET")
-        .ok()
-        .map(String::into_bytes)
-        .filter(|s| s.len() >= 32)
-        .unwrap_or_else(|| {
+    match agent_key(std::env::var("RUSTANGO_SESSION_SECRET").ok().as_deref()) {
+        AgentKey::Valid(key) => key,
+        AgentKey::Unusable(key, e) => {
+            tracing::warn!(
+                reason = %e,
+                "RUSTANGO_SESSION_SECRET is not a valid base64 key; MCP agent tokens still \
+                 sign with its text so issued tokens keep working, but a later release will \
+                 refuse it. Generate one with: openssl rand -base64 32"
+            );
+            key
+        }
+        AgentKey::Missing => {
+            use rand::RngCore;
             tracing::warn!(
                 "RUSTANGO_SESSION_SECRET unset or <32 bytes; MCP agent tokens \
                  are signed with an ephemeral per-process key (tokens won't \
                  survive a restart and won't verify across instances)"
             );
-            use rand::RngCore;
             let mut key = vec![0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut key);
             key
-        })
+        }
+    }
+}
+
+/// What `RUSTANGO_SESSION_SECRET` gives the agent-token key.
+enum AgentKey {
+    /// A secret [`crate::session::SessionSecret::from_b64`] accepts. The
+    /// key stays its text, which issued tokens were signed with.
+    Valid(Vec<u8>),
+    /// 32 bytes or more, but not a valid secret: still used, with a warning.
+    Unusable(Vec<u8>, crate::session::SessionSecretError),
+    /// Unset, or shorter than 32 bytes.
+    Missing,
+}
+
+fn agent_key(raw: Option<&str>) -> AgentKey {
+    let Some(raw) = raw.filter(|r| r.len() >= 32) else {
+        return AgentKey::Missing;
+    };
+    match crate::session::SessionSecret::from_b64(raw) {
+        Ok(_) => AgentKey::Valid(raw.as_bytes().to_vec()),
+        Err(e) => AgentKey::Unusable(raw.as_bytes().to_vec(), e),
+    }
 }
 
 #[cfg(test)]
@@ -765,11 +853,13 @@ mod tests {
             .await
             .unwrap();
         let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
-        let Ok(minted) = mint_agent_jwt(&jwt, &pool, "acme", "bot", &bot.token).await else {
+        let Ok(minted) =
+            mint_agent_jwt(&jwt, &pool, "acme", "bot", &bot.token, &ClientIp::default()).await
+        else {
             panic!("mint");
         };
         let tools = || async {
-            authenticate_bearer(&jwt, &pool, "acme", &minted.token)
+            authenticate_bearer(&jwt, &pool, "acme", &minted.token, &ClientIp::default())
                 .await
                 .ok()
                 .map(|a| a.tools)
@@ -781,6 +871,88 @@ mod tests {
         assert_eq!(tools().await, Some(vec![]), "a revoked skill ends at once");
         rotate_agent_secret_pool(&pool, "bot").await.unwrap();
         assert_eq!(tools().await, None, "a rotation ends the JWT");
+    }
+
+    /// A secret `SessionSecret` refuses is flagged; a valid one keeps the
+    /// key existing agent tokens were signed with.
+    #[test]
+    fn the_agent_key_follows_the_session_secret_rules() {
+        use base64::Engine as _;
+        let b64 = |n: usize| base64::engine::general_purpose::STANDARD.encode(vec![7u8; n]);
+        let good = b64(32);
+        assert!(matches!(agent_key(Some(&good)), AgentKey::Valid(k) if k == good.as_bytes()));
+        let pass = "correct horse battery staple and two more";
+        assert!(matches!(agent_key(Some(pass)), AgentKey::Unusable(k, _) if k == pass.as_bytes()));
+        // 32 characters of base64, but only 24 bytes of key.
+        assert!(matches!(agent_key(Some(&b64(24))), AgentKey::Unusable(..)));
+        assert!(matches!(agent_key(Some("short")), AgentKey::Missing));
+        assert!(matches!(agent_key(None), AgentKey::Missing));
+    }
+
+    fn client(ip: [u8; 4]) -> ClientIp {
+        let mut ext = no_ext();
+        ext.insert(crate::real_ip::TrustedRealIp(ip.into()));
+        ClientIp::from_parts(&ext, &HeaderMap::new())
+    }
+
+    /// Wrong agent secrets are limited per IP, on the token endpoints and
+    /// as a raw bearer, so a flood cannot fill the hashing queue.
+    #[cfg(all(feature = "sqlite", feature = "testkit"))]
+    #[tokio::test]
+    async fn wrong_agent_secrets_are_limited_per_ip() {
+        let _g = super::raw_key_cache_test_lock().lock().await;
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        crate::testkit::migrate_framework(&pool).await.unwrap();
+        let bot = crate::tenancy::create_agent_pool(&pool, "bot")
+            .await
+            .unwrap();
+        let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
+        // The bucket refills while Argon2 runs, so allow a few extra tries.
+        let tries = crate::login_throttle::shared().limits().ip_limit + 5;
+        let throttled = |r: LoginRefused| matches!(r, LoginRefused::Throttled { .. });
+
+        let (slug, ip) = ("t-mint-limit", client([10, 78, 0, 1]));
+        let mut refused = false;
+        for _ in 0..tries {
+            match mint_agent_jwt(&jwt, &pool, slug, "bot", "wrong", &ip).await {
+                Err(MintError::Unauthorized) => {}
+                Err(MintError::Refused(r)) if throttled(r) => refused = true,
+                _ => panic!("unexpected mint outcome"),
+            }
+            if refused {
+                break;
+            }
+        }
+        assert!(refused, "wrong secrets were never limited");
+        let r = mint_agent_jwt(&jwt, &pool, slug, "bot", &bot.token, &ip).await;
+        assert!(matches!(
+            r,
+            Err(MintError::Refused(LoginRefused::Throttled { .. }))
+        ));
+        let other = client([10, 78, 0, 2]);
+        assert!(mint_agent_jwt(&jwt, &pool, slug, "bot", &bot.token, &other)
+            .await
+            .is_ok());
+
+        let (slug, ip) = ("t-raw-limit", client([10, 78, 1, 1]));
+        let junk = "abcdef12.0123456789abcdef";
+        let mut refused = false;
+        for _ in 0..tries {
+            match authenticate_bearer(&jwt, &pool, slug, junk, &ip).await {
+                Err(BearerRejection::Unauthorized) => {}
+                Err(BearerRejection::Refused(r)) if throttled(r) => refused = true,
+                _ => panic!("unexpected bearer outcome"),
+            }
+            if refused {
+                break;
+            }
+        }
+        assert!(refused, "wrong raw keys were never limited");
+        let r = authenticate_bearer(&jwt, &pool, slug, &bot.token, &ip).await;
+        assert!(matches!(
+            r,
+            Err(BearerRejection::Refused(LoginRefused::Throttled { .. }))
+        ));
     }
 
     #[tokio::test]
@@ -875,7 +1047,14 @@ mod tests {
         let pool = crate::sql::Pool::connect("sqlite::memory:")
             .await
             .expect("sqlite");
-        let Err(e) = authenticate_bearer(&jwt, &pool, "acme", "abcdef12.0123456789abcdef").await
+        let Err(e) = authenticate_bearer(
+            &jwt,
+            &pool,
+            "acme",
+            "abcdef12.0123456789abcdef",
+            &ClientIp::default(),
+        )
+        .await
         else {
             panic!("a failed check must not authenticate");
         };

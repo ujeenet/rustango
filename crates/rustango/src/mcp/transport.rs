@@ -134,11 +134,12 @@ async fn sse_in(
     // Accept both bearer shapes the JSON-RPC POST accepts. See
     // `auth::authenticate_bearer` for why this stream must not be
     // stricter than the endpoint next to it.
-    let (agent, exp) =
-        match super::auth::authenticate_bearer_until(&jwt, t.pool(), &t.org.slug, token).await {
-            Ok(v) => v,
-            Err(e) => return e.into_response(&headers, &extensions, &uri),
-        };
+    let ip = crate::login_throttle::ClientIp::from_parts(&extensions, &headers);
+    let authed = super::auth::authenticate_bearer_until(&jwt, t.pool(), &t.org.slug, token, &ip);
+    let (agent, exp) = match authed.await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(&headers, &extensions, &uri),
+    };
     agent_sse(
         t.pool().clone(),
         agent,
@@ -259,18 +260,20 @@ mod tests {
         let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
         crate::testkit::migrate_framework(&pool).await.unwrap();
         let bot = create_agent_pool(&pool, "bot").await.unwrap();
+        let ip = crate::login_throttle::ClientIp::default();
         let bearer = if raw_key {
             bot.token
         } else {
             let Ok(minted) =
-                super::super::auth::mint_agent_jwt(&jwt, &pool, "acme", "bot", &bot.token).await
+                super::super::auth::mint_agent_jwt(&jwt, &pool, "acme", "bot", &bot.token, &ip)
+                    .await
             else {
                 panic!("mint");
             };
             minted.token
         };
         let Ok((agent, exp)) =
-            super::super::auth::authenticate_bearer_until(&jwt, &pool, "acme", &bearer).await
+            super::super::auth::authenticate_bearer_until(&jwt, &pool, "acme", &bearer, &ip).await
         else {
             panic!("authenticate");
         };

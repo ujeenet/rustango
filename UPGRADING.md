@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### MCP agent secrets are rate limited
+
+After `[auth] login_ip_limit` failed agent secrets from one IP, the MCP token endpoints and raw-key bearer answer `429` with `Retry-After`. A passphrase (non-base64) `RUSTANGO_SESSION_SECRET` still signs agent tokens but warns; 0.62.0 will refuse it, so set `openssl rand -base64 32`.
+
+### `Cookie::build` encodes `;`
+
+A `;` in a cookie's name, value or attributes is written as `%3B`; read it back with a percent-decode if you stored one.
+
 ## 0.61.5
 
 ### `reverse_has` follows `self_pk_column`
