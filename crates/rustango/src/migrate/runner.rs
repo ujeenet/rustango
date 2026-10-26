@@ -291,23 +291,37 @@ fn bootstrap_models() -> Vec<&'static ModelSchema> {
 }
 
 /// `CREATE INDEX` for the declared indexes of `models`, `unique_together`
-/// included, as the migration writer renders them.
-fn bootstrap_index_sql(
-    dialect: &dyn crate::sql::Dialect,
-    models: &[&'static ModelSchema],
-) -> Result<Vec<String>, MigrateError> {
+/// included, as the migration writer renders them. One that fails only
+/// warns: 0.61.4 created none, so bootstrap must not newly fail on one.
+async fn create_bootstrap_indexes(pool: &crate::sql::Pool, models: &[&'static ModelSchema]) {
+    let dialect = pool.dialect();
     let snapshot = SchemaSnapshot::from_models(models);
-    let changes: Vec<_> = snapshot
-        .indexes
-        .iter()
-        .map(super::diff::create_index)
-        .collect();
-    let batch = super::diff::render_changes_split_with_dialect(&changes, &snapshot, dialect)
-        .map_err(MigrateError::Validation)?;
-    for w in &batch.warnings {
-        tracing::warn!(target: "rustango::migrate", "{w}");
+    for idx in &snapshot.indexes {
+        let change = [super::diff::create_index(idx)];
+        let ran = match super::diff::render_changes_split_with_dialect(&change, &snapshot, dialect)
+        {
+            Ok(batch) => {
+                for w in &batch.warnings {
+                    tracing::warn!(target: "rustango::migrate", "{w}");
+                }
+                super::ensure::run_statements(pool, &batch.immediate)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            Err(e) => Err(e),
+        };
+        if let Err(error) = ran {
+            let model = snapshot.table(&idx.table).map_or("?", |t| t.model.as_str());
+            tracing::warn!(
+                target: "rustango::migrate",
+                model,
+                index = %idx.name,
+                %error,
+                "apply_all skipped index `{}` of `{model}`: {error}; a later release refuses it",
+                idx.name,
+            );
+        }
     }
-    Ok(batch.immediate)
 }
 
 /// Run `CREATE TABLE` for every registered model, then its declared
@@ -343,9 +357,7 @@ pub async fn apply_all(pool: &PgPool) -> Result<(), MigrateError> {
         let sql = ddl::create_table_sql(model);
         sqlx::query(&sql).execute(pool).await?;
     }
-    for sql in bootstrap_index_sql(&crate::sql::Postgres, &models)? {
-        sqlx::query(&sql).execute(pool).await?;
-    }
+    create_bootstrap_indexes(&crate::sql::Pool::Postgres(pool.clone()), &models).await;
     for model in &models {
         for sql in ddl::create_constraints_sql(model) {
             sqlx::query(&sql).execute(pool).await?;
@@ -420,9 +432,7 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
         let sql = ddl::create_table_sql_with_dialect(dialect, model);
         crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
     }
-    for sql in bootstrap_index_sql(dialect, &models)? {
-        crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
-    }
+    create_bootstrap_indexes(pool, &models).await;
     for model in &models {
         for sql in ddl::create_constraints_sql_with_dialect(dialect, model) {
             crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;

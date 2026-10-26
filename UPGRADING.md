@@ -152,7 +152,7 @@ untouched.
 
 ### The bootstrap walk creates declared indexes
 
-`apply_all` / `apply_all_pool` now also create `#[rustango(index)]` and `unique_together` indexes. A model whose index MySQL cannot build (a TEXT column) now fails there, as it does in `migrate`.
+`apply_all` / `apply_all_pool` now also create `#[rustango(index)]` and `unique_together` indexes. One that cannot be built (a MySQL TEXT column) warns now and is skipped; a later release refuses it, as `migrate` does.
 
 ### MySQL and SQLite tenant runs send migrate signals
 
