@@ -150,6 +150,64 @@ untouched.
 
 ## Unreleased
 
+## 0.61.5
+
+### ViewSet OpenAPI: Binary is hex
+
+ViewSet specs now give Binary fields `format: hex` instead of `byte`; the wire format was always hex. A client generated from an older spec that base64-encodes these fields was wrong before; regenerate it.
+
+### MCP agent secrets are rate limited
+
+After `[auth] login_ip_limit` failed agent secrets from one IP, the MCP token endpoints and raw-key bearer answer `429` with `Retry-After`. They count per IP in their own bucket, apart from human logins; behind a proxy mount `RealIpLayer::trust_proxies(...)`, or every client shares the proxy's bucket. A passphrase (non-base64) `RUSTANGO_SESSION_SECRET` still signs agent tokens but warns; 0.62.0 will refuse it, so set `openssl rand -base64 32`.
+
+### `Cookie::build` encodes `;`
+
+A `;` in a cookie's name, value or attributes is written as `%3B`; read it back with a percent-decode if you stored one.
+
+### The bootstrap walk creates declared indexes
+
+`apply_all` / `apply_all_pool` now also create `#[rustango(index)]` and `unique_together` indexes. One that cannot be built (a MySQL TEXT column) warns now and is skipped; a later release refuses it, as `migrate` does.
+
+### MySQL and SQLite tenant runs send migrate signals
+
+`migrate_tenants_db` / `migrate_one_tenant` now send `pre_migrate` / `post_migrate` once per tenant on every backend, so those receivers run for MySQL and SQLite tenants too.
+
+### `reverse_has` follows `self_pk_column`
+
+Instance helpers now filter on `self_pk_column`, and an omitted one means the model's primary-key column rather than `id`. Only a relation whose FK targets a non-PK column, or a model whose PK column is not `id`, sees a change.
+
+### A tenant URL that reaches the registry by another name warns
+
+Provisioning still accepts it but logs and shows a warning. Give such a tenant its own database: a later release refuses it.
+
+### `org_edit::Applied` has a `warning` field
+
+A struct literal of `Applied` needs `warning: None`; matching code is unaffected.
+
+### Postgres database-mode tenants open a second pool
+
+`TenantPools::acquire`, which the `Tenant` extractor uses, takes from a held-connection pool of its own, with no idle connections. Budget up to twice `database_pool_max_connections` per busy tenant on its server.
+
+### Schema tenants missing tables warn
+
+A tenant schema without a tenant table that `public` has logs a warning when its pool is built. Run `migrate-tenants` for it: a later release stops falling through to `public`.
+
+### Purge clears tenant cache keys you register
+
+Call `rustango::tenancy::decommission::clear_on_purge(cache)` at boot for each cache with `ScopedCache::for_tenant` entries; a purge then deletes them.
+
+### Storage: `save_stream` and `load_stream`
+
+New trait methods with defaults, so existing backends compile. A wrapper around another `Storage` must forward both, or it buffers whole objects and refuses `create_only`.
+
+### Admin and serializer links encode string keys
+
+Admin links and `serializer::hyperlink_url` / `hyperlinked_to_value` write the key percent-encoded (`a/b` becomes `a%2Fb`); integer and UUID keys are unchanged. A GET on the edit form without change permission now redirects to the detail page instead of rendering the form.
+
+### Custom admin views that shadow a built-in route warn
+
+A suffix such as `{id}` or `{id}/edit` still mounts but logs a warning; rename it, as a later release skips it like `{pk}`.
+
 ## 0.61.4
 
 ### Schema names equal to a database role are refused

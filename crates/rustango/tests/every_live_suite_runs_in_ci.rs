@@ -423,6 +423,30 @@ fn the_live_jobs_set_the_url_their_suites_read() {
     }
 }
 
+/// `postgres_test` may skip PostGIS only: its suites run in `postgis_live`,
+/// and every other extension suite must run on the pgvector image.
+#[test]
+fn postgres_test_declares_only_postgis_missing() {
+    let path = repo_root().join(".github/workflows/ci.yml");
+    let yaml = std::fs::read_to_string(&path).expect("read ci.yml");
+    let declared: Vec<String> = yaml
+        .lines()
+        .filter_map(|l| {
+            l.trim()
+                .strip_prefix("RUSTANGO_TEST_MISSING_PG_EXTENSIONS:")
+        })
+        .map(|v| v.trim().to_owned())
+        .collect();
+    assert_eq!(
+        declared,
+        ["postgis"],
+        "only `postgres_test` may declare one"
+    );
+    assert!(
+        job_block(&yaml, "postgres_test").contains("RUSTANGO_TEST_MISSING_PG_EXTENSIONS: postgis")
+    );
+}
+
 /// `postgres_test` and `mysql_live` run the `tests_compile` archive in N
 /// partitions. A matrix that skips a number, a filter on the PostgreSQL
 /// run, a parallel profile or another archive would leave suites unrun or
@@ -1167,4 +1191,62 @@ fn feature_combos_covers_the_media_axis() {
          feature graph is compiled only by `--all-features`, where every optional \
          feature is on and nothing can be observed to be missing.\n\n{block}"
     );
+}
+
+/// No workflow runs a script straight from the network: a moved tag or a
+/// compromised `main` would execute in CI unseen.
+#[test]
+fn no_workflow_pipes_a_download_into_a_shell() {
+    let dir = repo_root().join(".github/workflows");
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("read workflows") {
+        let path = entry.expect("entry").path();
+        let text = std::fs::read_to_string(&path).expect("read workflow");
+        // Join `\`-continued lines so a wrapped pipe is still one command.
+        let flat = text.replace("\\\n", " ");
+        for line in flat.lines().filter(|l| !l.trim_start().starts_with('#')) {
+            let squeezed: String = line.split_whitespace().collect::<Vec<_>>().join(" ");
+            let fetches = squeezed.contains("curl ") || squeezed.contains("wget ");
+            let piped = ["| sh", "| bash", "| sudo sh", "| sudo bash"]
+                .iter()
+                .any(|p| squeezed.contains(p));
+            if fetches && piped {
+                found.push(format!("{}: {}", path.display(), line.trim()));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "download piped into a shell:\n  {}",
+        found.join("\n  ")
+    );
+}
+
+/// Trivy is a pinned release whose checksum is verified before it runs.
+#[test]
+fn trivy_is_pinned_and_verified() {
+    let yaml =
+        std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let block = job_block(&yaml, "trivy");
+    assert!(
+        block.contains("TRIVY_VERSION:"),
+        "no pinned version:\n{block}"
+    );
+    assert!(
+        block.contains("sha256sum -c"),
+        "no checksum check:\n{block}"
+    );
+}
+
+/// Advisories land without a push, so `deny` also runs on a schedule.
+#[test]
+fn advisories_are_scanned_weekly() {
+    let text = std::fs::read_to_string(repo_root().join(".github/workflows/advisories.yml"))
+        .unwrap_or_default();
+    assert!(
+        text.contains("schedule:") && text.contains("cron:"),
+        "no schedule"
+    );
+    assert!(text.contains("check advisories"), "no advisory check");
+    assert!(text.contains("examples"), "examples not scanned");
 }

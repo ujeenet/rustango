@@ -54,7 +54,12 @@ pub use registry::StorageRegistry;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt as _};
 
 /// Re-exported so implementing [`Storage`] needs no `async-trait`
 /// entry in your own `Cargo.toml`, and cannot end up on a different
@@ -71,6 +76,162 @@ pub enum StorageError {
     InvalidPath(String),
     #[error("io error: {0}")]
     Io(String),
+}
+
+/// The error a create-only write gives when `key` is already there.
+fn already_exists(key: &str) -> StorageError {
+    StorageError::Io(format!("`{key}` already exists"))
+}
+
+/// Refuse a `put.content_length` that disagrees with the length passed.
+fn check_declared_len(key: &str, len: u64, put: &PutConditions) -> Result<(), StorageError> {
+    match put.content_length {
+        Some(declared) if declared != len => Err(StorageError::Io(format!(
+            "`{key}`: content length {declared} does not match the {len} bytes to write"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+// ------------------------------------------------------------------ ByteStream
+
+/// An object's bytes as a stream of chunks, for [`Storage::save_stream`]
+/// and [`Storage::load_stream`].
+///
+/// Build one from an `axum::body::Body`, a `reqwest::Response`, `Bytes`
+/// or a `Vec<u8>` with `ByteStream::from`, or from any stream with
+/// [`ByteStream::new`]. It is a `Stream`, so `axum::body::Body::from_stream`
+/// takes it as a response body.
+pub struct ByteStream(Pin<Box<dyn Stream<Item = Result<Bytes, StorageError>> + Send>>);
+
+impl ByteStream {
+    pub fn new<S>(stream: S) -> Self
+    where
+        S: Stream<Item = Result<Bytes, StorageError>> + Send + 'static,
+    {
+        Self(Box::pin(stream))
+    }
+
+    /// Yields exactly `len` bytes, or ends with an error, so a body of
+    /// another size never reaches the backend whole.
+    fn exact(self, len: u64) -> Self {
+        Self::new(Exact {
+            inner: self,
+            len,
+            seen: 0,
+            done: false,
+        })
+    }
+
+    /// The whole body, exactly `len` bytes.
+    async fn read_all(self, len: u64) -> Result<Vec<u8>, StorageError> {
+        // `len` comes from the caller; do not trust it for a huge allocation.
+        let cap = usize::try_from(len).unwrap_or(usize::MAX).min(8 << 20);
+        let mut out = Vec::with_capacity(cap);
+        let mut body = self.exact(len);
+        while let Some(chunk) = body.next().await {
+            out.extend_from_slice(&chunk?);
+        }
+        Ok(out)
+    }
+}
+
+impl Stream for ByteStream {
+    type Item = Result<Bytes, StorageError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.0.as_mut().poll_next(cx)
+    }
+}
+
+impl std::fmt::Debug for ByteStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ByteStream { .. }")
+    }
+}
+
+impl From<Bytes> for ByteStream {
+    fn from(b: Bytes) -> Self {
+        Self::new(futures_util::stream::iter([Ok(b)]))
+    }
+}
+
+impl From<Vec<u8>> for ByteStream {
+    fn from(v: Vec<u8>) -> Self {
+        Self::from(Bytes::from(v))
+    }
+}
+
+/// A request body, such as an upload an axum handler proxies on.
+#[cfg(feature = "_axum")]
+impl From<axum::body::Body> for ByteStream {
+    fn from(body: axum::body::Body) -> Self {
+        Self::new(
+            body.into_data_stream()
+                .map(|r| r.map_err(|e| StorageError::Io(format!("request body: {e}")))),
+        )
+    }
+}
+
+/// The response body. Check the status first: this streams any body.
+#[cfg(any(
+    feature = "storage-s3",
+    feature = "storage-azure",
+    feature = "http-client"
+))]
+impl From<reqwest::Response> for ByteStream {
+    fn from(resp: reqwest::Response) -> Self {
+        Self::new(futures_util::stream::try_unfold(resp, |mut r| async move {
+            match r.chunk().await {
+                Ok(Some(b)) => Ok(Some((b, r))),
+                Ok(None) => Ok(None),
+                Err(e) => Err(StorageError::Io(format!("read body: {e}"))),
+            }
+        }))
+    }
+}
+
+/// [`ByteStream::exact`].
+struct Exact {
+    inner: ByteStream,
+    len: u64,
+    seen: u64,
+    done: bool,
+}
+
+impl Stream for Exact {
+    type Item = Result<Bytes, StorageError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.done {
+            return Poll::Ready(None);
+        }
+        let next = std::task::ready!(self.inner.poll_next_unpin(cx));
+        let (len, seen) = (self.len, self.seen);
+        let out = match next {
+            Some(Ok(b)) => {
+                let seen = seen.saturating_add(b.len() as u64);
+                if seen > len {
+                    Err(StorageError::Io(format!(
+                        "body is longer than the {len} bytes declared"
+                    )))
+                } else {
+                    self.seen = seen;
+                    return Poll::Ready(Some(Ok(b)));
+                }
+            }
+            Some(Err(e)) => Err(e),
+            None if seen < len => Err(StorageError::Io(format!(
+                "body ended after {seen} of the {len} bytes declared"
+            ))),
+            None => {
+                self.done = true;
+                return Poll::Ready(None);
+            }
+        };
+        self.done = true;
+        Poll::Ready(Some(out))
+    }
 }
 
 // ------------------------------------------------------------------ Storage trait
@@ -159,6 +320,40 @@ pub trait Storage: Send + Sync + 'static {
         Err(StorageError::Io(format!(
             "this backend cannot report object metadata (key `{key}`)"
         )))
+    }
+
+    /// Write exactly `len` bytes from `body` to `key` as they arrive.
+    /// A body of another size, or a `put.content_length` other than
+    /// `len`, is refused; `put.create_only` refuses an existing key.
+    /// A failed or dropped body leaves no object.
+    ///
+    /// The default collects the body, then calls
+    /// [`Self::save_with_content_type`], so it holds the whole object in
+    /// memory. It refuses `create_only`, which it cannot make atomic.
+    /// A wrapper must forward this and [`Self::load_stream`].
+    async fn save_stream(
+        &self,
+        key: &str,
+        len: u64,
+        body: ByteStream,
+        put: &PutConditions,
+    ) -> Result<(), StorageError> {
+        validate_key(key)?;
+        check_declared_len(key, len, put)?;
+        if put.create_only {
+            return Err(StorageError::Io(format!(
+                "this backend cannot write create-only (key `{key}`)"
+            )));
+        }
+        let data = body.read_all(len).await?;
+        self.save_with_content_type(key, &data, put.content_type.as_deref())
+            .await
+    }
+
+    /// Read `key` as a stream of chunks, or [`StorageError::NotFound`].
+    /// The default is [`Self::load`] as one chunk.
+    async fn load_stream(&self, key: &str) -> Result<ByteStream, StorageError> {
+        Ok(ByteStream::from(self.load(key).await?))
     }
 }
 
@@ -324,11 +519,14 @@ impl LocalStorage {
     fn full_path(&self, key: &str) -> PathBuf {
         self.root.join(key)
     }
-}
 
-#[async_trait]
-impl Storage for LocalStorage {
-    async fn save(&self, key: &str, data: &[u8]) -> Result<(), StorageError> {
+    /// Write `body` to a temp file beside `key`, then move it into place.
+    async fn write_file(
+        &self,
+        key: &str,
+        body: LocalBody<'_>,
+        create_only: bool,
+    ) -> Result<(), StorageError> {
         validate_key(key)?;
         let path = self.full_path(key);
         if let Some(parent) = path.parent() {
@@ -355,16 +553,102 @@ impl Storage for LocalStorage {
             }
             Err(e) => return Err(io(e)),
         };
-        tokio::io::AsyncWriteExt::write_all(&mut file, data)
-            .await
-            .map_err(io)?;
+        let streamed = matches!(body, LocalBody::Stream(..));
+        match body {
+            LocalBody::Slice(data) => tokio::io::AsyncWriteExt::write_all(&mut file, data)
+                .await
+                .map_err(io)?,
+            LocalBody::Stream(body, len) => {
+                let mut body = body.exact(len);
+                while let Some(chunk) = body.next().await {
+                    tokio::io::AsyncWriteExt::write_all(&mut file, &chunk?)
+                        .await
+                        .map_err(io)?;
+                }
+            }
+        }
         tokio::io::AsyncWriteExt::flush(&mut file)
             .await
             .map_err(io)?;
+        if streamed {
+            file.sync_all().await.map_err(io)?;
+        }
         drop(file);
+        if create_only {
+            // A link, unlike a rename, refuses an existing name; the guard
+            // then drops the temp name.
+            return match tokio::fs::hard_link(&tmp, &path).await {
+                Ok(()) => Ok(()),
+                Err(e) => Err(link_error(key, &e)),
+            };
+        }
         tokio::fs::rename(&tmp, &path).await.map_err(io)?;
         guard.keep();
         Ok(())
+    }
+}
+
+/// A failed create-only link. FAT, SMB and some FUSE mounts have no
+/// hard links; say so rather than give a bare I/O error.
+fn link_error(key: &str, e: &std::io::Error) -> StorageError {
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::AlreadyExists => already_exists(key),
+        ErrorKind::Unsupported | ErrorKind::PermissionDenied => StorageError::Io(format!(
+            "`{key}`: create-only writes need hard links, which this filesystem may not support: {e}"
+        )),
+        _ => StorageError::Io(e.to_string()),
+    }
+}
+
+/// What [`LocalStorage::write_file`] writes.
+enum LocalBody<'a> {
+    Slice(&'a [u8]),
+    /// Exactly this many bytes, fsynced before they are published.
+    Stream(ByteStream, u64),
+}
+
+#[async_trait]
+impl Storage for LocalStorage {
+    async fn save(&self, key: &str, data: &[u8]) -> Result<(), StorageError> {
+        self.write_file(key, LocalBody::Slice(data), false).await
+    }
+
+    async fn save_stream(
+        &self,
+        key: &str,
+        len: u64,
+        body: ByteStream,
+        put: &PutConditions,
+    ) -> Result<(), StorageError> {
+        check_declared_len(key, len, put)?;
+        // Fail before reading the body; the link below is what holds.
+        if put.create_only && self.exists(key).await? {
+            return Err(already_exists(key));
+        }
+        self.write_file(key, LocalBody::Stream(body, len), put.create_only)
+            .await
+    }
+
+    async fn load_stream(&self, key: &str) -> Result<ByteStream, StorageError> {
+        validate_key(key)?;
+        let file = match tokio::fs::File::open(self.full_path(key)).await {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StorageError::NotFound(key.to_owned()))
+            }
+            Err(e) => return Err(StorageError::Io(e.to_string())),
+        };
+        Ok(ByteStream::new(futures_util::stream::try_unfold(
+            file,
+            |mut file| async move {
+                let mut buf = bytes::BytesMut::with_capacity(64 * 1024);
+                let n = tokio::io::AsyncReadExt::read_buf(&mut file, &mut buf)
+                    .await
+                    .map_err(|e| StorageError::Io(e.to_string()))?;
+                Ok((n > 0).then(|| (buf.freeze(), file)))
+            },
+        )))
     }
 
     async fn load(&self, key: &str) -> Result<Vec<u8>, StorageError> {
@@ -455,6 +739,25 @@ impl Storage for InMemoryStorage {
             .lock()
             .expect("storage mutex poisoned")
             .insert(key.to_owned(), data.to_vec());
+        Ok(())
+    }
+
+    /// Buffers like the default, but checks `create_only` under the lock.
+    async fn save_stream(
+        &self,
+        key: &str,
+        len: u64,
+        body: ByteStream,
+        put: &PutConditions,
+    ) -> Result<(), StorageError> {
+        validate_key(key)?;
+        check_declared_len(key, len, put)?;
+        let data = body.read_all(len).await?;
+        let mut files = self.files.lock().expect("storage mutex poisoned");
+        if put.create_only && files.contains_key(key) {
+            return Err(already_exists(key));
+        }
+        files.insert(key.to_owned(), data);
         Ok(())
     }
 
@@ -731,6 +1034,301 @@ mod tests {
         let meta = s.metadata("f.bin").await.unwrap().unwrap();
         assert_eq!((meta.size, meta.content_type), (N as u64, None));
         assert_eq!(s.metadata("nope").await.unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -------- streaming --------
+
+    fn parts(parts: &[&'static [u8]]) -> ByteStream {
+        let parts: Vec<_> = parts.iter().map(|p| Ok(Bytes::from_static(p))).collect();
+        ByteStream::new(futures_util::stream::iter(parts))
+    }
+
+    /// `first`, then an error.
+    fn failing(first: &'static [u8]) -> ByteStream {
+        ByteStream::new(futures_util::stream::iter([
+            Ok(Bytes::from_static(first)),
+            Err(StorageError::Io("client went away".into())),
+        ]))
+    }
+
+    async fn collect(s: ByteStream) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut s = s;
+        while let Some(c) = s.next().await {
+            out.extend_from_slice(&c.unwrap());
+        }
+        out
+    }
+
+    fn tmp_files(dir: &std::path::Path) -> Vec<String> {
+        walk(dir)
+            .into_iter()
+            .filter(|n| n.ends_with(".tmp"))
+            .collect()
+    }
+
+    fn walk(dir: &std::path::Path) -> Vec<String> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            if e.path().is_dir() {
+                out.extend(walk(&e.path()));
+            } else {
+                out.push(e.file_name().to_string_lossy().into_owned());
+            }
+        }
+        out
+    }
+
+    /// A backend with only the required methods, so the defaults run.
+    struct Plain(InMemoryStorage);
+
+    #[async_trait]
+    impl Storage for Plain {
+        async fn save(&self, key: &str, data: &[u8]) -> Result<(), StorageError> {
+            self.0.save(key, data).await
+        }
+        async fn load(&self, key: &str) -> Result<Vec<u8>, StorageError> {
+            self.0.load(key).await
+        }
+        async fn delete(&self, key: &str) -> Result<(), StorageError> {
+            self.0.delete(key).await
+        }
+        async fn exists(&self, key: &str) -> Result<bool, StorageError> {
+            self.0.exists(key).await
+        }
+        fn url(&self, _key: &str) -> Option<String> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn default_save_stream_checks_the_length() {
+        let s = Plain(InMemoryStorage::new());
+        let none = PutConditions::new();
+        s.save_stream("k", 6, parts(&[b"abc", b"def"]), &none)
+            .await
+            .unwrap();
+        assert_eq!(s.load("k").await.unwrap(), b"abcdef");
+        assert_eq!(collect(s.load_stream("k").await.unwrap()).await, b"abcdef");
+        for (len, body) in [(7, parts(&[b"abc", b"def"])), (5, parts(&[b"abc", b"def"]))] {
+            let err = s.save_stream("short", len, body, &none).await.unwrap_err();
+            assert!(err.to_string().contains("bytes declared"), "{err}");
+        }
+        let err = s
+            .save_stream("k2", 3, parts(&[b"abc"]), &none.clone().content_length(4))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+        assert!(s.save_stream("f", 9, failing(b"abc"), &none).await.is_err());
+        for k in ["short", "k2", "f"] {
+            assert!(!s.exists(k).await.unwrap(), "{k} was written");
+        }
+        assert!(matches!(
+            s.load_stream("nope").await.unwrap_err(),
+            StorageError::NotFound(_)
+        ));
+    }
+
+    /// The default cannot make create-only atomic, so it refuses it.
+    #[tokio::test]
+    async fn default_save_stream_refuses_create_only() {
+        let s = Plain(InMemoryStorage::new());
+        let err = s
+            .save_stream("k", 1, parts(&[b"x"]), &PutConditions::new().create_only())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("create-only"), "{err}");
+        assert!(!s.exists("k").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn in_memory_save_stream_create_only_refuses_an_existing_key() {
+        let s = InMemoryStorage::new();
+        let once = PutConditions::new().create_only();
+        s.save_stream("k", 3, parts(&[b"old"]), &once)
+            .await
+            .unwrap();
+        let err = s
+            .save_stream("k", 3, parts(&[b"new"]), &once)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert_eq!(s.load("k").await.unwrap(), b"old");
+        s.save_stream("k", 3, parts(&[b"new"]), &PutConditions::new())
+            .await
+            .unwrap();
+        assert_eq!(s.load("k").await.unwrap(), b"new");
+    }
+
+    #[tokio::test]
+    async fn local_save_stream_and_load_stream_round_trip() {
+        let dir = tempdir();
+        let s = LocalStorage::new(dir.clone());
+        let data: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let body = ByteStream::new(futures_util::stream::iter(
+            data.chunks(7_000)
+                .map(|c| Ok(Bytes::copy_from_slice(c)))
+                .collect::<Vec<_>>(),
+        ));
+        s.save_stream("a/b.bin", data.len() as u64, body, &PutConditions::new())
+            .await
+            .unwrap();
+        assert_eq!(s.load("a/b.bin").await.unwrap(), data);
+        let mut stream = s.load_stream("a/b.bin").await.unwrap();
+        let (mut got, mut pieces) = (Vec::new(), 0);
+        while let Some(c) = stream.next().await {
+            got.extend_from_slice(&c.unwrap());
+            pieces += 1;
+        }
+        assert_eq!(got, data);
+        assert!(pieces > 1, "load_stream read the file in one piece");
+        assert!(tmp_files(&dir).is_empty());
+        assert!(matches!(
+            s.load_stream("nope").await.unwrap_err(),
+            StorageError::NotFound(_)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A body of another size, or one that fails, writes nothing.
+    #[tokio::test]
+    async fn local_save_stream_refuses_a_wrong_length_and_leaves_nothing() {
+        let dir = tempdir();
+        let s = LocalStorage::new(dir.clone());
+        let none = PutConditions::new();
+        s.save("k", b"old").await.unwrap();
+        for (len, body) in [
+            (7, parts(&[b"abc", b"def"])),
+            (5, parts(&[b"abc", b"def"])),
+            (9, failing(b"abc")),
+        ] {
+            assert!(s.save_stream("k", len, body, &none).await.is_err());
+            assert_eq!(s.load("k").await.unwrap(), b"old", "len {len}");
+        }
+        let err = s
+            .save_stream("k", 6, parts(&[b"abcdef"]), &none.clone().content_length(5))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+        assert_eq!(walk(&dir), vec!["k".to_owned()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A save whose body stalls, then is dropped, leaves no temp file.
+    #[tokio::test]
+    async fn a_dropped_local_save_stream_leaves_no_temp_file() {
+        let dir = tempdir();
+        let s = LocalStorage::new(dir.clone());
+        let body = ByteStream::new(
+            futures_util::stream::iter([Ok(Bytes::from_static(b"abc"))])
+                .chain(futures_util::stream::pending()),
+        );
+        let put = PutConditions::new();
+        let save = s.save_stream("k", 10, body, &put);
+        let r = tokio::time::timeout(std::time::Duration::from_millis(300), save).await;
+        assert!(r.is_err(), "the save finished on a stalled body");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(walk(&dir).is_empty(), "{:?}", walk(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn local_save_stream_create_only_refuses_an_existing_key() {
+        let dir = tempdir();
+        let s = LocalStorage::new(dir.clone());
+        let once = PutConditions::new().create_only();
+        s.save_stream("k", 3, parts(&[b"old"]), &once)
+            .await
+            .unwrap();
+        let err = s
+            .save_stream("k", 3, parts(&[b"new"]), &once)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert_eq!(s.load("k").await.unwrap(), b"old");
+        assert_eq!(walk(&dir), vec!["k".to_owned()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No hard links (FAT, SMB, some FUSE) gives an error that says so.
+    #[test]
+    fn a_failed_create_only_link_names_the_cause() {
+        use std::io::{Error, ErrorKind};
+        for kind in [ErrorKind::Unsupported, ErrorKind::PermissionDenied] {
+            let err = link_error("k", &Error::from(kind)).to_string();
+            assert!(err.contains("need hard links"), "{kind:?}: {err}");
+        }
+        let err = link_error("k", &Error::from(ErrorKind::AlreadyExists)).to_string();
+        assert!(err.contains("already exists"), "{err}");
+    }
+
+    /// Racing create-only writers past the early check: one wins, the
+    /// rest are refused, and the winner's bytes stay whole.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn local_create_only_writes_race_to_one_winner() {
+        let dir = tempdir();
+        let s = Arc::new(LocalStorage::new(dir.clone()));
+        let tasks: Vec<_> = (0..8u8)
+            .map(|i| {
+                let s = s.clone();
+                tokio::spawn(async move {
+                    let body = ByteStream::from(vec![i; 1 << 16]);
+                    s.write_file("k", LocalBody::Stream(body, 1 << 16), true)
+                        .await
+                })
+            })
+            .collect();
+        let mut won = 0;
+        for t in tasks {
+            match t.await.unwrap() {
+                Ok(()) => won += 1,
+                Err(e) => assert!(e.to_string().contains("already exists"), "{e}"),
+            }
+        }
+        assert_eq!(won, 1);
+        let got = s.load("k").await.unwrap();
+        assert!(got.iter().all(|b| *b == got[0]), "a torn create-only write");
+        assert_eq!(walk(&dir), vec!["k".to_owned()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 512 MiB streams through while the writer never runs more than a
+    /// few chunks ahead of what is on disk: memory stays flat.
+    #[tokio::test]
+    async fn local_save_stream_never_buffers_the_object() {
+        const CHUNK: usize = 1 << 20;
+        const CHUNKS: usize = 512;
+        let dir = tempdir();
+        let s = LocalStorage::new(dir.clone());
+        let on_disk = {
+            let dir = dir.clone();
+            move || -> u64 {
+                std::fs::read_dir(&dir)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    // Not `DirEntry::metadata`: on Windows that is the
+                    // directory's copy, stale while the file is open.
+                    .filter_map(|e| std::fs::metadata(e.path()).ok())
+                    .map(|m| m.len())
+                    .sum()
+            }
+        };
+        let chunk = Bytes::from(vec![7u8; CHUNK]);
+        let body = ByteStream::new(futures_util::stream::iter(0..CHUNKS).map(move |i| {
+            let ahead = (i * CHUNK) as u64 - on_disk();
+            assert!(
+                ahead <= 4 * CHUNK as u64,
+                "chunk {i}: {ahead} bytes not yet written"
+            );
+            Ok(chunk.clone())
+        }));
+        let len = (CHUNK * CHUNKS) as u64;
+        s.save_stream("big.bin", len, body, &PutConditions::new())
+            .await
+            .unwrap();
+        assert_eq!(s.metadata("big.bin").await.unwrap().unwrap().size, len);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

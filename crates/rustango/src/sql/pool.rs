@@ -1310,9 +1310,13 @@ mod tuning_tests {
         #[cfg(all(feature = "tenancy", feature = "sqlite"))]
         {
             let config = crate::tenancy::TenantPoolsConfig::default();
-            let p = crate::tenancy::build_database_pool::<sqlx::Sqlite>("sqlite::memory:", &config)
-                .await
-                .expect("build a tenant pool");
+            let p = crate::tenancy::build_database_pool::<sqlx::Sqlite>(
+                "sqlite::memory:",
+                &config,
+                config.database_pool_min_connections,
+            )
+            .await
+            .expect("build a tenant pool");
             assert_eq!(p.options().get_test_before_acquire(), want, "tenant pool");
             let pools = crate::tenancy::DatabasePools::<sqlx::Sqlite>::new(
                 crate::tenancy::BackendKind::Sqlite,

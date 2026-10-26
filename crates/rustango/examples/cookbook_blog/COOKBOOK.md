@@ -880,7 +880,7 @@ Post::objects()
     .fetch_pool(&pool).await?;
 ```
 
-Same SQL-column-name convention as `through(...)` — sidesteps the multi-hop filter gap. Optional `self_pk_column = "..."` defaults to `"id"`.
+Same SQL-column-name convention as `through(...)` — sidesteps the multi-hop filter gap. Optional `self_pk_column = "..."` defaults to the primary-key column.
 
 **Status**: FK-reverse subset only — M2M / GFK `whereHas`, sub-predicate closures, `has(rel, '>', N)` count comparisons, and `withCount`-style annotate-by-relation remain follow-up slices.
 

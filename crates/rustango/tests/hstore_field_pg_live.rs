@@ -4,9 +4,8 @@
 //! `hstore` (no text-literal escaping) on INSERT and decodes it back
 //! into `HStore` on SELECT.
 //!
-//! Skips silently when `DATABASE_URL` is unset OR the `hstore` extension
-//! can't be created (e.g. the test role lacks the privilege). Runs in
-//! CI's `postgres_test` job, where the role can `CREATE EXTENSION`.
+//! Skips locally when `DATABASE_URL` is unset or `hstore` can't be
+//! created; fails in CI, where `postgres_test` provides both.
 
 use std::sync::OnceLock;
 
@@ -30,18 +29,16 @@ pub struct Product {
     pub attrs: HStore,
 }
 
-/// Connect + ensure the `hstore` extension exists. Returns `None` (skip)
-/// when `DATABASE_URL` is unset or the extension can't be created.
+/// Connect + ensure the `hstore` extension exists, or skip (fails in CI).
 async fn pool() -> Option<Pool> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = rustango::testkit::matrix::required_env("DATABASE_URL")?;
     let pg = sqlx::PgPool::connect(&url)
         .await
         .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}"));
-    sqlx::query("CREATE EXTENSION IF NOT EXISTS hstore")
-        .execute(&pg)
+    let pool: Pool = pg.into();
+    rustango::testkit::matrix::pg_extension(&pool, "hstore")
         .await
-        .ok()?;
-    Some(pg.into())
+        .then_some(pool)
 }
 
 async fn fresh(pool: &Pool) {

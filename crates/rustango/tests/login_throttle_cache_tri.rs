@@ -58,7 +58,35 @@ async fn replicas_share_the_limits(pool: &Pool) {
         .await;
 }
 
+/// A sign-in stored on the database cache lets that user and IP past a
+/// spent global limit, on another replica too.
+async fn a_known_client_passes_a_spent_global_limit(pool: &Pool) {
+    let table = "rustango_login_known_tri";
+    let cache: BoxedCache = Arc::new(fresh(pool, table).await);
+    let limits = LoginLimits {
+        global_limit: 1,
+        ..LoginLimits::default()
+    };
+    let a = LoginThrottle::with_cache(limits, cache.clone());
+    let b = LoginThrottle::with_cache(limits, cache.clone());
+    let s = LoginScope::Tenant("tri-known".into());
+    let home = ip("10.7.1.1");
+    a.begin(&s, &home, "alice").await.unwrap().succeeded().await;
+    a.begin(&s, &ip("10.7.1.2"), "x")
+        .await
+        .unwrap()
+        .failed()
+        .await;
+    assert!(
+        b.begin(&s, &ip("10.7.1.3"), "y").await.is_err(),
+        "global open"
+    );
+    let r = b.begin(&s, &home, "alice").await;
+    r.expect("a known client was locked out").succeeded().await;
+    let _ = DatabaseCache::new(pool.clone(), table).drop_table().await;
+}
+
 tri_dialect_test! {
     setup: noop,
-    scenarios: [replicas_share_the_limits],
+    scenarios: [replicas_share_the_limits, a_known_client_passes_a_spent_global_limit],
 }

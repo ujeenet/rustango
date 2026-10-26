@@ -4,6 +4,92 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.5] — 2026-10-26
+
+### Fixed — auth
+
+- A user who signed in from an IP before still signs in from it while a spray from many IPs spends the global login limit; per-IP limits and account locks still apply.
+- Failed MCP agent secrets (`/token`, `/oauth/token`, raw bearer keys) are limited per IP and per tenant through the login gate (new `LoginScope::TenantAgent`), so a flood cannot fill the hashing queue.
+- A `RUSTANGO_SESSION_SECRET` that is not valid base64 of 32+ bytes now logs a warning when it signs MCP agent tokens; it is still used, so issued tokens keep working.
+- `cookies::Cookie::build` writes a `;` in the name, value or attributes as `%3B`, so a request value cannot add cookie attributes.
+
+### Fixed — migrations
+
+- `apply_all` / `apply_all_pool` create each model's declared indexes, `unique_together` included, so an `ON CONFLICT` on them finds its target. One that cannot be built only warns.
+- Database-mode tenant runs on MySQL and SQLite send `pre_migrate` / `post_migrate` with the tenant's slug, as PG tenant runs do.
+- A hand-written `[DropIndex, DropCompositeFk]` on MySQL drops the FK first; the index drop failed with 1553.
+- Unapplying a dropped NOT NULL column with no default works when the table is empty; with rows it is still refused.
+
+### Added — migrate signals know their database
+
+`connect_pre_migrate_with_target` / `connect_post_migrate_with_target` receivers also get a `MigrateTarget` with the run's pool and tenant slug, so a per-tenant `post_migrate` can seed that tenant.
+
+### Fixed — admin
+
+- The admin TOTP enroll page (`/account/totp`) sends `Cache-Control: no-store`, so its setup key does not come back from a cache or the Back button.
+- The `addslashes` filter docs no longer suggest it for JS: inside `<script>` use `escapejs`.
+- Edit, delete and history links, the edit form's action and FK cell links percent-encode a string primary key, so a key with `/`, `?`, `#` or `%` reaches its own row.
+- A user without `{table}.change` (or on a read-only table) who opens an edit link is redirected to the read-only detail page instead of a form whose save fails.
+- A custom admin view whose suffix shadows a built-in route under another param name (`{id}`, `{id}/edit`) now logs a warning at build time.
+
+### Fixed — REST
+
+- `serializer::hyperlink_url` and `hyperlinked_to_value` percent-encode the key as one path segment.
+
+### Fixed — ORM
+
+- `reverse_has` instance helpers (`<name>`, `_count`, `_fetch`, `_first`, `_pluck`) filter on `self_pk_column`, as the EXISTS form does. Without it they join on the primary-key column, not a literal `id`.
+- A MySQL/SQLite `truncate` writes a bulk `update` audit entry for an audited table whose FK its `DELETE` sets to NULL.
+
+### Fixed — OpenAPI
+
+- A `#[derive(Serializer)]` with a `Decimal` or `Point` field compiles with `openapi` on: both implement `OpenApiSchema`.
+- ViewSet specs document Binary fields as hex (`format: hex`), as the server reads and writes them, not base64.
+- List params name the real `max_page_size` cap, list `ordering` on every non-cursor ViewSet and drop it under cursor pagination, which ignores it.
+- List and QUERY document their 400; create/PUT/PATCH document urlencoded bodies and the 422 `validation_failed`.
+
+### Fixed — tests and CI
+
+- Live suites no longer pass in CI when a PG extension is missing or a set URL is unreachable. New `testkit::matrix::{pg_extension, required_env, skip_outside_ci}` skip locally and fail when `CI` is set.
+- The MySQL permission upsert tests and the tenant read-only admin test run again; they were ignored with stale reasons.
+- The generated example projects' `.gitignore` / `.dockerignore` are regenerated with the scaffolder and now ignore the migrate lock file.
+- CI installs a pinned Trivy release and checks its sha256 instead of piping an install script from `main`; a weekly workflow re-runs the advisory scan.
+
+### Added — `CachePageLayer::credential_headers`
+
+Names more request headers that carry a credential, such as a custom token header. A request with one of them skips the shared cache, like `Authorization`, `Cookie` and `X-Api-Key`.
+
+### Fixed — leak follow-ups
+
+`check --deploy` warns about an existing tenant whose schema has a database role's name. When an admin list passes the `view` hook's scan cap, "next" only shows if a later row is one the hook admits.
+
+### Fixed — migrating a schema-mode tenant warns before adopting a foreign schema
+
+The tenant migration creates the schema with a plain `CREATE SCHEMA`. If the schema already exists and holds tables but no rustango ledger, it logs a warning before migrating into it. A later release refuses this.
+
+### Fixed — `purge-tenant` sees an idle tenant on a host alias
+
+Before dropping a brought Postgres database, the purge compares its server identity and name with every other database-mode tenant's and the registry's, so `db.internal` and `10.0.0.5` no longer slip past. A restored copy or replica shares the cluster id but not the server's start time, so it is told apart. Only tenants whose URL names the same database are probed, eight at a time with a 3 s timeout; one that cannot be resolved or reached is logged, not refused.
+
+### Fixed — a tenant URL that reaches the registry by another name is flagged
+
+Creating a tenant, editing its URL, the console's URL check and `migrate-tenant-storage` compare the server's identity (Postgres `system_identifier`, MySQL `server_uuid`, the SQLite file's device and inode) with the registry's. `localhost` for `127.0.0.1`, or a hard link, now gets a warning, also in `edit-tenant` and the console's edit notice; a later release refuses it.
+
+### Fixed — the registry check reads SQLite paths as SQLite does
+
+A symlink whose target passes through a missing directory, or a chain longer than the kernel follows, now resolves to the file SQLite opens. On Windows paths are compared as `GetFullPathNameW` builds them, without following links.
+
+### Fixed — tenancy pools and purge
+
+- A Postgres database-mode `Tenant` takes its held connection from a second pool of the tenant's, so requests that hold one and query `t.pool()` no longer time out at the pool's max size.
+- Building a schema-mode tenant's pool warns when its schema lacks tenant tables that `public` has, since `search_path` then reads and writes the shared copies.
+- `purge-tenant` and `migrate-tenant-storage` accept an existing tenant's stored schema name that new tenants may not use (`Acme`), quoted; reserved ones are still refused.
+- A purge clears the slug's account locks and the content-type cache, and `decommission::clear_on_purge(cache)` makes it delete the tenant's `ScopedCache::for_tenant` keys, so a new tenant reusing the slug starts clean.
+
+### Added — streaming storage
+
+`Storage::save_stream(key, len, body, &put)` writes exactly `len` bytes from a `ByteStream` as they arrive, and `Storage::load_stream(key)` reads one back in chunks, so an app can proxy large uploads to a private bucket. `LocalStorage`, `S3Storage` (one PUT up to 5 GiB, a multipart upload above, up to 5 TiB; unsigned payload over https, chunk-signed over http) and `AzureBlobStorage` (one Put Blob up to 5000 MiB, staged blocks above) stream; other backends get defaults that buffer. A wrong length is refused, `create_only` refuses an existing key, and a failed or dropped body leaves no object: a multipart upload is aborted, uncommitted blocks are never visible.
+
 ## [0.61.4] — 2026-10-26
 
 ### Fixed — a schema-mode tenant cannot take a role's name

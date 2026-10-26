@@ -389,7 +389,8 @@ pub async fn check_unique_together_pool(
 // written function, but these two cover the common case by filling
 // in `{pk}` in a URL template.
 
-/// Replace every `{pk}` in `template` with the primary key.
+/// Replace every `{pk}` in `template` with the primary key, encoded
+/// as one path segment.
 ///
 /// Numbers print as numbers, and strings and UUIDs print as
 /// themselves. Anything else falls back to its debug form, which is
@@ -402,8 +403,7 @@ pub async fn check_unique_together_pool(
 /// ```
 #[must_use]
 pub fn hyperlink_url(template: &str, pk: &crate::core::SqlValue) -> String {
-    let pk_str = render_pk(pk);
-    template.replace("{pk}", &pk_str)
+    crate::url_codec::fill_pk_segment(template, &render_pk(pk))
 }
 
 /// Add a `url` field, built from the primary key, and one
@@ -453,8 +453,7 @@ pub fn hyperlinked_to_value(
 
     // The object's own URL, from base[pk_field].
     if let Some(pk_val) = obj.get(pk_field) {
-        let pk_str = render_pk_json(pk_val);
-        let url = self_template.replace("{pk}", &pk_str);
+        let url = crate::url_codec::fill_pk_segment(self_template, &render_pk_json(pk_val));
         obj.insert("url".into(), serde_json::Value::String(url));
     }
 
@@ -464,8 +463,7 @@ pub fn hyperlinked_to_value(
         let url_key = format!("{fk_field}_url");
         match obj.get(*fk_field) {
             Some(v) if !v.is_null() => {
-                let pk_str = render_pk_json(v);
-                let url = template.replace("{pk}", &pk_str);
+                let url = crate::url_codec::fill_pk_segment(template, &render_pk_json(v));
                 obj.insert(url_key, serde_json::Value::String(url));
             }
             _ => {
@@ -519,6 +517,22 @@ mod hyperlinked_tests {
             &crate::core::SqlValue::String("alice".into()),
         );
         assert_eq!(url, "/users/alice");
+    }
+
+    #[test]
+    fn hyperlink_urls_encode_a_string_pk_as_one_segment() {
+        let pk = crate::core::SqlValue::String("a/../admin".into());
+        assert_eq!(hyperlink_url("/u/{pk}", &pk), "/u/a%2F..%2Fadmin");
+        let mut fks = std::collections::HashMap::new();
+        fks.insert("tag", "/t/{pk}");
+        let out = hyperlinked_to_value(
+            serde_json::json!({"id": "x?y=1", "tag": "é #"}),
+            "/u/{pk}",
+            "id",
+            &fks,
+        );
+        assert_eq!(out["url"], "/u/x%3Fy%3D1");
+        assert_eq!(out["tag_url"], "/t/%C3%A9%20%23");
     }
 
     #[test]

@@ -1079,11 +1079,33 @@ async fn check_connection(
         .await;
     match checked.preflight().await {
         Ok(()) => {
-            rep.step(ProvisionStep::CheckConnection, Progress::Ok).await;
+            let url = checked.probe_target().unwrap_or_default();
+            let done = registry_alias(url, registry)
+                .await
+                .map_or(Progress::Ok, |w| Progress::Done(RunText::fixed(w)));
+            rep.step(ProvisionStep::CheckConnection, done).await;
             Ok(())
         }
         Err(e) => rep.fail(ProvisionStep::CheckConnection, e).await,
     }
+}
+
+/// What [`registry_alias`] reports.
+pub(crate) const REGISTRY_ALIAS: &str = "warning: this URL reaches the registry's own database \
+     under another name; give the tenant a database of its own (a later release refuses it)";
+
+/// The registry's own database under another host name, link or mount,
+/// which the endpoint check cannot see: compared by server identity. Only
+/// warned in this release; `None` when it differs or cannot be read.
+pub(crate) async fn registry_alias(url: &str, registry: &crate::sql::Pool) -> Option<&'static str> {
+    use super::db_identity::DbIdentity;
+    let theirs = DbIdentity::of_pool(registry).await.ok()??;
+    let ours = DbIdentity::of_url(url).await.ok()??;
+    if ours != theirs {
+        return None;
+    }
+    tracing::warn!(target: "rustango::tenancy::provision", "{REGISTRY_ALIAS}");
+    Some(REGISTRY_ALIAS)
 }
 
 /// Why the registry's login may not create a tenant schema; `None` when
@@ -1207,17 +1229,7 @@ fn validate_fields(request: &ProvisionRequest) -> Result<ProvisionRequest, Strin
 /// The rule is the slug's, plus underscores: a schema name is not a
 /// hostname label, and Postgres is happy with `_`.
 pub(crate) fn validate_schema_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("a schema name is required".into());
-    }
-    if name.len() > 63 {
-        // Postgres truncates identifiers at NAMEDATALEN-1 silently,
-        // which would make the stored name and the real schema differ.
-        return Err(format!(
-            "schema name `{name}` is {} characters; Postgres allows at most 63",
-            name.len()
-        ));
-    }
+    validate_stored_schema_name(name)?;
     let legal = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-';
     if let Some(bad) = name.bytes().find(|b| !legal(*b)) {
         return Err(format!(
@@ -1231,6 +1243,23 @@ pub(crate) fn validate_schema_name(name: &str) -> Result<(), String> {
     // refused, since it reads as a flag.
     if name.starts_with('-') {
         return Err(format!("schema name `{name}` may not start with a hyphen"));
+    }
+    Ok(())
+}
+
+/// What an existing row's schema must still pass to be purged or moved:
+/// older rows may hold any name, used quoted, but never a reserved one.
+pub(crate) fn validate_stored_schema_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("a schema name is required".into());
+    }
+    if name.len() > 63 {
+        // Postgres truncates identifiers at NAMEDATALEN-1 silently,
+        // which would make the stored name and the real schema differ.
+        return Err(format!(
+            "schema name `{name}` is {} characters; Postgres allows at most 63",
+            name.len()
+        ));
     }
     // `pg_*` is reserved. Catch it here so it reads as a validation
     // error rather than a failed run.
@@ -1794,7 +1823,7 @@ impl Place {
 
 /// The file SQLite opens: a `file:` URI names its path, percent-encoded, before `?`.
 #[cfg(feature = "sqlite")]
-fn sqlite_file(name: &Path) -> std::path::PathBuf {
+pub(crate) fn sqlite_file(name: &Path) -> std::path::PathBuf {
     let name = name.to_string_lossy();
     let Some(uri) = name.strip_prefix("file:") else {
         return file_identity(Path::new(&*name));
@@ -1809,26 +1838,70 @@ fn sqlite_file(name: &Path) -> std::path::PathBuf {
 }
 
 /// The file `path` opens, walked as SQLite's unix VFS does: `..` pops by
-/// text, and each component that exists has its symlinks resolved.
+/// text, and each symlink is spliced in where it stands, up to 200 hops.
+#[cfg(unix)]
 fn file_identity(path: &Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::from("/");
+    let mut hops = 0;
+    if path.is_relative() {
+        if let Ok(cwd) = std::env::current_dir() {
+            walk_sqlite_path(&mut out, &cwd, &mut hops);
+        }
+    }
+    walk_sqlite_path(&mut out, path, &mut hops);
+    out
+}
+
+/// `appendAllPathElements` of `os_unix.c`.
+#[cfg(unix)]
+fn walk_sqlite_path(out: &mut std::path::PathBuf, path: &Path, hops: &mut u32) {
     use std::path::Component;
-    let abs = std::env::current_dir().map_or_else(|_| path.to_owned(), |d| d.join(path));
-    let mut resolved = std::path::PathBuf::new();
-    for part in abs.components() {
+    const SQLITE_MAX_SYMLINK: u32 = 200;
+    for part in path.components() {
         match part {
+            Component::RootDir => *out = std::path::PathBuf::from("/"),
             Component::ParentDir => {
-                resolved.pop();
+                out.pop();
             }
-            Component::CurDir => {}
-            other => {
-                resolved.push(other);
-                if let Ok(real) = std::fs::canonicalize(&resolved) {
-                    resolved = real;
+            Component::CurDir | Component::Prefix(_) => {}
+            Component::Normal(name) => {
+                out.push(name);
+                let is_link = std::fs::symlink_metadata(&*out).is_ok_and(|m| m.is_symlink());
+                if !is_link {
+                    continue;
                 }
+                // SQLite refuses to open past the cap; the text is as good as any.
+                *hops += 1;
+                if *hops > SQLITE_MAX_SYMLINK {
+                    return;
+                }
+                let Ok(target) = std::fs::read_link(&*out) else {
+                    continue;
+                };
+                out.pop();
+                walk_sqlite_path(out, &target, hops);
             }
         }
     }
-    resolved
+}
+
+/// `GetFullPathNameW`, as SQLite's Windows VFS: absolute, `..` popped by
+/// text, links left alone.
+#[cfg(not(unix))]
+fn file_identity(path: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let abs = std::env::current_dir().map_or_else(|_| path.to_owned(), |d| d.join(path));
+    let mut out = std::path::PathBuf::new();
+    for part in abs.components() {
+        match part {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Build a tenant URL on the same server as the registry, naming
@@ -1993,13 +2066,7 @@ pub(crate) async fn provision_schema<DB: Database>(
             })?;
         // The default `search_path` starts with "$user": a schema named
         // after a role would lead that role's sessions, the registry's included.
-        let is_role: bool = rustango::sql::sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)",
-        )
-        .bind(schema)
-        .fetch_one(pg_pools.registry())
-        .await?;
-        if is_role {
+        if is_role_name(pg_pools.registry(), schema).await? {
             return Err(TenancyError::Validation(format!(
                 "schema name `{schema}` is the name of a database role — choose another"
             )));
@@ -2035,6 +2102,15 @@ pub(crate) async fn provision_schema<DB: Database>(
             "schema mode is not available on this server — choose the database storage mode".into(),
         ))
     }
+}
+
+/// Whether a database role is called `name`. Catalog SQL: schema mode is Postgres-only.
+#[cfg(feature = "postgres")]
+pub(crate) async fn is_role_name(pg: &sqlx::PgPool, name: &str) -> Result<bool, sqlx::Error> {
+    rustango::sql::sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)")
+        .bind(name)
+        .fetch_one(pg)
+        .await
 }
 
 /// Drop the schema [`provision_schema`] just made when its `Org` row failed,
@@ -3603,18 +3679,17 @@ mod registry_endpoint_tests {
         assert!(refuse_registry_pool("postgres://x:5432/reg?host=::1", &v6).is_err());
     }
 
-    /// Unix only: a Windows canonical path starts `\\?\`, which a URL reads as a query.
-    #[cfg(all(feature = "sqlite", unix))]
+    /// Not canonicalized: a Windows canonical path starts `\\?\`, which a URL reads as a query.
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn a_relative_sqlite_path_is_the_same_file() {
         let dir = tempfile::tempdir_in(".").expect("tempdir");
-        let file = dir.path().join("reg.db");
-        std::fs::write(&file, b"").unwrap();
-        let abs = std::fs::canonicalize(&file).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let abs = cwd.join(dir.path().file_name().unwrap()).join("reg.db");
+        std::fs::write(&abs, b"").unwrap();
         let pool = crate::sql::Pool::Sqlite(
             sqlx::SqlitePool::connect_lazy(&format!("sqlite://{}", abs.display())).expect("lazy"),
         );
-        let cwd = std::env::current_dir().unwrap();
         let rel = std::path::Path::new(".").join(abs.strip_prefix(&cwd).unwrap());
         let rel = rel.display();
         for same in [format!("sqlite:{rel}"), format!("sqlite://{rel}?mode=rwc")] {
@@ -3622,11 +3697,15 @@ mod registry_endpoint_tests {
             assert!(refuse_registry_url(&same, &format!("sqlite://{}", abs.display())).is_err());
         }
         let abs_s = abs.display();
-        for uri in [
+        let mut uris = vec![
             format!("sqlite:file:{rel}"),
             format!("sqlite:file:{abs_s}?mode=rwc"),
-            format!("sqlite://file://{abs_s}"),
-        ] {
+        ];
+        // A Windows path has no leading `/` to follow the authority.
+        if cfg!(unix) {
+            uris.push(format!("sqlite://file://{abs_s}"));
+        }
+        for uri in uris {
             assert!(refuse_registry_pool(&uri, &pool).is_err(), "{uri}");
         }
         let sibling = format!("sqlite:{}", dir.path().join("t.db").display());
@@ -3665,5 +3744,38 @@ mod registry_endpoint_tests {
         }
         let other = format!("sqlite:{d}/nope/../link/t.db");
         assert!(refuse_registry_pool(&other, &pool).is_ok());
+    }
+
+    /// A link through a missing dir, and a chain past the kernel's limit,
+    /// resolve as SQLite resolves them, not by text.
+    #[cfg(all(feature = "sqlite", unix))]
+    #[tokio::test]
+    async fn symlinks_resolve_where_canonicalize_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("reg.db"), b"").unwrap();
+        std::os::unix::fs::symlink("nope/../real", dir.path().join("skip")).unwrap();
+        let hops = 60;
+        for i in 0..hops {
+            let next = if i + 1 == hops {
+                "real".to_owned()
+            } else {
+                format!("l{}", i + 1)
+            };
+            std::os::unix::fs::symlink(next, dir.path().join(format!("l{i}"))).unwrap();
+        }
+        let pool = crate::sql::Pool::Sqlite(
+            sqlx::SqlitePool::connect_lazy(&format!("sqlite://{}", real.join("reg.db").display()))
+                .expect("lazy"),
+        );
+        let d = dir.path().display();
+        for same in [
+            format!("sqlite:{d}/skip/reg.db"),
+            format!("sqlite:{d}/l0/reg.db"),
+        ] {
+            assert!(refuse_registry_pool(&same, &pool).is_err(), "{same}");
+        }
+        assert!(refuse_registry_pool(&format!("sqlite:{d}/l0/t.db"), &pool).is_ok());
     }
 }

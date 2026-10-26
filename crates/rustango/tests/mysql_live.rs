@@ -57,6 +57,29 @@ pub struct LiveAudited {
     name: String,
 }
 
+/// `unique_together`, which the bootstrap walk did not create.
+#[derive(Model, Debug)]
+#[rustango(table = "live_pairs", unique_together = "a, b")]
+#[allow(dead_code)]
+pub struct LivePair {
+    #[rustango(primary_key)]
+    id: Auto<i64>,
+    a: i64,
+    b: i64,
+}
+
+/// An index over 3072 bytes in utf8mb4, which MySQL cannot build (1071).
+/// The derive already refuses an index on an unbounded (TEXT) column.
+#[derive(Model, Debug)]
+#[rustango(table = "live_text_notes")]
+#[allow(dead_code)]
+pub struct LiveTextNote {
+    #[rustango(primary_key)]
+    id: Auto<i64>,
+    #[rustango(max_length = 1000, index)]
+    body: String,
+}
+
 async fn pool_or_skip() -> Option<Pool> {
     let url = std::env::var("MYSQL_TEST_URL").ok()?;
     Some(
@@ -324,4 +347,52 @@ async fn check_deploy_probes_named_time_zones() {
     .await;
     let out = String::from_utf8(out).unwrap();
     assert!(!out.contains("time zone"), "{out}");
+}
+
+/// The bootstrap walk creates `unique_together` indexes too.
+#[tokio::test]
+async fn apply_all_pool_creates_unique_together() {
+    let Some(pool) = pool_or_skip().await else {
+        eprintln!("MYSQL_TEST_URL unset — skipping");
+        return;
+    };
+    let _g = live_lock().lock().await;
+    fresh_schema(&pool).await;
+    let pair = || LivePair {
+        id: Auto::Unset,
+        a: 1,
+        b: 2,
+    };
+    pair().insert_pool(&pool).await.expect("first row");
+    assert!(
+        pair().insert_pool(&pool).await.is_err(),
+        "apply_all_pool left `unique_together` out"
+    );
+}
+
+/// An index MySQL cannot build warns and the bootstrap goes on, as in
+/// 0.61.4, which built no indexes at all.
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+#[tokio::test]
+async fn apply_all_pool_warns_on_an_index_it_cannot_build() {
+    let Some(pool) = pool_or_skip().await else {
+        eprintln!("MYSQL_TEST_URL unset — skipping");
+        return;
+    };
+    let _g = live_lock().lock().await;
+    let buf = rustango::testkit::CaptureWriter::default();
+    let sink = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    fresh_schema(&pool).await;
+    drop(guard);
+    let logs = buf.contents();
+    assert!(
+        logs.contains("LiveTextNote") && logs.contains("live_text_notes_body_idx"),
+        "{logs}"
+    );
 }

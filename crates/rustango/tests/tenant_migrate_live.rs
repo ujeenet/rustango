@@ -298,8 +298,40 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
         },
     );
 
+    // post_migrate fires per tenant with that tenant's pool and slug.
+    #[cfg(feature = "signals")]
+    let seen: std::sync::Arc<Mutex<Vec<(Option<String>, String)>>> = Default::default();
+    #[cfg(feature = "signals")]
+    let receiver = {
+        let seen = seen.clone();
+        rustango::signals::migrate::connect_post_migrate_with_target(move |_, target| {
+            let seen = seen.clone();
+            async move {
+                let pg = target.pool.as_postgres().expect("pg").clone();
+                let (schema,): (String,) = sqlx::query_as("SELECT current_schema()::text")
+                    .fetch_one(&pg)
+                    .await
+                    .unwrap();
+                seen.lock().await.push((target.tenant, schema));
+            }
+        })
+    };
+
     let pools = TenantPools::new(pool.clone());
     let report = migrate_tenants(&pools, &dir, &url).await.unwrap();
+
+    #[cfg(feature = "signals")]
+    {
+        rustango::signals::migrate::disconnect_post_migrate(receiver);
+        let mut got = seen.lock().await.clone();
+        got.sort();
+        let mut want = vec![
+            (Some(acme.slug.clone()), acme_schema.clone()),
+            (Some(globex.slug.clone()), globex_schema.clone()),
+        ];
+        want.sort();
+        assert_eq!(got, want, "one post_migrate per tenant, on its own pool");
+    }
 
     assert!(
         report.all_ok(),

@@ -108,68 +108,131 @@ fn build_graph() -> HashMap<&'static str, Vec<Edge>> {
     graph
 }
 
-/// The audited tables a truncate of `table` empties besides it: PG's
-/// `TRUNCATE … CASCADE` follows every FK, a `DELETE` only `ON DELETE CASCADE`.
-fn truncate_reach(table: &str, every_fk: bool) -> Vec<&'static ModelSchema> {
+/// An audited table a truncate of `table` changes: rows it takes, or, for a
+/// MySQL/SQLite `DELETE`, the FK it sets to NULL / default (`set`).
+pub(crate) struct Reached {
+    schema: &'static ModelSchema,
+    set: Option<&'static str>,
+    before: i64,
+}
+
+/// The audited tables a truncate of `table` reaches besides it: PG's
+/// `TRUNCATE … CASCADE` empties every FK child, a `DELETE` only follows
+/// `ON DELETE CASCADE` and sets the `SET NULL` / `SET DEFAULT` children.
+fn truncate_reach(
+    table: &str,
+    every_fk: bool,
+) -> Vec<(&'static ModelSchema, Option<&'static str>)> {
     let entries = canonical_entries();
     let mut out = Vec::new();
     let mut done: HashSet<&str> = HashSet::from([table]);
     let mut frontier = vec![table.to_owned()];
+    let mut sets = Vec::new();
     while let Some(parent) = frontier.pop() {
         for entry in &entries {
             let schema = entry.schema;
-            let by_field = schema.fields.iter().any(|f| {
-                matches!(f.relation, Some(Relation::Fk { to, .. } | Relation::O2O { to, .. }) if to == parent)
-                    && (every_fk || f.fk_on_delete == Some(OnDeleteAction::Cascade))
-            });
+            let refs = |f: &&crate::core::FieldSchema| matches!(f.relation, Some(Relation::Fk { to, .. } | Relation::O2O { to, .. }) if to == parent);
+            let by_field = schema
+                .fields
+                .iter()
+                .filter(refs)
+                .any(|f| every_fk || f.fk_on_delete == Some(OnDeleteAction::Cascade));
             let by_composite =
                 every_fk && schema.composite_relations.iter().any(|r| r.to == parent);
+            if !every_fk && schema.audit_track.is_some() {
+                sets.extend(
+                    schema
+                        .fields
+                        .iter()
+                        .filter(refs)
+                        .filter(|f| {
+                            matches!(
+                                f.fk_on_delete,
+                                Some(OnDeleteAction::SetNull | OnDeleteAction::SetDefault)
+                            )
+                        })
+                        .map(|f| (schema, f.column)),
+                );
+            }
             if (by_field || by_composite) && done.insert(schema.table) {
                 if schema.audit_track.is_some() {
-                    out.push(schema);
+                    out.push((schema, None));
                 }
                 frontier.push(schema.table.to_owned());
             }
+        }
+    }
+    // A child the truncate also deletes from is counted as removed.
+    for (schema, column) in sets {
+        if !done.contains(schema.table) {
+            out.push((schema, Some(column)));
         }
     }
     out
 }
 
 /// The audited tables a truncate of `table` reaches through its FKs, with
-/// their row counts; taken before it runs, for [`emit_truncated`].
+/// their counts; taken before it runs, for [`emit_truncated`].
 pub(crate) async fn truncate_counts(
     tx: &mut PoolTx<'_>,
     table: &str,
-) -> Result<Vec<(&'static ModelSchema, i64)>, ExecError> {
+) -> Result<Vec<Reached>, ExecError> {
     let every_fk = crate::sql::truncate_cascades_every_fk(tx.dialect());
     let mut out = Vec::new();
-    for schema in truncate_reach(table, every_fk) {
-        out.push((schema, row_count(tx, schema).await?));
+    for (schema, set) in truncate_reach(table, every_fk) {
+        let before = row_count(tx, schema, set).await?;
+        out.push(Reached {
+            schema,
+            set,
+            before,
+        });
     }
     Ok(out)
 }
 
-async fn row_count(tx: &mut PoolTx<'_>, schema: &'static ModelSchema) -> Result<i64, ExecError> {
-    let query = CountQuery::from_select(SelectQuery::new(schema));
-    crate::sql::count_rows_on(&mut *tx, &query).await
+/// `schema`'s rows, or those whose `set` FK is not NULL.
+async fn row_count(
+    tx: &mut PoolTx<'_>,
+    schema: &'static ModelSchema,
+    set: Option<&'static str>,
+) -> Result<i64, ExecError> {
+    let mut select = SelectQuery::new(schema);
+    if let Some(column) = set {
+        select = select.where_clause(WhereExpr::Predicate(Filter::new(
+            column,
+            Op::IsNull,
+            SqlValue::Bool(false),
+        )));
+    }
+    crate::sql::count_rows_on(&mut *tx, &CountQuery::from_select(select)).await
 }
 
-/// One bulk `delete` entry per audited table the truncate of `table` took
-/// rows from. A MySQL/SQLite `SET NULL` / `SET DEFAULT` child is not audited.
+/// One bulk entry per audited table the truncate of `table` changed: a
+/// `delete` for rows taken, an `update` for an FK it set.
 pub(crate) async fn emit_truncated(
     tx: &mut PoolTx<'_>,
     table: &str,
-    before: Vec<(&'static ModelSchema, i64)>,
+    before: Vec<Reached>,
 ) -> Result<(), ExecError> {
     let mut entries = Vec::new();
-    for (schema, rows) in before {
-        if rows > 0 && row_count(tx, schema).await? < rows {
+    for r in before {
+        if r.before > 0 && row_count(tx, r.schema, r.set).await? < r.before {
+            let (operation, changes) = match r.set {
+                None => (
+                    AuditOp::Delete,
+                    serde_json::json!({ "bulk": "truncate", "cascade_from": table }),
+                ),
+                Some(column) => (
+                    AuditOp::Update,
+                    serde_json::json!({ "bulk": "truncate", "cascade_from": table, "set": column }),
+                ),
+            };
             entries.push(PendingEntry {
-                entity_table: schema.table,
+                entity_table: r.schema.table,
                 entity_pk: String::new(),
-                operation: AuditOp::Delete,
+                operation,
                 source: super::current_source(),
-                changes: serde_json::json!({ "bulk": "truncate", "cascade_from": table }),
+                changes,
             });
         }
     }

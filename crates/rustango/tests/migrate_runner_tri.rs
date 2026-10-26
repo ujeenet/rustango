@@ -1029,11 +1029,15 @@ async fn refused_downgrade(pool: &Pool, t: &str, atomic: bool) {
     migrate_pool_with_ledger(pool, dir.path(), &ledger)
         .await
         .expect("migrate");
+    // An empty table would take `req` back.
+    let q = pool.dialect().quote_ident(t);
+    exec(pool, &format!("INSERT INTO {q} (z) VALUES (0)"))
+        .await
+        .unwrap();
     let err = unapply_pool_with_ledger(pool, dir.path(), &mig.name, &ledger)
         .await
         .expect_err("NOT NULL with no default is refused");
     assert!(err.to_string().contains("NOT NULL"), "{err}");
-    let q = pool.dialect().quote_ident(t);
     exec(pool, &format!("INSERT INTO {q} (z) VALUES (1)"))
         .await
         .unwrap_or_else(|e| panic!("`z` was dropped on {}: {e}", pool.dialect().name()));

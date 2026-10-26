@@ -1674,7 +1674,7 @@ fn substitute_pk(template: &str, pk: &str) -> String {
         return template.to_owned();
     }
     // Encoded as a path segment: a raw CR/LF panics `Redirect::to`.
-    template.replace("{pk}", &crate::url_codec::url_encode(pk))
+    crate::url_codec::fill_pk_segment(template, pk)
 }
 
 /// Substitute every `{column}` placeholder in a `success_url`

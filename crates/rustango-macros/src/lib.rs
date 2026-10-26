@@ -728,13 +728,19 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         ));
     };
 
-    let container = parse_container_attrs(input)?;
+    let mut container = parse_container_attrs(input)?;
     let table = container
         .table
         .unwrap_or_else(|| to_snake_case(&struct_name.to_string()));
     let model_name = struct_name.to_string();
 
     let collected = collect_fields(named, &table)?;
+    // `reverse_has` joins on the PK column unless it names another.
+    if let Some((_, pk_column)) = &collected.primary_key {
+        for rel in &mut container.reverse_has_relations {
+            rel.self_pk_column.get_or_insert_with(|| pk_column.clone());
+        }
+    }
 
     // Validate that #[rustango(display = "…")] names a real field.
     if let Some((ref display, span)) = container.display {
@@ -985,8 +991,11 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // Issue #817 — `#[rustango(through(...))]` accessors.
     let through_accessors = through_accessor_tokens(struct_name, &container.through_relations);
     // Issue #830 — `#[rustango(reverse_has(...))]` static accessors.
-    let reverse_has_accessors =
-        reverse_has_accessor_tokens(struct_name, &container.reverse_has_relations);
+    let reverse_has_accessors = reverse_has_accessor_tokens(
+        struct_name,
+        &container.reverse_has_relations,
+        &collected.column_entries,
+    );
     let generic_fk_accessors = generic_fk_accessor_tokens(
         struct_name,
         &container.generic_fks,
@@ -1721,6 +1730,7 @@ fn generic_m2m_accessor_tokens(
 fn reverse_has_accessor_tokens(
     struct_name: &syn::Ident,
     reverse_has_relations: &[ReverseHasAttr],
+    columns: &[ColumnEntry],
 ) -> TokenStream2 {
     let root = rustango_root();
     if reverse_has_relations.is_empty() {
@@ -1743,7 +1753,22 @@ fn reverse_has_accessor_tokens(
         let accessor_ident = syn::Ident::new(accessor_name, struct_name.span());
         let child = &rel.child;
         let child_fk_column = rel.child_fk_column.as_str();
-        let self_pk_column = rel.self_pk_column.as_str();
+        let self_pk_column = rel.self_pk_column();
+        // The instance helpers filter on the value the EXISTS form joins on.
+        let self_value = columns
+            .iter()
+            .find(|c| c.column == self_pk_column)
+            .map_or_else(
+                || quote! { self.__rustango_pk_value() },
+                |c| {
+                    let ident = &c.ident;
+                    quote! {
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#ident)
+                        )
+                    }
+                },
+            );
         let exists_doc = format!(
             "Eloquent `whereHas` analog — yields `EXISTS (SELECT 1 \
              FROM <{child}> WHERE {child_fk_column} = <outer>.{self_pk_column})`. \
@@ -1760,16 +1785,16 @@ fn reverse_has_accessor_tokens(
         let count_doc = format!(
             "Eloquent `$model->{name}->count()` analog — returns \
              the number of `{child}` rows whose `{child_fk_column}` \
-             matches this `{struct_name}` instance's primary key. \
+             matches this `{struct_name}` instance's `{self_pk_column}`. \
              Issued as `SELECT COUNT(*) FROM <{child}> WHERE \
-             {child_fk_column} = <self.pk>`.",
+             {child_fk_column} = <self.{self_pk_column}>`.",
             name = rel.name,
         );
         let accessor_doc = format!(
             "Eloquent `$model->{name}` accessor — returns a \
              `QuerySet<{child}>` filtered to rows whose \
              `{child_fk_column}` matches this `{struct_name}` \
-             instance's primary key. **Chainable**: compose `.filter()` \
+             instance's `{self_pk_column}`. **Chainable**: compose `.filter()` \
              / `.order_by()` / `.limit()` etc. on top, then call \
              `.fetch(&pool)` (the QuerySet trait method) when \
              done. For the simple \"fetch all\" hot path with no \
@@ -1790,7 +1815,7 @@ fn reverse_has_accessor_tokens(
             #[doc = #accessor_doc]
             pub fn #accessor_ident(&self) -> #root::query::QuerySet<#child> {
                 #root::query::QuerySet::<#child>::new()
-                    .filter(#child_fk_column, self.__rustango_pk_value())
+                    .filter(#child_fk_column, #self_value)
             }
 
             #[doc = #fetch_doc]
@@ -1877,10 +1902,7 @@ fn reverse_has_accessor_tokens(
                 #root::sql::ExecError,
             > {
                 use #root::sql::CounterPool as _;
-                #root::query::QuerySet::<#child>::new()
-                    .filter(#child_fk_column, self.__rustango_pk_value())
-                    .count(pool)
-                    .await
+                self.#accessor_ident().count(pool).await
             }
         }
     });
@@ -2778,7 +2800,7 @@ fn model_impl_tokens(
             let name = rel.name.as_str();
             let child = &rel.child;
             let child_fk_column = rel.child_fk_column.as_str();
-            let self_pk_column = rel.self_pk_column.as_str();
+            let self_pk_column = rel.self_pk_column();
             quote! {
                 #root::core::ReverseRelation::new(
                     #name,
@@ -8660,10 +8682,15 @@ struct ReverseHasAttr {
     /// primary key. For `Comment`'s `post: ForeignKey<Post>` the
     /// column is `"post_id"`.
     child_fk_column: String,
-    /// SQL primary-key column on **this** model's table — the column
-    /// the `OuterRef` resolves to. Optional; defaults to `"id"`
-    /// (rustango's default PK column name).
-    self_pk_column: String,
+    /// Column on **this** model's table the child FK references — the
+    /// `OuterRef` target. Defaults to the PK column (`"id"` without one).
+    self_pk_column: Option<String>,
+}
+
+impl ReverseHasAttr {
+    fn self_pk_column(&self) -> &str {
+        self.self_pk_column.as_deref().unwrap_or("id")
+    }
 }
 
 /// Parsed `#[rustango(generic_has(name, child, ct_column, pk_column
@@ -9452,7 +9479,6 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                         "`reverse_has` requires `child_fk_column = \"<column>\"`",
                     ));
                 };
-                let self_pk_column = self_pk_column.unwrap_or_else(|| "id".to_owned());
                 if out.reverse_has_relations.iter().any(|r| r.name == name) {
                     return Err(syn::Error::new(
                         span,

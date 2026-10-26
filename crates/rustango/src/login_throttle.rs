@@ -16,9 +16,14 @@
 //!   failed attempts use them up; a successful login gives its token back,
 //!   so credentials sent on every request (HTTP Basic, API keys) only hold
 //!   a token while they are checked. Only failures lock an account.
+//! - **Known clients**: a username that signed in from an IP within
+//!   [`KNOWN_CLIENT_TTL`] skips a spent global limit from that IP, so a
+//!   spray from many IPs cannot lock every user out. Its per-IP limit and
+//!   account lock still apply.
 //!
-//! Shared across scopes: the per-IP buckets, the account-lock store and
-//! the password-hashing queue ([`crate::passwords`]).
+//! Shared across scopes: the per-IP buckets (agent secrets have their
+//! own), the account-lock store and the password-hashing queue
+//! ([`crate::passwords`]).
 //!
 //! State: the per-IP and global buckets are in-process unless built
 //! with [`LoginThrottle::with_cache`]; the account lock uses
@@ -52,6 +57,11 @@ pub const DEFAULT_IP_WINDOW_SECS: u64 = 60;
 pub const DEFAULT_GLOBAL_LIMIT: u32 = 600;
 /// Default global window.
 pub const DEFAULT_GLOBAL_WINDOW_SECS: u64 = 60;
+/// How long a sign-in lets its username and IP skip a spent global limit.
+pub const KNOWN_CLIENT_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
+/// Known clients one process remembers without a shared cache; the least
+/// recently used go first.
+const KNOWN_CLIENT_MEMORY_CAP: usize = 10_000;
 
 /// Limits for [`LoginThrottle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +120,8 @@ pub enum LoginScope {
     TenantBasic(String),
     /// API keys against a tenant. Only failures keep their token; no account lock.
     TenantApiKey(String),
+    /// MCP agent secrets against a tenant, as for API keys.
+    TenantAgent(String),
 }
 
 impl LoginScope {
@@ -120,11 +132,21 @@ impl LoginScope {
             Self::Tenant(slug) => format!("tenant:{slug}"),
             Self::TenantBasic(slug) => format!("tenant-basic:{slug}"),
             Self::TenantApiKey(slug) => format!("tenant-apikey:{slug}"),
+            Self::TenantAgent(slug) => format!("tenant-agent:{slug}"),
         }
     }
 
     fn locks_accounts(&self) -> bool {
-        !matches!(self, Self::TenantApiKey(_))
+        !matches!(self, Self::TenantApiKey(_) | Self::TenantAgent(_))
+    }
+
+    /// The per-IP bucket key. Agent secrets count apart, so a looping
+    /// agent cannot spend the IP's human logins.
+    fn ip_bucket(&self, ip: &str) -> String {
+        match self {
+            Self::TenantAgent(_) => format!("agent/{ip}"),
+            _ => ip.to_owned(),
+        }
     }
 }
 
@@ -196,6 +218,8 @@ struct Buckets {
     ip: Limit,
     /// Keyed by [`LoginScope::key`].
     global: Limit,
+    /// Username and IP pairs that signed in; see [`KNOWN_CLIENT_TTL`].
+    known: BoxedCache,
     in_flight: InFlight,
 }
 
@@ -298,6 +322,19 @@ impl Buckets {
         let _ = tokio::time::timeout(left.min(IN_FLIGHT_POLL), notified).await;
         Ok(())
     }
+
+    /// `true` when `username` signed in from `ip` in this scope lately.
+    async fn is_known(&self, scope: &LoginScope, ip: &ClientIp, username: &str) -> bool {
+        let Some(ip) = ip.0.as_deref().filter(|_| scope.locks_accounts()) else {
+            return false;
+        };
+        let key = known_key(&account_key(&scope.key(), username), ip);
+        matches!(self.known.get(&key).await, Ok(Some(_)))
+    }
+}
+
+fn known_key(account_key: &str, ip: &str) -> String {
+    format!("login-known:{account_key}:{ip}")
 }
 
 fn ip_gate(ip: &str) -> String {
@@ -391,6 +428,9 @@ impl LoginThrottle {
             limits,
             ip: Limit::Memory(memory_ip(limits)),
             global: Limit::Memory(memory_global(limits)),
+            known: Arc::new(
+                crate::cache::InMemoryCache::new().with_max_entries(KNOWN_CLIENT_MEMORY_CAP),
+            ),
             in_flight: InFlight::default(),
         }))
     }
@@ -405,8 +445,11 @@ impl LoginThrottle {
     #[must_use]
     pub fn with_cache(limits: LoginLimits, cache: BoxedCache) -> Self {
         let ip = CacheRateLimitLayer::new(cache.clone(), limits.ip_limit.max(1), limits.ip_window);
-        let global =
-            CacheRateLimitLayer::new(cache, limits.global_limit.max(1), limits.global_window);
+        let global = CacheRateLimitLayer::new(
+            cache.clone(),
+            limits.global_limit.max(1),
+            limits.global_window,
+        );
         Self(Arc::new(Buckets {
             limits,
             ip: Limit::Cache {
@@ -417,6 +460,7 @@ impl LoginThrottle {
                 shared: global.key_prefix("login-global"),
                 fallback: memory_global(limits),
             },
+            known: cache,
             in_flight: InFlight::default(),
         }))
     }
@@ -450,7 +494,8 @@ impl LoginThrottle {
 
     /// Admit one attempt at `username` in `scope`. Call before the user
     /// lookup, then report the outcome on the returned [`LoginAttempt`].
-    /// `username` is ignored for [`LoginScope::TenantApiKey`].
+    /// `username` is ignored for [`LoginScope::TenantApiKey`] and
+    /// [`LoginScope::TenantAgent`].
     ///
     /// A limit that is full only with attempts still in flight here waits
     /// for one to settle, so right credentials are never refused by
@@ -489,6 +534,7 @@ impl LoginThrottle {
             buckets: Arc::clone(b),
             scope_key: scope.key(),
             ip: ip.0.clone(),
+            ip_bucket: ip.0.as_deref().map(|ip| scope.ip_bucket(ip)),
             spent: (Spent::Nothing, Spent::Nothing),
             locks: Vec::with_capacity(2),
             gates: Gates {
@@ -500,15 +546,15 @@ impl LoginThrottle {
             held.reserve_lock(account_key(&held.scope_key, username))
                 .await?;
         }
-        if let Some(ip) = &ip.0 {
-            match b.ip.take(ip).await {
+        if let Some(ip) = held.ip_bucket.clone() {
+            match b.ip.take(&ip).await {
                 Ok(spent) => {
                     held.spent.0 = spent;
-                    held.gates.enter(ip_gate(ip));
+                    held.gates.enter(ip_gate(&ip));
                 }
                 Err(retry_after_secs) => {
                     held.release().await;
-                    let gate = ip_gate(ip);
+                    let gate = ip_gate(&ip);
                     return Err(Blocked::Full {
                         gate,
                         retry_after_secs,
@@ -521,6 +567,7 @@ impl LoginThrottle {
                 held.spent.1 = spent;
                 held.gates.enter(global_gate(&held.scope_key));
             }
+            Err(_) if b.is_known(scope, ip, username).await => {}
             Err(retry_after_secs) => {
                 let gate = global_gate(&held.scope_key);
                 held.release().await;
@@ -561,10 +608,14 @@ impl LoginThrottle {
             }
             _ => Ok(()),
         };
-        if let Some(ip) = &ip.0 {
-            spent(&ip_gate(ip), b.ip.peek(ip).await)?;
+        if let Some(ip) = ip.0.as_deref().map(|ip| scope.ip_bucket(ip)) {
+            spent(&ip_gate(&ip), b.ip.peek(&ip).await)?;
         }
-        spent(&global_gate(&scope_key), b.global.peek(&scope_key).await)
+        let global = b.global.peek(&scope_key).await;
+        if global.is_err() && b.is_known(scope, ip, username).await {
+            return Ok(());
+        }
+        spent(&global_gate(&scope_key), global)
     }
 
     /// Run a signed-in user's current-password check through the gate, so a
@@ -619,6 +670,8 @@ struct Held {
     buckets: Arc<Buckets>,
     scope_key: String,
     ip: Option<String>,
+    /// The per-IP bucket key, from [`LoginScope::ip_bucket`].
+    ip_bucket: Option<String>,
     /// What `begin` counted per IP and globally, refunded on success.
     spent: (Spent, Spent),
     /// Account-lock slots: the submitted name, then the stored one.
@@ -681,11 +734,19 @@ impl LoginAttempt {
         }
     }
 
-    /// Clear the username's failures and give back the limit tokens.
+    /// Clear the username's failures, remember it as known from this IP,
+    /// and give back the limit tokens.
     pub async fn succeeded(mut self) {
         let mut held = self.held();
         let lockout = crate::account_lockout::shared();
-        for (key, slot) in held.locks.drain(..) {
+        for (key, slot) in std::mem::take(&mut held.locks) {
+            if let Some(ip) = &held.ip {
+                // Written once per pair: an existing marker is left alone.
+                let (cache, known) = (&held.buckets.known, known_key(&key, ip));
+                if !matches!(cache.get(&known).await, Ok(Some(_))) {
+                    let _ = cache.set(&known, "1", Some(KNOWN_CLIENT_TTL)).await;
+                }
+            }
             lockout.reserved_succeeded(&key, slot).await;
         }
         held.give_back().await;
@@ -730,7 +791,7 @@ impl Held {
 
     async fn give_back(&self) {
         let (ip_spent, global_spent) = self.spent;
-        if let Some(ip) = &self.ip {
+        if let Some(ip) = &self.ip_bucket {
             self.buckets.ip.give_back(ip, ip_spent).await;
         }
         self.buckets
@@ -740,13 +801,37 @@ impl Held {
     }
 }
 
+/// Forget the account locks of tenant `slug`'s logins, so a new tenant
+/// reusing the slug does not inherit them.
+///
+/// # Errors
+/// The lockout cache's `delete_prefix` error.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn forget_tenant(slug: &str) -> Result<(), crate::cache::CacheError> {
+    let lockout = crate::account_lockout::shared();
+    for scope in [
+        LoginScope::Tenant(slug.to_owned()),
+        LoginScope::TenantBasic(slug.to_owned()),
+    ] {
+        lockout
+            .clear_accounts_with_prefix(&account_key_prefix(&scope.key()))
+            .await?;
+    }
+    Ok(())
+}
+
+/// Every [`account_key`] of `scope_key` starts with this.
+fn account_key_prefix(scope_key: &str) -> String {
+    format!("login:{scope_key}:")
+}
+
 /// `login:<scope>:<sha256 of the trimmed, lowercased username>`. Hashed
 /// so the key has a fixed size and a shared cache never holds the name.
 fn account_key(scope_key: &str, username: &str) -> String {
     use sha2::{Digest as _, Sha256};
     use std::fmt::Write as _;
     let digest = Sha256::digest(username.trim().to_lowercase().as_bytes());
-    let mut key = format!("login:{scope_key}:");
+    let mut key = account_key_prefix(scope_key);
     for b in digest {
         let _ = write!(key, "{b:02x}");
     }
@@ -822,6 +907,7 @@ mod tests {
             tenant("a").key(),
             LoginScope::TenantBasic("a".into()).key(),
             LoginScope::TenantApiKey("a".into()).key(),
+            LoginScope::TenantAgent("a".into()).key(),
         ];
         for (i, a) in keys.iter().enumerate() {
             for b in &keys[i + 1..] {
@@ -932,6 +1018,144 @@ mod tests {
         for n in 0..10 {
             let a = t.begin(&s, &ip("10.9.2.1"), &format!("ok{n}")).await;
             a.unwrap().succeeded().await;
+        }
+    }
+
+    /// Many IPs spending a scope's global limit do not lock out a user who
+    /// signed in from this IP before; a new IP is still limited.
+    async fn known_client_passes_a_spent_global_limit(t: LoginThrottle, slug: &str, net: u8) {
+        let s = tenant(slug);
+        let home = ip(&format!("10.{net}.1.1"));
+        t.begin(&s, &home, "alice").await.unwrap().succeeded().await;
+        for n in 0..2 {
+            let (from, user) = (ip(&format!("10.{net}.2.{n}")), format!("x{n}"));
+            t.begin(&s, &from, &user).await.unwrap().failed().await;
+        }
+        let other = ip(&format!("10.{net}.3.1"));
+        assert!(
+            t.begin(&s, &other, "bob").await.is_err(),
+            "global limit open"
+        );
+        assert!(t.check(&s, &home, " Alice").await.is_ok(), "check refused");
+        let a = t.begin(&s, &home, "alice").await;
+        a.expect("a known client was locked out").succeeded().await;
+        let away = ip(&format!("10.{net}.4.1"));
+        assert!(
+            t.begin(&s, &away, "alice").await.is_err(),
+            "new IP bypassed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_known_client_passes_a_spent_global_limit() {
+        let limits = LoginLimits {
+            global_limit: 2,
+            ..LoginLimits::default()
+        };
+        known_client_passes_a_spent_global_limit(LoginThrottle::new(limits), "t-known", 30).await;
+        let cache: BoxedCache = Arc::new(crate::cache::InMemoryCache::new());
+        let t = on_cache(&cache, limits);
+        known_client_passes_a_spent_global_limit(t, "t-known-c", 31).await;
+    }
+
+    /// Agent-secret failures and human logins from one IP spend separate
+    /// per-IP buckets, so neither can lock the other out.
+    #[tokio::test]
+    async fn agent_failures_spare_human_logins_on_the_same_ip() {
+        let t = LoginThrottle::new(LoginLimits {
+            ip_limit: 2,
+            ..LoginLimits::default()
+        });
+        let (agent, human) = (LoginScope::TenantAgent("t-split".into()), tenant("t-split"));
+        let shared_ip = ip("10.9.40.1");
+        for _ in 0..2 {
+            t.begin(&agent, &shared_ip, "")
+                .await
+                .unwrap()
+                .failed()
+                .await;
+        }
+        assert!(t.begin(&agent, &shared_ip, "").await.is_err());
+        assert!(t.check(&human, &shared_ip, "bob").await.is_ok());
+        for n in 0..2 {
+            let a = t.begin(&human, &shared_ip, &format!("h{n}")).await;
+            a.expect("agent failures locked a human out").failed().await;
+        }
+        let other = ip("10.9.40.2");
+        for n in 0..2 {
+            let a = t.begin(&human, &other, &format!("g{n}")).await;
+            a.unwrap().failed().await;
+        }
+        let a = t.begin(&agent, &other, "").await;
+        a.expect("human failures locked an agent out")
+            .succeeded()
+            .await;
+    }
+
+    /// A known-client marker is written once, not on every sign-in.
+    #[tokio::test]
+    async fn a_known_client_marker_is_written_once() {
+        let counting = Arc::new(CountingSets::default());
+        let cache: BoxedCache = counting.clone();
+        let t = on_cache(&cache, LoginLimits::default());
+        let (s, home) = (tenant("t-mark-once"), ip("10.9.41.1"));
+        for _ in 0..3 {
+            t.begin(&s, &home, "carol").await.unwrap().succeeded().await;
+        }
+        let marks = counting
+            .known_sets
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(marks, 1, "the marker was rewritten");
+    }
+
+    /// An in-memory cache that counts `login-known:` writes.
+    #[derive(Default)]
+    struct CountingSets {
+        inner: crate::cache::InMemoryCache,
+        known_sets: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for CountingSets {
+        async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            self.inner.get(k).await
+        }
+        async fn set(
+            &self,
+            k: &str,
+            v: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            if k.contains("login-known:") {
+                self.known_sets
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.inner.set(k, v, ttl).await
+        }
+        async fn delete(&self, k: &str) -> Result<(), crate::cache::CacheError> {
+            self.inner.delete(k).await
+        }
+        async fn exists(&self, k: &str) -> Result<bool, crate::cache::CacheError> {
+            self.inner.exists(k).await
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.inner.clear().await
+        }
+        async fn incr(
+            &self,
+            k: &str,
+            by: i64,
+            ttl: Option<Duration>,
+        ) -> Result<i64, crate::cache::CacheError> {
+            self.inner.incr(k, by, ttl).await
+        }
+        async fn decr(
+            &self,
+            k: &str,
+            by: i64,
+            ttl: Option<Duration>,
+        ) -> Result<i64, crate::cache::CacheError> {
+            self.inner.decr(k, by, ttl).await
         }
     }
 
