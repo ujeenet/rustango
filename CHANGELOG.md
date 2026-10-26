@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — tests and CI
+
+- Live suites no longer pass in CI when a PG extension is missing or a set URL is unreachable. New `testkit::matrix::{pg_extension, required_env, skip_outside_ci}` skip locally and fail when `CI` is set.
+
 ## [0.61.4] — 2026-10-26
 
 ### Fixed — a schema-mode tenant cannot take a role's name

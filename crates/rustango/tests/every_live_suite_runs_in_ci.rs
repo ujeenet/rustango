@@ -423,6 +423,21 @@ fn the_live_jobs_set_the_url_their_suites_read() {
     }
 }
 
+/// `postgres_test` may skip PostGIS only: its suites run in `postgis_live`,
+/// and every other extension suite must run on the pgvector image.
+#[test]
+fn postgres_test_declares_only_postgis_missing() {
+    let path = repo_root().join(".github/workflows/ci.yml");
+    let yaml = std::fs::read_to_string(&path).expect("read ci.yml");
+    let declared: Vec<String> = yaml
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("RUSTANGO_TEST_MISSING_PG_EXTENSIONS:"))
+        .map(|v| v.trim().to_owned())
+        .collect();
+    assert_eq!(declared, ["postgis"], "only `postgres_test` may declare one");
+    assert!(job_block(&yaml, "postgres_test").contains("RUSTANGO_TEST_MISSING_PG_EXTENSIONS: postgis"));
+}
+
 /// `postgres_test` and `mysql_live` run the `tests_compile` archive in N
 /// partitions. A matrix that skips a number, a filter on the PostgreSQL
 /// run, a parallel profile or another archive would leave suites unrun or

@@ -1,7 +1,8 @@
 //! A form body to a serializer ViewSet types array, hstore and bytes
 //! fields the way JSON would, so they validate and save (#1993 review).
 //!
-//! Skips when `DATABASE_URL` is unset or `hstore` can't be created.
+//! Skips locally when `DATABASE_URL` is unset or `hstore` can't be
+//! created; fails in CI.
 
 #![cfg(all(
     feature = "postgres",
@@ -39,15 +40,14 @@ struct PostSerializer {
 }
 
 async fn app() -> Option<axum::Router> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = rustango::testkit::matrix::required_env("DATABASE_URL")?;
     let pg = sqlx::PgPool::connect(&url)
         .await
         .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}"));
-    sqlx::query("CREATE EXTENSION IF NOT EXISTS hstore")
-        .execute(&pg)
-        .await
-        .ok()?;
     let pool = Pool::from(pg);
+    if !rustango::testkit::matrix::pg_extension(&pool, "hstore").await {
+        return None;
+    }
     rustango::testkit::matrix::fresh_table::<Post>(&pool).await;
     Some(
         rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "tags", "attrs", "blob"])

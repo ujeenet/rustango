@@ -26,21 +26,12 @@ pub struct Doc {
 
 #[tokio::test]
 async fn vector_column_round_trip_and_knn() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!("DATABASE_URL unset — skipping pgvector live test");
+    let Some(url) = rustango::testkit::matrix::required_env("DATABASE_URL") else {
         return;
     };
     let pg = sqlx::PgPool::connect(&url).await.expect("connect PG");
 
-    // pgvector must be enabled; the test image (pgvector/pgvector:pg16)
-    // ships it. If it's somehow unavailable, skip rather than fail so a
-    // non-pgvector PG doesn't break the suite.
-    if sqlx::query("CREATE EXTENSION IF NOT EXISTS vector")
-        .execute(&pg)
-        .await
-        .is_err()
-    {
-        eprintln!("`vector` extension unavailable — skipping pgvector live test");
+    if !rustango::testkit::matrix::pg_extension(&pg.clone().into(), "vector").await {
         return;
     }
     for ddl in [
@@ -113,17 +104,11 @@ pub struct Note {
 /// #1970: an all-NULL vector column in a bulk_update reached PG as text.
 #[tokio::test]
 async fn bulk_update_sets_a_vector_column_to_null() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!("DATABASE_URL unset — skipping pgvector live test");
+    let Some(url) = rustango::testkit::matrix::required_env("DATABASE_URL") else {
         return;
     };
     let pg = sqlx::PgPool::connect(&url).await.expect("connect PG");
-    if sqlx::query("CREATE EXTENSION IF NOT EXISTS vector")
-        .execute(&pg)
-        .await
-        .is_err()
-    {
-        eprintln!("`vector` extension unavailable — skipping pgvector live test");
+    if !rustango::testkit::matrix::pg_extension(&pg.clone().into(), "vector").await {
         return;
     }
     let pool: Pool = pg.into();

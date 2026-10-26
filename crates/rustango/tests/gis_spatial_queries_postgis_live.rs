@@ -29,17 +29,11 @@ pub struct Place {
 
 #[tokio::test]
 async fn spatial_distance_dwithin_and_intersects() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!("DATABASE_URL unset — skipping PostGIS spatial live test");
+    let Some(url) = rustango::testkit::matrix::required_env("DATABASE_URL") else {
         return;
     };
     let pg = sqlx::PgPool::connect(&url).await.expect("connect PG");
-    if sqlx::query("CREATE EXTENSION IF NOT EXISTS postgis")
-        .execute(&pg)
-        .await
-        .is_err()
-    {
-        eprintln!("`postgis` extension unavailable — skipping spatial live test");
+    if !rustango::testkit::matrix::pg_extension(&pg.clone().into(), "postgis").await {
         return;
     }
     for ddl in [
