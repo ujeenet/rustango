@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Generic relation reads hide scoped-out rows
+
+`get_object` and the reverse generic helpers now return what a `QuerySet` returns. To read hidden rows, query the model with `without_global_scopes()`.
+
 ### `cache_page` bypasses `X-Api-Key` requests
 
 Such responses are no longer cached. A route that is truly public can opt back in with `cache_authenticated(true)`.

@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — generic relation reads apply global scopes
+
+`GenericForeignKey::get_object`, `fetch_row_as_json`, `fetch_reverse_generic` and `prefetch_reverse_generic_for` apply the model's global scopes, as `prefetch_generic` already did.
+
 ### Fixed — `cache_page` skips requests with `X-Api-Key`
 
 Like `Authorization` and `Cookie`, a request with `X-Api-Key` is neither served from nor stored in the shared cache unless the route sets `cache_authenticated(true)`.

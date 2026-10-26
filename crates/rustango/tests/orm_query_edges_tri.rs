@@ -107,6 +107,33 @@ pub struct Note {
     pub object_pk: i64,
 }
 
+fn shown_only() -> WhereExpr {
+    WhereExpr::Predicate(rustango::core::Filter::new(
+        "shown",
+        Op::Eq,
+        rustango::core::SqlValue::Bool(true),
+    ))
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "oqe_doc", app = "oqe", global_scope(name = "shown", apply = shown_only))]
+pub struct Doc {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub shown: bool,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "oqe_remark", app = "oqe", global_scope(name = "shown", apply = shown_only))]
+#[rustango(generic_fk(name = "target", ct_column = "ct_id", pk_column = "object_pk"))]
+pub struct Remark {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub ct_id: i64,
+    pub object_pk: i64,
+    pub shown: bool,
+}
+
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "oqe_token", app = "oqe")]
 pub struct Token {
@@ -134,6 +161,8 @@ async fn setup(pool: &Pool) {
     fresh_table::<Day>(pool).await;
     fresh_table::<Gauge>(pool).await;
     fresh_table::<Token>(pool).await;
+    fresh_table::<Doc>(pool).await;
+    fresh_table::<Remark>(pool).await;
     rustango::audit::ensure_table_pool(pool)
         .await
         .expect("audit table");
@@ -409,6 +438,56 @@ async fn prefetch_reverse_generic_by_a_renamed_column(pool: &Pool) {
     assert_eq!(grouped.get(&1).map(Vec::len), Some(1), "{grouped:?}");
 }
 
+/// Every generic-relation read applies the target's global scopes, as
+/// `prefetch_generic` does: a row a `QuerySet` hides is hidden by each path.
+async fn generic_reads_apply_global_scopes(pool: &Pool) {
+    use rustango::contenttypes::{self, ContentType, GenericForeignKey};
+    contenttypes::ensure_seeded(pool)
+        .await
+        .expect("seed content types");
+    let ct = ContentType::for_model::<Doc>(pool)
+        .await
+        .unwrap()
+        .expect("doc ct");
+    let ct_id = *ct.id.get().expect("ct id");
+    for (id, shown) in [(1, true), (2, false)] {
+        Doc { id, shown }.insert_pool(pool).await.expect("doc");
+        Remark {
+            id,
+            ct_id,
+            object_pk: 1,
+            shown,
+        }
+        .insert_pool(pool)
+        .await
+        .expect("remark");
+    }
+    let get = |pk| async move {
+        GenericForeignKey::new(ct_id, pk)
+            .get_object(pool)
+            .await
+            .expect("get_object")
+    };
+    assert!(get(1).await.is_some());
+    assert_eq!(get(2).await, None, "get_object read a scoped-out row");
+    let prefetched = contenttypes::prefetch_generic::<Doc>(pool, &[(ct_id, 1), (ct_id, 2)])
+        .await
+        .expect("prefetch_generic");
+    assert_eq!(prefetched.len(), 1);
+
+    let ids = |rows: &[serde_json::Value]| -> Vec<i64> {
+        rows.iter().filter_map(|r| r["id"].as_i64()).collect()
+    };
+    let reverse = contenttypes::fetch_reverse_generic(pool, Remark::SCHEMA, ct_id, 1, None)
+        .await
+        .expect("reverse");
+    assert_eq!(ids(&reverse), [1], "{reverse:?}");
+    let grouped = contenttypes::prefetch_reverse_generic_for::<Doc>(pool, Remark::SCHEMA, &[1], None)
+        .await
+        .expect("reverse prefetch");
+    assert_eq!(ids(&grouped[&1]), [1], "{grouped:?}");
+}
+
 /// `__week` is the ISO 8601 week on every backend.
 async fn week_is_iso(pool: &Pool) {
     let days = [
@@ -469,6 +548,7 @@ tri_dialect_test! {
         in_bulk_on_past_the_bind_cap,
         prefetch_soft_by_a_renamed_column,
         prefetch_reverse_generic_by_a_renamed_column,
+        generic_reads_apply_global_scopes,
         in_lists_match_alike_and_share_a_statement,
     ],
 }
