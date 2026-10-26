@@ -21,8 +21,8 @@
 //!
 //! ## Exempt paths
 //!
-//! [`SslRedirectLayer::exempt`] takes path prefixes. A request whose
-//! path starts with one of them is not redirected. This suits health
+//! [`SslRedirectLayer::exempt`] takes path prefixes, matched by whole
+//! segment. A request whose path is under one of them is not redirected. This suits health
 //! checks reached over plain HTTP. By default nothing is exempt.
 //!
 //! [`SslRedirectLayer::exempt`]: crate::ssl_redirect::SslRedirectLayer::exempt
@@ -119,10 +119,13 @@ impl SslRedirectLayer {
         false
     }
 
-    /// `true` when the request path matches any exempt prefix.
+    /// `true` when the request path is under any exempt prefix, by whole
+    /// segment: `/health` exempts `/health/db`, not `/healthcheck-admin`.
     #[must_use]
     pub fn is_exempt(&self, path: &str) -> bool {
-        self.exempt.iter().any(|p| path.starts_with(p))
+        self.exempt
+            .iter()
+            .any(|p| crate::urls::path_under_prefix(path, p))
     }
 }
 

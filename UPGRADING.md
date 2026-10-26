@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### Jobs: unregistered in-memory jobs are dead-lettered
+
+`InMemoryJobQueue` now passes a job with no registered handler to `on_dead_letter` (error `no handler registered`, 0 attempts). It was dropped before; the DB queue is unchanged.
+
+### HTTP middleware
+
+`SslRedirectLayer::exempt` prefixes match by whole segment; end a prefix with `/` or list each path. `RedirectMap` answers POST, PUT and others with 308/307 instead of 301/302. `CompressionLayer`'s `deflate` is now zlib-wrapped, as browsers expect.
+
 ## 0.61.5
 
 ### ViewSet OpenAPI: Binary is hex

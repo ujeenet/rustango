@@ -47,7 +47,7 @@ use axum::http::header::{
 use axum::http::{HeaderValue, Request, Response, StatusCode};
 use axum::middleware::Next;
 use axum::Router;
-use flate2::write::{DeflateEncoder, GzEncoder};
+use flate2::write::{GzEncoder, ZlibEncoder};
 use flate2::Compression;
 
 use crate::body_limit::collect_capped;
@@ -198,7 +198,7 @@ async fn handle(cfg: Arc<CompressionLayer>, req: Request<Body>, next: Next) -> R
         return resp;
     }
 
-    let compressed = match encode(encoding, &bytes, cfg.level) {
+    let compressed = match encode_off_runtime(encoding, bytes.clone(), cfg.level).await {
         Ok(c) => c,
         Err(_) => {
             // Compressor failed; we still hold the bytes, so send them raw.
@@ -287,6 +287,22 @@ pub fn decompress_string(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Bodies from this size compress on the blocking pool, not the async worker.
+const BLOCKING_THRESHOLD: usize = 64 * 1024;
+
+async fn encode_off_runtime(
+    enc: Encoding,
+    bytes: axum::body::Bytes,
+    level: u32,
+) -> std::io::Result<Vec<u8>> {
+    if bytes.len() < BLOCKING_THRESHOLD {
+        return encode(enc, &bytes, level);
+    }
+    tokio::task::spawn_blocking(move || encode(enc, &bytes, level))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
 fn encode(enc: Encoding, bytes: &[u8], level: u32) -> std::io::Result<Vec<u8>> {
     let level = Compression::new(level);
     match enc {
@@ -295,8 +311,9 @@ fn encode(enc: Encoding, bytes: &[u8], level: u32) -> std::io::Result<Vec<u8>> {
             e.write_all(bytes)?;
             e.finish()
         }
+        // HTTP `deflate` is the zlib format (RFC 9110), not raw DEFLATE.
         Encoding::Deflate => {
-            let mut e = DeflateEncoder::new(Vec::with_capacity(bytes.len() / 2), level);
+            let mut e = ZlibEncoder::new(Vec::with_capacity(bytes.len() / 2), level);
             e.write_all(bytes)?;
             e.finish()
         }
