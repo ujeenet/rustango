@@ -182,6 +182,22 @@ The first `migrate` runs `ALTER TABLE rustango_translations MODIFY COLUMN` on `l
 
 A schema-mode tenant's migrate takes its own advisory lock; the registry keeps the old key. During a rolling upgrade, do not migrate the same tenant from 0.61.3 and a newer release at once: they no longer share a lock.
 
+### `check --deploy` has new prod warnings
+
+An unset or `console` `[mail] backend` now warns on the prod tier. Set `smtp`, or `null` if the app sends no mail. `"*"` in `allowed_hosts` or `cors_allowed_origins` and an unset `request_timeout_secs` warn too.
+
+### `FileCache` permissions
+
+New cache directories are 0700 and entries 0600. An existing directory keeps its mode; `chmod 700` it, since entry files hold keys in clear.
+
+### `DynamicForm` URL and email answers
+
+A `url` answer with a `javascript:`, `vbscript:` or `data:` scheme is refused. Other non-http(s) URLs, and emails that `validate_email` or `SmtpMailer` would refuse, are still accepted with a `rustango::forms` warning; a later minor release will refuse them.
+
+### WebSocket peers must answer pings
+
+`ws_handler` now closes a socket that sends no frame within one `keepalive` after a ping. Browsers answer pings on their own; a custom client must too. A send that stalls past `max(keepalive, 10 s)` also closes it, so a short keepalive does not drop slow readers.
+
 ## 0.61.3
 
 ### `[cache] backend` should be a known lowercase name

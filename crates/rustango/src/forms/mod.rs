@@ -1263,6 +1263,15 @@ impl DynamicForm {
                     if field.field_type == DynamicFieldType::Email && !raw_str.is_empty() {
                         if !raw_str.contains('@') {
                             errors.add(&field.name, "Enter a valid email address.");
+                        } else if !is_strict_email(raw_str) {
+                            warn_lenient(&field.name, "an email address SmtpMailer would refuse");
+                        }
+                    }
+                    if field.field_type == DynamicFieldType::Url && !raw_str.is_empty() {
+                        if is_script_url(raw_str) {
+                            errors.add(&field.name, "Enter a valid URL.");
+                        } else if crate::validators::validate_url(raw_str).is_err() {
+                            warn_lenient(&field.name, "not an http(s) URL");
                         }
                     }
                 }
@@ -1381,6 +1390,40 @@ fn checkbox(raw: &str) -> Option<bool> {
     }
 }
 
+/// A URL a browser would run rather than follow: `javascript:`,
+/// `vbscript:` or `data:`, spelled as the browser reads it.
+fn is_script_url(raw: &str) -> bool {
+    // Browsers drop tab/LF/CR anywhere and leading controls and spaces.
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect();
+    let s = cleaned.trim_start_matches(|c: char| c <= ' ');
+    s.split_once(':').is_some_and(|(scheme, _)| {
+        ["javascript", "vbscript", "data"]
+            .iter()
+            .any(|bad| scheme.eq_ignore_ascii_case(bad))
+    })
+}
+
+/// The framework's email check, plus `SmtpMailer`'s parser with `email`.
+fn is_strict_email(s: &str) -> bool {
+    #[cfg(feature = "email")]
+    let parses = crate::email::is_address(s);
+    #[cfg(not(feature = "email"))]
+    let parses = true;
+    parses && crate::validators::validate_email(s).is_ok()
+}
+
+/// Accepted for compatibility; a later minor release refuses it.
+fn warn_lenient(field: &str, what: &str) {
+    tracing::warn!(
+        target: "rustango::forms",
+        field,
+        "DynamicForm accepted {what}; a later minor release will refuse it"
+    );
+}
+
 #[cfg(test)]
 mod dynamic_form_tests {
     use super::*;
@@ -1450,6 +1493,44 @@ mod dynamic_form_tests {
             serde_json::json!("x,y"),
             "only multi-select splits"
         );
+    }
+
+    /// A script URL is stored XSS once rendered as a link.
+    #[test]
+    fn url_field_refuses_script_urls() {
+        let mut f = form(serde_json::json!([{"name": "u", "field_type": "url"}]));
+        for bad in [
+            "javascript:alert(1)",
+            " JaVa\tScRiPt:alert(1)",
+            "\u{1}java\nscript:x",
+            "data:text/html,<script>x</script>",
+            "vbscript:x",
+        ] {
+            f.bind(HashMap::from([("u".into(), bad.into())]));
+            assert!(!f.is_valid(), "{bad:?} accepted");
+        }
+        // Accepted; the non-http(s) ones only log a warning for now.
+        for ok in ["https://example.com/a?b#c", "http://x:8080", "example.com", "mailto:a@b.co"] {
+            f.bind(HashMap::from([("u".into(), ok.into())]));
+            assert!(f.is_valid(), "{ok:?}: {:?}", f.errors());
+        }
+    }
+
+    #[test]
+    fn email_field_uses_the_framework_checks() {
+        assert!(is_strict_email("a.b+c@example.com"));
+        for bad in ["a..b@example.com", "a b@example.com", "a@localhost"] {
+            assert!(!is_strict_email(bad), "{bad:?}");
+        }
+        // Only the `email` feature's address parser refuses the bracketed form.
+        #[cfg(feature = "email")]
+        assert!(!is_strict_email("<a@example.com>"));
+        let mut f = form(serde_json::json!([{"name": "e", "field_type": "email"}]));
+        f.bind(HashMap::from([("e".into(), "nope".into())]));
+        assert!(!f.is_valid());
+        // Loose but with an `@`: still accepted, with a warning.
+        f.bind(HashMap::from([("e".into(), "a@localhost".into())]));
+        assert!(f.is_valid(), "{:?}", f.errors());
     }
 
     #[test]

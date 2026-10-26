@@ -711,6 +711,15 @@ impl AuditEntry {
     }
 }
 
+/// `now - days` (negative clamps to 0), floored at the Unix epoch: a huge
+/// `days` keeps every row instead of panicking or binding an unstorable year.
+fn cutoff_before(days: i64) -> chrono::DateTime<chrono::Utc> {
+    let floor = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
+    chrono::Duration::try_days(days.max(0))
+        .and_then(|d| chrono::Utc::now().checked_sub_signed(d))
+        .map_or(floor, |t| t.max(floor))
+}
+
 /// Delete audit entries older than `cutoff_days` from `pool`'s audit
 /// table. Returns the number of rows removed.
 ///
@@ -718,7 +727,8 @@ impl AuditEntry {
 /// maintenance task. Each tenant's audit table is its own retention
 /// boundary, so this only touches the tenant `pool` points at.
 ///
-/// `cutoff_days = 0` clears the whole table. A negative value clamps to 0.
+/// `cutoff_days = 0` clears the whole table. A negative value clamps to 0;
+/// one reaching before 1970 deletes nothing.
 ///
 /// Postgres-typed; [`cleanup_older_than_pool`] works on any backend.
 ///
@@ -731,8 +741,7 @@ impl AuditEntry {
 /// Driver / SQL failures from the DELETE.
 #[cfg(feature = "postgres")]
 pub async fn cleanup_older_than(pool: &PgPool, cutoff_days: i64) -> Result<u64, sqlx::Error> {
-    let cutoff = cutoff_days.max(0);
-    let cutoff_ts = chrono::Utc::now() - chrono::Duration::days(cutoff);
+    let cutoff_ts = cutoff_before(cutoff_days);
     let result = sqlx::query(r#"DELETE FROM "rustango_audit_log" WHERE "occurred_at" < $1"#)
         .bind(cutoff_ts)
         .execute(pool)
@@ -1313,7 +1322,8 @@ pub async fn fetch_for_entity_pool(
 /// computed in Rust and bound, so the SQL needs no
 /// `NOW() - INTERVAL '… day'`.
 ///
-/// `cutoff_days = 0` clears the whole table. A negative value clamps to 0.
+/// `cutoff_days = 0` clears the whole table. A negative value clamps to 0;
+/// one reaching before 1970 deletes nothing.
 ///
 /// **Under tenancy, pass a tenant-scoped pool.** The audit table is
 /// per-tenant, so this trims only the tenant `pool` points at. Pass a
@@ -1328,8 +1338,7 @@ pub async fn cleanup_older_than_pool(
     cutoff_days: i64,
 ) -> Result<u64, sqlx::Error> {
     use crate::core::SqlValue;
-    let cutoff = cutoff_days.max(0);
-    let cutoff_ts = chrono::Utc::now() - chrono::Duration::days(cutoff);
+    let cutoff_ts = cutoff_before(cutoff_days);
     let sql = audit_cleanup_older_than_sql(pool.dialect());
     // SQLite binds the cutoff twice: once for the indexed range, once for
     // the second leg. Both use the canonical spelling — the second leg

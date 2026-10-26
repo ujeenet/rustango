@@ -45,6 +45,27 @@ Like `Authorization` and `Cookie`, a request with `X-Api-Key` is neither served 
 - The migrate lock is per schema, so a schema-mode tenant's migration no longer waits on (or blocks) the registry's or another tenant's.
 - With `max_cached_scoped_pools = 0`, a registry connection a tenant borrows drops its prepared statements on the way in and out, so one query on tenants whose tables differ no longer fails with `cached plan must not change result type`.
 
+### Changed — `check --deploy` flags more prod defaults
+
+- An unset or `console` `[mail] backend` is a warning: it prints reset and magic-link URLs to stdout.
+- `"*"` in `allowed_hosts` or `cors_allowed_origins`, and an unset or zero `request_timeout_secs`, are warnings; an unset `max_body_bytes` is info.
+
+### Fixed — huge audit retention days and durations no longer panic
+
+`audit-cleanup --days`, the admin cleanup form and `cleanup_older_than*` keep every row when the cutoff falls before 1970 or past chrono's range; `format_duration_long` / `_short` filters pass out-of-range seconds through unchanged.
+
+### Fixed — `FileCache` reaps expired entries and is owner-only
+
+Every 16 writes sweep one sixteenth of the directory for expired entries, and the new `FileCache::purge_expired` sweeps it all. New directories are created 0700 and entries 0600 on Unix; entries held keys such as session ids readable to other local users.
+
+### Security — `DynamicForm` refuses script URLs
+
+A `url` field refuses `javascript:`, `vbscript:` and `data:` values, however a browser would spell them; rendered as a link they were stored XSS. Other URLs failing `validate_url`, and emails failing `validate_email` or the `SmtpMailer` parser, log a warning for now.
+
+### Fixed — WebSocket keepalive closes half-open peers
+
+`ws_handler` pings every `keepalive` even while messages flow, closes a peer that sends nothing for a whole interval after a ping, and gives each send `max(keepalive, 10 s)` to finish.
+
 ## [0.61.3] — 2026-10-26
 
 ### Changed — unknown `cache.backend` values are logged as errors
