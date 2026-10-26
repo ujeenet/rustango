@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `cache_page` skips requests with `X-Api-Key`
+
+Like `Authorization` and `Cookie`, a request with `X-Api-Key` is neither served from nor stored in the shared cache unless the route sets `cache_authenticated(true)`.
+
 ## [0.61.3] — 2026-10-26
 
 ### Changed — unknown `cache.backend` values are logged as errors

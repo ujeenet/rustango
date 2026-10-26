@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `cache_page` bypasses `X-Api-Key` requests
+
+Such responses are no longer cached. A route that is truly public can opt back in with `cache_authenticated(true)`.
+
 ## 0.61.3
 
 ### `[cache] backend` should be a known lowercase name
