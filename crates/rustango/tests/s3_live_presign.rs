@@ -265,3 +265,54 @@ async fn presigned_put_create_only_refuses_a_replay() {
     assert_eq!(storage.load(&key).await.expect("load"), b"first");
     storage.delete(&key).await.expect("delete");
 }
+
+async fn read_all(s: rustango::storage::ByteStream) -> Vec<u8> {
+    use http_body_util::BodyExt as _;
+    let body = axum::body::Body::from_stream(s);
+    body.collect().await.expect("read").to_bytes().to_vec()
+}
+
+/// `save_stream` over plain http chunk-signs the body: the server checks
+/// each chunk, create-only holds, and a cut-short body stores nothing.
+#[tokio::test]
+async fn save_stream_round_trip_create_only_and_cut_short() {
+    use rustango::storage::ByteStream;
+    let Some(storage) = maybe_storage() else {
+        eprintln!("skipping — set RUSTANGO_S3_TEST_KEY etc.");
+        return;
+    };
+    let key = format!("stream-test/{}.bin", uuid::Uuid::new_v4());
+    let data: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+    let len = data.len() as u64;
+    let once = PutConditions::new()
+        .content_type("application/octet-stream")
+        .create_only();
+    storage
+        .save_stream(&key, len, ByteStream::from(data.clone()), &once)
+        .await
+        .expect("save_stream");
+    let err = storage
+        .save_stream(&key, 3, ByteStream::from(b"new".to_vec()), &once)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("already exists"), "{err}");
+    let meta = storage.metadata(&key).await.expect("head").expect("object");
+    assert_eq!(meta.size, len);
+    assert_eq!(
+        meta.content_type.as_deref(),
+        Some("application/octet-stream")
+    );
+    assert_eq!(
+        read_all(storage.load_stream(&key).await.expect("load_stream")).await,
+        data
+    );
+
+    let cut = format!("stream-test/{}.cut", uuid::Uuid::new_v4());
+    let short = ByteStream::from(data[..1 << 20].to_vec());
+    assert!(storage
+        .save_stream(&cut, len, short, &PutConditions::new())
+        .await
+        .is_err());
+    assert_eq!(storage.metadata(&cut).await.expect("head"), None);
+    storage.delete(&key).await.expect("delete");
+}

@@ -61,3 +61,64 @@ fn sanitize_filename_blocks_path_traversal_and_unsafe_chars() {
     assert_eq!(sanitize_filename("my photo!.png"), "my_photo_.png");
     assert_eq!(sanitize_filename(""), "upload"); // never empty
 }
+
+mod streaming {
+    use axum::body::Body;
+    use axum::http::{header, HeaderMap, StatusCode};
+    use rustango::storage::{BoxedStorage, ByteStream, PutConditions, StorageError};
+
+    // The handlers from the "Large files" section, with the extractors' values passed in.
+    async fn upload(
+        storage: BoxedStorage,
+        headers: HeaderMap,
+        body: Body,
+    ) -> Result<String, StatusCode> {
+        let len = headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok()?.parse::<u64>().ok())
+            .ok_or(StatusCode::LENGTH_REQUIRED)?;
+        let key = format!("uploads/{}", uuid::Uuid::new_v4());
+        let put = PutConditions::new().create_only();
+        storage
+            .save_stream(&key, len, ByteStream::from(body), &put)
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        Ok(key)
+    }
+
+    async fn download(storage: BoxedStorage, key: String) -> Result<Body, StatusCode> {
+        let stream = storage.load_stream(&key).await.map_err(|e| match e {
+            StorageError::NotFound(_) => StatusCode::NOT_FOUND,
+            _ => StatusCode::BAD_GATEWAY,
+        })?;
+        Ok(Body::from_stream(stream))
+    }
+
+    #[tokio::test]
+    async fn proxy_an_upload_into_save_stream_and_back() {
+        use http_body_util::BodyExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let storage: BoxedStorage =
+            std::sync::Arc::new(rustango::storage::LocalStorage::new(dir.path().into()));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_LENGTH, "11".parse().unwrap());
+        let key = upload(storage.clone(), headers.clone(), Body::from("hello world"))
+            .await
+            .unwrap();
+        let body = download(storage.clone(), key).await.unwrap();
+        assert_eq!(body.collect().await.unwrap().to_bytes(), "hello world");
+        // A body of another size than declared is refused.
+        assert_eq!(
+            upload(storage.clone(), headers, Body::from("short")).await,
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            upload(storage.clone(), HeaderMap::new(), Body::from("x")).await,
+            Err(StatusCode::LENGTH_REQUIRED)
+        );
+        assert_eq!(
+            download(storage, "uploads/nope".into()).await.err(),
+            Some(StatusCode::NOT_FOUND)
+        );
+    }
+}
