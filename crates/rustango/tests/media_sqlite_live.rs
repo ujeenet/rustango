@@ -566,7 +566,7 @@ async fn finalize_on_a_failed_row_stays_failed() {
 #[tokio::test]
 async fn purge_pending_deletes_unconfirmed_objects() {
     use rustango::media::{MediaStatus, UploadIntent};
-    let (mgr, disk, _) = bucket_manager().await;
+    let (mgr, disk, sq) = bucket_manager().await;
     let begin = |name: &'static str| {
         let mgr = &mgr;
         async move {
@@ -592,7 +592,19 @@ async fn purge_pending_deletes_unconfirmed_objects() {
     disk.put(&ready.storage_key, b"0123456789", "image/png");
     mgr.finalize_upload(ready.media_id).await.expect("finalize");
     mgr.tag(pending.media_id, &["t"]).await.expect("tag");
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    // Older than the longest upload URL, which `purge_pending` waits out.
+    {
+        use rustango::core::Column as _;
+        use rustango::media::Media;
+        use rustango::sql::UpdaterPool as _;
+        Media::objects()
+            .where_(Media::id.gt(0))
+            .update()
+            .set("uploaded_at", chrono::Utc::now() - chrono::Duration::hours(2))
+            .execute_pool(&Pool::Sqlite(sq))
+            .await
+            .expect("age them");
+    }
 
     let purged = mgr
         .purge_pending(std::time::Duration::ZERO)
