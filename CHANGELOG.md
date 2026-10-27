@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin performance
+
+- The audit feed's facets read at most 16 values per column through the ORM, plus the active one, instead of every distinct value; "show all" stops at 200.
+- The tenant admin builds its routes once; each request carries its own pool, perms and branding.
+- Test: a tenant user cannot deactivate their own account in the tenant admin.
+
 ## [0.61.7] — 2026-10-27
 
 ### Fixed — admin, REST and i18n

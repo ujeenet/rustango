@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use axum::extract::{Form, Query, State};
+use axum::extract::{Form, Query};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use serde_json::Value;
 
@@ -19,6 +19,7 @@ use super::helpers::{chrome_context, ListQuery};
 use super::render;
 use super::templates::render_with_chrome;
 use super::urls::AppState;
+use super::views::{fetch_facet_counts, fetch_facet_value_total, FacetRow};
 use crate::audit::AuditPerm;
 
 /// Page size for the `/__audit` activity feed. Matches the per-table
@@ -32,6 +33,10 @@ pub(crate) const DETAIL_ROWS: i64 = 20;
 /// `FACET_TRUNCATE` in the per-table list views. Opt out for one column
 /// with `?facet_show_all=<col>`.
 const AUDIT_FACET_TRUNCATE: usize = 15;
+
+/// Most facet values `?facet_show_all=<col>` reads: `source` names every
+/// user who ever wrote, so it is unbounded.
+const AUDIT_FACET_SHOW_ALL_CAP: usize = 200;
 
 /// Read access to the audit feed. Only [`AppState::audit_reader`] builds
 /// one, so every admin read of the log goes through the permission gate.
@@ -74,11 +79,52 @@ impl AuditReader<'_> {
         crate::audit::list_in(self.pool, &filter, None, limit, 0).await
     }
 
-    pub(crate) async fn facet_counts(
+    /// `column`'s most used values, at most `limit + 1` of them plus
+    /// `active` when it sits past the cut, and how many distinct values
+    /// the column takes. Never reads every distinct value.
+    pub(crate) async fn facet(
         &self,
         column: &str,
-    ) -> Result<Vec<(String, i64)>, sqlx::Error> {
-        crate::audit::facet_counts_in(self.pool, column, self.tables.as_deref()).await
+        limit: usize,
+        active: Option<&str>,
+    ) -> Result<(Vec<FacetRow>, usize), AdminError> {
+        use crate::core::{Filter, Model as _, Op, SelectQuery, SqlValue, WhereExpr};
+        let schema = crate::audit::AuditLog::SCHEMA;
+        let (Some(field), Some(table_field)) = (schema.field(column), schema.field("entity_table"))
+        else {
+            return Ok((Vec::new(), 0));
+        };
+        if self.tables.as_ref().is_some_and(Vec::is_empty) {
+            return Ok((Vec::new(), 0));
+        }
+        let scope = |extra: Option<Filter>| {
+            let tables = self.tables.as_ref().map(|t| {
+                let list = t.iter().cloned().map(SqlValue::String).collect();
+                Filter::new(table_field.column, Op::In, SqlValue::List(list))
+            });
+            SelectQuery {
+                where_clause: WhereExpr::and_predicates(tables.into_iter().chain(extra).collect()),
+                ..SelectQuery::new(schema)
+            }
+        };
+        let mut rows =
+            fetch_facet_counts(self.pool, scope(None), field, false, Some(limit + 1)).await?;
+        let mut total = rows.len();
+        if total > limit {
+            total = fetch_facet_value_total(self.pool, scope(None), field).await?;
+            if let Some(v) = active.filter(|v| rows.iter().all(|r| r.raw != *v)) {
+                let own = Filter::new(field.column, Op::Eq, SqlValue::String(v.to_owned()));
+                let extra =
+                    fetch_facet_counts(self.pool, scope(Some(own)), field, false, Some(1)).await?;
+                // A case-insensitive collation can match a shown value.
+                let extra: Vec<FacetRow> = extra
+                    .into_iter()
+                    .filter(|e| rows.iter().all(|r| r.raw != e.raw))
+                    .collect();
+                rows.extend(extra);
+            }
+        }
+        Ok((rows, total))
     }
 }
 
@@ -141,7 +187,7 @@ fn audit_forbidden(action: &'static str) -> AdminError {
 /// distinct values, counts and toggle URLs, like `list_filter` does.
 pub(crate) async fn audit_log_view(
     Query(params): Query<HashMap<String, String>>,
-    State(state): State<AppState>,
+    state: AppState,
 ) -> Result<Html<String>, AdminError> {
     let reader = state
         .audit_reader()
@@ -202,10 +248,19 @@ pub(crate) async fn audit_log_view(
             .iter()
             .find(|(k, _)| *k == col)
             .map(|(_, v)| v.as_str());
-        let facet_pairs = reader.facet_counts(col).await.unwrap_or_default();
-        let mut values: Vec<Value> = facet_pairs
+        let show_all = show_all_facet == Some(col);
+        let cap = if show_all {
+            AUDIT_FACET_SHOW_ALL_CAP
+        } else {
+            AUDIT_FACET_TRUNCATE
+        };
+        let (facet_rows, total_values) = reader
+            .facet(col, cap, active_value)
+            .await
+            .unwrap_or_default();
+        let mut values: Vec<Value> = facet_rows
             .iter()
-            .map(|(raw, count)| {
+            .map(|FacetRow { raw, count, .. }| {
                 let is_active = active_value.map(|v| v == raw).unwrap_or(false);
                 let mut toggle = feed_query.without(&[col]);
                 if !is_active {
@@ -221,30 +276,18 @@ pub(crate) async fn audit_log_view(
                 })
             })
             .collect();
-        let show_all = show_all_facet == Some(col);
-        let total_values = values.len();
-        let mut more_count: usize = 0;
-        if !show_all && total_values > AUDIT_FACET_TRUNCATE {
-            let mut active_first: Vec<Value> = Vec::new();
-            let mut rest: Vec<Value> = Vec::new();
-            for v in values.into_iter() {
-                if v.get("active").and_then(|b| b.as_bool()).unwrap_or(false) {
-                    active_first.push(v);
-                } else {
-                    rest.push(v);
-                }
-            }
-            let cap = AUDIT_FACET_TRUNCATE.saturating_sub(active_first.len());
-            let kept_rest_len = rest.len().min(cap);
-            more_count = total_values - active_first.len() - kept_rest_len;
-            active_first.extend(rest.into_iter().take(cap));
-            values = active_first;
+        if values.len() > cap {
+            // The active value first, then the most used, `cap` in all.
+            let (active, rest): (Vec<Value>, Vec<Value>) = values
+                .into_iter()
+                .partition(|v| v.get("active").and_then(Value::as_bool).unwrap_or(false));
+            let room = cap.saturating_sub(active.len());
+            values = active;
+            values.extend(rest.into_iter().take(room));
         }
-        let show_all_url = if more_count > 0 {
-            Some(feed_query.clone().with("facet_show_all", col).url())
-        } else {
-            None
-        };
+        let more_count = total_values.saturating_sub(values.len());
+        let show_all_url = (more_count > 0 && !show_all)
+            .then(|| feed_query.clone().with("facet_show_all", col).url());
         facets_ctx.push(serde_json::json!({
             "field": col,
             "values": values,
@@ -315,7 +358,7 @@ pub(crate) async fn audit_log_view(
 /// with the matching numeric input. The cleanup emits its own audit
 /// entry, so the trail records that it ran.
 pub(crate) async fn audit_cleanup_submit(
-    State(state): State<AppState>,
+    state: AppState,
     Form(form): Form<HashMap<String, String>>,
 ) -> Result<Response, AdminError> {
     if !state.can_clean_audit() {

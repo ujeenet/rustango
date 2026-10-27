@@ -148,6 +148,12 @@ untouched.
 
 ---
 
+## Unreleased
+
+### Admin: bounded audit facets
+
+`/__audit?facet_show_all=<col>` lists at most 200 values, then "+N more"; filter the feed to reach the rest. A tenant admin custom view on a table the user cannot see is now a 404 from the view, not an unmounted route.
+
 ## 0.61.7
 
 ### Admin: no self-deactivation

@@ -8,7 +8,6 @@
 //! routes at runtime, and the Tera filter and tag set cannot be
 //! inspected either.
 
-use axum::extract::State;
 use axum::response::Html;
 use serde_json::json;
 
@@ -17,7 +16,7 @@ use super::templates::render_with_chrome;
 use super::urls::AppState;
 use crate::core::Relation;
 
-pub(crate) async fn docs_view(State(state): State<AppState>) -> Html<String> {
+pub(crate) async fn docs_view(state: AppState) -> Html<String> {
     // Group models by app label, as the sidebar does, keeping
     // registration order inside each app.
     let mut by_app: indexmap::IndexMap<String, Vec<serde_json::Value>> = indexmap::IndexMap::new();

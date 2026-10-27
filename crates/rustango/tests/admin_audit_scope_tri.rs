@@ -1,6 +1,7 @@
 //! The admin audit feed's per-user table scope renders valid SQL on
 //! every backend (#1858), and a model table named `audit` can't open it (#1979).
-//! Huge `?page=` values are empty pages (#1865).
+//! Huge `?page=` values are empty pages (#1865). Facets read a bounded
+//! number of values.
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -260,9 +261,82 @@ async fn huge_page_is_an_empty_page(pool: &Pool) {
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
+/// One row per new `audfacet_*` table, `n` rows for `audfacet_hot_*`.
+async fn seed_facet_tables(pool: &Pool, many: usize, hot: usize) {
+    AuditLog::objects()
+        .filter("entity_table__startswith", "audfacet_")
+        .delete_on(pool)
+        .await
+        .expect("clear facet rows");
+    let mut entries = Vec::new();
+    let mut push = |table: String, rows: usize| {
+        let table: &'static str = Box::leak(table.into_boxed_str());
+        for i in 0..rows {
+            entries.push(PendingEntry {
+                entity_table: table,
+                entity_pk: i.to_string(),
+                operation: AuditOp::Create,
+                source: AuditSource::System,
+                changes: serde_json::json!({}),
+            });
+        }
+    };
+    for i in 0..many {
+        push(format!("audfacet_many_{i:03}"), 1);
+    }
+    for i in 0..hot {
+        push(format!("audfacet_hot_{i:02}"), 50);
+    }
+    audit::emit_many_pool(pool, &entries).await.expect("emit");
+}
+
+async fn superuser_get(pool: &Pool, uri: &str) -> (StatusCode, String) {
+    let app = rustango::admin::Builder::new(pool.clone())
+        .admin_prefix("")
+        .build();
+    let res = app
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The `entity_table` facet section of a rendered feed.
+fn table_facet(body: &str) -> &str {
+    let start = body.find("By entity_table").expect("entity_table facet");
+    let rest = &body[start..];
+    &rest[..rest.find("</section>").unwrap_or(rest.len())]
+}
+
+/// `facet_show_all` still caps how many values a facet reads and renders.
+async fn show_all_facet_is_bounded(pool: &Pool) {
+    seed_facet_tables(pool, 260, 0).await;
+    let (status, body) = superuser_get(pool, "/__audit?facet_show_all=entity_table").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let facet = table_facet(&body);
+    let shown = facet.matches("class=\"count\"").count();
+    assert!(shown <= 200, "{shown} values rendered");
+    assert!(facet.contains("more&hellip;"), "{facet}");
+}
+
+/// The active value stays in a capped facet, with its own count.
+async fn active_facet_value_past_the_cut_is_shown(pool: &Pool) {
+    seed_facet_tables(pool, 1, 20).await;
+    let (status, body) = superuser_get(pool, "/__audit?entity_table=audfacet_many_000").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let facet = table_facet(&body);
+    assert!(facet.contains("audfacet_many_000"), "{facet}");
+    assert!(facet.contains("more&hellip;"), "{facet}");
+    assert!(facet.matches("class=\"count\"").count() <= 15, "{facet}");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        show_all_facet_is_bounded,
+        active_facet_value_past_the_cut_is_shown,
         feed_shows_only_viewable_tables,
         feed_hides_hook_scoped_tables,
         feed_with_no_viewable_table_is_empty,

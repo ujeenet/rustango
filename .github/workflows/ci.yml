@@ -1370,6 +1370,7 @@ jobs:
           --features sqlite,tenancy,admin-sso,testkit
           --test sso_link_tenancy_sqlite_live --test sso_link_tri
           --test admin_create_users_tri --test logout_revokes_sessions_tri
+          --test tenant_admin_state_tri
           --test operator_last_active_tri
           --test basic_auth_cache_tri
           --test api_key_hmac_tri
@@ -1676,6 +1677,7 @@ jobs:
           binary(=db_servers_tri) |
           binary(=admin_create_users_tri) |
           binary(=logout_revokes_sessions_tri) |
+          binary(=tenant_admin_state_tri) |
           binary(=operator_last_active_tri) |
           binary(=basic_auth_cache_tri) |
           binary(=api_key_hmac_tri) |
