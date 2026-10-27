@@ -148,6 +148,12 @@ untouched.
 
 ---
 
+## Unreleased
+
+### Webhook retries and page purges
+
+A webhook answered 429 or 503 with `Retry-After` now waits that long (up to an hour) before its retry. `CachePageLayer::invalidate` now purges every variant of the path, and each cached GET reads one extra small cache key.
+
 ## 0.61.7
 
 ### Admin: no self-deactivation

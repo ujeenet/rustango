@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — webhooks, jobs, MCP and page cache
+
+- `WebhookSubscription::max_attempts` and `retry_backoff` set a subscription's retry window; the default stays 8 runs from 1s.
+- Webhook delivery honours `Retry-After` on 429 and 503, in seconds or as an HTTP date, capped at an hour.
+- `Job::max_attempts(&self)` and `Job::retry_delay(&self, n)` let a job set its cap and wait from its payload.
+- `mcp::register_instructions` adds server-level guidance, sent as `instructions` in the `initialize` reply only when set.
+- `CachePageLayer::invalidate` purges every variant of a path (any query, vary value or method) through a per-path generation counter.
+
 ## [0.61.7] — 2026-10-27
 
 ### Fixed — admin, REST and i18n

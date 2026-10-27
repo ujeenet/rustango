@@ -1131,9 +1131,10 @@ async fn vary_star_is_not_cached() {
     assert_eq!(cache_status(&resp), Some("BYPASS"));
 }
 
-/// `invalidate` deletes exactly the key the layer wrote (#2252).
+/// One `invalidate` purges every variant of the path: any query, any
+/// vary value. Other paths and hosts keep theirs.
 #[tokio::test]
-async fn invalidate_purges_the_cached_page() {
+async fn invalidate_purges_every_variant_of_the_path() {
     use rustango::cache_page::PageKey;
     let hits = Arc::new(AtomicU32::new(0));
     let h = hits.clone();
@@ -1149,39 +1150,50 @@ async fn invalidate_purges_the_cached_page() {
                 async { "ok" }
             }),
         )
+        .route("/q", get(|| async { "q" }))
         .layer(layer.clone());
-    let status = |app: Router| async move {
-        let req = Request::get("/p?x=1")
-            .header(header::HOST, "a.test")
-            .header(header::ACCEPT_LANGUAGE, "en")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        resp.headers()["x-cache-status"]
-            .to_str()
-            .unwrap()
-            .to_owned()
+    let status = |uri: &'static str, host: &'static str, lang: &'static str| {
+        let app = app.clone();
+        async move {
+            let req = Request::get(uri)
+                .header(header::HOST, host)
+                .header(header::ACCEPT_LANGUAGE, lang)
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            cache_status(&resp).unwrap().to_owned()
+        }
     };
-    assert_eq!(status(app.clone()).await, "MISS");
-    assert_eq!(status(app.clone()).await, "HIT");
-
-    let page = PageKey::new("/p", "a.test").query("x=1");
-    layer
-        .invalidate([&page.clone().vary("Accept-Language", "fr")])
-        .await
-        .unwrap();
-    assert_eq!(
-        status(app.clone()).await,
-        "HIT",
-        "purged another vary value"
-    );
+    let variants = [
+        ("/p?x=1", "a.test", "en"),
+        ("/p?utm_source=x", "a.test", "en-US,en;q=0.9"),
+        ("/p", "a.test", "fr"),
+    ];
+    let kept = [("/q", "a.test", "en"), ("/p", "b.test", "en")];
+    for (uri, host, lang) in variants.into_iter().chain(kept) {
+        assert_eq!(status(uri, host, lang).await, "MISS");
+        assert_eq!(status(uri, host, lang).await, "HIT");
+    }
 
     layer
-        .invalidate([&page.vary("Accept-Language", "en")])
+        .invalidate([&PageKey::new("/p", "a.test")])
         .await
         .unwrap();
-    assert_eq!(status(app.clone()).await, "MISS", "page still cached");
-    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    for (uri, host, lang) in variants {
+        assert_eq!(status(uri, host, lang).await, "MISS", "{uri} {lang}");
+        assert_eq!(status(uri, host, lang).await, "HIT", "{uri} {lang}");
+    }
+    for (uri, host, lang) in kept {
+        assert_eq!(status(uri, host, lang).await, "HIT", "{host}{uri}");
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 7);
+
+    // A second purge works the same.
+    layer
+        .invalidate([&PageKey::new("/p", "a.test").query("x=1")])
+        .await
+        .unwrap();
+    assert_eq!(status("/p", "a.test", "fr").await, "MISS");
 }
 
 /// Two nests of one cached router keep apart, and `invalidate` takes the full path.
@@ -1312,8 +1324,8 @@ async fn pages_use_the_bytes_api_only() {
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     assert_eq!(
         cache.text_calls.load(Ordering::SeqCst),
-        0,
-        "no String get/set"
+        2,
+        "the page's String get/set are only the generation reads"
     );
     assert_eq!(cache.bytes_calls.load(Ordering::SeqCst), 3, "get, set, get");
 }
