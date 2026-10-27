@@ -1,17 +1,15 @@
-use axum::{extract::Path, response::Json};
+use axum::{extract::Path, http::StatusCode, response::Json};
+use rustango::api_errors::ApiError;
 use rustango::extractors::Tenant;
 
 use crate::models::{Author, Post};
 
-pub async fn list_articles(mut tenant: Tenant) -> Json<serde_json::Value> {
-    let posts: Vec<Post> = match Post::objects()
+pub async fn list_articles(mut tenant: Tenant) -> Result<Json<serde_json::Value>, ApiError> {
+    let posts: Vec<Post> = Post::objects()
         .order_by(&[("published_at", true)])
         .fetch_on(tenant.conn())
         .await
-    {
-        Ok(p) => p,
-        Err(e) => return Json(serde_json::json!({"error": e.to_string()})),
-    };
+        .map_err(db_error)?;
 
     let items: Vec<serde_json::Value> = posts
         .iter()
@@ -26,40 +24,39 @@ pub async fn list_articles(mut tenant: Tenant) -> Json<serde_json::Value> {
         })
         .collect();
 
-    Json(serde_json::json!({ "count": items.len(), "results": items }))
+    Ok(Json(
+        serde_json::json!({ "count": items.len(), "results": items }),
+    ))
 }
 
-pub async fn get_article(mut tenant: Tenant, Path(id): Path<i64>) -> Json<serde_json::Value> {
+pub async fn get_article(
+    mut tenant: Tenant,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     use rustango::core::Column as _;
-    let posts: Vec<Post> = match Post::objects()
+    let posts: Vec<Post> = Post::objects()
         .where_(Post::id.eq(id))
         .fetch_on(tenant.conn())
         .await
-    {
-        Ok(p) => p,
-        Err(e) => return Json(serde_json::json!({"error": e.to_string()})),
-    };
+        .map_err(db_error)?;
     let Some(post) = posts.into_iter().next() else {
-        return Json(serde_json::json!({"error": "not found"}));
+        return Err(ApiError::not_found("article not found"));
     };
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "id":           post.id.get().copied().unwrap_or(0),
         "title":        &post.title,
         "body":         &post.body,
         "author_id":    post.author_id.pk(),
         "published_at": post.published_at.to_rfc3339(),
-    }))
+    })))
 }
 
-pub async fn list_authors(mut tenant: Tenant) -> Json<serde_json::Value> {
-    let authors: Vec<Author> = match Author::objects()
+pub async fn list_authors(mut tenant: Tenant) -> Result<Json<serde_json::Value>, ApiError> {
+    let authors: Vec<Author> = Author::objects()
         .order_by(&[("name", false)])
         .fetch_on(tenant.conn())
         .await
-    {
-        Ok(a) => a,
-        Err(e) => return Json(serde_json::json!({"error": e.to_string()})),
-    };
+        .map_err(db_error)?;
 
     let items: Vec<serde_json::Value> = authors
         .iter()
@@ -72,5 +69,12 @@ pub async fn list_authors(mut tenant: Tenant) -> Json<serde_json::Value> {
         })
         .collect();
 
-    Json(serde_json::json!({ "count": items.len(), "results": items }))
+    Ok(Json(
+        serde_json::json!({ "count": items.len(), "results": items }),
+    ))
+}
+
+/// A 500 that logs the cause instead of sending it to the client.
+fn db_error(e: impl std::fmt::Display) -> ApiError {
+    ApiError::logged(StatusCode::INTERNAL_SERVER_ERROR, "blog_demo", e)
 }

@@ -371,13 +371,10 @@ fn generated_migration_has_rfc3339_timestamp() {
     let mig = make_migrations_from(&dir, &snapshot_with(vec![user_table()]), None)
         .unwrap()
         .unwrap();
-    // Loose check: contains "T" and either "Z" or "+" (offset marker).
     let ts = &mig.created_at;
-    assert!(ts.contains('T'), "expected 'T' in {ts}");
-    assert!(
-        ts.contains('Z') || ts.contains('+') || ts.contains('-'),
-        "expected timezone marker in {ts}"
-    );
+    let parsed = chrono::DateTime::parse_from_rfc3339(ts)
+        .unwrap_or_else(|e| panic!("not RFC 3339: {ts}: {e}"));
+    assert_eq!(parsed.offset().local_minus_utc(), 0, "expected UTC in {ts}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

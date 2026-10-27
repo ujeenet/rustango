@@ -13,6 +13,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .api(urls::api())
         .seed_with(seed::run)
         .await?
-        .serve("0.0.0.0:8080")
+        .serve("127.0.0.1:8080")
         .await
 }

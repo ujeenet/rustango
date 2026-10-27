@@ -57,7 +57,7 @@ serde_path_to_error = "0.1"
 serde_ignored = "0.1"
 
 # Errors
-thiserror = "1"
+thiserror = "2"
 
 # NFKD folding for `text::slugify`; already in the tree via sqlx's stringprep.
 unicode-normalization = "0.1"
