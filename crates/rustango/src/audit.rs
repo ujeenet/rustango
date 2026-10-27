@@ -1138,32 +1138,14 @@ pub async fn facet_counts(
     pool: &crate::sql::Pool,
     column: &str,
 ) -> Result<Vec<(String, i64)>, sqlx::Error> {
-    facet_counts_in(pool, column, None).await
-}
-
-/// [`facet_counts`] limited to `tables`, as [`list_in`].
-pub(crate) async fn facet_counts_in(
-    pool: &crate::sql::Pool,
-    column: &str,
-    tables: Option<&[String]>,
-) -> Result<Vec<(String, i64)>, sqlx::Error> {
-    use crate::core::SqlValue;
     // `column` is interpolated into the SQL, so it must be allowlisted.
     if !matches!(column, "entity_table" | "operation" | "source") {
         return Err(sqlx::Error::ColumnNotFound(column.to_owned()));
     }
-    if tables.is_some_and(<[String]>::is_empty) {
-        return Ok(Vec::new());
-    }
-    let sql = audit_facet_sql(pool.dialect(), column, tables);
-    let binds: Vec<SqlValue> = tables
-        .unwrap_or_default()
-        .iter()
-        .map(|t| SqlValue::String(t.clone()))
-        .collect();
+    let sql = audit_facet_sql(pool.dialect(), column);
     // The `(String, i64)` tuple decodes positionally, so it matches the
     // `facet_value, facet_count` column order in `audit_facet_sql`.
-    crate::sql::raw_query_pool::<(String, i64)>(&sql, binds, pool)
+    crate::sql::raw_query_pool::<(String, i64)>(&sql, Vec::new(), pool)
         .await
         .map_err(|e| match e {
             crate::sql::ExecError::Driver(err) => err,
@@ -1233,17 +1215,12 @@ fn audit_list_sql(
 
 /// Render the facet group-by. `column` must already be allowlisted by
 /// [`facet_counts`].
-fn audit_facet_sql(
-    dialect: &dyn crate::sql::Dialect,
-    column: &str,
-    tables: Option<&[String]>,
-) -> String {
+fn audit_facet_sql(dialect: &dyn crate::sql::Dialect, column: &str) -> String {
     let t = dialect.quote_ident("rustango_audit_log");
     let col = dialect.quote_ident(column);
     format!(
         "SELECT {col} AS facet_value, COUNT(*) AS facet_count \
-         FROM {t}{} GROUP BY {col} ORDER BY facet_count DESC, {col}",
-        audit_where_sql(dialect, &[], tables)
+         FROM {t} GROUP BY {col} ORDER BY facet_count DESC, {col}"
     )
 }
 

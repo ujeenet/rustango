@@ -154,6 +154,10 @@ untouched.
 
 A webhook answered 429 or 503 with `Retry-After` now waits that long (up to an hour) before its retry. `CachePageLayer::invalidate` now purges every variant of the path, and each cached GET reads one extra small cache key.
 
+### Admin: bounded audit facets
+
+`/__audit?facet_show_all=<col>` lists at most 200 values, then "+N more"; filter the feed to reach the rest. A tenant admin custom view on a table the user cannot see is now a 404 from the view, not an unmounted route.
+
 ## 0.61.7
 
 ### Admin: no self-deactivation
