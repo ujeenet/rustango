@@ -2543,6 +2543,7 @@ fn sanitize_next(next: Option<&str>) -> String {
 async fn org_impersonate(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
+    apex: Option<Extension<crate::tenancy::server::LinkApex>>,
     headers: HeaderMap,
     axum::extract::Path(slug): axum::extract::Path<String>,
 ) -> Response<Body> {
@@ -2603,6 +2604,7 @@ async fn org_impersonate(
         &org,
         &state.tenant_handoff_url,
         headers.get(header::HOST).and_then(|v| v.to_str().ok()),
+        &apex.map(|Extension(a)| a).unwrap_or_default(),
     );
     let redirect_to = format!("{handoff}?token={token}");
 

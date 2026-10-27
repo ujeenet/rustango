@@ -37,6 +37,7 @@ templates.
 - [TemplateView and RedirectView](#templateview-and-redirectview)
 - [Single-tenant vs multi-tenant](#single-tenant-vs-multi-tenant)
 - [Serving one model both ways](#serving-one-model-both-ways)
+- [Error pages](#error-pages)
 - [See also](#see-also)
 
 ---
@@ -369,6 +370,197 @@ Now `GET /api/posts` returns the paginated JSON envelope and `GET /posts`
 returns a rendered HTML list — same rows, same pool, two shapes. This exact
 setup is what the [backing test](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/html_and_api_contrast_sqlite_live.rs)
 asserts.
+
+## Error pages
+
+One layer turns every 4xx/5xx of an app into a page for people, and leaves
+API clients alone. It is **off by default**; nothing changes until you turn it
+on. Needs the `template_views` feature.
+
+### Turning it on
+
+On the multi-tenant server, the layer wraps everything: your api, the tenant
+login, the tenant admin, the operator console and the framework's own layers.
+
+```rust
+use std::sync::Arc;
+use rustango::errors::ErrorPagesLayer;
+
+let tera = Arc::new(rustango::template_extensions::html_tera_from_glob("templates/**/*.html")?);
+let app = rustango::server::Builder::from_env().await?
+    .api(my_app::urls::api())
+    .error_pages(ErrorPagesLayer::new().templates(tera));
+```
+
+`AppBuilder::error_pages` does the same for a single-pool app. On a router of
+your own, mount it with `ErrorPagesRouterExt` and add the 404 fallback:
+
+```rust
+use rustango::errors::{ErrorPagesLayer, ErrorPagesRouterExt as _};
+
+let app = Router::new()
+    .route("/projects", get(projects))
+    .fallback(rustango::errors::not_found)
+    .error_pages(ErrorPagesLayer::new().templates(tera.clone()));
+```
+
+With `Cli` and a config file, use the `[errors]` section instead:
+
+```toml
+[errors]
+enabled = true            # default false
+templates = "templates"   # template root holding errors/404.html etc.; default "templates"
+htmx_target = "#flash"    # HX-Retarget for htmx errors; default "#flash", "" sends none
+```
+
+A `templates` directory that does not exist or does not parse logs a warning
+and the built-in pages are used.
+
+### What each client gets
+
+| Request | Response |
+|---|---|
+| Browser navigation (`Accept: text/html`, no `HX-Request`) | Full HTML page |
+| htmx (`HX-Request`) | HTML fragment, plus `HX-Retarget: <htmx_target>` and `HX-Reswap: innerHTML show:window:top` |
+| Any other client (`fetch`, curl) | The body unchanged; an empty body gets the message as plain text |
+| JSON / problem+json body | Unchanged, unless it carries a `Message` and a browser or htmx asked |
+| `HEAD` | Unchanged |
+| A response marked `rustango::errors::KeepBody` | Unchanged |
+
+**A `text/html` error body is replaced too**, unless the response is marked
+`KeepBody`: mark any HTML error page you build yourself.
+
+Only text bodies (`text/plain`, `text/html`, none) and JSON with a message are
+replaced; images and other types pass through. A dressed response keeps its
+status and headers (`Retry-After` too). Every 4xx/5xx the layer sees, passthroughs
+included, gets `Vary: Accept, HX-Request`, merged with the handler's own.
+
+### Templates
+
+The first template that exists in your Tera wins:
+
+1. `errors/<code>.html`, e.g. `errors/404.html`
+2. `errors/4xx.html` or `errors/5xx.html`
+3. `errors/default.html`
+4. the built-in page
+
+htmx fragments use `errors/partial.html`, then the built-in fragment. A
+template that fails to render is logged and the built-in page is used; an
+error page never comes back empty.
+
+`templates/errors/404.html`:
+
+```html
+{% extends "base.html" %}
+{% block content %}
+<section class="error">
+  <h1>{{ code }} · {{ title }}</h1>
+  <p>{{ message }}</p>
+  <p>Nothing at <code>{{ path }}</code>.</p>
+  {% if user %}<p>Signed in as {{ user.username }}.</p>{% endif %}
+  <a href="/">Back to the start</a>
+</section>
+{% endblock content %}
+```
+
+`templates/errors/5xx.html`:
+
+```html
+{% extends "base.html" %}
+{% block content %}
+<section class="error">
+  <h1>{{ title }}</h1>
+  <p>{{ message }}</p>
+  <form method="post" action="/feedback">{{ csrf_input | safe }}
+    <button>Tell us what you were doing</button>
+  </form>
+</section>
+{% endblock content %}
+```
+
+Context:
+
+| Key | Value |
+|---|---|
+| `code` | The status, e.g. `404` |
+| `title` | A short title per status ("Not found") |
+| `message` | What went wrong, for the user (see below) |
+| `path` | The request path |
+| `user` | `{ username, is_superuser }` of the signed-in tenant user, or null |
+| `username`, `is_superuser` | The same, flat |
+| `csrf_token`, `csrf_input` | A CSRF token and its hidden input, under your CSRF layer's cookie name. The cookie is set only when the template uses them |
+| `csp_nonce` | This request's CSP nonce, or `""` |
+| `brand_name`, `brand_logo_url`, `brand_css`, `theme_mode` | From `[brand]` |
+
+`user` needs the `tenancy` feature and a tenant host; elsewhere it is null.
+Templates are per app: every tenant gets the same ones.
+
+### The built-in page
+
+Self-contained HTML: no CDN, no script, inline CSS with the request's CSP
+nonce, the admin's theme tokens (light and dark). With `[errors]` in settings
+it shows `[brand] name` and `logo_url`; `primary_color` and `theme_mode` set
+the colours (they need the `tenancy` feature, whose brand code it reuses).
+`ErrorPagesLayer::brand(&settings.brand)` does the same in code.
+
+### The message
+
+A handler gives words for the page with `rustango::errors::Message`, a
+response extension, or with `PageError`, which carries one:
+
+```rust
+use rustango::errors::{Message, PageError};
+
+async fn project(Path(slug): Path<String>) -> Result<Html<String>, PageError> {
+    let project = find_project(&slug)
+        .await
+        .map_err(PageError::server)?            // logged; the page says something generic
+        .ok_or_else(|| PageError::not_found("No project with that name."))?;
+    Ok(Html(render_project(&project)))
+}
+
+async fn archived() -> impl IntoResponse {
+    (StatusCode::GONE, Message::new("This project was archived."))
+}
+```
+
+Without a `Message`, a 4xx `text/plain` body of up to 2 KiB is the message
+(axum's rejections, the CSRF check), else the status's default text. The first
+letter is upper-cased.
+
+A 5xx never shows its cause: the page uses the generic text, and
+`PageError::server(e)` logs `e` and sends the same opaque body as every other
+5xx. Only when `RUSTANGO_DISCLOSE_ERRORS` is set does a 5xx page show its
+message or body, the same rule as every 5xx body in the framework.
+
+### What is covered
+
+Mounted by `Builder::error_pages` (or `[errors]`), the layer sits inside the
+security headers and outside everything else, so it dresses:
+
+- unknown paths and unknown hosts (404), and 405s;
+- the panic guard's 500;
+- the CSRF layer's 403, showing its reason;
+- `login_required_or_401` / `*_or_403` gates (401, 403);
+- the body limit (413), request timeout (504), rate limit and login throttle (429);
+- axum's rejections (400, 415, 422);
+- the tenant admin's denials and 404s, and unknown paths on the operator console.
+
+Pages that carry their own controls keep their look: the admin's "admin access
+required" page (it has a sign-out form) and its "table not migrated" page.
+Mark any response of your own with `KeepBody` to do the same.
+
+### Migrating from a hand-written error middleware
+
+An app that had its own `error_pages` middleware can delete:
+
+- the middleware (`from_fn(error_pages)`) and its `.fallback(not_found)`;
+- its title/message table: `rustango::errors::error_words` is the same table;
+- its private message extension: return `PageError` or `Message`;
+- the header/extension cloning it did to stamp CSRF and find the user.
+
+Keep `templates/error.html` as `templates/errors/default.html` and the htmx
+alert as `templates/errors/partial.html`; the context keys are the same.
 
 ---
 

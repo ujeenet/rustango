@@ -77,10 +77,9 @@ postgres = ["sqlx/postgres", "sqlx/tls-rustls"]
 # extra opt-ins.
 manage = ["_axum", "_http_layers", "runtime"]
 
-# Test-only constructors for downstream live tests. Currently
-# unlocks `Tenant::for_test(org, conn)` so tenancy-aware crates
-# (rustango-cms, etc.) can build a Tenant without booting a full
-# axum server with TenantContext. v0.30.26+.
+# Test-only constructors for downstream live tests: `Tenant::for_test_pools`,
+# `for_test_sqlite` and `for_test_mysql` build a Tenant without a full
+# axum server and TenantContext.
 test_utils = []
 
 # Dev-only test-support helpers (`crate::testkit`): build framework
@@ -526,7 +525,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.61.5", path = "../rustango-macros" }
+rustango-macros = { version = "0.61.6", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }

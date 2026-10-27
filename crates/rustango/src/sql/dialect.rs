@@ -358,6 +358,12 @@ pub trait Dialect: Send + Sync {
         false
     }
 
+    /// `true` if a plain read in a transaction sees its first read's
+    /// snapshot (MySQL REPEATABLE READ), not rows committed since.
+    fn plain_reads_see_snapshot(&self) -> bool {
+        false
+    }
+
     /// `true` if a `WITH` may hold a `DELETE` (Postgres only), so an owner
     /// delete and its junction cleanup run as one statement.
     fn supports_dml_in_cte(&self) -> bool {

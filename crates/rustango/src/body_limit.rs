@@ -257,9 +257,12 @@ impl http_body::Body for Prefixed {
 }
 
 fn too_large(limit: usize) -> Response {
-    crate::api_errors::ApiError::from_status(StatusCode::PAYLOAD_TOO_LARGE, "payload too large")
-        .with_details(serde_json::json!({ "limit_bytes": limit }))
-        .into_response()
+    let status = StatusCode::PAYLOAD_TOO_LARGE;
+    // The words let an error page dress this JSON for a browser.
+    let words = crate::errors::Message::new(crate::errors::error_words(status).1);
+    let body = crate::api_errors::ApiError::from_status(status, "payload too large")
+        .with_details(serde_json::json!({ "limit_bytes": limit }));
+    (words, body).into_response()
 }
 
 #[cfg(test)]

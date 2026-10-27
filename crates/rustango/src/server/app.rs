@@ -38,6 +38,8 @@ pub struct AppBuilder {
     pool: Pool,
     api: Option<Router>,
     schemas: Vec<&'static ModelSchema>,
+    #[cfg(feature = "template_views")]
+    error_pages: Option<crate::errors::ErrorPagesLayer>,
 }
 
 impl AppBuilder {
@@ -75,6 +77,8 @@ impl AppBuilder {
             pool,
             api: None,
             schemas: Vec::new(),
+            #[cfg(feature = "template_views")]
+            error_pages: None,
         }
     }
 
@@ -155,6 +159,15 @@ impl AppBuilder {
         self
     }
 
+    /// Dress every 4xx/5xx, panics and unknown paths included, with an
+    /// error page. Off by default.
+    #[cfg(feature = "template_views")]
+    #[must_use]
+    pub fn error_pages(mut self, layer: crate::errors::ErrorPagesLayer) -> Self {
+        self.error_pages = Some(layer);
+        self
+    }
+
     /// Bind + serve. Injects `Extension<Arc<Pool>>` into every
     /// request so handlers can run ORM calls without a stateful
     /// router.
@@ -179,7 +192,14 @@ impl AppBuilder {
     fn into_app(self) -> Router {
         let pool = Arc::new(self.pool);
         let app = self.api.unwrap_or_else(Router::new).layer(Extension(pool));
-        crate::panic_guard::catch_panics(app)
+        let app = crate::panic_guard::catch_panics(app);
+        // Outside the panic guard, so its 500 is dressed too.
+        #[cfg(feature = "template_views")]
+        if let Some(layer) = self.error_pages {
+            use crate::errors::ErrorPagesRouterExt as _;
+            return app.error_pages(layer);
+        }
+        app
     }
 }
 

@@ -1238,6 +1238,19 @@ For reverse FKs (parent.children), use the macro-generated `_set` method:
 let author_posts = author.post_set(&pool).await?;
 ```
 
+### Prefetching many-to-many and reverse relations
+
+For a list of parents, `fetch_with_prefetch_related` loads a many-to-many (`m2m(name = "tags", ...)`) or reverse-FK (`reverse_has(name = "items", ...)`) relation by name. It runs one query for the parents and one for the relation, whatever the number of parents.
+
+`rustango::sql::fetch_with_prefetch_related(Post::objects(), "tags", &pool)` returns `Vec<(Post, Vec<Tag>)>`. To filter or order the related rows, pass a queryset to `fetch_with_prefetch_related_filtered(Post::objects(), "tags", Tag::objects().order_by(&[("name", false)]), &pool)`; a limit on it applies to all parents together. `crates/rustango/tests/prefetch_related_tri.rs` runs both on PostgreSQL, MySQL and SQLite.
+
+- The parent keys go in one `IN` list, split into batches past the backend's bind limit (65,535 on MySQL, 32,766 on SQLite; PostgreSQL binds one array).
+- A many-to-many joins its through table, so a tag shared by many posts comes back once under each post. Integer, `String` and `Uuid` keys all work.
+- A reverse FK keys on the relation's `self_pk_column`, so children pointing at a unique column (`ForeignKey<Shop, String>` with `on = "code"`) group correctly.
+- An unknown name is `QueryError::UnknownField`; asking for the wrong child model is `ExecError::PrefetchTargetMismatch`.
+
+To prefetch by FK field instead of relation name, `fetch_with_prefetch_pool(Author::objects(), "author", &pool)` still works the same way.
+
 ### Custom joins
 
 When the join isn't driven by a foreign key — a custom predicate, a non-equi join, INNER instead of LEFT, a self-join, or joining on a non-PK column — use `.join(Join { … })`. Its `on` field takes any `WhereExpr`, so `and()` / `or()` / `Not` / function calls / column-vs-column / literal filters all compose freely.
@@ -1314,6 +1327,7 @@ The `Join.project` field tells the writer to emit `<alias>"."<col>" AS "<alias>_
 | Need | Tool |
 |---|---|
 | Pull related rows along with the main row | `select_related` |
+| Load many-to-many or reverse-FK rows for a list of parents | `fetch_with_prefetch_related` |
 | Filter main rows by a related-table predicate | `exists(...)` / `not_exists(...)` |
 | Filter via INNER instead of LEFT, or with extra ON predicates | `.join(...)` |
 | Self-join (e.g. `employee.manager_id = manager.id`) | `.join(...)` |

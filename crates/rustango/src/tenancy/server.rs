@@ -140,6 +140,21 @@ pub(crate) fn apex_domain() -> String {
     configured_apex_domain().unwrap_or_else(|| "localhost".into())
 }
 
+/// The apex tenant links point at: a `server::Builder`'s own, which its
+/// dispatch matches, else [`apex_domain`].
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LinkApex(Option<String>);
+
+impl LinkApex {
+    pub(crate) fn new(apex: impl Into<String>) -> Self {
+        Self(Some(apex.into()))
+    }
+
+    pub(crate) fn get(&self) -> String {
+        self.0.clone().unwrap_or_else(apex_domain)
+    }
+}
+
 /// `RUSTANGO_TENANT_SCHEME`, empty counted as unset. The one reader of it.
 pub(crate) fn tenant_scheme_setting() -> Option<String> {
     std::env::var("RUSTANGO_TENANT_SCHEME")
@@ -161,13 +176,28 @@ pub(crate) fn tenant_origin(host: &str, port_suffix: &str) -> String {
 
 /// A link to `path` on `org`'s tenant host. `request_host` is the
 /// caller's own `Host`, whose port is the last fallback.
-pub(crate) fn tenant_link(org: &super::Org, path: &str, request_host: Option<&str>) -> String {
+pub(crate) fn tenant_link(
+    org: &super::Org,
+    path: &str,
+    request_host: Option<&str>,
+    apex: &LinkApex,
+) -> String {
     let prefix = tenant_path_prefix(org.path_prefix.as_deref());
     let host = match org.host_pattern.as_deref().filter(|s| !s.is_empty()) {
         Some(pattern) => pattern.to_owned(),
         // A path-prefix tenant lives on the apex, any other on `<slug>.<apex>`.
-        None if prefix.is_empty() => format!("{}.{}", org.slug, apex_domain()),
-        None => apex_domain(),
+        None if prefix.is_empty() => {
+            if org.port.is_none() {
+                tracing::warn!(
+                    target: "rustango::tenancy",
+                    tenant = %org.slug,
+                    "tenant has no host, path prefix or port: the standard resolvers \
+                     do not route its `<slug>.<apex>` link"
+                );
+            }
+            format!("{}.{}", org.slug, apex.get())
+        }
+        None => apex.get(),
     };
     let port = tenant_port_suffix(
         org.port,

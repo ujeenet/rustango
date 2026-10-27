@@ -249,6 +249,12 @@ pub struct FieldSchema {
 #[cfg(doctest)]
 pub struct KeyedStringsNeedMaxLength;
 
+/// Credential columns: secret wherever they are rendered.
+#[cfg(any(feature = "admin", feature = "template_views"))]
+pub(crate) fn is_credential_column(name: &str) -> bool {
+    ["password_hash", "password", "database_url"].contains(&name)
+}
+
 impl FieldSchema {
     /// A plain `NOT NULL` column; every other field is off or empty,
     /// except `editable`. Set the rest by assigning fields:
@@ -552,8 +558,8 @@ pub struct GenericReverseRelation {
     /// Column on the child table holding the parent's primary key,
     /// such as `"object_pk"`. This is what the `OuterRef` matches.
     pub pk_column: &'static str,
-    /// Primary-key column on **this** (parent) model's table.
-    /// Defaults to `"id"`.
+    /// Primary-key column on **this** (parent) model's table. The
+    /// derive defaults it to the model's PK column.
     pub self_pk_column: &'static str,
 }
 
@@ -664,6 +670,14 @@ impl M2MRelation {
             dst_col,
             auto_create: true,
         }
+    }
+
+    /// PK column of the registered model on `to`; `"id"` when none is registered.
+    #[must_use]
+    pub fn target_pk_column(&self) -> &'static str {
+        ModelEntry::for_table(self.to)
+            .and_then(|e| e.schema.pk_column())
+            .unwrap_or("id")
     }
 }
 

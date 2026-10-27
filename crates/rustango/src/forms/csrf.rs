@@ -422,6 +422,14 @@ impl CsrfCookieSpec {
         )
     }
 
+    /// The cookie of the CSRF layer this response passed through, if any.
+    #[cfg(feature = "template_views")]
+    pub(crate) fn on_response(extensions: &axum::http::Extensions) -> Option<Self> {
+        extensions
+            .get::<ActiveCsrf>()
+            .map(|a| Self::of(&a.cfg, a.secure_from))
+    }
+
     fn of(cfg: &CsrfConfig, secure_from: SecureFrom) -> Self {
         match secure_from {
             SecureFrom::Config => Self {
@@ -534,104 +542,122 @@ where
                     (cfg, secure_from)
                 }
             };
-            let cookie_value = read_csrf_cookie(&req, &cfg.cookie_name);
+            // On the response too, so a layer outside (error pages) stamps
+            // under this cookie's name and flag.
+            let tag = ActiveCsrf {
+                cfg: Arc::clone(&cfg),
+                secure_from,
+                checked: false,
+            };
+            let result = async move {
+                let cookie_value = read_csrf_cookie(&req, &cfg.cookie_name);
 
-            // Enforce on unsafe methods — unless the path is exempt
-            // (beacon/collector endpoints; see `CsrfConfig::exempt_prefix`).
-            let enforced = !method_is_csrf_exempt(req.method(), &cfg)
-                && !path_is_exempt(req.uri().path(), &cfg.exempt_prefixes);
-            let report = is_browser_report(&req, &cfg.report_paths);
-            let mut req = if enforced {
-                // Origin-header defense-in-depth. Always runs; an empty
-                // `trusted_origins` means same-host only (#1529). A report
-                // only logs, so one sent without an Origin is taken.
-                let no_origin = !req.headers().contains_key(axum::http::header::ORIGIN);
-                if !((report && no_origin) || origin_allowed(&req, &cfg.trusted_origins)) {
-                    return Ok(forbid_response(
-                        "CSRF: request Origin not in CSRF_TRUSTED_ORIGINS \
+                // Enforce on unsafe methods — unless the path is exempt
+                // (beacon/collector endpoints; see `CsrfConfig::exempt_prefix`).
+                let enforced = !method_is_csrf_exempt(req.method(), &cfg)
+                    && !path_is_exempt(req.uri().path(), &cfg.exempt_prefixes);
+                let report = is_browser_report(&req, &cfg.report_paths);
+                let mut req = if enforced {
+                    // Origin-header defense-in-depth. Always runs; an empty
+                    // `trusted_origins` means same-host only (#1529). A report
+                    // only logs, so one sent without an Origin is taken.
+                    let no_origin = !req.headers().contains_key(axum::http::header::ORIGIN);
+                    if !((report && no_origin) || origin_allowed(&req, &cfg.trusted_origins)) {
+                        return Ok(forbid_response(
+                            "CSRF: request Origin not in CSRF_TRUSTED_ORIGINS \
                          and does not match Host",
-                    ));
-                }
-                let header_value = req
-                    .headers()
-                    .get(&cfg.header_name)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned);
-                if report {
-                    // Reports carry no token.
-                    req
-                } else if let Some(h) = header_value {
-                    // Header path — short-circuit, no body buffering.
-                    if !tokens_match(cookie_value.as_deref(), Some(&h)) {
-                        return Ok(forbid_response("CSRF token missing or mismatched"));
+                        ));
                     }
-                    req
-                } else if is_form_encoded(&req) {
-                    // Form-encoded POST without the header — read
-                    // `_csrf` from the body. Body is consumed once,
-                    // so we buffer + replace so the inner handler
-                    // can still parse it. `Bytes` stops at the limit the handler's
-                    // `Form` gets, so the read never goes past what it accepts.
-                    let (parts, body) = req.into_parts();
-                    let mut limited = Request::new(body);
-                    *limited.extensions_mut() = parts.extensions.clone();
-                    cap_an_unbounded_read(&mut limited);
-                    let bytes =
-                        match axum::RequestExt::extract::<axum::body::Bytes, _>(limited).await {
+                    let header_value = req
+                        .headers()
+                        .get(&cfg.header_name)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned);
+                    if report {
+                        // Reports carry no token.
+                        req
+                    } else if let Some(h) = header_value {
+                        // Header path — short-circuit, no body buffering.
+                        if !tokens_match(cookie_value.as_deref(), Some(&h)) {
+                            return Ok(forbid_response("CSRF token missing or mismatched"));
+                        }
+                        req
+                    } else if is_form_encoded(&req) {
+                        // Form-encoded POST without the header — read
+                        // `_csrf` from the body. Body is consumed once,
+                        // so we buffer + replace so the inner handler
+                        // can still parse it. `Bytes` stops at the limit the handler's
+                        // `Form` gets, so the read never goes past what it accepts.
+                        let (parts, body) = req.into_parts();
+                        let mut limited = Request::new(body);
+                        *limited.extensions_mut() = parts.extensions.clone();
+                        cap_an_unbounded_read(&mut limited);
+                        let bytes = match axum::RequestExt::extract::<axum::body::Bytes, _>(limited)
+                            .await
+                        {
                             Ok(b) => b,
                             Err(rejection) => {
                                 return Ok(axum::response::IntoResponse::into_response(rejection))
                             }
                         };
-                    let form_token = read_form_field(&bytes, CSRF_FORM_FIELD);
-                    if !tokens_match(cookie_value.as_deref(), form_token.as_deref()) {
+                        let form_token = read_form_field(&bytes, CSRF_FORM_FIELD);
+                        if !tokens_match(cookie_value.as_deref(), form_token.as_deref()) {
+                            return Ok(forbid_response("CSRF token missing or mismatched"));
+                        }
+                        Request::from_parts(parts, Body::from(bytes))
+                    } else {
+                        // Neither header nor form body — reject.
                         return Ok(forbid_response("CSRF token missing or mismatched"));
                     }
-                    Request::from_parts(parts, Body::from(bytes))
                 } else {
-                    // Neither header nor form body — reject.
-                    return Ok(forbid_response("CSRF token missing or mismatched"));
+                    req
+                };
+                // A report was not token-checked, so an inner layer must not defer.
+                if enforced && !report {
+                    req.extensions_mut().insert(ActiveCsrf {
+                        cfg: Arc::clone(&cfg),
+                        secure_from,
+                        checked: true,
+                    });
                 }
-            } else {
-                req
-            };
-            // A report was not token-checked, so an inner layer must not defer.
-            if enforced && !report {
-                req.extensions_mut().insert(ActiveCsrf {
-                    cfg: Arc::clone(&cfg),
-                    secure_from,
-                    checked: true,
-                });
-            }
 
-            // Pass to inner. After the response comes back, ensure
-            // the CSRF cookie is set so the next safe-method GET
-            // doesn't have to seed it.
-            let mut response = inner.call(req).await?;
-            // Seed the cookie only if the request had none *and* the
-            // handler didn't already set one.
-            //
-            // `stamp_into_context` (and `ensure_token` generally) mints a
-            // token, renders it into the form, and appends its own
-            // `Set-Cookie`. Minting a second one here appended a
-            // *different* value, and a browser keeps the last — so on a
-            // visitor's first-ever view of any form the rendered `_csrf`
-            // and the stored cookie disagreed, and their first submit was
-            // a 403. Reloading masked it, which is why it survived: only
-            // brand-new visitors ever saw it.
-            if cookie_value.is_none()
-                && !nested
-                && !sets_cookie(&response, &cfg.cookie_name)
-                && !is_publicly_cacheable(response.headers())
-            {
-                let cookie_str = CsrfCookieSpec::of(&cfg, secure_from).set_cookie(&mint_token());
-                if let Ok(hv) = HeaderValue::from_str(&cookie_str) {
-                    response
-                        .headers_mut()
-                        .append(axum::http::header::SET_COOKIE, hv);
+                // Pass to inner. After the response comes back, ensure
+                // the CSRF cookie is set so the next safe-method GET
+                // doesn't have to seed it.
+                let mut response = inner.call(req).await?;
+                // Seed the cookie only if the request had none *and* the
+                // handler didn't already set one.
+                //
+                // `stamp_into_context` (and `ensure_token` generally) mints a
+                // token, renders it into the form, and appends its own
+                // `Set-Cookie`. Minting a second one here appended a
+                // *different* value, and a browser keeps the last — so on a
+                // visitor's first-ever view of any form the rendered `_csrf`
+                // and the stored cookie disagreed, and their first submit was
+                // a 403. Reloading masked it, which is why it survived: only
+                // brand-new visitors ever saw it.
+                if cookie_value.is_none()
+                    && !nested
+                    && !sets_cookie(&response, &cfg.cookie_name)
+                    && !is_publicly_cacheable(response.headers())
+                {
+                    let cookie_str =
+                        CsrfCookieSpec::of(&cfg, secure_from).set_cookie(&mint_token());
+                    if let Ok(hv) = HeaderValue::from_str(&cookie_str) {
+                        response
+                            .headers_mut()
+                            .append(axum::http::header::SET_COOKIE, hv);
+                    }
                 }
+                Ok(response)
             }
-            Ok(response)
+            .await;
+            result.map(|mut response: Response<Body>| {
+                if response.extensions().get::<ActiveCsrf>().is_none() {
+                    response.extensions_mut().insert(tag);
+                }
+                response
+            })
         })
     }
 }
@@ -663,10 +689,9 @@ fn cap_an_unbounded_read(req: &mut Request) {
 /// `true` when `path` is under any configured exempt prefix, by whole
 /// segment, so `/beacon` does not exempt `/beacon-admin`.
 fn path_is_exempt(path: &str, prefixes: &[String]) -> bool {
-    prefixes.iter().any(|p| {
-        path.strip_prefix(p.as_str())
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/') || p.ends_with('/'))
-    })
+    prefixes
+        .iter()
+        .any(|p| crate::urls::path_under_prefix(path, p))
 }
 
 fn is_safe_method(m: &Method) -> bool {
@@ -994,6 +1019,34 @@ pub fn stamp_named_into_context(
     ctx: &mut tera::Context,
 ) -> Option<String> {
     stamp_cookie_into_context(headers, &CsrfCookieSpec::session_policy(cookie_name), ctx)
+}
+
+/// Stamp a page made from an already-built response: a token the response
+/// already sets for `spec` is reused, so no second, conflicting cookie.
+#[cfg(feature = "template_views")]
+pub(crate) fn stamp_onto_response(
+    request: &axum::http::HeaderMap,
+    response: &axum::http::HeaderMap,
+    spec: &CsrfCookieSpec,
+    ctx: &mut tera::Context,
+) -> Option<String> {
+    let set = response
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|v| v.split(';').next()?.split_once('='))
+        .find(|(k, _)| k.trim() == spec.name)
+        .map(|(_, v)| v.trim().to_owned());
+    match set {
+        Some(token) => {
+            if is_minted_token(&token) {
+                ctx.insert("csrf_token", &token);
+                ctx.insert("csrf_input", &csrf_input_html(&token));
+            }
+            None
+        }
+        None => stamp_cookie_into_context(request, spec, ctx),
+    }
 }
 
 /// [`stamp_named_into_context`] for a known cookie spec, e.g. the active layer's.

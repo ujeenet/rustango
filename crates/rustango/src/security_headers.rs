@@ -252,6 +252,14 @@ impl SecurityHeadersLayer {
             layer.csp = Some(csp.clone());
         }
         if let Some(secs) = s.hsts_max_age_secs {
+            if adds_hsts_directives(layer.hsts.as_deref(), secs) {
+                tracing::warn!(
+                    target: "rustango::security_headers",
+                    "[security] hsts_max_age_secs adds `includeSubDomains; preload` to preset {:?}, \
+                     which sends neither; 0.62.0 will keep the preset's directives",
+                    s.headers_preset.as_deref().unwrap_or("strict"),
+                );
+            }
             layer.hsts = if secs == 0 {
                 None
             } else {
@@ -260,6 +268,13 @@ impl SecurityHeadersLayer {
         }
         layer
     }
+}
+
+/// `hsts_max_age_secs = secs` would add `preload` the preset's HSTS lacks:
+/// browsers cache it, so 0.61 keeps adding it and only warns.
+#[cfg(feature = "config")]
+fn adds_hsts_directives(preset: Option<&str>, secs: u64) -> bool {
+    secs != 0 && !preset.is_some_and(|v| v.split(';').any(|p| p.trim() == "preload"))
 }
 
 /// Extension trait — `.security_headers(layer)` on Router.
@@ -785,6 +800,27 @@ mod tests {
         assert!(
             hsts.contains("includeSubDomains"),
             "preserved subdomain inclusion"
+        );
+    }
+
+    /// A max-age on a preset without `preload` still adds it, with a warning.
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_max_age_on_a_preset_without_preload_warns() {
+        let relaxed = SecurityHeadersLayer::relaxed();
+        let strict = SecurityHeadersLayer::strict();
+        assert!(adds_hsts_directives(relaxed.hsts.as_deref(), 60));
+        assert!(adds_hsts_directives(None, 60), "dev / none send no HSTS");
+        assert!(!adds_hsts_directives(strict.hsts.as_deref(), 60));
+        assert!(!adds_hsts_directives(relaxed.hsts.as_deref(), 0));
+
+        let mut s = crate::config::SecuritySettings::default();
+        s.headers_preset = Some("relaxed".into());
+        s.hsts_max_age_secs = Some(60);
+        assert_eq!(
+            SecurityHeadersLayer::from_settings(&s).hsts.as_deref(),
+            Some("max-age=60; includeSubDomains; preload"),
+            "the output itself is unchanged in 0.61"
         );
     }
 

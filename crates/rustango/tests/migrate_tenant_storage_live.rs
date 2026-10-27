@@ -751,6 +751,99 @@ fn _force_use_arc() {
     let _: Option<Arc<TenantPools>> = None;
 }
 
+/// An extension the target has but another role owns cannot be moved by
+/// the restore's `ALTER EXTENSION`: refused before the drain, not after it.
+#[tokio::test]
+async fn a_foreign_owned_extension_on_the_target_is_refused_up_front() {
+    let _g = live_lock().lock().await;
+    let Some(shared) = pool().await else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let base_url = std::env::var("DATABASE_URL").unwrap();
+    let (registry, pool) = private_registry("rustango_tforeign_reg").await;
+    let registry_url = registry.url().to_owned();
+    for stmt in [
+        "CREATE SCHEMA tforeign_ext",
+        "CREATE EXTENSION citext WITH SCHEMA tforeign_ext",
+        "CREATE SCHEMA tforeign_src",
+        "CREATE TABLE tforeign_src.rustango_users (id BIGSERIAL PRIMARY KEY, username tforeign_ext.citext NOT NULL)",
+    ] {
+        sqlx_exec(&pool, stmt).await;
+    }
+    let dst_db = ScratchDb::create(&base_url, "rustango_tforeign_dst").await;
+    // The target's owner, not a superuser; the extension is the superuser's.
+    let role = format!("rustango_tforeign_{}", std::process::id());
+    sqlx_exec(&shared, &format!("CREATE ROLE {role} LOGIN PASSWORD 'pw'")).await;
+    sqlx_exec(
+        &shared,
+        &format!("ALTER DATABASE \"{}\" OWNER TO {role}", dst_db.name()),
+    )
+    .await;
+    let dst = PgPool::connect(dst_db.url()).await.unwrap();
+    for stmt in [
+        "CREATE SCHEMA tforeign_ext".to_owned(),
+        "CREATE EXTENSION citext WITH SCHEMA tforeign_ext".to_owned(),
+        format!("GRANT USAGE ON SCHEMA tforeign_ext TO {role}"),
+    ] {
+        sqlx_exec(&dst, &stmt).await;
+    }
+    dst.close().await;
+    let (scheme, rest) = dst_db.url().split_once("://").unwrap();
+    let host = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
+    std::env::set_var(
+        "RUSTANGO_TFOREIGN_DST",
+        format!("{scheme}://{role}:pw@{host}"),
+    );
+
+    let mut org = Org {
+        id: Auto::default(),
+        slug: "tforeign".into(),
+        display_name: "Moved".into(),
+        storage_mode: StorageMode::Schema.as_str().into(),
+        backend_kind: "postgres".to_owned(),
+        database_url: None,
+        schema_name: Some("tforeign_src".into()),
+        host_pattern: None,
+        port: None,
+        path_prefix: None,
+        ..rustango::testkit::org()
+    };
+    org.insert(&pool).await.unwrap();
+    let pools = TenantPools::with_secrets(pool.clone(), ChainSecretsResolver::standard());
+    let started = std::time::Instant::now();
+    let mut out = Vec::<u8>::new();
+    let res = run_with_writer(
+        &pools,
+        &registry_url,
+        std::path::Path::new("."),
+        args(&[
+            "migrate-tenant-storage",
+            "tforeign",
+            "--to",
+            "database",
+            "--database-url",
+            "env://RUSTANGO_TFOREIGN_DST",
+            "--drain-secs",
+            "5",
+        ]),
+        &mut out,
+    )
+    .await;
+    let err = res
+        .expect_err("a foreign-owned extension must be refused")
+        .to_string();
+    assert!(
+        err.contains("citext") && err.contains("owned by another role"),
+        "{err}"
+    );
+    assert!(started.elapsed().as_secs() < 5, "refused after the drain");
+    assert!(org_row(&pool, "tforeign").await.active, "left inactive");
+    pool.close().await;
+    drop(dst_db);
+    sqlx_exec(&shared, &format!("DROP ROLE {role}")).await;
+}
+
 /// Moving into a schema another tenant uses is refused before any copy (#2290).
 #[tokio::test]
 async fn migrate_tenant_storage_refuses_a_schema_another_tenant_uses() {

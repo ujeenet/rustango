@@ -125,6 +125,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::email::smtp` | SMTP transport |
 | `rustango::email_jobs` | Two queues on one jobs table given different mailers |
 | `rustango::error` | The cause behind a 5xx, which the response body withholds |
+| `rustango::errors` | An error-page template that failed to render, or a template dir that did not load |
 | `rustango::forms` | `DynamicForm` values accepted now but refused in a later release |
 | `rustango::auth_flows` | Single-use auth links refused by the cache |
 | `rustango::aead` | A blank previous secret key |
@@ -142,6 +143,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::rate_limit` | Rate limiting |
 | `rustango::request_timeout` | Per-request timeout |
 | `rustango::scheduler` | Cron / scheduled tasks |
+| `rustango::security_headers` | Security-header settings (HSTS) |
 | `rustango::server` | Server boot and shutdown |
 | `rustango::shutdown` | Signal handling and shutdown hooks |
 | `rustango::sql` | Query execution |

@@ -126,6 +126,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::email::smtp` | SMTP-Transport |
 | `rustango::email_jobs` | Zwei Queues auf einer Jobs-Tabelle mit verschiedenen Mailern |
 | `rustango::error` | Die Ursache eines 5xx, die der Response-Body zurückhält |
+| `rustango::errors` | Ein Fehlerseiten-Template, das nicht renderte, oder ein Template-Verzeichnis, das nicht lud |
 | `rustango::forms` | `DynamicForm`-Werte, die jetzt noch akzeptiert, später abgelehnt werden |
 | `rustango::auth_flows` | Vom Cache abgewiesene Einmal-Auth-Links |
 | `rustango::aead` | Ein leerer vorheriger Geheimschlüssel |
@@ -143,6 +144,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::rate_limit` | Rate-Limiting |
 | `rustango::request_timeout` | Request-Timeout |
 | `rustango::scheduler` | Cron / geplante Tasks |
+| `rustango::security_headers` | Einstellungen der Sicherheits-Header (HSTS) |
 | `rustango::server` | Serverstart und -shutdown |
 | `rustango::shutdown` | Signalbehandlung und Shutdown-Hooks |
 | `rustango::sql` | Query-Ausführung |

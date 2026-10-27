@@ -941,7 +941,7 @@ pub(crate) async fn table_view(
 /// their row counts, and the URL each value toggles to.
 ///
 /// Counts are within the list's filters and search, minus the facet's
-/// own field filter, as Django does (#2004). One ORM `GROUP BY` per
+/// own field filter. One ORM `GROUP BY` per
 /// facet capped past `FACET_TRUNCATE`, plus one lookup for an FK facet's
 /// display values. A capped facet also counts its values and reads the
 /// active one.
@@ -3095,7 +3095,7 @@ pub(crate) async fn action_submit(
     .await?;
 
     // Every action runs the per-row hooks, as the single-row pages do. One
-    // refused row refuses the whole action, as Django's `delete_selected` does.
+    // refused row refuses the whole action.
     let (perm, named) = row_perms(&write, &action);
     let allowed = |row: &serde_json::Value| {
         let is_allowed = |p: &str| {

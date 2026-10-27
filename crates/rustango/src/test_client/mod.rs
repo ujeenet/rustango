@@ -325,11 +325,12 @@ pub struct RequestBuilder<'a> {
 
 impl<'a> RequestBuilder<'a> {
     /// Add a request header.
+    ///
+    /// # Panics
+    /// On an invalid header name or value, which would otherwise be dropped.
     #[must_use]
     pub fn header(mut self, name: &str, value: &str) -> Self {
-        if let (Ok(n), Ok(v)) = (HeaderName::try_from(name), HeaderValue::try_from(value)) {
-            self.headers.push((n, v));
-        }
+        self.headers.push(parse_header(name, value));
         self
     }
 
@@ -849,13 +850,13 @@ impl FactoryRequestBuilder {
         }
     }
 
-    /// Add a request header. Invalid header names / values are silently
-    /// dropped — the typical test path provides valid ASCII.
+    /// Add a request header.
+    ///
+    /// # Panics
+    /// On an invalid header name or value, which would otherwise be dropped.
     #[must_use]
     pub fn header(mut self, name: &str, value: &str) -> Self {
-        if let (Ok(n), Ok(v)) = (HeaderName::try_from(name), HeaderValue::try_from(value)) {
-            self.headers.push((n, v));
-        }
+        self.headers.push(parse_header(name, value));
         self
     }
 
@@ -921,6 +922,18 @@ impl FactoryRequestBuilder {
     }
 }
 
+/// The most of a response body [`TestResponse`] reads.
+const RESPONSE_BODY_LIMIT: usize = 16 * 1024 * 1024;
+
+/// A request header, or a panic naming the one that is invalid.
+fn parse_header(name: &str, value: &str) -> (HeaderName, HeaderValue) {
+    let n = HeaderName::try_from(name)
+        .unwrap_or_else(|e| panic!("invalid request header name {name:?}: {e}"));
+    let v = HeaderValue::try_from(value)
+        .unwrap_or_else(|e| panic!("invalid value for request header {name:?}: {e}"));
+    (n, v)
+}
+
 /// Captured response from a test request.
 pub struct TestResponse {
     pub status: u16,
@@ -942,11 +955,17 @@ impl TestResponse {
             .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
             .collect();
         let header_map = parts.headers;
-        // Use a generous limit (16 MiB) for test responses
-        let body = to_bytes(body, 16 * 1024 * 1024)
-            .await
-            .unwrap_or_default()
-            .to_vec();
+        // Empty as before, but said out loud; 0.62.0 makes this a panic.
+        let body = match to_bytes(body, RESPONSE_BODY_LIMIT).await {
+            Ok(b) => b.to_vec(),
+            Err(e) => {
+                tracing::warn!(
+                    "TestClient: reading the response body failed (limit \
+                     {RESPONSE_BODY_LIMIT} bytes), using an empty body: {e}"
+                );
+                Vec::new()
+            }
+        };
         Self {
             status,
             headers,
@@ -961,10 +980,10 @@ impl TestResponse {
         StatusCode::from_u16(self.status).map_or(false, |s| s.is_success())
     }
 
-    /// Body as UTF-8 text. Returns empty string if the body isn't valid UTF-8.
+    /// Body as UTF-8 text; invalid bytes become U+FFFD.
     #[must_use]
     pub fn text(&self) -> String {
-        String::from_utf8(self.body.clone()).unwrap_or_default()
+        String::from_utf8_lossy(&self.body).into_owned()
     }
 
     /// Body parsed as JSON. Panics if the body isn't valid JSON for `T`
@@ -1966,5 +1985,36 @@ mod tests {
         let req = RequestFactory::new().get("/hello").build();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid value for request header")]
+    fn an_invalid_request_header_panics() {
+        let _ = TestClient::new(app()).get("/hello").header("x-a", "a\nb");
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid request header name")]
+    fn an_invalid_factory_header_panics() {
+        let _ = RequestFactory::new().get("/x").header("bad name", "v");
+    }
+
+    /// Still empty in 0.61.x, as before; only a warning is new.
+    #[tokio::test]
+    async fn an_oversized_body_reads_as_empty() {
+        let big = Router::new().route(
+            "/big",
+            get(|| async { vec![b'x'; RESPONSE_BODY_LIMIT + 1] }),
+        );
+        let res = TestClient::new(big).get("/big").send().await;
+        assert_eq!(res.status, 200);
+        assert!(res.body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_utf8_text_is_lossy_not_empty() {
+        let bin = Router::new().route("/bin", get(|| async { vec![b'o', b'k', 0xff] }));
+        let res = TestClient::new(bin).get("/bin").send().await;
+        assert_eq!(res.text(), "ok\u{fffd}");
     }
 }

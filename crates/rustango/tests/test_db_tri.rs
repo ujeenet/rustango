@@ -37,6 +37,15 @@ pub struct Stamp {
     pub label: String,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "tdb1959_pair", app = "tdb1959", unique_together = "a, b")]
+pub struct Pair {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub a: i64,
+    pub b: i64,
+}
+
 const TABLES: &[&str] = &["tdb1959_parent", "tdb1959_child"];
 
 async fn setup(pool: &Pool) {
@@ -235,6 +244,33 @@ async fn create_tables_is_re_runnable(pool: &Pool) {
         .expect("second create_tables");
 }
 
+/// `create_tables` builds the `unique_together` index, and a re-run
+/// accepts it already there (MySQL has no `CREATE INDEX IF NOT EXISTS`).
+async fn create_tables_builds_declared_indexes(pool: &Pool) {
+    rustango::testkit::matrix::drop_table(pool, Pair::SCHEMA.table).await;
+    for _ in 0..2 {
+        rustango::testkit::create_tables(pool, &[Pair::SCHEMA])
+            .await
+            .expect("create_tables");
+    }
+    let row = || Pair {
+        id: Auto::default(),
+        a: 1,
+        b: 2,
+    };
+    row().insert_pool(pool).await.expect("first row");
+    assert!(
+        row().insert_pool(pool).await.is_err(),
+        "the unique_together index is missing"
+    );
+}
+
+/// The SQLite arm holds the suite lock too: it shares process-global
+/// signals and caches with the live arms under `cargo test`.
+async fn every_arm_holds_the_suite_lock(_pool: &Pool) {
+    assert!(rustango::testkit::matrix::live_lock().try_lock().is_err());
+}
+
 /// An `atomic()` inside `with_rollback` is a savepoint of it, so its
 /// insert is undone too (#1761).
 async fn with_rollback_undoes_a_nested_atomic(pool: &Pool) {
@@ -276,6 +312,8 @@ tri_dialect_test! {
         fixture_load_is_all_or_nothing,
         fixture_rejects_a_key_the_model_lacks,
         create_tables_is_re_runnable,
+        create_tables_builds_declared_indexes,
+        every_arm_holds_the_suite_lock,
     ],
 }
 

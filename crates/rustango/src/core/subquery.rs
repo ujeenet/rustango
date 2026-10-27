@@ -279,12 +279,11 @@ pub fn m2m_has_exists(m2m: &M2MRelation, self_pk: &'static str, negated: bool) -
 ///
 /// ```text
 /// (SELECT <agg>(<column>) FROM <to>
-///  WHERE <to>.id IN (SELECT <dst_col> FROM <through>
-///                    WHERE <src_col> = <outer>.<self_pk>))
+///  WHERE <to>.<to_pk> IN (SELECT <dst_col> FROM <through>
+///                         WHERE <src_col> = <outer>.<self_pk>))
 /// ```
 ///
-/// The target PK is assumed to be `"id"`, rustango's surrogate-PK
-/// convention, because [`M2MRelation`] does not carry it.
+/// `<to_pk>` is [`M2MRelation::target_pk_column`].
 #[must_use]
 pub fn m2m_has_aggregate(
     m2m: &M2MRelation,
@@ -308,7 +307,7 @@ pub fn m2m_has_aggregate(
             column,
             table: m2m.to,
             correlation: RelCorrelation::Membership {
-                target_pk: "id",
+                target_pk: m2m.target_pk_column(),
                 through: m2m.through,
                 dst_col: m2m.dst_col,
                 src_col: m2m.src_col,

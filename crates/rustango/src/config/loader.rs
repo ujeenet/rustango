@@ -119,7 +119,25 @@ impl std::fmt::Display for TomlSyntaxError {
 impl std::error::Error for TomlSyntaxError {}
 
 pub(super) fn load_with_root(root: &Path, env: &str) -> Result<Settings, ConfigError> {
-    load_with_root_and_env(root, env, std::env::vars())
+    load_with_root_and_env(root, env, utf8_env_vars(std::env::vars_os()))
+}
+
+/// The env vars as strings. `std::env::vars` panics on one that is not
+/// UTF-8, so such a var is skipped, with a warning if it is ours.
+fn utf8_env_vars<I>(vars: I) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+{
+    vars.into_iter()
+        .filter_map(|(k, v)| match (k.into_string(), v.into_string()) {
+            (Ok(k), Ok(v)) => Some((k, v)),
+            (Ok(k), Err(_)) if k.starts_with("RUSTANGO") => {
+                eprintln!("config: env var {k} is not valid UTF-8; ignoring it");
+                None
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Same as `load_with_root`, but the caller passes the env vars in.
@@ -219,22 +237,67 @@ fn load_report(
         (None, Some(l)) => merge(&mut tree, l),
         (None, None) => {}
     }
-    apply_env_overrides(&mut tree, env_vars)?;
+    let mut overrides = apply_env_overrides(&mut tree, env_vars)?;
 
-    let mut ignored: Vec<String> = Vec::new();
-    let settings: Settings = serde_path_to_error::deserialize(serde_ignored::Deserializer::new(
-        tree,
-        &mut |path: serde_ignored::Path<'_>| ignored.push(path.to_string()),
-    ))
-    .map_err(shape_error)?;
-    ignored.sort();
-    ignored.dedup();
-    Ok((settings, ignored))
+    // Each pass either loads, or turns one override into a string, or fails.
+    loop {
+        let mut ignored: Vec<String> = Vec::new();
+        let err = match serde_path_to_error::deserialize(serde_ignored::Deserializer::new(
+            tree.clone(),
+            &mut |path: serde_ignored::Path<'_>| ignored.push(path.to_string()),
+        )) {
+            Ok(settings) => {
+                ignored.sort();
+                ignored.dedup();
+                return Ok((settings, ignored));
+            }
+            Err(e) => e,
+        };
+        let at = err.path().to_string();
+        let Some(o) = overrides.iter_mut().find(|o| o.covers(&at)) else {
+            return Err(shape_error(&err));
+        };
+        // `SMTP_PASSWORD=123456` parsed as an integer: the field wants text.
+        if o.key == at && !o.as_string {
+            o.as_string = true;
+            graft(&mut tree, &o.path, toml::Value::String(o.raw.clone()));
+            continue;
+        }
+        return Err(ConfigError::EnvOverride {
+            var: o.var.clone(),
+            detail: safe_shape_message(&err),
+        });
+    }
+}
+
+/// One `RUSTANGO__*` value grafted into the tree.
+struct EnvOverride {
+    var: String,
+    path: Vec<String>,
+    /// `path` joined with `.`, as `serde_path_to_error` prints it.
+    key: String,
+    raw: String,
+    as_string: bool,
+}
+
+impl EnvOverride {
+    /// Whether a shape error at `at` lies in this override's value.
+    fn covers(&self, at: &str) -> bool {
+        at.strip_prefix(self.key.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '[']))
+    }
 }
 
 /// A shape error naming the key and the expected type, never the value:
 /// serde quotes the offending value, which can be a secret (#2159).
-fn shape_error(e: serde_path_to_error::Error<toml::de::Error>) -> ConfigError {
+fn shape_error(e: &serde_path_to_error::Error<toml::de::Error>) -> ConfigError {
+    ConfigError::Shape(<toml::de::Error as serde::de::Error>::custom(
+        safe_shape_message(e),
+    ))
+}
+
+/// The shape error's key and expected type, never the value.
+fn safe_shape_message(e: &serde_path_to_error::Error<toml::de::Error>) -> String {
     let path = e.path().to_string();
     let message = e.inner().message();
     let what = if message.starts_with("missing field `")
@@ -249,8 +312,7 @@ fn shape_error(e: serde_path_to_error::Error<toml::de::Error>) -> ConfigError {
             None => "wrong type or value".to_owned(),
         }
     };
-    let safe = format!("`{path}`: {what}");
-    ConfigError::Shape(<toml::de::Error as serde::de::Error>::custom(safe))
+    format!("`{path}`: {what}")
 }
 
 /// Read a TOML file. With `required = true` a missing file is an
@@ -299,11 +361,15 @@ fn merge(dst: &mut toml::Value, overlay: toml::Value) {
 ///
 /// Each value goes through TOML's own parser, so integers, booleans
 /// and strings are detected without writing a lexer here.
-fn apply_env_overrides<I>(tree: &mut toml::Value, env_vars: I) -> Result<(), ConfigError>
+fn apply_env_overrides<I>(
+    tree: &mut toml::Value,
+    env_vars: I,
+) -> Result<Vec<EnvOverride>, ConfigError>
 where
     I: IntoIterator<Item = (String, String)>,
 {
     const PREFIX: &str = "RUSTANGO__";
+    let mut grafted = Vec::new();
     for (var, raw) in env_vars {
         let Some(rest) = var.strip_prefix(PREFIX) else {
             if let Some(fixed) = mistyped_override(&var) {
@@ -319,9 +385,17 @@ where
             .map(|seg| seg.to_ascii_lowercase())
             .collect();
         let value = parse_env_value(&var, &raw)?;
+        let as_string = value.is_str();
         graft(tree, &path, value);
+        grafted.push(EnvOverride {
+            key: path.join("."),
+            var,
+            path,
+            raw,
+            as_string,
+        });
     }
-    Ok(())
+    Ok(grafted)
 }
 
 /// A var with one `_` after `RUSTANGO` but `__` later is a typo: it is
@@ -478,6 +552,67 @@ mod tests {
         let cfg = load_with_root_and_env(&root, "missing-env", mock_env).unwrap();
         assert_eq!(cfg.database.pool_max_size, Some(42));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An all-digit secret is a TOML integer, but the field is a string.
+    #[test]
+    fn env_var_digits_fill_a_string_field() {
+        let root = fresh_root("digit_secret");
+        write(&root, "default.toml", "[mail]\n");
+        let mock_env = vec![
+            (
+                "RUSTANGO__MAIL__SMTP_PASSWORD".to_owned(),
+                "123456".to_owned(),
+            ),
+            (
+                "RUSTANGO__MAIL__SMTP_USERNAME".to_owned(),
+                "true".to_owned(),
+            ),
+            (
+                "RUSTANGO__DATABASE__POOL_MAX_SIZE".to_owned(),
+                "7".to_owned(),
+            ),
+        ];
+        let cfg = load_with_root_and_env(&root, "missing-env", mock_env).unwrap();
+        assert_eq!(cfg.mail.smtp_password.as_deref(), Some("123456"));
+        assert_eq!(cfg.mail.smtp_username.as_deref(), Some("true"));
+        assert_eq!(cfg.database.pool_max_size, Some(7));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A bad override names its env var, never its value.
+    #[test]
+    fn a_bad_env_override_names_the_var() {
+        let root = fresh_root("bad_override");
+        write(&root, "default.toml", "[database]\n");
+        let mock_env = vec![(
+            "RUSTANGO__DATABASE__POOL_MAX_SIZE".to_owned(),
+            "tenSECRET".to_owned(),
+        )];
+        let err = load_with_root_and_env(&root, "missing-env", mock_env).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::EnvOverride { var, .. } if var == "RUSTANGO__DATABASE__POOL_MAX_SIZE"),
+            "{err:?}"
+        );
+        assert!(!err.to_string().contains("SECRET"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One non-UTF-8 env var must not panic the load.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_env_vars_are_skipped() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let bad = std::ffi::OsString::from_vec(vec![0xff, 0xfe]);
+        let vars = utf8_env_vars(vec![
+            (
+                std::ffi::OsString::from("RUSTANGO__MAIL__SMTP_USERNAME"),
+                bad.clone(),
+            ),
+            (bad, std::ffi::OsString::from("x")),
+            ("OK".into(), "1".into()),
+        ]);
+        assert_eq!(vars, vec![("OK".to_owned(), "1".to_owned())]);
     }
 
     #[test]
