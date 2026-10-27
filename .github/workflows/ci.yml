@@ -49,6 +49,11 @@ on:
   # red with no code change at all. With PR runs narrowed above, this is
   # also how you check a feature branch before merging it.
   workflow_dispatch:
+  # Weekly full run on `develop`, the default branch. Dedupe skips most
+  # develop pushes, and those are the only runs that save the build cache;
+  # this run never skips, so the cache stays fresh. After the image mirror.
+  schedule:
+    - cron: "47 4 * * 1"
 
 # One run per ref at a time; a new push cancels the one it supersedes.
 #
@@ -185,7 +190,8 @@ jobs:
   # Every other job reaches this through `needs:`, directly or via `gate`.
   # A failed lookup runs the matrix; it never skips it.
   # Only artifacts from runs of this repo count, so a fork PR cannot vouch
-  # for a tree. `workflow_dispatch` never skips: it is the manual re-check.
+  # for a tree. `workflow_dispatch` (manual re-check) and `schedule` (cache
+  # refresh) never skip.
   # `every_ci_job_is_deduped` checks the wiring.
   already_green:
     runs-on: ubuntu-latest
@@ -202,12 +208,12 @@ jobs:
       - id: check
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT: ${{ github.event_name }}
+          NEVER_SKIP: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
         run: |
           tree=$(git rev-parse 'HEAD^{tree}')
           echo "tree=$tree" >> "$GITHUB_OUTPUT"
-          if [ "$EVENT" = workflow_dispatch ]; then
-            echo "Manual run: never skipped."
+          if [ "$NEVER_SKIP" = true ]; then
+            echo "$GITHUB_EVENT_NAME run: never skipped."
             exit 0
           fi
           if ! hit=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=ci-green-$tree&per_page=100" --jq '

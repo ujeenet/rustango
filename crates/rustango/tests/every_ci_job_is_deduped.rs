@@ -176,6 +176,53 @@ fn problems(yaml: &str) -> Vec<String> {
     out
 }
 
+/// Manual and weekly runs must never skip: the weekly one is what still
+/// saves develop's build cache once dedupe skips its pushes.
+fn never_skip_problems(yaml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let on = yaml
+        .find("\non:\n")
+        .map(|at| &yaml[at + 1..])
+        .and_then(|rest| rest.find("\njobs:\n").map(|end| &rest[..end]))
+        .unwrap_or("");
+    if !on.contains("\n  schedule:\n") {
+        out.push("`on:` has no `schedule:` trigger".into());
+    }
+    let job = yaml
+        .find("\n  already_green:\n")
+        .map(|at| &yaml[at + 1..])
+        .unwrap_or("");
+    let job = &job[..job.find("\n  gate:\n").unwrap_or(job.len())];
+    let expr = job
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("NEVER_SKIP:"))
+        .unwrap_or("");
+    for event in ["workflow_dispatch", "schedule"] {
+        if !expr.contains(&format!("github.event_name == '{event}'")) {
+            out.push(format!(
+                "`already_green`'s NEVER_SKIP does not cover `{event}`"
+            ));
+        }
+    }
+    if !job.contains(r#"if [ "$NEVER_SKIP" = true ]; then"#) {
+        out.push("`already_green` does not act on NEVER_SKIP".into());
+    }
+    out
+}
+
+#[test]
+fn manual_and_weekly_runs_never_skip() {
+    let yaml = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml"))
+        .expect("ci.yml is readable");
+    let found = never_skip_problems(&yaml);
+    assert!(
+        found.is_empty(),
+        "ci.yml never-skip events:\n  {}",
+        found.join("\n  ")
+    );
+}
+
 #[test]
 fn every_ci_job_is_deduped_and_recorded() {
     let yaml = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml"))
@@ -238,6 +285,35 @@ jobs:
         ];
         for bad in cases {
             assert!(!problems(&bad).is_empty(), "should fail:\n{bad}");
+        }
+    }
+
+    const NEVER: &str = "
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: \"0 0 * * 1\"
+jobs:
+  already_green:
+    steps:
+      - env:
+          NEVER_SKIP: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
+        run: |
+          if [ \"$NEVER_SKIP\" = true ]; then
+  gate:
+    runs-on: x
+";
+
+    #[test]
+    fn a_dropped_never_skip_event_is_caught() {
+        assert_eq!(never_skip_problems(NEVER), Vec::<String>::new());
+        for bad in [
+            NEVER.replace("  schedule:\n    - cron: \"0 0 * * 1\"\n", ""),
+            NEVER.replace(" || github.event_name == 'schedule'", ""),
+            NEVER.replace("github.event_name == 'workflow_dispatch' || ", ""),
+            NEVER.replace("if [ \"$NEVER_SKIP\" = true ]; then", "true"),
+        ] {
+            assert!(!never_skip_problems(&bad).is_empty(), "should fail:\n{bad}");
         }
     }
 }

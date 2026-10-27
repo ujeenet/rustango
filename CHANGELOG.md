@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Internal — CI skips a tree that already passed
 
-- A run whose code tree already passed CI skips its jobs, so the develop push and the promote to `main` no longer rerun the matrix; `workflow_dispatch` always runs it.
+- A run whose code tree already passed CI skips its jobs, so the develop push and the promote to `main` no longer rerun the matrix; `workflow_dispatch` and a new weekly run on `develop` (which refreshes the build cache) always run it.
 
 ## [0.61.6] — 2026-10-26
 
