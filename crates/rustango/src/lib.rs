@@ -1028,6 +1028,11 @@ pub mod template_extensions;
 #[cfg(feature = "template_views")]
 pub mod shortcuts;
 
+/// HTML error pages: the [`errors::Message`] extension, and (with
+/// `template_views`) the layer that dresses 4xx/5xx responses.
+#[cfg(feature = "_axum")]
+pub mod errors;
+
 /// Human-readable template filters — `intcomma`, `intword`,
 /// `naturalsize`, `ordinal`, `apnumber`, `naturaltime`, `naturalday`.
 /// See [`humanize`].

@@ -150,6 +150,7 @@ pub struct FirstAdminHandover {
     key: [u8; 32],
     set_password_path: String,
     ttl: Duration,
+    apex: super::server::LinkApex,
     #[cfg(feature = "email")]
     mail: Option<Mail>,
 }
@@ -182,9 +183,17 @@ impl FirstAdminHandover {
             key: link_key(tenant_secret),
             set_password_path: super::routes::RouteConfig::default().change_password_url,
             ttl: Self::DEFAULT_TTL,
+            apex: super::server::LinkApex::default(),
             #[cfg(feature = "email")]
             mail: None,
         }
+    }
+
+    /// Link to this apex, the one the server dispatches on.
+    #[must_use]
+    pub(crate) fn apex(mut self, apex: super::server::LinkApex) -> Self {
+        self.apex = apex;
+        self
     }
 
     /// The tenant admin's change-password path, if not the default.
@@ -293,7 +302,8 @@ impl FirstAdminHandover {
             self.ttl,
         );
         let query = signed.split_once('?').map_or("", |(_, q)| q);
-        let page = super::server::tenant_link(org, &self.set_password_path, request_host);
+        let page =
+            super::server::tenant_link(org, &self.set_password_path, request_host, &self.apex);
         SetPasswordLink(format!("{page}?{query}"))
     }
 

@@ -218,7 +218,7 @@ pub use pools::{
     DefaultTenantDb, PrewarmReport, TenantConn, TenantPool, TenantPoolInvalidator, TenantPools,
     TenantPoolsConfig,
 };
-pub(crate) use resolver::host_is_apex;
+pub(crate) use resolver::{host_is_apex, ApexPathPrefixResolver};
 pub use resolver::{
     invalidate_host_cache, invalidate_org_cache, ChainResolver, HeaderResolver, ListenerPort,
     OrgResolver, PathPrefixResolver, PortResolver, RegisteredHostResolver, SubdomainResolver,

@@ -332,13 +332,15 @@ fn render_panel(records: &[RequestRecord]) -> String {
         rows.push_str(r#"<tr><td colspan="9" class="empty">No requests captured yet — make some requests and refresh.</td></tr>"#);
     }
     let count = records.len();
+    // Inline tags need the request's nonce under a strict CSP.
+    let nonce = crate::csp_nonce::nonce_attr();
     format!(
         r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <title>rustango — debug panel</title>
-<style>
+<style{nonce}>
 :root {{ color-scheme: light dark; --slow: #d04040; --ok: #38a169; --err: #d04040; }}
 body {{ font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
        margin: 1.5rem; line-height: 1.5; }}
@@ -368,7 +370,7 @@ tbody tr:hover {{ background: rgba(127,127,127,.06); }}
 <h1>rustango debug panel</h1>
 <p class="tag">{count} request{plural} captured · auto-refresh every 5s</p>
 <div class="warn"><strong>Dev only.</strong> Don't mount in production — exposes request patterns + timing data.</div>
-<button class="refresh" onclick="location.reload()">Refresh now</button>
+<button class="refresh" id="refresh">Refresh now</button>
 <table>
 <thead>
 <tr>
@@ -378,12 +380,14 @@ tbody tr:hover {{ background: rgba(127,127,127,.06); }}
 </thead>
 <tbody>{rows}</tbody>
 </table>
-<script>setTimeout(() => location.reload(), 5000);</script>
+<script{nonce}>document.getElementById("refresh").addEventListener("click", () => location.reload());
+setTimeout(() => location.reload(), 5000);</script>
 </body>
 </html>"#,
         count = count,
         plural = if count == 1 { "" } else { "s" },
         rows = rows,
+        nonce = nonce,
     )
 }
 
@@ -500,5 +504,14 @@ mod tests {
         let html = render_panel(&[r]);
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(html.contains("&lt;script&gt;"));
+    }
+
+    /// Every inline tag carries the nonce; no inline handler is left.
+    #[tokio::test]
+    async fn render_panel_inline_tags_carry_the_csp_nonce() {
+        let html = crate::csp_nonce::scoped("n0nce", async { render_panel(&[]) }).await;
+        assert!(html.contains(r#"<style nonce="n0nce">"#), "{html}");
+        assert!(html.contains(r#"<script nonce="n0nce">"#), "{html}");
+        assert!(!html.contains("onclick"), "{html}");
     }
 }

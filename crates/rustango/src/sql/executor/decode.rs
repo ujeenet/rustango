@@ -150,6 +150,20 @@ impl<F: Fn() -> Vec<TypedCol>> RowReader<F> {
     }
 }
 
+/// Column `name` of `row`, decoded as the model declares it.
+pub(super) fn named_cell<R: DecodeRow>(
+    row: &R,
+    name: &str,
+    declared: Option<FieldType>,
+) -> Result<SqlValue, sqlx::Error>
+where
+    for<'a> &'a str: sqlx::ColumnIndex<R>,
+{
+    use sqlx::Column as _;
+    let i = row.try_column(name)?.ordinal();
+    Ok(row.decode_cell(i, row.plan_cell(i, declared)))
+}
+
 /// The first type in the list sqlx would decode a `ty` column as.
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 macro_rules! first_compatible {

@@ -281,6 +281,41 @@ pub struct Ledger {
     pub label: String,
 }
 
+/// An M2M target whose PK column is not `id`.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rel_gem", app = "rel2293")]
+pub struct Gem {
+    #[rustango(primary_key, column = "gem_no")]
+    pub number: i64,
+    pub carat: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "rel_vault",
+    app = "rel2293",
+    m2m(
+        name = "gems",
+        to = "rel_gem",
+        through = "rel_vault_gem",
+        src = "vault_id",
+        dst = "gem_no"
+    )
+)]
+pub struct Vault {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rel_vault_gem", app = "rel2293")]
+pub struct VaultGem {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub vault_id: i64,
+    pub gem_no: i64,
+}
+
 /// `rel2293_article` without its FK constraint, so a row can point nowhere.
 const LOOSE_ARTICLE: &ModelSchema = &{
     const FIELDS: &[FieldSchema] = &[
@@ -340,6 +375,9 @@ async fn setup(pool: &Pool) {
     fresh_table::<Gpost>(pool).await;
     fresh_table::<Gvideo>(pool).await;
     fresh_table::<Gaudited>(pool).await;
+    fresh_table::<Gem>(pool).await;
+    fresh_table::<Vault>(pool).await;
+    fresh_table::<VaultGem>(pool).await;
     rustango::audit::ensure_table_pool(pool)
         .await
         .expect("audit table");
@@ -689,7 +727,7 @@ async fn filter_joins_project_nothing(pool: &Pool) {
     assert_eq!(eds, vec![1, 2]);
 }
 
-/// `None` as a filter value means `IS NULL`, as in Django (#2413).
+/// `None` as a filter value means `IS NULL`.
 async fn none_filter_is_null(pool: &Pool) {
     seed_articles(pool).await;
     let ids = |qs: rustango::query::QuerySet<Article>| async move {
@@ -1265,6 +1303,49 @@ async fn self_relation_correlates_to_the_outer_row(pool: &Pool) {
     );
 }
 
+/// M2M target aggregates join on the target's real PK column.
+async fn m2m_aggregate_on_a_renamed_target_pk(pool: &Pool) {
+    for (number, carat) in [(10, 3), (11, 7), (12, 5)] {
+        Gem { number, carat }
+            .insert_pool(pool)
+            .await
+            .expect("seed gem");
+    }
+    for id in [1, 2] {
+        Vault { id }.insert_pool(pool).await.expect("seed vault");
+    }
+    for (vault_id, gem_no) in [(1, 10), (1, 11)] {
+        let mut l = VaultGem {
+            id: Auto::default(),
+            vault_id,
+            gem_no,
+        };
+        l.insert_pool(pool).await.expect("seed link");
+    }
+    let rows = Vault::objects()
+        .annotate_max("gems", "carat")
+        .fetch(pool)
+        .await
+        .expect("annotate_max over a renamed target pk");
+    let mut got: Vec<(String, String)> = rows
+        .iter()
+        .map(|r| {
+            (
+                format!("{:?}", r["id"]),
+                format!("{:?}", r["gems_max_carat"]),
+            )
+        })
+        .collect();
+    got.sort_unstable();
+    assert_eq!(
+        got,
+        [
+            ("I64(1)".to_owned(), "I64(7)".to_owned()),
+            ("I64(2)".to_owned(), "Null".to_owned())
+        ]
+    );
+}
+
 async fn m2m_set_ignores_repeated_ids(pool: &Pool) {
     let post = Post { id: 1 };
     post.tags_m2m()
@@ -1585,6 +1666,7 @@ tri_dialect_test! {
         reverse_has_helpers_follow_self_pk_column,
         bulk_update_is_all_or_none,
         m2m_set_ignores_repeated_ids,
+        m2m_aggregate_on_a_renamed_target_pk,
         self_relation_correlates_to_the_outer_row,
         generic_m2m_set_ignores_repeated_ids,
         generic_m2m_rows_go_with_their_owner,

@@ -4,6 +4,73 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.6] — 2026-10-26
+
+### Added — HTML error pages
+
+- `rustango::errors::ErrorPagesLayer` dresses 4xx/5xx as a page (browser), a fragment with `HX-Retarget` (htmx) or leaves the body (other clients); JSON, `HEAD` and `KeepBody` responses pass through. Off by default.
+- Overrides `errors/{code}.html` → `errors/{4|5}xx.html` → `errors/default.html` → a built-in page in the admin's look with `[brand]`; enable via `Builder::error_pages`, `AppBuilder::error_pages` or `[errors] enabled = true`.
+- `errors::Message` (response extension), `PageError` and `errors::not_found`; 5xx text stays hidden unless `RUSTANGO_DISCLOSE_ERRORS`. Admin denials, the body-limit 413 and 429s carry a `Message`.
+- Error pages set a CSRF cookie only when the template uses the token, under the CSRF layer's own cookie name, reusing a cookie the response already sets; every 4xx/5xx gets `Vary: Accept, HX-Request`.
+- `cargo rustango new` writes `[errors] enabled = true` into `config/default.toml`, so new projects get the pages with no edits; existing projects stay off until they add it.
+
+### Added — ORM
+
+- `fetch_with_prefetch_related` / `_filtered` prefetch a many-to-many or `reverse_has` relation by name for a list of parents in one query per relation, chunked under the bind limit (new `ExecError::PrefetchTargetMismatch`).
+
+### Fixed — jobs
+
+- A DB-queue job's heartbeat runs in its own task, so a handler that blocks its thread keeps its lease instead of being reclaimed and run twice.
+- Worker ids (`locked_by`) carry a random per-process part, so two hosts with no `HOSTNAME` and the same pid no longer share or release each other's rows.
+- `InMemoryJobQueue` hands a job with no registered handler to the dead-letter callback instead of dropping it with a log line.
+
+### Fixed — HTTP middleware
+
+- `SslRedirectLayer::exempt` warns once per prefix when it matches mid-segment (`/health` for `/healthz`); such paths are still exempt in 0.61.
+- `CompressionLayer` sends zlib for `Content-Encoding: deflate` (raw DEFLATE before), and compresses bodies from 64 KiB on the blocking pool, not the async worker.
+- `RedirectMap` joins the request query onto a target's own query and keeps the target's `#fragment`; non-GET/HEAD requests get 308/307 so their method survives.
+
+### Fixed — ORM and forms
+
+- M2M `annotate_sum` / `_avg` / `_max` / `_min` join on the target model's real PK column, not a hard-coded `id`.
+- `#[derive(Form)]` accepts fields named `data`, `__errors` or `__cleaned`; they shadowed the generated locals.
+- Template views leave `password_hash`, `password` and `database_url` out of `object` / `objects` / `object_list` unless the view lists them. UpdateView and the bulk-delete confirm page still carry unlisted columns; one warning per process names them, as a later release drops them.
+- Admin inline `max_num` is recounted inside the save transaction with the parent row locked, so two concurrent saves cannot both add past it.
+
+### Fixed — CLI and config
+
+- `Cli` management verbs log to stderr, so `dumpdata > fx.json` and `sqlmigrate` output hold no log lines; `runserver` and apps not dispatching through `Cli` keep stdout.
+- `audit-cleanup` with a 0 or negative `--days` / `--keep-last` refuses without `--yes`; it deleted every audit entry.
+- A tenancy project's `startapp` reaches the tenancy scaffolder, so `--with-bootstrap-migration` works.
+- `[security] hsts_max_age_secs` on a preset without `preload` (`relaxed`) warns that it adds `includeSubDomains; preload`; the header is unchanged.
+- A 0 pool bound from `[database]` is ignored with a warning, like its env var, instead of failing every query.
+- Config loading skips non-UTF-8 env vars instead of panicking; an all-digit `RUSTANGO__*` secret loads into a string field; a bad override names its env var (`ConfigError::EnvOverride`).
+- `sqlite,admin-sso` builds without dead-code warnings.
+
+### Fixed — security
+
+- `CachePageLayer` no longer replays one CSP nonce: inside the nonce layer a hit gets the request's own nonce; a page whose CSP carries a nonce the layer cannot swap is not cached.
+- Resuming a tenant a failed run left behind checks its database URL, as it resolves now, against the registry and warns in the run log when it matches.
+- MCP notifications go out on one channel per tenant, so one tenant's burst cannot make another tenant's SSE stream skip frames.
+- `openapi_router` loads exact Swagger UI and Redoc versions with Subresource Integrity, and fetches the spec under the prefix it is nested at.
+
+### Fixed — testkit and macros
+
+- `generic_has` without `self_pk_column` joins on the parent's PK column, not a hard-coded `id`.
+- `#[derive(Model)]` warns when an index, `unique_together`, `index_together` or `get_latest_by` names no column; `#[rustango::main]` warns on an argument it ignores (tokio's own names excepted).
+- The livereload script and the debug panel's inline tags carry the request's CSP nonce; the panel has no inline `onclick`.
+- `tri_dialect_test!`'s SQLite arm takes the suite lock, as it shares global signals and caches with the live arms.
+- New `Tenant::for_test_sqlite`, `for_test_mysql` and `for_test_pools` (Postgres) build a test `Tenant` from one source; `Tenant::for_test` is deprecated.
+- `TestClient` panics on an invalid request header instead of dropping it, and warns when a response body fails or passes 16 MiB; `text()` is lossy, not empty, on non-UTF-8.
+- `cargo rustango new` ignores `.env.*` (keeping `.env.example`).
+
+### Fixed — tenancy
+
+- `server::Builder` serves a path-prefix tenant at `<apex>/<prefix>`, and its admin under the prefix on its own host too; every apex request went to the operator console, so the impersonation handoff 404ed. Console routes still win on the apex; a prefix they shadow logs one warning. `PathPrefixResolver` lookups are cached like host lookups.
+- Console handoff, end-impersonation and first-admin links in a `server::Builder` stack use the apex given to `from_pool`, not `RUSTANGO_APEX_DOMAIN`. A link made for a tenant with no host, path prefix or port logs a warning: the standard resolvers do not route `<slug>.<apex>`.
+- REST ViewSet writes to `rustango_orgs` / `rustango_org_hosts` claim the host, path prefix and port in one transaction as the admin does: a value another tenant holds is a `409`, a malformed one a `400`; MySQL's deadlock between two claims is retried once.
+- `migrate-tenant-storage` shows psql's ERROR lines, not the NOTICEs before them, and refuses up front an extension on the target that another role owns, which the restore could not move.
+
 ## [0.61.5] — 2026-10-26
 
 ### Fixed — auth

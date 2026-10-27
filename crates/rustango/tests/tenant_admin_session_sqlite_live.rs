@@ -52,6 +52,7 @@ struct Env {
     secret: SessionSecret,
     slug: String,
     host: String,
+    reg_url: String,
     _dir: tempfile::TempDir,
     _suite: tokio::sync::MutexGuard<'static, ()>,
 }
@@ -102,7 +103,7 @@ async fn boot() -> Env {
     let secret = SessionSecret::from_bytes(b"tenant-admin-session-secret-32b!".to_vec());
     let admin = TenantAdminBuilder::new(
         pools.clone(),
-        reg_url,
+        reg_url.clone(),
         ChainResolver::new().push(SubdomainResolver::new("app.test")),
     )
     .routes(RouteConfig::legacy())
@@ -116,6 +117,7 @@ async fn boot() -> Env {
         secret,
         slug,
         host,
+        reg_url,
         _dir: dir,
         _suite: suite,
     }
@@ -466,6 +468,270 @@ fn session_cookie_paths(resp: &axum::response::Response) -> Vec<String> {
                 .to_owned()
         })
         .collect()
+}
+
+/// A `server::Builder` stack serves a path-prefix tenant at
+/// `<apex>/<prefix>`, and its console links use the Builder's apex.
+#[tokio::test]
+async fn a_builder_serves_a_path_prefix_tenant_on_its_apex() {
+    let env = boot().await;
+    let mut org = Org::objects()
+        .filter("slug", env.slug.as_str())
+        .fetch(&env.registry)
+        .await
+        .unwrap()
+        .remove(0);
+    org.host_pattern = None;
+    org.path_prefix = Some("/acme".into());
+    org.save_pool(&env.registry).await.expect("set prefix");
+    rustango::tenancy::invalidate_org_cache();
+
+    let password = "operator-password-1";
+    let mut op = Operator {
+        id: Auto::default(),
+        username: unique("op"),
+        password_hash: rustango::tenancy::password::hash(password).unwrap(),
+        active: true,
+        created_at: chrono::Utc::now(),
+        password_changed_at: None,
+        sessions_revoked_at: None,
+    };
+    op.insert_pool(&env.registry).await.expect("seed operator");
+
+    let registry = sqlx::SqlitePool::connect(&env.reg_url).await.unwrap();
+    let app = rustango::server::Builder::from_pool(registry, env.reg_url.clone(), "apex.test")
+        .routes(RouteConfig::legacy())
+        .into_router()
+        .await
+        .expect("router");
+    let send = |method: &'static str, host: &str, uri: String, cookie: String, body: String| {
+        let (app, host) = (app.clone(), host.to_owned());
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::HOST, host)
+                    .header(header::COOKIE, format!("rustango_csrf=t; {cookie}"))
+                    .header("x-csrf-token", "t")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let header_of = |resp: &axum::response::Response, name| {
+        resp.headers()
+            .get(name)
+            .unwrap_or_else(|| panic!("{} has no {name}", resp.status()))
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+
+    let login = send(
+        "POST",
+        "apex.test",
+        "/login".into(),
+        String::new(),
+        format!("username={}&password={password}", op.username),
+    )
+    .await;
+    let op_cookie = header_of(&login, "set-cookie");
+    let start = send(
+        "POST",
+        "apex.test",
+        format!("/orgs/{}/impersonate", env.slug),
+        op_cookie.clone(),
+        String::new(),
+    )
+    .await;
+    let location = header_of(&start, "location");
+    assert!(
+        location.contains("//apex.test/acme/__impersonation_handoff?"),
+        "got {location}"
+    );
+    let handoff = location[location.find("/acme/").unwrap()..].to_owned();
+    let redeemed = send("GET", "apex.test", handoff, String::new(), String::new()).await;
+    assert_eq!(header_of(&redeemed, "location"), "/acme/__admin/");
+    let cookie = header_of(&redeemed, "set-cookie");
+    let page = send(
+        "GET",
+        "apex.test",
+        "/acme/__admin/".into(),
+        cookie.clone(),
+        String::new(),
+    )
+    .await;
+    assert_eq!(page.status(), StatusCode::OK);
+    let ended = send(
+        "POST",
+        "apex.test",
+        "/acme/__admin/__end-impersonation".into(),
+        cookie,
+        String::new(),
+    )
+    .await;
+    let back = header_of(&ended, "location");
+    assert!(back.ends_with("//apex.test/orgs"), "got {back}");
+
+    // The rest of the apex is still the console; another host's path picks no tenant.
+    let console = send("GET", "apex.test", "/orgs".into(), op_cookie, String::new()).await;
+    assert_eq!(console.status(), StatusCode::OK);
+    let other = send(
+        "GET",
+        "other.test",
+        "/acme/__admin/".into(),
+        String::new(),
+        String::new(),
+    )
+    .await;
+    assert_eq!(other.status(), StatusCode::NOT_FOUND);
+
+    // With a host of its own too, its prefixed admin is served there.
+    org.host_pattern = Some(env.host.clone());
+    org.save_pool(&env.registry).await.expect("set host");
+    rustango::tenancy::invalidate_org_cache();
+    let anon = send(
+        "GET",
+        &env.host,
+        "/acme/__admin/".into(),
+        String::new(),
+        String::new(),
+    )
+    .await;
+    let to = header_of(&anon, "location");
+    assert!(to.starts_with("/acme/__login"), "got {to}");
+}
+
+/// A seeded operator and a `server::Builder` app on apex `apex.test`.
+async fn builder_app(env: &Env) -> (Operator, axum::Router) {
+    let mut op = Operator {
+        id: Auto::default(),
+        username: unique("op"),
+        password_hash: rustango::tenancy::password::hash("operator-password-1").unwrap(),
+        active: true,
+        created_at: chrono::Utc::now(),
+        password_changed_at: None,
+        sessions_revoked_at: None,
+    };
+    op.insert_pool(&env.registry).await.expect("seed operator");
+    let registry = sqlx::SqlitePool::connect(&env.reg_url).await.unwrap();
+    let app = rustango::server::Builder::from_pool(registry, env.reg_url.clone(), "apex.test")
+        .routes(RouteConfig::legacy())
+        .into_router()
+        .await
+        .expect("router");
+    (op, app)
+}
+
+async fn apex_request(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    cookie: &str,
+    body: String,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::HOST, "apex.test")
+                .header(header::COOKIE, format!("rustango_csrf=t; {cookie}"))
+                .header("x-csrf-token", "t")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// A tenant prefix equal to a console path never takes it over: the console
+/// keeps `/orgs` and warns once; a path it does not serve reaches the tenant.
+#[tokio::test]
+async fn a_console_route_wins_over_a_tenant_prefix() {
+    let env = boot().await;
+    let mut org = Org::objects()
+        .filter("slug", env.slug.as_str())
+        .fetch(&env.registry)
+        .await
+        .unwrap()
+        .remove(0);
+    org.host_pattern = None;
+    org.path_prefix = Some("/orgs".into());
+    org.save_pool(&env.registry).await.expect("set prefix");
+    rustango::tenancy::invalidate_org_cache();
+    let (op, app) = builder_app(&env).await;
+
+    let out = rustango::testkit::CaptureWriter::default();
+    let writer = out.clone();
+    let sub = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let _guard = tracing::subscriber::set_default(sub);
+
+    let login = apex_request(
+        &app,
+        "POST",
+        "/login",
+        "",
+        format!("username={}&password=operator-password-1", op.username),
+    )
+    .await;
+    let cookie = login.headers()["set-cookie"].to_str().unwrap();
+    let cookie = cookie.split(';').next().unwrap().to_owned();
+    for _ in 0..2 {
+        let page = apex_request(&app, "GET", "/orgs", &cookie, String::new()).await;
+        assert_eq!(page.status(), StatusCode::OK);
+        let html = axum::body::to_bytes(page.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&html).contains(&env.slug),
+            "not the console's tenant list"
+        );
+    }
+    let logged = out.contents();
+    assert_eq!(
+        logged
+            .matches("shadowed by an operator console route")
+            .count(),
+        1,
+        "{logged}"
+    );
+    let anon = apex_request(&app, "GET", "/orgs/__admin/", "", String::new()).await;
+    let to = anon.headers()["location"].to_str().unwrap();
+    assert!(to.starts_with("/orgs/__login"), "got {to}");
+}
+
+/// Apex requests reuse the cached prefix lookup: none queries the registry.
+#[tokio::test]
+async fn apex_requests_do_not_query_the_registry_each_time() {
+    let env = boot().await;
+    let (_, app) = builder_app(&env).await;
+    let paths = ["/nosuch", "/login", "/orgs"];
+    for path in paths {
+        apex_request(&app, "GET", path, "", String::new()).await;
+    }
+    let queries = rustango::test_assertions::QueryCounter::scope(async {
+        for _ in 0..5 {
+            for path in paths {
+                apex_request(&app, "GET", path, "", String::new()).await;
+            }
+        }
+        rustango::test_assertions::QueryCounter::current()
+    })
+    .await;
+    assert_eq!(queries, 0, "registry queries for 15 cached apex requests");
 }
 
 /// An operator password change ends their open impersonation session.

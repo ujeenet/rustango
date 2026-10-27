@@ -150,6 +150,54 @@ untouched.
 
 ## Unreleased
 
+## 0.61.6
+
+### Error pages (opt-in)
+
+New `rustango::errors` and `[errors]` settings; nothing changes until you enable them. `Settings` has a new public `errors` field, so a `Settings { .. }` literal without `..Default::default()` stops compiling.
+
+### Jobs: unregistered in-memory jobs are dead-lettered
+
+`InMemoryJobQueue` now passes a job with no registered handler to `on_dead_letter` (error `no handler registered`, 0 attempts). It was dropped before; the DB queue is unchanged.
+
+### HTTP middleware
+
+`SslRedirectLayer::exempt` still matches raw prefixes, but warns when `/health` exempts `/healthz`; 0.62.0 will match whole segments only, so list such paths explicitly. `RedirectMap` answers POST, PUT and others with 308/307 instead of 301/302. `CompressionLayer`'s `deflate` is now zlib-wrapped, as browsers expect.
+
+### Tenancy: path-prefix routing and REST claims
+
+`server::Builder` now sends an apex request the console does not serve, under an active tenant's `path_prefix`, to that tenant; the console's own routes always win, and a shadowed prefix logs one warning. The prefix lookup is cached like host lookups. REST writes to `rustango_orgs` / `rustango_org_hosts` now validate and lowercase host, path prefix and port like the admin, and answer `409` for one another tenant holds.
+
+### Template views hide credential columns
+
+`ListView`, `DetailView`, `DeleteView`, `UpdateView` and the bulk-delete confirm page no longer put `password_hash`, `password` or `database_url` into the Tera context unless `.fields()` (or UpdateView's field list) names them. A template that shows a column literally named `password` or `database_url` on purpose must now list it in `.fields()`. UpdateView and the bulk-delete confirm page still carry columns outside their list; one warning per process names those views, as a later release will drop the columns.
+
+### Index the inline FK column
+
+An admin inline with `max_num` now recounts its rows inside the save transaction. On MySQL that is a locking read of the parent's child rows; without an index on the inline's FK column it locks the whole child table until the save commits, so index that column.
+
+### CLI and config
+
+`audit-cleanup --days 0`, `--keep-last 0` or a negative N deletes every audit entry, so it now refuses without `--yes`; add `--yes` to a job that means it. `Cli` management verbs (`dumpdata`, `migrate`, …) log to stderr, so their stdout holds only their output; `runserver` still logs to stdout. A tenancy project's `startapp` is now the tenancy one, so `--with-manage-bin` writes the tenancy `manage` bin.
+
+`[database] pool_max_size`, `pool_acquire_timeout_secs`, `pool_idle_timeout_secs` and `pool_max_lifetime_secs` of 0 are ignored with a warning, as their env vars already were. An all-digit or `true` `RUSTANGO__*` value fills a string field as text, and a bad override fails as `ConfigError::EnvOverride` instead of `Shape`.
+
+### Nonced pages and the page cache
+
+Behind `CachePageLayer` placed outside the CSP nonce layer, a page whose CSP names a nonce is no longer cached (`x-cache-status: BYPASS`). Mount the cache inside the nonce layer to keep caching it.
+
+### MCP notifications per tenant
+
+SSE streams read their tenant's channel. Send with `mcp::notifications::send` (the `notify_*` helpers do); a frame sent straight to `notifications::bus()` now reaches only in-process observers, not streams.
+
+### OpenAPI viewers
+
+Nested under a prefix, `/docs` and `/redoc` fetch `<prefix>/openapi.json`, no longer the root `/openapi.json`. The pages pin Swagger UI 5.34.0 and Redoc 2.5.4.
+
+### Testkit and macros
+
+`TestClient` now panics on an invalid request header it used to drop. A failed or over-16 MiB response body still reads as empty, with a warning; 0.62.0 will panic there too. `Tenant::for_test` is deprecated: use `Tenant::for_test_sqlite(org, pool)`, `Tenant::for_test_mysql(org, pool)` or `Tenant::for_test_pools(org, &pools).await`. A `generic_has` on a model whose PK column is not `id` now joins on that column; set `self_pk_column = "id"` to keep the old join. New warnings for unknown index columns and `#[rustango::main]` arguments are planned to become errors in 0.62.0.
+
 ## 0.61.5
 
 ### ViewSet OpenAPI: Binary is hex

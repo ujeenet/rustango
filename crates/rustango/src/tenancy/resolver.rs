@@ -163,6 +163,9 @@ struct RegistryState {
     /// `org_cache`; negative entries matter most here, as only hosts the
     /// base resolver missed reach this one.
     host_cache: HostTtlCache<Org>,
+    /// `/<first segment>` → [`Org`] by `path_prefix` (`None` = known miss).
+    /// The apex dispatch asks it on every apex request.
+    prefix_cache: HostTtlCache<Org>,
     /// Last `rustango_orgs` fingerprint seen, so this pod notices another
     /// pod's writes without a shared cache. See [`sync_org_generation`].
     org_gen: GenerationPoll<super::org::OrgGeneration>,
@@ -183,6 +186,7 @@ impl RegistryState {
         Self {
             org_cache: HostTtlCache::new(CACHE_TTL, CACHE_MAX),
             host_cache: HostTtlCache::new(CACHE_TTL, CACHE_MAX),
+            prefix_cache: HostTtlCache::new(CACHE_TTL, CACHE_MAX),
             org_gen: GenerationPoll::new(),
             host_gen: GenerationPoll::new(),
             registry_down: Breaker::new(),
@@ -190,10 +194,11 @@ impl RegistryState {
         }
     }
 
-    /// Drop both caches: each holds whole `Org` rows. See [`invalidate_org_cache`].
+    /// Drop every cache: each holds whole `Org` rows. See [`invalidate_org_cache`].
     fn invalidate_orgs(&self) {
         self.org_cache.clear();
         self.host_cache.clear();
+        self.prefix_cache.clear();
     }
 }
 
@@ -543,7 +548,46 @@ impl OrgResolver for PathPrefixResolver {
             return Ok(None);
         };
         let candidate = format!("/{first}");
-        find_active_org_by(registry, &state(registry), Org::path_prefix.eq(candidate)).await
+        // Cached like the host lookups, with the same invalidation.
+        let st = state(registry);
+        sync_org_generation(registry, &st).await;
+        match st.prefix_cache.get(&candidate) {
+            Cached::Miss => return Ok(None),
+            Cached::Hit(org) => return Ok(Some(org)),
+            Cached::Absent => {}
+        }
+        let _flight = st.prefix_cache.single_flight(&candidate).await;
+        match st.prefix_cache.get(&candidate) {
+            Cached::Miss => return Ok(None),
+            Cached::Hit(org) => return Ok(Some(org)),
+            Cached::Absent => {}
+        }
+        let found =
+            find_active_org_by(registry, &st, Org::path_prefix.eq(candidate.clone())).await?;
+        st.prefix_cache.put(&candidate, found.clone());
+        Ok(found)
+    }
+}
+
+/// [`PathPrefixResolver`] on the apex host only, where a path-prefix
+/// tenant lives: another host's path never picks a tenant.
+pub(crate) struct ApexPathPrefixResolver {
+    apex: String,
+}
+
+impl ApexPathPrefixResolver {
+    pub(crate) fn new(apex: impl Into<String>) -> Self {
+        Self { apex: apex.into() }
+    }
+}
+
+#[async_trait]
+impl OrgResolver for ApexPathPrefixResolver {
+    async fn resolve(&self, parts: &Parts, registry: &Pool) -> Result<Option<Org>, TenancyError> {
+        if !host_is_apex(&parts.headers, &parts.uri, &self.apex) {
+            return Ok(None);
+        }
+        PathPrefixResolver.resolve(parts, registry).await
     }
 }
 

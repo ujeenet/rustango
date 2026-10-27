@@ -127,6 +127,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::email::smtp` | Transport SMTP |
 | `rustango::email_jobs` | Deux files sur une table de jobs avec des mailers différents |
 | `rustango::error` | La cause d'une 5xx, que le corps de la réponse ne divulgue pas |
+| `rustango::errors` | Un template de page d'erreur dont le rendu a échoué, ou un répertoire de templates non chargé |
 | `rustango::forms` | Valeurs `DynamicForm` acceptées pour l'instant mais refusées dans une version future |
 | `rustango::auth_flows` | Liens d'authentification à usage unique refusés par le cache |
 | `rustango::aead` | Une clé secrète précédente vide |
@@ -144,6 +145,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::rate_limit` | Limitation de débit |
 | `rustango::request_timeout` | Délai par requête |
 | `rustango::scheduler` | Cron / tâches planifiées |
+| `rustango::security_headers` | Réglages des en-têtes de sécurité (HSTS) |
 | `rustango::server` | Démarrage et arrêt du serveur |
 | `rustango::shutdown` | Gestion des signaux et hooks d'arrêt |
 | `rustango::sql` | Exécution des requêtes |

@@ -29,7 +29,8 @@
 //! ## How it works
 //!
 //! 1. The layer picks a random session ID at startup.
-//! 2. Each HTML response gets a `<script>` before `</body>`.
+//! 2. Each HTML response gets a `<script>` before `</body>`, carrying the
+//!    request's CSP nonce when `.csp_nonce(...)` is layered outside it.
 //! 3. The script polls `/__livereload__/check` every `poll_ms`.
 //! 4. The endpoint returns the session ID. A different ID means the
 //!    server restarted, so the script calls `location.reload()`.
@@ -187,7 +188,9 @@ async fn handle(cfg: Arc<LiveReloadLayer>, req: Request<Body>, next: Next) -> Re
     };
 
     let html = String::from_utf8_lossy(&bytes);
-    let injected = inject_script(&html, &cfg.session, cfg.poll_ms);
+    // Inside `.csp_nonce(...)`, so a strict CSP runs the script.
+    let nonce = crate::csp_nonce::nonce_attr();
+    let injected = inject_script(&html, &cfg.session, cfg.poll_ms, &nonce);
     let mut response = Response::from_parts(parts, Body::from(injected));
     // The body grew, so the old Content-Length is wrong: drop it.
     response
@@ -196,9 +199,10 @@ async fn handle(cfg: Arc<LiveReloadLayer>, req: Request<Body>, next: Next) -> Re
     response
 }
 
-fn inject_script(html: &str, session: &str, poll_ms: u32) -> String {
+/// `nonce` is a ready ` nonce="…"` attribute, or empty.
+fn inject_script(html: &str, session: &str, poll_ms: u32, nonce: &str) -> String {
     let script = format!(
-        r#"<script>(function(){{var s="{session}";function p(){{fetch("{ENDPOINT}").then(r=>r.text()).then(v=>{{if(v.trim()&&v.trim()!==s)location.reload();}}).catch(()=>{{}});}}setInterval(p,{poll_ms});}})();</script>"#,
+        r#"<script{nonce}>(function(){{var s="{session}";function p(){{fetch("{ENDPOINT}").then(r=>r.text()).then(v=>{{if(v.trim()&&v.trim()!==s)location.reload();}}).catch(()=>{{}});}}setInterval(p,{poll_ms});}})();</script>"#,
     );
     if let Some(idx) = html.rfind("</body>") {
         let mut out = String::with_capacity(html.len() + script.len());
@@ -256,7 +260,7 @@ mod tests {
     #[test]
     fn inject_script_inserts_before_body_close() {
         let html = "<html><body>Hello</body></html>";
-        let out = inject_script(html, "abc", 1000);
+        let out = inject_script(html, "abc", 1000, "");
         assert!(out.contains("<script>"));
         let body_close = out.find("</body>").unwrap();
         let script_pos = out.find("<script>").unwrap();
@@ -268,14 +272,14 @@ mod tests {
     #[test]
     fn inject_script_appends_when_no_body_tag() {
         let html = "<p>fragment</p>";
-        let out = inject_script(html, "x", 500);
+        let out = inject_script(html, "x", 500, "");
         assert!(out.starts_with("<p>fragment</p>"));
         assert!(out.contains("<script>"));
     }
 
     #[test]
     fn inject_script_uses_endpoint_constant() {
-        let out = inject_script("<body></body>", "x", 100);
+        let out = inject_script("<body></body>", "x", 100, "");
         assert!(out.contains(ENDPOINT));
     }
 
@@ -283,5 +287,23 @@ mod tests {
     fn session_method_returns_value() {
         let l = LiveReloadLayer::dev();
         assert!(!l.session().is_empty());
+    }
+
+    /// Under a strict CSP the injected script needs the request's nonce.
+    #[tokio::test]
+    async fn injected_script_carries_the_csp_nonce() {
+        use crate::csp_nonce::{CspNonceLayer, CspNonceRouterExt};
+        use tower::ServiceExt;
+        let app = Router::new()
+            .route("/", get(|| async { axum::response::Html("<body></body>") }))
+            .livereload(LiveReloadLayer::dev())
+            .csp_nonce(CspNonceLayer::default());
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("<script nonce=\""), "{body}");
     }
 }

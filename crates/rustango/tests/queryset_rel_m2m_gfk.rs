@@ -78,6 +78,18 @@ pub struct GComment {
     score: i64,
 }
 
+/// A parent whose PK column is not `id`.
+#[derive(Model)]
+#[rustango(
+    table = "rmg_ledger",
+    generic_has(name = "comments", child = "GComment")
+)]
+#[allow(dead_code)]
+pub struct Ledger {
+    #[rustango(primary_key, column = "ledger_no")]
+    id: i64,
+}
+
 // ----------------------------------------------------------------- M2M
 
 #[test]
@@ -254,6 +266,24 @@ fn gfk_uses_backtick_quoting_on_mysql() {
         sql.contains("FROM `rmg_gcomment` WHERE `rmg_gcomment`.`object_pk` = `rmg_article`.`id`")
             && sql.contains("(SELECT `id` FROM `rustango_content_types` WHERE `table` = ?)"),
         "MySQL GFK shape: {sql}"
+    );
+}
+
+/// `generic_has` without `self_pk_column` joins on the PK column.
+#[test]
+fn gfk_defaults_to_the_parent_pk_column() {
+    assert_eq!(
+        Ledger::generic_reverse_relations()[0].self_pk_column,
+        "ledger_no"
+    );
+    let q = Ledger::objects()
+        .where_has("comments")
+        .compile()
+        .expect("compile");
+    let sql = Sqlite.compile_select(&q).expect("emit").sql;
+    assert!(
+        sql.contains(r#""rmg_gcomment"."object_pk" = "rmg_ledger"."ledger_no""#),
+        "{sql}"
     );
 }
 

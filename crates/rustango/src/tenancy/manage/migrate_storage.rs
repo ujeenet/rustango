@@ -233,6 +233,10 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
             // Only what the target lacks needs trust to create (#2385).
             let refused = async {
                 let missing = missing_on(&pool, &used, &schema.0).await?;
+                let present = used
+                    .iter()
+                    .filter(|e| !missing.iter().any(|m| m.name == e.name));
+                refuse_foreign_owned(&pool, present).await?;
                 refuse_untrusted(&pool, &missing, &parsed.allow_extensions, "the target").await
             }
             .await;
@@ -923,6 +927,34 @@ async fn refuse_untrusted(
     )))
 }
 
+/// Refuse an extension the target has but this user does not own: the
+/// restore moves it with `ALTER EXTENSION`, which only its owner may run.
+async fn refuse_foreign_owned<'e>(
+    pool: &crate::sql::sqlx::PgPool,
+    present: impl Iterator<Item = &'e Extension>,
+) -> Result<(), TenancyError> {
+    let mut foreign = Vec::new();
+    for e in present {
+        let mine: Option<bool> = crate::sql::sqlx::query_scalar(
+            "SELECT pg_has_role(extowner, 'USAGE') FROM pg_extension WHERE extname = $1",
+        )
+        .bind(&e.name)
+        .fetch_optional(pool)
+        .await?;
+        if mine == Some(false) {
+            foreign.push(e.name.as_str());
+        }
+    }
+    if foreign.is_empty() {
+        return Ok(());
+    }
+    Err(TenancyError::Validation(format!(
+        "extension(s) {} on the target are owned by another role, so the restore cannot \
+         move them: connect as their owner or a superuser, or drop them there",
+        foreign.join(", ")
+    )))
+}
+
 /// Refuse the extensions that would have to change schema but cannot.
 fn refuse_fixed<'e>(fixed: impl Iterator<Item = &'e Extension>) -> Result<(), TenancyError> {
     let names: Vec<&str> = fixed.map(|e| e.name.as_str()).collect();
@@ -1112,7 +1144,7 @@ fn run(mut cmd: std::process::Command, what: &str) -> Result<(), TenancyError> {
     Err(TenancyError::Validation(format!(
         "{what} failed (exit {:?}): {}",
         out.status.code(),
-        first_lines(&String::from_utf8_lossy(&out.stderr))
+        error_lines(&String::from_utf8_lossy(&out.stderr))
     )))
 }
 
@@ -1122,11 +1154,26 @@ fn stderr_of(child: &mut std::process::Child) -> String {
     if let Some(mut s) = child.stderr.take() {
         let _ = s.read_to_string(&mut buf);
     }
-    first_lines(&buf)
+    error_lines(&buf)
 }
 
-fn first_lines(s: &str) -> String {
-    s.lines().take(6).collect::<Vec<_>>().join(" | ")
+/// The lines that say why a client failed: psql prints NOTICEs first, so
+/// its ERROR/DETAIL/HINT lines, else the last lines.
+fn error_lines(s: &str) -> String {
+    const MARKS: [&str; 6] = ["ERROR:", "FATAL:", "DETAIL:", "HINT:", "CONTEXT:", "error:"];
+    let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
+    let errors: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| MARKS.iter().any(|m| l.contains(m)))
+        .take(6)
+        .collect();
+    let shown = if errors.is_empty() {
+        &lines[lines.len().saturating_sub(6)..]
+    } else {
+        &errors[..]
+    };
+    shown.join(" | ")
 }
 
 /// The target's `public` must be empty and ours to drop, or the restore
@@ -1299,6 +1346,28 @@ mod tests {
     #[test]
     fn redact_url_handles_no_scheme() {
         assert_eq!(redact_url("just-a-string"), "just-a-string");
+    }
+
+    /// psql's error is shown, not the NOTICE lines before it.
+    #[test]
+    fn a_failure_shows_the_error_behind_the_notices() {
+        let mut stderr = String::new();
+        for i in 0..8 {
+            stderr.push_str(&format!(
+                "psql:<stdin>:{i}: NOTICE:  table \"t{i}\" does not exist\n"
+            ));
+        }
+        stderr.push_str("psql:<stdin>:40: ERROR:  must be owner of extension citext\n");
+        stderr.push_str("CONTEXT:  extension citext\n");
+        let shown = error_lines(&stderr);
+        assert!(
+            shown.contains("must be owner of extension citext"),
+            "{shown}"
+        );
+        assert!(!shown.contains("NOTICE"), "{shown}");
+        // No ERROR line at all: the tail, where a client prints its reason.
+        let tail = error_lines("a\nb\nc\nd\ne\nf\ng\npg_dump: aborting\n");
+        assert!(tail.ends_with("pg_dump: aborting"), "{tail}");
     }
 
     /// #2384 — a printed conninfo never shows its password.

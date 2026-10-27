@@ -38,6 +38,7 @@ Cada tipo de vista (`ListView`, `DetailView`, `CreateView`, `UpdateView`,
 - [TemplateView y RedirectView](#templateview-y-redirectview)
 - [Mono-inquilino vs multi-inquilino](#mono-inquilino-vs-multi-inquilino)
 - [Servir un modelo de ambas formas](#servir-un-modelo-de-ambas-formas)
+- [Páginas de error](#páginas-de-error)
 - [Véase también](#véase-también)
 
 ---
@@ -366,6 +367,201 @@ let app = axum::Router::new()
 Ahora `GET /api/posts` devuelve el sobre JSON paginado y `GET /posts`
 devuelve un listado HTML renderizado — las mismas filas, el mismo pool, dos formas. Esta
 configuración exacta es lo que afirma el [test de respaldo](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/html_and_api_contrast_sqlite_live.rs).
+
+---
+
+## Páginas de error
+
+Una capa convierte cada 4xx/5xx de tu app en una página para personas y deja en
+paz a los clientes de API. Está **desactivada por defecto**; nada cambia hasta
+que la activas. Necesita la feature `template_views`.
+
+### Activarla
+
+En el servidor multi-inquilino, la capa lo envuelve todo: tu API, el login del
+inquilino, el admin del inquilino, la consola de operador y las capas propias
+del framework.
+
+```rust
+use std::sync::Arc;
+use rustango::errors::ErrorPagesLayer;
+
+let tera = Arc::new(rustango::template_extensions::html_tera_from_glob("templates/**/*.html")?);
+let app = rustango::server::Builder::from_env().await?
+    .api(my_app::urls::api())
+    .error_pages(ErrorPagesLayer::new().templates(tera));
+```
+
+`AppBuilder::error_pages` hace lo mismo para una app de un solo pool. En un
+router propio, móntala con `ErrorPagesRouterExt` y añade el fallback 404:
+
+```rust
+use rustango::errors::{ErrorPagesLayer, ErrorPagesRouterExt as _};
+
+let app = Router::new()
+    .route("/projects", get(projects))
+    .fallback(rustango::errors::not_found)
+    .error_pages(ErrorPagesLayer::new().templates(tera.clone()));
+```
+
+Con `Cli` y un archivo de configuración, usa en su lugar la sección `[errors]`:
+
+```toml
+[errors]
+enabled = true            # default false
+templates = "templates"   # template root holding errors/404.html etc.; default "templates"
+htmx_target = "#flash"    # HX-Retarget for htmx errors; default "#flash", "" sends none
+```
+
+Un directorio `templates` que no existe o no se parsea queda en el log, y se
+usan las páginas integradas.
+
+### Qué recibe cada cliente
+
+| Petición | Respuesta |
+|---|---|
+| Navegación del navegador (`Accept: text/html`, sin `HX-Request`) | Página HTML completa |
+| htmx (`HX-Request`) | Fragmento HTML, más `HX-Retarget: <htmx_target>` y `HX-Reswap: innerHTML show:window:top` |
+| Cualquier otro cliente (`fetch`, curl) | El cuerpo sin cambios; un cuerpo vacío recibe el mensaje como texto plano |
+| JSON / problem+json | Sin cambios, salvo que lleve un `Message` y pregunte un navegador o htmx |
+| `HEAD` | Sin cambios |
+| Una respuesta marcada con `rustango::errors::KeepBody` | Sin cambios |
+
+**También se reemplaza un cuerpo de error `text/html`**, salvo que la respuesta
+lleve `KeepBody`: marca toda página de error HTML que construyas tú.
+
+Solo se reemplazan cuerpos de texto (`text/plain`, `text/html`, ninguno) y JSON
+con mensaje; imágenes y otros tipos pasan. Una respuesta vestida conserva su
+estado y cabeceras (también `Retry-After`) y recibe `Vary: Accept, HX-Request`.
+
+### Plantillas
+
+Gana la primera plantilla que exista en tu Tera:
+
+1. `errors/<code>.html`, p. ej. `errors/404.html`
+2. `errors/4xx.html` o `errors/5xx.html`
+3. `errors/default.html`
+4. la página integrada
+
+Los fragmentos htmx usan `errors/partial.html` y luego el fragmento integrado.
+Una plantilla que falla al renderizar queda en el log y se usa la página
+integrada; una página de error nunca vuelve vacía.
+
+`templates/errors/404.html`:
+
+```html
+{% extends "base.html" %}
+{% block content %}
+<section class="error">
+  <h1>{{ code }} · {{ title }}</h1>
+  <p>{{ message }}</p>
+  <p>Nothing at <code>{{ path }}</code>.</p>
+  {% if user %}<p>Signed in as {{ user.username }}.</p>{% endif %}
+  <a href="/">Back to the start</a>
+</section>
+{% endblock content %}
+```
+
+`templates/errors/5xx.html`:
+
+```html
+{% extends "base.html" %}
+{% block content %}
+<section class="error">
+  <h1>{{ title }}</h1>
+  <p>{{ message }}</p>
+  <form method="post" action="/feedback">{{ csrf_input | safe }}
+    <button>Tell us what you were doing</button>
+  </form>
+</section>
+{% endblock content %}
+```
+
+Contexto:
+
+| Clave | Valor |
+|---|---|
+| `code` | El estado, p. ej. `404` |
+| `title` | Un título corto por estado («Not found») |
+| `message` | Qué salió mal, para el usuario (ver abajo) |
+| `path` | La ruta de la petición |
+| `user` | `{ username, is_superuser }` del usuario del inquilino con sesión, o null |
+| `username`, `is_superuser` | Lo mismo, plano |
+| `csrf_token`, `csrf_input` | Un token CSRF y su input oculto, con el nombre de cookie de tu capa CSRF. La cookie solo se pone si la plantilla los usa |
+| `csp_nonce` | El nonce CSP de esta petición, o `""` |
+| `brand_name`, `brand_logo_url`, `brand_css`, `theme_mode` | De `[brand]` |
+
+`user` necesita la feature `tenancy` y un host de inquilino; en otro caso es
+null. Las plantillas son por app: todos los inquilinos reciben las mismas.
+
+### La página integrada
+
+HTML autónomo: sin CDN, sin script, CSS inline con el nonce CSP de la petición,
+los tokens de tema del admin (claro y oscuro). Con `[errors]` en los settings
+muestra `[brand] name` y `logo_url`; `primary_color` y `theme_mode` fijan los
+colores (necesitan la feature `tenancy`, cuyo código de marca reutiliza).
+`ErrorPagesLayer::brand(&settings.brand)` hace lo mismo en código.
+
+### El mensaje
+
+Un handler le da palabras a la página con `rustango::errors::Message`, una
+extensión de respuesta, o con `PageError`, que lleva uno:
+
+```rust
+use rustango::errors::{Message, PageError};
+
+async fn project(Path(slug): Path<String>) -> Result<Html<String>, PageError> {
+    let project = find_project(&slug)
+        .await
+        .map_err(PageError::server)?            // logged; the page says something generic
+        .ok_or_else(|| PageError::not_found("No project with that name."))?;
+    Ok(Html(render_project(&project)))
+}
+
+async fn archived() -> impl IntoResponse {
+    (StatusCode::GONE, Message::new("This project was archived."))
+}
+```
+
+Sin `Message`, un cuerpo 4xx `text/plain` de hasta 2 KiB es el mensaje (los
+rechazos de axum, la comprobación CSRF); si no, el texto por defecto del estado.
+La primera letra pasa a mayúscula.
+
+Un 5xx nunca muestra su causa: la página usa el texto genérico, y
+`PageError::server(e)` registra `e` y envía el mismo cuerpo opaco que cualquier
+otro 5xx. Solo cuando `RUSTANGO_DISCLOSE_ERRORS` está definida una página 5xx
+muestra su mensaje o su cuerpo — la misma regla que para cualquier cuerpo 5xx
+del framework.
+
+### Qué cubre
+
+Montada con `Builder::error_pages` (o `[errors]`), la capa queda dentro de las
+cabeceras de seguridad y fuera de todo lo demás, así que viste:
+
+- rutas y hosts desconocidos (404), y los 405;
+- el 500 del panic guard;
+- el 403 de la capa CSRF, con su motivo;
+- las guardas `login_required_or_401` / `*_or_403` (401, 403);
+- el límite de cuerpo (413), el timeout de petición (504), el rate limit y el throttle de login (429);
+- los rechazos de axum (400, 415, 422);
+- las denegaciones y 404 del admin del inquilino, y las rutas desconocidas de la consola de operador.
+
+Las páginas con sus propios controles conservan su aspecto: la página «admin
+access required» del admin (tiene un formulario para cerrar sesión) y su página
+«table not migrated». Marca tus propias respuestas con `KeepBody` para hacer lo
+mismo.
+
+### Migrar desde un middleware de errores escrito a mano
+
+Una app que tenía su propio middleware `error_pages` puede borrar:
+
+- el middleware (`from_fn(error_pages)`) y su `.fallback(not_found)`;
+- su tabla de títulos/mensajes: `rustango::errors::error_words` es la misma tabla;
+- su extensión de mensaje privada: devuelve `PageError` o `Message`;
+- el clonado de cabeceras/extensiones que hacía para poner el CSRF y encontrar al usuario.
+
+Conserva `templates/error.html` como `templates/errors/default.html` y la alerta
+htmx como `templates/errors/partial.html`; las claves del contexto son las mismas.
 
 ---
 

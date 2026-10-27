@@ -159,6 +159,58 @@ impl Color {
     }
 }
 
+/// Set once `Cli` dispatches a management verb: its stdout is its output
+/// (`dumpdata > fx.json`), so terminal logs move to stderr. Nothing else
+/// sets it, so a server or any other app keeps logging to stdout.
+#[cfg(feature = "runtime")]
+static CONSOLE_TO_STDERR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Send terminal logs to stderr from now on, for this process.
+#[cfg(feature = "manage")]
+pub(crate) fn console_to_stderr() {
+    CONSOLE_TO_STDERR.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The argv verbs `Cli::run` serves on; every other verb is a management verb.
+#[cfg(feature = "manage")]
+pub(crate) fn is_server_verb(verb: &str) -> bool {
+    matches!(verb, "" | "runserver" | "run-server")
+}
+
+/// The terminal sink: stdout, or stderr after [`console_to_stderr`].
+#[cfg(feature = "runtime")]
+enum ConsoleOut {
+    Out(std::io::Stdout),
+    Err(std::io::Stderr),
+}
+
+#[cfg(feature = "runtime")]
+impl std::io::Write for ConsoleOut {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Out(w) => w.write(buf),
+            Self::Err(w) => w.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Out(w) => w.flush(),
+            Self::Err(w) => w.flush(),
+        }
+    }
+}
+
+/// `MakeWriter` for the terminal layer, read per event so a subscriber
+/// installed before `Cli` dispatches (`#[rustango::main]`) still follows it.
+#[cfg(feature = "runtime")]
+fn console() -> ConsoleOut {
+    if CONSOLE_TO_STDERR.load(std::sync::atomic::Ordering::Relaxed) {
+        ConsoleOut::Err(std::io::stderr())
+    } else {
+        ConsoleOut::Out(std::io::stdout())
+    }
+}
+
 /// A `fmt` layer with its formatter type erased.
 ///
 /// `Vec<Box<dyn Layer<S>>>` is itself a `Layer<S>`, so sinks can be
@@ -189,7 +241,7 @@ where
         ($l:expr) => {
             match writer.clone() {
                 Some(w) => $l.with_writer(w).boxed(),
-                None => $l.boxed(),
+                None => $l.with_writer(console).boxed(),
             }
         };
     }
@@ -429,6 +481,7 @@ impl Setup {
         let Some(file_sink) = self.file_sink else {
             // Stdout only: the simple `fmt::init` path.
             let b = tracing_subscriber::fmt()
+                .with_writer(console)
                 .with_env_filter(env_filter)
                 .with_target(self.with_targets)
                 .with_thread_ids(self.with_thread_ids)
@@ -736,6 +789,24 @@ mod tests {
         assert_eq!(sink.filename_prefix, "app");
         assert!(matches!(sink.rotation, Rotation::Daily));
         assert!(s.keep_stdout, "default keeps stdout alongside file");
+    }
+
+    /// Terminal logs stay on stdout until `Cli` dispatches a management
+    /// verb; only the server verbs keep stdout there.
+    #[cfg(feature = "manage")]
+    #[test]
+    fn the_console_moves_to_stderr_only_when_told() {
+        CONSOLE_TO_STDERR.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(matches!(console(), ConsoleOut::Out(_)));
+        for verb in ["", "runserver", "run-server"] {
+            assert!(is_server_verb(verb), "{verb:?}");
+        }
+        for verb in ["dumpdata", "sqlmigrate", "serve", "--port"] {
+            assert!(!is_server_verb(verb), "{verb}");
+        }
+        console_to_stderr();
+        assert!(matches!(console(), ConsoleOut::Err(_)));
+        CONSOLE_TO_STDERR.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[cfg(feature = "runtime")]

@@ -820,6 +820,13 @@ impl Cli {
     /// # Errors
     /// Surfaces whatever the underlying dispatcher / server returns.
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let verb = args.first().map_or("", String::as_str);
+        // A management verb's stdout is its output (`dumpdata > fx.json`),
+        // so its logs go to stderr, also through `#[rustango::main]`'s subscriber.
+        if !crate::logging::is_server_verb(verb) {
+            crate::logging::console_to_stderr();
+        }
         #[cfg(feature = "config")]
         if let Some(e) = self.boot_settings_error() {
             return Err(format!("refusing to start on a broken config: {e}").into());
@@ -846,9 +853,6 @@ impl Cli {
         if let Some(s) = self.settings_for_layers.as_ref() {
             warn_unread_settings(&s.inert_keys());
         }
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        let verb = args.first().map_or("", String::as_str);
-
         match verb {
             // v0.31.1 (#1): the hyphenated `run-server` form is what
             // `--help` has advertised since the start, but only the
@@ -856,7 +860,7 @@ impl Cli {
             // hyphenated form fell through to `dispatch()` →
             // `tenancy::manage::run_with_init`, which **silently
             // skipped the `.seed()` hook**. Accept both forms.
-            "" | "runserver" | "run-server" => self.runserver().await,
+            v if crate::logging::is_server_verb(v) => self.runserver().await,
             _ => self.dispatch(args).await,
         }
     }
@@ -914,6 +918,38 @@ impl Cli {
         Ok(())
     }
 
+    /// Verbs that need no database at all, run before any pool is
+    /// constructed (#1216): `connect_lazy` validates the URL scheme against
+    /// the enabled backends, so a stale `postgres://` in a SQLite-only build
+    /// could not print `--help`. `None` when `args` names another verb.
+    fn run_pool_free<W: std::io::Write>(
+        &self,
+        args: &[String],
+        out: &mut W,
+    ) -> Option<Result<(), Box<dyn std::error::Error>>> {
+        // A tenancy project has its own help — it lists `create-tenant`,
+        // `create-operator`, `create-user` and the rest of the tenancy
+        // verbs, which the plain migration runner knows nothing about.
+        // (Caught by `cookbook_blog`'s `cli_help_works_without_database_url`.)
+        #[cfg(feature = "tenancy")]
+        if self.tenancy
+            && matches!(
+                args.first().map(String::as_str),
+                None | Some("") | Some("help") | Some("--help") | Some("-h")
+            )
+        {
+            return Some(crate::tenancy::manage::write_help(out).map_err(Into::into));
+        }
+        // The tenancy scaffolder, with `--with-bootstrap-migration` and
+        // the tenancy `manage` bin; the plain one shadowed it.
+        #[cfg(feature = "tenancy")]
+        if self.tenancy && args.first().map(String::as_str) == Some("startapp") {
+            return Some(crate::tenancy::manage::startapp(&args[1..], out).map_err(Into::into));
+        }
+
+        crate::migrate::manage::run_pool_free(args, out).map(|r| r.map_err(Into::into))
+    }
+
     async fn dispatch(mut self, args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         // `dbshell` needs DATABASE_URL but NOT a sqlx pool — it execs
         // the native client (psql / mysql / sqlite3). Handle it before
@@ -930,39 +966,8 @@ impl Cli {
             return Ok(());
         }
 
-        // Verbs that need no database at all run here, before any pool is
-        // constructed (#1216). `connect_lazy` doesn't connect, but it does
-        // validate the URL scheme against the enabled backend features — so a
-        // SQLite-only build with a stale `postgres://` in the environment could
-        // not print its own `--help`. None of these verbs read or write a
-        // database, so none of them should care what `DATABASE_URL` says.
-        {
-            let mut out = std::io::stdout();
-
-            // A tenancy project has its own help — it lists `create-tenant`,
-            // `create-operator`, `create-user` and the rest of the tenancy
-            // verbs, which the plain migration runner knows nothing about.
-            // Route help there before the generic pool-free dispatch, or a
-            // tenancy project would print the wrong verb list. (Caught by
-            // `cookbook_blog`'s `cli_help_works_without_database_url`.)
-            //
-            // `write_help` needs no pool either, so tenancy projects get the
-            // same "help works whatever DATABASE_URL says" fix (#1216).
-            #[cfg(feature = "tenancy")]
-            if self.tenancy
-                && matches!(
-                    args.first().map(String::as_str),
-                    None | Some("") | Some("help") | Some("--help") | Some("-h")
-                )
-            {
-                crate::tenancy::manage::write_help(&mut out)?;
-                return Ok(());
-            }
-
-            if let Some(res) = crate::migrate::manage::run_pool_free(&args, &mut out) {
-                res?;
-                return Ok(());
-            }
+        if let Some(res) = self.run_pool_free(&args, &mut std::io::stdout()) {
+            return res;
         }
 
         // Verbs that print info and never touch the DB. We let these
@@ -1190,7 +1195,7 @@ impl Cli {
         #[cfg(feature = "config")]
         let settings = self.settings_for_layers.as_ref();
         #[cfg(feature = "config")]
-        let api = wrap_outer(apply_settings_layers_or_warn(api, settings));
+        let api = dress_errors(apply_settings_layers_or_warn(api, settings), settings);
         let api = self.mount_observability(api);
         let api = match self.real_ip.clone() {
             Some(layer) => {
@@ -1229,6 +1234,14 @@ impl Cli {
             .and_then(|s| crate::body_limit::BodyLimitLayer::from_settings(&s.server))
         {
             builder = builder.body_limit(layer);
+        }
+        #[cfg(all(feature = "config", feature = "template_views"))]
+        if let Some(layer) = self
+            .settings_for_layers
+            .as_ref()
+            .and_then(crate::errors::ErrorPagesLayer::from_settings)
+        {
+            builder = builder.error_pages(layer);
         }
         match outer {
             Some(o) => o.apply_to(builder),
@@ -1917,6 +1930,28 @@ fn wrap_outer((app, outer): (Router, Option<OuterLayers>)) -> Router {
         Some(o) => o.apply(app),
         None => app,
     }
+}
+
+/// [`wrap_outer`] with the `[errors]` pages between the settings layers
+/// and the outer ones: outside the timeout and body limit so their
+/// 408/413 are dressed, inside the security headers so the page gets
+/// the CSP nonce.
+#[cfg(feature = "config")]
+fn dress_errors(
+    (app, outer): (Router, Option<OuterLayers>),
+    settings: Option<&crate::config::Settings>,
+) -> Router {
+    #[cfg(feature = "template_views")]
+    let app = match settings.and_then(crate::errors::ErrorPagesLayer::from_settings) {
+        Some(layer) => {
+            use crate::errors::ErrorPagesRouterExt as _;
+            app.error_pages(layer)
+        }
+        None => app,
+    };
+    #[cfg(not(feature = "template_views"))]
+    let _ = settings;
+    wrap_outer((app, outer))
 }
 
 #[cfg(feature = "config")]
@@ -2871,6 +2906,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
+    }
+
+    /// A tenancy project's `startapp` is the tenancy scaffolder, which
+    /// knows `--with-bootstrap-migration`; the plain one shadowed it.
+    #[cfg(feature = "tenancy")]
+    #[test]
+    fn tenancy_startapp_reaches_the_tenancy_scaffolder() {
+        let args: Vec<String> = ["startapp", "blog", "--help"].map(String::from).into();
+        let mut out = Vec::new();
+        Cli::new()
+            .tenancy()
+            .run_pool_free(&args, &mut out)
+            .expect("pool-free verb")
+            .expect("help");
+        let out = String::from_utf8_lossy(&out);
+        assert!(out.contains("--with-bootstrap-migration"), "{out}");
     }
 }
 

@@ -960,6 +960,22 @@ mod tests {
         );
     }
 
+    /// A new project serves styled error pages without any TOML edits.
+    #[test]
+    fn new_projects_turn_error_pages_on() {
+        for backend in [Backend::Postgres, Backend::Sqlite, Backend::Mysql] {
+            let body = templates::config_default_toml("acme", backend);
+            let tree: toml::Table = toml::from_str(&body).expect("default.toml parses");
+            assert_eq!(
+                tree.get("errors")
+                    .and_then(|e| e.get("enabled"))
+                    .and_then(toml::Value::as_bool),
+                Some(true),
+                "{body}"
+            );
+        }
+    }
+
     /// Settings has no root keys, so a rendered tier with one fails to
     /// load under `RUSTANGO_CONFIG_STRICT`.
     #[test]
@@ -1191,6 +1207,19 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 0, "no generated example found");
+    }
+
+    /// Every `.env` variant holds secrets; only the template is committed.
+    #[test]
+    fn gitignore_excludes_env_variants_but_keeps_the_example() {
+        let lines: Vec<&str> = templates::GITIGNORE.lines().collect();
+        for needle in ["/.env", "/.env.*", "!/.env.example"] {
+            assert!(
+                lines.contains(&needle),
+                "missing `{needle}`:\n{}",
+                templates::GITIGNORE
+            );
+        }
     }
 
     /// `.dockerignore` decides what reaches the daemon at all. Without

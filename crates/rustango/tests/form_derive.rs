@@ -159,3 +159,46 @@ fn non_finite_floats_are_refused() {
     let ok = RatioForm::parse(&payload(&[("ratio", "0.5"), ("weight", "2.5")])).unwrap();
     assert_eq!(ok.weight, Some(2.5));
 }
+
+/// Fields named like the generated locals must not shadow them.
+#[derive(Form, Debug, PartialEq)]
+#[form(validate = "check")]
+pub struct ShadowForm {
+    pub data: String,
+    #[form(clean = "upper")]
+    pub __errors: String,
+    #[form(clean = "upper")]
+    pub __cleaned: String,
+    pub after: i32,
+}
+
+impl ShadowForm {
+    fn upper(v: &String) -> Result<String, String> {
+        Ok(v.to_uppercase())
+    }
+
+    fn check(&self) -> Result<(), rustango::forms::FormErrors> {
+        Ok(())
+    }
+}
+
+#[test]
+fn fields_named_like_generated_locals_parse() {
+    let form = payload(&[
+        ("data", "d"),
+        ("__errors", "e"),
+        ("__cleaned", "c"),
+        ("after", "7"),
+    ]);
+    assert_eq!(
+        ShadowForm::parse(&form).unwrap(),
+        ShadowForm {
+            data: "d".into(),
+            __errors: "E".into(),
+            __cleaned: "C".into(),
+            after: 7,
+        }
+    );
+    let errors = ShadowForm::parse(&payload(&[("data", "d")])).unwrap_err();
+    assert!(!errors.get("after").is_empty());
+}

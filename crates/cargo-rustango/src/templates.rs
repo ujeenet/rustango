@@ -198,12 +198,16 @@ RUSTANGO_APEX_DOMAIN=localhost
 /// committed a session signing key, on the very first run, in a
 /// three-line `.gitignore` that did not mention the directory.
 ///
+/// `.env.*` too (`.env.local`, `.env.prod`): only `.env.example` is safe.
+///
 /// `*.db*` for the same reason in a different register: a
 /// sqlite-backend project otherwise commits its development database.
 /// (The generated `.dockerignore` already excluded those and this file
 /// did not, which is the asymmetry that made it easy to miss.)
 pub const GITIGNORE: &str = "/target
 /.env
+/.env.*
+!/.env.example
 
 # Runtime state. The server writes generated session signing keys here
 # when RUSTANGO_SESSION_SECRET is unset — never commit them.
@@ -1098,6 +1102,15 @@ pub fn config_default_toml(name: &str, backend: Backend) -> String {
 # headers_preset       = "strict"
 # hsts_max_age_secs    = 31536000     # 1 year
 # cors_allowed_origins = []
+
+[errors]
+# Styled 4xx/5xx pages for browsers, htmx fragments, plain text for other
+# clients; JSON responses are never touched. Uses [brand] for the look.
+# Override any page with templates/errors/404.html, errors/5xx.html or
+# errors/default.html.
+enabled = true
+# templates   = "templates"    # template root holding errors/*.html
+# htmx_target = "#flash"       # where htmx error fragments are swapped in
 
 # [routes]
 # legacy_preset = false

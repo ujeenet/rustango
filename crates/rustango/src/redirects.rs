@@ -27,7 +27,8 @@
 //! Matching is exact on the request path, trailing slash included.
 //! `/old` and `/old/` are separate entries; add both if you need both.
 //! The query string is ignored when matching but kept on the redirect:
-//! `/old?ref=ad → /new?ref=ad`.
+//! `/old?ref=ad → /new?ref=ad`. A request other than GET or HEAD gets
+//! `308`/`307`, so its method and body survive the redirect.
 //!
 //! Destinations go into `Location` as written, so build the map only
 //! from values you control. A user-supplied destination is an open
@@ -50,7 +51,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::header::LOCATION;
-use axum::http::{HeaderValue, Request, StatusCode};
+use axum::http::{HeaderValue, Method, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -159,35 +160,55 @@ impl RedirectMap {
 /// string. Usable from a handler; the middleware calls it too.
 #[must_use]
 pub fn build_redirect_response(rule: &RedirectRule, query: Option<&str>) -> Response {
-    let mut loc = rule.to.clone();
-    if let Some(q) = query {
-        if !q.is_empty() {
-            loc.push('?');
-            loc.push_str(q);
-        }
-    }
-    let status = if rule.permanent {
-        StatusCode::MOVED_PERMANENTLY
-    } else {
-        StatusCode::FOUND
+    redirect(rule, query, false)
+}
+
+/// `keep_method`: 308/307, so a POST is not replayed as a GET.
+fn redirect(rule: &RedirectRule, query: Option<&str>, keep_method: bool) -> Response {
+    let status = match (rule.permanent, keep_method) {
+        (true, false) => StatusCode::MOVED_PERMANENTLY,
+        (false, false) => StatusCode::FOUND,
+        (true, true) => StatusCode::PERMANENT_REDIRECT,
+        (false, true) => StatusCode::TEMPORARY_REDIRECT,
     };
     let mut response = (status, ()).into_response();
-    if let Ok(hv) = HeaderValue::from_str(&loc) {
+    if let Ok(hv) = HeaderValue::from_str(&location(&rule.to, query)) {
         response.headers_mut().insert(LOCATION, hv);
     }
     response
 }
 
-/// axum middleware that answers a matching request with a 301 or 302.
+/// `to` with `query` joined onto its own query, before its fragment.
+fn location(to: &str, query: Option<&str>) -> String {
+    let Some(q) = query.filter(|q| !q.is_empty()) else {
+        return to.to_owned();
+    };
+    let (base, frag) = to.split_once('#').map_or((to, None), |(b, f)| (b, Some(f)));
+    let sep = match base.find('?') {
+        None => "?",
+        Some(i) if i + 1 == base.len() || base.ends_with('&') => "",
+        Some(_) => "&",
+    };
+    let mut loc = format!("{base}{sep}{q}");
+    if let Some(f) = frag {
+        loc.push('#');
+        loc.push_str(f);
+    }
+    loc
+}
+
+/// axum middleware that answers a matching request with a 301 or 302,
+/// or 308/307 for methods other than GET and HEAD.
 /// Mount with `from_fn_with_state(Arc<RedirectMap>, redirects_middleware)`.
 pub async fn redirects_middleware(
     State(map): State<Arc<RedirectMap>>,
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    let uri = req.uri().clone();
+    let uri = req.uri();
     if let Some(rule) = map.get(uri.path()) {
-        return build_redirect_response(rule, uri.query());
+        let keep_method = !matches!(*req.method(), Method::GET | Method::HEAD);
+        return redirect(rule, uri.query(), keep_method);
     }
     next.run(req).await
 }
@@ -352,6 +373,45 @@ mod tests {
         let r = req(&app, "/old?utm=test&ref=mail").await;
         assert_eq!(r.status(), StatusCode::FOUND);
         assert_eq!(loc(&r), "/new?utm=test&ref=mail");
+    }
+
+    /// A target with its own query or fragment keeps both, in order.
+    #[test]
+    fn query_merges_into_the_targets_query_and_precedes_its_fragment() {
+        let rule = |to: &str| RedirectRule {
+            to: to.into(),
+            permanent: false,
+        };
+        let at = |to, q| loc(&build_redirect_response(&rule(to), q)).to_owned();
+        assert_eq!(at("/new?ref=x", Some("a=1")), "/new?ref=x&a=1");
+        assert_eq!(at("/new#top", Some("a=1")), "/new?a=1#top");
+        assert_eq!(at("/new?ref=x#top", Some("a=1")), "/new?ref=x&a=1#top");
+        assert_eq!(at("/new?", Some("a=1")), "/new?a=1");
+        assert_eq!(at("/new#top", None), "/new#top");
+    }
+
+    /// A non-GET request keeps its method and body: 308/307, not 301/302.
+    #[tokio::test]
+    async fn a_post_gets_a_method_preserving_redirect() {
+        let map = Arc::new(RedirectMap::new().add_permanent("/p", "/P").add("/t", "/T"));
+        let app = app(map);
+        for (path, status) in [
+            ("/p", StatusCode::PERMANENT_REDIRECT),
+            ("/t", StatusCode::TEMPORARY_REDIRECT),
+        ] {
+            let r = app
+                .clone()
+                .oneshot(Request::post(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(r.status(), status, "{path}");
+        }
+        let head = app
+            .clone()
+            .oneshot(Request::head("/p").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(head.status(), StatusCode::MOVED_PERMANENTLY);
     }
 
     #[tokio::test]

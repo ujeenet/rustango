@@ -66,6 +66,9 @@ pub struct Settings {
     /// `storage::StorageRegistry::from_settings` reads it.
     pub storage: StorageSettings,
 
+    /// `[errors]`: HTML error pages. Off unless `enabled = true`.
+    pub errors: ErrorsSettings,
+
     /// `[sso]`: **has no effect yet** — nothing reads it (#1379).
     /// Configure admin SSO in the admin UI instead.
     pub sso: SsoSettings,
@@ -631,7 +634,8 @@ pub struct ServerSettings {
     /// worker.
     pub request_timeout_secs: Option<u64>,
     /// Largest body accepted on POST, PUT and PATCH. `None` installs no
-    /// body-limit layer; axum's 2 MiB default still caps typed extractors.
+    /// body-limit layer: axum's 2 MiB default still caps typed extractors,
+    /// but a handler streaming the raw `Body` reads it uncapped.
     pub max_body_bytes: Option<u64>,
     /// Seconds open connections get to finish after SIGTERM before they
     /// are closed. `None` means 20. Keep it under the orchestrator's
@@ -734,6 +738,26 @@ pub struct BrandSettings {
     pub theme_mode: Option<String>,
 }
 
+/// `[errors]`: HTML pages for 4xx/5xx responses. Read by `Cli` and
+/// `rustango::errors::ErrorPagesLayer::from_settings`.
+///
+/// ```toml
+/// [errors]
+/// enabled = true             # default false
+/// templates = "templates"    # template root holding errors/404.html etc.
+/// htmx_target = "#flash"     # HX-Retarget for htmx errors; "" sends none
+/// ```
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ErrorsSettings {
+    /// Turn the error pages on. Default `false`.
+    pub enabled: Option<bool>,
+    /// Template root searched for `errors/*.html`. Default `"templates"`.
+    pub templates: Option<String>,
+    /// CSS selector htmx errors are swapped into. Default `"#flash"`.
+    pub htmx_target: Option<String>,
+}
+
 /// Security headers, CSP and CORS. The defaults match
 /// `SecurityHeadersLayer::strict()`. Override single fields in dev or
 /// staging, for example to allow inline scripts locally.
@@ -749,7 +773,8 @@ pub struct SecuritySettings {
     pub csp: Option<String>,
     /// HSTS `max-age` in seconds. Default `31536000`, one year. `0`
     /// turns HSTS off, which helps in dev when switching between
-    /// http and https.
+    /// http and https. Setting it also adds `includeSubDomains` and
+    /// `preload`, whatever the preset (with a warning on `relaxed`).
     pub hsts_max_age_secs: Option<u64>,
     /// Origins allowed by CORS. Empty means no CORS layer. `["*"]`
     /// allows everything, though browsers reject it with

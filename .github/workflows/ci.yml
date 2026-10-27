@@ -324,6 +324,7 @@ jobs:
             --test live_profile_stays_serial \
             --test live_suites_fail_loudly \
             --test macro_internals_stays_internal \
+            --test macro_no_backend_cfg \
             --test no_orphaned_doc_comments \
             --test one_redirect_sanitizer \
             --test one_html_escaper \
@@ -915,6 +916,7 @@ jobs:
           - postgres,manage,admin
           - sqlite,template_views
           - sqlite,tenancy               # the pre-existing litmus
+          - sqlite,admin-sso             # SSO deploy check without tenancy
           # The media axis had no entry at all, so a change to the media
           # feature graph was compiled only by `--all-features`, where
           # every optional feature is on and nothing can be observed to
@@ -1203,6 +1205,7 @@ jobs:
             --test atomic_savepoints_tri \
             --test orm_bounded_dml_tri \
             --test orm_relations_tri \
+            --test prefetch_related_tri \
             --test orm_relation_edges_tri \
             --test orm_query_edges_tri \
             --test orm_claim_lock_tri \
@@ -1564,6 +1567,7 @@ jobs:
           binary(=admin_audit_writes_tri) |
           binary(=orm_bounded_dml_tri) |
           binary(=orm_relations_tri) |
+          binary(=prefetch_related_tri) |
           binary(=orm_relation_edges_tri) |
           binary(=orm_query_edges_tri) |
           binary(=orm_claim_lock_tri) |

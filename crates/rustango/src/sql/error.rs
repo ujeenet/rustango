@@ -318,6 +318,16 @@ pub enum ExecError {
         column: &'static str,
     },
 
+    /// A named prefetch was asked to load rows of a model its relation
+    /// does not point at.
+    #[error("prefetch `{model}.{relation}` loads `{expected}` rows, not `{got}`")]
+    PrefetchTargetMismatch {
+        model: &'static str,
+        relation: String,
+        expected: &'static str,
+        got: &'static str,
+    },
+
     /// Used when traversing schema metadata to resolve a foreign key
     /// or build a `WHERE pk = …` filter — the target model declares
     /// no `#[rustango(primary_key)]` field. Programming error;
@@ -427,7 +437,7 @@ impl ExecError {
 
     /// A deadlock the database broke by aborting this transaction:
     /// MySQL 1213, PG 40P01.
-    #[cfg(feature = "tenancy")]
+    #[cfg(any(feature = "tenancy", feature = "admin"))]
     pub(crate) fn is_deadlock(&self) -> bool {
         let Self::Driver(sqlx::Error::Database(db)) = self else {
             return false;

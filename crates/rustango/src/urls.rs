@@ -335,6 +335,14 @@ pub(crate) fn normalize_host(authority: &str) -> Option<String> {
     Some(host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase())
 }
 
+/// `true` when `path` is under `prefix` by whole segment, so `/beacon`
+/// does not match `/beacon-admin`. A prefix ending in `/` matches its subtree.
+#[cfg_attr(not(any(feature = "_http_layers", feature = "csrf")), allow(dead_code))]
+pub(crate) fn path_under_prefix(path: &str, prefix: &str) -> bool {
+    path.strip_prefix(prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/') || prefix.ends_with('/'))
+}
+
 /// A `Host` header that is only `host[:port]`, so it is safe to put in a
 /// URL: `good.com:1@evil.com` or `a@evil.com` never parse (#2173).
 #[cfg_attr(
