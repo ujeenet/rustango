@@ -49,6 +49,11 @@ on:
   # red with no code change at all. With PR runs narrowed above, this is
   # also how you check a feature branch before merging it.
   workflow_dispatch:
+  # Weekly full run on `develop`, the default branch. Dedupe skips most
+  # develop pushes, and those are the only runs that save the build cache;
+  # this run never skips, so the cache stays fresh. After the image mirror.
+  schedule:
+    - cron: "47 4 * * 1"
 
 # One run per ref at a time; a new push cancels the one it supersedes.
 #
@@ -173,6 +178,61 @@ env:
 # Jobs that build the same feature set share one `shared-key`.
 
 jobs:
+  # Has this exact code tree already passed CI?
+  #
+  # A release ran the full matrix three more times on identical code: the
+  # squash push to `develop`, the develop→main PR and the push to `main`.
+  # `record_green` (last job) uploads `ci-green-<tree>` when every job
+  # passed; finding one here skips the whole run. The tree, not the SHA,
+  # is the key: a squash or merge commit is new, its tree is not. On a PR
+  # it is the merge commit's tree, i.e. the code actually tested.
+  #
+  # Every other job reaches this through `needs:`, directly or via `gate`.
+  # A failed lookup runs the matrix; it never skips it.
+  # Only artifacts from runs of this repo count, so a fork PR cannot vouch
+  # for a tree. `workflow_dispatch` (manual re-check) and `schedule` (cache
+  # refresh) never skip.
+  # `every_ci_job_is_deduped` checks the wiring.
+  already_green:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+      tree: ${{ steps.check.outputs.tree }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEVER_SKIP: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+          if [ "$NEVER_SKIP" = true ]; then
+            echo "$GITHUB_EVENT_NAME run: never skipped."
+            exit 0
+          fi
+          if ! hit=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=ci-green-$tree&per_page=100" --jq '
+              [.artifacts[] | select(.expired | not)
+                | select(.workflow_run.repository_id != null
+                  and .workflow_run.head_repository_id == .workflow_run.repository_id)]
+              | first // empty
+              | "run \(.workflow_run.id) on \(.workflow_run.head_branch) at \(.workflow_run.head_sha)"'); then
+            echo "::warning::Artifact lookup failed; running the full matrix."
+            exit 0
+          fi
+          if [ -z "$hit" ]; then
+            echo "Tree $tree has not passed CI yet; running the full matrix."
+            exit 0
+          fi
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::Tree $tree already passed CI in $hit; skipping every job."
+          echo "Skipped: tree \`$tree\` already passed CI in $hit." >> "$GITHUB_STEP_SUMMARY"
+
   # Does the *expensive* half run for this event?
   #
   # Every job that needs a server, a container, or a full workspace build
@@ -193,7 +253,8 @@ jobs:
   # the exception and is deliberately ungated anyway: it costs a cold
   # `--all-features` build, and gating it would restore exactly the hole it
   # exists to close (#1572). `every_test_suite_compiles_in_ci` fails if
-  # anyone adds `needs:`, `if:` or `continue-on-error:` to it.
+  # anyone adds `needs:`, `if:` or `continue-on-error:` to it beyond the
+  # `already_green` dedupe.
   #
   # It runs on every push and dispatch, and on every PR into `main`,
   # `develop` or a release branch. Only a PR into a feature branch (a
@@ -204,12 +265,14 @@ jobs:
   # (#1678).
   gate:
     runs-on: ubuntu-latest
+    needs: already_green
     if: >-
-      github.event_name != 'pull_request'
+      needs.already_green.outputs.skip != 'true'
+      && (github.event_name != 'pull_request'
       || github.base_ref == 'main'
       || github.base_ref == 'develop'
       || contains(github.base_ref, 'release')
-      || contains(github.event.pull_request.labels.*.name, 'ci')
+      || contains(github.event.pull_request.labels.*.name, 'ci'))
     steps:
       - name: Why this run is happening
         run: |
@@ -222,6 +285,8 @@ jobs:
   # The `ci` label buys the expensive jobs; it should not be what buys
   # `cargo fmt --check`.
   fmt:
+    needs: already_green
+    if: needs.already_green.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -231,6 +296,8 @@ jobs:
       - run: cargo fmt --all -- --check
 
   clippy:
+    needs: already_green
+    if: needs.already_green.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -275,6 +342,8 @@ jobs:
   # A guard that needs a live database does NOT belong here; it belongs
   # in `postgres_test` with the rest.
   guards:
+    needs: already_green
+    if: needs.already_green.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -315,6 +384,7 @@ jobs:
             --test docs_inventories \
             --test docs_live_suite_counts \
             --test env_override_spelling \
+            --test every_ci_job_is_deduped \
             --test every_example_crate_is_built \
             --test every_live_suite_runs_in_ci \
             --test every_serve_shuts_down_gracefully \
@@ -426,6 +496,8 @@ jobs:
   # before — `libsqlite3-sys` with `bundled` compiles the SQLite C
   # amalgamation. The default is six hours.
   tests_compile:
+    needs: already_green
+    if: needs.already_green.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # Strip symbols: ~690 test binaries each link rustango statically, and
@@ -475,6 +547,8 @@ jobs:
   # the archive above reaches `postgres_test` without waiting for them.
   # Ungated for the same reason as `tests_compile`.
   tests_compile_narrow:
+    needs: already_green
+    if: needs.already_green.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -643,6 +717,8 @@ jobs:
   # merged into `develop` unnoticed is exactly the signal the gate was
   # never meant to remove.
   doc:
+    needs: already_green
+    if: needs.already_green.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -659,6 +735,8 @@ jobs:
       - run: cargo doc --workspace --no-deps
 
   deny:
+    needs: already_green
+    if: needs.already_green.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -673,6 +751,8 @@ jobs:
   # carry no `license` field, so `check licenses` fails them as
   # `unlicensed` for reasons that have nothing to do with security.
   deny-examples:
+    needs: already_green
+    if: needs.already_green.outputs.skip != 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -703,6 +783,8 @@ jobs:
   #
   # `cargo metadata` only resolves, so this is seconds and no compile.
   lockfiles:
+    needs: already_green
+    if: needs.already_green.outputs.skip != 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -802,6 +884,8 @@ jobs:
   # HIGH/CRITICAL (fixable only); misconfig is report-only so a
   # pre-existing finding never silently blocks a release.
   trivy:
+    needs: already_green
+    if: needs.already_green.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -2062,3 +2146,50 @@ jobs:
       - name: Test
         working-directory: crates/rustango/examples/${{ matrix.example }}
         run: cargo test --locked ${{ matrix.test_args }}
+
+  # Records that this tree passed, for `already_green` to find next time.
+  #
+  # No `if:`: the default needs every job to have succeeded, and a job the
+  # `gate` or the dedupe skipped is not a success, so a partial run (an
+  # unlabelled PR into a feature branch) records nothing. `needs:` must
+  # list every job; `every_ci_job_is_deduped` fails otherwise.
+  record_green:
+    runs-on: ubuntu-latest
+    needs:
+      - already_green
+      - gate
+      - fmt
+      - clippy
+      - guards
+      - tests_compile
+      - tests_compile_narrow
+      - postgres_test
+      - postgres_doctest
+      - doc
+      - deny
+      - deny-examples
+      - lockfiles
+      - platform_examples
+      - trivy
+      - scaffolded_projects
+      - feature_combos
+      - windows_test
+      - sqlite_litmus
+      - sqlite_live
+      - redis_live
+      - s3_live
+      - mysql_live
+      - postgis_live
+      - e2e
+      - tenant_e2e
+      - doc_examples
+    steps:
+      - env:
+          TREE: ${{ needs.already_green.outputs.tree }}
+        run: echo "$TREE $GITHUB_SHA $GITHUB_RUN_ID" > green.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ci-green-${{ needs.already_green.outputs.tree }}
+          path: green.txt
+          retention-days: 30
+          if-no-files-found: error
