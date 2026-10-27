@@ -465,11 +465,10 @@ async fn superuser_login_grants_read_write_admin() {
     assert_eq!(list_resp.status(), StatusCode::OK);
     let body = body_text(list_resp).await;
     assert!(body.contains("rw_marker"), "row should render: {body}");
-    // Superuser sees the "Add new" / "/new" affordance somewhere on
-    // the page (the rustango-admin templates emit it for non-read-only
-    // tables). A non-superuser test below will assert the inverse.
+    // Superuser sees the "+ new" link.
     assert!(
-        body.contains("/tenauth_widget/new") || body.to_lowercase().contains("add"),
+        body.replace("&#x2F;", "/")
+            .contains(r#"<a href="/__admin/tenauth_widget/new">"#),
         "superuser should see write-link, got: {body}"
     );
 

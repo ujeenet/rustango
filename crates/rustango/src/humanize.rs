@@ -130,10 +130,9 @@ struct NumberFmt {
 }
 
 fn locale_number_fmt(locale: &str) -> NumberFmt {
-    // Lowercase and keep the base language only: "en-US" is "en".
-    let base = locale.to_ascii_lowercase();
-    let base = base.split('-').next().unwrap_or(&base);
-    match base {
+    // Keep the base language only: "en-US" and "en_US" are "en".
+    let loc = crate::i18n::Locale::new(locale);
+    match loc.base_language() {
         // Dot decimal, comma groups.
         "en" | "ja" | "zh" | "ko" | "th" => NumberFmt {
             decimal: '.',
@@ -400,8 +399,8 @@ pub fn format_currency(amount: f64, currency: &str, locale: &str) -> String {
     let formatted = apply_number_fmt(int_part, frac_part, fmt);
     let sign = if negative { "-" } else { "" };
 
-    let base = locale.to_ascii_lowercase();
-    let base = base.split('-').next().unwrap_or(&base);
+    let loc = crate::i18n::Locale::new(locale);
+    let base = loc.base_language();
     let is_euro = currency.eq_ignore_ascii_case("EUR");
     // CLDR places the euro after the amount in these, and `€ 1,00` in Dutch.
     let euro_suffix_locale = matches!(
@@ -1805,6 +1804,15 @@ mod tests {
     fn format_number_public_unknown_locale_falls_back_to_en() {
         // An unknown locale gives the en-US shape.
         assert_eq!(format_number(1234.5, "xx-YY", None), "1,234.5");
+    }
+
+    #[test]
+    fn underscore_locales_match_their_base_language() {
+        assert_eq!(format_number(-1234.5, "de_DE", Some(2)), "-1.234,50");
+        assert_eq!(
+            format_currency(1234.5, "EUR", "pt_BR"),
+            format_currency(1234.5, "EUR", "pt")
+        );
     }
 
     // -------- Public format_currency --------

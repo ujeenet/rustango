@@ -19,7 +19,7 @@ use rustango::tenancy::{
         create_operator_if_missing, create_tenant_if_missing, create_user_if_missing,
         CreateTenantOpts,
     },
-    StorageMode, TenantPools,
+    password, StorageMode, TenantPools,
 };
 
 use crate::models::{Author, Post};
@@ -48,8 +48,17 @@ pub async fn run(
     )
     .await?;
 
-    create_operator_if_missing(&pools, "admin", "letmein").await?;
-    create_user_if_missing(&pools, TENANT_SLUG, "alice", "hunter2", true).await?;
+    // Random passwords, printed once: a match means this boot created the row.
+    let operator_pw = password::generate(20);
+    let op = create_operator_if_missing(&pools, "admin", &operator_pw).await?;
+    if password::verify_async(&operator_pw, &op.password_hash).await? {
+        println!("→ seed: operator admin / {operator_pw}");
+    }
+    let user_pw = password::generate(20);
+    let user = create_user_if_missing(&pools, TENANT_SLUG, "alice", &user_pw, true).await?;
+    if password::verify_async(&user_pw, &user.password_hash).await? {
+        println!("→ seed: {TENANT_SLUG} user alice / {user_pw}");
+    }
 
     // ── seed data (skip if already present) ───────────────────────────
     let mut conn = pools.acquire(&org).await?;

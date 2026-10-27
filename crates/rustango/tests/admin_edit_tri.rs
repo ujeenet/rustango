@@ -136,6 +136,38 @@ pub struct SlugRef {
     pub slug_id: String,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_dparent")]
+#[allow(dead_code)]
+pub struct DParent {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 8)]
+    pub name: String,
+}
+
+/// An inline child with a defaulted field and a sub-millisecond time.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_dline")]
+#[allow(dead_code)]
+pub struct DLine {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "aed_dparent", on = "id")]
+    pub parent_id: i64,
+    pub qty: i64,
+    #[rustango(max_length = 16, default = "'draft'")]
+    pub status: String,
+    pub at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+rustango::register_admin_inline!(
+    parent = "aed_dparent",
+    child = "aed_dline",
+    fk = "parent_id",
+    fields = &["qty", "status", "at"],
+);
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, "aed_slugref").await;
@@ -151,6 +183,9 @@ async fn setup(pool: &Pool) {
     fresh_table::<Line>(pool).await;
     fresh_table::<SOrder>(pool).await;
     fresh_table::<SLine>(pool).await;
+    drop_table(pool, "aed_dline").await;
+    fresh_table::<DParent>(pool).await;
+    fresh_table::<DLine>(pool).await;
 }
 
 /// The detail page lists the first 100 inline rows and 20 audit entries,
@@ -687,9 +722,63 @@ async fn read_only_edit_link_shows_detail(pool: &Pool) {
     }
 }
 
+async fn seed_dparent(pool: &Pool) -> i64 {
+    let mut p = DParent {
+        id: Auto::default(),
+        name: "p".into(),
+    };
+    p.insert_pool(pool).await.expect("parent");
+    *p.id.get().expect("pk")
+}
+
+/// An inline add row that does not send a defaulted field gets the column default.
+async fn inline_add_row_takes_the_column_default(pool: &Pool) {
+    let p = seed_dparent(pool).await;
+    let add = "name=p&aed_dline-TOTAL_FORMS=1&aed_dline-INITIAL_FORMS=0&aed_dline-0-qty=3";
+    let (status, body) = send(pool, "POST", &format!("/aed_dparent/{p}"), add).await;
+    assert!(status.is_redirection(), "add: {status} {body}");
+    let rows = DLine::objects().fetch(pool).await.expect("lines");
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].qty, rows[0].status.as_str()), (3, "draft"));
+}
+
+/// Editing one field of an inline row keeps a time the input shows only to ms.
+async fn inline_edit_keeps_microseconds(pool: &Pool) {
+    let p = seed_dparent(pool).await;
+    let at = chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:05.123456Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let mut line = DLine {
+        id: Auto::default(),
+        parent_id: p,
+        qty: 1,
+        status: "live".into(),
+        at: Some(at),
+    };
+    line.insert_pool(pool).await.expect("line");
+    let lid = *line.id.get().expect("pk");
+    let (status, html) = send(pool, "GET", &format!("/aed_dparent/{p}/edit"), "").await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    let form = encode(&[
+        ("name", "p".into()),
+        ("aed_dline-TOTAL_FORMS", "1".into()),
+        ("aed_dline-INITIAL_FORMS", "1".into()),
+        ("aed_dline-0-id", lid.to_string()),
+        ("aed_dline-0-qty", "2".into()),
+        ("aed_dline-0-status", shown(&html, "aed_dline-0-status")),
+        ("aed_dline-0-at", shown(&html, "aed_dline-0-at")),
+    ]);
+    let (status, body) = send(pool, "POST", &format!("/aed_dparent/{p}"), &form).await;
+    assert!(status.is_redirection(), "edit: {status} {body}");
+    let after = DLine::objects().fetch(pool).await.expect("lines").remove(0);
+    assert_eq!((after.qty, after.at), (2, Some(at)));
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        inline_add_row_takes_the_column_default,
+        inline_edit_keeps_microseconds,
         string_pk_links_are_encoded,
         string_fk_cell_link_is_encoded,
         read_only_edit_link_shows_detail,

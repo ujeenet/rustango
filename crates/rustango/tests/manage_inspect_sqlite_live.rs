@@ -134,7 +134,9 @@ async fn a_cli_provision_is_recorded_and_says_it_came_from_the_cli() {
         "the run should say where it came from: {out}"
     );
     assert!(
-        out.contains("succeeded") || out.contains("ok"),
+        out.lines()
+            .next()
+            .is_some_and(|l| l.ends_with("  succeeded")),
         "and that it finished: {out}"
     );
 }

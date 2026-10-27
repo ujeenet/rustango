@@ -2030,10 +2030,11 @@ Reproducible by hand:
 # repo never creates.)
 psql "${DATABASE_URL:-postgres://rustango:rustango@localhost:5432/postgres}" \
   -c "CREATE DATABASE cookbook_browser_dev"
+# One signing key for every command below.
+export RUSTANGO_SESSION_SECRET="$(openssl rand -base64 32)"
 DATABASE_URL=postgres://rustango:rustango@localhost:5432/cookbook_browser_dev \
 RUSTANGO_APEX_DOMAIN=localhost \
 RUSTANGO_BIND=127.0.0.1:8765 \
-RUSTANGO_SESSION_SECRET=cookbook-test-32bytes-cookbook-test-32bytes \
 cargo run -- migrate
 # `migrate` generates the framework's `system/migrations/` from the
 # compiled models on first run and applies them (no `init-tenancy`
