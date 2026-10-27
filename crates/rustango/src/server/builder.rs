@@ -938,6 +938,7 @@ impl<DB: Database> Builder<DB> {
             // target — no need to thread it from the operator
             // console.
             self.routes.impersonation_handoff_url.clone(),
+            self.routes.login_url.clone(),
         );
         let operator_admin = match health {
             Some(health) => operator_admin.merge(health),

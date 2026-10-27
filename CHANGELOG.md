@@ -18,6 +18,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The tenant admin builds its routes once; each request carries its own pool, perms and branding.
 - Test: a tenant user cannot deactivate their own account in the tenant admin.
 
+### Changed — operator console shared SSO page
+
+- The shared SSO providers page uses the console's form layout, shows the issuer URL field only for `oidc`, and lists the callback URL to register at the IdP (pattern plus an example tenant host).
+- Shared providers can be edited in place (`/sso-shared/{id}/edit`): the id and slug stay, a blank secret keeps the saved one; audited as `sso_shared_update`.
+- A refused add or edit re-renders the form with the typed values and the error (status 400), never the secret; the page no longer says secrets are `env://` references.
+
 ## [0.61.7] — 2026-10-27
 
 ### Fixed — admin, REST and i18n

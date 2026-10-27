@@ -137,7 +137,9 @@ câblage de points de terminaison par provider n'est nécessaire.
   les tenants (un Google à l'échelle de l'entreprise, par exemple). Géré
   depuis le panneau *Shared SSO* de la console, où *Allow email linking*
   bascule `allow_email_link` sur place (l'id et ses liens restent). Le
-  drapeau s'applique à **tous** les tenants.
+  drapeau s'applique à **tous** les tenants. *Edit* modifie un provider sur
+  place (même id et slug ; un secret vide garde celui enregistré), et chaque
+  ligne affiche l'URL de callback à enregistrer auprès de l'IdP.
 
 Sur la page de connexion d'un tenant, les deux ensembles fusionnent, et
 en cas de collision de slug, c'est le **propre provider du tenant qui

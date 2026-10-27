@@ -158,6 +158,10 @@ A webhook answered 429 or 503 with `Retry-After` now waits that long (up to an h
 
 `/__audit?facet_show_all=<col>` lists at most 200 values, then "+N more"; filter the feed to reach the rest. A tenant admin custom view on a table the user cannot see is now a 404 from the view, not an unmounted route.
 
+### Operator console: shared SSO form errors are HTML
+
+A refused shared-provider add now returns the console page (400) with the error, not a plain-text body. Successful changes redirect to `/sso-shared?notice=…`.
+
 ## 0.61.7
 
 ### Admin: no self-deactivation
