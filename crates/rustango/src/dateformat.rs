@@ -179,10 +179,20 @@ mod tera_filters {
     /// Two filters are added: `dateformat` for a date or datetime,
     /// and `timeformat` for a time.
     ///
-    /// ```jinja
-    /// {{ post.created_at | dateformat("Y-m-d H:i") }}
-    /// {{ event.starts_at | dateformat("D, F j Y") }}
-    /// {{ schedule.time | timeformat("g:i A") }}
+    /// Tera filter arguments are named: pass the format as `format=`.
+    ///
+    /// ```
+    /// let mut tera = tera::Tera::default();
+    /// rustango::dateformat::register_filters(&mut tera);
+    /// tera.add_raw_template(
+    ///     "t",
+    ///     r#"{{ created_at | dateformat(format="Y-m-d H:i") }} {{ starts | timeformat(format="g:i A") }}"#,
+    /// )
+    /// .unwrap();
+    /// let mut ctx = tera::Context::new();
+    /// ctx.insert("created_at", "2026-06-05T13:05:09Z");
+    /// ctx.insert("starts", "13:05:00");
+    /// assert_eq!(tera.render("t", &ctx).unwrap(), "2026-06-05 13:05 1:05 PM");
     /// ```
     ///
     /// The names avoid Tera's own `date` filter, which stays free for

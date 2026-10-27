@@ -1206,6 +1206,21 @@ impl ViewSet {
                  .allow_anonymous() if this is intended"
             );
         }
+        // Enforcing these would change who may write; planned for 0.62.0.
+        let ignored: Vec<&str> = ["change", "delete", "view"]
+            .into_iter()
+            .filter(|a| crate::admin::object_permissions::has_hook(self.schema.table, a))
+            .collect();
+        if !ignored.is_empty() {
+            tracing::warn!(
+                target: "rustango::viewset",
+                model = self.schema.table,
+                prefix,
+                hooks = ?ignored,
+                "ViewSet does not run the admin object-permission hooks registered for \
+                 these actions; 0.62.0 will enforce them"
+            );
+        }
         let state = Arc::new(ViewSetState {
             pool_source,
             vs: self.clone(),
@@ -3950,7 +3965,7 @@ async fn create_many(
                 on_conflict: None,
                 generated: vec![],
             };
-            match crate::audit::insert_tx(&mut tx, &query, pk_field).await {
+            match crate::audit::insert_tx_on(&acq.pool, &mut tx, &query, pk_field).await {
                 Ok(pk) => match add_hooks
                     .admit(&mut tx, query.model, pk_field, pk.clone())
                     .await
@@ -5336,6 +5351,61 @@ mod credential_owner_tests {
                 );
                 assert!(superuser_only_fields(table, write, &parts(Some(true))).is_empty());
             }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "tenancy", feature = "sqlite"))]
+mod bulk_create_source_tests {
+    use crate::audit::{self, with_tenant_source, writing_to_tenant, AuditSource};
+    use crate::sql::Auto;
+    use axum::http::{header, Method, Request, StatusCode};
+    use tower::ServiceExt as _;
+
+    #[derive(crate::Model, Debug, Clone)]
+    #[rustango(table = "vs_bulk_src", audit(track = "title"))]
+    #[allow(dead_code)]
+    pub struct Note {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 32)]
+        pub title: String,
+    }
+
+    /// A bulk create in a pool-bound tenant scope keeps the tenant's source.
+    #[tokio::test]
+    async fn bulk_create_records_the_tenant_bound_source() {
+        let pool = crate::sql::Pool::Sqlite(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        crate::testkit::matrix::fresh_table::<Note>(&pool).await;
+        audit::ensure_table_pool(&pool).await.unwrap();
+        let app = super::ViewSet::for_model(<Note as crate::core::Model>::SCHEMA, &["id", "title"])
+            .router_pool("/notes", pool.clone());
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/notes")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(r#"[{"title":"a"},{"title":"b"}]"#))
+            .unwrap();
+        let user = AuditSource::User { id: "7".into() };
+        let status = with_tenant_source(user, "a".into(), async {
+            writing_to_tenant("a".into(), Some(&pool), async {
+                app.oneshot(req).await.unwrap().status()
+            })
+            .await
+        })
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        for pk in ["1", "2"] {
+            let rows = audit::fetch_for_entity_pool(&pool, "vs_bulk_src", pk)
+                .await
+                .unwrap();
+            assert_eq!(rows.first().map(|e| e.source.as_str()), Some("user:7"));
         }
     }
 }

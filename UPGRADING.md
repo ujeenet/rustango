@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Admin: no self-deactivation
+
+Saving your own user row with `active` off is refused with a form error; ask another admin. A ViewSet on a model with admin `change`/`delete`/`view` hooks logs a warning: 0.62.0 will run those hooks on update, delete and read.
+
 ## 0.61.6
 
 ### Error pages (opt-in)

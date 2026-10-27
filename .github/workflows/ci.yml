@@ -1686,6 +1686,7 @@ jobs:
           binary(=password_reset_links_tri) |
           binary(=admin_authz_edges_tri) |
           binary(=admin_create_defaults_tri) |
+          binary(=admin_self_deactivate_tri) |
           binary(=permissions_inactive_tri) |
           binary(=viewset_superuser_fields_tri) |
           binary(=login_throttle_mysql_live) |
