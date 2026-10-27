@@ -77,8 +77,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   3. Newly-generated random key + atomic write to (2) so
     //      the next boot reuses it.
     //
-    // Pair with the admin user seeded by `seed::run` (default
-    // credentials: admin / admin).
+    // Pair with the admin user seeded by `seed::run`, whose password
+    // is printed on the first boot.
     let secret =
         SessionSecret::from_env_or_disk(std::path::Path::new("./var/.rustango_admin_session.key"));
     let admin = rustango::admin::Builder::new(pool)
@@ -86,13 +86,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_session_auth(secret)
         .build();
 
-    let user = std::env::var("RUSTANGO_DEMO_USER").unwrap_or_else(|_| "admin".to_owned());
-    let pass = std::env::var("RUSTANGO_DEMO_PASS").unwrap_or_else(|_| "admin".to_owned());
-
     println!("✓ ready. open http://localhost:8080/");
     println!();
-    println!("  Login form:  /login");
-    println!("  Credentials:  {user} / {pass}");
+    println!("  Login form:  /login (password printed at first boot)");
     println!("  Override via RUSTANGO_DEMO_USER / RUSTANGO_DEMO_PASS");
     println!();
     println!("  Try:");
@@ -102,5 +98,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("    • /gfkdemo_tag/new      — create form (content_type_id = CT <select> picker)");
     println!();
 
-    app.api(admin).serve("0.0.0.0:8080").await
+    app.api(admin).serve("127.0.0.1:8080").await
 }

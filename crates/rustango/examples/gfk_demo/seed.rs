@@ -14,16 +14,22 @@ pub async fn run(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
     contenttypes::ensure_seeded(pool).await?;
 
     // #253 — seed the admin user used by the session-login form.
-    // Credentials default to `admin / admin`; override via the
-    // `RUSTANGO_DEMO_USER` / `RUSTANGO_DEMO_PASS` env vars.
+    // `RUSTANGO_DEMO_USER` / `RUSTANGO_DEMO_PASS` override the name and
+    // the random password, which is printed only on this first boot.
     let existing_admin: Vec<AdminUser> = AdminUser::objects().fetch(pool).await?;
     if existing_admin.is_empty() {
         let username = std::env::var("RUSTANGO_DEMO_USER").unwrap_or_else(|_| "admin".to_owned());
-        let password = std::env::var("RUSTANGO_DEMO_PASS").unwrap_or_else(|_| "admin".to_owned());
+        let (password, shown) = match std::env::var("RUSTANGO_DEMO_PASS") {
+            Ok(p) => (p, "from RUSTANGO_DEMO_PASS".to_owned()),
+            Err(_) => {
+                let p = rustango::random::random_alphanum(20);
+                (p.clone(), p)
+            }
+        };
         let mut admin =
-            AdminUser::new_with_password(username, &password, /* superuser */ true)?;
+            AdminUser::new_with_password(username.clone(), &password, /* superuser */ true)?;
         admin.save_pool(pool).await?;
-        println!("→ seed: admin user created");
+        println!("→ seed: admin user created: {username} / {shown}");
     }
 
     // Skip the rest if we've already populated.
