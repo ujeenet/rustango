@@ -101,6 +101,18 @@ pub trait Job: Send + Sync + Sized + Serialize + DeserializeOwned + 'static {
         exponential_backoff(Duration::from_secs(1), failed_attempt)
     }
 
+    /// [`Self::MAX_ATTEMPTS`] for this job, read at dispatch. Override it
+    /// to set the cap per job from its payload.
+    fn max_attempts(&self) -> u32 {
+        Self::MAX_ATTEMPTS
+    }
+
+    /// [`Self::retry_backoff`] for this job. Override it to set the wait
+    /// per job from its payload.
+    fn retry_delay(&self, failed_attempt: u32) -> Duration {
+        Self::retry_backoff(failed_attempt)
+    }
+
     /// Run the job. Return `Ok(())` on success, `Err(Retryable(_))` to
     /// retry with backoff, `Err(Fatal(_))` to dead-letter at once.
     ///
@@ -251,11 +263,34 @@ struct JobEnvelope {
 // ------------------------------------------------------------------ Handler registry
 
 /// Type-erased async handler. The queue stores one per registered Job::NAME.
-type HandlerFn = Arc<
-    dyn Fn(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<(), JobError>> + Send>>
-        + Send
-        + Sync,
->;
+/// It takes the payload and the 0-based number of the run.
+type HandlerFn =
+    Arc<dyn Fn(serde_json::Value, u32) -> Pin<Box<dyn Future<Output = Ran> + Send>> + Send + Sync>;
+
+/// One run's result, and the wait before its retry should it fail.
+struct Ran {
+    result: Result<(), JobError>,
+    retry_in: Duration,
+}
+
+tokio::task_local! {
+    /// The least wait a running job asked for, see [`retry_after`].
+    static RETRY_AFTER: std::cell::Cell<Option<Duration>>;
+}
+
+/// From inside [`Job::run`]: wait at least `at_least` before the retry,
+/// as a receiver's `Retry-After` asks. Outside a run it does nothing.
+#[cfg_attr(not(feature = "webhook-delivery"), allow(dead_code))]
+pub(crate) fn retry_after(at_least: Duration) {
+    let _ =
+        RETRY_AFTER.try_with(|hint| hint.set(Some(hint.get().unwrap_or_default().max(at_least))));
+}
+
+/// A job's backoff, capped at a year so a runaway hook cannot overflow
+/// a deadline.
+fn cap_backoff(wait: Duration) -> Duration {
+    wait.min(Duration::from_secs(365 * 86_400))
+}
 
 /// One registered job type, as the workers need it.
 #[derive(Clone)]
@@ -263,7 +298,6 @@ struct Registered {
     handler: HandlerFn,
     /// `JobDeadLetter` needs the static name.
     name: &'static str,
-    retry_backoff: fn(u32) -> Duration,
     current_shape: fn(serde_json::Value) -> serde_json::Value,
 }
 
@@ -292,12 +326,6 @@ impl Registered {
             error,
         }
     }
-
-    /// The job's backoff, capped at a year so a runaway hook cannot
-    /// overflow a deadline.
-    fn backoff(&self, failed_attempt: u32) -> Duration {
-        (self.retry_backoff)(failed_attempt).min(Duration::from_secs(365 * 86_400))
-    }
 }
 
 #[derive(Default)]
@@ -318,26 +346,42 @@ impl HandlerRegistry {
         Fut: Future<Output = Result<(), JobError>> + Send + 'static,
     {
         let run = Arc::new(run);
-        let handler: HandlerFn = Arc::new(move |payload| {
+        let handler: HandlerFn = Arc::new(move |payload, failed_attempt| {
             let run = run.clone();
             Box::pin(async move {
-                // Retryable: during a rolling deploy the row may be another
-                // release's shape, and a worker of that release can still run it.
-                let job: T = serde_json::from_value(payload)
-                    .map_err(|e| JobError::Retryable(format!("payload decode: {e}")))?;
-                // A panic is a failed run, not a dead worker (#1843).
-                crate::panic_guard::catch_unwind(run(job))
-                    .await
-                    .unwrap_or_else(|panic| {
-                        let msg = crate::panic_guard::panic_message(&*panic);
-                        Err(JobError::Retryable(format!("job panicked: {msg}")))
+                let job: T = match serde_json::from_value(payload) {
+                    Ok(job) => job,
+                    // Retryable: during a rolling deploy the row may be another
+                    // release's shape, and a worker of that release can still run it.
+                    Err(e) => {
+                        return Ran {
+                            result: Err(JobError::Retryable(format!("payload decode: {e}"))),
+                            retry_in: cap_backoff(T::retry_backoff(failed_attempt)),
+                        }
+                    }
+                };
+                let delay = job.retry_delay(failed_attempt);
+                let (result, asked) = RETRY_AFTER
+                    .scope(std::cell::Cell::new(None), async move {
+                        // A panic is a failed run, not a dead worker (#1843).
+                        let result = crate::panic_guard::catch_unwind(run(job))
+                            .await
+                            .unwrap_or_else(|panic| {
+                                let msg = crate::panic_guard::panic_message(&*panic);
+                                Err(JobError::Retryable(format!("job panicked: {msg}")))
+                            });
+                        (result, RETRY_AFTER.with(std::cell::Cell::get))
                     })
+                    .await;
+                Ran {
+                    result,
+                    retry_in: cap_backoff(asked.map_or(delay, |a| a.max(delay))),
+                }
             })
         });
         let entry = Registered {
             handler,
             name: T::NAME,
-            retry_backoff: T::retry_backoff,
             current_shape: current_shape::<T>,
         };
         self.handlers.insert(T::NAME, entry);
@@ -371,9 +415,9 @@ pub(crate) async fn deliver_dead_letter(cb: DeadLetterFn, dl: JobDeadLetter) {
     }
 }
 
-/// [`Job::MAX_ATTEMPTS`] as the queues read it: 0 would never run (#2333).
-pub(crate) fn max_attempts<T: Job>() -> u32 {
-    T::MAX_ATTEMPTS.max(1)
+/// [`Job::max_attempts`] as the queues read it: 0 would never run (#2333).
+pub(crate) fn max_attempts<T: Job>(job: &T) -> u32 {
+    job.max_attempts().max(1)
 }
 
 /// `base`, doubled for each earlier failure and capped at `base · 2^10`.
@@ -519,7 +563,7 @@ impl JobQueue for InMemoryJobQueue {
             name: T::NAME,
             payload: value,
             attempt: 0,
-            max_attempts: max_attempts::<T>(),
+            max_attempts: max_attempts(payload),
             // Captured here, at the hand-off. A worker is spawned at
             // boot and has no caller to inherit from.
             context: crate::task_context::TaskContext::capture(),
@@ -675,14 +719,14 @@ async fn worker_loop(w: InMemoryWorker) {
         // Run the handler inside the context the caller had at
         // `dispatch`. Without this the job sees none of it — an audit
         // row written here would record `system` and lose the actor.
-        let result = envelope
+        let ran = envelope
             .context
             .clone()
-            .install((entry.handler)(payload))
+            .install((entry.handler)(payload, envelope.attempt))
             .await;
         current.lock().unwrap().take();
 
-        match result {
+        match ran.result {
             Ok(()) => {
                 pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             }
@@ -693,7 +737,7 @@ async fn worker_loop(w: InMemoryWorker) {
                     pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                     dead_letter_job(&dead_letter, Some(&entry), envelope, next_attempt, msg).await;
                 } else {
-                    let backoff = entry.backoff(envelope.attempt);
+                    let backoff = ran.retry_in;
                     let mut retry = envelope;
                     retry.attempt = next_attempt;
                     // Still counted in `pending` while parked.
@@ -794,8 +838,8 @@ mod tests {
     }
 
     /// A runaway hook is capped at a year, so no deadline overflows.
-    #[test]
-    fn a_runaway_backoff_hook_is_capped_at_a_year() {
+    #[tokio::test]
+    async fn a_runaway_backoff_hook_is_capped_at_a_year() {
         #[derive(Serialize, Deserialize)]
         struct Forever;
         #[async_trait::async_trait]
@@ -810,7 +854,8 @@ mod tests {
         }
         let mut reg = HandlerRegistry::default();
         reg.register::<Forever>();
-        let wait = reg.lookup(Forever::NAME).unwrap().backoff(0);
+        let handler = reg.lookup(Forever::NAME).unwrap().handler;
+        let wait = handler(serde_json::Value::Null, 0).await.retry_in;
         assert_eq!(wait, Duration::from_secs(365 * 86_400));
         let _ = tokio::time::Instant::now() + wait;
         let _ = chrono::Utc::now() + chrono::Duration::from_std(wait).unwrap();
