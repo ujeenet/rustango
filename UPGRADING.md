@@ -148,7 +148,7 @@ untouched.
 
 ---
 
-## Unreleased
+## 0.61.7
 
 ### Admin: no self-deactivation
 

@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.7] — 2026-10-27
+
 ### Fixed — admin, REST and i18n
 
 - A bulk ViewSet create in a tenant sweep records the tenant-bound audit source, as a single create does, not `system`.
