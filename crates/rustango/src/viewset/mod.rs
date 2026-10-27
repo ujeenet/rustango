@@ -5375,13 +5375,9 @@ mod bulk_create_source_tests {
     /// A bulk create in a pool-bound tenant scope keeps the tenant's source.
     #[tokio::test]
     async fn bulk_create_records_the_tenant_bound_source() {
-        let pool = crate::sql::Pool::Sqlite(
-            sqlx::sqlite::SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect("sqlite::memory:")
-                .await
-                .unwrap(),
-        );
+        let pool = crate::sql::Pool::connect("sqlite:file:vs_bulk_src?mode=memory&cache=shared")
+            .await
+            .unwrap();
         crate::testkit::matrix::fresh_table::<Note>(&pool).await;
         audit::ensure_table_pool(&pool).await.unwrap();
         let app = super::ViewSet::for_model(<Note as crate::core::Model>::SCHEMA, &["id", "title"])
