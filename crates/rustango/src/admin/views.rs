@@ -2360,10 +2360,52 @@ fn prefill_is_lossy(f: &FieldSchema, shown: &str) -> bool {
     }
 }
 
+/// Whether this edit sets the signed-in user's own account inactive; the
+/// next request would then be refused, as the operator console warns.
+fn deactivates_self(
+    parts: &axum::http::request::Parts,
+    model: &'static crate::core::ModelSchema,
+    before: Option<&serde_json::Value>,
+    values: &[(&'static str, SqlValue)],
+) -> bool {
+    use crate::core::Model as _;
+    let user_tables = [
+        super::user::AdminUser::SCHEMA.table,
+        #[cfg(feature = "tenancy")]
+        crate::tenancy::auth::User::SCHEMA.table,
+    ];
+    let (Some(session), Some(row)) = (super::session::from_extensions(&parts.extensions), before)
+    else {
+        return false;
+    };
+    let truthy = |v: &serde_json::Value| v.as_bool() == Some(true) || v.as_i64() == Some(1);
+    session.impersonated_by.is_none()
+        && user_tables.contains(&model.table)
+        && row.get("id").and_then(serde_json::Value::as_i64) == Some(session.user_id)
+        && row.get("username").and_then(serde_json::Value::as_str)
+            == Some(session.username.as_str())
+        && row.get("active").is_some_and(truthy)
+        && values
+            .iter()
+            .any(|(c, v)| *c == "active" && *v == SqlValue::Bool(false))
+}
+
 /// On update: a lossy prefill the form echoed back as it was shown is not
 /// rewritten; other fields are, so a stale form still wins.
 /// `auto_now` columns are restamped.
 fn keep_unchanged(
+    model: &'static crate::core::ModelSchema,
+    form: &HashMap<String, String>,
+    before: Option<&serde_json::Value>,
+    values: &mut Vec<(&'static str, SqlValue)>,
+) {
+    keep_echoed_lossy(model, form, before, values);
+    crate::forms::stamp_auto_now(model, values);
+}
+
+/// Drop each lossy prefill (a time shown to the millisecond, say) that
+/// `form` sent back as it was shown, so the stored value stays.
+pub(super) fn keep_echoed_lossy(
     model: &'static crate::core::ModelSchema,
     form: &HashMap<String, String>,
     before: Option<&serde_json::Value>,
@@ -2387,7 +2429,6 @@ fn keep_unchanged(
             values.retain(|(c, _)| *c != f.column);
         }
     }
-    crate::forms::stamp_auto_now(model, values);
 }
 
 // ============================================================== EDIT
@@ -2540,6 +2581,12 @@ pub(crate) async fn update_submit(
         }
     };
     keep_unchanged(model, &form, pre_update_row.as_ref(), &mut collected);
+    if deactivates_self(&parts, model, pre_update_row.as_ref(), &collected) {
+        let msg = "You cannot deactivate yourself: your next request would be refused. \
+                   Ask another admin to do it.";
+        let html = render_form(&state, model, Some(&form), true, Some(msg));
+        return Ok(Html(html).into_response());
+    }
     if let Err(e) =
         super::derived_fields::apply(model.table, &mut collected, pre_update_row.as_ref()).await
     {

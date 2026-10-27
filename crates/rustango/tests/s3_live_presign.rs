@@ -62,6 +62,23 @@ async fn temporary_keys_need_their_session_token() {
     storage.delete(&key).await.expect("delete");
 }
 
+/// Plain save/load/exists/delete through the signed request path.
+#[tokio::test]
+async fn save_load_exists_delete_round_trip() {
+    let Some(s) = maybe_storage() else {
+        eprintln!("skipping — set RUSTANGO_S3_TEST_KEY etc.");
+        return;
+    };
+    let key = format!("rustango-test/{}.txt", uuid::Uuid::new_v4());
+    let payload = b"hello from rustango integration test";
+    s.save(&key, payload).await.expect("save");
+    let loaded = s.load(&key).await.expect("load");
+    assert_eq!(&loaded, payload);
+    assert!(s.exists(&key).await.expect("exists"));
+    s.delete(&key).await.expect("delete");
+    assert!(!s.exists(&key).await.expect("exists after delete"));
+}
+
 #[tokio::test]
 async fn presigned_put_then_get_round_trip() {
     let Some(storage) = maybe_storage() else {

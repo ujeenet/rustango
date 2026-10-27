@@ -220,10 +220,21 @@ fn builds_tests(line: &str) -> bool {
 /// *mattering*, which is the same thing for a guard job.
 const GATES: &[&str] = &["needs:", "if:", "continue-on-error:"];
 
+/// The one gate allowed: skip only when this exact tree already passed.
+/// Exact lines, so `needs: [already_green, gate]` still counts as gated.
+const DEDUPE: &[&str] = &[
+    "needs: already_green",
+    "if: needs.already_green.outputs.skip != 'true'",
+];
+
 fn gating_keys(body: &str) -> Vec<&'static str> {
     GATES
         .iter()
-        .filter(|k| body.lines().any(|l| l.trim_start().starts_with(**k)))
+        .filter(|k| {
+            body.lines()
+                .map(str::trim)
+                .any(|l| l.starts_with(**k) && !DEDUPE.contains(&l))
+        })
         .copied()
         .collect()
 }
@@ -297,6 +308,21 @@ mod parser_tests {
         ];
         for l in no {
             assert!(!builds_every_suite(l), "should not count: {l}");
+        }
+    }
+
+    #[test]
+    fn only_the_dedupe_is_not_a_gate() {
+        let dedupe =
+            "    needs: already_green\n    if: needs.already_green.outputs.skip != 'true'\n";
+        assert!(gating_keys(dedupe).is_empty());
+        for gated in [
+            "    needs: [already_green, gate]\n",
+            "    needs: gate\n",
+            "    if: needs.already_green.outputs.skip != 'true' && github.event_name == 'push'\n",
+            "    if: always()\n",
+        ] {
+            assert!(!gating_keys(gated).is_empty(), "should be a gate: {gated}");
         }
     }
 }

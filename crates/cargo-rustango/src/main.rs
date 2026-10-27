@@ -903,14 +903,16 @@ mod tests {
 
     /// Every scaffolded example (one with a `config/`) holds what
     /// `cargo rustango new` emits today for one backend; regenerate,
-    /// don't hand-edit (#1801). `cookbook_blog` is hand-written, and
-    /// `prod_settings.toml` is tuned per app.
+    /// don't hand-edit (#1801). `cookbook_blog` is hand-written; only the
+    /// apps in `PROD_TUNED` tune `prod_settings.toml`, and no tier has root keys.
     #[test]
     fn example_configs_match_the_templates() {
         let examples =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../rustango/examples");
+        const PROD_TUNED: &[&str] = &["platform_commerce", "platform_commerce_saas"];
         let mut checked = 0;
         let mut drifted = Vec::new();
+        let mut rooted = Vec::new();
         for entry in std::fs::read_dir(&examples).expect("read examples/") {
             let root = entry.expect("examples/ entry").path();
             let name = root.file_name().unwrap().to_str().unwrap().to_owned();
@@ -918,8 +920,22 @@ mod tests {
                 continue;
             }
             checked += 1;
+            for tier in [
+                "default",
+                "dev_settings",
+                "staging_settings",
+                "prod_settings",
+            ] {
+                let file = root.join(format!("config/{tier}.toml"));
+                let body = std::fs::read_to_string(&file).unwrap_or_default();
+                let tree: toml::Table = toml::from_str(&body).expect("example tier parses");
+                if tree.values().any(|v| !v.is_table()) {
+                    rooted.push(format!("{name}/{tier}"));
+                }
+            }
+            let tuned = PROD_TUNED.contains(&name.as_str());
             let rendered = |backend| {
-                [
+                let mut files = vec![
                     (".env.example", templates::env_example(&name, backend)),
                     (
                         "config/default.toml",
@@ -933,7 +949,14 @@ mod tests {
                         "config/staging_settings.toml",
                         templates::config_staging_settings_toml(&name, backend),
                     ),
-                ]
+                ];
+                if !tuned {
+                    files.push((
+                        "config/prod_settings.toml",
+                        templates::config_prod_settings_toml(&name),
+                    ));
+                }
+                files
             };
             let mismatches = |backend| -> Vec<&str> {
                 rendered(backend)
@@ -958,6 +981,7 @@ mod tests {
             drifted.is_empty(),
             "drifted from the scaffolder: {drifted:?}"
         );
+        assert!(rooted.is_empty(), "root keys are ignored: {rooted:?}");
     }
 
     /// A new project serves styled error pages without any TOML edits.
@@ -1496,9 +1520,9 @@ mod tests {
         }
     }
 
-    /// `.env.example` must not ship a `RUSTANGO_SESSION_SECRET` value: one
-    /// that is not 32 bytes of base64 is discarded silently, so the project
-    /// looks configured and is not (#1359).
+    /// `.env.example` must not ship a `RUSTANGO_SESSION_SECRET` value: a
+    /// placeholder is not valid base64, so outside prod it falls back to
+    /// the ./var key and the project looks configured when it is not (#1359).
     #[test]
     fn the_env_template_ships_no_live_session_secret() {
         let env = templates::env_example("app", Backend::Postgres);
@@ -1507,7 +1531,7 @@ mod tests {
             assert!(
                 !(t.starts_with("RUSTANGO_SESSION_SECRET=")
                     && t.len() > "RUSTANGO_SESSION_SECRET=".len()),
-                "an uncommented secret with a value would be silently discarded: {t}"
+                "an uncommented placeholder secret would not be used: {t}"
             );
         }
         assert!(

@@ -163,16 +163,17 @@ DATABASE_URL={url}
 # Apex domain the operator console is served on.
 RUSTANGO_APEX_DOMAIN=localhost
 
-# Session signing key — 32 bytes of base64. Anything else is discarded
-# silently and a key is generated into ./var/ instead, so a project that
-# looks configured is not. Leave it commented in development; set a real
-# one in production and keep it out of source control:
+# Session signing key — base64 of at least 32 bytes. Outside prod a bad
+# value only warns at boot and the key saved in ./var/ is used instead;
+# on prod the server refuses to start. Leave it commented in development;
+# set a real one in production and keep it out of source control:
 #   RUSTANGO_SESSION_SECRET=$(openssl rand -base64 32)
 # RUSTANGO_SESSION_SECRET=
 
 # Encryption key for sealed secrets: saved database server passwords,
-# tenant database URLs, EncryptedString fields. Use 32 or more random
-# bytes and back it up: without it sealed values cannot be read.
+# tenant database URLs, EncryptedString fields. Any string of 32 or more
+# characters (it is hashed into the key); back it up: without it sealed
+# values cannot be read.
 #   RUSTANGO_SECRET_KEY=$(openssl rand -base64 48)
 # RUSTANGO_SECRET_KEY=
 # Rotation: old key here, new one above, then in a tenancy project

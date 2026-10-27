@@ -222,8 +222,8 @@ fn canonical_base(base: &str) -> &str {
 /// The [`LANGUAGE_NAMES`] row for a bare locale string (region-stripped,
 /// alias-resolved), or `None` when core has no metadata for the language.
 fn language_row(locale: &str) -> Option<&'static (&'static str, &'static str, &'static str)> {
-    let lower = locale.to_ascii_lowercase();
-    let base = canonical_base(lower.split('-').next().unwrap_or(&lower));
+    let locale = Locale::new(locale);
+    let base = canonical_base(locale.base_language());
     LANGUAGE_NAMES.iter().find(|(code, _, _)| *code == base)
 }
 
@@ -476,14 +476,10 @@ impl Translator {
         let ov = self.overrides.read().expect("translator poisoned");
         let cats = self.catalogs.read().expect("translator poisoned");
         let pc = self.plural_catalogs.read().expect("translator poisoned");
-        // Within a plural entry: the exact category, then `other`, then any
-        // form, so a partly authored entry still resolves.
+        // Within a plural entry: the exact category, then `other`; past that the
+        // flat entry decides, never an arbitrary form in HashMap order.
         let pick = |entry: &HashMap<String, String>, category: &str| -> Option<String> {
-            entry
-                .get(category)
-                .or_else(|| entry.get("other"))
-                .or_else(|| entry.values().next())
-                .cloned()
+            entry.get(category).or_else(|| entry.get("other")).cloned()
         };
         let base = Locale::new(req.base_language());
         let mut seen: Vec<&Locale> = Vec::with_capacity(self.fallback_chain.len() + 3);
@@ -1841,6 +1837,27 @@ mod tests {
             .add_locale(Locale::new("fr"), flat("fr flat"))
             .add_plural_locale(Locale::new("en"), entry("en plural"));
         assert_eq!(t.translate_plural("fr", "k", 2, &[]), "fr flat");
+    }
+
+    #[test]
+    fn plural_entry_without_category_or_other_falls_to_flat() {
+        let mut e = HashMap::new();
+        e.insert("one".to_owned(), "one form".to_owned());
+        let plural = [("k".to_owned(), e)].into_iter().collect();
+        let flat = [("k".to_owned(), "flat".to_owned())].into_iter().collect();
+        let t = Translator::new(Locale::new("en"))
+            .add_locale(Locale::new("en"), flat)
+            .add_plural_locale(Locale::new("en"), plural);
+        assert_eq!(t.translate_plural("en", "k", 1, &[]), "one form");
+        assert_eq!(t.translate_plural("en", "k", 5, &[]), "flat");
+    }
+
+    #[test]
+    fn language_names_accept_underscore_locales() {
+        assert_eq!(language_display_name("pt_BR"), "Portuguese");
+        assert_eq!(language_native_name("de_DE"), language_native_name("de"));
+        assert_ne!(language_native_name("de_DE"), "Unknown");
+        assert_eq!(Locale::new("pt_BR").display_name(), "Portuguese");
     }
 
     #[test]

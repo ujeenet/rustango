@@ -1,18 +1,22 @@
 # getting_started_blog — production tier
 # Loaded when RUSTANGO_ENV=prod. Strict-by-default; sensitive values
-# (database url, secret key) come from RUSTANGO__* env vars or your
-# secrets manager — leaving them out of source control.
+# (database url, secret key) come from the environment or your secrets
+# manager — leaving them out of source control.
 
+# The URL comes from the `DATABASE_URL` environment variable, which is
+# what every pool reads. Set it from your secrets manager.
+#
 # Pool sizes can be pinned here. If you do, uncomment the header *with*
-# the keys: a key under a commented-out `[database]` lands at the root.
+# the keys: a key left uncommented under a commented-out `[database]`
+# lands at the TOML root, where it is silently ignored.
 # [database]
-# url = "set via RUSTANGO__DATABASE__URL or your secrets manager"
 # pool_min_size = 5
 # pool_max_size = 50
 
 [server]
-bind                 = "0.0.0.0:8080"
-request_timeout_secs = 30
+bind                  = "0.0.0.0:8080"
+request_timeout_secs  = 30
+shutdown_timeout_secs = 20
 
 [security]
 headers_preset    = "strict"
@@ -20,3 +24,13 @@ hsts_max_age_secs = 31536000
 
 [audit]
 retention_days = 365
+
+# Read by `Cli::with_logging()`, which this project does NOT call. To make
+# this section live: add `.with_logging()`, and change `src/main.rs` to
+# `#[rustango::main(logging = false)]` so the macro's own subscriber steps
+# aside — `tracing` keeps the first one installed, so without that the
+# settings here are read and discarded (#1465).
+# `RUST_LOG` overrides `level` either way, and works today.
+# [logging]
+# level  = "info"
+# format = "json"     # one object per event, for a log aggregator

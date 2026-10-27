@@ -4,6 +4,34 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.7] — 2026-10-27
+
+### Fixed — admin, REST and i18n
+
+- A bulk ViewSet create in a tenant sweep records the tenant-bound audit source, as a single create does, not `system`.
+- A ViewSet warns at mount when admin `change`/`delete`/`view` object-permission hooks exist for its model; it does not run them yet (0.62.0 will).
+- An admin inline add row that does not send a defaulted field leaves it to its column default, as the create form does.
+- An admin inline edit no longer rewrites an untouched time shown to the millisecond, so stored microseconds stay.
+- The admin refuses an edit that deactivates the signed-in user's own account, as the operator console does.
+- `translate_plural` falls back category, then `other`, then the flat entry; it no longer picks an arbitrary form.
+- `language_display_name` / `language_native_name`, `format_number` and `format_currency` accept `pt_BR`-style locales.
+- The `dateformat` / `timeformat` example uses `format="..."`, which Tera parses; it is now a doctest.
+
+### Internal — CI skips a tree that already passed
+
+- A run whose code tree already passed CI skips its jobs, so the develop push and the promote to `main` no longer rerun the matrix; `workflow_dispatch` and a new weekly run on `develop` (which refreshes the build cache) always run it.
+
+### Changed — `thiserror` 2
+
+- The workspace now builds on `thiserror` 2, so apps on `thiserror` 2 no longer compile a second copy.
+
+### Fixed — example drift and loose test assertions
+
+- `blog_demo` and `gfk_demo` bind `127.0.0.1` and seed random passwords, printed once at creation; `blog_demo` API errors are now 404/500, not 200.
+- `.env.example` (scaffolder and examples) describes what a bad `RUSTANGO_SESSION_SECRET` and `RUSTANGO_SECRET_KEY` really do; the cookbook recipe uses a valid base64 secret.
+- `getting_started_blog`'s prod tier matches the scaffolder, and the drift guard now checks it and rejects root keys in any example tier.
+- Several tests assert the exact marker instead of a substring any page contains; the live S3 round trip moved into `s3_live_presign`, so CI runs it.
+
 ## [0.61.6] — 2026-10-26
 
 ### Added — HTML error pages

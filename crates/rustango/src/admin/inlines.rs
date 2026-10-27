@@ -1102,18 +1102,23 @@ impl InlineTarget {
             .constrain(self.scope.row_where(self.pk.column, pk))
     }
 
-    /// `edit` drops an empty secret, so the stored one stays.
+    /// `edit` drops an empty secret, so the stored one stays; an add
+    /// leaves an unsent defaulted field to its column default.
     fn values(
         &self,
         row: &HashMap<String, String>,
         edit: bool,
     ) -> Result<Vec<(&'static str, SqlValue)>, crate::forms::FormError> {
+        use crate::forms::{absent_takes_default, Encoding};
         self.writable
             .iter()
             .filter(|f| {
-                !(edit
-                    && self.secrets.contains(&f.name)
-                    && row.get(f.name).is_none_or(String::is_empty))
+                if edit {
+                    !(self.secrets.contains(&f.name)
+                        && row.get(f.name).is_none_or(String::is_empty))
+                } else {
+                    !(absent_takes_default(f, Encoding::Form) && !row.contains_key(f.name))
+                }
             })
             .map(|f| {
                 let value = crate::forms::parse_form_value(f, row.get(f.name).map(String::as_str))?;
@@ -1706,7 +1711,6 @@ async fn plan_target(
             continue;
         }
 
-        #[cfg_attr(not(feature = "tenancy"), allow(unused_mut))]
         let mut values = target.values(&row, true).map_err(|e| bad_row(idx, e))?;
         if values.is_empty() {
             continue;
@@ -1722,6 +1726,7 @@ async fn plan_target(
         if target.unchanged(&before, &values) {
             continue;
         }
+        super::views::keep_echoed_lossy(target.child, &row, Some(&before), &mut values);
         if state.is_read_only(table) {
             return Err(read_only().into());
         }

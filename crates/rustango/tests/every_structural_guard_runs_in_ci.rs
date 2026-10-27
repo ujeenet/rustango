@@ -211,9 +211,18 @@ fn the_guards_job_is_actually_ungated() {
 
     // `continue-on-error` does not stop the job running, but it stops
     // it mattering — which is the same thing for a guard.
+    // The one exception: skip only when this exact tree already passed.
+    let dedupe = [
+        "needs: already_green",
+        "if: needs.already_green.outputs.skip != 'true'",
+    ];
     let gates: Vec<&str> = ["needs:", "if:", "continue-on-error:"]
         .into_iter()
-        .filter(|k| job.lines().any(|l| l.trim_start().starts_with(*k)))
+        .filter(|k| {
+            job.lines()
+                .map(str::trim)
+                .any(|l| l.starts_with(*k) && !dedupe.contains(&l))
+        })
         .collect();
 
     assert!(
