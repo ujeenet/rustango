@@ -1369,6 +1369,7 @@ jobs:
           cargo nextest run --profile ci -p rustango --no-default-features
           --features sqlite,tenancy,admin-sso,testkit
           --test sso_link_tenancy_sqlite_live --test sso_link_tri
+          --test sso_shared_console_tri
           --test admin_create_users_tri --test logout_revokes_sessions_tri
           --test operator_last_active_tri
           --test basic_auth_cache_tri
@@ -1668,6 +1669,7 @@ jobs:
           binary(=unique_together_validator_tri) |
           binary(=inserted_pk_readback_tri) |
           binary(=sso_link_tri) |
+          binary(=sso_shared_console_tri) |
           binary(=tenant_purge_tri) |
           binary(=resolver_per_registry_tri) |
           binary(=org_host_claims_tri) |

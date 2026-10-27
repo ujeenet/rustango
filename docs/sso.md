@@ -125,6 +125,8 @@ discovered at login — no per-provider endpoint wiring.
   (a company-wide Google, say). Managed from the console's *Shared SSO*
   panel, where *Allow email linking* toggles `allow_email_link` in place
   (the id and its links stay). The flag applies to **every** tenant.
+  *Edit* changes a provider in place (same id and slug; a blank secret
+  keeps the saved one), and each row shows the callback URL to register.
 
 On a tenant's login page the two sets merge, and on a slug clash the
 **tenant's own provider wins** over the shared one — so a tenant can

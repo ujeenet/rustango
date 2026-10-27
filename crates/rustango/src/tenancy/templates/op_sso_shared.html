@@ -2,13 +2,18 @@
 {% block title %}Shared SSO providers — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
 {% block content %}
 <h1>Shared SSO providers</h1>
-<p>Registry-wide OpenID Connect / social login providers. Each one is offered
-on <strong>every</strong> tenant's login page. A tenant can add its own providers
-from its admin; on a slug clash the tenant's own provider wins. Secrets are stored
-as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login.</p>
+{% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+{% if notice %}<div class="alert alert-notice">{{ notice }}</div>{% endif %}
+
+<p>OpenID Connect and social login providers offered on <strong>every</strong>
+tenant's login page. A tenant can add its own providers from its admin; on a
+slug clash the tenant's provider wins. Client secrets are stored encrypted and
+never shown again.</p>
+<p>The IdP sends users back to each tenant's own host, so register one redirect
+URI per tenant host: <code>{{ callback.pattern }}</code>.</p>
 
 {% if providers | length == 0 %}
-  <div class="empty">No shared providers yet — add one below.</div>
+  <div class="empty">No shared providers yet{% if edit_enabled %} — add one below{% endif %}.</div>
 {% else %}
 <table>
   <thead>
@@ -25,7 +30,7 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
   </thead>
   <tbody>
     {% for p in providers %}
-    <tr>
+    <tr class="sso-row">
       <td><strong>{{ p.slug }}</strong></td>
       <td>{{ p.label }}</td>
       <td>{{ p.kind }}</td>
@@ -38,17 +43,25 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
       <td>{{ p.sort_order }}</td>
       <td class="actions-col">
         {% if edit_enabled %}
-        <form method="post" action="{{ console_prefix }}/sso-shared/{{ p.id }}/email-link">
+        <a class="btn-row-action" href="{{ console_prefix }}/sso-shared/{{ p.id }}/edit">Edit</a>
+        <form method="post" action="{{ console_prefix }}/sso-shared/{{ p.id }}/email-link" class="inline-form">
           {{ csrf_input | default(value='') | safe }}
           <input type="hidden" name="allow_email_link" value="{% if p.allow_email_link %}off{% else %}on{% endif %}">
           <button type="submit" class="btn-row-action">{% if p.allow_email_link %}Stop email linking{% else %}Allow email linking{% endif %}</button>
         </form>
-        <form method="post" action="{{ console_prefix }}/sso-shared/{{ p.id }}/delete"
-              data-confirm="Delete shared provider {{ p.slug }}?">
+        <form method="post" action="{{ console_prefix }}/sso-shared/{{ p.id }}/delete" class="inline-form"
+              data-confirm="Delete shared provider {{ p.slug }}? Users linked to it can no longer sign in with it.">
           {{ csrf_input | default(value='') | safe }}
           <button type="submit" class="btn-row-action">Delete</button>
         </form>
         {% endif %}
+      </td>
+    </tr>
+    {#- A full-width row, so a long URL wraps instead of widening the table. -#}
+    <tr class="sso-callback-row">
+      <td colspan="8">
+        <span class="field-helper">Callback URL</span> <code>{{ p.callback.pattern }}</code>
+        {% if p.callback.example %}<span class="field-helper">e.g.</span> <code>{{ p.callback.example }}</code>{% endif %}
       </td>
     </tr>
     {% endfor %}
@@ -57,29 +70,15 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
 {% endif %}
 
 {% if edit_enabled %}
-<h2>Add a shared provider</h2>
-<form method="post" action="{{ console_prefix }}/sso-shared" class="op-form">
+<form method="post" action="{{ console_prefix }}/sso-shared" class="edit-form" autocomplete="off">
   {{ csrf_input | default(value='') | safe }}
-  <label>Slug <input name="slug" required pattern="[a-z0-9-]+" placeholder="acme-google"></label>
-  <label>Button label <input name="label" required placeholder="Sign in with Google"></label>
-  <label>Kind
-    <select name="kind">
-      <option value="oidc">oidc (generic — needs issuer URL)</option>
-      <option value="google">google</option>
-      <option value="microsoft">microsoft</option>
-      <option value="github">github</option>
-      <option value="gitlab">gitlab</option>
-      <option value="discord">discord</option>
-    </select>
-  </label>
-  <label>Issuer URL (oidc only) <input name="issuer_url" placeholder="https://idp.example.com"></label>
-  <label>Client ID <input name="client_id" required></label>
-  <label>Client secret <input name="client_secret" type="password" required placeholder="the OAuth client secret — stored encrypted at rest"></label>
-  <label>Scopes (optional, space-separated) <input name="scopes" placeholder="openid email profile groups"></label>
-  <label>Sort order <input name="sort_order" type="number" value="0"></label>
-  <label class="inline"><input type="checkbox" name="enabled" checked> Enabled</label>
-  <label class="inline"><input type="checkbox" name="allow_email_link"> Link first-time users by verified email, in every tenant (never superusers or staff)</label>
-  <button type="submit">Add provider</button>
+  <fieldset class="section">
+    <legend>Add a shared provider</legend>
+    {% include "_op_sso_shared_form.html" %}
+  </fieldset>
+  <p class="form-actions">
+    <button type="submit" class="btn btn-primary">Add provider</button>
+  </p>
 </form>
 {% endif %}
 {% endblock %}

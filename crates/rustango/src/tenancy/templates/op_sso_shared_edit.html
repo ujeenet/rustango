@@ -1,0 +1,19 @@
+{% extends "op_layout.html" %}
+{% block title %}{{ f.slug }} — Shared SSO providers — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="{{ console_prefix }}/sso-shared">Shared SSO providers</a><span class="sep">/</span>{{ f.slug }}</p>
+<h1>Shared provider <code>{{ f.slug }}</code></h1>
+{% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+
+<form method="post" action="{{ console_prefix }}/sso-shared/{{ id }}/edit" class="edit-form" autocomplete="off">
+  {{ csrf_input | default(value='') | safe }}
+  <fieldset class="section">
+    <legend>Provider</legend>
+    {% include "_op_sso_shared_form.html" %}
+  </fieldset>
+  <p class="form-actions">
+    <button type="submit" class="btn btn-primary">Save changes</button>
+    <a href="{{ console_prefix }}/sso-shared" class="btn-link">Cancel</a>
+  </p>
+</form>
+{% endblock %}

@@ -378,11 +378,16 @@ impl Env {
 
     /// The operator console's shared provider list page.
     async fn shared_list(&self) -> String {
+        self.console_page("/sso-shared").await
+    }
+
+    /// A console page's HTML.
+    async fn console_page(&self, path: &str) -> String {
         let cookies = self.console_cookies().await;
         let resp = send(
             &self.console,
             Request::builder()
-                .uri("/sso-shared")
+                .uri(path)
                 .header(header::COOKIE, cookies)
                 .body(Body::empty())
                 .unwrap(),
@@ -917,6 +922,43 @@ async fn the_console_refuses_an_invalid_shared_provider() {
     assert!(!html.contains("myspace") && !html.contains("a/b"), "{html}");
 }
 
+/// The page shows the redirect URI to register, per tenant host, and the
+/// issuer row only for `oidc`.
+#[tokio::test]
+async fn the_shared_page_shows_callback_urls_and_the_issuer_row() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let html = env.shared_list().await;
+    assert!(html.contains("class=\"sso-issuer-row\">"), "{html}");
+    env.shared_provider("corp", false).await;
+    // Tera escapes `/` as `&#x2F;`.
+    let html = env.shared_list().await.replace("&#x2F;", "/");
+    assert!(
+        html.contains("https://&lt;tenant host&gt;/login/sso/corp/callback"),
+        "{html}"
+    );
+    assert!(
+        html.contains("acme.app.test/login/sso/corp/callback"),
+        "{html}"
+    );
+    let edit = env.email_link_path().await.replace("/email-link", "/edit");
+    let html = env.console_page(&edit).await.replace("&#x2F;", "/");
+    assert!(html.contains("class=\"sso-issuer-row\">"), "{html}");
+    assert!(
+        html.contains("acme.app.test/login/sso/corp/callback"),
+        "{html}"
+    );
+    let form = "label=corp&kind=google&client_id=cid&enabled=on";
+    assert_eq!(
+        env.console_post(&edit, form.into()).await,
+        StatusCode::SEE_OTHER
+    );
+    assert!(env
+        .console_page(&edit)
+        .await
+        .contains("class=\"sso-issuer-row\" hidden"));
+}
+
 #[tokio::test]
 async fn a_read_only_console_cannot_change_shared_providers() {
     let _g = SUITE.lock().await;
@@ -931,6 +973,10 @@ async fn a_read_only_console_cannot_change_shared_providers() {
             "slug=x&label=x&kind=google&client_id=c&client_secret=s",
         ),
         (&path.replace("/email-link", "/delete"), ""),
+        (
+            &path.replace("/email-link", "/edit"),
+            "label=x&kind=google&client_id=c",
+        ),
     ] {
         let resp = send(
             &env.readonly_console,

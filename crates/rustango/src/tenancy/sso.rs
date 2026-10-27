@@ -10,9 +10,9 @@
 //! [`crate::admin::sso_provider::SsoProvider`] table (per-tenant, granular)
 //! merged with the registry-wide [`SharedSsoProvider`] set (operator-defined,
 //! offered to all tenants). On a slug clash the tenant's row wins. Each
-//! provider stores a **secret reference** (e.g. `env://…`) resolved via
-//! [`SecretsResolver`] at login time, so the raw secret never sits in a
-//! column. `{login}/sso/{slug}` starts the handshake for one provider.
+//! provider's client secret is stored encrypted (`Cast<EncryptedString>`)
+//! and decrypted only at login. `{login}/sso/{slug}` starts the handshake
+//! for one provider.
 
 use axum::{
     http::{header, request::Parts, HeaderValue},
@@ -196,9 +196,14 @@ fn derive_redirect(parts: &Parts, routes: &RouteConfig, slug: &str) -> Option<St
         crate::real_ip::trusted_forwarded(&parts.headers, &parts.extensions, "x-forwarded-proto")
             .unwrap_or("https");
     Some(format!(
-        "{scheme}://{host}{}/sso/{slug}/callback",
-        routes.login_url
+        "{scheme}://{host}{}",
+        callback_path(&routes.login_url, slug)
     ))
+}
+
+/// The IdP callback path for `slug` under the tenant login path.
+pub(crate) fn callback_path(login_url: &str, slug: &str) -> String {
+    format!("{login_url}/sso/{slug}/callback")
 }
 
 fn login_error(routes: &RouteConfig, code: &str) -> Response {

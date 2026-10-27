@@ -148,6 +148,12 @@ untouched.
 
 ---
 
+## Unreleased
+
+### Operator console: shared SSO form errors are HTML
+
+A refused shared-provider add now returns the console page (400) with the error, not a plain-text body. Successful changes redirect to `/sso-shared?notice=…`.
+
 ## 0.61.7
 
 ### Admin: no self-deactivation

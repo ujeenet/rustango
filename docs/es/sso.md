@@ -126,7 +126,9 @@ sesión — sin cableado de endpoints por proveedor.
   (un Google a nivel de empresa, por ejemplo). Gestionado desde el panel
   *Shared SSO* de la consola, donde *Allow email linking* alterna
   `allow_email_link` en el sitio (el id y sus enlaces se conservan). La opción
-  se aplica a **todos** los tenants.
+  se aplica a **todos** los tenants. *Edit* cambia un proveedor en el sitio
+  (mismo id y slug; un secreto vacío conserva el guardado), y cada fila
+  muestra la URL de callback que hay que registrar en el IdP.
 
 En la página de inicio de sesión de un tenant los dos conjuntos se fusionan, y ante
 un choque de slug **gana el propio proveedor del tenant** sobre el compartido — así

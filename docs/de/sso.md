@@ -126,7 +126,9 @@ werden bei der Anmeldung ermittelt — keine Endpunkt-Verdrahtung pro Anbieter.
   (etwa ein unternehmensweites Google). Verwaltet über das *Shared SSO*-Panel
   der Konsole, wo *Allow email linking* `allow_email_link` an Ort und Stelle
   umschaltet (die ID und ihre Verknüpfungen bleiben). Das Flag gilt für
-  **jeden** Tenant.
+  **jeden** Tenant. *Edit* ändert einen Provider an Ort und Stelle (gleiche
+  ID und Slug; ein leeres Secret behält das gespeicherte), und jede Zeile
+  zeigt die Callback-URL, die beim IdP zu registrieren ist.
 
 Auf der Anmeldeseite eines Tenants verschmelzen die beiden Mengen, und bei einer
 Slug-Kollision **gewinnt der eigene Anbieter des Tenants** gegenüber dem geteilten
