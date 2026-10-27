@@ -2169,20 +2169,10 @@ pub(crate) async fn insert_returning(
     Ok(inserted)
 }
 
-/// [`insert`] inside an open transaction.
+/// [`insert`] inside a transaction opened on `pool`, attributed as [`insert`] is.
 ///
 /// # Errors
 /// As [`crate::sql::insert_returning_tx`], plus the audit write.
-#[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
-pub(crate) async fn insert_tx(
-    tx: &mut crate::sql::PoolTx<'_>,
-    query: &crate::core::InsertQuery,
-    pk_field: &crate::core::FieldSchema,
-) -> Result<crate::core::SqlValue, crate::sql::ExecError> {
-    Ok(insert_returning_tx(tx, query, pk_field).await?.0)
-}
-
-/// [`insert_tx`] in a transaction opened on `pool`, attributed as [`insert`] is.
 #[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
 pub(crate) async fn insert_tx_on(
     pool: &crate::sql::Pool,
