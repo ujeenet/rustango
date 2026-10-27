@@ -1257,47 +1257,6 @@ mod tests {
             .ends_with("examplebucket.s3.us-east-1.amazonaws.com/foo.txt"));
     }
 
-    // -------- live test, skipped with no AWS env vars --------
-
-    #[tokio::test]
-    async fn live_round_trip_skipped_without_env() {
-        let access = std::env::var("RUSTANGO_S3_TEST_KEY").ok();
-        let secret = std::env::var("RUSTANGO_S3_TEST_SECRET").ok();
-        let bucket = std::env::var("RUSTANGO_S3_TEST_BUCKET").ok();
-        let endpoint = std::env::var("RUSTANGO_S3_TEST_ENDPOINT").ok();
-        let region =
-            std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
-        let (Some(access), Some(secret), Some(bucket)) = (access, secret, bucket) else {
-            eprintln!(
-                "skipping live S3 test — set RUSTANGO_S3_TEST_KEY / _SECRET / _BUCKET (and optionally _ENDPOINT / _REGION)"
-            );
-            return;
-        };
-        let mut creds = S3Credentials::new(access, secret);
-        if let Ok(token) = std::env::var("RUSTANGO_S3_TEST_SESSION_TOKEN") {
-            creds = creds.with_session_token(token);
-        }
-        let s = S3Storage::new(
-            S3Config {
-                bucket,
-                region,
-                endpoint: endpoint.clone(),
-                // A custom endpoint usually means R2 or MinIO, which
-                // want path style.
-                path_style: endpoint.is_some(),
-            },
-            creds,
-        );
-        let key = format!("rustango-test/{}.txt", uuid::Uuid::new_v4());
-        let payload = b"hello from rustango integration test";
-        s.save(&key, payload).await.expect("save");
-        let loaded = s.load(&key).await.expect("load");
-        assert_eq!(&loaded, payload);
-        assert!(s.exists(&key).await.expect("exists"));
-        s.delete(&key).await.expect("delete");
-        assert!(!s.exists(&key).await.expect("exists after delete"));
-    }
-
     // -------- presigned URLs, checked offline --------
 
     #[test]

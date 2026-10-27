@@ -1385,8 +1385,8 @@ async fn list_renders_fk_as_link_to_display_value() {
     );
     // Raw integer should NOT appear in the FK cell.
     assert!(
-        !body.contains("<td>1</td>") || body.contains("<td>1</td><td><a"),
-        "raw author_id 1 leaked: {body}",
+        !body.contains("<td>1</td>") && !body.contains("<td>2</td>"),
+        "raw author_id leaked: {body}",
     );
 
     migrate::drop_all(&pool).await.unwrap();
@@ -1452,7 +1452,7 @@ async fn fk_falls_back_to_raw_when_target_hidden() {
     );
     // Raw author_id renders.
     assert!(
-        body.contains(">1<") || body.contains(">2<"),
+        body.contains("<td>1</td>") && body.contains("<td>2</td>"),
         "raw author_id missing: {body}",
     );
 
