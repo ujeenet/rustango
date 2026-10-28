@@ -262,6 +262,11 @@ async fn enroll_sign_in_replay_disable(pool: &Pool) {
     );
     assert!(location(&resp).starts_with("/login/totp"));
     assert_eq!(audit_count(pool, &op, "totp_failed").await, 1);
+    let page = html(send(&app, "GET", &location(&resp), &pending, String::new()).await).await;
+    assert!(
+        page.contains("not accepted"),
+        "a wrong code says so: {page}"
+    );
 
     let code = totp::generate_at(&secret, now, 30, 6);
     let resp = send(
@@ -290,6 +295,11 @@ async fn enroll_sign_in_replay_disable(pool: &Pool) {
     assert!(
         set_cookie(&resp, SESSION).is_none(),
         "a replayed code signs in"
+    );
+    let page = html(send(&app, "GET", &location(&resp), &again, String::new()).await).await;
+    assert!(
+        page.contains("not accepted"),
+        "a replayed code says so: {page}"
     );
 
     // Off with a later code; then the password alone signs in again.

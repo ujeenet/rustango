@@ -349,10 +349,12 @@ pub(super) async fn code_submit(
             })
             .await;
         }
-        return flash::redirect(
-            &code_url(&next),
-            flash::Flash::Error("Enter the 6-digit code from your authenticator app."),
-        );
+        let message = if code.is_empty() {
+            "Enter the 6-digit code from your authenticator app."
+        } else {
+            "That code was not accepted: it is wrong or was already used. Enter the current code from your authenticator app."
+        };
+        return flash::redirect(&code_url(&next), flash::Flash::Error(message));
     }
     if enrolled {
         audit(&state, &op, "totp_enroll", "login").await;
