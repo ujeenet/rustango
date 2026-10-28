@@ -401,11 +401,13 @@ where
                 .await
             }
         });
-        router
-            .layer(axum::middleware::from_fn(
-                crate::admin::csrf_context::csrf_context,
-            ))
-            .layer(crate::forms::csrf::layer())
+        crate::errors::own_pages(
+            router
+                .layer(axum::middleware::from_fn(
+                    crate::admin::csrf_context::csrf_context,
+                ))
+                .layer(crate::forms::csrf::layer()),
+        )
     }
 }
 

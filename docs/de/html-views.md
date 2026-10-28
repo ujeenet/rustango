@@ -544,9 +544,10 @@ innerhalb der Security-Header und außerhalb von allem anderen, er ersetzt also:
 - axums Rejections (400, 415, 422);
 - die Ablehnungen und 404 des Tenant-Admins sowie unbekannte Pfade der Operator-Konsole.
 
-Seiten mit eigenen Bedienelementen behalten ihr Aussehen: die Admin-Seite
-„admin access required" (sie hat ein Abmelde-Formular) und die Seite „table not
-migrated". Markiere eigene Antworten mit `KeepBody`, um dasselbe zu tun.
+Seiten mit eigenen Bedienelementen behalten ihr Aussehen: jede HTML-Fehlerseite
+des Admins, des Tenant-Admins, der Operator-Konsole und der generischen Views,
+etwa ein mit seinem Fehler erneut gezeigtes Formular, die Seite „admin access
+required" (sie hat ein Abmelde-Formular) und die Seite „table not migrated". Markiere eigene Antworten mit `KeepBody`, um dasselbe zu tun.
 
 ### Umstieg von einer selbst geschriebenen Fehler-Middleware
 

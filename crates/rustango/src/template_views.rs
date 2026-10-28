@@ -2418,6 +2418,7 @@ fn rerender_form(
     let set_cookie = stamp_csrf(&CsrfCookie::of(parts), &mut ctx);
     let mut resp = render(&state.tera, &state.template, ctx, parts);
     *resp.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+    crate::errors::keep_own_page(&mut resp);
     apply_csrf_cookie(&mut resp, set_cookie);
     resp
 }
@@ -3325,6 +3326,7 @@ fn render(tera: &Tera, name: &str, mut ctx: Context, parts: &Parts) -> Response 
             if crate::template_debug::enabled() && crate::error::disclose_server_errors() {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
+                    crate::errors::KeepBody,
                     Html(crate::template_debug::error_page_html(&e, name)),
                 )
                     .into_response();
@@ -4227,6 +4229,7 @@ mod tenant {
         let set_cookie = super::stamp_csrf(&super::CsrfCookie::of(parts), &mut ctx);
         let mut resp = render(&state.tera, &state.template, ctx, parts);
         *resp.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+        crate::errors::keep_own_page(&mut resp);
         super::apply_csrf_cookie(&mut resp, set_cookie);
         resp
     }
@@ -6337,6 +6340,30 @@ mod tests {
             .unwrap();
         let res = app.oneshot(post).await.unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    }
+
+    /// The error-pages layer keeps a create form re-shown with its errors.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn the_error_pages_layer_keeps_a_form_rerender() {
+        use crate::errors::{ErrorPagesLayer, ErrorPagesRouterExt as _};
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "<p>my form</p>").unwrap();
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let app = CreateView::for_model(schema_two_fields(), &["title"])
+            .template("f.html")
+            .router("/c", Arc::new(tera), pool)
+            .error_pages(ErrorPagesLayer::new());
+        let mut req = csrf_form_post("/c/new", "");
+        req.headers_mut()
+            .insert(axum::http::header::ACCEPT, "text/html".parse().unwrap());
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert_eq!(body, "<p>my form</p>");
     }
 
     /// The POST re-render carries the token too, so a fix-and-resubmit works (#2234).

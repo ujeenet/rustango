@@ -990,7 +990,7 @@ fn router_unlogged(
     // its cookie, so the layer sees it set and adds no second one.
     // Origin is the check that stops a tenant host: it can plant the
     // cookie, and so knows the token.
-    public
+    let console = public
         .merge(private)
         .route_layer(middleware::from_fn(
             crate::admin::csrf_context::csrf_context,
@@ -999,7 +999,8 @@ fn router_unlogged(
         .route_layer(middleware::from_fn_with_state(state.clone(), flash::layer))
         .merge(assets)
         .with_state(state)
-        .layer(middleware::from_fn(mount::layer))
+        .layer(middleware::from_fn(mount::layer));
+    crate::errors::own_pages(console)
 }
 
 /// Rows per page, for every list the console renders. One number for
