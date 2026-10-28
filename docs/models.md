@@ -281,7 +281,7 @@ different type, name it: `ForeignKey<User, String>`. One-to-one uses
 |---|---|---|
 | `primary_key` | `#[rustango(primary_key)]` | marks the PK |
 | `max_length = N` | `#[rustango(max_length = 200)]` | `VARCHAR(N)` + write-time length check |
-| `default = "…"` | `#[rustango(default = "'draft'")]` | DB column default (SQL literal) |
+| `default = "…"` | `#[rustango(default = "'draft'")]` | DB column default (raw SQL: quote text as `'draft'`; a bare word or a non-number on a numeric field is a compile error) |
 | `unique` | `#[rustango(unique)]` | unique constraint on the column |
 | `choices = "…"` | `#[rustango(choices = "draft:Draft, published:Published")]` | enumerated values (`value:Label`); admin `<select>` + validation |
 | `auto_now_add` | `#[rustango(auto_now_add)]` | set to now on **insert** (on an `Auto<DateTime<Utc>>`) |
