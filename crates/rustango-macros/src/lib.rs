@@ -10671,7 +10671,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 out.generic_m2m.push(gm);
                 return Ok(());
             }
-            Err(meta.error("unknown rustango container attribute"))
+            Err(unknown_key_error(&meta, "container", CONTAINER_ATTR_KEYS))
         })?;
     }
     Ok(out)
@@ -10971,6 +10971,136 @@ struct FieldAttrs {
     validators: Vec<String>,
 }
 
+/// Keys `parse_field_attrs` accepts, listed in its unknown-key error.
+const FIELD_ATTR_KEYS: &[&str] = &[
+    "column",
+    "primary_key",
+    "fk",
+    "o2o",
+    "on",
+    "on_delete",
+    "related_name",
+    "max_length",
+    "vector",
+    "geometry",
+    "min",
+    "max",
+    "default",
+    "generated_as",
+    "help_text",
+    "choices",
+    "db_comment",
+    "verbose_name",
+    "editable",
+    "blank",
+    "citext",
+    "validators",
+    "auto_uuid",
+    "default_uuid_v7",
+    "auto_now_add",
+    "auto_now",
+    "soft_delete",
+    "unique",
+    "index",
+];
+
+/// Keys `parse_container_attrs` accepts, listed in its unknown-key error.
+const CONTAINER_ATTR_KEYS: &[&str] = &[
+    "table",
+    "display",
+    "app",
+    "scope",
+    "admin",
+    "manager",
+    "manager_fn",
+    "default_order",
+    "global_scope",
+    "through",
+    "reverse_has",
+    "generic_has",
+    "audit",
+    "permissions",
+    "view",
+    "managed",
+    "verbose_name",
+    "verbose_name_plural",
+    "db_table_comment",
+    "proxy",
+    "order_with_respect_to",
+    "required_db_features",
+    "required_db_vendor",
+    "base_manager_name",
+    "default_related_name",
+    "extra_permissions",
+    "default_permissions",
+    "get_latest_by",
+    "unique_together",
+    "index_together",
+    "unique_when",
+    "index_when",
+    "index",
+    "check",
+    "exclude",
+    "generic_fk",
+    "fk_composite",
+    "m2m",
+    "generic_m2m",
+];
+
+/// A flag attribute: `#[rustango(key)]` or `#[rustango(key = true)]`.
+/// `= false` is refused: off is the default, so the attribute is a no-op.
+fn parse_flag(meta: &syn::meta::ParseNestedMeta<'_>, key: &str) -> syn::Result<()> {
+    if meta.input.peek(syn::Token![=]) {
+        let lit: syn::LitBool = meta.value()?.parse()?;
+        if !lit.value {
+            return Err(syn::Error::new(
+                lit.span(),
+                format!("`{key} = false` is the default; remove the attribute"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// "unknown rustango <what> attribute `key`", with the nearest key and the full list.
+fn unknown_key_error(
+    meta: &syn::meta::ParseNestedMeta<'_>,
+    what: &str,
+    keys: &[&str],
+) -> syn::Error {
+    let path = &meta.path;
+    let got = path
+        .get_ident()
+        .map_or_else(|| quote!(#path).to_string(), ToString::to_string);
+    let mut msg = format!("unknown rustango {what} attribute `{got}`");
+    if let Some(near) = keys
+        .iter()
+        .map(|k| (edit_distance(&got, k), *k))
+        .filter(|(d, k)| *d <= 2.max(k.len() / 4))
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, k)| k)
+    {
+        msg.push_str(&format!("; did you mean `{near}`?"));
+    }
+    msg.push_str(&format!(" Supported: {}", keys.join(", ")));
+    meta.error(msg)
+}
+
+/// Levenshtein distance, for "did you mean" hints.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let sub = prev[j] + usize::from(ca != *cb);
+            cur.push(sub.min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
 fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
     let mut out = FieldAttrs {
         column: None,
@@ -11019,6 +11149,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("primary_key") {
+                parse_flag(&meta, "primary_key")?;
                 out.primary_key = true;
                 return Ok(());
             }
@@ -11240,6 +11371,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("auto_uuid") {
+                parse_flag(&meta, "auto_uuid")?;
                 out.auto_uuid = true;
                 // Implied: PK + auto + DEFAULT gen_random_uuid().
                 // Each is also explicitly settable; the explicit
@@ -11251,6 +11383,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("default_uuid_v7") {
+                parse_flag(&meta, "default_uuid_v7")?;
                 // Backend-neutral counterpart of `auto_uuid` — issue #823.
                 // No SQL DEFAULT (the macro fills the value Rust-side
                 // before binding); just mark the field as PK + Auto
@@ -11261,6 +11394,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("auto_now_add") {
+                parse_flag(&meta, "auto_now_add")?;
                 out.auto_now_add = true;
                 if out.default.is_none() {
                     out.default = Some("now()".into());
@@ -11268,6 +11402,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("auto_now") {
+                parse_flag(&meta, "auto_now")?;
                 out.auto_now = true;
                 if out.default.is_none() {
                     out.default = Some("now()".into());
@@ -11275,14 +11410,17 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("soft_delete") {
+                parse_flag(&meta, "soft_delete")?;
                 out.soft_delete = true;
                 return Ok(());
             }
             if meta.path.is_ident("unique") {
+                parse_flag(&meta, "unique")?;
                 out.unique = true;
                 return Ok(());
             }
             if meta.path.is_ident("index") {
+                parse_flag(&meta, "index")?;
                 out.index = true;
                 // Optional sub-attrs: #[rustango(index(unique, name = "…", method = "gin"))]
                 if meta.input.peek(syn::token::Paren) {
@@ -11318,7 +11456,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 }
                 return Ok(());
             }
-            Err(meta.error("unknown rustango field attribute"))
+            Err(unknown_key_error(&meta, "field", FIELD_ATTR_KEYS))
         })?;
     }
     Ok(out)
@@ -11835,6 +11973,65 @@ fn check_bound_compatibility(
             return Err(syn::Error::new_spanned(
                 field,
                 format!("`min` ({min}) is greater than `max` ({max})"),
+            ));
+        }
+    }
+    if let Some(default) = &attrs.default {
+        check_default_expr(default, kind).map_err(|msg| syn::Error::new_spanned(field, msg))?;
+    }
+    Ok(())
+}
+
+/// SQL words a `default` may be on its own; any other bare word is a
+/// column reference, which Postgres and MySQL refuse in a DEFAULT.
+const DEFAULT_KEYWORDS: &[&str] = &[
+    "NULL",
+    "TRUE",
+    "FALSE",
+    "CURRENT_TIMESTAMP",
+    "CURRENT_DATE",
+    "CURRENT_TIME",
+    "LOCALTIMESTAMP",
+    "LOCALTIME",
+];
+
+/// `default` is raw SQL. Refuse the shapes only SQLite accepts: a bare
+/// word (read as a column on PG/MySQL) and a non-numeric literal on a
+/// numeric field.
+fn check_default_expr(default: &str, kind: DetectedKind) -> Result<(), String> {
+    let expr = default.trim();
+    let is_word = expr.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && expr
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ');
+    let upper = expr.to_ascii_uppercase();
+    if is_word && !DEFAULT_KEYWORDS.contains(&upper.as_str()) {
+        return Err(format!(
+            "`default = \"{expr}\"` is raw SQL, so `{expr}` is read as a column name; \
+             for the text '{expr}' write `default = \"'{expr}'\"`"
+        ));
+    }
+    let numeric = kind.is_integer()
+        || matches!(
+            kind,
+            DetectedKind::F32 | DetectedKind::F64 | DetectedKind::Decimal
+        );
+    if numeric {
+        let unquoted = expr
+            .strip_prefix('\'')
+            .and_then(|e| e.strip_suffix('\''))
+            .unwrap_or(expr);
+        let is_number = if kind.is_integer() {
+            unquoted.parse::<i64>().is_ok()
+        } else {
+            unquoted.parse::<f64>().is_ok_and(f64::is_finite)
+        };
+        // Keep expressions (`(1 + 2)`, `abs(-1)`) and NULL; refuse a
+        // literal that is no number. `""` renders as `''`.
+        let is_literal = is_word || expr.is_empty() || expr.starts_with('\'');
+        if is_literal && !is_number && upper != "NULL" {
+            return Err(format!(
+                "`default = \"{expr}\"` is not a number, but the field is numeric"
             ));
         }
     }
@@ -14553,6 +14750,110 @@ mod field_attr_tests {
         let out = expand(&input).expect("derives").to_string();
         assert_eq!(out.matches("message_set_pool").count(), 1, "{out}");
         assert!(!out.contains("impl other :: Account {"), "{out}");
+    }
+
+    fn field_error(src: &str) -> Option<String> {
+        let f: syn::FieldsNamed = syn::parse_str(&format!("{{ {src} }}")).unwrap();
+        let field = f.named.into_iter().next().unwrap();
+        match parse_field_attrs(&field) {
+            Err(e) => Some(e.to_string()),
+            Ok(_) => error_for(field),
+        }
+    }
+
+    /// Flag attrs take `= true` like `blank`; `= false` is refused by name.
+    #[test]
+    fn flag_attrs_accept_eq_true() {
+        for key in [
+            "primary_key",
+            "unique",
+            "soft_delete",
+            "index",
+            "auto_now",
+            "auto_now_add",
+        ] {
+            let f: syn::FieldsNamed =
+                syn::parse_str(&format!("{{ #[rustango({key} = true)] a: i64 }}")).unwrap();
+            let field = f.named.into_iter().next().unwrap();
+            assert!(parse_field_attrs(&field).is_ok(), "{key} = true");
+            let err = field_error(&format!("#[rustango({key} = false)] a: i64")).unwrap();
+            assert!(err.contains(&format!("`{key} = false`")), "{err}");
+        }
+        let f: syn::Field =
+            syn::parse_quote!(#[rustango(primary_key = true, unique = true)] a: i64);
+        let attrs = parse_field_attrs(&f).unwrap();
+        assert!(attrs.primary_key && attrs.unique);
+    }
+
+    /// An unknown key is named, the nearest key suggested and the list shown.
+    #[test]
+    fn unknown_key_is_named_with_a_suggestion() {
+        let err = field_error("#[rustango(max_lenght = 5)] a: String").unwrap();
+        assert!(err.contains("`max_lenght`"), "{err}");
+        assert!(err.contains("did you mean `max_length`"), "{err}");
+        assert!(err.contains("Supported: column"), "{err}");
+        let input: DeriveInput = syn::parse_quote! {
+            #[rustango(tabel = "p")]
+            struct P { id: i64 }
+        };
+        let err = parse_container_attrs(&input).err().unwrap().to_string();
+        assert!(
+            err.contains("`tabel`") && err.contains("did you mean `table`"),
+            "{err}"
+        );
+        let err = field_error("#[rustango(zzzzzz)] a: i64").unwrap();
+        assert!(!err.contains("did you mean"), "{err}");
+    }
+
+    /// The listed keys are the parsed keys; a stale list would mislead.
+    #[test]
+    fn listed_keys_are_all_known() {
+        for key in FIELD_ATTR_KEYS {
+            let err = field_error(&format!("#[rustango({key})] a: i64")).unwrap_or_default();
+            assert!(!err.contains("unknown rustango field"), "{key}: {err}");
+        }
+        for key in CONTAINER_ATTR_KEYS {
+            let input: DeriveInput =
+                syn::parse_str(&format!("#[rustango({key})] struct P {{ id: i64 }}")).unwrap();
+            let err = parse_container_attrs(&input)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(!err.contains("unknown rustango container"), "{key}: {err}");
+        }
+    }
+
+    /// `default` is raw SQL: a bare word or a non-number on a numeric field is refused.
+    #[test]
+    fn default_shapes_only_sqlite_takes_are_refused() {
+        for bad in [
+            r#"#[rustango(default = "draft")] s: String"#,
+            r#"#[rustango(default = "draft")] s: Option<String>"#,
+            r#"#[rustango(default = "abc")] n: i32"#,
+            r#"#[rustango(default = "'abc'")] n: i64"#,
+            r#"#[rustango(default = "true")] n: i32"#,
+            r#"#[rustango(default = "")] n: i32"#,
+            r#"#[rustango(default = "'x'")] n: f64"#,
+        ] {
+            assert!(field_error(bad).is_some(), "{bad} must be refused");
+        }
+        let err = field_error(r#"#[rustango(default = "draft")] s: String"#).unwrap();
+        assert!(err.contains(r#"default = "'draft'""#), "{err}");
+        for good in [
+            r#"#[rustango(default = "'draft'")] s: String"#,
+            r#"#[rustango(default = "")] s: String"#,
+            r#"#[rustango(default = "now()")] s: String"#,
+            r#"#[rustango(default = "CURRENT_TIMESTAMP")] s: String"#,
+            r#"#[rustango(default = "NULL")] s: Option<String>"#,
+            r#"#[rustango(default = "0")] n: i32"#,
+            r#"#[rustango(default = "-1")] n: i64"#,
+            r#"#[rustango(default = "'5'")] n: i64"#,
+            r#"#[rustango(default = "(1 + 2)")] n: i64"#,
+            r#"#[rustango(default = "1.5")] n: f64"#,
+            r#"#[rustango(default = "true")] b: bool"#,
+        ] {
+            assert_eq!(field_error(good), None, "{good}");
+        }
     }
 
     /// A raw ident derives names without `r#`; this used to panic (#1937).

@@ -1152,6 +1152,53 @@ fn junction_conflict(out: &[M2MTableSnapshot]) -> Option<String> {
     })
 }
 
+/// A `fk` / `o2o` naming no registered table or column fails only at
+/// `migrate` (PG/MySQL) or at write time (SQLite); refuse it here.
+pub(crate) fn check_relation_targets() -> Result<(), super::MigrateError> {
+    let all: Vec<&'static ModelSchema> = inventory::iter::<ModelEntry>
+        .into_iter()
+        .map(|e| e.schema)
+        .collect();
+    let errors = relation_target_errors(&all);
+    if errors.is_empty() {
+        return Ok(());
+    }
+    Err(super::MigrateError::Validation(format!(
+        "relation targets not found:\n  - {}",
+        errors.join("\n  - ")
+    )))
+}
+
+/// One message per table-owning model's `fk` / `o2o` whose `to` is no
+/// table in `all`, or whose `on` is no column of it.
+pub(crate) fn relation_target_errors(all: &[&'static ModelSchema]) -> Vec<String> {
+    let mut out = Vec::new();
+    for model in all.iter().filter(|m| m.owns_table()) {
+        for f in model.fields {
+            let (kind, to, on) = match f.relation {
+                Some(Relation::Fk { to, on }) => ("fk", to, on),
+                Some(Relation::O2O { to, on }) => ("o2o", to, on),
+                None => continue,
+            };
+            let at = format!("`{}.{}` ({kind} = \"{to}\")", model.name, f.name);
+            match all.iter().find(|m| m.table == to) {
+                Some(target) if target.field_by_column(on).is_none() => {
+                    out.push(format!("{at}: table `{to}` has no column `{on}`"))
+                }
+                Some(_) => {}
+                None => match all.iter().find(|m| m.name.eq_ignore_ascii_case(to)) {
+                    Some(m) => out.push(format!(
+                        "{at}: `{to}` is a model; use its table `{}`, or `ForeignKey<{}>`",
+                        m.table, m.name
+                    )),
+                    None => out.push(format!("{at}: no registered model has table `{to}`")),
+                },
+            }
+        }
+    }
+    out
+}
+
 /// `makemigrations` refuses a conflicting junction as an error; the
 /// snapshot builders can only panic. A CHECK name on two tables only warns:
 /// the snapshot keeps one of them, and MySQL refuses the second.
@@ -1711,5 +1758,60 @@ mod generated_as_and_db_comment_capture {
             id_field.get("db_comment").is_none(),
             "id field should not have db_comment key"
         );
+    }
+}
+
+#[cfg(test)]
+mod relation_target_tests {
+    use super::*;
+    use crate::core::{FieldSchema, FieldType};
+
+    const fn rel_field(name: &'static str, rel: Relation) -> FieldSchema {
+        let mut f = FieldSchema::new(name, name, FieldType::I64);
+        f.relation = Some(rel);
+        f
+    }
+
+    const AUTHOR: &ModelSchema = &{
+        const FIELDS: &[FieldSchema] = &[FieldSchema::new("id", "id", FieldType::I64)];
+        let mut s = ModelSchema::new("Author", "author");
+        s.fields = FIELDS;
+        s
+    };
+
+    fn errors_for(rel: Relation) -> Vec<String> {
+        let fields: &'static [FieldSchema] = Box::leak(Box::new([rel_field("author_id", rel)]));
+        let mut post = ModelSchema::new("Post", "post");
+        post.fields = fields;
+        let post: &'static ModelSchema = Box::leak(Box::new(post));
+        relation_target_errors(&[AUTHOR, post])
+    }
+
+    /// A model name, a typo'd table or a typo'd column fail at makemigrations.
+    #[test]
+    fn unknown_targets_are_named() {
+        let e = errors_for(Relation::fk("Author", "id"));
+        assert!(
+            e[0].contains("`Author` is a model; use its table `author`"),
+            "{e:?}"
+        );
+        let e = errors_for(Relation::o2o("autors", "id"));
+        assert!(
+            e[0].contains("`Post.author_id`") && e[0].contains("`autors`"),
+            "{e:?}"
+        );
+        let e = errors_for(Relation::fk("author", "idd"));
+        assert!(e[0].contains("no column `idd`"), "{e:?}");
+        assert!(errors_for(Relation::fk("author", "id")).is_empty());
+    }
+
+    /// Every relation the crate's own and test models declare resolves.
+    #[test]
+    fn registry_relations_resolve() {
+        let all: Vec<&'static ModelSchema> = inventory::iter::<ModelEntry>
+            .into_iter()
+            .map(|e| e.schema)
+            .collect();
+        assert_eq!(relation_target_errors(&all), Vec::<String>::new());
     }
 }

@@ -363,7 +363,10 @@ Each tenant has its own brand on its `Org` row, set on
 `theme_mode`. The **Branding assets** form on the same page uploads a logo
 (PNG, JPEG or WebP) and a favicon (PNG or ICO), up to 1 MB each
 (`RUSTANGO_BRAND_MAX_BYTES`). Files are stored under
-`RUSTANGO_BRAND_STORAGE_DIR`, default `./var/brand`.
+`RUSTANGO_BRAND_STORAGE_DIR`, default `./var/brand`. That dir is local to
+each pod and lost on redeploy; with several replicas pass a shared disk with
+`Cli::brand_storage` or `server::Builder::brand_storage` (for example a
+`StorageRegistry` disk).
 
 The tenant admin and its sign-in page use these; `[brand]` does not reach
 them. Without `brand_name` the tenant's display name is shown, and without an

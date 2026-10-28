@@ -123,7 +123,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 |---|---|
 | `showmodels [--format plain\|json] [--app <label>]` | Chaque modèle enregistré, trié pour une sortie déterministe |
 | `showurls [--format plain\|json]` | Chaque route nommée, triée |
-| `check [--deploy]` | Contrôles de santé ; `--deploy` ajoute les audits de production |
+| `check [--deploy]` | Contrôles de santé, changements de modèles sans migration et migrations non appliquées ; `--deploy` ajoute les audits de production |
 | `create-admin` | Crée une ligne `AdminUser` pour les projets utilisant `admin::Builder::with_session_auth`. **Pas** conditionné à `tenancy` — prend un simple `&Pool` et écrit dans `rustango_admin_users`, en créant la table si besoin. Le seul moyen d'obtenir un premier login admin sur un projet non-tenancy |
 | `reset-password <username>` / `change-password <username>` | Définit le mot de passe d'un utilisateur admin (base unique) ; `change-password` vérifie d'abord l'actuel. Mêmes options de mot de passe que `create-admin` |
 | `set-admin-active <username> --on\|--off` | Désactive un utilisateur admin (ses sessions prennent fin) ou le réactive |

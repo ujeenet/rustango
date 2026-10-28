@@ -286,7 +286,7 @@ mit `select_related` (ebenfalls im ORM-Leitfaden).
 |---|---|---|
 | `primary_key` | `#[rustango(primary_key)]` | markiert den PK |
 | `max_length = N` | `#[rustango(max_length = 200)]` | `VARCHAR(N)` + Längenprüfung beim Schreiben |
-| `default = "…"` | `#[rustango(default = "'draft'")]` | DB-Spaltenstandard (SQL-Literal) |
+| `default = "…"` | `#[rustango(default = "'draft'")]` | DB-Spaltenstandard (rohes SQL: Text in Anführungszeichen wie `'draft'`; ein nacktes Wort oder eine Nicht-Zahl auf einem Zahlenfeld ist ein Compile-Fehler) |
 | `unique` | `#[rustango(unique)]` | Unique-Constraint auf der Spalte |
 | `choices = "…"` | `#[rustango(choices = "draft:Draft, published:Published")]` | aufgezählte Werte (`value:Label`); Admin-`<select>` + Validierung |
 | `auto_now_add` | `#[rustango(auto_now_add)]` | beim **Einfügen** auf jetzt setzen (auf einem `Auto<DateTime<Utc>>`) |

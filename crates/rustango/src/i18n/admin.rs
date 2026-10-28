@@ -33,9 +33,9 @@
 //! The render + apply logic are free functions so they're unit-testable
 //! without an HTTP harness; the registered handlers are thin glue.
 //!
-//! After a save the in-memory override cache is stale until the app calls
-//! [`crate::i18n::db::refresh_overrides_pool`] — wire that on a signal or
-//! a short interval; the persisted edit is authoritative regardless.
+//! After a save the editor reloads every translator the app registered with
+//! [`crate::i18n::db::register_live_translator`]. Other replicas stay stale
+//! until they call [`crate::i18n::db::refresh_overrides_pool`].
 
 #[cfg(feature = "admin")]
 use crate::i18n::db::{all_pool, delete_key_pool, delete_override, upsert_pool, Translation};
@@ -409,7 +409,7 @@ async fn editor_get(
         }
         Err(e) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("translations editor: {e}"),
+            crate::error::server_error_body("translations editor", &e),
         )
             .into_response(),
     }
@@ -446,9 +446,13 @@ async fn editor_post(
     if let Err(e) = apply_form(&pool, &form, &updated_by).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("save translations: {e}"),
+            crate::error::server_error_body("save translations", &e),
         )
             .into_response();
+    }
+    // The rows are saved; a failed reload only delays them until the next one.
+    if let Err(e) = crate::i18n::db::refresh_live_translators(&pool).await {
+        tracing::warn!(target: "rustango::i18n", error = %e, "translations saved, reload failed");
     }
     Redirect::to("editor").into_response()
 }
@@ -468,7 +472,7 @@ async fn export_get(
             .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("export translations: {e}"),
+            crate::error::server_error_body("export translations", &e),
         )
             .into_response(),
     }
@@ -505,11 +509,73 @@ crate::register_admin_view!(
 mod tests {
     use super::*;
 
+    /// `editor_post` reloads the process-wide live translators; one test at a time.
+    #[cfg(all(feature = "admin", feature = "sqlite"))]
+    static EDITOR_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[cfg(all(feature = "admin", feature = "sqlite"))]
+    async fn memory_pool() -> Pool {
+        let pool: Pool = crate::sql::sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap()
+            .into();
+        crate::i18n::db::ensure_table_pool(&pool).await.unwrap();
+        pool
+    }
+
+    /// A save reaches a registered translator without a restart.
+    #[cfg(all(feature = "admin", feature = "sqlite"))]
+    #[tokio::test]
+    async fn a_save_reaches_the_live_translator() {
+        use crate::i18n::{Locale, Translator};
+        let _g = EDITOR_LOCK.lock().await;
+        let pool = memory_pool().await;
+        let t = std::sync::Arc::new(
+            Translator::new(Locale::new("en")).add_locale(
+                Locale::new("en"),
+                [("greeting".to_owned(), "Helo".to_owned())]
+                    .into_iter()
+                    .collect(),
+            ),
+        );
+        crate::i18n::db::register_live_translator(&t);
+        let req = axum::http::Request::post("/editor")
+            .body(axum::body::Body::from("tr:en:greeting=Hello"))
+            .unwrap();
+        let res = editor_post(pool, req).await;
+        assert_eq!(res.status(), axum::http::StatusCode::SEE_OTHER);
+        assert_eq!(t.translate("en", "greeting", &[]), "Hello");
+    }
+
+    /// A failed read answers 500 without the driver's text.
+    #[cfg(all(feature = "admin", feature = "sqlite"))]
+    #[tokio::test]
+    async fn editor_errors_hide_the_driver_text() {
+        let pool = memory_pool().await;
+        crate::sql::raw_execute_pool(&pool, "DROP TABLE rustango_translations", Vec::new())
+            .await
+            .unwrap();
+        for res in [
+            editor_get(pool.clone(), axum::http::Request::default()).await,
+            export_get(pool.clone(), axum::http::Request::default()).await,
+        ] {
+            assert_eq!(res.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            let body = axum::body::to_bytes(res.into_body(), 1 << 16)
+                .await
+                .unwrap();
+            let body = String::from_utf8_lossy(&body);
+            assert!(!body.contains("rustango_translations"), "{body}");
+        }
+    }
+
     /// A user named like an operator is recorded by id, never as the operator.
     #[cfg(all(feature = "admin", feature = "sqlite"))]
     #[tokio::test]
     async fn a_user_named_like_an_operator_is_recorded_as_a_user() {
         use crate::admin::session::AdminSession;
+        let _g = EDITOR_LOCK.lock().await;
         use crate::sql::FetcherPool as _;
         let pool: Pool = crate::sql::sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
@@ -539,6 +605,7 @@ mod tests {
     #[tokio::test]
     async fn a_non_superuser_cannot_write_translations() {
         use crate::admin::session::AdminSession;
+        let _g = EDITOR_LOCK.lock().await;
         let pool: Pool = crate::sql::sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")

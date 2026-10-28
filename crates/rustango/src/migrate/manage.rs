@@ -2178,6 +2178,49 @@ async fn sso_link_audit(pool: &Pool, audit: &mut DeployAuditFindings) {
     }
 }
 
+/// Model changes no file holds yet, and files `pool`'s ledger has not applied.
+async fn pending_migration_audit(
+    pool: &Pool,
+    dir: &Path,
+    prior: &[super::Migration],
+    scope: Option<super::MigrationScope>,
+    warnings: &mut Vec<String>,
+    errors: &mut Vec<String>,
+) {
+    match super::make::planned_migrations(dir, has_registry_models()) {
+        Ok(planned) if !planned.is_empty() => {
+            let ops: Vec<String> = planned
+                .iter()
+                .flat_map(|m| m.forward.iter().map(describe_op))
+                .collect();
+            warnings.push(format!(
+                "models have changes no migration holds — run `manage makemigrations`:\n            {}",
+                ops.join("\n            ")
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => errors.push(format!("makemigrations would fail: {e}")),
+    }
+    match runner::applied_or_empty(pool, runner::LEDGER_TABLE).await {
+        Ok(applied) => {
+            let pending: Vec<&str> = runner::migration_states(prior, &applied)
+                .filter(|(m, s)| {
+                    *s == runner::MigrationState::Pending && scope.is_none_or(|sc| m.scope == sc)
+                })
+                .map(|(m, _)| m.name.as_str())
+                .collect();
+            if !pending.is_empty() {
+                warnings.push(format!(
+                    "{} migration(s) not applied — run `manage migrate`: {}",
+                    pending.len(),
+                    pending.join(", ")
+                ));
+            }
+        }
+        Err(e) => errors.push(format!("cannot read the migration ledger: {e}")),
+    }
+}
+
 /// `manage check [--deploy]` — run system audits.
 async fn check_cmd<W: Write>(
     pool: &Pool,
@@ -2185,14 +2228,16 @@ async fn check_cmd<W: Write>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
-    check_cmd_with(pool, dir, args, w, None::<std::future::Ready<_>>).await
+    check_cmd_with(pool, dir, None, args, w, None::<std::future::Ready<_>>).await
 }
 
 /// [`check_cmd`] for the tenancy dispatcher: `tenancy` carries its per-tenant
 /// deploy findings, awaited only under `--deploy`, and turns on the apex row.
+/// `scope` limits the unapplied count to the files `pool`'s ledger records.
 pub(crate) async fn check_cmd_with<W: Write>(
     pool: &Pool,
     dir: &Path,
+    scope: Option<super::MigrationScope>,
     args: &[String],
     w: &mut W,
     tenancy: Option<impl std::future::Future<Output = DeployAuditFindings>>,
@@ -2243,6 +2288,7 @@ pub(crate) async fn check_cmd_with<W: Write>(
             );
         } else {
             info.push(format!("{} migration(s) on disk", prior.len()));
+            pending_migration_audit(pool, dir, &prior, scope, &mut warnings, &mut errors).await;
         }
     }
 

@@ -37,6 +37,7 @@ pub fn make_migrations(
     name_override: Option<&str>,
 ) -> Result<Option<Migration>, MigrateError> {
     super::snapshot::check_registry_junctions()?;
+    super::snapshot::check_relation_targets()?;
     let current = SchemaSnapshot::from_registry();
     make_migrations_from(dir, &current, name_override)
 }
@@ -63,6 +64,7 @@ pub fn make_migrations_for_scope(
     name_override: Option<&str>,
 ) -> Result<Option<Migration>, MigrateError> {
     super::snapshot::check_registry_junctions()?;
+    super::snapshot::check_relation_targets()?;
     let current = SchemaSnapshot::from_registry_for_scope(scope);
     let migration_scope = match scope {
         crate::core::ModelScope::Registry => super::MigrationScope::Registry,
@@ -92,6 +94,7 @@ pub fn make_migrations_for_app(
         std::fs::create_dir_all(&app_dir)?;
     }
     super::snapshot::check_registry_junctions()?;
+    super::snapshot::check_relation_targets()?;
     let current = SchemaSnapshot::from_registry_for_app(app);
     make_migrations_from(&app_dir, &current, name_override)
 }
@@ -121,6 +124,35 @@ pub fn make_migrations_scoped(
     }
     file::write(&dir.join(format!("{}.json", mig.name)), &mig)?;
     Ok(Some(mig))
+}
+
+/// The files a flagless `makemigrations` would write into `dir`, unwritten:
+/// one per scope in a tenancy project, else one. Empty when models match.
+///
+/// # Errors
+/// As [`make_migrations`].
+pub(crate) fn planned_migrations(
+    dir: &Path,
+    tenancy: bool,
+) -> Result<Vec<Migration>, MigrateError> {
+    use crate::core::ModelScope;
+    super::snapshot::check_registry_junctions()?;
+    super::snapshot::check_relation_targets()?;
+    let prior = file::list_dir(dir)?;
+    if !tenancy {
+        return Ok(plan_from(&prior, &SchemaSnapshot::from_registry(), None)?
+            .into_iter()
+            .collect());
+    }
+    let mut out = Vec::new();
+    for (scope, ms) in [
+        (ModelScope::Registry, super::MigrationScope::Registry),
+        (ModelScope::Tenant, super::MigrationScope::Tenant),
+    ] {
+        let current = SchemaSnapshot::from_registry_for_scope(scope);
+        out.extend(plan_scoped(&prior, &current, scope, ms, None)?);
+    }
+    Ok(out)
 }
 
 /// The file [`make_migrations_scoped`] would write after `prior`, unwritten.

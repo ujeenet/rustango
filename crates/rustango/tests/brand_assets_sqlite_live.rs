@@ -192,6 +192,36 @@ async fn tenant_login_brand_images_load_under_default_routes() {
     std::env::remove_var(branding::BRAND_STORAGE_ROOT_ENV);
 }
 
+/// `Builder::brand_storage` serves tenant assets from that disk, not the
+/// per-pod local dir: here the local copy is gone.
+#[tokio::test]
+async fn builder_brand_storage_serves_from_the_given_disk() {
+    let _g = SUITE.lock().await;
+    let t = tenant().await;
+    let local = std::path::PathBuf::from(std::env::var(branding::BRAND_STORAGE_ROOT_ENV).unwrap());
+    let shared: rustango::storage::BoxedStorage =
+        Arc::new(rustango::storage::InMemoryStorage::new());
+    for entry in std::fs::read_dir(local.join(&t.slug)).unwrap() {
+        let path = entry.unwrap().path();
+        let key = format!("{}/{}", t.slug, path.file_name().unwrap().to_string_lossy());
+        shared
+            .save(&key, &std::fs::read(&path).unwrap())
+            .await
+            .unwrap();
+    }
+    std::fs::remove_dir_all(&local).unwrap();
+    let app = rustango::server::Builder::from_pool(t.pool.clone(), t.url.clone(), "localhost")
+        .brand_storage(shared)
+        .into_router()
+        .await
+        .expect("assemble");
+    let host = format!("{}.localhost", t.slug);
+    let html = text(send(&app, &host, "/login").await).await;
+    let logo = attr_after(&html, "class=\"brand-logo\"", "src").expect("logo img");
+    assert_png(&app, &host, &logo).await;
+    std::env::remove_var(branding::BRAND_STORAGE_ROOT_ENV);
+}
+
 /// Tenant admin pages use the tenant favicon, not only the sign-in page.
 #[tokio::test]
 async fn tenant_admin_pages_use_the_tenant_favicon() {
