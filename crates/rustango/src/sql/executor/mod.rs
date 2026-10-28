@@ -1486,6 +1486,8 @@ pub(crate) fn compile_bulk_insert_batches(
     if query.rows.is_empty() {
         return Ok(Vec::new());
     }
+    // Before chunking, so a repeated key resolves the same in any batch.
+    let query = &*query.last_per_conflict_key();
     let max_rows = rows_per_batch(dialect, query.columns.len(), usize::MAX);
     if query.rows.len() <= max_rows {
         return Ok(vec![dialect.compile_bulk_insert(query)?]);

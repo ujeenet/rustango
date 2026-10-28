@@ -22,7 +22,7 @@ Recent releases added a batch of features that aren't yet woven into every secti
 
 - **`Q!` macro + `Qb` runtime builder** — compile-time-safe filters. `User::objects().where_(Q!(User.email__icontains = "alice"))` fails to build on a typo'd field name. Runtime-composable variant for admin filter chips: `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
 - **`.distinct_on(&["author_id"])`** — PG native; portable window-function fallback on MySQL / SQLite. "Latest per group" patterns.
-- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** — insert many rows, updating the ones that already exist. Tri-dialect ON CONFLICT / ON DUPLICATE KEY UPDATE.
+- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** — insert many rows, updating the ones that already exist. Tri-dialect ON CONFLICT / ON DUPLICATE KEY UPDATE. Rows that repeat a key: the last one wins.
 - **`explain_pool()`** — tri-dialect EXPLAIN. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
 - **DB function library** — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Per-dialect emission with clear errors where SQLite lacks the function.
 - **Field types** — `rust_decimal::Decimal` (PG/MySQL native, SQLite via Decode shim), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) now accepted by `#[derive(Model)]` (v0.42).
@@ -309,7 +309,7 @@ let inbox: Vec<Post> = Post::objects()
 | `.intersection(other)` | `INTERSECT` | Rows in BOTH querysets |
 | `.difference(other)` | `EXCEPT` | Rows in first queryset but NOT others |
 
-Every method takes `QuerySet<T>` — both branches must target the same model `T`, so the column shape matches by construction (verified at compile time by Rust's generics). Calls accumulate; mixing operators in one chain is allowed (`a.union(b).intersection(c)` evaluates left-to-right per SQL standard).
+Every method takes `QuerySet<T>` — both branches must target the same model `T`, so the column shape matches by construction (verified at compile time by Rust's generics). Calls accumulate; mixing operators in one chain is allowed (`a.union(b).intersection(c)` evaluates left-to-right on every backend, as `(a ∪ b) ∩ c`).
 
 **Outer modifiers apply to the merged result**:
 
@@ -433,7 +433,7 @@ let ids: Vec<i64> = Post::objects()
 | `.values_list(&[cols])` | `SELECT col1, col2 FROM …` | `Vec<Vec<SqlValue>>` (ordered by `cols`) |
 | `.values_list_flat(col)` | `SELECT col FROM …` | `Vec<U>` (typed, via `fetch::<U>(...)`) |
 
-**Works with the rest of the query chain.** `.where_()`, `.filter()`, `.order_by()`, `.limit()`, `.offset()`, and the set operators (`.union()` / `.intersection()` / `.difference()`) — every method called BEFORE `.values_*` carries through. The values builders are terminal (nothing chains after them), so set the query shape first, then fetch.
+**Works with the rest of the query chain.** `.where_()`, `.filter()`, `.order_by()`, `.limit()`, `.offset()`, and the set operators (`.union()` / `.intersection()` / `.difference()`) — every method called BEFORE `.values_*` carries through. The values builders are terminal (nothing chains after them), so set the query shape first, then fetch. A set operation ordered by a column the projection leaves out also compares that column, then drops it from the rows.
 
 **Validation at `.compile()` / `.fetch()` time:**
 - Empty column list (`.values_dict(&[])`) → [`QueryError::EmptyValuesProjection`].

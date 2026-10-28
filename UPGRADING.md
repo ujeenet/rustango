@@ -150,6 +150,12 @@ untouched.
 
 ## Unreleased
 
+### ORM set operations and writes
+
+- On PG and MySQL, `a.union(b).intersection(c)` now returns `(a ∪ b) ∩ c`, not `a ∪ (b ∩ c)`; write `a.union(b.intersection(c))` for the old rows.
+- `bulk_upsert_pool` drops earlier rows that repeat a key in the batch; `dates()` / `datetimes()` leave out NULLs.
+- M2M `add` runs in a transaction that locks the source row and checks for the link first.
+
 ### Model attributes, check and MCP
 
 `default = "…"` is raw SQL: a bare word such as `"draft"` and a non-number on a numeric field (`"abc"`, `"true"`, `""`) now fail to compile; write `"'draft'"`. `primary_key = false` and the like are refused as no-ops. `makemigrations` now refuses an `fk` / `o2o` to a table or column no model registers. `manage check` warns on unmade or unapplied migrations; in tenancy it counts registry migrations only. MCP tool results that are not objects lose `structuredContent` and keep the text block. The translations editor reloads only translators passed to `i18n::db::register_live_translator`.

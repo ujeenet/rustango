@@ -4,6 +4,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — ORM set operations and writes
+
+- `a.union(b).intersection(c)` and `a.difference(b).intersection(c)` read left to right on PG and MySQL too, as on SQLite.
+- A union ordered by a column the `values_*` projection leaves out works on every backend.
+- SQLite runs a union of `select_related` branches with an outer `order_by`.
+- `bulk_upsert_pool` with a key repeated in one batch keeps the last row on every backend; PG used to fail.
+- `dates()` / `datetimes()` skip NULL values instead of failing the decode.
+- M2M `add` no longer links twice when the through model has no unique `(src, dst)` key.
+
 ### Fixed — model attributes, migrations and MCP
 
 - `#[rustango(default = "…")]` refuses a bare word (read as a column on PG/MySQL) and a non-number on a numeric field at compile time.

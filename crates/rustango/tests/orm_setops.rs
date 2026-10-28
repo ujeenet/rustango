@@ -152,6 +152,47 @@ mod scenarios {
         assert_eq!(sorted_names(rows), vec!["a3"]);
     }
 
+    fn ids(rows: Vec<Item>) -> Vec<i64> {
+        rows.into_iter().map(|i| i.id).collect()
+    }
+
+    /// A chain evaluates left to right: INTERSECT does not bind tighter.
+    pub async fn check_set_ops_chain_left_to_right(pool: &Pool) {
+        let rows: Vec<Item> = Item::objects()
+            .filter("grp", "a")
+            .union(Item::objects().filter("grp", "b"))
+            .intersection(Item::objects().filter("rnk__gte", 2_i64))
+            .order_by(&[("id", false)])
+            .fetch(pool)
+            .await
+            .expect("union then intersection");
+        assert_eq!(ids(rows), vec![2, 3, 4, 5], "(a UNION b) INTERSECT rnk>=2");
+
+        let rows: Vec<Item> = Item::objects()
+            .filter("grp", "a")
+            .difference(Item::objects().filter("rnk__lte", 1_i64))
+            .intersection(Item::objects().filter("rnk__gte", 3_i64))
+            .order_by(&[("id", false)])
+            .fetch(pool)
+            .await
+            .expect("difference then intersection");
+        assert_eq!(ids(rows), vec![3], "(a EXCEPT rnk<=1) INTERSECT rnk>=3");
+    }
+
+    /// The merged ORDER BY may name a column the values projection drops.
+    pub async fn check_ordered_union_values_other_column(pool: &Pool) {
+        let names: Vec<String> = Item::objects()
+            .filter("grp", "a")
+            .union(Item::objects().filter("grp", "b"))
+            .order_by(&[("rnk", true)])
+            .limit(4)
+            .values_list_flat("name")
+            .fetch::<String>(pool)
+            .await
+            .expect("ordered union, other column");
+        assert_eq!(names, vec!["b2", "b1", "a3", "a2"]);
+    }
+
     /// `with_compound` — the fallible pre-compiled-branch form.
     pub async fn check_with_compound_precompiled_branch(pool: &Pool) {
         let branch = Item::objects()
@@ -228,6 +269,8 @@ mod pg_live {
     pg_case!(check_intersection);
     pg_case!(check_difference);
     pg_case!(check_with_compound_precompiled_branch);
+    pg_case!(check_set_ops_chain_left_to_right);
+    pg_case!(check_ordered_union_values_other_column);
 }
 
 // --------------------------------------------------------------- SQLite
@@ -273,6 +316,8 @@ mod sqlite_live {
     sqlite_case!(check_intersection);
     sqlite_case!(check_difference);
     sqlite_case!(check_with_compound_precompiled_branch);
+    sqlite_case!(check_set_ops_chain_left_to_right);
+    sqlite_case!(check_ordered_union_values_other_column);
 }
 
 // ---------------------------------------------------------------- MySQL
@@ -334,4 +379,6 @@ mod mysql_live {
     mysql_case!(check_intersection);
     mysql_case!(check_difference);
     mysql_case!(check_with_compound_precompiled_branch);
+    mysql_case!(check_set_ops_chain_left_to_right);
+    mysql_case!(check_ordered_union_values_other_column);
 }

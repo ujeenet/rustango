@@ -7830,6 +7830,7 @@ fn inherent_impl_tokens(
             /// Auto-PK rows must all have `Auto::Unset` (the sequence
             /// picks the PK on insert; the update path never touches
             /// the Auto column). Auto-set rows trigger a hard error.
+            /// Rows repeating a `target` key: the last one wins.
             /// Empty slice is a no-op. On an audited model each written
             /// row gets a `create` or `update` audit row; MySQL refuses it.
             ///
