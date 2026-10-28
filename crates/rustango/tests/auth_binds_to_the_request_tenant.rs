@@ -123,6 +123,11 @@ async fn tenant_db(url: &str, user: Option<(&str, &str)>) -> rustango::sql::Pool
 }
 
 fn build_app(ns: &str) -> (Router, String) {
+    build_app_with(ns, None)
+}
+
+/// [`build_app`], with `require_perm(perm)` inside the auth layer.
+fn build_app_with(ns: &str, perm: Option<&'static str>) -> (Router, String) {
     let template = format!("sqlite:file:xtenant_{ns}_{{slug}}?mode=memory&cache=shared");
     let pools = Arc::new(
         DatabasePools::<sqlx::Sqlite>::new(BackendKind::Sqlite).with_url_template(&template),
@@ -138,11 +143,13 @@ fn build_app(ns: &str) -> (Router, String) {
     });
 
     let backends: Vec<Arc<dyn AuthBackend>> = vec![Arc::new(ModelBackend)];
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/whoami", get(whoami))
-        .route("/tenant", get(tenant_of))
-        .require_auth(backends)
-        .layer(axum::Extension(ctx));
+        .route("/tenant", get(tenant_of));
+    if let Some(perm) = perm {
+        app = app.require_perm(perm);
+    }
+    let app = app.require_auth(backends).layer(axum::Extension(ctx));
     (app, template)
 }
 
@@ -339,6 +346,22 @@ async fn a_database_error_is_a_503_without_driver_text() {
         !text.contains("rustango_users") && !text.contains("no such table"),
         "{text}"
     );
+}
+
+/// A failing permission read is a server error, not a 403.
+#[tokio::test]
+async fn a_permission_read_error_is_a_503_without_driver_text() {
+    let (app, template) = build_app_with("permerr", Some("post.add"));
+    // Users only: the permission tables are missing, so the read fails.
+    let _alpha = tenant_db(
+        &template.replace("{slug}", "alpha"),
+        Some(("ann", "s3cret")),
+    )
+    .await;
+    let (status, body) = call_full(&app, "alpha.localhost", Some("ann:s3cret")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"], "service_unavailable");
+    assert!(!body.to_string().contains("no such table"), "{body}");
 }
 
 /// The 401 and 403 from the auth layer use the API error JSON shape.

@@ -288,9 +288,14 @@ async fn perm_middleware(
         Err(resp) => return resp,
     };
     let req = Request::from_parts(parts, body);
-    let ok = permissions::has_perm_pool(user.id, state.codename, &pool)
-        .await
-        .unwrap_or(false);
+    // A failed read is an outage, not a missing permission.
+    let ok = match permissions::has_perm_pool(user.id, state.codename, &pool).await {
+        Ok(ok) => ok,
+        Err(e) => {
+            let status = StatusCode::SERVICE_UNAVAILABLE;
+            return ApiError::logged(status, "require_perm", e).into_response();
+        }
+    };
     if !ok {
         return ApiError::forbidden(format!("permission required: {}", state.codename))
             .into_response();
