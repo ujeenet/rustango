@@ -365,7 +365,7 @@ let app = Router::new()
 // authenticate on another's — fixed in 0.57.11.
 ```
 
-The middleware tries each backend in order. The first one that succeeds wins; the first one that returns a hard error stops the chain. `require_perm` answers `401` without a user and `403` without the codename. `optional_auth(backends)` resolves the user the same way but lets anonymous requests through. All three need the tenancy layer mounted outside them; without a `TenantContext` they fail closed with `500`.
+The middleware tries each backend in order. The first one that succeeds wins; the first one that returns a hard error stops the chain. `require_perm` answers `401` without a user, `403` without the codename and `503` when the permission read fails. `optional_auth(backends)` resolves the user the same way but lets anonymous requests through. All three need the tenancy layer mounted outside them; without a `TenantContext` they fail closed with `500`.
 
 ### Writing your own backend
 

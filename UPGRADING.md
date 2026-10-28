@@ -161,6 +161,13 @@ Bare-admin audit rows now carry `user:<id>` instead of `system`. Single-database
 - `require_auth` / `require_perm` bodies are JSON (`{"error","message","status"}`) instead of plain text, and a database error during the credential lookup is a `503`, not a `401`.
 - `FormView` answers invalid input with `422` (was `200`); a bool checkbox and a `blank` string field have `required: false` in `form.fields`.
 
+### Admin, auth and run-server
+
+- The bare admin's `static_url` is now under its mount: the favicon is `<admin_prefix>/__static__/icon.png`. Sessions are no longer waived for `/__static__` paths.
+- A right Basic-auth admin or API-key credential no longer resets the per-IP and global login counters; only failures count, as before.
+- `require_perm` returns `503` when the permission read fails (was `403`).
+- `check --deploy` on a single-database Cli no longer warns about `RUSTANGO_APEX_DOMAIN`.
+
 ---
 
 ## 0.61.9

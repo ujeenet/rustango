@@ -566,7 +566,7 @@ indique lo contrario):
 | `title(s)` / `subtitle(s)` | Cabecera / subcabecera de la barra lateral. |
 | `admin_prefix(p)` | Prefijo de URL — **debe coincidir con la ruta de anidamiento**. Por defecto `/__admin`. |
 | `audit_url(u)` | Ruta de la vista de actividad/auditoría. Por defecto `/__audit`. |
-| `static_url(u)` | Prefijo para los assets incrustados (favicon, logo). Por defecto `/__static__`. |
+| `static_url(u)` | Prefijo para los assets incrustados (favicon, logo). Por defecto `/__static__`. El admin simple sirve un prefijo de ruta bajo su montaje. |
 | `change_password_url(u)` | Ruta de la página de autoservicio de cambio de contraseña (añade el enlace en la barra lateral). |
 | `show_only([tables])` | Lista blanca de qué tablas aparecen; las demás devuelven 404 y quedan ocultas. |
 | `read_only([tables])` | Renderiza esas tablas pero prohíbe crear/editar/eliminar. |

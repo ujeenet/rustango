@@ -563,7 +563,7 @@ anders angegeben):
 | `title(s)` / `subtitle(s)` | Kopf- / Unterüberschrift der Seitenleiste. |
 | `admin_prefix(p)` | URL-Präfix — **muss dem Einhängepfad entsprechen**. Standard `/__admin`. |
 | `audit_url(u)` | Pfad der Aktivitäts-/Prüfpfad-Ansicht. Standard `/__audit`. |
-| `static_url(u)` | Präfix für eingebettete Assets (Favicon, Logo). Standard `/__static__`. |
+| `static_url(u)` | Präfix für eingebettete Assets (Favicon, Logo). Standard `/__static__`. Der einfache Admin liefert ein Pfad-Präfix unter seinem Mount aus. |
 | `change_password_url(u)` | Pfad der Selbstbedienungs-Passwortänderungsseite (fügt den Seitenleisten-Link hinzu). |
 | `show_only([tables])` | Whitelist, welche Tabellen erscheinen; andere liefern 404 und sind verborgen. |
 | `read_only([tables])` | Diese Tabellen rendern, aber Erstellen/Bearbeiten/Löschen verbieten. |

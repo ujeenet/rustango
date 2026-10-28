@@ -362,7 +362,7 @@ let app = Router::new()
     .require_auth(backends);       // outer: resolves the user first
 ```
 
-Die Middleware probiert jedes Backend der Reihe nach. Das erste, das erfolgreich ist, gewinnt; das erste, das einen harten Fehler zurückgibt, stoppt die Kette. `require_perm` antwortet `401` ohne Benutzer und `403` ohne den Codename. `optional_auth(backends)` löst den Benutzer genauso auf, lässt anonyme Anfragen aber durch. Alle drei brauchen den Tenancy-Layer außen herum; ohne `TenantContext` scheitern sie sicher mit `500`.
+Die Middleware probiert jedes Backend der Reihe nach. Das erste, das erfolgreich ist, gewinnt; das erste, das einen harten Fehler zurückgibt, stoppt die Kette. `require_perm` antwortet `401` ohne Benutzer, `403` ohne den Codename und `503`, wenn das Lesen der Berechtigung scheitert. `optional_auth(backends)` löst den Benutzer genauso auf, lässt anonyme Anfragen aber durch. Alle drei brauchen den Tenancy-Layer außen herum; ohne `TenantContext` scheitern sie sicher mit `500`.
 
 ### Ein eigenes Backend schreiben
 

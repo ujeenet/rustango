@@ -27,6 +27,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - FormView keeps form-wide errors under `__all__` and answers an invalid form with `422`.
 - Create/UpdateView mark neither a bool checkbox nor a `blank` string `required`, and accept an empty `blank` string.
 
+### Fixed — admin, auth and run-server
+
+- An admin edit refused on error shows the typed inline rows again, with the ContentType picker on edit and create.
+- The bare admin serves the favicon its pages link (`<admin_prefix><static_url>/icon.png`); the TOTP page drops a link to a missing stylesheet.
+- `check --deploy` checks `RUSTANGO_APEX_DOMAIN` only on a tenancy Cli; api and fullstack projects get no tenancy lines in `.env.example`.
+- The Basic-auth admin gate and API-key auth read the login limits and count only failures, not every request.
+- `require_perm` answers a permission read error with a logged JSON `503`, not a `403`.
+- `run-server` reaches path-prefix tenants at `<apex>/<prefix>` and builds tenant links with `--apex`.
+- SQLite/MySQL tenancy `runserver` opens the registry with the framework pool setup (tuning, WAL, file created) and honours `shutdown_timeout_secs`.
+
 ## [0.61.9] — 2026-10-28
 
 ### Fixed — ORM and migrations

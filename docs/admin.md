@@ -553,7 +553,7 @@ Every method on `admin::Builder` (each returns `Self` for chaining unless noted)
 | `title(s)` / `subtitle(s)` | Sidebar header / subheader. |
 | `admin_prefix(p)` | URL prefix — **must match the nest path**. Default `/__admin`. |
 | `audit_url(u)` | Path of the activity/audit view. Default `/__audit`. |
-| `static_url(u)` | Prefix for embedded assets (favicon, logo). Default `/__static__`. |
+| `static_url(u)` | Prefix for embedded assets (favicon, logo). Default `/__static__`. The bare admin serves a path prefix under its mount. |
 | `change_password_url(u)` | Path of the self-serve password-change page (adds the sidebar link). |
 | `show_only([tables])` | Whitelist which tables appear; others 404 and are hidden. |
 | `read_only([tables])` | Render those tables but forbid create/edit/delete. |
