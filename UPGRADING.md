@@ -148,6 +148,17 @@ untouched.
 
 ---
 
+## Unreleased
+
+### REST API and template views
+
+- `ViewSet::for_model`, `filter_fields`, `search_fields`, `ordering_fields`, `ordering` and `related_filter` panic on a name the model lacks; `#[derive(ViewSet)]` hits it at `router()`. Fix the typo the message names.
+- Cursor pagination with a `#[derive(Serializer)]` that does not render the cursor field or the primary key panics at mount, where it used to 500 per request.
+- `require_auth` / `require_perm` bodies are JSON (`{"error","message","status"}`) instead of plain text, and a database error during the credential lookup is a `503`, not a `401`.
+- `FormView` answers invalid input with `422` (was `200`); a bool checkbox and a `blank` string field have `required: false` in `form.fields`.
+
+---
+
 ## 0.61.9
 
 ### ORM results that change
