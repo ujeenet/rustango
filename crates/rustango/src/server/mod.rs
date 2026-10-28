@@ -40,4 +40,6 @@ pub use app::AppBuilder;
 #[cfg(all(test, feature = "tenancy", feature = "sqlite", feature = "manage"))]
 pub(crate) use builder::resolver_tests;
 #[cfg(feature = "tenancy")]
+pub(crate) use builder::{apex_resolver, resolve, Resolution};
+#[cfg(feature = "tenancy")]
 pub use builder::{ApiRouter, Builder};
