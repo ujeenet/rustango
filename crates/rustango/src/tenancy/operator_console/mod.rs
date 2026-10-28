@@ -853,6 +853,13 @@ fn router_unlogged(
                 );
         }
     }
+    #[cfg(feature = "totp")]
+    if edit_enabled {
+        private = private.route(
+            "/operators/{id}/reset-totp",
+            get(op_post_only_redirect).post(operators::operator_reset_totp),
+        );
+    }
     if edit_enabled {
         private = private
             // Who can sign in to this console. `edit_enabled` is really

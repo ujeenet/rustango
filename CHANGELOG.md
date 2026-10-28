@@ -17,11 +17,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - `#[rustango(default = "…")]` refuses a bare word (read as a column on PG/MySQL) and a non-number on a numeric field at compile time.
 - `primary_key`, `unique`, `index`, `soft_delete`, `auto_now(_add)`, `auto_uuid` and `default_uuid_v7` accept `= true`; an unknown attribute names the key, suggests the nearest one and lists the valid ones.
-- `makemigrations` refuses an `fk` / `o2o` whose table or `on` column is not registered, and says when the value is a model name.
+- `makemigrations` refuses an `fk` / `o2o` that names a model instead of its table, or a column its registered table lacks; a table no model registers only warns.
 - `manage check` reports model changes with no migration and migrations not yet applied.
 - The translations editor reloads translators registered with `i18n::db::register_live_translator` after a save, and its 500s no longer carry driver text.
 - MCP `tools/call` sends `structuredContent` only for an object result; `resources/list` gives each skill resource a `name` and lists a URI once.
-- `server::Builder::brand_storage` / `Cli::brand_storage` store tenant logos and favicons on a shared disk.
+- `server::Builder::brand_storage` / `Cli::brand_storage` store tenant logos and favicons on a shared disk; `purge-tenant` deletes them there.
+- A bare-word `default = "current_user"` (or `session_user`, `user`) is refused with a message that says it works on Postgres only.
 
 ### Fixed — single-database admin and CLI
 
@@ -29,7 +30,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Single-database `migrate` and the `runserver` auto-migrate fire `pre_migrate` / `post_migrate` on every backend.
 - `runserver` auto-migrate can be turned off (`[server] migrate_on_boot = false`, `Cli::migrate_on_boot(false)`) and waits at most `[server] migrate_lock_timeout_secs` (300) for the lock.
 - New single-database verbs: `audit-cleanup`, `reset-password`, `change-password`, `set-admin-active`, `reset-admin-totp`; tenancy gains `reset-operator-totp`. The TOTP resets are audited.
-- The bare admin can turn TOTP off with a current code (`/account/totp/disable`); enrolling, turning off and failed codes write audit rows.
+- The bare admin can turn TOTP off with a current code (`/account/totp/disable`); enrolling, turning off and failed codes (at login and enrollment too) write audit rows.
+- The operator console can remove another operator's two-factor device (`/operators/{id}/reset-totp`), audited.
 - Bare-admin change-password refuses the current password and no longer overwrites a change made during the check.
 
 ### Fixed — REST API and template views
@@ -39,12 +41,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The OpenAPI docs declare framework API keys as `Authorization: Bearer`, not `X-API-Key`.
 - ViewSet OpenAPI lists the DELETE `409`; ViewSet and `Serializer` schemas carry `enum`, `maxLength`, `minimum` and `maximum`.
 - Cursor pagination reads the cursor under a serializer's renamed key; a serializer that drops it panics at mount.
+- `[security] cors_allowed_headers`, `cors_expose_headers` and `cors_allow_credentials` feed `CorsLayer::from_settings`, on top of the framework's lists.
+- A ViewSet and `permission_required(_or_403)` answer a permission read error with a logged `503`, not a `403`.
 - `CorsLayer::from_settings` allows `Idempotency-Key`, `If-Match`, `If-None-Match` and `X-Date`, and exposes `Retry-After`, `Idempotent-Replayed`, `ETag`, `Location` and `Link` (also on `permissive()`).
 - `LinkHeaderBuilder` merges a base URL's query instead of adding a second `?`.
 - UpdateView re-renders a refused form with `object` and `pk`, and prefills inputs in the shape they accept.
 - DetailView and TemplateView stamp `csrf_token` / `csrf_input`; tenant ListView stamps `page_marks`.
 - FormView keeps form-wide errors under `__all__` and answers an invalid form with `422`.
-- Create/UpdateView mark neither a bool checkbox nor a `blank` string `required`, and accept an empty `blank` string.
+- Create/UpdateView mark neither a bool checkbox nor a `blank` string `required`, and accept an empty `blank` string; on create a defaulted field is optional and takes its column default when sent empty.
 
 ### Fixed — admin, auth and run-server
 
@@ -63,7 +67,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — migrations, auth, i18n, admin and REST
 
-- `manage migrate <target>` applies the framework's system chain first, so a project migration with an FK to a framework table runs on a fresh database.
+- `manage migrate <target>` applies the framework's system chain first, so a project migration with an FK to a framework table runs on a fresh database; an unknown target fails before anything runs.
 - `forget-pending` refuses a migration that a later one names in `prev` or `merges`, and names those files.
 - A data op with several SQL statements runs on PG and MySQL too; data-op SQL is sent unprepared.
 - Password-reset, email-verification and magic links join a `base_url` query with `&` and keep a `#fragment` last; signed URLs leave the fragment out of the signature.
@@ -72,18 +76,19 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Admin list facets on a field named `page`, `q`, `year`, `month`, `day`, `count`, `trashed` or `facet_show_all` link `?<field>__exact=` and filter.
 - A ViewSet's create/update body cap follows a `BodyLimitLayer`, raised or lowered; without one it stays 4 MiB.
 - `derive(Model)` with a `Decimal` field builds with the `sqlite` feature; SQLite reads it from its NUMERIC cell (a `SUM` there is still `f64`).
-- `manage startapp` and `make:*` write `rgo::` paths and `#[rgo(...)]` in a project whose Cargo.toml renames the dependency to `rgo`.
+- `manage startapp` and `make:*` write `rgo::` paths and `#[rgo(...)]` in a project whose Cargo.toml renames the dependency to `rgo`, also through `rgo = { workspace = true }`.
+- Attribute hints quote `#[rgo(...)]` when the model uses that name.
 
 ### Changed — SaaS soak example
 
 - `platform_commerce_saas` ViewSets need a Bearer token and the model's codenames; the soak signs in with a per-tenant API user. `/shop` stays anonymous, and the single-database twin keeps open ViewSets until it has API sign-in.
-- `platform_commerce_saas` `POST /api/v1/orders/{id}/confirm` needs a Bearer token and the order change codename.
+- `platform_commerce_saas` `POST /api/v1/orders/{id}/confirm`, `/api/v1/payments` and `/api/v1/refunds` need a Bearer token and the order change codename.
 
 ### Fixed — ORM shortcuts
 
 - `update().set()` on one field twice keeps the last value on every backend; Postgres refused it.
 - `chunk`, `chunk_by_id` and `each` work on an `i32` primary key and on one with a renamed column.
-- `find_many`, `find_many_or_fail`, `where_in` and `destroy` split a key list past the dialect's bind cap.
+- `find_many`, `find_many_or_fail`, `where_in` and `destroy` split a key list past the dialect's bind cap, counting `1_i32` and `1_i64` as one key.
 - `latest` / `earliest` skip NULLs, so every backend returns the same row.
 - `last()` on a sliced queryset returns the last row of the slice.
 

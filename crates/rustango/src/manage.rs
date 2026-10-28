@@ -1095,6 +1095,7 @@ impl Cli {
             self.init_tenancy_fn,
             crate::tenancy::manage::CliFacts {
                 provisioning: self.provisioning_dir.is_some(),
+                brand_storage: self.brand_storage.clone(),
             },
         )
         .await?;

@@ -191,10 +191,12 @@ where
 }
 
 /// What `Cli` knows about the deployment that a verb cannot see.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct CliFacts {
     /// `with_tenant_provisioning` was called.
     pub(crate) provisioning: bool,
+    /// `Cli::brand_storage`, for the verbs that delete brand files.
+    pub(crate) brand_storage: Option<crate::storage::BoxedStorage>,
 }
 
 /// [`run_with_writer_and_init`] with the `Cli`'s [`CliFacts`].
@@ -272,7 +274,9 @@ where
         }
         "test-tenant-connection" => tenants::test_tenant_connection(&args[1..], writer).await,
         "drop-tenant" => tenants::drop_tenant(pools, &args[1..], writer).await,
-        "purge-tenant" => tenants::purge_tenant(pools, &args[1..], writer).await,
+        "purge-tenant" => {
+            tenants::purge_tenant(pools, &args[1..], writer, facts.brand_storage.clone()).await
+        }
         "rotate-tenant-password" => {
             tenants::rotate_tenant_password(pools, &args[1..], writer).await
         }

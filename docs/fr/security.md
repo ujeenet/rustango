@@ -131,7 +131,7 @@ let layer = CorsLayer::new()
 let layer = CorsLayer::permissive();              // any origin, common methods
 ```
 
-`CorsLayer::new()` n'autorise aucune origine tant que vous n'en ajoutez pas. `CorsLayer::from_settings(&settings.security)` lit `[security] cors_allowed_origins` : une liste vide donne `None` (ne rien monter), `"*"` donne `permissive()`, et des origines nommées donnent une liste d'autorisation avec les méthodes courantes (QUERY compris) et les en-têtes de requête `Content-Type`, `Authorization`, `X-Date`, `Idempotency-Key`, `If-Match`, `If-None-Match`. Les deux exposent `Retry-After`, `Idempotent-Replayed`, `ETag`, `Location`, `Link` aux scripts.
+`CorsLayer::new()` n'autorise aucune origine tant que vous n'en ajoutez pas. `CorsLayer::from_settings(&settings.security)` lit `[security] cors_allowed_origins` : une liste vide donne `None` (ne rien monter), `"*"` donne `permissive()`, et des origines nommées donnent une liste d'autorisation avec les méthodes courantes (QUERY compris) et les en-têtes de requête `Content-Type`, `Authorization`, `X-Date`, `Idempotency-Key`, `If-Match`, `If-None-Match`. Les deux exposent `Retry-After`, `Idempotent-Replayed`, `ETag`, `Location`, `Link` aux scripts. `cors_allowed_headers` et `cors_expose_headers` s'ajoutent à ces listes, et `cors_allow_credentials = true` envoie `Access-Control-Allow-Credentials` (avec des origines nommées).
 
 **Note de sécurité :** avec des identifiants, vous DEVEZ lister des origines explicites. `allow_credentials(true)` combiné à `allow_any_origin()` ne donne pas un CORS joker avec identifiants — cela n'existe pas, et le demander ne vous donne aucune des deux moitiés.
 

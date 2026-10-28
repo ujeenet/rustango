@@ -860,6 +860,10 @@ async fn migrate<W: Write>(
     }
 
     if let Some(target) = positional {
+        if target != "zero" {
+            // A typo must fail before the system chain touches the database.
+            runner::target_on_disk(&super::file::list_dir(dir)?, dir, target)?;
+        }
         // A forward target needs the framework tables its migrations may FK.
         if target != "zero" && !target_is_applied(pool, target).await? {
             return migrate_with_framework(

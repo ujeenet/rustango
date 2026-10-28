@@ -82,7 +82,12 @@ async fn anonymous_request_gets_401() {
 /// loop over a permission they will never be granted).
 #[tokio::test]
 async fn authenticated_but_unauthorised_gets_403() {
-    let app = gated(pool().await);
+    let pool = pool().await;
+    // A failed permission read is a 503; this one must succeed and miss.
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("framework tables");
+    let app = gated(pool);
 
     let mut req = Request::builder()
         .method(Method::GET)

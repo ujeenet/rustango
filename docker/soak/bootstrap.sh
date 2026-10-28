@@ -173,22 +173,21 @@ done
 
 # The REST API takes a Bearer token and each model's codenames. `soakapi`
 # is the driver's API user on every tenant, granted them all; where it is
-# a tenant's first user it is also a superuser. Grants only on creation,
-# so a re-run stays quick.
+# a tenant's first user it is also a superuser. Grants run on every run,
+# so one that failed is retried; a create that failed for any reason but
+# "exists" then fails the grant.
 API_TABLES="commerce_product commerce_order commerce_order_line commerce_customer \
 commerce_inventory commerce_promotion commerce_gift_card"
 i=1
 while [ "$i" -le "$TENANTS" ]; do
     slug=$(printf 't%02d' "$i")
-    if app create-user "$slug" soakapi --password "soak-soakapi-pw" >/dev/null 2>&1; then
-        for table in $API_TABLES; do
-            for action in view add change delete; do
-                app grant-perm "$slug" soakapi "$table.$action" >/dev/null
-            done
+    app create-user "$slug" soakapi --password "soak-soakapi-pw" >/dev/null 2>&1 \
+        || log "API user on $slug already exists"
+    for table in $API_TABLES; do
+        for action in view add change delete; do
+            app grant-perm "$slug" soakapi "$table.$action" >/dev/null
         done
-    else
-        log "API user on $slug already exists"
-    fi
+    done
     i=$((i + 1))
 done
 

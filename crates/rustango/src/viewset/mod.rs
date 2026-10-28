@@ -1531,10 +1531,12 @@ impl AcquiredConn {
     }
 
     #[cfg(feature = "tenancy")]
-    async fn has_perm(&mut self, uid: i64, codename: &str) -> bool {
-        crate::tenancy::permissions::has_perm_pool(uid, codename, &self.pool)
-            .await
-            .unwrap_or(false)
+    async fn has_perm(
+        &mut self,
+        uid: i64,
+        codename: &str,
+    ) -> Result<bool, crate::tenancy::TenancyError> {
+        crate::tenancy::permissions::has_perm_pool(uid, codename, &self.pool).await
     }
 }
 
@@ -1721,8 +1723,11 @@ impl ViewSetState {
             }
             // All of them: a second codename narrows, never widens (#2522).
             for cn in codenames {
-                if !conn.has_perm(auth.id, cn).await {
-                    return PermOutcome::Forbidden;
+                match conn.has_perm(auth.id, cn).await {
+                    Ok(true) => {}
+                    Ok(false) => return PermOutcome::Forbidden,
+                    // A failed read is an outage, not a missing permission.
+                    Err(e) => return PermOutcome::Unavailable(e.to_string()),
                 }
             }
             PermOutcome::Allow
@@ -2392,9 +2397,9 @@ fn narrow(expr: WhereExpr, extra: Vec<WhereExpr>) -> WhereExpr {
 
 /// Outcome of a per-action permission check.
 ///
-/// Three-valued on purpose: "no principal" and "principal without the
-/// permission" are different answers to the client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// "No principal", "principal without the permission" and "could not
+/// tell" are different answers to the client.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum PermOutcome {
     /// Authorised — proceed.
     Allow,
@@ -2407,6 +2412,9 @@ enum PermOutcome {
     Unauthenticated,
     /// Authenticated, but lacks a required codename → `403`.
     Forbidden,
+    /// The permission read failed → logged `503`; carries the cause.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    Unavailable(String),
 }
 
 /// The preamble every REST handler runs. Splits the request into
@@ -2443,6 +2451,14 @@ async fn enter(
         }
         PermOutcome::Forbidden => {
             return Err(json_error(StatusCode::FORBIDDEN, "permission denied"))
+        }
+        PermOutcome::Unavailable(e) => {
+            return Err(crate::api_errors::ApiError::logged(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "viewset permission check",
+                e,
+            )
+            .into_response())
         }
     }
     Ok((parts, body, acq))
@@ -4441,6 +4457,11 @@ impl ReadBack {
         match state.check_perm(&state.vs.perms.retrieve, parts, acq).await {
             PermOutcome::Allow => Self::Row(scope),
             PermOutcome::Unauthenticated | PermOutcome::Forbidden => Self::PkOnly(scope),
+            // The write is done; echo only the key rather than fail it.
+            PermOutcome::Unavailable(e) => {
+                tracing::warn!(target: "rustango::viewset", error = %e, "permission read failed; echoing the key only");
+                Self::PkOnly(scope)
+            }
         }
     }
 
@@ -4594,7 +4615,7 @@ pub(crate) async fn extract_create_body(
     let bytes = to_bytes(body, cap.unwrap_or(DEFAULT_BODY_CAP))
         .await
         .map_err(|e| {
-            // Our own cap or an outer `BodyLimitLayer` stream cap (#1673).
+            // Our own cap or an outer `BodyLimitLayer` stream cap.
             #[cfg(feature = "_http_layers")]
             if crate::body_limit::over_cap(&e) {
                 return BodyError::TooLarge;
@@ -4807,6 +4828,25 @@ mod body_tests {
         assert_eq!(
             plain.oneshot(post()).await.unwrap().status(),
             StatusCode::PAYLOAD_TOO_LARGE
+        );
+        // A cap below the default lowers it.
+        let small = || {
+            axum::http::Request::post("/")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"title":"{}"}}"#,
+                    "x".repeat(2 << 10)
+                )))
+                .unwrap()
+        };
+        let lowered = route().body_limit(BodyLimitLayer::new(1 << 10));
+        assert_eq!(
+            lowered.oneshot(small()).await.unwrap().status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            route().oneshot(small()).await.unwrap().status(),
+            StatusCode::CREATED
         );
     }
 

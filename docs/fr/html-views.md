@@ -305,9 +305,12 @@ avec le `NULL` SQL rendu en `null`. Utilisez `.context_object_name("posts" / "po
 ajouter un alias plus convivial à côté de `object_list` / `object`.
 
 Chaque entrée de `form.fields` porte `name`, `column`, `ty`, `required`, `max_length` et
-`value`. Une case à cocher et une chaîne `blank` ne sont jamais `required`. `form.errors` est indexé par nom de champ et contient un message par champ, pas une
+`value`. `form.errors` est indexé par nom de champ et contient un message par champ, pas une
 liste. Chaque vue estampille aussi `csrf_token` et `csrf_input`, et chaque routeur de vue
 rejette un POST sans jeton correspondant.
+
+Une case à cocher et une chaîne `blank` ne sont jamais `required`, ni un champ avec
+`default` dans un formulaire de création : envoyé vide, il prend la valeur par défaut de la colonne.
 
 `CreateView` n'estampille aucun `object`, donc `{{ object.title }}` dans un formulaire de
 création est indéfini plutôt que vide — utilisez `{{ field.value }}` depuis `form.fields`, qui

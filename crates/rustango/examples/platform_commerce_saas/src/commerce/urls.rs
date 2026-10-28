@@ -10,8 +10,8 @@
 //! 2. The hand-written handlers take `Tenant<DefaultTenantDb>` and read
 //!    `t.pool()` / `t.org.slug` rather than carrying a pool and a fixed
 //!    slug in state.
-//! 3. The ViewSets need a Bearer token from `/api/auth/login`, and each
-//!    checks its model's codenames. The single-tenant twin has no API
+//! 3. The ViewSets and hand-written writes need a Bearer token from
+//!    `/api/auth/login`, and each checks its model's codenames. The single-tenant twin has no API
 //!    sign-in yet, so its ViewSets stay open.
 //!
 //! Everything else — models, serializers, jobs, the URL map — is byte
@@ -87,7 +87,7 @@ pub fn api(
         .merge(rest_api(&auth).with_state(()))
         .merge(promotion_pages())
         .merge(order_actions(&auth))
-        .merge(payments(cache.clone()))
+        .merge(payments(&auth, cache.clone()))
         .merge(account())
         .merge(storefront(cache))
         .route("/_soak/info", get(soak_info))
@@ -199,12 +199,40 @@ fn account() -> Router<AppState> {
 }
 
 /// A retried payment POST must not charge twice, and must not replay
-/// another caller's or another tenant's answer (#1668).
-fn payments(cache: rustango::cache::BoxedCache) -> Router<AppState> {
+/// another caller's or another tenant's answer. A Bearer token and the
+/// order change codename, as `confirm`.
+#[must_use]
+pub fn payments(auth: &JwtAuth, cache: rustango::cache::BoxedCache) -> Router<AppState> {
     Router::new()
-        .route("/api/v1/payments", post(probes::payment))
-        .route("/api/v1/refunds", post(probes::payment))
+        .route("/api/v1/payments", post(payment))
+        .route("/api/v1/refunds", post(payment))
         .idempotency(IdempotencyLayer::new(cache).scope(format!("{}.payments", cache_namespace())))
+        .layer(axum::middleware::from_fn_with_state(auth.clone(), require_bearer))
+}
+
+async fn payment(
+    t: Tenant<DefaultTenantDb>,
+    Extension(user): Extension<AuthenticatedUser>,
+    body: Json<serde_json::Value>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    may_change_orders(&t, &user).await?;
+    probes::payment(body).await
+}
+
+/// 403 unless `user` holds the order change codename on this tenant.
+async fn may_change_orders(
+    t: &Tenant<DefaultTenantDb>,
+    user: &AuthenticatedUser,
+) -> Result<(), (StatusCode, String)> {
+    let codename = rustango::permissions::codename_for::<Order>("change");
+    let allowed = rustango::tenancy::permissions::has_perm_pool(user.id, &codename, t.pool())
+        .await
+        .map_err(rustango::server_error)?;
+    if allowed {
+        Ok(())
+    } else {
+        Err((StatusCode::FORBIDDEN, format!("needs `{codename}`")))
+    }
 }
 
 fn probe_routes() -> Router<AppState> {
@@ -485,13 +513,7 @@ async fn confirm_order(
     Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<i64>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
-    let codename = rustango::permissions::codename_for::<Order>("change");
-    let allowed = rustango::tenancy::permissions::has_perm_pool(user.id, &codename, t.pool())
-        .await
-        .map_err(rustango::server_error)?;
-    if !allowed {
-        return Err((StatusCode::FORBIDDEN, format!("needs `{codename}`")));
-    }
+    may_change_orders(&t, &user).await?;
     let slug = t.org.slug.clone();
     let queue = st.queues.get(&slug).ok_or((
         StatusCode::SERVICE_UNAVAILABLE,

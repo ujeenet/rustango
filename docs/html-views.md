@@ -307,9 +307,12 @@ SQL `NULL` rendered as `null`. Use `.context_object_name("posts" / "post")` to
 add a friendlier alias alongside `object_list` / `object`.
 
 Each entry in `form.fields` carries `name`, `column`, `ty`, `required`,
-`max_length` and `value`. A checkbox and a `blank` string are never `required`. `form.errors` is keyed by field name and holds one
+`max_length` and `value`. `form.errors` is keyed by field name and holds one
 message per field, not a list. Every view also stamps `csrf_token` and
 `csrf_input`, and every view router rejects a POST without a matching token.
+
+A checkbox and a `blank` string are never `required`, nor is a field with a
+`default` on a create form: sent empty, it takes the column default.
 
 `CreateView` stamps no `object`, so `{{ object.title }}` on a create form is
 undefined rather than empty — use `{{ field.value }}` from `form.fields`, which

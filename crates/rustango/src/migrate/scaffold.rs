@@ -191,9 +191,46 @@ pub fn startapp(
 
 /// The name `root`'s Cargo.toml gives a renamed rustango dependency
 /// (`rgo = { package = "rustango", .. }`), as a path segment.
+/// A member's `rgo = { workspace = true }` takes the rename from the
+/// workspace root's `[workspace.dependencies]`.
 pub(crate) fn renamed_dep(root: &Path) -> Option<String> {
     let toml = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
-    renamed_dep_in(&toml).map(|k| k.replace('-', "_"))
+    renamed_dep_in(&toml)
+        .or_else(|| {
+            let ws = root
+                .ancestors()
+                .skip(1)
+                .filter_map(|d| std::fs::read_to_string(d.join("Cargo.toml")).ok())
+                .find(|t| t.lines().any(|l| l.trim() == "[workspace]"))?;
+            renamed_dep_in(&ws).filter(|k| inherits_dep(&toml, k))
+        })
+        .map(|k| k.replace('-', "_"))
+}
+
+/// Whether `toml` declares dependency `key` with `workspace = true`.
+fn inherits_dep(toml: &str, key: &str) -> bool {
+    let mut in_table = false;
+    for line in toml.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_table = t
+                .trim_matches(|c| c == '[' || c == ']')
+                .rsplit_once('.')
+                .is_some_and(|(head, k)| head.ends_with("dependencies") && k.trim() == key);
+            continue;
+        }
+        let Some((k, value)) = t.split_once('=') else {
+            continue;
+        };
+        let k = k.trim().trim_matches('"');
+        let value: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+        if (in_table && k == "workspace" && value == "true")
+            || (k == key && value.starts_with('{') && value.contains("workspace=true"))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn renamed_dep_in(toml: &str) -> Option<String> {
@@ -809,6 +846,39 @@ mod tests {
             "{models}"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `rgo = { workspace = true }` reads the rename from the workspace root.
+    #[test]
+    fn renamed_dep_follows_a_workspace_dependency() {
+        let ws = fresh_root("alias_ws");
+        let member = ws.join("crates").join("app");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/app\"]\n\n[workspace.dependencies]\n\
+             rgo = { package = \"rustango\", version = \"0.61\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[dependencies]\nrgo = { workspace = true }\n",
+        )
+        .unwrap();
+        assert_eq!(renamed_dep(&member).as_deref(), Some("rgo"));
+        std::fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[dependencies.rgo]\nworkspace = true\n",
+        )
+        .unwrap();
+        assert_eq!(renamed_dep(&member).as_deref(), Some("rgo"));
+        std::fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[dependencies]\nrustango = \"0.61\"\n",
+        )
+        .unwrap();
+        assert_eq!(renamed_dep(&member), None);
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

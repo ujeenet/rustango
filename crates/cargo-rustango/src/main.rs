@@ -1600,8 +1600,6 @@ mod tests {
         }
     }
 
-    /// `--rustango-path` is data, not TOML: backslashes and quotes must
-    /// survive into a manifest cargo can read (#2287).
     /// `--alias rgo` renames the dependency and every path and attribute the
     /// generated Rust names it by, and nothing that only spells the word.
     #[test]
@@ -1661,6 +1659,8 @@ mod tests {
         assert!(validate_alias("rgo", DepName::Rustango).is_ok());
     }
 
+    /// `--rustango-path` is data, not TOML: backslashes and quotes must
+    /// survive into a manifest cargo can read.
     #[test]
     fn rustango_path_round_trips_through_cargo_toml() {
         for path in [

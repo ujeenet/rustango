@@ -827,13 +827,54 @@ jobs:
   # `--all-targets` is load-bearing — it pulls in `tests/`, which is
   # where drift actually shows up first.
   platform_examples:
+    permissions:
+      contents: read
+      packages: read
     needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         backend: [postgres, mysql, sqlite]
+    # The saas API-auth test needs its leg's database; an empty image
+    # starts no service on the other legs.
+    services:
+      postgres:
+        image: ${{ matrix.backend == 'postgres' && 'ghcr.io/ujeenet/ci-postgres:16-alpine' || '' }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          POSTGRES_USER: rustango
+          POSTGRES_PASSWORD: rustango
+          POSTGRES_DB: rustango_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rustango -d rustango_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+      mysql:
+        image: ${{ matrix.backend == 'mysql' && 'ghcr.io/ujeenet/ci-mysql:8.0' || '' }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          MYSQL_ROOT_PASSWORD: rustango
+          MYSQL_DATABASE: rustango_test
+          MYSQL_USER: rustango
+          MYSQL_PASSWORD: rustango
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u rustango -prustango"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
     env:
+      DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
+      MYSQL_TEST_URL: mysql://rustango:rustango@127.0.0.1:3306/rustango_test
       # One shared target dir across both examples, for the reason
       # bin/examples.sh documents: each example's own target/ is ~1.3 GB.
       CARGO_TARGET_DIR: ${{ github.workspace }}/target-examples
@@ -1272,6 +1313,7 @@ jobs:
             --no-default-features \
             --features sqlite,tenancy,admin,jobs-postgres,media,passwords,serializer,totp,scheduler,testkit \
             --test access_admin_codename_sqlite_live \
+            --test auth_binds_to_the_request_tenant \
             --test admin_sqlite_live \
             --test brand_assets_sqlite_live \
             --test admin_list_display_links_sqlite_live \

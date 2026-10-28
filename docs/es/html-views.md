@@ -308,9 +308,12 @@ el `NULL` de SQL renderizado como `null`. Usa `.context_object_name("posts" / "p
 añadir un alias más amigable junto a `object_list` / `object`.
 
 Cada entrada de `form.fields` lleva `name`, `column`, `ty`, `required`, `max_length` y
-`value`. Una casilla y un string `blank` nunca son `required`. `form.errors` está indexado por nombre de campo y contiene un mensaje por campo, no
+`value`. `form.errors` está indexado por nombre de campo y contiene un mensaje por campo, no
 una lista. Cada vista estampa además `csrf_token` y `csrf_input`, y cada router de vista
 rechaza un POST sin un token que coincida.
+
+Una casilla y un string `blank` nunca son `required`, ni un campo con `default` en un
+formulario de creación: enviado vacío, toma el default de la columna.
 
 `CreateView` no estampa ningún `object`, así que `{{ object.title }}` en un formulario de
 creación queda indefinido en lugar de vacío — usa `{{ field.value }}` de `form.fields`, que

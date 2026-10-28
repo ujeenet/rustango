@@ -385,6 +385,8 @@ async fn login_submit(
                     attempt.prompted().await;
                 } else {
                     attempt.failed().await;
+                    let source = crate::audit::AuditSource::User { id: id.to_string() };
+                    totp_audit_as(&state, id, source, "totp_failed").await;
                 }
                 send_user_login_failed(UserLoginFailedContext {
                     source: "admin",
@@ -846,6 +848,9 @@ async fn totp_enroll_submit(
         super::totp_store::confirm_with_code(&state.pool, session.user_id, &secret, code).await
     };
     settle_code(attempt, confirmed.as_ref().ok().copied(), code).await;
+    if matches!(confirmed, Ok(false)) && !code.is_empty() {
+        totp_audit(&state, &session, "totp_failed").await;
+    }
     if matches!(confirmed, Ok(false)) {
         // Never echo a re-enroll's key: that would hand it to any session.
         let (key, otpauth) = if reenroll {
@@ -890,11 +895,22 @@ async fn totp_enroll_submit(
 /// An audit row for a TOTP change on the signed-in user's own entry.
 #[cfg(feature = "totp")]
 async fn totp_audit(state: &AppState, session: &AdminSession, action: &str) {
+    totp_audit_as(state, session.user_id, session.actor(), action).await;
+}
+
+/// [`totp_audit`] before a session exists: the login's code step.
+#[cfg(feature = "totp")]
+async fn totp_audit_as(
+    state: &AppState,
+    user_id: i64,
+    source: crate::audit::AuditSource,
+    action: &str,
+) {
     let entry = crate::audit::PendingEntry {
         entity_table: AdminUser::SCHEMA.table,
-        entity_pk: session.user_id.to_string(),
+        entity_pk: user_id.to_string(),
         operation: crate::audit::AuditOp::Action,
-        source: session.actor(),
+        source,
         changes: serde_json::json!({ "action": action }),
     };
     if let Err(e) = crate::audit::emit_one_pool(&state.pool, &entry).await {
