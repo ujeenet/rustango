@@ -601,7 +601,16 @@ impl SchemaSnapshot {
         };
         match change {
             SC::RenameTable { old_name, new_name } => {
-                if self.table(new_name).is_some() || self.table(old_name).is_none() {
+                let taken = self.table(new_name).is_some() || self.m2m_table(new_name).is_some();
+                // A junction's own name: `through` is all that names it.
+                if let Some(m) = self.m2m_tables.iter_mut().find(|m| m.through == *old_name) {
+                    if !taken {
+                        m.through.clone_from(new_name);
+                        self.sort();
+                    }
+                    return;
+                }
+                if taken || self.table(old_name).is_none() {
                     return;
                 }
                 for t in &mut self.tables {

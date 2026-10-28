@@ -4172,6 +4172,281 @@ async fn not_null_drop_unapplies(pool: &Pool, t: &str, atomic: bool) {
     assert!(err.contains("NOT NULL"), "{err}");
 }
 
+// ---------------------------------------------------------------- data-loss batch
+
+/// A file creating a parent and its child unapplies child first; name
+/// order dropped the parent first and `MySQL` refused it (3730).
+async fn created_tables_unapply_child_first(pool: &Pool) {
+    let (comment, post) = ("mad_uc_comment", "mad_uc_post");
+    let chain = Chain::new(pool, "uc", &[comment, post]).await;
+    let name = chain
+        .step(
+            pool,
+            json!({"tables": [
+                table(comment, vec![id(), col("post_id", "i64", fk(post))]),
+                table(post, vec![id()]),
+            ]}),
+        )
+        .await
+        .expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[post, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[comment, "id", "post_id"],
+    )
+    .await
+    .unwrap();
+    chain.undo(pool, &name).await.expect("child drops first");
+    for t in [comment, post] {
+        assert!(
+            exec(pool, "SELECT 1 FROM {}", &[t]).await.is_err(),
+            "{t} is gone"
+        );
+    }
+}
+
+/// Undo after an `--empty` rename reads the renamed shape, as makemigrations does.
+async fn undo_after_an_empty_rename(pool: &Pool) {
+    let t = "mad_ue_post";
+    let chain = Chain::new(pool, "ue", &[t]).await;
+    let s = |name: &str| col(name, "string", json!({"max_length": 20}));
+    let with = |cols: &[&str]| {
+        let mut f = vec![id()];
+        f.extend(cols.iter().map(|c| s(c)));
+        json!({"tables": [table(t, f)]})
+    };
+    chain
+        .step(pool, with(&["a", "keep"]))
+        .await
+        .expect("initial");
+    let mut mig =
+        rustango::migrate::manage::make_empty(chain.dir.path(), "rename").expect("--empty");
+    mig.forward = vec![Operation::Schema(SchemaChange::RenameColumn {
+        table: t.into(),
+        old_column: "a".into(),
+        new_column: "b".into(),
+    })];
+    chain.write(&mig);
+    chain.migrate(pool).await.expect("the rename");
+    let dropped = chain.step(pool, with(&["keep"])).await.expect("drop b");
+    chain.undo(pool, &dropped).await.expect("b comes back");
+    exec(pool, "SELECT {} FROM {}", &["b", t])
+        .await
+        .expect("b is back");
+    chain.undo(pool, &mig.name).await.expect("and the rename");
+    exec(pool, "SELECT {} FROM {}", &["a", t])
+        .await
+        .expect("a is back");
+}
+
+/// `--empty` chains onto its own scope: a registry file last in the dir
+/// used to become its parent, and the next tenant diff dropped a column.
+async fn empty_migration_keeps_its_scope(pool: &Pool) {
+    use rustango::core::ModelScope;
+    use rustango::migrate::make::make_migrations_scoped;
+    use rustango::migrate::MigrationScope;
+    let (t, org) = ("mad_es_post", "mad_es_org");
+    let chain = Chain::new(pool, "es", &[t, org]).await;
+    let s = |name: &str| col(name, "string", json!({"max_length": 20}));
+    let post = |cols: &[&str]| {
+        let mut f = vec![id()];
+        f.extend(cols.iter().map(|c| s(c)));
+        json!({"tables": [table(t, f)]})
+    };
+    let tenant = |v: Value| {
+        make_migrations_scoped(
+            chain.dir.path(),
+            &snap(v),
+            ModelScope::Tenant,
+            MigrationScope::Tenant,
+            None,
+        )
+    };
+    let first = tenant(post(&["a"]))
+        .expect("tenant 0001")
+        .expect("a file")
+        .name;
+    make_migrations_scoped(
+        chain.dir.path(),
+        &snap(json!({"tables": [table(org, vec![id()])]})),
+        ModelScope::Registry,
+        MigrationScope::Registry,
+        None,
+    )
+    .expect("registry 0002")
+    .expect("a file");
+    chain.migrate(pool).await.expect("both scopes");
+    let mut mig =
+        rustango::migrate::manage::make_empty(chain.dir.path(), "rename").expect("--empty");
+    assert_eq!(mig.scope, MigrationScope::Tenant);
+    assert_eq!(mig.prev, Some(first), "the tenant head");
+    mig.forward = vec![Operation::Schema(SchemaChange::RenameColumn {
+        table: t.into(),
+        old_column: "a".into(),
+        new_column: "b".into(),
+    })];
+    chain.write(&mig);
+    chain.migrate(pool).await.expect("the rename");
+    let next = tenant(post(&["b", "c"])).expect("diff").expect("a file");
+    assert_eq!(
+        next.forward,
+        vec![Operation::Schema(SchemaChange::AddColumn {
+            table: t.into(),
+            column: "c".into(),
+        })],
+        "no drop of the renamed column"
+    );
+    chain.migrate(pool).await.expect("add c");
+    chain.undo(pool, &next.name).await.expect("round trip");
+}
+
+fn junction(through: &str, post: &str, tag: &str) -> Value {
+    json!({"through": through, "src_table": post, "src_col": "post_id",
+           "dst_table": tag, "dst_col": "tag_id"})
+}
+
+async fn junction_rows(pool: &Pool, through: &str) -> Result<Vec<(i64,)>, String> {
+    let sql = q(pool, "SELECT {} FROM {}", &["tag_id", through]);
+    rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// A seeded post/tag junction named `through`.
+async fn seeded_junction(pool: &Pool, chain: &Chain, post: &str, tag: &str, through: &str) {
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(post, vec![id()]), table(tag, vec![id()])],
+                   "m2m_tables": [junction(through, post, tag)]}),
+        )
+        .await
+        .expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[post, "id"])
+        .await
+        .unwrap();
+    exec(pool, "INSERT INTO {} ({}) VALUES (7)", &[tag, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 7)",
+        &[through, "post_id", "tag_id"],
+    )
+    .await
+    .unwrap();
+}
+
+/// A renamed `through` is a `RenameTable`: the junction keeps its rows.
+async fn m2m_through_rename_keeps_rows(pool: &Pool) {
+    let (post, tag, old, new) = (
+        "mad_tr_post",
+        "mad_tr_tag",
+        "mad_tr_post_tags",
+        "mad_tr_links",
+    );
+    let chain = Chain::new(pool, "tr", &[old, new, post, tag]).await;
+    seeded_junction(pool, &chain, post, tag, old).await;
+    let name = chain
+        .step(
+            pool,
+            json!({"tables": [table(post, vec![id()]), table(tag, vec![id()])],
+                   "m2m_tables": [junction(new, post, tag)]}),
+        )
+        .await
+        .expect("the rename applies");
+    assert_eq!(
+        chain.head().forward,
+        vec![Operation::Schema(SchemaChange::RenameTable {
+            old_name: old.into(),
+            new_name: new.into(),
+        })]
+    );
+    assert_eq!(junction_rows(pool, new).await.unwrap(), [(7,)]);
+    chain.undo(pool, &name).await.expect("unapply");
+    assert_eq!(junction_rows(pool, old).await.unwrap(), [(7,)], "and back");
+}
+
+/// A hand-written junction `RenameTable` reaches the snapshot: the next diff is empty.
+async fn m2m_through_rename_by_hand(pool: &Pool) {
+    let (post, tag, old, new) = (
+        "mad_th_post",
+        "mad_th_tag",
+        "mad_th_post_tags",
+        "mad_th_links",
+    );
+    let chain = Chain::new(pool, "th", &[old, new, post, tag]).await;
+    seeded_junction(pool, &chain, post, tag, old).await;
+    let mut mig =
+        rustango::migrate::manage::make_empty(chain.dir.path(), "rename").expect("--empty");
+    mig.forward = vec![Operation::Schema(SchemaChange::RenameTable {
+        old_name: old.into(),
+        new_name: new.into(),
+    })];
+    chain.write(&mig);
+    chain.migrate(pool).await.expect("the hand-written rename");
+    let renamed = json!({"tables": [table(post, vec![id()]), table(tag, vec![id()])],
+                         "m2m_tables": [junction(new, post, tag)]});
+    let next = make_migrations_from(chain.dir.path(), &snap(renamed), None).expect("diff");
+    assert!(
+        next.is_none(),
+        "the rename is already applied: {:?}",
+        next.map(|m| m.forward)
+    );
+    assert_eq!(junction_rows(pool, new).await.unwrap(), [(7,)]);
+    chain.undo(pool, &mig.name).await.expect("unapply");
+    assert_eq!(junction_rows(pool, old).await.unwrap(), [(7,)]);
+}
+
+/// `--squash` rebuilds from the models; models ahead of the pending files
+/// would have their change faked where those files ran, so it is refused.
+/// File logic only, so one backend.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn squash_refuses_models_ahead_of_the_files() {
+    use rustango::migrate::{file, manage};
+    let run = |pool: Pool, dir: std::path::PathBuf, args: &'static [&'static str]| async move {
+        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        manage::run_with_writer(&pool, &dir, args, &mut Vec::new()).await
+    };
+    for ahead in [false, true] {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        run(pool.clone(), dir.clone(), &["makemigrations"])
+            .await
+            .expect("makemigrations");
+        manage::make_empty(&dir, "note").expect("--empty");
+        if ahead {
+            // As if a model gained a table no file holds yet.
+            let mut head = file::list_dir(&dir).unwrap().pop().unwrap();
+            let app = head
+                .snapshot
+                .tables
+                .iter()
+                .position(|t| t.name == "mad_sdm_child");
+            head.snapshot.tables.remove(app.expect("an app table"));
+            file::write(&dir.join(format!("{}.json", head.name)), &head).unwrap();
+        }
+        let before = file::list_dir(&dir).unwrap().len();
+        let out = run(pool.clone(), dir.clone(), &["migrate", "--squash"]).await;
+        if ahead {
+            let err = out.expect_err("models ahead of the files");
+            assert!(err.to_string().contains("makemigrations"), "{err}");
+            assert_eq!(
+                file::list_dir(&dir).unwrap().len(),
+                before,
+                "nothing deleted"
+            );
+        } else {
+            out.expect("the files match the models");
+        }
+    }
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
@@ -4258,5 +4533,10 @@ tri_dialect_test!(
         fk_column_rename_frees_the_old_name,
         not_null_drop_unapplies_on_an_empty_table,
         not_null_drop_unapplies_without_a_transaction,
+        created_tables_unapply_child_first,
+        undo_after_an_empty_rename,
+        empty_migration_keeps_its_scope,
+        m2m_through_rename_keeps_rows,
+        m2m_through_rename_by_hand,
     ]
 );
