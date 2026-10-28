@@ -54,6 +54,22 @@ pub struct Coded {
     pub slug: String,
 }
 
+/// Column defaults and an unticked box on the add form.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "wrerr_item", admin(list_display = "name"))]
+#[allow(dead_code)]
+pub struct Item {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+    #[rustango(default = "0")]
+    pub stock: i32,
+    #[rustango(max_length = 16, default = "'new'")]
+    pub label: String,
+    pub active: bool,
+}
+
 rustango::register_admin_inline!(
     parent = "wrerr_parent",
     child = "wrerr_child",
@@ -103,10 +119,11 @@ async fn setup(pool: &Pool) {
     fresh_table::<Coded>(pool).await;
     fresh_table::<AParent>(pool).await;
     fresh_table::<AChild>(pool).await;
+    fresh_table::<Item>(pool).await;
     rustango::audit::ensure_table_pool(pool)
         .await
         .expect("audit table");
-    for t in ["wrerr_parent", "wrerr_aparent"] {
+    for t in ["wrerr_parent", "wrerr_aparent", "wrerr_item"] {
         rustango::audit::AuditLog::delete_where("entity_table", t, pool)
             .await
             .expect("clear audit rows");
@@ -439,9 +456,57 @@ async fn rolled_back_edit_leaves_no_audit_row(pool: &Pool) {
     }
 }
 
+/// The create audit entry records what was written, an unticked box too.
+async fn a_create_audit_records_an_unticked_box(pool: &Pool) {
+    let (status, body) = post(pool, "/wrerr_item", "name=boxed&stock=5&label=x").await;
+    assert!(status.is_redirection(), "{status} {body}");
+    let row = Item::objects()
+        .filter("name", "boxed".to_owned())
+        .fetch(pool)
+        .await
+        .unwrap()
+        .remove(0);
+    let pk = row.id.get().unwrap().to_string();
+    let entries = rustango::audit::fetch_for_entity_pool(pool, "wrerr_item", &pk)
+        .await
+        .unwrap();
+    let changes = &entries[0].changes;
+    assert_eq!(changes["active"], serde_json::json!(false), "{changes}");
+    assert_eq!(changes["stock"], serde_json::json!(5), "{changes}");
+}
+
+/// Behind the error-pages layer a browser still gets the admin's form.
+async fn the_error_pages_layer_keeps_the_admin_form(pool: &Pool) {
+    #[cfg(feature = "template_views")]
+    {
+        use rustango::errors::{ErrorPagesLayer, ErrorPagesRouterExt as _};
+        let app = rustango::admin::Builder::new(pool.clone())
+            .admin_prefix("")
+            .build()
+            .error_pages(ErrorPagesLayer::new());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/wrerr_item")
+            .header("accept", "text/html")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("name=&stock=abc&label=Typed"))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&bytes);
+        assert_eq!(status, StatusCode::OK, "{html}");
+        assert!(html.contains(r#"value="Typed""#), "{html}");
+    }
+    #[cfg(not(feature = "template_views"))]
+    let _ = pool;
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        a_create_audit_records_an_unticked_box,
+        the_error_pages_layer_keeps_the_admin_form,
         unknown_action_is_a_400,
         unique_refusal_is_a_plain_message,
         unique_refusal_on_a_typed_pk_names_no_field,

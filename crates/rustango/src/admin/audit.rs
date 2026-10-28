@@ -507,6 +507,13 @@ pub(super) fn audit_form(
             out.insert(f.name.to_owned(), SECRET_CHANGED.to_owned());
         } else if let crate::core::SqlValue::DateTime(at) = value {
             out.insert(f.name.to_owned(), at.to_rfc3339());
+        } else if !out.contains_key(f.name) {
+            // Written but not sent, such as an unticked box: the value written.
+            let shown = match value {
+                crate::core::SqlValue::Null => String::new(),
+                v => v.to_display_string(),
+            };
+            out.insert(f.name.to_owned(), shown);
         }
     }
     out
