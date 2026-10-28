@@ -14,6 +14,7 @@ La console opérateur est l'interface web de la première sorte — provisionner
 - [Le monter](#le-monter)
 - [Ce que fait chaque page](#ce-que-fait-chaque-page)
 - [Noms d'hôte](#noms-dhôte)
+- [Hôtes inconnus](#hôtes-inconnus)
 - [Opérateurs](#opérateurs)
 - [Le journal d'audit](#le-journal-daudit)
 - [Exécutions de provisioning](#exécutions-de-provisioning)
@@ -91,6 +92,47 @@ Deux choses à savoir :
 Les noms d'hôte sont normalisés à l'entrée : minuscules, sans schéma, sans port, sans chemin. La valeur stockée est comparée octet par octet à l'en-tête `Host`, donc une valeur qui ne pourrait jamais correspondre est refusée plutôt qu'enregistrée.
 
 Depuis la CLI : [`list-hosts` / `add-host` / `remove-host` / `set-host-enabled`](manage.md#noms-dhôte).
+
+---
+
+## Hôtes inconnus
+
+Par défaut, une requête dont l'hôte ne résout aucun tenant va aux routes de
+votre application, où l'extracteur `Tenant` et l'admin du tenant répondent 404.
+Pour servir autre chose à la place — une page de configuration au premier
+démarrage, une page « ce site n'est pas encore configuré » — passez un routeur
+à `unresolved_tenant` :
+
+```rust
+use axum::{routing::get, Extension, Router};
+use rustango::tenancy::TenantRegistry;
+
+async fn setup(Extension(reg): Extension<TenantRegistry>) -> &'static str {
+    match reg.has_tenants().await {
+        Ok(false) => "Créez votre premier site",
+        _ => "Ce site n'est pas encore configuré",
+    }
+}
+
+Cli::new()
+    .tenancy()
+    .unresolved_tenant(Router::new().route("/", get(setup)))
+    .run()
+    .await?;
+```
+
+Il s'exécute pour un hôte inconnu et pour un chemin de l'apex que la console ne
+sert pas. Il ne s'exécute jamais pour un hôte qui résout un tenant, et la
+console garde ses propres routes. Un tenant inactif ne résout pas : son hôte
+atteint donc aussi ce routeur. Le routeur reçoit le registre sous la forme
+`Extension<TenantRegistry>`, jamais un pool de tenant ; `has_tenants()` compte
+aussi les tenants inactifs. `/health` et `/ready` restent servis à côté.
+
+**Sécurité :** toute personne qui atteint le serveur atteint ce routeur.
+Vérifiez l'état vous-même (par exemple, ne proposez la configuration que tant
+que `has_tenants()` vaut false) et protégez tout ce qui écrit.
+
+Le même setter existe sur `rustango::server::Builder`.
 
 ---
 

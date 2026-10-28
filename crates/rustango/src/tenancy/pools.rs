@@ -1593,7 +1593,10 @@ pub(crate) async fn connect_schema_scoped(
 /// `SET search_path TO "<schema>", public`, the schema quoted.
 #[cfg(feature = "postgres")]
 fn set_search_path_sql(schema: &str) -> String {
-    format!("SET search_path TO {}, public", quote_ident(schema))
+    format!(
+        "SET search_path TO {}, public",
+        crate::sql::quote_with(schema, '"')
+    )
 }
 
 /// Options of a schema-mode tenant pool.
@@ -1911,21 +1914,10 @@ fn reset_pg_registry_conn(
     })
 }
 
-/// Quote a Postgres identifier — wrap in double-quotes, escape any
-/// embedded double-quote. Used for schema names in
-/// `SET search_path` to prevent malformed slugs from breaking the
-/// statement (and to defuse the trivial injection vector that would
-/// exist if we string-concatenated raw schema names into SQL).
-#[cfg(feature = "postgres")]
-fn quote_ident(name: &str) -> String {
-    let escaped = name.replace('"', "\"\"");
-    format!("\"{escaped}\"")
-}
-
 /// A tenant's `search_path`, quoted: unquoted, `Acme` folds into `acme`'s schema (#2325).
 #[cfg(feature = "postgres")]
 fn search_path(schema: &str) -> String {
-    format!("{},public", quote_ident(schema))
+    format!("{},public", crate::sql::quote_with(schema, '"'))
 }
 
 /// [`search_path`] as a startup option, which PG splits on unescaped whitespace.
@@ -2422,14 +2414,6 @@ mod tests {
             set_search_path_sql("a\"b c\\d\x0Be"),
             "SET search_path TO \"a\"\"b c\\d\x0Be\", public"
         );
-    }
-
-    #[cfg(feature = "postgres")]
-    #[test]
-    fn quote_ident_wraps_and_escapes() {
-        assert_eq!(quote_ident("acme"), "\"acme\"");
-        assert_eq!(quote_ident("a\"b"), "\"a\"\"b\"");
-        assert_eq!(quote_ident(""), "\"\"");
     }
 
     #[test]

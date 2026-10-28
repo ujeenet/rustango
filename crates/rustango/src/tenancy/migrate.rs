@@ -1015,7 +1015,7 @@ enum SchemaOrigin {
 #[cfg(feature = "postgres")]
 async fn ensure_schema(pg: &PgPool, schema: &str) -> Result<SchemaOrigin, sqlx::Error> {
     use crate::migrate::{LEDGER_TABLE, SYSTEM_LEDGER_TABLE};
-    let create = format!("CREATE SCHEMA {}", quote_ident_for_schema(schema));
+    let create = format!("CREATE SCHEMA {}", crate::sql::quote_with(schema, '"'));
     match rustango::sql::sqlx::query(&create).execute(pg).await {
         Ok(_) => return Ok(SchemaOrigin::Created),
         // duplicate_schema, or a concurrent create's unique_violation.
@@ -1117,12 +1117,6 @@ fn tempdir_under_target() -> Result<TempDir, TenancyError> {
     })?;
     Ok(TempDir(p))
 }
-#[cfg(feature = "postgres")]
-fn quote_ident_for_schema(name: &str) -> String {
-    let escaped = name.replace('"', "\"\"");
-    format!("\"{escaped}\"")
-}
-
 #[cfg(all(test, feature = "postgres"))]
 mod schema_pool_tests {
     use super::build_schema_scoped_pool;
@@ -1150,7 +1144,7 @@ mod schema_pool_tests {
         for s in [&a, &b] {
             let drop = format!(
                 "DROP SCHEMA IF EXISTS {} CASCADE",
-                super::quote_ident_for_schema(s)
+                crate::sql::quote_with(s, '"')
             );
             let _ = sqlx::query(&drop)
                 .execute(registry.as_postgres().expect("pg"))
@@ -1172,7 +1166,7 @@ mod schema_pool_tests {
             .await
             .expect("registry");
         let s = format!("origin_{}", std::process::id());
-        let q = super::quote_ident_for_schema(&s);
+        let q = crate::sql::quote_with(&s, '"');
         let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {q} CASCADE"))
             .execute(&pg)
             .await;

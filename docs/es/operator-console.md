@@ -14,6 +14,7 @@ La consola de operador es la interfaz web de la primera clase — aprovisionar t
 - [Montarla](#montarla)
 - [Qué hace cada página](#qué-hace-cada-página)
 - [Nombres de host](#nombres-de-host)
+- [Hosts desconocidos](#hosts-desconocidos)
 - [Operadores](#operadores)
 - [El registro de auditoría](#el-registro-de-auditoría)
 - [Ejecuciones de aprovisionamiento](#ejecuciones-de-aprovisionamiento)
@@ -90,6 +91,47 @@ Dos cosas que conviene saber:
 Los nombres de host se normalizan a la entrada: minúsculas, sin esquema, sin puerto, sin ruta. El valor guardado se compara byte a byte con la cabecera `Host`, así que un valor que nunca podría encajar se rechaza en vez de guardarse.
 
 Desde la CLI: [`list-hosts` / `add-host` / `remove-host` / `set-host-enabled`](manage.md#nombres-de-host).
+
+---
+
+## Hosts desconocidos
+
+Por defecto, una petición cuyo host no resuelve ningún tenant va a las rutas
+de tu aplicación, donde el extractor `Tenant` y el admin del tenant responden
+404. Para servir otra cosa en su lugar — una página de configuración inicial, una
+página «este sitio aún no está configurado» — pasa un router a
+`unresolved_tenant`:
+
+```rust
+use axum::{routing::get, Extension, Router};
+use rustango::tenancy::TenantRegistry;
+
+async fn setup(Extension(reg): Extension<TenantRegistry>) -> &'static str {
+    match reg.has_tenants().await {
+        Ok(false) => "Crea tu primer sitio",
+        _ => "Este sitio aún no está configurado",
+    }
+}
+
+Cli::new()
+    .tenancy()
+    .unresolved_tenant(Router::new().route("/", get(setup)))
+    .run()
+    .await?;
+```
+
+Se ejecuta para un host desconocido y para una ruta del apex que la consola no
+sirve. Nunca se ejecuta para un host que resuelve a un tenant, y la consola
+conserva sus propias rutas. Un tenant inactivo no resuelve, así que su host
+también llega a este router. El router recibe el registro como
+`Extension<TenantRegistry>`, nunca un pool de tenant; `has_tenants()` cuenta
+también los tenants inactivos. `/health` y `/ready` siguen servidos a su lado.
+
+**Seguridad:** cualquiera que llegue al servidor llega a este router. Comprueba
+el estado tú mismo (por ejemplo, ofrece la configuración solo mientras
+`has_tenants()` sea false) y protege todo lo que escriba.
+
+El mismo setter existe en `rustango::server::Builder`.
 
 ---
 

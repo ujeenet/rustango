@@ -137,6 +137,9 @@ pub struct Cli {
     /// See [`Cli::tenant_header`].
     #[cfg(feature = "tenancy")]
     tenant_header: Option<crate::tenancy::HeaderResolver>,
+    /// See [`Cli::unresolved_tenant`].
+    #[cfg(feature = "tenancy")]
+    unresolved_tenant: Option<Router>,
     /// Bootstrap initializer used by the `init-tenancy` verb when
     /// [`Cli::tenancy`] is on. Defaults to
     /// [`crate::tenancy::init_tenancy`]; replaced by [`Cli::user_model`]
@@ -227,6 +230,8 @@ impl Cli {
             #[cfg(feature = "tenancy")]
             tenant_header: None,
             #[cfg(feature = "tenancy")]
+            unresolved_tenant: None,
+            #[cfg(feature = "tenancy")]
             init_tenancy_fn: crate::tenancy::init_tenancy,
             #[cfg(feature = "config")]
             settings_for_layers: None,
@@ -314,6 +319,15 @@ impl Cli {
     #[must_use]
     pub fn tenant_header(mut self, resolver: crate::tenancy::HeaderResolver) -> Self {
         self.tenant_header = Some(resolver);
+        self
+    }
+
+    /// With [`Cli::tenancy`], serve `router` where no tenant resolves.
+    /// See [`crate::server::Builder::unresolved_tenant`].
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn unresolved_tenant(mut self, router: Router) -> Self {
+        self.unresolved_tenant = Some(router);
         self
     }
 
@@ -1305,6 +1319,9 @@ impl Cli {
             .span_redact(self.span_redact_params());
         if let Some(h) = &self.tenant_header {
             builder = builder.header_resolver(h.clone());
+        }
+        if let Some(r) = &self.unresolved_tenant {
+            builder = builder.unresolved_tenant(r.clone());
         }
         if let Some(layer) = &self.real_ip {
             builder = builder.real_ip(layer.clone());
@@ -2582,6 +2599,26 @@ mod tests {
         assert_eq!(
             x_org_pick(&builder(cli), &sq).await.as_deref(),
             Some("acme")
+        );
+    }
+
+    /// `Cli::unresolved_tenant` reaches the builder.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[tokio::test]
+    async fn unresolved_tenant_reaches_the_builder() {
+        use crate::server::resolver_tests::{get, hosted_registry, setup_router};
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = hosted_registry(true).await;
+        let b = crate::server::Builder::from_pool(sq, url, "localhost");
+        let app = Cli::new()
+            .unresolved_tenant(setup_router())
+            .tenancy_builder(b, None)
+            .into_router()
+            .await
+            .expect("assemble");
+        assert_eq!(
+            get(&app, "ghost.localhost", "/").await,
+            (200, "unresolved:true".into())
         );
     }
 

@@ -14,6 +14,7 @@ Die Operator-Konsole ist die Weboberfläche für die erste Art — Tenants provi
 - [Einbinden](#einbinden)
 - [Was jede Seite tut](#was-jede-seite-tut)
 - [Hostnamen](#hostnamen)
+- [Unbekannte Hosts](#unbekannte-hosts)
 - [Operatoren](#operatoren)
 - [Das Audit-Log](#das-audit-log)
 - [Provisioning-Läufe](#provisioning-läufe)
@@ -90,6 +91,48 @@ Zwei Dinge, die man wissen sollte:
 Hostnamen werden beim Eingang normalisiert: kleingeschrieben, ohne Schema, ohne Port, ohne Pfad. Der gespeicherte Wert wird Byte für Byte gegen den `Host`-Header verglichen, ein Wert, der nie passen könnte, wird also abgelehnt statt gespeichert.
 
 Über die CLI: [`list-hosts` / `add-host` / `remove-host` / `set-host-enabled`](manage.md#hostnamen).
+
+---
+
+## Unbekannte Hosts
+
+Standardmäßig geht eine Anfrage, deren Host keinen Tenant auflöst, an die
+Routen deiner App, wo der `Tenant`-Extractor und die Tenant-Admin mit 404
+antworten. Um dort stattdessen etwas auszuliefern — eine Einrichtungsseite beim ersten
+Start, eine Seite „diese Site ist noch nicht eingerichtet" — übergib einen
+Router an `unresolved_tenant`:
+
+```rust
+use axum::{routing::get, Extension, Router};
+use rustango::tenancy::TenantRegistry;
+
+async fn setup(Extension(reg): Extension<TenantRegistry>) -> &'static str {
+    match reg.has_tenants().await {
+        Ok(false) => "Lege deine erste Site an",
+        _ => "Diese Site ist noch nicht eingerichtet",
+    }
+}
+
+Cli::new()
+    .tenancy()
+    .unresolved_tenant(Router::new().route("/", get(setup)))
+    .run()
+    .await?;
+```
+
+Er läuft für einen unbekannten Host und für einen Apex-Pfad, den die Konsole
+nicht bedient. Er läuft nie für einen Host, der zu einem Tenant auflöst, und
+die Konsole behält ihre eigenen Routen. Ein inaktiver Tenant löst nicht auf,
+sein Host erreicht also ebenfalls diesen Router. Der Router bekommt die
+Registry als `Extension<TenantRegistry>`, nie einen Tenant-Pool;
+`has_tenants()` zählt auch inaktive Tenants. `/health` und `/ready` bleiben
+daneben erreichbar.
+
+**Sicherheit:** Jeder, der den Server erreicht, erreicht auch diesen Router.
+Prüfe den Zustand selbst (biete die Einrichtung z. B. nur an, solange
+`has_tenants()` false ist) und schütze alles, was schreibt.
+
+Denselben Setter gibt es auf `rustango::server::Builder`.
 
 ---
 

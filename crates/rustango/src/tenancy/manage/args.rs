@@ -141,8 +141,7 @@ pub(super) fn parse(args: &[String], spec: &Spec<'_>) -> Result<Parsed, TenancyE
 /// any embedded `"` so the quoted form survives unmodified.
 #[cfg(feature = "postgres")]
 pub(super) fn quote_ident(name: &str) -> String {
-    let escaped = name.replace('"', "\"\"");
-    format!("\"{escaped}\"")
+    crate::sql::quote_with(name, '"')
 }
 
 /// Reject `args.first()` if it looks like a flag (starts with `-`).
