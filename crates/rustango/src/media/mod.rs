@@ -1681,43 +1681,64 @@ impl MediaManager {
     /// The count aggregates every link before the limit applies, so the
     /// cost grows with the link table, not the page.
     pub async fn popular_tags(&self, limit: i64) -> Result<Vec<(MediaTag, i64)>, MediaError> {
-        let p = self.pool.dialect().placeholder(1);
-        let sql = format!(
-            // The join to `rustango_media` keeps this in step with
-            // `list_with_tag`. Without it the count includes links to
-            // soft-deleted rows, which leaks how many were deleted.
-            // Still a LEFT JOIN chain, so a tag with no live media
-            // stays listed with a count of zero.
-            "SELECT t.id, t.name, t.slug, t.created_at, COUNT(m.id) AS use_count \
-               FROM rustango_media_tags t \
-               LEFT JOIN rustango_media_tag_links l ON l.tag_id = t.id \
-               LEFT JOIN rustango_media m \
-                      ON m.id = l.media_id AND m.deleted_at IS NULL \
-              GROUP BY t.id, t.name, t.slug, t.created_at \
-              ORDER BY use_count DESC, t.slug \
-              LIMIT {p}"
-        );
-        // `use_count` is an aggregate, not part of MediaTag's schema,
-        // so the per-backend decoders below pull it themselves and
-        // leave the tag columns to the derived `sqlx::FromRow`.
-        let lim = limit.clamp(1, MAX_LIST_LIMIT);
-        match &self.pool {
-            #[cfg(feature = "postgres")]
-            crate::sql::Pool::Postgres(pg) => {
-                let rows = sqlx::query(&sql).bind(lim).fetch_all(pg).await?;
-                rows.iter().map(decode_tag_with_count_pg).collect()
-            }
-            #[cfg(feature = "mysql")]
-            crate::sql::Pool::Mysql(my) => {
-                let rows = sqlx::query(&sql).bind(lim).fetch_all(my).await?;
-                rows.iter().map(decode_tag_with_count_my).collect()
-            }
-            #[cfg(feature = "sqlite")]
-            crate::sql::Pool::Sqlite(sq) => {
-                let rows = sqlx::query(&sql).bind(lim).fetch_all(sq).await?;
-                rows.iter().map(decode_tag_with_count_sq).collect()
-            }
+        use crate::core::subquery::outer_ref;
+        use crate::core::{AggregateExpr, Expr, SqlValue};
+        use crate::sql::FetcherPool as _;
+        // Count only links to live media, in step with `list_with_tag`;
+        // a tag with no live media stays listed with zero.
+        let alive = Media::objects()
+            .where_(Media::id.eq_expr(outer_ref("media_id")))
+            .where_(Media::deleted_at.is_null())
+            .compile()
+            .map_err(media_err_from_query)?;
+        let uses = MediaTagLink::objects()
+            .where_(MediaTagLink::tag_id.eq_expr(outer_ref("id")))
+            .where_exists(alive)
+            .aggregate()
+            // No columns: one scalar `COUNT(*)`, no GROUP BY.
+            .values(&[])
+            .annotate("c", AggregateExpr::Count(None))
+            .compile()
+            .map_err(media_err_from_query)?;
+        let top = MediaTag::objects()
+            .aggregate()
+            .values(&["id"])
+            .annotate(
+                "use_count",
+                AggregateExpr::RelatedAggregate(Box::new(Expr::AggregateSubquery(Box::new(uses)))),
+            )
+            .order_by(&[("use_count", true), ("slug", false)])
+            .limit(limit.clamp(1, MAX_LIST_LIMIT))
+            .fetch(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
+        let ranked: Vec<(i64, i64)> = top
+            .iter()
+            .filter_map(|r| match (r.get("id"), r.get("use_count")) {
+                (Some(SqlValue::I64(id)), Some(SqlValue::I64(n))) => Some((*id, *n)),
+                _ => None,
+            })
+            .collect();
+        if ranked.len() != top.len() {
+            return Err(MediaError::Other(
+                "popular_tags: non-integer id or count".into(),
+            ));
         }
+        if ranked.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut tags: std::collections::HashMap<i64, MediaTag> = MediaTag::objects()
+            .where_(MediaTag::id.is_in(ranked.iter().map(|(id, _)| *id).collect::<Vec<_>>()))
+            .fetch(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?
+            .into_iter()
+            .filter_map(|t| t.id.get().copied().map(|id| (id, t)))
+            .collect();
+        Ok(ranked
+            .into_iter()
+            .filter_map(|(id, n)| tags.remove(&id).map(|t| (t, n)))
+            .collect())
     }
 
     // --------- internal: row insert
@@ -1934,33 +1955,6 @@ async fn lock_subtree_tx(
         level = next;
     }
     Ok(ids)
-}
-
-/// Decode one `popular_tags` row: a `MediaTag` plus the aggregate
-/// `use_count`. `MediaTag`'s derived `FromRow` reads only the model's
-/// own columns, so `use_count` is read here. One helper per backend.
-#[cfg(feature = "postgres")]
-fn decode_tag_with_count_pg(row: &sqlx::postgres::PgRow) -> Result<(MediaTag, i64), MediaError> {
-    use sqlx::{FromRow as _, Row as _};
-    let count: i64 = row.try_get("use_count").map_err(MediaError::Db)?;
-    let tag = MediaTag::from_row(row).map_err(MediaError::Db)?;
-    Ok((tag, count))
-}
-
-#[cfg(feature = "mysql")]
-fn decode_tag_with_count_my(row: &sqlx::mysql::MySqlRow) -> Result<(MediaTag, i64), MediaError> {
-    use sqlx::{FromRow as _, Row as _};
-    let count: i64 = row.try_get("use_count").map_err(MediaError::Db)?;
-    let tag = MediaTag::from_row(row).map_err(MediaError::Db)?;
-    Ok((tag, count))
-}
-
-#[cfg(feature = "sqlite")]
-fn decode_tag_with_count_sq(row: &sqlx::sqlite::SqliteRow) -> Result<(MediaTag, i64), MediaError> {
-    use sqlx::{FromRow as _, Row as _};
-    let count: i64 = row.try_get("use_count").map_err(MediaError::Db)?;
-    let tag = MediaTag::from_row(row).map_err(MediaError::Db)?;
-    Ok((tag, count))
 }
 
 /// `now - age`, computed in Rust so no per-dialect `NOW() - INTERVAL`.

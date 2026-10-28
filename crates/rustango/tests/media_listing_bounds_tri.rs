@@ -244,6 +244,43 @@ async fn parallel_set_tags_overlap(pool: &Pool) {
     }
 }
 
+/// `popular_tags` runs through the executor and counts live media only.
+async fn popular_tags_are_counted(pool: &Pool) {
+    let mgr = manager(pool);
+    let (a, b, c) = (
+        seed_media(&mgr, None).await,
+        seed_media(&mgr, None).await,
+        seed_media(&mgr, None).await,
+    );
+    mgr.tag(a, &["hot", "warm"]).await.expect("tag a");
+    mgr.tag(b, &["hot", "warm"]).await.expect("tag b");
+    mgr.tag(c, &["hot", "cold"]).await.expect("tag c");
+    mgr.set_tags(a, &["hot", "warm", "unused"])
+        .await
+        .expect("set a");
+    mgr.set_tags(a, &["hot", "warm"]).await.expect("reset a");
+    let gone = mgr.get(c).await.expect("get").expect("row");
+    mgr.delete(&gone).await.expect("soft delete c");
+
+    let (top, queries) = QueryCounter::scope(async {
+        let top = mgr.popular_tags(10).await.expect("popular_tags");
+        (top, QueryCounter::current())
+    })
+    .await;
+    let got: Vec<(String, i64)> = top.into_iter().map(|(t, n)| (t.slug, n)).collect();
+    let want = [("hot", 2), ("warm", 2), ("cold", 0), ("unused", 0)];
+    let want: Vec<(String, i64)> = want.iter().map(|(s, n)| ((*s).to_owned(), *n)).collect();
+    assert_eq!((got, queries), (want, 2), "tags, queries");
+    let first: Vec<String> = mgr
+        .popular_tags(1)
+        .await
+        .expect("limit 1")
+        .into_iter()
+        .map(|(t, _)| t.slug)
+        .collect();
+    assert_eq!(first, ["hot"]);
+}
+
 /// A subtree wider than the bind cap still lists one correct page.
 async fn recursive_listing_spans_bind_cap(pool: &Pool) {
     let mgr = manager(pool);
@@ -313,5 +350,6 @@ tri_dialect_test!(
         case_variants_resolve,
         parallel_set_tags_overlap,
         recursive_listing_spans_bind_cap,
+        popular_tags_are_counted,
     ]
 );
