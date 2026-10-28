@@ -141,6 +141,7 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 | `grant-perm` / `revoke-perm` | Berechtigungen per Codename |
 | `seed-permissions [--slug <s>]` | Legt die Standard-Berechtigungszeilen an |
 | `create-api-key` | Stellt einen API-Key aus |
+| `revoke-passkey <slug> <username> [--credential <id>]` | Löscht einen Passkey eines Tenant-Benutzers oder alle (Feature `passkey`) |
 
 ### Tenants **T**
 
@@ -154,6 +155,7 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host-Routing |
 | `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Gespeicherte Datenbankserver |
 | `test-tenant-connection` | Prüft, ob die Datenbank eines Tenants erreichbar ist |
+| `reseal-tenant-secrets [--apply]` | Versiegelt gespeicherte Tenant-URLs und Server-Passwörter neu mit dem aktuellen `RUSTANGO_SECRET_KEY`; ohne `--apply` ein Probelauf |
 | `prewarm-pools` | Öffnet Tenant-Pools vor dem ersten Request |
 | `run-server` / `runserver` | Startet den Multi-Tenant-Server |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup und interaktive Einstiegspunkte |
@@ -411,10 +413,15 @@ cargo run -- status                     # alias
 Ausgabe:
 
 ```
-[X] 0001_initial
-[X] 0002_add_status
-[ ] 0003_add_slug
+Migrations in ./migrations:
+  [X] 0001_initial
+  [X] 0002_add_status
+  [ ] 0003_add_slug
+System migrations in ./system/migrations:
+  [X] 0001_create_rustango_audit_log_and_rustango_content_types
 ```
+
+Eine Zeile, die ein angewendeter Squash ersetzt, zeigt `[X] <name> (replaced by a squash)`.
 
 ---
 
@@ -524,14 +531,18 @@ Erstellt:
 ```
 src/<name>/
   mod.rs
-  models.rs
+  models.rs      (a starter model named after the app)
   views.rs
   urls.rs
+  tests.rs
 ```
 
-Sicher erneut ausführbar — bestehende Dateien bleiben unberührt. Ein manueller
-Schritt: fügen Sie `pub mod <name>;` zu `src/lib.rs` hinzu, damit Rust das neue
-Modul kompiliert.
+Sicher erneut ausführbar — bestehende Dateien bleiben unberührt. Der Befehl
+registriert auch das Modul: `pub mod <name>;` in `src/lib.rs` (oder
+`mod <name>;` in `src/main.rs`, wenn es keine `lib.rs` gibt), dazu eine Zeile
+`.merge(crate::<name>::urls::api())` im `api()`-Aggregator von
+`src/urls.rs`. Kann er eine Datei nicht anpassen, gibt er die Zeile zum
+Einfügen aus.
 
 ---
 
@@ -572,22 +583,29 @@ Pool-Vorlage — generierte `src/post_view_set.rs`:
 
 ```rust
 #[derive(ViewSet)]
-#[viewset(model = Post, fields = "id, ", filter_fields = "", search_fields = "", page_size = 20)]
+#[viewset(model = Post, fields = "id, ", filter_fields = "", search_fields = "", page_size = 20, read_only)]
 pub struct PostViewSet;
 ```
 
-Einbinden mit: `.merge(PostViewSet::router("/api/posts", pool.clone()))`.
+Sie startet als `read_only`: fügen Sie hinter einer Auth-Schicht
+`permissions(create = "...", ...)` hinzu und entfernen Sie dann `read_only`, um
+Schreibzugriffe zu bedienen. `--model Post` importiert `crate::models::Post`;
+passen Sie die `use`-Zeile an, wenn das Modell in einer App liegt.
+
+In `src/main.rs` mit dem Pool des Servers einbinden:
+`.nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/post_view_set", pool))`.
 
 Tenant-Vorlage — **kein Derive**. Sie erzeugt ein
 `pub fn router() -> Router<()>`, gebaut aus
-`ViewSet::for_model(Post::SCHEMA, &["id"]).tenant_router("/api/posts")`, mit der restlichen
-Builder-Kette (`filter_fields` / `search_fields` / `ordering` /
-`page_size` / `permissions_for_model` / `read_only`) als auskommentierte Zeilen
-vorgestubbt. Die Verbindung wird pro Anfrage über den `Tenant`-Extractor
+`ViewSet::for_model(Post::SCHEMA, &["id"])`, mit aktivem
+`.permissions_for_model::<Post>()` und der restlichen Builder-Kette
+(`filter_fields` / `search_fields` / `ordering` / `ordering_fields` /
+`page_size` / `read_only`) als auskommentierte Zeilen vorgestubbt, am Ende
+`.tenant_router("/api/post_view_set")`. Die Verbindung wird pro Anfrage über den `Tenant`-Extractor
 aufgelöst statt einmalig beim Einbinden eingefangen — ein `router()` bedient also
 jeden Tenant.
 
-Einbinden mit: `.merge(crate::viewsets::post::router())` — **nicht** mit der
+Einbinden mit: `.merge(crate::post_view_set::router())` — **nicht** mit der
 `PostViewSet::router(path, pool)`-Zeile oben.
 
 `--crate <path>` benennt die Framework-Crate in den generierten `use`-Zeilen um,
@@ -777,7 +795,7 @@ Sie `--deploy` für die strengeren Produktionsreife-Prüfungen hinzu.
 
 **Mit `--deploy`:**
 - `RUSTANGO_ENV` ist `prod` oder `production`
-- `RUSTANGO_SESSION_SECRET` gesetzt und ≥ 32 Byte (der HMAC-Schlüssel für
+- `RUSTANGO_SESSION_SECRET` gesetzt und decodiert zu einem Schlüssel von ≥ 32 Byte, dieselbe Prüfung wie zur Laufzeit (der HMAC-Schlüssel für
   Cookies + JWTs; `SECRET_KEY` wird vom Framework nie gelesen)
 - `DATABASE_URL` gesetzt
 - `RUSTANGO_APEX_DOMAIN` gesetzt — die Warnung erscheint bei **jedem** Projekt, wenn unset oder `localhost`, und sagt das auch; Single-Tenant-Projekte können sie ignorieren
@@ -792,7 +810,10 @@ running rustango system check (deploy mode)...
   [info]    3 models registered via inventory
   [info]    database reachable
   [info]    4 migration(s) on disk
-  [info]    RUSTANGO_SESSION_SECRET length OK
+  [info]    RUSTANGO_ENV is set to a production value
+  [info]    RUSTANGO_SESSION_SECRET decodes to a valid ≥32-byte key
+  [info]    DATABASE_URL set
+  [info]    RUSTANGO_APEX_DOMAIN set to a non-localhost value
 all checks passed
 ```
 
@@ -961,6 +982,7 @@ cargo run -- create-tenant gamma --mode database --server main
 | `--schema-name <s>` | Überschreibt den generierten Schemanamen im Schema-Modus |
 | `--port <n>` | Port, unter dem der Tenant erreichbar ist, fürs Routing |
 | `--path-prefix <s>` | Pfad-Präfix, unter dem der Tenant erreichbar ist, fürs Routing |
+| `--admin-email <e>` / `--admin-username <u>` | Legt den ersten Superuser des Tenants an |
 
 Jeder Modus prüft seine Rechte, bevor etwas entsteht, und wenn eines fehlt,
 nennt er es und gibt die Anweisungen aus, die es beheben: Der Schemamodus braucht
@@ -1057,7 +1079,7 @@ dem erneut getippten Slug übergeben. Bei Tenants im database-Modus bleibt die
 zugrunde liegende Datenbank an Ort und Stelle, es sei denn, Sie übergeben
 zusätzlich `--purge-database`. Ohne dieses Flag **verweigert** der Befehl bei
 Database-Mode-Tenants komplett — er entfernt nicht die `Org`-Zeile und lässt die
-Datenbank stehen, er tut gar nichts (tenancy/manage/tenants.rs:479).
+Datenbank stehen, er tut gar nichts.
 
 ```bash
 cargo run -- purge-tenant acme --confirm acme
@@ -1204,7 +1226,11 @@ damit ein erneut laufendes Provisioning-Skript nicht rot wird.
 ### `create-user <tenant> <username> --password <pwd> [--superuser]`
 
 Erstellt einen Benutzer innerhalb eines Tenants — mit `--superuser` auch einen
-Administrator, aber immer auf einen einzelnen Tenant beschränkt.
+Administrator, aber immer auf einen einzelnen Tenant beschränkt. Statt
+`--password` können Sie `--password-stdin` oder `--generate` (gibt ein
+zufälliges aus) übergeben; lassen Sie alle drei im Terminal weg, fragt der
+Befehl nach. `--skip-validation` überspringt die Passwortregeln. Ein
+`--staff`-Flag gibt es nicht.
 
 ```bash
 cargo run -- create-user acme alice --password hunter2 --superuser
@@ -1253,14 +1279,14 @@ cargo run -- revoke-role acme alice editor
 Gewährt eine einzelne Berechtigung. Standardmäßig ist das zweite Argument ein
 **Benutzername**, sodass die Berechtigung direkt an diesen Benutzer geht; fügen
 Sie `--role` hinzu, um sie stattdessen einer Rolle zu gewähren.
-Berechtigungs-Codenames verwenden das Format `<app>.<action>_<model>`
-(`blog.add_post`, `blog.change_post`, …). Das Feature
-`auto_create_permissions` erstellt die vier standardmäßigen CRUD-Codenames
-automatisch für jedes Modell, das mit `#[rustango(permissions)]` markiert ist.
+Modell-Codenames verwenden das Format `<table>.<action>`
+(`posts.add`, `posts.change`, `posts.delete`, `posts.view`). `migrate` legt
+diese vier für jedes Modell an; mit `#[rustango(permissions = false)]` nehmen
+Sie ein Modell aus.
 
 ```bash
-cargo run -- grant-perm acme alice blog.change_post           # grant to user alice
-cargo run -- grant-perm acme editor blog.change_post --role   # grant to role editor
+cargo run -- grant-perm acme alice posts.change           # grant to user alice
+cargo run -- grant-perm acme editor posts.change --role   # grant to role editor
 ```
 
 ### `revoke-perm <tenant> <role-name|username> <codename> [--role]`
@@ -1270,8 +1296,8 @@ auf einen Benutzer; fügen Sie `--role` hinzu, um sie stattdessen von einer Roll
 zu entziehen.
 
 ```bash
-cargo run -- revoke-perm acme alice blog.change_post
-cargo run -- revoke-perm acme editor blog.change_post --role
+cargo run -- revoke-perm acme alice posts.change
+cargo run -- revoke-perm acme editor posts.change --role
 ```
 
 ### `create-api-key <tenant> <username> [--label <s>]`
@@ -1319,7 +1345,7 @@ cargo run -- audit-log --pk acme --limit 100
 
 | Verb | Flags |
 |---|---|
-| `list-runs` | `--limit <n>`, `--kind provision\|migrate`, `--state <s>` |
+| `list-runs` | `--limit <n>`, `--kind provision\|migrate\|purge\|rotate_password`, `--state pending\|running\|succeeded\|failed` |
 | `show-run <id>` | — |
 | `audit-log` | `--limit <n>`, `--table <t>`, `--pk <v>`, `--operation <o>`, `--source <s>` |
 
@@ -1352,9 +1378,11 @@ Die Operator-Konsole hat dafür ebenfalls einen Button, auf der Tenant-Liste.
 ## Eigenes Benutzermodell (zusätzliche Spalten auf `rustango_users`)
 
 So fügen Sie der Benutzertabelle Ihre eigenen Felder hinzu. Der eingebaute Tenant-`User` hat
-sieben feste Spalten: `id`, `username`, `password_hash`, `is_superuser`,
-`active`, `created_at`, plus eine `data`-JSONB-Spalte (ein flexibler JSON-Blob)
-für beliebige zusätzliche Metadaten pro Benutzer. **Für die meisten Apps ist
+neun feste Spalten: `id`, `username`, `password_hash`, `is_superuser`,
+`active`, `created_at`, `password_changed_at`, `sessions_revoked_at`, plus eine
+`data`-JSONB-Spalte (ein flexibler JSON-Blob) für beliebige zusätzliche
+Metadaten pro Benutzer. Mit dem Feature `sso` hat er außerdem eine eindeutige
+`email`. **Für die meisten Apps ist
 diese JSONB-Spalte alles, was Sie brauchen** — keine Migration, kein Override,
 keine Überraschungen.
 
@@ -1619,7 +1647,7 @@ Warum das sicher ist:
 ```bash
 cargo run -- startapp blog        # if not done yet
 # Edit src/blog/models.rs — add #[derive(Model)]
-# Add `pub mod blog;` to src/lib.rs
+# (startapp already added `pub mod blog;` to src/lib.rs)
 cargo run -- makemigrations
 cargo run -- migrate
 ```
@@ -1629,7 +1657,8 @@ cargo run -- migrate
 ```bash
 cargo run -- make:viewset PostViewSet --model Post
 # Edit src/post_view_set.rs — fill in field lists
-# Mount in src/urls.rs
+# Add `pub mod post_view_set;` to src/lib.rs
+# Mount it in src/main.rs: .nest_with("/api", |pool| PostViewSet::router("/posts", pool))
 cargo run                        # GET /api/posts now works
 ```
 
@@ -1689,6 +1718,10 @@ sei denn, Sie schalten das Pre-Warming ein. Die Einstellungen leben auf
 | `database_pool_idle_timeout` | 10 min | Schließt untätige Verbindungen nach dieser Dauer. Wehrt Kappungen durch Load-Balancer / `idle_in_transaction_session_timeout` ab. |
 | `database_pool_max_lifetime` | 30 min | Erzwingt das Rotieren von Verbindungen, damit vault-geleaste Anmeldedaten aufgefrischt werden. |
 | `prewarm_active_tenants` | false | Wenn true, ruft `Server::Builder::serve` beim Boot `prewarm_database_tenants()` auf. |
+| `max_cached_scoped_pools` | 64 | Obergrenze für die gecachten Pools pro Tenant bei Tenants im schema-Modus. |
+| `scoped_pool_max_connections` | 8 | `max_connections` jedes Tenant-Pools im schema-Modus. |
+
+Mit `Cli` übergeben Sie die Konfiguration über `Cli::with_tenant_pools(config)`.
 
 ### Beim Boot vorwärmen
 

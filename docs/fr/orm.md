@@ -1631,7 +1631,7 @@ with_source(
 ).await?;
 ```
 
-Le panneau d'historique par ligne de l'admin lit dans cette table ; le flux inter-modèles est à `/__audit`.
+Le panneau d'historique par ligne de l'admin lit dans cette table ; le flux inter-modèles est à `<admin prefix>/__audit` (`Builder::audit_url` le change ; l'admin de tenant utilise `RouteConfig::audit_url`, par défaut `/audit`).
 
 Les lignes auditées qu'une FK `on_delete = "cascade"` supprime reçoivent une entrée `delete`, lue avant la suppression dans sa transaction. Les lignes modifiées par `set_null` / `set_default`, et les tables enfants que `Model::truncate` de PostgreSQL vide avec `CASCADE`, ne sont pas auditées. Cela s'exécute sur les chemins pool et transaction (`delete_pool`, `PoolTx`, `PoolConn`), par 500 lignes supprimées à la fois : les lignes en cascade de chaque tranche sont lues avec `FOR UPDATE` et gardées en mémoire avec leurs entrées jusqu'à la suppression de la tranche. Un exécuteur sqlx brut (`Model::delete(&PgPool)`, `delete_on`) exécute un simple DELETE et journalise à la place un avertissement unique. Une FK `DEFERRABLE INITIALLY DEFERRED` ne cascade qu'au commit, donc ses lignes ne reçoivent pas d'entrées.
 
