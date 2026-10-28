@@ -183,6 +183,13 @@ Bare-admin audit rows now carry `user:<id>` instead of `system`. Single-database
 - `update().set()` on one field twice sends only the last assignment; on MySQL a later `set_expr` now reads the old value, not the earlier `set`.
 - `find_many`, `where_in` and `destroy` past the bind cap run one statement per batch; `destroy` is not atomic across batches.
 
+### Migrations, secrets and auth
+
+- `makemigrations` (and `make_migrations*`) refuse a column dropped beside a same-type new column on one table. For a rename, write a `RenameColumn` in a `makemigrations --empty` file; for a real drop + add, pass `--drop-and-add` or call `make_migrations_from_with(.., DropAndAdd::Allow)`.
+- `MigrateError::Validation` displays its message alone; code matching the `invalid migration:` text must drop the prefix.
+- `jwt::decode` refuses a present `exp` / `nbf` that is not a non-negative number (it was read as absent), and honours a fractional one.
+- Run `reseal-tenant-secrets --apply` once more after a key rotation done on an earlier release, before removing `RUSTANGO_SECRET_KEY_PREVIOUS`, so operator TOTP secrets are re-sealed.
+
 ---
 
 ## 0.61.9

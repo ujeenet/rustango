@@ -188,14 +188,14 @@ insère la ligne et fait un `303` vers `success_url` :
 ```rust
 use rustango::template_views::CreateView;
 
-let app = CreateView::for_model(Post::SCHEMA, &["title", "body"])
+let app = CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"])
     .success_url("/posts")         // where to send the browser after a save
     .router("/posts", Arc::new(tera), pool);
 ```
 
 La liste des champs est obligatoire. C'est la liste blanche d'écriture : le
 formulaire n'affiche que ces champs et toute autre clé envoyée (par exemple
-`author_id=1`) est ignorée. Avec UpdateView, un champ listé mais absent garde sa
+`id=1`) est ignorée. Avec UpdateView, un champ listé mais absent garde sa
 valeur ; seul un `bool` passe à `false`, car une case décochée n'envoie rien. Avec
 CreateView, un champ listé absent qui a un défaut de colonne reçoit ce défaut.
 
@@ -206,6 +206,7 @@ validation :
 ```html
 <form method="post">
   {{ csrf_input | safe }}
+  {% if form.errors.__all__ %}<p class="error">{{ form.errors.__all__ }}</p>{% endif %}
   {% for field in form.fields %}
     <label for="{{ field.name }}">{{ field.name }}</label>
     <input id="{{ field.name }}" name="{{ field.name }}" value="{{ field.value }}"
@@ -218,6 +219,8 @@ validation :
   <button>{% if is_update %}Save{% else %}Create{% endif %}</button>
 </form>
 ```
+
+Une écriture que la base refuse (une colonne NOT NULL que le formulaire omet, un CHECK) est une erreur de tout le formulaire sous `form.errors.__all__`, pas sous un champ ; affichez-la, sinon la page revient sans message.
 
 Deux choses sont faciles à se tromper ici. `form.errors` associe un nom de champ à **une
 seule chaîne**, pas à une liste — lui appliquer `join` est une erreur. Et il n'existe pas de
@@ -234,7 +237,7 @@ est re-rendu avec les messages et un statut `422` au lieu d'être enregistré :
 ```rust
 use rustango::forms::FormErrors;
 
-CreateView::for_model(Post::SCHEMA, &["title", "body"])
+CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"])
     .validator(|data| {
         let mut errs = FormErrors::default();
         if data.get("title").map_or(true, |t| t.len() < 5) {
@@ -277,7 +280,7 @@ Montez les cinq au même préfixe et vous avez un CRUD HTML complet :
 let app = axum::Router::new()
     .merge(ListView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
-    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
+    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
     .merge(UpdateView::for_model(Post::SCHEMA, &["title", "body"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
     .merge(DeleteView::for_model(Post::SCHEMA).success_url("/posts").router("/posts", tera, pool));
 ```

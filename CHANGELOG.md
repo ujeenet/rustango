@@ -64,6 +64,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `latest` / `earliest` skip NULLs, so every backend returns the same row.
 - `last()` on a sliced queryset returns the last row of the slice.
 
+### Fixed — migrations, secrets and auth
+
+- `makemigrations` refuses a column dropped beside a new column of the same type on one table (a likely rename that would delete the data), and names the `--empty` + `RenameColumn` route; `--drop-and-add` writes the drop + add on purpose. Every `DropColumn` now warns that its data goes.
+- `reseal-tenant-secrets` re-seals operator TOTP secrets, so a key rotation no longer locks enrolled operators out of the console.
+- Tenancy `ModelBackend` Basic auth holds a login slot before the cached-credential check, so a parallel burst cannot pass the account lock.
+- `jwt::decode` reads a fractional `exp` / `nbf` as a NumericDate instead of ignoring it, and refuses a non-numeric one.
+- CLI errors no longer start with `invalid migration:`; `migrate <target>` prints `applied` / `unapplied` per file; migrate messages drop stale version and issue references.
+- The admin's missing-table page names `makemigrations`; the tenancy quickstart, operator TOTP recovery and the CreateView example in the docs work as written.
+
 ## [0.61.9] — 2026-10-28
 
 ### Fixed — ORM and migrations
