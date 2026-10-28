@@ -121,7 +121,7 @@ alcanzan mediante `Cli::tenancy()`.
 |---|---|
 | `showmodels [--format plain\|json] [--app <label>]` | Cada modelo registrado, ordenado para una salida determinista |
 | `showurls [--format plain\|json]` | Cada ruta con nombre, ordenada |
-| `check [--deploy]` | Comprobaciones de salud; `--deploy` añade las auditorías de producción |
+| `check [--deploy]` | Comprobaciones de salud, cambios de modelos sin migración y migraciones sin aplicar; `--deploy` añade las auditorías de producción |
 | `create-admin` | Crea una fila `AdminUser` para proyectos que usan `admin::Builder::with_session_auth`. **No** está condicionado a `tenancy` — recibe un `&Pool` simple y escribe `rustango_admin_users`, creando la tabla si falta. La única forma de conseguir un primer login de admin en un proyecto sin tenancy |
 | `reset-password <username>` / `change-password <username>` | Fija la contraseña de un usuario admin (una sola base); `change-password` comprueba antes la actual. Mismas opciones de contraseña que `create-admin` |
 | `set-admin-active <username> --on\|--off` | Desactiva un usuario admin (sus sesiones terminan) o lo reactiva |

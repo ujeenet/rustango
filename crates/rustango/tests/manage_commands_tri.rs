@@ -261,6 +261,56 @@ async fn manage_connects_with_only_the_db_vars(backend: &Pool) {
         .expect("the command wrote to the DB_* database");
 }
 
+/// An app model, so `makemigrations` has a project table to write.
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "mc_check_item")]
+#[allow(dead_code)]
+pub struct CheckItem {
+    #[rustango(primary_key)]
+    pub id: rustango::sql::Auto<i64>,
+    #[rustango(max_length = 32, default = "'new'")]
+    pub state: String,
+}
+
+async fn manage_out(pool: &Pool, dir: &std::path::Path, argv: &[&str]) -> String {
+    let mut out = Vec::new();
+    rustango::migrate::manage::run_with_writer(pool, dir, args(argv), &mut out)
+        .await
+        .unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+    String::from_utf8(out).unwrap()
+}
+
+/// `check` reports migrations the ledger has not applied, and model
+/// changes no migration holds; once migrated it reports neither.
+async fn check_reports_unapplied_and_unmade_migrations(backend: &Pool) {
+    let env = Env::new(backend).await;
+    let dir = env.dir();
+    manage_out(&env.registry, &dir, &["makemigrations"]).await;
+    let out = manage_out(&env.registry, &dir, &["check"]).await;
+    assert!(out.contains("not applied — run `manage migrate`"), "{out}");
+    assert!(!out.contains("models have changes"), "{out}");
+
+    manage_out(&env.registry, &dir, &["migrate"]).await;
+    let out = manage_out(&env.registry, &dir, &["check"]).await;
+    assert!(!out.contains("not applied"), "{out}");
+    assert!(!out.contains("models have changes"), "{out}");
+
+    // Only an empty file: every model is a change no migration holds.
+    let bare = env.tmp.path().join("bare").join("migrations");
+    std::fs::create_dir_all(&bare).unwrap();
+    manage_out(
+        &env.registry,
+        &bare,
+        &["makemigrations", "--empty", "start"],
+    )
+    .await;
+    let out = manage_out(&env.registry, &bare, &["check"]).await;
+    assert!(
+        out.contains("models have changes no migration holds"),
+        "{out}"
+    );
+}
+
 /// `--tenant <slug>` opens that tenant's pool, schema or database mode,
 /// and stays out of the command's arguments.
 async fn tenant_flag_opens_the_tenant_pool(backend: &Pool) {
@@ -336,5 +386,6 @@ tri_dialect_test! {
     scenarios: [
         manage_connects_with_only_the_db_vars,
         tenant_flag_opens_the_tenant_pool,
+        check_reports_unapplied_and_unmade_migrations,
     ],
 }

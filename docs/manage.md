@@ -120,7 +120,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 |---|---|
 | `showmodels [--format plain\|json] [--app <label>]` | Every registered model, sorted for deterministic output |
 | `showurls [--format plain\|json]` | Every named route, sorted |
-| `check [--deploy]` | Health checks; `--deploy` adds the production audits |
+| `check [--deploy]` | Health checks, model changes no migration holds, and migrations not yet applied; `--deploy` adds the production audits |
 | `create-admin` | Bootstrap an `AdminUser` row for projects using `admin::Builder::with_session_auth`. **Not** tenancy-gated — it takes a plain `&Pool` and writes `rustango_admin_users`, creating the table if absent. The only way to get a first admin login on a non-tenancy project |
 | `reset-password <username>` / `change-password <username>` | Set a single-database admin user's password; `change-password` checks the current one first. Same password flags as `create-admin` |
 | `set-admin-active <username> --on\|--off` | Turn an admin user off (their sessions end) or back on |

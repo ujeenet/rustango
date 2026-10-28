@@ -461,6 +461,7 @@ where
         "check" => rustango::migrate::manage::check_cmd_with(
             &pools.registry_pool(),
             dir,
+            Some(rustango::migrate::MigrationScope::Registry),
             &args[1..],
             writer,
             tenancy_deploy_findings(pools, facts),
