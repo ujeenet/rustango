@@ -125,6 +125,11 @@ impl Lockout {
         self
     }
 
+    /// Attempts counted per window before the account locks.
+    pub(crate) fn attempt_limit(&self) -> u32 {
+        self.max_attempts
+    }
+
     /// How long a lock lasts once set.
     #[must_use]
     pub fn lock_duration(&self) -> Duration {
