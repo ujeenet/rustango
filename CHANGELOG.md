@@ -24,6 +24,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Shared providers can be edited in place (`/sso-shared/{id}/edit`): the id and slug stay, a blank secret keeps the saved one; audited as `sso_shared_update`.
 - A refused add or edit re-renders the form with the typed values and the error (status 400), never the secret; the page no longer says secrets are `env://` references.
 
+### Fixed — migrations, ORM, MCP and admin
+
+- `makemigrations` warns when a model sets `db_table_comment`: file migrations do not write table comments yet (0.62.0 will).
+- `MediaManager::popular_tags` runs through the ORM, so `QueryCounter` sees it, and costs two queries.
+- The `NullsOrder` docs describe the MySQL `IS NULL` sort the writer emits.
+- MCP discovery and the 401 hint advertise `http` on loopback dev hosts (`*.localhost`, `[::1]`, `127.0.0.0/8`) unless a trusted proxy says `https`; `localhost.example.com` is no longer treated as local.
+- The admin list's `?facet_show_all=<field>` reads at most 200 values.
+- `testkit::add_missing_columns::<M>()` adds the columns a narrower build left out; two admin suites use it, so they pass on a shared database whatever ran before.
+
 ## [0.61.7] — 2026-10-27
 
 ### Fixed — admin, REST and i18n

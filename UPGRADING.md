@@ -162,6 +162,10 @@ A webhook answered 429 or 503 with `Retry-After` now waits that long (up to an h
 
 A refused shared-provider add now returns the console page (400) with the error, not a plain-text body. Successful changes redirect to `/sso-shared?notice=…`.
 
+### Table comments, MCP scheme, facet cap
+
+A model with `db_table_comment` gets a `makemigrations` warning: file migrations still do not write it, so add a data migration with the comment statement. MCP discovery on `*.localhost` / `[::1]` now says `http`; set a trusted `X-Forwarded-Proto` if a TLS proxy fronts it. The admin list's "show all" facet stops at 200 values.
+
 ## 0.61.7
 
 ### Admin: no self-deactivation

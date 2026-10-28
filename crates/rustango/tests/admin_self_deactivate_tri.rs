@@ -23,6 +23,10 @@ async fn setup(pool: &Pool) {
     rustango::testkit::migrate_framework(pool)
         .await
         .expect("framework tables");
+    // A narrower build may have made this table without `email`.
+    rustango::testkit::add_missing_columns::<AdminUser>(pool)
+        .await
+        .expect("admin user columns");
     #[cfg(feature = "totp")]
     rustango::admin::totp_store::ensure_table(pool)
         .await

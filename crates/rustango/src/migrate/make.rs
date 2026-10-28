@@ -165,6 +165,7 @@ pub fn make_migrations_scoped(
         )));
     }
 
+    warn_untracked_table_comments(current);
     let changes = detect_changes(&prev_snapshot, current);
     if changes.is_empty() {
         return Ok(None);
@@ -198,6 +199,24 @@ pub fn make_migrations_scoped(
     let path = dir.join(format!("{name}.json"));
     file::write(&path, &mig)?;
     Ok(Some(mig))
+}
+
+/// Snapshots do not carry `db_table_comment` yet, so file migrations
+/// never write it; say so instead of dropping it silently.
+fn warn_untracked_table_comments(current: &SchemaSnapshot) {
+    for e in crate::core::inventory::iter::<crate::core::ModelEntry> {
+        let Some(comment) = e.schema.db_table_comment else {
+            continue;
+        };
+        if current.tables.iter().any(|t| t.name == e.schema.table) {
+            tracing::warn!(
+                target: "rustango::migrate",
+                "`{}`: db_table_comment {comment:?} is not written by file migrations yet; \
+                 add it with a data migration",
+                e.schema.table,
+            );
+        }
+    }
 }
 
 /// Generate the framework's own **system-app** migrations into
@@ -458,6 +477,7 @@ pub fn make_migrations_from(
         )));
     }
 
+    warn_untracked_table_comments(current);
     let changes = detect_changes(&prev_snapshot, current);
     if changes.is_empty() {
         return Ok(None);

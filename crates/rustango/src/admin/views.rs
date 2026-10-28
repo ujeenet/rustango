@@ -314,6 +314,10 @@ impl FieldLookup {
 /// collapse into a "+N more" link (`?facet_show_all=<field>`).
 const FACET_TRUNCATE: usize = 15;
 
+/// Most values `?facet_show_all=<field>` reads, so a high-cardinality
+/// column never loads every distinct value.
+const FACET_SHOW_ALL_CAP: usize = 200;
+
 #[allow(clippy::too_many_lines)] // mostly linear HTML emission; splitting hurts readability
 pub(crate) async fn table_view(
     parts: axum::http::request::Parts,
@@ -988,8 +992,13 @@ async fn compute_facets(
         };
         let is_bool = field.ty == crate::core::FieldType::Bool;
         let show_all = show_all_facet == Some(field.name);
+        let cap = if show_all {
+            FACET_SHOW_ALL_CAP
+        } else {
+            FACET_TRUNCATE
+        };
         // One past the cap tells whether there are more (#2344).
-        let limit = (!show_all).then_some(FACET_TRUNCATE + 1);
+        let limit = Some(cap + 1);
         let mut facet_rows =
             fetch_facet_counts(&state.pool, source.clone(), field, is_bool, limit).await?;
         let is_active = |r: &FacetRow| {
@@ -1089,11 +1098,10 @@ async fn compute_facets(
                 "toggle_url": toggle_url,
             }));
         }
-        // Truncate to FACET_TRUNCATE values unless "show all" is on
-        // for this column. Active values always render, so one never
-        // hides behind the cutoff. They count toward the budget.
+        // Truncate to `cap` values. Active values always render, so
+        // one never hides behind the cutoff. They count toward the budget.
         let mut more_count: usize = 0;
-        if !show_all && total_values > FACET_TRUNCATE {
+        if total_values > cap {
             // Keep every active value + as many of the rest as fit.
             let mut active_first: Vec<serde_json::Value> = Vec::new();
             let mut rest: Vec<serde_json::Value> = Vec::new();
@@ -1104,10 +1112,13 @@ async fn compute_facets(
                     rest.push(v);
                 }
             }
-            let cap = FACET_TRUNCATE.saturating_sub(active_first.len());
-            let kept_rest_len = rest.len().min(cap);
-            more_count = total_values - active_first.len() - kept_rest_len;
-            active_first.extend(rest.into_iter().take(cap));
+            let room = cap.saturating_sub(active_first.len());
+            let kept_rest_len = rest.len().min(room);
+            // "Show all" has no further page to link to.
+            if !show_all {
+                more_count = total_values - active_first.len() - kept_rest_len;
+            }
+            active_first.extend(rest.into_iter().take(room));
             values = active_first;
         }
         let show_all_url = if more_count > 0 {

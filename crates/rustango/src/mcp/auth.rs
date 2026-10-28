@@ -696,7 +696,7 @@ pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
 
 /// The request's origin, `scheme://host`, read from the headers. It
 /// honours `X-Forwarded-Proto` from a trusted proxy, and otherwise
-/// assumes `http` on localhost and `https` anywhere else.
+/// assumes `http` on a loopback host and `https` anywhere else.
 pub(crate) fn origin(headers: &HeaderMap, extensions: &axum::http::Extensions) -> String {
     // Only a plain `host[:port]` goes into the discovery URLs (#1963).
     let host = headers
@@ -707,7 +707,7 @@ pub(crate) fn origin(headers: &HeaderMap, extensions: &axum::http::Extensions) -
     let scheme = crate::real_ip::trusted_forwarded(headers, extensions, "x-forwarded-proto")
         .map(str::to_owned)
         .unwrap_or_else(|| {
-            if host.starts_with("localhost") || host.starts_with("127.") {
+            if crate::urls::is_loopback_host(&host) {
                 "http".into()
             } else {
                 "https".into()
@@ -1008,6 +1008,32 @@ mod tests {
         let mut ext = no_ext();
         ext.insert(crate::real_ip::TrustedRealIp([10, 0, 0, 1].into()));
         assert_eq!(origin(&h, &ext), "http://app.example");
+    }
+
+    /// Loopback dev hosts advertise http unless a trusted proxy says https.
+    #[test]
+    fn loopback_hosts_advertise_http() {
+        for host in [
+            "acme.localhost:8080",
+            "localhost",
+            "127.0.0.1:8000",
+            "[::1]:8080",
+        ] {
+            assert_eq!(origin(&headers(host), &no_ext()), format!("http://{host}"));
+        }
+        assert_eq!(
+            origin(&headers("example.com"), &no_ext()),
+            "https://example.com"
+        );
+        assert_eq!(
+            origin(&headers("localhost.example.com"), &no_ext()),
+            "https://localhost.example.com"
+        );
+        let mut h = headers("acme.localhost:8080");
+        h.insert("x-forwarded-proto", "https".parse().unwrap());
+        let mut ext = no_ext();
+        ext.insert(crate::real_ip::TrustedRealIp([10, 0, 0, 1].into()));
+        assert_eq!(origin(&h, &ext), "https://acme.localhost:8080");
     }
 
     /// A Host with userinfo never reaches the discovery URLs (#1963).
