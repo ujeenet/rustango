@@ -182,7 +182,7 @@ pub struct Item {
 }
 ```
 
-`#[rgo(...)]` bedeutet genau dasselbe wie `#[rustango(...)]` und funktioniert unabhängig davon, wie du die Abhängigkeit nennst. Ein Struct oder Feld verwendet einen Namen: `#[rustango(...)]` und `#[rgo(...)]` am selben Element zu mischen ist ein Compile-Fehler. Die Generatoren `manage startapp` und `make:*` schreiben weiterhin `rustango::`-Pfade; benenne sie in den erzeugten Dateien um.
+`#[rgo(...)]` bedeutet genau dasselbe wie `#[rustango(...)]` und funktioniert unabhängig davon, wie du die Abhängigkeit nennst. Ein Struct oder Feld verwendet einen Namen: `#[rustango(...)]` und `#[rgo(...)]` am selben Element zu mischen ist ein Compile-Fehler. `manage startapp` und die `make:*`-Generatoren lesen die Cargo.toml und schreiben ebenfalls `rgo::`-Pfade und `#[rgo(...)]`.
 
 ---
 

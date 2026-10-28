@@ -87,6 +87,7 @@ pub fn sign(url: &str, secret: &[u8], ttl: Option<Duration>) -> String {
 /// Like [`sign`], but with the expiry given as unix seconds.
 #[must_use]
 pub fn sign_at(url: &str, secret: &[u8], expires_at: Option<u64>) -> String {
+    let (url, fragment) = split_fragment(url);
     let (base, mut params) = parse_url(url);
     params.retain(|(k, _)| k != SIGNATURE_PARAM && k != EXPIRES_PARAM);
     if let Some(exp) = expires_at {
@@ -95,7 +96,7 @@ pub fn sign_at(url: &str, secret: &[u8], expires_at: Option<u64>) -> String {
     let canonical = canonicalize(&base, &params);
     let signature = compute_signature(&canonical, secret);
     params.push((SIGNATURE_PARAM.to_owned(), signature));
-    rebuild_url(&base, &params)
+    rebuild_url(&base, &params) + fragment
 }
 
 /// Check the signature on `url`. It returns `Ok(())` when the URL is
@@ -113,7 +114,7 @@ pub fn verify(url: &str, secret: &[u8]) -> Result<(), SignedUrlError> {
 /// # Errors
 /// See [`SignedUrlError`].
 pub fn verify_at(url: &str, secret: &[u8], now_secs: u64) -> Result<(), SignedUrlError> {
-    let (base, mut params) = parse_url(url);
+    let (base, mut params) = parse_url(split_fragment(url).0);
 
     // Extract the signature
     let sig_idx = params
@@ -164,6 +165,12 @@ fn current_unix_secs() -> u64 {
 /// cannot be broken on demand.
 fn clock_secs<E>(elapsed: Result<Duration, E>) -> u64 {
     elapsed.map_or(u64::MAX, |t| t.as_secs())
+}
+
+/// `url` without its `#fragment`, and the fragment with its `#`. The browser
+/// never sends the fragment, so it is not signed.
+fn split_fragment(url: &str) -> (&str, &str) {
+    url.find('#').map_or((url, ""), |i| url.split_at(i))
 }
 
 fn parse_url(url: &str) -> (String, Vec<(String, String)>) {

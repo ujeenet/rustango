@@ -264,6 +264,9 @@ const RESERVED_PARAMS: &[&str] = &[
 /// Most keys one `IN` list binds: under every dialect's bind cap (#2049).
 const MAX_IN_KEYS: usize = 10_000;
 
+/// The explicit equality suffix, for a field named like a reserved param.
+const EXACT: &str = "__exact";
+
 /// How a list URL param selects rows on one field. NULL and `""` get a
 /// `=1` suffix form, since `?field=` reads as "no filter" (#2006, #2081).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -289,12 +292,23 @@ impl FieldLookup {
         [Self::IsNull, Self::IsEmpty]
             .into_iter()
             .find_map(|l| Some((key.strip_suffix(l.suffix())?, l)))
+            .or_else(|| Some((key.strip_suffix(EXACT)?, Self::Eq)))
             .unwrap_or((key, Self::Eq))
+    }
+
+    /// The URL key filtering `field` with this lookup. A field named like a
+    /// reserved param (`page`, `year`, ...) is spelled `{field}__exact`.
+    fn key(self, field: &str) -> String {
+        let suffix = match self {
+            Self::Eq if RESERVED_PARAMS.contains(&field) => EXACT,
+            l => l.suffix(),
+        };
+        format!("{field}{suffix}")
     }
 
     /// Every URL key that can filter `field`, to clear them all.
     fn keys(field: &str) -> [String; 3] {
-        Self::ALL.map(|l| format!("{field}{}", l.suffix()))
+        Self::ALL.map(|l| l.key(field))
     }
 
     /// The URL pair that selects one facet value.
@@ -305,7 +319,7 @@ impl FieldLookup {
             _ => Self::Eq,
         };
         let value = if lookup == Self::Eq { raw } else { "1" };
-        (format!("{field}{}", lookup.suffix()), value.to_owned())
+        (lookup.key(field), value.to_owned())
     }
 }
 
@@ -396,7 +410,7 @@ pub(crate) async fn table_view(
                 value: v,
             },
         ));
-        active_field_filters.push((key.clone(), value.clone()));
+        active_field_filters.push((lookup.key(field.name), value.clone()));
     }
     active_field_filters.sort();
 

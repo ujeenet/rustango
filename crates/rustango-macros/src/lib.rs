@@ -11923,14 +11923,28 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         })
     }};
 
-    let from_row_init = quote! {
-        #ident: #root::sql::sqlx::Row::try_get(row, #column_lit)?
-    };
-    let from_aliased_row_init = quote! {
-        #ident: #root::sql::sqlx::Row::try_get(
-            row,
-            #root::core::joins::joined_label(prefix, #column_lit).as_str(),
-        )?
+    // sqlx-sqlite has no `Decimal` decode: it goes through `FlatScalar`'s cell.
+    let decimal_column = kind == DetectedKind::Decimal && !detected_auto && fk_inner.is_none();
+    let (from_row_init, from_aliased_row_init) = if decimal_column {
+        (
+            quote! { #ident: #root::sql::try_get_flat(row, #column_lit)? },
+            quote! {
+                #ident: #root::sql::try_get_flat(
+                    row,
+                    #root::core::joins::joined_label(prefix, #column_lit).as_str(),
+                )?
+            },
+        )
+    } else {
+        (
+            quote! { #ident: #root::sql::sqlx::Row::try_get(row, #column_lit)? },
+            quote! {
+                #ident: #root::sql::sqlx::Row::try_get(
+                    row,
+                    #root::core::joins::joined_label(prefix, #column_lit).as_str(),
+                )?
+            },
+        )
     };
     // `Auto<Uuid>` and `ForeignKey<_, Uuid>` decode through their own
     // MySQL impls; a bare or optional `Uuid` needs `FlatScalar`'s cell.

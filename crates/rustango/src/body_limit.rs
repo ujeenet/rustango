@@ -143,7 +143,16 @@ struct StreamCap(usize);
 /// Whether a `BodyLimitLayer` already caps this request's body stream.
 #[cfg_attr(not(feature = "csrf"), allow(dead_code))]
 pub(crate) fn stream_capped(extensions: &axum::http::Extensions) -> bool {
-    extensions.get::<StreamCap>().is_some()
+    stream_cap(extensions).is_some()
+}
+
+/// The cap a `BodyLimitLayer` put on this request's body stream, if any.
+#[cfg_attr(
+    not(any(feature = "csrf", feature = "admin", feature = "tenancy")),
+    allow(dead_code)
+)]
+pub(crate) fn stream_cap(extensions: &axum::http::Extensions) -> Option<usize> {
+    extensions.get::<StreamCap>().map(|c| c.0)
 }
 
 /// Record the smaller of `own` and any outer `DefaultBodyLimit` (an outer

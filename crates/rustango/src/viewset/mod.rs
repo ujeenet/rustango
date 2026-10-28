@@ -4570,6 +4570,9 @@ pub(crate) enum CreateBody {
     Bulk(Vec<(HashMap<String, String>, Option<Value>)>),
 }
 
+/// Create/update body cap when no `BodyLimitLayer` sets one.
+const DEFAULT_BODY_CAP: usize = 4 * 1024 * 1024;
+
 pub(crate) async fn extract_create_body(
     parts: axum::http::request::Parts,
     body: Body,
@@ -4583,14 +4586,21 @@ pub(crate) async fn extract_create_body(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let bytes = to_bytes(body, 4 * 1024 * 1024).await.map_err(|e| {
-        // Our own cap or an outer `BodyLimitLayer` stream cap (#1673).
-        #[cfg(feature = "_http_layers")]
-        if crate::body_limit::over_cap(&e) {
-            return BodyError::TooLarge;
-        }
-        BodyError::Bad(e.to_string())
-    })?;
+    // A `BodyLimitLayer`'s cap, raised or lowered, replaces the default.
+    #[cfg(feature = "_http_layers")]
+    let cap = crate::body_limit::stream_cap(&parts.extensions);
+    #[cfg(not(feature = "_http_layers"))]
+    let cap = None;
+    let bytes = to_bytes(body, cap.unwrap_or(DEFAULT_BODY_CAP))
+        .await
+        .map_err(|e| {
+            // Our own cap or an outer `BodyLimitLayer` stream cap (#1673).
+            #[cfg(feature = "_http_layers")]
+            if crate::body_limit::over_cap(&e) {
+                return BodyError::TooLarge;
+            }
+            BodyError::Bad(e.to_string())
+        })?;
 
     if content_type.contains("application/json") {
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
@@ -4760,6 +4770,44 @@ mod body_tests {
         };
         assert!(matches!(err, BodyError::TooLarge));
         assert_eq!(err.into_response().status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// A `BodyLimitLayer` above the default cap lets a larger body through;
+    /// without one the default still holds.
+    #[cfg(feature = "_http_layers")]
+    #[tokio::test]
+    async fn a_body_limit_layer_sets_the_cap() {
+        use crate::body_limit::{BodyLimitLayer, BodyLimitRouterExt as _};
+        use tower::ServiceExt as _;
+        let route = || {
+            axum::Router::new().route(
+                "/",
+                axum::routing::post(|req: axum::extract::Request| async move {
+                    let (parts, body) = req.into_parts();
+                    match extract_create_body(parts, body, None).await {
+                        Ok(_) => StatusCode::CREATED,
+                        Err(e) => e.into_response().status(),
+                    }
+                }),
+            )
+        };
+        let big = format!(r#"{{"title":"{}"}}"#, "x".repeat(5 << 20));
+        let post = || {
+            axum::http::Request::post("/")
+                .header("content-type", "application/json")
+                .body(Body::from(big.clone()))
+                .unwrap()
+        };
+        let raised = route().body_limit(BodyLimitLayer::new(20 << 20));
+        assert_eq!(
+            raised.oneshot(post()).await.unwrap().status(),
+            StatusCode::CREATED
+        );
+        let plain = route();
+        assert_eq!(
+            plain.oneshot(post()).await.unwrap().status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
     }
 
     #[tokio::test]

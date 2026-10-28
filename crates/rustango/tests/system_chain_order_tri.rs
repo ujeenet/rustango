@@ -842,6 +842,62 @@ async fn project_fk_to_waiting_system_table(backend: Backend, same_step: bool) {
     manage_migrate(&pool, &dir).await.expect("second run");
 }
 
+/// `migrate <target>` on a fresh database applies the system chain first,
+/// so a project FK to a framework table finds its target.
+async fn migrate_target_runs_the_system_chain(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "target").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let users = "rustango_admin_users";
+    let mut owner = current_table(users, None)["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["primary_key"] == true)
+        .unwrap()
+        .clone();
+    let pk = owner["column"].clone();
+    for (k, v) in [
+        ("name", json!("owner_id")),
+        ("column", json!("owner_id")),
+        ("nullable", json!(true)),
+        ("primary_key", json!(false)),
+        ("auto", json!(false)),
+        ("fk", json!({ "kind": "fk", "to": users, "on": pk })),
+    ] {
+        owner[k] = v;
+    }
+    let note = json!({ "name": "syschain_note", "model": "Note", "fields": [
+        { "name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true },
+        owner,
+    ] });
+    let dir = root.join("migrations");
+    write_step(
+        &dir,
+        "0001_initial",
+        None,
+        json!({ "tables": [note] }),
+        vec![json!({ "CreateTable": "syschain_note" })],
+    );
+    let mut out = Vec::new();
+    rustango::migrate::manage::run_with_writer(
+        &pool,
+        &dir,
+        ["migrate".to_owned(), "0001_initial".to_owned()],
+        &mut out,
+    )
+    .await
+    .expect("migrate <target> on a fresh database");
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("(system)"), "{out}");
+    assert!(has_table(&pool, "syschain_note").await);
+    assert!(has_table(&pool, users).await);
+}
+
 async fn fk_to_a_later_system_step(backend: Backend) {
     project_fk_to_waiting_system_table(backend, false).await;
 }
@@ -1977,4 +2033,5 @@ per_backend!(
     dropped_table_gets_its_fks_back,
     later_step_waits_on_a_held_table,
     early_table_gets_a_later_index,
+    migrate_target_runs_the_system_chain,
 );

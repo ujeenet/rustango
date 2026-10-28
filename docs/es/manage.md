@@ -83,7 +83,7 @@ alcanzan mediante `Cli::tenancy()`.
 | `downgrade [N]` | Revierte las últimas N migraciones |
 | `showmigrations` / `status` | Lista las migraciones y su estado de aplicación |
 | `sqlmigrate <name>` | Imprime el SQL que ejecutaría una migración, sin ejecutarlo |
-| `forget-pending <name>` | Borra un JSON de migración no aplicada |
+| `forget-pending <name>` | Borra un JSON de migración no aplicada del que no depende ninguna posterior |
 | `add-data-op --sql <SQL> [--reverse-sql <SQL>]` | Añade una operación de datos escrita a mano |
 | `inspectdb [--schema <s>] [--table <t>]` | Lee un esquema existente y emite código `#[derive(Model)]` |
 
