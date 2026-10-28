@@ -148,6 +148,12 @@ untouched.
 
 ---
 
+## Unreleased
+
+### Table comments, MCP scheme, facet cap
+
+A model with `db_table_comment` gets a `makemigrations` warning: file migrations still do not write it, so add a data migration with the comment statement. MCP discovery on `*.localhost` / `[::1]` now says `http`; set a trusted `X-Forwarded-Proto` if a TLS proxy fronts it. The admin list's "show all" facet stops at 200 values.
+
 ## 0.61.7
 
 ### Admin: no self-deactivation
