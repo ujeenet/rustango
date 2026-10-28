@@ -4969,6 +4969,21 @@ pub async fn migrate_to_pool_with_ledger(
     .await
 }
 
+/// `Err` unless `target` is one of `all`, the files in `dir`.
+pub(crate) fn target_on_disk(
+    all: &[Migration],
+    dir: &Path,
+    target: &str,
+) -> Result<(), MigrateError> {
+    if all.iter().any(|m| m.name == target) {
+        return Ok(());
+    }
+    Err(MigrateError::Validation(format!(
+        "target migration `{target}` not found in {}",
+        dir.display()
+    )))
+}
+
 /// [`migrate_to_pool_with_ledger`] for a caller already holding the lock.
 pub(crate) async fn migrate_to_locked(
     held: LockHeld,
@@ -4984,12 +4999,7 @@ pub(crate) async fn migrate_to_locked(
         return unapply_all_in_order_pool(pool, dir, &all, &applied, ledger).await;
     }
 
-    if !all.iter().any(|m| m.name == target) {
-        return Err(MigrateError::Validation(format!(
-            "target migration `{target}` not found in {}",
-            dir.display()
-        )));
-    }
+    target_on_disk(&all, dir, target)?;
 
     let mut applied = applied;
     let mut touched = Vec::new();

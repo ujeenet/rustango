@@ -898,6 +898,32 @@ async fn migrate_target_runs_the_system_chain(backend: Backend) {
     assert!(has_table(&pool, users).await);
 }
 
+/// An unknown target fails before anything is applied.
+async fn migrate_unknown_target_changes_nothing(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "typo").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let dir = root.join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    let err = rustango::migrate::manage::run_with_writer(
+        &pool,
+        &dir,
+        ["migrate".to_owned(), "0001_typo".to_owned()],
+        &mut Vec::new(),
+    )
+    .await
+    .expect_err("an unknown target");
+    assert!(err.to_string().contains("not found"), "{err}");
+    assert!(
+        !has_table(&pool, "rustango_admin_users").await,
+        "the system chain ran"
+    );
+}
+
 async fn fk_to_a_later_system_step(backend: Backend) {
     project_fk_to_waiting_system_table(backend, false).await;
 }
@@ -2034,4 +2060,5 @@ per_backend!(
     later_step_waits_on_a_held_table,
     early_table_gets_a_later_index,
     migrate_target_runs_the_system_chain,
+    migrate_unknown_target_changes_nothing,
 );

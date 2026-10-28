@@ -1152,27 +1152,38 @@ fn junction_conflict(out: &[M2MTableSnapshot]) -> Option<String> {
     })
 }
 
-/// A `fk` / `o2o` naming no registered table or column fails only at
-/// `migrate` (PG/MySQL) or at write time (SQLite); refuse it here.
+/// A `fk` / `o2o` naming a model instead of its table, or no column of a
+/// registered table, fails only at `migrate` or write time; refuse it here.
+/// A table no model registers (raw SQL, feature-gated model) only warns.
 pub(crate) fn check_relation_targets() -> Result<(), super::MigrateError> {
     let all: Vec<&'static ModelSchema> = inventory::iter::<ModelEntry>
         .into_iter()
         .map(|e| e.schema)
         .collect();
-    let errors = relation_target_errors(&all);
-    if errors.is_empty() {
+    let found = relation_targets(&all);
+    for w in &found.unregistered {
+        tracing::warn!(target: "rustango::migrate", "{w}");
+    }
+    if found.errors.is_empty() {
         return Ok(());
     }
     Err(super::MigrateError::Validation(format!(
         "relation targets not found:\n  - {}",
-        errors.join("\n  - ")
+        found.errors.join("\n  - ")
     )))
 }
 
-/// One message per table-owning model's `fk` / `o2o` whose `to` is no
-/// table in `all`, or whose `on` is no column of it.
-pub(crate) fn relation_target_errors(all: &[&'static ModelSchema]) -> Vec<String> {
-    let mut out = Vec::new();
+/// What [`relation_targets`] found: hard errors, and targets on tables no
+/// registered model owns, which may exist outside the registry.
+#[derive(Debug, Default)]
+pub(crate) struct RelationTargets {
+    pub(crate) errors: Vec<String>,
+    pub(crate) unregistered: Vec<String>,
+}
+
+/// Check each table-owning model's `fk` / `o2o` `to` / `on` against `all`.
+pub(crate) fn relation_targets(all: &[&'static ModelSchema]) -> RelationTargets {
+    let mut out = RelationTargets::default();
     for model in all.iter().filter(|m| m.owns_table()) {
         for f in model.fields {
             let (kind, to, on) = match f.relation {
@@ -1182,16 +1193,19 @@ pub(crate) fn relation_target_errors(all: &[&'static ModelSchema]) -> Vec<String
             };
             let at = format!("`{}.{}` ({kind} = \"{to}\")", model.name, f.name);
             match all.iter().find(|m| m.table == to) {
-                Some(target) if target.field_by_column(on).is_none() => {
-                    out.push(format!("{at}: table `{to}` has no column `{on}`"))
-                }
+                Some(target) if target.field_by_column(on).is_none() => out
+                    .errors
+                    .push(format!("{at}: table `{to}` has no column `{on}`")),
                 Some(_) => {}
                 None => match all.iter().find(|m| m.name.eq_ignore_ascii_case(to)) {
-                    Some(m) => out.push(format!(
+                    Some(m) => out.errors.push(format!(
                         "{at}: `{to}` is a model; use its table `{}`, or `ForeignKey<{}>`",
                         m.table, m.name
                     )),
-                    None => out.push(format!("{at}: no registered model has table `{to}`")),
+                    None => out.unregistered.push(format!(
+                        "{at}: no registered model has table `{to}`; \
+                         `migrate` fails unless the table exists"
+                    )),
                 },
             }
         }
@@ -1779,15 +1793,19 @@ mod relation_target_tests {
         s
     };
 
-    fn errors_for(rel: Relation) -> Vec<String> {
+    fn targets_for(rel: Relation) -> RelationTargets {
         let fields: &'static [FieldSchema] = Box::leak(Box::new([rel_field("author_id", rel)]));
         let mut post = ModelSchema::new("Post", "post");
         post.fields = fields;
         let post: &'static ModelSchema = Box::leak(Box::new(post));
-        relation_target_errors(&[AUTHOR, post])
+        relation_targets(&[AUTHOR, post])
     }
 
-    /// A model name, a typo'd table or a typo'd column fail at makemigrations.
+    fn errors_for(rel: Relation) -> Vec<String> {
+        targets_for(rel).errors
+    }
+
+    /// A model name or a typo'd column fail at makemigrations.
     #[test]
     fn unknown_targets_are_named() {
         let e = errors_for(Relation::fk("Author", "id"));
@@ -1795,14 +1813,23 @@ mod relation_target_tests {
             e[0].contains("`Author` is a model; use its table `author`"),
             "{e:?}"
         );
-        let e = errors_for(Relation::o2o("autors", "id"));
-        assert!(
-            e[0].contains("`Post.author_id`") && e[0].contains("`autors`"),
-            "{e:?}"
-        );
         let e = errors_for(Relation::fk("author", "idd"));
         assert!(e[0].contains("no column `idd`"), "{e:?}");
-        assert!(errors_for(Relation::fk("author", "id")).is_empty());
+        let ok = targets_for(Relation::fk("author", "id"));
+        assert!(ok.errors.is_empty() && ok.unregistered.is_empty());
+    }
+
+    /// A table no model registers (raw SQL, feature-gated model) only warns.
+    #[test]
+    fn unregistered_table_only_warns() {
+        let t = targets_for(Relation::o2o("legacy_users", "id"));
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        assert!(
+            t.unregistered[0].contains("`Post.author_id`")
+                && t.unregistered[0].contains("`legacy_users`"),
+            "{:?}",
+            t.unregistered
+        );
     }
 
     /// Every relation the crate's own and test models declare resolves.
@@ -1812,6 +1839,7 @@ mod relation_target_tests {
             .into_iter()
             .map(|e| e.schema)
             .collect();
-        assert_eq!(relation_target_errors(&all), Vec::<String>::new());
+        let t = relation_targets(&all);
+        assert_eq!((t.errors, t.unregistered), (Vec::new(), Vec::new()));
     }
 }
