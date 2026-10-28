@@ -149,9 +149,9 @@ solo en despliegues de PostgreSQL:
 
 ## Claves primarias
 
-Cada modelo necesita una clave primaria. Marca un campo con
-`#[rustango(primary_key)]`; si no marcas ninguno, el esquema busca una columna llamada
-`id`.
+Marca un campo con `#[rustango(primary_key)]`. Un modelo sin clave primaria
+sigue compilando y se puede consultar, pero el derive omite todos los métodos de fila
+basados en la PK (`save_pool`, `find`, `delete_pool`, `refresh_from_db`, …).
 
 La PK **por defecto y más común** es un entero de 64 bits autoincremental, declarado como
 `Auto<i64>`:
@@ -172,7 +172,9 @@ g.save_pool(&pool).await?;                              // DB assigns the id
 let new_id = g.id.get().copied().unwrap();             // now populated
 ```
 
-Los tipos internos de `Auto<T>` admitidos son `i32`, `i64` y `Uuid`.
+Los tipos internos de `Auto<T>` admitidos son `i32`, `i64`, `Uuid` y
+`DateTime<Utc>` (la base de datos lo rellena con la hora actual, como en el
+campo `auto_now_add` de arriba).
 
 ### Claves primarias personalizadas
 
@@ -462,7 +464,7 @@ la lista completa, incluyendo las avanzadas/específicas de PostgreSQL.
 | `on_delete` | `"cascade"` / `"restrict"` / `"set_null"` / `"set_default"` / `"no_action"` | acción `ON DELETE` de la FK |
 | `o2o` | `"table"` | FK uno-a-uno a esa tabla |
 | `generated_as` | `"expr"` | columna computada (generada) por la BD |
-| `citext` | flag | texto insensible a mayúsculas (CITEXT de PostgreSQL) |
+| `citext` | flag | texto insensible a mayúsculas: `CITEXT` en PostgreSQL, `TEXT COLLATE NOCASE` en SQLite, una collation insensible a mayúsculas en MySQL |
 | `vector(dims = N)` | `N` | dimensión de pgvector |
 | `geometry(srid = N)` | `N` | id de referencia espacial de PostGIS |
 | `db_comment` | `"…"` | COMMENT de columna |
