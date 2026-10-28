@@ -173,7 +173,8 @@ RUSTANGO_APEX_DOMAIN=localhost
 # Encryption key for sealed secrets: saved database server passwords,
 # tenant database URLs, EncryptedString fields. Any string of 32 or more
 # characters (it is hashed into the key); back it up: without it sealed
-# values cannot be read.
+# values cannot be read. Unset on the dev and test tiers, a key is
+# generated and saved in ./var/; staging and prod must set it.
 #   RUSTANGO_SECRET_KEY=$(openssl rand -base64 48)
 # RUSTANGO_SECRET_KEY=
 # Rotation: old key here, new one above, then in a tenancy project
@@ -648,17 +649,17 @@ pub fn main_rs(template: Template, name: &str) -> String {
 
 /// [`main_rs`] plus the `Cli` calls the chosen `--features` need.
 pub fn main_rs_for(template: Template, name: &str, features: &[String]) -> String {
-    let main = main_rs(template, name);
-    if !features.iter().any(|f| f == "csrf") {
-        return main;
+    let has = |f: &str| features.iter().any(|x| x == f);
+    let mut extra = String::new();
+    if has("csrf") {
+        extra
+            .push_str("        .with_csrf() // `--features csrf`: form POSTs must carry `_csrf`\n");
     }
-    main.replacen(
-        API_LINE,
-        &format!(
-            "{API_LINE}        .with_csrf() // `--features csrf`: form POSTs must carry `_csrf`\n"
-        ),
-        1,
-    )
+    // A tenancy app mounts MCP inside `urls::api()`; this one needs the pool.
+    if has("mcp") && template != Template::Tenant {
+        extra.push_str("        .nest_with(\"/mcp\", urls::mcp) // `--features mcp`\n");
+    }
+    main_rs(template, name).replacen(API_LINE, &format!("{API_LINE}{extra}"), 1)
 }
 
 /// The `Cli` line every `main.rs` template has; optional calls go after it.
@@ -868,8 +869,8 @@ pub fn models_rs(template: Template) -> String {
 //! macro populates the `inventory` registry that
 //! `rustango::admin::router(pool)` walks.
 
-use rustango::sql::Auto;
-use rustango::Model;
+// The derive plus the ORM traits, so `Item::objects().count(&pool)` resolves.
+use rustango::prelude::*;
 
 // `#[derive(Model)]` registers this struct at *runtime* through `inventory`,
 // which rustc cannot see — so fields only the framework reads look dead to it.
@@ -920,7 +921,55 @@ pub async fn healthz() -> &'static str {
 
 // ---------------- src/urls.rs ----------------
 
-pub fn urls_rs(template: Template) -> String {
+/// `src/urls.rs`, plus the mounts the chosen `--features` need.
+pub fn urls_rs_for(template: Template, features: &[String]) -> String {
+    let urls = urls_base(template);
+    if !features.iter().any(|f| f == "mcp") {
+        return urls;
+    }
+    match template {
+        Template::Tenant => urls
+            .replacen(
+                "pub fn api() -> Router<()> {\n    Router::new()",
+                "pub fn api() -> Router<()> {\n    let mcp = mcp_settings();\n    Router::new()",
+                1,
+            )
+            .replacen(
+                "        .route(\"/healthz\", get(views::healthz))\n}\n",
+                MCP_TENANT,
+                1,
+            ),
+        Template::Api | Template::Fullstack => format!("{urls}{MCP_SINGLE}"),
+    }
+}
+
+/// `--features mcp` on the tenant template: agent auth, `[mcp]` settings.
+const MCP_TENANT: &str = "        .route(\"/healthz\", get(views::healthz))
+        // `--features mcp`: agents trade a credential at `{prefix}/token`.
+        .nest(
+            mcp.prefix(),
+            rustango::mcp::secure_tenant_router_from_settings(&mcp),
+        )
+}
+
+/// The `[mcp]` section of config/*.toml; defaults when it does not load.
+fn mcp_settings() -> rustango::config::McpSettings {
+    rustango::config::Settings::load_from_env()
+        .map(|s| s.mcp)
+        .unwrap_or_default()
+}
+";
+
+/// `--features mcp` on a single-database template, nested by `main.rs`.
+const MCP_SINGLE: &str = "
+/// `--features mcp`: the MCP endpoint at `/mcp`, on the serving pool.
+/// Transport only; agent tools need the tenant template's authed router.
+pub fn mcp(pool: rustango::sql::Pool) -> Router {
+    rustango::mcp::router(pool)
+}
+";
+
+fn urls_base(template: Template) -> String {
     match template {
         Template::Api => {
             // Stateless aggregator. `manage startapp <name>` auto-

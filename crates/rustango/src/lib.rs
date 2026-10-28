@@ -1396,6 +1396,36 @@ pub use inventory;
 /// [`sql::Auto`] for details.
 pub use sql::Auto;
 
+/// `use rustango::prelude::*;` brings the ORM's extension traits into
+/// scope, so `Item::objects().count(&pool)` resolves without hunting them down.
+///
+/// ```no_run
+/// use rustango::prelude::*;
+///
+/// #[derive(Model)]
+/// #[rustango(table = "prelude_item")]
+/// pub struct Item {
+///     #[rustango(primary_key)]
+///     pub id: Auto<i64>,
+///     pub active: bool,
+/// }
+///
+/// async fn demo(pool: &rustango::sql::Pool) -> Result<(), rustango::sql::ExecError> {
+///     let total: i64 = Item::objects().count(pool).await?;
+///     let any = Item::objects().where_(Item::active.eq(true)).exists(pool).await?;
+///     let rows: Vec<Item> = Item::objects().fetch(pool).await?;
+///     let _ = (total, any, rows);
+///     Ok(())
+/// }
+/// # fn main() {}
+/// ```
+pub mod prelude {
+    pub use crate::core::{Column, Model};
+    pub use crate::sql::{Auto, CounterPool, ExistsPool, FetcherPool, FetcherTx, UpdaterPool};
+    /// The derive, beside the trait of the same name.
+    pub use rustango_macros::Model;
+}
+
 /// Bake every migration file in a directory into the binary at
 /// compile time, for shipping a single-binary distribution. Pair
 /// with [`migrate::migrate_embedded`].

@@ -56,6 +56,8 @@ El CHANGELOG contiene el índice completo de tickets de cada versión.
 
 ## Consultas
 
+`use rustango::prelude::*;` trae de una vez los traits de extensión del ORM (`FetcherPool`, `CounterPool`, `ExistsPool`, `UpdaterPool`, `FetcherTx`), `Column`, `Model` y `Auto`. Sin ellos, `.count(&pool)` o `.fetch(&pool)` falla con "QuerySet is not an iterator". Los ejemplos de abajo importan cada trait por su nombre.
+
 Lee filas de la base de datos. `Post::objects()` inicia una consulta; encadenas filtros y ordenamiento, luego llamas a `.fetch(&pool).await?` para ejecutarla y recuperar un `Vec<Post>`. `.where_(...)` añade una condición unida con AND.
 
 ```rust
