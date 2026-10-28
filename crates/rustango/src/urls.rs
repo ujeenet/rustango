@@ -308,6 +308,25 @@ fn check_host_and_scheme(trimmed: &str, allowed_hosts: &[&str], require_https: b
         .any(|a| a.strip_suffix('.').unwrap_or(a).eq_ignore_ascii_case(&host))
 }
 
+/// `localhost`, `*.localhost`, or a loopback IP, with or without a port.
+#[cfg(feature = "tenancy")]
+pub(crate) fn is_loopback_host(host: &str) -> bool {
+    use std::net::IpAddr;
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else if host.parse::<IpAddr>().is_ok() {
+        host
+    } else {
+        host.rsplit_once(':')
+            .filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit()))
+            .map_or(host, |(name, _)| name)
+    };
+    let name = name.to_ascii_lowercase();
+    name == "localhost"
+        || name.ends_with(".localhost")
+        || name.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
 /// Splits an authority into host and port; `[v6]:port` keeps the brackets
 /// on the host (#2043). `None` when the port is not digits, so
 /// `good.com:1@evil.com` is refused rather than read as `good.com`.
