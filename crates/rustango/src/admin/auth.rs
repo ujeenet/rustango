@@ -4,8 +4,8 @@
 //! decodes to the configured credentials. Otherwise it gets a 401 with
 //! `WWW-Authenticate: Basic realm="Rustango Admin"`.
 //!
-//! Each attempt goes through [`crate::login_throttle`] (admin scope),
-//! and both fields are compared in constant time.
+//! Each request reads the [`crate::login_throttle`] limits (admin scope)
+//! and only a miss is counted; both fields are compared in constant time.
 
 use std::sync::Arc;
 
@@ -46,21 +46,24 @@ async fn basic_auth_middleware(
         return challenge();
     };
     let ip = ClientIp::from_parts(request.extensions(), request.headers());
-    let attempt = match crate::login_throttle::shared()
-        .begin(&LoginScope::Admin, &ip, &user)
-        .await
-    {
-        Ok(attempt) => attempt,
-        Err(refused) => return refused.into_response(),
-    };
+    // Sent on every request, so a success reserves and counts nothing.
+    let throttle = crate::login_throttle::shared();
+    if let Err(refused) = throttle.check(&LoginScope::Admin, &ip, &user).await {
+        return refused.into_response();
+    }
     // Both compares always run, so the timing does not say which field is wrong.
     let user_ok = crate::crypto::constant_time_compare(user.as_bytes(), creds.username.as_bytes());
     let pass_ok = crate::crypto::constant_time_compare(pass.as_bytes(), creds.password.as_bytes());
     if user_ok & pass_ok {
-        attempt.succeeded().await;
+        throttle
+            .succeeded_quietly(&LoginScope::Admin, &ip, &user)
+            .await;
         return next.run(request).await;
     }
-    attempt.failed().await;
+    match throttle.begin(&LoginScope::Admin, &ip, &user).await {
+        Ok(attempt) => attempt.failed().await,
+        Err(refused) => return refused.into_response(),
+    }
     challenge()
 }
 
@@ -106,6 +109,42 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         app.clone().oneshot(req).await.unwrap().status()
+    }
+
+    /// A right Basic header is sent on every request: a repeat writes
+    /// nothing to the login gate's cache; a wrong one is still counted.
+    #[tokio::test]
+    async fn right_basic_credentials_write_nothing_to_the_login_gate() {
+        let counting =
+            std::sync::Arc::new(crate::login_throttle::counting::CountingWrites::default());
+        let cache: crate::cache::BoxedCache = counting.clone();
+        let installed = crate::login_throttle::configure_shared(
+            crate::login_throttle::LoginThrottle::with_cache(
+                crate::login_throttle::LoginLimits::default(),
+                cache,
+            ),
+        );
+        // nextest runs each test in its own process; another gate won here.
+        if !installed {
+            return;
+        }
+        let app = protect_with_basic_auth(
+            Router::new().route("/", get(|| async { "ok" })),
+            "basic-quiet-admin",
+            "right",
+        );
+        let writes = || counting.writes();
+        assert_eq!(call(&app, "basic-quiet-admin:right").await, StatusCode::OK);
+        let first = writes();
+        for _ in 0..3 {
+            assert_eq!(call(&app, "basic-quiet-admin:right").await, StatusCode::OK);
+        }
+        assert_eq!(writes(), first, "a repeat success wrote to the login gate");
+        assert_eq!(
+            call(&app, "basic-quiet-admin:wrong").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(writes() > 0, "a miss was not counted");
     }
 
     /// Wrong passwords lock the account, so the right one is refused after.

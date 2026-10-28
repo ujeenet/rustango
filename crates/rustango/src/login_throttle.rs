@@ -618,6 +618,28 @@ impl LoginThrottle {
         spent(&global_gate(&scope_key), global)
     }
 
+    /// Report a right credential checked after [`Self::check`], not
+    /// [`Self::begin`], as one sent on every request is. It writes only to
+    /// clear the account's failures or remember a new client.
+    pub(crate) async fn succeeded_quietly(
+        &self,
+        scope: &LoginScope,
+        ip: &ClientIp,
+        username: &str,
+    ) {
+        if !scope.locks_accounts() {
+            return;
+        }
+        let key = account_key(&scope.key(), username);
+        let failing = crate::account_lockout::shared().attempt_count(&key).await > 0;
+        if !failing && (ip.0.is_none() || self.0.is_known(scope, ip, username).await) {
+            return;
+        }
+        if let Ok(attempt) = self.begin(scope, ip, username).await {
+            attempt.succeeded().await;
+        }
+    }
+
     /// Run a signed-in user's current-password check through the gate, so a
     /// stolen session cannot guess it at hash speed (#1873). A miss counts
     /// toward the same account lock as the login form.
@@ -875,6 +897,73 @@ pub fn configure_shared(throttle: LoginThrottle) -> bool {
 #[cfg(all(feature = "config", feature = "manage"))]
 pub(crate) fn configure_from_settings(throttle: LoginThrottle) -> bool {
     SHARED.set_from_settings(throttle)
+}
+
+/// A test cache that counts the gate's writes.
+#[cfg(test)]
+pub(crate) mod counting {
+    /// Counts the login gate's cache writes.
+    #[derive(Default)]
+    pub(crate) struct CountingWrites {
+        inner: crate::cache::InMemoryCache,
+        writes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingWrites {
+        fn wrote(&self) {
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Writes so far.
+        pub(crate) fn writes(&self) -> usize {
+            self.writes.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for CountingWrites {
+        async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            self.inner.get(k).await
+        }
+        async fn set(
+            &self,
+            k: &str,
+            v: &str,
+            ttl: Option<std::time::Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            self.wrote();
+            self.inner.set(k, v, ttl).await
+        }
+        async fn delete(&self, k: &str) -> Result<(), crate::cache::CacheError> {
+            self.wrote();
+            self.inner.delete(k).await
+        }
+        async fn exists(&self, k: &str) -> Result<bool, crate::cache::CacheError> {
+            self.inner.exists(k).await
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.inner.clear().await
+        }
+        async fn incr(
+            &self,
+            k: &str,
+            by: i64,
+            ttl: Option<std::time::Duration>,
+        ) -> Result<i64, crate::cache::CacheError> {
+            self.wrote();
+            self.inner.incr(k, by, ttl).await
+        }
+        async fn decr(
+            &self,
+            k: &str,
+            by: i64,
+            ttl: Option<std::time::Duration>,
+        ) -> Result<i64, crate::cache::CacheError> {
+            self.wrote();
+            self.inner.decr(k, by, ttl).await
+        }
+    }
 }
 
 #[cfg(test)]

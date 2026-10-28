@@ -44,7 +44,7 @@ use crate::sql::Pool;
 use super::auth::parse_basic_auth;
 use super::password;
 use super::password::HashLane;
-use crate::login_throttle::{ClientIp, LoginAttempt, LoginScope};
+use crate::login_throttle::{ClientIp, LoginScope};
 
 // ------------------------------------------------------------------ AuthUser
 
@@ -89,20 +89,6 @@ impl AuthError {
             _ => Self::InvalidToken,
         }
     }
-}
-
-/// Admit one per-request credential check for this request's tenant and
-/// client. Refuses without a tenant, so tenants never share limits.
-async fn begin(
-    parts: &Parts,
-    scope: fn(String) -> LoginScope,
-    username: &str,
-) -> Result<LoginAttempt, AuthError> {
-    let slug = tenant_slug(parts)?;
-    crate::login_throttle::shared()
-        .begin(&scope(slug.to_owned()), &client_ip(parts), username)
-        .await
-        .map_err(AuthError::Refused)
 }
 
 fn client_ip(parts: &Parts) -> ClientIp {
@@ -484,7 +470,14 @@ impl AuthBackend for ApiKeyBackend {
 
         // Two indexed ORM round-trips: the key by prefix, then its user.
         // Failures per IP and per tenant; no lock, the prefix is no account.
-        let attempt = begin(parts, LoginScope::TenantApiKey, "").await?;
+        // Sent on every request: the limits are read, and only a miss counts.
+        let scope = LoginScope::TenantApiKey(tenant_slug(parts)?.to_owned());
+        let ip = client_ip(parts);
+        let throttle = crate::login_throttle::shared();
+        throttle
+            .check(&scope, &ip, "")
+            .await
+            .map_err(AuthError::Refused)?;
         let server_key = api_key_secret().map_err(AuthError::from_hash)?;
         let mac = api_key_mac(server_key, secret);
         let keys = ApiKey::objects()
@@ -511,19 +504,32 @@ impl AuthBackend for ApiKeyBackend {
                 Some(k) => Some(k),
                 None if legacy.is_empty() => None,
                 // Pre-#2617 argon2 rows: verify once, then store the MAC.
+                // A guess at hash cost is reserved like a login.
                 None => {
+                    let attempt = throttle
+                        .begin(&scope, &ip, "")
+                        .await
+                        .map_err(AuthError::Refused)?;
                     let key = password::first_verified(legacy, secret, |k| &k.key_hash)
                         .await
                         .map_err(AuthError::from_hash)?;
-                    if let Some(k) = &key {
-                        upgrade_api_key(pool, k, &mac).await;
-                    }
-                    key
+                    let Some(k) = key else {
+                        attempt.failed().await;
+                        return Ok(None);
+                    };
+                    attempt.succeeded().await;
+                    upgrade_api_key(pool, &k, &mac).await;
+                    Some(k)
                 }
             },
         };
         let Some(key) = key else {
-            attempt.failed().await;
+            throttle
+                .begin(&scope, &ip, "")
+                .await
+                .map_err(AuthError::Refused)?
+                .failed()
+                .await;
             return Ok(None);
         };
 
@@ -532,7 +538,6 @@ impl AuthBackend for ApiKeyBackend {
         if key.expires_at.is_some_and(|exp| chrono::Utc::now() > exp) {
             return Err(AuthError::InvalidToken);
         }
-        attempt.succeeded().await;
 
         let users = super::auth::User::objects()
             .where_(super::auth::User::id.eq(key.user_id))
@@ -1292,6 +1297,56 @@ mod tests {
             matches!(r, Err(AuthError::Refused(LoginRefused::Throttled { .. }))),
             "{r:?}"
         );
+    }
+
+    /// A right API key is sent on every request: it writes nothing to the
+    /// login gate's cache; a wrong one is still counted.
+    #[tokio::test]
+    async fn right_api_keys_write_nothing_to_the_login_gate() {
+        let counting =
+            std::sync::Arc::new(crate::login_throttle::counting::CountingWrites::default());
+        let cache: crate::cache::BoxedCache = counting.clone();
+        let installed = crate::login_throttle::configure_shared(
+            crate::login_throttle::LoginThrottle::with_cache(
+                crate::login_throttle::LoginLimits::default(),
+                cache,
+            ),
+        );
+        // nextest runs each test in its own process; another gate won here.
+        if !installed {
+            return;
+        }
+        set_api_key_secret(crate::session::SessionSecret::from_bytes(vec![7; 32]));
+        let (pool, user) = jwt_user("api_key_quiet_gate").await;
+        crate::testkit::create_tables_for::<ApiKey>(&pool)
+            .await
+            .unwrap();
+        let token = create_api_key(*user.id.get().unwrap(), "t", None, &pool)
+            .await
+            .unwrap();
+        let call = |token: String| {
+            let pool = pool.clone();
+            async move {
+                let (parts, ()) = axum::http::Request::builder()
+                    .header("authorization", format!("Bearer {token}"))
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        [10, 64, 0, 1],
+                        1,
+                    ))))
+                    .extension(super::super::TenantSlug("t-quiet-key".into()))
+                    .body(())
+                    .unwrap()
+                    .into_parts();
+                ApiKeyBackend.authenticate(&parts, &pool).await
+            }
+        };
+        for _ in 0..3 {
+            assert!(matches!(call(token.clone()).await, Ok(Some(_))));
+        }
+        assert_eq!(counting.writes(), 0, "a right key wrote to the login gate");
+        let (prefix, _) = token.split_once('.').unwrap();
+        assert!(matches!(call(format!("{prefix}.wrong")).await, Ok(None)));
+        assert!(counting.writes() > 0, "a wrong key was not counted");
     }
 
     /// A user row in a fresh shared in-memory `SQLite`.
