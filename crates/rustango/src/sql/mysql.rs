@@ -783,6 +783,9 @@ impl Dialect for MySql {
     /// MySQL's `REGEXP` is case-sensitive and has no insensitive
     /// form; the column's collation decides. As with ILIKE, the
     /// insensitive variants lowercase both sides instead.
+    /// The case flag rides in the pattern: REGEXP alone follows the column
+    /// collation, and lowering the pattern turns `\D` into `\d`.
+    /// ICU (MySQL) and PCRE (MariaDB) both read `(?i)` / `(?-i)`.
     fn write_regex(
         &self,
         sql: &mut String,
@@ -791,22 +794,30 @@ impl Dialect for MySql {
         case_sensitive: bool,
         negated: bool,
     ) {
-        let kw = if negated { " NOT REGEXP " } else { " REGEXP " };
-        if case_sensitive {
-            sql.push_str(qualified_col);
-            sql.push_str(kw);
-            sql.push_str(placeholder);
+        sql.push_str(qualified_col);
+        sql.push_str(if negated { " NOT REGEXP " } else { " REGEXP " });
+        sql.push_str(if case_sensitive {
+            "CONCAT('(?-i)', "
         } else {
-            // Lowercase both sides in the SQL, so the comparison
-            // ignores case whatever the column's collation.
-            sql.push_str("LOWER(");
-            sql.push_str(qualified_col);
-            sql.push(')');
-            sql.push_str(kw);
-            sql.push_str("LOWER(");
-            sql.push_str(placeholder);
-            sql.push(')');
-        }
+            "CONCAT('(?i)', "
+        });
+        sql.push_str(placeholder);
+        sql.push(')');
+    }
+
+    /// LIKE follows the column collation, case-insensitive by default.
+    fn write_like_typed(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        ty: Option<FieldType>,
+        placeholder: &str,
+        negated: bool,
+    ) {
+        sql.push_str(&self.like_operand(qualified_col, ty));
+        sql.push_str(if negated { " NOT LIKE " } else { " LIKE " });
+        sql.push_str(placeholder);
+        sql.push_str(" COLLATE utf8mb4_bin");
     }
 
     /// MySQL has no trigram operators; its `FULLTEXT` similarity is

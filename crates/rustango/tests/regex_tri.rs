@@ -9,7 +9,7 @@
 //! |---|---|---|---|
 //! | operator | `~` / `~*` / `!~` | `REGEXP` | `REGEXP` → user function |
 //! | available? | yes | yes | **no** |
-//! | `regex` case | sensitive | **collation-dependent** | n/a |
+//! | `regex` case | sensitive | sensitive (`(?-i)`) | n/a |
 //!
 //! PostgreSQL asserted that matching works. SQLite asserted that it
 //! fails *cleanly* — SQLite's `REGEXP` delegates to a `regexp(pattern,
@@ -96,10 +96,9 @@ async fn regex_is_case_sensitive_where_the_backend_allows_it(pool: &Pool) {
     let want = by_dialect! { pool,
         postgres => Some(vec!["alice"]),
             because "the `~` operator is case-sensitive, so `^al.*` misses `Alice-2`",
-        mysql => Some(vec!["Alice-2", "alice"]),
-            because "MySQL's REGEXP follows the column collation, and the default \
-                     utf8mb4_0900_ai_ci is case-insensitive — so REGEXP matches both \
-                     cases and `regex` behaves like `iregex` here",
+        mysql => Some(vec!["alice"]),
+            because "the pattern carries `(?-i)`, so the `_ci` collation does not \
+                     make REGEXP ignore case",
         sqlite => None,
             because "SQLite's REGEXP delegates to a `regexp()` user function that sqlx \
                      does not register (its `regexp` cargo feature is off), so this \
@@ -119,8 +118,7 @@ async fn iregex_matches_both_cases(pool: &Pool) {
         postgres => Some(vec!["Alice-2", "alice"]),
             because "`~*` is the case-insensitive operator",
         mysql => Some(vec!["Alice-2", "alice"]),
-            because "same answer as `regex` on a case-insensitive collation — the \
-                     LOWER() wrap is redundant here rather than wrong",
+            because "the pattern carries `(?i)`",
         sqlite => None,
             because "the LOWER() wrap still resolves to the same unregistered \
                      `regexp()` function; what matters is that it is a resolution \
@@ -139,9 +137,8 @@ async fn not_regex_excludes_matches(pool: &Pool) {
     let want = by_dialect! { pool,
         postgres => Some(vec!["ADMIN-root", "Alice-2", "Bob-3", "alice", "bob"]),
             because "`!~` is case-sensitive, so only the lowercase `admin` is excluded",
-        mysql => Some(vec!["Alice-2", "Bob-3", "alice", "bob"]),
-            because "NOT REGEXP inherits the case-insensitive collation, so both \
-                     `admin` and `ADMIN-root` are excluded",
+        mysql => Some(vec!["ADMIN-root", "Alice-2", "Bob-3", "alice", "bob"]),
+            because "`(?-i)` keeps NOT REGEXP case-sensitive, as on PG",
         sqlite => None,
             because "no regexp function to negate",
     };
@@ -166,8 +163,7 @@ async fn not_iregex_excludes_both_cases(pool: &Pool) {
         postgres => Some(vec!["Alice-2", "Bob-3", "alice", "bob"]),
             because "`!~*` is case-insensitive, so both `admin` and `ADMIN-root` go",
         mysql => Some(vec!["Alice-2", "Bob-3", "alice", "bob"]),
-            because "same answer as `not_regex` on a case-insensitive collation — this \
-                     is the arm where PG and MySQL agree and `not_regex` does not",
+            because "`(?i)` excludes both cases, as `!~*`",
         sqlite => None,
             because "no regexp function to negate",
     };
@@ -191,7 +187,7 @@ async fn filter_string_iregex_routes_at_runtime(pool: &Pool) {
             because "the `__iregex` suffix must resolve to the same `~*` the typed \
                      column builds",
         mysql => Some(vec!["Bob-3", "bob"]),
-            because "resolves to the same collation-driven REGEXP",
+            because "resolves to the same `(?i)` REGEXP",
         sqlite => None,
             because "routes to the same unregistered `regexp()` function; what is \
                      pinned is that it fails at resolution, not at the lookup parser",
@@ -199,6 +195,23 @@ async fn filter_string_iregex_routes_at_runtime(pool: &Pool) {
 
     let rows = User::objects()
         .filter("name__iregex", "^bob")
+        .fetch(pool)
+        .await;
+    expect_regex(rows, want.value).await;
+}
+
+/// `iregex` keeps the pattern: lowering it would turn `\D` into `\d`.
+async fn iregex_keeps_uppercase_escapes(pool: &Pool) {
+    let want = by_dialect! { pool,
+        postgres => Some(vec!["ADMIN-root", "Alice-2", "Bob-3", "admin", "alice", "bob"]),
+            because "`~*` leaves `\\D` alone: every name starts with a non-digit",
+        mysql => Some(vec!["ADMIN-root", "Alice-2", "Bob-3", "admin", "alice", "bob"]),
+            because "the `(?i)` flag leaves the pattern as written",
+        sqlite => None,
+            because "no regexp function is registered",
+    };
+    let rows = User::objects()
+        .filter("name__iregex", r"^\D")
         .fetch(pool)
         .await;
     expect_regex(rows, want.value).await;
@@ -212,5 +225,6 @@ tri_dialect_test! {
         not_regex_excludes_matches,
         not_iregex_excludes_both_cases,
         filter_string_iregex_routes_at_runtime,
+        iregex_keeps_uppercase_escapes,
     ],
 }

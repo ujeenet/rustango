@@ -5,7 +5,9 @@
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
 use chrono::{NaiveDate, TimeZone as _, Utc};
-use rustango::core::{joins::aliased, Join, JoinKind, Model as _, Op, QueryError, WhereExpr};
+use rustango::core::{
+    joins::aliased, Column as _, Join, JoinKind, Model as _, Op, QueryError, WhereExpr,
+};
 use rustango::sql::{ExecError, FetcherPool as _, ForeignKey, Pool};
 use rustango::{tri_dialect_test, Model};
 
@@ -144,6 +146,23 @@ pub struct Token {
     pub rank: i32,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "oqe_item", app = "oqe")]
+pub struct Item {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 20)]
+    pub category: String,
+    #[rustango(max_length = 40)]
+    pub title: String,
+    #[rustango(max_length = 20)]
+    pub middle: Option<String>,
+    #[rustango(max_length = 40)]
+    pub out: Option<String>,
+    pub score: f64,
+    pub created_at: chrono::DateTime<Utc>,
+}
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     for t in [City::SCHEMA, Top::SCHEMA, Mid::SCHEMA, Pet::SCHEMA] {
@@ -163,6 +182,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Token>(pool).await;
     fresh_table::<Doc>(pool).await;
     fresh_table::<Remark>(pool).await;
+    fresh_table::<Item>(pool).await;
     rustango::audit::ensure_table_pool(pool)
         .await
         .expect("audit table");
@@ -542,6 +562,271 @@ async fn f32_json_is_not_widened(pool: &Pool) {
     );
 }
 
+/// Rows `(id, category, title, middle)`, one second apart, score 1.23456.
+async fn items(pool: &Pool, rows: &[(i64, &str, &str, Option<&str>)]) {
+    let base = Utc.with_ymd_and_hms(2026, 2, 28, 23, 30, 0).unwrap();
+    for &(id, category, title, middle) in rows {
+        Item {
+            id,
+            category: category.into(),
+            title: title.into(),
+            middle: middle.map(Into::into),
+            out: None,
+            score: 1.23456,
+            created_at: base + chrono::Duration::seconds(id),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("item");
+    }
+}
+
+/// A DISTINCT `values` ordered by a column outside the projection.
+async fn distinct_values_ordered_by_another_column(pool: &Pool) {
+    items(
+        pool,
+        &[
+            (1, "a", "t", None),
+            (2, "b", "t", None),
+            (3, "a", "t", None),
+        ],
+    )
+    .await;
+    let got: Vec<String> = Item::objects()
+        .distinct()
+        .order_by(&[("created_at", true)])
+        .values_list_flat("category")
+        .fetch::<String>(pool)
+        .await
+        .expect("PG and MySQL want the ORDER BY column selected");
+    assert_eq!(got, ["a", "b", "a"]);
+}
+
+/// A page past the last row still reports the total.
+async fn page_past_the_end_keeps_its_total(pool: &Pool) {
+    items(
+        pool,
+        &[
+            (1, "a", "t", None),
+            (2, "a", "t", None),
+            (3, "a", "t", None),
+        ],
+    )
+    .await;
+    let page = Item::objects()
+        .order_by(&[("id", false)])
+        .limit(2)
+        .offset(10)
+        .fetch_paginated_on(pool)
+        .await
+        .expect("page");
+    assert!(page.rows.is_empty());
+    assert_eq!(page.total, 3);
+    let mut conn = pool.acquire().await.expect("conn");
+    let page = Item::objects()
+        .limit(2)
+        .offset(10)
+        .fetch_paginated_on(&mut conn)
+        .await
+        .expect("page on a connection");
+    assert_eq!(page.total, 3);
+}
+
+/// `dates()` / `datetimes()` bucket in UTC whatever the PG session zone.
+async fn date_buckets_are_utc(pool: &Pool) {
+    use rustango::query::{DateKind, DateTimeKind};
+    items(pool, &[(0, "a", "t", None)]).await;
+    #[cfg(feature = "postgres")]
+    let kyiv;
+    #[cfg(feature = "postgres")]
+    let pool = match pool.as_postgres() {
+        // One connection, so the session zone holds for every query.
+        Some(_) => {
+            let url = std::env::var("DATABASE_URL").expect("the PG arm runs on DATABASE_URL");
+            let one = rustango::sql::sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&url)
+                .await
+                .expect("one connection");
+            rustango::sql::sqlx::query("SET TIME ZONE 'Europe/Kyiv'")
+                .execute(&one)
+                .await
+                .expect("session zone");
+            kyiv = Pool::from(one);
+            &kyiv
+        }
+        None => pool,
+    };
+    let months =
+        rustango::sql::fetch_dates_pool(pool, Item::objects().dates("created_at", DateKind::Month))
+            .await
+            .expect("dates");
+    assert_eq!(months, [NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()]);
+    let days = rustango::sql::fetch_datetimes_pool(
+        pool,
+        Item::objects().datetimes("created_at", DateTimeKind::Day),
+    )
+    .await
+    .expect("datetimes");
+    assert_eq!(days, [Utc.with_ymd_and_hms(2026, 2, 28, 0, 0, 0).unwrap()]);
+}
+
+/// PARTITION BY / ORDER BY of a window take the base table beside a join.
+async fn window_columns_beside_a_join(pool: &Pool) {
+    Owner { id: 1 }.insert_pool(pool).await.expect("owner");
+    for id in [1, 2] {
+        Pet {
+            id,
+            owner: ForeignKey::unloaded(1),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("pet");
+    }
+    let rows = Pet::objects()
+        .join(Join {
+            target: Owner::SCHEMA,
+            alias: "owner",
+            kind: JoinKind::Inner,
+            on: WhereExpr::ExprCompare {
+                lhs: aliased("owner", "id"),
+                op: Op::Eq,
+                rhs: aliased("oqe_pet", "owner_ref"),
+            },
+            project: vec![],
+        })
+        .aggregate()
+        .group_by("id")
+        .group_by("owner_ref")
+        .annotate(
+            "rn",
+            rustango::core::window::row_number()
+                .partition_by("owner_ref")
+                .order_by(&[("id", true)])
+                .into(),
+        )
+        .fetch(pool)
+        .await
+        .expect("`id` is not ambiguous");
+    assert_eq!(rows.len(), 2);
+}
+
+/// `contains` / `startswith` / `endswith` and `like` match case.
+async fn like_lookups_match_case(pool: &Pool) {
+    items(
+        pool,
+        &[
+            (1, "a", "Rust", None),
+            (2, "a", "rust", None),
+            (3, "a", "RUST", None),
+            (4, "a", "a_b*?[x]", None),
+        ],
+    )
+    .await;
+    let ids = |rows: Vec<Item>| {
+        let mut v: Vec<i64> = rows.iter().map(|i| i.id).collect();
+        v.sort_unstable();
+        v
+    };
+    for (lookup, value, want) in [
+        ("title__contains", "Rust", vec![1]),
+        ("title__startswith", "ru", vec![2]),
+        ("title__endswith", "ST", vec![3]),
+        ("title__contains", "*?[", vec![4]),
+        ("title__contains", "_", vec![4]),
+        ("title__icontains", "rust", vec![1, 2, 3]),
+        ("title__like", "R%t", vec![1]),
+    ] {
+        let rows = Item::objects()
+            .filter(lookup, value)
+            .fetch(pool)
+            .await
+            .expect(lookup);
+        assert_eq!(ids(rows), want, "{lookup} {value}");
+    }
+}
+
+/// `UPDATE … SET out = expr` for row `id`, then read `out` back.
+async fn set_out(pool: &Pool, id: i64, expr: rustango::core::Expr) -> Option<String> {
+    Item::objects()
+        .filter("id", id)
+        .update()
+        .set_expr("out", expr)
+        .execute_on(pool)
+        .await
+        .expect("update");
+    Item::objects()
+        .filter("id", id)
+        .fetch(pool)
+        .await
+        .expect("read")[0]
+        .out
+        .clone()
+}
+
+/// `concat` with a NULL operand is NULL on every backend.
+async fn concat_with_null_is_null(pool: &Pool) {
+    use rustango::core::{funcs::concat, F};
+    items(pool, &[(1, "a", "Ann", None), (2, "a", "Bo", Some("B"))]).await;
+    let full = || concat([F("title").into(), " ".into(), F("middle").into()]);
+    assert_eq!(set_out(pool, 1, full()).await, None);
+    assert_eq!(set_out(pool, 2, full()).await.as_deref(), Some("Bo B"));
+}
+
+/// `round_to` on a float column runs on PG too.
+async fn round_to_on_a_float(pool: &Pool) {
+    use rustango::core::{funcs::round_to, F};
+    items(pool, &[(1, "a", "t", None)]).await;
+    Item::objects()
+        .update()
+        .set_expr("score", round_to(F("score"), 2_i32))
+        .execute_on(pool)
+        .await
+        .expect("round(double precision, int)");
+    let score = Item::objects().fetch(pool).await.expect("read")[0].score;
+    assert!((score - 1.23).abs() < 1e-9, "{score}");
+}
+
+/// `lpad` cuts a long input on the right and repeats a fill from its start.
+async fn lpad_matches_pg(pool: &Pool) {
+    use rustango::core::{funcs::lpad, F};
+    items(pool, &[(1, "a", "hello", None), (2, "a", "x", None)]).await;
+    let pad = |len: i32, fill: &str| lpad(F("title"), len, fill.to_owned());
+    assert_eq!(set_out(pool, 1, pad(3, "x")).await.as_deref(), Some("hel"));
+    assert_eq!(
+        set_out(pool, 2, pad(5, "ab")).await.as_deref(),
+        Some("ababx")
+    );
+}
+
+/// XOR counts a NULL operand as false, with two operands or more.
+async fn xor_counts_null_as_false(pool: &Pool) {
+    items(pool, &[(1, "a", "t", None), (2, "a", "t", Some("m"))]).await;
+    let a = || Item::middle.eq(Some("m".to_owned()));
+    let two: Vec<i64> = Item::objects()
+        .where_(a().xor(Item::id.eq(1)))
+        .fetch(pool)
+        .await
+        .expect("two")
+        .iter()
+        .map(|i| i.id)
+        .collect();
+    let three: Vec<i64> = Item::objects()
+        .where_(a().xor(Item::id.eq(1)).xor(Item::id.eq(-1)))
+        .fetch(pool)
+        .await
+        .expect("three")
+        .iter()
+        .map(|i| i.id)
+        .collect();
+    let mut both = [two, three];
+    for v in &mut both {
+        v.sort_unstable();
+    }
+    assert_eq!(both[0], [1, 2], "NULL xor TRUE keeps the row");
+    assert_eq!(both[0], both[1]);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -556,5 +841,14 @@ tri_dialect_test! {
         prefetch_reverse_generic_by_a_renamed_column,
         generic_reads_apply_global_scopes,
         in_lists_match_alike_and_share_a_statement,
+        distinct_values_ordered_by_another_column,
+        page_past_the_end_keeps_its_total,
+        date_buckets_are_utc,
+        window_columns_beside_a_join,
+        like_lookups_match_case,
+        concat_with_null_is_null,
+        round_to_on_a_float,
+        lpad_matches_pg,
+        xor_counts_null_as_false,
     ],
 }

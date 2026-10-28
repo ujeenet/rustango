@@ -84,3 +84,26 @@ pub(super) fn paginated_statement(
     crate::sql::writers::write_compound_with_total(&mut b, select)?;
     b.finish()
 }
+
+/// The pre-LIMIT count for a page past the last row, which has no row to
+/// carry `__rustango_total`. `None` when the query has no OFFSET.
+pub(super) fn total_statement(
+    d: &dyn crate::sql::Dialect,
+    select: &crate::core::SelectQuery,
+) -> Result<Option<crate::sql::CompiledStatement>, crate::sql::SqlError> {
+    let offset = if select.compound.is_empty() {
+        select.offset
+    } else {
+        select.compound_offset
+    };
+    if offset.unwrap_or(0) <= 0 {
+        return Ok(None);
+    }
+    let mut all = select.clone();
+    all.limit = None;
+    all.offset = None;
+    all.compound_limit = None;
+    all.compound_offset = None;
+    d.compile_count(&crate::core::CountQuery::from_select(all))
+        .map(Some)
+}

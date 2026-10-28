@@ -425,8 +425,7 @@ impl Dialect for Sqlite {
     /// your own. Without one the query parses but fails at run time
     /// with `no such function: REGEXP`.
     ///
-    /// For the case-insensitive form, both sides are lowercased, as
-    /// with ILIKE. That folds ASCII only.
+    /// The case-insensitive form prefixes the pattern with `(?i)`.
     fn write_regex(
         &self,
         sql: &mut String,
@@ -435,17 +434,13 @@ impl Dialect for Sqlite {
         case_sensitive: bool,
         negated: bool,
     ) {
-        let kw = if negated { " NOT REGEXP " } else { " REGEXP " };
+        sql.push_str(qualified_col);
+        sql.push_str(if negated { " NOT REGEXP " } else { " REGEXP " });
+        // Lowering the pattern would turn `\D` into `\d`.
         if case_sensitive {
-            sql.push_str(qualified_col);
-            sql.push_str(kw);
             sql.push_str(placeholder);
         } else {
-            sql.push_str("LOWER(");
-            sql.push_str(qualified_col);
-            sql.push(')');
-            sql.push_str(kw);
-            sql.push_str("LOWER(");
+            sql.push_str("('(?i)' || ");
             sql.push_str(placeholder);
             sql.push(')');
         }

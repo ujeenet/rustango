@@ -1,10 +1,9 @@
 //! Tri-dialect emission tests for `__regex` / `__iregex` lookups
 //! (issue #26) — `Q::regex("name", "^foo.*")` / `Q::iregex(...)`
 //! plus the negated forms. PG uses native
-//! `~` / `~*` / `!~` / `!~*` POSIX operators; MySQL uses `REGEXP`
-//! (with LOWER fallback for case-insensitive); SQLite uses
-//! `REGEXP` (delegating to the loaded `regexp` user-function),
-//! same LOWER fallback for case-insensitive.
+//! `~` / `~*` / `!~` / `!~*` POSIX operators; MySQL and SQLite use
+//! `REGEXP` with an inline `(?i)` / `(?-i)` flag (SQLite delegates to
+//! the loaded `regexp` user-function).
 
 use rustango::core::Column as _;
 #[cfg(feature = "mysql")]
@@ -79,7 +78,7 @@ fn not_iregex_emits_bang_tilde_star_on_pg() {
     );
 }
 
-// ---------- MySQL: REGEXP keyword + LOWER fallback ----------
+// ---------- MySQL: REGEXP with an inline case flag ----------
 
 #[cfg(feature = "mysql")]
 #[test]
@@ -90,15 +89,11 @@ fn regex_emits_regexp_keyword_on_mysql() {
         .unwrap();
     let stmt = MySql.compile_select(&q).unwrap();
     assert!(
-        stmt.sql.contains("`name` REGEXP ?"),
-        "MySQL REGEXP: {}",
+        stmt.sql.contains("`name` REGEXP CONCAT('(?-i)', ?)"),
+        "MySQL REGEXP, case-sensitive whatever the collation: {}",
         stmt.sql
     );
-    assert!(
-        !stmt.sql.contains("LOWER"),
-        "case-sensitive on MySQL — no LOWER wrap: {}",
-        stmt.sql
-    );
+    assert!(!stmt.sql.contains("LOWER"), "no LOWER wrap: {}", stmt.sql);
 }
 
 #[cfg(feature = "mysql")]
@@ -110,7 +105,7 @@ fn not_regex_emits_not_regexp_keyword_on_mysql() {
         .unwrap();
     let stmt = MySql.compile_select(&q).unwrap();
     assert!(
-        stmt.sql.contains("`name` NOT REGEXP ?"),
+        stmt.sql.contains("`name` NOT REGEXP CONCAT('(?-i)', ?)"),
         "MySQL NOT REGEXP: {}",
         stmt.sql
     );
@@ -118,35 +113,35 @@ fn not_regex_emits_not_regexp_keyword_on_mysql() {
 
 #[cfg(feature = "mysql")]
 #[test]
-fn iregex_wraps_lower_on_mysql() {
+fn iregex_flags_the_pattern_on_mysql() {
     let q = User::objects()
         .where_(User::name.iregex("admin"))
         .compile()
         .unwrap();
     let stmt = MySql.compile_select(&q).unwrap();
     assert!(
-        stmt.sql.contains("LOWER(`name`) REGEXP LOWER(?)"),
-        "MySQL iregex LOWER fallback: {}",
+        stmt.sql.contains("`name` REGEXP CONCAT('(?i)', ?)"),
+        "MySQL iregex flag, the pattern kept as is: {}",
         stmt.sql
     );
 }
 
 #[cfg(feature = "mysql")]
 #[test]
-fn not_iregex_wraps_lower_on_mysql() {
+fn not_iregex_flags_the_pattern_on_mysql() {
     let q = User::objects()
         .where_(User::name.not_iregex("admin"))
         .compile()
         .unwrap();
     let stmt = MySql.compile_select(&q).unwrap();
     assert!(
-        stmt.sql.contains("LOWER(`name`) NOT REGEXP LOWER(?)"),
-        "MySQL NOT iregex LOWER fallback: {}",
+        stmt.sql.contains("`name` NOT REGEXP CONCAT('(?i)', ?)"),
+        "MySQL NOT iregex flag: {}",
         stmt.sql
     );
 }
 
-// ---------- SQLite: REGEXP user-function + LOWER fallback ----------
+// ---------- SQLite: REGEXP user-function + `(?i)` flag ----------
 
 #[cfg(feature = "sqlite")]
 #[test]
@@ -165,15 +160,15 @@ fn regex_emits_regexp_keyword_on_sqlite() {
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn iregex_wraps_lower_on_sqlite() {
+fn iregex_flags_the_pattern_on_sqlite() {
     let q = User::objects()
         .where_(User::name.iregex("admin"))
         .compile()
         .unwrap();
     let stmt = Sqlite.compile_select(&q).unwrap();
     assert!(
-        stmt.sql.contains(r#"LOWER("name") REGEXP LOWER(?)"#),
-        "SQLite iregex LOWER fallback: {}",
+        stmt.sql.contains(r#""name" REGEXP ('(?i)' || ?)"#),
+        "SQLite iregex flag: {}",
         stmt.sql
     );
 }

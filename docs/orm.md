@@ -99,9 +99,8 @@ let either_but_not_both = Post::objects()
     .where_(Post::status.eq("draft").xor(Post::author_id.eq(42)))
     .fetch(&pool).await?;
 // Tri-dialect emission: native logical XOR exists on MySQL but not PG
-// or SQLite, so the writer emits a portable rewrite uniformly —
-// `(a AND NOT b) OR (NOT a AND b)` for the binary form, or a
-// CASE-WHEN-1/0 tally `% 2 = 1` for N-ary chains.
+// or SQLite, so the writer emits a portable CASE-WHEN-1/0 tally
+// `% 2 = 1`; a NULL operand counts as false.
 ```
 
 ### Comparison filters
@@ -501,8 +500,8 @@ User::objects()
 | Dialect | Case-sensitive | Case-insensitive | Notes |
 |---|---|---|---|
 | PostgreSQL | `<col> ~ ?` / `<col> !~ ?` | `<col> ~* ?` / `<col> !~* ?` | Native POSIX operators |
-| MySQL | `` `col` REGEXP ? `` / `` `col` NOT REGEXP ? `` | `LOWER(`col`) REGEXP LOWER(?)` (negated wraps `NOT`) | LOWER() fallback for `i*` |
-| SQLite | `"col" REGEXP ?` / `"col" NOT REGEXP ?` | `LOWER("col") REGEXP LOWER(?)` (negated wraps `NOT`) | Needs the `regexp` user-function loaded on the connection |
+| MySQL | `` `col` REGEXP CONCAT('(?-i)', ?) `` / `NOT REGEXP` | `` `col` REGEXP CONCAT('(?i)', ?) `` / `NOT REGEXP` | Inline ICU/PCRE flag, whatever the collation |
+| SQLite | `"col" REGEXP ?` / `"col" NOT REGEXP ?` | `"col" REGEXP ('(?i)' \|\| ?)` / `NOT REGEXP` | Needs the `regexp` user-function loaded on the connection |
 
 **SQLite requires a registered `regexp` user-function** — it's not built in. sqlx-sqlite 0.8 does **not** register one by default. Two paths to enable it:
 
@@ -1745,7 +1744,7 @@ Post::objects().where_(Post::author_id.eq(42));
 | *(none)* / `__exact` | `=` | scalar | bare key is exact-eq; `None` → `IS NULL` |
 | `__ne` | `<>` | scalar | `None` → `IS NOT NULL` |
 | `__gt` / `__gte` / `__lt` / `__lte` | `>` `>=` `<` `<=` | scalar | |
-| `__contains` | `LIKE` | string | wraps value as `%v%` |
+| `__contains` | `LIKE` | string | wraps value as `%v%`; case-sensitive everywhere (MySQL `COLLATE utf8mb4_bin`, SQLite `GLOB`) |
 | `__icontains` | `ILIKE` | string | wraps value as `%v%`; MySQL emulated via `LOWER()` |
 | `__startswith` | `LIKE` | string | wraps as `v%` |
 | `__istartswith` | `ILIKE` | string | wraps as `v%` |
@@ -1755,7 +1754,7 @@ Post::objects().where_(Post::author_id.eq(42));
 | `__in` | `IN (…)` | `SqlValue::List` | rejects non-list values |
 | `__isnull` | `IS NULL` / `IS NOT NULL` | `bool` | `true` → IS NULL, `false` → IS NOT NULL |
 | `__between` / `__range` | `BETWEEN … AND …` | 2-elt `SqlValue::List` | inclusive on both ends |
-| `__regex` / `__iregex` | PG `~` / `~*`, MySQL/SQLite `REGEXP` | string | case-insensitive emulated on MySQL/SQLite via `LOWER()` wrap; SQLite needs a `regexp` user-function |
+| `__regex` / `__iregex` | PG `~` / `~*`, MySQL/SQLite `REGEXP` | string | case flag inline as `(?i)` / `(?-i)` on MySQL/SQLite; SQLite needs a `regexp` user-function |
 
 > **LIKE metacharacters are escaped.** `__contains` / `__startswith` / `__endswith` (and their `i` variants) treat the value as a **literal** substring — a `%` or `_` in it matches itself, not as a wildcard. The framework escapes them and emits `ESCAPE '!'`, honored on all three dialects. For a raw pattern where you place your own `%` / `_`, use `__like` / `__ilike`, which bind the value verbatim.
 
