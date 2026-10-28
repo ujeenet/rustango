@@ -57,6 +57,32 @@ pub const DEFAULT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// The signal a graceful server stops accepting on.
 pub type StopSignal = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
+/// Bind `addr` and log where the server listens: every serve path binds
+/// here, so none starts silently. `apex` adds the operator console URL.
+///
+/// # Errors
+/// The bind failure.
+#[cfg(feature = "_axum")]
+pub(crate) async fn bind_announced(
+    addr: &str,
+    apex: Option<&str>,
+) -> std::io::Result<tokio::net::TcpListener> {
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+    match apex {
+        Some(apex) => tracing::info!(
+            target: "rustango::server",
+            addr = %bound,
+            "listening on http://{bound}; operator console at http://{apex}:{}/",
+            bound.port()
+        ),
+        None => {
+            tracing::info!(target: "rustango::server", addr = %bound, "listening on http://{bound}")
+        }
+    }
+    Ok(listener)
+}
+
 /// Serve `app` until [`shutdown_signal`], then give open connections
 /// `drain` to finish. SSE and long-poll never finish on their own, so
 /// without a deadline SIGTERM waited for SIGKILL (#1883). This is the
@@ -215,6 +241,31 @@ async fn serve_with(
 #[cfg(all(test, feature = "_axum"))]
 mod tests {
     use super::*;
+
+    /// A developer sees where the server listens, and the console URL with tenancy.
+    #[cfg(feature = "runtime")]
+    #[tokio::test]
+    async fn binding_logs_the_address() {
+        use tracing::instrument::WithSubscriber as _;
+        for apex in [None, Some("shop.localhost")] {
+            let out = crate::testkit::CaptureWriter::default();
+            let sub = tracing_subscriber::fmt()
+                .with_writer(out.clone())
+                .with_ansi(false)
+                .finish();
+            let listener = bind_announced("127.0.0.1:0", apex)
+                .with_subscriber(sub)
+                .await
+                .unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let logs = out.contents();
+            assert!(logs.contains(" INFO "), "{logs}");
+            assert!(logs.contains(&format!("http://127.0.0.1:{port}")), "{logs}");
+            if let Some(apex) = apex {
+                assert!(logs.contains(&format!("http://{apex}:{port}/")), "{logs}");
+            }
+        }
+    }
 
     /// A request that never ends (long-poll, SSE) must not hold
     /// shutdown past the deadline (#1883).

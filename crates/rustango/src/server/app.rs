@@ -185,7 +185,7 @@ impl AppBuilder {
     /// an error.
     pub async fn serve(self, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         let app = self.into_app();
-        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let listener = crate::shutdown::bind_announced(addr, None).await?;
         crate::shutdown::serve_until_drained(listener, app, crate::shutdown::DEFAULT_DRAIN_TIMEOUT)
             .await?;
         Ok(())

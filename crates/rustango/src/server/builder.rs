@@ -792,6 +792,7 @@ impl<DB: Database> Builder<DB> {
         // Audit M2 — prod tier requires a valid RUSTANGO_SESSION_SECRET
         // and fails closed; dev/staging keep the disk-persisted keys.
         let tier = crate::session::tier_from_env();
+        crate::aead::use_dev_key_file_for_env();
         let session_secret_for_tenant = crate::session::load_session_secret_for_tier(
             &tier,
             std::path::Path::new(crate::session::TENANT_SESSION_KEY_PATH),
@@ -1182,6 +1183,13 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
+    /// `run-server --apex`, which beats the apex `from_env` read.
+    #[cfg(feature = "manage")]
+    pub(crate) fn with_apex(mut self, apex: String) -> Self {
+        self.apex = apex;
+        self
+    }
+
     /// Assemble everything and bind.
     ///
     /// # Errors
@@ -1191,8 +1199,9 @@ impl<DB: Database> Builder<DB> {
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
         let drain = self.drain_timeout;
+        let apex = self.apex.clone();
         let app = self.into_router().await?;
-        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let listener = crate::shutdown::bind_announced(addr, Some(&apex)).await?;
         let app = tag_listener_port(app, &listener)?;
         crate::shutdown::serve_until_drained(listener, app, drain).await?;
         Ok(())

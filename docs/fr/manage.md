@@ -843,6 +843,8 @@ cargo run                        # implicit
 cargo run -- runserver           # explicit
 ```
 
+`--bind <addr>` l'emporte sur `RUSTANGO_BIND` et `[server] bind` ; dans un projet tenancy, `--apex <domain>` l'emporte sur `RUSTANGO_APEX_DOMAIN` et `[tenancy] apex_domain`. Tout autre flag est refusé. Le serveur journalise en INFO l'adresse où il écoute.
+
 Sur SIGTERM, il n'accepte plus de connexions et laisse aux connexions ouvertes
 `[server] shutdown_timeout_secs` (20 par défaut) pour finir, puis ferme le reste.
 SSE et long-poll ne finissent jamais seuls. Les exécutions de provisionnement et

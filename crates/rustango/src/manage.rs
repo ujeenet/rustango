@@ -34,6 +34,7 @@ use std::pin::Pin;
 use axum::Router;
 
 mod command;
+mod serve_args;
 pub use command::{CommandContext, CommandError, CommandFuture};
 #[doc(hidden)]
 pub use command::{CommandEntry, __command_future};
@@ -126,6 +127,9 @@ pub struct Cli {
     /// Routers built from the serving pool, by mount path.
     nested: Vec<(String, NestFn)>,
     bind: String,
+    /// `run-server --apex`; beats the env var and `[tenancy] apex_domain`.
+    #[cfg(feature = "tenancy")]
+    apex: Option<String>,
     migrations_dir: PathBuf,
     tenancy: bool,
     /// Optional override for the framework's reserved URL prefixes
@@ -223,6 +227,8 @@ impl Cli {
             on_shutdown: None,
             nested: Vec::new(),
             bind: std::env::var("RUSTANGO_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
+            #[cfg(feature = "tenancy")]
+            apex: None,
             migrations_dir: PathBuf::from("./migrations"),
             tenancy: false,
             #[cfg(feature = "tenancy")]
@@ -898,6 +904,12 @@ impl Cli {
         args: Vec<String>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.command_set = command::CommandSet::build(&self.commands)?;
+        // Dev and test only; read on first use, so most verbs never touch the file.
+        #[cfg(all(
+            feature = "_aead",
+            any(feature = "admin", feature = "tenancy", feature = "csrf")
+        ))]
+        crate::aead::use_dev_key_file_for_env();
         let verb = args.first().map_or("", String::as_str);
         // A management verb's stdout is its output (`dumpdata > fx.json`),
         // so its logs go to stderr, also through `#[rustango::main]`'s subscriber.
@@ -937,8 +949,35 @@ impl Cli {
             // hyphenated form fell through to `dispatch()` →
             // `tenancy::manage::run_with_init`, which **silently
             // skipped the `.seed()` hook**. Accept both forms.
-            v if crate::logging::is_server_verb(v) => self.runserver().await,
+            v if crate::logging::is_server_verb(v) => {
+                match self.take_serve_args(args.get(1..).unwrap_or_default())? {
+                    Some(help) => {
+                        println!("{help}");
+                        Ok(())
+                    }
+                    None => self.runserver().await,
+                }
+            }
             _ => self.dispatch(args).await,
+        }
+    }
+
+    /// Apply `run-server`'s flags; `Some` is the usage text to print instead.
+    fn take_serve_args(&mut self, args: &[String]) -> Result<Option<String>, String> {
+        match serve_args::parse(args, self.tenancy)? {
+            serve_args::ServeArgs::Help(text) => Ok(Some(text)),
+            serve_args::ServeArgs::Serve { bind, apex } => {
+                if let Some(bind) = bind {
+                    self.bind = bind;
+                }
+                #[cfg(feature = "tenancy")]
+                if apex.is_some() {
+                    self.apex = apex;
+                }
+                #[cfg(not(feature = "tenancy"))]
+                let _ = apex;
+                Ok(None)
+            }
         }
     }
 
@@ -1502,8 +1541,7 @@ impl Cli {
             }
             let drain = self.drain_timeout();
             let app = self.assemble_app(pool);
-            let listener = tokio::net::TcpListener::bind(&self.bind).await?;
-            eprintln!("server listening on http://{}", listener.local_addr()?);
+            let listener = crate::shutdown::bind_announced(&self.bind, None).await?;
             crate::shutdown::serve_until_drained(listener, app, drain).await?;
             run_shutdown_hook(self.on_shutdown).await;
             return Ok(());
@@ -1535,8 +1573,7 @@ impl Cli {
                 }
                 let drain = self.drain_timeout();
                 let app = self.assemble_app(pool);
-                let listener = tokio::net::TcpListener::bind(&self.bind).await?;
-                eprintln!("server listening on http://{}", listener.local_addr()?);
+                let listener = crate::shutdown::bind_announced(&self.bind, None).await?;
                 crate::shutdown::serve_until_drained(listener, app, drain).await?;
                 run_shutdown_hook(self.on_shutdown).await;
                 return Ok(());
@@ -1559,8 +1596,7 @@ impl Cli {
             }
             let drain = self.drain_timeout();
             let app = self.assemble_app(pool);
-            let listener = tokio::net::TcpListener::bind(&self.bind).await?;
-            eprintln!("server listening on http://{}", listener.local_addr()?);
+            let listener = crate::shutdown::bind_announced(&self.bind, None).await?;
             crate::shutdown::serve_until_drained(listener, app, drain).await?;
             run_shutdown_hook(self.on_shutdown).await;
             Ok(())
@@ -1611,6 +1647,9 @@ impl Cli {
             .await?
             .api(api)
             .drain_timeout(self.drain_timeout());
+        if let Some(apex) = self.apex.take() {
+            builder = builder.with_apex(apex);
+        }
         builder = self.tenancy_builder(builder, outer);
         if self.health_endpoints {
             builder = builder.with_health();
@@ -1681,7 +1720,10 @@ impl Cli {
         let outer = None;
         // Not `mount_observability` — see the dispatch path above. The
         // builder applies these to the outermost router.
-        let apex = crate::tenancy::server::apex_domain();
+        let apex = self
+            .apex
+            .take()
+            .unwrap_or_else(crate::tenancy::server::apex_domain);
         let registry_url =
             crate::env::database_url_from_env().map_err(|e| -> Box<dyn std::error::Error> {
                 format!(
@@ -2342,6 +2384,72 @@ mod tests {
     fn seed_hook_stored() {
         let cli = Cli::new().seed(|_pool| async { Ok(()) });
         assert!(cli.seed.is_some());
+    }
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// `run-server --bind` beats `RUSTANGO_BIND` and `[server] bind`.
+    #[test]
+    fn run_server_flags_beat_env_and_settings() {
+        for tenancy in [false, true] {
+            let mut cli = Cli::new().bind("127.0.0.1:9090");
+            if tenancy {
+                cli = cli.tenancy();
+            }
+            #[cfg(feature = "config")]
+            {
+                let mut s = crate::config::Settings::default();
+                s.server.bind = Some("127.0.0.1:9091".into());
+                cli = cli.with_settings(&s);
+            }
+            let flags = args(&["--bind", "127.0.0.1:8099"]);
+            assert_eq!(cli.take_serve_args(&flags), Ok(None));
+            assert_eq!(cli.bind, "127.0.0.1:8099", "tenancy={tenancy}");
+        }
+        #[cfg(feature = "tenancy")]
+        {
+            let mut cli = Cli::new().tenancy();
+            assert_eq!(
+                cli.take_serve_args(&args(&["--apex", "shop.test"])),
+                Ok(None)
+            );
+            assert_eq!(cli.apex.as_deref(), Some("shop.test"));
+        }
+    }
+
+    /// An unknown flag is refused before any database is opened, on both paths.
+    #[tokio::test]
+    async fn run_server_refuses_unknown_flags() {
+        for tenancy in [false, true] {
+            for verb in ["run-server", "runserver"] {
+                let cli = if tenancy {
+                    Cli::new().tenancy()
+                } else {
+                    Cli::new()
+                };
+                let err = cli
+                    .run_with_args(args(&[verb, "--bogus"]))
+                    .await
+                    .expect_err("unknown flag accepted");
+                assert!(
+                    err.to_string().contains("unknown argument `--bogus`"),
+                    "{err}"
+                );
+            }
+        }
+        let err = Cli::new()
+            .run_with_args(args(&["run-server", "--apex", "x"]))
+            .await
+            .expect_err("--apex without tenancy");
+        assert!(err.to_string().contains("tenancy"), "{err}");
+        // `--help` prints the usage and opens nothing.
+        Cli::new()
+            .tenancy()
+            .run_with_args(args(&["run-server", "--help"]))
+            .await
+            .expect("help");
     }
 
     /// `Cli::with_settings` honors `Settings.server.bind` when

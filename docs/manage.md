@@ -920,6 +920,8 @@ cargo run                        # implicit
 cargo run -- runserver           # explicit
 ```
 
+`--bind <addr>` beats `RUSTANGO_BIND` and `[server] bind`; in a tenancy project `--apex <domain>` beats `RUSTANGO_APEX_DOMAIN` and `[tenancy] apex_domain`. Any other flag is refused. The server logs the address it listens on at INFO.
+
 On SIGTERM it stops accepting and gives open connections
 `[server] shutdown_timeout_secs` (default 20) to finish, then closes the rest.
 SSE and long-poll never finish by themselves. Provisioning and migration runs

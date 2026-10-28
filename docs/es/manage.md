@@ -807,6 +807,8 @@ cargo run                        # implicit
 cargo run -- runserver           # explicit
 ```
 
+`--bind <addr>` gana a `RUSTANGO_BIND` y `[server] bind`; en un proyecto tenancy, `--apex <domain>` gana a `RUSTANGO_APEX_DOMAIN` y `[tenancy] apex_domain`. Cualquier otro flag se rechaza. El servidor registra en INFO la dirección en la que escucha.
+
 Con SIGTERM deja de aceptar conexiones y da a las abiertas
 `[server] shutdown_timeout_secs` (20 por defecto) para terminar; luego cierra el
 resto. SSE y long-poll nunca terminan solos. Las ejecuciones de aprovisionamiento
