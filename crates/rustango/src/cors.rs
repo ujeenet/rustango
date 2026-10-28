@@ -171,6 +171,8 @@ impl CorsLayer {
     /// - Named origins give an allowlist plus the methods and
     ///   headers most APIs need. For tighter control, build the
     ///   layer yourself.
+    /// - `cors_allowed_headers` / `cors_expose_headers` add to the
+    ///   framework's lists; `cors_allow_credentials` sets credentials.
     ///
     /// ```no_run
     /// # use rustango::cors::{CorsLayer, CorsRouterExt};
@@ -187,10 +189,9 @@ impl CorsLayer {
         if s.cors_allowed_origins.is_empty() {
             return None;
         }
-        if s.cors_allowed_origins.iter().any(|o| o == "*") {
-            return Some(Self::permissive());
-        }
-        Some(
+        let layer = if s.cors_allowed_origins.iter().any(|o| o == "*") {
+            Self::permissive()
+        } else {
             Self::new()
                 .allow_origins(s.cors_allowed_origins.iter().cloned())
                 .allow_methods([
@@ -198,7 +199,24 @@ impl CorsLayer {
                 ])
                 .allow_headers(FRAMEWORK_REQUEST_HEADERS)
                 .expose_headers(FRAMEWORK_RESPONSE_HEADERS)
-                .max_age(Duration::from_secs(3600)),
+                .max_age(Duration::from_secs(3600))
+        };
+        let merge = |base: Vec<String>, extra: &[String]| -> Vec<String> {
+            let mut out = base;
+            for h in extra {
+                if !out.iter().any(|b| b == "*" || b.eq_ignore_ascii_case(h)) {
+                    out.push(h.clone());
+                }
+            }
+            out
+        };
+        let allow = merge(layer.allow_headers.clone(), &s.cors_allowed_headers);
+        let expose = merge(layer.expose_headers.clone(), &s.cors_expose_headers);
+        Some(
+            layer
+                .allow_headers(allow)
+                .expose_headers(expose)
+                .allow_credentials(s.cors_allow_credentials.unwrap_or(false)),
         )
     }
 
@@ -623,6 +641,39 @@ mod tests {
         assert!(layer
             .resolve_origin(Some("https://other.example.com"))
             .is_none());
+    }
+
+    /// `[security]` CORS headers and credentials add to the framework's lists.
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_merges_configured_headers_and_credentials() {
+        let mut s = crate::config::SecuritySettings::default();
+        s.cors_allowed_origins = vec!["https://app.example.com".into()];
+        s.cors_allowed_headers = vec!["X-Tenant".into(), "authorization".into()];
+        s.cors_expose_headers = vec!["X-Total-Count".into()];
+        s.cors_allow_credentials = Some(true);
+        let layer = CorsLayer::from_settings(&s).expect("Some");
+        let mut resp = Response::new(Body::empty());
+        attach_cors_headers(&layer, Some("https://app.example.com"), None, &mut resp);
+        let header = |name| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+        };
+        let allowed = header(ACCESS_CONTROL_ALLOW_HEADERS);
+        assert!(
+            allowed.contains("x-tenant") && allowed.contains("idempotency-key"),
+            "{allowed}"
+        );
+        assert_eq!(allowed.matches("authorization").count(), 1, "{allowed}");
+        let exposed = header(ACCESS_CONTROL_EXPOSE_HEADERS);
+        assert!(
+            exposed.contains("x-total-count") && exposed.contains("etag"),
+            "{exposed}"
+        );
+        assert_eq!(header(ACCESS_CONTROL_ALLOW_CREDENTIALS), "true");
     }
 
     /// A browser client can send the idempotency and HMAC headers, and

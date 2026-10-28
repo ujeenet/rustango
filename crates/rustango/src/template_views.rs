@@ -1683,7 +1683,7 @@ fn form_fields(
                 name: f.name,
                 column: f.column,
                 ty: field_type_label(f.ty),
-                required: input_required(f),
+                required: input_required(f, kind),
                 max_length: f.max_length,
                 value,
             }
@@ -1691,11 +1691,16 @@ fn form_fields(
         .collect()
 }
 
-/// Whether the input must be filled. An unticked checkbox is `false`, and
-/// a `blank` string may be empty, so neither is `required`.
-fn input_required(f: &FieldSchema) -> bool {
+/// Whether the input must be filled. An unticked checkbox is `false`, a
+/// `blank` string may be empty, and on create an empty defaulted field
+/// takes its column default, so none of those is `required`.
+fn input_required(f: &FieldSchema, kind: crate::core::WriteKind) -> bool {
     use crate::core::FieldType as T;
-    !f.nullable && f.ty != T::Bool && !(f.blank && f.ty == T::String)
+    !f.nullable
+        && f.ty != T::Bool
+        && !(f.blank && f.ty == T::String)
+        && !(kind == crate::core::WriteKind::Insert
+            && crate::forms::absent_takes_default(f, crate::forms::Encoding::Form))
 }
 
 fn field_type_label(ty: crate::core::FieldType) -> &'static str {
@@ -2229,7 +2234,16 @@ fn parse_form(
             continue;
         }
         let raw = raw.cloned().unwrap_or_default();
-        if raw.is_empty() && input_required(f) {
+        // Sent empty where empty is no value: a defaulted field's create takes the default.
+        if raw.is_empty()
+            && kind == crate::core::WriteKind::Insert
+            && !f.nullable
+            && !(f.blank && f.ty == crate::core::FieldType::String)
+            && crate::forms::absent_takes_default(f, crate::forms::Encoding::Form)
+        {
+            continue;
+        }
+        if raw.is_empty() && input_required(f, kind) {
             errors.insert(f.name.to_owned(), "this field is required".to_owned());
             continue;
         }
@@ -4894,7 +4908,7 @@ mod tests {
         pub name: String,
     }
 
-    /// CreateView renders and parses a natural PK; UpdateView does not (#1725).
+    /// CreateView renders and parses a natural PK; UpdateView does not.
     #[test]
     fn create_view_keeps_a_natural_pk() {
         use crate::core::WriteKind;
@@ -4939,6 +4953,8 @@ mod tests {
         pub title: String,
         pub at: Option<chrono::DateTime<chrono::Utc>>,
         pub meta: serde_json::Value,
+        #[rustango(default = "3")]
+        pub rank: i32,
     }
 
     fn submitted(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -4949,7 +4965,7 @@ mod tests {
     }
 
     /// An unticked box is `false` and a `blank` string may be empty, so
-    /// neither input is `required`; a box reads `true`/`false` (#1735, #1586).
+    /// neither input is `required`; a box reads `true`/`false`.
     #[test]
     fn checkboxes_and_blank_strings_are_not_required() {
         use crate::core::WriteKind;
@@ -4971,8 +4987,31 @@ mod tests {
         assert!(cols.contains(&"note"), "{cols:?}");
     }
 
+    /// On create a defaulted field is not `required`, and sent empty it
+    /// takes the column default; on update it stays required.
+    #[test]
+    fn a_defaulted_field_is_optional_on_create() {
+        use crate::core::WriteKind;
+        let s = <Flagged as crate::core::Model>::SCHEMA;
+        let required = |kind| {
+            form_fields(s, &every(s), &HashMap::new(), kind)
+                .into_iter()
+                .find(|f| f.name == "rank")
+                .unwrap()
+                .required
+        };
+        assert!(!required(WriteKind::Insert));
+        assert!(required(WriteKind::Update));
+        let form = submitted(&[("title", "t"), ("meta", "{}"), ("rank", "")]);
+        let (cols, _, errors) = parse_form(s, &every(s), &form, WriteKind::Insert);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(!cols.contains(&"rank"), "{cols:?}");
+        let (_, _, errors) = parse_form(s, &every(s), &form, WriteKind::Update);
+        assert!(errors.contains_key("rank"), "{errors:?}");
+    }
+
     /// Stored values fit their inputs: no offset on a datetime, a JSON
-    /// string keeps its quotes (#1734).
+    /// string keeps its quotes.
     #[test]
     fn update_values_fit_their_inputs() {
         let s = <Flagged as crate::core::Model>::SCHEMA;

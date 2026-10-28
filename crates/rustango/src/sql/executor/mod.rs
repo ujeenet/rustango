@@ -145,13 +145,22 @@ fn in_batches(
     let mut seen = std::collections::HashSet::new();
     let keys: Vec<SqlValue> = keys
         .into_iter()
-        .filter(|k| seen.insert(format!("{k:?}")))
+        .filter(|k| seen.insert(dedupe_key(k)))
         .collect();
     if room > 0 && crate::sql::writers::in_list_binds(dialect, &keys) <= room {
         return Ok(vec![keys]);
     }
     let size = in_chunk_size(base.model.table, keys.len(), room, sliced)?;
     Ok(keys.chunks(size).map(<[SqlValue]>::to_vec).collect())
+}
+
+/// One key per distinct value: `I32(1)` and `I64(1)` name the same row.
+fn dedupe_key(k: &SqlValue) -> String {
+    match k {
+        SqlValue::I16(n) => format!("{:?}", SqlValue::I64(i64::from(*n))),
+        SqlValue::I32(n) => format!("{:?}", SqlValue::I64(i64::from(*n))),
+        other => format!("{other:?}"),
+    }
 }
 
 /// `keys` as the `IN` lists one statement over `T` can bind, for the
@@ -3203,6 +3212,13 @@ pub use iter::ChunkedIter;
 #[cfg(test)]
 mod in_chunk_tests {
     use super::*;
+
+    #[test]
+    fn integer_widths_dedupe_as_one_key() {
+        assert_eq!(dedupe_key(&SqlValue::I32(1)), dedupe_key(&SqlValue::I64(1)));
+        assert_eq!(dedupe_key(&SqlValue::I16(1)), dedupe_key(&SqlValue::I64(1)));
+        assert_ne!(dedupe_key(&SqlValue::I64(1)), dedupe_key(&SqlValue::I64(2)));
+    }
 
     #[test]
     fn a_query_that_cannot_be_split_is_refused() {

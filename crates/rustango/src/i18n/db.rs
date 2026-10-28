@@ -224,7 +224,9 @@ pub async fn all_pool(pool: &Pool) -> Result<Vec<Translation>, ExecError> {
 /// change (operator id / username); pass `""` if not tracked.
 ///
 /// # Errors
-/// As the ORM upsert path ([`ExecError`]).
+/// As the ORM upsert path ([`ExecError`]). A `key` over 200 chars or a
+/// `locale` over 16 fails validation with `MaxLengthExceeded` before
+/// any SQL runs; the seed and the editor skip those keys instead.
 pub async fn upsert_pool(
     pool: &Pool,
     locale: &str,

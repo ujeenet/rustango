@@ -786,6 +786,13 @@ pub struct SecuritySettings {
     /// allows everything, though browsers reject it with
     /// credentials.
     pub cors_allowed_origins: Vec<String>,
+    /// Request headers CORS allows on top of the framework's list.
+    pub cors_allowed_headers: Vec<String>,
+    /// Response headers CORS exposes to scripts on top of the framework's list.
+    pub cors_expose_headers: Vec<String>,
+    /// `true` sends `Access-Control-Allow-Credentials`. Default `false`;
+    /// pair it with named origins, not `"*"`.
+    pub cors_allow_credentials: Option<bool>,
     /// Allowed Host headers, enforced by
     /// [`crate::host_validation::AllowedHostsLayer`]. An entry is a
     /// hostname, a `.example.com` wildcard, or `*`. Empty turns the

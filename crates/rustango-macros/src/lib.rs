@@ -6203,12 +6203,10 @@ fn inherent_impl_tokens(
 
             #value_method
 
-            /// Fetch the row with the largest `field` value —
-            /// `SELECT … ORDER BY <field> DESC LIMIT 1`. Returns
-            /// `Ok(None)` for an empty table. Eloquent
-            /// `Model::latest($field)->first()` parity.
-            /// Thin wrapper over `QuerySet::<Self>::default()
-            /// .latest(field, pool)`.
+            /// Fetch the row with the largest non-NULL `field` value.
+            /// Returns `Ok(None)` when the table is empty or every
+            /// `field` is NULL. Thin wrapper over
+            /// `QuerySet::<Self>::default().latest(field, pool)`.
             ///
             /// **Field name** is the Rust field ident as a string
             /// (not the SQL column). It is a runtime `&str`, so an
@@ -6230,10 +6228,8 @@ fn inherent_impl_tokens(
                     .await
             }
 
-            /// Sibling of [`Self::latest`] — fetches the row
-            /// with the smallest `field` value (`ORDER BY <field>
-            /// ASC LIMIT 1`). Eloquent `Model::oldest($field)
-            /// ->first()` parity.
+            /// Sibling of [`Self::latest`]: fetches the row with the
+            /// smallest non-NULL `field` value.
             ///
             /// # Errors
             /// As [`Self::latest`].
@@ -9139,6 +9135,8 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         generic_has_relations: Vec::new(),
     };
     for attr in model_attrs(&input.attrs)? {
+        // The name the user wrote, for hints that quote the attribute.
+        let written = ModelAttrName::of(attr).map_or("rustango", ModelAttrName::as_str);
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("table") {
                 let s: LitStr = meta.value()?.parse()?;
@@ -10153,7 +10151,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 // Both produce `CREATE UNIQUE INDEX <name> ON <table>
                 // (col1, col2)`, where <name> defaults to
                 // `<table>_<col1>_<col2>_uq` when not supplied.
-                let (columns, name) = parse_together_attr(&meta, "unique_together")?;
+                let (columns, name) = parse_together_attr(&meta, "unique_together", written)?;
                 out.indexes.push(IndexAttr {
                     span: meta.path.span(),
                     name,
@@ -10171,7 +10169,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 //
                 //   #[rustango(index_together = "created_at, status")]
                 //   #[rustango(index_together(columns = "created_at, status", name = "x"))]
-                let (columns, name) = parse_together_attr(&meta, "index_together")?;
+                let (columns, name) = parse_together_attr(&meta, "index_together", written)?;
                 out.indexes.push(IndexAttr {
                     span: meta.path.span(),
                     name,
@@ -10748,13 +10746,14 @@ fn split_field_list(raw: &str) -> Vec<String> {
 fn parse_together_attr(
     meta: &syn::meta::ParseNestedMeta<'_>,
     attr: &str,
+    written: &str,
 ) -> syn::Result<(Vec<String>, Option<String>)> {
     // Disambiguate by whether the next token is `=` (key-value) or
     // `(` (parenthesized).
     if meta.input.peek(syn::Token![=]) {
         let cols_lit: LitStr = meta.value()?.parse()?;
         let columns = split_field_list(&cols_lit.value());
-        check_together_columns(meta, attr, &columns)?;
+        check_together_columns(meta, attr, written, &columns)?;
         return Ok((columns, None));
     }
     let mut columns: Option<Vec<String>> = None;
@@ -10777,21 +10776,23 @@ fn parse_together_attr(
             "{attr}(...) requires a `columns = \"col1, col2\"` argument",
         ))
     })?;
-    check_together_columns(meta, attr, &columns)?;
+    check_together_columns(meta, attr, written, &columns)?;
     Ok((columns, name))
 }
 
 fn check_together_columns(
     meta: &syn::meta::ParseNestedMeta<'_>,
     attr: &str,
+    written: &str,
     columns: &[String],
 ) -> syn::Result<()> {
     if columns.len() < 2 {
-        let single = if attr == "unique_together" {
-            "#[rustango(unique)] on the field"
+        let flag = if attr == "unique_together" {
+            "unique"
         } else {
-            "#[rustango(index)] on the field"
+            "index"
         };
+        let single = format!("#[{written}({flag})] on the field");
         return Err(meta.error(format!(
             "{attr} expects two or more columns; for a single-column equivalent use {single}",
         )));
@@ -12066,6 +12067,12 @@ fn check_default_expr(default: &str, kind: DetectedKind) -> Result<(), String> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ');
     let upper = expr.to_ascii_uppercase();
+    if is_word && ["CURRENT_USER", "SESSION_USER", "USER"].contains(&upper.as_str()) {
+        return Err(format!(
+            "`default = \"{expr}\"` works on Postgres only: MySQL refuses it as a default \
+             and SQLite stores the text `{expr}`; set the value in code instead"
+        ));
+    }
     if is_word && !DEFAULT_KEYWORDS.contains(&upper.as_str()) {
         return Err(format!(
             "`default = \"{expr}\"` is raw SQL, so `{expr}` is read as a column name; \
@@ -14900,6 +14907,12 @@ mod field_attr_tests {
         }
         let err = field_error(r#"#[rustango(default = "draft")] s: String"#).unwrap();
         assert!(err.contains(r#"default = "'draft'""#), "{err}");
+        // Valid on Postgres alone, so the message says that, not "a column".
+        let err = field_error(r#"#[rustango(default = "current_user")] s: String"#).unwrap();
+        assert!(
+            err.contains("Postgres only") && !err.contains("column"),
+            "{err}"
+        );
         for good in [
             r#"#[rustango(default = "'draft'")] s: String"#,
             r#"#[rustango(default = "")] s: String"#,
@@ -14984,5 +14997,17 @@ mod model_attr_name_tests {
             field_error(quote! { #[rustango(primary_key)] #[rustango(column = "c")] a: i64 }),
             None
         );
+    }
+
+    /// A hint quotes the attribute under the name the user wrote.
+    #[test]
+    fn hints_use_the_written_name() {
+        let err = container_error(quote! { #[rgo(table = "t", unique_together = "a")] struct S; })
+            .expect("one column must fail");
+        assert!(err.contains("#[rgo(unique)]"), "{err}");
+        let err =
+            container_error(quote! { #[rustango(table = "t", index_together = "a")] struct S; })
+                .expect("one column must fail");
+        assert!(err.contains("#[rustango(index)]"), "{err}");
     }
 }

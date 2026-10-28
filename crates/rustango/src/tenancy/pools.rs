@@ -1978,13 +1978,17 @@ mod tests {
     use super::*;
 
     /// A SQLite registry opens through the framework: a missing file is
-    /// created and the journal is WAL.
+    /// created, the journal is WAL and the pool takes `[database]` tuning.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn a_sqlite_registry_gets_the_framework_setup() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("registry.db");
         let url = format!("sqlite:{}", file.display());
+        // First call wins; nextest runs each test in its own process.
+        let mut tuning = crate::sql::PoolTuning::default();
+        tuning.max_connections = Some(3);
+        crate::sql::configure_pools(tuning);
         let pool = <sqlx::Sqlite as RegistryConnect>::connect_registry(&url)
             .await
             .expect("a missing registry file is created");
@@ -1994,6 +1998,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(mode.to_ascii_lowercase(), "wal");
+        let want = crate::sql::pool_tuning().max_connections.expect("tuned");
+        assert_eq!(
+            pool.options().get_max_connections(),
+            want,
+            "[database] pool size"
+        );
     }
 
     /// Counts lookups and parks each one briefly, so concurrent misses overlap.
