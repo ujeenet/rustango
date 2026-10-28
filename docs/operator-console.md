@@ -81,6 +81,7 @@ The console answers on the **apex** domain (`RUSTANGO_APEX_DOMAIN`), not on a te
 | **Runs** | Provisioning and migration runs, streamed live |
 | **Database servers** | Servers tenant databases are created on, with their admin login |
 | **Two-factor sign-in** | Your own authenticator app (`totp` feature) |
+| **Shared SSO** | Sign-in providers offered to every tenant, with the callback URL to register (`admin-sso` feature; see [SSO](sso.md)) |
 
 ---
 

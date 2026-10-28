@@ -418,7 +418,7 @@ above; this is the complete list, including advanced/PostgreSQL-specific ones.
 | `through(...)` | relation spec | custom through-relation accessor |
 | `reverse_has(...)` / `generic_has(...)` | relation spec | reverse has-many / reverse generic-FK accessor |
 | `required_db_features` / `required_db_vendor` | list / vendor | deployment validation constraints |
-| `db_table_comment` | `"…"` | table COMMENT |
+| `db_table_comment` | `"…"` | table COMMENT; file migrations do not write it yet, and `makemigrations` warns |
 | `admin(...)` | admin opts | admin UI config (see [admin.md](admin.md)) |
 | `fk_composite(...)` / `generic_fk(...)` | spec | composite FK / generic (content-type) FK |
 | `m2m(...)` / `generic_m2m(...)` | spec | many-to-many / generic many-to-many relation |

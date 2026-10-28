@@ -157,6 +157,9 @@ compose in the query string and can be combined. `?<field>=` works only on a
 `list_filter`, displayed, FK or inline-parent column, never a secret one, and
 `?<field>__isnull=1` lists the NULL rows, `?<field>__isempty=1` the empty-text ones.
 
+A facet card shows up to 15 values; the rest collapse into a "+N more" link
+(`?facet_show_all=<field>`), which lists at most 200.
+
 [![The posts list filtered by status=published: an active filter chip, the matching facet highlighted, search box, and the bulk-action picker](img/admin-list-filtered.png)](img/admin-list-filtered.png)
 
 **Sorting.** Click a column header to sort; click again to flip direction
@@ -301,6 +304,13 @@ named after the action. An action that deletes should say so with
 needs `{table}.delete` and runs the `delete` hook instead. It still needs
 `{table}.change`, and it is audited and signalled as an edit.
 
+A `register_action` handler writes on its own connection, so the audit rows
+for an audited model are written after it, best effort.
+`register_tx_action(table, name, handler)` (and `register_tx_action_with_perm`)
+hands the handler `&mut PoolTx` instead, so its writes and their audit rows
+commit or roll back together. Write only through that transaction: a second
+connection can deadlock a single-connection SQLite pool.
+
 ---
 
 ## Audit trail
@@ -324,6 +334,8 @@ fingerprint. Two places surface it:
 - The sidebar's **Activity** view (`GET /<prefix>/__audit`) is a cross-row feed,
   newest first, with facet cards for entity / operation / source and a cleanup
   form to purge entries older than N days (itself recorded as an audit entry).
+  Each facet card shows up to 15 values plus the active one; "+N more"
+  (`?facet_show_all=<col>`) lists at most 200, so filter the feed to reach the rest.
   Under `with_user_perms`, tables with a queryset or `view` hook show here
   only to superusers.
 
@@ -444,6 +456,9 @@ let admin = admin::Builder::new(pool)
 The tenant-admin builder wires this to its `RouteConfig::logout_url`
 automatically, so the button always hits a route that exists.
 
+The admin refuses an edit that unchecks **active** on the signed-in user's own
+row, as the operator console does: ask another admin.
+
 Unchecking **active** in the admin stamps `sessions_revoked_at` too. A direct
 ORM write to `active` does not; in your own code use
 `rustango::session::deactivate::<AdminUser>(&pool, id)` (or `Operator`, `User`),
@@ -541,6 +556,7 @@ Every method on `admin::Builder` (each returns `Self` for chaining unless noted)
 | `with_user_perms([codenames])` | Gate tables on `{table}.view/add/change/delete`. |
 | `register_action(table, name, handler)` | Register a bulk-action handler. |
 | `register_action_with_perm(table, name, perm, handler)` | Same, checked against `ActionPerm::Delete` instead of `change`. |
+| `register_tx_action(table, name, handler)` / `register_tx_action_with_perm` | Same, but the handler gets the write transaction, so audit rows commit with it. |
 | `with_session_auth(secret)` | Require cookie login (`/login` + `/logout`). |
 | `logout_url(u)` | POST target for the sidebar Logout button. Default `{admin_prefix}/logout`; tenant admins set it to their tenancy logout route. |
 | `secure_cookies(bool)` | Set the `Secure` (HTTPS-only) flag on the session cookie. `new` follows `[security].secure_cookies`, else secure on the prod tier. |

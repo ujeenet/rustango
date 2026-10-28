@@ -32,6 +32,7 @@ Laravel's `Cache` facade.
 - [TTL and expiry](#ttl-and-expiry)
 - [Swapping backends](#swapping-backends)
 - [Caching under multi-tenancy](#caching-under-multi-tenancy)
+- [Caching whole pages](#caching-whole-pages)
 - [Reference](#reference)
 - [See also](#see-also)
 
@@ -58,10 +59,14 @@ let cache: BoxedCache = Arc::new(InMemoryCache::new());
 | `FileCache` | `cache` | `file` | one file per key under `file_cache_dir`; shared only if the directory is |
 | `NullCache` | `cache` | `null` / `none` | disable caching (every read misses) — handy in tests |
 
-There is no `postgres` value — the DB backend is `db` or `database`. A
-`CacheSettings` doc comment claimed otherwise until
-[#1400](https://github.com/ujeenet/rustango/issues/1400), and an unrecognised
-value gets you an in-memory cache with a warning.
+There is no `postgres` value — the DB backend is `db` or `database`. Values
+are lowercase. An unknown or mis-cased value (`Redis`, a typo), or `file`
+without `file_cache_dir`, logs an `error` and falls back to an in-memory cache;
+a later minor release will refuse it.
+
+`FileCache` sweeps one sixteenth of its directory for expired entries every 16
+writes. Call `FileCache::purge_expired()` on a schedule to sweep it all. New
+directories are created 0700 and entries 0600 on Unix.
 
 ---
 
@@ -267,6 +272,38 @@ Two things worth knowing:
 
 The unscoped `Cache::clear()` is still process-global, so reach for the scoped
 view whenever a single tenant's change is what triggered the invalidation.
+
+A purged tenant's slug can be reused by a new tenant. To make `purge-tenant`
+delete the old tenant's `ScopedCache::for_tenant` keys, call
+`rustango::tenancy::decommission::clear_on_purge(cache)` at boot for each cache
+that holds them.
+
+---
+
+## Caching whole pages
+
+`CachePageLayer::new(cache)` (in `rustango::cache_page`) stores GET responses
+in any `BoxedCache`; `.timeout(dur)` sets how long (default 60 s). It is safe
+by default:
+
+- A request with `Authorization`, `Cookie` or `X-Api-Key` is neither served
+  from nor stored in the cache. Name more credential headers (a custom token
+  header) with `.credential_headers(["x-my-token"])`.
+  `.cache_authenticated(true)` turns this off, only for a route whose page is
+  the same for every caller.
+- A response with `Set-Cookie`, or `Cache-Control: private`, `no-cache` or
+  `no-store`, is never cached.
+- `.vary_on([...])` puts request headers in the key.
+
+To drop a page after a write, call
+`layer.invalidate(&[PageKey::new(path, host)]).await?` on a clone of the layer
+(add `.tenant(slug)` to the key under tenancy). It purges every cached variant
+of that path: any query string, any `vary_on` value, GET and `QUERY` alike. It
+works through a per-path generation counter, so each cached GET reads one more
+small cache key.
+
+Under tenancy, mount the layer inside the tenancy layer; see
+[Middleware](middleware.md).
 
 ---
 
