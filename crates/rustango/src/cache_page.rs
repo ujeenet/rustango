@@ -147,6 +147,46 @@ pub struct CachePageLayer {
     credential_headers: Vec<HeaderName>,
     /// Skip tenant resolution. See [`Self::tenant_agnostic`].
     tenant_agnostic: bool,
+    /// Which part of the query keys the page. See [`Self::query_keys`].
+    query_key: Arc<QueryKey>,
+}
+
+/// The part of the query string that goes into the key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QueryKey {
+    /// The query exactly as sent: every distinct string is its own entry.
+    Raw,
+    /// Only these params (sorted), each kept in the order sent.
+    Only(Vec<String>),
+    /// No query at all.
+    Ignore,
+}
+
+impl QueryKey {
+    /// The query text this mode keys on.
+    fn of<'a>(&self, query: &'a str) -> std::borrow::Cow<'a, str> {
+        match self {
+            Self::Raw => query.into(),
+            Self::Ignore => "".into(),
+            Self::Only(names) => {
+                let mut kept: Vec<(String, &str)> = query
+                    .split('&')
+                    .filter(|p| !p.is_empty())
+                    .filter_map(|p| {
+                        let name = crate::url_codec::url_decode(p.split('=').next().unwrap_or(""));
+                        names.contains(&name).then_some((name, p))
+                    })
+                    .collect();
+                // Stable: repeated params keep their order.
+                kept.sort_by(|a, b| a.0.cmp(&b.0));
+                kept.iter()
+                    .map(|(_, p)| *p)
+                    .collect::<Vec<_>>()
+                    .join("&")
+                    .into()
+            }
+        }
+    }
 }
 
 impl CachePageLayer {
@@ -163,6 +203,7 @@ impl CachePageLayer {
             cache_authenticated: false,
             credential_headers: crate::vary::CREDENTIAL_HEADERS.to_vec(),
             tenant_agnostic: false,
+            query_key: Arc::new(QueryKey::Raw),
         }
     }
 
@@ -256,6 +297,27 @@ impl CachePageLayer {
         self
     }
 
+    /// Key only on the named query params, sorted by name; others are
+    /// dropped from the key. By default the raw query string is the key,
+    /// so each distinct string (`?x=<random>`) stores its own entry.
+    #[must_use]
+    pub fn query_keys<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.query_key = Arc::new(QueryKey::Only(names.into_iter().map(Into::into).collect()));
+        self
+    }
+
+    /// Leave the query string out of the key: every query of a path
+    /// shares one entry. For a page that does not read its query.
+    #[must_use]
+    pub fn ignore_query(mut self) -> Self {
+        self.query_key = Arc::new(QueryKey::Ignore);
+        self
+    }
+
     /// Cache RFC 10008 `QUERY` requests. Default `false`.
     ///
     /// QUERY is safe and idempotent, and its response depends on the
@@ -280,7 +342,7 @@ impl CachePageLayer {
             &self.key_prefix,
             "GET",
             &page.path,
-            &page.query,
+            &self.query_key.of(&page.query),
             &page.host,
             self.page_tenant(page),
             self.vary_on
@@ -415,6 +477,7 @@ impl<S> tower::Layer<S> for CachePageLayer {
                 self.credential_headers.clone()
             }),
             tenant_agnostic: self.tenant_agnostic,
+            query_key: self.query_key.clone(),
         }
     }
 }
@@ -431,6 +494,7 @@ pub struct CachePageService<S> {
     /// Credential headers that bypass the cache; empty with `cache_authenticated`.
     credentials: Arc<Vec<HeaderName>>,
     tenant_agnostic: bool,
+    query_key: Arc<QueryKey>,
 }
 
 impl<S> Service<Request<Body>> for CachePageService<S>
@@ -458,6 +522,7 @@ where
         let cache_query = self.cache_query;
         let credentials = self.credentials.clone();
         let tenant_agnostic = self.tenant_agnostic;
+        let query_key = self.query_key.clone();
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
 
@@ -522,6 +587,7 @@ where
                 &prefix,
                 &req,
                 tenant.as_deref(),
+                &query_key,
                 &vary,
                 body_digest.as_deref(),
                 generation,
@@ -770,10 +836,7 @@ fn request_page(req: &Request<Body>) -> (&str, &axum::http::Uri) {
         })
         .unwrap_or("");
     // A nested router strips its prefix from `uri`; key on the full path.
-    let uri = req
-        .extensions()
-        .get::<axum::extract::OriginalUri>()
-        .map_or(req.uri(), |o| &o.0);
+    let uri = crate::urls::original_uri(req.uri(), req.extensions());
     (host, uri)
 }
 
@@ -783,6 +846,7 @@ fn compute_cache_key(
     prefix: &str,
     req: &Request<Body>,
     tenant: Option<&str>,
+    query_key: &QueryKey,
     vary_on: &[HeaderName],
     body_digest: Option<&str>,
     generation: u64,
@@ -796,7 +860,7 @@ fn compute_cache_key(
         prefix,
         req.method().as_str(),
         uri.path(),
-        uri.query().unwrap_or(""),
+        &query_key.of(uri.query().unwrap_or("")),
         host,
         tenant,
         values.iter().map(|(n, v)| (*n, v.as_str())),

@@ -835,19 +835,23 @@ impl JwtBackend {
 
     /// Issue a signed JWT for `user_id` valid for `self.ttl_secs`, with no
     /// tenant binding: it authenticates only where no tenant is resolved.
-    /// Logout-all and a password change end it.
+    /// Logout-all and a password change end it. It does not know the user's
+    /// logout stamp, so one minted in the second after a logout-all is
+    /// refused: right after a logout-all, use [`Self::issue_for_user`].
     #[must_use]
     pub fn issue(&self, user_id: i64) -> String {
         self.sign_payload(&self.claims(user_id, None))
     }
 
     /// [`Self::issue`] bound to tenant `slug`, for `require_auth` routes (#1848).
+    /// Right after a logout-all, use [`Self::issue_for_tenant_user`].
     #[must_use]
     pub fn issue_for_tenant(&self, user_id: i64, slug: &str) -> String {
         self.sign_payload(&self.claims(user_id, Some(slug)))
     }
 
     /// [`Self::issue`] for `user`, also ended when its password hash changes.
+    /// Valid even when minted in the same second as a logout-all.
     #[must_use]
     pub fn issue_for_user(&self, user: &super::auth::User) -> String {
         self.sign_payload(&self.user_claims(user, None))
@@ -874,6 +878,8 @@ impl JwtBackend {
 
     fn user_claims(&self, user: &super::auth::User, tenant: Option<&str>) -> serde_json::Value {
         let mut payload = self.claims(user.id.get().copied().unwrap_or(0), tenant);
+        // Past the logout stamp, like the session claims below.
+        payload["iat"] = crate::session::issued_at(user.sessions_revoked_at).into();
         if let Some(claims) = payload.as_object_mut() {
             super::auth_routes::RefreshSession::for_user(&self.pwf_secret, user).write(claims);
         }
@@ -1110,11 +1116,7 @@ impl AuthBackend for JwtBackend {
 // ------------------------------------------------------------------ helpers
 
 fn extract_bearer(parts: &Parts) -> Result<Option<&str>, AuthError> {
-    let Some(value) = parts.headers.get(axum::http::header::AUTHORIZATION) else {
-        return Ok(None);
-    };
-    let s = value.to_str().unwrap_or("");
-    Ok(s.strip_prefix("Bearer ").map(str::trim))
+    Ok(crate::bearer::token(&parts.headers))
 }
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -1345,6 +1347,23 @@ mod tests {
             assert!(matches!(r, Err(AuthError::InvalidToken)), "{stamp}: {r:?}");
             let r = bearer(&backend, &bound, Some("acme"), &pool).await;
             assert!(matches!(r, Err(AuthError::InvalidToken)), "{stamp}: {r:?}");
+        }
+    }
+
+    /// A user token minted in the second a logout-all stamped is accepted.
+    #[tokio::test]
+    async fn a_user_token_right_after_logout_all_is_accepted() {
+        let (pool, mut user) = jwt_user("jwt_after_logout_all").await;
+        let cutoff = crate::session::logout_cutoff_at(None, chrono::Utc::now().timestamp());
+        user.sessions_revoked_at = Some(cutoff);
+        user.save_pool(&pool).await.unwrap();
+        let backend = JwtBackend::new(vec![7u8; 32]);
+        for (token, tenant) in [
+            (backend.issue_for_user(&user), None),
+            (backend.issue_for_tenant_user(&user, "acme"), Some("acme")),
+        ] {
+            let r = bearer(&backend, &token, tenant, &pool).await;
+            assert!(matches!(r, Ok(Some(_))), "{tenant:?}: {r:?}");
         }
     }
 

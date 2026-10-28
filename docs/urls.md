@@ -126,10 +126,10 @@ params.insert("id", "42".to_string());
 let response = redirect_to_view("post-detail", &params)?;
 ```
 
-`resolve_url(spec, &params)` accepts either form: if `spec` already looks
-like a URL (`/…`, `http://`, `https://`, `./`, `../`) it's returned unchanged;
-otherwise it's treated as a route name and reverse-resolved. Handy for a
-`?next=` parameter or a setting that may hold *either* a path or a name:
+`resolve_url(spec, &params)` accepts either form: a same-site URL (a `/…` path
+that is not `//host` or `/\host`, `./`, `../`) is returned unchanged; anything
+else is treated as a route name and reverse-resolved. Handy for a `?next=`
+parameter or a setting that may hold *either* a path or a name:
 
 ```rust
 let url = resolve_url("post-detail", &params)?;  // name  → "/posts/42"
@@ -139,12 +139,11 @@ let url = resolve_url("/dashboard", &params)?;   // path  → "/dashboard" (as-i
 (For raw redirects to a known URL, `rustango::shortcuts::redirect(url)` returns a
 plain `302`.)
 
-**`resolve_url` does not check the host.** `http://evil.example` comes back
-unchanged. Before you redirect to a user-supplied `?next=`, check it with
-`rustango::urls::url_has_allowed_host_and_scheme(url, &allowed_hosts, require_https)`.
-It accepts a relative path, or an `http`/`https` URL whose host is in the list,
-and refuses `//host`, `\\host`, control characters and other schemes
-(`javascript:`, `data:`, …).
+**`resolve_url` never returns an off-site URL.** `http://evil.example` and
+`//evil.example` are no route names, so they fail with `UnknownName`. To redirect
+to an absolute URL on purpose, check it with
+`rustango::urls::url_has_allowed_host_and_scheme(url, &allowed_hosts, require_https)`
+and pass it to `redirect` directly.
 
 ---
 
@@ -283,7 +282,8 @@ compile a `Regex` once and reuse it across requests.
   a name → string mapping; it doesn't check that a handler is actually mounted at
   that pattern. Register the name where you mount the route so they stay in sync.
 - **Values are percent-encoded** by `reverse`, so they're safe to drop into a
-  `Location` header or an `href`.
+  `Location` header or an `href`. A `{*rest}` catch-all takes the key `rest`
+  and keeps its `/` separators.
 - **No regex or typed converters** in patterns (nothing like `<int:pk>`);
   placeholders are plain `{name}` and values are substituted as-is (after
   encoding). See [Regex & typed path patterns](#regex--typed-path-patterns) for

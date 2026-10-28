@@ -191,6 +191,20 @@ async fn delete_selected_built_in_runs_against_picked_rows() {
     assert_eq!(labels, vec!["gamma".to_string()]);
 }
 
+/// Under `nest`, the redirect keeps the prefix the browser used.
+#[tokio::test]
+async fn a_nested_bulk_action_redirects_under_the_prefix() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else { return };
+    fresh_table(&pool).await;
+    let ids = seed_three(&pool).await;
+    let app = axum::Router::new().nest("/app", build_app(pool.clone()));
+    let body = format!("action=delete_selected&_selected_action={}", ids[0]);
+    let resp = app.oneshot(post_form("/app/widgets", &body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers()[header::LOCATION], "/app/widgets");
+}
+
 #[tokio::test]
 async fn user_action_runs_against_pool_and_updates_rows() {
     let _g = live_lock().lock().await;

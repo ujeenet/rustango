@@ -140,12 +140,120 @@ async fn sse_in(
         Ok(v) => v,
         Err(e) => return e.into_response(&headers, &extensions, &uri),
     };
-    agent_sse(
+    open_capped(
         t.pool().clone(),
         agent,
         exp.map(|exp| JwtBound { jwt, exp }),
-        KEEP_ALIVE * RECHECK_EVERY_KEEP_ALIVES,
+        StreamCaps::from_env(),
     )
+}
+
+/// The agent's stream, or `429` when it or its tenant has too many open.
+fn open_capped(
+    pool: crate::sql::Pool,
+    agent: super::McpAgent,
+    token: Option<JwtBound>,
+    caps: StreamCaps,
+) -> Response {
+    let Some(slot) = StreamSlot::acquire(&agent.tenant, agent.agent_id, caps) else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many open notification streams",
+        )
+            .into_response();
+    };
+    agent_sse(
+        pool,
+        agent,
+        token,
+        KEEP_ALIVE * RECHECK_EVERY_KEEP_ALIVES,
+        slot,
+    )
+}
+
+/// How many streams may be open at once in this process; `0` is no cap.
+#[derive(Clone, Copy, Debug)]
+struct StreamCaps {
+    per_agent: usize,
+    per_tenant: usize,
+}
+
+impl StreamCaps {
+    const PER_AGENT_VAR: &'static str = "RUSTANGO_MCP_SSE_PER_AGENT";
+    const PER_TENANT_VAR: &'static str = "RUSTANGO_MCP_SSE_PER_TENANT";
+
+    /// The env overrides, else 8 per agent and 256 per tenant.
+    fn from_env() -> Self {
+        let read = |var: &str, default: usize| {
+            std::env::var(var)
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(default)
+        };
+        Self {
+            per_agent: read(Self::PER_AGENT_VAR, 8),
+            per_tenant: read(Self::PER_TENANT_VAR, 256),
+        }
+    }
+}
+
+/// Open streams by `(tenant, agent)` and by tenant. Keyed by tenant, so
+/// one tenant's count never touches another's.
+#[derive(Default)]
+struct OpenStreams {
+    by_agent: std::collections::HashMap<(String, i64), usize>,
+    by_tenant: std::collections::HashMap<String, usize>,
+}
+
+fn open_streams() -> std::sync::MutexGuard<'static, OpenStreams> {
+    static OPEN: std::sync::OnceLock<std::sync::Mutex<OpenStreams>> = std::sync::OnceLock::new();
+    OPEN.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// One open stream's place under the caps; dropping it frees the place.
+struct StreamSlot {
+    tenant: String,
+    agent_id: i64,
+}
+
+impl StreamSlot {
+    fn acquire(tenant: &str, agent_id: i64, caps: StreamCaps) -> Option<Self> {
+        let mut open = open_streams();
+        let key = (tenant.to_owned(), agent_id);
+        let agent_n = open.by_agent.get(&key).copied().unwrap_or(0);
+        let tenant_n = open.by_tenant.get(tenant).copied().unwrap_or(0);
+        let full = |n: usize, cap: usize| cap != 0 && n >= cap;
+        if full(agent_n, caps.per_agent) || full(tenant_n, caps.per_tenant) {
+            return None;
+        }
+        open.by_agent.insert(key, agent_n + 1);
+        open.by_tenant.insert(tenant.to_owned(), tenant_n + 1);
+        Some(Self {
+            tenant: tenant.to_owned(),
+            agent_id,
+        })
+    }
+}
+
+impl Drop for StreamSlot {
+    fn drop(&mut self) {
+        let mut open = open_streams();
+        let key = (std::mem::take(&mut self.tenant), self.agent_id);
+        if let Some(n) = open.by_agent.get_mut(&key) {
+            *n -= 1;
+            if *n == 0 {
+                open.by_agent.remove(&key);
+            }
+        }
+        if let Some(n) = open.by_tenant.get_mut(&key.0) {
+            *n -= 1;
+            if *n == 0 {
+                open.by_tenant.remove(&key.0);
+            }
+        }
+    }
 }
 
 /// A JWT stream's token: it ends at `exp` or when its JTI is revoked (#2303).
@@ -166,12 +274,15 @@ fn agent_sse(
     agent: super::McpAgent,
     token: Option<JwtBound>,
     recheck_every: Duration,
+    slot: StreamSlot,
 ) -> Response {
     use tokio::sync::broadcast::error::RecvError;
     // Own tenant's channel: another tenant's burst cannot make it lag.
     let mut rx = super::notifications::subscribe(&agent.tenant);
     let exp = token.as_ref().map(|t| t.exp);
     let stream = async_stream::stream! {
+        // Held while the stream lives; the client going away frees it.
+        let _slot = slot;
         let expired = async move {
             match exp {
                 Some(exp) => {
@@ -285,18 +396,69 @@ mod tests {
         JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec())
     }
 
+    const NO_CAP: StreamCaps = StreamCaps {
+        per_agent: 0,
+        per_tenant: 0,
+    };
+
+    /// `agent_sse` with an uncapped slot.
+    fn open(
+        pool: crate::sql::Pool,
+        agent: super::super::McpAgent,
+        token: Option<JwtBound>,
+        recheck: Duration,
+    ) -> Response {
+        let slot = StreamSlot::acquire(&agent.tenant, agent.agent_id, NO_CAP).unwrap();
+        agent_sse(pool, agent, token, recheck, slot)
+    }
+
+    /// Past either cap a stream is refused; a closed stream frees its place.
+    #[test]
+    fn open_streams_are_capped_per_agent_and_per_tenant() {
+        let tenant = format!("cap-{}", std::process::id());
+        let caps = StreamCaps {
+            per_agent: 2,
+            per_tenant: 3,
+        };
+        let a1 = StreamSlot::acquire(&tenant, 1, caps).unwrap();
+        let a2 = StreamSlot::acquire(&tenant, 1, caps).unwrap();
+        assert!(StreamSlot::acquire(&tenant, 1, caps).is_none(), "per agent");
+        let b1 = StreamSlot::acquire(&tenant, 2, caps).unwrap();
+        assert!(
+            StreamSlot::acquire(&tenant, 3, caps).is_none(),
+            "per tenant"
+        );
+        assert!(
+            StreamSlot::acquire(&format!("{tenant}-other"), 1, caps).is_some(),
+            "another tenant has its own count"
+        );
+        drop(a1);
+        let again = StreamSlot::acquire(&tenant, 1, caps);
+        assert!(again.is_some(), "a dropped stream frees its place");
+        drop((a2, b1, again));
+    }
+
+    /// The handler answers 429 past the per-agent cap.
+    #[tokio::test]
+    async fn the_handler_refuses_past_the_cap() {
+        let (pool, agent, _, _) = world(jwt(), false).await;
+        let caps = StreamCaps {
+            per_agent: 1,
+            per_tenant: 0,
+        };
+        let held = StreamSlot::acquire(&agent.tenant, agent.agent_id, caps).unwrap();
+        let resp = open_capped(pool, agent, None, caps);
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        drop(held);
+    }
+
     /// Open a stream re-checking every 50ms, check it stays open, revoke, expect it to end.
     async fn assert_ends_on_revoke(
         pool: crate::sql::Pool,
         agent: super::super::McpAgent,
         token: Option<JwtBound>,
     ) {
-        let body = drain(agent_sse(
-            pool.clone(),
-            agent,
-            token,
-            Duration::from_millis(50),
-        ));
+        let body = drain(open(pool.clone(), agent, token, Duration::from_millis(50)));
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!body.is_finished(), "a live agent's stream must stay open");
         rotate_agent_secret_pool(&pool, "bot").await.unwrap();
@@ -315,7 +477,7 @@ mod tests {
     async fn the_stream_ends_when_the_jwt_expires() {
         let (pool, agent, token, _) = world(jwt().with_access_ttl(2), false).await;
         assert!(token.is_some());
-        let body = drain(agent_sse(pool, agent, token, Duration::from_secs(3600)));
+        let body = drain(open(pool, agent, token, Duration::from_secs(3600)));
         let ended = tokio::time::timeout(Duration::from_secs(6), body).await;
         assert!(ended.is_ok(), "the stream outlived its token");
     }
@@ -332,7 +494,7 @@ mod tests {
     async fn the_stream_ends_when_the_jwt_is_revoked() {
         let (pool, agent, token, bearer) = world(jwt(), false).await;
         let jwt = token.as_ref().map(|t| t.jwt.clone()).unwrap();
-        let body = drain(agent_sse(pool, agent, token, Duration::from_millis(50)));
+        let body = drain(open(pool, agent, token, Duration::from_millis(50)));
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!body.is_finished(), "a live token's stream must stay open");
         assert!(jwt.revoke(&bearer).await);
@@ -356,7 +518,7 @@ mod tests {
         use http_body_util::BodyExt as _;
         let (pool, agent, token, _) = world(jwt(), false).await;
         let tenant = agent.tenant.clone();
-        let mut body = agent_sse(pool, agent, token, Duration::from_secs(3600)).into_body();
+        let mut body = open(pool, agent, token, Duration::from_secs(3600)).into_body();
         super::super::notifications::notify_resources_list_changed(&tenant, None);
         for _ in 0..1000 {
             super::super::notifications::notify_tools_list_changed("other-tenant", None);
@@ -392,12 +554,7 @@ mod tests {
             }
         };
         rename("rustango_agents", "rustango_agents_off").await;
-        let body = drain(agent_sse(
-            pool.clone(),
-            agent,
-            token,
-            Duration::from_millis(50),
-        ));
+        let body = drain(open(pool.clone(), agent, token, Duration::from_millis(50)));
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!body.is_finished(), "a DB error must not end the stream");
         rename("rustango_agents_off", "rustango_agents").await;

@@ -20,6 +20,21 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - XOR counts a NULL operand as false with two operands, as with three.
 - Audited `save`, `insert` and `delete` on SQLite take the write lock at `BEGIN`, so a cascading delete no longer fails with "database is locked".
 
+### Fixed — auth and HTTP security
+
+- Operator TOTP sign-in upgrades a weak password hash once the code passes; the new hash rides the pending cookie encrypted.
+- Tenant admin login and change-password pages show only messages they signed.
+- `messages::Outbox` `Debug` hides the signing key.
+- `JwtBackend::issue_for_user` tokens stamp `iat` past a logout-all; `issue` documents that it cannot.
+- Admin, console and error pages send `Cache-Control: private` and `Vary: Cookie` (console and error pages `no-store`); tenant JWT routes and MCP token endpoints send `no-store`.
+- Member SSO failure pages answer a matching error status with `no-store`.
+- Bearer 401s carry `WWW-Authenticate`; the `Bearer` scheme is matched case-insensitively.
+- `login_required` `?next=`, trailing-slash redirects and ListView bulk-action redirects keep the `nest` prefix.
+- `urls::reverse` fills `{*rest}` catch-alls; `resolve_url` returns only same-site URLs.
+- MCP SSE streams are capped per agent and per tenant (429 past the cap).
+- `CachePageLayer::query_keys` / `ignore_query` bound the entries a query string can create.
+- `EtagLayer` only handles GET and HEAD.
+
 ## [0.61.8] — 2026-10-28
 
 ### Fixed — migrations, dev key, uploads, views and leaks

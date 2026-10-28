@@ -170,8 +170,8 @@ extern crate self as rustango;
 /// a `{:?}`, `dbg!` or panic message never carries a hash or password.
 #[allow(unused_macros)]
 macro_rules! redacted_debug {
-    ($ty:ident { $($shown:ident),* $(,)? ; $($secret:ident),* $(,)? }) => {
-        impl ::std::fmt::Debug for $ty {
+    ($ty:ident $(<$lt:lifetime>)? { $($shown:ident),* $(,)? ; $($secret:ident),* $(,)? }) => {
+        impl ::std::fmt::Debug for $ty $(<$lt>)? {
             fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                 f.debug_struct(stringify!($ty))
                     $(.field(stringify!($shown), &self.$shown))*
@@ -1139,6 +1139,10 @@ pub mod dates;
 /// as password reset tokens, magic links and signed cookies.
 #[cfg(feature = "_signing")]
 pub mod signing;
+
+/// The bearer credential and its 401 challenge.
+#[cfg(any(feature = "tenancy", feature = "admin", feature = "mcp"))]
+pub(crate) mod bearer;
 
 /// `Vary` header merging for the response layers.
 #[cfg(all(feature = "_axum", feature = "_tower"))]

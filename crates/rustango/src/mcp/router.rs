@@ -195,6 +195,7 @@ where
     Tenant<DB>: FromRequestParts<AuthedMcpState> + Send,
 {
     use super::oauth;
+    use axum::middleware::map_response;
     let root = if enable_sse {
         post(post_authed::<DB>).get(sse_handler::<DB>)
     } else {
@@ -202,8 +203,15 @@ where
     };
     Router::new()
         .route("/", root)
-        .route("/token", post(agent_token::<DB>))
-        .route("/oauth/token", post(oauth::oauth_token::<DB>))
+        // Tokens, and refusals of them: no cache keeps either.
+        .route(
+            "/token",
+            post(agent_token::<DB>).layer(map_response(crate::vary::token_reply)),
+        )
+        .route(
+            "/oauth/token",
+            post(oauth::oauth_token::<DB>).layer(map_response(crate::vary::token_reply)),
+        )
         .route(
             "/.well-known/oauth-protected-resource",
             get(oauth::well_known_protected_resource),

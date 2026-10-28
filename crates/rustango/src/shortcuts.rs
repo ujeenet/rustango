@@ -236,14 +236,17 @@ pub fn redirect(url: impl Into<String>) -> Response {
 
 /// Turn either a raw URL or a registered route name into a URL string.
 ///
-/// A `spec` starting with `/`, `http://`, `https://`, `./` or `../` is
-/// already a URL and comes back unchanged. Anything else is a route name
-/// passed to [`crate::urls::reverse`] with `params`, including namespaced
-/// names such as `"polls:detail"`.
+/// A same-site `spec` (a path [`safe_next`] accepts, `./` or `../`) comes
+/// back unchanged, so a `?next=` value is safe to pass. Anything else is a
+/// route name passed to [`crate::urls::reverse`] with `params`, including
+/// namespaced names such as `"polls:detail"`.
 ///
 /// # Errors
 /// Forwards [`crate::urls::ReverseError`] when `spec` is a name and
-/// `params` does not fit the pattern.
+/// `params` does not fit the pattern; an off-site URL is no route name,
+/// so it is `UnknownName`.
+///
+/// [`safe_next`]: crate::auth_decorators::safe_next
 ///
 /// ```ignore
 /// use std::collections::HashMap;
@@ -263,13 +266,11 @@ pub fn resolve_url(
     spec: &str,
     params: &std::collections::HashMap<&str, String>,
 ) -> Result<String, crate::urls::ReverseError> {
-    if spec.starts_with('/')
-        || spec.starts_with("http://")
-        || spec.starts_with("https://")
-        || spec.starts_with("./")
-        || spec.starts_with("../")
-    {
+    if spec.starts_with("./") || spec.starts_with("../") {
         return Ok(spec.to_owned());
+    }
+    if let Some(path) = crate::auth_decorators::safe_next(spec) {
+        return Ok(path);
     }
     crate::urls::reverse(spec, params)
 }
@@ -1174,22 +1175,19 @@ mod tests {
         assert_eq!(resolve_url("/posts/42", &p).unwrap(), "/posts/42");
     }
 
+    /// A raw spec may come from `?next=`: only a same-site URL passes.
     #[test]
-    fn resolve_url_passes_through_https_url() {
+    fn resolve_url_refuses_off_site_urls() {
         let p = HashMap::new();
-        assert_eq!(
-            resolve_url("https://example.com/x", &p).unwrap(),
-            "https://example.com/x"
-        );
-    }
-
-    #[test]
-    fn resolve_url_passes_through_http_url() {
-        let p = HashMap::new();
-        assert_eq!(
-            resolve_url("http://example.com/x", &p).unwrap(),
-            "http://example.com/x"
-        );
+        for spec in [
+            "https://evil.example/x",
+            "http://evil.example/x",
+            "//evil.example/x",
+            "/\\evil.example/x",
+            "/%2Fevil.example",
+        ] {
+            assert!(resolve_url(spec, &p).is_err(), "{spec}");
+        }
     }
 
     #[test]

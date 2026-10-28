@@ -70,6 +70,11 @@ async fn anonymous_request_gets_401() {
         StatusCode::UNAUTHORIZED,
         "an unauthenticated request must be 401, not 403"
     );
+    assert_eq!(
+        res.headers()[axum::http::header::WWW_AUTHENTICATE],
+        "Bearer",
+        "a 401 names its scheme (RFC 9110 §15.5.2)"
+    );
 }
 
 /// Authenticated, but without the codename → 403. This is the case 403 is for,

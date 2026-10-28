@@ -147,9 +147,23 @@ fn code_url(next: &str) -> String {
     format!("/login/totp?next={}", urlencoding_lite(next))
 }
 
+/// Key for the rehash sealed in the pending cookie, apart from the session MAC.
+fn upgrade_key(state: &ConsoleState) -> String {
+    let key = crate::session::sign(&state.session_secret, b"rustango-op-totp-rehash-v1");
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, key)
+}
+
 /// The password matched: set the pending cookie and ask for the code.
-pub(super) fn challenge(state: &ConsoleState, op: &auth::Operator, next: &str) -> Response<Body> {
-    let pending = Pending::new(&state.session_secret, oid(op), &op.password_hash);
+/// A rehash rides along encrypted; `code_submit` stores it.
+pub(super) fn challenge(
+    state: &ConsoleState,
+    op: &auth::PasswordVerified<auth::Operator>,
+    next: &str,
+) -> Response<Body> {
+    let mut pending = Pending::new(&state.session_secret, oid(op), &op.password_hash);
+    pending.upgrade = op.upgrade().and_then(|new| {
+        crate::aead::encrypt_with(Some(&upgrade_key(state)), new.as_bytes(), TAG).ok()
+    });
     let mut resp = Redirect::to(&code_url(next)).into_response();
     resp.headers_mut().append(
         header::SET_COOKIE,
@@ -159,8 +173,11 @@ pub(super) fn challenge(state: &ConsoleState, op: &auth::Operator, next: &str) -
 }
 
 /// The active operator behind a valid pending cookie, whose password has
-/// not changed since.
-async fn pending_operator(state: &ConsoleState, headers: &HeaderMap) -> Option<auth::Operator> {
+/// not changed since, with the rehash the password step carried.
+async fn pending_operator(
+    state: &ConsoleState,
+    headers: &HeaderMap,
+) -> Option<auth::PasswordVerified<auth::Operator>> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
     let pending = crate::cookies::cookie_from_headers(headers, PENDING_COOKIE)
@@ -172,11 +189,15 @@ async fn pending_operator(state: &ConsoleState, headers: &HeaderMap) -> Option<a
         .ok()?
         .into_iter()
         .next()?;
+    let upgrade = pending.upgrade.as_deref().and_then(|sealed| {
+        let new = crate::aead::decrypt_with(Some(&upgrade_key(state)), sealed, TAG).ok()?;
+        String::from_utf8(new).ok()
+    });
     (op.active
         && pending
             .pwf
             .matches(&state.session_secret, &op.password_hash))
-    .then_some(op)
+    .then(|| auth::PasswordVerified::resume(op, upgrade))
 }
 
 fn expired(next: &str) -> Response<Body> {
@@ -388,6 +409,7 @@ pub(super) async fn code_submit(
     if enrolled {
         audit(&state, &op, "totp_enroll", "login").await;
     }
+    let op = op.complete(&state.registry).await;
     let mut resp = start_session(&state, &op, &next, meta).await;
     resp.headers_mut()
         .append(header::SET_COOKIE, pending_cookie("", 0));

@@ -54,6 +54,7 @@ use tower::ServiceExt;
 use tracing::warn;
 
 use super::branding;
+use super::operator_console::flash;
 use super::org::Org;
 use super::pools::{DefaultTenantDb, TenantPools};
 use super::resolver::OrgResolver;
@@ -764,7 +765,8 @@ where
                         &parts.extensions,
                         &parts.headers,
                     );
-                    change_password_submit(&org, &pool, routes, user_id, &ip, body).await
+                    change_password_submit(&org, &cfg.secret, &pool, routes, user_id, &ip, body)
+                        .await
                 }
                 _ => (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response(),
             };
@@ -1052,17 +1054,15 @@ async fn login_form(
     #[cfg(feature = "admin-sso")] registry_pool: &crate::sql::Pool,
 ) -> Response {
     let mut next: Option<String> = None;
-    let mut error: Option<String> = None;
+    // Only a message this admin signed shows: a crafted link puts no text here.
+    let error = query.and_then(|q| flash::read(&cfg.secret, &routes.login_url, q).error);
     if let Some(q) = query {
         for pair in q.split('&') {
             let Some((k, v)) = pair.split_once('=') else {
                 continue;
             };
-            let v = url_decode_lite(v);
-            match k {
-                "next" => next = Some(v),
-                "error" => error = Some(v),
-                _ => {}
+            if k == "next" {
+                next = Some(url_decode_lite(v));
             }
         }
     }
@@ -1240,12 +1240,11 @@ async fn login_submit(
         }
     };
     let bad_creds = || -> Response {
-        Redirect::to(&format!(
-            "{}?error=Invalid+credentials&next={}",
-            routes.login_url,
-            urlencoding_lite(&next)
-        ))
-        .into_response()
+        flash::signed_redirect(
+            &cfg.secret,
+            &format!("{}?next={}", routes.login_url, urlencoding_lite(&next)),
+            flash::Flash::Error("Invalid credentials"),
+        )
     };
     let fire_failed = |reason: AuthFailureReason| {
         let ctx = UserLoginFailedContext {
@@ -1568,24 +1567,12 @@ fn change_password_form(
     routes: &super::routes::RouteConfig,
     query: Option<&str>,
 ) -> axum::response::Html<String> {
-    let mut error: Option<String> = None;
-    let mut success: Option<String> = None;
-    if let Some(q) = query {
-        for pair in q.split('&') {
-            let Some((k, v)) = pair.split_once('=') else {
-                continue;
-            };
-            let v = url_decode_lite(v);
-            match k {
-                "error" => error = Some(v),
-                "ok" => success = Some(v),
-                _ => {}
-            }
-        }
-    }
+    let messages = query
+        .map(|q| flash::read(&cfg.secret, &routes.change_password_url, q))
+        .unwrap_or_default();
     let mut ctx = password_page_ctx(org, brand_storage, routes);
-    ctx.insert("error", &error);
-    ctx.insert("success", &success);
+    ctx.insert("error", &messages.error);
+    ctx.insert("success", &messages.ok);
     if let Some(token) = crate::admin::session::current_csrf_token() {
         ctx.insert("csrf_token", &token);
     }
@@ -1657,6 +1644,7 @@ fn render_password_page(
 
 async fn change_password_submit(
     org: &Org,
+    secret: &tenant_console::SessionSecret,
     tenant_pool: &crate::sql::Pool,
     routes: &super::routes::RouteConfig,
     user_id: i64,
@@ -1677,12 +1665,11 @@ async fn change_password_submit(
         }
     };
     let redir_err = |msg: &str| -> Response {
-        Redirect::to(&format!(
-            "{}?error={}",
-            routes.change_password_url,
-            urlencoding_lite(msg)
-        ))
-        .into_response()
+        flash::signed_redirect(
+            secret,
+            &routes.change_password_url,
+            flash::Flash::Error(msg),
+        )
     };
     if form.current_password.is_empty() || form.new_password.is_empty() {
         return redir_err("All fields are required.");
@@ -1763,11 +1750,11 @@ async fn change_password_submit(
             return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
         }
     }
-    Redirect::to(&format!(
-        "{}?ok=Password+updated",
-        routes.change_password_url
-    ))
-    .into_response()
+    flash::signed_redirect(
+        secret,
+        &routes.change_password_url,
+        flash::Flash::Ok("Password updated"),
+    )
 }
 
 #[derive(serde::Deserialize)]

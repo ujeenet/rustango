@@ -50,6 +50,11 @@ pub(crate) async fn csrf_context(request: Request<Body>, next: Next) -> Response
             response.headers_mut().append(SET_COOKIE, v);
         }
     }
+    // The page holds the user's rows and token: no shared cache may keep it.
+    if !cacheable {
+        crate::vary::mark_private(response.headers_mut());
+        crate::vary::add_vary(response.headers_mut(), "Cookie");
+    }
     response
 }
 
@@ -60,6 +65,31 @@ mod tests {
     use tower::ServiceExt as _;
 
     use crate::forms::csrf::{with_config, CsrfConfig};
+
+    /// A page with a CSRF token and session data stays out of shared caches.
+    #[tokio::test]
+    async fn pages_are_private_and_vary_on_cookie() {
+        use axum::http::header::{CACHE_CONTROL, VARY};
+        let app = Router::new()
+            .route("/page", get(|| async { "rows" }))
+            .route(
+                "/brand.css",
+                get(|| async { ([(CACHE_CONTROL, "public, max-age=60")], "css") }),
+            )
+            .layer(axum::middleware::from_fn(super::csrf_context));
+        let get = |path: &str| {
+            axum::http::Request::builder()
+                .uri(path)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let page = app.clone().oneshot(get("/page")).await.unwrap();
+        assert_eq!(page.headers()[CACHE_CONTROL], "private");
+        assert_eq!(page.headers()[VARY], "Cookie");
+        let asset = app.oneshot(get("/brand.css")).await.unwrap();
+        assert_eq!(asset.headers()[CACHE_CONTROL], "public, max-age=60");
+        assert!(asset.headers().get(VARY).is_none());
+    }
 
     /// #2160 — the page's token rides in the outer layer's cookie, and
     /// no second cookie is set.

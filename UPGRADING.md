@@ -158,6 +158,20 @@ untouched.
 
 `makemigrations` drops proxy models from the snapshot and refuses a new composite FK to columns with no primary or unique key in the same column order; add `unique_together` on the target. `migrate --fake <name>` refuses a tenant migration without `--all-tenants`, and a registry one with it; `migrate --system` or `--all-tenants` without `--fake` is an error.
 
+### Auth and HTTP replies
+
+- Tenant admin login and change-password pages show only messages they signed; a hand-built `?error=` / `?ok=` link shows nothing.
+- Member SSO failure pages answer 400, 403, 404, 500, 502 or 503 instead of 200, with `Cache-Control: no-store`. Monitoring that keyed on the 200 body should key on the status.
+- Admin and console pages send `Cache-Control: private` and `Vary: Cookie`; console and dressed error pages also `no-store`. Tenant JWT routes and the MCP token endpoints send `no-store` and `Pragma: no-cache`.
+- Bearer 401s carry `WWW-Authenticate: Bearer`, and the scheme is case-insensitive, so `bearer <token>` now authenticates.
+- `EtagLayer` touches only GET and HEAD; a write's reply is never a 304.
+- `resolve_url` returns only same-site URLs: `http(s)://…` and `//host` now fail with `UnknownName`. Check an absolute target with `url_has_allowed_host_and_scheme` and `redirect` to it directly.
+- `reverse` fills a `{*rest}` catch-all from the key `rest` and keeps its `/`.
+- MCP: at most 8 open SSE streams per agent and 256 per tenant per process, else 429; tune with `RUSTANGO_MCP_SSE_PER_AGENT` / `RUSTANGO_MCP_SSE_PER_TENANT` (`0` is no cap).
+- `JwtBackend::issue` cannot see a logout-all stamp, so a token it mints in that second is refused; mint with `issue_for_user` there.
+
+---
+
 ## 0.61.8
 
 ### Data ops, uploads, views and Debug output

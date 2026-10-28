@@ -245,9 +245,10 @@ async fn auth_middleware(
             }
         }
     }
+    let sent = crate::bearer::Sent::of(&headers);
 
     if let Some(resp) = error_response {
-        return resp;
+        return crate::bearer::challenge(resp, sent);
     }
 
     match authenticated {
@@ -256,9 +257,10 @@ async fn auth_middleware(
             req.extensions_mut().insert(super::TenantSlug(org.slug));
             next.run(req).await
         }
-        None if state.required => {
-            (StatusCode::UNAUTHORIZED, "authentication required").into_response()
-        }
+        None if state.required => crate::bearer::challenge(
+            (StatusCode::UNAUTHORIZED, "authentication required").into_response(),
+            sent,
+        ),
         None => next.run(req).await,
     }
 }
@@ -270,7 +272,10 @@ async fn perm_middleware(
 ) -> Response {
     let user = req.extensions().get::<AuthenticatedUser>().cloned();
     let Some(user) = user else {
-        return (StatusCode::UNAUTHORIZED, "authentication required").into_response();
+        return crate::bearer::challenge(
+            (StatusCode::UNAUTHORIZED, "authentication required").into_response(),
+            crate::bearer::Sent::of(req.headers()),
+        );
     };
     // Same tenant as the credential was checked against —
     // a permission read against the wrong database is how tenant A's
