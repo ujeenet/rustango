@@ -539,6 +539,10 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
+        "                       [--resume]  finish a tenant whose migrations failed (left inactive)"
+    )?;
+    writeln!(
+        w,
         "  test-tenant-connection <url> [--no-write-probe] [--timeout <secs>]"
     )?;
     writeln!(

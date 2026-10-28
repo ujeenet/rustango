@@ -961,6 +961,11 @@ cargo run -- create-tenant gamma --mode database --server main
 | `--schema-name <s>` | Überschreibt den generierten Schemanamen im Schema-Modus |
 | `--port <n>` | Port, unter dem der Tenant erreichbar ist, fürs Routing |
 | `--path-prefix <s>` | Pfad-Präfix, unter dem der Tenant erreichbar ist, fürs Routing |
+| `--resume` | Schließt einen Tenant ab, den ein früherer Lauf wegen fehlgeschlagener Migrationen inaktiv ließ; dieselben Flags erneut angeben |
+
+Schlagen die Migrationen des Tenants fehl, endet `create-tenant` mit einem
+Fehlercode und der Tenant bleibt inaktiv. Behebe die Migration und führe
+denselben Befehl mit `--resume` erneut aus: er migriert und aktiviert den Tenant.
 
 Jeder Modus prüft seine Rechte, bevor etwas entsteht, und wenn eines fehlt,
 nennt er es und gibt die Anweisungen aus, die es beheben: Der Schemamodus braucht

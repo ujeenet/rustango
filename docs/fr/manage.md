@@ -997,6 +997,11 @@ cargo run -- create-tenant gamma --mode database --server main
 | `--schema-name <s>` | Remplace le nom de schéma généré en mode schéma |
 | `--port <n>` | Port sur lequel le tenant est joignable, pour le routage |
 | `--path-prefix <s>` | Préfixe de chemin sous lequel le tenant est joignable, pour le routage |
+| `--resume` | Termine un tenant qu'un run précédent a laissé inactif après l'échec de ses migrations ; redonnez les mêmes options |
+
+Si les migrations du tenant échouent, `create-tenant` sort avec un code
+non nul et le tenant reste inactif. Corrigez la migration, puis relancez
+la même commande avec `--resume` : elle migre et active ce tenant.
 
 Chaque mode vérifie ses droits avant de créer quoi que ce soit et, quand l'un
 manque, le nomme et affiche les instructions qui le corrigent : le mode schéma
