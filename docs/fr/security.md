@@ -512,6 +512,8 @@ Fonctionne avec Google Authenticator, Authy, 1Password, Bitwarden et d'autres ap
 
 `verify` accepte le même code à nouveau jusqu'à son expiration. Pour des codes à usage unique, appelez plutôt `matched_step`, stockez le pas qu'il renvoie et n'acceptez un code que si son pas est postérieur au pas stocké. La connexion admin intégrée fait ainsi.
 
+La console opérateur a le même second facteur, facultatif par opérateur ou obligatoire pour tous ; voir [Connexion à deux facteurs](operator-console.md#connexion-à-deux-facteurs).
+
 **Codes de récupération** (codes de secours à usage unique pour quand un utilisateur perd son téléphone) pas encore fournis. Le motif courant est de stocker 8 à 10 codes hachés par utilisateur et d'en brûler un à chaque utilisation.
 
 ---

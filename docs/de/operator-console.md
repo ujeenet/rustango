@@ -15,6 +15,7 @@ Die Operator-Konsole ist die Weboberfläche für die erste Art — Tenants provi
 - [Was jede Seite tut](#was-jede-seite-tut)
 - [Hostnamen](#hostnamen)
 - [Operatoren](#operatoren)
+- [Zwei-Faktor-Anmeldung](#zwei-faktor-anmeldung)
 - [Das Audit-Log](#das-audit-log)
 - [Provisioning-Läufe](#provisioning-läufe)
 - [Datenbankserver](#datenbankserver)
@@ -72,6 +73,7 @@ Die Konsole antwortet auf der **Apex**-Domain (`RUSTANGO_APEX_DOMAIN`), nicht au
 | **Audit log** | Jede Änderung, die über diese Konsole lief |
 | **Runs** | Provisioning- und Migrationsläufe, live gestreamt |
 | **Database servers** | Server, auf denen Tenant-Datenbanken angelegt werden, mit ihrem Admin-Login |
+| **Two-factor sign-in** | Die eigene Authenticator-App (Feature `totp`) |
 
 ---
 
@@ -107,6 +109,18 @@ Zwei Dinge lässt die Seite aus demselben Grund nicht zu:
 Ein generiertes Passwort wird **einmal** angezeigt, im Antwortkörper — nie über einen Redirect, der es in die Adressleiste, die Historie, den Referrer und jedes Access-Log dazwischen tragen würde.
 
 Über die CLI: [`list-operators` / `set-operator-active`](manage.md#list-operators).
+
+---
+
+## Zwei-Faktor-Anmeldung
+
+Mit dem Feature `totp` kann ein Operator unter **Two-factor sign-in** (`/account/totp`) eine Authenticator-App hinzufügen. Die Seite zeigt einen Einrichtungsschlüssel und einen `otpauth://`-Link, bis ein Code ihn bestätigt. Zum Abschalten ist ein aktueller Code nötig.
+
+Danach öffnet das Passwort allein nur den Code-Schritt (`/login/totp`); keine Konsolenseite antwortet, bis der Code stimmt. Jeder Code gilt einmal, und falsche Codes zählen gegen dieselben Limits und dieselbe Sperre wie falsche Passwörter. Einrichten, Abschalten und jeder falsche Code landen im [Audit-Log](#das-audit-log) als `totp_enroll`, `totp_disable` und `totp_failed`, nie mit dem Code.
+
+Pro Operator ist es freiwillig. Mit `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` wird es Pflicht: Ein Operator ohne Gerät richtet dann beim Code-Schritt eines ein, bevor die erste Sitzung beginnt. Wird beim Start gelesen.
+
+Die Geheimnisse liegen in `rustango_operator_totp` in der Registry, versiegelt unter `RUSTANGO_SECRET_KEY`, der zum Einrichten gesetzt sein muss. `migrate` legt die Tabelle an, sonst die Konsole bei der ersten Anmeldung. Ist die Tabelle nicht lesbar, wird die Anmeldung abgelehnt statt allein mit dem Passwort durchgelassen. Wiederherstellungscodes gibt es noch nicht: Wer das Gerät verliert, braucht eine Shell auf der Registry, um seine Zeile zu löschen.
 
 ---
 

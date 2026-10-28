@@ -19,6 +19,7 @@ and runs the whole registry. There is no per-tenant migrate on the command line.
 - [What each page does](#what-each-page-does)
 - [Hostnames](#hostnames)
 - [Operators](#operators)
+- [Two-factor sign-in](#two-factor-sign-in)
 - [The audit log](#the-audit-log)
 - [Provisioning runs](#provisioning-runs)
 - [Database servers](#database-servers)
@@ -78,6 +79,7 @@ The console answers on the **apex** domain (`RUSTANGO_APEX_DOMAIN`), not on a te
 | **Audit log** | Every change made through the console |
 | **Runs** | Provisioning and migration runs, streamed live |
 | **Database servers** | Servers tenant databases are created on, with their admin login |
+| **Two-factor sign-in** | Your own authenticator app (`totp` feature) |
 
 ---
 
@@ -113,6 +115,18 @@ Two things the page will not let you do, for the same reason:
 A generated password is shown **once**, in the response body — never through a redirect, which would put it in the URL bar, the history, the referrer and every access log in between.
 
 From the CLI: [`list-operators` / `set-operator-active`](manage.md#list-operators).
+
+---
+
+## Two-factor sign-in
+
+With the `totp` feature, an operator can add an authenticator app under **Two-factor sign-in** (`/account/totp`). The page shows a setup key and an `otpauth://` link until a code confirms it. Turning it off takes a current code.
+
+Once it is on, the password alone only opens the code step (`/login/totp`); no console page answers until the code is right. Each code works once, and wrong codes count against the same limits and lock as wrong passwords. Enrolling, turning it off and every wrong code are written to the [audit log](#the-audit-log) as `totp_enroll`, `totp_disable` and `totp_failed`, never with the code.
+
+It is optional per operator. Set `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` to require it: an operator without a device then sets one up at the code step before the first session. Read at start-up.
+
+The secrets live in `rustango_operator_totp` in the registry, sealed under `RUSTANGO_SECRET_KEY`, which must be set to enroll. `migrate` creates the table, or the console does on the first sign-in. If the table cannot be read, sign-in is refused rather than let through on the password. There are no recovery codes yet: an operator who loses the device needs a shell on the registry to delete their row.
 
 ---
 

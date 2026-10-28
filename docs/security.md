@@ -527,6 +527,8 @@ Works with Google Authenticator, Authy, 1Password, Bitwarden, and other standard
 
 `verify` accepts the same code again until it expires. To make codes single use, call `matched_step` instead, store the step it returns, and accept a code only when its step is later than the stored one. The built-in admin login does this.
 
+The operator console has the same second factor, optional per operator or required for all; see [Two-factor sign-in](operator-console.md#two-factor-sign-in).
+
 **Recovery codes** (one-time backup codes for when a user loses their phone) aren't shipped yet. The common pattern is to store 8–10 hashed codes per user and burn one each time it's used.
 
 ---
