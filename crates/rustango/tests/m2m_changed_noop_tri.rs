@@ -139,6 +139,21 @@ async fn set_on_an_i32_through_model(pool: &Pool) {
     assert_eq!(actions(&fired), [M2mAction::Set]);
 }
 
+/// `add` skips a present link even when the through model has no unique key.
+async fn add_twice_on_a_keyless_through_model(pool: &Pool) {
+    let (_signals, fired) = record().await;
+    let p = M2MManager {
+        src_pk: SqlValue::I64(1),
+        through: PostTagI32::SCHEMA.table,
+        src_col: "post_id",
+        dst_col: "tag_id",
+    };
+    p.add(5_i64, pool).await.expect("add");
+    p.add(5_i64, pool).await.expect("duplicate add");
+    assert_eq!(actions(&fired), [M2mAction::Add]);
+    assert_eq!(p.all_as::<i32>(pool).await.expect("all"), [5]);
+}
+
 async fn generic_noop_set_and_clear_fire_nothing(pool: &Pool) {
     let (_signals, fired) = record().await;
     let t = tags(GENERIC_INT);
@@ -254,6 +269,7 @@ tri_dialect_test! {
         noop_changes_fire_nothing,
         noop_set_and_clear_fire_nothing,
         set_on_an_i32_through_model,
+        add_twice_on_a_keyless_through_model,
         generic_noop_set_and_clear_fire_nothing,
         generic_set_with_string_keys,
         generic_set_on_an_int_column,

@@ -152,6 +152,25 @@ async fn empty_batch_is_a_noop(pool: &Pool) {
     assert_eq!(count(pool).await, 0, "an empty batch must write nothing");
 }
 
+/// A conflict key repeated in one batch keeps the last row on every backend.
+async fn repeated_key_in_one_batch_keeps_the_last(pool: &Pool) {
+    let rows = [
+        post("a", "First", 1),
+        post("b", "Beta", 2),
+        post("a", "Last", 3),
+    ];
+    Post::bulk_upsert_pool(&rows, &["slug"], &["title", "view_count"], pool)
+        .await
+        .expect("repeated key in a fresh batch");
+    assert_eq!(fetch(pool, "a").await, ("Last".into(), 3));
+    let again = [post("a", "X", 4), post("a", "Y", 5)];
+    Post::bulk_upsert_pool(&again, &["slug"], &["title", "view_count"], pool)
+        .await
+        .expect("repeated key over an existing row");
+    assert_eq!(fetch(pool, "a").await, ("Y".into(), 5));
+    assert_eq!(count(pool).await, 2);
+}
+
 /// No update columns is a typed error on every backend, not bad SQL.
 async fn empty_update_cols_is_refused(pool: &Pool) {
     let err = Post::bulk_upsert_pool(&[post("a", "Alpha", 1)], &["slug"], &[], pool)
@@ -228,5 +247,6 @@ tri_dialect_test! {
         second_call_updates_listed_columns_only,
         insert_or_ignore_skips_conflicts,
         empty_batch_is_a_noop,
+        repeated_key_in_one_batch_keeps_the_last,
     ],
 }

@@ -165,6 +165,15 @@ pub struct Item {
 }
 
 #[derive(Model, Debug, Clone)]
+#[rustango(table = "oqe_ev", app = "oqe")]
+pub struct Ev {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub at: Option<chrono::DateTime<Utc>>,
+    pub d: Option<NaiveDate>,
+}
+
+#[derive(Model, Debug, Clone)]
 #[rustango(table = "oqe_small", app = "oqe")]
 pub struct Small {
     #[rustango(primary_key)]
@@ -201,6 +210,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Remark>(pool).await;
     fresh_table::<Item>(pool).await;
     fresh_table::<Small>(pool).await;
+    fresh_table::<Ev>(pool).await;
     fresh_table::<Renamed>(pool).await;
     rustango::audit::ensure_table_pool(pool)
         .await
@@ -690,6 +700,42 @@ async fn date_buckets_are_utc(pool: &Pool) {
     assert_eq!(days, [Utc.with_ymd_and_hms(2026, 2, 28, 0, 0, 0).unwrap()]);
 }
 
+/// `dates()` / `datetimes()` skip NULL values of a nullable column.
+async fn date_buckets_skip_nulls(pool: &Pool) {
+    use rustango::query::{DateKind, DateTimeKind};
+    let at = Utc.with_ymd_and_hms(2026, 3, 14, 9, 30, 0).unwrap();
+    let d = NaiveDate::from_ymd_opt(2026, 3, 14).unwrap();
+    for ev in [
+        Ev {
+            id: 1,
+            at: Some(at),
+            d: Some(d),
+        },
+        Ev {
+            id: 2,
+            at: None,
+            d: None,
+        },
+    ] {
+        ev.insert_pool(pool).await.expect("ev");
+    }
+    let months = rustango::sql::fetch_dates_pool(pool, Ev::objects().dates("at", DateKind::Month))
+        .await
+        .expect("dates on a nullable datetime");
+    assert_eq!(months, [NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()]);
+    let days = rustango::sql::fetch_dates_pool(pool, Ev::objects().dates("d", DateKind::Day))
+        .await
+        .expect("dates on a nullable date");
+    assert_eq!(days, [d]);
+    let hours = rustango::sql::fetch_datetimes_pool(
+        pool,
+        Ev::objects().datetimes("at", DateTimeKind::Hour),
+    )
+    .await
+    .expect("datetimes on a nullable datetime");
+    assert_eq!(hours, [Utc.with_ymd_and_hms(2026, 3, 14, 9, 0, 0).unwrap()]);
+}
+
 /// PARTITION BY / ORDER BY of a window take the base table beside a join.
 async fn window_columns_beside_a_join(pool: &Pool) {
     Owner { id: 1 }.insert_pool(pool).await.expect("owner");
@@ -1044,6 +1090,7 @@ tri_dialect_test! {
         distinct_values_ordered_by_another_column,
         page_past_the_end_keeps_its_total,
         date_buckets_are_utc,
+        date_buckets_skip_nulls,
         window_columns_beside_a_join,
         like_lookups_match_case,
         concat_with_null_is_null,

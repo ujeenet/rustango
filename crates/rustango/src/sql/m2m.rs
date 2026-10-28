@@ -88,8 +88,8 @@ impl M2MManager {
         .await
     }
 
-    /// Add `dst_id` to the junction table. No-op if already present.
-    /// Tri-dialect: [`insert_or_ignore`](super::insert_or_ignore); a duplicate fires no signal.
+    /// Add `dst_id` to the junction table. No-op if already present, with
+    /// or without a unique `(src, dst)` key; a duplicate fires no signal.
     ///
     /// # Errors
     /// Driver failures, or a key outside the through model's field bounds.
@@ -101,8 +101,9 @@ impl M2MManager {
             vec![self.src_col, self.dst_col],
             vec![src.clone(), dst.clone()],
         );
+        let link = vec![eq(self.src_col, src.clone()), eq(self.dst_col, dst.clone())];
         // A skipped duplicate changed nothing, so it fires no signal (#2221).
-        if !super::executor::insert_or_ignore(pool, &query).await? {
+        if !insert_link(self.source_locks(&src), link, &query, pool).await? {
             return Ok(());
         }
         // #410 — fire m2m_changed after successful junction-row write.
@@ -162,18 +163,7 @@ impl M2MManager {
         let src = self.src_key()?;
         let dsts = dst_keys(ids, self.through, self.dst_col)?;
         let rows = dsts.iter().map(|d| vec![src.clone(), d.clone()]).collect();
-        // The manager does not name its source (a new pub field would break
-        // literals), so lock every registered model declaring this junction end.
-        let locks: Vec<SelectQuery> = inventory::iter::<crate::core::ModelEntry>
-            .into_iter()
-            .map(|e| e.schema)
-            .filter(|s| {
-                s.m2m
-                    .iter()
-                    .any(|r| r.through == self.through && r.src_col == self.src_col)
-            })
-            .filter_map(|s| source_lock(s, &src))
-            .collect();
+        let locks = self.source_locks(&src);
         if locks.is_empty() {
             tracing::warn!(
                 through = self.through,
@@ -250,6 +240,21 @@ impl M2MManager {
 
     fn src_key(&self) -> Result<SqlValue, ExecError> {
         src_key(&self.src_pk, self.through)
+    }
+
+    /// The manager does not name its source (a new pub field would break
+    /// literals), so lock every registered model declaring this junction end.
+    fn source_locks(&self, src: &SqlValue) -> Vec<SelectQuery> {
+        inventory::iter::<crate::core::ModelEntry>
+            .into_iter()
+            .map(|e| e.schema)
+            .filter(|s| {
+                s.m2m
+                    .iter()
+                    .any(|r| r.through == self.through && r.src_col == self.src_col)
+            })
+            .filter_map(|s| source_lock(s, src))
+            .collect()
     }
 
     fn junction(&self) -> &'static ModelSchema {
@@ -380,6 +385,34 @@ fn source_lock(source: &'static ModelSchema, pk: &SqlValue) -> Option<SelectQuer
         ..crate::core::LockMode::default()
     });
     Some(q)
+}
+
+/// Insert `query` unless a junction row matches `link`, under `locks`: a
+/// through model need not have a unique `(src, dst)` key. `true` when it inserted.
+async fn insert_link(
+    locks: Vec<SelectQuery>,
+    link: Vec<Filter>,
+    query: &InsertQuery,
+    pool: &Pool,
+) -> Result<bool, ExecError> {
+    let query = InsertQuery {
+        on_conflict: Some(crate::core::ConflictClause::DoNothing),
+        ..query.clone()
+    };
+    query.validate()?;
+    // SQLite has no row lock: take its write lock at BEGIN instead.
+    let mut tx = crate::sql::write_transaction(pool).await?;
+    for lock in locks {
+        let stmt = pool.dialect().compile_select(&lock)?;
+        super::executor::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+    }
+    let present = SelectQuery::new(query.model).where_clause(WhereExpr::and_predicates(link));
+    if super::executor::count_rows_on(&mut tx, &CountQuery::from_select(present)).await? > 0 {
+        return Ok(false);
+    }
+    super::executor::insert_tx(&mut tx, &query).await?;
+    tx.commit().await.map_err(ExecError::Driver)?;
+    Ok(true)
 }
 
 /// Delete the rows `owner` matches and insert `rows` in one transaction, so

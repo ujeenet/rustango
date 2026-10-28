@@ -1357,6 +1357,8 @@ impl BulkInsertQuery {
     /// * Postgres / SQLite (3.24+): `ON CONFLICT (target) DO UPDATE SET col = EXCLUDED.col`
     /// * MySQL: `ON DUPLICATE KEY UPDATE col = VALUES(col)`. It matches
     ///   every UNIQUE index, so a target that is not the only one is refused.
+    ///
+    /// Rows repeating a `target` key: the executor keeps the last one.
     #[must_use]
     pub fn on_conflict_do_update(
         mut self,
@@ -1394,6 +1396,50 @@ impl BulkInsertQuery {
         self.rows
             .iter()
             .try_for_each(|row| validate_row(self.model, &self.columns, row))
+    }
+
+    /// For a `DoUpdate`, this batch keeping only the last row of each repeated
+    /// conflict key: PG refuses to update one row twice in a statement. NULL keys never conflict.
+    #[must_use]
+    pub(crate) fn last_per_conflict_key(&self) -> std::borrow::Cow<'_, Self> {
+        use std::borrow::Cow;
+        let Some(ConflictClause::DoUpdate { target, .. }) = &self.on_conflict else {
+            return Cow::Borrowed(self);
+        };
+        let Some(idx) = target
+            .iter()
+            .map(|t| self.columns.iter().position(|c| c == t))
+            .collect::<Option<Vec<usize>>>()
+        else {
+            return Cow::Borrowed(self);
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut keep = vec![true; self.rows.len()];
+        for (i, row) in self.rows.iter().enumerate().rev() {
+            let key: Option<Vec<String>> = idx
+                .iter()
+                .map(|&k| match row.get(k) {
+                    None | Some(SqlValue::Null) => None,
+                    Some(v) => Some(format!("{v:?}")),
+                })
+                .collect();
+            if key.is_some_and(|key| !seen.insert(key)) {
+                keep[i] = false;
+            }
+        }
+        if keep.iter().all(|k| *k) {
+            return Cow::Borrowed(self);
+        }
+        let rows = self
+            .rows
+            .iter()
+            .zip(keep)
+            .filter_map(|(row, k)| k.then(|| row.clone()))
+            .collect();
+        Cow::Owned(Self {
+            rows,
+            ..self.clone()
+        })
     }
 }
 

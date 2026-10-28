@@ -22,7 +22,7 @@ Les versions récentes ont ajouté un lot de fonctionnalités qui ne sont pas en
 
 - **Macro `Q!` + builder d'exécution `Qb`** — filtres sûrs à la compilation. `User::objects().where_(Q!(User.email__icontains = "alice"))` échoue à la compilation si un nom de champ comporte une faute de frappe. Variante composable à l'exécution pour les puces de filtre de l'admin : `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
 - **`.distinct_on(&["author_id"])`** — natif sur PG ; repli portable via fonction de fenêtrage sur MySQL / SQLite. Modèles « le plus récent par groupe ».
-- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** — insère de nombreuses lignes en une instruction, ou les met à jour en cas de conflit. `ON CONFLICT` / `ON DUPLICATE KEY UPDATE` tri-dialecte.
+- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** — insère de nombreuses lignes en une instruction, ou les met à jour en cas de conflit. `ON CONFLICT` / `ON DUPLICATE KEY UPDATE` tri-dialecte. Si une clé se répète, la dernière ligne gagne.
 - **`explain_pool()`** — EXPLAIN tri-dialecte. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
 - **Bibliothèque de fonctions SQL** — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Émission par dialecte avec des erreurs claires là où SQLite ne dispose pas de la fonction.
 - **Types de champ** — `rust_decimal::Decimal` (natif sur PG/MySQL, via un shim Decode sur SQLite), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) sont désormais acceptés par `#[derive(Model)]` (v0.42).
@@ -309,7 +309,7 @@ let inbox: Vec<Post> = Post::objects()
 | `.intersection(other)` | `INTERSECT` | Lignes présentes dans LES DEUX querysets |
 | `.difference(other)` | `EXCEPT` | Lignes du premier queryset mais PAS des autres |
 
-Chaque méthode prend un `QuerySet<T>` — les deux branches doivent cibler le même modèle `T`, de sorte que la forme des colonnes correspond par construction (vérifiée à la compilation par les génériques de Rust). Les appels s'accumulent ; mélanger les opérateurs dans une même chaîne est autorisé (`a.union(b).intersection(c)` s'évalue de gauche à droite selon le standard SQL).
+Chaque méthode prend un `QuerySet<T>` — les deux branches doivent cibler le même modèle `T`, de sorte que la forme des colonnes correspond par construction (vérifiée à la compilation par les génériques de Rust). Les appels s'accumulent ; mélanger les opérateurs dans une même chaîne est autorisé (`a.union(b).intersection(c)` s'évalue de gauche à droite sur chaque backend, comme `(a ∪ b) ∩ c`).
 
 **Les modificateurs externes s'appliquent au résultat fusionné** :
 
@@ -433,7 +433,7 @@ let ids: Vec<i64> = Post::objects()
 | `.values_list(&[cols])` | `SELECT col1, col2 FROM …` | `Vec<Vec<SqlValue>>` (ordonné par `cols`) |
 | `.values_list_flat(col)` | `SELECT col FROM …` | `Vec<U>` (typé, via `fetch::<U>(...)`) |
 
-**Fonctionne avec le reste de la chaîne de requête.** `.where_()`, `.filter()`, `.order_by()`, `.limit()`, `.offset()`, et les opérateurs d'ensemble (`.union()` / `.intersection()` / `.difference()`) — toute méthode appelée AVANT `.values_*` est propagée. Les builders de valeurs sont terminaux (rien ne se chaîne après eux), donc définissez d'abord la forme de la requête, puis fetchez.
+**Fonctionne avec le reste de la chaîne de requête.** `.where_()`, `.filter()`, `.order_by()`, `.limit()`, `.offset()`, et les opérateurs d'ensemble (`.union()` / `.intersection()` / `.difference()`) — toute méthode appelée AVANT `.values_*` est propagée. Les builders de valeurs sont terminaux (rien ne se chaîne après eux), donc définissez d'abord la forme de la requête, puis fetchez. Une opération d'ensemble triée par une colonne hors de la projection compare aussi cette colonne, puis la retire des lignes.
 
 **Validation au moment de `.compile()` / `.fetch()` :**
 - Liste de colonnes vide (`.values_dict(&[])`) → [`QueryError::EmptyValuesProjection`].
