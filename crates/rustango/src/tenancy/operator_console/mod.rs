@@ -66,7 +66,7 @@
 mod audit;
 mod db_servers;
 mod decommission;
-mod flash;
+pub(in crate::tenancy) mod flash;
 mod hosts;
 mod migrate;
 mod mount;
