@@ -51,6 +51,24 @@ fn validation_failed() -> Response {
     Response::new("validation failed; `details` maps each field to its errors")
 }
 
+/// A path pk that does not parse as the key's type (`parse_pk_or_400`).
+fn malformed_pk() -> Response {
+    Response::new("malformed primary key")
+}
+
+/// `extract_create_body`'s cap, or an outer body limit.
+fn body_too_large() -> Response {
+    Response::new("request body too large")
+}
+
+/// Either shape. An object and an array never both match, so `anyOf` is exact.
+fn any_of(a: Schema, b: Schema) -> Schema {
+    Schema {
+        any_of: vec![a, b],
+        ..Schema::default()
+    }
+}
+
 /// `run_list` refuses an unknown lookup, a bad value, an oversized IN list or a bad cursor.
 fn bad_list_criteria() -> Response {
     Response::new("bad filter lookup or value, IN list too long, or invalid cursor")
@@ -109,25 +127,50 @@ impl ViewSet {
         if self.list_can_refuse() {
             list_op = list_op.response("400", bad_list_criteria());
         }
-        p = p.get(list_op);
+        p = p.get(self.gated(list_op, &self.perms.list, "list"));
 
         // -------- create (POST)
         if !self.read_only {
+            // A JSON array is a bulk create (`CreateBody::Bulk`); a form never is.
+            let one = self.request_schema(Body::Create);
+            let body = RequestBody::json(any_of(one.clone(), Schema::array_of(one.clone())))
+                .and_content("application/x-www-form-urlencoded", one);
+            let created = any_of(
+                Schema::ref_(item_ref),
+                Schema::array_of(Schema::ref_(item_ref).nullable()),
+            );
             let create_op = Operation::new()
                 .summary(format!("Create {tag}"))
+                .description(format!(
+                    "A JSON array creates up to {} rows in one transaction and answers \
+                     an array in the same order.",
+                    self.max_bulk_create
+                ))
                 .operation_id(format!("create_{}", snake(tag)))
                 .tag(tag)
-                .request_body(write_body(self.request_schema(Body::Create)))
+                .request_body(body)
                 .response(
                     "201",
-                    // `create_one` answers a bare 201 when the read-back is scoped out.
-                    Response::new("created; empty body when the new row is outside your scope")
-                        .json_content(Schema::ref_(item_ref)),
+                    // `create_one` answers a bare 201 when the read-back is scoped out;
+                    // `fetch_many_by_pk_scoped` puts `null` in that row's place.
+                    Response::new(
+                        "created; empty body when the new row is outside your scope, \
+                         and `null` for each such row of a bulk create",
+                    )
+                    .json_content(created),
                 )
                 .response("400", malformed_body())
                 .response("409", conflict())
+                .response(
+                    "413",
+                    Response::new(format!(
+                        "request body too large, or a bulk create over {} rows or over \
+                         the create throttle",
+                        self.max_bulk_create
+                    )),
+                )
                 .response("422", validation_failed());
-            p = p.post(create_op);
+            p = p.post(self.gated(create_op, &self.perms.create, "create"));
         }
 
         // -------- query (QUERY, RFC 10008)
@@ -185,7 +228,7 @@ impl ViewSet {
                     "422",
                     Response::new("body is not a JSON object of criteria"),
                 );
-            p = p.query(query_op);
+            p = p.query(self.gated(query_op, &self.perms.list, "list"));
         }
 
         p
@@ -195,7 +238,7 @@ impl ViewSet {
         let mut p = PathItem::new().parameter(self.pk_path_param());
 
         // -------- retrieve (GET)
-        let retrieve_op = Operation::new()
+        let mut retrieve_op = Operation::new()
             .summary(format!("Retrieve {tag}"))
             .operation_id(format!("retrieve_{}", snake(tag)))
             .tag(tag)
@@ -204,7 +247,16 @@ impl ViewSet {
                 Response::new("found").json_content(Schema::ref_(item_ref)),
             )
             .response("404", Response::new("not found"));
-        p = p.get(retrieve_op);
+        if self.pk_can_be_malformed() {
+            retrieve_op = retrieve_op.response("400", malformed_pk());
+        }
+        p = p.get(self.gated(retrieve_op, &self.perms.retrieve, "retrieve"));
+        // PUT/PATCH share one 400 for the path pk and the body.
+        let bad_write = if self.pk_can_be_malformed() {
+            Response::new("malformed primary key or body, or a value that does not parse")
+        } else {
+            malformed_body()
+        };
 
         if !self.read_only {
             let update_op = Operation::new()
@@ -217,11 +269,12 @@ impl ViewSet {
                     Response::new("updated").json_content(Schema::ref_(item_ref)),
                 )
                 .response("204", moved_out_of_scope())
-                .response("400", malformed_body())
+                .response("400", bad_write.clone())
                 .response("404", Response::new("not found"))
                 .response("409", conflict())
+                .response("413", body_too_large())
                 .response("422", validation_failed());
-            p = p.put(update_op);
+            p = p.put(self.gated(update_op, &self.perms.update, "update"));
 
             let patch_op = Operation::new()
                 .summary(format!("Partially update {tag}"))
@@ -233,22 +286,54 @@ impl ViewSet {
                     Response::new("updated").json_content(Schema::ref_(item_ref)),
                 )
                 .response("204", moved_out_of_scope())
-                .response("400", malformed_body())
+                .response("400", bad_write)
                 .response("404", Response::new("not found"))
                 .response("409", conflict())
+                .response("413", body_too_large())
                 .response("422", validation_failed());
-            p = p.patch(patch_op);
+            p = p.patch(self.gated(patch_op, &self.perms.update, "update"));
 
-            let destroy_op = Operation::new()
+            let mut destroy_op = Operation::new()
                 .summary(format!("Delete {tag}"))
                 .operation_id(format!("destroy_{}", snake(tag)))
                 .tag(tag)
                 .response("204", Response::new("deleted"))
                 .response("404", Response::new("not found"));
-            p = p.delete(destroy_op);
+            if self.pk_can_be_malformed() {
+                destroy_op = destroy_op.response("400", malformed_pk());
+            }
+            p = p.delete(self.gated(destroy_op, &self.perms.destroy, "destroy"));
         }
 
         p
+    }
+
+    /// What `enter()` answers before the handler: 401/403 from the
+    /// action's codenames, 429 from its throttle.
+    fn gated(&self, mut op: Operation, codenames: &[String], action: &str) -> Operation {
+        if !codenames.is_empty() {
+            // Without tenancy there is no principal, so `check_perm` only denies.
+            #[cfg(feature = "tenancy")]
+            {
+                op = op.response("401", Response::new("authentication required"));
+            }
+            op = op.response("403", Response::new("permission denied"));
+        }
+        if self.throttle.for_action(action).is_some() {
+            op = op.response(
+                "429",
+                Response::new("throttled; retry after `Retry-After` seconds")
+                    .header("Retry-After", Schema::integer()),
+            );
+        }
+        op
+    }
+
+    /// `parse_pk_string` takes any text for a `String` key.
+    fn pk_can_be_malformed(&self) -> bool {
+        self.schema
+            .primary_key()
+            .is_some_and(|f| f.ty != FieldType::String)
     }
 
     /// The body a write accepts, from the same field set the handlers
@@ -790,9 +875,96 @@ mod tests {
         let coll = &paths.iter().find(|(p, _)| p == "/api/posts").unwrap().1;
         let v = serde_json::to_value(coll.post.as_ref().unwrap()).unwrap();
         assert_eq!(
-            v["responses"]["201"]["content"]["application/json"]["schema"]["$ref"],
+            v["responses"]["201"]["content"]["application/json"]["schema"]["anyOf"][0]["$ref"],
             "#/components/schemas/Post"
         );
+    }
+
+    /// A JSON array creates many rows and answers an array, `null` where scoped out.
+    #[test]
+    fn create_documents_the_bulk_shape() {
+        let paths = vs().max_bulk_create(50).openapi_paths("/api/posts", "Post");
+        let coll = &paths.iter().find(|(p, _)| p == "/api/posts").unwrap().1;
+        let v = serde_json::to_value(coll.post.as_ref().unwrap()).unwrap();
+        let content = &v["requestBody"]["content"];
+        let json = &content["application/json"]["schema"]["anyOf"];
+        assert_eq!(json[1]["type"], "array", "{v}");
+        assert_eq!(json[1]["items"], json[0], "{v}");
+        // A form body is always one row.
+        assert_eq!(
+            content["application/x-www-form-urlencoded"]["schema"],
+            json[0]
+        );
+        let created = &v["responses"]["201"]["content"]["application/json"]["schema"]["anyOf"];
+        assert_eq!(created[1]["type"], "array", "{v}");
+        assert_eq!(
+            created[1]["items"],
+            serde_json::json!({"anyOf": [
+                {"$ref": "#/components/schemas/Post"}, {"type": "null"},
+            ]})
+        );
+        let too_large = v["responses"]["413"]["description"].as_str().unwrap();
+        assert!(too_large.contains("50 rows"), "{too_large}");
+        for (name, op) in [("PUT", &paths[1].1.put), ("PATCH", &paths[1].1.patch)] {
+            let v = serde_json::to_value(op.as_ref().unwrap()).unwrap();
+            assert!(v["responses"]["413"].is_object(), "{name}: {v}");
+        }
+    }
+
+    /// `parse_pk_or_400` refuses a pk that does not parse, on retrieve and DELETE too.
+    #[test]
+    fn item_reads_and_deletes_document_a_malformed_pk() {
+        let paths = vs().openapi_paths("/api/posts", "Post");
+        let item = &paths[1].1;
+        for (name, op) in [("GET", &item.get), ("DELETE", &item.delete)] {
+            let v = serde_json::to_value(op.as_ref().unwrap()).unwrap();
+            assert_eq!(
+                v["responses"]["400"]["description"], "malformed primary key",
+                "{name}: {v}"
+            );
+        }
+    }
+
+    fn statuses(op: Option<&crate::openapi::Operation>) -> Vec<String> {
+        op.unwrap().responses.keys().cloned().collect()
+    }
+
+    /// `enter()` answers 401/403 for an action with codenames, 429 when throttled.
+    #[test]
+    fn gated_actions_document_what_enter_returns() {
+        let has = |op, code: &str| statuses(op).iter().any(|s| s == code);
+        let paths = vs().openapi_paths("/api/posts", "Post");
+        for code in ["401", "403", "429"] {
+            assert!(!has(paths[0].1.get.as_ref(), code), "ungated list: {code}");
+        }
+
+        let perms = crate::viewset::ViewSetPerms {
+            list: vec!["post.view".into()],
+            ..Default::default()
+        };
+        let throttle = crate::viewset::ViewSetThrottle {
+            destroy: Some(crate::viewset::ThrottleRule::new(5, 60)),
+            ..Default::default()
+        };
+        let paths = vs()
+            .permissions(perms)
+            .throttle(throttle)
+            .openapi_paths("/api/posts", "Post");
+        let (coll, item) = (&paths[0].1, &paths[1].1);
+        assert!(has(coll.get.as_ref(), "403"));
+        assert_eq!(
+            has(coll.get.as_ref(), "401"),
+            cfg!(feature = "tenancy"),
+            "401 needs a principal to authenticate"
+        );
+        assert!(!has(coll.post.as_ref(), "403"), "create has no codenames");
+        assert!(!has(coll.get.as_ref(), "429"));
+        let del = serde_json::to_value(item.delete.as_ref().unwrap()).unwrap();
+        assert!(
+            del["responses"]["429"]["headers"]["Retry-After"].is_object(),
+            "{del}"
+        );
+        assert!(!has(item.get.as_ref(), "429"));
     }
 
     /// #2164: create and update map a unique violation to 409.
@@ -838,9 +1010,14 @@ mod tests {
         assert!(created.contains("empty body"), "{created}");
     }
 
+    /// The one-row body; a create's JSON body also takes an array of them.
     fn body_schema(op: Option<&crate::openapi::Operation>) -> serde_json::Value {
         let v = serde_json::to_value(op.unwrap()).unwrap();
-        v["requestBody"]["content"]["application/json"]["schema"].clone()
+        let s = &v["requestBody"]["content"]["application/json"]["schema"];
+        match s["anyOf"].get(0) {
+            Some(one) => one.clone(),
+            None => s.clone(),
+        }
     }
 
     /// #1922: the item schema as a request body required the `Auto` id
@@ -1119,7 +1296,7 @@ mod tests {
             let content = &v["requestBody"]["content"];
             assert_eq!(
                 content["application/x-www-form-urlencoded"]["schema"],
-                content["application/json"]["schema"],
+                body_schema(op.as_ref()),
                 "{name}: {v}"
             );
             assert!(v["responses"]["422"].is_object(), "{name}: {v}");

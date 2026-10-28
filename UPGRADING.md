@@ -162,6 +162,10 @@ A webhook answered 429 or 503 with `Retry-After` now waits that long (up to an h
 
 A refused shared-provider add now returns the console page (400) with the error, not a plain-text body. Successful changes redirect to `/sso-shared?notice=…`.
 
+### ViewSet OpenAPI: create is an `anyOf`
+
+A ViewSet's `POST` JSON body and its 201 schema are now `anyOf` one row or an array of rows, since a JSON array is a bulk create. Regenerate clients built from the spec.
+
 ## 0.61.7
 
 ### Admin: no self-deactivation
