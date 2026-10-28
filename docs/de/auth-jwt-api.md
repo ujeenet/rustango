@@ -76,6 +76,10 @@ Instanz hat ihre eigene In-Memory-Sperrliste. Bei zwei Instanzen sieht
 abläuft. Ein gemeinsamer `jti_store` (Redis, Datenbank) beseitigt diese
 Trennung ebenfalls.
 
+`require_bearer` und `/me` akzeptieren nur Tokens, die `/login` oder `/refresh`
+ausgestellt haben, und lehnen sie ab, sobald sich der Benutzer irgendwo abmeldet
+oder sein Passwort ändert.
+
 `Config::default()` signiert mit `RUSTANGO_SESSION_SECRET` (demselben Schlüssel
 wie das Admin-Session-Cookie) und verwendet TTLs von 15 Min. Access / 7 Tage
 Refresh. Überschreiben Sie `prefix`, `access_ttl_secs`, `refresh_ttl_secs` oder

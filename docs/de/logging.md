@@ -190,6 +190,22 @@ die Zeilen oben.
 | `compact` | Entwicklung — knappere Einzelzeile, Span-Felder am Ende | `.with_format(Format::Compact)` |
 | `json` | Produktion — ein Objekt pro Event, für Loki / CloudWatch / Datadog | `.json()` |
 
+Alle vier rendern unterschiedlich, was nicht immer so war: Früher rief
+`install()` weder `.pretty()` noch `.compact()` auf, beide Werte erzeugten also
+`full`-Ausgabe.
+
+### Farbe
+
+Farbe ist an, wenn stdout ein Terminal ist, und aus, wenn nicht — das Umleiten
+in eine Datei oder ein Lauf unter CI braucht keine Konfiguration. `NO_COLOR`
+wird beachtet. `json` und die Datei-Senke sind nie farbig.
+
+| `color` | Verhalten |
+|---|---|
+| `auto` | Farbe genau dann, wenn stdout ein Terminal ist und `NO_COLOR` nicht gesetzt ist. Der Default |
+| `always` | Farbe auch beim Umleiten |
+| `never` | Nie Farbe |
+
 ```rust,ignore
 rustango::logging::Setup::new()
     .json()
@@ -210,7 +226,7 @@ Quellpositionen (nützlich in der Entwicklung, laut in Produktion), und
 das Filtern danach aufgegeben haben.
 
 > Jeder Format-Wert erreicht seinen eigenen Formatter. `compact` wurde früher
-> akzeptiert und dann wie der Default gerendert — das ist behoben (#1480).
+> akzeptiert und dann wie der Default gerendert — das ist behoben.
 
 ## Logging aus den Settings konfigurieren
 
@@ -222,6 +238,7 @@ Rebuild ändern kann. Der Abschnitt heißt `[logging]`:
 [logging]
 level             = "info,sqlx=warn"
 format            = "pretty"
+color             = "auto"
 with_line_numbers = true
 ```
 
@@ -265,15 +282,24 @@ rustango::manage::Cli::new()
 der Kette spielt keine Rolle: installiert wird bei `run()`, gegen die
 endgültigen Settings.
 
-> **`#[rustango::main]` gewinnt dagegen.** Das Makro installiert einen
-> Subscriber, noch bevor die Runtime gebaut ist, und jeder Installer nutzt
-> `try_init` — der erste gewinnt, spätere werden stillschweigend verworfen. Ein
-> `main`, das das Makro behält *und* `with_logging()` aufruft, bekommt also die
-> Defaults des Makros: Ihr `[logging]`-Abschnitt wird gelesen und bleibt dann
-> wirkungslos, ohne jeden Hinweis. Für Settings-gesteuertes Logging tauschen Sie
-> `#[rustango::main]` gegen `#[tokio::main]` — das ist die eine Änderung, die
-> ein generiertes Projekt braucht. Verfolgt in
-> [#1465](https://github.com/ujeenet/rustango/issues/1465).
+> **Sag `#[rustango::main]`, dass es Platz machen soll.** Das Makro installiert
+> einen Subscriber, noch bevor die Runtime gebaut ist, und jeder Installer nutzt
+> `try_init`, also gewinnt der erste. Übergib `logging = false`, dann installiert
+> sich deiner zuerst:
+>
+> ```rust,ignore
+> #[rustango::main(logging = false)]
+> async fn main() -> Result<(), Box<dyn std::error::Error>> {
+>     rustango::manage::Cli::new()
+>         .with_settings_from_env()
+>         .with_logging()
+>         .run().await
+> }
+> ```
+>
+> Ohne das wird der Abschnitt `[logging]` gelesen und verworfen. Früher geschah
+> das still; `install()` warnt jetzt auf stderr und über `tracing`, wenn es
+> bereits einen Subscriber vorfindet.
 
 Jeder Schlüssel lässt sich pro Deployment per Umgebungsvariable überschreiben,
 mit Abschnitt und Schlüssel als Pfadsegmenten:

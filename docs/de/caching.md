@@ -52,12 +52,17 @@ use std::sync::Arc;
 let cache: BoxedCache = Arc::new(InMemoryCache::new());
 ```
 
-| Backend | Feature | Verwenden für |
-|---|---|---|
-| `InMemoryCache` | `cache` | Dev, Tests, Einzelprozess (HashMap pro Prozess + TTL) |
-| `RedisCache` | `cache-redis` | Produktion; über Replicas geteilt |
-| `DatabaseCache` | `cache` | Produktion ohne Redis; eine `rustango_cache`-Tabelle |
-| `NullCache` | `cache` | Caching deaktivieren (jeder Read verfehlt) — praktisch in Tests |
+| Backend | Feature | `[cache] backend` | Verwenden für |
+|---|---|---|---|
+| `InMemoryCache` | `cache` | `memory` *(Standard)* | Dev, Tests, Einzelprozess (HashMap pro Prozess + TTL) |
+| `RedisCache` | `cache-redis` | `redis` | Produktion; über Replicas geteilt |
+| `DatabaseCache` | `cache` | `db` / `database` | Produktion ohne Redis; eine `rustango_cache`-Tabelle |
+| `FileCache` | `cache` | `file` | eine Datei pro Key unter `file_cache_dir`; nur geteilt, wenn das Verzeichnis es ist |
+| `NullCache` | `cache` | `null` / `none` | Caching deaktivieren (jeder Read verfehlt) — praktisch in Tests |
+
+Einen Wert `postgres` gibt es nicht — das DB-Backend ist `db` oder `database`.
+Ein Doc-Kommentar von `CacheSettings` behauptete früher etwas anderes, und ein
+unbekannter Wert liefert einen In-Memory-Cache mit einer Warnung.
 
 ---
 
@@ -109,7 +114,8 @@ aus dem Cache bedient.
 
 > **Bei Schreibvorgängen invalidieren.** Cache-Aside bedeutet veraltete Daten,
 > bis das TTL abläuft. Für Daten, die sich ändern, mache auch `delete(key)`, wenn
-> du sie schreibst — z. B. aus einem [`post_save`-Signal](orm.md) — damit der
+> du sie schreibst — z. B. aus einem [`post_save`-Signal](orm.md), das du nach dem Speichern
+> sendest (das Speichern selbst sendet es nicht) — damit der
 > nächste Read neu berechnet.
 
 ---

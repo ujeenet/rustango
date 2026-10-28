@@ -5,18 +5,18 @@ einen Server zu booten oder das Netzwerk zu berühren. **Rustango**s `TestClient
 Router **in-process** aus: du rufst `client.get("/path")` auf, es routet die Anfrage
 durch den echten Stack (Extractors, Middleware, Handler) und gibt dir die
 Antwort zum Assertieren zurück. Füge Transaction-Rollback-Isolation für Datenbanktests und
-ein Set von Response-Assertions hinzu, und du hast eine vollständige
-Integrationstest-Umgebung, ohne die Prozessgrenze zu verlassen.
+ein Set von Response-Assertions hinzu, und ein ganzer Request-Ablauf ist ohne
+Socket testbar.
 
 [![Testen in Rustango: TestClient umschließt deinen Router und sendet In-process-Anfragen durch den echten Handler-Stack; die TestResponse macht Status, Text und JSON zum Assertieren verfügbar — kein Socket, kein Server](../img/testing.png)](../img/testing.png)
 
 > **Neu bei einem Begriff hier?** *router*, *handler*, *fixture*, *rollback* — siehe das
 > [Glossar](glossary.md).
 
-> **Quelle:** `rustango::test_client` (`TestClient`, `TestResponse`),
-> `rustango::test_assertions` (`assert_status_2xx`, `assert_redirects`,
-> `assert_cookie_set`, …) und `rustango::test_db` (`with_rollback`) — immer
-> kompiliert.
+> **Quelle:** `rustango::test_client` (`TestClient`, `TestResponse`) — braucht
+> das Feature `admin`, weil es einen `axum::Router` umhüllt. `rustango::test_assertions`
+> (`assert_status_2xx`, `assert_redirects`, `assert_cookie_set`, …) und
+> `rustango::test_db` (`with_rollback`) sind ungegated.
 >
 > **Lauffähige Version:** die untenstehenden Snippets *sind* ein bestehender Test —
 > [`testing_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/testing_doc.rs)
@@ -147,7 +147,14 @@ async fn creating_a_post_persists_it() {
 }
 ```
 
-Die Closure bekommt ein `AtomicTx`; sperre es pro Anweisung mit `tx.lock().await?`. Ein `atomic()` auf demselben Pool darin ist ein Savepoint und wird mit zurückgerollt. Gib den Guard vor einem verschachtelten `atomic()` oder `bulk_insert_pool` frei, sonst schlagen sie mit `ExecError::NestedAtomic` fehl.
+Das `Box::pin` ist Pflicht, keine Stilfrage: Die Schranke ist
+`for<'tx> FnOnce(&'tx AtomicTx) -> Pin<Box<dyn Future<…> + Send + 'tx>>`,
+so darf die Closure `tx` über ihre eigenen Await-Punkte hinweg ausleihen. Ein
+`atomic()` auf demselben Pool innerhalb der Closure ist ein Savepoint und wird
+ebenfalls zurückgerollt; gib den Guard davor oder vor einem `bulk_insert_pool`
+frei, sonst schlagen sie mit `NestedAtomic` fehl. Die Closure liefert
+`Result<T, ExecError>`, ebenso `with_rollback` — das Rollback passiert so oder
+so, das `unwrap` betrifft also deine Assertions, nicht das Aufräumen.
 
 Für SQLite verwenden die `*_sqlite_live.rs`-Tests überall in diesem Repo stattdessen eine In-Memory-
 Datenbank pro Test — ebenfalls vollständig isoliert, mit null externem Setup.
@@ -188,6 +195,25 @@ MySQL ist das, worüber Leute stolpern: es liest seine eigene Variable, also fü
 eine Shell, in der nur `DATABASE_URL` gesetzt ist, die Postgres-Suites aus und
 überspringt stillschweigend jede MySQL-Suite.
 
+### Nacheinander ausführen
+
+Die Live-Suiten teilen sich eine Datenbank, und die meisten löschen oder leeren
+die Framework-Tabellen im Setup, parallel ausgeführt kämpfen sie also um den
+Katalog. Nutze das Profil `live`, das `test-threads = 1` setzt:
+
+```bash
+cargo nextest run --profile live --workspace --all-features
+```
+
+Ohne es gibt es viele Fehlschläge, und keiner davon ist echt: 758 gegen
+PostgreSQL, 95 gegen MySQL, mit dem Profil in beiden Fällen 0. Die
+`tokio::sync::Mutex`-Guards in diesen Suiten helfen nicht, weil nextest jeden
+Test in seinem eigenen Prozess ausführt und ein Mutex in einem Prozess keinen
+anderen erreicht.
+
+Das ist ein Workaround, keine Lösung — Datenbanken pro Prozess würden die
+Parallelität zurückbringen.
+
 ### Einen Skip von einem Pass unterscheiden
 
 Die meisten Skips sind ein nacktes frühes `return` ganz ohne Ausgabe. Eine
@@ -213,7 +239,7 @@ Skip.
 ## Response-Assertion-Helper
 
 Für rohe `axum::Response`-Werte (z. B. aus `tower::oneshot`) liefert `test_assertions`
-lesbare Ein-Zeilen-Prüfungen für Status, Inhalt, Redirects und Cookies:
+fertige Prüfungen für Status, Redirects und Cookies:
 
 ```rust
 use rustango::test_assertions::{assert_status_2xx, assert_redirects, assert_cookie_set};

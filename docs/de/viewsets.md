@@ -520,6 +520,12 @@ die Validierung oder die Datenbank es abfängt.
 > 0–4 committete, `400 bulk entry 5` zurückgab und keine der erzeugten Zeilen nannte.
 > Genau diese Verstöße kann die Validierung vorab nicht entscheiden.
 
+Eine Charge fasst höchstens 1000 Zeilen (`max_bulk_create(n)`; mehr ist ein `413`),
+und jede Zeile verbraucht eine `create`-Throttle-Einheit.
+
+Bei einem `#[rustango(soft_delete)]`-Modell stempelt `DELETE` die Spalte, statt zu
+löschen, und jede Action behandelt eine soft-gelöschte Zeile als verschwunden.
+
 ---
 
 ## Auswahl, welche Operationen exponiert werden
@@ -567,6 +573,7 @@ Felder, die Antworten zeigen und Bodies schreiben dürfen. Jede weitere Methode 
 | `ordering_fields(&["…"])` | Festlegen, welche Felder `?ordering=` verwenden darf. |
 | `page_size(n)` | Standard-Seitengröße (≤ 100). |
 | `max_page_size(n)` | Hebt oder senkt das Client-Limit selbst (Default 100). |
+| `max_bulk_create(n)` | Höchstzahl an Zeilen, die ein Bulk-Create tragen darf (Default 1000). |
 | `pk_param(name)` | Benennt den Pfadparameter der Detail-Routen um. |
 | `read_only()` | Nur GET. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Codename-Gates pro Aktion (letzteres bei Mandantenfähigkeit). |
@@ -766,6 +773,21 @@ auch `write_pins`: Create speichert den Besitzer, Update kann ihn nicht ändern,
 Auch die statischen globalen Scopes eines Modells begrenzen, was gelesen wird, nicht was
 geschrieben wird: Create oder Update darf den Scope verlassen (201 ohne Body oder 204).
 Für eine Sicherheitsgrenze nimm ein Filter-Backend mit `write_pins`.
+
+Ein Schreibvorgang gibt seine volle Zeile nur an einen Aufrufer mit der
+Berechtigung `retrieve` zurück; andere bekommen nur `{"<pk>": …}` (eine pro
+Bulk-Zeile). Ein einzelnes Create sendet außerdem einen `Location`-Header, der
+auf die Detail-Route zeigt.
+
+Ein FK, den ein Body setzt, muss eine Zeile nennen, die die globalen Scopes des
+Ziels zeigen; ein Update darf den Wert erneut senden, den die Zeile bereits hat.
+Um ihn weiter einzugrenzen, ergänze ein Backend für dieses Feld; es läuft gegen
+das Zielmodell, und jede andere Zeile ist ein 422:
+
+```rust
+ViewSet::for_model(Comment::SCHEMA, &["id", "body", "post_id"])
+    .related_filter("post_id", OwnedBy::column("author_id"))
+```
 
 #### `OwnedBy` — das mitgelieferte Backend
 

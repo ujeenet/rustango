@@ -194,7 +194,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     rustango::manage::Cli::new()
         .api(urls::api())
-        .with_welcome()  // friendly `/` page until you add a root handler
         .with_health()   // /health + /ready endpoints (fullstack & tenant)
         .run()
         .await
@@ -207,11 +206,26 @@ Wie sich die Vorlagen innerhalb von `main.rs` / `urls.rs` unterscheiden:
 
 - **api** — kein Admin; `urls::api()` aggregiert schlicht deine eigenen Routen.
 - **fullstack** — dieselbe `urls.rs`, plus ein `admin_router(pool)`-Helfer, den `main.rs` mit `Cli::nest_with("/admin", …)` einhängt, gebaut aus dem Pool des Servers. Er nimmt `rustango::sql::Pool` entgegen, benennt also keinen Treiber, und liegt hinter einem Login: Lege das Konto mit `cargo run -- create-admin <username>` an (siehe [Erste Schritte, Schritt 11](getting-started.md#schritt-11-den-auto-admin-einschalten)).
-- **tenant** — `main.rs` ergänzt `.tenancy()`, bedient die Operator-Konsole auf der Apex-Domain und jeden Tenant unter seiner eigenen Subdomain. Die eigenen Tabellen des Frameworks werden beim ersten `cargo run -- migrate` aus den kompilierten Modellen in einen **`system/migrations/`**-Ordner generiert — kein handgeliefertes Bootstrap-JSON, sodass das allererste migrate ohne zusätzliche Einrichtung funktioniert.
+- **tenant** — `main.rs` ergänzt `.tenancy()`, bedient die Operator-Konsole auf der Apex-Domain und jeden Tenant unter seiner eigenen Subdomain, sowie `.with_tenant_provisioning("migrations")` für die Konsolenseiten **New tenant** und **Database servers** (lösche es, um sie abzuschalten; das Speichern eines Servers braucht `RUSTANGO_SECRET_KEY`). Die eigenen Tabellen des Frameworks werden beim ersten `cargo run -- migrate` aus den kompilierten Modellen in einen **`system/migrations/`**-Ordner generiert — kein handgeliefertes Bootstrap-JSON, sodass das allererste migrate ohne zusätzliche Einrichtung funktioniert.
 
 ### Geschichtete Konfiguration
 
 Die Einstellungen laden zuerst `config/default.toml`, dann `config/<RUSTANGO_ENV>_settings.toml` darüber. `RUSTANGO_ENV` ist standardmäßig `dev`, sodass ein frisch gescaffoldetes `cargo run` ohne Änderungen funktioniert; setze `RUSTANGO_ENV=prod` in der Produktion, um `prod_settings.toml` aufzunehmen.
+
+Die Dev- und Staging-Dateien setzen eine `[brand] tagline` von `dev` bzw. `staging`. Um sie zu ändern oder deinen eigenen Namen und dein Logo zu setzen, siehe [Branding](operator-console.md#branding) und die [Konfigurationsschlüssel](admin.md#konfiguration-admin-und-brand) des Admins.
+
+### Einstellungen, die nicht von selbst wirken
+
+Nicht jeden Schlüssel liest das Framework. `Cli::with_settings` warnt beim Start, wenn einer aus der ersten Gruppe gesetzt ist.
+
+| Schlüssel | Status |
+|---|---|
+| `[sso]` (jeder Schlüssel) | Noch ohne Wirkung. Richte Admin-SSO in der Admin-UI ein. |
+| `[auth.jwt] issuer`, `audience` | Noch ohne Wirkung. |
+| `[admin] primary_color`, `csrf_cookie_secure`, `session_timeout_minutes` | Noch ohne Wirkung; nur `check --deploy` liest sie. |
+| `[database] url` | Wird nicht zum Verbinden genutzt: Jeder Pool liest die Umgebungsvariable `DATABASE_URL`. |
+| `[audit] retention_days` | Nichts räumt danach auf; plane `audit-cleanup --days <N>` ein. |
+| `[jobs]`, `[i18n]`, `[cache]`, `[mail]`, `[mcp]`, `[auth.jwt]`-TTLs, `[admin]` | Vom Benutzer verdrahtet: nur vom Konstruktor gelesen, den du aufrufst (`jobs::inmemory_from_settings`, `Translator::from_settings`, `cache::from_settings_async`, `email::from_settings`, `mcp::secure_tenant_router_from_settings`, `auth_routes::Config::with_jwt_settings`, `admin::Builder::from_settings`). |
 
 ### Erster Lauf
 

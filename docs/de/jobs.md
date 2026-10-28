@@ -263,6 +263,13 @@ ziehen alle sicher aus der geteilten Tabelle. Der Web-Prozess muss dann nur noch
 periodischen [`reclaim_stuck_jobs_pool`](#die-persistente-queue-produktion)-Sweep,
 um Jobs eines abgestürzten Workers zurückzuholen.
 
+Zwei verschiedene Queues auf einer Tabelle (etwa ein Mailer und ein Report-Runner
+mit eigenen Handlern) greifen sich gegenseitig die Jobs. Gib jeder mit
+`.queue_name("mailer")` auf der dispatchenden und der arbeitenden Seite einen
+eigenen Namen: Eine benannte Queue führt nur ihre Jobs aus, eine unbenannte nur
+unbenannte Jobs. Worker von vor `queue_name` ignorieren es und führen auch
+benannte Jobs aus: Stoppe sie, bevor du auf eine benannte Queue dispatchst.
+
 ---
 
 ## Retries und Backoff
@@ -351,6 +358,11 @@ queue.start().await;
 // 3. Dispatch exactly as before — now it's durable.
 queue.dispatch(&WelcomeEmail { user_id: 42 }).await?;
 ```
+
+**Dispatch innerhalb einer Transaktion.** Innerhalb eines `atomic`-Blocks auf dem
+eigenen Pool der Queue tritt `dispatch` dem Block bei: Der Job wird mit ihm
+zurückgerollt, und kein Worker wacht vor dem Commit auf. Halte den `TxGuard` des
+Blocks nicht über den Aufruf hinweg.
 
 **Abgestürzte Worker wiederherstellen.** Stirbt ein Worker mitten im Job, bleibt
 die Zeile gesperrt. Führe einen periodischen Sweep aus, um Sperren älter als eine
@@ -501,7 +513,8 @@ Wenn du den Sweep so absicherst, dass nur eine Replica ihn ausführt, dann
 use rustango::distributed_lock::DistributedLock;
 
 let lock = DistributedLock::new(cache.clone()).for_tenant(&org.slug);
-lock.with_lock("nightly_prune", ttl, || async { /* … */ }).await;
+// Tick every minute; this runs once per UTC day across replicas.
+lock.once_per_period("nightly_prune", day, || prune(&org)).await;
 ```
 
 Ungescoped konkurrieren alle Tenants um dasselbe `lock:nightly_prune`: der
