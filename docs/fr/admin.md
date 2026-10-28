@@ -167,6 +167,9 @@ de dates se combinent tous dans la chaîne de requête et peuvent être associé
 parent d'inline, jamais sur une colonne secrète, et `?<field>__isnull=1` liste
 les lignes NULL, `?<field>__isempty=1` celles au texte vide.
 
+Une carte de facette affiche jusqu'à 15 valeurs ; les autres se replient dans
+un lien « +N de plus » (`?facet_show_all=<field>`), qui en liste au plus 200.
+
 [![La liste des posts filtrée par status=published : une puce de filtre actif, la facette correspondante mise en évidence, la boîte de recherche et le sélecteur d'actions groupées](../img/admin-list-filtered.png)](../img/admin-list-filtered.png)
 
 **Tri.** Cliquez sur l'en-tête d'une colonne pour trier ; cliquez à nouveau
@@ -325,6 +328,14 @@ pour qu'elle exige `{table}.delete` et exécute le hook `delete` à la place. El
 exige toujours `{table}.change`, et elle est auditée et signalée comme une
 modification.
 
+Un gestionnaire `register_action` écrit sur sa propre connexion, donc les
+lignes d'audit d'un modèle audité sont écrites après lui, au mieux.
+`register_tx_action(table, name, handler)` (et `register_tx_action_with_perm`)
+passe plutôt `&mut PoolTx` au gestionnaire, donc ses écritures et leurs lignes
+d'audit sont validées ou annulées ensemble. N'écrivez que via cette
+transaction : une seconde connexion peut bloquer un pool SQLite à une seule
+connexion.
+
 ---
 
 ## Piste d'audit
@@ -353,6 +364,9 @@ empreinte inviolable. Deux endroits l'exposent :
   facettes par entité / opération / source et un formulaire de nettoyage pour
   purger les entrées plus anciennes que N jours (lui-même enregistré comme
   une entrée d'audit).
+  Chaque carte de facette affiche jusqu'à 15 valeurs plus la valeur active ;
+  « +N de plus » (`?facet_show_all=<col>`) en liste au plus 200, donc filtrez
+  le flux pour atteindre les autres.
 
 [![Le flux Activité : chaque changement audité à travers les modèles avec des diffs JSON, des cartes de facettes par table/opération/source, et un formulaire de nettoyage](../img/admin-audit.png)](../img/admin-audit.png)
 
@@ -485,6 +499,9 @@ Le builder d'admin de tenant câble cela automatiquement sur son
 `RouteConfig::logout_url`, de sorte que le bouton atteint toujours une route qui
 existe.
 
+L'admin refuse une modification qui décoche **active** sur la propre ligne de
+l'utilisateur connecté, comme la console opérateur : demandez à un autre admin.
+
 Décocher **active** dans l'admin horodate aussi `sessions_revoked_at`. Une
 écriture ORM directe sur `active` ne le fait pas ; dans votre propre code,
 utilisez `rustango::session::deactivate::<AdminUser>(&pool, id)` (ou
@@ -585,6 +602,7 @@ sauf indication contraire) :
 | `with_user_perms([codenames])` | Conditionne les tables sur `{table}.view/add/change/delete`. |
 | `register_action(table, name, handler)` | Enregistre un gestionnaire d'action groupée. |
 | `register_action_with_perm(table, name, perm, handler)` | Idem, vérifié contre `ActionPerm::Delete` au lieu de `change`. |
+| `register_tx_action(table, name, handler)` / `register_tx_action_with_perm` | Pareil, mais le gestionnaire reçoit la transaction d'écriture, donc les lignes d'audit sont validées avec elle. |
 | `with_session_auth(secret)` | Exige une connexion par cookie (`/login` + `/logout`). |
 | `logout_url(u)` | Cible POST du bouton Déconnexion de la barre latérale. Par défaut `{admin_prefix}/logout` ; les admins de tenant la pointent vers leur route de déconnexion tenancy. |
 | `secure_cookies(bool)` | Définit le drapeau `Secure` (HTTPS uniquement) sur le cookie de session. `new` suit `[security].secure_cookies`, sinon sécurisé au niveau prod. |

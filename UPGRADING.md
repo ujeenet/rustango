@@ -152,7 +152,7 @@ untouched.
 
 ### Operator console: optional TOTP
 
-Nothing changes until an operator enrolls or `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` is set. The console creates `rustango_operator_totp` in the registry on its first sign-in (or `migrate` does); if that table cannot be read, operator sign-in is refused. Enrolling needs `RUSTANGO_SECRET_KEY`; `reseal-tenant-secrets` does not reseal these secrets yet, so keep `RUSTANGO_SECRET_KEY_PREVIOUS` set while enrolled operators re-enroll after a key rotation.
+Nothing changes until an operator enrolls or `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` is set. The console creates `rustango_operator_totp` in the registry on its first sign-in (or `migrate` does); if the registry role cannot create it, sign-in uses the password alone until `migrate` creates it (refused under `RUSTANGO_OPERATOR_REQUIRE_TOTP=1`); if the table exists but cannot be read, sign-in is refused. Enrolling needs `RUSTANGO_SECRET_KEY`; `reseal-tenant-secrets` does not reseal these secrets yet, so keep `RUSTANGO_SECRET_KEY_PREVIOUS` set while enrolled operators re-enroll after a key rotation.
 
 ### Database URL from DB_* vars; 0.62.0 flips the precedence
 

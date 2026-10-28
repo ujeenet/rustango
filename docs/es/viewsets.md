@@ -593,6 +593,7 @@ que las respuestas muestran y los bodies pueden escribir. Cada otro método devu
 | `pagination(PaginationStyle::…)` | Establece el estilo explícitamente. |
 | `filter_backend(closure)` | Añade predicados `WHERE` personalizados más allá de `filter_fields`. |
 | `throttle(…)` / `throttle_all(max, secs)` | Límites de tasa de ventana fija por acción; `QUERY` gasta el presupuesto de list. |
+| `admin_add_hooks()` | Ejecuta los hooks de permiso por objeto `"add"` del admin al crear, sobre la petición y sobre cada fila escrita; un rechazo es un `403`. Desactivado por defecto. |
 | `router(prefix, pgpool)` | Monta (Postgres, pool estático). |
 | `router_pool(prefix, pool)` | Monta tri-dialecto (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenencia)* monta con resolución de inquilino por petición. |
@@ -756,6 +757,10 @@ Una lista de acción vacía = sin verificación. La aplicación lee un usuario
 autenticado de la petición (la integración de autenticación de `tenancy`); los
 superusuarios la eluden, un usuario ausente se deniega. `.permissions_for_model::<Post>()`
 autocompleta los codenames estándar `post.view`/`add`/`change`/`delete`.
+
+Un ViewSet aún no ejecuta los hooks de permiso por objeto `change`, `delete` o `view`
+del admin. Si su modelo tiene alguno, montarlo registra un aviso; la 0.62.0 los
+ejecutará al actualizar, eliminar y leer.
 
 **El throttling** aplica límites de ventana fija por cliente, por acción:
 

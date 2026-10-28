@@ -296,6 +296,14 @@ Der zugrunde liegende Test dispatcht einen Job, der einmal fehlschlägt und dann
 gelingt, und stellt sicher, dass er **mehr als einmal lief und schließlich
 gelang** — das Retry findet tatsächlich statt.
 
+Um die Wartezeit für jeden Job eines Typs zu ändern, überschreibe
+`fn retry_backoff(failed_attempt: u32) -> Duration` im Impl
+(`failed_attempt` ist 0 nach dem ersten Lauf). Um die Obergrenze oder die
+Wartezeit aus dem Payload zu setzen, überschreibe `fn max_attempts(&self) -> u32`
+oder `fn retry_delay(&self, failed_attempt: u32) -> Duration`; standardmäßig
+liefern sie `MAX_ATTEMPTS` und `retry_backoff`. Die Obergrenze wird beim
+Dispatch gelesen.
+
 ---
 
 ## Der Dead-Letter-Handler

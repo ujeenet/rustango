@@ -158,6 +158,9 @@ und Zeilenanzahl sowie Facetten-Anzahlen aktualisieren sich. Filter, Suche, Sort
 und die Datumshierarchie fügen sich alle in der Query-Zeichenkette zusammen und lassen
 sich kombinieren.
 
+Eine Facetten-Karte zeigt bis zu 15 Werte; der Rest klappt in einen Link "+N more"
+(`?facet_show_all=<field>`) ein, der höchstens 200 auflistet.
+
 [![Die nach status=published gefilterte Beitragsliste: ein aktiver Filter-Chip, die passende hervorgehobene Facette, das Suchfeld und der Massenaktionsauswähler](../img/admin-list-filtered.png)](../img/admin-list-filtered.png)
 
 **Sortieren.** Klicke auf einen Spaltenkopf zum Sortieren; erneut klicken, um die
@@ -304,6 +307,14 @@ Objekt-Hook, der nach der Aktion benannt ist. Eine Aktion, die löscht, sollte d
 braucht sie `{table}.delete` und führt stattdessen den `delete`-Hook aus. Sie braucht
 weiterhin `{table}.change` und wird als Bearbeitung auditiert und signalisiert.
 
+Ein `register_action`-Handler schreibt über seine eigene Verbindung, daher werden
+die Prüfpfad-Zeilen eines geprüften Modells danach geschrieben, nach bestem Bemühen.
+`register_tx_action(table, name, handler)` (und `register_tx_action_with_perm`)
+übergibt dem Handler stattdessen `&mut PoolTx`, sodass seine Schreibvorgänge und
+ihre Prüfpfad-Zeilen gemeinsam committen oder zurückrollen. Schreibe nur über
+diese Transaktion: Eine zweite Verbindung kann einen SQLite-Pool mit nur einer
+Verbindung blockieren.
+
 ---
 
 ## Prüfpfad
@@ -329,6 +340,9 @@ manipulationssicheren Fingerabdruck. Zwei Stellen zeigen es an:
   zeilenübergreifender Feed, neueste zuerst, mit Facetten-Karten für Entität / Operation
   / Quelle und einem Aufräumformular, um Einträge älter als N Tage zu bereinigen (was
   selbst als Prüfpfad-Eintrag erfasst wird).
+  Jede Facetten-Karte zeigt bis zu 15 Werte plus den aktiven; "+N more"
+  (`?facet_show_all=<col>`) listet höchstens 200, also filtere den Feed, um den
+  Rest zu erreichen.
 
 [![Der Activity-Feed: jede geprüfte Änderung über Modelle hinweg mit JSON-Diffs, Facetten-Karten nach Tabelle/Operation/Quelle und einem Aufräumformular](../img/admin-audit.png)](../img/admin-audit.png)
 
@@ -451,6 +465,10 @@ Der Mandanten-Admin-Builder verdrahtet dies automatisch mit seiner
 `RouteConfig::logout_url`, sodass die Schaltfläche immer eine Route trifft, die
 existiert.
 
+Der Admin lehnt eine Bearbeitung ab, die **active** in der eigenen Zeile des
+angemeldeten Benutzers abwählt, wie die Operator-Konsole: Bitte einen anderen
+Admin darum.
+
 Das Abwählen von **active** im Admin setzt auch `sessions_revoked_at`. Ein direkter
 ORM-Schreibzugriff auf `active` tut das nicht; nutze in deinem eigenen Code
 `rustango::session::deactivate::<AdminUser>(&pool, id)` (oder `Operator`, `User`),
@@ -548,6 +566,7 @@ anders angegeben):
 | `with_user_perms([codenames])` | Sperrt Tabellen auf `{table}.view/add/change/delete`. |
 | `register_action(table, name, handler)` | Registriert einen Massenaktions-Handler. |
 | `register_action_with_perm(table, name, perm, handler)` | Ebenso, aber gegen `ActionPerm::Delete` statt `change` geprüft. |
+| `register_tx_action(table, name, handler)` / `register_tx_action_with_perm` | Dasselbe, aber der Handler erhält die Schreibtransaktion, sodass Prüfpfad-Zeilen mit ihr committen. |
 | `with_session_auth(secret)` | Erfordert Cookie-Login (`/login` + `/logout`). |
 | `logout_url(u)` | POST-Ziel für die Logout-Schaltfläche der Seitenleiste. Standard `{admin_prefix}/logout`; Mandanten-Admins setzen es auf ihre Mandanten-Logout-Route. |
 | `secure_cookies(bool)` | Setzt das `Secure`-Flag (HTTPS-only) auf dem Session-Cookie. |

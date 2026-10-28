@@ -419,7 +419,7 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `through(...)` | spécification de relation | accesseur de relation « through » personnalisé |
 | `reverse_has(...)` / `generic_has(...)` | spécification de relation | accesseur has-many inverse / FK générique inverse |
 | `required_db_features` / `required_db_vendor` | liste / fournisseur | contraintes de validation de déploiement |
-| `db_table_comment` | `"…"` | COMMENT de table |
+| `db_table_comment` | `"…"` | COMMENT de table ; les migrations fichier ne l'écrivent pas encore, et `makemigrations` émet un avertissement |
 | `admin(...)` | options admin | configuration de l'UI admin (voir [admin.md](admin.md)) |
 | `fk_composite(...)` / `generic_fk(...)` | spécification | FK composite / FK générique (content-type) |
 | `m2m(...)` / `generic_m2m(...)` | spécification | relation plusieurs-à-plusieurs / plusieurs-à-plusieurs générique |

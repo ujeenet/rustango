@@ -143,9 +143,22 @@ PATCH, DELETE), und es bleibt mit der Konfiguration des ViewSet synchron:
   `limit`/`offset`).
 - **Filtering / Suche / Sortierung** → ein `?field=`-Query-Parameter pro
   `filter_fields` (mit den verfügbaren `__gt`/`__in`/…-Lookups beschrieben) plus
-  `?search=` und `?ordering=`, wenn konfiguriert.
+  `?search=`, wenn konfiguriert, und `?ordering=` (unten).
 - **`read_only()`** → die Schreiboperationen (POST/PUT/PATCH/DELETE) werden
   weggelassen.
+- **Bodies und Fehler** → Create, PUT und PATCH nehmen JSON- oder
+  urlencoded-Bodies an und dokumentieren `422 validation_failed`, `400` für einen
+  fehlerhaften Body und `413` für einen zu großen. Die Create-Operation
+  beschreibt die Bulk-Array-Form in ihrem Text (die Schemas bleiben eine Zeile).
+  List dokumentiert ein `400`, wenn seine Filter einen Wert ablehnen können;
+  Retrieve und DELETE dokumentieren `400` für einen fehlerhaften pk.
+- **Gates** → `403` (und `401` mit `tenancy`) bei einer Aktion mit
+  Berechtigungs-Codenames und `429` mit `Retry-After` bei einer Aktion mit
+  Throttle.
+- **List-Parameter** → `page_size` nennt die echte `max_page_size`-Obergrenze.
+  `?ordering=` wird bei jedem ViewSet aufgeführt außer bei cursor-paginierten,
+  die immer nach der Cursor-Spalte sortieren. Binärfelder sind `format: hex`, so
+  wie der Server sie liest und schreibt.
 - **Pfadparameter** → `{pk}`, typisiert aus dem Primärschlüssel des Modells.
 - **`operationId`** → `list_post`, `create_post`, … (pro Aktion in snake_case).
 

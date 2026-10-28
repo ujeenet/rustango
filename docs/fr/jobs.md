@@ -309,6 +309,13 @@ Le test sous-jacent dispatche une tâche qui échoue une fois puis réussit, et
 affirme qu'elle **s'est exécutée plus d'une fois et a fini par réussir** — la
 nouvelle tentative a bien lieu.
 
+Pour changer l'attente de toutes les tâches d'un type, surchargez
+`fn retry_backoff(failed_attempt: u32) -> Duration` dans l'impl
+(`failed_attempt` vaut 0 après la première exécution). Pour fixer le plafond ou
+l'attente depuis le payload, surchargez `fn max_attempts(&self) -> u32` ou
+`fn retry_delay(&self, failed_attempt: u32) -> Duration` ; par défaut ils
+renvoient `MAX_ATTEMPTS` et `retry_backoff`. Le plafond est lu au dispatch.
+
 ---
 
 ## Le handler dead-letter

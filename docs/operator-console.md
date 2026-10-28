@@ -81,6 +81,7 @@ The console answers on the **apex** domain (`RUSTANGO_APEX_DOMAIN`), not on a te
 | **Runs** | Provisioning and migration runs, streamed live |
 | **Database servers** | Servers tenant databases are created on, with their admin login |
 | **Two-factor sign-in** | Your own authenticator app (`totp` feature) |
+| **Shared SSO** | Sign-in providers offered to every tenant, with the callback URL to register (`admin-sso` feature; see [SSO](sso.md)) |
 
 ---
 
@@ -149,7 +150,7 @@ Once it is on, the password alone only opens the code step (`/login/totp`); no c
 
 It is optional per operator. Set `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` to require it: an operator without a device then sets one up at the code step before the first session. Read at start-up.
 
-The secrets live in `rustango_operator_totp` in the registry, sealed under `RUSTANGO_SECRET_KEY`, which must be set to enroll. `migrate` creates the table, or the console does on the first sign-in. If the table cannot be read, sign-in is refused rather than let through on the password. There are no recovery codes yet: an operator who loses the device needs a shell on the registry to delete their row.
+The secrets live in `rustango_operator_totp` in the registry, sealed under `RUSTANGO_SECRET_KEY`, which must be set to enroll. `migrate` creates the table, or the console does on the first sign-in. If the table is missing (a registry role without CREATE, before `migrate`), sign-in uses the password alone unless TOTP is required; if it exists but cannot be read, sign-in is refused. There are no recovery codes yet: an operator who loses the device needs a shell on the registry to delete their row.
 
 ---
 

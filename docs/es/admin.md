@@ -160,6 +160,9 @@ combinarse. `?<field>=` solo funciona sobre una columna de `list_filter`, mostra
 padre de inline, nunca sobre una secreta, y `?<field>__isnull=1` lista las filas NULL,
 `?<field>__isempty=1` las de texto vacío.
 
+Una tarjeta de faceta muestra hasta 15 valores; el resto se agrupa en un enlace
+"+N more" (`?facet_show_all=<field>`), que lista como máximo 200.
+
 [![La lista de entradas filtrada por status=published: un chip de filtro activo, la faceta coincidente resaltada, el cuadro de búsqueda y el selector de acciones masivas](../img/admin-list-filtered.png)](../img/admin-list-filtered.png)
 
 **Ordenación.** Haz clic en un encabezado de columna para ordenar; clic de nuevo para
@@ -309,6 +312,13 @@ objeto con el nombre de la acción. Una acción que borra debe decirlo con
 `{table}.delete` y ejecute en su lugar el hook `delete`. Sigue necesitando
 `{table}.change`, y se audita y se señala como una edición.
 
+Un manejador de `register_action` escribe en su propia conexión, así que las filas de
+auditoría de un modelo auditado se escriben después, en la medida de lo posible.
+`register_tx_action(table, name, handler)` (y `register_tx_action_with_perm`) le pasa
+al manejador `&mut PoolTx`, de modo que sus escrituras y sus filas de auditoría se
+confirman o se revierten juntas. Escribe solo a través de esa transacción: una segunda
+conexión puede bloquear un pool SQLite de una sola conexión.
+
 ---
 
 ## Registro de auditoría
@@ -333,6 +343,8 @@ resistente a manipulaciones. Dos lugares lo exponen:
   cruza filas, del más reciente al más antiguo, con tarjetas de faceta para entidad /
   operación / fuente y un formulario de limpieza para purgar entradas de más de N días
   (lo cual se registra a su vez como una entrada de auditoría).
+  Cada tarjeta de faceta muestra hasta 15 valores más el activo; "+N more"
+  (`?facet_show_all=<col>`) lista como máximo 200, así que filtra el feed para ver el resto.
   Con `with_user_perms`, las tablas con un hook de queryset o `view` solo aparecen
   aquí para los superusuarios.
 
@@ -455,6 +467,9 @@ let admin = admin::Builder::new(pool)
 El builder del admin de inquilino conecta esto a su `RouteConfig::logout_url`
 automáticamente, de modo que el botón siempre alcanza una ruta que existe.
 
+El admin rechaza una edición que desmarca **active** en la fila del propio usuario
+que ha iniciado sesión, igual que la consola de operador: pídeselo a otro admin.
+
 Desmarcar **active** en el admin también fija `sessions_revoked_at`. Una escritura
 directa del ORM en `active` no lo hace; en tu propio código usa
 `rustango::session::deactivate::<AdminUser>(&pool, id)` (o `Operator`, `User`),
@@ -553,6 +568,7 @@ indique lo contrario):
 | `with_user_perms([codenames])` | Condiciona tablas a `{table}.view/add/change/delete`. |
 | `register_action(table, name, handler)` | Registra un manejador de acción masiva. |
 | `register_action_with_perm(table, name, perm, handler)` | Igual, comprobado contra `ActionPerm::Delete` en lugar de `change`. |
+| `register_tx_action(table, name, handler)` / `register_tx_action_with_perm` | Igual, pero el manejador recibe la transacción de escritura, así que las filas de auditoría se confirman con ella. |
 | `with_session_auth(secret)` | Requiere inicio de sesión por cookie (`/login` + `/logout`). |
 | `logout_url(u)` | Destino POST del botón Logout de la barra lateral. Por defecto `{admin_prefix}/logout`; los admins de inquilino lo ajustan a su ruta de logout de tenancy. |
 | `secure_cookies(bool)` | Establece el flag `Secure` (solo HTTPS) en la cookie de sesión. `new` sigue a `[security].secure_cookies`, o si no es segura en el nivel prod. |

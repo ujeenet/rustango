@@ -282,7 +282,7 @@ tx.commit().await?;
 |---|---|
 | PostgreSQL | Volle Unterstützung — jedes Flag emittiert seine native Syntax. |
 | MySQL 8.0.1+ | Unterstützt alles außer `NO KEY` — dieses Flag fällt auf schlichtes `FOR UPDATE` zurück (die strengere Sperre). |
-| SQLite | Keine Syntax für Sperren auf Zeilenebene; der Writer emittiert keine Klausel. Öffne die Transaktion mit `rustango::sql::write_transaction(&pool)`: Sie nimmt die Schreibsperre der Datenbank beim `BEGIN`, sodass ein zweiter Worker wartet und dann die beanspruchte Zeile sieht. Eine `transaction_pool`-Transaktion sperrt nichts, bis sie schreibt, und der zweite Schreiber scheitert mit `SQLITE_BUSY`. |
+| SQLite | Keine Syntax für Sperren auf Zeilenebene; der Writer emittiert keine Klausel. Öffne die Transaktion mit `rustango::sql::write_transaction(&pool)`: Sie nimmt die Schreibsperre der Datenbank beim `BEGIN`, sodass ein zweiter Worker wartet und dann die beanspruchte Zeile sieht. Eine `transaction_pool`-Transaktion sperrt nichts, bis sie schreibt, und der zweite Schreiber scheitert mit `SQLITE_BUSY`. Für einen `atomic`-Block nimm `rustango::sql::atomic_immediate(&pool, …)`: Sein oberster SQLite-Block startet mit `BEGIN IMMEDIATE`; auf PG und MySQL ist es schlichtes `atomic`. |
 
 **Muss innerhalb einer Transaktion laufen.** `FOR UPDATE` außerhalb einer Transaktion ist auf PostgreSQL eine No-op (die implizite Ein-Statement-Transaktion gibt die Sperre sofort frei) und auf MySQL ein Fehler. Auf Postgres kombiniere es mit `pool.begin()` (einem `sqlx::PgPool`); für eine backend-agnostische Transaktion nimm `rustango::sql::write_transaction(&pool)` und `.fetch_on(&mut tx)`.
 

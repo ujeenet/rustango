@@ -142,9 +142,22 @@ PATCH, DELETE), et il reste synchronisé avec la configuration du ViewSet :
   pour le style configuré (`page`/`page_size`, `cursor`, ou `limit`/`offset`).
 - **Filtrage / recherche / tri** → un paramètre de requête `?field=` par
   `filter_fields` (avec les lookups `__gt`/`__in`/… disponibles décrits), plus
-  `?search=` et `?ordering=` lorsqu'ils sont configurés.
+  `?search=` lorsqu'il est configuré et `?ordering=` (ci-dessous).
 - **`read_only()`** → les opérations d'écriture (POST/PUT/PATCH/DELETE) sont
   omises.
+- **Corps et erreurs** → create, PUT et PATCH acceptent des corps JSON ou
+  urlencoded et documentent `422 validation_failed`, `400` pour un corps
+  malformé et `413` pour un corps trop gros. L'opération create décrit la
+  forme tableau en masse dans son texte (les schémas restent à une ligne). List
+  documente un `400` quand ses filtres peuvent refuser une valeur ; retrieve et
+  DELETE documentent `400` pour une pk malformée.
+- **Contrôles d'accès** → `403` (et `401` avec `tenancy`) sur une action avec
+  des codenames de permission, et `429` avec `Retry-After` sur une action
+  avec un throttle.
+- **Paramètres de liste** → `page_size` indique le vrai plafond
+  `max_page_size`. `?ordering=` est listé sur chaque ViewSet sauf ceux paginés
+  par curseur, qui trient toujours par la colonne du curseur. Les champs
+  binaires sont en `format: hex`, comme le serveur les lit et les écrit.
 - **Paramètre de chemin** → `{pk}` typé d'après la clé primaire du modèle.
 - **`operationId`** → `list_post`, `create_post`, … (en snake_case par action).
 

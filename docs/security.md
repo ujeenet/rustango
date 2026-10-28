@@ -658,6 +658,8 @@ fn check(secret: &[u8], headers: &HeaderMap, body: &Bytes) -> StatusCode {
 
 The older `X-Webhook-Signature` covers the body alone and is still sent while receivers move to v2.
 
+A delivery answered 408, 429 or 5xx, or one that fails in transport, is retried: 8 runs in all, waiting 1s and doubling. `WebhookSubscription::max_attempts(n)` and `retry_backoff(base)` change both for a subscription. A `Retry-After` on a 429 or 503, in seconds or as an HTTP date, makes the next retry wait at least that long, at most an hour. Other 4xx answers are dead-lettered at once. Retries reuse the first timestamp, so the receiver's `max_age` must cover the whole retry window.
+
 The signature comparison is constant-time, meaning it always takes the same amount of time whether the guess is right or wrong. That stops timing attacks, where an attacker measures tiny response-time differences to guess the secret one character at a time.
 
 Outbound calls to URLs that config can set (webhook delivery, Slack `webhook_callback`, OAuth2/OIDC discovery, token and userinfo) refuse loopback, private, link-local and metadata addresses and never follow redirects. To reach an IdP or Slack hook on your own network, list it in `RUSTANGO_OUTBOUND_ALLOW` (comma-separated hosts and CIDRs, e.g. `10.0.5.0/24,idp.internal`); everything else stays refused. A host entry trusts whatever that name resolves to, so list only names you control. The list never applies to webhook delivery: a subscription opts in with `allow_private_targets(true)`.

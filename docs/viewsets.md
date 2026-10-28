@@ -580,6 +580,7 @@ fields responses render and bodies may write. Every other method returns `Self`:
 | `pagination(PaginationStyle::…)` | Set the style explicitly. |
 | `filter_backend(closure)` | Add custom `WHERE` predicates beyond `filter_fields`. |
 | `throttle(…)` / `throttle_all(max, secs)` | Per-action fixed-window rate limits; `QUERY` spends the list budget. |
+| `admin_add_hooks()` | Run the admin's `"add"` object-permission hooks on create, on the request and on each written row; a refusal is a `403`. Off by default. |
 | `router(prefix, pgpool)` | Mount (Postgres, static pool). |
 | `router_pool(prefix, pool)` | Mount tri-dialect (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenancy)* mount with per-request tenant resolution. |
@@ -737,6 +738,10 @@ An empty action list = no check. Enforcement reads an authenticated user from
 the request (the `tenancy` auth integration); superusers bypass, a missing user
 is denied. `.permissions_for_model::<Post>()` auto-fills the standard
 `post.view`/`add`/`change`/`delete` codenames.
+
+A ViewSet does not run the admin's `change`, `delete` or `view`
+object-permission hooks yet. When its model has any, mounting it logs a
+warning; 0.62.0 will run them on update, delete and read.
 
 **Throttling** applies fixed-window per-client limits, per action:
 

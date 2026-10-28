@@ -282,7 +282,7 @@ Calling `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` without a prio
 |---|---|
 | PostgreSQL | Full support — every flag emits its native syntax. |
 | MySQL 8.0.1+ | Supports everything except `NO KEY` — that flag falls back to plain `FOR UPDATE` (the stricter lock). |
-| SQLite | No row-level lock syntax; the writer emits no clause. Open the transaction with `rustango::sql::write_transaction(&pool)`: it takes the database write lock at `BEGIN`, so a second worker waits and then sees the claimed row. A `transaction_pool` one locks nothing until it writes, and the second writer fails with `SQLITE_BUSY`. |
+| SQLite | No row-level lock syntax; the writer emits no clause. Open the transaction with `rustango::sql::write_transaction(&pool)`: it takes the database write lock at `BEGIN`, so a second worker waits and then sees the claimed row. A `transaction_pool` one locks nothing until it writes, and the second writer fails with `SQLITE_BUSY`. For an `atomic` block, use `rustango::sql::atomic_immediate(&pool, …)`: its top-level SQLite block starts with `BEGIN IMMEDIATE`; on PG and MySQL it is plain `atomic`. |
 
 **Must run inside a transaction.** `FOR UPDATE` outside a tx is a no-op on PostgreSQL (the implicit single-statement tx releases the lock immediately) and an error on MySQL. On Postgres pair it with `pool.begin()` (a `sqlx::PgPool`); for a backend-agnostic transaction use `rustango::sql::write_transaction(&pool)` and `.fetch_on(&mut tx)`.
 
@@ -1240,7 +1240,7 @@ let author_posts = author.post_set(&pool).await?;
 
 ### Prefetching many-to-many and reverse relations
 
-For a list of parents, `fetch_with_prefetch_related` loads a many-to-many (`m2m(name = "tags", ...)`) or reverse-FK (`reverse_has(name = "items", ...)`) relation by name. It runs one query for the parents and one for the relation, whatever the number of parents.
+For a list of parents, `fetch_with_prefetch_related` loads a many-to-many (`m2m(name = "tags", ...)`) or reverse-FK (`reverse_has(name = "items", ...)`) relation by name. It runs one query for the parents and one for the relation (more only past the bind limit, see below).
 
 `rustango::sql::fetch_with_prefetch_related(Post::objects(), "tags", &pool)` returns `Vec<(Post, Vec<Tag>)>`. To filter or order the related rows, pass a queryset to `fetch_with_prefetch_related_filtered(Post::objects(), "tags", Tag::objects().order_by(&[("name", false)]), &pool)`; a limit on it applies to all parents together. `crates/rustango/tests/prefetch_related_tri.rs` runs both on PostgreSQL, MySQL and SQLite.
 

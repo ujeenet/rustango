@@ -304,6 +304,13 @@ El test que lo respalda despacha un trabajo que falla una vez y luego tiene
 éxito, y afirma que **se ejecutó más de una vez y finalmente tuvo éxito** — el
 reintento realmente ocurre.
 
+Para cambiar la espera de todos los trabajos de un tipo, sobrescribe
+`fn retry_backoff(failed_attempt: u32) -> Duration` en el impl (`failed_attempt` vale
+0 tras la primera ejecución). Para fijar el límite o la espera a partir del payload,
+sobrescribe `fn max_attempts(&self) -> u32` o
+`fn retry_delay(&self, failed_attempt: u32) -> Duration`; por defecto devuelven
+`MAX_ATTEMPTS` y `retry_backoff`. El límite se lee al despachar.
+
 ---
 
 ## El handler dead-letter

@@ -653,6 +653,8 @@ fn check(secret: &[u8], headers: &HeaderMap, body: &Bytes) -> StatusCode {
 
 Die ältere `X-Webhook-Signature` deckt nur den Body ab und wird weiter gesendet, solange Empfänger auf v2 umstellen.
 
+Eine Zustellung, die mit 408, 429 oder 5xx beantwortet wird oder beim Transport scheitert, wird wiederholt: insgesamt 8 Läufe, mit 1s Wartezeit, die sich jedes Mal verdoppelt. `WebhookSubscription::max_attempts(n)` und `retry_backoff(base)` ändern beides für ein Abonnement. Ein `Retry-After` auf einer 429 oder 503, in Sekunden oder als HTTP-Datum, lässt den nächsten Versuch mindestens so lange warten, höchstens eine Stunde. Andere 4xx-Antworten gehen sofort in den Dead-Letter. Wiederholungen nutzen den ersten Zeitstempel, also muss das `max_age` des Empfängers das ganze Wiederholungsfenster abdecken.
+
 Der Signaturvergleich ist konstant-zeitlich, das heißt, er dauert immer gleich lang, egal ob die Vermutung richtig oder falsch ist. Das stoppt Timing-Angriffe, bei denen ein Angreifer winzige Antwortzeit-Unterschiede misst, um das Secret Zeichen für Zeichen zu erraten.
 
 Ausgehende Aufrufe an URLs, die die Konfiguration setzen kann (Webhook-Zustellung, Slack `webhook_callback`, OAuth2/OIDC-Discovery, Token und Userinfo), lehnen Loopback-, private, Link-Local- und Metadaten-Adressen ab und folgen nie Redirects. Um einen IdP oder einen Slack-Hook im eigenen Netz zu erreichen, trage ihn in `RUSTANGO_OUTBOUND_ALLOW` ein (kommagetrennte Hosts und CIDRs, z. B. `10.0.5.0/24,idp.internal`); alles andere bleibt abgelehnt. Ein Host-Eintrag vertraut allem, wozu dieser Name auflöst, trage also nur Namen ein, die du kontrollierst. Die Liste gilt nie für Webhook-Zustellung: Ein Abonnement schaltet das mit `allow_private_targets(true)` frei.

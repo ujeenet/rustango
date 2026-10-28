@@ -173,6 +173,12 @@ The `initialize` handshake is a plain JSON-RPC POST and works on any mount:
     "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
 ```
 
+To give agents server-wide guidance, call
+`rustango::mcp::register_instructions("…")` at startup. The text is sent as
+`instructions` in the `initialize` reply; without a call the field is left out.
+Several calls (a library and its app, say) are joined with a blank line in call
+order; a blank or repeated text is skipped.
+
 ---
 
 ## Step 4 — Authorize agents

@@ -81,6 +81,7 @@ La console répond sur le domaine **apex** (`RUSTANGO_APEX_DOMAIN`), pas sur un 
 | **Runs** | Exécutions de provisioning et de migration, diffusées en direct |
 | **Database servers** | Serveurs où les bases des tenants sont créées, avec leur login d'administration |
 | **Two-factor sign-in** | Votre application d'authentification (feature `totp`) |
+| **Shared SSO** | Fournisseurs de connexion proposés à chaque tenant, avec l'URL de callback à enregistrer (feature `admin-sso` ; voir [SSO](sso.md)) |
 
 ---
 
@@ -150,7 +151,7 @@ Ensuite, le mot de passe seul n'ouvre que l'étape du code (`/login/totp`) ; auc
 
 C'est facultatif par opérateur. `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` le rend obligatoire : un opérateur sans appareil en configure un à l'étape du code avant sa première session. Lu au démarrage.
 
-Les secrets sont dans `rustango_operator_totp` dans le registre, scellés sous `RUSTANGO_SECRET_KEY`, qui doit être défini pour s'inscrire. `migrate` crée la table, sinon la console le fait à la première connexion. Si la table est illisible, la connexion est refusée plutôt qu'acceptée sur le seul mot de passe. Il n'y a pas encore de codes de secours : un opérateur qui perd son appareil a besoin d'un shell sur le registre pour supprimer sa ligne.
+Les secrets sont dans `rustango_operator_totp` dans le registre, scellés sous `RUSTANGO_SECRET_KEY`, qui doit être défini pour s'inscrire. `migrate` crée la table, sinon la console le fait à la première connexion. Si la table manque (un rôle de registre sans CREATE, avant `migrate`), le mot de passe suffit sauf si TOTP est obligatoire ; si elle existe mais est illisible, la connexion est refusée. Il n'y a pas encore de codes de secours : un opérateur qui perd son appareil a besoin d'un shell sur le registre pour supprimer sa ligne.
 
 ---
 

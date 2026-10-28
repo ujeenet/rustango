@@ -33,6 +33,7 @@ igual, solo cambia la configuración.
 - [TTL y expiración](#ttl-y-expiración)
 - [Cambiar de backend](#cambiar-de-backend)
 - [Caché con multi-tenancy](#caché-con-multi-tenancy)
+- [Caché de páginas completas](#caché-de-páginas-completas)
 - [Referencia](#referencia)
 - [Véase también](#véase-también)
 
@@ -62,6 +63,16 @@ let cache: BoxedCache = Arc::new(InMemoryCache::new());
 No existe el valor `postgres` — el backend de BD es `db` o `database`. Un
 comentario de documentación de `CacheSettings` decía lo contrario hasta hace
 poco, y un valor no reconocido te da una caché en memoria con una advertencia.
+
+No existe el valor `postgres`: el backend de base de datos es `db` o `database`. Los
+valores van en minúsculas. Un valor desconocido o con otras mayúsculas (`Redis`, una
+errata), o `file` sin `file_cache_dir`, registra un `error` y recurre a una caché en
+memoria; una versión menor posterior lo rechazará.
+
+`FileCache` barre una dieciseisava parte de su directorio en busca de entradas
+expiradas cada 16 escrituras. Llama a `FileCache::purge_expired()` de forma periódica
+para barrerlo entero. En Unix, los directorios nuevos se crean con 0700 y las entradas
+con 0600.
 
 ---
 
@@ -277,6 +288,38 @@ Dos cosas que conviene saber:
 El `Cache::clear()` sin acotar sigue siendo global al proceso, así que usa la
 vista acotada siempre que el cambio de un solo tenant sea lo que disparó la
 invalidación.
+
+Un tenant nuevo puede reutilizar el slug de un tenant purgado. Para que
+`purge-tenant` borre las claves `ScopedCache::for_tenant` del tenant anterior, llama a
+`rustango::tenancy::decommission::clear_on_purge(cache)` al arrancar por cada caché
+que las guarde.
+
+---
+
+## Caché de páginas completas
+
+`CachePageLayer::new(cache)` (en `rustango::cache_page`) guarda las respuestas GET en
+cualquier `BoxedCache`; `.timeout(dur)` fija cuánto tiempo (por defecto 60 s). Es
+seguro por defecto:
+
+- Una petición con `Authorization`, `Cookie` o `X-Api-Key` ni se sirve desde la caché
+  ni se guarda en ella. Añade más cabeceras de credenciales (una cabecera de token
+  propia) con `.credential_headers(["x-my-token"])`.
+  `.cache_authenticated(true)` lo desactiva; úsalo solo en una ruta cuya página sea la
+  misma para todos los clientes.
+- Una respuesta con `Set-Cookie`, o con `Cache-Control: private`, `no-cache` o
+  `no-store`, nunca se guarda.
+- `.vary_on([...])` incluye cabeceras de la petición en la clave.
+
+Para descartar una página tras una escritura, llama a
+`layer.invalidate(&[PageKey::new(path, host)]).await?` sobre un clon de la capa
+(añade `.tenant(slug)` a la clave con tenancy). Purga todas las variantes cacheadas
+de esa ruta: cualquier query string, cualquier valor de `vary_on`, GET y `QUERY` por
+igual. Funciona con un contador de generación por ruta, así que cada GET cacheado lee
+una clave de caché pequeña más.
+
+Con tenancy, monta la capa dentro de la capa de tenancy; consulta
+[Middleware](middleware.md).
 
 ---
 

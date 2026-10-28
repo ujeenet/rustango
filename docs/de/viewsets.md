@@ -582,6 +582,7 @@ Felder, die Antworten zeigen und Bodies schreiben dürfen. Jede weitere Methode 
 | `pagination(PaginationStyle::…)` | Den Stil explizit setzen. |
 | `filter_backend(closure)` | Eigene `WHERE`-Prädikate über `filter_fields` hinaus hinzufügen. |
 | `throttle(…)` / `throttle_all(max, secs)` | Rate-Limits pro Aktion mit festem Zeitfenster. |
+| `admin_add_hooks()` | Führt beim Create die `"add"`-Objekt-Berechtigungs-Hooks des Admins aus, auf dem Request und auf jeder geschriebenen Zeile; eine Ablehnung ist ein `403`. Standardmäßig aus. |
 | `router(prefix, pgpool)` | Einbinden (Postgres, statischer Pool). |
 | `router_pool(prefix, pool)` | Tri-dialektfähig einbinden (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(Mandantenfähigkeit)* mit Mandantenauflösung pro Anfrage einbinden. |
@@ -726,6 +727,10 @@ Eine leere Aktionsliste = keine Prüfung. Die Durchsetzung liest einen authentif
 der Anfrage (die `tenancy`-Auth-Integration); Superuser umgehen sie, ein fehlender Benutzer
 wird abgelehnt. `.permissions_for_model::<Post>()` füllt automatisch die Standard-
 Codenamen `post.view`/`add`/`change`/`delete`.
+
+Ein ViewSet führt die Objekt-Berechtigungs-Hooks `change`, `delete` und `view`
+des Admins noch nicht aus. Hat sein Modell welche, loggt das Einhängen eine
+Warnung; 0.62.0 wird sie bei Update, Delete und Read ausführen.
 
 **Drosselung** wendet Limits pro Client mit festem Zeitfenster an, pro Aktion:
 

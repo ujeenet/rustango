@@ -586,6 +586,7 @@ que les réponses affichent et que les bodies peuvent écrire. Chaque autre mét
 | `pagination(PaginationStyle::…)` | Définir le style explicitement. |
 | `filter_backend(closure)` | Ajouter des prédicats `WHERE` personnalisés au-delà de `filter_fields`. |
 | `throttle(…)` / `throttle_all(max, secs)` | Limites de débit à fenêtre fixe par action ; `QUERY` consomme le budget de la liste. |
+| `admin_add_hooks()` | Exécute les hooks de permission objet `"add"` de l'admin à la création, sur la requête et sur chaque ligne écrite ; un refus donne un `403`. Désactivé par défaut. |
 | `router(prefix, pgpool)` | Monter (Postgres, pool statique). |
 | `router_pool(prefix, pool)` | Monter en tri-dialecte (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(multi-location)* monter avec résolution du locataire par requête. |
@@ -746,6 +747,11 @@ Une liste d'action vide = pas de vérification. L'application lit un utilisateur
 la requête (l'intégration d'auth `tenancy`) ; les superusers contournent, un utilisateur manquant
 est refusé. `.permissions_for_model::<Post>()` remplit automatiquement les codenames standard
 `post.view`/`add`/`change`/`delete`.
+
+Un ViewSet n'exécute pas encore les hooks de permission objet `change`,
+`delete` ou `view` de l'admin. Quand son modèle en a, le monter journalise un
+avertissement ; 0.62.0 les exécutera à la mise à jour, à la suppression et à
+la lecture.
 
 **Le throttling** applique des limites à fenêtre fixe par client, par action :
 

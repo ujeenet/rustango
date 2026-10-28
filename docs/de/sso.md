@@ -126,9 +126,12 @@ werden bei der Anmeldung ermittelt — keine Endpunkt-Verdrahtung pro Anbieter.
   (etwa ein unternehmensweites Google). Verwaltet über das *Shared SSO*-Panel
   der Konsole, wo *Allow email linking* `allow_email_link` an Ort und Stelle
   umschaltet (die ID und ihre Verknüpfungen bleiben). Das Flag gilt für
-  **jeden** Tenant. *Edit* ändert einen Provider an Ort und Stelle (gleiche
-  ID und Slug; ein leeres Secret behält das gespeicherte), und jede Zeile
-  zeigt die Callback-URL, die beim IdP zu registrieren ist.
+  **jeden** Tenant. *Edit* (`/sso-shared/{id}/edit`) ändert einen Provider an
+  Ort und Stelle (gleiche ID und Slug; ein leeres Secret behält das
+  gespeicherte), und jede Zeile zeigt die Callback-URL, die beim IdP zu
+  registrieren ist. Das Feld für die Issuer-URL erscheint nur bei `oidc`. Ein
+  abgelehntes Hinzufügen oder Bearbeiten zeigt das Formular erneut (Status 400)
+  mit den eingegebenen Werten und dem Fehler, nie mit dem Secret.
 
 Auf der Anmeldeseite eines Tenants verschmelzen die beiden Mengen, und bei einer
 Slug-Kollision **gewinnt der eigene Anbieter des Tenants** gegenüber dem geteilten
@@ -146,6 +149,13 @@ Abweisung (`sso refused`) enthält `provider_id`, `issuer` und `subject`. Eine
 Zeile anzulegen erfordert die Session-Authentifizierung des Admins
 (`Builder::with_session_auth` oder `with_session` des Tenant-Admins); ohne sie
 kann niemand Verknüpfungen anlegen.
+
+Eine Verknüpfung, die mehr als 5 Minuten vor dem Konto angelegt wurde, auf das
+sie zeigt (etwa eine nach einem Restore wiederverwendete ID), loggt eine Warnung
+und meldet trotzdem an.
+`rustango::sso::link::set_stale_links(StaleLinks::Drop)` löscht eine solche
+Verknüpfung stattdessen. Nutze das nur, wenn `created_at`-Werte von Konten nie
+importiert oder nachträglich befüllt werden.
 
 ## Member (Endbenutzer) SSO
 
@@ -181,6 +191,10 @@ Es hängt zwei Routen pro Slug an `login_base` an:
 
 Unterschiede zum Admin-Ablauf:
 
+- **Callback-Schema.** Die Member-`redirect_uri` nimmt ihr Schema aus dem
+  `X-Forwarded-Proto` eines vertrauenswürdigen Proxys, sonst `http` auf einem
+  Loopback-Host (`localhost`, `*.localhost`, eine Loopback-IP) und überall sonst
+  `https`, sodass `localhost.example.com` `https` bekommt.
 - **Auto-Provisionierung.** Mit `auto_provision = true` (optional; Standard ist `false`) **erstellt**
   eine verifizierte IdP-E-Mail ohne passende `rustango_users`-Zeile eine solche
   — Benutzername aus dem lokalen Teil der E-Mail (bei Kollision entdupliziert),

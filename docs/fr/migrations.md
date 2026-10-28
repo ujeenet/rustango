@@ -174,6 +174,17 @@ répété pour réparer une série de lignes en une seule commande.
 
 ---
 
+## Signaux de migration
+
+Les receivers `rustango::signals::migrate::connect_pre_migrate` et
+`connect_post_migrate` s'exécutent avant et après un passage de `migrate`. Les
+receivers `connect_pre_migrate_with_target` et
+`connect_post_migrate_with_target` reçoivent aussi un `MigrateTarget` : le
+`pool` du passage et son slug `tenant` (`None` pour le registre ou un passage
+sur une seule base). Un passage par tenant envoie le signal une fois par
+tenant avec le pool de ce tenant, sur chaque backend, donc un receiver
+`post_migrate` peut initialiser les données de chaque tenant.
+
 ## Une nouvelle clé unique sur des lignes en double
 
 Avant qu'une migration n'ajoute un index unique ou une colonne unique à une table existante, `migrate` vérifie qu'aucune paire de lignes ne partage la clé (les lignes ayant un NULL dedans sont ignorées). Si c'est le cas, il s'arrête avant tout DDL et affiche un `SELECT … GROUP BY … HAVING COUNT(*) > 1` qui les liste. La vérification parcourt la table une fois par nouvelle clé : sur une grande table, elle coûte donc un parcours complet. Elle est sautée après une étape de données dans la même migration, qui peut être celle qui supprime les doublons, et pour les tables ou colonnes que la migration crée ou renomme elle-même.
