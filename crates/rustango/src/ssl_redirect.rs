@@ -50,6 +50,8 @@ pub struct SslRedirectLayer {
     exempt: Vec<String>,
     /// Prefixes already warned about a mid-segment match; shared by clones.
     warned: Arc<Mutex<Vec<String>>>,
+    /// `/health` and `/ready` pass: probes come over plain HTTP.
+    probes_exempt: bool,
 }
 
 impl Default for SslRedirectLayer {
@@ -68,7 +70,16 @@ impl SslRedirectLayer {
             proxy_ssl_header: None,
             exempt: Vec::new(),
             warned: Arc::default(),
+            probes_exempt: false,
         }
+    }
+
+    /// Let the built-in health endpoints through, as the server does
+    /// when it mounts them.
+    #[must_use]
+    pub(crate) fn exempt_probes(mut self) -> Self {
+        self.probes_exempt = true;
+        self
     }
 
     /// Declare the header your proxy sets when the original request
@@ -175,16 +186,13 @@ impl<S: Clone + Send + Sync + 'static> SslRedirectRouterExt for Router<S> {
 }
 
 async fn handle(cfg: Arc<SslRedirectLayer>, req: Request<Body>, next: Next) -> Response<Body> {
-    if cfg.is_secure(&req) || cfg.is_exempt(req.uri().path()) {
+    let probe = cfg.probes_exempt && crate::health::is_probe_path(req.uri().path());
+    if probe || cfg.is_secure(&req) || cfg.is_exempt(req.uri().path()) {
         return next.run(req).await;
     }
     // Target URL: Host header, then path and query from the request.
-    let Some(host) = req
-        .headers()
-        .get(axum::http::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        // HTTP/2 sends `:authority`, not `Host`.
-        .or_else(|| req.uri().authority().map(|a| a.as_str()))
+    // HTTP/2 sends `:authority`, not `Host`.
+    let Some(host) = crate::urls::request_authority(req.headers(), req.uri())
         .and_then(crate::urls::HostAuthority::parse)
     else {
         let mut resp = Response::new(Body::from("invalid Host header"));

@@ -1099,10 +1099,16 @@ impl<DB: Database> Builder<DB> {
         };
         // Same order as the single-tenant router: the Host allowlist is
         // outermost, so a bad Host is refused, never redirected to.
+        // Probes send the pod IP over plain HTTP, so health skips both.
         #[cfg(feature = "admin")]
         let app = match self.ssl_redirect {
             Some(layer) => {
                 use crate::ssl_redirect::SslRedirectRouterExt as _;
+                let layer = if self.health_endpoints {
+                    layer.exempt_probes()
+                } else {
+                    layer
+                };
                 app.ssl_redirect(layer)
             }
             None => app,
@@ -1111,6 +1117,11 @@ impl<DB: Database> Builder<DB> {
         let app = match self.allowed_hosts {
             Some(layer) => {
                 use crate::host_validation::AllowedHostsRouterExt as _;
+                let layer = if self.health_endpoints {
+                    layer.exempt_probes()
+                } else {
+                    layer
+                };
                 app.allowed_hosts(layer)
             }
             None => app,
@@ -1563,6 +1574,32 @@ pub(crate) mod resolver_tests {
             get(&app, "ghost.localhost", "/").await,
             (200, "unresolved:false".into())
         );
+    }
+
+    /// A probe by pod IP over plain HTTP reaches `/health` and `/ready`
+    /// through the Host allowlist and the HTTPS redirect; nothing else does.
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn health_probes_skip_the_host_check_and_https_redirect() {
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = hosted_registry(true).await;
+        let api = Router::new().route("/page", axum::routing::get(|| async { "tenant" }));
+        let app = Builder::<sqlx::Sqlite>::from_pool(sq, url, "localhost")
+            .api(api)
+            .with_health()
+            .allowed_hosts(crate::host_validation::AllowedHostsLayer::new([
+                ".localhost",
+            ]))
+            .ssl_redirect(crate::ssl_redirect::SslRedirectLayer::new())
+            .into_router()
+            .await
+            .unwrap();
+        for path in ["/health", "/ready"] {
+            assert_eq!(get(&app, "10.0.0.5:8080", path).await.0, 200, "{path}");
+        }
+        assert_eq!(get(&app, "10.0.0.5:8080", "/page").await.0, 400);
+        assert_eq!(get(&app, "10.0.0.5:8080", "/health/x").await.0, 400);
+        assert_eq!(get(&app, "acme.localhost", "/page").await.0, 301);
     }
 
     /// #1856 — without `.header_resolver()` a client `X-Org` picks no tenant.
