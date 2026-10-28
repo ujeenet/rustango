@@ -169,6 +169,10 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::tenancy::sweep` | Aufbewahrungs-Sweeps |
 | `rustango::viewset` | ViewSets mit offenen Schreibaktionen |
 
+Änderungen in der Konsole gehen zusätzlich an
+`rustango::tenancy::operator_console::action`, ein Event pro Änderung; mit
+`RUST_LOG=rustango::tenancy::operator_console::action=info` sehen Sie nur diese.
+
 Das sind die Targets, die das Framework explizit benennt. Events ohne eigenes
 Target erben ihren Modulpfad, was dieselbe Form ergibt —
 `rustango::access_log` und `rustango::tracing_layer` sind genauso erreichbar wie
@@ -223,7 +227,14 @@ rustango::logging::setup_for_env();
 Zwei Darstellungs-Schalter lohnen sich: `.with_line_numbers()` ergänzt
 Quellpositionen (nützlich in der Entwicklung, laut in Produktion), und
 `.without_targets()` blendet die Target-Spalte aus — tun Sie das nur, wenn Sie
-das Filtern danach aufgegeben haben.
+das Filtern danach aufgegeben haben. `.with_thread_ids()` ergänzt die
+Thread-ID, und `.with_color(Color::Never)` setzt die Farbe im Code. Unter
+`#[rustango::main]` folgt die Farbe immer der `auto`-Regel, weil das Makro
+zuerst installiert.
+
+Ein Management-Verb (`dumpdata`, `migrate`, …) schickt Terminal-Logs nach
+stderr, damit sein stdout sauber bleibt: `cargo run -- dumpdata > fixtures.json`
+funktioniert. Der Server loggt weiter nach stdout.
 
 > Jeder Format-Wert erreicht seinen eigenen Formatter. `compact` wurde früher
 > akzeptiert und dann wie der Default gerendert — das ist behoben.
@@ -361,7 +372,7 @@ let app = router.access_log(AccessLogLayer::default());
 ```
 
 ```text
-INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12 client.address=192.0.2.1 tenant=acme
+INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12.4 client.address=192.0.2.1 tenant=acme
 ```
 
 Das Level trägt Bedeutung, Alarmierung kann also daran ansetzen:
@@ -386,10 +397,14 @@ AccessLogLayer::default()
 ihn an `.real_ip(layer)`; ein Layer am API-Router läuft zu spät.
 
 Query-Parameter, die Zugangsdaten tragen, werden vor dem Schreiben mit
-`[redacted]` maskiert — `password`, `passwd`, `token`, `secret`, `api_key`,
-`apikey`, `access_token`, `refresh_token`, `signature`, `auth`. Erweitern mit
-`.redact_additional("session_id")`, oder die ganze Liste ersetzen mit
-`.redact(vec![...])`. Das betrifft **nur Query-Strings**; für den Rest siehe
+`[redacted]` maskiert. Ein Schlüssel wird maskiert, wenn er ein geheimes Wort
+enthält, wortweise verglichen; also zählen `api_key`, `reset_token` und
+`X-Api-Key`. Zu den Wörtern gehören `password`, `pass`, `pwd`, `token`, `jwt`,
+`secret`, `key`, `signature`, `auth`, `credential`, `cookie`, `session`,
+`otp`, dazu die OAuth-Namen `code`, `state` und `assertion`. Erweitern mit
+`.redact_additional("ref")`, oder die ganze Liste ersetzen mit
+`.redact(vec![...])`; `token`, `signature` und `code` bleiben in jedem Fall
+maskiert. Das `url.query` des Request-Spans wird genauso maskiert. Das betrifft **nur Query-Strings**; für den Rest siehe
 [security.md](security.md#secrets-aus-deinen-logs-heraushalten).
 
 ## Welcher Mandant war das?

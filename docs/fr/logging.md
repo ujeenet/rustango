@@ -174,6 +174,10 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::tenancy::sweep` | Balayages de rétention |
 | `rustango::viewset` | ViewSets montés avec des écritures ouvertes |
 
+Les modifications faites dans la console vont aussi vers
+`rustango::tenancy::operator_console::action`, un événement par modification ;
+`RUST_LOG=rustango::tenancy::operator_console::action=info` les montre seules.
+
 Ce sont les targets que le framework nomme explicitement. Les événements qui
 n'en nomment aucun héritent de leur chemin de module, ce qui donne la même forme
 — `rustango::access_log` et `rustango::tracing_layer` s'atteignent exactement
@@ -228,7 +232,15 @@ rustango::logging::setup_for_env();
 Deux réglages d'affichage méritent d'être connus : `.with_line_numbers()` ajoute
 la position dans le code (utile en développement, bruyant en production), et
 `.without_targets()` masque la colonne target — ne le faites que si vous avez
-renoncé à filtrer dessus.
+renoncé à filtrer dessus. `.with_thread_ids()` ajoute l'id du thread, et
+`.with_color(Color::Never)` règle la couleur dans le code. Sous
+`#[rustango::main]`, la couleur suit toujours la règle `auto`, car la macro
+installe en premier.
+
+Une commande de gestion (`dumpdata`, `migrate`, …) envoie les journaux du
+terminal sur stderr, pour garder sa sortie standard propre :
+`cargo run -- dumpdata > fixtures.json` fonctionne. Le serveur continue de
+journaliser sur stdout.
 
 > Chaque valeur de format atteint son propre formateur. `compact` était accepté
 > puis rendu comme la valeur par défaut — c'est corrigé.
@@ -363,7 +375,7 @@ let app = router.access_log(AccessLogLayer::default());
 ```
 
 ```text
-INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12 client.address=192.0.2.1 tenant=acme
+INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12.4 client.address=192.0.2.1 tenant=acme
 ```
 
 Le niveau porte du sens, l'alerting peut donc s'y accrocher :
@@ -388,10 +400,15 @@ AccessLogLayer::default()
 passez-le à `.real_ip(layer)` ; une couche sur le routeur de l'API arrive trop tard.
 
 Les paramètres de requête porteurs d'identifiants sont masqués par `[redacted]`
-avant l'écriture de la ligne — `password`, `passwd`, `token`, `secret`,
-`api_key`, `apikey`, `access_token`, `refresh_token`, `signature`, `auth`.
-Étendez avec `.redact_additional("session_id")`, ou remplacez toute la liste
-avec `.redact(vec![...])`. Cela ne couvre **que les chaînes de requête** ; pour
+avant l'écriture de la ligne. Une clé est masquée quand elle contient un mot
+secret, comparé mot par mot : `api_key`, `reset_token` et `X-Api-Key` comptent
+donc. Les mots incluent `password`, `pass`, `pwd`, `token`, `jwt`, `secret`,
+`key`, `signature`, `auth`, `credential`, `cookie`, `session`, `otp`, plus les
+noms OAuth `code`, `state` et `assertion`. Étendez avec
+`.redact_additional("ref")`, ou remplacez toute la liste avec
+`.redact(vec![...])` ; `token`, `signature` et `code` restent masqués dans
+tous les cas. Le `url.query` du span de requête est masqué de la même façon.
+Cela ne couvre **que les chaînes de requête** ; pour
 le reste, voir
 [security.md](security.md#garder-les-secrets-hors-de-vos-journaux).
 

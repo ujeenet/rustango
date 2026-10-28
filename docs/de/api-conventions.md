@@ -80,7 +80,7 @@ Wie Sie ein Objekt bauen, hängt davon ab, was es benötigt. Es gibt einige Stan
 Der Rückgabetyp einer Methode sagt Ihnen, wie sie fehlschlagen kann. Rust hat keine Exceptions, daher ist der Fehlschlag Teil des Rückgabewerts. Es gibt drei Formen.
 
 **`Result<T, E>`** — wie eine Funktion, die entweder einen Wert zurückgibt oder eine Exception wirft. Sie erhalten entweder den Wert `T` oder einen Fehler `E` mit Details. Verwenden Sie es für Operationen, die fehlschlagen können und bei denen das *Warum* zählt:
-- I/O: `pool.fetch(...).await -> Result<_, sqlx::Error>`
+- I/O: `Post::objects().fetch(&pool).await -> Result<Vec<Post>, ExecError>`
 - Validierung: `Form::parse(data) -> Result<Self, FormErrors>`
 - Ausstellung: `JwtLifecycle::issue_pair_with(uid, claims) -> Result<_, JwtIssueError>`
 
@@ -91,7 +91,7 @@ Der Rückgabetyp einer Methode sagt Ihnen, wie sie fehlschlagen kann. Rust hat k
 
 **`bool`** — ein schlichtes Ja/Nein, wenn kein weiteres Detail benötigt wird:
 - `cache.exists(k) -> Result<bool, _>` (das `Result` deckt das I/O ab; der `bool` ist die Antwort)
-- `JwtLifecycle::revoke(token) -> bool` (true = zur Blacklist hinzugefügt)
+- `async JwtLifecycle::revoke(token) -> bool` (true = zur Blacklist hinzugefügt)
 - `disconnect_pre_save(id) -> bool` (true = ein Eintrag wurde entfernt)
 
 **`Result<Option<T>>` oder `Result<T>` mit einem `NotFound`-Fehler?** Beide können „Nachschlagen fehlgeschlagen“ ausdrücken, wählen Sie also danach, wie außergewöhnlich „nicht gefunden“ ist:
@@ -122,7 +122,7 @@ Die Faustregel: Wenn eine Methode auf etwas wartet (die Datenbank, das Netzwerk 
 Jeder ORM-Aufruf nimmt einen Pool oder Executor (das Datenbank-Handle) als **letztes** Argument entgegen. Sie übergeben die Verbindung jedes Mal, anstatt sich auf einen versteckten globalen Zustand zu verlassen:
 
 ```rust
-post.save_on(&pool).await?
+post.save_pool(&pool).await?
 Post::objects().filter(...).fetch_on(&pool).await?
 send_post_save(&post, ctx).await                  // ⚠️ no pool — signals are pool-free
 ```
@@ -131,7 +131,7 @@ send_post_save(&post, ctx).await                  // ⚠️ no pool — signals 
 
 **Warum jedes Mal übergeben?** Rust bevorzugt sichtbare Abhängigkeiten gegenüber verstecktem globalem Zustand. Die naheliegende Alternative — die Verbindung in einem Thread-Local zu halten — bricht in Rusts async-Welt zusammen, wo eine Task mitten in einer Anfrage zwischen Threads springen kann. Der Nachteil ist mehr Tipparbeit; der Vorteil ist, dass Sie nach jeder Stelle greppen können, die die Datenbank berührt.
 
-Wenn Sie feststellen, dass Sie `&pool` durch zehn Schichten von Funktionsaufrufen durchreichen, akzeptieren Sie einmal `impl Executor` am öffentlichen Einstiegspunkt und lassen Sie die internen Helfer diese eine Verbindung teilen.
+Wenn Sie feststellen, dass Sie `&pool` durch zehn Schichten von Funktionsaufrufen durchreichen, akzeptieren Sie einmal ein `E: SqlExecutor` am öffentlichen Einstiegspunkt und lassen Sie die internen Helfer diese eine Verbindung teilen.
 
 ---
 
@@ -144,7 +144,8 @@ Es gibt drei Möglichkeiten, ein Queryset zu filtern, und sie kombinieren sich a
 //    GET /api/posts?author_id=42&status__ne=archived
 
 // 2. String-keyed (lookup at compile of the queryset; runtime field name resolution)
-Post::objects().filter("author_id", Op::Eq, SqlValue::I64(42));
+Post::objects().filter("author_id", 42_i64);                // equality
+Post::objects().filter_op("author_id", Op::Gt, 42_i64);     // any operator
 
 // 3. Typed columns (compile-time field check)
 Post::objects().where_(Post::author_id.eq(42));
@@ -153,7 +154,7 @@ Post::objects().where_(Post::author_id.eq(42));
 | Syntax | Verwenden, wenn |
 |---|---|
 | HTTP-Query | Öffentliche API-Endpunkte — das ViewSet parst diese für Sie aus dem Query-String |
-| String-basiertes `.filter` | Generischer CRUD- oder Admin-Code, wo Feldnamen aus der Config stammen und zur Kompilierzeit nicht bekannt sind |
+| String-basiertes `.filter` / `.filter_op` | Generischer CRUD- oder Admin-Code, wo Feldnamen aus der Config stammen und zur Kompilierzeit nicht bekannt sind |
 | Typisiertes `.where_` | Ihr Anwendungscode — der bevorzugte Standard. Der Compiler prüft, dass das Feld existiert und die Typen übereinstimmen |
 
 Sie können **alle drei mischen** in einem einzigen Queryset.
@@ -177,7 +178,7 @@ Sie können **alle drei mischen** in einem einzigen Queryset.
 | JWT | `tenancy::jwt_lifecycle` | `JwtIssueError` |
 | API-Schlüssel | `api_keys::*` | `ApiKeyError` |
 | Passwörter | `passwords::*` | `PasswordError` |
-| Webhooks | `webhook::*` | (gibt bool zurück, kein dedizierter Fehler) |
+| Webhooks | `webhook::*` | `EmptySigningKey` aus `sign`; `verify_*` gibt `bool` zurück |
 | Signierte URLs | `signed_url::*` | `SignedUrlError` |
 | Bulk-Aktionen | `bulk_actions::*` | `BulkActionError` |
 | Fixtures | `fixtures::*` | `FixtureError` |
@@ -192,14 +193,19 @@ Sie können **alle drei mischen** in einem einzigen Queryset.
 **Ein Handler-Beispiel:**
 
 ```rust
+use axum::http::StatusCode;
 use rustango::api_errors::ApiError;
 
-async fn handler() -> Result<Json<X>, ApiError> {
-    let post = Post::objects().get(&pool, 1).await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+async fn handler() -> Result<Json<Post>, ApiError> {
+    let post = Post::objects().find(1, &pool).await
+        // loggt die Ursache; der Client bekommt eine generische 500-Meldung
+        .map_err(|e| ApiError::logged(StatusCode::INTERNAL_SERVER_ERROR, "load post", e))?
+        .ok_or_else(|| ApiError::not_found("no such post"))?;
     Ok(Json(post))
 }
 ```
+
+Steck kein `e.to_string()` in `ApiError::internal`: Das schickt den Datenbankfehler an den Client. `ApiError::logged` loggt die Ursache eines 5xx und sendet eine generische Meldung (außer `RUSTANGO_DISCLOSE_ERRORS` erlaubt es).
 
 `ApiError` implementiert `IntoResponse`, sodass die Rückgabe automatisch seine JSON-Form erzeugt: `{"error": <Maschinencode>, "message": …, "status": …, "details": …}`.
 
@@ -282,7 +288,8 @@ batteries = [
 
 Die Indirektion ist Absicht: `batteries` ist ein einziger Name, den ein
 nachgelagertes Crate abschalten kann — `default-features = false, features = ["postgres"]` —
-ohne die Liste neu aufzuschreiben. Die Alternative, alle achtunddreißig in
+ohne die Liste neu aufzuschreiben. Es erlaubt auch, alles zu behalten und ein
+anderes Backend zu wählen: `default-features = false, features = ["batteries", "sqlite"]`. Die Alternative, alle achtunddreißig in
 `default` zu schreiben, hieße, dass jeder, der sich abmeldet, alle achtunddreißig kennen muss.
 
 **Standardmäßig aus:** Features, die schwere Abhängigkeiten oder externe Dienste hereinziehen:

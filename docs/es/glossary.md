@@ -60,6 +60,7 @@ las peticiones como las respuestas suelen ser JSON.
 | `201` | Created — tu cosa nueva se guardó |
 | `204` | Done — nada que devolver (p. ej. tras un borrado) |
 | `400` | Bad request — enviaste algo inválido (el cuerpo dice qué) |
+| `422` | No procesable — los datos no pasaron la validación (el cuerpo nombra el campo) |
 | `401` / `403` | No autenticado / no permitido |
 | `404` | Not found (no encontrado) |
 | `429` | Too many requests — ve más despacio |
@@ -75,7 +76,7 @@ usada para filtrar, buscar, ordenar o paginar los resultados — p. ej.
 
 **Paginación** — dividir una lista larga de resultados en páginas para que una respuesta no sea
 enorme. El **envelope (envoltorio)** es lo que rodea a la página y también te indica los
-totales — p. ej. `{"count": 137, "page": 2, "results": [ … ]}`. Consulta
+totales — p. ej. `{"count": 137, "page": 2, "page_size": 20, "last_page": 7, "results": [ … ]}`. Consulta
 [Paginación](viewsets.md#paginación).
 
 **`curl`** — una herramienta de línea de comandos para enviar peticiones a la API a mano. Los
@@ -110,8 +111,8 @@ de un ViewSet: convierte un modelo en **páginas** HTML — una página de lista
 página de detalle, y formularios de crear/editar/eliminar — renderizadas mediante plantillas Tera,
 en lugar de JSON. La *vista HTML*. Consulta [Vistas HTML](html-views.md).
 
-**Plantilla (Template)** — un archivo con marcadores de posición (Rustango usa [Tera](https://keats.github.io/tera/),
-muy parecido a Jinja) que el servidor rellena con datos para producir
+**Plantilla (Template)** — un archivo con marcadores de posición (Rustango usa [Tera](https://keats.github.io/tera/))
+que el servidor rellena con datos para producir
 una página HTML. `{{ post.title }}` inserta un valor; `{% for … %}` itera.
 
 **Router / montaje (mount)** — el router mapea las URL entrantes al código que las

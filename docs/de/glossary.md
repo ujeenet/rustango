@@ -60,6 +60,7 @@ Requests als auch Responses sind üblicherweise JSON.
 | `201` | Created — dein neues Ding wurde gespeichert |
 | `204` | Done — nichts zurückzusenden (z. B. nach einem Löschen) |
 | `400` | Bad request — du hast etwas Ungültiges gesendet (der Körper sagt was) |
+| `422` | Nicht verarbeitbar — die Daten haben die Validierung nicht bestanden (der Körper nennt das Feld) |
 | `401` / `403` | Nicht eingeloggt / nicht erlaubt |
 | `404` | Not found (nicht gefunden) |
 | `429` | Too many requests — mach langsamer |
@@ -75,7 +76,7 @@ verwendet, um Ergebnisse zu filtern, zu durchsuchen, zu sortieren oder zu pagini
 
 **Pagination (Seitennummerierung)** — das Aufteilen einer langen Ergebnisliste in Seiten, damit eine Response nicht
 riesig ist. Der **Envelope** ist die Hülle um die Seite, die dir auch die
-Gesamtwerte nennt — z. B. `{"count": 137, "page": 2, "results": [ … ]}`. Siehe
+Gesamtwerte nennt — z. B. `{"count": 137, "page": 2, "page_size": 20, "last_page": 7, "results": [ … ]}`. Siehe
 [Pagination](viewsets.md#paginierung).
 
 **`curl`** — ein Kommandozeilen-Werkzeug zum manuellen Senden von API-Requests. Die
@@ -110,8 +111,8 @@ Gegenstück zu einem ViewSet: verwandelt ein Modell in HTML-**Seiten** — eine 
 Detailseite und Erstellen-/Bearbeiten-/Löschen-Formulare — gerendert durch Tera-Templates,
 statt JSON. Die *HTML-View*. Siehe [HTML-Views](html-views.md).
 
-**Template** — eine Datei mit Platzhaltern (Rustango verwendet [Tera](https://keats.github.io/tera/),
-sehr ähnlich zu Jinja), die der Server mit Daten füllt, um eine
+**Template** — eine Datei mit Platzhaltern (Rustango verwendet [Tera](https://keats.github.io/tera/)),
+die der Server mit Daten füllt, um eine
 HTML-Seite zu erzeugen. `{{ post.title }}` fügt einen Wert ein; `{% for … %}` schleift.
 
 **Router / Mount (Einhängen)** — der Router bildet eingehende URLs auf den Code ab, der sie

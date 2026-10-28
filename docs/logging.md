@@ -167,6 +167,10 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::tenancy::sweep` | Retention sweeps |
 | `rustango::viewset` | ViewSets mounted with open write actions |
 
+Console changes also go to `rustango::tenancy::operator_console::action`,
+one event per change, so `RUST_LOG=rustango::tenancy::operator_console::action=info`
+shows them alone.
+
 Those are the targets the framework names explicitly. Events that don't name
 one inherit their module path, which gives the same shape —
 `rustango::access_log` and `rustango::tracing_layer` are reachable exactly like
@@ -221,6 +225,13 @@ rustango::logging::setup_for_env();
 Two display knobs are worth knowing: `.with_line_numbers()` adds source
 locations (useful in dev, noisy in prod), and `.without_targets()` hides the
 target column — do that only if you have given up on filtering by it.
+`.with_thread_ids()` adds the thread id, and `.with_color(Color::Never)` sets
+colour in code. Under `#[rustango::main]` colour always follows the `auto`
+rule, because the macro installs first.
+
+A management verb (`dumpdata`, `migrate`, …) sends terminal logs to stderr,
+so its stdout stays clean: `cargo run -- dumpdata > fixtures.json` works.
+The server keeps logging to stdout.
 
 > Each format value reaches its own formatter. `compact` used to be
 > accepted and then render as the default — that is fixed.
@@ -351,7 +362,7 @@ let app = router.access_log(AccessLogLayer::default());
 ```
 
 ```text
-INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12 client.address=192.0.2.1 tenant=acme
+INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12.4 client.address=192.0.2.1 tenant=acme
 ```
 
 The level carries meaning, so alerting can key on it:
@@ -376,10 +387,14 @@ AccessLogLayer::default()
 to `.real_ip(layer)`; a layer on the api router runs too late.
 
 Credential-bearing query params are masked with `[redacted]` before the line is
-written — `password`, `passwd`, `token`, `secret`, `api_key`, `apikey`,
-`access_token`, `refresh_token`, `signature`, `auth`. Extend with
-`.redact_additional("session_id")`, or replace the whole list with
-`.redact(vec![...])`. This covers **query strings only**; see
+written. A key is masked when it holds a secret word, matched by word, so
+`api_key`, `reset_token` and `X-Api-Key` all count. The words include
+`password`, `pass`, `pwd`, `token`, `jwt`, `secret`, `key`, `signature`,
+`auth`, `credential`, `cookie`, `session`, `otp`, plus the OAuth names `code`,
+`state` and `assertion`. Extend with `.redact_additional("ref")`, or replace
+the whole list with `.redact(vec![...])`; `token`, `signature` and `code` stay
+masked either way. The request span's `url.query` is masked the same way.
+This covers **query strings only**; see
 [security.md](security.md#keeping-secrets-out-of-your-logs) for the rest.
 
 ## Which tenant was that?

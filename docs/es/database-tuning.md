@@ -98,8 +98,8 @@ descubras bajo carga.
 | `pool_max_size` | `RUSTANGO_DB_MAX_CONNECTIONS` | 10 (driver) | Máximo de conexiones que abrirá el pool. Las peticiones de más hacen cola. |
 | `pool_min_size` | `RUSTANGO_DB_MIN_CONNECTIONS` | 0 (driver) | Conexiones que siguen abiertas aunque estén ociosas. |
 | `pool_acquire_timeout_secs` | `RUSTANGO_DB_ACQUIRE_TIMEOUT_SECS` | 5 | Cuánto espera quien pide una conexión antes de fallar. |
-| `pool_idle_timeout_secs` | `RUSTANGO_DB_IDLE_TIMEOUT_SECS` | por defecto del driver | Cierra conexiones que llevan este tiempo ociosas. |
-| `pool_max_lifetime_secs` | `RUSTANGO_DB_MAX_LIFETIME_SECS` | por defecto del driver | Cierra conexiones con esta antigüedad, se usen o no. |
+| `pool_idle_timeout_secs` | `RUSTANGO_DB_IDLE_TIMEOUT_SECS` | 10 min (driver) | Cierra conexiones que llevan este tiempo ociosas. |
+| `pool_max_lifetime_secs` | `RUSTANGO_DB_MAX_LIFETIME_SECS` | 30 min (driver) | Cierra conexiones con esta antigüedad, se usen o no. |
 | `pool_test_before_acquire` | `RUSTANGO_DB_TEST_BEFORE_ACQUIRE` | `false` | Hace ping a cada conexión antes de entregarla. Desactivado, solo se hace ping a las conexiones inactivas más de `RUSTANGO_DB_IDLE_PING_SECS`. |
 | `pool_idle_ping_secs` | `RUSTANGO_DB_IDLE_PING_SECS` | 30 | Con el ping desactivado, hace ping a una conexión inactiva al menos este tiempo antes de entregarla. |
 
@@ -204,6 +204,6 @@ En una aplicación multi-tenant, cada tenant en modo base de datos tiene
 su propio pool, y esos se configuran aparte mediante `TenantPoolsConfig`
 —consulta [Ajuste de pools de tenant](manage.md) en la guía de `manage`—.
 Sus valores por defecto difieren de los del pool principal; en concreto,
-el timeout de adquisición de los tenants es más generoso, algo que
+el timeout de adquisición de los tenants es más generoso (30 segundos), algo que
 conviene revisar si ejecutas muchos tenants contra bases de datos que
 pueden caerse de forma independiente.
