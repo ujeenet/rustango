@@ -8,11 +8,12 @@ the framework's `User` for tenant storage and adds two typed columns
 ## What this example shows
 
 - Implementing `TenantUserModel` on a `#[derive(Model)]` struct that
-  declares all seven framework-required columns plus extras.
+  declares all nine framework-required columns plus extras.
 - Wiring the override through `Cli::user_model::<AppUser>()` in
-  [`src/main.rs`](src/main.rs) so `init-tenancy` materializes a
-  bootstrap migration whose `CREATE TABLE rustango_users` carries the
-  extras.
+  [`src/main.rs`](src/main.rs), which checks the schema at startup.
+  Because `AppUser` names the `rustango_users` table, it replaces the
+  framework's `User` in the generated system migration, so
+  `CREATE TABLE rustango_users` carries the extras.
 - Reading the extras via the ORM — see
   [`src/api.rs`](src/api.rs) for the `GET /users/{username}`
   handler. It answers 401 without a tenant session cookie.
@@ -66,7 +67,7 @@ curl -sb /tmp/c.txt -H "Host: acme.localhost" http://127.0.0.1:8080/users/alice
 
 `display_name` and `timezone` come up empty / `UTC` because
 `create-user` doesn't write to extras (the framework command knows
-only the seven core columns). Set them with a regular `UPDATE` or
+only the core columns). Set them with a regular `UPDATE` or
 through your own admin / form / API — they're application data.
 
 ### Admin
@@ -76,35 +77,36 @@ sidebar shows `Project → AppUser`; clicking through renders
 `AppUser`'s `list_display` (with `display_name` and `timezone`
 columns) and the detail view exposes every column on the row. The
 admin's table-keyed lookup deduplicates by picking the richer schema
-when two models share a table name — `AppUser` (9 fields) wins over
-the framework's `User` (7 fields). See
+when two models share a table name — `AppUser` has more fields than
+the framework's `User`, so it wins. See
 [`crates/rustango/src/admin/helpers.rs::inventory_entries_dedup_by_table`](../../src/admin/helpers.rs)
 for the dedup rule.
 
-## How this differs from a fresh `cargo rustango new --template tenant`
+## Using a custom user model in a scaffolded project
 
-`cargo rustango new --template tenant` writes
-`migrations/0001_rustango_{registry,tenant}_initial.json` from a
-**static** template using the framework's `User`. `init-tenancy` is
-idempotent and won't replace those files. To use a custom user model
-on a scaffolded project you must `rm` the two bootstrap JSONs first;
-this example ships with `migrations/` empty for exactly that reason.
+A project from `cargo rustango new --template tenant` starts with an
+empty `system/migrations/` folder. Add the `AppUser` model and the
+`.user_model::<AppUser>()` call before the first `makemigrations` or
+`migrate`, and the generated `CREATE TABLE rustango_users` carries
+your extras. On a project that already ran `migrate`, the extras
+arrive as `AddColumn` steps instead (see below).
 
 ## Constraints
 
 - `AppUser` declares every framework column verbatim
   (`id, username, password_hash, is_superuser, active, created_at,
-  data`). Missing one trips
+  data, password_changed_at, sessions_revoked_at`). Missing one trips
   `validate_tenant_user_schema` — covered by
   `tests/bootstrap_migration.rs::validate_accepts_app_user`.
-- Both the framework's `User` and `AppUser` register in the model
-  inventory under the same table name. Subsequent
-  `cargo run -- makemigrations` runs may emit redundant ops touching
-  `rustango_users`; review the JSON before applying. (Workaround for
-  this example: don't run `makemigrations` against `rustango_users`
-  after the initial bootstrap; use hand-written `AddColumn`
-  migrations to add more extras later.)
-- Extras must be `NULL`-able or carry `default = "…"` so the bootstrap
-  migration applies cleanly to a fresh tenant schema.
-- Framework auth/admin still reads the seven core columns by name;
-  the two extras are only visible via `AppUser::objects().fetch_on(...)`.
+- To add more extras later, add the field to `AppUser` and run
+  `cargo run -- makemigrations`. Both `User` and `AppUser` declare
+  `rustango_users`; the generator keeps your model and writes an
+  `AddColumn` step to `system/migrations/` (the framework's own
+  chain, next to `migrations/`). Review and commit that file, then
+  `cargo run -- migrate`. `migrate` also generates the step itself if
+  you skip `makemigrations`, but commit the file so every deploy runs
+  the same chain.
+- Extras must be `NULL`-able or carry `default = "…"` so the
+  `AddColumn` step applies cleanly to tenants that already have users.
+- Framework auth still reads the core columns by name; your code reads
+  the extras through `AppUser` (e.g. `AppUser::objects().fetch_on(...)`).

@@ -11,8 +11,8 @@ tu página de inicio de sesión (flujo de navegador) o respondidas con 401/403
 > **Fuente:** `rustango::auth_decorators` (`login_required`, `login_required_or_401`,
 > `user_passes_test`, `superuser_required`, `active_required`,
 > `permission_required` + las variantes `_or_403`; `safe_next`, `extract_next`) —
-> las barreras están detrás de la característica `tenancy` (leen el extractor
-> `SessionUser`). `safe_next`, `extract_next`, `extract_next_named` y
+> las barreras están detrás de la característica `tenancy` y solo funcionan bajo
+> el servidor de tenancy (leen el extractor `SessionUser`). `safe_next`, `extract_next`, `extract_next_named` y
 > `redirect_to_login` solo necesitan axum.
 >
 > **Versión ejecutable:** el comportamiento de restricción está cubierto por el
@@ -22,9 +22,19 @@ tu página de inicio de sesión (flujo de navegador) o respondidas con 401/403
 > **¿Algún término aquí es nuevo para ti?** *middleware/capa*, *extractor*,
 > *401/403* — consulta el [glosario](glossary.md).
 
-> Compañero de inmersión profunda de la [guía de seguridad](security.md). Las
-> barreras leen la sesión establecida al iniciar sesión — consulta
-> [Sesiones](auth-sessions.md).
+> Compañero de inmersión profunda de la [guía de seguridad](security.md).
+
+> **Solo para apps con tenancy.** Las barreras leen una sola cosa: la cookie
+> firmada `rustango_tenant_session`, a través del extractor `SessionUser`. El
+> servidor de tenancy pone esa cookie cuando un usuario inicia sesión en el login
+> del inquilino (`/login` por defecto), por SSO, o cuando un operador suplanta a
+> un usuario. El extractor también necesita el contexto de inquilino que monta
+> el servidor de tenancy. Las barreras **no** leen sesiones de
+> [`SessionStore`](auth-sessions.md). En una app de una sola base de datos, o en
+> un router sin el servidor de tenancy, toda petición cuenta como anónima:
+> `login_required` redirige a la página de login cada vez. Consulta
+> [Aplicaciones de una sola base de datos](#aplicaciones-de-una-sola-base-de-datos)
+> para saber qué usar ahí.
 
 ---
 
@@ -32,7 +42,7 @@ tu página de inicio de sesión (flujo de navegador) o respondidas con 401/403
 - [Inicio rápido](#inicio-rápido) · [Barreras de navegador vs. API](#barreras-de-navegador-vs-api)
 - [La familia de barreras](#la-familia-de-barreras) · [Barreras por predicado y por rol](#barreras-por-predicado-y-por-rol)
 - [Barreras de permiso](#barreras-de-permiso) · [El viaje de ida y vuelta de `?next=`](#el-viaje-de-ida-y-vuelta-de-next)
-- [Notas y límites](#notas-y-límites)
+- [Aplicaciones de una sola base de datos](#aplicaciones-de-una-sola-base-de-datos) · [Notas y límites](#notas-y-límites)
 
 ---
 
@@ -171,12 +181,32 @@ assert_eq!(safe_next("%2F%2Fevil.example/x"),   None);   // decodes to //evil
 
 ---
 
+## Aplicaciones de una sola base de datos
+
+Hoy no hay una barrera lista para una app sin tenancy. Usa una de estas
+opciones:
+
+- **Páginas de staff en el admin.** El admin simple tiene su propio login. Llama
+  a `with_session_auth(secret)` en `rustango::admin::Builder` y cada ruta del
+  admin pide un usuario admin con sesión iniciada. El admin pone la sesión en la
+  petición como `Extension<AdminSession>`. Esta barrera cubre solo el router del
+  admin, no tus propias rutas.
+- **Tus propias rutas.** Escribe un middleware pequeño con
+  `axum::middleware::from_fn`: lee tu cookie de sesión, carga la sesión con
+  [`SessionStore::load`](auth-sessions.md) y, si no hay usuario en ella,
+  devuelve `redirect_to_login(login_url, "next", original_path)`. En el handler
+  de login, lee `?next=` con `extract_next` y pásalo por `safe_next`, como se
+  muestra arriba. Estos helpers no necesitan la característica `tenancy`.
+
+---
+
 ## Notas y límites
 
-- **Estas barreras leen la sesión.** «Con sesión iniciada» significa que el
-  extractor [`SessionUser`](auth-sessions.md) resolvió un usuario a partir de la
-  cookie de sesión — así que son para autenticación por sesión/cookie. La
-  autenticación por token de API ([JWT](auth-jwt-api.md), [claves de
+- **«Con sesión iniciada» significa una sesión de inquilino.** El extractor
+  `SessionUser` resolvió un usuario activo a partir de la cookie
+  `rustango_tenant_session` de este inquilino. Una cookie de otro inquilino, una
+  caducada, o una emitida antes del último cambio de contraseña o cierre de
+  sesión cuenta como anónima. La autenticación por token de API ([JWT](auth-jwt-api.md), [claves de
   API](auth-api-keys.md)) se restringe en su lugar en la capa de la [cadena de
   backends](auth-backends.md), leyendo la cabecera `Authorization`.
 - **El orden de las capas importa.** `.layer(gate)` protege cada ruta añadida al

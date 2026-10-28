@@ -11,8 +11,8 @@ beantwortet (API-Ablauf) —, bevor sie je den Handler erreichen.
 > **Quelle:** `rustango::auth_decorators` (`login_required`, `login_required_or_401`,
 > `user_passes_test`, `superuser_required`, `active_required`,
 > `permission_required` + die `_or_403`-Varianten; `safe_next`, `extract_next`) —
-> die Gatter liegen hinter dem Feature `tenancy` (sie lesen den
-> `SessionUser`-Extraktor). `safe_next`, `extract_next`, `extract_next_named` und
+> die Gatter liegen hinter dem Feature `tenancy` und funktionieren nur unter dem
+> Tenancy-Server (sie lesen den `SessionUser`-Extraktor). `safe_next`, `extract_next`, `extract_next_named` und
 > `redirect_to_login` brauchen nur axum.
 >
 > **Ausführbare Version:** das Absicherungsverhalten wird vom getesteten
@@ -22,8 +22,19 @@ beantwortet (API-Ablauf) —, bevor sie je den Handler erreichen.
 > **Ein Begriff hier neu?** *Middleware/Layer*, *Extraktor*, *401/403* — siehe das
 > [Glossar](glossary.md).
 
-> Vertiefungsbegleiter zum [Sicherheitsleitfaden](security.md). Die Gatter lesen
-> die bei der Anmeldung gesetzte Session — siehe [Sessions](auth-sessions.md).
+> Vertiefungsbegleiter zum [Sicherheitsleitfaden](security.md).
+
+> **Nur für Tenancy-Apps.** Die Gatter lesen genau eines: das signierte Cookie
+> `rustango_tenant_session`, über den `SessionUser`-Extraktor. Der
+> Tenancy-Server setzt dieses Cookie, wenn sich ein Benutzer beim
+> Mandanten-Login (standardmäßig `/login`) oder per SSO anmeldet oder wenn ein
+> Operator einen Benutzer impersoniert. Der Extraktor braucht außerdem den
+> Mandantenkontext, den der Tenancy-Server einhängt. Die Gatter lesen **keine**
+> [`SessionStore`](auth-sessions.md)-Sessions. In einer App mit nur einer
+> Datenbank oder auf einem Router ohne Tenancy-Server gilt jede Anfrage als
+> anonym: `login_required` leitet jedes Mal auf die Anmeldeseite um. Was Sie
+> dort stattdessen nutzen, steht unter
+> [Apps mit einer Datenbank](#apps-mit-einer-datenbank).
 
 ---
 
@@ -31,7 +42,7 @@ beantwortet (API-Ablauf) —, bevor sie je den Handler erreichen.
 - [Schnellstart](#schnellstart) · [Browser- vs. API-Gatter](#browser--vs-api-gatter)
 - [Die Gatter-Familie](#die-gatter-familie) · [Prädikat- und Rollen-Gatter](#prädikat--und-rollen-gatter)
 - [Berechtigungs-Gatter](#berechtigungs-gatter) · [Der `?next=`-Umlauf](#der-next-umlauf)
-- [Hinweise und Grenzen](#hinweise-und-grenzen)
+- [Apps mit einer Datenbank](#apps-mit-einer-datenbank) · [Hinweise und Grenzen](#hinweise-und-grenzen)
 
 ---
 
@@ -170,12 +181,33 @@ assert_eq!(safe_next("%2F%2Fevil.example/x"),   None);   // decodes to //evil
 
 ---
 
+## Apps mit einer Datenbank
+
+Für eine App ohne Tenancy gibt es heute kein fertiges Gatter. Nutzen Sie eines
+davon:
+
+- **Staff-Seiten im Admin.** Der einfache Admin hat ein eigenes Login. Rufen Sie
+  `with_session_auth(secret)` auf `rustango::admin::Builder` auf, dann verlangt
+  jede Admin-Route einen angemeldeten Admin-Benutzer. Der Admin legt die Session
+  als `Extension<AdminSession>` in die Anfrage. Dieses Gatter deckt nur den
+  Admin-Router ab, nicht Ihre eigenen Routen.
+- **Ihre eigenen Routen.** Schreiben Sie eine kleine Middleware mit
+  `axum::middleware::from_fn`: Session-Cookie lesen, die Session mit
+  [`SessionStore::load`](auth-sessions.md) laden und, wenn kein Benutzer darin
+  ist, `redirect_to_login(login_url, "next", original_path)` zurückgeben. Im
+  Login-Handler lesen Sie `?next=` mit `extract_next` und geben es durch
+  `safe_next`, wie oben gezeigt. Diese Helfer brauchen das Feature `tenancy`
+  nicht.
+
+---
+
 ## Hinweise und Grenzen
 
-- **Diese Gatter lesen die Session.** „Angemeldet" bedeutet, dass der
-  [`SessionUser`](auth-sessions.md)-Extraktor einen Benutzer aus dem
-  Session-Cookie aufgelöst hat — sie sind also für Session-/Cookie-Auth gedacht.
-  API-Token-Auth ([JWT](auth-jwt-api.md), [API-Schlüssel](auth-api-keys.md))
+- **„Angemeldet" heißt: eine Mandanten-Session.** Der `SessionUser`-Extraktor
+  hat einen aktiven Benutzer aus dem Cookie `rustango_tenant_session` für diesen
+  Mandanten aufgelöst. Ein Cookie eines anderen Mandanten, ein abgelaufenes oder
+  eines, das vor der letzten Passwortänderung oder Abmeldung ausgestellt wurde,
+  gilt als anonym. API-Token-Auth ([JWT](auth-jwt-api.md), [API-Schlüssel](auth-api-keys.md))
   sichert stattdessen auf der Ebene der [Backend-Kette](auth-backends.md) ab und
   liest den `Authorization`-Header.
 - **Die Layer-Reihenfolge ist wichtig.** `.layer(gate)` schützt jede Route, die

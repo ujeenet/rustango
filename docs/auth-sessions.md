@@ -21,8 +21,12 @@ request.
 > **New to a term here?** *session*, *opaque id*, *cookie*, *cache* — see the
 > [glossary](glossary.md).
 
-> Deep dive companion to the [Security guide](security.md). Gating routes behind
-> a logged-in session is covered in [Auth decorators](auth-decorators.md); for
+> Deep dive companion to the [Security guide](security.md). The
+> [Auth decorators](auth-decorators.md) do **not** read these sessions: they
+> read the tenancy login cookie. To gate routes on a `SessionStore` session,
+> write a small middleware that loads the session and calls
+> `redirect_to_login` — see
+> [Single-database apps](auth-decorators.md#single-database-apps). For
 > stateless API tokens instead, see [JWT](auth-jwt.md).
 
 ---
