@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — new projects: scaffolder, examples, getting started
+
+- With no `RUSTANGO_BIND` or `[server] bind`, `Cli` binds `127.0.0.1:8080` off the prod and staging tiers, so an api project no longer listens on every interface in dev.
+- `cargo rustango new` prints host steps that work: compose starts only the database, `.env` points at `localhost`, and fullstack makes the first admin with `--superuser`.
+- The generated Dockerfiles use the image's own toolchain instead of downloading `stable` again; the release one builds without a `Cargo.lock` and `.dockerignore` skips `var/`.
+- `startapp --with-manage-bin` bins run through `Cli`, so they read `DB_*` vars and serve `register_command!` verbs.
+- Examples: commerce apps mark soak ViewSets `allow_anonymous`, bind the compose container on all interfaces, and fail closed on a missing prod session secret; cookbook_blog ships `makemigrations` output for all its models; getting_started_blog matches the scaffold.
+
 ### Fixed — production safety: page cache, JWT keys, probes, HTTP/2 hosts, tenant CLI, DB URL
 
 - `CachePageLayer::vary_on` keys on every value of a repeated header (HTTP/2 sends each cookie apart); a non-UTF-8 value bypasses the cache.
