@@ -4,6 +4,17 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — ORM and migration data loss
+
+- `update()`/`delete()` after `join`, `join_sub` or `join_lateral` are refused with `QueryError::JoinDml`; the join was dropped and the write hit every row.
+- Undoing a migration drops the tables it created child first, so MySQL no longer stops half way on a foreign key.
+- `makemigrations --empty` chains onto its own scope's last file (`--scope` picks it) and copies its renamed shape.
+- A renamed M2M `through` becomes a `RenameTable` that keeps the rows, and a hand-written junction `RenameTable` reaches the snapshot.
+- Undo reads the parent's snapshot with its hand-written renames, as `makemigrations` does.
+- `migrate --squash` is refused while the models hold changes no migration has yet.
+- The derive's PG `bulk_insert` splits rows past the bind cap into chunks inside one transaction.
+- `QuerySet::iterator` pages inside the queryset's own limit and offset, and on a set operation over the merged result.
+
 ### Fixed — error pages, admin create form, console sign-in
 
 - The error-pages layer keeps every HTML error page the admin, tenant admin, operator console and generic views render, so a form shown again with its error (status 400/422) is no longer swapped for the generic page.

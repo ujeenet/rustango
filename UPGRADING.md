@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Refusals instead of silent data loss
+
+`update()`/`delete()` on a queryset with `join`/`join_sub`/`join_lateral` now return `QueryError::JoinDml`; narrow the write with `where_in_subquery` instead. `migrate --squash` refuses while models have unmigrated changes: run `makemigrations` first. In a tenancy dir `makemigrations --empty` now chains onto the last tenant file; pass `--scope registry` for a registry one. A changed M2M `through` name is now written as a `RenameTable`, not a drop and create. `Model::bulk_insert_on` still sends one statement; past the bind cap use the pool `bulk_insert`, which now chunks.
+
 ### Error pages keep the framework's own HTML pages
 
 With `[errors] enabled = true`, an HTML 4xx/5xx from the admin, tenant admin, operator console or generic views now passes through as rendered. A plain-text or JSON error from them is still dressed. On the admin add form, a blank NOT NULL non-text field with a column default now takes that default instead of failing.
