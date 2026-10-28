@@ -4,6 +4,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — fresh-project CLI and dev secrets
+
+- `run-server` through `Cli` reads `--bind`, `--apex` and `--help`, beating env and settings; an unknown flag is refused instead of dropped.
+- Every serving path logs one INFO line with the bound address, plus the operator console URL with tenancy.
+- On the dev and test tiers an unset `RUSTANGO_SECRET_KEY` falls back to a key generated and saved in `./var/`, so TOTP and saved server passwords work out of the box; staging and prod still need it.
+- The console TOTP page without a key shows how to set one instead of a link back to itself.
+- MCP agent tokens sign with the saved dev session key, read on the first token, so tokens survive a dev restart and CLI verbs no longer warn.
+- `cargo rustango new --features mcp` mounts `/mcp`; generated models import the new `rustango::prelude` (ORM traits, `Column`, `Model`, `Auto`).
+
 ### Added — operator console two-factor sign-in
 
 - Operators can turn on TOTP at `/account/totp` (setup key and `otpauth` link, confirmed with a code) and turn it off with a current code (needs `totp`).
