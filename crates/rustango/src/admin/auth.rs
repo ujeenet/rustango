@@ -4,9 +4,8 @@
 //! decodes to the configured credentials. Otherwise it gets a 401 with
 //! `WWW-Authenticate: Basic realm="Rustango Admin"`.
 //!
-//! The comparison is plain byte equality, **not** constant-time. That
-//! is fine for an admin gate, but do not reuse this layer where a
-//! timing side channel would matter.
+//! Each attempt goes through [`crate::login_throttle`] (admin scope),
+//! and both fields are compared in constant time.
 
 use std::sync::Arc;
 
@@ -38,14 +37,34 @@ async fn basic_auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let ok = request
+    use crate::login_throttle::{ClientIp, LoginScope};
+    let Some((user, pass)) = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(extract_basic)
-        .is_some_and(|(u, p)| u == creds.username && p == creds.password);
-    if ok {
+    else {
+        return challenge();
+    };
+    let ip = ClientIp::from_parts(request.extensions(), request.headers());
+    let attempt = match crate::login_throttle::shared()
+        .begin(&LoginScope::Admin, &ip, &user)
+        .await
+    {
+        Ok(attempt) => attempt,
+        Err(refused) => return refused.into_response(),
+    };
+    // Both compares always run, so the timing does not say which field is wrong.
+    let user_ok = crate::crypto::constant_time_compare(user.as_bytes(), creds.username.as_bytes());
+    let pass_ok = crate::crypto::constant_time_compare(pass.as_bytes(), creds.password.as_bytes());
+    if user_ok & pass_ok {
+        attempt.succeeded().await;
         return next.run(request).await;
     }
+    attempt.failed().await;
+    challenge()
+}
+
+fn challenge() -> Response {
     let mut resp = (StatusCode::UNAUTHORIZED, "Authentication required").into_response();
     resp.headers_mut().insert(
         header::WWW_AUTHENTICATE,
@@ -71,4 +90,42 @@ pub fn protect_with_csrf(router: Router) -> Router {
     router
         .layer(middleware::from_fn(super::csrf_context::csrf_context))
         .layer(crate::forms::csrf::layer())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::get;
+    use tower::ServiceExt as _;
+
+    async fn call(app: &Router, user_pass: &str) -> StatusCode {
+        let creds = base64::engine::general_purpose::STANDARD.encode(user_pass);
+        let req = Request::builder()
+            .uri("/")
+            .header(header::AUTHORIZATION, format!("Basic {creds}"))
+            .body(Body::empty())
+            .unwrap();
+        app.clone().oneshot(req).await.unwrap().status()
+    }
+
+    /// Wrong passwords lock the account, so the right one is refused after.
+    #[tokio::test]
+    async fn repeated_wrong_passwords_lock_the_basic_gate() {
+        let app = protect_with_basic_auth(
+            Router::new().route("/", get(|| async { "ok" })),
+            "basic-lock-admin",
+            "right",
+        );
+        assert_eq!(call(&app, "basic-lock-admin:right").await, StatusCode::OK);
+        for _ in 0..crate::account_lockout::DEFAULT_MAX_ATTEMPTS {
+            assert_eq!(
+                call(&app, "basic-lock-admin:wrong").await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(
+            call(&app, "basic-lock-admin:right").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
 }
