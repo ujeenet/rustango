@@ -160,8 +160,10 @@ Every template writes a self-contained Cargo project:
   .env.example          # copy to .env (DATABASE_URL, RUSTANGO_SESSION_SECRET, …)
   .gitignore
   rust-toolchain.toml   # selects the `stable` toolchain + rustfmt/clippy/rust-analyzer
-  docker-compose.yml    # a Postgres service to develop against
-  Dockerfile            # production image
+  docker-compose.yml    # the database service (none for sqlite) + a cargo-watch dev container
+  Dockerfile            # production image (multi-stage, release, non-root)
+  Dockerfile.dev        # the dev image docker-compose.yml builds
+  .dockerignore
   README.md
   config/
     default.toml        # settings shared across every environment
@@ -169,7 +171,9 @@ Every template writes a self-contained Cargo project:
     staging_settings.toml
     prod_settings.toml
   migrations/           # JSON migration files (committed to git)
+  system/migrations/    # the framework's own tables, generated on first migrate (commit them)
   src/
+    lib.rs              # the app as a library: `pub mod models; pub mod urls; pub mod views;`
     main.rs             # the single binary — HTTP server + every manage verb
     models.rs           # your #[derive(Model)] structs
     views.rs            # request handlers ("views")
@@ -178,19 +182,17 @@ Every template writes a self-contained Cargo project:
 
 ### One binary for everything
 
-`src/main.rs` is the only entrypoint. It boots the HTTP server **and** dispatches every `manage` verb — there is no separate manage script or `src/bin/manage.rs`:
+`src/main.rs` is the only entrypoint. It boots the HTTP server **and** dispatches every `manage` verb — there is no separate manage script or `src/bin/manage.rs`. The modules live in the library target (`src/lib.rs`), so `main.rs` reaches them by crate name, and so can a worker binary under `src/bin/`. The api template's `main.rs`, trimmed:
 
 ```rust
-mod models;
-mod urls;
-mod views;
+use myapp::urls;
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     rustango::manage::Cli::new()
         .api(urls::api())
-        .with_health()   // /health + /ready endpoints (fullstack & tenant)
+        .with_health()   // /health + /ready endpoints (every template)
         .run()
         .await
 }
@@ -201,7 +203,7 @@ So `cargo run` starts the server, and `cargo run -- <verb>` runs migrations, gen
 How the templates differ inside `main.rs` / `urls.rs`:
 
 - **api** — no admin; `urls::api()` simply aggregates your own routes.
-- **fullstack** — same `urls.rs`, plus an `admin_router(pool)` helper that `main.rs` mounts with `Cli::nest_with("/admin", …)`, built from the server's pool. It takes `rustango::sql::Pool`, so it names no driver, and sits behind a login: create the account with `cargo run -- create-admin <username>` (see [getting started, Step 11](getting-started.md#step-11-turn-on-the-auto-admin)).
+- **fullstack** — same `urls.rs`, plus `admin_prefix(&settings)` and an `admin_router(pool, &settings)` helper that `main.rs` mounts with `Cli::nest_with(urls::admin_prefix(&settings), …)`, built from the server's pool. The prefix is `[admin] url_prefix` (or `[routes] admin_url`), else `/admin`. `main.rs` loads the settings once and passes them to the `Cli` with `with_loaded_settings`. It takes `rustango::sql::Pool`, so it names no driver, and sits behind a login: create the account with `cargo run -- create-admin <username>` (see [getting started, Step 11](getting-started.md#step-11-turn-on-the-auto-admin)).
 - **tenant** — `main.rs` adds `.tenancy()`, serving the operator console at the apex domain and each tenant under its own subdomain, and `.with_tenant_provisioning("migrations")` for the console's **New tenant** and **Database servers** pages (delete it to turn them off; saving a server needs `RUSTANGO_SECRET_KEY`). The framework's own tables are generated into a **`system/migrations/`** folder from the compiled models on the first `cargo run -- migrate` — no hand-shipped bootstrap JSON, so the very first migrate works with no extra setup.
 
 ### Layered configuration
@@ -244,12 +246,12 @@ Scaffold a self-contained module of related models, views, and routes:
 cargo run -- startapp blog
 ```
 
-It writes `src/blog/` containing `mod.rs`, `models.rs` (a starter model named after the singularized app — `blog` → `Blog`), `views.rs`, `urls.rs`, and `tests.rs`, then declares the module in `src/main.rs` and merges its routes into `urls::api()`.
+It writes `src/blog/` containing `mod.rs`, `models.rs` (a starter model named after the singularized app — `blog` → `Blog`), `views.rs`, `urls.rs`, and `tests.rs`, then declares the module in `src/lib.rs` (`pub mod blog;`; `mod blog;` in `src/main.rs` on a project without a `lib.rs`) and merges its routes into `urls::api()`.
 
 Options:
 
 - **`--into <dir>`** — scaffold under a base directory other than `src/` (e.g. a workspace member).
-- **`--with-manage-bin`** — also emit a `bin/manage.rs` (for layouts that prefer a separate manage binary).
+- **`--with-manage-bin`** — also emit a `src/bin/manage.rs` (for layouts that prefer a separate manage binary).
 
 ---
 
@@ -264,6 +266,8 @@ Inside a project, the `make:*` verbs scaffold one file at a time. The full per-f
 | `make:api_routes <app>` | An API route aggregator for an app |
 | `make:form <Name>` | An HTML form with validation |
 | `make:job <Name>` | A background job handler |
+| `make:scheduled <Name>` | A fixed-interval task for `scheduler::Scheduler` |
+| `make:worker <Name>` | A worker binary under `src/bin/` that drains the job queue |
 | `make:notification <Name>` | A multi-channel notification |
 | `make:middleware <Name>` | A middleware skeleton |
 | `make:test <Name>` | A test module using the in-process test client |
