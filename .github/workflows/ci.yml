@@ -1313,6 +1313,7 @@ jobs:
             --no-default-features \
             --features sqlite,tenancy,admin,jobs-postgres,media,passwords,serializer,totp,scheduler,testkit \
             --test access_admin_codename_sqlite_live \
+            --test auth_binds_to_the_request_tenant \
             --test admin_sqlite_live \
             --test brand_assets_sqlite_live \
             --test admin_list_display_links_sqlite_live \

@@ -401,9 +401,15 @@ async fn purge_deletes_brand_files_from_the_cli_store() {
         .migrations_dir(b.migrations.path())
         .brand_storage(store.clone())
         .run_with_args(
-            ["purge-tenant", &slug, "--confirm", &slug]
-                .map(str::to_owned)
-                .to_vec(),
+            [
+                "purge-tenant",
+                &slug,
+                "--confirm",
+                &slug,
+                "--purge-database",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
         )
         .await;
     std::env::remove_var("DATABASE_URL");

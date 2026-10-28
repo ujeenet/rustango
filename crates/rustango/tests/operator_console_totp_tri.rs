@@ -519,7 +519,11 @@ async fn another_operator_resets_a_lost_device(pool: &Pool) {
         String::new(),
     )
     .await;
-    assert_eq!(location(&resp), "/operators", "{}", resp.status());
+    assert!(
+        location(&resp).starts_with("/operators?notice=removed"),
+        "{}",
+        location(&resp)
+    );
     assert_eq!(devices().await, 0);
     assert_eq!(audit_count(pool, &admin, "operator_totp_reset").await, 1);
     password_session(&app, &lost).await;
