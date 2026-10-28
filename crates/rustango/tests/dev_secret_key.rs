@@ -3,6 +3,8 @@
 
 #![cfg(all(feature = "tenancy", feature = "manage"))]
 
+use rustango::tenancy::SecretsResolver as _;
+
 static ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn boot(tier: &str) {
@@ -26,7 +28,6 @@ async fn only_the_dev_tier_seals_without_the_env_var() {
     let sealed = rustango::tenancy::seal("postgres://u:p@h/db").expect("dev seals");
     let key = std::fs::read("./var/.rustango_secret.key").expect("key saved in ./var/");
     assert!(key.len() >= 32);
-    use rustango::tenancy::SecretsResolver as _;
     let open = rustango::tenancy::ChainSecretsResolver::standard()
         .resolve(&sealed)
         .await

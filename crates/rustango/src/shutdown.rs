@@ -77,7 +77,7 @@ pub(crate) async fn bind_announced(
             bound.port()
         ),
         None => {
-            tracing::info!(target: "rustango::server", addr = %bound, "listening on http://{bound}")
+            tracing::info!(target: "rustango::server", addr = %bound, "listening on http://{bound}");
         }
     }
     Ok(listener)
