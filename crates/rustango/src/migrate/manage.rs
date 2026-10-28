@@ -6235,6 +6235,7 @@ pub(crate) enum ApexDomain {
     #[default]
     SingleTenant,
     /// `RUSTANGO_APEX_DOMAIN` (or settings) as configured, if at all.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
     Tenancy(Option<String>),
 }
 
