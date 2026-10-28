@@ -121,41 +121,19 @@ impl SessionSecret {
                 Err(e) => warn_unusable_secret(&e.to_string()),
             }
         }
-        if let Ok(bytes) = std::fs::read(disk_path) {
-            if bytes.len() >= 32 {
-                restrict_session_secret_perms(disk_path);
-                tracing::info!(
-                    path = %disk_path.display(),
-                    "loaded persisted session secret from disk",
-                );
-                return Self(bytes);
-            }
-        }
-        let mut buf = vec![0u8; 32];
-        OsRng.fill_bytes(&mut buf);
-        if let Some(parent) = disk_path.parent() {
-            create_private_dir(parent);
-        }
-        match persist_secret(disk_path, &buf) {
-            Ok(on_disk) => {
-                tracing::info!(
-                    path = %disk_path.display(),
-                    "generated new session secret and persisted to disk \
-                     (set RUSTANGO_SESSION_SECRET to override; this message \
-                     only fires on first boot)",
-                );
-                // Another first boot may have won; everyone uses its key.
-                return Self(on_disk);
-            }
+        match load_or_create_key_file(disk_path, "session secret", "RUSTANGO_SESSION_SECRET") {
+            Ok(bytes) => Self(bytes),
             Err(e) => {
                 tracing::warn!(
                     path = %disk_path.display(),
                     error = %e,
                     "could not persist session secret to disk — using ephemeral random key",
                 );
+                let mut buf = vec![0u8; 32];
+                OsRng.fill_bytes(&mut buf);
+                Self(buf)
             }
         }
-        Self(buf)
     }
 
     /// Strict variant of [`Self::from_env_or_random`]: returns
@@ -342,6 +320,35 @@ pub(crate) fn warn_unusable_secret(reason: &str) {
          {reason}. Falling back to the key on disk. Generate a valid one with: \
          openssl rand -base64 32"
     );
+}
+
+/// The 32+ byte key saved at `path`, else a new random one saved there
+/// owner-only. `what` and `var` name it in the one INFO line each logs.
+pub(crate) fn load_or_create_key_file(
+    path: &std::path::Path,
+    what: &str,
+    var: &str,
+) -> std::io::Result<Vec<u8>> {
+    if let Ok(bytes) = std::fs::read(path) {
+        if bytes.len() >= 32 {
+            restrict_session_secret_perms(path);
+            tracing::info!(path = %path.display(), "loaded persisted {what} from disk");
+            return Ok(bytes);
+        }
+    }
+    let mut buf = vec![0u8; 32];
+    OsRng.fill_bytes(&mut buf);
+    if let Some(parent) = path.parent() {
+        create_private_dir(parent);
+    }
+    let on_disk = persist_secret(path, &buf)?;
+    tracing::info!(
+        path = %path.display(),
+        "generated new {what} and persisted to disk (set {var} to override; \
+         this message only fires on first boot)",
+    );
+    // Another first boot may have won; everyone uses its key.
+    Ok(on_disk)
 }
 
 /// Publish `bytes` at `path` unless another boot got there first, and

@@ -106,6 +106,10 @@
            autocomplete="one-time-code" pattern="[0-9]*" maxlength="8" required autofocus>
     <button type="submit">Turn on</button>
   </form>
+  {% elif key_missing %}
+  <p class="sub">Set <code>RUSTANGO_SECRET_KEY</code> to 32 or more random bytes
+    (<code>openssl rand -base64 48</code>) and restart the server; then set up
+    two-factor sign-in here.</p>
   {% else %}
   <p class="sub">Two-factor sign-in is off for <strong>{{ operator_username }}</strong>.</p>
   <a class="button" href="{{ console_prefix }}/account/totp">Set it up</a>

@@ -17,12 +17,10 @@ use tower::ServiceExt;
 const PASSWORD: &str = "operator-password-totp";
 const SESSION: &str = "rustango_op_session";
 const PENDING: &str = "rustango_op_totp";
+const KEY: &str = "operator-console-totp-tri-key-0123456789";
 
 async fn setup(pool: &Pool) {
-    std::env::set_var(
-        "RUSTANGO_SECRET_KEY",
-        "operator-console-totp-tri-key-0123456789",
-    );
+    std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
     // Shared with other suites: create what is missing, never drop.
     rustango::testkit::migrate_framework(pool)
         .await
@@ -400,9 +398,25 @@ async fn a_required_policy_enrolls_at_sign_in(pool: &Pool) {
     assert_eq!(confirmed, vec![true]);
 }
 
+/// Without a key the page says how to set one, not a link back to itself.
+async fn without_a_key_the_page_says_how_to_set_it(pool: &Pool) {
+    let app = app(pool, false);
+    let op = operator(pool).await;
+    let session = password_session(&app, &op).await;
+    std::env::remove_var("RUSTANGO_SECRET_KEY");
+    let page = html(send(&app, "GET", "/account/totp", &session, String::new()).await).await;
+    std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+    assert!(page.contains("openssl rand -base64 48"), "{page}");
+    assert!(
+        !page.contains("Set it up"),
+        "a link back to this page: {page}"
+    );
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
+        without_a_key_the_page_says_how_to_set_it,
         enroll_sign_in_replay_disable,
         the_pending_state_opens_no_page,
         a_required_policy_enrolls_at_sign_in,
