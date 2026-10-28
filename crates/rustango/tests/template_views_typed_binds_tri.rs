@@ -273,11 +273,66 @@ fn app(pool: &Pool) -> axum::Router {
                 .router("/badges", t.clone(), pool.clone()),
         )
         .merge(
+            CreateView::for_model(Event::SCHEMA, EVENT_FIELDS)
+                .template("form.html")
+                .success_url("/ev/{pk}/{day}/{done}/{token}/{author_id}")
+                .router("/tevents", t.clone(), pool.clone()),
+        )
+        .merge(
+            CreateView::for_model(Event::SCHEMA, EVENT_FIELDS)
+                .template("form.html")
+                .success_url("/ev/{note}")
+                .router("/nevents", t.clone(), pool.clone()),
+        )
+        .merge(
+            CreateView::for_model(Tag::SCHEMA, &["code", "name"])
+                .template("form.html")
+                .success_url("/tags/{pk}")
+                .router("/ptags", t.clone(), pool.clone()),
+        )
+        .merge(
             ListView::for_model(Pin::SCHEMA)
                 .template("pins.html")
                 .with_fk_display(true)
                 .router("/pins", t, pool.clone()),
         )
+}
+
+/// A form POST's status and `Location`.
+async fn post_location(pool: &Pool, uri: &str, body: &str) -> (StatusCode, String) {
+    let resp = app(pool)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, FORM)
+                .header(header::COOKIE, format!("rustango_csrf={CSRF}"))
+                .body(Body::from(format!("_csrf={CSRF}&{body}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let location = resp
+        .headers()
+        .get(header::LOCATION)
+        .map_or_else(String::new, |v| v.to_str().unwrap().to_owned());
+    (resp.status(), location)
+}
+
+/// `success_url` placeholders of any type are read from the saved row on
+/// every backend; one that cannot be filled redirects, never a 500 after the save.
+async fn create_view_fills_typed_placeholders(pool: &Pool) {
+    let (status, to) = post_location(pool, "/tevents/new", &form("2026-09-29", 7, true)).await;
+    assert!(status.is_redirection(), "{status} {to}");
+    let pk = *events(pool).await[0].id.get().expect("pk");
+    assert_eq!(to, format!("/ev/{pk}/2026-09-29/true/{UUID_A}/7"));
+    let (status, to) = post_location(pool, "/nevents/new", &form("2026-09-30", 7, true)).await;
+    assert!(status.is_redirection(), "a NULL placeholder: {status} {to}");
+    assert_eq!(to, "/ev/");
+    assert_eq!(events(pool).await.len(), 2, "each create saved once");
+    let (status, to) = post_location(pool, "/ptags/new", "code=go&name=Go").await;
+    assert!(status.is_redirection(), "{status} {to}");
+    assert_eq!(to, "/tags/go", "the natural pk as written");
 }
 
 async fn send(pool: &Pool, method: Method, uri: &str, body: &str) -> (StatusCode, String) {
@@ -954,5 +1009,6 @@ tri_dialect_test! {
         garbage_url_pk_is_a_404,
         huge_page_is_an_empty_page,
         create_view_writes_natural_and_v7_pks,
+        create_view_fills_typed_placeholders,
     ],
 }
