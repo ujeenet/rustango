@@ -313,6 +313,9 @@ seguro por defecto:
 - Una respuesta con `Set-Cookie`, o con `Cache-Control: private`, `no-cache` o
   `no-store`, nunca se guarda.
 - `.vary_on([...])` incluye cabeceras de la petición en la clave.
+- Por defecto la query cruda va en la clave: cada query distinta crea su entrada y
+  `?x=<aleatorio>` puede llenar la caché. `.query_keys(["page", "q"])` usa solo
+  esos parámetros, ordenados; `.ignore_query()` deja la query fuera.
 - `.key_prefix(..)` da a cada capa su propio espacio de claves (por defecto
   `rustango.cache_page`). `.cache_query(true)` cachea también peticiones `QUERY`,
   con un resumen del cuerpo (hasta 1 MiB) en la clave. `.tenant_agnostic(true)`

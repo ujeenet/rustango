@@ -316,6 +316,10 @@ in einem beliebigen `BoxedCache`; `.timeout(dur)` legt fest, wie lange (Standard
 - Eine Antwort mit `Set-Cookie` oder `Cache-Control: private`, `no-cache` oder
   `no-store` wird nie gecacht.
 - `.vary_on([...])` nimmt Request-Header in den Key auf.
+- Standardmäßig steht der rohe Query-String im Key: jede andere Query legt einen
+  eigenen Eintrag an, und `?x=<zufällig>` kann den Cache füllen.
+  `.query_keys(["page", "q"])` nimmt nur diese Parameter, sortiert;
+  `.ignore_query()` lässt die Query weg.
 - `.key_prefix(..)` gibt jedem Layer einen eigenen Schlüsselraum (Standard
   `rustango.cache_page`). `.cache_query(true)` cacht auch `QUERY`-Anfragen, mit
   einem Digest des Bodys (bis 1 MiB) im Key. `.tenant_agnostic(true)` cacht ohne

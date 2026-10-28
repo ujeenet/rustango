@@ -297,6 +297,9 @@ by default:
 - A response with `Set-Cookie`, or `Cache-Control: private`, `no-cache` or
   `no-store`, is never cached.
 - `.vary_on([...])` puts request headers in the key.
+- The raw query string is in the key by default, so each distinct query stores
+  its own entry and `?x=<random>` can fill the cache. `.query_keys(["page", "q"])`
+  keys only on those params, sorted; `.ignore_query()` leaves the query out.
 - `.key_prefix(..)` gives each layer its own keyspace (default
   `rustango.cache_page`). `.cache_query(true)` also caches `QUERY` requests,
   keyed on a digest of the body (up to 1 MiB). `.tenant_agnostic(true)` caches
