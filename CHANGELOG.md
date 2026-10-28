@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.9] — 2026-10-28
+
 ### Fixed — ORM and migrations
 
 - `makemigrations` skips `#[rustango(proxy)]` models and keeps one model per table, so a proxy no longer gets a second `CREATE TABLE`.
