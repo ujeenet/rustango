@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.8] — 2026-10-28
+
 ### Fixed — migrations, dev key, uploads, views and leaks
 
 - `makemigrations` no longer turns one M2M swapped for another between the same models into a junction rename that moves the old rows to the new relation; it drops and creates, and warns.

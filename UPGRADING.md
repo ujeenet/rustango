@@ -148,7 +148,7 @@ untouched.
 
 ---
 
-## Unreleased
+## 0.61.8
 
 ### Data ops, uploads, views and Debug output
 
