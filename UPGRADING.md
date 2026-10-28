@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Serializer serde attributes, Basic gate throttle, JWT sessions, tenant SSO egress
+
+`#[derive(Serializer)]` now applies `#[serde(rename/rename_all/skip/skip_serializing/skip_serializing_if/skip_deserializing)]`: JSON keys, `writable_fields()` and accepted input keys follow the serde names, so clients of a renamed field must use the new key. `protect_with_basic_auth` now answers 429 after repeated wrong passwords. `JwtBackend` tokens with an `iat` (all new `issue*` and `JwtLifecycle` tokens) are refused after the user's `sessions_revoked_at` or `password_changed_at`; tokens without `iat` still work until expiry and log one warning. Tenant-owned `SsoProvider` rows no longer use `RUSTANGO_OUTBOUND_ALLOW`; put an internal IdP in a shared provider, or list it in the new `RUSTANGO_TENANT_OUTBOUND_ALLOW`. `168.63.129.16` and `fd20:ce::254` are now always refused. `check --deploy` warns when the secret key comes from the dev key file. With `run-server --apex`, a console-created tenant with a blank host gets `<slug>.<apex>`.
+
 ### Probes, HTTP/2 hosts, short JWT keys, tenant CLI exit code
 
 With `with_health()`, `/health` and `/ready` no longer get the Host check or the HTTPS redirect. HTTP/2 requests now pass `allowed_hosts` by `:authority` instead of getting 400. `jwt::decode*` returns `JwtError::Decode` for a key under 32 bytes. `create-tenant` now exits non-zero when tenant migrations fail; rerun it with `--resume`. A blank `DATABASE_URL=` now falls through to the `DB_*` vars. A repeated `vary_on` header changes the page-cache key, so those pages miss once.

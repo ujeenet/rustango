@@ -4,6 +4,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — serializer serde attributes, admin Basic gate, tenant SSO egress, JWT sessions
+
+- `#[derive(Serializer)]` honours `#[serde(rename, rename_all, skip, skip_serializing, skip_serializing_if, skip_deserializing)]` on output and input; a `skip_serializing` field (such as a password hash) no longer appears in responses.
+- `protect_with_basic_auth` runs each attempt through the admin login throttle and compares both fields in constant time.
+- A tenant's own SSO provider rows reach public addresses only, not the `RUSTANGO_OUTBOUND_ALLOW` hosts; `RUSTANGO_TENANT_OUTBOUND_ALLOW` opens private hosts for them. Shared and config providers keep the operator allowlist.
+- GCP metadata over IPv6 (`fd20:ce::254`) and Azure WireServer (`168.63.129.16`) are refused on every outbound policy.
+- `JwtBackend::issue` / `issue_for_tenant` tokens carry `iat` (and a `jti` with a store) and end on logout-all and password change; new `issue_for_user` / `issue_for_tenant_user` also bind the password hash. Older tokens work until they expire, with one warning.
+- `check --deploy` and the console flag a `RUSTANGO_SECRET_KEY` taken from the dev key file, and the check no longer creates that file.
+- `run-server --apex` sets the default host of tenants created in the console.
+
 ### Fixed — production safety: page cache, JWT keys, probes, HTTP/2 hosts, tenant CLI, DB URL
 
 - `CachePageLayer::vary_on` keys on every value of a repeated header (HTTP/2 sends each cookie apart); a non-UTF-8 value bypasses the cache.
