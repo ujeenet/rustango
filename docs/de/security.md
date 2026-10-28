@@ -125,7 +125,7 @@ let layer = CorsLayer::permissive();              // any origin, common methods
 
 **Sicherheitshinweis:** Mit Credentials MUSST du explizite Origins auflisten. `allow_credentials(true)` zusammen mit `allow_any_origin()` ergibt kein „credentialed Wildcard-CORS" — das gibt es nicht, und wer es verlangt, bekommt keine der beiden Hälften.
 
-Rustango antwortet darauf mit `Access-Control-Allow-Origin: *` und **ohne** `Access-Control-Allow-Credentials`-Header, sodass der Browser die Anfrage mit Credentials blockiert. Bis [#1394](https://github.com/ujeenet/rustango/issues/1394) wurde stattdessen die anfragende Origin zurückgespiegelt — und genau das akzeptieren Browser zusammen mit Credentials. Diese Kombination war ein funktionierendes Loch, lesbar von jeder Seite, die der Nutzer besuchte, und diese Seite beschrieb es als etwas, das der Browser ablehnen würde.
+Rustango antwortet darauf mit `Access-Control-Allow-Origin: *` und **ohne** `Access-Control-Allow-Credentials`-Header, sodass der Browser die Anfrage mit Credentials blockiert. Ältere Versionen spiegelten stattdessen die anfragende Origin zurückgespiegelt — und genau das akzeptieren Browser zusammen mit Credentials. Diese Kombination war ein funktionierendes Loch, lesbar von jeder Seite, die der Nutzer besuchte, und diese Seite beschrieb es als etwas, das der Browser ablehnen würde.
 
 Nutze `.allow_origins([...])` mit den Origins, die du tatsächlich bedienst. Dieser Pfad ist unverändert und sendet weiterhin `Access-Control-Allow-Credentials: true`.
 
@@ -264,7 +264,7 @@ let app = Router::new()
 
 Die Bedingung ist Absicht, kein Zufall: CSRF schützt Credentials, die der Browser von sich aus mitschickt, also ist es das Session-Cookie, das es überhaupt sinnvoll macht. Ein Admin ohne `with_session_auth` hat kein von rustango verwaltetes Credential, mit dem sich fälschen ließe, und seine Mutationen sind für jeden direkt erreichbar, der die Route erreicht — das ist eine Authentifizierungslücke, keine CSRF-Lücke, und CSRF würde sie nicht verkleinern. Das gilt nur, solange davor kein vom Browser mitgeschicktes Credential steht. HTTP Basic (`protect_with_basic_auth`) oder eine eigene Cookie-Auth ist eines, also reiten Cross-Site-POSTs darauf — und `csrf::layer()` selbst einzuhängen hilft nicht, weil der Admin Formular-Tokens nur unter `with_session_auth` rendert, sodass jedes POST mit 403 endet. Nimm `with_session_auth` für einen Admin im Browser.
 
-Bis [#1395](https://github.com/ujeenet/rustango/issues/1395) behauptete dieser Absatz, der Schutz sei bedingungslos — geschützt war allein `POST /login`. Jede andere Admin-Mutation akzeptierte ein Cross-Site-POST auf der Session des Administrators, Audit-Cleanup eingeschlossen, sodass dieselbe Anfrageklasse ihre eigene Spur löschen konnte.
+Ältere Fassungen dieses Absatzes behaupteten, der Schutz sei bedingungslos — geschützt war allein `POST /login`. Jede andere Admin-Mutation akzeptierte ein Cross-Site-POST auf der Session des Administrators, Audit-Cleanup eingeschlossen, sodass dieselbe Anfrageklasse ihre eigene Spur löschen konnte.
 
 ---
 
@@ -468,7 +468,7 @@ jwt.revoke(&access_token).await;     // adds JTI to blacklist
 jwt.revoke(&refresh_token).await;
 ```
 
-Die standardmäßige In-Memory-Blacklist (`InMemoryJtiStore`) räumt abgelaufene Einträge von selbst aus, aber sie lebt in einem Prozess und vergisst bei jedem Neustart jeden Widerruf. Für Multi-Prozess-Deployments installiere einen gemeinsamen, dauerhaften Store über `JwtLifecycle::new(secret).with_jti_store(store)` — `store` ist ein beliebiger `Arc<dyn JtiStore>` (zum Beispiel ein Redis- oder DB-gestützter). Ohne einen gemeinsamen Store kann ein Token, das du auf einer Replica widerrufst, auf einer anderen weiterhin abgespielt werden, bis es abläuft. Seit v0.52 (#1191) sind all diese Aufrufe `async` — `verify_*`, `refresh*` und `revoke` warten auf den Store, sodass ein dauerhafter Store ein einzelner bedingter Schreibvorgang sein kann statt eines letztlich konsistenten Caches mit Hintergrund-Flusher.
+Die standardmäßige In-Memory-Blacklist (`InMemoryJtiStore`) räumt abgelaufene Einträge von selbst aus, aber sie lebt in einem Prozess und vergisst bei jedem Neustart jeden Widerruf. Für Multi-Prozess-Deployments installiere einen gemeinsamen, dauerhaften Store über `JwtLifecycle::new(secret).with_jti_store(store)` — `store` ist ein beliebiger `Arc<dyn JtiStore>` (zum Beispiel ein Redis- oder DB-gestützter). Ohne einen gemeinsamen Store kann ein Token, das du auf einer Replica widerrufst, auf einer anderen weiterhin abgespielt werden, bis es abläuft. Seit v0.52 sind all diese Aufrufe `async` — `verify_*`, `refresh*` und `revoke` warten auf den Store, sodass ein dauerhafter Store ein einzelner bedingter Schreibvorgang sein kann statt eines letztlich konsistenten Caches mit Hintergrund-Flusher.
 
 > **Vertiefung:** [JWT-Auth-API](auth-jwt-api.md) — der eingebaute `/api/auth/login|refresh|logout|me`-Router, gleitendes Refresh und der JTI-Widerrufs-Store. Für ein einzelnes selbstverwaltetes Token siehe [JWT (standalone)](auth-jwt.md). Um Browser-/API-Routen per Login zu gaten, siehe [Access-Decorators](auth-decorators.md).
 
@@ -754,7 +754,7 @@ Immer aktive Prüfungen (laufen mit oder ohne `--deploy`):
 
 Zusätzliche `--deploy`-Prüfungen (Produktionshärtung):
 - ✅ `RUSTANGO_ENV` ist `prod` oder `production`
-- ✅ `RUSTANGO_SESSION_SECRET` gesetzt und **dekodiert** ≥ 32 Bytes (der HMAC-Schlüssel für Cookie- + JWT-Signierung — `SECRET_KEY` wird vom Framework **nicht** gelesen), ohne verbliebenen Scaffolder-Platzhalter. Es ist base64: `openssl rand -base64 32` liefert 44 Zeichen. Ein Secret mit 32 *Zeichen* hat nur 24 Bytes und wird abgelehnt — seit [#1396](https://github.com/ujeenet/rustango/issues/1396) von `check --deploy` und der Laufzeit gleichermaßen; genau darum geht es, denn die Prüfung maß früher die kodierte Zeichenkette und ließ einen Wert durch, den die App dann ablehnte
+- ✅ `RUSTANGO_SESSION_SECRET` gesetzt und **dekodiert** ≥ 32 Bytes (der HMAC-Schlüssel für Cookie- + JWT-Signierung — `SECRET_KEY` wird vom Framework **nicht** gelesen), ohne verbliebenen Scaffolder-Platzhalter. Es ist base64: `openssl rand -base64 32` liefert 44 Zeichen. Ein Secret mit 32 *Zeichen* hat nur 24 Bytes und wird abgelehnt — von `check --deploy` und der Laufzeit gleichermaßen; genau darum geht es, denn die Prüfung maß früher die kodierte Zeichenkette und ließ einen Wert durch, den die App dann ablehnte
 - ✅ `DATABASE_URL` gesetzt (und warnt, wenn es auf localhost zeigt)
 - ⚠️ `RUSTANGO_APEX_DOMAIN` / `RUSTANGO_BIND` Plausibilitätswarnungen für Tenancy + Nicht-Loopback-Binding
 

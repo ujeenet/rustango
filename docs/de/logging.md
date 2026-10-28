@@ -419,9 +419,7 @@ AccessLogLayer::default().tenant_field(TenantField::Off)    // tenant=-
 
 > **Nur der Request-Pfad.** Ein Hintergrund-Job läuft außerhalb des Requests,
 > der ihn eingereiht hat, und hat keinen Mandanten zu loggen — der Slot gilt pro
-> Task, und `tokio::spawn` erbt ihn nicht. Verfolgt in
-> [#1229](https://github.com/ujeenet/rustango/issues/1229) /
-> [#1223](https://github.com/ujeenet/rustango/issues/1223).
+> Task, und `tokio::spawn` erbt ihn nicht. Das ist eine bekannte Lücke.
 
 ## Request-Spans und OpenTelemetry
 

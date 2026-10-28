@@ -364,8 +364,7 @@ Déclarés sur le **modèle** :
   pilote et sont `#[cfg(feature = "postgres")]`, donc sur un build `sqlite` ou
   `mysql` ils n'existent tout simplement pas. La famille `_pool` prend
   `rustango::sql::Pool` et fonctionne sur les trois — écrivez celle-là sauf si
-  vous savez être sur Postgres. Ce nommage inversé est suivi dans
-  [#1293](https://github.com/ujeenet/rustango/issues/1293) ; voir
+  vous savez être sur Postgres. Ce nommage inversé est un défaut connu ; voir
   [api-conventions](api-conventions.md#fonctions).
 - **La suppression logique** (si activée) — `soft_delete`, `restore`, `force_delete` ;
   `QuerySet::active()` / `with_trashed()` / `only_trashed()`.

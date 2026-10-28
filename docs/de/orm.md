@@ -20,15 +20,15 @@ Ein paar Rust-Begriffe tauchen durchgehend auf. `&pool` ist eine geteilte Refere
 
 Jüngste Releases haben eine Reihe von Features hinzugefügt, die noch nicht in jeden Abschnitt weiter unten eingearbeitet sind. Kurze Hinweise:
 
-- **`Q!`-Makro + `Qb`-Laufzeit-Builder** (#269, #263) — kompilierzeitsichere Filter. `User::objects().where_(Q!(User.email__icontains = "alice"))` lässt sich bei einem falsch geschriebenen Feldnamen nicht bauen. Laufzeit-komponierbare Variante für Admin-Filter-Chips: `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
-- **`.distinct_on(&["author_id"])`** (#264) — PG-nativ; portabler Fallback per Fensterfunktion auf MySQL / SQLite. Muster nach dem Schema "Neuestes pro Gruppe".
-- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** (#267) — viele Zeilen in einem Statement einfügen oder bei Konflikt aktualisieren. Tri-dialektisches ON CONFLICT / ON DUPLICATE KEY UPDATE.
-- **`explain_pool()`** (#272) — tri-dialektisches EXPLAIN. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
-- **DB-Funktionsbibliothek** (#266) — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Emission pro Dialekt mit klaren Fehlern dort, wo SQLite die Funktion nicht hat.
-- **Feldtypen** — `rust_decimal::Decimal` (PG/MySQL-nativ, SQLite über einen Decode-Shim), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) werden jetzt von `#[derive(Model)]` akzeptiert (#524, v0.42).
-- **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — validieren, ohne sofort zu schreiben. Jetzt validieren, das vorbereitete Schreib-Set mutieren, committen, wenn bereit.
-- **`#[rustango(unique_when(columns = "...", condition = "..."))]`** (#265) — partielle Unique-Constraints. "Eindeutige E-Mail pro nicht-gelöschter Zeile" / "Eindeutiger Slug pro Mandant".
-- **`manage makemigrations --merge`** (#346, v0.42) — Merge-Knoten für divergente Branch-Ketten. Siehe [`docs/manage.md`](manage.md#makemigrations---merge).
+- **`Q!`-Makro + `Qb`-Laufzeit-Builder** — kompilierzeitsichere Filter. `User::objects().where_(Q!(User.email__icontains = "alice"))` lässt sich bei einem falsch geschriebenen Feldnamen nicht bauen. Laufzeit-komponierbare Variante für Admin-Filter-Chips: `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
+- **`.distinct_on(&["author_id"])`** — PG-nativ; portabler Fallback per Fensterfunktion auf MySQL / SQLite. Muster nach dem Schema "Neuestes pro Gruppe".
+- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** — viele Zeilen in einem Statement einfügen oder bei Konflikt aktualisieren. Tri-dialektisches ON CONFLICT / ON DUPLICATE KEY UPDATE.
+- **`explain_pool()`** — tri-dialektisches EXPLAIN. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
+- **DB-Funktionsbibliothek** — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Emission pro Dialekt mit klaren Fehlern dort, wo SQLite die Funktion nicht hat.
+- **Feldtypen** — `rust_decimal::Decimal` (PG/MySQL-nativ, SQLite über einen Decode-Shim), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) werden jetzt von `#[derive(Model)]` akzeptiert (v0.42).
+- **`ModelForm::prepare_save()` / `PreparedSave`** (v0.42) — validieren, ohne sofort zu schreiben. Jetzt validieren, das vorbereitete Schreib-Set mutieren, committen, wenn bereit.
+- **`#[rustango(unique_when(columns = "...", condition = "..."))]`** — partielle Unique-Constraints. "Eindeutige E-Mail pro nicht-gelöschter Zeile" / "Eindeutiger Slug pro Mandant".
+- **`manage makemigrations --merge`** (v0.42) — Merge-Knoten für divergente Branch-Ketten. Siehe [`docs/manage.md`](manage.md#makemigrations---merge).
 
 Das CHANGELOG führt den vollständigen Ticket-Index für jedes Release.
 
@@ -1398,9 +1398,8 @@ Senkt intern zu `save_partial` ab — gleiche Audit-Verengung, gleiche `Auto::Un
 > oder einen Postgres-Executor — auf einem MySQL- oder SQLite-Build existieren
 > sie nicht. Einen tri-dialektalen einfachen Bulk-Insert gibt es nicht; die
 > Mehr-Backend-Batch-Writer sind `bulk_upsert_pool` und
-> `bulk_insert_or_ignore_pool`, beide mit `&Pool`. Zusammen mit dem übrigen
-> Namens-Split verfolgt in
-> [#1293](https://github.com/ujeenet/rustango/issues/1293).
+> `bulk_insert_or_ignore_pool`, beide mit `&Pool`. Das gehört zum selben
+> bekannten Namens-Split.
 
 
 > **Fallstrick — Massenoperationen überspringen Per-Zeile-Hooks.** `bulk_insert`, Queryset
@@ -1753,7 +1752,7 @@ Post::objects().where_(Post::author_id.eq(42));
 | `__between` / `__range` | `BETWEEN … AND …` | 2-elementige `SqlValue::List` | an beiden Enden inklusiv |
 | `__regex` / `__iregex` | PG `~` / `~*`, MySQL/SQLite `REGEXP` | String | case-insensitiv emuliert auf MySQL/SQLite über `LOWER()`-Umschließung; SQLite braucht eine `regexp`-User-Funktion |
 
-> **LIKE-Metazeichen werden escaped.** `__contains` / `__startswith` / `__endswith` (und ihre `i`-Varianten) behandeln den Wert als **wörtlichen** Teilstring — ein `%` oder `_` darin passt auf sich selbst, nicht als Platzhalter. Das Framework escaped sie und gibt `ESCAPE '!'` aus, auf allen drei Dialekten wirksam (#1257). Für ein rohes Muster mit eigenen `%` / `_` nutze `__like` / `__ilike`, die den Wert wörtlich binden.
+> **LIKE-Metazeichen werden escaped.** `__contains` / `__startswith` / `__endswith` (und ihre `i`-Varianten) behandeln den Wert als **wörtlichen** Teilstring — ein `%` oder `_` darin passt auf sich selbst, nicht als Platzhalter. Das Framework escaped sie und gibt `ESCAPE '!'` aus, auf allen drei Dialekten wirksam. Für ein rohes Muster mit eigenen `%` / `_` nutze `__like` / `__ilike`, die den Wert wörtlich binden.
 
 **Fehler tauchen bei `.compile()` auf, nicht zur `.filter()`-Aufrufzeit** — Wertform-Diskrepanzen (z. B. `__in` mit einem Skalar, `__isnull` mit einem Nicht-Bool, `__between` mit falscher Stelligkeit) und unbekannte Suffixe (`status__nope`) geben `QueryError::UnknownLookup` / `QueryError::InvalidLookupValue` von `.compile()` zurück, sodass die fluente Kette typsauber bleibt. Verkettete Traversierungen (`author__name__icontains`) werden in v0.39 **nicht** unterstützt — der Splitter nimmt das Suffix nach dem ersten `__`, sodass der ganze Schwanz `name__icontains` als unbekanntes Suffix behandelt wird.
 

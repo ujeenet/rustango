@@ -127,7 +127,7 @@ let layer = CorsLayer::permissive();              // any origin, common methods
 
 **Security note:** with credentials you MUST list explicit origins. `allow_credentials(true)` combined with `allow_any_origin()` does not give you credentialed wildcard CORS — there is no such thing, and asking for it gets you neither half.
 
-Rustango answers such a request with `Access-Control-Allow-Origin: *` and **no** `Access-Control-Allow-Credentials` header, so the browser blocks the credentialed request. Until [#1394](https://github.com/ujeenet/rustango/issues/1394) it echoed the requesting origin back instead, which browsers *do* accept alongside credentials — that combination was a working hole, readable by any site the user happened to visit, and this page previously described it as something the browser would reject.
+Rustango answers such a request with `Access-Control-Allow-Origin: *` and **no** `Access-Control-Allow-Credentials` header, so the browser blocks the credentialed request. Older releases echoed the requesting origin back instead, which browsers *do* accept alongside credentials — that combination was a working hole, readable by any site the user happened to visit, and this page previously described it as something the browser would reject.
 
 Use `.allow_origins([...])` with the origins you actually serve. That path is unchanged and still sends `Access-Control-Allow-Credentials: true`.
 
@@ -152,7 +152,7 @@ router.rate_limit(RateLimitLayer::global(10, Duration::from_secs(1)));
 
 When exhausted: `429 Too Many Requests` with `Retry-After` header. Every successful response includes `X-RateLimit-Limit` + `X-RateLimit-Remaining`.
 
-> **Behind a reverse proxy, name your proxies or `per_ip` limits nothing useful** ([#1398](https://github.com/ujeenet/rustango/issues/1398)). `RateLimitLayer::per_ip` keys on the connecting socket, which behind a proxy is the *proxy's* address — so every client shares one bucket. One noisy client rate-limits everybody, and no individual attacker is ever limited.
+> **Behind a reverse proxy, name your proxies or `per_ip` limits nothing useful**. `RateLimitLayer::per_ip` keys on the connecting socket, which behind a proxy is the *proxy's* address — so every client shares one bucket. One noisy client rate-limits everybody, and no individual attacker is ever limited.
 >
 > Mount `RealIpLayer` **and tell it which hops to believe**:
 >
@@ -203,7 +203,7 @@ let app = axum::Router::new()
     );
 ```
 
-> **Keying by a secret header is safe to share.** When you `key_by(KeyBy::Header("authorization"))` or `"x-api-key"`, the cache-backed limiter **hashes** the header value before using it as a key (#1252), so a shared Redis never stores a live credential where someone reading keys could harvest it. Keying by `KeyBy::Ip` needs `ConnectInfo` (or a `RealIpLayer` with `trust_proxies` in front); without it the limiter warns once and falls back to a single shared bucket.
+> **Keying by a secret header is safe to share.** When you `key_by(KeyBy::Header("authorization"))` or `"x-api-key"`, the cache-backed limiter **hashes** the header value before using it as a key, so a shared Redis never stores a live credential where someone reading keys could harvest it. Keying by `KeyBy::Ip` needs `ConnectInfo` (or a `RealIpLayer` with `trust_proxies` in front); without it the limiter warns once and falls back to a single shared bucket.
 
 
 ---
@@ -266,7 +266,7 @@ let app = Router::new()
 
 The condition is deliberate rather than incidental: CSRF defends credentials the browser attaches on its own, so it is the session cookie that makes it meaningful. An admin built without `with_session_auth` has no rustango-managed credential to forge with, and its mutations are reachable directly by anyone who can reach the route — that is an authentication gap, not a CSRF one, and CSRF would not narrow it. That holds only while nothing in front of it is a browser-attached credential. HTTP Basic (`protect_with_basic_auth`) or your own cookie auth is one, so cross-site POSTs ride it — and mounting `csrf::layer()` yourself does not fix it, because the admin renders form tokens only under `with_session_auth`, so every POST 403s. Use `with_session_auth` for a browser-facing admin.
 
-Until [#1395](https://github.com/ujeenet/rustango/issues/1395) this paragraph claimed the protection was unconditional while the only guarded route was `POST /login`. Every other admin mutation accepted a cross-site POST riding the administrator's session — audit cleanup among them, so the same request class could erase its own trace.
+Older versions of this paragraph claimed the protection was unconditional while the only guarded route was `POST /login`. Every other admin mutation accepted a cross-site POST riding the administrator's session — audit cleanup among them, so the same request class could erase its own trace.
 
 ---
 
@@ -473,7 +473,7 @@ jwt.revoke(&access_token).await;     // adds JTI to blacklist
 jwt.revoke(&refresh_token).await;
 ```
 
-The default in-memory blacklist (`InMemoryJtiStore`) cleans out expired entries on its own, but it lives in one process and forgets every revocation on restart. For multi-process deployments, install a shared, durable store via `JwtLifecycle::new(secret).with_jti_store(store)` — `store` is any `Arc<dyn JtiStore>` (for example a Redis- or DB-backed one). Without a shared store, a token you revoke on one replica can still be replayed on another until it expires. All of these are `async` since v0.52 (#1191) — `verify_*`, `refresh*` and `revoke` await the store, so a durable store can be a single conditional write instead of an eventually-consistent cache with a background flusher.
+The default in-memory blacklist (`InMemoryJtiStore`) cleans out expired entries on its own, but it lives in one process and forgets every revocation on restart. For multi-process deployments, install a shared, durable store via `JwtLifecycle::new(secret).with_jti_store(store)` — `store` is any `Arc<dyn JtiStore>` (for example a Redis- or DB-backed one). Without a shared store, a token you revoke on one replica can still be replayed on another until it expires. All of these are `async` since v0.52 — `verify_*`, `refresh*` and `revoke` await the store, so a durable store can be a single conditional write instead of an eventually-consistent cache with a background flusher.
 
 > **Deep dive:** [JWT auth API](auth-jwt-api.md) — the built-in `/api/auth/login|refresh|logout|me` router, sliding refresh, and the JTI revocation store. For a single self-managed token, see [JWT (standalone)](auth-jwt.md). To gate browser/API routes by login, see [access decorators](auth-decorators.md).
 
@@ -759,7 +759,7 @@ Always-on checks (run with or without `--deploy`):
 
 Additional `--deploy` (production-hardening) checks:
 - ✅ `RUSTANGO_ENV` is `prod` or `production`
-- ✅ `RUSTANGO_SESSION_SECRET` set and **decoding to** ≥ 32 bytes (the HMAC key for cookie + JWT signing — `SECRET_KEY` is **not** read by the framework), with no scaffolder placeholder left in. It is base64: `openssl rand -base64 32` gives you 44 characters. A 32-*character* secret is only 24 bytes and is refused — by `check --deploy` and the runtime alike since [#1396](https://github.com/ujeenet/rustango/issues/1396), which is the point: the check used to measure the encoded string and pass a value the app then rejected
+- ✅ `RUSTANGO_SESSION_SECRET` set and **decoding to** ≥ 32 bytes (the HMAC key for cookie + JWT signing — `SECRET_KEY` is **not** read by the framework), with no scaffolder placeholder left in. It is base64: `openssl rand -base64 32` gives you 44 characters. A 32-*character* secret is only 24 bytes and is refused — by `check --deploy` and the runtime alike, which is the point: the check used to measure the encoded string and pass a value the app then rejected
 - ✅ `DATABASE_URL` set (and warns if it points at localhost)
 - ⚠️ `RUSTANGO_APEX_DOMAIN` / `RUSTANGO_BIND` sanity warnings for tenancy + non-loopback binding
 

@@ -514,7 +514,7 @@ axum `HEAD` automatisch aus dem `GET`-Handler; `OPTIONS` ist nicht verdrahtet. *
 fehlerhaftes Element lehnt die ganze Charge ab und **hinterlässt nichts** — gleich ob
 die Validierung oder die Datenbank es abfängt.
 
-> Die zweite Hälfte stimmte bis [#1403](https://github.com/ujeenet/rustango/issues/1403)
+> Die zweite Hälfte stimmte in älteren Versionen
 > nicht. Die Validierung war atomar; die Schreibvorgänge waren je ein `INSERT` ohne
 > Transaktion, sodass ein Unique- oder Fremdschlüsselverstoß bei Element 5 die Elemente
 > 0–4 committete, `400 bulk entry 5` zurückgab und keine der erzeugten Zeilen nannte.
@@ -681,7 +681,7 @@ plus deine eigenen Pro-Feld- und feldübergreifenden Regeln zu erhalten.
 ### Formen der Fehlerantwort
 
 Jeder ViewSet-Fehler ist ein [`ApiError`](api-conventions.md)-Body, dieselbe Form,
-die deine eigenen Handler senden (#1193):
+die deine eigenen Handler senden:
 
 ```json
 {"error": "<machine code>", "message": "<sentence>", "status": 400}
@@ -930,7 +930,7 @@ let api = urls::api()
 
 - **Builder + `router_pool` / `tenant_router`** ist **tri-dialektfähig** — PostgreSQL,
   SQLite und MySQL — und ist der empfohlene Weg.
-- **Das `router(prefix, pool)` des Derive-Makros** nimmt `impl Into<rustango::sql::Pool>` — einen `PgPool`, `MySqlPool`, `SqlitePool` oder das `Pool`-Enum. Es ist nicht Postgres-only (#1273).
+- **Das `router(prefix, pool)` des Derive-Makros** nimmt `impl Into<rustango::sql::Pool>` — einen `PgPool`, `MySqlPool`, `SqlitePool` oder das `Pool`-Enum. Es ist nicht Postgres-only.
 - **Serializer-Eingabe + -Ausgabe** funktioniert jetzt auf **allen drei Backends** (das
   Rendern pro Zeile ist tri-dialektfähig; das alte PG-only-Gate ist weg).
 - Filterung, Suche, Sortierung, die drei Paginierungsmodi, Berechtigungen,

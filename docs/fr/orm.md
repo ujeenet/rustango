@@ -20,15 +20,15 @@ Quelques termes Rust reviennent tout au long du document. `&pool` est une réfé
 
 Les versions récentes ont ajouté un lot de fonctionnalités qui ne sont pas encore intégrées à toutes les sections ci-dessous. Repères rapides :
 
-- **Macro `Q!` + builder d'exécution `Qb`** (#269, #263) — filtres sûrs à la compilation. `User::objects().where_(Q!(User.email__icontains = "alice"))` échoue à la compilation si un nom de champ comporte une faute de frappe. Variante composable à l'exécution pour les puces de filtre de l'admin : `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
-- **`.distinct_on(&["author_id"])`** (#264) — natif sur PG ; repli portable via fonction de fenêtrage sur MySQL / SQLite. Modèles « le plus récent par groupe ».
-- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** (#267) — insère de nombreuses lignes en une instruction, ou les met à jour en cas de conflit. `ON CONFLICT` / `ON DUPLICATE KEY UPDATE` tri-dialecte.
-- **`explain_pool()`** (#272) — EXPLAIN tri-dialecte. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
-- **Bibliothèque de fonctions SQL** (#266) — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Émission par dialecte avec des erreurs claires là où SQLite ne dispose pas de la fonction.
-- **Types de champ** — `rust_decimal::Decimal` (natif sur PG/MySQL, via un shim Decode sur SQLite), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) sont désormais acceptés par `#[derive(Model)]` (#524, v0.42).
-- **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — valider sans écrire tout de suite. Validez maintenant, modifiez l'ensemble d'écriture préparé, puis validez quand vous êtes prêt.
-- **`#[rustango(unique_when(columns = "...", condition = "..."))]`** (#265) — contraintes d'unicité partielles. « E-mail unique par ligne non supprimée » / « Slug unique par tenant ».
-- **`manage makemigrations --merge`** (#346, v0.42) — nœud de fusion pour les chaînes de branches divergentes. Voir [`docs/manage.md`](manage.md#makemigrations---merge).
+- **Macro `Q!` + builder d'exécution `Qb`** — filtres sûrs à la compilation. `User::objects().where_(Q!(User.email__icontains = "alice"))` échoue à la compilation si un nom de champ comporte une faute de frappe. Variante composable à l'exécution pour les puces de filtre de l'admin : `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
+- **`.distinct_on(&["author_id"])`** — natif sur PG ; repli portable via fonction de fenêtrage sur MySQL / SQLite. Modèles « le plus récent par groupe ».
+- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** — insère de nombreuses lignes en une instruction, ou les met à jour en cas de conflit. `ON CONFLICT` / `ON DUPLICATE KEY UPDATE` tri-dialecte.
+- **`explain_pool()`** — EXPLAIN tri-dialecte. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
+- **Bibliothèque de fonctions SQL** — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Émission par dialecte avec des erreurs claires là où SQLite ne dispose pas de la fonction.
+- **Types de champ** — `rust_decimal::Decimal` (natif sur PG/MySQL, via un shim Decode sur SQLite), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) sont désormais acceptés par `#[derive(Model)]` (v0.42).
+- **`ModelForm::prepare_save()` / `PreparedSave`** (v0.42) — valider sans écrire tout de suite. Validez maintenant, modifiez l'ensemble d'écriture préparé, puis validez quand vous êtes prêt.
+- **`#[rustango(unique_when(columns = "...", condition = "..."))]`** — contraintes d'unicité partielles. « E-mail unique par ligne non supprimée » / « Slug unique par tenant ».
+- **`manage makemigrations --merge`** (v0.42) — nœud de fusion pour les chaînes de branches divergentes. Voir [`docs/manage.md`](manage.md#makemigrations---merge).
 
 Le CHANGELOG contient l'index complet des tickets pour chaque version.
 
@@ -1398,8 +1398,8 @@ Se ramène en interne à `save_partial` — même restriction d'audit, même con
 > `&PgPool` ou un executor Postgres — sur un build MySQL ou SQLite ils n'existent
 > pas. Il n'y a pas d'insertion en masse simple tri-dialecte ; les writers de lot
 > multi-backends sont `bulk_upsert_pool` et `bulk_insert_or_ignore_pool`, tous
-> deux avec `&Pool`. Suivi avec le reste de la scission de nommage dans
-> [#1293](https://github.com/ujeenet/rustango/issues/1293).
+> deux avec `&Pool`. Cela fait partie de la même scission de
+> nommage connue.
 
 
 > **Piège — les opérations en masse sautent les hooks par ligne.** `bulk_insert`, le
@@ -1754,7 +1754,7 @@ Post::objects().where_(Post::author_id.eq(42));
 | `__between` / `__range` | `BETWEEN … AND …` | `SqlValue::List` à 2 éléments | inclusif aux deux bornes |
 | `__regex` / `__iregex` | PG `~` / `~*`, MySQL/SQLite `REGEXP` | chaîne | insensible à la casse émulé sur MySQL/SQLite via encapsulation `LOWER()` ; SQLite nécessite une fonction utilisateur `regexp` |
 
-> **Les métacaractères de LIKE sont échappés.** `__contains` / `__startswith` / `__endswith` (et leurs variantes `i`) traitent la valeur comme une sous-chaîne **littérale** — un `%` ou `_` y correspond à lui-même, pas comme joker. Le framework les échappe et émet `ESCAPE '!'`, respecté sur les trois dialectes (#1257). Pour un motif brut où vous placez vos propres `%` / `_`, utilisez `__like` / `__ilike`, qui lient la valeur telle quelle.
+> **Les métacaractères de LIKE sont échappés.** `__contains` / `__startswith` / `__endswith` (et leurs variantes `i`) traitent la valeur comme une sous-chaîne **littérale** — un `%` ou `_` y correspond à lui-même, pas comme joker. Le framework les échappe et émet `ESCAPE '!'`, respecté sur les trois dialectes. Pour un motif brut où vous placez vos propres `%` / `_`, utilisez `__like` / `__ilike`, qui lient la valeur telle quelle.
 
 **Les erreurs remontent à `.compile()`, pas au moment de l'appel `.filter()`** — les incohérences de forme de valeur (p. ex. `__in` avec un scalaire, `__isnull` avec un non-bool, `__between` avec la mauvaise arité) et les suffixes inconnus (`status__nope`) renvoient `QueryError::UnknownLookup` / `QueryError::InvalidLookupValue` depuis `.compile()` afin que la chaîne fluide reste propre au niveau du typage. Les traversées chaînées (`author__name__icontains`) ne sont **pas** prises en charge en v0.39 — le séparateur prend le suffixe après le premier `__`, donc toute la queue `name__icontains` est traitée comme un suffixe inconnu.
 

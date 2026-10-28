@@ -370,8 +370,7 @@ Auf dem **Modell** deklariert:
   `#[cfg(feature = "postgres")]`, existieren also in einem `sqlite`- oder
   `mysql`-Build überhaupt nicht. Die `_pool`-Familie nimmt `rustango::sql::Pool`
   und funktioniert auf allen dreien — schreiben Sie diese, sofern Sie nicht
-  sicher auf Postgres sind. Die vertauschte Benennung wird in
-  [#1293](https://github.com/ujeenet/rustango/issues/1293) verfolgt; siehe
+  sicher auf Postgres sind. Die Benennung ist bekanntermaßen vertauscht; siehe
   [api-conventions](api-conventions.md#funktionen).
 - **Soft-Delete** (wenn aktiviert) — `soft_delete`, `restore`, `force_delete`;
   `QuerySet::active()` / `with_trashed()` / `only_trashed()`.

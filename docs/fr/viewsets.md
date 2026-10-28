@@ -701,7 +701,7 @@ plus vos propres règles par champ et inter-champs.
 ### Formes de réponse en erreur
 
 Chaque erreur de ViewSet est un corps [`ApiError`](api-conventions.md), la même
-forme que celle de vos propres handlers (#1193) :
+forme que celle de vos propres handlers :
 
 ```json
 {"error": "<machine code>", "message": "<sentence>", "status": 400}
@@ -951,7 +951,7 @@ lignes `.merge(...)` ; branchez-le dans votre `urls.rs` de niveau supérieur.
 
 - **Le builder + `router_pool` / `tenant_router`** est **tri-dialecte** — PostgreSQL,
   SQLite et MySQL — et c'est le chemin recommandé.
-- **Le `router(prefix, pool)` de la macro derive** prend `impl Into<rustango::sql::Pool>` — un `PgPool`, `MySqlPool`, `SqlitePool` ou l'énumération `Pool`. Il n'est pas réservé à Postgres (#1273).
+- **Le `router(prefix, pool)` de la macro derive** prend `impl Into<rustango::sql::Pool>` — un `PgPool`, `MySqlPool`, `SqlitePool` ou l'énumération `Pool`. Il n'est pas réservé à Postgres.
 - **L'entrée + sortie du sérialiseur** fonctionne désormais sur **les trois backends** (le
   rendu par ligne est tri-dialecte ; l'ancienne barrière PG-uniquement a disparu).
 - Le filtrage, la recherche, le tri, les trois modes de pagination, les permissions,

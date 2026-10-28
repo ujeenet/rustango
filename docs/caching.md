@@ -197,8 +197,8 @@ let cache: BoxedCache = rustango::cache::from_settings_async(&settings.cache).aw
 | `redis` | **panics** — cannot be built synchronously | ✓ |
 | `db` | **panics** — needs a runtime `&Pool` | error; build it where the pool is |
 
-The sync resolver panics rather than substituting a backend
-([#1400](https://github.com/ujeenet/rustango/issues/1400)). It used to warn and
+The sync resolver panics rather than substituting a backend.
+It used to warn and
 return an in-memory cache, which is not a degraded shared cache — it is a
 different one. A per-process cache multiplies `CacheRateLimitLayer`'s limit by
 the replica count, and stops `verify_single_use` failing closed, so the same

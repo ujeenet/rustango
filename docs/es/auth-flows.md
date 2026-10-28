@@ -101,7 +101,7 @@ let user_id = confirm_password_reset_pool(
 > `LinkScope::audience("app")` son para apps con una sola base de datos de usuarios.
 
 > **Usa esta forma para `rustango_users`.** Las sesiones del framework llevan una
-> huella del hash de la contraseña ([#1338](https://github.com/ujeenet/rustango/issues/1338)), así que el nuevo hash
+> huella del hash de la contraseña, así que el nuevo hash
 > termina toda sesión emitida antes del restablecimiento, incluida la de un
 > atacante. También marca `password_changed_at`, que registra el cambio pero no es
 > lo que termina las sesiones.
@@ -117,7 +117,7 @@ manipuladas o con el secreto equivocado sin tocar la fila:
 ```
 
 Es el mismo `passwords::strength_score` que usa el resto del framework, así que una contraseña
-rechazada en el registro no puede establecerse restableciéndola (#1399).
+rechazada en el registro no puede establecerse restableciéndola.
 
 > `_into` apunta a tu propia tabla/columnas — un `app_users` del inquilino, por
 > ejemplo. Solo escribe el hash. Las sesiones que emite el framework terminan con

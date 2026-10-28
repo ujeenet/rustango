@@ -371,8 +371,7 @@ Declarados sobre el **modelo**:
   `#[cfg(feature = "postgres")]`, así que en un build `sqlite` o `mysql` no
   existen en absoluto. La familia `_pool` toma `rustango::sql::Pool` y funciona
   en los tres — escribe esos salvo que sepas que estás en Postgres. El nombrado
-  invertido se sigue en
-  [#1293](https://github.com/ujeenet/rustango/issues/1293); consulta
+  está invertido, y se sabe; consulta
   [api-conventions](api-conventions.md#funciones).
 - **Borrado lógico** (cuando está habilitado) — `soft_delete`, `restore`,
   `force_delete`; `QuerySet::active()` / `with_trashed()` / `only_trashed()`.

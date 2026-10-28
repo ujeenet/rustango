@@ -125,7 +125,7 @@ let layer = CorsLayer::permissive();              // any origin, common methods
 
 **Note de sécurité :** avec des identifiants, vous DEVEZ lister des origines explicites. `allow_credentials(true)` combiné à `allow_any_origin()` ne donne pas un CORS joker avec identifiants — cela n'existe pas, et le demander ne vous donne aucune des deux moitiés.
 
-Rustango répond alors `Access-Control-Allow-Origin: *` et **aucun** en-tête `Access-Control-Allow-Credentials`, si bien que le navigateur bloque la requête avec identifiants. Jusqu'à [#1394](https://github.com/ujeenet/rustango/issues/1394), l'origine demandeuse était renvoyée en écho — ce que les navigateurs acceptent justement avec des identifiants : cette combinaison était un trou bien réel, lisible par n'importe quel site visité par l'utilisateur, et cette page le décrivait comme quelque chose que le navigateur rejetterait.
+Rustango répond alors `Access-Control-Allow-Origin: *` et **aucun** en-tête `Access-Control-Allow-Credentials`, si bien que le navigateur bloque la requête avec identifiants. Dans les anciennes versions, l'origine demandeuse était renvoyée en écho — ce que les navigateurs acceptent justement avec des identifiants : cette combinaison était un trou bien réel, lisible par n'importe quel site visité par l'utilisateur, et cette page le décrivait comme quelque chose que le navigateur rejetterait.
 
 Utilisez `.allow_origins([...])` avec les origines que vous servez réellement. Ce chemin est inchangé et envoie toujours `Access-Control-Allow-Credentials: true`.
 
@@ -264,7 +264,7 @@ let app = Router::new()
 
 La condition est délibérée, pas fortuite : le CSRF défend des identifiants que le navigateur joint de lui-même, c'est donc le cookie de session qui lui donne un sens. Un admin construit sans `with_session_auth` n'a aucun identifiant géré par rustango à usurper, et ses mutations sont directement joignables par quiconque atteint la route — c'est un trou d'authentification, pas de CSRF, et le CSRF ne le réduirait pas. Cela ne vaut que tant que rien devant n'est un identifiant joint par le navigateur. HTTP Basic (`protect_with_basic_auth`) ou votre propre auth par cookie en est un, donc les POST cross-site s'en servent — et monter `csrf::layer()` vous-même ne règle rien, car l'admin ne rend les jetons de formulaire qu'avec `with_session_auth`, donc chaque POST renvoie 403. Utilisez `with_session_auth` pour un admin de navigateur.
 
-Jusqu'à [#1395](https://github.com/ujeenet/rustango/issues/1395), ce paragraphe affirmait que la protection était inconditionnelle alors que la seule route protégée était `POST /login`. Toute autre mutation de l'admin acceptait un POST inter-sites porté par la session de l'administrateur — y compris la purge d'audit, si bien que la même classe de requête pouvait effacer sa propre trace.
+Dans les anciennes versions, ce paragraphe affirmait que la protection était inconditionnelle alors que la seule route protégée était `POST /login`. Toute autre mutation de l'admin acceptait un POST inter-sites porté par la session de l'administrateur — y compris la purge d'audit, si bien que la même classe de requête pouvait effacer sa propre trace.
 
 ---
 
@@ -468,7 +468,7 @@ jwt.revoke(&access_token).await;     // adds JTI to blacklist
 jwt.revoke(&refresh_token).await;
 ```
 
-La liste noire en mémoire par défaut (`InMemoryJtiStore`) nettoie d'elle-même les entrées expirées, mais elle vit dans un seul processus et oublie chaque révocation au redémarrage. Pour les déploiements multi-processus, installez un store partagé et durable via `JwtLifecycle::new(secret).with_jti_store(store)` — `store` est n'importe quel `Arc<dyn JtiStore>` (par exemple un store adossé à Redis ou à une base de données). Sans store partagé, un jeton que vous révoquez sur une réplique peut encore être rejoué sur une autre jusqu'à son expiration. Depuis v0.52 (#1191), tous ces appels sont `async` — `verify_*`, `refresh*` et `revoke` attendent le store, de sorte qu'un store durable peut être une simple écriture conditionnelle au lieu d'un cache à cohérence à terme doté d'un vidage en arrière-plan.
+La liste noire en mémoire par défaut (`InMemoryJtiStore`) nettoie d'elle-même les entrées expirées, mais elle vit dans un seul processus et oublie chaque révocation au redémarrage. Pour les déploiements multi-processus, installez un store partagé et durable via `JwtLifecycle::new(secret).with_jti_store(store)` — `store` est n'importe quel `Arc<dyn JtiStore>` (par exemple un store adossé à Redis ou à une base de données). Sans store partagé, un jeton que vous révoquez sur une réplique peut encore être rejoué sur une autre jusqu'à son expiration. Depuis v0.52, tous ces appels sont `async` — `verify_*`, `refresh*` et `revoke` attendent le store, de sorte qu'un store durable peut être une simple écriture conditionnelle au lieu d'un cache à cohérence à terme doté d'un vidage en arrière-plan.
 
 > **À approfondir :** [API d'authentification JWT](auth-jwt-api.md) — le routeur intégré `/api/auth/login|refresh|logout|me`, le rafraîchissement glissant, et le store de révocation JTI. Pour un seul jeton auto-géré, voir [JWT (autonome)](auth-jwt.md). Pour restreindre les routes navigateur/API selon la connexion, voir [décorateurs d'accès](auth-decorators.md).
 
@@ -754,7 +754,7 @@ Vérifications toujours actives (exécutées avec ou sans `--deploy`) :
 
 Vérifications `--deploy` supplémentaires (durcissement pour la production) :
 - ✅ `RUSTANGO_ENV` est `prod` ou `production`
-- ✅ `RUSTANGO_SESSION_SECRET` défini et **décodant en** ≥ 32 octets (la clé HMAC pour la signature des cookies + JWT — `SECRET_KEY` n'est **pas** lu par le framework), sans placeholder du scaffolder laissé en place. C'est du base64 : `openssl rand -base64 32` produit 44 caractères. Un secret de 32 *caractères* ne fait que 24 octets et est refusé — par `check --deploy` comme par le runtime depuis [#1396](https://github.com/ujeenet/rustango/issues/1396) ; c'est précisément l'objectif, car la vérification mesurait auparavant la chaîne encodée et laissait passer une valeur que l'application rejetait ensuite
+- ✅ `RUSTANGO_SESSION_SECRET` défini et **décodant en** ≥ 32 octets (la clé HMAC pour la signature des cookies + JWT — `SECRET_KEY` n'est **pas** lu par le framework), sans placeholder du scaffolder laissé en place. C'est du base64 : `openssl rand -base64 32` produit 44 caractères. Un secret de 32 *caractères* ne fait que 24 octets et est refusé — par `check --deploy` comme par le runtime ; c'est précisément l'objectif, car la vérification mesurait auparavant la chaîne encodée et laissait passer une valeur que l'application rejetait ensuite
 - ✅ `DATABASE_URL` défini (et avertit s'il pointe vers localhost)
 - ⚠️ Avertissements de cohérence `RUSTANGO_APEX_DOMAIN` / `RUSTANGO_BIND` pour la tenancy + le binding non-loopback
 

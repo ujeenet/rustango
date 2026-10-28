@@ -525,7 +525,7 @@ haz `POST` de un *arreglo* JSON y cada elemento se inserta en orden, **dentro de
 transacción**. Un elemento inválido rechaza todo el lote y **no deja nada atrás** — lo
 detecte la validación o la base de datos.
 
-> Esa segunda mitad no era cierta hasta [#1403](https://github.com/ujeenet/rustango/issues/1403).
+> Esa segunda mitad no era cierta en versiones antiguas.
 > La validación era atómica; las escrituras eran un `INSERT` cada una sin transacción,
 > así que una violación de unicidad o de clave foránea en el elemento 5 confirmaba los
 > elementos 0–4, devolvía `400 bulk entry 5` y no nombraba ninguna de las filas creadas.
@@ -711,7 +711,7 @@ reglas por campo y entre campos.
 ### Formas de respuesta de error
 
 Todo error de un ViewSet es un cuerpo [`ApiError`](api-conventions.md), la misma
-forma que envían tus propios handlers (#1193):
+forma que envían tus propios handlers:
 
 ```json
 {"error": "<machine code>", "message": "<sentence>", "status": 400}
@@ -970,7 +970,7 @@ let api = urls::api()
   PostgreSQL, SQLite y MySQL — y es la ruta recomendada.
 - **El `router(prefix, pool)` de la macro derive** recibe `impl Into<rustango::sql::Pool>`
   — un `PgPool`, `MySqlPool`, `SqlitePool` o el enum `Pool`. No es exclusivo de
-  Postgres (#1273).
+  Postgres.
 - **La entrada + salida del serializador** ahora funciona en **los tres backends**
   (el renderizado por fila es tri-dialecto; la antigua compuerta solo-PG
   desapareció).

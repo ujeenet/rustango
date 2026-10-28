@@ -512,7 +512,7 @@ The routes are built with `axum::routing::get`, so axum answers `HEAD` from the
 element rejects the whole batch and **leaves nothing behind** — whether it is
 caught by validation or by the database.
 
-> That second half was not true until [#1403](https://github.com/ujeenet/rustango/issues/1403).
+> That second half was not true in older releases.
 > Validation was atomic; the writes were one `INSERT` each with no transaction,
 > so a unique or foreign-key violation on element 5 committed elements 0–4,
 > returned `400 bulk entry 5`, and named none of the rows it had created.
@@ -693,7 +693,7 @@ plus your own per-field and cross-field rules.
 ### Error response shapes
 
 Every ViewSet error is an [`ApiError`](api-conventions.md) body, the same shape
-your own handlers send (#1193):
+your own handlers send:
 
 ```json
 {"error": "<machine code>", "message": "<sentence>", "status": 400}
@@ -940,7 +940,7 @@ let api = urls::api()
 
 - **Builder + `router_pool` / `tenant_router`** is **tri-dialect** — PostgreSQL,
   SQLite and MySQL — and is the recommended path.
-- **The derive macro's `router(prefix, pool)`** takes `impl Into<rustango::sql::Pool>` — a `PgPool`, `MySqlPool`, `SqlitePool` or the `Pool` enum. It is not Postgres-only (#1273).
+- **The derive macro's `router(prefix, pool)`** takes `impl Into<rustango::sql::Pool>` — a `PgPool`, `MySqlPool`, `SqlitePool` or the `Pool` enum. It is not Postgres-only.
 - **Serializer input + output** now works on **all three backends** (the
   per-row render is tri-dialect; the old PG-only gate is gone).
 - Filtering, search, ordering, the three pagination modes, permissions,

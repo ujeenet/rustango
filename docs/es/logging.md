@@ -419,9 +419,7 @@ AccessLogLayer::default().tenant_field(TenantField::Off)    // tenant=-
 
 > **Solo el camino de la petición.** Un trabajo en segundo plano corre fuera de
 > la petición que lo encoló y no tiene inquilino que registrar — la ranura es
-> por tarea, y `tokio::spawn` no la hereda. Seguimiento en
-> [#1229](https://github.com/ujeenet/rustango/issues/1229) /
-> [#1223](https://github.com/ujeenet/rustango/issues/1223).
+> por tarea, y `tokio::spawn` no la hereda. Es una carencia conocida.
 
 ## Spans de petición y OpenTelemetry
 

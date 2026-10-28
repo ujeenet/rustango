@@ -190,7 +190,7 @@ the rows above.
 | `json` | Production — one object per event, for Loki / CloudWatch / Datadog | `.json()` |
 
 All four render differently, which has not always been true: before
-#1480 `install()` called neither `.pretty()` nor `.compact()`, so both
+0.57.6 `install()` called neither `.pretty()` nor `.compact()`, so both
 values produced `full` output.
 
 ### Colour
@@ -224,7 +224,7 @@ locations (useful in dev, noisy in prod), and `.without_targets()` hides the
 target column — do that only if you have given up on filtering by it.
 
 > Each format value reaches its own formatter. `compact` used to be
-> accepted and then render as the default — that is fixed (#1480).
+> accepted and then render as the default — that is fixed.
 
 ## Configuring logging from settings
 
@@ -295,9 +295,7 @@ doesn't matter: the install happens at `run()`, against the final settings.
 >
 > Without it the `[logging]` section is read and discarded. That used to be
 > silent; `install()` now warns on stderr and through `tracing` when it finds a
-> subscriber already in place ([#1465]).
-
-[#1465]: https://github.com/ujeenet/rustango/issues/1465
+> subscriber already in place.
 
 Any key can be overridden per-deployment with an environment variable, using
 the section and key as path segments:
@@ -410,9 +408,7 @@ AccessLogLayer::default().tenant_field(TenantField::Off)    // tenant=-
 
 > **The request path only.** A background job runs outside the request that
 > enqueued it and has no tenant to log — the slot is per-task and
-> `tokio::spawn` does not inherit it. Tracked in
-> [#1229](https://github.com/ujeenet/rustango/issues/1229) /
-> [#1223](https://github.com/ujeenet/rustango/issues/1223).
+> `tokio::spawn` does not inherit it. This is a known gap.
 
 ## Request spans and OpenTelemetry
 
@@ -446,7 +442,7 @@ the *span*, every event emitted during the request — including the ORM's —
 carries them in span context, with no subsystem knowing what a tenant is.
 
 **`Cli` installs it for you**, on every serving path, together with the access
-log. Before #1480 nothing in the framework mounted it, so a `tracing::info!` in
+log. Before 0.57.6 nothing in the framework mounted it, so a `tracing::info!` in
 a handler had no enclosing span — no tenant, no correlation — which is what
 made handler logs read as loose, context-free lines.
 

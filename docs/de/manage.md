@@ -259,8 +259,8 @@ cargo run -- makemigrations --empty rename_status_to_state
 
 ### `makemigrations --merge`
 
-Repariert eine Migrationshistorie, die sich in zwei Zweige aufgeteilt hat
-(Issue #346). Das passiert,
+Repariert eine Migrationshistorie, die sich in zwei Zweige aufgeteilt hat.
+Das passiert,
 wenn zwei Personen jeweils `makemigrations` auf ihrem eigenen Feature-Branch
 ausführen, sodass beide neuen Dateien auf denselben Elternknoten zeigen.
 Nachdem beide Branches gemergt sind, hat die Historie zwei „Blätter"
@@ -720,8 +720,8 @@ cargo run -- db:dump --out backups/before-migrate.sql
 ```
 
 Die Statuszeile `running: pg_dump …` geht auf **stderr** und bleibt damit
-aus der Umleitung und aus einer Pipe heraus. Bis [#1404](https://github.com/ujeenet/rustango/issues/1404)
-ging sie auf stdout und landete so in der ersten Zeile der `.sql`-Datei.
+aus der Umleitung und aus einer Pipe heraus. Ältere Versionen
+schickten sie auf stdout und landete so in der ersten Zeile der `.sql`-Datei.
 
 ### `db:restore <path> [--clean --yes]`
 

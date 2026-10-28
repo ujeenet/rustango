@@ -422,9 +422,7 @@ AccessLogLayer::default().tenant_field(TenantField::Off)    // tenant=-
 
 > **Le chemin de la requête uniquement.** Une tâche de fond tourne en dehors de
 > la requête qui l'a mise en file et n'a pas de locataire à journaliser —
-> l'emplacement est par tâche, et `tokio::spawn` n'en hérite pas. Suivi dans
-> [#1229](https://github.com/ujeenet/rustango/issues/1229) /
-> [#1223](https://github.com/ujeenet/rustango/issues/1223).
+> l'emplacement est par tâche, et `tokio::spawn` n'en hérite pas. C'est une lacune connue.
 
 ## Spans de requête et OpenTelemetry
 

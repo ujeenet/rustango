@@ -125,7 +125,7 @@ let layer = CorsLayer::permissive();              // any origin, common methods
 
 **Nota de seguridad:** con credenciales DEBES enumerar orígenes explícitos. `allow_credentials(true)` junto a `allow_any_origin()` no te da CORS comodín con credenciales — eso no existe, y pedirlo no te da ninguna de las dos mitades.
 
-Rustango responde con `Access-Control-Allow-Origin: *` y **sin** cabecera `Access-Control-Allow-Credentials`, de modo que el navegador bloquea la petición con credenciales. Hasta [#1394](https://github.com/ujeenet/rustango/issues/1394) devolvía reflejado el origen solicitante, que es justo lo que los navegadores *sí* aceptan junto a credenciales: esa combinación era un agujero real, legible por cualquier sitio que el usuario visitara, y esta página lo describía como algo que el navegador rechazaría.
+Rustango responde con `Access-Control-Allow-Origin: *` y **sin** cabecera `Access-Control-Allow-Credentials`, de modo que el navegador bloquea la petición con credenciales. Las versiones antiguas devolvían reflejado el origen solicitante, que es justo lo que los navegadores *sí* aceptan junto a credenciales: esa combinación era un agujero real, legible por cualquier sitio que el usuario visitara, y esta página lo describía como algo que el navegador rechazaría.
 
 Usa `.allow_origins([...])` con los orígenes que realmente sirves. Esa ruta no cambia y sigue enviando `Access-Control-Allow-Credentials: true`.
 
@@ -150,7 +150,7 @@ router.rate_limit(RateLimitLayer::global(10, Duration::from_secs(1)));
 
 Cuando se agota: `429 Too Many Requests` con la cabecera `Retry-After`. Cada respuesta exitosa incluye `X-RateLimit-Limit` + `X-RateLimit-Remaining`.
 
-> **Detrás de un proxy inverso, nombra tus proxies o `per_ip` no limita nada útil** ([#1398](https://github.com/ujeenet/rustango/issues/1398)). `RateLimitLayer::per_ip` se basa en el socket de conexión, que detrás de un proxy es la dirección del *proxy* — de modo que todos los clientes comparten un único cubo. Un solo cliente ruidoso limita entonces a todos los demás, y ningún atacante individual llega a ser limitado.
+> **Detrás de un proxy inverso, nombra tus proxies o `per_ip` no limita nada útil**. `RateLimitLayer::per_ip` se basa en el socket de conexión, que detrás de un proxy es la dirección del *proxy* — de modo que todos los clientes comparten un único cubo. Un solo cliente ruidoso limita entonces a todos los demás, y ningún atacante individual llega a ser limitado.
 >
 > Monta `RealIpLayer` **y dile a qué saltos creer**:
 >
@@ -264,7 +264,7 @@ let app = Router::new()
 
 La condición es deliberada, no incidental: CSRF defiende credenciales que el navegador adjunta por su cuenta, así que es la cookie de sesión la que lo hace significativo. Un admin construido sin `with_session_auth` no tiene ninguna credencial gestionada por rustango que falsificar, y sus mutaciones son alcanzables directamente por cualquiera que llegue a la ruta — eso es un hueco de autenticación, no de CSRF, y CSRF no lo estrecharía. Eso solo vale mientras delante no haya una credencial que el navegador adjunte solo. HTTP Basic (`protect_with_basic_auth`) o tu propia auth por cookie lo es, así que los POST cross-site viajan con ella — y montar `csrf::layer()` tú mismo no lo arregla, porque el admin solo renderiza tokens de formulario con `with_session_auth`, así que cada POST devuelve 403. Usa `with_session_auth` para un admin de navegador.
 
-Hasta [#1395](https://github.com/ujeenet/rustango/issues/1395) este párrafo afirmaba que la protección era incondicional cuando la única ruta protegida era `POST /login`. Cualquier otra mutación del admin aceptaba un POST entre sitios montado sobre la sesión del administrador — incluida la limpieza de auditoría, de modo que la misma clase de petición podía borrar su propio rastro.
+Las versiones antiguas de este párrafo afirmaban que la protección era incondicional cuando la única ruta protegida era `POST /login`. Cualquier otra mutación del admin aceptaba un POST entre sitios montado sobre la sesión del administrador — incluida la limpieza de auditoría, de modo que la misma clase de petición podía borrar su propio rastro.
 
 ---
 
@@ -470,7 +470,7 @@ jwt.revoke(&access_token).await;     // adds JTI to blacklist
 jwt.revoke(&refresh_token).await;
 ```
 
-La lista negra en memoria por defecto (`InMemoryJtiStore`) limpia por sí sola las entradas caducadas, pero vive en un único proceso y olvida cada revocación al reiniciar. Para despliegues multiproceso, instala un almacén compartido y duradero vía `JwtLifecycle::new(secret).with_jti_store(store)` — `store` es cualquier `Arc<dyn JtiStore>` (por ejemplo uno respaldado por Redis o por BD). Sin un almacén compartido, un token que revocas en una réplica todavía puede repetirse en otra hasta que caduque. Desde v0.52 (#1191) todas estas llamadas son `async` — `verify_*`, `refresh*` y `revoke` esperan al almacén, de modo que un almacén duradero puede ser una única escritura condicional en lugar de una caché de consistencia eventual con volcado en segundo plano.
+La lista negra en memoria por defecto (`InMemoryJtiStore`) limpia por sí sola las entradas caducadas, pero vive en un único proceso y olvida cada revocación al reiniciar. Para despliegues multiproceso, instala un almacén compartido y duradero vía `JwtLifecycle::new(secret).with_jti_store(store)` — `store` es cualquier `Arc<dyn JtiStore>` (por ejemplo uno respaldado por Redis o por BD). Sin un almacén compartido, un token que revocas en una réplica todavía puede repetirse en otra hasta que caduque. Desde v0.52 todas estas llamadas son `async` — `verify_*`, `refresh*` y `revoke` esperan al almacén, de modo que un almacén duradero puede ser una única escritura condicional en lugar de una caché de consistencia eventual con volcado en segundo plano.
 
 > **Análisis en profundidad:** [API de auth JWT](auth-jwt-api.md) — el router incorporado `/api/auth/login|refresh|logout|me`, el refresco deslizante, y el almacén de revocación de JTI. Para un único token autogestionado, consulta [JWT (independiente)](auth-jwt.md). Para restringir rutas de navegador/API por inicio de sesión, consulta los [decoradores de acceso](auth-decorators.md).
 
@@ -756,7 +756,7 @@ Comprobaciones siempre activas (se ejecutan con o sin `--deploy`):
 
 Comprobaciones adicionales de `--deploy` (endurecimiento para producción):
 - ✅ `RUSTANGO_ENV` es `prod` o `production`
-- ✅ `RUSTANGO_SESSION_SECRET` establecida y **decodificando a** ≥ 32 bytes (la clave HMAC para la firma de cookies + JWT — `SECRET_KEY` **no** la lee el framework), sin ningún marcador de posición del scaffolder dejado dentro. Es base64: `openssl rand -base64 32` da 44 caracteres. Un secreto de 32 *caracteres* son solo 24 bytes y se rechaza — por `check --deploy` y por el runtime desde [#1396](https://github.com/ujeenet/rustango/issues/1396); ese es justamente el punto, porque la comprobación medía la cadena codificada y aprobaba un valor que la app luego rechazaba
+- ✅ `RUSTANGO_SESSION_SECRET` establecida y **decodificando a** ≥ 32 bytes (la clave HMAC para la firma de cookies + JWT — `SECRET_KEY` **no** la lee el framework), sin ningún marcador de posición del scaffolder dejado dentro. Es base64: `openssl rand -base64 32` da 44 caracteres. Un secreto de 32 *caracteres* son solo 24 bytes y se rechaza — por `check --deploy` y por el runtime; ese es justamente el punto, porque la comprobación medía la cadena codificada y aprobaba un valor que la app luego rechazaba
 - ✅ `DATABASE_URL` establecida (y advierte si apunta a localhost)
 - ⚠️ Advertencias de coherencia de `RUSTANGO_APEX_DOMAIN` / `RUSTANGO_BIND` para la tenencia + el enlace no de loopback
 

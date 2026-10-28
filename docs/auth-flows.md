@@ -77,7 +77,7 @@ hash** in one call.
 use std::time::Duration;
 use rustango::auth_flows::{LinkScope, PasswordReset, confirm_password_reset_pool};
 
-// The request's tenant (`t: Tenant`): links redeem only in it (#2472).
+// The request's tenant (`t: Tenant`): links redeem only in it.
 let scope = LinkScope::from(&t);
 
 // 1. User asks to reset → look them up → issue a link → email it.
@@ -101,7 +101,7 @@ let user_id = confirm_password_reset_pool(
 > `LinkScope::audience("app")` are for apps with a single user database.
 
 > **Use this form for `rustango_users`.** Framework sessions carry a fingerprint
-> of the password hash ([#1338](https://github.com/ujeenet/rustango/issues/1338)), so the new hash ends every
+> of the password hash, so the new hash ends every
 > session issued before the reset, an attacker's included. It also stamps
 > `password_changed_at`, which records the change but is not what ends them.
 
@@ -116,7 +116,7 @@ tampered, or wrong-secret inputs without touching the row:
 ```
 
 It is the same `passwords::strength_score` the rest of the framework uses, so a
-password refused at registration cannot be set by resetting (#1399).
+password refused at registration cannot be set by resetting.
 
 > `_into` points at your own table/columns — a tenant `app_users`, say. It writes
 > only the hash. Sessions the framework issues end on that new hash; a session

@@ -101,7 +101,7 @@ let user_id = confirm_password_reset_pool(
 > und `LinkScope::audience("app")` sind für Apps mit einer einzigen Benutzerdatenbank.
 
 > **Verwende diese Form für `rustango_users`.** Framework-Sitzungen tragen einen
-> Fingerabdruck des Passwort-Hashes ([#1338](https://github.com/ujeenet/rustango/issues/1338)), daher beendet der
+> Fingerabdruck des Passwort-Hashes, daher beendet der
 > neue Hash jede vor dem Zurücksetzen ausgestellte Sitzung, auch die eines
 > Angreifers. Sie stempelt auch `password_changed_at`; das hält die Änderung fest,
 > beendet die Sitzungen aber nicht.
@@ -117,7 +117,7 @@ manipulierte oder mit falschem Secret versehene Eingaben abweist, ohne die Zeile
 ```
 
 Es ist dasselbe `passwords::strength_score`, das der Rest des Frameworks verwendet — ein bei der
-Registrierung abgelehntes Passwort lässt sich also nicht per Zurücksetzen setzen (#1399).
+Registrierung abgelehntes Passwort lässt sich also nicht per Zurücksetzen setzen.
 
 > `_into` verweist auf Ihre eigene Tabelle/Spalten — etwa ein mandantenspezifisches
 > `app_users`. Es schreibt nur den Hash. Vom Framework ausgestellte Sitzungen enden

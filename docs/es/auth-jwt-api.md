@@ -213,7 +213,7 @@ assert!(b.verify_access(&pair.access).await.is_none());   // B ve la revocación
 
 ### Escribir un almacén duradero
 
-`JtiStore` es asíncrono (desde v0.52, #1191), así que una implementación duradera
+`JtiStore` es asíncrono (desde v0.52), así que una implementación duradera
 es una sola consulta — sin volcado en segundo plano ni ventana de convergencia
 durante la cual un `jti` revocado siga aceptándose en otra réplica. Ambos métodos
 devuelven `JtiFuture<'_, T>` (un future en caja — el trait se usa como
@@ -289,7 +289,7 @@ menos que uses `refresh_with`.
   pasarela de API, otro servicio al que le entregues un token. Tres segmentos, una
   cabecera JOSE `{"alg":"HS256","typ":"JWT"}`, firmada sobre `header.payload`.
 
-  Hasta [#1397](https://github.com/ujeenet/rustango/issues/1397) eran dos
+  Antes de 0.57.5 eran dos
   segmentos sin cabecera, firmados solo sobre el payload — legibles por nada más
   que rustango, y rechazados incluso por `rustango::jwt::decode`. Si escribiste un
   verificador propio para sortearlo, puedes tirarlo.

@@ -209,8 +209,7 @@ let cache: BoxedCache = rustango::cache::from_settings_async(&settings.cache).aw
 | `redis` | **panik** — synchron nicht baubar | ✓ |
 | `db` | **panik** — braucht einen `&Pool` zur Laufzeit | Fehler; dort bauen, wo der Pool ist |
 
-Der synchrone Resolver bricht ab, statt einen anderen Backend unterzuschieben
-([#1400](https://github.com/ujeenet/rustango/issues/1400)). Früher warnte er und
+Der synchrone Resolver bricht ab, statt einen anderen Backend unterzuschieben. Früher warnte er und
 lieferte einen In-Memory-Cache — das ist kein abgeschwächter geteilter Cache,
 sondern ein anderer. Ein prozesslokaler Cache multipliziert das Limit von
 `CacheRateLimitLayer` mit der Anzahl der Replicas und lässt `verify_single_use`

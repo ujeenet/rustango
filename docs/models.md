@@ -363,8 +363,7 @@ Declared on the **model**:
   they take a driver-specific `sqlx::PgPool` and are `#[cfg(feature = "postgres")]`,
   so on a `sqlite` or `mysql` build they do not exist at all. The `_pool` family
   takes `rustango::sql::Pool` and works on all three — write those unless you
-  know you are on Postgres. The inverted naming is tracked in
-  [#1293](https://github.com/ujeenet/rustango/issues/1293); see
+  know you are on Postgres. The naming is known to be inverted; see
   [api-conventions](api-conventions.md#functions).
 - **Soft delete** (when enabled) — `soft_delete`, `restore`, `force_delete`;
   `QuerySet::active()` / `with_trashed()` / `only_trashed()`.

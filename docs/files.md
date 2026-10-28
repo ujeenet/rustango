@@ -450,7 +450,7 @@ tables, whenever you run `migrate` / provision a tenant. There is no lazy
 > against real 0.46–0.50 databases showed neither worked, and **both are yanked**.
 > The reconcile guard demanded a migration be purely `CreateTable`, while a
 > generated initial migration is tables *and* indexes, so it bailed on every real
-> one. 0.51.2 is the release where this actually fires (#1167).
+> one. 0.51.2 is the release where this actually fires.
 
 ---
 

@@ -20,15 +20,15 @@ A few Rust terms recur throughout. `&pool` is a shared reference to a database c
 
 Recent releases added a batch of features that aren't yet woven into every section below. Quick pointers:
 
-- **`Q!` macro + `Qb` runtime builder** (#269, #263) — compile-time-safe filters. `User::objects().where_(Q!(User.email__icontains = "alice"))` fails to build on a typo'd field name. Runtime-composable variant for admin filter chips: `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
-- **`.distinct_on(&["author_id"])`** (#264) — PG native; portable window-function fallback on MySQL / SQLite. "Latest per group" patterns.
-- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** (#267) — insert many rows, updating the ones that already exist. Tri-dialect ON CONFLICT / ON DUPLICATE KEY UPDATE.
-- **`explain_pool()`** (#272) — tri-dialect EXPLAIN. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
-- **DB function library** (#266) — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Per-dialect emission with clear errors where SQLite lacks the function.
-- **Field types** — `rust_decimal::Decimal` (PG/MySQL native, SQLite via Decode shim), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) now accepted by `#[derive(Model)]` (#524, v0.42).
-- **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — validate now, mutate the prepared write set, commit when ready.
-- **`#[rustango(unique_when(columns = "...", condition = "..."))]`** (#265) — partial unique constraints. "Unique email per non-deleted row" / "Unique slug per tenant".
-- **`manage makemigrations --merge`** (#346, v0.42) — a merge node that reunites divergent branch chains. See [`docs/manage.md`](manage.md#makemigrations---merge).
+- **`Q!` macro + `Qb` runtime builder** — compile-time-safe filters. `User::objects().where_(Q!(User.email__icontains = "alice"))` fails to build on a typo'd field name. Runtime-composable variant for admin filter chips: `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
+- **`.distinct_on(&["author_id"])`** — PG native; portable window-function fallback on MySQL / SQLite. "Latest per group" patterns.
+- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** — insert many rows, updating the ones that already exist. Tri-dialect ON CONFLICT / ON DUPLICATE KEY UPDATE.
+- **`explain_pool()`** — tri-dialect EXPLAIN. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
+- **DB function library** — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Per-dialect emission with clear errors where SQLite lacks the function.
+- **Field types** — `rust_decimal::Decimal` (PG/MySQL native, SQLite via Decode shim), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) now accepted by `#[derive(Model)]` (v0.42).
+- **`ModelForm::prepare_save()` / `PreparedSave`** (v0.42) — validate now, mutate the prepared write set, commit when ready.
+- **`#[rustango(unique_when(columns = "...", condition = "..."))]`** — partial unique constraints. "Unique email per non-deleted row" / "Unique slug per tenant".
+- **`manage makemigrations --merge`** (v0.42) — a merge node that reunites divergent branch chains. See [`docs/manage.md`](manage.md#makemigrations---merge).
 
 The CHANGELOG carries the full ticket index for each release.
 
@@ -1398,8 +1398,7 @@ Internally lowers to `save_partial` — same audit narrowing, same `Auto::Unset`
 > Postgres executor — on a MySQL or SQLite build they do not exist. There is no
 > tri-dialect plain bulk insert; the multi-backend batch writers are
 > `bulk_upsert_pool` and `bulk_insert_or_ignore_pool`, both taking `&Pool`.
-> Tracked with the rest of the naming split in
-> [#1293](https://github.com/ujeenet/rustango/issues/1293).
+> This is part of the same known naming split.
 
 
 > **Pitfall — bulk ops skip per-row hooks.** `bulk_insert`, queryset
@@ -1753,7 +1752,7 @@ Post::objects().where_(Post::author_id.eq(42));
 | `__between` / `__range` | `BETWEEN … AND …` | 2-elt `SqlValue::List` | inclusive on both ends |
 | `__regex` / `__iregex` | PG `~` / `~*`, MySQL/SQLite `REGEXP` | string | case-insensitive emulated on MySQL/SQLite via `LOWER()` wrap; SQLite needs a `regexp` user-function |
 
-> **LIKE metacharacters are escaped.** `__contains` / `__startswith` / `__endswith` (and their `i` variants) treat the value as a **literal** substring — a `%` or `_` in it matches itself, not as a wildcard. The framework escapes them and emits `ESCAPE '!'`, honored on all three dialects (#1257). For a raw pattern where you place your own `%` / `_`, use `__like` / `__ilike`, which bind the value verbatim.
+> **LIKE metacharacters are escaped.** `__contains` / `__startswith` / `__endswith` (and their `i` variants) treat the value as a **literal** substring — a `%` or `_` in it matches itself, not as a wildcard. The framework escapes them and emits `ESCAPE '!'`, honored on all three dialects. For a raw pattern where you place your own `%` / `_`, use `__like` / `__ilike`, which bind the value verbatim.
 
 **Errors surface at `.compile()`, not at `.filter()` call time** — value-shape mismatches (e.g. `__in` with a scalar, `__isnull` with a non-bool, `__between` with the wrong arity) and unknown suffixes (`status__nope`) return `QueryError::UnknownLookup` / `QueryError::InvalidLookupValue` from `.compile()` so the fluent chain stays type-clean. Chained traversals (`author__name__icontains`) are **not** supported in v0.39 — the splitter takes the suffix after the first `__`, so the whole tail `name__icontains` is treated as an unknown suffix.
 

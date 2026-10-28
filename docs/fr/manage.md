@@ -274,8 +274,8 @@ cargo run -- makemigrations --empty rename_status_to_state
 
 ### `makemigrations --merge`
 
-Corrige un historique de migrations qui s'est scindé en deux branches
-(issue #346). Cela
+Corrige un historique de migrations qui s'est scindé en deux branches.
+Cela
 se produit quand deux personnes exécutent chacune `makemigrations` sur leur
 propre branche de fonctionnalité, de sorte que les deux nouveaux fichiers
 pointent vers le même parent. Une fois les deux branches fusionnées,
@@ -746,7 +746,7 @@ cargo run -- db:dump --out backups/before-migrate.sql
 ```
 
 La ligne d'état `running: pg_dump …` part sur **stderr** : elle reste donc
-hors de la redirection et hors d'un tube. Jusqu'à [#1404](https://github.com/ujeenet/rustango/issues/1404)
+hors de la redirection et hors d'un tube. Dans les anciennes versions,
 elle partait sur stdout et se retrouvait en première ligne du fichier `.sql`.
 
 ### `db:restore <path> [--clean --yes]`

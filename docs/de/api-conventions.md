@@ -38,7 +38,7 @@ Der Name einer Methode sagt Ihnen, was sie tut. Sobald Sie diese Suffixe gelernt
   | **Lesen** (`QuerySet`) | `fetch(&pool)` — bereits Mehr-Backend | *ist* der schlichte Name |
   | **Schreiben** (Modell) | `save(&pool)` — **nur Postgres** | `save_pool(&pool)` |
 
-  Der kurze Name ist beim Schreiben also der engere und beim Lesen der breitere. Diese Umkehrung ist ein Schönheitsfehler, kein Entwurf: sie wird in [#1293](https://github.com/ujeenet/rustango/issues/1293) verfolgt und über einen Deprecation-Zyklus statt einer Umbenennung aufgelöst. Bis dahin gilt: **wer nicht auf Postgres arbeitet, schreibt `save_pool` / `insert_pool` / `delete_pool`.**
+  Der kurze Name ist beim Schreiben also der engere und beim Lesen der breitere. Diese Umkehrung ist ein Schönheitsfehler, kein Entwurf: sie wird über einen Deprecation-Zyklus statt einer Umbenennung aufgelöst. Bis dahin gilt: **wer nicht auf Postgres arbeitet, schreibt `save_pool` / `insert_pool` / `delete_pool`.**
 - **`from_X(value)`** — konvertiert AUS einem anderen Wert (z. B. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — eine Builder-Methode, die eine Option setzt und das Objekt zurückgibt, sodass Sie Aufrufe verketten können (z. B. `with_default_ttl(d)`, `with_access_ttl(secs)`).
 - **`new()`** — der minimale Konstruktor. Alle Argumente, die er entgegennimmt, sind erforderliche Abhängigkeiten (z. B. `RedisCache::new(url)` — Sie können den Cache nicht ohne URL bauen).

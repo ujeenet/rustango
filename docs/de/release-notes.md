@@ -1,6 +1,6 @@
 # Versionshinweise
 
-Jede für Nutzer sichtbare Änderung kommt mit einem Changelog-Eintrag. Diese Seite ist der Weg dorthin, denn bis jetzt hatte die Doku-Website keinen — wer hier las, sah versionsbeschriftete Überschriften innerhalb der Anleitungen und sonst nichts, und so kam es, dass eine auf 0.42 festgenagelte Überschrift sich las wie „die Doku hört bei 0.42 auf“ ([#1304](https://github.com/ujeenet/rustango/issues/1304)).
+Jede für Nutzer sichtbare Änderung kommt mit einem Changelog-Eintrag. Diese Seite ist der Weg dorthin, denn bis jetzt hatte die Doku-Website keinen — wer hier las, sah versionsbeschriftete Überschriften innerhalb der Anleitungen und sonst nichts, und so kam es, dass eine auf 0.42 festgenagelte Überschrift sich las wie „die Doku hört bei 0.42 auf“.
 
 ## Wo die Hinweise leben
 
@@ -19,7 +19,7 @@ Einträge sind unter `Added` (Hinzugefügt), `Changed` (Geändert), `Fixed` (Beh
 Zwei Konventionen, die du kennen solltest:
 
 - **Einträge sagen warum, nicht nur was.** Ein Eintrag, der Verhalten ändert, erklärt, was vorher passiert ist, denn genau das sagt dir, ob es dich betrifft.
-- **Issue-Nummern sind tragend.** `(#1229)` verlinkt die Diskussion, aus der die Änderung hervorging, und dort steht meist mehr Detail, als im Eintrag Platz hat.
+- **Ältere Einträge nennen ein Issue.** Die Nummer in Klammern verlinkt die Diskussion, aus der die Änderung hervorging, und dort steht meist mehr Detail, als im Eintrag Platz hat.
 
 ## Versionierung
 

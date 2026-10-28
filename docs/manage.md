@@ -264,7 +264,7 @@ cargo run -- makemigrations --empty rename_status_to_state
 
 ### `makemigrations --merge`
 
-Fixes a migration history that has split into two branches (issue #346).
+Fixes a migration history that has split into two branches.
 This happens when two people each run `makemigrations` on their own
 feature branch, so both new files point at the same parent. After both branches merge, the
 history has two "leaves" (end points), and `makemigrations` refuses to
@@ -710,8 +710,8 @@ cargo run -- db:dump --out backups/before-migrate.sql
 ```
 
 The `running: pg_dump …` status line goes to **stderr**, so it stays out
-of the redirect and out of a pipe. Until [#1404](https://github.com/ujeenet/rustango/issues/1404)
-it went to stdout, which put it on the first line of the `.sql` file.
+of the redirect and out of a pipe. Older releases
+sent it to stdout, which put it on the first line of the `.sql` file.
 
 ### `db:restore <path> [--clean --yes]`
 

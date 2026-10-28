@@ -182,9 +182,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-> **Den Drain in `on_shutdown` legen, nicht hinter `run()`.** Bis
-> [#1409](https://github.com/ujeenet/rustango/issues/1409) rief dieses
-> Beispiel `queue.shutdown()` in der Zeile *nach* `run()` auf, und die konnte
+> **Den Drain in `on_shutdown` legen, nicht hinter `run()`.** Frühere
+> Fassungen dieses Beispiels riefen `queue.shutdown()` in der Zeile *nach* `run()` auf, und die konnte
 > nie ausgeführt werden: SIGTERM wurde nirgends behandelt, ein Stopp durch den
 > Orchestrator beendete den Prozess also sofort. `run()` kehrt jetzt beim
 > Signal zurück — aber `on_shutdown` bleibt der richtige Ort, weil der Hook
@@ -455,8 +454,7 @@ gibt keinen Worker-Supervisor pro Tenant, kein `Job::run(&ctx)` mit
 angehängtem Tenant und keinen Tenant-bewussten `reclaim_stuck_jobs_pool`-Sweep
 — du iterierst selbst über die Tenants, wie oben. Tenants, die nach dem Boot
 provisioniert werden, bekommen bis zum Prozess-Neustart keine Worker.
-Verfolgt in
-[#1223](https://github.com/ujeenet/rustango/issues/1223).
+Das ist eine bekannte Lücke.
 
 **Ambienter Kontext: nur Audit-Quelle und Zeitzone.** `InMemoryJobQueue`
 erfasst sie bei `dispatch`, der Scheduler bei `every()`, und beide setzen sie
@@ -528,9 +526,7 @@ lock.once_per_period("nightly_prune", day, || prune(&org)).await;
 Ungescoped konkurrieren alle Tenants um dasselbe `lock:nightly_prune`: der
 erste Tenant gewinnt, die übrigen werden für die gesamte TTL übersprungen — und
 zwar still, denn ein abgelehntes Acquire ist das erwartete Ergebnis, es wird
-nichts geloggt. Verfolgt in
-[#1226](https://github.com/ujeenet/rustango/issues/1226) und
-[#1228](https://github.com/ujeenet/rustango/issues/1228).
+nichts geloggt. Das ist eine bekannte Lücke.
 
 ---
 

@@ -38,7 +38,7 @@ El nombre de un método te dice lo que hace. Una vez que aprendes estos sufijos,
   | **Lecturas** (`QuerySet`) | `fetch(&pool)` — ya es multi-backend | *es* el nombre escueto |
   | **Escrituras** (modelo) | `save(&pool)` — **solo Postgres** | `save_pool(&pool)` |
 
-  Así que el nombre corto es el estrecho para escrituras y el amplio para lecturas. Esa inversión es una verruga, no un diseño: se rastrea en [#1293](https://github.com/ujeenet/rustango/issues/1293) y se resolverá con un ciclo de deprecación en lugar de un renombrado. Hasta entonces, **si no estás en Postgres, escribe `save_pool` / `insert_pool` / `delete_pool`.**
+  Así que el nombre corto es el estrecho para escrituras y el amplio para lecturas. Esa inversión es una verruga, no un diseño: se resolverá con un ciclo de deprecación en lugar de un renombrado. Hasta entonces, **si no estás en Postgres, escribe `save_pool` / `insert_pool` / `delete_pool`.**
 - **`from_X(value)`** — convierte DESDE otro valor (p. ej. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — un método de builder que establece una opción y devuelve el objeto, de modo que puedes encadenar llamadas (p. ej. `with_default_ttl(d)`, `with_access_ttl(secs)`).
 - **`new()`** — el constructor mínimo. Cualquier argumento que reciba es una dependencia obligatoria (p. ej. `RedisCache::new(url)` — no puedes construir la caché sin una URL).

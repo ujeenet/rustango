@@ -218,7 +218,7 @@ assert!(b.verify_access(&pair.access).await.is_none());   // B sieht As Widerruf
 
 ### Einen dauerhaften Speicher schreiben
 
-`JtiStore` ist asynchron (seit v0.52, #1191), eine dauerhafte Implementierung ist
+`JtiStore` ist asynchron (seit v0.52), eine dauerhafte Implementierung ist
 also eine einzige Abfrage — kein Hintergrund-Flusher, kein Konvergenzfenster, in
 dem ein widerrufener `jti` woanders noch akzeptiert wird. Beide Methoden geben
 `JtiFuture<'_, T>` zurück (ein geboxtes Future — der Trait wird als
@@ -293,7 +293,7 @@ Benutzerdefinierte Claims überleben `refresh` (werden auf das neue Paar
   API-Gateway, ein anderer Dienst, dem du ein Token gibst. Drei Segmente, ein
   JOSE-Header `{"alg":"HS256","typ":"JWT"}`, signiert über `header.payload`.
 
-  Bis [#1397](https://github.com/ujeenet/rustango/issues/1397) waren es zwei
+  Vor 0.57.5 waren es zwei
   Segmente ohne Header, signiert nur über die Payload — lesbar von nichts außer
   rustango und sogar von `rustango::jwt::decode` abgelehnt. Wer dafür einen
   eigenen Verifier geschrieben hat, kann ihn wegwerfen.

@@ -209,8 +209,8 @@ PostgreSQL, 95 against MySQL, 0 either way with the profile. The
 `tokio::sync::Mutex` guards inside those suites do not help, because nextest
 runs each test in its own process and a mutex in one does not reach another.
 
-This is a workaround, not a fix — see #1624 for per-process databases, which
-would restore the parallelism.
+This is a workaround, not a fix — per-process databases would restore the
+parallelism.
 
 ### Telling a skip from a pass
 

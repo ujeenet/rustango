@@ -181,8 +181,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-> **Put the drain in `on_shutdown`, not after `run()`.** Until
-> [#1409](https://github.com/ujeenet/rustango/issues/1409) this example
+> **Put the drain in `on_shutdown`, not after `run()`.** Earlier
+> versions of this example
 > called `queue.shutdown()` on the line *after* `run()`, and that line could
 > never execute: nothing handled SIGTERM, so an orchestrator's stop killed
 > the process outright. `run()` now returns on signal, so code after it does
@@ -447,8 +447,7 @@ afterwards.
 per-tenant worker supervisor, no `Job::run(&ctx)` with the tenant attached,
 and no tenant-aware `reclaim_stuck_jobs_pool` sweep — you loop over tenants
 yourself, as above. New tenants provisioned after boot get no workers until
-the process restarts. Tracked in
-[#1223](https://github.com/ujeenet/rustango/issues/1223).
+the process restarts. This is a known gap.
 
 **Ambient context: audit source and timezone only.** `InMemoryJobQueue`
 captures them at `dispatch` and the scheduler at `every()`, and each reinstalls
@@ -517,9 +516,7 @@ lock.once_per_period("nightly_prune", day, || prune(&org)).await;
 
 Unscoped, every tenant contends for one `lock:nightly_prune`: the first tenant
 wins and the rest are skipped for the whole TTL, silently — a refused acquire is
-the expected outcome, so nothing is logged. Tracked in
-[#1226](https://github.com/ujeenet/rustango/issues/1226) and
-[#1228](https://github.com/ujeenet/rustango/issues/1228).
+the expected outcome, so nothing is logged. This is a known gap.
 
 ---
 

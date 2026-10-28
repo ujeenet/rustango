@@ -192,9 +192,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-> **Mettez le drainage dans `on_shutdown`, pas après `run()`.** Jusqu'à
-> [#1409](https://github.com/ujeenet/rustango/issues/1409), cet exemple
-> appelait `queue.shutdown()` à la ligne *suivant* `run()`, et cette ligne ne
+> **Mettez le drainage dans `on_shutdown`, pas après `run()`.** Les versions
+> antérieures de cet exemple appelaient `queue.shutdown()` à la ligne *suivant* `run()`, et cette ligne ne
 > pouvait jamais s'exécuter : rien ne gérait SIGTERM, donc l'arrêt de
 > l'orchestrateur tuait le processus sur-le-champ. `run()` retourne désormais
 > sur signal — mais `on_shutdown` reste le bon endroit, car le hook s'exécute
@@ -474,8 +473,7 @@ superviseur de workers par tenant, pas de `Job::run(&ctx)` avec le tenant
 attaché, et pas de balayage `reclaim_stuck_jobs_pool` conscient du tenant —
 vous itérez vous-même sur les tenants, comme ci-dessus. Les tenants
 provisionnés après le démarrage n'ont aucun worker jusqu'au redémarrage du
-processus. Suivi dans
-[#1223](https://github.com/ujeenet/rustango/issues/1223).
+processus. C'est une lacune connue.
 
 **Contexte ambiant : source d'audit et fuseau horaire seulement.**
 `InMemoryJobQueue` les capture au `dispatch` et le scheduler à `every()`, et
@@ -546,9 +544,7 @@ lock.once_per_period("nightly_prune", day, || prune(&org)).await;
 
 Non cadré, tous les tenants se disputent un unique `lock:nightly_prune` : le
 premier gagne et les autres sont ignorés pendant toute la TTL, en silence — un
-acquire refusé est le résultat attendu, donc rien n'est journalisé. Suivi dans
-[#1226](https://github.com/ujeenet/rustango/issues/1226) et
-[#1228](https://github.com/ujeenet/rustango/issues/1228).
+acquire refusé est le résultat attendu, donc rien n'est journalisé. C'est une lacune connue.
 
 ---
 

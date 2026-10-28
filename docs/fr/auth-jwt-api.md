@@ -219,7 +219,7 @@ assert!(b.verify_access(&pair.access).await.is_none());   // B voit la révocati
 
 ### Écrire un magasin durable
 
-`JtiStore` est asynchrone (depuis v0.52, #1191) : une implémentation durable
+`JtiStore` est asynchrone (depuis v0.52) : une implémentation durable
 tient donc en une requête — pas de vidage en arrière-plan, pas de fenêtre de
 convergence pendant laquelle un `jti` révoqué est encore accepté ailleurs. Les
 deux méthodes renvoient `JtiFuture<'_, T>` (un future boxé — le trait est utilisé
@@ -295,7 +295,7 @@ sauf si vous utilisez `refresh_with`.
   d'API, un autre service auquel vous confiez un jeton. Trois segments, un en-tête
   JOSE `{"alg":"HS256","typ":"JWT"}`, signé sur `header.payload`.
 
-  Jusqu'à [#1397](https://github.com/ujeenet/rustango/issues/1397) c'étaient deux
+  Avant 0.57.5, c'étaient deux
   segments sans en-tête, signés sur la seule charge utile — lisibles par rien
   d'autre que rustango, et rejetés jusque par `rustango::jwt::decode`. Si vous
   aviez écrit un vérificateur maison pour contourner cela, vous pouvez le jeter.
