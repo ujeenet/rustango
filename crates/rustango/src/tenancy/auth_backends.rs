@@ -242,14 +242,13 @@ impl AuthBackend for ModelBackend {
         };
 
         // Own lock scope, apart from the login forms; only failures count.
-        // A locked or spent caller is refused before the lookup.
+        // Sent on every request: admitted before the lookup, so a locked or
+        // spent caller is refused first and a burst holds slots, not checks.
         let slug = tenant_slug(parts)?;
         let scope = LoginScope::TenantBasic(slug.to_owned());
-        let ip = client_ip(parts);
-        let throttle = crate::login_throttle::shared();
         let refused = AuthError::Refused;
-        throttle
-            .check(&scope, &ip, &username)
+        let mut attempt = crate::login_throttle::shared()
+            .begin_per_request(&scope, &client_ip(parts), &username)
             .await
             .map_err(refused)?;
         let users = super::auth::User::objects()
@@ -259,7 +258,7 @@ impl AuthBackend for ModelBackend {
         let user = users.into_iter().next();
 
         // A credential verified moments ago against this same stored hash
-        // skips argon2 and the limits: it is not a guess (#2617).
+        // skips argon2: it is not a guess (#2617).
         let cache_key = user
             .as_ref()
             .map(|u| basic_cache_key(slug, &username, &password, &u.password_hash));
@@ -275,19 +274,14 @@ impl AuthBackend for ModelBackend {
         if let Some(hit) = user.as_ref().and_then(cached) {
             // The stored name's lock too, when the submitted one differs.
             if hit.username != username {
-                throttle
-                    .check(&scope, &ip, &hit.username)
-                    .await
-                    .map_err(refused)?;
+                attempt.resolve(&hit.username).await.map_err(refused)?;
             }
+            attempt.settle(true).await;
             return Ok(Some(hit));
         }
 
-        let mut attempt = throttle
-            .begin(&scope, &ip, &username)
-            .await
-            .map_err(refused)?;
-
+        // A check at hash cost is reserved like a login.
+        attempt.reserve().await.map_err(refused)?;
         let Some(user) = user else {
             // Audit H1/N4 — spend a verify's worth of work on the
             // unknown-user path so timing doesn't reveal whether the
@@ -295,7 +289,7 @@ impl AuthBackend for ModelBackend {
             password::verify_dummy_async_in(HashLane::Credential, &password)
                 .await
                 .map_err(AuthError::from_hash)?;
-            attempt.failed().await;
+            attempt.settle(false).await;
             return Ok(None);
         };
         attempt
@@ -304,7 +298,7 @@ impl AuthBackend for ModelBackend {
             .map_err(AuthError::Refused)?;
         // A parallel request may have verified it while this one waited.
         if let Some(hit) = cached(&user) {
-            attempt.succeeded().await;
+            attempt.settle(true).await;
             return Ok(Some(hit));
         }
 
@@ -314,7 +308,7 @@ impl AuthBackend for ModelBackend {
             .await
             .map_err(AuthError::from_hash)?;
         if !user.active || !ok {
-            attempt.failed().await;
+            attempt.settle(false).await;
             // Audit N4 — an inactive account must look identical to a
             // wrong password at this (username-keyed, pre-credential)
             // boundary: same `Ok(None)`, not a distinguishable
@@ -324,7 +318,7 @@ impl AuthBackend for ModelBackend {
             return Ok(None);
         }
 
-        attempt.succeeded().await;
+        attempt.settle(true).await;
         let id = user.id.get().copied().unwrap_or(0);
         if let (Some(key), true) = (cache_key, id != 0) {
             basic_cache_put(slug, key, id);
@@ -515,10 +509,7 @@ impl AuthBackend for ApiKeyBackend {
                 }
             },
         };
-        attempt
-            .settle(key.is_some())
-            .await
-            .map_err(AuthError::Refused)?;
+        attempt.settle(key.is_some()).await;
         let Some(key) = key else {
             return Ok(None);
         };
@@ -1355,18 +1346,85 @@ mod tests {
         );
     }
 
-    /// A right API key is sent on every request: it writes nothing to the
-    /// login gate's cache; a wrong one is still counted.
+    /// Parallel Basic guesses through a slow shared cache, from a client
+    /// that signed in moments ago: the account lock still bounds the burst,
+    /// so the right password sent last is refused, verified cache or not.
     #[tokio::test]
-    async fn right_api_keys_write_nothing_to_the_login_gate() {
-        let counting =
-            std::sync::Arc::new(crate::login_throttle::counting::CountingWrites::default());
-        let cache: crate::cache::BoxedCache = counting.clone();
+    async fn a_parallel_burst_of_basic_user_guesses_is_bounded_by_the_lock() {
+        use base64::Engine as _;
+        let slow = std::sync::Arc::new(
+            crate::login_throttle::counting::CountingWrites::with_read_delay(
+                std::time::Duration::from_millis(100),
+            ),
+        );
         let installed = crate::login_throttle::configure_shared(
             crate::login_throttle::LoginThrottle::with_cache(
                 crate::login_throttle::LoginLimits::default(),
-                cache,
+                slow,
             ),
+        );
+        // nextest runs each test in its own process; another gate won here.
+        if !installed {
+            return;
+        }
+        let (pool, mut user) = jwt_user("basic_burst_gate").await;
+        user.password_hash = password::hash("s3cret-basic").unwrap();
+        user.save_pool(&pool).await.unwrap();
+        let call = |pass: String| {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let creds =
+                    base64::engine::general_purpose::STANDARD.encode(format!("alice:{pass}"));
+                let (parts, ()) = axum::http::Request::builder()
+                    .header("authorization", format!("Basic {creds}"))
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        [10, 66, 0, 1],
+                        1,
+                    ))))
+                    .extension(super::super::TenantSlug("t-burst-basic".into()))
+                    .body(())
+                    .unwrap()
+                    .into_parts();
+                ModelBackend.authenticate(&parts, &pool).await
+            })
+        };
+        // Known client, and the credential sits in the verified cache.
+        assert!(matches!(
+            call("s3cret-basic".into()).await.unwrap(),
+            Ok(Some(_))
+        ));
+        let guesses: Vec<_> = (0..99).map(|i| call(format!("guess{i}"))).collect();
+        // The right one arrives while the wrong ones are in flight.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let right = call("s3cret-basic".into());
+        let mut misses = 0;
+        for g in guesses {
+            match g.await.unwrap() {
+                Ok(None) => misses += 1,
+                Err(AuthError::Refused(_)) => {}
+                other => panic!("a wrong password got {:?}", other.map(|u| u.map(|u| u.id))),
+            }
+        }
+        let max = crate::account_lockout::DEFAULT_MAX_ATTEMPTS as usize;
+        assert!(misses <= max, "{misses} wrong passwords were checked");
+        assert!(
+            matches!(right.await.unwrap(), Err(AuthError::Refused(_))),
+            "the right password passed a locked account"
+        );
+    }
+
+    /// A right API key is sent on every request: its slot is given back,
+    /// so it leaves the per-IP limit as it was; a wrong one is counted.
+    #[tokio::test]
+    async fn right_api_keys_leave_the_limit_as_it_was() {
+        let limits = crate::login_throttle::LoginLimits {
+            ip_limit: 3,
+            ..Default::default()
+        };
+        let cache: crate::cache::BoxedCache =
+            std::sync::Arc::new(crate::cache::InMemoryCache::new());
+        let installed = crate::login_throttle::configure_shared(
+            crate::login_throttle::LoginThrottle::with_cache(limits, cache),
         );
         // nextest runs each test in its own process; another gate won here.
         if !installed {
@@ -1396,13 +1454,17 @@ mod tests {
                 ApiKeyBackend.authenticate(&parts, &pool).await
             }
         };
-        for _ in 0..3 {
+        for _ in 0..10 {
             assert!(matches!(call(token.clone()).await, Ok(Some(_))));
         }
-        assert_eq!(counting.writes(), 0, "a right key wrote to the login gate");
         let (prefix, _) = token.split_once('.').unwrap();
-        assert!(matches!(call(format!("{prefix}.wrong")).await, Ok(None)));
-        assert!(counting.writes() > 0, "a wrong key was not counted");
+        for _ in 0..3 {
+            assert!(matches!(call(format!("{prefix}.wrong")).await, Ok(None)));
+        }
+        assert!(
+            matches!(call(token.clone()).await, Err(AuthError::Refused(_))),
+            "wrong keys were not counted"
+        );
     }
 
     /// A user row in a fresh shared in-memory `SQLite`.

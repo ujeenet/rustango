@@ -245,7 +245,7 @@ To change the key:
    old key still opens what it sealed.
 2. `cargo run -- reseal-tenant-secrets` lists what would change.
 3. `cargo run -- reseal-tenant-secrets --apply` re-seals tenant URLs, server
-   passwords and SSO client secrets with the new key.
+   passwords, operator TOTP secrets and SSO client secrets with the new key.
 4. Remove `RUSTANGO_SECRET_KEY_PREVIOUS` and restart.
 
 Values sealed under a blank key before blank keys were refused still open

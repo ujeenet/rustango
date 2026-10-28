@@ -51,7 +51,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - An admin edit refused on error shows the typed inline rows again, with the ContentType picker on edit and create.
 - The bare admin serves the favicon its pages link (`<admin_prefix><static_url>/icon.png`); the TOTP page drops a link to a missing stylesheet.
 - `check --deploy` checks `RUSTANGO_APEX_DOMAIN` only on a tenancy Cli; api and fullstack projects get no tenancy lines in `.env.example`.
-- The Basic-auth admin gate and API-key auth hold a slot before the compare and count only failures, so a parallel burst cannot pass the account lock or per-IP limit; a right credential from a known client writes nothing.
+- The Basic-auth admin gate and API-key auth take a slot on the shared account-lock or per-IP counter before the compare and count only failures, so a parallel burst cannot pass the lock or limit, even across replicas; a right credential gives its slot back and leaves nothing behind.
 - `require_perm` answers a permission read error with a logged JSON `503`, not a `403`.
 - `run-server` reaches path-prefix tenants at `<apex>/<prefix>` and builds tenant links with `--apex`.
 - SQLite/MySQL tenancy `runserver` opens the registry with the framework pool setup (tuning, WAL, file created) and honours `shutdown_timeout_secs`.
@@ -86,6 +86,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `find_many`, `find_many_or_fail`, `where_in` and `destroy` split a key list past the dialect's bind cap.
 - `latest` / `earliest` skip NULLs, so every backend returns the same row.
 - `last()` on a sliced queryset returns the last row of the slice.
+
+### Fixed — migrations, secrets and auth
+
+- `makemigrations` refuses a column dropped beside a new column of the same type on one table (a likely rename that would delete the data), and names the `--empty` + `RenameColumn` route; `--drop-and-add` writes the drop + add on purpose. Every `DropColumn` now warns that its data goes.
+- `reseal-tenant-secrets` re-seals operator TOTP secrets, so a key rotation no longer locks enrolled operators out of the console.
+- Tenancy `ModelBackend` Basic auth takes the same per-request slot before the cached-credential check, so a parallel burst cannot pass the account lock.
+- `jwt::decode` reads a fractional `exp` / `nbf` as a NumericDate instead of ignoring it, and refuses a non-numeric one.
+- CLI errors no longer start with `invalid migration:`; `migrate <target>` prints `applied` / `unapplied` per file; migrate messages drop stale version and issue references.
+- The admin's missing-table page names `makemigrations`; the tenancy quickstart, operator TOTP recovery and the CreateView example in the docs work as written.
 
 ## [0.61.9] — 2026-10-28
 

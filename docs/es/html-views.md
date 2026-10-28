@@ -191,13 +191,13 @@ inserta la fila y hace un `303` a `success_url`:
 ```rust
 use rustango::template_views::CreateView;
 
-let app = CreateView::for_model(Post::SCHEMA, &["title", "body"])
+let app = CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"])
     .success_url("/posts")         // where to send the browser after a save
     .router("/posts", Arc::new(tera), pool);
 ```
 
 La lista de campos es obligatoria. Es la lista blanca de escritura: el formulario
-muestra solo esos campos y cualquier otra clave enviada (por ejemplo `author_id=1`)
+muestra solo esos campos y cualquier otra clave enviada (por ejemplo `id=1`)
 se ignora. En UpdateView, un campo listado que no llega conserva su valor; solo un
 `bool` pasa a `false`, porque una casilla sin marcar no envía nada. En CreateView,
 un campo listado con default de columna que no llega recibe ese default.
@@ -209,6 +209,7 @@ validación:
 ```html
 <form method="post">
   {{ csrf_input | safe }}
+  {% if form.errors.__all__ %}<p class="error">{{ form.errors.__all__ }}</p>{% endif %}
   {% for field in form.fields %}
     <label for="{{ field.name }}">{{ field.name }}</label>
     <input id="{{ field.name }}" name="{{ field.name }}" value="{{ field.value }}"
@@ -221,6 +222,8 @@ validación:
   <button>{% if is_update %}Save{% else %}Create{% endif %}</button>
 </form>
 ```
+
+Una escritura que la base de datos rechaza (una columna NOT NULL que el formulario omite, un CHECK) es un error de todo el formulario en `form.errors.__all__`, no en un campo; muéstralo, o la página vuelve sin ningún mensaje.
 
 Aquí hay dos cosas fáciles de equivocar. `form.errors` asocia un nombre de campo a **una
 cadena**, no a una lista — aplicarle `join` es un error. Y no existe una variable `errors` de
@@ -237,7 +240,7 @@ se vuelve a renderizar con los mensajes y un estado `422` en lugar de guardar:
 ```rust
 use rustango::forms::FormErrors;
 
-CreateView::for_model(Post::SCHEMA, &["title", "body"])
+CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"])
     .validator(|data| {
         let mut errs = FormErrors::default();
         if data.get("title").map_or(true, |t| t.len() < 5) {
@@ -280,7 +283,7 @@ Monta las cinco en el mismo prefijo y tienes un CRUD HTML completo:
 let app = axum::Router::new()
     .merge(ListView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
-    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
+    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
     .merge(UpdateView::for_model(Post::SCHEMA, &["title", "body"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
     .merge(DeleteView::for_model(Post::SCHEMA).success_url("/posts").router("/posts", tera, pool));
 ```

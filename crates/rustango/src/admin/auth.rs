@@ -59,9 +59,7 @@ async fn basic_auth_middleware(
     let user_ok = crate::crypto::constant_time_compare(user.as_bytes(), creds.username.as_bytes());
     let pass_ok = crate::crypto::constant_time_compare(pass.as_bytes(), creds.password.as_bytes());
     let right = user_ok & pass_ok;
-    if let Err(refused) = attempt.settle(right).await {
-        return refused.into_response();
-    }
+    attempt.settle(right).await;
     if right {
         return next.run(request).await;
     }

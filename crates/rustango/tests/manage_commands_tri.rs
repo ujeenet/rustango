@@ -311,6 +311,43 @@ async fn check_reports_unapplied_and_unmade_migrations(backend: &Pool) {
     );
 }
 
+/// `migrate <target>` says which way each file went, and CLI errors carry
+/// no "invalid migration" prefix or stale version.
+async fn migrate_target_names_each_direction(backend: &Pool) {
+    let env = Env::new(backend).await;
+    let dir = env.tmp.path().join("steps").join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    manage_out(&env.registry, &dir, &["makemigrations", "--empty", "a"]).await;
+    manage_out(&env.registry, &dir, &["makemigrations", "--empty", "b"]).await;
+    manage_out(&env.registry, &dir, &["migrate"]).await;
+
+    let out = manage_out(&env.registry, &dir, &["migrate", "0001_a"]).await;
+    assert_eq!(out.trim(), "unapplied 0002_b", "{out}");
+    let out = manage_out(&env.registry, &dir, &["migrate", "0002_b"]).await;
+    assert_eq!(out.trim(), "applied 0002_b", "{out}");
+
+    let err = |argv: &'static [&'static str]| {
+        let (pool, dir) = (env.registry.clone(), dir.clone());
+        async move {
+            let mut out = Vec::new();
+            rustango::migrate::manage::run_with_writer(&pool, &dir, args(argv), &mut out)
+                .await
+                .expect_err("refused")
+                .to_string()
+        }
+    };
+    let e = err(&["createsuperuser"]).await;
+    assert!(
+        e.starts_with("unknown subcommand: `createsuperuser`"),
+        "{e}"
+    );
+    let e = err(&["migrate", "0001_a", "--dry-run"]).await;
+    assert!(
+        !e.contains("invalid migration") && !e.contains("v0."),
+        "{e}"
+    );
+}
+
 /// `--tenant <slug>` opens that tenant's pool, schema or database mode,
 /// and stays out of the command's arguments.
 async fn tenant_flag_opens_the_tenant_pool(backend: &Pool) {
@@ -387,5 +424,6 @@ tri_dialect_test! {
         manage_connects_with_only_the_db_vars,
         tenant_flag_opens_the_tenant_pool,
         check_reports_unapplied_and_unmade_migrations,
+        migrate_target_names_each_direction,
     ],
 }

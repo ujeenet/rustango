@@ -260,27 +260,6 @@ impl InFlight {
     fn busy(&self, gate: &str) -> Option<Arc<Notify>> {
         self.map().get(gate).map(|(_, notify)| Arc::clone(notify))
     }
-
-    /// Enter `gate` once fewer than `cap` are in it; `false` past `deadline`.
-    async fn enter_capped(&self, gate: &str, cap: usize, deadline: tokio::time::Instant) -> bool {
-        loop {
-            let notify = {
-                let mut map = self.map();
-                let (n, notify) = map.entry(gate.to_owned()).or_default();
-                if *n < cap {
-                    *n += 1;
-                    return true;
-                }
-                Arc::clone(notify)
-            };
-            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if left.is_zero() {
-                return false;
-            }
-            // Polled too, so a wake-up between the read and the wait is not lost.
-            let _ = tokio::time::timeout(left.min(IN_FLIGHT_POLL), notify.notified()).await;
-        }
-    }
 }
 
 /// The gates one attempt holds; leaving them on drop wakes the waiters.
@@ -532,8 +511,19 @@ impl LoginThrottle {
         ip: &ClientIp,
         username: &str,
     ) -> Result<LoginAttempt, LoginRefused> {
-        self.warn_once_on_weak_store();
         let deadline = tokio::time::Instant::now() + crate::passwords::hash_wait();
+        self.begin_until(scope, ip, username, deadline).await
+    }
+
+    /// [`Self::begin`], giving up at `deadline`.
+    async fn begin_until(
+        &self,
+        scope: &LoginScope,
+        ip: &ClientIp,
+        username: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<LoginAttempt, LoginRefused> {
+        self.warn_once_on_weak_store();
         loop {
             match self.try_begin(scope, ip, username).await {
                 Ok(held) => return Ok(LoginAttempt(Some(held))),
@@ -640,9 +630,10 @@ impl LoginThrottle {
     }
 
     /// Admit a credential sent on every request (HTTP Basic, an API key)
-    /// before it is compared. A known client at a clean account holds an
-    /// in-process slot only, so a right one writes nothing; else it is
-    /// reserved like a login.
+    /// before it is compared. A known client at a clean account takes one
+    /// slot on the counter that bounds guesses (the account's, else the
+    /// per-IP or global one), shared by every replica on the cache and
+    /// given back by a right credential; else it is reserved like a login.
     ///
     /// # Errors
     /// As [`Self::begin`].
@@ -653,49 +644,64 @@ impl LoginThrottle {
         username: &str,
     ) -> Result<PerRequestAttempt, LoginRefused> {
         let deadline = tokio::time::Instant::now() + crate::passwords::hash_wait();
-        let (gate, cap) = self.quiet_gate(scope, ip, username);
-        // Capped like the limit, so a burst here guesses no more than it allows.
-        if !self.0.in_flight.enter_capped(&gate, cap, deadline).await {
-            return Err(LoginRefused::Busy);
-        }
-        let quiet = Gates {
-            buckets: Arc::clone(&self.0),
-            held: vec![gate],
-        };
-        let held = if self.is_quiet(scope, ip, username).await {
-            PerRequestHeld::Quiet(quiet)
+        let quiet = if self.is_quiet(scope, ip, username).await {
+            self.take_quiet(scope, ip, username).await
         } else {
-            drop(quiet);
-            PerRequestHeld::Reserved(self.begin(scope, ip, username).await?)
+            None
+        };
+        let held = match quiet {
+            Some(slot) => PerRequestHeld::Quiet(slot),
+            // Full or locked meanwhile: the login path waits or refuses.
+            None => {
+                PerRequestHeld::Reserved(self.begin_until(scope, ip, username, deadline).await?)
+            }
         };
         Ok(PerRequestAttempt {
             throttle: Self(Arc::clone(&self.0)),
             scope: scope.clone(),
             ip: ip.clone(),
             username: username.to_owned(),
+            deadline,
             held,
         })
     }
 
-    /// The in-process gate quiet checks wait at, and how many it admits.
-    fn quiet_gate(&self, scope: &LoginScope, ip: &ClientIp, username: &str) -> (String, usize) {
-        let scope_key = scope.key();
-        let limits = self.0.limits;
-        let (gate, cap) = if scope.locks_accounts() {
-            let cap = crate::account_lockout::shared().attempt_limit();
-            (account_key(&scope_key, username), cap)
-        } else if let Some(ip) = ip.0.as_deref() {
-            (
-                format!("{scope_key}:{}", ip_gate(&scope.ip_bucket(ip))),
-                limits.ip_limit,
-            )
-        } else {
-            (global_gate(&scope_key), limits.global_limit)
+    /// One atomic slot on the counter that bounds guesses here; `None`
+    /// when it is full or the account locked.
+    async fn take_quiet(
+        &self,
+        scope: &LoginScope,
+        ip: &ClientIp,
+        username: &str,
+    ) -> Option<QuietSlot> {
+        let b = &self.0;
+        let mut gates = Gates {
+            buckets: Arc::clone(b),
+            held: Vec::with_capacity(1),
         };
-        (
-            format!("quiet:{gate}"),
-            usize::try_from(cap.max(1)).unwrap_or(usize::MAX),
-        )
+        let counted = if scope.locks_accounts() {
+            let key = account_key(&scope.key(), username);
+            match crate::account_lockout::shared().reserve(&key).await {
+                Reservation::Counted(slot) => {
+                    gates.enter(key.clone());
+                    Counted::Account(key, slot)
+                }
+                _ => return None,
+            }
+        } else if let Some(bucket) = ip.0.as_deref().map(|ip| scope.ip_bucket(ip)) {
+            let spent = b.ip.take(&bucket).await.ok()?;
+            gates.enter(ip_gate(&bucket));
+            Counted::Ip(bucket, spent)
+        } else {
+            let key = scope.key();
+            let spent = b.global.take(&key).await.ok()?;
+            gates.enter(global_gate(&key));
+            Counted::Global(key, spent)
+        };
+        Some(QuietSlot {
+            counted: Some(counted),
+            gates,
+        })
     }
 
     /// `true` when admitting a right credential would change nothing: no
@@ -871,13 +877,64 @@ pub(crate) struct PerRequestAttempt {
     scope: LoginScope,
     ip: ClientIp,
     username: String,
+    /// The one `hash_wait` this request gets, however often it waits.
+    deadline: tokio::time::Instant,
     held: PerRequestHeld,
 }
 
 enum PerRequestHeld {
-    /// An in-process slot only.
-    Quiet(Gates),
+    Quiet(QuietSlot),
     Reserved(LoginAttempt),
+}
+
+/// The one counter a quiet credential took a slot on.
+enum Counted {
+    Account(String, ReservedSlot),
+    Ip(String, Spent),
+    Global(String, Spent),
+}
+
+/// A quiet credential's slot. Dropped unreported, it is given back.
+struct QuietSlot {
+    counted: Option<Counted>,
+    /// Left after the counter, so waiters see the refund.
+    gates: Gates,
+}
+
+impl Counted {
+    /// The compare proved nothing, or was right: give the slot back. A right
+    /// one also clears failures counted since it was admitted.
+    async fn refund(self, buckets: &Buckets, right: bool) {
+        let lockout = crate::account_lockout::shared();
+        match self {
+            Self::Account(key, slot) if right => lockout.reserved_succeeded(&key, slot).await,
+            Self::Account(key, slot) => lockout.release(&key, slot).await,
+            Self::Ip(key, spent) => buckets.ip.give_back(&key, spent).await,
+            Self::Global(key, spent) => buckets.global.give_back(&key, spent).await,
+        }
+    }
+}
+
+impl Drop for QuietSlot {
+    fn drop(&mut self) {
+        let Some(counted) = self.counted.take() else {
+            return;
+        };
+        let buckets = Arc::clone(&self.gates.buckets);
+        let gates = std::mem::replace(
+            &mut self.gates,
+            Gates {
+                buckets: Arc::clone(&buckets),
+                held: Vec::new(),
+            },
+        );
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                counted.refund(&buckets, false).await;
+                drop(gates);
+            });
+        }
+    }
 }
 
 impl PerRequestAttempt {
@@ -887,40 +944,68 @@ impl PerRequestAttempt {
     /// As [`LoginThrottle::begin`].
     #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
     pub(crate) async fn reserve(&mut self) -> Result<(), LoginRefused> {
-        if let PerRequestHeld::Quiet(_) = self.held {
+        if let PerRequestHeld::Quiet(slot) = &mut self.held {
+            // Given back first, so the reservation is not refused by itself.
+            if let Some(counted) = slot.counted.take() {
+                counted.refund(&self.throttle.0, false).await;
+            }
+            for gate in slot.gates.held.drain(..) {
+                self.throttle.0.in_flight.leave(&gate);
+            }
             let attempt = self
                 .throttle
-                .begin(&self.scope, &self.ip, &self.username)
+                .begin_until(&self.scope, &self.ip, &self.username, self.deadline)
                 .await?;
             self.held = PerRequestHeld::Reserved(attempt);
         }
         Ok(())
     }
 
-    /// Report the compare. A quiet right one writes nothing; a quiet miss
-    /// is counted before its slot is left.
+    /// [`Self::reserve`], then [`LoginAttempt::resolve`] with the stored username.
     ///
     /// # Errors
-    /// [`LoginRefused`] when a quiet miss can no longer be counted.
-    pub(crate) async fn settle(self, right: bool) -> Result<(), LoginRefused> {
+    /// As [`Self::reserve`] and [`LoginAttempt::resolve`].
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    pub(crate) async fn resolve(&mut self, stored_username: &str) -> Result<(), LoginRefused> {
+        self.reserve().await?;
+        match &mut self.held {
+            PerRequestHeld::Reserved(attempt) => attempt.resolve(stored_username).await,
+            PerRequestHeld::Quiet(_) => Ok(()),
+        }
+    }
+
+    /// Report the compare. A quiet right one gives its slot back; a quiet
+    /// miss keeps it, counted, and counts against the other limits too.
+    pub(crate) async fn settle(self, right: bool) {
         match self.held {
-            PerRequestHeld::Quiet(_slot) if right => Ok(()),
-            PerRequestHeld::Quiet(_slot) => {
-                let attempt = self
-                    .throttle
-                    .begin(&self.scope, &self.ip, &self.username)
-                    .await?;
-                attempt.failed().await;
-                Ok(())
+            PerRequestHeld::Quiet(mut slot) => {
+                let Some(counted) = slot.counted.take() else {
+                    return;
+                };
+                let b = &self.throttle.0;
+                if right {
+                    counted.refund(b, true).await;
+                    return;
+                }
+                let scope_key = self.scope.key();
+                match counted {
+                    Counted::Account(key, lock) => {
+                        crate::account_lockout::shared()
+                            .reserved_failed(&key, lock)
+                            .await;
+                        if let Some(ip) = self.ip.0.as_deref() {
+                            let _ = b.ip.take(&self.scope.ip_bucket(ip)).await;
+                        }
+                        let _ = b.global.take(&scope_key).await;
+                    }
+                    Counted::Ip(..) => {
+                        let _ = b.global.take(&scope_key).await;
+                    }
+                    Counted::Global(..) => {}
+                }
             }
-            PerRequestHeld::Reserved(attempt) if right => {
-                attempt.succeeded().await;
-                Ok(())
-            }
-            PerRequestHeld::Reserved(attempt) => {
-                attempt.failed().await;
-                Ok(())
-            }
+            PerRequestHeld::Reserved(attempt) if right => attempt.succeeded().await,
+            PerRequestHeld::Reserved(attempt) => attempt.failed().await,
         }
     }
 }
@@ -1752,5 +1837,145 @@ mod tests {
         let r = LoginRefused::Busy.into_response();
         assert_eq!(r.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert!(r.headers().contains_key(axum::http::header::RETRY_AFTER));
+    }
+
+    /// Two replicas on one shared cache, as a load balancer spreads them.
+    fn replicas(limits: LoginLimits) -> [Arc<LoginThrottle>; 2] {
+        let cache: BoxedCache = Arc::new(crate::cache::InMemoryCache::new());
+        [
+            Arc::new(LoginThrottle::with_cache(limits, cache.clone())),
+            Arc::new(LoginThrottle::with_cache(limits, cache)),
+        ]
+    }
+
+    /// Per-request guesses spread over `replicas`, each compared for 30 ms
+    /// then reported wrong; how many were compared, refused or not after.
+    async fn per_request_burst(
+        replicas: &[Arc<LoginThrottle>; 2],
+        s: &LoginScope,
+        ip: &ClientIp,
+        user: &str,
+        n: usize,
+    ) -> usize {
+        let compared = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let runs: Vec<_> = (0..n)
+            .map(|i| {
+                let (t, s, ip, user) = (
+                    Arc::clone(&replicas[i % 2]),
+                    s.clone(),
+                    ip.clone(),
+                    user.to_owned(),
+                );
+                let compared = Arc::clone(&compared);
+                tokio::spawn(async move {
+                    let Ok(a) = t.begin_per_request(&s, &ip, &user).await else {
+                        return;
+                    };
+                    compared.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    a.settle(false).await;
+                })
+            })
+            .collect();
+        for r in runs {
+            r.await.unwrap();
+        }
+        compared.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A known client's Basic guesses over two replicas: the account lock
+    /// bounds every compare, including ones answered 429 after it.
+    #[tokio::test]
+    async fn per_request_guesses_over_replicas_are_bounded_by_the_lock() {
+        let r = replicas(LoginLimits::default());
+        let (s, client) = (
+            LoginScope::TenantBasic("t-repl-lock".into()),
+            ip("10.9.70.1"),
+        );
+        let a = r[0].begin(&s, &client, "bob").await.unwrap();
+        a.succeeded().await;
+        let compared = per_request_burst(&r, &s, &client, "bob", 30).await;
+        let max = crate::account_lockout::shared().attempt_limit() as usize;
+        assert!(compared <= max, "{compared} guesses were compared");
+    }
+
+    /// API-key guesses over two replicas: the per-IP limit bounds every compare.
+    #[tokio::test]
+    async fn per_request_keys_over_replicas_are_bounded_by_the_ip_limit() {
+        let r = replicas(LoginLimits {
+            ip_limit: 3,
+            ..LoginLimits::default()
+        });
+        let s = LoginScope::TenantApiKey("t-repl-ip".into());
+        let compared = per_request_burst(&r, &s, &ip("10.9.70.2"), "", 30).await;
+        assert!(compared <= 3, "{compared} keys were compared");
+    }
+
+    /// A wrong guess counted after a quiet right one was admitted is
+    /// cleared when that right one settles, as on the login form.
+    #[tokio::test]
+    async fn a_right_per_request_credential_clears_a_failure_counted_meanwhile() {
+        let t = LoginThrottle::new(LoginLimits::default());
+        let (s, client) = (
+            LoginScope::TenantBasic("t-quiet-clear".into()),
+            ip("10.9.70.3"),
+        );
+        let a = t.begin(&s, &client, "carol").await.unwrap();
+        a.succeeded().await;
+        let right = t.begin_per_request(&s, &client, "carol").await.unwrap();
+        let wrong = t.begin(&s, &client, "carol").await.unwrap();
+        wrong.failed().await;
+        right.settle(true).await;
+        let key = account_key(&s.key(), "carol");
+        assert_eq!(
+            crate::account_lockout::shared().attempt_count(&key).await,
+            0
+        );
+    }
+
+    /// A per-request credential waits at most one `hash_wait` before a 503.
+    #[tokio::test]
+    async fn a_per_request_credential_waits_one_deadline() {
+        let t = Arc::new(LoginThrottle::new(LoginLimits::default()));
+        let (s, client) = (
+            LoginScope::TenantBasic("t-one-wait".into()),
+            ip("10.9.70.4"),
+        );
+        let a = t.begin(&s, &client, "dan").await.unwrap();
+        a.succeeded().await;
+        let max = crate::account_lockout::shared().attempt_limit() as usize;
+        let mut held = Vec::new();
+        for _ in 0..max {
+            held.push(t.begin_per_request(&s, &client, "dan").await.unwrap());
+        }
+        let wait = crate::passwords::hash_wait();
+        let started = tokio::time::Instant::now();
+        let late = {
+            let (t, s, client) = (Arc::clone(&t), s.clone(), client.clone());
+            tokio::spawn(async move { t.begin_per_request(&s, &client, "dan").await.is_ok() })
+        };
+        // Plain attempts fill the lock while the late one waits.
+        tokio::time::sleep(wait / 2).await;
+        let mut plain = Vec::new();
+        for _ in 0..max {
+            let (t, s, client) = (Arc::clone(&t), s.clone(), client.clone());
+            plain.push(tokio::spawn(async move {
+                let a = t.begin(&s, &client, "dan").await;
+                tokio::time::sleep(wait * 3).await;
+                drop(a);
+            }));
+        }
+        tokio::time::sleep(wait * 2 / 5).await;
+        drop(held.pop());
+        let _ = late.await.unwrap();
+        let took = started.elapsed();
+        assert!(
+            took < wait * 3 / 2,
+            "waited {took:?} for a {wait:?} deadline"
+        );
+        drop(held);
+        for p in plain {
+            p.abort();
+        }
     }
 }

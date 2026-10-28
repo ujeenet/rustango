@@ -283,7 +283,8 @@ fn decode_inner(
         .map_err(|e| JwtError::Decode(format!("payload b64: {e}")))?;
     let claims = Claims::from_json(&payload_bytes)?;
 
-    if let Some(exp) = claims.get::<u64>("exp") {
+    // A fractional `exp` ends at its whole second, a fractional `nbf` starts at the next.
+    if let Some(exp) = numeric_date(&claims, "exp", f64::floor)? {
         if now > exp {
             return Err(JwtError::Expired(exp));
         }
@@ -292,13 +293,35 @@ fn decode_inner(
         // minted without `.ttl()` was valid forever (#1538).
         return Err(JwtError::MissingExp);
     }
-    if let Some(nbf) = claims.get::<u64>("nbf") {
+    if let Some(nbf) = numeric_date(&claims, "nbf", f64::ceil)? {
         if now < nbf {
             return Err(JwtError::NotYetValid(nbf));
         }
     }
 
     Ok(claims)
+}
+
+/// A NumericDate claim, integer or not (RFC 7519 allows a fraction);
+/// `round` picks the safe whole second. A present non-number is refused,
+/// never read as absent.
+fn numeric_date(
+    claims: &Claims,
+    name: &str,
+    round: fn(f64) -> f64,
+) -> Result<Option<u64>, JwtError> {
+    let Some(v) = claims.inner.get(name) else {
+        return Ok(None);
+    };
+    if let Some(n) = v.as_u64() {
+        return Ok(Some(n));
+    }
+    match v.as_f64().map(round) {
+        // Saturates past u64::MAX, which no clock reaches.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Some(f) if f >= 0.0 => Ok(Some(f as u64)),
+        _ => Err(JwtError::Decode(format!("`{name}` is not a NumericDate"))),
+    }
 }
 
 /// Read a token without checking its signature or its `exp`/`nbf`.
@@ -390,6 +413,55 @@ mod tests {
         let t = encode(&c, SECRET).unwrap();
         let err = decode(&t, b"wrong-secret-bytes-but-long-enough").unwrap_err();
         assert!(matches!(err, JwtError::BadSignature));
+    }
+
+    /// A fractional `exp` / `nbf` is a NumericDate, not a missing claim;
+    /// a present non-number is refused.
+    #[test]
+    fn fractional_and_non_numeric_time_claims() {
+        let token = |exp: serde_json::Value, nbf: Option<serde_json::Value>| {
+            let mut c = Claims::new("u");
+            c.set("exp", exp);
+            if let Some(nbf) = nbf {
+                c.set("nbf", nbf);
+            }
+            encode(&c, SECRET).unwrap()
+        };
+        let expired = token(serde_json::json!(1000.5), None);
+        assert!(matches!(
+            decode_at(&expired, SECRET, 2000),
+            Err(JwtError::Expired(1000))
+        ));
+        assert!(matches!(
+            decode_at_allowing_no_exp(&expired, SECRET, 2000),
+            Err(JwtError::Expired(1000))
+        ));
+        assert!(decode_at(&expired, SECRET, 1000).is_ok());
+
+        let early = token(
+            serde_json::json!(9_999_999_999_u64),
+            Some(serde_json::json!(5000.5)),
+        );
+        assert!(matches!(
+            decode_at(&early, SECRET, 5000),
+            Err(JwtError::NotYetValid(5001))
+        ));
+        assert!(decode_at(&early, SECRET, 5001).is_ok());
+
+        for bad in [
+            serde_json::json!("1000"),
+            serde_json::json!(null),
+            serde_json::json!(-5),
+        ] {
+            let t = token(bad.clone(), None);
+            assert!(
+                matches!(
+                    decode_at_allowing_no_exp(&t, SECRET, 0),
+                    Err(JwtError::Decode(_))
+                ),
+                "exp={bad}"
+            );
+        }
     }
 
     /// A token signed with a short key, as anyone could make one.

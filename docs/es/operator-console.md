@@ -152,7 +152,7 @@ Después, la contraseña sola solo abre el paso del código (`/login/totp`); nin
 
 Es opcional por operador. `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` lo hace obligatorio: un operador sin dispositivo configura uno en el paso del código antes de su primera sesión. Se lee al arrancar.
 
-Los secretos están en `rustango_operator_totp` en el registro, sellados con `RUSTANGO_SECRET_KEY`, que debe estar definido para activarlo. `migrate` crea la tabla, o la consola en el primer inicio de sesión. Si la tabla no existe (un rol del registro sin CREATE, antes de `migrate`), basta la contraseña salvo que TOTP sea obligatorio; si existe pero no se puede leer, el inicio de sesión se rechaza. Aún no hay códigos de recuperación: un operador que pierde el dispositivo necesita una shell en el registro para borrar su fila.
+Los secretos están en `rustango_operator_totp` en el registro, sellados con `RUSTANGO_SECRET_KEY`, que debe estar definido para activarlo. `migrate` crea la tabla, o la consola en el primer inicio de sesión. Si la tabla no existe (un rol del registro sin CREATE, antes de `migrate`), basta la contraseña salvo que TOTP sea obligatorio; si existe pero no se puede leer, el inicio de sesión se rechaza. Aún no hay códigos de recuperación: si un operador pierde el dispositivo, ejecuta `cargo run -- reset-operator-totp <username>`.
 
 ---
 

@@ -248,7 +248,8 @@ Um den Schlüssel zu wechseln:
    alte Schlüssel öffnet weiterhin, was er versiegelt hat.
 2. `cargo run -- reseal-tenant-secrets` listet, was sich ändern würde.
 3. `cargo run -- reseal-tenant-secrets --apply` versiegelt Tenant-URLs,
-   Server-Passwörter und SSO-Client-Secrets neu mit dem neuen Schlüssel.
+   Server-Passwörter, Operator-TOTP-Secrets und SSO-Client-Secrets neu mit
+   dem neuen Schlüssel.
 4. Entferne `RUSTANGO_SECRET_KEY_PREVIOUS` und starte neu.
 
 Werte, die mit einem leeren Schlüssel versiegelt wurden, bevor leere

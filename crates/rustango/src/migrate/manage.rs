@@ -46,7 +46,6 @@ use crate::sql::Pool;
 
 use super::error::MigrateError;
 use super::file::{self, DataOp, Migration, Operation};
-use super::make::{make_migrations, make_migrations_for_app};
 use super::runner;
 use super::snapshot::SchemaSnapshot;
 
@@ -555,6 +554,7 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
 fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let mut empty = false;
     let mut merge = false;
+    let mut drops = super::make::DropAndAdd::Refuse;
     let mut name: Option<String> = None;
     let mut app: Option<String> = None;
     let mut scope_override: Option<crate::core::ModelScope> = None;
@@ -563,6 +563,7 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
         match arg.as_str() {
             "--empty" => empty = true,
             "--merge" => merge = true,
+            "--drop-and-add" => drops = super::make::DropAndAdd::Allow,
             "--app" => {
                 app = Some(iter.next().cloned().ok_or_else(|| {
                     MigrateError::Validation("--app requires an app name".into())
@@ -588,7 +589,10 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
                      makemigrations --empty <name>          empty scaffold for data ops (--scope picks the chain)\n\
                      makemigrations --merge                 reconcile a divergent chain (two leaves\n\
                                                             on the same parent) by writing an empty\n\
-                                                            NNNN_merge.json — issue #346\n\
+                                                            NNNN_merge.json\n\
+                     makemigrations --drop-and-add          write a dropped column beside a new one of\n\
+                                                            the same type as drop + add (deletes its data);\n\
+                                                            refused by default as a likely rename\n\
                      \n\
                      In tenancy projects (any registered model with scope = \"registry\"),\n\
                      a flagless makemigrations splits the diff into TWO files — one for\n\
@@ -647,7 +651,7 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
     // wiring (which passes the flat `migrations/` dir) keeps working.
     if let Some(app_name) = app {
         let project_root = dir.parent().unwrap_or(dir);
-        match make_migrations_for_app(project_root, &app_name, name.as_deref())? {
+        match super::make::make_migrations_for_app_with(project_root, &app_name, name.as_deref(), drops)? {
             Some(mig) => {
                 let app_dir = project_root.join(&app_name).join("migrations");
                 writeln!(w, "wrote {}", file_path(&app_dir, &mig.name).display())?;
@@ -665,7 +669,7 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
 
     // Explicit scope flag — emit exactly one file in that scope.
     if let Some(scope) = scope_override {
-        return write_scoped_migration(dir, scope, name.as_deref(), w);
+        return write_scoped_migration(dir, scope, name.as_deref(), drops, w);
     }
 
     // Auto-detect: if any registered model is `scope = "registry"`,
@@ -704,7 +708,8 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
             crate::core::ModelScope::Registry,
             crate::core::ModelScope::Tenant,
         ] {
-            let mig = crate::migrate::make::make_migrations_for_scope(dir, scope, name.as_deref())?;
+            let mig =
+                super::make::make_migrations_for_scope_with(dir, scope, name.as_deref(), drops)?;
             match mig {
                 Some(m) => {
                     writeln!(
@@ -729,7 +734,7 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
 
     // Single-tenant (no registry-scoped models): one migration covering
     // every registered model — the v0.24.x behavior.
-    match make_migrations(dir, name.as_deref())? {
+    match super::make::make_migrations_with(dir, name.as_deref(), drops)? {
         Some(mig) => {
             writeln!(w, "wrote {}", file_path(dir, &mig.name).display())?;
             for op in &mig.forward {
@@ -753,9 +758,10 @@ fn write_scoped_migration<W: Write>(
     dir: &Path,
     scope: crate::core::ModelScope,
     name: Option<&str>,
+    drops: super::make::DropAndAdd,
     w: &mut W,
 ) -> Result<(), MigrateError> {
-    match crate::migrate::make::make_migrations_for_scope(dir, scope, name)? {
+    match super::make::make_migrations_for_scope_with(dir, scope, name, drops)? {
         Some(mig) => {
             writeln!(
                 w,
@@ -847,7 +853,7 @@ async fn migrate<W: Write>(
     if dry_run {
         if positional.is_some() {
             return Err(MigrateError::Validation(
-                "`migrate <target> --dry-run` is not supported in v0.4 — use plain `--dry-run` to preview pending forward migrations".into(),
+                "`migrate <target> --dry-run` is not supported — use plain `--dry-run` to preview pending forward migrations".into(),
             ));
         }
         return migrate_dry_run_cmd(pool, dir, &SystemView::tenant(dir), w).await;
@@ -869,8 +875,15 @@ async fn migrate<W: Write>(
         if touched.is_empty() {
             writeln!(w, "already at {target}")?;
         } else {
+            // One list holds both directions: the ledger says which each went.
+            let applied = runner::applied_set_pool(pool).await?;
             for m in &touched {
-                writeln!(w, "  touched {}", m.name)?;
+                let verb = if applied.contains(&m.name) {
+                    "applied"
+                } else {
+                    "unapplied"
+                };
+                writeln!(w, "  {verb} {}", m.name)?;
             }
         }
         return Ok(());
@@ -1099,7 +1112,7 @@ where
             writeln!(
                 w,
                 "  normalised {} SQLite datetime value(s) in {} — these were written by \
-                 the pre-0.57.11 default and did not compare against a bound timestamp (#1464)",
+                 the pre-0.57.11 default and did not compare against a bound timestamp",
                 fixed.rows,
                 fixed.columns.join(", "),
             )?;
@@ -1329,7 +1342,8 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
     // registry vs tenant in tenancy projects, single file otherwise.
     // Pass through to the existing entry point so any future flags
     // gain consistent behavior automatically.
-    makemigrations(dir, &[], w)?;
+    // The pending files already hold any drop + add; refusing here would lose them.
+    makemigrations(dir, &["--drop-and-add".to_owned()], w)?;
 
     stamp_replaces(dir, &before, &removed, w)
 }

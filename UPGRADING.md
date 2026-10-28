@@ -174,7 +174,7 @@ Bare-admin audit rows now carry `user:<id>` instead of `system`. Single-database
 ### Admin, auth and run-server
 
 - The bare admin's `static_url` is now under its mount: the favicon is `<admin_prefix>/__static__/icon.png`. Sessions are no longer waived for `/__static__` paths.
-- A right Basic-auth admin or API-key credential no longer resets the per-IP and global login counters; only failures count, as before. Without a client IP (no `ConnectInfo`, no trusted proxy) a Basic-auth success still reserves a login slot per request.
+- Basic-auth (admin and tenancy) and API-key credentials take one slot on a shared counter before the compare: the account lock for a known client, else the per-IP limit (the global one without a client IP). A right credential gives it back and clears failures counted meanwhile, so it leaves nothing behind, but it is one cache `incr` and `decr` per request. A wrong one keeps it. Unknown clients reserve a full login slot, as before. Parallel right requests from one Basic account past `max_attempts` wait for a slot, at most one `hash_wait`.
 - `require_perm` returns `503` when the permission read fails (was `403`).
 - `check --deploy` on a single-database Cli no longer warns about `RUSTANGO_APEX_DOMAIN`.
 
@@ -199,6 +199,13 @@ Bare-admin audit rows now carry `user:<id>` instead of `system`. Single-database
 - `last()` on a queryset with `limit` / `offset` reads the slice and returns its last row.
 - `update().set()` on one field twice sends only the last assignment; on MySQL a later `set_expr` now reads the old value, not the earlier `set`.
 - `find_many`, `where_in` and `destroy` past the bind cap run one statement per batch; `destroy` is not atomic across batches.
+
+### Migrations, secrets and auth
+
+- `makemigrations` (and `make_migrations*`) refuse a column dropped beside a same-type new column on one table. For a rename, write a `RenameColumn` in a `makemigrations --empty` file; for a real drop + add, pass `--drop-and-add` or call `make_migrations_from_with(.., DropAndAdd::Allow)`.
+- `MigrateError::Validation` displays its message alone; code matching the `invalid migration:` text must drop the prefix.
+- `jwt::decode` refuses a present `exp` / `nbf` that is not a non-negative number (it was read as absent), and honours a fractional one.
+- Run `reseal-tenant-secrets --apply` once more after a key rotation done on an earlier release, before removing `RUSTANGO_SECRET_KEY_PREVIOUS`, so operator TOTP secrets are re-sealed.
 
 ---
 

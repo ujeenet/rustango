@@ -50,7 +50,8 @@ pub use file::{
 };
 pub use invert::invert;
 pub use make::{
-    make_migrations, make_migrations_for_app, make_migrations_from, make_migrations_system,
+    make_migrations, make_migrations_for_app, make_migrations_from, make_migrations_from_with,
+    make_migrations_system, DropAndAdd,
 };
 #[cfg(feature = "postgres")]
 pub use manage::{append_data_op, make_data_migration, make_data_migration_in_scope};
