@@ -11,8 +11,8 @@ répondues par 401/403 (flux API) — avant même d'atteindre le handler.
 > **Source :** `rustango::auth_decorators` (`login_required`, `login_required_or_401`,
 > `user_passes_test`, `superuser_required`, `active_required`,
 > `permission_required` + les variantes `_or_403` ; `safe_next`, `extract_next`) —
-> les verrous sont derrière la fonctionnalité `tenancy` (ils lisent l'extracteur
-> `SessionUser`). `safe_next`, `extract_next`, `extract_next_named` et
+> les verrous sont derrière la fonctionnalité `tenancy` et ne fonctionnent que
+> sous le serveur tenancy (ils lisent l'extracteur `SessionUser`). `safe_next`, `extract_next`, `extract_next_named` et
 > `redirect_to_login` n'ont besoin que d'axum.
 >
 > **Version exécutable :** le comportement de verrouillage est couvert par le
@@ -22,8 +22,18 @@ répondues par 401/403 (flux API) — avant même d'atteindre le handler.
 > **Un terme vous est inconnu ici ?** *middleware/couche*, *extracteur*,
 > *401/403* — voir le [glossaire](glossary.md).
 
-> Compagnon d'approfondissement du [guide de sécurité](security.md). Les verrous
-> lisent la session posée à la connexion — voir [Sessions](auth-sessions.md).
+> Compagnon d'approfondissement du [guide de sécurité](security.md).
+
+> **Applications tenancy uniquement.** Les verrous lisent une seule chose : le
+> cookie signé `rustango_tenant_session`, via l'extracteur `SessionUser`. Le
+> serveur tenancy pose ce cookie quand un utilisateur se connecte sur la page de
+> connexion du locataire (`/login` par défaut), via SSO, ou quand un opérateur
+> usurpe l'identité d'un utilisateur. L'extracteur a aussi besoin du contexte de
+> locataire que le serveur tenancy monte. Les verrous ne lisent **pas** les
+> sessions [`SessionStore`](auth-sessions.md). Dans une application à une seule
+> base, ou sur un routeur sans serveur tenancy, chaque requête est anonyme :
+> `login_required` redirige vers la page de connexion à chaque fois. Voir
+> [Applications mono-base](#applications-mono-base) pour la solution.
 
 ---
 
@@ -31,7 +41,7 @@ répondues par 401/403 (flux API) — avant même d'atteindre le handler.
 - [Démarrage rapide](#démarrage-rapide) · [Verrous navigateur vs API](#verrous-navigateur-vs-api)
 - [La famille de verrous](#la-famille-de-verrous) · [Verrous par prédicat et par rôle](#verrous-par-prédicat-et-par-rôle)
 - [Verrous de permission](#verrous-de-permission) · [L'aller-retour `?next=`](#laller-retour-next)
-- [Remarques et limites](#remarques-et-limites)
+- [Applications mono-base](#applications-mono-base) · [Remarques et limites](#remarques-et-limites)
 
 ---
 
@@ -173,12 +183,34 @@ assert_eq!(safe_next("%2F%2Fevil.example/x"),   None);   // decodes to //evil
 
 ---
 
+## Applications mono-base
+
+Aucun verrou prêt à l'emploi n'existe aujourd'hui pour une application sans
+tenancy. Utilisez l'une de ces options :
+
+- **Pages du personnel dans l'admin.** L'admin simple a sa propre connexion.
+  Appelez `with_session_auth(secret)` sur `rustango::admin::Builder` et chaque
+  route de l'admin exige un utilisateur admin connecté. L'admin place la session
+  dans la requête sous la forme `Extension<AdminSession>`. Ce verrou ne couvre
+  que le routeur de l'admin, pas vos propres routes.
+- **Vos propres routes.** Écrivez un petit middleware avec
+  `axum::middleware::from_fn` : lisez votre cookie de session, chargez la
+  session avec [`SessionStore::load`](auth-sessions.md) et, s'il n'y a pas
+  d'utilisateur dedans, renvoyez
+  `redirect_to_login(login_url, "next", original_path)`. Dans le handler de
+  connexion, lisez `?next=` avec `extract_next` et passez-le par `safe_next`,
+  comme montré plus haut. Ces helpers n'ont pas besoin de la fonctionnalité
+  `tenancy`.
+
+---
+
 ## Remarques et limites
 
-- **Ces verrous lisent la session.** « Connecté » signifie que l'extracteur
-  [`SessionUser`](auth-sessions.md) a résolu un utilisateur depuis le cookie de
-  session — ils sont donc destinés à l'authentification par session/cookie.
-  L'authentification par jeton d'API ([JWT](auth-jwt-api.md), [clés
+- **« Connecté » signifie une session de locataire.** L'extracteur
+  `SessionUser` a résolu un utilisateur actif depuis le cookie
+  `rustango_tenant_session` de ce locataire. Un cookie d'un autre locataire, un
+  cookie expiré, ou un cookie émis avant le dernier changement de mot de passe
+  ou la dernière déconnexion compte comme anonyme. L'authentification par jeton d'API ([JWT](auth-jwt-api.md), [clés
   d'API](auth-api-keys.md)) se verrouille plutôt au niveau de la [chaîne de
   backends](auth-backends.md), en lisant l'en-tête `Authorization`.
 - **L'ordre des couches compte.** `.layer(gate)` protège chaque route ajoutée au

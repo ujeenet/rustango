@@ -436,6 +436,6 @@ testable without spinning up a server. Model new layers on either.
 
 - [Security guide](security.md) — the full defense-in-depth stack and a
   deploy-time checklist (`manage check --deploy`).
-- [Authentication](auth-sessions.md) — auth backends and the `CurrentUser`
+- [Authentication](auth-backends.md) — auth backends and the `CurrentUser`
   middleware build on the same layer mechanism.
 - [URLs & routing](urls.md) — where layers attach to routers and sub-routers.

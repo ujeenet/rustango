@@ -22,10 +22,13 @@ Eintrag, und jede Replik sieht das Abmelden bei der nächsten Anfrage.
 > **Ein Begriff hier neu?** *Session*, *opake ID*, *Cookie*, *Cache* — siehe das
 > [Glossar](glossary.md).
 
-> Vertiefungsbegleiter zum [Sicherheitsleitfaden](security.md). Das Absichern von
-> Routen hinter einer angemeldeten Session wird in
-> [Auth-Dekoratoren](auth-decorators.md) behandelt; für zustandslose API-Tokens
-> stattdessen siehe [JWT](auth-jwt.md).
+> Vertiefungsbegleiter zum [Sicherheitsleitfaden](security.md). Die
+> [Auth-Dekoratoren](auth-decorators.md) lesen diese Sessions **nicht**: Sie
+> lesen das Tenancy-Login-Cookie. Um Routen über eine `SessionStore`-Session
+> abzusichern, schreiben Sie eine kleine Middleware, die die Session lädt und
+> `redirect_to_login` aufruft — siehe
+> [Apps mit einer Datenbank](auth-decorators.md#apps-mit-einer-datenbank). Für
+> zustandslose API-Tokens stattdessen siehe [JWT](auth-jwt.md).
 
 ---
 

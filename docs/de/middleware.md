@@ -457,7 +457,7 @@ hochzufahren. Modelliere neue Layer nach dem einen oder dem anderen.
 
 - [Security-Leitfaden](security.md) — der vollständige Defense-in-Depth-Stack
   und eine Checkliste für den Deploy-Zeitpunkt (`manage check --deploy`).
-- [Authentifizierung](auth-sessions.md) — die Auth-Backends und die
+- [Authentifizierung](auth-backends.md) — die Auth-Backends und die
   `CurrentUser`-Middleware bauen auf demselben Layer-Mechanismus auf.
 - [URLs & Routing](urls.md) — wo Layer an Router und Sub-Router angehängt
   werden.

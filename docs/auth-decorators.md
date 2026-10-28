@@ -10,9 +10,9 @@ or answered with 401/403 (API flow) — before they ever reach the handler.
 > **Source:** `rustango::auth_decorators` (`login_required`, `login_required_or_401`,
 > `user_passes_test`, `superuser_required`, `active_required`,
 > `permission_required` + `_or_403` variants; `safe_next`, `extract_next`) —
-> the gates are behind the `tenancy` feature (they read the `SessionUser`
-> extractor). `safe_next`, `extract_next`, `extract_next_named` and
-> `redirect_to_login` need only axum.
+> the gates are behind the `tenancy` feature and work only under the tenancy
+> server (they read the `SessionUser` extractor). `safe_next`, `extract_next`,
+> `extract_next_named` and `redirect_to_login` need only axum.
 >
 > **Runnable version:** the gating behavior is covered by the tested
 > [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_decorators.rs) —
@@ -21,8 +21,17 @@ or answered with 401/403 (API flow) — before they ever reach the handler.
 > **New to a term here?** *middleware/layer*, *extractor*, *401/403* — see the
 > [glossary](glossary.md).
 
-> Deep dive companion to the [Security guide](security.md). The gates read the
-> session set at login — see [Sessions](auth-sessions.md).
+> Deep dive companion to the [Security guide](security.md).
+
+> **Tenancy apps only.** The gates read one thing: the signed
+> `rustango_tenant_session` cookie, through the `SessionUser` extractor. The
+> tenancy server sets that cookie when a user signs in at the tenant login
+> (`/login` by default), through SSO, or when an operator impersonates a user.
+> The extractor also needs the tenant context that the tenancy server mounts.
+> The gates do **not** read [`SessionStore`](auth-sessions.md) sessions. In a
+> single-database app, or on a router without the tenancy server, every request
+> counts as anonymous: `login_required` redirects to the login page every time.
+> See [Single-database apps](#single-database-apps) for what to use there.
 
 ---
 
@@ -30,7 +39,7 @@ or answered with 401/403 (API flow) — before they ever reach the handler.
 - [Quick start](#quick-start) · [Browser vs API gates](#browser-vs-api-gates)
 - [The gate family](#the-gate-family) · [Predicate & role gates](#predicate-and-role-gates)
 - [Permission gates](#permission-gates) · [The `?next=` round-trip](#the-next-round-trip)
-- [Notes & limits](#notes-and-limits)
+- [Single-database apps](#single-database-apps) · [Notes & limits](#notes-and-limits)
 
 ---
 
@@ -167,13 +176,33 @@ assert_eq!(safe_next("%2F%2Fevil.example/x"),   None);   // decodes to //evil
 
 ---
 
+## Single-database apps
+
+There is no ready-made gate for an app without tenancy today. Use one of these:
+
+- **Staff pages in the admin.** The bare admin has its own login. Call
+  `with_session_auth(secret)` on `rustango::admin::Builder` and every admin
+  route asks for a signed-in admin user. The admin puts the session in the
+  request as `Extension<AdminSession>`. This gate covers the admin router only,
+  not your own routes.
+- **Your own routes.** Write a small middleware with
+  `axum::middleware::from_fn`: read your session cookie, load the session with
+  [`SessionStore::load`](auth-sessions.md), and when there is no user in it,
+  return `redirect_to_login(login_url, "next", original_path)`. In the login
+  handler, read `?next=` with `extract_next` and pass it through `safe_next`,
+  as shown above. These helpers do not need the `tenancy` feature.
+
+---
+
 ## Notes and limits
 
-- **These gates read the session.** "Logged in" means the [`SessionUser`](auth-sessions.md)
-  extractor resolved a user from the session cookie — so they're for
-  session/cookie auth. API token auth ([JWT](auth-jwt-api.md), [API
-  keys](auth-api-keys.md)) gates at the [backend chain](auth-backends.md) layer
-  instead, reading the `Authorization` header.
+- **"Logged in" means a tenant session.** The `SessionUser` extractor resolved
+  an active user from the `rustango_tenant_session` cookie for this tenant. A
+  cookie from another tenant, an expired one, or one minted before the user's
+  last password change or logout counts as anonymous. API token auth
+  ([JWT](auth-jwt-api.md), [API keys](auth-api-keys.md)) gates at the
+  [backend chain](auth-backends.md) layer instead, reading the `Authorization`
+  header.
 - **Layer ordering matters.** `.layer(gate)` protects every route added to the
   router *before* it; routes added after are public. Scoping the gate to a
   dedicated sub-router (the quick-start shape) avoids that footgun.
