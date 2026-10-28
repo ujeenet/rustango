@@ -357,6 +357,15 @@ pub(crate) fn normalize_host(authority: &str) -> Option<String> {
 /// The URI the client sent: `Router::nest` strips its prefix from
 /// `uri`, `OriginalUri` keeps it.
 #[cfg(feature = "_axum")]
+#[cfg_attr(
+    not(any(
+        feature = "admin",
+        feature = "tenancy",
+        feature = "template_views",
+        feature = "cache-page"
+    )),
+    allow(dead_code)
+)]
 pub(crate) fn original_uri<'a>(
     uri: &'a axum::http::Uri,
     extensions: &'a axum::http::Extensions,

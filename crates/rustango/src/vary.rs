@@ -40,6 +40,14 @@ pub(crate) fn add_vary(headers: &mut HeaderMap, token: &str) {
 
 /// Make `Cache-Control` `private`: any `public` is dropped, freshness
 /// directives such as `max-age` are kept.
+#[cfg_attr(
+    not(any(
+        feature = "tenancy",
+        feature = "template_views",
+        feature = "cache-page"
+    )),
+    allow(dead_code)
+)]
 pub(crate) fn mark_private(headers: &mut HeaderMap) {
     use axum::http::header::CACHE_CONTROL;
     // Every line, so a `no-store` on a second one survives the rewrite.
@@ -60,6 +68,10 @@ pub(crate) fn mark_private(headers: &mut HeaderMap) {
 }
 
 /// [`mark_private`] plus `no-store`, for pages that carry secrets.
+#[cfg_attr(
+    not(any(feature = "tenancy", feature = "template_views")),
+    allow(dead_code)
+)]
 pub(crate) fn mark_no_store(headers: &mut HeaderMap) {
     use axum::http::header::CACHE_CONTROL;
     mark_private(headers);

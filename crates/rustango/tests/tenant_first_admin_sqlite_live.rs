@@ -236,7 +236,10 @@ async fn redeem_and_sign_in(admin: &axum::Router, host: &str, link: &str, userna
     let uri = path_and_query(link);
     let form = tenant_req(admin, host, "GET", &uri, "").await;
     assert_eq!(form.status(), StatusCode::OK);
-    assert_eq!(form.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(form.headers()[header::CACHE_CONTROL]
+        .to_str()
+        .unwrap()
+        .contains("no-store"));
     let html = body_of(form).await;
     assert!(html.contains("Set your password"), "{html}");
 
@@ -385,7 +388,10 @@ async fn the_console_creates_a_first_admin_who_signs_in_through_the_link() {
         StatusCode::OK,
         "the run renders with the link"
     );
-    assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(resp.headers()[header::CACHE_CONTROL]
+        .to_str()
+        .unwrap()
+        .contains("no-store"));
     let run_policy = resp.headers()[header::REFERRER_POLICY].clone();
     let run_origin = browser_origin(&resp, "console.test");
     let page = body_of(resp).await;

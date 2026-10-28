@@ -596,6 +596,7 @@ async fn handle_login_required(
 }
 
 /// The `?next=` target: the path and query as sent, nest prefix included.
+#[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
 fn next_target(parts: &axum::http::request::Parts) -> String {
     crate::urls::original_uri(&parts.uri, &parts.extensions)
         .path_and_query()

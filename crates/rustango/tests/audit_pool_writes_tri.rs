@@ -248,6 +248,8 @@ async fn wait_until_blocked(pool: &Pool, n: i64) {
 
 /// [`wait_until_blocked`] for the locked reads of `table`.
 async fn wait_until_blocked_on(pool: &Pool, table: &str, n: i64) {
+    // SQLite counts busy connections; only the server probes name the table.
+    let _ = table;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let blocked: i64 = match pool.dialect().name() {
