@@ -1362,7 +1362,16 @@ fn render_changes_split_inner(
                 let f = t.field(column).ok_or_else(|| {
                     format!("AddColumn for `{table}.{column}` but field missing in snapshot")
                 })?;
-                if !f.nullable && f.default.is_none() && !empty_tables {
+                // SQLite cannot ADD a STORED generated column (#559).
+                if f.generated_as.is_some() {
+                    if let Some(rebuild) =
+                        super::rebuild::TableRebuild::needed(dialect, current, table)
+                    {
+                        out.set_rebuild(rebuild?)?;
+                        continue;
+                    }
+                }
+                if !f.nullable && f.default.is_none() && f.generated_as.is_none() && !empty_tables {
                     return Err(format!(
                         "AddColumn `{table}.{column}` is NOT NULL with no `default` — \
                          Postgres can't backfill existing rows. Pick one:\n  \
@@ -1384,7 +1393,11 @@ fn render_changes_split_inner(
                 if dialect.name() == "mysql" && is_uuid_default(f) {
                     out.immediate
                         .extend(add_column_backfilled(table, f, dialect));
-                } else if dialect.name() == "mysql" && !f.nullable && f.default.is_none() {
+                } else if dialect.name() == "mysql"
+                    && !f.nullable
+                    && f.default.is_none()
+                    && f.generated_as.is_none()
+                {
                     // MySQL fills a NOT NULL ADD with '' or 0; MODIFY fails on a NULL row instead.
                     out.immediate
                         .extend(add_column_then_not_null(table, f, dialect));
@@ -2539,6 +2552,15 @@ fn add_column_sql(table: &str, f: &FieldSnapshot, dialect: &dyn crate::sql::Dial
         col_q,
         sql_type_with_dialect(f, dialect)
     );
+    // As CREATE TABLE: no DEFAULT, CHECK or FK beside the expression.
+    if let Some(expr) = &f.generated_as {
+        let _ = write!(sql, " GENERATED ALWAYS AS ({expr}) STORED");
+        if !f.nullable {
+            sql.push_str(" NOT NULL");
+        }
+        sql.push_str(&inline_comment(f, dialect));
+        return sql;
+    }
     if let Some(expr) = &f.default {
         let rendered = render_column_default(expr, &f.ty, f.max_length, dialect);
         let _ = write!(sql, " DEFAULT {rendered}");

@@ -381,15 +381,22 @@ where
         )?;
         return Ok(());
     }
+    if fakes.is_empty() && (fake_scope == FakeScope::System || fake_all_tenants) {
+        return Err(TenancyError::Migrate(
+            rustango::migrate::MigrateError::Validation(
+                "--system and --all-tenants only apply to `--fake <name>`".into(),
+            ),
+        ));
+    }
     if !fakes.is_empty() {
         let (fake_dir, ledger) = fake_scope.resolve(dir);
+        check_fake_names(&fake_dir, &fakes, fake_all_tenants)?;
         if fake_all_tenants {
-            return fake_apply_across_tenants(pools, &fake_dir, ledger, &fakes, w).await;
+            return fake_apply_across_tenants(pools, ledger, &fakes, w).await;
         }
         if fake_scope == FakeScope::System {
             return fake_apply_to_pool(
                 &pools.registry_pool(),
-                &fake_dir,
                 ledger,
                 &fakes,
                 "registry (system chain)",
@@ -397,7 +404,7 @@ where
             )
             .await;
         }
-        return fake_apply_to_registry(pools, dir, &fakes, w).await;
+        return fake_apply_to_registry(pools, &fakes, w).await;
     }
     if target.is_some() || dry_run {
         // Targeted / dry-run mode is registry-only — tenant-scoped
@@ -527,7 +534,6 @@ pub(super) fn init_tenancy_cmd_with<W: Write>(
 /// schema is created if missing (same shape as `ensure_ledger`).
 async fn fake_apply_to_registry<W: Write, DB: Database>(
     pools: &TenantPools<DB>,
-    dir: &Path,
     names: &[String],
     w: &mut W,
 ) -> Result<(), TenancyError>
@@ -537,7 +543,6 @@ where
     let registry = pools.registry_pool();
     fake_apply_to_pool(
         &registry,
-        dir,
         rustango::migrate::LEDGER_TABLE,
         names,
         "registry",
@@ -556,7 +561,6 @@ where
 /// can't leave the others unrepaired.
 async fn fake_apply_across_tenants<W: Write, DB: Database>(
     pools: &TenantPools<DB>,
-    dir: &Path,
     ledger: &str,
     names: &[String],
     w: &mut W,
@@ -591,7 +595,7 @@ where
                 continue;
             }
         };
-        if let Err(e) = fake_apply_to_pool(&pool, dir, ledger, names, &org.slug, w).await {
+        if let Err(e) = fake_apply_to_pool(&pool, ledger, names, &org.slug, w).await {
             failures += 1;
             writeln!(w, "  ! {e}")?;
         }
@@ -641,6 +645,46 @@ impl FakeScope {
     }
 }
 
+/// Each name must be a migration in `dir` of the scope being stamped:
+/// tenant-scoped with `--all-tenants`, registry-scoped without.
+fn check_fake_names(dir: &Path, names: &[String], all_tenants: bool) -> Result<(), TenancyError> {
+    use rustango::migrate::MigrationScope;
+    let refuse = |msg: String| {
+        Err(TenancyError::Migrate(
+            rustango::migrate::MigrateError::Validation(msg),
+        ))
+    };
+    let want = if all_tenants {
+        MigrationScope::Tenant
+    } else {
+        MigrationScope::Registry
+    };
+    let migrations = rustango::migrate::file::list_dir(dir).map_err(TenancyError::Migrate)?;
+    for name in names {
+        match migrations.iter().find(|m| &m.name == name) {
+            None => {
+                return refuse(format!(
+                    "--fake: no migration named `{name}` in {} \
+                     (run `showmigrations` to list available names)",
+                    dir.display()
+                ))
+            }
+            Some(m) if m.scope != want => {
+                let (kind, fix) = if all_tenants {
+                    ("registry", "drop `--all-tenants` to stamp the registry")
+                } else {
+                    ("tenant", "add `--all-tenants` to stamp every tenant")
+                };
+                return refuse(format!(
+                    "--fake: `{name}` is a {kind}-scoped migration; {fix}"
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
 /// Backfill `ledger` in `pool` with `names` without running any SQL.
 ///
 /// Recovery path for the "tables exist but the ledger row is missing" drift
@@ -649,33 +693,16 @@ impl FakeScope {
 /// out-of-band, a dropped ledger, a partially-succeeded migration, or a
 /// subsystem whose tables predate its migration.
 ///
-/// Each name is validated against `dir` before the row lands, so operators
-/// can't backfill a typo. The ledger is created if missing. `label` names
+/// The caller checks each name with [`check_fake_names`] first. The
+/// ledger is created if missing. `label` names
 /// the target in the output (`registry`, a tenant slug, …).
 async fn fake_apply_to_pool<W: Write>(
     pool: &crate::sql::Pool,
-    dir: &Path,
     ledger: &str,
     names: &[String],
     label: &str,
     w: &mut W,
 ) -> Result<(), TenancyError> {
-    // Discover what's on disk to validate the names.
-    let migrations = rustango::migrate::file::list_dir(dir).map_err(TenancyError::Migrate)?;
-    let on_disk: std::collections::HashSet<&str> =
-        migrations.iter().map(|m| m.name.as_str()).collect();
-    for name in names {
-        if !on_disk.contains(name.as_str()) {
-            return Err(TenancyError::Migrate(
-                rustango::migrate::MigrateError::Validation(format!(
-                    "--fake: no migration named `{name}` in {} \
-                     (run `showmigrations` to list available names)",
-                    dir.display()
-                )),
-            ));
-        }
-    }
-
     // Ensure the ledger table exists, then INSERT each row idempotently.
     // v0.38 — route through the tri-dialect `_pool` helpers + the
     // dialect's `placeholder(n)` emitter so the same code works on

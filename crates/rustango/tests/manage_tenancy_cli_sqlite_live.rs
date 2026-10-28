@@ -285,14 +285,47 @@ async fn a_failed_tenant_fails_the_tenant_verbs() {
         reversible: false,
     })];
     file::write(&b.migrations.path().join("0003_bad.json"), &bad).unwrap();
-    for args in [
-        &["migrate-tenants"][..],
-        &["migrate"],
-        &["migrate", "--fake", "9999_none", "--all-tenants"],
-    ] {
+    for args in [&["migrate-tenants"][..], &["migrate"]] {
         let err = b.run(args).await.expect_err(&args.join(" "));
         assert!(err.contains("1 of 1 tenant(s) failed"), "{args:?}: {err}");
     }
+    let err = b
+        .run(&["migrate", "--fake", "9999_none", "--all-tenants"])
+        .await
+        .expect_err("an unknown name");
+    assert!(err.contains("no migration named"), "{err}");
+}
+
+/// `--fake` stamps only a migration of the scope it targets, and the
+/// scope flags never run a plain migrate.
+#[tokio::test]
+async fn migrate_fake_refuses_the_wrong_scope() {
+    let b = boot().await;
+    let err = b
+        .run(&["migrate", "--fake", "0002_ten"])
+        .await
+        .expect_err("a tenant migration into the registry ledger");
+    assert!(err.contains("add `--all-tenants`"), "{err}");
+    let err = b
+        .run(&["migrate", "--fake", "0001_reg", "--all-tenants"])
+        .await
+        .expect_err("a registry migration into tenant ledgers");
+    assert!(err.contains("drop `--all-tenants`"), "{err}");
+    for flag in ["--system", "--all-tenants"] {
+        let err = b.run(&["migrate", flag]).await.expect_err(flag);
+        assert!(err.contains("--fake"), "{flag}: {err}");
+    }
+    assert!(!b.has_table("reg_t").await, "a scope flag ran migrate");
+    let out = b
+        .run(&["migrate", "--fake", "0001_reg"])
+        .await
+        .expect("a registry fake");
+    assert!(out.contains("faked 0001_reg"), "{out}");
+    let out = b.run(&["migrate"]).await.expect("migrate");
+    assert!(
+        !b.has_table("reg_t").await,
+        "0001_reg was not stamped: {out}"
+    );
 }
 
 /// Tenant-scoped files are marked from the tenant ledgers, not the
