@@ -78,6 +78,16 @@ impl DeviceTable for OperatorTotp {
     }
 }
 
+/// `stored` opened (the previous key too) and sealed again under the
+/// current key, for `reseal-tenant-secrets`.
+pub(crate) fn reseal(operator_id: i64, stored: &str) -> Result<String, String> {
+    let b64 = stored.strip_prefix(SEALED_V1).ok_or("not a sealed value")?;
+    let plain = crate::aead::decrypt(b64, &aad(operator_id)).map_err(|e| format!("{e:?}"))?;
+    crate::aead::encrypt(&plain, &aad(operator_id))
+        .map(|b64| format!("{SEALED_V1}{b64}"))
+        .map_err(|e| format!("cannot seal: {e:?}"))
+}
+
 /// Create `rustango_operator_totp` for the registry's backend. Idempotent.
 ///
 /// # Errors

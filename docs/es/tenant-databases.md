@@ -246,8 +246,8 @@ Para cambiar la clave:
    abriendo lo que selló.
 2. `cargo run -- reseal-tenant-secrets` lista lo que cambiaría.
 3. `cargo run -- reseal-tenant-secrets --apply` vuelve a sellar con la clave
-   nueva las URLs de los tenants, las contraseñas de los servidores y los
-   client secrets de SSO.
+   nueva las URLs de los tenants, las contraseñas de los servidores, los
+   secretos TOTP de los operadores y los client secrets de SSO.
 4. Quita `RUSTANGO_SECRET_KEY_PREVIOUS` y reinicia.
 
 Los valores sellados con una clave en blanco, de antes de que se rechazaran

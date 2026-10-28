@@ -624,6 +624,58 @@ async fn reseal_covers_server_passwords(pool: &Pool) {
     with_key();
 }
 
+/// `reseal-tenant-secrets` re-seals operator TOTP secrets too, so an
+/// enrolled operator still reaches the code step once the old key goes.
+async fn reseal_covers_operator_totp(pool: &Pool) {
+    #[cfg(feature = "totp")]
+    {
+        use rustango::totp::{self, TotpSecret};
+        let _g = env_lock().lock().await;
+        let old = "old-totp-key-0123456789abcdef0123456789";
+        std::env::set_var("RUSTANGO_SECRET_KEY", old);
+        std::env::remove_var("RUSTANGO_SECRET_KEY_PREVIOUS");
+        let env = Env::new(pool).await;
+        seed_operator(&env).await;
+        let c = Console::boot(&env, false).await;
+        // Enroll under the old key.
+        let (_, page) = c.get("/account/totp").await;
+        let at = page.find("class=\"key\">").expect("setup key shown") + "class=\"key\">".len();
+        let key: String = page[at..].chars().take_while(|ch| *ch != '<').collect();
+        let secret = TotpSecret::from_base32(key.trim()).expect("base32 key");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let code = totp::generate_at(&secret, now, 30, 6);
+        let page = body(c.post("/account/totp", &format!("totp_code={code}")).await).await;
+        assert!(page.contains("now on"), "{page}");
+
+        std::env::set_var("RUSTANGO_SECRET_KEY_PREVIOUS", old);
+        std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+        let out = env
+            .run(&["reseal-tenant-secrets", "--apply"])
+            .await
+            .expect("apply");
+        assert!(out.contains("/secret: re-sealed"), "{out}");
+        std::env::remove_var("RUSTANGO_SECRET_KEY_PREVIOUS");
+
+        // The password opens the code step, not a 503.
+        let login = c.post("/login", "username=op&password=letmein").await;
+        let to = login
+            .headers()
+            .get("location")
+            .map(|v| v.to_str().unwrap().to_owned());
+        assert!(
+            to.as_deref().is_some_and(|l| l.starts_with("/login/totp")),
+            "{} {to:?}",
+            login.status()
+        );
+        with_key();
+    }
+    #[cfg(not(feature = "totp"))]
+    let _ = pool;
+}
+
 // ------------------------------------------------------------- console
 
 struct Console {
@@ -1027,6 +1079,7 @@ tri_dialect_test! {
         a_stale_edit_is_refused,
         new_servers_require_tls,
         reseal_covers_server_passwords,
+        reseal_covers_operator_totp,
         a_console_post_needs_csrf,
         a_console_without_pools_does_not_delete,
         the_console_never_shows_the_password,
