@@ -614,7 +614,7 @@ async fn a_json_field_stores_the_value_as_sent() {
         );
     }
     let form = rustango::forms::ModelFormFor::<Item>::from_json(
-        &serde_json::json!({"title": "t", "settings": "dark"}),
+        &serde_json::json!({"title": "t", "status": "draft", "settings": "dark"}),
     )
     .expect("parses");
     let at = form
