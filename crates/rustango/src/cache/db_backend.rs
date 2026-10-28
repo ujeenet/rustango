@@ -446,8 +446,8 @@ impl Cache for DatabaseCache {
     }
 
     /// One upsert, so parallel callers never lose a count (#1871). The TTL
-    /// is set on insert only; an expired or non-integer value restarts at `by`.
-    /// Overflow is an error, not a saturation.
+    /// is set on insert only; an expired or non-i64 value restarts at `by`.
+    /// Overflow is an error, not a saturation: PG and MySQL raise it.
     async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
@@ -468,7 +468,12 @@ impl Cache for DatabaseCache {
             SqlValue::I64(now),
             SqlValue::I64(now),
         ];
-        let err = |e: crate::sql::ExecError| CacheError::Connection(format!("incr: {e}"));
+        let err = |e: crate::sql::ExecError| {
+            if is_out_of_range(&e) {
+                return super::incr_overflow();
+            }
+            CacheError::Connection(format!("incr: {e}"))
+        };
         let mysql = dialect.name() == "mysql";
         let excluded = |col: &str| {
             if mysql {
@@ -479,13 +484,19 @@ impl Cache for DatabaseCache {
         };
         let (new_value, new_expires) = (excluded("value"), excluded("expires"));
         let expired = |p: &str| format!("{table}.expires <> 0 AND {table}.expires < {p}");
-        // A strict-mode MySQL CAST of a non-integer is an error, not 0.
+        // A strict-mode MySQL CAST of a non-integer is an error, not 0, so
+        // only text inside the i64 range is cast; CASE fixes the order.
+        let in_i64 = |matches: &str, wide: &str| {
+            format!(
+                "NOT (CASE WHEN {table}.value {matches} '^-?[0-9]{{1,19}}$' \
+                 THEN CAST({table}.value AS {wide}) BETWEEN {} AND {} ELSE FALSE END)",
+                i64::MIN,
+                i64::MAX
+            )
+        };
         let (not_int, int) = match dialect.name() {
-            "mysql" => (
-                format!("{table}.value NOT REGEXP '^-?[0-9]{{1,18}}$'"),
-                "SIGNED",
-            ),
-            "postgres" => (format!("{table}.value !~ '^-?[0-9]{{1,18}}$'"), "BIGINT"),
+            "mysql" => (in_i64("REGEXP", "DECIMAL(20,0)"), "SIGNED"),
+            "postgres" => (in_i64("~", "NUMERIC"), "BIGINT"),
             _ => (
                 format!("CAST(CAST({table}.value AS INTEGER) AS TEXT) <> {table}.value"),
                 "INTEGER",
@@ -548,9 +559,7 @@ impl Cache for DatabaseCache {
             .await
             .map_err(err)?;
             let Some((v,)) = rows.into_iter().next() else {
-                return Err(CacheError::Connection(
-                    "incr: integer out of range (i64 overflow)".to_owned(),
-                ));
+                return Err(super::incr_overflow());
             };
             v
         };
@@ -649,6 +658,15 @@ impl Cache for DatabaseCache {
             .map_err(|e| CacheError::Connection(format!("delete_prefix: {e}")))?;
         Ok(())
     }
+}
+
+/// SQLSTATE 22003: PG and MySQL refuse a BIGINT sum past the i64 range.
+fn is_out_of_range(e: &crate::sql::ExecError) -> bool {
+    matches!(
+        e,
+        crate::sql::ExecError::Driver(sqlx::Error::Database(db))
+            if db.code().as_deref() == Some("22003")
+    )
 }
 
 #[cfg(test)]

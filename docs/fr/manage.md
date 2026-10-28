@@ -93,7 +93,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 
 | Verbe | Ce qu'il fait |
 |---|---|
-| `dumpdata` | Exporte des lignes en fixtures JSON |
+| `dumpdata` | Exporte des lignes en fixtures JSON. Les flottants gardent chaque bit ; une colonne JSON contenant le `null` JSON est écrite `{"$json": null}`, distincte du NULL SQL (`null`) |
 | `loaddata <fixture.json> [--fail-fast]` | Recharge des fixtures JSON. Un chargement échoué ou partiel n'est pas annulé |
 | `flush [--yes] [--app <label>] [--model <name>]` | Vide chaque table de modèle ; les drapeaux restreignent l'ensemble. Les modèles non gérés et les vues sont ignorés. Postgres utilise `TRUNCATE … RESTART IDENTITY` et échoue si une table hors du filtre référence une cible (un lien `ON DELETE CASCADE` depuis celle-ci la vide quand même sur MySQL / SQLite) ; MySQL / SQLite suppriment les lignes dans une transaction, enfants d'abord, et gardent les compteurs d'id. Un projet multi-tenant exige `--tenant <slug>` et ne vide que ce tenant |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Suppression en masse en flux ; `--pretend` signale sans supprimer |

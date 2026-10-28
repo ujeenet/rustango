@@ -78,6 +78,7 @@ pub(crate) use executor::rolled_back;
 pub use executor::row_to_json_my;
 #[cfg(feature = "sqlite")]
 pub use executor::row_to_json_sqlite;
+pub(crate) use executor::select_rows_as_json_with;
 #[cfg(feature = "template_views")]
 pub(crate) use executor::select_stored_uuids;
 pub use executor::{

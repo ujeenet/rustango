@@ -864,7 +864,9 @@ pub(crate) async fn render_form_for_parent_in(
 }
 
 /// Rendered rows of one editable panel and its TOTAL_FORMS. With a
-/// refused POST in `submitted`, the rows show what was typed, not the stored values.
+/// refused POST in `submitted`, the rows show what was typed, not the stored
+/// values. Typed rows are matched to stored ones by PK; a typed row whose
+/// row is gone shows as an error, so its values land on no other row.
 fn form_panel_rows(
     child_cfg: &crate::core::AdminConfig,
     display_fields: &[&'static FieldSchema],
@@ -875,33 +877,36 @@ fn form_panel_rows(
     submitted: Option<&HashMap<String, String>>,
 ) -> (usize, Vec<serde_json::Value>) {
     let initial_forms = rows.len();
+    let pk_field_name = pk_field.map_or("id", |p| p.name);
     // Only a POST that carried this panel's formset replaces its values.
-    let submitted = submitted.filter(|form| form.contains_key(&format!("{prefix}-TOTAL_FORMS")));
-    let total_forms = submitted
-        .and_then(|form| crate::forms::formset::total_forms(form, prefix).ok())
-        .map_or(initial_forms + extra, |n| {
-            n.clamp(initial_forms, crate::forms::formset::MAX_FORMS)
-        });
-    let typed = |idx: usize, f: &FieldSchema, kind: WriteKind| -> Option<String> {
+    let posted = submitted.and_then(|form| {
+        let total = crate::forms::formset::total_forms(form, prefix).ok()?;
+        Some(PostedSlots::new(form, prefix, pk_field_name, total))
+    });
+    let total_forms = posted.as_ref().map_or(initial_forms + extra, |p| {
+        (initial_forms + p.new.len()).min(crate::forms::formset::MAX_FORMS)
+    });
+    // `slot` is the posted index; `None` keeps the stored value.
+    let typed = |slot: Option<usize>, f: &FieldSchema, kind: WriteKind| -> Option<String> {
         let form = submitted.filter(|_| f.accepts_input(kind))?;
         // An unchecked box is not sent: missing means blank.
         Some(
-            form.get(&format!("{prefix}-{idx}-{}", f.name))
+            form.get(&format!("{prefix}-{}-{}", slot?, f.name))
                 .cloned()
                 .unwrap_or_default(),
         )
     };
-    let pk_field_name = pk_field.map_or("id", |p| p.name);
     let mut rendered_rows: Vec<serde_json::Value> = Vec::with_capacity(total_forms);
     for (idx, row) in rows.iter().enumerate() {
         let pk_text = row_pk_text(row, pk_field);
+        let slot = posted.as_ref().and_then(|p| p.slot_of(&pk_text));
         let cells: Vec<serde_json::Value> = display_fields
             .iter()
             .map(|f| {
                 // Route through the same formatter the main change form
                 // uses, so DateTime/Json/Array values are normalised to
                 // what each `<input>` accepts.
-                let raw_str = typed(idx, f, WriteKind::Update)
+                let raw_str = typed(slot, f, WriteKind::Update)
                     .unwrap_or_else(|| crate::admin::render::render_value_for_input_json(row, f));
                 let input_html =
                     render_prefixed_input(child_cfg, f, &raw_str, (prefix, idx, WriteKind::Update));
@@ -920,9 +925,7 @@ fn form_panel_rows(
             n = html_escape(pk_field_name),
             v = html_escape(&pk_text),
         );
-        let deleting = submitted
-            .and_then(|form| form.get(&format!("{prefix}-{idx}-DELETE")))
-            .is_some_and(|v| !v.is_empty());
+        let deleting = slot.is_some_and(|s| posted.as_ref().is_some_and(|p| p.deleting(s)));
         let delete_input_html = format!(
             r#"<input type="checkbox" name="{p}-{i}-DELETE" value="on"{c}>"#,
             p = html_escape(prefix),
@@ -936,13 +939,34 @@ fn form_panel_rows(
             "delete_input_html": delete_input_html,
         }));
     }
+    // Typed rows whose row is gone: shown, never posted again.
+    if let Some(p) = &posted {
+        let shown: HashSet<String> = rows.iter().map(|r| row_pk_text(r, pk_field)).collect();
+        for (slot, pk) in &p.existing {
+            if shown.contains(pk) || p.deleting(*slot) {
+                continue;
+            }
+            rendered_rows.push(serde_json::json!({
+                "pk": pk,
+                "error": format!(
+                    "Row {pk} was deleted after this page loaded; its changes were not saved."
+                ),
+                "cells": [],
+                "hidden_pk": "",
+                "delete_input_html": "",
+            }));
+        }
+    }
     // Blank rows for adding new children. No hidden PK (the POST
     // handler treats absence as "INSERT") and no DELETE box.
     for idx in initial_forms..total_forms {
+        let slot = posted
+            .as_ref()
+            .and_then(|p| p.new.get(idx - initial_forms).copied());
         let cells: Vec<serde_json::Value> = display_fields
             .iter()
             .map(|f| {
-                let raw_str = typed(idx, f, WriteKind::Insert).unwrap_or_default();
+                let raw_str = typed(slot, f, WriteKind::Insert).unwrap_or_default();
                 let input_html =
                     render_prefixed_input(child_cfg, f, &raw_str, (prefix, idx, WriteKind::Insert));
                 serde_json::json!({
@@ -959,6 +983,61 @@ fn form_panel_rows(
         }));
     }
     (total_forms, rendered_rows)
+}
+
+/// A posted formset's slots, split as [`plan_post`] reads them.
+struct PostedSlots<'a> {
+    form: &'a HashMap<String, String>,
+    prefix: &'a str,
+    /// Slots of existing rows, with the PK each was posted for.
+    existing: Vec<(usize, String)>,
+    /// Slots of new rows, in order.
+    new: Vec<usize>,
+}
+
+impl<'a> PostedSlots<'a> {
+    fn new(
+        form: &'a HashMap<String, String>,
+        prefix: &'a str,
+        pk_name: &str,
+        total: usize,
+    ) -> Self {
+        let initial = crate::forms::formset::initial_forms(form, prefix);
+        let (mut existing, mut new) = (Vec::new(), Vec::new());
+        for slot in 0..total {
+            let pk = form
+                .get(&format!("{prefix}-{slot}-{pk_name}"))
+                .map_or("", String::as_str);
+            if slot_is_new(initial, slot, pk) {
+                new.push(slot);
+            } else {
+                existing.push((slot, pk.trim().to_owned()));
+            }
+        }
+        Self {
+            form,
+            prefix,
+            existing,
+            new,
+        }
+    }
+
+    /// The slot posted for the existing row `pk`.
+    fn slot_of(&self, pk: &str) -> Option<usize> {
+        self.existing.iter().find(|(_, p)| p == pk).map(|(s, _)| *s)
+    }
+
+    fn deleting(&self, slot: usize) -> bool {
+        self.form
+            .get(&format!("{}-{slot}-DELETE", self.prefix))
+            .is_some_and(|v| !v.is_empty())
+    }
+}
+
+/// Whether posted slot `idx` is a new row: past INITIAL_FORMS, or without
+/// it, one with no PK.
+fn slot_is_new(initial: Option<usize>, idx: usize, raw_pk: &str) -> bool {
+    initial.map_or(raw_pk.trim().is_empty(), |n| idx >= n)
 }
 
 /// Wrap `super::render::render_input` so the generated `name=` /
@@ -1599,7 +1678,7 @@ async fn plan_target(
         inserts: Vec::new(),
         cap: None,
     };
-    let is_new = |idx: usize, raw_pk: &str| initial.map_or(raw_pk.trim().is_empty(), |n| idx >= n);
+    let is_new = |idx: usize, raw_pk: &str| slot_is_new(initial, idx, raw_pk);
     let rows = crate::forms::formset::row_payloads(form, table, total_forms);
     // Every existing row's stored state in one read, not one per row.
     let existing_raw: Vec<String> = rows

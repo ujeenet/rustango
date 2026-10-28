@@ -101,6 +101,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - CLI errors no longer start with `invalid migration:`; `migrate <target>` prints `applied` / `unapplied` per file; migrate messages drop stale version and issue references.
 - The admin's missing-table page names `makemigrations`; the tenancy quickstart, operator TOTP recovery and the CreateView example in the docs work as written.
 
+### Fixed — wrong data: cache counters, dumps, admin inlines
+
+- `Cache::incr` on `DatabaseCache` (PG, MySQL) no longer resets a 19-digit counter to `by`; every backend errors on i64 overflow, and `RedisCache` returns the exact value past 2^53.
+- `dumpdata` → `loaddata` keeps every f64 bit and tells JSON `null` from SQL NULL; a NOT NULL JSON column holding `null` reloads.
+- The admin re-shows a refused edit's inline rows by PK; a row deleted meanwhile shows as an error instead of moving its values onto another row.
+
 ## [0.61.9] — 2026-10-28
 
 ### Fixed — ORM and migrations

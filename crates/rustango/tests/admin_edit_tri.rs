@@ -871,6 +871,89 @@ async fn refused_edit_keeps_the_typed_inline_rows(pool: &Pool) {
     assert_eq!(stored[0].qty, 1, "a refused save wrote the row");
 }
 
+/// A refused save keys the typed inline rows by PK: a row deleted meanwhile
+/// shows as an error, and the others keep their own values.
+async fn refused_edit_keys_typed_rows_by_pk(pool: &Pool) {
+    let mut p = RParent {
+        id: Auto::default(),
+        name: "p".into(),
+        rank: 1,
+    };
+    p.insert_pool(pool).await.expect("parent");
+    let pid = *p.id.get().expect("pk");
+    let mut lines = Vec::new();
+    for qty in [1, 2, 3] {
+        let mut l = RLine {
+            id: Auto::default(),
+            parent_id: pid,
+            qty,
+            done: false,
+        };
+        l.insert_pool(pool).await.expect("line");
+        lines.push(l);
+    }
+    let [a, b, c] = [0, 1, 2].map(|i| *lines[i].id.get().expect("pk"));
+    // Another user deletes b after the page loaded.
+    lines[1].delete_pool(pool).await.expect("delete b");
+    let form = format!(
+        "name=p&rank=abc&aed_rline-TOTAL_FORMS=4&aed_rline-INITIAL_FORMS=3\
+         &aed_rline-0-id={a}&aed_rline-0-qty=10\
+         &aed_rline-1-id={b}&aed_rline-1-qty=20\
+         &aed_rline-2-id={c}&aed_rline-2-qty=30\
+         &aed_rline-3-qty=40"
+    );
+    let (status, html) = send(pool, "POST", &format!("/aed_rparent/{pid}"), &form).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert_eq!(shown(&html, "aed_rline-INITIAL_FORMS"), "2", "{html}");
+    assert_eq!(shown(&html, "aed_rline-TOTAL_FORMS"), "3", "{html}");
+    let rows = [
+        (
+            shown(&html, "aed_rline-0-id"),
+            shown(&html, "aed_rline-0-qty"),
+        ),
+        (
+            shown(&html, "aed_rline-1-id"),
+            shown(&html, "aed_rline-1-qty"),
+        ),
+    ];
+    assert_eq!(
+        rows,
+        [(a.to_string(), "10".into()), (c.to_string(), "30".into())],
+        "typed values moved to another row"
+    );
+    assert_eq!(shown(&html, "aed_rline-2-qty"), "40", "typed new row lost");
+    assert!(!html.contains("aed_rline-3-"), "an extra slot: {html}");
+    assert!(
+        html.contains(&format!("Row {b} was deleted")),
+        "the gone row is not flagged: {html}"
+    );
+
+    // Save the form as shown, parent fixed: each row keeps its own data.
+    let resubmit = encode(&[
+        ("name", "p".into()),
+        ("rank", "2".into()),
+        ("aed_rline-TOTAL_FORMS", "3".into()),
+        ("aed_rline-INITIAL_FORMS", "2".into()),
+        ("aed_rline-0-id", rows[0].0.clone()),
+        ("aed_rline-0-qty", rows[0].1.clone()),
+        ("aed_rline-1-id", rows[1].0.clone()),
+        ("aed_rline-1-qty", rows[1].1.clone()),
+        ("aed_rline-2-qty", "40".into()),
+    ]);
+    let (status, body) = send(pool, "POST", &format!("/aed_rparent/{pid}"), &resubmit).await;
+    assert!(status.is_redirection(), "save: {status} {body}");
+    let mut stored: Vec<(i64, i64)> = RLine::objects()
+        .fetch(pool)
+        .await
+        .expect("lines")
+        .into_iter()
+        .map(|l| (*l.id.get().expect("pk"), l.qty))
+        .collect();
+    stored.sort_unstable();
+    assert_eq!(&stored[..2], [(a, 10), (c, 30)]);
+    assert_eq!((stored.len(), stored[2].1), (3, 40));
+}
+
 /// The bare admin serves the favicon its pages link, outside the session gate.
 async fn bare_admin_serves_the_favicon_it_links(pool: &Pool) {
     let admin = rustango::admin::Builder::new(pool.clone())
@@ -934,6 +1017,7 @@ tri_dialect_test! {
         detail_page_bounds_inline_rows_and_history,
         inline_save_reads_children_in_one_select,
         refused_edit_keeps_the_typed_inline_rows,
+        refused_edit_keys_typed_rows_by_pk,
         bare_admin_serves_the_favicon_it_links,
     ],
 }

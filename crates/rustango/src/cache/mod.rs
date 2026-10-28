@@ -76,6 +76,11 @@ pub enum CacheError {
     Serialization(String),
 }
 
+/// The error every backend returns when `incr` would leave the i64 range.
+pub(crate) fn incr_overflow() -> CacheError {
+    CacheError::Connection("incr: integer out of range (i64 overflow)".to_owned())
+}
+
 // ------------------------------------------------------------------ Cache trait
 
 /// Pluggable async cache.
@@ -151,7 +156,8 @@ pub trait Cache: Send + Sync + 'static {
     }
 
     /// Add `by` to the integer counter at `key` and return the new
-    /// value. A value that is not an integer counts as 0.
+    /// value. A value that is not an integer counts as 0; an i64
+    /// overflow is an error and leaves the counter as it was.
     ///
     /// The default is a get-parse-set, which is not atomic. Backends
     /// with a native counter override it: `RedisCache` uses `INCRBY` and
@@ -165,7 +171,7 @@ pub trait Cache: Send + Sync + 'static {
             .await?
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
-        let new = cur.saturating_add(by);
+        let new = cur.checked_add(by).ok_or_else(incr_overflow)?;
         self.set(key, &new.to_string(), ttl).await?;
         Ok(new)
     }
@@ -260,7 +266,8 @@ pub trait Cache: Send + Sync + 'static {
     /// backend that makes `incr` atomic gets an atomic `decr` too.
     /// `ttl` is a hint, as it is for `incr`.
     async fn decr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
-        self.incr(key, by.saturating_neg(), ttl).await
+        self.incr(key, by.checked_neg().ok_or_else(incr_overflow)?, ttl)
+            .await
     }
 
     /// Return the stored value, or `default` when the key is absent or
@@ -976,7 +983,7 @@ impl Cache for InMemoryCache {
             .filter(|e| !e.is_expired())
             .and_then(|e| std::str::from_utf8(&e.value).ok()?.parse::<i64>().ok())
             .unwrap_or(0);
-        let new = current.saturating_add(by);
+        let new = current.checked_add(by).ok_or_else(incr_overflow)?;
         let value = bytes::Bytes::from(new.to_string());
         let size = key.len() + value.len();
         // Keep the existing expiry when the key is live and no TTL is
@@ -1511,7 +1518,7 @@ impl FileCache {
             ),
             Entry::Dead | Entry::Missing => (0, None),
         };
-        let new = cur.saturating_add(by);
+        let new = cur.checked_add(by).ok_or_else(incr_overflow)?;
         let bytes = match (ttl, kept) {
             (None, Some(at)) => Self::encode_at(key, new.to_string().as_bytes(), at),
             _ => Self::encode(key, new.to_string().as_bytes(), ttl),

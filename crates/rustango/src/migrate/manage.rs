@@ -4226,7 +4226,7 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
                     });
                 }
             }
-            let rows = crate::sql::select_rows_as_json(pool, &query, &fields)
+            let rows = crate::sql::select_rows_as_json_with(pool, &query, &fields, fixture_json)
                 .await
                 .map_err(|e| {
                     MigrateError::Validation(format!(
@@ -4283,6 +4283,27 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
         }
     }
     out.finish()
+}
+
+/// Tags a JSON column value in a fixture, so a JSON `null` stays apart
+/// from SQL NULL (plain `null`).
+const JSON_TAG: &str = "$json";
+
+/// A JSON column value as dumpdata writes it: `null`, and any value that
+/// looks like a tag, go inside one.
+fn fixture_json(v: serde_json::Value) -> serde_json::Value {
+    if v.is_null() || json_tagged(&v).is_some() {
+        serde_json::json!({ JSON_TAG: v })
+    } else {
+        v
+    }
+}
+
+/// The value inside a [`JSON_TAG`] wrapper.
+fn json_tagged(v: &serde_json::Value) -> Option<&serde_json::Value> {
+    v.as_object()
+        .filter(|m| m.len() == 1)
+        .and_then(|m| m.get(JSON_TAG))
 }
 
 /// Rows per dumpdata page.
@@ -4621,8 +4642,8 @@ fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
 /// - boolean → `SqlValue::Bool`
 /// - string → parsed per `FieldType` (Decimal / Date / DateTime /
 ///   Time / Uuid / Binary [hex] / String)
-/// - null → `SqlValue::Null`
-/// - object / array → `SqlValue::Json`
+/// - null → `SqlValue::Null`; on a NOT NULL JSON field, JSON `null`
+/// - object / array → `SqlValue::Json`; `{"$json": v}` → `v`
 /// `loaddata` into every model, or only those of `scope`.
 pub(crate) async fn loaddata_cmd<W: Write>(
     pool: &Pool,
@@ -5066,7 +5087,8 @@ pub(crate) fn json_to_sql_value(
     field: &crate::core::FieldSchema,
 ) -> Result<crate::core::SqlValue, String> {
     use crate::core::{FieldType, SqlValue};
-    if v.is_null() {
+    // A JSON field reads `null` below: a NOT NULL one can only mean JSON `null`.
+    if v.is_null() && !matches!(field.ty, FieldType::Json) {
         return Ok(SqlValue::Null);
     }
     match field.ty {
@@ -5140,7 +5162,12 @@ pub(crate) fn json_to_sql_value(
                 .map(SqlValue::Uuid)
                 .map_err(|e| format!("Uuid parse: {e}"))
         }
-        FieldType::Json => Ok(SqlValue::Json(v.clone())),
+        // Older dumps wrote JSON `null` untagged, as SQL NULL.
+        FieldType::Json => Ok(match json_tagged(v) {
+            Some(inner) => SqlValue::Json(inner.clone()),
+            None if v.is_null() && field.nullable => SqlValue::Null,
+            None => SqlValue::Json(v.clone()),
+        }),
         FieldType::Decimal => {
             let s = v
                 .as_str()
