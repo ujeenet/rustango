@@ -897,6 +897,19 @@ impl PerRequestAttempt {
         Ok(())
     }
 
+    /// [`Self::reserve`], then [`LoginAttempt::resolve`] with the stored username.
+    ///
+    /// # Errors
+    /// As [`Self::reserve`] and [`LoginAttempt::resolve`].
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    pub(crate) async fn resolve(&mut self, stored_username: &str) -> Result<(), LoginRefused> {
+        self.reserve().await?;
+        match &mut self.held {
+            PerRequestHeld::Reserved(attempt) => attempt.resolve(stored_username).await,
+            PerRequestHeld::Quiet(_) => Ok(()),
+        }
+    }
+
     /// Report the compare. A quiet right one writes nothing; a quiet miss
     /// is counted before its slot is left.
     ///
