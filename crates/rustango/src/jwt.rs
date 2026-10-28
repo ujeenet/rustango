@@ -221,7 +221,7 @@ pub fn decode_at(token: &str, secret: &[u8], now: u64) -> Result<Claims, JwtErro
 ///
 /// This is the explicit branch: `decode` refuses such a token, because
 /// forgetting `.ttl()` and meaning to omit it look identical once the
-/// token is signed (#1538).
+/// token is signed.
 ///
 /// # Errors
 /// See [`JwtError`].
@@ -290,7 +290,7 @@ fn decode_inner(
         }
     } else if require_exp {
         // Absent `exp` used to skip the check entirely, so a token
-        // minted without `.ttl()` was valid forever (#1538).
+        // minted without `.ttl()` was valid forever.
         return Err(JwtError::MissingExp);
     }
     if let Some(nbf) = numeric_date(&claims, "nbf", f64::ceil)? {
@@ -529,7 +529,7 @@ mod tests {
 
     /// A token minted without `.ttl()` carries no `exp`, and the old
     /// `if let Some(exp)` skipped the check entirely — so it was valid
-    /// forever (#1538). `decode` now refuses it.
+    /// forever. `decode` now refuses it.
     #[test]
     fn a_token_with_no_exp_is_refused() {
         let t = encode(&Claims::new("forever"), SECRET).unwrap();

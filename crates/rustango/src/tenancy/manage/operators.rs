@@ -127,7 +127,7 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     use crate::audit::{AuditOp, AuditSource, PendingEntry};
-    use crate::tenancy::operator_totp::{self, OperatorTotp};
+    use crate::tenancy::operator_totp;
     const USAGE: &str = "reset-operator-totp <username>";
     let parsed = super::args::parse(
         args,
@@ -146,7 +146,7 @@ where
         .map_err(explain)?;
     let id = op.id.get().copied().unwrap_or_default();
     operator_totp::ensure_table(&registry).await?;
-    if crate::admin::totp_store::reset_in::<OperatorTotp>(&registry, id).await? == 0 {
+    if operator_totp::reset(&registry, &op).await? == 0 {
         writeln!(w, "`{username}` has no two-factor device")?;
         return Ok(());
     }
@@ -159,6 +159,9 @@ where
         changes: serde_json::json!({ "action": "totp_reset" }),
     };
     crate::audit::emit_one_pool(&registry, &entry).await?;
-    writeln!(w, "two-factor device removed for operator `{username}`")?;
+    writeln!(
+        w,
+        "two-factor device removed for operator `{username}`; their sessions are ended"
+    )?;
     Ok(())
 }

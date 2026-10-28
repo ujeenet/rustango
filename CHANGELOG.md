@@ -4,6 +4,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — auth review, round two
+
+- A right Basic or API-key credential no longer clears the account's failed logins; only a sign-in does, so polling clients cannot wipe a guesser's misses.
+- A request cancelled while its credential's slot is given back still gives it back.
+- Resetting an operator's TOTP, from the console or `reset-operator-totp`, ends that operator's sessions.
+- `permission_required` / `permission_required_or_403` read the tenant pool on any backend, so SQLite and MySQL tenants no longer get a 500 in a build with `postgres`.
+- `reseal-tenant-secrets` counts an operator TOTP row of an unexpected shape as failed instead of skipping it.
+- CORS: credentials with `"*"` origins are refused with a logged error; with credentials a `"*"` entry in `cors_allowed_headers` / `cors_expose_headers` is dropped.
+
 ### Fixed — ORM set operations and writes
 
 - `a.union(b).intersection(c)` and `a.difference(b).intersection(c)` read left to right on PG and MySQL too, as on SQLite.

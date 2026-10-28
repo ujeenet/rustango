@@ -626,9 +626,18 @@ async fn reseal_covers_server_passwords(pool: &Pool) {
 
 /// `reseal-tenant-secrets` re-seals operator TOTP secrets too, so an
 /// enrolled operator still reaches the code step once the old key goes.
+#[cfg(not(feature = "totp"))]
+async fn reseal_covers_operator_totp(_: &Pool) {
+    panic!("this scenario needs the `totp` feature");
+}
+
+/// `reseal-tenant-secrets` re-seals operator TOTP secrets too, so an
+/// enrolled operator still reaches the code step once the old key goes.
+#[cfg(feature = "totp")]
 async fn reseal_covers_operator_totp(pool: &Pool) {
-    #[cfg(feature = "totp")]
     {
+        use rustango::sql::UpdaterPool as _;
+        use rustango::tenancy::OperatorTotp;
         use rustango::totp::{self, TotpSecret};
         let _g = env_lock().lock().await;
         let old = "old-totp-key-0123456789abcdef0123456789";
@@ -649,6 +658,22 @@ async fn reseal_covers_operator_totp(pool: &Pool) {
         let code = totp::generate_at(&secret, now, 30, 6);
         let page = body(c.post("/account/totp", &format!("totp_code={code}")).await).await;
         assert!(page.contains("now on"), "{page}");
+        // A NULL `pending_secret` is not an odd row.
+        let dry = env.run(&["reseal-tenant-secrets"]).await.expect("dry run");
+        assert!(dry.contains("/secret: would re-seal"), "{dry}");
+        // A re-enrollment in progress, sealed under the old key too.
+        let sealed: Vec<String> = OperatorTotp::objects()
+            .values_list_flat("secret")
+            .fetch(&env.registry)
+            .await
+            .expect("totp rows");
+        OperatorTotp::objects()
+            .filter("confirmed", true)
+            .update()
+            .set("pending_secret", sealed[0].clone())
+            .execute_pool(&env.registry)
+            .await
+            .expect("stage a re-enrollment");
 
         std::env::set_var("RUSTANGO_SECRET_KEY_PREVIOUS", old);
         std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
@@ -657,7 +682,15 @@ async fn reseal_covers_operator_totp(pool: &Pool) {
             .await
             .expect("apply");
         assert!(out.contains("/secret: re-sealed"), "{out}");
+        assert!(out.contains("/pending_secret: re-sealed"), "{out}");
         std::env::remove_var("RUSTANGO_SECRET_KEY_PREVIOUS");
+        // Both now open under the new key alone, and a second run is clean.
+        let again = env
+            .run(&["reseal-tenant-secrets", "--apply"])
+            .await
+            .expect("second apply");
+        assert!(again.contains("/pending_secret: re-sealed"), "{again}");
+        assert!(again.contains(" 0 failed"), "{again}");
 
         // The password opens the code step, not a 503.
         let login = c.post("/login", "username=op&password=letmein").await;
@@ -672,8 +705,6 @@ async fn reseal_covers_operator_totp(pool: &Pool) {
         );
         with_key();
     }
-    #[cfg(not(feature = "totp"))]
-    let _ = pool;
 }
 
 // ------------------------------------------------------------- console

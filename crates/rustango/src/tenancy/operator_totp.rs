@@ -151,3 +151,23 @@ pub(crate) async fn remove(
 ) -> Result<bool, ExecError> {
     store::remove_in::<OperatorTotp>(pool, operator_id, secret).await
 }
+
+/// Drop `operator`'s device for a lost one, and end their sessions so one
+/// opened with it does not outlive it. The number of devices dropped.
+pub(crate) async fn reset(
+    pool: &Pool,
+    operator: &crate::tenancy::auth::Operator,
+) -> Result<u64, ExecError> {
+    let id = operator.id.get().copied().unwrap_or_default();
+    let n = store::reset_in::<OperatorTotp>(pool, id).await?;
+    if n > 0 {
+        crate::session::revoke_sessions::<crate::tenancy::auth::Operator>(
+            pool,
+            id,
+            operator.sessions_revoked_at,
+            0,
+        )
+        .await?;
+    }
+    Ok(n)
+}

@@ -145,18 +145,14 @@ impl CorsLayer {
 
     /// Allow any origin.
     ///
-    /// This warns if credentials are already on. Browsers reject `*`
+    /// This logs an error if credentials are already on. Browsers reject `*`
     /// together with credentials. For credentialed CORS, list the
     /// origins with `.allow_origins([...])` instead.
     #[must_use]
     pub fn allow_any_origin(mut self) -> Self {
         self.allow_origin = AllowOrigin::Any;
         if self.allow_credentials {
-            tracing::warn!(
-                target: "rustango::cors",
-                "CorsLayer.allow_any_origin() called with allow_credentials=true — \
-                 use .allow_origins([...]) with an explicit allowlist for credentialed CORS"
-            );
+            log_credentials_with_any_origin();
         }
         self
     }
@@ -189,7 +185,14 @@ impl CorsLayer {
         if s.cors_allowed_origins.is_empty() {
             return None;
         }
-        let layer = if s.cors_allowed_origins.iter().any(|o| o == "*") {
+        let any_origin = s.cors_allowed_origins.iter().any(|o| o == "*");
+        let mut credentials = s.cors_allow_credentials.unwrap_or(false);
+        if credentials && any_origin {
+            // Browsers refuse `*` with credentials, so they could never work.
+            log_credentials_with_any_origin();
+            credentials = false;
+        }
+        let layer = if any_origin {
             Self::permissive()
         } else {
             Self::new()
@@ -204,6 +207,15 @@ impl CorsLayer {
         let merge = |base: Vec<String>, extra: &[String]| -> Vec<String> {
             let mut out = base;
             for h in extra {
+                // With credentials a browser reads `*` as a header named `*`.
+                if credentials && h == "*" {
+                    tracing::warn!(
+                        target: "rustango::cors",
+                        "`*` in cors_allowed_headers / cors_expose_headers is not a wildcard \
+                         with cors_allow_credentials; it is ignored, so list the headers"
+                    );
+                    continue;
+                }
                 if !out.iter().any(|b| b == "*" || b.eq_ignore_ascii_case(h)) {
                     out.push(h.clone());
                 }
@@ -216,7 +228,7 @@ impl CorsLayer {
             layer
                 .allow_headers(allow)
                 .expose_headers(expose)
-                .allow_credentials(s.cors_allow_credentials.unwrap_or(false)),
+                .allow_credentials(credentials),
         )
     }
 
@@ -257,20 +269,14 @@ impl CorsLayer {
     ///
     /// **Do not combine this with `allow_any_origin()`.** Browsers
     /// reject `*` together with credentials, so those requests fail.
-    /// List your origins instead. This method warns at build time if
-    /// the layer already allows any origin, so the mistake shows up
-    /// in the logs and not only as a broken preflight.
+    /// List your origins instead. This method logs an error if the
+    /// layer already allows any origin, so the mistake shows up in the
+    /// logs and not only as a failed request.
     #[must_use]
     pub fn allow_credentials(mut self, yes: bool) -> Self {
         self.allow_credentials = yes;
         if yes && matches!(self.allow_origin, AllowOrigin::Any) {
-            tracing::warn!(
-                target: "rustango::cors",
-                "CorsLayer.allow_credentials(true) combined with allow_any_origin() — \
-                 the framework echoes the request Origin back per request, but preflights \
-                 that omit `Origin` will fail in browsers. Use .allow_origins([...]) with \
-                 an explicit allowlist for credentialed CORS."
-            );
+            log_credentials_with_any_origin();
         }
         self
     }
@@ -310,6 +316,15 @@ impl CorsLayer {
             (AllowOrigin::List(_), None) => None,
         }
     }
+}
+
+/// Any origin with credentials answers `*`, which browsers refuse.
+fn log_credentials_with_any_origin() {
+    tracing::error!(
+        target: "rustango::cors",
+        "CORS allows any origin with credentials: the layer answers `*`, which browsers \
+         refuse for credentialed requests, so they all fail; list the origins instead"
+    );
 }
 
 /// Extension trait that adds `.layer(CorsLayer)` ergonomics to `Router`.
@@ -674,6 +689,35 @@ mod tests {
             "{exposed}"
         );
         assert_eq!(header(ACCESS_CONTROL_ALLOW_CREDENTIALS), "true");
+    }
+
+    /// `*` origins never turn credentials on: browsers refuse that pair.
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_refuses_credentials_with_any_origin() {
+        let mut s = crate::config::SecuritySettings::default();
+        s.cors_allowed_origins = vec!["*".into()];
+        s.cors_allow_credentials = Some(true);
+        let layer = CorsLayer::from_settings(&s).expect("Some");
+        assert!(!layer.allow_credentials);
+    }
+
+    /// With credentials a configured `*` header is dropped, not sent as a
+    /// header named `*`, and the headers after it still count.
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_drops_a_star_header_with_credentials() {
+        let mut s = crate::config::SecuritySettings::default();
+        s.cors_allowed_origins = vec!["https://app.example.com".into()];
+        s.cors_allowed_headers = vec!["*".into(), "X-Tenant".into()];
+        s.cors_expose_headers = vec!["*".into(), "X-Total-Count".into()];
+        s.cors_allow_credentials = Some(true);
+        let layer = CorsLayer::from_settings(&s).expect("Some");
+        for list in [&layer.allow_headers, &layer.expose_headers] {
+            assert!(!list.iter().any(|h| h == "*"), "{list:?}");
+        }
+        assert!(layer.allow_headers.iter().any(|h| h == "X-Tenant"));
+        assert!(layer.expose_headers.iter().any(|h| h == "X-Total-Count"));
     }
 
     /// A browser client can send the idempotency and HMAC headers, and

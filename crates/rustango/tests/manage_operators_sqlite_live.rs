@@ -271,6 +271,8 @@ async fn reset_operator_totp_removes_the_device() {
     let out = b.run(&["reset-operator-totp", "ada"]).await.expect("reset");
     assert!(out.contains("removed"), "{out}");
     assert_eq!(OperatorTotp::objects().count(&b.registry).await.unwrap(), 0);
+    let after = ops::by_username(&b.registry, "ada").await.unwrap();
+    assert!(after.sessions_revoked_at.is_some(), "sessions not ended");
     let audit = rustango::audit::AuditLog::objects()
         .filter("entity_table", "rustango_operators")
         .fetch(&b.registry)
