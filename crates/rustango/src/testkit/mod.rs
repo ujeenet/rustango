@@ -221,6 +221,33 @@ pub async fn migrate_framework(pool: &Pool) -> Result<(), MigrateError> {
     Ok(())
 }
 
+/// Add the columns `M`'s table lacks, so a table created by a build
+/// with fewer features (an optional `email`, say) fits this one.
+///
+/// # Errors
+/// Any catalog read or DDL failure ([`MigrateError`]).
+pub async fn add_missing_columns<M: crate::core::Model>(pool: &Pool) -> Result<(), MigrateError> {
+    let table = M::SCHEMA.table;
+    let have = crate::migrate::ensure::live_columns(pool, table).await?;
+    let snapshot = crate::migrate::SchemaSnapshot::from_models(&[M::SCHEMA]);
+    let changes: Vec<_> = snapshot
+        .tables
+        .iter()
+        .flat_map(|t| &t.fields)
+        .filter(|f| !have.contains(&f.column))
+        .map(|f| crate::migrate::SchemaChange::AddColumn {
+            table: table.to_owned(),
+            column: f.column.clone(),
+        })
+        .collect();
+    if changes.is_empty() {
+        return Ok(());
+    }
+    crate::migrate::ensure::apply_changes_idempotent(pool, &snapshot, &changes)
+        .await
+        .map_err(|e| MigrateError::Validation(format!("{e}")))
+}
+
 // ======================================================= factories
 
 /// A fully-populated [`Org`](crate::tenancy::Org) with valid defaults,

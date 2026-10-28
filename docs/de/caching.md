@@ -34,6 +34,7 @@ nur die Konfiguration ändert sich.
 - [TTL und Ablauf](#ttl-und-ablauf)
 - [Backends tauschen](#backends-tauschen)
 - [Caching unter Multi-Tenancy](#caching-unter-multi-tenancy)
+- [Ganze Seiten cachen](#ganze-seiten-cachen)
 - [Referenz](#referenz)
 - [Siehe auch](#siehe-auch)
 
@@ -52,12 +53,27 @@ use std::sync::Arc;
 let cache: BoxedCache = Arc::new(InMemoryCache::new());
 ```
 
-| Backend | Feature | Verwenden für |
-|---|---|---|
-| `InMemoryCache` | `cache` | Dev, Tests, Einzelprozess (HashMap pro Prozess + TTL) |
-| `RedisCache` | `cache-redis` | Produktion; über Replicas geteilt |
-| `DatabaseCache` | `cache` | Produktion ohne Redis; eine `rustango_cache`-Tabelle |
-| `NullCache` | `cache` | Caching deaktivieren (jeder Read verfehlt) — praktisch in Tests |
+| Backend | Feature | `[cache] backend` | Verwenden für |
+|---|---|---|---|
+| `InMemoryCache` | `cache` | `memory` *(Standard)* | Dev, Tests, Einzelprozess (HashMap pro Prozess + TTL) |
+| `RedisCache` | `cache-redis` | `redis` | Produktion; über Replicas geteilt |
+| `DatabaseCache` | `cache` | `db` / `database` | Produktion ohne Redis; eine `rustango_cache`-Tabelle |
+| `FileCache` | `cache` | `file` | eine Datei pro Key unter `file_cache_dir`; nur geteilt, wenn das Verzeichnis es ist |
+| `NullCache` | `cache` | `null` / `none` | Caching deaktivieren (jeder Read verfehlt) — praktisch in Tests |
+
+Einen Wert `postgres` gibt es nicht — das DB-Backend ist `db` oder `database`.
+Ein Doc-Kommentar von `CacheSettings` behauptete früher etwas anderes, und ein
+unbekannter Wert liefert einen In-Memory-Cache mit einer Warnung.
+
+Es gibt keinen Wert `postgres` — das DB-Backend heißt `db` oder `database`. Werte
+sind kleingeschrieben. Ein unbekannter oder falsch geschriebener Wert (`Redis`,
+ein Tippfehler) oder `file` ohne `file_cache_dir` loggt einen `error` und fällt
+auf einen In-Memory-Cache zurück; ein späteres Minor-Release wird ihn ablehnen.
+
+`FileCache` räumt alle 16 Schreibvorgänge ein Sechzehntel seines Verzeichnisses
+von abgelaufenen Einträgen. Rufe `FileCache::purge_expired()` regelmäßig auf, um
+alles zu räumen. Neue Verzeichnisse werden unter Unix mit 0700 angelegt, Einträge
+mit 0600.
 
 ---
 
@@ -109,7 +125,8 @@ aus dem Cache bedient.
 
 > **Bei Schreibvorgängen invalidieren.** Cache-Aside bedeutet veraltete Daten,
 > bis das TTL abläuft. Für Daten, die sich ändern, mache auch `delete(key)`, wenn
-> du sie schreibst — z. B. aus einem [`post_save`-Signal](orm.md) — damit der
+> du sie schreibst — z. B. aus einem [`post_save`-Signal](orm.md), das du nach dem Speichern
+> sendest (das Speichern selbst sendet es nicht) — damit der
 > nächste Read neu berechnet.
 
 ---
@@ -156,7 +173,12 @@ Eine Flut eindeutiger Schlüssel kann den Prozess so nicht unbegrenzt wachsen
 lassen, bedeutet aber auch: **ein Eintrag kann vor Ablauf seines TTL
 verschwinden**, wenn er beim Erreichen des Budgets der am längsten unbenutzte
 ist. Die Verdrängung entfernt zuerst bereits abgelaufene Einträge, dann die am
-längsten unbenutzten, bis beide Budgets eingehalten sind.
+längsten unbenutzten, bis beide Budgets um 10 % unterschritten sind. Mit
+`set_forever` geschriebene Einträge (Feature-Flags) liegen außerhalb der Budgets
+und werden nie verdrängt, solange sie in ihren eigenen Grenzen bleiben — 16 MiB
+oder 10 000 Einträge (`.with_max_pinned_bytes(..)` / `.with_max_pinned_entries(..)`).
+Darüber werden neue `set_forever`-Einträge als normale, verdrängbare Einträge
+gespeichert, und einmal wird eine Warnung geloggt.
 
 Behandle einen Cache-Read also auch innerhalb des TTL als „kann fehlen". Das gilt
 für jedes Cache-Backend, hier hat es aber eine Ursache, über die du nachdenken
@@ -192,8 +214,7 @@ let cache: BoxedCache = rustango::cache::from_settings_async(&settings.cache).aw
 | `redis` | **panik** — synchron nicht baubar | ✓ |
 | `db` | **panik** — braucht einen `&Pool` zur Laufzeit | Fehler; dort bauen, wo der Pool ist |
 
-Der synchrone Resolver bricht ab, statt einen anderen Backend unterzuschieben
-([#1400](https://github.com/ujeenet/rustango/issues/1400)). Früher warnte er und
+Der synchrone Resolver bricht ab, statt einen anderen Backend unterzuschieben. Früher warnte er und
 lieferte einen In-Memory-Cache — das ist kein abgeschwächter geteilter Cache,
 sondern ein anderer. Ein prozesslokaler Cache multipliziert das Limit von
 `CacheRateLimitLayer` mit der Anzahl der Replicas und lässt `verify_single_use`
@@ -257,10 +278,11 @@ Key ist ein eigener Roundtrip.
 steckt hinter `DistributedLock`. `Cache::add` ist bei allen dreien atomar — `RedisCache`
 (`SET NX`), `InMemoryCache` (das seine Sperre über das Read-Modify-Write hält)
 und `DatabaseCache`, das das Test-and-Set unter Zeilensperren ausführt, sodass
-ein Wettlauf genau einen Gewinner hat. `Cache::incr` ist bei den ersten beiden
-atomar, fällt bei `DatabaseCache` aber auf den nicht-atomaren Standard zurück.
-Ein `DistributedLock` ist also auf allen dreien sicher; ein Zähler, der über
-Replikate hinweg exakt sein muss, will Redis.
+ein Wettlauf genau einen Gewinner hat. `Cache::incr` ist ebenfalls auf allen
+dreien atomar: `DatabaseCache` erledigt es in einem Upsert. `FileCache` macht
+beides unter einer Sperre pro Eintrag, die nur auf einem Host gilt. Ein
+`DistributedLock` oder ein exakter Zähler funktioniert über Replikate hinweg also
+mit Redis oder der Datenbank.
 
 Zwei Dinge, die man wissen sollte:
 
@@ -273,15 +295,57 @@ Das ungescopete `Cache::clear()` ist weiterhin prozessweit — greife also zur
 gescopeten Sicht, wann immer die Änderung eines einzelnen Tenants die
 Invalidierung ausgelöst hat.
 
+Der Slug eines gelöschten Tenants kann von einem neuen Tenant wiederverwendet
+werden. Damit `purge-tenant` die `ScopedCache::for_tenant`-Keys des alten Tenants
+löscht, rufe beim Start `rustango::tenancy::decommission::clear_on_purge(cache)`
+für jeden Cache auf, der sie hält.
+
+---
+
+## Ganze Seiten cachen
+
+`CachePageLayer::new(cache)` (in `rustango::cache_page`) speichert GET-Antworten
+in einem beliebigen `BoxedCache`; `.timeout(dur)` legt fest, wie lange (Standard
+60 s). Es ist standardmäßig sicher:
+
+- Ein Request mit `Authorization`, `Cookie` oder `X-Api-Key` wird weder aus dem
+  Cache bedient noch darin gespeichert. Weitere Credential-Header (etwa einen
+  eigenen Token-Header) nennst du mit `.credential_headers(["x-my-token"])`.
+  `.cache_authenticated(true)` schaltet das ab, nur für eine Route, deren Seite
+  für jeden Aufrufer gleich ist.
+- Eine Antwort mit `Set-Cookie` oder `Cache-Control: private`, `no-cache` oder
+  `no-store` wird nie gecacht.
+- `.vary_on([...])` nimmt Request-Header in den Key auf.
+- `.key_prefix(..)` gibt jedem Layer einen eigenen Schlüsselraum (Standard
+  `rustango.cache_page`). `.cache_query(true)` cacht auch `QUERY`-Anfragen, mit
+  einem Digest des Bodys (bis 1 MiB) im Key. `.tenant_agnostic(true)` cacht ohne
+  aufgelösten Mandanten, nur für eine Seite, die für jeden Mandanten gleich ist.
+
+Um eine Seite nach einem Schreibvorgang zu verwerfen, rufe
+`layer.invalidate(&[PageKey::new(path, host)]).await?` auf einem Klon des Layers
+auf (unter Tenancy hänge `.tenant(slug)` an den Key). Das löscht jede gecachte
+Variante dieses Pfads: jeden Query-String, jeden `vary_on`-Wert, GET und `QUERY`
+gleichermaßen. Es arbeitet mit einem Generationszähler pro Pfad, daher liest
+jeder gecachte GET einen weiteren kleinen Cache-Key.
+
+Unter Tenancy hängst du den Layer innerhalb des Tenancy-Layers ein; siehe
+[Middleware](middleware.md).
+
 ---
 
 ## Referenz
 
-**`Cache`-Trait:** `get` · `set(key, value, ttl)` · `delete` · `exists` ·
+**`Cache`-Trait:** `get` · `set(key, value, ttl)` · `set_forever` · `delete` ·
+`exists` / `has_key` · `clear` · `delete_prefix` · `incr` / `decr` · `add`
+(setzen, falls fehlend) · `touch` (neuer TTL) · `get_bytes` / `set_bytes` ·
 `get_many` / `set_many` / `delete_many` · `get_or(key, default)`.
 
 **Freie Helfer:** `get_or_set(cache, key, factory, ttl)` ·
-`get_json` / `set_json` · `from_settings(&CacheSettings)`.
+`get_json` / `set_json` · `from_settings(&CacheSettings)` ·
+`from_settings_async(&CacheSettings)`.
+
+**Aufräumen:** `DatabaseCache::purge_expired()` und
+`FileCache::purge_expired()` löschen abgelaufene Einträge; rufe sie zeitgesteuert auf.
 
 **Was auf dem Cache aufbaut:** serverseitige [Sessions](auth-sessions.md),
 verteiltes [Rate Limiting](middleware.md) (`CacheRateLimitLayer`),

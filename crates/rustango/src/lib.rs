@@ -166,6 +166,22 @@ compile_error!(
 // ourselves inside this crate.
 extern crate self as rustango;
 
+/// `Debug` that prints `shown` fields and `[redacted]` for `secret` ones, so
+/// a `{:?}`, `dbg!` or panic message never carries a hash or password.
+#[allow(unused_macros)]
+macro_rules! redacted_debug {
+    ($ty:ident { $($shown:ident),* $(,)? ; $($secret:ident),* $(,)? }) => {
+        impl ::std::fmt::Debug for $ty {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                f.debug_struct(stringify!($ty))
+                    $(.field(stringify!($shown), &self.$shown))*
+                    $(.field(stringify!($secret), &format_args!("[redacted]")))*
+                    .finish_non_exhaustive()
+            }
+        }
+    };
+}
+
 // ---------------------------------------------------------------- per-backend macro support
 //
 // `#[derive(Model)]` always emits a call to `__impl_my_from_row!`. The two
@@ -520,9 +536,9 @@ pub mod jsonapi;
 #[cfg(any(
     feature = "_signing",
     feature = "storage-s3",
-    feature = "storage-azure",
     feature = "csrf",
     feature = "totp",
+    feature = "tenancy",
 ))]
 pub(crate) mod crypto;
 
@@ -1395,6 +1411,36 @@ pub use inventory;
 /// Server-assigned PK wrapper. `id: Auto<i64>` → `BIGSERIAL`. See
 /// [`sql::Auto`] for details.
 pub use sql::Auto;
+
+/// `use rustango::prelude::*;` brings the ORM's extension traits into
+/// scope, so `Item::objects().count(&pool)` resolves without hunting them down.
+///
+/// ```no_run
+/// use rustango::prelude::*;
+///
+/// #[derive(Model)]
+/// #[rustango(table = "prelude_item")]
+/// pub struct Item {
+///     #[rustango(primary_key)]
+///     pub id: Auto<i64>,
+///     pub active: bool,
+/// }
+///
+/// async fn demo(pool: &rustango::sql::Pool) -> Result<(), rustango::sql::ExecError> {
+///     let total: i64 = Item::objects().count(pool).await?;
+///     let any = Item::objects().where_(Item::active.eq(true)).exists(pool).await?;
+///     let rows: Vec<Item> = Item::objects().fetch(pool).await?;
+///     let _ = (total, any, rows);
+///     Ok(())
+/// }
+/// # fn main() {}
+/// ```
+pub mod prelude {
+    pub use crate::core::{Column, Model};
+    pub use crate::sql::{Auto, CounterPool, ExistsPool, FetcherPool, FetcherTx, UpdaterPool};
+    /// The derive, beside the trait of the same name.
+    pub use rustango_macros::Model;
+}
 
 /// Bake every migration file in a directory into the binary at
 /// compile time, for shipping a single-binary distribution. Pair

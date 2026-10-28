@@ -10,9 +10,9 @@
 //! [`crate::admin::sso_provider::SsoProvider`] table (per-tenant, granular)
 //! merged with the registry-wide [`SharedSsoProvider`] set (operator-defined,
 //! offered to all tenants). On a slug clash the tenant's row wins. Each
-//! provider stores a **secret reference** (e.g. `env://…`) resolved via
-//! [`SecretsResolver`] at login time, so the raw secret never sits in a
-//! column. `{login}/sso/{slug}` starts the handshake for one provider.
+//! provider's client secret is stored encrypted (`Cast<EncryptedString>`)
+//! and decrypted only at login. `{login}/sso/{slug}` starts the handshake
+//! for one provider.
 
 use axum::{
     http::{header, request::Parts, HeaderValue},
@@ -20,8 +20,7 @@ use axum::{
 };
 
 use crate::admin::sso::{
-    build_provider, open_flow, seal_flow, FlowPurpose, FlowScope, ProviderButton, SsoError,
-    SSO_FLOW_COOKIE,
+    open_flow, seal_flow, FlowPurpose, FlowScope, ProviderButton, SsoError, SSO_FLOW_COOKIE,
 };
 use crate::admin::sso_provider::SsoProvider;
 use crate::query::QuerySet;
@@ -29,6 +28,7 @@ use crate::signals::auth::{
     meta_from_parts, send_user_logged_in, AuthFailureReason, UserLoggedInContext,
 };
 use crate::sql::Pool;
+use crate::sso::build_provider_for;
 use crate::sso::link::{signal_refused, LinkSource, ProviderKey};
 use crate::sso::provider::{load_rows, resolve_row, ResolvedProvider};
 
@@ -196,9 +196,14 @@ fn derive_redirect(parts: &Parts, routes: &RouteConfig, slug: &str) -> Option<St
         crate::real_ip::trusted_forwarded(&parts.headers, &parts.extensions, "x-forwarded-proto")
             .unwrap_or("https");
     Some(format!(
-        "{scheme}://{host}{}/sso/{slug}/callback",
-        routes.login_url
+        "{scheme}://{host}{}",
+        callback_path(&routes.login_url, slug)
     ))
+}
+
+/// The IdP callback path for `slug` under the tenant login path.
+pub(crate) fn callback_path(login_url: &str, slug: &str) -> String {
+    format!("{login_url}/sso/{slug}/callback")
 }
 
 fn login_error(routes: &RouteConfig, code: &str) -> Response {
@@ -237,7 +242,7 @@ pub(super) async fn tenant_sso_begin(
     let Some(redirect_uri) = derive_redirect(parts, routes, slug) else {
         return login_error(routes, "config");
     };
-    let (cfg, _key) = match resolve_by_slug(tenant_pool, registry_pool, slug, redirect_uri).await {
+    let (cfg, key) = match resolve_by_slug(tenant_pool, registry_pool, slug, redirect_uri).await {
         Ok(Some(c)) => c,
         Ok(None) => return login_error(routes, "disabled"),
         Err(e) => {
@@ -245,7 +250,7 @@ pub(super) async fn tenant_sso_begin(
             return login_error(routes, "config");
         }
     };
-    let provider = match build_provider(&cfg.sso).await {
+    let provider = match build_provider_for(&cfg.sso, key.source()).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(target: "rustango::tenancy::sso", "begin build: {e}");
@@ -309,7 +314,7 @@ pub(super) async fn tenant_sso_callback(
             return login_error(routes, "config");
         }
     };
-    let provider = match build_provider(&cfg.sso).await {
+    let provider = match build_provider_for(&cfg.sso, key.source()).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(target: "rustango::tenancy::sso", "callback build: {e}");

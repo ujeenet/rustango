@@ -81,7 +81,7 @@ fn runserver_body() -> String {
 fn every_serving_path_goes_through_one_assembly() {
     let body = runserver_body();
 
-    let binds = body.matches("TcpListener::bind").count();
+    let binds = body.matches("bind_announced(").count();
     let assembles = body.matches("self.assemble_app(").count();
 
     assert!(

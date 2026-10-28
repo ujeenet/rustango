@@ -227,6 +227,8 @@ pub struct OAuth2Provider {
     emails_url: Option<String>,
     client_config: Option<ClientConfig>,
     http: EgressCache,
+    /// Fixed egress policy; `None` reads the operator allowlist per call.
+    egress: Option<TargetPolicy>,
 }
 
 impl std::fmt::Debug for OAuth2Provider {
@@ -274,6 +276,7 @@ impl OAuth2Provider {
             emails_url: None,
             client_config: None,
             http: EgressCache::default(),
+            egress: None,
         }
     }
 
@@ -371,6 +374,13 @@ impl OAuth2Provider {
         p.discover(issuer.as_ref(), &TargetPolicy::from_env()).await
     }
 
+    /// Pin the egress policy for every later call.
+    #[cfg(feature = "sso")]
+    pub(crate) fn with_egress(mut self, policy: TargetPolicy) -> Self {
+        self.egress = Some(policy);
+        self
+    }
+
     /// Fill the endpoints from `issuer`'s discovery document.
     pub(crate) async fn discover(
         mut self,
@@ -453,7 +463,8 @@ impl OAuth2Provider {
         code: &str,
         callback_state: &str,
     ) -> Result<(NormalizedUser, TokenResponse), OAuthError> {
-        self.complete_with(flow, code, callback_state, &TargetPolicy::from_env())
+        let policy = self.egress.clone().unwrap_or_else(TargetPolicy::from_env);
+        self.complete_with(flow, code, callback_state, &policy)
             .await
     }
 

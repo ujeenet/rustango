@@ -18,7 +18,9 @@ liste de configuration, câblée à axum. Associez-la à
 > `ApiKeyBackend`, `JwtBackend`, `AuthUser`, `AuthError`) et
 > `rustango::tenancy::{RouterAuthExt, CurrentUser}` — derrière la fonctionnalité
 > `tenancy`. Un registre portable et indépendant de la base de données vit aussi
-> à `rustango::auth_backends` (toujours compilé).
+> à `rustango::auth_backends`, qui demande la feature interne `_async_trait` —
+> activée par `cache`, `email`, `jobs` et `oauth2`, donc la plupart des builds
+> l'ont, mais pas un build minimal.
 >
 > **Version exécutable :** chaque extrait est copié depuis
 > [`auth_backends_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_backends_doc.rs)
@@ -43,8 +45,9 @@ middleware les essaie **dans l'ordre** :
 - le **premier** backend qui reconnaît l'identifiant l'emporte (renvoie
   l'utilisateur) ;
 - un backend qui ne le reconnaît pas renvoie « aucun » et le suivant est essayé ;
-- si un backend échoue durement (par ex. un compte inactif sur un jeton
-  *valide*), la chaîne s'arrête avec cette erreur ;
+- si un backend échoue durement, la chaîne s'arrête avec cette erreur : un
+  compte inactif avec un identifiant *valide* donne `403`, un verrouillage `429`
+  (ou `503` si le hachage des mots de passe est saturé), un jeton invalide `401` ;
 - si aucun ne correspond, la requête reçoit un `401` (avec `require_auth`) ou
   poursuit de manière anonyme (avec `optional_auth`).
 
@@ -70,7 +73,10 @@ let backends: Vec<Arc<dyn AuthBackend>> = vec![
 
 `ApiKeyBackend` et `JwtBackend` lisent tous deux `Bearer` et lèvent l'ambiguïté
 par la forme (le premier segment séparé par un point d'une clé d'API fait
-exactement 8 caractères). Construisez `JwtBackend` avec un secret d'**au moins 32
+exactement 8 caractères). Une valeur `Bearer` qui a la forme d'un JWT mais
+échoue à la vérification est un `401` ferme, pas un passage au backend suivant.
+`ModelBackend` compte les mots de passe faux par tenant, IP et nom d'utilisateur ;
+des essais répétés reçoivent `429`. Construisez `JwtBackend` avec un secret d'**au moins 32
 octets** (`JwtBackend::new(secret)` panique sinon) :
 
 ```rust
@@ -146,6 +152,26 @@ let app = Router::new()
     .route("/profile", get(profile))
     .require_auth(backends);           // 401 if no backend matches
 ```
+
+> **Ces méthodes prenaient un `Pool` avant 0.57.11.** Ce n'est plus le cas, et
+> le changement est un correctif de sécurité, pas du rangement. Le pool était
+> capturé à la construction du routeur et réutilisé pour chaque requête : un
+> identifiant émis par un tenant s'authentifiait donc sur l'hôte d'un autre
+> tenant — les backends cherchaient l'utilisateur dans la base avec laquelle le
+> routeur avait été construit, et `is_superuser` poursuivait son chemin dans une
+> extension de requête sans nouvelle requête en base.
+>
+> Le pool vient désormais du tenant résolu pour **chaque requête**. La
+> migration consiste à retirer l'argument :
+>
+> ```rust
+> .require_auth(backends, pool.clone())  →  .require_auth(backends)
+> .require_perm("post.add", pool)        →  .require_perm("post.add")
+> ```
+>
+> Montez la couche de tenancy à l'extérieur de celles-ci. Sans contexte de
+> tenant dans les extensions de requête, elles échouent en mode fermé avec un
+> `500` plutôt que de deviner une base.
 
 Comportement vérifié :
 
@@ -235,7 +261,8 @@ async fn who(remote_user: &str) -> Result<Option<Principal>, AuthError> {
 ```
 
 Mêmes sémantiques « le premier succès l'emporte / la première erreur arrête » que
-la chaîne HTTP. Pour verrouiller de vraies routes, utilisez le middleware
+la chaîne HTTP. `chain.get_user(id)` parcourt la chaîne de la même façon pour
+recharger un principal, par exemple celui gardé en session. Pour verrouiller de vraies routes, utilisez le middleware
 `tenancy` ci-dessus.
 
 ---

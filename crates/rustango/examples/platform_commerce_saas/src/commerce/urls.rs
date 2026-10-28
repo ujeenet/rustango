@@ -14,6 +14,9 @@
 //! Everything else — models, serializers, jobs, the URL map — is byte
 //! for byte the same file as the single-tenant app.
 //!
+//! The ViewSets take anonymous writes because the soak driver sends no
+//! login; a real app sets `.permissions_for_model::<T>()` instead.
+//!
 //! On a tenant host the framework claims `/admin`, `/login`, `/logout`,
 //! `/change-password`, `/_static/*` and `/_brand/*` ahead of this
 //! router. `main.rs` calls `RouteConfig::legacy()` to move all of them
@@ -112,6 +115,7 @@ fn jwt_auth() -> JwtAuth {
 /// rows from list, detail, update and delete (#1746).
 fn promotions() -> Router<AppState> {
     ViewSet::for_model(Promotion::SCHEMA, &["id", "code", "label", "amount_cents", "visible", "deleted_at"])
+        .allow_anonymous() // the soak driver writes without a login
         .filter_fields(&["code", "visible"])
         .search_fields(&["code"])
         .limit_offset_pagination()
@@ -122,6 +126,7 @@ fn promotions() -> Router<AppState> {
 /// The card code is the primary key, and a create keeps it (#1671).
 fn gift_cards() -> Router<AppState> {
     ViewSet::for_model(GiftCard::SCHEMA, &["code", "balance_cents"])
+        .allow_anonymous() // the soak driver writes without a login
         .tenant_router("/api/v1/gift-cards")
         .with_state(())
 }
@@ -370,6 +375,7 @@ fn cache_namespace() -> String {
 
 fn products() -> Router<AppState> {
     ViewSet::for_model(Product::SCHEMA, &["id", "sku", "name", "description", "price_cents", "active", "created_at"])
+        .allow_anonymous() // the soak driver writes without a login
         .serializer::<ProductSerializer>()
         .filter_fields(&["active", "sku"])
         .search_fields(&["sku", "name"])
@@ -397,6 +403,7 @@ const ORDER_FIELDS: &[&str] = &[
 /// paginators are exercised by the same soak.
 fn orders() -> Router<AppState> {
     ViewSet::for_model(Order::SCHEMA, ORDER_FIELDS)
+        .allow_anonymous() // the soak driver writes without a login
         .serializer::<OrderSerializer>()
         .filter_fields(&["status", "customer_id"])
         .cursor_pagination_desc("placed_at")
@@ -415,6 +422,7 @@ fn orders() -> Router<AppState> {
 /// serializer happens to hide the column".
 fn orders_raw() -> Router<AppState> {
     ViewSet::for_model(Order::SCHEMA, ORDER_FIELDS)
+        .allow_anonymous() // the soak driver writes without a login
         .filter_fields(&["status", "customer_id"])
         .limit_offset_pagination()
         .tenant_router("/api/v1/orders-raw")
@@ -424,6 +432,7 @@ fn orders_raw() -> Router<AppState> {
 /// The bulk-create endpoint (#1403).
 fn order_lines() -> Router<AppState> {
     ViewSet::for_model(OrderLine::SCHEMA, &["id", "order_id", "product_id", "quantity", "unit_price_cents"])
+        .allow_anonymous() // the soak driver writes without a login
         .filter_fields(&["order_id", "product_id"])
         .page_size(50)
         .tenant_router("/api/v1/order-lines")
@@ -432,6 +441,7 @@ fn order_lines() -> Router<AppState> {
 
 fn customers() -> Router<AppState> {
     ViewSet::for_model(Customer::SCHEMA, &["id", "email", "full_name", "loyalty_tier", "created_at"])
+        .allow_anonymous() // the soak driver writes without a login
         .serializer::<CustomerSerializer>()
         .filter_fields(&["loyalty_tier"])
         .search_fields(&["email", "full_name"])
@@ -442,6 +452,7 @@ fn customers() -> Router<AppState> {
 
 fn inventory() -> Router<AppState> {
     ViewSet::for_model(InventoryItem::SCHEMA, &["id", "product_id", "location", "on_hand", "updated_at"])
+        .allow_anonymous() // the soak driver writes without a login
         .filter_fields(&["product_id", "location"])
         .limit_offset_pagination()
         .tenant_router("/api/v1/inventory")

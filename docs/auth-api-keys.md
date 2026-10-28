@@ -16,7 +16,8 @@ backend that stores keys and authenticates `Authorization: Bearer` requests.
 > `split_token`, `ApiKeyError`) — the standalone helper, behind the `api_keys`
 > feature (on by default). The stored backend is
 > `rustango::tenancy::auth_backends` (`create_api_key`, `ApiKeyBackend`,
-> `ensure_api_keys_table_pool`) — behind the `tenancy` feature.
+> `ensure_api_keys_table_pool`, `set_api_key_secret`) — behind the `tenancy`
+> feature.
 >
 > **Runnable version:** the helper snippets are copied from
 > [`auth_api_keys_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_api_keys_doc.rs)
@@ -41,10 +42,10 @@ backend that stores keys and authenticates `Authorization: Bearer` requests.
 
 A key has two parts joined by a dot: **`{prefix}.{secret}`**.
 
-- The **prefix** is 8 characters — stored in clear text and used as a fast,
-  unique lookup index ("which key is this?").
-- The **secret** is the actual credential. You store only an **argon2id hash**
-  of it, never the secret itself.
+- The **prefix** is 8 hex characters — stored in clear text and used as a
+  fast lookup index ("which key is this?").
+- The **secret** is 32 hex characters and is the actual credential. You store
+  only a **hash** of it, never the secret itself.
 
 The full token is shown to the user **exactly once**, at creation. Lose it and
 you reissue — there's no way to recover it, because only the hash is kept. This
@@ -91,7 +92,8 @@ hashing the same secret twice yields different strings — and both verify.
 the stored string isn't a valid hash.
 
 From async code call `generate_key_async`, `hash_secret_async` and
-`verify_key_async`; they run argon2 off the runtime.
+`verify_key_async`; they run argon2 off the runtime. They can also return
+`ApiKeyError::Busy` when no hashing slot frees up in time.
 
 ---
 
@@ -111,15 +113,25 @@ ensure_api_keys_table_pool(&pool).await?;   // CREATE TABLE IF NOT EXISTS
 ```
 
 The `ApiKey` row stores `user_id` (FK to `rustango_users`), the 8-char
-`key_prefix` (unique), the argon2id `key_hash`, a `label`, and an optional
-`expires_at`.
+`key_prefix` (indexed, not unique), the `key_hash`, a `label`, an optional
+`expires_at` and `created_at`.
+
+The stored backend does not use argon2id. `key_hash` is an HMAC-SHA256 of the
+secret, under a key derived from the server secret. That keeps the check cheap
+on every request. The server secret is `RUSTANGO_SESSION_SECRET` (in dev, the
+tenant session key file). Call `set_api_key_secret(secret)` once at startup to
+use another key; the first call wins. **Changing that key, or rotating
+`RUSTANGO_SESSION_SECRET`, makes every issued key stop working.** Rows stored
+as argon2id by older versions still verify and are rewritten to the HMAC on
+first use.
 
 ---
 
 ## Issuing a key
 
 `create_api_key` generates the token, hashes the secret, inserts the row, and
-returns the **plaintext token once**:
+returns the **plaintext token once**. On the prod tier it fails when
+`RUSTANGO_SESSION_SECRET` is unset:
 
 ```rust
 use rustango::tenancy::auth_backends::create_api_key;
@@ -133,11 +145,15 @@ use chrono::{Duration, Utc};
 let token = create_api_key(42, "tmp", Some(Utc::now() + Duration::days(30)), &pool).await?;
 ```
 
-From the command line, the `manage` CLI wraps the same call:
+From the command line, the `manage` CLI wraps the same call. It creates the
+table if needed, and `--label` defaults to empty:
 
 ```bash
 cargo run -- create-api-key <tenant> <username> --label "ci-key" --expires-days 30
 ```
+
+The CLI must use the same server secret as the server, or the key matches
+nothing. When it falls back to the dev key file it prints a note saying so.
 
 ---
 
@@ -168,23 +184,30 @@ curl https://api.example.com/api/data \
   -H "Authorization: Bearer a1b2c3d4.the-secret-half"
 ```
 
-The backend finds the `ApiKey` by its 8-char prefix, checks `expires_at`,
-verifies the secret against the stored hash, loads the owning user, and injects
-it for your handlers to read via [`CurrentUser`](auth-backends.md). A wrong
-secret or unknown prefix is a `401`; an expired key is rejected; a disabled
-owner is a `403`.
+The backend finds the `ApiKey` rows by the 8-char prefix, checks the secret
+against each stored hash, then checks `expires_at`, loads the owning user, and
+injects it for your handlers to read via [`CurrentUser`](auth-backends.md).
+
+- A wrong secret or unknown prefix is not an error: the next backend in the
+  chain runs. If none signs the caller in, `require_auth` answers `401`.
+- An expired key is a `401` at once.
+- A disabled owner is a `403`.
+- Failed attempts are rate-limited per tenant and per client IP. Over the
+  limit the answer is `429`.
+
+The key lives in one tenant's database, so it only works on that tenant.
 
 ---
 
 ## Security notes
 
-- **The secret is shown once.** Only the prefix + argon2id hash are persisted —
-  there is no recovery, only reissue.
+- **The secret is shown once.** Only the prefix + the keyed hash are
+  persisted — there is no recovery, only reissue.
 - **The prefix is stored in clear text on purpose** — it's the O(1) lookup
   index. A database leak reveals which prefixes exist, never the secrets.
-- **Timing is equalized.** An unknown prefix still runs a dummy verify, so a
-  missing key takes about the same time as a real one — no enumeration via
-  response timing.
+- **Timing is equalized.** The hash is compared in constant time, and the
+  secret is checked before expiry, so an expired key costs the same as an
+  unknown one.
 - **Scope keys to a user, set an expiry, and rotate.** Issue per integration so
   you can revoke one without disturbing the others; prefer short `expires_at`
   windows for temporary access.

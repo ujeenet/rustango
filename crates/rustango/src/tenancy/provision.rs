@@ -662,16 +662,67 @@ pub async fn provision_tenant_recorded<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    let by = RunBy {
+        requested_by,
+        idempotency_key,
+    };
+    recorded(pools, registry_url, dir, request, observer, by, false).await
+}
+
+/// [`provision_tenant_recorded`] that, with `resume`, finishes a tenant
+/// an earlier failed run left inactive, as `create-tenant --resume` does.
+pub(crate) async fn provision_tenant_recorded_or_resume<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    request: &ProvisionRequest,
+    observer: Option<&dyn ProvisionObserver>,
+    requested_by: Option<&str>,
+    resume: bool,
+) -> Result<(super::provision_store::ProvisioningRun, ProvisionOutcome), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let by = RunBy {
+        requested_by,
+        idempotency_key: None,
+    };
+    recorded(pools, registry_url, dir, request, observer, by, resume).await
+}
+
+/// Who asked for a recorded run.
+struct RunBy<'a> {
+    requested_by: Option<&'a str>,
+    idempotency_key: Option<&'a str>,
+}
+
+async fn recorded<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    request: &ProvisionRequest,
+    observer: Option<&dyn ProvisionObserver>,
+    by: RunBy<'_>,
+    resume: bool,
+) -> Result<(super::provision_store::ProvisioningRun, ProvisionOutcome), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     use super::provision_store as store;
+    let RunBy {
+        requested_by,
+        idempotency_key,
+    } = by;
 
     let registry = pools.registry_pool();
     // A taken slug leaves no failed run behind. A lookup error falls
     // through, so Validate records it; Validate also checks again.
+    // Resuming, an inactive row goes on to Validate, which decides.
     let taken = Org::objects()
         .where_(Org::slug.eq(request.slug.clone()))
         .first(&registry)
         .await;
-    if matches!(taken, Ok(Some(_))) {
+    if matches!(&taken, Ok(Some(org)) if !resume || org.active) {
         return Err(TenancyError::Validation(format!(
             "tenant slug `{}` already exists",
             request.slug
@@ -689,7 +740,7 @@ where
     .await?;
     let run_id = run.id.get().copied().unwrap_or_default();
 
-    let outcome = in_run(pools, registry_url, dir, request, observer, run_id, false)
+    let outcome = in_run(pools, registry_url, dir, request, observer, run_id, resume)
         .await
         // A pre-row failure still closed the run inside
         // `provision_tenant_in_run`; propagate the reason unchanged.
@@ -1553,7 +1604,7 @@ async fn checked_server(
     // Before any DDL: the login rustango mints is stored only sealed,
     // whatever the registry's strictness.
     if backend != BackendKind::Sqlite {
-        if std::env::var(crate::aead::KEY_VAR).is_err() {
+        if crate::aead::env_key().is_none() {
             return Err(TenancyError::Validation(format!(
                 "{} is not set: the login rustango creates for a tenant is stored only sealed",
                 crate::aead::KEY_VAR
@@ -2924,6 +2975,8 @@ pub struct Provisioner<DB: Database> {
     registry_url: String,
     migrations_dir: std::path::PathBuf,
     first_admin: Option<super::first_admin::FirstAdminHandover>,
+    /// `run-server --apex`: a blank host becomes `<slug>.<apex>`.
+    apex: Option<String>,
 }
 
 impl<DB: Database> Provisioner<DB> {
@@ -2937,6 +2990,27 @@ impl<DB: Database> Provisioner<DB> {
             registry_url: registry_url.into(),
             migrations_dir: migrations_dir.into(),
             first_admin: None,
+            apex: None,
+        }
+    }
+
+    /// The apex a blank host defaults under, over the env var and settings.
+    #[must_use]
+    pub(crate) fn with_default_apex(mut self, apex: Option<String>) -> Self {
+        self.apex = apex;
+        self
+    }
+
+    fn with_default_host<'r>(
+        &self,
+        request: &'r ProvisionRequest,
+    ) -> std::borrow::Cow<'r, ProvisionRequest> {
+        match (&self.apex, &request.host_pattern) {
+            (Some(apex), None) => std::borrow::Cow::Owned(ProvisionRequest {
+                host_pattern: Some(format!("{}.{apex}", request.slug)),
+                ..request.clone()
+            }),
+            _ => std::borrow::Cow::Borrowed(request),
         }
     }
 
@@ -2975,7 +3049,7 @@ where
         // and the rows that record it. The caller still waits for it.
         let pools = self.pools.clone();
         let (url, dir) = (self.registry_url.clone(), self.migrations_dir.clone());
-        let request = request.clone();
+        let request = self.with_default_host(request).into_owned();
         let requested_by = requested_by.map(ToOwned::to_owned);
         let idempotency_key = idempotency_key.map(ToOwned::to_owned);
         Box::pin(async move {
@@ -3006,7 +3080,7 @@ where
                 self.pools.as_ref(),
                 &self.registry_url,
                 &self.migrations_dir,
-                request,
+                &self.with_default_host(request),
                 None,
                 run_id,
             )
@@ -3810,5 +3884,65 @@ mod registry_endpoint_tests {
             assert!(refuse_registry_pool(&same, &pool).is_err(), "{same}");
         }
         assert!(refuse_registry_pool(&format!("sqlite:{d}/l0/t.db"), &pool).is_ok());
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod apex_tests {
+    use super::*;
+
+    /// A blank host under `run-server --apex` is `<slug>.<apex>`, whatever
+    /// the env var says; an explicit host stays.
+    #[tokio::test]
+    async fn the_run_server_apex_names_a_blank_host() {
+        let _g = crate::tenancy::server::APEX_TEST_LOCK.lock().await;
+        std::env::set_var("RUSTANGO_APEX_DOMAIN", "localhost");
+        let tmp = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+        let pools = std::sync::Arc::new(TenantPools::<sqlx::Sqlite>::new(pool));
+        let migrations = tempfile::tempdir().unwrap();
+        let mut out = Vec::new();
+        super::super::manage::run_with_writer(
+            pools.as_ref(),
+            &url,
+            migrations.path(),
+            vec!["migrate-registry".to_owned()],
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let p = Provisioner::new(pools.clone(), url.clone(), migrations.path())
+            .with_default_apex(Some("shop.test".into()))
+            .erased();
+        let tenant = |slug: &str| {
+            let db = tmp.path().join(format!("{slug}.db"));
+            ProvisionRequest::new(
+                slug,
+                TenantStorage::Database(DatabaseSource::Url(format!(
+                    "sqlite://{}?mode=rwc",
+                    db.display()
+                ))),
+            )
+        };
+        let mut own = tenant("own");
+        own.host_pattern = Some("own.example.com".into());
+        for req in [tenant("acme"), own] {
+            p.provision(&req, None, None).await.unwrap();
+        }
+        std::env::remove_var("RUSTANGO_APEX_DOMAIN");
+        let hosts: Vec<Option<String>> = crate::query::QuerySet::<super::super::Org>::new()
+            .order_by(&[("slug", false)])
+            .values_list_flat("host_pattern")
+            .fetch(&pools.registry_pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            hosts,
+            [
+                Some("acme.shop.test".to_owned()),
+                Some("own.example.com".to_owned())
+            ]
+        );
     }
 }

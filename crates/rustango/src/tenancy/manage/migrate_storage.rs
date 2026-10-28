@@ -76,7 +76,6 @@ use crate::tenancy::org::{Org, StorageMode};
 use crate::tenancy::pools::TenantPools;
 
 /// Parsed `migrate-tenant-storage` arguments.
-#[derive(Debug)]
 struct MigrateStorageArgs {
     slug: String,
     target: StorageMode,
@@ -91,6 +90,8 @@ struct MigrateStorageArgs {
     drain_secs: u64,
     dry_run: bool,
 }
+
+redacted_debug!(MigrateStorageArgs { slug, target, schema_name, allow_extensions, drain_secs, dry_run; database_url });
 
 pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
     pools: &TenantPools,

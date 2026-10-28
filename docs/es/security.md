@@ -71,12 +71,16 @@ let app = router.security_headers(SecurityHeadersLayer::strict());
 | `dev()` | Local: solo nosniff (sin HSTS para evitar bloquear localhost en HTTPS para siempre) |
 | `empty()` | Construir desde cero |
 
+`SecurityHeadersLayer::default()` es `strict()`. `from_preset(name)` elige un preset por nombre (`"strict"`, `"relaxed"`, `"dev"`, `"none"` o `"empty"`); un nombre desconocido da `strict()`, nunca ninguna cabecera. `from_settings(&settings.security)` lee `[security] headers_preset`, `csp` y `hsts_max_age_secs` (`0` desactiva HSTS). Una cabecera que el handler ya puso se conserva.
+
+Dos capas más van aquí. `host_validation::AllowedHostsLayer::new(["example.com", ".example.com"])` responde `400` a una petición cuyo `Host` no está en la lista (`.example.com` cubre también sus subdominios). `ssl_redirect::SslRedirectLayer::new()` responde al HTTP plano con un `301` a HTTPS; detrás de un proxy que termina TLS, añade `.proxy_ssl_header("X-Forwarded-Proto", "https")`, o redirige en bucle.
+
 ### CSP personalizada
 
 ```rust
 let csp = CspBuilder::new()
     .default_src(&["'self'"])
-    // The placeholder becomes a per-request nonce; the bundled admin uses it.
+    // The placeholder becomes a per-request nonce only under CspNonceLayer (below).
     .script_src(&["'self'", "'nonce-__RUSTANGO_NONCE__'", "https://cdn.example.com"])
     .style_src(&["'self'", "'nonce-__RUSTANGO_NONCE__'"])
     .img_src(&["'self'", "data:", "https:"])
@@ -89,6 +93,10 @@ let csp = CspBuilder::new()
 
 let layer = SecurityHeadersLayer::strict().csp(csp);
 ```
+
+`'nonce-__RUSTANGO_NONCE__'` (la constante `csp_nonce::CSP_NONCE_PLACEHOLDER`) es solo un marcador. Monta `csp_nonce::CspNonceLayer::default()` con `.csp_nonce(...)` **después** de `.security_headers(...)`, para que se ejecute por fuera: crea un nonce aleatorio por petición, lo pone en la petición como `Extension<Nonce>` y sustituye el marcador en la cabecera CSP. Sin ella, el navegador recibe el marcador literal y bloquea todo script y estilo inline.
+
+Las [páginas de error](html-views.md#páginas-de-error) incorporadas y las plantillas del admin ponen el mismo nonce en sus etiquetas inline, así que pasan esta política.
 
 ### Despliegue gradual de CSP
 
@@ -123,9 +131,11 @@ let layer = CorsLayer::new()
 let layer = CorsLayer::permissive();              // any origin, common methods
 ```
 
+`CorsLayer::new()` no permite ningún origen hasta que añadas alguno. `CorsLayer::from_settings(&settings.security)` lee `[security] cors_allowed_origins`: una lista vacía da `None` (no montar nada), `"*"` da `permissive()`, y orígenes con nombre dan una lista de permitidos con los métodos comunes (QUERY incluido) y las cabeceras `Content-Type` y `Authorization`.
+
 **Nota de seguridad:** con credenciales DEBES enumerar orígenes explícitos. `allow_credentials(true)` junto a `allow_any_origin()` no te da CORS comodín con credenciales — eso no existe, y pedirlo no te da ninguna de las dos mitades.
 
-Rustango responde con `Access-Control-Allow-Origin: *` y **sin** cabecera `Access-Control-Allow-Credentials`, de modo que el navegador bloquea la petición con credenciales. Hasta [#1394](https://github.com/ujeenet/rustango/issues/1394) devolvía reflejado el origen solicitante, que es justo lo que los navegadores *sí* aceptan junto a credenciales: esa combinación era un agujero real, legible por cualquier sitio que el usuario visitara, y esta página lo describía como algo que el navegador rechazaría.
+Rustango responde con `Access-Control-Allow-Origin: *` y **sin** cabecera `Access-Control-Allow-Credentials`, de modo que el navegador bloquea la petición con credenciales. Las versiones antiguas devolvían reflejado el origen solicitante, que es justo lo que los navegadores *sí* aceptan junto a credenciales: esa combinación era un agujero real, legible por cualquier sitio que el usuario visitara, y esta página lo describía como algo que el navegador rechazaría.
 
 Usa `.allow_origins([...])` con los orígenes que realmente sirves. Esa ruta no cambia y sigue enviando `Access-Control-Allow-Credentials: true`.
 
@@ -148,9 +158,9 @@ router.rate_limit(RateLimitLayer::per_header("authorization", 1000, Duration::fr
 router.rate_limit(RateLimitLayer::global(10, Duration::from_secs(1)));
 ```
 
-Cuando se agota: `429 Too Many Requests` con la cabecera `Retry-After`. Cada respuesta exitosa incluye `X-RateLimit-Limit` + `X-RateLimit-Remaining`.
+Cuando se agota: `429 Too Many Requests` con la cabecera `Retry-After`. Cada respuesta exitosa incluye `X-RateLimit-Limit` + `X-RateLimit-Remaining`. La capa es un cubo de tokens: `capacity` peticiones, rellenadas a lo largo de `refill_period`. Guarda como mucho 100.000 cubos; cámbialo con `.max_buckets(n)`.
 
-> **Detrás de un proxy inverso, nombra tus proxies o `per_ip` no limita nada útil** ([#1398](https://github.com/ujeenet/rustango/issues/1398)). `RateLimitLayer::per_ip` se basa en el socket de conexión, que detrás de un proxy es la dirección del *proxy* — de modo que todos los clientes comparten un único cubo. Un solo cliente ruidoso limita entonces a todos los demás, y ningún atacante individual llega a ser limitado.
+> **Detrás de un proxy inverso, nombra tus proxies o `per_ip` no limita nada útil**. `RateLimitLayer::per_ip` se basa en el socket de conexión, que detrás de un proxy es la dirección del *proxy* — de modo que todos los clientes comparten un único cubo. Un solo cliente ruidoso limita entonces a todos los demás, y ningún atacante individual llega a ser limitado.
 >
 > Monta `RealIpLayer` **y dile a qué saltos creer**:
 >
@@ -172,6 +182,16 @@ Cuando se agota: `429 Too Many Requests` con la cabecera `Retry-After`. Cada res
 >
 > Nombra las direcciones desde las que tu ingress conecta realmente. Confiar en un rango más amplio entrega la elusión a cualquiera dentro de él.
 
+### Límites de login incorporados
+
+Cada login por contraseña incorporado (admin, consola de operador, admin de tenant, `/auth/login` de JWT) pasa por `rustango::login_throttle` antes de buscar al usuario. Comprueba, por orden, un bloqueo por nombre de usuario (5 fallos, 15 min) que cuenta los nombres desconocidos igual que los reales, un límite por IP (20 logins fallidos/min; IPv6 cuenta por /64) y un límite global por login (600 logins fallidos/min cada uno para el admin, la consola de operador y cada tenant). Un login correcto no cuenta contra los límites. Un nombre de usuario que inició sesión desde una IP en los últimos 30 días se salta desde esa IP un límite global agotado, para que un ataque desde muchas IP no pueda bloquear a todos los usuarios; su límite por IP y su bloqueo por nombre siguen aplicándose. Una vez encontrada la fila del usuario, el bloqueo sigue también al nombre de usuario guardado, así que las grafías que la base de datos trata como iguales (MySQL hace coincidir `alicé` con `alice`) comparten un bloqueo. HTTP Basic y las claves de API tienen su propio ámbito y solo cuentan fallos. Un login rechazado recibe `429` con `Retry-After`, y la misma respuesta exista o no la cuenta.
+
+Detrás de un proxy inverso, monta `RealIpLayer` con tus proxies como se muestra arriba; una app `Cli` llama en su lugar a `Cli::with_trusted_proxies(["127.0.0.1/32"])?`. Sin ello, todos los clientes tienen la dirección del proxy y comparten un único cubo por IP; se registra una advertencia una vez cuando llegan cabeceras de reenvío.
+
+El hash de contraseñas ejecuta como mucho un trabajo por CPU, compartido por todos los logins; HTTP Basic, las claves de API y los secretos de agente pueden usar como mucho la mitad de los huecos. Un login que espera más de `hash_wait_ms` (5 s) por un hueco recibe `503` con `Retry-After`, tanto para usuarios conocidos como desconocidos.
+
+Ajústalos bajo `[auth]`: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`, `login_global_window_secs`, `lockout_threshold`, `lockout_duration_secs`, `hash_wait_ms`. Un valor fijado en código (`login_throttle::configure_shared`, `account_lockout::configure_shared`, `passwords::configure_hash_wait`) prevalece sobre estas claves. Los cubos por IP y global son por proceso salvo que instales `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))`, que los cuenta en ventanas fijas en una caché compartida (ante un error de caché ambos vuelven al proceso; una ráfaga que cruza el borde de una ventana puede llegar al doble de un límite; las apps que comparten una caché comparten los contadores salvo que cada una use su propio `ScopedCache`); el primer login registra una advertencia mientras sean por proceso. El bloqueo por nombre de usuario usa `account_lockout::shared()`, que puedes respaldar con una caché compartida mediante `account_lockout::configure_shared`. Los fallos cuentan en una ventana fija (1 hora por defecto) que empieza con el primer fallo, así que un atacante tiene `lockout_threshold - 1` intentos por ventana sin bloqueo; los límites por IP y global acotan el resto.
+
 `RateLimitLayer` es **local al proceso** — cuenta las peticiones solo dentro de una instancia en ejecución, lo cual está bien si ejecutas una sola instancia. Si ejecutas varias instancias (réplicas) detrás de un balanceador de carga, cada una mantendría su propio recuento, de modo que el límite real se multiplica. Para compartir un único recuento entre todas las réplicas, usa `rate_limit_cache::CacheRateLimitLayer`, que delega en cualquier implementación de `cache::Cache` (empareja con `cache::RedisCache` para un contador compartido incrementado atómicamente por el `INCRBY` de Redis):
 
 ```rust
@@ -191,7 +211,9 @@ let app = axum::Router::new()
     );
 ```
 
-> **Keyear por una cabecera secreta es seguro de compartir.** Con `key_by(KeyBy::Header("authorization"))` o `"x-api-key"`, el limitador respaldado por caché **hashea** el valor de la cabecera antes de usarlo como clave (#1252), de modo que un Redis compartido nunca almacena una credencial viva donde alguien con acceso de lectura a las claves pudiera cosecharla. `KeyBy::Ip` necesita `ConnectInfo` (o un `RealIpLayer` delante); sin ello, el limitador avisa una vez y recae en un único bucket compartido.
+Cuenta en ventanas fijas, así que una ráfaga a caballo de un borde de ventana puede llegar al doble del límite. Un error de caché deja pasar la petición (fail open) y registra un aviso.
+
+> **Keyear por una cabecera secreta es seguro de compartir.** Con `key_by(KeyBy::Header("authorization"))` o `"x-api-key"`, el limitador respaldado por caché **hashea** el valor de la cabecera antes de usarlo como clave, de modo que un Redis compartido nunca almacena una credencial viva donde alguien con acceso de lectura a las claves pudiera cosecharla. `KeyBy::Ip` necesita `ConnectInfo` (o un `RealIpLayer` con `trust_proxies` delante); sin ello, el limitador avisa una vez y recae en un único bucket compartido.
 
 
 ---
@@ -224,7 +246,7 @@ let public_router = public_router
 axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 ```
 
-Si tu proxy inverso reenvía `X-Forwarded-For`, configúralo para que establezca `RemoteAddr` — `ip_filter` lee el par de conexión, no las cabeceras.
+Una petición sin `ConnectInfo` la rechaza `allow_only` y la deja pasar `block`; cámbialo con `.allow_no_ip(bool)`. Detrás de un proxy inverso, el par es el proxy. Llama a `.behind_trusted_proxy()` para comprobar en su lugar la IP del cliente que resolvió un `RealIpLayer` con `trust_proxies`. El filtro debe ir dentro de ese `RealIpLayer` (añade `.real_ip(...)` después de `.ip_filter(...)`), o comprueba la dirección del proxy y una lista de bloqueo deja pasar a todos. `ip_filter` nunca lee por sí mismo una cabecera de reenvío.
 
 ---
 
@@ -246,7 +268,7 @@ let app = Router::new()
     .layer(csrf::layer());
 ```
 
-`csrf::layer()` construye la capa con `secure: true`, así que la cookie se rechaza sobre HTTP plano — en `http://localhost` usa `CsrfConfig::allow_insecure_for_dev()` o la capa parecerá no hacer nada. Ese ajuste solo rige la capa: las CBV de `template_views` emiten su cookie con `forms::csrf::ensure_token`, que sigue `session::secure_cookies()` (la política de arranque, si no `Secure` en el tier prod). `csrf::with_config(CsrfConfig)` sobrescribe los nombres de cookie/cabecera y el flag `Secure`, además de `trusted_origins` — orígenes extra permitidos junto al propio Host de la petición. La comprobación de Origin se ejecuta aunque esté vacío: un `Origin` ajeno recibe `403`, y sobre TLS también un POST sin `Origin`. En las plantillas, `{{ csrf_token }}` te da el token en bruto y `{{ csrf_input }}` un `<input>` oculto listo para usar — escríbelo como `{{ csrf_input | safe }}`, porque Tera autoescapa las plantillas `.html`: sin el filtro la página renderiza un `<input …>` literal visible, el formulario no lleva campo `_csrf` y cada POST devuelve 403. Ambas variables solo están en el contexto para las CBV de `template_views` o después de llamar tú mismo a `forms::csrf::stamp_into_context` — un handler escrito a mano no tiene ninguna. Usa el patrón de cookie de doble envío: en los métodos inseguros (POST, PUT, PATCH, DELETE) la capa comprueba la cabecera `X-CSRF-Token` (o el campo de formulario `_csrf`) contra la cookie `rustango_csrf`; una discrepancia devuelve `403 Forbidden`.
+`csrf::layer()` toma el flag `Secure` de la cookie de `session::secure_cookies()`: la política de arranque (`[security] secure_cookies`, que la ruta `manage` pone a `true` por defecto), si no `Secure` en el tier prod. Las CBV de `template_views` emiten su cookie con `forms::csrf::ensure_token`, que sigue la misma política. `csrf::with_config(CsrfConfig)` usa en su lugar `CsrfConfig::secure` (por defecto `true`); en `http://localhost` llama a `CsrfConfig::default().allow_insecure_for_dev()`, o el navegador descarta la cookie y cada POST recibe `403`. `with_config` fija también los nombres de cookie/cabecera y `trusted_origins` — orígenes extra permitidos junto al propio Host de la petición (`.trust_origin("https://app.example.com")`, se admiten comodines `*.example.com`). La comprobación de Origin se ejecuta aunque esté vacío: un `Origin` ajeno recibe `403`, y sobre TLS también un POST sin `Origin`. En las plantillas, `{{ csrf_token }}` te da el token en bruto y `{{ csrf_input }}` un `<input>` oculto listo para usar — escríbelo como `{{ csrf_input | safe }}`, porque Tera autoescapa las plantillas `.html`: sin el filtro la página renderiza un `<input …>` literal visible, el formulario no lleva campo `_csrf` y cada POST devuelve 403. Ambas variables solo están en el contexto para las CBV de `template_views` o después de llamar tú mismo a `forms::csrf::stamp_into_context` — un handler escrito a mano no tiene ninguna. Usa el patrón de cookie de doble envío. GET, HEAD, OPTIONS y TRACE son seguros, y también QUERY salvo que se active `require_csrf_on_query`. En cualquier otro método la capa comprueba la cabecera `X-CSRF-Token` (o el campo de formulario `_csrf`) contra la cookie `rustango_csrf`; una discrepancia devuelve `403 Forbidden`.
 
 **Eximir endpoints recolectores.** `CsrfConfig::exempt_prefix("/path")` (repetible) omite la aplicación de CSRF para los métodos inseguros en peticiones cuya ruta comienza con el prefijo dado. Esto es para endpoints de solo anexado, sin estado de autenticación, alcanzados vía `navigator.sendBeacon` — por ejemplo, un recolector de analíticas — que no pueden establecer una cabecera `X-CSRF-Token` y, cuando la página se sirve desde una caché de CDN que elimina `Set-Cookie`, puede que no lleven ninguna cookie CSRF en absoluto. Mantén los prefijos estrechos y nunca eximas nada que lea o escriba estado de autenticación.
 
@@ -254,7 +276,7 @@ let app = Router::new()
 
 La condición es deliberada, no incidental: CSRF defiende credenciales que el navegador adjunta por su cuenta, así que es la cookie de sesión la que lo hace significativo. Un admin construido sin `with_session_auth` no tiene ninguna credencial gestionada por rustango que falsificar, y sus mutaciones son alcanzables directamente por cualquiera que llegue a la ruta — eso es un hueco de autenticación, no de CSRF, y CSRF no lo estrecharía. Eso solo vale mientras delante no haya una credencial que el navegador adjunte solo. HTTP Basic (`protect_with_basic_auth`) o tu propia auth por cookie lo es, así que los POST cross-site viajan con ella — y montar `csrf::layer()` tú mismo no lo arregla, porque el admin solo renderiza tokens de formulario con `with_session_auth`, así que cada POST devuelve 403. Usa `with_session_auth` para un admin de navegador.
 
-Hasta [#1395](https://github.com/ujeenet/rustango/issues/1395) este párrafo afirmaba que la protección era incondicional cuando la única ruta protegida era `POST /login`. Cualquier otra mutación del admin aceptaba un POST entre sitios montado sobre la sesión del administrador — incluida la limpieza de auditoría, de modo que la misma clase de petición podía borrar su propio rastro.
+Las versiones antiguas de este párrafo afirmaban que la protección era incondicional cuando la única ruta protegida era `POST /login`. Cualquier otra mutación del admin aceptaba un POST entre sitios montado sobre la sesión del administrador — incluida la limpieza de auditoría, de modo que la misma clase de petición podía borrar su propio rastro.
 
 ---
 
@@ -282,13 +304,13 @@ Para la defensa XSS basada en CSP, consulta [Establecer cabeceras de seguridad](
 
 ## Prevenir la inyección SQL
 
-La inyección SQL ocurre cuando la entrada del usuario se pega directamente en una cadena SQL y cambia la consulta. El ORM de **Rustango** detiene esto por diseño: usa el enlace de parámetros de sqlx en todas partes — cada valor se envía como un marcador de posición `$1, $2, ...`, nunca pegado en el texto de la consulta. (sqlx es la biblioteca de base de datos subyacente.) **No puedes concatenar accidentalmente la entrada del usuario en SQL a través de la API del ORM.**
+La inyección SQL ocurre cuando la entrada del usuario se pega directamente en una cadena SQL y cambia la consulta. El ORM de **Rustango** detiene esto por diseño: usa el enlace de parámetros de sqlx en todas partes — cada valor se envía como un marcador de posición enlazado (`$1, $2, ...` en PostgreSQL, `?` en MySQL y SQLite), nunca pegado en el texto de la consulta. (sqlx es la biblioteca de base de datos subyacente.) **No puedes concatenar accidentalmente la entrada del usuario en SQL a través de la API del ORM.**
 
 Hay dos puntos en los que hay que tener cuidado:
 
 **1. Nombres de tabla y columna en `bulk_actions`:**
 
-Los marcadores de posición protegen los valores, pero no pueden llevar un identificador (un nombre de tabla o columna), así que esos necesitan su propia protección. El ejecutor de acciones masivas nunca pega nombres de tabla/columna suministrados por el usuario en bruto dentro del SQL. Internamente valida cada identificador (un `validate_ident` privado al crate que rechaza `"`, `` ` ``, `\0`, `\n`, `\r`, `\`, `;`, espacios y caracteres de control) y luego lo entrecomilla mediante `dialect.quote_ident()` antes de construir la sentencia. Esta protección se ejecuta por ti — no la llamas tú mismo.
+Los marcadores de posición protegen los valores, pero no pueden llevar un identificador (un nombre de tabla o columna), así que esos necesitan su propia protección. Las acciones masivas escriben a través del ORM, así que ningún nombre en bruto llega al SQL. Una acción incorporada que fija una columna la busca en el esquema del modelo; un nombre que el modelo no tiene falla con `BulkActionError::InvalidIdent`. Las claves elegidas son un `PkSet`, tipado según la clave primaria del modelo: una clave del tipo equivocado falla con `InvalidPk`, y un conjunto admite como mucho 10.000 claves. Esta protección se ejecuta por ti — no la llamas tú mismo.
 
 **2. La salida de emergencia de SQL en bruto:**
 
@@ -346,7 +368,7 @@ let app = Router::new()
     .require_auth(backends);       // outer: resolves the user first
 ```
 
-El middleware prueba cada backend en orden. El primero que tiene éxito gana; el primero que devuelve un error duro detiene la cadena.
+El middleware prueba cada backend en orden. El primero que tiene éxito gana; el primero que devuelve un error duro detiene la cadena. `require_perm` responde `401` sin usuario y `403` sin el codename. `optional_auth(backends)` resuelve el usuario igual pero deja pasar las peticiones anónimas. Las tres necesitan la capa de tenancy montada por fuera; sin `TenantContext` fallan de forma segura con `500`.
 
 ### Escribir tu propio backend
 
@@ -387,6 +409,8 @@ let hashed = hash(&new_password)?;
 let ok = verify(&attempted, &user.password_hash)?;
 ```
 
+`hash` y `verify` bloquean el hilo durante todo el hash. En código async usa `hash_async` / `verify_async`, que corren en el pool de hasheo acotado y devuelven `PasswordError::Busy` cuando no se libera un hueco a tiempo. Tras un login correcto, `needs_rehash(stored)` te dice que el hash está por debajo del coste actual; `rehash_async` da el nuevo.
+
 El hasheo usa **argon2id** (el valor predeterminado recomendado por OWASP desde 2023 — resiste mejor el crackeo por GPU que bcrypt). Los hashes se almacenan en formato de cadena PHC, así que puedes cambiar los parámetros más tarde sin romper los hashes antiguos.
 
 La **comprobación de fortaleza** incorporada es intencionadamente mínima. Para despliegues serios, comprueba también las contraseñas contra la API HIBP / pwned-passwords para rechazar las que se sabe que se han filtrado.
@@ -407,6 +431,8 @@ let jwt = JwtLifecycle::new(secret)
     .with_access_ttl(900)                         // 15 min
     .with_refresh_ttl(7 * 86400);                 // 7 days
 ```
+
+Estos son también los valores por defecto. `JwtLifecycle::new` hace panic cuando `secret` tiene menos de 32 bytes, porque con una clave corta cualquiera puede acuñar tokens. `issue_pair(user_id)` emite un par sin claims propios, `issue_access_with` un solo token de acceso, y `verify_refresh` comprueba un token de refresco.
 
 ### Emitir un token con claims personalizados (sin consulta a la BD al verificar)
 
@@ -439,7 +465,7 @@ let new_pair = jwt.refresh(&refresh_token).await
 // new_pair has the same roles + scope + tenant
 ```
 
-El JTI (su ID único) del antiguo token de refresco se añade a una lista negra para que no pueda reutilizarse — esto bloquea los ataques de repetición donde se reenvía un token antiguo robado.
+El JTI (su ID único) del antiguo token de refresco se añade a una lista negra para que no pueda reutilizarse — esto bloquea los ataques de repetición donde se reenvía un token antiguo robado. Un token de refresco es de un solo uso: de dos refrescos del mismo token, aunque sean a la vez, el segundo recibe `None`.
 
 ### Refrescar con permisos revisados de nuevo
 
@@ -456,11 +482,11 @@ let new_pair = jwt.refresh_with(&refresh_token, json!({
 ### Revocar un token
 
 ```rust
-jwt.revoke(&access_token).await;     // adds JTI to blacklist
+jwt.revoke(&access_token).await;     // adds JTI to blacklist; false if the token isn't ours
 jwt.revoke(&refresh_token).await;
 ```
 
-La lista negra en memoria por defecto (`InMemoryJtiStore`) limpia por sí sola las entradas caducadas, pero vive en un único proceso y olvida cada revocación al reiniciar. Para despliegues multiproceso, instala un almacén compartido y duradero vía `JwtLifecycle::new(secret).with_jti_store(store)` — `store` es cualquier `Arc<dyn JtiStore>` (por ejemplo uno respaldado por Redis o por BD). Sin un almacén compartido, un token que revocas en una réplica todavía puede repetirse en otra hasta que caduque. Desde v0.52 (#1191) todas estas llamadas son `async` — `verify_*`, `refresh*` y `revoke` esperan al almacén, de modo que un almacén duradero puede ser una única escritura condicional en lugar de una caché de consistencia eventual con volcado en segundo plano.
+La lista negra en memoria por defecto (`InMemoryJtiStore`) limpia por sí sola las entradas caducadas, pero vive en un único proceso y olvida cada revocación al reiniciar. Para despliegues multiproceso, instala un almacén compartido y duradero vía `JwtLifecycle::new(secret).with_jti_store(store)` — `store` es cualquier `Arc<dyn JtiStore>`. Solo se incluye `InMemoryJtiStore`, así que el respaldado por Redis o por BD lo escribes tú. Sin un almacén compartido, un token que revocas en una réplica todavía puede repetirse en otra hasta que caduque. Desde v0.52 todas estas llamadas son `async` — `verify_*`, `refresh*` y `revoke` esperan al almacén, de modo que un almacén duradero puede ser una única escritura condicional en lugar de una caché de consistencia eventual con volcado en segundo plano.
 
 > **Análisis en profundidad:** [API de auth JWT](auth-jwt-api.md) — el router incorporado `/api/auth/login|refresh|logout|me`, el refresco deslizante, y el almacén de revocación de JTI. Para un único token autogestionado, consulta [JWT (independiente)](auth-jwt.md). Para restringir rutas de navegador/API por inicio de sesión, consulta los [decoradores de acceso](auth-decorators.md).
 
@@ -514,13 +540,17 @@ Funciona con Google Authenticator, Authy, 1Password, Bitwarden y otras aplicacio
 
 `verify` acepta el mismo código otra vez hasta que caduca. Para códigos de un solo uso, llame a `matched_step`, guarde el paso que devuelve y acepte un código solo si su paso es posterior al guardado. El inicio de sesión integrado del admin lo hace así.
 
+Con la funcionalidad `totp`, el bare admin también tiene inicio de sesión en dos pasos. Cada usuario se registra en `<admin>/account/totp`, y se pide un dispositivo confirmado en cada login, SSO incluido.
+
+La consola de operadores tiene el mismo segundo factor, opcional por operador u obligatorio para todos; vea [Inicio de sesión en dos pasos](operator-console.md#inicio-de-sesión-en-dos-pasos).
+
 **Códigos de recuperación** (códigos de respaldo de un solo uso para cuando un usuario pierde su teléfono) todavía no se incluyen. El patrón común es almacenar de 8 a 10 códigos hasheados por usuario y consumir uno cada vez que se usa.
 
 ---
 
 ## Enviar URLs firmadas (enlaces mágicos)
 
-Una URL firmada lleva una firma a prueba de manipulaciones, de modo que puedes confiar en ella sin una sesión — perfecta para inicios de sesión con enlace mágico, restablecimientos de contraseña y enlaces de descarga de tiempo limitado. Firmas una URL con `sign` (opcionalmente con una caducidad) y la verificas con `verify` cuando el usuario hace clic. (Laravel las llama "rutas firmadas".)
+Una URL firmada lleva una firma a prueba de manipulaciones, de modo que puedes confiar en ella sin una sesión — perfecta para inicios de sesión con enlace mágico, restablecimientos de contraseña y enlaces de descarga de tiempo limitado. Firmas una URL con `sign` (opcionalmente con una caducidad) y la verificas con `verify` cuando el usuario hace clic.
 
 ```rust
 use rustango::signed_url::{sign, verify, SignedUrlError};
@@ -550,7 +580,9 @@ Usos comunes:
 - Enlaces de "Haz clic aquí para verificar tu email"
 - Enlaces de baja de suscripción (sin necesidad de auth; la propia URL prueba la intención)
 
-Antes de firmar, los parámetros de consulta se ordenan en un orden fijo, así que un atacante no puede reordenarlos (por ejemplo moviendo `?expires=...`) para cambiar lo que cubre la firma y falsificar un enlace de aspecto válido.
+La firma es un HMAC-SHA256 sobre el esquema, el host, la ruta y la query, ordenada antes para que el orden de los parámetros no importe. Cambiar cualquiera de ellos, `expires` incluido, la rompe.
+
+**Estos enlaces no son de un solo uso.** `verify` solo comprueba la firma y la caducidad, así que un enlace filtrado (una cabecera Referer, el historial del navegador, un correo reenviado) sigue funcionando hasta que caduca. Para un enlace que inicia sesión o cambia datos, usa las variantes `verify_single_use` de `auth_flows`, o borra el registro tras el primer clic.
 
 > Análisis en profundidad: [Flujos de cuenta](auth-flows.md) construye el restablecimiento de contraseña, la verificación de email y el inicio de sesión con enlace mágico sobre esta primitiva de URL firmada.
 
@@ -616,7 +648,40 @@ async fn handle_stripe_webhook(headers: HeaderMap, body: Bytes) -> StatusCode {
 | `HexSha256` | los bytes que pases, hex en bruto | valores `v1=` de Stripe / `v0=` de Slack sobre las cadenas de arriba |
 | `Base64Sha256` | cuerpo, base64 estándar | Shopify (`X-Shopify-Hmac-Sha256`) |
 
+### Webhooks de `webhook_delivery`
+
+Los envíos propios de Rustango llevan `X-Webhook-Signature-V2`, firmada sobre el id, el evento, la marca de tiempo y el cuerpo. Compruébala con `verify_delivery` y luego descarta un `X-Webhook-Id` que ya hayas visto dentro de `max_age`. Elige un `max_age` más largo que el tiempo que los jobs pueden pasar en cola.
+
+```rust
+use axum::{body::Bytes, http::HeaderMap, http::StatusCode};
+use rustango::webhook::{verify_delivery, DeliveryHeaders, SignatureFormat};
+
+fn check(secret: &[u8], headers: &HeaderMap, body: &Bytes) -> StatusCode {
+    let h = |name| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let signed = DeliveryHeaders::new(
+        h("x-webhook-id"),
+        h("x-webhook-event"),
+        h("x-webhook-timestamp"),
+        h("x-webhook-signature-v2"),
+    );
+    let max_age = std::time::Duration::from_secs(600);
+    if !verify_delivery(SignatureFormat::HexSha256WithPrefix, secret, &signed, body, max_age) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    // ... drop a repeated id, then process
+    StatusCode::OK
+}
+```
+
+La antigua `X-Webhook-Signature` cubre solo el cuerpo y se sigue enviando mientras los receptores pasan a v2.
+
+Una entrega que recibe 408, 429 o 5xx, o que falla en el transporte, se reintenta: 8 ejecuciones en total, esperando 1s y duplicando la espera. `WebhookSubscription::max_attempts(n)` y `retry_backoff(base)` cambian ambos valores para una suscripción. Un `Retry-After` en un 429 o 503, en segundos o como fecha HTTP, hace que el siguiente reintento espere al menos ese tiempo, como máximo una hora. Las demás respuestas 4xx van al dead-letter de inmediato; `retry_status_codes([...])` añade códigos que reintentar. Los reintentos reutilizan la primera marca de tiempo, así que el `max_age` del receptor debe cubrir toda la ventana de reintentos.
+
 La comparación de la firma es de tiempo constante, lo que significa que siempre tarda la misma cantidad de tiempo tanto si la conjetura es correcta como si es incorrecta. Eso detiene los ataques de temporización, donde un atacante mide diminutas diferencias en el tiempo de respuesta para adivinar el secreto un carácter a la vez.
+
+Las llamadas salientes a URLs que puede fijar la configuración (envío de webhooks, `webhook_callback` de Slack, descubrimiento OAuth2/OIDC, token y userinfo) rechazan direcciones de loopback, privadas, link-local y de metadatos, y nunca siguen redirecciones. Para llegar a un IdP o un hook de Slack en tu propia red, inclúyelo en `RUSTANGO_OUTBOUND_ALLOW` (hosts y CIDRs separados por comas, p. ej. `10.0.5.0/24,idp.internal`); todo lo demás sigue rechazado. Una entrada de host confía en lo que resuelva ese nombre, así que incluye solo nombres que controles. La lista nunca se aplica al envío de webhooks: una suscripción lo activa con `allow_private_targets(true)`. Tampoco se aplica a los proveedores SSO propios de un tenant, que fija un admin del tenant: esos leen `RUSTANGO_TENANT_OUTBOUND_ALLOW` (vacía por defecto, así que solo direcciones públicas).
+
+Estas llamadas ignoran `HTTPS_PROXY`/`NO_PROXY`. Para enviarlas a través de un proxy de salida, define `RUSTANGO_OUTBOUND_PROXY` (p. ej. `http://proxy.internal:3128`); el propio proxy puede ser privado. La app sigue resolviendo y comprobando antes cada destino, así que necesita DNS local para ellos; un fallo de resolución rechaza la llamada. El proxy vuelve a resolver el nombre, así que también debe rechazar destinos privados y de metadatos: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16 (incl. 169.254.169.254, 169.254.170.2, 169.254.170.23), 100.64.0.0/10 (incl. 100.100.100.200), ::1, fc00::/7 (incl. fd00:ec2::254, fd00:ec2::23) y fe80::/10. Sin proxy, las direcciones se vuelven a comprobar al conectar.
 
 ---
 
@@ -628,8 +693,7 @@ Las URLs registradas pueden filtrar contraseñas y tokens que aparecen en las ca
 let app = router.access_log(AccessLogLayer::default());
 ```
 
-Por defecto, los valores de estos parámetros de consulta se reemplazan por `[redacted]`:
-`password`, `passwd`, `token`, `secret`, `api_key`, `apikey`, `access_token`, `refresh_token`, `signature`, `auth`.
+Por defecto, un parámetro de consulta se reemplaza por `[redacted]` cuando su nombre contiene una palabra secreta, comparada por palabras, así que `api_key`, `reset_token` y `X-Api-Key` cuentan todos. Las palabras incluyen `password`, `pass`, `pwd`, `token`, `jwt`, `secret`, `key`, `signature`, `auth`, `credential`, `cookie`, `session` y `otp`, más los nombres OAuth `code`, `state` y `assertion`.
 
 Añadir a la lista:
 
@@ -646,6 +710,8 @@ let layer = AccessLogLayer::default()
     .redact(vec!["only_this".into()]);
 ```
 
+`token`, `signature` y `code` siguen ocultos incluso tras `.redact(...)`, porque el framework pone credenciales en ellos.
+
 Nota: esto solo redacta las **cadenas de consulta**. Para depurar los cuerpos o las cabeceras de las peticiones, filtra en el origen con `tracing::Subscriber`.
 
 ---
@@ -658,7 +724,7 @@ Un ID de petición etiqueta cada línea de registro de una petición con el mism
 let app = router.request_id(RequestIdLayer::default());
 ```
 
-Reutiliza un `X-Request-Id` entrante (para que los servicios encadenados compartan un ID) o genera un ID base64 de 22 caracteres nuevo. Los IDs entrantes se validan primero — cualquiera con caracteres de control, saltos de línea, bytes nulos, o de más de 128 caracteres se rechaza, lo que bloquea los ataques de inyección de cabeceras.
+Reutiliza un `X-Request-Id` entrante solo si viene de un proxy nombrado en `RealIpLayer::trust_proxies` (o `Cli::with_trusted_proxies`), para que los servicios encadenados compartan un ID, y, si no, genera un ID base64 de 22 caracteres nuevo. Los IDs entrantes deben tener como mucho 128 caracteres ASCII visibles, sin comillas ni barra invertida, lo que bloquea la inyección de cabeceras y de logs.
 
 En los manejadores:
 
@@ -668,6 +734,8 @@ async fn handler(id: rustango::request_id::RequestId) -> String {
     format!("req {}", id.0)
 }
 ```
+
+Para poner el ID en cada línea de log de la petición, monta también `tracing_layer::TracingLayer::new()`: su span de petición tiene un campo `request_id` que la capa rellena. Sin ella, el ID solo llega a la cabecera de respuesta.
 
 En una configuración de confianza cero, donde no confías en los IDs enviados por los servicios upstream, genera siempre el tuyo propio:
 
@@ -692,7 +760,7 @@ let db_pwd = secrets.require("DB_PASSWORD").await?;       // reads MYAPP_DB_PASS
 let redis_url = secrets.get("REDIS_URL").await?;          // None when unset
 ```
 
-Para obtener secretos de Vault, AWS Secrets Manager o GCP Secret Manager, implementa el trait tú mismo — es solo un método asíncrono.
+Para obtener secretos de Vault, AWS Secrets Manager o GCP Secret Manager, implementa el trait tú mismo — es solo un método asíncrono, `get`. En tests usa `InMemorySecrets::new().with(&[("DB_PASSWORD", "x")])`.
 
 ---
 
@@ -711,9 +779,13 @@ Comprobaciones siempre activas (se ejecutan con o sin `--deploy`):
 
 Comprobaciones adicionales de `--deploy` (endurecimiento para producción):
 - ✅ `RUSTANGO_ENV` es `prod` o `production`
-- ✅ `RUSTANGO_SESSION_SECRET` establecida y **decodificando a** ≥ 32 bytes (la clave HMAC para la firma de cookies + JWT — `SECRET_KEY` **no** la lee el framework), sin ningún marcador de posición del scaffolder dejado dentro. Es base64: `openssl rand -base64 32` da 44 caracteres. Un secreto de 32 *caracteres* son solo 24 bytes y se rechaza — por `check --deploy` y por el runtime desde [#1396](https://github.com/ujeenet/rustango/issues/1396); ese es justamente el punto, porque la comprobación medía la cadena codificada y aprobaba un valor que la app luego rechazaba
-- ✅ `DATABASE_URL` establecida (y advierte si apunta a localhost)
+- ✅ `RUSTANGO_SESSION_SECRET` establecida y **decodificando a** ≥ 32 bytes (la clave HMAC para la firma de cookies + JWT — `SECRET_KEY` **no** la lee el framework), sin ningún marcador de posición del scaffolder dejado dentro. Es base64: `openssl rand -base64 32` da 44 caracteres. Un secreto de 32 *caracteres* son solo 24 bytes y se rechaza — por `check --deploy` y por el runtime; ese es justamente el punto, porque la comprobación medía la cadena codificada y aprobaba un valor que la app luego rechazaba
+- ✅ Hay una base de datos configurada: `DATABASE_URL`, o `DB_USER` + `DB_NAME` (y advierte si apunta a localhost)
 - ⚠️ Advertencias de coherencia de `RUSTANGO_APEX_DOMAIN` / `RUSTANGO_BIND` para la tenencia + el enlace no de loopback
+- ⚠️ Ajustes con valores de dev en el tier prod: `[security] headers_preset`, `secure_cookies = false`, `hsts_max_age_secs = 0`, `allowed_hosts` vacío o `"*"`, `"*"` en `cors_allowed_origins`, `csrf_trusted_origins` vacío, sin `secure_ssl_redirect`; `[server] request_timeout_secs` y `max_body_bytes` sin fijar; un `[auth] argon2_memory_kib` bajo; un `[auth.jwt] access_ttl_secs` de más de una hora; `[mail] backend` sin fijar o `console`
+- ⚠️ Un router de admin sin autenticación, un almacén de bloqueo de logins local al proceso, la collation y la zona horaria de la base de datos, modelos cuyo `required_db_vendor` o `required_db_features` le faltan a la base, y proveedores SSO que rechazarían a todo usuario
+
+`RUSTANGO_SECRET_KEY` es otra clave: cifra los secretos guardados, como los secretos de cliente SSO. Con el aprovisionamiento de tenants montado, `check --deploy` avisa si falta o tiene menos de 32 bytes.
 
 Devuelve un código de salida distinto de cero ante cualquier hallazgo de **nivel de error** (bueno para las puertas de CI). Las advertencias no provocan un fallo pero aparecen en la salida.
 

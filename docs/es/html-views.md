@@ -54,7 +54,7 @@ Esta es la primera decisión. Ambas convierten un modelo en endpoints; difieren 
 | Devuelve | **datos JSON** | una **página HTML renderizada en el servidor** |
 | Pensada para | SPAs, apps móviles, otros servicios | navegadores, sitios renderizados en el servidor, CRUD tipo admin |
 | Una «creación» | `POST` JSON → `201` + el nuevo objeto | `POST` de un formulario → redirección `303` a una página de éxito |
-| Ante una entrada inválida | `400` + un mapa de errores JSON indexado por campo | vuelve a renderizar el formulario con los errores mostrados |
+| Ante una entrada inválida | `422` + un mapa de errores JSON indexado por campo | vuelve a renderizar el formulario con los errores mostrados |
 | Lee un listado como | un sobre JSON paginado | una `<table>`/bucle en tu plantilla |
 | Habitualmente autenticada con | tokens / JWT / claves de API | cookies de sesión |
 
@@ -99,8 +99,9 @@ consulta.
 ```rust
 use rustango::template_views::ListView;
 use std::sync::Arc;
-use tera::Tera;
 
+// Escapes every template, not only `.html` ones.
+let tera = rustango::template_extensions::html_tera_from_glob("templates/**/*")?;
 let app = ListView::for_model(Post::SCHEMA)
     .page_size(20)                       // rows per page (?page=N to navigate)
     .order_by("published_at", true)      // default sort, true = DESC
@@ -130,6 +131,14 @@ page {{ page }} / {{ total_pages }}
 ViewSet — la diferencia es puramente que el resultado es una página renderizada en lugar de un
 sobre JSON. Usa `.context_object_name("posts")` si prefieres iterar sobre `posts` en vez de sobre
 `object_list` en la plantilla.
+
+El tamaño de página es 20 por defecto. Un cliente puede pedir `?page_size=N`,
+limitado por `.max_page_size(n)` (100 por defecto). `.bulk_actions(true)` hace que
+la lista acepte un POST con un campo `action` y las pk elegidas:
+`delete_selected` viene incluida, `.action(...)` añade las tuyas, y
+`.with_delete_confirmation(true)` muestra antes una página de confirmación.
+`.with_fk_display(true)` añade un valor `<column>_display` por cada clave foránea,
+con una consulta extra por columna FK y por página.
 
 **`?ordering=` es la excepción.** La lista permitida de un `ListView` empieza *vacía*, así
 que el parámetro se ignora hasta que nombras tú las columnas ordenables:
@@ -218,7 +227,7 @@ cadena**, no a una lista — aplicarle `join` es un error. Y no existe una varia
 nivel superior; iterar sobre una es un fallo de renderizado de Tera, así que la página
 devuelve 500 en lugar de mostrar el mensaje.
 
-`{{ csrf_input | safe }}` necesita el filtro: Tera autoescapa los `.html`, así que sin él el
+`{{ csrf_input | safe }}` necesita el filtro: `html_tera` autoescapa todas las plantillas, así que sin él el
 token se renderiza como texto y todo POST es rechazado.
 
 **Validación.** Las reglas del esquema (tipo, `max_length`, NOT NULL…) se aplican
@@ -285,7 +294,7 @@ ellas:
 
 | Vista | Variables disponibles en la plantilla |
 |---|---|
-| `ListView` | `object_list` (las filas de la página), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev` |
+| `ListView` | `object_list` (las filas de la página), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev`, `page_marks`, `prev_page_url` / `next_page_url`, `ordering`, `filters`, `search` (and `bulk_actions` when on) |
 | `DetailView` | `object` (la fila) |
 | `CreateView` | `form` (`.fields`, `.errors`), `is_create` (true), `is_update` (false) — **sin `object`** |
 | `UpdateView` | `form` (`.fields`, `.errors`), `object` (la fila), `pk`, `is_create` (false), `is_update` (true) |
@@ -328,6 +337,15 @@ use rustango::template_views::RedirectView;
 
 let app = RedirectView::to("/posts").router("/old-posts");
 ```
+
+Responde `302 Found`; `.permanent()` la convierte en `301`.
+
+**FormView** — un formulario sin modelo. `FormView::<ContactForm>::for_form(handler)`
+renderiza un formulario `#[derive(Form)]` en GET (plantilla `form.html` por defecto).
+En POST valida y llama a tu handler async; `Ok(())` redirige con `303`, y
+`Err(msg)` vuelve a renderizar el formulario. Su contexto es `errors` (una lista
+por campo) y `values`. Como en todas las vistas de aquí, `.success_url` es `/` por
+defecto.
 
 ---
 
@@ -413,8 +431,12 @@ templates = "templates"   # template root holding errors/404.html etc.; default 
 htmx_target = "#flash"    # HX-Retarget for htmx errors; default "#flash", "" sends none
 ```
 
-Un directorio `templates` que no existe o no se parsea queda en el log, y se
-usan las páginas integradas.
+Un directorio `templates` que no existe se omite sin aviso; uno que no se parsea
+queda en el log. En ambos casos se usan las páginas integradas.
+
+`cargo rustango new` escribe `[errors] enabled = true` en `config/default.toml`, así
+que un proyecto nuevo tiene las páginas activadas. Los proyectos antiguos siguen sin
+ellas hasta que añaden la sección.
 
 ### Qué recibe cada cliente
 
@@ -533,6 +555,9 @@ otro 5xx. Solo cuando `RUSTANGO_DISCLOSE_ERRORS` está definida una página 5xx
 muestra su mensaje o su cuerpo — la misma regla que para cualquier cuerpo 5xx
 del framework.
 
+`PageError::forbidden(msg)` y `PageError::new(status, msg)` cubren otros
+estados. `ErrorPagesLayer::htmx_swap(..)` cambia el valor de `HX-Reswap`.
+
 ### Qué cubre
 
 Montada con `Builder::error_pages` (o `[errors]`), la capa queda dentro de las
@@ -546,8 +571,10 @@ cabeceras de seguridad y fuera de todo lo demás, así que viste:
 - los rechazos de axum (400, 415, 422);
 - las denegaciones y 404 del admin del inquilino, y las rutas desconocidas de la consola de operador.
 
-Las páginas con sus propios controles conservan su aspecto: la página «admin
-access required» del admin (tiene un formulario para cerrar sesión) y su página
+Las páginas con sus propios controles conservan su aspecto: toda página de
+error HTML del admin, del admin de tenant, de la consola de operador y de las
+vistas genéricas, como un formulario mostrado de nuevo con su error, la página
+«admin access required» (tiene un formulario para cerrar sesión) y la página
 «table not migrated». Marca tus propias respuestas con `KeepBody` para hacer lo
 mismo.
 

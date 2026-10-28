@@ -75,10 +75,14 @@ Reset-Token nicht als Magic Link wiederverwendet werden kann) und kodieren die B
 
 ```rust
 use std::time::Duration;
-use rustango::auth_flows::{PasswordReset, confirm_password_reset_pool_into};
+use rustango::auth_flows::{LinkScope, PasswordReset, confirm_password_reset_pool};
+
+// The request's tenant (`t: Tenant`): links redeem only in it.
+let scope = LinkScope::from(&t);
 
 // 1. User asks to reset → look them up → issue a link → email it.
 let url = PasswordReset::issue(
+    &scope,
     "https://app.example.com/auth/reset",   // your callback route
     user_id,                                // encoded in the token
     secret,
@@ -88,12 +92,17 @@ mailer.send(&Email::new().to(addr).subject("Reset your password").body(&url)).aw
 
 // 2. User clicks + submits a new password → verify + rotate the hash.
 let user_id = confirm_password_reset_pool(
-    &pool, &url, "a-brand-new-strong-password", secret,
+    &t, &url, "a-brand-new-strong-password", secret,
 ).await?;
 ```
 
+> **Mandantenfähige Apps müssen `&t`** (den `Tenant` oder einen `TenantScope`) an die
+> Bestätigung übergeben, damit Pool und Scope aus einem Wert stammen. Ein Link für einen
+> anderen Scope scheitert mit `Err(WrongScope)`. `LinkTarget::audience(&pool, "app")`
+> und `LinkScope::audience("app")` sind für Apps mit einer einzigen Benutzerdatenbank.
+
 > **Verwende diese Form für `rustango_users`.** Framework-Sitzungen tragen einen
-> Fingerabdruck des Passwort-Hashes ([#1338](https://github.com/ujeenet/rustango/issues/1338)), daher beendet der
+> Fingerabdruck des Passwort-Hashes, daher beendet der
 > neue Hash jede vor dem Zurücksetzen ausgestellte Sitzung, auch die eines
 > Angreifers. Sie stempelt auch `password_changed_at`; das hält die Änderung fest,
 > beendet die Sitzungen aber nicht.
@@ -109,7 +118,7 @@ manipulierte oder mit falschem Secret versehene Eingaben abweist, ohne die Zeile
 ```
 
 Es ist dasselbe `passwords::strength_score`, das der Rest des Frameworks verwendet — ein bei der
-Registrierung abgelehntes Passwort lässt sich also nicht per Zurücksetzen setzen (#1399).
+Registrierung abgelehntes Passwort lässt sich also nicht per Zurücksetzen setzen.
 
 > `_into` verweist auf Ihre eigene Tabelle/Spalten — etwa ein mandantenspezifisches
 > `app_users`. Es schreibt nur den Hash. Vom Framework ausgestellte Sitzungen enden
@@ -118,11 +127,16 @@ Registrierung abgelehntes Passwort lässt sich also nicht per Zurücksetzen setz
 
 ### Den Link einmalig machen
 
-Die obigen Helfer prüfen nur Signatur und Ablauf, **der Link bleibt also seine gesamte TTL lang
+`confirm_password_reset_pool` schreibt nur, solange `password_changed_at` älter als der Link ist,
+und setzt die Spalte neu. Jede Passwortänderung, auch dieser Reset, beendet also alle älteren
+Links: eine Wiederholung bekommt `Err(Expired)`.
+
+Die `_into`-Form hat keine solche Spalte, **ihr Link bleibt also seine gesamte TTL lang
 nutzbar** — auch nachdem das Passwort geändert wurde. Eine Kopie der E-Mail in einem geteilten
 Postfach, eine Weiterleitung oder ein Support-Ticket mit der eingefügten Mail ist bis zum Ablauf
 des Tokens eine funktionierende Kontoübernahme — zu einem Zeitpunkt, an dem der legitime Nutzer
-fertig ist und keinen Verdacht hat.
+fertig ist und keinen Verdacht hat. Zwei gleichzeitige Klicks können zudem beide die Zeitprüfung
+bestehen.
 
 Übergeben Sie einen Cache, und das Token wird bei der ersten Verwendung verbraucht:
 
@@ -130,7 +144,7 @@ fertig ist und keinen Verdacht hat.
 use rustango::auth_flows::confirm_password_reset_single_use;
 
 let user_id = confirm_password_reset_single_use(
-    &pool, &url, "a-brand-new-strong-password", secret, &cache,
+    &t, &url, "a-brand-new-strong-password", secret, &cache,
 ).await?;                      // ein Replay → Err(AuthFlowError::AlreadyUsed)
 ```
 
@@ -154,11 +168,11 @@ integrierten DB-Schreibvorgang — Sie setzen Ihre eigene Spalte „verifiziert�
 use rustango::auth_flows::EmailVerification;
 
 // On signup:
-let url = EmailVerification::issue(callback, user_id, &email, secret, Duration::from_secs(86_400));
+let url = EmailVerification::issue(&scope, callback, user_id, &email, secret, Duration::from_secs(86_400));
 mailer.send(&Email::new().to(&email).subject("Confirm your email").body(&url)).await?;
 
 // On click:
-let (user_id, email) = EmailVerification::verify(&url, secret)?;
+let (user_id, email) = EmailVerification::verify(&scope, &url, secret)?;
 // → if email still matches the user's current address, mark them verified
 ```
 
@@ -173,11 +187,11 @@ eine [Session](auth-sessions.md). Halten Sie die TTL kurz (10–30 Min) und mach
 ```rust
 use rustango::auth_flows::MagicLink;
 
-let url = MagicLink::issue(callback, &email, secret, Duration::from_secs(900));
+let url = MagicLink::issue(&scope, callback, &email, secret, Duration::from_secs(900));
 mailer.send(&Email::new().to(&email).subject("Your sign-in link").body(&url)).await?;
 
 // On click:
-let email = MagicLink::verify_single_use(&url, secret, &cache).await?;
+let email = MagicLink::verify_single_use(&scope, &url, secret, &cache).await?;
 // → look up the user by email, create a session
 ```
 
@@ -186,9 +200,10 @@ let email = MagicLink::verify_single_use(&url, secret, &cache).await?;
 ## Einmal-Tokens
 
 `verify` allein prüft nur Signatur + Ablauf, ein durchgesickerter Link ist also bis zum Ablauf
-wiederholbar. Für Anmeldung und Zurücksetzung bevorzugen Sie `verify_single_use(url, secret,
-&cache)` — es hält die Signatur des Tokens in einem `Cache` fest und verweigert eine zweite
-Nutzung:
+wiederholbar. Für Anmeldung und Zurücksetzung bevorzugen Sie `verify_single_use(scope, url,
+secret, &cache)` — es hält die Signatur des Tokens in einem `Cache` fest und verweigert eine zweite
+Nutzung. Speziell für das Zurücksetzen erledigt `confirm_password_reset_single_use` das im selben
+Aufruf ([oben](#den-link-einmalig-machen)):
 
 ```rust
 // first click  → Ok(email)
@@ -210,7 +225,8 @@ Anwendung liefert den Rest:
 
 - Ein **Secret** (ein stabiler App-Schlüssel; per Konvention 32 Byte).
 - Ein **Mailer** zum Versenden der Links — `rustango::email` liefert `ConsoleMailer`,
-  `SmtpMailer` und `InMemoryMailer` (praktisch in Tests).
+  `FileMailer`, `NullMailer`, `InMemoryMailer` (praktisch in Tests) und, mit dem Feature
+  `email-smtp`, `SmtpMailer`.
 - Eine **Benutzertabelle** mit den Spalten, die jeder Ablauf braucht (E-Mail für die
   Verifizierungs-/Magic-Link-Suche; eine Passwort-Hash-Spalte für die Zurücksetzung; eine Spalte
   „verifiziert“, die Ihnen gehört).

@@ -12,9 +12,7 @@ itself, a chat. The server needs to *push* to the browser without being asked.
   client also sends (chat, collaborative editing, presence).
 
 Both fan out through the same in-process **broadcast bus** ([`EventBus`]), so
-"send this to every connected client" is one call regardless of transport. If
-you come from Laravel this is Echo/Reverb; from Node, `ws` + `EventSource` —
-same ideas, one bus behind them.
+"send this to every connected client" is one call regardless of transport.
 
 > **Source:** `rustango::sse` (`EventBus`) — behind the **`sse`** feature; and
 > `rustango::ws` (`WsHub`, `WsConfig`, `ws_handler`) — behind the
@@ -167,12 +165,15 @@ ws.onmessage = (e) => { const t = JSON.parse(e.data); console.log('tick', t.valu
 
 | Knob | Default | Effect |
 |---|---|---|
-| `.keepalive(Duration)` | 30 s | idle `Ping` interval — lower detects dead connections sooner |
+| `.keepalive(Duration)` | 30 s | `Ping` interval, busy or idle; a peer silent for a whole interval after a ping is closed |
 | `.on_message(fn(&str) -> Option<String>)` | none | handle client→server text; return `Some(reply)` to echo **to that client only** (call `hub.broadcast(..)` for fan-out) |
 | `.max_message_bytes(n)` | 1 MiB | close the connection if a client message exceeds this |
 
 **Slow consumers** don't get silently dropped: a lagging client is told it
-missed `n` messages (`Lagged(n)`) so it can resync or carry on.
+missed `n` messages so it can resync or carry on: it gets the text frame
+`{"_lagged": n}`. Binary frames from the client are dropped. To pass a full
+`WsConfig` at once, use `WsHub::with_config(bus, config)`; `hub.receiver_count()`
+counts open sockets.
 
 ## Sending from elsewhere
 
@@ -214,10 +215,12 @@ buffer, and a client that falls further behind than `capacity` gets a
 
 ```toml
 # Cargo.toml — both are in Rustango's default set; list them if you slim features.
-rustango = { version = "*", features = ["sse", "websocket"] }
+rustango = { version = "0.61", features = ["sse", "websocket"] }
 ```
 
-- **`sse`** — the `EventBus` broadcast bus (pulls `tokio`). Enough for SSE, since
-  the SSE wire format comes from axum's own `response::sse`.
+- **`sse`** — the `EventBus` broadcast bus (no extra dependencies). Enough for
+  SSE, since the SSE wire format comes from axum's own `response::sse`. Not to be
+  confused with `rustango::events::EventBus`, an always-on typed bus of domain
+  events with async handlers.
 - **`websocket`** — the `WsHub` / `ws_handler` scaffold; implies `admin` (axum)
   + `sse` + `axum/ws`.

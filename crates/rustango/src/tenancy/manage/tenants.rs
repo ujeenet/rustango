@@ -36,7 +36,7 @@ pub(super) async fn create_tenant<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let request = parse_create_tenant_args(args)?;
+    let (request, resume) = parse_create_tenant_args(args)?;
     // Before anything is made: a missing prod key must not strand an admin.
     let handover = match &request.first_admin {
         Some(_) => Some(cli_handover(w)?),
@@ -57,14 +57,14 @@ where
     // provision that died halfway left nothing to find. Recording is
     // best-effort inside `provision_tenant_recorded`: bookkeeping must not
     // be what fails a tenant creation.
-    let (_run, mut outcome) = provision::provision_tenant_recorded(
+    let (_run, mut outcome) = provision::provision_tenant_recorded_or_resume(
         pools,
         registry_url,
         dir,
         &request,
         Some(&progress),
         Some("cli"),
-        None,
+        resume,
     )
     .await?;
 
@@ -91,7 +91,15 @@ where
         // The observer already printed the `--no-migrate` line; the
         // verb has never followed it with a summary.
         provision::MigrationsOutcome::Skipped => {}
-        provision::MigrationsOutcome::Failed(err) => writeln!(w, "  migration failed: {err}")?,
+        // A script must see the failure; the tenant stays inactive.
+        provision::MigrationsOutcome::Failed(err) => {
+            writeln!(w, "  migration failed: {err}")?;
+            return Err(TenancyError::Validation(format!(
+                "tenant `{0}` was left inactive because its migrations failed; \
+                 fix them, then rerun `create-tenant {0} …` with the same flags and `--resume`",
+                outcome.slug
+            )));
+        }
         provision::MigrationsOutcome::Applied(applied) => {
             writeln!(w, "  applied {} migration(s)", applied.len())?;
             for m in applied {
@@ -323,12 +331,15 @@ pub(super) async fn test_tenant_connection<W: Write + Send>(
 /// `argv` → [`ProvisionRequest`]. The only place that knows
 /// `--no-migrate` exists: a negative flag is right for a command line
 /// and wrong for a struct field, so it is inverted on the way in.
-fn parse_create_tenant_args(args: &[String]) -> Result<provision::ProvisionRequest, TenancyError> {
+/// The `bool` is `--resume`.
+fn parse_create_tenant_args(
+    args: &[String],
+) -> Result<(provision::ProvisionRequest, bool), TenancyError> {
     const HELP: &str = "create-tenant <slug> [--mode schema|database] \
         [--backend postgres|mysql|sqlite] [--display-name <s>] \
         [--database-url <url> | --server <name>] [--schema-name <s>] [--host-pattern <s>] \
         [--port <n>] [--path-prefix <s>] [--no-migrate] \
-        [--admin-email <e> [--admin-username <u>]]";
+        [--admin-email <e> [--admin-username <u>]] [--resume]";
     reject_leading_flag(args, "create-tenant", "slug", HELP)?;
     let mut iter = args.iter();
     let slug_arg = iter.next().cloned();
@@ -344,6 +355,7 @@ fn parse_create_tenant_args(args: &[String]) -> Result<provision::ProvisionReque
     let mut mode = None;
     let (mut database_url, mut server, mut schema_name) = (None, None, None);
     let (mut admin_email, mut admin_username) = (None, None);
+    let mut resume = false;
     while let Some(flag) = iter.next() {
         match flag.as_str() {
             "--mode" => {
@@ -375,6 +387,7 @@ fn parse_create_tenant_args(args: &[String]) -> Result<provision::ProvisionReque
             }
             "--path-prefix" => out.path_prefix = Some(next_value(&mut iter, "--path-prefix")?),
             "--no-migrate" => out.run_migrations = false,
+            "--resume" => resume = true,
             "--admin-email" => admin_email = Some(next_value(&mut iter, "--admin-email")?),
             "--admin-username" => {
                 admin_username = Some(next_value(&mut iter, "--admin-username")?);
@@ -428,7 +441,7 @@ fn parse_create_tenant_args(args: &[String]) -> Result<provision::ProvisionReque
             .validate_storage_mode(mode)
             .map_err(|msg| TenancyError::Validation(msg.to_owned()))?;
     }
-    Ok(out)
+    Ok((out, resume))
 }
 
 // ---------- drop-tenant ----------

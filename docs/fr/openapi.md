@@ -92,7 +92,7 @@ répercutés. Les types de champ sont mis en correspondance automatiquement :
 | `String`, `&str` | `string` |
 | `bool` | `boolean` |
 | `Vec<T>` / `[T; N]` | `array` de `T` |
-| `Option<T>` | `T`, marqué `nullable` |
+| `Option<T>` | `[T, "null"]`, non requis |
 | `chrono::DateTime<Utc>` | `string` / `date-time` |
 | `chrono::NaiveDate` | `string` / `date` |
 | `uuid::Uuid` | `string` / `uuid` |
@@ -121,7 +121,7 @@ impl rustango::openapi::OpenApiSchema for Money {
 ## Chemins depuis les ViewSets
 
 `ViewSet::openapi_paths(prefix, schema_ref)` retourne les paires
-`(path, PathItem)` pour les cinq routes CRUD standard — list, create, retrieve,
+`(path, PathItem)` pour les six opérations CRUD standard — list, create, retrieve,
 update, partial update, delete — câblées pour référencer un schéma de composant
 enregistré :
 
@@ -142,11 +142,26 @@ PATCH, DELETE), et il reste synchronisé avec la configuration du ViewSet :
   pour le style configuré (`page`/`page_size`, `cursor`, ou `limit`/`offset`).
 - **Filtrage / recherche / tri** → un paramètre de requête `?field=` par
   `filter_fields` (avec les lookups `__gt`/`__in`/… disponibles décrits), plus
-  `?search=` et `?ordering=` lorsqu'ils sont configurés.
+  `?search=` lorsqu'il est configuré et `?ordering=` (ci-dessous).
 - **`read_only()`** → les opérations d'écriture (POST/PUT/PATCH/DELETE) sont
   omises.
-- **Paramètre de chemin** → `{pk}` typé d'après la clé primaire du modèle.
-- **`operationId`** → `list_post`, `create_post`, … (en snake_case par action).
+- **Corps et erreurs** → create, PUT et PATCH acceptent des corps JSON ou
+  urlencoded et documentent `422 validation_failed`, `400` pour un corps
+  malformé et `413` pour un corps trop gros. L'opération create décrit la
+  forme tableau en masse dans son texte (les schémas restent à une ligne). List
+  documente un `400` quand ses filtres peuvent refuser une valeur ; retrieve et
+  DELETE documentent `400` pour une pk malformée.
+- **Contrôles d'accès** → `403` (et `401` avec `tenancy`) sur une action avec
+  des codenames de permission, et `429` avec `Retry-After` sur une action
+  avec un throttle.
+- **Paramètres de liste** → `page_size` indique le vrai plafond
+  `max_page_size`. `?ordering=` est listé sur chaque ViewSet sauf ceux paginés
+  par curseur, qui trient toujours par la colonne du curseur. Les champs
+  binaires sont en `format: hex`, comme le serveur les lit et les écrit.
+- **Paramètre de chemin** → `{pk}` typé d'après la clé primaire du modèle ;
+  `.pk_param(name)` le renomme.
+- **`operationId`** → `list_post`, `create_post`, `retrieve_post`, `update_post`,
+  `partial_update_post`, `destroy_post` (action + nom du schéma en snake_case).
 
 > Le ViewSet lui-même est documenté dans le [guide des ViewSets](viewsets.md).
 
@@ -169,8 +184,10 @@ let app = axum::Router::new()
 ```
 
 Les pages du visualiseur sont de minuscules coquilles HTML qui chargent Swagger
-UI / Redoc depuis un CDN (`unpkg` / `jsdelivr`) — aucun JS n'est empaqueté dans
-**Rustango**. Pour un déploiement isolé du réseau, écrire `spec.to_json()` dans un
+UI / Redoc depuis un CDN (`unpkg` / `jsdelivr`), chacun figé sur une version
+exacte avec un hash Subresource Integrity — aucun JS n'est empaqueté dans
+**Rustango**. Elles chargent la spec à côté d'elles, donc le routeur peut être
+imbriqué sous n'importe quel préfixe. Pour un déploiement isolé du réseau, écrire `spec.to_json()` dans un
 fichier au démarrage et héberger soi-même les assets du visualiseur depuis votre
 propre répertoire statique.
 
@@ -204,7 +221,10 @@ let json = spec.to_json();   // pretty-printed OpenAPI 3.1
 ```
 
 `OpenApiSpec` accepte aussi `.contact(...)`, `.license(...)`, `.add_tag(...)`, et
-plusieurs entrées `.server(...)`.
+plusieurs entrées `.server(...)`. `Operation` ajoute `.description`,
+`.parameter`, `.request_body(RequestBody::json(..) / ::form(..))` et
+`.deprecated()` ; `Parameter` a les constructeurs `path` / `query` / `header` ;
+`Response` ajoute `.header(name, schema)`.
 
 ---
 

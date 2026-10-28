@@ -12,9 +12,7 @@ que se lo pidan. **Rustango** te ofrece ambos transportes de push sobre una sola
   cliente también envía (chat, edición colaborativa, presencia).
 
 Ambos se difunden a través del mismo **bus de difusión** en proceso ([`EventBus`]), de modo que
-«envía esto a cada cliente conectado» es una sola llamada independientemente del transporte. En
-otros ecosistemas quizá lo conozcas como Echo/Reverb, o como
-`ws` + `EventSource` — las mismas ideas, un solo bus detrás de ellas.
+«envía esto a cada cliente conectado» es una sola llamada independientemente del transporte.
 
 > **Fuente:** `rustango::sse` (`EventBus`) — tras la característica **`sse`**; y
 > `rustango::ws` (`WsHub`, `WsConfig`, `ws_handler`) — tras la
@@ -167,12 +165,15 @@ ws.onmessage = (e) => { const t = JSON.parse(e.data); console.log('tick', t.valu
 
 | Perilla | Por defecto | Efecto |
 |---|---|---|
-| `.keepalive(Duration)` | 30 s | intervalo de `Ping` en reposo — más bajo detecta conexiones muertas antes |
+| `.keepalive(Duration)` | 30 s | intervalo de `Ping`, con o sin tráfico; un par que calla un intervalo entero tras un ping se cierra |
 | `.on_message(fn(&str) -> Option<String>)` | ninguno | maneja texto cliente→servidor; devuelve `Some(reply)` para responder con eco **solo a ese cliente** (llama a `hub.broadcast(..)` para la difusión) |
 | `.max_message_bytes(n)` | 1 MiB | cierra la conexión si un mensaje del cliente excede esto |
 
 **Los consumidores lentos** no se descartan en silencio: a un cliente rezagado se le indica que
-se perdió `n` mensajes (`Lagged(n)`) para que pueda resincronizarse o continuar.
+se perdió `n` mensajes para que pueda resincronizarse o continuar: recibe el frame
+de texto `{"_lagged": n}`. Los frames binarios del cliente se descartan. Para pasar
+una `WsConfig` completa usa `WsHub::with_config(bus, config)`;
+`hub.receiver_count()` cuenta los sockets abiertos.
 
 ## Enviar desde otro sitio
 
@@ -214,10 +215,12 @@ señal `Lagged` en lugar de un crecimiento de memoria ilimitado.
 
 ```toml
 # Cargo.toml — both are in Rustango's default set; list them if you slim features.
-rustango = { version = "*", features = ["sse", "websocket"] }
+rustango = { version = "0.61", features = ["sse", "websocket"] }
 ```
 
-- **`sse`** — el bus de difusión `EventBus` (arrastra `tokio`). Suficiente para SSE, ya que
-  el formato de cable SSE proviene del propio `response::sse` de axum.
+- **`sse`** — el bus de difusión `EventBus` (sin dependencias extra). Suficiente
+  para SSE, ya que el formato de cable SSE proviene del propio `response::sse` de
+  axum. No confundir con `rustango::events::EventBus`, un bus tipado de eventos de
+  dominio siempre presente, con handlers async.
 - **`websocket`** — el andamiaje `WsHub` / `ws_handler`; implica `admin` (axum)
   + `sse` + `axum/ws`.

@@ -279,6 +279,35 @@ pub(crate) fn absent_takes_default(field: &FieldSchema, encoding: Encoding) -> b
         && (encoding == Encoding::Json || field.ty != FieldType::Bool)
 }
 
+#[cfg(feature = "admin")]
+/// A form create leaves `field` to its column `DEFAULT`: it was not sent,
+/// or sent blank where blank is no valid value (a NOT NULL non-text field).
+pub(crate) fn blank_takes_default(field: &FieldSchema, raw: Option<&str>) -> bool {
+    absent_takes_default(field, Encoding::Form)
+        && raw.is_none_or(|v| v.is_empty() && !field.nullable && field.ty != FieldType::String)
+}
+
+#[cfg(feature = "admin")]
+/// A literal column default as a form value: a number, or a quoted
+/// string. `None` for an expression such as `CURRENT_TIMESTAMP`.
+pub(crate) fn default_form_value(field: &FieldSchema) -> Option<String> {
+    let d = field.default?.trim();
+    match field.ty {
+        FieldType::I16 | FieldType::I32 | FieldType::I64 => {
+            d.parse::<i64>().ok().map(|n| n.to_string())
+        }
+        FieldType::F32 | FieldType::F64 | FieldType::Decimal => {
+            d.parse::<f64>().ok().map(|_| d.to_owned())
+        }
+        FieldType::String => {
+            let inner = d.strip_prefix('\'')?.strip_suffix('\'')?;
+            // A lone quote inside means it is no single literal.
+            (!inner.replace("''", "").contains('\'')).then(|| inner.replace("''", "'"))
+        }
+        _ => None,
+    }
+}
+
 /// Parse one form value from a raw string.
 ///
 /// Empty string + nullable field → `SqlValue::Null`.
@@ -1627,9 +1656,8 @@ impl<T: crate::core::Model> ModelFormFor<T> {
     /// A missing key or `null` is absent; `null` on a NOT NULL Bool is an error. Strings pass through
     /// directly; numbers/bools/Arrays/objects get JSON-stringified
     /// then parsed by `parse_form_value` via the field's declared
-    /// type — so an i64 field accepts both `42` and `"42"`, and a
-    /// JSON field accepts an inline object that gets re-stringified
-    /// and re-parsed.
+    /// type — so an i64 field accepts both `42` and `"42"`. A JSON
+    /// field stores the value as sent: `"42"` stays a string.
     ///
     /// # Errors
     /// As [`Self::parse`], plus `FormErrors` with a non-field error
@@ -1668,6 +1696,10 @@ impl<T: crate::core::Model> ModelFormFor<T> {
             //             bools, arrays, objects)
             match v {
                 serde_json::Value::Null => {}
+                // A Json field stores the value itself: `"dark"` stays a string.
+                other if field.ty == crate::core::FieldType::Json => {
+                    payload.insert(k.clone(), other.to_string());
+                }
                 serde_json::Value::String(s) => {
                     payload.insert(k.clone(), s.clone());
                 }

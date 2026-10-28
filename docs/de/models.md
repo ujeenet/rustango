@@ -148,9 +148,9 @@ Verwende sie nur in PostgreSQL-Deployments:
 
 ## Primärschlüssel
 
-Jedes Modell braucht einen Primärschlüssel. Markiere ein Feld mit
-`#[rustango(primary_key)]`; wenn du keines markierst, sucht das Schema nach einer Spalte
-namens `id`.
+Markiere ein Feld mit `#[rustango(primary_key)]`. Ein Modell ohne Primärschlüssel
+kompiliert trotzdem und lässt sich abfragen, aber das Derive lässt jede PK-basierte
+Zeilenmethode weg (`save_pool`, `find`, `delete_pool`, `refresh_from_db`, …).
 
 Der **Standard und häufigste** PK ist eine auto-inkrementierende 64-Bit-Ganzzahl,
 deklariert als `Auto<i64>`:
@@ -172,7 +172,9 @@ g.save_pool(&pool).await?;                              // DB assigns the id
 let new_id = g.id.get().copied().unwrap();             // now populated
 ```
 
-Unterstützte innere `Auto<T>`-Typen sind `i32`, `i64` und `Uuid`.
+Unterstützte innere `Auto<T>`-Typen sind `i32`, `i64`, `Uuid` und
+`DateTime<Utc>` (die Datenbank füllt es mit der aktuellen Zeit, wie beim
+`auto_now_add`-Feld oben).
 
 ### Benutzerdefinierte Primärschlüssel
 
@@ -370,8 +372,7 @@ Auf dem **Modell** deklariert:
   `#[cfg(feature = "postgres")]`, existieren also in einem `sqlite`- oder
   `mysql`-Build überhaupt nicht. Die `_pool`-Familie nimmt `rustango::sql::Pool`
   und funktioniert auf allen dreien — schreiben Sie diese, sofern Sie nicht
-  sicher auf Postgres sind. Die vertauschte Benennung wird in
-  [#1293](https://github.com/ujeenet/rustango/issues/1293) verfolgt; siehe
+  sicher auf Postgres sind. Die Benennung ist bekanntermaßen vertauscht; siehe
   [api-conventions](api-conventions.md#funktionen).
 - **Soft-Delete** (wenn aktiviert) — `soft_delete`, `restore`, `force_delete`;
   `QuerySet::active()` / `with_trashed()` / `only_trashed()`.
@@ -426,7 +427,7 @@ spezifischer.
 | `through(...)` | Relationsspezifikation | benutzerdefinierter Through-Relation-Accessor |
 | `reverse_has(...)` / `generic_has(...)` | Relationsspezifikation | Rückwärts-has-many / Rückwärts-generischer-FK-Accessor |
 | `required_db_features` / `required_db_vendor` | Liste / Vendor | Deployment-Validierungs-Constraints |
-| `db_table_comment` | `"…"` | Tabellen-COMMENT |
+| `db_table_comment` | `"…"` | Tabellen-COMMENT; Datei-Migrationen schreiben ihn noch nicht, und `makemigrations` warnt |
 | `admin(...)` | Admin-Optionen | Admin-UI-Konfiguration (siehe [admin.md](admin.md)) |
 | `fk_composite(...)` / `generic_fk(...)` | Spezifikation | zusammengesetzter FK / generischer (Content-Type-) FK |
 | `m2m(...)` / `generic_m2m(...)` | Spezifikation | Viele-zu-viele- / generische Viele-zu-viele-Beziehung |
@@ -453,7 +454,7 @@ spezifischer.
 | `verbose_name` | `"Label"` | Lesbare Feldbezeichnung in Formular/Admin |
 | `help_text` | `"…"` | Hilfetext unter dem Formular-/Admin-Widget |
 | `validators` | `"name, name"` | benannte Validatoren für dieses Feld |
-| `related_name` | `"posts"` | Name des Reverse-Accessors am FK-Ziel |
+| `related_name` | `"posts"` | Name des Reverse-Accessors am FK-Ziel; `"+"` für keinen (ein Ziel aus einem anderen Crate) |
 | `auto_now` | Flag | bei jedem Speichern auf jetzt setzen |
 | `auto_now_add` | Flag | beim Einfügen auf jetzt setzen |
 | `soft_delete` | Flag | markiert den Soft-Delete-Zeitstempel (`Option<DateTime<Utc>>`) |
@@ -463,7 +464,7 @@ spezifischer.
 | `on_delete` | `"cascade"` / `"restrict"` / `"set_null"` / `"set_default"` / `"no_action"` | `ON DELETE`-Aktion des FK |
 | `o2o` | `"table"` | Eins-zu-eins-FK auf diese Tabelle |
 | `generated_as` | `"expr"` | DB-berechnete (generierte) Spalte |
-| `citext` | Flag | case-insensitiver Text (PostgreSQL CITEXT) |
+| `citext` | Flag | case-insensitiver Text: `CITEXT` auf PostgreSQL, `TEXT COLLATE NOCASE` auf SQLite, eine case-insensitive Collation auf MySQL |
 | `vector(dims = N)` | `N` | pgvector-Dimension |
 | `geometry(srid = N)` | `N` | PostGIS-Raumbezugs-ID |
 | `db_comment` | `"…"` | Spalten-COMMENT |

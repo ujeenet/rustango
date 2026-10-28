@@ -9,8 +9,9 @@ oder vergleichen den Klartext niemals.
 
 [![Passwörter in Rustango: hash() erzeugt eine gesalzene argon2id-PHC-Zeichenkette, verify() prüft einen Versuch dagegen, und verify_dummy() gleicht die Anmelde-Timing an](../img/auth-passwords.png)](../img/auth-passwords.png)
 
-> **Quelle:** `rustango::passwords` (`hash`, `verify`, `verify_dummy`,
-> `strength_score`, `StrengthIssue`) — hinter dem Feature `passwords`
+> **Quelle:** `rustango::passwords` (`hash`, `verify`, `verify_dummy`, ihre
+> `_async`-Formen, `Argon2Params`, `needs_rehash`, `strength_score`,
+> `StrengthIssue`) — hinter dem Feature `passwords`
 > (standardmäßig aktiviert). Für die in die Mandantenfähigkeit integrierten
 > Passwort-Hilfsfunktionen siehe `rustango::tenancy::password`.
 >
@@ -30,7 +31,8 @@ oder vergleichen den Klartext niemals.
 - [Schnellstart](#schnellstart) · [Warum argon2id](#warum-argon2id)
 - [Hashen bei der Registrierung](#hashen-bei-der-registrierung) · [Prüfen bei der Anmeldung](#prüfen-bei-der-anmeldung)
 - [Timing-sichere Anmeldungen](#timing-sichere-anmeldungen-kontoaufzählung) · [Stärkeprüfungen](#stärkeprüfungen)
-- [Wo der Hash lebt](#wo-der-hash-lebt) · [Hinweise und Grenzen](#hinweise-und-grenzen)
+- [Wo der Hash lebt](#wo-der-hash-lebt) · [Async-Code](#async-code) · [Kosten und Neu-Hashen](#kosten-und-neu-hashen)
+- [Hinweise und Grenzen](#hinweise-und-grenzen)
 
 ---
 
@@ -202,15 +204,51 @@ Sobald der Benutzer authentifiziert ist, übergeben Sie an eine
 
 ---
 
+## Async-Code
+
+`hash`, `verify` und `verify_dummy` blockieren: ein argon2-Aufruf belegt einen
+Runtime-Worker für den ganzen Hash. Rufen Sie in einem Handler stattdessen
+`hash_async`, `verify_async` und `verify_dummy_async` auf. Sie laufen im
+Blocking-Pool, höchstens ein Job pro CPU gleichzeitig.
+
+Ein Job wartet bis zu `hash_wait()` auf einen freien Platz (Standard 5 s,
+`DEFAULT_HASH_WAIT`) und schlägt dann mit `PasswordError::Busy` fehl. Antworten
+Sie darauf mit einem 503, gleich für einen bekannten und einen unbekannten
+Benutzer. Setzen Sie die Wartezeit mit `[auth] hash_wait_ms` oder beim Start mit
+`configure_hash_wait(duration)`.
+
+---
+
+## Kosten und Neu-Hashen
+
+Neue Hashes nutzen `argon2_params()`, standardmäßig `Argon2Params::DEFAULT`
+(m=19456 KiB, t=2, p=1). Erhöhen Sie sie mit `[auth] argon2_memory_kib`,
+`argon2_iterations` und `argon2_parallelism`, oder rufen Sie beim Start
+`configure_argon2(Argon2Params::new(m, t, p)?)` auf; ein im Code gesetzter Wert
+gewinnt gegen die Einstellungen. `Argon2Params::new` lehnt eine Kombination ab,
+die argon2 ablehnt.
+
+Alte Hashes verifizieren weiterhin, denn ihre Kosten stehen in der
+PHC-Zeichenkette. `needs_rehash(&stored)` ist `true`, wenn ein Hash schwächer
+ist als die heutigen Kosten (oder nicht argon2id v19). Nach einer erfolgreichen
+Anmeldung:
+
+- `rehash_async(attempt, &stored)` liefert einen frischen Hash, wenn einer fällig ist, sonst `None`.
+- `upgrade_stored_hash(&pool, Model::SCHEMA, id, attempt, &stored)` speichert ihn
+  auch in der Spalte `password_hash` der Zeile, aber nur wenn diese Spalte noch
+  `stored` enthält, und liefert den jetzt gültigen Hash.
+
+---
+
 ## Hinweise und Grenzen
 
 - **Niemals** den Klartext speichern, protokollieren oder mit `==` vergleichen.
   `hash` → speichern; `verify` → prüfen. Das ist der ganze Vertrag.
-- **Die Kostenparameter sind die OWASP-Standardwerte**, fest eingebaut. Sie sind
-  eine vernünftige Untergrenze; sie später anzuheben ist sicher — alte Hashes
-  verifizieren weiterhin (ihre Parameter leben in der PHC-Zeichenkette), und Sie
-  können bei der nächsten erfolgreichen Anmeldung neu hashen, um sie zu
-  aktualisieren.
+- **Die Kostenparameter stehen standardmäßig auf der OWASP-Untergrenze.** Sie
+  später anzuheben ist sicher — alte Hashes verifizieren weiterhin (ihre
+  Parameter leben in der PHC-Zeichenkette), und
+  [`upgrade_stored_hash`](#kosten-und-neu-hashen) hasht bei der nächsten
+  erfolgreichen Anmeldung neu.
 - `strength_score` ist eine Heuristik, keine Richtlinien-Engine — es wird
   `Summer2024!` nicht erkennen. Legen Sie für echte Stärkedurchsetzung eine
   Leak-Listen-Abfrage darüber.

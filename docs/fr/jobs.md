@@ -83,7 +83,12 @@ impl Job for WelcomeEmail {
 Surchargez `const MAX_ATTEMPTS: u32 = 3;` sur l'impl pour changer le plafond de
 **tentatives totales** — pas de nouvelles tentatives. La valeur par défaut de 5
 correspond à une exécution initiale plus quatre reprises ; `MAX_ATTEMPTS = 3`
-donne deux reprises.
+donne deux reprises. `0` compte comme `1` : la tâche s'exécute une fois.
+
+Un handler qui a besoin d'un état que le payload ne peut pas porter, comme un
+mailer, s'enregistre avec `queue.register_with::<T, _, _>(|job| async move { … })`.
+Cette closure s'exécute à la place de `Job::run`. Les deux files intégrées le
+prennent en charge.
 
 ---
 
@@ -106,6 +111,16 @@ queue.start().await;
 
 queue.shutdown().await;   // on shutdown: drain in-flight jobs, then stop
 ```
+
+`shutdown()` accorde un délai de grâce aux tâches en cours (`shutdown_grace`,
+5 s par défaut), puis les interrompt et les remet en file. Les tâches en file et
+les nouvelles tentatives en attente restent en file, et un nouveau `start()` les
+reprend.
+
+Les tâches sont **at-least-once** (au moins une fois). Aucun signal d'arrêt
+n'atteint une tâche en cours, et une tâche interrompue repart du début (la file
+en base libère sa ligne même si la tâche venait de se terminer). L'interruption
+consomme une tentative. Rendez chaque tâche idempotente.
 
 Conservez le `Arc<InMemoryJobQueue>` dans l'état de votre application pour que
 les handlers puissent l'atteindre.
@@ -182,9 +197,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-> **Mettez le drainage dans `on_shutdown`, pas après `run()`.** Jusqu'à
-> [#1409](https://github.com/ujeenet/rustango/issues/1409), cet exemple
-> appelait `queue.shutdown()` à la ligne *suivant* `run()`, et cette ligne ne
+> **Mettez le drainage dans `on_shutdown`, pas après `run()`.** Les versions
+> antérieures de cet exemple appelaient `queue.shutdown()` à la ligne *suivant* `run()`, et cette ligne ne
 > pouvait jamais s'exécuter : rien ne gérait SIGTERM, donc l'arrêt de
 > l'orchestrateur tuait le processus sur-le-champ. `run()` retourne désormais
 > sur signal — mais `on_shutdown` reste le bon endroit, car le hook s'exécute
@@ -265,6 +279,14 @@ workers). Associez le worker à un balayage périodique
 [`reclaim_stuck_jobs_pool`](#la-file-persistante-production) pour récupérer les
 tâches d'un worker crashé.
 
+Deux files différentes sur une même table (par exemple un mailer et un
+générateur de rapports, avec leurs propres handlers) prennent les tâches l'une
+de l'autre. Donnez à chacune son propre nom avec `.queue_name("mailer")` côté
+dispatch et côté worker : une file nommée n'exécute que ses tâches, une file
+sans nom que les tâches sans nom. Les workers antérieurs à `queue_name`
+l'ignorent et exécutent aussi les tâches nommées : arrêtez-les avant de
+dispatcher sur une file nommée.
+
 ---
 
 ## Nouvelles tentatives et backoff
@@ -290,6 +312,15 @@ impl Job for FlakyImport {
 Le test sous-jacent dispatche une tâche qui échoue une fois puis réussit, et
 affirme qu'elle **s'est exécutée plus d'une fois et a fini par réussir** — la
 nouvelle tentative a bien lieu.
+
+Pour changer l'attente de toutes les tâches d'un type, surchargez
+`fn retry_backoff(failed_attempt: u32) -> Duration` dans l'impl
+(`failed_attempt` vaut 0 après la première exécution). Pour fixer le plafond ou
+l'attente depuis le payload, surchargez `fn max_attempts(&self) -> u32` ou
+`fn retry_delay(&self, failed_attempt: u32) -> Duration` ; par défaut ils
+renvoient `MAX_ATTEMPTS` et `retry_backoff`. Le plafond est lu au dispatch.
+`jobs::exponential_backoff(base, failed_attempt)` est la courbe par défaut avec
+votre propre base : `base`, doublée à chaque échec, plafonnée à `base · 1024`.
 
 ---
 
@@ -330,8 +361,9 @@ Le test confirme que le callback se déclenche exactement une fois pour une tâc
 vrais déploiements — plusieurs workers, plusieurs réplicas, des tâches qui
 doivent survivre à un crash — utilisez **`DatabaseJobQueue`** (le même type que
 `PgJobQueue`). Les tâches vivent dans une table `rustango_jobs` ; les workers
-les prennent en charge avec un `UPDATE … RETURNING` borné par une transaction,
-donc c'est sûr entre processus. Elle est **tri-dialecte** (PostgreSQL, MySQL,
+réservent une ligne dans une transaction (`FOR UPDATE SKIP LOCKED` sur PostgreSQL
+et MySQL, un seul `UPDATE … RETURNING` sur SQLite), donc c'est sûr entre
+processus. Elle est **tri-dialecte** (PostgreSQL, MySQL,
 SQLite). Les définitions `Job` de l'étape 1 sont inchangées.
 
 ```rust
@@ -355,6 +387,11 @@ queue.start().await;
 queue.dispatch(&WelcomeEmail { user_id: 42 }).await?;
 ```
 
+**Dispatcher dans une transaction.** Dans un bloc `atomic` sur le pool propre
+de la file, `dispatch` rejoint le bloc : la tâche est annulée avec lui, et aucun
+worker ne se réveille avant le commit. Ne gardez pas le `TxGuard` du bloc
+pendant l'appel.
+
 **Récupérer les workers crashés.** Si un worker meurt en cours de tâche, la
 ligne reste verrouillée. Lancez un balayage périodique pour relâcher les verrous
 plus anciens qu'un seuil afin qu'un autre worker reprenne la tâche :
@@ -363,6 +400,17 @@ plus anciens qu'un seuil afin qu'un autre worker reprenne la tâche :
 // e.g. from a scheduled task every few minutes:
 let reclaimed = DatabaseJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(300)).await?;
 ```
+
+Ou laissez la file le faire : `.reclaim_stuck_after(Duration::from_secs(300))` sur
+le builder balaie le pool de la file au `start`, puis toutes les
+`min(seuil, 60s)`. C'est désactivé par défaut, et le seuil est relevé à au moins
+trois heartbeats.
+
+Une tâche en cours rafraîchit son verrou toutes les `heartbeat_interval` (10 s
+par défaut) : gardez donc le seuil bien au-dessus. Chaque prise en charge
+consomme une tentative, donc une tâche qui fait planter son worker passe en
+dead-letter une fois ses `MAX_ATTEMPTS` exécutions épuisées. Une tâche qui
+panique est un échec `Retryable` ; le worker continue de tourner.
 
 Le flux dispatch-and-run et `reclaim_stuck_jobs_pool` sont tous deux éprouvés en
 dogfooding contre SQLite dans `jobs_sqlite_live.rs`.
@@ -436,10 +484,10 @@ ensuite.
 **Limites connues.** Le framework ne fait pas le fan-out pour vous : pas de
 superviseur de workers par tenant, pas de `Job::run(&ctx)` avec le tenant
 attaché, et pas de balayage `reclaim_stuck_jobs_pool` conscient du tenant —
-vous itérez vous-même sur les tenants, comme ci-dessus. Les tenants
+vous itérez vous-même sur les tenants, comme ci-dessus (`.reclaim_stuck_after(..)`
+sur la file de chaque tenant balaie le pool de ce tenant). Les tenants
 provisionnés après le démarrage n'ont aucun worker jusqu'au redémarrage du
-processus. Suivi dans
-[#1223](https://github.com/ujeenet/rustango/issues/1223).
+processus. C'est une lacune connue.
 
 **Contexte ambiant : source d'audit et fuseau horaire seulement.**
 `InMemoryJobQueue` les capture au `dispatch` et le scheduler à `every()`, et
@@ -504,14 +552,13 @@ verrou par tenant** :
 use rustango::distributed_lock::DistributedLock;
 
 let lock = DistributedLock::new(cache.clone()).for_tenant(&org.slug);
-lock.with_lock("nightly_prune", ttl, || async { /* … */ }).await;
+// Tick every minute; this runs once per UTC day across replicas.
+lock.once_per_period("nightly_prune", day, || prune(&org)).await;
 ```
 
 Non cadré, tous les tenants se disputent un unique `lock:nightly_prune` : le
 premier gagne et les autres sont ignorés pendant toute la TTL, en silence — un
-acquire refusé est le résultat attendu, donc rien n'est journalisé. Suivi dans
-[#1226](https://github.com/ujeenet/rustango/issues/1226) et
-[#1228](https://github.com/ujeenet/rustango/issues/1228).
+acquire refusé est le résultat attendu, donc rien n'est journalisé. C'est une lacune connue.
 
 ---
 
@@ -533,9 +580,13 @@ acquire refusé est le résultat attendu, donc rien n'est journalisé. Suivi dan
 | `Queue(String)` | erreur de file interne (sérialisation/enregistrement) |
 
 **Méthodes de `JobQueue` :** `register::<T>()` · `dispatch(&payload)` · `start()` ·
-`shutdown()` · `pending_count()`. `DatabaseJobQueue` ajoute
-`ensure_table_pool`, `with_workers_pool`, `poll_interval`, et
-`reclaim_stuck_jobs_pool`.
+`register_with::<T, _, _>(handler)` · `shutdown()` · `pending_count()` (tâches en
+attente de prise en charge). Les deux files ont `on_dead_letter` et
+`shutdown_grace`. `DatabaseJobQueue` ajoute `ensure_table_pool`,
+`with_workers_pool`, `new_pool`, `poll_interval`, `heartbeat_interval`,
+`queue_name`, `reclaim_stuck_after` et `reclaim_stuck_jobs_pool`.
+`jobs::inmemory_from_settings(&settings.jobs)` construit une `InMemoryJobQueue`
+avec `[jobs] concurrency` workers (4 par défaut).
 
 ---
 

@@ -4,8 +4,7 @@ Caching stores the result of expensive work — a heavy query, a rendered
 fragment, a third-party API call — so the next request gets it instantly instead
 of recomputing. **Rustango** gives you one `Cache` trait with swappable backends
 (in-memory, Redis, database), a compute-on-miss helper (`get_or_set`), and typed
-JSON helpers. Swap the backend without touching a single call site — like
-Laravel's `Cache` facade.
+JSON helpers. Swap the backend without touching a single call site.
 
 [![Caching in Rustango: get_or_set checks the cache, runs the factory only on a miss, stores the result with a TTL, and serves hits instantly; the same Cache trait backs InMemory, Redis, and DB](img/caching.png)](img/caching.png)
 
@@ -32,6 +31,7 @@ Laravel's `Cache` facade.
 - [TTL and expiry](#ttl-and-expiry)
 - [Swapping backends](#swapping-backends)
 - [Caching under multi-tenancy](#caching-under-multi-tenancy)
+- [Caching whole pages](#caching-whole-pages)
 - [Reference](#reference)
 - [See also](#see-also)
 
@@ -58,10 +58,14 @@ let cache: BoxedCache = Arc::new(InMemoryCache::new());
 | `FileCache` | `cache` | `file` | one file per key under `file_cache_dir`; shared only if the directory is |
 | `NullCache` | `cache` | `null` / `none` | disable caching (every read misses) — handy in tests |
 
-There is no `postgres` value — the DB backend is `db` or `database`. A
-`CacheSettings` doc comment claimed otherwise until
-[#1400](https://github.com/ujeenet/rustango/issues/1400), and an unrecognised
-value gets you an in-memory cache with a warning.
+There is no `postgres` value — the DB backend is `db` or `database`. Values
+are lowercase. An unknown or mis-cased value (`Redis`, a typo), or `file`
+without `file_cache_dir`, logs an `error` and falls back to an in-memory cache;
+a later minor release will refuse it.
+
+`FileCache` sweeps one sixteenth of its directory for expired entries every 16
+writes. Call `FileCache::purge_expired()` on a schedule to sweep it all. New
+directories are created 0700 and entries 0600 on Unix.
 
 ---
 
@@ -157,7 +161,10 @@ cannot grow the process without limit, but it does mean **an entry can vanish
 before its TTL expires** if it is the least recently used when the budget is
 reached. Eviction drops already-expired entries first, then the least-recently
 used, until both are 10% under budget. Entries written with `set_forever`
-(feature flags) are outside the budgets and never evicted.
+(feature flags) are outside the budgets and never evicted while they stay within
+their own caps — 16 MiB or 10 000 entries (`.with_max_pinned_bytes(..)` /
+`.with_max_pinned_entries(..)`). Past those, new `set_forever` entries are stored
+as ordinary, evictable entries and a warning is logged once.
 
 So treat a cache read as "may be absent" even inside the TTL. That is true of
 every cache backend, but here it has a cause you can reason about and tune:
@@ -192,8 +199,8 @@ let cache: BoxedCache = rustango::cache::from_settings_async(&settings.cache).aw
 | `redis` | **panics** — cannot be built synchronously | ✓ |
 | `db` | **panics** — needs a runtime `&Pool` | error; build it where the pool is |
 
-The sync resolver panics rather than substituting a backend
-([#1400](https://github.com/ujeenet/rustango/issues/1400)). It used to warn and
+The sync resolver panics rather than substituting a backend.
+It used to warn and
 return an in-memory cache, which is not a degraded shared cache — it is a
 different one. A per-process cache multiplies `CacheRateLimitLayer`'s limit by
 the replica count, and stops `verify_single_use` failing closed, so the same
@@ -254,9 +261,10 @@ and per-account lockout; `Cache::add` (set-if-absent) backs `DistributedLock`.
 `Cache::add` is atomic on all three — `RedisCache` (`SET NX`), `InMemoryCache`
 (which holds its lock across the read-modify-write) and `DatabaseCache`, which
 does the test-and-set under row locks so a race resolves to exactly one winner.
-`Cache::incr` is atomic on the first two but falls back to the non-atomic
-default on `DatabaseCache`. So a `DistributedLock` is safe on any of the three;
-a counter that must be exact across replicas wants Redis.
+`Cache::incr` is atomic on all three too: `DatabaseCache` does it in one upsert.
+`FileCache` does both under a per-entry lock, which holds only on one host.
+So a `DistributedLock` or an exact counter works across replicas on Redis or
+the database.
 
 Two things worth knowing:
 
@@ -268,15 +276,57 @@ Two things worth knowing:
 The unscoped `Cache::clear()` is still process-global, so reach for the scoped
 view whenever a single tenant's change is what triggered the invalidation.
 
+A purged tenant's slug can be reused by a new tenant. To make `purge-tenant`
+delete the old tenant's `ScopedCache::for_tenant` keys, call
+`rustango::tenancy::decommission::clear_on_purge(cache)` at boot for each cache
+that holds them.
+
+---
+
+## Caching whole pages
+
+`CachePageLayer::new(cache)` (in `rustango::cache_page`) stores GET responses
+in any `BoxedCache`; `.timeout(dur)` sets how long (default 60 s). It is safe
+by default:
+
+- A request with `Authorization`, `Cookie` or `X-Api-Key` is neither served
+  from nor stored in the cache. Name more credential headers (a custom token
+  header) with `.credential_headers(["x-my-token"])`.
+  `.cache_authenticated(true)` turns this off, only for a route whose page is
+  the same for every caller.
+- A response with `Set-Cookie`, or `Cache-Control: private`, `no-cache` or
+  `no-store`, is never cached.
+- `.vary_on([...])` puts request headers in the key.
+- `.key_prefix(..)` gives each layer its own keyspace (default
+  `rustango.cache_page`). `.cache_query(true)` also caches `QUERY` requests,
+  keyed on a digest of the body (up to 1 MiB). `.tenant_agnostic(true)` caches
+  without a resolved tenant, only for a page that is the same for every tenant.
+
+To drop a page after a write, call
+`layer.invalidate(&[PageKey::new(path, host)]).await?` on a clone of the layer
+(add `.tenant(slug)` to the key under tenancy). It purges every cached variant
+of that path: any query string, any `vary_on` value, GET and `QUERY` alike. It
+works through a per-path generation counter, so each cached GET reads one more
+small cache key.
+
+Under tenancy, mount the layer inside the tenancy layer; see
+[Middleware](middleware.md).
+
 ---
 
 ## Reference
 
-**`Cache` trait:** `get` · `set(key, value, ttl)` · `delete` · `exists` ·
+**`Cache` trait:** `get` · `set(key, value, ttl)` · `set_forever` · `delete` ·
+`exists` / `has_key` · `clear` · `delete_prefix` · `incr` / `decr` · `add`
+(set-if-absent) · `touch` (new TTL) · `get_bytes` / `set_bytes` ·
 `get_many` / `set_many` / `delete_many` · `get_or(key, default)`.
 
 **Free helpers:** `get_or_set(cache, key, factory, ttl)` ·
-`get_json` / `set_json` · `from_settings(&CacheSettings)`.
+`get_json` / `set_json` · `from_settings(&CacheSettings)` ·
+`from_settings_async(&CacheSettings)`.
+
+**Housekeeping:** `DatabaseCache::purge_expired()` and
+`FileCache::purge_expired()` delete expired entries; call them on a schedule.
 
 **What's built on the cache:** server-side [sessions](auth-sessions.md),
 distributed [rate limiting](middleware.md) (`CacheRateLimitLayer`), idempotency

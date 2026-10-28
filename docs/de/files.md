@@ -13,10 +13,10 @@ einmal gegen das Trait; wechsle von lokaler Festplatte zu S3 mit einer einzeilig
 > *vorsignierte URL* — siehe das [Glossar](glossary.md).
 
 > **Quelle:** `rustango::storage` (`Storage`, `LocalStorage`, `InMemoryStorage`,
-> `s3::S3Storage`, `BoxedStorage`), `rustango::uploads` (`save_uploads`,
+> `s3::S3Storage`, `azure::AzureBlobStorage`, `StorageRegistry`, `BoxedStorage`), `rustango::uploads` (`save_uploads`,
 > `UploadConfig`, `sanitize_filename`) und `rustango::media`
 > (`Media`, `MediaManager`) — hinter den Features `storage` / `uploads` / `storage-s3` /
-> `media` (alle standardmäßig aktiviert).
+> `storage-azure` / `media` (alle standardmäßig aktiviert).
 >
 > **Lauffähige Version:** Die Storage- + Upload-Schutzvorkehrungs-Snippets sind kopiert aus
 > [`files_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/files_doc.rs)
@@ -32,6 +32,9 @@ einmal gegen das Trait; wechsle von lokaler Festplatte zu S3 mit einer einzeilig
 - [Schritt 3 — Einen Upload annehmen](#schritt-3--einen-upload-annehmen)
 - [Sichere Dateinamen](#sichere-dateinamen)
 - [Produktion: S3-kompatibler Speicher](#produktion-s3-kompatibler-speicher)
+- [Produktion: Azure Blob Storage](#produktion-azure-blob-storage)
+- [Große Dateien: streamen](#große-dateien-streamen)
+- [Mehrere Disks aus der Konfiguration](#mehrere-disks-aus-der-konfiguration)
 - [Die Mediathek](#die-mediathek)
 - [Referenz](#referenz)
 - [Siehe auch](#siehe-auch)
@@ -55,6 +58,7 @@ let storage: BoxedStorage = Arc::new(LocalStorage::new(PathBuf::from("./uploads"
 |---|---|---|
 | `LocalStorage` | `storage` | Ein-Server-Deployments — Dateien auf lokaler Festplatte |
 | `S3Storage` | `storage-s3` | Produktion — S3 / R2 / B2 / MinIO Objektspeicher |
+| `AzureBlobStorage` | `storage-azure` | Produktion — Azure Blob Storage (Azurite in der Entwicklung) |
 | `InMemoryStorage` | `storage` | Tests — eine `HashMap`, berührt nie die Festplatte |
 
 ---
@@ -100,14 +104,17 @@ gepuffert zu werden.
 use rustango::uploads::{save_uploads, UploadConfig};
 use axum::extract::Multipart;
 
-async fn upload(mp: Multipart) -> Result<impl IntoResponse, UploadError> {
+async fn upload(mp: Multipart) -> Result<Json<Vec<String>>, (StatusCode, String)> {
     let cfg = UploadConfig::new("avatars/")          // key prefix
         .max_bytes(2 * 1024 * 1024)                  // reject files over 2 MiB
         .allowed_extensions(&["png", "jpg", "jpeg", "webp"])
         .randomize_filename(true);                   // avoid collisions
 
-    let saved = save_uploads(mp, &cfg, &storage).await?;   // Vec<SavedUpload>
-    Ok(Json(saved))
+    // UploadError is not a response: map it yourself.
+    let saved = save_uploads(mp, &cfg, &storage)     // Vec<SavedUpload>
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(saved.into_iter().map(|s| s.key).collect()))
 }
 ```
 
@@ -116,6 +123,14 @@ Die Schutzvorkehrungen werden erzwungen (und verifiziert): `allowed_extensions` 
 sobald die Größe überschritten wird. Die In-File-`uploads`-Tests treiben echte Multipart-Bodies an
 und behaupten, dass Dateien im Speicher landen, überdimensionierte Dateien abgelehnt und
 nicht erlaubte Erweiterungen verweigert werden.
+
+Standardwerte: `max_bytes` 10 MiB, `max_files` 20, `randomize_filename` an (ein
+UUID-Präfix im Key). Ohne `allowed_extensions` wird jede Erweiterung akzeptiert,
+außer denen, die ein Browser als Skript ausführt (`html`, `svg`, `xml`, `js`, … —
+`uploads::ACTIVE_EXTENSIONS`). Der erste Fehler stoppt die Schleife und löscht die
+schon gespeicherten Dateien; eine abgelehnte Anfrage hinterlässt also nichts. Jedes
+`SavedUpload` trägt `key`, `original_filename`, `content_type` (wie vom Client
+behauptet — nicht vertrauen) und `size_bytes`.
 
 ```rust
 let cfg = UploadConfig::new("avatars/").allowed_extensions(&["PNG", "Jpg"]);
@@ -153,13 +168,152 @@ identisch — nur der Konstruktor ändert sich:
 ```rust
 use rustango::storage::s3::S3Storage;   // needs the `storage-s3` feature
 
-let storage: BoxedStorage = Arc::new(
-    S3Storage::new(/* bucket, region, endpoint, credentials */)
-);
+use rustango::storage::s3::{S3Config, S3Credentials};
+
+let cfg = S3Config::new("my-bucket", "us-east-1")
+    .with_endpoint("https://<account>.r2.cloudflarestorage.com"); // R2 / B2 / MinIO; omit for AWS
+let creds = S3Credentials::new(access_key_id, secret_access_key);
+let storage: BoxedStorage = Arc::new(S3Storage::new(cfg, creds));
 // save / load / delete / url — exactly the same calls as LocalStorage
 ```
 
 Deine Handler und Modelle ändern sich nicht; nur die Verdrahtung beim Start.
+
+---
+
+## Produktion: Azure Blob Storage
+
+`AzureBlobStorage` (hinter `storage-azure`) signiert Serveraufrufe mit dem
+Shared Key des Kontos und gibt Service-SAS-URLs für vorsigniertes GET und PUT
+aus:
+
+```rust
+use rustango::storage::azure::{AzureBlobStorage, AzureConfig};
+
+let key = std::env::var("AZURE_STORAGE_KEY")?; // base64, from the portal
+let cfg = AzureConfig::new("myaccount", key, "uploads");
+// Azurite: cfg.endpoint("http://127.0.0.1:10000/devstoreaccount1")
+let storage: BoxedStorage = Arc::new(AzureBlobStorage::new(cfg)?);
+```
+
+Unterschiede zu S3, die ein Direkt-Upload beachten muss:
+
+- Der Browser muss jeden Header aus `storage.presigned_put_headers(&put)`
+  senden, der `x-ms-blob-type: BlockBlob` ergänzt. Die CORS-Regel des Kontos
+  muss ihn zusammen mit `Content-Type` und `If-None-Match` erlauben.
+- Eine SAS kann keine Header signieren, Größe und Typ werden also nicht von der
+  URL erzwungen. Bestätige den Upload mit `metadata`.
+  `MediaManager::begin_upload` lehnt eine Azure-Disk ab; lade über den Server
+  mit `save_bytes` hoch. Ein Create-only-PUT bekommt `c` ohne `w`, die URL kann
+  also weiterhin keinen Blob ersetzen.
+- Ein einzelnes PUT fasst bis zu 5000 MiB; darüber stellt `save_stream` Blöcke
+  bereit.
+
+---
+
+## Große Dateien: streamen
+
+`save` und `load` nehmen und liefern ganze Puffer. Für ein großes Objekt, oder
+um den Bucket privat zu halten und Uploads durch deinen Server zu leiten, nimm
+`save_stream` und `load_stream`: Chunks gehen durch, sobald sie ankommen, der
+Speicher bleibt also flach. Ein `ByteStream` entsteht aus einem axum-`Body`,
+einer `reqwest::Response`, `Bytes` oder einem `Vec<u8>`.
+
+```rust
+use axum::{body::Body, extract::{Path, State}, http::{header, HeaderMap, StatusCode}};
+use rustango::storage::{BoxedStorage, ByteStream, PutConditions, StorageError};
+
+// PUT /files: proxy the request body into storage.
+async fn upload(State(storage): State<BoxedStorage>, headers: HeaderMap, body: Body)
+    -> Result<String, StatusCode>
+{
+    let len = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok())
+        .ok_or(StatusCode::LENGTH_REQUIRED)?;
+    let key = format!("uploads/{}", uuid::Uuid::new_v4());
+    let put = PutConditions::new().create_only();
+    storage
+        .save_stream(&key, len, ByteStream::from(body), &put)
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok(key)
+}
+
+// GET /files/{*key}: stream it back.
+async fn download(State(storage): State<BoxedStorage>, Path(key): Path<String>)
+    -> Result<Body, StatusCode>
+{
+    let stream = storage.load_stream(&key).await.map_err(|e| match e {
+        StorageError::NotFound(_) => StatusCode::NOT_FOUND,
+        _ => StatusCode::BAD_GATEWAY,
+    })?;
+    Ok(Body::from_stream(stream))
+}
+```
+
+`save_stream` schreibt genau `len` Bytes. Ein Body anderer Größe oder ein
+`put.content_length` ungleich `len` wird abgelehnt, und `create_only` lehnt
+einen vorhandenen Key ab. Ein Body, der fehlschlägt oder abgebrochen wird,
+hinterlässt nichts. Ein Body-Limit-Layer auf der Route muss die Größe
+erlauben, die du annimmst.
+
+| Backend | Wie es streamt |
+|---------|----------------|
+| `LocalStorage` | Temp-Datei im Zielverzeichnis, fsync, dann rename; `create_only` verlinkt, ersetzt also nie eine Datei |
+| `S3Storage` | ein PUT bis 5 GiB; darüber ein Multipart-Upload mit bis zu 10.000 Teilen (5 TiB), ein Teil gleichzeitig unterwegs. Über https wird der Body als `UNSIGNED-PAYLOAD` gesendet; über reines http (lokales MinIO, SeaweedFS) wird jeder 64-KiB-Chunk signiert. `create_only` sendet `If-None-Match: *` (bei Multipart beim Complete), was AWS, MinIO und SeaweedFS beachten |
+| `AzureBlobStorage` | ein Put Blob bis 5000 MiB; darüber Put Block für jeden Teil, dann ein Put Block List. `create_only` sendet `If-None-Match: *` (auf der Liste) |
+| `InMemoryStorage` | sammelt den Body im Speicher; `create_only` wird unter seiner Sperre geprüft |
+| andere | der Trait-Default: sammelt den Body im Speicher, dann `save`; lehnt `create_only` ab |
+
+Ein fehlgeschlagener oder abgebrochener Multipart-Upload wird abgebrochen, und
+Azure zeigt nie nicht festgeschriebene Blöcke, ein Teilobjekt ist also nie
+sichtbar. Ein Server, der nach einem Absturz Teile behält, sollte trotzdem eine
+Lifecycle-Regel haben, die unvollständige Multipart-Uploads entfernt.
+`LocalStorage` `create_only` braucht Hardlinks; auf FAT, SMB oder manchen
+FUSE-Mounts scheitert es mit einem Fehler, der das sagt.
+
+---
+
+## Mehrere Disks aus der Konfiguration
+
+Eine App kann Backends mischen — zwei S3-Buckets, einen Azure-Container, einen
+lokalen Cache — als benannte Disks. Deklariere sie in `[storage]` und baue eine
+`StorageRegistry`:
+
+```toml
+[storage]
+default = "uploads"
+
+[storage.disks.uploads]
+driver          = "azure"
+account         = "myaccount"
+container       = "uploads"
+public_endpoint = "https://files.example.com"   # optional: links browsers follow
+
+[storage.disks.archive]
+driver = "s3"
+bucket = "archive"
+region = "eu-west-1"
+cdn    = "https://cdn.example.com/archive"
+
+[storage.disks.cache]
+driver = "local"
+root   = "./var/cache"
+```
+
+```rust
+let registry = StorageRegistry::from_settings(&settings.storage)?;
+let uploads = registry.default_disk().expect("default disk");
+```
+
+Schlüssel bleiben aus der Datei: `RUSTANGO__STORAGE__DISKS__UPLOADS__ACCOUNT_KEY`,
+`RUSTANGO__STORAGE__DISKS__ARCHIVE__SECRET_ACCESS_KEY`. Disk-Namen sind
+kleingeschrieben `[a-z0-9_]`, damit diese Overrides sie erreichen. Ein Treiber,
+dessen Feature nicht einkompiliert ist, ist ein Fehler, der die Disk nennt,
+keine still fehlende Disk. `public_endpoint` lässt vorsignierte URLs und
+`url()` auf die Adresse zeigen, die Browser erreichen, während Lesen und
+Schreiben weiter `endpoint` nutzen.
 
 ---
 
@@ -174,7 +328,12 @@ unterstützt zwei Upload-Abläufe:
   Aufruf.
 - **Direkt-in-den-Speicher:** `manager.begin_upload(...)` gibt eine **vorsignierte PUT**-URL
   zurück, zu der der Browser direkt hochlädt (dein Server proxyt die Bytes nie),
-  dann bestätigst du die Zeile.
+  dann bestätigst du die Zeile. Das PUT muss jeden Header aus
+  `ticket.headers` senden (`Content-Type`, `If-None-Match: *` und auf Azure
+  `x-ms-blob-type`), die CORS-Regel des Buckets muss sie also erlauben. Die URL
+  kann das Objekt einmal anlegen und nie ersetzen. Vergib auch
+  `s3:ListBucket`: Ohne das beantwortet S3 ein fehlendes Objekt mit 403, und
+  finalize liefert 502, statt die Zeile als `Failed` zu markieren.
 
 ```rust
 use rustango::media::{Media, MediaManager};
@@ -225,7 +384,7 @@ Für Dateien auf der lokalen Platte statt in einem Bucket erledigt das der
 Static-Handler bereits, ganz ohne Media-Zeile:
 
 ```rust
-Cli::new(pool).with_uploads("/uploads", "./var/uploads")
+Cli::new().with_uploads("/uploads", "./var/uploads")
 ```
 
 **Wenn du gerade einen `AllowAll`-Authorizer schreiben wolltest, damit eine
@@ -260,7 +419,12 @@ vorsigniertes `PUT` für ein vom Aufrufer gewähltes Key-Präfix.
 `rustango_media.view` zum Lesen, `rustango_media_collections.add` zum Anlegen
 eines Ordners und so weiter. Hänge es **innerhalb** von `require_auth` ein,
 das die Identität injiziert, die es liest; ohne das ist jede Anfrage ein
-`401`. Superuser überspringen die Prüfung.
+`401`. Superuser überspringen die Codename-Prüfung — aber **nicht**
+`allow_disks`, das auch sie bindet: `is_superuser` erhebt innerhalb eines
+Tenants, und der Objektspeicher ist über alle hinweg geteilt. Nur ein Superuser
+darf das `uploaded_by_id` eines anderen Benutzers setzen, und das Ablegen in
+eine Collection (Upload, Verschieben oder eine verschachtelte Collection)
+braucht zusätzlich `rustango_media_collections.view`.
 
 Drei Dinge, die es nicht leistet:
 
@@ -268,7 +432,11 @@ Drei Dinge, die es nicht leistet:
   Media-Zeile per id. `MediaManager` hält einen Pool, ein mandantenfähiges
   Deployment grenzt Zeilen also selbst ein — dafür implementierst du
   `MediaAuthorizer`. `MediaTarget` benennt die Zeile (`Media(id)`,
-  `Collection(id)`, `CollectionSubtree(id)`, …) genau dafür.
+  `Collection(id)`, `CollectionSubtree(id)`, …) genau dafür, damit sich eine
+  Policy pro Zeile schreiben lässt. `?recursive` auf dem Inhalt einer Collection
+  kommt als `CollectionContents { id, recursive: true }` an — dasselbe Ziel,
+  markiert —, sodass eine Policy beim breiten Lesen strenger sein kann, ohne
+  die genannte Collection zu verlieren.
 - **Den Objektspeicher eingrenzen.** `disk` kommt bei `POST /uploads/begin` vom
   Aufrufer, und die `StorageRegistry` ist prozessweit — Pool-pro-Mandant trennt
   die Datenbank, nicht den Bucket: ein bloßes `rustango_media.add` schreibt in
@@ -305,7 +473,16 @@ Schritt „beim ersten Gebrauch anlegen"; ist das Feature aus, werden die Tabell
 > System-Migrations-Ledger verzeichnet, *ohne* ihr `CREATE TABLE` erneut auszuführen, und deine
 > bestehenden Zeilen bleiben unberührt. **Kein manueller Schritt ist erforderlich** — das Upgrade,
 > das andernfalls mit `relation already exists` / `table already exists` fehlschlagen würde,
-> funktioniert jetzt einfach. (Eingeführt in 0.51.1; siehe das CHANGELOG.)
+> funktioniert jetzt einfach.
+>
+> **Upgrade auf 0.51.2 oder neuer, nicht 0.51.1.** 0.51.0 verlegte die
+> Medientabellen auf System-Migrationen, und 0.51.1 versprach diese
+> Reconciliation — versionsübergreifende Tests gegen echte 0.46–0.50-Datenbanken
+> zeigten, dass keine von beiden funktionierte, und **beide sind gezogen
+> (yanked)**. Die Absicherung verlangte, dass eine Migration rein aus
+> `CreateTable` besteht, während eine generierte Initial-Migration Tabellen
+> *und* Indizes enthält, also brach sie bei jeder echten ab. 0.51.2 ist das
+> Release, in dem sie tatsächlich greift.
 
 ---
 
@@ -313,14 +490,15 @@ Schritt „beim ersten Gebrauch anlegen"; ist das Feature aus, werden die Tabell
 
 **`Storage`-Trait:** `save(key, &bytes)` · `load(key)` · `delete(key)` ·
 `exists(key)` · `url(key) -> Option<String>`, dazu mit Default `save_with_content_type`,
-`presigned_get_url(key, ttl)`, `presigned_put_url(key, ttl, &put)` und `metadata(key)`
+`presigned_get_url(key, ttl)`, `presigned_put_url(key, ttl, &put)`, `presigned_put_headers(&put)`, `metadata(key)`,
+`save_stream(key, len, body, &put)` und `load_stream(key)`
 (ein signierendes Backend überschreibt das Presign-Paar; die Defaults liefern `None`).
 
 **`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.max_files(n)` · `.allowed_extensions(&[..])`
 (case-insensitiv) · `.randomize_filename(bool)`. Verwendet von
 `save_uploads(multipart, &cfg, &storage)`.
 
-**Backends:** `LocalStorage` (Festplatte) · `S3Storage` (Objektspeicher, `storage-s3`)
+**Backends:** `LocalStorage` (Festplatte) · `S3Storage` (Objektspeicher, `storage-s3`) · `AzureBlobStorage` (`storage-azure`)
 · `InMemoryStorage` (Tests). Alle geben ein `BoxedStorage` zurück.
 
 ---

@@ -19,6 +19,13 @@ async fn setup(pool: &Pool) {
     rustango::testkit::migrate_framework(pool)
         .await
         .expect("framework tables");
+    // A narrower build may have made these tables without `email`.
+    rustango::testkit::add_missing_columns::<User>(pool)
+        .await
+        .expect("user columns");
+    rustango::testkit::add_missing_columns::<rustango::admin::AdminUser>(pool)
+        .await
+        .expect("admin user columns");
 }
 
 /// Unique per run: the shared tables keep earlier runs' rows.

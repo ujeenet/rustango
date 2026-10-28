@@ -1,0 +1,105 @@
+{#- The shared-provider fields, for the add form and the edit page. `f` is the
+    prefill (never the secret), `creating` picks the add-only rows. -#}
+  <table>
+    <tr>
+      <th><label for="sso_slug">slug</label></th>
+      <td>
+        {% if creating %}
+        <input type="text" id="sso_slug" name="slug" required pattern="[A-Za-z0-9_\-]+" maxlength="64"
+               value="{{ f.slug }}" placeholder="acme-google" data-mark="{{ slug_mark }}">
+        <div class="field-helper">Letters, digits, <code>_</code> and <code>-</code>. Part of the callback URL, so it cannot change later.</div>
+        {% else %}
+        <code>{{ f.slug }}</code>
+        <div class="field-helper">Part of the callback URL, so it cannot change.</div>
+        {% endif %}
+      </td>
+    </tr>
+    <tr>
+      <th><label for="sso_label">button label</label></th>
+      <td><input type="text" id="sso_label" name="label" required maxlength="150"
+                 value="{{ f.label }}" placeholder="Sign in with Google"></td>
+    </tr>
+    <tr>
+      <th><label for="sso_kind">kind</label></th>
+      <td>
+        <select id="sso_kind" name="kind">
+          {% for k in kinds %}<option value="{{ k }}"{% if f.kind == k %} selected{% endif %}>{% if k == "oidc" %}oidc (generic OpenID Connect){% else %}{{ k }}{% endif %}</option>{% endfor %}
+        </select>
+        {% if not creating %}<div class="field-helper">Changing the kind or issuer URL unlinks the users who signed in through this provider.</div>{% endif %}
+      </td>
+    </tr>
+    <tr class="sso-issuer-row"{% if f.kind != "oidc" %} hidden{% endif %}>
+      <th><label for="sso_issuer_url">issuer URL</label></th>
+      <td>
+        <input type="url" id="sso_issuer_url" name="issuer_url" maxlength="255"
+               value="{{ f.issuer_url }}" placeholder="https://idp.example.com">
+        <div class="field-helper">Only for <code>oidc</code>: the endpoints are discovered from it.</div>
+      </td>
+    </tr>
+    <tr>
+      <th><label for="sso_client_id">client ID</label></th>
+      <td><input type="text" id="sso_client_id" name="client_id" required maxlength="255"
+                 value="{{ f.client_id }}" autocomplete="off"></td>
+    </tr>
+    <tr>
+      <th><label for="sso_client_secret">client secret</label></th>
+      <td>
+        <input type="password" id="sso_client_secret" name="client_secret" autocomplete="new-password"{% if creating %} required{% endif %}>
+        <div class="field-helper">Stored encrypted. {% if creating %}Never shown again.{% else %}Saved — leave blank to keep it.{% endif %}</div>
+      </td>
+    </tr>
+    <tr>
+      <th><label for="sso_scopes">scopes</label></th>
+      <td>
+        <input type="text" id="sso_scopes" name="scopes" maxlength="255"
+               value="{{ f.scopes }}" placeholder="openid email profile">
+        <div class="field-helper">Optional, space-separated. Blank for the kind's default.</div>
+      </td>
+    </tr>
+    <tr>
+      <th><label for="sso_sort_order">sort order</label></th>
+      <td>
+        <input type="number" id="sso_sort_order" name="sort_order" value="{{ f.sort_order }}">
+        <div class="field-helper">Lower numbers come first on the login page.</div>
+      </td>
+    </tr>
+    <tr>
+      <th><label for="sso_enabled">enabled</label></th>
+      <td><input type="checkbox" id="sso_enabled" name="enabled"{% if f.enabled == "on" %} checked{% endif %}></td>
+    </tr>
+    <tr>
+      <th><label for="sso_allow_email_link">email linking</label></th>
+      <td>
+        <input type="checkbox" id="sso_allow_email_link" name="allow_email_link"{% if f.allow_email_link == "on" %} checked{% endif %}>
+        <div class="field-helper">Link a first-time user by verified email, in every tenant. Never superusers or staff.</div>
+      </td>
+    </tr>
+    <tr>
+      <th>callback URL</th>
+      <td>
+        <code class="sso-callback" data-template="{{ callback.pattern }}">{{ callback.pattern }}</code>
+        {% if callback.example %}
+        <div class="field-helper">For tenant <strong>{{ callback.example_tenant }}</strong>:
+          <code class="sso-callback" data-template="{{ callback.example }}">{{ callback.example }}</code></div>
+        {% endif %}
+        <div class="field-helper">Register this redirect URI at the IdP once for each tenant host that offers the provider.</div>
+      </td>
+    </tr>
+  </table>
+<script nonce="{{ csp_nonce }}">
+  (function () {
+    const kind = document.getElementById("sso_kind");
+    const issuer = document.querySelector(".sso-issuer-row");
+    kind.addEventListener("change", () => { issuer.hidden = kind.value !== "oidc"; });
+    const slug = document.getElementById("sso_slug");
+    if (!slug) return;
+    const mark = slug.dataset.mark;
+    const show = () => {
+      for (const el of document.querySelectorAll(".sso-callback")) {
+        el.textContent = el.dataset.template.split(mark).join(slug.value.trim() || mark);
+      }
+    };
+    slug.addEventListener("input", show);
+    show();
+  })();
+</script>

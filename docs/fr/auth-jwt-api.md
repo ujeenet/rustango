@@ -51,7 +51,13 @@ réécrit sinon :
 | GET | `/api/auth/me` | `Authorization: Bearer <access>` | `{user_id, username, is_superuser}` |
 
 Login vérifie le mot de passe avec [argon2id](auth-passwords.md), puis émet une
-paire. Les chemins, TTL et la clé de signature sont configurables via `Config`.
+paire. Un mauvais mot de passe, un utilisateur inconnu et un compte inactif
+reçoivent tous le même `401 invalid credentials`, donc l'endpoint ne révèle pas
+les comptes. Les logins partagent les limites de débit et le verrouillage de
+compte du login admin du tenant : au-delà de la limite la réponse est `429`, et
+`503` quand le hachage des mots de passe est saturé. `/me` répond `403` pour un
+compte inactif. Les chemins, TTL et la clé de signature sont configurables via
+`Config`.
 
 ## Le câblage
 
@@ -75,12 +81,41 @@ le routeur n'est pas vu par `require_bearer`, et le token reste valide jusqu'à
 son expiration. Un `jti_store` partagé (Redis, base de données) supprime aussi
 cette séparation.
 
+`require_bearer` et `/me` n'acceptent que des tokens émis par `/login` ou
+`/refresh`, et les refusent dès que l'utilisateur se déconnecte n'importe où ou
+change de mot de passe.
+
 `Config::default()` signe avec `RUSTANGO_SESSION_SECRET` (la même clé que le
-cookie de session admin) et utilise des TTL de 15 min pour l'accès / 7 jours pour
-le rafraîchissement. Redéfinissez `prefix`, `access_ttl_secs`,
-`refresh_ttl_secs`, ou `session_secret` selon vos besoins. Les endpoints
-s'exécutent dans le contexte du tenant, montez-les donc dans une application
-tenancy.
+cookie de session admin, décodée du base64) et utilise des TTL de 15 min pour
+l'accès / 7 jours pour le rafraîchissement. `JwtAuth::new` panique quand la clé
+fait moins de 32 octets, donc un serveur mal configuré refuse de démarrer. Les
+champs de `Config` :
+
+| Champ | Défaut | Rôle |
+|---|---|---|
+| `prefix` | `/api/auth` | préfixe d'URL des quatre endpoints |
+| `access_ttl_secs` | `900` | durée de vie du token d'accès |
+| `refresh_ttl_secs` | 7 jours | durée de vie du token de rafraîchissement |
+| `refresh_absolute_ttl_secs` | 30 jours | durée maximale d'un login à travers les rafraîchissements ; doit être > 0 |
+| `refresh_reuse_grace_secs` | `10` | fenêtre de nouvel essai après une rotation ; `0` traite toute réutilisation comme un vol |
+| `session_secret` | `None` | clé de signature explicite au lieu de `RUSTANGO_SESSION_SECRET` |
+| `jti_store` | `None` | magasin de révocation ; `None` est celui en mémoire |
+| `extra_claims` | `None` | hook qui ajoute des claims aux deux tokens au login et à chaque rafraîchissement |
+
+`extra_claims` reçoit un `ClaimsContext` (`user_id`, `username`,
+`is_superuser`, `tenant_slug`). Renvoyer un nom réservé (`sub`, `exp`, `jti`,
+`typ`, `kind`) fait échouer le login en `500` ; `tenant`, `pwf`, `sat` et `fam`
+appartiennent au routeur. Avec la fonctionnalité `config`,
+`Config::with_jwt_settings(&settings.auth.jwt)` lit `access_ttl_secs` et
+`refresh_ttl_secs` depuis `[auth.jwt]` ; les clés `issuer` et `audience` y sont
+encore sans effet.
+
+Les endpoints s'exécutent dans le contexte du tenant, montez-les donc dans une
+application tenancy. Pour un type de base tenant autre que celui par défaut,
+utilisez `router_for::<DB>()` et `require_bearer_for::<DB>`.
+`auth.lifecycle()` donne le `JwtLifecycle` sous-jacent, et
+`auth.verify_for_tenant(bearer, &tenant)` fait les mêmes contrôles que
+`require_bearer` et renvoie l'id utilisateur.
 
 ```sh
 # Login → access + refresh
@@ -115,6 +150,13 @@ match jwt.verify_access(&access).await {
     None => { /* 401 : invalide, expiré, révoqué, ou mauvais type */ }
 }
 ```
+
+`JwtLifecycle::new` prend la clé en `Vec<u8>` et panique quand elle fait moins
+de 32 octets. Les TTL valent par défaut 15 min / 7 jours ; changez-les avec
+`.with_access_ttl(secs)` et `.with_refresh_ttl(secs)`.
+`issue_access_with(user_id, custom)` émet un token d'accès seul, sans moitié de
+rafraîchissement, et `blacklist_size()` indique à peu près combien de JTI sont
+révoqués (`0` pour un magasin qui ne sait pas compter).
 
 Les tokens d'accès et de rafraîchissement ne sont **pas interchangeables** —
 `verify_access` rejette un token de rafraîchissement et vice versa, de sorte
@@ -163,7 +205,9 @@ oublie au redémarrage).
 
 Chaque token porte un `jti` unique. `revoke` l'ajoute à une liste noire de sorte
 que les appels `verify_*` suivants échouent jusqu'à ce que le token ait de toute
-façon expiré — c'est ce qu'appelle `POST /api/auth/logout` :
+façon expiré — c'est ce qu'appelle `POST /api/auth/logout`. Il ne vérifie que
+la signature, donc il accepte aussi un token expiré, et il renvoie `false` pour
+un token qu'il ne peut pas vérifier :
 
 ```rust
 let pair = jwt.issue_pair(1);
@@ -215,7 +259,7 @@ assert!(b.verify_access(&pair.access).await.is_none());   // B voit la révocati
 
 ### Écrire un magasin durable
 
-`JtiStore` est asynchrone (depuis v0.52, #1191) : une implémentation durable
+`JtiStore` est asynchrone (depuis v0.52) : une implémentation durable
 tient donc en une requête — pas de vidage en arrière-plan, pas de fenêtre de
 convergence pendant laquelle un `jti` révoqué est encore accepté ailleurs. Les
 deux méthodes renvoient `JtiFuture<'_, T>` (un future boxé — le trait est utilisé
@@ -240,7 +284,10 @@ impl JtiStore for PgJtiStore {
 `jti`, exactement un doit obtenir `true` — une seule écriture conditionnelle
 (`INSERT … ON CONFLICT DO NOTHING`, Redis `SET NX`), jamais une lecture suivie
 d'une écriture. Sinon la garantie d'usage unique des tokens de rafraîchissement
-disparaît.
+disparaît. Deux autres méthodes ont une valeur par défaut : `approx_size`
+(`None`, utilisée par `blacklist_size`) et `is_process_local` (`false` ;
+renvoyez `true` seulement pour un magasin qui ne partage pas les révocations,
+ce qui fait journaliser un avertissement par `JwtAuth::new`).
 
 Comme la vérification consulte le magasin, `verify_access`, `verify_refresh`,
 `refresh`, `revoke` et les helpers de token MCP / tenant
@@ -291,7 +338,7 @@ sauf si vous utilisez `refresh_with`.
   d'API, un autre service auquel vous confiez un jeton. Trois segments, un en-tête
   JOSE `{"alg":"HS256","typ":"JWT"}`, signé sur `header.payload`.
 
-  Jusqu'à [#1397](https://github.com/ujeenet/rustango/issues/1397) c'étaient deux
+  Avant 0.57.5, c'étaient deux
   segments sans en-tête, signés sur la seule charge utile — lisibles par rien
   d'autre que rustango, et rejetés jusque par `rustango::jwt::decode`. Si vous
   aviez écrit un vérificateur maison pour contourner cela, vous pouvez le jeter.

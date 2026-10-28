@@ -4,8 +4,7 @@ Middleware is code that runs **around** every request — before your handler
 sees it and after it produces a response. It's where cross-cutting concerns
 live: logging, rate limiting, security headers, CSRF, locale and timezone
 resolution. **Rustango** ships a deep catalog of ready-made middleware and
-makes writing your own a few lines. If you come from Express, this is
-`app.use()`; from Laravel, it's the HTTP kernel — same idea, attached to your
+makes writing your own a few lines. Each one is a layer attached to your
 router.
 
 [![Middleware in Rustango: a request flows down through a stack of tower layers (request-id, locale, security headers, CSRF) into the handler and back up through the response side of each layer](img/middleware.png)](img/middleware.png)
@@ -145,13 +144,16 @@ to get the method.
 | Max body size | `BodyLimitLayer` | `.body_limit(..)` |
 | Maintenance mode (503) | `MaintenanceLayer` | `.maintenance(..)` |
 | Idempotency keys | `IdempotencyLayer` | `.idempotency(..)` |
-| Restrict HTTP methods | `MethodRestrictLayer` | `.require_get()` / `.require_post()` / `.require_safe()` |
+| Restrict HTTP methods | `MethodRestrictLayer` | `.require_get()` / `.require_post()` / `.require_safe()` / `.require_methods([..])` |
+| Method override (`_method` field / `X-HTTP-Method-Override`) | `MethodOverrideLayer` | `.layer(..)` |
+| Custom error pages | `ErrorPagesLayer` | `.error_pages(..)` |
 | **Observability** | | |
 | Request id (`X-Request-Id`) | `RequestIdLayer` | `.request_id(..)` |
 | [Access log](logging.md#the-access-log) (PII-redacted) | `AccessLogLayer` | `.access_log(..)` |
 | `tracing` spans | `TracingLayer` | `.layer(..)` |
 | `Server-Timing` header | `ServerTimingLayer` | `.server_timing(..)` |
 | Real client IP (behind proxies) | `RealIpLayer` | `.real_ip(..)` |
+| Request signals (`request_started` / `request_finished`) | `RequestSignalsLayer` | `.layer(..)` |
 | **Content & response** | | |
 | gzip/br compression | `CompressionLayer` | `.compression(..)` |
 | ETag / conditional GET | `EtagLayer` | `.etag(..)` |
@@ -162,7 +164,7 @@ to get the method.
 | Active timezone | *(compose with `from_fn`)* | see [below](#timezone-aware-middleware) |
 | **Development** | | |
 | Live reload | `LiveReloadLayer` | `.livereload(..)` |
-| Debug panel | `DebugPanelLayer` | `.debug_panel(..)` |
+| Debug panel | `DebugPanelLayer` | `.debug_panel()` / `.debug_panel_with(..)` |
 
 Under `tenancy`, mount `CachePageLayer` inside the tenancy layer: on a router
 you pass to the server builder. It puts the resolved tenant in the key; outside
@@ -333,6 +335,10 @@ Three presets cover the common cases:
 | `relaxed()` | embeddable pages | 1 year | `SAMEORIGIN` |
 | `dev()` | local dev | *(omitted)* | — |
 
+`empty()` sends no headers. `from_preset("strict" | "relaxed" | "dev" | "none")`
+picks one by name; an unknown name gives `strict()`, so a typo never strips the
+headers.
+
 Use `dev()` locally — HSTS would otherwise pin your browser to HTTPS for a year
 on `localhost`. Build a CSP fluently with `CspBuilder` (`.default_src(..)`,
 `.script_src(..)`, …, `.build()`), and roll it out safely with
@@ -356,7 +362,8 @@ let app = Router::new()
     .layer(csrf::layer());
 ```
 
-A safe method (GET/HEAD/OPTIONS) mints a `rustango_csrf` cookie. An unsafe
+A safe method (GET/HEAD/OPTIONS/TRACE, and `QUERY` unless
+`require_csrf_on_query` is set) mints a `rustango_csrf` cookie. An unsafe
 method (POST/PUT/PATCH/DELETE) must echo that cookie's value back, either in the
 `X-CSRF-Token` header or the `_csrf` form field; a mismatch is `403 Forbidden`:
 
@@ -375,9 +382,13 @@ a ready-made hidden `<input name="_csrf">` — drop one in every form. The `| sa
 is required: templates autoescape, so without it the form carries no `_csrf`
 field and every POST 403s. The admin's own login form does exactly this — see
 `crates/rustango/src/admin/templates/login.html`. Override
-the cookie/header names or the `Secure` flag with `csrf::with_config(CsrfConfig)`;
-the Origin-header check always runs and accepts the request's own Host; an SPA
-served from another origin adds it with `.with_trusted_origins([...])`. For append-only collector endpoints
+the cookie/header names or the `Secure` flag with `csrf::with_config(CsrfConfig)`.
+The plain `csrf::layer()` takes the cookie's `Secure` flag from the session
+policy; with `with_config` it is `CsrfConfig::secure` (default `true`;
+`.allow_insecure_for_dev()` turns it off for plain-HTTP dev).
+The Origin-header check always runs and accepts the request's own Host; an SPA
+served from another origin adds it with `.trust_origin(..)` or
+`.with_trusted_origins([...])`. For append-only collector endpoints
 hit via `navigator.sendBeacon` (e.g. analytics) that can't send a token header,
 `CsrfConfig::exempt_prefix("/path")` skips enforcement for a narrow path prefix.
 The auto-admin enables CSRF on every mutation with no opt-out.

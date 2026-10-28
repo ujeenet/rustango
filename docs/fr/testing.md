@@ -13,10 +13,12 @@ d'intégration complet sans quitter le processus.
 > **Un terme nouveau ici ?** *router*, *handler*, *fixture*, *rollback* — voir le
 > [glossaire](glossary.md).
 
-> **Source :** `rustango::test_client` (`TestClient`, `TestResponse`),
-> `rustango::test_assertions` (`assert_status_2xx`, `assert_redirects`,
-> `assert_cookie_set`, …), et `rustango::test_db` (`with_rollback`) — toujours
-> compilés.
+> **Source :** `rustango::test_client` (`TestClient`, `TestResponse`) — demande
+> la feature `admin`, car il enveloppe un `axum::Router`. `rustango::test_db`
+> (`with_rollback`) n'est derrière aucune feature. `rustango::test_assertions`
+> est toujours compilé, mais ses helpers de réponse (`assert_status_2xx`,
+> `assert_redirects`, `assert_cookie_set`, …) demandent une feature HTTP comme
+> `admin` ou `manage`.
 >
 > **Version exécutable :** les snippets ci-dessous *sont* un test qui passe —
 > [`testing_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/testing_doc.rs)
@@ -51,8 +53,21 @@ let res = client.get("/ping").send().await;   // routed in-process
 assert_eq!(res.status, 200);
 ```
 
-`TestClient` a `get` / `post` / `put` / `patch` / `delete` / `head`, chacun
-renvoyant un builder que vous finissez avec `.send().await`.
+`TestClient` a `get` / `post` / `put` / `patch` / `delete` / `head` /
+`query`, plus `request(method, path)`, chacun renvoyant un builder que vous
+finissez avec `.send().await`.
+
+Le client se comporte comme un navigateur sur `http://testserver` :
+
+- **Un cookie jar.** `Set-Cookie` est conservé et renvoyé aux requêtes
+  suivantes vers les chemins correspondants. Lisez-le avec `cookie(name)` ou
+  `cookies()`, remplissez-le avec `set_cookie`, videz-le avec `clear_cookies`.
+- **`Host: testserver`**, et un `Origin` de même origine sur les méthodes non
+  sûres, sauf si la requête fixe les siens.
+- **Adresse du pair `127.0.0.1`.** Changez-la par requête avec
+  `.remote_addr(addr)`.
+- **Le CSRF est appliqué.** Envoyez le jeton avec `.with_csrf()` (l'en-tête
+  `X-CSRF-Token`) ou un champ de formulaire `_csrf` ; `csrf_token()` le lit.
 
 ---
 
@@ -95,8 +110,25 @@ let res = client
 assert_eq!(res.status, 201);
 ```
 
-Utilisez `.body(...)` pour les corps bruts (non-JSON), et une route manquante renvoie un vrai
-`404` — vérifié dans le test sous-jacent.
+Utilisez `.form(&[("k", "v")])` pour un corps de formulaire, `.body(...)` pour
+des octets bruts, et une route manquante renvoie un vrai `404` — vérifié dans le
+test sous-jacent.
+
+`.send_following_redirects(max_hops)` suit jusqu'à ce nombre de redirections
+comme un navigateur et renvoie la réponse finale avec la chaîne
+`(status, location)`. `client.get_following_redirects(path, max_hops)` est le
+raccourci `GET`.
+
+### Se connecter
+
+- `client.login(path, &[("username", "ada"), ("password", "…")])` se connecte
+  par le formulaire : il charge `path` pour un jeton CSRF si le jar n'en a pas,
+  puis envoie les champs. Le cookie de session reste dans le jar.
+- `client.logout(Some(path))` poste vers la route de déconnexion ;
+  `logout(None)` vide seulement le jar.
+- Avec `tenancy`, `force_login_tenant_user(&secret, slug, &user, ttl_secs)` et
+  `force_login_operator(&secret, &operator, ttl_secs)` mettent un cookie de
+  session dans le jar sans le formulaire. La ligne doit être enregistrée.
 
 ---
 
@@ -147,10 +179,33 @@ async fn creating_a_post_persists_it() {
 }
 ```
 
-La closure reçoit un `AtomicTx` ; verrouillez-le à chaque instruction avec `tx.lock().await?`. Un `atomic()` sur le même pool à l'intérieur est un savepoint et est annulé lui aussi. Relâchez le guard avant un `atomic()` imbriqué ou un `bulk_insert_pool`, sinon ils échouent avec `ExecError::NestedAtomic`.
+Le `Box::pin` est obligatoire, pas stylistique : la borne est
+`for<'tx> FnOnce(&'tx AtomicTx) -> Pin<Box<dyn Future<…> + Send + 'tx>>`,
+c'est ce qui permet à la closure d'emprunter `tx` à travers ses propres points
+d'await. Un `atomic()` sur le même pool à l'intérieur de la closure est un
+savepoint et est annulé lui aussi ; relâchez le guard avant lui ou avant un
+`bulk_insert_pool`, sinon ils échouent avec `NestedAtomic`. La closure renvoie
+`Result<T, ExecError>`, tout comme `with_rollback` — le rollback a lieu dans
+tous les cas, donc l'`unwrap` concerne vos assertions, pas le nettoyage.
 
 Pour SQLite, les tests `*_sqlite_live.rs` à travers ce dépôt utilisent à la place une base de données
 en mémoire par test — également entièrement isolée, avec zéro configuration externe.
+
+Le code qui doit vraiment valider (signaux, hooks `on_commit`) ne tourne pas
+sous un rollback. Utilisez `with_truncate_after(&pool, &["posts"], || async move { … })` :
+le corps valide, puis les tables listées sont vidées, même si le corps panique.
+Lancez ces tests un par un derrière un `tokio::sync::Mutex` partagé.
+`truncate_tables(&pool, &[…])` est le vidage seul.
+
+### Autres helpers
+
+| Module | Ce qu'il vous donne |
+|---|---|
+| `test_server::LiveServer` (`admin`) | Un vrai socket : `LiveServer::spawn(router)`, puis `url(path)` |
+| `test_factory` | `Sequence` (un compteur qui construit des valeurs) et le trait `Factory` avec `build_batch(n)` |
+| `test_data` | `setup_test_data!` / `setup_test_data_async!` : une fixture construite une fois par processus |
+| `test_settings` (`config`) | `with_overridden(settings, future)` : `Settings::load` renvoie `settings` dans la future |
+| `test_filter` | `tags!("slow")` en tête d'un test ; `RUSTANGO_TEST_TAGS` / `RUSTANGO_TEST_EXCLUDE_TAGS` choisissent ce qui tourne |
 
 ---
 
@@ -171,8 +226,8 @@ couverture.
 | Variable | Suites | Ce dont elles ont besoin |
 |---|---:|---|
 | *(aucune)* | 227 | Rien — une SQLite en mémoire ou en fichier temporaire. Tournent toujours. |
-| `DATABASE_URL` | 171 | Un serveur PostgreSQL joignable. |
-| `MYSQL_TEST_URL` | 103 | Un serveur MySQL 8+ joignable. **Pas** `DATABASE_URL`. |
+| `DATABASE_URL` | 175 | Un serveur PostgreSQL joignable. |
+| `MYSQL_TEST_URL` | 107 | Un serveur MySQL 8+ joignable. **Pas** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Un Redis joignable. |
 
 Une suite qui lit deux variables est comptée sous les deux ; la colonne ne
@@ -189,6 +244,26 @@ backend sur trois.
 MySQL est celle qui piège les gens : elle lit sa propre variable, donc un shell
 où seule `DATABASE_URL` est définie exécute les suites Postgres et saute
 silencieusement toutes les suites MySQL.
+
+### Les exécuter une à la fois
+
+Les suites live partagent une seule base et la plupart suppriment ou vident les
+tables du framework à l'initialisation : les exécuter en parallèle les fait se
+battre pour le catalogue. Utilisez le profil `live`, qui définit
+`test-threads = 1` :
+
+```bash
+cargo nextest run --profile live --workspace --all-features
+```
+
+Sans lui, les échecs sont nombreux et aucun n'est réel : 758 contre
+PostgreSQL, 95 contre MySQL, 0 dans les deux cas avec le profil. Les gardes
+`tokio::sync::Mutex` à l'intérieur de ces suites n'aident pas, car nextest
+exécute chaque test dans son propre processus et un mutex dans l'un n'atteint
+pas l'autre.
+
+C'est un contournement, pas une correction : des bases par processus
+rétabliraient le parallélisme.
 
 ### Distinguer un saut d'un succès
 

@@ -30,7 +30,7 @@ Le nom d'une méthode indique ce qu'elle fait. Une fois ces suffixes assimilés,
 ### Fonctions
 
 - **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — le nom nu prend un `rustango::sql::Pool` et constitue le chemin ordinaire. Il fonctionne sur Postgres, MySQL et SQLite, en choisissant le dialecte en interne. C'est ce que veut la quasi-totalité du code applicatif.
-- **`fetch_on(executor)`, `count_on(executor)`** — le suffixe `_on` signifie « exécute ceci contre l'*executor* que je te fournis » — une connexion ou une transaction ouverte plutôt que le pool. À utiliser quand il faut plusieurs instructions dans une même transaction. **Les méthodes `_on` sont réservées à Postgres** (`#[cfg(feature = "postgres")]`).
+- **`fetch_on(executor)`, `count_on(executor)`** — le suffixe `_on` signifie « exécute ceci contre l'*executor* que je te fournis » — une connexion ou une transaction ouverte plutôt que le pool. À utiliser quand il faut plusieurs instructions dans une même transaction. `fetch_on` / `first_on` / `count_on` / `exists_on` et le `fetch_on` de `values` / `aggregate` acceptent n'importe quel `SqlExecutor` (`&mut PoolConn`, `&mut PoolTx`, `&Pool`) sur les trois backends ; le reste de la famille `_on` est encore réservé à Postgres.
 - **Les écritures inversent cette règle, et c'est le seul endroit où elle ne tient pas.** `save(&pool)`, `insert(&pool)` et `delete(&pool)` prennent un `sqlx::PgPool` spécifique au pilote ; sur un build sans la fonctionnalité `postgres`, elles **n'existent tout simplement pas** — choisir `sqlite` fait disparaître la méthode au lieu d'échouer avec un message qui en nomme la cause. Les versions multi-backends portent le suffixe `_pool` : `save_pool`, `insert_pool`, `delete_pool`, chacune prenant `rustango::sql::Pool`.
 
   | | nom nu | version multi-backends |
@@ -38,7 +38,7 @@ Le nom d'une méthode indique ce qu'elle fait. Une fois ces suffixes assimilés,
   | **Lectures** (`QuerySet`) | `fetch(&pool)` — déjà multi-backends | *est* le nom nu |
   | **Écritures** (modèle) | `save(&pool)` — **Postgres uniquement** | `save_pool(&pool)` |
 
-  Le nom court est donc le plus étroit pour les écritures et le plus large pour les lectures. Cette inversion est une verrue, pas un choix de conception : elle est suivie dans [#1293](https://github.com/ujeenet/rustango/issues/1293) et sera résolue par un cycle de dépréciation plutôt que par un renommage. En attendant, **si vous n'êtes pas sur Postgres, écrivez `save_pool` / `insert_pool` / `delete_pool`.**
+  Le nom court est donc le plus étroit pour les écritures et le plus large pour les lectures. Cette inversion est une verrue, pas un choix de conception : elle sera résolue par un cycle de dépréciation plutôt que par un renommage. En attendant, **si vous n'êtes pas sur Postgres, écrivez `save_pool` / `insert_pool` / `delete_pool`.**
 - **`from_X(value)`** — convertit DEPUIS une autre valeur (par ex. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — une méthode de builder qui définit une option et retourne l'objet, ce qui permet d'enchaîner les appels (par ex. `with_default_ttl(d)`, `with_access_ttl(secs)`).
 - **`new()`** — le constructeur minimal. Les arguments qu'il prend sont des dépendances obligatoires (par ex. `RedisCache::new(url)` — vous ne pouvez pas construire le cache sans une URL).
@@ -80,7 +80,7 @@ La façon de construire un objet dépend de ce dont il a besoin. Il existe quelq
 Le type de retour d'une méthode indique comment elle peut échouer. Rust n'a pas d'exceptions, donc l'échec fait partie de la valeur de retour. Il existe trois formes.
 
 **`Result<T, E>`** — comme une fonction qui soit retourne une valeur, soit lève une exception. Vous obtenez soit la valeur `T`, soit une erreur `E` avec des détails. À utiliser pour les opérations qui peuvent échouer et où le *pourquoi* importe :
-- E/S : `pool.fetch(...).await -> Result<_, sqlx::Error>`
+- E/S : `Post::objects().fetch(&pool).await -> Result<Vec<Post>, ExecError>`
 - Validation : `Form::parse(data) -> Result<Self, FormErrors>`
 - Émission : `JwtLifecycle::issue_pair_with(uid, claims) -> Result<_, JwtIssueError>`
 
@@ -91,7 +91,7 @@ Le type de retour d'une méthode indique comment elle peut échouer. Rust n'a pa
 
 **`bool`** — un simple oui/non quand aucun détail supplémentaire n'est nécessaire :
 - `cache.exists(k) -> Result<bool, _>` (le `Result` couvre l'E/S ; le `bool` est la réponse)
-- `JwtLifecycle::revoke(token) -> bool` (true = ajouté à la liste noire)
+- `async JwtLifecycle::revoke(token) -> bool` (true = ajouté à la liste noire)
 - `disconnect_pre_save(id) -> bool` (true = une entrée a été retirée)
 
 **`Result<Option<T>>` ou `Result<T>` avec une erreur `NotFound` ?** Les deux peuvent exprimer « la recherche a échoué », alors choisissez selon le caractère exceptionnel de « non trouvé » :
@@ -122,7 +122,7 @@ La règle générale : si une méthode attend quelque chose (la base de données
 Chaque appel ORM prend un pool ou un executor (le handle de base de données) comme **dernier** argument. Vous passez la connexion à chaque fois, plutôt que de vous appuyer sur un état global caché :
 
 ```rust
-post.save_on(&pool).await?
+post.save_pool(&pool).await?
 Post::objects().filter(...).fetch_on(&pool).await?
 send_post_save(&post, ctx).await                  // ⚠️ no pool — signals are pool-free
 ```
@@ -131,7 +131,7 @@ send_post_save(&post, ctx).await                  // ⚠️ no pool — signals 
 
 **Pourquoi le passer à chaque fois ?** Rust préfère les dépendances visibles à un état global caché. L'alternative évidente — conserver la connexion dans un stockage thread-local — s'effondre dans le monde async de Rust, où une tâche peut sauter d'un thread à l'autre en plein milieu d'une requête. L'inconvénient, c'est plus de saisie ; l'avantage, c'est que vous pouvez faire un grep sur chaque endroit qui touche la base de données.
 
-Si vous vous retrouvez à faire transiter `&pool` à travers dix couches d'appels de fonctions, acceptez `impl Executor` une seule fois au point d'entrée public et laissez les helpers internes partager cette unique connexion.
+Si vous vous retrouvez à faire transiter `&pool` à travers dix couches d'appels de fonctions, acceptez un `E: SqlExecutor` une seule fois au point d'entrée public et laissez les helpers internes partager cette unique connexion.
 
 ---
 
@@ -144,7 +144,8 @@ Il y a trois façons de filtrer un queryset, et elles se combinent toutes dans u
 //    GET /api/posts?author_id=42&status__ne=archived
 
 // 2. String-keyed (lookup at compile of the queryset; runtime field name resolution)
-Post::objects().filter("author_id", Op::Eq, SqlValue::I64(42));
+Post::objects().filter("author_id", 42_i64);                // equality
+Post::objects().filter_op("author_id", Op::Gt, 42_i64);     // any operator
 
 // 3. Typed columns (compile-time field check)
 Post::objects().where_(Post::author_id.eq(42));
@@ -153,7 +154,7 @@ Post::objects().where_(Post::author_id.eq(42));
 | Syntaxe | À utiliser quand |
 |---|---|
 | Requête HTTP | Endpoints d'API publics — le ViewSet les analyse pour vous depuis la chaîne de requête |
-| `.filter` par clé-chaîne | Code CRUD générique ou d'admin, où les noms de champs viennent de la config et ne sont pas connus à la compilation |
+| `.filter` / `.filter_op` par clé-chaîne | Code CRUD générique ou d'admin, où les noms de champs viennent de la config et ne sont pas connus à la compilation |
 | `.where_` typé | Le code de votre application — le choix par défaut recommandé. Le compilateur vérifie que le champ existe et que les types correspondent |
 
 Vous pouvez **mélanger les trois** dans un même queryset.
@@ -177,7 +178,7 @@ Vous pouvez **mélanger les trois** dans un même queryset.
 | JWT | `tenancy::jwt_lifecycle` | `JwtIssueError` |
 | Clés d'API | `api_keys::*` | `ApiKeyError` |
 | Mots de passe | `passwords::*` | `PasswordError` |
-| Webhooks | `webhook::*` | (retourne un bool, pas d'erreur dédiée) |
+| Webhooks | `webhook::*` | `EmptySigningKey` depuis `sign` ; `verify_*` retourne un `bool` |
 | URLs signées | `signed_url::*` | `SignedUrlError` |
 | Actions en masse | `bulk_actions::*` | `BulkActionError` |
 | Fixtures | `fixtures::*` | `FixtureError` |
@@ -192,16 +193,21 @@ Vous pouvez **mélanger les trois** dans un même queryset.
 **Un exemple de handler :**
 
 ```rust
+use axum::http::StatusCode;
 use rustango::api_errors::ApiError;
 
-async fn handler() -> Result<Json<X>, ApiError> {
-    let post = Post::objects().get(&pool, 1).await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+async fn handler() -> Result<Json<Post>, ApiError> {
+    let post = Post::objects().find(1, &pool).await
+        // journalise la cause ; le client reçoit un message 500 générique
+        .map_err(|e| ApiError::logged(StatusCode::INTERNAL_SERVER_ERROR, "load post", e))?
+        .ok_or_else(|| ApiError::not_found("no such post"))?;
     Ok(Json(post))
 }
 ```
 
-`ApiError` implémente `IntoResponse`, si bien que le retourner produit automatiquement sa forme JSON : `{"error": <code machine>, "message": …, "status": …, "details": …}`.
+Ne mettez pas `e.to_string()` dans `ApiError::internal` : cela envoie l'erreur de base de données au client. `ApiError::logged` journalise la cause d'un 5xx et envoie un message générique (sauf si `RUSTANGO_DISCLOSE_ERRORS` l'autorise).
+
+`ApiError` implémente `IntoResponse`, si bien que le retourner produit automatiquement sa forme JSON : `{"error": <machine code>, "message": …, "status": …, "details": …}`.
 
 Les erreurs JSON du framework lui-même utilisent la même forme : ViewSets, rejets de tenant et de `Principal`, media, endpoints JSON de l'admin, limites de corps, limites de débit et mode maintenance. Un `5xx` journalise sa cause et envoie un `message` générique. Voir [ViewSets — formes de réponse en erreur](viewsets.md#formes-de-réponse-en-erreur).
 
@@ -267,16 +273,24 @@ let l = AccessLogLayer {
 Une *feature* est un flag de build Cargo (le `[features]` de `Cargo.toml`) qui active ou désactive un pan du crate — la liste des briques installées de votre application, mais résolue à la compilation. Chaque module qui tire une dépendance supplémentaire se trouve derrière l'une d'elles. L'ensemble par défaut, c'est « vous en voulez presque certainement » :
 
 ```toml
-default = [
-    "postgres", "manage", "admin", "config", "forms", "serializer",
-    "cache", "signals", "email", "storage", "scheduler", "secrets", "totp",
-    "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url",
-    "notifications", "casts", "jobs", "jobs-postgres", "auth_flows", "sse",
-    "websocket", "oauth2", "http-client", "compression", "openapi",
-    "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3",
-    "media", "runserver", "template_views",
+default = ["postgres", "batteries"]
+
+batteries = [
+    "manage", "admin", "config", "forms", "serializer", "cache", "signals",
+    "email", "storage", "scheduler", "secrets", "totp", "webhook",
+    "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications",
+    "casts", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket",
+    "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions",
+    "hmac-auth", "jwt", "uploads", "storage-s3", "storage-azure", "media",
+    "runserver", "template_views",
 ]
 ```
+
+L'indirection est délibérée : `batteries` est un nom unique qu'un crate en aval
+peut désactiver — `default-features = false, features = ["postgres"]` — sans
+avoir à recopier la liste. Il permet aussi de tout garder et de choisir un autre
+backend : `default-features = false, features = ["batteries", "sqlite"]`. L'alternative, tout écrire dans `default`, obligerait
+quiconque s'en retire à connaître toute la liste.
 
 **Désactivées par défaut :** les features qui tirent de lourdes dépendances ou des services externes :
 - `tenancy` — ajoute `argon2`, `hmac`, `sha2`, `cookie`, `tower` (la plupart des applications n'en ont pas besoin)
@@ -293,7 +307,7 @@ rustango = { version = "0.61", default-features = false, features = ["postgres",
 
 ## Macros vs runtime
 
-Une *macro* est du code qui génère du code à la compilation (`#[derive(Model)]` et consorts) — à peu près ce que fait un générateur Rails, sauf qu'elle s'exécute à chaque build et que le compilateur vérifie le résultat. La répartition ci-dessous décide de ce qui est fait par une macro versus du simple code au runtime.
+Une *macro* est du code qui génère du code à la compilation (`#[derive(Model)]` et consorts). Elle s'exécute à chaque build, et le compilateur vérifie le résultat. La répartition ci-dessous décide de ce qui est fait par une macro versus du simple code au runtime.
 
 | Préoccupation | Macro ou runtime ? |
 |---|---|

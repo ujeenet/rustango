@@ -1,5 +1,52 @@
-FROM rust:1.88
+# The deployable image. `Dockerfile.dev` is the hot-reload one
+# docker-compose.yml uses; this one is for shipping.
+#
+#   docker build -t getting_started_blog:latest .
+#   docker run --rm -p 8080:8080 -e DATABASE_URL=... getting_started_blog:latest
+#
+# Pick a non-default backend at build time:
+#   docker build --build-arg FEATURES=sqlite --build-arg NO_DEFAULT=1 .
 
+FROM rust:1-bookworm AS builder
+# The image's own toolchain, not rust-toolchain.toml's `stable`.
+ENV RUSTUP_TOOLCHAIN=$RUST_VERSION
+ARG FEATURES=""
+ARG NO_DEFAULT=""
+WORKDIR /src
+COPY . .
+# Incremental compilation only grows the cache in a one-shot image build.
+ENV CARGO_INCREMENTAL=0
+RUN set -eux; \
+    flags="--release"; \
+    if [ -f Cargo.lock ]; then flags="$flags --locked"; fi; \
+    if [ -n "$NO_DEFAULT" ]; then flags="$flags --no-default-features"; fi; \
+    if [ -n "$FEATURES" ]; then flags="$flags --features $FEATURES"; fi; \
+    cargo build $flags; \
+    mkdir -p /out; \
+    cp target/release/getting_started_blog /out/
+
+# Same Debian release as the builder: the binary links the builder's glibc.
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /out/getting_started_blog /usr/local/bin/getting_started_blog
+# Migrations and settings are read at run time, so they travel with the
+# binary rather than being baked into it. `system/` holds the framework's
+# own migrations: without it `migrate` skips framework schema changes.
+COPY migrations /app/migrations
+COPY system /app/system
+COPY config /app/config
+# Never root. The numeric id keeps the ownership stable if the image is
+# rebuilt on a host whose useradd picks a different one.
+RUN useradd --uid 10001 --create-home app && chown -R 10001 /app
+USER 10001
 WORKDIR /app
-
-RUN cargo install cargo-watch
+# A release image runs the prod tier. Unset, the dev tier would load and
+# bind 127.0.0.1, which the port mapping cannot reach.
+ENV RUSTANGO_ENV=prod
+EXPOSE 8080
+# `.with_health()` mounts /health; drop this line if you removed it.
+HEALTHCHECK --interval=5s --timeout=3s --start-period=20s --retries=12 \
+  CMD curl -fsS http://127.0.0.1:8080/health || exit 1
+CMD ["getting_started_blog"]

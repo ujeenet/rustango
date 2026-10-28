@@ -1131,9 +1131,10 @@ async fn vary_star_is_not_cached() {
     assert_eq!(cache_status(&resp), Some("BYPASS"));
 }
 
-/// `invalidate` deletes exactly the key the layer wrote (#2252).
+/// One `invalidate` purges every variant of the path: any query, any
+/// vary value. Other paths and hosts keep theirs.
 #[tokio::test]
-async fn invalidate_purges_the_cached_page() {
+async fn invalidate_purges_every_variant_of_the_path() {
     use rustango::cache_page::PageKey;
     let hits = Arc::new(AtomicU32::new(0));
     let h = hits.clone();
@@ -1149,39 +1150,50 @@ async fn invalidate_purges_the_cached_page() {
                 async { "ok" }
             }),
         )
+        .route("/q", get(|| async { "q" }))
         .layer(layer.clone());
-    let status = |app: Router| async move {
-        let req = Request::get("/p?x=1")
-            .header(header::HOST, "a.test")
-            .header(header::ACCEPT_LANGUAGE, "en")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        resp.headers()["x-cache-status"]
-            .to_str()
-            .unwrap()
-            .to_owned()
+    let status = |uri: &'static str, host: &'static str, lang: &'static str| {
+        let app = app.clone();
+        async move {
+            let req = Request::get(uri)
+                .header(header::HOST, host)
+                .header(header::ACCEPT_LANGUAGE, lang)
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            cache_status(&resp).unwrap().to_owned()
+        }
     };
-    assert_eq!(status(app.clone()).await, "MISS");
-    assert_eq!(status(app.clone()).await, "HIT");
-
-    let page = PageKey::new("/p", "a.test").query("x=1");
-    layer
-        .invalidate([&page.clone().vary("Accept-Language", "fr")])
-        .await
-        .unwrap();
-    assert_eq!(
-        status(app.clone()).await,
-        "HIT",
-        "purged another vary value"
-    );
+    let variants = [
+        ("/p?x=1", "a.test", "en"),
+        ("/p?utm_source=x", "a.test", "en-US,en;q=0.9"),
+        ("/p", "a.test", "fr"),
+    ];
+    let kept = [("/q", "a.test", "en"), ("/p", "b.test", "en")];
+    for (uri, host, lang) in variants.into_iter().chain(kept) {
+        assert_eq!(status(uri, host, lang).await, "MISS");
+        assert_eq!(status(uri, host, lang).await, "HIT");
+    }
 
     layer
-        .invalidate([&page.vary("Accept-Language", "en")])
+        .invalidate([&PageKey::new("/p", "a.test")])
         .await
         .unwrap();
-    assert_eq!(status(app.clone()).await, "MISS", "page still cached");
-    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    for (uri, host, lang) in variants {
+        assert_eq!(status(uri, host, lang).await, "MISS", "{uri} {lang}");
+        assert_eq!(status(uri, host, lang).await, "HIT", "{uri} {lang}");
+    }
+    for (uri, host, lang) in kept {
+        assert_eq!(status(uri, host, lang).await, "HIT", "{host}{uri}");
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 7);
+
+    // A second purge works the same.
+    layer
+        .invalidate([&PageKey::new("/p", "a.test").query("x=1")])
+        .await
+        .unwrap();
+    assert_eq!(status("/p", "a.test", "fr").await, "MISS");
 }
 
 /// Two nests of one cached router keep apart, and `invalidate` takes the full path.
@@ -1312,8 +1324,8 @@ async fn pages_use_the_bytes_api_only() {
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     assert_eq!(
         cache.text_calls.load(Ordering::SeqCst),
-        0,
-        "no String get/set"
+        2,
+        "the page's String get/set are only the generation reads"
     );
     assert_eq!(cache.bytes_calls.load(Ordering::SeqCst), 3, "get, set, get");
 }
@@ -1459,4 +1471,124 @@ async fn a_reflected_cache_token_never_gets_the_visitors_nonce() {
         );
         assert!(body.ends_with("__RUSTANGO_CACHED_NONCE__"), "{body}");
     }
+}
+
+/// Every value of the request's `vary_on` headers, joined, so the
+/// handler's view of a repeated header is the cache's too.
+fn echo_vary_app(cache: Arc<InMemoryCache>, name: &'static str) -> Router {
+    Router::new()
+        .route(
+            "/v",
+            get(move |headers: axum::http::HeaderMap| async move {
+                let all: Vec<String> = headers
+                    .get_all(name)
+                    .iter()
+                    .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+                    .collect();
+                format!("seen={}", all.join("|"))
+            }),
+        )
+        .layer(
+            CachePageLayer::new(cache)
+                .tenant_agnostic(true)
+                .cache_authenticated(true)
+                .vary_on([name]),
+        )
+}
+
+/// HTTP/2 sends each cookie in its own field: two users sharing the
+/// first cookie must not share a page.
+#[tokio::test]
+async fn vary_on_keys_every_value_of_a_repeated_header() {
+    let app = echo_vary_app(Arc::new(InMemoryCache::new()), "cookie");
+    let send = |second: &'static str| {
+        let req = Request::builder()
+            .uri("/v")
+            .header(header::COOKIE, "consent=yes")
+            .header(header::COOKIE, second)
+            .body(Body::empty())
+            .unwrap();
+        app.clone().oneshot(req)
+    };
+    let alice = send("session=alice").await.unwrap();
+    assert_eq!(
+        body_to_string(alice.into_body()).await,
+        "seen=consent=yes|session=alice"
+    );
+    let bob = send("session=bob").await.unwrap();
+    assert_eq!(
+        body_to_string(bob.into_body()).await,
+        "seen=consent=yes|session=bob",
+        "bob got alice's page"
+    );
+    // The same pair still hits.
+    let again = send("session=alice").await.unwrap();
+    assert_eq!(
+        again.headers().get("x-cache-status").unwrap(),
+        "HIT",
+        "a repeated header no longer caches"
+    );
+}
+
+/// A value that is not UTF-8 is not the same as no header at all.
+#[tokio::test]
+async fn a_non_utf8_vary_value_does_not_fill_the_missing_entry() {
+    let app = echo_vary_app(Arc::new(InMemoryCache::new()), "accept-language");
+    let odd = Request::builder()
+        .uri("/v")
+        .header(
+            header::ACCEPT_LANGUAGE,
+            axum::http::HeaderValue::from_bytes(b"\xffen").unwrap(),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let r = app.clone().oneshot(odd).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let plain = Request::builder().uri("/v").body(Body::empty()).unwrap();
+    let r = app.clone().oneshot(plain).await.unwrap();
+    assert_eq!(
+        body_to_string(r.into_body()).await,
+        "seen=",
+        "the header-less request got the non-UTF-8 page"
+    );
+}
+
+/// The purge counter outlives a backend's short default TTL, so a purged
+/// variant does not come back when that default runs out.
+#[tokio::test]
+async fn a_short_default_ttl_does_not_resurrect_purged_pages() {
+    use rustango::cache_page::PageKey;
+    let hits = Arc::new(AtomicU32::new(0));
+    let h = hits.clone();
+    let cache = Arc::new(InMemoryCache::with_default_ttl(Duration::from_millis(200)));
+    let layer = CachePageLayer::new(cache)
+        .tenant_agnostic(true)
+        .timeout(Duration::from_secs(60));
+    let app: Router = Router::new()
+        .route(
+            "/p",
+            get(move || {
+                let n = h.fetch_add(1, Ordering::SeqCst);
+                async move { format!("v{n}") }
+            }),
+        )
+        .layer(layer.clone());
+    let fetch = || {
+        let app = app.clone();
+        async move {
+            let req = Request::get("/p?x=1")
+                .header(header::HOST, "a.test")
+                .body(Body::empty())
+                .unwrap();
+            body_to_string(app.oneshot(req).await.unwrap().into_body()).await
+        }
+    };
+    assert_eq!(fetch().await, "v0");
+    layer
+        .invalidate([&PageKey::new("/p", "a.test")])
+        .await
+        .unwrap();
+    assert_eq!(fetch().await, "v1");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(fetch().await, "v1", "the purged v0 page came back");
 }

@@ -1,258 +1,327 @@
-# Tenant databases on a saved server
+# Tenant-Datenbanken auf einem gespeicherten Server
 
-A database-mode tenant can bring its own database URL, or rustango can make
-the database for it. This page is the second path, end to end: save a server,
-test it, create tenants on it, rotate their passwords, purge them.
+Ein Tenant im Datenbankmodus kann eine eigene Datenbank-URL mitbringen, oder
+rustango legt die Datenbank für ihn an. Diese Seite zeigt den zweiten Weg von
+Anfang bis Ende: Server speichern, testen, Tenants darauf anlegen, ihre
+Passwörter rotieren, sie löschen.
 
-rustango makes each tenant a database named as the slug and a login of its
-own with a random password, granted that database only. It records both in
-`rustango_tenant_databases`. Only a recorded database is ever dropped or has
-its password changed by rustango.
+rustango legt für jeden Tenant eine Datenbank mit dem Slug als Namen an und
+einen eigenen Login mit Zufallspasswort, der nur auf diese Datenbank Rechte
+hat. Beides wird in `rustango_tenant_databases` festgehalten. Nur eine
+festgehaltene Datenbank wird von rustango je gelöscht oder bekommt ein neues
+Passwort.
 
-## Table of contents
+## Inhaltsverzeichnis
 
-- [Before you start](#before-you-start)
-- [1. Set the secret key](#1-set-the-secret-key)
-- [2. Save the server](#2-save-the-server)
-- [3. Test it](#3-test-it)
-- [4. Create a tenant](#4-create-a-tenant)
-- [5. Rotate a tenant's password](#5-rotate-a-tenants-password)
-- [6. Purge a tenant](#6-purge-a-tenant)
-- [The secret key: backup and rotation](#the-secret-key-backup-and-rotation)
-- [Backup and restore](#backup-and-restore)
-- [PostgreSQL notes](#postgresql-notes)
-- [MySQL notes](#mysql-notes)
-- [Local development with Docker](#local-development-with-docker)
+- [Bevor du anfängst](#bevor-du-anfängst)
+- [Rechte](#rechte)
+- [1. Den geheimen Schlüssel setzen](#1-den-geheimen-schlüssel-setzen)
+- [2. Den Server speichern](#2-den-server-speichern)
+- [3. Ihn testen](#3-ihn-testen)
+- [4. Einen Tenant anlegen](#4-einen-tenant-anlegen)
+- [5. Das Passwort eines Tenants rotieren](#5-das-passwort-eines-tenants-rotieren)
+- [6. Einen Tenant löschen](#6-einen-tenant-löschen)
+- [Der geheime Schlüssel: Backup und Rotation](#der-geheime-schlüssel-backup-und-rotation)
+- [Backup und Wiederherstellung](#backup-und-wiederherstellung)
+- [Hinweise zu PostgreSQL](#hinweise-zu-postgresql)
+- [Hinweise zu MySQL](#hinweise-zu-mysql)
+- [Lokale Entwicklung mit Docker](#lokale-entwicklung-mit-docker)
 
-## Before you start
+## Bevor du anfängst
 
-- The server runs the registry's backend. A Postgres registry makes Postgres
-  tenants, and so on.
-- **PostgreSQL 15 or later.** Before 15 every login may create tables in the
-  `public` schema of every database, the registry's included. `test-db-server`
-  refuses older servers.
-- The admin login needs these rights:
+- Der Server läuft mit dem Backend der Registry. Eine Postgres-Registry legt
+  Postgres-Tenants an, und so weiter.
+- **PostgreSQL 15 oder neuer.** Vor 15 darf jeder Login im Schema `public`
+  jeder Datenbank Tabellen anlegen, auch in der der Registry.
+  `test-db-server` lehnt ältere Server ab.
+- Der Admin-Login braucht diese Rechte:
 
-| Backend | Rights |
+| Backend | Rechte |
 |---|---|
-| PostgreSQL | `CREATEDB` and `CREATEROLE`, or superuser |
-| MySQL / MariaDB | global `CREATE`, `DROP`, `CREATE USER`, and every database privilege `WITH GRANT OPTION` |
-| SQLite | a writable directory; tenants are `<dir>/<slug>.db` |
+| PostgreSQL | `CREATEDB` und `CREATEROLE`, oder Superuser |
+| MySQL / MariaDB | globales `CREATE`, `DROP`, `CREATE USER` und jedes Datenbankrecht `WITH GRANT OPTION` |
+| SQLite | ein beschreibbares Verzeichnis; Tenants sind `<dir>/<slug>.db` |
 
-## 1. Set the secret key
+Rechte aus MySQL-Rollen zählen, wenn die Rolle standardmäßig aktiv ist
+(`SET DEFAULT ROLE`). Das vollständige Bild steht unter [Rechte](#rechte).
 
-Server passwords and new tenant URLs are stored sealed (`enc:v1:`), with a key
-derived from `RUSTANGO_SECRET_KEY`. Use 32 or more random bytes:
+## Rechte
+
+Jeder Weg, einen Tenant anzulegen, nutzt einen anderen Login und braucht
+andere Rechte. **Test connection**, `test-db-server` und das Anlegen selbst
+prüfen dieselbe Liste, nennen, was fehlt, und geben die Anweisungen aus, die
+es beheben. Ein Anlegen wird abgelehnt, bevor irgendetwas entsteht.
+
+| Option | Wo die Daten liegen | Genutzter Login | Eigener Login des Tenants | Nötige Rechte |
+|---|---|---|---|---|
+| Datenbank, neu auf einem gespeicherten Server | eine neue Datenbank mit dem Slug als Namen | der Admin-Login des Servers, einmalig | ja | Datenbanken anlegen, Logins anlegen, Rechte vergeben |
+| Datenbank, vorhandene URL | die Datenbank in der URL | der Login in der URL | der der URL | keine: nichts wird angelegt; der Login muss Tabellen anlegen dürfen |
+| Datenbank auf dem Server der Registry | eine vorhandene Datenbank dort | der der Registry (`DATABASE_URL`), geteilt | nein, nicht isoliert | keine: nichts wird angelegt |
+| Schema (nur PostgreSQL) | ein Schema in der Registry-Datenbank | der der Registry (`DATABASE_URL`), geteilt | nein | `CREATE` auf der Registry-Datenbank |
+
+Um einem Login die Rechte zu geben, führe als Admin aus. MySQL / MariaDB, als
+`root`:
+
+```sql
+GRANT CREATE, DROP, CREATE USER ON *.* TO 'rustango'@'%';
+GRANT ALL PRIVILEGES ON *.* TO 'rustango'@'%' WITH GRANT OPTION;
+```
+
+PostgreSQL, als Superuser:
+
+```sql
+ALTER ROLE rustango CREATEDB CREATEROLE;
+-- schema mode: the registry's login
+GRANT CREATE ON DATABASE app TO rustango;
+```
+
+Der MySQL-Login `rustango` aus der generierten docker-compose hat nur Rechte
+auf seine eigene Datenbank: Speichere den Server stattdessen mit `root` als
+Admin-Login. Sagt der Server nicht, was ein Login darf, meldet die Prüfung
+„unknown" und lässt das Anlegen trotzdem versuchen. Oder überspringe all das:
+Nutze eine vorhandene Datenbank-URL.
+
+## 1. Den geheimen Schlüssel setzen
+
+Server-Passwörter und neue Tenant-URLs werden versiegelt gespeichert
+(`enc:v1:`), mit einem Schlüssel, der aus `RUSTANGO_SECRET_KEY` abgeleitet
+wird. Nimm 32 oder mehr Zufallsbytes:
 
 ```bash
 export RUSTANGO_SECRET_KEY="$(openssl rand -base64 48)"
 ```
 
-Without a key, or with a blank one, a server password is refused and a tenant
-URL is stored unsealed with a warning (refused under
-`RUSTANGO_REQUIRE_SEALED_SECRETS=1`). The console's database server pages and
-its **New tenant** page show a banner while the key is missing or short.
+Ohne Schlüssel oder mit einem leeren wird ein Server-Passwort abgelehnt und
+eine Tenant-URL unversiegelt mit einer Warnung gespeichert (abgelehnt unter
+`RUSTANGO_REQUIRE_SEALED_SECRETS=1`). Die Datenbankserver-Seiten der Konsole
+und ihre Seite **New tenant** zeigen ein Banner, solange der Schlüssel fehlt
+oder zu kurz ist.
 
-## 2. Save the server
+## 2. Den Server speichern
 
-Console: **Organizations → Database servers**. CLI:
+Konsole: **Organizations → Database servers**. CLI:
 
 ```bash
 cargo run -- add-db-server main --host db.internal --user admin --tls require
 ```
 
-The password is asked at a hidden prompt and stored sealed. TLS defaults to
-`require`. See [manage.md](manage.md) for every flag.
+Das Passwort wird verdeckt abgefragt und versiegelt gespeichert. TLS ist
+standardmäßig `require`. Alle Flags stehen in [manage.md](manage.md).
 
-## 3. Test it
+## 3. Ihn testen
 
 ```bash
 cargo run -- test-db-server main
 ```
 
-It logs in and reports the server version and whether the admin may create
-databases, create logins and grant rights. On the console's **New tenant**
-page, **Test connection** with a slug also runs every check a create runs
-before any DDL: slug free, routing free, and no database or login of that
-name.
+Der Befehl meldet sich an und gibt die Server-Version aus und, je eine Zeile,
+ob der Admin Datenbanken anlegen, Logins anlegen und Rechte vergeben darf.
+Fehlt eines, nennt er es und gibt die Anweisungen aus, die es beheben (siehe
+[Rechte](#rechte)). Auf der Konsolenseite **New tenant** führt **Test
+connection** mit einem Slug außerdem jede Prüfung aus, die ein Anlegen vor
+jeder DDL ausführt: Slug frei, Routing frei, und keine Datenbank und kein
+Login mit diesem Namen.
 
-## 4. Create a tenant
+## 4. Einen Tenant anlegen
 
-Console: **Organizations → New tenant**, database mode, **Create a new
+Konsole: **Organizations → New tenant**, Datenbankmodus, **Create a new
 database on a saved server**. CLI:
 
 ```bash
 cargo run -- create-tenant acme --server main
 ```
 
-The run creates the database, the login and the grant, signs in as the new
-login, registers the tenant, runs its migrations and activates it. A failure
-after the database exists drops what the run made. The tenant's URL holds the
-new login's password and is stored sealed.
+Der Lauf legt Datenbank, Login und Rechtevergabe an, meldet sich als neuer
+Login an, registriert den Tenant, führt seine Migrationen aus und aktiviert
+ihn. Ein Fehler, nachdem die Datenbank existiert, löscht, was der Lauf
+angelegt hat. Die URL des Tenants enthält das Passwort des neuen Logins und
+wird versiegelt gespeichert.
 
-To give the tenant its first admin, fill in the admin email on the form
-(username optional; it defaults to the email), or on the CLI:
+Um dem Tenant seinen ersten Admin zu geben, trag im Formular die Admin-E-Mail
+ein (Benutzername optional; Standard ist die E-Mail), oder per CLI:
 
 ```bash
 cargo run -- create-tenant acme --server main --admin-email admin@example.com
 ```
 
-The run creates a superuser with no usable password, before the tenant goes
-live. The admin sets their own password through a link that works once, for
-72 hours, on this tenant only. With `Builder::first_admin_mailer` it is mailed
-to them; otherwise the console shows it **once** after you submit, and the CLI
-prints it. Copy it then. A lost or expired link:
+Der Lauf legt einen Superuser ohne nutzbares Passwort an, bevor der Tenant
+live geht. Der Admin setzt sein Passwort selbst über einen Link, der einmal
+funktioniert, 72 Stunden lang, nur für diesen Tenant. Mit
+`Builder::first_admin_mailer` wird er ihm gemailt; sonst zeigt die Konsole
+ihn nach dem Absenden **einmal** an, und die CLI gibt ihn aus. Kopiere ihn
+dann. Ein verlorener oder abgelaufener Link:
 `cargo run -- set-password-link acme admin@example.com`. Details:
-[First admin](operator-console.md).
+[Erster Admin](operator-console.md#erster-admin).
 
-## 5. Rotate a tenant's password
+## 5. Das Passwort eines Tenants rotieren
 
-Console: the tenant's page, **Rotate database password**. CLI:
+Konsole: die Seite des Tenants, **Rotate database password**. CLI:
 
 ```bash
 cargo run -- rotate-tenant-password acme
 ```
 
-Both run as a recorded run with these steps:
+Beide laufen als festgehaltener Lauf mit diesen Schritten:
 
-1. `check`: the tenant has a record, its URL still names that database and
-   login, the URL is stored literal or sealed (an `env://` or vault reference
-   is refused: change the password in that store), and the admin may alter
-   the login.
-2. `alter_password`: a new random password on the server.
-3. `store_password`: the new URL, sealed, is written only while the stored
-   URL is still the one read (compare-and-set). If that fails, `revert` puts
-   the old password back, but only while the stored URL still holds it;
-   otherwise run `rotate-tenant-password` again.
-4. `invalidate_pools`: this process drops its pools for the tenant.
-5. `discard_old_password`: see the window below.
+1. `check`: Der Tenant hat einen Eintrag, seine URL nennt noch diese
+   Datenbank und diesen Login, die URL ist im Klartext oder versiegelt
+   gespeichert (eine `env://`- oder Vault-Referenz wird abgelehnt: Ändere das
+   Passwort in diesem Speicher), und der Admin darf den Login ändern.
+2. `alter_password`: ein neues Zufallspasswort auf dem Server.
+3. `store_password`: Die neue URL wird versiegelt nur geschrieben, solange die
+   gespeicherte URL noch die gelesene ist (Compare-and-Set). Scheitert das,
+   setzt `revert` das alte Passwort zurück, aber nur, solange die gespeicherte
+   URL es noch enthält; sonst führe `rotate-tenant-password` erneut aus.
+4. `invalidate_pools`: Dieser Prozess verwirft seine Pools für den Tenant.
+5. `discard_old_password`: siehe das Zeitfenster unten.
 
-**The window.** Other pods notice the new URL on their next `rustango_orgs`
-fingerprint poll (`RUSTANGO_HOST_GEN_CHECK_SECS`, default 5 s). Until then
-their *new* connections use the old password. Open connections are never cut.
+**Das Zeitfenster.** Andere Pods bemerken die neue URL beim nächsten
+Fingerprint-Poll von `rustango_orgs` (`RUSTANGO_HOST_GEN_CHECK_SECS`,
+Standard 5 s). Bis dahin nutzen ihre *neuen* Verbindungen das alte Passwort.
+Offene Verbindungen werden nie getrennt.
 
-- On MySQL 8.0.14 and later the old password is kept valid with
-  `RETAIN CURRENT PASSWORD` for two poll intervals, then dropped with
-  `DISCARD OLD PASSWORD`. No connection fails. The admin's global
-  `CREATE USER` is enough for both. If the process stops during the wait,
-  the old password stays valid until the next rotation or purge.
-- On PostgreSQL and MariaDB there are no dual passwords: the old one stops at
-  once, so other pods may fail to open new connections for up to one poll
-  interval.
+- Auf MySQL 8.0.14 und neuer bleibt das alte Passwort mit
+  `RETAIN CURRENT PASSWORD` für zwei Poll-Intervalle gültig und wird dann mit
+  `DISCARD OLD PASSWORD` verworfen. Keine Verbindung schlägt fehl. Das
+  globale `CREATE USER` des Admins reicht für beides. Stoppt der Prozess
+  während des Wartens, bleibt das alte Passwort bis zur nächsten Rotation
+  oder Löschung gültig.
+- Auf PostgreSQL und MariaDB gibt es keine doppelten Passwörter: Das alte
+  hört sofort auf zu gelten, sodass andere Pods bis zu ein Poll-Intervall lang
+  keine neuen Verbindungen öffnen können.
 
-A SQLite tenant has no password. A database rustango did not make is refused.
+Ein SQLite-Tenant hat kein Passwort. Eine Datenbank, die rustango nicht
+angelegt hat, wird abgelehnt.
 
-## 6. Purge a tenant
+## 6. Einen Tenant löschen
 
-Console: the tenant's page, **Purge** (type the slug, tick **drop the
-database**). CLI:
+Konsole: die Seite des Tenants, **Purge** (Slug eintippen, **drop the
+database** ankreuzen). CLI:
 
 ```bash
 cargo run -- purge-tenant acme --confirm acme --purge-database
 ```
 
-With a provisioning console the purge is a recorded run, followed live on its
-run page; the CLI prints the same steps. Every refusal comes first, in
-`check`, so a refused purge changes nothing:
+Mit einer Provisioning-Konsole ist das Löschen ein festgehaltener Lauf, den
+du live auf seiner Lauf-Seite verfolgst; die CLI gibt dieselben Schritte aus.
+Jede Ablehnung kommt zuerst, in `check`, sodass ein abgelehntes Löschen
+nichts ändert:
 
-- the tenant's URL no longer names the recorded database or login, for
-  example after `edit-tenant --database-url` or `migrate-tenant-storage`.
-  Nothing is dropped: put the URL back, or drop that database by hand and
-  delete its `rustango_tenant_databases` row;
-- another tenant's URL names the same database, or can't be read to rule
-  it out (on MySQL and SQLite each one is checked by the live server and
-  file, so an alias counts), or it is the registry's;
-- another purge or password change is running for the tenant;
-- the admin does not own the database (Postgres: it was made by another
-  admin), or may not drop the login (see
-  [PostgreSQL notes](#postgresql-notes)); on MySQL it needs global `DROP`
-  and `CREATE USER`;
-- a session not opened by this tenant's pools is open in the database (an
-  operator, a backup).
+- Die URL des Tenants nennt die festgehaltene Datenbank oder den Login nicht
+  mehr, etwa nach `edit-tenant --database-url` oder
+  `migrate-tenant-storage`. Nichts wird gelöscht: Setz die URL zurück, oder
+  lösche diese Datenbank von Hand und entferne ihre Zeile in
+  `rustango_tenant_databases`;
+- die URL eines anderen Tenants nennt dieselbe Datenbank oder lässt sich zum
+  Ausschließen nicht lesen (auf MySQL und SQLite wird jede gegen den laufenden
+  Server und die Datei geprüft, ein Alias zählt also), oder es ist die der
+  Registry;
+- ein anderes Löschen oder eine Passwortänderung läuft für den Tenant;
+- der Admin besitzt die Datenbank nicht (Postgres: ein anderer Admin hat sie
+  angelegt) oder darf den Login nicht löschen (siehe
+  [Hinweise zu PostgreSQL](#hinweise-zu-postgresql)); auf MySQL braucht er
+  globales `DROP` und `CREATE USER`;
+- eine Sitzung, die nicht von den Pools dieses Tenants geöffnet wurde, ist in
+  der Datenbank offen (ein Operator, ein Backup).
 
-Then: `deactivate`, `purge_media`, `drop_database` (ending this tenant's
-own sessions on every pod first), `drop_login`, `remove_org`,
-`delete_record`. A retry after a failed step skips what is already gone. SQLite deletes the tenant's file and its `-wal`, `-shm` and
-`-journal` files.
+Dann: `deactivate`, `purge_media`, `drop_database` (vorher werden die eigenen
+Sitzungen dieses Tenants auf jedem Pod beendet), `drop_login`, `remove_org`,
+`delete_record`. Ein erneuter Versuch nach einem gescheiterten Schritt
+überspringt, was schon weg ist. SQLite löscht die Datei des Tenants und ihre
+Dateien `-wal`, `-shm` und `-journal`.
 
-A database the operator brought has no record and keeps the old behaviour:
-on Postgres it is dropped through its own URL; elsewhere it is left in place
-and the purge says so.
+Eine Datenbank, die der Operator mitgebracht hat, hat keinen Eintrag und
+behält das alte Verhalten: Auf Postgres wird sie über ihre eigene URL
+gelöscht; anderswo bleibt sie stehen, und das Löschen sagt das.
 
-## The secret key: backup and rotation
+## Der geheime Schlüssel: Backup und Rotation
 
-**Back up `RUSTANGO_SECRET_KEY` with the registry backup.** Without it no
-sealed tenant URL or server password opens, and every tenant on a saved
-server is unreachable until each URL is entered again.
+**Sichere `RUSTANGO_SECRET_KEY` zusammen mit dem Registry-Backup.** Ohne ihn
+öffnet sich keine versiegelte Tenant-URL und kein Server-Passwort, und jeder
+Tenant auf einem gespeicherten Server ist unerreichbar, bis jede URL neu
+eingegeben wurde.
 
-To change the key:
+Um den Schlüssel zu wechseln:
 
-1. Set `RUSTANGO_SECRET_KEY_PREVIOUS` to the old key and
-   `RUSTANGO_SECRET_KEY` to the new one, on every process, and restart. The
-   old key still opens what it sealed.
-2. `cargo run -- reseal-tenant-secrets` lists what would change.
-3. `cargo run -- reseal-tenant-secrets --apply` re-seals tenant URLs, server
-   passwords and SSO client secrets with the new key.
-4. Remove `RUSTANGO_SECRET_KEY_PREVIOUS` and restart.
+1. Setze `RUSTANGO_SECRET_KEY_PREVIOUS` auf den alten Schlüssel und
+   `RUSTANGO_SECRET_KEY` auf den neuen, in jedem Prozess, und starte neu. Der
+   alte Schlüssel öffnet weiterhin, was er versiegelt hat.
+2. `cargo run -- reseal-tenant-secrets` listet, was sich ändern würde.
+3. `cargo run -- reseal-tenant-secrets --apply` versiegelt Tenant-URLs,
+   Server-Passwörter und SSO-Client-Secrets neu mit dem neuen Schlüssel.
+4. Entferne `RUSTANGO_SECRET_KEY_PREVIOUS` und starte neu.
 
-Values sealed under a blank key before blank keys were refused still open
-when `RUSTANGO_SECRET_KEY_PREVIOUS` is set and empty; re-seal them the same way.
+Werte, die mit einem leeren Schlüssel versiegelt wurden, bevor leere
+Schlüssel abgelehnt wurden, öffnen sich weiterhin, wenn
+`RUSTANGO_SECRET_KEY_PREVIOUS` gesetzt und leer ist; versiegle sie auf
+dieselbe Weise neu.
 
-## Backup and restore
+## Backup und Wiederherstellung
 
-A dump of a tenant database does not hold its login: Postgres roles and MySQL
-users live outside any one database. To restore a tenant on another server:
+Ein Dump einer Tenant-Datenbank enthält ihren Login nicht: Postgres-Rollen
+und MySQL-Benutzer liegen außerhalb jeder einzelnen Datenbank. Um einen
+Tenant auf einem anderen Server wiederherzustellen:
 
-- Postgres: restore the roles first (`pg_dumpall --roles-only`), or create the
-  tenant's login, restore the database, grant it, and run
-  `rotate-tenant-password` so the stored URL and the login agree.
-- MySQL: create the user and its grant, restore the database, then
-  `rotate-tenant-password`.
+- Postgres: Stelle zuerst die Rollen wieder her (`pg_dumpall --roles-only`),
+  oder lege den Login des Tenants an, stelle die Datenbank wieder her, vergib
+  die Rechte und führe `rotate-tenant-password` aus, damit gespeicherte URL
+  und Login übereinstimmen.
+- MySQL: Lege den Benutzer und seine Rechte an, stelle die Datenbank wieder
+  her, dann `rotate-tenant-password`.
 
-Restore the registry together with its `rustango_tenant_databases` rows, and
-point the saved server at the new host with `edit-db-server`.
+Stelle die Registry zusammen mit ihren Zeilen in `rustango_tenant_databases`
+wieder her und richte den gespeicherten Server mit `edit-db-server` auf den
+neuen Host.
 
-## PostgreSQL notes
+## Hinweise zu PostgreSQL
 
-- **New databases copy `template1`.** Its encoding, locale and any objects or
-  extensions in it reach every tenant. Keep `template1` in `UTF8`.
-- **Extensions.** The tenant login has every right on its database but is not
-  a superuser. It can `CREATE EXTENSION` for *trusted* extensions (`pgcrypto`,
-  `citext`, `hstore`, `pg_trgm`, `uuid-ossp`, `unaccent`, `ltree` and others
-  marked trusted). An untrusted one, such as PostGIS, must be installed by a
-  superuser: in `template1` before the tenant is created, or in the tenant's
-  database after.
-- **Changing the admin login (PostgreSQL 16+).** A `CREATEROLE` login may
-  alter or drop only roles it holds `ADMIN OPTION` on, and only the admin that
-  created a tenant login holds it. After you switch a server to another admin,
-  rotation and purge of older tenants are refused with the `GRANT … WITH ADMIN
-  OPTION` to run. A purge also needs the admin to own the database (or be a
-  superuser).
-- **Ending sessions.** Tenant pools connect with
-  `application_name=rustango-tenant:<id>`. A purge ends those sessions, which
-  needs a superuser, membership in the tenant's role, or `pg_signal_backend`;
-  without it the purge is refused while such sessions are open.
+- **Neue Datenbanken kopieren `template1`.** Dessen Encoding, Locale und alle
+  Objekte oder Extensions darin erreichen jeden Tenant. Halte `template1` in
+  `UTF8`.
+- **Extensions.** Der Tenant-Login hat alle Rechte auf seiner Datenbank, ist
+  aber kein Superuser. Er kann `CREATE EXTENSION` für *vertrauenswürdige*
+  Extensions ausführen (`pgcrypto`, `citext`, `hstore`, `pg_trgm`,
+  `uuid-ossp`, `unaccent`, `ltree` und andere als trusted markierte). Eine
+  nicht vertrauenswürdige, etwa PostGIS, muss ein Superuser installieren: in
+  `template1`, bevor der Tenant angelegt wird, oder danach in der Datenbank
+  des Tenants.
+- **Den Admin-Login wechseln (PostgreSQL 16+).** Ein `CREATEROLE`-Login darf
+  nur Rollen ändern oder löschen, auf die er `ADMIN OPTION` hat, und nur der
+  Admin, der einen Tenant-Login angelegt hat, hat sie. Nachdem du einen
+  Server auf einen anderen Admin umgestellt hast, werden Rotation und Löschen
+  älterer Tenants abgelehnt, mit dem auszuführenden `GRANT … WITH ADMIN
+  OPTION`. Ein Löschen braucht außerdem, dass der Admin die Datenbank besitzt
+  (oder Superuser ist).
+- **Sitzungen beenden.** Tenant-Pools verbinden sich mit
+  `application_name=rustango-tenant:<id>`. Ein Löschen beendet diese
+  Sitzungen, wofür es einen Superuser, die Mitgliedschaft in der Rolle des
+  Tenants oder `pg_signal_backend` braucht; ohne das wird das Löschen
+  abgelehnt, solange solche Sitzungen offen sind.
 
-## MySQL notes
+## Hinweise zu MySQL
 
-- The tenant login is `'<login>'@'%'`: it may connect from any host the
-  server's network allows. Limit it with the network or the server's
-  `bind-address`; per-host logins are not offered yet.
-- Tenant databases are `utf8mb4` with the registry database's collation.
-- Dual passwords need MySQL 8.0.14+; MariaDB rotates without them.
+- Der Tenant-Login ist `'<login>'@'%'`: Er darf sich von jedem Host verbinden,
+  den das Netzwerk des Servers zulässt. Begrenze ihn über das Netzwerk oder
+  die `bind-address` des Servers; Logins pro Host werden noch nicht angeboten.
+- Tenant-Datenbanken sind `utf8mb4` mit der Collation der Registry-Datenbank.
+- Doppelte Passwörter brauchen MySQL 8.0.14+; MariaDB rotiert ohne sie.
 
-## Local development with Docker
+## Lokale Entwicklung mit Docker
 
-Local database containers usually have no TLS, so save the server with
-`--tls disable`. On MySQL the `root` login has every right the admin needs.
+Das Standard-Image `postgres` hat kein TLS, speichere es also mit
+`--tls disable`. `mysql:8` liefert TLS mit einem selbstsignierten Zertifikat:
+`--tls require` funktioniert, `verify-ca` braucht dieses Zertifikat. Auf
+MySQL nimm `root`: Dem Login `rustango` aus der generierten docker-compose
+fehlen die Rechte (siehe [Rechte](#rechte)).
 
 ```bash
 docker run -d --name pg -e POSTGRES_PASSWORD=pw -p 5432:5432 postgres:16
 cargo run -- add-db-server local --host 127.0.0.1 --port 5432 --user postgres --tls disable
 
 docker run -d --name my -e MYSQL_ROOT_PASSWORD=pw -p 3306:3306 mysql:8
-cargo run -- add-db-server local --host 127.0.0.1 --port 3306 --user root --tls disable
+cargo run -- add-db-server local --host 127.0.0.1 --port 3306 --user root --tls require
 ```
 
-Never use `--tls disable` for a server reached over a network you do not
-control: the admin login can drop every database on it.
+Nutze `--tls disable` nie für einen Server, den du über ein Netzwerk
+erreichst, das du nicht kontrollierst: Der Admin-Login kann jede Datenbank
+darauf löschen.

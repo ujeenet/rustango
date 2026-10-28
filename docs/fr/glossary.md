@@ -15,7 +15,6 @@ de haut en bas ; c'est une introduction de cinq minutes. Tout le reste est fait 
 - [Les données et la base de données](#les-données-et-la-base-de-données)
 - [Multi-tenance (multi-tenancy)](#multi-tenance-multi-tenancy) — seulement si vous servez plusieurs clients depuis un seul déploiement
 - [Quelques mots de Rust](#quelques-mots-de-rust) — pour que les blocs de code ne fassent pas peur
-- [Frameworks auxquels nous comparons](#frameworks-auxquels-nous-comparons)
 
 ---
 
@@ -61,6 +60,7 @@ requêtes comme les réponses sont généralement en JSON.
 | `201` | Created — votre nouvelle chose a été enregistrée |
 | `204` | Done — rien à renvoyer (p. ex. après une suppression) |
 | `400` | Bad request — vous avez envoyé quelque chose d'invalide (le corps dit quoi) |
+| `422` | Non traitable — les données n'ont pas passé la validation (le corps nomme le champ) |
 | `401` / `403` | Non connecté / non autorisé |
 | `404` | Not found (introuvable) |
 | `429` | Too many requests — ralentissez |
@@ -76,7 +76,7 @@ utilisée pour filtrer, rechercher, trier ou paginer les résultats — p. ex.
 
 **Pagination** — découper une longue liste de résultats en pages pour qu'une réponse ne soit pas
 énorme. L'**enveloppe** est l'emballage autour de la page qui vous indique aussi les
-totaux — p. ex. `{"count": 137, "page": 2, "results": [ … ]}`. Voir
+totaux — p. ex. `{"count": 137, "page": 2, "page_size": 20, "last_page": 7, "results": [ … ]}`. Voir
 [Pagination](viewsets.md#pagination).
 
 **`curl`** — un outil en ligne de commande pour envoyer des requêtes d'API à la main. Les
@@ -111,8 +111,8 @@ d'un ViewSet : transforme un modèle en **pages** HTML — une page de liste, un
 page de détail, et des formulaires de création/édition/suppression — rendues via des templates Tera,
 au lieu de JSON. La *vue HTML*. Voir [Vues HTML](html-views.md).
 
-**Template (gabarit)** — un fichier avec des espaces réservés (Rustango utilise [Tera](https://keats.github.io/tera/),
-très semblable à Jinja) que le serveur remplit de données pour produire
+**Template (gabarit)** — un fichier avec des espaces réservés (Rustango utilise [Tera](https://keats.github.io/tera/))
+que le serveur remplit de données pour produire
 une page HTML. `{{ post.title }}` insère une valeur ; `{% for … %}` fait une boucle.
 
 **Router / montage (mount)** — le router associe les URL entrantes au code qui les
@@ -124,10 +124,20 @@ handler et après lui — pour des préoccupations transversales comme la journa
 en-têtes de sécurité ou le CSRF. « Layer » est le mot de Rustango pour une pièce de
 middleware. Voir le [guide du Middleware](middleware.md).
 
-**Pool (ou executor)** — la connexion à la base de données que votre code utilise pour lire et
-écrire. Rustango vous demande de passer le pool explicitement à chaque appel à la base de données
-(plutôt que de le cacher dans un global), pour qu'il soit toujours clair ce qui touche à la
-base de données. Vous verrez `&pool` comme dernier argument des appels de l'ORM.
+**Pool** — le handle de base de données que votre code utilise pour lire et écrire.
+Rustango vous demande de le passer explicitement à chaque appel à la base de données
+(plutôt que de le cacher dans un global), pour qu'il soit toujours clair ce qui touche à
+la base de données. Vous verrez `&pool` comme dernier argument des appels de l'ORM.
+`rustango::sql::Pool` est un enum sur les trois backends, et c'est ce que prennent les
+méthodes courantes.
+
+**Executor** — *pas* un synonyme de pool. Un executor est une seule connexion ou une
+transaction ouverte : ce sur quoi une instruction s'exécute réellement. Les méthodes
+qui finissent par `_on` en prennent un, et c'est ainsi que vous placez plusieurs
+instructions dans une même transaction. `fetch_on`, `first_on`, `count_on` et
+`exists_on` acceptent n'importe quel executor sur les trois backends ; le reste de la
+famille `_on` reste réservé à Postgres. La distinction décide des méthodes qui existent
+dans votre build, donc [api-conventions](api-conventions.md#fonctions) détaille la règle.
 
 **QuerySet** — une requête de base de données que vous construisez étape par étape en Rust
 (`Post::objects().filter(...).order_by(...)`) avant de l'exécuter. Elle est paresseuse (lazy) :
@@ -224,13 +234,3 @@ base de données est `async`.
 exceptions. Un `Result` est « un succès *ou* une erreur » ; une `Option` est « une valeur *ou*
 rien ». Le `?` que vous voyez après certains appels signifie « si cela a échoué, arrête-toi et
 renvoie l'erreur ».
-
----
-
-## Frameworks auxquels nous comparons
-
-Cette documentation dit parfois « comme X » pour aider les lecteurs venant d'autres
-écosystèmes. Les comparaisons sont un bonus — vous n'en avez jamais besoin pour suivre un guide.
-
-**Laravel / Rails** — des frameworks web PHP et Ruby populaires, mentionnés pour la même
-raison « si vous avez utilisé ceci, cela vous semblera familier ».

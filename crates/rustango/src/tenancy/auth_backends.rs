@@ -363,7 +363,7 @@ impl AuthBackend for ModelBackend {
 ///     .fetch(&pool)
 ///     .await?;
 /// ```
-#[derive(crate::Model, Debug, Clone)]
+#[derive(crate::Model, Clone)]
 #[rustango(
     table = "rustango_api_keys",
     admin(
@@ -405,6 +405,8 @@ pub struct ApiKey {
     #[rustango(auto_now_add)]
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
+
+redacted_debug!(ApiKey { id, user_id, key_prefix, label, expires_at, created_at; key_hash });
 
 // A key is minted by `create-api-key`, which shows the secret once; an admin
 // form could only store a row nobody can use (#1763).
@@ -634,12 +636,14 @@ fn raw_secret_api_key_mac(key: &crate::session::SessionSecret, secret: &str) -> 
 
 fn tagged_mac(scheme: &str, key: &crate::session::SessionSecret, secret: &str) -> String {
     let msg = [API_KEY_MAC_TAG, secret.as_bytes()].concat();
-    format!("{scheme}{}", to_hex(&crate::session::sign(key, &msg)))
+    format!(
+        "{scheme}{}",
+        crate::hex::hex_encode(&crate::session::sign(key, &msg))
+    )
 }
 
 fn mac_eq(stored: &str, mac: &str) -> bool {
-    use subtle::ConstantTimeEq as _;
-    stored.len() == mac.len() && bool::from(stored.as_bytes().ct_eq(mac.as_bytes()))
+    crate::crypto::constant_time_compare(stored.as_bytes(), mac.as_bytes())
 }
 
 /// Swap a verified argon2 hash for the MAC. A failure only costs one more
@@ -693,10 +697,10 @@ pub(crate) async fn create_api_key_signed(
     // process.
     let mut prefix_bytes = [0u8; 4];
     OsRng.fill_bytes(&mut prefix_bytes);
-    let prefix = to_hex(&prefix_bytes);
+    let prefix = crate::hex::hex_encode(&prefix_bytes);
     let mut secret_bytes = [0u8; 16];
     OsRng.fill_bytes(&mut secret_bytes);
-    let secret = to_hex(&secret_bytes);
+    let secret = crate::hex::hex_encode(&secret_bytes);
 
     let hash = api_key_mac(mac_key, &secret);
 
@@ -744,6 +748,8 @@ pub struct JwtBackend {
     jti_store: Option<std::sync::Arc<dyn crate::jti_store::JtiStore>>,
     /// Set once this backend has warned that revocation is not checked.
     warned_unchecked: std::sync::atomic::AtomicBool,
+    /// Set once this backend has warned about a token with no `iat`.
+    warned_legacy: std::sync::atomic::AtomicBool,
 }
 
 impl JwtBackend {
@@ -769,6 +775,7 @@ impl JwtBackend {
             ttl_secs: 3600,
             jti_store: None,
             warned_unchecked: std::sync::atomic::AtomicBool::new(false),
+            warned_legacy: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -806,6 +813,18 @@ impl JwtBackend {
         }
     }
 
+    /// A token from before `iat` was stamped: it cannot be tied to a session.
+    fn warn_legacy_token(&self) {
+        use std::sync::atomic::Ordering;
+        if !self.warned_legacy.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                target: "rustango::tenancy",
+                "JwtBackend accepted a token with no `iat`: it survives logout-all and \
+                 password changes until it expires; reissue it"
+            );
+        }
+    }
+
     /// Build from the operator-console session secret (convenient for
     /// projects that don't want a separate signing key).
     #[cfg(feature = "postgres")]
@@ -816,17 +835,49 @@ impl JwtBackend {
 
     /// Issue a signed JWT for `user_id` valid for `self.ttl_secs`, with no
     /// tenant binding: it authenticates only where no tenant is resolved.
+    /// Logout-all and a password change end it.
     #[must_use]
     pub fn issue(&self, user_id: i64) -> String {
-        self.sign_payload(&serde_json::json!({"sub": user_id, "exp": self.exp()}))
+        self.sign_payload(&self.claims(user_id, None))
     }
 
     /// [`Self::issue`] bound to tenant `slug`, for `require_auth` routes (#1848).
     #[must_use]
     pub fn issue_for_tenant(&self, user_id: i64, slug: &str) -> String {
-        let mut payload = serde_json::json!({"sub": user_id, "exp": self.exp()});
-        payload[super::jwt_lifecycle::CLAIM_TENANT] = slug.into();
-        self.sign_payload(&payload)
+        self.sign_payload(&self.claims(user_id, Some(slug)))
+    }
+
+    /// [`Self::issue`] for `user`, also ended when its password hash changes.
+    #[must_use]
+    pub fn issue_for_user(&self, user: &super::auth::User) -> String {
+        self.sign_payload(&self.user_claims(user, None))
+    }
+
+    /// [`Self::issue_for_tenant`] for `user`, also ended when its password hash changes.
+    #[must_use]
+    pub fn issue_for_tenant_user(&self, user: &super::auth::User, slug: &str) -> String {
+        self.sign_payload(&self.user_claims(user, Some(slug)))
+    }
+
+    fn claims(&self, user_id: i64, tenant: Option<&str>) -> serde_json::Value {
+        let now = chrono::Utc::now().timestamp();
+        let mut payload = serde_json::json!({"sub": user_id, "exp": self.exp(), "iat": now});
+        // Only a store can revoke a jti; without one it would only warn.
+        if self.jti_store.is_some() {
+            payload["jti"] = super::jwt_lifecycle::random_jti().into();
+        }
+        if let Some(slug) = tenant {
+            payload[super::jwt_lifecycle::CLAIM_TENANT] = slug.into();
+        }
+        payload
+    }
+
+    fn user_claims(&self, user: &super::auth::User, tenant: Option<&str>) -> serde_json::Value {
+        let mut payload = self.claims(user.id.get().copied().unwrap_or(0), tenant);
+        if let Some(claims) = payload.as_object_mut() {
+            super::auth_routes::RefreshSession::for_user(&self.pwf_secret, user).write(claims);
+        }
+        payload
     }
 
     fn exp(&self) -> i64 {
@@ -867,11 +918,7 @@ impl JwtBackend {
         &self,
         token: &str,
         scope: super::jwt_lifecycle::UserTokenScope<'_>,
-    ) -> Option<(
-        i64,
-        Option<String>,
-        Option<super::auth_routes::RefreshSession>,
-    )> {
+    ) -> Option<VerifiedClaims> {
         use base64::Engine;
         use subtle::ConstantTimeEq;
         let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -919,8 +966,22 @@ impl JwtBackend {
             .get("jti")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
-        Some((sub, jti, super::auth_routes::RefreshSession::read(claims)))
+        Some(VerifiedClaims {
+            sub,
+            jti,
+            iat: payload.get("iat").and_then(serde_json::Value::as_i64),
+            session: super::auth_routes::RefreshSession::read(claims),
+        })
     }
+}
+
+/// What [`JwtBackend::verify_claims`] read from a valid token.
+struct VerifiedClaims {
+    sub: i64,
+    jti: Option<String>,
+    iat: Option<i64>,
+    /// The login-session claims, when the token carries them.
+    session: Option<super::auth_routes::RefreshSession>,
 }
 
 /// v0.38 — inline HMAC-SHA256(secret, msg) so JwtBackend signs
@@ -976,9 +1037,14 @@ impl AuthBackend for JwtBackend {
             Some(slug) => super::jwt_lifecycle::UserTokenScope::Tenant(&slug.0),
             None => super::jwt_lifecycle::UserTokenScope::Unscoped,
         };
-        let (user_id, jti, session) = match self.verify_claims(token, scope) {
-            Some(c) => c,
-            None => return Err(AuthError::InvalidToken),
+        let Some(VerifiedClaims {
+            sub: user_id,
+            jti,
+            iat,
+            session,
+        }) = self.verify_claims(token, scope)
+        else {
+            return Err(AuthError::InvalidToken);
         };
 
         // Revocation, when a store is wired (#1402). Without this the
@@ -1007,15 +1073,30 @@ impl AuthBackend for JwtBackend {
         }
 
         // A login token ends with its session, as on `require_bearer` (#2247).
-        if let Some(session) = session {
-            let check = super::auth_routes::SessionCheck {
-                pwf_secret: &self.pwf_secret,
-                families: self.jti_store.as_deref(),
-                cap_secs: None,
-            };
-            if !session.admits(&check, &user).await {
-                return Err(AuthError::InvalidToken);
+        // Without session claims, `iat` still meets logout-all and password changes.
+        let admitted = match (session, iat) {
+            (Some(session), _) => {
+                let check = super::auth_routes::SessionCheck {
+                    pwf_secret: &self.pwf_secret,
+                    families: self.jti_store.as_deref(),
+                    cap_secs: None,
+                };
+                session.admits(&check, &user).await
             }
+            (None, Some(iat)) => {
+                user.password_changed_at
+                    .is_none_or(|ts| iat >= ts.timestamp())
+                    && user
+                        .sessions_revoked_at
+                        .is_none_or(|ts| iat > ts.timestamp())
+            }
+            (None, None) => {
+                self.warn_legacy_token();
+                true
+            }
+        };
+        if !admitted {
+            return Err(AuthError::InvalidToken);
         }
 
         Ok(Some(AuthUser {
@@ -1027,10 +1108,6 @@ impl AuthBackend for JwtBackend {
 }
 
 // ------------------------------------------------------------------ helpers
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
 
 fn extract_bearer(parts: &Parts) -> Result<Option<&str>, AuthError> {
     let Some(value) = parts.headers.get(axum::http::header::AUTHORIZATION) else {
@@ -1212,6 +1289,107 @@ mod tests {
         assert!(
             matches!(r, Err(AuthError::Refused(LoginRefused::Throttled { .. }))),
             "{r:?}"
+        );
+    }
+
+    /// A user row in a fresh shared in-memory `SQLite`.
+    async fn jwt_user(name: &str) -> (Pool, crate::tenancy::auth::User) {
+        let pool = Pool::connect(&format!("sqlite:file:{name}?mode=memory&cache=shared"))
+            .await
+            .unwrap();
+        crate::testkit::create_tables_for::<crate::tenancy::auth::User>(&pool)
+            .await
+            .unwrap();
+        let mut user = crate::testkit::user();
+        user.insert_pool(&pool).await.unwrap();
+        (pool, user)
+    }
+
+    async fn bearer(
+        backend: &JwtBackend,
+        token: &str,
+        tenant: Option<&str>,
+        pool: &Pool,
+    ) -> Result<Option<AuthUser>, AuthError> {
+        let mut req =
+            axum::http::Request::builder().header("authorization", format!("Bearer {token}"));
+        if let Some(slug) = tenant {
+            req = req.extension(super::super::TenantSlug(slug.into()));
+        }
+        let (parts, ()) = req.body(()).unwrap().into_parts();
+        backend.authenticate(&parts, pool).await
+    }
+
+    /// `issue` / `issue_for_tenant` tokens end on logout-all and on a password change.
+    #[tokio::test]
+    async fn issued_tokens_end_with_the_session() {
+        let (pool, mut user) = jwt_user("jwt_issue_ends_with_session").await;
+        let id = *user.id.get().unwrap();
+        let backend = JwtBackend::new(vec![7u8; 32]);
+        let plain = backend.issue(id);
+        let bound = backend.issue_for_tenant(id, "acme");
+        assert!(bearer(&backend, &plain, None, &pool)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(bearer(&backend, &bound, Some("acme"), &pool)
+            .await
+            .unwrap()
+            .is_some());
+        let later = chrono::Utc::now() + chrono::Duration::seconds(5);
+        for stamp in ["sessions_revoked_at", "password_changed_at"] {
+            user.sessions_revoked_at = (stamp == "sessions_revoked_at").then_some(later);
+            user.password_changed_at = (stamp == "password_changed_at").then_some(later);
+            user.save_pool(&pool).await.unwrap();
+            let r = bearer(&backend, &plain, None, &pool).await;
+            assert!(matches!(r, Err(AuthError::InvalidToken)), "{stamp}: {r:?}");
+            let r = bearer(&backend, &bound, Some("acme"), &pool).await;
+            assert!(matches!(r, Err(AuthError::InvalidToken)), "{stamp}: {r:?}");
+        }
+    }
+
+    /// A user-bound token also ends when the password hash changes.
+    #[tokio::test]
+    async fn user_bound_tokens_end_with_the_password_hash() {
+        let (pool, mut user) = jwt_user("jwt_user_bound_pwf").await;
+        let backend = JwtBackend::new(vec![7u8; 32]);
+        let token = backend.issue_for_tenant_user(&user, "acme");
+        assert!(bearer(&backend, &token, Some("acme"), &pool)
+            .await
+            .unwrap()
+            .is_some());
+        user.password_hash = "$argon2id$v=19$m=19456,t=2,p=1$new$hash".into();
+        user.save_pool(&pool).await.unwrap();
+        let r = bearer(&backend, &token, Some("acme"), &pool).await;
+        assert!(matches!(r, Err(AuthError::InvalidToken)), "{r:?}");
+    }
+
+    /// A token minted before these claims still works until it expires, with one warning.
+    #[tokio::test]
+    async fn a_legacy_token_is_accepted_with_one_warning() {
+        let (pool, user) = jwt_user("jwt_legacy_token_warns").await;
+        let backend = JwtBackend::new(vec![7u8; 32]);
+        let legacy = backend.sign_payload(&serde_json::json!({
+            "sub": *user.id.get().unwrap(),
+            "exp": backend.exp(),
+        }));
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let _g = tracing::subscriber::set_default(subscriber);
+        for _ in 0..2 {
+            assert!(bearer(&backend, &legacy, None, &pool)
+                .await
+                .unwrap()
+                .is_some());
+        }
+        assert_eq!(
+            buf.contents().matches("no `iat`").count(),
+            1,
+            "{}",
+            buf.contents()
         );
     }
 

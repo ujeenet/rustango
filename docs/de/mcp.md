@@ -158,9 +158,12 @@ Der authentifizierte Router mountet: `POST {prefix}` (JSON-RPC), `GET {prefix}`
 (SSE-Benachrichtigungen), `POST {prefix}/token` (Credential → JWT),
 `POST {prefix}/oauth/token` (OAuth 2.1) und die beiden `.well-known/*`
 Discovery-Dokumente. Er signiert Agenten-Tokens mit `RUSTANGO_SESSION_SECRET`.
+Fehlt der Wert oder ist er kürzer als 32 Bytes, warnt er und nutzt einen
+zufälligen Schlüssel pro Prozess; Tokens gelten dann nur bis zum Neustart.
 
-Der `initialize`-Handshake ist ein einfacher JSON-RPC-POST und funktioniert auf
-jedem Mount:
+Der `initialize`-Handshake ist ein einfacher JSON-RPC-POST. Auf dem
+authentifizierten Mount braucht jeder POST ein Bearer-Token, auch `initialize`
+und `ping`; ein Aufruf ohne Token erhält `401`.
 
 ```json
 // → POST /mcp
@@ -171,9 +174,17 @@ jedem Mount:
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.61.7" },
-    "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
+    "serverInfo": { "name": "rustango", "version": "0.61.8" },
+    "capabilities": { "tools": { "listChanged": true }, "prompts": { "listChanged": true },
+                      "resources": { "listChanged": true, "subscribe": false },
+                      "logging": {}, "completions": {} } } }
 ```
+
+Um Agenten serverweite Hinweise zu geben, rufe beim Start
+`rustango::mcp::register_instructions("…")` auf. Der Text wird als
+`instructions` in der `initialize`-Antwort gesendet; ohne Aufruf fehlt das Feld.
+Mehrere Aufrufe (etwa eine Bibliothek und ihre App) werden in Aufrufreihenfolge
+mit einer Leerzeile verbunden; ein leerer oder wiederholter Text wird übersprungen.
 
 ---
 
@@ -216,8 +227,10 @@ Auf dem Rohschlüssel-Pfad verifiziert der Server das Secret (argon2, mit einem
 kurzlebigen prozesslokalen Cache, damit der Hash nicht pro Anfrage neu berechnet
 wird), prüft die Gültigkeit erneut und löst die Gewährungen **bei jeder Anfrage**
 auf — ein benutzereigener Schlüssel spiegelt stets das aktuelle RBAC seines
-Besitzers wider, und ein Widerruf greift sofort, statt die TTL eines JWT
-abzuwarten. Setzen Sie in Produktion `[mcp] rate_limit_per_minute`, um den
+Besitzers wider. Der JWT-Pfad macht es genauso: jede Anfrage prüft, dass der
+Agent (und sein Besitzer) aktiv und das Secret nicht rotiert ist, und liest die
+Gewährungen aus den Zeilen, nicht aus den Claims. Ein Widerruf greift also auf
+beiden Pfaden sofort. Setzen Sie in Produktion `[mcp] rate_limit_per_minute`, um den
 Verifizierungsaufwand zu begrenzen. Der Effekt, von Ende zu Ende verifiziert:
 
 ```rust
@@ -234,8 +247,9 @@ assert_eq!(out["structuredContent"]["sum"], 5);
 ```
 
 Tokens sind tenant-gepinnt: Ein für `acme` ausgestelltes Token wird gegen jeden
-anderen Tenant abgelehnt (Cross-Tenant-Replay → 401). Widerrufen Sie einen
-Agenten, und seine JTI wird auf die Blacklist gesetzt.
+anderen Tenant abgelehnt (Cross-Tenant-Replay → 401). Ein rotiertes Secret oder
+ein deaktivierter Agent lässt seine Tokens bei der nächsten Anfrage scheitern;
+eine über den `JwtLifecycle` widerrufene JTI ebenso.
 
 ### Nutzereigene Keys (berechtigungsgesteuerte Capabilities)
 
@@ -274,7 +288,7 @@ durch RBAC abgesichert, ohne Änderung an diesen Handlern. Der besitzende Nutzer
 reist im `uid`-Claim des Tokens mit; ein Tool-Handler liest ihn als
 `ctx.agent.user_id`, um die Arbeit auf dieses Mitglied zu beschränken. Widerrufen
 Sie frische Capabilities, indem Sie die Berechtigungen des Nutzers ändern (sie
-werden beim nächsten Token neu aufgelöst); widerrufen Sie den Key selbst mit
+werden bei der nächsten Anfrage neu aufgelöst); widerrufen Sie den Key selbst mit
 `revoke_user_key_pool(&pool, user_id, agent_id)`. Listen Sie die Keys eines
 Mitglieds mit `list_user_keys_pool(&pool, user_id)` auf.
 
@@ -286,7 +300,7 @@ sonst die einer von ihm gehaltenen Permission zugeordneten Skills) und der
 (`skills = &["coach", …]`) ist auf diese beschränkt und erhält nichts mehr, sobald ihr letzter Skill entzogen ist. Die Auflösung schneidet den
 Scope stets erneut mit der *aktuellen* Berechtigung — sodass ein Key niemals die
 Berechtigungen des Eigentümers überschreiten kann, und der Verlust einer
-Permission jeden Key bei der nächsten Ausstellung einengt. Ein Scope auf einen
+Permission jeden Key bei der nächsten Anfrage einengt. Ein Scope auf einen
 Skill, zu dem der Eigentümer nicht berechtigt ist, wird bei der Erstellung
 abgelehnt.
 
@@ -333,9 +347,9 @@ created key #7 for user `alice` in tenant `acme` (label `Alice's phone`, scope f
 $ cargo run -- create-user-key acme alice --label "coach bot" --skill coach
 ```
 
-Alices Key löst nun bei jeder Token-Ausstellung die Tools des `coach`-Skills auf,
+Alices Key löst nun bei jeder Anfrage die Tools des `coach`-Skills auf,
 weil sie `mcp.coach` hält. Ändern Sie ihre Berechtigungen und die Capabilities
-werden bei ihrem nächsten Token neu aufgelöst; widerrufen Sie den Key selbst mit
+werden bei ihrer nächsten Anfrage neu aufgelöst; widerrufen Sie den Key selbst mit
 `revoke-user-key`. Dieselbe Key-id ist von Maschinenagenten im Tenant-Admin
 unterscheidbar (die `Agent`-Liste zeigt `user_id`).
 
@@ -353,7 +367,7 @@ SSE-Strom (`GET {prefix}`) für Server→Client-Benachrichtigungen. Methoden:
 
 | Methode | Auth | Zweck |
 |---|---|---|
-| `initialize` · `ping` | nein | Handshake + Liveness |
+| `initialize` · `ping` | auf dem authentifizierten Mount | Handshake + Liveness |
 | `tools/list` · `tools/call` | ja | Tools entdecken + aufrufen (nur gewährte) |
 | `prompts/list` · `prompts/get` | ja | skill-abgeleitete Prompts |
 | `resources/list` · `resources/read` · `resources/templates/list` | ja | statische + Skill-Resources |
@@ -368,6 +382,10 @@ verbotenes Tool, ungültige Params) geben einen JSON-RPC-`error` mit Codes wie
 (`INVALID_PARAMS`) zurück. Lange Tools melden Fortschritt und honorieren
 Abbrüche über den `McpContext`.
 
+Jeder `tools/call` schreibt einen Audit-Log-Eintrag mit Tool-Name und Argumenten.
+Werte unter sensiblen Schlüsseln (`password`, `token`, `secret`, …) werden
+geschwärzt. Scheitert das Audit, wird nur gewarnt; der Aufruf läuft trotzdem.
+
 ---
 
 ## Einstellungen
@@ -376,12 +394,13 @@ Der Abschnitt `[mcp]` (gelesen von `secure_tenant_router_from_settings`):
 
 ```toml
 [mcp]
-prefix                = "/mcp"   # URL prefix the router mounts under
+prefix                = "/mcp"   # not applied by the router: pass
+                                 # settings.mcp.prefix() to .nest() yourself
 token_ttl_secs        = 900      # agent access-token lifetime (15 min)
 enable_sse            = true     # serve the GET {prefix} SSE stream
 allowed_origins       = []       # CORS allow-list (empty = same-origin only)
 rate_limit_per_minute = 0        # per-IP cap (0/unset = unlimited)
-max_tools_listed      = 0        # tools/list page size (0/unset = unlimited)
+max_tools_listed      = 0        # page size of every */list (0/unset = unlimited)
 max_body_bytes        = 1048576  # JSON-RPC body cap — raise for tools that
                                  # accept inline payloads (base64 uploads)
 ```

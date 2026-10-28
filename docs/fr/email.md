@@ -53,7 +53,7 @@ let email = Email::new()
     .html_body("<p>Thanks for signing up.</p>"); // optional HTML part
 ```
 
-`.cc(...)`, `.reply_to(...)`, et les pièces jointes sont également disponibles.
+`.cc(...)`, `.bcc(...)`, `.reply_to(...)`, `.header(name, value)`, `.attach(...)` / `.attach_text(filename, text)`, et les pièces jointes sont également disponibles.
 
 ---
 
@@ -73,7 +73,10 @@ tenez un **`BoxedMailer`** (`Arc<dyn Mailer>`) :
 Construisez-le à partir de la configuration afin qu'il diffère selon l'environnement (`ConsoleMailer`
 en local, `SmtpMailer` en prod) via `email::from_settings(&settings.mail)?`. Avec
 `backend = "smtp"`, il échoue si le mailer ne peut pas être construit (pas de `smtp_host`,
-`from_address` invalide, `smtp_tls` autre que `none` / `starttls` / `implicit`).
+`from_address` invalide, `smtp_tls` autre que `none` / `starttls` / `implicit`, ou un build
+sans `email-smtp`). `backend` accepte `console` (par défaut), `memory`,
+`null` / `none`, `file` (exige `file_email_dir`) et `smtp` ; toute autre valeur donne
+`MailError::Config`.
 
 ---
 
@@ -147,8 +150,8 @@ assert_eq!(sent[0].subject, "Welcome");
 ## Templates
 
 Pour tout ce qui va au-delà d'une ligne de texte, rendez le corps à partir d'un template
-[Tera](html-views.md) plutôt que d'inliner du HTML. L'`EmailRenderer` de la fonctionnalité
-`email_templates` suit une convention `name.subject.txt` / `name.txt` / `name.html` — un seul
+[Tera](html-views.md) plutôt que d'inliner du HTML. `email_templates::EmailRenderer`
+(fonctionnalités `email` + `admin`, toutes deux par défaut) suit une convention `name.subject.txt` / `name.txt` / `name.html` — un seul
 ensemble de templates produit l'objet, la partie texte brut et la partie HTML ensemble, si bien que
 les trois ne divergent jamais. Le trait `Mailable` empaquette « une chose qui sait se transformer
 elle-même en `Email` » pour des messages réutilisables.
@@ -174,20 +177,26 @@ async fn run(&self) -> Result<(), JobError> {
 }
 ```
 
-La fonctionnalité `email_jobs` câble cela pour vous.
+`email_jobs` (fonctionnalités `email` + `jobs`) câble cela pour vous : appelez
+`register_email_job(&queue, EmailJobConfig::new(mailer))` une fois au démarrage, puis
+`dispatch_email(&queue, &email)` dans le handler. Il valide avant la mise en file,
+et seul un échec `Transport` est réessayé.
 
 ---
 
 ## Référence
 
-**Builder `Email` :** `to` · `cc` · `from` · `reply_to` · `subject` · `body` ·
-`html_body` · pièces jointes · `validate()` · `send(&mailer)`.
+**Builder `Email` :** `to` · `cc` · `bcc` · `from` · `reply_to` · `subject` · `body` ·
+`html_body` · `header` · `attach` · `attach_text` · `validate()` · `send(&mailer)`.
 
 **Helpers :** `send_mail(mailer, subject, body, from, &recipients)` ·
-`send_many(mailer, &emails)` · `from_settings(&EmailSettings)`.
+`send_many(mailer, &emails)` · `from_settings(&MailSettings)` ·
+`mail_admins(mailer, &settings.mail, subject, body)` /
+`mail_managers(...)` (send to `[mail].admins` / `managers`).
 
 **`MailError` :** `InvalidMessage` (incomplet) · `BadHeader` (injection CRLF) ·
-`Transport` (échec de backend/livraison, le seul que `EmailJob` réessaie) · `Config` (section `[mail]` invalide).
+`Transport` (échec de backend/livraison, le seul que `EmailJob` réessaie) ·
+`Rejected` (le serveur SMTP refuse le message pour de bon) · `Config` (section `[mail]` invalide).
 
 ---
 

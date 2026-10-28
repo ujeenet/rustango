@@ -618,3 +618,38 @@ fn snapshot_in_generated_migration_matches_input() {
     assert_eq!(mig.snapshot, want);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "mk_noted", db_table_comment = "kept notes")]
+#[allow(dead_code)]
+pub struct MkNoted {
+    #[rustango(primary_key)]
+    pub id: rustango::sql::Auto<i64>,
+}
+
+/// A model's `db_table_comment` is not tracked by file migrations yet,
+/// so `makemigrations` warns rather than dropping it silently.
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+#[test]
+fn untracked_table_comment_is_warned() {
+    use rustango::core::Model as _;
+    let buf = rustango::testkit::CaptureWriter::default();
+    let sink = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let dir = fresh_dir("table_comment");
+    let current = SchemaSnapshot::from_models(&[MkNoted::SCHEMA]);
+    tracing::subscriber::with_default(subscriber, || {
+        make_migrations_from(&dir, &current, None).expect("make");
+    });
+    let logs = buf.contents();
+    assert!(
+        logs.contains("mk_noted") && logs.contains("db_table_comment"),
+        "{logs}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

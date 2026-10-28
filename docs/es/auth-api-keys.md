@@ -17,7 +17,8 @@ las claves y autentica las peticiones `Authorization: Bearer`.
 > `split_token`, `ApiKeyError`) — el ayudante autónomo, tras la característica
 > `api_keys` (activada por defecto). El backend con almacenamiento es
 > `rustango::tenancy::auth_backends` (`create_api_key`, `ApiKeyBackend`,
-> `ensure_api_keys_table_pool`) — tras la característica `tenancy`.
+> `ensure_api_keys_table_pool`, `set_api_key_secret`) — tras la característica
+> `tenancy`.
 >
 > **Versión ejecutable:** los fragmentos del ayudante están copiados de
 > [`auth_api_keys_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_api_keys_doc.rs)
@@ -42,10 +43,10 @@ las claves y autentica las peticiones `Authorization: Bearer`.
 
 Una clave tiene dos partes unidas por un punto: **`{prefix}.{secret}`**.
 
-- El **prefijo** tiene 8 caracteres — se almacena en texto claro y se usa como
-  índice de búsqueda rápido y único («¿qué clave es esta?»).
-- El **secreto** es la credencial real. Solo almacenas un **hash argon2id** del
-  mismo, nunca el secreto en sí.
+- El **prefijo** tiene 8 caracteres hexadecimales — se almacena en texto claro
+  y se usa como índice de búsqueda rápido («¿qué clave es esta?»).
+- El **secreto** tiene 32 caracteres hexadecimales y es la credencial real.
+  Solo almacenas un **hash** del mismo, nunca el secreto en sí.
 
 El token completo se muestra al usuario **exactamente una vez**, en la creación.
 Piérdelo y lo reemites — no hay forma de recuperarlo, porque solo se conserva el
@@ -93,7 +94,8 @@ se verifican. `verify_key` devuelve `Ok(false)` en caso de discrepancia y
 `Err(ApiKeyError)` solo cuando la cadena almacenada no es un hash válido.
 
 Desde código async llame a `generate_key_async`, `hash_secret_async` y
-`verify_key_async`; calculan argon2 fuera del runtime.
+`verify_key_async`; calculan argon2 fuera del runtime. También pueden devolver
+`ApiKeyError::Busy` cuando no se libera a tiempo un hueco de hash.
 
 ---
 
@@ -113,15 +115,25 @@ ensure_api_keys_table_pool(&pool).await?;   // CREATE TABLE IF NOT EXISTS
 ```
 
 La fila `ApiKey` almacena `user_id` (FK a `rustango_users`), el `key_prefix` de
-8 caracteres (único), el `key_hash` argon2id, una `label`, y un `expires_at`
-opcional.
+8 caracteres (indexado, no único), el `key_hash`, una `label`, un `expires_at`
+opcional y `created_at`.
+
+El backend con almacenamiento no usa argon2id. `key_hash` es un HMAC-SHA256 del
+secreto, bajo una clave derivada del secreto del servidor. Así la comprobación
+es barata en cada petición. El secreto del servidor es `RUSTANGO_SESSION_SECRET`
+(en dev, el archivo de clave de sesión del tenant). Llama a
+`set_api_key_secret(secret)` una vez al arrancar para usar otra clave; gana la
+primera llamada. **Cambiar esa clave, o rotar `RUSTANGO_SESSION_SECRET`, deja
+sin servicio todas las claves emitidas.** Las filas guardadas como argon2id por
+versiones antiguas aún se verifican y se reescriben al HMAC en el primer uso.
 
 ---
 
 ## Emitir una clave
 
 `create_api_key` genera el token, hashea el secreto, inserta la fila, y devuelve
-el **token en texto claro una sola vez**:
+el **token en texto claro una sola vez**. En el tier prod falla cuando
+`RUSTANGO_SESSION_SECRET` no está definido:
 
 ```rust
 use rustango::tenancy::auth_backends::create_api_key;
@@ -135,11 +147,15 @@ use chrono::{Duration, Utc};
 let token = create_api_key(42, "tmp", Some(Utc::now() + Duration::days(30)), &pool).await?;
 ```
 
-Desde la línea de comandos, la CLI `manage` envuelve la misma llamada:
+Desde la línea de comandos, la CLI `manage` envuelve la misma llamada. Crea la
+tabla si hace falta, y `--label` está vacío por defecto:
 
 ```bash
 cargo run -- create-api-key <tenant> <username> --label "ci-key" --expires-days 30
 ```
+
+La CLI debe usar el mismo secreto que el servidor, o la clave no coincide con
+nada. Cuando recurre al archivo de clave de dev, imprime una nota.
 
 ---
 
@@ -171,25 +187,34 @@ curl https://api.example.com/api/data \
   -H "Authorization: Bearer a1b2c3d4.the-secret-half"
 ```
 
-El backend encuentra la `ApiKey` por su prefijo de 8 caracteres, comprueba
-`expires_at`, verifica el secreto contra el hash almacenado, carga al usuario
-propietario, y lo inyecta para que tus handlers lo lean mediante
-[`CurrentUser`](auth-backends.md). Un secreto incorrecto o un prefijo
-desconocido es un `401`; una clave caducada se rechaza; un propietario
-deshabilitado es un `403`.
+El backend encuentra las filas `ApiKey` por el prefijo de 8 caracteres,
+verifica el secreto contra cada hash almacenado, luego comprueba `expires_at`,
+carga al usuario propietario, y lo inyecta para que tus handlers lo lean
+mediante [`CurrentUser`](auth-backends.md).
+
+- Un secreto incorrecto o un prefijo desconocido no es un error: se ejecuta el
+  siguiente backend de la cadena. Si ninguno autentica al llamante,
+  `require_auth` responde `401`.
+- Una clave caducada es un `401` inmediato.
+- Un propietario deshabilitado es un `403`.
+- Los intentos fallidos se limitan por tenant y por IP del cliente. Por encima
+  del límite la respuesta es `429`.
+
+La clave vive en la base de datos de un tenant, así que solo funciona en ese
+tenant.
 
 ---
 
 ## Notas de seguridad
 
 - **El secreto se muestra una vez.** Solo se persisten el prefijo + el hash
-  argon2id — no hay recuperación, solo reemisión.
+  con clave — no hay recuperación, solo reemisión.
 - **El prefijo se almacena en texto claro a propósito** — es el índice de
   búsqueda O(1). Una fuga de base de datos revela qué prefijos existen, nunca los
   secretos.
-- **El tiempo está igualado.** Un prefijo desconocido igualmente ejecuta una
-  verificación ficticia, de modo que una clave ausente tarda más o menos lo mismo
-  que una real — sin enumeración a través del tiempo de respuesta.
+- **El tiempo está igualado.** El hash se compara en tiempo constante, y el
+  secreto se comprueba antes de la caducidad, así que una clave caducada cuesta
+  lo mismo que una desconocida.
 - **Limita las claves a un usuario, establece una expiración, y rótalas.** Emite
   una por integración para poder revocar una sin perturbar las demás; prefiere
   ventanas `expires_at` cortas para acceso temporal.

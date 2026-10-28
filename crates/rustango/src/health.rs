@@ -277,10 +277,19 @@ impl HealthRouter {
             show_errors: self.show_errors,
         };
         Router::new()
-            .route("/health", get(handle_live))
-            .route("/ready", get(handle_ready))
+            .route(PROBE_PATHS[0], get(handle_live))
+            .route(PROBE_PATHS[1], get(handle_ready))
             .with_state(state)
     }
+}
+
+/// Where [`HealthRouter::into_router`] mounts liveness and readiness.
+const PROBE_PATHS: [&str; 2] = ["/health", "/ready"];
+
+/// `true` for exactly the paths the health router serves, so the outer
+/// layers can let probes through without exempting a subtree.
+pub(crate) fn is_probe_path(path: &str) -> bool {
+    PROBE_PATHS.contains(&path)
 }
 
 /// `url` for errors and logs: no userinfo, query or fragment.

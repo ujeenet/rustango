@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en" data-theme="{{ theme_mode | default(value='auto') }}">
+<head>
+  <meta charset="utf-8">
+  {% if brand_logo_url %}<link rel="icon" href="{{ brand_logo_url }}">{% endif %}
+  <title>Sign-in code — {{ brand_name | default(value='Rustango Operator Console') }}</title>
+  {% include "_theme_tokens.html" %}
+  {% if brand_css %}<style nonce="{{ csp_nonce }}">:root { {{ brand_css | safe }} }</style>{% endif %}
+  <style nonce="{{ csp_nonce }}">
+    /* Without it the 100%-wide inputs overflow the card by their padding. */
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: var(--font-family-base);
+      font-size: var(--font-size-base);
+      line-height: var(--line-height-base);
+      background: var(--color-bg);
+      color: var(--color-fg);
+      display: flex;
+      min-height: 100vh;
+      align-items: center;
+      justify-content: center;
+    }
+    .card {
+      width: 320px;
+      padding: var(--space-6);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-lg);
+      background: var(--color-bg-surface);
+      box-shadow: var(--shadow-sm);
+    }
+    /* Same compact header as the tenant sign-in: logo beside the name. */
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      margin-bottom: var(--space-2);
+    }
+    .brand .brand-logo {
+      flex: 0 0 auto;
+      width: 40px;
+      height: 40px;
+      object-fit: contain;
+    }
+    h1 {
+      color: var(--color-accent);
+      font-size: 1.4rem;
+      margin: 0;
+    }
+    p.sub {
+      color: var(--color-fg-muted);
+      margin: 0 0 var(--space-5) 0;
+    }
+    label {
+      display: block;
+      font-size: var(--font-size-sm);
+      color: var(--color-fg-muted);
+      margin-top: var(--space-3);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    input[type=text], input[type=password] {
+      width: 100%;
+      padding: var(--space-2) 0.6rem;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-md);
+      font: inherit;
+      background: var(--color-bg-input);
+      color: var(--color-fg);
+      margin-top: var(--space-1);
+    }
+    input:focus { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+    button {
+      margin-top: var(--space-5);
+      width: 100%;
+      padding: 0.6rem;
+      background: var(--color-accent);
+      color: var(--color-fg-on-accent);
+      border: 0;
+      border-radius: var(--radius-md);
+      font: inherit;
+      font-weight: var(--font-weight-bold);
+      cursor: pointer;
+    }
+    button:hover { filter: brightness(1.1); }
+    .error {
+      color: var(--color-error-fg);
+      background: var(--color-error-bg);
+      padding: var(--space-2) var(--space-3);
+      border-radius: var(--radius-md);
+      margin: var(--space-4) 0 0 0;
+      font-size: 13px;
+    }
+    .key {
+      font-family: var(--font-family-mono, monospace);
+      letter-spacing: 0.1em;
+      word-break: break-all;
+      margin: var(--space-1) 0 0 0;
+    }
+    .uri { font-size: 12px; color: var(--color-fg-muted); word-break: break-all; margin: var(--space-1) 0 0 0; }
+  </style>
+</head>
+<body>
+  <form class="card" method="post" action="{{ console_prefix }}/login/totp">
+    {{ csrf_input | default(value='') | safe }}
+    <div class="brand">
+      {% if brand_logo_url %}<img class="brand-logo" src="{{ brand_logo_url }}" alt="">{% endif %}
+      <h1>{{ brand_name | default(value='Rustango') }}</h1>
+    </div>
+    {% if enroll %}
+    <p class="sub">This console requires a second factor. Add this key to your
+      authenticator app, then enter the code it shows.</p>
+    {% else %}
+    <p class="sub">Enter the code from your authenticator app.</p>
+    {% endif %}
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    {% if enroll and secret_base32 %}
+    <label>Setup key</label>
+    <p class="key">{{ secret_base32 }}</p>
+    <label>otpauth link</label>
+    <p class="uri">{{ otpauth_url }}</p>
+    {% endif %}
+    <label for="totp_code">Code</label>
+    <input type="text" id="totp_code" name="totp_code" inputmode="numeric"
+           autocomplete="one-time-code" pattern="[0-9]*" maxlength="8" autofocus required>
+    <input type="hidden" name="next" value="{{ next }}">
+    <button type="submit">Continue</button>
+  </form>
+</body>
+</html>

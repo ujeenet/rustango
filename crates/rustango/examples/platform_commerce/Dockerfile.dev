@@ -1,4 +1,6 @@
 FROM rust:1
+# The image's own toolchain, not rust-toolchain.toml's `stable`.
+ENV RUSTUP_TOOLCHAIN=$RUST_VERSION
 
 WORKDIR /app
 

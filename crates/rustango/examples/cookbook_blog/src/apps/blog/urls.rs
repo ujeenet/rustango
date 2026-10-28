@@ -1,7 +1,7 @@
 //! Tenant-aware HTTP routes for the blog app.
 //!
-//! `/api/authors` GET / POST exercise the JSON API surface against
-//! the per-request tenant pool. `/authors/new` GET / POST exercises
+//! `/api/authors` and `/api/authors/{id}` are GET-only JSON reads
+//! against the per-request tenant pool. `/authors/new` GET / POST exercises
 //! the *non-admin* form path: render an HTML form, parse the POST
 //! body with `ModelFormFor<Author>`, save via the per-tenant
 //! connection. No auto-admin involved.
@@ -19,8 +19,8 @@ use std::collections::HashMap;
 
 use super::models::Author;
 
-/// Tenant-scoped list + create.
-async fn list_or_create(
+/// Tenant-scoped list.
+async fn list(
     mut tenant: Tenant,
 ) -> Result<Json<Vec<AuthorOut>>, (StatusCode, String)> {
     let rows: Vec<Author> = Author::objects()
@@ -287,7 +287,7 @@ async fn whoami(SessionUser(user): SessionUser) -> axum::response::Response {
 #[must_use]
 pub fn api() -> Router {
     Router::new()
-        .route("/api/authors", get(list_or_create))
+        .route("/api/authors", get(list))
         .route("/api/authors/{id}", get(retrieve))
         .route("/authors/new", get(show_new_form).post(submit_new_form))
         .route("/authors/{id}/edit", get(show_edit_form).post(submit_edit_form))

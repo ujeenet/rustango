@@ -77,7 +77,7 @@ hash** in one call.
 use std::time::Duration;
 use rustango::auth_flows::{LinkScope, PasswordReset, confirm_password_reset_pool};
 
-// The request's tenant (`t: Tenant`): links redeem only in it (#2472).
+// The request's tenant (`t: Tenant`): links redeem only in it.
 let scope = LinkScope::from(&t);
 
 // 1. User asks to reset → look them up → issue a link → email it.
@@ -96,12 +96,13 @@ let user_id = confirm_password_reset_pool(
 ).await?;
 ```
 
-> **Multi-tenant apps must pass `&t`** (the `Tenant`) to confirm, so the pool
-> and the scope come from one value. `LinkTarget::audience(&pool, "app")` and
-> `LinkScope::audience("app")` are for apps with a single user database.
+> **Multi-tenant apps must pass `&t`** (the `Tenant`, or a `TenantScope`) to
+> confirm, so the pool and the scope come from one value. A link issued for
+> another scope fails with `Err(WrongScope)`. `LinkTarget::audience(&pool, "app")`
+> and `LinkScope::audience("app")` are for apps with a single user database.
 
 > **Use this form for `rustango_users`.** Framework sessions carry a fingerprint
-> of the password hash ([#1338](https://github.com/ujeenet/rustango/issues/1338)), so the new hash ends every
+> of the password hash, so the new hash ends every
 > session issued before the reset, an attacker's included. It also stamps
 > `password_changed_at`, which records the change but is not what ends them.
 
@@ -116,7 +117,7 @@ tampered, or wrong-secret inputs without touching the row:
 ```
 
 It is the same `passwords::strength_score` the rest of the framework uses, so a
-password refused at registration cannot be set by resetting (#1399).
+password refused at registration cannot be set by resetting.
 
 > `_into` points at your own table/columns — a tenant `app_users`, say. It writes
 > only the hash. Sessions the framework issues end on that new hash; a session
@@ -125,11 +126,16 @@ password refused at registration cannot be set by resetting (#1399).
 
 ### Make the link single-use
 
-The helpers above verify signature and expiry only, so **the link stays usable
-for its full TTL** — including after the password has been changed. A copy of
+`confirm_password_reset_pool` writes only while `password_changed_at` is older
+than the link, and stamps it. So any password change, this reset included, ends
+every older link: a replay gets `Err(Expired)`.
+
+The `_into` form has no such column, so **its link stays usable for its full
+TTL** — including after the password has been changed. A copy of
 the email in a shared inbox, a forwarded message, or a support ticket with the
 mail pasted in is a working account takeover until the token expires, at a point
 where the legitimate user has finished and has no reason to suspect anything.
+Two clicks at the same moment can also both pass the time check.
 
 Pass a cache and the token is consumed on first use:
 
@@ -217,7 +223,8 @@ supplies the rest:
 
 - A **secret** (a stable app key; 32 bytes by convention).
 - A **mailer** to send the links — `rustango::email` ships `ConsoleMailer`,
-  `SmtpMailer`, and `InMemoryMailer` (handy in tests).
+  `FileMailer`, `NullMailer`, `InMemoryMailer` (handy in tests) and, with the
+  `email-smtp` feature, `SmtpMailer`.
 - A **user table** with the columns each flow needs (email for verify/magic-link
   lookup; a password-hash column for reset; a "verified" column you own).
 - The **callback routes** that receive the click and the session minting for

@@ -19,7 +19,7 @@ use crate::sql::{Auto, ExecError, Pool};
 /// A tenant-scoped MCP agent. Authenticates with a `prefix.secret`
 /// credential; the secret half is argon2id-hashed in `secret_hash` and
 /// never stored or returned in the clear.
-#[derive(crate::Model, Debug, Clone)]
+#[derive(crate::Model, Clone)]
 #[rustango(
     table = "rustango_agents",
     display = "name",
@@ -65,6 +65,8 @@ pub struct Agent {
     #[rustango(default = "'{}'")]
     pub data: serde_json::Value,
 }
+
+redacted_debug!(Agent { id, name, secret_prefix, active, created_at, secret_rotated_at, user_id, data; secret_hash });
 
 impl Agent {
     /// Whether this user key was minted with pinned skills. A scoped key
@@ -125,18 +127,14 @@ async fn generate_credential() -> Result<(String, String, String), AgentError> {
 
     let mut prefix_bytes = [0u8; 4];
     OsRng.fill_bytes(&mut prefix_bytes);
-    let prefix = to_hex(&prefix_bytes);
+    let prefix = crate::hex::hex_encode(&prefix_bytes);
     let mut secret_bytes = [0u8; 16];
     OsRng.fill_bytes(&mut secret_bytes);
-    let secret = to_hex(&secret_bytes);
+    let secret = crate::hex::hex_encode(&secret_bytes);
     let hash = super::password::hash_async(&secret)
         .await
         .map_err(|e| AgentError::Secret(e.to_string()))?;
     Ok((format!("{prefix}.{secret}"), prefix, hash))
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Create a new agent with a freshly generated credential. The returned
@@ -889,7 +887,7 @@ async fn unique_key_name(pool: &Pool, user_id: i64) -> Result<String, AgentError
     for _ in 0..6 {
         let mut b = [0u8; 5];
         OsRng.fill_bytes(&mut b);
-        let name = format!("uk_{user_id}_{}", to_hex(&b));
+        let name = format!("uk_{user_id}_{}", crate::hex::hex_encode(&b));
         let taken: Vec<Agent> = Agent::objects()
             .filter("name", name.clone())
             .limit(1)

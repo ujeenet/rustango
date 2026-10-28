@@ -266,6 +266,14 @@ fn tenancy_feature_on_fullstack_compiles() {
     );
 }
 
+/// `--features mcp` mounts the MCP router, on both template shapes.
+#[test]
+#[ignore = "compiles rustango; run with --ignored"]
+fn mcp_feature_compiles() {
+    assert_compiles_with("tenant", &["--features", "mcp"], &[], "mcp-tenant");
+    assert_compiles_with("fullstack", &["--features", "mcp"], &[], "mcp-fullstack");
+}
+
 // ------------------------------------------------------------ run it
 
 /// Status line and headers of a signed-out `GET path` on the apex.

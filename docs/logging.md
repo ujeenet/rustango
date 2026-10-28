@@ -1,8 +1,7 @@
 # Logging
 
 Logs are how a running app tells you what it did. **Rustango** builds on
-[`tracing`](https://docs.rs/tracing) — the same shape as Laravel's logging
-channels, but structured: an event carries named fields
+[`tracing`](https://docs.rs/tracing), so logs are structured: an event carries named fields
 (`status=500`, `tenant=acme`) rather than a formatted sentence, so a log
 aggregator can filter on them.
 
@@ -128,7 +127,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::errors` | An error-page template that failed to render, or a template dir that did not load |
 | `rustango::forms` | `DynamicForm` values accepted now but refused in a later release |
 | `rustango::auth_flows` | Single-use auth links refused by the cache |
-| `rustango::aead` | A blank previous secret key |
+| `rustango::aead` | A blank previous secret key, or a dev secret key that cannot be saved |
 | `rustango::hmac_auth` | HMAC request auth setup |
 | `rustango::humanize` | Humanize filters |
 | `rustango::jobs` | Background job queues |
@@ -168,6 +167,10 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::tenancy::sweep` | Retention sweeps |
 | `rustango::viewset` | ViewSets mounted with open write actions |
 
+Console changes also go to `rustango::tenancy::operator_console::action`,
+one event per change, so `RUST_LOG=rustango::tenancy::operator_console::action=info`
+shows them alone.
+
 Those are the targets the framework names explicitly. Events that don't name
 one inherit their module path, which gives the same shape —
 `rustango::access_log` and `rustango::tracing_layer` are reachable exactly like
@@ -190,7 +193,7 @@ the rows above.
 | `json` | Production — one object per event, for Loki / CloudWatch / Datadog | `.json()` |
 
 All four render differently, which has not always been true: before
-#1480 `install()` called neither `.pretty()` nor `.compact()`, so both
+0.57.6 `install()` called neither `.pretty()` nor `.compact()`, so both
 values produced `full` output.
 
 ### Colour
@@ -222,9 +225,16 @@ rustango::logging::setup_for_env();
 Two display knobs are worth knowing: `.with_line_numbers()` adds source
 locations (useful in dev, noisy in prod), and `.without_targets()` hides the
 target column — do that only if you have given up on filtering by it.
+`.with_thread_ids()` adds the thread id, and `.with_color(Color::Never)` sets
+colour in code. Under `#[rustango::main]` colour always follows the `auto`
+rule, because the macro installs first.
+
+A management verb (`dumpdata`, `migrate`, …) sends terminal logs to stderr,
+so its stdout stays clean: `cargo run -- dumpdata > fixtures.json` works.
+The server keeps logging to stdout.
 
 > Each format value reaches its own formatter. `compact` used to be
-> accepted and then render as the default — that is fixed (#1480).
+> accepted and then render as the default — that is fixed.
 
 ## Configuring logging from settings
 
@@ -295,9 +305,7 @@ doesn't matter: the install happens at `run()`, against the final settings.
 >
 > Without it the `[logging]` section is read and discarded. That used to be
 > silent; `install()` now warns on stderr and through `tracing` when it finds a
-> subscriber already in place ([#1465]).
-
-[#1465]: https://github.com/ujeenet/rustango/issues/1465
+> subscriber already in place.
 
 Any key can be overridden per-deployment with an environment variable, using
 the section and key as path segments:
@@ -354,7 +362,7 @@ let app = router.access_log(AccessLogLayer::default());
 ```
 
 ```text
-INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12 client.address=192.0.2.1 tenant=acme
+INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12.4 client.address=192.0.2.1 tenant=acme
 ```
 
 The level carries meaning, so alerting can key on it:
@@ -379,10 +387,14 @@ AccessLogLayer::default()
 to `.real_ip(layer)`; a layer on the api router runs too late.
 
 Credential-bearing query params are masked with `[redacted]` before the line is
-written — `password`, `passwd`, `token`, `secret`, `api_key`, `apikey`,
-`access_token`, `refresh_token`, `signature`, `auth`. Extend with
-`.redact_additional("session_id")`, or replace the whole list with
-`.redact(vec![...])`. This covers **query strings only**; see
+written. A key is masked when it holds a secret word, matched by word, so
+`api_key`, `reset_token` and `X-Api-Key` all count. The words include
+`password`, `pass`, `pwd`, `token`, `jwt`, `secret`, `key`, `signature`,
+`auth`, `credential`, `cookie`, `session`, `otp`, plus the OAuth names `code`,
+`state` and `assertion`. Extend with `.redact_additional("ref")`, or replace
+the whole list with `.redact(vec![...])`; `token`, `signature` and `code` stay
+masked either way. The request span's `url.query` is masked the same way.
+This covers **query strings only**; see
 [security.md](security.md#keeping-secrets-out-of-your-logs) for the rest.
 
 ## Which tenant was that?
@@ -410,9 +422,7 @@ AccessLogLayer::default().tenant_field(TenantField::Off)    // tenant=-
 
 > **The request path only.** A background job runs outside the request that
 > enqueued it and has no tenant to log — the slot is per-task and
-> `tokio::spawn` does not inherit it. Tracked in
-> [#1229](https://github.com/ujeenet/rustango/issues/1229) /
-> [#1223](https://github.com/ujeenet/rustango/issues/1223).
+> `tokio::spawn` does not inherit it. This is a known gap.
 
 ## Request spans and OpenTelemetry
 
@@ -446,7 +456,7 @@ the *span*, every event emitted during the request — including the ORM's —
 carries them in span context, with no subsystem knowing what a tenant is.
 
 **`Cli` installs it for you**, on every serving path, together with the access
-log. Before #1480 nothing in the framework mounted it, so a `tracing::info!` in
+log. Before 0.57.6 nothing in the framework mounted it, so a `tracing::info!` in
 a handler had no enclosing span — no tenant, no correlation — which is what
 made handler logs read as loose, context-free lines.
 

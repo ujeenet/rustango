@@ -272,58 +272,66 @@ impl CachePageLayer {
         self
     }
 
-    /// The key this layer writes for a `GET` of `page`, built by the
-    /// layer's own key function. The tenant is ignored when the layer
-    /// does not key on tenants.
+    /// The key this layer writes for a `GET` of `page` at `generation`,
+    /// built by the layer's own key function.
     #[must_use]
-    pub(crate) fn key_for(&self, page: &PageKey) -> String {
-        let tenant = if tenant_keyed(self.tenant_agnostic) {
-            page.tenant.as_deref()
-        } else {
-            None
-        };
+    pub(crate) fn key_for(&self, page: &PageKey, generation: u64) -> String {
         build_key(
             &self.key_prefix,
             "GET",
             &page.path,
             &page.query,
             &page.host,
-            tenant,
+            self.page_tenant(page),
             self.vary_on
                 .iter()
                 .map(|name| (name.as_str(), page.vary_value(name))),
             None,
+            generation,
         )
     }
 
-    /// Delete the cached `GET` response of every page given, from the
-    /// layer's own cache. Pass one [`PageKey`] per `vary_on` value set.
+    /// The page's tenant, or `None` when the layer does not key on tenants.
+    fn page_tenant<'a>(&self, page: &'a PageKey) -> Option<&'a str> {
+        if tenant_keyed(self.tenant_agnostic) {
+            page.tenant.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// Purge every cached variant of each page's path: any query
+    /// string, any vary value, GET and QUERY alike.
     ///
-    /// Only the exact query string and vary values given are purged: the
-    /// key holds them raw, not sorted or decoded. Other variants (say
-    /// `?utm_source=x`) stay until the layer's timeout.
+    /// Bumps a per-path generation counter that every key of the path
+    /// carries, so older entries are never read again and expire on
+    /// their own. The entry for the exact query and vary values given
+    /// is deleted too.
     ///
     /// # Errors
-    /// The cache backend's delete error.
+    /// The cache backend's `incr` or delete error.
     pub async fn invalidate<'a, I>(&self, pages: I) -> Result<(), CacheError>
     where
         I: IntoIterator<Item = &'a PageKey>,
     {
         let keyed = tenant_keyed(self.tenant_agnostic);
-        let keys: Vec<String> = pages
-            .into_iter()
-            .inspect(|p| {
-                if keyed && p.tenant.is_none() {
-                    // Such a page is never cached, so this deletes nothing.
-                    tracing::warn!(
-                        target: "rustango::cache_page",
-                        path = %p.path,
-                        "invalidate: page has no tenant but the layer keys on it"
-                    );
-                }
-            })
-            .map(|p| self.key_for(p))
-            .collect();
+        let mut keys = Vec::new();
+        for p in pages {
+            if keyed && p.tenant.is_none() {
+                // Such a page is never cached, so this deletes nothing.
+                tracing::warn!(
+                    target: "rustango::cache_page",
+                    path = %p.path,
+                    "invalidate: page has no tenant but the layer keys on it"
+                );
+            }
+            let counter = generation_key(&self.key_prefix, &p.path, &p.host, self.page_tenant(p));
+            // A long TTL, not `None`: a backend may give `None` its short
+            // default, and a counter that expired would bring older entries back.
+            let now = self.cache.incr(&counter, 1, Some(GENERATION_TTL)).await?;
+            let before = u64::try_from(now.saturating_sub(1)).unwrap_or(0);
+            keys.push(self.key_for(p, before));
+        }
         let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
         self.cache.delete_many(&refs).await
     }
@@ -374,6 +382,7 @@ impl PageKey {
     }
 
     /// The request's value of a `vary_on` header. Names are case-insensitive.
+    /// A header sent several times is its values joined by `\n`, in order.
     #[must_use]
     pub fn vary(mut self, name: impl AsRef<str>, value: impl Into<String>) -> Self {
         self.vary
@@ -502,13 +511,23 @@ where
                 PageTenant::Slug(slug) => Some(slug),
                 PageTenant::NoTenant => None,
             };
-            let key = compute_cache_key(
+            let (host, uri) = request_page(&req);
+            let counter = generation_key(&prefix, uri.path(), host, tenant.as_deref());
+            // Unknown generation: a purged page could be served, so bypass.
+            let Ok(generation) = read_generation(&cache, &counter).await else {
+                return inner.call(req).await;
+            };
+            // A `vary_on` value that is not UTF-8 has no key of its own.
+            let Some(key) = compute_cache_key(
                 &prefix,
                 &req,
                 tenant.as_deref(),
                 &vary,
                 body_digest.as_deref(),
-            );
+                generation,
+            ) else {
+                return inner.call(req).await;
+            };
             let nonce = req.extensions().get::<crate::csp_nonce::Nonce>().cloned();
             let nonce = nonce.as_ref().map(crate::csp_nonce::Nonce::value);
 
@@ -737,14 +756,8 @@ fn tenant_keyed(tenant_agnostic: bool) -> bool {
     cfg!(feature = "tenancy") && !tenant_agnostic
 }
 
-/// The key of the request the layer is serving.
-fn compute_cache_key(
-    prefix: &str,
-    req: &Request<Body>,
-    tenant: Option<&str>,
-    vary_on: &[HeaderName],
-    body_digest: Option<&str>,
-) -> String {
+/// The request's host and full path, as its keys hold them.
+fn request_page(req: &Request<Body>) -> (&str, &axum::http::Uri) {
     // HTTP/2 sends `:authority`, not `Host`.
     let host = req
         .headers()
@@ -761,23 +774,71 @@ fn compute_cache_key(
         .extensions()
         .get::<axum::extract::OriginalUri>()
         .map_or(req.uri(), |o| &o.0);
-    build_key(
+    (host, uri)
+}
+
+/// The key of the request the layer is serving; `None` when a `vary_on`
+/// value is not UTF-8, so it cannot share the missing header's entry.
+fn compute_cache_key(
+    prefix: &str,
+    req: &Request<Body>,
+    tenant: Option<&str>,
+    vary_on: &[HeaderName],
+    body_digest: Option<&str>,
+    generation: u64,
+) -> Option<String> {
+    let (host, uri) = request_page(req);
+    let values = vary_on
+        .iter()
+        .map(|name| Some((name.as_str(), vary_value(req.headers(), name)?)))
+        .collect::<Option<Vec<_>>>()?;
+    Some(build_key(
         prefix,
         req.method().as_str(),
         uri.path(),
         uri.query().unwrap_or(""),
         host,
         tenant,
-        vary_on.iter().map(|name| {
-            let v = req
-                .headers()
-                .get(name)
-                .and_then(|h| h.to_str().ok())
-                .unwrap_or("");
-            (name.as_str(), v)
-        }),
+        values.iter().map(|(n, v)| (*n, v.as_str())),
         body_digest,
-    )
+        generation,
+    ))
+}
+
+/// Every value of `name`, in order, joined by `\n`: HTTP/2 sends each
+/// cookie in its own field. `\n` cannot occur in a value, so the join
+/// is unambiguous, and one value keys as before.
+fn vary_value(headers: &HeaderMap, name: &HeaderName) -> Option<String> {
+    let mut out = String::new();
+    for (i, v) in headers.get_all(name).iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(v.to_str().ok()?);
+    }
+    Some(out)
+}
+
+/// How long a generation counter lives: ten years, so it outlives any page.
+const GENERATION_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 365 * 24 * 3600);
+
+/// The key of a path's generation counter, which every page key of the
+/// path carries. `#` never starts a page key's method part.
+fn generation_key(prefix: &str, path: &str, host: &str, tenant: Option<&str>) -> String {
+    let mut k = format!("{prefix}|#gen|");
+    write_lp(&mut k, path);
+    write_lp(&mut k, host);
+    write_lp(&mut k, tenant.unwrap_or(""));
+    k
+}
+
+/// The path's current generation; 0 when it was never invalidated.
+async fn read_generation(cache: &BoxedCache, key: &str) -> Result<u64, CacheError> {
+    Ok(cache
+        .get(key)
+        .await?
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0))
 }
 
 /// The only place the key format lives, as `prefix|<len>:<bytes>|...`.
@@ -797,6 +858,7 @@ fn build_key<'a>(
     tenant: Option<&str>,
     vary: impl Iterator<Item = (&'a str, &'a str)>,
     body_digest: Option<&str>,
+    generation: u64,
 ) -> String {
     use std::fmt::Write as _;
     let mut k = String::with_capacity(prefix.len() + 128);
@@ -815,6 +877,10 @@ fn build_key<'a>(
     // key. GET passes `None`, so its keys are unchanged.
     if let Some(digest) = body_digest {
         write_lp(&mut k, digest);
+    }
+    // Generation 0 adds nothing, so keys written before the counter stay valid.
+    if generation > 0 {
+        write_lp(&mut k, &format!("#gen:{generation}"));
     }
     k
 }

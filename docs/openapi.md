@@ -119,7 +119,7 @@ impl rustango::openapi::OpenApiSchema for Money {
 ## Paths from ViewSets
 
 `ViewSet::openapi_paths(prefix, schema_ref)` returns the `(path, PathItem)` pairs
-for the five standard CRUD routes — list, create, retrieve, update, partial
+for the six standard CRUD operations — list, create, retrieve, update, partial
 update, delete — wired to reference a registered component schema:
 
 ```rust
@@ -139,15 +139,29 @@ PATCH, DELETE), and it stays in sync with the ViewSet's configuration:
   configured style (`page`/`page_size`, `cursor`, or `limit`/`offset`).
 - **Filtering / search / ordering** → one `?field=` query param per
   `filter_fields` (with the available `__gt`/`__in`/… lookups described), plus
-  `?search=` and `?ordering=` when configured.
+  `?search=` when configured and `?ordering=` (below).
 - **`read_only()`** → the write operations (POST/PUT/PATCH/DELETE) are omitted.
 - **Request bodies** → inline schemas of the fields the ViewSet writes: no
   `Auto` id, `read_only` or soft-delete column; `write_only` fields included;
   nothing required on PATCH. Responses reference the registered schema. A field
   a filter backend pins per request still shows (and may show required); the
   server ignores the body's value for it.
-- **Path param** → `{pk}` typed from the model's primary key.
-- **`operationId`** → `list_post`, `create_post`, … (snake-cased per action).
+- **Bodies and errors** → create, PUT and PATCH accept JSON or urlencoded
+  bodies and document `422 validation_failed`, `400` for a malformed body and
+  `413` for one too large. The create operation describes the bulk array form
+  in its text (the schemas stay one row). List documents a `400` when its
+  filters can refuse a value; retrieve and DELETE document `400` for a
+  malformed pk.
+- **Gates** → `403` (and `401` with `tenancy`) on an action with permission
+  codenames, and `429` with `Retry-After` on an action with a throttle.
+- **List params** → `page_size` names the real `max_page_size` cap.
+  `?ordering=` is listed on every ViewSet except cursor-paginated ones, which
+  always sort by the cursor column. Binary fields are `format: hex`, as the
+  server reads and writes them.
+- **Path param** → `{pk}` typed from the model's primary key; `.pk_param(name)`
+  renames it.
+- **`operationId`** → `list_post`, `create_post`, `retrieve_post`, `update_post`,
+  `partial_update_post`, `destroy_post` (action + the snake-cased schema name).
 
 > The ViewSet itself is documented in the [ViewSets guide](viewsets.md).
 
@@ -170,7 +184,9 @@ let app = axum::Router::new()
 ```
 
 The viewer pages are tiny HTML shells that load Swagger UI / Redoc from a CDN
-(`unpkg` / `jsdelivr`) — no JS is bundled into **Rustango**. For an air-gapped
+(`unpkg` / `jsdelivr`), each pinned to an exact version with a Subresource
+Integrity hash — no JS is bundled into **Rustango**. They fetch the spec next to
+themselves, so you can nest the router under any prefix. For an air-gapped
 deployment, write `spec.to_json()` to a file at startup and self-host the viewer
 assets from your own static dir.
 
@@ -204,7 +220,10 @@ let json = spec.to_json();   // pretty-printed OpenAPI 3.1
 ```
 
 `OpenApiSpec` also takes `.contact(...)`, `.license(...)`, `.add_tag(...)`, and
-multiple `.server(...)` entries.
+multiple `.server(...)` entries. `Operation` adds `.description`, `.parameter`,
+`.request_body(RequestBody::json(..) / ::form(..))` and `.deprecated()`;
+`Parameter` has `path` / `query` / `header` constructors; `Response` adds
+`.header(name, schema)`.
 
 ---
 

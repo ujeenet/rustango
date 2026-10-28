@@ -156,10 +156,13 @@ let api = axum::Router::new()
 Le routeur authentifié monte : `POST {prefix}` (JSON-RPC), `GET {prefix}` (SSE
 notifications), `POST {prefix}/token` (credential → JWT), `POST {prefix}/oauth/token`
 (OAuth 2.1), et les deux documents de découverte `.well-known/*`. Il signe les
-tokens d'agent avec `RUSTANGO_SESSION_SECRET`.
+tokens d'agent avec `RUSTANGO_SESSION_SECRET`. Si elle est absente ou fait moins
+de 32 octets, il avertit et utilise une clé aléatoire par processus : les tokens
+ne survivent pas à un redémarrage.
 
-Le handshake `initialize` est un simple POST JSON-RPC et fonctionne sur
-n'importe quel montage :
+Le handshake `initialize` est un simple POST JSON-RPC. Sur le montage
+authentifié, chaque POST exige un jeton Bearer, `initialize` et `ping` compris ;
+un appel sans jeton reçoit `401`.
 
 ```json
 // → POST /mcp
@@ -170,9 +173,18 @@ n'importe quel montage :
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.61.7" },
-    "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
+    "serverInfo": { "name": "rustango", "version": "0.61.8" },
+    "capabilities": { "tools": { "listChanged": true }, "prompts": { "listChanged": true },
+                      "resources": { "listChanged": true, "subscribe": false },
+                      "logging": {}, "completions": {} } } }
 ```
+
+Pour donner aux agents des consignes valables pour tout le serveur, appelez
+`rustango::mcp::register_instructions("…")` au démarrage. Le texte est envoyé
+comme `instructions` dans la réponse à `initialize` ; sans appel, le champ est
+omis. Plusieurs appels (une bibliothèque et son application, par exemple) sont
+joints par une ligne vide dans l'ordre des appels ; un texte vide ou répété est
+ignoré.
 
 ---
 
@@ -215,8 +227,10 @@ Sur le chemin de la clé brute, le serveur vérifie le secret (argon2, avec un
 petit cache local au processus pour ne pas recalculer le hash à chaque requête),
 revérifie la validité et résout les grants **à chaque requête** — une clé
 appartenant à un utilisateur reflète toujours le RBAC en vigueur de son
-propriétaire, et une révocation s'applique immédiatement au lieu d'attendre
-l'expiration d'un JWT. En production, définissez
+propriétaire. Le chemin JWT fait de même : chaque requête revérifie que l'agent
+(et son propriétaire) est actif et que son secret n'a pas tourné, et lit les
+grants dans les lignes, pas dans les claims. Une révocation s'applique donc tout
+de suite sur les deux chemins. En production, définissez
 `[mcp] rate_limit_per_minute` pour borner le travail de vérification. L'effet,
 vérifié de bout en bout :
 
@@ -234,8 +248,9 @@ assert_eq!(out["structuredContent"]["sum"], 5);
 ```
 
 Les tokens sont épinglés au tenant : un token émis pour `acme` est rejeté contre
-tout autre tenant (replay cross-tenant → 401). Révoquez un agent et son JTI est
-mis sur liste noire.
+tout autre tenant (replay cross-tenant → 401). Un secret tourné ou un agent
+désactivé fait refuser ses tokens à la requête suivante ; un JTI révoqué via le
+`JwtLifecycle` aussi.
 
 ### Clés détenues par l'utilisateur (capacités pilotées par permissions)
 
@@ -274,7 +289,7 @@ gardés par le RBAC, sans aucun changement à ces handlers. L'utilisateur
 propriétaire voyage dans le claim `uid` du token ; un handler de tool le lit
 comme `ctx.agent.user_id` pour restreindre le travail à ce membre. Révoquez de
 nouvelles capacités en changeant les permissions de l'utilisateur (elles se
-re-résolvent au prochain token) ; révoquez la clé elle-même avec
+re-résolvent à la requête suivante) ; révoquez la clé elle-même avec
 `revoke_user_key_pool(&pool, user_id, agent_id)`. Listez les clés d'un membre
 avec `list_user_keys_pool(&pool, user_id)`.
 
@@ -286,7 +301,7 @@ reçoit l'intégralité des droits du propriétaire ; une clé à portée limit�
 (`skills = &["coach", …]`) est restreinte à ceux-ci, et ne reçoit plus rien une fois son dernier skill retiré. La résolution re-intersecte
 toujours la portée avec les droits *courants* — de sorte qu'une clé ne peut
 jamais dépasser les permissions du propriétaire, et perdre une permission
-rétrécit chaque clé à la prochaine émission. Restreindre la portée à un skill
+rétrécit chaque clé à la requête suivante. Restreindre la portée à un skill
 auquel le propriétaire n'a pas droit est refusé à la création.
 
 Les agents autonomes ne sont pas affectés — un agent machine (`user_id = None`)
@@ -332,9 +347,9 @@ created key #7 for user `alice` in tenant `acme` (label `Alice's phone`, scope f
 $ cargo run -- create-user-key acme alice --label "coach bot" --skill coach
 ```
 
-La clé d'Alice résout désormais les tools du skill `coach` à chaque émission de
-token parce qu'elle détient `mcp.coach`. Changez ses permissions et les
-capacités se re-résolvent à son prochain token ; révoquez la clé elle-même avec
+La clé d'Alice résout désormais les tools du skill `coach` à chaque requête
+parce qu'elle détient `mcp.coach`. Changez ses permissions et les
+capacités se re-résolvent à sa requête suivante ; révoquez la clé elle-même avec
 `revoke-user-key`. Le même id de clé se distingue des agents machine dans l'admin
 du tenant (la liste `Agent` affiche `user_id`).
 
@@ -351,7 +366,7 @@ optionnel (`GET {prefix}`) pour les notifications serveur→client. Méthodes :
 
 | Méthode | Auth | But |
 |---|---|---|
-| `initialize` · `ping` | non | handshake + liveness |
+| `initialize` · `ping` | sur le montage authentifié | handshake + liveness |
 | `tools/list` · `tools/call` | oui | découvrir + invoquer les tools (accordés seulement) |
 | `prompts/list` · `prompts/get` | oui | prompts dérivés des skills |
 | `resources/list` · `resources/read` · `resources/templates/list` | oui | resources statiques + de skill |
@@ -366,6 +381,10 @@ comme `-32002` (`TOOL_NOT_FOUND`), `-32003` (`TOOL_FORBIDDEN`), `-32602`
 (`INVALID_PARAMS`). Les tools longs rapportent la progression et honorent
 l'annulation via le `McpContext`.
 
+Chaque `tools/call` écrit une entrée de journal d'audit avec le nom du tool et ses
+arguments. Les valeurs sous des clés sensibles (`password`, `token`, `secret`, …)
+sont masquées. Un échec d'audit ne fait qu'avertir ; l'appel s'exécute quand même.
+
 ---
 
 ## Réglages
@@ -374,12 +393,13 @@ La section `[mcp]` (lue par `secure_tenant_router_from_settings`) :
 
 ```toml
 [mcp]
-prefix                = "/mcp"   # URL prefix the router mounts under
+prefix                = "/mcp"   # not applied by the router: pass
+                                 # settings.mcp.prefix() to .nest() yourself
 token_ttl_secs        = 900      # agent access-token lifetime (15 min)
 enable_sse            = true     # serve the GET {prefix} SSE stream
 allowed_origins       = []       # CORS allow-list (empty = same-origin only)
 rate_limit_per_minute = 0        # per-IP cap (0/unset = unlimited)
-max_tools_listed      = 0        # tools/list page size (0/unset = unlimited)
+max_tools_listed      = 0        # page size of every */list (0/unset = unlimited)
 max_body_bytes        = 1048576  # JSON-RPC body cap — raise for tools that
                                  # accept inline payloads (base64 uploads)
 ```

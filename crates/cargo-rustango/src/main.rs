@@ -41,10 +41,12 @@
 //!       views.rs
 //!       urls.rs
 //!
-//! Once written, the user typically runs:
+//! Once written, `new` prints `templates::next_steps`: cargo on the host,
+//! compose for the database only.
 //!
-//!   $ cd `<name>` && docker compose up -d
-//!   $ cargo run -- migrate
+//!   $ cd `<name>` && cp .env.example .env   # `postgres` -> `localhost`
+//!   $ docker compose up -d --no-deps postgres
+//!   $ cargo run -- makemigrations && cargo run -- migrate
 //!   $ cargo run
 
 use std::fs;
@@ -447,18 +449,9 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
 
     println!();
     println!("done. next:");
-    println!("  cd {}", parsed.name);
-    println!("  cp .env.example .env");
-    // SQLite is a file the first migrate creates — nothing to boot.
-    if parsed.backend.service().is_some() {
-        println!("  docker compose up -d");
+    for line in templates::next_steps(&parsed.name, parsed.template, parsed.backend).lines() {
+        println!("  {line}");
     }
-    println!(
-        "  cargo run -- makemigrations  # generate schema migrations (incl. system/ framework tables)"
-    );
-    println!("  cargo run -- migrate         # apply them");
-    println!("  cargo run                    # boot the HTTP server");
-    println!("  cargo run -- --help          # full verb list");
     Ok(())
 }
 
@@ -780,7 +773,11 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     )?;
     write(root, "src/models.rs", &templates::models_rs(template))?;
     write(root, "src/views.rs", templates::VIEWS_RS)?;
-    write(root, "src/urls.rs", &templates::urls_rs(template))?;
+    write(
+        root,
+        "src/urls.rs",
+        &templates::urls_rs_for(template, &args.features),
+    )?;
 
     // Every project gets an empty `system/migrations/` folder — the
     // framework's own tables are NOT shipped as hardcoded bootstrap JSON.
@@ -949,6 +946,15 @@ mod tests {
                         "config/staging_settings.toml",
                         templates::config_staging_settings_toml(&name, backend),
                     ),
+                    (
+                        "docker-compose.yml",
+                        templates::docker_compose(&name, backend),
+                    ),
+                    ("Dockerfile", templates::dockerfile_prod(&name)),
+                    ("Dockerfile.dev", templates::dockerfile_dev().to_owned()),
+                    (".dockerignore", templates::DOCKERIGNORE.to_owned()),
+                    (".gitignore", templates::GITIGNORE.to_owned()),
+                    ("rust-toolchain.toml", templates::RUST_TOOLCHAIN.to_owned()),
                 ];
                 if !tuned {
                     files.push((
@@ -1075,7 +1081,7 @@ mod tests {
     /// no driver pool, and puts it behind a login (#1627).
     #[test]
     fn fullstack_mounts_a_gated_driver_neutral_admin() {
-        let urls = templates::urls_rs(Template::Fullstack);
+        let urls = templates::urls_rs_for(Template::Fullstack, &[]);
         let main = templates::main_rs(Template::Fullstack, "demo");
         assert!(
             urls.contains("pub fn admin_router(pool: Pool, settings: &Settings)"),
@@ -1252,7 +1258,8 @@ mod tests {
     #[test]
     fn dockerignore_excludes_target_and_secrets() {
         let body = templates::DOCKERIGNORE;
-        for needle in ["target/", ".env", "*.db", ".git/"] {
+        // `var/` holds the generated session keys and the MCP agent secret.
+        for needle in ["target/", ".env", "*.db", ".git/", "\nvar/"] {
             assert!(
                 body.contains(needle),
                 "`.dockerignore` must exclude `{needle}`, got: {body}"
@@ -1309,7 +1316,7 @@ mod tests {
     fn no_main_template_mounts_welcome_over_its_own_root() {
         for template in [Template::Api, Template::Fullstack, Template::Tenant] {
             let main = templates::main_rs(template, "my_app");
-            let routes_root = templates::urls_rs(template).contains(".route(\"/\",");
+            let routes_root = templates::urls_rs_for(template, &[]).contains(".route(\"/\",");
             assert!(
                 !(routes_root && main.contains(".with_welcome()")),
                 "template {template:?} routes `/` and also chains `.with_welcome()`"
@@ -1606,7 +1613,7 @@ mod tests {
     /// `[admin]` and `[brand]` reach the generated admin.
     #[test]
     fn fullstack_admin_reads_settings() {
-        let urls = templates::urls_rs(Template::Fullstack);
+        let urls = templates::urls_rs_for(Template::Fullstack, &[]);
         assert!(
             urls.contains("admin::Builder::from_settings(pool, settings)"),
             "{urls}"
@@ -1634,6 +1641,133 @@ mod tests {
                 "{template:?}: {csrf}"
             );
         }
+    }
+
+    /// `--features mcp` mounts `/mcp`: settings-aware and authed on the
+    /// tenant template, on the serving pool elsewhere; nothing without it.
+    #[test]
+    fn mcp_feature_mounts_the_router() {
+        let mcp = ["mcp".to_owned()];
+        let tenant = templates::urls_rs_for(Template::Tenant, &mcp);
+        assert!(
+            tenant.contains("rustango::mcp::secure_tenant_router_from_settings(&mcp)"),
+            "{tenant}"
+        );
+        // `startapp` merges after the last `Router::new()`: it must stay in `api()`.
+        assert_eq!(tenant.matches("Router::new()").count(), 1, "{tenant}");
+        let main = templates::main_rs_for(Template::Tenant, "myapp", &mcp);
+        assert!(!main.contains("mcp"), "{main}");
+        for template in [Template::Api, Template::Fullstack] {
+            let urls = templates::urls_rs_for(template, &mcp);
+            assert!(urls.contains("rustango::mcp::router(pool)"), "{urls}");
+            let main = templates::main_rs_for(template, "myapp", &mcp);
+            assert!(
+                main.contains(".nest_with(\"/mcp\", urls::mcp)"),
+                "{template:?}: {main}"
+            );
+        }
+        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
+            assert!(!templates::urls_rs_for(template, &[]).contains("mcp"));
+            assert!(!templates::main_rs_for(template, "myapp", &[]).contains("mcp"));
+        }
+    }
+
+    /// The models file imports the prelude, so the ORM traits are in scope.
+    #[test]
+    fn models_use_the_prelude() {
+        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
+            let models = templates::models_rs(template);
+            assert!(models.contains("use rustango::prelude::*;"), "{models}");
+        }
+    }
+
+    /// The printed steps run cargo on the host: the URL names `localhost`,
+    /// and compose starts only the database, so 8080 stays free.
+    #[test]
+    fn next_steps_run_cargo_on_the_host() {
+        for backend in [Backend::Postgres, Backend::Mysql, Backend::Sqlite] {
+            let steps = templates::next_steps("myapp", Template::Fullstack, backend);
+            assert!(steps.contains("cp .env.example .env"), "{steps}");
+            assert!(
+                !steps.lines().any(|l| l.trim_end() == "docker compose up -d"
+                    || l.contains("docker compose up -d ") && !l.contains("--no-deps")),
+                "compose would start the rust service on 8080:\n{steps}"
+            );
+            match backend.service() {
+                Some(svc) => {
+                    assert!(
+                        steps.contains(&format!("docker compose up -d --no-deps {svc}")),
+                        "{steps}"
+                    );
+                    assert!(
+                        steps.contains(&format!("`{svc}` -> `localhost`")),
+                        "{steps}"
+                    );
+                }
+                None => assert!(!steps.contains("docker compose"), "{steps}"),
+            }
+            let readme = templates::readme("myapp", Template::Fullstack, backend);
+            let host = steps.strip_prefix("cd myapp\n").expect("starts with cd");
+            assert!(readme.contains(host), "README path B drifted:\n{readme}");
+        }
+    }
+
+    /// The bare admin lets only superusers in, so every hint that makes the
+    /// first account must make a superuser.
+    #[test]
+    fn create_admin_hints_make_a_superuser() {
+        let main = templates::main_rs(Template::Fullstack, "myapp");
+        let urls = templates::urls_rs_for(Template::Fullstack, &[]);
+        let readme = templates::readme("myapp", Template::Fullstack, Backend::Postgres);
+        let steps = templates::next_steps("myapp", Template::Fullstack, Backend::Postgres);
+        for (file, body) in [
+            ("main", &main),
+            ("urls", &urls),
+            ("readme", &readme),
+            ("steps", &steps),
+        ] {
+            let hints: Vec<&str> = body
+                .lines()
+                .filter(|l| l.contains("create-admin"))
+                .collect();
+            assert!(
+                !hints.is_empty(),
+                "{file} names no create-admin step:\n{body}"
+            );
+            for line in hints {
+                assert!(line.contains("--superuser"), "{file}: `{line}`");
+            }
+        }
+        for template in [Template::Api, Template::Tenant] {
+            let steps = templates::next_steps("myapp", template, Backend::Postgres);
+            assert!(!steps.contains("create-admin"), "{template:?}: {steps}");
+        }
+    }
+
+    /// `rust-toolchain.toml` names `stable`, which the `rust:1` images do not
+    /// install under that name; pin both images to their own toolchain.
+    #[test]
+    fn images_use_their_own_toolchain() {
+        for body in [
+            templates::dockerfile_dev().to_owned(),
+            templates::dockerfile_prod("myapp"),
+        ] {
+            assert!(
+                body.contains("ENV RUSTUP_TOOLCHAIN=$RUST_VERSION"),
+                "{body}"
+            );
+        }
+    }
+
+    /// A fresh project has no `Cargo.lock` until cargo runs once.
+    #[test]
+    fn dockerfile_locks_only_when_a_lockfile_exists() {
+        let body = templates::dockerfile_prod("myapp");
+        assert!(!body.contains("flags=\"--release --locked\""), "{body}");
+        assert!(
+            body.contains("if [ -f Cargo.lock ]; then flags=\"$flags --locked\"; fi"),
+            "{body}"
+        );
     }
 
     /// A fresh project generates the framework's tables before migrating.

@@ -10,7 +10,7 @@ use crate::core::{
     Assignment, CountQuery, DeleteQuery, FieldSchema, Filter, InsertQuery, ModelEntry, Op,
     SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
-use axum::extract::{Form, Path, Query, State};
+use axum::extract::{Form, Path, Query};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 
 use super::errors::AdminError;
@@ -142,7 +142,7 @@ async fn gfk_ct_map(
 
 // ============================================================== INDEX
 
-pub(crate) async fn index(State(state): State<AppState>) -> Html<String> {
+pub(crate) async fn index(state: AppState) -> Html<String> {
     // Group registered models by app label. `resolved_app_label()`
     // returns the `#[rustango(app = "...")]` override, or infers one
     // from the module path. Models with no app label go to "Project".
@@ -314,12 +314,16 @@ impl FieldLookup {
 /// collapse into a "+N more" link (`?facet_show_all=<field>`).
 const FACET_TRUNCATE: usize = 15;
 
+/// Most values `?facet_show_all=<field>` reads, so a high-cardinality
+/// column never loads every distinct value.
+const FACET_SHOW_ALL_CAP: usize = 200;
+
 #[allow(clippy::too_many_lines)] // mostly linear HTML emission; splitting hurts readability
 pub(crate) async fn table_view(
     parts: axum::http::request::Parts,
     Path(table): Path<String>,
     Query(params): Query<HashMap<String, String>>,
-    State(state): State<AppState>,
+    state: AppState,
 ) -> Result<Html<String>, AdminError> {
     let model = resolve_model(&state, &table)?;
     let pk_field = model.primary_key();
@@ -988,16 +992,21 @@ async fn compute_facets(
         };
         let is_bool = field.ty == crate::core::FieldType::Bool;
         let show_all = show_all_facet == Some(field.name);
+        let cap = if show_all {
+            FACET_SHOW_ALL_CAP
+        } else {
+            FACET_TRUNCATE
+        };
         // One past the cap tells whether there are more (#2344).
-        let limit = (!show_all).then_some(FACET_TRUNCATE + 1);
+        let limit = Some(cap + 1);
         let mut facet_rows =
-            fetch_facet_counts(state, source.clone(), field, is_bool, limit).await?;
+            fetch_facet_counts(&state.pool, source.clone(), field, is_bool, limit).await?;
         let is_active = |r: &FacetRow| {
             active_field_filters.contains(&FieldLookup::param(field.name, &r.key, &r.raw))
         };
         let mut total_values = facet_rows.len();
         if !show_all && total_values > FACET_TRUNCATE {
-            total_values = fetch_facet_value_total(state, source, field).await?;
+            total_values = fetch_facet_value_total(&state.pool, source, field).await?;
             // The active value may sit past the cut: read it on its own.
             // The field's own filters select at most one value.
             if !facet_rows.iter().any(is_active) {
@@ -1015,7 +1024,8 @@ async fn compute_facets(
                         ..SelectQuery::new(model)
                     };
                     let extra =
-                        fetch_facet_counts(state, active_source, field, is_bool, Some(1)).await?;
+                        fetch_facet_counts(&state.pool, active_source, field, is_bool, Some(1))
+                            .await?;
                     // `?author=01` names a shown value in another spelling.
                     let extra: Vec<FacetRow> = extra
                         .into_iter()
@@ -1088,11 +1098,10 @@ async fn compute_facets(
                 "toggle_url": toggle_url,
             }));
         }
-        // Truncate to FACET_TRUNCATE values unless "show all" is on
-        // for this column. Active values always render, so one never
-        // hides behind the cutoff. They count toward the budget.
+        // Truncate to `cap` values. Active values always render, so
+        // one never hides behind the cutoff. They count toward the budget.
         let mut more_count: usize = 0;
-        if !show_all && total_values > FACET_TRUNCATE {
+        if total_values > cap {
             // Keep every active value + as many of the rest as fit.
             let mut active_first: Vec<serde_json::Value> = Vec::new();
             let mut rest: Vec<serde_json::Value> = Vec::new();
@@ -1103,10 +1112,13 @@ async fn compute_facets(
                     rest.push(v);
                 }
             }
-            let cap = FACET_TRUNCATE.saturating_sub(active_first.len());
-            let kept_rest_len = rest.len().min(cap);
-            more_count = total_values - active_first.len() - kept_rest_len;
-            active_first.extend(rest.into_iter().take(cap));
+            let room = cap.saturating_sub(active_first.len());
+            let kept_rest_len = rest.len().min(room);
+            // "Show all" has no further page to link to.
+            if !show_all {
+                more_count = total_values - active_first.len() - kept_rest_len;
+            }
+            active_first.extend(rest.into_iter().take(room));
             values = active_first;
         }
         let show_all_url = if more_count > 0 {
@@ -1234,16 +1246,16 @@ fn warn_scan_cap(table: &'static str, cap: usize) {
 }
 
 /// One facet value: the stored key, its URL form, the FK display name and the count.
-struct FacetRow {
+pub(crate) struct FacetRow {
     key: SqlValue,
-    raw: String,
+    pub(crate) raw: String,
     display: Option<String>,
-    count: i64,
+    pub(crate) count: i64,
 }
 
 /// How many distinct values (NULL included) `field` takes over `source`'s rows.
-async fn fetch_facet_value_total(
-    state: &AppState,
+pub(crate) async fn fetch_facet_value_total(
+    pool: &crate::sql::Pool,
     source: SelectQuery,
     field: &'static FieldSchema,
 ) -> Result<usize, AdminError> {
@@ -1262,7 +1274,7 @@ async fn fetch_facet_value_total(
             ),
         ],
     );
-    let row = crate::sql::fetch_aggregate_dict(&state.pool, &agg)
+    let row = crate::sql::fetch_aggregate_dict(pool, &agg)
         .await?
         .into_iter()
         .next()
@@ -1274,8 +1286,8 @@ async fn fetch_facet_value_total(
 
 /// `SELECT <col>, COUNT(*) … GROUP BY <col>` over `source`'s rows, most used
 /// first, at most `limit` values.
-async fn fetch_facet_counts(
-    state: &AppState,
+pub(crate) async fn fetch_facet_counts(
+    pool: &crate::sql::Pool,
     source: SelectQuery,
     field: &'static FieldSchema,
     is_bool: bool,
@@ -1292,7 +1304,7 @@ async fn fetch_facet_counts(
         OrderItem::column(field.column, false),
     ];
     agg.limit = limit.and_then(|n| i64::try_from(n).ok());
-    let rows = crate::sql::fetch_aggregate_dict(&state.pool, &agg).await?;
+    let rows = crate::sql::fetch_aggregate_dict(pool, &agg).await?;
     Ok(rows
         .into_iter()
         .map(|mut row| {
@@ -1736,7 +1748,7 @@ pub(crate) async fn autocomplete_view(
     parts: axum::http::request::Parts,
     Path(table): Path<String>,
     Query(params): Query<HashMap<String, String>>,
-    State(state): State<AppState>,
+    state: AppState,
 ) -> Result<axum::Json<serde_json::Value>, AdminError> {
     let model = resolve_model(&state, &table)?;
     let admin_cfg = admin_config_or_default(model);
@@ -1830,7 +1842,7 @@ pub(crate) async fn autocomplete_view(
 pub(crate) async fn detail_view(
     parts: axum::http::request::Parts,
     Path((table, pk_raw)): Path<(String, String)>,
-    State(state): State<AppState>,
+    state: AppState,
 ) -> Result<Html<String>, AdminError> {
     let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw).await?;
 
@@ -2045,7 +2057,7 @@ async fn user_roles_panel_ctx(state: &AppState, pk_raw: &str) -> Option<serde_js
 pub(crate) async fn create_form(
     parts: axum::http::request::Parts,
     Path(table): Path<String>,
-    State(state): State<AppState>,
+    state: AppState,
 ) -> Result<Html<String>, AdminError> {
     let model = resolve_model(&state, &table)?;
     if !state.can_add(model.table) {
@@ -2094,7 +2106,7 @@ async fn preload_gfk_cts(
 pub(crate) async fn create_submit(
     parts: axum::http::request::Parts,
     Path(table): Path<String>,
-    State(state): State<AppState>,
+    state: AppState,
     Form(form): Form<HashMap<String, String>>,
 ) -> Result<Response, AdminError> {
     let model = resolve_model(&state, &table)?;
@@ -2119,13 +2131,12 @@ pub(crate) async fn create_submit(
     let locked = state.locked_fields(model, AdminWrite::Add);
     let mut skip: Vec<&str> = locked.all().collect();
     skip.extend(FormLayout::of(model, &admin_cfg, false).unrendered(model));
-    // A defaulted field the form does not send is left to its column
-    // default; a sent empty value still means "" or NULL.
+    // A defaulted field the form does not send, or sends blank where blank
+    // is no value, is left to its column default; else "" means "" or NULL.
     skip.extend(
         model
             .scalar_fields()
-            .filter(|f| crate::forms::absent_takes_default(f, crate::forms::Encoding::Form))
-            .filter(|f| !form.contains_key(f.name))
+            .filter(|f| crate::forms::blank_takes_default(f, form.get(f.name).map(String::as_str)))
             .map(|f| f.name),
     );
     let mut collected = match forms::collect_insert_values(model, &form, &skip) {
@@ -2436,7 +2447,7 @@ pub(super) fn keep_echoed_lossy(
 pub(crate) async fn edit_form(
     parts: axum::http::request::Parts,
     Path((table, pk_raw)): Path<(String, String)>,
-    State(state): State<AppState>,
+    state: AppState,
 ) -> Result<Response, AdminError> {
     // No `{table}.change`: the save would be refused, so show the read-only detail.
     if state.is_read_only(resolve_model(&state, &table)?.table) {
@@ -2517,7 +2528,7 @@ pub(crate) async fn edit_form(
 pub(crate) async fn update_submit(
     parts: axum::http::request::Parts,
     Path((table, pk_raw)): Path<(String, String)>,
-    State(state): State<AppState>,
+    state: AppState,
     Form(form): Form<HashMap<String, String>>,
 ) -> Result<Response, AdminError> {
     let model = resolve_model(&state, &table)?;
@@ -2857,7 +2868,7 @@ async fn rollback_quietly(tx: crate::audit::PoolBoundTx<'_>, table: &str) {
 pub(crate) async fn delete_submit(
     parts: axum::http::request::Parts,
     Path((table, pk_raw)): Path<(String, String)>,
-    State(state): State<AppState>,
+    state: AppState,
 ) -> Result<Response, AdminError> {
     let model = resolve_model(&state, &table)?;
     if !state.can_delete(model.table) {
@@ -3044,7 +3055,7 @@ fn blocking_referrers(table: &str) -> Vec<String> {
 pub(crate) async fn action_submit(
     parts: axum::http::request::Parts,
     Path(table): Path<String>,
-    State(state): State<AppState>,
+    state: AppState,
     body: axum::body::Bytes,
 ) -> Result<Response, AdminError> {
     let model = resolve_model(&state, &table)?;

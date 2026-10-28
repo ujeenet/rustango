@@ -10,7 +10,9 @@ or answered with 401/403 (API flow) — before they ever reach the handler.
 > **Source:** `rustango::auth_decorators` (`login_required`, `login_required_or_401`,
 > `user_passes_test`, `superuser_required`, `active_required`,
 > `permission_required` + `_or_403` variants; `safe_next`, `extract_next`) —
-> behind the `tenancy` feature (the gates read the `SessionUser` extractor).
+> the gates are behind the `tenancy` feature (they read the `SessionUser`
+> extractor). `safe_next`, `extract_next`, `extract_next_named` and
+> `redirect_to_login` need only axum.
 >
 > **Runnable version:** the gating behavior is covered by the tested
 > [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_decorators.rs) —
@@ -84,7 +86,7 @@ let api = Router::new().route("/api/me", get(me)).layer(login_required_or_401())
 | `superuser_required(url)` | `superuser_required_or_403()` | `is_superuser && active` |
 | `user_passes_test(url, pred)` | `user_passes_test_or_403(pred)` | predicate over the `User` row |
 | `permission_required(url, codename)` † | `permission_required_or_403(codename)` | holds the permission codename |
-† `permission_required` is the one gate in this column that does not always redirect. An **anonymous** visitor gets the 302 to `login_url`; a visitor who *is* logged in but lacks the codename gets a bare **403**, with no redirect and no body (`auth_decorators.rs:560`). The other four redirect in every failure case.
+† `permission_required` is the one gate in this column that does not always redirect. An **anonymous** visitor gets the 302 to `login_url`; a visitor who *is* logged in but lacks the codename gets a bare **403**, with no redirect and no body. The other four redirect in every failure case.
 
 All are tower layers — `.layer(...)` them onto a router or sub-router.
 
@@ -153,8 +155,8 @@ async fn login_post(Query(q): Query<HashMap<String, String>>, /* … */) -> Resp
 ```
 
 `safe_next` only accepts same-origin, root-relative paths — it rejects absolute
-URLs, scheme-relative `//host`, backslash variants, and their percent-encoded
-forms:
+URLs, scheme-relative `//host`, backslash variants, their percent-encoded
+forms, control characters and empty values:
 
 ```rust
 assert_eq!(safe_next("/dashboard"),            Some("/dashboard".to_owned()));
@@ -179,6 +181,9 @@ assert_eq!(safe_next("%2F%2Fevil.example/x"),   None);   // decodes to //evil
   engine) — mount it under the tenant; an untenant'd route 500s.
 - The redirect's `?next=` is always percent-encoded, so CRLF / response-splitting
   can't leak into the `Location` header.
+- Writing your own gate? `redirect_to_login(login_url, "next", original)` builds
+  the same 302, and `extract_next_named(&q, field)` reads a field other than
+  `next`.
 
 
 ---

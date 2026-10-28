@@ -62,7 +62,7 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
-/// Wire under `/api`. Mount onto your `Cli::api(...)` router.
+/// `/healthz` and `/users/{username}`; `main.rs` mounts it at the root.
 #[must_use]
 pub fn router() -> Router {
     Router::new()

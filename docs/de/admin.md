@@ -158,6 +158,9 @@ und Zeilenanzahl sowie Facetten-Anzahlen aktualisieren sich. Filter, Suche, Sort
 und die Datumshierarchie fügen sich alle in der Query-Zeichenkette zusammen und lassen
 sich kombinieren.
 
+Eine Facetten-Karte zeigt bis zu 15 Werte; der Rest klappt in einen Link "+N more"
+(`?facet_show_all=<field>`) ein, der höchstens 200 auflistet.
+
 [![Die nach status=published gefilterte Beitragsliste: ein aktiver Filter-Chip, die passende hervorgehobene Facette, das Suchfeld und der Massenaktionsauswähler](../img/admin-list-filtered.png)](../img/admin-list-filtered.png)
 
 **Sortieren.** Klicke auf einen Spaltenkopf zum Sortieren; erneut klicken, um die
@@ -298,6 +301,20 @@ Wähle Zeilen mit den Kontrollkästchen aus, wähle die Aktion im Auswähler und
 nicht. Ein in `admin(actions = ...)` gelisteter Aktionsname ohne registrierten Handler
 erscheint schlicht nicht.
 
+Eine eigene Aktion wird wie eine Bearbeitung geprüft: `{table}.change` plus ein
+Objekt-Hook, der nach der Aktion benannt ist. Eine Aktion, die löscht, sollte das mit
+`register_action_with_perm(table, name, ActionPerm::Delete, handler)` sagen, dann
+braucht sie `{table}.delete` und führt stattdessen den `delete`-Hook aus. Sie braucht
+weiterhin `{table}.change` und wird als Bearbeitung auditiert und signalisiert.
+
+Ein `register_action`-Handler schreibt über seine eigene Verbindung, daher werden
+die Prüfpfad-Zeilen eines geprüften Modells danach geschrieben, nach bestem Bemühen.
+`register_tx_action(table, name, handler)` (und `register_tx_action_with_perm`)
+übergibt dem Handler stattdessen `&mut PoolTx`, sodass seine Schreibvorgänge und
+ihre Prüfpfad-Zeilen gemeinsam committen oder zurückrollen. Schreibe nur über
+diese Transaktion: Eine zweite Verbindung kann einen SQLite-Pool mit nur einer
+Verbindung blockieren.
+
 ---
 
 ## Prüfpfad
@@ -323,6 +340,9 @@ manipulationssicheren Fingerabdruck. Zwei Stellen zeigen es an:
   zeilenübergreifender Feed, neueste zuerst, mit Facetten-Karten für Entität / Operation
   / Quelle und einem Aufräumformular, um Einträge älter als N Tage zu bereinigen (was
   selbst als Prüfpfad-Eintrag erfasst wird).
+  Jede Facetten-Karte zeigt bis zu 15 Werte plus den aktiven; "+N more"
+  (`?facet_show_all=<col>`) listet höchstens 200, also filtere den Feed, um den
+  Rest zu erreichen.
 
 [![Der Activity-Feed: jede geprüfte Änderung über Modelle hinweg mit JSON-Diffs, Facetten-Karten nach Tabelle/Operation/Quelle und einem Aufräumformular](../img/admin-audit.png)](../img/admin-audit.png)
 
@@ -372,7 +392,9 @@ Drei weitere Registrierungsmakros hängen sich in das Verhalten eines registrier
   bindet eine zusätzliche Seite/Aktion unter `/<prefix>/posts/duplicate` ein. Der
   Handler ist ein asynchrones `fn(Pool, Request) -> Response`. (Reservierte Suffixe wie
   `new`, `__action`, `__autocomplete`, `{pk}`, `{pk}/edit`, `{pk}/delete` werden mit
-  einer Warnung übersprungen.)
+  einer Warnung übersprungen.) Unter `with_user_perms` braucht ein GET `{table}.view`
+  und ein POST/PUT/PATCH/DELETE `{table}.change`; ergänze `perm = "publish"`, um
+  `{table}.publish` zu verlangen.
 - **Queryset-Einschränkung** —
   `register_admin_queryset!("posts", hook)`, wobei `hook: fn(&Parts) -> Vec<Filter>`
   einschränkt, was eine Anfrage sehen kann (z. B. nur die Zeilen des aktuellen
@@ -381,7 +403,16 @@ Drei weitere Registrierungsmakros hängen sich in das Verhalten eines registrier
   `register_admin_object_permission!("posts", "change", check)`, wobei
   `check: fn(&Parts, Option<&Value>) -> bool` pro Zeile erlaubt oder verweigert.
   Eingebaute Handler konsultieren die Aktionen `add`, `change`, `delete` und `view`;
-  mehrere Hooks werden mit UND verknüpft.
+  mehrere Hooks werden mit UND verknüpft. Ein `view`-Hook verbirgt Zeilen auch in der
+  Liste, im Autocomplete sowie in FK-Facettennamen und FK-Zellnamen. Die Liste führt
+  ihn über jede Zeile aus, die ihre Filter und ihre Suche treffen, sodass Summen,
+  Facetten, Datums-Buckets und Suche verborgene Zeilen auslassen; ab 10 000 Zeilen
+  (`Builder::view_hook_scan_cap`) hält sie sie stattdessen zurück. Ein Queryset-Hook
+  erledigt das in SQL und skaliert.
+- **Geheime Felder** — ein Feld mit dem Widget `password`
+  (`formfield_overrides = "x: password"`) zeigt seinen Wert nie und wird nie
+  durchsucht, gefiltert oder facettiert. Nichts anderes markiert ein Geheimnis: Gib
+  Feldern wie `token` / `api_key` ebenfalls dieses Widget.
 
 Für gröbere, codename-basierte Zugriffskontrolle sperrt `Builder::with_user_perms([...])`
 jede Tabelle auf `{table}.view` / `.add` / `.change` / `.delete`: fehlendes `view`
@@ -434,6 +465,15 @@ Der Mandanten-Admin-Builder verdrahtet dies automatisch mit seiner
 `RouteConfig::logout_url`, sodass die Schaltfläche immer eine Route trifft, die
 existiert.
 
+Der Admin lehnt eine Bearbeitung ab, die **active** in der eigenen Zeile des
+angemeldeten Benutzers abwählt, wie die Operator-Konsole: Bitte einen anderen
+Admin darum.
+
+Das Abwählen von **active** im Admin setzt auch `sessions_revoked_at`. Ein direkter
+ORM-Schreibzugriff auf `active` tut das nicht; nutze in deinem eigenen Code
+`rustango::session::deactivate::<AdminUser>(&pool, id)` (oder `Operator`, `User`),
+damit eine spätere Reaktivierung kein altes Cookie wiederbelebt.
+
 ---
 
 ## Theming und Branding
@@ -445,13 +485,68 @@ existiert.
 | `.brand_logo_url(url)` | Über dem Titel gerendertes Logo. |
 | `.brand_name(s)` / `.brand_tagline(s)` | Mandantenspezifische Überschreibungen von Titel/Untertitel. |
 | `.tenant_brand_css(css)` | Ein vorgefertigter `:root{…}`-CSS-Variablen-Block, inline eingebettet für mandantenspezifische Paletten. |
-| `.from_settings(pool, &settings)` | Baut Branding + Sichtbarkeit aus den Abschnitten `[admin]` / `[brand]` deiner Konfigurationsdatei. |
+| `.from_settings(pool, &settings)` | Baut Branding + Sichtbarkeit aus den Abschnitten `[admin]` / `[brand]` deiner Konfigurationsdatei; siehe unten. |
 
-`from_settings` liest `admin.title`, `admin.subtitle`, `admin.logo_url`,
-`admin.theme_mode`, `admin.url_prefix`, `admin.allowed_tables`,
-`admin.read_only_tables`, greift auf den `[brand]`-Abschnitt zurück und setzt
-`secure_cookies` standardmäßig auf `true`. Imperative `Builder`-Aufrufe danach gewinnen
-weiterhin.
+### Konfiguration: `[admin]` und `[brand]`
+
+`Builder::from_settings(pool, &settings)` liest `[admin]` aus
+`config/default.toml` oder `config/<env>_settings.toml` und greift für die
+Oberfläche auf `[brand]` zurück. Die `urls.rs` eines generierten Projekts ruft es
+bereits auf. `Builder`-Aufrufe danach gewinnen weiterhin.
+
+```toml
+[admin]
+title            = "Acme Admin"
+subtitle         = "Back office"
+logo_url         = "/static/acme-logo.png"
+theme_mode       = "auto"           # auto | light | dark
+url_prefix       = "/admin"
+allowed_tables   = []               # empty = every registered model
+read_only_tables = ["orders"]
+```
+
+| Schlüssel | Standard | Rückfall auf | Was er tut |
+|---|---|---|---|
+| `title` | `Rustango Admin` | `[brand] name` | Überschrift der Seitenleiste und der `<title>` der Seite |
+| `subtitle` | keiner | `[brand] tagline` | Zeile unter der Überschrift |
+| `logo_url` | keiner: kein Logo | `[brand] logo_url` | Bild neben der Überschrift |
+| `theme_mode` | `auto` | `[brand] theme_mode` | Start-Theme, das `data-theme` auf `<html>` |
+| `url_prefix` | `/__admin` | `[routes] admin_url` | Präfix jedes Admin-Links. Hänge den Router unter demselben Pfad ein: `Builder::settings_prefix(&settings)` liefert ihn, und das Scaffold fällt auf `/admin` zurück |
+| `allowed_tables` | `[]`, jedes Modell | | Wie `show_only` |
+| `read_only_tables` | `[]` | | Wie `read_only` |
+| `primary_color` | | | Noch ohne Wirkung; nur `manage check --deploy` liest es |
+| `csrf_cookie_secure` | | | Noch ohne Wirkung; das CSRF-Cookie folgt `[security] secure_cookies` |
+| `session_timeout_minutes` | | | Noch ohne Wirkung; der Admin hat kein Idle-Timeout |
+
+Auch `[brand] primary_color` färbt diesen Admin nicht; es ist für die
+[Operator-Konsole](operator-console.md#branding). Das Session-Cookie ist
+`Secure`, außer bei `[security] secure_cookies = false`.
+
+Die `config/dev_settings.toml` des Scaffolds setzt `[brand] tagline = "dev"`,
+was hier als Untertitel erscheint; siehe
+[die Taglines der Stufen](operator-console.md#die-taglines-dev-und-staging).
+
+**Eigenes Logo.** `logo_url` geht unverändert in `<img src>`. Liefere die Datei
+aus deiner App aus: Lege sie unter `assets/acme-logo.png` ab, ergänze
+`.with_static("/static", "./assets")` in deiner `Cli::new()`-Kette in `main.rs`
+und setze `logo_url = "/static/acme-logo.png"`. Admin und Static-Mount teilen
+sich einen Host, ein Pfad funktioniert also. Eine vollständige URL zu einem CDN
+funktioniert auch. `[brand] logo_path` gilt nur für die Operator-Konsole; dieser
+Admin ignoriert es.
+
+### Der Tenant-Admin
+
+In einem Tenancy-Projekt läuft der Admin jedes Tenants auf dessen Host unter
+`/admin` (`RouteConfig::admin_url`; der `Builder`-Standard `/__admin` gilt hier
+nicht). Alte `/__admin`-Links erreichen ihn weiterhin, außer
+`RouteConfig::legacy()` macht `/__admin` zum Hauptpfad.
+
+Der Tenant-Admin liest weder `[admin]` noch `[brand]`. Er nimmt seine Marke aus
+der `Org`-Zeile des Tenants: Der Name ist `brand_name`, sonst der Anzeigename
+des Tenants; das Logo ist das auf der Bearbeitungsseite der Konsole hochgeladene,
+sonst das Framework-Logo (`rustango.png` unter der Static-URL); das Theme ist
+`theme_mode` und die Akzentfarbe `primary_color`. Siehe
+[Branding pro Tenant](operator-console.md#branding-pro-tenant).
 
 ---
 
@@ -464,6 +559,7 @@ anders angegeben):
 |---|---|
 | `new(pool)` | Aus einem beliebigen Pool konstruieren (PostgreSQL / MySQL / SQLite). Standardwerte: Präfix `/__admin`, Dev-Cookies. |
 | `from_settings(pool, &settings)` | Aus geparster Konfiguration konstruieren (`config`-Feature). |
+| `settings_prefix(&settings)` | Assoziierte Funktion, kein Builder-Schritt: das Mount-Präfix, das die Einstellungen verlangen (`[admin] url_prefix`, sonst `[routes] admin_url`), oder `None`. |
 | `title(s)` / `subtitle(s)` | Kopf- / Unterüberschrift der Seitenleiste. |
 | `admin_prefix(p)` | URL-Präfix — **muss dem Einhängepfad entsprechen**. Standard `/__admin`. |
 | `audit_url(u)` | Pfad der Aktivitäts-/Prüfpfad-Ansicht. Standard `/__audit`. |
@@ -473,13 +569,17 @@ anders angegeben):
 | `read_only([tables])` | Diese Tabellen rendern, aber Erstellen/Bearbeiten/Löschen verbieten. |
 | `read_only_all()` | Markiert **jede** Tabelle als schreibgeschützt. |
 | `skip_count_for([tables])` | Überspringt `COUNT(*)` auf riesigen Tabellen (Pager zeigt "Page N"). |
+| `view_hook_scan_cap(rows)` | Wie viele Zeilen die Liste durch `view`-Hooks prüft, bevor sie den Rest zurückhält. Standard 10 000. |
 | `with_user_perms([codenames])` | Sperrt Tabellen auf `{table}.view/add/change/delete`. |
 | `register_action(table, name, handler)` | Registriert einen Massenaktions-Handler. |
+| `register_action_with_perm(table, name, perm, handler)` | Ebenso, aber gegen `ActionPerm::Delete` statt `change` geprüft. |
+| `register_tx_action(table, name, handler)` / `register_tx_action_with_perm` | Dasselbe, aber der Handler erhält die Schreibtransaktion, sodass Prüfpfad-Zeilen mit ihr committen. |
 | `with_session_auth(secret)` | Erfordert Cookie-Login (`/login` + `/logout`). |
 | `logout_url(u)` | POST-Ziel für die Logout-Schaltfläche der Seitenleiste. Standard `{admin_prefix}/logout`; Mandanten-Admins setzen es auf ihre Mandanten-Logout-Route. |
 | `secure_cookies(bool)` | Setzt das `Secure`-Flag (HTTPS-only) auf dem Session-Cookie. |
 | `theme_mode(m)` | `"light"` / `"dark"` / `"auto"`. |
 | `brand_logo_url(url)` | Logo über dem Titel. |
+| `brand_favicon_url(url)` | Favicon-URL; ohne Wert bleibt das mitgelieferte Icon. |
 | `brand_name(s)` / `brand_tagline(s)` | Mandantenspezifische Marken-Überschreibungen. |
 | `tenant_brand_css(css)` | Mandantenspezifischer CSS-Variablen-Block. |
 | `impersonated_by(operator_id)` | Rendert ein Impersonations-Banner (Operator-Konsole). |

@@ -129,7 +129,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::errors` | Ein Fehlerseiten-Template, das nicht renderte, oder ein Template-Verzeichnis, das nicht lud |
 | `rustango::forms` | `DynamicForm`-Werte, die jetzt noch akzeptiert, später abgelehnt werden |
 | `rustango::auth_flows` | Vom Cache abgewiesene Einmal-Auth-Links |
-| `rustango::aead` | Ein leerer vorheriger Geheimschlüssel |
+| `rustango::aead` | Ein leerer vorheriger Geheimschlüssel oder ein Dev-Schlüssel, der sich nicht speichern lässt |
 | `rustango::hmac_auth` | Einrichtung der HMAC-Request-Authentifizierung |
 | `rustango::humanize` | Humanize-Filter |
 | `rustango::jobs` | Hintergrund-Job-Queues |
@@ -169,6 +169,10 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::tenancy::sweep` | Aufbewahrungs-Sweeps |
 | `rustango::viewset` | ViewSets mit offenen Schreibaktionen |
 
+Änderungen in der Konsole gehen zusätzlich an
+`rustango::tenancy::operator_console::action`, ein Event pro Änderung; mit
+`RUST_LOG=rustango::tenancy::operator_console::action=info` sehen Sie nur diese.
+
 Das sind die Targets, die das Framework explizit benennt. Events ohne eigenes
 Target erben ihren Modulpfad, was dieselbe Form ergibt —
 `rustango::access_log` und `rustango::tracing_layer` sind genauso erreichbar wie
@@ -190,6 +194,22 @@ die Zeilen oben.
 | `compact` | Entwicklung — knappere Einzelzeile, Span-Felder am Ende | `.with_format(Format::Compact)` |
 | `json` | Produktion — ein Objekt pro Event, für Loki / CloudWatch / Datadog | `.json()` |
 
+Alle vier rendern unterschiedlich, was nicht immer so war: Früher rief
+`install()` weder `.pretty()` noch `.compact()` auf, beide Werte erzeugten also
+`full`-Ausgabe.
+
+### Farbe
+
+Farbe ist an, wenn stdout ein Terminal ist, und aus, wenn nicht — das Umleiten
+in eine Datei oder ein Lauf unter CI braucht keine Konfiguration. `NO_COLOR`
+wird beachtet. `json` und die Datei-Senke sind nie farbig.
+
+| `color` | Verhalten |
+|---|---|
+| `auto` | Farbe genau dann, wenn stdout ein Terminal ist und `NO_COLOR` nicht gesetzt ist. Der Default |
+| `always` | Farbe auch beim Umleiten |
+| `never` | Nie Farbe |
+
 ```rust,ignore
 rustango::logging::Setup::new()
     .json()
@@ -207,10 +227,17 @@ rustango::logging::setup_for_env();
 Zwei Darstellungs-Schalter lohnen sich: `.with_line_numbers()` ergänzt
 Quellpositionen (nützlich in der Entwicklung, laut in Produktion), und
 `.without_targets()` blendet die Target-Spalte aus — tun Sie das nur, wenn Sie
-das Filtern danach aufgegeben haben.
+das Filtern danach aufgegeben haben. `.with_thread_ids()` ergänzt die
+Thread-ID, und `.with_color(Color::Never)` setzt die Farbe im Code. Unter
+`#[rustango::main]` folgt die Farbe immer der `auto`-Regel, weil das Makro
+zuerst installiert.
+
+Ein Management-Verb (`dumpdata`, `migrate`, …) schickt Terminal-Logs nach
+stderr, damit sein stdout sauber bleibt: `cargo run -- dumpdata > fixtures.json`
+funktioniert. Der Server loggt weiter nach stdout.
 
 > Jeder Format-Wert erreicht seinen eigenen Formatter. `compact` wurde früher
-> akzeptiert und dann wie der Default gerendert — das ist behoben (#1480).
+> akzeptiert und dann wie der Default gerendert — das ist behoben.
 
 ## Logging aus den Settings konfigurieren
 
@@ -222,6 +249,7 @@ Rebuild ändern kann. Der Abschnitt heißt `[logging]`:
 [logging]
 level             = "info,sqlx=warn"
 format            = "pretty"
+color             = "auto"
 with_line_numbers = true
 ```
 
@@ -265,15 +293,24 @@ rustango::manage::Cli::new()
 der Kette spielt keine Rolle: installiert wird bei `run()`, gegen die
 endgültigen Settings.
 
-> **`#[rustango::main]` gewinnt dagegen.** Das Makro installiert einen
-> Subscriber, noch bevor die Runtime gebaut ist, und jeder Installer nutzt
-> `try_init` — der erste gewinnt, spätere werden stillschweigend verworfen. Ein
-> `main`, das das Makro behält *und* `with_logging()` aufruft, bekommt also die
-> Defaults des Makros: Ihr `[logging]`-Abschnitt wird gelesen und bleibt dann
-> wirkungslos, ohne jeden Hinweis. Für Settings-gesteuertes Logging tauschen Sie
-> `#[rustango::main]` gegen `#[tokio::main]` — das ist die eine Änderung, die
-> ein generiertes Projekt braucht. Verfolgt in
-> [#1465](https://github.com/ujeenet/rustango/issues/1465).
+> **Sag `#[rustango::main]`, dass es Platz machen soll.** Das Makro installiert
+> einen Subscriber, noch bevor die Runtime gebaut ist, und jeder Installer nutzt
+> `try_init`, also gewinnt der erste. Übergib `logging = false`, dann installiert
+> sich deiner zuerst:
+>
+> ```rust,ignore
+> #[rustango::main(logging = false)]
+> async fn main() -> Result<(), Box<dyn std::error::Error>> {
+>     rustango::manage::Cli::new()
+>         .with_settings_from_env()
+>         .with_logging()
+>         .run().await
+> }
+> ```
+>
+> Ohne das wird der Abschnitt `[logging]` gelesen und verworfen. Früher geschah
+> das still; `install()` warnt jetzt auf stderr und über `tracing`, wenn es
+> bereits einen Subscriber vorfindet.
 
 Jeder Schlüssel lässt sich pro Deployment per Umgebungsvariable überschreiben,
 mit Abschnitt und Schlüssel als Pfadsegmenten:
@@ -335,7 +372,7 @@ let app = router.access_log(AccessLogLayer::default());
 ```
 
 ```text
-INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12 client.address=192.0.2.1 tenant=acme
+INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12.4 client.address=192.0.2.1 tenant=acme
 ```
 
 Das Level trägt Bedeutung, Alarmierung kann also daran ansetzen:
@@ -360,10 +397,14 @@ AccessLogLayer::default()
 ihn an `.real_ip(layer)`; ein Layer am API-Router läuft zu spät.
 
 Query-Parameter, die Zugangsdaten tragen, werden vor dem Schreiben mit
-`[redacted]` maskiert — `password`, `passwd`, `token`, `secret`, `api_key`,
-`apikey`, `access_token`, `refresh_token`, `signature`, `auth`. Erweitern mit
-`.redact_additional("session_id")`, oder die ganze Liste ersetzen mit
-`.redact(vec![...])`. Das betrifft **nur Query-Strings**; für den Rest siehe
+`[redacted]` maskiert. Ein Schlüssel wird maskiert, wenn er ein geheimes Wort
+enthält, wortweise verglichen; also zählen `api_key`, `reset_token` und
+`X-Api-Key`. Zu den Wörtern gehören `password`, `pass`, `pwd`, `token`, `jwt`,
+`secret`, `key`, `signature`, `auth`, `credential`, `cookie`, `session`,
+`otp`, dazu die OAuth-Namen `code`, `state` und `assertion`. Erweitern mit
+`.redact_additional("ref")`, oder die ganze Liste ersetzen mit
+`.redact(vec![...])`; `token`, `signature` und `code` bleiben in jedem Fall
+maskiert. Das `url.query` des Request-Spans wird genauso maskiert. Das betrifft **nur Query-Strings**; für den Rest siehe
 [security.md](security.md#secrets-aus-deinen-logs-heraushalten).
 
 ## Welcher Mandant war das?
@@ -393,9 +434,7 @@ AccessLogLayer::default().tenant_field(TenantField::Off)    // tenant=-
 
 > **Nur der Request-Pfad.** Ein Hintergrund-Job läuft außerhalb des Requests,
 > der ihn eingereiht hat, und hat keinen Mandanten zu loggen — der Slot gilt pro
-> Task, und `tokio::spawn` erbt ihn nicht. Verfolgt in
-> [#1229](https://github.com/ujeenet/rustango/issues/1229) /
-> [#1223](https://github.com/ujeenet/rustango/issues/1223).
+> Task, und `tokio::spawn` erbt ihn nicht. Das ist eine bekannte Lücke.
 
 ## Request-Spans und OpenTelemetry
 

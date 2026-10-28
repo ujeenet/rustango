@@ -148,6 +148,64 @@ untouched.
 
 ---
 
+## 0.61.8
+
+### Data ops, uploads, views and Debug output
+
+`add-data-op` without `--to` now chains onto the last tenant file and its snapshot; pass `--scope registry` for a registry one. Uploads named like `.html` or `.svg` are now refused when the allow-list is empty, as `x.html` is. A CreateView `success_url` placeholder is read back from the saved row; when it cannot be filled (a NULL value), the redirect goes to the path before the first placeholder instead of a 500. A JSON string sent for a Json field is stored as a string on the serializer path and in `ModelFormFor::from_json` (`"42"` is no longer a number). A `blank` String field with `choices` or `validators` now accepts `""`. The admin change-password page, and an `OnAuthSuccess` hook error (502), no longer show the error text unless `RUSTANGO_DISCLOSE_ERRORS` is on. `{:?}` of `Operator`, `User`, `AdminUser`, `Agent`, `ApiKey`, `DatabaseUrlBuilder` and `Cast<EncryptedString>` prints `[redacted]` for the secret; `CastValue` gains `const SECRET: bool = false`.
+
+### Default bind is loopback off prod and staging
+
+With neither `RUSTANGO_BIND` nor `[server] bind` set, `Cli` and the tenancy `ServerConfig` now bind `127.0.0.1:8080` unless `RUSTANGO_ENV` is `prod` or `staging`. A container on another tier must set `RUSTANGO_BIND=0.0.0.0:8080`.
+
+### Serializer serde attributes, Basic gate throttle, JWT sessions, tenant SSO egress
+
+`#[derive(Serializer)]` now applies `#[serde(rename/rename_all/skip/skip_serializing/skip_serializing_if/skip_deserializing)]`: JSON keys, `writable_fields()` and accepted input keys follow the serde names, so clients of a renamed field must use the new key. `protect_with_basic_auth` now answers 429 after repeated wrong passwords. `JwtBackend` tokens with an `iat` (all new `issue*` and `JwtLifecycle` tokens) are refused after the user's `sessions_revoked_at` or `password_changed_at`; tokens without `iat` still work until expiry and log one warning. Tenant-owned `SsoProvider` rows no longer use `RUSTANGO_OUTBOUND_ALLOW`; put an internal IdP in a shared provider, or list it in the new `RUSTANGO_TENANT_OUTBOUND_ALLOW`. `168.63.129.16` and `fd20:ce::254` are now always refused. `check --deploy` warns when the secret key comes from the dev key file. With `run-server --apex`, a console-created tenant with a blank host gets `<slug>.<apex>`.
+
+### Probes, HTTP/2 hosts, short JWT keys, tenant CLI exit code
+
+With `with_health()`, `/health` and `/ready` no longer get the Host check or the HTTPS redirect. HTTP/2 requests now pass `allowed_hosts` by `:authority` instead of getting 400. `jwt::decode*` returns `JwtError::Decode` for a key under 32 bytes. `create-tenant` now exits non-zero when tenant migrations fail; rerun it with `--resume`. A blank `DATABASE_URL=` now falls through to the `DB_*` vars. A repeated `vary_on` header changes the page-cache key, so those pages miss once.
+
+### Refusals instead of silent data loss
+
+`update()`/`delete()` on a queryset with `join`/`join_sub`/`join_lateral` now return `QueryError::JoinDml`; narrow the write with `where_in_subquery` instead. `migrate --squash` refuses while models have unmigrated changes: run `makemigrations` first. In a tenancy dir `makemigrations --empty` now chains onto the last tenant file; pass `--scope registry` for a registry one. A renamed M2M `through` is still a drop and create (its rows are not kept, and `makemigrations` warns), since swapping one M2M for another between the same models looks the same; write a junction rename by hand as a `RenameTable` in a `makemigrations --empty` file. `Model::bulk_insert_on` still sends one statement; past the bind cap use the pool `bulk_insert`, which now chunks.
+
+### Error pages keep the framework's own HTML pages
+
+With `[errors] enabled = true`, an HTML 4xx/5xx from the admin, tenant admin, operator console or generic views now passes through as rendered. A plain-text or JSON error from them is still dressed. On the admin add form, a blank NOT NULL non-text field with a column default now takes that default instead of failing.
+
+### run-server flags and the dev secret key
+
+`run-server --bind/--apex` now apply, and an unknown flag after the server verb fails instead of being ignored. With `RUSTANGO_SECRET_KEY` unset on the dev or test tier, every binary (server, worker, `manage`, tests) seals and opens with a key saved in `var/.rustango_secret.key`, found from the working directory up to the Cargo workspace root and created in that root. Once you set `RUSTANGO_SECRET_KEY`, values the file sealed open only with `export RUSTANGO_SECRET_KEY_PREVIOUS="$(base64 < var/.rustango_secret.key | tr -d "\n")"`; then run `reseal-tenant-secrets --apply`.
+
+### Operator console: optional TOTP
+
+Nothing changes until an operator enrolls or `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` is set. The console creates `rustango_operator_totp` in the registry on its first sign-in (or `migrate` does); if the registry role cannot create it, sign-in uses the password alone until `migrate` creates it (refused under `RUSTANGO_OPERATOR_REQUIRE_TOTP=1`); if the table exists but cannot be read, sign-in is refused. Enrolling needs `RUSTANGO_SECRET_KEY`; `reseal-tenant-secrets` does not reseal these secrets yet, so keep `RUSTANGO_SECRET_KEY_PREVIOUS` set while enrolled operators re-enroll after a key rotation.
+
+### Database URL from DB_* vars; 0.62.0 flips the precedence
+
+`manage`, `migrate` and the server now also connect from `DB_DRIVER` / `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` (or `DB_PASSWORD_FILE`) / `DB_NAME` / `DB_PARAMS` when `DATABASE_URL` is unset. If you set both, `DATABASE_URL` still wins and a startup warning names it; **from 0.62.0 the `DB_*` vars win**, so keep one style. Setting both `DB_PASSWORD` and `DB_PASSWORD_FILE` is an error. "No database" errors now name both styles.
+
+### manage: custom commands reserve their names
+
+A `register_command!` or `Cli::command` verb that matches a built-in verb, or another command, makes `Cli::run` fail at startup. Member SSO on a host like `localhost.example.com` now builds an `https` callback.
+
+### Webhook retries and page purges
+
+A webhook answered 429 or 503 with `Retry-After` now waits that long (up to an hour) before its retry. `CachePageLayer::invalidate` now purges every variant of the path, and each cached GET reads one extra small cache key.
+
+### Admin: bounded audit facets
+
+`/__audit?facet_show_all=<col>` lists at most 200 values, then "+N more"; filter the feed to reach the rest. A tenant admin custom view on a table the user cannot see is now a 404 from the view, not an unmounted route.
+
+### Operator console: shared SSO form errors are HTML
+
+A refused shared-provider add now returns the console page (400) with the error, not a plain-text body. Successful changes redirect to `/sso-shared?notice=…`.
+
+### Table comments, MCP scheme, facet cap
+
+A model with `db_table_comment` gets a `makemigrations` warning: file migrations still do not write it, so add a data migration with the comment statement. MCP discovery on `*.localhost` / `[::1]` now says `http`; set a trusted `X-Forwarded-Proto` if a TLS proxy fronts it. The admin list's "show all" facet stops at 200 values.
+
 ## 0.61.7
 
 ### Admin: no self-deactivation

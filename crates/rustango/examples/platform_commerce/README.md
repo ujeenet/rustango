@@ -23,7 +23,7 @@ scratch.
 
 ```sh
 cp .env.example .env                 # then change `postgres` -> `localhost` in DATABASE_URL
-docker compose up -d postgres        # only the DB
+docker compose up -d --no-deps postgres  # only the DB: the rust service holds 8080
 cargo run -- migrate                 # apply pending migrations
 cargo run                            # boot the HTTP server
 cargo run -- --help                  # full verb list (makemigrations, startapp, etc.)
@@ -39,13 +39,14 @@ flows through the same binary via `rustango::manage::Cli` — see
 ```text
 src/
   main.rs         — Cli::new().api(urls::api()).run() boots both server + verbs
-  models.rs       — every #[derive(Model)] lives here
+  models.rs       — empty; the models live in the commerce app
   views.rs        — request handlers ("views")
   urls.rs         — pub fn api() -> Router aggregator
+  commerce/       — the app: models.rs, urls.rs, serializers.rs, jobs.rs
 
 migrations/       — JSON migration files (committed to git)
 ```
 
-Adding a new model is one struct in `models.rs`; the auto-admin sees
+Adding a new model is one struct in `commerce/models.rs`; the auto-admin sees
 it immediately. See <https://github.com/ujeenet/rustango> for the full
 feature list.

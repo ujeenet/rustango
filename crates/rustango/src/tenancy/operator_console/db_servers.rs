@@ -103,6 +103,10 @@ pub(super) fn key_warning() -> Option<&'static str> {
              key. Move it to RUSTANGO_SECRET_KEY_PREVIOUS, set 32 or more random bytes, restart \
              and run reseal-tenant-secrets --apply.",
         ),
+        KeyStatus::DevFile => Some(
+            "RUSTANGO_SECRET_KEY is not set, so passwords are sealed with the dev key file, \
+             which a redeploy loses. Set RUSTANGO_SECRET_KEY before deploying.",
+        ),
         KeyStatus::Ok => None,
     }
 }

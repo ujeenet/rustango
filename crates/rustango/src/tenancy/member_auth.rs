@@ -66,7 +66,9 @@ use crate::sso::link::{
     ProviderKey,
 };
 use crate::sso::provider::resolve_by_slug;
-use crate::sso::{build_provider, open_flow, seal_flow, FlowPurpose, FlowScope, NormalizedUser};
+use crate::sso::{
+    build_provider_for, open_flow, seal_flow, FlowPurpose, FlowScope, NormalizedUser,
+};
 use crate::tenancy::DefaultTenantDb;
 use crate::tenancy::User;
 
@@ -563,7 +565,7 @@ pub(crate) fn external_base(parts: &Parts) -> Option<String> {
     let scheme = proto.unwrap_or_else(|| {
         if let Some(s) = parts.uri.scheme_str() {
             s.to_owned()
-        } else if host.contains("localhost") || host.starts_with("127.") {
+        } else if crate::urls::is_loopback_host(&host) {
             "http".to_owned()
         } else {
             "https".to_owned()
@@ -615,7 +617,7 @@ async fn sso_begin_in(
         }
     };
 
-    let provider = match build_provider(&resolved.sso).await {
+    let provider = match build_provider_for(&resolved.sso, LinkSource::Tenant).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, slug, "build_provider failed");
@@ -698,7 +700,7 @@ async fn sso_callback_in(
         Ok(Some(r)) => r,
         _ => return clear_flow(sso_error("That sign-in method is not available.", &mount)),
     };
-    let provider = match build_provider(&resolved.sso).await {
+    let provider = match build_provider_for(&resolved.sso, LinkSource::Tenant).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "build_provider failed on callback");
@@ -1328,6 +1330,27 @@ mod tests {
         assert_eq!(
             external_base(&parts).as_deref(),
             Some("http://downtown.localhost:8080")
+        );
+    }
+
+    /// A public host that only contains `localhost` stays https.
+    #[test]
+    fn external_base_localhost_lookalike_stays_https() {
+        for host in [
+            "localhost.evil.com",
+            "notlocalhost.com:8443",
+            "127.evil.com",
+        ] {
+            assert_eq!(
+                external_base(&parts_with(&[("host", host)])).as_deref(),
+                Some(format!("https://{host}").as_str()),
+                "{host}"
+            );
+        }
+        let parts = parts_with(&[("host", "127.0.0.1:8080")]);
+        assert_eq!(
+            external_base(&parts).as_deref(),
+            Some("http://127.0.0.1:8080")
         );
     }
 

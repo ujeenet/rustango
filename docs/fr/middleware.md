@@ -5,8 +5,7 @@ votre handler ne la voie et après qu'il a produit une réponse. C'est là que
 vivent les préoccupations transversales : journalisation, limitation de débit,
 en-têtes de sécurité, CSRF, résolution de la locale et du fuseau horaire.
 **Rustango** fournit un catalogue riche de middlewares prêts à l'emploi et rend
-l'écriture des vôtres possible en quelques lignes. Dans Express, c'est
-`app.use()` ; dans Laravel, c'est le kernel HTTP — la même idée, rattachée à
+l'écriture des vôtres possible en quelques lignes. Chacun est une couche rattachée à
 votre routeur.
 
 [![Middleware in Rustango: a request flows down through a stack of tower layers (request-id, locale, security headers, CSRF) into the handler and back up through the response side of each layer](../img/middleware.png)](../img/middleware.png)
@@ -153,13 +152,16 @@ portée pour obtenir la méthode.
 | Taille de corps maximale | `BodyLimitLayer` | `.body_limit(..)` |
 | Mode maintenance (503) | `MaintenanceLayer` | `.maintenance(..)` |
 | Clés d'idempotence | `IdempotencyLayer` | `.idempotency(..)` |
-| Restreindre les méthodes HTTP | `MethodRestrictLayer` | `.require_get()` / `.require_post()` / `.require_safe()` |
+| Restreindre les méthodes HTTP | `MethodRestrictLayer` | `.require_get()` / `.require_post()` / `.require_safe()` / `.require_methods([..])` |
+| Surcharge de méthode (champ `_method` / `X-HTTP-Method-Override`) | `MethodOverrideLayer` | `.layer(..)` |
+| Pages d'erreur personnalisées | `ErrorPagesLayer` | `.error_pages(..)` |
 | **Observabilité** | | |
 | Identifiant de requête (`X-Request-Id`) | `RequestIdLayer` | `.request_id(..)` |
 | [Journal d'accès](logging.md#le-journal-daccès) (PII expurgées) | `AccessLogLayer` | `.access_log(..)` |
 | Spans `tracing` | `TracingLayer` | `.layer(..)` |
 | En-tête `Server-Timing` | `ServerTimingLayer` | `.server_timing(..)` |
 | IP client réelle (derrière des proxys) | `RealIpLayer` | `.real_ip(..)` |
+| Signaux de requête (`request_started` / `request_finished`) | `RequestSignalsLayer` | `.layer(..)` |
 | **Contenu & réponse** | | |
 | Compression gzip/br | `CompressionLayer` | `.compression(..)` |
 | ETag / GET conditionnel | `EtagLayer` | `.etag(..)` |
@@ -170,7 +172,7 @@ portée pour obtenir la méthode.
 | Fuseau horaire actif | *(à composer avec `from_fn`)* | voir [ci-dessous](#middleware-sensible-au-fuseau-horaire) |
 | **Développement** | | |
 | Rechargement à chaud | `LiveReloadLayer` | `.livereload(..)` |
-| Panneau de débogage | `DebugPanelLayer` | `.debug_panel(..)` |
+| Panneau de débogage | `DebugPanelLayer` | `.debug_panel()` / `.debug_panel_with(..)` |
 
 Avec `tenancy`, montez `CachePageLayer` dans la couche tenancy : sur un router
 passé au builder du serveur. Il met le tenant résolu dans la clé ; hors de la
@@ -349,6 +351,10 @@ Trois presets couvrent les cas courants :
 | `relaxed()` | pages intégrables | 1 an | `SAMEORIGIN` |
 | `dev()` | dev local | *(omis)* | — |
 
+`empty()` n'envoie aucun en-tête. `from_preset("strict" | "relaxed" | "dev" | "none")`
+choisit par nom ; un nom inconnu donne `strict()`, une faute de frappe ne retire
+donc jamais les en-têtes.
+
 Utilisez `dev()` en local — HSTS épinglerait autrement votre navigateur sur
 HTTPS pendant un an sur `localhost`. Construisez une CSP de manière fluide avec
 `CspBuilder` (`.default_src(..)`, `.script_src(..)`, …, `.build()`), et
@@ -374,7 +380,8 @@ let app = Router::new()
     .layer(csrf::layer());
 ```
 
-Une méthode sûre (GET/HEAD/OPTIONS) émet un cookie `rustango_csrf`. Une méthode
+Une méthode sûre (GET/HEAD/OPTIONS/TRACE, et `QUERY` tant que
+`require_csrf_on_query` n'est pas activé) émet un cookie `rustango_csrf`. Une méthode
 non sûre (POST/PUT/PATCH/DELETE) doit renvoyer la valeur de ce cookie, soit dans
 l'en-tête `X-CSRF-Token` soit dans le champ de formulaire `_csrf` ; une
 non-concordance donne un `403 Forbidden` :
@@ -395,9 +402,12 @@ un dans chaque formulaire. Le `| safe` est obligatoire : Tera échappe `.html`
 automatiquement, sans quoi le formulaire ne porte aucun champ `_csrf` et chaque
 POST renvoie 403. Le formulaire de connexion de l'admin fait exactement cela —
 voir `crates/rustango/src/admin/templates/login.html`. Surchargez les noms de cookie/en-tête ou le flag
-`Secure` avec `csrf::with_config(CsrfConfig)` ; la vérification de
-l'en-tête Origin s'exécute toujours et accepte le Host de la requête ; une SPA
-servie depuis une autre origine s'ajoute avec `.with_trusted_origins([...])`. Pour des endpoints
+`Secure` avec `csrf::with_config(CsrfConfig)`. Le simple `csrf::layer()` prend le
+flag `Secure` de la politique de session ; avec `with_config` c'est
+`CsrfConfig::secure` (par défaut `true` ; `.allow_insecure_for_dev()` le coupe pour
+le dev en HTTP). La vérification de l'en-tête Origin s'exécute toujours et
+accepte le Host de la requête ; une SPA servie depuis une autre origine s'ajoute
+avec `.trust_origin(..)` ou `.with_trusted_origins([...])`. Pour des endpoints
 collecteurs append-only atteints via `navigator.sendBeacon` (p. ex. analytics)
 qui ne peuvent pas envoyer d'en-tête de jeton, `CsrfConfig::exempt_prefix("/path")`
 saute l'application pour un préfixe de chemin étroit. L'auto-admin active le CSRF

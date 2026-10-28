@@ -596,6 +596,52 @@ async fn set_operation_dml_is_refused(pool: &Pool) {
     assert!(ids_tagged(pool, "x").await.is_empty());
 }
 
+/// A join used to be dropped, so the write reached every row.
+async fn join_dml_is_refused(pool: &Pool) {
+    use rustango::core::joins::aliased;
+    use rustango::core::{Join, JoinKind, Model as _, Op, WhereExpr};
+    rustango::testkit::matrix::fresh_table::<Child>(pool).await;
+    Child {
+        id: 1,
+        item: ForeignKey::unloaded(1_i64),
+    }
+    .insert_pool(pool)
+    .await
+    .unwrap();
+    let on = || WhereExpr::ExprCompare {
+        lhs: aliased("c", "item"),
+        op: Op::Eq,
+        rhs: aliased("bdml_item", "id"),
+    };
+    let joined = || {
+        Item::objects().join(Join {
+            target: Child::SCHEMA,
+            alias: "c",
+            kind: JoinKind::Inner,
+            on: on(),
+            project: vec![],
+        })
+    };
+    let e = joined().compile_delete().unwrap_err();
+    assert!(matches!(e, QueryError::JoinDml { .. }), "{e:?}");
+    let sub = Child::objects().compile().unwrap();
+    let e = Item::objects()
+        .join_sub(sub, "c", on())
+        .compile_delete()
+        .unwrap_err();
+    assert!(matches!(e, QueryError::JoinDml { .. }), "{e:?}");
+    let e = joined()
+        .update()
+        .set("tag", "x")
+        .execute_pool(pool)
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("join"), "{e}");
+    assert_eq!(ids(pool).await, vec![1, 2, 3, 4, 5]);
+    assert!(ids_tagged(pool, "x").await.is_empty());
+    rustango::testkit::matrix::drop_table(pool, "bdml_child").await;
+}
+
 tri_dialect_test! {
     setup: seeded,
     scenarios: [
@@ -617,6 +663,7 @@ tri_dialect_test! {
         nested_and_correlated_in_subquery_dml,
         nested_in_wraps_once,
         set_operation_dml_is_refused,
+        join_dml_is_refused,
     ],
 }
 
@@ -681,4 +728,17 @@ fn outer_where_is_kept_next_to_the_bound() {
     let (outer, inner) = sql.split_once(" IN (").expect("bounded by IN");
     assert!(outer.contains(r#""tag" = $1"#), "outer WHERE kept: {sql}");
     assert!(inner.contains(r#""tag" = $2"#), "inner WHERE: {sql}");
+}
+
+#[test]
+fn lateral_join_dml_is_refused() {
+    use rustango::core::WhereExpr;
+    let sub = Child::objects().compile().unwrap();
+    let e = Item::objects()
+        .join_lateral(sub, "c", WhereExpr::And(vec![]))
+        .update()
+        .set("tag", "x")
+        .compile()
+        .unwrap_err();
+    assert!(matches!(e, QueryError::JoinDml { .. }), "{e:?}");
 }

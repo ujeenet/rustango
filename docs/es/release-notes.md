@@ -1,6 +1,6 @@
 # Notas de la versión
 
-Cada cambio visible para el usuario llega con una entrada en el changelog. Esta página es la ruta hacia ellas, porque hasta ahora el sitio de documentación no tenía ninguna — quien leía aquí veía encabezados etiquetados con una versión dentro de las guías y nada más, y así fue como un encabezado clavado en 0.42 acabó leyéndose como «la documentación se detuvo en 0.42» ([#1304](https://github.com/ujeenet/rustango/issues/1304)).
+Cada cambio visible para el usuario llega con una entrada en el changelog. Esta página es la ruta hacia ellas, porque hasta ahora el sitio de documentación no tenía ninguna — quien leía aquí veía encabezados etiquetados con una versión dentro de las guías y nada más, y así fue como un encabezado clavado en 0.42 acabó leyéndose como «la documentación se detuvo en 0.42».
 
 ## Dónde viven las notas
 
@@ -19,7 +19,7 @@ Las entradas se agrupan bajo `Added` (añadido), `Changed` (cambiado), `Fixed` (
 Dos convenciones que conviene conocer:
 
 - **Las entradas dicen por qué, no solo qué.** Una entrada que cambia el comportamiento explica lo que ocurría antes, porque eso es lo que te dice si te afecta.
-- **Los números de issue son estructurales.** `(#1229)` enlaza la discusión que produjo el cambio, que suele tener más detalle del que cabe en la entrada.
+- **Las entradas antiguas nombran un issue.** El número entre paréntesis enlaza la discusión que produjo el cambio, que suele tener más detalle del que cabe en la entrada.
 
 ## Versionado
 

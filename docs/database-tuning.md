@@ -94,8 +94,8 @@ load.
 | `pool_max_size` | `RUSTANGO_DB_MAX_CONNECTIONS` | 10 (driver) | Most connections the pool will open. Requests beyond this queue. |
 | `pool_min_size` | `RUSTANGO_DB_MIN_CONNECTIONS` | 0 (driver) | Connections kept open even when idle. |
 | `pool_acquire_timeout_secs` | `RUSTANGO_DB_ACQUIRE_TIMEOUT_SECS` | 5 | How long a caller waits for a connection before erroring. |
-| `pool_idle_timeout_secs` | `RUSTANGO_DB_IDLE_TIMEOUT_SECS` | driver default | Close a connection that has sat idle this long. |
-| `pool_max_lifetime_secs` | `RUSTANGO_DB_MAX_LIFETIME_SECS` | driver default | Close a connection this old regardless of use. |
+| `pool_idle_timeout_secs` | `RUSTANGO_DB_IDLE_TIMEOUT_SECS` | 10 min (driver) | Close a connection that has sat idle this long. |
+| `pool_max_lifetime_secs` | `RUSTANGO_DB_MAX_LIFETIME_SECS` | 30 min (driver) | Close a connection this old regardless of use. |
 | `pool_test_before_acquire` | `RUSTANGO_DB_TEST_BEFORE_ACQUIRE` | `false` | Ping each connection before a checkout. Off, only connections idle past `RUSTANGO_DB_IDLE_PING_SECS` are pinged. |
 | `pool_idle_ping_secs` | `RUSTANGO_DB_IDLE_PING_SECS` | 30 | With the ping off, ping a connection idle at least this long before handing it out. |
 
@@ -195,5 +195,5 @@ In a multi-tenant app, each database-mode tenant gets its own pool, and
 those are configured separately through `TenantPoolsConfig` — see
 [Tenant-pool tuning](manage.md) in the `manage` guide. Their defaults
 differ from the primary pool's; in particular the tenant acquire timeout
-is more generous, which is worth reviewing if you run many tenants
+is more generous (30 seconds), which is worth reviewing if you run many tenants
 against databases that can become unreachable independently.

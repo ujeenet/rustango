@@ -25,15 +25,17 @@
 //!     ]));
 //! ```
 //!
-//! A missing or unlisted `Host` gets a `400 Bad Request`. The body
+//! The host is `Host`, or the HTTP/2 `:authority` when there is none.
+//! A missing or unlisted host gets a `400 Bad Request`. The body
 //! echoes the rejected host to help ops, but never the allowed list.
 //!
 //! ## Settings wiring
 //!
-//! `Settings.security.allowed_hosts: Vec<String>` (parsed by
-//! `env::list("ALLOWED_HOSTS")`) feeds
+//! `Settings.security.allowed_hosts: Vec<String>` feeds
 //! [`AllowedHostsLayer::from_settings_list`]. An empty list turns the
-//! check off, so the operator has to opt in.
+//! check off, so the operator has to opt in. When the server mounts
+//! `/health` and `/ready`, those two skip the check: probes send the
+//! pod IP as host.
 //!
 //! [`AllowedHostsLayer::from_settings_list`]: crate::host_validation::AllowedHostsLayer::from_settings_list
 
@@ -101,6 +103,8 @@ impl Pattern {
 #[derive(Clone)]
 pub struct AllowedHostsLayer {
     patterns: Arc<Vec<Pattern>>,
+    /// `/health` and `/ready` pass: probes send the pod IP as host.
+    probes_exempt: bool,
 }
 
 impl AllowedHostsLayer {
@@ -119,7 +123,17 @@ impl AllowedHostsLayer {
             .collect();
         Self {
             patterns: Arc::new(patterns),
+            probes_exempt: false,
         }
+    }
+
+    /// Let the built-in health endpoints through, as the server does
+    /// when it mounts them.
+    #[cfg_attr(not(all(feature = "manage", feature = "config")), allow(dead_code))]
+    #[must_use]
+    pub(crate) fn exempt_probes(mut self) -> Self {
+        self.probes_exempt = true;
+        self
     }
 
     /// Wire from `Settings.security.allowed_hosts`. An empty list
@@ -166,11 +180,11 @@ impl<S: Clone + Send + Sync + 'static> AllowedHostsRouterExt for Router<S> {
 }
 
 async fn handle(cfg: Arc<AllowedHostsLayer>, req: Request<Body>, next: Next) -> Response<Body> {
-    let host = req
-        .headers()
-        .get(axum::http::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
+    if cfg.probes_exempt && crate::health::is_probe_path(req.uri().path()) {
+        return next.run(req).await;
+    }
+    // HTTP/2 sends `:authority`, not `Host`.
+    let host = crate::urls::request_authority(req.headers(), req.uri()).unwrap_or("");
     if cfg.permits(host) {
         next.run(req).await
     } else {

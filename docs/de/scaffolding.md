@@ -164,8 +164,10 @@ Jede Vorlage schreibt ein in sich geschlossenes Cargo-Projekt:
   .env.example          # copy to .env (DATABASE_URL, RUSTANGO_SESSION_SECRET, …)
   .gitignore
   rust-toolchain.toml   # selects the `stable` toolchain + rustfmt/clippy/rust-analyzer
-  docker-compose.yml    # a Postgres service to develop against
-  Dockerfile            # production image
+  docker-compose.yml    # the database service (none for sqlite) + a cargo-watch dev container
+  Dockerfile            # production image (multi-stage, release, non-root)
+  Dockerfile.dev        # the dev image docker-compose.yml builds
+  .dockerignore
   README.md
   config/
     default.toml        # settings shared across every environment
@@ -173,7 +175,9 @@ Jede Vorlage schreibt ein in sich geschlossenes Cargo-Projekt:
     staging_settings.toml
     prod_settings.toml
   migrations/           # JSON migration files (committed to git)
+  system/migrations/    # the framework's own tables, generated on first migrate (commit them)
   src/
+    lib.rs              # the app as a library: `pub mod models; pub mod urls; pub mod views;`
     main.rs             # the single binary — HTTP server + every manage verb
     models.rs           # your #[derive(Model)] structs
     views.rs            # request handlers ("views")
@@ -182,20 +186,17 @@ Jede Vorlage schreibt ein in sich geschlossenes Cargo-Projekt:
 
 ### Ein Binary für alles
 
-`src/main.rs` ist der einzige Einstiegspunkt. Es startet den HTTP-Server **und** dispatcht jedes `manage`-Verb — es gibt keine separate `manage.py` oder `src/bin/manage.rs`:
+`src/main.rs` ist der einzige Einstiegspunkt. Es startet den HTTP-Server **und** dispatcht jedes `manage`-Verb — es gibt kein separates manage-Skript und keine `src/bin/manage.rs`. Die Module liegen im Library-Target (`src/lib.rs`), daher erreicht `main.rs` sie über den Crate-Namen, und ebenso ein Worker-Binary unter `src/bin/`. Die `main.rs` der api-Vorlage, gekürzt:
 
 ```rust
-mod models;
-mod urls;
-mod views;
+use myapp::urls;
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     rustango::manage::Cli::new()
         .api(urls::api())
-        .with_welcome()  // friendly `/` page until you add a root handler
-        .with_health()   // /health + /ready endpoints (fullstack & tenant)
+        .with_health()   // /health + /ready endpoints (every template)
         .run()
         .await
 }
@@ -206,22 +207,39 @@ Also startet `cargo run` den Server, und `cargo run -- <verb>` führt Migratione
 Wie sich die Vorlagen innerhalb von `main.rs` / `urls.rs` unterscheiden:
 
 - **api** — kein Admin; `urls::api()` aggregiert schlicht deine eigenen Routen.
-- **fullstack** — dieselbe `urls.rs`, plus ein `admin_router(pool)`-Helfer, den `main.rs` mit `Cli::nest_with("/admin", …)` einhängt, gebaut aus dem Pool des Servers. Er nimmt `rustango::sql::Pool` entgegen, benennt also keinen Treiber, und liegt hinter einem Login: Lege das Konto mit `cargo run -- create-admin <username>` an (siehe [Erste Schritte, Schritt 11](getting-started.md#schritt-11-den-auto-admin-einschalten)).
-- **tenant** — `main.rs` ergänzt `.tenancy()`, bedient die Operator-Konsole auf der Apex-Domain und jeden Tenant unter seiner eigenen Subdomain. Die eigenen Tabellen des Frameworks werden beim ersten `cargo run -- migrate` aus den kompilierten Modellen in einen **`system/migrations/`**-Ordner generiert — kein handgeliefertes Bootstrap-JSON, sodass das allererste migrate ohne zusätzliche Einrichtung funktioniert.
+- **fullstack** — dieselbe `urls.rs`, plus `admin_prefix(&settings)` und ein `admin_router(pool, &settings)`-Helfer, den `main.rs` mit `Cli::nest_with(urls::admin_prefix(&settings), …)` einhängt, gebaut aus dem Pool des Servers. Das Präfix ist `[admin] url_prefix` (oder `[routes] admin_url`), sonst `/admin`. `main.rs` lädt die Einstellungen einmal und gibt sie mit `with_loaded_settings` an die `Cli` weiter. Er nimmt `rustango::sql::Pool` entgegen, benennt also keinen Treiber, und liegt hinter einem Login: Lege das Konto mit `cargo run -- create-admin <username> --superuser` an (siehe [Erste Schritte, Schritt 11](getting-started.md#schritt-11-den-auto-admin-einschalten)).
+- **tenant** — `main.rs` ergänzt `.tenancy()`, bedient die Operator-Konsole auf der Apex-Domain und jeden Tenant unter seiner eigenen Subdomain, sowie `.with_tenant_provisioning("migrations")` für die Konsolenseiten **New tenant** und **Database servers** (lösche es, um sie abzuschalten; das Speichern eines Servers braucht `RUSTANGO_SECRET_KEY`). Die eigenen Tabellen des Frameworks werden beim ersten `cargo run -- migrate` aus den kompilierten Modellen in einen **`system/migrations/`**-Ordner generiert — kein handgeliefertes Bootstrap-JSON, sodass das allererste migrate ohne zusätzliche Einrichtung funktioniert.
 
 ### Geschichtete Konfiguration
 
 Die Einstellungen laden zuerst `config/default.toml`, dann `config/<RUSTANGO_ENV>_settings.toml` darüber. `RUSTANGO_ENV` ist standardmäßig `dev`, sodass ein frisch gescaffoldetes `cargo run` ohne Änderungen funktioniert; setze `RUSTANGO_ENV=prod` in der Produktion, um `prod_settings.toml` aufzunehmen.
 
+Die Dev- und Staging-Dateien setzen eine `[brand] tagline` von `dev` bzw. `staging`. Um sie zu ändern oder deinen eigenen Namen und dein Logo zu setzen, siehe [Branding](operator-console.md#branding) und die [Konfigurationsschlüssel](admin.md#konfiguration-admin-und-brand) des Admins.
+
+### Einstellungen, die nicht von selbst wirken
+
+Nicht jeden Schlüssel liest das Framework. `Cli::with_settings` warnt beim Start, wenn einer aus der ersten Gruppe gesetzt ist.
+
+| Schlüssel | Status |
+|---|---|
+| `[sso]` (jeder Schlüssel) | Noch ohne Wirkung. Richte Admin-SSO in der Admin-UI ein. |
+| `[auth.jwt] issuer`, `audience` | Noch ohne Wirkung. |
+| `[admin] primary_color`, `csrf_cookie_secure`, `session_timeout_minutes` | Noch ohne Wirkung; nur `check --deploy` liest sie. |
+| `[database] url` | Wird nicht zum Verbinden genutzt: Jeder Pool liest die Umgebungsvariable `DATABASE_URL`. |
+| `[audit] retention_days` | Nichts räumt danach auf; plane `audit-cleanup --days <N>` ein. |
+| `[jobs]`, `[i18n]`, `[cache]`, `[mail]`, `[mcp]`, `[auth.jwt]`-TTLs, `[admin]` | Vom Benutzer verdrahtet: nur vom Konstruktor gelesen, den du aufrufst (`jobs::inmemory_from_settings`, `Translator::from_settings`, `cache::from_settings_async`, `email::from_settings`, `mcp::secure_tenant_router_from_settings`, `auth_routes::Config::with_jwt_settings`, `admin::Builder::from_settings`). |
+
 ### Erster Lauf
 
 ```sh
 cd <name>
-cp .env.example .env
-docker compose up -d        # start Postgres
-cargo run -- migrate        # apply migrations
-cargo run                   # serve
-cargo run -- --help         # see every manage verb
+cp .env.example .env                     # then change `postgres` -> `localhost` in DATABASE_URL
+docker compose up -d --no-deps postgres  # only the database: the rust service holds 8080
+cargo run -- makemigrations              # generate the framework's (and your) tables
+cargo run -- migrate                     # apply them
+cargo run -- create-admin <username> --superuser  # fullstack: the admin login
+cargo run                                # serve
+cargo run -- --help                      # see every manage verb
 ```
 
 ---
@@ -234,12 +252,12 @@ Scaffolde ein in sich geschlossenes Modul aus zusammengehörigen Modellen, Views
 cargo run -- startapp blog
 ```
 
-Es schreibt `src/blog/` mit `mod.rs`, `models.rs` (ein Starter-Modell, benannt nach der Singular-Form der App — `blog` → `Blog`), `views.rs`, `urls.rs` und `tests.rs`, deklariert dann das Modul in `src/main.rs` und merged seine Routen in `urls::api()`.
+Es schreibt `src/blog/` mit `mod.rs`, `models.rs` (ein Starter-Modell, benannt nach der Singular-Form der App — `blog` → `Blog`), `views.rs`, `urls.rs` und `tests.rs`, deklariert dann das Modul in `src/lib.rs` (`pub mod blog;`; `mod blog;` in `src/main.rs` bei einem Projekt ohne `lib.rs`) und merged seine Routen in `urls::api()`.
 
 Optionen:
 
 - **`--into <dir>`** — scaffolde unter einem anderen Basisverzeichnis als `src/` (z. B. einem Workspace-Member).
-- **`--with-manage-bin`** — gib zusätzlich eine `bin/manage.rs` aus (für Layouts, die ein separates manage-Binary bevorzugen).
+- **`--with-manage-bin`** — gib zusätzlich eine `src/bin/manage.rs` aus (für Layouts, die ein separates manage-Binary bevorzugen).
 
 ---
 
@@ -254,6 +272,8 @@ Innerhalb eines Projekts scaffolden die `make:*`-Verben jeweils eine Datei. Die 
 | `make:api_routes <app>` | Ein API-Routen-Aggregator für eine App |
 | `make:form <Name>` | Ein HTML-Formular mit Validierung |
 | `make:job <Name>` | Ein Handler für einen Hintergrund-Job |
+| `make:scheduled <Name>` | Eine Aufgabe mit festem Intervall für `scheduler::Scheduler` |
+| `make:worker <Name>` | Ein Worker-Binary unter `src/bin/`, das die Job-Queue abarbeitet |
 | `make:notification <Name>` | Eine Mehrkanal-Benachrichtigung |
 | `make:middleware <Name>` | Ein Middleware-Gerüst |
 | `make:test <Name>` | Ein Testmodul mit dem In-process-Testclient |

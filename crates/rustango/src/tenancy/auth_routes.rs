@@ -414,15 +414,22 @@ impl RefreshSession {
     const FAM: &'static str = "fam";
 
     fn start(auth: &JwtAuth, user: &crate::tenancy::auth::User) -> Self {
+        Self::for_user(&auth.0.pwf_secret, user)
+    }
+
+    pub(crate) fn for_user(
+        pwf_secret: &crate::session::SessionSecret,
+        user: &crate::tenancy::auth::User,
+    ) -> Self {
         Self {
-            pwf: crate::session::PasswordFingerprint::of(&auth.0.pwf_secret, &user.password_hash),
+            pwf: crate::session::PasswordFingerprint::of(pwf_secret, &user.password_hash),
             // After the last logout, so a login in that second still refreshes (#2036).
             sat: crate::session::issued_at(user.sessions_revoked_at),
             fam: crate::tenancy::jwt_lifecycle::random_jti(),
         }
     }
 
-    fn write(&self, claims: &mut serde_json::Map<String, serde_json::Value>) {
+    pub(crate) fn write(&self, claims: &mut serde_json::Map<String, serde_json::Value>) {
         let pwf = serde_json::to_value(&self.pwf).unwrap_or_default();
         claims.insert(Self::PWF.to_owned(), pwf);
         claims.insert(Self::SAT.to_owned(), self.sat.into());

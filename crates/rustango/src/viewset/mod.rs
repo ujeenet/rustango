@@ -3389,7 +3389,7 @@ async fn handle_create(
         .map_or_else(|| parts.uri.path(), |u| u.path())
         .to_owned();
     // A JSON array body means a bulk create.
-    let create_body = match extract_create_body(parts, body, typed_schema(&state)).await {
+    let create_body = match extract_create_body(parts, body, Some(body_types(&state))).await {
         Ok(b) => b,
         Err(e) => return e.into_response(),
     };
@@ -4126,7 +4126,7 @@ async fn update_inner(
         Err(resp) => return resp,
     };
 
-    let (form, json) = match extract_form_body(parts, body, typed_schema(&state)).await {
+    let (form, json) = match extract_form_body(parts, body, Some(body_types(&state))).await {
         Ok(b) => b,
         Err(e) => return e.into_response(),
     };
@@ -4462,7 +4462,7 @@ impl BodyError {
 async fn extract_form_body(
     parts: axum::http::request::Parts,
     body: Body,
-    typed: Option<&'static ModelSchema>,
+    typed: Option<BodyTypes>,
 ) -> Result<(HashMap<String, String>, Option<Value>), BodyError> {
     match extract_create_body(parts, body, typed).await? {
         CreateBody::Single(form, json) => Ok((form, json)),
@@ -4488,7 +4488,7 @@ pub(crate) enum CreateBody {
 pub(crate) async fn extract_create_body(
     parts: axum::http::request::Parts,
     body: Body,
-    typed: Option<&'static ModelSchema>,
+    typed: Option<BodyTypes>,
 ) -> Result<CreateBody, BodyError> {
     use axum::body::to_bytes;
 
@@ -4551,13 +4551,13 @@ pub(crate) async fn extract_create_body(
 /// a NOT NULL field is refused, and a Json field keeps the value as JSON.
 fn json_object_to_form(
     obj: &serde_json::Map<String, Value>,
-    typed: Option<&'static ModelSchema>,
+    typed: Option<BodyTypes>,
 ) -> Result<HashMap<String, String>, String> {
     let mut form = HashMap::with_capacity(obj.len());
     for (k, v) in obj {
         // Server-set columns are never read from the body.
         let field = typed
-            .and_then(|s| s.field(k))
+            .and_then(|t| t.field(k))
             .filter(|f| !f.auto && f.generated_as.is_none());
         let s = match (v, field) {
             (Value::Null, Some(f)) if !f.nullable => {
@@ -4575,9 +4575,35 @@ fn json_object_to_form(
     Ok(form)
 }
 
-/// The schema a JSON body is decoded by; a serializer types its own (#2530).
-fn typed_schema(state: &ViewSetState) -> Option<&'static ModelSchema> {
-    state.vs.serializer.is_none().then_some(state.vs.schema)
+/// How a JSON body's keys find their model field: by name, or by a
+/// serializer's writable names, `source` renames resolved.
+#[derive(Clone, Copy)]
+pub(crate) struct BodyTypes {
+    schema: &'static ModelSchema,
+    /// `(serializer names, model fields)`, parallel.
+    serializer: Option<(&'static [&'static str], &'static [&'static str])>,
+}
+
+impl BodyTypes {
+    fn field(self, key: &str) -> Option<&'static crate::core::FieldSchema> {
+        let column = match self.serializer {
+            None => key,
+            Some((names, columns)) => columns.get(names.iter().position(|n| *n == key)?)?,
+        };
+        self.schema.field(column)
+    }
+}
+
+/// The types a JSON body is decoded by, so a Json field keeps a JSON string.
+fn body_types(state: &ViewSetState) -> BodyTypes {
+    BodyTypes {
+        schema: state.vs.schema,
+        serializer: state
+            .vs
+            .serializer
+            .as_ref()
+            .map(|b| (b.writable_field_names(), b.writable_model_fields())),
+    }
 }
 
 /// Every ViewSet error is an `ApiError`, and a 5xx withholds its cause (#1193).

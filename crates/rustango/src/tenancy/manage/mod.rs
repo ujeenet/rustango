@@ -539,6 +539,10 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
+        "                       [--resume]  finish a tenant whose migrations failed (left inactive)"
+    )?;
+    writeln!(
+        w,
         "  test-tenant-connection <url> [--no-write-probe] [--timeout <secs>]"
     )?;
     writeln!(
@@ -1103,6 +1107,12 @@ fn secret_key_audit(
         KeyStatus::Short => out.warnings.push(
             "RUSTANGO_SECRET_KEY is shorter than 32 bytes — sealed secrets use a weak key".into(),
         ),
+        KeyStatus::DevFile => out.warnings.push(
+            "RUSTANGO_SECRET_KEY is unset — sealed secrets use the dev key file \
+             `var/.rustango_secret.key`, which a redeploy loses; set the env var \
+             (`openssl rand -base64 48`) and back it up"
+                .into(),
+        ),
         KeyStatus::Ok => out
             .info
             .push("RUSTANGO_SECRET_KEY is set for sealed secrets".into()),
@@ -1139,6 +1149,7 @@ mod deploy_tests {
         for (status, flagged) in [
             (KeyStatus::Missing, true),
             (KeyStatus::Short, true),
+            (KeyStatus::DevFile, true),
             (KeyStatus::Ok, false),
         ] {
             let mut out = rustango::migrate::manage::DeployAuditFindings::default();

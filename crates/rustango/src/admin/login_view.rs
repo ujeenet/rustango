@@ -568,10 +568,12 @@ async fn change_password_submit(
         }),
     };
     if let Err(e) = crate::sql::update_pool(&state.pool, &q).await {
+        // The driver error names tables and constraints: log it only.
+        tracing::warn!(target: "rustango::admin", error = %e, "change-password update");
         return Html(render_change_password_form(
             &state,
             None,
-            Some(&format!("Update failed: {e}")),
+            Some("Could not save — please try again."),
         ))
         .into_response();
     }

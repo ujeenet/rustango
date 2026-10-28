@@ -34,6 +34,11 @@ async fn post(
 }
 
 async fn boot(name: &str) -> (axum::Router, String) {
+    let (app, session, _) = boot_with_pool(name).await;
+    (app, session)
+}
+
+async fn boot_with_pool(name: &str) -> (axum::Router, String, Pool) {
     let p = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -53,7 +58,7 @@ async fn boot(name: &str) -> (axum::Router, String) {
         .insert_pool(&pool)
         .await
         .unwrap();
-    let app = Builder::new(pool)
+    let app = Builder::new(pool.clone())
         .admin_prefix("")
         .with_session_auth(SessionSecret::from_bytes(vec![7u8; 32]))
         .build();
@@ -70,7 +75,7 @@ async fn boot(name: &str) -> (axum::Router, String) {
                 .then(|| s.split(';').next().unwrap_or("").to_owned())
         })
         .expect("session cookie");
-    (app, session)
+    (app, session, pool)
 }
 
 #[tokio::test]
@@ -110,4 +115,30 @@ async fn new_password_length_counts_characters_not_bytes() {
         html.contains("at least 8"),
         "short password accepted: {html}"
     );
+}
+
+/// A failed password write shows a generic message, not the driver error.
+#[tokio::test]
+async fn a_failed_update_hides_the_driver_error() {
+    let (app, session, pool) = boot_with_pool("cpwdb").await;
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "CREATE TRIGGER cpw_fail BEFORE UPDATE ON rustango_admin_users \
+         BEGIN SELECT RAISE(ABORT, 'internal_constraint_q7Zx'); END",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let body =
+        "current_password=correct-horse&new_password=another-pass-9&new_password_confirm=another-pass-9";
+    let r = post(&app, "/account/password", &session, body.to_owned()).await;
+    let html = String::from_utf8(
+        axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!html.contains("internal_constraint_q7Zx"), "{html}");
+    assert!(html.contains("Could not save"), "{html}");
 }

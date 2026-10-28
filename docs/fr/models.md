@@ -145,8 +145,9 @@ des déploiements PostgreSQL :
 
 ## Clés primaires
 
-Chaque modèle a besoin d'une clé primaire. Marquez un champ `#[rustango(primary_key)]` ; si
-vous n'en marquez aucun, le schéma recherche une colonne nommée `id`.
+Marquez un champ `#[rustango(primary_key)]`. Un modèle sans clé primaire compile
+quand même et peut être interrogé, mais le derive omet toutes les méthodes de ligne
+basées sur la PK (`save_pool`, `find`, `delete_pool`, `refresh_from_db`, …).
 
 La PK **par défaut et la plus courante** est un entier 64 bits auto-incrémenté,
 déclaré comme `Auto<i64>` :
@@ -167,7 +168,9 @@ g.save_pool(&pool).await?;                              // DB assigns the id
 let new_id = g.id.get().copied().unwrap();             // now populated
 ```
 
-Les types internes de `Auto<T>` pris en charge sont `i32`, `i64` et `Uuid`.
+Les types internes de `Auto<T>` pris en charge sont `i32`, `i64`, `Uuid` et
+`DateTime<Utc>` (la base de données le remplit avec l'heure courante, comme pour le
+champ `auto_now_add` ci-dessus).
 
 ### Clés primaires personnalisées
 
@@ -364,8 +367,7 @@ Déclarés sur le **modèle** :
   pilote et sont `#[cfg(feature = "postgres")]`, donc sur un build `sqlite` ou
   `mysql` ils n'existent tout simplement pas. La famille `_pool` prend
   `rustango::sql::Pool` et fonctionne sur les trois — écrivez celle-là sauf si
-  vous savez être sur Postgres. Ce nommage inversé est suivi dans
-  [#1293](https://github.com/ujeenet/rustango/issues/1293) ; voir
+  vous savez être sur Postgres. Ce nommage inversé est un défaut connu ; voir
   [api-conventions](api-conventions.md#fonctions).
 - **La suppression logique** (si activée) — `soft_delete`, `restore`, `force_delete` ;
   `QuerySet::active()` / `with_trashed()` / `only_trashed()`.
@@ -415,11 +417,11 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `audit(track = "…")` | liste de champs | historique des modifications par ligne |
 | `scope` | `"tenant"` / `"registry"` | portée multi-tenant |
 | `proxy` | indicateur | modèle proxy (partage la table d'un autre) |
-| `global_scope(name, apply = fn)` | nom + fonction | filtre appliqué automatiquement à toutes les requêtes |
+| `global_scope(name, apply = fn)` | nom + fonction | filtre appliqué automatiquement aux querysets et aux raccourcis, pas aux méthodes d'instance indexées par PK ni à `truncate` |
 | `through(...)` | spécification de relation | accesseur de relation « through » personnalisé |
 | `reverse_has(...)` / `generic_has(...)` | spécification de relation | accesseur has-many inverse / FK générique inverse |
 | `required_db_features` / `required_db_vendor` | liste / fournisseur | contraintes de validation de déploiement |
-| `db_table_comment` | `"…"` | COMMENT de table |
+| `db_table_comment` | `"…"` | COMMENT de table ; les migrations fichier ne l'écrivent pas encore, et `makemigrations` émet un avertissement |
 | `admin(...)` | options admin | configuration de l'UI admin (voir [admin.md](admin.md)) |
 | `fk_composite(...)` / `generic_fk(...)` | spécification | FK composite / FK générique (content-type) |
 | `m2m(...)` / `generic_m2m(...)` | spécification | relation plusieurs-à-plusieurs / plusieurs-à-plusieurs générique |
@@ -446,7 +448,7 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `verbose_name` | `"Label"` | libellé lisible du champ dans les formulaires/admin |
 | `help_text` | `"…"` | texte d'aide rendu sous le widget de formulaire/admin |
 | `validators` | `"name, name"` | validateurs nommés à exécuter sur ce champ |
-| `related_name` | `"posts"` | nom de l'accesseur inverse sur la cible de la FK |
+| `related_name` | `"posts"` | nom de l'accesseur inverse sur la cible de la FK ; `"+"` pour aucun (une cible d'un autre crate) |
 | `auto_now` | indicateur | réglé à l'heure actuelle à chaque save |
 | `auto_now_add` | indicateur | réglé à l'heure actuelle à l'insertion |
 | `soft_delete` | indicateur | marque l'horodatage de suppression douce (`Option<DateTime<Utc>>`) |
@@ -456,7 +458,7 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `on_delete` | `"cascade"` / `"restrict"` / `"set_null"` / `"set_default"` / `"no_action"` | action `ON DELETE` de la FK |
 | `o2o` | `"table"` | FK un-à-un vers cette table |
 | `generated_as` | `"expr"` | colonne calculée (générée) par la base de données |
-| `citext` | indicateur | texte insensible à la casse (CITEXT PostgreSQL) |
+| `citext` | indicateur | texte insensible à la casse : `CITEXT` sur PostgreSQL, `TEXT COLLATE NOCASE` sur SQLite, une collation insensible à la casse sur MySQL |
 | `vector(dims = N)` | `N` | dimension pgvector |
 | `geometry(srid = N)` | `N` | identifiant de référence spatiale PostGIS |
 | `db_comment` | `"…"` | COMMENT de colonne |

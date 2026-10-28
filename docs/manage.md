@@ -1,7 +1,6 @@
 # `manage` CLI reference
 
-This is **Rustango**'s command-line tool, like Laravel's `artisan` or Rails'
-`rails` command. In a project scaffolded via `cargo rustango new`, one binary
+This is **Rustango**'s command-line tool. In a project scaffolded via `cargo rustango new`, one binary
 runs every command ("verb"):
 
 ```bash
@@ -84,7 +83,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | `showmigrations` / `status` | List migrations and their applied state |
 | `sqlmigrate <name>` | Print the SQL a migration would run, without running it |
 | `forget-pending <name>` | Delete an un-applied migration JSON |
-| `add-data-op --sql <SQL> [--reverse-sql <SQL>]` | Append a hand-written data operation |
+| `add-data-op --sql <SQL> [--reverse-sql <SQL>] [--scope <s>]` | Append a hand-written data operation |
 | `inspectdb [--schema <s>] [--table <t>]` | Read a live schema and emit `#[derive(Model)]` source |
 
 ### Data
@@ -132,14 +131,15 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 |---|---|
 | `create-superuser` / `set-superuser` | Create a superuser, or promote an existing user |
 | `create-user` / `create-operator` | Create a tenant user or an operator |
-| `reset-password` / `change-password` | Tenant-user password recovery |
+| `reset-password` / `change-password` | Tenant-user password recovery. `change-password` takes the current password from `--current-stdin` or `RUSTANGO_CURRENT_PASSWORD` off a terminal; `--current` in argv warns |
 | `set-password-link <slug> <username>` | Print a single-use link for the user to set their own password |
-| `reset-operator-password` / `change-operator-password` | Operator password recovery |
+| `reset-operator-password` / `change-operator-password` | Operator password recovery; `change-operator-password` reads the current password like `change-password` |
 | `set-operator-active` | Enable or disable an operator |
 | `create-role` / `assign-role` / `revoke-role` / `list-roles` | Roles |
 | `grant-perm` / `revoke-perm` | Permissions by codename |
 | `seed-permissions [--slug <s>]` | Seed the default permission rows |
 | `create-api-key` | Issue an API key |
+| `revoke-passkey <slug> <username> [--credential <id>]` | Delete one of a tenant user's passkeys, or all of them (`passkey` feature) |
 
 ### Tenants **T**
 
@@ -153,6 +153,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host routing |
 | `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Saved database servers |
 | `test-tenant-connection` | Verify a tenant's database is reachable |
+| `reseal-tenant-secrets [--apply]` | Re-seal stored tenant URLs and server passwords with the current `RUSTANGO_SECRET_KEY`; a dry run without `--apply` |
 | `prewarm-pools` | Open tenant pools ahead of first request |
 | `run-server` / `runserver` | Run the multi-tenant server |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup and interactive entry points |
@@ -264,7 +265,7 @@ cargo run -- makemigrations --empty rename_status_to_state
 
 ### `makemigrations --merge`
 
-Fixes a migration history that has split into two branches (issue #346).
+Fixes a migration history that has split into two branches.
 This happens when two people each run `makemigrations` on their own
 feature branch, so both new files point at the same parent. After both branches merge, the
 history has two "leaves" (end points), and `makemigrations` refuses to
@@ -291,8 +292,7 @@ cargo run -- makemigrations --merge
 
 ### `migrate`
 
-Applies all pending migrations to the database, in order — like Laravel's
-`php artisan migrate`. This is the command you run after `makemigrations`
+Applies all pending migrations to the database, in order. This is the command you run after `makemigrations`
 to actually change your schema.
 
 ```bash
@@ -391,8 +391,7 @@ job.
 
 ### `downgrade [N]`
 
-Rolls back the last N applied migrations (default 1) — Laravel's
-`migrate:rollback`. Each migration must be reversible: schema changes
+Rolls back the last N applied migrations (default 1). Each migration must be reversible: schema changes
 reverse automatically, but data operations need a `reverse_sql` defined
 or the rollback fails.
 
@@ -414,10 +413,15 @@ cargo run -- status                     # alias
 Output:
 
 ```
-[X] 0001_initial
-[X] 0002_add_status
-[ ] 0003_add_slug
+Migrations in ./migrations:
+  [X] 0001_initial
+  [X] 0002_add_status
+  [ ] 0003_add_slug
+System migrations in ./system/migrations:
+  [X] 0001_create_rustango_audit_log_and_rustango_content_types
 ```
+
+A row superseded by an applied squash shows `[X] <name> (replaced by a squash)`.
 
 ---
 
@@ -464,7 +468,7 @@ any attempt to roll it back fails immediately.
 
 ### `cargo rustango new <name>` *(separate binary)*
 
-Creates a brand-new **Rustango** project — like `laravel new`. This is a
+Creates a brand-new **Rustango** project. This is a
 separate tool, so install it first with `cargo install cargo-rustango`.
 Pick from three templates:
 
@@ -524,20 +528,23 @@ Creates:
 ```
 src/<name>/
   mod.rs
-  models.rs
+  models.rs      (a starter model named after the app)
   views.rs
   urls.rs
+  tests.rs
 ```
 
-Safe to re-run — existing files are left alone. One manual step: add
-`pub mod <name>;` to `src/lib.rs` so Rust compiles the new module.
+Safe to re-run — existing files are left alone. It also registers the
+module: `pub mod <name>;` in `src/lib.rs` (or `mod <name>;` in
+`src/main.rs` when there is no `lib.rs`), plus a
+`.merge(crate::<name>::urls::api())` line in the `api()` aggregator of
+`src/urls.rs`. When it cannot patch a file, it prints the line to add.
 
 ---
 
 ## File generators (`make:*`)
 
-These create starter files for common building blocks — much like
-Laravel's `make:*` commands (`make:controller`, `make:model`, …). Each
+These create starter files for common building blocks. Each
 generator writes to `src/<snake_name>.rs` (or `tests/<snake_name>.rs`
 for `make:test`) and:
 
@@ -570,21 +577,27 @@ Pool template — generated `src/post_view_set.rs`:
 
 ```rust
 #[derive(ViewSet)]
-#[viewset(model = Post, fields = "id, ", filter_fields = "", search_fields = "", page_size = 20)]
+#[viewset(model = Post, fields = "id, ", filter_fields = "", search_fields = "", page_size = 20, read_only)]
 pub struct PostViewSet;
 ```
 
-Mount with: `.merge(PostViewSet::router("/api/posts", pool.clone()))`.
+It starts `read_only`: add `permissions(create = "...", ...)` behind an auth
+layer, then drop `read_only`, to serve writes. `--model Post` imports
+`crate::models::Post`; edit the `use` line if the model lives in an app.
+
+Mount it in `src/main.rs` with the server's pool:
+`.nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/post_view_set", pool))`.
 
 Tenant template — **not a derive**. It emits a `pub fn router() -> Router<()>`
-built from `ViewSet::for_model(Post::SCHEMA, &["id"]).tenant_router("/api/posts")`, with
-the rest of the builder chain (`filter_fields` / `search_fields` /
-`ordering` / `page_size` / `permissions_for_model` / `read_only`) stubbed out as
-commented lines. The connection is resolved per request through the `Tenant`
-extractor rather than captured once at mount time, so one `router()` serves every
-tenant.
+built from `ViewSet::for_model(Post::SCHEMA, &["id"])`, with
+`.permissions_for_model::<Post>()` on and the rest of the builder chain
+(`filter_fields` / `search_fields` / `ordering` / `ordering_fields` /
+`page_size` / `read_only`) stubbed out as commented lines, ending in
+`.tenant_router("/api/post_view_set")`. The connection is resolved per request
+through the `Tenant` extractor rather than captured once at mount time, so one
+`router()` serves every tenant.
 
-Mount with: `.merge(crate::viewsets::post::router())` — **not** the
+Mount with: `.merge(crate::post_view_set::router())` — **not** the
 `PostViewSet::router(path, pool)` line above.
 
 `--crate <path>` renames the framework crate in the generated `use` lines, for
@@ -652,8 +665,7 @@ cargo run -- make:worker JobsWorker
 
 ### `make:notification <Name>`
 
-Generates a notification struct that builds an email — like Laravel's
-`make:notification`.
+Generates a notification struct that builds an email.
 
 ```bash
 cargo run -- make:notification WelcomeEmail
@@ -697,8 +709,7 @@ cargo run -- db:info
 
 ### `db:dump [--out <path>] [--data-only|--schema-only] [--no-owner]`
 
-Backs up your database by running `pg_dump` against `DATABASE_URL` —
-like `php artisan db:dump`. By default the SQL goes to stdout (so you
+Backs up your database by running `pg_dump` against `DATABASE_URL`. By default the SQL goes to stdout (so you
 can pipe it); pass `--out <path>` (`-o`) to write a file instead.
 `--data-only` and `--schema-only` map straight to `pg_dump`'s flags, and
 `--no-owner` drops the OWNER lines. You need `pg_dump` installed and on
@@ -710,8 +721,8 @@ cargo run -- db:dump --out backups/before-migrate.sql
 ```
 
 The `running: pg_dump …` status line goes to **stderr**, so it stays out
-of the redirect and out of a pipe. Until [#1404](https://github.com/ujeenet/rustango/issues/1404)
-it went to stdout, which put it on the first line of the `.sql` file.
+of the redirect and out of a pipe. Older releases
+sent it to stdout, which put it on the first line of the `.sql` file.
 
 ### `db:restore <path> [--clean --yes]`
 
@@ -741,7 +752,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.7
+rustango 0.61.8
 ```
 
 ### `about`
@@ -753,7 +764,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.7
+  version:        0.61.8
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -773,7 +784,7 @@ production-readiness checks.
 
 **With `--deploy`:**
 - `RUSTANGO_ENV` is `prod` or `production`
-- `RUSTANGO_SESSION_SECRET` set and ≥ 32 bytes (the HMAC key for
+- `RUSTANGO_SESSION_SECRET` set and decoding to a ≥ 32-byte key, the same check the runtime applies (the HMAC key for
   cookies + JWTs; `SECRET_KEY` is never read by the framework)
 - `DATABASE_URL` set
 - `RUSTANGO_APEX_DOMAIN` set — the warning fires for **every** project when unset or `localhost`, and says so; single-tenant projects can ignore it
@@ -788,7 +799,10 @@ running rustango system check (deploy mode)...
   [info]    3 models registered via inventory
   [info]    database reachable
   [info]    4 migration(s) on disk
-  [info]    RUSTANGO_SESSION_SECRET length OK
+  [info]    RUSTANGO_ENV is set to a production value
+  [info]    RUSTANGO_SESSION_SECRET decodes to a valid ≥32-byte key
+  [info]    DATABASE_URL set
+  [info]    RUSTANGO_APEX_DOMAIN set to a non-localhost value
 all checks passed
 ```
 
@@ -920,6 +934,8 @@ cargo run                        # implicit
 cargo run -- runserver           # explicit
 ```
 
+`--bind <addr>` beats `RUSTANGO_BIND` and `[server] bind`; in a tenancy project `--apex <domain>` beats `RUSTANGO_APEX_DOMAIN` and `[tenancy] apex_domain`. Any other flag is refused. The server logs the address it listens on at INFO.
+
 On SIGTERM it stops accepting and gives open connections
 `[server] shutdown_timeout_secs` (default 20) to finish, then closes the rest.
 SSE and long-poll never finish by themselves. Provisioning and migration runs
@@ -951,6 +967,12 @@ cargo run -- create-tenant gamma --mode database --server main
 | `--schema-name <s>` | Override the generated schema name in schema mode |
 | `--port <n>` | Port the tenant is reachable on, for routing |
 | `--path-prefix <s>` | Path prefix the tenant is reachable under, for routing |
+| `--admin-email <e>` / `--admin-username <u>` | Create the tenant's first superuser (see **First admin** above) |
+| `--resume` | Finish a tenant an earlier run left inactive because its migrations failed; give the same flags again |
+
+If the tenant's migrations fail, `create-tenant` exits non-zero and the
+tenant stays inactive. Fix the migration, then rerun the same command
+with `--resume`: it migrates and activates that tenant.
 
 Each mode checks its rights before anything is made and, when one is
 missing, names it and prints the statements that fix it: schema mode needs
@@ -1039,8 +1061,7 @@ removes its row from `rustango_orgs`, with no undo. When you're not
 running interactively (no terminal attached), you must pass
 `--confirm <slug>` with the slug typed again. For database-mode tenants the command
 **refuses outright** unless you also pass `--purge-database` — it does not
-remove the `Org` row and leave the database behind, it does nothing at all
-(tenancy/manage/tenants.rs:479).
+remove the `Org` row and leave the database behind, it does nothing at all.
 
 ```bash
 cargo run -- purge-tenant acme --confirm acme
@@ -1194,7 +1215,10 @@ does not go red.
 ### `create-user <tenant> <username> --password <pwd> [--superuser]`
 
 Creates a user inside one tenant. The account exists only in that
-tenant.
+tenant. Instead of `--password` you can pass `--password-stdin` or
+`--generate` (prints a random one); omit all three on a terminal and it
+prompts. `--skip-validation` skips the password rules. There is no
+`--staff` flag.
 
 ```bash
 cargo run -- create-user acme alice --password hunter2 --superuser
@@ -1241,14 +1265,14 @@ cargo run -- revoke-role acme alice editor
 
 Grants a single permission. By default the second argument is a
 **username**, so the permission goes straight to that user; add `--role`
-to grant it to a role instead. Permission codenames use the
-`<app>.<action>_<model>` format (`blog.add_post`, `blog.change_post`,
-…). The `auto_create_permissions` feature creates the four standard CRUD
-codenames automatically for any model marked `#[rustango(permissions)]`.
+to grant it to a role instead. Model codenames use the
+`<table>.<action>` format (`posts.add`, `posts.change`, `posts.delete`,
+`posts.view`). `migrate` seeds these four for every model; opt a model out
+with `#[rustango(permissions = false)]`.
 
 ```bash
-cargo run -- grant-perm acme alice blog.change_post           # grant to user alice
-cargo run -- grant-perm acme editor blog.change_post --role   # grant to role editor
+cargo run -- grant-perm acme alice posts.change           # grant to user alice
+cargo run -- grant-perm acme editor posts.change --role   # grant to role editor
 ```
 
 ### `revoke-perm <tenant> <role-name|username> <codename> [--role]`
@@ -1257,8 +1281,8 @@ Removes a permission — the reverse of `grant-perm`. Targets a user by
 default; add `--role` to revoke it from a role instead.
 
 ```bash
-cargo run -- revoke-perm acme alice blog.change_post
-cargo run -- revoke-perm acme editor blog.change_post --role
+cargo run -- revoke-perm acme alice posts.change
+cargo run -- revoke-perm acme editor posts.change --role
 ```
 
 ### `create-api-key <tenant> <username> [--label <s>]`
@@ -1305,7 +1329,7 @@ cargo run -- audit-log --pk acme --limit 100
 
 | Verb | Flags |
 |---|---|
-| `list-runs` | `--limit <n>`, `--kind provision\|migrate`, `--state <s>` |
+| `list-runs` | `--limit <n>`, `--kind provision\|migrate\|purge\|rotate_password`, `--state pending\|running\|succeeded\|failed` |
 | `show-run <id>` | — |
 | `audit-log` | `--limit <n>`, `--table <t>`, `--pk <v>`, `--operation <o>`, `--source <s>` |
 
@@ -1336,9 +1360,10 @@ The operator console has a button for this too, on the tenant list.
 ## Custom user model (extra columns on `rustango_users`)
 
 This is how you add your own fields to the user table. The built-in
-tenant `User` has seven fixed columns: `id`, `username`, `password_hash`, `is_superuser`,
-`active`, `created_at`, plus a `data` JSONB column (a flexible
-JSON blob) for any extra per-user metadata. **For most apps that JSONB
+tenant `User` has nine fixed columns: `id`, `username`, `password_hash`, `is_superuser`,
+`active`, `created_at`, `password_changed_at`, `sessions_revoked_at`, plus a
+`data` JSONB column (a flexible JSON blob) for any extra per-user metadata.
+With the `sso` feature it also has a unique `email`. **For most apps that JSONB
 column is all you need** — no migration, no override, no surprises.
 
 When you want **typed, indexable** columns on `rustango_users` instead,
@@ -1457,54 +1482,71 @@ builds the server `Builder` directly, without going through `Cli`.
 
 ## Custom subcommands
 
-You can add your own management commands. The trick is to inspect the
-arguments yourself and handle your command before passing the rest to
-`Cli::run`. Two ways to do it:
+A crate can add its own verbs, and so can the app. They are listed in
+`--help` under the crate that registered them, and run like built-in ones.
 
-**Inline in `src/main.rs`** (no extra binary):
+**From a crate** — `register_command!` registers the verb at link time, so
+the host app does not change `main`:
 
 ```rust
-#[rustango::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = dotenvy::dotenv();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if matches!(args.first().map(String::as_str), Some("import-csv")) {
-        let url = std::env::var("DATABASE_URL")?;
-        let pool = rustango::sql::Pool::connect_postgres(&url).await?;
-        return my_csv_importer::run(&pool, &args[1..]).await;
-    }
-    rustango::manage::Cli::new().api(urls::api()).run().await
-}
+use std::io::Write as _;
+use rustango::manage::CommandContext;
+
+// In any crate the binary links, e.g. a CMS library.
+rustango::register_command!(
+    "reset-link",
+    "Print a password-reset link for a user",
+    |mut ctx: CommandContext, args: Vec<String>| async move {
+        let user = args.first().ok_or("usage: reset-link --tenant <slug> <user>")?;
+        let pool = ctx.tenant_pool().ok_or("pass --tenant <slug>")?.clone();
+        // ... look the user up on `pool` with the ORM ...
+        writeln!(ctx.stdout(), "link for {user}")?;
+        Ok(())
+    },
+);
 ```
 
-**Via `--with-manage-bin`** (separate `src/bin/manage.rs`):
+**From the app** — the `Cli::command` builder method:
+
+```rust
+rustango::manage::Cli::new()
+    .tenancy()
+    .command("import-csv", "Import a CSV file", |ctx, args| async move {
+        my_csv_importer::run(ctx.pool(), &args).await?;
+        Ok(())
+    })
+    .run()
+    .await
+```
+
+The handler gets a `CommandContext` and the arguments after the verb:
+
+- `ctx.pool()` — the app's database; in a tenancy project, the registry.
+- `ctx.tenant_pool()` / `ctx.tenant()` — with `Cli::tenancy()`,
+  `--tenant <slug>` is taken out of the arguments and opens that tenant's
+  pool (schema or database mode, any backend). `ctx.tenant_by_slug(slug)`
+  opens any other one.
+- `ctx.settings()` — the settings given to `Cli::with_settings*`.
+- `ctx.stdout()` — where output goes.
 
 ```bash
-cargo run -- startapp app --with-manage-bin
+cargo run -- reset-link --tenant acme alice
 ```
 
-Then in `src/bin/manage.rs`:
+A name that clashes with a built-in verb, or one registered twice, makes
+`Cli::run` fail at startup with both names in the error.
 
-```rust
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = dotenvy::dotenv();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let url = std::env::var("DATABASE_URL")?;
-    let pool = rustango::sql::Pool::connect_postgres(&url).await?;
+`Cli::run_with_args(args)` runs the CLI on the arguments you give it (no
+program name) instead of the process's, for example from a test.
 
-    match args.first().map(String::as_str) {
-        Some("import-csv") => my_csv_importer::run(&pool, &args[1..]).await,
-        _ => rustango::migrate::manage::run(&pool, "./migrations".as_ref(), args)
-            .await
-            .map_err(Into::into),
-    }
-}
-```
-
-Run your own commands just like the built-in ones:
-`cargo run -- import-csv path/to/file.csv` (or
-`cargo run --bin manage -- import-csv …` when using `--with-manage-bin`).
+**Database connection.** Every verb, the server and custom commands read
+the database from `DATABASE_URL`, or from `DB_DRIVER`, `DB_HOST`,
+`DB_PORT`, `DB_USER`, `DB_PASSWORD` (or `DB_PASSWORD_FILE`, a file holding
+it), `DB_NAME` and `DB_PARAMS`. For SQLite set `DB_DRIVER=sqlite` and
+`DB_NAME` to the file path. Setting both `DB_PASSWORD` and
+`DB_PASSWORD_FILE` is an error. When both styles are set, `DATABASE_URL` wins
+and one warning (password hidden) says so, and `check --deploy` lists it; from
+0.62.0 the `DB_*` vars will win, so keep one style.
 
 ---
 
@@ -1579,7 +1621,7 @@ Why this is safe:
 ```bash
 cargo run -- startapp blog        # if not done yet
 # Edit src/blog/models.rs — add #[derive(Model)]
-# Add `pub mod blog;` to src/lib.rs
+# (startapp already added `pub mod blog;` to src/lib.rs)
 cargo run -- makemigrations
 cargo run -- migrate
 ```
@@ -1589,7 +1631,8 @@ cargo run -- migrate
 ```bash
 cargo run -- make:viewset PostViewSet --model Post
 # Edit src/post_view_set.rs — fill in field lists
-# Mount in src/urls.rs
+# Add `pub mod post_view_set;` to src/lib.rs
+# Mount it in src/main.rs: .nest_with("/api", |pool| PostViewSet::router("/posts", pool))
 cargo run                        # GET /api/posts now works
 ```
 
@@ -1648,6 +1691,10 @@ on pre-warming. The settings live on `TenantPoolsConfig`:
 | `database_pool_idle_timeout` | 10 min | Close idle connections after this duration. Defends against load-balancer / `idle_in_transaction_session_timeout` cuts. |
 | `database_pool_max_lifetime` | 30 min | Force-rotate connections so vault-leased credentials get refreshed. |
 | `prewarm_active_tenants` | false | When true, `Server::Builder::serve` calls `prewarm_database_tenants()` at boot. |
+| `max_cached_scoped_pools` | 64 | Cap on the cached per-tenant pools for schema-mode tenants. |
+| `scoped_pool_max_connections` | 8 | `max_connections` of each schema-mode tenant pool. |
+
+With `Cli`, pass the config through `Cli::with_tenant_pools(config)`.
 
 ### Pre-warm at boot
 

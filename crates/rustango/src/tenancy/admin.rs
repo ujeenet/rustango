@@ -361,6 +361,8 @@ where
             .brand_storage
             .unwrap_or_else(branding::default_brand_storage);
         let routes = self.routes;
+        // Built once: each request brings its own pool, perms and branding.
+        let admin_router = crate::admin::per_request_router(&routes.audit_url);
 
         // CSRF on every tenant admin write (#1713): tenant hosts are
         // same-site, so `SameSite=Lax` lets `t02` post to `t01`. Same
@@ -379,9 +381,11 @@ where
             let subtitle = subtitle.clone();
             let brand_storage = brand_storage.clone();
             let routes = routes.clone();
+            let admin_router = admin_router.clone();
             async move {
                 handle_request::<DB>(
                     req,
+                    admin_router,
                     &pools,
                     &registry_url,
                     &*resolver,
@@ -397,16 +401,19 @@ where
                 .await
             }
         });
-        router
-            .layer(axum::middleware::from_fn(
-                crate::admin::csrf_context::csrf_context,
-            ))
-            .layer(crate::forms::csrf::layer())
+        crate::errors::own_pages(
+            router
+                .layer(axum::middleware::from_fn(
+                    crate::admin::csrf_context::csrf_context,
+                ))
+                .layer(crate::forms::csrf::layer()),
+        )
     }
 }
 
 async fn handle_request<DB: Database>(
     req: Request<Body>,
+    admin_router: Router,
     pools: &TenantPools<DB>,
     registry_url: &str,
     resolver: &dyn OrgResolver,
@@ -764,7 +771,7 @@ where
         }
     }
 
-    let admin_router = build_inner_admin_router(
+    let admin_state = inner_admin_state(
         pool.clone(),
         show_only,
         read_only,
@@ -800,6 +807,7 @@ where
     if let Some(sess) = &admin_session {
         parts.extensions.insert(sess.clone());
     }
+    parts.extensions.insert(admin_state);
     let inner_req = Request::from_parts(parts, body);
     // Dispatch inside an `audit::with_source` scope so audited writes
     // pick up the signed-in user. With no session the source stays
@@ -1944,7 +1952,8 @@ fn sanitize_next_with_routes(next: Option<&str>, routes: &super::routes::RouteCo
     s
 }
 
-fn build_inner_admin_router(
+/// This request's admin state: its pool, user perms and tenant branding.
+fn inner_admin_state(
     pool: crate::sql::Pool,
     show_only: &Option<Vec<String>>,
     read_only: &[String],
@@ -1956,7 +1965,7 @@ fn build_inner_admin_router(
     brand_storage: &BoxedStorage,
     impersonated_by: Option<i64>,
     routes: &super::routes::RouteConfig,
-) -> Router {
+) -> crate::admin::RequestState {
     let admin_url_prefix = routes.admin_url.as_str();
     let change_password_url = routes.change_password_url.as_str();
     let logout_url = routes.logout_url.as_str();
@@ -2048,7 +2057,7 @@ fn build_inner_admin_router(
             move |pool, pks| handler(pool, pks),
         );
     }
-    builder.build()
+    builder.into_request_state()
 }
 
 /// Serve a per-tenant brand asset from the shared brand storage.
@@ -2112,6 +2121,7 @@ mod resolver_error_tests {
         let req = Request::builder().uri("/").body(Body::empty()).unwrap();
         let resp = handle_request(
             req,
+            crate::admin::per_request_router("/__audit"),
             &pools,
             "",
             &Failing,
@@ -2217,7 +2227,8 @@ mod ungated_flag_tests {
             .expect("sqlite");
         let storage: super::BoxedStorage =
             std::sync::Arc::new(crate::storage::InMemoryStorage::new());
-        let _admin = super::build_inner_admin_router(
+        let _router = crate::admin::per_request_router("/__audit");
+        let _state = super::inner_admin_state(
             pool,
             &None,
             &[],

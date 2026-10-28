@@ -98,3 +98,20 @@ async fn suffix_collision_does_not_match_subdomain_pattern() {
         StatusCode::BAD_REQUEST
     );
 }
+
+/// HTTP/2 carries the host in `:authority` (the URI) and no `Host`.
+#[tokio::test]
+async fn http2_authority_without_host_is_checked() {
+    let layer = AllowedHostsLayer::new(["example.com"]);
+    let h2 = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let ok = build_app(layer.clone())
+        .oneshot(h2("https://example.com:8443/"))
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    let bad = build_app(layer)
+        .oneshot(h2("https://attacker.com/"))
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+}

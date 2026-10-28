@@ -13,9 +13,7 @@ qu'on le lui demande. **Rustango** vous offre les deux transports de push sur un
   client envoie aussi (chat, édition collaborative, présence).
 
 Les deux se diffusent à travers le même **bus de diffusion** en processus ([`EventBus`]), si bien
-que « envoyer ceci à chaque client connecté » est un seul appel quel que soit le transport. Dans
-d'autres écosystèmes, vous connaissez peut-être cela sous le nom d'Echo/Reverb, ou de
-`ws` + `EventSource` — mêmes idées, un seul bus derrière elles.
+que « envoyer ceci à chaque client connecté » est un seul appel quel que soit le transport.
 
 > **Source :** `rustango::sse` (`EventBus`) — derrière la fonctionnalité **`sse`** ; et
 > `rustango::ws` (`WsHub`, `WsConfig`, `ws_handler`) — derrière la
@@ -169,12 +167,15 @@ ws.onmessage = (e) => { const t = JSON.parse(e.data); console.log('tick', t.valu
 
 | Réglage | Défaut | Effet |
 |---|---|---|
-| `.keepalive(Duration)` | 30 s | intervalle de `Ping` en veille — plus bas détecte les connexions mortes plus tôt |
+| `.keepalive(Duration)` | 30 s | intervalle de `Ping`, trafic ou pas ; un pair muet pendant tout un intervalle après un ping est fermé |
 | `.on_message(fn(&str) -> Option<String>)` | aucun | gère le texte client→serveur ; renvoyez `Some(reply)` pour renvoyer un écho **à ce client uniquement** (appelez `hub.broadcast(..)` pour la diffusion) |
 | `.max_message_bytes(n)` | 1 MiB | ferme la connexion si un message client dépasse cette limite |
 
 **Les consommateurs lents** ne sont pas abandonnés en silence : un client à la traîne se voit dire
-qu'il a manqué `n` messages (`Lagged(n)`) afin qu'il puisse se resynchroniser ou continuer.
+qu'il a manqué `n` messages afin qu'il puisse se resynchroniser ou continuer : il
+reçoit la trame texte `{"_lagged": n}`. Les trames binaires du client sont
+ignorées. Pour passer une `WsConfig` complète, utilisez
+`WsHub::with_config(bus, config)` ; `hub.receiver_count()` compte les sockets ouverts.
 
 ## Envoyer depuis ailleurs
 
@@ -216,10 +217,12 @@ signal `Lagged` plutôt qu'une croissance mémoire illimitée.
 
 ```toml
 # Cargo.toml — both are in Rustango's default set; list them if you slim features.
-rustango = { version = "*", features = ["sse", "websocket"] }
+rustango = { version = "0.61", features = ["sse", "websocket"] }
 ```
 
-- **`sse`** — le bus de diffusion `EventBus` (tire `tokio`). Suffisant pour SSE, puisque
-  le format de fil SSE provient du `response::sse` propre à axum.
+- **`sse`** — le bus de diffusion `EventBus` (aucune dépendance en plus). Suffisant
+  pour SSE, puisque le format de fil SSE provient du `response::sse` propre à axum.
+  À ne pas confondre avec `rustango::events::EventBus`, un bus typé d'événements
+  métier toujours présent, avec des handlers async.
 - **`websocket`** — l'échafaudage `WsHub` / `ws_handler` ; implique `admin` (axum)
   + `sse` + `axum/ws`.
