@@ -42,8 +42,9 @@ enum Policy {
 /// The console's TOTP settings, and the once-per-process table check.
 pub(super) struct Gate {
     policy: Policy,
-    /// Set once `rustango_operator_totp` exists, so an install that has not
-    /// re-run `migrate` keeps signing in; after it, a read error fails closed.
+    /// Set once `rustango_operator_totp` exists. Without it an optional
+    /// policy signs in on the password (no device can exist); a read error
+    /// on a table that exists fails closed.
     ensured: tokio::sync::OnceCell<()>,
 }
 
@@ -94,12 +95,33 @@ pub(super) async fn owed(
     op: &auth::Operator,
 ) -> Result<Owed, crate::sql::ExecError> {
     state.totp.ensure(&state.registry).await;
-    Ok(
-        match operator_totp::confirmed(&state.registry, oid(op)).await? {
-            Some(device) => Owed::Code(device),
-            None if state.totp.policy == Policy::Required => Owed::Enrollment,
-            None => Owed::Nothing,
-        },
+    let device = match operator_totp::confirmed(&state.registry, oid(op)).await {
+        Ok(device) => device,
+        // A table that does not exist holds no device, so an optional policy
+        // signs in on the password; any other read error fails closed.
+        Err(e) if state.totp.policy == Policy::Optional && table_is_missing(state).await => {
+            tracing::warn!(target: LOG, error = %e, "rustango_operator_totp is missing; run `migrate`");
+            None
+        }
+        Err(e) => return Err(e),
+    };
+    Ok(match device {
+        Some(device) => Owed::Code(device),
+        None if state.totp.policy == Policy::Required => Owed::Enrollment,
+        None => Owed::Nothing,
+    })
+}
+
+/// `rustango_operator_totp` provably absent; a failed probe is not "absent".
+async fn table_is_missing(state: &ConsoleState) -> bool {
+    use crate::core::Model as _;
+    matches!(
+        crate::migrate::try_table_exists_here(
+            &state.registry,
+            operator_totp::OperatorTotp::SCHEMA.table,
+        )
+        .await,
+        Ok(false)
     )
 }
 
