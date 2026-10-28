@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — error pages, admin create form, console sign-in
+
+- The error-pages layer keeps every HTML error page the admin, tenant admin, operator console and generic views render, so a form shown again with its error (status 400/422) is no longer swapped for the generic page.
+- The admin add form prefills a literal column default, and a blank non-text field with a default takes it instead of blocking submit.
+- Admin audit entries record the value written for a field the form did not send, such as an unticked box.
+- A wrong or reused console sign-in code now says it was not accepted.
+- Console pages and the built-in error page link the brand logo as the favicon.
+
 ### Added — operator console two-factor sign-in
 
 - Operators can turn on TOTP at `/account/totp` (setup key and `otpauth` link, confirmed with a code) and turn it off with a current code (needs `totp`).

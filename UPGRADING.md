@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Error pages keep the framework's own HTML pages
+
+With `[errors] enabled = true`, an HTML 4xx/5xx from the admin, tenant admin, operator console or generic views now passes through as rendered. A plain-text or JSON error from them is still dressed. On the admin add form, a blank NOT NULL non-text field with a column default now takes that default instead of failing.
+
 ### Operator console: optional TOTP
 
 Nothing changes until an operator enrolls or `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` is set. The console creates `rustango_operator_totp` in the registry on its first sign-in (or `migrate` does); if that table cannot be read, operator sign-in is refused. Enrolling needs `RUSTANGO_SECRET_KEY`; `reseal-tenant-secrets` does not reseal these secrets yet, so keep `RUSTANGO_SECRET_KEY_PREVIOUS` set while enrolled operators re-enroll after a key rotation.
