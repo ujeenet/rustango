@@ -1801,14 +1801,15 @@ impl Cli {
                 )
                 .into()
             })?;
-        let registry =
-            sqlx::Pool::<crate::tenancy::DefaultTenantDb>::connect(&registry_url).await?;
+        use crate::tenancy::RegistryConnect as _;
+        let registry = crate::tenancy::DefaultTenantDb::connect_registry(&registry_url).await?;
         let mut builder = crate::server::Builder::<crate::tenancy::DefaultTenantDb>::from_pool(
             registry,
             registry_url,
             apex,
         )
-        .api(api);
+        .api(api)
+        .drain_timeout(self.drain_timeout());
         if let Some(apex) = apex_flag {
             builder = builder.with_apex(apex);
         }

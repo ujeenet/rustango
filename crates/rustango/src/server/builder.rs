@@ -148,7 +148,8 @@ impl Builder<sqlx::Postgres> {
         let apex = crate::tenancy::server::apex_domain();
         let registry_url = crate::env::database_url_from_env()
             .unwrap_or_else(|_| "postgres://rustango:rustango@localhost:5432/rustango_test".into());
-        let registry = crate::sql::Pool::connect_postgres(&registry_url).await?;
+        use crate::tenancy::RegistryConnect as _;
+        let registry = sqlx::Postgres::connect_registry(&registry_url).await?;
         Ok(Self::from_pool(registry, registry_url, apex))
     }
 }
@@ -1170,9 +1171,7 @@ impl<DB: Database> Builder<DB> {
     /// The standard chain, path-prefix tenants on the apex, plus the
     /// opt-in header fallback.
     pub(crate) fn resolver(&self) -> ChainResolver {
-        let chain = ChainResolver::standard(self.apex.clone()).push(
-            crate::tenancy::ApexPathPrefixResolver::new(self.apex.clone()),
-        );
+        let chain = apex_resolver(&self.apex);
         match &self.header_resolver {
             Some(h) => chain.push(h.clone()),
             None => chain,
@@ -1223,9 +1222,15 @@ impl<DB: Database> Builder<DB> {
     }
 }
 
+/// The standard chain plus path-prefix tenants on the apex; `run-server` uses it too.
+pub(crate) fn apex_resolver(apex: &str) -> ChainResolver {
+    ChainResolver::standard(apex.to_owned())
+        .push(crate::tenancy::ApexPathPrefixResolver::new(apex.to_owned()))
+}
+
 /// Where a request's tenant lookup landed; the console's fallback reads it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Resolution {
+pub(crate) enum Resolution {
     /// Under the path prefix of the tenant it resolves to.
     PrefixTenant,
     /// A tenant, not under its prefix.
@@ -1260,7 +1265,7 @@ fn warn_shadowed(shadowed: &std::sync::Mutex<std::collections::HashSet<String>>,
 
 /// Resolve `req`'s tenant, on the apex or on the tenant's host, and
 /// whether it is under that tenant's path prefix.
-async fn resolve(
+pub(crate) async fn resolve(
     req: axum::http::Request<axum::body::Body>,
     resolver: &ChainResolver,
     registry: &crate::sql::Pool,
