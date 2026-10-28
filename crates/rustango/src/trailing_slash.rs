@@ -180,7 +180,12 @@ mod tests {
     /// Under `nest`, `Location` keeps the prefix the client used.
     #[tokio::test]
     async fn a_nested_redirect_keeps_the_prefix() {
-        let app = Router::new().nest("/api", strip_app());
+        // A nested router's layer sees unmatched paths only through its own fallback.
+        let inner = Router::new()
+            .route("/foo", get(|| async { "ok" }))
+            .fallback(|| async { StatusCode::NOT_FOUND })
+            .trailing_slash(TrailingSlashLayer::new(SlashStyle::Strip));
+        let app = Router::new().nest("/api", inner);
         let resp = app
             .oneshot(
                 Request::builder()

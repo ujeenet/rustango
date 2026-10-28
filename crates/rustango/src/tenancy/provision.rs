@@ -3362,11 +3362,12 @@ mod validation_tests {
     /// The default host pattern uses `[tenancy] apex_domain` too (#2225).
     #[test]
     fn the_default_host_pattern_reads_the_apex_setting() {
+        // Under the lock: another test sets RUSTANGO_APEX_DOMAIN while holding it.
+        let _g = crate::tenancy::server::APEX_TEST_LOCK.blocking_lock();
         assert!(
             std::env::var("RUSTANGO_APEX_DOMAIN").is_err(),
             "unset RUSTANGO_APEX_DOMAIN to run this test; env wins over the setting"
         );
-        let _g = crate::tenancy::server::APEX_TEST_LOCK.blocking_lock();
         crate::tenancy::server::reset_apex_domain_setting();
         crate::tenancy::server::set_apex_domain_setting("apex.test");
         let req = ProvisionRequest::database("acme", "postgres://h/tenant");

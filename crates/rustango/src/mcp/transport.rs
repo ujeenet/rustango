@@ -441,7 +441,9 @@ mod tests {
     /// The handler answers 429 past the per-agent cap.
     #[tokio::test]
     async fn the_handler_refuses_past_the_cap() {
-        let (pool, agent, _, _) = world(jwt(), false).await;
+        let (pool, mut agent, _, _) = world(jwt(), false).await;
+        // Its own agent id: parallel tests hold streams for the shared one.
+        agent.agent_id = i64::MAX - 443;
         let caps = StreamCaps {
             per_agent: 1,
             per_tenant: 0,
