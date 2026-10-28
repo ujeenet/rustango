@@ -384,3 +384,112 @@ async fn auth_layer_refusals_are_json() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["error"], "forbidden");
 }
+
+/// Users only, no permission tables: every permission read fails.
+async fn alpha_without_perm_tables(ns: &str) -> (Router, String, rustango::sql::Pool) {
+    let (app, template) = build_app(ns);
+    let alpha = tenant_db(
+        &template.replace("{slug}", "alpha"),
+        Some(("ann", "s3cret")),
+    )
+    .await;
+    (app, template, alpha)
+}
+
+/// A ViewSet's permission read error is a logged 503, not a 403.
+#[tokio::test]
+async fn a_viewset_permission_read_error_is_a_503() {
+    let (_, template, _alpha) = alpha_without_perm_tables("vsperm").await;
+    let pools = Arc::new(
+        DatabasePools::<sqlx::Sqlite>::new(BackendKind::Sqlite).with_url_template(&template),
+    );
+    let ctx = Arc::new(DatabaseTenantContext {
+        pools,
+        resolver: ChainResolver::new().push(HostResolver),
+        session_secret: SessionSecret::from_bytes(b"test_tenant_secret_____32bytes!!".to_vec()),
+        operator_secret: SessionSecret::from_bytes(b"test_oper_secret_______32bytes!!".to_vec()),
+        registry: rustango::sql::Pool::Sqlite(
+            sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy sqlite"),
+        ),
+    });
+    let backends: Vec<Arc<dyn AuthBackend>> = vec![Arc::new(ModelBackend)];
+    use rustango::core::Model as _;
+    let app = rustango::viewset::ViewSet::for_model(rustango::tenancy::User::SCHEMA, &["id"])
+        .permissions_for_model::<rustango::tenancy::User>()
+        .tenant_router("/users")
+        .require_auth(backends)
+        .layer(axum::Extension(ctx));
+    let req = Request::builder()
+        .uri("/users")
+        .header(HOST, "alpha.localhost")
+        .header(
+            header::AUTHORIZATION,
+            format!("Basic {}", b64("ann:s3cret")),
+        )
+        .body(Body::empty())
+        .expect("request");
+    let resp = app.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    assert!(
+        !String::from_utf8_lossy(&body).contains("no such table"),
+        "{body:?}"
+    );
+}
+
+/// `permission_required(_or_403)` answer a permission read error with 503.
+#[tokio::test]
+async fn a_decorator_permission_read_error_is_a_503() {
+    use rustango::tenancy::tenant_console::{
+        encode, PasswordFingerprint, TenantSessionPayload, COOKIE_NAME,
+    };
+    let (_, template, alpha) = alpha_without_perm_tables("decperm").await;
+    let ann: Vec<rustango::tenancy::User> = {
+        use rustango::sql::FetcherPool as _;
+        rustango::tenancy::User::objects()
+            .filter("username", "ann")
+            .fetch(&alpha)
+            .await
+            .expect("ann")
+    };
+    let secret = SessionSecret::from_bytes(b"test_tenant_secret_____32bytes!!".to_vec());
+    let payload = TenantSessionPayload::new(
+        *ann[0].id.get().expect("saved"),
+        "alpha",
+        3600,
+        PasswordFingerprint::of(&secret, &ann[0].password_hash),
+    );
+    let cookie = format!("{COOKIE_NAME}={}", encode(&secret, &payload));
+    let pools = Arc::new(
+        DatabasePools::<sqlx::Sqlite>::new(BackendKind::Sqlite).with_url_template(&template),
+    );
+    let ctx = Arc::new(DatabaseTenantContext {
+        pools,
+        resolver: ChainResolver::new().push(HostResolver),
+        session_secret: secret,
+        operator_secret: SessionSecret::from_bytes(b"test_oper_secret_______32bytes!!".to_vec()),
+        registry: rustango::sql::Pool::Sqlite(
+            sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy sqlite"),
+        ),
+    });
+    use rustango::auth_decorators::{permission_required, permission_required_or_403};
+    let app = Router::new()
+        .route("/a", get(|| async { "ok" }))
+        .layer(permission_required("/login", "post.add"))
+        .merge(
+            Router::new()
+                .route("/b", get(|| async { "ok" }))
+                .layer(permission_required_or_403("post.add")),
+        )
+        .layer(axum::Extension(ctx));
+    for path in ["/a", "/b"] {
+        let req = Request::builder()
+            .uri(path)
+            .header(HOST, "alpha.localhost")
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .expect("request");
+        let status = app.clone().oneshot(req).await.expect("response").status();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+    }
+}

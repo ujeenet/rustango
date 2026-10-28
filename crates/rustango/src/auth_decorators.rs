@@ -503,9 +503,10 @@ async fn handle_permission_required(
                     .expect("500 + empty body is always valid");
             }
         };
-    let has = crate::tenancy::permissions::has_perm_pool(uid, codename, tenant.pool())
-        .await
-        .unwrap_or(false);
+    let has = match crate::tenancy::permissions::has_perm_pool(uid, codename, tenant.pool()).await {
+        Ok(has) => has,
+        Err(e) => return perm_read_failed(&e),
+    };
     if has {
         let req = Request::from_parts(parts, body);
         return next.run(req).await;
@@ -514,6 +515,17 @@ async fn handle_permission_required(
         .status(StatusCode::FORBIDDEN)
         .body(Body::empty())
         .expect("403 + empty body is always valid")
+}
+
+/// A failed permission read is an outage, not a missing permission:
+/// a logged `503`, never a `403`.
+#[cfg(feature = "tenancy")]
+fn perm_read_failed(e: &crate::tenancy::TenancyError) -> Response {
+    tracing::error!(target: "rustango::auth", error = %e, "permission check failed");
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .body(Body::empty())
+        .expect("503 + empty body is always valid")
 }
 
 #[cfg(feature = "tenancy")]
@@ -560,9 +572,10 @@ async fn handle_permission_required_or_403(
                     .expect("500 + empty body is always valid");
             }
         };
-    let has = crate::tenancy::permissions::has_perm_pool(uid, codename, tenant.pool())
-        .await
-        .unwrap_or(false);
+    let has = match crate::tenancy::permissions::has_perm_pool(uid, codename, tenant.pool()).await {
+        Ok(has) => has,
+        Err(e) => return perm_read_failed(&e),
+    };
     if has {
         let req = Request::from_parts(parts, body);
         return next.run(req).await;

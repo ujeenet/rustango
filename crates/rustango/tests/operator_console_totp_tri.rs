@@ -477,6 +477,54 @@ async fn without_a_key_the_page_says_how_to_set_it(pool: &Pool) {
     );
 }
 
+/// Another operator removes a lost device from `/operators`, audited;
+/// your own device is refused there.
+async fn another_operator_resets_a_lost_device(pool: &Pool) {
+    let app = app(pool, false);
+    let lost = operator(pool).await;
+    let now = fresh_step().await;
+    let session = password_session(&app, &lost).await;
+    enroll(pool, &app, &lost, &session, now).await;
+    let admin = operator(pool).await;
+    let admin_session = password_session(&app, &admin).await;
+    let lost_id = lost.id.get().copied().unwrap();
+    let devices = || async {
+        OperatorTotp::objects()
+            .filter("operator_id", lost_id)
+            .fetch(pool)
+            .await
+            .unwrap()
+            .len()
+    };
+
+    let own = send(
+        &app,
+        "POST",
+        &format!("/operators/{lost_id}/reset-totp"),
+        &session,
+        String::new(),
+    )
+    .await;
+    assert!(
+        html(own).await.contains("/account/totp"),
+        "own device refused"
+    );
+    assert_eq!(devices().await, 1);
+
+    let resp = send(
+        &app,
+        "POST",
+        &format!("/operators/{lost_id}/reset-totp"),
+        &admin_session,
+        String::new(),
+    )
+    .await;
+    assert_eq!(location(&resp), "/operators", "{}", resp.status());
+    assert_eq!(devices().await, 0);
+    assert_eq!(audit_count(pool, &admin, "operator_totp_reset").await, 1);
+    password_session(&app, &lost).await;
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
@@ -485,5 +533,6 @@ tri_dialect_test!(
         the_pending_state_opens_no_page,
         a_required_policy_enrolls_at_sign_in,
         a_code_sign_in_upgrades_a_weak_hash,
+        another_operator_resets_a_lost_device,
     ]
 );
