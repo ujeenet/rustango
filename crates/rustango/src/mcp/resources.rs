@@ -104,10 +104,32 @@ pub async fn list_resources(ctx: &McpContext) -> Result<Value, JsonRpcError> {
     let skill_resources = crate::tenancy::resources_for_skills_pool(&ctx.pool, &ctx.agent.skills)
         .await
         .map_err(internal)?;
-    for r in &skill_resources {
-        out.push(json!({ "uri": r.resource_uri, "mimeType": r.mime }));
-    }
+    push_skill_resources(&mut out, &skill_resources);
     Ok(json!({ "resources": out }))
+}
+
+/// Add each skill resource once per URI, after any static one of that URI.
+/// `name` is required: `data.name`, else the URI's last segment.
+fn push_skill_resources(out: &mut Vec<Value>, skill: &[crate::tenancy::AgentSkillResource]) {
+    for r in skill {
+        if out.iter().any(|e| e["uri"] == r.resource_uri.as_str()) {
+            continue;
+        }
+        let uri = r.resource_uri.as_str();
+        let name = r
+            .data
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|n| !n.is_empty())
+            .or_else(|| {
+                uri.trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .filter(|n| !n.is_empty())
+            })
+            .unwrap_or(uri);
+        out.push(json!({ "uri": uri, "name": name, "mimeType": r.mime }));
+    }
 }
 
 /// `resources/read`: read a static resource, or a skill resource,
@@ -183,4 +205,42 @@ macro_rules! register_mcp_resource {
             }
         }
     };
+}
+
+#[cfg(test)]
+mod list_tests {
+    use super::*;
+    use crate::tenancy::AgentSkillResource;
+
+    fn res(uri: &str, data: Value) -> AgentSkillResource {
+        AgentSkillResource {
+            id: crate::sql::Auto::default(),
+            skill_id: 1,
+            resource_uri: uri.to_owned(),
+            mime: "text/plain".to_owned(),
+            data,
+        }
+    }
+
+    /// Every entry has a `name`, and a URI shows once.
+    #[test]
+    fn skill_resources_are_named_and_deduped() {
+        let mut out = vec![json!({ "uri": "app://static", "name": "s", "mimeType": "text/plain" })];
+        push_skill_resources(
+            &mut out,
+            &[
+                res("skill://docs/guide.md", json!({ "text": "x" })),
+                res("skill://docs/guide.md", json!({ "text": "y" })),
+                res("skill://named", json!({ "name": "Named one" })),
+                res("app://static", json!({})),
+            ],
+        );
+        let uris: Vec<&str> = out.iter().map(|e| e["uri"].as_str().unwrap()).collect();
+        assert_eq!(
+            uris,
+            ["app://static", "skill://docs/guide.md", "skill://named"]
+        );
+        assert_eq!(out[1]["name"], "guide.md");
+        assert_eq!(out[2]["name"], "Named one");
+    }
 }

@@ -233,19 +233,22 @@ pub(crate) async fn call_tool_with(
     }
 }
 
-/// Wrap a handler's JSON in a `CallToolResult`. The value appears
-/// twice: as a text block, which the spec requires, and as
-/// `structuredContent` for a client that can read it directly.
+/// Wrap a handler's JSON in a `CallToolResult`: always a text block,
+/// plus `structuredContent` when the value is an object, the only shape
+/// the schema allows there.
 fn call_tool_result(value: Value) -> Value {
     let text = match &value {
         Value::String(s) => s.clone(),
         other => serde_json::to_string(other).unwrap_or_default(),
     };
-    json!({
+    let mut out = json!({
         "content": [{ "type": "text", "text": text }],
-        "structuredContent": value,
         "isError": false,
-    })
+    });
+    if value.is_object() {
+        out["structuredContent"] = value;
+    }
+    out
 }
 
 /// A `CallToolResult` for a tool that ran but failed: the message as
@@ -362,6 +365,23 @@ macro_rules! register_mcp_tool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `structuredContent` must be an object; other values go as text only.
+    #[test]
+    fn structured_content_is_only_an_object() {
+        let obj = call_tool_result(json!({ "n": 1 }));
+        assert_eq!(obj["structuredContent"], json!({ "n": 1 }));
+        for (value, text) in [
+            (json!("done"), "done"),
+            (json!([1, 2]), "[1,2]"),
+            (json!(3), "3"),
+            (Value::Null, "null"),
+        ] {
+            let out = call_tool_result(value);
+            assert!(out.get("structuredContent").is_none(), "{out}");
+            assert_eq!(out["content"][0]["text"], text, "{out}");
+        }
+    }
 
     #[test]
     fn redact_json_scrubs_sensitive_keys_recursively() {
