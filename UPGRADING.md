@@ -168,13 +168,20 @@ Bare-admin audit rows now carry `user:<id>` instead of `system`. Single-database
 ### Admin, auth and run-server
 
 - The bare admin's `static_url` is now under its mount: the favicon is `<admin_prefix>/__static__/icon.png`. Sessions are no longer waived for `/__static__` paths.
-- A right Basic-auth admin or API-key credential no longer resets the per-IP and global login counters; only failures count, as before.
+- A right Basic-auth admin or API-key credential no longer resets the per-IP and global login counters; only failures count, as before. Without a client IP (no `ConnectInfo`, no trusted proxy) a Basic-auth success still reserves a login slot per request.
 - `require_perm` returns `503` when the permission read fails (was `403`).
 - `check --deploy` on a single-database Cli no longer warns about `RUSTANGO_APEX_DOMAIN`.
 
 ### `rgo` short name
 
 `#[derive(Model)]` now also claims the `#[rgo(...)]` attribute; a model that put another macro's `#[rgo]` on itself must drop or rename it. `rgo` on crates.io is a different crate, so use it as a rename: `rgo = { package = "rustango", … }`. `cargo install cargo-rustango` now installs a second binary, `cargo-rgo`.
+
+### ORM shortcuts
+
+- `latest(field)` / `earliest(field)` (and the `_default` forms) skip rows where `field` is NULL; they return `None` when every row is NULL.
+- `last()` on a queryset with `limit` / `offset` reads the slice and returns its last row.
+- `update().set()` on one field twice sends only the last assignment; on MySQL a later `set_expr` now reads the old value, not the earlier `set`.
+- `find_many`, `where_in` and `destroy` past the bind cap run one statement per batch; `destroy` is not atomic across batches.
 
 ---
 

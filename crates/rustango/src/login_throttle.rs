@@ -260,6 +260,27 @@ impl InFlight {
     fn busy(&self, gate: &str) -> Option<Arc<Notify>> {
         self.map().get(gate).map(|(_, notify)| Arc::clone(notify))
     }
+
+    /// Enter `gate` once fewer than `cap` are in it; `false` past `deadline`.
+    async fn enter_capped(&self, gate: &str, cap: usize, deadline: tokio::time::Instant) -> bool {
+        loop {
+            let notify = {
+                let mut map = self.map();
+                let (n, notify) = map.entry(gate.to_owned()).or_default();
+                if *n < cap {
+                    *n += 1;
+                    return true;
+                }
+                Arc::clone(notify)
+            };
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            // Polled too, so a wake-up between the read and the wait is not lost.
+            let _ = tokio::time::timeout(left.min(IN_FLIGHT_POLL), notify.notified()).await;
+        }
+    }
 }
 
 /// The gates one attempt holds; leaving them on drop wakes the waiters.
@@ -618,25 +639,86 @@ impl LoginThrottle {
         spent(&global_gate(&scope_key), global)
     }
 
-    /// Report a right credential checked after [`Self::check`], not
-    /// [`Self::begin`], as one sent on every request is. It writes only to
-    /// clear the account's failures or remember a new client.
-    pub(crate) async fn succeeded_quietly(
+    /// Admit a credential sent on every request (HTTP Basic, an API key)
+    /// before it is compared. A known client at a clean account holds an
+    /// in-process slot only, so a right one writes nothing; else it is
+    /// reserved like a login.
+    ///
+    /// # Errors
+    /// As [`Self::begin`].
+    pub(crate) async fn begin_per_request(
         &self,
         scope: &LoginScope,
         ip: &ClientIp,
         username: &str,
-    ) {
-        if !scope.locks_accounts() {
-            return;
+    ) -> Result<PerRequestAttempt, LoginRefused> {
+        let deadline = tokio::time::Instant::now() + crate::passwords::hash_wait();
+        let (gate, cap) = self.quiet_gate(scope, ip, username);
+        // Capped like the limit, so a burst here guesses no more than it allows.
+        if !self.0.in_flight.enter_capped(&gate, cap, deadline).await {
+            return Err(LoginRefused::Busy);
         }
-        let key = account_key(&scope.key(), username);
-        let failing = crate::account_lockout::shared().attempt_count(&key).await > 0;
-        if !failing && (ip.0.is_none() || self.0.is_known(scope, ip, username).await) {
-            return;
+        let quiet = Gates {
+            buckets: Arc::clone(&self.0),
+            held: vec![gate],
+        };
+        let held = if self.is_quiet(scope, ip, username).await {
+            PerRequestHeld::Quiet(quiet)
+        } else {
+            drop(quiet);
+            PerRequestHeld::Reserved(self.begin(scope, ip, username).await?)
+        };
+        Ok(PerRequestAttempt {
+            throttle: Self(Arc::clone(&self.0)),
+            scope: scope.clone(),
+            ip: ip.clone(),
+            username: username.to_owned(),
+            held,
+        })
+    }
+
+    /// The in-process gate quiet checks wait at, and how many it admits.
+    fn quiet_gate(&self, scope: &LoginScope, ip: &ClientIp, username: &str) -> (String, usize) {
+        let scope_key = scope.key();
+        let limits = self.0.limits;
+        let (gate, cap) = if scope.locks_accounts() {
+            let cap = crate::account_lockout::shared().attempt_limit();
+            (account_key(&scope_key, username), cap)
+        } else if let Some(ip) = ip.0.as_deref() {
+            (
+                format!("{scope_key}:{}", ip_gate(&scope.ip_bucket(ip))),
+                limits.ip_limit,
+            )
+        } else {
+            (global_gate(&scope_key), limits.global_limit)
+        };
+        (
+            format!("quiet:{gate}"),
+            usize::try_from(cap.max(1)).unwrap_or(usize::MAX),
+        )
+    }
+
+    /// `true` when admitting a right credential would change nothing: no
+    /// lock, no counted attempt, a known client, and room in the limits.
+    async fn is_quiet(&self, scope: &LoginScope, ip: &ClientIp, username: &str) -> bool {
+        let b = &self.0;
+        let scope_key = scope.key();
+        if scope.locks_accounts() {
+            let lockout = crate::account_lockout::shared();
+            let key = account_key(&scope_key, username);
+            // The count first: a lock is set before the count is cleared.
+            if lockout.attempt_count(&key).await > 0 || lockout.is_locked(&key).await {
+                return false;
+            }
+            if !b.is_known(scope, ip, username).await {
+                return false;
+            }
+        } else if b.global.peek(&scope_key).await.is_err() {
+            return false;
         }
-        if let Ok(attempt) = self.begin(scope, ip, username).await {
-            attempt.succeeded().await;
+        match ip.0.as_deref() {
+            Some(ip) => b.ip.peek(&scope.ip_bucket(ip)).await.is_ok(),
+            None => true,
         }
     }
 
@@ -781,6 +863,68 @@ impl LoginAttempt {
     }
 }
 
+/// A per-request credential admitted by [`LoginThrottle::begin_per_request`].
+/// Dropped unsettled, it gives back what it holds.
+#[must_use = "settle the compare, or a miss is never counted"]
+pub(crate) struct PerRequestAttempt {
+    throttle: LoginThrottle,
+    scope: LoginScope,
+    ip: ClientIp,
+    username: String,
+    held: PerRequestHeld,
+}
+
+enum PerRequestHeld {
+    /// An in-process slot only.
+    Quiet(Gates),
+    Reserved(LoginAttempt),
+}
+
+impl PerRequestAttempt {
+    /// Reserve like a login now, before a check at hash cost.
+    ///
+    /// # Errors
+    /// As [`LoginThrottle::begin`].
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    pub(crate) async fn reserve(&mut self) -> Result<(), LoginRefused> {
+        if let PerRequestHeld::Quiet(_) = self.held {
+            let attempt = self
+                .throttle
+                .begin(&self.scope, &self.ip, &self.username)
+                .await?;
+            self.held = PerRequestHeld::Reserved(attempt);
+        }
+        Ok(())
+    }
+
+    /// Report the compare. A quiet right one writes nothing; a quiet miss
+    /// is counted before its slot is left.
+    ///
+    /// # Errors
+    /// [`LoginRefused`] when a quiet miss can no longer be counted.
+    pub(crate) async fn settle(self, right: bool) -> Result<(), LoginRefused> {
+        match self.held {
+            PerRequestHeld::Quiet(_slot) if right => Ok(()),
+            PerRequestHeld::Quiet(_slot) => {
+                let attempt = self
+                    .throttle
+                    .begin(&self.scope, &self.ip, &self.username)
+                    .await?;
+                attempt.failed().await;
+                Ok(())
+            }
+            PerRequestHeld::Reserved(attempt) if right => {
+                attempt.succeeded().await;
+                Ok(())
+            }
+            PerRequestHeld::Reserved(attempt) => {
+                attempt.failed().await;
+                Ok(())
+            }
+        }
+    }
+}
+
 impl Held {
     /// Count the attempt against the account before the password check.
     async fn reserve_lock(&mut self, key: String) -> Result<(), Blocked> {
@@ -907,9 +1051,24 @@ pub(crate) mod counting {
     pub(crate) struct CountingWrites {
         inner: crate::cache::InMemoryCache,
         writes: std::sync::atomic::AtomicUsize,
+        read_delay: std::time::Duration,
     }
 
     impl CountingWrites {
+        /// Every read waits `delay`, like a remote cache.
+        pub(crate) fn with_read_delay(delay: std::time::Duration) -> Self {
+            Self {
+                read_delay: delay,
+                ..Self::default()
+            }
+        }
+
+        async fn read(&self) {
+            if !self.read_delay.is_zero() {
+                tokio::time::sleep(self.read_delay).await;
+            }
+        }
+
         fn wrote(&self) {
             self.writes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -924,6 +1083,7 @@ pub(crate) mod counting {
     #[async_trait::async_trait]
     impl crate::cache::Cache for CountingWrites {
         async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            self.read().await;
             self.inner.get(k).await
         }
         async fn set(
@@ -940,6 +1100,7 @@ pub(crate) mod counting {
             self.inner.delete(k).await
         }
         async fn exists(&self, k: &str) -> Result<bool, crate::cache::CacheError> {
+            self.read().await;
             self.inner.exists(k).await
         }
         async fn clear(&self) -> Result<(), crate::cache::CacheError> {

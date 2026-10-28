@@ -1,6 +1,7 @@
 //! ORM edges on every backend: FK `get` under `on`, join alias clashes, long
 //! `select_related` chains, `in_bulk_on` past the bind cap, soft / generic
-//! prefetch through a renamed column, ISO weeks and `f32` in JSON.
+//! prefetch through a renamed column, ISO weeks and `f32` in JSON, and the
+//! model shortcuts on small or renamed keys and past the bind cap.
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
@@ -163,6 +164,22 @@ pub struct Item {
     pub created_at: chrono::DateTime<Utc>,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "oqe_small", app = "oqe")]
+pub struct Small {
+    #[rustango(primary_key)]
+    pub id: rustango::sql::Auto<i32>,
+    pub n: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "oqe_renamed", app = "oqe")]
+pub struct Renamed {
+    #[rustango(primary_key, column = "renamed_id")]
+    pub id: rustango::sql::Auto<i64>,
+    pub n: i64,
+}
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     for t in [City::SCHEMA, Top::SCHEMA, Mid::SCHEMA, Pet::SCHEMA] {
@@ -183,6 +200,8 @@ async fn setup(pool: &Pool) {
     fresh_table::<Doc>(pool).await;
     fresh_table::<Remark>(pool).await;
     fresh_table::<Item>(pool).await;
+    fresh_table::<Small>(pool).await;
+    fresh_table::<Renamed>(pool).await;
     rustango::audit::ensure_table_pool(pool)
         .await
         .expect("audit table");
@@ -827,6 +846,187 @@ async fn xor_counts_null_as_false(pool: &Pool) {
     assert_eq!(both[0], both[1]);
 }
 
+/// A field set twice keeps the last value; Postgres refuses two assignments.
+async fn update_set_twice_keeps_the_last(pool: &Pool) {
+    use rustango::core::F;
+    items(pool, &[(1, "a", "t", None), (2, "a", "t", None)]).await;
+    Item::objects()
+        .update()
+        .set("score", 7.0_f64)
+        .set("score", 9.0_f64)
+        .execute_on(pool)
+        .await
+        .expect("set twice");
+    Item::objects()
+        .filter("id", 1_i64)
+        .update()
+        .set("score", 1.0_f64)
+        .set_expr("score", F("score") + 2.0_f64)
+        .execute_on(pool)
+        .await
+        .expect("set then set_expr");
+    let mut scores: Vec<(i64, f64)> = Item::objects()
+        .fetch(pool)
+        .await
+        .expect("read")
+        .iter()
+        .map(|i| (i.id, i.score))
+        .collect();
+    scores.sort_by_key(|(id, _)| *id);
+    assert_eq!(scores, [(1, 11.0), (2, 9.0)]);
+}
+
+/// `chunk`, `chunk_by_id` and `each` on an `i32` key and on a renamed key.
+async fn chunk_shortcuts_on_small_and_renamed_keys(pool: &Pool) {
+    use rustango::sql::Auto;
+    for n in 0..5 {
+        Small { id: Auto::Unset, n }
+            .insert_pool(pool)
+            .await
+            .expect("small");
+        Renamed { id: Auto::Unset, n }
+            .insert_pool(pool)
+            .await
+            .expect("renamed");
+    }
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let take = || std::mem::take(&mut *seen.lock().unwrap());
+    let rows = |s: &std::sync::Arc<std::sync::Mutex<Vec<i64>>>| {
+        let s = s.clone();
+        move |batch: Vec<i64>| {
+            s.lock().unwrap().extend(batch);
+            async { Ok::<(), ExecError>(()) }
+        }
+    };
+    let ns = |v: Vec<Small>| v.into_iter().map(|r| r.n).collect::<Vec<_>>();
+    let rn = |v: Vec<Renamed>| v.into_iter().map(|r| r.n).collect::<Vec<_>>();
+    let all = vec![0, 1, 2, 3, 4];
+
+    let add = rows(&seen);
+    Small::chunk_by_id(2, pool, |b| add(ns(b)))
+        .await
+        .expect("i32 chunk_by_id");
+    assert_eq!(take(), all, "i32 chunk_by_id");
+    let add = rows(&seen);
+    Small::each(2, pool, |r| add(vec![r.n]))
+        .await
+        .expect("i32 each");
+    assert_eq!(take(), all, "i32 each");
+
+    let add = rows(&seen);
+    Renamed::chunk(2, pool, |b| add(rn(b)))
+        .await
+        .expect("renamed chunk");
+    assert_eq!(take(), all, "renamed chunk");
+    let add = rows(&seen);
+    Renamed::chunk_by_id(2, pool, |b| add(rn(b)))
+        .await
+        .expect("renamed chunk_by_id");
+    assert_eq!(take(), all, "renamed chunk_by_id");
+    let add = rows(&seen);
+    Renamed::each(2, pool, |r| add(vec![r.n]))
+        .await
+        .expect("renamed each");
+    assert_eq!(take(), all, "renamed each");
+}
+
+/// The key-list shortcuts split a list past the bind cap; PG binds one array.
+async fn key_list_shortcuts_past_the_bind_cap(pool: &Pool) {
+    for id in [1, 2, 3] {
+        Bucket { id }.insert_pool(pool).await.expect("bucket");
+    }
+    let many = || (1..=70_000_i64).collect::<Vec<_>>();
+    let ids = |rows: Vec<Bucket>| {
+        let mut v: Vec<i64> = rows.iter().map(|b| b.id).collect();
+        v.sort_unstable();
+        v
+    };
+    let found = Bucket::find_many(many(), pool).await.expect("find_many");
+    assert_eq!(ids(found), [1, 2, 3]);
+    let found = Bucket::where_in("id", many(), pool)
+        .await
+        .expect("where_in");
+    assert_eq!(ids(found), [1, 2, 3]);
+    let missing = Bucket::find_many_or_fail(many(), pool).await;
+    assert!(
+        matches!(
+            missing,
+            Err(ExecError::Driver(rustango::sql::sqlx::Error::RowNotFound))
+        ),
+        "{missing:?}"
+    );
+    let gone = Bucket::destroy(many().into_iter().filter(|id| *id != 2), pool)
+        .await
+        .expect("destroy");
+    assert_eq!(gone, 2);
+    assert_eq!(ids(Bucket::objects().fetch(pool).await.expect("left")), [2]);
+}
+
+/// `latest` / `earliest` skip NULLs on every backend.
+async fn latest_and_earliest_skip_nulls(pool: &Pool) {
+    let nothing: Option<Item> = Item::objects().latest("middle", pool).await.expect("empty");
+    assert!(nothing.is_none());
+    items(
+        pool,
+        &[
+            (1, "a", "t", Some("a")),
+            (2, "a", "t", None),
+            (3, "a", "t", Some("b")),
+            (4, "a", "t", None),
+            (5, "a", "t", Some("c")),
+        ],
+    )
+    .await;
+    let middle = |row: Option<Item>| row.expect("a row").middle;
+    let latest = Item::objects()
+        .latest("middle", pool)
+        .await
+        .expect("latest");
+    assert_eq!(middle(latest).as_deref(), Some("c"));
+    let earliest = Item::objects()
+        .earliest("middle", pool)
+        .await
+        .expect("earliest");
+    assert_eq!(middle(earliest).as_deref(), Some("a"));
+    let only_nulls = Item::objects()
+        .filter("middle__isnull", true)
+        .latest("middle", pool)
+        .await
+        .expect("only NULLs");
+    assert!(only_nulls.is_none());
+}
+
+/// `last` on a sliced queryset returns the slice's last row.
+async fn last_of_a_slice(pool: &Pool) {
+    items(
+        pool,
+        &[
+            (1, "a", "t", None),
+            (2, "a", "t", None),
+            (3, "a", "t", None),
+            (4, "a", "t", None),
+            (5, "a", "t", None),
+        ],
+    )
+    .await;
+    let by_id = || Item::objects().order_by(&[("id", false)]);
+    let id = |row: Option<Item>| row.map(|i| i.id);
+    assert_eq!(
+        id(by_id().limit(2).last(pool).await.expect("limit")),
+        Some(2)
+    );
+    assert_eq!(
+        id(by_id().offset(1).last(pool).await.expect("offset")),
+        Some(5)
+    );
+    assert_eq!(
+        id(by_id().limit(2).offset(1).last(pool).await.expect("both")),
+        Some(3)
+    );
+    assert_eq!(id(by_id().offset(9).last(pool).await.expect("past")), None);
+    assert_eq!(id(by_id().last(pool).await.expect("whole")), Some(5));
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -850,5 +1050,10 @@ tri_dialect_test! {
         round_to_on_a_float,
         lpad_matches_pg,
         xor_counts_null_as_false,
+        update_set_twice_keeps_the_last,
+        chunk_shortcuts_on_small_and_renamed_keys,
+        key_list_shortcuts_past_the_bind_cap,
+        latest_and_earliest_skip_nulls,
+        last_of_a_slice,
     ],
 }

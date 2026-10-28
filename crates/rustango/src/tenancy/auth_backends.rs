@@ -470,12 +470,10 @@ impl AuthBackend for ApiKeyBackend {
 
         // Two indexed ORM round-trips: the key by prefix, then its user.
         // Failures per IP and per tenant; no lock, the prefix is no account.
-        // Sent on every request: the limits are read, and only a miss counts.
+        // Sent on every request: admitted before the lookup, only a miss counts.
         let scope = LoginScope::TenantApiKey(tenant_slug(parts)?.to_owned());
-        let ip = client_ip(parts);
-        let throttle = crate::login_throttle::shared();
-        throttle
-            .check(&scope, &ip, "")
+        let mut attempt = crate::login_throttle::shared()
+            .begin_per_request(&scope, &client_ip(parts), "")
             .await
             .map_err(AuthError::Refused)?;
         let server_key = api_key_secret().map_err(AuthError::from_hash)?;
@@ -506,30 +504,22 @@ impl AuthBackend for ApiKeyBackend {
                 // Pre-#2617 argon2 rows: verify once, then store the MAC.
                 // A guess at hash cost is reserved like a login.
                 None => {
-                    let attempt = throttle
-                        .begin(&scope, &ip, "")
-                        .await
-                        .map_err(AuthError::Refused)?;
+                    attempt.reserve().await.map_err(AuthError::Refused)?;
                     let key = password::first_verified(legacy, secret, |k| &k.key_hash)
                         .await
                         .map_err(AuthError::from_hash)?;
-                    let Some(k) = key else {
-                        attempt.failed().await;
-                        return Ok(None);
-                    };
-                    attempt.succeeded().await;
-                    upgrade_api_key(pool, &k, &mac).await;
-                    Some(k)
+                    if let Some(k) = &key {
+                        upgrade_api_key(pool, k, &mac).await;
+                    }
+                    key
                 }
             },
         };
+        attempt
+            .settle(key.is_some())
+            .await
+            .map_err(AuthError::Refused)?;
         let Some(key) = key else {
-            throttle
-                .begin(&scope, &ip, "")
-                .await
-                .map_err(AuthError::Refused)?
-                .failed()
-                .await;
             return Ok(None);
         };
 
@@ -1296,6 +1286,72 @@ mod tests {
         assert!(
             matches!(r, Err(AuthError::Refused(LoginRefused::Throttled { .. }))),
             "{r:?}"
+        );
+    }
+
+    /// Parallel wrong keys through a slow shared cache spend the per-IP
+    /// limit, so the right key sent last in the burst is refused.
+    #[tokio::test]
+    async fn a_parallel_burst_of_api_key_guesses_is_bounded_by_the_ip_limit() {
+        let slow = std::sync::Arc::new(
+            crate::login_throttle::counting::CountingWrites::with_read_delay(
+                std::time::Duration::from_millis(100),
+            ),
+        );
+        let limits = crate::login_throttle::LoginLimits {
+            ip_limit: 3,
+            ..Default::default()
+        };
+        let installed = crate::login_throttle::configure_shared(
+            crate::login_throttle::LoginThrottle::with_cache(limits, slow),
+        );
+        // nextest runs each test in its own process; another gate won here.
+        if !installed {
+            return;
+        }
+        set_api_key_secret(crate::session::SessionSecret::from_bytes(vec![7; 32]));
+        let (pool, user) = jwt_user("api_key_burst_gate").await;
+        crate::testkit::create_tables_for::<ApiKey>(&pool)
+            .await
+            .unwrap();
+        let token = create_api_key(*user.id.get().unwrap(), "t", None, &pool)
+            .await
+            .unwrap();
+        let (prefix, _) = token.split_once('.').unwrap();
+        let call = |token: String| {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let (parts, ()) = axum::http::Request::builder()
+                    .header("authorization", format!("Bearer {token}"))
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        [10, 64, 0, 2],
+                        1,
+                    ))))
+                    .extension(super::super::TenantSlug("t-burst-key".into()))
+                    .body(())
+                    .unwrap()
+                    .into_parts();
+                ApiKeyBackend.authenticate(&parts, &pool).await
+            })
+        };
+        let guesses: Vec<_> = (0..30)
+            .map(|i| call(format!("{prefix}.guess{i}")))
+            .collect();
+        // The right one arrives while the wrong ones are in flight.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let right = call(token.clone());
+        let mut misses = 0;
+        for g in guesses {
+            match g.await.unwrap() {
+                Ok(None) => misses += 1,
+                Err(AuthError::Refused(_)) => {}
+                other => panic!("a wrong key got {:?}", other.map(|u| u.map(|u| u.id))),
+            }
+        }
+        assert!(misses <= 3, "{misses} wrong keys were checked");
+        assert!(
+            matches!(right.await.unwrap(), Err(AuthError::Refused(_))),
+            "the right key passed a spent per-IP limit"
         );
     }
 

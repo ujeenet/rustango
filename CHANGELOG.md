@@ -42,7 +42,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - An admin edit refused on error shows the typed inline rows again, with the ContentType picker on edit and create.
 - The bare admin serves the favicon its pages link (`<admin_prefix><static_url>/icon.png`); the TOTP page drops a link to a missing stylesheet.
 - `check --deploy` checks `RUSTANGO_APEX_DOMAIN` only on a tenancy Cli; api and fullstack projects get no tenancy lines in `.env.example`.
-- The Basic-auth admin gate and API-key auth read the login limits and count only failures, not every request.
+- The Basic-auth admin gate and API-key auth hold a slot before the compare and count only failures, so a parallel burst cannot pass the account lock or per-IP limit; a right credential from a known client writes nothing.
 - `require_perm` answers a permission read error with a logged JSON `503`, not a `403`.
 - `run-server` reaches path-prefix tenants at `<apex>/<prefix>` and builds tenant links with `--apex`.
 - SQLite/MySQL tenancy `runserver` opens the registry with the framework pool setup (tuning, WAL, file created) and honours `shutdown_timeout_secs`.
@@ -55,6 +55,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Changed — SaaS soak example
 
 - `platform_commerce_saas` ViewSets need a Bearer token and the model's codenames; the soak signs in with a per-tenant API user. `/shop` stays anonymous, and the single-database twin keeps open ViewSets until it has API sign-in.
+
+### Fixed — ORM shortcuts
+
+- `update().set()` on one field twice keeps the last value on every backend; Postgres refused it.
+- `chunk`, `chunk_by_id` and `each` work on an `i32` primary key and on one with a renamed column.
+- `find_many`, `find_many_or_fail`, `where_in` and `destroy` split a key list past the dialect's bind cap.
+- `latest` / `earliest` skip NULLs, so every backend returns the same row.
+- `last()` on a sliced queryset returns the last row of the slice.
 
 ## [0.61.9] — 2026-10-28
 
