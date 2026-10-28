@@ -170,8 +170,8 @@ extern crate self as rustango;
 /// a `{:?}`, `dbg!` or panic message never carries a hash or password.
 #[allow(unused_macros)]
 macro_rules! redacted_debug {
-    ($ty:ident { $($shown:ident),* $(,)? ; $($secret:ident),* $(,)? }) => {
-        impl ::std::fmt::Debug for $ty {
+    ($ty:ident $(<$lt:lifetime>)? { $($shown:ident),* $(,)? ; $($secret:ident),* $(,)? }) => {
+        impl ::std::fmt::Debug for $ty $(<$lt>)? {
             fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                 f.debug_struct(stringify!($ty))
                     $(.field(stringify!($shown), &self.$shown))*
