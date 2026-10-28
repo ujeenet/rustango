@@ -668,15 +668,16 @@ async def check_tenant_isolation(client, name, base):
     """Two tenants must not see each other's rows."""
     a, b = tenant_host(1), tenant_host(2)
     sku = f"ISO-{time.time_ns()}"
-    r = await client.post(f"{base}/api/v1/products", headers={"Host": a}, json={
+    r = await client.post(f"{base}/api/v1/products",
+                          headers=await TOKENS.headers(client, base, a), json={
         "sku": sku, "name": "Isolation probe", "blurb": None,
         "price_cents": 999, "active": True})
     if r.status_code not in (200, 201):
         REPORT.add("tenant isolation", "—", "NOT-COVERED",
                    f"could not create in t01: {r.status_code} {r.text[:160]}", name)
         return
-    other = await client.get(f"{base}/api/v1/products", headers={"Host": b},
-                             params={"sku": sku})
+    other = await client.get(f"{base}/api/v1/products",
+                             headers=await TOKENS.headers(client, base, b), params={"sku": sku})
     rows = []
     if other.status_code == 200:
         body = other.json()
@@ -744,7 +745,8 @@ async def check_tenant_login(client, name, base):
     # which the Origin check refuses. The driver sets Origin itself, so
     # it can only see the header that causes it. Read off an app route:
     # that is where the configured preset applies.
-    api = await client.get(f"{base}/api/v1/products", headers={"Host": a})
+    api = await client.get(f"{base}/api/v1/products",
+                           headers=await TOKENS.headers(client, base, a))
     policy = api.headers.get("referrer-policy", "")
     REPORT.add("headers preset lets browsers send their Origin", "#1695",
                "NOT-COVERED" if not policy else
@@ -1106,11 +1108,13 @@ async def check_body_limit(client, name, base, headers=None):
     big = json.dumps({"sku": f"BIG-{RUN_ID}", "name": "x" * 400_000,
                       "blurb": None, "price_cents": 1, "active": False}).encode()
     host = host_of(base, headers)
+    bearer = (headers or {}).get("Authorization")
+    auth = f"Authorization: {bearer}\r\n" if bearer else ""
     chunked = [f"{len(big[i:i + 16_384]):x}\r\n".encode() + big[i:i + 16_384] + b"\r\n"
                for i in range(0, len(big), 16_384)] + [b"0\r\n\r\n"]
 
     def post(path):
-        return (f"POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n"
+        return (f"POST {path} HTTP/1.1\r\nHost: {host}\r\n{auth}Content-Type: application/json\r\n"
                 "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
 
     st, body = await raw_status(base, post("/api/v1/payments"), chunked)
@@ -1119,7 +1123,7 @@ async def check_body_limit(client, name, base, headers=None):
     st, body = await raw_status(base, post("/api/v1/products"), chunked)
     REPORT.add("chunked body over max_body_bytes is 413 on a ViewSet", "#1673",
                verdict(st == 413), f"{st} {body[:100]}", name)
-    q, body = await raw_status(base, f"QUERY /api/v1/products HTTP/1.1\r\nHost: {host}\r\n"
+    q, body = await raw_status(base, f"QUERY /api/v1/products HTTP/1.1\r\nHost: {host}\r\n{auth}"
                                f"Content-Type: application/json\r\nContent-Length: {len(big)}\r\n"
                                "Connection: close\r\n\r\n", [big])
     REPORT.add("QUERY body over max_body_bytes is 413", "#1673", verdict(q == 413),
@@ -1347,9 +1351,9 @@ async def check_idempotency_scope(client, name, base, headers=None, other_tenant
     REPORT.add("same caller, same key replays", issue,
                verdict(again.json().get("payment_id") == pid), "(control)", name)
     b = await client.post(url, headers={**a, "Authorization": "Bearer caller-b"}, json=body)
-    anon = await client.post(url, headers={**h, "Idempotency-Key": key}, json=body)
+    anon_r = await client.post(url, headers={**no_token(h), "Idempotency-Key": key}, json=body)
     refund = await client.post(f"{base}/api/v1/refunds", headers=a, json=body)
-    leaks = [label for label, resp in (("another caller", b), ("no caller", anon),
+    leaks = [label for label, resp in (("another caller", b), ("no caller", anon_r),
                                        ("another route", refund))
              if resp.status_code == 201 and resp.json().get("payment_id") == pid]
     REPORT.add("idempotent replay reaches only its caller and route", issue,
@@ -1557,7 +1561,7 @@ async def check_storefront_escapes(client, name, base, headers=None):
         REPORT.add("storefront escapes product text", "#1636", "FAIL",
                    f"could not create the product: {r.status_code} {r.text[:160]}", name)
         return
-    page = await client.get(f"{base}/shop/products", headers=headers,
+    page = await client.get(f"{base}/shop/products", headers=no_token(headers),
                             params={"fresh": time.time_ns()})
     body = page.text
     raw = "<script>alert" in body or "<b>" in body
@@ -1629,6 +1633,95 @@ async def basic_auth(client, base, host, user, password, ip=None):
     if ip:
         h["X-Forwarded-For"] = ip
     return await client.get(f"{base}/api/v1/account", headers=h)
+
+
+# ------------------------------------------------------------ API tokens
+
+
+# The SaaS REST API needs a Bearer token and the model's codenames.
+# `bootstrap.sh` makes `soakapi` on every tenant with all of them, and
+# `noperms` on t01 with none.
+API_USER = ("soakapi", pw("soakapi"))
+NOPERMS_USER = ("noperms", pw("noperms"))
+
+
+class ApiTokens:
+    """One access token per (instance, tenant host), signed in once.
+
+    Access tokens last 15 minutes and the load phase runs longer, so an
+    old one is refreshed first; the lock keeps it to one refresh per key,
+    since a refresh token redeems once.
+    """
+    REFRESH_AFTER = 600
+
+    def __init__(self):
+        self._tokens: dict = {}
+        self._locks: dict = {}
+
+    async def headers(self, client, base, host, extra=None) -> dict:
+        extra = extra or {}
+        key = (base, host)
+        async with self._locks.setdefault(key, asyncio.Lock()):
+            t = self._tokens.get(key)
+            if t is None or time.time() - t["at"] > self.REFRESH_AFTER:
+                t = await self._renew(client, base, host, extra, t)
+                self._tokens[key] = t
+        h = {"Host": host, **extra}
+        if t["access"]:
+            h["Authorization"] = f"Bearer {t['access']}"
+        return h
+
+    async def _renew(self, client, base, host, extra, old):
+        r = None
+        if old and old["refresh"]:
+            r = await client.post(f"{base}/api/auth/refresh",
+                                  headers={"Host": host, **extra},
+                                  json={"refresh": old["refresh"]})
+        if r is None or r.status_code != 200:
+            r = await jwt_login(client, base, host, *API_USER, extra=extra)
+        if r.status_code != 200:
+            # Sent anonymous, the API answers 401 and the check says so.
+            print(f"  API sign-in on {host} failed: {r.status_code} {r.text[:120]}")
+            return {"access": None, "refresh": None, "at": time.time()}
+        pair = r.json()
+        return {"access": secret(pair["access"]), "refresh": secret(pair["refresh"]),
+                "at": time.time()}
+
+
+TOKENS = ApiTokens()
+
+
+def no_token(headers: dict | None) -> dict | None:
+    """`headers` without the API token, for the storefront and the admin."""
+    if headers is None:
+        return None
+    return {k: v for k, v in headers.items() if k != "Authorization"}
+
+
+async def check_api_auth(client, name, base):
+    """The SaaS ViewSets: anonymous writes are 401, a user without the
+    model's codenames is 403, the API user gets through."""
+    host = tenant_host(1)
+    url = f"{base}/api/v1/products"
+    body = {"sku": f"AUTH-{RUN_ID}-{time.time_ns()}", "name": "Auth probe",
+            "blurb": None, "price_cents": 1, "active": False}
+    anon_post = await client.post(url, headers={"Host": host}, json=body)
+    anon_del = await client.delete(f"{url}/1", headers={"Host": host})
+    REPORT.add("anonymous API writes are refused", "—",
+               verdict(anon_post.status_code == 401 and anon_del.status_code == 401),
+               f"POST {anon_post.status_code}, DELETE {anon_del.status_code}", name)
+    r = await jwt_login(client, base, host, *NOPERMS_USER)
+    if r.status_code != 200:
+        REPORT.add("API writes need the model's codenames", "—", "NOT-COVERED",
+                   f"noperms could not sign in: {r.status_code}", name)
+    else:
+        bare = {"Host": host, "Authorization": f"Bearer {secret(r.json()['access'])}"}
+        no = await client.post(url, headers=bare, json=body)
+        REPORT.add("API writes need the model's codenames", "—",
+                   verdict(no.status_code == 403), f"{no.status_code}", name)
+    ok = await client.post(url, headers=await TOKENS.headers(client, base, host), json=body)
+    REPORT.add("the API user writes through", "—", verdict(ok.status_code == 201),
+               f"{ok.status_code} {ok.text[:120]}", name)
 
 
 def page_csrf(r) -> str | None:
@@ -2019,7 +2112,7 @@ async def check_admin_inlines(client, name, base, session_cookie, headers=None,
                    f"could not build the fixture: {e!r}", name)
         return
     page = await client.get(f"{base}{admin}/commerce_order/{ids['o1']}/edit", headers={
-        **h, "Cookie": f"{ADMIN_COOKIE if not h else SESSION_COOKIE}={session_cookie}"})
+        **no_token(h), "Cookie": f"{ADMIN_COOKIE if not h else SESSION_COOKIE}={session_cookie}"})
     token = page_csrf(page) or set_cookie_value(page, "rustango_csrf")
     cookie = (f"rustango_csrf={token}; "
               f"{ADMIN_COOKIE if not h else SESSION_COOKIE}={session_cookie}")
@@ -2039,7 +2132,7 @@ async def check_admin_inlines(client, name, base, session_cookie, headers=None,
                 "commerce_order_line-0-quantity": str(qty),
                 "commerce_order_line-0-unit_price_cents": "1"}
 
-    post_h = {**h, "Cookie": cookie, "Origin": origin_of(base, headers)}
+    post_h = {**no_token(h), "Cookie": cookie, "Origin": origin_of(base, headers)}
     own = await client.post(f"{base}{admin}/commerce_order/{ids['o1']}", headers=post_h,
                             data=form(ids["l1"], ids["p1"], 7))
     l1 = (await client.get(f"{base}/api/v1/order-lines/{ids['l1']}", headers=h)).json()
@@ -2458,7 +2551,7 @@ async def emit_redaction_probe(client):
     """
     name, base = EDGE_SAAS
     token = secret(f"INVITE-{RUN_ID}-{time.time_ns()}")
-    h = {"Host": tenant_host(1), **TLS}
+    h = await TOKENS.headers(client, base, tenant_host(1), extra=TLS)
     cu = await client.post(f"{base}/api/v1/customers", headers=h, json={
         "contact_email": f"redact-{RUN_ID}-{time.time_ns()}@example.test",
         "full_name": "Redaction", "loyalty_tier": "bronze"})
@@ -2533,7 +2626,7 @@ async def run_058_saas(client, name, base):
     _, session, _ = await tenant_login(client, base, tenant_host(7), "csrfadmin", pw("csrfadmin"))
     if session:
         await guarded(check_admin_inlines, client, name, base, session,
-                      headers={"Host": tenant_host(7)}, name=name)
+                      headers=await TOKENS.headers(client, base, tenant_host(7)), name=name)
     await guarded(check_console, client, name, base, name=name)
     await guarded(check_jwt, client, name, base, name=name)
     await guarded(check_sso, client, name, base, name=name)
@@ -2562,14 +2655,16 @@ class Counters:
 async def load_worker(client, counters: Counters, targets, until, rng):
     """Sustained mixed traffic until the deadline."""
     while time.time() < until:
-        name, base, headers = rng.choice(targets)
+        name, base, host = rng.choice(targets)
         try:
+            # The SaaS API signs in; the single app and `/shop` take none.
+            headers = await TOKENS.headers(client, base, host) if host else None
             roll = rng.random()
             if roll < 0.35:
                 r = await client.get(f"{base}/api/v1/products", headers=headers,
                                      params={"limit": 25})
             elif roll < 0.5:
-                r = await client.get(f"{base}/shop/products", headers=headers)
+                r = await client.get(f"{base}/shop/products", headers=no_token(headers))
             elif roll < 0.7:
                 r = await client.post(f"{base}/api/v1/products", headers=headers, json={
                     "sku": f"LOAD-{RUN_ID}-{rng.getrandbits(32):x}", "name": "Load item",
@@ -2683,14 +2778,17 @@ async def main():
             saas_info[name] = await check_soak_info(client, name, base, headers=hdr,
                                                     expect_tenant="t01")
             await check_health_endpoints(client, name, base)
-            await check_null_fk(client, name, base, headers=hdr)
-            await check_serializer_carries_fk(client, name, base, headers=hdr)
-            await check_bulk_atomic(client, name, base, headers=hdr)
-            await check_serializer_source(client, name, base, headers=hdr)
-            await check_pagination(client, name, base, headers=hdr)
-            await check_cursor_walks(client, name, base, headers=hdr)
-            await check_malformed_cursor_is_400(client, name, base, headers=hdr)
-            await check_not_found_envelope(client, name, base, headers=hdr)
+            await guarded(check_api_auth, client, name, base, name=name)
+            # The REST API signs in; the storefront below stays anonymous.
+            api = await TOKENS.headers(client, base, tenant_host(1))
+            await check_null_fk(client, name, base, headers=api)
+            await check_serializer_carries_fk(client, name, base, headers=api)
+            await check_bulk_atomic(client, name, base, headers=api)
+            await check_serializer_source(client, name, base, headers=api)
+            await check_pagination(client, name, base, headers=api)
+            await check_cursor_walks(client, name, base, headers=api)
+            await check_malformed_cursor_is_400(client, name, base, headers=api)
+            await check_not_found_envelope(client, name, base, headers=api)
             await check_page_cache(client, name, base, headers=hdr)
             await check_page_cache_is_per_tenant(client, name, base)
             await check_tenant_isolation(client, name, base)
@@ -2698,7 +2796,8 @@ async def main():
             await check_apex_does_not_serve_app(client, name, base)
             await check_unknown_tenant_envelope(client, name, base)
             await check_tenant_login(client, name, base)
-            await run_058_common(client, name, base, headers=hdr)
+            await run_058_common(client, name, base,
+                                 headers=await TOKENS.headers(client, base, tenant_host(1)))
             await run_058_saas(client, name, base)
 
         await check_page_cache_does_not_cross_apps(client, live_single, live_saas)
@@ -2733,7 +2832,7 @@ async def main():
             await lock_timer
 
         targets = [(n, b, None) for n, b in live_single.items()]
-        targets += [(n, b, {"Host": tenant_host(rng.randint(1, TENANTS))})
+        targets += [(n, b, tenant_host(rng.randint(1, TENANTS)))
                     for n, b in live_saas.items() for _ in range(3)]
         if not targets:
             print("\nno live instances — nothing to drive")

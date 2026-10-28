@@ -142,3 +142,119 @@ fn the_storefront_escapes_product_text() {
         "got: {li}"
     );
 }
+
+/// The tenant database for this build's backend, or `None` to skip:
+/// `DATABASE_URL` on Postgres, `MYSQL_TEST_URL` on MySQL, a temp file on SQLite.
+fn tenant_db() -> Option<(String, &'static str)> {
+    #[cfg(feature = "postgres")]
+    return std::env::var("DATABASE_URL").ok().map(|u| (u, "postgres"));
+    #[cfg(all(feature = "sqlite", not(feature = "postgres")))]
+    return Some((
+        format!(
+            "sqlite://{}?mode=rwc",
+            std::env::temp_dir()
+                .join(format!("pcs_api_auth_{}.sqlite", std::process::id()))
+                .display()
+        ),
+        "sqlite",
+    ));
+    #[cfg(all(feature = "mysql", not(any(feature = "postgres", feature = "sqlite"))))]
+    return std::env::var("MYSQL_TEST_URL").ok().map(|u| (u, "mysql"));
+}
+
+/// Every request resolves to one tenant on `url`; no registry table needed.
+#[derive(Clone)]
+struct OneTenant(rustango::tenancy::Org);
+
+#[async_trait::async_trait]
+impl rustango::tenancy::OrgResolver for OneTenant {
+    async fn resolve(
+        &self,
+        _parts: &axum::http::request::Parts,
+        _registry: &rustango::sql::Pool,
+    ) -> Result<Option<rustango::tenancy::Org>, rustango::tenancy::TenancyError> {
+        Ok(Some(self.0.clone()))
+    }
+}
+
+/// The REST API refuses every anonymous write, and a bad token, with 401.
+#[tokio::test]
+async fn anonymous_api_writes_are_refused() {
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use rustango::extractors::TenantContext;
+    use rustango::tenancy::auth_routes::{Config, JwtAuth};
+    use rustango::tenancy::session::SessionSecret;
+    use rustango::tenancy::{ChainResolver, DefaultTenantDb, Org, TenantPools};
+    use tower::ServiceExt as _;
+
+    let Some((url, backend)) = tenant_db() else {
+        eprintln!("skipping: no database URL for this backend");
+        return;
+    };
+    let org = Org {
+        id: rustango::sql::Auto::Unset,
+        slug: "acme".into(),
+        display_name: "Acme".into(),
+        storage_mode: "database".into(),
+        backend_kind: backend.into(),
+        database_url: Some(url.clone()),
+        schema_name: None,
+        host_pattern: None,
+        port: None,
+        path_prefix: None,
+        active: true,
+        created_at: chrono::Utc::now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
+    };
+    let registry = rustango::sql::sqlx::Pool::<DefaultTenantDb>::connect(&url)
+        .await
+        .expect("connect");
+    let ctx = std::sync::Arc::new(TenantContext {
+        pools: std::sync::Arc::new(TenantPools::new(registry)),
+        resolver: ChainResolver::new().push(OneTenant(org)),
+        session_secret: SessionSecret::from_bytes(vec![1; 32]),
+        operator_secret: SessionSecret::from_bytes(vec![2; 32]),
+    });
+    let auth = JwtAuth::new(Config {
+        session_secret: Some(vec![3; 32]),
+        ..Config::default()
+    });
+    let app = super::urls::rest_api(&auth).layer(axum::Extension(ctx));
+
+    let mut writes = Vec::new();
+    for prefix in [
+        "products",
+        "orders",
+        "orders-raw",
+        "order-lines",
+        "customers",
+        "inventory",
+        "promotions",
+        "gift-cards",
+    ] {
+        writes.push((Method::POST, format!("/api/v1/{prefix}")));
+        for m in [Method::PUT, Method::PATCH, Method::DELETE] {
+            writes.push((m, format!("/api/v1/{prefix}/1")));
+        }
+    }
+    for (method, path) in &writes {
+        for bearer in [None, Some("Bearer not.a.token")] {
+            let mut req = Request::builder()
+                .method(method.clone())
+                .uri(path)
+                .header("content-type", "application/json");
+            if let Some(b) = bearer {
+                req = req.header("authorization", b);
+            }
+            let req = req.body(Body::from("{}")).unwrap();
+            let status = app.clone().oneshot(req).await.unwrap().status();
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path} with {bearer:?}");
+        }
+    }
+}

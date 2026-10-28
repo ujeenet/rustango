@@ -47,6 +47,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `run-server` reaches path-prefix tenants at `<apex>/<prefix>` and builds tenant links with `--apex`.
 - SQLite/MySQL tenancy `runserver` opens the registry with the framework pool setup (tuning, WAL, file created) and honours `shutdown_timeout_secs`.
 
+### Added — `rgo` short name
+
+- `#[derive(Model)]` reads `#[rgo(...)]` like `#[rustango(...)]`; both names on one item or field is a compile error.
+- `cargo rgo` runs the `cargo rustango` scaffolder, and `cargo rustango new --alias rgo` writes `rgo = { package = "rustango", … }` with `rgo::` paths and `#[rgo(...)]` in the generated code.
+
+### Changed — SaaS soak example
+
+- `platform_commerce_saas` ViewSets need a Bearer token and the model's codenames; the soak signs in with a per-tenant API user. `/shop` stays anonymous, and the single-database twin keeps open ViewSets until it has API sign-in.
+
 ## [0.61.9] — 2026-10-28
 
 ### Fixed — ORM and migrations

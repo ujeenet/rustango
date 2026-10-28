@@ -172,6 +172,10 @@ Bare-admin audit rows now carry `user:<id>` instead of `system`. Single-database
 - `require_perm` returns `503` when the permission read fails (was `403`).
 - `check --deploy` on a single-database Cli no longer warns about `RUSTANGO_APEX_DOMAIN`.
 
+### `rgo` short name
+
+`#[derive(Model)]` now also claims the `#[rgo(...)]` attribute; a model that put another macro's `#[rgo]` on itself must drop or rename it. `rgo` on crates.io is a different crate, so use it as a rename: `rgo = { package = "rustango", … }`. `cargo install cargo-rustango` now installs a second binary, `cargo-rgo`.
+
 ---
 
 ## 0.61.9
