@@ -415,7 +415,7 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `audit(track = "…")` | liste de champs | historique des modifications par ligne |
 | `scope` | `"tenant"` / `"registry"` | portée multi-tenant |
 | `proxy` | indicateur | modèle proxy (partage la table d'un autre) |
-| `global_scope(name, apply = fn)` | nom + fonction | filtre appliqué automatiquement à toutes les requêtes |
+| `global_scope(name, apply = fn)` | nom + fonction | filtre appliqué automatiquement aux querysets et aux raccourcis, pas aux méthodes d'instance indexées par PK ni à `truncate` |
 | `through(...)` | spécification de relation | accesseur de relation « through » personnalisé |
 | `reverse_has(...)` / `generic_has(...)` | spécification de relation | accesseur has-many inverse / FK générique inverse |
 | `required_db_features` / `required_db_vendor` | liste / fournisseur | contraintes de validation de déploiement |
@@ -446,7 +446,7 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `verbose_name` | `"Label"` | libellé lisible du champ dans les formulaires/admin |
 | `help_text` | `"…"` | texte d'aide rendu sous le widget de formulaire/admin |
 | `validators` | `"name, name"` | validateurs nommés à exécuter sur ce champ |
-| `related_name` | `"posts"` | nom de l'accesseur inverse sur la cible de la FK |
+| `related_name` | `"posts"` | nom de l'accesseur inverse sur la cible de la FK ; `"+"` pour aucun (une cible d'un autre crate) |
 | `auto_now` | indicateur | réglé à l'heure actuelle à chaque save |
 | `auto_now_add` | indicateur | réglé à l'heure actuelle à l'insertion |
 | `soft_delete` | indicateur | marque l'horodatage de suppression douce (`Option<DateTime<Utc>>`) |

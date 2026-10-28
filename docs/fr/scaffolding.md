@@ -178,7 +178,7 @@ Chaque template écrit un projet Cargo autonome :
 
 ### Un seul binaire pour tout
 
-`src/main.rs` est le seul point d'entrée. Il démarre le serveur HTTP **et** dispatche chaque verbe `manage` — il n'y a pas de `manage.py` séparé ni de `src/bin/manage.rs` :
+`src/main.rs` est le seul point d'entrée. Il démarre le serveur HTTP **et** dispatche chaque verbe `manage` — il n'y a pas de script manage séparé ni de `src/bin/manage.rs` :
 
 ```rust
 mod models;
@@ -190,7 +190,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     rustango::manage::Cli::new()
         .api(urls::api())
-        .with_welcome()  // friendly `/` page until you add a root handler
         .with_health()   // /health + /ready endpoints (fullstack & tenant)
         .run()
         .await
@@ -203,11 +202,26 @@ En quoi les templates diffèrent à l'intérieur de `main.rs` / `urls.rs` :
 
 - **api** — pas d'admin ; `urls::api()` se contente d'agréger vos propres routes.
 - **fullstack** — le même `urls.rs`, plus un assistant `admin_router(pool)` que `main.rs` monte avec `Cli::nest_with("/admin", …)`, construit à partir du pool du serveur. Il prend un `rustango::sql::Pool`, donc ne nomme aucun pilote, et se trouve derrière une connexion : créez le compte avec `cargo run -- create-admin <username>` (voir [Prise en main, étape 11](getting-started.md#étape-11--activer-ladministration-automatique)).
-- **tenant** — `main.rs` ajoute `.tenancy()`, servant la console opérateur sur le domaine apex et chaque tenant sous son propre sous-domaine. Les propres tables du framework sont générées dans un dossier **`system/migrations/`** à partir des modèles compilés lors du premier `cargo run -- migrate` — aucun JSON de bootstrap livré à la main, donc le tout premier migrate fonctionne sans configuration supplémentaire.
+- **tenant** — `main.rs` ajoute `.tenancy()`, servant la console opérateur sur le domaine apex et chaque tenant sous son propre sous-domaine, et `.with_tenant_provisioning("migrations")` pour les pages **New tenant** et **Database servers** de la console (supprimez-le pour les désactiver ; enregistrer un serveur demande `RUSTANGO_SECRET_KEY`). Les propres tables du framework sont générées dans un dossier **`system/migrations/`** à partir des modèles compilés lors du premier `cargo run -- migrate` — aucun JSON de bootstrap livré à la main, donc le tout premier migrate fonctionne sans configuration supplémentaire.
 
 ### Configuration en couches
 
 Les paramètres se chargent d'abord depuis `config/default.toml`, puis depuis `config/<RUSTANGO_ENV>_settings.toml` par-dessus. `RUSTANGO_ENV` vaut `dev` par défaut, si bien qu'un `cargo run` juste après l'échafaudage fonctionne sans aucune modification ; définissez `RUSTANGO_ENV=prod` en production pour prendre en compte `prod_settings.toml`.
+
+Les fichiers dev et staging définissent un `[brand] tagline` valant `dev` et `staging`. Pour le changer, ou pour définir votre propre nom et logo, voir [Identité visuelle](operator-console.md#identité-visuelle) et les [clés de configuration](admin.md#configuration--admin-et-brand) de l'admin.
+
+### Paramètres sans effet par eux-mêmes
+
+Toutes les clés ne sont pas lues par le framework. `Cli::with_settings` avertit au démarrage quand l'une des clés du premier groupe est définie.
+
+| Clé | Statut |
+|---|---|
+| `[sso]` (chaque clé) | Sans effet pour l'instant. Configurez le SSO de l'admin dans l'interface de l'admin. |
+| `[auth.jwt] issuer`, `audience` | Sans effet pour l'instant. |
+| `[admin] primary_color`, `csrf_cookie_secure`, `session_timeout_minutes` | Sans effet pour l'instant ; seul `check --deploy` les lit. |
+| `[database] url` | Pas utilisé pour se connecter : chaque pool lit la variable d'environnement `DATABASE_URL`. |
+| `[audit] retention_days` | Rien n'élague sur cette base ; planifiez `audit-cleanup --days <N>`. |
+| `[jobs]`, `[i18n]`, `[cache]`, `[mail]`, `[mcp]`, TTL de `[auth.jwt]`, `[admin]` | Câblés par l'utilisateur : lus uniquement par le constructeur que vous appelez (`jobs::inmemory_from_settings`, `Translator::from_settings`, `cache::from_settings_async`, `email::from_settings`, `mcp::secure_tenant_router_from_settings`, `auth_routes::Config::with_jwt_settings`, `admin::Builder::from_settings`). |
 
 ### Premier lancement
 

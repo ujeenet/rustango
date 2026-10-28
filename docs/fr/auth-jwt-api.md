@@ -75,6 +75,10 @@ le routeur n'est pas vu par `require_bearer`, et le token reste valide jusqu'à
 son expiration. Un `jti_store` partagé (Redis, base de données) supprime aussi
 cette séparation.
 
+`require_bearer` et `/me` n'acceptent que des tokens émis par `/login` ou
+`/refresh`, et les refusent dès que l'utilisateur se déconnecte n'importe où ou
+change de mot de passe.
+
 `Config::default()` signe avec `RUSTANGO_SESSION_SECRET` (la même clé que le
 cookie de session admin) et utilise des TTL de 15 min pour l'accès / 7 jours pour
 le rafraîchissement. Redéfinissez `prefix`, `access_ttl_secs`,

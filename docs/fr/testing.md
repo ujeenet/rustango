@@ -13,10 +13,10 @@ d'intégration complet sans quitter le processus.
 > **Un terme nouveau ici ?** *router*, *handler*, *fixture*, *rollback* — voir le
 > [glossaire](glossary.md).
 
-> **Source :** `rustango::test_client` (`TestClient`, `TestResponse`),
-> `rustango::test_assertions` (`assert_status_2xx`, `assert_redirects`,
-> `assert_cookie_set`, …), et `rustango::test_db` (`with_rollback`) — toujours
-> compilés.
+> **Source :** `rustango::test_client` (`TestClient`, `TestResponse`) — demande
+> la feature `admin`, car il enveloppe un `axum::Router`. `rustango::test_assertions`
+> (`assert_status_2xx`, `assert_redirects`, `assert_cookie_set`, …) et
+> `rustango::test_db` (`with_rollback`) ne sont derrière aucune feature.
 >
 > **Version exécutable :** les snippets ci-dessous *sont* un test qui passe —
 > [`testing_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/testing_doc.rs)
@@ -147,7 +147,14 @@ async fn creating_a_post_persists_it() {
 }
 ```
 
-La closure reçoit un `AtomicTx` ; verrouillez-le à chaque instruction avec `tx.lock().await?`. Un `atomic()` sur le même pool à l'intérieur est un savepoint et est annulé lui aussi. Relâchez le guard avant un `atomic()` imbriqué ou un `bulk_insert_pool`, sinon ils échouent avec `ExecError::NestedAtomic`.
+Le `Box::pin` est obligatoire, pas stylistique : la borne est
+`for<'tx> FnOnce(&'tx AtomicTx) -> Pin<Box<dyn Future<…> + Send + 'tx>>`,
+c'est ce qui permet à la closure d'emprunter `tx` à travers ses propres points
+d'await. Un `atomic()` sur le même pool à l'intérieur de la closure est un
+savepoint et est annulé lui aussi ; relâchez le guard avant lui ou avant un
+`bulk_insert_pool`, sinon ils échouent avec `NestedAtomic`. La closure renvoie
+`Result<T, ExecError>`, tout comme `with_rollback` — le rollback a lieu dans
+tous les cas, donc l'`unwrap` concerne vos assertions, pas le nettoyage.
 
 Pour SQLite, les tests `*_sqlite_live.rs` à travers ce dépôt utilisent à la place une base de données
 en mémoire par test — également entièrement isolée, avec zéro configuration externe.
@@ -189,6 +196,26 @@ backend sur trois.
 MySQL est celle qui piège les gens : elle lit sa propre variable, donc un shell
 où seule `DATABASE_URL` est définie exécute les suites Postgres et saute
 silencieusement toutes les suites MySQL.
+
+### Les exécuter une à la fois
+
+Les suites live partagent une seule base et la plupart suppriment ou vident les
+tables du framework à l'initialisation : les exécuter en parallèle les fait se
+battre pour le catalogue. Utilisez le profil `live`, qui définit
+`test-threads = 1` :
+
+```bash
+cargo nextest run --profile live --workspace --all-features
+```
+
+Sans lui, les échecs sont nombreux et aucun n'est réel : 758 contre
+PostgreSQL, 95 contre MySQL, 0 dans les deux cas avec le profil. Les gardes
+`tokio::sync::Mutex` à l'intérieur de ces suites n'aident pas, car nextest
+exécute chaque test dans son propre processus et un mutex dans l'un n'atteint
+pas l'autre.
+
+C'est un contournement, pas une correction : des bases par processus
+rétabliraient le parallélisme.
 
 ### Distinguer un saut d'un succès
 

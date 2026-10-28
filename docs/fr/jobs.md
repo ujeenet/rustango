@@ -107,6 +107,16 @@ queue.start().await;
 queue.shutdown().await;   // on shutdown: drain in-flight jobs, then stop
 ```
 
+`shutdown()` accorde un délai de grâce aux tâches en cours (`shutdown_grace`,
+5 s par défaut), puis les interrompt et les remet en file. Les tâches en file et
+les nouvelles tentatives en attente restent en file, et un nouveau `start()` les
+reprend.
+
+Les tâches sont **at-least-once** (au moins une fois). Aucun signal d'arrêt
+n'atteint une tâche en cours, et une tâche interrompue repart du début (la file
+en base libère sa ligne même si la tâche venait de se terminer). L'interruption
+consomme une tentative. Rendez chaque tâche idempotente.
+
 Conservez le `Arc<InMemoryJobQueue>` dans l'état de votre application pour que
 les handlers puissent l'atteindre.
 
@@ -265,6 +275,14 @@ workers). Associez le worker à un balayage périodique
 [`reclaim_stuck_jobs_pool`](#la-file-persistante-production) pour récupérer les
 tâches d'un worker crashé.
 
+Deux files différentes sur une même table (par exemple un mailer et un
+générateur de rapports, avec leurs propres handlers) prennent les tâches l'une
+de l'autre. Donnez à chacune son propre nom avec `.queue_name("mailer")` côté
+dispatch et côté worker : une file nommée n'exécute que ses tâches, une file
+sans nom que les tâches sans nom. Les workers antérieurs à `queue_name`
+l'ignorent et exécutent aussi les tâches nommées : arrêtez-les avant de
+dispatcher sur une file nommée.
+
 ---
 
 ## Nouvelles tentatives et backoff
@@ -355,6 +373,11 @@ queue.start().await;
 queue.dispatch(&WelcomeEmail { user_id: 42 }).await?;
 ```
 
+**Dispatcher dans une transaction.** Dans un bloc `atomic` sur le pool propre
+de la file, `dispatch` rejoint le bloc : la tâche est annulée avec lui, et aucun
+worker ne se réveille avant le commit. Ne gardez pas le `TxGuard` du bloc
+pendant l'appel.
+
 **Récupérer les workers crashés.** Si un worker meurt en cours de tâche, la
 ligne reste verrouillée. Lancez un balayage périodique pour relâcher les verrous
 plus anciens qu'un seuil afin qu'un autre worker reprenne la tâche :
@@ -363,6 +386,12 @@ plus anciens qu'un seuil afin qu'un autre worker reprenne la tâche :
 // e.g. from a scheduled task every few minutes:
 let reclaimed = DatabaseJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(300)).await?;
 ```
+
+Une tâche en cours rafraîchit son verrou toutes les `heartbeat_interval` (10 s
+par défaut) : gardez donc le seuil bien au-dessus. Chaque prise en charge
+consomme une tentative, donc une tâche qui fait planter son worker passe en
+dead-letter une fois ses `MAX_ATTEMPTS` exécutions épuisées. Une tâche qui
+panique est un échec `Retryable` ; le worker continue de tourner.
 
 Le flux dispatch-and-run et `reclaim_stuck_jobs_pool` sont tous deux éprouvés en
 dogfooding contre SQLite dans `jobs_sqlite_live.rs`.
@@ -504,7 +533,8 @@ verrou par tenant** :
 use rustango::distributed_lock::DistributedLock;
 
 let lock = DistributedLock::new(cache.clone()).for_tenant(&org.slug);
-lock.with_lock("nightly_prune", ttl, || async { /* … */ }).await;
+// Tick every minute; this runs once per UTC day across replicas.
+lock.once_per_period("nightly_prune", day, || prune(&org)).await;
 ```
 
 Non cadré, tous les tenants se disputent un unique `lock:nightly_prune` : le
@@ -533,7 +563,7 @@ acquire refusé est le résultat attendu, donc rien n'est journalisé. Suivi dan
 | `Queue(String)` | erreur de file interne (sérialisation/enregistrement) |
 
 **Méthodes de `JobQueue` :** `register::<T>()` · `dispatch(&payload)` · `start()` ·
-`shutdown()` · `pending_count()`. `DatabaseJobQueue` ajoute
+`shutdown()` · `pending_count()`. Les deux files ont `shutdown_grace`. `DatabaseJobQueue` ajoute
 `ensure_table_pool`, `with_workers_pool`, `poll_interval`, et
 `reclaim_stuck_jobs_pool`.
 

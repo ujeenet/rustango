@@ -65,6 +65,10 @@ valeur de `rustango::logging::DEFAULT_FILTER`. Ce défaut est délibéré : sqlx
 journalise chaque requête en `info`, donc un `info` non filtré enterre vos
 propres événements sous le SQL.
 
+Pour des logs JSON, définissez `RUSTANGO__LOGGING__FORMAT=json` (aussi
+`pretty`, `compact`, `full`). Comme `RUST_LOG`, elle est lue depuis
+l'environnement, sinon depuis `./.env`.
+
 Pour configurer autre chose que le niveau, installez le subscriber vous-même.
 Chaque installateur est idempotent (`try_init` en dessous), un appel
 supplémentaire est donc sans effet plutôt qu'une panique :
@@ -191,6 +195,22 @@ comme les lignes ci-dessus.
 | `compact` | Développement — ligne unique plus concise, champs de span à la fin | `.with_format(Format::Compact)` |
 | `json` | Production — un objet par événement, pour Loki / CloudWatch / Datadog | `.json()` |
 
+Les quatre ont un rendu différent, ce qui n'a pas toujours été vrai : autrefois,
+`install()` n'appelait ni `.pretty()` ni `.compact()`, si bien que ces deux
+valeurs produisaient une sortie `full`.
+
+### Couleur
+
+La couleur est activée quand stdout est un terminal, et désactivée sinon —
+rediriger vers un fichier ou tourner en CI ne demande aucune configuration.
+`NO_COLOR` est respecté. `json` et le sink fichier ne sont jamais colorés.
+
+| `color` | Comportement |
+|---|---|
+| `auto` | Couleur si et seulement si stdout est un terminal et `NO_COLOR` n'est pas défini. Le défaut |
+| `always` | Couleur même en redirection |
+| `never` | Jamais de couleur |
+
 ```rust,ignore
 rustango::logging::Setup::new()
     .json()
@@ -211,8 +231,7 @@ la position dans le code (utile en développement, bruyant en production), et
 renoncé à filtrer dessus.
 
 > Chaque valeur de format atteint son propre formateur. `compact` était accepté
-> puis rendu comme la valeur par défaut — corrigé (#1480).
-> pas.
+> puis rendu comme la valeur par défaut — c'est corrigé.
 
 ## Configurer la journalisation depuis les réglages
 
@@ -224,6 +243,7 @@ journalisation sans recompiler. La section s'appelle `[logging]` :
 [logging]
 level             = "info,sqlx=warn"
 format            = "pretty"
+color             = "auto"
 with_line_numbers = true
 ```
 
@@ -267,15 +287,24 @@ appelle lui-même `logging::setup()` n'obtienne pas un second installateur.
 L'ordre dans la chaîne n'a pas d'importance : l'installation a lieu à `run()`,
 contre les réglages finaux.
 
-> **`#[rustango::main]` l'emporte dessus.** La macro installe un subscriber
-> avant même que le runtime ne soit construit, et chaque installateur utilise
-> `try_init` : le premier gagne, les suivants sont écartés en silence. Un `main`
-> qui garde la macro *et* appelle `with_logging()` obtient donc les valeurs par
-> défaut de la macro : votre section `[logging]` est lue puis reste sans effet,
-> sans rien pour le signaler. Pour une journalisation pilotée par les réglages,
-> remplacez `#[rustango::main]` par `#[tokio::main]` — c'est la seule chose
-> qu'un projet généré doit changer. Suivi dans
-> [#1465](https://github.com/ujeenet/rustango/issues/1465).
+> **Dites à `#[rustango::main]` de s'effacer.** La macro installe un
+> subscriber avant même que le runtime ne soit construit, et chaque installateur
+> utilise `try_init` : le premier gagne. Passez `logging = false` et le vôtre
+> s'installe en premier :
+>
+> ```rust,ignore
+> #[rustango::main(logging = false)]
+> async fn main() -> Result<(), Box<dyn std::error::Error>> {
+>     rustango::manage::Cli::new()
+>         .with_settings_from_env()
+>         .with_logging()
+>         .run().await
+> }
+> ```
+>
+> Sans cela, la section `[logging]` est lue puis ignorée. Autrefois c'était
+> silencieux ; `install()` avertit désormais sur stderr et via `tracing` quand il
+> trouve un subscriber déjà en place.
 
 N'importe quelle clé peut être écrasée par déploiement via une variable
 d'environnement, la section et la clé servant de segments de chemin :
@@ -427,9 +456,31 @@ couche OpenTelemetry, qui lit le span à sa fermeture.
 Cette couche vaut d'être installée ne serait-ce que pour le champ locataire :
 comme les champs sont portés par le *span*, chaque événement émis pendant la
 requête — y compris ceux de l'ORM — les porte dans son contexte de span, sans
-qu'aucun sous-système ait à savoir ce qu'est un locataire. Elle n'est **pas**
-installée par défaut ; ni `server::Builder`, ni `Cli`, ni le scaffolder ne
-l'ajoutent.
+qu'aucun sous-système ait à savoir ce qu'est un locataire.
+
+**`Cli` l'installe pour vous**, sur chaque chemin de service, avec le journal
+d'accès. Autrefois, rien dans le framework ne la montait : un `tracing::info!`
+dans un handler n'avait donc aucun span englobant — ni locataire, ni
+corrélation — et c'est ce qui faisait lire les logs des handlers comme des
+lignes isolées, sans contexte.
+
+`[logging] access_log = false` désactive **uniquement le journal d'accès**. Le
+span de requête et l'en-tête `X-Request-Id` restent montés. Ce réglage nomme le
+journal, et le service pour lequel il existe — celui qui journalise les
+requêtes en bordure — est précisément celui qui veut encore le contexte de
+trace et la corrélation des requêtes. (Une version antérieure de cette page
+disait qu'il désactivait les deux, et une version antérieure du code le
+faisait ; les deux avaient tort pour la même raison.)
+
+`server::Builder` les monte aussi quand `Cli` lui passe la configuration, ce
+qu'il fait sur les chemins de service de la tenancy — l'admin du tenant et la
+console opérateur sont derrière un aiguillage par Host que le routeur api ne
+voit jamais, donc les couches vont sur le routeur le plus extérieur plutôt que
+sur celui que vous passez. Un `server::Builder` construit entièrement à la main
+ne monte aucune des couches qu'ajoute `Cli` : appelez `.observability(..)` pour
+le span et le journal d'accès, et `.security_headers(..)`, `.allowed_hosts(..)`
+et `.ssl_redirect(..)` pour les couches `[security]` — chacune reste désactivée
+tant que vous ne le faites pas.
 
 ## Journalisation dans les tests
 
@@ -466,5 +517,7 @@ par le guard.
   détruit, ou le processus est mort avant que l'appender ne vide son tampon.
   Voir [Écrire dans un fichier](#écrire-dans-un-fichier).
 - **Deux subscribers, le second ignoré.** `try_init` signifie que le premier
-  gagne, en silence. Si vous appelez `logging::setup()` *et*
-  `Cli::with_logging()`, c'est celui des réglages qui perd.
+  gagne. Si vous appelez `logging::setup()` *et* `Cli::with_logging()`, c'est
+  celui des réglages qui perd. `install()` avertit quand cela arrive — cherchez
+  `logging setup ignored` sur stderr. Sous `#[rustango::main]`, ajoutez
+  `logging = false`.

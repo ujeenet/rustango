@@ -92,7 +92,7 @@ répercutés. Les types de champ sont mis en correspondance automatiquement :
 | `String`, `&str` | `string` |
 | `bool` | `boolean` |
 | `Vec<T>` / `[T; N]` | `array` de `T` |
-| `Option<T>` | `T`, marqué `nullable` |
+| `Option<T>` | `[T, "null"]`, non requis |
 | `chrono::DateTime<Utc>` | `string` / `date-time` |
 | `chrono::NaiveDate` | `string` / `date` |
 | `uuid::Uuid` | `string` / `uuid` |

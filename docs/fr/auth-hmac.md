@@ -14,8 +14,8 @@ sous la forme d'une seule couche tower.
 > **Un terme vous est inconnu ?** *HMAC*, *secret partagé*, *rejeu*, *comparaison en temps constant* —
 > voir le [glossaire](glossary.md).
 
-> **Source :** `rustango::hmac_auth` (`HmacAuthLayer`, `KeyResolver`, `sign_now`,
-> `sign_request`) — derrière la fonctionnalité `hmac-auth` (activée par défaut ;
+> **Source :** `rustango::hmac_auth` (`HmacAuthLayer`, `KeyResolver`,
+> `KeyTenantResolver`, `RequestToSign`, `sign_now`, `sign_request`) — derrière la fonctionnalité `hmac-auth` (activée par défaut ;
 > la protection contre le rejeu nécessite en plus `cache`).
 >
 > **Version exécutable :** chaque extrait est copié depuis
@@ -143,6 +143,23 @@ La signature est en base64 ; le hash du corps à l'intérieur de la chaîne
 canonique est en hexadécimal. Envoyez le corps octet pour octet tel qu'il a été
 signé — tout proxy qui le réécrit (recompression, re-sérialisation JSON) casse la
 vérification.
+
+---
+
+## Applications multi-tenant
+
+L'en-tête du tenant et le port ne sont pas signés par défaut, et la couche ne
+connaît aucun tenant. Sur une application résolue par tenant :
+
+- `.bind_tenants(tenant_of)` associe chaque identifiant de clé au slug du
+  tenant pour lequel il peut agir. La couche résout le tenant de la requête
+  avec le contexte de tenant monté et répond `403` quand il diffère, ou quand
+  il n'y en a aucun.
+- `.signed_headers(["x-org"])` ajoute des en-têtes à la chaîne signée, et
+  `.sign_port()` ajoute le port de `Host`. Chacun ajoute une ligne
+  `name:value`, triée par nom. Le client signe la même liste avec
+  `RequestToSign::header` et `port` ; un en-tête absent de la requête est signé
+  comme vide.
 
 ---
 

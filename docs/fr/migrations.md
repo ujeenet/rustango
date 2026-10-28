@@ -174,6 +174,12 @@ répété pour réparer une série de lignes en une seule commande.
 
 ---
 
+## Une nouvelle clé unique sur des lignes en double
+
+Avant qu'une migration n'ajoute un index unique ou une colonne unique à une table existante, `migrate` vérifie qu'aucune paire de lignes ne partage la clé (les lignes ayant un NULL dedans sont ignorées). Si c'est le cas, il s'arrête avant tout DDL et affiche un `SELECT … GROUP BY … HAVING COUNT(*) > 1` qui les liste. La vérification parcourt la table une fois par nouvelle clé : sur une grande table, elle coûte donc un parcours complet. Elle est sautée après une étape de données dans la même migration, qui peut être celle qui supprime les doublons, et pour les tables ou colonnes que la migration crée ou renomme elle-même.
+
+---
+
 ## Mise à niveau vers 0.51.2
 
 > **Les 0.51.0 et 0.51.1 ont été retirées (yanked)** — la réconciliation qu'elles promettaient ne s'est jamais

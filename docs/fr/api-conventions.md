@@ -30,7 +30,7 @@ Le nom d'une méthode indique ce qu'elle fait. Une fois ces suffixes assimilés,
 ### Fonctions
 
 - **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — le nom nu prend un `rustango::sql::Pool` et constitue le chemin ordinaire. Il fonctionne sur Postgres, MySQL et SQLite, en choisissant le dialecte en interne. C'est ce que veut la quasi-totalité du code applicatif.
-- **`fetch_on(executor)`, `count_on(executor)`** — le suffixe `_on` signifie « exécute ceci contre l'*executor* que je te fournis » — une connexion ou une transaction ouverte plutôt que le pool. À utiliser quand il faut plusieurs instructions dans une même transaction. **Les méthodes `_on` sont réservées à Postgres** (`#[cfg(feature = "postgres")]`).
+- **`fetch_on(executor)`, `count_on(executor)`** — le suffixe `_on` signifie « exécute ceci contre l'*executor* que je te fournis » — une connexion ou une transaction ouverte plutôt que le pool. À utiliser quand il faut plusieurs instructions dans une même transaction. `fetch_on` / `first_on` / `count_on` / `exists_on` et le `fetch_on` de `values` / `aggregate` acceptent n'importe quel `SqlExecutor` (`&mut PoolConn`, `&mut PoolTx`, `&Pool`) sur les trois backends ; le reste de la famille `_on` est encore réservé à Postgres.
 - **Les écritures inversent cette règle, et c'est le seul endroit où elle ne tient pas.** `save(&pool)`, `insert(&pool)` et `delete(&pool)` prennent un `sqlx::PgPool` spécifique au pilote ; sur un build sans la fonctionnalité `postgres`, elles **n'existent tout simplement pas** — choisir `sqlite` fait disparaître la méthode au lieu d'échouer avec un message qui en nomme la cause. Les versions multi-backends portent le suffixe `_pool` : `save_pool`, `insert_pool`, `delete_pool`, chacune prenant `rustango::sql::Pool`.
 
   | | nom nu | version multi-backends |
@@ -201,7 +201,7 @@ async fn handler() -> Result<Json<X>, ApiError> {
 }
 ```
 
-`ApiError` implémente `IntoResponse`, si bien que le retourner produit automatiquement sa forme JSON : `{"error": <code machine>, "message": …, "status": …, "details": …}`.
+`ApiError` implémente `IntoResponse`, si bien que le retourner produit automatiquement sa forme JSON : `{"error": <machine code>, "message": …, "status": …, "details": …}`.
 
 Les erreurs JSON du framework lui-même utilisent la même forme : ViewSets, rejets de tenant et de `Principal`, media, endpoints JSON de l'admin, limites de corps, limites de débit et mode maintenance. Un `5xx` journalise sa cause et envoie un `message` générique. Voir [ViewSets — formes de réponse en erreur](viewsets.md#formes-de-réponse-en-erreur).
 
@@ -267,16 +267,23 @@ let l = AccessLogLayer {
 Une *feature* est un flag de build Cargo (le `[features]` de `Cargo.toml`) qui active ou désactive un pan du crate — la liste des briques installées de votre application, mais résolue à la compilation. Chaque module qui tire une dépendance supplémentaire se trouve derrière l'une d'elles. L'ensemble par défaut, c'est « vous en voulez presque certainement » :
 
 ```toml
-default = [
-    "postgres", "manage", "admin", "config", "forms", "serializer",
-    "cache", "signals", "email", "storage", "scheduler", "secrets", "totp",
-    "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url",
-    "notifications", "casts", "jobs", "jobs-postgres", "auth_flows", "sse",
-    "websocket", "oauth2", "http-client", "compression", "openapi",
-    "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3",
-    "media", "runserver", "template_views",
+default = ["postgres", "batteries"]
+
+batteries = [
+    "manage", "admin", "config", "forms", "serializer", "cache", "signals",
+    "email", "storage", "scheduler", "secrets", "totp", "webhook",
+    "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications",
+    "casts", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket",
+    "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions",
+    "hmac-auth", "jwt", "uploads", "storage-s3", "storage-azure", "media",
+    "runserver", "template_views",
 ]
 ```
+
+L'indirection est délibérée : `batteries` est un nom unique qu'un crate en aval
+peut désactiver — `default-features = false, features = ["postgres"]` — sans
+avoir à recopier la liste. L'alternative, tout écrire dans `default`, obligerait
+quiconque s'en retire à connaître toute la liste.
 
 **Désactivées par défaut :** les features qui tirent de lourdes dépendances ou des services externes :
 - `tenancy` — ajoute `argon2`, `hmac`, `sha2`, `cookie`, `tower` (la plupart des applications n'en ont pas besoin)
