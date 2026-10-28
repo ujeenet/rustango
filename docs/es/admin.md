@@ -612,6 +612,7 @@ Todas las rutas son relativas a `admin_prefix`:
 | `/__audit` (o `audit_url`) | GET | Feed de actividad + limpieza. |
 | `/login`, `/logout` | GET/POST | Auth de sesión (cuando está activada). |
 | `/account/password`, `/account/totp` | GET/POST | Autoservicio de cambio de contraseña / inscripción TOTP. |
+| `/account/totp/disable` | POST | Desactivar el TOTP con un código actual. |
 
 Las rutas personalizadas registradas con `register_admin_view!` se montan en
 `/<table>/<suffix>`.

@@ -609,6 +609,7 @@ Alle Pfade sind relativ zu `admin_prefix`:
 | `/__audit` (oder `audit_url`) | GET | Aktivitäts-Feed + Aufräumen. |
 | `/login`, `/logout` | GET/POST | Session-Auth (wenn aktiviert). |
 | `/account/password`, `/account/totp` | GET/POST | Selbstbedienungs-Passwortänderung / TOTP-Registrierung. |
+| `/account/totp/disable` | POST | TOTP mit einem aktuellen Code abschalten. |
 
 Mit `register_admin_view!` registrierte benutzerdefinierte Routen binden unter
 `/<table>/<suffix>` ein.

@@ -156,9 +156,18 @@ pub async fn run_with_writer<W: Write + Send>(
         // to the unknown-subcommand error.
         #[cfg(feature = "admin")]
         "create-admin" => crate::admin::create_admin_cmd(pool, &args[1..], writer).await,
+        #[cfg(feature = "admin")]
+        "reset-password" => crate::admin::reset_password_cmd(pool, &args[1..], writer).await,
+        #[cfg(feature = "admin")]
+        "change-password" => crate::admin::change_password_cmd(pool, &args[1..], writer).await,
+        #[cfg(feature = "admin")]
+        "set-admin-active" => crate::admin::set_admin_active_cmd(pool, &args[1..], writer).await,
+        #[cfg(all(feature = "admin", feature = "totp"))]
+        "reset-admin-totp" => crate::admin::reset_admin_totp_cmd(pool, &args[1..], writer).await,
         "flush" => flush_cmd(pool, &args[1..], FlushScope::All, writer).await,
         // #822 — bulk pruning of stale rows from `Prunable` models.
         "prune" => prune_cmd(pool, &args[1..], writer).await,
+        "audit-cleanup" => audit_cleanup_cmd(pool, &args[1..], writer).await,
         // Purges expired entries from a DatabaseCache-backed
         // table. Works for any
         // table written by `cache::DatabaseCache`, including the
@@ -320,6 +329,33 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         "      --pretend counts matches without deleting; --model / --except"
     )?;
     writeln!(w, "      narrow the scope (repeatable).\n")?;
+    writeln!(
+        w,
+        "  reset-password <username> | change-password <username>"
+    )?;
+    writeln!(
+        w,
+        "      Set an admin user's password; change-password checks the old one.\n"
+    )?;
+    writeln!(w, "  set-admin-active <username> --on|--off")?;
+    writeln!(
+        w,
+        "      Turn an admin user off (ends their sessions) or back on.\n"
+    )?;
+    writeln!(w, "  reset-admin-totp <username>")?;
+    writeln!(
+        w,
+        "      Remove an admin user's two-factor device (lost phone).\n"
+    )?;
+    writeln!(w, "  audit-cleanup --days <N> | --keep-last <N> [--yes]")?;
+    writeln!(
+        w,
+        "      Trim the audit log: entries older than N days, or all but the"
+    )?;
+    writeln!(
+        w,
+        "      N newest per row. N <= 0 deletes everything and needs --yes.\n"
+    )?;
     writeln!(w, "  clear-cache [--table <name>]")?;
     writeln!(w, "      (alias: clearsessions)")?;
     writeln!(
@@ -829,9 +865,13 @@ async fn migrate<W: Write>(
         return Ok(());
     }
 
-    migrate_with_framework(pool, dir, w, runner::Signals::Skip, |held| {
-        runner::migrate_pool_locked(held, pool, dir, None)
-    })
+    migrate_with_framework(
+        pool,
+        dir,
+        w,
+        runner::Signals::Fire { tenant: None },
+        |held| runner::migrate_pool_locked(held, pool, dir, None),
+    )
     .await
 }
 
@@ -5803,6 +5843,45 @@ fn parse_prune_args(args: &[String]) -> Result<PruneArgs, MigrateError> {
         }
     }
     Ok(out)
+}
+
+/// `manage audit-cleanup --days <N> | --keep-last <N> [--yes]`: audit-log
+/// retention on the one database, the rule the tenancy verb uses.
+async fn audit_cleanup_cmd<W: Write>(
+    pool: &Pool,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    const USAGE: &str = "audit-cleanup --days <N> | --keep-last <N> [--yes]";
+    let (mut days, mut keep_last, mut yes) = (None, None, false);
+    let mut iter = args.iter();
+    let number = |flag: &str, v: Option<&String>| -> Result<i64, MigrateError> {
+        let raw = v.ok_or_else(|| MigrateError::Validation(format!("{flag} requires a value")))?;
+        raw.parse::<i64>().map_err(|_| {
+            MigrateError::Validation(format!("{flag} expects an integer, got `{raw}`"))
+        })
+    };
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--days" => days = Some(number("--days", iter.next())?),
+            "--keep-last" => keep_last = Some(number("--keep-last", iter.next())?),
+            "--yes" => yes = true,
+            "--help" | "-h" => {
+                writeln!(w, "{USAGE}")?;
+                return Ok(());
+            }
+            other => {
+                return Err(MigrateError::Validation(format!(
+                    "audit-cleanup: unexpected argument `{other}` — usage: {USAGE}"
+                )))
+            }
+        }
+    }
+    let rule = crate::audit::Retention::from_flags(days, keep_last, yes)
+        .map_err(MigrateError::Validation)?;
+    let deleted = rule.prune(pool).await?;
+    writeln!(w, "audit-cleanup done: deleted={deleted}")?;
+    Ok(())
 }
 
 /// `manage prune [--model <name>] [--except <name>] [--pretend]` —

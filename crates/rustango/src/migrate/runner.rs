@@ -585,15 +585,10 @@ pub(crate) async fn migrate_locked(
 /// the migrate lock, so a handler may migrate again.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Signals<'a> {
-    /// The PG `migrate` runner's and every tenant run's contract; `tenant`
-    /// names the run's tenant.
-    #[cfg_attr(
-        not(any(feature = "tenancy", all(feature = "postgres", feature = "manage"))),
-        allow(dead_code)
-    )]
-    Fire {
-        tenant: Option<&'a str>,
-    },
+    /// Every `migrate` run's contract; `tenant` names the run's tenant.
+    Fire { tenant: Option<&'a str> },
+    /// The registry's own run only.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
     Skip,
 }
 

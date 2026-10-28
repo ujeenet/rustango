@@ -641,6 +641,12 @@ pub struct ServerSettings {
     /// are closed. `None` means 20. Keep it under the orchestrator's
     /// grace period (30 s on Kubernetes).
     pub shutdown_timeout_secs: Option<u64>,
+    /// Single-database `runserver` applies migrations before it binds.
+    /// `None` means on. Set `false` when a deploy step runs `migrate`.
+    pub migrate_on_boot: Option<bool>,
+    /// Seconds a booting server waits for another run's migrate lock
+    /// before it exits. `None` means 300.
+    pub migrate_lock_timeout_secs: Option<u64>,
 }
 
 impl ServerSettings {

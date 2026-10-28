@@ -374,7 +374,6 @@ pub(crate) async fn start_in<M: DeviceTable>(
 }
 
 /// Drop the confirmed device whose secret is `secret`; `false` when it changed meanwhile.
-#[cfg(feature = "tenancy")]
 pub(crate) async fn remove_in<M: DeviceTable>(
     pool: &Pool,
     owner: i64,
@@ -386,6 +385,17 @@ pub(crate) async fn remove_in<M: DeviceTable>(
         .filter("confirmed", true)
         .compile_delete()?;
     Ok(crate::sql::delete_pool(pool, &del).await? == 1)
+}
+
+/// Drop every device of `owner`, confirmed or not: a lost authenticator.
+pub(crate) async fn reset_in<M: DeviceTable>(
+    pool: &Pool,
+    owner: i64,
+) -> Result<u64, crate::sql::ExecError> {
+    let del = crate::query::QuerySet::<M>::new()
+        .filter(M::OWNER, owner)
+        .compile_delete()?;
+    crate::sql::delete_pool(pool, &del).await
 }
 
 /// Fetch the device row for `user_id`, if any.

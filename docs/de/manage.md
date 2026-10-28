@@ -124,6 +124,9 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 | `showurls [--format plain\|json]` | Jede benannte Route, sortiert |
 | `check [--deploy]` | Health-Checks; `--deploy` ergänzt die Produktions-Audits |
 | `create-admin` | Legt eine `AdminUser`-Zeile für Projekte mit `admin::Builder::with_session_auth` an. **Nicht** tenancy-gated — nimmt einen einfachen `&Pool` und schreibt `rustango_admin_users`, die Tabelle wird bei Bedarf angelegt. Der einzige Weg zu einem ersten Admin-Login in einem Nicht-Tenancy-Projekt |
+| `reset-password <username>` / `change-password <username>` | Setzt das Passwort eines Admin-Benutzers (eine Datenbank); `change-password` prüft zuerst das aktuelle. Gleiche Passwort-Flags wie `create-admin` |
+| `set-admin-active <username> --on\|--off` | Schaltet einen Admin-Benutzer ab (seine Sitzungen enden) oder wieder an |
+| `reset-admin-totp <username>` | Entfernt das Zwei-Faktor-Gerät eines Admin-Benutzers nach Verlust des Telefons. Protokolliert mit Quelle `cli` |
 | `about` / `version` / `--version` | Build- und Versionsinformationen |
 | `docs` | Öffnet die Dokumentation |
 
@@ -137,6 +140,7 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 | `set-password-link <slug> <username>` | Gibt einen Einmal-Link aus, mit dem der Benutzer sein eigenes Passwort setzt |
 | `reset-operator-password` / `change-operator-password` | Passwort-Wiederherstellung für Operatoren; `change-operator-password` liest das aktuelle Passwort wie `change-password` |
 | `set-operator-active` | Aktiviert oder deaktiviert einen Operator |
+| `reset-operator-totp <username>` | Entfernt das Zwei-Faktor-Gerät eines Operators nach Verlust des Telefons. Im Registry-Audit-Log mit Quelle `cli` |
 | `create-role` / `assign-role` / `revoke-role` / `list-roles` | Rollen |
 | `grant-perm` / `revoke-perm` | Berechtigungen per Codename |
 | `seed-permissions [--slug <s>]` | Legt die Standard-Berechtigungszeilen an |
@@ -968,6 +972,15 @@ die ein gestoppter Prozess über eine Stunde auf `running` ließ, werden beim
 nächsten Start als fehlgeschlagen markiert; ein Webhook-Retry mit derselben
 `event_id` läuft erneut.
 
+Ein `runserver` mit einer Datenbank wendet ausstehende Migrationen vor dem Binden
+an und löst `pre_migrate` / `post_migrate` aus wie `migrate`. Er wartet bis zu
+`[server] migrate_lock_timeout_secs` (Standard 300) auf die Sperre eines anderen
+Laufs und beendet sich dann. Abschalten mit `[server] migrate_on_boot = false`
+(`RUSTANGO__SERVER__MIGRATE_ON_BOOT=false`) oder `Cli::migrate_on_boot(false)`.
+Bei einem Rolling Deploy mit mehreren Replikas abschalten und `migrate` einmal als
+Job vor dem Deploy laufen lassen, damit kein Pod migriert, während alte Pods noch
+bedienen. Der Tenancy-Server migriert beim Start nie; `migrate` selbst ausführen.
+
 ### `create-tenant <slug> [options]`
 
 Richtet einen neuen Tenant (Kunde/Org) ein und wendet die Tenant-Migrationen
@@ -1346,6 +1359,9 @@ getan haben — es wächst also mit der Nutzung der Konsole. Nennen Sie einen
 Tenant (`--tenant`), fragen Sie nach diesem Tenant und lassen die Registry in
 Ruhe. Ein defekter Tenant wird gemeldet und gezählt, statt den Durchlauf zu
 beenden.
+
+Ein Projekt mit einer Datenbank hat dasselbe Verb mit `--days`, `--keep-last` und
+`--yes`; es kürzt das eine Audit-Log.
 
 ### Nachsehen, was passiert ist
 
