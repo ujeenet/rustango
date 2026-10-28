@@ -33,7 +33,6 @@
 //! ```
 
 use std::collections::HashSet;
-use std::path::Path;
 
 use axum::extract::Multipart;
 
@@ -196,7 +195,9 @@ async fn save_each(
             bytes.extend_from_slice(&chunk);
         }
 
-        let ext = lowercase_ext(&filename);
+        // Checked on the stored name: a dotfile like `.html` keeps its type.
+        let safe_name = sanitize_filename(&filename);
+        let ext = lowercase_ext(&safe_name);
         let allowed = match (&ext, cfg.allowed_extensions.is_empty()) {
             (Some(e), true) => !ACTIVE_EXTENSIONS.contains(&e.as_str()),
             (None, true) => true,
@@ -209,7 +210,6 @@ async fn save_each(
             ));
         }
 
-        let safe_name = sanitize_filename(&filename);
         let key_filename = if cfg.randomize_filename {
             randomize(&safe_name)
         } else {
@@ -265,11 +265,12 @@ pub fn sanitize_filename(name: &str) -> String {
     out
 }
 
-/// The lowercase extension without its dot, or `None`.
+/// The lowercase text after the last dot, or `None`. A leading dot counts,
+/// unlike `Path::extension`: `.html` is stored as `<uuid>-.html`.
 fn lowercase_ext(name: &str) -> Option<String> {
-    Path::new(name)
-        .extension()
-        .and_then(|s| s.to_str())
+    name.rsplit_once('.')
+        .map(|(_, e)| e)
+        .filter(|e| !e.is_empty())
         .map(str::to_ascii_lowercase)
 }
 
@@ -327,6 +328,8 @@ mod tests {
         assert_eq!(lowercase_ext("a.PNG").as_deref(), Some("png"));
         assert_eq!(lowercase_ext("a.tar.gz").as_deref(), Some("gz"));
         assert_eq!(lowercase_ext("noext"), None);
+        assert_eq!(lowercase_ext(".HTML").as_deref(), Some("html"));
+        assert_eq!(lowercase_ext("trailing."), None);
     }
 
     // -------- ensure_trailing_slash
@@ -614,7 +617,15 @@ mod tests {
     /// With no allow-list, types that run script are still refused (#1849).
     #[tokio::test]
     async fn empty_allow_list_refuses_active_types() {
-        for name in ["x.html", "x.SVG", "x.xml", "x.js"] {
+        for name in [
+            "x.html",
+            "x.SVG",
+            "x.xml",
+            "x.js",
+            ".html",
+            ".svg",
+            "dir/.Html",
+        ] {
             let (status, body, _) = upload(UploadConfig::new("u/"), &[name]).await;
             assert_eq!(status, 400, "{name}: {body}");
         }
