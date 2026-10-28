@@ -1339,7 +1339,15 @@ async def check_idempotency_scope(client, name, base, headers=None, other_tenant
     url = f"{base}/api/v1/payments"
     key = f"idem-{RUN_ID}-{time.time_ns()}"
     h = headers or {}
-    a = {**h, "Idempotency-Key": key, "Authorization": "Bearer caller-a"}
+    caller_a, caller_b = "Bearer caller-a", "Bearer caller-b"
+    if "Authorization" in h:
+        # The SaaS payments need a real token: the API user, then `noperms`,
+        # whose 403 is fine as long as it is no replay.
+        caller_a = h["Authorization"]
+        r = await jwt_login(client, base, h["Host"], *NOPERMS_USER)
+        if r.status_code == 200:
+            caller_b = f"Bearer {secret(r.json()['access'])}"
+    a = {**h, "Idempotency-Key": key, "Authorization": caller_a}
     body = {"amount_cents": 1200}
     first = await client.post(url, headers=a, json=body)
     again = await client.post(url, headers=a, json=body)
@@ -1350,7 +1358,7 @@ async def check_idempotency_scope(client, name, base, headers=None, other_tenant
     pid = first.json().get("payment_id")
     REPORT.add("same caller, same key replays", issue,
                verdict(again.json().get("payment_id") == pid), "(control)", name)
-    b = await client.post(url, headers={**a, "Authorization": "Bearer caller-b"}, json=body)
+    b = await client.post(url, headers={**a, "Authorization": caller_b}, json=body)
     anon_r = await client.post(url, headers={**no_token(h), "Idempotency-Key": key}, json=body)
     refund = await client.post(f"{base}/api/v1/refunds", headers=a, json=body)
     leaks = [label for label, resp in (("another caller", b), ("no caller", anon_r),
@@ -1360,14 +1368,18 @@ async def check_idempotency_scope(client, name, base, headers=None, other_tenant
                "FAIL" if leaks else "PASS",
                f"replayed to: {leaks}" if leaks else "", name)
     if other_tenant:
-        t = await client.post(url, headers={**a, "Host": other_tenant}, json=body)
+        other = {**a, "Host": other_tenant}
+        if "Authorization" in h:
+            t_h = await TOKENS.headers(client, base, other_tenant)
+            other["Authorization"] = t_h.get("Authorization", caller_a)
+        t = await client.post(url, headers=other, json=body)
         REPORT.add("idempotent replay stays in its tenant", issue,
                    verdict(t.status_code == 201 and t.json().get("payment_id") != pid),
                    f"{t.status_code}", name)
     changed = await client.post(url, headers=a, json={"amount_cents": 1})
     REPORT.add("reused key with another body is 422", issue,
                verdict(changed.status_code == 422), f"{changed.status_code}", name)
-    ck = {**h, "Idempotency-Key": f"{key}-cookie", "Authorization": "Bearer caller-a"}
+    ck = {**h, "Idempotency-Key": f"{key}-cookie", "Authorization": caller_a}
     c1 = await client.post(url, headers=ck, json={"amount_cents": 5, "remember": True})
     c2 = await client.post(url, headers=ck, json={"amount_cents": 5, "remember": True})
     stored = c1.status_code == 201 and c2.json().get("payment_id") == c1.json().get("payment_id")

@@ -145,9 +145,18 @@ fn the_storefront_escapes_product_text() {
 
 /// The tenant database for this build's backend, or `None` to skip:
 /// `DATABASE_URL` on Postgres, `MYSQL_TEST_URL` on MySQL, a temp file on SQLite.
+/// CI sets the URL on every leg, so a missing one fails there.
 fn tenant_db() -> Option<(String, &'static str)> {
+    let from_env = |var: &str, backend: &'static str| match std::env::var(var)
+        .ok()
+        .filter(|u| !u.is_empty())
+    {
+        Some(u) => Some((u, backend)),
+        None if std::env::var_os("CI").is_some() => panic!("CI must set {var}"),
+        None => None,
+    };
     #[cfg(feature = "postgres")]
-    return std::env::var("DATABASE_URL").ok().map(|u| (u, "postgres"));
+    return from_env("DATABASE_URL", "postgres");
     #[cfg(all(feature = "sqlite", not(feature = "postgres")))]
     return Some((
         format!(
@@ -159,7 +168,18 @@ fn tenant_db() -> Option<(String, &'static str)> {
         "sqlite",
     ));
     #[cfg(all(feature = "mysql", not(any(feature = "postgres", feature = "sqlite"))))]
-    return std::env::var("MYSQL_TEST_URL").ok().map(|u| (u, "mysql"));
+    return from_env("MYSQL_TEST_URL", "mysql");
+}
+
+/// Removes the SQLite temp file when the test ends.
+struct RemoveOnDrop(Option<std::path::PathBuf>);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 /// Every request resolves to one tenant on `url`; no registry table needed.
@@ -192,6 +212,11 @@ async fn anonymous_api_writes_are_refused() {
         eprintln!("skipping: no database URL for this backend");
         return;
     };
+    let _cleanup = RemoveOnDrop(
+        url.strip_prefix("sqlite://")
+            .and_then(|r| r.split('?').next())
+            .map(std::path::PathBuf::from),
+    );
     let org = Org {
         id: rustango::sql::Auto::Unset,
         slug: "acme".into(),
@@ -231,8 +256,14 @@ async fn anonymous_api_writes_are_refused() {
         registry: registry.into(),
         pool_cfg: rustango::tenancy::TenantPoolsConfig::default(),
     };
+    let cache: rustango::cache::BoxedCache =
+        std::sync::Arc::new(rustango::cache::InMemoryCache::new());
     let app = super::urls::rest_api(&auth)
-        .merge(super::urls::order_actions(&auth).with_state(state))
+        .merge(
+            super::urls::order_actions(&auth)
+                .merge(super::urls::payments(&auth, cache))
+                .with_state(state),
+        )
         .layer(axum::Extension(ctx));
 
     let mut writes = Vec::new();
@@ -251,7 +282,13 @@ async fn anonymous_api_writes_are_refused() {
             writes.push((m, format!("/api/v1/{prefix}/1")));
         }
     }
-    writes.push((Method::POST, "/api/v1/orders/1/confirm".to_owned()));
+    for path in [
+        "/api/v1/orders/1/confirm",
+        "/api/v1/payments",
+        "/api/v1/refunds",
+    ] {
+        writes.push((Method::POST, path.to_owned()));
+    }
     for (method, path) in &writes {
         for bearer in [None, Some("Bearer not.a.token")] {
             let mut req = Request::builder()
@@ -263,7 +300,11 @@ async fn anonymous_api_writes_are_refused() {
             }
             let req = req.body(Body::from("{}")).unwrap();
             let status = app.clone().oneshot(req).await.unwrap().status();
-            assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path} with {bearer:?}");
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{method} {path} with {bearer:?}"
+            );
         }
     }
 }
