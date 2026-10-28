@@ -83,7 +83,8 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 /// * `filter_fields = "a, b"` — fields filterable via `?a=v` query params.
 /// * `search_fields = "a, b"` — fields searched by `?search=...`.
 /// * `ordering = "a, -b"` — default list ordering; prefix `-` for DESC.
-/// * `page_size = N` — default page size (default: 20, max: 1000).
+/// * `page_size = N` — default page size (default: 20; requests are capped
+///   at `ViewSet::max_page_size`, default 100).
 /// * `read_only` — flag; wires only `list` + `retrieve` (no mutations).
 /// * `allow_anonymous` — flag; write actions without codenames are
 ///   intended, so the mount warning is skipped.

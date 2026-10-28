@@ -205,7 +205,7 @@ Register the module — add `pub mod post_serializer;` to `src/blog/mod.rs`.
 Note we only wrote one validator (`title_min_3`); the fields also **inherit the
 model's constraints** automatically — `title` is length-checked against the
 model's `max_length = 200`, and a `choices`/`min`/`max` column would be checked
-too, all returning friendly `400`s on write. Add `max_length` / `min_length` /
+too, all returning friendly `422`s on write. Add `max_length` / `min_length` /
 `min` / `max` serializer attributes to override a field's bound. (See the
 [serializers guide](serializers.md#validation) for the full validation story.)
 
@@ -235,7 +235,9 @@ use rustango::ViewSet;
 pub struct PostViewSet;
 ```
 
-Add `pub mod post_view_set;` to `src/blog/mod.rs`.
+The generator writes `src/post_view_set.rs` (it starts `read_only`, and its
+`use` line assumes `crate::models::Post`). Move it to `src/blog/post_view_set.rs`
+as shown and add `pub mod post_view_set;` to `src/blog/mod.rs`.
 
 > `fields` is required: it is the write allow-list, so a body cannot set any
 > other column (say `author_id` on a model that should own it). A serializer
@@ -258,8 +260,12 @@ pub fn api(pool: Pool) -> Router {
 }
 ```
 
-`make:api_routes blog` scaffolds exactly this aggregator if you'd rather
-generate it. Wire `blog::urls::api(pool)` into your top-level `urls.rs`.
+`make:api_routes blog` scaffolds the same shape as `src/blog/api_routes.rs` if
+you'd rather generate it. The top-level `urls::api()` has no pool, so mount this
+router from `src/main.rs`, where the `Cli` hands you the server's pool. A
+root nest is refused, so nest it under a prefix and drop that prefix from the
+ViewSet path: `.nest_with("/api", |pool| myapp::blog::urls::api(pool))` with
+`PostViewSet::router("/posts", pool)` inside.
 
 ### Step 7 — Run it and exercise every endpoint
 
@@ -291,14 +297,16 @@ The response is the **serializer's** shape: `body` came back as `content`, the
 computed `summary` appeared, and `published_at` (read-only, server-set) is
 present.
 
-**Validation rejects bad input** with a `400` — field-keyed arrays of messages:
+**Validation rejects bad input** with a `422` — field-keyed arrays of messages
+under `details`:
 
 ```bash
 curl -i -X POST localhost:8080/api/posts \
   -H 'content-type: application/json' \
   -d '{"title":"hi","content":"x","author_id":1}'
-# HTTP/1.1 400 Bad Request
-# {"title":["title must be at least 3 characters"]}
+# HTTP/1.1 422 Unprocessable Entity
+# {"error":"validation_failed","message":"invalid input","status":422,
+#  "details":{"title":["title must be at least 3 characters"]}}
 ```
 
 **Read-only / computed fields a client posts are ignored** — they can't inject
@@ -371,8 +379,8 @@ async fn rejects_short_title() {
     let res = client.post("/api/posts")
         .json(&json!({"title":"hi","content":"x","author_id":1}))
         .send().await;
-    assert_eq!(res.status, 400);
-    assert!(res.json_value()["title"].is_array());   // field-keyed error shape
+    assert_eq!(res.status, 422);
+    assert!(res.json_value()["details"]["title"].is_array());   // field-keyed error shape
 }
 
 #[tokio::test]
@@ -427,9 +435,9 @@ On `create` and `update`, when a serializer is registered:
 1. **Validation runs.** The serializer's `validate()` — every per-field
    `#[serializer(validate = "fn")]` plus the container-level cross-field
    `validate` — runs against the JSON body. On failure the request is rejected
-   `400 Bad Request` with the field-keyed error shape: a JSON object keyed by
-   field name with arrays of messages, e.g.
-   `{"title":["title must be at least 3 characters"]}`.
+   `422 Unprocessable Entity` (`validation_failed`) with the field-keyed error
+   shape in `details`: a JSON object keyed by field name with arrays of
+   messages, e.g. `{"title":["title must be at least 3 characters"]}`.
 2. **Writable-field filtering.** Only the serializer's writable fields are
    persisted; `read_only` and `method`/computed fields a client posts are
    **ignored** (not written), and `source` renames are resolved to the model
@@ -553,7 +561,8 @@ mount the ViewSet and override the one route with your own handler (see
 | `ordering` | `"-published_at, id"` | none | Default sort (`-` = DESC). |
 | `page_size` | `20` | 20 | Rows per page (client `?page_size=` capped at 100). |
 | `read_only` | *(flag)* | off | Expose GET (list + retrieve) only. |
-| `permissions(...)` | `permissions(create = "post.add")` | none | Per-action permission codenames. |
+| `allow_anonymous` | *(flag)* | off | Say that write actions with no codenames are meant to be open; silences the mount warning. |
+| `permissions(...)` | `permissions(create = "posts.add")` | none | Per-action permission codenames. |
 
 ---
 
@@ -572,8 +581,11 @@ fields responses render and bodies may write. Every other method returns `Self`:
 | `page_size(n)` | Default page size (≤ 100). |
 | `max_page_size(n)` | Raise or lower the client cap itself (default 100). |
 | `max_bulk_create(n)` | Most rows one bulk create may carry (default 1000). |
-| `pk_param(name)` | Rename the path parameter used for detail routes. |
+| `pk_param(name)` | Rename the path parameter used for detail routes (`pk_param_name()` reads it back). |
+| `openapi_query(bool)` | Describe the `QUERY` route in the generated OpenAPI document (needs OpenAPI 3.2 tooling). Off by default; the route is mounted either way. |
+| `related_filter(fk_field, backend)` | Limit which target rows a body's FK may name; any other is a `422`. |
 | `read_only()` | GET-only. |
+| `allow_anonymous()` | Writes without codenames are intended; skips the mount warning. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Per-action codename gates (the latter on tenancy). |
 | `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Keyset pagination (skips `COUNT(*)`). Any totally-ordered NOT NULL column: integer, timestamp, date, uuid or string. |
 | `limit_offset_pagination()` | `?limit=&offset=` windowing. |
@@ -581,7 +593,7 @@ fields responses render and bodies may write. Every other method returns `Self`:
 | `filter_backend(closure)` | Add custom `WHERE` predicates beyond `filter_fields`. |
 | `throttle(…)` / `throttle_all(max, secs)` | Per-action fixed-window rate limits; `QUERY` spends the list budget. |
 | `admin_add_hooks()` | Run the admin's `"add"` object-permission hooks on create, on the request and on each written row; a refusal is a `403`. Off by default. |
-| `router(prefix, pgpool)` | Mount (Postgres, static pool). |
+| `router(prefix, pgpool)` | Mount (Postgres only, static `PgPool`; `postgres` feature). |
 | `router_pool(prefix, pool)` | Mount tri-dialect (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenancy)* mount with per-request tenant resolution. |
 
@@ -657,14 +669,14 @@ bool, json or blob column panics at build time rather than failing per request.
 { "count": 137, "limit": 20, "offset": 40, "results": [ … ] }
 ```
 
-`page_size` / `limit` are clamped to 100.
+`page_size` / `limit` are clamped to `max_page_size` (default 100).
 
 ---
 
 ## Validation
 
 With a **serializer wired**, the create/update path runs the serializer's
-validators and returns field-keyed `400`s — the recommended way to validate (see
+validators and returns field-keyed `422`s — the recommended way to validate (see
 [the marriage](#the-serializer-marriage-input--output) and the
 [serializers guide](serializers.md#validation)). Three layers run:
 
@@ -672,7 +684,7 @@ validators and returns field-keyed `400`s — the recommended way to validate (s
   by default the field **inherits the model's** `max_length` / `min` / `max` /
   `choices`. So a `#[rustango(max_length = 200)]` column is length-checked on the
   API with no extra config, turning would-be DB-constraint `500`s into friendly
-  `400`s like
+  `422`s with `details` like
   `{"title":["Ensure this value has at most 200 characters."]}`.
 - **Per-field** `validate = "fn"` and a **cross-field** `validate` hook — your
   custom rules (formats, cross-field, business logic).
@@ -725,11 +737,11 @@ use rustango::viewset::{ViewSet, ViewSetPerms};
 
 ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .permissions(ViewSetPerms {
-        list:     vec!["post.view".into()],
-        retrieve: vec!["post.view".into()],
-        create:   vec!["post.add".into()],
-        update:   vec!["post.change".into()],
-        destroy:  vec!["post.delete".into()],
+        list:     vec!["posts.view".into()],
+        retrieve: vec!["posts.view".into()],
+        create:   vec!["posts.add".into()],
+        update:   vec!["posts.change".into()],
+        destroy:  vec!["posts.delete".into()],
     })
     .router_pool("/api/posts", pool);
 ```
@@ -737,7 +749,8 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
 An empty action list = no check. Enforcement reads an authenticated user from
 the request (the `tenancy` auth integration); superusers bypass, a missing user
 is denied. `.permissions_for_model::<Post>()` auto-fills the standard
-`post.view`/`add`/`change`/`delete` codenames.
+`<table>.view` / `.add` / `.change` / `.delete` codenames (`posts.view`, … for
+the `posts` table).
 
 A ViewSet does not run the admin's `change`, `delete` or `view`
 object-permission hooks yet. When its model has any, mounting it logs a
