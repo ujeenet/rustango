@@ -527,6 +527,11 @@ share a host, so a path works. A full URL to a CDN works too.
 
 ### The tenant admin
 
+In a tenancy project each tenant's admin is served on that tenant's host at
+`/admin` (`RouteConfig::admin_url`; the bare `Builder` default `/__admin` does
+not apply). Old `/__admin` links still reach it, unless
+`RouteConfig::legacy()` makes `/__admin` the main path.
+
 The tenant admin does not read `[admin]` or `[brand]`. It takes its brand from
 the tenant's `Org` row: the name is `brand_name`, else the tenant's display
 name; the logo is the one uploaded on the console's edit page, else the
@@ -544,6 +549,7 @@ Every method on `admin::Builder` (each returns `Self` for chaining unless noted)
 |---|---|
 | `new(pool)` | Construct from any pool (PostgreSQL / MySQL / SQLite). Defaults: prefix `/__admin`, dev cookies. |
 | `from_settings(pool, &settings)` | Construct from parsed config (`config` feature). |
+| `settings_prefix(&settings)` | Associated fn, not a builder step: the mount prefix the settings ask for (`[admin] url_prefix`, else `[routes] admin_url`), or `None`. |
 | `title(s)` / `subtitle(s)` | Sidebar header / subheader. |
 | `admin_prefix(p)` | URL prefix — **must match the nest path**. Default `/__admin`. |
 | `audit_url(u)` | Path of the activity/audit view. Default `/__audit`. |
@@ -553,6 +559,7 @@ Every method on `admin::Builder` (each returns `Self` for chaining unless noted)
 | `read_only([tables])` | Render those tables but forbid create/edit/delete. |
 | `read_only_all()` | Mark **every** table read-only. |
 | `skip_count_for([tables])` | Skip `COUNT(*)` on huge tables (pager shows "Page N"). |
+| `view_hook_scan_cap(rows)` | How many rows the list scans through `view` hooks before it withholds the rest. Default 10 000. |
 | `with_user_perms([codenames])` | Gate tables on `{table}.view/add/change/delete`. |
 | `register_action(table, name, handler)` | Register a bulk-action handler. |
 | `register_action_with_perm(table, name, perm, handler)` | Same, checked against `ActionPerm::Delete` instead of `change`. |
@@ -562,6 +569,7 @@ Every method on `admin::Builder` (each returns `Self` for chaining unless noted)
 | `secure_cookies(bool)` | Set the `Secure` (HTTPS-only) flag on the session cookie. `new` follows `[security].secure_cookies`, else secure on the prod tier. |
 | `theme_mode(m)` | `"light"` / `"dark"` / `"auto"`. |
 | `brand_logo_url(url)` | Logo above the title. |
+| `brand_favicon_url(url)` | Favicon URL; unset keeps the bundled icon. |
 | `brand_name(s)` / `brand_tagline(s)` | Per-tenant brand overrides. |
 | `tenant_brand_css(css)` | Per-tenant CSS-variable block. |
 | `impersonated_by(operator_id)` | Render an impersonation banner (operator console). |
