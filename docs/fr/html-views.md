@@ -550,9 +550,11 @@ habille donc :
 - les rejets d'axum (400, 415, 422) ;
 - les refus et 404 de l'admin du locataire, et les chemins inconnus de la console opérateur.
 
-Les pages qui portent leurs propres contrôles gardent leur aspect : la page
-« admin access required » de l'admin (elle a un formulaire de déconnexion) et
-sa page « table not migrated ». Marquez vos propres réponses avec `KeepBody`
+Les pages qui portent leurs propres contrôles gardent leur aspect : toute page
+d'erreur HTML de l'admin, de l'admin tenant, de la console opérateur et des vues
+génériques, comme un formulaire réaffiché avec son erreur, la page « admin
+access required » (elle a un formulaire de déconnexion) et la page « table not
+migrated ». Marquez vos propres réponses avec `KeepBody`
 pour faire de même.
 
 ### Migrer depuis un middleware d'erreur écrit à la main

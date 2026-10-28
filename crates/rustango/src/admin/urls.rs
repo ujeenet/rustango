@@ -895,10 +895,10 @@ impl Builder {
             } else {
                 public
             };
-            return Router::new().merge(public).merge(protected);
+            return crate::errors::own_pages(Router::new().merge(public).merge(protected));
         }
 
-        protected
+        crate::errors::own_pages(protected)
     }
 }
 

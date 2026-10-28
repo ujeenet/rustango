@@ -101,6 +101,7 @@ impl Console {
                     .method(method)
                     .uri(uri)
                     .header(header::HOST, "console.test")
+                    .header(header::ACCEPT, "text/html")
                     .header(header::COOKIE, format!("rustango_csrf=t; {}", self.cookie))
                     .header("x-csrf-token", "t")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
@@ -260,11 +261,33 @@ async fn a_bad_create_rerenders_with_the_typed_values(pool: &Pool) {
     }
 }
 
+/// The error-pages layer, outermost as `server::Builder` mounts it, keeps
+/// the console's own form page for a refused create.
+async fn the_error_pages_layer_keeps_the_console_form(pool: &Pool) {
+    #[cfg(feature = "template_views")]
+    {
+        use rustango::errors::{ErrorPagesLayer, ErrorPagesRouterExt as _};
+        let mut c = console(pool).await;
+        c.app = c.app.clone().error_pages(ErrorPagesLayer::new());
+        let form = "slug=ok-slug&label=Typed+Label&kind=oidc&client_id=c&client_secret=s";
+        let (status, html) = c.html("POST", "/sso-shared", form.to_owned()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            html.contains("alert-error") && html.contains("issuer"),
+            "{html}"
+        );
+        assert!(html.contains("value=\"Typed Label\""), "{html}");
+    }
+    #[cfg(not(feature = "template_views"))]
+    let _ = pool;
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         an_edit_keeps_the_id_and_a_blank_secret,
         a_bad_edit_rerenders_with_the_typed_values,
         a_bad_create_rerenders_with_the_typed_values,
+        the_error_pages_layer_keeps_the_console_form,
     ],
 }

@@ -1369,7 +1369,7 @@ jobs:
       - run: cargo nextest run --profile ci -p rustango --no-default-features --features sqlite,admin,template_views,testkit --test view_global_scopes_tri --test template_views_typed_binds_tri
       - run: >-
           cargo nextest run --profile ci -p rustango --no-default-features
-          --features sqlite,tenancy,admin-sso,testkit
+          --features sqlite,tenancy,admin-sso,template_views,testkit
           --test sso_link_tenancy_sqlite_live --test sso_link_tri
           --test sso_shared_console_tri
           --test admin_create_users_tri --test logout_revokes_sessions_tri

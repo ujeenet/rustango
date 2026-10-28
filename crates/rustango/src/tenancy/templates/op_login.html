@@ -2,6 +2,7 @@
 <html lang="en" data-theme="{{ theme_mode | default(value='auto') }}">
 <head>
   <meta charset="utf-8">
+  {% if brand_logo_url %}<link rel="icon" href="{{ brand_logo_url }}">{% endif %}
   <title>Sign in — {{ brand_name | default(value='Rustango Operator Console') }}</title>
   {% include "_theme_tokens.html" %}
   {% if brand_css %}<style nonce="{{ csp_nonce }}">:root { {{ brand_css | safe }} }</style>{% endif %}

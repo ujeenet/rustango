@@ -551,8 +551,10 @@ cabeceras de seguridad y fuera de todo lo demás, así que viste:
 - los rechazos de axum (400, 415, 422);
 - las denegaciones y 404 del admin del inquilino, y las rutas desconocidas de la consola de operador.
 
-Las páginas con sus propios controles conservan su aspecto: la página «admin
-access required» del admin (tiene un formulario para cerrar sesión) y su página
+Las páginas con sus propios controles conservan su aspecto: toda página de
+error HTML del admin, del admin de tenant, de la consola de operador y de las
+vistas genéricas, como un formulario mostrado de nuevo con su error, la página
+«admin access required» (tiene un formulario para cerrar sesión) y la página
 «table not migrated». Marca tus propias respuestas con `KeepBody` para hacer lo
 mismo.
 

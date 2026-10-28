@@ -5,6 +5,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
+{% if brand_logo_url %}<link rel="icon" href="{{ brand_logo_url }}">{% endif %}
 <title>{{ code }} · {{ title }}{% if brand_name %} · {{ brand_name }}{% endif %}</title>
 {% include "_theme_tokens.html" %}
 {% if brand_css %}<style nonce="{{ csp_nonce }}">:root { {{ brand_css | safe }} }</style>{% endif %}

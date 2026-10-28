@@ -550,8 +550,10 @@ security headers and outside everything else, so it dresses:
 - axum's rejections (400, 415, 422);
 - the tenant admin's denials and 404s, and unknown paths on the operator console.
 
-Pages that carry their own controls keep their look: the admin's "admin access
-required" page (it has a sign-out form) and its "table not migrated" page.
+Pages that carry their own controls keep their look: every HTML error page of
+the admin, the tenant admin, the operator console and the generic views, such
+as a form shown again with its error, the "admin access required" page (it has
+a sign-out form) and the "table not migrated" page.
 Mark any response of your own with `KeepBody` to do the same.
 
 ### Migrating from a hand-written error middleware

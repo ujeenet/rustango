@@ -782,13 +782,22 @@ fn render_form_with_inlines_and_pickers(
 
     let row_for_field = |f: &'static FieldSchema| -> serde_json::Value {
         let is_secret = is_secret_field(&admin_cfg, f.name);
+        let new_default = (prefill.is_none() && !pk_locked)
+            .then(|| crate::forms::default_form_value(f))
+            .flatten();
         let value = match prefill.and_then(|m| m.get(f.name)) {
             _ if is_secret => "",
             Some(v) => v.as_str(),
             None if prefill.is_none() && f.ty == crate::core::FieldType::Bool => {
                 new_form_bool_value(f)
             }
-            None => "",
+            None => new_default.as_deref().unwrap_or(""),
+        };
+        // A blank create value takes the column default, so it may be left empty.
+        let takes_default = !pk_locked && crate::forms::blank_takes_default(f, Some(""));
+        let shown = crate::core::FieldSchema {
+            blank: f.blank || takes_default,
+            ..*f
         };
         let is_readonly_field = locked.contains(f.name);
         let extra = if f.primary_key {
@@ -801,7 +810,7 @@ fn render_form_with_inlines_and_pickers(
             " <small>auto</small>"
         } else if gfk_ct_columns.contains(f.column) {
             " <small>generic FK</small>"
-        } else if !f.nullable {
+        } else if !f.nullable && !takes_default {
             " <small>required</small>"
         } else {
             ""
@@ -821,12 +830,12 @@ fn render_form_with_inlines_and_pickers(
         // #244 — swap raw integer input for a ContentType `<select>`
         // on fields named as a `generic_fk` ct_column.
         let mut input_html = if gfk_ct_columns.contains(f.column) {
-            render::render_gfk_select(f, value, lock_input, gfk_picker_cts)
+            render::render_gfk_select(&shown, value, lock_input, gfk_picker_cts)
         } else if is_secret {
             // Required only on create: an empty edit keeps the stored value.
-            render::render_secret_input(f, lock_input, !pk_locked)
+            render::render_secret_input(&shown, lock_input, !pk_locked)
         } else {
-            render::render_input_with_widget(f, value, lock_input, widget_override)
+            render::render_input_with_widget(&shown, value, lock_input, widget_override)
         };
         // `raw_id_fields`: when the field is an FK / O2O and is named
         // in `admin.raw_id_fields`, append a magnifying-glass lookup
