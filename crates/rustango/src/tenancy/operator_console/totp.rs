@@ -407,6 +407,11 @@ fn account_page(
     ctx.insert("otpauth_url", &secret.map(|s| otpauth(state, op, s)));
     ctx.insert("error", &error);
     ctx.insert("success", &success);
+    // Without a key the "Set it up" link leads back here; say what to do instead.
+    ctx.insert(
+        "key_missing",
+        &(crate::aead::key_status() == crate::aead::KeyStatus::Missing),
+    );
     no_store(render(state, "op_totp.html", &ctx))
 }
 

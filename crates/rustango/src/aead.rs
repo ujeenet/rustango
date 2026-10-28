@@ -54,10 +54,86 @@ pub(crate) enum AeadError {
     Decrypt,
 }
 
-/// The current key. Read per call so key rotation and tests see the live
-/// value. An empty or blank value counts as unset.
-fn env_key() -> Option<String> {
-    std::env::var(KEY_VAR).ok().filter(|k| !k.trim().is_empty())
+/// The current key: the env var, read per call so rotation and tests see
+/// the live value (blank counts as unset), else the dev key file.
+pub(crate) fn env_key() -> Option<String> {
+    resolve_key(std::env::var(KEY_VAR).ok(), dev_key)
+}
+
+fn resolve_key(env: Option<String>, dev: impl FnOnce() -> Option<String>) -> Option<String> {
+    env.filter(|k| !k.trim().is_empty()).or_else(dev)
+}
+
+/// Where the dev and test tiers keep a generated key, beside the session key.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+pub(crate) const DEV_KEY_PATH: &str = "./var/.rustango_secret.key";
+
+/// The dev key file, once [`use_dev_key_file`] allowed it; read on first use.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+static DEV_KEY: std::sync::OnceLock<DevKey> = std::sync::OnceLock::new();
+
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+struct DevKey {
+    path: std::path::PathBuf,
+    key: std::sync::OnceLock<Option<String>>,
+}
+
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+fn dev_key() -> Option<String> {
+    let dev = DEV_KEY.get()?;
+    dev.key.get_or_init(|| load_dev_key(&dev.path)).clone()
+}
+
+#[cfg(not(any(feature = "admin", feature = "tenancy", feature = "csrf")))]
+fn dev_key() -> Option<String> {
+    None
+}
+
+/// Boot: on the dev and test tiers an unset key falls back to a generated
+/// one saved at `path`. Any other tier keeps requiring the env var.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+pub(crate) fn use_dev_key_file(tier: &str, path: &std::path::Path) -> bool {
+    if !dev_key_tier(tier) {
+        return false;
+    }
+    let _ = DEV_KEY.set(DevKey {
+        path: path.to_owned(),
+        key: std::sync::OnceLock::new(),
+    });
+    true
+}
+
+/// [`use_dev_key_file`] for `RUSTANGO_ENV` and [`DEV_KEY_PATH`]; every boot path calls it.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+pub(crate) fn use_dev_key_file_for_env() -> bool {
+    use_dev_key_file(
+        &crate::env::tier_from_env(),
+        std::path::Path::new(DEV_KEY_PATH),
+    )
+}
+
+/// Only these tiers may seal with a key nobody set; staging and prod may not.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+fn dev_key_tier(tier: &str) -> bool {
+    matches!(crate::env::canonical_tier(tier).as_str(), "dev" | "test")
+}
+
+/// The saved key as text, generated on first use; `None` when it cannot be saved.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+fn load_dev_key(path: &std::path::Path) -> Option<String> {
+    use base64::Engine as _;
+    match crate::session::load_or_create_key_file(path, "secret key", KEY_VAR) {
+        Ok(bytes) => Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        Err(e) => {
+            tracing::warn!(
+                target: "rustango::aead",
+                path = %path.display(),
+                error = %e,
+                "could not save a dev {KEY_VAR}; sealing stays off until it is set"
+            );
+            None
+        }
+    }
 }
 
 /// A key that may seal: set and not blank. A blank one would seal under
@@ -189,6 +265,47 @@ fn open(key: AeadKey<'_>, stored: &str, aad: &[u8]) -> Result<Vec<u8>, AeadError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The env var wins; blank counts as unset and falls to the dev key.
+    #[test]
+    fn the_env_key_beats_the_dev_key() {
+        let dev = || Some("dev-key".to_owned());
+        assert_eq!(
+            resolve_key(Some("env-key".into()), dev).as_deref(),
+            Some("env-key")
+        );
+        assert_eq!(
+            resolve_key(Some("  ".into()), dev).as_deref(),
+            Some("dev-key")
+        );
+        assert_eq!(resolve_key(None, dev).as_deref(), Some("dev-key"));
+        assert_eq!(resolve_key(None, || None), None);
+    }
+
+    /// Dev and test get a saved key that survives a restart; staging and prod never do.
+    #[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+    #[test]
+    fn only_dev_and_test_generate_a_key() {
+        let dir = std::env::temp_dir().join(format!("rustango_aead_dev_{}", std::process::id()));
+        let path = dir.join("var/.rustango_secret.key");
+        for tier in ["prod", "Production", "staging"] {
+            assert!(!dev_key_tier(tier), "{tier}");
+        }
+        assert!(dev_key_tier("dev") && dev_key_tier("") && dev_key_tier("TEST"));
+        let first = load_dev_key(&path).expect("generated");
+        assert!(first.len() >= MIN_KEY_LEN, "short dev key");
+        assert_eq!(
+            load_dev_key(&path),
+            Some(first.clone()),
+            "a restart keeps the key"
+        );
+        let sealed = encrypt_with(Some(&first), b"pw", b"").unwrap();
+        assert_eq!(
+            decrypt_with(load_dev_key(&path).as_deref(), &sealed, b"").unwrap(),
+            b"pw"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     const KEY: Option<&str> = Some("aead-unit-test-key");
 

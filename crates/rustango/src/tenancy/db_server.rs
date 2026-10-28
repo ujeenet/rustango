@@ -977,7 +977,7 @@ impl DbServer {
 /// Seal `pw`, and check it opens back to the same text.
 fn sealed(pw: &LoginPassword) -> Result<String, DbServerError> {
     let sealed = super::seal(pw.expose()).map_err(|e| DbServerError::Seal(e.to_string()))?;
-    let current = std::env::var(crate::aead::KEY_VAR).ok();
+    let current = crate::aead::env_key();
     match super::secrets::open_sealed(&sealed, current.as_deref(), None) {
         Ok(back) if back == pw.expose() => Ok(sealed),
         _ => Err(DbServerError::Seal("the sealed value does not open".into())),

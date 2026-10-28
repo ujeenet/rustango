@@ -129,7 +129,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::errors` | Ein Fehlerseiten-Template, das nicht renderte, oder ein Template-Verzeichnis, das nicht lud |
 | `rustango::forms` | `DynamicForm`-Werte, die jetzt noch akzeptiert, später abgelehnt werden |
 | `rustango::auth_flows` | Vom Cache abgewiesene Einmal-Auth-Links |
-| `rustango::aead` | Ein leerer vorheriger Geheimschlüssel |
+| `rustango::aead` | Ein leerer vorheriger Geheimschlüssel oder ein Dev-Schlüssel, der sich nicht speichern lässt |
 | `rustango::hmac_auth` | Einrichtung der HMAC-Request-Authentifizierung |
 | `rustango::humanize` | Humanize-Filter |
 | `rustango::jobs` | Hintergrund-Job-Queues |

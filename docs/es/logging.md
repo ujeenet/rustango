@@ -132,7 +132,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::errors` | Una plantilla de página de error que no se renderizó, o un directorio de plantillas que no cargó |
 | `rustango::forms` | Valores de `DynamicForm` aceptados hoy pero rechazados en una versión futura |
 | `rustango::auth_flows` | Enlaces de autenticación de un solo uso rechazados por el caché |
-| `rustango::aead` | Una clave secreta anterior vacía |
+| `rustango::aead` | Una clave secreta anterior vacía, o una clave de desarrollo que no se puede guardar |
 | `rustango::hmac_auth` | Configuración de la autenticación HMAC de peticiones |
 | `rustango::humanize` | Filtros de humanize |
 | `rustango::jobs` | Colas de trabajos en segundo plano |

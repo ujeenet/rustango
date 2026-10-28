@@ -127,7 +127,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::errors` | An error-page template that failed to render, or a template dir that did not load |
 | `rustango::forms` | `DynamicForm` values accepted now but refused in a later release |
 | `rustango::auth_flows` | Single-use auth links refused by the cache |
-| `rustango::aead` | A blank previous secret key |
+| `rustango::aead` | A blank previous secret key, or a dev secret key that cannot be saved |
 | `rustango::hmac_auth` | HMAC request auth setup |
 | `rustango::humanize` | Humanize filters |
 | `rustango::jobs` | Background job queues |

@@ -1553,7 +1553,7 @@ async fn checked_server(
     // Before any DDL: the login rustango mints is stored only sealed,
     // whatever the registry's strictness.
     if backend != BackendKind::Sqlite {
-        if std::env::var(crate::aead::KEY_VAR).is_err() {
+        if crate::aead::env_key().is_none() {
             return Err(TenancyError::Validation(format!(
                 "{} is not set: the login rustango creates for a tenant is stored only sealed",
                 crate::aead::KEY_VAR

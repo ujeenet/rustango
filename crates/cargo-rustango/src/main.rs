@@ -780,7 +780,11 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     )?;
     write(root, "src/models.rs", &templates::models_rs(template))?;
     write(root, "src/views.rs", templates::VIEWS_RS)?;
-    write(root, "src/urls.rs", &templates::urls_rs(template))?;
+    write(
+        root,
+        "src/urls.rs",
+        &templates::urls_rs_for(template, &args.features),
+    )?;
 
     // Every project gets an empty `system/migrations/` folder — the
     // framework's own tables are NOT shipped as hardcoded bootstrap JSON.
@@ -1075,7 +1079,7 @@ mod tests {
     /// no driver pool, and puts it behind a login (#1627).
     #[test]
     fn fullstack_mounts_a_gated_driver_neutral_admin() {
-        let urls = templates::urls_rs(Template::Fullstack);
+        let urls = templates::urls_rs_for(Template::Fullstack, &[]);
         let main = templates::main_rs(Template::Fullstack, "demo");
         assert!(
             urls.contains("pub fn admin_router(pool: Pool, settings: &Settings)"),
@@ -1309,7 +1313,7 @@ mod tests {
     fn no_main_template_mounts_welcome_over_its_own_root() {
         for template in [Template::Api, Template::Fullstack, Template::Tenant] {
             let main = templates::main_rs(template, "my_app");
-            let routes_root = templates::urls_rs(template).contains(".route(\"/\",");
+            let routes_root = templates::urls_rs_for(template, &[]).contains(".route(\"/\",");
             assert!(
                 !(routes_root && main.contains(".with_welcome()")),
                 "template {template:?} routes `/` and also chains `.with_welcome()`"
@@ -1606,7 +1610,7 @@ mod tests {
     /// `[admin]` and `[brand]` reach the generated admin.
     #[test]
     fn fullstack_admin_reads_settings() {
-        let urls = templates::urls_rs(Template::Fullstack);
+        let urls = templates::urls_rs_for(Template::Fullstack, &[]);
         assert!(
             urls.contains("admin::Builder::from_settings(pool, settings)"),
             "{urls}"
@@ -1633,6 +1637,44 @@ mod tests {
                 csrf.contains("\n        .with_csrf()"),
                 "{template:?}: {csrf}"
             );
+        }
+    }
+
+    /// `--features mcp` mounts `/mcp`: settings-aware and authed on the
+    /// tenant template, on the serving pool elsewhere; nothing without it.
+    #[test]
+    fn mcp_feature_mounts_the_router() {
+        let mcp = ["mcp".to_owned()];
+        let tenant = templates::urls_rs_for(Template::Tenant, &mcp);
+        assert!(
+            tenant.contains("rustango::mcp::secure_tenant_router_from_settings(&mcp)"),
+            "{tenant}"
+        );
+        // `startapp` merges after the last `Router::new()`: it must stay in `api()`.
+        assert_eq!(tenant.matches("Router::new()").count(), 1, "{tenant}");
+        let main = templates::main_rs_for(Template::Tenant, "myapp", &mcp);
+        assert!(!main.contains("mcp"), "{main}");
+        for template in [Template::Api, Template::Fullstack] {
+            let urls = templates::urls_rs_for(template, &mcp);
+            assert!(urls.contains("rustango::mcp::router(pool)"), "{urls}");
+            let main = templates::main_rs_for(template, "myapp", &mcp);
+            assert!(
+                main.contains(".nest_with(\"/mcp\", urls::mcp)"),
+                "{template:?}: {main}"
+            );
+        }
+        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
+            assert!(!templates::urls_rs_for(template, &[]).contains("mcp"));
+            assert!(!templates::main_rs_for(template, "myapp", &[]).contains("mcp"));
+        }
+    }
+
+    /// The models file imports the prelude, so the ORM traits are in scope.
+    #[test]
+    fn models_use_the_prelude() {
+        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
+            let models = templates::models_rs(template);
+            assert!(models.contains("use rustango::prelude::*;"), "{models}");
         }
     }
 

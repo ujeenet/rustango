@@ -773,17 +773,25 @@ pub(crate) fn unauthorized(
 /// comes from `RUSTANGO_SESSION_SECRET`, as the rest of the
 /// framework's does.
 pub(crate) fn default_jwt() -> Arc<JwtLifecycle> {
-    Arc::new(JwtLifecycle::new(jwt_secret()))
+    Arc::new(JwtLifecycle::lazy(jwt_secret))
 }
 
 /// The key that signs agent tokens: `RUSTANGO_SESSION_SECRET`, which
 /// the rest of the framework uses too.
 ///
-/// With that unset it warns and uses a random key for this process,
-/// so dev works but nothing survives a restart. `manage check
-/// --deploy` reports a missing or short secret.
+/// With that unset, off the prod tier it is the tenant session key saved
+/// in `./var/`, so dev tokens survive a restart. On prod it warns and uses
+/// a random key for this process; `manage check --deploy` reports that.
 pub(crate) fn jwt_secret() -> Vec<u8> {
-    match agent_key(std::env::var("RUSTANGO_SESSION_SECRET").ok().as_deref()) {
+    agent_secret(
+        std::env::var("RUSTANGO_SESSION_SECRET").ok().as_deref(),
+        &crate::session::tier_from_env(),
+        std::path::Path::new(crate::session::TENANT_SESSION_KEY_PATH),
+    )
+}
+
+fn agent_secret(raw: Option<&str>, tier: &str, disk: &std::path::Path) -> Vec<u8> {
+    match agent_key(raw) {
         AgentKey::Valid(key) => key,
         AgentKey::Unusable(key, e) => {
             tracing::warn!(
@@ -793,6 +801,11 @@ pub(crate) fn jwt_secret() -> Vec<u8> {
                  refuse it. Generate one with: openssl rand -base64 32"
             );
             key
+        }
+        AgentKey::Missing if !crate::session::is_prod_tier(tier) => {
+            crate::session::SessionSecret::from_env_or_disk(disk)
+                .key()
+                .to_vec()
         }
         AgentKey::Missing => {
             use rand::RngCore;
@@ -833,6 +846,42 @@ fn agent_key(raw: Option<&str>) -> AgentKey {
 mod tests {
     use super::*;
     use axum::http::Uri;
+
+    /// Off prod an unset secret signs with the saved session key, so dev
+    /// tokens survive a restart; prod gets a per-process key and no file.
+    #[test]
+    fn dev_agent_tokens_sign_with_the_saved_session_key() {
+        if std::env::var("RUSTANGO_SESSION_SECRET").is_ok() {
+            return; // from_env_or_disk would return the env key
+        }
+        let dir = std::env::temp_dir().join(format!("rustango_mcp_key_{}", std::process::id()));
+        let path = dir.join("var/.rustango_tenant_session.key");
+        let first = agent_secret(None, "dev", &path);
+        assert_eq!(std::fs::read(&path).unwrap(), first, "not the saved key");
+        assert_eq!(
+            agent_secret(None, "dev", &path),
+            first,
+            "changed on restart"
+        );
+        let prod = dir.join("prod.key");
+        assert_eq!(agent_secret(None, "prod", &prod).len(), 32);
+        assert!(!prod.exists(), "prod wrote a key file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Building the router (every CLI verb does) reads no key and logs nothing.
+    #[test]
+    fn building_the_router_logs_nothing() {
+        let out = crate::testkit::CaptureWriter::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(out.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(sub, || {
+            let _ = crate::mcp::secure_tenant_router();
+        });
+        assert_eq!(out.contents(), "");
+    }
 
     /// #1962 — a minted JWT ends at a secret rotation, and its grants
     /// follow the rows, not the claims.
