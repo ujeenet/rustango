@@ -645,6 +645,7 @@ Tous les chemins sont relatifs à `admin_prefix` :
 | `/__audit` (ou `audit_url`) | GET | Flux d'activité + nettoyage. |
 | `/login`, `/logout` | GET/POST | Authentification par session (si activée). |
 | `/account/password`, `/account/totp` | GET/POST | Changement de mot de passe libre-service / inscription TOTP. |
+| `/account/totp/disable` | POST | Désactiver le TOTP avec un code actuel. |
 
 Les routes personnalisées enregistrées avec `register_admin_view!` se
 montent à `/<table>/<suffix>`.

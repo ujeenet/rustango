@@ -35,6 +35,16 @@
         </label>
         <button type="submit" name="reset" value="1">Re-enroll</button>
       </form>
+      <p>To turn two-factor off, enter a current code.</p>
+      <form method="post" action="{{ action }}/disable">
+        {{ csrf_input | safe }}
+        <label>
+          Current code
+          <input type="text" name="totp_code" inputmode="numeric" autocomplete="one-time-code"
+                 pattern="[0-9]*" maxlength="8" placeholder="123456" required>
+        </label>
+        <button type="submit">Turn off</button>
+      </form>
     {% else %}
       {% if secret_base32 %}
       <p>Scan this setup key in your authenticator app (Google Authenticator, 1Password,

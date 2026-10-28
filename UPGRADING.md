@@ -148,6 +148,14 @@ untouched.
 
 ---
 
+## Unreleased
+
+### Single-database admin and boot migrate
+
+Bare-admin audit rows now carry `user:<id>` instead of `system`. Single-database `migrate` and `runserver` now fire `pre_migrate` / `post_migrate` with `tenant = None`; a receiver that assumed a tenant run must check. `runserver` gives up after 300 s waiting for another run's migrate lock; raise `[server] migrate_lock_timeout_secs`, or set `[server] migrate_on_boot = false` and run `migrate` as a deploy step. `ServerSettings` has two new fields, so a struct literal needs `..Default::default()`. `set-admin-active`, `reset-admin-totp` and `reset-operator-totp` are now built-in verbs, so a command registered under one of those names is refused. The bare change-password form refuses the current password as the new one.
+
+---
+
 ## 0.61.9
 
 ### ORM results that change

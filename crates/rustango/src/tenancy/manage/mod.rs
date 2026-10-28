@@ -338,6 +338,8 @@ where
         // #1344 — seeing who exists, and turning one off, were console-only.
         "list-operators" => operators::list_operators(pools, &args[1..], writer).await,
         "set-operator-active" => operators::set_operator_active(pools, &args[1..], writer).await,
+        #[cfg(feature = "totp")]
+        "reset-operator-totp" => operators::reset_operator_totp(pools, &args[1..], writer).await,
         // #1344 — the console renders all three; nothing printed them, so an
         // incident question needed a browser or a SQL client.
         "list-runs" => inspect::list_runs(pools, &args[1..], writer).await,
@@ -709,6 +711,11 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         "                       deactivate the last active one — that would lock"
     )?;
     writeln!(w, "                       everyone out of the console.")?;
+    writeln!(w, "  reset-operator-totp <username>")?;
+    writeln!(
+        w,
+        "                       Remove an operator's two-factor device (lost phone)."
+    )?;
     writeln!(
         w,
         "  create-user <slug> <username> [--password <p> | --generate] [--superuser]"

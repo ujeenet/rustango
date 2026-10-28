@@ -114,3 +114,51 @@ where
     }
     Ok(())
 }
+
+/// `reset-operator-totp <username>`: drop the operator's authenticator, for
+/// a lost device. Audited on the registry with `source = cli`.
+#[cfg(feature = "totp")]
+pub(super) async fn reset_operator_totp<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    use crate::audit::{AuditOp, AuditSource, PendingEntry};
+    use crate::tenancy::operator_totp::{self, OperatorTotp};
+    const USAGE: &str = "reset-operator-totp <username>";
+    let parsed = super::args::parse(
+        args,
+        &super::args::Spec {
+            verb: "reset-operator-totp",
+            usage: USAGE,
+            switches: &[],
+            valued: &[],
+            max_positionals: 1,
+        },
+    )?;
+    let username = parsed.required(0, USAGE)?;
+    let registry = pools.registry_pool();
+    let op = ops::by_username(&registry, &username)
+        .await
+        .map_err(explain)?;
+    let id = op.id.get().copied().unwrap_or_default();
+    operator_totp::ensure_table(&registry).await?;
+    if crate::admin::totp_store::reset_in::<OperatorTotp>(&registry, id).await? == 0 {
+        writeln!(w, "`{username}` has no two-factor device")?;
+        return Ok(());
+    }
+    crate::audit::ensure_table_pool(&registry).await?;
+    let entry = PendingEntry {
+        entity_table: "rustango_operators",
+        entity_pk: id.to_string(),
+        operation: AuditOp::Action,
+        source: AuditSource::Custom("cli".into()),
+        changes: serde_json::json!({ "action": "totp_reset" }),
+    };
+    crate::audit::emit_one_pool(&registry, &entry).await?;
+    writeln!(w, "two-factor device removed for operator `{username}`")?;
+    Ok(())
+}

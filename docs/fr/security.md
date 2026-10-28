@@ -534,7 +534,7 @@ Fonctionne avec Google Authenticator, Authy, 1Password, Bitwarden et d'autres ap
 
 `verify` accepte le même code à nouveau jusqu'à son expiration. Pour des codes à usage unique, appelez plutôt `matched_step`, stockez le pas qu'il renvoie et n'acceptez un code que si son pas est postérieur au pas stocké. La connexion admin intégrée fait ainsi.
 
-Avec la fonctionnalité `totp`, le bare admin a aussi une connexion à deux facteurs. Chaque utilisateur s'enrôle sur `<admin>/account/totp`, et un appareil confirmé est demandé à chaque connexion, SSO compris.
+Avec la fonctionnalité `totp`, le bare admin a aussi une connexion à deux facteurs. Chaque utilisateur s'enrôle sur `<admin>/account/totp`, et un appareil confirmé est demandé à chaque connexion, SSO compris. Le désactiver demande un code actuel ; pour un appareil perdu, lancez `manage reset-admin-totp <username>` (`reset-operator-totp` pour un opérateur). L'inscription, la désactivation et les codes faux écrivent des lignes d'audit.
 
 La console opérateur a le même second facteur, facultatif par opérateur ou obligatoire pour tous ; voir [Connexion à deux facteurs](operator-console.md#connexion-à-deux-facteurs).
 

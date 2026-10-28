@@ -32,25 +32,6 @@ use crate::tenancy::Org;
 
 use super::args::next_value;
 
-/// Whichever retention mode was asked for, against one pool.
-///
-/// The two `cleanup_*_pool` helpers are already tri-dialect; this only
-/// picks between them so the registry and each tenant cannot drift.
-async fn prune(
-    pool: &crate::sql::Pool,
-    days: Option<i64>,
-    keep_last: Option<i64>,
-) -> Result<u64, TenancyError> {
-    if let Some(n) = days {
-        Ok(crate::audit::cleanup_older_than_pool(pool, n).await?)
-    } else if let Some(n) = keep_last {
-        Ok(crate::audit::cleanup_keep_last_n_pool(pool, n).await?)
-    } else {
-        // The caller rejects "neither" before reaching here.
-        Ok(0)
-    }
-}
-
 pub(super) async fn audit_cleanup_cmd<W: Write + Send, DB: Database>(
     pools: &TenantPools<DB>,
     args: &[String],
@@ -97,26 +78,8 @@ where
         }
     }
 
-    match (days, keep_last) {
-        (None, None) => {
-            return Err(TenancyError::Validation(
-                "audit-cleanup requires --days <N> or --keep-last <N>".into(),
-            ))
-        }
-        (Some(_), Some(_)) => {
-            return Err(TenancyError::Validation(
-                "--days and --keep-last are mutually exclusive".into(),
-            ))
-        }
-        _ => {}
-    }
-
-    // Zero or less keeps nothing: every entry in every log goes.
-    if !yes && days.or(keep_last).is_some_and(|n| n <= 0) {
-        return Err(TenancyError::Validation(
-            "a retention of 0 or less deletes every audit entry; pass --yes to confirm".into(),
-        ));
-    }
+    let rule = crate::audit::Retention::from_flags(days, keep_last, yes)
+        .map_err(TenancyError::Validation)?;
 
     if registry_only && tenant_slug.is_some() {
         return Err(TenancyError::Validation(
@@ -134,7 +97,7 @@ where
     // tenants, so nothing trimmed it. Swept unless a single tenant was
     // named, which asks for that tenant and nothing else.
     if tenant_slug.is_none() {
-        let deleted = prune(&registry, days, keep_last).await?;
+        let deleted = rule.prune(&registry).await?;
         writeln!(w, "  registry deleted={deleted}")?;
         total_deleted += deleted;
     }
@@ -151,7 +114,7 @@ where
         // One named tenant: a failure is the answer to what was asked,
         // so it propagates rather than being collected.
         let scoped = pools.scoped_pool_dyn(&org).await?;
-        let deleted = prune(&scoped, days, keep_last).await?;
+        let deleted = rule.prune(&scoped).await?;
         writeln!(w, "  tenant={slug} deleted={deleted}")?;
         total_deleted += deleted;
         swept = 1;
@@ -162,7 +125,7 @@ where
         // used to end the sweep with a raw SQL error, leaving every
         // later tenant untrimmed.
         let sweep = super::super::sweep::for_each_tenant(pools, |_org, pool| async move {
-            prune(&pool, days, keep_last).await
+            rule.prune(&pool).await.map_err(TenancyError::from)
         })
         .await?;
 

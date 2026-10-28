@@ -534,7 +534,7 @@ Funktioniert mit Google Authenticator, Authy, 1Password, Bitwarden und anderen S
 
 `verify` akzeptiert denselben Code erneut, bis er abläuft. Für Einmal-Codes rufen Sie stattdessen `matched_step` auf, speichern den zurückgegebenen Schritt und akzeptieren einen Code nur, wenn sein Schritt später ist als der gespeicherte. Der eingebaute Admin-Login macht das so.
 
-Mit dem Feature `totp` hat auch der Bare-Admin eine Zwei-Faktor-Anmeldung. Jeder Benutzer registriert sich unter `<admin>/account/totp`, und ein bestätigtes Gerät wird bei jedem Login abgefragt, SSO eingeschlossen.
+Mit dem Feature `totp` hat auch der Bare-Admin eine Zwei-Faktor-Anmeldung. Jeder Benutzer registriert sich unter `<admin>/account/totp`, und ein bestätigtes Gerät wird bei jedem Login abgefragt, SSO eingeschlossen. Zum Abschalten ist ein aktueller Code nötig; bei verlorenem Gerät `manage reset-admin-totp <username>` ausführen (`reset-operator-totp` für einen Operator). Registrieren, Abschalten und falsche Codes schreiben Audit-Zeilen.
 
 Die Operator-Konsole hat denselben zweiten Faktor, freiwillig pro Operator oder Pflicht für alle; siehe [Zwei-Faktor-Anmeldung](operator-console.md#zwei-faktor-anmeldung).
 

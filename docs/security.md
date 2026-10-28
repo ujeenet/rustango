@@ -537,7 +537,7 @@ Works with Google Authenticator, Authy, 1Password, Bitwarden, and other standard
 
 `verify` accepts the same code again until it expires. To make codes single use, call `matched_step` instead, store the step it returns, and accept a code only when its step is later than the stored one. The built-in admin login does this.
 
-With the `totp` feature the bare admin has two-factor sign-in too. Each user enrolls at `<admin>/account/totp`, and a confirmed device is asked for at every login, SSO included.
+With the `totp` feature the bare admin has two-factor sign-in too. Each user enrolls at `<admin>/account/totp`, and a confirmed device is asked for at every login, SSO included. Turning it off takes a current code; for a lost device run `manage reset-admin-totp <username>` (`reset-operator-totp` for an operator). Enrolling, turning off and failed codes write audit rows.
 
 The operator console has the same second factor, optional per operator or required for all; see [Two-factor sign-in](operator-console.md#two-factor-sign-in).
 

@@ -4,6 +4,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — single-database admin and CLI
+
+- Bare-admin writes record the signed-in user as the audit source, not `system`.
+- Single-database `migrate` and the `runserver` auto-migrate fire `pre_migrate` / `post_migrate` on every backend.
+- `runserver` auto-migrate can be turned off (`[server] migrate_on_boot = false`, `Cli::migrate_on_boot(false)`) and waits at most `[server] migrate_lock_timeout_secs` (300) for the lock.
+- New single-database verbs: `audit-cleanup`, `reset-password`, `change-password`, `set-admin-active`, `reset-admin-totp`; tenancy gains `reset-operator-totp`. The TOTP resets are audited.
+- The bare admin can turn TOTP off with a current code (`/account/totp/disable`); enrolling, turning off and failed codes write audit rows.
+- Bare-admin change-password refuses the current password and no longer overwrites a change made during the check.
+
 ## [0.61.9] — 2026-10-28
 
 ### Fixed — ORM and migrations

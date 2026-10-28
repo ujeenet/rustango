@@ -540,7 +540,7 @@ Funciona con Google Authenticator, Authy, 1Password, Bitwarden y otras aplicacio
 
 `verify` acepta el mismo código otra vez hasta que caduca. Para códigos de un solo uso, llame a `matched_step`, guarde el paso que devuelve y acepte un código solo si su paso es posterior al guardado. El inicio de sesión integrado del admin lo hace así.
 
-Con la funcionalidad `totp`, el bare admin también tiene inicio de sesión en dos pasos. Cada usuario se registra en `<admin>/account/totp`, y se pide un dispositivo confirmado en cada login, SSO incluido.
+Con la funcionalidad `totp`, el bare admin también tiene inicio de sesión en dos pasos. Cada usuario se registra en `<admin>/account/totp`, y se pide un dispositivo confirmado en cada login, SSO incluido. Desactivarlo pide un código actual; si se pierde el dispositivo, ejecute `manage reset-admin-totp <username>` (`reset-operator-totp` para un operador). El registro, la desactivación y los códigos erróneos escriben filas de auditoría.
 
 La consola de operadores tiene el mismo segundo factor, opcional por operador u obligatorio para todos; vea [Inicio de sesión en dos pasos](operator-console.md#inicio-de-sesión-en-dos-pasos).
 

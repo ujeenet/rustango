@@ -123,6 +123,9 @@ alcanzan mediante `Cli::tenancy()`.
 | `showurls [--format plain\|json]` | Cada ruta con nombre, ordenada |
 | `check [--deploy]` | Comprobaciones de salud; `--deploy` añade las auditorías de producción |
 | `create-admin` | Crea una fila `AdminUser` para proyectos que usan `admin::Builder::with_session_auth`. **No** está condicionado a `tenancy` — recibe un `&Pool` simple y escribe `rustango_admin_users`, creando la tabla si falta. La única forma de conseguir un primer login de admin en un proyecto sin tenancy |
+| `reset-password <username>` / `change-password <username>` | Fija la contraseña de un usuario admin (una sola base); `change-password` comprueba antes la actual. Mismas opciones de contraseña que `create-admin` |
+| `set-admin-active <username> --on\|--off` | Desactiva un usuario admin (sus sesiones terminan) o lo reactiva |
+| `reset-admin-totp <username>` | Quita el dispositivo de dos factores de un usuario admin tras perder el teléfono. Auditado con origen `cli` |
 | `about` / `version` / `--version` | Información de build y versión |
 | `docs` | Abre la documentación |
 
@@ -136,6 +139,7 @@ alcanzan mediante `Cli::tenancy()`.
 | `set-password-link <slug> <username>` | Imprime un enlace de un solo uso para que el usuario fije su propia contraseña |
 | `reset-operator-password` / `change-operator-password` | Recuperación de contraseña de operador; `change-operator-password` lee la contraseña actual igual que `change-password` |
 | `set-operator-active` | Activa o desactiva un operador |
+| `reset-operator-totp <username>` | Quita el dispositivo de dos factores de un operador tras perder el teléfono. Auditado en el registry con origen `cli` |
 | `create-role` / `assign-role` / `revoke-role` / `list-roles` | Roles |
 | `grant-perm` / `revoke-perm` | Permisos por codename |
 | `seed-permissions [--slug <s>]` | Siembra las filas de permisos por defecto |
@@ -954,6 +958,16 @@ y migración que un proceso detenido dejó en `running` más de una hora se marc
 como fallidas en el siguiente arranque, y un reintento del webhook con el mismo
 `event_id` se ejecuta de nuevo.
 
+Un `runserver` de una sola base aplica las migraciones pendientes antes de
+escuchar y dispara `pre_migrate` / `post_migrate` como `migrate`. Espera hasta
+`[server] migrate_lock_timeout_secs` (300 por defecto) el bloqueo de otra
+ejecución y luego termina. Desactívelo con `[server] migrate_on_boot = false`
+(`RUSTANGO__SERVER__MIGRATE_ON_BOOT=false`) o `Cli::migrate_on_boot(false)`.
+En un despliegue gradual con varias réplicas, desactívelo y ejecute `migrate` una
+vez como job previo al despliegue, para que ningún pod migre mientras los
+antiguos siguen sirviendo. El servidor tenancy nunca migra al arrancar; ejecute
+`migrate` usted mismo.
+
 ### `create-tenant <slug> [options]`
 
 Configura un nuevo tenant (cliente/org) y le aplica las migraciones de tenant. El
@@ -1332,6 +1346,9 @@ En el log del registry es donde la consola de operador anota lo que han hecho
 los operadores, así que crece con el uso de la consola. Nombrar un tenant
 (`--tenant`) pide ese tenant y deja el registry en paz. Un tenant roto se
 informa y se cuenta en lugar de terminar el barrido.
+
+Un proyecto de una sola base tiene el mismo verbo con `--days`, `--keep-last` y
+`--yes`; recorta el único log de auditoría.
 
 ### Ver qué ha pasado
 

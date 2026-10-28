@@ -122,6 +122,9 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | `showurls [--format plain\|json]` | Every named route, sorted |
 | `check [--deploy]` | Health checks; `--deploy` adds the production audits |
 | `create-admin` | Bootstrap an `AdminUser` row for projects using `admin::Builder::with_session_auth`. **Not** tenancy-gated — it takes a plain `&Pool` and writes `rustango_admin_users`, creating the table if absent. The only way to get a first admin login on a non-tenancy project |
+| `reset-password <username>` / `change-password <username>` | Set a single-database admin user's password; `change-password` checks the current one first. Same password flags as `create-admin` |
+| `set-admin-active <username> --on\|--off` | Turn an admin user off (their sessions end) or back on |
+| `reset-admin-totp <username>` | Remove an admin user's two-factor device after a lost phone. Audited with source `cli` |
 | `about` / `version` / `--version` | Build and version information |
 | `docs` | Open the documentation |
 
@@ -135,6 +138,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | `set-password-link <slug> <username>` | Print a single-use link for the user to set their own password |
 | `reset-operator-password` / `change-operator-password` | Operator password recovery; `change-operator-password` reads the current password like `change-password` |
 | `set-operator-active` | Enable or disable an operator |
+| `reset-operator-totp <username>` | Remove an operator's two-factor device after a lost phone. Audited on the registry with source `cli` |
 | `create-role` / `assign-role` / `revoke-role` / `list-roles` | Roles |
 | `grant-perm` / `revoke-perm` | Permissions by codename |
 | `seed-permissions [--slug <s>]` | Seed the default permission rows |
@@ -942,6 +946,15 @@ SSE and long-poll never finish by themselves. Provisioning and migration runs
 left `running` by a stopped process for over an hour are marked failed at the
 next boot, and a webhook retry with the same `event_id` runs again.
 
+A single-database `runserver` applies pending migrations before it binds, firing
+`pre_migrate` / `post_migrate` like `migrate`. It waits up to
+`[server] migrate_lock_timeout_secs` (default 300) for another run's lock, then
+exits. Turn it off with `[server] migrate_on_boot = false`
+(`RUSTANGO__SERVER__MIGRATE_ON_BOOT=false`) or `Cli::migrate_on_boot(false)`.
+For a rolling deploy with several replicas, turn it off and run `migrate` once as
+a pre-deploy job, so a pod never migrates while old pods still serve. The tenancy
+server never migrates on boot; run `migrate` yourself.
+
 ### `create-tenant <slug> [options]`
 
 Sets up a new tenant (customer/org) and applies the tenant migrations to
@@ -1313,6 +1326,9 @@ tenant's. The registry log is where the operator console records what
 operators did, so it grows with console use. Naming one tenant
 (`--tenant`) asks for that tenant and leaves the registry alone. One
 broken tenant is reported and counted rather than ending the sweep.
+
+A single-database project has the same verb with `--days`, `--keep-last` and
+`--yes`; it trims the one audit log.
 
 ### Inspecting what happened
 

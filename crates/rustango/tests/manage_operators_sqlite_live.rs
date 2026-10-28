@@ -237,3 +237,47 @@ async fn the_verb_and_the_engine_agree() {
     let listed = b.run(&["list-operators"]).await.expect("list");
     assert!(listed.contains("2 operator(s), 2 active"), "{listed}");
 }
+
+/// `reset-operator-totp` drops a lost device and audits it on the registry.
+#[cfg(feature = "totp")]
+#[tokio::test]
+async fn reset_operator_totp_removes_the_device() {
+    use rustango::core::{InsertQuery, Model as _, SqlValue};
+    use rustango::sql::{CounterPool as _, FetcherPool as _};
+    use rustango::tenancy::operator_totp::OperatorTotp;
+    let b = boot().await;
+    b.operator("ada").await;
+    let id = *ops::by_username(&b.registry, "ada")
+        .await
+        .unwrap()
+        .id
+        .get()
+        .unwrap();
+    rustango::tenancy::operator_totp::ensure_table(&b.registry)
+        .await
+        .unwrap();
+    let row = InsertQuery::new(
+        OperatorTotp::SCHEMA,
+        vec!["operator_id", "secret", "confirmed", "created_at"],
+        vec![
+            SqlValue::I64(id),
+            SqlValue::String("enc:v1:lost".into()),
+            SqlValue::Bool(true),
+            SqlValue::DateTime(chrono::Utc::now()),
+        ],
+    );
+    rustango::sql::insert_pool(&b.registry, &row).await.unwrap();
+
+    let out = b.run(&["reset-operator-totp", "ada"]).await.expect("reset");
+    assert!(out.contains("removed"), "{out}");
+    assert_eq!(OperatorTotp::objects().count(&b.registry).await.unwrap(), 0);
+    let audit = rustango::audit::AuditLog::objects()
+        .filter("entity_table", "rustango_operators")
+        .fetch(&b.registry)
+        .await
+        .unwrap();
+    assert!(audit
+        .iter()
+        .any(|r| r.source == "cli" && r.entity_pk == id.to_string()));
+    assert!(b.run(&["reset-operator-totp", "nobody"]).await.is_err());
+}
