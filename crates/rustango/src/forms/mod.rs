@@ -65,6 +65,7 @@ pub mod csrf;
 /// HTTP request payload keyed `<prefix>-<N>-<field>`.
 pub mod formset;
 
+#[cfg(any(feature = "admin", feature = "template_views"))]
 pub(crate) mod input_value;
 
 /// Reusable declarative field-constraint validators (`max_length` /

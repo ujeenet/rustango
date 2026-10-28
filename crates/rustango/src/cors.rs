@@ -46,6 +46,7 @@ use axum::middleware::Next;
 use axum::Router;
 
 /// Request headers the framework reads: bodies, auth, HMAC, idempotency, preconditions.
+#[cfg(feature = "config")]
 const FRAMEWORK_REQUEST_HEADERS: [&str; 6] = [
     "Content-Type",
     "Authorization",
