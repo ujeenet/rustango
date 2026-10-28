@@ -69,6 +69,7 @@ async fn console(pool: &Pool) -> Console {
     op.insert_pool(pool).await.expect("seed operator");
     // Operator ids restart when another suite recreates the operators table,
     // so a device left by the TOTP suite could claim this id; clear it.
+    #[cfg(feature = "totp")]
     let _ = rustango::tenancy::operator_totp::OperatorTotp::objects()
         .filter("operator_id", op.id.get().copied().unwrap_or_default())
         .delete_on(pool)
