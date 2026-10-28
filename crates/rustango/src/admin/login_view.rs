@@ -679,7 +679,6 @@ fn render_totp_enroll(
         "action": format!("{admin_prefix}/account/totp"),
         "admin_title": state.config.title.as_deref().unwrap_or("Rustango Admin"),
         "admin_prefix": admin_prefix,
-        "static_url": &state.config.static_url,
         "already_enabled": already_enabled,
         "secret_base32": secret_base32,
         "otpauth_url": otpauth_url,
@@ -1064,8 +1063,8 @@ pub(crate) struct SessionGate {
     pub(crate) pool: crate::sql::Pool,
 }
 
-/// Require a valid session cookie on every admin request. `/login` and
-/// the embedded static assets under `/__static__/` pass through.
+/// Require a valid session cookie on every admin request but `/login`.
+/// The favicon is served outside this gate.
 ///
 /// A valid session is inserted as `Extension<AdminSession>` so handlers
 /// can read the current user. With `gate.require_superuser` set (the
@@ -1076,7 +1075,7 @@ pub(crate) async fn require_session(
     next: Next,
 ) -> Response {
     let path = request.uri().path();
-    if path == gate.login_path || path == "/login" || path.starts_with("/__static__") {
+    if path == gate.login_path || path == "/login" {
         return next.run(request).await;
     }
 
@@ -1261,6 +1260,15 @@ mod tests {
             pool,
             config: Arc::new(config),
         }
+    }
+
+    /// The TOTP page links no stylesheet: none is served.
+    #[cfg(feature = "totp")]
+    #[tokio::test]
+    async fn totp_page_links_no_missing_stylesheet() {
+        let html = render_totp_enroll(&test_state(), false, "S", "otpauth://x", None, None);
+        assert!(html.contains("Two-factor"), "{html}");
+        assert!(!html.contains(r#"rel="stylesheet""#), "{html}");
     }
 
     #[tokio::test]

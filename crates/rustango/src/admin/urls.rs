@@ -825,9 +825,17 @@ impl Builder {
         self
     }
 
-    pub fn build(self) -> Router {
+    pub fn build(mut self) -> Router {
         if self.config.session_secret.is_none() && !self.config.gated_upstream {
             UNGATED_ADMIN_BUILT.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        // A path `static_url` is served by this router, so its links carry the mount.
+        let mut assets = Router::new();
+        if self.config.static_url.starts_with('/') {
+            let icon = format!("{}/icon.png", self.config.static_url);
+            assets = assets.route(&icon, get(|| async { crate::welcome::icon_png_response() }));
+            self.config.static_url =
+                format!("{}{}", self.config.admin_prefix, self.config.static_url);
         }
         let audit_path = self.config.audit_url.clone();
         let session_secret = self.config.session_secret.clone();
@@ -895,10 +903,10 @@ impl Builder {
             } else {
                 public
             };
-            return crate::errors::own_pages(Router::new().merge(public).merge(protected));
+            return crate::errors::own_pages(assets.merge(public).merge(protected));
         }
 
-        crate::errors::own_pages(protected)
+        crate::errors::own_pages(assets.merge(protected))
     }
 }
 
