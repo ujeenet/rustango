@@ -1979,7 +1979,7 @@ async fn about_cmd<W: Write>(pool: &Pool, w: &mut W) -> Result<(), MigrateError>
     )?;
     let env_label = std::env::var("RUSTANGO_ENV").unwrap_or_else(|_| "(unset)".into());
     writeln!(w, "  RUSTANGO_ENV:   {env_label}")?;
-    let db_url = about_db_url(std::env::var("DATABASE_URL").ok());
+    let db_url = about_db_url(crate::env::database_url_from_env().ok());
     writeln!(w, "  DATABASE_URL:   {db_url}")?;
 
     // DB connectivity — tri-dialect: SELECT 1 is universal across PG/MySQL/SQLite.
@@ -3282,11 +3282,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
     {crate_root}::logging::setup();
     // A worker never runs main.rs, so it loads `.env` itself.
     let _ = dotenvy::dotenv();
-    // `std::env::var(..)?` would surface as the bare word `NotPresent`,
-    // which tells an operator nothing about which variable or why.
-    let url = std::env::var("DATABASE_URL").map_err(|_| {{
-        "missing env var 'DATABASE_URL'. Set it in your shell, or copy \
-         '.env.example' to '.env'."
+    // DATABASE_URL, or DB_USER + DB_NAME; the error names both.
+    let url = {crate_root}::env::database_url_from_env().map_err(|e| {{
+        format!("{{e}}. Set it in your shell, or copy '.env.example' to '.env'.")
     }})?;
     let pool = Pool::connect(&url).await?;
 
@@ -3556,13 +3554,8 @@ fn build_pg_dump_argv(parsed: &DbDumpArgs) -> Vec<String> {
 /// writer here to put it anywhere else.
 fn db_dump_cmd(args: &[String]) -> Result<(), MigrateError> {
     let parsed = parse_db_dump_args(args)?;
-    let url = std::env::var("DATABASE_URL").map_err(|_| {
-        MigrateError::Validation(
-            "DATABASE_URL must be set for db:dump (e.g. \
-             postgres://user:pass@host:5432/db)"
-                .into(),
-        )
-    })?;
+    let url = crate::env::database_url_from_env()
+        .map_err(|e| MigrateError::Validation(format!("db:dump needs a database: {e}")))?;
     let mut cmd = pg_dump_command(&parsed, &url)?;
     eprintln!("running: pg_dump {}", shown_args(&cmd));
     let status = cmd.status().map_err(|e| {
@@ -3711,13 +3704,8 @@ fn build_psql_argv(parsed: &RestorePlan) -> Vec<String> {
 
 fn db_restore_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let parsed = RestorePlan::check(parse_db_restore_args(args)?, confirm_clean_restore)?;
-    let url = std::env::var("DATABASE_URL").map_err(|_| {
-        MigrateError::Validation(
-            "DATABASE_URL must be set for db:restore (e.g. \
-             postgres://user:pass@host:5432/db)"
-                .into(),
-        )
-    })?;
+    let url = crate::env::database_url_from_env()
+        .map_err(|e| MigrateError::Validation(format!("db:restore needs a database: {e}")))?;
     run_psql_restore("psql", &parsed, &url, w)
 }
 
@@ -6079,6 +6067,8 @@ pub(crate) struct DeployAuditEnv {
     pub rustango_env: Option<String>,
     pub session_secret: Option<String>,
     pub database_url: Option<String>,
+    /// `DATABASE_URL` and `DB_*` both set: the resolver's warning.
+    pub database_style_conflict: Option<String>,
     pub apex_domain: Option<String>,
     pub bind: Option<String>,
     /// An admin was built without session auth (#1627).
@@ -6089,7 +6079,8 @@ fn deploy_audit_env() -> DeployAuditEnv {
     DeployAuditEnv {
         rustango_env: std::env::var("RUSTANGO_ENV").ok(),
         session_secret: std::env::var("RUSTANGO_SESSION_SECRET").ok(),
-        database_url: std::env::var("DATABASE_URL").ok(),
+        database_url: crate::env::database_url_from_env().ok(),
+        database_style_conflict: crate::env::database_style_conflict(),
         #[cfg(feature = "tenancy")]
         apex_domain: crate::tenancy::server::configured_apex_domain(),
         #[cfg(not(feature = "tenancy"))]
@@ -6205,9 +6196,10 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
 
     // DATABASE_URL — required.
     match env.database_url.as_deref() {
-        None => out
-            .errors
-            .push("DATABASE_URL is unset — required in production".into()),
+        None => out.errors.push(
+            "no database configured: DATABASE_URL, or DB_USER + DB_NAME, is required in production"
+                .into(),
+        ),
         Some(url) if url.contains("localhost") || url.contains("127.0.0.1") => {
             out.warnings.push(
                 "DATABASE_URL points at localhost / 127.0.0.1 — verify this is intended in \
@@ -6216,6 +6208,9 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
             );
         }
         Some(_) => out.info.push("DATABASE_URL set".into()),
+    }
+    if let Some(conflict) = &env.database_style_conflict {
+        out.warnings.push(conflict.clone());
     }
 
     // RUSTANGO_APEX_DOMAIN — required for tenancy projects, but
@@ -8504,6 +8499,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             rustango_env: Some("prod".into()),
             session_secret: Some("a".repeat(48)),
             database_url: Some("postgres://app:s3cr3t@db.example.com/app_prod".into()),
+            database_style_conflict: None,
             apex_domain: Some("app.example.com".into()),
             bind: Some("0.0.0.0:8080".into()),
             ungated_admin: false,
@@ -8747,6 +8743,20 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             r.errors.iter().any(|e| e.contains("DATABASE_URL")),
             "expected error for unset DATABASE_URL, got: {:?}",
             r.errors
+        );
+    }
+
+    #[test]
+    fn deploy_audit_reports_both_database_styles() {
+        let env = DeployAuditEnv {
+            database_style_conflict: Some("both DATABASE_URL and DB_USER are set".into()),
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("DB_USER")),
+            "{:?}",
+            r.warnings
         );
     }
 

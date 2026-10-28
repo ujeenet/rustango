@@ -129,7 +129,7 @@ struct PendingAction {
 
 #[cfg(feature = "postgres")]
 impl Builder<sqlx::Postgres> {
-    /// Connect to `DATABASE_URL`, build [`TenantPools`], read
+    /// Connect to `DATABASE_URL` (or the `DB_*` vars), build [`TenantPools`], read
     /// `RUSTANGO_APEX_DOMAIN`, else `[tenancy] apex_domain` if
     /// `Cli::with_settings` already ran in this process. Tracing init is
     /// left to the caller — one `tracing_subscriber::fmt().init()` away.
@@ -142,7 +142,7 @@ impl Builder<sqlx::Postgres> {
     /// Connection to `DATABASE_URL` failures.
     pub async fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
         let apex = crate::tenancy::server::apex_domain();
-        let registry_url = std::env::var("DATABASE_URL")
+        let registry_url = crate::env::database_url_from_env()
             .unwrap_or_else(|_| "postgres://rustango:rustango@localhost:5432/rustango_test".into());
         let registry = crate::sql::Pool::connect_postgres(&registry_url).await?;
         Ok(Self::from_pool(registry, registry_url, apex))

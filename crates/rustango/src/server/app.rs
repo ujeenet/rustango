@@ -43,7 +43,8 @@ pub struct AppBuilder {
 }
 
 impl AppBuilder {
-    /// Connect via [`Pool::connect`] using `DATABASE_URL`. Recognized
+    /// Connect via [`Pool::connect`] using `DATABASE_URL`, or the `DB_*`
+    /// vars ([`crate::env::database_url_from_env`]). Recognized
     /// URL schemes (each gated on the matching feature):
     ///
     /// - `postgres://` / `postgresql://`  (feature `postgres`)
@@ -54,14 +55,16 @@ impl AppBuilder {
     /// `sqlite:./relative.db?mode=rwc`, `sqlite:///abs/path.db`.
     ///
     /// # Errors
-    /// `DATABASE_URL` unset, unsupported scheme for the active
+    /// No database configured, unsupported scheme for the active
     /// feature set, or driver connect failure.
     pub async fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
-        let url = std::env::var("DATABASE_URL").map_err(|_| {
-            "DATABASE_URL not set. Examples:\n  \
-             sqlite:./var/app.db?mode=rwc\n  \
-             postgres://user:pass@localhost:5432/dbname\n  \
-             mysql://user:pass@localhost:3306/dbname"
+        let url = crate::env::database_url_from_env().map_err(|e| {
+            format!(
+                "{e}. Examples:\n  \
+                 DATABASE_URL=sqlite:./var/app.db?mode=rwc\n  \
+                 DATABASE_URL=postgres://user:pass@localhost:5432/dbname\n  \
+                 DB_DRIVER=mysql DB_HOST=db DB_USER=app DB_PASSWORD=… DB_NAME=app"
+            )
         })?;
         let pool = Pool::connect(&url).await?;
         Ok(Self::from_pool(pool))
