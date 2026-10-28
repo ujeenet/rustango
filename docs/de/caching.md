@@ -34,6 +34,7 @@ nur die Konfiguration ändert sich.
 - [TTL und Ablauf](#ttl-und-ablauf)
 - [Backends tauschen](#backends-tauschen)
 - [Caching unter Multi-Tenancy](#caching-unter-multi-tenancy)
+- [Ganze Seiten cachen](#ganze-seiten-cachen)
 - [Referenz](#referenz)
 - [Siehe auch](#siehe-auch)
 
@@ -58,6 +59,16 @@ let cache: BoxedCache = Arc::new(InMemoryCache::new());
 | `RedisCache` | `cache-redis` | Produktion; über Replicas geteilt |
 | `DatabaseCache` | `cache` | Produktion ohne Redis; eine `rustango_cache`-Tabelle |
 | `NullCache` | `cache` | Caching deaktivieren (jeder Read verfehlt) — praktisch in Tests |
+
+Es gibt keinen Wert `postgres` — das DB-Backend heißt `db` oder `database`. Werte
+sind kleingeschrieben. Ein unbekannter oder falsch geschriebener Wert (`Redis`,
+ein Tippfehler) oder `file` ohne `file_cache_dir` loggt einen `error` und fällt
+auf einen In-Memory-Cache zurück; ein späteres Minor-Release wird ihn ablehnen.
+
+`FileCache` räumt alle 16 Schreibvorgänge ein Sechzehntel seines Verzeichnisses
+von abgelaufenen Einträgen. Rufe `FileCache::purge_expired()` regelmäßig auf, um
+alles zu räumen. Neue Verzeichnisse werden unter Unix mit 0700 angelegt, Einträge
+mit 0600.
 
 ---
 
@@ -272,6 +283,38 @@ Zwei Dinge, die man wissen sollte:
 Das ungescopete `Cache::clear()` ist weiterhin prozessweit — greife also zur
 gescopeten Sicht, wann immer die Änderung eines einzelnen Tenants die
 Invalidierung ausgelöst hat.
+
+Der Slug eines gelöschten Tenants kann von einem neuen Tenant wiederverwendet
+werden. Damit `purge-tenant` die `ScopedCache::for_tenant`-Keys des alten Tenants
+löscht, rufe beim Start `rustango::tenancy::decommission::clear_on_purge(cache)`
+für jeden Cache auf, der sie hält.
+
+---
+
+## Ganze Seiten cachen
+
+`CachePageLayer::new(cache)` (in `rustango::cache_page`) speichert GET-Antworten
+in einem beliebigen `BoxedCache`; `.timeout(dur)` legt fest, wie lange (Standard
+60 s). Es ist standardmäßig sicher:
+
+- Ein Request mit `Authorization`, `Cookie` oder `X-Api-Key` wird weder aus dem
+  Cache bedient noch darin gespeichert. Weitere Credential-Header (etwa einen
+  eigenen Token-Header) nennst du mit `.credential_headers(["x-my-token"])`.
+  `.cache_authenticated(true)` schaltet das ab, nur für eine Route, deren Seite
+  für jeden Aufrufer gleich ist.
+- Eine Antwort mit `Set-Cookie` oder `Cache-Control: private`, `no-cache` oder
+  `no-store` wird nie gecacht.
+- `.vary_on([...])` nimmt Request-Header in den Key auf.
+
+Um eine Seite nach einem Schreibvorgang zu verwerfen, rufe
+`layer.invalidate(&[PageKey::new(path, host)]).await?` auf einem Klon des Layers
+auf (unter Tenancy hänge `.tenant(slug)` an den Key). Das löscht jede gecachte
+Variante dieses Pfads: jeden Query-String, jeden `vary_on`-Wert, GET und `QUERY`
+gleichermaßen. Es arbeitet mit einem Generationszähler pro Pfad, daher liest
+jeder gecachte GET einen weiteren kleinen Cache-Key.
+
+Unter Tenancy hängst du den Layer innerhalb des Tenancy-Layers ein; siehe
+[Middleware](middleware.md).
 
 ---
 

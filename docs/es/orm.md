@@ -282,7 +282,7 @@ Llamar a `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` sin un `.sele
 |---|---|
 | PostgreSQL | Soporte completo — cada flag emite su sintaxis nativa. |
 | MySQL 8.0.1+ | Soporta todo excepto `NO KEY` — ese flag recae en `FOR UPDATE` simple (el bloqueo más estricto). |
-| SQLite | Sin sintaxis de bloqueo a nivel de fila. El writer no emite ninguna cláusula; las transacciones mantienen un bloqueo de escritura implícito sobre toda la base de datos. Usa una estrategia distinta para SQLite (típicamente un bucle busy-wait sobre la transacción misma). |
+| SQLite | Sin sintaxis de bloqueo a nivel de fila. El writer no emite ninguna cláusula; las transacciones mantienen un bloqueo de escritura implícito sobre toda la base de datos. Usa una estrategia distinta para SQLite (típicamente un bucle busy-wait sobre la transacción misma). Para un bloque `atomic`, usa `rustango::sql::atomic_immediate(&pool, …)`: su bloque SQLite de nivel superior empieza con `BEGIN IMMEDIATE`; en PG y MySQL es un `atomic` normal. |
 
 **Debe ejecutarse dentro de una transacción.** `FOR UPDATE` fuera de una tx es un no-op en PostgreSQL (la tx implícita de una sola sentencia libera el bloqueo de inmediato) y un error en MySQL. En Postgres combínalo con `pool.begin()` (un `sqlx::PgPool`); para una transacción independiente del backend usa `rustango::sql::atomic(&pool, …)` o `transaction_pool(&pool)`, que te devuelven un `PoolTx` sobre el que hacer `match`.
 

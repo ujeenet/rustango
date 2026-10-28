@@ -137,9 +137,13 @@ câblage de points de terminaison par provider n'est nécessaire.
   les tenants (un Google à l'échelle de l'entreprise, par exemple). Géré
   depuis le panneau *Shared SSO* de la console, où *Allow email linking*
   bascule `allow_email_link` sur place (l'id et ses liens restent). Le
-  drapeau s'applique à **tous** les tenants. *Edit* modifie un provider sur
-  place (même id et slug ; un secret vide garde celui enregistré), et chaque
-  ligne affiche l'URL de callback à enregistrer auprès de l'IdP.
+  drapeau s'applique à **tous** les tenants. *Edit*
+  (`/sso-shared/{id}/edit`) modifie un provider sur place (même id et slug ;
+  un secret vide garde celui enregistré), et chaque ligne affiche l'URL de
+  callback à enregistrer auprès de l'IdP. Le champ d'URL de l'issuer
+  n'apparaît que pour `oidc`. Un ajout ou une modification refusé réaffiche le
+  formulaire (statut 400) avec les valeurs saisies et l'erreur, jamais le
+  secret.
 
 Sur la page de connexion d'un tenant, les deux ensembles fusionnent, et
 en cas de collision de slug, c'est le **propre provider du tenant qui
@@ -158,6 +162,13 @@ finale), `subject` et `user_id`. L'admin calcule `key_sha256`. La ligne de journ
 l'authentification par session de l'admin (`Builder::with_session_auth`,
 ou `with_session` de l'admin tenant) ; sans elle, personne ne peut ajouter
 de liens.
+
+Un lien créé plus de 5 minutes avant le compte vers lequel il pointe (un id
+réutilisé après une restauration, par exemple) journalise un avertissement et
+connecte quand même l'utilisateur.
+`rustango::sso::link::set_stale_links(StaleLinks::Drop)` supprime plutôt un tel
+lien. Ne l'utilisez que si les valeurs `created_at` des comptes ne sont jamais
+importées ni remplies après coup.
 
 ## SSO membre (utilisateur final)
 
@@ -195,6 +206,10 @@ Il monte deux routes par slug sous `login_base` :
 
 Différences avec le flux admin :
 
+- **Schéma du callback.** Le `redirect_uri` membre prend son schéma dans le
+  `X-Forwarded-Proto` d'un proxy de confiance, sinon `http` sur un hôte de
+  loopback (`localhost`, `*.localhost`, une IP de loopback) et `https` partout
+  ailleurs, donc `localhost.example.com` obtient `https`.
 - **Provisionnement automatique.** Avec `auto_provision = true` (optionnel ; le
   défaut est `false`), un email IdP vérifié sans ligne `rustango_users`
   correspondante en **crée** une — nom d'utilisateur issu de la partie

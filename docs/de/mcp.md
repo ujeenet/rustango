@@ -175,6 +175,12 @@ jedem Mount:
     "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
 ```
 
+Um Agenten serverweite Hinweise zu geben, rufe beim Start
+`rustango::mcp::register_instructions("…")` auf. Der Text wird als
+`instructions` in der `initialize`-Antwort gesendet; ohne Aufruf fehlt das Feld.
+Mehrere Aufrufe (etwa eine Bibliothek und ihre App) werden in Aufrufreihenfolge
+mit einer Leerzeile verbunden; ein leerer oder wiederholter Text wird übersprungen.
+
 ---
 
 ## Schritt 4 — Agenten autorisieren

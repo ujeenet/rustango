@@ -414,6 +414,10 @@ htmx_target = "#flash"    # HX-Retarget for htmx errors; default "#flash", "" se
 Un répertoire `templates` absent ou qui ne se parse pas est journalisé, et les
 pages intégrées sont utilisées.
 
+`cargo rustango new` écrit `[errors] enabled = true` dans
+`config/default.toml`, donc un nouveau projet a les pages activées. Les projets
+plus anciens restent désactivés tant qu'ils n'ajoutent pas la section.
+
 ### Ce que reçoit chaque client
 
 | Requête | Réponse |

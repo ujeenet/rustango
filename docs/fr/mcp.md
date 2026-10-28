@@ -174,6 +174,13 @@ n'importe quel montage :
     "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
 ```
 
+Pour donner aux agents des consignes valables pour tout le serveur, appelez
+`rustango::mcp::register_instructions("…")` au démarrage. Le texte est envoyé
+comme `instructions` dans la réponse à `initialize` ; sans appel, le champ est
+omis. Plusieurs appels (une bibliothèque et son application, par exemple) sont
+joints par une ligne vide dans l'ordre des appels ; un texte vide ou répété est
+ignoré.
+
 ---
 
 ## Étape 4 — Autoriser les agents

@@ -173,6 +173,12 @@ montaje:
     "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
 ```
 
+Para dar a los agentes indicaciones para todo el servidor, llama a
+`rustango::mcp::register_instructions("…")` al arrancar. El texto se envía como
+`instructions` en la respuesta de `initialize`; sin ninguna llamada, el campo no
+aparece. Varias llamadas (una librería y su app, por ejemplo) se unen con una línea en
+blanco, en orden de llamada; un texto vacío o repetido se omite.
+
 ---
 
 ## Paso 4 — Autorizar agentes
