@@ -1140,6 +1140,10 @@ pub mod dates;
 #[cfg(feature = "_signing")]
 pub mod signing;
 
+/// The bearer credential and its 401 challenge.
+#[cfg(any(feature = "tenancy", feature = "admin", feature = "mcp"))]
+pub(crate) mod bearer;
+
 /// `Vary` header merging for the response layers.
 #[cfg(all(feature = "_axum", feature = "_tower"))]
 pub(crate) mod vary;

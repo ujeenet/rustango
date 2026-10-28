@@ -2357,9 +2357,9 @@ async fn enter(
         // client treats 401 as its cue to refresh, so answering 403
         // to an anonymous request silently logs the member out.
         PermOutcome::Unauthenticated => {
-            return Err(json_error(
-                StatusCode::UNAUTHORIZED,
-                "authentication required",
+            return Err(crate::bearer::challenge(
+                json_error(StatusCode::UNAUTHORIZED, "authentication required"),
+                crate::bearer::Sent::of(&parts.headers),
             ))
         }
         PermOutcome::Forbidden => {

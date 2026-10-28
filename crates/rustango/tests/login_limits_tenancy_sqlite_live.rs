@@ -538,6 +538,33 @@ async fn jwt_routes_serve_a_non_default_backend() {
     .await;
     assert_eq!(r.status(), StatusCode::OK, "me");
     assert_no_store(&r, "me");
+    // The scheme is case-insensitive; a 401 says how to authenticate.
+    let lower = Request::builder()
+        .uri("/bearer")
+        .header(header::AUTHORIZATION, format!("bearer {access}"))
+        .body(Body::empty())
+        .unwrap();
+    let r = send(&env.api, &next_ip(), lower).await;
+    assert_eq!(r.status(), StatusCode::OK, "lower-case scheme");
+    for (bearer, challenge) in [
+        (None, "Bearer"),
+        (Some("not-a-token"), r#"Bearer error="invalid_token""#),
+    ] {
+        for uri in ["/bearer", "/api/auth/me", "/whoami"] {
+            let r = send(
+                &env.api,
+                &next_ip(),
+                call("GET", uri, bearer, serde_json::json!({})),
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "{uri} {bearer:?}");
+            assert_eq!(
+                r.headers()[header::WWW_AUTHENTICATE],
+                challenge,
+                "{uri} {bearer:?}"
+            );
+        }
+    }
     let r = send(
         &env.api,
         &next_ip(),

@@ -1016,15 +1016,8 @@ async fn bearer_in(
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let Some(token) = req
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-    else {
-        return unauthorized("missing Bearer token");
+    let Some(token) = crate::bearer::token(req.headers()) else {
+        return missing_bearer();
     };
 
     let user = match session_user(&auth, token, &t).await {
@@ -1110,8 +1103,20 @@ async fn session_user_in(
         .then_some(user))
 }
 
+/// A 401 for a token that was sent and refused.
 fn unauthorized(msg: &'static str) -> Response {
-    err(StatusCode::UNAUTHORIZED, msg)
+    crate::bearer::challenge(
+        err(StatusCode::UNAUTHORIZED, msg),
+        crate::bearer::Sent::BadToken,
+    )
+}
+
+/// A 401 for a request with no bearer token.
+fn missing_bearer() -> Response {
+    crate::bearer::challenge(
+        err(StatusCode::UNAUTHORIZED, "missing Bearer token"),
+        crate::bearer::Sent::Nothing,
+    )
 }
 
 /// An `ApiError` body; a 5xx cause is logged, not sent (#1684).
@@ -1133,13 +1138,9 @@ impl<S: Send + Sync> FromRequestParts<S> for Bearer {
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        parts
-            .headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .map(|t| Bearer(t.trim().to_owned()))
-            .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "missing Bearer token"))
+        crate::bearer::token(&parts.headers)
+            .map(|t| Bearer(t.to_owned()))
+            .ok_or_else(missing_bearer)
     }
 }
 

@@ -1116,11 +1116,7 @@ impl AuthBackend for JwtBackend {
 // ------------------------------------------------------------------ helpers
 
 fn extract_bearer(parts: &Parts) -> Result<Option<&str>, AuthError> {
-    let Some(value) = parts.headers.get(axum::http::header::AUTHORIZATION) else {
-        return Ok(None);
-    };
-    let s = value.to_str().unwrap_or("");
-    Ok(s.strip_prefix("Bearer ").map(str::trim))
+    Ok(crate::bearer::token(&parts.headers))
 }
 
 #[cfg(all(test, feature = "sqlite"))]
