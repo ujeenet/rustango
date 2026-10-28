@@ -17,7 +17,7 @@ use crate::Model;
 /// `username` is the login key and a UNIQUE index keeps it unique.
 /// `password_hash` is the argon2id PHC string from
 /// [`crate::passwords::hash`].
-#[derive(Model, Debug, Clone)]
+#[derive(Model, Clone)]
 #[rustango(
     table = "rustango_admin_users",
     app = "admin",
@@ -61,6 +61,8 @@ pub struct AdminUser {
     /// every device (#1855).
     pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
+
+redacted_debug!(AdminUser { id, username, is_superuser, active, created_at, sessions_revoked_at; password_hash });
 
 // The admin form's password is hashed here, off the runtime.
 fn admin_hash_password<'a>(

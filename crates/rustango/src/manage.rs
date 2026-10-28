@@ -33,6 +33,12 @@ use std::pin::Pin;
 
 use axum::Router;
 
+mod command;
+mod serve_args;
+pub use command::{CommandContext, CommandError, CommandFuture};
+#[doc(hidden)]
+pub use command::{CommandEntry, __command_future};
+
 /// Boxed seed-hook future. Keeps the public method signature simple
 /// while accepting any `async fn(&Pool) -> Result<…>` closure.
 type SeedFut<'a> =
@@ -46,6 +52,14 @@ type ShutdownFn = Box<dyn FnOnce() -> ShutdownFut + Send>;
 
 /// A router built from the serving pool. See [`Cli::nest_with`].
 type NestFn = Box<dyn FnOnce(crate::sql::Pool) -> Router + Send>;
+
+/// `help`, `--help`, `-h` or no verb at all.
+fn is_help_verb(args: &[String]) -> bool {
+    matches!(
+        args.first().map(String::as_str),
+        None | Some("" | "help" | "--help" | "-h")
+    )
+}
 
 /// `runserver`'s auto-migrate: the same chains as `manage migrate` (#2056).
 async fn auto_migrate(
@@ -113,6 +127,9 @@ pub struct Cli {
     /// Routers built from the serving pool, by mount path.
     nested: Vec<(String, NestFn)>,
     bind: String,
+    /// `run-server --apex`; beats the env var and `[tenancy] apex_domain`.
+    #[cfg(feature = "tenancy")]
+    apex: Option<String>,
     migrations_dir: PathBuf,
     tenancy: bool,
     /// Optional override for the framework's reserved URL prefixes
@@ -124,6 +141,9 @@ pub struct Cli {
     /// See [`Cli::tenant_header`].
     #[cfg(feature = "tenancy")]
     tenant_header: Option<crate::tenancy::HeaderResolver>,
+    /// See [`Cli::unresolved_tenant`].
+    #[cfg(feature = "tenancy")]
+    unresolved_tenant: Option<Router>,
     /// Bootstrap initializer used by the `init-tenancy` verb when
     /// [`Cli::tenancy`] is on. Defaults to
     /// [`crate::tenancy::init_tenancy`]; replaced by [`Cli::user_model`]
@@ -190,11 +210,16 @@ pub struct Cli {
     /// runserver future.
     #[cfg(all(feature = "config", feature = "runtime"))]
     install_logging: bool,
+    /// Added by [`Cli::command`].
+    commands: Vec<command::Command>,
+    /// Built and checked at [`Cli::run`]: registered plus `commands`.
+    command_set: command::CommandSet,
 }
 
 impl Cli {
-    /// Default builder — empty router, no seed, binds `0.0.0.0:8080`,
-    /// migrations live in `./migrations`, single-tenant.
+    /// Default builder — empty router, no seed, binds `RUSTANGO_BIND`, else
+    /// `127.0.0.1:8080` (`0.0.0.0:8080` on prod and staging), migrations live
+    /// in `./migrations`, single-tenant.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -202,13 +227,18 @@ impl Cli {
             seed: None,
             on_shutdown: None,
             nested: Vec::new(),
-            bind: std::env::var("RUSTANGO_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
+            bind: std::env::var("RUSTANGO_BIND")
+                .unwrap_or_else(|_| crate::env::default_bind(&crate::env::tier_from_env()).into()),
+            #[cfg(feature = "tenancy")]
+            apex: None,
             migrations_dir: PathBuf::from("./migrations"),
             tenancy: false,
             #[cfg(feature = "tenancy")]
             routes: None,
             #[cfg(feature = "tenancy")]
             tenant_header: None,
+            #[cfg(feature = "tenancy")]
+            unresolved_tenant: None,
             #[cfg(feature = "tenancy")]
             init_tenancy_fn: crate::tenancy::init_tenancy,
             #[cfg(feature = "config")]
@@ -231,7 +261,42 @@ impl Cli {
             welcome_page: false,
             #[cfg(all(feature = "config", feature = "runtime"))]
             install_logging: false,
+            commands: Vec::new(),
+            command_set: command::CommandSet::default(),
         }
+    }
+
+    /// Add a verb of the app's own, listed in `--help`. Crates use
+    /// [`register_command!`](crate::register_command) instead. A clash
+    /// with a built-in verb makes [`Cli::run`] fail at startup.
+    ///
+    /// ```ignore
+    /// Cli::new().command("greet", "Say hello", |mut ctx, args| async move {
+    ///     writeln!(ctx.stdout(), "hello {}", args.join(" "))?;
+    ///     Ok(())
+    /// })
+    /// ```
+    ///
+    /// With [`Cli::tenancy`], `--tenant <slug>` is taken out of the
+    /// arguments and opens that tenant's pool
+    /// ([`CommandContext::tenant_pool`]).
+    #[must_use]
+    pub fn command<F, Fut>(mut self, name: &str, about: &str, handler: F) -> Self
+    where
+        F: Fn(CommandContext, Vec<String>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), CommandError>> + Send + 'static,
+    {
+        self.commands
+            .push(command::Command::new(name, about, "this app", handler));
+        self
+    }
+
+    /// The context a command runs with on `pool`.
+    fn command_context(&self, pool: crate::sql::Pool) -> CommandContext {
+        let ctx = CommandContext::new(pool);
+        #[cfg(feature = "config")]
+        let ctx = ctx.with_settings(self.settings_for_layers.clone());
+        ctx
     }
 
     /// Override the framework's reserved URL prefixes. Equivalent to
@@ -262,6 +327,15 @@ impl Cli {
     #[must_use]
     pub fn tenant_header(mut self, resolver: crate::tenancy::HeaderResolver) -> Self {
         self.tenant_header = Some(resolver);
+        self
+    }
+
+    /// With [`Cli::tenancy`], serve `router` where no tenant resolves.
+    /// See [`crate::server::Builder::unresolved_tenant`].
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn unresolved_tenant(mut self, router: Router) -> Self {
+        self.unresolved_tenant = Some(router);
         self
     }
 
@@ -336,8 +410,8 @@ impl Cli {
         self
     }
 
-    /// Override the bind address. Defaults to `RUSTANGO_BIND` env or
-    /// `0.0.0.0:8080`.
+    /// Override the bind address. Defaults to `RUSTANGO_BIND` env, else
+    /// loopback off the prod and staging tiers.
     #[must_use]
     pub fn bind(mut self, addr: impl Into<String>) -> Self {
         self.bind = addr.into();
@@ -587,9 +661,9 @@ impl Cli {
     ///     .run().await
     /// ```
     ///
-    /// Mounted via `Router::merge`, which means a `/` route inside
-    /// `urls::api()` would collide and panic. Drop the call once your
-    /// own root handler is wired.
+    /// Mounted via `Router::merge`. When `urls::api()` already routes
+    /// `GET /`, the welcome page is skipped with a warning. Drop the
+    /// call once your own root handler is wired.
     #[must_use]
     pub fn with_welcome(mut self) -> Self {
         self.welcome_page = true;
@@ -657,7 +731,7 @@ impl Cli {
         //   1. an explicit `.bind(...)` call AFTER this one
         //   2. `RUSTANGO_BIND` env var
         //   3. `Settings.server.bind` (this branch)
-        //   4. hardcoded `0.0.0.0:8080` (Cli::new fallback)
+        //   4. the tier's fallback (Cli::new: loopback off prod/staging)
         //
         // Env wins over TOML so deploy-time emergency overrides
         // don't require a config push + restart.
@@ -820,7 +894,18 @@ impl Cli {
     /// # Errors
     /// Surfaces whatever the underlying dispatcher / server returns.
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
-        let args: Vec<String> = std::env::args().skip(1).collect();
+        self.run_with_args(std::env::args().skip(1).collect()).await
+    }
+
+    /// [`Cli::run`] on `args` instead of the process's (no program name).
+    ///
+    /// # Errors
+    /// As [`Cli::run`].
+    pub async fn run_with_args(
+        mut self,
+        args: Vec<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.command_set = command::CommandSet::build(&self.commands)?;
         let verb = args.first().map_or("", String::as_str);
         // A management verb's stdout is its output (`dumpdata > fx.json`),
         // so its logs go to stderr, also through `#[rustango::main]`'s subscriber.
@@ -860,8 +945,35 @@ impl Cli {
             // hyphenated form fell through to `dispatch()` →
             // `tenancy::manage::run_with_init`, which **silently
             // skipped the `.seed()` hook**. Accept both forms.
-            v if crate::logging::is_server_verb(v) => self.runserver().await,
+            v if crate::logging::is_server_verb(v) => {
+                match self.take_serve_args(args.get(1..).unwrap_or_default())? {
+                    Some(help) => {
+                        println!("{help}");
+                        Ok(())
+                    }
+                    None => self.runserver().await,
+                }
+            }
             _ => self.dispatch(args).await,
+        }
+    }
+
+    /// Apply `run-server`'s flags; `Some` is the usage text to print instead.
+    fn take_serve_args(&mut self, args: &[String]) -> Result<Option<String>, String> {
+        match serve_args::parse(args, self.tenancy)? {
+            serve_args::ServeArgs::Help(text) => Ok(Some(text)),
+            serve_args::ServeArgs::Serve { bind, apex } => {
+                if let Some(bind) = bind {
+                    self.bind = bind;
+                }
+                #[cfg(feature = "tenancy")]
+                if apex.is_some() {
+                    self.apex = apex;
+                }
+                #[cfg(not(feature = "tenancy"))]
+                let _ = apex;
+                Ok(None)
+            }
         }
     }
 
@@ -903,6 +1015,12 @@ impl Cli {
         if let Some(cfg) = self.tenant_pools.clone() {
             pools = pools.config(cfg);
         }
+        if let Some(cmd) = args.first().and_then(|v| self.command_set.get(v)).cloned() {
+            let ctx = self.command_context(pools.registry_pool());
+            return command::run_tenancy(&cmd, ctx, std::sync::Arc::new(pools), args[1..].to_vec())
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> { e });
+        }
         crate::tenancy::manage::run_from_cli(
             &pools,
             url,
@@ -938,7 +1056,11 @@ impl Cli {
                 None | Some("") | Some("help") | Some("--help") | Some("-h")
             )
         {
-            return Some(crate::tenancy::manage::write_help(out).map_err(Into::into));
+            return Some(
+                crate::tenancy::manage::write_help(out)
+                    .map_err(Into::into)
+                    .and_then(|()| self.command_set.write_help(out).map_err(Into::into)),
+            );
         }
         // The tenancy scaffolder, with `--with-bootstrap-migration` and
         // the tenancy `manage` bin; the plain one shadowed it.
@@ -947,7 +1069,12 @@ impl Cli {
             return Some(crate::tenancy::manage::startapp(&args[1..], out).map_err(Into::into));
         }
 
-        crate::migrate::manage::run_pool_free(args, out).map(|r| r.map_err(Into::into))
+        let res =
+            crate::migrate::manage::run_pool_free(args, out).map(|r| r.map_err(Into::into))?;
+        if res.is_ok() && is_help_verb(args) {
+            return Some(self.command_set.write_help(out).map_err(Into::into));
+        }
+        Some(res)
     }
 
     async fn dispatch(mut self, args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
@@ -956,9 +1083,7 @@ impl Cli {
         // the pool dance so it works even when sqlx can't connect
         // (e.g. tunnel-only setups, fresh-clone scenarios).
         if matches!(args.first().map(String::as_str), Some("dbshell")) {
-            let url = std::env::var("DATABASE_URL").map_err(|_| -> Box<dyn std::error::Error> {
-                "missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`.".into()
-            })?;
+            let url = crate::env::database_url_or_advice()?;
             // On Unix `dbshell::run` swaps the process and never
             // returns; on other targets it returns after the client
             // exits. Either way, propagate the result.
@@ -991,10 +1116,11 @@ impl Cli {
                 | Some("make:middleware")
                 | Some("make:test")
         );
-        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://offline".into());
-        if !no_db_verb && std::env::var("DATABASE_URL").is_err() {
-            return Err("missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`.".into());
-        }
+        let url = match crate::env::database_url_or_advice() {
+            Ok(url) => url,
+            Err(_) if no_db_verb => "postgres://offline".into(),
+            Err(e) => return Err(e.into()),
+        };
 
         #[cfg(all(feature = "tenancy", feature = "postgres"))]
         if self.tenancy {
@@ -1104,6 +1230,12 @@ impl Cli {
                 .map_err(|e| format!("connect({shown}): {e}").into())
                 as Result<_, Box<dyn std::error::Error>>
         }?;
+        if let Some(cmd) = args.first().and_then(|v| self.command_set.get(v)).cloned() {
+            return cmd
+                .call(self.command_context(pool), args[1..].to_vec())
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> { e });
+        }
         if args.first().map(String::as_str) == Some("check") {
             self.build_nested(&pool);
         }
@@ -1194,8 +1326,11 @@ impl Cli {
         let api = crate::panic_guard::catch_panics(api);
         #[cfg(feature = "config")]
         let settings = self.settings_for_layers.as_ref();
+        // Health probes skip the Host check and the redirect when mounted.
         #[cfg(feature = "config")]
-        let api = dress_errors(apply_settings_layers_or_warn(api, settings), settings);
+        let hp = self.health_endpoints;
+        #[cfg(feature = "config")]
+        let api = dress_errors(apply_settings_layers_or_warn(api, settings), settings, hp);
         let api = self.mount_observability(api);
         let api = match self.real_ip.clone() {
             Some(layer) => {
@@ -1222,6 +1357,9 @@ impl Cli {
             .span_redact(self.span_redact_params());
         if let Some(h) = &self.tenant_header {
             builder = builder.header_resolver(h.clone());
+        }
+        if let Some(r) = &self.unresolved_tenant {
+            builder = builder.unresolved_tenant(r.clone());
         }
         if let Some(layer) = &self.real_ip {
             builder = builder.real_ip(layer.clone());
@@ -1389,9 +1527,7 @@ impl Cli {
         // migrations through migrate_pool (tri-dialect).
         #[cfg(not(feature = "postgres"))]
         {
-            let url = std::env::var("DATABASE_URL").map_err(|_| {
-                "missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`."
-            })?;
+            let url = crate::env::database_url_or_advice()?;
             let pool = crate::sql::Pool::connect(&url).await?;
             auto_migrate(&pool, &self.migrations_dir).await?;
             if let Some(seed) = self.seed.take() {
@@ -1404,17 +1540,14 @@ impl Cli {
             }
             let drain = self.drain_timeout();
             let app = self.assemble_app(pool);
-            let listener = tokio::net::TcpListener::bind(&self.bind).await?;
-            eprintln!("server listening on http://{}", listener.local_addr()?);
+            let listener = crate::shutdown::bind_announced(&self.bind, None).await?;
             crate::shutdown::serve_until_drained(listener, app, drain).await?;
             run_shutdown_hook(self.on_shutdown).await;
             return Ok(());
         }
         #[cfg(feature = "postgres")]
         {
-            let url = std::env::var("DATABASE_URL").map_err(|_| {
-            "missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`."
-        })?;
+            let url = crate::env::database_url_or_advice()?;
             // #560 — on a multi-backend build (e.g. `--features
             // postgres,sqlite`) this `cfg(postgres)` arm fires even
             // when `DATABASE_URL` is a `sqlite://` / `mysql://` URL.
@@ -1439,8 +1572,7 @@ impl Cli {
                 }
                 let drain = self.drain_timeout();
                 let app = self.assemble_app(pool);
-                let listener = tokio::net::TcpListener::bind(&self.bind).await?;
-                eprintln!("server listening on http://{}", listener.local_addr()?);
+                let listener = crate::shutdown::bind_announced(&self.bind, None).await?;
                 crate::shutdown::serve_until_drained(listener, app, drain).await?;
                 run_shutdown_hook(self.on_shutdown).await;
                 return Ok(());
@@ -1463,8 +1595,7 @@ impl Cli {
             }
             let drain = self.drain_timeout();
             let app = self.assemble_app(pool);
-            let listener = tokio::net::TcpListener::bind(&self.bind).await?;
-            eprintln!("server listening on http://{}", listener.local_addr()?);
+            let listener = crate::shutdown::bind_announced(&self.bind, None).await?;
             crate::shutdown::serve_until_drained(listener, app, drain).await?;
             run_shutdown_hook(self.on_shutdown).await;
             Ok(())
@@ -1515,6 +1646,9 @@ impl Cli {
             .await?
             .api(api)
             .drain_timeout(self.drain_timeout());
+        if let Some(apex) = self.apex.take() {
+            builder = builder.with_apex(apex);
+        }
         builder = self.tenancy_builder(builder, outer);
         if self.health_endpoints {
             builder = builder.with_health();
@@ -1585,16 +1719,19 @@ impl Cli {
         let outer = None;
         // Not `mount_observability` — see the dispatch path above. The
         // builder applies these to the outermost router.
-        let apex = crate::tenancy::server::apex_domain();
+        let apex_flag = self.apex.take();
+        let apex = apex_flag
+            .clone()
+            .unwrap_or_else(crate::tenancy::server::apex_domain);
         let registry_url =
-            std::env::var("DATABASE_URL")
-                .ok()
-                .ok_or_else(|| -> Box<dyn std::error::Error> {
-                    "DATABASE_URL not set — sqlite/mysql tenancy projects need an explicit \
-             registry URL (e.g. `sqlite:./var/registry.db` or `mysql://…`). Set the \
-             env var or build the server manually via `server::Builder::from_pool`."
-                        .into()
-                })?;
+            crate::env::database_url_from_env().map_err(|e| -> Box<dyn std::error::Error> {
+                format!(
+                    "{e} — sqlite/mysql tenancy projects need an explicit registry URL \
+                     (e.g. `sqlite:./var/registry.db` or `mysql://…`), or build the \
+                     server manually via `server::Builder::from_pool`."
+                )
+                .into()
+            })?;
         let registry =
             sqlx::Pool::<crate::tenancy::DefaultTenantDb>::connect(&registry_url).await?;
         let mut builder = crate::server::Builder::<crate::tenancy::DefaultTenantDb>::from_pool(
@@ -1603,6 +1740,9 @@ impl Cli {
             apex,
         )
         .api(api);
+        if let Some(apex) = apex_flag {
+            builder = builder.with_apex(apex);
+        }
         builder = self.tenancy_builder(builder, outer);
         if self.health_endpoints {
             builder = builder.with_health();
@@ -1906,6 +2046,17 @@ impl OuterLayers {
         app
     }
 
+    /// Let `/health` and `/ready` past the Host check and the redirect:
+    /// probes send the pod IP over plain HTTP.
+    #[cfg(feature = "config")]
+    fn exempt_probes(mut self) -> Self {
+        use crate::host_validation::AllowedHostsLayer;
+        use crate::ssl_redirect::SslRedirectLayer;
+        self.allowed_hosts = self.allowed_hosts.map(AllowedHostsLayer::exempt_probes);
+        self.ssl_redirect = self.ssl_redirect.map(SslRedirectLayer::exempt_probes);
+        self
+    }
+
     #[cfg(feature = "tenancy")]
     fn apply_to<DB: sqlx::Database>(
         self,
@@ -1932,15 +2083,34 @@ fn wrap_outer((app, outer): (Router, Option<OuterLayers>)) -> Router {
     }
 }
 
+/// The settings layers, with `/health` and `/ready` let past the Host check
+/// and the redirect when the server mounts them.
+#[cfg(feature = "config")]
+fn exempt_probes_if(
+    on: bool,
+    (app, outer): (Router, Option<OuterLayers>),
+) -> (Router, Option<OuterLayers>) {
+    (
+        app,
+        if on {
+            outer.map(OuterLayers::exempt_probes)
+        } else {
+            outer
+        },
+    )
+}
+
 /// [`wrap_outer`] with the `[errors]` pages between the settings layers
 /// and the outer ones: outside the timeout and body limit so their
 /// 408/413 are dressed, inside the security headers so the page gets
 /// the CSP nonce.
 #[cfg(feature = "config")]
 fn dress_errors(
-    (app, outer): (Router, Option<OuterLayers>),
+    layered: (Router, Option<OuterLayers>),
     settings: Option<&crate::config::Settings>,
+    probes: bool,
 ) -> Router {
+    let (app, outer) = exempt_probes_if(probes, layered);
     #[cfg(feature = "template_views")]
     let app = match settings.and_then(crate::errors::ErrorPagesLayer::from_settings) {
         Some(layer) => {
@@ -2248,6 +2418,82 @@ mod tests {
         assert!(cli.seed.is_some());
     }
 
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// `run-server --bind` beats `RUSTANGO_BIND` and `[server] bind`.
+    #[test]
+    fn run_server_flags_beat_env_and_settings() {
+        for tenancy in [false, true] {
+            let mut cli = Cli::new().bind("127.0.0.1:9090");
+            if tenancy {
+                cli = cli.tenancy();
+            }
+            #[cfg(feature = "config")]
+            {
+                let mut s = crate::config::Settings::default();
+                s.server.bind = Some("127.0.0.1:9091".into());
+                cli = cli.with_settings(&s);
+            }
+            let flags = args(&["--bind", "127.0.0.1:8099"]);
+            assert_eq!(cli.take_serve_args(&flags), Ok(None));
+            assert_eq!(cli.bind, "127.0.0.1:8099", "tenancy={tenancy}");
+        }
+        #[cfg(feature = "tenancy")]
+        {
+            let mut cli = Cli::new().tenancy();
+            assert_eq!(
+                cli.take_serve_args(&args(&["--apex", "shop.test"])),
+                Ok(None)
+            );
+            assert_eq!(cli.apex.as_deref(), Some("shop.test"));
+        }
+    }
+
+    /// An unknown flag is refused before any database is opened, on both paths.
+    #[tokio::test]
+    async fn run_server_refuses_unknown_flags() {
+        for tenancy in [false, true] {
+            for verb in ["run-server", "runserver"] {
+                let cli = if tenancy {
+                    Cli::new().tenancy()
+                } else {
+                    Cli::new()
+                };
+                let err = cli
+                    .run_with_args(args(&[verb, "--bogus"]))
+                    .await
+                    .expect_err("unknown flag accepted");
+                assert!(
+                    err.to_string().contains("unknown argument `--bogus`"),
+                    "{err}"
+                );
+            }
+        }
+        let err = Cli::new()
+            .run_with_args(args(&["run-server", "--apex", "x"]))
+            .await
+            .expect_err("--apex without tenancy");
+        assert!(err.to_string().contains("tenancy"), "{err}");
+        // `--help` prints the usage and opens nothing.
+        Cli::new()
+            .tenancy()
+            .run_with_args(args(&["run-server", "--help"]))
+            .await
+            .expect("help");
+    }
+
+    /// A project that loads no settings (the api template) still binds
+    /// loopback in dev.
+    #[test]
+    fn unconfigured_dev_binds_loopback() {
+        if std::env::var("RUSTANGO_BIND").is_ok() || std::env::var("RUSTANGO_ENV").is_ok() {
+            return;
+        }
+        assert_eq!(Cli::new().bind, "127.0.0.1:8080");
+    }
+
     /// `Cli::with_settings` honors `Settings.server.bind` when
     /// `RUSTANGO_BIND` env isn't set (#87 wiring).
     #[cfg(feature = "config")]
@@ -2503,6 +2749,26 @@ mod tests {
         assert_eq!(
             x_org_pick(&builder(cli), &sq).await.as_deref(),
             Some("acme")
+        );
+    }
+
+    /// `Cli::unresolved_tenant` reaches the builder.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[tokio::test]
+    async fn unresolved_tenant_reaches_the_builder() {
+        use crate::server::resolver_tests::{get, hosted_registry, setup_router};
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = hosted_registry(true).await;
+        let b = crate::server::Builder::from_pool(sq, url, "localhost");
+        let app = Cli::new()
+            .unresolved_tenant(setup_router())
+            .tenancy_builder(b, None)
+            .into_router()
+            .await
+            .expect("assemble");
+        assert_eq!(
+            get(&app, "ghost.localhost", "/").await,
+            (200, "unresolved:true".into())
         );
     }
 
@@ -2923,6 +3189,45 @@ mod tests {
         let out = String::from_utf8_lossy(&out);
         assert!(out.contains("--with-bootstrap-migration"), "{out}");
     }
+
+    crate::register_command!("zz-crate-cmd", "A crate's command", |_ctx, _args| async {
+        Ok(())
+    });
+
+    /// `--help` lists registered and app commands, in both modes.
+    #[test]
+    fn help_lists_added_commands() {
+        let modes: &[fn(Cli) -> Cli] = &[|c| c, |c| c.tenancy()];
+        for mode in modes {
+            let mut cli =
+                mode(Cli::new()).command("zz-app-cmd", "An app command", |_, _| async { Ok(()) });
+            cli.command_set = command::CommandSet::build(&cli.commands).unwrap();
+            let mut out = Vec::new();
+            cli.run_pool_free(&["--help".to_owned()], &mut out)
+                .expect("pool-free")
+                .expect("help");
+            let out = String::from_utf8_lossy(&out);
+            for needle in [
+                "zz-crate-cmd",
+                "A crate's command",
+                "zz-app-cmd",
+                "this app",
+            ] {
+                assert!(out.contains(needle), "{needle} missing:\n{out}");
+            }
+        }
+    }
+
+    /// A command named like a built-in verb stops the run before any verb.
+    #[tokio::test]
+    async fn a_command_clashing_with_a_builtin_verb_fails_at_startup() {
+        let err = Cli::new()
+            .command("migrate", "shadow", |_, _| async { Ok(()) })
+            .run_with_args(vec!["--help".to_owned()])
+            .await
+            .expect_err("clash");
+        assert!(err.to_string().contains("built-in verb"), "{err}");
+    }
 }
 
 /// `Cli::with_health()` must reach every serving path (#1457).
@@ -3123,11 +3428,11 @@ mod assemble_app_tests {
         let mut s = crate::config::Settings::default();
         s.security.allowed_hosts = vec!["example.com".into()];
         let app = Cli::new()
+            .api(Router::new().route("/page", axum::routing::get(|| async { "page" })))
             .with_settings(&s)
-            .with_health()
             .assemble_app(pool);
         let send = |host: &str| {
-            let req = Request::builder().uri("/health").header("host", host);
+            let req = Request::builder().uri("/page").header("host", host);
             app.clone().oneshot(req.body(Body::empty()).unwrap())
         };
         let ok = send("example.com").await.expect("request");
@@ -3135,6 +3440,37 @@ mod assemble_app_tests {
         assert!(ok.headers().contains_key("x-frame-options"));
         let bad = send("evil.example").await.expect("request");
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A probe by pod IP over plain HTTP still reaches `/health` and
+    /// `/ready`; other paths keep the Host check and the redirect.
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn health_probes_skip_the_host_check_and_https_redirect() {
+        let _serial = serialized();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let mut s = crate::config::Settings::default();
+        s.security.allowed_hosts = vec!["example.com".into()];
+        s.security.secure_ssl_redirect = Some(true);
+        let app = Cli::new()
+            .api(Router::new().route("/page", axum::routing::get(|| async { "page" })))
+            .with_settings(&s)
+            .with_health()
+            .assemble_app(pool);
+        let send = |host: &str, path: &str| {
+            let req = Request::builder().uri(path).header("host", host);
+            app.clone().oneshot(req.body(Body::empty()).unwrap())
+        };
+        for path in ["/health", "/ready"] {
+            let r = send("10.0.0.5:8080", path).await.expect("request");
+            assert_eq!(r.status(), StatusCode::OK, "{path}");
+        }
+        let r = send("10.0.0.5:8080", "/page").await.expect("request");
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        let r = send("example.com", "/page").await.expect("request");
+        assert_eq!(r.status(), StatusCode::MOVED_PERMANENTLY);
     }
 
     /// `[security] csrf_trusted_origins` reaches both CSRF mounts.

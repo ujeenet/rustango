@@ -830,51 +830,15 @@ impl Builder {
             UNGATED_ADMIN_BUILT.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         let audit_path = self.config.audit_url.clone();
-        let audit_cleanup_path = format!("{audit_path}/cleanup");
         let session_secret = self.config.session_secret.clone();
         let admin_prefix = self.config.admin_prefix.clone();
         let state = AppState {
             pool: self.pool,
             config: Arc::new(self.config),
         };
-
-        let protected = Router::new()
-            .route("/", get(views::index))
-            .route(&audit_path, get(super::audit::audit_log_view))
-            .route(
-                &audit_cleanup_path,
-                post(super::audit::audit_cleanup_submit),
-            )
-            // In-admin model reference: every registered model.
-            .route("/__docs", get(super::docs::docs_view))
-            .route(
-                "/{table}",
-                get(views::table_view).post(views::create_submit),
-            )
-            .route(
-                &format!("/{{table}}/{CREATE_SEGMENT}"),
-                get(views::create_form),
-            )
-            .route("/{table}/__action", post(views::action_submit))
-            .route("/{table}/__autocomplete", get(views::autocomplete_view))
-            .route(
-                "/{table}/{pk}",
-                get(views::detail_view).post(views::update_submit),
-            )
-            .route("/{table}/{pk}/edit", get(views::edit_form))
-            .route("/{table}/{pk}/delete", post(views::delete_submit))
-            .with_state(state.clone());
-
-        // Extra routes a model registers for itself. Each inventory
-        // entry is checked against the built-in routes, then mounted
-        // on the same protected router.
-        let protected = mount_custom_views(protected, state.clone())
-            .layer(axum::middleware::from_fn(
-                super::session::scope_request_session,
-            ))
-            .layer(axum::Extension(super::session::PermsScoped(
-                state.config.user_perms.is_some(),
-            )));
+        let protected = protected_routes(&audit_path, StateSource::Fixed(state.clone()), &|t| {
+            state.is_visible(t)
+        });
 
         // With session auth on, `/login` and `/logout` mount before
         // the auth middleware so they stay reachable. Every other
@@ -931,11 +895,138 @@ impl Builder {
             } else {
                 public
             };
-            return Router::new().merge(public).merge(protected);
+            return crate::errors::own_pages(Router::new().merge(public).merge(protected));
         }
 
-        protected
+        crate::errors::own_pages(protected)
     }
+}
+
+#[cfg(feature = "tenancy")]
+impl Builder {
+    /// This builder's settings as one request's state, for a
+    /// [`per_request_router`].
+    pub(crate) fn into_request_state(self) -> RequestState {
+        RequestState(AppState {
+            pool: self.pool,
+            config: Arc::new(self.config),
+        })
+    }
+}
+
+/// Where the admin's handlers get their [`AppState`]. Handlers extract
+/// `AppState` itself, so none can read a state the request did not pick.
+#[derive(Clone)]
+pub(crate) enum StateSource {
+    /// One state for every request: [`Builder::build`].
+    Fixed(AppState),
+    /// Each request brings its own [`RequestState`]; one without is a 500.
+    #[cfg(feature = "tenancy")]
+    PerRequest,
+}
+
+/// One request's admin state: its pool, user perms and branding.
+#[cfg(feature = "tenancy")]
+#[derive(Clone)]
+pub(crate) struct RequestState(AppState);
+
+impl axum::extract::FromRequestParts<StateSource> for AppState {
+    type Rejection = AdminError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        source: &StateSource,
+    ) -> Result<Self, AdminError> {
+        #[cfg(not(feature = "tenancy"))]
+        let _ = parts;
+        match source {
+            StateSource::Fixed(state) => Ok(state.clone()),
+            #[cfg(feature = "tenancy")]
+            StateSource::PerRequest => parts
+                .extensions
+                .get::<RequestState>()
+                .map(|s| s.0.clone())
+                .ok_or_else(|| AdminError::Internal("admin request carries no state".into())),
+        }
+    }
+}
+
+/// Route tables built so far, for the build-once guard.
+static ROUTER_BUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[doc(hidden)]
+#[must_use]
+pub fn __router_builds() -> usize {
+    ROUTER_BUILDS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The admin routes for a caller that builds them once and puts a
+/// [`RequestState`] in each request.
+#[cfg(feature = "tenancy")]
+pub(crate) fn per_request_router(audit_url: &str) -> Router {
+    // Visibility depends on the request's perms, so every view mounts and
+    // checks it per request.
+    protected_routes(audit_url, StateSource::PerRequest, &|_| true)
+}
+
+/// Every admin route behind the session gate. `mount_view` picks the
+/// custom views worth mounting; each still checks access per request.
+fn protected_routes(
+    audit_path: &str,
+    source: StateSource,
+    mount_view: &dyn Fn(&str) -> bool,
+) -> Router {
+    ROUTER_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let audit_cleanup_path = format!("{audit_path}/cleanup");
+    let routes = Router::new()
+        .route("/", get(views::index))
+        .route(audit_path, get(super::audit::audit_log_view))
+        .route(
+            &audit_cleanup_path,
+            post(super::audit::audit_cleanup_submit),
+        )
+        // In-admin model reference: every registered model.
+        .route("/__docs", get(super::docs::docs_view))
+        .route(
+            "/{table}",
+            get(views::table_view).post(views::create_submit),
+        )
+        .route(
+            &format!("/{{table}}/{CREATE_SEGMENT}"),
+            get(views::create_form),
+        )
+        .route("/{table}/__action", post(views::action_submit))
+        .route("/{table}/__autocomplete", get(views::autocomplete_view))
+        .route(
+            "/{table}/{pk}",
+            get(views::detail_view).post(views::update_submit),
+        )
+        .route("/{table}/{pk}/edit", get(views::edit_form))
+        .route("/{table}/{pk}/delete", post(views::delete_submit));
+    // Extra routes a model registers for itself. Each inventory
+    // entry is checked against the built-in routes, then mounted
+    // on the same protected router.
+    mount_custom_views(routes, mount_view)
+        .layer(axum::middleware::from_fn(
+            super::session::scope_request_session,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            source.clone(),
+            mark_perms_scoped,
+        ))
+        .with_state(source)
+}
+
+/// Tag the request with whether its state carries per-user perms.
+async fn mark_perms_scoped(
+    state: AppState,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    req.extensions_mut().insert(super::session::PermsScoped(
+        state.config.user_perms.is_some(),
+    ));
+    next.run(req).await
 }
 
 /// Tables the generic admin never serves: the TOTP store holds raw
@@ -956,6 +1047,10 @@ fn is_never_served(table: &str) -> bool {
     }
     #[cfg(feature = "totp")]
     if table == <super::totp_store::AdminTotp as crate::core::Model>::SCHEMA.table {
+        return true;
+    }
+    #[cfg(all(feature = "tenancy", feature = "totp"))]
+    if table == <crate::tenancy::OperatorTotp as crate::core::Model>::SCHEMA.table {
         return true;
     }
     #[cfg(feature = "passkey")]
@@ -1109,7 +1204,10 @@ impl AppState {
 ///
 /// Skips a view whose suffix collides with a built-in route, and
 /// one whose model is not visible to this admin instance.
-fn mount_custom_views(mut router: Router, state: AppState) -> Router {
+fn mount_custom_views(
+    mut router: Router<StateSource>,
+    mount_view: &dyn Fn(&str) -> bool,
+) -> Router<StateSource> {
     use axum::extract::Request;
     use axum::http::Method;
     use axum::response::IntoResponse as _;
@@ -1141,7 +1239,7 @@ fn mount_custom_views(mut router: Router, state: AppState) -> Router {
         }
         // A hidden table, registry ones on a tenant admin included,
         // gets no custom routes either.
-        if !state.is_visible(view.table) {
+        if !mount_view(view.table) {
             tracing::debug!(
                 target: "rustango::admin",
                 table = %view.table,
@@ -1156,27 +1254,27 @@ fn mount_custom_views(mut router: Router, state: AppState) -> Router {
         let path = format!("/{table}/{suffix}");
         // `view.handler` is a plain fn pointer, so it is Copy.
         let handler = view.handler;
-        // Each closure needs its own `Pool`. Clone it here, not
-        // inside the closure, so the loop can keep using `state`.
-        let pool_for_handler = state.pool.clone();
-
         // A user without the view's perm gets 403 rather than the handler.
         // The method default applies only under `with_user_perms`.
         let perm = view.required_perm();
-        let allowed =
-            (view.perm.is_none() && state.config.user_perms.is_none()) || state.allows(table, perm);
-        let mounted_handler = move |req: Request| {
-            let pool = pool_for_handler.clone();
-            async move {
-                if !allowed {
-                    return AdminError::Forbidden {
-                        table: table.to_owned(),
-                        action: perm,
-                    }
-                    .into_response();
+        let view_perm = view.perm;
+        let mounted_handler = move |state: AppState, req: Request| async move {
+            if !state.is_visible(table) {
+                return AdminError::TableNotFound {
+                    table: table.to_owned(),
                 }
-                handler(pool, req).await
+                .into_response();
             }
+            let allowed = (view_perm.is_none() && state.config.user_perms.is_none())
+                || state.allows(table, perm);
+            if !allowed {
+                return AdminError::Forbidden {
+                    table: table.to_owned(),
+                    action: perm,
+                }
+                .into_response();
+            }
+            handler(state.pool, req).await
         };
 
         // Axum has no `MethodFilter` for the QUERY method, so it

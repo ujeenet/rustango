@@ -28,6 +28,8 @@ pub type ApiRouter = Router<()>;
 /// tenant-admin shape by constructing via [`Builder::from_pool`].
 pub struct Builder<DB: Database = DefaultTenantDb> {
     apex: String,
+    /// The apex `run-server --apex` gave; console-created tenants default under it.
+    apex_flag: Option<String>,
     registry_url: String,
     pools: Arc<TenantPools<DB>>,
     registry: sqlx::Pool<DB>,
@@ -114,6 +116,8 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     real_ip: Option<crate::real_ip::RealIpLayer>,
     /// Opt-in `X-Org`-style fallback after the host resolvers (#1856).
     header_resolver: Option<HeaderResolver>,
+    /// Serves requests that resolve no tenant; `None` routes them as before.
+    unresolved: Option<ApiRouter>,
     /// Wraps both Host branches, inside the security headers.
     #[cfg(feature = "template_views")]
     error_pages: Option<crate::errors::ErrorPagesLayer>,
@@ -129,7 +133,7 @@ struct PendingAction {
 
 #[cfg(feature = "postgres")]
 impl Builder<sqlx::Postgres> {
-    /// Connect to `DATABASE_URL`, build [`TenantPools`], read
+    /// Connect to `DATABASE_URL` (or the `DB_*` vars), build [`TenantPools`], read
     /// `RUSTANGO_APEX_DOMAIN`, else `[tenancy] apex_domain` if
     /// `Cli::with_settings` already ran in this process. Tracing init is
     /// left to the caller — one `tracing_subscriber::fmt().init()` away.
@@ -142,7 +146,7 @@ impl Builder<sqlx::Postgres> {
     /// Connection to `DATABASE_URL` failures.
     pub async fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
         let apex = crate::tenancy::server::apex_domain();
-        let registry_url = std::env::var("DATABASE_URL")
+        let registry_url = crate::env::database_url_from_env()
             .unwrap_or_else(|_| "postgres://rustango:rustango@localhost:5432/rustango_test".into());
         let registry = crate::sql::Pool::connect_postgres(&registry_url).await?;
         Ok(Self::from_pool(registry, registry_url, apex))
@@ -166,6 +170,7 @@ impl<DB: Database> Builder<DB> {
         let pools = Arc::new(TenantPools::<DB>::new(registry.clone()));
         Self {
             apex: apex.into(),
+            apex_flag: None,
             registry_url: registry_url.into(),
             pools,
             registry,
@@ -197,6 +202,7 @@ impl<DB: Database> Builder<DB> {
             #[cfg(feature = "_http_layers")]
             real_ip: None,
             header_resolver: None,
+            unresolved: None,
             #[cfg(feature = "template_views")]
             error_pages: None,
             _phantom: PhantomData,
@@ -270,6 +276,33 @@ impl<DB: Database> Builder<DB> {
     #[must_use]
     pub fn header_resolver(mut self, resolver: HeaderResolver) -> Self {
         self.header_resolver = Some(resolver);
+        self
+    }
+
+    /// Serve `router` for requests that resolve no tenant: an unknown
+    /// host, or an apex path the operator console does not serve.
+    ///
+    /// It gets an `Extension<`[`TenantRegistry`](crate::tenancy::TenantRegistry)`>`,
+    /// never a tenant. Anyone who can reach the server reaches it.
+    /// Unset, an unknown host reaches the api router, where `Tenant` answers 404.
+    ///
+    /// ```no_run
+    /// use axum::{routing::get, Extension, Router};
+    /// use rustango::tenancy::TenantRegistry;
+    ///
+    /// async fn setup(Extension(reg): Extension<TenantRegistry>) -> &'static str {
+    ///     match reg.has_tenants().await {
+    ///         Ok(false) => "Create your first site",
+    ///         _ => "This site is not set up yet",
+    ///     }
+    /// }
+    /// # fn demo<DB: sqlx::Database>(b: rustango::server::Builder<DB>) -> rustango::server::Builder<DB> {
+    /// b.unresolved_tenant(Router::new().route("/", get(setup)))
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn unresolved_tenant(mut self, router: ApiRouter) -> Self {
+        self.unresolved = Some(router);
         self
     }
 
@@ -865,6 +898,19 @@ impl<DB: Database> Builder<DB> {
         let prefixed = with_body_limit(prefixed, self.body_limit.clone());
         let prefix_app = prefixed.fallback_service(tenant_app.clone());
         let registry_pool: crate::sql::Pool = self.registry.clone().into();
+        // Health too: a load balancer probes by IP, which resolves no tenant.
+        let unresolved = self.unresolved.map(|r| {
+            let r = match &health {
+                Some(h) => r.merge(h.clone()),
+                None => r,
+            };
+            let r = r.layer(Extension(crate::tenancy::TenantRegistry::new(
+                registry_pool.clone(),
+            )));
+            #[cfg(feature = "_http_layers")]
+            let r = with_body_limit(r, self.body_limit.clone());
+            r
+        });
 
         // `router_with_pools` (rather than `router`) so the operator
         // console exposes /orgs/{slug}/edit. The pool handle is needed
@@ -921,6 +967,7 @@ impl<DB: Database> Builder<DB> {
                 dir,
             )
             .with_first_admin_handover(handover)
+            .with_default_apex(self.apex_flag.clone())
             .erased()
         });
         let operator_admin = operator_console::router_full_unlogged(
@@ -938,6 +985,7 @@ impl<DB: Database> Builder<DB> {
             // target — no need to thread it from the operator
             // console.
             self.routes.impersonation_handoff_url.clone(),
+            self.routes.login_url.clone(),
         );
         let operator_admin = match health {
             Some(health) => operator_admin.merge(health),
@@ -957,11 +1005,20 @@ impl<DB: Database> Builder<DB> {
         // reaches a path-prefix tenant. Added after its layers, so they skip it.
         let operator_admin = operator_admin.fallback_service(tower::service_fn({
             let prefixed = prefix_app.clone();
+            let unresolved = unresolved.clone();
             move |req: axum::http::Request<axum::body::Body>| {
                 let mut prefixed = prefixed.clone();
+                let unresolved = unresolved.clone();
                 async move {
-                    let mut resp = if req.extensions().get::<PrefixTenant>().is_some() {
+                    let unresolved = unresolved.filter(|_| {
+                        req.extensions().get::<Resolution>() == Some(&Resolution::None)
+                    });
+                    let mut resp = if req.extensions().get::<Resolution>()
+                        == Some(&Resolution::PrefixTenant)
+                    {
                         prefixed.as_service().oneshot(req).await?
+                    } else if let Some(mut unresolved) = unresolved {
+                        unresolved.as_service().oneshot(req).await?
                     } else {
                         axum::response::IntoResponse::into_response(
                             axum::http::StatusCode::NOT_FOUND,
@@ -978,24 +1035,24 @@ impl<DB: Database> Builder<DB> {
             let operator = operator_admin.clone();
             let tenants = tenant_app.clone();
             let prefixed = prefix_app.clone();
+            let unresolved = unresolved.clone();
             let apex = self.apex.clone();
             move |req: axum::http::Request<axum::body::Body>| {
                 let mut operator = operator.clone();
                 let mut tenants = tenants.clone();
                 let mut prefixed = prefixed.clone();
+                let unresolved = unresolved.clone();
                 let apex = apex.clone();
                 let registry = registry_pool.clone();
                 let resolver = dispatch_resolver.clone();
                 let shadowed = shadowed.clone();
                 async move {
                     let on_apex = crate::tenancy::host_is_apex(req.headers(), req.uri(), &apex);
-                    let (mut req, prefixed_path) =
-                        under_tenant_prefix(req, &resolver, &registry).await;
+                    let (mut req, resolution) = resolve(req, &resolver, &registry).await;
+                    let prefixed_path = resolution == Resolution::PrefixTenant;
                     let response = if on_apex {
                         let path = req.uri().path().to_owned();
-                        if prefixed_path {
-                            req.extensions_mut().insert(PrefixTenant);
-                        }
+                        req.extensions_mut().insert(resolution);
                         let resp = operator.as_service().oneshot(req).await;
                         if let Ok(r) = &resp {
                             if prefixed_path && r.extensions().get::<ConsoleUnmatched>().is_none() {
@@ -1005,6 +1062,10 @@ impl<DB: Database> Builder<DB> {
                         resp
                     } else if prefixed_path {
                         prefixed.as_service().oneshot(req).await
+                    } else if let (Resolution::None, Some(mut unresolved)) =
+                        (resolution, unresolved)
+                    {
+                        unresolved.as_service().oneshot(req).await
                     } else {
                         tenants.as_service().oneshot(req).await
                     };
@@ -1042,10 +1103,16 @@ impl<DB: Database> Builder<DB> {
         };
         // Same order as the single-tenant router: the Host allowlist is
         // outermost, so a bad Host is refused, never redirected to.
+        // Probes send the pod IP over plain HTTP, so health skips both.
         #[cfg(feature = "admin")]
         let app = match self.ssl_redirect {
             Some(layer) => {
                 use crate::ssl_redirect::SslRedirectRouterExt as _;
+                let layer = if self.health_endpoints {
+                    layer.exempt_probes()
+                } else {
+                    layer
+                };
                 app.ssl_redirect(layer)
             }
             None => app,
@@ -1054,6 +1121,11 @@ impl<DB: Database> Builder<DB> {
         let app = match self.allowed_hosts {
             Some(layer) => {
                 use crate::host_validation::AllowedHostsRouterExt as _;
+                let layer = if self.health_endpoints {
+                    layer.exempt_probes()
+                } else {
+                    layer
+                };
                 app.allowed_hosts(layer)
             }
             None => app,
@@ -1125,6 +1197,14 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
+    /// `run-server --apex`, which beats the apex `from_env` read.
+    #[cfg(feature = "manage")]
+    pub(crate) fn with_apex(mut self, apex: String) -> Self {
+        self.apex_flag = Some(apex.clone());
+        self.apex = apex;
+        self
+    }
+
     /// Assemble everything and bind.
     ///
     /// # Errors
@@ -1134,17 +1214,27 @@ impl<DB: Database> Builder<DB> {
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
         let drain = self.drain_timeout;
+        let apex = self.apex.clone();
         let app = self.into_router().await?;
-        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let listener = crate::shutdown::bind_announced(addr, Some(&apex)).await?;
         let app = tag_listener_port(app, &listener)?;
         crate::shutdown::serve_until_drained(listener, app, drain).await?;
         Ok(())
     }
 }
 
-/// Marks an apex request under a tenant's path prefix, for the console's fallback.
-#[derive(Clone, Copy)]
-struct PrefixTenant;
+/// Where a request's tenant lookup landed; the console's fallback reads it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Resolution {
+    /// Under the path prefix of the tenant it resolves to.
+    PrefixTenant,
+    /// A tenant, not under its prefix.
+    Tenant,
+    /// No tenant: the only case the unresolved router may serve.
+    None,
+    /// The lookup failed; routes as if no fallback were set.
+    Failed,
+}
 
 /// Marks a response from the console's fallback: no console route matched.
 #[derive(Clone, Copy)]
@@ -1168,25 +1258,33 @@ fn warn_shadowed(shadowed: &std::sync::Mutex<std::collections::HashSet<String>>,
     }
 }
 
-/// Whether `req` is under the path prefix of the tenant it resolves to, on
-/// the apex or on the tenant's host. A failed lookup routes as before.
-async fn under_tenant_prefix(
+/// Resolve `req`'s tenant, on the apex or on the tenant's host, and
+/// whether it is under that tenant's path prefix.
+async fn resolve(
     req: axum::http::Request<axum::body::Body>,
     resolver: &ChainResolver,
     registry: &crate::sql::Pool,
-) -> (axum::http::Request<axum::body::Body>, bool) {
+) -> (axum::http::Request<axum::body::Body>, Resolution) {
     use crate::tenancy::OrgResolver as _;
     let (parts, body) = req.into_parts();
-    let under = match resolver.resolve(&parts, registry).await {
-        Ok(org) => org
-            .and_then(|o| o.path_prefix)
-            .is_some_and(|p| crate::tenancy::routes::path_is_under(parts.uri.path(), &p)),
+    let resolution = match resolver.resolve(&parts, registry).await {
+        Ok(None) => Resolution::None,
+        Ok(Some(org)) => {
+            if org
+                .path_prefix
+                .is_some_and(|p| crate::tenancy::routes::path_is_under(parts.uri.path(), &p))
+            {
+                Resolution::PrefixTenant
+            } else {
+                Resolution::Tenant
+            }
+        }
         Err(e) => {
             tracing::debug!(target: "rustango::server", error = %e, "tenant lookup failed");
-            false
+            Resolution::Failed
         }
     };
-    (axum::http::Request::from_parts(parts, body), under)
+    (axum::http::Request::from_parts(parts, body), resolution)
 }
 
 #[cfg(feature = "_http_layers")]
@@ -1376,6 +1474,145 @@ pub(crate) mod resolver_tests {
             .await
             .expect("resolve")
             .map(|o| o.slug)
+    }
+
+    /// A registry whose org `acme` lives at `acme.localhost`, or no org.
+    pub(crate) async fn hosted_registry(
+        with_org: bool,
+    ) -> (tempfile::TempDir, sqlx::SqlitePool, String) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let sq = crate::sql::Pool::connect_sqlite(&url)
+            .await
+            .expect("connect");
+        let pool = crate::sql::Pool::Sqlite(sq.clone());
+        crate::testkit::create_tables_for::<Org>(&pool)
+            .await
+            .expect("orgs");
+        if with_org {
+            let mut org = Org {
+                backend_kind: "sqlite".into(),
+                host_pattern: Some("acme.localhost".into()),
+                ..crate::testkit::org()
+            };
+            org.insert_pool(&pool).await.expect("insert org");
+        }
+        (tmp, sq, url)
+    }
+
+    pub(crate) async fn get(app: &Router, host: &str, path: &str) -> (u16, String) {
+        let req = axum::http::Request::get(path)
+            .header("host", host)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        let status = res.status().as_u16();
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// Names what served the request and whether the registry has tenants.
+    pub(crate) fn setup_router() -> Router {
+        Router::new().fallback(
+            |Extension(reg): Extension<crate::tenancy::TenantRegistry>| async move {
+                format!("unresolved:{}", reg.has_tenants().await.unwrap())
+            },
+        )
+    }
+
+    async fn app_with(sq: sqlx::SqlitePool, url: String, fallback: bool) -> Router {
+        let api = Router::new().route("/page", axum::routing::get(|| async { "tenant" }));
+        let b = Builder::<sqlx::Sqlite>::from_pool(sq, url, "localhost")
+            .api(api)
+            .with_health();
+        let b = if fallback {
+            b.unresolved_tenant(setup_router())
+        } else {
+            b
+        };
+        b.into_router().await.unwrap()
+    }
+
+    /// Unknown hosts and unserved apex paths reach the fallback; a
+    /// tenant's host and the console's own routes never do.
+    #[tokio::test]
+    async fn unresolved_tenant_serves_only_unresolved_requests() {
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = hosted_registry(true).await;
+        let app = app_with(sq, url, true).await;
+
+        assert_eq!(
+            get(&app, "acme.localhost", "/page").await,
+            (200, "tenant".into())
+        );
+        assert_eq!(get(&app, "acme.localhost", "/nowhere").await.0, 404);
+        let unresolved = (200, "unresolved:true".to_owned());
+        assert_eq!(get(&app, "ghost.localhost", "/page").await, unresolved);
+        assert_eq!(get(&app, "10.0.0.5:8080", "/").await, unresolved);
+        assert_eq!(get(&app, "localhost", "/setup").await, unresolved);
+        // The console keeps its login on the apex.
+        let (status, body) = get(&app, "localhost", "/login").await;
+        assert_eq!(status, 200);
+        assert_ne!(body, unresolved.1);
+        // A load balancer probing by IP still gets the health endpoint.
+        let (status, body) = get(&app, "10.0.0.5:8080", "/health").await;
+        assert_eq!(status, 200);
+        assert_ne!(body, unresolved.1);
+    }
+
+    /// Unset, routing is as before: an unknown host reaches the app's
+    /// routes (where `Tenant` answers 404), an unserved apex path is a 404.
+    #[tokio::test]
+    async fn without_unresolved_tenant_routing_is_unchanged() {
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = hosted_registry(true).await;
+        let app = app_with(sq, url, false).await;
+        assert_eq!(
+            get(&app, "ghost.localhost", "/page").await,
+            (200, "tenant".into())
+        );
+        assert_eq!(get(&app, "ghost.localhost", "/nowhere").await.0, 404);
+        assert_eq!(get(&app, "localhost", "/setup").await.0, 404);
+    }
+
+    /// A fresh install: the fallback sees an empty registry.
+    #[tokio::test]
+    async fn unresolved_tenant_sees_a_fresh_registry() {
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = hosted_registry(false).await;
+        let app = app_with(sq, url, true).await;
+        assert_eq!(
+            get(&app, "ghost.localhost", "/").await,
+            (200, "unresolved:false".into())
+        );
+    }
+
+    /// A probe by pod IP over plain HTTP reaches `/health` and `/ready`
+    /// through the Host allowlist and the HTTPS redirect; nothing else does.
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn health_probes_skip_the_host_check_and_https_redirect() {
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = hosted_registry(true).await;
+        let api = Router::new().route("/page", axum::routing::get(|| async { "tenant" }));
+        let app = Builder::<sqlx::Sqlite>::from_pool(sq, url, "localhost")
+            .api(api)
+            .with_health()
+            .allowed_hosts(crate::host_validation::AllowedHostsLayer::new([
+                ".localhost",
+            ]))
+            .ssl_redirect(crate::ssl_redirect::SslRedirectLayer::new())
+            .into_router()
+            .await
+            .unwrap();
+        for path in ["/health", "/ready"] {
+            assert_eq!(get(&app, "10.0.0.5:8080", path).await.0, 200, "{path}");
+        }
+        assert_eq!(get(&app, "10.0.0.5:8080", "/page").await.0, 400);
+        assert_eq!(get(&app, "10.0.0.5:8080", "/health/x").await.0, 400);
+        assert_eq!(get(&app, "acme.localhost", "/page").await.0, 301);
     }
 
     /// #1856 — without `.header_resolver()` a client `X-Org` picks no tenant.

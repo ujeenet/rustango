@@ -25,6 +25,10 @@ pub fn validate_value(
     match value {
         SqlValue::String(s) => {
             check_max_length(model, field, s)?;
+            // `blank` means "" is a valid value, whatever the rules for a non-empty one.
+            if field.blank && s.is_empty() {
+                return Ok(());
+            }
             check_choices(model, field, s)?;
             check_named_validators(model, field, s)
         }

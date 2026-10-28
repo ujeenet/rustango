@@ -43,8 +43,9 @@ probiert die Middleware sie **der Reihe nach** durch:
   Benutzer zurück);
 - ein Backend, das ihn nicht erkennt, gibt „keiner" zurück, und das nächste wird
   probiert;
-- wenn ein Backend hart fehlschlägt (z. B. ein inaktives Konto bei einem
-  *gültigen* Token), stoppt die Kette mit diesem Fehler;
+- wenn ein Backend hart fehlschlägt, stoppt die Kette mit diesem Fehler: ein
+  inaktives Konto mit *gültigem* Credential ist `403`, eine Sperre `429` (oder
+  `503`, wenn das Passwort-Hashing ausgelastet ist), ein ungültiges Token `401`;
 - wenn keines passt, erhält die Anfrage `401` (mit `require_auth`) oder fährt
   anonym fort (mit `optional_auth`).
 
@@ -70,6 +71,9 @@ let backends: Vec<Arc<dyn AuthBackend>> = vec![
 
 `ApiKeyBackend` und `JwtBackend` lesen beide `Bearer` und unterscheiden anhand der
 Form (das erste Punkt-Segment eines API-Schlüssels ist genau 8 Zeichen lang).
+Ein `Bearer`-Wert in JWT-Form, der die Prüfung nicht besteht, ist ein hartes
+`401` und geht nicht an das nächste Backend. `ModelBackend` zählt falsche
+Passwörter pro Mandant, IP und Benutzername; wiederholtes Raten bekommt `429`.
 Konstruieren Sie `JwtBackend` mit einem Geheimnis von **mindestens 32 Byte**
 (`JwtBackend::new(secret)` panikt andernfalls):
 
@@ -148,6 +152,26 @@ let app = Router::new()
     .route("/profile", get(profile))
     .require_auth(backends);           // 401 if no backend matches
 ```
+
+> **Vor 0.57.11 nahmen diese einen `Pool`.** Das tun sie nicht mehr, und die
+> Änderung ist ein Sicherheitsfix, kein Aufräumen. Der Pool wurde beim Bauen
+> des Routers erfasst und für jede Anfrage wiederverwendet, sodass eine von
+> einem Tenant ausgestellte Anmeldeinformation auf dem Host eines anderen
+> Tenants authentifizierte — die Backends suchten den Benutzer in der
+> Datenbank, mit der der Router zufällig gebaut worden war, und
+> `is_superuser` reiste ohne erneute Abfrage in einer Request-Extension weiter.
+>
+> Der Pool kommt jetzt aus dem Tenant, der für **jede Anfrage** aufgelöst
+> wird. Die Migration besteht im Weglassen des Arguments:
+>
+> ```rust
+> .require_auth(backends, pool.clone())  →  .require_auth(backends)
+> .require_perm("post.add", pool)        →  .require_perm("post.add")
+> ```
+>
+> Hängen Sie den Tenancy-Layer außerhalb davon ein. Ohne Tenant-Kontext in den
+> Request-Extensions schlagen sie geschlossen mit `500` fehl, statt eine
+> Datenbank zu raten.
 
 Verifiziertes Verhalten:
 
@@ -237,7 +261,8 @@ async fn who(remote_user: &str) -> Result<Option<Principal>, AuthError> {
 ```
 
 Dieselbe Semantik „erster Erfolg gewinnt / erster Fehler stoppt" wie die
-HTTP-Kette. Zum Absichern echter Routen verwenden Sie die `tenancy`-Middleware
+HTTP-Kette. `chain.get_user(id)` läuft die Kette genauso ab, um einen Principal
+neu zu laden, etwa einen aus einer Session. Zum Absichern echter Routen verwenden Sie die `tenancy`-Middleware
 oben.
 
 ---

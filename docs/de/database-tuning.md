@@ -99,8 +99,10 @@ lassen.
 | `pool_max_size` | `RUSTANGO_DB_MAX_CONNECTIONS` | 10 (Treiber) | Höchstzahl geöffneter Verbindungen. Weitere Requests warten. |
 | `pool_min_size` | `RUSTANGO_DB_MIN_CONNECTIONS` | 0 (Treiber) | Verbindungen, die auch im Leerlauf offen bleiben. |
 | `pool_acquire_timeout_secs` | `RUSTANGO_DB_ACQUIRE_TIMEOUT_SECS` | 5 | Wie lange ein Aufrufer auf eine Verbindung wartet, bevor er scheitert. |
-| `pool_idle_timeout_secs` | `RUSTANGO_DB_IDLE_TIMEOUT_SECS` | Treiber-Voreinstellung | Schließt Verbindungen, die so lange untätig waren. |
-| `pool_max_lifetime_secs` | `RUSTANGO_DB_MAX_LIFETIME_SECS` | Treiber-Voreinstellung | Schließt Verbindungen ab diesem Alter, unabhängig von der Nutzung. |
+| `pool_idle_timeout_secs` | `RUSTANGO_DB_IDLE_TIMEOUT_SECS` | 10 min (Treiber) | Schließt Verbindungen, die so lange untätig waren. |
+| `pool_max_lifetime_secs` | `RUSTANGO_DB_MAX_LIFETIME_SECS` | 30 min (Treiber) | Schließt Verbindungen ab diesem Alter, unabhängig von der Nutzung. |
+| `pool_test_before_acquire` | `RUSTANGO_DB_TEST_BEFORE_ACQUIRE` | `false` | Pingt jede Verbindung vor dem Ausleihen an. Ist es aus, werden nur Verbindungen angepingt, die länger als `RUSTANGO_DB_IDLE_PING_SECS` untätig waren. |
+| `pool_idle_ping_secs` | `RUSTANGO_DB_IDLE_PING_SECS` | 30 | Bei abgeschaltetem Ping wird eine Verbindung, die mindestens so lange untätig war, vor der Herausgabe angepingt. |
 
 Einen Parameter nicht zu setzen ist nicht dasselbe, wie ihn auf null zu
 setzen. Nicht gesetzt heißt: *die Voreinstellung des Treibers gilt* —
@@ -205,6 +207,6 @@ Datenbank-Modus seinen eigenen Pool, und diese werden separat über
 `TenantPoolsConfig` konfiguriert — siehe
 [Tenant-Pool-Tuning](manage.md) in der `manage`-Anleitung. Ihre
 Voreinstellungen weichen von denen des primären Pools ab; insbesondere
-ist das Acquire-Timeout der Tenants großzügiger, was einen Blick wert
+ist das Acquire-Timeout der Tenants großzügiger (30 Sekunden), was einen Blick wert
 ist, wenn Sie viele Tenants gegen Datenbanken betreiben, die unabhängig
 voneinander ausfallen können.

@@ -564,7 +564,7 @@ impl JobQueue for PgJobQueue {
     async fn dispatch<T: Job>(&self, payload: &T) -> Result<(), JobError> {
         use crate::core::SqlValue;
         let value = serde_json::to_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
-        let max_attempts = i32::try_from(super::max_attempts::<T>()).unwrap_or(i32::MAX);
+        let max_attempts = i32::try_from(super::max_attempts(payload)).unwrap_or(i32::MAX);
         let dialect = self.pool.dialect();
         let (p1, p2, p3, p4, p5) = (
             dialect.placeholder(1),
@@ -980,18 +980,20 @@ async fn run_one(
     }
 
     // The enqueuer's context, as `InMemoryJobQueue` does (#1229).
+    // `attempt` counts this run, so the run's 0-based number is one less.
+    let failed = u32::try_from(job.attempt - 1).unwrap_or(0);
     let run = job
         .context
         .clone()
-        .install((entry.handler)(job.payload.clone()));
-    let (result, held) = run_with_heartbeat(pool, worker, job.id, run).await;
+        .install((entry.handler)(job.payload.clone(), failed));
+    let (outcome, held) = run_with_heartbeat(pool, worker, job.id, run).await;
     if !held {
         // Another worker may own the row now; its outcome is not ours to write.
         tracing::warn!(id = job.id, worker = %worker.id, "job lease lost; result dropped");
         return;
     }
 
-    match result {
+    match outcome.result {
         Ok(()) => {
             finish_job(pool, worker, job.id).await;
         }
@@ -999,8 +1001,7 @@ async fn run_one(
             if job.attempt >= max_attempts {
                 handle_dead_letter(pool, dead_letter, worker, &job, &entry, &msg).await;
             } else {
-                let failed = u32::try_from(job.attempt - 1).unwrap_or(0);
-                let backoff = chrono::Duration::from_std(entry.backoff(failed)).unwrap_or_default();
+                let backoff = chrono::Duration::from_std(outcome.retry_in).unwrap_or_default();
                 let next_run: DateTime<Utc> = Utc::now() + backoff;
                 schedule_retry(pool, worker, job.id, next_run, &msg).await;
             }

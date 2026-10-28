@@ -23,6 +23,11 @@ use crate::cidr::CidrRange;
 ))]
 pub(crate) const ALLOW_ENV: &str = "RUSTANGO_OUTBOUND_ALLOW";
 
+/// The private targets a tenant-owned URL (a tenant's SSO issuer) may reach.
+/// Separate from [`ALLOW_ENV`], so trusting an internal `IdP` trusts no tenant.
+#[cfg(feature = "sso")]
+pub(crate) const TENANT_ALLOW_ENV: &str = "RUSTANGO_TENANT_OUTBOUND_ALLOW";
+
 /// Private targets an operator allowed. A host entry matches the URL
 /// host; a CIDR entry must cover every address the host resolves to.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
@@ -87,7 +92,7 @@ fn normalize_host(host: &str) -> String {
 }
 
 /// Held by tests that set or read [`ALLOW_ENV`].
-#[cfg(all(test, feature = "webhook-delivery"))]
+#[cfg(all(test, any(feature = "webhook-delivery", feature = "sso")))]
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Which addresses a target may resolve to.
@@ -123,6 +128,14 @@ impl TargetPolicy {
     pub(crate) fn from_env() -> Self {
         Self::Public(Allowlist::parse(
             &std::env::var(ALLOW_ENV).unwrap_or_default(),
+        ))
+    }
+
+    /// Public addresses plus [`TENANT_ALLOW_ENV`]: public only when unset.
+    #[cfg(feature = "sso")]
+    pub(crate) fn tenant_from_env() -> Self {
+        Self::Public(Allowlist::parse(
+            &std::env::var(TENANT_ALLOW_ENV).unwrap_or_default(),
         ))
     }
 }
@@ -422,15 +435,19 @@ fn refused_ip(ip: IpAddr, allow: &Allowlist) -> bool {
 
 /// Cloud instance-metadata endpoints (AWS, ECS, EKS Pod Identity, GCP, Azure,
 /// Oracle, Alibaba). No allowlist entry opens them: they hand out credentials.
-const METADATA_V4: [Ipv4Addr; 4] = [
+/// Azure's `WireServer` is a public address, so only this list refuses it.
+const METADATA_V4: [Ipv4Addr; 5] = [
     Ipv4Addr::new(169, 254, 169, 254),
     Ipv4Addr::new(169, 254, 170, 2),
     Ipv4Addr::new(169, 254, 170, 23),
     Ipv4Addr::new(100, 100, 100, 200),
+    Ipv4Addr::new(168, 63, 129, 16),
 ];
-const METADATA_V6: [Ipv6Addr; 2] = [
+const METADATA_V6: [Ipv6Addr; 3] = [
     Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254),
     Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x23),
+    // GCP metadata over IPv6.
+    Ipv6Addr::new(0xfd20, 0xce, 0, 0, 0, 0, 0, 0x254),
 ];
 
 fn is_metadata_ip(ip: IpAddr) -> bool {
@@ -579,6 +596,7 @@ mod tests {
             "http://10.0.0.1/",
             "http://localhost/",
             "http://[::1]/",
+            "http://168.63.129.16/",
         ] {
             let err = check_url(url, &TargetPolicy::public_only()).await.err();
             assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");
@@ -591,6 +609,9 @@ mod tests {
             "http://169.254.169.254/latest/meta-data/",
             "http://[::ffff:169.254.169.254]/",
             "http://100.100.100.200/",
+            "http://[fd20:ce::254]/",
+            "http://168.63.129.16/",
+            "http://168.63.129.16:32526/",
         ] {
             let err = check_url(url, &TargetPolicy::AllowPrivate).await.err();
             assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");
@@ -649,6 +670,8 @@ mod tests {
             "fd00:ec2::254",
             "100.100.100.200",
             "::ffff:169.254.169.254",
+            "fd20:ce::254",
+            "168.63.129.16",
         ] {
             let route = checked_addrs("metadata.google.internal", at(ip), &allow);
             assert!(matches!(route, Err(TargetError::Blocked)), "{ip}");
@@ -659,6 +682,7 @@ mod tests {
             "http://169.254.169.254/",
             "http://[fd00:ec2::254]/",
             "http://100.100.100.200/",
+            "http://[fd20:ce::254]/",
         ] {
             let err = check_url(url, &policy).await.err();
             assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");

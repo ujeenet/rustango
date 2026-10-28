@@ -63,6 +63,8 @@ pub trait CastValue {
     /// # Errors
     /// [`CastError`] when the stored form cannot be decoded.
     fn from_db(stored: &str) -> Result<Self::Value, CastError>;
+    /// `true` hides the value from `Debug`, for casts that hold secrets.
+    const SECRET: bool = false;
 }
 
 /// A model field stored through the [`CastValue`] impl `C`. See the
@@ -109,6 +111,12 @@ where
     C::Value: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if C::SECRET {
+            return f
+                .debug_tuple("Cast")
+                .field(&format_args!("[redacted]"))
+                .finish();
+        }
         f.debug_tuple("Cast").field(&self.value).finish()
     }
 }

@@ -112,6 +112,25 @@ pub fn make_migrations_scoped(
     name_override: Option<&str>,
 ) -> Result<Option<Migration>, MigrateError> {
     let prior = file::list_dir(dir)?;
+    let Some(mig) = plan_scoped(&prior, current, model_scope, migration_scope, name_override)?
+    else {
+        return Ok(None);
+    };
+    if !dir.exists() {
+        std::fs::create_dir_all(dir)?;
+    }
+    file::write(&dir.join(format!("{}.json", mig.name)), &mig)?;
+    Ok(Some(mig))
+}
+
+/// The file [`make_migrations_scoped`] would write after `prior`, unwritten.
+fn plan_scoped(
+    prior: &[Migration],
+    current: &SchemaSnapshot,
+    model_scope: crate::core::ModelScope,
+    migration_scope: super::MigrationScope,
+    name_override: Option<&str>,
+) -> Result<Option<Migration>, MigrateError> {
     // Each scope has its own chain, so keep only this scope's prior
     // migrations. Both chains start at `0001_`, since each has its
     // own head.
@@ -165,6 +184,7 @@ pub fn make_migrations_scoped(
         )));
     }
 
+    warn_untracked_table_comments(current);
     let changes = detect_changes(&prev_snapshot, current);
     if changes.is_empty() {
         return Ok(None);
@@ -180,8 +200,8 @@ pub fn make_migrations_scoped(
     let name = format!("{next_index:04}_{suffix}");
     let created_at = chrono::Utc::now().to_rfc3339();
 
-    let mig = Migration {
-        name: name.clone(),
+    Ok(Some(Migration {
+        name,
         created_at,
         prev: prev_name,
         atomic: true,
@@ -190,14 +210,25 @@ pub fn make_migrations_scoped(
         merges: Vec::new(),
         snapshot: current.clone(),
         forward: changes.into_iter().map(Operation::Schema).collect(),
-    };
+    }))
+}
 
-    if !dir.exists() {
-        std::fs::create_dir_all(dir)?;
+/// Snapshots do not carry `db_table_comment` yet, so file migrations
+/// never write it; say so instead of dropping it silently.
+fn warn_untracked_table_comments(current: &SchemaSnapshot) {
+    for e in crate::core::inventory::iter::<crate::core::ModelEntry> {
+        let Some(comment) = e.schema.db_table_comment else {
+            continue;
+        };
+        if current.tables.iter().any(|t| t.name == e.schema.table) {
+            tracing::warn!(
+                target: "rustango::migrate",
+                "`{}`: db_table_comment {comment:?} is not written by file migrations yet; \
+                 add it with a data migration",
+                e.schema.table,
+            );
+        }
     }
-    let path = dir.join(format!("{name}.json"));
-    file::write(&path, &mig)?;
-    Ok(Some(mig))
 }
 
 /// Generate the framework's own **system-app** migrations into
@@ -422,6 +453,22 @@ pub fn make_migrations_from(
     name_override: Option<&str>,
 ) -> Result<Option<Migration>, MigrateError> {
     let prior = file::list_dir(dir)?;
+    let Some(mig) = plan_from(&prior, current, name_override)? else {
+        return Ok(None);
+    };
+    if !dir.exists() {
+        std::fs::create_dir_all(dir)?;
+    }
+    file::write(&dir.join(format!("{}.json", mig.name)), &mig)?;
+    Ok(Some(mig))
+}
+
+/// The file [`make_migrations_from`] would write after `prior`, unwritten.
+fn plan_from(
+    prior: &[Migration],
+    current: &SchemaSnapshot,
+    name_override: Option<&str>,
+) -> Result<Option<Migration>, MigrateError> {
     let chain: Vec<&Migration> = prior.iter().collect();
     refuse_branched(&chain)?;
     let mut prev_snapshot = prior
@@ -458,6 +505,7 @@ pub fn make_migrations_from(
         )));
     }
 
+    warn_untracked_table_comments(current);
     let changes = detect_changes(&prev_snapshot, current);
     if changes.is_empty() {
         return Ok(None);
@@ -470,8 +518,8 @@ pub fn make_migrations_from(
     let name = format!("{next_index:04}_{suffix}");
     let created_at = chrono::Utc::now().to_rfc3339();
 
-    let mig = Migration {
-        name: name.clone(),
+    Ok(Some(Migration {
+        name,
         created_at,
         prev: prev_name,
         atomic: true,
@@ -480,14 +528,30 @@ pub fn make_migrations_from(
         merges: Vec::new(),
         snapshot: current.clone(),
         forward: changes.into_iter().map(Operation::Schema).collect(),
-    };
+    }))
+}
 
-    if !dir.exists() {
-        std::fs::create_dir_all(dir)?;
+/// Whether today's models hold a change no file in `prior` has yet; one
+/// diff per scope when `scoped`, as a plain `makemigrations` splits it.
+///
+/// # Errors
+/// As [`make_migrations`].
+pub(crate) fn models_ahead_of(prior: &[Migration], scoped: bool) -> Result<bool, MigrateError> {
+    use crate::core::ModelScope;
+    super::snapshot::check_registry_junctions()?;
+    if !scoped {
+        return Ok(plan_from(prior, &SchemaSnapshot::from_registry(), None)?.is_some());
     }
-    let path = dir.join(format!("{name}.json"));
-    file::write(&path, &mig)?;
-    Ok(Some(mig))
+    for (model, file) in [
+        (ModelScope::Registry, super::MigrationScope::Registry),
+        (ModelScope::Tenant, super::MigrationScope::Tenant),
+    ] {
+        let current = SchemaSnapshot::from_registry_for_scope(model);
+        if plan_scoped(prior, &current, model, file, None)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Names reachable from the last in-scope migration through every
@@ -540,7 +604,7 @@ fn merged_branches<'a>(chain: &[&'a Migration], m: &'a Migration) -> Vec<&'a str
 /// before it: `--empty` copies its parent's snapshot and the edit never
 /// updates it (#2573). A snapshot that differs from its parent's already
 /// holds its ops, so the walk stops there.
-fn effective_snapshot(chain: &[&Migration], head: &Migration) -> SchemaSnapshot {
+pub(super) fn effective_snapshot(chain: &[&Migration], head: &Migration) -> SchemaSnapshot {
     let parent = |m: &Migration| {
         m.prev
             .as_deref()

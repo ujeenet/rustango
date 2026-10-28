@@ -37,20 +37,20 @@ y luego el resto de la página es una referencia de cada perilla.
 
 ---
 
-## Table of contents
-- [Vistas de API vs vistas HTML](#api-views-vs-html-views) — ¿JSON para clientes o páginas HTML?
-- [Construir una API REST de blog](#build-a-rest-blog-api) — el recorrido completo
-- [El matrimonio con el serializador: entrada + salida](#the-serializer-marriage-input--output)
-- [Las dos formas de definir un ViewSet](#the-two-ways-to-define-a-viewset)
-- [Los endpoints CRUD](#the-crud-endpoints) · [Elegir cuáles exponer](#choosing-which-operations-to-expose)
-- [Referencia de `#[viewset(...)]`](#viewset-attribute-reference) · [Referencia del builder](#builder-reference)
-- [Filtrado, búsqueda y ordenación](#filtering-search-and-ordering) · [Paginación](#pagination)
-- [Validación](#validation) · [Permisos y throttling](#permissions-and-throttling) · [Acciones personalizadas](#custom-actions-beyond-crud)
-- [Montaje](#mounting) · [Backends](#backend-support)
+## Tabla de contenidos
+- [Vistas de API vs vistas HTML](#vistas-de-api-vs-vistas-html) — ¿JSON para clientes o páginas HTML?
+- [Construir una API REST de blog](#construir-una-api-rest-de-blog) — el recorrido completo
+- [El matrimonio con el serializador: entrada + salida](#el-matrimonio-con-el-serializador-entrada--salida)
+- [Las dos formas de definir un ViewSet](#las-dos-formas-de-definir-un-viewset)
+- [Los endpoints CRUD](#los-endpoints-crud) · [Elegir cuáles exponer](#elegir-qué-operaciones-exponer)
+- [Referencia de `#[viewset(...)]`](#referencia-del-atributo-viewset) · [Referencia del builder](#referencia-del-builder)
+- [Filtrado, búsqueda y ordenación](#filtrado-búsqueda-y-ordenación) · [Paginación](#paginación)
+- [Validación](#validación) · [Permisos y throttling](#permisos-y-throttling) · [Acciones personalizadas](#acciones-personalizadas-más-allá-de-crud)
+- [Montaje](#montaje) · [Backends](#soporte-de-backends)
 
 ---
 
-## API views vs HTML views
+## Vistas de API vs vistas HTML
 
 Antes del tutorial, una bifurcación en el camino. **Rustango** tiene dos formas
 de convertir un modelo en endpoints, y un ViewSet es una de ellas:
@@ -79,7 +79,7 @@ para el lado HTML consulta [Vistas HTML — páginas renderizadas en el servidor
 
 ---
 
-## Build a REST blog API
+## Construir una API REST de blog
 
 Construiremos un blog con dos modelos — `Author` y `Post` — y expondremos `Post`
 como un recurso REST en `/api/posts` cuya forma JSON y validación están
@@ -90,7 +90,7 @@ Este recorrido asume un proyecto creado con `cargo rustango new myblog`
 (consulta [Primeros pasos](getting-started.md) para la configuración del proyecto
 y la base de datos). Cada paso es un comando o archivo real.
 
-### Step 1 — Create the blog app
+### Paso 1 — Crear la app del blog
 
 Las apps son módulos de funcionalidad autocontenidos:
 
@@ -101,7 +101,7 @@ cargo run -- startapp blog
 Eso escribe `src/blog/{mod,models,views,urls,tests}.rs` y conecta el módulo
 dentro de `main.rs` + el agregador `urls::api()`.
 
-### Step 2 — Define the models
+### Paso 2 — Definir los modelos
 
 `src/blog/models.rs` — un `Author` y un `Post` (una clave foránea los enlaza):
 
@@ -142,7 +142,7 @@ pub struct Post {
 }
 ```
 
-### Step 3 — Migrate
+### Paso 3 — Migrar
 
 Genera y aplica la migración (igual que `makemigrations` + `migrate`):
 
@@ -151,7 +151,7 @@ cargo run -- makemigrations
 cargo run -- migrate
 ```
 
-### Step 4 — Scaffold the serializer
+### Paso 4 — Generar el serializador
 
 El serializador define el contrato de petición/respuesta de la API.
 Genera el esqueleto:
@@ -210,13 +210,13 @@ Registra el módulo — añade `pub mod post_serializer;` a `src/blog/mod.rs`.
 Nota que solo escribimos un validador (`title_min_3`); los campos también
 **heredan las restricciones del modelo** automáticamente — a `title` se le
 verifica la longitud contra el `max_length = 200` del modelo, y una columna con
-`choices`/`min`/`max` también se verificaría, todo devolviendo `400`s amigables
+`choices`/`min`/`max` también se verificaría, todo devolviendo `422`s amigables
 en la escritura. Añade los atributos de serializador `max_length` / `min_length` /
 `min` / `max` para sobrescribir el límite de un campo. (Consulta la
 [guía de serializadores](serializers.md#validación) para la historia completa de
 validación.)
 
-### Step 5 — Scaffold the ViewSet and wire the serializer
+### Paso 5 — Generar el ViewSet y conectar el serializador
 
 ```bash
 cargo run -- make:viewset PostViewSet --model Post
@@ -243,13 +243,15 @@ use rustango::ViewSet;
 pub struct PostViewSet;
 ```
 
-Añade `pub mod post_view_set;` a `src/blog/mod.rs`.
+El generador escribe `src/post_view_set.rs` (empieza como `read_only`, y su
+línea `use` asume `crate::models::Post`). Muévelo a `src/blog/post_view_set.rs`
+como se muestra y añade `pub mod post_view_set;` a `src/blog/mod.rs`.
 
 > `fields` es obligatorio: es la lista blanca de escritura, así que un body no
 > puede fijar otra columna (por ejemplo `author_id`). Un serializador la restringe
 > más; nunca la amplía.
 
-### Step 6 — Mount the routes
+### Paso 6 — Montar las rutas
 
 En un proyecto de un solo inquilino, anida el router del ViewSet bajo una ruta,
 pasando el pool:
@@ -266,13 +268,18 @@ pub fn api(pool: Pool) -> Router {
 }
 ```
 
-`make:api_routes blog` genera exactamente este agregador si prefieres
-generarlo. Conecta `blog::urls::api(pool)` en tu `urls.rs` de nivel superior.
+`make:api_routes blog` genera la misma forma en `src/blog/api_routes.rs` si
+prefieres generarlo. El `urls::api()` de nivel superior no tiene pool, así que
+monta este router desde `src/main.rs`, donde el `Cli` te da el pool del
+servidor. Un nest en la raíz se rechaza, así que anídalo bajo un prefijo y quita
+ese prefijo de la ruta del ViewSet:
+`.nest_with("/api", |pool| myapp::blog::urls::api(pool))` con
+`PostViewSet::router("/posts", pool)` dentro.
 
-### Step 7 — Run it and exercise every endpoint
+### Paso 7 — Ejecutarlo y probar cada endpoint
 
 ```bash
-cargo run            # listening on http://0.0.0.0:8080
+cargo run            # listening on http://127.0.0.1:8080
 ```
 
 **Crear** (`POST`). El serializador valida primero, luego escribe solo los campos
@@ -299,15 +306,16 @@ La respuesta tiene la forma del **serializador**: `body` regresó como `content`
 apareció el `summary` calculado, y `published_at` (de solo lectura, establecido
 por el servidor) está presente.
 
-**La validación rechaza la entrada inválida** con un `400` —
-arreglos de mensajes indexados por campo:
+**La validación rechaza la entrada inválida** con un `422` —
+arreglos de mensajes indexados por campo bajo `details`:
 
 ```bash
 curl -i -X POST localhost:8080/api/posts \
   -H 'content-type: application/json' \
   -d '{"title":"hi","content":"x","author_id":1}'
-# HTTP/1.1 400 Bad Request
-# {"title":["title must be at least 3 characters"]}
+# HTTP/1.1 422 Unprocessable Entity
+# {"error":"validation_failed","message":"invalid input","status":422,
+#  "details":{"title":["title must be at least 3 characters"]}}
 ```
 
 **Los campos de solo lectura / calculados que un cliente envía se ignoran** — no
@@ -343,7 +351,7 @@ curl -X DELETE localhost:8080/api/posts/1              # destroy → 204
 La validación de `PATCH` corre sobre lo que envías; los campos de solo lectura se
 mantienen en su valor de servidor incluso si se envían.
 
-### Step 8 — Filter, search, order, paginate
+### Paso 8 — Filtrar, buscar, ordenar, paginar
 
 Todo en el endpoint de listado, sin código adicional (declaraste los campos en el
 Paso 5):
@@ -356,7 +364,7 @@ curl 'localhost:8080/api/posts?ordering=title'                    # sort (asc)
 curl 'localhost:8080/api/posts?page=2&page_size=10'               # paginate
 ```
 
-### Step 9 — Test it
+### Paso 9 — Probarlo
 
 El framework incluye un cliente de pruebas en proceso — haz aserciones sobre
 respuestas HTTP reales sin arrancar un servidor:
@@ -369,6 +377,8 @@ use rustango::sql::Pool;
 use serde_json::json;
 
 async fn app() -> axum::Router {
+    // `Pool::connect` picks the backend from the URL scheme, so the
+    // same test runs against sqlite, Postgres or MySQL.
     let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
     PostViewSet::router("/api/posts", pool)
 }
@@ -379,8 +389,8 @@ async fn rejects_short_title() {
     let res = client.post("/api/posts")
         .json(&json!({"title":"hi","content":"x","author_id":1}))
         .send().await;
-    assert_eq!(res.status, 400);
-    assert!(res.json_value()["title"].is_array());   // field-keyed error shape
+    assert_eq!(res.status, 422);
+    assert!(res.json_value()["details"]["title"].is_array());   // field-keyed error shape
 }
 
 #[tokio::test]
@@ -404,13 +414,13 @@ referencia detrás de cada paso.
 
 ---
 
-## The serializer marriage: input + output
+## El matrimonio con el serializador: entrada + salida
 
 Conectar un serializador (vía `serializer = …` en el derive, o `.serializer::<S>()`
 en el builder) cambia **ambas** direcciones. Funciona igual en PostgreSQL, MySQL
 y SQLite.
 
-### Output — responses render through the serializer
+### Salida — las respuestas se renderizan a través del serializador
 
 Las respuestas de `list`, `retrieve`, `create` y `update` se producen mediante
 `S::from_model(&row)`, de modo que las sobrescrituras del serializador dan forma
@@ -430,15 +440,15 @@ al JSON:
 > base — conecta las relaciones explícitamente si un campo anidado debe
 > poblarse.
 
-### Input — requests are validated and filtered
+### Entrada — las peticiones se validan y filtran
 
 En `create` y `update`, cuando hay un serializador registrado:
 
 1. **Se ejecuta la validación.** El `validate()` del serializador — cada
    `#[serializer(validate = "fn")]` por campo más el `validate` cruzado a nivel
    de contenedor — corre contra el cuerpo JSON. Ante un fallo, la petición se
-   rechaza con `400 Bad Request` con la forma de error indexada por campo: un objeto JSON
-   indexado por nombre de campo con arreglos de mensajes, p. ej.
+   rechaza con `422 Unprocessable Entity` (`validation_failed`) con la forma de error
+   indexada por campo en `details`: un objeto JSON indexado por nombre de campo con arreglos de mensajes, p. ej.
    `{"title":["title must be at least 3 characters"]}`.
 2. **Filtrado de campos escribibles.** Solo se persisten los campos escribibles
    del serializador; los campos `read_only` y `method`/calculados que un cliente
@@ -456,7 +466,7 @@ saber cómo escribir los validadores.
 
 ---
 
-## The two ways to define a ViewSet
+## Las dos formas de definir un ViewSet
 
 Ambas producen un `axum::Router` con las mismas rutas CRUD.
 
@@ -502,13 +512,13 @@ backends de filtro personalizados, paginación por cursor).
 
 ---
 
-## The CRUD endpoints
+## Los endpoints CRUD
 
 Montar en `/api/posts` conecta las seis operaciones REST:
 
 | Verbo | Ruta | Acción | Éxito | Cuerpo |
 |---|---|---|---|---|
-| `GET` | `/api/posts` | **list** | 200 | sobre paginado (ver [Paginación](#pagination)) |
+| `GET` | `/api/posts` | **list** | 200 | sobre paginado (ver [Paginación](#paginación)) |
 | `POST` | `/api/posts` | **create** | 201 | el objeto creado — *o un arreglo, para creación masiva* |
 | `GET` | `/api/posts/{pk}` | **retrieve** | 200 | el objeto |
 | `PUT` | `/api/posts/{pk}` | **update** (completa) | 200 | el objeto actualizado |
@@ -523,15 +533,21 @@ haz `POST` de un *arreglo* JSON y cada elemento se inserta en orden, **dentro de
 transacción**. Un elemento inválido rechaza todo el lote y **no deja nada atrás** — lo
 detecte la validación o la base de datos.
 
-> Esa segunda mitad no era cierta hasta [#1403](https://github.com/ujeenet/rustango/issues/1403).
+> Esa segunda mitad no era cierta en versiones antiguas.
 > La validación era atómica; las escrituras eran un `INSERT` cada una sin transacción,
 > así que una violación de unicidad o de clave foránea en el elemento 5 confirmaba los
 > elementos 0–4, devolvía `400 bulk entry 5` y no nombraba ninguna de las filas creadas.
 > Esas violaciones son justo la clase que la validación no puede decidir de antemano.
 
+Un lote admite como mucho 1000 filas (`max_bulk_create(n)`; más es un `413`), y
+cada fila gasta una unidad del throttle de `create`.
+
+En un modelo `#[rustango(soft_delete)]`, `DELETE` marca la columna en lugar de
+borrar, y todas las acciones tratan una fila con borrado lógico como inexistente.
+
 ---
 
-## Choosing which operations to expose
+## Elegir qué operaciones exponer
 
 Para un recurso de **solo lectura** (solo list + retrieve), añade `read_only`:
 
@@ -542,27 +558,28 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title"]).read_only() // builder
 
 No hay un interruptor por verbo más allá de read-only. Para "todo excepto
 eliminar", monta el ViewSet y sobrescribe la única ruta con tu propio handler
-(ver [Acciones personalizadas](#custom-actions-beyond-crud)).
+(ver [Acciones personalizadas](#acciones-personalizadas-más-allá-de-crud)).
 
 ---
 
-## `#[viewset(...)]` attribute reference
+## Referencia del atributo `#[viewset(...)]`
 
 | Clave | Ejemplo | Por defecto | Qué hace |
 |---|---|---|---|
 | `model` | `model = Post` | **requerido** | El modelo sobre el que se construye el recurso. |
-| `serializer` | `serializer = path::To::S` | ninguno | Conecta un serializador para **salida + entrada** tipadas (ver [arriba](#the-serializer-marriage-input--output)). |
+| `serializer` | `serializer = path::To::S` | ninguno | Conecta un serializador para **salida + entrada** tipadas (ver [arriba](#el-matrimonio-con-el-serializador-entrada--salida)). |
 | `fields` | `"id, title, body"` | **obligatorio** | Los únicos campos que las respuestas muestran y los bodies pueden escribir; las demás claves se ignoran. Un serializador la restringe. |
 | `filter_fields` | `"author_id, status"` | ninguno | Campos filtrables vía `?field=value` (+ lookups). |
 | `search_fields` | `"title, body"` | ninguno | Campos con los que coincide la caja `?search=` (OR sin distinción de mayúsculas). |
 | `ordering` | `"-published_at, id"` | ninguno | Orden por defecto (`-` = DESC). |
 | `page_size` | `20` | 20 | Filas por página (el `?page_size=` del cliente se limita a 100). |
 | `read_only` | *(flag)* | apagado | Expone solo GET (list + retrieve). |
-| `permissions(...)` | `permissions(create = "post.add")` | ninguno | Codenames de permiso por acción. |
+| `allow_anonymous` | *(flag)* | apagado | Indica que las acciones de escritura sin codenames deben ser abiertas; silencia el aviso al montar. |
+| `permissions(...)` | `permissions(create = "posts.add")` | ninguno | Codenames de permiso por acción. |
 
 ---
 
-## Builder reference
+## Referencia del builder
 
 `ViewSet::for_model(SCHEMA, &["id", "title"])` recibe la lista de campos: los únicos
 que las respuestas muestran y los bodies pueden escribir. Cada otro método devuelve `Self`:
@@ -576,21 +593,26 @@ que las respuestas muestran y los bodies pueden escribir. Cada otro método devu
 | `ordering_fields(&["…"])` | Lista blanca de qué campos puede usar `?ordering=`. |
 | `page_size(n)` | Tamaño de página por defecto (≤ 100). |
 | `max_page_size(n)` | Sube o baja el propio tope del cliente (100 por defecto). |
-| `pk_param(name)` | Renombra el parámetro de ruta de las rutas de detalle. |
+| `pk_param(name)` | Renombra el parámetro de ruta de las rutas de detalle (`pk_param_name()` lo lee). |
+| `openapi_query(bool)` | Describe la ruta `QUERY` en el documento OpenAPI generado (necesita herramientas de OpenAPI 3.2). Apagado por defecto; la ruta se monta igualmente. |
+| `related_filter(fk_field, backend)` | Limita qué filas destino puede nombrar una FK del cuerpo; cualquier otra es un `422`. |
 | `read_only()` | Solo GET. |
+| `allow_anonymous()` | Las escrituras sin codenames son intencionadas; omite el aviso al montar. |
+| `max_bulk_create(n)` | Máximo de filas que puede llevar una creación masiva (1000 por defecto). |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Compuertas de codename por acción (la última sobre tenencia). |
-| `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Paginación por keyset (omite `COUNT(*)`). |
+| `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Paginación por keyset (omite `COUNT(*)`). Cualquier columna NOT NULL de orden total: entero, timestamp, fecha, uuid o cadena. |
 | `limit_offset_pagination()` | Ventaneo `?limit=&offset=`. |
 | `pagination(PaginationStyle::…)` | Establece el estilo explícitamente. |
 | `filter_backend(closure)` | Añade predicados `WHERE` personalizados más allá de `filter_fields`. |
-| `throttle(…)` / `throttle_all(max, secs)` | Límites de tasa de ventana fija por acción. |
-| `router(prefix, pgpool)` | Monta (Postgres, pool estático). |
+| `throttle(…)` / `throttle_all(max, secs)` | Límites de tasa de ventana fija por acción; `QUERY` gasta el presupuesto de list. |
+| `admin_add_hooks()` | Ejecuta los hooks de permiso por objeto `"add"` del admin al crear, sobre la petición y sobre cada fila escrita; un rechazo es un `403`. Desactivado por defecto. |
+| `router(prefix, pgpool)` | Monta (solo Postgres, `PgPool` estático; característica `postgres`). |
 | `router_pool(prefix, pool)` | Monta tri-dialecto (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenencia)* monta con resolución de inquilino por petición. |
 
 ---
 
-## Filtering, search and ordering
+## Filtrado, búsqueda y ordenación
 
 Todo gobernado por parámetros de consulta en el endpoint de **listado**.
 
@@ -605,20 +627,30 @@ lookups vía un sufijo `__`:
 ?body__isnull=false
 ```
 
-Lookups soportados: `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `contains`,
-`icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `isnull`
-(sin sufijo = exacto). Los campos que no están en `filter_fields` se ignoran.
+Lookups soportados: `iexact`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`,
+`range` (`lo,hi`), `contains`, `icontains`, `startswith`, `istartswith`,
+`endswith`, `iendswith`, `isnull`, y las partes de fecha `year`, `month`, `day`,
+`hour`, `minute`, `second`, `quarter`, `week`, `week_day`, `date`, seguidas
+opcionalmente de una comparación (`created_at__date__gte=2026-01-01`). Sin
+sufijo = exacto. Una fecha simple en un `__gte` / `__lte` sobre un datetime cubre
+todo ese día UTC.
+
+Un valor vacío no filtra. Un lookup desconocido o un valor que no se puede
+interpretar es un `400` que nombra el parámetro; con un `filter_backend`
+registrado, un lookup desconocido se deja al backend. Los lookups LIKE necesitan
+un campo de texto. Los campos que no están en `filter_fields` se ignoran.
 
 **Búsqueda** — `?search=term` coincide con `search_fields` mediante un OR sin
 distinción de mayúsculas.
 
 **Ordenación** — `?ordering=field,-other` (`-` = DESC). Cualquier campo que la
 respuesta muestra (con un serializador, los campos que renderiza) es ordenable a menos que establezcas `.ordering_fields([...])` para restringirlo. Sin
-un parámetro, se aplica el `ordering` por defecto. Todos se componen.
+un parámetro, se aplica el `ordering` por defecto, o si no el `default_order` del
+modelo; la clave primaria siempre desempata. Todos se componen.
 
 ---
 
-## Pagination
+## Paginación
 
 > **Trampa — pagina sobre un orden determinista.** La paginación por número de
 > página y por limit/offset asume una clasificación estable; ordenar por una
@@ -637,7 +669,11 @@ difiere según el estilo:
 ```
 
 **Cursor** — `.cursor_pagination("id")` (o `_desc`); omite `COUNT(*)`, ideal para
-tablas muy grandes. `?cursor=<token>&page_size=20`:
+tablas muy grandes. El campo debe tener un **orden total**: un entero, timestamp,
+fecha, uuid o cadena. `"id"` es la elección habitual; un timestamp `created_at`
+es la otra, y es lo que quieres en una tabla de solo inserción. Una columna
+float, bool, json o blob provoca un panic al construir en lugar de fallar en cada
+petición. `?cursor=<token>&page_size=20`:
 
 ```json
 { "page_size": 20, "next": "<opaque-cursor-or-null>", "results": [ … ] }
@@ -649,22 +685,22 @@ tablas muy grandes. `?cursor=<token>&page_size=20`:
 { "count": 137, "limit": 20, "offset": 40, "results": [ … ] }
 ```
 
-`page_size` / `limit` se limitan a 100.
+`page_size` / `limit` se limitan a `max_page_size` (100 por defecto).
 
 ---
 
-## Validation
+## Validación
 
 Con un **serializador conectado**, la ruta de create/update ejecuta los
-validadores del serializador y devuelve `400`s indexados por campo — la forma
-recomendada de validar (ver [el matrimonio](#the-serializer-marriage-input--output)
+validadores del serializador y devuelve `422`s indexados por campo — la forma
+recomendada de validar (ver [el matrimonio](#el-matrimonio-con-el-serializador-entrada--salida)
 y la [guía de serializadores](serializers.md#validación)). Se ejecutan tres capas:
 
 - **Restricciones declarativas** — `max_length` / `min_length` / `min` / `max`, y
   por defecto el campo **hereda del modelo** `max_length` / `min` / `max` /
   `choices`. Así, una columna `#[rustango(max_length = 200)]` se verifica en
-  longitud en la API sin configuración extra, convirtiendo los `500`s que serían por restricción de BD en `400`s
-  amigables como `{"title":["Ensure this value has at most 200 characters."]}`.
+  longitud en la API sin configuración extra, convirtiendo los `500`s que serían por restricción de BD en `422`s
+  amigables con `details` como `{"title":["Ensure this value has at most 200 characters."]}`.
 - **Por campo** `validate = "fn"` y un hook `validate` **cruzado** — tus reglas
   personalizadas (formatos, entre campos, lógica de negocio).
 
@@ -675,8 +711,9 @@ Independientemente de un serializador, la ruta de escritura siempre aplica el
   `bool` inválido es un `400` que nombra el campo.
 - **Requerido / NOT NULL** — un campo no anulable faltante (o cadena vacía para un
   `String` no anulable) es un `400`; los campos anulables aceptan vacío → `NULL`.
-- **Restricciones de base de datos** — únicos, claves foráneas y restricciones
-  check afloran como un `400` en INSERT/UPDATE.
+- **Restricciones de base de datos** — una clave duplicada es un `409`
+  (`conflict`); las claves foráneas y las restricciones check afloran como un
+  `400` en INSERT/UPDATE.
 
 Así que incluso sin un serializador obtienes validación de tipo + requerido +
 restricción de BD; conecta un serializador para obtener verificaciones
@@ -686,7 +723,7 @@ reglas por campo y entre campos.
 ### Formas de respuesta de error
 
 Todo error de un ViewSet es un cuerpo [`ApiError`](api-conventions.md), la misma
-forma que envían tus propios handlers (#1193):
+forma que envían tus propios handlers:
 
 ```json
 {"error": "<machine code>", "message": "<sentence>", "status": 400}
@@ -705,7 +742,7 @@ forma que envían tus propios handlers (#1193):
 
 ---
 
-## Permissions and throttling
+## Permisos y throttling
 
 > **Un ViewSet es público por defecto.** Montar uno expone los seis verbos CRUD a
 > cualquiera — no hay autenticación integrada. Protégelo con `permissions(...)`
@@ -719,11 +756,11 @@ use rustango::viewset::{ViewSet, ViewSetPerms};
 
 ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .permissions(ViewSetPerms {
-        list:     vec!["post.view".into()],
-        retrieve: vec!["post.view".into()],
-        create:   vec!["post.add".into()],
-        update:   vec!["post.change".into()],
-        destroy:  vec!["post.delete".into()],
+        list:     vec!["posts.view".into()],
+        retrieve: vec!["posts.view".into()],
+        create:   vec!["posts.add".into()],
+        update:   vec!["posts.change".into()],
+        destroy:  vec!["posts.delete".into()],
     })
     .router_pool("/api/posts", pool);
 ```
@@ -731,7 +768,12 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
 Una lista de acción vacía = sin verificación. La aplicación lee un usuario
 autenticado de la petición (la integración de autenticación de `tenancy`); los
 superusuarios la eluden, un usuario ausente se deniega. `.permissions_for_model::<Post>()`
-autocompleta los codenames estándar `post.view`/`add`/`change`/`delete`.
+autocompleta los codenames estándar `<table>.view` / `.add` / `.change` /
+`.delete` (`posts.view`, … para la tabla `posts`).
+
+Un ViewSet aún no ejecuta los hooks de permiso por objeto `change`, `delete` o `view`
+del admin. Si su modelo tiene alguno, montarlo registra un aviso; la 0.62.0 los
+ejecutará al actualizar, eliminar y leer.
 
 **El throttling** aplica límites de ventana fija por cliente, por acción:
 
@@ -744,10 +786,11 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
 Sobre el límite → `429 Too Many Requests` + `Retry-After`. Los contadores son por
 proceso; la clave del cliente es la IP de cliente de confianza (`TrustedRealIp`,
 si no el socket; ver [security.md](security.md)).
+Con `tenant_router` cada inquilino tiene sus propios presupuestos.
 
 ---
 
-## Custom actions beyond CRUD
+## Acciones personalizadas más allá de CRUD
 
 No hay ningún atributo para añadir rutas extra a un ViewSet — es estrictamente las seis rutas
 CRUD. Para endpoints adicionales, monta tus propios handlers junto al ViewSet:
@@ -764,7 +807,7 @@ let api = Router::new()
 Para lógica `WHERE` adicional, `.filter_backend(…)` aporta predicados sin una ruta
 separada.
 
-### Scoping rows to the authenticated principal
+### Acotar filas al principal autenticado
 
 Un backend se ejecuta en **cada** acción — `list`, `retrieve`, `update`,
 `destroy` — de modo que acota el queryset base de todas las rutas. Una fila que
@@ -782,7 +825,22 @@ Los ámbitos globales estáticos de un modelo también limitan lo que se lee, no
 escribe: una creación o actualización puede salir del ámbito (201 sin cuerpo, o 204).
 Para una frontera de seguridad, usa un backend de filtro con `write_pins`.
 
-#### `OwnedBy` — the shipped backend
+Una escritura devuelve su fila completa solo a quien tiene el permiso `retrieve`;
+los demás reciben solo `{"<pk>": …}` (uno por fila en una creación masiva). Una
+creación individual también envía una cabecera `Location` que apunta a la ruta
+de detalle.
+
+Una FK que fija un body debe nombrar una fila que muestren los ámbitos globales
+del destino; una actualización puede reenviar el valor que la fila ya tiene. Para
+restringirla más, añade un backend para ese campo; se ejecuta contra el modelo de
+destino, y cualquier otra fila es un 422:
+
+```rust
+ViewSet::for_model(Comment::SCHEMA, &["id", "body", "post_id"])
+    .related_filter("post_id", OwnedBy::column("author_id"))
+```
+
+#### `OwnedBy` — el backend incluido
 
 La mayoría de los recursos con dueño necesitan exactamente una regla: *filas cuya
 columna de propiedad es el llamador*. Nombra la columna y móntala.
@@ -811,7 +869,7 @@ Los superusuarios no son especiales por defecto; `.superuser_sees_all()` lo
 habilita, porque "los admins ven todo" es una decisión de producto, no del
 framework.
 
-#### Where the identity comes from
+#### De dónde viene la identidad
 
 [`Principal`] es el único tipo de identidad, resuelto a partir de lo que sea que
 verificó la petición — un `Principal` explícito, un `AuthenticatedUser` dejado por
@@ -838,7 +896,7 @@ async fn home(OptionalPrincipal(who): OptionalPrincipal) -> String {
 }
 ```
 
-#### Writing your own backend
+#### Escribir tu propio backend
 
 Cuando la propiedad no es una sola columna — un equipo compartido, una fila con
 borrado lógico, una ventana de fechas — implementa el trait y sobrescribe
@@ -896,7 +954,7 @@ la rama.
 
 ---
 
-## Mounting
+## Montaje
 
 Compón el router del ViewSet en tu app. Un solo inquilino, pool estático:
 
@@ -919,13 +977,13 @@ let api = urls::api()
 
 ---
 
-## Backend support
+## Soporte de backends
 
 - **El builder + `router_pool` / `tenant_router`** es **tri-dialecto** —
   PostgreSQL, SQLite y MySQL — y es la ruta recomendada.
 - **El `router(prefix, pool)` de la macro derive** recibe `impl Into<rustango::sql::Pool>`
   — un `PgPool`, `MySqlPool`, `SqlitePool` o el enum `Pool`. No es exclusivo de
-  Postgres (#1273).
+  Postgres.
 - **La entrada + salida del serializador** ahora funciona en **los tres backends**
   (el renderizado por fila es tri-dialecto; la antigua compuerta solo-PG
   desapareció).
@@ -935,7 +993,7 @@ let api = urls::api()
 
 ---
 
-## Try it
+## Pruébalo
 
 El flujo de principio a fin de arriba refleja el ejemplo compilable
 `getting_started_blog` (Pasos 12–13 de la [guía de primeros pasos](getting-started.md)).
@@ -953,7 +1011,7 @@ cargo test --features sqlite,tenancy --test viewset_sqlite_live
 
 ---
 
-## See also
+## Véase también
 
 - [Serializadores](serializers.md) — da forma al JSON que un ViewSet envía y valida.
 - [Vistas HTML](html-views.md) — la contraparte renderizada en el servidor de esta API JSON.

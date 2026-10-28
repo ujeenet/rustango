@@ -18,7 +18,7 @@ async fn pool() -> Pool {
 }
 
 fn admin_app(pool: Pool) -> axum::Router {
-    urls::api().nest("/admin", urls::admin_router(pool))
+    urls::api().nest("/admin", urls::admin_router(pool, &rustango::config::Settings::default()))
 }
 
 /// A client signed in as a fresh superuser.

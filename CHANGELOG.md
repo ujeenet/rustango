@@ -4,6 +4,134 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.8] — 2026-10-28
+
+### Fixed — migrations, dev key, uploads, views and leaks
+
+- `makemigrations` no longer turns one M2M swapped for another between the same models into a junction rename that moves the old rows to the new relation; it drops and creates, and warns.
+- `add-data-op` chains onto its own scope's last file and snapshot, and takes `--scope`.
+- With no `RUSTANGO_SECRET_KEY` on dev and test, every binary (workers, own bins, tests) uses the saved dev key, found from the working directory up to the workspace root.
+- Uploads: a dotfile like `.html` or `.svg` counts as that extension, so the script-type block applies.
+- CreateView reads `success_url` placeholders from the saved row on every backend, and never answers 500 after the row is saved.
+- A JSON string for a Json field stays a string on the serializer ViewSet path and in `ModelFormFor::from_json`.
+- A `blank` String field with `choices` or `validators` accepts `""`.
+- `Debug` hides password and key hashes, decrypted SSO client secrets and the `DatabaseUrlBuilder` password.
+- The admin change-password page and the OAuth2 hook 502 log the error and show a generic message.
+
+### Fixed — new projects: scaffolder, examples, getting started
+
+- With no `RUSTANGO_BIND` or `[server] bind`, `Cli` binds `127.0.0.1:8080` off the prod and staging tiers, so an api project no longer listens on every interface in dev.
+- `cargo rustango new` prints host steps that work: compose starts only the database, `.env` points at `localhost`, and fullstack makes the first admin with `--superuser`.
+- The generated Dockerfiles use the image's own toolchain instead of downloading `stable` again; the release one builds without a `Cargo.lock` and `.dockerignore` skips `var/`.
+- `startapp --with-manage-bin` bins run through `Cli`, so they read `DB_*` vars and serve `register_command!` verbs.
+- Examples: commerce apps mark soak ViewSets `allow_anonymous`, bind the compose container on all interfaces, and fail closed on a missing prod session secret; cookbook_blog ships `makemigrations` output for all its models; getting_started_blog matches the scaffold.
+
+### Fixed — serializer serde attributes, admin Basic gate, tenant SSO egress, JWT sessions
+
+- `#[derive(Serializer)]` honours `#[serde(rename, rename_all, skip, skip_serializing, skip_serializing_if, skip_deserializing)]` on output and input; a `skip_serializing` field (such as a password hash) no longer appears in responses.
+- `protect_with_basic_auth` runs each attempt through the admin login throttle and compares both fields in constant time.
+- A tenant's own SSO provider rows reach public addresses only, not the `RUSTANGO_OUTBOUND_ALLOW` hosts; `RUSTANGO_TENANT_OUTBOUND_ALLOW` opens private hosts for them. Shared and config providers keep the operator allowlist.
+- GCP metadata over IPv6 (`fd20:ce::254`) and Azure WireServer (`168.63.129.16`) are refused on every outbound policy.
+- `JwtBackend::issue` / `issue_for_tenant` tokens carry `iat` (and a `jti` with a store) and end on logout-all and password change; new `issue_for_user` / `issue_for_tenant_user` also bind the password hash. Older tokens work until they expire, with one warning.
+- `check --deploy` and the console flag a `RUSTANGO_SECRET_KEY` taken from the dev key file, and the check no longer creates that file.
+- `run-server --apex` sets the default host of tenants created in the console.
+
+### Fixed — production safety: page cache, JWT keys, probes, HTTP/2 hosts, tenant CLI, DB URL
+
+- `CachePageLayer::vary_on` keys on every value of a repeated header (HTTP/2 sends each cookie apart); a non-UTF-8 value bypasses the cache.
+- `jwt::decode` and its variants refuse a key under 32 bytes, as `encode` does.
+- With `with_health()`, `/health` and `/ready` skip `[security] allowed_hosts` and `secure_ssl_redirect`, so probes by pod IP over HTTP pass.
+- `AllowedHostsLayer` reads the HTTP/2 `:authority` when there is no `Host`.
+- `create-tenant` exits non-zero when the tenant's migrations fail; `create-tenant … --resume` finishes that tenant.
+- A blank `DATABASE_URL` or `DB_*` var counts as unset, and an IPv6 `DB_HOST` is bracketed.
+
+### Fixed — ORM and migration data loss
+
+- `update()`/`delete()` after `join`, `join_sub` or `join_lateral` are refused with `QueryError::JoinDml`; the join was dropped and the write hit every row.
+- Undoing a migration drops the tables it created child first, so MySQL no longer stops half way on a foreign key.
+- `makemigrations --empty` chains onto its own scope's last file (`--scope` picks it) and copies its renamed shape.
+- A hand-written junction `RenameTable` reaches the snapshot.
+- Undo reads the parent's snapshot with its hand-written renames, as `makemigrations` does.
+- `migrate --squash` is refused while the models hold changes no migration has yet.
+- The derive's PG `bulk_insert` splits rows past the bind cap into chunks inside one transaction.
+- `QuerySet::iterator` pages inside the queryset's own limit and offset, and on a set operation over the merged result.
+
+### Fixed — error pages, admin create form, console sign-in
+
+- The error-pages layer keeps every HTML error page the admin, tenant admin, operator console and generic views render, so a form shown again with its error (status 400/422) is no longer swapped for the generic page.
+- The admin add form prefills a literal column default, and a blank non-text field with a default takes it instead of blocking submit.
+- Admin audit entries record the value written for a field the form did not send, such as an unticked box.
+- A wrong or reused console sign-in code now says it was not accepted.
+- Console pages and the built-in error page link the brand logo as the favicon.
+
+### Fixed — fresh-project CLI and dev secrets
+
+- `run-server` through `Cli` reads `--bind`, `--apex` and `--help`, beating env and settings; an unknown flag is refused instead of dropped.
+- Every serving path logs one INFO line with the bound address, plus the operator console URL with tenancy.
+- On the dev and test tiers an unset `RUSTANGO_SECRET_KEY` falls back to a key generated and saved in `./var/`, so TOTP and saved server passwords work out of the box; staging and prod still need it.
+- The console TOTP page without a key shows how to set one instead of a link back to itself.
+- MCP agent tokens sign with the saved dev session key, read on the first token, so tokens survive a dev restart and CLI verbs no longer warn.
+- `cargo rustango new --features mcp` mounts `/mcp`; generated models import the new `rustango::prelude` (ORM traits, `Column`, `Model`, `Auto`).
+
+### Added — operator console two-factor sign-in
+
+- Operators can turn on TOTP at `/account/totp` (setup key and `otpauth` link, confirmed with a code) and turn it off with a current code (needs `totp`).
+- An enrolled operator's password opens only the `/login/totp` code step: codes are single use, throttled like passwords, and no console page answers before the code.
+- `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` requires it for every operator, with enrollment at sign-in; off by default.
+- Secrets are sealed in the registry's new `rustango_operator_totp` table (made by `migrate` or the first sign-in); enroll, disable and failed codes are audited.
+- The admin TOTP store and the SSO code step now share one store and one pending-cookie type with the console.
+
+### Added — manage commands and DB_* connection vars
+
+- `register_command!` lets a crate add a `manage` verb, and `Cli::command` lets the app; `--help` lists them by crate, and a clash with a built-in verb fails at startup.
+- `CommandContext` gives a command the app or registry pool, the `--tenant <slug>` tenant's pool (schema or database mode), the settings and stdout. `Cli::run_with_args` runs the CLI on given arguments.
+- `manage`, `migrate`, `dbshell`, `db:*` and the server read the database through `env::database_url_from_env`, so `DB_HOST`, `DB_USER`, `DB_NAME` and friends work everywhere, not only `DATABASE_URL`.
+- `DB_PASSWORD_FILE` reads the password from a file; `DB_DRIVER=sqlite` takes `DB_NAME` as the file path.
+- With both `DATABASE_URL` and `DB_*` set, `DATABASE_URL` still wins and one warning (password redacted) says so; `check --deploy` lists it too.
+
+### Fixed — member SSO redirect scheme
+
+- Member SSO's `redirect_uri` uses `http` only on loopback hosts; `localhost.example.com` gets `https`.
+
+### Added — webhooks, jobs, MCP and page cache
+
+- `WebhookSubscription::max_attempts` and `retry_backoff` set a subscription's retry window; the default stays 8 runs from 1s.
+- Webhook delivery honours `Retry-After` on 429 and 503, in seconds or as an HTTP date, capped at an hour.
+- `Job::max_attempts(&self)` and `Job::retry_delay(&self, n)` let a job set its cap and wait from its payload.
+- `mcp::register_instructions` adds server-level guidance, sent as `instructions` in the `initialize` reply only when set.
+- `CachePageLayer::invalidate` purges every variant of a path (any query, vary value or method) through a per-path generation counter.
+
+### Fixed — admin performance
+
+- The audit feed's facets read at most 16 values per column through the ORM, plus the active one, instead of every distinct value; "show all" stops at 200.
+- The tenant admin builds its routes once; each request carries its own pool, perms and branding.
+- Test: a tenant user cannot deactivate their own account in the tenant admin.
+
+### Changed — operator console shared SSO page
+
+- The shared SSO providers page uses the console's form layout, shows the issuer URL field only for `oidc`, and lists the callback URL to register at the IdP (pattern plus an example tenant host).
+- Shared providers can be edited in place (`/sso-shared/{id}/edit`): the id and slug stay, a blank secret keeps the saved one; audited as `sso_shared_update`.
+- A refused add or edit re-renders the form with the typed values and the error (status 400), never the secret; the page no longer says secrets are `env://` references.
+
+### Fixed — migrations, ORM, MCP and admin
+
+- `makemigrations` warns when a model sets `db_table_comment`: file migrations do not write table comments yet (0.62.0 will).
+- `MediaManager::popular_tags` runs through the ORM, so `QueryCounter` sees it, and costs two queries.
+- The `NullsOrder` docs describe the MySQL `IS NULL` sort the writer emits.
+- MCP discovery and the 401 hint advertise `http` on loopback dev hosts (`*.localhost`, `[::1]`, `127.0.0.0/8`) unless a trusted proxy says `https`; `localhost.example.com` is no longer treated as local.
+- The admin list's `?facet_show_all=<field>` reads at most 200 values.
+- `testkit::add_missing_columns::<M>()` adds the columns a narrower build left out; two admin suites use it, so they pass on a shared database whatever ran before.
+
+### Added — unresolved-tenant router and ViewSet spec gaps
+
+- `server::Builder::unresolved_tenant(router)` / `Cli::unresolved_tenant` serve a router where no tenant resolves (unknown host, apex path the console does not serve), with `Extension<TenantRegistry>` and its `has_tenants()`; unset, routing is unchanged.
+- The ViewSet OpenAPI describes bulk create in the create operation (the schemas stay one row), 400 for a malformed pk on retrieve and DELETE, 413 on writes, and 401/403/429 where the action has codenames or a throttle.
+
+### Internal — crypto and quoting helpers
+
+- `storage-azure` enables `_signing`; the `to_hex`/`mac_eq` copies use `crate::hex` and `crypto::constant_time_compare`; the private identifier quoters use `quote_with`.
+- Test: a PG `array_agg` of INTEGER and BIGINT columns decodes as number arrays.
+
 ## [0.61.7] — 2026-10-27
 
 ### Fixed — admin, REST and i18n

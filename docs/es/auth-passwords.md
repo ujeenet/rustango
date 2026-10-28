@@ -9,8 +9,9 @@ plano.
 
 [![Contraseñas en Rustango: hash() produce una cadena PHC argon2id con sal, verify() comprueba un intento contra ella, y verify_dummy() iguala los tiempos de inicio de sesión](../img/auth-passwords.png)](../img/auth-passwords.png)
 
-> **Fuente:** `rustango::passwords` (`hash`, `verify`, `verify_dummy`,
-> `strength_score`, `StrengthIssue`) — detrás de la característica `passwords`
+> **Fuente:** `rustango::passwords` (`hash`, `verify`, `verify_dummy`, sus
+> formas `_async`, `Argon2Params`, `needs_rehash`, `strength_score`,
+> `StrengthIssue`) — detrás de la característica `passwords`
 > (activada por defecto). Para las utilidades de contraseña de usuario integradas
 > con la multitenencia, consulta `rustango::tenancy::password`.
 >
@@ -30,7 +31,8 @@ plano.
 - [Inicio rápido](#inicio-rápido) · [Por qué argon2id](#por-qué-argon2id)
 - [Hashear al registrarse](#hashear-al-registrarse) · [Verificar al iniciar sesión](#verificar-al-iniciar-sesión)
 - [Inicios de sesión con tiempos seguros](#inicios-de-sesión-con-tiempos-seguros-enumeración-de-cuentas) · [Comprobaciones de robustez](#comprobaciones-de-robustez)
-- [Dónde vive el hash](#dónde-vive-el-hash) · [Notas y límites](#notas-y-límites)
+- [Dónde vive el hash](#dónde-vive-el-hash) · [Código asíncrono](#código-asíncrono) · [Coste y rehasheo](#coste-y-rehasheo)
+- [Notas y límites](#notas-y-límites)
 
 ---
 
@@ -202,14 +204,49 @@ Una vez que el usuario está autenticado, pasa el testigo a una
 
 ---
 
+## Código asíncrono
+
+`hash`, `verify` y `verify_dummy` son bloqueantes: una llamada a argon2 ocupa un
+worker del runtime durante todo el hash. En un handler, llama en su lugar a
+`hash_async`, `verify_async` y `verify_dummy_async`. Se ejecutan en el pool
+bloqueante, como máximo un trabajo por CPU a la vez.
+
+Un trabajo espera hasta `hash_wait()` un hueco libre (5 s por defecto,
+`DEFAULT_HASH_WAIT`) y luego falla con `PasswordError::Busy`. Responde con un
+503, igual para un usuario conocido y uno desconocido. Ajusta la espera con
+`[auth] hash_wait_ms` o `configure_hash_wait(duration)` al arrancar.
+
+---
+
+## Coste y rehasheo
+
+Los hashes nuevos usan `argon2_params()`, por defecto `Argon2Params::DEFAULT`
+(m=19456 KiB, t=2, p=1). Súbelo con `[auth] argon2_memory_kib`,
+`argon2_iterations` y `argon2_parallelism`, o llama a
+`configure_argon2(Argon2Params::new(m, t, p)?)` al arrancar; un valor fijado en
+código gana sobre los ajustes. `Argon2Params::new` rechaza una combinación que
+argon2 no acepta.
+
+Los hashes antiguos siguen verificándose, porque su coste vive en la cadena PHC.
+`needs_rehash(&stored)` es `true` cuando un hash es más débil que el coste
+actual (o no es argon2id v19). Tras un inicio de sesión con éxito:
+
+- `rehash_async(attempt, &stored)` devuelve un hash nuevo cuando toca, si no `None`.
+- `upgrade_stored_hash(&pool, Model::SCHEMA, id, attempt, &stored)` también lo
+  guarda en la columna `password_hash` de la fila, pero solo si esa columna aún
+  contiene `stored`, y devuelve el hash que queda vigente.
+
+---
+
 ## Notas y límites
 
 - **Nunca** almacenes, registres ni compares con `==` el texto plano. `hash` →
   almacenar; `verify` → comprobar. Ese es todo el contrato.
-- **Los parámetros de coste son los valores por defecto de OWASP**, integrados de
-  serie. Son un suelo razonable; elevarlos más adelante es seguro — los hashes
-  antiguos siguen verificándose (sus parámetros viven en la cadena PHC), y puedes
-  volver a hashear en el siguiente inicio de sesión con éxito para actualizarlos.
+- **Los parámetros de coste parten por defecto del suelo de OWASP.** Elevarlos
+  más adelante es seguro — los hashes antiguos siguen verificándose (sus
+  parámetros viven en la cadena PHC), y
+  [`upgrade_stored_hash`](#coste-y-rehasheo) vuelve a hashear en el siguiente
+  inicio de sesión con éxito.
 - `strength_score` es una heurística, no un motor de políticas — no detectará
   `Summer2024!`. Superpón una búsqueda en listas de filtraciones para una
   aplicación real de la robustez.

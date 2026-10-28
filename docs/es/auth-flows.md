@@ -75,10 +75,14 @@ verifica el token y **rota el hash almacenado** en una sola llamada.
 
 ```rust
 use std::time::Duration;
-use rustango::auth_flows::{PasswordReset, confirm_password_reset_pool_into};
+use rustango::auth_flows::{LinkScope, PasswordReset, confirm_password_reset_pool};
+
+// The request's tenant (`t: Tenant`): links redeem only in it.
+let scope = LinkScope::from(&t);
 
 // 1. User asks to reset → look them up → issue a link → email it.
 let url = PasswordReset::issue(
+    &scope,
     "https://app.example.com/auth/reset",   // your callback route
     user_id,                                // encoded in the token
     secret,
@@ -88,12 +92,17 @@ mailer.send(&Email::new().to(addr).subject("Reset your password").body(&url)).aw
 
 // 2. User clicks + submits a new password → verify + rotate the hash.
 let user_id = confirm_password_reset_pool(
-    &pool, &url, "a-brand-new-strong-password", secret,
+    &t, &url, "a-brand-new-strong-password", secret,
 ).await?;
 ```
 
+> **Las apps multi-tenant deben pasar `&t`** (el `Tenant`, o un `TenantScope`) a la
+> confirmación, para que el pool y el ámbito salgan del mismo valor. Un enlace emitido
+> para otro ámbito falla con `Err(WrongScope)`. `LinkTarget::audience(&pool, "app")` y
+> `LinkScope::audience("app")` son para apps con una sola base de datos de usuarios.
+
 > **Usa esta forma para `rustango_users`.** Las sesiones del framework llevan una
-> huella del hash de la contraseña ([#1338](https://github.com/ujeenet/rustango/issues/1338)), así que el nuevo hash
+> huella del hash de la contraseña, así que el nuevo hash
 > termina toda sesión emitida antes del restablecimiento, incluida la de un
 > atacante. También marca `password_changed_at`, que registra el cambio pero no es
 > lo que termina las sesiones.
@@ -109,7 +118,7 @@ manipuladas o con el secreto equivocado sin tocar la fila:
 ```
 
 Es el mismo `passwords::strength_score` que usa el resto del framework, así que una contraseña
-rechazada en el registro no puede establecerse restableciéndola (#1399).
+rechazada en el registro no puede establecerse restableciéndola.
 
 > `_into` apunta a tu propia tabla/columnas — un `app_users` del inquilino, por
 > ejemplo. Solo escribe el hash. Las sesiones que emite el framework terminan con
@@ -118,11 +127,16 @@ rechazada en el registro no puede establecerse restableciéndola (#1399).
 
 ### Haz que el enlace sea de un solo uso
 
-Los asistentes anteriores solo verifican firma y caducidad, así que **el enlace sigue siendo
+`confirm_password_reset_pool` solo escribe mientras `password_changed_at` sea anterior al enlace,
+y actualiza esa columna. Así que cualquier cambio de contraseña, este incluido, invalida todos
+los enlaces anteriores: una repetición recibe `Err(Expired)`.
+
+La forma `_into` no tiene esa columna, así que **su enlace sigue siendo
 utilizable durante todo su TTL** — incluso después de cambiar la contraseña. Una copia del correo
 en un buzón compartido, un mensaje reenviado o un ticket de soporte con el correo pegado es una
 toma de control de la cuenta en funcionamiento hasta que el token caduque, en un momento en que el
-usuario legítimo ya ha terminado y no tiene motivo para sospechar.
+usuario legítimo ya ha terminado y no tiene motivo para sospechar. Dos clics simultáneos también
+pueden pasar ambos la comprobación de fecha.
 
 Pasa una caché y el token se consume en el primer uso:
 
@@ -130,7 +144,7 @@ Pasa una caché y el token se consume en el primer uso:
 use rustango::auth_flows::confirm_password_reset_single_use;
 
 let user_id = confirm_password_reset_single_use(
-    &pool, &url, "a-brand-new-strong-password", secret, &cache,
+    &t, &url, "a-brand-new-strong-password", secret, &cache,
 ).await?;                      // una repetición → Err(AuthFlowError::AlreadyUsed)
 ```
 
@@ -154,11 +168,11 @@ integrada — tú defines tu propia columna «verificado»:
 use rustango::auth_flows::EmailVerification;
 
 // On signup:
-let url = EmailVerification::issue(callback, user_id, &email, secret, Duration::from_secs(86_400));
+let url = EmailVerification::issue(&scope, callback, user_id, &email, secret, Duration::from_secs(86_400));
 mailer.send(&Email::new().to(&email).subject("Confirm your email").body(&url)).await?;
 
 // On click:
-let (user_id, email) = EmailVerification::verify(&url, secret)?;
+let (user_id, email) = EmailVerification::verify(&scope, &url, secret)?;
 // → if email still matches the user's current address, mark them verified
 ```
 
@@ -173,11 +187,11 @@ acuñas una [sesión](auth-sessions.md). Mantén el TTL corto (10–30 min) y ha
 ```rust
 use rustango::auth_flows::MagicLink;
 
-let url = MagicLink::issue(callback, &email, secret, Duration::from_secs(900));
+let url = MagicLink::issue(&scope, callback, &email, secret, Duration::from_secs(900));
 mailer.send(&Email::new().to(&email).subject("Your sign-in link").body(&url)).await?;
 
 // On click:
-let email = MagicLink::verify_single_use(&url, secret, &cache).await?;
+let email = MagicLink::verify_single_use(&scope, &url, secret, &cache).await?;
 // → look up the user by email, create a session
 ```
 
@@ -187,8 +201,9 @@ let email = MagicLink::verify_single_use(&url, secret, &cache).await?;
 
 `verify` por sí solo únicamente comprueba firma + caducidad, así que un enlace filtrado es
 reproducible hasta que caduca. Para el inicio de sesión y el restablecimiento, prefiere
-`verify_single_use(url, secret, &cache)` — registra la firma del token en un `Cache` y rechaza un
-segundo uso:
+`verify_single_use(scope, url, secret, &cache)` — registra la firma del token en un `Cache` y rechaza un
+segundo uso. Para el restablecimiento en concreto, `confirm_password_reset_single_use` lo hace
+dentro de la misma llamada ([arriba](#haz-que-el-enlace-sea-de-un-solo-uso)):
 
 ```rust
 // first click  → Ok(email)
@@ -210,7 +225,8 @@ aporta el resto:
 
 - Un **secreto** (una clave de aplicación estable; 32 bytes por convención).
 - Un **mailer** para enviar los enlaces — `rustango::email` incluye `ConsoleMailer`,
-  `SmtpMailer` e `InMemoryMailer` (útil en pruebas).
+  `FileMailer`, `NullMailer`, `InMemoryMailer` (útil en pruebas) y, con la feature
+  `email-smtp`, `SmtpMailer`.
 - Una **tabla de usuarios** con las columnas que cada flujo necesita (correo para la búsqueda de
   verificación/enlace mágico; una columna de hash de contraseña para el restablecimiento; una
   columna «verificado» que es tuya).

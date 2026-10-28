@@ -81,7 +81,48 @@ async fn absent_defaulted_fields_take_the_column_default(pool: &Pool) {
     );
 }
 
+async fn get(pool: &Pool, uri: &str) -> (StatusCode, String) {
+    let app = rustango::admin::Builder::new(pool.clone())
+        .admin_prefix("")
+        .build();
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The `<input>` tag of `name` in a rendered form.
+fn input_tag<'a>(html: &'a str, name: &str) -> &'a str {
+    let at = html
+        .find(&format!(r#"name="{name}""#))
+        .unwrap_or_else(|| panic!("no {name} input: {html}"));
+    let start = html[..at].rfind('<').unwrap();
+    let end = at + html[at..].find('>').unwrap();
+    &html[start..=end]
+}
+
+/// The add form shows a literal default and never blocks submit on it;
+/// a blank number takes the default.
+async fn the_add_form_offers_the_column_default(pool: &Pool) {
+    let (status, html) = get(pool, "/acd_item/new").await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    let rank = input_tag(&html, "rank");
+    assert!(rank.contains(r#"value="7""#), "{rank}");
+    assert!(!rank.contains("required"), "{rank}");
+    assert!(
+        input_tag(&html, "status").contains(r#"value="draft""#),
+        "{html}"
+    );
+    let (status, html) = post(pool, "title=blank&status=s&rank=").await;
+    assert!(status.is_redirection(), "{status}: {html}");
+    assert_eq!(item(pool, "blank").await.rank, 7);
+}
+
 tri_dialect_test!(
     setup: setup,
-    scenarios: [absent_defaulted_fields_take_the_column_default],
+    scenarios: [
+        absent_defaulted_fields_take_the_column_default,
+        the_add_form_offers_the_column_default,
+    ],
 );

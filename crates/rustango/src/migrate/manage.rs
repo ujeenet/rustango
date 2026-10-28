@@ -268,7 +268,7 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     )?;
     writeln!(
         w,
-        "  add-data-op --sql <SQL> [--reverse-sql <SQL>] [--name <name>] [--to <migration>]"
+        "  add-data-op --sql <SQL> [--reverse-sql <SQL>] [--name <name>] [--to <migration> | --scope <s>]"
     )?;
     writeln!(
         w,
@@ -549,7 +549,7 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
                     "makemigrations [name]                  diff registry, write next file in <dir>\n\
                      makemigrations --app <app> [name]      diff one app, write to <project_root>/<app>/migrations/\n\
                      makemigrations --scope <s> [name]      <s> = registry|tenant; one file with that MigrationScope\n\
-                     makemigrations --empty <name>          empty scaffold for data ops\n\
+                     makemigrations --empty <name>          empty scaffold for data ops (--scope picks the chain)\n\
                      makemigrations --merge                 reconcile a divergent chain (two leaves\n\
                                                             on the same parent) by writing an empty\n\
                                                             NNNN_merge.json — issue #346\n\
@@ -591,7 +591,11 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
                 "makemigrations --empty requires a name".into(),
             ));
         };
-        let mig = make_empty(dir, &n)?;
+        let scope = match scope_override {
+            Some(crate::core::ModelScope::Registry) => super::MigrationScope::Registry,
+            Some(crate::core::ModelScope::Tenant) | None => super::MigrationScope::Tenant,
+        };
+        let mig = make_empty_in_scope(dir, &n, scope)?;
         writeln!(
             w,
             "wrote {} (empty scaffold — fill in `forward` with data ops)",
@@ -1093,6 +1097,10 @@ fn shared_bootstrap() -> Vec<Bootstrap> {
     fn totp(pool: &Pool) -> EnsureFuture<'_> {
         Box::pin(crate::admin::totp_store::ensure_table(pool))
     }
+    #[cfg(all(feature = "tenancy", feature = "totp"))]
+    fn operator_totp(pool: &Pool) -> EnsureFuture<'_> {
+        Box::pin(crate::tenancy::operator_totp::ensure_table(pool))
+    }
     vec![
         // Writes to `audit(track = ...)` models record from the first migrate.
         Bootstrap {
@@ -1108,6 +1116,18 @@ fn shared_bootstrap() -> Vec<Bootstrap> {
             ensure: totp,
             ddl: |d| {
                 super::ensure::idempotent_ddl(&crate::admin::totp_store::bootstrap_snapshot(), d)
+            },
+        },
+        // The console's sign-in reads it, and fails closed on a read error.
+        #[cfg(all(feature = "tenancy", feature = "totp"))]
+        Bootstrap {
+            table: crate::tenancy::OperatorTotp::SCHEMA.table,
+            ensure: operator_totp,
+            ddl: |d| {
+                super::ensure::idempotent_ddl(
+                    &crate::tenancy::operator_totp::bootstrap_snapshot(),
+                    d,
+                )
             },
         },
         // The admin lists translations wherever they live.
@@ -1213,6 +1233,16 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
                 m.name,
             )));
         }
+    }
+
+    // The squash is built from the models; on a database that ran the old
+    // files it is only recorded, so a change no file holds would never run.
+    if super::make::models_ahead_of(&all, has_registry_models())? {
+        return Err(MigrateError::Validation(
+            "migrate --squash: refused — the models have changes no migration holds yet. \
+             Run `makemigrations` first, then squash."
+                .into(),
+        ));
     }
 
     writeln!(
@@ -1639,18 +1669,38 @@ pub(crate) async fn forget_pending_cmd_with<W: Write>(
 /// # Errors
 /// As [`super::file::list_dir`] / [`super::file::write`].
 pub fn make_empty(dir: &Path, name: &str) -> Result<Migration, MigrateError> {
+    make_empty_in_scope(dir, name, super::MigrationScope::default())
+}
+
+/// [`make_empty`] for `scope`: chains onto that scope's last file and copies
+/// its snapshot, renames included, so the next diff starts from it.
+///
+/// # Errors
+/// As [`make_empty`].
+pub fn make_empty_in_scope(
+    dir: &Path,
+    name: &str,
+    scope: super::MigrationScope,
+) -> Result<Migration, MigrateError> {
+    write_scaffold(dir, name, scope, Vec::new())
+}
+
+/// A file holding `forward`, chained onto `scope`'s last file with its
+/// effective snapshot, so a later diff in that scope starts from it.
+fn write_scaffold(
+    dir: &Path,
+    name: &str,
+    scope: super::MigrationScope,
+    forward: Vec<Operation>,
+) -> Result<Migration, MigrateError> {
     let prior = file::list_dir(dir)?;
-    let prev_snapshot = prior.last().map_or_else(
-        || SchemaSnapshot {
-            tables: vec![],
-            m2m_tables: vec![],
-            indexes: vec![],
-            checks: vec![],
-            excludes: vec![],
-        },
-        |m| m.snapshot.clone(),
-    );
-    let prev_name = prior.last().map(|m| m.name.clone());
+    let chain: Vec<&Migration> = prior.iter().filter(|m| m.scope == scope).collect();
+    let head = chain.last().copied();
+    let prev_snapshot = head.map_or_else(SchemaSnapshot::default, |m| {
+        super::make::effective_snapshot(&chain, m)
+    });
+    let prev_name = head.map(|m| m.name.clone());
+    // Numbered across the whole dir, so the two scopes never share a name.
     let next_index = prior
         .last()
         .and_then(|m| file::extract_index(&m.name))
@@ -1662,11 +1712,11 @@ pub fn make_empty(dir: &Path, name: &str) -> Result<Migration, MigrateError> {
         created_at: chrono::Utc::now().to_rfc3339(),
         prev: prev_name,
         atomic: true,
-        scope: super::MigrationScope::default(),
+        scope,
         replaces: Vec::new(),
         merges: Vec::new(),
         snapshot: prev_snapshot,
-        forward: vec![],
+        forward,
     };
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
@@ -1698,38 +1748,33 @@ pub fn make_data_migration(
     sql: &str,
     reverse_sql: Option<&str>,
 ) -> Result<Migration, MigrateError> {
-    let prior = file::list_dir(dir)?;
-    let prev_snapshot = prior
-        .last()
-        .map_or_else(|| SchemaSnapshot::default(), |m| m.snapshot.clone());
-    let prev_name = prior.last().map(|m| m.name.clone());
-    let next_index = prior
-        .last()
-        .and_then(|m| file::extract_index(&m.name))
-        .map_or(1, |n| n + 1);
+    make_data_migration_in_scope(
+        dir,
+        name,
+        sql,
+        reverse_sql,
+        super::MigrationScope::default(),
+    )
+}
 
-    let full_name = format!("{next_index:04}_{name}");
+/// [`make_data_migration`] for `scope`: chains onto that scope's last file,
+/// as [`make_empty_in_scope`] does.
+///
+/// # Errors
+/// As [`make_data_migration`].
+pub fn make_data_migration_in_scope(
+    dir: &Path,
+    name: &str,
+    sql: &str,
+    reverse_sql: Option<&str>,
+    scope: super::MigrationScope,
+) -> Result<Migration, MigrateError> {
     let op = Operation::Data(DataOp {
         sql: sql.to_owned(),
         reverse_sql: reverse_sql.map(str::to_owned),
         reversible: reverse_sql.is_some(),
     });
-    let mig = Migration {
-        name: full_name.clone(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        prev: prev_name,
-        atomic: true,
-        scope: super::MigrationScope::default(),
-        replaces: Vec::new(),
-        merges: Vec::new(),
-        snapshot: prev_snapshot,
-        forward: vec![op],
-    };
-    if !dir.exists() {
-        std::fs::create_dir_all(dir)?;
-    }
-    file::write(&file_path(dir, &mig.name), &mig)?;
-    Ok(mig)
+    write_scaffold(dir, name, scope, vec![op])
 }
 
 /// Append a data operation to an existing migration file.
@@ -1772,9 +1817,26 @@ fn add_data_op_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(
     let mut reverse_sql: Option<String> = None;
     let mut name: Option<String> = None;
     let mut to: Option<String> = None;
+    let mut scope: Option<super::MigrationScope> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--scope" => {
+                let raw = iter.next().ok_or_else(|| {
+                    MigrateError::Validation("--scope requires \"registry\" or \"tenant\"".into())
+                })?;
+                scope = match crate::core::ModelScope::from_str(raw) {
+                    Some(crate::core::ModelScope::Registry) => {
+                        Some(super::MigrationScope::Registry)
+                    }
+                    Some(crate::core::ModelScope::Tenant) => Some(super::MigrationScope::Tenant),
+                    None => {
+                        return Err(MigrateError::Validation(format!(
+                            "--scope must be \"registry\" or \"tenant\", got {raw:?}"
+                        )))
+                    }
+                };
+            }
             "--sql" => {
                 sql =
                     Some(iter.next().cloned().ok_or_else(|| {
@@ -1800,7 +1862,7 @@ fn add_data_op_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(
             "--help" | "-h" => {
                 writeln!(
                     w,
-                    "add-data-op --sql <SQL> [--reverse-sql <SQL>] [--name <name>] [--to <migration>]"
+                    "add-data-op --sql <SQL> [--reverse-sql <SQL>] [--name <name>] [--to <migration> | --scope <s>]"
                 )?;
                 return Ok(());
             }
@@ -1809,7 +1871,7 @@ fn add_data_op_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(
             }
             other => {
                 return Err(MigrateError::Validation(format!(
-                    "unexpected argument: `{other}` — use --sql, --reverse-sql, --name, --to"
+                    "unexpected argument: `{other}` — use --sql, --reverse-sql, --name, --to, --scope"
                 )));
             }
         }
@@ -1818,11 +1880,22 @@ fn add_data_op_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(
     let sql = sql.ok_or_else(|| MigrateError::Validation("--sql is required".into()))?;
 
     if let Some(migration_name) = to {
+        if scope.is_some() {
+            return Err(MigrateError::Validation(
+                "--to appends to that file; it does not combine with --scope".into(),
+            ));
+        }
         append_data_op(dir, &migration_name, &sql, reverse_sql.as_deref())?;
         writeln!(w, "appended data op to {migration_name}.json")?;
     } else {
         let name = name.unwrap_or_else(|| "data_op".to_owned());
-        let mig = make_data_migration(dir, &name, &sql, reverse_sql.as_deref())?;
+        let mig = make_data_migration_in_scope(
+            dir,
+            &name,
+            &sql,
+            reverse_sql.as_deref(),
+            scope.unwrap_or_default(),
+        )?;
         let rev_note = if reverse_sql.is_some() {
             " (reversible)"
         } else {
@@ -1979,7 +2052,7 @@ async fn about_cmd<W: Write>(pool: &Pool, w: &mut W) -> Result<(), MigrateError>
     )?;
     let env_label = std::env::var("RUSTANGO_ENV").unwrap_or_else(|_| "(unset)".into());
     writeln!(w, "  RUSTANGO_ENV:   {env_label}")?;
-    let db_url = about_db_url(std::env::var("DATABASE_URL").ok());
+    let db_url = about_db_url(crate::env::database_url_from_env().ok());
     writeln!(w, "  DATABASE_URL:   {db_url}")?;
 
     // DB connectivity — tri-dialect: SELECT 1 is universal across PG/MySQL/SQLite.
@@ -3282,11 +3355,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
     {crate_root}::logging::setup();
     // A worker never runs main.rs, so it loads `.env` itself.
     let _ = dotenvy::dotenv();
-    // `std::env::var(..)?` would surface as the bare word `NotPresent`,
-    // which tells an operator nothing about which variable or why.
-    let url = std::env::var("DATABASE_URL").map_err(|_| {{
-        "missing env var 'DATABASE_URL'. Set it in your shell, or copy \
-         '.env.example' to '.env'."
+    // DATABASE_URL, or DB_USER + DB_NAME; the error names both.
+    let url = {crate_root}::env::database_url_from_env().map_err(|e| {{
+        format!("{{e}}. Set it in your shell, or copy '.env.example' to '.env'.")
     }})?;
     let pool = Pool::connect(&url).await?;
 
@@ -3556,13 +3627,8 @@ fn build_pg_dump_argv(parsed: &DbDumpArgs) -> Vec<String> {
 /// writer here to put it anywhere else.
 fn db_dump_cmd(args: &[String]) -> Result<(), MigrateError> {
     let parsed = parse_db_dump_args(args)?;
-    let url = std::env::var("DATABASE_URL").map_err(|_| {
-        MigrateError::Validation(
-            "DATABASE_URL must be set for db:dump (e.g. \
-             postgres://user:pass@host:5432/db)"
-                .into(),
-        )
-    })?;
+    let url = crate::env::database_url_from_env()
+        .map_err(|e| MigrateError::Validation(format!("db:dump needs a database: {e}")))?;
     let mut cmd = pg_dump_command(&parsed, &url)?;
     eprintln!("running: pg_dump {}", shown_args(&cmd));
     let status = cmd.status().map_err(|e| {
@@ -3711,13 +3777,8 @@ fn build_psql_argv(parsed: &RestorePlan) -> Vec<String> {
 
 fn db_restore_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let parsed = RestorePlan::check(parse_db_restore_args(args)?, confirm_clean_restore)?;
-    let url = std::env::var("DATABASE_URL").map_err(|_| {
-        MigrateError::Validation(
-            "DATABASE_URL must be set for db:restore (e.g. \
-             postgres://user:pass@host:5432/db)"
-                .into(),
-        )
-    })?;
+    let url = crate::env::database_url_from_env()
+        .map_err(|e| MigrateError::Validation(format!("db:restore needs a database: {e}")))?;
     run_psql_restore("psql", &parsed, &url, w)
 }
 
@@ -6079,6 +6140,8 @@ pub(crate) struct DeployAuditEnv {
     pub rustango_env: Option<String>,
     pub session_secret: Option<String>,
     pub database_url: Option<String>,
+    /// `DATABASE_URL` and `DB_*` both set: the resolver's warning.
+    pub database_style_conflict: Option<String>,
     pub apex_domain: Option<String>,
     pub bind: Option<String>,
     /// An admin was built without session auth (#1627).
@@ -6089,7 +6152,8 @@ fn deploy_audit_env() -> DeployAuditEnv {
     DeployAuditEnv {
         rustango_env: std::env::var("RUSTANGO_ENV").ok(),
         session_secret: std::env::var("RUSTANGO_SESSION_SECRET").ok(),
-        database_url: std::env::var("DATABASE_URL").ok(),
+        database_url: crate::env::database_url_from_env().ok(),
+        database_style_conflict: crate::env::database_style_conflict(),
         #[cfg(feature = "tenancy")]
         apex_domain: crate::tenancy::server::configured_apex_domain(),
         #[cfg(not(feature = "tenancy"))]
@@ -6205,9 +6269,10 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
 
     // DATABASE_URL — required.
     match env.database_url.as_deref() {
-        None => out
-            .errors
-            .push("DATABASE_URL is unset — required in production".into()),
+        None => out.errors.push(
+            "no database configured: DATABASE_URL, or DB_USER + DB_NAME, is required in production"
+                .into(),
+        ),
         Some(url) if url.contains("localhost") || url.contains("127.0.0.1") => {
             out.warnings.push(
                 "DATABASE_URL points at localhost / 127.0.0.1 — verify this is intended in \
@@ -6216,6 +6281,9 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
             );
         }
         Some(_) => out.info.push("DATABASE_URL set".into()),
+    }
+    if let Some(conflict) = &env.database_style_conflict {
+        out.warnings.push(conflict.clone());
     }
 
     // RUSTANGO_APEX_DOMAIN — required for tenancy projects, but
@@ -6993,12 +7061,15 @@ mod gen_tests {
         }
     }
 
-    /// The worker reads `DATABASE_URL`, so it must load `.env` like main.rs.
+    /// The worker resolves the database URL, so it must load `.env` like main.rs.
     #[test]
     fn worker_loads_dotenv_before_reading_the_url() {
         let body = worker_template("Mailer", "mailer", "rustango", "my_app");
         let dotenv = body.find("dotenvy::dotenv()").expect("loads .env");
-        assert!(dotenv < body.find("\"DATABASE_URL\"").unwrap(), "{body}");
+        assert!(
+            dotenv < body.find("database_url_from_env").unwrap(),
+            "{body}"
+        );
     }
 
     // -------- dumpdata --------
@@ -8504,6 +8575,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             rustango_env: Some("prod".into()),
             session_secret: Some("a".repeat(48)),
             database_url: Some("postgres://app:s3cr3t@db.example.com/app_prod".into()),
+            database_style_conflict: None,
             apex_domain: Some("app.example.com".into()),
             bind: Some("0.0.0.0:8080".into()),
             ungated_admin: false,
@@ -8747,6 +8819,20 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             r.errors.iter().any(|e| e.contains("DATABASE_URL")),
             "expected error for unset DATABASE_URL, got: {:?}",
             r.errors
+        );
+    }
+
+    #[test]
+    fn deploy_audit_reports_both_database_styles() {
+        let env = DeployAuditEnv {
+            database_style_conflict: Some("both DATABASE_URL and DB_USER are set".into()),
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("DB_USER")),
+            "{:?}",
+            r.warnings
         );
     }
 

@@ -75,10 +75,14 @@ vérifie le token et **fait tourner le hash stocké** en un seul appel.
 
 ```rust
 use std::time::Duration;
-use rustango::auth_flows::{PasswordReset, confirm_password_reset_pool_into};
+use rustango::auth_flows::{LinkScope, PasswordReset, confirm_password_reset_pool};
+
+// The request's tenant (`t: Tenant`): links redeem only in it.
+let scope = LinkScope::from(&t);
 
 // 1. User asks to reset → look them up → issue a link → email it.
 let url = PasswordReset::issue(
+    &scope,
     "https://app.example.com/auth/reset",   // your callback route
     user_id,                                // encoded in the token
     secret,
@@ -88,12 +92,18 @@ mailer.send(&Email::new().to(addr).subject("Reset your password").body(&url)).aw
 
 // 2. User clicks + submits a new password → verify + rotate the hash.
 let user_id = confirm_password_reset_pool(
-    &pool, &url, "a-brand-new-strong-password", secret,
+    &t, &url, "a-brand-new-strong-password", secret,
 ).await?;
 ```
 
+> **Les applications multi-tenant doivent passer `&t`** (le `Tenant`, ou un
+> `TenantScope`) à la confirmation, pour que le pool et la portée viennent d'une
+> seule valeur. Un lien émis pour une autre portée échoue avec `Err(WrongScope)`.
+> `LinkTarget::audience(&pool, "app")` et `LinkScope::audience("app")` sont
+> pour les applications à base d'utilisateurs unique.
+
 > **Utilisez cette forme pour `rustango_users`.** Les sessions du framework portent
-> une empreinte du hash du mot de passe ([#1338](https://github.com/ujeenet/rustango/issues/1338)), donc le nouveau
+> une empreinte du hash du mot de passe, donc le nouveau
 > hash met fin à toute session émise avant la réinitialisation, y compris celle
 > d'un attaquant. Elle horodate aussi `password_changed_at`, qui enregistre le
 > changement mais n'est pas ce qui termine les sessions.
@@ -109,7 +119,7 @@ altérées ou au mauvais secret sans toucher à la ligne :
 ```
 
 C'est le même `passwords::strength_score` que le reste du framework utilise : un mot de passe
-refusé à l'inscription ne peut donc pas être défini via une réinitialisation (#1399).
+refusé à l'inscription ne peut donc pas être défini via une réinitialisation.
 
 > `_into` pointe vers votre propre table/colonnes — un `app_users` de locataire, par
 > exemple. Il n'écrit que le hash. Les sessions émises par le framework prennent fin
@@ -118,11 +128,16 @@ refusé à l'inscription ne peut donc pas être défini via une réinitialisatio
 
 ### Rendre le lien à usage unique
 
-Les assistants ci-dessus ne vérifient que la signature et l'expiration : **le lien reste donc
+`confirm_password_reset_pool` n'écrit que tant que `password_changed_at` est plus ancien que le
+lien, et met cette colonne à jour. Tout changement de mot de passe, cette réinitialisation
+comprise, met donc fin aux liens plus anciens : un rejeu reçoit `Err(Expired)`.
+
+La forme `_into` n'a pas cette colonne : **son lien reste donc
 utilisable pendant toute sa TTL** — y compris après le changement du mot de passe. Une copie de
 l'e-mail dans une boîte partagée, un message transféré ou un ticket de support où le mail est collé
 constitue une prise de contrôle du compte opérationnelle jusqu'à l'expiration du token, à un moment
-où l'utilisateur légitime a terminé et n'a aucune raison de se méfier.
+où l'utilisateur légitime a terminé et n'a aucune raison de se méfier. Deux clics simultanés
+peuvent aussi passer tous deux le contrôle de date.
 
 Passez un cache et le token est consommé dès la première utilisation :
 
@@ -130,7 +145,7 @@ Passez un cache et le token est consommé dès la première utilisation :
 use rustango::auth_flows::confirm_password_reset_single_use;
 
 let user_id = confirm_password_reset_single_use(
-    &pool, &url, "a-brand-new-strong-password", secret, &cache,
+    &t, &url, "a-brand-new-strong-password", secret, &cache,
 ).await?;                      // un rejeu → Err(AuthFlowError::AlreadyUsed)
 ```
 
@@ -154,11 +169,11 @@ ici — vous définissez votre propre colonne « vérifié » :
 use rustango::auth_flows::EmailVerification;
 
 // On signup:
-let url = EmailVerification::issue(callback, user_id, &email, secret, Duration::from_secs(86_400));
+let url = EmailVerification::issue(&scope, callback, user_id, &email, secret, Duration::from_secs(86_400));
 mailer.send(&Email::new().to(&email).subject("Confirm your email").body(&url)).await?;
 
 // On click:
-let (user_id, email) = EmailVerification::verify(&url, secret)?;
+let (user_id, email) = EmailVerification::verify(&scope, &url, secret)?;
 // → if email still matches the user's current address, mark them verified
 ```
 
@@ -173,11 +188,11 @@ let (user_id, email) = EmailVerification::verify(&url, secret)?;
 ```rust
 use rustango::auth_flows::MagicLink;
 
-let url = MagicLink::issue(callback, &email, secret, Duration::from_secs(900));
+let url = MagicLink::issue(&scope, callback, &email, secret, Duration::from_secs(900));
 mailer.send(&Email::new().to(&email).subject("Your sign-in link").body(&url)).await?;
 
 // On click:
-let email = MagicLink::verify_single_use(&url, secret, &cache).await?;
+let email = MagicLink::verify_single_use(&scope, &url, secret, &cache).await?;
 // → look up the user by email, create a session
 ```
 
@@ -186,7 +201,7 @@ let email = MagicLink::verify_single_use(&url, secret, &cache).await?;
 ## Tokens à usage unique
 
 `verify` seul ne vérifie que la signature + l'expiration, donc un lien divulgué est rejouable
-jusqu'à son expiration. Pour la connexion et la réinitialisation, préférez `verify_single_use(url, secret,
+jusqu'à son expiration. Pour la connexion et la réinitialisation, préférez `verify_single_use(scope, url, secret,
 &cache)` — il enregistre la signature du token dans un `Cache` et refuse une deuxième
 utilisation :
 
@@ -209,7 +224,8 @@ fournit le reste :
 
 - Un **secret** (une clé d'application stable ; 32 octets par convention).
 - Un **mailer** pour envoyer les liens — `rustango::email` fournit `ConsoleMailer`,
-  `SmtpMailer` et `InMemoryMailer` (pratique dans les tests).
+  `FileMailer`, `NullMailer`, `InMemoryMailer` (pratique dans les tests) et, avec la
+  feature `email-smtp`, `SmtpMailer`.
 - Une **table utilisateur** avec les colonnes dont chaque flux a besoin (e-mail pour la recherche
   vérification/lien magique ; une colonne de hash de mot de passe pour la réinitialisation ; une
   colonne « vérifié » qui vous appartient).

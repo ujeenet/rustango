@@ -115,7 +115,7 @@ fn auth_required() -> JsonRpcError {
 /// A version mismatch is not an error here. We return ours and let
 /// the client decide, as the MCP lifecycle spec says.
 fn initialize(_params: Option<Value>) -> Result<Value, JsonRpcError> {
-    let result = InitializeResult {
+    let base = InitializeResult {
         protocol_version: PROTOCOL_VERSION,
         capabilities: ServerCapabilities {
             // `listChanged` is true because the server does emit
@@ -131,5 +131,46 @@ fn initialize(_params: Option<Value>) -> Result<Value, JsonRpcError> {
             version: env!("CARGO_PKG_VERSION"),
         },
     };
-    serde_json::to_value(result).map_err(JsonRpcError::internal_logged)
+    let reply = InitializeReply {
+        base,
+        instructions: instructions(),
+    };
+    serde_json::to_value(reply).map_err(JsonRpcError::internal_logged)
+}
+
+/// `InitializeResult` plus the optional `instructions`; a wrapper so the
+/// public struct keeps its fields.
+#[derive(serde::Serialize)]
+struct InitializeReply {
+    #[serde(flatten)]
+    base: InitializeResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+}
+
+/// Server-level guidance, in registration order.
+static INSTRUCTIONS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// Add server-level guidance for agents, sent as `instructions` in the
+/// `initialize` reply. Parts join with a blank line in call order, so a
+/// library and its host can both add one; a repeated or blank text is skipped.
+pub fn register_instructions(text: impl Into<String>) {
+    let text = text.into();
+    if text.trim().is_empty() {
+        return;
+    }
+    let mut all = INSTRUCTIONS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !all.contains(&text) {
+        all.push(text);
+    }
+}
+
+/// The joined guidance; `None` when nothing was registered.
+fn instructions() -> Option<String> {
+    let all = INSTRUCTIONS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (!all.is_empty()).then(|| all.join("\n\n"))
 }

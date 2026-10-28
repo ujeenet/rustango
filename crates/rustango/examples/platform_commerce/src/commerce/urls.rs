@@ -13,6 +13,9 @@
 //! sees them, so a storefront that wants its own `/login` has to either
 //! move the console (the SaaS app calls `RouteConfig::legacy()`) or
 //! stay out of those paths. This app does both.
+//!
+//! The ViewSets take anonymous writes because the soak driver sends no
+//! login; a real app sets `.permissions_for_model::<T>()` instead.
 
 use std::sync::Arc;
 
@@ -85,6 +88,7 @@ pub fn api(
 /// rows from list, detail, update and delete (#1746).
 fn promotions(pool: &Pool) -> Router<AppState> {
     ViewSet::for_model(Promotion::SCHEMA, &["id", "code", "label", "amount_cents", "visible", "deleted_at"])
+        .allow_anonymous() // the soak driver writes without a login
         .filter_fields(&["code", "visible"])
         .search_fields(&["code"])
         .limit_offset_pagination()
@@ -95,6 +99,7 @@ fn promotions(pool: &Pool) -> Router<AppState> {
 /// The card code is the primary key, and a create keeps it (#1671).
 fn gift_cards(pool: &Pool) -> Router<AppState> {
     ViewSet::for_model(GiftCard::SCHEMA, &["code", "balance_cents"])
+        .allow_anonymous() // the soak driver writes without a login
         .router_pool("/api/v1/gift-cards", pool.clone())
         .with_state(())
 }
@@ -241,6 +246,7 @@ fn cache_namespace() -> String {
 /// Limit/offset pagination, filtering and search.
 fn products(pool: &Pool) -> Router<AppState> {
     ViewSet::for_model(Product::SCHEMA, &["id", "sku", "name", "description", "price_cents", "active", "created_at"])
+        .allow_anonymous() // the soak driver writes without a login
         .serializer::<ProductSerializer>()
         .filter_fields(&["active", "sku"])
         .search_fields(&["sku", "name"])
@@ -274,6 +280,7 @@ const ORDER_FIELDS: &[&str] = &[
 /// all six instances until the soak's first run found it.
 fn orders(pool: &Pool) -> Router<AppState> {
     ViewSet::for_model(Order::SCHEMA, ORDER_FIELDS)
+        .allow_anonymous() // the soak driver writes without a login
         .serializer::<OrderSerializer>()
         .filter_fields(&["status", "customer_id"])
         .cursor_pagination_desc("placed_at")
@@ -299,6 +306,7 @@ fn orders(pool: &Pool) -> Router<AppState> {
 /// text"*.
 fn orders_raw(pool: &Pool) -> Router<AppState> {
     ViewSet::for_model(Order::SCHEMA, ORDER_FIELDS)
+        .allow_anonymous() // the soak driver writes without a login
         .filter_fields(&["status", "customer_id"])
         .limit_offset_pagination()
         .router_pool("/api/v1/orders-raw", pool.clone())
@@ -311,6 +319,7 @@ fn orders_raw(pool: &Pool) -> Router<AppState> {
 /// product_id)` on the model is what makes that provokable from a test.
 fn order_lines(pool: &Pool) -> Router<AppState> {
     ViewSet::for_model(OrderLine::SCHEMA, &["id", "order_id", "product_id", "quantity", "unit_price_cents"])
+        .allow_anonymous() // the soak driver writes without a login
         .filter_fields(&["order_id", "product_id"])
         .page_size(50)
         .router_pool("/api/v1/order-lines", pool.clone())
@@ -319,6 +328,7 @@ fn order_lines(pool: &Pool) -> Router<AppState> {
 
 fn customers(pool: &Pool) -> Router<AppState> {
     ViewSet::for_model(Customer::SCHEMA, &["id", "email", "full_name", "loyalty_tier", "created_at"])
+        .allow_anonymous() // the soak driver writes without a login
         .serializer::<CustomerSerializer>()
         .filter_fields(&["loyalty_tier"])
         .search_fields(&["email", "full_name"])
@@ -331,6 +341,7 @@ fn customers(pool: &Pool) -> Router<AppState> {
 /// the soak generates real contention rather than simulating it.
 fn inventory(pool: &Pool) -> Router<AppState> {
     ViewSet::for_model(InventoryItem::SCHEMA, &["id", "product_id", "location", "on_hand", "updated_at"])
+        .allow_anonymous() // the soak driver writes without a login
         .filter_fields(&["product_id", "location"])
         .limit_offset_pagination()
         .router_pool("/api/v1/inventory", pool.clone())

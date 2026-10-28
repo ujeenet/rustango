@@ -31,8 +31,8 @@ acepta indistintamente un nombre o una ruta ya formada.
 
 `register_url!("name", "/pattern")` registra un mapeo nombre → patrón. Se ejecuta
 al cargar el módulo (vía `inventory`), así que la ruta aterriza en un registro
-global en el momento en que su módulo se enlaza — sin `urls.py` central que editar,
-y sin `include()` que cablear.
+global en el momento en que su módulo se enlaza — sin archivo de rutas central que editar,
+y nada que cablear a mano.
 
 ```rust
 use rustango::register_url;
@@ -107,6 +107,11 @@ Para guardar el resultado en una variable, usa el `{% set %}` de Tera:
 Un argumento `null` (normalmente una variable de template no definida) falla
 ruidosamente en lugar de producir en silencio una URL rota.
 
+Para query strings, `rustango::urls::register_querystring_filter(&mut tera)` añade
+un filtro `querystring`. Toma la query actual y reemplaza claves:
+`{{ qs | querystring(page=2) }}`. Un valor `null` quita una clave, y un resultado
+vacío es la cadena vacía, sin `?` colgando.
+
 ---
 
 ## Redirigir por nombre
@@ -138,11 +143,18 @@ let url = resolve_url("/dashboard", &params)?;   // path  → "/dashboard" (as-i
 (Para redirecciones crudas a una URL conocida, `rustango::shortcuts::redirect(url)`
 devuelve un simple `302`.)
 
+**`resolve_url` no comprueba el host.** `http://evil.example` vuelve sin cambios.
+Antes de redirigir a un `?next=` que envía el usuario, compruébalo con
+`rustango::urls::url_has_allowed_host_and_scheme(url, &allowed_hosts, require_https)`.
+Acepta una ruta relativa, o una URL `http`/`https` cuyo host está en la lista, y
+rechaza `//host`, `\\host`, los caracteres de control y otros esquemas
+(`javascript:`, `data:`, …).
+
 ---
 
 ## Namespacing
 
-No hay `include()` ni un namespace de app auto-aplicado — cada `register_url!`
+No hay un namespace de app auto-aplicado — cada `register_url!`
 aterriza en un único registro global. El namespacing es una **convención en el
 nombre mismo**: prefija con `app:` y pasa el nombre completo a
 `reverse("app:detail")`.

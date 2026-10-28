@@ -91,6 +91,19 @@ URL is stored unsealed with a warning (refused under
 `RUSTANGO_REQUIRE_SEALED_SECRETS=1`). The console's database server pages and
 its **New tenant** page show a banner while the key is missing or short.
 
+On the dev and test tiers (`RUSTANGO_ENV` unset, `dev` or `test`) an unset key
+falls back to one saved in `var/.rustango_secret.key`, in every binary that
+seals or opens. The file is looked up from the working directory up to the
+Cargo workspace root (the nearest dir with `Cargo.lock`); a new one is created
+in that root, or in the working directory outside a Cargo project. Once you set
+`RUSTANGO_SECRET_KEY`, open the values the file sealed with:
+
+```bash
+export RUSTANGO_SECRET_KEY_PREVIOUS="$(base64 < var/.rustango_secret.key | tr -d "\n")"
+```
+
+then re-seal them as in [rotation](#the-secret-key-backup-and-rotation).
+
 ## 2. Save the server
 
 Console: **Organizations → Database servers**. CLI:

@@ -174,6 +174,22 @@ wiederholt werden, um eine Reihe von Zeilen in einem Befehl zu reparieren.
 
 ---
 
+## Migrate-Signale
+
+Receiver von `rustango::signals::migrate::connect_pre_migrate` und
+`connect_post_migrate` laufen vor und nach einem Migrate-Lauf. Die Receiver von
+`connect_pre_migrate_with_target` und `connect_post_migrate_with_target` erhalten
+zusätzlich ein `MigrateTarget`: den `pool` des Laufs und seinen `tenant`-Slug
+(`None` für die Registry oder einen Lauf mit einer einzigen Datenbank). Ein
+Tenant-Lauf sendet einmal pro Tenant mit dem Pool dieses Tenants, auf jedem
+Backend, sodass ein `post_migrate`-Receiver jeden Tenant befüllen kann.
+
+## Ein neuer Unique-Schlüssel über doppelte Zeilen
+
+Bevor eine Migration einer bestehenden Tabelle einen Unique-Index oder eine Unique-Spalte hinzufügt, prüft `migrate`, dass sich keine zwei Zeilen den Schlüssel teilen (Zeilen mit einem NULL darin werden ignoriert). Tun es welche, stoppt es vor jeder DDL und gibt ein `SELECT … GROUP BY … HAVING COUNT(*) > 1` aus, das sie auflistet. Die Prüfung liest die Tabelle einmal pro neuem Schlüssel, kostet auf einer großen Tabelle also einen vollständigen Scan. Sie wird nach einem Datenschritt in derselben Migration übersprungen, denn der könnte die Duplikate gerade entfernen, und für Tabellen oder Spalten, die die Migration selbst anlegt oder umbenennt.
+
+---
+
 ## Upgrade auf 0.51.2
 
 > **0.51.0 und 0.51.1 wurden zurückgezogen (yanked)** — die Reconciliation, die sie versprachen, feuerte nie

@@ -38,7 +38,7 @@ The name of a method tells you what it does. Once you learn these suffixes, you 
   | **Reads** (`QuerySet`) | `fetch(&pool)` — already multi-backend | *is* the bare name |
   | **Writes** (model) | `save(&pool)` — **Postgres only** | `save_pool(&pool)` |
 
-  So the short name is the narrow one for writes and the broad one for reads. That inversion is a wart, not a design: it is tracked in [#1293](https://github.com/ujeenet/rustango/issues/1293) and will be resolved with a deprecation cycle rather than a rename. Until then, **if you are not on Postgres, write `save_pool` / `insert_pool` / `delete_pool`.**
+  So the short name is the narrow one for writes and the broad one for reads. That inversion is a wart, not a design: it will be resolved with a deprecation cycle rather than a rename. Until then, **if you are not on Postgres, write `save_pool` / `insert_pool` / `delete_pool`.**
 - **`from_X(value)`** — converts FROM another value (e.g. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — a builder method that sets one option and returns the object, so you can chain calls (e.g. `with_default_ttl(d)`, `with_access_ttl(secs)`).
 - **`new()`** — the minimal constructor. Any arguments it takes are required dependencies (e.g. `RedisCache::new(url)` — you can't build the cache without a URL).
@@ -80,7 +80,7 @@ How you build an object depends on what it needs. There are a few standard shape
 A method's return type tells you how it can fail. Rust has no exceptions, so failure is part of the return value. There are three shapes.
 
 **`Result<T, E>`** — like a function that either returns a value or throws. You get either the value `T` or an error `E` with details. Use it for operations that can fail and where the *why* matters:
-- I/O: `pool.fetch(...).await -> Result<_, sqlx::Error>`
+- I/O: `Post::objects().fetch(&pool).await -> Result<Vec<Post>, ExecError>`
 - Validation: `Form::parse(data) -> Result<Self, FormErrors>`
 - Issuance: `JwtLifecycle::issue_pair_with(uid, claims) -> Result<_, JwtIssueError>`
 
@@ -91,7 +91,7 @@ A method's return type tells you how it can fail. Rust has no exceptions, so fai
 
 **`bool`** — a plain yes/no when no further detail is needed:
 - `cache.exists(k) -> Result<bool, _>` (the `Result` covers I/O; the `bool` is the answer)
-- `JwtLifecycle::revoke(token) -> bool` (true = added to the blacklist)
+- `async JwtLifecycle::revoke(token) -> bool` (true = added to the blacklist)
 - `disconnect_pre_save(id) -> bool` (true = an entry was removed)
 
 **`Result<Option<T>>` or `Result<T>` with a `NotFound` error?** Both can express "lookup failed," so pick by how exceptional "not found" is:
@@ -122,7 +122,7 @@ The rule of thumb: if a method waits on something (the database, network, or dis
 Every ORM call takes a pool or executor (the database handle) as its **last** argument. You pass the connection in every time, rather than relying on a hidden global:
 
 ```rust
-post.save_on(&pool).await?
+post.save_pool(&pool).await?
 Post::objects().filter(...).fetch_on(&pool).await?
 send_post_save(&post, ctx).await                  // ⚠️ no pool — signals are pool-free
 ```
@@ -131,7 +131,7 @@ send_post_save(&post, ctx).await                  // ⚠️ no pool — signals 
 
 **Why pass it every time?** Rust prefers dependencies you can see over hidden global state. Keeping the connection in thread-local storage breaks down in Rust's async world, where a task can hop between threads mid-request. The downside is more typing; the upside is that you can grep for every place that touches the database.
 
-If you find yourself passing `&pool` through ten layers of function calls, accept `impl Executor` once at the public entry point and let the internal helpers share that single connection.
+If you find yourself passing `&pool` through ten layers of function calls, accept an `E: SqlExecutor` once at the public entry point and let the internal helpers share that single connection.
 
 ---
 
@@ -144,7 +144,8 @@ There are three ways to filter a queryset, and they all combine in one query. Pi
 //    GET /api/posts?author_id=42&status__ne=archived
 
 // 2. String-keyed (lookup at compile of the queryset; runtime field name resolution)
-Post::objects().filter("author_id", Op::Eq, SqlValue::I64(42));
+Post::objects().filter("author_id", 42_i64);                // equality
+Post::objects().filter_op("author_id", Op::Gt, 42_i64);     // any operator
 
 // 3. Typed columns (compile-time field check)
 Post::objects().where_(Post::author_id.eq(42));
@@ -153,7 +154,7 @@ Post::objects().where_(Post::author_id.eq(42));
 | Syntax | Use when |
 |---|---|
 | HTTP query | Public API endpoints — the ViewSet parses these out of the query string for you |
-| String-keyed `.filter` | Generic CRUD or admin code, where field names come from config and aren't known at compile time |
+| String-keyed `.filter` / `.filter_op` | Generic CRUD or admin code, where field names come from config and aren't known at compile time |
 | Typed `.where_` | Your app code — the preferred default. The compiler checks the field exists and the types match |
 
 You can **mix all three** in a single queryset.
@@ -177,7 +178,7 @@ You can **mix all three** in a single queryset.
 | JWT | `tenancy::jwt_lifecycle` | `JwtIssueError` |
 | API keys | `api_keys::*` | `ApiKeyError` |
 | Passwords | `passwords::*` | `PasswordError` |
-| Webhooks | `webhook::*` | (returns bool, no dedicated error) |
+| Webhooks | `webhook::*` | `EmptySigningKey` from `sign`; `verify_*` returns `bool` |
 | Signed URLs | `signed_url::*` | `SignedUrlError` |
 | Bulk actions | `bulk_actions::*` | `BulkActionError` |
 | Fixtures | `fixtures::*` | `FixtureError` |
@@ -192,14 +193,19 @@ You can **mix all three** in a single queryset.
 **A handler example:**
 
 ```rust
+use axum::http::StatusCode;
 use rustango::api_errors::ApiError;
 
-async fn handler() -> Result<Json<X>, ApiError> {
-    let post = Post::objects().get(&pool, 1).await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+async fn handler() -> Result<Json<Post>, ApiError> {
+    let post = Post::objects().find(1, &pool).await
+        // logs the cause; the client gets a generic 500 message
+        .map_err(|e| ApiError::logged(StatusCode::INTERNAL_SERVER_ERROR, "load post", e))?
+        .ok_or_else(|| ApiError::not_found("no such post"))?;
     Ok(Json(post))
 }
 ```
+
+Don't put `e.to_string()` into `ApiError::internal`: that sends the database error to the client. `ApiError::logged` logs a 5xx cause and sends a generic message (unless `RUSTANGO_DISCLOSE_ERRORS` allows it).
 
 `ApiError` implements `IntoResponse`, so returning it produces its JSON shape automatically: `{"error": <machine code>, "message": …, "status": …, "details": …}`.
 
@@ -282,8 +288,9 @@ batteries = [
 
 The indirection is deliberate: `batteries` is a single name a downstream
 crate can switch off — `default-features = false, features = ["postgres"]` —
-without having to restate the list. The alternative, spelling all thirty-seven
-into `default`, means anyone opting out has to know all thirty-seven.
+without having to restate the list. It also lets a project keep everything and
+pick another backend: `default-features = false, features = ["batteries", "sqlite"]`. The alternative, spelling all thirty-eight
+into `default`, means anyone opting out has to know all thirty-eight.
 
 **Off by default:** features that pull in heavy dependencies or external services:
 - `tenancy` — adds `argon2`, `hmac`, `sha2`, `cookie`, `tower` (most apps don't need it)
@@ -300,7 +307,7 @@ rustango = { version = "0.61", default-features = false, features = ["postgres",
 
 ## Macros vs runtime
 
-A *macro* is code that generates code at compile time (`#[derive(Model)]` and friends) — roughly what a Rails generator does, except it runs every build and the compiler checks the result. The split below decides what's done by a macro versus plain runtime code.
+A *macro* is code that generates code at compile time (`#[derive(Model)]` and friends). It runs on every build, and the compiler checks the result. The split below decides what's done by a macro versus plain runtime code.
 
 | Concern | Macro or runtime? |
 |---|---|

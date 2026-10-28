@@ -89,7 +89,7 @@ pub struct InventoryItem {
 
 /// Chapter 2 §2.23 — composite (multi-column) FK target.
 #[derive(Model, Debug, Clone)]
-#[rustango(table = "cookbook_pair_target")]
+#[rustango(table = "cookbook_pair_target", unique_together = "a_id, b_id")]
 pub struct PairTarget {
     #[rustango(primary_key)]
     pub id: Auto<i64>,

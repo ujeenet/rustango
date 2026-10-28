@@ -625,6 +625,34 @@ mod tests {
         assert_eq!(json.body, r#"{"error":"x"}"#);
     }
 
+    /// A framework router's HTML error page is kept; its plain-text one is dressed.
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn own_pages_keep_html_errors_only() {
+        let inner = Router::new()
+            .route(
+                "/form",
+                get(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        axum::response::Html("<form>typed</form>"),
+                    )
+                }),
+            )
+            .route(
+                "/text",
+                get(|| async { (StatusCode::BAD_REQUEST, "bad input") }),
+            );
+        let app = crate::errors::own_pages(inner).error_pages(ErrorPagesLayer::new());
+        let form = call(app.clone(), get_req("/form", "text/html", false)).await;
+        assert_eq!(form.status, StatusCode::BAD_REQUEST);
+        assert_eq!(form.body, "<form>typed</form>");
+        let frag = call(app.clone(), get_req("/form", "*/*", true)).await;
+        assert_eq!(frag.body, "<form>typed</form>");
+        let text = call(app, get_req("/text", "text/html", false)).await;
+        assert!(text.body.contains("<!doctype html>") && text.body.contains("Bad input"));
+    }
+
     #[tokio::test]
     async fn head_and_keep_body_pass_through() {
         let app = app(ErrorPagesLayer::new());

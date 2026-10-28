@@ -195,7 +195,7 @@ pub struct SealedSecretsResolver;
 #[async_trait]
 impl SecretsResolver for SealedSecretsResolver {
     async fn resolve(&self, reference: &str) -> Result<String, SecretsError> {
-        let current = std::env::var(crate::aead::KEY_VAR).ok();
+        let current = crate::aead::env_key();
         let previous = std::env::var(PREVIOUS_KEY_VAR).ok();
         open_sealed(reference, current.as_deref(), previous.as_deref())
     }

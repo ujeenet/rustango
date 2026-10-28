@@ -50,7 +50,12 @@ otherwise rewrites:
 | GET | `/api/auth/me` | `Authorization: Bearer <access>` | `{user_id, username, is_superuser}` |
 
 Login verifies the password with [argon2id](auth-passwords.md), then issues a
-pair. Paths, TTLs, and the signing key are configurable via `Config`.
+pair. A wrong password, an unknown user and an inactive account all get the
+same `401 invalid credentials`, so the endpoint cannot list accounts. Logins
+share the rate limits and account lock of the tenant admin login: over the
+limit the answer is `429`, and `503` when password hashing is busy. `/me`
+answers `403` for an inactive account. Paths, TTLs, and the signing key are
+configurable via `Config`.
 
 ## Wiring it up
 
@@ -77,9 +82,33 @@ by `require_bearer` and the token keeps working until it expires. A shared
 and refuse them once the user logs out anywhere or changes password.
 
 `Config::default()` signs with `RUSTANGO_SESSION_SECRET` (the same key as the
-admin session cookie) and uses 15-min access / 7-day refresh TTLs. Override
-`prefix`, `access_ttl_secs`, `refresh_ttl_secs`, or `session_secret` as needed.
+admin session cookie, base64-decoded) and uses 15-min access / 7-day refresh
+TTLs. `JwtAuth::new` panics when the key is under 32 bytes, so a misconfigured
+server refuses to start. The `Config` fields:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `prefix` | `/api/auth` | URL prefix of the four endpoints |
+| `access_ttl_secs` | `900` | access token lifetime |
+| `refresh_ttl_secs` | 7 days | refresh token lifetime |
+| `refresh_absolute_ttl_secs` | 30 days | longest a login lasts across refreshes; must be > 0 |
+| `refresh_reuse_grace_secs` | `10` | retry window after a rotation; `0` treats every reuse as theft |
+| `session_secret` | `None` | explicit signing key instead of `RUSTANGO_SESSION_SECRET` |
+| `jti_store` | `None` | revocation store; `None` is the in-memory one |
+| `extra_claims` | `None` | hook that adds claims to both tokens at login and on every refresh |
+
+`extra_claims` gets a `ClaimsContext` (`user_id`, `username`, `is_superuser`,
+`tenant_slug`). Returning a reserved name (`sub`, `exp`, `jti`, `typ`, `kind`)
+fails the login with `500`; `tenant`, `pwf`, `sat` and `fam` are the router's
+own. With the `config` feature, `Config::with_jwt_settings(&settings.auth.jwt)`
+reads `access_ttl_secs` and `refresh_ttl_secs` from `[auth.jwt]`; the
+`issuer` and `audience` keys there have no effect yet.
+
 The endpoints run under the tenant context, so mount them in a tenancy app.
+For a tenant database type other than the default, use `router_for::<DB>()`
+and `require_bearer_for::<DB>`. `auth.lifecycle()` gives the `JwtLifecycle`
+behind it, and `auth.verify_for_tenant(bearer, &tenant)` runs the same checks
+as `require_bearer` and returns the user id.
 
 ```sh
 # Login → access + refresh
@@ -114,6 +143,13 @@ match jwt.verify_access(&access).await {
     None => { /* 401: invalid, expired, revoked, or wrong type */ }
 }
 ```
+
+`JwtLifecycle::new` takes the key as a `Vec<u8>` and panics when it is under
+32 bytes. The TTLs default to 15 min / 7 days; change them with
+`.with_access_ttl(secs)` and `.with_refresh_ttl(secs)`.
+`issue_access_with(user_id, custom)` mints a lone access token with no refresh
+half, and `blacklist_size()` reports roughly how many JTIs are revoked (`0`
+for a store that cannot count).
 
 Access and refresh tokens are **not interchangeable** — `verify_access` rejects
 a refresh token and vice versa, so a stolen short-lived access token can't be
@@ -158,7 +194,8 @@ as the JTI store (an in-memory one forgets on restart).
 
 Each token carries a unique `jti`. `revoke` adds it to a blacklist so subsequent
 `verify_*` calls fail until the token would have expired anyway — this is what
-`POST /api/auth/logout` calls:
+`POST /api/auth/logout` calls. It checks only the signature, so it also takes an
+expired token, and it returns `false` for a token it cannot verify:
 
 ```rust
 let pair = jwt.issue_pair(1);
@@ -207,7 +244,7 @@ assert!(b.verify_access(&pair.access).await.is_none());   // B sees A's revocati
 
 ### Writing a durable store
 
-`JtiStore` is async (since v0.52, #1191), so a durable implementation is one
+`JtiStore` is async (since v0.52), so a durable implementation is one
 query — no background flusher, no convergence window during which a revoked
 `jti` is still accepted elsewhere. Both methods return
 `JtiFuture<'_, T>` (a boxed future — the trait is used as `Arc<dyn JtiStore>`,
@@ -234,6 +271,10 @@ impl JtiStore for PgJtiStore {
 
 `mark_used` MUST be atomic: concurrent callers for the same `jti` must see
 exactly one `true`, or the single-use refresh guarantee is gone.
+Two more methods have defaults: `approx_size` (`None`, used by
+`blacklist_size`) and `is_process_local` (`false`; return `true` only for a
+store that does not share revocations, which makes `JwtAuth::new` log a
+warning).
 
 Because verification consults the store, `verify_access`, `verify_refresh`,
 `refresh`, `revoke` and the MCP/tenant token helpers
@@ -280,7 +321,7 @@ Custom claims survive `refresh` (carried onto the new pair) unless you use
   service you hand a token to. Three segments, a JOSE header of
   `{"alg":"HS256","typ":"JWT"}`, signed over `header.payload`.
 
-  Until [#1397](https://github.com/ujeenet/rustango/issues/1397) they were two
+  Before 0.57.5 they were two
   segments with no header, signed over the payload alone — readable by nothing
   but rustango, and rejected even by `rustango::jwt::decode`. If you wrote a
   custom verifier to work around that, you can drop it.

@@ -98,8 +98,10 @@ pub fn sign(
 ) -> Result<String, EmptySigningKey> {
     let bytes = compute_hmac(secret, body).ok_or(EmptySigningKey)?;
     Ok(match format {
-        SignatureFormat::HexSha256WithPrefix => format!("sha256={}", to_hex(&bytes)),
-        SignatureFormat::HexSha256 => to_hex(&bytes),
+        SignatureFormat::HexSha256WithPrefix => {
+            format!("sha256={}", crate::hex::hex_encode(&bytes))
+        }
+        SignatureFormat::HexSha256 => crate::hex::hex_encode(&bytes),
         SignatureFormat::Base64Sha256 => {
             use base64::Engine;
             base64::engine::general_purpose::STANDARD.encode(&bytes)
@@ -223,10 +225,6 @@ fn decode_signature(format: SignatureFormat, signature: &str) -> Option<Vec<u8>>
                 .ok()
         }
     }
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn from_hex(s: &str) -> Option<Vec<u8>> {
@@ -409,7 +407,7 @@ mod tests {
     #[test]
     fn from_hex_roundtrip() {
         let bytes: Vec<u8> = (0..=255).collect();
-        let hex = to_hex(&bytes);
+        let hex = crate::hex::hex_encode(&bytes);
         let decoded = from_hex(&hex).unwrap();
         assert_eq!(decoded, bytes);
     }
@@ -431,7 +429,7 @@ mod tests {
             use hmac::{Hmac, Mac};
             let mut mac = <Hmac<Sha256>>::new_from_slice(b"").unwrap();
             mac.update(BODY);
-            to_hex(&mac.finalize().into_bytes())
+            crate::hex::hex_encode(&mac.finalize().into_bytes())
         };
         assert!(!verify_signature(
             SignatureFormat::HexSha256,

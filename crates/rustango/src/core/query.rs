@@ -920,18 +920,18 @@ pub struct OrderClause {
 /// `ASC` and first on `DESC` (the SQL standard), while MySQL treats
 /// NULL as smaller than any value, so it comes first on `ASC` and
 /// last on `DESC`. `First` or `Last` gives the same order on all
-/// three; MySQL has no `NULLS` keywords, so the writer emits an
-/// `IFNULL(…)` workaround there.
+/// three; MySQL has no `NULLS` keywords, so the writer sorts on
+/// `<col> IS NULL` first there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[allow(clippy::exhaustive_enums)] // SQL has only FIRST and LAST.
 pub enum NullsOrder {
     /// Backend's native default — emits no `NULLS …` clause.
     #[default]
     Default,
-    /// `NULLS FIRST` on PG / SQLite; on MySQL an
-    /// `IFNULL(col, '') = '' DESC, …` trick.
+    /// `NULLS FIRST` on PG / SQLite; `<col> IS NULL DESC, <col>` on
+    /// MySQL.
     First,
-    /// `NULLS LAST` on PG / SQLite; the same kind of trick on MySQL.
+    /// `NULLS LAST` on PG / SQLite; `<col> IS NULL ASC, <col>` on MySQL.
     Last,
 }
 

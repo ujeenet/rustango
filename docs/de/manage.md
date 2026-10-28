@@ -1,7 +1,6 @@
 # `manage`-CLI-Referenz
 
-Dies ist **Rustango**s Kommandozeilenwerkzeug, vergleichbar mit Laravels
-`artisan` oder Rails' `rails`-Befehl. In einem via `cargo rustango new`
+Dies ist **Rustango**s Kommandozeilenwerkzeug. In einem via `cargo rustango new`
 generierten Projekt führt ein einziges Binary jeden Befehl aus („Verb"):
 
 ```bash
@@ -62,6 +61,133 @@ Nutzungshilfe aus.
 - [Eigene Unterbefehle](#eigene-unterbefehle)
 - [Häufige Arbeitsabläufe](#häufige-arbeitsabläufe)
 - [Alle Verben](#alle-verben)
+
+---
+
+## Alle Verben
+
+Die Abschnitte oben erklären die gängigen Verben im Detail. Diese Tabelle ist
+die **vollständige** Liste, aus den beiden Dispatchern
+(`migrate/manage.rs` und `tenancy/manage/mod.rs`) gezogen statt aus der Prosa —
+ein Verb, das im Leitfaden fehlt, ist hier trotzdem auffindbar. Für die Flags
+`<verb> --help` ausführen; der Hilfetext ist maßgeblich, diese Seite nicht.
+
+Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
+`Cli::tenancy()` erreicht.
+
+### Migrationen und Schema
+
+| Verb | Was es tut |
+|---|---|
+| `makemigrations [name]` / `--empty <name>` | Erzeugt eine Migration aus dem Model-Diff |
+| `migrate [target]` / `--dry-run` / `--squash` | Wendet ausstehende Migrationen an |
+| `downgrade [N]` | Rollt die letzten N Migrationen zurück |
+| `showmigrations` / `status` | Listet Migrationen und ihren Anwendungsstand |
+| `sqlmigrate <name>` | Gibt das SQL einer Migration aus, ohne es auszuführen |
+| `forget-pending <name>` | Löscht eine noch nicht angewendete Migrations-JSON |
+| `add-data-op --sql <SQL> [--reverse-sql <SQL>]` | Hängt eine handgeschriebene Datenoperation an |
+| `inspectdb [--schema <s>] [--table <t>]` | Liest ein bestehendes Schema und erzeugt `#[derive(Model)]`-Quellcode |
+
+### Daten
+
+| Verb | Was es tut |
+|---|---|
+| `dumpdata` | Exportiert Zeilen als JSON-Fixtures |
+| `loaddata <fixture.json> [--fail-fast]` | Lädt JSON-Fixtures wieder ein. Ein fehlgeschlagener oder teilweiser Ladevorgang wird nicht zurückgerollt |
+| `flush [--yes] [--app <label>] [--model <name>]` | Leert jede Model-Tabelle; die Flags grenzen die Menge ein. Nicht verwaltete Models und Views werden übersprungen. Postgres nutzt `TRUNCATE … RESTART IDENTITY` und schlägt fehl, wenn eine Tabelle außerhalb des Filters ein Ziel referenziert; MySQL / SQLite löschen die Zeilen in einer Transaktion, Kinder zuerst, und behalten die ID-Zähler. Ein Tenancy-Projekt braucht `--tenant <slug>` und leert nur diesen Tenant |
+| `prune [--model <name>] [--except <name>] [--pretend]` | Streamendes Massenlöschen; `--pretend` meldet nur, ohne zu löschen |
+| `db:dump` / `db:restore` / `db:info` | Natives Dump / Restore / Inspect |
+| `dbshell` | Führt den nativen Client aus (`psql` / `mysql` / `sqlite3`). Braucht nur `DATABASE_URL`, keinen funktionierenden Pool — es wird vor dem Pool-Aufbau behandelt und funktioniert daher auch, wenn sqlx nicht verbinden kann |
+
+### Scaffolder und Generatoren
+
+| Verb | Was es tut |
+|---|---|
+| `startapp <name>` | Legt ein App-Modul an |
+| `make:viewset` / `make:serializer` / `make:form` | Erzeugt ein ViewSet, einen Serializer oder ein Form |
+| `make:job` / `make:scheduled` / `make:worker` / `make:middleware` / `make:notification` / `make:test` | Erzeugt einen Queue-Job, eine Intervall-Aufgabe, ein Worker-Binary, eine Middleware, eine Notification oder einen Test |
+| `make:api_routes <app> [--tenant]` | Erzeugt das API-Routen-Modul einer App |
+
+### Cache, Sessions und Mail
+
+| Verb | Was es tut |
+|---|---|
+| `createcachetable` / `create-cache-table` `[--table <name>]` | Legt die Cache-Tabelle an (und die Session-Tabelle, wenn Sessions in die DB gehen) |
+| `clear-cache [--table <name>]` / `clearsessions` | Leert ihn; gibt die Anzahl gelöschter Zeilen zurück |
+| `sendtestemail --to <addr>` | Sendet eine feste Test-Mail über das konfigurierte Backend |
+
+### Introspektion
+
+| Verb | Was es tut |
+|---|---|
+| `showmodels [--format plain\|json] [--app <label>]` | Jedes registrierte Model, sortiert für deterministische Ausgabe |
+| `showurls [--format plain\|json]` | Jede benannte Route, sortiert |
+| `check [--deploy]` | Health-Checks; `--deploy` ergänzt die Produktions-Audits |
+| `create-admin` | Legt eine `AdminUser`-Zeile für Projekte mit `admin::Builder::with_session_auth` an. **Nicht** tenancy-gated — nimmt einen einfachen `&Pool` und schreibt `rustango_admin_users`, die Tabelle wird bei Bedarf angelegt. Der einzige Weg zu einem ersten Admin-Login in einem Nicht-Tenancy-Projekt |
+| `about` / `version` / `--version` | Build- und Versionsinformationen |
+| `docs` | Öffnet die Dokumentation |
+
+### Benutzer und Zugriff **T**
+
+| Verb | Was es tut |
+|---|---|
+| `create-superuser` / `set-superuser` | Legt einen Superuser an oder befördert einen bestehenden Benutzer |
+| `create-user` / `create-operator` | Legt einen Tenant-Benutzer oder einen Operator an |
+| `reset-password` / `change-password` | Passwort-Wiederherstellung für Tenant-Benutzer. `change-password` nimmt das aktuelle Passwort aus `--current-stdin` oder, ohne Terminal, aus `RUSTANGO_CURRENT_PASSWORD`; `--current` in argv warnt |
+| `set-password-link <slug> <username>` | Gibt einen Einmal-Link aus, mit dem der Benutzer sein eigenes Passwort setzt |
+| `reset-operator-password` / `change-operator-password` | Passwort-Wiederherstellung für Operatoren; `change-operator-password` liest das aktuelle Passwort wie `change-password` |
+| `set-operator-active` | Aktiviert oder deaktiviert einen Operator |
+| `create-role` / `assign-role` / `revoke-role` / `list-roles` | Rollen |
+| `grant-perm` / `revoke-perm` | Berechtigungen per Codename |
+| `seed-permissions [--slug <s>]` | Legt die Standard-Berechtigungszeilen an |
+| `create-api-key` | Stellt einen API-Key aus |
+| `revoke-passkey <slug> <username> [--credential <id>]` | Löscht einen Passkey eines Tenant-Benutzers oder alle (Feature `passkey`) |
+
+### Tenants **T**
+
+| Verb | Was es tut |
+|---|---|
+| `create-tenant` / `edit-tenant` / `list-tenants` | Anlegen, bearbeiten, auflisten |
+| `drop-tenant` / `purge-tenant` | Deaktivieren (umkehrbar) / zerstören (nicht) |
+| `rotate-tenant-password <slug>` | Neues Passwort für einen Login, den rustango auf einem gespeicherten Server angelegt hat |
+| `migrate-tenants` / `migrate-registry` | Wendet Migrationen über alle Tenants oder auf die Registry an |
+| `migrate-tenant-storage <slug> --to schema\|database` | Verschiebt einen Tenant zwischen Speichermodi |
+| `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host-Routing |
+| `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Gespeicherte Datenbankserver |
+| `test-tenant-connection` | Prüft, ob die Datenbank eines Tenants erreichbar ist |
+| `reseal-tenant-secrets [--apply]` | Versiegelt gespeicherte Tenant-URLs und Server-Passwörter neu mit dem aktuellen `RUSTANGO_SECRET_KEY`; ohne `--apply` ein Probelauf |
+| `prewarm-pools` | Öffnet Tenant-Pools vor dem ersten Request |
+| `run-server` / `runserver` | Startet den Multi-Tenant-Server |
+| `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup und interaktive Einstiegspunkte |
+
+**Erster Admin.** `create-tenant <slug> … --admin-email <e> [--admin-username <u>]`
+legt nach den Migrationen einen Superuser an, bevor der Tenant live geht;
+schlägt das fehl, wird der Lauf zurückgerollt. Der Admin bekommt kein Passwort.
+Das Verb gibt einmal einen Link zum Setzen des Passworts aus: Er funktioniert
+einmal, läuft nach 72 Stunden ab und gilt nur für diesen Tenant. Gib ihn dem
+Admin. Er ist mit dem Tenant-Session-Schlüssel des Servers signiert
+(`RUSTANGO_SESSION_SECRET` oder die Dev-Schlüsseldatei), also starte die CLI mit
+demselben Schlüssel wie den Server. `set-password-link <slug> <username>` gibt
+einen neuen aus.
+
+### Audit **T**
+
+| Verb | Was es tut |
+|---|---|
+| `audit-log` | Liest den Audit-Trail |
+| `audit-cleanup` | Kürzt ihn |
+
+### MCP **T**
+
+Vollständig im [MCP-Leitfaden](mcp.md) dokumentiert.
+
+| Verb | Was es tut |
+|---|---|
+| `create-agent` / `list-agents` / `rotate-agent-secret` | Agents |
+| `create-skill` / `list-skills` / `grant-skill` / `revoke-skill` | Skills |
+| `map-skill-permission` / `unmap-skill-permission` | Bindet einen Skill an eine Berechtigung |
+| `create-user-key` / `list-user-keys` / `revoke-user-key` | MCP-Zugangsdaten pro Benutzer |
+| `list-runs` / `show-run` | Lauf-Historie |
 
 ---
 
@@ -144,8 +270,8 @@ cargo run -- makemigrations --empty rename_status_to_state
 
 ### `makemigrations --merge`
 
-Repariert eine Migrationshistorie, die sich in zwei Zweige aufgeteilt hat
-(Issue #346). Das passiert,
+Repariert eine Migrationshistorie, die sich in zwei Zweige aufgeteilt hat.
+Das passiert,
 wenn zwei Personen jeweils `makemigrations` auf ihrem eigenen Feature-Branch
 ausführen, sodass beide neuen Dateien auf denselben Elternknoten zeigen.
 Nachdem beide Branches gemergt sind, hat die Historie zwei „Blätter"
@@ -173,8 +299,7 @@ cargo run -- makemigrations --merge
 
 ### `migrate`
 
-Wendet alle ausstehenden Migrationen der Reihe nach auf die Datenbank an — das
-Gegenstück zu Laravels `php artisan migrate`. Dies ist der Befehl, den
+Wendet alle ausstehenden Migrationen der Reihe nach auf die Datenbank an. Dies ist der Befehl, den
 Sie nach `makemigrations` ausführen, um Ihr Schema tatsächlich zu ändern.
 
 ```bash
@@ -276,8 +401,7 @@ Per-Tenant-Aufgabe.
 
 ### `downgrade [N]`
 
-Rollt die letzten N angewendeten Migrationen zurück (Standard 1) — Laravels
-`migrate:rollback`. Jede Migration muss reversibel sein: Schemaänderungen
+Rollt die letzten N angewendeten Migrationen zurück (Standard 1). Jede Migration muss reversibel sein: Schemaänderungen
 kehren sich automatisch um, aber Datenoperationen brauchen ein definiertes
 `reverse_sql`, sonst scheitert der Rollback.
 
@@ -299,10 +423,15 @@ cargo run -- status                     # alias
 Ausgabe:
 
 ```
-[X] 0001_initial
-[X] 0002_add_status
-[ ] 0003_add_slug
+Migrations in ./migrations:
+  [X] 0001_initial
+  [X] 0002_add_status
+  [ ] 0003_add_slug
+System migrations in ./system/migrations:
+  [X] 0001_create_rustango_audit_log_and_rustango_content_types
 ```
+
+Eine Zeile, die ein angewendeter Squash ersetzt, zeigt `[X] <name> (replaced by a squash)`.
 
 ---
 
@@ -350,8 +479,7 @@ markiert — jeder Versuch, ihn zurückzurollen, scheitert sofort.
 
 ### `cargo rustango new <name>` *(separates Binary)*
 
-Erstellt ein brandneues **Rustango**-Projekt — wie `laravel new` oder
-`rails new`. Dies ist ein separates Werkzeug, installieren Sie es also
+Erstellt ein brandneues **Rustango**-Projekt. Dies ist ein separates Werkzeug, installieren Sie es also
 zuerst mit `cargo install cargo-rustango`. Wählen Sie aus drei Vorlagen:
 
 ```bash
@@ -413,21 +541,24 @@ Erstellt:
 ```
 src/<name>/
   mod.rs
-  models.rs
+  models.rs      (a starter model named after the app)
   views.rs
   urls.rs
+  tests.rs
 ```
 
-Sicher erneut ausführbar — bestehende Dateien bleiben unberührt. Ein manueller
-Schritt: fügen Sie `pub mod <name>;` zu `src/lib.rs` hinzu, damit Rust das neue
-Modul kompiliert.
+Sicher erneut ausführbar — bestehende Dateien bleiben unberührt. Der Befehl
+registriert auch das Modul: `pub mod <name>;` in `src/lib.rs` (oder
+`mod <name>;` in `src/main.rs`, wenn es keine `lib.rs` gibt), dazu eine Zeile
+`.merge(crate::<name>::urls::api())` im `api()`-Aggregator von
+`src/urls.rs`. Kann er eine Datei nicht anpassen, gibt er die Zeile zum
+Einfügen aus.
 
 ---
 
 ## Dateigeneratoren (`make:*`)
 
-Diese erstellen Startdateien für gängige Bausteine — sehr ähnlich zu Laravels
-`make:*`-Befehlen (`make:controller`, `make:model`, …). Jeder Generator
+Diese erstellen Startdateien für gängige Bausteine. Jeder Generator
 schreibt nach `src/<snake_name>.rs` (oder `tests/<snake_name>.rs` für
 `make:test`) und:
 
@@ -462,22 +593,29 @@ Pool-Vorlage — generierte `src/post_view_set.rs`:
 
 ```rust
 #[derive(ViewSet)]
-#[viewset(model = Post, fields = "id, ", filter_fields = "", search_fields = "", page_size = 20)]
+#[viewset(model = Post, fields = "id, ", filter_fields = "", search_fields = "", page_size = 20, read_only)]
 pub struct PostViewSet;
 ```
 
-Einbinden mit: `.merge(PostViewSet::router("/api/posts", pool.clone()))`.
+Sie startet als `read_only`: fügen Sie hinter einer Auth-Schicht
+`permissions(create = "...", ...)` hinzu und entfernen Sie dann `read_only`, um
+Schreibzugriffe zu bedienen. `--model Post` importiert `crate::models::Post`;
+passen Sie die `use`-Zeile an, wenn das Modell in einer App liegt.
+
+In `src/main.rs` mit dem Pool des Servers einbinden:
+`.nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/post_view_set", pool))`.
 
 Tenant-Vorlage — **kein Derive**. Sie erzeugt ein
 `pub fn router() -> Router<()>`, gebaut aus
-`ViewSet::for_model(Post::SCHEMA, &["id"]).tenant_router("/api/posts")`, mit der restlichen
-Builder-Kette (`filter_fields` / `search_fields` / `ordering` /
-`page_size` / `permissions_for_model` / `read_only`) als auskommentierte Zeilen
-vorgestubbt. Die Verbindung wird pro Anfrage über den `Tenant`-Extractor
+`ViewSet::for_model(Post::SCHEMA, &["id"])`, mit aktivem
+`.permissions_for_model::<Post>()` und der restlichen Builder-Kette
+(`filter_fields` / `search_fields` / `ordering` / `ordering_fields` /
+`page_size` / `read_only`) als auskommentierte Zeilen vorgestubbt, am Ende
+`.tenant_router("/api/post_view_set")`. Die Verbindung wird pro Anfrage über den `Tenant`-Extractor
 aufgelöst statt einmalig beim Einbinden eingefangen — ein `router()` bedient also
 jeden Tenant.
 
-Einbinden mit: `.merge(crate::viewsets::post::router())` — **nicht** mit der
+Einbinden mit: `.merge(crate::post_view_set::router())` — **nicht** mit der
 `PostViewSet::router(path, pool)`-Zeile oben.
 
 `--crate <path>` benennt die Framework-Crate in den generierten `use`-Zeilen um,
@@ -546,8 +684,7 @@ cargo run -- make:worker JobsWorker
 
 ### `make:notification <Name>`
 
-Generiert eine Notification-Struktur, die eine E-Mail aufbaut — wie Laravels
-`make:notification`.
+Generiert eine Notification-Struktur, die eine E-Mail aufbaut.
 
 ```bash
 cargo run -- make:notification WelcomeEmail
@@ -592,8 +729,8 @@ cargo run -- db:info
 
 ### `db:dump [--out <path>] [--data-only|--schema-only] [--no-owner]`
 
-Sichert Ihre Datenbank, indem `pg_dump` gegen `DATABASE_URL` ausgeführt wird —
-wie `php artisan db:dump`. Standardmäßig geht das SQL nach stdout (damit Sie es
+Sichert Ihre Datenbank, indem `pg_dump` gegen `DATABASE_URL` ausgeführt wird.
+Standardmäßig geht das SQL nach stdout (damit Sie es
 pipen können); übergeben Sie `--out <path>` (`-o`), um stattdessen eine Datei
 zu schreiben. `--data-only` und `--schema-only` bilden direkt auf die Flags von
 `pg_dump` ab, und `--no-owner` lässt die OWNER-Zeilen weg. Sie brauchen
@@ -605,8 +742,8 @@ cargo run -- db:dump --out backups/before-migrate.sql
 ```
 
 Die Statuszeile `running: pg_dump …` geht auf **stderr** und bleibt damit
-aus der Umleitung und aus einer Pipe heraus. Bis [#1404](https://github.com/ujeenet/rustango/issues/1404)
-ging sie auf stdout und landete so in der ersten Zeile der `.sql`-Datei.
+aus der Umleitung und aus einer Pipe heraus. Ältere Versionen
+schickten sie auf stdout und landete so in der ersten Zeile der `.sql`-Datei.
 
 ### `db:restore <path> [--clean --yes]`
 
@@ -636,7 +773,7 @@ Gibt die Version des **Rustango**-Frameworks aus.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.7
+rustango 0.61.8
 ```
 
 ### `about`
@@ -648,7 +785,7 @@ Umgebungsvariablen. Legen Sie dies in Support-Tickets, wenn etwas nicht stimmt.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.7
+  version:        0.61.8
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -668,7 +805,7 @@ Sie `--deploy` für die strengeren Produktionsreife-Prüfungen hinzu.
 
 **Mit `--deploy`:**
 - `RUSTANGO_ENV` ist `prod` oder `production`
-- `RUSTANGO_SESSION_SECRET` gesetzt und ≥ 32 Byte (der HMAC-Schlüssel für
+- `RUSTANGO_SESSION_SECRET` gesetzt und decodiert zu einem Schlüssel von ≥ 32 Byte, dieselbe Prüfung wie zur Laufzeit (der HMAC-Schlüssel für
   Cookies + JWTs; `SECRET_KEY` wird vom Framework nie gelesen)
 - `DATABASE_URL` gesetzt
 - `RUSTANGO_APEX_DOMAIN` gesetzt — die Warnung erscheint bei **jedem** Projekt, wenn unset oder `localhost`, und sagt das auch; Single-Tenant-Projekte können sie ignorieren
@@ -683,7 +820,10 @@ running rustango system check (deploy mode)...
   [info]    3 models registered via inventory
   [info]    database reachable
   [info]    4 migration(s) on disk
-  [info]    RUSTANGO_SESSION_SECRET length OK
+  [info]    RUSTANGO_ENV is set to a production value
+  [info]    RUSTANGO_SESSION_SECRET decodes to a valid ≥32-byte key
+  [info]    DATABASE_URL set
+  [info]    RUSTANGO_APEX_DOMAIN set to a non-localhost value
 all checks passed
 ```
 
@@ -819,6 +959,8 @@ cargo run                        # implicit
 cargo run -- runserver           # explicit
 ```
 
+`--bind <addr>` schlägt `RUSTANGO_BIND` und `[server] bind`; in einem Tenancy-Projekt schlägt `--apex <domain>` `RUSTANGO_APEX_DOMAIN` und `[tenancy] apex_domain`. Jedes andere Flag wird abgelehnt. Der Server loggt die Adresse, auf der er lauscht, auf INFO.
+
 Bei SIGTERM nimmt er keine Verbindungen mehr an und gibt offenen Verbindungen
 `[server] shutdown_timeout_secs` (Standard 20) Zeit, dann schließt er den Rest.
 SSE und Long-Poll enden nie von selbst. Provisionierungs- und Migrationsläufe,
@@ -837,19 +979,50 @@ abgelehnt (`tenancy::provision::provision_tenant`), bevor sonst etwas passiert.
 ```bash
 cargo run -- create-tenant acme --display-name "ACME Corp"
 cargo run -- create-tenant beta --mode database --database-url postgres://...
+cargo run -- create-tenant gamma --mode database --server main
 ```
 
 | Flag | Beschreibung |
 |---|---|
 | `--display-name <name>` | Menschenlesbares Label, das in Admin-Seitenleisten angezeigt wird |
-| `--mode schema \| database` | Speichermodus (Standard: schema) |
-| `--database-url <url>` | Tenant-spezifische DB-URL (erforderlich für den database-Modus) |
+| `--mode schema \| database` | Speichermodus (Standard: schema, oder database, wenn `--database-url` oder `--server` angegeben ist) |
+| `--database-url <url>` | Eine vorhandene Datenbank für den Tenant |
+| `--server <name>` | Legt die Datenbank stattdessen auf diesem [gespeicherten Server](#datenbankserver) an |
 | `--host-pattern <pattern>` | Überschreibt das vom `SubdomainResolver` verwendete Host-Muster |
 | `--no-migrate` | Überspringt das Anwenden tenant-scoped Migrationen nach dem Provisioning |
-| `--backend postgres \| mysql \| sqlite` | Treiber für einen Database-Mode-Tenant (Default: `postgres`). Wird gegen `--mode` validiert |
+| `--backend postgres \| mysql \| sqlite` | Muss das Backend der Registry sein, das auch der Standard ist |
 | `--schema-name <s>` | Überschreibt den generierten Schemanamen im Schema-Modus |
 | `--port <n>` | Port, unter dem der Tenant erreichbar ist, fürs Routing |
 | `--path-prefix <s>` | Pfad-Präfix, unter dem der Tenant erreichbar ist, fürs Routing |
+| `--admin-email <e>` / `--admin-username <u>` | Legt den ersten Superuser des Tenants an (siehe **Erster Admin** oben) |
+| `--resume` | Schließt einen Tenant ab, den ein früherer Lauf wegen fehlgeschlagener Migrationen inaktiv ließ; dieselben Flags erneut angeben |
+
+Schlagen die Migrationen des Tenants fehl, endet `create-tenant` mit einem
+Fehlercode und der Tenant bleibt inaktiv. Behebe die Migration und führe
+denselben Befehl mit `--resume` erneut aus: er migriert und aktiviert den Tenant.
+
+Jeder Modus prüft seine Rechte, bevor etwas entsteht, und wenn eines fehlt,
+nennt er es und gibt die Anweisungen aus, die es beheben: Der Schemamodus braucht
+das `CREATE` des Registry-Logins auf der Registry-Datenbank, `--server` braucht
+die Admin-Rechte unten, `--database-url` braucht keine. Siehe
+[Rechte](tenant-databases.md#rechte).
+
+Mit `--server` werden zuerst die Admin-Rechte des Servers geprüft, dann wird eine
+Datenbank angelegt, die exakt wie der Slug heißt, mit eigenem Login
+(Zufallspasswort, nur auf diese Datenbank berechtigt); SQLite legt
+`<dir>/<slug>.db` an. Eine vorhandene Datenbank dieses Namens wird abgelehnt, nie
+wiederverwendet. Der neue Login muss sich dann anmelden (eine pg_hba-Regel oder
+ein überdeckendes MySQL-Konto scheitert hier). Auf MySQL übernimmt die Datenbank
+die utf8mb4-Collation der Registry. Die Tenant-URL wird versiegelt gespeichert und
+die Datenbank in `rustango_tenant_databases` festgehalten. Scheitert das
+Registrieren, Migrieren oder Aktivieren, werden die neue Datenbank, der Login und
+die Tenant-Zeile wieder gelöscht, sodass derselbe Befehl einfach erneut laufen
+kann. Scheitert dieses Löschen, bleiben der inaktive Tenant und sein Eintrag: Ein
+fortsetzender erneuter Versuch (Webhook, `create_tenant_if_missing`) migriert ihn
+an Ort und Stelle. Der Eintrag wird vor dem `CREATE` geschrieben, sodass ein
+mittendrin abgebrochener Lauf eine Datenbank hinterlässt, die rustango finden kann:
+Ein erneuter Versuch nach zehn Minuten löscht sie und beginnt neu und lehnt eine
+Datenbank ab, von der er nicht beweisen kann, dass er sie angelegt hat.
 
 ### `edit-tenant <slug> [options]`
 
@@ -923,7 +1096,7 @@ dem erneut getippten Slug übergeben. Bei Tenants im database-Modus bleibt die
 zugrunde liegende Datenbank an Ort und Stelle, es sei denn, Sie übergeben
 zusätzlich `--purge-database`. Ohne dieses Flag **verweigert** der Befehl bei
 Database-Mode-Tenants komplett — er entfernt nicht die `Org`-Zeile und lässt die
-Datenbank stehen, er tut gar nichts (tenancy/manage/tenants.rs:479).
+Datenbank stehen, er tut gar nichts.
 
 ```bash
 cargo run -- purge-tenant acme --confirm acme
@@ -934,6 +1107,20 @@ Bei mehreren Servern erst deaktivieren (`drop-tenant`) und 30 s warten. Ein
 Server, dessen Tenant-Cache noch einen Schema-Mode-Tenant hält, behält
 `search_path = <schema>, public`; nach dem Löschen des Schemas fallen seine
 Abfragen bis zur Cache-Auffrischung auf `public` durch.
+
+### `rotate-tenant-password <slug>`
+
+Gibt dem Login, den rustango für den Tenant auf einem gespeicherten Server
+angelegt hat, ein neues Zufallspasswort: auf dem Server geändert, dann
+versiegelt über der alten URL gespeichert, dann öffnen sich die Pools des
+Tenants neu. Die Schritte werden ausgegeben, sobald sie enden; der Lauf wird als
+`rotate_password` festgehalten. Andere Pods übernehmen die neue URL innerhalb
+eines Fingerprint-Polls; zu diesem Zeitfenster siehe
+[Tenant-Datenbanken auf einem gespeicherten Server](tenant-databases.md).
+
+```bash
+cargo run -- rotate-tenant-password acme
+```
 
 ### `list-tenants`
 
@@ -1056,7 +1243,11 @@ damit ein erneut laufendes Provisioning-Skript nicht rot wird.
 ### `create-user <tenant> <username> --password <pwd> [--superuser]`
 
 Erstellt einen Benutzer innerhalb eines Tenants — mit `--superuser` auch einen
-Administrator, aber immer auf einen einzelnen Tenant beschränkt.
+Administrator, aber immer auf einen einzelnen Tenant beschränkt. Statt
+`--password` können Sie `--password-stdin` oder `--generate` (gibt ein
+zufälliges aus) übergeben; lassen Sie alle drei im Terminal weg, fragt der
+Befehl nach. `--skip-validation` überspringt die Passwortregeln. Ein
+`--staff`-Flag gibt es nicht.
 
 ```bash
 cargo run -- create-user acme alice --password hunter2 --superuser
@@ -1105,14 +1296,14 @@ cargo run -- revoke-role acme alice editor
 Gewährt eine einzelne Berechtigung. Standardmäßig ist das zweite Argument ein
 **Benutzername**, sodass die Berechtigung direkt an diesen Benutzer geht; fügen
 Sie `--role` hinzu, um sie stattdessen einer Rolle zu gewähren.
-Berechtigungs-Codenames verwenden das Format `<app>.<action>_<model>`
-(`blog.add_post`, `blog.change_post`, …). Das Feature
-`auto_create_permissions` erstellt die vier standardmäßigen CRUD-Codenames
-automatisch für jedes Modell, das mit `#[rustango(permissions)]` markiert ist.
+Modell-Codenames verwenden das Format `<table>.<action>`
+(`posts.add`, `posts.change`, `posts.delete`, `posts.view`). `migrate` legt
+diese vier für jedes Modell an; mit `#[rustango(permissions = false)]` nehmen
+Sie ein Modell aus.
 
 ```bash
-cargo run -- grant-perm acme alice blog.change_post           # grant to user alice
-cargo run -- grant-perm acme editor blog.change_post --role   # grant to role editor
+cargo run -- grant-perm acme alice posts.change           # grant to user alice
+cargo run -- grant-perm acme editor posts.change --role   # grant to role editor
 ```
 
 ### `revoke-perm <tenant> <role-name|username> <codename> [--role]`
@@ -1122,8 +1313,8 @@ auf einen Benutzer; fügen Sie `--role` hinzu, um sie stattdessen von einer Roll
 zu entziehen.
 
 ```bash
-cargo run -- revoke-perm acme alice blog.change_post
-cargo run -- revoke-perm acme editor blog.change_post --role
+cargo run -- revoke-perm acme alice posts.change
+cargo run -- revoke-perm acme editor posts.change --role
 ```
 
 ### `create-api-key <tenant> <username> [--label <s>]`
@@ -1171,7 +1362,7 @@ cargo run -- audit-log --pk acme --limit 100
 
 | Verb | Flags |
 |---|---|
-| `list-runs` | `--limit <n>`, `--kind provision\|migrate`, `--state <s>` |
+| `list-runs` | `--limit <n>`, `--kind provision\|migrate\|purge\|rotate_password`, `--state pending\|running\|succeeded\|failed` |
 | `show-run <id>` | — |
 | `audit-log` | `--limit <n>`, `--table <t>`, `--pk <v>`, `--operation <o>`, `--source <s>` |
 
@@ -1204,9 +1395,11 @@ Die Operator-Konsole hat dafür ebenfalls einen Button, auf der Tenant-Liste.
 ## Eigenes Benutzermodell (zusätzliche Spalten auf `rustango_users`)
 
 So fügen Sie der Benutzertabelle Ihre eigenen Felder hinzu. Der eingebaute Tenant-`User` hat
-sieben feste Spalten: `id`, `username`, `password_hash`, `is_superuser`,
-`active`, `created_at`, plus eine `data`-JSONB-Spalte (ein flexibler JSON-Blob)
-für beliebige zusätzliche Metadaten pro Benutzer. **Für die meisten Apps ist
+neun feste Spalten: `id`, `username`, `password_hash`, `is_superuser`,
+`active`, `created_at`, `password_changed_at`, `sessions_revoked_at`, plus eine
+`data`-JSONB-Spalte (ein flexibler JSON-Blob) für beliebige zusätzliche
+Metadaten pro Benutzer. Mit dem Feature `sso` hat er außerdem eine eindeutige
+`email`. **Für die meisten Apps ist
 diese JSONB-Spalte alles, was Sie brauchen** — keine Migration, kein Override,
 keine Überraschungen.
 
@@ -1328,56 +1521,74 @@ Server-`Builder` direkt baut, ohne über `Cli` zu gehen.
 
 ## Eigene Unterbefehle
 
-Sie können Ihre eigenen Befehle hinzufügen und sie neben den eingebauten Verben
-ausführen. Der Trick besteht darin, die Argumente
-selbst zu inspizieren und Ihren Befehl zu behandeln, bevor Sie den Rest an
-`Cli::run` weitergeben. Zwei Wege, es zu tun:
+Ein Crate kann eigene Verben hinzufügen, die App ebenso. Sie stehen in
+`--help` unter dem Crate, das sie registriert hat, und laufen wie die
+eingebauten.
 
-**Inline in `src/main.rs`** (kein zusätzliches Binary):
+**Aus einem Crate** — `register_command!` registriert das Verb beim Linken,
+die Host-App ändert `main` nicht:
 
 ```rust
-#[rustango::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = dotenvy::dotenv();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if matches!(args.first().map(String::as_str), Some("import-csv")) {
-        let url = std::env::var("DATABASE_URL")?;
-        let pool = rustango::sql::Pool::connect_postgres(&url).await?;
-        return my_csv_importer::run(&pool, &args[1..]).await;
-    }
-    rustango::manage::Cli::new().api(urls::api()).run().await
-}
+use std::io::Write as _;
+use rustango::manage::CommandContext;
+
+// In any crate the binary links, e.g. a CMS library.
+rustango::register_command!(
+    "reset-link",
+    "Print a password-reset link for a user",
+    |mut ctx: CommandContext, args: Vec<String>| async move {
+        let user = args.first().ok_or("usage: reset-link --tenant <slug> <user>")?;
+        let pool = ctx.tenant_pool().ok_or("pass --tenant <slug>")?.clone();
+        // ... look the user up on `pool` with the ORM ...
+        writeln!(ctx.stdout(), "link for {user}")?;
+        Ok(())
+    },
+);
 ```
 
-**Via `--with-manage-bin`** (separates `src/bin/manage.rs`):
+**Aus der App** — die Builder-Methode `Cli::command`:
+
+```rust
+rustango::manage::Cli::new()
+    .tenancy()
+    .command("import-csv", "Import a CSV file", |ctx, args| async move {
+        my_csv_importer::run(ctx.pool(), &args).await?;
+        Ok(())
+    })
+    .run()
+    .await
+```
+
+Der Handler bekommt einen `CommandContext` und die Argumente nach dem Verb:
+
+- `ctx.pool()` — die Datenbank der App; in einem Tenancy-Projekt die Registry.
+- `ctx.tenant_pool()` / `ctx.tenant()` — mit `Cli::tenancy()` wird
+  `--tenant <slug>` aus den Argumenten genommen und öffnet den Pool dieses
+  Mandanten (Schema- oder Datenbank-Modus, jedes Backend).
+  `ctx.tenant_by_slug(slug)` öffnet jeden anderen.
+- `ctx.settings()` — die an `Cli::with_settings*` übergebenen Einstellungen.
+- `ctx.stdout()` — wohin die Ausgabe geht.
 
 ```bash
-cargo run -- startapp app --with-manage-bin
+cargo run -- reset-link --tenant acme alice
 ```
 
-Dann in `src/bin/manage.rs`:
+Ein Name, der mit einem eingebauten Verb kollidiert oder doppelt
+registriert ist, lässt `Cli::run` beim Start mit beiden Namen im Fehler
+scheitern.
 
-```rust
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = dotenvy::dotenv();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let url = std::env::var("DATABASE_URL")?;
-    let pool = rustango::sql::Pool::connect_postgres(&url).await?;
+`Cli::run_with_args(args)` führt die CLI mit den übergebenen Argumenten (ohne
+Programmnamen) statt mit denen des Prozesses aus, etwa aus einem Test.
 
-    match args.first().map(String::as_str) {
-        Some("import-csv") => my_csv_importer::run(&pool, &args[1..]).await,
-        _ => rustango::migrate::manage::run(&pool, "./migrations".as_ref(), args)
-            .await
-            .map_err(Into::into),
-    }
-}
-```
-
-Führen Sie Ihre eigenen Befehle genau wie die eingebauten aus:
-`cargo run -- import-csv path/to/file.csv` (oder
-`cargo run --bin manage -- import-csv …` bei Verwendung von
-`--with-manage-bin`).
+**Datenbankverbindung.** Alle Verben, der Server und eigene Befehle lesen
+die Datenbank aus `DATABASE_URL` oder aus `DB_DRIVER`, `DB_HOST`,
+`DB_PORT`, `DB_USER`, `DB_PASSWORD` (oder `DB_PASSWORD_FILE`, einer Datei
+mit dem Passwort), `DB_NAME` und `DB_PARAMS`. Für SQLite `DB_DRIVER=sqlite`
+und `DB_NAME` als Dateipfad setzen. `DB_PASSWORD` und `DB_PASSWORD_FILE`
+zusammen zu setzen ist ein Fehler. Sind beide Varianten gesetzt, gewinnt
+`DATABASE_URL`, eine einzige Warnung (Passwort verborgen) sagt es, und
+`check --deploy` listet es auf; ab 0.62.0 gewinnen die `DB_*`-Variablen,
+also bleib bei einer Variante.
 
 ---
 
@@ -1453,7 +1664,7 @@ Warum das sicher ist:
 ```bash
 cargo run -- startapp blog        # if not done yet
 # Edit src/blog/models.rs — add #[derive(Model)]
-# Add `pub mod blog;` to src/lib.rs
+# (startapp already added `pub mod blog;` to src/lib.rs)
 cargo run -- makemigrations
 cargo run -- migrate
 ```
@@ -1463,7 +1674,8 @@ cargo run -- migrate
 ```bash
 cargo run -- make:viewset PostViewSet --model Post
 # Edit src/post_view_set.rs — fill in field lists
-# Mount in src/urls.rs
+# Add `pub mod post_view_set;` to src/lib.rs
+# Mount it in src/main.rs: .nest_with("/api", |pool| PostViewSet::router("/posts", pool))
 cargo run                        # GET /api/posts now works
 ```
 
@@ -1523,6 +1735,10 @@ sei denn, Sie schalten das Pre-Warming ein. Die Einstellungen leben auf
 | `database_pool_idle_timeout` | 10 min | Schließt untätige Verbindungen nach dieser Dauer. Wehrt Kappungen durch Load-Balancer / `idle_in_transaction_session_timeout` ab. |
 | `database_pool_max_lifetime` | 30 min | Erzwingt das Rotieren von Verbindungen, damit vault-geleaste Anmeldedaten aufgefrischt werden. |
 | `prewarm_active_tenants` | false | Wenn true, ruft `Server::Builder::serve` beim Boot `prewarm_database_tenants()` auf. |
+| `max_cached_scoped_pools` | 64 | Obergrenze für die gecachten Pools pro Tenant bei Tenants im schema-Modus. |
+| `scoped_pool_max_connections` | 8 | `max_connections` jedes Tenant-Pools im schema-Modus. |
+
+Mit `Cli` übergeben Sie die Konfiguration über `Cli::with_tenant_pools(config)`.
 
 ### Beim Boot vorwärmen
 
@@ -1586,116 +1802,3 @@ Sie auf mDNS.
 - [ViewSets](viewsets.md)
 - [Serializer](serializers.md)
 - [Sicherheitsleitfaden](security.md)
-
-## Alle Verben
-
-Die Abschnitte oben erklären die gängigen Verben im Detail. Diese Tabelle ist
-die **vollständige** Liste, aus den beiden Dispatchern
-(`migrate/manage.rs` und `tenancy/manage/mod.rs`) gezogen statt aus der Prosa —
-ein Verb, das im Leitfaden fehlt, ist hier trotzdem auffindbar. Für die Flags
-`<verb> --help` ausführen; der Hilfetext ist maßgeblich, diese Seite nicht.
-
-Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
-`Cli::tenancy()` erreicht.
-
-### Migrationen und Schema
-
-| Verb | Was es tut |
-|---|---|
-| `makemigrations [name]` / `--empty <name>` | Erzeugt eine Migration aus dem Model-Diff |
-| `migrate [target]` / `--dry-run` / `--squash` | Wendet ausstehende Migrationen an |
-| `downgrade [N]` | Rollt die letzten N Migrationen zurück |
-| `showmigrations` / `status` | Listet Migrationen und ihren Anwendungsstand |
-| `sqlmigrate <name>` | Gibt das SQL einer Migration aus, ohne es auszuführen |
-| `forget-pending <name>` | Löscht eine noch nicht angewendete Migrations-JSON |
-| `add-data-op --sql <SQL> [--reverse-sql <SQL>]` | Hängt eine handgeschriebene Datenoperation an |
-| `inspectdb [--schema <s>] [--table <t>]` | Liest ein bestehendes Schema und erzeugt `#[derive(Model)]`-Quellcode |
-
-### Daten
-
-| Verb | Was es tut |
-|---|---|
-| `dumpdata` | Exportiert Zeilen als JSON-Fixtures |
-| `loaddata <fixture.json> [--fail-fast]` | Lädt JSON-Fixtures wieder ein. Ein fehlgeschlagener oder teilweiser Ladevorgang wird nicht zurückgerollt |
-| `flush [--yes] [--app <label>] [--model <name>]` | Leert jede Model-Tabelle; die Flags grenzen die Menge ein. Nicht verwaltete Models und Views werden übersprungen. Postgres nutzt `TRUNCATE … RESTART IDENTITY` und schlägt fehl, wenn eine Tabelle außerhalb des Filters ein Ziel referenziert; MySQL / SQLite löschen die Zeilen in einer Transaktion, Kinder zuerst, und behalten die ID-Zähler. Ein Tenancy-Projekt braucht `--tenant <slug>` und leert nur diesen Tenant |
-| `prune [--model <name>] [--except <name>] [--pretend]` | Streamendes Massenlöschen; `--pretend` meldet nur, ohne zu löschen |
-| `db:dump` / `db:restore` / `db:info` | Natives Dump / Restore / Inspect |
-| `dbshell` | Führt den nativen Client aus (`psql` / `mysql` / `sqlite3`). Braucht nur `DATABASE_URL`, keinen funktionierenden Pool — es wird vor dem Pool-Aufbau behandelt und funktioniert daher auch, wenn sqlx nicht verbinden kann |
-
-### Scaffolder und Generatoren
-
-| Verb | Was es tut |
-|---|---|
-| `startapp <name>` | Legt ein App-Modul an |
-| `make:viewset` / `make:serializer` / `make:form` | Erzeugt ein ViewSet, einen Serializer oder ein Form |
-| `make:job` / `make:scheduled` / `make:worker` / `make:middleware` / `make:notification` / `make:test` | Erzeugt einen Queue-Job, eine Intervall-Aufgabe, ein Worker-Binary, eine Middleware, eine Notification oder einen Test |
-| `make:api_routes <app> [--tenant]` | Erzeugt das API-Routen-Modul einer App |
-
-### Cache, Sessions und Mail
-
-| Verb | Was es tut |
-|---|---|
-| `createcachetable` / `create-cache-table` `[--table <name>]` | Legt die Cache-Tabelle an (und die Session-Tabelle, wenn Sessions in die DB gehen) |
-| `clear-cache [--table <name>]` / `clearsessions` | Leert ihn; gibt die Anzahl gelöschter Zeilen zurück |
-| `sendtestemail --to <addr>` | Sendet eine feste Test-Mail über das konfigurierte Backend |
-
-### Introspektion
-
-| Verb | Was es tut |
-|---|---|
-| `showmodels [--format plain\|json] [--app <label>]` | Jedes registrierte Model, sortiert für deterministische Ausgabe |
-| `showurls [--format plain\|json]` | Jede benannte Route, sortiert |
-| `check [--deploy]` | Health-Checks; `--deploy` ergänzt die Produktions-Audits |
-| `create-admin` | Legt eine `AdminUser`-Zeile für Projekte mit `admin::Builder::with_session_auth` an. **Nicht** tenancy-gated — nimmt einen einfachen `&Pool` und schreibt `rustango_admin_users`, die Tabelle wird bei Bedarf angelegt. Der einzige Weg zu einem ersten Admin-Login in einem Nicht-Tenancy-Projekt |
-| `about` / `version` / `--version` | Build- und Versionsinformationen |
-| `docs` | Öffnet die Dokumentation |
-
-### Benutzer und Zugriff **T**
-
-| Verb | Was es tut |
-|---|---|
-| `create-superuser` / `set-superuser` | Legt einen Superuser an oder befördert einen bestehenden Benutzer |
-| `create-user` / `create-operator` | Legt einen Tenant-Benutzer oder einen Operator an |
-| `reset-password` / `change-password` | Passwort-Wiederherstellung für Tenant-Benutzer |
-| `reset-operator-password` / `change-operator-password` | Passwort-Wiederherstellung für Operatoren |
-| `set-operator-active` | Aktiviert oder deaktiviert einen Operator |
-| `create-role` / `assign-role` / `revoke-role` / `list-roles` | Rollen |
-| `grant-perm` / `revoke-perm` | Berechtigungen per Codename |
-| `seed-permissions [--slug <s>]` | Legt die Standard-Berechtigungszeilen an |
-| `create-api-key` | Stellt einen API-Key aus |
-
-### Tenants **T**
-
-| Verb | Was es tut |
-|---|---|
-| `create-tenant` / `edit-tenant` / `list-tenants` | Anlegen, bearbeiten, auflisten |
-| `drop-tenant` / `purge-tenant` | Deaktivieren (umkehrbar) / zerstören (nicht) |
-| `migrate-tenants` / `migrate-registry` | Wendet Migrationen über alle Tenants oder auf die Registry an |
-| `migrate-tenant-storage <slug> --to schema\|database` | Verschiebt einen Tenant zwischen Speichermodi |
-| `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host-Routing |
-| `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Gespeicherte Datenbankserver |
-| `test-tenant-connection` | Prüft, ob die Datenbank eines Tenants erreichbar ist |
-| `prewarm-pools` | Öffnet Tenant-Pools vor dem ersten Request |
-| `run-server` / `runserver` | Startet den Multi-Tenant-Server |
-| `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup und interaktive Einstiegspunkte |
-
-### Audit **T**
-
-| Verb | Was es tut |
-|---|---|
-| `audit-log` | Liest den Audit-Trail |
-| `audit-cleanup` | Kürzt ihn |
-
-### MCP **T**
-
-Vollständig im [MCP-Leitfaden](mcp.md) dokumentiert.
-
-| Verb | Was es tut |
-|---|---|
-| `create-agent` / `list-agents` / `rotate-agent-secret` | Agents |
-| `create-skill` / `list-skills` / `grant-skill` / `revoke-skill` | Skills |
-| `map-skill-permission` / `unmap-skill-permission` | Bindet einen Skill an eine Berechtigung |
-| `create-user-key` / `list-user-keys` / `revoke-user-key` | MCP-Zugangsdaten pro Benutzer |
-| `list-runs` / `show-run` | Lauf-Historie |
-
----

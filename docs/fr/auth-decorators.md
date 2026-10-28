@@ -11,8 +11,9 @@ répondues par 401/403 (flux API) — avant même d'atteindre le handler.
 > **Source :** `rustango::auth_decorators` (`login_required`, `login_required_or_401`,
 > `user_passes_test`, `superuser_required`, `active_required`,
 > `permission_required` + les variantes `_or_403` ; `safe_next`, `extract_next`) —
-> derrière la fonctionnalité `tenancy` (les verrous lisent l'extracteur
-> `SessionUser`).
+> les verrous sont derrière la fonctionnalité `tenancy` (ils lisent l'extracteur
+> `SessionUser`). `safe_next`, `extract_next`, `extract_next_named` et
+> `redirect_to_login` n'ont besoin que d'axum.
 >
 > **Version exécutable :** le comportement de verrouillage est couvert par le
 > [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_decorators.rs)
@@ -87,7 +88,7 @@ let api = Router::new().route("/api/me", get(me)).layer(login_required_or_401())
 | `superuser_required(url)` | `superuser_required_or_403()` | `is_superuser && active` |
 | `user_passes_test(url, pred)` | `user_passes_test_or_403(pred)` | prédicat sur le modèle `User` |
 | `permission_required(url, codename)` † | `permission_required_or_403(codename)` | détient le codename de permission |
-† `permission_required` est la seule barrière de cette colonne qui ne redirige pas systématiquement. Un visiteur **anonyme** obtient le 302 vers `login_url` ; un visiteur connecté mais dépourvu du codename obtient un **403** nu, sans redirection ni corps (`auth_decorators.rs:560`). Les quatre autres redirigent dans tous les cas d'échec.
+† `permission_required` est la seule barrière de cette colonne qui ne redirige pas systématiquement. Un visiteur **anonyme** obtient le 302 vers `login_url` ; un visiteur connecté mais dépourvu du codename obtient un **403** nu, sans redirection ni corps. Les quatre autres redirigent dans tous les cas d'échec.
 
 Ce sont toutes des couches tower — `.layer(...)`-les sur un routeur ou un
 sous-routeur.
@@ -160,7 +161,8 @@ async fn login_post(Query(q): Query<HashMap<String, String>>, /* … */) -> Resp
 
 `safe_next` n'accepte que les chemins de même origine, relatifs à la racine — il
 rejette les URL absolues, les `//host` relatifs au schéma, les variantes à
-barre oblique inverse, et leurs formes encodées en pourcentage :
+barre oblique inverse, leurs formes encodées en pourcentage, les caractères de
+contrôle et les valeurs vides :
 
 ```rust
 assert_eq!(safe_next("/dashboard"),            Some("/dashboard".to_owned()));
@@ -188,6 +190,9 @@ assert_eq!(safe_next("%2F%2Fevil.example/x"),   None);   // decodes to //evil
 - Le `?next=` de la redirection est toujours encodé en pourcentage, de sorte que
   le CRLF / fractionnement de réponse ne peut pas fuiter dans l'en-tête
   `Location`.
+- Vous écrivez votre propre verrou ? `redirect_to_login(login_url, "next", original)`
+  construit le même 302, et `extract_next_named(&q, field)` lit un autre champ que
+  `next`.
 
 
 ---

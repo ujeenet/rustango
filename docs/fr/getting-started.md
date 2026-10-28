@@ -168,7 +168,7 @@ PostgreSQL et SQLite. `utf8mb4_0900_as_cs` compare comme eux. Évitez une collat
 
 ## Étape 1 : installer le générateur de squelette
 
-Le générateur de squelette (scaffolder) crée pour vous des squelettes de projet et d'application, comme `rails new`.
+Le générateur de squelette (scaffolder) crée pour vous des squelettes de projet et d'application.
 
 ```bash
 cargo install cargo-rustango
@@ -180,13 +180,13 @@ Ceci ajoute globalement la sous-commande `cargo rustango ...`. Vérifiez qu'elle
 cargo rustango --help
 ```
 
-La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.61.7`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
+La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.61.8`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
 
 ---
 
 ## Étape 2 : créer le projet
 
-Ceci génère un nouveau projet, l'équivalent chez **Rustango** de `rails new` ou `composer create-project`.
+Ceci génère un nouveau projet avec une structure, des réglages et des migrations prêts.
 
 ```bash
 cd ~/projects                                 # wherever you keep code
@@ -207,10 +207,13 @@ myblog/
 ├── .env.example                # template for DATABASE_URL etc.
 ├── .gitignore
 ├── docker-compose.yml          # Postgres in a container
+├── Dockerfile                  # release image; Dockerfile.dev is the dev one
 ├── README.md                   # project-specific
 ├── config/                     # tiered settings (default + dev/staging/prod)
 ├── migrations/                 # empty — `cargo run -- makemigrations` populates
+├── system/migrations/          # the framework's own tables
 └── src/
+    ├── lib.rs                  # the app as a library: `pub mod models; …`
     ├── main.rs                 # entry point: `Cli::new().api(urls::api()).run()`
     ├── models.rs               # every #[derive(Model)] lives here
     ├── views.rs                # axum request handlers
@@ -218,6 +221,8 @@ myblog/
 ```
 
 Il n'y a qu'un seul binaire : `cargo run` démarre le serveur HTTP, et chaque verbe d'administration (`migrate`, `makemigrations`, `startapp`, `check`, …) passe par ce même binaire via `cargo run -- <verb>`. Il n'y a pas de binaire `manage` séparé.
+
+Les modules de l'application vivent dans la cible de bibliothèque (`src/lib.rs`), et `src/main.rs` les atteint par le nom de la crate (`use myblog::urls;`). C'est ce qui permet aux tests de `tests/` et aux binaires supplémentaires de `src/bin/` d'utiliser vos modèles.
 
 `Cargo.toml` est le manifeste de dépendances (comme un `composer.json` ou un `Gemfile`). Ouvrez-le et vérifiez que `rustango` figure bien dans `[dependencies]`.
 
@@ -254,7 +259,6 @@ Le fichier `.env` généré est prêt à l'emploi avec Docker. Comme nous allons
 
 ```bash
 DATABASE_URL=postgres://rustango:rustango@localhost:5432/myblog_dev
-RUSTANGO_BIND=0.0.0.0:8080
 RUSTANGO_APEX_DOMAIN=localhost
 ```
 
@@ -268,7 +272,7 @@ Pour la production, définissez-en une vraie — 32 octets de base64, depuis vot
 openssl rand -base64 32     # paste output as RUSTANGO_SESSION_SECRET value
 ```
 
-Une valeur qui n'est pas 32 octets de base64 ne peut pas être utilisée. Le serveur le signale au démarrage et se rabat sur la clé générée plutôt que d'échouer — surveillez donc cet avertissement si vous en avez défini une et que les sessions se comportent comme si ce n'était pas le cas.
+Une valeur qui n'est pas 32 octets de base64 ne peut pas être utilisée. Hors du palier prod, le serveur le signale au démarrage et se rabat sur la clé générée — surveillez donc cet avertissement si vous en avez défini une et que les sessions se comportent comme si ce n'était pas le cas. Avec `RUSTANGO_ENV=prod`, un secret absent ou invalide empêche le serveur de démarrer.
 
 ---
 
@@ -300,7 +304,7 @@ psql "$DATABASE_URL" -c "SELECT version();"   # should print Postgres version
 
 ## Étape 5 : exécuter les migrations intégrées
 
-Les migrations créent les tables de votre base de données, la même idée que `php artisan migrate` ou `rails db:migrate`. Exécutez-les une fois pour mettre en place les propres tables du framework :
+Les migrations créent les tables de votre base de données. Exécutez-les une fois pour mettre en place les propres tables du framework :
 
 ```bash
 cargo run -- migrate
@@ -314,7 +318,7 @@ Vérifiez l'état des migrations :
 cargo run -- showmigrations
 ```
 
-Sur un projet neuf, ceci affiche `(no migrations in ./migrations)`. Une fois que vous aurez créé un modèle et exécuté `makemigrations` (étape 9), chaque migration appliquée affichera un `[X]` ici.
+Sur un projet neuf, ceci affiche `(no migrations in ./migrations)`, puis la chaîne propre au framework sous `System migrations in ./system/migrations:`. Une fois que vous aurez créé un modèle et exécuté `makemigrations` (étape 9), chaque migration appliquée affichera un `[X]` ici.
 
 ---
 
@@ -329,8 +333,10 @@ cargo run
 Vous verrez :
 
 ```
-listening on http://0.0.0.0:8080
+server listening on http://127.0.0.1:8080
 ```
+
+`cargo run` applique aussi les migrations en attente avant de commencer à écouter.
 
 Ouvrez <http://localhost:8080> dans votre navigateur. Le squelette fournit un gestionnaire racine simple (`views::index`) qui vous accueille avec **Hello from Rustango!** et un lien vers l'administration — ce qui confirme que **Rustango** fonctionne. (Les projets qui ne définissent pas leur propre route `/` reçoivent à la place une page d'accueil intégrée, via `Cli::with_welcome()`.)
 
@@ -357,7 +363,7 @@ src/blog/
 └── tests.rs               # in-process router + inventory smoke tests
 ```
 
-`startapp` branche le nouveau module pour vous : il déclare `mod blog;` dans `src/main.rs` et insère une ligne `.merge(crate::blog::urls::api())` dans l'agrégateur `api()` de `src/urls.rs`, si bien que les routes du blog s'intègrent automatiquement à l'application. Aucun enregistrement manuel de module n'est nécessaire.
+`startapp` branche le nouveau module pour vous : il déclare `pub mod blog;` dans `src/lib.rs` (ou `mod blog;` dans `src/main.rs` sur un ancien projet uniquement binaire) et insère une ligne `.merge(crate::blog::urls::api())` dans l'agrégateur `api()` de `src/urls.rs`, si bien que les routes du blog s'intègrent automatiquement à l'application. Aucun enregistrement manuel de module n'est nécessaire.
 
 ---
 
@@ -452,15 +458,10 @@ psql "$DATABASE_URL" -c "\d posts"
 
 Lisons et écrivons des lignes depuis le code. L'ORM vous permet de manipuler les lignes de la base de données comme des structures Rust plutôt que du SQL brut.
 
-Modifiez temporairement `src/main.rs` pour exécuter un rapide test de création-et-lecture avant de démarrer le serveur. Remplacez le corps du `Cli` par un test ad hoc de l'ORM (conservez le `#[rustango::main]` du générateur de squelette ainsi que les déclarations `mod` en haut du fichier) :
+Modifiez temporairement `src/main.rs` pour exécuter un rapide test de création-et-lecture avant de démarrer le serveur. Remplacez le corps du `Cli` par un test ad hoc de l'ORM (conservez le `#[rustango::main]` du générateur de squelette). Les modèles vivent dans la bibliothèque, donc `main.rs` les nomme par le nom de la crate :
 
 ```rust
-mod blog;
-mod models;
-mod urls;
-mod views;
-
-use crate::blog::models::Post;
+use myblog::blog::models::Post;
 use rustango::sql::{FetcherPool, Pool};
 use rustango::{Auto, Model};
 
@@ -515,21 +516,21 @@ Vous devriez voir l'identifiant de votre nouvel article ainsi que les lignes lue
 
 **Rustango** fournit une interface d'administration générée pour vos modèles — un back-office prêt à parcourir, rechercher et modifier vos données sans écrire de code. Le squelette fullstack la câble déjà : un utilitaire dans `src/urls.rs` transforme un pool en routeur d'administration, et `src/main.rs` l'imbrique sous `/admin`.
 
-L'utilitaire place l'administration derrière une connexion. Le `admin_prefix` doit correspondre au chemin sous lequel elle est imbriquée (`/admin`) afin que les propres liens et actions de formulaire de l'administration se résolvent correctement :
+L'utilitaire place l'administration derrière une connexion. Il lit ses options dans les paramètres chargés, et `admin_prefix` doit correspondre au chemin sous lequel elle est imbriquée afin que les propres liens et actions de formulaire de l'administration se résolvent correctement. `admin_prefix(settings)` renvoie `[admin] url_prefix` (ou `[routes] admin_url`), sinon `/admin` :
 
 ```rust
 use rustango::admin;
+use rustango::config::Settings;
 use rustango::session::{load_session_secret_for_tier, tier_from_env};
 use rustango::sql::Pool;
 
-pub fn admin_router(pool: Pool) -> Router {
+pub fn admin_router(pool: Pool, settings: &Settings) -> Router {
     let secret = load_session_secret_for_tier(
         &tier_from_env(),
         std::path::Path::new("./var/.rustango_session.key"),
     );
-    admin::Builder::new(pool)
-        .title("Myblog Admin")
-        .admin_prefix("/admin") // must match the `.nest_with("/admin", …)` below
+    admin::Builder::from_settings(pool, settings)
+        .admin_prefix(admin_prefix(settings)) // the path main.rs nests it at
         .with_session_auth(secret)
         .build()
 }
@@ -539,21 +540,24 @@ pub fn admin_router(pool: Pool) -> Router {
 
 `Builder::new` accepte le pool de n'importe quel backend : cet utilitaire ne nomme donc aucun pilote et fonctionne sur les trois.
 
-`src/main.rs` remet l'utilitaire au `Cli`, qui construit l'administration à partir du pool avec lequel il sert : des verbes comme `makemigrations` tournent donc toujours sans base de données. Conservez la ligne `mod blog;` de l'étape 7 — c'est elle qui enregistre votre modèle `Post` auprès de l'administration :
+`src/main.rs` remet l'utilitaire au `Cli`, qui construit l'administration à partir du pool avec lequel il sert : des verbes comme `makemigrations` tournent donc toujours sans base de données. Conservez la ligne `pub mod blog;` de l'étape 7 dans `src/lib.rs` — c'est elle qui enregistre votre modèle `Post` auprès de l'administration. Le `main.rs` généré ressemble à ceci (abrégé) :
 
 ```rust
-mod blog;
-mod models;
-mod urls;
-mod views;
+use myblog::urls;
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
+    let loaded = rustango::config::Settings::load_from_env();
+    let settings = loaded.as_ref().cloned().unwrap_or_default();
+    let admin_settings = settings.clone();
     rustango::manage::Cli::new()
         .api(urls::api())
-        .nest_with("/admin", urls::admin_router)
+        .nest_with(urls::admin_prefix(&settings), move |pool| {
+            urls::admin_router(pool, &admin_settings)
+        })
         .with_health() // /health + /ready endpoints
+        .with_loaded_settings(loaded)
         .run()
         .await
 }
@@ -607,25 +611,28 @@ use crate::blog::models::Post;
 pub struct PostViewSet;
 ```
 
-Enregistrez le nouveau module en ajoutant `mod post_view_set;` avec les autres déclarations `mod` en haut de `src/main.rs`.
+Enregistrez le nouveau module en ajoutant `pub mod post_view_set;` à `src/lib.rs` (`make:viewset` affiche cette ligne pour vous).
+
+Le fichier généré commence par `read_only`. Si vous l'omettez, comme ci-dessus, le ViewSet sert aussi la création, la mise à jour et la suppression. Les actions d'écriture sans codenames `permissions(...)` journalisent un avertissement au montage du routeur ; ajoutez `allow_anonymous` pour indiquer que c'est voulu.
 
 ### 12b. Monter les routes
 
-Attachez les routes du ViewSet au routeur de l'application (la version **Rustango** d'un fichier `urls.py` ou d'un `routes/api.php`). Le routeur du ViewSet a besoin du pool de base de données, construisez-le donc dans `src/main.rs`, là où vit le pool, et fusionnez-le dans l'agrégateur `urls::api()` :
+Attachez les routes du ViewSet à l'application. Le routeur du ViewSet a besoin du pool de base de données, et `urls::api()` n'en a pas, donc ajoutez un `nest_with` de plus à la chaîne du `Cli` dans `src/main.rs`. Il reçoit le pool du serveur, comme l'administration :
 
 ```rust
-let api = urls::api()
-    .nest("/admin", urls::admin_router(pool.clone()))
-    .merge(crate::post_view_set::PostViewSet::router("/api/posts", pool));
-
 rustango::manage::Cli::new()
-    .api(api)
+    .api(urls::api())
+    .nest_with(urls::admin_prefix(&settings), move |pool| {
+        urls::admin_router(pool, &admin_settings)
+    })
+    .nest_with("/api", |pool| myblog::post_view_set::PostViewSet::router("/posts", pool))
     .with_health()
+    .with_loaded_settings(loaded)
     .run()
     .await
 ```
 
-(`urls::api()` est l'agrégateur généré par le générateur de squelette ; `manage startapp` fusionne les routes de toute sous-application de la même façon.)
+Le ViewSet répond désormais sur `/api/posts` et `/api/posts/{id}`.
 
 ### 12c. Essayer les points de terminaison
 
@@ -681,7 +688,7 @@ pub struct PostSerializer {
 
 Dès qu'un serializer est attaché, **ses champs constituent toute la surface d'écriture** : tout ce qu'un client envoie et qui n'est pas listé ici est écarté avant l'`INSERT`. C'est pourquoi `author_id` y figure. Il est `NOT NULL` et sans valeur par défaut sur le modèle, donc l'omettre fait échouer toute création sur la contrainte NOT NULL. `status` peut rester en dehors, car le modèle lui donne `default = "'draft'"`.
 
-Le type de chaque champ du serializer reflète le champ correspondant du modèle, donc `id` et `published_at` conservent leur enveloppe `Auto<…>` héritée du modèle (un `Auto<i64>` se sérialise toujours en un simple entier JSON). Enregistrez ensuite le module en ajoutant `mod post_serializer;` avec les autres déclarations `mod` dans `src/main.rs`.
+Le type de chaque champ du serializer reflète le champ correspondant du modèle, donc `id` et `published_at` conservent leur enveloppe `Auto<…>` héritée du modèle (un `Auto<i64>` se sérialise toujours en un simple entier JSON). Enregistrez ensuite le module en ajoutant `pub mod post_serializer;` à `src/lib.rs`.
 
 Branchez le serializer dans le ViewSet avec l'attribut `serializer` — les réponses de liste, de récupération et de création sont alors rendues via celui-ci. `fields` reste obligatoire : un body n'écrit que les champs listés à la fois ici et dans le serializer :
 
@@ -696,7 +703,7 @@ Branchez le serializer dans le ViewSet avec l'attribut `serializer` — les rép
 pub struct PostViewSet;
 ```
 
-Ceci fonctionne à l'identique sur PostgreSQL, MySQL et SQLite. Les redéfinitions `method` / `read_only` / `source` / `write_only` s'appliquent toutes à la réponse, et **les corps de requête sont eux aussi validés via le serializer** : `create` / `update` exécutent sa `validate()` (par champ et inter-champs), renvoyant un `400` avec une carte d'erreurs par champ (`{field: [messages]}`) en cas d'échec, et les champs en lecture seule / calculés qu'un client tenterait de poster sont ignorés. (Remarque : les champs de serializer `nested` / `many` nécessitent que les lignes liées soient chargées via `select_related` ; sinon ils s'affichent avec leur valeur par défaut.) Voir le [guide des ViewSets](viewsets.md) pour le comportement complet en entrée et en sortie.
+Ceci fonctionne à l'identique sur PostgreSQL, MySQL et SQLite. Les redéfinitions `method` / `read_only` / `source` / `write_only` s'appliquent toutes à la réponse, et **les corps de requête sont eux aussi validés via le serializer** : `create` / `update` exécutent sa `validate()` (par champ et inter-champs), renvoyant un `422` (`validation_failed`) avec une liste de messages par champ dans `details` (`{field: [messages]}`) en cas d'échec, et les champs en lecture seule / calculés qu'un client tenterait de poster sont ignorés. (Remarque : les champs de serializer `nested` / `many` nécessitent que les lignes liées soient chargées via `select_related` ; sinon ils s'affichent avec leur valeur par défaut.) Voir le [guide des ViewSets](viewsets.md) pour le comportement complet en entrée et en sortie.
 
 ---
 
@@ -748,7 +755,7 @@ let roles: Vec<String> = claims.get("roles").unwrap_or_default();
 
 ## Étape 15 : ajouter le middleware de sécurité
 
-Le middleware englobe chaque requête pour y ajouter un comportement transversal. Ce code se place dans `src/main.rs` : il remplace la ligne `let api = ...` de l'étape 11, afin que le routeur soit entièrement assemblé avant d'atteindre le `Cli`. Ici, vous empilez les identifiants de requête, la journalisation des accès, la limitation de débit, le CORS et les en-têtes de sécurité en une seule chaîne. Chaque `.method(...)` ajoute une couche ; l'ordre des appels détermine l'ordre de la pile. Voir le [guide du middleware](middleware.md) pour le catalogue complet des couches et les règles d'ordonnancement.
+Le middleware englobe chaque requête pour y ajouter un comportement transversal. Ce code se place dans `src/main.rs` : il remplace la ligne `nest_with` de `/api` de l'étape 12b, afin que les couches englobent chaque route sous `/api`. Ici, vous empilez les identifiants de requête, la journalisation des accès, la limitation de débit, le CORS et les en-têtes de sécurité en une seule chaîne. Chaque `.method(...)` ajoute une couche ; l'ordre des appels détermine l'ordre de la pile. Voir le [guide du middleware](middleware.md) pour le catalogue complet des couches et les règles d'ordonnancement.
 
 ```rust
 use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt, CspBuilder};
@@ -756,13 +763,9 @@ use rustango::cors::{CorsLayer, CorsRouterExt};
 use rustango::rate_limit::{RateLimitLayer, RateLimitRouterExt};
 use rustango::access_log::{AccessLogLayer, AccessLogRouterExt};
 use rustango::request_id::{RequestIdLayer, RequestIdRouterExt};
-use rustango::health::health_router;
 use std::time::Duration;
 
-let app = urls::api()
-    .nest("/admin", urls::admin_router(pool.clone()))
-    .merge(crate::post_view_set::PostViewSet::router("/api/posts", pool.clone()))
-    .merge(health_router(pool.clone()))                        // /health, /ready
+.nest_with("/api", |pool| myblog::post_view_set::PostViewSet::router("/posts", pool)
     .request_id(RequestIdLayer::default())
     .access_log(AccessLogLayer::default())                      // PII-redacted
     .rate_limit(RateLimitLayer::per_ip(60, Duration::from_secs(60)))
@@ -772,10 +775,10 @@ let app = urls::api()
     .security_headers(
         SecurityHeadersLayer::strict()
             .csp(CspBuilder::strict_starter().build()),
-    );
+    ))
 ```
 
-Remettez le `app` fini au `Cli` exactement comme avant — `rustango::manage::Cli::new().api(app).with_welcome().run().await` — et chaque requête passe désormais par la pile complète de middleware.
+Le reste de la chaîne du `Cli` ne change pas. Chaque requête `/api` passe désormais par la pile complète de middleware. `.with_welcome()` n'a aucun effet ici : le squelette route déjà `/`, donc la page d'accueil est ignorée avec un avertissement.
 
 ---
 
@@ -844,7 +847,7 @@ Trois détails de cet extrait sont faciles à rater, et chacun produit un échec
 
 `Pool` est le pool multi-backend, et `router` accepte le pool de n'importe quel backend : ce fichier compile donc tel quel sur PostgreSQL, MySQL et SQLite.
 
-> **Attention :** les tests d'intégration dans `tests/` ne peuvent faire `use myblog::…` que si la crate expose une cible de bibliothèque. Un squelette neuf n'est composé que d'un binaire (`src/main.rs`, sans `src/lib.rs`), donc ajoutez une simple ligne `src/lib.rs` qui réexporte les modules que vous voulez tester — `pub mod models; pub mod post_view_set; pub mod urls;` — et conservez les lignes `mod …;` correspondantes dans `src/main.rs`. (Si vous préférez ne pas ajouter de cible de bibliothèque, construisez plutôt le routeur entièrement en ligne dans le test, de la façon dont `make:test` génère sa fonction `app()`.)
+> **Attention :** les tests d'intégration dans `tests/` ne peuvent faire `use myblog::…` que pour les modules déclarés `pub mod` dans `src/lib.rs`. Un squelette neuf a cette cible de bibliothèque ; vérifiez que `pub mod post_view_set;` y figure (étape 12a). Un projet issu d'un ancien `cargo-rustango` peut n'être qu'un binaire : ajoutez un `src/lib.rs` avec les lignes `pub mod …;` nécessaires, ou construisez le routeur en ligne dans le test, de la façon dont `make:test` génère sa fonction `app()`.
 
 Exécutez les tests :
 
@@ -862,21 +865,21 @@ Avant de déployer, exécutez le vérificateur intégré. Il signale les erreurs
 cargo run -- check --deploy
 ```
 
-Dans votre environnement de développement local, vous verrez quelque chose comme :
+`--deploy` traite un `RUSTANGO_SESSION_SECRET` absent comme une erreur, donc définissez-en un d'abord (étape 3), même en local. Dans votre environnement de développement local, vous verrez alors quelque chose comme :
 
 ```
 running rustango system check (deploy mode)...
   [info]    6 models registered via inventory
   [info]    database reachable
   [info]    1 migration(s) on disk
-  [info]    RUSTANGO_SESSION_SECRET length OK
+  [info]    RUSTANGO_SESSION_SECRET decodes to a valid ≥32-byte key
   [info]    config tier resolved to `dev`
   [warning] RUSTANGO_ENV is unset — set to `prod` so config loaders pick the right tier
-  [warning] DATABASE_URL points at localhost / 127.0.0.1 — verify this is intended in production
-  [warning] RUSTANGO_APEX_DOMAIN is unset / `localhost` — set it for tenancy projects
+  [warning] DATABASE_URL points at localhost / 127.0.0.1 — verify this is intended in production (…)
+  [warning] RUSTANGO_APEX_DOMAIN is unset / `localhost` — tenancy projects need this set to (…)
 ```
 
-(Le nombre exact de modèles/migrations dépend de votre projet.) Ces trois avertissements sont ceux attendus en environnement de développement. Dans une configuration de production — `RUSTANGO_ENV=prod`, un `DATABASE_URL` de base de données géré, un domaine apex défini — ils disparaissent et vous verrez `all checks passed`. Corrigez tout avertissement ou erreur restant avant de déployer en production.
+(Le nombre exact de modèles/migrations et les notes supplémentaires dépendent de votre projet et de ses features.) Ces trois avertissements sont ceux attendus en environnement de développement. Dans une configuration de production — `RUSTANGO_ENV=prod`, un `DATABASE_URL` de base de données géré, un domaine apex défini — ils disparaissent et vous verrez `all checks passed`. Corrigez tout avertissement ou erreur restant avant de déployer en production.
 
 ---
 
@@ -908,7 +911,8 @@ Assurez-vous que votre proxy inverse :
 - Transmet `X-Forwarded-For`, et l'app monte `RealIpLayer::trust_proxies([...])` avec ce proxy (`Cli::with_trusted_proxies([...])?` ou `server::Builder::real_ip`), pour des IP précises dans `AccessLogLayer` et les throttles (voir [security.md](security.md))
 - Transmet l'en-tête `Host` d'origine sans le modifier : le routage des tenants, la détection de l'apex et `AllowedHostsLayer` ne lisent que `Host`
 - Transmet `X-Forwarded-Proto` (et `X-Forwarded-Host`, qui ne fixe que l'URL de redirection SSO derrière un proxy de confiance)
-- Utilise `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())` afin que `ConnectInfo` soit renseigné pour la limitation de débit et le filtrage par IP
+
+`Cli::run()` renseigne déjà `ConnectInfo` pour la limitation de débit et le filtrage par IP. Si vous servez le routeur vous-même, utilisez `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())`.
 
 ---
 

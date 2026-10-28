@@ -55,7 +55,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            bind: "0.0.0.0:8080".into(),
+            bind: crate::env::default_bind(&crate::env::tier_from_env()).into(),
             apex_domain: "localhost".into(),
             operator_show_only: vec!["rustango_orgs".into(), "rustango_operators".into()],
         }
@@ -253,30 +253,12 @@ fn pick_tenant_scheme(setting: Option<String>, secure: bool, host: &str) -> Stri
     if let Some(scheme) = setting.filter(|s| !s.is_empty()) {
         return scheme;
     }
-    if secure && !is_loopback_host(host) {
+    if secure && !crate::urls::is_loopback_host(host) {
         "https"
     } else {
         "http"
     }
     .into()
-}
-
-/// `localhost`, `*.localhost`, or a loopback IP, with or without a port.
-fn is_loopback_host(host: &str) -> bool {
-    use std::net::IpAddr;
-    let name = if let Some(rest) = host.strip_prefix('[') {
-        rest.split(']').next().unwrap_or(rest)
-    } else if host.parse::<IpAddr>().is_ok() {
-        host
-    } else {
-        host.rsplit_once(':')
-            .filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit()))
-            .map_or(host, |(name, _)| name)
-    };
-    let name = name.to_ascii_lowercase();
-    name == "localhost"
-        || name.ends_with(".localhost")
-        || name.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Run the server until the process is signalled (Ctrl-C / SIGTERM).
@@ -364,7 +346,7 @@ where
     }));
 
     // --- Listener + banner ---
-    let listener = tokio::net::TcpListener::bind(&config.bind).await?;
+    let listener = crate::shutdown::bind_announced(&config.bind, Some(&config.apex_domain)).await?;
     let bound = listener.local_addr()?;
     writeln!(writer, "==> rustango operator + tenant server")?;
     writeln!(writer, "    bound to {bound}")?;
@@ -472,7 +454,7 @@ mod apex_tests {
             "[::1]",
             "[::1]:8080",
         ] {
-            assert!(is_loopback_host(host), "{host}");
+            assert!(crate::urls::is_loopback_host(host), "{host}");
         }
         for host in [
             "127.example.com",
@@ -480,7 +462,7 @@ mod apex_tests {
             "[2001:db8::1]:80",
             "10.0.0.1",
         ] {
-            assert!(!is_loopback_host(host), "{host}");
+            assert!(!crate::urls::is_loopback_host(host), "{host}");
         }
     }
 

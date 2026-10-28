@@ -65,6 +65,10 @@ valeur de `rustango::logging::DEFAULT_FILTER`. Ce défaut est délibéré : sqlx
 journalise chaque requête en `info`, donc un `info` non filtré enterre vos
 propres événements sous le SQL.
 
+Pour des logs JSON, définissez `RUSTANGO__LOGGING__FORMAT=json` (aussi
+`pretty`, `compact`, `full`). Comme `RUST_LOG`, elle est lue depuis
+l'environnement, sinon depuis `./.env`.
+
 Pour configurer autre chose que le niveau, installez le subscriber vous-même.
 Chaque installateur est idempotent (`try_init` en dessous), un appel
 supplémentaire est donc sans effet plutôt qu'une panique :
@@ -130,7 +134,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::errors` | Un template de page d'erreur dont le rendu a échoué, ou un répertoire de templates non chargé |
 | `rustango::forms` | Valeurs `DynamicForm` acceptées pour l'instant mais refusées dans une version future |
 | `rustango::auth_flows` | Liens d'authentification à usage unique refusés par le cache |
-| `rustango::aead` | Une clé secrète précédente vide |
+| `rustango::aead` | Une clé secrète précédente vide, ou une clé de dev impossible à enregistrer |
 | `rustango::hmac_auth` | Configuration de l'authentification HMAC des requêtes |
 | `rustango::humanize` | Filtres humanize |
 | `rustango::jobs` | Files de tâches de fond |
@@ -170,6 +174,10 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::tenancy::sweep` | Balayages de rétention |
 | `rustango::viewset` | ViewSets montés avec des écritures ouvertes |
 
+Les modifications faites dans la console vont aussi vers
+`rustango::tenancy::operator_console::action`, un événement par modification ;
+`RUST_LOG=rustango::tenancy::operator_console::action=info` les montre seules.
+
 Ce sont les targets que le framework nomme explicitement. Les événements qui
 n'en nomment aucun héritent de leur chemin de module, ce qui donne la même forme
 — `rustango::access_log` et `rustango::tracing_layer` s'atteignent exactement
@@ -191,6 +199,22 @@ comme les lignes ci-dessus.
 | `compact` | Développement — ligne unique plus concise, champs de span à la fin | `.with_format(Format::Compact)` |
 | `json` | Production — un objet par événement, pour Loki / CloudWatch / Datadog | `.json()` |
 
+Les quatre ont un rendu différent, ce qui n'a pas toujours été vrai : autrefois,
+`install()` n'appelait ni `.pretty()` ni `.compact()`, si bien que ces deux
+valeurs produisaient une sortie `full`.
+
+### Couleur
+
+La couleur est activée quand stdout est un terminal, et désactivée sinon —
+rediriger vers un fichier ou tourner en CI ne demande aucune configuration.
+`NO_COLOR` est respecté. `json` et le sink fichier ne sont jamais colorés.
+
+| `color` | Comportement |
+|---|---|
+| `auto` | Couleur si et seulement si stdout est un terminal et `NO_COLOR` n'est pas défini. Le défaut |
+| `always` | Couleur même en redirection |
+| `never` | Jamais de couleur |
+
 ```rust,ignore
 rustango::logging::Setup::new()
     .json()
@@ -208,11 +232,18 @@ rustango::logging::setup_for_env();
 Deux réglages d'affichage méritent d'être connus : `.with_line_numbers()` ajoute
 la position dans le code (utile en développement, bruyant en production), et
 `.without_targets()` masque la colonne target — ne le faites que si vous avez
-renoncé à filtrer dessus.
+renoncé à filtrer dessus. `.with_thread_ids()` ajoute l'id du thread, et
+`.with_color(Color::Never)` règle la couleur dans le code. Sous
+`#[rustango::main]`, la couleur suit toujours la règle `auto`, car la macro
+installe en premier.
+
+Une commande de gestion (`dumpdata`, `migrate`, …) envoie les journaux du
+terminal sur stderr, pour garder sa sortie standard propre :
+`cargo run -- dumpdata > fixtures.json` fonctionne. Le serveur continue de
+journaliser sur stdout.
 
 > Chaque valeur de format atteint son propre formateur. `compact` était accepté
-> puis rendu comme la valeur par défaut — corrigé (#1480).
-> pas.
+> puis rendu comme la valeur par défaut — c'est corrigé.
 
 ## Configurer la journalisation depuis les réglages
 
@@ -224,6 +255,7 @@ journalisation sans recompiler. La section s'appelle `[logging]` :
 [logging]
 level             = "info,sqlx=warn"
 format            = "pretty"
+color             = "auto"
 with_line_numbers = true
 ```
 
@@ -267,15 +299,24 @@ appelle lui-même `logging::setup()` n'obtienne pas un second installateur.
 L'ordre dans la chaîne n'a pas d'importance : l'installation a lieu à `run()`,
 contre les réglages finaux.
 
-> **`#[rustango::main]` l'emporte dessus.** La macro installe un subscriber
-> avant même que le runtime ne soit construit, et chaque installateur utilise
-> `try_init` : le premier gagne, les suivants sont écartés en silence. Un `main`
-> qui garde la macro *et* appelle `with_logging()` obtient donc les valeurs par
-> défaut de la macro : votre section `[logging]` est lue puis reste sans effet,
-> sans rien pour le signaler. Pour une journalisation pilotée par les réglages,
-> remplacez `#[rustango::main]` par `#[tokio::main]` — c'est la seule chose
-> qu'un projet généré doit changer. Suivi dans
-> [#1465](https://github.com/ujeenet/rustango/issues/1465).
+> **Dites à `#[rustango::main]` de s'effacer.** La macro installe un
+> subscriber avant même que le runtime ne soit construit, et chaque installateur
+> utilise `try_init` : le premier gagne. Passez `logging = false` et le vôtre
+> s'installe en premier :
+>
+> ```rust,ignore
+> #[rustango::main(logging = false)]
+> async fn main() -> Result<(), Box<dyn std::error::Error>> {
+>     rustango::manage::Cli::new()
+>         .with_settings_from_env()
+>         .with_logging()
+>         .run().await
+> }
+> ```
+>
+> Sans cela, la section `[logging]` est lue puis ignorée. Autrefois c'était
+> silencieux ; `install()` avertit désormais sur stderr et via `tracing` quand il
+> trouve un subscriber déjà en place.
 
 N'importe quelle clé peut être écrasée par déploiement via une variable
 d'environnement, la section et la clé servant de segments de chemin :
@@ -334,7 +375,7 @@ let app = router.access_log(AccessLogLayer::default());
 ```
 
 ```text
-INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12 client.address=192.0.2.1 tenant=acme
+INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12.4 client.address=192.0.2.1 tenant=acme
 ```
 
 Le niveau porte du sens, l'alerting peut donc s'y accrocher :
@@ -359,10 +400,15 @@ AccessLogLayer::default()
 passez-le à `.real_ip(layer)` ; une couche sur le routeur de l'API arrive trop tard.
 
 Les paramètres de requête porteurs d'identifiants sont masqués par `[redacted]`
-avant l'écriture de la ligne — `password`, `passwd`, `token`, `secret`,
-`api_key`, `apikey`, `access_token`, `refresh_token`, `signature`, `auth`.
-Étendez avec `.redact_additional("session_id")`, ou remplacez toute la liste
-avec `.redact(vec![...])`. Cela ne couvre **que les chaînes de requête** ; pour
+avant l'écriture de la ligne. Une clé est masquée quand elle contient un mot
+secret, comparé mot par mot : `api_key`, `reset_token` et `X-Api-Key` comptent
+donc. Les mots incluent `password`, `pass`, `pwd`, `token`, `jwt`, `secret`,
+`key`, `signature`, `auth`, `credential`, `cookie`, `session`, `otp`, plus les
+noms OAuth `code`, `state` et `assertion`. Étendez avec
+`.redact_additional("ref")`, ou remplacez toute la liste avec
+`.redact(vec![...])` ; `token`, `signature` et `code` restent masqués dans
+tous les cas. Le `url.query` du span de requête est masqué de la même façon.
+Cela ne couvre **que les chaînes de requête** ; pour
 le reste, voir
 [security.md](security.md#garder-les-secrets-hors-de-vos-journaux).
 
@@ -393,9 +439,7 @@ AccessLogLayer::default().tenant_field(TenantField::Off)    // tenant=-
 
 > **Le chemin de la requête uniquement.** Une tâche de fond tourne en dehors de
 > la requête qui l'a mise en file et n'a pas de locataire à journaliser —
-> l'emplacement est par tâche, et `tokio::spawn` n'en hérite pas. Suivi dans
-> [#1229](https://github.com/ujeenet/rustango/issues/1229) /
-> [#1223](https://github.com/ujeenet/rustango/issues/1223).
+> l'emplacement est par tâche, et `tokio::spawn` n'en hérite pas. C'est une lacune connue.
 
 ## Spans de requête et OpenTelemetry
 
@@ -427,9 +471,31 @@ couche OpenTelemetry, qui lit le span à sa fermeture.
 Cette couche vaut d'être installée ne serait-ce que pour le champ locataire :
 comme les champs sont portés par le *span*, chaque événement émis pendant la
 requête — y compris ceux de l'ORM — les porte dans son contexte de span, sans
-qu'aucun sous-système ait à savoir ce qu'est un locataire. Elle n'est **pas**
-installée par défaut ; ni `server::Builder`, ni `Cli`, ni le scaffolder ne
-l'ajoutent.
+qu'aucun sous-système ait à savoir ce qu'est un locataire.
+
+**`Cli` l'installe pour vous**, sur chaque chemin de service, avec le journal
+d'accès. Autrefois, rien dans le framework ne la montait : un `tracing::info!`
+dans un handler n'avait donc aucun span englobant — ni locataire, ni
+corrélation — et c'est ce qui faisait lire les logs des handlers comme des
+lignes isolées, sans contexte.
+
+`[logging] access_log = false` désactive **uniquement le journal d'accès**. Le
+span de requête et l'en-tête `X-Request-Id` restent montés. Ce réglage nomme le
+journal, et le service pour lequel il existe — celui qui journalise les
+requêtes en bordure — est précisément celui qui veut encore le contexte de
+trace et la corrélation des requêtes. (Une version antérieure de cette page
+disait qu'il désactivait les deux, et une version antérieure du code le
+faisait ; les deux avaient tort pour la même raison.)
+
+`server::Builder` les monte aussi quand `Cli` lui passe la configuration, ce
+qu'il fait sur les chemins de service de la tenancy — l'admin du tenant et la
+console opérateur sont derrière un aiguillage par Host que le routeur api ne
+voit jamais, donc les couches vont sur le routeur le plus extérieur plutôt que
+sur celui que vous passez. Un `server::Builder` construit entièrement à la main
+ne monte aucune des couches qu'ajoute `Cli` : appelez `.observability(..)` pour
+le span et le journal d'accès, et `.security_headers(..)`, `.allowed_hosts(..)`
+et `.ssl_redirect(..)` pour les couches `[security]` — chacune reste désactivée
+tant que vous ne le faites pas.
 
 ## Journalisation dans les tests
 
@@ -466,5 +532,7 @@ par le guard.
   détruit, ou le processus est mort avant que l'appender ne vide son tampon.
   Voir [Écrire dans un fichier](#écrire-dans-un-fichier).
 - **Deux subscribers, le second ignoré.** `try_init` signifie que le premier
-  gagne, en silence. Si vous appelez `logging::setup()` *et*
-  `Cli::with_logging()`, c'est celui des réglages qui perd.
+  gagne. Si vous appelez `logging::setup()` *et* `Cli::with_logging()`, c'est
+  celui des réglages qui perd. `install()` avertit quand cela arrive — cherchez
+  `logging setup ignored` sur stderr. Sous `#[rustango::main]`, ajoutez
+  `logging = false`.

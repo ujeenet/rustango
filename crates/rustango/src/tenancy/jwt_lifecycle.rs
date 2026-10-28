@@ -169,13 +169,49 @@ pub const DEFAULT_REFRESH_TTL_SECS: i64 = 7 * 24 * 3600;
 /// multi-instance deployments can share state via a Redis- or DB-
 /// backed impl. Default ctor wires up [`InMemoryJtiStore`].
 pub struct JwtLifecycle {
-    secret: Vec<u8>,
+    secret: SigningKey,
     pub access_ttl_secs: i64,
     pub refresh_ttl_secs: i64,
     jti_store: Arc<dyn JtiStore>,
 }
 
+/// The HMAC key: given, or resolved on the first token so building a
+/// router reads no secret (and warns about none) on a verb that never serves.
+enum SigningKey {
+    Ready(Vec<u8>),
+    #[cfg(feature = "mcp")]
+    Lazy(std::sync::OnceLock<Vec<u8>>, fn() -> Vec<u8>),
+}
+
+impl SigningKey {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Ready(k) => k,
+            #[cfg(feature = "mcp")]
+            Self::Lazy(cell, load) => cell.get_or_init(|| {
+                let key = load();
+                assert!(
+                    key.len() >= 32,
+                    "JwtLifecycle signing key is too short; need >= 32 bytes"
+                );
+                key
+            }),
+        }
+    }
+}
+
 impl JwtLifecycle {
+    /// [`Self::new`] with the key read by `load` on first use.
+    #[cfg(feature = "mcp")]
+    pub(crate) fn lazy(load: fn() -> Vec<u8>) -> Self {
+        Self {
+            secret: SigningKey::Lazy(std::sync::OnceLock::new(), load),
+            access_ttl_secs: DEFAULT_ACCESS_TTL_SECS,
+            refresh_ttl_secs: DEFAULT_REFRESH_TTL_SECS,
+            jti_store: Arc::new(InMemoryJtiStore::new()),
+        }
+    }
+
     /// Build a new lifecycle with default TTLs (15 min access / 7 day refresh).
     ///
     /// # Panics
@@ -202,7 +238,7 @@ impl JwtLifecycle {
             "JwtLifecycle signing key is too short; need >= 32 bytes (a shorter key is forgeable)",
         );
         Self {
-            secret,
+            secret: SigningKey::Ready(secret),
             access_ttl_secs: DEFAULT_ACCESS_TTL_SECS,
             refresh_ttl_secs: DEFAULT_REFRESH_TTL_SECS,
             jti_store: Arc::new(InMemoryJtiStore::new()),
@@ -581,7 +617,8 @@ impl JwtLifecycle {
     fn sign(&self, msg: &[u8]) -> Vec<u8> {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
-        let mut mac = <Hmac<Sha256>>::new_from_slice(&self.secret).expect("HMAC accepts any key");
+        let mut mac =
+            <Hmac<Sha256>>::new_from_slice(self.secret.bytes()).expect("HMAC accepts any key");
         mac.update(msg);
         mac.finalize().into_bytes().to_vec()
     }

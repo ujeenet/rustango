@@ -84,6 +84,38 @@ impl IntoResponseParts for KeepBody {
     }
 }
 
+/// Marks every HTML 4xx/5xx of a framework router as [`KeepBody`]: such a
+/// page (a form re-shown with its error) is rendered on purpose.
+#[cfg(feature = "admin")]
+pub(crate) fn own_pages<S: Clone + Send + Sync + 'static>(
+    router: axum::Router<S>,
+) -> axum::Router<S> {
+    router.layer(axum::middleware::map_response(
+        |mut res: Response| async move {
+            keep_own_page(&mut res);
+            res
+        },
+    ))
+}
+
+/// [`KeepBody`] on `res` when it is an HTML error page.
+#[cfg(any(feature = "admin", feature = "template_views"))]
+pub(crate) fn keep_own_page(res: &mut Response) {
+    let status = res.status();
+    let html = res
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| {
+            ct.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("text/html")
+        });
+    if html && (status.is_client_error() || status.is_server_error()) {
+        res.extensions_mut().insert(KeepBody);
+    }
+}
+
 /// A handler error for the error page: a 4xx carries its message, a
 /// 5xx logs its cause and keeps it out of the body (unless disclosed).
 #[derive(Debug)]

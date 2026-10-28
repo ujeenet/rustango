@@ -18,7 +18,9 @@ and runs the whole registry. There is no per-tenant migrate on the command line.
 - [Mounting it](#mounting-it)
 - [What each page does](#what-each-page-does)
 - [Hostnames](#hostnames)
+- [Unknown hosts](#unknown-hosts)
 - [Operators](#operators)
+- [Two-factor sign-in](#two-factor-sign-in)
 - [The audit log](#the-audit-log)
 - [Provisioning runs](#provisioning-runs)
 - [Database servers](#database-servers)
@@ -78,6 +80,9 @@ The console answers on the **apex** domain (`RUSTANGO_APEX_DOMAIN`), not on a te
 | **Audit log** | Every change made through the console |
 | **Runs** | Provisioning and migration runs, streamed live |
 | **Database servers** | Servers tenant databases are created on, with their admin login |
+| **Change password** | Your own password |
+| **Two-factor sign-in** | Your own authenticator app (`totp` feature) |
+| **Shared SSO** | Sign-in providers offered to every tenant, with the callback URL to register (`admin-sso` feature; see [SSO](sso.md)) |
 
 ---
 
@@ -99,6 +104,28 @@ From the CLI: [`list-hosts` / `add-host` / `remove-host` / `set-host-enabled`](m
 
 ---
 
+## Unknown hosts
+
+By default a request whose host resolves no tenant goes to your app's routes,
+where the `Tenant` extractor and the tenant admin answer 404. To serve
+something there instead — a first-run setup page, a "this site is not set up"
+page — hand a router to `unresolved_tenant`, for example one `/` route that answers "Create your first site" while `TenantRegistry::has_tenants()` is false. `Builder::unresolved_tenant` has a compiled example.
+
+It runs for an unknown host and for an apex path the console does not serve.
+It never runs for a host that resolves to a tenant, and the console keeps its
+own routes. An inactive tenant does not resolve, so its host reaches this
+router too. The router gets the registry as `Extension<TenantRegistry>`, never
+a tenant pool; `has_tenants()` counts inactive tenants too. `/health` and
+`/ready` stay served next to it.
+
+**Security:** anyone who can reach the server can reach this router. Check the
+state yourself (for example, offer setup only while `has_tenants()` is false)
+and protect anything that writes.
+
+The same setter exists on `rustango::server::Builder`.
+
+---
+
 ## Operators
 
 [![The operators page — the signed-in operator marked "that's you", with a form to add another and the option to generate a password](img/operator-console-operators.png)](img/operator-console-operators.png)
@@ -113,6 +140,18 @@ Two things the page will not let you do, for the same reason:
 A generated password is shown **once**, in the response body — never through a redirect, which would put it in the URL bar, the history, the referrer and every access log in between.
 
 From the CLI: [`list-operators` / `set-operator-active`](manage.md#list-operators).
+
+---
+
+## Two-factor sign-in
+
+With the `totp` feature, an operator can add an authenticator app under **Two-factor sign-in** (`/account/totp`). The page shows a setup key and an `otpauth://` link until a code confirms it. Turning it off takes a current code.
+
+Once it is on, the password alone only opens the code step (`/login/totp`); no console page answers until the code is right. Each code works once, and wrong codes count against the same limits and lock as wrong passwords. Enrolling, turning it off and every wrong code are written to the [audit log](#the-audit-log) as `totp_enroll`, `totp_disable` and `totp_failed`, never with the code.
+
+It is optional per operator. Set `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` to require it: an operator without a device then sets one up at the code step before the first session. Read at start-up.
+
+The secrets live in `rustango_operator_totp` in the registry, sealed under `RUSTANGO_SECRET_KEY`, which must be set to enroll. `migrate` creates the table, or the console does on the first sign-in. If the table is missing (a registry role without CREATE, before `migrate`), sign-in uses the password alone unless TOTP is required; if it exists but cannot be read, sign-in is refused. There are no recovery codes yet: an operator who loses the device needs a shell on the registry to delete their row.
 
 ---
 
@@ -183,7 +222,7 @@ fails, the run rolls back like any other step.
 
 The admin sets their own password through a set-password link. The link
 works once, expires in 72 hours, and opens only this tenant's
-change-password page. With `Builder::first_admin_mailer(mailer, from)` it is
+change-password page. With `Builder::first_admin_mailer(mailer, from)` (`email` feature) it is
 mailed to the admin. Without a mailer, the run page shows it to you **once**,
 right after you submit; copy it and give it to the admin. It is never stored,
 audited or logged; the audit log records the user's creation only.
@@ -361,7 +400,7 @@ levels and add wiring, so they are not a fourth and fifth rung:
 | `router_with_impersonation` | edit | brand storage, the tenant session secret and a handoff URL, so an operator can enter a tenant |
 | `router_full` | whatever you pass | all of the above as `Option`s — `None` simply does not mount those routes |
 
-`Server::Builder::serve` mounts impersonation for you; a custom mount
+`rustango::server::Builder::serve` mounts impersonation for you; a custom mount
 point opts in by using `router_with_impersonation` in place of
 `router_with_pools`. Reach for `router_full` when you need a
 combination the shorthands do not name — it exists so that a new

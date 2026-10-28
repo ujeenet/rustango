@@ -15,7 +15,8 @@ tower layer.
 
 > **Source:** `rustango::hmac_auth` (`HmacAuthLayer`, `KeyResolver`,
 > `KeyTenantResolver`, `RequestToSign`, `sign_now`, `sign_request`) — behind the `hmac-auth` feature (on by default; replay
-> protection additionally needs `cache`).
+> protection additionally needs `cache`, and `bind_tenants` / `KeyTenantResolver`
+> need `tenancy`).
 >
 > **Runnable version:** every snippet is copied from
 > [`auth_hmac_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_hmac_doc.rs)
@@ -27,6 +28,7 @@ tower layer.
 - [What gets signed](#what-gets-signed)
 - [Server: verify with the layer](#server-verify-with-the-layer)
 - [Client: sign a request](#client-sign-a-request)
+- [Multi-tenant apps](#multi-tenant-apps)
 - [Clock skew and replay](#clock-skew-and-replay)
 - [Limits](#limits)
 - [See also](#see-also)
@@ -68,7 +70,9 @@ Because the query is **sorted** on both ends, `?b=2&a=1` and `?a=1&b=2` produce
 the same signature. Because the body is hashed into the string, changing a single
 byte invalidates it.
 
-The host is the `Host` header without its port. Unpinned, the layer trusts the
+The host is the `Host` header (or the HTTP/2 authority) without its port,
+lowercased. A request whose `Host` and authority name different hosts is a
+`401`. Unpinned, the layer trusts the
 request's own `Host`, so a request replayed to another service that shares the
 key, with `Host` still naming the first, passes. When services share a key, pin
 each one with `.host("api.example.com")` or put it behind a proxy that enforces
@@ -111,7 +115,10 @@ with an unknown key and it's a `401`:
 > **No identity extractor.** The layer verifies the signature but does **not**
 > inject which `keyId` signed into the request — there's no `HmacUser` extractor.
 > If a handler needs the caller identity, wrap the layer or carry it yourself.
-> Rejections are plain `401`/`413` responses, not a typed error you match on.
+> Rejections are JSON error responses, not a typed error you match on: `401`
+> for a bad or missing signature, date or key, `413` for a body over the limit,
+> and, with `bind_tenants`, `403` for the wrong tenant (`503` when the tenant
+> lookup fails).
 
 ---
 
@@ -147,8 +154,10 @@ The tenant header and the port are not signed by default, and the layer knows
 no tenant. On a tenant-resolved app:
 
 - `.bind_tenants(tenant_of)` maps each key id to the tenant slug it may act
-  for. The layer resolves the request's tenant with the mounted tenant context
-  and answers `403` when it differs, or when there is none.
+  for (a `KeyTenantResolver`; `None` means the key may act for any tenant).
+  The layer resolves the request's tenant with the mounted tenant context and
+  answers `403` when it differs, or when there is none. It runs after the
+  signature check.
 - `.signed_headers(["x-org"])` adds headers to the signed string, and
   `.sign_port()` adds the port in `Host`. Each adds a `name:value` line, sorted
   by name. The client signs the same list with `RequestToSign::header` and
@@ -161,7 +170,8 @@ no tenant. On a tenant-resolved app:
 The `X-Date` timestamp bounds replay: a request whose date is outside
 `tolerance_secs` (default ±300 s) is rejected, so a captured request is only
 reusable inside that short window. To close it entirely, attach a **nonce store**
-(any `cache::Cache`) and each signature can be spent only once within the window:
+(any `cache::Cache`) and each signature can be spent only once. A verified
+signature is kept for twice `tolerance_secs`, and a repeat gets a `401`:
 
 ```rust
 use rustango::cache::InMemoryCache;
@@ -172,8 +182,10 @@ let layer = HmacAuthLayer::new(resolver)
 ```
 
 In production use a **shared** store (Redis) so the protection holds across
-replicas — an in-process cache only guards one instance. The replay check fails
-open on a cache error (availability over the narrow in-window risk).
+replicas — an in-process cache only guards one instance. A `NullCache` stores
+nothing, so the layer logs a warning that replay protection is off. The replay
+check fails open on a cache error (availability over the narrow in-window
+risk); it logs a warning for that request.
 
 ---
 

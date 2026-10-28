@@ -95,7 +95,11 @@ pub use queryset_hooks::{AdminQuerySetHook, QuerySetHookFn};
 pub use session::{AdminSession, AdminSessionSecret};
 #[cfg(feature = "admin-sso")]
 pub use sso_provider::SsoProvider;
+#[doc(hidden)]
+pub use urls::__router_builds;
 pub(crate) use urls::ungated_admin_built;
+#[cfg(feature = "tenancy")]
+pub(crate) use urls::{per_request_router, RequestState};
 #[cfg(all(test, feature = "sqlite"))]
 pub(crate) use urls::{reset_ungated_admin_built, ungated_flag_lock};
 pub use urls::{router, ActionPerm, AdminActionFn, AdminActionFuture, AdminTxActionFn, Builder};

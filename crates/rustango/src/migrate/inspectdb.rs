@@ -939,7 +939,7 @@ async fn list_columns_sqlite(
     // and must be quoted. `PRAGMA table_info` gives nullability,
     // default and the PK flag; `sqlite_master` gives the declared
     // type and whether AUTOINCREMENT is set.
-    let pragma = format!("PRAGMA table_info({})", quote_sqlite_ident(table));
+    let pragma = format!("PRAGMA table_info({})", crate::sql::quote_with(table, '"'));
     let rows = sqlx::query(&pragma)
         .fetch_all(pool)
         .await
@@ -989,7 +989,7 @@ async fn list_pk_columns_sqlite(
     table: &str,
 ) -> Result<Vec<String>, MigrateError> {
     use sqlx::Row as _;
-    let pragma = format!("PRAGMA table_info({})", quote_sqlite_ident(table));
+    let pragma = format!("PRAGMA table_info({})", crate::sql::quote_with(table, '"'));
     let rows = sqlx::query(&pragma)
         .fetch_all(pool)
         .await
@@ -1018,7 +1018,10 @@ async fn list_fks_sqlite(
     table: &str,
 ) -> Result<Vec<(String, String)>, MigrateError> {
     use sqlx::Row as _;
-    let pragma = format!("PRAGMA foreign_key_list({})", quote_sqlite_ident(table));
+    let pragma = format!(
+        "PRAGMA foreign_key_list({})",
+        crate::sql::quote_with(table, '"')
+    );
     let rows = sqlx::query(&pragma)
         .fetch_all(pool)
         .await
@@ -1067,12 +1070,6 @@ async fn view_definition_sqlite(
             .map_err(MigrateError::Driver)?
             .flatten();
     Ok(def)
-}
-
-#[cfg(feature = "sqlite")]
-fn quote_sqlite_ident(name: &str) -> String {
-    let escaped = name.replace('"', "\"\"");
-    format!("\"{escaped}\"")
 }
 
 /// Parse a SQLite declared type like `VARCHAR(80)` → `("varchar", Some(80))`,

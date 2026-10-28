@@ -68,8 +68,17 @@ where
     Ok(row)
 }
 
+/// Rows per Postgres `bulk_insert` statement at `columns` columns, under
+/// the bind cap; the derive's pool `bulk_insert` chunks by it.
+#[doc(hidden)]
+#[must_use]
+pub fn bulk_insert_rows_per_statement(columns: usize) -> usize {
+    super::rows_per_batch(&Postgres, columns, usize::MAX)
+}
+
 /// Like [`bulk_insert_pool`](crate::sql::bulk_insert_pool) but accepts
-/// any sqlx executor.
+/// any sqlx executor. One statement, so past the bind cap the driver
+/// refuses it: use the model's pool `bulk_insert`, which chunks.
 ///
 /// # Errors
 /// [`ExecError`] if the query is invalid or the driver rejects it.

@@ -343,6 +343,8 @@ async fn member_sso_router_serves_a_non_default_backend() {
     let _g = SUITE.lock().await;
     // A fake OIDC IdP on loopback, which outbound calls allow only when listed.
     std::env::set_var("RUSTANGO_OUTBOUND_ALLOW", "127.0.0.1");
+    // Tenant-owned provider rows read their own allowlist.
+    std::env::set_var("RUSTANGO_TENANT_OUTBOUND_ALLOW", "127.0.0.1");
     std::env::set_var("RUSTANGO_SECRET_KEY", "non-default-backend-key");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let issuer = format!("http://{}", listener.local_addr().unwrap());

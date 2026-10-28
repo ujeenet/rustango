@@ -121,41 +121,19 @@ impl SessionSecret {
                 Err(e) => warn_unusable_secret(&e.to_string()),
             }
         }
-        if let Ok(bytes) = std::fs::read(disk_path) {
-            if bytes.len() >= 32 {
-                restrict_session_secret_perms(disk_path);
-                tracing::info!(
-                    path = %disk_path.display(),
-                    "loaded persisted session secret from disk",
-                );
-                return Self(bytes);
-            }
-        }
-        let mut buf = vec![0u8; 32];
-        OsRng.fill_bytes(&mut buf);
-        if let Some(parent) = disk_path.parent() {
-            create_private_dir(parent);
-        }
-        match persist_secret(disk_path, &buf) {
-            Ok(on_disk) => {
-                tracing::info!(
-                    path = %disk_path.display(),
-                    "generated new session secret and persisted to disk \
-                     (set RUSTANGO_SESSION_SECRET to override; this message \
-                     only fires on first boot)",
-                );
-                // Another first boot may have won; everyone uses its key.
-                return Self(on_disk);
-            }
+        match load_or_create_key_file(disk_path, "session secret", "RUSTANGO_SESSION_SECRET") {
+            Ok(bytes) => Self(bytes),
             Err(e) => {
                 tracing::warn!(
                     path = %disk_path.display(),
                     error = %e,
                     "could not persist session secret to disk — using ephemeral random key",
                 );
+                let mut buf = vec![0u8; 32];
+                OsRng.fill_bytes(&mut buf);
+                Self(buf)
             }
         }
-        Self(buf)
     }
 
     /// Strict variant of [`Self::from_env_or_random`]: returns
@@ -344,6 +322,40 @@ pub(crate) fn warn_unusable_secret(reason: &str) {
     );
 }
 
+/// The 32+ byte key saved at `path`, else a new random one saved there
+/// owner-only. `what` and `var` name it in the one INFO line each logs.
+pub(crate) fn load_or_create_key_file(
+    path: &std::path::Path,
+    what: &str,
+    var: &str,
+) -> std::io::Result<Vec<u8>> {
+    match std::fs::read(path) {
+        Ok(bytes) if bytes.len() >= 32 => {
+            restrict_session_secret_perms(path);
+            tracing::info!(path = %path.display(), "loaded persisted {what} from disk");
+            return Ok(bytes);
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // An existing key we cannot read must never be replaced: it may
+        // seal data that a new key could not open.
+        Err(e) => return Err(e),
+    }
+    let mut buf = vec![0u8; 32];
+    OsRng.fill_bytes(&mut buf);
+    if let Some(parent) = path.parent() {
+        create_private_dir(parent);
+    }
+    let on_disk = persist_secret(path, &buf)?;
+    tracing::info!(
+        path = %path.display(),
+        "generated new {what} and persisted to disk (set {var} to override; \
+         this message only fires on first boot)",
+    );
+    // Another first boot may have won; everyone uses its key.
+    Ok(on_disk)
+}
+
 /// Publish `bytes` at `path` unless another boot got there first, and
 /// return the key that is on disk. The temp file has a unique name, is
 /// owner-only from creation, and is never opened through a link.
@@ -381,8 +393,8 @@ fn publish_first(tmp: &std::path::Path, path: &std::path::Path) -> std::io::Resu
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // A stale short file (the loader skipped it) is replaced.
-            match std::fs::read(path) {
-                Ok(b) if b.len() >= 32 => Ok(false),
+            match std::fs::read(path)? {
+                b if b.len() >= 32 => Ok(false),
                 _ => std::fs::rename(tmp, path).map(|()| true),
             }
         }
@@ -496,6 +508,55 @@ impl PasswordFingerprint {
         let current = Self::of(secret, password_hash);
         use subtle::ConstantTimeEq as _;
         self.0.as_bytes().ct_eq(current.0.as_bytes()).into()
+    }
+}
+
+/// Who passed the first factor and still owes a TOTP code. Signed under a
+/// per-flow tag ending in `.`, so it never verifies as a session cookie.
+#[cfg(all(feature = "totp", any(feature = "admin-sso", feature = "tenancy")))]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct PendingSecondFactor {
+    pub(crate) uid: i64,
+    /// Bound to the password hash, so a password change in between ends it.
+    pub(crate) pwf: PasswordFingerprint,
+    pub(crate) exp: i64,
+}
+
+#[cfg(all(feature = "totp", any(feature = "admin-sso", feature = "tenancy")))]
+impl PendingSecondFactor {
+    /// How long the code step stays open.
+    pub(crate) const TTL_SECS: i64 = 300;
+
+    pub(crate) fn new(secret: &SessionSecret, uid: i64, password_hash: &str) -> Self {
+        Self {
+            uid,
+            pwf: PasswordFingerprint::of(secret, password_hash),
+            exp: chrono::Utc::now().timestamp() + Self::TTL_SECS,
+        }
+    }
+
+    fn mac(secret: &SessionSecret, tag: &[u8], body: &str) -> [u8; 32] {
+        sign(secret, &[tag, body.as_bytes()].concat())
+    }
+
+    pub(crate) fn seal(&self, secret: &SessionSecret, tag: &[u8]) -> String {
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let body = b64.encode(serde_json::to_vec(self).unwrap_or_default());
+        let sig = b64.encode(Self::mac(secret, tag, &body));
+        format!("{body}.{sig}")
+    }
+
+    /// The pending state behind `value`, if signed under `tag` and not expired.
+    pub(crate) fn open(secret: &SessionSecret, tag: &[u8], value: &str) -> Option<Self> {
+        use subtle::ConstantTimeEq as _;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let (body, sig) = value.split_once('.')?;
+        let sig = b64.decode(sig).ok()?;
+        if Self::mac(secret, tag, body).ct_eq(&sig[..]).unwrap_u8() == 0 {
+            return None;
+        }
+        let p: Self = serde_json::from_slice(&b64.decode(body).ok()?).ok()?;
+        (chrono::Utc::now().timestamp() < p.exp).then_some(p)
     }
 }
 
@@ -620,6 +681,24 @@ pub async fn deactivate<T: crate::core::Model + Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A key file that exists but cannot be read is an error, never replaced.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_key_file_is_kept() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key");
+        std::fs::write(&path, [9u8; 32]).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            return; // running as root: permissions cannot make it unreadable
+        }
+        let got = load_or_create_key_file(&path, "test key", "TEST_KEY");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(got.is_err(), "{got:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), [9u8; 32]);
+    }
 
     /// The fingerprint is domain-tagged, not a bare MAC of the hash.
     #[test]

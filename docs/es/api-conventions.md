@@ -30,7 +30,7 @@ El nombre de un método te dice lo que hace. Una vez que aprendes estos sufijos,
 ### Funciones
 
 - **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — el nombre escueto recibe un `rustango::sql::Pool` y es el camino habitual. Funciona en Postgres, MySQL y SQLite, eligiendo el dialecto internamente. Es lo que quiere casi todo el código de aplicación.
-- **`fetch_on(executor)`, `count_on(executor)`** — el sufijo `_on` significa «ejecuta esto contra el *executor* que te entrego» — una conexión o una transacción abierta en lugar del pool. Úsalo cuando necesites varias sentencias dentro de una misma transacción. **Los métodos `_on` son solo para Postgres** (`#[cfg(feature = "postgres")]`).
+- **`fetch_on(executor)`, `count_on(executor)`** — el sufijo `_on` significa «ejecuta esto contra el *executor* que te entrego» — una conexión o una transacción abierta en lugar del pool. Úsalo cuando necesites varias sentencias dentro de una misma transacción. `fetch_on` / `first_on` / `count_on` / `exists_on` y el `fetch_on` de `values` / `aggregate` aceptan cualquier `SqlExecutor` (`&mut PoolConn`, `&mut PoolTx`, `&Pool`) en los tres backends; el resto de la familia `_on` sigue siendo solo para Postgres.
 - **Las escrituras invierten esto, y es el único lugar donde la regla no se cumple.** `save(&pool)`, `insert(&pool)` y `delete(&pool)` reciben un `sqlx::PgPool` específico del controlador, así que en un build sin la característica `postgres` **no existen en absoluto**: elegir `sqlite` hace desaparecer el método en lugar de fallar con algo que nombre la causa. Las versiones multi-backend llevan el sufijo `_pool`: `save_pool`, `insert_pool`, `delete_pool`, cada una con `rustango::sql::Pool`.
 
   | | nombre escueto | versión multi-backend |
@@ -38,7 +38,7 @@ El nombre de un método te dice lo que hace. Una vez que aprendes estos sufijos,
   | **Lecturas** (`QuerySet`) | `fetch(&pool)` — ya es multi-backend | *es* el nombre escueto |
   | **Escrituras** (modelo) | `save(&pool)` — **solo Postgres** | `save_pool(&pool)` |
 
-  Así que el nombre corto es el estrecho para escrituras y el amplio para lecturas. Esa inversión es una verruga, no un diseño: se rastrea en [#1293](https://github.com/ujeenet/rustango/issues/1293) y se resolverá con un ciclo de deprecación en lugar de un renombrado. Hasta entonces, **si no estás en Postgres, escribe `save_pool` / `insert_pool` / `delete_pool`.**
+  Así que el nombre corto es el estrecho para escrituras y el amplio para lecturas. Esa inversión es una verruga, no un diseño: se resolverá con un ciclo de deprecación en lugar de un renombrado. Hasta entonces, **si no estás en Postgres, escribe `save_pool` / `insert_pool` / `delete_pool`.**
 - **`from_X(value)`** — convierte DESDE otro valor (p. ej. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — un método de builder que establece una opción y devuelve el objeto, de modo que puedes encadenar llamadas (p. ej. `with_default_ttl(d)`, `with_access_ttl(secs)`).
 - **`new()`** — el constructor mínimo. Cualquier argumento que reciba es una dependencia obligatoria (p. ej. `RedisCache::new(url)` — no puedes construir la caché sin una URL).
@@ -80,7 +80,7 @@ Cómo construyes un objeto depende de lo que necesita. Hay unas pocas formas est
 El tipo de retorno de un método te dice cómo puede fallar. Rust no tiene excepciones, así que el fallo forma parte del valor de retorno. Hay tres formas.
 
 **`Result<T, E>`** — como una función que o bien devuelve un valor o bien lanza una excepción. Obtienes o el valor `T` o un error `E` con detalles. Úsalo para operaciones que pueden fallar y donde el *porqué* importa:
-- E/S: `pool.fetch(...).await -> Result<_, sqlx::Error>`
+- E/S: `Post::objects().fetch(&pool).await -> Result<Vec<Post>, ExecError>`
 - Validación: `Form::parse(data) -> Result<Self, FormErrors>`
 - Emisión: `JwtLifecycle::issue_pair_with(uid, claims) -> Result<_, JwtIssueError>`
 
@@ -91,7 +91,7 @@ El tipo de retorno de un método te dice cómo puede fallar. Rust no tiene excep
 
 **`bool`** — un simple sí/no cuando no se necesita más detalle:
 - `cache.exists(k) -> Result<bool, _>` (el `Result` cubre la E/S; el `bool` es la respuesta)
-- `JwtLifecycle::revoke(token) -> bool` (true = añadido a la lista negra)
+- `async JwtLifecycle::revoke(token) -> bool` (true = añadido a la lista negra)
 - `disconnect_pre_save(id) -> bool` (true = se eliminó una entrada)
 
 **¿`Result<Option<T>>` o `Result<T>` con un error `NotFound`?** Ambos pueden expresar «la búsqueda falló», así que elige según lo excepcional que sea «no encontrado»:
@@ -122,7 +122,7 @@ La regla general: si un método espera algo (la base de datos, la red o el disco
 Cada llamada al ORM recibe un pool o executor (el handle de base de datos) como **último** argumento. Pasas la conexión cada vez, en lugar de depender de un estado global oculto:
 
 ```rust
-post.save_on(&pool).await?
+post.save_pool(&pool).await?
 Post::objects().filter(...).fetch_on(&pool).await?
 send_post_save(&post, ctx).await                  // ⚠️ no pool — signals are pool-free
 ```
@@ -131,7 +131,7 @@ send_post_save(&post, ctx).await                  // ⚠️ no pool — signals 
 
 **¿Por qué pasarlo cada vez?** Rust prefiere las dependencias que puedes ver sobre el estado global oculto. La alternativa obvia — guardar la conexión en almacenamiento thread-local — se desmorona en el mundo async de Rust, donde una tarea puede saltar entre hilos a mitad de una petición. La desventaja es más tecleo; la ventaja es que puedes hacer grep de cada lugar que toca la base de datos.
 
-Si te encuentras pasando `&pool` a través de diez capas de llamadas a funciones, acepta `impl Executor` una sola vez en el punto de entrada público y deja que los helpers internos compartan esa única conexión.
+Si te encuentras pasando `&pool` a través de diez capas de llamadas a funciones, acepta un `E: SqlExecutor` una sola vez en el punto de entrada público y deja que los helpers internos compartan esa única conexión.
 
 ---
 
@@ -144,7 +144,8 @@ Hay tres maneras de filtrar un queryset, y todas se combinan en una misma consul
 //    GET /api/posts?author_id=42&status__ne=archived
 
 // 2. String-keyed (lookup at compile of the queryset; runtime field name resolution)
-Post::objects().filter("author_id", Op::Eq, SqlValue::I64(42));
+Post::objects().filter("author_id", 42_i64);                // equality
+Post::objects().filter_op("author_id", Op::Gt, 42_i64);     // any operator
 
 // 3. Typed columns (compile-time field check)
 Post::objects().where_(Post::author_id.eq(42));
@@ -153,7 +154,7 @@ Post::objects().where_(Post::author_id.eq(42));
 | Sintaxis | Úsala cuando |
 |---|---|
 | Query HTTP | Endpoints de API públicos — el ViewSet los analiza por ti a partir de la cadena de consulta |
-| `.filter` por clave-cadena | Código CRUD genérico o de admin, donde los nombres de campos vienen de la configuración y no se conocen en tiempo de compilación |
+| `.filter` / `.filter_op` por clave-cadena | Código CRUD genérico o de admin, donde los nombres de campos vienen de la configuración y no se conocen en tiempo de compilación |
 | `.where_` tipado | El código de tu aplicación — la opción por defecto recomendada. El compilador comprueba que el campo existe y que los tipos coinciden |
 
 Puedes **mezclar las tres** en un mismo queryset.
@@ -177,7 +178,7 @@ Puedes **mezclar las tres** en un mismo queryset.
 | JWT | `tenancy::jwt_lifecycle` | `JwtIssueError` |
 | Claves de API | `api_keys::*` | `ApiKeyError` |
 | Contraseñas | `passwords::*` | `PasswordError` |
-| Webhooks | `webhook::*` | (devuelve bool, sin error dedicado) |
+| Webhooks | `webhook::*` | `EmptySigningKey` desde `sign`; `verify_*` devuelve `bool` |
 | URLs firmadas | `signed_url::*` | `SignedUrlError` |
 | Acciones masivas | `bulk_actions::*` | `BulkActionError` |
 | Fixtures | `fixtures::*` | `FixtureError` |
@@ -192,14 +193,19 @@ Puedes **mezclar las tres** en un mismo queryset.
 **Un ejemplo de handler:**
 
 ```rust
+use axum::http::StatusCode;
 use rustango::api_errors::ApiError;
 
-async fn handler() -> Result<Json<X>, ApiError> {
-    let post = Post::objects().get(&pool, 1).await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+async fn handler() -> Result<Json<Post>, ApiError> {
+    let post = Post::objects().find(1, &pool).await
+        // registra la causa; el cliente recibe un mensaje 500 genérico
+        .map_err(|e| ApiError::logged(StatusCode::INTERNAL_SERVER_ERROR, "load post", e))?
+        .ok_or_else(|| ApiError::not_found("no such post"))?;
     Ok(Json(post))
 }
 ```
+
+No pongas `e.to_string()` en `ApiError::internal`: eso envía el error de base de datos al cliente. `ApiError::logged` registra la causa de un 5xx y envía un mensaje genérico (salvo que `RUSTANGO_DISCLOSE_ERRORS` lo permita).
 
 `ApiError` implementa `IntoResponse`, así que devolverlo produce automáticamente su forma JSON: `{"error": <código máquina>, "message": …, "status": …, "details": …}`.
 
@@ -267,16 +273,24 @@ let l = AccessLogLayer {
 Un *feature* es un flag de compilación de Cargo (el `[features]` de `Cargo.toml`) que activa o desactiva una parte del crate — la lista de piezas instaladas de tu aplicación, pero resuelta en tiempo de compilación. Cada módulo que arrastra una dependencia extra queda detrás de uno. El conjunto por defecto es «casi seguro que quieres estos»:
 
 ```toml
-default = [
-    "postgres", "manage", "admin", "config", "forms", "serializer",
-    "cache", "signals", "email", "storage", "scheduler", "secrets", "totp",
-    "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url",
-    "notifications", "casts", "jobs", "jobs-postgres", "auth_flows", "sse",
-    "websocket", "oauth2", "http-client", "compression", "openapi",
-    "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3",
-    "media", "runserver", "template_views",
+default = ["postgres", "batteries"]
+
+batteries = [
+    "manage", "admin", "config", "forms", "serializer", "cache", "signals",
+    "email", "storage", "scheduler", "secrets", "totp", "webhook",
+    "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications",
+    "casts", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket",
+    "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions",
+    "hmac-auth", "jwt", "uploads", "storage-s3", "storage-azure", "media",
+    "runserver", "template_views",
 ]
 ```
+
+La indirección es deliberada: `batteries` es un único nombre que un crate
+dependiente puede desactivar — `default-features = false, features = ["postgres"]` —
+sin tener que repetir la lista. También permite conservarlo todo y elegir otro
+backend: `default-features = false, features = ["batteries", "sqlite"]`. La alternativa, escribir todos los features en
+`default`, obliga a quien quiera prescindir de ellos a conocerlos todos.
 
 **Desactivados por defecto:** los features que arrastran dependencias pesadas o servicios externos:
 - `tenancy` — añade `argon2`, `hmac`, `sha2`, `cookie`, `tower` (la mayoría de las aplicaciones no lo necesitan)
@@ -293,7 +307,7 @@ rustango = { version = "0.61", default-features = false, features = ["postgres",
 
 ## Macros vs runtime
 
-Una *macro* es código que genera código en tiempo de compilación (`#[derive(Model)]` y compañía) — aproximadamente lo que hace un generador de Rails, salvo que se ejecuta en cada compilación y el compilador comprueba el resultado. La división de abajo decide qué hace una macro frente a código de runtime plano.
+Una *macro* es código que genera código en tiempo de compilación (`#[derive(Model)]` y compañía). Se ejecuta en cada compilación, y el compilador comprueba el resultado. La división de abajo decide qué hace una macro frente a código de runtime plano.
 
 | Aspecto | ¿Macro o runtime? |
 |---|---|

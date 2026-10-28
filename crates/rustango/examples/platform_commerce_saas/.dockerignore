@@ -8,6 +8,9 @@ target/
 .env.*
 !.env.example
 
+# Runtime state: generated session keys and the MCP agent secret.
+var/
+
 # Local databases — a SQLite file here would be baked into the image.
 *.db
 *.db-wal

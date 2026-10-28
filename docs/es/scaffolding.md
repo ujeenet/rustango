@@ -160,8 +160,10 @@ Cada plantilla escribe un proyecto de Cargo autocontenido:
   .env.example          # copy to .env (DATABASE_URL, RUSTANGO_SESSION_SECRET, …)
   .gitignore
   rust-toolchain.toml   # selects the `stable` toolchain + rustfmt/clippy/rust-analyzer
-  docker-compose.yml    # a Postgres service to develop against
-  Dockerfile            # production image
+  docker-compose.yml    # the database service (none for sqlite) + a cargo-watch dev container
+  Dockerfile            # production image (multi-stage, release, non-root)
+  Dockerfile.dev        # the dev image docker-compose.yml builds
+  .dockerignore
   README.md
   config/
     default.toml        # settings shared across every environment
@@ -169,7 +171,9 @@ Cada plantilla escribe un proyecto de Cargo autocontenido:
     staging_settings.toml
     prod_settings.toml
   migrations/           # JSON migration files (committed to git)
+  system/migrations/    # the framework's own tables, generated on first migrate (commit them)
   src/
+    lib.rs              # the app as a library: `pub mod models; pub mod urls; pub mod views;`
     main.rs             # the single binary — HTTP server + every manage verb
     models.rs           # your #[derive(Model)] structs
     views.rs            # request handlers ("views")
@@ -178,20 +182,17 @@ Cada plantilla escribe un proyecto de Cargo autocontenido:
 
 ### Un binario para todo
 
-`src/main.rs` es el único punto de entrada. Arranca el servidor HTTP **y** despacha cada verbo de `manage` — no hay un `manage.py` ni un `src/bin/manage.rs` aparte:
+`src/main.rs` es el único punto de entrada. Arranca el servidor HTTP **y** despacha cada verbo de `manage` — no hay un script de manage ni un `src/bin/manage.rs` aparte. Los módulos viven en el target de biblioteca (`src/lib.rs`), así que `main.rs` llega a ellos por el nombre del crate, y también un binario worker bajo `src/bin/`. El `main.rs` de la plantilla api, recortado:
 
 ```rust
-mod models;
-mod urls;
-mod views;
+use myapp::urls;
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     rustango::manage::Cli::new()
         .api(urls::api())
-        .with_welcome()  // friendly `/` page until you add a root handler
-        .with_health()   // /health + /ready endpoints (fullstack & tenant)
+        .with_health()   // /health + /ready endpoints (every template)
         .run()
         .await
 }
@@ -202,22 +203,39 @@ Así que `cargo run` arranca el servidor, y `cargo run -- <verb>` ejecuta migrac
 Cómo difieren las plantillas dentro de `main.rs` / `urls.rs`:
 
 - **api** — sin admin; `urls::api()` simplemente agrega tus propias rutas.
-- **fullstack** — el mismo `urls.rs`, más un ayudante `admin_router(pool)` que `main.rs` monta con `Cli::nest_with("/admin", …)`, construido a partir del pool del servidor. Recibe un `rustango::sql::Pool`, así que no nombra ningún driver, y queda detrás de un inicio de sesión: crea la cuenta con `cargo run -- create-admin <username>` (consulta [Primeros pasos, Paso 11](getting-started.md#paso-11-activar-el-auto-admin)).
-- **tenant** — `main.rs` añade `.tenancy()`, sirviendo la consola de operador en el dominio ápice y cada tenant bajo su propio subdominio. Las propias tablas del framework se generan en una carpeta **`system/migrations/`** a partir de los modelos compilados en el primer `cargo run -- migrate` — sin JSON de bootstrap entregado a mano, así que la primerísima migración funciona sin configuración adicional.
+- **fullstack** — el mismo `urls.rs`, más `admin_prefix(&settings)` y un ayudante `admin_router(pool, &settings)` que `main.rs` monta con `Cli::nest_with(urls::admin_prefix(&settings), …)`, construido a partir del pool del servidor. El prefijo es `[admin] url_prefix` (o `[routes] admin_url`), si no `/admin`. `main.rs` carga los ajustes una vez y los pasa al `Cli` con `with_loaded_settings`. Recibe un `rustango::sql::Pool`, así que no nombra ningún driver, y queda detrás de un inicio de sesión: crea la cuenta con `cargo run -- create-admin <username> --superuser` (consulta [Primeros pasos, Paso 11](getting-started.md#paso-11-activar-el-auto-admin)).
+- **tenant** — `main.rs` añade `.tenancy()`, sirviendo la consola de operador en el dominio ápice y cada tenant bajo su propio subdominio, y `.with_tenant_provisioning("migrations")` para las páginas **New tenant** y **Database servers** de la consola (bórralo para desactivarlas; guardar un servidor necesita `RUSTANGO_SECRET_KEY`). Las propias tablas del framework se generan en una carpeta **`system/migrations/`** a partir de los modelos compilados en el primer `cargo run -- migrate` — sin JSON de bootstrap entregado a mano, así que la primerísima migración funciona sin configuración adicional.
 
 ### Configuración por capas
 
 Los ajustes cargan primero `config/default.toml`, luego `config/<RUSTANGO_ENV>_settings.toml` encima. `RUSTANGO_ENV` es `dev` por defecto, así que un `cargo run` recién generado funciona sin ediciones; establece `RUSTANGO_ENV=prod` en producción para recoger `prod_settings.toml`.
 
+Los archivos de dev y staging definen un `[brand] tagline` de `dev` y `staging`. Para cambiarlo, o para poner tu propio nombre y logo, consulta [Marca](operator-console.md#marca) y las [claves de configuración](admin.md#configuración-admin-y-brand) del admin.
+
+### Ajustes que no surten efecto por sí solos
+
+No todas las claves las lee el framework. `Cli::with_settings` avisa al arrancar cuando se define una del primer grupo.
+
+| Clave | Estado |
+|---|---|
+| `[sso]` (todas las claves) | Aún sin efecto. Configura el SSO del admin en la UI del admin. |
+| `[auth.jwt] issuer`, `audience` | Aún sin efecto. |
+| `[admin] primary_color`, `csrf_cookie_secure`, `session_timeout_minutes` | Aún sin efecto; solo las lee `check --deploy`. |
+| `[database] url` | No se usa para conectar: cada pool lee la variable de entorno `DATABASE_URL`. |
+| `[audit] retention_days` | Nada poda en base a ella; programa `audit-cleanup --days <N>`. |
+| `[jobs]`, `[i18n]`, `[cache]`, `[mail]`, `[mcp]`, TTLs de `[auth.jwt]`, `[admin]` | Cableadas por el usuario: solo las lee el constructor al que llamas (`jobs::inmemory_from_settings`, `Translator::from_settings`, `cache::from_settings_async`, `email::from_settings`, `mcp::secure_tenant_router_from_settings`, `auth_routes::Config::with_jwt_settings`, `admin::Builder::from_settings`). |
+
 ### Primera ejecución
 
 ```sh
 cd <name>
-cp .env.example .env
-docker compose up -d        # start Postgres
-cargo run -- migrate        # apply migrations
-cargo run                   # serve
-cargo run -- --help         # see every manage verb
+cp .env.example .env                     # then change `postgres` -> `localhost` in DATABASE_URL
+docker compose up -d --no-deps postgres  # only the database: the rust service holds 8080
+cargo run -- makemigrations              # generate the framework's (and your) tables
+cargo run -- migrate                     # apply them
+cargo run -- create-admin <username> --superuser  # fullstack: the admin login
+cargo run                                # serve
+cargo run -- --help                      # see every manage verb
 ```
 
 ---
@@ -230,12 +248,12 @@ Genera un módulo autocontenido de modelos, vistas y rutas relacionados:
 cargo run -- startapp blog
 ```
 
-Escribe `src/blog/` conteniendo `mod.rs`, `models.rs` (un modelo inicial nombrado según la forma singular de la app — `blog` → `Blog`), `views.rs`, `urls.rs` y `tests.rs`, luego declara el módulo en `src/main.rs` y fusiona sus rutas en `urls::api()`.
+Escribe `src/blog/` conteniendo `mod.rs`, `models.rs` (un modelo inicial nombrado según la forma singular de la app — `blog` → `Blog`), `views.rs`, `urls.rs` y `tests.rs`, luego declara el módulo en `src/lib.rs` (`pub mod blog;`; `mod blog;` en `src/main.rs` en un proyecto sin `lib.rs`) y fusiona sus rutas en `urls::api()`.
 
 Opciones:
 
 - **`--into <dir>`** — genera el andamiaje bajo un directorio base distinto de `src/` (p. ej. un miembro del workspace).
-- **`--with-manage-bin`** — emite además un `bin/manage.rs` (para diseños que prefieren un binario de manage aparte).
+- **`--with-manage-bin`** — emite además un `src/bin/manage.rs` (para diseños que prefieren un binario de manage aparte).
 
 ---
 
@@ -250,6 +268,8 @@ Dentro de un proyecto, los verbos `make:*` generan el andamiaje de un archivo ca
 | `make:api_routes <app>` | Un agregador de rutas de API para una app |
 | `make:form <Name>` | Un formulario HTML con validación |
 | `make:job <Name>` | Un handler de job en segundo plano |
+| `make:scheduled <Name>` | Una tarea de intervalo fijo para `scheduler::Scheduler` |
+| `make:worker <Name>` | Un binario worker bajo `src/bin/` que vacía la cola de jobs |
 | `make:notification <Name>` | Una notificación multicanal |
 | `make:middleware <Name>` | Un esqueleto de middleware |
 | `make:test <Name>` | Un módulo de pruebas usando el cliente de pruebas en el mismo proceso |

@@ -52,7 +52,8 @@ let email = Email::new()
     .html_body("<p>Thanks for signing up.</p>"); // optional HTML part
 ```
 
-`.cc(...)`, `.reply_to(...)`, and attachments are available too.
+`.cc(...)`, `.bcc(...)`, `.reply_to(...)`, `.header(name, value)`, and
+`.attach(...)` / `.attach_text(filename, text)` are available too.
 
 ---
 
@@ -72,7 +73,10 @@ hold a **`BoxedMailer`** (`Arc<dyn Mailer>`):
 Build it from config so it differs per environment (`ConsoleMailer` locally,
 `SmtpMailer` in prod) via `email::from_settings(&settings.mail)?`. With
 `backend = "smtp"` it fails if the mailer cannot be built (no `smtp_host`, a bad
-`from_address`, `smtp_tls` other than `none` / `starttls` / `implicit`).
+`from_address`, `smtp_tls` other than `none` / `starttls` / `implicit`, or a build
+without `email-smtp`). `backend` accepts `console` (the default), `memory`,
+`null` / `none`, `file` (needs `file_email_dir`) and `smtp`; any other value is a
+`MailError::Config`.
 
 ---
 
@@ -146,7 +150,8 @@ assert_eq!(sent[0].subject, "Welcome");
 ## Templates
 
 For anything beyond a line of text, render the body from a [Tera](html-views.md)
-template instead of inlining HTML. The `email_templates` feature's `EmailRenderer`
+template instead of inlining HTML. `email_templates::EmailRenderer` (features
+`email` + `admin`, both in the default set)
 follows a `name.subject.txt` / `name.txt` / `name.html` convention — one template
 set produces the subject, the plain-text part, and the HTML part together, so the
 three never drift. The HTML part autoescapes; the subject and text part render raw.
@@ -174,20 +179,26 @@ async fn run(&self) -> Result<(), JobError> {
 }
 ```
 
-The `email_jobs` feature wires this up for you.
+`email_jobs` (features `email` + `jobs`) wires this up for you: call
+`register_email_job(&queue, EmailJobConfig::new(mailer))` once at startup, then
+`dispatch_email(&queue, &email)` in the handler. It validates before queueing,
+and only a `Transport` failure retries.
 
 ---
 
 ## Reference
 
-**`Email` builder:** `to` · `cc` · `from` · `reply_to` · `subject` · `body` ·
-`html_body` · attachments · `validate()` · `send(&mailer)`.
+**`Email` builder:** `to` · `cc` · `bcc` · `from` · `reply_to` · `subject` · `body` ·
+`html_body` · `header` · `attach` · `attach_text` · `validate()` · `send(&mailer)`.
 
 **Helpers:** `send_mail(mailer, subject, body, from, &recipients)` ·
-`send_many(mailer, &emails)` · `from_settings(&EmailSettings)`.
+`send_many(mailer, &emails)` · `from_settings(&MailSettings)` ·
+`mail_admins(mailer, &settings.mail, subject, body)` /
+`mail_managers(...)` (send to `[mail].admins` / `managers`).
 
 **`MailError`:** `InvalidMessage` (incomplete) · `BadHeader` (CRLF injection) ·
-`Transport` (backend/delivery failure, the only one `EmailJob` retries) · `Config` (bad `[mail]` section).
+`Transport` (backend/delivery failure, the only one `EmailJob` retries) ·
+`Rejected` (the SMTP server refused the message for good) · `Config` (bad `[mail]` section).
 
 ---
 

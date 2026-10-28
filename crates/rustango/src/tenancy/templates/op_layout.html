@@ -67,6 +67,7 @@ document.addEventListener('submit',function(e){var m=e.target.getAttribute('data
 document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('button[data-confirm]');if(b&&!confirm(b.getAttribute('data-confirm')))e.preventDefault();});
 document.addEventListener('change',function(e){var s=e.target;if(s.matches&&s.matches('select[data-nav]')){location.href=s.options[s.selectedIndex].dataset.href;}});
   </script>
+  {% if brand_logo_url %}<link rel="icon" href="{{ brand_logo_url }}">{% endif %}
   <title>{% block title %}{{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}</title>
   <script nonce="{{ csp_nonce }}">
   // No-flash theme application — see _theme_toggle.html for the cycle UI.
@@ -96,6 +97,7 @@ document.addEventListener('change',function(e){var s=e.target;if(s.matches&&s.ma
         {% if sso_console %}<a href="{{ console_prefix | default(value='') }}/sso-shared" class="{% if section == 'sso' %}active{% endif %}">Shared SSO</a>{% endif %}
         <a href="{{ console_prefix | default(value='') }}/audit" class="{% if section == 'audit' %}active{% endif %}">Audit log</a>
         <a href="{{ console_prefix | default(value='') }}/change-password" class="{% if section == 'change_password' %}active{% endif %}">Change password</a>
+        {% if totp_console %}<a href="{{ console_prefix | default(value='') }}/account/totp" class="{% if section == 'totp' %}active{% endif %}">Two-factor sign-in</a>{% endif %}
       </nav>
       <div class="who">Signed in as <strong>{{ operator_username }}</strong></div>
       <form class="logout" method="post" action="{{ console_prefix | default(value='') }}/logout">

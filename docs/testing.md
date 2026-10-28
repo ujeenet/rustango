@@ -14,9 +14,10 @@ socket.
 > [glossary](glossary.md).
 
 > **Source:** `rustango::test_client` (`TestClient`, `TestResponse`) — needs
-> the `admin` feature, because it wraps an `axum::Router`. `rustango::test_assertions`
-> (`assert_status_2xx`, `assert_redirects`, `assert_cookie_set`, …) and
-> `rustango::test_db` (`with_rollback`) are ungated.
+> the `admin` feature, because it wraps an `axum::Router`. `rustango::test_db`
+> (`with_rollback`) is ungated. `rustango::test_assertions` is always compiled,
+> but its response helpers (`assert_status_2xx`, `assert_redirects`,
+> `assert_cookie_set`, …) need an HTTP feature such as `admin` or `manage`.
 >
 > **Runnable version:** the snippets below *are* a passing test —
 > [`testing_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/testing_doc.rs)
@@ -51,8 +52,21 @@ let res = client.get("/ping").send().await;   // routed in-process
 assert_eq!(res.status, 200);
 ```
 
-`TestClient` has `get` / `post` / `put` / `patch` / `delete` / `head`, each
-returning a builder you finish with `.send().await`.
+`TestClient` has `get` / `post` / `put` / `patch` / `delete` / `head` /
+`query`, plus `request(method, path)`, each returning a builder you finish
+with `.send().await`.
+
+The client acts like a browser on `http://testserver`:
+
+- **A cookie jar.** `Set-Cookie` is stored and sent back on later requests to
+  matching paths. Read it with `cookie(name)` or `cookies()`, seed it with
+  `set_cookie`, empty it with `clear_cookies`.
+- **`Host: testserver`**, and a same-origin `Origin` on unsafe methods, unless
+  the request sets its own.
+- **Peer address `127.0.0.1`.** Change it per request with
+  `.remote_addr(addr)`.
+- **CSRF is enforced.** Send the token with `.with_csrf()` (the
+  `X-CSRF-Token` header) or a `_csrf` form field; `csrf_token()` reads it.
 
 ---
 
@@ -95,8 +109,23 @@ let res = client
 assert_eq!(res.status, 201);
 ```
 
-Use `.body(...)` for raw (non-JSON) bodies, and a missing route returns a real
-`404` — verified in the backing test.
+Use `.form(&[("k", "v")])` for a form body, `.body(...)` for raw bytes, and a
+missing route returns a real `404` — verified in the backing test.
+
+`.send_following_redirects(max_hops)` follows up to that many redirects like a
+browser and returns the final response with the `(status, location)` chain.
+`client.get_following_redirects(path, max_hops)` is the `GET` shortcut.
+
+### Signing in
+
+- `client.login(path, &[("username", "ada"), ("password", "…")])` signs in
+  through the form: it fetches `path` for a CSRF token if the jar has none,
+  then posts the fields. The session cookie stays in the jar.
+- `client.logout(Some(path))` posts to the logout route; `logout(None)` only
+  empties the jar.
+- With `tenancy`, `force_login_tenant_user(&secret, slug, &user, ttl_secs)`
+  and `force_login_operator(&secret, &operator, ttl_secs)` put a session
+  cookie in the jar without the form. The row must be saved.
 
 ---
 
@@ -159,6 +188,22 @@ about cleanup.
 For SQLite, the `*_sqlite_live.rs` tests throughout this repo use an in-memory
 database per test instead — also fully isolated, with zero external setup.
 
+Code that must really commit (signals, `on_commit` hooks) cannot run under a
+rollback. Use `with_truncate_after(&pool, &["posts"], || async move { … })`:
+the body commits, then the listed tables are cleared, even if the body panics.
+Run such tests one at a time behind a shared `tokio::sync::Mutex`.
+`truncate_tables(&pool, &[…])` is the clear on its own.
+
+### More helpers
+
+| Module | What it gives you |
+|---|---|
+| `test_server::LiveServer` (`admin`) | A real socket: `LiveServer::spawn(router)`, then `url(path)` |
+| `test_factory` | `Sequence` (a counter that builds values) and the `Factory` trait with `build_batch(n)` |
+| `test_data` | `setup_test_data!` / `setup_test_data_async!`: a fixture built once per process |
+| `test_settings` (`config`) | `with_overridden(settings, future)`: `Settings::load` returns `settings` inside the future |
+| `test_filter` | `tags!("slow")` at the top of a test; `RUSTANGO_TEST_TAGS` / `RUSTANGO_TEST_EXCLUDE_TAGS` pick what runs |
+
 ---
 
 ## Live suites, and why a green run may prove nothing
@@ -176,8 +221,8 @@ you read a green result as coverage.
 | Variable | Suites | What they need |
 |---|---:|---|
 | *(none)* | 227 | Nothing — an in-memory or temp-file SQLite. Always run. |
-| `DATABASE_URL` | 171 | A reachable PostgreSQL server. |
-| `MYSQL_TEST_URL` | 103 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
+| `DATABASE_URL` | 175 | A reachable PostgreSQL server. |
+| `MYSQL_TEST_URL` | 107 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | A reachable Redis. |
 
 A suite reading two variables is counted under both, so the column does not sum
@@ -209,8 +254,8 @@ PostgreSQL, 95 against MySQL, 0 either way with the profile. The
 `tokio::sync::Mutex` guards inside those suites do not help, because nextest
 runs each test in its own process and a mutex in one does not reach another.
 
-This is a workaround, not a fix — see #1624 for per-process databases, which
-would restore the parallelism.
+This is a workaround, not a fix — per-process databases would restore the
+parallelism.
 
 ### Telling a skip from a pass
 

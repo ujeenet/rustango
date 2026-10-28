@@ -35,8 +35,8 @@
 //! - `X-Webhook-Signature-V2: <signature>` over the id, event, timestamp
 //!   and body; check it with [`verify_delivery`], which also bounds the age.
 //!   The timestamp is set at dispatch and retries reuse it: the default
-//!   retries span about two minutes, so `max_age` must cover that plus
-//!   any queue backlog.
+//!   retries span about two minutes, so `max_age` must cover that, any
+//!   longer retry window you set, and any queue backlog.
 //! - `X-Webhook-Signature: <signature>` over the body only, for receivers
 //!   not yet on v2. It does not stop a replay under a new id or event:
 //!   move receivers to v2. Both are in your chosen [`SignatureFormat`].
@@ -45,7 +45,11 @@
 //! ## Retry policy
 //!
 //! - 2xx: done.
-//! - 408, 429 and 5xx: retried with backoff, up to `MAX_ATTEMPTS`.
+//! - 408, 429 and 5xx: retried with backoff, 8 attempts in all, 1s
+//!   doubling. Change both with [`WebhookSubscription::max_attempts`] and
+//!   [`WebhookSubscription::retry_backoff`].
+//! - A `Retry-After` on 429 or 503, in seconds or as an HTTP date, makes
+//!   the next retry wait at least that long, at most an hour.
 //! - Other 4xx: dead-lettered at once. A bad URL or bad auth will not
 //!   fix itself.
 //! - Transport errors (refused connection, DNS, TLS): retried.
@@ -71,6 +75,8 @@
 //! [`verify_delivery`]: crate::webhook::verify_delivery
 //! [`WebhookSubscription::header`]: crate::webhook_delivery::WebhookSubscription::header
 //! [`WebhookSubscription::retry_status_codes`]: crate::webhook_delivery::WebhookSubscription::retry_status_codes
+//! [`WebhookSubscription::max_attempts`]: crate::webhook_delivery::WebhookSubscription::max_attempts
+//! [`WebhookSubscription::retry_backoff`]: crate::webhook_delivery::WebhookSubscription::retry_backoff
 //! [`WebhookSubscription::allow_private_targets`]: crate::webhook_delivery::WebhookSubscription::allow_private_targets
 
 use std::collections::HashMap;
@@ -80,7 +86,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::jobs::{Job, JobError, JobQueue};
+use crate::jobs::{exponential_backoff, Job, JobError, JobQueue};
 use crate::outbound::{self, TargetError, TargetPolicy};
 use crate::webhook::{sign as sign_body, sign_delivery, SignatureFormat};
 
@@ -233,13 +239,71 @@ fn url_origin(url: &str) -> String {
 impl Job for WebhookEvent {
     const NAME: &'static str = "rustango.webhook_delivery";
     /// 8 attempts in total, so 7 retries. With the queue's
-    /// `1s * 2^attempt` backoff that spans about two minutes. Not
-    /// configurable: `WebhookSubscription` has no attempts setting.
+    /// `1s * 2^attempt` backoff that spans about two minutes. Set it per
+    /// subscription with [`WebhookSubscription::max_attempts`].
     const MAX_ATTEMPTS: u32 = 8;
 
     async fn run(&self) -> Result<(), JobError> {
         deliver(self).await
     }
+}
+
+/// The job [`WebhookSubscription::register`] runs: the event plus the
+/// subscription's retry settings, left out of the row when unset.
+#[derive(Serialize, Deserialize)]
+struct Delivery {
+    #[serde(flatten)]
+    event: WebhookEvent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_attempts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    backoff_ms: Option<u64>,
+}
+
+#[async_trait::async_trait]
+impl Job for Delivery {
+    const NAME: &'static str = WebhookEvent::NAME;
+    const MAX_ATTEMPTS: u32 = WebhookEvent::MAX_ATTEMPTS;
+
+    fn max_attempts(&self) -> u32 {
+        self.max_attempts.unwrap_or(Self::MAX_ATTEMPTS)
+    }
+
+    fn retry_delay(&self, failed_attempt: u32) -> Duration {
+        self.backoff_ms.map_or_else(
+            || Self::retry_backoff(failed_attempt),
+            |ms| exponential_backoff(Duration::from_millis(ms), failed_attempt),
+        )
+    }
+
+    async fn run(&self) -> Result<(), JobError> {
+        deliver(&self.event).await
+    }
+}
+
+/// The longest `Retry-After` a delivery honours.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(3600);
+
+/// A `Retry-After` in seconds or as an HTTP date, capped; a past date is 0.
+fn retry_after(
+    headers: &reqwest::header::HeaderMap,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<Duration> {
+    let v = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    let wait = match v.parse::<u64>() {
+        Ok(secs) => Duration::from_secs(secs),
+        Err(_) => {
+            let at = chrono::DateTime::parse_from_rfc2822(v).ok()?;
+            (at.with_timezone(&chrono::Utc) - now)
+                .to_std()
+                .unwrap_or_default()
+        }
+    };
+    Some(wait.min(MAX_RETRY_AFTER))
 }
 
 async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
@@ -296,6 +360,11 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
     if (200..300).contains(&status) {
         return Ok(());
     }
+    if status == 429 || status == 503 {
+        if let Some(wait) = retry_after(resp.headers(), chrono::Utc::now()) {
+            crate::jobs::retry_after(wait);
+        }
+    }
     // Status only: the response body is never stored.
     let msg = format!("status {status}");
     if event.retry_status_codes.contains(&status) || is_default_retryable(status) {
@@ -322,6 +391,8 @@ pub struct WebhookSubscription {
     timeout: Duration,
     retry_status_codes: Vec<u16>,
     allow_private_targets: bool,
+    max_attempts: Option<u32>,
+    retry_backoff: Option<Duration>,
     /// The first header [`Self::header`] refused; `dispatch` fails on it (#2236).
     bad_header: Option<String>,
 }
@@ -337,6 +408,8 @@ impl std::fmt::Debug for WebhookSubscription {
             .field("timeout", &self.timeout)
             .field("retry_status_codes", &self.retry_status_codes)
             .field("allow_private_targets", &self.allow_private_targets)
+            .field("max_attempts", &self.max_attempts)
+            .field("retry_backoff", &self.retry_backoff)
             .field("bad_header", &self.bad_header)
             .finish()
     }
@@ -352,6 +425,8 @@ impl WebhookSubscription {
             timeout: Duration::from_secs(10),
             retry_status_codes: Vec::new(),
             allow_private_targets: false,
+            max_attempts: None,
+            retry_backoff: None,
             bad_header: None,
         }
     }
@@ -404,10 +479,27 @@ impl WebhookSubscription {
         self
     }
 
+    /// Runs in all before a delivery dead-letters. Default 8, which with
+    /// the default backoff gives up after about two minutes. 0 counts as 1.
+    #[must_use]
+    pub fn max_attempts(mut self, attempts: u32) -> Self {
+        self.max_attempts = Some(attempts);
+        self
+    }
+
+    /// Wait before the first retry, doubled for each later one up to
+    /// 1024 times. Default 1s.
+    #[must_use]
+    pub fn retry_backoff(mut self, base: Duration) -> Self {
+        self.retry_backoff = Some(base);
+        self
+    }
+
     /// Register the delivery [`Job`] on `queue`. Call once at startup,
-    /// before [`Self::dispatch`]. Safe to call twice.
+    /// before [`Self::dispatch`]. Safe to call twice. Registering
+    /// [`WebhookEvent`] yourself instead ignores [`Self::retry_backoff`].
     pub async fn register<Q: JobQueue>(queue: &Q) {
-        queue.register::<WebhookEvent>().await;
+        queue.register::<Delivery>().await;
     }
 
     /// Queue a [`WebhookEvent`] and return its id at once. A worker
@@ -464,7 +556,14 @@ impl WebhookSubscription {
             retry_status_codes: self.retry_status_codes.clone(),
             allow_private_targets: self.allow_private_targets,
         };
-        queue.dispatch(&event).await?;
+        let delivery = Delivery {
+            event,
+            max_attempts: self.max_attempts,
+            backoff_ms: self
+                .retry_backoff
+                .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+        };
+        queue.dispatch(&delivery).await?;
         Ok(id)
     }
 }
@@ -476,6 +575,7 @@ pub type SharedSubscription = Arc<WebhookSubscription>;
 mod tests {
     use super::*;
     use crate::jobs::InMemoryJobQueue;
+    use axum::response::IntoResponse as _;
     use axum::routing::post;
     use axum::Router;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -765,6 +865,131 @@ mod tests {
 
         srv.abort();
         q.shutdown().await;
+    }
+
+    /// A 429's `Retry-After` holds the retry back past the 1s backoff.
+    #[tokio::test]
+    async fn a_retry_after_on_429_delays_the_retry() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        let app = Router::new().route(
+            "/hook",
+            post(move || {
+                let mut seen = s.lock().unwrap();
+                seen.push(std::time::Instant::now());
+                let first = seen.len() == 1;
+                async move {
+                    if first {
+                        (
+                            axum::http::StatusCode::TOO_MANY_REQUESTS,
+                            [("retry-after", "3")],
+                        )
+                            .into_response()
+                    } else {
+                        "ok".into_response()
+                    }
+                }
+            }),
+        );
+        let (base, srv) = serve(app).await;
+        let q = InMemoryJobQueue::with_workers(1);
+        WebhookSubscription::register(&q).await;
+        q.start().await;
+        WebhookSubscription::new(format!("{base}/hook"), "s")
+            .allow_private_targets(true)
+            .dispatch(&q, "ping", &serde_json::json!({}))
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        while seen.lock().unwrap().len() < 2 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "retried once");
+        let gap = seen[1] - seen[0];
+        assert!(gap >= Duration::from_millis(2900), "{gap:?}");
+        srv.abort();
+        q.shutdown().await;
+    }
+
+    /// The subscription's attempts and backoff replace the 8-run default.
+    #[tokio::test]
+    async fn the_subscription_sets_attempts_and_backoff() {
+        let (url, srv) = start_server(503, Arc::default()).await;
+        let q = InMemoryJobQueue::with_workers(1);
+        WebhookSubscription::register(&q).await;
+        let dead = Arc::new(Mutex::new(Vec::new()));
+        let d = dead.clone();
+        q.on_dead_letter(move |dl| {
+            let d = d.clone();
+            async move { d.lock().unwrap().push(dl) }
+        })
+        .await;
+        q.start().await;
+        WebhookSubscription::new(url, "s")
+            .allow_private_targets(true)
+            .max_attempts(3)
+            .retry_backoff(Duration::from_millis(20))
+            .dispatch(&q, "ping", &serde_json::json!({}))
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while dead.lock().unwrap().is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let dead = dead.lock().unwrap();
+        assert_eq!(dead.len(), 1, "not dead-lettered within 3s");
+        assert_eq!(dead[0].attempts, 3);
+        assert_eq!(dead[0].payload["max_attempts"], 3);
+        srv.abort();
+        q.shutdown().await;
+    }
+
+    #[test]
+    fn retry_after_reads_seconds_and_dates_capped() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-27T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let of = |v: &str| {
+            let mut h = reqwest::header::HeaderMap::new();
+            h.insert(reqwest::header::RETRY_AFTER, v.parse().unwrap());
+            retry_after(&h, now)
+        };
+        assert_eq!(of("120"), Some(Duration::from_secs(120)));
+        assert_eq!(
+            of("Tue, 27 Oct 2026 12:05:00 GMT"),
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(of("Tue, 27 Oct 2026 11:00:00 GMT"), Some(Duration::ZERO));
+        assert_eq!(of("999999"), Some(MAX_RETRY_AFTER));
+        assert_eq!(of("soon"), None);
+        assert_eq!(retry_after(&reqwest::header::HeaderMap::new(), now), None);
+    }
+
+    /// Without retry settings the row has the shape older releases read.
+    #[test]
+    fn a_delivery_without_retry_settings_keeps_the_event_shape() {
+        let ev = event("https://example.com/h".into(), false);
+        let plain = Delivery {
+            event: ev.clone(),
+            max_attempts: None,
+            backoff_ms: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            serde_json::to_value(&ev).unwrap()
+        );
+        let set = Delivery {
+            event: ev,
+            max_attempts: Some(20),
+            backoff_ms: Some(5_000),
+        };
+        let back: Delivery = serde_json::from_value(serde_json::to_value(&set).unwrap()).unwrap();
+        assert_eq!(Job::max_attempts(&back), 20);
+        assert_eq!(back.retry_delay(2), Duration::from_secs(20));
+        let old: Delivery = serde_json::from_value(serde_json::to_value(&plain).unwrap()).unwrap();
+        assert_eq!(Job::max_attempts(&old), 8);
+        assert_eq!(old.retry_delay(0), Duration::from_secs(1));
     }
 
     #[test]

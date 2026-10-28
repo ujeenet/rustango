@@ -8,6 +8,8 @@
 #   docker build --build-arg FEATURES=sqlite --build-arg NO_DEFAULT=1 .
 
 FROM rust:1-bookworm AS builder
+# The image's own toolchain, not rust-toolchain.toml's `stable`.
+ENV RUSTUP_TOOLCHAIN=$RUST_VERSION
 ARG FEATURES=""
 ARG NO_DEFAULT=""
 WORKDIR /src
@@ -15,7 +17,8 @@ COPY . .
 # Incremental compilation only grows the cache in a one-shot image build.
 ENV CARGO_INCREMENTAL=0
 RUN set -eux; \
-    flags="--release --locked"; \
+    flags="--release"; \
+    if [ -f Cargo.lock ]; then flags="$flags --locked"; fi; \
     if [ -n "$NO_DEFAULT" ]; then flags="$flags --no-default-features"; fi; \
     if [ -n "$FEATURES" ]; then flags="$flags --features $FEATURES"; fi; \
     cargo build $flags; \
@@ -29,14 +32,19 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /out/platform_commerce_saas /usr/local/bin/platform_commerce_saas
 # Migrations and settings are read at run time, so they travel with the
-# binary rather than being baked into it.
+# binary rather than being baked into it. `system/` holds the framework's
+# own migrations: without it `migrate` skips framework schema changes.
 COPY migrations /app/migrations
+COPY system /app/system
 COPY config /app/config
 # Never root. The numeric id keeps the ownership stable if the image is
 # rebuilt on a host whose useradd picks a different one.
 RUN useradd --uid 10001 --create-home app && chown -R 10001 /app
 USER 10001
 WORKDIR /app
+# A release image runs the prod tier. Unset, the dev tier would load and
+# bind 127.0.0.1, which the port mapping cannot reach.
+ENV RUSTANGO_ENV=prod
 EXPOSE 8080
 # `.with_health()` mounts /health; drop this line if you removed it.
 HEALTHCHECK --interval=5s --timeout=3s --start-period=20s --retries=12 \

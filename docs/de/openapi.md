@@ -121,7 +121,7 @@ impl rustango::openapi::OpenApiSchema for Money {
 ## Pfade aus ViewSets
 
 `ViewSet::openapi_paths(prefix, schema_ref)` gibt die `(path, PathItem)`-Paare
-für die fünf standardmäßigen CRUD-Routen zurück — list, create, retrieve,
+für die sechs standardmäßigen CRUD-Operationen zurück — list, create, retrieve,
 update, partial update, delete — verdrahtet, um auf ein registriertes
 Component-Schema zu verweisen:
 
@@ -143,11 +143,26 @@ PATCH, DELETE), und es bleibt mit der Konfiguration des ViewSet synchron:
   `limit`/`offset`).
 - **Filtering / Suche / Sortierung** → ein `?field=`-Query-Parameter pro
   `filter_fields` (mit den verfügbaren `__gt`/`__in`/…-Lookups beschrieben) plus
-  `?search=` und `?ordering=`, wenn konfiguriert.
+  `?search=`, wenn konfiguriert, und `?ordering=` (unten).
 - **`read_only()`** → die Schreiboperationen (POST/PUT/PATCH/DELETE) werden
   weggelassen.
-- **Pfadparameter** → `{pk}`, typisiert aus dem Primärschlüssel des Modells.
-- **`operationId`** → `list_post`, `create_post`, … (pro Aktion in snake_case).
+- **Bodies und Fehler** → Create, PUT und PATCH nehmen JSON- oder
+  urlencoded-Bodies an und dokumentieren `422 validation_failed`, `400` für einen
+  fehlerhaften Body und `413` für einen zu großen. Die Create-Operation
+  beschreibt die Bulk-Array-Form in ihrem Text (die Schemas bleiben eine Zeile).
+  List dokumentiert ein `400`, wenn seine Filter einen Wert ablehnen können;
+  Retrieve und DELETE dokumentieren `400` für einen fehlerhaften pk.
+- **Gates** → `403` (und `401` mit `tenancy`) bei einer Aktion mit
+  Berechtigungs-Codenames und `429` mit `Retry-After` bei einer Aktion mit
+  Throttle.
+- **List-Parameter** → `page_size` nennt die echte `max_page_size`-Obergrenze.
+  `?ordering=` wird bei jedem ViewSet aufgeführt außer bei cursor-paginierten,
+  die immer nach der Cursor-Spalte sortieren. Binärfelder sind `format: hex`, so
+  wie der Server sie liest und schreibt.
+- **Pfadparameter** → `{pk}`, typisiert aus dem Primärschlüssel des Modells;
+  `.pk_param(name)` benennt ihn um.
+- **`operationId`** → `list_post`, `create_post`, `retrieve_post`, `update_post`,
+  `partial_update_post`, `destroy_post` (Aktion + Schemaname in snake_case).
 
 > Das ViewSet selbst wird im [ViewSets-Leitfaden](viewsets.md) dokumentiert.
 
@@ -170,7 +185,10 @@ let app = axum::Router::new()
 ```
 
 Die Viewer-Seiten sind winzige HTML-Hüllen, die Swagger UI / Redoc von einem CDN
-laden (`unpkg` / `jsdelivr`) — es wird kein JS in **Rustango** gebündelt. Für
+laden (`unpkg` / `jsdelivr`), jeweils auf eine exakte Version mit
+Subresource-Integrity-Hash festgelegt — es wird kein JS in **Rustango** gebündelt.
+Sie laden die Spec relativ zu sich selbst, also kann der Router unter jedem Präfix
+liegen. Für
 ein Air-Gapped-Deployment schreibe `spec.to_json()` beim Start in eine Datei und
 hoste die Viewer-Assets aus deinem eigenen Static-Verzeichnis selbst.
 
@@ -204,7 +222,10 @@ let json = spec.to_json();   // pretty-printed OpenAPI 3.1
 ```
 
 `OpenApiSpec` nimmt außerdem `.contact(...)`, `.license(...)`, `.add_tag(...)`
-und mehrere `.server(...)`-Einträge entgegen.
+und mehrere `.server(...)`-Einträge entgegen. `Operation` bietet `.description`,
+`.parameter`, `.request_body(RequestBody::json(..) / ::form(..))` und
+`.deprecated()`; `Parameter` hat die Konstruktoren `path` / `query` / `header`;
+`Response` bietet `.header(name, schema)`.
 
 ---
 
@@ -258,7 +279,22 @@ Typkonstruktoren: `string` · `integer` / `int32` · `number` · `boolean` ·
 ## Anmerkungen und Grenzen
 
 - **Es ist OpenAPI 3.1** (`"openapi": "3.1.0"`), was sich an JSON Schema 2020-12
-  ausrichtet — die meisten modernen Werkzeuge konsumieren es direkt.
+  ausrichtet — die meisten modernen Werkzeuge konsumieren es direkt. **Eine
+  QUERY-Operation hebt die Spec auf `3.2.0`**, weil das die Version ist, die die
+  Methode definiert: `PathItem::query` setzt sie für das ganze Dokument. Liest
+  dein Tooling nur 3.1, ist das die eine Sache, die ihm die Version unter den
+  Füßen ändert — siehe [query-method](query-method.md).
+
+  Ein ViewSet hängt eine QUERY-Route ein, **beschreibt sie aber standardmäßig
+  nicht**, sodass das generierte Dokument bei 3.1.0 bleibt. Schalte es ein, wenn
+  deine Toolchain 3.2 liest:
+
+  ```rust,ignore
+  ViewSet::for_model(Post::SCHEMA, &["id", "title"]).openapi_query(true)
+  ```
+
+  Die Route wird in jedem Fall bedient; das Flag entscheidet nur, ob das
+  Dokument sie erwähnt und welche Version es deshalb angeben muss.
 - **Der Viewer-Router benötigt das `admin`-Feature** (für axum); `openapi`
   allein reicht, um eine Spec zu *bauen* und zu serialisieren
   (`spec.to_json()`).

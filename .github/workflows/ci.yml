@@ -378,6 +378,7 @@ jobs:
       - run: |
           cargo nextest run --profile ci -p rustango --features tenancy \
             --test branding_urls_are_escaped \
+            --test database_url_one_resolver \
             --test docs_links \
             --test docs_contract \
             --test docs_versions \
@@ -1356,6 +1357,7 @@ jobs:
             --test admin_totp_2fa_sqlite_live \
             --test admin_totp_2fa_e2e \
             --test admin_totp_replay_tri \
+            --test operator_console_totp_tri \
             --test orm_aggregation \
             --test orm_subquery \
             --test orm_window \
@@ -1367,9 +1369,11 @@ jobs:
       - run: cargo nextest run --profile ci -p rustango --no-default-features --features sqlite,admin,template_views,testkit --test view_global_scopes_tri --test template_views_typed_binds_tri
       - run: >-
           cargo nextest run --profile ci -p rustango --no-default-features
-          --features sqlite,tenancy,admin-sso,testkit
+          --features sqlite,tenancy,admin-sso,template_views,testkit
           --test sso_link_tenancy_sqlite_live --test sso_link_tri
+          --test sso_shared_console_tri
           --test admin_create_users_tri --test logout_revokes_sessions_tri
+          --test tenant_admin_state_tri
           --test operator_last_active_tri
           --test basic_auth_cache_tri
           --test api_key_hmac_tri
@@ -1668,20 +1672,24 @@ jobs:
           binary(=unique_together_validator_tri) |
           binary(=inserted_pk_readback_tri) |
           binary(=sso_link_tri) |
+          binary(=sso_shared_console_tri) |
           binary(=tenant_purge_tri) |
           binary(=resolver_per_registry_tri) |
           binary(=org_host_claims_tri) |
           binary(=org_admin_claims_tri) |
           binary(=tenancy_manage_tri) |
+          binary(=manage_commands_tri) |
           binary(=db_servers_tri) |
           binary(=admin_create_users_tri) |
           binary(=logout_revokes_sessions_tri) |
+          binary(=tenant_admin_state_tri) |
           binary(=operator_last_active_tri) |
           binary(=basic_auth_cache_tri) |
           binary(=api_key_hmac_tri) |
           binary(=system_chain_order_tri) |
           binary(=agent_grants_unique_tri) |
           binary(=admin_totp_replay_tri) |
+          binary(=operator_console_totp_tri) |
           binary(=tenant_admin_tables_tri) |
           binary(=password_reset_links_tri) |
           binary(=admin_authz_edges_tri) |

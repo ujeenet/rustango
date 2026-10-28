@@ -52,7 +52,7 @@ use super::password;
 
 /// Registry-scoped operator. Single identity domain for the main app
 /// administrator(s); not visible to tenants.
-#[derive(Model, Debug, Clone)]
+#[derive(Model, Clone)]
 #[rustango(table = "rustango_operators", display = "username", scope = "registry")]
 #[allow(dead_code)]
 pub struct Operator {
@@ -78,10 +78,12 @@ pub struct Operator {
     pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+redacted_debug!(Operator { id, username, active, created_at, password_changed_at, sessions_revoked_at; password_hash });
+
 /// Per-tenant user. Lives in the tenant's storage (schema or
 /// dedicated DB). `is_superuser = true` elevates to org-admin inside
 /// the tenant — never grants access to `/operator`.
-#[derive(Model, Debug, Clone)]
+#[derive(Model, Clone)]
 #[rustango(
     table = "rustango_users",
     display = "username",
@@ -138,6 +140,8 @@ pub struct User {
     /// every device (#1855).
     pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
+
+redacted_debug!(User { id, username, is_superuser, active, created_at, data, password_changed_at, sessions_revoked_at; password_hash });
 
 // The admin form's password is hashed here; a change also stamps
 // `password_changed_at`, which ends the user's older sessions.

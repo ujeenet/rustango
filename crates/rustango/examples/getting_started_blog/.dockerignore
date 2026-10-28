@@ -1,0 +1,25 @@
+# Build output — the image builds its own, and this is the single
+# biggest thing that would otherwise be uploaded to the daemon.
+target/
+**/target/
+
+# Secrets. `.env.example` is the committed template and is safe.
+.env
+.env.*
+!.env.example
+
+# Runtime state: generated session keys and the MCP agent secret.
+var/
+
+# Local databases — a SQLite file here would be baked into the image.
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*-migrate.lock*
+
+# Nothing in the image needs these.
+.git/
+.gitignore
+node_modules/
+**/node_modules/

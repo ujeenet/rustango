@@ -15,7 +15,6 @@ gedacht, während du vorankommst.
 - [Daten und die Datenbank](#daten-und-die-datenbank)
 - [Mandantenfähigkeit (multi-tenancy)](#mandantenfähigkeit-multi-tenancy) — nur wenn du mehrere Kunden aus einem Deployment bedienst
 - [Ein paar Rust-Wörter](#ein-paar-rust-wörter) — damit die Codeblöcke nicht angsteinflößend sind
-- [Frameworks, mit denen wir vergleichen](#frameworks-mit-denen-wir-vergleichen)
 
 ---
 
@@ -61,6 +60,7 @@ Requests als auch Responses sind üblicherweise JSON.
 | `201` | Created — dein neues Ding wurde gespeichert |
 | `204` | Done — nichts zurückzusenden (z. B. nach einem Löschen) |
 | `400` | Bad request — du hast etwas Ungültiges gesendet (der Körper sagt was) |
+| `422` | Nicht verarbeitbar — die Daten haben die Validierung nicht bestanden (der Körper nennt das Feld) |
 | `401` / `403` | Nicht eingeloggt / nicht erlaubt |
 | `404` | Not found (nicht gefunden) |
 | `429` | Too many requests — mach langsamer |
@@ -76,7 +76,7 @@ verwendet, um Ergebnisse zu filtern, zu durchsuchen, zu sortieren oder zu pagini
 
 **Pagination (Seitennummerierung)** — das Aufteilen einer langen Ergebnisliste in Seiten, damit eine Response nicht
 riesig ist. Der **Envelope** ist die Hülle um die Seite, die dir auch die
-Gesamtwerte nennt — z. B. `{"count": 137, "page": 2, "results": [ … ]}`. Siehe
+Gesamtwerte nennt — z. B. `{"count": 137, "page": 2, "page_size": 20, "last_page": 7, "results": [ … ]}`. Siehe
 [Pagination](viewsets.md#paginierung).
 
 **`curl`** — ein Kommandozeilen-Werkzeug zum manuellen Senden von API-Requests. Die
@@ -111,8 +111,8 @@ Gegenstück zu einem ViewSet: verwandelt ein Modell in HTML-**Seiten** — eine 
 Detailseite und Erstellen-/Bearbeiten-/Löschen-Formulare — gerendert durch Tera-Templates,
 statt JSON. Die *HTML-View*. Siehe [HTML-Views](html-views.md).
 
-**Template** — eine Datei mit Platzhaltern (Rustango verwendet [Tera](https://keats.github.io/tera/),
-sehr ähnlich zu Jinja), die der Server mit Daten füllt, um eine
+**Template** — eine Datei mit Platzhaltern (Rustango verwendet [Tera](https://keats.github.io/tera/)),
+die der Server mit Daten füllt, um eine
 HTML-Seite zu erzeugen. `{{ post.title }}` fügt einen Wert ein; `{% for … %}` schleift.
 
 **Router / Mount (Einhängen)** — der Router bildet eingehende URLs auf den Code ab, der sie
@@ -124,10 +124,19 @@ Handler und danach — für querschnittliche Belange wie Logging, Rate-Limiting,
 Security-Header oder CSRF. „Layer" ist Rustangos Wort für ein Stück
 Middleware. Siehe den [Middleware-Leitfaden](middleware.md).
 
-**Pool (oder Executor)** — die Datenbankverbindung, die dein Code zum Lesen und
-Schreiben verwendet. Rustango bittet dich, den Pool bei jedem Datenbankaufruf explizit zu übergeben
-(statt ihn in einem Global zu verstecken), sodass immer klar ist, was die
-Datenbank berührt. Du wirst `&pool` als letztes Argument von ORM-Aufrufen sehen.
+**Pool** — das Datenbank-Handle, mit dem dein Code liest und schreibt. Rustango
+bittet dich, es bei jedem Datenbankaufruf explizit zu übergeben (statt es in einem
+Global zu verstecken), sodass immer klar ist, was die Datenbank berührt. Du wirst
+`&pool` als letztes Argument von ORM-Aufrufen sehen. `rustango::sql::Pool` ist ein
+Enum über die drei Backends, und die alltäglichen Methoden nehmen es.
+
+**Executor** — *kein* Synonym für Pool. Ein Executor ist eine einzelne Verbindung
+oder eine offene Transaktion: das, worauf ein Statement tatsächlich läuft. Methoden
+mit der Endung `_on` nehmen einen, so bringst du mehrere Statements in eine
+Transaktion. `fetch_on`, `first_on`, `count_on` und `exists_on` nehmen jeden
+Executor auf allen drei Backends; der Rest der `_on`-Familie ist weiterhin nur für
+Postgres. Die Unterscheidung entscheidet, welche Methoden es in deinem Build gibt,
+deshalb erklärt [api-conventions](api-conventions.md#funktionen) die Regel vollständig.
 
 **QuerySet** — eine Datenbankabfrage, die du Schritt für Schritt in Rust aufbaust
 (`Post::objects().filter(...).order_by(...)`), bevor du sie ausführst. Sie ist lazy:
@@ -225,13 +234,3 @@ Datenbank berührt, ist `async`.
 werfen. Ein `Result` ist „Erfolg *oder* ein Fehler"; ein `Option` ist „ein Wert *oder*
 nichts". Das `?`, das du nach manchen Aufrufen siehst, bedeutet „falls dies fehlgeschlagen ist, halte an und
 gib den Fehler zurück".
-
----
-
-## Frameworks, mit denen wir vergleichen
-
-Diese Dokumentation sagt gelegentlich „wie X", um Leser zu unterstützen, die aus anderen
-Ökosystemen kommen. Die Vergleiche sind ein Bonus — du brauchst sie nie, um einem Leitfaden zu folgen.
-
-**Laravel / Rails** — populäre PHP- und Ruby-Webframeworks, aus demselben
-Grund „wenn du dies verwendet hast, wird sich das vertraut anfühlen" erwähnt.

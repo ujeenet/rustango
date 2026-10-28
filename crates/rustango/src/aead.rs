@@ -26,15 +26,37 @@ pub(crate) enum KeyStatus {
     /// Set, but below [`MIN_KEY_LEN`].
     Short,
     Ok,
+    /// Unset, so sealing uses the generated dev key file, which a redeploy loses.
+    DevFile,
+}
+
+/// Reads the env var and the tier only; never reads or creates the dev key file.
+#[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+pub(crate) fn key_status() -> KeyStatus {
+    status_of(std::env::var(KEY_VAR).ok(), dev_key_on())
 }
 
 #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
-pub(crate) fn key_status() -> KeyStatus {
-    match env_key() {
-        None => KeyStatus::Missing,
+fn status_of(env: Option<String>, dev_on: bool) -> KeyStatus {
+    match env.filter(|k| !k.trim().is_empty()) {
         Some(k) if k.len() < MIN_KEY_LEN => KeyStatus::Short,
         Some(_) => KeyStatus::Ok,
+        None if dev_on => KeyStatus::DevFile,
+        None => KeyStatus::Missing,
     }
+}
+
+/// Whether an unset key falls back to the dev key file on this tier.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+#[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+fn dev_key_on() -> bool {
+    dev_key_tier(&crate::env::tier_from_env())
+}
+
+#[cfg(not(any(feature = "admin", feature = "tenancy", feature = "csrf")))]
+#[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+fn dev_key_on() -> bool {
+    false
 }
 
 /// The one key every in-crate unit test uses: they share a process
@@ -54,10 +76,87 @@ pub(crate) enum AeadError {
     Decrypt,
 }
 
-/// The current key. Read per call so key rotation and tests see the live
-/// value. An empty or blank value counts as unset.
-fn env_key() -> Option<String> {
-    std::env::var(KEY_VAR).ok().filter(|k| !k.trim().is_empty())
+/// The current key: the env var, read per call so rotation and tests see
+/// the live value (blank counts as unset), else the dev key file.
+pub(crate) fn env_key() -> Option<String> {
+    resolve_key(std::env::var(KEY_VAR).ok(), dev_key)
+}
+
+fn resolve_key(env: Option<String>, dev: impl FnOnce() -> Option<String>) -> Option<String> {
+    env.filter(|k| !k.trim().is_empty()).or_else(dev)
+}
+
+/// Where the dev and test tiers keep a generated key, under the project root.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+const DEV_KEY_FILE: &str = "var/.rustango_secret.key";
+
+/// The dev key, read (or generated) once per process.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+static DEV_KEY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// On the dev and test tiers an unset key falls back to the saved one, so
+/// every binary of the project (server, worker, `manage`, tests) agrees.
+/// Any other tier keeps requiring the env var.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+fn dev_key() -> Option<String> {
+    if !dev_key_tier(&crate::env::tier_from_env()) {
+        return None;
+    }
+    DEV_KEY
+        .get_or_init(|| {
+            let cwd = std::env::current_dir().ok()?;
+            load_dev_key(&dev_key_path(&cwd))
+        })
+        .clone()
+}
+
+#[cfg(not(any(feature = "admin", feature = "tenancy", feature = "csrf")))]
+fn dev_key() -> Option<String> {
+    None
+}
+
+/// The first saved [`DEV_KEY_FILE`] from `cwd` up to the Cargo workspace root
+/// (the nearest dir with `Cargo.lock`), else a new one there, else in `cwd`.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+fn dev_key_path(cwd: &std::path::Path) -> std::path::PathBuf {
+    let root = cwd.ancestors().find(|d| d.join("Cargo.lock").is_file());
+    let searched: Vec<&std::path::Path> = match root {
+        Some(root) => cwd
+            .ancestors()
+            .take_while(|d| *d != root)
+            .chain([root])
+            .collect(),
+        None => vec![cwd],
+    };
+    searched
+        .iter()
+        .map(|d| d.join(DEV_KEY_FILE))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| root.unwrap_or(cwd).join(DEV_KEY_FILE))
+}
+
+/// Only these tiers may seal with a key nobody set; staging and prod may not.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+fn dev_key_tier(tier: &str) -> bool {
+    matches!(crate::env::canonical_tier(tier).as_str(), "dev" | "test")
+}
+
+/// The saved key as text, generated on first use; `None` when it cannot be saved.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+fn load_dev_key(path: &std::path::Path) -> Option<String> {
+    use base64::Engine as _;
+    match crate::session::load_or_create_key_file(path, "secret key", KEY_VAR) {
+        Ok(bytes) => Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        Err(e) => {
+            tracing::warn!(
+                target: "rustango::aead",
+                path = %path.display(),
+                error = %e,
+                "could not save a dev {KEY_VAR}; sealing stays off until it is set"
+            );
+            None
+        }
+    }
 }
 
 /// A key that may seal: set and not blank. A blank one would seal under
@@ -189,6 +288,81 @@ fn open(key: AeadKey<'_>, stored: &str, aad: &[u8]) -> Result<Vec<u8>, AeadError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The env var wins; blank counts as unset and falls to the dev key.
+    #[test]
+    fn the_env_key_beats_the_dev_key() {
+        let dev = || Some("dev-key".to_owned());
+        assert_eq!(
+            resolve_key(Some("env-key".into()), dev).as_deref(),
+            Some("env-key")
+        );
+        assert_eq!(
+            resolve_key(Some("  ".into()), dev).as_deref(),
+            Some("dev-key")
+        );
+        assert_eq!(resolve_key(None, dev).as_deref(), Some("dev-key"));
+        assert_eq!(resolve_key(None, || None), None);
+    }
+
+    /// Dev and test get a saved key that survives a restart; staging and prod never do.
+    #[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+    #[test]
+    fn only_dev_and_test_generate_a_key() {
+        let dir = std::env::temp_dir().join(format!("rustango_aead_dev_{}", std::process::id()));
+        let path = dir.join("var/.rustango_secret.key");
+        for tier in ["prod", "Production", "staging"] {
+            assert!(!dev_key_tier(tier), "{tier}");
+        }
+        assert!(dev_key_tier("dev") && dev_key_tier("") && dev_key_tier("TEST"));
+        let first = load_dev_key(&path).expect("generated");
+        assert!(first.len() >= MIN_KEY_LEN, "short dev key");
+        assert_eq!(
+            load_dev_key(&path),
+            Some(first.clone()),
+            "a restart keeps the key"
+        );
+        let sealed = encrypt_with(Some(&first), b"pw", b"").unwrap();
+        assert_eq!(
+            decrypt_with(load_dev_key(&path).as_deref(), &sealed, b"").unwrap(),
+            b"pw"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The status names the dev key file without reading or creating it.
+    #[test]
+    fn key_status_reports_the_dev_file() {
+        let long = "k".repeat(MIN_KEY_LEN);
+        assert_eq!(status_of(Some(long), true), KeyStatus::Ok);
+        assert_eq!(status_of(Some("short".into()), true), KeyStatus::Short);
+        assert_eq!(status_of(Some(" ".into()), true), KeyStatus::DevFile);
+        assert_eq!(status_of(None, true), KeyStatus::DevFile);
+        assert_eq!(status_of(None, false), KeyStatus::Missing);
+    }
+
+    /// Every dir of a workspace finds one key: a saved one on the way up, else the root's.
+    #[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+    #[test]
+    fn the_dev_key_path_does_not_depend_on_the_cwd() {
+        let root = std::env::temp_dir().join(format!("rustango_aead_path_{}", std::process::id()));
+        let sub = root.join("crates/app/src");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(root.join("Cargo.lock"), "").unwrap();
+        let at_root = root.join(DEV_KEY_FILE);
+        assert_eq!(dev_key_path(&sub), at_root);
+        assert_eq!(dev_key_path(&root), at_root);
+        let crate_key = root.join("crates/app").join(DEV_KEY_FILE);
+        std::fs::create_dir_all(crate_key.parent().unwrap()).unwrap();
+        std::fs::write(&crate_key, [0u8; 32]).unwrap();
+        assert_eq!(dev_key_path(&sub), crate_key, "a saved key wins");
+        assert_eq!(
+            dev_key_path(&root.join("crates")),
+            at_root,
+            "never looks down"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     const KEY: Option<&str> = Some("aead-unit-test-key");
 

@@ -43,6 +43,7 @@ mod types;
 pub mod utilities;
 
 pub use auth::{issue_agent_token, verify_agent_token, verify_raw_agent_credential, McpAgent};
+pub use handlers::register_instructions;
 pub use notifications::{
     notify_prompts_list_changed, notify_resources_list_changed, notify_tools_list_changed,
 };

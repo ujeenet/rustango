@@ -128,7 +128,7 @@ where
     Tenant<DB>: FromRequestParts<AuthedMcpState> + Send,
 {
     let jwt = Arc::new(
-        JwtLifecycle::new(super::auth::jwt_secret()).with_access_ttl(settings.token_ttl_secs()),
+        JwtLifecycle::lazy(super::auth::jwt_secret).with_access_ttl(settings.token_ttl_secs()),
     );
     let state = AuthedMcpState {
         mcp: McpState {

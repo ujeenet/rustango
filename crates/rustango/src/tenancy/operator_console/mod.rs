@@ -72,6 +72,10 @@ mod migrate;
 mod mount;
 mod operators;
 mod provisioning;
+#[cfg(feature = "admin-sso")]
+mod sso_shared;
+#[cfg(feature = "totp")]
+mod totp;
 
 use crate::core::Column as _;
 // `ConsoleState.registry` is `crate::sql::Pool`, the backend-erasing enum,
@@ -150,6 +154,13 @@ struct ConsoleState {
     /// [`super::routes::RouteConfig::impersonation_handoff_url`].
     /// Default `/_impersonation_handoff`.
     tenant_handoff_url: String,
+    /// The tenant admin's login path, for the SSO callback URLs shown on
+    /// the shared providers page. Default `/login`.
+    #[cfg_attr(not(feature = "admin-sso"), allow(dead_code))]
+    tenant_login_url: String,
+    /// Operator second-factor settings, read from env at boot.
+    #[cfg(feature = "totp")]
+    totp: Arc<totp::Gate>,
 }
 
 /// The bundled logo, served by the console itself.
@@ -605,6 +616,7 @@ pub fn router_full(
 
 /// [`router_full`] without its own access log, for `server::Builder` when
 /// it mounts observability itself; one line per request.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn router_full_unlogged(
     registry: crate::sql::Pool,
     pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
@@ -613,6 +625,7 @@ pub(crate) fn router_full_unlogged(
     brand_storage: BoxedStorage,
     tenant_session_secret: Option<SessionSecret>,
     tenant_handoff_url: String,
+    tenant_login_url: String,
 ) -> Router {
     router_unlogged(
         registry,
@@ -622,6 +635,7 @@ pub(crate) fn router_full_unlogged(
         brand_storage,
         tenant_session_secret,
         tenant_handoff_url,
+        tenant_login_url,
     )
 }
 
@@ -643,6 +657,7 @@ fn router_inner(
         brand_storage,
         tenant_session_secret,
         tenant_handoff_url,
+        super::routes::RouteConfig::default().login_url,
     )
     .access_log(access_log_layer())
 }
@@ -655,6 +670,7 @@ pub(crate) fn access_log_layer() -> crate::access_log::AccessLogLayer {
         .redact_additional("token")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn router_unlogged(
     registry: crate::sql::Pool,
     pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
@@ -663,6 +679,7 @@ fn router_unlogged(
     brand_storage: BoxedStorage,
     tenant_session_secret: Option<SessionSecret>,
     tenant_handoff_url: String,
+    tenant_login_url: String,
 ) -> Router {
     let mut tera = crate::template_extensions::html_tera();
     tera.add_raw_templates([
@@ -713,6 +730,14 @@ fn router_unlogged(
             include_str!("../templates/op_sso_shared.html"),
         ),
         (
+            "op_sso_shared_edit.html",
+            include_str!("../templates/op_sso_shared_edit.html"),
+        ),
+        (
+            "_op_sso_shared_form.html",
+            include_str!("../templates/_op_sso_shared_form.html"),
+        ),
+        (
             "op_orgs_new.html",
             include_str!("../templates/op_orgs_new.html"),
         ),
@@ -733,6 +758,11 @@ fn router_unlogged(
             "op_db_server_edit.html",
             include_str!("../templates/op_db_server_edit.html"),
         ),
+        (
+            "op_login_totp.html",
+            include_str!("../templates/op_login_totp.html"),
+        ),
+        ("op_totp.html", include_str!("../templates/op_totp.html")),
     ])
     .expect("operator-console templates parse");
     let edit_enabled = pools.is_some();
@@ -748,6 +778,9 @@ fn router_unlogged(
         op_brand: Arc::new(OpBrand::from_env()),
         tenant_session_secret: tenant_session_secret.map(Arc::new),
         tenant_handoff_url,
+        tenant_login_url,
+        #[cfg(feature = "totp")]
+        totp: Arc::new(totp::Gate::from_env()),
     };
 
     // Public routes (login + static asset + brand asset) skip the
@@ -756,6 +789,9 @@ fn router_unlogged(
     let public = Router::new()
         .route("/login", get(login_form).post(login_submit))
         .route("/logout", post(logout));
+    // The code step after the password; only the pending cookie reaches it.
+    #[cfg(feature = "totp")]
+    let public = public.route("/login/totp", get(totp::code_form).post(totp::code_submit));
     // Cacheable GET-only assets stay outside the CSRF layers, so no
     // shared cache stores a `Set-Cookie` with them.
     let mut assets = Router::new()
@@ -786,18 +822,34 @@ fn router_unlogged(
             "/change-password",
             get(change_password_form).post(change_password_submit),
         );
+    #[cfg(feature = "totp")]
+    {
+        private = private
+            .route(
+                "/account/totp",
+                get(totp::account_form).post(totp::account_confirm),
+            )
+            .route(
+                "/account/totp/disable",
+                get(totp_post_only_redirect).post(totp::account_disable),
+            );
+    }
     // Registry-wide shared SSO providers (admin-sso): every operator sees
     // the list; changing it needs an editable console.
     #[cfg(feature = "admin-sso")]
     {
-        private = private.route("/sso-shared", get(sso_shared_list));
+        private = private.route("/sso-shared", get(sso_shared::list));
         if edit_enabled {
             private = private
-                .route("/sso-shared", post(sso_shared_create))
-                .route("/sso-shared/{id}/delete", post(sso_shared_delete))
+                .route("/sso-shared", post(sso_shared::create))
+                .route(
+                    "/sso-shared/{id}/edit",
+                    get(sso_shared::edit_form).post(sso_shared::edit_submit),
+                )
+                .route("/sso-shared/{id}/delete", post(sso_shared::delete))
                 .route(
                     "/sso-shared/{id}/email-link",
-                    post(sso_shared_set_email_link),
+                    post(sso_shared::set_email_link),
                 );
         }
     }
@@ -938,7 +990,7 @@ fn router_unlogged(
     // its cookie, so the layer sees it set and adds no second one.
     // Origin is the check that stops a tenant host: it can plant the
     // cookie, and so knows the token.
-    public
+    let console = public
         .merge(private)
         .route_layer(middleware::from_fn(
             crate::admin::csrf_context::csrf_context,
@@ -947,7 +999,8 @@ fn router_unlogged(
         .route_layer(middleware::from_fn_with_state(state.clone(), flash::layer))
         .merge(assets)
         .with_state(state)
-        .layer(middleware::from_fn(mount::layer))
+        .layer(middleware::from_fn(mount::layer));
+    crate::errors::own_pages(console)
 }
 
 /// Rows per page, for every list the console renders. One number for
@@ -1122,6 +1175,7 @@ fn inject_op_brand(ctx: &mut Context, brand: &OpBrand) {
     // Show the "Shared SSO" nav entry only when the admin-sso feature is
     // compiled in (its routes exist only then).
     ctx.insert("sso_console", &cfg!(feature = "admin-sso"));
+    ctx.insert("totp_console", &cfg!(feature = "totp"));
     // Templates prefix every console link with it.
     let prefix = mount::MountPrefix::current();
     ctx.insert("console_prefix", prefix.as_str());
@@ -1206,6 +1260,11 @@ async fn org_post_only_redirect(
 /// rather than slug and land back on the one list page.
 async fn op_post_only_redirect() -> Redirect {
     Redirect::to("/operators")
+}
+
+#[cfg(feature = "totp")]
+async fn totp_post_only_redirect() -> Redirect {
+    Redirect::to("/account/totp")
 }
 
 async fn orgs_post_only_redirect() -> Redirect {
@@ -1356,8 +1415,7 @@ async fn login_submit(
 ) -> Response<Body> {
     use crate::login_throttle::{LoginRefused, LoginScope};
     use crate::signals::auth::{
-        meta_from_parts, send_user_logged_in, send_user_login_failed, AuthFailureReason,
-        UserLoggedInContext, UserLoginFailedContext,
+        meta_from_parts, send_user_login_failed, AuthFailureReason, UserLoginFailedContext,
     };
     let meta = meta_from_parts(&extensions, &headers, Some("/login"));
     let next = sanitize_next(form.next.as_deref());
@@ -1383,9 +1441,8 @@ async fn login_submit(
         }
     }
 
-    let principal = match auth::check_operator_password(found, &form.password).await {
-        // No second factor on the console.
-        Ok(Some(op)) => op.complete(&state.registry).await,
+    let verified = match auth::check_operator_password(found, &form.password).await {
+        Ok(Some(op)) => op,
         Ok(None) => {
             attempt.failed().await;
             send_user_login_failed(UserLoginFailedContext {
@@ -1406,15 +1463,47 @@ async fn login_submit(
             return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
         }
     };
-    let oid = principal.id.get().copied().unwrap_or_default();
+    // An enrolled operator, or any under a required policy, owes a code:
+    // the password alone sets only the short-lived pending cookie.
+    #[cfg(feature = "totp")]
+    match totp::owed(&state, &verified).await {
+        Ok(totp::Owed::Nothing) => {}
+        Ok(_) => {
+            attempt.prompted().await;
+            return totp::challenge(&state, &verified, &next);
+        }
+        // Fail closed: an unreadable device is not "no second factor".
+        Err(e) => {
+            tracing::error!(target: "rustango::tenancy::operator_console", error = %e, "cannot read the operator's TOTP device; refusing the sign-in");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "login temporarily unavailable",
+            )
+                .into_response();
+        }
+    }
+    let principal = verified.complete(&state.registry).await;
     attempt.succeeded().await;
+    start_session(&state, &principal, &next, meta).await
+}
+
+/// Sign `op` in: the session cookie, a redirect to `next` and the signal.
+/// Only a sign-in with every factor passed reaches this.
+async fn start_session(
+    state: &ConsoleState,
+    op: &auth::Operator,
+    next: &str,
+    meta: crate::signals::auth::AuthRequestMeta,
+) -> Response<Body> {
+    use crate::signals::auth::{send_user_logged_in, UserLoggedInContext};
+    let oid = op.id.get().copied().unwrap_or_default();
     let mut payload = SessionPayload::new(
         oid,
         SESSION_IDLE_SECS,
-        session::PasswordFingerprint::of(&state.session_secret, &principal.password_hash),
+        session::PasswordFingerprint::of(&state.session_secret, &op.password_hash),
     );
-    payload.iat = crate::session::issued_at(principal.sessions_revoked_at);
-    let mut resp = Redirect::to(&next).into_response();
+    payload.iat = crate::session::issued_at(op.sessions_revoked_at);
+    let mut resp = Redirect::to(next).into_response();
     resp.headers_mut().append(
         header::SET_COOKIE,
         session_cookie(&state.session_secret, &payload),
@@ -1422,7 +1511,7 @@ async fn login_submit(
     send_user_logged_in(UserLoggedInContext {
         source: "operator",
         user_id: oid,
-        username: form.username.clone(),
+        username: op.username.clone(),
         // Operator principals are uniformly "superuser-equivalent" at
         // the framework boundary — they're the people minting tenant
         // sessions. There's no separate flag on the Operator row.
@@ -1570,7 +1659,7 @@ async fn change_password_form(
     render(&state, "op_change_password.html", &ctx)
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 struct OpChangePasswordForm {
     current_password: String,
     new_password: String,
@@ -1756,212 +1845,6 @@ async fn orgs_list(
     ctx.insert("notice", &q.notice);
     paged.inject(&mut ctx, "/orgs", "");
     render(&state, "op_orgs.html", &ctx)
-}
-
-// ---- Shared SSO providers (registry-wide, `admin-sso`) --------------
-// A provider defined here (`SharedSsoProvider`, registry scope) is
-// offered on every tenant's login page. Each tenant manages its own
-// providers (`SsoProvider`) from its own admin. Both lists merge at
-// login; the tenant one wins on a slug clash.
-#[cfg(feature = "admin-sso")]
-#[derive(serde::Deserialize)]
-struct SharedSsoForm {
-    slug: String,
-    label: String,
-    kind: String,
-    issuer_url: Option<String>,
-    client_id: String,
-    client_secret: String,
-    scopes: Option<String>,
-    sort_order: Option<i32>,
-    enabled: Option<String>,
-    allow_email_link: Option<String>,
-}
-
-#[cfg(feature = "admin-sso")]
-async fn sso_shared_list(
-    State(state): State<ConsoleState>,
-    Extension(op): Extension<auth::Operator>,
-) -> Response<Body> {
-    let mut rows: Vec<super::sso::SharedSsoProvider> =
-        match super::sso::SharedSsoProvider::objects()
-            .fetch(&state.registry)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => return server_error("operator_console", &e),
-        };
-    rows.sort_by_key(|p| p.sort_order);
-    let view: Vec<_> = rows
-        .into_iter()
-        .map(|p| {
-            serde_json::json!({
-                "id": p.id.get().copied().unwrap_or_default(),
-                "slug": p.slug,
-                "label": p.label,
-                "kind": p.kind,
-                "issuer_url": p.issuer_url,
-                "client_id": p.client_id,
-                "enabled": p.enabled,
-                "allow_email_link": p.allow_email_link,
-                "sort_order": p.sort_order,
-            })
-        })
-        .collect();
-    let mut ctx = Context::new();
-    inject_op_brand(&mut ctx, &state.op_brand);
-    ctx.insert("section", "sso");
-    ctx.insert("operator_username", &op.username);
-    ctx.insert("providers", &view);
-    ctx.insert("edit_enabled", &state.pools.is_some());
-    render(&state, "op_sso_shared.html", &ctx)
-}
-
-#[cfg(feature = "admin-sso")]
-async fn sso_shared_create(
-    State(state): State<ConsoleState>,
-    Extension(op): Extension<auth::Operator>,
-    Form(form): Form<SharedSsoForm>,
-) -> Response<Body> {
-    let mut row = super::sso::SharedSsoProvider {
-        id: crate::sql::Auto::Unset,
-        slug: form.slug.trim().to_owned(),
-        label: form.label,
-        kind: form.kind.trim().to_owned(),
-        issuer_url: form.issuer_url.filter(|s| !s.trim().is_empty()),
-        client_id: form.client_id,
-        client_secret: crate::casts::Cast::new(form.client_secret),
-        enabled: form.enabled.as_deref() == Some("on"),
-        sort_order: form.sort_order.unwrap_or(0),
-        scopes: form.scopes.filter(|s| !s.trim().is_empty()),
-        allow_email_link: form.allow_email_link.as_deref() == Some("on"),
-        created_at: crate::sql::Auto::Unset,
-        updated_at: crate::sql::Auto::Unset,
-    };
-    let bad = |msg: String| (StatusCode::BAD_REQUEST, msg).into_response();
-    if row.slug.len() > 64 || crate::validators::validate_slug(&row.slug).is_err() {
-        return bad("slug must be 1-64 letters, digits, `_` or `-`".into());
-    }
-    if let Err(e) = crate::sso::check_provider(&row.kind, row.issuer_url.as_deref()) {
-        return bad(e.to_string());
-    }
-    use crate::sql::ExistsPool as _;
-    let taken = super::sso::SharedSsoProvider::objects()
-        .where_(super::sso::SharedSsoProvider::slug.eq(row.slug.clone()))
-        .exists(&state.registry)
-        .await;
-    if matches!(taken, Ok(true)) {
-        return bad(format!("a shared provider `{}` already exists", row.slug));
-    }
-    if let Err(e) = row.insert_pool(&state.registry).await {
-        if e.is_unique_violation() {
-            return bad(format!("a shared provider `{}` already exists", row.slug));
-        }
-        return server_error("create failed", &e);
-    }
-    let mut detail = serde_json::Map::new();
-    detail.insert("slug".into(), serde_json::json!(row.slug));
-    detail.insert("kind".into(), serde_json::json!(row.kind));
-    detail.insert("enabled".into(), serde_json::json!(row.enabled));
-    detail.insert(
-        "allow_email_link".into(),
-        serde_json::json!(row.allow_email_link),
-    );
-    let id = row.id.get().copied().unwrap_or_default();
-    sso_shared_audit(&state, &op, id, "sso_shared_create", detail).await;
-    Redirect::to("/sso-shared").into_response()
-}
-
-/// Audit a shared provider change; these rows decide sign-in for every tenant.
-#[cfg(feature = "admin-sso")]
-async fn sso_shared_audit(
-    state: &ConsoleState,
-    op: &auth::Operator,
-    id: i64,
-    verb: &str,
-    detail: serde_json::Map<String, serde_json::Value>,
-) {
-    use crate::core::Model as _;
-    emit_registry_audit(
-        &state.registry,
-        super::sso::SharedSsoProvider::SCHEMA.table,
-        &id.to_string(),
-        op.id.get().copied().unwrap_or(0),
-        verb,
-        detail,
-    )
-    .await;
-}
-
-/// The wanted `allow_email_link` value, `on` or `off`.
-#[cfg(feature = "admin-sso")]
-#[derive(serde::Deserialize)]
-struct EmailLinkForm {
-    allow_email_link: String,
-}
-
-/// Set `allow_email_link` in place (only that column), so the id and its links survive.
-#[cfg(feature = "admin-sso")]
-async fn sso_shared_set_email_link(
-    State(state): State<ConsoleState>,
-    Extension(op): Extension<auth::Operator>,
-    axum::extract::Path(id): axum::extract::Path<i64>,
-    Form(form): Form<EmailLinkForm>,
-) -> Response<Body> {
-    use crate::sql::UpdaterPool as _;
-    let allow = match form.allow_email_link.as_str() {
-        "on" => true,
-        "off" => false,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                "allow_email_link must be on or off",
-            )
-                .into_response()
-        }
-    };
-    match super::sso::SharedSsoProvider::objects()
-        .filter("id", id)
-        .update()
-        .set("allow_email_link", allow)
-        .execute_pool(&state.registry)
-        .await
-    {
-        Ok(1) => {
-            let mut detail = serde_json::Map::new();
-            detail.insert("allow_email_link".into(), serde_json::json!(allow));
-            sso_shared_audit(&state, &op, id, "sso_shared_email_link", detail).await;
-            Redirect::to("/sso-shared").into_response()
-        }
-        Ok(_) => (StatusCode::NOT_FOUND, "no such shared provider").into_response(),
-        Err(e) => server_error("update failed", &e),
-    }
-}
-
-#[cfg(feature = "admin-sso")]
-async fn sso_shared_delete(
-    State(state): State<ConsoleState>,
-    Extension(op): Extension<auth::Operator>,
-    axum::extract::Path(id): axum::extract::Path<i64>,
-) -> Response<Body> {
-    let row = match super::sso::SharedSsoProvider::objects()
-        .filter("id", id)
-        .fetch(&state.registry)
-        .await
-    {
-        Ok(v) => v.into_iter().next(),
-        Err(e) => return server_error("delete failed", &e),
-    };
-    let Some(r) = row else {
-        return (StatusCode::NOT_FOUND, "no such shared provider").into_response();
-    };
-    if let Err(e) = r.delete_pool(&state.registry).await {
-        return server_error("delete failed", &e);
-    }
-    let mut detail = serde_json::Map::new();
-    detail.insert("slug".into(), serde_json::json!(r.slug));
-    sso_shared_audit(&state, &op, id, "sso_shared_delete", detail).await;
-    Redirect::to("/sso-shared").into_response()
 }
 
 // ----------------------------- /orgs/{slug}/edit

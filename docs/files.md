@@ -32,7 +32,9 @@ once against the trait; switch from local disk to S3 with a one-line change.
 - [Step 3 — Accept an upload](#step-3--accept-an-upload)
 - [Safe filenames](#safe-filenames)
 - [Production: S3-compatible storage](#production-s3-compatible-storage)
+- [Production: Azure Blob Storage](#production-azure-blob-storage)
 - [Large files: stream them](#large-files-stream-them)
+- [Several disks from config](#several-disks-from-config)
 - [The media library](#the-media-library)
 - [Reference](#reference)
 - [See also](#see-also)
@@ -101,14 +103,17 @@ oversize file is rejected mid-transfer instead of buffering into memory first.
 use rustango::uploads::{save_uploads, UploadConfig};
 use axum::extract::Multipart;
 
-async fn upload(mp: Multipart) -> Result<impl IntoResponse, UploadError> {
+async fn upload(mp: Multipart) -> Result<Json<Vec<String>>, (StatusCode, String)> {
     let cfg = UploadConfig::new("avatars/")          // key prefix
         .max_bytes(2 * 1024 * 1024)                  // reject files over 2 MiB
         .allowed_extensions(&["png", "jpg", "jpeg", "webp"])
         .randomize_filename(true);                   // avoid collisions
 
-    let saved = save_uploads(mp, &cfg, &storage).await?;   // Vec<SavedUpload>
-    Ok(Json(saved))
+    // UploadError is not a response: map it yourself.
+    let saved = save_uploads(mp, &cfg, &storage)     // Vec<SavedUpload>
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(saved.into_iter().map(|s| s.key).collect()))
 }
 ```
 
@@ -117,6 +122,14 @@ The guards are enforced (and verified): `allowed_extensions` is **case-insensiti
 the size is exceeded. The in-file `uploads` tests drive real multipart bodies and
 assert files land in storage, oversize files are rejected, and disallowed
 extensions are refused.
+
+Defaults: `max_bytes` 10 MiB, `max_files` 20, `randomize_filename` on (a UUID
+prefix on the key). With no `allowed_extensions`, any extension is accepted
+except the ones a browser runs as script (`html`, `svg`, `xml`, `js`, … —
+`uploads::ACTIVE_EXTENSIONS`). The first error stops the loop and deletes the
+files already saved, so a refused request leaves nothing behind. Each
+`SavedUpload` carries `key`, `original_filename`, `content_type` (as the client
+claimed it — do not trust it) and `size_bytes`.
 
 ```rust
 let cfg = UploadConfig::new("avatars/").allowed_extensions(&["PNG", "Jpg"]);
@@ -155,9 +168,12 @@ identical — only the constructor changes:
 ```rust
 use rustango::storage::s3::S3Storage;   // needs the `storage-s3` feature
 
-let storage: BoxedStorage = Arc::new(
-    S3Storage::new(/* bucket, region, endpoint, credentials */)
-);
+use rustango::storage::s3::{S3Config, S3Credentials};
+
+let cfg = S3Config::new("my-bucket", "us-east-1")
+    .with_endpoint("https://<account>.r2.cloudflarestorage.com"); // R2 / B2 / MinIO; omit for AWS
+let creds = S3Credentials::new(access_key_id, secret_access_key);
+let storage: BoxedStorage = Arc::new(S3Storage::new(cfg, creds));
 // save / load / delete / url — exactly the same calls as LocalStorage
 ```
 
@@ -243,6 +259,7 @@ body-limit layer on the route must allow the size you accept.
 | `LocalStorage` | temp file in the target directory, fsync, then rename; `create_only` links, so it never replaces a file |
 | `S3Storage` | one PUT up to 5 GiB; above, a multipart upload of up to 10,000 parts (5 TiB), one part in flight. Over https the body is sent as `UNSIGNED-PAYLOAD`; over plain http (local MinIO, SeaweedFS) every 64 KiB chunk is signed. `create_only` sends `If-None-Match: *` (on Complete for multipart), which AWS, MinIO and SeaweedFS honour |
 | `AzureBlobStorage` | one Put Blob up to 5000 MiB; above, Put Block for each part then one Put Block List. `create_only` sends `If-None-Match: *` (on the list) |
+| `InMemoryStorage` | collects the body in memory; `create_only` is checked under its lock |
 | others | the trait default: collects the body in memory, then `save`; it refuses `create_only` |
 
 A failed or dropped multipart upload is aborted, and Azure never shows
@@ -358,7 +375,7 @@ For files on local disk rather than a bucket, the static handler already does
 this and needs no media row at all:
 
 ```rust
-Cli::new(pool).with_uploads("/uploads", "./var/uploads")
+Cli::new().with_uploads("/uploads", "./var/uploads")
 ```
 
 **If you were about to write an `AllowAll` authorizer to make a public page
@@ -450,7 +467,7 @@ tables, whenever you run `migrate` / provision a tenant. There is no lazy
 > against real 0.46–0.50 databases showed neither worked, and **both are yanked**.
 > The reconcile guard demanded a migration be purely `CreateTable`, while a
 > generated initial migration is tables *and* indexes, so it bailed on every real
-> one. 0.51.2 is the release where this actually fires (#1167).
+> one. 0.51.2 is the release where this actually fires.
 
 ---
 

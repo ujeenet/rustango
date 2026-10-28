@@ -16,8 +16,8 @@ E-Mail verknüpft, wenn beim Anbieter **`allow_email_link`** eingeschaltet ist
 (Standard: aus), und nie, wenn das Konto ein Superuser oder Staff ist (Tenant:
 besitzt irgendeine Berechtigung; Bare-Admin: jedes Konto). Solche Konten
 verknüpft ein Admin, der die `SsoLink`-Zeile im Admin anlegt; die Log-Zeile der
-Abweisung nennt das Subject. (Der Member-Ablauf, weiter unten, provisioniert
-standardmäßig automatisch; siehe unten, wie man das abschaltet.)
+Abweisung nennt das Subject. (Der Member-Ablauf, weiter unten, kann für eine
+unbekannte E-Mail auch ein Konto anlegen; das ist standardmäßig aus.)
 
 > **Quelle:** der admin-unabhängige Kern `rustango::sso` (`SsoProvider`,
 > `build_provider`, `verified_email`, `ResolvedSso`, `SsoError`), die
@@ -124,9 +124,15 @@ werden bei der Anmeldung ermittelt — keine Endpunkt-Verdrahtung pro Anbieter.
 - **Operator-Konsole** (Multi-Tenancy): ein Operator definiert einmal einen
   **`SharedSsoProvider`**, und er wird **jedem** Tenant angeboten
   (etwa ein unternehmensweites Google). Verwaltet über das *Shared SSO*-Panel
-  der Konsole, wo *Allow email linking* `allow_email_link` an Ort und Stelle
+  der Konsole (`/sso-shared`, Feature `admin-sso`; jeder Operator kann die
+  Liste sehen, Änderungen brauchen eine editierbare Konsole), wo *Allow email linking* `allow_email_link` an Ort und Stelle
   umschaltet (die ID und ihre Verknüpfungen bleiben). Das Flag gilt für
-  **jeden** Tenant.
+  **jeden** Tenant. *Edit* (`/sso-shared/{id}/edit`) ändert einen Provider an
+  Ort und Stelle (gleiche ID und Slug; ein leeres Secret behält das
+  gespeicherte), und jede Zeile zeigt die Callback-URL, die beim IdP zu
+  registrieren ist. Das Feld für die Issuer-URL erscheint nur bei `oidc`. Ein
+  abgelehntes Hinzufügen oder Bearbeiten zeigt das Formular erneut (Status 400)
+  mit den eingegebenen Werten und dem Fehler, nie mit dem Secret.
 
 Auf der Anmeldeseite eines Tenants verschmelzen die beiden Mengen, und bei einer
 Slug-Kollision **gewinnt der eigene Anbieter des Tenants** gegenüber dem geteilten
@@ -134,9 +140,10 @@ Slug-Kollision **gewinnt der eigene Anbieter des Tenants** gegenüber dem geteil
 
 Die Callback-URL wird pro Anfrage aus Host + Slug abgeleitet
 (`https://<host><login>/sso/<slug>/callback`), registrieren Sie diese also beim
-IdP. Ein Benutzer wird verknüpft durch das optionale Verknüpfen per E-Mail
+IdP. Das Schema ist `https`, außer ein vertrauenswürdiger Proxy sendet
+`X-Forwarded-Proto`. Ein Benutzer wird verknüpft durch das optionale Verknüpfen per E-Mail
 (nicht privilegierte Tenant-Benutzer) oder dadurch, dass ein Superuser eine
-`SsoLink`-Zeile anlegt: `provider_source` (`tenant`, `shared` oder `admin`),
+`SsoLink`-Zeile anlegt: `provider_source` (`tenant`, `shared`, `admin` oder `app` für eine native Anmeldung),
 `provider_id` (die ID der Anbieter-Zeile), `issuer` (`kind` oder
 `kind|issuer_url` ohne abschließenden Schrägstrich), `subject` und `user_id`.
 Der Admin berechnet `key_sha256`. Die Log-Zeile der
@@ -144,6 +151,24 @@ Abweisung (`sso refused`) enthält `provider_id`, `issuer` und `subject`. Eine
 Zeile anzulegen erfordert die Session-Authentifizierung des Admins
 (`Builder::with_session_auth` oder `with_session` des Tenant-Admins); ohne sie
 kann niemand Verknüpfungen anlegen.
+
+Eine Verknüpfung, die mehr als 5 Minuten vor dem Konto angelegt wurde, auf das
+sie zeigt (etwa eine nach einem Restore wiederverwendete ID), loggt eine Warnung
+und meldet trotzdem an. Eine Verknüpfung, deren Benutzer nicht mehr existiert,
+wird bei der nächsten Anmeldung gelöscht.
+`rustango::sso::link::set_stale_links(StaleLinks::Drop)` löscht eine solche
+Verknüpfung stattdessen. Nutze das nur, wenn `created_at`-Werte von Konten nie
+importiert oder nachträglich befüllt werden.
+
+Mit dem Feature `totp` muss ein Bare-Admin-Benutzer mit bestätigtem
+TOTP-Gerät nach SSO noch einen Code eingeben. Der Admin zeigt das Code-Formular
+und hält die offene Anmeldung 5 Minuten in einem signierten Cookie; das
+Formular sendet an `<login>/sso-totp`. Der Tenant-Admin hat keinen TOTP-Schritt.
+
+`manage check --deploy` warnt vor einem aktivierten Anbieter, der jeden
+bestehenden Benutzer abweisen würde: keine `SsoLink`-Zeilen, und E-Mail-Verknüpfung
+aus oder nur privilegierte Benutzer. Im Bare-Admin ist das jeder Anbieter ohne
+Verknüpfungen.
 
 ## Member (Endbenutzer) SSO
 
@@ -156,7 +181,7 @@ denselben `rustango::sso`-Kern und die eigenen `SsoProvider`-Zeilen des Tenants 
 nur die Session, die es prägt, unterscheidet sich, weshalb es hinter dem
 `sso`-Feature (nicht `admin-sso`) lebt und keinen Auto-Admin braucht.
 
-Hängen Sie `member_sso_router` in einen `tenancy::server::Builder`-Stack ein (es
+Hängen Sie `member_sso_router` in einen `rustango::server::Builder`-Stack ein (es
 liest den aufgelösten `Arc<TenantContext>`, den der Builder injiziert):
 
 ```rust
@@ -171,14 +196,25 @@ let members = member_sso_router(MemberAuthConfig {
 });
 ```
 
+Mit mehreren einkompilierten Backends ist `member_sso_router` für den
+Standard-Tenant-Typ (Postgres); nutzen Sie `member_sso_router_for::<sqlx::Sqlite>`
+(oder `MySql`).
+
 Es hängt zwei Routen pro Slug an `login_base` an:
 
 - `GET {login_base}/sso/{slug}` — den Handshake beginnen, zum IdP weiterleiten.
 - `GET {login_base}/sso/{slug}/callback` — ihn abschließen, den Member
   finden-oder-provisionieren, das Session-Cookie prägen.
 
+Ein Tenant mit Pfad-Präfix bekommt dieselben zwei Routen unter seinem Präfix.
+
 Unterschiede zum Admin-Ablauf:
 
+- **Callback-Schema.** Die Member-`redirect_uri` nimmt ihr Schema aus dem
+  `X-Forwarded-Proto` eines vertrauenswürdigen Proxys (und ihren Host aus
+  `X-Forwarded-Host`), sonst `http` auf einem
+  Loopback-Host (`localhost`, `*.localhost`, eine Loopback-IP) und überall sonst
+  `https`, sodass `localhost.example.com` `https` bekommt.
 - **Auto-Provisionierung.** Mit `auto_provision = true` (optional; Standard ist `false`) **erstellt**
   eine verifizierte IdP-E-Mail ohne passende `rustango_users`-Zeile eine solche
   — Benutzername aus dem lokalen Teil der E-Mail (bei Kollision entdupliziert),
@@ -186,9 +222,11 @@ Unterschiede zum Admin-Ablauf:
   sich nicht per Passwort anmelden) — und verknüpft sie. Eine E-Mail, die zu
   einem bestehenden Konto passt, folgt der obigen `allow_email_link`-Regel.
   Setzen Sie es auf `false`, um unbekannte E-Mails abzuweisen. Eine native
-  Anmeldung ruft `find_or_provision_member` direkt auf; sein Ergebnis
-  `MemberSignIn` unterscheidet `NotLinked` (ein Konto hat die E-Mail, darf
-  aber nicht darüber verknüpft werden) von `NoAccount`.
+  Anmeldung (eine App, die ihr ID-Token selbst geprüft hat) ruft
+  `find_or_provision_member` direkt auf, mit `ProviderKey::app(issuer)` als
+  Schlüssel. Ihr Ergebnis `MemberSignIn` ist `Member(id)`, `NotLinked` (ein
+  Konto hat die E-Mail, darf aber nicht darüber verknüpft werden), `NoAccount`,
+  `Inactive`, `Unverified` oder `Refused`.
 - **Ein eigenes Session-Cookie.** Das Member-Cookie
   (`rustango_member_session`) ist von den Tenant- / Admin-Session-Cookies
   **domänengetrennt**: die signierte Nachricht trägt einen Tag pro Domäne und
@@ -197,6 +235,10 @@ Unterschiede zum Admin-Ablauf:
   `RUSTANGO_SESSION_SECRET` signiert sind. Es ist slug-gebunden (ein für `acme`
   geprägtes Cookie authentifiziert niemals auf `globex`) und wird durch eine
   Passwort-Rotation invalidiert (analog zur Admin-Session).
+- **Logout.** `member_auth::logout(&pool, &user)` beendet die Sessions des
+  Members auf allen Geräten und gibt den `Set-Cookie`-Wert zurück, der das
+  Cookie löscht. Bei einem Tenant mit Pfad-Präfix nutzen Sie `logout_at`, das
+  das Cookie auf dem Präfix-Pfad löscht.
 
 Lesen Sie den aktuellen Member in einem Handler mit dem **`CurrentMember`**-
 Extraktor — dem Member-Gegenstück zu `SessionUser`. Er ist unfehlbar
@@ -227,10 +269,16 @@ um sich am Token-Endpunkt des IdP zu authentifizieren. So legt ein durchgesicker
 DB-Dump das Secret nie offen, und jeder Tenant behält sein eigenes Secret ohne
 Umgebungsvariable pro Anbieter.
 
-> Setzen Sie `RUSTANGO_SECRET_KEY` im Deployment (beliebige Länge; es wird per
-> SHA-256 zu einem 32-Byte-Schlüssel gehasht). Ohne sie schlägt das Speichern oder
-> Verwenden eines Anbieters schnell fehl — dieselbe Haltung wie bei einer
-> fehlenden Datenbank-URL.
+> Setzen Sie `RUSTANGO_SECRET_KEY` im Deployment. Es wird per SHA-256 zu einem
+> 32-Byte-Schlüssel gehasht; nutzen Sie mindestens 32 zufällige Zeichen (mit eingehängter
+> Tenant-Provisionierung warnt `check --deploy` bei einem kürzeren Schlüssel). Ohne
+> sie schlägt das Speichern oder Verwenden eines Anbieters schnell fehl —
+> dieselbe Haltung wie bei einer fehlenden Datenbank-URL.
+
+Zum Rotieren setzen Sie den neuen Wert in `RUSTANGO_SECRET_KEY` und den alten in
+`RUSTANGO_SECRET_KEY_PREVIOUS`. Lesen fällt auf den alten Schlüssel zurück. In
+einem Multi-Tenant-Deployment versiegelt `manage reseal-tenant-secrets --apply`
+danach die geteilten und die Tenant-SSO-Secrets mit dem neuen Schlüssel neu.
 
 ## Anbieter (Presets)
 

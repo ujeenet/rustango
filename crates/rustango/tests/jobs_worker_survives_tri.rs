@@ -202,6 +202,29 @@ impl Job for LongError {
     }
 }
 
+/// Takes its attempt cap and retry wait from its payload.
+#[derive(Serialize, Deserialize)]
+struct PerJob {
+    token: String,
+    attempts: u32,
+    wait_secs: u64,
+}
+
+#[async_trait::async_trait]
+impl Job for PerJob {
+    const NAME: &'static str = "tri:per_job_retry";
+    fn max_attempts(&self) -> u32 {
+        self.attempts
+    }
+    fn retry_delay(&self, _: u32) -> Duration {
+        Duration::from_secs(self.wait_secs)
+    }
+    async fn run(&self) -> Result<(), JobError> {
+        start(&self.token);
+        Err(JobError::Retryable("later".into()))
+    }
+}
+
 async fn queue(pool: &Pool, workers: usize, heartbeat: Duration) -> PgJobQueue {
     let q = PgJobQueue::with_workers_pool(pool.clone(), workers)
         .poll_interval(Duration::from_millis(20))
@@ -213,7 +236,108 @@ async fn queue(pool: &Pool, workers: usize, heartbeat: Duration) -> PgJobQueue {
     q.register::<NoAttempts>().await;
     q.register::<SlowRetry>().await;
     q.register::<LongError>().await;
+    q.register::<PerJob>().await;
     q
+}
+
+/// Rows due after `at_least` from now.
+async fn rows_due_after(pool: &Pool, at_least: chrono::Duration) -> i64 {
+    let sql = format!(
+        "SELECT COUNT(*) FROM rustango_jobs WHERE run_at > {}",
+        pool.dialect().placeholder(1)
+    );
+    let later = chrono::Utc::now() + at_least;
+    let rows: Vec<(i64,)> =
+        rustango::sql::raw_query_pool(&sql, vec![SqlValue::DateTime(later)], pool)
+            .await
+            .expect("run_at");
+    rows[0].0
+}
+
+/// Run once, then wait until the retry is scheduled.
+async fn wait_for_the_retry(pool: &Pool, tok: &str) {
+    wait_for("the first run", || counts(tok).0 == 1).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while the_row(pool).await.1 {
+        assert!(Instant::now() < deadline, "retry never scheduled");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A job's payload sets the stored attempt cap and its retry time.
+async fn a_jobs_payload_sets_its_cap_and_wait(pool: &Pool) {
+    let tok = token(pool, "per_job");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    let job = PerJob {
+        token: tok.clone(),
+        attempts: 7,
+        wait_secs: 7200,
+    };
+    q.dispatch(&job).await.unwrap();
+    let rows: Vec<(i32,)> =
+        rustango::sql::raw_query_pool("SELECT max_attempts FROM rustango_jobs", Vec::new(), pool)
+            .await
+            .expect("max_attempts");
+    assert_eq!(rows[0].0, 7);
+    q.start().await;
+    wait_for_the_retry(pool, &tok).await;
+    q.shutdown().await;
+    assert_eq!(
+        rows_due_after(pool, chrono::Duration::minutes(100)).await,
+        1,
+        "retry not two hours out"
+    );
+}
+
+/// A webhook's `Retry-After` sets its retry time on a database queue.
+async fn a_retry_after_sets_a_webhooks_retry_time(pool: &Pool) {
+    #[cfg(feature = "webhook-delivery")]
+    {
+        use rustango::webhook_delivery::WebhookSubscription;
+        let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let h = hits.clone();
+        let app = axum::Router::new().route(
+            "/hook",
+            axum::routing::post(move || {
+                h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async {
+                    (
+                        axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        [("retry-after", "3000")],
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        let srv = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let q = queue(pool, 1, Duration::from_secs(60)).await;
+        WebhookSubscription::register(&q).await;
+        WebhookSubscription::new(url, "s")
+            .allow_private_targets(true)
+            .dispatch(&q, "ping", &serde_json::json!({}))
+            .await
+            .unwrap();
+        q.start().await;
+        wait_for("the delivery", || {
+            hits.load(std::sync::atomic::Ordering::SeqCst) == 1
+        })
+        .await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while the_row(pool).await.1 {
+            assert!(Instant::now() < deadline, "retry never scheduled");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        q.shutdown().await;
+        srv.abort();
+        assert_eq!(
+            rows_due_after(pool, chrono::Duration::minutes(45)).await,
+            1,
+            "Retry-After not honoured"
+        );
+    }
+    #[cfg(not(feature = "webhook-delivery"))]
+    let _ = pool;
 }
 
 /// A retry's error over 64 KiB is stored cut on a char boundary, not lost.
@@ -1157,6 +1281,8 @@ tri_dialect_test! {
         a_dropped_queue_stops_its_workers,
         zero_max_attempts_runs_once,
         a_jobs_backoff_hook_sets_its_retry_time,
+        a_jobs_payload_sets_its_cap_and_wait,
+        a_retry_after_sets_a_webhooks_retry_time,
         a_long_error_is_stored_cut,
         a_db_queue_sends_with_its_registered_mailer,
         a_dispatch_rolls_back_with_its_atomic_block,

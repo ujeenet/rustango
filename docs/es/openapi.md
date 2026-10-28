@@ -91,7 +91,7 @@ trasladan todos. Los tipos de campo se mapean automáticamente:
 | `String`, `&str` | `string` |
 | `bool` | `boolean` |
 | `Vec<T>` / `[T; N]` | `array` of `T` |
-| `Option<T>` | `T`, marcado `nullable` |
+| `Option<T>` | `[T, "null"]`, no obligatorio |
 | `chrono::DateTime<Utc>` | `string` / `date-time` |
 | `chrono::NaiveDate` | `string` / `date` |
 | `uuid::Uuid` | `string` / `uuid` |
@@ -120,7 +120,7 @@ impl rustango::openapi::OpenApiSchema for Money {
 ## Rutas desde ViewSets
 
 `ViewSet::openapi_paths(prefix, schema_ref)` devuelve los pares `(path, PathItem)` para
-las cinco rutas CRUD estándar — list, create, retrieve, update, partial update,
+las seis operaciones CRUD estándar — list, create, retrieve, update, partial update,
 delete — conectadas para referenciar un esquema de componente registrado:
 
 ```rust
@@ -141,10 +141,29 @@ DELETE), y se mantiene sincronizado con la configuración del ViewSet:
   `limit`/`offset`).
 - **Filtrado / búsqueda / ordenación** → un parámetro de consulta `?field=` por cada
   `filter_fields` (con los lookups disponibles `__gt`/`__in`/… descritos), más
-  `?search=` y `?ordering=` cuando están configurados.
+  `?search=` cuando está configurado y `?ordering=` (abajo).
 - **`read_only()`** → las operaciones de escritura (POST/PUT/PATCH/DELETE) se omiten.
-- **Parámetro de ruta** → `{pk}` tipado a partir de la clave primaria del modelo.
-- **`operationId`** → `list_post`, `create_post`, … (en snake-case por acción).
+- **Cuerpos de petición** → esquemas en línea de los campos que escribe el ViewSet: sin
+  id `Auto`, sin columna `read_only` ni de borrado lógico; los campos `write_only` se
+  incluyen; nada es obligatorio en PATCH. Las respuestas referencian el esquema
+  registrado. Un campo que un filter backend fija por petición sigue apareciendo (y
+  puede aparecer como obligatorio); el servidor ignora el valor del cuerpo para él.
+- **Cuerpos y errores** → create, PUT y PATCH aceptan cuerpos JSON o urlencoded y
+  documentan `422 validation_failed`, `400` para un cuerpo mal formado y `413` para
+  uno demasiado grande. La operación create describe la forma de array masivo en su
+  texto (los esquemas siguen siendo de una fila). List documenta un `400` cuando sus
+  filtros pueden rechazar un valor; retrieve y DELETE documentan `400` para un pk mal
+  formado.
+- **Restricciones** → `403` (y `401` con `tenancy`) en una acción con codenames de
+  permiso, y `429` con `Retry-After` en una acción con throttle.
+- **Parámetros de lista** → `page_size` indica el límite real `max_page_size`.
+  `?ordering=` aparece en todos los ViewSets excepto en los de paginación por cursor,
+  que siempre ordenan por la columna del cursor. Los campos binarios son
+  `format: hex`, tal como el servidor los lee y escribe.
+- **Parámetro de ruta** → `{pk}` tipado a partir de la clave primaria del modelo;
+  `.pk_param(name)` lo renombra.
+- **`operationId`** → `list_post`, `create_post`, `retrieve_post`, `update_post`,
+  `partial_update_post`, `destroy_post` (acción + nombre del esquema en snake-case).
 
 > El ViewSet en sí está documentado en la [guía de ViewSets](viewsets.md).
 
@@ -167,7 +186,9 @@ let app = axum::Router::new()
 ```
 
 Las páginas del visor son diminutas cáscaras HTML que cargan Swagger UI / Redoc desde
-un CDN (`unpkg` / `jsdelivr`) — no se empaqueta ningún JS en **Rustango**. Para un
+un CDN (`unpkg` / `jsdelivr`), cada uno fijado a una versión exacta con un hash
+Subresource Integrity — no se empaqueta ningún JS en **Rustango**. Cargan la spec
+junto a ellas, así que el router puede anidarse bajo cualquier prefijo. Para un
 despliegue aislado (air-gapped), escribe `spec.to_json()` en un archivo al arrancar y
 auto-hospeda los assets del visor desde tu propio directorio estático.
 
@@ -201,7 +222,10 @@ let json = spec.to_json();   // pretty-printed OpenAPI 3.1
 ```
 
 `OpenApiSpec` también acepta `.contact(...)`, `.license(...)`, `.add_tag(...)` y
-múltiples entradas `.server(...)`.
+múltiples entradas `.server(...)`. `Operation` añade `.description`,
+`.parameter`, `.request_body(RequestBody::json(..) / ::form(..))` y
+`.deprecated()`; `Parameter` tiene los constructores `path` / `query` / `header`;
+`Response` añade `.header(name, schema)`.
 
 ---
 
@@ -255,7 +279,20 @@ Constructores de tipos: `string` · `integer` / `int32` · `number` · `boolean`
 ## Notas y límites
 
 - **Es OpenAPI 3.1** (`"openapi": "3.1.0"`), que se alinea con JSON Schema 2020-12 — la
-  mayoría del tooling moderno lo consume directamente.
+  mayoría del tooling moderno lo consume directamente. **Añadir una operación QUERY
+  sube la especificación a `3.2.0`**, porque es la versión que define el método:
+  `PathItem::query` la fija en todo el documento. Si tu tooling solo lee 3.1, eso es
+  lo único que le cambiará la versión sin avisar — ver [query-method](query-method.md).
+
+  Un ViewSet monta una ruta QUERY pero **no la describe por defecto**, así que el
+  documento generado sigue en 3.1.0. Actívalo cuando tu toolchain lea 3.2:
+
+  ```rust,ignore
+  ViewSet::for_model(Post::SCHEMA, &["id", "title"]).openapi_query(true)
+  ```
+
+  La ruta se sirve en ambos casos; el flag solo decide si el documento la menciona
+  y, por tanto, qué versión tiene que declarar.
 - **El router del visor necesita la característica `admin`** (para axum); `openapi` por
   sí solo basta para *construir* y serializar una especificación (`spec.to_json()`).
 - **Los visores cargan desde un CDN** — está bien para documentación interna/de

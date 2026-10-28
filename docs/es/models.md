@@ -149,9 +149,9 @@ solo en despliegues de PostgreSQL:
 
 ## Claves primarias
 
-Cada modelo necesita una clave primaria. Marca un campo con
-`#[rustango(primary_key)]`; si no marcas ninguno, el esquema busca una columna llamada
-`id`.
+Marca un campo con `#[rustango(primary_key)]`. Un modelo sin clave primaria
+sigue compilando y se puede consultar, pero el derive omite todos los métodos de fila
+basados en la PK (`save_pool`, `find`, `delete_pool`, `refresh_from_db`, …).
 
 La PK **por defecto y más común** es un entero de 64 bits autoincremental, declarado como
 `Auto<i64>`:
@@ -172,7 +172,9 @@ g.save_pool(&pool).await?;                              // DB assigns the id
 let new_id = g.id.get().copied().unwrap();             // now populated
 ```
 
-Los tipos internos de `Auto<T>` admitidos son `i32`, `i64` y `Uuid`.
+Los tipos internos de `Auto<T>` admitidos son `i32`, `i64`, `Uuid` y
+`DateTime<Utc>` (la base de datos lo rellena con la hora actual, como en el
+campo `auto_now_add` de arriba).
 
 ### Claves primarias personalizadas
 
@@ -371,8 +373,7 @@ Declarados sobre el **modelo**:
   `#[cfg(feature = "postgres")]`, así que en un build `sqlite` o `mysql` no
   existen en absoluto. La familia `_pool` toma `rustango::sql::Pool` y funciona
   en los tres — escribe esos salvo que sepas que estás en Postgres. El nombrado
-  invertido se sigue en
-  [#1293](https://github.com/ujeenet/rustango/issues/1293); consulta
+  está invertido, y se sabe; consulta
   [api-conventions](api-conventions.md#funciones).
 - **Borrado lógico** (cuando está habilitado) — `soft_delete`, `restore`,
   `force_delete`; `QuerySet::active()` / `with_trashed()` / `only_trashed()`.
@@ -422,11 +423,11 @@ la lista completa, incluyendo las avanzadas/específicas de PostgreSQL.
 | `audit(track = "…")` | lista de campos | historial de cambios por fila |
 | `scope` | `"tenant"` / `"registry"` | ámbito de multi-tenancy |
 | `proxy` | flag | modelo proxy (comparte la tabla de otro) |
-| `global_scope(name, apply = fn)` | nombre + fn | filtro aplicado automáticamente a todas las consultas |
+| `global_scope(name, apply = fn)` | nombre + fn | filtro aplicado automáticamente a querysets y atajos, no a los métodos de instancia por PK ni a `truncate` |
 | `through(...)` | especificación de relación | accesor de relación through personalizado |
 | `reverse_has(...)` / `generic_has(...)` | especificación de relación | accesor inverso has-many / inverso de FK genérica |
 | `required_db_features` / `required_db_vendor` | lista / proveedor | restricciones de validación de despliegue |
-| `db_table_comment` | `"…"` | COMMENT de tabla |
+| `db_table_comment` | `"…"` | COMMENT de tabla; las migraciones en archivo aún no lo escriben, y `makemigrations` avisa |
 | `admin(...)` | opciones de admin | configuración de la UI del admin (consulta [admin.md](admin.md)) |
 | `fk_composite(...)` / `generic_fk(...)` | especificación | FK compuesta / FK genérica (content-type) |
 | `m2m(...)` / `generic_m2m(...)` | especificación | relación muchos-a-muchos / muchos-a-muchos genérica |
@@ -453,7 +454,7 @@ la lista completa, incluyendo las avanzadas/específicas de PostgreSQL.
 | `verbose_name` | `"Label"` | etiqueta legible del campo en formularios/admin |
 | `help_text` | `"…"` | texto de ayuda bajo el widget de formulario/admin |
 | `validators` | `"name, name"` | validadores con nombre a ejecutar en este campo |
-| `related_name` | `"posts"` | nombre del accesor inverso en el destino de la FK |
+| `related_name` | `"posts"` | nombre del accesor inverso en el destino de la FK; `"+"` para ninguno (un destino de otro crate) |
 | `auto_now` | flag | establecer a ahora en cada guardado |
 | `auto_now_add` | flag | establecer a ahora en la inserción |
 | `soft_delete` | flag | marca la marca de tiempo de borrado suave (`Option<DateTime<Utc>>`) |
@@ -463,7 +464,7 @@ la lista completa, incluyendo las avanzadas/específicas de PostgreSQL.
 | `on_delete` | `"cascade"` / `"restrict"` / `"set_null"` / `"set_default"` / `"no_action"` | acción `ON DELETE` de la FK |
 | `o2o` | `"table"` | FK uno-a-uno a esa tabla |
 | `generated_as` | `"expr"` | columna computada (generada) por la BD |
-| `citext` | flag | texto insensible a mayúsculas (CITEXT de PostgreSQL) |
+| `citext` | flag | texto insensible a mayúsculas: `CITEXT` en PostgreSQL, `TEXT COLLATE NOCASE` en SQLite, una collation insensible a mayúsculas en MySQL |
 | `vector(dims = N)` | `N` | dimensión de pgvector |
 | `geometry(srid = N)` | `N` | id de referencia espacial de PostGIS |
 | `db_comment` | `"…"` | COMMENT de columna |

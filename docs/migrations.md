@@ -175,6 +175,15 @@ repeated to repair a stretch of rows in one command.
 
 ---
 
+## Migrate signals
+
+`rustango::signals::migrate::connect_pre_migrate` and `connect_post_migrate`
+receivers run before and after a migrate run. The `connect_pre_migrate_with_target`
+and `connect_post_migrate_with_target` receivers also get a `MigrateTarget`:
+the run's `pool` and its `tenant` slug (`None` for the registry or a
+single-database run). A tenant run sends once per tenant with that tenant's
+pool, on every backend, so a `post_migrate` receiver can seed each tenant.
+
 ## A new unique key over duplicate rows
 
 Before a migration adds a unique index or a unique column to an existing table, `migrate` checks that no two rows share the key (rows with a NULL in it are ignored). If some do, it stops before any DDL and prints a `SELECT … GROUP BY … HAVING COUNT(*) > 1` that lists them. The check scans the table once per new key, so on a large table it costs one full scan. It is skipped after a data step in the same migration, which may be the one removing the duplicates, and for tables or columns the migration itself creates or renames.
