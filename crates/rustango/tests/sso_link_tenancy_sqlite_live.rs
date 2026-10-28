@@ -35,6 +35,8 @@ impl Idp {
         // The fake IdP is on loopback, which outbound calls refuse unless
         // allowlisted. Every test holds `SUITE`, so setting env is safe.
         std::env::set_var("RUSTANGO_OUTBOUND_ALLOW", "127.0.0.1");
+        // Tenant-owned provider rows read their own allowlist.
+        std::env::set_var("RUSTANGO_TENANT_OUTBOUND_ALLOW", "127.0.0.1");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let issuer = format!("http://{}", listener.local_addr().unwrap());
         let claims = Arc::new(Mutex::new(serde_json::json!({})));

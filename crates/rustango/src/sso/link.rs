@@ -76,6 +76,12 @@ impl ProviderKey {
         })
     }
 
+    /// Which provider table the row came from.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    pub(crate) fn source(&self) -> LinkSource {
+        self.source
+    }
+
     /// The stored issuer (`kind` or `kind|issuer_url`).
     #[must_use]
     pub fn issuer(&self) -> &str {
