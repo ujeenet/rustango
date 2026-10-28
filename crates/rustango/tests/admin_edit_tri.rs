@@ -861,7 +861,8 @@ async fn refused_edit_keeps_the_typed_inline_rows(pool: &Pool) {
             );
         }
         assert!(
-            html.contains(&format!(r#"action="/aed_rparent/{pid}""#)),
+            html.replace("&#x2F;", "/")
+                .contains(&format!(r#"action="/aed_rparent/{pid}""#)),
             "form action"
         );
     }
@@ -895,7 +896,7 @@ async fn bare_admin_serves_the_favicon_it_links(pool: &Pool) {
     let at = html.find(r#"rel="icon""#).expect("a favicon link");
     let href = &html[at..];
     let href = &href[href.find("href=\"").unwrap() + 6..];
-    let href = href[..href.find('"').unwrap()].to_owned();
+    let href = href[..href.find('"').unwrap()].replace("&#x2F;", "/");
     assert_eq!(href, "/admin/__static__/icon.png");
     let (status, kind, _) = get(href).await;
     assert_eq!(status, StatusCode::OK, "favicon");
