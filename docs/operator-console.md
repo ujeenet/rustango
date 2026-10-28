@@ -18,6 +18,7 @@ and runs the whole registry. There is no per-tenant migrate on the command line.
 - [Mounting it](#mounting-it)
 - [What each page does](#what-each-page-does)
 - [Hostnames](#hostnames)
+- [Unknown hosts](#unknown-hosts)
 - [Operators](#operators)
 - [The audit log](#the-audit-log)
 - [Provisioning runs](#provisioning-runs)
@@ -96,6 +97,46 @@ Two things worth knowing:
 Hostnames are normalized on the way in: lowercased, no scheme, no port, no path. The stored value is compared byte-for-byte against the `Host` header, so a value that could never match is refused rather than saved.
 
 From the CLI: [`list-hosts` / `add-host` / `remove-host` / `set-host-enabled`](manage.md#hostnames).
+
+---
+
+## Unknown hosts
+
+By default a request whose host resolves no tenant goes to your app's routes,
+where the `Tenant` extractor and the tenant admin answer 404. To serve
+something there instead — a first-run setup page, a "this site is not set up"
+page — hand a router to `unresolved_tenant`:
+
+```rust
+use axum::{routing::get, Extension, Router};
+use rustango::tenancy::TenantRegistry;
+
+async fn setup(Extension(reg): Extension<TenantRegistry>) -> &'static str {
+    match reg.has_tenants().await {
+        Ok(false) => "Create your first site",
+        _ => "This site is not set up yet",
+    }
+}
+
+Cli::new()
+    .tenancy()
+    .unresolved_tenant(Router::new().route("/", get(setup)))
+    .run()
+    .await?;
+```
+
+It runs for an unknown host and for an apex path the console does not serve.
+It never runs for a host that resolves to a tenant, and the console keeps its
+own routes. An inactive tenant does not resolve, so its host reaches this
+router too. The router gets the registry as `Extension<TenantRegistry>`, never
+a tenant pool; `has_tenants()` counts inactive tenants too. `/health` and
+`/ready` stay served next to it.
+
+**Security:** anyone who can reach the server can reach this router. Check the
+state yourself (for example, offer setup only while `has_tenants()` is false)
+and protect anything that writes.
+
+The same setter exists on `rustango::server::Builder`.
 
 ---
 

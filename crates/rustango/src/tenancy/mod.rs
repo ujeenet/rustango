@@ -143,6 +143,7 @@ pub mod server_admin;
 /// login's password.
 pub mod server_tenant;
 pub mod tenant_console;
+mod unresolved;
 
 #[cfg(feature = "mcp")]
 pub use agents::{
@@ -243,3 +244,4 @@ pub use secrets::{
 pub use sweep::{
     active_tenants, for_each_tenant, with_tenant, SweepError, TenantOutcome, TenantSweep,
 };
+pub use unresolved::TenantRegistry;
