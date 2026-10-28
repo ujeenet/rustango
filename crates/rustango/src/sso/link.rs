@@ -77,7 +77,7 @@ impl ProviderKey {
     }
 
     /// Which provider table the row came from.
-    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    #[cfg_attr(not(all(feature = "tenancy", feature = "admin-sso")), allow(dead_code))]
     pub(crate) fn source(&self) -> LinkSource {
         self.source
     }
