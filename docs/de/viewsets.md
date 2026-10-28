@@ -276,7 +276,7 @@ lass dieses Präfix im ViewSet-Pfad weg:
 ### Schritt 7 — Ausführen und jeden Endpunkt durchprobieren
 
 ```bash
-cargo run            # listening on http://0.0.0.0:8080
+cargo run            # listening on http://127.0.0.1:8080
 ```
 
 **Erstellen** (`POST`). Der Serializer validiert zuerst und schreibt dann nur die

@@ -279,7 +279,7 @@ ese prefijo de la ruta del ViewSet:
 ### Paso 7 — Ejecutarlo y probar cada endpoint
 
 ```bash
-cargo run            # listening on http://0.0.0.0:8080
+cargo run            # listening on http://127.0.0.1:8080
 ```
 
 **Crear** (`POST`). El serializador valida primero, luego escribe solo los campos

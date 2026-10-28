@@ -259,7 +259,6 @@ Le fichier `.env` généré est prêt à l'emploi avec Docker. Comme nous allons
 
 ```bash
 DATABASE_URL=postgres://rustango:rustango@localhost:5432/myblog_dev
-RUSTANGO_BIND=0.0.0.0:8080
 RUSTANGO_APEX_DOMAIN=localhost
 ```
 
@@ -334,7 +333,7 @@ cargo run
 Vous verrez :
 
 ```
-server listening on http://0.0.0.0:8080
+server listening on http://127.0.0.1:8080
 ```
 
 `cargo run` applique aussi les migrations en attente avant de commencer à écouter.

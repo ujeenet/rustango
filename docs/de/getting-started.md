@@ -256,7 +256,6 @@ Die generierte `.env` ist von Haus aus Docker-freundlich. Da wir `cargo` auf dem
 
 ```bash
 DATABASE_URL=postgres://rustango:rustango@localhost:5432/myblog_dev
-RUSTANGO_BIND=0.0.0.0:8080
 RUSTANGO_APEX_DOMAIN=localhost
 ```
 
@@ -330,7 +329,7 @@ cargo run
 Du siehst:
 
 ```
-server listening on http://0.0.0.0:8080
+server listening on http://127.0.0.1:8080
 ```
 
 `cargo run` wendet außerdem ausstehende Migrationen an, bevor es zu lauschen beginnt.

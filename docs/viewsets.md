@@ -270,7 +270,7 @@ ViewSet path: `.nest_with("/api", |pool| myapp::blog::urls::api(pool))` with
 ### Step 7 — Run it and exercise every endpoint
 
 ```bash
-cargo run            # listening on http://0.0.0.0:8080
+cargo run            # listening on http://127.0.0.1:8080
 ```
 
 **Create** (`POST`). The serializer validates first, then writes only the
