@@ -223,6 +223,23 @@ impl Env {
         admin.close().await;
     }
 
+    /// A database for `--database-url`, made outside the engine.
+    async fn bare_database(&self, slug: &str) -> String {
+        if !self.server_backend() {
+            let file = self.dir("tenants").join(format!("{slug}.db"));
+            return format!("sqlite://{}?mode=rwc", file.display());
+        }
+        let admin = self.admin().await;
+        let name = db_name(slug);
+        let login = Login::new(tenant_login_name(&name));
+        admin
+            .create_tenant_database(&name, &login, &LoginPassword::generate())
+            .await
+            .expect("create database");
+        admin.close().await;
+        on_db(&self.url, slug)
+    }
+
     async fn database_exists(&self, slug: &str) -> bool {
         if !self.server_backend() {
             return self.dir("tenants").join(format!("{slug}.db")).exists();
@@ -764,6 +781,33 @@ async fn a_failed_migration_drops_everything_it_made(pool: &Pool) {
     let req = ProvisionRequest::on_server(&a, "main");
     env.provision(&env.dir("good"), &req).await.expect("retry");
     assert_provisioned(&env, &a).await;
+    env.clean(&[&a]).await;
+}
+
+/// `create-tenant` fails when the tenant's migrations do, and `--resume`
+/// finishes the tenant it left inactive.
+async fn the_cli_fails_on_a_failed_migration_and_resumes(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+    let env = Env::new(pool).await;
+    let a = slug("resume");
+    env.clean(&[&a]).await;
+    let url = env.bare_database(&a).await;
+    let args = ["create-tenant", a.as_str(), "--database-url", url.as_str()];
+
+    let err = env
+        .run(&env.dir("broken"), &args)
+        .await
+        .expect_err("a failed migration must fail the verb");
+    assert!(err.to_string().contains("--resume"), "{err}");
+    assert!(!env.org(&a).await.expect("row kept").active);
+
+    let err = env.run(&env.dir("good"), &args).await.expect_err("taken");
+    assert!(err.to_string().contains("already exists"), "{err}");
+
+    let resumed = [&args[..], &["--resume"]].concat();
+    env.run(&env.dir("good"), &resumed).await.expect("resume");
+    assert!(env.org(&a).await.expect("row").active);
     env.clean(&[&a]).await;
 }
 
@@ -1675,6 +1719,7 @@ tri_dialect_test! {
         the_console_creates_a_tenant_on_a_saved_server,
         the_cli_creates_tenants_on_a_saved_server,
         a_failed_migration_drops_everything_it_made,
+        the_cli_fails_on_a_failed_migration_and_resumes,
         a_failed_first_admin_drops_everything_it_made,
         a_failed_insert_drops_what_it_made,
         an_existing_database_is_refused_and_kept,

@@ -354,6 +354,19 @@ pub(crate) fn normalize_host(authority: &str) -> Option<String> {
     Some(host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase())
 }
 
+/// The request's host as sent: `Host`, or the HTTP/2 `:authority` when
+/// there is none. A `Host` that is not UTF-8 is `None`, never the URI's.
+#[cfg(feature = "_http_layers")]
+pub(crate) fn request_authority<'a>(
+    headers: &'a axum::http::HeaderMap,
+    uri: &'a axum::http::Uri,
+) -> Option<&'a str> {
+    match headers.get(axum::http::header::HOST) {
+        Some(v) => v.to_str().ok(),
+        None => uri.authority().map(axum::http::uri::Authority::as_str),
+    }
+}
+
 /// `true` when `path` is under `prefix` by whole segment, so `/beacon`
 /// does not match `/beacon-admin`. A prefix ending in `/` matches its subtree.
 #[cfg_attr(not(any(feature = "_http_layers", feature = "csrf")), allow(dead_code))]

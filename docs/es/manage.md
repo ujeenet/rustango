@@ -980,6 +980,11 @@ cargo run -- create-tenant gamma --mode database --server main
 | `--port <n>` | Puerto en el que el tenant es accesible, para el enrutado |
 | `--path-prefix <s>` | Prefijo de ruta bajo el que el tenant es accesible, para el enrutado |
 | `--admin-email <e>` / `--admin-username <u>` | Crea el primer superusuario del tenant (ver **Primer administrador** arriba) |
+| `--resume` | Termina un tenant que una ejecución anterior dejó inactivo porque fallaron sus migraciones; repite las mismas opciones |
+
+Si fallan las migraciones del tenant, `create-tenant` termina con un código
+distinto de cero y el tenant queda inactivo. Corrige la migración y vuelve a
+ejecutar el mismo comando con `--resume`: migra y activa ese tenant.
 
 Cada modo comprueba sus permisos antes de crear nada y, cuando falta uno, lo
 nombra e imprime las sentencias que lo arreglan: el modo schema necesita el

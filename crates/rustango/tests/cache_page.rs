@@ -1472,3 +1472,83 @@ async fn a_reflected_cache_token_never_gets_the_visitors_nonce() {
         assert!(body.ends_with("__RUSTANGO_CACHED_NONCE__"), "{body}");
     }
 }
+
+/// Every value of the request's `vary_on` headers, joined, so the
+/// handler's view of a repeated header is the cache's too.
+fn echo_vary_app(cache: Arc<InMemoryCache>, name: &'static str) -> Router {
+    Router::new()
+        .route(
+            "/v",
+            get(move |headers: axum::http::HeaderMap| async move {
+                let all: Vec<String> = headers
+                    .get_all(name)
+                    .iter()
+                    .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+                    .collect();
+                format!("seen={}", all.join("|"))
+            }),
+        )
+        .layer(
+            CachePageLayer::new(cache)
+                .tenant_agnostic(true)
+                .cache_authenticated(true)
+                .vary_on([name]),
+        )
+}
+
+/// HTTP/2 sends each cookie in its own field: two users sharing the
+/// first cookie must not share a page.
+#[tokio::test]
+async fn vary_on_keys_every_value_of_a_repeated_header() {
+    let app = echo_vary_app(Arc::new(InMemoryCache::new()), "cookie");
+    let send = |second: &'static str| {
+        let req = Request::builder()
+            .uri("/v")
+            .header(header::COOKIE, "consent=yes")
+            .header(header::COOKIE, second)
+            .body(Body::empty())
+            .unwrap();
+        app.clone().oneshot(req)
+    };
+    let alice = send("session=alice").await.unwrap();
+    assert_eq!(
+        body_to_string(alice.into_body()).await,
+        "seen=consent=yes|session=alice"
+    );
+    let bob = send("session=bob").await.unwrap();
+    assert_eq!(
+        body_to_string(bob.into_body()).await,
+        "seen=consent=yes|session=bob",
+        "bob got alice's page"
+    );
+    // The same pair still hits.
+    let again = send("session=alice").await.unwrap();
+    assert_eq!(
+        again.headers().get("x-cache-status").unwrap(),
+        "HIT",
+        "a repeated header no longer caches"
+    );
+}
+
+/// A value that is not UTF-8 is not the same as no header at all.
+#[tokio::test]
+async fn a_non_utf8_vary_value_does_not_fill_the_missing_entry() {
+    let app = echo_vary_app(Arc::new(InMemoryCache::new()), "accept-language");
+    let odd = Request::builder()
+        .uri("/v")
+        .header(
+            header::ACCEPT_LANGUAGE,
+            axum::http::HeaderValue::from_bytes(b"\xffen").unwrap(),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let r = app.clone().oneshot(odd).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let plain = Request::builder().uri("/v").body(Body::empty()).unwrap();
+    let r = app.clone().oneshot(plain).await.unwrap();
+    assert_eq!(
+        body_to_string(r.into_body()).await,
+        "seen=",
+        "the header-less request got the non-UTF-8 page"
+    );
+}

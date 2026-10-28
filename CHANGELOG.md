@@ -4,6 +4,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — production safety: page cache, JWT keys, probes, HTTP/2 hosts, tenant CLI, DB URL
+
+- `CachePageLayer::vary_on` keys on every value of a repeated header (HTTP/2 sends each cookie apart); a non-UTF-8 value bypasses the cache.
+- `jwt::decode` and its variants refuse a key under 32 bytes, as `encode` does.
+- With `with_health()`, `/health` and `/ready` skip `[security] allowed_hosts` and `secure_ssl_redirect`, so probes by pod IP over HTTP pass.
+- `AllowedHostsLayer` reads the HTTP/2 `:authority` when there is no `Host`.
+- `create-tenant` exits non-zero when the tenant's migrations fail; `create-tenant … --resume` finishes that tenant.
+- A blank `DATABASE_URL` or `DB_*` var counts as unset, and an IPv6 `DB_HOST` is bracketed.
+
 ### Fixed — error pages, admin create form, console sign-in
 
 - The error-pages layer keeps every HTML error page the admin, tenant admin, operator console and generic views render, so a form shown again with its error (status 400/422) is no longer swapped for the generic page.

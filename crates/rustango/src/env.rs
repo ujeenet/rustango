@@ -428,7 +428,8 @@ impl DatabaseUrlBuilder {
     }
 
     /// Build `scheme://[user[:pw]@]host:port[/db][?params]`. Host
-    /// falls back to `localhost` and port to the driver's default.
+    /// falls back to `localhost` and port to the driver's default; an
+    /// IPv6 host such as `::1` is bracketed.
     #[must_use]
     pub fn build(&self) -> String {
         let scheme = self.driver.scheme();
@@ -443,7 +444,14 @@ impl DatabaseUrlBuilder {
             }
             out.push('@');
         }
-        out.push_str(host);
+        // An IPv6 literal needs brackets; a zone id's `%` is `%25` in a URL.
+        if host.contains(':') && !host.starts_with('[') {
+            out.push('[');
+            out.push_str(&host.replace('%', "%25"));
+            out.push(']');
+        } else {
+            out.push_str(host);
+        }
         out.push(':');
         out.push_str(&port.to_string());
         if let Some(db) = &self.database {
@@ -493,6 +501,8 @@ const DB_UNSET_HINT: &str = "set DATABASE_URL, or DB_USER + DB_NAME \
 ///    - `DB_NAME` (**required** when assembling; the file path for SQLite)
 ///    - `DB_PARAMS` (optional raw query string)
 ///
+/// A blank value counts as unset, so `DATABASE_URL=` falls through.
+///
 /// When both styles are set, `DATABASE_URL` wins and one warning per
 /// process says so. 0.62.0 flips this: the separate vars will win.
 ///
@@ -524,11 +534,11 @@ pub(crate) fn database_style_conflict() -> Option<String> {
 }
 
 fn database_style_conflict_with(get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
-    let url = get("DATABASE_URL")?;
+    let url = non_blank(get, "DATABASE_URL")?;
     let parts: Vec<&str> = DB_PART_VARS
         .iter()
         .copied()
-        .filter(|n| get(n).is_some_and(|v| !v.is_empty()))
+        .filter(|n| non_blank(get, n).is_some())
         .collect();
     if parts.is_empty() {
         return None;
@@ -555,7 +565,14 @@ fn warn_style_conflict_once(msg: &str) {
     }
 }
 
+/// `get`, with a blank value read as unset: `.env` templates ship
+/// `DATABASE_URL=` and `DB_HOST=`, which mean "not set", not "empty".
+fn non_blank(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
+    get(name).filter(|v| !v.trim().is_empty())
+}
+
 fn resolve_database_url(get: &dyn Fn(&str) -> Option<String>) -> Result<String, EnvError> {
+    let get = &|name: &str| non_blank(get, name);
     if let Some(url) = get("DATABASE_URL") {
         // One scheme downstream, so callers match on `postgres://`.
         if let Some(rest) = url.strip_prefix("postgresql://") {
@@ -1090,6 +1107,47 @@ mod tests {
             ("DB_PASSWORD_FILE", "/nonexistent/rustango-pw"),
         ]);
         assert!(resolve_database_url(&missing).is_err());
+    }
+
+    /// A blank var (a `.env` template's `DATABASE_URL=`) counts as unset.
+    #[test]
+    fn database_url_treats_blank_vars_as_unset() {
+        let get = vars(&[
+            ("DATABASE_URL", " "),
+            ("DB_DRIVER", ""),
+            ("DB_HOST", ""),
+            ("DB_PORT", ""),
+            ("DB_PASSWORD", ""),
+            ("DB_PARAMS", ""),
+            ("DB_USER", "u"),
+            ("DB_NAME", "d"),
+        ]);
+        assert_eq!(
+            resolve_database_url(&get).unwrap(),
+            "postgres://u@localhost:5432/d"
+        );
+        assert!(database_style_conflict_with(&get).is_none());
+        match resolve_database_url(&vars(&[("DB_USER", ""), ("DB_NAME", "d")])).unwrap_err() {
+            EnvError::MissingRequired { name, .. } => assert_eq!(name, "DB_USER"),
+            other => panic!("wrong variant: {other:?}"),
+        }
+        assert!(matches!(
+            resolve_database_url(&vars(&[("DATABASE_URL", ""), ("DB_HOST", "")])),
+            Err(EnvError::MissingRequired { ref name, .. }) if name == "DATABASE_URL"
+        ));
+    }
+
+    #[test]
+    fn database_url_brackets_an_ipv6_host() {
+        let get = vars(&[("DB_HOST", "::1"), ("DB_USER", "u"), ("DB_NAME", "d")]);
+        assert_eq!(
+            resolve_database_url(&get).unwrap(),
+            "postgres://u@[::1]:5432/d"
+        );
+        let b = DatabaseUrlBuilder::new(DbDriver::Mysql).host("[fe80::1]");
+        assert_eq!(b.build(), "mysql://[fe80::1]:3306");
+        let b = DatabaseUrlBuilder::new(DbDriver::Mysql).host("fe80::1%eth0");
+        assert_eq!(b.build(), "mysql://[fe80::1%25eth0]:3306");
     }
 
     #[test]

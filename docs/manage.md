@@ -968,6 +968,11 @@ cargo run -- create-tenant gamma --mode database --server main
 | `--port <n>` | Port the tenant is reachable on, for routing |
 | `--path-prefix <s>` | Path prefix the tenant is reachable under, for routing |
 | `--admin-email <e>` / `--admin-username <u>` | Create the tenant's first superuser (see **First admin** above) |
+| `--resume` | Finish a tenant an earlier run left inactive because its migrations failed; give the same flags again |
+
+If the tenant's migrations fail, `create-tenant` exits non-zero and the
+tenant stays inactive. Fix the migration, then rerun the same command
+with `--resume`: it migrates and activates that tenant.
 
 Each mode checks its rights before anything is made and, when one is
 missing, names it and prints the statements that fix it: schema mode needs

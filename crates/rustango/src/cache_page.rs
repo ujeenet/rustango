@@ -382,6 +382,7 @@ impl PageKey {
     }
 
     /// The request's value of a `vary_on` header. Names are case-insensitive.
+    /// A header sent several times is its values joined by `\n`, in order.
     #[must_use]
     pub fn vary(mut self, name: impl AsRef<str>, value: impl Into<String>) -> Self {
         self.vary
@@ -516,14 +517,17 @@ where
             let Ok(generation) = read_generation(&cache, &counter).await else {
                 return inner.call(req).await;
             };
-            let key = compute_cache_key(
+            // A `vary_on` value that is not UTF-8 has no key of its own.
+            let Some(key) = compute_cache_key(
                 &prefix,
                 &req,
                 tenant.as_deref(),
                 &vary,
                 body_digest.as_deref(),
                 generation,
-            );
+            ) else {
+                return inner.call(req).await;
+            };
             let nonce = req.extensions().get::<crate::csp_nonce::Nonce>().cloned();
             let nonce = nonce.as_ref().map(crate::csp_nonce::Nonce::value);
 
@@ -773,7 +777,8 @@ fn request_page(req: &Request<Body>) -> (&str, &axum::http::Uri) {
     (host, uri)
 }
 
-/// The key of the request the layer is serving.
+/// The key of the request the layer is serving; `None` when a `vary_on`
+/// value is not UTF-8, so it cannot share the missing header's entry.
 fn compute_cache_key(
     prefix: &str,
     req: &Request<Body>,
@@ -781,26 +786,37 @@ fn compute_cache_key(
     vary_on: &[HeaderName],
     body_digest: Option<&str>,
     generation: u64,
-) -> String {
+) -> Option<String> {
     let (host, uri) = request_page(req);
-    build_key(
+    let values = vary_on
+        .iter()
+        .map(|name| Some((name.as_str(), vary_value(req.headers(), name)?)))
+        .collect::<Option<Vec<_>>>()?;
+    Some(build_key(
         prefix,
         req.method().as_str(),
         uri.path(),
         uri.query().unwrap_or(""),
         host,
         tenant,
-        vary_on.iter().map(|name| {
-            let v = req
-                .headers()
-                .get(name)
-                .and_then(|h| h.to_str().ok())
-                .unwrap_or("");
-            (name.as_str(), v)
-        }),
+        values.iter().map(|(n, v)| (*n, v.as_str())),
         body_digest,
         generation,
-    )
+    ))
+}
+
+/// Every value of `name`, in order, joined by `\n`: HTTP/2 sends each
+/// cookie in its own field. `\n` cannot occur in a value, so the join
+/// is unambiguous, and one value keys as before.
+fn vary_value(headers: &HeaderMap, name: &HeaderName) -> Option<String> {
+    let mut out = String::new();
+    for (i, v) in headers.get_all(name).iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(v.to_str().ok()?);
+    }
+    Some(out)
 }
 
 /// How long a generation counter lives: ten years, so it outlives any page.

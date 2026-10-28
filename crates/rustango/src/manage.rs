@@ -1331,7 +1331,11 @@ impl Cli {
         #[cfg(feature = "config")]
         let settings = self.settings_for_layers.as_ref();
         #[cfg(feature = "config")]
-        let api = dress_errors(apply_settings_layers_or_warn(api, settings), settings);
+        let (api, mut outer) = apply_settings_layers_or_warn(api, settings);
+        if self.health_endpoints {
+            outer = outer.map(OuterLayers::exempt_probes);
+        }
+        let api = dress_errors((api, outer), settings);
         let api = self.mount_observability(api);
         let api = match self.real_ip.clone() {
             Some(layer) => {
@@ -2042,6 +2046,17 @@ impl OuterLayers {
             app = app.allowed_hosts(l);
         }
         app
+    }
+
+    /// Let `/health` and `/ready` past the Host check and the redirect:
+    /// probes send the pod IP over plain HTTP.
+    #[cfg(feature = "config")]
+    fn exempt_probes(mut self) -> Self {
+        use crate::host_validation::AllowedHostsLayer;
+        use crate::ssl_redirect::SslRedirectLayer;
+        self.allowed_hosts = self.allowed_hosts.map(AllowedHostsLayer::exempt_probes);
+        self.ssl_redirect = self.ssl_redirect.map(SslRedirectLayer::exempt_probes);
+        self
     }
 
     #[cfg(feature = "tenancy")]
@@ -3386,11 +3401,11 @@ mod assemble_app_tests {
         let mut s = crate::config::Settings::default();
         s.security.allowed_hosts = vec!["example.com".into()];
         let app = Cli::new()
+            .api(Router::new().route("/page", axum::routing::get(|| async { "page" })))
             .with_settings(&s)
-            .with_health()
             .assemble_app(pool);
         let send = |host: &str| {
-            let req = Request::builder().uri("/health").header("host", host);
+            let req = Request::builder().uri("/page").header("host", host);
             app.clone().oneshot(req.body(Body::empty()).unwrap())
         };
         let ok = send("example.com").await.expect("request");
@@ -3398,6 +3413,37 @@ mod assemble_app_tests {
         assert!(ok.headers().contains_key("x-frame-options"));
         let bad = send("evil.example").await.expect("request");
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A probe by pod IP over plain HTTP still reaches `/health` and
+    /// `/ready`; other paths keep the Host check and the redirect.
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn health_probes_skip_the_host_check_and_https_redirect() {
+        let _serial = serialized();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let mut s = crate::config::Settings::default();
+        s.security.allowed_hosts = vec!["example.com".into()];
+        s.security.secure_ssl_redirect = Some(true);
+        let app = Cli::new()
+            .api(Router::new().route("/page", axum::routing::get(|| async { "page" })))
+            .with_settings(&s)
+            .with_health()
+            .assemble_app(pool);
+        let send = |host: &str, path: &str| {
+            let req = Request::builder().uri(path).header("host", host);
+            app.clone().oneshot(req.body(Body::empty()).unwrap())
+        };
+        for path in ["/health", "/ready"] {
+            let r = send("10.0.0.5:8080", path).await.expect("request");
+            assert_eq!(r.status(), StatusCode::OK, "{path}");
+        }
+        let r = send("10.0.0.5:8080", "/page").await.expect("request");
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        let r = send("example.com", "/page").await.expect("request");
+        assert_eq!(r.status(), StatusCode::MOVED_PERMANENTLY);
     }
 
     /// `[security] csrf_trusted_origins` reaches both CSRF mounts.

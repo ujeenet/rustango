@@ -662,16 +662,67 @@ pub async fn provision_tenant_recorded<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    let by = RunBy {
+        requested_by,
+        idempotency_key,
+    };
+    recorded(pools, registry_url, dir, request, observer, by, false).await
+}
+
+/// [`provision_tenant_recorded`] that, with `resume`, finishes a tenant
+/// an earlier failed run left inactive, as `create-tenant --resume` does.
+pub(crate) async fn provision_tenant_recorded_or_resume<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    request: &ProvisionRequest,
+    observer: Option<&dyn ProvisionObserver>,
+    requested_by: Option<&str>,
+    resume: bool,
+) -> Result<(super::provision_store::ProvisioningRun, ProvisionOutcome), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let by = RunBy {
+        requested_by,
+        idempotency_key: None,
+    };
+    recorded(pools, registry_url, dir, request, observer, by, resume).await
+}
+
+/// Who asked for a recorded run.
+struct RunBy<'a> {
+    requested_by: Option<&'a str>,
+    idempotency_key: Option<&'a str>,
+}
+
+async fn recorded<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    request: &ProvisionRequest,
+    observer: Option<&dyn ProvisionObserver>,
+    by: RunBy<'_>,
+    resume: bool,
+) -> Result<(super::provision_store::ProvisioningRun, ProvisionOutcome), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     use super::provision_store as store;
+    let RunBy {
+        requested_by,
+        idempotency_key,
+    } = by;
 
     let registry = pools.registry_pool();
     // A taken slug leaves no failed run behind. A lookup error falls
     // through, so Validate records it; Validate also checks again.
+    // Resuming, an inactive row goes on to Validate, which decides.
     let taken = Org::objects()
         .where_(Org::slug.eq(request.slug.clone()))
         .first(&registry)
         .await;
-    if matches!(taken, Ok(Some(_))) {
+    if matches!(&taken, Ok(Some(org)) if !resume || org.active) {
         return Err(TenancyError::Validation(format!(
             "tenant slug `{}` already exists",
             request.slug
@@ -689,7 +740,7 @@ where
     .await?;
     let run_id = run.id.get().copied().unwrap_or_default();
 
-    let outcome = in_run(pools, registry_url, dir, request, observer, run_id, false)
+    let outcome = in_run(pools, registry_url, dir, request, observer, run_id, resume)
         .await
         // A pre-row failure still closed the run inside
         // `provision_tenant_in_run`; propagate the reason unchanged.

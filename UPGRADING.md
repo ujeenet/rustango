@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Probes, HTTP/2 hosts, short JWT keys, tenant CLI exit code
+
+With `with_health()`, `/health` and `/ready` no longer get the Host check or the HTTPS redirect. HTTP/2 requests now pass `allowed_hosts` by `:authority` instead of getting 400. `jwt::decode*` returns `JwtError::Decode` for a key under 32 bytes. `create-tenant` now exits non-zero when tenant migrations fail; rerun it with `--resume`. A blank `DATABASE_URL=` now falls through to the `DB_*` vars. A repeated `vary_on` header changes the page-cache key, so those pages miss once.
+
 ### Error pages keep the framework's own HTML pages
 
 With `[errors] enabled = true`, an HTML 4xx/5xx from the admin, tenant admin, operator console or generic views now passes through as rendered. A plain-text or JSON error from them is still dressed. On the admin add form, a blank NOT NULL non-text field with a column default now takes that default instead of failing.
