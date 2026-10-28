@@ -197,6 +197,7 @@ pub(crate) fn is_prod_tier(raw: &str) -> bool {
 
 /// Listener address when neither `RUSTANGO_BIND` nor `[server] bind` is set:
 /// all interfaces on prod and staging, like their scaffolded tiers; loopback elsewhere.
+#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
 pub(crate) fn default_bind(tier: &str) -> &'static str {
     match canonical_tier(tier).as_str() {
         "prod" | "staging" => "0.0.0.0:8080",

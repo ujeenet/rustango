@@ -67,6 +67,12 @@ async fn console(pool: &Pool) -> Console {
         sessions_revoked_at: None,
     };
     op.insert_pool(pool).await.expect("seed operator");
+    // Operator ids restart when another suite recreates the operators table,
+    // so a device left by the TOTP suite could claim this id; clear it.
+    let _ = rustango::tenancy::operator_totp::OperatorTotp::objects()
+        .filter("operator_id", op.id.get().copied().unwrap_or_default())
+        .delete_on(pool)
+        .await;
     let mut c = Console {
         app,
         pool: pool.clone(),
@@ -79,7 +85,11 @@ async fn console(pool: &Pool) -> Console {
             format!("username={}&password={PASSWORD}", op.username),
         )
         .await;
-    assert!(login.status().is_redirection(), "operator login");
+    assert!(
+        login.status().is_redirection(),
+        "operator login: {}",
+        login.status()
+    );
     c.cookie = login
         .headers()
         .get_all(header::SET_COOKIE)

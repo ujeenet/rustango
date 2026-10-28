@@ -66,6 +66,7 @@ fn resolve_key(env: Option<String>, dev: impl FnOnce() -> Option<String>) -> Opt
 
 /// Where the dev and test tiers keep a generated key, beside the session key.
 #[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
 pub(crate) const DEV_KEY_PATH: &str = "./var/.rustango_secret.key";
 
 /// The dev key file, once [`use_dev_key_file`] allowed it; read on first use.
@@ -92,6 +93,7 @@ fn dev_key() -> Option<String> {
 /// Boot: on the dev and test tiers an unset key falls back to a generated
 /// one saved at `path`. Any other tier keeps requiring the env var.
 #[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
 pub(crate) fn use_dev_key_file(tier: &str, path: &std::path::Path) -> bool {
     if !dev_key_tier(tier) {
         return false;
@@ -105,6 +107,7 @@ pub(crate) fn use_dev_key_file(tier: &str, path: &std::path::Path) -> bool {
 
 /// [`use_dev_key_file`] for `RUSTANGO_ENV` and [`DEV_KEY_PATH`]; every boot path calls it.
 #[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
 pub(crate) fn use_dev_key_file_for_env() -> bool {
     use_dev_key_file(
         &crate::env::tier_from_env(),
