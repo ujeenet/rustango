@@ -30,7 +30,7 @@ Der Name einer Methode sagt Ihnen, was sie tut. Sobald Sie diese Suffixe gelernt
 ### Funktionen
 
 - **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — der schlichte Name nimmt einen `rustango::sql::Pool` und ist der Alltagsweg. Er funktioniert auf Postgres, MySQL und SQLite und wählt den Dialekt intern. Das ist es, was fast jeder Anwendungscode will.
-- **`fetch_on(executor)`, `count_on(executor)`** — das Suffix `_on` bedeutet „führe dies gegen den *Executor* aus, den ich dir übergebe“ — eine Verbindung oder eine offene Transaktion statt des Pools. Greif dazu, wenn du mehrere Statements in einer Transaktion brauchst. **`_on`-Methoden sind nur für Postgres** (`#[cfg(feature = "postgres")]`).
+- **`fetch_on(executor)`, `count_on(executor)`** — das Suffix `_on` bedeutet „führe dies gegen den *Executor* aus, den ich dir übergebe“ — eine Verbindung oder eine offene Transaktion statt des Pools. Greif dazu, wenn du mehrere Statements in einer Transaktion brauchst. `fetch_on` / `first_on` / `count_on` / `exists_on` und das `fetch_on` von `values` / `aggregate` nehmen jeden `SqlExecutor` (`&mut PoolConn`, `&mut PoolTx`, `&Pool`) auf allen drei Backends; der Rest der `_on`-Familie ist weiterhin nur für Postgres.
 - **Schreibvorgänge kehren dies um, und das ist die einzige Stelle, an der die Regel nicht gilt.** `save(&pool)`, `insert(&pool)` und `delete(&pool)` nehmen einen treiberspezifischen `sqlx::PgPool`; auf einem Build ohne das Feature `postgres` **existieren sie gar nicht** — die Auswahl von `sqlite` lässt die Methode verschwinden, statt mit einer Meldung zu scheitern, die die Ursache benennt. Die Mehr-Backend-Varianten tragen das Suffix `_pool`: `save_pool`, `insert_pool`, `delete_pool`, jeweils mit `rustango::sql::Pool`.
 
   | | schlichter Name | Mehr-Backend-Variante |
@@ -267,16 +267,23 @@ Verwenden, wenn:
 Ein *Feature* ist ein Cargo-Build-Flag (das `[features]` von `Cargo.toml`), das einen Teil des Crates ein- oder ausschaltet — die Liste der installierten Bestandteile Ihrer Anwendung, aber zur Kompilierzeit aufgelöst. Jedes Modul, das eine zusätzliche Abhängigkeit hereinzieht, sitzt hinter einem. Der Standardsatz lautet „die wollen Sie mit ziemlicher Sicherheit“:
 
 ```toml
-default = [
-    "postgres", "manage", "admin", "config", "forms", "serializer",
-    "cache", "signals", "email", "storage", "scheduler", "secrets", "totp",
-    "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url",
-    "notifications", "casts", "jobs", "jobs-postgres", "auth_flows", "sse",
-    "websocket", "oauth2", "http-client", "compression", "openapi",
-    "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3",
-    "media", "runserver", "template_views",
+default = ["postgres", "batteries"]
+
+batteries = [
+    "manage", "admin", "config", "forms", "serializer", "cache", "signals",
+    "email", "storage", "scheduler", "secrets", "totp", "webhook",
+    "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications",
+    "casts", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket",
+    "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions",
+    "hmac-auth", "jwt", "uploads", "storage-s3", "storage-azure", "media",
+    "runserver", "template_views",
 ]
 ```
+
+Die Indirektion ist Absicht: `batteries` ist ein einziger Name, den ein
+nachgelagertes Crate abschalten kann — `default-features = false, features = ["postgres"]` —
+ohne die Liste neu aufzuschreiben. Die Alternative, alle achtunddreißig in
+`default` zu schreiben, hieße, dass jeder, der sich abmeldet, alle achtunddreißig kennen muss.
 
 **Standardmäßig aus:** Features, die schwere Abhängigkeiten oder externe Dienste hereinziehen:
 - `tenancy` — fügt `argon2`, `hmac`, `sha2`, `cookie`, `tower` hinzu (die meisten Anwendungen brauchen es nicht)

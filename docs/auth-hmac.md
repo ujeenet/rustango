@@ -27,6 +27,7 @@ tower layer.
 - [What gets signed](#what-gets-signed)
 - [Server: verify with the layer](#server-verify-with-the-layer)
 - [Client: sign a request](#client-sign-a-request)
+- [Multi-tenant apps](#multi-tenant-apps)
 - [Clock skew and replay](#clock-skew-and-replay)
 - [Limits](#limits)
 - [See also](#see-also)

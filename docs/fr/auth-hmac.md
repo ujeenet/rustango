@@ -28,6 +28,7 @@ sous la forme d'une seule couche tower.
 - [Ce qui est signé](#ce-qui-est-signé)
 - [Serveur : vérifier avec la couche](#serveur--vérifier-avec-la-couche)
 - [Client : signer une requête](#client--signer-une-requête)
+- [Applications multi-tenant](#applications-multi-tenant)
 - [Dérive d'horloge et rejeu](#dérive-dhorloge-et-rejeu)
 - [Limites](#limites)
 - [Voir aussi](#voir-aussi)

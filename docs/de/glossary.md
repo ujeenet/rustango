@@ -123,10 +123,19 @@ Handler und danach — für querschnittliche Belange wie Logging, Rate-Limiting,
 Security-Header oder CSRF. „Layer" ist Rustangos Wort für ein Stück
 Middleware. Siehe den [Middleware-Leitfaden](middleware.md).
 
-**Pool (oder Executor)** — die Datenbankverbindung, die dein Code zum Lesen und
-Schreiben verwendet. Rustango bittet dich, den Pool bei jedem Datenbankaufruf explizit zu übergeben
-(statt ihn in einem Global zu verstecken), sodass immer klar ist, was die
-Datenbank berührt. Du wirst `&pool` als letztes Argument von ORM-Aufrufen sehen.
+**Pool** — das Datenbank-Handle, mit dem dein Code liest und schreibt. Rustango
+bittet dich, es bei jedem Datenbankaufruf explizit zu übergeben (statt es in einem
+Global zu verstecken), sodass immer klar ist, was die Datenbank berührt. Du wirst
+`&pool` als letztes Argument von ORM-Aufrufen sehen. `rustango::sql::Pool` ist ein
+Enum über die drei Backends, und die alltäglichen Methoden nehmen es.
+
+**Executor** — *kein* Synonym für Pool. Ein Executor ist eine einzelne Verbindung
+oder eine offene Transaktion: das, worauf ein Statement tatsächlich läuft. Methoden
+mit der Endung `_on` nehmen einen, so bringst du mehrere Statements in eine
+Transaktion. `fetch_on`, `first_on`, `count_on` und `exists_on` nehmen jeden
+Executor auf allen drei Backends; der Rest der `_on`-Familie ist weiterhin nur für
+Postgres. Die Unterscheidung entscheidet, welche Methoden es in deinem Build gibt,
+deshalb erklärt [api-conventions](api-conventions.md#funktionen) die Regel vollständig.
 
 **QuerySet** — eine Datenbankabfrage, die du Schritt für Schritt in Rust aufbaust
 (`Post::objects().filter(...).order_by(...)`), bevor du sie ausführst. Sie ist lazy:

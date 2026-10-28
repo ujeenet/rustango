@@ -131,8 +131,9 @@ backends, and it is what the everyday methods take.
 
 **Executor** — *not* a synonym for pool. An executor is a single connection or
 an open transaction: the thing a statement actually runs on. Methods ending
-`_on` take one, which is how you put several statements inside one transaction —
-and they are Postgres-only (`#[cfg(feature = "postgres")]`). The distinction
+`_on` take one, which is how you put several statements inside one transaction.
+`fetch_on`, `first_on`, `count_on` and `exists_on` take any executor on all three
+backends; the rest of the `_on` family is still Postgres-only. The distinction
 decides which methods exist on your build, so
 [api-conventions](api-conventions.md#functions) spells the rule out in full.
 

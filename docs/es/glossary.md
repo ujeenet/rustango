@@ -133,8 +133,9 @@ métodos de uso diario.
 **Executor** — *no* es un sinónimo de pool. Un executor es una sola conexión o una
 transacción abierta: aquello sobre lo que realmente se ejecuta una sentencia. Los
 métodos que terminan en `_on` reciben uno, y así es como metes varias sentencias
-en una misma transacción — y son solo para Postgres (`#[cfg(feature = "postgres")]`).
-La distinción decide qué métodos existen en tu build, así que
+en una misma transacción. `fetch_on`, `first_on`, `count_on` y `exists_on` aceptan
+cualquier executor en los tres backends; el resto de la familia `_on` sigue siendo
+solo para Postgres. La distinción decide qué métodos existen en tu build, así que
 [api-conventions](api-conventions.md#funciones) explica la regla completa.
 
 **QuerySet** — una consulta a la base de datos que construyes paso a paso en Rust

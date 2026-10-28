@@ -282,8 +282,8 @@ batteries = [
 
 The indirection is deliberate: `batteries` is a single name a downstream
 crate can switch off — `default-features = false, features = ["postgres"]` —
-without having to restate the list. The alternative, spelling all thirty-seven
-into `default`, means anyone opting out has to know all thirty-seven.
+without having to restate the list. The alternative, spelling all thirty-eight
+into `default`, means anyone opting out has to know all thirty-eight.
 
 **Off by default:** features that pull in heavy dependencies or external services:
 - `tenancy` — adds `argon2`, `hmac`, `sha2`, `cookie`, `tower` (most apps don't need it)
