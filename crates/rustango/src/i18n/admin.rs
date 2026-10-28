@@ -301,8 +301,9 @@ pub fn cleared_cells<'a>(
         .collect()
 }
 
-/// Upsert each edit that [`changed_edits`] keeps. Returns the count
-/// written. `updated_by` records the operator.
+/// Upsert each edit that [`changed_edits`] keeps, skipping one whose key
+/// the table cannot hold. Returns the count written. `updated_by` records
+/// the operator.
 ///
 /// # Errors
 /// As the ORM upsert path ([`crate::sql::ExecError`]).
@@ -313,7 +314,8 @@ pub async fn apply_edits(
     updated_by: &str,
 ) -> Result<usize, crate::sql::ExecError> {
     let current = editor_rows(pool).await?;
-    let changed = changed_edits(&current, edits);
+    let mut changed = changed_edits(&current, edits);
+    changed.retain(|(locale, key, _)| crate::i18n::db::storable(locale, key));
     for (locale, key, value) in &changed {
         upsert_pool(pool, locale, key, value, updated_by).await?;
     }

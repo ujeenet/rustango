@@ -854,6 +854,17 @@ async fn migrate<W: Write>(
     }
 
     if let Some(target) = positional {
+        // A forward target needs the framework tables its migrations may FK.
+        if target != "zero" && !target_is_applied(pool, target).await? {
+            return migrate_with_framework(
+                pool,
+                dir,
+                w,
+                runner::Signals::Fire { tenant: None },
+                |held| runner::migrate_to_locked(held, pool, dir, target, runner::LEDGER_TABLE),
+            )
+            .await;
+        }
         let touched = runner::migrate_to_pool(pool, dir, target).await?;
         if touched.is_empty() {
             writeln!(w, "already at {target}")?;
@@ -873,6 +884,14 @@ async fn migrate<W: Write>(
         |held| runner::migrate_pool_locked(held, pool, dir, None),
     )
     .await
+}
+
+async fn target_is_applied(pool: &Pool, target: &str) -> Result<bool, MigrateError> {
+    let applied = runner::with_migrate_lock_held(pool, |held| {
+        runner::ledger_names(held, pool, runner::LEDGER_TABLE)
+    })
+    .await?;
+    Ok(applied.contains(target))
 }
 
 /// The framework chain `migrate` runs beside the project's, read from disk
@@ -1685,6 +1704,22 @@ pub(crate) async fn forget_pending_cmd_with<W: Write>(
             "forget-pending: migration `{}` is already applied on tenant `{slug}`. \
              Unapply it there first.",
             migration.name,
+        )));
+    }
+
+    // Only a leaf: a later file naming it in `prev`/`merges` breaks the chain.
+    let dependants: Vec<&str> = all
+        .iter()
+        .filter(|m| {
+            m.prev.as_deref() == Some(migration.name.as_str()) || m.merges.contains(&migration.name)
+        })
+        .map(|m| m.name.as_str())
+        .collect();
+    if !dependants.is_empty() {
+        return Err(MigrateError::Validation(format!(
+            "forget-pending: `{}` is built on by {}; forget those first",
+            migration.name,
+            dependants.join(", "),
         )));
     }
 
@@ -2596,6 +2631,15 @@ fn pascal_to_snake(s: &str) -> String {
     out
 }
 
+/// Write a generated source file. A project that renamed the dependency
+/// (`rgo = { package = "rustango", .. }`) gets its name in the code.
+fn write_source(path: &std::path::Path, body: &str) -> std::io::Result<()> {
+    match super::scaffold::renamed_dep(std::path::Path::new(".")) {
+        Some(to) => std::fs::write(path, super::scaffold::rename_dep(body, &to)),
+        None => std::fs::write(path, body),
+    }
+}
+
 fn write_generated<W: Write>(
     w: &mut W,
     file_name: &str,
@@ -2611,7 +2655,7 @@ fn write_generated<W: Write>(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, contents)?;
+    write_source(&path, &contents)?;
     writeln!(w, "wrote {}", path.display())?;
     // Lead with whichever entry the project actually has. A scaffolded
     // project keeps its modules in the library so that binaries under
@@ -3134,7 +3178,7 @@ fn make_api_routes_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
     } else {
         api_routes_template_pool(app, &crate_root)
     };
-    std::fs::write(&path, body)?;
+    write_source(&path, &body)?;
     writeln!(w, "wrote {}", path.display())?;
     writeln!(
         w,
@@ -3506,7 +3550,7 @@ fn write_generated_bin<W: Write>(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, contents)?;
+    write_source(&path, &contents)?;
     writeln!(w, "wrote {}", path.display())?;
     // No `[[bin]]` stanza needed: cargo picks up `src/bin/*.rs` on its own.
     writeln!(w, "  run it with `cargo run --bin {bin_name}`")?;
@@ -3626,7 +3670,7 @@ async fn {snake}() {{
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, body)?;
+    write_source(&path, &body)?;
     writeln!(w, "wrote {}", path.display())?;
     Ok(())
 }
@@ -7165,6 +7209,35 @@ mod gen_tests {
         }
         let err = make_cmd("make:test", &[], &mut Vec::new(), none).unwrap_err();
         assert!(err.to_string().contains("`admin`"), "{err}");
+    }
+
+    /// In a project that renamed the dependency to `rgo`, `make:*` writes `rgo::`.
+    #[test]
+    fn make_verbs_follow_a_renamed_dependency() {
+        let _guard = cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"short\"\n\n[dependencies]\n\
+             rgo = { package = \"rustango\", version = \"0.61\" }\n",
+        )
+        .unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let run = make_cmd(
+            "make:job",
+            &["SendMail".to_owned()],
+            &mut Vec::new(),
+            |_| true,
+        );
+        let body = std::fs::read_to_string("src/send_mail.rs");
+        let _ = std::env::set_current_dir(&prev);
+        run.unwrap();
+        let body = body.unwrap();
+        assert!(
+            body.contains("rgo::") && !body.contains("rustango::"),
+            "{body}"
+        );
     }
 
     /// The pool viewset needs `admin`; the tenant one only `tenancy`.

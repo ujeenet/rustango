@@ -65,6 +65,23 @@ pub struct Translation {
 const LOCALE_LEN: u32 = 16;
 const KEY_LEN: u32 = 200;
 
+/// `true` when `(locale, key)` fits the table; a longer catalog key stays
+/// file-only rather than failing the rows beside it.
+pub(crate) fn storable(locale: &str, key: &str) -> bool {
+    let fits = |s: &str, max: u32| u32::try_from(s.chars().count()).is_ok_and(|n| n <= max);
+    let ok = fits(locale, LOCALE_LEN) && fits(key, KEY_LEN);
+    if !ok {
+        tracing::warn!(
+            target: "rustango::i18n",
+            locale,
+            key_chars = key.chars().count(),
+            "translation key longer than {KEY_LEN} chars (or locale over {LOCALE_LEN}) \
+             is not stored in the database; it keeps its file value"
+        );
+    }
+    ok
+}
+
 /// The `CREATE TABLE` for this dialect.
 ///
 /// Both timestamp columns take type *and* `DEFAULT` from
@@ -240,7 +257,8 @@ pub async fn upsert_pool(
 /// `(locale, key)` rows are left untouched (`ON CONFLICT DO NOTHING`),
 /// so files stay the source of truth for shipped defaults and only
 /// previously-unknown keys are added. Idempotent — safe to run on every
-/// boot. Returns the number of file entries processed.
+/// boot. Returns the number of file entries processed. A key longer than
+/// the `key` column is skipped with a warning and keeps its file value.
 ///
 /// The on-disk path is the caller's: load with
 /// `Translator::from_directory(dir, default)?` then hand the result here
@@ -255,6 +273,7 @@ pub async fn seed_from_translator_pool(
     let rows: Vec<Translation> = translator
         .entries()
         .into_iter()
+        .filter(|(locale, key, _)| storable(locale, key))
         .map(|(locale, key, value)| Translation {
             id: Auto::Unset,
             locale,

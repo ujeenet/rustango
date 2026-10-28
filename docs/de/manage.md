@@ -84,7 +84,7 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 | `downgrade [N]` | Rollt die letzten N Migrationen zurück |
 | `showmigrations` / `status` | Listet Migrationen und ihren Anwendungsstand |
 | `sqlmigrate <name>` | Gibt das SQL einer Migration aus, ohne es auszuführen |
-| `forget-pending <name>` | Löscht eine noch nicht angewendete Migrations-JSON |
+| `forget-pending <name>` | Löscht eine noch nicht angewendete Migrations-JSON, auf der keine spätere aufbaut |
 | `add-data-op --sql <SQL> [--reverse-sql <SQL>]` | Hängt eine handgeschriebene Datenoperation an |
 | `inspectdb [--schema <s>] [--table <t>]` | Liest ein bestehendes Schema und erzeugt `#[derive(Model)]`-Quellcode |
 

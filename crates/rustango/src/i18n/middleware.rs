@@ -165,10 +165,10 @@ impl LocaleMiddleware {
         // 1. Cookie
         if let Some(name) = cfg.cookie_name.as_deref() {
             if let Some(value) = crate::cookies::cookie_from_headers(req.headers(), name) {
-                // Same form as the Accept-Language path: `pt_BR` ≡ `pt-BR`.
-                let locale = Locale::new(value).0;
-                if cfg.available.contains(&locale) {
-                    return locale;
+                // Matched as the Accept-Language path is: `pt_BR` ≡ `pt-BR`,
+                // and `fr-CA` falls back to `fr`.
+                if let Some(matched) = negotiate_language(&Locale::new(value).0, &cfg.available) {
+                    return matched;
                 }
             }
         }
@@ -324,6 +324,14 @@ mod tests {
         assert_eq!(mw.pick(&req("/", Some("pt-BR"), None)), "pt-br");
         let mw = LocaleMiddleware::new(&["pt-BR"]).default("pt_BR");
         assert_eq!(mw.pick(&req("/", None, None)), "pt-br");
+    }
+
+    /// A regional cookie falls back to its base language, as the header does.
+    #[test]
+    fn regional_cookie_falls_back_to_its_base_language() {
+        let mw = LocaleMiddleware::new(&["en", "fr"]).default("en");
+        let r = req("/", Some("en"), Some("django_language=fr-CA"));
+        assert_eq!(mw.pick(&r), "fr");
     }
 
     #[test]

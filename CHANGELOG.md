@@ -52,9 +52,23 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `#[derive(Model)]` reads `#[rgo(...)]` like `#[rustango(...)]`; both names on one item or field is a compile error.
 - `cargo rgo` runs the `cargo rustango` scaffolder, and `cargo rustango new --alias rgo` writes `rgo = { package = "rustango", … }` with `rgo::` paths and `#[rgo(...)]` in the generated code.
 
+### Fixed — migrations, auth, i18n, admin and REST
+
+- `manage migrate <target>` applies the framework's system chain first, so a project migration with an FK to a framework table runs on a fresh database.
+- `forget-pending` refuses a migration that a later one names in `prev` or `merges`, and names those files.
+- A data op with several SQL statements runs on PG and MySQL too; data-op SQL is sent unprepared.
+- Password-reset, email-verification and magic links join a `base_url` query with `&` and keep a `#fragment` last; signed URLs leave the fragment out of the signature.
+- The i18n seed and the translations editor skip, with a warning, a key longer than the 200-char column instead of failing every row.
+- `LocaleMiddleware` matches the language cookie like `Accept-Language`, so `fr-CA` falls back to `fr`.
+- Admin list facets on a field named `page`, `q`, `year`, `month`, `day`, `count`, `trashed` or `facet_show_all` link `?<field>__exact=` and filter.
+- A ViewSet's create/update body cap follows a `BodyLimitLayer`, raised or lowered; without one it stays 4 MiB.
+- `derive(Model)` with a `Decimal` field builds with the `sqlite` feature; SQLite reads it from its NUMERIC cell (a `SUM` there is still `f64`).
+- `manage startapp` and `make:*` write `rgo::` paths and `#[rgo(...)]` in a project whose Cargo.toml renames the dependency to `rgo`.
+
 ### Changed — SaaS soak example
 
 - `platform_commerce_saas` ViewSets need a Bearer token and the model's codenames; the soak signs in with a per-tenant API user. `/shop` stays anonymous, and the single-database twin keeps open ViewSets until it has API sign-in.
+- `platform_commerce_saas` `POST /api/v1/orders/{id}/confirm` needs a Bearer token and the order change codename.
 
 ### Fixed — ORM shortcuts
 

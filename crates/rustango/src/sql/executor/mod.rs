@@ -1649,6 +1649,24 @@ pub async fn run_ddl_idempotent(pool: &Pool, ddl: &str) -> Result<(), sqlx::Erro
     Ok(())
 }
 
+/// Run bind-free SQL unprepared, so a script of several statements runs on
+/// every backend (PG and MySQL refuse that as one prepared statement).
+///
+/// # Errors
+/// The driver's [`sqlx::Error`].
+pub(crate) async fn execute_unprepared_pool(pool: &Pool, sql: &str) -> Result<(), sqlx::Error> {
+    use sqlx::Executor as _;
+    crate::test_assertions::query_counter::bump();
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(p) => p.execute(sqlx::raw_sql(sql)).await.map(drop),
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(p) => p.execute(sqlx::raw_sql(sql)).await.map(drop),
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(p) => p.execute(sqlx::raw_sql(sql)).await.map(drop),
+    }
+}
+
 // ---- internal dispatch helpers ----
 
 /// Run a parameterized statement that returns no rows. Shared by the
@@ -2222,8 +2240,9 @@ where
 mod values;
 #[allow(unused_imports)]
 pub use values::{
-    fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, try_get_flat_my,
-    try_get_flat_sqlite, FlatScalar, MaybeMyScalar, MaybePgScalar, MaybeSqliteScalar,
+    fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, try_get_flat,
+    try_get_flat_my, try_get_flat_sqlite, FlatScalar, MaybeMyScalar, MaybePgScalar,
+    MaybeSqliteScalar,
 };
 pub(crate) use values::{fetch_values_flat_on, fetch_values_list_on};
 

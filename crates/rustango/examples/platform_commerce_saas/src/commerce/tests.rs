@@ -216,7 +216,7 @@ async fn anonymous_api_writes_are_refused() {
         .await
         .expect("connect");
     let ctx = std::sync::Arc::new(TenantContext {
-        pools: std::sync::Arc::new(TenantPools::new(registry)),
+        pools: std::sync::Arc::new(TenantPools::new(registry.clone())),
         resolver: ChainResolver::new().push(OneTenant(org)),
         session_secret: SessionSecret::from_bytes(vec![1; 32]),
         operator_secret: SessionSecret::from_bytes(vec![2; 32]),
@@ -225,7 +225,15 @@ async fn anonymous_api_writes_are_refused() {
         session_secret: Some(vec![3; 32]),
         ..Config::default()
     });
-    let app = super::urls::rest_api(&auth).layer(axum::Extension(ctx));
+    let state = super::urls::AppState {
+        queues: std::sync::Arc::default(),
+        fail_ratio_pct: 0,
+        registry: registry.into(),
+        pool_cfg: rustango::tenancy::TenantPoolsConfig::default(),
+    };
+    let app = super::urls::rest_api(&auth)
+        .merge(super::urls::order_actions(&auth).with_state(state))
+        .layer(axum::Extension(ctx));
 
     let mut writes = Vec::new();
     for prefix in [
@@ -243,6 +251,7 @@ async fn anonymous_api_writes_are_refused() {
             writes.push((m, format!("/api/v1/{prefix}/1")));
         }
     }
+    writes.push((Method::POST, "/api/v1/orders/1/confirm".to_owned()));
     for (method, path) in &writes {
         for bearer in [None, Some("Bearer not.a.token")] {
             let mut req = Request::builder()

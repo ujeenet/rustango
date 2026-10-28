@@ -178,7 +178,7 @@ pub struct Item {
 }
 ```
 
-`#[rgo(...)]` significa exactamente lo mismo que `#[rustango(...)]`, llames como llames a la dependencia. Un struct o campo usa un solo nombre: mezclar `#[rustango(...)]` y `#[rgo(...)]` en el mismo elemento es un error de compilación. Los generadores `manage startapp` y `make:*` siguen escribiendo rutas `rustango::`; renómbralas en los archivos que crean.
+`#[rgo(...)]` significa exactamente lo mismo que `#[rustango(...)]`, llames como llames a la dependencia. Un struct o campo usa un solo nombre: mezclar `#[rustango(...)]` y `#[rgo(...)]` en el mismo elemento es un error de compilación. `manage startapp` y los generadores `make:*` leen el Cargo.toml y también escriben rutas `rgo::` y `#[rgo(...)]`.
 
 ---
 

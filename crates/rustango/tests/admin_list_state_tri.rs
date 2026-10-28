@@ -107,6 +107,22 @@ pub struct Pet {
     pub owner_id: i64,
 }
 
+/// Fields named like the list's own params.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "adminls_car",
+    admin(list_display = "name, year, page", list_filter = "year, page")
+)]
+#[allow(dead_code)]
+pub struct Car {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+    pub year: i32,
+    pub page: i32,
+}
+
 /// Owner ids whose row the admin read for a display name.
 static OWNERS_READ: std::sync::Mutex<Vec<i64>> = std::sync::Mutex::new(Vec::new());
 /// Scenarios on [`OWNERS_READ`] run one at a time.
@@ -151,6 +167,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::drop_table(pool, "adminls_pet").await;
     rustango::testkit::matrix::fresh_table::<Owner>(pool).await;
     rustango::testkit::matrix::fresh_table::<Pet>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Car>(pool).await;
 }
 
 fn kind_filters(value: &str) -> Vec<Filter> {
@@ -553,6 +570,39 @@ async fn null_facet_lists_the_null_rows(pool: &Pool) {
     assert!(body.contains(r#"href="/adm/adminls_slug""#), "{body}");
 }
 
+/// A facet on a field named `year` or `page` filters on it, not on the
+/// date strip or the pager.
+async fn reserved_name_facets_filter(pool: &Pool) {
+    for (name, year, page) in [("car-aaa", 2020, 1), ("car-bbb", 2024, 2)] {
+        let mut c = Car {
+            id: Auto::default(),
+            name: name.into(),
+            year,
+            page,
+        };
+        c.insert_pool(pool).await.expect("insert car");
+    }
+    let body = get(pool, "/adminls_car").await;
+    for link in [
+        "/adminls_car?year__exact=2020",
+        "/adminls_car?page__exact=2",
+    ] {
+        assert!(body.contains(link), "{link}: {body}");
+    }
+    let body = get(pool, "/adminls_car?year__exact=2020").await;
+    assert!(
+        body.contains("car-aaa") && !body.contains("car-bbb"),
+        "{body}"
+    );
+    let body = get(pool, "/adminls_car?page__exact=2").await;
+    assert!(
+        body.contains("car-bbb") && !body.contains("car-aaa"),
+        "{body}"
+    );
+    // The active value toggles back off.
+    assert!(body.contains(r#"href="/adm/adminls_car""#), "{body}");
+}
+
 /// The empty-string facet links `?tag__isempty=1`, which lists only those rows (#2081).
 async fn empty_facet_lists_the_empty_rows(pool: &Pool) {
     for (name, tag) in [("plain-row", ""), ("red-row", "red")] {
@@ -745,5 +795,6 @@ tri_dialect_test! {
         fk_facet_past_the_cut_is_reachable,
         noncanonical_active_value_is_listed_once,
         bulk_action_selection_is_capped,
+        reserved_name_facets_filter,
     ],
 }

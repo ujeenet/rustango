@@ -172,6 +172,17 @@ Bare-admin audit rows now carry `user:<id>` instead of `system`. Single-database
 - `require_perm` returns `503` when the permission read fails (was `403`).
 - `check --deploy` on a single-database Cli no longer warns about `RUSTANGO_APEX_DOMAIN`.
 
+### Migrations, links, i18n, admin and REST
+
+- `migrate <target>` forward now applies pending framework system migrations and the bootstrap tables first, as plain `migrate` does, and fires `pre_migrate` / `post_migrate`.
+- `forget-pending` refuses a migration another file builds on; forget the newest first.
+- Data-op SQL runs unprepared, so it can hold several statements on every backend.
+- `signed_url::sign` / `verify` ignore a `#fragment` and `sign` keeps it after the query; a link signed over a fragment before this no longer verifies.
+- A catalog key over 200 chars is no longer stored in `rustango_translations`; it keeps its file value.
+- Admin list facets for a field named like a list param (`page`, `year`, ...) link `?<field>__exact=`; `?<field>__exact=` works for any field.
+- A `BodyLimitLayer` now sets a ViewSet's create/update cap, so one below 4 MiB lowers it and one above raises it.
+- `manage startapp` and `make:*` read Cargo.toml: a dependency renamed from `rustango` gets its name in the generated code.
+
 ### `rgo` short name
 
 `#[derive(Model)]` now also claims the `#[rgo(...)]` attribute; a model that put another macro's `#[rgo]` on itself must drop or rename it. `rgo` on crates.io is a different crate, so use it as a rename: `rgo = { package = "rustango", … }`. `cargo install cargo-rustango` now installs a second binary, `cargo-rgo`.

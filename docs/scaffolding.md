@@ -178,7 +178,7 @@ pub struct Item {
 }
 ```
 
-`#[rgo(...)]` means exactly what `#[rustango(...)]` means, and works whatever you call the dependency. One struct or field uses one name: mixing `#[rustango(...)]` and `#[rgo(...)]` on the same item is a compile error. The `manage startapp` and `make:*` generators still write `rustango::` paths, so rename those in the files they create.
+`#[rgo(...)]` means exactly what `#[rustango(...)]` means, and works whatever you call the dependency. One struct or field uses one name: mixing `#[rustango(...)]` and `#[rgo(...)]` on the same item is a compile error. `manage startapp` and the `make:*` generators read Cargo.toml and write `rgo::` paths and `#[rgo(...)]` too.
 
 ---
 

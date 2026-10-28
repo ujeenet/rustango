@@ -4387,6 +4387,75 @@ async fn data_op_keeps_its_scope(pool: &Pool) {
     chain.migrate(pool).await.expect("add b");
 }
 
+async fn manage(pool: &Pool, chain: &Chain, args: &[&str]) -> Result<(), String> {
+    let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+    rustango::migrate::manage::run_with_writer(pool, chain.dir.path(), args, &mut Vec::new())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// A data op of two statements applies on every backend, not just SQLite.
+async fn data_op_runs_several_statements(pool: &Pool) {
+    let t = "mad_ms_item";
+    let chain = Chain::new(pool, "ms", &[t]).await;
+    let v = json!({"tables": [table(t, vec![id(), col("n", "i64", json!({}))])]});
+    chain.step(pool, v).await.expect("create");
+    let sql = q(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1); UPDATE {} SET {} = 2",
+        &[t, "id", "n", t, "n"],
+    );
+    manage(
+        pool,
+        &chain,
+        &["add-data-op", "--sql", &sql, "--name", "mad_ms_two"],
+    )
+    .await
+    .expect("add-data-op");
+    chain.migrate(pool).await.expect("both statements apply");
+    let sql = q(pool, "SELECT {} FROM {}", &["n", t]);
+    let rows: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, vec![(2,)]);
+}
+
+/// `forget-pending` refuses a migration a later one builds on, and names it.
+async fn forget_pending_keeps_the_chain(pool: &Pool) {
+    let t = "mad_fp_item";
+    let chain = Chain::new(pool, "fp", &[t]).await;
+    let v = json!({"tables": [table(t, vec![id()])]});
+    chain.step(pool, v).await.expect("create");
+    manage(
+        pool,
+        &chain,
+        &["add-data-op", "--sql", "SELECT 1", "--name", "mad_fp_two"],
+    )
+    .await
+    .expect("0002");
+    let two = chain.head().name;
+    manage(
+        pool,
+        &chain,
+        &["add-data-op", "--sql", "SELECT 1", "--name", "mad_fp_three"],
+    )
+    .await
+    .expect("0003");
+    let three = chain.head().name;
+    let err = manage(pool, &chain, &["forget-pending", &two])
+        .await
+        .expect_err("0003 builds on 0002");
+    assert!(err.contains(&three), "{err}");
+    rustango::migrate::file::list_dir(chain.dir.path()).expect("the chain is whole");
+    manage(pool, &chain, &["forget-pending", &three])
+        .await
+        .expect("a leaf goes");
+    manage(pool, &chain, &["forget-pending", &two])
+        .await
+        .expect("then its parent");
+    chain.migrate(pool).await.expect("migrate after");
+}
+
 fn junction(through: &str, post: &str, tag: &str) -> Value {
     json!({"through": through, "src_table": post, "src_col": "post_id",
            "dst_table": tag, "dst_col": "tag_id"})
@@ -4733,5 +4802,7 @@ tri_dialect_test!(
         proxy_model_creates_no_table,
         composite_fk_needs_a_unique_target,
         generated_column_adds_to_a_filled_table,
+        data_op_runs_several_statements,
+        forget_pending_keeps_the_chain,
     ]
 );

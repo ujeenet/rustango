@@ -113,9 +113,14 @@ impl LinkScope {
         Self(format!("aud:{audience}"))
     }
 
-    /// Append the scope to an unsigned link.
-    fn append(&self, url: &str) -> String {
-        format!("{url}&{}={}", Self::PARAM, url_encode(&self.0))
+    /// The unsigned link: `base` plus `query` and the scope, before any
+    /// `#fragment` and joined to a query `base` already has.
+    fn link(&self, base: &str, query: &str) -> String {
+        let (path, fragment) = base.find('#').map_or((base, ""), |i| base.split_at(i));
+        let path = path.trim_end_matches(['?', '&']);
+        let joiner = if path.contains('?') { '&' } else { '?' };
+        let scope = url_encode(&self.0);
+        format!("{path}{joiner}{query}&{}={scope}{fragment}", Self::PARAM)
     }
 
     /// The link's scope must be this one; a link without one is refused.
@@ -253,15 +258,14 @@ impl PasswordReset {
         secret: &[u8],
         ttl: Duration,
     ) -> String {
-        let url = format!(
-            "{}?user_id={}&purpose={}&{}={}",
-            base_url.trim_end_matches('?'),
+        let query = format!(
+            "user_id={}&purpose={}&{}={}",
             user_id,
             Self::PURPOSE,
             Self::ISSUED_AT,
             chrono::Utc::now().timestamp_micros(),
         );
-        sign(&scope.append(&url), secret, Some(ttl))
+        sign(&scope.link(base_url, &query), secret, Some(ttl))
     }
 
     /// Query param holding the issue time, unix microseconds.
@@ -649,14 +653,13 @@ impl EmailVerification {
         secret: &[u8],
         ttl: Duration,
     ) -> String {
-        let url = format!(
-            "{}?user_id={}&email={}&purpose={}",
-            base_url.trim_end_matches('?'),
+        let query = format!(
+            "user_id={}&email={}&purpose={}",
             user_id,
             url_encode(email),
             Self::PURPOSE,
         );
-        sign(&scope.append(&url), secret, Some(ttl))
+        sign(&scope.link(base_url, &query), secret, Some(ttl))
     }
 
     /// Verify the URL and return the `(user_id, email)` it was issued for.
@@ -716,13 +719,8 @@ impl MagicLink {
         secret: &[u8],
         ttl: Duration,
     ) -> String {
-        let url = format!(
-            "{}?email={}&purpose={}",
-            base_url.trim_end_matches('?'),
-            url_encode(email),
-            Self::PURPOSE,
-        );
-        sign(&scope.append(&url), secret, Some(ttl))
+        let query = format!("email={}&purpose={}", url_encode(email), Self::PURPOSE);
+        sign(&scope.link(base_url, &query), secret, Some(ttl))
     }
 
     /// Verify the URL and return the email it was issued for.
@@ -763,9 +761,12 @@ impl MagicLink {
 // ------------------------------------------------------------------ Helpers
 
 fn extract_query(url: &str, key: &str) -> Option<String> {
+    let url = url.split_once('#').map_or(url, |(u, _)| u);
     let query = url.split_once('?')?.1;
     for pair in query.split('&') {
-        let (k, v) = pair.split_once('=')?;
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
         let k = url_decode(k);
         if k == key {
             return Some(url_decode(v));
@@ -864,6 +865,52 @@ mod tests {
         );
         let user_id = PasswordReset::verify(&scope(), &url, SECRET).unwrap();
         assert_eq!(user_id, 42);
+    }
+
+    /// A base URL with its own query or a `#fragment` still gives a live link:
+    /// the query joins with `&`, and the server, which never sees the
+    /// fragment, verifies what the browser sends.
+    #[test]
+    fn links_keep_the_base_query_and_fragment() {
+        let ttl = Duration::from_secs(600);
+        for base in [
+            "https://app.example.com/reset?lang=en",
+            "https://app.example.com/reset?next=/x&",
+            "https://app.example.com/reset#/spa",
+            "https://app.example.com/reset?lang=en#/spa?x=1",
+        ] {
+            let reset = PasswordReset::issue(&scope(), base, 42, SECRET, ttl);
+            let verify = EmailVerification::issue(&scope(), base, 42, "a@b.c", SECRET, ttl);
+            let magic = MagicLink::issue(&scope(), base, "a@b.c", SECRET, ttl);
+            for url in [&reset, &verify, &magic] {
+                let sent = url.split_once('#').map_or(url.as_str(), |(u, _)| u);
+                if let Some((_, frag)) = base.split_once('#') {
+                    assert!(url.ends_with(&format!("#{frag}")), "{url}");
+                }
+                if base.contains("lang=en") {
+                    assert_eq!(extract_query(sent, "lang").as_deref(), Some("en"), "{url}");
+                }
+                assert_eq!(
+                    PasswordReset::verify(&scope(), sent, SECRET).is_ok(),
+                    url == &reset
+                );
+            }
+            assert_eq!(
+                PasswordReset::verify(&scope(), &reset, SECRET),
+                Ok(42),
+                "{reset}"
+            );
+            assert_eq!(
+                EmailVerification::verify(&scope(), &verify, SECRET),
+                Ok((42, "a@b.c".to_owned())),
+                "{verify}"
+            );
+            let sent = magic.split_once('#').map_or(magic.as_str(), |(u, _)| u);
+            assert_eq!(
+                MagicLink::verify(&scope(), sent, SECRET).as_deref(),
+                Ok("a@b.c")
+            );
+        }
     }
 
     /// #2472 — every link kind is refused outside the scope it was issued for.

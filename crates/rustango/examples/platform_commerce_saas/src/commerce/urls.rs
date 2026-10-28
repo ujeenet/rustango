@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::{get, post};
@@ -39,7 +39,7 @@ use rustango::real_ip::RealIpRouterExt as _;
 use rustango::sql::UpdaterPool as _;
 use rustango::template_views::{CreateView, DeleteView, DetailView, ListView, UpdateView};
 use rustango::tenancy::auth_routes::{require_bearer, Config as JwtConfig, JwtAuth};
-use rustango::tenancy::{DefaultTenantDb, Org};
+use rustango::tenancy::{AuthenticatedUser, DefaultTenantDb, Org};
 use rustango::viewset::ViewSet;
 
 use super::jobs::{self, FlakyPaymentCapture, OrderConfirmation};
@@ -86,7 +86,7 @@ pub fn api(
     Router::new()
         .merge(rest_api(&auth).with_state(()))
         .merge(promotion_pages())
-        .route("/api/v1/orders/{id}/confirm", post(confirm_order))
+        .merge(order_actions(&auth))
         .merge(payments(cache.clone()))
         .merge(account())
         .merge(storefront(cache))
@@ -119,6 +119,15 @@ pub fn rest_api(auth: &JwtAuth) -> Router<()> {
         .merge(inventory())
         .merge(promotions())
         .merge(gift_cards())
+        .layer(axum::middleware::from_fn_with_state(auth.clone(), require_bearer))
+}
+
+/// Hand-written order writes: a Bearer token, as the ViewSets, and the
+/// order change codename, checked in the handler.
+#[must_use]
+pub fn order_actions(auth: &JwtAuth) -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/orders/{id}/confirm", post(confirm_order))
         .layer(axum::middleware::from_fn_with_state(auth.clone(), require_bearer))
 }
 
@@ -473,8 +482,16 @@ fn inventory() -> Router {
 async fn confirm_order(
     State(st): State<AppState>,
     t: Tenant<DefaultTenantDb>,
+    Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<i64>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let codename = rustango::permissions::codename_for::<Order>("change");
+    let allowed = rustango::tenancy::permissions::has_perm_pool(user.id, &codename, t.pool())
+        .await
+        .map_err(rustango::server_error)?;
+    if !allowed {
+        return Err((StatusCode::FORBIDDEN, format!("needs `{codename}`")));
+    }
     let slug = t.org.slug.clone();
     let queue = st.queues.get(&slug).ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
