@@ -348,6 +348,23 @@ async fn facet_show_all_keeps_the_filter_state(pool: &Pool) {
     assert_eq!(next.matches("facet_show_all=rank").count(), 1, "{next}");
 }
 
+/// "Show all" lists at most 200 values of a facet, not every one.
+async fn facet_show_all_is_capped(pool: &Pool) {
+    for i in 0..205 {
+        seed_slug(pool, &format!("c{i:03}"), "k", Some(i)).await;
+    }
+    let body = get(pool, "/adminls_slug?facet_show_all=rank").await;
+    let shown: std::collections::BTreeSet<&str> = body
+        .split("href=\"")
+        .skip(1)
+        .filter_map(|s| s.split('"').next())
+        .filter_map(|l| l.split("rank=").nth(1))
+        .map(|v| v.split('&').next().unwrap_or(v))
+        .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+        .collect();
+    assert_eq!(shown.len(), 200, "{shown:?}");
+}
+
 /// The bulk-action form posts under the prefix.
 async fn action_form_posts_under_the_prefix(pool: &Pool) {
     seed(pool, "x", true).await;
@@ -713,6 +730,7 @@ tri_dialect_test! {
         equal_sort_keys_page_in_pk_order,
         links_keep_the_whole_filter_state,
         facet_show_all_keeps_the_filter_state,
+        facet_show_all_is_capped,
         action_form_posts_under_the_prefix,
         edit_form_checks_a_true_bool,
         bool_facet_reads_true_and_toggles_off,
