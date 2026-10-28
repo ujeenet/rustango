@@ -53,7 +53,7 @@ C'est la première décision. Les deux transforment un modèle en points d'accè
 | Renvoie | des **données JSON** | une **page HTML rendue côté serveur** |
 | Conçue pour | SPA, applications mobiles, autres services | navigateurs, sites rendus côté serveur, CRUD façon admin |
 | Une « création » | `POST` JSON → `201` + le nouvel objet | `POST` d'un formulaire → redirection `303` vers une page de succès |
-| En cas d'entrée invalide | `400` + une carte d'erreurs JSON indexée par champ | re-rend le formulaire avec les erreurs affichées |
+| En cas d'entrée invalide | `422` + une carte d'erreurs JSON indexée par champ | re-rend le formulaire avec les erreurs affichées |
 | Lit une liste comme | une enveloppe JSON paginée | un `<table>`/une boucle dans votre template |
 | Authentifiée en général par | jetons / JWT / clés d'API | cookies de session |
 
@@ -128,6 +128,14 @@ page {{ page }} / {{ total_pages }}
 ViewSet — la différence tient uniquement au fait que le résultat est une page rendue plutôt qu'une
 enveloppe JSON. Utilisez `.context_object_name("posts")` si vous préférez boucler sur `posts`
 plutôt que sur `object_list` dans le template.
+
+La taille de page vaut 20 par défaut. Un client peut demander `?page_size=N`,
+plafonné par `.max_page_size(n)` (100 par défaut). `.bulk_actions(true)` fait
+accepter à la liste un POST avec un champ `action` et les pk choisies :
+`delete_selected` est intégrée, `.action(...)` ajoute les vôtres, et
+`.with_delete_confirmation(true)` affiche d'abord une page de confirmation.
+`.with_fk_display(true)` ajoute une valeur `<column>_display` pour chaque clé
+étrangère, au prix d'une requête de plus par colonne FK et par page.
 
 **`?ordering=` est l'exception.** La liste blanche d'un `ListView` démarre *vide*, donc
 le paramètre est ignoré tant que vous ne nommez pas vous-même les colonnes triables :
@@ -283,7 +291,7 @@ l'autre :
 
 | Vue | Variables disponibles dans le template |
 |---|---|
-| `ListView` | `object_list` (les lignes de la page), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev` |
+| `ListView` | `object_list` (les lignes de la page), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev`, `page_marks`, `prev_page_url` / `next_page_url`, `ordering`, `filters`, `search` (and `bulk_actions` when on) |
 | `DetailView` | `object` (la ligne) |
 | `CreateView` | `form` (`.fields`, `.errors`), `is_create` (true), `is_update` (false) — **pas d'`object`** |
 | `UpdateView` | `form` (`.fields`, `.errors`), `object` (la ligne), `pk`, `is_create` (false), `is_update` (true) |
@@ -326,6 +334,15 @@ use rustango::template_views::RedirectView;
 
 let app = RedirectView::to("/posts").router("/old-posts");
 ```
+
+Elle répond `302 Found` ; `.permanent()` en fait un `301`.
+
+**FormView** — un formulaire sans modèle. `FormView::<ContactForm>::for_form(handler)`
+rend un formulaire `#[derive(Form)]` en GET (template `form.html` par défaut). En
+POST, il valide et appelle votre handler async ; `Ok(())` redirige en `303`, et
+`Err(msg)` ré-affiche le formulaire. Son contexte est `errors` (une liste par
+champ) et `values`. Comme pour toutes les vues ici, `.success_url` vaut `/` par
+défaut.
 
 ---
 
@@ -411,8 +428,8 @@ templates = "templates"   # template root holding errors/404.html etc.; default 
 htmx_target = "#flash"    # HX-Retarget for htmx errors; default "#flash", "" sends none
 ```
 
-Un répertoire `templates` absent ou qui ne se parse pas est journalisé, et les
-pages intégrées sont utilisées.
+Un répertoire `templates` absent est ignoré sans bruit ; un répertoire qui ne se
+parse pas est journalisé. Dans les deux cas, les pages intégrées sont utilisées.
 
 `cargo rustango new` écrit `[errors] enabled = true` dans
 `config/default.toml`, donc un nouveau projet a les pages activées. Les projets
@@ -535,6 +552,9 @@ Un 5xx ne montre jamais sa cause : la page utilise le texte générique, et
 autre 5xx. Ce n'est que lorsque `RUSTANGO_DISCLOSE_ERRORS` est défini qu'une
 page 5xx montre son message ou son corps — la même règle que pour tout corps 5xx
 du framework.
+
+`PageError::forbidden(msg)` et `PageError::new(status, msg)` couvrent les autres
+statuts. `ErrorPagesLayer::htmx_swap(..)` change la valeur `HX-Reswap`.
 
 ### Ce qui est couvert
 

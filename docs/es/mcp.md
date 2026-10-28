@@ -160,10 +160,13 @@ tenancy SQLite o MySQL usa `secure_tenant_router_from_settings_for::<sqlx::Sqlit
 El router autenticado monta: `POST {prefix}` (JSON-RPC), `GET {prefix}`
 (notificaciones SSE), `POST {prefix}/token` (credencial → JWT),
 `POST {prefix}/oauth/token` (OAuth 2.1), y los dos documentos de descubrimiento
-`.well-known/*`. Firma los tokens de agente con `RUSTANGO_SESSION_SECRET`.
+`.well-known/*`. Firma los tokens de agente con `RUSTANGO_SESSION_SECRET`. Si
+falta o tiene menos de 32 bytes, avisa y usa una clave aleatoria por proceso: los
+tokens no sobreviven a un reinicio.
 
-El handshake `initialize` es un simple POST JSON-RPC y funciona en cualquier
-montaje:
+El handshake `initialize` es un simple POST JSON-RPC. En el montaje autenticado
+cada POST necesita un token Bearer, `initialize` y `ping` incluidos; una llamada
+sin token recibe `401`.
 
 ```json
 // → POST /mcp
@@ -175,7 +178,9 @@ montaje:
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
     "serverInfo": { "name": "rustango", "version": "0.61.7" },
-    "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
+    "capabilities": { "tools": { "listChanged": true }, "prompts": { "listChanged": true },
+                      "resources": { "listChanged": true, "subscribe": false },
+                      "logging": {}, "completions": {} } } }
 ```
 
 Para dar a los agentes indicaciones para todo el servidor, llama a
@@ -224,8 +229,10 @@ En la ruta de clave en bruto el servidor verifica el secreto (argon2, con una
 caché local al proceso de corta vida para no recalcular el hash en cada
 petición), vuelve a comprobar la vigencia y resuelve las concesiones **en cada
 petición** — una clave propiedad de un usuario siempre refleja el RBAC vigente
-de su dueño, y la revocación se aplica de inmediato en lugar de esperar al TTL
-de un JWT. En producción, establece `[mcp] rate_limit_per_minute` para acotar el
+de su dueño. La ruta JWT hace lo mismo: cada petición comprueba que el agente (y
+su dueño) está activo y que su secreto no rotó, y lee las concesiones de las
+filas, no de los claims. Así la revocación se aplica de inmediato en ambas rutas.
+En producción, establece `[mcp] rate_limit_per_minute` para acotar el
 trabajo de verificación. El efecto, verificado de extremo a extremo:
 
 ```rust
@@ -242,8 +249,9 @@ assert_eq!(out["structuredContent"]["sum"], 5);
 ```
 
 Los tokens están fijados al tenant: un token emitido para `acme` se rechaza contra
-cualquier otro tenant (replay entre tenants → 401). Revoca un agente y su JTI
-queda en la lista negra.
+cualquier otro tenant (replay entre tenants → 401). Rotar el secreto o desactivar
+el agente hace rechazar sus tokens en la siguiente petición; un JTI revocado con
+el `JwtLifecycle` también.
 
 ### Claves propiedad del usuario (capacidades dirigidas por permisos)
 
@@ -281,8 +289,8 @@ tools/prompts/resources se aplanan en los claims `skills`/`tools` del JWT. Así
 protegidos por RBAC, sin cambio alguno en esos handlers. El usuario propietario
 viaja en el claim `uid` del token; un handler de tool lo lee como
 `ctx.agent.user_id` para acotar el trabajo a ese miembro. Revoca capacidades
-recién otorgadas cambiando los permisos del usuario (se re-resuelven en el
-siguiente token); revoca la clave misma con
+recién otorgadas cambiando los permisos del usuario (se re-resuelven en la
+siguiente petición); revoca la clave misma con
 `revoke_user_key_pool(&pool, user_id, agent_id)`. Lista las claves de un miembro
 con `list_user_keys_pool(&pool, user_id)`.
 
@@ -294,7 +302,7 @@ la totalidad de los derechos del propietario; una clave con alcance
 (`skills = &["coach", …]`) se limita a esos, y no recibe nada cuando se revoca su último skill. La resolución siempre reintersecta el
 alcance con los derechos *actuales* — de modo que una clave nunca puede exceder
 los permisos del propietario, y perder un permiso estrecha cada clave en la
-siguiente emisión. Acotar a un skill al que el propietario no tiene derecho se
+siguiente petición. Acotar a un skill al que el propietario no tiene derecho se
 rechaza en la creación.
 
 Los agentes independientes no se ven afectados — un agente de máquina
@@ -341,9 +349,9 @@ created key #7 for user `alice` in tenant `acme` (label `Alice's phone`, scope f
 $ cargo run -- create-user-key acme alice --label "coach bot" --skill coach
 ```
 
-La clave de Alice ahora resuelve las tools del skill `coach` en cada emisión de
-token porque ella posee `mcp.coach`. Cambia sus permisos y las capacidades se
-re-resuelven en su siguiente token; revoca la clave misma con `revoke-user-key`.
+La clave de Alice ahora resuelve las tools del skill `coach` en cada petición
+porque ella posee `mcp.coach`. Cambia sus permisos y las capacidades se
+re-resuelven en su siguiente petición; revoca la clave misma con `revoke-user-key`.
 El mismo id de clave se distingue de los agentes de máquina en el admin del tenant
 (la lista `Agent` muestra `user_id`).
 
@@ -360,7 +368,7 @@ opcional (`GET {prefix}`) para notificaciones servidor→cliente. Métodos:
 
 | Método | Auth | Propósito |
 |---|---|---|
-| `initialize` · `ping` | no | handshake + liveness |
+| `initialize` · `ping` | en el montaje autenticado | handshake + liveness |
 | `tools/list` · `tools/call` | sí | descubrir + invocar tools (solo las concedidas) |
 | `prompts/list` · `prompts/get` | sí | prompts derivados de skills |
 | `resources/list` · `resources/read` · `resources/templates/list` | sí | resources estáticos + de skill |
@@ -375,6 +383,10 @@ como `-32002` (`TOOL_NOT_FOUND`), `-32003` (`TOOL_FORBIDDEN`), `-32602`
 (`INVALID_PARAMS`). Las tools largas reportan progreso y honran la cancelación a
 través del `McpContext`.
 
+Cada `tools/call` escribe una entrada de auditoría con el nombre de la tool y sus
+argumentos. Los valores bajo claves sensibles (`password`, `token`, `secret`, …)
+se ocultan. Un fallo de auditoría solo avisa; la llamada se ejecuta igual.
+
 ---
 
 ## Ajustes
@@ -383,12 +395,13 @@ La sección `[mcp]` (leída por `secure_tenant_router_from_settings`):
 
 ```toml
 [mcp]
-prefix                = "/mcp"   # URL prefix the router mounts under
+prefix                = "/mcp"   # not applied by the router: pass
+                                 # settings.mcp.prefix() to .nest() yourself
 token_ttl_secs        = 900      # agent access-token lifetime (15 min)
 enable_sse            = true     # serve the GET {prefix} SSE stream
 allowed_origins       = []       # CORS allow-list (empty = same-origin only)
 rate_limit_per_minute = 0        # per-IP cap (0/unset = unlimited)
-max_tools_listed      = 0        # tools/list page size (0/unset = unlimited)
+max_tools_listed      = 0        # page size of every */list (0/unset = unlimited)
 max_body_bytes        = 1048576  # JSON-RPC body cap — raise for tools that
                                  # accept inline payloads (base64 uploads)
 ```

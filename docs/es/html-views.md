@@ -54,7 +54,7 @@ Esta es la primera decisión. Ambas convierten un modelo en endpoints; difieren 
 | Devuelve | **datos JSON** | una **página HTML renderizada en el servidor** |
 | Pensada para | SPAs, apps móviles, otros servicios | navegadores, sitios renderizados en el servidor, CRUD tipo admin |
 | Una «creación» | `POST` JSON → `201` + el nuevo objeto | `POST` de un formulario → redirección `303` a una página de éxito |
-| Ante una entrada inválida | `400` + un mapa de errores JSON indexado por campo | vuelve a renderizar el formulario con los errores mostrados |
+| Ante una entrada inválida | `422` + un mapa de errores JSON indexado por campo | vuelve a renderizar el formulario con los errores mostrados |
 | Lee un listado como | un sobre JSON paginado | una `<table>`/bucle en tu plantilla |
 | Habitualmente autenticada con | tokens / JWT / claves de API | cookies de sesión |
 
@@ -131,6 +131,14 @@ page {{ page }} / {{ total_pages }}
 ViewSet — la diferencia es puramente que el resultado es una página renderizada en lugar de un
 sobre JSON. Usa `.context_object_name("posts")` si prefieres iterar sobre `posts` en vez de sobre
 `object_list` en la plantilla.
+
+El tamaño de página es 20 por defecto. Un cliente puede pedir `?page_size=N`,
+limitado por `.max_page_size(n)` (100 por defecto). `.bulk_actions(true)` hace que
+la lista acepte un POST con un campo `action` y las pk elegidas:
+`delete_selected` viene incluida, `.action(...)` añade las tuyas, y
+`.with_delete_confirmation(true)` muestra antes una página de confirmación.
+`.with_fk_display(true)` añade un valor `<column>_display` por cada clave foránea,
+con una consulta extra por columna FK y por página.
 
 **`?ordering=` es la excepción.** La lista permitida de un `ListView` empieza *vacía*, así
 que el parámetro se ignora hasta que nombras tú las columnas ordenables:
@@ -286,7 +294,7 @@ ellas:
 
 | Vista | Variables disponibles en la plantilla |
 |---|---|
-| `ListView` | `object_list` (las filas de la página), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev` |
+| `ListView` | `object_list` (las filas de la página), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev`, `page_marks`, `prev_page_url` / `next_page_url`, `ordering`, `filters`, `search` (and `bulk_actions` when on) |
 | `DetailView` | `object` (la fila) |
 | `CreateView` | `form` (`.fields`, `.errors`), `is_create` (true), `is_update` (false) — **sin `object`** |
 | `UpdateView` | `form` (`.fields`, `.errors`), `object` (la fila), `pk`, `is_create` (false), `is_update` (true) |
@@ -329,6 +337,15 @@ use rustango::template_views::RedirectView;
 
 let app = RedirectView::to("/posts").router("/old-posts");
 ```
+
+Responde `302 Found`; `.permanent()` la convierte en `301`.
+
+**FormView** — un formulario sin modelo. `FormView::<ContactForm>::for_form(handler)`
+renderiza un formulario `#[derive(Form)]` en GET (plantilla `form.html` por defecto).
+En POST valida y llama a tu handler async; `Ok(())` redirige con `303`, y
+`Err(msg)` vuelve a renderizar el formulario. Su contexto es `errors` (una lista
+por campo) y `values`. Como en todas las vistas de aquí, `.success_url` es `/` por
+defecto.
 
 ---
 
@@ -414,8 +431,8 @@ templates = "templates"   # template root holding errors/404.html etc.; default 
 htmx_target = "#flash"    # HX-Retarget for htmx errors; default "#flash", "" sends none
 ```
 
-Un directorio `templates` que no existe o no se parsea queda en el log, y se
-usan las páginas integradas.
+Un directorio `templates` que no existe se omite sin aviso; uno que no se parsea
+queda en el log. En ambos casos se usan las páginas integradas.
 
 `cargo rustango new` escribe `[errors] enabled = true` en `config/default.toml`, así
 que un proyecto nuevo tiene las páginas activadas. Los proyectos antiguos siguen sin
@@ -537,6 +554,9 @@ Un 5xx nunca muestra su causa: la página usa el texto genérico, y
 otro 5xx. Solo cuando `RUSTANGO_DISCLOSE_ERRORS` está definida una página 5xx
 muestra su mensaje o su cuerpo — la misma regla que para cualquier cuerpo 5xx
 del framework.
+
+`PageError::forbidden(msg)` y `PageError::new(status, msg)` cubren otros
+estados. `ErrorPagesLayer::htmx_swap(..)` cambia el valor de `HX-Reswap`.
 
 ### Qué cubre
 

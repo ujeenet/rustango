@@ -106,6 +106,11 @@ Um das Ergebnis in einer Variablen festzuhalten, verwenden Sie Teras `{% set %}`
 Ein `null`-Argument (meist eine undefinierte Template-Variable) schlägt lautstark
 fehl, statt stillschweigend eine kaputte URL zu erzeugen.
 
+Für Query-Strings fügt `rustango::urls::register_querystring_filter(&mut tera)` den
+Filter `querystring` hinzu. Er nimmt die aktuelle Query und überschreibt Schlüssel:
+`{{ qs | querystring(page=2) }}`. Ein `null`-Wert entfernt einen Schlüssel, und ein
+leeres Ergebnis ist der leere String, ohne hängendes `?`.
+
 ---
 
 ## Redirect per Name
@@ -136,6 +141,13 @@ let url = resolve_url("/dashboard", &params)?;   // path  → "/dashboard" (as-i
 
 (Für rohe Redirects zu einer bekannten URL gibt `rustango::shortcuts::redirect(url)`
 ein schlichtes `302` zurück.)
+
+**`resolve_url` prüft den Host nicht.** `http://evil.example` kommt unverändert
+zurück. Prüfen Sie ein vom Nutzer geliefertes `?next=` vor dem Redirect mit
+`rustango::urls::url_has_allowed_host_and_scheme(url, &allowed_hosts, require_https)`.
+Es akzeptiert einen relativen Pfad oder eine `http`/`https`-URL, deren Host in der
+Liste steht, und lehnt `//host`, `\\host`, Steuerzeichen und andere Schemata
+(`javascript:`, `data:`, …) ab.
 
 ---
 

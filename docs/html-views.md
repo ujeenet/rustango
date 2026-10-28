@@ -53,7 +53,7 @@ This is the first decision. Both turn a model into endpoints; they differ in
 | Sends back | **JSON data** | a **server-rendered HTML page** |
 | Built for | SPAs, mobile apps, other services | browsers, server-rendered sites, admin-style CRUD |
 | A "create" | `POST` JSON → `201` + the new object | `POST` a form → `303` redirect to a success page |
-| On bad input | `400` + a field-keyed JSON error map | re-render the form with the errors shown |
+| On bad input | `422` + a field-keyed JSON error map | re-render the form with the errors shown |
 | Reads a list as | a paginated JSON envelope | a `<table>`/loop in your template |
 | Usually authed by | tokens / JWT / API keys | session cookies |
 
@@ -129,6 +129,13 @@ page {{ page }} / {{ total_pages }}
 difference is purely that the result is a rendered page rather than a JSON
 envelope. Use `.context_object_name("posts")` if you'd rather loop over `posts`
 than `object_list` in the template.
+
+The page size defaults to 20. A client may ask for `?page_size=N`, capped by
+`.max_page_size(n)` (default 100). `.bulk_actions(true)` lets the list accept a
+POST with an `action` field and the selected pks: `delete_selected` is built in,
+`.action(...)` adds your own, and `.with_delete_confirmation(true)` shows a
+confirm page first. `.with_fk_display(true)` adds a `<column>_display` value for
+each foreign key, at one extra query per FK column per page.
 
 **`?ordering=` is the exception.** A `ListView`'s allowlist starts *empty*, so
 the parameter is ignored until you name the sortable columns yourself:
@@ -286,7 +293,7 @@ Every view stamps a consistent context so templates port cleanly between them:
 
 | View | Variables available in the template |
 |---|---|
-| `ListView` | `object_list` (the page's rows), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev` |
+| `ListView` | `object_list` (the page's rows), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev`, `page_marks`, `prev_page_url` / `next_page_url`, `ordering`, `filters`, `search` (and `bulk_actions` when on) |
 | `DetailView` | `object` (the row) |
 | `CreateView` | `form` (`.fields`, `.errors`), `is_create` (true), `is_update` (false) — **no `object`** |
 | `UpdateView` | `form` (`.fields`, `.errors`), `object` (the row), `pk`, `is_create` (false), `is_update` (true) |
@@ -329,6 +336,14 @@ use rustango::template_views::RedirectView;
 
 let app = RedirectView::to("/posts").router("/old-posts");
 ```
+
+It answers `302 Found`; `.permanent()` makes it `301`.
+
+**FormView** — a form with no model. `FormView::<ContactForm>::for_form(handler)`
+renders a `#[derive(Form)]` form on GET (template `form.html` by default). On POST
+it validates and calls your async handler; `Ok(())` redirects with `303`, and
+`Err(msg)` re-renders the form. Its context is `errors` (a list per field) and
+`values`. Like every view here, `.success_url` defaults to `/`.
 
 ---
 
@@ -413,8 +428,8 @@ templates = "templates"   # template root holding errors/404.html etc.; default 
 htmx_target = "#flash"    # HX-Retarget for htmx errors; default "#flash", "" sends none
 ```
 
-A `templates` directory that does not exist or does not parse logs a warning
-and the built-in pages are used.
+A `templates` directory that does not exist is skipped quietly; one that does
+not parse logs a warning. Either way the built-in pages are used.
 
 `cargo rustango new` writes `[errors] enabled = true` into
 `config/default.toml`, so a new project has the pages on. Older projects stay
@@ -536,6 +551,9 @@ A 5xx never shows its cause: the page uses the generic text, and
 `PageError::server(e)` logs `e` and sends the same opaque body as every other
 5xx. Only when `RUSTANGO_DISCLOSE_ERRORS` is set does a 5xx page show its
 message or body, the same rule as every 5xx body in the framework.
+
+`PageError::forbidden(msg)` and `PageError::new(status, msg)` cover other
+statuses. `ErrorPagesLayer::htmx_swap(..)` changes the `HX-Reswap` value.
 
 ### What is covered
 
