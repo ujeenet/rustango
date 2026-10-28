@@ -61,14 +61,6 @@ fn body_too_large() -> Response {
     Response::new("request body too large")
 }
 
-/// Either shape. An object and an array never both match, so `anyOf` is exact.
-fn any_of(a: Schema, b: Schema) -> Schema {
-    Schema {
-        any_of: vec![a, b],
-        ..Schema::default()
-    }
-}
-
 /// `run_list` refuses an unknown lookup, a bad value, an oversized IN list or a bad cursor.
 fn bad_list_criteria() -> Response {
     Response::new("bad filter lookup or value, IN list too long, or invalid cursor")
@@ -131,19 +123,18 @@ impl ViewSet {
 
         // -------- create (POST)
         if !self.read_only {
-            // A JSON array is a bulk create (`CreateBody::Bulk`); a form never is.
+            // The schemas stay one row, so clients built from the spec keep
+            // working; the bulk array form is described in prose until 0.62.0.
             let one = self.request_schema(Body::Create);
-            let body = RequestBody::json(any_of(one.clone(), Schema::array_of(one.clone())))
+            let body = RequestBody::json(one.clone())
                 .and_content("application/x-www-form-urlencoded", one);
-            let created = any_of(
-                Schema::ref_(item_ref),
-                Schema::array_of(Schema::ref_(item_ref).nullable()),
-            );
+            let created = Schema::ref_(item_ref);
             let create_op = Operation::new()
                 .summary(format!("Create {tag}"))
                 .description(format!(
-                    "A JSON array creates up to {} rows in one transaction and answers \
-                     an array in the same order.",
+                    "A JSON array of these bodies creates up to {} rows in one transaction \
+                     and answers an array of rows in the same order, `null` for a row \
+                     outside your scope.",
                     self.max_bulk_create
                 ))
                 .operation_id(format!("create_{}", snake(tag)))
@@ -875,33 +866,34 @@ mod tests {
         let coll = &paths.iter().find(|(p, _)| p == "/api/posts").unwrap().1;
         let v = serde_json::to_value(coll.post.as_ref().unwrap()).unwrap();
         assert_eq!(
-            v["responses"]["201"]["content"]["application/json"]["schema"]["anyOf"][0]["$ref"],
+            v["responses"]["201"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/Post"
         );
     }
 
-    /// A JSON array creates many rows and answers an array, `null` where scoped out.
+    /// The schemas stay one row; the bulk array form is in the description.
     #[test]
     fn create_documents_the_bulk_shape() {
         let paths = vs().max_bulk_create(50).openapi_paths("/api/posts", "Post");
         let coll = &paths.iter().find(|(p, _)| p == "/api/posts").unwrap().1;
         let v = serde_json::to_value(coll.post.as_ref().unwrap()).unwrap();
         let content = &v["requestBody"]["content"];
-        let json = &content["application/json"]["schema"]["anyOf"];
-        assert_eq!(json[1]["type"], "array", "{v}");
-        assert_eq!(json[1]["items"], json[0], "{v}");
-        // A form body is always one row.
+        assert!(
+            content["application/json"]["schema"]["properties"].is_object(),
+            "{v}"
+        );
         assert_eq!(
             content["application/x-www-form-urlencoded"]["schema"],
-            json[0]
+            content["application/json"]["schema"]
         );
-        let created = &v["responses"]["201"]["content"]["application/json"]["schema"]["anyOf"];
-        assert_eq!(created[1]["type"], "array", "{v}");
         assert_eq!(
-            created[1]["items"],
-            serde_json::json!({"anyOf": [
-                {"$ref": "#/components/schemas/Post"}, {"type": "null"},
-            ]})
+            v["responses"]["201"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/Post"
+        );
+        let about = v["description"].as_str().unwrap();
+        assert!(
+            about.contains("JSON array") && about.contains("50 rows"),
+            "{about}"
         );
         let too_large = v["responses"]["413"]["description"].as_str().unwrap();
         assert!(too_large.contains("50 rows"), "{too_large}");

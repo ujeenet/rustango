@@ -101,25 +101,7 @@ Par défaut, une requête dont l'hôte ne résout aucun tenant va aux routes de
 votre application, où l'extracteur `Tenant` et l'admin du tenant répondent 404.
 Pour servir autre chose à la place — une page de configuration au premier
 démarrage, une page « ce site n'est pas encore configuré » — passez un routeur
-à `unresolved_tenant` :
-
-```rust
-use axum::{routing::get, Extension, Router};
-use rustango::tenancy::TenantRegistry;
-
-async fn setup(Extension(reg): Extension<TenantRegistry>) -> &'static str {
-    match reg.has_tenants().await {
-        Ok(false) => "Créez votre premier site",
-        _ => "Ce site n'est pas encore configuré",
-    }
-}
-
-Cli::new()
-    .tenancy()
-    .unresolved_tenant(Router::new().route("/", get(setup)))
-    .run()
-    .await?;
-```
+à `unresolved_tenant`, par exemple une route `/` qui répond « Créez votre premier site » tant que `TenantRegistry::has_tenants()` vaut false. `Builder::unresolved_tenant` a un exemple compilé.
 
 Il s'exécute pour un hôte inconnu et pour un chemin de l'apex que la console ne
 sert pas. Il ne s'exécute jamais pour un hôte qui résout un tenant, et la

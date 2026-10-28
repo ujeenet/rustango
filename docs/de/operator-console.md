@@ -100,25 +100,7 @@ Standardmäßig geht eine Anfrage, deren Host keinen Tenant auflöst, an die
 Routen deiner App, wo der `Tenant`-Extractor und die Tenant-Admin mit 404
 antworten. Um dort stattdessen etwas auszuliefern — eine Einrichtungsseite beim ersten
 Start, eine Seite „diese Site ist noch nicht eingerichtet" — übergib einen
-Router an `unresolved_tenant`:
-
-```rust
-use axum::{routing::get, Extension, Router};
-use rustango::tenancy::TenantRegistry;
-
-async fn setup(Extension(reg): Extension<TenantRegistry>) -> &'static str {
-    match reg.has_tenants().await {
-        Ok(false) => "Lege deine erste Site an",
-        _ => "Diese Site ist noch nicht eingerichtet",
-    }
-}
-
-Cli::new()
-    .tenancy()
-    .unresolved_tenant(Router::new().route("/", get(setup)))
-    .run()
-    .await?;
-```
+Router an `unresolved_tenant`, etwa eine Route `/`, die „Erstelle deine erste Site" antwortet, solange `TenantRegistry::has_tenants()` false ist. `Builder::unresolved_tenant` hat ein kompiliertes Beispiel.
 
 Er läuft für einen unbekannten Host und für einen Apex-Pfad, den die Konsole
 nicht bedient. Er läuft nie für einen Host, der zu einem Tenant auflöst, und

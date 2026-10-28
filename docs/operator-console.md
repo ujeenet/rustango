@@ -105,25 +105,7 @@ From the CLI: [`list-hosts` / `add-host` / `remove-host` / `set-host-enabled`](m
 By default a request whose host resolves no tenant goes to your app's routes,
 where the `Tenant` extractor and the tenant admin answer 404. To serve
 something there instead — a first-run setup page, a "this site is not set up"
-page — hand a router to `unresolved_tenant`:
-
-```rust
-use axum::{routing::get, Extension, Router};
-use rustango::tenancy::TenantRegistry;
-
-async fn setup(Extension(reg): Extension<TenantRegistry>) -> &'static str {
-    match reg.has_tenants().await {
-        Ok(false) => "Create your first site",
-        _ => "This site is not set up yet",
-    }
-}
-
-Cli::new()
-    .tenancy()
-    .unresolved_tenant(Router::new().route("/", get(setup)))
-    .run()
-    .await?;
-```
+page — hand a router to `unresolved_tenant`, for example one `/` route that answers "Create your first site" while `TenantRegistry::has_tenants()` is false. `Builder::unresolved_tenant` has a compiled example.
 
 It runs for an unknown host and for an apex path the console does not serve.
 It never runs for a host that resolves to a tenant, and the console keeps its

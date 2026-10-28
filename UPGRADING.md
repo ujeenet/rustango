@@ -174,10 +174,6 @@ A refused shared-provider add now returns the console page (400) with the error,
 
 A model with `db_table_comment` gets a `makemigrations` warning: file migrations still do not write it, so add a data migration with the comment statement. MCP discovery on `*.localhost` / `[::1]` now says `http`; set a trusted `X-Forwarded-Proto` if a TLS proxy fronts it. The admin list's "show all" facet stops at 200 values.
 
-### ViewSet OpenAPI: create is an `anyOf`
-
-A ViewSet's `POST` JSON body and its 201 schema are now `anyOf` one row or an array of rows, since a JSON array is a bulk create. Regenerate clients built from the spec.
-
 ## 0.61.7
 
 ### Admin: no self-deactivation

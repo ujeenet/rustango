@@ -48,7 +48,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Added — unresolved-tenant router and ViewSet spec gaps
 
 - `server::Builder::unresolved_tenant(router)` / `Cli::unresolved_tenant` serve a router where no tenant resolves (unknown host, apex path the console does not serve), with `Extension<TenantRegistry>` and its `has_tenants()`; unset, routing is unchanged.
-- The ViewSet OpenAPI documents bulk create (JSON array in, array out with `null` for rows outside your scope), 400 for a malformed pk on retrieve and DELETE, 413 on writes, and 401/403/429 where the action has codenames or a throttle.
+- The ViewSet OpenAPI describes bulk create in the create operation (the schemas stay one row), 400 for a malformed pk on retrieve and DELETE, 413 on writes, and 401/403/429 where the action has codenames or a throttle.
 
 ### Internal — crypto and quoting helpers
 

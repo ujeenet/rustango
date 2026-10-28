@@ -100,25 +100,7 @@ Por defecto, una petición cuyo host no resuelve ningún tenant va a las rutas
 de tu aplicación, donde el extractor `Tenant` y el admin del tenant responden
 404. Para servir otra cosa en su lugar — una página de configuración inicial, una
 página «este sitio aún no está configurado» — pasa un router a
-`unresolved_tenant`:
-
-```rust
-use axum::{routing::get, Extension, Router};
-use rustango::tenancy::TenantRegistry;
-
-async fn setup(Extension(reg): Extension<TenantRegistry>) -> &'static str {
-    match reg.has_tenants().await {
-        Ok(false) => "Crea tu primer sitio",
-        _ => "Este sitio aún no está configurado",
-    }
-}
-
-Cli::new()
-    .tenancy()
-    .unresolved_tenant(Router::new().route("/", get(setup)))
-    .run()
-    .await?;
-```
+`unresolved_tenant`, por ejemplo una ruta `/` que responde «Crea tu primer sitio» mientras `TenantRegistry::has_tenants()` sea false. `Builder::unresolved_tenant` tiene un ejemplo compilado.
 
 Se ejecuta para un host desconocido y para una ruta del apex que la consola no
 sirve. Nunca se ejecuta para un host que resuelve a un tenant, y la consola
