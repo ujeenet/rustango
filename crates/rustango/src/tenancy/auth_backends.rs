@@ -276,7 +276,7 @@ impl AuthBackend for ModelBackend {
             if hit.username != username {
                 attempt.resolve(&hit.username).await.map_err(refused)?;
             }
-            attempt.settle(true).await.map_err(refused)?;
+            attempt.settle(true).await;
             return Ok(Some(hit));
         }
 
@@ -289,7 +289,7 @@ impl AuthBackend for ModelBackend {
             password::verify_dummy_async_in(HashLane::Credential, &password)
                 .await
                 .map_err(AuthError::from_hash)?;
-            attempt.settle(false).await.map_err(refused)?;
+            attempt.settle(false).await;
             return Ok(None);
         };
         attempt
@@ -298,7 +298,7 @@ impl AuthBackend for ModelBackend {
             .map_err(AuthError::Refused)?;
         // A parallel request may have verified it while this one waited.
         if let Some(hit) = cached(&user) {
-            attempt.settle(true).await.map_err(refused)?;
+            attempt.settle(true).await;
             return Ok(Some(hit));
         }
 
@@ -308,7 +308,7 @@ impl AuthBackend for ModelBackend {
             .await
             .map_err(AuthError::from_hash)?;
         if !user.active || !ok {
-            attempt.settle(false).await.map_err(refused)?;
+            attempt.settle(false).await;
             // Audit N4 — an inactive account must look identical to a
             // wrong password at this (username-keyed, pre-credential)
             // boundary: same `Ok(None)`, not a distinguishable
@@ -318,7 +318,7 @@ impl AuthBackend for ModelBackend {
             return Ok(None);
         }
 
-        attempt.settle(true).await.map_err(refused)?;
+        attempt.settle(true).await;
         let id = user.id.get().copied().unwrap_or(0);
         if let (Some(key), true) = (cache_key, id != 0) {
             basic_cache_put(slug, key, id);
@@ -509,10 +509,7 @@ impl AuthBackend for ApiKeyBackend {
                 }
             },
         };
-        attempt
-            .settle(key.is_some())
-            .await
-            .map_err(AuthError::Refused)?;
+        attempt.settle(key.is_some()).await;
         let Some(key) = key else {
             return Ok(None);
         };
@@ -1416,18 +1413,18 @@ mod tests {
         );
     }
 
-    /// A right API key is sent on every request: it writes nothing to the
-    /// login gate's cache; a wrong one is still counted.
+    /// A right API key is sent on every request: its slot is given back,
+    /// so it leaves the per-IP limit as it was; a wrong one is counted.
     #[tokio::test]
-    async fn right_api_keys_write_nothing_to_the_login_gate() {
-        let counting =
-            std::sync::Arc::new(crate::login_throttle::counting::CountingWrites::default());
-        let cache: crate::cache::BoxedCache = counting.clone();
+    async fn right_api_keys_leave_the_limit_as_it_was() {
+        let limits = crate::login_throttle::LoginLimits {
+            ip_limit: 3,
+            ..Default::default()
+        };
+        let cache: crate::cache::BoxedCache =
+            std::sync::Arc::new(crate::cache::InMemoryCache::new());
         let installed = crate::login_throttle::configure_shared(
-            crate::login_throttle::LoginThrottle::with_cache(
-                crate::login_throttle::LoginLimits::default(),
-                cache,
-            ),
+            crate::login_throttle::LoginThrottle::with_cache(limits, cache),
         );
         // nextest runs each test in its own process; another gate won here.
         if !installed {
@@ -1457,13 +1454,17 @@ mod tests {
                 ApiKeyBackend.authenticate(&parts, &pool).await
             }
         };
-        for _ in 0..3 {
+        for _ in 0..10 {
             assert!(matches!(call(token.clone()).await, Ok(Some(_))));
         }
-        assert_eq!(counting.writes(), 0, "a right key wrote to the login gate");
         let (prefix, _) = token.split_once('.').unwrap();
-        assert!(matches!(call(format!("{prefix}.wrong")).await, Ok(None)));
-        assert!(counting.writes() > 0, "a wrong key was not counted");
+        for _ in 0..3 {
+            assert!(matches!(call(format!("{prefix}.wrong")).await, Ok(None)));
+        }
+        assert!(
+            matches!(call(token.clone()).await, Err(AuthError::Refused(_))),
+            "wrong keys were not counted"
+        );
     }
 
     /// A user row in a fresh shared in-memory `SQLite`.
