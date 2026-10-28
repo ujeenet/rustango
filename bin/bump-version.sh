@@ -92,7 +92,7 @@ REWRITE='
   unless ($example) {
     # Our own manifest line, or a line naming rustango. A `[dependencies.foo]`
     # table with its own `version = "X"` line still matches; check the list.
-    s/(version\s*=\s*")\Q$o\E(?![0-9.])/$1$n/g if /^\s*version\s*=/ || /rustango/;
+    s/(version\s*=\s*"=?)\Q$o\E(?![0-9.])/$1$n/g if /^\s*version\s*=/ || /rustango/;
     s/("version"\s*:\s*")\Q$o\E(?![0-9.])/$1$n/g;
     s/(version:\s+)\Q$o\E(?![0-9.])/$1$n/g;
     s/(--version\s+"?)\Q$o\E(?![0-9.])/$1$n/g;
@@ -101,7 +101,7 @@ REWRITE='
     if ($os ne $ns) {
       s/^(version\s*=\s*")\Q$os\E(?![0-9.])/$1$ns/ if $ARGV eq "docs/index.toml";
       if (/rustango/) {
-        s/(version\s*=\s*")\Q$os\E(?![0-9.])/$1$ns/g;
+        s/(version\s*=\s*"=?)\Q$os\E(?![0-9.])/$1$ns/g;
         s/(\b(?:rustango-orm-macros|rustango-macros|cargo-rustango|rustango)\s*=\s*")\Q$os\E(?![0-9.])/$1$ns/g;
       }
     }
