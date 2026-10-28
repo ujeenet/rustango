@@ -279,7 +279,8 @@ fila, de modo que una carrera se resuelve con exactamente un ganador.
 `Cache::incr` también es atómico en los tres: `DatabaseCache` lo hace en un solo
 upsert. `FileCache` hace ambos bajo un cerrojo por entrada, válido solo en un
 host. Así que un `DistributedLock` o un contador exacto entre réplicas funciona
-con Redis o con la base de datos.
+con Redis o con la base de datos. Todos los backends cuentan en todo el rango
+`i64`; un desbordamiento es un error y deja el contador como estaba.
 
 Dos cosas que conviene saber:
 

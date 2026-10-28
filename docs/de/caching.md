@@ -282,7 +282,8 @@ ein Wettlauf genau einen Gewinner hat. `Cache::incr` ist ebenfalls auf allen
 dreien atomar: `DatabaseCache` erledigt es in einem Upsert. `FileCache` macht
 beides unter einer Sperre pro Eintrag, die nur auf einem Host gilt. Ein
 `DistributedLock` oder ein exakter Zähler funktioniert über Replikate hinweg also
-mit Redis oder der Datenbank.
+mit Redis oder der Datenbank. Jedes Backend zählt über den ganzen `i64`-Bereich;
+ein Überlauf ist ein Fehler und lässt den Zähler unverändert.
 
 Zwei Dinge, die man wissen sollte:
 

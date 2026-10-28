@@ -90,7 +90,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 
 | Verb | What it does |
 |---|---|
-| `dumpdata` | Export rows as JSON fixtures |
+| `dumpdata` | Export rows as JSON fixtures. Floats keep every bit; a JSON column holding JSON `null` is written `{"$json": null}`, apart from SQL NULL (`null`) |
 | `loaddata <fixture.json> [--fail-fast]` | Load JSON fixtures back in. A failed or partial load is not rolled back |
 | `flush [--yes] [--app <label>] [--model <name>]` | Wipe every model table; the flags limit the set. Unmanaged models and views are skipped. Postgres uses `TRUNCATE … RESTART IDENTITY` and fails if a table outside the filter references a target (an `ON DELETE CASCADE` link from it still empties it on MySQL / SQLite); MySQL / SQLite delete rows in one transaction, children first, and keep id counters. A tenancy project needs `--tenant <slug>` and clears only that tenant |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Streaming bulk delete; `--pretend` reports without deleting |

@@ -91,7 +91,7 @@ alcanzan mediante `Cli::tenancy()`.
 
 | Verbo | Qué hace |
 |---|---|
-| `dumpdata` | Exporta filas como fixtures JSON |
+| `dumpdata` | Exporta filas como fixtures JSON. Los flotantes conservan cada bit; una columna JSON con el `null` de JSON se escribe `{"$json": null}`, aparte del NULL de SQL (`null`) |
 | `loaddata <fixture.json> [--fail-fast]` | Vuelve a cargar fixtures JSON. Una carga fallida o parcial no se revierte |
 | `flush [--yes] [--app <label>] [--model <name>]` | Vacía todas las tablas de modelos; las banderas limitan el conjunto. Se omiten los modelos no gestionados y las vistas. Postgres usa `TRUNCATE … RESTART IDENTITY` y falla si una tabla fuera del filtro referencia un objetivo (un enlace `ON DELETE CASCADE` desde ella la vacía igualmente en MySQL / SQLite); MySQL / SQLite borran las filas en una transacción, hijos primero, y conservan los contadores de id. Un proyecto con tenancy necesita `--tenant <slug>` y solo vacía ese tenant |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Borrado masivo en streaming; `--pretend` informa sin borrar |

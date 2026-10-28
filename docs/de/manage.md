@@ -92,7 +92,7 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 
 | Verb | Was es tut |
 |---|---|
-| `dumpdata` | Exportiert Zeilen als JSON-Fixtures |
+| `dumpdata` | Exportiert Zeilen als JSON-Fixtures. Gleitkommazahlen bleiben bitgenau; eine JSON-Spalte mit JSON-`null` wird als `{"$json": null}` geschrieben, getrennt von SQL NULL (`null`) |
 | `loaddata <fixture.json> [--fail-fast]` | Lädt JSON-Fixtures wieder ein. Ein fehlgeschlagener oder teilweiser Ladevorgang wird nicht zurückgerollt |
 | `flush [--yes] [--app <label>] [--model <name>]` | Leert jede Model-Tabelle; die Flags grenzen die Menge ein. Nicht verwaltete Models und Views werden übersprungen. Postgres nutzt `TRUNCATE … RESTART IDENTITY` und schlägt fehl, wenn eine Tabelle außerhalb des Filters ein Ziel referenziert; MySQL / SQLite löschen die Zeilen in einer Transaktion, Kinder zuerst, und behalten die ID-Zähler. Ein Tenancy-Projekt braucht `--tenant <slug>` und leert nur diesen Tenant |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Streamendes Massenlöschen; `--pretend` meldet nur, ohne zu löschen |

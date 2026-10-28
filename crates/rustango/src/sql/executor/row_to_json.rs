@@ -50,6 +50,13 @@ pub(super) fn cell_is_null<R: sqlx::Row, I: sqlx::ColumnIndex<R>>(row: &R, index
     }
 }
 
+/// Rewrites a decoded JSON column value; SQL NULL never reaches it.
+pub(crate) type JsonCell = fn(serde_json::Value) -> serde_json::Value;
+
+fn json_as_is(v: serde_json::Value) -> serde_json::Value {
+    v
+}
+
 /// Generic body for the PG + MySQL `row_to_json` variants — they
 /// emit byte-identical match-on-`FieldType` decode tables. Issue
 /// #562: extract into a generic-over-`sqlx::Row` function so the
@@ -68,6 +75,7 @@ fn row_to_json_generic<'r, R>(
     fields: &[&'static crate::core::FieldSchema],
     uuid_cell: fn(&'r R, &str) -> Option<uuid::Uuid>,
     pg_only: fn(&'r R, &crate::core::FieldSchema) -> serde_json::Value,
+    json_cell: JsonCell,
 ) -> serde_json::Value
 where
     R: sqlx::Row,
@@ -136,6 +144,7 @@ where
                 .unwrap_or(Value::Null),
             FieldType::Json => row
                 .try_get::<serde_json::Value, _>(field.column)
+                .map(json_cell)
                 .unwrap_or(Value::Null),
             FieldType::Decimal => row
                 .try_get::<rust_decimal::Decimal, _>(field.column)
@@ -167,11 +176,21 @@ pub fn row_to_json(
     row: &sqlx::postgres::PgRow,
     fields: &[&'static crate::core::FieldSchema],
 ) -> serde_json::Value {
+    row_to_json_pg_with(row, fields, json_as_is)
+}
+
+#[cfg(feature = "postgres")]
+fn row_to_json_pg_with(
+    row: &sqlx::postgres::PgRow,
+    fields: &[&'static crate::core::FieldSchema],
+    json_cell: JsonCell,
+) -> serde_json::Value {
     row_to_json_generic(
         row,
         fields,
         |row, col| sqlx::Row::try_get::<uuid::Uuid, _>(row, col).ok(),
         pg_only_cell,
+        json_cell,
     )
 }
 
@@ -236,12 +255,22 @@ pub fn row_to_json_my(
     row: &sqlx::mysql::MySqlRow,
     fields: &[&'static crate::core::FieldSchema],
 ) -> serde_json::Value {
+    row_to_json_my_with(row, fields, json_as_is)
+}
+
+#[cfg(feature = "mysql")]
+fn row_to_json_my_with(
+    row: &sqlx::mysql::MySqlRow,
+    fields: &[&'static crate::core::FieldSchema],
+    json_cell: JsonCell,
+) -> serde_json::Value {
     row_to_json_generic(
         row,
         fields,
         |row, col| crate::sql::try_get_flat_my::<uuid::Uuid>(row, col).ok(),
         // PG-only types never live on MySQL.
         |_, _| serde_json::Value::Null,
+        json_cell,
     )
 }
 
@@ -256,6 +285,15 @@ pub fn row_to_json_my(
 pub fn row_to_json_sqlite(
     row: &sqlx::sqlite::SqliteRow,
     fields: &[&'static crate::core::FieldSchema],
+) -> serde_json::Value {
+    row_to_json_sqlite_with(row, fields, json_as_is)
+}
+
+#[cfg(feature = "sqlite")]
+fn row_to_json_sqlite_with(
+    row: &sqlx::sqlite::SqliteRow,
+    fields: &[&'static crate::core::FieldSchema],
+    json_cell: JsonCell,
 ) -> serde_json::Value {
     use crate::core::FieldType;
     use serde_json::{json, Value};
@@ -324,7 +362,7 @@ pub fn row_to_json_sqlite(
                 // SQLite stores JSON as TEXT; try parsing back to
                 // Value, else surface the raw string.
                 match row.try_get::<String, _>(field.column) {
-                    Ok(s) => serde_json::from_str(&s).unwrap_or(Value::String(s)),
+                    Ok(s) => json_cell(serde_json::from_str(&s).unwrap_or(Value::String(s))),
                     Err(_) => Value::Null,
                 }
             }
@@ -395,6 +433,16 @@ pub async fn select_rows_as_json(
     query: &SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
 ) -> Result<Vec<serde_json::Value>, ExecError> {
+    select_rows_as_json_with(pool, query, fields, json_as_is).await
+}
+
+/// [`select_rows_as_json`] with each JSON column value passed through `json_cell`.
+pub(crate) async fn select_rows_as_json_with(
+    pool: &Pool,
+    query: &SelectQuery,
+    fields: &[&'static crate::core::FieldSchema],
+    json_cell: JsonCell,
+) -> Result<Vec<serde_json::Value>, ExecError> {
     crate::test_assertions::query_counter::bump();
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
@@ -408,7 +456,7 @@ pub async fn select_rows_as_json(
             Ok(rows
                 .iter()
                 .map(|r| {
-                    let mut json = row_to_json(r, fields);
+                    let mut json = row_to_json_pg_with(r, fields, json_cell);
                     augment_joined_columns_pg(&mut json, r, &query.joins);
                     json
                 })
@@ -425,7 +473,7 @@ pub async fn select_rows_as_json(
             Ok(rows
                 .iter()
                 .map(|r| {
-                    let mut json = row_to_json_my(r, fields);
+                    let mut json = row_to_json_my_with(r, fields, json_cell);
                     augment_joined_columns_my(&mut json, r, &query.joins);
                     json
                 })
@@ -442,7 +490,7 @@ pub async fn select_rows_as_json(
             Ok(rows
                 .iter()
                 .map(|r| {
-                    let mut json = row_to_json_sqlite(r, fields);
+                    let mut json = row_to_json_sqlite_with(r, fields, json_cell);
                     augment_joined_columns_sqlite(&mut json, r, &query.joins);
                     json
                 })

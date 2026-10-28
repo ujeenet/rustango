@@ -78,6 +78,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `latest` / `earliest` skip NULLs, so every backend returns the same row.
 - `last()` on a sliced queryset returns the last row of the slice.
 
+### Fixed — wrong data: cache counters, dumps, admin inlines
+
+- `Cache::incr` on `DatabaseCache` (PG, MySQL) no longer resets a 19-digit counter to `by`; every backend errors on i64 overflow, and `RedisCache` returns the exact value past 2^53.
+- `dumpdata` → `loaddata` keeps every f64 bit and tells JSON `null` from SQL NULL; a NOT NULL JSON column holding `null` reloads.
+- The admin re-shows a refused edit's inline rows by PK; a row deleted meanwhile shows as an error instead of moving its values onto another row.
+
 ## [0.61.9] — 2026-10-28
 
 ### Fixed — ORM and migrations
