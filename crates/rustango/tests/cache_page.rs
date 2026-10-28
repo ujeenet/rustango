@@ -1552,3 +1552,43 @@ async fn a_non_utf8_vary_value_does_not_fill_the_missing_entry() {
         "the header-less request got the non-UTF-8 page"
     );
 }
+
+/// The purge counter outlives a backend's short default TTL, so a purged
+/// variant does not come back when that default runs out.
+#[tokio::test]
+async fn a_short_default_ttl_does_not_resurrect_purged_pages() {
+    use rustango::cache_page::PageKey;
+    let hits = Arc::new(AtomicU32::new(0));
+    let h = hits.clone();
+    let cache = Arc::new(InMemoryCache::with_default_ttl(Duration::from_millis(200)));
+    let layer = CachePageLayer::new(cache)
+        .tenant_agnostic(true)
+        .timeout(Duration::from_secs(60));
+    let app: Router = Router::new()
+        .route(
+            "/p",
+            get(move || {
+                let n = h.fetch_add(1, Ordering::SeqCst);
+                async move { format!("v{n}") }
+            }),
+        )
+        .layer(layer.clone());
+    let fetch = || {
+        let app = app.clone();
+        async move {
+            let req = Request::get("/p?x=1")
+                .header(header::HOST, "a.test")
+                .body(Body::empty())
+                .unwrap();
+            body_to_string(app.oneshot(req).await.unwrap().into_body()).await
+        }
+    };
+    assert_eq!(fetch().await, "v0");
+    layer
+        .invalidate([&PageKey::new("/p", "a.test")])
+        .await
+        .unwrap();
+    assert_eq!(fetch().await, "v1");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(fetch().await, "v1", "the purged v0 page came back");
+}
