@@ -10,7 +10,7 @@ HS256 en interne.
 [![JWT autonome dans Rustango : les Claims portent des champs sub/exp/personnalisés, encode() signe avec un secret partagé, decode() vérifie la signature + l'expiration](../img/auth-jwt.png)](../img/auth-jwt.png)
 
 > **Source :** `rustango::jwt` (`Claims`, `encode`, `decode`, `decode_at`,
-> `decode_unverified`, `JwtError`) — derrière la fonctionnalité `jwt` (activée
+> `decode_allowing_no_exp`, `decode_unverified`, `JwtError`) — derrière la fonctionnalité `jwt` (activée
 > par défaut). Pour une **API** access+refresh clé en main avec révocation, voir
 > [API d'authentification JWT](auth-jwt-api.md).
 >
@@ -120,7 +120,14 @@ match decode(&token, secret) {
 }
 ```
 
-`decode` vérifie la **signature**, puis `exp` et `nbf`. Pour tester le
+`decode` vérifie la **signature**, puis l'en-tête `alg`, puis `exp` et `nbf`.
+**`exp` est obligatoire** : un token sans `exp` échoue avec
+`JwtError::MissingExp`, car il n'expirerait jamais. Pour un token de service
+qui n'expire pas à dessein, appelez `decode_allowing_no_exp(token, secret)` (ou
+`decode_at_allowing_no_exp` avec une heure fixée) ; tous les autres contrôles
+s'exécutent quand même.
+
+Pour tester le
 comportement de la fenêtre temporelle (ou ajouter une tolérance de dérive),
 `decode_at(token, secret, now)` vous permet de fixer la seconde « courante » :
 
@@ -150,7 +157,7 @@ impérativement :
    ```
 
 2. **Le secret doit faire ≥ 32 octets** — `encode` refuse de signer avec une clé
-   plus courte (une clé courte est devinable, et une clé HMAC devinable signifie
+   plus courte et renvoie `JwtError::Decode` (une clé courte est devinable, et une clé HMAC devinable signifie
    des tokens falsifiables). HS256 est symétrique : quiconque possède le secret
    de vérification peut aussi *forger* des tokens, il reste donc à l'intérieur de
    votre frontière de confiance (service unique / backend partagé). L'émission de

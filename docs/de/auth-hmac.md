@@ -17,7 +17,8 @@ Tower-Layer.
 
 > **Quelle:** `rustango::hmac_auth` (`HmacAuthLayer`, `KeyResolver`,
 > `KeyTenantResolver`, `RequestToSign`, `sign_now`, `sign_request`) — hinter dem Feature `hmac-auth` (standardmäßig aktiviert; der
-> Replay-Schutz benötigt zusätzlich `cache`).
+> Replay-Schutz benötigt zusätzlich `cache`, und `bind_tenants` /
+> `KeyTenantResolver` brauchen `tenancy`).
 >
 > **Lauffähige Version:** Jedes Snippet ist aus
 > [`auth_hmac_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_hmac_doc.rs) kopiert
@@ -73,7 +74,9 @@ Weil der Query-String auf beiden Seiten **sortiert** wird, erzeugen `?b=2&a=1`
 und `?a=1&b=2` dieselbe Signatur. Weil der Body in die Zeichenkette gehasht wird,
 macht das Ändern eines einzigen Bytes sie ungültig.
 
-Der Host ist der `Host`-Header ohne Port. Ohne Festlegung vertraut die Schicht dem
+Der Host ist der `Host`-Header (oder die HTTP/2-Authority) ohne Port, klein
+geschrieben. Nennen `Host` und Authority verschiedene Hosts, ist das ein `401`.
+Ohne Festlegung vertraut die Schicht dem
 `Host` der Anfrage selbst: eine Anfrage, die an einen anderen Dienst mit demselben
 Schlüssel wiederholt wird und deren `Host` noch den ersten nennt, wird angenommen.
 Teilen Dienste einen Schlüssel, legen Sie jeden mit `.host("api.example.com")` fest
@@ -118,8 +121,11 @@ Eine korrekt signierte Anfrage passiert; manipulieren Sie den Body, lassen Sie
 > **Kein Identitäts-Extraktor.** Der Layer verifiziert die Signatur, **injiziert
 > aber nicht**, welche `keyId` signiert hat, in die Anfrage — es gibt keinen
 > `HmacUser`-Extraktor. Wenn ein Handler die Aufrufer-Identität benötigt, umhüllen
-> Sie den Layer oder führen Sie sie selbst mit. Ablehnungen sind schlichte
-> `401`/`413`-Antworten, kein typisierter Fehler, auf den Sie matchen.
+> Sie den Layer oder führen Sie sie selbst mit. Ablehnungen sind
+> JSON-Fehlerantworten, kein typisierter Fehler, auf den Sie matchen: `401` für
+> eine falsche oder fehlende Signatur, ein falsches Datum oder einen unbekannten
+> Schlüssel, `413` für einen zu großen Body und, mit `bind_tenants`, `403` für
+> den falschen Tenant (`503`, wenn die Tenant-Suche scheitert).
 
 ---
 
@@ -156,9 +162,10 @@ Der Tenant-Header und der Port werden standardmäßig nicht signiert, und der
 Layer kennt keinen Tenant. In einer App mit Tenant-Auflösung:
 
 - `.bind_tenants(tenant_of)` ordnet jeder Key-Id den Tenant-Slug zu, für den
-  sie handeln darf. Der Layer löst den Tenant der Anfrage über den eingehängten
-  Tenant-Kontext auf und antwortet mit `403`, wenn er abweicht oder keiner da
-  ist.
+  sie handeln darf (ein `KeyTenantResolver`; `None` heißt, der Schlüssel darf
+  für jeden Tenant handeln). Der Layer löst den Tenant der Anfrage über den
+  eingehängten Tenant-Kontext auf und antwortet mit `403`, wenn er abweicht
+  oder keiner da ist. Das läuft nach der Signaturprüfung.
 - `.signed_headers(["x-org"])` nimmt Header in den signierten String auf, und
   `.sign_port()` den Port in `Host`. Jedes ergänzt eine Zeile `name:value`,
   sortiert nach Name. Der Client signiert dieselbe Liste mit
@@ -173,7 +180,9 @@ Der `X-Date`-Zeitstempel begrenzt Replay: Eine Anfrage, deren Datum außerhalb v
 `tolerance_secs` (Standard ±300 s) liegt, wird abgelehnt, sodass eine abgefangene
 Anfrage nur innerhalb dieses kurzen Fensters wiederverwendbar ist. Um es ganz zu
 schließen, hängen Sie einen **Nonce-Store** an (irgendeinen `cache::Cache`), und
-jede Signatur kann innerhalb des Fensters nur einmal ausgegeben werden:
+jede Signatur kann nur einmal ausgegeben werden. Eine geprüfte Signatur wird
+doppelt so lange wie `tolerance_secs` gehalten, eine Wiederholung bekommt ein
+`401`:
 
 ```rust
 use rustango::cache::InMemoryCache;
@@ -185,8 +194,10 @@ let layer = HmacAuthLayer::new(resolver)
 
 Verwenden Sie in der Produktion einen **gemeinsamen** Store (Redis), damit der
 Schutz über Replicas hinweg hält — ein In-Process-Cache schützt nur eine
-Instanz. Die Replay-Prüfung schlägt bei einem Cache-Fehler „fail open“ fehl
-(Verfügbarkeit vor dem engen In-Fenster-Risiko).
+Instanz. Ein `NullCache` speichert nichts, daher loggt der Layer eine Warnung,
+dass der Replay-Schutz aus ist. Die Replay-Prüfung schlägt bei einem
+Cache-Fehler „fail open“ fehl (Verfügbarkeit vor dem engen In-Fenster-Risiko)
+und loggt für diese Anfrage eine Warnung.
 
 ---
 

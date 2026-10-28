@@ -17,7 +17,8 @@ das Schlüssel speichert und `Authorization: Bearer`-Anfragen authentifiziert.
 > `split_token`, `ApiKeyError`) — der eigenständige Helfer, hinter dem Feature
 > `api_keys` (standardmäßig aktiviert). Das speichernde Backend ist
 > `rustango::tenancy::auth_backends` (`create_api_key`, `ApiKeyBackend`,
-> `ensure_api_keys_table_pool`) — hinter dem Feature `tenancy`.
+> `ensure_api_keys_table_pool`, `set_api_key_secret`) — hinter dem Feature
+> `tenancy`.
 >
 > **Lauffähige Version:** Die Helfer-Snippets sind aus
 > [`auth_api_keys_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_api_keys_doc.rs) kopiert
@@ -43,10 +44,10 @@ das Schlüssel speichert und `Authorization: Bearer`-Anfragen authentifiziert.
 Ein Schlüssel hat zwei durch einen Punkt verbundene Teile:
 **`{prefix}.{secret}`**.
 
-- Das **Präfix** hat 8 Zeichen — im Klartext gespeichert und als schneller,
-  eindeutiger Nachschlage-Index verwendet („welcher Schlüssel ist das?“).
-- Das **Secret** ist das eigentliche Credential. Sie speichern nur einen
-  **argon2id-Hash** davon, niemals das Secret selbst.
+- Das **Präfix** hat 8 Hex-Zeichen — im Klartext gespeichert und als
+  schneller Nachschlage-Index verwendet („welcher Schlüssel ist das?“).
+- Das **Secret** hat 32 Hex-Zeichen und ist das eigentliche Credential. Sie
+  speichern nur einen **Hash** davon, niemals das Secret selbst.
 
 Der vollständige Token wird dem Benutzer **genau einmal** angezeigt, bei der
 Erstellung. Verlieren Sie ihn, stellen Sie ihn neu aus — es gibt keine
@@ -96,7 +97,9 @@ Nichtübereinstimmung und `Err(ApiKeyError)` nur dann, wenn die gespeicherte
 Zeichenkette kein gültiger Hash ist.
 
 Aus async-Code rufen Sie `generate_key_async`, `hash_secret_async` und
-`verify_key_async` auf; sie rechnen argon2 außerhalb der Runtime.
+`verify_key_async` auf; sie rechnen argon2 außerhalb der Runtime. Sie können
+auch `ApiKeyError::Busy` liefern, wenn nicht rechtzeitig ein Hash-Slot frei
+wird.
 
 ---
 
@@ -116,15 +119,26 @@ ensure_api_keys_table_pool(&pool).await?;   // CREATE TABLE IF NOT EXISTS
 ```
 
 Die `ApiKey`-Zeile speichert `user_id` (FK auf `rustango_users`), das
-8-stellige `key_prefix` (eindeutig), den argon2id-`key_hash`, ein `label` und
-ein optionales `expires_at`.
+8-stellige `key_prefix` (indiziert, nicht eindeutig), den `key_hash`, ein
+`label`, ein optionales `expires_at` und `created_at`.
+
+Das speichernde Backend nutzt kein argon2id. `key_hash` ist ein HMAC-SHA256 des
+Secrets, unter einem Schlüssel, der aus dem Server-Secret abgeleitet ist. So
+bleibt die Prüfung bei jeder Anfrage billig. Das Server-Secret ist
+`RUSTANGO_SESSION_SECRET` (in dev die Tenant-Session-Schlüsseldatei). Rufen
+Sie `set_api_key_secret(secret)` einmal beim Start auf, um einen anderen
+Schlüssel zu nutzen; der erste Aufruf gewinnt. **Wechseln Sie diesen Schlüssel
+oder rotieren Sie `RUSTANGO_SESSION_SECRET`, funktioniert kein ausgestellter
+Schlüssel mehr.** Zeilen, die ältere Versionen als argon2id gespeichert haben,
+werden weiter geprüft und bei der ersten Nutzung auf den HMAC umgeschrieben.
 
 ---
 
 ## Einen Schlüssel ausstellen
 
 `create_api_key` erzeugt den Token, hasht das Secret, fügt die Zeile ein und
-liefert den **Klartext-Token einmalig**:
+liefert den **Klartext-Token einmalig**. Auf dem Prod-Tier schlägt es fehl,
+wenn `RUSTANGO_SESSION_SECRET` nicht gesetzt ist:
 
 ```rust
 use rustango::tenancy::auth_backends::create_api_key;
@@ -138,11 +152,16 @@ use chrono::{Duration, Utc};
 let token = create_api_key(42, "tmp", Some(Utc::now() + Duration::days(30)), &pool).await?;
 ```
 
-Von der Kommandozeile aus umhüllt die `manage`-CLI denselben Aufruf:
+Von der Kommandozeile aus umhüllt die `manage`-CLI denselben Aufruf. Sie legt
+die Tabelle bei Bedarf an, und `--label` ist standardmäßig leer:
 
 ```bash
 cargo run -- create-api-key <tenant> <username> --label "ci-key" --expires-days 30
 ```
+
+Die CLI muss dasselbe Server-Secret nutzen wie der Server, sonst passt der
+Schlüssel zu nichts. Fällt sie auf die Dev-Schlüsseldatei zurück, gibt sie
+einen Hinweis aus.
 
 ---
 
@@ -174,25 +193,33 @@ curl https://api.example.com/api/data \
   -H "Authorization: Bearer a1b2c3d4.the-secret-half"
 ```
 
-Das Backend findet den `ApiKey` anhand seines 8-stelligen Präfixes, prüft
-`expires_at`, verifiziert das Secret gegen den gespeicherten Hash, lädt den
+Das Backend findet die `ApiKey`-Zeilen anhand des 8-stelligen Präfixes, prüft
+das Secret gegen jeden gespeicherten Hash, prüft dann `expires_at`, lädt den
 besitzenden Benutzer und injiziert ihn, damit Ihre Handler ihn über
-[`CurrentUser`](auth-backends.md) lesen können. Ein falsches Secret oder ein
-unbekanntes Präfix ist ein `401`; ein abgelaufener Schlüssel wird abgelehnt; ein
-deaktivierter Besitzer ist ein `403`.
+[`CurrentUser`](auth-backends.md) lesen können.
+
+- Ein falsches Secret oder ein unbekanntes Präfix ist kein Fehler: Das nächste
+  Backend der Kette läuft. Meldet keines den Aufrufer an, antwortet
+  `require_auth` mit `401`.
+- Ein abgelaufener Schlüssel ist sofort ein `401`.
+- Ein deaktivierter Besitzer ist ein `403`.
+- Fehlversuche werden pro Tenant und pro Client-IP begrenzt. Über dem Limit
+  lautet die Antwort `429`.
+
+Der Schlüssel liegt in der Datenbank eines Tenants und gilt nur dort.
 
 ---
 
 ## Sicherheitshinweise
 
-- **Das Secret wird einmal angezeigt.** Nur das Präfix + der argon2id-Hash werden
-  persistiert — es gibt keine Wiederherstellung, nur eine Neuausstellung.
+- **Das Secret wird einmal angezeigt.** Nur das Präfix + der geschlüsselte Hash
+  werden persistiert — es gibt keine Wiederherstellung, nur eine Neuausstellung.
 - **Das Präfix wird absichtlich im Klartext gespeichert** — es ist der
   O(1)-Nachschlage-Index. Ein Datenbankleck verrät, welche Präfixe existieren,
   niemals die Secrets.
-- **Das Timing ist ausgeglichen.** Ein unbekanntes Präfix führt trotzdem eine
-  Dummy-Verifizierung durch, sodass ein fehlender Schlüssel etwa gleich lang
-  braucht wie ein echter — keine Aufzählung über das Antwort-Timing.
+- **Das Timing ist ausgeglichen.** Der Hash wird in konstanter Zeit
+  verglichen, und das Secret wird vor dem Ablauf geprüft, sodass ein
+  abgelaufener Schlüssel gleich viel kostet wie ein unbekannter.
 - **Beschränken Sie Schlüssel auf einen Benutzer, setzen Sie einen Ablauf und
   rotieren Sie.** Stellen Sie pro Integration einen aus, damit Sie einen
   widerrufen können, ohne die anderen zu stören; bevorzugen Sie kurze

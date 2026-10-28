@@ -9,7 +9,7 @@ them back, HS256 under the hood.
 [![Standalone JWT in Rustango: Claims carry sub/exp/custom fields, encode() signs with a shared secret, decode() verifies signature + expiry](img/auth-jwt.png)](img/auth-jwt.png)
 
 > **Source:** `rustango::jwt` (`Claims`, `encode`, `decode`, `decode_at`,
-> `decode_unverified`, `JwtError`) — behind the `jwt` feature (on by default).
+> `decode_allowing_no_exp`, `decode_unverified`, `JwtError`) — behind the `jwt` feature (on by default).
 > For a batteries-included access+refresh **API** with revocation, see
 > [JWT auth API](auth-jwt-api.md).
 >
@@ -117,7 +117,13 @@ match decode(&token, secret) {
 }
 ```
 
-`decode` verifies the **signature**, then `exp` and `nbf`. To test clock-window
+`decode` verifies the **signature**, then the `alg` header, then `exp` and
+`nbf`. **`exp` is required**: a token without one fails with
+`JwtError::MissingExp`, because it would never expire. For a deliberate
+non-expiring service token, call `decode_allowing_no_exp(token, secret)` (or
+`decode_at_allowing_no_exp` with a pinned time); every other check still runs.
+
+To test clock-window
 behavior (or add skew tolerance), `decode_at(token, secret, now)` lets you pin
 the "current" second:
 
@@ -146,7 +152,7 @@ This is auth-boundary code — three things you must know:
    ```
 
 2. **The secret must be ≥ 32 bytes** — `encode` refuses to sign with a shorter
-   key (a short key is guessable, and a guessable HMAC key means forgeable
+   key and returns `JwtError::Decode` (a short key is guessable, and a guessable HMAC key means forgeable
    tokens). HS256 is symmetric: anyone with the verify secret can also *mint*
    tokens, so it stays inside your trust boundary (single service / shared
    backend). Cross-org token issuance wants asymmetric RS256/ES256, which this

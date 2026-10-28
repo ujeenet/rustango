@@ -16,7 +16,8 @@ sous la forme d'une seule couche tower.
 
 > **Source :** `rustango::hmac_auth` (`HmacAuthLayer`, `KeyResolver`,
 > `KeyTenantResolver`, `RequestToSign`, `sign_now`, `sign_request`) — derrière la fonctionnalité `hmac-auth` (activée par défaut ;
-> la protection contre le rejeu nécessite en plus `cache`).
+> la protection contre le rejeu nécessite en plus `cache`, et `bind_tenants` /
+> `KeyTenantResolver` nécessitent `tenancy`).
 >
 > **Version exécutable :** chaque extrait est copié depuis
 > [`auth_hmac_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_hmac_doc.rs)
@@ -71,7 +72,9 @@ Parce que la requête est **triée** des deux côtés, `?b=2&a=1` et `?a=1&b=2`
 produisent la même signature. Parce que le corps est haché dans la chaîne,
 changer un seul octet l'invalide.
 
-L'hôte est l'en-tête `Host` sans son port. Sans valeur fixée, la couche se fie
+L'hôte est l'en-tête `Host` (ou l'autorité HTTP/2) sans son port, en
+minuscules. Une requête dont `Host` et l'autorité nomment des hôtes différents
+reçoit un `401`. Sans valeur fixée, la couche se fie
 au `Host` de la requête : une requête rejouée vers un autre service qui partage la
 clé, avec un `Host` qui nomme toujours le premier, passe. Quand des services
 partagent une clé, fixez chacun avec `.host("api.example.com")` ou placez-le
@@ -115,8 +118,11 @@ signez avec une clé inconnue et c'est un `401` :
 > **Pas d'extracteur d'identité.** La couche vérifie la signature mais n'**injecte
 > pas** quel `keyId` a signé dans la requête — il n'y a pas d'extracteur
 > `HmacUser`. Si un handler a besoin de l'identité de l'appelant, enveloppez la
-> couche ou portez-la vous-même. Les rejets sont de simples réponses `401`/`413`,
-> pas une erreur typée que vous filtrez.
+> couche ou portez-la vous-même. Les rejets sont des réponses d'erreur JSON,
+> pas une erreur typée que vous filtrez : `401` pour une signature, une date ou
+> une clé mauvaise ou absente, `413` pour un corps au-delà de la limite, et,
+> avec `bind_tenants`, `403` pour le mauvais tenant (`503` quand la recherche du
+> tenant échoue).
 
 ---
 
@@ -153,9 +159,10 @@ L'en-tête du tenant et le port ne sont pas signés par défaut, et la couche ne
 connaît aucun tenant. Sur une application résolue par tenant :
 
 - `.bind_tenants(tenant_of)` associe chaque identifiant de clé au slug du
-  tenant pour lequel il peut agir. La couche résout le tenant de la requête
-  avec le contexte de tenant monté et répond `403` quand il diffère, ou quand
-  il n'y en a aucun.
+  tenant pour lequel il peut agir (un `KeyTenantResolver` ; `None` veut dire
+  que la clé peut agir pour tout tenant). La couche résout le tenant de la
+  requête avec le contexte de tenant monté et répond `403` quand il diffère, ou
+  quand il n'y en a aucun. Cela s'exécute après la vérification de signature.
 - `.signed_headers(["x-org"])` ajoute des en-têtes à la chaîne signée, et
   `.sign_port()` ajoute le port de `Host`. Chacun ajoute une ligne
   `name:value`, triée par nom. Le client signe la même liste avec
@@ -170,7 +177,8 @@ L'horodatage `X-Date` borne le rejeu : une requête dont la date est en dehors d
 `tolerance_secs` (défaut ±300 s) est rejetée, de sorte qu'une requête capturée
 n'est réutilisable que dans cette courte fenêtre. Pour la fermer entièrement,
 attachez un **magasin de nonces** (n'importe quel `cache::Cache`) et chaque
-signature ne peut être dépensée qu'une seule fois dans la fenêtre :
+signature ne peut être dépensée qu'une seule fois. Une signature vérifiée est
+gardée deux fois `tolerance_secs`, et une répétition reçoit un `401` :
 
 ```rust
 use rustango::cache::InMemoryCache;
@@ -182,8 +190,11 @@ let layer = HmacAuthLayer::new(resolver)
 
 En production, utilisez un magasin **partagé** (Redis) pour que la protection
 tienne à travers les réplicas — un cache en processus ne garde qu'une seule
-instance. La vérification de rejeu échoue en mode ouvert sur une erreur de cache
-(disponibilité plutôt que le risque étroit dans la fenêtre).
+instance. Un `NullCache` ne stocke rien, donc la couche journalise un
+avertissement disant que la protection contre le rejeu est coupée. La
+vérification de rejeu échoue en mode ouvert sur une erreur de cache
+(disponibilité plutôt que le risque étroit dans la fenêtre) et journalise un
+avertissement pour cette requête.
 
 ---
 

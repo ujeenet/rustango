@@ -21,7 +21,7 @@ compte est un superutilisateur ou du staff (tenant : détient une
 permission quelconque ; bare admin : tout compte). Ces comptes sont liés
 par un admin, qui ajoute la ligne `SsoLink` dans l'admin ; la ligne de
 journal du refus indique le subject. (Le flux membre, ci-dessous,
-provisionne automatiquement par défaut ; voir plus bas pour le désactiver.)
+peut aussi créer un compte pour un email inconnu ; c'est désactivé par défaut.)
 
 > **Source :** le cœur `rustango::sso`, indépendant de l'admin
 > (`SsoProvider`, `build_provider`, `verified_email`, `ResolvedSso`,
@@ -135,7 +135,9 @@ câblage de points de terminaison par provider n'est nécessaire.
 - **Console opérateur** (multi-tenancy) : un opérateur définit un
   **`SharedSsoProvider`** une seule fois, et il est proposé à **tous**
   les tenants (un Google à l'échelle de l'entreprise, par exemple). Géré
-  depuis le panneau *Shared SSO* de la console, où *Allow email linking*
+  depuis le panneau *Shared SSO* de la console (`/sso-shared`, fonctionnalité
+  `admin-sso` ; tout opérateur voit la liste, les changements exigent une
+  console modifiable), où *Allow email linking*
   bascule `allow_email_link` sur place (l'id et ses liens restent). Le
   drapeau s'applique à **tous** les tenants. *Edit*
   (`/sso-shared/{id}/edit`) modifie un provider sur place (même id et slug ;
@@ -152,10 +154,11 @@ provider partagé pour lui-même.
 
 L'URL de callback est dérivée par requête à partir de l'hôte + du slug
 (`https://<host><login>/sso/<slug>/callback`), c'est donc celle-là qu'il
-faut enregistrer auprès de l'IdP. Un utilisateur est lié par la liaison
+faut enregistrer auprès de l'IdP. Le schéma est `https`, sauf si un proxy de
+confiance envoie `X-Forwarded-Proto`. Un utilisateur est lié par la liaison
 optionnelle par email (utilisateurs tenant non privilégiés), ou par un
 superutilisateur qui ajoute une ligne `SsoLink` : `provider_source`
-(`tenant`, `shared` ou `admin`), `provider_id` (l'id de la ligne du
+(`tenant`, `shared`, `admin`, ou `app` pour une connexion native), `provider_id` (l'id de la ligne du
 provider), `issuer` (`kind`, ou `kind|issuer_url` sans barre oblique
 finale), `subject` et `user_id`. L'admin calcule `key_sha256`. La ligne de journal du refus (`sso refused`) porte
 `provider_id`, `issuer` et `subject`. Ajouter une ligne exige
@@ -165,10 +168,22 @@ de liens.
 
 Un lien créé plus de 5 minutes avant le compte vers lequel il pointe (un id
 réutilisé après une restauration, par exemple) journalise un avertissement et
-connecte quand même l'utilisateur.
+connecte quand même l'utilisateur. Un lien dont l'utilisateur n'existe plus est
+supprimé à la connexion suivante.
 `rustango::sso::link::set_stale_links(StaleLinks::Drop)` supprime plutôt un tel
 lien. Ne l'utilisez que si les valeurs `created_at` des comptes ne sont jamais
 importées ni remplies après coup.
+
+Avec la fonctionnalité `totp`, un utilisateur du bare admin qui a un appareil
+TOTP confirmé doit encore saisir un code après le SSO. L'admin affiche le
+formulaire de code et garde la connexion en attente 5 minutes dans un cookie
+signé ; le formulaire poste vers `<login>/sso-totp`. L'admin tenant n'a pas
+d'étape TOTP.
+
+`manage check --deploy` avertit pour un provider activé qui refuserait tout
+utilisateur existant : aucune ligne `SsoLink`, et liaison par email désactivée
+ou seulement des utilisateurs privilégiés. Dans le bare admin, c'est tout
+provider sans lien.
 
 ## SSO membre (utilisateur final)
 
@@ -182,7 +197,7 @@ et les lignes `SsoProvider` du tenant — seule la session émise diffère,
 d'où le fait qu'il vive derrière la fonctionnalité `sso` (et non
 `admin-sso`) et n'ait besoin d'aucun auto-admin.
 
-Montez `member_sso_router` dans une pile `tenancy::server::Builder` (il
+Montez `member_sso_router` dans une pile `rustango::server::Builder` (il
 lit l'`Arc<TenantContext>` résolu que le builder injecte) :
 
 ```rust
@@ -197,6 +212,10 @@ let members = member_sso_router(MemberAuthConfig {
 });
 ```
 
+Avec plusieurs backends compilés, `member_sso_router` sert le type de tenant
+par défaut (Postgres) ; utilisez `member_sso_router_for::<sqlx::Sqlite>` (ou
+`MySql`).
+
 Il monte deux routes par slug sous `login_base` :
 
 - `GET {login_base}/sso/{slug}` — démarrer la poignée de main, rediriger
@@ -204,10 +223,13 @@ Il monte deux routes par slug sous `login_base` :
 - `GET {login_base}/sso/{slug}/callback` — la terminer, trouver ou
   provisionner le membre, émettre le cookie de session.
 
+Un tenant à préfixe de chemin reçoit les deux mêmes routes sous son préfixe.
+
 Différences avec le flux admin :
 
 - **Schéma du callback.** Le `redirect_uri` membre prend son schéma dans le
-  `X-Forwarded-Proto` d'un proxy de confiance, sinon `http` sur un hôte de
+  `X-Forwarded-Proto` d'un proxy de confiance (et son hôte dans
+  `X-Forwarded-Host`), sinon `http` sur un hôte de
   loopback (`localhost`, `*.localhost`, une IP de loopback) et `https` partout
   ailleurs, donc `localhost.example.com` obtient `https`.
 - **Provisionnement automatique.** Avec `auto_provision = true` (optionnel ; le
@@ -218,9 +240,11 @@ Différences avec le flux admin :
   peuvent pas se connecter par mot de passe) — et la lie. Un email qui
   correspond à un compte existant suit la règle `allow_email_link`
   ci-dessus. Mettez-le à `false` pour refuser les emails inconnus. Une
-  connexion native appelle directement `find_or_provision_member` ; son
-  résultat `MemberSignIn` distingue `NotLinked` (un compte a cet email
-  mais ne peut pas être lié par lui) de `NoAccount`.
+  connexion native (une app qui a vérifié elle-même son ID token) appelle
+  directement `find_or_provision_member`, avec `ProviderKey::app(issuer)`
+  comme clé. Son résultat `MemberSignIn` vaut `Member(id)`, `NotLinked` (un
+  compte a cet email mais ne peut pas être lié par lui), `NoAccount`,
+  `Inactive`, `Unverified` ou `Refused`.
 - **Son propre cookie de session.** Le cookie membre
   (`rustango_member_session`) est **séparé par domaine** des cookies de
   session tenant / admin : le message signé porte une étiquette
@@ -230,6 +254,10 @@ Différences avec le flux admin :
   `RUSTANGO_SESSION_SECRET`. Il est lié au slug (un cookie émis pour
   `acme` n'authentifie jamais sur `globex`) et invalidé par une rotation
   de mot de passe (parité avec la session admin).
+- **Déconnexion.** `member_auth::logout(&pool, &user)` termine les sessions
+  du membre sur tous les appareils et renvoie la valeur `Set-Cookie` qui
+  efface le cookie. Pour un tenant à préfixe de chemin, utilisez
+  `logout_at`, qui efface le cookie sur le chemin du préfixe.
 
 Lisez le membre courant dans un handler avec l'extracteur
 **`CurrentMember`** — l'équivalent membre de `SessionUser`. Il est
@@ -263,10 +291,17 @@ jetons de l'IdP. Ainsi, un dump de base de données divulgué n'expose
 jamais le secret, et chaque tenant conserve son propre secret sans
 variable d'environnement par provider.
 
-> Définissez `RUSTANGO_SECRET_KEY` dans le déploiement (n'importe quelle
-> longueur ; elle est hachée en SHA-256 vers une clé de 32 octets). Sans
-> elle, enregistrer ou utiliser un provider échoue immédiatement — la
-> même posture qu'une URL de base de données manquante.
+> Définissez `RUSTANGO_SECRET_KEY` dans le déploiement. Elle est hachée en
+> SHA-256 vers une clé de 32 octets ; utilisez au moins 32 caractères
+> aléatoires (avec le provisionnement des tenants monté, `check --deploy`
+> avertit pour une clé plus courte). Sans elle, enregistrer ou utiliser un provider échoue
+> immédiatement — la même posture qu'une URL de base de données manquante.
+
+Pour faire tourner la clé, mettez la nouvelle valeur dans
+`RUSTANGO_SECRET_KEY` et l'ancienne dans `RUSTANGO_SECRET_KEY_PREVIOUS`. La
+lecture retombe sur l'ancienne clé. Dans un déploiement multi-tenant,
+`manage reseal-tenant-secrets --apply` rescelle ensuite les secrets SSO
+partagés et des tenants avec la nouvelle clé.
 
 ## Providers (préréglages)
 
