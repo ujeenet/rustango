@@ -464,6 +464,12 @@ async fn served_tenant_admin_limits_per_ip() {
     assert!(is_429(&r), "got {}", r.status());
 }
 
+/// Token replies are never stored (RFC 6749 §5.1).
+fn assert_no_store(r: &axum::response::Response, what: &str) {
+    assert_eq!(r.headers()[header::CACHE_CONTROL], "no-store", "{what}");
+    assert_eq!(r.headers()[header::PRAGMA], "no-cache", "{what}");
+}
+
 #[tokio::test]
 async fn jwt_login_locks_with_429() {
     let _g = SUITE.lock().await;
@@ -489,6 +495,11 @@ async fn jwt_routes_serve_a_non_default_backend() {
     env.user(&name).await;
     let r = env.jwt_login(&next_ip(), &name, PASS).await;
     assert_eq!(r.status(), StatusCode::OK);
+    assert_no_store(&r, "login");
+    assert_no_store(
+        &env.jwt_login(&next_ip(), &name, "wrong").await,
+        "failed login",
+    );
     let tokens = json_body(r).await;
     let refresh = tokens["refresh"].as_str().unwrap().to_owned();
     let call = |method: &str, uri: &str, bearer: Option<&str>, body: serde_json::Value| {
@@ -514,6 +525,7 @@ async fn jwt_routes_serve_a_non_default_backend() {
     )
     .await;
     assert_eq!(r.status(), StatusCode::OK, "refresh");
+    assert_no_store(&r, "refresh");
     let rotated = json_body(r).await;
     let access = rotated["access"].as_str().unwrap().to_owned();
     let refresh = rotated["refresh"].as_str().unwrap().to_owned();
@@ -525,6 +537,7 @@ async fn jwt_routes_serve_a_non_default_backend() {
     )
     .await;
     assert_eq!(r.status(), StatusCode::OK, "me");
+    assert_no_store(&r, "me");
     let r = send(
         &env.api,
         &next_ip(),

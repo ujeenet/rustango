@@ -322,6 +322,8 @@ impl JwtAuth {
             .route(&format!("{p}/logout"), post(logout::<DB>))
             .route(&format!("{p}/me"), get(me::<DB>))
             .with_state(self.clone())
+            // Tokens and the user's identity: no cache keeps them.
+            .layer(axum::middleware::map_response(crate::vary::token_reply))
     }
 
     /// The lifecycle behind this auth, e.g. to mint a token in a test.

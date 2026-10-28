@@ -598,22 +598,22 @@ async fn sso_begin_in(
     };
     let slug = sso.slug.as_str();
     let Some(secret) = session_secret(&parts) else {
-        return sso_error("Sign-in is temporarily unavailable.", &mount);
+        return sso_error(SsoFailure::Unavailable, &mount);
     };
     let pool = t.pool();
 
     let Some(redirect_uri) = mount.callback_uri(&parts, slug) else {
-        return sso_error("Sign-in is temporarily unavailable.", &mount);
+        return sso_error(SsoFailure::Unavailable, &mount);
     };
     let resolved = match resolve_by_slug(pool, slug, redirect_uri).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             tracing::warn!(slug, "SSO provider not found / disabled");
-            return sso_error("That sign-in method is not available.", &mount);
+            return sso_error(SsoFailure::UnknownProvider, &mount);
         }
         Err(e) => {
             tracing::error!(error = %e, slug, "resolve_by_slug failed");
-            return sso_error("Sign-in is temporarily unavailable.", &mount);
+            return sso_error(SsoFailure::Unavailable, &mount);
         }
     };
 
@@ -621,7 +621,7 @@ async fn sso_begin_in(
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, slug, "build_provider failed");
-            return sso_error("Sign-in is temporarily unavailable.", &mount);
+            return sso_error(SsoFailure::Unavailable, &mount);
         }
     };
 
@@ -665,19 +665,19 @@ async fn sso_callback_in(
     let slug = sso.slug.as_str();
     let clear_flow = |resp: Response| clear_flow(resp, &mount.path);
     let Some(secret) = session_secret(&parts) else {
-        return sso_error("Sign-in is temporarily unavailable.", &mount);
+        return sso_error(SsoFailure::Unavailable, &mount);
     };
 
     if let Some(err) = params.error {
         tracing::warn!(slug, error = %err, "IdP returned an error");
-        return sso_error("Sign-in was cancelled or denied.", &mount);
+        return sso_error(SsoFailure::Denied, &mount);
     }
     let (Some(code), Some(state)) = (params.code, params.state) else {
-        return sso_error("Malformed sign-in response.", &mount);
+        return sso_error(SsoFailure::Malformed, &mount);
     };
 
     let Some(sealed) = extract_cookie(&parts, FLOW_COOKIE) else {
-        return sso_error("Your sign-in session expired. Please try again.", &mount);
+        return sso_error(SsoFailure::Expired, &mount);
     };
     let flow = match open_flow(
         &sealed,
@@ -687,24 +687,24 @@ async fn sso_callback_in(
         Ok(f) => f,
         Err(e) => {
             tracing::warn!(error = %e, "open_flow failed");
-            return sso_error("Your sign-in session expired. Please try again.", &mount);
+            return sso_error(SsoFailure::Expired, &mount);
         }
     };
 
     let pool = t.pool();
 
     let Some(redirect_uri) = mount.callback_uri(&parts, slug) else {
-        return clear_flow(sso_error("Sign-in is temporarily unavailable.", &mount));
+        return clear_flow(sso_error(SsoFailure::Unavailable, &mount));
     };
     let resolved = match resolve_by_slug(pool, slug, redirect_uri).await {
         Ok(Some(r)) => r,
-        _ => return clear_flow(sso_error("That sign-in method is not available.", &mount)),
+        _ => return clear_flow(sso_error(SsoFailure::UnknownProvider, &mount)),
     };
     let provider = match build_provider_for(&resolved.sso, LinkSource::Tenant).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "build_provider failed on callback");
-            return clear_flow(sso_error("Sign-in is temporarily unavailable.", &mount));
+            return clear_flow(sso_error(SsoFailure::Unavailable, &mount));
         }
     };
 
@@ -712,7 +712,12 @@ async fn sso_callback_in(
         Ok((user, _tokens)) => user,
         Err(e) => {
             tracing::error!(error = %e, "oauth2 complete failed");
-            return clear_flow(sso_error("Sign-in failed. Please try again.", &mount));
+            let failure = match e {
+                crate::oauth2::OAuthError::StateMismatch
+                | crate::oauth2::OAuthError::FlowExpired => SsoFailure::Expired,
+                _ => SsoFailure::Upstream,
+            };
+            return clear_flow(sso_error(failure, &mount));
         }
     };
 
@@ -750,41 +755,29 @@ async fn sso_callback_in(
     let member_id = match outcome {
         Ok(MemberSignIn::Member(id)) => id,
         Ok(MemberSignIn::NotLinked) => {
-            return clear_flow(sso_error(
-                "This sign-in is not linked to your account. Please contact your administrator.",
-                &mount,
-            ));
+            return clear_flow(sso_error(SsoFailure::NotLinked, &mount));
         }
         Ok(MemberSignIn::NoAccount) => {
-            return clear_flow(sso_error(
-                "There is no account for this sign-in. Please contact your administrator.",
-                &mount,
-            ));
+            return clear_flow(sso_error(SsoFailure::NoAccount, &mount));
         }
         Ok(MemberSignIn::Inactive) => {
-            return clear_flow(sso_error(
-                "This account is disabled. Please contact your administrator.",
-                &mount,
-            ));
+            return clear_flow(sso_error(SsoFailure::Inactive, &mount));
         }
         Ok(MemberSignIn::Unverified) => {
-            return clear_flow(sso_error(
-                "Your identity provider did not return a verified email.",
-                &mount,
-            ));
+            return clear_flow(sso_error(SsoFailure::Unverified, &mount));
         }
         Ok(_) => {
-            return clear_flow(sso_error("Sign-in failed. Please try again.", &mount));
+            return clear_flow(sso_error(SsoFailure::Refused, &mount));
         }
         Err(e) => {
             tracing::error!(error = %e, "find-or-provision member failed");
-            return clear_flow(sso_error("Could not complete sign-in.", &mount));
+            return clear_flow(sso_error(SsoFailure::Incomplete, &mount));
         }
     };
 
     let Some(member) = tenant_user(pool, member_id).await.filter(|u| u.active) else {
         tracing::warn!(member_id, "member missing or inactive after sign-in");
-        return clear_flow(sso_error("Could not complete sign-in.", &mount));
+        return clear_flow(sso_error(SsoFailure::Incomplete, &mount));
     };
     let cookie = mount.mint_cookie(&secret, &member, &t.org.slug, config.session_ttl);
     let landing = safe_landing(params.next.as_deref(), &mount.url(&config.landing_url));
@@ -1109,9 +1102,70 @@ fn clear_flow(mut resp: Response, path: &str) -> Response {
 /// Minimal self-contained HTML error page for SSO failures — no
 /// template dependency, so it renders even when tenant templates are
 /// missing. Links back to the login page under `mount`.
-fn sso_error(message: &str, mount: &Mount) -> Response {
+/// Why a member sign-in stopped: picks the page's status and text.
+#[derive(Clone, Copy, Debug)]
+enum SsoFailure {
+    /// Missing secret, bad config, provider discovery down.
+    Unavailable,
+    UnknownProvider,
+    /// The IdP said no.
+    Denied,
+    Malformed,
+    /// No, stale or mismatched flow state.
+    Expired,
+    /// The code exchange or userinfo call failed.
+    Upstream,
+    NotLinked,
+    NoAccount,
+    Inactive,
+    Unverified,
+    Refused,
+    /// Our own read or write failed after the IdP answered.
+    Incomplete,
+}
+
+impl SsoFailure {
+    fn status(self) -> StatusCode {
+        match self {
+            Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::UnknownProvider => StatusCode::NOT_FOUND,
+            Self::Malformed | Self::Expired => StatusCode::BAD_REQUEST,
+            Self::Upstream => StatusCode::BAD_GATEWAY,
+            Self::Denied
+            | Self::NotLinked
+            | Self::NoAccount
+            | Self::Inactive
+            | Self::Unverified
+            | Self::Refused => StatusCode::FORBIDDEN,
+            Self::Incomplete => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::Unavailable => "Sign-in is temporarily unavailable.",
+            Self::UnknownProvider => "That sign-in method is not available.",
+            Self::Denied => "Sign-in was cancelled or denied.",
+            Self::Malformed => "Malformed sign-in response.",
+            Self::Expired => "Your sign-in session expired. Please try again.",
+            Self::Upstream | Self::Refused => "Sign-in failed. Please try again.",
+            Self::NotLinked => {
+                "This sign-in is not linked to your account. Please contact your administrator."
+            }
+            Self::NoAccount => {
+                "There is no account for this sign-in. Please contact your administrator."
+            }
+            Self::Inactive => "This account is disabled. Please contact your administrator.",
+            Self::Unverified => "Your identity provider did not return a verified email.",
+            Self::Incomplete => "Could not complete sign-in.",
+        }
+    }
+}
+
+/// The failure page: its own status, never cached, kept by the error-page layer.
+fn sso_error(failure: SsoFailure, mount: &Mount) -> Response {
     let back = crate::text::html_escape(&mount.login_url());
-    let message = crate::text::html_escape(message);
+    let message = crate::text::html_escape(failure.message());
     // A nonce'd `<style>`, not a style attribute: strict CSP (#2144).
     let nonce = crate::csp_nonce::nonce_attr();
     let html = format!(
@@ -1119,11 +1173,14 @@ fn sso_error(message: &str, mount: &Mount) -> Response {
          <style{nonce}>body{{font-family:system-ui;max-width:32rem;margin:4rem auto;padding:0 1rem}}</style>\
          <body><h1>Sign-in error</h1><p>{message}</p><p><a href=\"{back}\">Back to sign-in</a></p></body>"
     );
-    Response::builder()
-        .status(StatusCode::OK)
+    let mut resp = Response::builder()
+        .status(failure.status())
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from(html))
-        .expect("valid response")
+        .expect("valid response");
+    resp.extensions_mut().insert(crate::errors::KeepBody);
+    resp
 }
 
 #[cfg(test)]
@@ -1160,7 +1217,7 @@ mod tests {
                         path: "/".into(),
                         login: "/login".into(),
                     };
-                    let mut resp = sso_error("bad", &mount);
+                    let mut resp = sso_error(SsoFailure::Malformed, &mount);
                     resp.headers_mut()
                         .insert("x-nonce", n.value().parse().unwrap());
                     resp

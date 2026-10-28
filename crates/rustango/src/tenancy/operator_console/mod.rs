@@ -997,6 +997,13 @@ fn router_unlogged(
         ))
         .route_layer(crate::forms::csrf::layer())
         .route_layer(middleware::from_fn_with_state(state.clone(), flash::layer))
+        // Console pages show tenants, operators and tokens: never stored.
+        .route_layer(middleware::map_response(
+            |mut resp: Response<Body>| async move {
+                crate::vary::mark_no_store(resp.headers_mut());
+                resp
+            },
+        ))
         .merge(assets)
         .with_state(state)
         .layer(middleware::from_fn(mount::layer));
@@ -2563,6 +2570,26 @@ mod flash_tests {
             .await
             .unwrap();
         String::from_utf8_lossy(&body).into_owned()
+    }
+
+    /// Console pages are never stored by a browser or a shared cache.
+    #[tokio::test]
+    async fn console_pages_are_no_store() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let app = super::router(pool, super::SessionSecret::from_bytes(vec![3; 32]));
+        for path in ["/login", "/orgs"] {
+            let req = Request::get(path).body(Body::empty()).unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            let cc = resp.headers()[axum::http::header::CACHE_CONTROL]
+                .to_str()
+                .unwrap();
+            assert!(
+                cc.contains("no-store") && cc.contains("private"),
+                "{path}: {cc}"
+            );
+            let vary = resp.headers()[axum::http::header::VARY].to_str().unwrap();
+            assert!(vary.contains("Cookie"), "{path}: {vary}");
+        }
     }
 
     /// A link cannot put its own text on the console login page.

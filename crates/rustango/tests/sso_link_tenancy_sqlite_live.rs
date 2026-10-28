@@ -1961,3 +1961,52 @@ async fn an_operator_password_change_is_audited() {
         "not audited: {sources:?}"
     );
 }
+
+/// A failed member sign-in says so in its status and is never cached.
+#[tokio::test]
+async fn member_sso_failures_have_an_error_status_and_no_store() {
+    use rustango::extractors::TenantContext;
+    use rustango::tenancy::member_auth::{member_sso_router_for, MemberAuthConfig};
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
+        pools: env._pools.clone(),
+        resolver: ChainResolver::new().push(SubdomainResolver::new("app.test")),
+        session_secret: env.secret.clone(),
+        operator_secret: env.secret.clone(),
+    });
+    let app = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig::default())
+        .layer(axum::Extension(ctx));
+    let host = env.tenants[0].host.clone();
+    let get = |uri: &str| {
+        Request::builder()
+            .uri(uri)
+            .header(header::HOST, &host)
+            .body(Body::empty())
+            .unwrap()
+    };
+    env.idp.assert("sub-stranger", "stranger@example.com");
+    let refused = handshake(&app, &host, "/auth", "corp").await;
+    for (what, resp, want) in [
+        (
+            "unknown provider",
+            send(&app, get("/auth/sso/nope")).await,
+            404,
+        ),
+        (
+            "no flow cookie",
+            send(&app, get("/auth/sso/corp/callback?code=c&state=s")).await,
+            400,
+        ),
+        (
+            "IdP error",
+            send(&app, get("/auth/sso/corp/callback?error=access_denied")).await,
+            403,
+        ),
+        ("not linked", refused, 403),
+    ] {
+        assert_eq!(resp.status().as_u16(), want, "{what}");
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store", "{what}");
+    }
+}
