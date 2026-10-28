@@ -50,7 +50,7 @@ pub enum EnvError {
     MissingRequired { name: String, hint: String },
     /// `DB_DRIVER`, or the scheme read from `DATABASE_URL`, is not a
     /// backend we support.
-    #[error("unsupported DB driver `{0}` — expected one of: postgres, postgresql, mysql")]
+    #[error("unsupported DB driver `{0}` — expected one of: postgres, postgresql, mysql, mariadb, sqlite")]
     UnsupportedDriver(String),
 }
 
@@ -460,6 +460,23 @@ impl DatabaseUrlBuilder {
     }
 }
 
+/// The separate connection vars [`database_url_from_env`] assembles from.
+const DB_PART_VARS: &[&str] = &[
+    "DB_DRIVER",
+    "DB_HOST",
+    "DB_PORT",
+    "DB_USER",
+    "DB_PASSWORD",
+    "DB_PASSWORD_FILE",
+    "DB_NAME",
+    "DB_PARAMS",
+];
+
+/// What to tell an operator who set neither connection style.
+const DB_UNSET_HINT: &str = "set DATABASE_URL, or DB_USER + DB_NAME \
+     (with DB_HOST, DB_PORT, DB_PASSWORD or DB_PASSWORD_FILE, DB_DRIVER); \
+     for SQLite, DB_DRIVER=sqlite + DB_NAME=<file path>";
+
 /// Resolve a database URL from environment variables.
 ///
 /// Resolution order:
@@ -467,53 +484,161 @@ impl DatabaseUrlBuilder {
 ///    `postgresql://` becomes `postgres://`.
 /// 2. Otherwise assembled from:
 ///    - `DB_DRIVER` (default `postgres`): one of `postgres`,
-///      `postgresql`, `mysql`, `mariadb`.
+///      `postgresql`, `mysql`, `mariadb`, `sqlite`.
 ///    - `DB_HOST` (default `localhost`)
 ///    - `DB_PORT` (default `5432` for postgres, `3306` for mysql)
-///    - `DB_USER` (**required** when assembling)
-///    - `DB_PASSWORD` (optional; auto percent-encoded)
-///    - `DB_NAME` (**required** when assembling)
+///    - `DB_USER` (**required** when assembling, except for SQLite)
+///    - `DB_PASSWORD`, or `DB_PASSWORD_FILE` naming a file that holds
+///      it (Docker / Kubernetes secrets); optional, auto percent-encoded
+///    - `DB_NAME` (**required** when assembling; the file path for SQLite)
 ///    - `DB_PARAMS` (optional raw query string)
 ///
+/// When both styles are set, `DATABASE_URL` wins and one warning per
+/// process says so. 0.62.0 flips this: the separate vars will win.
+///
 /// # Errors
-/// - [`EnvError::MissingRequired`] when assembling without `DB_USER`
-///   or `DB_NAME`.
+/// - [`EnvError::MissingRequired`] when neither style is set, or when
+///   assembling without `DB_USER` or `DB_NAME`.
 /// - [`EnvError::UnsupportedDriver`] for an unknown `DB_DRIVER`.
-/// - [`EnvError::Parse`] when `DB_PORT` is not a number.
+/// - [`EnvError::Parse`] when `DB_PORT` is not a number, or
+///   `DB_PASSWORD_FILE` can't be read or is set with `DB_PASSWORD`.
 pub fn database_url_from_env() -> Result<String, EnvError> {
-    if let Some(url) = lookup("DATABASE_URL") {
+    let url = resolve_database_url(&lookup)?;
+    if let Some(msg) = database_style_conflict_with(&lookup) {
+        warn_style_conflict_once(&msg);
+    }
+    Ok(url)
+}
+
+/// [`database_url_from_env`] with the CLI's advice on where to set it.
+#[cfg(feature = "manage")]
+pub(crate) fn database_url_or_advice() -> Result<String, String> {
+    database_url_from_env()
+        .map_err(|e| format!("{e}. Set it in your shell, or copy `.env.example` to `.env`."))
+}
+
+/// The warning [`database_url_from_env`] logs when `DATABASE_URL` and
+/// `DB_*` vars are both set; `None` when only one style is.
+pub(crate) fn database_style_conflict() -> Option<String> {
+    database_style_conflict_with(&lookup)
+}
+
+fn database_style_conflict_with(get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let url = get("DATABASE_URL")?;
+    let parts: Vec<&str> = DB_PART_VARS
+        .iter()
+        .copied()
+        .filter(|n| get(n).is_some_and(|v| !v.is_empty()))
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "both DATABASE_URL and {} are set; using DATABASE_URL ({}). \
+         From 0.62.0 the DB_* vars win; unset one of the two styles",
+        parts.join(", "),
+        crate::sql::connect_diagnosis::redact(&url),
+    ))
+}
+
+/// One warning per process: every pool open resolves the URL again.
+fn warn_style_conflict_once(msg: &str) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    // CLI verbs often run with no subscriber; stderr then.
+    if tracing::dispatcher::has_been_set() {
+        tracing::warn!(target: "rustango::sql", "{msg}");
+    } else {
+        eprintln!("warning: {msg}");
+    }
+}
+
+fn resolve_database_url(get: &dyn Fn(&str) -> Option<String>) -> Result<String, EnvError> {
+    if let Some(url) = get("DATABASE_URL") {
         // One scheme downstream, so callers match on `postgres://`.
         if let Some(rest) = url.strip_prefix("postgresql://") {
             return Ok(format!("postgres://{rest}"));
         }
         return Ok(url);
     }
-    let driver = match lookup("DB_DRIVER") {
+    if DB_PART_VARS.iter().all(|n| get(n).is_none()) {
+        return Err(EnvError::MissingRequired {
+            name: "DATABASE_URL".into(),
+            hint: DB_UNSET_HINT.into(),
+        });
+    }
+    let name = |var: &str| {
+        get(var).ok_or_else(|| EnvError::MissingRequired {
+            name: var.into(),
+            hint: format!("set DATABASE_URL or {var} (e.g. `export {var}=app`)"),
+        })
+    };
+    // `DbDriver` has no SQLite variant until 0.62.0: adding one breaks matches.
+    let driver = match get("DB_DRIVER") {
+        Some(s) if s.trim().eq_ignore_ascii_case("sqlite") => {
+            return Ok(sqlite_url(&name("DB_NAME")?, get("DB_PARAMS")));
+        }
         Some(s) => DbDriver::parse(&s)?,
         None => DbDriver::Postgres,
     };
-    let user = lookup("DB_USER").ok_or_else(|| EnvError::MissingRequired {
-        name: "DB_USER".into(),
-        hint: "set DATABASE_URL or DB_USER (e.g. `export DB_USER=app`)".into(),
-    })?;
-    let name = lookup("DB_NAME").ok_or_else(|| EnvError::MissingRequired {
-        name: "DB_NAME".into(),
-        hint: "set DATABASE_URL or DB_NAME (e.g. `export DB_NAME=app`)".into(),
-    })?;
-    let mut b = DatabaseUrlBuilder::new(driver).user(user).database(name);
-    if let Some(host) = lookup("DB_HOST") {
+    let user = name("DB_USER")?;
+    let mut b = DatabaseUrlBuilder::new(driver)
+        .user(user)
+        .database(name("DB_NAME")?);
+    if let Some(host) = get("DB_HOST") {
         b = b.host(host);
     }
-    if let Some(port) = optional::<u16>("DB_PORT")? {
-        b = b.port(port);
+    if let Some(port) = get("DB_PORT") {
+        b = b.port(
+            port.parse()
+                .map_err(|e: std::num::ParseIntError| EnvError::Parse {
+                    name: "DB_PORT".into(),
+                    ty: "u16",
+                    detail: e.to_string(),
+                })?,
+        );
     }
-    if let Some(pw) = lookup("DB_PASSWORD") {
+    if let Some(pw) = db_password(get)? {
         b = b.password(pw);
     }
-    if let Some(params) = lookup("DB_PARAMS") {
+    if let Some(params) = get("DB_PARAMS") {
         b = b.params(params);
     }
     Ok(b.build())
+}
+
+/// `DB_PASSWORD`, or the contents of `DB_PASSWORD_FILE` less its
+/// trailing newline. Both set is an error: neither silently wins.
+fn db_password(get: &dyn Fn(&str) -> Option<String>) -> Result<Option<String>, EnvError> {
+    let file_err = |detail: String| EnvError::Parse {
+        name: "DB_PASSWORD_FILE".into(),
+        ty: "readable file path",
+        detail,
+    };
+    match (get("DB_PASSWORD"), get("DB_PASSWORD_FILE")) {
+        (Some(_), Some(_)) => Err(file_err(
+            "set DB_PASSWORD or DB_PASSWORD_FILE, not both".into(),
+        )),
+        (Some(pw), None) => Ok(Some(pw)),
+        (None, Some(path)) => {
+            let raw =
+                std::fs::read_to_string(&path).map_err(|e| file_err(format!("{path}: {e}")))?;
+            Ok(Some(raw.trim_end_matches(['\n', '\r']).to_owned()))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+/// `sqlite:<path>`; `:memory:` stays the in-memory database.
+fn sqlite_url(path: &str, params: Option<String>) -> String {
+    let mut url = format!("sqlite:{path}");
+    if let Some(p) = params.filter(|p| !p.is_empty()) {
+        url.push('?');
+        url.push_str(&p);
+    }
+    url
 }
 
 /// RFC 3986 percent-encoding for the userinfo part (user and
@@ -843,6 +968,7 @@ mod tests {
         "DB_PORT",
         "DB_USER",
         "DB_PASSWORD",
+        "DB_PASSWORD_FILE",
         "DB_NAME",
         "DB_PARAMS",
     ];
@@ -900,6 +1026,103 @@ mod tests {
             EnvError::MissingRequired { name, .. } => assert_eq!(name, "DB_USER"),
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    /// A lookup over fixed pairs, so these need no process env.
+    fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        move |name| map.get(name).cloned()
+    }
+
+    #[test]
+    fn database_url_assembles_sqlite_from_db_name() {
+        let get = vars(&[("DB_DRIVER", "SQLite"), ("DB_NAME", "./var/app.db")]);
+        assert_eq!(resolve_database_url(&get).unwrap(), "sqlite:./var/app.db");
+        let get = vars(&[("DB_DRIVER", "sqlite"), ("DB_NAME", ":memory:")]);
+        assert_eq!(resolve_database_url(&get).unwrap(), "sqlite::memory:");
+        let get = vars(&[
+            ("DB_DRIVER", "sqlite"),
+            ("DB_NAME", "/abs/x.db"),
+            ("DB_PARAMS", "mode=rwc"),
+        ]);
+        assert_eq!(
+            resolve_database_url(&get).unwrap(),
+            "sqlite:/abs/x.db?mode=rwc"
+        );
+        let get = vars(&[("DB_DRIVER", "sqlite")]);
+        match resolve_database_url(&get).unwrap_err() {
+            EnvError::MissingRequired { name, .. } => assert_eq!(name, "DB_NAME"),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn database_url_reads_the_password_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pw");
+        std::fs::write(&path, "p@ss word\n").unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let get = vars(&[
+            ("DB_USER", "u"),
+            ("DB_NAME", "d"),
+            ("DB_PASSWORD_FILE", path.as_str()),
+        ]);
+        assert_eq!(
+            resolve_database_url(&get).unwrap(),
+            "postgres://u:p%40ss%20word@localhost:5432/d"
+        );
+        let both = vars(&[
+            ("DB_USER", "u"),
+            ("DB_NAME", "d"),
+            ("DB_PASSWORD", "x"),
+            ("DB_PASSWORD_FILE", path.as_str()),
+        ]);
+        assert!(matches!(
+            resolve_database_url(&both),
+            Err(EnvError::Parse { ref name, .. }) if name == "DB_PASSWORD_FILE"
+        ));
+        let missing = vars(&[
+            ("DB_USER", "u"),
+            ("DB_NAME", "d"),
+            ("DB_PASSWORD_FILE", "/nonexistent/rustango-pw"),
+        ]);
+        assert!(resolve_database_url(&missing).is_err());
+    }
+
+    #[test]
+    fn database_url_unset_error_names_both_styles() {
+        let err = resolve_database_url(&vars(&[])).unwrap_err().to_string();
+        for needle in ["DATABASE_URL", "DB_USER", "DB_NAME", "DB_PASSWORD_FILE"] {
+            assert!(err.contains(needle), "{needle} missing from: {err}");
+        }
+    }
+
+    #[test]
+    fn database_url_still_wins_and_the_conflict_is_redacted() {
+        let get = vars(&[
+            ("DATABASE_URL", "postgres://app:s3cret@db/app"),
+            ("DB_USER", "other"),
+            ("DB_NAME", "otherdb"),
+            ("DB_HOST", ""),
+        ]);
+        assert_eq!(
+            resolve_database_url(&get).unwrap(),
+            "postgres://app:s3cret@db/app"
+        );
+        let msg = database_style_conflict_with(&get).expect("conflict");
+        assert!(!msg.contains("s3cret"), "{msg}");
+        assert!(
+            msg.contains("DB_USER, DB_NAME") && !msg.contains("DB_HOST"),
+            "{msg}"
+        );
+        assert!(msg.contains("0.62.0"), "{msg}");
+        assert!(
+            database_style_conflict_with(&vars(&[("DATABASE_URL", "sqlite::memory:")])).is_none()
+        );
+        assert!(database_style_conflict_with(&vars(&[("DB_USER", "u")])).is_none());
     }
 
     #[test]

@@ -1328,56 +1328,68 @@ Server-`Builder` direkt baut, ohne über `Cli` zu gehen.
 
 ## Eigene Unterbefehle
 
-Sie können Ihre eigenen Befehle hinzufügen und sie neben den eingebauten Verben
-ausführen. Der Trick besteht darin, die Argumente
-selbst zu inspizieren und Ihren Befehl zu behandeln, bevor Sie den Rest an
-`Cli::run` weitergeben. Zwei Wege, es zu tun:
+Ein Crate kann eigene Verben hinzufügen, die App ebenso. Sie stehen in
+`--help` unter dem Crate, das sie registriert hat, und laufen wie die
+eingebauten.
 
-**Inline in `src/main.rs`** (kein zusätzliches Binary):
+**Aus einem Crate** — `register_command!` registriert das Verb beim Linken,
+die Host-App ändert `main` nicht:
 
 ```rust
-#[rustango::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = dotenvy::dotenv();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if matches!(args.first().map(String::as_str), Some("import-csv")) {
-        let url = std::env::var("DATABASE_URL")?;
-        let pool = rustango::sql::Pool::connect_postgres(&url).await?;
-        return my_csv_importer::run(&pool, &args[1..]).await;
-    }
-    rustango::manage::Cli::new().api(urls::api()).run().await
-}
+use std::io::Write as _;
+use rustango::manage::CommandContext;
+
+// In any crate the binary links, e.g. a CMS library.
+rustango::register_command!(
+    "reset-link",
+    "Print a password-reset link for a user",
+    |mut ctx: CommandContext, args: Vec<String>| async move {
+        let user = args.first().ok_or("usage: reset-link --tenant <slug> <user>")?;
+        let pool = ctx.tenant_pool().ok_or("pass --tenant <slug>")?.clone();
+        // ... look the user up on `pool` with the ORM ...
+        writeln!(ctx.stdout(), "link for {user}")?;
+        Ok(())
+    },
+);
 ```
 
-**Via `--with-manage-bin`** (separates `src/bin/manage.rs`):
+**Aus der App** — die Builder-Methode `Cli::command`:
+
+```rust
+rustango::manage::Cli::new()
+    .tenancy()
+    .command("import-csv", "Import a CSV file", |ctx, args| async move {
+        my_csv_importer::run(ctx.pool(), &args).await?;
+        Ok(())
+    })
+    .run()
+    .await
+```
+
+Der Handler bekommt einen `CommandContext` und die Argumente nach dem Verb:
+
+- `ctx.pool()` — die Datenbank der App; in einem Tenancy-Projekt die Registry.
+- `ctx.tenant_pool()` / `ctx.tenant()` — mit `Cli::tenancy()` wird
+  `--tenant <slug>` aus den Argumenten genommen und öffnet den Pool dieses
+  Mandanten (Schema- oder Datenbank-Modus, jedes Backend).
+  `ctx.tenant_by_slug(slug)` öffnet jeden anderen.
+- `ctx.settings()` — die an `Cli::with_settings*` übergebenen Einstellungen.
+- `ctx.stdout()` — wohin die Ausgabe geht.
 
 ```bash
-cargo run -- startapp app --with-manage-bin
+cargo run -- reset-link --tenant acme alice
 ```
 
-Dann in `src/bin/manage.rs`:
+Ein Name, der mit einem eingebauten Verb kollidiert oder doppelt
+registriert ist, lässt `Cli::run` beim Start mit beiden Namen im Fehler
+scheitern.
 
-```rust
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = dotenvy::dotenv();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let url = std::env::var("DATABASE_URL")?;
-    let pool = rustango::sql::Pool::connect_postgres(&url).await?;
-
-    match args.first().map(String::as_str) {
-        Some("import-csv") => my_csv_importer::run(&pool, &args[1..]).await,
-        _ => rustango::migrate::manage::run(&pool, "./migrations".as_ref(), args)
-            .await
-            .map_err(Into::into),
-    }
-}
-```
-
-Führen Sie Ihre eigenen Befehle genau wie die eingebauten aus:
-`cargo run -- import-csv path/to/file.csv` (oder
-`cargo run --bin manage -- import-csv …` bei Verwendung von
-`--with-manage-bin`).
+**Datenbankverbindung.** Alle Verben, der Server und eigene Befehle lesen
+die Datenbank aus `DATABASE_URL` oder aus `DB_DRIVER`, `DB_HOST`,
+`DB_PORT`, `DB_USER`, `DB_PASSWORD` (oder `DB_PASSWORD_FILE`, einer Datei
+mit dem Passwort), `DB_NAME` und `DB_PARAMS`. Für SQLite `DB_DRIVER=sqlite`
+und `DB_NAME` als Dateipfad setzen. Sind beide Varianten gesetzt, gewinnt
+`DATABASE_URL` und eine Warnung sagt es; ab 0.62.0 gewinnen die `DB_*`-Variablen.
 
 ---
 

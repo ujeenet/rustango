@@ -33,6 +33,11 @@ use std::pin::Pin;
 
 use axum::Router;
 
+mod command;
+pub use command::{CommandContext, CommandError, CommandFuture};
+#[doc(hidden)]
+pub use command::{CommandEntry, __command_future};
+
 /// Boxed seed-hook future. Keeps the public method signature simple
 /// while accepting any `async fn(&Pool) -> Result<…>` closure.
 type SeedFut<'a> =
@@ -46,6 +51,14 @@ type ShutdownFn = Box<dyn FnOnce() -> ShutdownFut + Send>;
 
 /// A router built from the serving pool. See [`Cli::nest_with`].
 type NestFn = Box<dyn FnOnce(crate::sql::Pool) -> Router + Send>;
+
+/// `help`, `--help`, `-h` or no verb at all.
+fn is_help_verb(args: &[String]) -> bool {
+    matches!(
+        args.first().map(String::as_str),
+        None | Some("" | "help" | "--help" | "-h")
+    )
+}
 
 /// `runserver`'s auto-migrate: the same chains as `manage migrate` (#2056).
 async fn auto_migrate(
@@ -190,6 +203,10 @@ pub struct Cli {
     /// runserver future.
     #[cfg(all(feature = "config", feature = "runtime"))]
     install_logging: bool,
+    /// Added by [`Cli::command`].
+    commands: Vec<command::Command>,
+    /// Built and checked at [`Cli::run`]: registered plus `commands`.
+    command_set: command::CommandSet,
 }
 
 impl Cli {
@@ -231,7 +248,42 @@ impl Cli {
             welcome_page: false,
             #[cfg(all(feature = "config", feature = "runtime"))]
             install_logging: false,
+            commands: Vec::new(),
+            command_set: command::CommandSet::default(),
         }
+    }
+
+    /// Add a verb of the app's own, listed in `--help`. Crates use
+    /// [`register_command!`](crate::register_command) instead. A clash
+    /// with a built-in verb makes [`Cli::run`] fail at startup.
+    ///
+    /// ```ignore
+    /// Cli::new().command("greet", "Say hello", |mut ctx, args| async move {
+    ///     writeln!(ctx.stdout(), "hello {}", args.join(" "))?;
+    ///     Ok(())
+    /// })
+    /// ```
+    ///
+    /// With [`Cli::tenancy`], `--tenant <slug>` is taken out of the
+    /// arguments and opens that tenant's pool
+    /// ([`CommandContext::tenant_pool`]).
+    #[must_use]
+    pub fn command<F, Fut>(mut self, name: &str, about: &str, handler: F) -> Self
+    where
+        F: Fn(CommandContext, Vec<String>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), CommandError>> + Send + 'static,
+    {
+        self.commands
+            .push(command::Command::new(name, about, "this app", handler));
+        self
+    }
+
+    /// The context a command runs with on `pool`.
+    fn command_context(&self, pool: crate::sql::Pool) -> CommandContext {
+        let ctx = CommandContext::new(pool);
+        #[cfg(feature = "config")]
+        let ctx = ctx.with_settings(self.settings_for_layers.clone());
+        ctx
     }
 
     /// Override the framework's reserved URL prefixes. Equivalent to
@@ -820,7 +872,18 @@ impl Cli {
     /// # Errors
     /// Surfaces whatever the underlying dispatcher / server returns.
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
-        let args: Vec<String> = std::env::args().skip(1).collect();
+        self.run_with_args(std::env::args().skip(1).collect()).await
+    }
+
+    /// [`Cli::run`] on `args` instead of the process's (no program name).
+    ///
+    /// # Errors
+    /// As [`Cli::run`].
+    pub async fn run_with_args(
+        mut self,
+        args: Vec<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.command_set = command::CommandSet::build(&self.commands)?;
         let verb = args.first().map_or("", String::as_str);
         // A management verb's stdout is its output (`dumpdata > fx.json`),
         // so its logs go to stderr, also through `#[rustango::main]`'s subscriber.
@@ -903,6 +966,12 @@ impl Cli {
         if let Some(cfg) = self.tenant_pools.clone() {
             pools = pools.config(cfg);
         }
+        if let Some(cmd) = args.first().and_then(|v| self.command_set.get(v)).cloned() {
+            let ctx = self.command_context(pools.registry_pool());
+            return command::run_tenancy(&cmd, ctx, std::sync::Arc::new(pools), args[1..].to_vec())
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> { e });
+        }
         crate::tenancy::manage::run_from_cli(
             &pools,
             url,
@@ -938,7 +1007,11 @@ impl Cli {
                 None | Some("") | Some("help") | Some("--help") | Some("-h")
             )
         {
-            return Some(crate::tenancy::manage::write_help(out).map_err(Into::into));
+            return Some(
+                crate::tenancy::manage::write_help(out)
+                    .map_err(Into::into)
+                    .and_then(|()| self.command_set.write_help(out).map_err(Into::into)),
+            );
         }
         // The tenancy scaffolder, with `--with-bootstrap-migration` and
         // the tenancy `manage` bin; the plain one shadowed it.
@@ -947,7 +1020,12 @@ impl Cli {
             return Some(crate::tenancy::manage::startapp(&args[1..], out).map_err(Into::into));
         }
 
-        crate::migrate::manage::run_pool_free(args, out).map(|r| r.map_err(Into::into))
+        let res =
+            crate::migrate::manage::run_pool_free(args, out).map(|r| r.map_err(Into::into))?;
+        if res.is_ok() && is_help_verb(args) {
+            return Some(self.command_set.write_help(out).map_err(Into::into));
+        }
+        Some(res)
     }
 
     async fn dispatch(mut self, args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
@@ -956,9 +1034,7 @@ impl Cli {
         // the pool dance so it works even when sqlx can't connect
         // (e.g. tunnel-only setups, fresh-clone scenarios).
         if matches!(args.first().map(String::as_str), Some("dbshell")) {
-            let url = std::env::var("DATABASE_URL").map_err(|_| -> Box<dyn std::error::Error> {
-                "missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`.".into()
-            })?;
+            let url = crate::env::database_url_or_advice()?;
             // On Unix `dbshell::run` swaps the process and never
             // returns; on other targets it returns after the client
             // exits. Either way, propagate the result.
@@ -991,10 +1067,11 @@ impl Cli {
                 | Some("make:middleware")
                 | Some("make:test")
         );
-        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://offline".into());
-        if !no_db_verb && std::env::var("DATABASE_URL").is_err() {
-            return Err("missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`.".into());
-        }
+        let url = match crate::env::database_url_or_advice() {
+            Ok(url) => url,
+            Err(_) if no_db_verb => "postgres://offline".into(),
+            Err(e) => return Err(e.into()),
+        };
 
         #[cfg(all(feature = "tenancy", feature = "postgres"))]
         if self.tenancy {
@@ -1104,6 +1181,12 @@ impl Cli {
                 .map_err(|e| format!("connect({shown}): {e}").into())
                 as Result<_, Box<dyn std::error::Error>>
         }?;
+        if let Some(cmd) = args.first().and_then(|v| self.command_set.get(v)).cloned() {
+            return cmd
+                .call(self.command_context(pool), args[1..].to_vec())
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> { e });
+        }
         if args.first().map(String::as_str) == Some("check") {
             self.build_nested(&pool);
         }
@@ -1389,9 +1472,7 @@ impl Cli {
         // migrations through migrate_pool (tri-dialect).
         #[cfg(not(feature = "postgres"))]
         {
-            let url = std::env::var("DATABASE_URL").map_err(|_| {
-                "missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`."
-            })?;
+            let url = crate::env::database_url_or_advice()?;
             let pool = crate::sql::Pool::connect(&url).await?;
             auto_migrate(&pool, &self.migrations_dir).await?;
             if let Some(seed) = self.seed.take() {
@@ -1412,9 +1493,7 @@ impl Cli {
         }
         #[cfg(feature = "postgres")]
         {
-            let url = std::env::var("DATABASE_URL").map_err(|_| {
-            "missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`."
-        })?;
+            let url = crate::env::database_url_or_advice()?;
             // #560 — on a multi-backend build (e.g. `--features
             // postgres,sqlite`) this `cfg(postgres)` arm fires even
             // when `DATABASE_URL` is a `sqlite://` / `mysql://` URL.
@@ -1587,14 +1666,14 @@ impl Cli {
         // builder applies these to the outermost router.
         let apex = crate::tenancy::server::apex_domain();
         let registry_url =
-            std::env::var("DATABASE_URL")
-                .ok()
-                .ok_or_else(|| -> Box<dyn std::error::Error> {
-                    "DATABASE_URL not set — sqlite/mysql tenancy projects need an explicit \
-             registry URL (e.g. `sqlite:./var/registry.db` or `mysql://…`). Set the \
-             env var or build the server manually via `server::Builder::from_pool`."
-                        .into()
-                })?;
+            crate::env::database_url_from_env().map_err(|e| -> Box<dyn std::error::Error> {
+                format!(
+                    "{e} — sqlite/mysql tenancy projects need an explicit registry URL \
+                     (e.g. `sqlite:./var/registry.db` or `mysql://…`), or build the \
+                     server manually via `server::Builder::from_pool`."
+                )
+                .into()
+            })?;
         let registry =
             sqlx::Pool::<crate::tenancy::DefaultTenantDb>::connect(&registry_url).await?;
         let mut builder = crate::server::Builder::<crate::tenancy::DefaultTenantDb>::from_pool(
@@ -2922,6 +3001,45 @@ mod tests {
             .expect("help");
         let out = String::from_utf8_lossy(&out);
         assert!(out.contains("--with-bootstrap-migration"), "{out}");
+    }
+
+    crate::register_command!("zz-crate-cmd", "A crate's command", |_ctx, _args| async {
+        Ok(())
+    });
+
+    /// `--help` lists registered and app commands, in both modes.
+    #[test]
+    fn help_lists_added_commands() {
+        let modes: &[fn(Cli) -> Cli] = &[|c| c, |c| c.tenancy()];
+        for mode in modes {
+            let mut cli =
+                mode(Cli::new()).command("zz-app-cmd", "An app command", |_, _| async { Ok(()) });
+            cli.command_set = command::CommandSet::build(&cli.commands).unwrap();
+            let mut out = Vec::new();
+            cli.run_pool_free(&["--help".to_owned()], &mut out)
+                .expect("pool-free")
+                .expect("help");
+            let out = String::from_utf8_lossy(&out);
+            for needle in [
+                "zz-crate-cmd",
+                "A crate's command",
+                "zz-app-cmd",
+                "this app",
+            ] {
+                assert!(out.contains(needle), "{needle} missing:\n{out}");
+            }
+        }
+    }
+
+    /// A command named like a built-in verb stops the run before any verb.
+    #[tokio::test]
+    async fn a_command_clashing_with_a_builtin_verb_fails_at_startup() {
+        let err = Cli::new()
+            .command("migrate", "shadow", |_, _| async { Ok(()) })
+            .run_with_args(vec!["--help".to_owned()])
+            .await
+            .expect_err("clash");
+        assert!(err.to_string().contains("built-in verb"), "{err}");
     }
 }
 

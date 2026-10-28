@@ -378,6 +378,7 @@ jobs:
       - run: |
           cargo nextest run --profile ci -p rustango --features tenancy \
             --test branding_urls_are_escaped \
+            --test database_url_one_resolver \
             --test docs_links \
             --test docs_contract \
             --test docs_versions \
@@ -1676,6 +1677,7 @@ jobs:
           binary(=org_host_claims_tri) |
           binary(=org_admin_claims_tri) |
           binary(=tenancy_manage_tri) |
+          binary(=manage_commands_tri) |
           binary(=db_servers_tri) |
           binary(=admin_create_users_tri) |
           binary(=logout_revokes_sessions_tri) |

@@ -1303,55 +1303,67 @@ cargo run -- migrate              # creates rustango_users with your extras
 
 ## Subcomandos personalizados
 
-Puedes añadir tus propios comandos y ejecutarlos junto a los verbos integrados.
-El truco es inspeccionar los argumentos tú
-mismo y manejar tu comando antes de pasar el resto a `Cli::run`. Dos formas de
-hacerlo:
+Un crate puede añadir sus propios verbos, y la app también. Aparecen en
+`--help` bajo el crate que los registró y se ejecutan como los integrados.
 
-**En línea en `src/main.rs`** (sin binario extra):
+**Desde un crate** — `register_command!` registra el verbo al enlazar, así
+la app anfitriona no cambia `main`:
 
 ```rust
-#[rustango::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = dotenvy::dotenv();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if matches!(args.first().map(String::as_str), Some("import-csv")) {
-        let url = std::env::var("DATABASE_URL")?;
-        let pool = rustango::sql::Pool::connect_postgres(&url).await?;
-        return my_csv_importer::run(&pool, &args[1..]).await;
-    }
-    rustango::manage::Cli::new().api(urls::api()).run().await
-}
+use std::io::Write as _;
+use rustango::manage::CommandContext;
+
+// In any crate the binary links, e.g. a CMS library.
+rustango::register_command!(
+    "reset-link",
+    "Print a password-reset link for a user",
+    |mut ctx: CommandContext, args: Vec<String>| async move {
+        let user = args.first().ok_or("usage: reset-link --tenant <slug> <user>")?;
+        let pool = ctx.tenant_pool().ok_or("pass --tenant <slug>")?.clone();
+        // ... look the user up on `pool` with the ORM ...
+        writeln!(ctx.stdout(), "link for {user}")?;
+        Ok(())
+    },
+);
 ```
 
-**Vía `--with-manage-bin`** (`src/bin/manage.rs` aparte):
+**Desde la app** — el método de builder `Cli::command`:
+
+```rust
+rustango::manage::Cli::new()
+    .tenancy()
+    .command("import-csv", "Import a CSV file", |ctx, args| async move {
+        my_csv_importer::run(ctx.pool(), &args).await?;
+        Ok(())
+    })
+    .run()
+    .await
+```
+
+El handler recibe un `CommandContext` y los argumentos tras el verbo:
+
+- `ctx.pool()` — la base de datos de la app; en un proyecto multi-tenant, el registro.
+- `ctx.tenant_pool()` / `ctx.tenant()` — con `Cli::tenancy()`,
+  `--tenant <slug>` se quita de los argumentos y abre el pool de ese tenant
+  (modo esquema o base de datos, cualquier backend). `ctx.tenant_by_slug(slug)`
+  abre cualquier otro.
+- `ctx.settings()` — la configuración pasada a `Cli::with_settings*`.
+- `ctx.stdout()` — adónde va la salida.
 
 ```bash
-cargo run -- startapp app --with-manage-bin
+cargo run -- reset-link --tenant acme alice
 ```
 
-Luego en `src/bin/manage.rs`:
+Un nombre que choca con un verbo integrado, o registrado dos veces, hace
+que `Cli::run` falle al arrancar con ambos nombres en el error.
 
-```rust
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = dotenvy::dotenv();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let url = std::env::var("DATABASE_URL")?;
-    let pool = rustango::sql::Pool::connect_postgres(&url).await?;
-
-    match args.first().map(String::as_str) {
-        Some("import-csv") => my_csv_importer::run(&pool, &args[1..]).await,
-        _ => rustango::migrate::manage::run(&pool, "./migrations".as_ref(), args)
-            .await
-            .map_err(Into::into),
-    }
-}
-```
-
-Ejecuta tus propios comandos igual que los integrados:
-`cargo run -- import-csv path/to/file.csv` (o
-`cargo run --bin manage -- import-csv …` cuando uses `--with-manage-bin`).
+**Conexión a la base de datos.** Todos los verbos, el servidor y los
+comandos propios leen la base de datos de `DATABASE_URL`, o de `DB_DRIVER`,
+`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD` (o `DB_PASSWORD_FILE`, un
+archivo que la contiene), `DB_NAME` y `DB_PARAMS`. Para SQLite, ponga
+`DB_DRIVER=sqlite` y la ruta del archivo en `DB_NAME`. Si ambos estilos
+están definidos, gana `DATABASE_URL` y un aviso lo indica; desde 0.62.0
+ganarán las variables `DB_*`.
 
 ---
 

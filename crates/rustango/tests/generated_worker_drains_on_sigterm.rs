@@ -185,7 +185,7 @@ fn the_generated_worker_reclaims_while_running_not_on_exit() {
 fn the_generated_worker_names_the_env_var_it_is_missing() {
     let body = generate("envvar");
     assert!(
-        body.contains("missing env var 'DATABASE_URL'"),
+        body.contains("env::database_url_from_env()") && body.contains("'.env.example'"),
         "the generated worker must say which variable is missing and how to set it, \
          not propagate `VarError` as `NotPresent`. Got:\n{body}"
     );

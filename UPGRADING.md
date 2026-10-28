@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### Database URL from DB_* vars; 0.62.0 flips the precedence
+
+`manage`, `migrate` and the server now also connect from `DB_DRIVER` / `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` (or `DB_PASSWORD_FILE`) / `DB_NAME` / `DB_PARAMS` when `DATABASE_URL` is unset. If you set both, `DATABASE_URL` still wins and a startup warning names it; **from 0.62.0 the `DB_*` vars win**, so keep one style. Setting both `DB_PASSWORD` and `DB_PASSWORD_FILE` is an error. "No database" errors now name both styles.
+
+### manage: custom commands reserve their names
+
+A `register_command!` or `Cli::command` verb that matches a built-in verb, or another command, makes `Cli::run` fail at startup. Member SSO on a host like `localhost.example.com` now builds an `https` callback.
+
 ### Webhook retries and page purges
 
 A webhook answered 429 or 503 with `Retry-After` now waits that long (up to an hour) before its retry. `CachePageLayer::invalidate` now purges every variant of the path, and each cached GET reads one extra small cache key.

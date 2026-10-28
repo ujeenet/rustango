@@ -563,7 +563,7 @@ pub(crate) fn external_base(parts: &Parts) -> Option<String> {
     let scheme = proto.unwrap_or_else(|| {
         if let Some(s) = parts.uri.scheme_str() {
             s.to_owned()
-        } else if host.contains("localhost") || host.starts_with("127.") {
+        } else if crate::urls::is_loopback_host(&host) {
             "http".to_owned()
         } else {
             "https".to_owned()
@@ -1328,6 +1328,27 @@ mod tests {
         assert_eq!(
             external_base(&parts).as_deref(),
             Some("http://downtown.localhost:8080")
+        );
+    }
+
+    /// A public host that only contains `localhost` stays https.
+    #[test]
+    fn external_base_localhost_lookalike_stays_https() {
+        for host in [
+            "localhost.evil.com",
+            "notlocalhost.com:8443",
+            "127.evil.com",
+        ] {
+            assert_eq!(
+                external_base(&parts_with(&[("host", host)])).as_deref(),
+                Some(format!("https://{host}").as_str()),
+                "{host}"
+            );
+        }
+        let parts = parts_with(&[("host", "127.0.0.1:8080")]);
+        assert_eq!(
+            external_base(&parts).as_deref(),
+            Some("http://127.0.0.1:8080")
         );
     }
 
