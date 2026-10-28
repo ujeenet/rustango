@@ -6988,12 +6988,15 @@ mod gen_tests {
         }
     }
 
-    /// The worker reads `DATABASE_URL`, so it must load `.env` like main.rs.
+    /// The worker resolves the database URL, so it must load `.env` like main.rs.
     #[test]
     fn worker_loads_dotenv_before_reading_the_url() {
         let body = worker_template("Mailer", "mailer", "rustango", "my_app");
         let dotenv = body.find("dotenvy::dotenv()").expect("loads .env");
-        assert!(dotenv < body.find("\"DATABASE_URL\"").unwrap(), "{body}");
+        assert!(
+            dotenv < body.find("database_url_from_env").unwrap(),
+            "{body}"
+        );
     }
 
     // -------- dumpdata --------

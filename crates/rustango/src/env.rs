@@ -549,7 +549,7 @@ fn warn_style_conflict_once(msg: &str) {
     }
     // CLI verbs often run with no subscriber; stderr then.
     if tracing::dispatcher::has_been_set() {
-        tracing::warn!(target: "rustango::env", "{msg}");
+        tracing::warn!(target: "rustango::sql", "{msg}");
     } else {
         eprintln!("warning: {msg}");
     }
