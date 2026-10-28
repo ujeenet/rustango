@@ -5,8 +5,7 @@ que tu handler la vea y después de que produce una respuesta. Ahí es donde viv
 las preocupaciones transversales: logging, limitación de tasa, cabeceras de
 seguridad, CSRF, resolución de locale y zona horaria. **Rustango** incluye un
 catálogo amplio de middleware listo para usar y hace que escribir el tuyo propio
-sea cuestión de unas pocas líneas. En Express esto es `app.use()`; en Laravel,
-el kernel HTTP — la misma idea, adjunta a tu router.
+sea cuestión de unas pocas líneas. Cada uno es una capa adjunta a tu router.
 
 [![Middleware in Rustango: a request flows down through a stack of tower layers (request-id, locale, security headers, CSRF) into the handler and back up through the response side of each layer](../img/middleware.png)](../img/middleware.png)
 

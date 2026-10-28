@@ -30,7 +30,7 @@ Der Name einer Methode sagt Ihnen, was sie tut. Sobald Sie diese Suffixe gelernt
 ### Funktionen
 
 - **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — der schlichte Name nimmt einen `rustango::sql::Pool` und ist der Alltagsweg. Er funktioniert auf Postgres, MySQL und SQLite und wählt den Dialekt intern. Das ist es, was fast jeder Anwendungscode will.
-- **`fetch_on(executor)`, `count_on(executor)`** — das Suffix `_on` bedeutet „führe dies gegen den *Executor* aus, den ich dir übergebe“ — eine Verbindung oder eine offene Transaktion statt des Pools. Greif dazu, wenn du mehrere Statements in einer Transaktion brauchst. **`_on`-Methoden sind nur für Postgres** (`#[cfg(feature = "postgres")]`).
+- **`fetch_on(executor)`, `count_on(executor)`** — das Suffix `_on` bedeutet „führe dies gegen den *Executor* aus, den ich dir übergebe“ — eine Verbindung oder eine offene Transaktion statt des Pools. Greif dazu, wenn du mehrere Statements in einer Transaktion brauchst. `fetch_on` / `first_on` / `count_on` / `exists_on` und das `fetch_on` von `values` / `aggregate` nehmen jeden `SqlExecutor` (`&mut PoolConn`, `&mut PoolTx`, `&Pool`) auf allen drei Backends; der Rest der `_on`-Familie ist weiterhin nur für Postgres.
 - **Schreibvorgänge kehren dies um, und das ist die einzige Stelle, an der die Regel nicht gilt.** `save(&pool)`, `insert(&pool)` und `delete(&pool)` nehmen einen treiberspezifischen `sqlx::PgPool`; auf einem Build ohne das Feature `postgres` **existieren sie gar nicht** — die Auswahl von `sqlite` lässt die Methode verschwinden, statt mit einer Meldung zu scheitern, die die Ursache benennt. Die Mehr-Backend-Varianten tragen das Suffix `_pool`: `save_pool`, `insert_pool`, `delete_pool`, jeweils mit `rustango::sql::Pool`.
 
   | | schlichter Name | Mehr-Backend-Variante |
@@ -38,7 +38,7 @@ Der Name einer Methode sagt Ihnen, was sie tut. Sobald Sie diese Suffixe gelernt
   | **Lesen** (`QuerySet`) | `fetch(&pool)` — bereits Mehr-Backend | *ist* der schlichte Name |
   | **Schreiben** (Modell) | `save(&pool)` — **nur Postgres** | `save_pool(&pool)` |
 
-  Der kurze Name ist beim Schreiben also der engere und beim Lesen der breitere. Diese Umkehrung ist ein Schönheitsfehler, kein Entwurf: sie wird in [#1293](https://github.com/ujeenet/rustango/issues/1293) verfolgt und über einen Deprecation-Zyklus statt einer Umbenennung aufgelöst. Bis dahin gilt: **wer nicht auf Postgres arbeitet, schreibt `save_pool` / `insert_pool` / `delete_pool`.**
+  Der kurze Name ist beim Schreiben also der engere und beim Lesen der breitere. Diese Umkehrung ist ein Schönheitsfehler, kein Entwurf: sie wird über einen Deprecation-Zyklus statt einer Umbenennung aufgelöst. Bis dahin gilt: **wer nicht auf Postgres arbeitet, schreibt `save_pool` / `insert_pool` / `delete_pool`.**
 - **`from_X(value)`** — konvertiert AUS einem anderen Wert (z. B. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — eine Builder-Methode, die eine Option setzt und das Objekt zurückgibt, sodass Sie Aufrufe verketten können (z. B. `with_default_ttl(d)`, `with_access_ttl(secs)`).
 - **`new()`** — der minimale Konstruktor. Alle Argumente, die er entgegennimmt, sind erforderliche Abhängigkeiten (z. B. `RedisCache::new(url)` — Sie können den Cache nicht ohne URL bauen).
@@ -267,16 +267,23 @@ Verwenden, wenn:
 Ein *Feature* ist ein Cargo-Build-Flag (das `[features]` von `Cargo.toml`), das einen Teil des Crates ein- oder ausschaltet — die Liste der installierten Bestandteile Ihrer Anwendung, aber zur Kompilierzeit aufgelöst. Jedes Modul, das eine zusätzliche Abhängigkeit hereinzieht, sitzt hinter einem. Der Standardsatz lautet „die wollen Sie mit ziemlicher Sicherheit“:
 
 ```toml
-default = [
-    "postgres", "manage", "admin", "config", "forms", "serializer",
-    "cache", "signals", "email", "storage", "scheduler", "secrets", "totp",
-    "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url",
-    "notifications", "casts", "jobs", "jobs-postgres", "auth_flows", "sse",
-    "websocket", "oauth2", "http-client", "compression", "openapi",
-    "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3",
-    "media", "runserver", "template_views",
+default = ["postgres", "batteries"]
+
+batteries = [
+    "manage", "admin", "config", "forms", "serializer", "cache", "signals",
+    "email", "storage", "scheduler", "secrets", "totp", "webhook",
+    "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications",
+    "casts", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket",
+    "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions",
+    "hmac-auth", "jwt", "uploads", "storage-s3", "storage-azure", "media",
+    "runserver", "template_views",
 ]
 ```
+
+Die Indirektion ist Absicht: `batteries` ist ein einziger Name, den ein
+nachgelagertes Crate abschalten kann — `default-features = false, features = ["postgres"]` —
+ohne die Liste neu aufzuschreiben. Die Alternative, alle achtunddreißig in
+`default` zu schreiben, hieße, dass jeder, der sich abmeldet, alle achtunddreißig kennen muss.
 
 **Standardmäßig aus:** Features, die schwere Abhängigkeiten oder externe Dienste hereinziehen:
 - `tenancy` — fügt `argon2`, `hmac`, `sha2`, `cookie`, `tower` hinzu (die meisten Anwendungen brauchen es nicht)
@@ -293,7 +300,7 @@ rustango = { version = "0.61", default-features = false, features = ["postgres",
 
 ## Makros vs Laufzeit
 
-Ein *Makro* ist Code, der zur Kompilierzeit Code generiert (`#[derive(Model)]` und Verwandte) — ungefähr das, was ein Rails-Generator tut, außer dass es bei jedem Build läuft und der Compiler das Ergebnis prüft. Die Aufteilung unten entscheidet, was von einem Makro versus schlichtem Laufzeitcode erledigt wird.
+Ein *Makro* ist Code, der zur Kompilierzeit Code generiert (`#[derive(Model)]` und Verwandte). Es läuft bei jedem Build, und der Compiler prüft das Ergebnis. Die Aufteilung unten entscheidet, was von einem Makro versus schlichtem Laufzeitcode erledigt wird.
 
 | Anliegen | Makro oder Laufzeit? |
 |---|---|

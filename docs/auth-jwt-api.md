@@ -207,7 +207,7 @@ assert!(b.verify_access(&pair.access).await.is_none());   // B sees A's revocati
 
 ### Writing a durable store
 
-`JtiStore` is async (since v0.52, #1191), so a durable implementation is one
+`JtiStore` is async (since v0.52), so a durable implementation is one
 query — no background flusher, no convergence window during which a revoked
 `jti` is still accepted elsewhere. Both methods return
 `JtiFuture<'_, T>` (a boxed future — the trait is used as `Arc<dyn JtiStore>`,
@@ -280,7 +280,7 @@ Custom claims survive `refresh` (carried onto the new pair) unless you use
   service you hand a token to. Three segments, a JOSE header of
   `{"alg":"HS256","typ":"JWT"}`, signed over `header.payload`.
 
-  Until [#1397](https://github.com/ujeenet/rustango/issues/1397) they were two
+  Before 0.57.5 they were two
   segments with no header, signed over the payload alone — readable by nothing
   but rustango, and rejected even by `rustango::jwt::decode`. If you wrote a
   custom verifier to work around that, you can drop it.

@@ -514,11 +514,17 @@ axum `HEAD` automatisch aus dem `GET`-Handler; `OPTIONS` ist nicht verdrahtet. *
 fehlerhaftes Element lehnt die ganze Charge ab und **hinterlässt nichts** — gleich ob
 die Validierung oder die Datenbank es abfängt.
 
-> Die zweite Hälfte stimmte bis [#1403](https://github.com/ujeenet/rustango/issues/1403)
+> Die zweite Hälfte stimmte in älteren Versionen
 > nicht. Die Validierung war atomar; die Schreibvorgänge waren je ein `INSERT` ohne
 > Transaktion, sodass ein Unique- oder Fremdschlüsselverstoß bei Element 5 die Elemente
 > 0–4 committete, `400 bulk entry 5` zurückgab und keine der erzeugten Zeilen nannte.
 > Genau diese Verstöße kann die Validierung vorab nicht entscheiden.
+
+Eine Charge fasst höchstens 1000 Zeilen (`max_bulk_create(n)`; mehr ist ein `413`),
+und jede Zeile verbraucht eine `create`-Throttle-Einheit.
+
+Bei einem `#[rustango(soft_delete)]`-Modell stempelt `DELETE` die Spalte, statt zu
+löschen, und jede Action behandelt eine soft-gelöschte Zeile als verschwunden.
 
 ---
 
@@ -567,6 +573,7 @@ Felder, die Antworten zeigen und Bodies schreiben dürfen. Jede weitere Methode 
 | `ordering_fields(&["…"])` | Festlegen, welche Felder `?ordering=` verwenden darf. |
 | `page_size(n)` | Standard-Seitengröße (≤ 100). |
 | `max_page_size(n)` | Hebt oder senkt das Client-Limit selbst (Default 100). |
+| `max_bulk_create(n)` | Höchstzahl an Zeilen, die ein Bulk-Create tragen darf (Default 1000). |
 | `pk_param(name)` | Benennt den Pfadparameter der Detail-Routen um. |
 | `read_only()` | Nur GET. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Codename-Gates pro Aktion (letzteres bei Mandantenfähigkeit). |
@@ -674,7 +681,7 @@ plus deine eigenen Pro-Feld- und feldübergreifenden Regeln zu erhalten.
 ### Formen der Fehlerantwort
 
 Jeder ViewSet-Fehler ist ein [`ApiError`](api-conventions.md)-Body, dieselbe Form,
-die deine eigenen Handler senden (#1193):
+die deine eigenen Handler senden:
 
 ```json
 {"error": "<machine code>", "message": "<sentence>", "status": 400}
@@ -771,6 +778,21 @@ auch `write_pins`: Create speichert den Besitzer, Update kann ihn nicht ändern,
 Auch die statischen globalen Scopes eines Modells begrenzen, was gelesen wird, nicht was
 geschrieben wird: Create oder Update darf den Scope verlassen (201 ohne Body oder 204).
 Für eine Sicherheitsgrenze nimm ein Filter-Backend mit `write_pins`.
+
+Ein Schreibvorgang gibt seine volle Zeile nur an einen Aufrufer mit der
+Berechtigung `retrieve` zurück; andere bekommen nur `{"<pk>": …}` (eine pro
+Bulk-Zeile). Ein einzelnes Create sendet außerdem einen `Location`-Header, der
+auf die Detail-Route zeigt.
+
+Ein FK, den ein Body setzt, muss eine Zeile nennen, die die globalen Scopes des
+Ziels zeigen; ein Update darf den Wert erneut senden, den die Zeile bereits hat.
+Um ihn weiter einzugrenzen, ergänze ein Backend für dieses Feld; es läuft gegen
+das Zielmodell, und jede andere Zeile ist ein 422:
+
+```rust
+ViewSet::for_model(Comment::SCHEMA, &["id", "body", "post_id"])
+    .related_filter("post_id", OwnedBy::column("author_id"))
+```
 
 #### `OwnedBy` — das mitgelieferte Backend
 
@@ -908,7 +930,7 @@ let api = urls::api()
 
 - **Builder + `router_pool` / `tenant_router`** ist **tri-dialektfähig** — PostgreSQL,
   SQLite und MySQL — und ist der empfohlene Weg.
-- **Das `router(prefix, pool)` des Derive-Makros** nimmt `impl Into<rustango::sql::Pool>` — einen `PgPool`, `MySqlPool`, `SqlitePool` oder das `Pool`-Enum. Es ist nicht Postgres-only (#1273).
+- **Das `router(prefix, pool)` des Derive-Makros** nimmt `impl Into<rustango::sql::Pool>` — einen `PgPool`, `MySqlPool`, `SqlitePool` oder das `Pool`-Enum. Es ist nicht Postgres-only.
 - **Serializer-Eingabe + -Ausgabe** funktioniert jetzt auf **allen drei Backends** (das
   Rendern pro Zeile ist tri-dialektfähig; das alte PG-only-Gate ist weg).
 - Filterung, Suche, Sortierung, die drei Paginierungsmodi, Berechtigungen,

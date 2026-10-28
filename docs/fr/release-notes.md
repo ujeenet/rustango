@@ -1,6 +1,6 @@
 # Notes de version
 
-Chaque changement visible par l'utilisateur est livré avec une entrée de changelog. Cette page en est le point d'accès, car jusqu'ici le site de documentation n'en avait aucun — un lecteur n'y voyait que des titres étiquetés d'une version à l'intérieur des guides et rien d'autre, ce qui a fait qu'un titre figé sur 0.42 s'est lu comme « la documentation s'est arrêtée en 0.42 » ([#1304](https://github.com/ujeenet/rustango/issues/1304)).
+Chaque changement visible par l'utilisateur est livré avec une entrée de changelog. Cette page en est le point d'accès, car jusqu'ici le site de documentation n'en avait aucun — un lecteur n'y voyait que des titres étiquetés d'une version à l'intérieur des guides et rien d'autre, ce qui a fait qu'un titre figé sur 0.42 s'est lu comme « la documentation s'est arrêtée en 0.42 ».
 
 ## Où vivent les notes
 
@@ -19,7 +19,7 @@ Les entrées sont regroupées sous `Added` (ajouté), `Changed` (modifié), `Fix
 Deux conventions à connaître :
 
 - **Les entrées disent pourquoi, pas seulement quoi.** Une entrée qui change un comportement explique ce qui se passait avant, car c'est cela qui vous dit si vous êtes concerné.
-- **Les numéros d'issue sont porteurs.** `(#1229)` renvoie à la discussion qui a produit le changement, laquelle contient en général plus de détails que l'entrée ne peut en accueillir.
+- **Les anciennes entrées citent une issue.** Le numéro entre parenthèses renvoie à la discussion qui a produit le changement, laquelle contient en général plus de détails que l'entrée ne peut en accueillir.
 
 ## Versionnage
 

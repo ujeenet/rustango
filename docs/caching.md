@@ -4,8 +4,7 @@ Caching stores the result of expensive work — a heavy query, a rendered
 fragment, a third-party API call — so the next request gets it instantly instead
 of recomputing. **Rustango** gives you one `Cache` trait with swappable backends
 (in-memory, Redis, database), a compute-on-miss helper (`get_or_set`), and typed
-JSON helpers. Swap the backend without touching a single call site — like
-Laravel's `Cache` facade.
+JSON helpers. Swap the backend without touching a single call site.
 
 [![Caching in Rustango: get_or_set checks the cache, runs the factory only on a miss, stores the result with a TTL, and serves hits instantly; the same Cache trait backs InMemory, Redis, and DB](img/caching.png)](img/caching.png)
 
@@ -197,8 +196,8 @@ let cache: BoxedCache = rustango::cache::from_settings_async(&settings.cache).aw
 | `redis` | **panics** — cannot be built synchronously | ✓ |
 | `db` | **panics** — needs a runtime `&Pool` | error; build it where the pool is |
 
-The sync resolver panics rather than substituting a backend
-([#1400](https://github.com/ujeenet/rustango/issues/1400)). It used to warn and
+The sync resolver panics rather than substituting a backend.
+It used to warn and
 return an in-memory cache, which is not a degraded shared cache — it is a
 different one. A per-process cache multiplies `CacheRateLimitLayer`'s limit by
 the replica count, and stops `verify_single_use` failing closed, so the same

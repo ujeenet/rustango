@@ -191,6 +191,10 @@ reciben además un `MigrateTarget`: el `pool` de la ejecución y su slug `tenant
 tenant envía la señal una vez por tenant con el pool de ese tenant, en todos los
 backends, así que un receptor `post_migrate` puede sembrar datos en cada tenant.
 
+## Una clave única nueva sobre filas duplicadas
+
+Antes de que una migración añada un índice único o una columna única a una tabla existente, `migrate` comprueba que no haya dos filas que compartan la clave (las filas con un NULL en ella se ignoran). Si las hay, se detiene antes de cualquier DDL e imprime un `SELECT … GROUP BY … HAVING COUNT(*) > 1` que las lista. La comprobación recorre la tabla una vez por clave nueva, así que en una tabla grande cuesta un escaneo completo. Se omite tras un paso de datos en la misma migración, que puede ser el que elimina los duplicados, y para tablas o columnas que la propia migración crea o renombra.
+
 ---
 
 ## Actualizar a la 0.51.2

@@ -20,15 +20,15 @@ Algunos términos de Rust se repiten a lo largo del documento. `&pool` es una re
 
 Las versiones recientes añadieron un lote de características que aún no están integradas en cada una de las secciones de abajo. Referencias rápidas:
 
-- **Macro `Q!` + builder en tiempo de ejecución `Qb`** (#269, #263) — filtros seguros en tiempo de compilación. `User::objects().where_(Q!(User.email__icontains = "alice"))` no compila si el nombre del campo tiene una errata. Variante componible en tiempo de ejecución para chips de filtro del admin: `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
-- **`.distinct_on(&["author_id"])`** (#264) — nativo en PG; fallback portable con funciones de ventana en MySQL / SQLite. Patrones de "el más reciente por grupo".
-- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** (#267) — inserta muchas filas en una sentencia, o las actualiza si hay conflicto. `ON CONFLICT` / `ON DUPLICATE KEY UPDATE` tri-dialecto.
-- **`explain_pool()`** (#272) — `EXPLAIN` tri-dialecto. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
-- **Biblioteca de funciones de BD** (#266) — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Emisión por dialecto con errores claros donde SQLite carece de la función.
-- **Tipos de campo** — `rust_decimal::Decimal` (nativo en PG/MySQL, en SQLite vía shim de Decode), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) ahora aceptados por `#[derive(Model)]` (#524, v0.42).
-- **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — valida sin escribir de inmediato. Valida ahora, muta el conjunto de escritura preparado, confirma cuando estés listo.
-- **`#[rustango(unique_when(columns = "...", condition = "..."))]`** (#265) — restricciones únicas parciales. "Email único por fila no eliminada" / "Slug único por tenant".
-- **`manage makemigrations --merge`** (#346, v0.42) — nodo de fusión para cadenas de ramas divergentes. Ver [`docs/manage.md`](manage.md#makemigrations---merge).
+- **Macro `Q!` + builder en tiempo de ejecución `Qb`** — filtros seguros en tiempo de compilación. `User::objects().where_(Q!(User.email__icontains = "alice"))` no compila si el nombre del campo tiene una errata. Variante componible en tiempo de ejecución para chips de filtro del admin: `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
+- **`.distinct_on(&["author_id"])`** — nativo en PG; fallback portable con funciones de ventana en MySQL / SQLite. Patrones de "el más reciente por grupo".
+- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** — inserta muchas filas en una sentencia, o las actualiza si hay conflicto. `ON CONFLICT` / `ON DUPLICATE KEY UPDATE` tri-dialecto.
+- **`explain_pool()`** — `EXPLAIN` tri-dialecto. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
+- **Biblioteca de funciones de BD** — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Emisión por dialecto con errores claros donde SQLite carece de la función.
+- **Tipos de campo** — `rust_decimal::Decimal` (nativo en PG/MySQL, en SQLite vía shim de Decode), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) ahora aceptados por `#[derive(Model)]` (v0.42).
+- **`ModelForm::prepare_save()` / `PreparedSave`** (v0.42) — valida sin escribir de inmediato. Valida ahora, muta el conjunto de escritura preparado, confirma cuando estés listo.
+- **`#[rustango(unique_when(columns = "...", condition = "..."))]`** — restricciones únicas parciales. "Email único por fila no eliminada" / "Slug único por tenant".
+- **`manage makemigrations --merge`** (v0.42) — nodo de fusión para cadenas de ramas divergentes. Ver [`docs/manage.md`](manage.md#makemigrations---merge).
 
 El CHANGELOG contiene el índice completo de tickets de cada versión.
 
@@ -282,9 +282,9 @@ Llamar a `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` sin un `.sele
 |---|---|
 | PostgreSQL | Soporte completo — cada flag emite su sintaxis nativa. |
 | MySQL 8.0.1+ | Soporta todo excepto `NO KEY` — ese flag recae en `FOR UPDATE` simple (el bloqueo más estricto). |
-| SQLite | Sin sintaxis de bloqueo a nivel de fila. El writer no emite ninguna cláusula; las transacciones mantienen un bloqueo de escritura implícito sobre toda la base de datos. Usa una estrategia distinta para SQLite (típicamente un bucle busy-wait sobre la transacción misma). Para un bloque `atomic`, usa `rustango::sql::atomic_immediate(&pool, …)`: su bloque SQLite de nivel superior empieza con `BEGIN IMMEDIATE`; en PG y MySQL es un `atomic` normal. |
+| SQLite | Sin sintaxis de bloqueo a nivel de fila; el writer no emite ninguna cláusula. Abre la transacción con `rustango::sql::write_transaction(&pool)`: toma el bloqueo de escritura de la base de datos en el `BEGIN`, así que un segundo worker espera y luego ve la fila reclamada. Una de `transaction_pool` no bloquea nada hasta que escribe, y el segundo escritor falla con `SQLITE_BUSY`. Para un bloque `atomic`, usa `rustango::sql::atomic_immediate(&pool, …)`: su bloque SQLite de nivel superior empieza con `BEGIN IMMEDIATE`; en PG y MySQL es un `atomic` normal. |
 
-**Debe ejecutarse dentro de una transacción.** `FOR UPDATE` fuera de una tx es un no-op en PostgreSQL (la tx implícita de una sola sentencia libera el bloqueo de inmediato) y un error en MySQL. En Postgres combínalo con `pool.begin()` (un `sqlx::PgPool`); para una transacción independiente del backend usa `rustango::sql::atomic(&pool, …)` o `transaction_pool(&pool)`, que te devuelven un `PoolTx` sobre el que hacer `match`.
+**Debe ejecutarse dentro de una transacción.** `FOR UPDATE` fuera de una tx es un no-op en PostgreSQL (la tx implícita de una sola sentencia libera el bloqueo de inmediato) y un error en MySQL. En Postgres combínalo con `pool.begin()` (un `sqlx::PgPool`); para una transacción independiente del backend usa `rustango::sql::write_transaction(&pool)` y `.fetch_on(&mut tx)`.
 
 ### Combinar consultas (unión, intersección, diferencia)
 
@@ -447,7 +447,7 @@ let ids: Vec<i64> = Post::objects()
 
 ### Incluir o excluir columnas
 
-Misma idea que la sección anterior, pero como par incluir/excluir: `.only('id', 'name')` conserva solo las columnas nombradas, `.defer('big_field')` conserva todo excepto esas. Úsalos en tablas anchas donde columnas grandes TEXT / BLOB / JSONB hacen que las vistas de lista sean caras de leer:
+Misma idea que la sección anterior, pero como par incluir/excluir: `.only("id", "name")` conserva solo las columnas nombradas, `.defer("big_field")` conserva todo excepto esas. Úsalos en tablas anchas donde columnas grandes TEXT / BLOB / JSONB hacen que las vistas de lista sean caras de leer:
 
 ```rust
 // .only(...) — fetch only the named columns.
@@ -718,7 +718,7 @@ Order::objects()
 |---|---|---|---|
 | `now()` | `NOW()` | `NOW()` | `CURRENT_TIMESTAMP` |
 | `extract_year(x)` | `CAST(EXTRACT(YEAR FROM x) AS INTEGER)` | `YEAR(x)` | `CAST(strftime('%Y', x) AS INTEGER)` |
-| `extract_week(x)` ⚠ | `EXTRACT(WEEK FROM x)` — ISO 8601, rango 1–53 | `WEEK(x)` — inicio en domingo, rango **0**–53 | `strftime('%W', x)` — inicio en lunes, rango 00–53 |
+| `extract_week(x)` | `EXTRACT(WEEK FROM x)` — ISO 8601, rango 1–53 | `WEEK(x, 3)` — ISO 8601 | ISO 8601, a partir del jueves de la semana |
 | `extract_weekday(x)` | `CAST(EXTRACT(DOW FROM x) AS INTEGER)` | `(DAYOFWEEK(x) - 1)` | `CAST(strftime('%w', x) AS INTEGER)` |
 | `extract_quarter(x)` | `EXTRACT(QUARTER FROM x)` | `QUARTER(x)` | **no soportado** — error |
 | `trunc_date(x)` | `DATE(x)` | `DATE(x)` | `DATE(x)` |
@@ -730,7 +730,7 @@ Order::objects()
 
 - **El tipo de retorno de `trunc_year/month` diverge**: timestamp en PG, texto en MySQL/SQLite. Castea del lado de la aplicación al leer si necesitas un `chrono::NaiveDate` tipado — o guarda el bucket como un entero simple (`extract_year` + `extract_month`) y reconstrúyelo en código.
 - **`extract_weekday` está normalizado a 0 = domingo** en los tres dialectos. El `DAYOFWEEK()` nativo de MySQL devuelve 1=domingo, así que el writer resta 1.
-- **⚠ `extract_week` NO es portable.** PG devuelve números de semana ISO 8601 (inicio en lunes, rango 1–53); el `WEEK(x)` predeterminado de MySQL es inicio en domingo con rango **0**–53; el `strftime('%W')` de SQLite es inicio en lunes con rango 00–53. Para 2024-01-01 (un lunes), los tres backends devuelven `1`, `0` y `01` respectivamente. El código de un solo backend puede usarlo libremente; el código entre dialectos debería calcular el límite de la semana como un `chrono::DateTime` tipado en Rust y filtrar sobre la columna de timestamp en su lugar.
+- **`extract_week` y `__week` son la semana ISO 8601** (inicio en lunes, 1–53) en los tres dialectos: 2023-01-01 es la semana 52.
 - **`extract_quarter` en SQLite da error** con `OpNotSupportedInDialect` — SQLite no tiene un token nativo de trimestre. O bien pon la característica detrás de un `cfg(not(sqlite))` o calcula vía `((extract_month - 1) / 3) + 1` en código de aplicación.
 - **Manejo de zona horaria**: el `EXTRACT` de PG opera en la zona horaria de la columna; el `YEAR()` de MySQL opera en la zona horaria de la sesión (`SET time_zone = ...`); SQLite no tiene soporte real de TZ — trata todo como UTC. Usa `TIMESTAMPTZ` en PG, `DATETIME` en MySQL con la TZ de sesión establecida, strings ISO-8601 en SQLite.
 
@@ -1238,6 +1238,19 @@ Para FKs inversas (parent.children), usa el método `_set` generado por la macro
 let author_posts = author.post_set(&pool).await?;
 ```
 
+### Precargar relaciones muchos-a-muchos e inversas
+
+Para una lista de padres, `fetch_with_prefetch_related` carga por nombre una relación muchos-a-muchos (`m2m(name = "tags", ...)`) o de FK inversa (`reverse_has(name = "items", ...)`). Ejecuta una consulta para los padres y otra para la relación, sea cual sea el número de padres.
+
+`rustango::sql::fetch_with_prefetch_related(Post::objects(), "tags", &pool)` devuelve `Vec<(Post, Vec<Tag>)>`. Para filtrar u ordenar las filas relacionadas, pasa un queryset a `fetch_with_prefetch_related_filtered(Post::objects(), "tags", Tag::objects().order_by(&[("name", false)]), &pool)`; un límite en él se aplica a todos los padres juntos. `crates/rustango/tests/prefetch_related_tri.rs` ejecuta ambos en PostgreSQL, MySQL y SQLite.
+
+- Las claves de los padres van en una sola lista `IN`, dividida en lotes al superar el límite de binds del backend (65.535 en MySQL, 32.766 en SQLite; PostgreSQL enlaza un array).
+- Una muchos-a-muchos une su tabla intermedia, así que una etiqueta compartida por muchos posts vuelve una vez bajo cada post. Funcionan claves enteras, `String` y `Uuid`.
+- Una FK inversa se indexa por el `self_pk_column` de la relación, así que los hijos que apuntan a una columna única (`ForeignKey<Shop, String>` con `on = "code"`) se agrupan correctamente.
+- Un nombre desconocido es `QueryError::UnknownField`; pedir el modelo hijo equivocado es `ExecError::PrefetchTargetMismatch`.
+
+Para precargar por campo FK en lugar de por nombre de relación, `fetch_with_prefetch_pool(Author::objects(), "author", &pool)` sigue funcionando igual.
+
 ### Joins personalizados
 
 Cuando el join no está impulsado por una foreign key — un predicado personalizado, un join no-equi, INNER en lugar de LEFT, un self-join, o unir por una columna que no es PK — usa `.join(Join { … })`. Su campo `on` toma cualquier `WhereExpr`, así que `and()` / `or()` / `Not` / llamadas de función / columna-vs-columna / filtros literales se componen todos libremente.
@@ -1314,6 +1327,7 @@ El campo `Join.project` le dice al writer que emita columnas `<alias>"."<col>" A
 | Necesidad | Herramienta |
 |---|---|
 | Traer filas relacionadas junto con la fila principal | `select_related` |
+| Cargar filas muchos-a-muchos o de FK inversa para una lista de padres | `fetch_with_prefetch_related` |
 | Filtrar filas principales por un predicado de tabla relacionada | `exists(...)` / `not_exists(...)` |
 | Filtrar vía INNER en lugar de LEFT, o con predicados ON extra | `.join(...)` |
 | Self-join (p. ej. `employee.manager_id = manager.id`) | `.join(...)` |
@@ -1383,9 +1397,8 @@ Internamente desciende a `save_partial` — mismo estrechamiento de auditoría, 
 > emiten bajo `#[cfg(feature = "postgres")]` y reciben un `&PgPool` o un executor
 > de Postgres — en un build de MySQL o SQLite no existen. No hay una inserción
 > masiva simple tri-dialecto; los escritores por lotes multi-backend son
-> `bulk_upsert_pool` y `bulk_insert_or_ignore_pool`, ambos con `&Pool`. Se
-> rastrea junto al resto de la división de nombres en
-> [#1293](https://github.com/ujeenet/rustango/issues/1293).
+> `bulk_upsert_pool` y `bulk_insert_or_ignore_pool`, ambos con `&Pool`. Es parte
+> de la misma división de nombres conocida.
 
 
 > **Trampa — las ops en lote omiten los hooks por fila.** `bulk_insert`, el
@@ -1452,7 +1465,7 @@ Post::bulk_upsert_pool(
 > ellos mismos `#[cfg(feature = "postgres")]`.
 >
 > Los puntos de entrada multi-backend son `rustango::sql::transaction_pool(&pool)`
-> y `rustango::sql::atomic(&pool, …)`. Ambos devuelven un `PoolTx` — un enum sobre
+> y `rustango::sql::atomic(&pool, …)` (vía `tx.lock().await?`). Ambos devuelven un `PoolTx` — un enum sobre
 > el que haces `match` por backend — en vez de una transacción del driver, así que
 > una transacción tri-dialecto se escribe por rama, no cambiando el tipo de pool.
 
@@ -1485,7 +1498,7 @@ b.save_on(&mut *tx).await?;
 tx.commit().await?;
 ```
 
-Descarta la `tx` sin llamar a `commit()` (p. ej. en un retorno anticipado con `?`) y la transacción hace rollback. Para un hook post-commit, el ámbito es `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, que auto-confirma en `Ok` y hace rollback en `Err` — y el hook en sí es `rustango::sql::on_commit(|| { … })`, llamado **dentro** de esa closure. `atomic` vacía la cola una vez confirmado el commit; llamar a `on_commit` fuera de un ámbito `atomic` hace panic en vez de descartar el callback. Dentro de la closure, `tx` es un `AtomicTx`: bloquéalo en cada sentencia, `insert_tx(&mut *tx.lock().await?, &q)`. Un `atomic(&pool, …)` anidado sobre el mismo pool corre en un savepoint sobre la misma conexión, y sus hooks esperan al commit más externo. El anidamiento es por objeto pool: pasa el pool de la petición. Dos bloques anidados a la vez (`join!`) o un `TxGuard` retenido durante la llamada devuelven `ExecError::NestedAtomic`; un savepoint fallido revierte todo con `ExecError::AtomicAborted`. Una tarea lanzada con `tokio::spawn` no hereda el bloque.
+Descarta la `tx` sin llamar a `commit()` (p. ej. en un retorno anticipado con `?`) y la transacción hace rollback. Para un hook post-commit, el ámbito es `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, que auto-confirma en `Ok` y hace rollback en `Err` — y el hook en sí es `rustango::sql::on_commit(|| { … })`, llamado **dentro** de esa closure. `atomic` vacía la cola una vez confirmado el commit; llamar a `on_commit` fuera de un ámbito `atomic` hace panic en vez de descartar el callback. Dentro de la closure, `tx` es un `AtomicTx`: bloquéalo en cada sentencia, `insert_tx(&mut *tx.lock().await?, &q)`. Un `atomic(&pool, …)` anidado sobre el mismo pool corre en un savepoint sobre la misma conexión, y sus hooks esperan al commit más externo. El anidamiento es por objeto pool: pasa el pool de la petición. Dos bloques anidados a la vez (`join!`) o un `TxGuard` retenido durante la llamada devuelven `ExecError::NestedAtomic`; un savepoint fallido revierte todo con `ExecError::AtomicAborted`. Una tarea lanzada con `tokio::spawn` no hereda el bloque, así que un `atomic` allí confirma por su cuenta. PostgreSQL se ralentiza a partir de 64 savepoints en una transacción, así que evita anidar en bucles calientes; en MySQL un deadlock dentro de un bloque anidado revierte toda la transacción, y las sentencias del ORM posteriores devuelven `ExecError::AtomicAborted`. En MySQL, DDL / `TRUNCATE` / `LOCK TABLES` confirman implícitamente y `atomic` devuelve `ExecError::AtomicEndedEarly` con escrituras ya confirmadas. MySQL y SQLite deshacen solo la sentencia fallida (clave duplicada, `SQLITE_BUSY`), así que una closure que ignora el error y devuelve `Ok` confirma el resto; PG aborta toda la transacción.
 
 ---
 
@@ -1555,6 +1568,11 @@ let typed = Event::objects()
 
 Lee/escribe tipos de Rust vía `serde_json::from_value` / `to_value`.
 
+Los backends difieren en dos puntos:
+
+- `json_contains` da las mismas filas en PostgreSQL y MySQL cuando el valor tiene la forma de la columna en cada clave (`{"tags": ["a"]}` contra `{"tags": ["a", "b"]}`). MySQL también encuentra un escalar dentro de un array (`{"tags": "a"}`); PostgreSQL no. SQLite no tiene contención.
+- `Event::data.contains(..)` / `icontains(..)` y los `search_fields` del admin comparan contra el texto JSON guardado. Eso coincide solo dentro de una clave o un valor de cadena (`icontains("alice")`): SQLite guarda `{"a":1}`, PostgreSQL y MySQL imprimen `{"a": 1}`, con las claves ordenadas de más corta a más larga y luego por bytes; SQLite conserva el texto que escribió rustango.
+
 ---
 
 ## Borrado lógico (soft delete)
@@ -1585,6 +1603,8 @@ let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await
 
 Estos reciben el `&Pool` y funcionan en los tres backends; `soft_delete_on` / `restore_on` son las formas executor solo de Postgres (para pasar una transacción). El botón "Delete" del admin borra en suave cualquier modelo que tenga la columna. Las consultas por defecto siguen incluyendo filas borradas en suave, pero ya no hace falta escribir el filtro a mano: `.active()` las excluye, `.only_trashed()` devuelve solo esas y `.with_trashed()` es un marcador que expresa la intención y no cambia nada — no deshace un `.active()` previo. Para excluirlas por defecto, declara un global scope — `#[rustango(global_scope(name = "live", apply = live_only))]`, donde `live_only()` devuelve el filtro `deleted_at IS NULL` — y desactívalo por consulta con `.without_global_scope("live")`.
 
+Los global scopes se aplican a todo `QuerySet` y a los atajos de `Model` construidos sobre uno (`count`, `sum`, `avg`, `min`, `max`, `destroy`, `delete_where`, …). No se aplican a `Model::truncate`, que vacía toda la tabla, ni a los métodos de instancia por clave primaria (`save_pool`, `save_partial`, `delete_pool`, `soft_delete`, `restore`): esos actúan sobre la fila que ya tienes.
+
 ---
 
 ## Rastro de auditoría
@@ -1611,6 +1631,8 @@ with_source(
 ```
 
 El panel de historial por fila del admin lee de esta tabla; el feed entre modelos está en `/__audit`.
+
+Las filas auditadas que elimina una FK `on_delete = "cascade"` reciben una entrada `delete`, leída antes del borrado dentro de su transacción. Las filas cambiadas por `set_null` / `set_default`, y las tablas hijas que vacía el `Model::truncate` de PostgreSQL con `CASCADE`, no se auditan. Funciona en los caminos de pool y de transacción (`delete_pool`, `PoolTx`, `PoolConn`), de 500 filas borradas en 500: las filas en cascada de cada bloque se leen con `FOR UPDATE` y se guardan en memoria con sus entradas hasta que se borra el bloque. Un executor sqlx crudo (`Model::delete(&PgPool)`, `delete_on`) ejecuta un único DELETE simple y en su lugar registra una advertencia una sola vez. Una FK `DEFERRABLE INITIALLY DEFERRED` solo propaga en cascada en el commit, así que sus filas no reciben entradas.
 
 Limpieza:
 
@@ -1730,7 +1752,7 @@ Post::objects().where_(Post::author_id.eq(42));
 | `__between` / `__range` | `BETWEEN … AND …` | `SqlValue::List` de 2 elementos | inclusivo en ambos extremos |
 | `__regex` / `__iregex` | PG `~` / `~*`, MySQL/SQLite `REGEXP` | string | insensible a mayúsculas emulado en MySQL/SQLite vía envoltura `LOWER()`; SQLite necesita una función de usuario `regexp` |
 
-> **Los metacaracteres de LIKE se escapan.** `__contains` / `__startswith` / `__endswith` (y sus variantes `i`) tratan el valor como una subcadena **literal** — un `%` o `_` en él coincide consigo mismo, no como comodín. El framework los escapa y emite `ESCAPE '!'`, respetado en los tres dialectos (#1257). Para un patrón crudo donde tú colocas tus `%` / `_`, usa `__like` / `__ilike`, que vinculan el valor literalmente.
+> **Los metacaracteres de LIKE se escapan.** `__contains` / `__startswith` / `__endswith` (y sus variantes `i`) tratan el valor como una subcadena **literal** — un `%` o `_` en él coincide consigo mismo, no como comodín. El framework los escapa y emite `ESCAPE '!'`, respetado en los tres dialectos. Para un patrón crudo donde tú colocas tus `%` / `_`, usa `__like` / `__ilike`, que vinculan el valor literalmente.
 
 **Los errores se exponen en `.compile()`, no en el momento de la llamada a `.filter()`** — los desajustes de forma de valor (p. ej. `__in` con un escalar, `__isnull` con un no-bool, `__between` con la aridad equivocada) y los sufijos desconocidos (`status__nope`) devuelven `QueryError::UnknownLookup` / `QueryError::InvalidLookupValue` desde `.compile()` para que la cadena fluida se mantenga limpia de tipos. Los recorridos encadenados (`author__name__icontains`) **no** están soportados en v0.39 — el splitter toma el sufijo después del primer `__`, así que toda la cola `name__icontains` se trata como un sufijo desconocido.
 
@@ -1752,16 +1774,36 @@ async fn handler(mut t: Tenant) -> Result<...> {
 }
 ```
 
-`fetch_on` es **solo para Postgres** (`#[cfg(feature = "postgres")]`, acotado a
-`Database = sqlx::Postgres`) y acepta cualquier executor sqlx de *Postgres* —
-`&PgPool`, `&mut PgConnection` o una `Transaction`. Existe exactamente para el caso
-de arriba: los tenants en modo esquema comparten el pool del registro pero dependen
-de un `SET search_path` por checkout, así que pasar `&PgPool` daría en el esquema
+Los tenants en modo esquema comparten el pool del registro pero dependen de un
+`SET search_path` por checkout, así que pasar `&PgPool` daría en el esquema
 equivocado sin avisar.
 
-`fetch` **no** es azúcar de eso. Es un método `FetcherPool` aparte que recibe
-`&Pool`, despacha por dialecto y existe en los tres backends — así que en un build
-de MySQL o SQLite `fetch` es el único de los dos que existe.
+## Una conexión por petición
+
+Cada `fetch(&pool)` toma su propia conexión. Para ejecutar las consultas de un
+handler sobre una sola, tómala con `let mut conn = pool.acquire().await?;` (un
+`PoolConn`) y pasa `&mut conn` a los métodos `_on`, p. ej.
+`Post::objects().fetch_on(&mut conn)`. Funciona en los tres backends.
+`conn.begin()` abre un `PoolTx` sobre la misma conexión.
+
+Los métodos `_on` son `fetch_on`, `first_on`, `count_on`, `exists_on`,
+`fetch_paginated_on`, `in_bulk_on`, `explain_on`, `delete_on` en un queryset,
+`execute_on` en `update()`, `ForeignKey::get_on`, `annotate_count_children_on`,
+`fetch_aggregate_on`, y `fetch_on` en `values()`, `values_list()`, `values_list_flat()`
+(más `first_on`) y `aggregate()`. Aceptan cualquier `SqlExecutor`: `&mut PoolConn`,
+`&mut PoolTx`, `&Pool`, o en Postgres cualquier executor sqlx (`&PgPool`,
+`&mut PgConnection`, `t.conn()`).
+
+Una conexión vuelve al pool con cualquier estado de sesión que le hayas fijado
+(`SET …`, `@vars` de MySQL, `PRAGMA` de SQLite); el siguiente que la toma lo
+hereda, y en un pool de registro puede ser la petición de otro tenant. Tras un
+cambio así llama a `conn.close_on_drop()`, para que la conexión se cierre en
+lugar de reutilizarse.
+
+Mientras tengas un `PoolConn`, pásalo a todas las consultas: un método `&Pool`
+en el mismo handler toma una segunda conexión. Con `max_connections` peticiones
+así a la vez, cada una tiene una y espera otra, y todas agotan el tiempo de
+espera. Suelta la conexión antes de llamar a código que recibe `&Pool`.
 
 ---
 

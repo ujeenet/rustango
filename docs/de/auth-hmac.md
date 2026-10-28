@@ -15,8 +15,8 @@ Tower-Layer.
 > **Ein Begriff hier neu für Sie?** *HMAC*, *gemeinsames Secret*, *Replay*, *Vergleich in konstanter Zeit* —
 > siehe das [Glossar](glossary.md).
 
-> **Quelle:** `rustango::hmac_auth` (`HmacAuthLayer`, `KeyResolver`, `sign_now`,
-> `sign_request`) — hinter dem Feature `hmac-auth` (standardmäßig aktiviert; der
+> **Quelle:** `rustango::hmac_auth` (`HmacAuthLayer`, `KeyResolver`,
+> `KeyTenantResolver`, `RequestToSign`, `sign_now`, `sign_request`) — hinter dem Feature `hmac-auth` (standardmäßig aktiviert; der
 > Replay-Schutz benötigt zusätzlich `cache`).
 >
 > **Lauffähige Version:** Jedes Snippet ist aus
@@ -29,6 +29,7 @@ Tower-Layer.
 - [Was signiert wird](#was-signiert-wird)
 - [Server: mit dem Layer verifizieren](#server-mit-dem-layer-verifizieren)
 - [Client: eine Anfrage signieren](#client-eine-anfrage-signieren)
+- [Mandantenfähige Apps](#mandantenfähige-apps)
 - [Uhren-Skew und Replay](#uhren-skew-und-replay)
 - [Grenzen](#grenzen)
 - [Siehe auch](#siehe-auch)
@@ -146,6 +147,23 @@ let req = http::Request::post("/api/charge")
 Die Signatur ist base64; der Body-Hash innerhalb der kanonischen Zeichenkette ist
 hex. Senden Sie den Body Byte für Byte wie signiert — jeder Proxy, der ihn
 umschreibt (Neukomprimierung, JSON-Neuserialisierung), bricht die Verifizierung.
+
+---
+
+## Mandantenfähige Apps
+
+Der Tenant-Header und der Port werden standardmäßig nicht signiert, und der
+Layer kennt keinen Tenant. In einer App mit Tenant-Auflösung:
+
+- `.bind_tenants(tenant_of)` ordnet jeder Key-Id den Tenant-Slug zu, für den
+  sie handeln darf. Der Layer löst den Tenant der Anfrage über den eingehängten
+  Tenant-Kontext auf und antwortet mit `403`, wenn er abweicht oder keiner da
+  ist.
+- `.signed_headers(["x-org"])` nimmt Header in den signierten String auf, und
+  `.sign_port()` den Port in `Host`. Jedes ergänzt eine Zeile `name:value`,
+  sortiert nach Name. Der Client signiert dieselbe Liste mit
+  `RequestToSign::header` und `port`; ein Header, den die Anfrage weglässt,
+  wird als leer signiert.
 
 ---
 

@@ -125,7 +125,7 @@ let layer = CorsLayer::permissive();              // any origin, common methods
 
 **Sicherheitshinweis:** Mit Credentials MUSST du explizite Origins auflisten. `allow_credentials(true)` zusammen mit `allow_any_origin()` ergibt kein „credentialed Wildcard-CORS" — das gibt es nicht, und wer es verlangt, bekommt keine der beiden Hälften.
 
-Rustango antwortet darauf mit `Access-Control-Allow-Origin: *` und **ohne** `Access-Control-Allow-Credentials`-Header, sodass der Browser die Anfrage mit Credentials blockiert. Bis [#1394](https://github.com/ujeenet/rustango/issues/1394) wurde stattdessen die anfragende Origin zurückgespiegelt — und genau das akzeptieren Browser zusammen mit Credentials. Diese Kombination war ein funktionierendes Loch, lesbar von jeder Seite, die der Nutzer besuchte, und diese Seite beschrieb es als etwas, das der Browser ablehnen würde.
+Rustango antwortet darauf mit `Access-Control-Allow-Origin: *` und **ohne** `Access-Control-Allow-Credentials`-Header, sodass der Browser die Anfrage mit Credentials blockiert. Ältere Versionen spiegelten stattdessen die anfragende Origin zurückgespiegelt — und genau das akzeptieren Browser zusammen mit Credentials. Diese Kombination war ein funktionierendes Loch, lesbar von jeder Seite, die der Nutzer besuchte, und diese Seite beschrieb es als etwas, das der Browser ablehnen würde.
 
 Nutze `.allow_origins([...])` mit den Origins, die du tatsächlich bedienst. Dieser Pfad ist unverändert und sendet weiterhin `Access-Control-Allow-Credentials: true`.
 
@@ -150,7 +150,7 @@ router.rate_limit(RateLimitLayer::global(10, Duration::from_secs(1)));
 
 Bei Erschöpfung: `429 Too Many Requests` mit `Retry-After`-Header. Jede erfolgreiche Antwort enthält `X-RateLimit-Limit` + `X-RateLimit-Remaining`.
 
-> **Hinter einem Reverse Proxy: benenne deine Proxys, sonst limitiert `per_ip` nichts Sinnvolles** ([#1398](https://github.com/ujeenet/rustango/issues/1398)). `RateLimitLayer::per_ip` schlüsselt auf den verbindenden Socket, was hinter einem Proxy die Adresse des *Proxys* ist — also teilen sich alle Clients einen Bucket. Ein einziger lauter Client limitiert dann alle anderen, und kein einzelner Angreifer wird je limitiert.
+> **Hinter einem Reverse Proxy: benenne deine Proxys, sonst limitiert `per_ip` nichts Sinnvolles**. `RateLimitLayer::per_ip` schlüsselt auf den verbindenden Socket, was hinter einem Proxy die Adresse des *Proxys* ist — also teilen sich alle Clients einen Bucket. Ein einziger lauter Client limitiert dann alle anderen, und kein einzelner Angreifer wird je limitiert.
 >
 > Mounte `RealIpLayer` **und sag ihm, welchen Hops er glauben soll**:
 >
@@ -172,6 +172,16 @@ Bei Erschöpfung: `429 Too Many Requests` mit `Retry-After`-Header. Jede erfolgr
 >
 > Benenne die Adressen, von denen dein Ingress tatsächlich verbindet. Einen weiteren Bereich zu vertrauen, reicht den Bypass an jeden darin weiter.
 
+### Eingebaute Login-Limits
+
+Jeder eingebaute Passwort-Login (Admin, Operator-Konsole, Tenant-Admin, JWT `/auth/login`) läuft vor dem Benutzer-Lookup durch `rustango::login_throttle`. Er prüft der Reihe nach eine Sperre pro Benutzername (5 Fehlversuche, 15 Min.), die unbekannte Benutzernamen genauso zählt wie echte, ein Limit pro IP (20 fehlgeschlagene Logins/Min.; IPv6 zählt pro /64) und ein globales Limit pro Login (je 600 fehlgeschlagene Logins/Min. für den Admin, die Operator-Konsole und jeden Tenant). Ein erfolgreicher Login zählt nicht gegen die Limits. Sobald die Benutzerzeile gefunden ist, folgt die Sperre auch dem gespeicherten Benutzernamen, sodass Schreibweisen, die die Datenbank als gleich behandelt (MySQL setzt `alicé` mit `alice` gleich), eine Sperre teilen. HTTP Basic und API-Keys haben ihren eigenen Bereich und zählen nur Fehlversuche. Ein abgelehnter Login bekommt `429` mit `Retry-After`, und dieselbe Antwort, ob das Konto existiert oder nicht.
+
+Hinter einem Reverse Proxy mountest du `RealIpLayer` mit deinen Proxys wie oben gezeigt; eine `Cli`-App ruft stattdessen `Cli::with_trusted_proxies(["127.0.0.1/32"])?` auf. Ohne das hat jeder Client die Adresse des Proxys und teilt sich einen IP-Bucket; eine Warnung wird einmal geloggt, wenn Forwarding-Header eintreffen.
+
+Passwort-Hashing führt höchstens einen Job pro CPU aus, geteilt von jedem Login; HTTP Basic, API-Keys und Agent-Secrets dürfen höchstens die Hälfte der Slots belegen. Ein Login, der länger als `hash_wait_ms` (5 s) auf einen Slot wartet, bekommt `503` mit `Retry-After`, für bekannte und unbekannte Benutzer gleichermaßen.
+
+Feinjustiert wird unter `[auth]`: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`, `login_global_window_secs`, `lockout_threshold`, `lockout_duration_secs`, `hash_wait_ms`. Ein im Code gesetzter Wert (`login_throttle::configure_shared`, `account_lockout::configure_shared`, `passwords::configure_hash_wait`) gewinnt über diese Schlüssel. Die IP- und globalen Buckets gelten pro Prozess, außer du installierst `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))`, das sie in festen Fenstern in einem geteilten Cache zählt (bei einem Cache-Fehler fallen beide auf den Prozess zurück; ein Burst über eine Fenstergrenze kann das Doppelte eines Limits erreichen; Apps, die sich einen Cache teilen, teilen die Zähler, außer jede nutzt ihren eigenen `ScopedCache`); der erste Login loggt eine Warnung, solange sie pro Prozess gelten. Die Benutzernamen-Sperre nutzt `account_lockout::shared()`, das du über `account_lockout::configure_shared` mit einem geteilten Cache unterlegen kannst. Fehlversuche zählen in einem festen Fenster (standardmäßig 1 Stunde), das mit dem ersten Fehlversuch beginnt, ein Angreifer bekommt also `lockout_threshold - 1` Versuche pro Fenster ohne Sperre; die IP- und globalen Limits begrenzen den Rest.
+
 `RateLimitLayer` ist **prozesslokal** — es zählt Anfragen nur innerhalb einer laufenden Instanz, was in Ordnung ist, wenn du eine einzelne Instanz betreibst. Wenn du mehrere Instanzen (Replicas) hinter einem Load Balancer betreibst, würde jede ihre eigene Zählung führen, sodass sich das reale Limit vervielfacht. Um eine Zählung über alle Replicas hinweg zu teilen, nutze `rate_limit_cache::CacheRateLimitLayer`, das an eine beliebige `cache::Cache`-Implementierung delegiert (kombiniere es mit `cache::RedisCache` für einen gemeinsamen Zähler, der atomar per Redis `INCRBY` inkrementiert wird):
 
 ```rust
@@ -191,7 +201,7 @@ let app = axum::Router::new()
     );
 ```
 
-> **Nach einem geheimen Header zu keyen ist teilbar-sicher.** Bei `key_by(KeyBy::Header("authorization"))` oder `"x-api-key"` **hasht** der cache-gestützte Limiter den Header-Wert, bevor er ihn als Schlüssel verwendet (#1252) — ein geteiltes Redis speichert also nie eine gültige Anmeldeinformation dort, wo jemand mit Schlüssel-Lesezugriff sie abgreifen könnte. `KeyBy::Ip` braucht `ConnectInfo` (oder ein vorgeschaltetes `RealIpLayer`); fehlt das, warnt der Limiter einmalig und fällt auf einen einzigen geteilten Bucket zurück.
+> **Nach einem geheimen Header zu keyen ist teilbar-sicher.** Bei `key_by(KeyBy::Header("authorization"))` oder `"x-api-key"` **hasht** der cache-gestützte Limiter den Header-Wert, bevor er ihn als Schlüssel verwendet — ein geteiltes Redis speichert also nie eine gültige Anmeldeinformation dort, wo jemand mit Schlüssel-Lesezugriff sie abgreifen könnte. `KeyBy::Ip` braucht `ConnectInfo` (oder ein vorgeschaltetes `RealIpLayer` mit `trust_proxies`); fehlt das, warnt der Limiter einmalig und fällt auf einen einzigen geteilten Bucket zurück.
 
 
 ---
@@ -254,7 +264,7 @@ let app = Router::new()
 
 Die Bedingung ist Absicht, kein Zufall: CSRF schützt Credentials, die der Browser von sich aus mitschickt, also ist es das Session-Cookie, das es überhaupt sinnvoll macht. Ein Admin ohne `with_session_auth` hat kein von rustango verwaltetes Credential, mit dem sich fälschen ließe, und seine Mutationen sind für jeden direkt erreichbar, der die Route erreicht — das ist eine Authentifizierungslücke, keine CSRF-Lücke, und CSRF würde sie nicht verkleinern. Das gilt nur, solange davor kein vom Browser mitgeschicktes Credential steht. HTTP Basic (`protect_with_basic_auth`) oder eine eigene Cookie-Auth ist eines, also reiten Cross-Site-POSTs darauf — und `csrf::layer()` selbst einzuhängen hilft nicht, weil der Admin Formular-Tokens nur unter `with_session_auth` rendert, sodass jedes POST mit 403 endet. Nimm `with_session_auth` für einen Admin im Browser.
 
-Bis [#1395](https://github.com/ujeenet/rustango/issues/1395) behauptete dieser Absatz, der Schutz sei bedingungslos — geschützt war allein `POST /login`. Jede andere Admin-Mutation akzeptierte ein Cross-Site-POST auf der Session des Administrators, Audit-Cleanup eingeschlossen, sodass dieselbe Anfrageklasse ihre eigene Spur löschen konnte.
+Ältere Fassungen dieses Absatzes behaupteten, der Schutz sei bedingungslos — geschützt war allein `POST /login`. Jede andere Admin-Mutation akzeptierte ein Cross-Site-POST auf der Session des Administrators, Audit-Cleanup eingeschlossen, sodass dieselbe Anfrageklasse ihre eigene Spur löschen konnte.
 
 ---
 
@@ -458,7 +468,7 @@ jwt.revoke(&access_token).await;     // adds JTI to blacklist
 jwt.revoke(&refresh_token).await;
 ```
 
-Die standardmäßige In-Memory-Blacklist (`InMemoryJtiStore`) räumt abgelaufene Einträge von selbst aus, aber sie lebt in einem Prozess und vergisst bei jedem Neustart jeden Widerruf. Für Multi-Prozess-Deployments installiere einen gemeinsamen, dauerhaften Store über `JwtLifecycle::new(secret).with_jti_store(store)` — `store` ist ein beliebiger `Arc<dyn JtiStore>` (zum Beispiel ein Redis- oder DB-gestützter). Ohne einen gemeinsamen Store kann ein Token, das du auf einer Replica widerrufst, auf einer anderen weiterhin abgespielt werden, bis es abläuft. Seit v0.52 (#1191) sind all diese Aufrufe `async` — `verify_*`, `refresh*` und `revoke` warten auf den Store, sodass ein dauerhafter Store ein einzelner bedingter Schreibvorgang sein kann statt eines letztlich konsistenten Caches mit Hintergrund-Flusher.
+Die standardmäßige In-Memory-Blacklist (`InMemoryJtiStore`) räumt abgelaufene Einträge von selbst aus, aber sie lebt in einem Prozess und vergisst bei jedem Neustart jeden Widerruf. Für Multi-Prozess-Deployments installiere einen gemeinsamen, dauerhaften Store über `JwtLifecycle::new(secret).with_jti_store(store)` — `store` ist ein beliebiger `Arc<dyn JtiStore>` (zum Beispiel ein Redis- oder DB-gestützter). Ohne einen gemeinsamen Store kann ein Token, das du auf einer Replica widerrufst, auf einer anderen weiterhin abgespielt werden, bis es abläuft. Seit v0.52 sind all diese Aufrufe `async` — `verify_*`, `refresh*` und `revoke` warten auf den Store, sodass ein dauerhafter Store ein einzelner bedingter Schreibvorgang sein kann statt eines letztlich konsistenten Caches mit Hintergrund-Flusher.
 
 > **Vertiefung:** [JWT-Auth-API](auth-jwt-api.md) — der eingebaute `/api/auth/login|refresh|logout|me`-Router, gleitendes Refresh und der JTI-Widerrufs-Store. Für ein einzelnes selbstverwaltetes Token siehe [JWT (standalone)](auth-jwt.md). Um Browser-/API-Routen per Login zu gaten, siehe [Access-Decorators](auth-decorators.md).
 
@@ -520,7 +530,7 @@ Die Operator-Konsole hat denselben zweiten Faktor, freiwillig pro Operator oder 
 
 ## Signierte URLs versenden (Magic Links)
 
-Eine signierte URL trägt eine manipulationssichere Signatur, sodass du ihr ohne Session vertrauen kannst — perfekt für Magic-Link-Logins, Passwort-Resets und zeitlich begrenzte Download-Links. Du `sign`st eine URL (optional mit einem Ablaufdatum) und `verify`st sie, wenn der Benutzer klickt. (Laravel nennt diese „signed routes".)
+Eine signierte URL trägt eine manipulationssichere Signatur, sodass du ihr ohne Session vertrauen kannst — perfekt für Magic-Link-Logins, Passwort-Resets und zeitlich begrenzte Download-Links. Du `sign`st eine URL (optional mit einem Ablaufdatum) und `verify`st sie, wenn der Benutzer klickt.
 
 ```rust
 use rustango::signed_url::{sign, verify, SignedUrlError};
@@ -616,9 +626,40 @@ async fn handle_stripe_webhook(headers: HeaderMap, body: Bytes) -> StatusCode {
 | `HexSha256` | die übergebenen Bytes, rohes Hex | Stripe `v1=` / Slack `v0=` über die Strings oben |
 | `Base64Sha256` | Body, Standard-Base64 | Shopify (`X-Shopify-Hmac-Sha256`) |
 
+### Webhooks aus `webhook_delivery`
+
+Rustangos eigene Zustellungen tragen `X-Webhook-Signature-V2`, signiert über Id, Event, Zeitstempel und Body. Prüfe sie mit `verify_delivery` und verwirf dann eine `X-Webhook-Id`, die du innerhalb von `max_age` schon gesehen hast. Wähle ein `max_age`, das länger ist, als Jobs in der Warteschlange stehen können.
+
+```rust
+use axum::{body::Bytes, http::HeaderMap, http::StatusCode};
+use rustango::webhook::{verify_delivery, DeliveryHeaders, SignatureFormat};
+
+fn check(secret: &[u8], headers: &HeaderMap, body: &Bytes) -> StatusCode {
+    let h = |name| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let signed = DeliveryHeaders::new(
+        h("x-webhook-id"),
+        h("x-webhook-event"),
+        h("x-webhook-timestamp"),
+        h("x-webhook-signature-v2"),
+    );
+    let max_age = std::time::Duration::from_secs(600);
+    if !verify_delivery(SignatureFormat::HexSha256WithPrefix, secret, &signed, body, max_age) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    // ... drop a repeated id, then process
+    StatusCode::OK
+}
+```
+
+Die ältere `X-Webhook-Signature` deckt nur den Body ab und wird weiter gesendet, solange Empfänger auf v2 umstellen.
+
 Eine Zustellung, die mit 408, 429 oder 5xx beantwortet wird oder beim Transport scheitert, wird wiederholt: insgesamt 8 Läufe, mit 1s Wartezeit, die sich jedes Mal verdoppelt. `WebhookSubscription::max_attempts(n)` und `retry_backoff(base)` ändern beides für ein Abonnement. Ein `Retry-After` auf einer 429 oder 503, in Sekunden oder als HTTP-Datum, lässt den nächsten Versuch mindestens so lange warten, höchstens eine Stunde. Andere 4xx-Antworten gehen sofort in den Dead-Letter. Wiederholungen nutzen den ersten Zeitstempel, also muss das `max_age` des Empfängers das ganze Wiederholungsfenster abdecken.
 
 Der Signaturvergleich ist konstant-zeitlich, das heißt, er dauert immer gleich lang, egal ob die Vermutung richtig oder falsch ist. Das stoppt Timing-Angriffe, bei denen ein Angreifer winzige Antwortzeit-Unterschiede misst, um das Secret Zeichen für Zeichen zu erraten.
+
+Ausgehende Aufrufe an URLs, die die Konfiguration setzen kann (Webhook-Zustellung, Slack `webhook_callback`, OAuth2/OIDC-Discovery, Token und Userinfo), lehnen Loopback-, private, Link-Local- und Metadaten-Adressen ab und folgen nie Redirects. Um einen IdP oder einen Slack-Hook im eigenen Netz zu erreichen, trage ihn in `RUSTANGO_OUTBOUND_ALLOW` ein (kommagetrennte Hosts und CIDRs, z. B. `10.0.5.0/24,idp.internal`); alles andere bleibt abgelehnt. Ein Host-Eintrag vertraut allem, wozu dieser Name auflöst, trage also nur Namen ein, die du kontrollierst. Die Liste gilt nie für Webhook-Zustellung: Ein Abonnement schaltet das mit `allow_private_targets(true)` frei.
+
+Diese Aufrufe ignorieren `HTTPS_PROXY`/`NO_PROXY`. Um sie über einen Egress-Proxy zu schicken, setze `RUSTANGO_OUTBOUND_PROXY` (z. B. `http://proxy.internal:3128`); der Proxy selbst darf privat sein. Die App löst jedes Ziel trotzdem zuerst auf und prüft es, braucht also lokales DNS dafür; ein fehlgeschlagener Lookup lehnt den Aufruf ab. Der Proxy löst den Namen erneut auf, muss also ebenfalls private und Metadaten-Ziele ablehnen: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16 (inkl. 169.254.169.254, 169.254.170.2, 169.254.170.23), 100.64.0.0/10 (inkl. 100.100.100.200), ::1, fc00::/7 (inkl. fd00:ec2::254, fd00:ec2::23) und fe80::/10. Ohne Proxy werden Adressen beim Verbindungsaufbau erneut geprüft.
 
 ---
 
@@ -713,7 +754,7 @@ Immer aktive Prüfungen (laufen mit oder ohne `--deploy`):
 
 Zusätzliche `--deploy`-Prüfungen (Produktionshärtung):
 - ✅ `RUSTANGO_ENV` ist `prod` oder `production`
-- ✅ `RUSTANGO_SESSION_SECRET` gesetzt und **dekodiert** ≥ 32 Bytes (der HMAC-Schlüssel für Cookie- + JWT-Signierung — `SECRET_KEY` wird vom Framework **nicht** gelesen), ohne verbliebenen Scaffolder-Platzhalter. Es ist base64: `openssl rand -base64 32` liefert 44 Zeichen. Ein Secret mit 32 *Zeichen* hat nur 24 Bytes und wird abgelehnt — seit [#1396](https://github.com/ujeenet/rustango/issues/1396) von `check --deploy` und der Laufzeit gleichermaßen; genau darum geht es, denn die Prüfung maß früher die kodierte Zeichenkette und ließ einen Wert durch, den die App dann ablehnte
+- ✅ `RUSTANGO_SESSION_SECRET` gesetzt und **dekodiert** ≥ 32 Bytes (der HMAC-Schlüssel für Cookie- + JWT-Signierung — `SECRET_KEY` wird vom Framework **nicht** gelesen), ohne verbliebenen Scaffolder-Platzhalter. Es ist base64: `openssl rand -base64 32` liefert 44 Zeichen. Ein Secret mit 32 *Zeichen* hat nur 24 Bytes und wird abgelehnt — von `check --deploy` und der Laufzeit gleichermaßen; genau darum geht es, denn die Prüfung maß früher die kodierte Zeichenkette und ließ einen Wert durch, den die App dann ablehnte
 - ✅ `DATABASE_URL` gesetzt (und warnt, wenn es auf localhost zeigt)
 - ⚠️ `RUSTANGO_APEX_DOMAIN` / `RUSTANGO_BIND` Plausibilitätswarnungen für Tenancy + Nicht-Loopback-Binding
 

@@ -184,6 +184,10 @@ zusätzlich ein `MigrateTarget`: den `pool` des Laufs und seinen `tenant`-Slug
 Tenant-Lauf sendet einmal pro Tenant mit dem Pool dieses Tenants, auf jedem
 Backend, sodass ein `post_migrate`-Receiver jeden Tenant befüllen kann.
 
+## Ein neuer Unique-Schlüssel über doppelte Zeilen
+
+Bevor eine Migration einer bestehenden Tabelle einen Unique-Index oder eine Unique-Spalte hinzufügt, prüft `migrate`, dass sich keine zwei Zeilen den Schlüssel teilen (Zeilen mit einem NULL darin werden ignoriert). Tun es welche, stoppt es vor jeder DDL und gibt ein `SELECT … GROUP BY … HAVING COUNT(*) > 1` aus, das sie auflistet. Die Prüfung liest die Tabelle einmal pro neuem Schlüssel, kostet auf einer großen Tabelle also einen vollständigen Scan. Sie wird nach einem Datenschritt in derselben Migration übersprungen, denn der könnte die Duplikate gerade entfernen, und für Tabellen oder Spalten, die die Migration selbst anlegt oder umbenennt.
+
 ---
 
 ## Upgrade auf 0.51.2

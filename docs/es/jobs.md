@@ -105,6 +105,15 @@ queue.start().await;
 queue.shutdown().await;   // on shutdown: drain in-flight jobs, then stop
 ```
 
+`shutdown()` da a los trabajos en curso un periodo de gracia (`shutdown_grace`,
+5 s por defecto), y luego los aborta y los vuelve a encolar. Los trabajos en cola
+y los reintentos aparcados siguen en cola, y un nuevo `start()` los recoge.
+
+Los trabajos son **at-least-once**. Ninguna señal de parada llega a un trabajo en
+curso, y un trabajo abortado vuelve a ejecutarse desde el principio (la cola en BD
+libera su fila aunque el trabajo acabara de terminar). El aborto gasta un intento.
+Haz que cada trabajo sea idempotente.
+
 Mantén el `Arc<InMemoryJobQueue>` en el estado de tu aplicación para que los
 handlers puedan alcanzarlo.
 
@@ -179,9 +188,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-> **Pon el drenaje en `on_shutdown`, no después de `run()`.** Hasta
-> [#1409](https://github.com/ujeenet/rustango/issues/1409) este ejemplo
-> llamaba a `queue.shutdown()` en la línea *posterior* a `run()`, y esa línea
+> **Pon el drenaje en `on_shutdown`, no después de `run()`.** Las versiones
+> anteriores de este ejemplo llamaban a `queue.shutdown()` en la línea *posterior* a `run()`, y esa línea
 > no podía ejecutarse nunca: nada manejaba SIGTERM, así que la parada del
 > orquestador mataba el proceso de inmediato. Ahora `run()` retorna con la
 > señal — pero `on_shutdown` sigue siendo el lugar correcto, porque también se
@@ -260,6 +268,14 @@ solo necesita `dispatch` (no tiene que `start()` los workers). Empareja el worke
 con un barrido periódico
 [`reclaim_stuck_jobs_pool`](#la-cola-persistente-producción) para recuperar
 trabajos de un worker que se ha caído.
+
+Dos colas distintas sobre una tabla (por ejemplo, un mailer y un generador de
+informes con sus propios handlers) se quitan los trabajos entre sí. Da a cada una
+su nombre con `.queue_name("mailer")` en el lado que despacha y en el que
+trabaja: una cola con nombre solo ejecuta sus trabajos, y una sin nombre solo los
+trabajos sin nombre. Los workers anteriores a `queue_name` lo ignoran y ejecutan
+también los trabajos con nombre: detenlos antes de despachar en una cola con
+nombre.
 
 ---
 
@@ -356,6 +372,11 @@ queue.start().await;
 queue.dispatch(&WelcomeEmail { user_id: 42 }).await?;
 ```
 
+**Despachar dentro de una transacción.** Dentro de un bloque `atomic` sobre el
+propio pool de la cola, `dispatch` se une al bloque: el trabajo se revierte con
+él, y ningún worker despierta antes del commit. No mantengas el `TxGuard` del
+bloque durante la llamada.
+
 **Recuperar workers caídos.** Si un worker muere a mitad de un trabajo, la fila
 queda bloqueada. Ejecuta un barrido periódico para liberar los bloqueos más
 antiguos que un umbral, de modo que otro worker retome el trabajo:
@@ -364,6 +385,12 @@ antiguos que un umbral, de modo que otro worker retome el trabajo:
 // e.g. from a scheduled task every few minutes:
 let reclaimed = DatabaseJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(300)).await?;
 ```
+
+Un trabajo en curso renueva su bloqueo cada `heartbeat_interval` (10 s por
+defecto), así que mantén el umbral muy por encima. Cada recogida gasta un intento,
+así que un trabajo que tumba a su worker va a dead-letter cuando se agotan las
+`MAX_ATTEMPTS` ejecuciones. Un trabajo que hace panic es un fallo `Retryable`; el
+worker sigue funcionando.
 
 Tanto el flujo dispatch-and-run como `reclaim_stuck_jobs_pool` se prueban con
 dogfooding contra SQLite en `jobs_sqlite_live.rs`.
@@ -437,8 +464,7 @@ compartida por razones operativas, resuelve el pool del tenant como lo
 supervisor de workers por tenant, ni `Job::run(&ctx)` con el tenant adjunto, ni
 un barrido `reclaim_stuck_jobs_pool` consciente del tenant — iteras sobre los
 tenants tú mismo, como arriba. Los tenants provisionados después del arranque
-no obtienen workers hasta que el proceso se reinicia. Seguimiento en
-[#1223](https://github.com/ujeenet/rustango/issues/1223).
+no obtienen workers hasta que el proceso se reinicia. Es una carencia conocida.
 
 **Contexto ambiental: solo fuente de auditoría y zona horaria.**
 `InMemoryJobQueue` los captura en `dispatch` y el scheduler en `every()`, y
@@ -508,9 +534,7 @@ lock.with_lock("nightly_prune", ttl, || async { /* … */ }).await;
 
 Sin acotar, todos los tenants compiten por un único `lock:nightly_prune`: el
 primero gana y el resto se omite durante toda la TTL, en silencio — un acquire
-rechazado es el resultado esperado, así que no se registra nada. Seguimiento en
-[#1226](https://github.com/ujeenet/rustango/issues/1226) y
-[#1228](https://github.com/ujeenet/rustango/issues/1228).
+rechazado es el resultado esperado, así que no se registra nada. Es una carencia conocida.
 
 ---
 
@@ -532,7 +556,7 @@ rechazado es el resultado esperado, así que no se registra nada. Seguimiento en
 | `Queue(String)` | error interno de la cola (serialización/registro) |
 
 **Métodos de `JobQueue`:** `register::<T>()` · `dispatch(&payload)` · `start()` ·
-`shutdown()` · `pending_count()`. `DatabaseJobQueue` añade
+`shutdown()` · `pending_count()`. Ambas colas tienen `shutdown_grace`. `DatabaseJobQueue` añade
 `ensure_table_pool`, `with_workers_pool`, `poll_interval` y
 `reclaim_stuck_jobs_pool`.
 

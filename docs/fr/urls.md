@@ -5,8 +5,7 @@ fragile — changez une route et chaque littéral casse silencieusement.
 **Rustango** vous donne la réponse à cela : **nommez un motif d'URL une fois,
 puis construisez l'URL par son nom partout** — en Rust avec `reverse(...)`, dans
 les templates avec `{{ url(...) }}`, et dans les redirections avec
-`redirect_to_view(...)` ; `resolve_url(...)` accepte indifféremment un nom ou un
-chemin déjà formé.
+`redirect_to_view(...)`.
 
 [![URL reverse nommées : register_url! nomme un motif, reverse() construit l'URL en Rust, et {{ url(...) }} construit l'URL dans un template](../img/urls.png)](../img/urls.png)
 
@@ -32,8 +31,8 @@ chemin déjà formé.
 
 `register_url!("name", "/pattern")` enregistre un mapping nom → motif. Il s'exécute
 au chargement du module (via `inventory`), donc la route atterrit dans un registre
-global dès que son module est lié — pas de `urls.py` central à éditer, et pas
-d'`include()` à câbler.
+global dès que son module est lié — pas de fichier de routes central à éditer,
+et rien à câbler à la main.
 
 ```rust
 use rustango::register_url;
@@ -81,7 +80,7 @@ voir [Erreurs](#erreurs).
 
 ## Reverse dans les templates
 
-Les templates reçoivent une fonction `url` pour Tera.
+Les templates reçoivent une fonction Tera `url(...)`.
 Enregistrez-la une fois sur votre instance `Tera` à l'initialisation (elle est
 derrière la feature `template_views`) :
 
@@ -143,10 +142,9 @@ retourne un simple `302`.)
 
 ## Namespacing
 
-Il n'y a pas d'`include()` ni de namespace d'app auto-appliqué — chaque
-`register_url!` atterrit dans un unique registre global. Le namespacing est une
-**convention dans le nom lui-même** : préfixez avec `app:` et passez le nom
-complet à `reverse("app:detail")`.
+Il n'y a pas de namespace d'app auto-appliqué — chaque `register_url!` atterrit
+dans un unique registre global. Le namespacing est une **convention dans le nom
+lui-même** : préfixez le nom avec `app:`, puis faites le reverse du nom complet.
 
 ```rust
 register_url!("blog:post-detail", "/blog/posts/{id}");
@@ -209,7 +207,7 @@ visiblement plutôt que de rendre un lien cassé.
 
 ## Motifs regex & chemins typés
 
-**Rustango n'a pas de `re_path`, et aucun convertisseur de chemin n'est jamais
+**Rustango n'a pas de routes regex, et aucun convertisseur de chemin n'est jamais
 appliqué.** Un segment de motif est soit un littéral (`/posts/new`) soit un
 placeholder `{name}` qui capture exactement un segment ; `{*name}` capture le
 reste du chemin. C'est tout le vocabulaire — il n'y a pas de
@@ -236,8 +234,8 @@ jamais été un moteur de regex au départ.
 La forme `{int:id}` n'est acceptée que comme **facilité de portage** pour
 `reverse()` : le constructeur découpe le placeholder sur `:` et ne garde que le
 nom, jetant le préfixe de type ([`urls.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/src/urls.rs)). Cela
-permet à `reverse()` de fonctionner sur un motif copié verbatim d'une définition
-de route typée d'un autre framework — mais rien ne valide que la valeur fournie
+permet à `reverse()` de fonctionner sur un motif copié verbatim d'un framework
+qui écrit le type dans le chemin (`"<int:id>/"`) — mais rien ne valide que la valeur fournie
 est réellement un entier.
 
 ### Comment exprimer une route contrainte

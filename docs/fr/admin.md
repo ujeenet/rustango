@@ -163,6 +163,9 @@ pour restreindre la liste ; le filtre actif s'affiche sous forme de puce avec
 un lien **effacer**, et le nombre de lignes ainsi que les compteurs de
 facettes se mettent à jour. Les filtres, la recherche, le tri et la hiérarchie
 de dates se combinent tous dans la chaîne de requête et peuvent être associés.
+`?<field>=` ne fonctionne que sur une colonne `list_filter`, affichée, FK ou
+parent d'inline, jamais sur une colonne secrète, et `?<field>__isnull=1` liste
+les lignes NULL, `?<field>__isempty=1` celles au texte vide.
 
 Une carte de facette affiche jusqu'à 15 valeurs ; les autres se replient dans
 un lien « +N de plus » (`?facet_show_all=<field>`), qui en liste au plus 200.
@@ -318,6 +321,13 @@ sélecteur, et soumettez (`POST /<prefix>/<table>/__action`).
 listé dans `admin(actions = ...)` sans gestionnaire enregistré n'apparaît
 simplement pas.
 
+Une action personnalisée est vérifiée comme une modification : `{table}.change`
+plus un hook d'objet nommé d'après l'action. Une action qui supprime doit le
+dire avec `register_action_with_perm(table, name, ActionPerm::Delete, handler)`,
+pour qu'elle exige `{table}.delete` et exécute le hook `delete` à la place. Elle
+exige toujours `{table}.change`, et elle est auditée et signalée comme une
+modification.
+
 Un gestionnaire `register_action` écrit sur sa propre connexion, donc les
 lignes d'audit d'un modèle audité sont écrites après lui, au mieux.
 `register_tx_action(table, name, handler)` (et `register_tx_action_with_perm`)
@@ -407,7 +417,9 @@ d'un modèle enregistré :
   monte une page/action supplémentaire à `/<prefix>/posts/duplicate`. Le
   gestionnaire est une `fn(Pool, Request) -> Response` asynchrone. (Les
   suffixes réservés comme `new`, `__action`, `__autocomplete`, `{pk}`,
-  `{pk}/edit`, `{pk}/delete` sont ignorés avec un avertissement.)
+  `{pk}/edit`, `{pk}/delete` sont ignorés avec un avertissement.) Sous
+  `with_user_perms`, un GET demande `{table}.view` et un POST/PUT/PATCH/DELETE
+  `{table}.change` ; ajoutez `perm = "publish"` pour exiger `{table}.publish`.
 - **Restriction de queryset** —
   `register_admin_queryset!("posts", hook)` où
   `hook: fn(&Parts) -> Vec<Filter>` restreint ce qu'une requête peut voir
@@ -417,7 +429,17 @@ d'un modèle enregistré :
   `register_admin_object_permission!("posts", "change", check)` où
   `check: fn(&Parts, Option<&Value>) -> bool` autorise ou refuse par ligne.
   Les gestionnaires intégrés consultent les actions `add`, `change`,
-  `delete` et `view` ; plusieurs hooks se combinent avec un ET logique.
+  `delete` et `view` ; plusieurs hooks se combinent avec un ET logique. Un
+  hook `view` masque aussi des lignes dans la liste, l'autocomplétion, les noms
+  des facettes FK et les noms des cellules FK. La liste l'exécute sur chaque
+  ligne que ses filtres et sa recherche retiennent : les totaux, les facettes,
+  les tranches de dates et la recherche excluent donc les lignes masquées ;
+  au-delà de 10 000 lignes (`Builder::view_hook_scan_cap`), elle les retient à
+  la place. Un hook de queryset fait cela en SQL et passe à l'échelle.
+- **Champs secrets** — un champ avec le widget `password`
+  (`formfield_overrides = "x: password"`) n'affiche jamais sa valeur et n'est
+  jamais recherché, filtré ni utilisé en facette. Rien d'autre ne marque un
+  secret : donnez aussi ce widget aux champs `token` / `api_key`.
 
 Pour un contrôle d'accès plus grossier basé sur des codenames,
 `Builder::with_user_perms([...])` conditionne chaque table sur
@@ -462,7 +484,9 @@ affiche une ligne **« Connecté en tant que _username_ »** et un bouton
 **Déconnexion** (un formulaire `POST`). Les admins autonomes postent vers
 `{admin_prefix}/logout` par défaut ; un admin de tenant se trouve derrière la
 route de déconnexion propre à la couche de multi-tenancy, alors pointez le
-bouton dessus avec `Builder::logout_url` :
+bouton dessus avec `Builder::logout_url`. La déconnexion horodate le
+`sessions_revoked_at` de l'utilisateur, ce qui termine ses sessions sur chaque
+appareil :
 
 ```rust
 let admin = admin::Builder::new(pool)
@@ -478,6 +502,12 @@ existe.
 L'admin refuse une modification qui décoche **active** sur la propre ligne de
 l'utilisateur connecté, comme la console opérateur : demandez à un autre admin.
 
+Décocher **active** dans l'admin horodate aussi `sessions_revoked_at`. Une
+écriture ORM directe sur `active` ne le fait pas ; dans votre propre code,
+utilisez `rustango::session::deactivate::<AdminUser>(&pool, id)` (ou
+`Operator`, `User`), pour qu'une réactivation ultérieure ne ranime aucun ancien
+cookie.
+
 ---
 
 ## Thème et image de marque
@@ -489,13 +519,65 @@ l'utilisateur connecté, comme la console opérateur : demandez à un autre admi
 | `.brand_logo_url(url)` | Logo affiché au-dessus du titre. |
 | `.brand_name(s)` / `.brand_tagline(s)` | Surcharges par tenant du titre/sous-titre. |
 | `.tenant_brand_css(css)` | Un bloc CSS `:root{…}` de variables déjà construit, inliné pour des palettes par tenant. |
-| `.from_settings(pool, &settings)` | Construit l'image de marque + la visibilité à partir des sections `[admin]` / `[brand]` de votre fichier de configuration. |
+| `.from_settings(pool, &settings)` | Construit l'image de marque + la visibilité à partir des sections `[admin]` / `[brand]` de votre fichier de configuration ; voir ci-dessous. |
 
-`from_settings` lit `admin.title`, `admin.subtitle`, `admin.logo_url`,
-`admin.theme_mode`, `admin.url_prefix`, `admin.allowed_tables`,
-`admin.read_only_tables`, en se repliant sur la section `[brand]`, et met
-`secure_cookies` à `true` par défaut. Les appels impératifs au `Builder`
-après cela l'emportent toujours.
+### Configuration : `[admin]` et `[brand]`
+
+`Builder::from_settings(pool, &settings)` lit `[admin]` depuis
+`config/default.toml` ou `config/<env>_settings.toml`, et se replie sur
+`[brand]` pour l'habillage. Le `urls.rs` d'un projet généré l'appelle déjà. Les
+appels au `Builder` faits après lui l'emportent toujours.
+
+```toml
+[admin]
+title            = "Acme Admin"
+subtitle         = "Back office"
+logo_url         = "/static/acme-logo.png"
+theme_mode       = "auto"           # auto | light | dark
+url_prefix       = "/admin"
+allowed_tables   = []               # empty = every registered model
+read_only_tables = ["orders"]
+```
+
+| Clé | Défaut | Repli sur | Rôle |
+|---|---|---|---|
+| `title` | `Rustango Admin` | `[brand] name` | Titre de la barre latérale et `<title>` de la page |
+| `subtitle` | aucun | `[brand] tagline` | Ligne sous le titre |
+| `logo_url` | aucun : pas de logo | `[brand] logo_url` | Image à côté du titre |
+| `theme_mode` | `auto` | `[brand] theme_mode` | Thème de départ, le `data-theme` de `<html>` |
+| `url_prefix` | `/__admin` | `[routes] admin_url` | Préfixe de chaque lien de l'admin. Montez le routeur au même chemin : `Builder::settings_prefix(&settings)` le renvoie, et le projet généré se replie sur `/admin` |
+| `allowed_tables` | `[]`, chaque modèle | | Comme `show_only` |
+| `read_only_tables` | `[]` | | Comme `read_only` |
+| `primary_color` | | | Sans effet pour l'instant ; seul `manage check --deploy` le lit |
+| `csrf_cookie_secure` | | | Sans effet pour l'instant ; le cookie CSRF suit `[security] secure_cookies` |
+| `session_timeout_minutes` | | | Sans effet pour l'instant ; l'admin n'a pas de délai d'inactivité |
+
+`[brand]` habille aussi les pages d'erreur intégrées, qu'active `[errors]` ; voir [Pages d'erreur](html-views.md#pages-derreur).
+
+`[brand] primary_color` ne teinte pas non plus cet admin ; il sert à la
+[console opérateur](operator-console.md#identité-visuelle). Le cookie de session
+est `Secure` sauf si `[security] secure_cookies = false`.
+
+Le `config/dev_settings.toml` du projet généré définit `[brand] tagline = "dev"`,
+qui s'affiche ici comme sous-titre ; voir
+[les slogans par niveau](operator-console.md#les-slogans-dev-et-staging).
+
+**Votre propre logo.** `logo_url` va tel quel dans `<img src>`. Servez le
+fichier depuis votre application : placez-le dans `assets/acme-logo.png`,
+ajoutez `.with_static("/static", "./assets")` à votre chaîne `Cli::new()` dans
+`main.rs`, et mettez `logo_url = "/static/acme-logo.png"`. L'admin et le
+montage statique partagent un hôte, donc un chemin fonctionne. Une URL complète
+vers un CDN fonctionne aussi. `[brand] logo_path` ne sert qu'à la console
+opérateur ; cet admin l'ignore.
+
+### L'admin du tenant
+
+L'admin du tenant ne lit ni `[admin]` ni `[brand]`. Il prend son identité
+visuelle dans la ligne `Org` du tenant : le nom est `brand_name`, sinon le nom
+affiché du tenant ; le logo est celui envoyé sur la page d'édition de la
+console, sinon le logo du framework (`rustango.png` sous l'URL statique) ; le
+thème est `theme_mode` et la couleur d'accent `primary_color`. Voir
+[l'identité visuelle par tenant](operator-console.md#identité-visuelle-par-tenant).
 
 ---
 
@@ -519,10 +601,11 @@ sauf indication contraire) :
 | `skip_count_for([tables])` | Évite `COUNT(*)` sur les tables volumineuses (le pagineur affiche « Page N »). |
 | `with_user_perms([codenames])` | Conditionne les tables sur `{table}.view/add/change/delete`. |
 | `register_action(table, name, handler)` | Enregistre un gestionnaire d'action groupée. |
+| `register_action_with_perm(table, name, perm, handler)` | Idem, vérifié contre `ActionPerm::Delete` au lieu de `change`. |
 | `register_tx_action(table, name, handler)` / `register_tx_action_with_perm` | Pareil, mais le gestionnaire reçoit la transaction d'écriture, donc les lignes d'audit sont validées avec elle. |
 | `with_session_auth(secret)` | Exige une connexion par cookie (`/login` + `/logout`). |
 | `logout_url(u)` | Cible POST du bouton Déconnexion de la barre latérale. Par défaut `{admin_prefix}/logout` ; les admins de tenant la pointent vers leur route de déconnexion tenancy. |
-| `secure_cookies(bool)` | Définit le drapeau `Secure` (HTTPS uniquement) sur le cookie de session. |
+| `secure_cookies(bool)` | Définit le drapeau `Secure` (HTTPS uniquement) sur le cookie de session. `new` suit `[security].secure_cookies`, sinon sécurisé au niveau prod. |
 | `theme_mode(m)` | `"light"` / `"dark"` / `"auto"`. |
 | `brand_logo_url(url)` | Logo au-dessus du titre. |
 | `brand_name(s)` / `brand_tagline(s)` | Surcharges de marque par tenant. |

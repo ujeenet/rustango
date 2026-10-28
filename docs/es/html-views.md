@@ -99,8 +99,9 @@ consulta.
 ```rust
 use rustango::template_views::ListView;
 use std::sync::Arc;
-use tera::Tera;
 
+// Escapes every template, not only `.html` ones.
+let tera = rustango::template_extensions::html_tera_from_glob("templates/**/*")?;
 let app = ListView::for_model(Post::SCHEMA)
     .page_size(20)                       // rows per page (?page=N to navigate)
     .order_by("published_at", true)      // default sort, true = DESC
@@ -218,7 +219,7 @@ cadena**, no a una lista — aplicarle `join` es un error. Y no existe una varia
 nivel superior; iterar sobre una es un fallo de renderizado de Tera, así que la página
 devuelve 500 en lugar de mostrar el mensaje.
 
-`{{ csrf_input | safe }}` necesita el filtro: Tera autoescapa los `.html`, así que sin él el
+`{{ csrf_input | safe }}` necesita el filtro: `html_tera` autoescapa todas las plantillas, así que sin él el
 token se renderiza como texto y todo POST es rechazado.
 
 **Validación.** Las reglas del esquema (tipo, `max_length`, NOT NULL…) se aplican

@@ -38,7 +38,7 @@ The name of a method tells you what it does. Once you learn these suffixes, you 
   | **Reads** (`QuerySet`) | `fetch(&pool)` — already multi-backend | *is* the bare name |
   | **Writes** (model) | `save(&pool)` — **Postgres only** | `save_pool(&pool)` |
 
-  So the short name is the narrow one for writes and the broad one for reads. That inversion is a wart, not a design: it is tracked in [#1293](https://github.com/ujeenet/rustango/issues/1293) and will be resolved with a deprecation cycle rather than a rename. Until then, **if you are not on Postgres, write `save_pool` / `insert_pool` / `delete_pool`.**
+  So the short name is the narrow one for writes and the broad one for reads. That inversion is a wart, not a design: it will be resolved with a deprecation cycle rather than a rename. Until then, **if you are not on Postgres, write `save_pool` / `insert_pool` / `delete_pool`.**
 - **`from_X(value)`** — converts FROM another value (e.g. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — a builder method that sets one option and returns the object, so you can chain calls (e.g. `with_default_ttl(d)`, `with_access_ttl(secs)`).
 - **`new()`** — the minimal constructor. Any arguments it takes are required dependencies (e.g. `RedisCache::new(url)` — you can't build the cache without a URL).
@@ -282,8 +282,8 @@ batteries = [
 
 The indirection is deliberate: `batteries` is a single name a downstream
 crate can switch off — `default-features = false, features = ["postgres"]` —
-without having to restate the list. The alternative, spelling all thirty-seven
-into `default`, means anyone opting out has to know all thirty-seven.
+without having to restate the list. The alternative, spelling all thirty-eight
+into `default`, means anyone opting out has to know all thirty-eight.
 
 **Off by default:** features that pull in heavy dependencies or external services:
 - `tenancy` — adds `argon2`, `hmac`, `sha2`, `cookie`, `tower` (most apps don't need it)
@@ -300,7 +300,7 @@ rustango = { version = "0.61", default-features = false, features = ["postgres",
 
 ## Macros vs runtime
 
-A *macro* is code that generates code at compile time (`#[derive(Model)]` and friends) — roughly what a Rails generator does, except it runs every build and the compiler checks the result. The split below decides what's done by a macro versus plain runtime code.
+A *macro* is code that generates code at compile time (`#[derive(Model)]` and friends). It runs on every build, and the compiler checks the result. The split below decides what's done by a macro versus plain runtime code.
 
 | Concern | Macro or runtime? |
 |---|---|

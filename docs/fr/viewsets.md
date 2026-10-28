@@ -364,6 +364,8 @@ use rustango::sql::Pool;
 use serde_json::json;
 
 async fn app() -> axum::Router {
+    // `Pool::connect` picks the backend from the URL scheme, so the
+    // same test runs against sqlite, Postgres or MySQL.
     let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
     PostViewSet::router("/api/posts", pool)
 }
@@ -514,12 +516,19 @@ axum répond au `HEAD` depuis le handler `GET` ; `OPTIONS` n'est pas branché. L
 Un seul élément invalide rejette tout le lot et **ne laisse rien derrière** — qu'il soit
 rattrapé par la validation ou par la base de données.
 
-> Cette seconde moitié était fausse jusqu'à [#1403](https://github.com/ujeenet/rustango/issues/1403).
+> Cette seconde moitié était fausse autrefois.
 > La validation était atomique ; les écritures étaient un `INSERT` chacune sans
 > transaction, si bien qu'une violation d'unicité ou de clé étrangère sur l'élément 5
 > validait les éléments 0–4, renvoyait `400 bulk entry 5` et ne nommait aucune des
 > lignes créées. Ces violations sont précisément la classe que la validation ne peut
 > pas trancher en amont.
+
+Un lot contient au plus 1000 lignes (`max_bulk_create(n)` ; au-delà, c'est une
+`413`), et chaque ligne consomme une unité de throttle `create`.
+
+Sur un modèle `#[rustango(soft_delete)]`, `DELETE` horodate la colonne au lieu
+de supprimer, et chaque action traite une ligne supprimée en douceur comme
+disparue.
 
 ---
 
@@ -568,14 +577,15 @@ que les réponses affichent et que les bodies peuvent écrire. Chaque autre mét
 | `ordering_fields(&["…"])` | Liste blanche des champs que `?ordering=` peut utiliser. |
 | `page_size(n)` | Taille de page par défaut (≤ 100). |
 | `max_page_size(n)` | Relève ou abaisse le plafond client lui-même (100 par défaut). |
+| `max_bulk_create(n)` | Nombre maximal de lignes qu'une création groupée peut porter (1000 par défaut). |
 | `pk_param(name)` | Renomme le paramètre de chemin des routes de détail. |
 | `read_only()` | GET uniquement. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Barrières de codename par action (cette dernière sur la multi-location). |
-| `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Pagination par keyset (saute `COUNT(*)`). |
+| `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Pagination par keyset (saute `COUNT(*)`). Toute colonne NOT NULL totalement ordonnée : entier, horodatage, date, uuid ou chaîne. |
 | `limit_offset_pagination()` | Fenêtrage `?limit=&offset=`. |
 | `pagination(PaginationStyle::…)` | Définir le style explicitement. |
 | `filter_backend(closure)` | Ajouter des prédicats `WHERE` personnalisés au-delà de `filter_fields`. |
-| `throttle(…)` / `throttle_all(max, secs)` | Limites de débit à fenêtre fixe par action. |
+| `throttle(…)` / `throttle_all(max, secs)` | Limites de débit à fenêtre fixe par action ; `QUERY` consomme le budget de la liste. |
 | `admin_add_hooks()` | Exécute les hooks de permission objet `"add"` de l'admin à la création, sur la requête et sur chaque ligne écrite ; un refus donne un `403`. Désactivé par défaut. |
 | `router(prefix, pgpool)` | Monter (Postgres, pool statique). |
 | `router_pool(prefix, pool)` | Monter en tri-dialecte (PG / SQLite / MySQL). |
@@ -598,15 +608,25 @@ les lookups via un `__suffix` :
 ?body__isnull=false
 ```
 
-Lookups pris en charge : `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `contains`,
-`icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `isnull`
-(pas de suffixe = exact). Les champs absents de `filter_fields` sont ignorés.
+Lookups pris en charge : `iexact`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`,
+`range` (`lo,hi`), `contains`, `icontains`, `startswith`, `istartswith`,
+`endswith`, `iendswith`, `isnull`, et les parties de date `year`, `month`, `day`,
+`hour`, `minute`, `second`, `quarter`, `week`, `week_day`, `date`, suivies en
+option d'une comparaison (`created_at__date__gte=2026-01-01`). Pas de suffixe =
+exact. Une date simple sur un `__gte` / `__lte` de datetime couvre toute cette
+journée UTC.
+
+Une valeur vide n'est pas un filtre. Un lookup inconnu ou une valeur qui ne se
+parse pas est une `400` qui nomme le paramètre ; avec un `filter_backend`
+enregistré, un lookup inconnu est laissé au backend. Les lookups LIKE demandent
+un champ chaîne. Les champs absents de `filter_fields` sont ignorés.
 
 **Recherche** — `?search=term` fait correspondre `search_fields` avec un OU insensible à la casse.
 
 **Tri** — `?ordering=field,-other` (`-` = DESC). Tout champ que la réponse montre
 (avec un sérialiseur, les champs qu'il rend) est triable sauf si vous définissez `.ordering_fields([...])` pour le restreindre. Sans paramètre, le
-tri par défaut `ordering` s'applique. Ils se composent tous.
+tri par défaut `ordering` s'applique, sinon le `default_order` du modèle ; la
+clé primaire départage toujours les égalités. Ils se composent tous.
 
 ---
 
@@ -627,7 +647,12 @@ Trois styles ; le numéro de page est le défaut. L'enveloppe de liste diffère 
 ```
 
 **Curseur** — `.cursor_pagination("id")` (ou `_desc`) ; saute `COUNT(*)`, idéal
-pour les très grandes tables. `?cursor=<token>&page_size=20` :
+pour les très grandes tables. Le champ doit être **totalement ordonné** : un
+entier, un horodatage, une date, un uuid ou une chaîne. `"id"` est le choix
+habituel ; un horodatage `created_at` est l'autre, et c'est ce qu'il vous faut
+sur une table en ajout seul. Une colonne float, bool, json ou blob panique à la
+construction plutôt que d'échouer à chaque requête.
+`?cursor=<token>&page_size=20` :
 
 ```json
 { "page_size": 20, "next": "<opaque-cursor-or-null>", "results": [ … ] }
@@ -665,8 +690,9 @@ Indépendamment d'un sérialiseur, le chemin d'écriture applique toujours le **
   invalide est une `400` nommant le champ.
 - **Requis / NOT NULL** — un champ non-nullable manquant (ou une chaîne vide pour une
   `String` non-nullable) est une `400` ; les champs nullables acceptent le vide → `NULL`.
-- **Contraintes de base de données** — unique, clés étrangères et contraintes check apparaissent
-  comme une `400` sur INSERT/UPDATE.
+- **Contraintes de base de données** — une clé dupliquée est une `409` (`conflict`) ;
+  les clés étrangères et les contraintes check apparaissent comme une `400` sur
+  INSERT/UPDATE.
 
 Ainsi, même sans sérialiseur, vous obtenez une validation de type + requis + contrainte-BDD ;
 branchez un sérialiseur pour obtenir les vérifications déclaratives de longueur/plage/choix (héritées automatiquement)
@@ -675,7 +701,7 @@ plus vos propres règles par champ et inter-champs.
 ### Formes de réponse en erreur
 
 Chaque erreur de ViewSet est un corps [`ApiError`](api-conventions.md), la même
-forme que celle de vos propres handlers (#1193) :
+forme que celle de vos propres handlers :
 
 ```json
 {"error": "<machine code>", "message": "<sentence>", "status": 400}
@@ -773,6 +799,21 @@ changer, et `WritePin::Deny` refuse l'écriture avec un 403.
 Les portées globales statiques d'un modèle limitent aussi ce qui est lu, pas ce qui est
 écrit : une création ou une mise à jour peut sortir de la portée (201 sans corps, ou 204).
 Pour une frontière de sécurité, utilisez un backend de filtre avec `write_pins`.
+
+Une écriture ne renvoie sa ligne complète qu'à un appelant qui a la permission
+`retrieve` ; les autres reçoivent seulement `{"<pk>": …}` (un par ligne d'un
+lot). Une création unitaire envoie aussi un en-tête `Location` qui pointe vers
+la route de détail.
+
+Une FK définie par un corps doit nommer une ligne que les portées globales de la
+cible montrent ; une mise à jour peut renvoyer la valeur que la ligne contient
+déjà. Pour la restreindre davantage, ajoutez un backend pour ce champ ; il
+s'exécute sur le modèle cible, et toute autre ligne est une 422 :
+
+```rust
+ViewSet::for_model(Comment::SCHEMA, &["id", "body", "post_id"])
+    .related_filter("post_id", OwnedBy::column("author_id"))
+```
 
 #### `OwnedBy` — le backend fourni
 
@@ -910,7 +951,7 @@ lignes `.merge(...)` ; branchez-le dans votre `urls.rs` de niveau supérieur.
 
 - **Le builder + `router_pool` / `tenant_router`** est **tri-dialecte** — PostgreSQL,
   SQLite et MySQL — et c'est le chemin recommandé.
-- **Le `router(prefix, pool)` de la macro derive** prend `impl Into<rustango::sql::Pool>` — un `PgPool`, `MySqlPool`, `SqlitePool` ou l'énumération `Pool`. Il n'est pas réservé à Postgres (#1273).
+- **Le `router(prefix, pool)` de la macro derive** prend `impl Into<rustango::sql::Pool>` — un `PgPool`, `MySqlPool`, `SqlitePool` ou l'énumération `Pool`. Il n'est pas réservé à Postgres.
 - **L'entrée + sortie du sérialiseur** fonctionne désormais sur **les trois backends** (le
   rendu par ligne est tri-dialecte ; l'ancienne barrière PG-uniquement a disparu).
 - Le filtrage, la recherche, le tri, les trois modes de pagination, les permissions,

@@ -182,9 +182,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-> **Den Drain in `on_shutdown` legen, nicht hinter `run()`.** Bis
-> [#1409](https://github.com/ujeenet/rustango/issues/1409) rief dieses
-> Beispiel `queue.shutdown()` in der Zeile *nach* `run()` auf, und die konnte
+> **Den Drain in `on_shutdown` legen, nicht hinter `run()`.** Frühere
+> Fassungen dieses Beispiels riefen `queue.shutdown()` in der Zeile *nach* `run()` auf, und die konnte
 > nie ausgeführt werden: SIGTERM wurde nirgends behandelt, ein Stopp durch den
 > Orchestrator beendete den Prozess also sofort. `run()` kehrt jetzt beim
 > Signal zurück — aber `on_shutdown` bleibt der richtige Ort, weil der Hook
@@ -262,6 +261,13 @@ ziehen alle sicher aus der geteilten Tabelle. Der Web-Prozess muss dann nur noch
 `dispatch` (er muss keine Worker `start()`). Kopple den Worker mit einem
 periodischen [`reclaim_stuck_jobs_pool`](#die-persistente-queue-produktion)-Sweep,
 um Jobs eines abgestürzten Workers zurückzuholen.
+
+Zwei verschiedene Queues auf einer Tabelle (etwa ein Mailer und ein Report-Runner
+mit eigenen Handlern) greifen sich gegenseitig die Jobs. Gib jeder mit
+`.queue_name("mailer")` auf der dispatchenden und der arbeitenden Seite einen
+eigenen Namen: Eine benannte Queue führt nur ihre Jobs aus, eine unbenannte nur
+unbenannte Jobs. Worker von vor `queue_name` ignorieren es und führen auch
+benannte Jobs aus: Stoppe sie, bevor du auf eine benannte Queue dispatchst.
 
 ---
 
@@ -360,6 +366,11 @@ queue.start().await;
 queue.dispatch(&WelcomeEmail { user_id: 42 }).await?;
 ```
 
+**Dispatch innerhalb einer Transaktion.** Innerhalb eines `atomic`-Blocks auf dem
+eigenen Pool der Queue tritt `dispatch` dem Block bei: Der Job wird mit ihm
+zurückgerollt, und kein Worker wacht vor dem Commit auf. Halte den `TxGuard` des
+Blocks nicht über den Aufruf hinweg.
+
 **Abgestürzte Worker wiederherstellen.** Stirbt ein Worker mitten im Job, bleibt
 die Zeile gesperrt. Führe einen periodischen Sweep aus, um Sperren älter als eine
 Schwelle freizugeben, damit ein anderer Worker den Job wieder aufnimmt:
@@ -443,8 +454,7 @@ gibt keinen Worker-Supervisor pro Tenant, kein `Job::run(&ctx)` mit
 angehängtem Tenant und keinen Tenant-bewussten `reclaim_stuck_jobs_pool`-Sweep
 — du iterierst selbst über die Tenants, wie oben. Tenants, die nach dem Boot
 provisioniert werden, bekommen bis zum Prozess-Neustart keine Worker.
-Verfolgt in
-[#1223](https://github.com/ujeenet/rustango/issues/1223).
+Das ist eine bekannte Lücke.
 
 **Ambienter Kontext: nur Audit-Quelle und Zeitzone.** `InMemoryJobQueue`
 erfasst sie bei `dispatch`, der Scheduler bei `every()`, und beide setzen sie
@@ -509,15 +519,14 @@ Wenn du den Sweep so absicherst, dass nur eine Replica ihn ausführt, dann
 use rustango::distributed_lock::DistributedLock;
 
 let lock = DistributedLock::new(cache.clone()).for_tenant(&org.slug);
-lock.with_lock("nightly_prune", ttl, || async { /* … */ }).await;
+// Tick every minute; this runs once per UTC day across replicas.
+lock.once_per_period("nightly_prune", day, || prune(&org)).await;
 ```
 
 Ungescoped konkurrieren alle Tenants um dasselbe `lock:nightly_prune`: der
 erste Tenant gewinnt, die übrigen werden für die gesamte TTL übersprungen — und
 zwar still, denn ein abgelehntes Acquire ist das erwartete Ergebnis, es wird
-nichts geloggt. Verfolgt in
-[#1226](https://github.com/ujeenet/rustango/issues/1226) und
-[#1228](https://github.com/ujeenet/rustango/issues/1228).
+nichts geloggt. Das ist eine bekannte Lücke.
 
 ---
 

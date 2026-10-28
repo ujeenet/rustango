@@ -166,7 +166,7 @@ lesen. `manage check --deploy` warnt vor beidem.
 
 ## Schritt 1: Den Scaffolder installieren
 
-Der Scaffolder generiert für dich Projekt- und App-Gerüste, ähnlich wie `rails new`.
+Der Scaffolder generiert für dich Projekt- und App-Gerüste.
 
 ```bash
 cargo install cargo-rustango
@@ -184,7 +184,7 @@ Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du 
 
 ## Schritt 2: Das Projekt erstellen
 
-Das erzeugt ein frisches Projekt, das **Rustango**-Äquivalent zu `rails new` oder `composer create-project`.
+Das erzeugt ein frisches Projekt mit fertigem Layout, Einstellungen und Migrationen.
 
 ```bash
 cd ~/projects                                 # wherever you keep code
@@ -296,7 +296,7 @@ psql "$DATABASE_URL" -c "SELECT version();"   # should print Postgres version
 
 ## Schritt 5: Die integrierten Migrationen ausführen
 
-Migrationen erstellen deine Datenbanktabellen, dieselbe Idee wie `php artisan migrate` oder `rails db:migrate`. Führe sie einmal aus, um die eigenen Tabellen des Frameworks einzurichten:
+Migrationen erstellen deine Datenbanktabellen. Führe sie einmal aus, um die eigenen Tabellen des Frameworks einzurichten:
 
 ```bash
 cargo run -- migrate
@@ -607,7 +607,7 @@ Registriere das neue Modul, indem du `mod post_view_set;` zu den anderen `mod`-D
 
 ### 12b. Die Routen einhängen
 
-Hänge die Routen des ViewSet an den Router der App an (die **Rustango**-Version einer `urls.py`- oder `routes/api.php`-Datei). Der ViewSet-Router braucht den Datenbankpool, also baue ihn in `src/main.rs`, wo der Pool lebt, und merge ihn in den `urls::api()`-Aggregator:
+Hänge die Routen des ViewSet an den Router der App an (die Datei, die deine API-Routen auflistet). Der ViewSet-Router braucht den Datenbankpool, also baue ihn in `src/main.rs`, wo der Pool lebt, und merge ihn in den `urls::api()`-Aggregator:
 
 ```rust
 let api = urls::api()

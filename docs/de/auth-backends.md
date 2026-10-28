@@ -149,6 +149,26 @@ let app = Router::new()
     .require_auth(backends);           // 401 if no backend matches
 ```
 
+> **Vor 0.57.11 nahmen diese einen `Pool`.** Das tun sie nicht mehr, und die
+> Änderung ist ein Sicherheitsfix, kein Aufräumen. Der Pool wurde beim Bauen
+> des Routers erfasst und für jede Anfrage wiederverwendet, sodass eine von
+> einem Tenant ausgestellte Anmeldeinformation auf dem Host eines anderen
+> Tenants authentifizierte — die Backends suchten den Benutzer in der
+> Datenbank, mit der der Router zufällig gebaut worden war, und
+> `is_superuser` reiste ohne erneute Abfrage in einer Request-Extension weiter.
+>
+> Der Pool kommt jetzt aus dem Tenant, der für **jede Anfrage** aufgelöst
+> wird. Die Migration besteht im Weglassen des Arguments:
+>
+> ```rust
+> .require_auth(backends, pool.clone())  →  .require_auth(backends)
+> .require_perm("post.add", pool)        →  .require_perm("post.add")
+> ```
+>
+> Hängen Sie den Tenancy-Layer außerhalb davon ein. Ohne Tenant-Kontext in den
+> Request-Extensions schlagen sie geschlossen mit `500` fehl, statt eine
+> Datenbank zu raten.
+
 Verifiziertes Verhalten:
 
 ```rust

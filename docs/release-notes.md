@@ -1,6 +1,6 @@
 # Release notes
 
-Every user-visible change ships with a changelog entry. This page is the route to them, because until now the docs site had none — a reader here could see version-labelled headings inside guides and nothing else, which is how a heading pinned to 0.42 came to read as "the docs stopped in 0.42" ([#1304](https://github.com/ujeenet/rustango/issues/1304)).
+Every user-visible change ships with a changelog entry. This page is the route to them, because until now the docs site had none — a reader here could see version-labelled headings inside guides and nothing else, which is how a heading pinned to 0.42 came to read as "the docs stopped in 0.42".
 
 ## Where the notes live
 
@@ -19,7 +19,7 @@ Entries are grouped under `Added`, `Changed`, `Fixed`, `Removed` and `Security`,
 Two conventions worth knowing:
 
 - **Entries say why, not just what.** An entry that changes behaviour explains what used to happen, because that is what tells you whether it affects you.
-- **Issue numbers are load-bearing.** `(#1229)` links the discussion that produced the change, which usually has more detail than the entry has room for.
+- **Older entries name an issue.** The number in brackets links the discussion that produced the change, which usually has more detail than the entry has room for.
 
 ## Versioning
 

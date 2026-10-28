@@ -14,8 +14,8 @@ como una única capa tower.
 > **¿Nuevo en algún término de aquí?** *HMAC*, *secreto compartido*, *replay*,
 > *comparación en tiempo constante* — consulta el [glosario](glossary.md).
 
-> **Fuente:** `rustango::hmac_auth` (`HmacAuthLayer`, `KeyResolver`, `sign_now`,
-> `sign_request`) — detrás de la feature `hmac-auth` (activa por defecto; la
+> **Fuente:** `rustango::hmac_auth` (`HmacAuthLayer`, `KeyResolver`,
+> `KeyTenantResolver`, `RequestToSign`, `sign_now`, `sign_request`) — detrás de la feature `hmac-auth` (activa por defecto; la
 > protección contra replay además necesita `cache`).
 >
 > **Versión ejecutable:** cada fragmento está copiado de
@@ -28,6 +28,7 @@ como una única capa tower.
 - [Qué se firma](#qué-se-firma)
 - [Servidor: verificar con la capa](#servidor-verificar-con-la-capa)
 - [Cliente: firmar una solicitud](#cliente-firmar-una-solicitud)
+- [Apps multi-tenant](#apps-multi-tenant)
 - [Desfase de reloj y replay](#desfase-de-reloj-y-replay)
 - [Límites](#límites)
 - [Véase también](#véase-también)
@@ -142,6 +143,22 @@ let req = http::Request::post("/api/charge")
 La firma es base64; el hash del cuerpo dentro de la cadena canónica es hex. Envía
 el cuerpo byte por byte tal como lo firmaste — cualquier proxy que lo reescriba
 (recompresión, reserialización de JSON) rompe la verificación.
+
+---
+
+## Apps multi-tenant
+
+La cabecera de tenant y el puerto no se firman por defecto, y la capa no conoce
+ningún tenant. En una app que resuelve tenants:
+
+- `.bind_tenants(tenant_of)` asigna a cada id de clave el slug del tenant por el
+  que puede actuar. La capa resuelve el tenant de la solicitud con el contexto de
+  tenant montado y responde `403` cuando no coincide, o cuando no hay ninguno.
+- `.signed_headers(["x-org"])` añade cabeceras a la cadena firmada, y
+  `.sign_port()` añade el puerto de `Host`. Cada una añade una línea
+  `name:value`, ordenadas por nombre. El cliente firma la misma lista con
+  `RequestToSign::header` y `port`; una cabecera que la solicitud omite se firma
+  como vacía.
 
 ---
 

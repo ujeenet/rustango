@@ -31,8 +31,8 @@ acepta indistintamente un nombre o una ruta ya formada.
 
 `register_url!("name", "/pattern")` registra un mapeo nombre → patrón. Se ejecuta
 al cargar el módulo (vía `inventory`), así que la ruta aterriza en un registro
-global en el momento en que su módulo se enlaza — sin `urls.py` central que editar,
-y sin `include()` que cablear.
+global en el momento en que su módulo se enlaza — sin archivo de rutas central que editar,
+y nada que cablear a mano.
 
 ```rust
 use rustango::register_url;
@@ -142,7 +142,7 @@ devuelve un simple `302`.)
 
 ## Namespacing
 
-No hay `include()` ni un namespace de app auto-aplicado — cada `register_url!`
+No hay un namespace de app auto-aplicado — cada `register_url!`
 aterriza en un único registro global. El namespacing es una **convención en el
 nombre mismo**: prefija con `app:` y pasa el nombre completo a
 `reverse("app:detail")`.

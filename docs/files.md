@@ -32,7 +32,9 @@ once against the trait; switch from local disk to S3 with a one-line change.
 - [Step 3 — Accept an upload](#step-3--accept-an-upload)
 - [Safe filenames](#safe-filenames)
 - [Production: S3-compatible storage](#production-s3-compatible-storage)
+- [Production: Azure Blob Storage](#production-azure-blob-storage)
 - [Large files: stream them](#large-files-stream-them)
+- [Several disks from config](#several-disks-from-config)
 - [The media library](#the-media-library)
 - [Reference](#reference)
 - [See also](#see-also)
@@ -450,7 +452,7 @@ tables, whenever you run `migrate` / provision a tenant. There is no lazy
 > against real 0.46–0.50 databases showed neither worked, and **both are yanked**.
 > The reconcile guard demanded a migration be purely `CreateTable`, while a
 > generated initial migration is tables *and* indexes, so it bailed on every real
-> one. 0.51.2 is the release where this actually fires (#1167).
+> one. 0.51.2 is the release where this actually fires.
 
 ---
 

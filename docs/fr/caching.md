@@ -52,12 +52,18 @@ use std::sync::Arc;
 let cache: BoxedCache = Arc::new(InMemoryCache::new());
 ```
 
-| Backend | Feature | À utiliser pour |
-|---|---|---|
-| `InMemoryCache` | `cache` | dev, tests, processus unique (HashMap par processus + TTL) |
-| `RedisCache` | `cache-redis` | production ; partagé entre réplicas |
-| `DatabaseCache` | `cache` | production sans Redis ; une table `rustango_cache` |
-| `NullCache` | `cache` | désactiver la mise en cache (chaque lecture rate) — pratique en tests |
+| Backend | Feature | `[cache] backend` | À utiliser pour |
+|---|---|---|---|
+| `InMemoryCache` | `cache` | `memory` *(défaut)* | dev, tests, processus unique (HashMap par processus + TTL) |
+| `RedisCache` | `cache-redis` | `redis` | production ; partagé entre réplicas |
+| `DatabaseCache` | `cache` | `db` / `database` | production sans Redis ; une table `rustango_cache` |
+| `FileCache` | `cache` | `file` | un fichier par clé sous `file_cache_dir` ; partagé seulement si le répertoire l'est |
+| `NullCache` | `cache` | `null` / `none` | désactiver la mise en cache (chaque lecture rate) — pratique en tests |
+
+Il n'y a pas de valeur `postgres` — le backend base de données est `db` ou
+`database`. Un commentaire de doc de `CacheSettings` affirmait le contraire
+autrefois, et une valeur non reconnue vous donne un cache en mémoire avec un
+avertissement.
 
 Il n'y a pas de valeur `postgres` : le backend base de données est `db` ou
 `database`. Les valeurs sont en minuscules. Une valeur inconnue ou mal casée
@@ -121,7 +127,8 @@ servi depuis le cache.
 > **Invalidez à l'écriture.** Le cache-aside signifie des données périmées
 > jusqu'à ce que le TTL expire. Pour des données qui changent, faites aussi
 > `delete(key)` quand vous les écrivez — p. ex. depuis un [signal
-> `post_save`](orm.md) — pour que la lecture suivante recalcule.
+> `post_save`](orm.md) que vous envoyez après l'enregistrement (l'enregistrement
+> ne l'envoie pas) — pour que la lecture suivante recalcule.
 
 ---
 
@@ -169,7 +176,8 @@ afflux de clés uniques ne peut donc pas faire croître le processus sans limite
 mais cela signifie aussi qu'**une entrée peut disparaître avant l'expiration de
 son TTL** si elle est la moins récemment utilisée au moment où le budget est
 atteint. L'éviction supprime d'abord les entrées déjà expirées, puis les moins
-récemment utilisées, jusqu'à respecter les deux budgets.
+récemment utilisées, jusqu'à passer 10 % sous les deux budgets. Les entrées
+écrites avec `set_forever` (feature flags) sont hors budget et jamais évincées.
 
 Traitez donc une lecture de cache comme « peut être absente » même à l'intérieur
 du TTL. C'est vrai de tout backend de cache, mais ici la cause est
@@ -205,8 +213,7 @@ let cache: BoxedCache = rustango::cache::from_settings_async(&settings.cache).aw
 | `redis` | **panique** — non constructible de façon synchrone | ✓ |
 | `db` | **panique** — exige un `&Pool` à l'exécution | erreur ; construisez-le là où est le pool |
 
-Le résolveur synchrone panique plutôt que de substituer un backend
-([#1400](https://github.com/ujeenet/rustango/issues/1400)). Il avertissait
+Le résolveur synchrone panique plutôt que de substituer un backend. Il avertissait
 auparavant et renvoyait un cache en mémoire, qui n'est pas un cache partagé
 dégradé : c'est un autre cache. Un cache par processus multiplie la limite de
 `CacheRateLimitLayer` par le nombre de réplicas et empêche `verify_single_use`

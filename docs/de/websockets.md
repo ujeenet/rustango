@@ -12,9 +12,7 @@ selbst aktualisiert, ein Chat. Der Server muss zum Browser *pushen*, ohne gefrag
   Client auch sendet (Chat, kollaboratives Editieren, Präsenz).
 
 Beide fächern sich über denselben In-Process-**Broadcast-Bus** ([`EventBus`]) auf, sodass
-„sende dies an jeden verbundenen Client" ein einziger Aufruf ist, unabhängig vom Transport. In
-anderen Ökosystemen kennst du das vielleicht als Echo/Reverb oder als
-`ws` + `EventSource` — dieselben Ideen, ein Bus dahinter.
+„sende dies an jeden verbundenen Client" ein einziger Aufruf ist, unabhängig vom Transport.
 
 > **Quelle:** `rustango::sse` (`EventBus`) — hinter dem **`sse`**-Feature; und
 > `rustango::ws` (`WsHub`, `WsConfig`, `ws_handler`) — hinter dem

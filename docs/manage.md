@@ -1,7 +1,6 @@
 # `manage` CLI reference
 
-This is **Rustango**'s command-line tool, like Laravel's `artisan` or Rails'
-`rails` command. In a project scaffolded via `cargo rustango new`, one binary
+This is **Rustango**'s command-line tool. In a project scaffolded via `cargo rustango new`, one binary
 runs every command ("verb"):
 
 ```bash
@@ -264,7 +263,7 @@ cargo run -- makemigrations --empty rename_status_to_state
 
 ### `makemigrations --merge`
 
-Fixes a migration history that has split into two branches (issue #346).
+Fixes a migration history that has split into two branches.
 This happens when two people each run `makemigrations` on their own
 feature branch, so both new files point at the same parent. After both branches merge, the
 history has two "leaves" (end points), and `makemigrations` refuses to
@@ -291,8 +290,7 @@ cargo run -- makemigrations --merge
 
 ### `migrate`
 
-Applies all pending migrations to the database, in order — like Laravel's
-`php artisan migrate`. This is the command you run after `makemigrations`
+Applies all pending migrations to the database, in order. This is the command you run after `makemigrations`
 to actually change your schema.
 
 ```bash
@@ -391,8 +389,7 @@ job.
 
 ### `downgrade [N]`
 
-Rolls back the last N applied migrations (default 1) — Laravel's
-`migrate:rollback`. Each migration must be reversible: schema changes
+Rolls back the last N applied migrations (default 1). Each migration must be reversible: schema changes
 reverse automatically, but data operations need a `reverse_sql` defined
 or the rollback fails.
 
@@ -464,7 +461,7 @@ any attempt to roll it back fails immediately.
 
 ### `cargo rustango new <name>` *(separate binary)*
 
-Creates a brand-new **Rustango** project — like `laravel new`. This is a
+Creates a brand-new **Rustango** project. This is a
 separate tool, so install it first with `cargo install cargo-rustango`.
 Pick from three templates:
 
@@ -536,8 +533,7 @@ Safe to re-run — existing files are left alone. One manual step: add
 
 ## File generators (`make:*`)
 
-These create starter files for common building blocks — much like
-Laravel's `make:*` commands (`make:controller`, `make:model`, …). Each
+These create starter files for common building blocks. Each
 generator writes to `src/<snake_name>.rs` (or `tests/<snake_name>.rs`
 for `make:test`) and:
 
@@ -652,8 +648,7 @@ cargo run -- make:worker JobsWorker
 
 ### `make:notification <Name>`
 
-Generates a notification struct that builds an email — like Laravel's
-`make:notification`.
+Generates a notification struct that builds an email.
 
 ```bash
 cargo run -- make:notification WelcomeEmail
@@ -697,8 +692,7 @@ cargo run -- db:info
 
 ### `db:dump [--out <path>] [--data-only|--schema-only] [--no-owner]`
 
-Backs up your database by running `pg_dump` against `DATABASE_URL` —
-like `php artisan db:dump`. By default the SQL goes to stdout (so you
+Backs up your database by running `pg_dump` against `DATABASE_URL`. By default the SQL goes to stdout (so you
 can pipe it); pass `--out <path>` (`-o`) to write a file instead.
 `--data-only` and `--schema-only` map straight to `pg_dump`'s flags, and
 `--no-owner` drops the OWNER lines. You need `pg_dump` installed and on
@@ -710,8 +704,8 @@ cargo run -- db:dump --out backups/before-migrate.sql
 ```
 
 The `running: pg_dump …` status line goes to **stderr**, so it stays out
-of the redirect and out of a pipe. Until [#1404](https://github.com/ujeenet/rustango/issues/1404)
-it went to stdout, which put it on the first line of the `.sql` file.
+of the redirect and out of a pipe. Older releases
+sent it to stdout, which put it on the first line of the `.sql` file.
 
 ### `db:restore <path> [--clean --yes]`
 

@@ -5,7 +5,11 @@ Un projet multi-tenant a deux sortes d'administrateurs, et elles ne se mélangen
 - Les **opérateurs** exploitent le *déploiement*. Ils vivent dans le registry, se connectent sur le domaine apex et atteignent chaque tenant.
 - Les **utilisateurs de tenant** exploitent *un* tenant. Ils vivent dans la base de ce tenant et ne voient jamais la console.
 
-La console opérateur est l'interface web de la première sorte — provisionner des tenants, attacher des noms d'hôte, gérer les opérateurs, lire la piste d'audit et mettre un tenant hors service. Tout cela est aussi un [verbe `manage`](manage.md#commandes-de-tenancy), car une action qui n'existe que sur une seule surface ne peut pas être automatisée, et une qui n'existe que dans un shell ne peut pas être déléguée.
+La console opérateur est l'interface web de la première sorte — provisionner des tenants, attacher des noms d'hôte, gérer les opérateurs, lire la piste d'audit et mettre un tenant hors service. Presque tout ici est aussi un [verbe `manage`](manage.md#commandes-de-tenancy), car une action qui n'existe que sur une seule surface ne peut pas être automatisée, et une qui n'existe que dans un shell ne peut pas être déléguée.
+
+L'écart à connaître : la console peut migrer **un seul** tenant
+(`POST /orgs/{slug}/migrate`), alors que `migrate-tenants` en CLI ne prend pas de slug
+et traite tout le registry. Il n'y a pas de migration par tenant en ligne de commande.
 
 [![La liste des tenants de la console opérateur — chaque tenant du registry avec son mode de stockage, son motif d'hôte et son état actif, plus les actions pour provisionner, migrer et préchauffer](../img/operator-console.png)](../img/operator-console.png)
 
@@ -20,6 +24,7 @@ La console opérateur est l'interface web de la première sorte — provisionner
 - [Le journal d'audit](#le-journal-daudit)
 - [Exécutions de provisioning](#exécutions-de-provisioning)
 - [Serveurs de bases de données](#serveurs-de-bases-de-données)
+- [Identité visuelle](#identité-visuelle)
 - [Les trois niveaux de capacité](#les-trois-niveaux-de-capacité)
 
 ---
@@ -69,7 +74,7 @@ La console répond sur le domaine **apex** (`RUSTANGO_APEX_DOMAIN`), pas sur un 
 | Page | À quoi elle sert |
 |---|---|
 | **Organizations** | Chaque tenant, avec mode de stockage, motif d'hôte et état actif |
-| **Organizations → Edit** | Nom affiché, motif d'hôte, préfixe de chemin, port, URL de base, identité visuelle |
+| **Organizations → Edit** | Nom affiché, motif d'hôte, préfixe de chemin, port, URL de base de données, identité visuelle |
 | **Hostnames** | Les domaines supplémentaires auxquels un tenant répond |
 | **Operators** | Qui peut se connecter à cette console |
 | **Audit log** | Chaque changement effectué via la console |
@@ -154,7 +159,7 @@ Les secrets sont dans `rustango_operator_totp` dans le registre, scellés sous `
 
 [![Le journal d'audit de la console — qui a changé quoi, sur quel enregistrement et quand, filtrable par entité, id et opération](../img/operator-console-audit.png)](../img/operator-console-audit.png)
 
-Chaque modification passée par la console est enregistrée : éditions de tenant, changements de noms d'hôte, gestion des opérateurs, usurpation d'identité, purges, préchauffages. La colonne `source` porte `operator:<id>:<verbe>`, ce qui permet de séparer après coup l'activité des opérateurs de celle des utilisateurs de tenant.
+Chaque modification passée par la console est enregistrée : éditions de tenant, changements de noms d'hôte, gestion des opérateurs, usurpation d'identité, purges, préchauffages. La colonne `source` porte `operator:<id>:<verb>`, ce qui permet de séparer après coup l'activité des opérateurs de celle des utilisateurs de tenant.
 
 C'est le journal du **registry**. L'historique propre à un tenant vit dans l'admin de ce tenant — mélanger les deux imposerait d'éventer une requête sur chaque pool de tenant pour afficher une seule page.
 
@@ -172,6 +177,65 @@ Provisionner un tenant, ce sont plusieurs étapes contre une base qui peut être
 
 Les tenants créés depuis la CLI sont enregistrés eux aussi, marqués `requested_by = cli`, si bien que l'historique couvre les deux surfaces.
 
+### Créer un tenant
+
+**Organizations → New tenant**. Chaque option indique sur le formulaire où
+vivent les données, quel login est utilisé et de quels droits il a besoin :
+
+- **Schema** (registry PostgreSQL uniquement) : un schéma dans la base du
+  registry. Il utilise le login du registry (`DATABASE_URL`) ; les tenants le
+  partagent et n'ont pas de login propre. Demande `CREATE` sur la base du registry.
+
+En mode base de données, choisissez une option :
+
+- **Create a new database on a saved server** : choisissez le serveur. Le
+  login d'administration du serveur est utilisé une fois ; le tenant reçoit son
+  propre login. La base porte exactement le nom du slug et reçoit un login
+  propre avec un mot de passe aléatoire, autorisé sur cette base seulement.
+  L'exécution affiche `create_database`, `create_login`, `grant` et
+  `check_login` (le nouveau login se connecte). Une base existante de ce nom
+  est refusée. Si une étape ultérieure échoue, l'étape `rollback` de
+  l'exécution supprime la nouvelle base, le login et la ligne du tenant, et le
+  formulaire revient avec la raison. C'est l'option par défaut dès qu'un
+  serveur est enregistré.
+- **Use an existing database URL** : rien n'est créé ; la base doit exister.
+  Masquée, et jamais renvoyée à la page. Aucun droit d'administration requis.
+- **A database on the registry's server** : un nom de base ; il utilise le
+  login du registry (`DATABASE_URL`), donc les tenants ne sont pas isolés les
+  uns des autres. Rien n'est créé.
+
+**Test connection** vérifie ce dont l'option choisie a besoin et ne crée rien.
+Sur un serveur enregistré, il lance chaque vérification qu'une soumission
+effectue avant de créer quoi que ce soit (slug libre, routage, droits
+d'administration, aucune base ni aucun login de ce nom) et liste chaque droit
+avec oui, non ou inconnu. En mode schéma, il vérifie le `CREATE` du login du
+registry sur la base du registry. Un droit manquant est accompagné des
+instructions qui le corrigent, et la création est refusée avec le même texte
+avant que quoi que ce soit ne soit créé. Voir
+[Droits](tenant-databases.md#droits). Sinon, il se connecte à la base. Le
+backend est toujours celui du registry.
+
+### Premier administrateur
+
+Indiquez un e-mail d'administrateur (et, en option, un nom d'utilisateur ; par
+défaut l'e-mail) et l'exécution ajoute une étape `create_admin` après les
+migrations, avant que le tenant ne soit mis en service. Elle crée un
+superutilisateur sans mot de passe utilisable. Si l'étape échoue, l'exécution
+revient en arrière comme pour toute autre étape.
+
+L'administrateur choisit son propre mot de passe via un lien de définition de
+mot de passe. Le lien ne sert qu'une fois, expire au bout de 72 heures et
+n'ouvre que la page de changement de mot de passe de ce tenant. Avec
+`Builder::first_admin_mailer(mailer, from)`, il est envoyé par e-mail à
+l'administrateur. Sans mailer, la page de l'exécution vous l'affiche **une
+fois**, juste après la soumission ; copiez-le et transmettez-le à
+l'administrateur. Il n'est jamais stocké, audité ni journalisé ; le journal
+d'audit n'enregistre que la création de l'utilisateur.
+
+Les champs apparaissent quand le provisioner dispose d'une remise
+(`Provisioner::with_first_admin_handover` ; le `Builder` standard en définit une).
+Lien perdu ou expiré : lancez `manage set-password-link <slug> <username>`.
+
 Depuis la CLI : [`list-runs` / `show-run`](manage.md#voir-ce-qui-sest-passé).
 
 ---
@@ -185,19 +249,134 @@ registre SQLite, un « serveur » est un répertoire pour les fichiers des
 tenants. Le backend est toujours celui du registre.
 
 Le mot de passe est stocké scellé (`enc:v1:`), donc `RUSTANGO_SECRET_KEY` doit
-être défini ; sinon l'enregistrement est refusé. Il n'est jamais réaffiché : le
+être défini ; sinon l'enregistrement est refusé et la page affiche un avertissement. Il n'est jamais réaffiché : le
 formulaire d'édition laisse le champ vide, et un champ vide conserve celui
 enregistré. Les lignes d'audit nomment les champs modifiés, jamais leurs valeurs.
 
-**Test** se connecte et affiche la version du serveur et si le login peut créer
-des bases, créer des logins et accorder des droits, ainsi que la première raison
-pour laquelle il ne peut pas provisionner de tenants (par exemple PostgreSQL
-avant 15).
+**Test** se connecte et liste la version du serveur et, une ligne chacun, si le
+login d'administration peut créer des bases, créer des logins et accorder des
+droits. Quand il ne peut pas provisionner de tenants, il dit pourquoi (un droit
+manquant, ou PostgreSQL avant 15) et affiche les instructions `GRANT` /
+`ALTER ROLE` qui corrigent cela. Les droits issus de rôles MySQL actifs comptent.
+
+TLS vaut `require` par défaut pour un nouveau serveur. Une modification faite
+depuis une page que quelqu'un d'autre a changée entre-temps est refusée ;
+rechargez et modifiez à nouveau.
+
+Dans la stack de dev `docker compose` générée, Postgres n'a pas de TLS :
+enregistrez-le avec TLS `disable` ; MySQL 8 sert du TLS, donc `require`
+fonctionne. L'utilisateur MySQL `rustango` du compose ne peut ni créer
+d'utilisateurs ni accorder de droits ; enregistrez ce serveur en tant que `root`.
 
 La suppression est refusée tant que l'URL d'un tenant en mode base de données
-pointe vers l'hôte et le port du serveur (SQLite : un fichier dans son répertoire).
+pointe vers l'hôte et le port du serveur (SQLite : un fichier dans son
+répertoire) ou ne peut pas être résolue, tant qu'une base créée là par rustango
+est encore enregistrée, et sur une console construite sans pools de tenants.
+
+Un tenant dont la base a été créée sur un serveur enregistré obtient **Rotate
+database password** sur sa page. Cette action et **Purge** s'exécutent comme des
+exécutions enregistrées, suivies en direct comme une création. Le déroulement
+complet est dans [Bases de tenants sur un serveur enregistré](tenant-databases.md).
 
 Depuis la CLI : [`add-db-server` et compagnie](manage.md#serveurs-de-bases-de-données).
+
+---
+
+## Identité visuelle
+
+Le nom, le slogan, le logo, la couleur d'accent et le thème de la console
+viennent de `[brand]` dans `config/default.toml` ou `config/<env>_settings.toml` :
+
+```toml
+[brand]
+name          = "Acme Operator"
+tagline       = "Production"
+logo_url      = "https://cdn.example.com/acme-logo.png"
+primary_color = "#2c6fb0"
+theme_mode    = "auto"
+```
+
+| Clé | Défaut | Rôle |
+|---|---|---|
+| `name` | `Rustango` | Nom dans l'en-tête et sur la page de connexion |
+| `tagline` | aucun ; la page de connexion affiche « Operator console » | Ligne sous le nom |
+| `logo_url` | `/__static__/rustango.png` | Image du logo ; par défaut le logo fourni, servi par la console |
+| `logo_path` | aucun | Fichier de logo local que la console sert elle-même ; voir [Votre propre logo](#votre-propre-logo) |
+| `primary_color` | la couleur du thème | Teinte les boutons principaux et les liens. Hex : `#rrggbb` ou `#rgb` |
+| `theme_mode` | `auto` | Thème de départ : `auto`, `light` ou `dark` |
+
+Une valeur vide compte comme non définie. Un `primary_color` ou un
+`theme_mode` qui ne se parse pas est ignoré, et la valeur par défaut reste.
+
+Les variables d'environnement l'emportent sur le fichier : vous pouvez donc
+changer l'identité d'un déploiement sans modifier la configuration :
+
+| Variable | Remplace |
+|---|---|
+| `RUSTANGO_OPERATOR_BRAND_NAME` | `name` |
+| `RUSTANGO_OPERATOR_TAGLINE` | `tagline` |
+| `RUSTANGO_OPERATOR_LOGO_URL` | `logo_url` |
+| `RUSTANGO_OPERATOR_LOGO_PATH` | `logo_path` |
+| `RUSTANGO_OPERATOR_PRIMARY_COLOR` | `primary_color` |
+| `RUSTANGO_OPERATOR_THEME_MODE` | `theme_mode` |
+
+L'ordre est : variable d'environnement, puis `[brand]` (le fichier du niveau
+au-dessus de `default.toml`), puis la valeur par défaut. Une variable vide est
+ignorée. La console lit tout cela une seule fois au démarrage : redémarrez-la
+après un changement.
+
+### Votre propre logo
+
+Le domaine apex ne sert que la console : un montage `Cli::with_static` est
+servi sur les hôtes des tenants, pas sur l'apex. Un logo est donc soit un
+fichier que sert la console, soit une URL complète.
+
+`logo_path = "assets/acme-logo.png"` désigne un fichier local, relatif au
+répertoire de travail. La console le lit une fois au démarrage, avec les mêmes
+contrôles qu'un envoi de logo de tenant : PNG, JPEG, WebP ou ICO (pas de SVG),
+au plus `RUSTANGO_BRAND_MAX_BYTES` (1 Mio). Elle sert le fichier à
+`/__static__/brand-logo.<ext>?v=<hash>` avec un cache d'un an ; le hash change
+avec le fichier. Un fichier manquant ou refusé journalise un avertissement et
+le logo fourni reste.
+
+`logo_url` va directement dans `<img src>` : le navigateur doit donc pouvoir le
+charger — un CDN, un bucket de stockage objet ou votre site web. Si vous
+définissez `[security] csp`, autorisez cet hôte dans `img-src`.
+
+Si les deux sont définis, les variables d'environnement l'emportent sur le
+fichier et, au sein de chacun, `logo_url` l'emporte sur `logo_path`.
+
+Dans un projet sans tenancy, l'admin partage un hôte avec vos routes, donc un
+montage statique y fonctionne ; voir [la section image de marque de l'admin](admin.md#configuration--admin-et-brand).
+
+La console ne définit pas de favicon, et il n'existe pas de clé pour cela.
+
+### Les slogans `dev` et `staging`
+
+`cargo rustango new` écrit `tagline = "dev"` sous `[brand]` dans
+`config/dev_settings.toml` et `tagline = "staging"` dans
+`staging_settings.toml`, pour distinguer les niveaux d'un coup d'œil ; le
+slogan s'affiche comme un badge. `prod_settings.toml` n'en définit aucun. Le
+fichier du niveau l'emporte sur `default.toml`, donc cela remplace un slogan que
+vous y auriez défini.
+
+Pour le changer, modifiez la ligne, par exemple `tagline = "Acme dev"`. Pour le
+retirer, supprimez la ligne ou mettez `tagline = ""`. Dans un projet avec
+l'admin, le même slogan sert de sous-titre à l'admin.
+
+### Identité visuelle par tenant
+
+Chaque tenant a sa propre identité sur sa ligne `Org`, définie dans
+**Organizations → Edit** : `brand_name`, `brand_tagline`, `primary_color` et
+`theme_mode`. Le formulaire **Branding assets** de la même page envoie un logo
+(PNG, JPEG ou WebP) et un favicon (PNG ou ICO), jusqu'à 1 Mo chacun
+(`RUSTANGO_BRAND_MAX_BYTES`). Les fichiers sont stockés sous
+`RUSTANGO_BRAND_STORAGE_DIR`, par défaut `./var/brand`.
+
+L'admin du tenant et sa page de connexion les utilisent ; `[brand]` ne les
+atteint pas. Sans `brand_name`, le nom affiché du tenant est utilisé, et sans
+logo envoyé, le logo du framework. Le favicon s'affiche sur les pages de
+connexion et de changement de mot de passe du tenant. Voir [la section image de marque de l'admin](admin.md#ladmin-du-tenant).
 
 ---
 

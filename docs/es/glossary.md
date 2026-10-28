@@ -15,7 +15,6 @@ consultarse sobre la marcha.
 - [Los datos y la base de datos](#los-datos-y-la-base-de-datos)
 - [Multi-tenancy](#multi-tenancy) — solo si sirves a varios clientes desde un único despliegue
 - [Unas pocas palabras de Rust](#unas-pocas-palabras-de-rust) — para que los bloques de código no den miedo
-- [Frameworks con los que comparamos](#frameworks-con-los-que-comparamos)
 
 ---
 
@@ -77,7 +76,7 @@ usada para filtrar, buscar, ordenar o paginar los resultados — p. ej.
 **Paginación** — dividir una lista larga de resultados en páginas para que una respuesta no sea
 enorme. El **envelope (envoltorio)** es lo que rodea a la página y también te indica los
 totales — p. ej. `{"count": 137, "page": 2, "results": [ … ]}`. Consulta
-[Paginación](viewsets.md#pagination).
+[Paginación](viewsets.md#paginación).
 
 **`curl`** — una herramienta de línea de comandos para enviar peticiones a la API a mano. Los
 ejemplos `curl ...` de esta documentación te permiten probar un endpoint desde una terminal
@@ -124,10 +123,20 @@ handler y después de él — para preocupaciones transversales como el registro
 cabeceras de seguridad o el CSRF. "Layer" es la palabra de Rustango para una pieza de
 middleware. Consulta la [guía de Middleware](middleware.md).
 
-**Pool (o executor)** — la conexión a la base de datos que tu código usa para leer y
-escribir. Rustango te pide pasar el pool explícitamente a cada llamada a la base de datos
-(en vez de ocultarlo en un global), para que siempre quede claro qué toca la
-base de datos. Verás `&pool` como último argumento de las llamadas del ORM.
+**Pool** — el handle de base de datos que tu código usa para leer y escribir.
+Rustango te pide pasarlo explícitamente a cada llamada a la base de datos (en vez
+de ocultarlo en un global), para que siempre quede claro qué toca la base de
+datos. Verás `&pool` como último argumento de las llamadas del ORM.
+`rustango::sql::Pool` es un enum sobre los tres backends, y es lo que reciben los
+métodos de uso diario.
+
+**Executor** — *no* es un sinónimo de pool. Un executor es una sola conexión o una
+transacción abierta: aquello sobre lo que realmente se ejecuta una sentencia. Los
+métodos que terminan en `_on` reciben uno, y así es como metes varias sentencias
+en una misma transacción. `fetch_on`, `first_on`, `count_on` y `exists_on` aceptan
+cualquier executor en los tres backends; el resto de la familia `_on` sigue siendo
+solo para Postgres. La distinción decide qué métodos existen en tu build, así que
+[api-conventions](api-conventions.md#funciones) explica la regla completa.
 
 **QuerySet** — una consulta a la base de datos que construyes paso a paso en Rust
 (`Post::objects().filter(...).order_by(...)`) antes de ejecutarla. Es perezosa (lazy):
@@ -224,13 +233,3 @@ base de datos es `async`.
 excepciones. Un `Result` es "éxito *o* un error"; una `Option` es "un valor *o*
 nada". El `?` que ves tras algunas llamadas significa "si esto falló, detente y
 devuelve el error".
-
----
-
-## Frameworks con los que comparamos
-
-Esta documentación dice de vez en cuando "como X" para ayudar a los lectores que vienen de otros
-ecosistemas. Las comparaciones son un extra — nunca las necesitas para seguir una guía.
-
-**Laravel / Rails** — frameworks web populares de PHP y Ruby, mencionados por la misma
-razón de "si has usado esto, esto te resultará familiar".

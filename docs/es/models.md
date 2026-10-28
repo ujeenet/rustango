@@ -371,8 +371,7 @@ Declarados sobre el **modelo**:
   `#[cfg(feature = "postgres")]`, así que en un build `sqlite` o `mysql` no
   existen en absoluto. La familia `_pool` toma `rustango::sql::Pool` y funciona
   en los tres — escribe esos salvo que sepas que estás en Postgres. El nombrado
-  invertido se sigue en
-  [#1293](https://github.com/ujeenet/rustango/issues/1293); consulta
+  está invertido, y se sabe; consulta
   [api-conventions](api-conventions.md#funciones).
 - **Borrado lógico** (cuando está habilitado) — `soft_delete`, `restore`,
   `force_delete`; `QuerySet::active()` / `with_trashed()` / `only_trashed()`.
@@ -422,7 +421,7 @@ la lista completa, incluyendo las avanzadas/específicas de PostgreSQL.
 | `audit(track = "…")` | lista de campos | historial de cambios por fila |
 | `scope` | `"tenant"` / `"registry"` | ámbito de multi-tenancy |
 | `proxy` | flag | modelo proxy (comparte la tabla de otro) |
-| `global_scope(name, apply = fn)` | nombre + fn | filtro aplicado automáticamente a todas las consultas |
+| `global_scope(name, apply = fn)` | nombre + fn | filtro aplicado automáticamente a querysets y atajos, no a los métodos de instancia por PK ni a `truncate` |
 | `through(...)` | especificación de relación | accesor de relación through personalizado |
 | `reverse_has(...)` / `generic_has(...)` | especificación de relación | accesor inverso has-many / inverso de FK genérica |
 | `required_db_features` / `required_db_vendor` | lista / proveedor | restricciones de validación de despliegue |
@@ -453,7 +452,7 @@ la lista completa, incluyendo las avanzadas/específicas de PostgreSQL.
 | `verbose_name` | `"Label"` | etiqueta legible del campo en formularios/admin |
 | `help_text` | `"…"` | texto de ayuda bajo el widget de formulario/admin |
 | `validators` | `"name, name"` | validadores con nombre a ejecutar en este campo |
-| `related_name` | `"posts"` | nombre del accesor inverso en el destino de la FK |
+| `related_name` | `"posts"` | nombre del accesor inverso en el destino de la FK; `"+"` para ninguno (un destino de otro crate) |
 | `auto_now` | flag | establecer a ahora en cada guardado |
 | `auto_now_add` | flag | establecer a ahora en la inserción |
 | `soft_delete` | flag | marca la marca de tiempo de borrado suave (`Option<DateTime<Utc>>`) |

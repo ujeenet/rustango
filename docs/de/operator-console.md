@@ -7,6 +7,11 @@ Ein Multi-Tenant-Projekt hat zwei Arten von Administratoren, und die vermischen 
 
 Die Operator-Konsole ist die Weboberfläche für die erste Art — Tenants provisionieren, Hostnamen binden, Operatoren verwalten, den Audit-Trail lesen und einen Tenant außer Betrieb nehmen. Alles davon ist auch ein [`manage`-Verb](manage.md#tenancy-befehle), denn eine Aktion, die es nur auf einer Oberfläche gibt, lässt sich nicht automatisieren — und eine, die es nur in der Shell gibt, nicht delegieren.
 
+Die Lücke, die man kennen sollte: Die Konsole kann **einen** Tenant migrieren
+(`POST /orgs/{slug}/migrate`), während `migrate-tenants` in der CLI keinen Slug
+nimmt und die ganze Registry abarbeitet. Eine Migration pro Tenant gibt es auf
+der Kommandozeile nicht.
+
 [![Die Tenant-Liste der Operator-Konsole — jeder Tenant der Registry mit Speichermodus, Host-Muster und Aktiv-Status, dazu Aktionen zum Provisionieren, Migrieren und Vorwärmen](../img/operator-console.png)](../img/operator-console.png)
 
 ## Inhaltsverzeichnis
@@ -20,6 +25,7 @@ Die Operator-Konsole ist die Weboberfläche für die erste Art — Tenants provi
 - [Das Audit-Log](#das-audit-log)
 - [Provisioning-Läufe](#provisioning-läufe)
 - [Datenbankserver](#datenbankserver)
+- [Branding](#branding)
 - [Die drei Fähigkeitsstufen](#die-drei-fähigkeitsstufen)
 
 ---
@@ -172,6 +178,64 @@ Einen Tenant zu provisionieren sind mehrere Schritte gegen eine Datenbank, die l
 
 Über die CLI angelegte Tenants werden ebenfalls aufgezeichnet, markiert mit `requested_by = cli`, sodass die Historie beide Oberflächen abdeckt.
 
+### Einen Tenant anlegen
+
+**Organizations → New tenant**. Jede Option sagt im Formular, wo die Daten
+liegen, welcher Login genutzt wird und welche Rechte er braucht:
+
+- **Schema** (nur PostgreSQL-Registry): ein Schema in der Registry-Datenbank.
+  Es nutzt den Login der Registry (`DATABASE_URL`); Tenants teilen ihn und
+  bekommen keinen eigenen Login. Braucht `CREATE` auf der Registry-Datenbank.
+
+Im Datenbankmodus wählst du eine davon:
+
+- **Create a new database on a saved server**: Wähle den Server. Er nutzt den
+  Admin-Login des Servers einmal; der Tenant bekommt seinen eigenen Login. Die
+  Datenbank heißt exakt wie der Slug und bekommt einen eigenen Login mit
+  Zufallspasswort, der nur auf diese Datenbank Rechte hat. Der Lauf zeigt
+  `create_database`, `create_login`, `grant` und `check_login` (der neue Login
+  meldet sich an). Eine vorhandene Datenbank dieses Namens wird abgelehnt.
+  Scheitert ein späterer Schritt, löscht der Schritt `rollback` des Laufs die
+  neue Datenbank, den Login und die Tenant-Zeile, und das Formular kommt mit
+  dem Grund zurück. Das ist der Standard, sobald ein Server gespeichert ist.
+- **Use an existing database URL**: Nichts wird angelegt; die Datenbank muss
+  existieren. Maskiert und nie an die Seite zurückgeschickt. Keine
+  Admin-Rechte nötig.
+- **A database on the registry's server**: ein Datenbankname; er nutzt den
+  Login der Registry (`DATABASE_URL`), Tenants sind also nicht voneinander
+  isoliert. Nichts wird angelegt.
+
+**Test connection** prüft, was die gewählte Option braucht, und legt nichts
+an. Auf einem gespeicherten Server führt es jede Prüfung aus, die ein Absenden
+vor dem Anlegen ausführt (Slug frei, Routing, Admin-Rechte, keine Datenbank
+und kein Login dieses Namens), und listet jedes Recht als yes, no oder
+unknown. Im Schemamodus prüft es das `CREATE` des Registry-Logins auf der
+Registry-Datenbank. Ein fehlendes Recht kommt mit den Anweisungen, die es
+beheben, und das Anlegen wird mit demselben Text abgelehnt, bevor etwas
+entsteht. Siehe [Rechte](tenant-databases.md#rechte). Sonst erreicht es die
+Datenbank. Das Backend ist immer das der Registry.
+
+### Erster Admin
+
+Gib eine Admin-E-Mail an (und optional einen Benutzernamen; Standard ist die
+E-Mail), und der Lauf ergänzt nach den Migrationen einen Schritt
+`create_admin`, bevor der Tenant live geht. Er legt einen Superuser ohne
+nutzbares Passwort an. Scheitert der Schritt, rollt der Lauf zurück wie bei
+jedem anderen Schritt.
+
+Der Admin setzt sein Passwort selbst über einen Set-Password-Link. Der Link
+funktioniert einmal, läuft nach 72 Stunden ab und öffnet nur die
+Passwort-ändern-Seite dieses Tenants. Mit
+`Builder::first_admin_mailer(mailer, from)` wird er dem Admin gemailt. Ohne
+Mailer zeigt die Lauf-Seite ihn dir **einmal**, direkt nach dem Absenden;
+kopiere ihn und gib ihn dem Admin. Er wird nie gespeichert, auditiert oder
+geloggt; das Audit-Log hält nur das Anlegen des Benutzers fest.
+
+Die Felder erscheinen, wenn der Provisioner eine Übergabe hat
+(`Provisioner::with_first_admin_handover`; der Standard-`Builder` setzt eine).
+Ein verlorener oder abgelaufener Link: Führe
+`manage set-password-link <slug> <username>` aus.
+
 Über die CLI: [`list-runs` / `show-run`](manage.md#nachsehen-was-passiert-ist).
 
 ---
@@ -184,19 +248,138 @@ Wartungsdatenbank statt `postgres`. Bei einer SQLite-Registry ist ein „Server�
 ein Verzeichnis für Tenant-Dateien. Das Backend ist immer das der Registry.
 
 Das Passwort wird versiegelt gespeichert (`enc:v1:`), daher muss
-`RUSTANGO_SECRET_KEY` gesetzt sein; sonst wird das Speichern abgelehnt. Es wird
-nie wieder angezeigt: Das Bearbeiten-Formular lässt das Feld leer, ein leeres
-Feld behält das gespeicherte. Audit-Zeilen nennen die geänderten Felder, nie
-ihre Werte.
+`RUSTANGO_SECRET_KEY` gesetzt sein; sonst wird das Speichern abgelehnt, und die
+Seite zeigt eine Warnung. Es wird nie wieder angezeigt: Das Bearbeiten-Formular
+lässt das Feld leer, ein leeres Feld behält das gespeicherte. Audit-Zeilen
+nennen die geänderten Felder, nie ihre Werte.
 
-**Test** meldet sich an und zeigt die Serverversion und ob der Admin-Login
-Datenbanken und Logins anlegen und Rechte vergeben darf, dazu den ersten Grund,
-warum keine Tenants angelegt werden können (etwa PostgreSQL vor 15).
+**Test** meldet sich an und zeigt die Serverversion und, je eine Zeile, ob der
+Admin-Login Datenbanken anlegen, Logins anlegen und Rechte vergeben darf. Kann
+er keine Tenants provisionieren, sagt es warum (ein fehlendes Recht oder
+PostgreSQL vor 15) und zeigt die `GRANT`- / `ALTER ROLE`-Anweisungen, die es
+beheben. Rechte aus aktiven MySQL-Rollen zählen.
+
+TLS ist für einen neuen Server standardmäßig `require`. Eine Bearbeitung von
+einer Seite aus, die zwischenzeitlich jemand anderes geändert hat, wird
+abgelehnt; lade neu und bearbeite erneut.
+
+Im generierten `docker compose`-Dev-Stack hat Postgres kein TLS, speichere es
+also mit TLS `disable`; MySQL 8 liefert TLS, `require` funktioniert also. Der
+MySQL-Benutzer `rustango` aus der Compose-Datei kann keine Benutzer anlegen und
+keine Rechte vergeben; speichere diesen Server als `root`.
 
 Löschen wird abgelehnt, solange die URL eines Datenbank-Tenants auf Host und
-Port des Servers zeigt (SQLite: eine Datei in seinem Verzeichnis).
+Port des Servers zeigt (SQLite: eine Datei in seinem Verzeichnis) oder sich
+nicht auflösen lässt, solange eine Datenbank, die rustango dort angelegt hat,
+noch festgehalten ist, und bei einer Konsole ohne Tenant-Pools.
+
+Ein Tenant, dessen Datenbank auf einem gespeicherten Server angelegt wurde,
+bekommt auf seiner Seite **Rotate database password**. Das und **Purge** laufen
+als festgehaltene Läufe, live verfolgt wie ein Anlegen. Der ganze Ablauf steht
+in [Tenant-Datenbanken auf einem gespeicherten Server](tenant-databases.md).
 
 Über die CLI: [`add-db-server` und Verwandte](manage.md#datenbankserver).
+
+---
+
+## Branding
+
+Name, Tagline, Logo, Akzentfarbe und Theme der Konsole kommen aus `[brand]` in
+`config/default.toml` oder `config/<env>_settings.toml`:
+
+```toml
+[brand]
+name          = "Acme Operator"
+tagline       = "Production"
+logo_url      = "https://cdn.example.com/acme-logo.png"
+primary_color = "#2c6fb0"
+theme_mode    = "auto"
+```
+
+| Schlüssel | Standard | Was er tut |
+|---|---|---|
+| `name` | `Rustango` | Name in der Kopfzeile und auf der Anmeldeseite |
+| `tagline` | keiner; die Anmeldeseite zeigt „Operator console" | Zeile unter dem Namen |
+| `logo_url` | `/__static__/rustango.png` | Logo-Bild; Standard ist das mitgelieferte Logo, von der Konsole ausgeliefert |
+| `logo_path` | keiner | Lokale Logo-Datei, die die Konsole selbst ausliefert; siehe [Eigenes Logo](#eigenes-logo) |
+| `primary_color` | die Farbe des Themes | Färbt primäre Buttons und Links. Hex: `#rrggbb` oder `#rgb` |
+| `theme_mode` | `auto` | Start-Theme: `auto`, `light` oder `dark` |
+
+Ein leerer Wert gilt als nicht gesetzt. Eine `primary_color` oder ein
+`theme_mode`, die sich nicht parsen lassen, werden ignoriert, und der Standard
+bleibt.
+
+Umgebungsvariablen überschreiben die Datei, so kannst du ein Deployment ohne
+Konfigurationsänderung umbranden:
+
+| Variable | Überschreibt |
+|---|---|
+| `RUSTANGO_OPERATOR_BRAND_NAME` | `name` |
+| `RUSTANGO_OPERATOR_TAGLINE` | `tagline` |
+| `RUSTANGO_OPERATOR_LOGO_URL` | `logo_url` |
+| `RUSTANGO_OPERATOR_LOGO_PATH` | `logo_path` |
+| `RUSTANGO_OPERATOR_PRIMARY_COLOR` | `primary_color` |
+| `RUSTANGO_OPERATOR_THEME_MODE` | `theme_mode` |
+
+Die Reihenfolge: Umgebungsvariable, dann `[brand]` (die Stufen-Datei über
+`default.toml`), dann der Standard. Eine leere Variable wird ignoriert. Die
+Konsole liest all das einmal beim Start, starte sie also nach einer Änderung
+neu.
+
+### Eigenes Logo
+
+Die Apex-Domain liefert nur die Konsole aus: Ein `Cli::with_static`-Mount wird
+auf Tenant-Hosts ausgeliefert, nicht auf dem Apex. Ein Logo ist also entweder
+eine Datei, die die Konsole ausliefert, oder eine vollständige URL.
+
+`logo_path = "assets/acme-logo.png"` nennt eine lokale Datei, relativ zum
+Arbeitsverzeichnis. Die Konsole liest sie einmal beim Start, mit denselben
+Prüfungen wie ein Tenant-Logo-Upload: PNG, JPEG, WebP oder ICO (kein SVG),
+höchstens `RUSTANGO_BRAND_MAX_BYTES` (1 MiB). Sie liefert die Datei unter
+`/__static__/brand-logo.<ext>?v=<hash>` mit einem Jahr Cache aus; der Hash
+ändert sich mit der Datei. Eine fehlende oder abgelehnte Datei loggt eine
+Warnung, und das mitgelieferte Logo bleibt.
+
+`logo_url` geht direkt in `<img src>`, der Browser muss es also laden können:
+ein CDN, ein Object-Storage-Bucket oder deine Website. Wenn du
+`[security] csp` setzt, erlaube diesen Host in `img-src`.
+
+Sind beide gesetzt, gewinnen die Umgebungsvariablen über die Datei, und
+innerhalb einer Quelle gewinnt `logo_url` über `logo_path`.
+
+In einem Projekt ohne Tenancy teilt sich der Admin einen Host mit deinen
+Routen, dort funktioniert ein Static-Mount also; siehe
+[den Branding-Abschnitt des Admins](admin.md#konfiguration-admin-und-brand).
+
+Die Konsole setzt kein Favicon, und es gibt keinen Schlüssel dafür.
+
+### Die Taglines `dev` und `staging`
+
+`cargo rustango new` schreibt `tagline = "dev"` unter `[brand]` in
+`config/dev_settings.toml` und `tagline = "staging"` in
+`staging_settings.toml`, damit du die Stufen auf einen Blick unterscheidest;
+die Tagline erscheint als Badge. `prod_settings.toml` setzt keine. Die
+Stufen-Datei gewinnt über `default.toml`, das ersetzt also eine Tagline, die
+du dort gesetzt hast.
+
+Um sie zu ändern, bearbeite die Zeile, etwa `tagline = "Acme dev"`. Um sie zu
+entfernen, lösche die Zeile oder setze `tagline = ""`. In einem Projekt mit
+Admin ist dieselbe Tagline der Untertitel des Admins.
+
+### Branding pro Tenant
+
+Jeder Tenant hat seine eigene Marke in seiner `Org`-Zeile, gesetzt unter
+**Organizations → Edit**: `brand_name`, `brand_tagline`, `primary_color` und
+`theme_mode`. Das Formular **Branding assets** auf derselben Seite lädt ein
+Logo (PNG, JPEG oder WebP) und ein Favicon (PNG oder ICO) hoch, je bis 1 MB
+(`RUSTANGO_BRAND_MAX_BYTES`). Die Dateien liegen unter
+`RUSTANGO_BRAND_STORAGE_DIR`, Standard `./var/brand`.
+
+Der Tenant-Admin und seine Anmeldeseite nutzen diese Werte; `[brand]` erreicht
+sie nicht. Ohne `brand_name` wird der Anzeigename des Tenants gezeigt, ohne
+hochgeladenes Logo das Framework-Logo. Das Favicon erscheint auf der Anmelde-
+und der Passwort-ändern-Seite des Tenants. Siehe
+[den Branding-Abschnitt des Admins](admin.md#der-tenant-admin).
 
 ---
 

@@ -168,7 +168,7 @@ PostgreSQL et SQLite. `utf8mb4_0900_as_cs` compare comme eux. Évitez une collat
 
 ## Étape 1 : installer le générateur de squelette
 
-Le générateur de squelette (scaffolder) crée pour vous des squelettes de projet et d'application, comme `rails new`.
+Le générateur de squelette (scaffolder) crée pour vous des squelettes de projet et d'application.
 
 ```bash
 cargo install cargo-rustango
@@ -186,7 +186,7 @@ La version du générateur de squelette est celle que votre projet épingle : in
 
 ## Étape 2 : créer le projet
 
-Ceci génère un nouveau projet, l'équivalent chez **Rustango** de `rails new` ou `composer create-project`.
+Ceci génère un nouveau projet avec une structure, des réglages et des migrations prêts.
 
 ```bash
 cd ~/projects                                 # wherever you keep code
@@ -300,7 +300,7 @@ psql "$DATABASE_URL" -c "SELECT version();"   # should print Postgres version
 
 ## Étape 5 : exécuter les migrations intégrées
 
-Les migrations créent les tables de votre base de données, la même idée que `php artisan migrate` ou `rails db:migrate`. Exécutez-les une fois pour mettre en place les propres tables du framework :
+Les migrations créent les tables de votre base de données. Exécutez-les une fois pour mettre en place les propres tables du framework :
 
 ```bash
 cargo run -- migrate
@@ -611,7 +611,7 @@ Enregistrez le nouveau module en ajoutant `mod post_view_set;` avec les autres d
 
 ### 12b. Monter les routes
 
-Attachez les routes du ViewSet au routeur de l'application (la version **Rustango** d'un fichier `urls.py` ou d'un `routes/api.php`). Le routeur du ViewSet a besoin du pool de base de données, construisez-le donc dans `src/main.rs`, là où vit le pool, et fusionnez-le dans l'agrégateur `urls::api()` :
+Attachez les routes du ViewSet au routeur de l'application (le fichier qui liste vos routes d'API). Le routeur du ViewSet a besoin du pool de base de données, construisez-le donc dans `src/main.rs`, là où vit le pool, et fusionnez-le dans l'agrégateur `urls::api()` :
 
 ```rust
 let api = urls::api()

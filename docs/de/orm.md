@@ -20,15 +20,15 @@ Ein paar Rust-Begriffe tauchen durchgehend auf. `&pool` ist eine geteilte Refere
 
 Jüngste Releases haben eine Reihe von Features hinzugefügt, die noch nicht in jeden Abschnitt weiter unten eingearbeitet sind. Kurze Hinweise:
 
-- **`Q!`-Makro + `Qb`-Laufzeit-Builder** (#269, #263) — kompilierzeitsichere Filter. `User::objects().where_(Q!(User.email__icontains = "alice"))` lässt sich bei einem falsch geschriebenen Feldnamen nicht bauen. Laufzeit-komponierbare Variante für Admin-Filter-Chips: `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
-- **`.distinct_on(&["author_id"])`** (#264) — PG-nativ; portabler Fallback per Fensterfunktion auf MySQL / SQLite. Muster nach dem Schema "Neuestes pro Gruppe".
-- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** (#267) — viele Zeilen in einem Statement einfügen oder bei Konflikt aktualisieren. Tri-dialektisches ON CONFLICT / ON DUPLICATE KEY UPDATE.
-- **`explain_pool()`** (#272) — tri-dialektisches EXPLAIN. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
-- **DB-Funktionsbibliothek** (#266) — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Emission pro Dialekt mit klaren Fehlern dort, wo SQLite die Funktion nicht hat.
-- **Feldtypen** — `rust_decimal::Decimal` (PG/MySQL-nativ, SQLite über einen Decode-Shim), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) werden jetzt von `#[derive(Model)]` akzeptiert (#524, v0.42).
-- **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — validieren, ohne sofort zu schreiben. Jetzt validieren, das vorbereitete Schreib-Set mutieren, committen, wenn bereit.
-- **`#[rustango(unique_when(columns = "...", condition = "..."))]`** (#265) — partielle Unique-Constraints. "Eindeutige E-Mail pro nicht-gelöschter Zeile" / "Eindeutiger Slug pro Mandant".
-- **`manage makemigrations --merge`** (#346, v0.42) — Merge-Knoten für divergente Branch-Ketten. Siehe [`docs/manage.md`](manage.md#makemigrations---merge).
+- **`Q!`-Makro + `Qb`-Laufzeit-Builder** — kompilierzeitsichere Filter. `User::objects().where_(Q!(User.email__icontains = "alice"))` lässt sich bei einem falsch geschriebenen Feldnamen nicht bauen. Laufzeit-komponierbare Variante für Admin-Filter-Chips: `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
+- **`.distinct_on(&["author_id"])`** — PG-nativ; portabler Fallback per Fensterfunktion auf MySQL / SQLite. Muster nach dem Schema "Neuestes pro Gruppe".
+- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** — viele Zeilen in einem Statement einfügen oder bei Konflikt aktualisieren. Tri-dialektisches ON CONFLICT / ON DUPLICATE KEY UPDATE.
+- **`explain_pool()`** — tri-dialektisches EXPLAIN. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
+- **DB-Funktionsbibliothek** — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Emission pro Dialekt mit klaren Fehlern dort, wo SQLite die Funktion nicht hat.
+- **Feldtypen** — `rust_decimal::Decimal` (PG/MySQL-nativ, SQLite über einen Decode-Shim), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) werden jetzt von `#[derive(Model)]` akzeptiert (v0.42).
+- **`ModelForm::prepare_save()` / `PreparedSave`** (v0.42) — validieren, ohne sofort zu schreiben. Jetzt validieren, das vorbereitete Schreib-Set mutieren, committen, wenn bereit.
+- **`#[rustango(unique_when(columns = "...", condition = "..."))]`** — partielle Unique-Constraints. "Eindeutige E-Mail pro nicht-gelöschter Zeile" / "Eindeutiger Slug pro Mandant".
+- **`manage makemigrations --merge`** (v0.42) — Merge-Knoten für divergente Branch-Ketten. Siehe [`docs/manage.md`](manage.md#makemigrations---merge).
 
 Das CHANGELOG führt den vollständigen Ticket-Index für jedes Release.
 
@@ -282,9 +282,9 @@ tx.commit().await?;
 |---|---|
 | PostgreSQL | Volle Unterstützung — jedes Flag emittiert seine native Syntax. |
 | MySQL 8.0.1+ | Unterstützt alles außer `NO KEY` — dieses Flag fällt auf schlichtes `FOR UPDATE` zurück (die strengere Sperre). |
-| SQLite | Keine Syntax für Sperren auf Zeilenebene. Der Writer emittiert überhaupt keine Klausel; Transaktionen halten eine implizite Schreibsperre für die gesamte Datenbank. Verwende für SQLite eine andere Strategie (typischerweise eine Busy-Wait-Schleife auf der Transaktion selbst). Für einen `atomic`-Block nimm `rustango::sql::atomic_immediate(&pool, …)`: Sein oberster SQLite-Block startet mit `BEGIN IMMEDIATE`; auf PG und MySQL ist es schlichtes `atomic`. |
+| SQLite | Keine Syntax für Sperren auf Zeilenebene; der Writer emittiert keine Klausel. Öffne die Transaktion mit `rustango::sql::write_transaction(&pool)`: Sie nimmt die Schreibsperre der Datenbank beim `BEGIN`, sodass ein zweiter Worker wartet und dann die beanspruchte Zeile sieht. Eine `transaction_pool`-Transaktion sperrt nichts, bis sie schreibt, und der zweite Schreiber scheitert mit `SQLITE_BUSY`. Für einen `atomic`-Block nimm `rustango::sql::atomic_immediate(&pool, …)`: Sein oberster SQLite-Block startet mit `BEGIN IMMEDIATE`; auf PG und MySQL ist es schlichtes `atomic`. |
 
-**Muss innerhalb einer Transaktion laufen.** `FOR UPDATE` außerhalb einer Transaktion ist auf PostgreSQL eine No-op (die implizite Ein-Statement-Transaktion gibt die Sperre sofort frei) und auf MySQL ein Fehler. Auf Postgres kombiniere es mit `pool.begin()` (einem `sqlx::PgPool`); für eine backend-agnostische Transaktion nimm `rustango::sql::atomic(&pool, …)` oder `transaction_pool(&pool)`, die dir ein `PoolTx` zum `match`en liefern.
+**Muss innerhalb einer Transaktion laufen.** `FOR UPDATE` außerhalb einer Transaktion ist auf PostgreSQL eine No-op (die implizite Ein-Statement-Transaktion gibt die Sperre sofort frei) und auf MySQL ein Fehler. Auf Postgres kombiniere es mit `pool.begin()` (einem `sqlx::PgPool`); für eine backend-agnostische Transaktion nimm `rustango::sql::write_transaction(&pool)` und `.fetch_on(&mut tx)`.
 
 ### Abfragen kombinieren (Vereinigung, Schnitt, Differenz)
 
@@ -718,7 +718,7 @@ Order::objects()
 |---|---|---|---|
 | `now()` | `NOW()` | `NOW()` | `CURRENT_TIMESTAMP` |
 | `extract_year(x)` | `CAST(EXTRACT(YEAR FROM x) AS INTEGER)` | `YEAR(x)` | `CAST(strftime('%Y', x) AS INTEGER)` |
-| `extract_week(x)` ⚠ | `EXTRACT(WEEK FROM x)` — ISO 8601, Bereich 1–53 | `WEEK(x)` — sonntagsbeginnend, Bereich **0**–53 | `strftime('%W', x)` — montagsbeginnend, Bereich 00–53 |
+| `extract_week(x)` | `EXTRACT(WEEK FROM x)` — ISO 8601, Bereich 1–53 | `WEEK(x, 3)` — ISO 8601 | ISO 8601, ab dem Donnerstag der Woche |
 | `extract_weekday(x)` | `CAST(EXTRACT(DOW FROM x) AS INTEGER)` | `(DAYOFWEEK(x) - 1)` | `CAST(strftime('%w', x) AS INTEGER)` |
 | `extract_quarter(x)` | `EXTRACT(QUARTER FROM x)` | `QUARTER(x)` | **nicht unterstützt** — Fehler |
 | `trunc_date(x)` | `DATE(x)` | `DATE(x)` | `DATE(x)` |
@@ -730,7 +730,7 @@ Order::objects()
 
 - **`trunc_year/month`-Rückgabetyp divergiert**: Zeitstempel auf PG, Text auf MySQL/SQLite. Caste auf App-Seite beim Lesen, wenn du ein typisiertes `chrono::NaiveDate` brauchst — oder speichere den Bucket als schlichten Integer (`extract_year` + `extract_month`) und rekonstruiere im Code.
 - **`extract_weekday` ist auf 0 = Sonntag normalisiert** über alle drei Dialekte. MySQLs natives `DAYOFWEEK()` gibt 1=Sonntag zurück, also subtrahiert der Writer 1.
-- **⚠ `extract_week` ist NICHT portabel.** PG gibt ISO-8601-Wochennummern zurück (montagsbeginnend, Bereich 1–53); MySQLs Standard-`WEEK(x)` ist sonntagsbeginnend mit Bereich **0**–53; SQLites `strftime('%W')` ist montagsbeginnend mit Bereich 00–53. Für 2024-01-01 (ein Montag) geben die drei Backends jeweils `1`, `0` und `01` zurück. Single-Backend-Code kann es frei verwenden; dialektübergreifender Code sollte die Wochengrenze als typisiertes `chrono::DateTime` in Rust berechnen und stattdessen auf der Zeitstempel-Spalte filtern.
+- **`extract_week` und `__week` liefern die ISO-8601-Woche** (Montagsbeginn, 1–53) auf allen drei Dialekten: 2023-01-01 ist Woche 52.
 - **`extract_quarter` auf SQLite wirft einen Fehler** mit `OpNotSupportedInDialect` — SQLite hat kein natives Quartals-Token. Gate das Feature entweder hinter `cfg(not(sqlite))` oder berechne per `((extract_month - 1) / 3) + 1` im App-Code.
 - **Zeitzonen-Behandlung**: PG `EXTRACT` operiert in der Zeitzone der Spalte; MySQL `YEAR()` operiert in der Sitzungs-Zeitzone (`SET time_zone = ...`); SQLite hat keine echte TZ-Unterstützung — behandle alles als UTC. Verwende `TIMESTAMPTZ` auf PG, `DATETIME` auf MySQL mit gesetzter Sitzungs-TZ, ISO-8601-Strings auf SQLite.
 
@@ -1238,6 +1238,19 @@ Für Reverse-FKs (parent.children) verwende die makro-generierte `_set`-Methode:
 let author_posts = author.post_set(&pool).await?;
 ```
 
+### Many-to-many- und Reverse-Relationen vorab laden
+
+Für eine Liste von Eltern lädt `fetch_with_prefetch_related` eine Many-to-many- (`m2m(name = "tags", ...)`) oder Reverse-FK-Relation (`reverse_has(name = "items", ...)`) über ihren Namen. Es führt eine Abfrage für die Eltern und eine für die Relation aus, egal wie viele Eltern es sind.
+
+`rustango::sql::fetch_with_prefetch_related(Post::objects(), "tags", &pool)` liefert `Vec<(Post, Vec<Tag>)>`. Um die verwandten Zeilen zu filtern oder zu sortieren, übergib ein Queryset an `fetch_with_prefetch_related_filtered(Post::objects(), "tags", Tag::objects().order_by(&[("name", false)]), &pool)`; ein Limit darauf gilt für alle Eltern zusammen. `crates/rustango/tests/prefetch_related_tri.rs` führt beides auf PostgreSQL, MySQL und SQLite aus.
+
+- Die Eltern-Keys gehen in eine `IN`-Liste, die jenseits des Bind-Limits des Backends in Chargen geteilt wird (65.535 auf MySQL, 32.766 auf SQLite; PostgreSQL bindet ein Array).
+- Eine Many-to-many-Relation joint ihre Through-Tabelle, ein Tag, den viele Posts teilen, kommt also unter jedem Post einmal zurück. Integer-, `String`- und `Uuid`-Keys funktionieren alle.
+- Ein Reverse-FK schlüsselt auf die `self_pk_column` der Relation, Kinder, die auf eine Unique-Spalte zeigen (`ForeignKey<Shop, String>` mit `on = "code"`), werden also richtig gruppiert.
+- Ein unbekannter Name ist `QueryError::UnknownField`; das falsche Kindmodell anzufragen ist `ExecError::PrefetchTargetMismatch`.
+
+Um statt über den Relationsnamen über ein FK-Feld vorab zu laden, funktioniert `fetch_with_prefetch_pool(Author::objects(), "author", &pool)` weiterhin genauso.
+
 ### Benutzerdefinierte Joins
 
 Wenn der Join nicht von einem Foreign Key getrieben wird — ein benutzerdefiniertes Prädikat, ein Non-Equi-Join, INNER statt LEFT, ein Self-Join oder ein Join auf einer Nicht-PK-Spalte — verwende `.join(Join { … })`. Sein `on`-Feld nimmt jedes `WhereExpr`, sodass `and()` / `or()` / `Not` / Funktionsaufrufe / Spalte-gegen-Spalte / Literalfilter alle frei komponieren.
@@ -1314,6 +1327,7 @@ Das `Join.project`-Feld weist den Writer an, `<alias>"."<col>" AS "<alias>__<col
 | Bedarf | Werkzeug |
 |---|---|
 | Verwandte Zeilen zusammen mit der Hauptzeile ziehen | `select_related` |
+| Many-to-many- oder Reverse-FK-Zeilen für eine Liste von Eltern laden | `fetch_with_prefetch_related` |
 | Hauptzeilen nach einem Prädikat der verwandten Tabelle filtern | `exists(...)` / `not_exists(...)` |
 | Per INNER statt LEFT filtern oder mit zusätzlichen ON-Prädikaten | `.join(...)` |
 | Self-Join (z. B. `employee.manager_id = manager.id`) | `.join(...)` |
@@ -1384,9 +1398,8 @@ Senkt intern zu `save_partial` ab — gleiche Audit-Verengung, gleiche `Auto::Un
 > oder einen Postgres-Executor — auf einem MySQL- oder SQLite-Build existieren
 > sie nicht. Einen tri-dialektalen einfachen Bulk-Insert gibt es nicht; die
 > Mehr-Backend-Batch-Writer sind `bulk_upsert_pool` und
-> `bulk_insert_or_ignore_pool`, beide mit `&Pool`. Zusammen mit dem übrigen
-> Namens-Split verfolgt in
-> [#1293](https://github.com/ujeenet/rustango/issues/1293).
+> `bulk_insert_or_ignore_pool`, beide mit `&Pool`. Das gehört zum selben
+> bekannten Namens-Split.
 
 
 > **Fallstrick — Massenoperationen überspringen Per-Zeile-Hooks.** `bulk_insert`, Queryset
@@ -1557,6 +1570,11 @@ let typed = Event::objects()
 
 Lies/schreibe Rust-Typen über `serde_json::from_value` / `to_value`.
 
+Backends unterscheiden sich an zwei Stellen:
+
+- `json_contains` liefert auf PostgreSQL und MySQL dieselben Zeilen, wenn der Wert an jedem Key die Form der Spalte hat (`{"tags": ["a"]}` gegen `{"tags": ["a", "b"]}`). MySQL trifft zusätzlich einen Skalar innerhalb eines Arrays (`{"tags": "a"}`); PostgreSQL nicht. SQLite hat keine Containment-Prüfung.
+- `Event::data.contains(..)` / `icontains(..)` und Admin-`search_fields` vergleichen den gespeicherten JSON-Text. Das stimmt nur innerhalb eines Keys oder String-Werts überein (`icontains("alice")`): SQLite speichert `{"a":1}`, PostgreSQL und MySQL geben `{"a": 1}` aus, die Keys nach Länge, dann byteweise sortiert; SQLite behält den Text, den rustango geschrieben hat.
+
 ---
 
 ## Soft Delete
@@ -1613,6 +1631,8 @@ with_source(
 ```
 
 Das Per-Zeile-Verlaufspanel des Admins liest aus dieser Tabelle; der modellübergreifende Feed ist unter `/__audit`.
+
+Auditierte Zeilen, die ein FK `on_delete = "cascade"` entfernt, bekommen einen `delete`-Eintrag, gelesen vor dem Löschen in dessen Transaktion. Zeilen, die `set_null` / `set_default` ändern, und Kindtabellen, die `Model::truncate` auf PostgreSQL mit `CASCADE` leert, werden nicht auditiert. Das läuft auf Pool- und Transaktionspfaden (`delete_pool`, `PoolTx`, `PoolConn`), 500 gelöschte Zeilen auf einmal: Die kaskadierten Zeilen jedes Blocks werden mit `FOR UPDATE` gelesen und mit ihren Einträgen im Speicher gehalten, bis der Block gelöscht ist. Ein roher sqlx-Executor (`Model::delete(&PgPool)`, `delete_on`) führt ein schlichtes DELETE aus und loggt stattdessen einmalig eine Warnung. Ein `DEFERRABLE INITIALLY DEFERRED`-FK kaskadiert erst beim Commit, seine Zeilen bekommen also keine Einträge.
 
 Bereinigung:
 
@@ -1732,7 +1752,7 @@ Post::objects().where_(Post::author_id.eq(42));
 | `__between` / `__range` | `BETWEEN … AND …` | 2-elementige `SqlValue::List` | an beiden Enden inklusiv |
 | `__regex` / `__iregex` | PG `~` / `~*`, MySQL/SQLite `REGEXP` | String | case-insensitiv emuliert auf MySQL/SQLite über `LOWER()`-Umschließung; SQLite braucht eine `regexp`-User-Funktion |
 
-> **LIKE-Metazeichen werden escaped.** `__contains` / `__startswith` / `__endswith` (und ihre `i`-Varianten) behandeln den Wert als **wörtlichen** Teilstring — ein `%` oder `_` darin passt auf sich selbst, nicht als Platzhalter. Das Framework escaped sie und gibt `ESCAPE '!'` aus, auf allen drei Dialekten wirksam (#1257). Für ein rohes Muster mit eigenen `%` / `_` nutze `__like` / `__ilike`, die den Wert wörtlich binden.
+> **LIKE-Metazeichen werden escaped.** `__contains` / `__startswith` / `__endswith` (und ihre `i`-Varianten) behandeln den Wert als **wörtlichen** Teilstring — ein `%` oder `_` darin passt auf sich selbst, nicht als Platzhalter. Das Framework escaped sie und gibt `ESCAPE '!'` aus, auf allen drei Dialekten wirksam. Für ein rohes Muster mit eigenen `%` / `_` nutze `__like` / `__ilike`, die den Wert wörtlich binden.
 
 **Fehler tauchen bei `.compile()` auf, nicht zur `.filter()`-Aufrufzeit** — Wertform-Diskrepanzen (z. B. `__in` mit einem Skalar, `__isnull` mit einem Nicht-Bool, `__between` mit falscher Stelligkeit) und unbekannte Suffixe (`status__nope`) geben `QueryError::UnknownLookup` / `QueryError::InvalidLookupValue` von `.compile()` zurück, sodass die fluente Kette typsauber bleibt. Verkettete Traversierungen (`author__name__icontains`) werden in v0.39 **nicht** unterstützt — der Splitter nimmt das Suffix nach dem ersten `__`, sodass der ganze Schwanz `name__icontains` als unbekanntes Suffix behandelt wird.
 
@@ -1754,16 +1774,36 @@ async fn handler(mut t: Tenant) -> Result<...> {
 }
 ```
 
-`fetch_on` ist **nur für Postgres** (`#[cfg(feature = "postgres")]`, gebunden an
-`Database = sqlx::Postgres`) und nimmt jeden *Postgres*-sqlx-Executor entgegen —
-`&PgPool`, `&mut PgConnection` oder eine `Transaction`. Es existiert genau für den
-Fall oben: Schema-Mode-Tenants teilen sich den Registry-Pool, verlassen sich aber
-auf ein `SET search_path` pro Checkout, sodass ein `&PgPool` stillschweigend das
-falsche Schema träfe.
+Schema-Mode-Tenants teilen sich den Registry-Pool, verlassen sich aber auf ein
+`SET search_path` pro Checkout, sodass ein `&PgPool` stillschweigend das falsche
+Schema träfe.
 
-`fetch` ist **kein** Zucker dafür. Es ist eine eigene `FetcherPool`-Methode, die
-`&Pool` nimmt, pro Dialekt dispatcht und auf allen drei Backends verfügbar ist —
-auf einem MySQL- oder SQLite-Build existiert von beiden also nur `fetch`.
+## Eine Verbindung pro Request
+
+Jedes `fetch(&pool)` leiht sich seine eigene Verbindung. Um die Abfragen eines
+Handlers auf einer auszuführen, nimm sie mit `let mut conn = pool.acquire().await?;`
+(ein `PoolConn`) und übergib `&mut conn` an die `_on`-Methoden, etwa
+`Post::objects().fetch_on(&mut conn)`. Das funktioniert auf allen drei Backends.
+`conn.begin()` öffnet ein `PoolTx` auf derselben Verbindung.
+
+Die `_on`-Methoden sind `fetch_on`, `first_on`, `count_on`, `exists_on`,
+`fetch_paginated_on`, `in_bulk_on`, `explain_on`, `delete_on` auf einem Queryset,
+`execute_on` auf `update()`, `ForeignKey::get_on`, `annotate_count_children_on`,
+`fetch_aggregate_on` sowie `fetch_on` auf `values()`, `values_list()`,
+`values_list_flat()` (plus `first_on`) und `aggregate()`. Sie nehmen jeden
+`SqlExecutor`: `&mut PoolConn`, `&mut PoolTx`, `&Pool` oder auf Postgres jeden
+sqlx-Executor (`&PgPool`, `&mut PgConnection`, `t.conn()`).
+
+Eine Verbindung geht mit jedem Sitzungszustand, den du auf ihr gesetzt hast
+(`SET …`, MySQL-`@vars`, SQLite-`PRAGMA`), zurück in den Pool; der nächste
+Ausleiher erbt ihn, und auf einem Registry-Pool kann das der Request eines anderen
+Tenants sein. Rufe nach einer solchen Änderung `conn.close_on_drop()` auf, damit
+die Verbindung geschlossen statt wiederverwendet wird.
+
+Solange du ein `PoolConn` hältst, übergib es an jede Abfrage: Eine `&Pool`-Methode
+im selben Handler leiht sich eine zweite Verbindung. Mit `max_connections` solchen
+Requests gleichzeitig hält jeder eine und wartet auf eine weitere, und alle laufen
+in den Timeout. Gib die Verbindung frei, bevor du Code aufrufst, der `&Pool` nimmt.
 
 ---
 
