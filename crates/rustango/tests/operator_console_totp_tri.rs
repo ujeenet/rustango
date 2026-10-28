@@ -8,7 +8,7 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::response::Response;
 use axum::Router;
-use rustango::sql::{sqlx, Auto, FetcherPool as _, Pool};
+use rustango::sql::{sqlx, Auto, FetcherPool as _, Pool, UpdaterPool as _};
 use rustango::tenancy::{Operator, OperatorTotp, TenantPoolInvalidator, TenantPools};
 use rustango::totp::{self, TotpSecret};
 use rustango::tri_dialect_test;
@@ -408,6 +408,57 @@ async fn a_required_policy_enrolls_at_sign_in(pool: &Pool) {
     assert_eq!(confirmed, vec![true]);
 }
 
+/// A weak hash is upgraded once the code passes, never by the password alone.
+async fn a_code_sign_in_upgrades_a_weak_hash(pool: &Pool) {
+    use rustango::passwords::needs_rehash;
+    // argon2id m=8,t=1,p=1 of "pw-weak-hash".
+    const WEAK: &str = "$argon2id$v=19$m=8,t=1,p=1$c2FsdHNhbHRzYWx0c2FsdA$Tk2Yd9kayx5c9Zj6ox/S6WGhYHdSHI6LCO1srlux3Ns";
+    let app = app(pool, true);
+    let op = operator(pool).await;
+    let id = op.id.get().copied().unwrap();
+    Operator::objects()
+        .filter("id", id)
+        .update()
+        .set("password_hash", WEAK)
+        .execute_pool(pool)
+        .await
+        .unwrap();
+    let stored = || async {
+        Operator::objects()
+            .filter("id", id)
+            .fetch(pool)
+            .await
+            .unwrap()
+            .remove(0)
+            .password_hash
+    };
+    let now = fresh_step().await;
+    let body = format!("username={}&password=pw-weak-hash&next=/orgs", op.username);
+    let resp = send(&app, "POST", "/login", "", body).await;
+    let pending = set_cookie(&resp, PENDING).expect("pending cookie");
+    assert_eq!(stored().await, WEAK, "the password alone wrote the hash");
+    let page = html(send(&app, "GET", "/login/totp", &pending, String::new()).await).await;
+    let code = totp::generate_at(&shown_key(&page), now, 30, 6);
+    let resp = send(
+        &app,
+        "POST",
+        "/login/totp",
+        &pending,
+        format!("totp_code={code}&next=/orgs"),
+    )
+    .await;
+    let session = set_cookie(&resp, SESSION).expect("the code signs in");
+    let new = stored().await;
+    assert_ne!(new, WEAK, "the weak hash is still stored");
+    assert!(!needs_rehash(&new), "{new}");
+    let orgs = send(&app, "GET", "/orgs", &session, String::new()).await;
+    assert_eq!(
+        orgs.status(),
+        StatusCode::OK,
+        "the session fits the new hash"
+    );
+}
+
 /// Without a key the page says how to set one, not a link back to itself.
 async fn without_a_key_the_page_says_how_to_set_it(pool: &Pool) {
     let app = app(pool, false);
@@ -433,5 +484,6 @@ tri_dialect_test!(
         enroll_sign_in_replay_disable,
         the_pending_state_opens_no_page,
         a_required_policy_enrolls_at_sign_in,
+        a_code_sign_in_upgrades_a_weak_hash,
     ]
 );
