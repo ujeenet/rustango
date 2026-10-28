@@ -253,7 +253,11 @@ emisor y hora).
   memoria al iniciar sesión; los formularios de edición enmascaran el secreto
   almacenado.
 - La cookie de flujo es de vida corta (10 min), `HttpOnly`, `SameSite=Lax`
-  y `Secure` sobre HTTPS; el handshake lleva PKCE + un `state` firmado.
+  y `Secure` según la configuración — **no** según el esquema de la petición. La
+  precedencia es `security.secure_cookies` (`true` por defecto en el camino de
+  `manage`, así que falla de forma cerrada), y si no hay nada definido, «segura en
+  el nivel prod» a partir de `RUSTANGO_ENV`. Nada comprueba si la petición llegó
+  realmente por HTTPS. El handshake lleva PKCE + un `state` firmado.
 - Las sesiones de SSO son la sesión de administrador corriente — rotar o
   desactivar al usuario vinculado las invalida a través del control en vivo
   existente.

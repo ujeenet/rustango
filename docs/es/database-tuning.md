@@ -100,6 +100,8 @@ descubras bajo carga.
 | `pool_acquire_timeout_secs` | `RUSTANGO_DB_ACQUIRE_TIMEOUT_SECS` | 5 | Cuánto espera quien pide una conexión antes de fallar. |
 | `pool_idle_timeout_secs` | `RUSTANGO_DB_IDLE_TIMEOUT_SECS` | por defecto del driver | Cierra conexiones que llevan este tiempo ociosas. |
 | `pool_max_lifetime_secs` | `RUSTANGO_DB_MAX_LIFETIME_SECS` | por defecto del driver | Cierra conexiones con esta antigüedad, se usen o no. |
+| `pool_test_before_acquire` | `RUSTANGO_DB_TEST_BEFORE_ACQUIRE` | `false` | Hace ping a cada conexión antes de entregarla. Desactivado, solo se hace ping a las conexiones inactivas más de `RUSTANGO_DB_IDLE_PING_SECS`. |
+| `pool_idle_ping_secs` | `RUSTANGO_DB_IDLE_PING_SECS` | 30 | Con el ping desactivado, hace ping a una conexión inactiva al menos este tiempo antes de entregarla. |
 
 Dejar un parámetro sin configurar no es lo mismo que ponerlo a cero. Sin
 configurar significa *se aplica el valor por defecto del driver*: el

@@ -152,6 +152,11 @@ let api = axum::Router::new()
 // hand `api` to your tenancy Cli/Builder as usual
 ```
 
+Con varios backends compilados, el tipo de tenant por defecto es Postgres. Para un
+tenancy SQLite o MySQL usa `secure_tenant_router_from_settings_for::<sqlx::Sqlite>`
+(o `tenant_router_authed_for`). Sin `config`,
+`secure_tenant_router_for::<sqlx::Sqlite>()` es `secure_tenant_router()` para ese backend.
+
 El router autenticado monta: `POST {prefix}` (JSON-RPC), `GET {prefix}`
 (notificaciones SSE), `POST {prefix}/token` (credencial → JWT),
 `POST {prefix}/oauth/token` (OAuth 2.1), y los dos documentos de descubrimiento
@@ -403,7 +408,7 @@ cargo test -p rustango --features sqlite,mcp,config --test 'mcp_*'
 
 Arranca la demo (siguiente sección) y háblale directamente. La demo protege
 **cada** método detrás de un token de agente (una llamada sin autenticar devuelve
-`401`), así que emite uno primero — la demo imprime el secreto del agente al
+`401` con un cuerpo de error JSON-RPC, código `-32001`), así que emite uno primero — la demo imprime el secreto del agente al
 arrancar:
 
 ```bash

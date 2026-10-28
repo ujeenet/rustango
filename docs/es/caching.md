@@ -51,12 +51,17 @@ use std::sync::Arc;
 let cache: BoxedCache = Arc::new(InMemoryCache::new());
 ```
 
-| Backend | Feature | Usar para |
-|---|---|---|
-| `InMemoryCache` | `cache` | dev, tests, un solo proceso (HashMap por proceso + TTL) |
-| `RedisCache` | `cache-redis` | producción; compartido entre réplicas |
-| `DatabaseCache` | `cache` | producción sin Redis; una tabla `rustango_cache` |
-| `NullCache` | `cache` | deshabilitar la caché (cada lectura falla) — práctico en tests |
+| Backend | Feature | `[cache] backend` | Usar para |
+|---|---|---|---|
+| `InMemoryCache` | `cache` | `memory` *(por defecto)* | dev, tests, un solo proceso (HashMap por proceso + TTL) |
+| `RedisCache` | `cache-redis` | `redis` | producción; compartido entre réplicas |
+| `DatabaseCache` | `cache` | `db` / `database` | producción sin Redis; una tabla `rustango_cache` |
+| `FileCache` | `cache` | `file` | un archivo por clave bajo `file_cache_dir`; compartido solo si el directorio lo está |
+| `NullCache` | `cache` | `null` / `none` | deshabilitar la caché (cada lectura falla) — práctico en tests |
+
+No existe el valor `postgres` — el backend de BD es `db` o `database`. Un
+comentario de documentación de `CacheSettings` decía lo contrario hasta hace
+poco, y un valor no reconocido te da una caché en memoria con una advertencia.
 
 ---
 
@@ -106,7 +111,8 @@ sirve desde la caché.
 
 > **Invalida al escribir.** Cache-aside significa datos obsoletos hasta que
 > expira el TTL. Para datos que cambian, haz también `delete(key)` cuando los
-> escribes — p. ej. desde una [señal `post_save`](orm.md) — para que la siguiente
+> escribes — p. ej. desde una [señal `post_save`](orm.md) que envíes tras guardar (guardar no la
+> envía) — para que la siguiente
 > lectura recalcule.
 
 ---
@@ -154,7 +160,9 @@ de claves únicas no puede hacer crecer el proceso sin límite, pero también
 significa que **una entrada puede desaparecer antes de que expire su TTL** si es
 la menos usada recientemente cuando se alcanza el presupuesto. El desalojo
 elimina primero las entradas ya expiradas y después las menos usadas
-recientemente, hasta cumplir ambos presupuestos.
+recientemente, hasta quedar un 10 % por debajo de ambos presupuestos. Las
+entradas escritas con `set_forever` (feature flags) quedan fuera de los
+presupuestos y nunca se desalojan.
 
 Así que trata una lectura de caché como «puede estar ausente» incluso dentro del
 TTL. Eso vale para cualquier backend de caché, pero aquí tiene una causa

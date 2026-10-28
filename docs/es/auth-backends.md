@@ -17,7 +17,9 @@ rutas y el extractor `CurrentUser` para leer el resultado.
 > `ApiKeyBackend`, `JwtBackend`, `AuthUser`, `AuthError`) y
 > `rustango::tenancy::{RouterAuthExt, CurrentUser}` — detrás de la característica
 > `tenancy`. Un registro portable e independiente de la base de datos también
-> vive en `rustango::auth_backends` (siempre compilado).
+> vive en `rustango::auth_backends`, que necesita la feature interna `_async_trait`
+> — la activan `cache`, `email`, `jobs` y `oauth2`, así que la mayoría de los
+> builds la tienen, pero uno mínimo no.
 >
 > **Versión ejecutable:** cada fragmento está copiado de
 > [`auth_backends_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_backends_doc.rs)
@@ -144,6 +146,26 @@ let app = Router::new()
     .route("/profile", get(profile))
     .require_auth(backends);           // 401 if no backend matches
 ```
+
+> **Antes de 0.57.11 recibían un `Pool`.** Ya no, y el cambio es una corrección
+> de seguridad, no un arreglo cosmético. El pool se capturaba al construir el
+> router y se reutilizaba en cada petición, así que una credencial emitida por un
+> tenant autenticaba en el host de otro tenant — los backends buscaban al usuario
+> en la base de datos con la que se hubiera construido el router, y
+> `is_superuser` seguía adelante en una extensión de la petición sin volver a
+> consultarse.
+>
+> Ahora el pool sale del tenant resuelto en **cada petición**. Migrar consiste en
+> quitar el argumento:
+>
+> ```rust
+> .require_auth(backends, pool.clone())  →  .require_auth(backends)
+> .require_perm("post.add", pool)        →  .require_perm("post.add")
+> ```
+>
+> Monta la capa de tenancy por fuera de estas. Sin un contexto de tenant en las
+> extensiones de la petición fallan de forma cerrada con un `500` en lugar de
+> adivinar una base de datos.
 
 Comportamiento verificado:
 

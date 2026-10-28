@@ -105,6 +105,15 @@ queue.start().await;
 queue.shutdown().await;   // on shutdown: drain in-flight jobs, then stop
 ```
 
+`shutdown()` da a los trabajos en curso un periodo de gracia (`shutdown_grace`,
+5 s por defecto), y luego los aborta y los vuelve a encolar. Los trabajos en cola
+y los reintentos aparcados siguen en cola, y un nuevo `start()` los recoge.
+
+Los trabajos son **at-least-once**. Ninguna señal de parada llega a un trabajo en
+curso, y un trabajo abortado vuelve a ejecutarse desde el principio (la cola en BD
+libera su fila aunque el trabajo acabara de terminar). El aborto gasta un intento.
+Haz que cada trabajo sea idempotente.
+
 Mantén el `Arc<InMemoryJobQueue>` en el estado de tu aplicación para que los
 handlers puedan alcanzarlo.
 
@@ -261,6 +270,14 @@ con un barrido periódico
 [`reclaim_stuck_jobs_pool`](#la-cola-persistente-producción) para recuperar
 trabajos de un worker que se ha caído.
 
+Dos colas distintas sobre una tabla (por ejemplo, un mailer y un generador de
+informes con sus propios handlers) se quitan los trabajos entre sí. Da a cada una
+su nombre con `.queue_name("mailer")` en el lado que despacha y en el que
+trabaja: una cola con nombre solo ejecuta sus trabajos, y una sin nombre solo los
+trabajos sin nombre. Los workers anteriores a `queue_name` lo ignoran y ejecutan
+también los trabajos con nombre: detenlos antes de despachar en una cola con
+nombre.
+
 ---
 
 ## Reintentos y backoff
@@ -349,6 +366,11 @@ queue.start().await;
 queue.dispatch(&WelcomeEmail { user_id: 42 }).await?;
 ```
 
+**Despachar dentro de una transacción.** Dentro de un bloque `atomic` sobre el
+propio pool de la cola, `dispatch` se une al bloque: el trabajo se revierte con
+él, y ningún worker despierta antes del commit. No mantengas el `TxGuard` del
+bloque durante la llamada.
+
 **Recuperar workers caídos.** Si un worker muere a mitad de un trabajo, la fila
 queda bloqueada. Ejecuta un barrido periódico para liberar los bloqueos más
 antiguos que un umbral, de modo que otro worker retome el trabajo:
@@ -357,6 +379,12 @@ antiguos que un umbral, de modo que otro worker retome el trabajo:
 // e.g. from a scheduled task every few minutes:
 let reclaimed = DatabaseJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(300)).await?;
 ```
+
+Un trabajo en curso renueva su bloqueo cada `heartbeat_interval` (10 s por
+defecto), así que mantén el umbral muy por encima. Cada recogida gasta un intento,
+así que un trabajo que tumba a su worker va a dead-letter cuando se agotan las
+`MAX_ATTEMPTS` ejecuciones. Un trabajo que hace panic es un fallo `Retryable`; el
+worker sigue funcionando.
 
 Tanto el flujo dispatch-and-run como `reclaim_stuck_jobs_pool` se prueban con
 dogfooding contra SQLite en `jobs_sqlite_live.rs`.
@@ -525,7 +553,7 @@ rechazado es el resultado esperado, así que no se registra nada. Seguimiento en
 | `Queue(String)` | error interno de la cola (serialización/registro) |
 
 **Métodos de `JobQueue`:** `register::<T>()` · `dispatch(&payload)` · `start()` ·
-`shutdown()` · `pending_count()`. `DatabaseJobQueue` añade
+`shutdown()` · `pending_count()`. Ambas colas tienen `shutdown_grace`. `DatabaseJobQueue` añade
 `ensure_table_pool`, `with_workers_pool`, `poll_interval` y
 `reclaim_stuck_jobs_pool`.
 

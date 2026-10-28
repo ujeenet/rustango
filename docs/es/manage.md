@@ -824,19 +824,45 @@ nuevo sobre un slug existente se rechaza de entrada con ``tenant slug
 ```bash
 cargo run -- create-tenant acme --display-name "ACME Corp"
 cargo run -- create-tenant beta --mode database --database-url postgres://...
+cargo run -- create-tenant gamma --mode database --server main
 ```
 
 | Flag | Descripción |
 |---|---|
 | `--display-name <name>` | Etiqueta legible por humanos que se muestra en las barras laterales del admin |
-| `--mode schema \| database` | Modo de almacenamiento (por defecto: schema) |
-| `--database-url <url>` | URL de BD específica del tenant (requerida para el modo database) |
+| `--mode schema \| database` | Modo de almacenamiento (por defecto: schema, o database si se da `--database-url` o `--server`) |
+| `--database-url <url>` | Una base de datos existente para el tenant |
+| `--server <name>` | Crea en su lugar la base de datos en este [servidor guardado](#servidores-de-bases-de-datos) |
 | `--host-pattern <pattern>` | Anula el patrón de host usado por `SubdomainResolver` |
 | `--no-migrate` | Omite aplicar las migraciones con scope de tenant tras el aprovisionamiento |
-| `--backend postgres \| mysql \| sqlite` | Driver para un tenant en modo base (por defecto: `postgres`). Se valida contra `--mode` |
+| `--backend postgres \| mysql \| sqlite` | Debe ser el backend del registro, que es el valor por defecto |
 | `--schema-name <s>` | Sobrescribe el nombre de esquema generado en modo esquema |
 | `--port <n>` | Puerto en el que el tenant es accesible, para el enrutado |
 | `--path-prefix <s>` | Prefijo de ruta bajo el que el tenant es accesible, para el enrutado |
+
+Cada modo comprueba sus permisos antes de crear nada y, cuando falta uno, lo
+nombra e imprime las sentencias que lo arreglan: el modo schema necesita el
+`CREATE` del login del registro sobre la base de datos del registro, `--server`
+necesita los permisos de administración descritos abajo, `--database-url` no
+necesita ninguno. Ver [Permisos](tenant-databases.md#permisos).
+
+Con `--server`, primero se comprueban los permisos de administración del
+servidor; luego se crea una base de datos con exactamente el nombre del slug y
+su propio login (contraseña aleatoria, con permisos solo sobre esa base de
+datos); SQLite crea `<dir>/<slug>.db`. Una base de datos existente con ese
+nombre se rechaza, nunca se reutiliza. Después, el login nuevo debe poder
+iniciar sesión (una regla de pg_hba o una cuenta MySQL que lo tape falla aquí).
+En MySQL la base de datos copia la collation utf8mb4 del registro. La URL del
+tenant se guarda sellada y la base de datos queda registrada en
+`rustango_tenant_databases`. Si falla el registro, la migración o la
+activación, la base de datos, el login y la fila del tenant nuevos se eliminan
+de nuevo, así que basta con volver a ejecutar el mismo comando. Si esa
+eliminación falla, el tenant inactivo y su registro se quedan: un reintento que
+reanuda (webhook, `create_tenant_if_missing`) lo migra en su sitio. El registro
+se escribe antes del `CREATE`, así que una ejecución interrumpida a medias deja
+una base de datos que rustango puede encontrar: un reintento pasados diez
+minutos la elimina y empieza de nuevo, y rechaza una base de datos que no puede
+demostrar que creó.
 
 ### `edit-tenant <slug> [options]`
 
@@ -902,9 +928,8 @@ cargo run -- drop-tenant acme --confirm acme
 **Elimina un tenant permanentemente.** Borra el esquema del tenant y elimina su
 fila de `rustango_orgs`, sin deshacer posible. Cuando no estás ejecutando de
 forma interactiva (sin terminal adjunto), debes pasar `--confirm <slug>` con el
-slug tecleado de nuevo. Para los tenants en modo database, la base de datos
-subyacente se deja en su sitio a menos que también pases `--purge-database`. Sin
-esa bandera el comando **se niega por completo** para tenants en modo base — no
+slug tecleado de nuevo. Para los tenants en modo database, el comando **se niega
+por completo** salvo que también pases `--purge-database` — no
 borra la fila `Org` dejando la base, no hace absolutamente nada
 (tenancy/manage/tenants.rs:479).
 
@@ -917,6 +942,26 @@ Con varios servidores, desactiva primero (`drop-tenant`) y espera 30 s. Un
 servidor cuya caché aún tiene un tenant en modo schema mantiene
 `search_path = <schema>, public`; al borrar el schema, sus consultas caen en
 `public` hasta que la caché se refresca.
+
+Cada paso se imprime al terminar y la purga queda registrada como una ejecución
+de tipo `purge` (`list-runs --kind purge`). Una base de datos que rustango creó
+en un servidor guardado la elimina el administrador de ese servidor, junto con
+su login y su registro; todos los rechazos se evalúan antes de cambiar nada. Ver
+[Bases de datos de tenant en un servidor guardado](tenant-databases.md).
+
+### `rotate-tenant-password <slug>`
+
+Da una contraseña aleatoria nueva al login que rustango creó para el tenant en
+un servidor guardado: se cambia en el servidor, luego se sella y se guarda sobre
+la URL antigua, y después se reabren los pools del tenant. Los pasos se imprimen
+al terminar; la ejecución queda registrada como `rotate_password`. Los demás
+pods recogen la URL nueva en un sondeo de huella; ver
+[Bases de datos de tenant en un servidor guardado](tenant-databases.md) para esa
+ventana.
+
+```bash
+cargo run -- rotate-tenant-password acme
+```
 
 ### `list-tenants`
 
@@ -977,14 +1022,21 @@ cargo run -- remove-db-server main
 |---|---|
 | `add-db-server <name> --host <h> [--port <n>] --user <u> [--tls <mode>] [--maintenance-db <db>]` | Guarda un servidor. SQLite: `--sqlite-dir <dir>` en su lugar |
 | `list-db-servers` | Todos los servidores guardados, sin secretos |
-| `test-db-server <name>` | Inicia sesión y muestra la versión y los permisos del login; falla si no se puede aprovisionar |
+| `test-db-server <name>` | Inicia sesión y muestra la versión y los permisos del login de administración, una línea por cada uno; falla nombrando lo que falta y el `GRANT` que hay que ejecutar |
 | `edit-db-server <name> [mismos flags] [--prompt-password \| --clear-password] [--on\|--off]` | Cambia un servidor; `none` vacía `--tls` o `--maintenance-db` |
 | `remove-db-server <name>` | Lo borra; se rechaza mientras la base de un tenant esté en él |
 
 La contraseña se pide sin eco, o se lee de la variable indicada con
 `--password-env <VAR>`; `--no-password` no guarda ninguna. Nunca viene de argv
 ni se imprime. Se guarda sellada, así que `RUSTANGO_SECRET_KEY` debe estar
-definida.
+definida. `--tls` acepta `disable`, `prefer`, `require`, `verify-ca` o
+`verify-full`; un servidor nuevo recibe `require` salvo que pases otro.
+`edit-db-server --prompt-password` conserva la contraseña guardada ante una
+respuesta vacía. Borrar se rechaza mientras la URL de un tenant apunte al
+servidor, o no se pueda resolver o interpretar. Los hosts se comparan ignorando
+mayúsculas, los corchetes de IPv6 y un punto final; `localhost` y `127.0.0.1`
+cuentan como hosts distintos. `reseal-tenant-secrets` también vuelve a sellar
+las contraseñas de los servidores.
 
 ### `create-operator <username> --password <pwd>`
 
@@ -1599,7 +1651,7 @@ alcanzan mediante `Cli::tenancy()`.
 |---|---|
 | `dumpdata` | Exporta filas como fixtures JSON |
 | `loaddata <fixture.json> [--fail-fast]` | Vuelve a cargar fixtures JSON. Una carga fallida o parcial no se revierte |
-| `flush [--yes] [--app <label>] [--model <name>]` | Vacía todas las tablas de modelos; las banderas limitan el conjunto. Se omiten los modelos no gestionados y las vistas. Postgres usa `TRUNCATE … RESTART IDENTITY` y falla si una tabla fuera del filtro referencia un objetivo; MySQL / SQLite borran las filas en una transacción, hijos primero, y conservan los contadores de id. Un proyecto con tenancy necesita `--tenant <slug>` y solo vacía ese tenant |
+| `flush [--yes] [--app <label>] [--model <name>]` | Vacía todas las tablas de modelos; las banderas limitan el conjunto. Se omiten los modelos no gestionados y las vistas. Postgres usa `TRUNCATE … RESTART IDENTITY` y falla si una tabla fuera del filtro referencia un objetivo (un enlace `ON DELETE CASCADE` desde ella la vacía igualmente en MySQL / SQLite); MySQL / SQLite borran las filas en una transacción, hijos primero, y conservan los contadores de id. Un proyecto con tenancy necesita `--tenant <slug>` y solo vacía ese tenant |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Borrado masivo en streaming; `--pretend` informa sin borrar |
 | `db:dump` / `db:restore` / `db:info` | Dump / restauración / inspección nativos |
 | `dbshell` | Ejecuta el cliente nativo (`psql` / `mysql` / `sqlite3`). Solo necesita `DATABASE_URL`, no un pool funcional — se gestiona antes de construir el pool, así que funciona cuando sqlx no puede conectar |
@@ -1639,6 +1691,7 @@ alcanzan mediante `Cli::tenancy()`.
 | `create-superuser` / `set-superuser` | Crea un superusuario, o promociona a un usuario existente |
 | `create-user` / `create-operator` | Crea un usuario de tenant o un operador |
 | `reset-password` / `change-password` | Recuperación de contraseña de usuario de tenant |
+| `set-password-link <slug> <username>` | Imprime un enlace de un solo uso para que el usuario fije su propia contraseña |
 | `reset-operator-password` / `change-operator-password` | Recuperación de contraseña de operador |
 | `set-operator-active` | Activa o desactiva un operador |
 | `create-role` / `assign-role` / `revoke-role` / `list-roles` | Roles |
@@ -1652,6 +1705,7 @@ alcanzan mediante `Cli::tenancy()`.
 |---|---|
 | `create-tenant` / `edit-tenant` / `list-tenants` | Aprovisionar, editar, listar |
 | `drop-tenant` / `purge-tenant` | Desactivar (reversible) / destruir (no) |
+| `rotate-tenant-password <slug>` | Contraseña nueva para un login que rustango creó en un servidor guardado |
 | `migrate-tenants` / `migrate-registry` | Aplica migraciones a todos los tenants, o al registro |
 | `migrate-tenant-storage <slug> --to schema\|database` | Mueve un tenant entre modos de almacenamiento |
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Enrutado por host |
@@ -1660,6 +1714,16 @@ alcanzan mediante `Cli::tenancy()`.
 | `prewarm-pools` | Abre los pools de tenants antes de la primera petición |
 | `run-server` / `runserver` | Ejecuta el servidor multi-tenant |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Puntos de entrada de configuración e interactivos |
+
+**Primer administrador.** `create-tenant <slug> … --admin-email <e> [--admin-username <u>]`
+crea un superusuario tras las migraciones, antes de que el tenant entre en
+servicio; si falla, la ejecución se revierte. El administrador no recibe
+contraseña. El verbo imprime una vez un enlace para fijar la contraseña: funciona
+una sola vez, caduca en 72 horas y solo en este tenant. Dáselo al administrador.
+Está firmado con la clave de sesión de tenant del servidor
+(`RUSTANGO_SESSION_SECRET`, o el archivo de clave de desarrollo), así que ejecuta
+la CLI con la misma clave que el servidor. `set-password-link <slug> <username>`
+imprime uno nuevo.
 
 ### Audit **T**
 

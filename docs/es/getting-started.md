@@ -744,7 +744,7 @@ let roles: Vec<String> = claims.get("roles").unwrap_or_default();
 
 ## Paso 15: Añadir middleware de seguridad
 
-El middleware envuelve cada petición para añadir comportamiento transversal. Aquí apilas IDs de petición, registro de acceso, límite de tasa, CORS y cabeceras de seguridad en una cadena. Cada `.method(...)` añade una capa; el orden de las llamadas determina el orden de la pila. Consulta la [guía de Middleware](middleware.md) para el catálogo completo de capas y las reglas de ordenamiento.
+El middleware envuelve cada petición para añadir comportamiento transversal. Este va en `src/main.rs`: sustituye la línea `let api = ...` del Paso 11, para que el router esté montado por completo antes de llegar al `Cli`. Aquí apilas IDs de petición, registro de acceso, límite de tasa, CORS y cabeceras de seguridad en una cadena. Cada `.method(...)` añade una capa. Consulta la [guía de Middleware](middleware.md) para el catálogo completo de capas y las reglas de ordenamiento.
 
 ```rust
 use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt, CspBuilder};

@@ -400,7 +400,7 @@ envuelven una página de ellos en el envoltorio estándar:
 ```
 
 (Ese es el envoltorio de número de página por defecto; consulta
-[Paginación](viewsets.md#pagination) para las formas de cursor y limit/offset.)
+[Paginación](viewsets.md#paginación) para las formas de cursor y limit/offset.)
 
 ---
 
@@ -426,7 +426,7 @@ pub struct PostViewSet;
 
 El ViewSet dirige esto a través de tres métodos de `ModelSerializer` que el derive
 genera: `validate()`, `writable_source_fields()` y `from_writable_json()`. Consulta la
-[guía de ViewSets](viewsets.md#the-serializer-marriage-input--output) para el
+[guía de ViewSets](viewsets.md#el-matrimonio-con-el-serializador-entrada--salida) para el
 comportamiento completo y un ejemplo trabajado.
 
 También puedes usar un serializador **de forma independiente** — mapea una fila y

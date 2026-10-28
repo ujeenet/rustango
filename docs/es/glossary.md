@@ -77,7 +77,7 @@ usada para filtrar, buscar, ordenar o paginar los resultados — p. ej.
 **Paginación** — dividir una lista larga de resultados en páginas para que una respuesta no sea
 enorme. El **envelope (envoltorio)** es lo que rodea a la página y también te indica los
 totales — p. ej. `{"count": 137, "page": 2, "results": [ … ]}`. Consulta
-[Paginación](viewsets.md#pagination).
+[Paginación](viewsets.md#paginación).
 
 **`curl`** — una herramienta de línea de comandos para enviar peticiones a la API a mano. Los
 ejemplos `curl ...` de esta documentación te permiten probar un endpoint desde una terminal
@@ -124,10 +124,19 @@ handler y después de él — para preocupaciones transversales como el registro
 cabeceras de seguridad o el CSRF. "Layer" es la palabra de Rustango para una pieza de
 middleware. Consulta la [guía de Middleware](middleware.md).
 
-**Pool (o executor)** — la conexión a la base de datos que tu código usa para leer y
-escribir. Rustango te pide pasar el pool explícitamente a cada llamada a la base de datos
-(en vez de ocultarlo en un global), para que siempre quede claro qué toca la
-base de datos. Verás `&pool` como último argumento de las llamadas del ORM.
+**Pool** — el handle de base de datos que tu código usa para leer y escribir.
+Rustango te pide pasarlo explícitamente a cada llamada a la base de datos (en vez
+de ocultarlo en un global), para que siempre quede claro qué toca la base de
+datos. Verás `&pool` como último argumento de las llamadas del ORM.
+`rustango::sql::Pool` es un enum sobre los tres backends, y es lo que reciben los
+métodos de uso diario.
+
+**Executor** — *no* es un sinónimo de pool. Un executor es una sola conexión o una
+transacción abierta: aquello sobre lo que realmente se ejecuta una sentencia. Los
+métodos que terminan en `_on` reciben uno, y así es como metes varias sentencias
+en una misma transacción — y son solo para Postgres (`#[cfg(feature = "postgres")]`).
+La distinción decide qué métodos existen en tu build, así que
+[api-conventions](api-conventions.md#funciones) explica la regla completa.
 
 **QuerySet** — una consulta a la base de datos que construyes paso a paso en Rust
 (`Post::objects().filter(...).order_by(...)`) antes de ejecutarla. Es perezosa (lazy):

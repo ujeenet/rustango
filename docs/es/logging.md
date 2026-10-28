@@ -64,6 +64,9 @@ Usa `RUST_LOG` cuando está definida, e `info,sqlx=warn` cuando no — el valor 
 registra cada sentencia en `info`, así que un `info` sin filtrar entierra tus
 propios eventos bajo el SQL.
 
+Para logs JSON define `RUSTANGO__LOGGING__FORMAT=json` (también `pretty`, `compact`,
+`full`). Igual que `RUST_LOG`, se lee del entorno o, si no, de `./.env`.
+
 Para configurar algo más que el nivel, instala tú el subscriber. Todos los
 instaladores son idempotentes (`try_init` por debajo), así que una llamada de
 más no hace nada en lugar de provocar un panic:
@@ -190,6 +193,22 @@ filas de arriba.
 | `compact` | Desarrollo — línea única más concisa, campos de span al final | `.with_format(Format::Compact)` |
 | `json` | Producción — un objeto por evento, para Loki / CloudWatch / Datadog | `.json()` |
 
+Los cuatro se renderizan de forma distinta, cosa que no siempre fue así: antes,
+`install()` no llamaba ni a `.pretty()` ni a `.compact()`, así que ambos valores
+producían la salida `full`.
+
+### Color
+
+El color está activado cuando stdout es una terminal y desactivado cuando no lo
+es — redirigir a un fichero o ejecutar en CI no necesita configuración. Se
+respeta `NO_COLOR`. `json` y el sumidero a fichero nunca llevan color.
+
+| `color` | Comportamiento |
+|---|---|
+| `auto` | Color si y solo si stdout es una terminal y `NO_COLOR` no está definida. El valor por defecto |
+| `always` | Color incluso al redirigir |
+| `never` | Nunca color |
+
 ```rust,ignore
 rustango::logging::Setup::new()
     .json()
@@ -210,7 +229,7 @@ posición en el código (útil en desarrollo, ruidoso en producción), y
 a filtrar por ella.
 
 > Cada valor de formato llega a su propio formateador. `compact` se aceptaba y
-> luego se renderizaba como el valor por defecto — corregido (#1480).
+> luego se renderizaba como el valor por defecto — ya está corregido.
 
 ## Configurar el logging desde los ajustes
 
@@ -222,6 +241,7 @@ logging sin recompilar. La sección es `[logging]`:
 [logging]
 level             = "info,sqlx=warn"
 format            = "pretty"
+color             = "auto"
 with_line_numbers = true
 ```
 
@@ -265,15 +285,24 @@ llama a `logging::setup()` por su cuenta no reciba un segundo instalador. El
 orden en la cadena da igual: la instalación ocurre en `run()`, contra los
 ajustes finales.
 
-> **`#[rustango::main]` le gana.** La macro instala un subscriber antes incluso
-> de construir el runtime, y todos los instaladores usan `try_init`: gana el
-> primero y los posteriores se descartan en silencio. Un `main` que conserva la
-> macro *y* llama a `with_logging()` se queda por tanto con los valores por
-> defecto de la macro: tu sección `[logging]` se lee y luego no surte efecto,
-> sin que nada lo indique. Para logging dirigido por los ajustes, cambia
-> `#[rustango::main]` por `#[tokio::main]` — es lo único que un proyecto
-> generado necesita tocar. Seguimiento en
-> [#1465](https://github.com/ujeenet/rustango/issues/1465).
+> **Dile a `#[rustango::main]` que se aparte.** La macro instala un subscriber
+> antes incluso de construir el runtime, y todos los instaladores usan
+> `try_init`, así que gana el primero. Pasa `logging = false` y el tuyo se
+> instala antes:
+>
+> ```rust,ignore
+> #[rustango::main(logging = false)]
+> async fn main() -> Result<(), Box<dyn std::error::Error>> {
+>     rustango::manage::Cli::new()
+>         .with_settings_from_env()
+>         .with_logging()
+>         .run().await
+> }
+> ```
+>
+> Sin ello, la sección `[logging]` se lee y se descarta. Antes eso ocurría en
+> silencio; ahora `install()` avisa por stderr y por `tracing` cuando encuentra
+> un subscriber ya instalado.
 
 Cualquier clave se puede sobrescribir por despliegue con una variable de
 entorno, usando la sección y la clave como segmentos de ruta:
@@ -424,8 +453,27 @@ que lee el span al cerrarse.
 Merece la pena instalar esta capa aunque solo sea por el campo de inquilino:
 como los campos están en el *span*, cada evento emitido durante la petición —
 incluidos los del ORM — los lleva en su contexto de span, sin que ningún
-subsistema sepa qué es un inquilino. **No** se instala por defecto; ni
-`server::Builder`, ni `Cli`, ni el scaffolder la añaden.
+subsistema sepa qué es un inquilino.
+
+**`Cli` la instala por ti**, en cada camino de servicio, junto con el access
+log. Antes, nada en el framework la montaba, así que un `tracing::info!` en un
+handler no tenía span que lo envolviera — ni inquilino, ni correlación — y por
+eso los logs de los handlers se leían como líneas sueltas y sin contexto.
+
+`[logging] access_log = false` desactiva **solo el access log**. El span de
+petición y la cabecera `X-Request-Id` siguen montados. Ese ajuste nombra el log,
+y el servicio para el que existe — uno que registra las peticiones en el borde —
+es precisamente el que sigue queriendo contexto de traza y correlación de
+peticiones.
+
+`server::Builder` también las monta cuando `Cli` le pasa la configuración, cosa
+que hace en los caminos de servicio de tenancy — el admin del inquilino y la
+consola de operador están tras un despacho por Host que el router de la api
+nunca ve, así que las capas van en el router más externo y no en el que tú
+pasas. Un `server::Builder` construido totalmente a mano no monta ninguna de
+las capas que añade `Cli`: llama a `.observability(..)` para el span y el access
+log, y a `.security_headers(..)`, `.allowed_hosts(..)` y `.ssl_redirect(..)`
+para las capas de `[security]` — cada una está desactivada hasta que lo hagas.
 
 ## Logging en los tests
 
@@ -453,11 +501,13 @@ cubre el guard.
 - **Tu propio crate calla en `info`.** `RUST_LOG=info` aplica a todos los
   targets; si pusiste `RUST_LOG=rustango=info`, filtraste fuera tu código.
   Nombra ambos: `RUST_LOG=info,rustango=warn`.
-- **Un filtro sobre `crate::algo` no casa nada.** Los targets son cadenas; ver
+- **Un filtro sobre `crate::something` no casa nada.** Los targets son cadenas; ver
   la nota en [Targets](#targets-nombrar-el-subsistema).
 - **Fichero vacío tras un fallo.** El guard de `install()` se destruyó, o el
   proceso murió antes de que el appender volcara. Ver
   [Escribir a un fichero](#escribir-a-un-fichero).
 - **Dos subscribers, el segundo ignorado.** `try_init` significa que gana el
-  primero, en silencio. Si llamas a `logging::setup()` *y* a
-  `Cli::with_logging()`, pierde el de los ajustes.
+  primero. Si llamas a `logging::setup()` *y* a `Cli::with_logging()`, pierde el
+  de los ajustes. `install()` avisa cuando ocurre — busca
+  `logging setup ignored` en stderr. Con `#[rustango::main]`, añade
+  `logging = false`.

@@ -156,7 +156,9 @@ paginación a 10/página y el selector de acciones publish/archive.
 acotar la lista; el filtro activo se muestra como un chip con un enlace **clear**, y el
 recuento de filas y los recuentos de facetas se actualizan. Los filtros, la búsqueda, la
 ordenación y la jerarquía de fechas se componen todos en la cadena de consulta y pueden
-combinarse.
+combinarse. `?<field>=` solo funciona sobre una columna de `list_filter`, mostrada, FK o
+padre de inline, nunca sobre una secreta, y `?<field>__isnull=1` lista las filas NULL,
+`?<field>__isempty=1` las de texto vacío.
 
 [![La lista de entradas filtrada por status=published: un chip de filtro activo, la faceta coincidente resaltada, el cuadro de búsqueda y el selector de acciones masivas](../img/admin-list-filtered.png)](../img/admin-list-filtered.png)
 
@@ -255,7 +257,9 @@ lectura; en la página de **edición** se convierten en un FormSet editable (añ
 cambiar / eliminar filas en el sitio). Opciones: `kind` (`Tabular` — una fila de tabla
 por hijo, o `Stacked` — un conjunto de campos por hijo), `label`, `fields` (por defecto:
 cada escalar excepto el FK), `extra` (filas en blanco ofrecidas para añadir), `max_num`
-y `readonly_fields`.
+(un guardado que añade filas por encima se rechaza) y `readonly_fields`. Las filas inline
+pasan por el hook `view` del hijo, los campos secretos nunca se muestran, y una fila extra
+con una PK natural escrita se inserta.
 
 [![La página de detalle de una entrada: campos de solo lectura, la tabla inline de Comments y la tarjeta de registro de auditoría que muestra la entrada de creación como un diff JSON](../img/admin-detail.png)](../img/admin-detail.png)
 
@@ -299,6 +303,12 @@ Selecciona filas con las casillas, elige la acción en el selector y envía
 registras. Un nombre de acción listado en `admin(actions = ...)` sin un manejador
 registrado simplemente no aparecerá.
 
+Una acción personalizada se comprueba como una edición: `{table}.change` más un hook de
+objeto con el nombre de la acción. Una acción que borra debe decirlo con
+`register_action_with_perm(table, name, ActionPerm::Delete, handler)`, para que necesite
+`{table}.delete` y ejecute en su lugar el hook `delete`. Sigue necesitando
+`{table}.change`, y se audita y se señala como una edición.
+
 ---
 
 ## Registro de auditoría
@@ -323,6 +333,8 @@ resistente a manipulaciones. Dos lugares lo exponen:
   cruza filas, del más reciente al más antiguo, con tarjetas de faceta para entidad /
   operación / fuente y un formulario de limpieza para purgar entradas de más de N días
   (lo cual se registra a su vez como una entrada de auditoría).
+  Con `with_user_perms`, las tablas con un hook de queryset o `view` solo aparecen
+  aquí para los superusuarios.
 
 [![El feed de Activity: cada cambio auditado a través de los modelos con diffs JSON, tarjetas de faceta por tabla/operación/fuente y un formulario de limpieza](../img/admin-audit.png)](../img/admin-audit.png)
 
@@ -371,7 +383,8 @@ Tres macros de registro más se enganchan al comportamiento de un modelo registr
   monta una página/acción adicional en `/<prefix>/posts/duplicate`. El manejador es un
   `fn(Pool, Request) -> Response` asíncrono. (Los sufijos reservados como `new`,
   `__action`, `__autocomplete`, `{pk}`, `{pk}/edit`, `{pk}/delete` se omiten con una
-  advertencia.)
+  advertencia.) Con `with_user_perms`, un GET necesita `{table}.view` y un
+  POST/PUT/PATCH/DELETE `{table}.change`; añade `perm = "publish"` para exigir `{table}.publish`.
 - **Acotación de querysets** —
   `register_admin_queryset!("posts", hook)` donde `hook: fn(&Parts) -> Vec<Filter>`
   restringe lo que una petición puede ver (por ejemplo, solo las filas del usuario
@@ -380,7 +393,17 @@ Tres macros de registro más se enganchan al comportamiento de un modelo registr
   `register_admin_object_permission!("posts", "change", check)` donde
   `check: fn(&Parts, Option<&Value>) -> bool` permite o deniega por fila. Los manejadores
   incorporados consultan las acciones `add`, `change`, `delete` y `view`; varios hooks se
-  combinan con Y (AND).
+  combinan con Y (AND). Un hook `view` también oculta filas de la lista, del
+  autocompletado, de los nombres de las facetas de FK y de los nombres de las celdas
+  de FK. La lista lo ejecuta sobre cada fila que coinciden con sus filtros y su
+  búsqueda, así que los totales, las facetas, los grupos de fechas y la búsqueda
+  dejan fuera las filas ocultas; pasadas las 10 000 filas
+  (`Builder::view_hook_scan_cap`) las retiene en su lugar. Un hook de queryset hace
+  esto en SQL y escala.
+- **Campos secretos** — un campo con el widget `password`
+  (`formfield_overrides = "x: password"`) nunca muestra su valor y nunca se busca,
+  filtra ni facetea. Nada más marca un secreto: da también ese widget a los campos
+  `token` / `api_key`.
 
 Para un control de acceso más grueso basado en codename, `Builder::with_user_perms([...])`
 condiciona cada tabla a `{table}.view` / `.add` / `.change` / `.delete`: la ausencia de
@@ -432,6 +455,11 @@ let admin = admin::Builder::new(pool)
 El builder del admin de inquilino conecta esto a su `RouteConfig::logout_url`
 automáticamente, de modo que el botón siempre alcanza una ruta que existe.
 
+Desmarcar **active** en el admin también fija `sessions_revoked_at`. Una escritura
+directa del ORM en `active` no lo hace; en tu propio código usa
+`rustango::session::deactivate::<AdminUser>(&pool, id)` (o `Operator`, `User`),
+para que una reactivación posterior no reviva ninguna cookie antigua.
+
 ---
 
 ## Temas y marca
@@ -443,13 +471,64 @@ automáticamente, de modo que el botón siempre alcanza una ruta que existe.
 | `.brand_logo_url(url)` | Logo renderizado sobre el título. |
 | `.brand_name(s)` / `.brand_tagline(s)` | Sobrescrituras por inquilino del título/subtítulo. |
 | `.tenant_brand_css(css)` | Un bloque de variables CSS `:root{…}` prefabricado, incrustado inline para paletas por inquilino. |
-| `.from_settings(pool, &settings)` | Construye la marca + visibilidad a partir de las secciones `[admin]` / `[brand]` de tu archivo de configuración. |
+| `.from_settings(pool, &settings)` | Construye la marca + visibilidad a partir de las secciones `[admin]` / `[brand]` de tu archivo de configuración; ver abajo. |
 
-`from_settings` lee `admin.title`, `admin.subtitle`, `admin.logo_url`,
-`admin.theme_mode`, `admin.url_prefix`, `admin.allowed_tables`,
-`admin.read_only_tables`, recurriendo a la sección `[brand]`, y establece
-`secure_cookies` por defecto en `true`. Las llamadas imperativas al `Builder` posteriores
-siguen prevaleciendo.
+### Configuración: `[admin]` y `[brand]`
+
+`Builder::from_settings(pool, &settings)` lee `[admin]` de
+`config/default.toml` o `config/<env>_settings.toml`, y recurre a `[brand]`
+para el aspecto. El `urls.rs` de un proyecto generado ya lo llama. Las
+llamadas al `Builder` hechas después siguen prevaleciendo.
+
+```toml
+[admin]
+title            = "Acme Admin"
+subtitle         = "Back office"
+logo_url         = "/static/acme-logo.png"
+theme_mode       = "auto"           # auto | light | dark
+url_prefix       = "/admin"
+allowed_tables   = []               # empty = every registered model
+read_only_tables = ["orders"]
+```
+
+| Clave | Por defecto | Recurre a | Qué hace |
+|---|---|---|---|
+| `title` | `Rustango Admin` | `[brand] name` | Cabecera de la barra lateral y el `<title>` de la página |
+| `subtitle` | ninguno | `[brand] tagline` | Línea bajo la cabecera |
+| `logo_url` | ninguno: sin logo | `[brand] logo_url` | Imagen junto a la cabecera |
+| `theme_mode` | `auto` | `[brand] theme_mode` | Tema inicial, el `data-theme` de `<html>` |
+| `url_prefix` | `/__admin` | `[routes] admin_url` | Prefijo de cada enlace del admin. Anida el router en la misma ruta: `Builder::settings_prefix(&settings)` la devuelve, y el scaffold recurre a `/admin` |
+| `allowed_tables` | `[]`, todos los modelos | | Igual que `show_only` |
+| `read_only_tables` | `[]` | | Igual que `read_only` |
+| `primary_color` | | | Aún sin efecto; solo lo lee `manage check --deploy` |
+| `csrf_cookie_secure` | | | Aún sin efecto; la cookie CSRF sigue a `[security] secure_cookies` |
+| `session_timeout_minutes` | | | Aún sin efecto; el admin no tiene timeout por inactividad |
+
+`[brand]` también da estilo a las páginas de error incorporadas, que activa `[errors]`; ver [Páginas de error](html-views.md#páginas-de-error).
+
+`[brand] primary_color` tampoco tiñe este admin; es para la
+[consola de operador](operator-console.md#marca). La cookie de sesión es
+`Secure` salvo con `[security] secure_cookies = false`.
+
+El `config/dev_settings.toml` del scaffold define `[brand] tagline = "dev"`,
+que aquí aparece como subtítulo; ver
+[los lemas por nivel](operator-console.md#los-lemas-dev-y-staging).
+
+**Tu propio logo.** `logo_url` va tal cual a `<img src>`. Sirve el archivo
+desde tu app: ponlo en `assets/acme-logo.png`, añade
+`.with_static("/static", "./assets")` a tu cadena `Cli::new()` en `main.rs`
+y define `logo_url = "/static/acme-logo.png"`. El admin y el montaje estático
+comparten host, así que una ruta funciona. Una URL completa a un CDN también.
+`[brand] logo_path` es solo para la consola de operador; este admin lo ignora.
+
+### El admin de inquilino
+
+El admin de inquilino no lee `[admin]` ni `[brand]`. Toma su marca de la fila
+`Org` del tenant: el nombre es `brand_name`, o si no el nombre visible del
+tenant; el logo es el subido en la página de edición de la consola, o si no el
+logo del framework (`rustango.png` bajo la URL estática); el tema es
+`theme_mode` y el color de acento `primary_color`. Ver
+[marca por tenant](operator-console.md#marca-por-tenant).
 
 ---
 
@@ -473,9 +552,10 @@ indique lo contrario):
 | `skip_count_for([tables])` | Omite `COUNT(*)` en tablas enormes (el paginador muestra "Page N"). |
 | `with_user_perms([codenames])` | Condiciona tablas a `{table}.view/add/change/delete`. |
 | `register_action(table, name, handler)` | Registra un manejador de acción masiva. |
+| `register_action_with_perm(table, name, perm, handler)` | Igual, comprobado contra `ActionPerm::Delete` en lugar de `change`. |
 | `with_session_auth(secret)` | Requiere inicio de sesión por cookie (`/login` + `/logout`). |
 | `logout_url(u)` | Destino POST del botón Logout de la barra lateral. Por defecto `{admin_prefix}/logout`; los admins de inquilino lo ajustan a su ruta de logout de tenancy. |
-| `secure_cookies(bool)` | Establece el flag `Secure` (solo HTTPS) en la cookie de sesión. |
+| `secure_cookies(bool)` | Establece el flag `Secure` (solo HTTPS) en la cookie de sesión. `new` sigue a `[security].secure_cookies`, o si no es segura en el nivel prod. |
 | `theme_mode(m)` | `"light"` / `"dark"` / `"auto"`. |
 | `brand_logo_url(url)` | Logo sobre el título. |
 | `brand_name(s)` / `brand_tagline(s)` | Sobrescrituras de marca por inquilino. |

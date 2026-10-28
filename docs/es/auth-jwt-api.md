@@ -74,6 +74,9 @@ tiene su propia lista de revocación en memoria: con dos, `require_bearer` no ve
 un logout hecho en el router, y el token sigue funcionando hasta que expira. Un
 `jti_store` compartido (Redis, base de datos) también elimina esa división.
 
+`require_bearer` y `/me` solo aceptan tokens emitidos por `/login` o `/refresh`,
+y los rechazan en cuanto el usuario cierra sesión en cualquier sitio o cambia la contraseña.
+
 `Config::default()` firma con `RUSTANGO_SESSION_SECRET` (la misma clave que la
 cookie de sesión del admin) y usa TTL de 15 min de acceso / 7 días de refresco.
 Sobrescribe `prefix`, `access_ttl_secs`, `refresh_ttl_secs`, o `session_secret`

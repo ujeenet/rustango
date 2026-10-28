@@ -91,7 +91,7 @@ trasladan todos. Los tipos de campo se mapean automáticamente:
 | `String`, `&str` | `string` |
 | `bool` | `boolean` |
 | `Vec<T>` / `[T; N]` | `array` of `T` |
-| `Option<T>` | `T`, marcado `nullable` |
+| `Option<T>` | `[T, "null"]`, no obligatorio |
 | `chrono::DateTime<Utc>` | `string` / `date-time` |
 | `chrono::NaiveDate` | `string` / `date` |
 | `uuid::Uuid` | `string` / `uuid` |
@@ -143,6 +143,11 @@ DELETE), y se mantiene sincronizado con la configuración del ViewSet:
   `filter_fields` (con los lookups disponibles `__gt`/`__in`/… descritos), más
   `?search=` y `?ordering=` cuando están configurados.
 - **`read_only()`** → las operaciones de escritura (POST/PUT/PATCH/DELETE) se omiten.
+- **Cuerpos de petición** → esquemas en línea de los campos que escribe el ViewSet: sin
+  id `Auto`, sin columna `read_only` ni de borrado lógico; los campos `write_only` se
+  incluyen; nada es obligatorio en PATCH. Las respuestas referencian el esquema
+  registrado. Un campo que un filter backend fija por petición sigue apareciendo (y
+  puede aparecer como obligatorio); el servidor ignora el valor del cuerpo para él.
 - **Parámetro de ruta** → `{pk}` tipado a partir de la clave primaria del modelo.
 - **`operationId`** → `list_post`, `create_post`, … (en snake-case por acción).
 
@@ -255,7 +260,20 @@ Constructores de tipos: `string` · `integer` / `int32` · `number` · `boolean`
 ## Notas y límites
 
 - **Es OpenAPI 3.1** (`"openapi": "3.1.0"`), que se alinea con JSON Schema 2020-12 — la
-  mayoría del tooling moderno lo consume directamente.
+  mayoría del tooling moderno lo consume directamente. **Añadir una operación QUERY
+  sube la especificación a `3.2.0`**, porque es la versión que define el método:
+  `PathItem::query` la fija en todo el documento. Si tu tooling solo lee 3.1, eso es
+  lo único que le cambiará la versión sin avisar — ver [query-method](query-method.md).
+
+  Un ViewSet monta una ruta QUERY pero **no la describe por defecto**, así que el
+  documento generado sigue en 3.1.0. Actívalo cuando tu toolchain lea 3.2:
+
+  ```rust,ignore
+  ViewSet::for_model(Post::SCHEMA, &["id", "title"]).openapi_query(true)
+  ```
+
+  La ruta se sirve en ambos casos; el flag solo decide si el documento la menciona
+  y, por tanto, qué versión tiene que declarar.
 - **El router del visor necesita la característica `admin`** (para axum); `openapi` por
   sí solo basta para *construir* y serializar una especificación (`spec.to_json()`).
 - **Los visores cargan desde un CDN** — está bien para documentación interna/de
