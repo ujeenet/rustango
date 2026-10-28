@@ -1,0 +1,26 @@
+[package]
+name = "rustango-rgo-smoke"
+version = "0.0.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Smoke test: the rustango dependency renamed `rgo`, with models written as `#[rgo(...)]`."
+
+[lints]
+workspace = true
+
+[lib]
+name = "rustango_rgo_smoke"
+path = "src/lib.rs"
+
+# The derive gates its emissions on the consumer's features, so these
+# forward to `rgo/*` as in rustango-renamed-smoke.
+[features]
+default = ["postgres", "serializer"]
+postgres = ["rgo/postgres"]
+serializer = ["rgo/serializer"]
+
+[dependencies]
+# `rgo` on crates.io is another crate, so the short name is a rename.
+rgo = { package = "rustango", path = "../rustango", version = "0.61.9" }

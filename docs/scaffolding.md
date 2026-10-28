@@ -26,7 +26,7 @@
 cargo install cargo-rustango
 ```
 
-That puts a `cargo-rustango` binary on your `PATH`; Cargo then exposes it as `cargo rustango`, one global command you can run from anywhere.
+That puts a `cargo-rustango` binary on your `PATH`; Cargo then exposes it as `cargo rustango`, one global command you can run from anywhere. The same install adds `cargo-rgo`, so `cargo rgo …` is a shorter way to type any `cargo rustango …` command.
 
 ### The generator's own version is the one your project gets
 
@@ -56,6 +56,7 @@ cargo rustango new <name> [--template api|fullstack|tenant]
 - **`--template` / `-t`** — which starter to scaffold (default: **fullstack**).
 - **`--backend` / `-b`** — which database the project runs on (default: **postgres**).
 - **`--features` / `-F`** — extra **Rustango** features, comma- or space-separated.
+- **`--alias rgo`** — name the dependency `rgo` instead of `rustango` (see [A shorter name](#a-shorter-name-rgo)).
 - **`--interactive` / `-i`** — pick from menus instead. A bare `cargo rustango new` on a terminal does the same.
 - **`--help` / `-h`**, **`--version`** — usage and version.
 
@@ -147,6 +148,37 @@ A template turns on a sensible set; `--features` adds the opt-ins none of them r
 | `testkit` / `test_utils` | Test-only schema builders, factories, and constructors |
 
 `cargo rustango new --help` prints this list. Backends are **not** valid here — pass `--backend` instead; naming one as a feature is refused, because it would pin the framework's backend while the project's own feature stayed off, and `#[derive(Model)]` gates its emissions on the project's features.
+
+### A shorter name: `rgo`
+
+```sh
+cargo rgo new shop --alias rgo
+```
+
+`--alias rgo` writes the dependency under the name `rgo`, and the generated code uses `rgo::` paths and `#[rgo(...)]` attributes. The crate `rgo` on crates.io belongs to someone else, so this is a rename of the `rustango` package:
+
+```toml
+[dependencies]
+rgo = { package = "rustango", version = "0.61", default-features = false, features = ["batteries"] }
+
+[features]
+postgres = ["rgo/postgres"]
+```
+
+```rust
+use rgo::prelude::*;
+
+#[derive(Model, Debug, Clone)]
+#[rgo(table = "item", display = "name")]
+pub struct Item {
+    #[rgo(primary_key)]
+    pub id: Auto<i64>,
+    #[rgo(max_length = 64)]
+    pub name: String,
+}
+```
+
+`#[rgo(...)]` means exactly what `#[rustango(...)]` means, and works whatever you call the dependency. One struct or field uses one name: mixing `#[rustango(...)]` and `#[rgo(...)]` on the same item is a compile error. The `manage startapp` and `make:*` generators still write `rustango::` paths, so rename those in the files they create.
 
 ---
 

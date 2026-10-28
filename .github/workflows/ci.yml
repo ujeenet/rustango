@@ -709,6 +709,8 @@ jobs:
         with:
           tool: nextest@0.9.114
       - run: cargo test --workspace --all-features --doc
+      # The derive under a renamed dependency (`orm`, and `rgo` with `#[rgo(...)]`), on the smokes' own features.
+      - run: cargo nextest run --profile ci -p rustango-renamed-smoke -p rustango-rgo-smoke
       # A `Decimal` model needs a build without `sqlite`.
       - run: cargo nextest run --profile live -p rustango --no-default-features --features postgres,testkit --test orm_core_counts_tri decimal
       - run: cargo nextest run --profile live -p rustango --no-default-features --features postgres,testkit --test values_tri decimal

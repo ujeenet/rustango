@@ -2469,6 +2469,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustango-rgo-smoke"
+version = "0.0.0"
+dependencies = [
+ "rustango",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -47,7 +47,7 @@ fn rustango_root() -> TokenStream2 {
 }
 
 /// Derive a `Model` impl. See crate docs for the supported attributes.
-#[proc_macro_derive(Model, attributes(rustango))]
+#[proc_macro_derive(Model, attributes(rustango, rgo))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand(&input)
@@ -9040,6 +9040,62 @@ struct AdminAttrs {
     formfield_overrides: Option<(Vec<(String, String)>, proc_macro2::Span)>,
 }
 
+/// The names `#[derive(Model)]` reads its attributes under: `rgo` is a
+/// short alias of `rustango` with the same meaning.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModelAttrName {
+    Rustango,
+    Rgo,
+}
+
+impl ModelAttrName {
+    fn of(attr: &syn::Attribute) -> Option<Self> {
+        let path = attr.path();
+        if path.is_ident("rustango") {
+            Some(Self::Rustango)
+        } else if path.is_ident("rgo") {
+            Some(Self::Rgo)
+        } else {
+            None
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Rustango => "rustango",
+            Self::Rgo => "rgo",
+        }
+    }
+}
+
+/// The model attributes in `attrs`, under either name. One item or field
+/// uses one name, so a mix reads as a mistake rather than a merge.
+fn model_attrs(attrs: &[syn::Attribute]) -> syn::Result<Vec<&syn::Attribute>> {
+    let mut first: Option<ModelAttrName> = None;
+    let mut out = Vec::new();
+    for attr in attrs {
+        let Some(name) = ModelAttrName::of(attr) else {
+            continue;
+        };
+        match first {
+            Some(seen) if seen != name => {
+                return Err(syn::Error::new_spanned(
+                    attr.path(),
+                    format!(
+                        "`#[{}(...)]` and `#[{}(...)]` are the same attribute; \
+                         use one name on an item or field",
+                        seen.as_str(),
+                        name.as_str(),
+                    ),
+                ));
+            }
+            _ => first = Some(name),
+        }
+        out.push(attr);
+    }
+    Ok(out)
+}
+
 fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
     let mut out = ContainerAttrs {
         table: None,
@@ -9085,10 +9141,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         reverse_has_relations: Vec::new(),
         generic_has_relations: Vec::new(),
     };
-    for attr in &input.attrs {
-        if !attr.path().is_ident("rustango") {
-            continue;
-        }
+    for attr in model_attrs(&input.attrs)? {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("table") {
                 let s: LitStr = meta.value()?.parse()?;
@@ -11136,10 +11189,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         case_insensitive: false,
         validators: Vec::new(),
     };
-    for attr in &field.attrs {
-        if !attr.path().is_ident("rustango") {
-            continue;
-        }
+    for attr in model_attrs(&field.attrs)? {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("column") {
                 let s: LitStr = meta.value()?.parse()?;
@@ -14862,5 +14912,66 @@ mod field_attr_tests {
         let ident: syn::Ident = syn::parse_quote!(r#type);
         assert_eq!(column_type_ident(&ident).to_string(), "type_col");
         assert_eq!(ident_from_name("type", ident.span()).to_string(), "r#type");
+    }
+}
+
+#[cfg(test)]
+mod model_attr_name_tests {
+    use super::*;
+
+    fn container_error(item: proc_macro2::TokenStream) -> Option<String> {
+        let input: DeriveInput = syn::parse2(item).unwrap();
+        parse_container_attrs(&input).err().map(|e| e.to_string())
+    }
+
+    fn field_error(field: proc_macro2::TokenStream) -> Option<String> {
+        let f: syn::FieldsNamed = syn::parse2(quote!({ #field })).unwrap();
+        let field = f.named.into_iter().next().unwrap();
+        parse_field_attrs(&field).err().map(|e| e.to_string())
+    }
+
+    /// `#[rgo(...)]` reads exactly as `#[rustango(...)]`.
+    #[test]
+    fn rgo_is_read_like_rustango() {
+        let long: DeriveInput = syn::parse_quote! {
+            #[rustango(table = "t", display = "name")] struct S;
+        };
+        let short: DeriveInput = syn::parse_quote! {
+            #[rgo(table = "t", display = "name")] struct S;
+        };
+        let (long, short) = (
+            parse_container_attrs(&long).unwrap(),
+            parse_container_attrs(&short).unwrap(),
+        );
+        assert_eq!(long.table, short.table);
+        assert_eq!(short.table.as_deref(), Some("t"));
+        assert_eq!(long.display.map(|d| d.0), short.display.map(|d| d.0));
+    }
+
+    #[test]
+    fn mixing_names_on_one_item_or_field_is_refused() {
+        let err = container_error(quote! {
+            #[rustango(table = "t")] #[rgo(display = "name")] struct S;
+        })
+        .expect("a mix on an item must fail");
+        assert!(
+            err.contains("`#[rustango(...)]` and `#[rgo(...)]`"),
+            "{err}"
+        );
+        let err = field_error(quote! { #[rgo(primary_key)] #[rustango(column = "c")] a: i64 })
+            .expect("a mix on a field must fail");
+        assert!(
+            err.contains("`#[rgo(...)]` and `#[rustango(...)]`"),
+            "{err}"
+        );
+        // Either name repeated alone is fine.
+        assert_eq!(
+            container_error(quote! { #[rgo(table = "t")] #[rgo(display = "name")] struct S; }),
+            None
+        );
+        assert_eq!(
+            field_error(quote! { #[rustango(primary_key)] #[rustango(column = "c")] a: i64 }),
+            None
+        );
     }
 }

@@ -56,15 +56,16 @@ use std::process::ExitCode;
 mod templates;
 mod wizard;
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let raw: Vec<String> = std::env::args().collect();
-    // Cargo passes our own crate name as the first real argv when
-    // called as `cargo rustango ...`. Strip it so we see `["new",
-    // "myapp", ...]`. Allow direct invocation `cargo-rustango new ...`
-    // too — useful in tests and for users who installed the binary.
-    let args: Vec<String> = match raw.iter().position(|s| s == "rustango") {
-        Some(i) if i + 1 < raw.len() => raw[i + 1..].to_vec(),
-        _ => raw[1..].to_vec(),
+    // Cargo passes the subcommand name as the first real argv when
+    // called as `cargo rustango ...` or its alias `cargo rgo ...`. Strip
+    // it so we see `["new", "myapp", ...]`. Allow direct invocation
+    // `cargo-rustango new ...` too — useful in tests and for users who
+    // installed the binary.
+    let args: Vec<String> = match raw.get(1).map(String::as_str) {
+        Some("rustango" | "rgo") => raw[2..].to_vec(),
+        _ => raw.get(1..).unwrap_or_default().to_vec(),
     };
 
     match args.first().map(String::as_str) {
@@ -95,7 +96,8 @@ fn print_help() {
     println!();
     println!("USAGE:");
     println!("  cargo rustango new <name> [--template api|fullstack|tenant]");
-    println!("                           [--rustango-path <dir>]");
+    println!("                           [--rustango-path <dir>] [--alias rgo]");
+    println!("  cargo rgo ...            the same command, shorter");
     println!();
     println!("TEMPLATES:");
     println!("  api        bare ORM + axum, no admin (JSON-only services)");
@@ -109,6 +111,8 @@ fn print_help() {
     println!("  -i, --interactive        pick from numbered menus instead");
     println!("      --rustango-path <d>  depend on a local rustango checkout");
     println!("                           instead of the published crate");
+    println!("      --alias rgo          name the dependency `rgo`: code uses");
+    println!("                           `rgo::` paths and `#[rgo(...)]`");
     println!();
     println!("INTERACTIVE:");
     println!("  `cargo rustango new` with no arguments opens a wizard that asks");
@@ -138,6 +142,68 @@ fn print_help() {
     println!("  cargo rustango new edge --backend sqlite");
     println!("  cargo rustango new saas --template tenant --features csrf,sso,cache-redis");
     println!("  cargo rustango new ex1 --rustango-path ../rustango/crates/rustango");
+    println!("  cargo rgo new short --alias rgo");
+}
+
+/// The name a generated project gives its rustango dependency.
+///
+/// `rgo` on crates.io is another crate, so the short name is a rename:
+/// `rgo = { package = "rustango", … }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DepName {
+    #[default]
+    Rustango,
+    Rgo,
+}
+
+impl DepName {
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "rustango" => Ok(Self::Rustango),
+            "rgo" => Ok(Self::Rgo),
+            other => Err(format!(
+                "unknown alias `{other}` — `rgo` is the one alias `#[rgo(...)]` understands"
+            )),
+        }
+    }
+
+    /// The dependency key, and the path generated code uses.
+    pub fn ident(self) -> &'static str {
+        match self {
+            Self::Rustango => "rustango",
+            Self::Rgo => "rgo",
+        }
+    }
+
+    /// Rust source written against `rustango`, moved to this name:
+    /// `rustango::` paths and `#[rustango(` attributes, nothing else.
+    pub fn apply(self, src: &str) -> String {
+        let to = self.ident();
+        if to == "rustango" {
+            return src.to_owned();
+        }
+        let mut out = String::with_capacity(src.len());
+        let mut rest = src;
+        while let Some(at) = rest.find("rustango") {
+            let (before, tail) = rest.split_at(at);
+            let after = &tail["rustango".len()..];
+            let starts_word = !before
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || "_-.".contains(c));
+            let is_path = after.starts_with("::");
+            let is_attr = before.ends_with("#[") && after.starts_with('(');
+            out.push_str(before);
+            out.push_str(if starts_word && (is_path || is_attr) {
+                to
+            } else {
+                "rustango"
+            });
+            rest = after;
+        }
+        out.push_str(rest);
+        out
+    }
 }
 
 /// Database backend a generated project builds and runs with by default.
@@ -299,18 +365,25 @@ impl Template {
     /// *project's* features — a cfg inside a derive resolves against the
     /// destination crate. Pinning `rustango/postgres` while the project's own
     /// `postgres` feature was off made the two disagree.
-    fn rustango_dep(self, path: Option<&str>, extras: &[String]) -> String {
+    fn rustango_dep(self, path: Option<&str>, extras: &[String], dep: DepName) -> String {
         let feats = feature_list(self.base_features(), extras);
+        // A renamed dependency names the real package first.
+        let package = match dep {
+            DepName::Rustango => "",
+            DepName::Rgo => r#"package = "rustango", "#,
+        };
         match path {
             Some(p) => {
                 let p = templates::toml_string(p);
-                format!(r#"{{ path = {p}, default-features = false, features = [{feats}] }}"#)
+                format!(
+                    r#"{{ {package}path = {p}, default-features = false, features = [{feats}] }}"#
+                )
             }
             // Track our own version, bumped in lockstep with rustango, so a
             // published scaffolder always pins a real, current release. It was
             // hardcoded pre-v0.29 and rotted to `"0.23"` (#79).
             None => format!(
-                r#"{{ version = "{}", default-features = false, features = [{feats}] }}"#,
+                r#"{{ {package}version = "{}", default-features = false, features = [{feats}] }}"#,
                 mm_version()
             ),
         }
@@ -385,6 +458,8 @@ struct NewArgs {
     /// `--rustango-path <dir>`: emit a path dependency instead of the crates.io
     /// version. For in-repo examples and for testing the working tree (#1211).
     rustango_path: Option<String>,
+    /// `--alias rgo`: what the project calls the dependency.
+    dep: DepName,
 }
 
 /// `new`'s command line before defaults. `None` = the flag was absent, so the
@@ -396,6 +471,7 @@ struct NewFlags {
     backend: Option<Backend>,
     features: Vec<String>,
     rustango_path: Option<String>,
+    dep: DepName,
     /// `-i` / `--interactive`, or a bare `new` on a terminal: ask the rest.
     interactive: bool,
 }
@@ -408,6 +484,7 @@ impl NewFlags {
             backend: self.backend.unwrap_or(Backend::DEFAULT),
             features: self.features,
             rustango_path: self.rustango_path,
+            dep: self.dep,
         }
     }
 }
@@ -427,6 +504,7 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
     };
     validate_features(&parsed.features, parsed.template)?;
     validate_name(&parsed.name)?;
+    validate_alias(&parsed.name, parsed.dep)?;
 
     let root = PathBuf::from(&parsed.name);
     if root.exists() {
@@ -473,6 +551,7 @@ fn parse_new_flags(args: &[String], interactive: bool) -> Result<NewFlags, Strin
     let mut backend: Option<Backend> = None;
     let mut features: Vec<String> = Vec::new();
     let mut rustango_path: Option<String> = None;
+    let mut dep = DepName::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -530,6 +609,15 @@ fn parse_new_flags(args: &[String], interactive: bool) -> Result<NewFlags, Strin
             _ if arg.starts_with("--rustango-path=") => {
                 rustango_path = Some(arg["--rustango-path=".len()..].to_owned());
             }
+            "--alias" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| "--alias requires a value".to_owned())?;
+                dep = DepName::parse(v)?;
+            }
+            _ if arg.starts_with("--alias=") => {
+                dep = DepName::parse(&arg["--alias=".len()..])?;
+            }
             // Consumed by the caller, which decides before parsing whether a
             // terminal is available; accepted here so it isn't "unknown".
             "--interactive" | "-i" => {}
@@ -577,6 +665,7 @@ fn parse_new_flags(args: &[String], interactive: bool) -> Result<NewFlags, Strin
         backend,
         features,
         rustango_path,
+        dep,
         interactive,
     })
 }
@@ -633,6 +722,18 @@ fn validate_name(name: &str) -> Result<(), String> {
         return Err(format!(
             "`{name}` cannot be a project name — the generated project depends on \
              `{dep}`, and a crate cannot share a name with its own dependency"
+        ));
+    }
+    Ok(())
+}
+
+/// The project cannot share a name with its renamed dependency either.
+fn validate_alias(name: &str, dep: DepName) -> Result<(), String> {
+    if templates::crate_name(name) == dep.ident() {
+        return Err(format!(
+            "`{name}` cannot be a project name with `--alias {}` — a crate cannot share \
+             a name with its own dependency",
+            dep.ident()
         ));
     }
     Ok(())
@@ -712,6 +813,7 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
             backend,
             &args.features,
             args.rustango_path.as_deref(),
+            args.dep,
         ),
     )?;
     write(
@@ -770,17 +872,23 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     // A `src/bin/*.rs` (a worker from `manage make:worker`, say) is its
     // own crate and can reach the app only through this.
     write(root, "src/lib.rs", &templates::lib_rs(name))?;
+    // Rust sources name the dependency; `--alias` moves them to its name.
+    let dep = args.dep;
     write(
         root,
         "src/main.rs",
-        &templates::main_rs_for(template, name, &args.features),
+        &dep.apply(&templates::main_rs_for(template, name, &args.features)),
     )?;
-    write(root, "src/models.rs", &templates::models_rs(template))?;
-    write(root, "src/views.rs", templates::VIEWS_RS)?;
+    write(
+        root,
+        "src/models.rs",
+        &dep.apply(&templates::models_rs(template)),
+    )?;
+    write(root, "src/views.rs", &dep.apply(templates::VIEWS_RS))?;
     write(
         root,
         "src/urls.rs",
-        &templates::urls_rs_for(template, &args.features),
+        &dep.apply(&templates::urls_rs_for(template, &args.features)),
     )?;
 
     // Every project gets an empty `system/migrations/` folder — the
@@ -853,7 +961,7 @@ mod tests {
         let mm = mm_version();
         let needle = format!("\"{mm}\"");
         for template in [Template::Api, Template::Fullstack, Template::Tenant] {
-            let dep = template.rustango_dep(None, &[]);
+            let dep = template.rustango_dep(None, &[], DepName::Rustango);
             assert!(
                 dep.contains(&needle),
                 "template {template:?} dep `{dep}` does not pin v{mm}"
@@ -1057,7 +1165,7 @@ mod tests {
         // ^0.23.0 was yanked, breaking `rustango = "0.23"` resolution).
         const YANKED: &[&str] = &["0.23"];
         for template in [Template::Api, Template::Fullstack, Template::Tenant] {
-            let dep = template.rustango_dep(None, &[]);
+            let dep = template.rustango_dep(None, &[], DepName::Rustango);
             for ver in YANKED {
                 let needle = format!("\"{ver}\"");
                 assert!(
@@ -1358,7 +1466,14 @@ mod tests {
             ("mariadb", "mysql"),
         ] {
             let args = parse(&["app", "--backend", flag]).expect(flag);
-            let toml = templates::cargo_toml("app", args.template, args.backend, &[], None);
+            let toml = templates::cargo_toml(
+                "app",
+                args.template,
+                args.backend,
+                &[],
+                None,
+                DepName::Rustango,
+            );
             assert!(
                 toml.contains(&format!(r#"default = ["{feature}"]"#)),
                 "--backend {flag} should default to {feature}:\n{toml}"
@@ -1406,7 +1521,7 @@ mod tests {
     #[test]
     fn features_extend_the_template_list() {
         let args = parse(&["app", "--template", "tenant", "--features", "csrf"]).expect("parse");
-        let dep = args.template.rustango_dep(None, &args.features);
+        let dep = args.template.rustango_dep(None, &args.features, args.dep);
         assert!(
             dep.contains(r#"features = ["batteries", "tenancy", "csrf"]"#),
             "extras must append to the template's own: {dep}"
@@ -1487,6 +1602,65 @@ mod tests {
 
     /// `--rustango-path` is data, not TOML: backslashes and quotes must
     /// survive into a manifest cargo can read (#2287).
+    /// `--alias rgo` renames the dependency and every path and attribute the
+    /// generated Rust names it by, and nothing that only spells the word.
+    #[test]
+    fn alias_rgo_renames_the_dependency_and_the_code() {
+        let args = parse(&["app", "--template", "tenant", "--alias", "rgo"]).expect("parse");
+        assert_eq!(args.dep, DepName::Rgo);
+        let toml = templates::cargo_toml("app", args.template, args.backend, &[], None, args.dep);
+        let parsed: toml::Table = toml.parse().expect("valid TOML");
+        let dep = &parsed["dependencies"]["rgo"];
+        assert_eq!(dep["package"].as_str(), Some("rustango"), "{toml}");
+        assert!(parsed["dependencies"].get("rustango").is_none(), "{toml}");
+        assert_eq!(
+            parsed["features"]["postgres"][0].as_str(),
+            Some("rgo/postgres")
+        );
+
+        let models = args.dep.apply(&templates::models_rs(args.template));
+        assert!(models.contains("#[rgo(table = \"item\""), "{models}");
+        assert!(models.contains("#[rgo(primary_key)]"), "{models}");
+        assert!(models.contains("use rgo::prelude::*;"), "{models}");
+        let main = args
+            .dep
+            .apply(&templates::main_rs_for(args.template, "app", &[]));
+        assert!(
+            main.contains("#[rgo::main]") && main.contains("rgo::manage::Cli"),
+            "{main}"
+        );
+        let urls = args
+            .dep
+            .apply(&templates::urls_rs_for(Template::Fullstack, &[]));
+        for src in [&models, &main, &urls] {
+            assert!(
+                !src.contains("rustango::") && !src.contains("#[rustango("),
+                "{src}"
+            );
+        }
+        // A file name and prose keep the word.
+        assert!(urls.contains("./var/.rustango_session.key"), "{urls}");
+        assert_eq!(
+            DepName::Rgo.apply("cargo-rustango new"),
+            "cargo-rustango new"
+        );
+        // The default changes nothing.
+        let plain = templates::models_rs(Template::Fullstack);
+        assert_eq!(DepName::Rustango.apply(&plain), plain);
+    }
+
+    #[test]
+    fn alias_takes_only_rgo_and_refuses_a_clashing_name() {
+        assert_eq!(
+            parse(&["app", "--alias=rgo"]).expect("equals form").dep,
+            DepName::Rgo
+        );
+        assert!(parse(&["app", "--alias", "orm"]).is_err());
+        assert!(parse(&["app", "--alias"]).is_err());
+        assert!(validate_alias("rgo", DepName::Rgo).is_err());
+        assert!(validate_alias("rgo", DepName::Rustango).is_ok());
+    }
+
     #[test]
     fn rustango_path_round_trips_through_cargo_toml() {
         for path in [
@@ -1497,8 +1671,14 @@ mod tests {
             "new\nline",
             "del\u{7f}ete",
         ] {
-            let toml =
-                templates::cargo_toml("app", Template::Api, Backend::Sqlite, &[], Some(path));
+            let toml = templates::cargo_toml(
+                "app",
+                Template::Api,
+                Backend::Sqlite,
+                &[],
+                Some(path),
+                DepName::Rustango,
+            );
             let doc: toml::Table = toml::from_str(&toml)
                 .unwrap_or_else(|e| panic!("{path:?} broke Cargo.toml: {e}\n{toml}"));
             assert_eq!(doc["dependencies"]["rustango"]["path"].as_str(), Some(path));
@@ -1511,7 +1691,14 @@ mod tests {
     fn names_of_template_dependencies_are_refused() {
         let jobs = vec!["jobs".to_owned()];
         for template in [Template::Api, Template::Fullstack, Template::Tenant] {
-            let toml = templates::cargo_toml("app", template, Backend::Postgres, &jobs, None);
+            let toml = templates::cargo_toml(
+                "app",
+                template,
+                Backend::Postgres,
+                &jobs,
+                None,
+                DepName::Rustango,
+            );
             let doc: toml::Table = toml::from_str(&toml).expect("Cargo.toml parses");
             for table in ["dependencies", "dev-dependencies"] {
                 for dep in doc[table].as_table().expect(table).keys() {

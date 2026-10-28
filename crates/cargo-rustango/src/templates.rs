@@ -6,7 +6,7 @@
 //! ships everything in one artifact. CI snapshot-tests the generated
 //! output by running `cargo check` on each template.
 
-use super::{Backend, Template};
+use super::{Backend, DepName, Template};
 
 // ---------------- Cargo.toml ----------------
 
@@ -68,9 +68,11 @@ pub fn cargo_toml(
     backend: Backend,
     features: &[String],
     rustango_path: Option<&str>,
+    dep: DepName,
 ) -> String {
-    let rustango_dep = template.rustango_dep(rustango_path, features);
+    let rustango_dep = template.rustango_dep(rustango_path, features, dep);
     let default_backend = backend.feature();
+    let krate = dep.ident();
 
     // `rustango::jobs::Job` is an async trait, so a project that
     // implements one needs `#[async_trait]`. rustango depends on
@@ -116,8 +118,8 @@ edition = "2021"
 [dependencies]
 # `rustango` re-exports every proc-macro (Model / Form / ViewSet /
 # Serializer / embed_migrations / main), so you do NOT need to depend
-# on `rustango-macros` directly. Use `rustango::Model` etc.
-rustango = {rustango_dep}
+# on `rustango-macros` directly. Use `{krate}::Model` etc.
+{krate} = {rustango_dep}
 {deps}{async_trait_dep}
 
 [dev-dependencies]
@@ -130,9 +132,9 @@ tokio = {{ version = "1", features = ["macros", "rt-multi-thread"] }}
 # `cargo run --no-default-features --features sqlite`.
 [features]
 default = ["{default_backend}"]
-postgres = ["rustango/postgres"]
-sqlite = ["rustango/sqlite"]
-mysql = ["rustango/mysql"]
+postgres = ["{krate}/postgres"]
+sqlite = ["{krate}/sqlite"]
+mysql = ["{krate}/mysql"]
 "#
     )
 }
