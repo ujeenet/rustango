@@ -129,6 +129,7 @@ impl AllowedHostsLayer {
 
     /// Let the built-in health endpoints through, as the server does
     /// when it mounts them.
+    #[cfg_attr(not(all(feature = "manage", feature = "config")), allow(dead_code))]
     #[must_use]
     pub(crate) fn exempt_probes(mut self) -> Self {
         self.probes_exempt = true;

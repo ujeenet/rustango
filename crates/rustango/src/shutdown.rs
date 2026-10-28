@@ -62,6 +62,7 @@ pub type StopSignal = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + S
 ///
 /// # Errors
 /// The bind failure.
+#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
 #[cfg(feature = "_axum")]
 pub(crate) async fn bind_announced(
     addr: &str,
