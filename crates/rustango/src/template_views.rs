@@ -6248,7 +6248,7 @@ mod tests {
             .router("/", Arc::new(tera));
 
         let res = app.oneshot(csrf_form_post("/", "name=")).await.unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
         assert_eq!(std::str::from_utf8(&body).unwrap(), "name:1");
     }
