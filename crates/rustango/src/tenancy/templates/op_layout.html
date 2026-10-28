@@ -67,6 +67,7 @@ document.addEventListener('submit',function(e){var m=e.target.getAttribute('data
 document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('button[data-confirm]');if(b&&!confirm(b.getAttribute('data-confirm')))e.preventDefault();});
 document.addEventListener('change',function(e){var s=e.target;if(s.matches&&s.matches('select[data-nav]')){location.href=s.options[s.selectedIndex].dataset.href;}});
   </script>
+  {% if brand_logo_url %}<link rel="icon" href="{{ brand_logo_url }}">{% endif %}
   <title>{% block title %}{{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}</title>
   <script nonce="{{ csp_nonce }}">
   // No-flash theme application — see _theme_toggle.html for the cycle UI.
