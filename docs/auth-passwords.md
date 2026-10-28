@@ -8,8 +8,9 @@ first choice. You never store, log, or compare the plaintext.
 
 [![Passwords in Rustango: hash() produces a salted argon2id PHC string, verify() checks an attempt against it, and verify_dummy() equalizes login timing](img/auth-passwords.png)](img/auth-passwords.png)
 
-> **Source:** `rustango::passwords` (`hash`, `verify`, `verify_dummy`,
-> `strength_score`, `StrengthIssue`) — behind the `passwords` feature (on by
+> **Source:** `rustango::passwords` (`hash`, `verify`, `verify_dummy`, their
+> `_async` forms, `Argon2Params`, `needs_rehash`, `strength_score`,
+> `StrengthIssue`) — behind the `passwords` feature (on by
 > default). For the tenancy-integrated user-password helpers see
 > `rustango::tenancy::password`.
 >
@@ -29,7 +30,8 @@ first choice. You never store, log, or compare the plaintext.
 - [Quick start](#quick-start) · [Why argon2id](#why-argon2id)
 - [Hashing on signup](#hashing-on-signup) · [Verifying on login](#verifying-on-login)
 - [Timing-safe logins](#timing-safe-logins-account-enumeration) · [Strength checks](#strength-checks)
-- [Where the hash lives](#where-the-hash-lives) · [Notes & limits](#notes-and-limits)
+- [Where the hash lives](#where-the-hash-lives) · [Async code](#async-code) · [Cost and rehashing](#cost-and-rehashing)
+- [Notes & limits](#notes-and-limits)
 
 ---
 
@@ -193,13 +195,47 @@ browser apps) or issue a [JWT](auth-jwt.md) (for APIs).
 
 ---
 
+## Async code
+
+`hash`, `verify` and `verify_dummy` are blocking: one argon2 call holds a
+runtime worker for the whole hash. In a handler, call `hash_async`,
+`verify_async` and `verify_dummy_async` instead. They run on the blocking
+pool, at most one job per CPU at once.
+
+A job waits up to `hash_wait()` for a free slot (default 5 s,
+`DEFAULT_HASH_WAIT`), then fails with `PasswordError::Busy`. Answer that with a
+503, the same for a known and an unknown user. Set the wait with
+`[auth] hash_wait_ms` or `configure_hash_wait(duration)` at boot.
+
+---
+
+## Cost and rehashing
+
+New hashes use `argon2_params()`, by default `Argon2Params::DEFAULT`
+(m=19456 KiB, t=2, p=1). Raise it with `[auth] argon2_memory_kib`,
+`argon2_iterations` and `argon2_parallelism`, or call
+`configure_argon2(Argon2Params::new(m, t, p)?)` at boot; a value set in code
+wins over the settings. `Argon2Params::new` refuses a combination argon2 rejects.
+
+Old hashes still verify, because their cost lives in the PHC string.
+`needs_rehash(&stored)` is `true` when a hash is weaker than today's cost (or
+not argon2id v19). After a successful login:
+
+- `rehash_async(attempt, &stored)` returns a fresh hash when one is due, else `None`.
+- `upgrade_stored_hash(&pool, Model::SCHEMA, id, attempt, &stored)` also stores
+  it in the row's `password_hash` column, but only if that column still holds
+  `stored`, and returns the hash now in force.
+
+---
+
 ## Notes and limits
 
 - **Never** store, log, or `==`-compare the plaintext. `hash` → store;
   `verify` → check. That's the whole contract.
-- **Cost parameters are the OWASP defaults**, baked in. They're a sensible
-  floor; raising them later is safe — old hashes still verify (their params live
-  in the PHC string), and you can re-hash on next successful login to upgrade.
+- **Cost parameters default to the OWASP floor.** Raising them later is safe —
+  old hashes still verify (their params live in the PHC string), and
+  [`upgrade_stored_hash`](#cost-and-rehashing) re-hashes on the next successful
+  login.
 - `strength_score` is a heuristic, not a policy engine — it won't catch
   `Summer2024!`. Layer a breach-list lookup for real strength enforcement.
 - For multi-tenant apps with the framework's user store, prefer
