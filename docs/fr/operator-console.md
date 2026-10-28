@@ -76,6 +76,7 @@ La console répond sur le domaine **apex** (`RUSTANGO_APEX_DOMAIN`), pas sur un 
 | **Runs** | Exécutions de provisioning et de migration, diffusées en direct |
 | **Database servers** | Serveurs où les bases des tenants sont créées, avec leur login d'administration |
 | **Two-factor sign-in** | Votre application d'authentification (feature `totp`) |
+| **Shared SSO** | Fournisseurs de connexion proposés à chaque tenant, avec l'URL de callback à enregistrer (feature `admin-sso` ; voir [SSO](sso.md)) |
 
 ---
 

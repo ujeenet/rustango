@@ -139,13 +139,25 @@ PATCH, DELETE), and it stays in sync with the ViewSet's configuration:
   configured style (`page`/`page_size`, `cursor`, or `limit`/`offset`).
 - **Filtering / search / ordering** → one `?field=` query param per
   `filter_fields` (with the available `__gt`/`__in`/… lookups described), plus
-  `?search=` and `?ordering=` when configured.
+  `?search=` when configured and `?ordering=` (below).
 - **`read_only()`** → the write operations (POST/PUT/PATCH/DELETE) are omitted.
 - **Request bodies** → inline schemas of the fields the ViewSet writes: no
   `Auto` id, `read_only` or soft-delete column; `write_only` fields included;
   nothing required on PATCH. Responses reference the registered schema. A field
   a filter backend pins per request still shows (and may show required); the
   server ignores the body's value for it.
+- **Bodies and errors** → create, PUT and PATCH accept JSON or urlencoded
+  bodies and document `422 validation_failed`, `400` for a malformed body and
+  `413` for one too large. The create operation describes the bulk array form
+  in its text (the schemas stay one row). List documents a `400` when its
+  filters can refuse a value; retrieve and DELETE document `400` for a
+  malformed pk.
+- **Gates** → `403` (and `401` with `tenancy`) on an action with permission
+  codenames, and `429` with `Retry-After` on an action with a throttle.
+- **List params** → `page_size` names the real `max_page_size` cap.
+  `?ordering=` is listed on every ViewSet except cursor-paginated ones, which
+  always sort by the cursor column. Binary fields are `format: hex`, as the
+  server reads and writes them.
 - **Path param** → `{pk}` typed from the model's primary key.
 - **`operationId`** → `list_post`, `create_post`, … (snake-cased per action).
 

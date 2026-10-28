@@ -132,9 +132,9 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 |---|---|
 | `create-superuser` / `set-superuser` | Create a superuser, or promote an existing user |
 | `create-user` / `create-operator` | Create a tenant user or an operator |
-| `reset-password` / `change-password` | Tenant-user password recovery |
+| `reset-password` / `change-password` | Tenant-user password recovery. `change-password` takes the current password from `--current-stdin` or `RUSTANGO_CURRENT_PASSWORD` off a terminal; `--current` in argv warns |
 | `set-password-link <slug> <username>` | Print a single-use link for the user to set their own password |
-| `reset-operator-password` / `change-operator-password` | Operator password recovery |
+| `reset-operator-password` / `change-operator-password` | Operator password recovery; `change-operator-password` reads the current password like `change-password` |
 | `set-operator-active` | Enable or disable an operator |
 | `create-role` / `assign-role` / `revoke-role` / `list-roles` | Roles |
 | `grant-perm` / `revoke-perm` | Permissions by codename |
@@ -1511,12 +1511,17 @@ cargo run -- reset-link --tenant acme alice
 A name that clashes with a built-in verb, or one registered twice, makes
 `Cli::run` fail at startup with both names in the error.
 
+`Cli::run_with_args(args)` runs the CLI on the arguments you give it (no
+program name) instead of the process's, for example from a test.
+
 **Database connection.** Every verb, the server and custom commands read
 the database from `DATABASE_URL`, or from `DB_DRIVER`, `DB_HOST`,
 `DB_PORT`, `DB_USER`, `DB_PASSWORD` (or `DB_PASSWORD_FILE`, a file holding
 it), `DB_NAME` and `DB_PARAMS`. For SQLite set `DB_DRIVER=sqlite` and
-`DB_NAME` to the file path. When both styles are set, `DATABASE_URL` wins
-and a warning says so; from 0.62.0 the `DB_*` vars will win.
+`DB_NAME` to the file path. Setting both `DB_PASSWORD` and
+`DB_PASSWORD_FILE` is an error. When both styles are set, `DATABASE_URL` wins
+and one warning (password hidden) says so, and `check --deploy` lists it; from
+0.62.0 the `DB_*` vars will win, so keep one style.
 
 ---
 

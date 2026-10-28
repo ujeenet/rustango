@@ -158,6 +158,9 @@ recuento de filas y los recuentos de facetas se actualizan. Los filtros, la bús
 ordenación y la jerarquía de fechas se componen todos en la cadena de consulta y pueden
 combinarse.
 
+Una tarjeta de faceta muestra hasta 15 valores; el resto se agrupa en un enlace
+"+N more" (`?facet_show_all=<field>`), que lista como máximo 200.
+
 [![La lista de entradas filtrada por status=published: un chip de filtro activo, la faceta coincidente resaltada, el cuadro de búsqueda y el selector de acciones masivas](../img/admin-list-filtered.png)](../img/admin-list-filtered.png)
 
 **Ordenación.** Haz clic en un encabezado de columna para ordenar; clic de nuevo para
@@ -299,6 +302,13 @@ Selecciona filas con las casillas, elige la acción en el selector y envía
 registras. Un nombre de acción listado en `admin(actions = ...)` sin un manejador
 registrado simplemente no aparecerá.
 
+Un manejador de `register_action` escribe en su propia conexión, así que las filas de
+auditoría de un modelo auditado se escriben después, en la medida de lo posible.
+`register_tx_action(table, name, handler)` (y `register_tx_action_with_perm`) le pasa
+al manejador `&mut PoolTx`, de modo que sus escrituras y sus filas de auditoría se
+confirman o se revierten juntas. Escribe solo a través de esa transacción: una segunda
+conexión puede bloquear un pool SQLite de una sola conexión.
+
 ---
 
 ## Registro de auditoría
@@ -323,6 +333,8 @@ resistente a manipulaciones. Dos lugares lo exponen:
   cruza filas, del más reciente al más antiguo, con tarjetas de faceta para entidad /
   operación / fuente y un formulario de limpieza para purgar entradas de más de N días
   (lo cual se registra a su vez como una entrada de auditoría).
+  Cada tarjeta de faceta muestra hasta 15 valores más el activo; "+N more"
+  (`?facet_show_all=<col>`) lista como máximo 200, así que filtra el feed para ver el resto.
 
 [![El feed de Activity: cada cambio auditado a través de los modelos con diffs JSON, tarjetas de faceta por tabla/operación/fuente y un formulario de limpieza](../img/admin-audit.png)](../img/admin-audit.png)
 
@@ -432,6 +444,9 @@ let admin = admin::Builder::new(pool)
 El builder del admin de inquilino conecta esto a su `RouteConfig::logout_url`
 automáticamente, de modo que el botón siempre alcanza una ruta que existe.
 
+El admin rechaza una edición que desmarca **active** en la fila del propio usuario
+que ha iniciado sesión, igual que la consola de operador: pídeselo a otro admin.
+
 ---
 
 ## Temas y marca
@@ -473,6 +488,7 @@ indique lo contrario):
 | `skip_count_for([tables])` | Omite `COUNT(*)` en tablas enormes (el paginador muestra "Page N"). |
 | `with_user_perms([codenames])` | Condiciona tablas a `{table}.view/add/change/delete`. |
 | `register_action(table, name, handler)` | Registra un manejador de acción masiva. |
+| `register_tx_action(table, name, handler)` / `register_tx_action_with_perm` | Igual, pero el manejador recibe la transacción de escritura, así que las filas de auditoría se confirman con ella. |
 | `with_session_auth(secret)` | Requiere inicio de sesión por cookie (`/login` + `/logout`). |
 | `logout_url(u)` | Destino POST del botón Logout de la barra lateral. Por defecto `{admin_prefix}/logout`; los admins de inquilino lo ajustan a su ruta de logout de tenancy. |
 | `secure_cookies(bool)` | Establece el flag `Secure` (solo HTTPS) en la cookie de sesión. |

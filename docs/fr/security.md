@@ -616,6 +616,8 @@ async fn handle_stripe_webhook(headers: HeaderMap, body: Bytes) -> StatusCode {
 | `HexSha256` | les octets passés, hex brut | valeurs `v1=` de Stripe / `v0=` de Slack sur les chaînes ci-dessus |
 | `Base64Sha256` | corps, base64 standard | Shopify (`X-Shopify-Hmac-Sha256`) |
 
+Une livraison qui reçoit 408, 429 ou 5xx, ou qui échoue au niveau du transport, est retentée : 8 exécutions au total, avec une attente de 1s qui double à chaque fois. `WebhookSubscription::max_attempts(n)` et `retry_backoff(base)` changent les deux pour un abonnement. Un `Retry-After` sur une 429 ou une 503, en secondes ou en date HTTP, fait attendre la tentative suivante au moins aussi longtemps, au plus une heure. Les autres réponses 4xx partent en dead-letter tout de suite. Les tentatives réutilisent le premier horodatage, donc le `max_age` du receveur doit couvrir toute la fenêtre de tentatives.
+
 La comparaison de signature est à temps constant, ce qui signifie qu'elle prend toujours le même temps que la supposition soit correcte ou fausse. Cela stoppe les attaques temporelles, où un attaquant mesure de minuscules différences de temps de réponse pour deviner le secret un caractère à la fois.
 
 ---

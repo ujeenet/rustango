@@ -125,8 +125,11 @@ discovered at login — no per-provider endpoint wiring.
   (a company-wide Google, say). Managed from the console's *Shared SSO*
   panel, where *Allow email linking* toggles `allow_email_link` in place
   (the id and its links stay). The flag applies to **every** tenant.
-  *Edit* changes a provider in place (same id and slug; a blank secret
-  keeps the saved one), and each row shows the callback URL to register.
+  *Edit* (`/sso-shared/{id}/edit`) changes a provider in place (same id
+  and slug; a blank secret keeps the saved one), and each row shows the
+  callback URL to register. The issuer URL field shows only for `oidc`. A
+  refused add or edit shows the form again (status 400) with the typed
+  values and the error, never the secret.
 
 On a tenant's login page the two sets merge, and on a slug clash the
 **tenant's own provider wins** over the shared one — so a tenant can
@@ -143,6 +146,12 @@ users), or by a superuser adding an `SsoLink` row: `provider_source`
 `issuer` and `subject`. Adding a row needs the admin's session auth
 (`Builder::with_session_auth`, or the tenant admin's `with_session`);
 without it nobody can add links.
+
+A link created more than 5 minutes before the account it points at (an id
+reused after a restore, say) logs a warning and still signs in.
+`rustango::sso::link::set_stale_links(StaleLinks::Drop)` deletes such a link
+instead. Use it only when account `created_at` values are never imported or
+backfilled.
 
 ## Member (end-user) SSO
 
@@ -180,6 +189,10 @@ It mounts two per-slug routes off `login_base`:
 
 Differences from the admin flow:
 
+- **Callback scheme.** The member `redirect_uri` takes its scheme from a
+  trusted proxy's `X-Forwarded-Proto`, else `http` on a loopback host
+  (`localhost`, `*.localhost`, a loopback IP) and `https` everywhere else,
+  so `localhost.example.com` gets `https`.
 - **Auto-provisioning.** With `auto_provision = true` (opt-in; the default is `false`), a
   verified IdP email with no matching `rustango_users` row **creates**
   one — username from the email local-part (deduped on a clash), a real

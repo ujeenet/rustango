@@ -33,6 +33,7 @@ seule la configuration change.
 - [TTL et expiration](#ttl-et-expiration)
 - [Changer de backend](#changer-de-backend)
 - [La mise en cache en multi-tenancy](#la-mise-en-cache-en-multi-tenancy)
+- [Mettre en cache des pages entières](#mettre-en-cache-des-pages-entières)
 - [Référence](#référence)
 - [Voir aussi](#voir-aussi)
 
@@ -57,6 +58,17 @@ let cache: BoxedCache = Arc::new(InMemoryCache::new());
 | `RedisCache` | `cache-redis` | production ; partagé entre réplicas |
 | `DatabaseCache` | `cache` | production sans Redis ; une table `rustango_cache` |
 | `NullCache` | `cache` | désactiver la mise en cache (chaque lecture rate) — pratique en tests |
+
+Il n'y a pas de valeur `postgres` : le backend base de données est `db` ou
+`database`. Les valeurs sont en minuscules. Une valeur inconnue ou mal casée
+(`Redis`, une faute de frappe), ou `file` sans `file_cache_dir`, journalise une
+`error` et se replie sur un cache en mémoire ; une version mineure ultérieure
+la refusera.
+
+`FileCache` balaie un seizième de son répertoire à la recherche d'entrées
+expirées toutes les 16 écritures. Appelez `FileCache::purge_expired()` de façon
+planifiée pour tout balayer. Sous Unix, les nouveaux répertoires sont créés en
+0700 et les entrées en 0600.
 
 ---
 
@@ -272,6 +284,38 @@ Deux choses à savoir :
 
 Le `Cache::clear()` non cadré reste global au processus : utilisez la vue cadrée
 dès que c'est le changement d'un seul tenant qui a déclenché l'invalidation.
+
+Le slug d'un tenant purgé peut être réutilisé par un nouveau tenant. Pour que
+`purge-tenant` supprime les clés `ScopedCache::for_tenant` de l'ancien tenant,
+appelez `rustango::tenancy::decommission::clear_on_purge(cache)` au démarrage
+pour chaque cache qui les contient.
+
+---
+
+## Mettre en cache des pages entières
+
+`CachePageLayer::new(cache)` (dans `rustango::cache_page`) stocke les réponses
+GET dans n'importe quel `BoxedCache` ; `.timeout(dur)` fixe leur durée (60 s
+par défaut). Il est sûr par défaut :
+
+- Une requête avec `Authorization`, `Cookie` ou `X-Api-Key` n'est ni servie
+  depuis le cache ni stockée dedans. Nommez d'autres en-têtes d'identifiants
+  (un en-tête de jeton personnalisé) avec `.credential_headers(["x-my-token"])`.
+  `.cache_authenticated(true)` désactive cela, seulement pour une route dont la
+  page est la même pour chaque appelant.
+- Une réponse avec `Set-Cookie`, ou `Cache-Control: private`, `no-cache` ou
+  `no-store`, n'est jamais mise en cache.
+- `.vary_on([...])` met des en-têtes de requête dans la clé.
+
+Pour retirer une page après une écriture, appelez
+`layer.invalidate(&[PageKey::new(path, host)]).await?` sur un clone de la
+couche (ajoutez `.tenant(slug)` à la clé en multi-tenancy). Cela purge chaque
+variante en cache de ce chemin : toute chaîne de requête, toute valeur
+`vary_on`, GET et `QUERY` confondus. Cela passe par un compteur de génération
+par chemin, donc chaque GET en cache lit une petite clé de cache de plus.
+
+En multi-tenancy, montez la couche à l'intérieur de la couche tenancy ; voir
+[Middleware](middleware.md).
 
 ---
 

@@ -416,6 +416,10 @@ htmx_target = "#flash"    # HX-Retarget for htmx errors; default "#flash", "" se
 A `templates` directory that does not exist or does not parse logs a warning
 and the built-in pages are used.
 
+`cargo rustango new` writes `[errors] enabled = true` into
+`config/default.toml`, so a new project has the pages on. Older projects stay
+off until they add the section.
+
 ### What each client gets
 
 | Request | Response |

@@ -290,6 +290,13 @@ impl Job for FlakyImport {
 The backing test dispatches a job that fails once then succeeds, and asserts it
 **ran more than once and eventually succeeded** — the retry actually happens.
 
+To change the wait for every job of a type, override
+`fn retry_backoff(failed_attempt: u32) -> Duration` on the impl
+(`failed_attempt` is 0 after the first run). To set the cap or the wait from
+the payload, override `fn max_attempts(&self) -> u32` or
+`fn retry_delay(&self, failed_attempt: u32) -> Duration`; by default they
+return `MAX_ATTEMPTS` and `retry_backoff`. The cap is read at dispatch.
+
 ---
 
 ## The dead-letter handler

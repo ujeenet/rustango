@@ -618,6 +618,8 @@ async fn handle_stripe_webhook(headers: HeaderMap, body: Bytes) -> StatusCode {
 | `HexSha256` | los bytes que pases, hex en bruto | valores `v1=` de Stripe / `v0=` de Slack sobre las cadenas de arriba |
 | `Base64Sha256` | cuerpo, base64 estándar | Shopify (`X-Shopify-Hmac-Sha256`) |
 
+Una entrega que recibe 408, 429 o 5xx, o que falla en el transporte, se reintenta: 8 ejecuciones en total, esperando 1s y duplicando la espera. `WebhookSubscription::max_attempts(n)` y `retry_backoff(base)` cambian ambos valores para una suscripción. Un `Retry-After` en un 429 o 503, en segundos o como fecha HTTP, hace que el siguiente reintento espere al menos ese tiempo, como máximo una hora. Las demás respuestas 4xx van al dead-letter de inmediato. Los reintentos reutilizan la primera marca de tiempo, así que el `max_age` del receptor debe cubrir toda la ventana de reintentos.
+
 La comparación de la firma es de tiempo constante, lo que significa que siempre tarda la misma cantidad de tiempo tanto si la conjetura es correcta como si es incorrecta. Eso detiene los ataques de temporización, donde un atacante mide diminutas diferencias en el tiempo de respuesta para adivinar el secreto un carácter a la vez.
 
 ---

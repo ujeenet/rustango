@@ -282,7 +282,7 @@ Appeler `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` sans un `.sele
 |---|---|
 | PostgreSQL | Prise en charge complète — chaque option émet sa syntaxe native. |
 | MySQL 8.0.1+ | Prend tout en charge sauf `NO KEY` — cette option retombe sur un simple `FOR UPDATE` (le verrou plus strict). |
-| SQLite | Aucune syntaxe de verrou au niveau ligne. Le writer n'émet aucune clause ; les transactions détiennent un verrou d'écriture implicite pour toute la base de données. Utilisez une autre stratégie pour SQLite (généralement une boucle d'attente active sur la transaction elle-même). |
+| SQLite | Aucune syntaxe de verrou au niveau ligne. Le writer n'émet aucune clause ; les transactions détiennent un verrou d'écriture implicite pour toute la base de données. Utilisez une autre stratégie pour SQLite (généralement une boucle d'attente active sur la transaction elle-même). Pour un bloc `atomic`, utilisez `rustango::sql::atomic_immediate(&pool, …)` : son bloc SQLite de premier niveau démarre par `BEGIN IMMEDIATE` ; sur PG et MySQL c'est un `atomic` ordinaire. |
 
 **Doit s'exécuter à l'intérieur d'une transaction.** `FOR UPDATE` hors transaction est une opération sans effet sur PostgreSQL (la transaction implicite à instruction unique libère le verrou immédiatement) et une erreur sur MySQL. Sur Postgres, associez-le à `pool.begin()` (un `sqlx::PgPool`) ; pour une transaction indépendante du backend, utilisez `rustango::sql::atomic(&pool, …)` ou `transaction_pool(&pool)`, qui renvoient un `PoolTx` sur lequel faire un `match`.
 

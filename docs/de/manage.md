@@ -1384,12 +1384,18 @@ Ein Name, der mit einem eingebauten Verb kollidiert oder doppelt
 registriert ist, lässt `Cli::run` beim Start mit beiden Namen im Fehler
 scheitern.
 
+`Cli::run_with_args(args)` führt die CLI mit den übergebenen Argumenten (ohne
+Programmnamen) statt mit denen des Prozesses aus, etwa aus einem Test.
+
 **Datenbankverbindung.** Alle Verben, der Server und eigene Befehle lesen
 die Datenbank aus `DATABASE_URL` oder aus `DB_DRIVER`, `DB_HOST`,
 `DB_PORT`, `DB_USER`, `DB_PASSWORD` (oder `DB_PASSWORD_FILE`, einer Datei
 mit dem Passwort), `DB_NAME` und `DB_PARAMS`. Für SQLite `DB_DRIVER=sqlite`
-und `DB_NAME` als Dateipfad setzen. Sind beide Varianten gesetzt, gewinnt
-`DATABASE_URL` und eine Warnung sagt es; ab 0.62.0 gewinnen die `DB_*`-Variablen.
+und `DB_NAME` als Dateipfad setzen. `DB_PASSWORD` und `DB_PASSWORD_FILE`
+zusammen zu setzen ist ein Fehler. Sind beide Varianten gesetzt, gewinnt
+`DATABASE_URL`, eine einzige Warnung (Passwort verborgen) sagt es, und
+`check --deploy` listet es auf; ab 0.62.0 gewinnen die `DB_*`-Variablen,
+also bleib bei einer Variante.
 
 ---
 
@@ -1668,8 +1674,8 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 |---|---|
 | `create-superuser` / `set-superuser` | Legt einen Superuser an oder befördert einen bestehenden Benutzer |
 | `create-user` / `create-operator` | Legt einen Tenant-Benutzer oder einen Operator an |
-| `reset-password` / `change-password` | Passwort-Wiederherstellung für Tenant-Benutzer |
-| `reset-operator-password` / `change-operator-password` | Passwort-Wiederherstellung für Operatoren |
+| `reset-password` / `change-password` | Passwort-Wiederherstellung für Tenant-Benutzer. `change-password` nimmt das aktuelle Passwort aus `--current-stdin` oder, ohne Terminal, aus `RUSTANGO_CURRENT_PASSWORD`; `--current` in argv warnt |
+| `reset-operator-password` / `change-operator-password` | Passwort-Wiederherstellung für Operatoren; `change-operator-password` liest das aktuelle Passwort wie `change-password` |
 | `set-operator-active` | Aktiviert oder deaktiviert einen Operator |
 | `create-role` / `assign-role` / `revoke-role` / `list-roles` | Rollen |
 | `grant-perm` / `revoke-perm` | Berechtigungen per Codename |

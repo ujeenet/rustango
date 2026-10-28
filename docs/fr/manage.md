@@ -1414,13 +1414,19 @@ cargo run -- reset-link --tenant acme alice
 Un nom qui entre en conflit avec un verbe intégré, ou enregistré deux
 fois, fait échouer `Cli::run` au démarrage avec les deux noms dans l'erreur.
 
+`Cli::run_with_args(args)` exécute la CLI sur les arguments que vous lui
+donnez (sans nom de programme) au lieu de ceux du processus, par exemple
+depuis un test.
+
 **Connexion à la base.** Tous les verbes, le serveur et les commandes
 personnalisées lisent la base depuis `DATABASE_URL`, ou depuis `DB_DRIVER`,
 `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD` (ou `DB_PASSWORD_FILE`, un
 fichier qui le contient), `DB_NAME` et `DB_PARAMS`. Pour SQLite, mettez
-`DB_DRIVER=sqlite` et le chemin du fichier dans `DB_NAME`. Si les deux
-styles sont définis, `DATABASE_URL` l'emporte et un avertissement le
-signale ; à partir de 0.62.0, les variables `DB_*` l'emporteront.
+`DB_DRIVER=sqlite` et le chemin du fichier dans `DB_NAME`. Définir à la fois
+`DB_PASSWORD` et `DB_PASSWORD_FILE` est une erreur. Si les deux styles sont
+définis, `DATABASE_URL` l'emporte, un seul avertissement (mot de passe masqué)
+le signale, et `check --deploy` le liste ; à partir de 0.62.0, les variables
+`DB_*` l'emporteront, donc gardez un seul style.
 
 ---
 
@@ -1705,8 +1711,8 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 |---|---|
 | `create-superuser` / `set-superuser` | Crée un superutilisateur, ou promeut un utilisateur existant |
 | `create-user` / `create-operator` | Crée un utilisateur de tenant ou un opérateur |
-| `reset-password` / `change-password` | Récupération du mot de passe d'un utilisateur de tenant |
-| `reset-operator-password` / `change-operator-password` | Récupération du mot de passe d'un opérateur |
+| `reset-password` / `change-password` | Récupération du mot de passe d'un utilisateur de tenant. Hors terminal, `change-password` lit le mot de passe actuel depuis `--current-stdin` ou `RUSTANGO_CURRENT_PASSWORD` ; `--current` dans argv émet un avertissement |
+| `reset-operator-password` / `change-operator-password` | Récupération du mot de passe d'un opérateur ; `change-operator-password` lit le mot de passe actuel comme `change-password` |
 | `set-operator-active` | Active ou désactive un opérateur |
 | `create-role` / `assign-role` / `revoke-role` / `list-roles` | Rôles |
 | `grant-perm` / `revoke-perm` | Permissions par codename |

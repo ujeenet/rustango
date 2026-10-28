@@ -1357,13 +1357,18 @@ cargo run -- reset-link --tenant acme alice
 Un nombre que choca con un verbo integrado, o registrado dos veces, hace
 que `Cli::run` falle al arrancar con ambos nombres en el error.
 
+`Cli::run_with_args(args)` ejecuta la CLI con los argumentos que le pase (sin el
+nombre del programa) en lugar de los del proceso, por ejemplo desde un test.
+
 **Conexión a la base de datos.** Todos los verbos, el servidor y los
 comandos propios leen la base de datos de `DATABASE_URL`, o de `DB_DRIVER`,
 `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD` (o `DB_PASSWORD_FILE`, un
 archivo que la contiene), `DB_NAME` y `DB_PARAMS`. Para SQLite, ponga
-`DB_DRIVER=sqlite` y la ruta del archivo en `DB_NAME`. Si ambos estilos
-están definidos, gana `DATABASE_URL` y un aviso lo indica; desde 0.62.0
-ganarán las variables `DB_*`.
+`DB_DRIVER=sqlite` y la ruta del archivo en `DB_NAME`. Definir a la vez
+`DB_PASSWORD` y `DB_PASSWORD_FILE` es un error. Si ambos estilos están
+definidos, gana `DATABASE_URL`, un único aviso (con la contraseña oculta) lo
+indica y `check --deploy` lo lista; desde 0.62.0 ganarán las variables
+`DB_*`, así que use un solo estilo.
 
 ---
 
@@ -1638,8 +1643,8 @@ alcanzan mediante `Cli::tenancy()`.
 |---|---|
 | `create-superuser` / `set-superuser` | Crea un superusuario, o promociona a un usuario existente |
 | `create-user` / `create-operator` | Crea un usuario de tenant o un operador |
-| `reset-password` / `change-password` | Recuperación de contraseña de usuario de tenant |
-| `reset-operator-password` / `change-operator-password` | Recuperación de contraseña de operador |
+| `reset-password` / `change-password` | Recuperación de contraseña de usuario de tenant. `change-password` toma la contraseña actual de `--current-stdin` o de `RUSTANGO_CURRENT_PASSWORD` fuera de una terminal; `--current` en argv emite un aviso |
+| `reset-operator-password` / `change-operator-password` | Recuperación de contraseña de operador; `change-operator-password` lee la contraseña actual igual que `change-password` |
 | `set-operator-active` | Activa o desactiva un operador |
 | `create-role` / `assign-role` / `revoke-role` / `list-roles` | Roles |
 | `grant-perm` / `revoke-perm` | Permisos por codename |

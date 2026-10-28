@@ -141,8 +141,20 @@ DELETE), y se mantiene sincronizado con la configuración del ViewSet:
   `limit`/`offset`).
 - **Filtrado / búsqueda / ordenación** → un parámetro de consulta `?field=` por cada
   `filter_fields` (con los lookups disponibles `__gt`/`__in`/… descritos), más
-  `?search=` y `?ordering=` cuando están configurados.
+  `?search=` cuando está configurado y `?ordering=` (abajo).
 - **`read_only()`** → las operaciones de escritura (POST/PUT/PATCH/DELETE) se omiten.
+- **Cuerpos y errores** → create, PUT y PATCH aceptan cuerpos JSON o urlencoded y
+  documentan `422 validation_failed`, `400` para un cuerpo mal formado y `413` para
+  uno demasiado grande. La operación create describe la forma de array masivo en su
+  texto (los esquemas siguen siendo de una fila). List documenta un `400` cuando sus
+  filtros pueden rechazar un valor; retrieve y DELETE documentan `400` para un pk mal
+  formado.
+- **Restricciones** → `403` (y `401` con `tenancy`) en una acción con codenames de
+  permiso, y `429` con `Retry-After` en una acción con throttle.
+- **Parámetros de lista** → `page_size` indica el límite real `max_page_size`.
+  `?ordering=` aparece en todos los ViewSets excepto en los de paginación por cursor,
+  que siempre ordenan por la columna del cursor. Los campos binarios son
+  `format: hex`, tal como el servidor los lee y escribe.
 - **Parámetro de ruta** → `{pk}` tipado a partir de la clave primaria del modelo.
 - **`operationId`** → `list_post`, `create_post`, … (en snake-case por acción).
 

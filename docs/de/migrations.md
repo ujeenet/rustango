@@ -174,6 +174,18 @@ wiederholt werden, um eine Reihe von Zeilen in einem Befehl zu reparieren.
 
 ---
 
+## Migrate-Signale
+
+Receiver von `rustango::signals::migrate::connect_pre_migrate` und
+`connect_post_migrate` laufen vor und nach einem Migrate-Lauf. Die Receiver von
+`connect_pre_migrate_with_target` und `connect_post_migrate_with_target` erhalten
+zusätzlich ein `MigrateTarget`: den `pool` des Laufs und seinen `tenant`-Slug
+(`None` für die Registry oder einen Lauf mit einer einzigen Datenbank). Ein
+Tenant-Lauf sendet einmal pro Tenant mit dem Pool dieses Tenants, auf jedem
+Backend, sodass ein `post_migrate`-Receiver jeden Tenant befüllen kann.
+
+---
+
 ## Upgrade auf 0.51.2
 
 > **0.51.0 und 0.51.1 wurden zurückgezogen (yanked)** — die Reconciliation, die sie versprachen, feuerte nie
