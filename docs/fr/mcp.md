@@ -159,6 +159,9 @@ notifications), `POST {prefix}/token` (credential → JWT), `POST {prefix}/oauth
 tokens d'agent avec `RUSTANGO_SESSION_SECRET`. Si elle est absente ou fait moins
 de 32 octets, il avertit et utilise une clé aléatoire par processus : les tokens
 ne survivent pas à un redémarrage.
+Chaque processus garde au plus 8 flux SSE ouverts par agent et 256 par tenant ;
+au-delà, `GET {prefix}` répond `429`. `RUSTANGO_MCP_SSE_PER_AGENT` /
+`RUSTANGO_MCP_SSE_PER_TENANT` les changent (`0` = sans limite).
 
 Le handshake `initialize` est un simple POST JSON-RPC. Sur le montage
 authentifié, chaque POST exige un jeton Bearer, `initialize` et `ping` compris ;
@@ -173,7 +176,7 @@ un appel sans jeton reçoit `401`.
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.61.8" },
+    "serverInfo": { "name": "rustango", "version": "0.61.9" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": { "listChanged": true },
                       "resources": { "listChanged": true, "subscribe": false },
                       "logging": {}, "completions": {} } } }

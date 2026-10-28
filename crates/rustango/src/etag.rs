@@ -89,6 +89,13 @@ impl<S: Clone + Send + Sync + 'static> EtagRouterExt for Router<S> {
 }
 
 async fn handle(cfg: Arc<EtagLayer>, req: Request<Body>, next: Next) -> Response<Body> {
+    // A 304 answers only a read; a write has already run.
+    if !matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) {
+        return next.run(req).await;
+    }
     // Read If-None-Match before the request is consumed.
     let client_etag = req
         .headers()
@@ -262,6 +269,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    /// A write already ran: its reply passes through, never a 304 (RFC 9110 §13.1.2).
+    #[tokio::test]
+    async fn a_write_is_never_answered_304() {
+        let app = Router::new()
+            .route("/page", axum::routing::put(|| async { "stored" }))
+            .etag(EtagLayer::new());
+        let r = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/page")
+                    .header(IF_NONE_MATCH, "*")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(r.headers().get(ETAG).is_none());
     }
 
     /// An `If-None-Match` list that contains our etag must 304.

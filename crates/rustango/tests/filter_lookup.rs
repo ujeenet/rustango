@@ -175,10 +175,16 @@ fn escaped_like_emits_escape_clause_on_every_dialect() {
         .unwrap();
     let sq = Sqlite.compile_select(&qs.compile().unwrap()).unwrap();
     assert!(pg.sql.contains("LIKE $1 ESCAPE '!'"), "pg: {}", pg.sql);
-    assert!(my.sql.contains("LIKE ? ESCAPE '!'"), "mysql: {}", my.sql);
-    assert!(sq.sql.contains("LIKE ? ESCAPE '!'"), "sqlite: {}", sq.sql);
-    // All three escape the value identically.
-    for stmt in [&pg, &my, &sq] {
+    assert!(
+        my.sql.contains("LIKE ? COLLATE utf8mb4_bin ESCAPE '!'"),
+        "mysql: {}",
+        my.sql
+    );
+    // SQLite's LIKE ignores case, so the same pattern runs as a GLOB.
+    assert!(sq.sql.contains("GLOB ?"), "sqlite: {}", sq.sql);
+    assert_eq!(sq.params, vec![SqlValue::String("*a%b*".into())]);
+    // PG and MySQL escape the value identically.
+    for stmt in [&pg, &my] {
         assert_eq!(stmt.params, vec![SqlValue::String("%a!%b%".into())]);
     }
 }
@@ -572,7 +578,7 @@ fn sqlite_keeps_double_quotes_for_filter_columns() {
     let qs = Post::objects().filter("title__contains", "rust");
     let stmt = Sqlite.compile_select(&qs.compile().unwrap()).unwrap();
     assert!(
-        stmt.sql.contains(r#""title" LIKE ?"#),
+        stmt.sql.contains(r#""title" GLOB ?"#),
         "SQLite shape: {}",
         stmt.sql
     );

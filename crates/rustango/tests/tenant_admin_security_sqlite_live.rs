@@ -667,3 +667,65 @@ async fn the_cleanup_form_needs_audit_delete() {
     let (_, body) = env.get("/__admin/__audit", &cleaner).await;
     assert!(body.contains("__audit/cleanup"), "{body}");
 }
+
+impl Env {
+    /// POST `body` to `uri` and GET where it redirects; that page's body.
+    async fn follow(&self, uri: &str, cookie: &str, body: &str) -> String {
+        let res = self
+            .admin
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::HOST, &self.host)
+                    .header(header::COOKIE, cookie)
+                    .header("x-csrf-token", "t")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let to = res.headers()[header::LOCATION].to_str().unwrap().to_owned();
+        assert!(to.contains("flash_sig="), "unsigned message: {to}");
+        self.get(&to, cookie).await.1
+    }
+}
+
+/// Only messages the admin itself signed show on the login page.
+#[tokio::test]
+async fn the_login_page_shows_no_crafted_message() {
+    let env = boot().await;
+    let (_, page) = env
+        .get("/__login?error=Account+locked.+Call+555-0100", "")
+        .await;
+    assert!(!page.contains("Call 555"), "crafted text shown: {page}");
+    let page = env
+        .follow(
+            "/__login",
+            "rustango_csrf=t",
+            "_csrf=t&username=nobody&password=wrong&next=/",
+        )
+        .await;
+    assert!(page.contains("Invalid credentials"), "{page}");
+}
+
+/// Only messages the admin itself signed show on the password page.
+#[tokio::test]
+async fn the_password_page_shows_no_crafted_message() {
+    let env = boot().await;
+    let cookie = env.login(false, &[]).await;
+    for q in ["error=Call+555-0100", "ok=Call+555-0100"] {
+        let (_, page) = env.get(&format!("/__change-password?{q}"), &cookie).await;
+        assert!(!page.contains("Call 555"), "{q}: crafted text shown");
+    }
+    let page = env
+        .follow(
+            "/__change-password",
+            &cookie,
+            "_csrf=t&current_password=pw-123456789&new_password=a&confirm_password=b",
+        )
+        .await;
+    assert!(page.contains("did not match"), "{page}");
+}

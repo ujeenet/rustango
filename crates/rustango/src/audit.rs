@@ -1370,7 +1370,8 @@ pub async fn delete_one_with_audit(
     query: &crate::core::DeleteQuery,
     entry: &PendingEntry,
 ) -> Result<u64, crate::sql::ExecError> {
-    let mut tx = crate::sql::transaction_pool(pool).await?;
+    // SQLite: the cascade reads before it deletes, so lock at BEGIN.
+    let mut tx = crate::sql::write_transaction(pool).await?;
     let affected = writing_via(pool, crate::sql::delete_tx(&mut tx, query)).await?;
     if affected > 0 {
         emit_one_tx(&mut tx, Via::Pool(pool), entry).await?;
@@ -1413,7 +1414,7 @@ pub async fn save_one_with_audit(
 ) -> Result<u64, crate::sql::ExecError> {
     query.validate()?;
     let stmt = pool.dialect().compile_update(query)?;
-    let mut tx = crate::sql::transaction_pool(pool).await?;
+    let mut tx = crate::sql::write_transaction(pool).await?;
     let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
     if affected > 0 {
         emit_one_tx(&mut tx, Via::Pool(pool), entry).await?;
@@ -1600,7 +1601,7 @@ where
     M: crate::sql::AssignAutoPkPool,
 {
     // `insert_returning_tx` already handles each backend's return shape.
-    let mut tx = crate::sql::transaction_pool(pool).await?;
+    let mut tx = crate::sql::write_transaction(pool).await?;
     let returning = crate::sql::insert_returning_tx(&mut tx, query).await?;
     crate::sql::apply_auto_pk(returning, model)?;
     emit_one_tx(&mut tx, Via::Pool(pool), &entry(model)).await?;
@@ -2139,7 +2140,7 @@ pub(crate) async fn insert_returning(
         let pk = crate::sql::inserted_pk(query, &returning, pk_field)?;
         return Ok((pk, returning));
     }
-    let mut tx = crate::sql::transaction_pool(pool).await?;
+    let mut tx = crate::sql::write_transaction(pool).await?;
     // The create recorder only has the transaction.
     let inserted = writing_via(pool, insert_returning_tx(&mut tx, query, pk_field)).await?;
     tx.commit().await?;

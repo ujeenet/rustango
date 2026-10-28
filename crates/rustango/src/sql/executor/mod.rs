@@ -206,7 +206,11 @@ where
             _ => unreachable!("a PgPool yields Postgres rows"),
         })
         .await?;
-        Ok(into_page(rows))
+        let total = match total_statement(&Postgres, &select)?.filter(|_| rows.is_empty()) {
+            Some(count) => Some(count_stmt_on(pool, count).await?),
+            None => None,
+        };
+        Ok(into_page(rows, total))
     }
 }
 
@@ -221,9 +225,11 @@ where
     Ok((T::from_row(row)?, row.try_get("__rustango_total")?))
 }
 
-/// An empty page has no row to carry the total, so it is 0.
-fn into_page<T>(rows: Vec<(T, i64)>) -> Page<T> {
-    let total = rows.first().map_or(0, |(_, total)| *total);
+/// An empty page has no row to carry the total: `counted` is it, or 0.
+fn into_page<T>(rows: Vec<(T, i64)>, counted: Option<i64>) -> Page<T> {
+    let total = rows
+        .first()
+        .map_or(counted.unwrap_or(0), |(_, total)| *total);
     Page {
         rows: rows.into_iter().map(|(row, _)| row).collect(),
         total,
@@ -254,7 +260,8 @@ where
     /// ORDER BY ... LIMIT 20 OFFSET 40
     /// ```
     ///
-    /// An empty result gives `Page { rows: vec![], total: 0 }`.
+    /// A page past the last row runs one `COUNT(*)` for its total (not
+    /// on a bare sqlx Postgres executor, where it stays 0).
     /// MySQL needs 8.0 or later for the window function.
     ///
     /// # Errors
@@ -265,16 +272,18 @@ where
     ) -> Result<Page<T>, ExecError> {
         let select = self.compile()?;
         let stmt = paginated_statement(exec.dialect(), &select)?;
-        let rows = run_on(exec, &stmt.sql, stmt.params, |row| match row {
-            #[cfg(feature = "postgres")]
-            RowRef::Postgres(r) => paged::<T, _>(r),
-            #[cfg(feature = "mysql")]
-            RowRef::Mysql(r) => paged::<T, _>(r),
-            #[cfg(feature = "sqlite")]
-            RowRef::Sqlite(r) => paged::<T, _>(r),
-        })
-        .await?;
-        Ok(into_page(rows))
+        let count = total_statement(exec.dialect(), &select)?;
+        let (rows, total) = exec
+            .fetch_rows_or_count(stmt, count, |row| match row {
+                #[cfg(feature = "postgres")]
+                RowRef::Postgres(r) => paged::<T, _>(r),
+                #[cfg(feature = "mysql")]
+                RowRef::Mysql(r) => paged::<T, _>(r),
+                #[cfg(feature = "sqlite")]
+                RowRef::Sqlite(r) => paged::<T, _>(r),
+            })
+            .await?;
+        Ok(into_page(rows, total))
     }
 
     /// [`QuerySet::in_bulk`] on a [`SqlExecutor`], e.g. `Tenant::conn()`
@@ -329,8 +338,8 @@ where
 }
 
 mod page;
-use page::paginated_statement;
 pub use page::Page;
+use page::{paginated_statement, total_statement};
 
 // PG `_on` CRUD family — see pg_on.rs.
 #[cfg(feature = "postgres")]
@@ -1934,6 +1943,14 @@ pub(crate) async fn count_rows_on<'c, E: SqlExecutor<'c>>(
     query: &CountQuery,
 ) -> Result<i64, ExecError> {
     let stmt = exec.dialect().compile_count(query)?;
+    count_stmt_on(exec, stmt).await
+}
+
+/// Run a compiled `SELECT COUNT(*)` on `exec`.
+pub(crate) async fn count_stmt_on<'c, E: SqlExecutor<'c>>(
+    exec: E,
+    stmt: crate::sql::CompiledStatement,
+) -> Result<i64, ExecError> {
     fn cell_i64<R>(row: &R) -> Result<i64, sqlx::Error>
     where
         R: sqlx::Row,

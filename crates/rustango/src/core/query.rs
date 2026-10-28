@@ -255,17 +255,11 @@ pub enum WhereExpr {
     /// Logical negation. Emits `NOT (child)`.
     Not(Box<WhereExpr>),
     /// Logical XOR. True when an odd number of
-    /// children are true. Only MySQL has a native XOR, so the writer
-    /// always rewrites: two children become
-    /// `(a AND NOT b) OR (NOT a AND b)`, three or more fold into a
-    /// CASE-WHEN-1/0 sum tested with `% 2 = 1`. No children matches
-    /// nothing and is rejected, like `Or(vec![])`; one child means the
-    /// child itself.
-    ///
-    /// The two-child rewrite prints each operand twice, so the
-    /// database evaluates each one twice. That only matters for
-    /// volatile expressions such as `RANDOM()` or `NOW()`. Three or
-    /// more children evaluate each child exactly once.
+    /// children are true; a NULL child counts as false. Only MySQL has
+    /// a native XOR, so the writer folds the children into a
+    /// CASE-WHEN-1/0 sum tested with `% 2 = 1`, each evaluated once. No
+    /// children matches nothing and is rejected, like `Or(vec![])`; one
+    /// child means the child itself.
     Xor(Vec<WhereExpr>),
     /// `EXISTS (<subquery>)` — true when the inner `SelectQuery`
     /// returns at least one row. Boxed because `SelectQuery` carries

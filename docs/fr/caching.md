@@ -317,6 +317,9 @@ par défaut). Il est sûr par défaut :
 - Une réponse avec `Set-Cookie`, ou `Cache-Control: private`, `no-cache` ou
   `no-store`, n'est jamais mise en cache.
 - `.vary_on([...])` met des en-têtes de requête dans la clé.
+- Par défaut la query brute est dans la clé : chaque query distincte crée son
+  entrée, et `?x=<aléatoire>` peut remplir le cache. `.query_keys(["page", "q"])`
+  ne garde que ces paramètres, triés ; `.ignore_query()` retire la query.
 - `.key_prefix(..)` donne à chaque couche son propre espace de clés (par défaut
   `rustango.cache_page`). `.cache_query(true)` met aussi en cache les requêtes
   `QUERY`, avec un condensé du corps (jusqu'à 1 Mio) dans la clé.

@@ -354,6 +354,27 @@ pub(crate) fn normalize_host(authority: &str) -> Option<String> {
     Some(host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase())
 }
 
+/// The URI the client sent: `Router::nest` strips its prefix from
+/// `uri`, `OriginalUri` keeps it.
+#[cfg(feature = "_axum")]
+#[cfg_attr(
+    not(any(
+        feature = "admin",
+        feature = "tenancy",
+        feature = "template_views",
+        feature = "cache-page"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn original_uri<'a>(
+    uri: &'a axum::http::Uri,
+    extensions: &'a axum::http::Extensions,
+) -> &'a axum::http::Uri {
+    extensions
+        .get::<axum::extract::OriginalUri>()
+        .map_or(uri, |o| &o.0)
+}
+
 /// The request's host as sent: `Host`, or the HTTP/2 `:authority` when
 /// there is none. A `Host` that is not UTF-8 is `None`, never the URI's.
 #[cfg(feature = "_http_layers")]
@@ -566,11 +587,22 @@ fn substitute(
         // Drop a type annotation like `{int:id}`, so a pattern
         // copied from a router works as written.
         let key = placeholder.split(':').next_back().unwrap_or(&placeholder);
+        // `{*rest}` is a catch-all: keyed `rest` (or the old `*rest`), its `/` kept.
+        let (key, wildcard) = match key.strip_prefix('*') {
+            Some(bare) if !params.contains_key(key) => (bare, true),
+            _ => (key, key.starts_with('*')),
+        };
         let value = params.get(key).ok_or_else(|| ReverseError::MissingParam {
             name: name.to_owned(),
             param: key.to_owned(),
         })?;
-        out.push_str(&crate::url_codec::url_encode(value));
+        if wildcard {
+            let segments: Vec<String> =
+                value.split('/').map(crate::url_codec::url_encode).collect();
+            out.push_str(&segments.join("/"));
+        } else {
+            out.push_str(&crate::url_codec::url_encode(value));
+        }
         used.insert(key.to_owned());
     }
     // Reject extra params so a typo does not pass unnoticed.
@@ -626,6 +658,18 @@ mod tests {
         let p = params(&[("id", "hello world")]);
         let url = reverse("__test_post_detail", &p).unwrap();
         assert_eq!(url, "/posts/hello%20world");
+    }
+
+    crate::register_url!("__test_wildcard", "/files/{*rest}");
+
+    /// A `{*rest}` catch-all takes `rest` and keeps its `/` separators.
+    #[test]
+    fn reverse_fills_a_wildcard_by_its_bare_name() {
+        let p = params(&[("rest", "a b/c.txt")]);
+        assert_eq!(
+            reverse("__test_wildcard", &p).unwrap(),
+            "/files/a%20b/c.txt"
+        );
     }
 
     #[test]

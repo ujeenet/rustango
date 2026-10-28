@@ -172,11 +172,12 @@ pub fn push(
 /// out.push(messages::Level::Warning, "Email not verified.", "");
 /// let cookie = out.set_cookie();
 /// ```
-#[derive(Debug)]
 pub struct Outbox<'a> {
     secret: &'a [u8],
     messages: Vec<Message>,
 }
+
+redacted_debug!(Outbox<'_> { messages; secret });
 
 impl<'a> Outbox<'a> {
     /// Start from the messages already in the request's cookie.
@@ -487,6 +488,18 @@ mod tests {
     fn cookie_from_set(set: &str) -> String {
         let first = set.split(';').next().unwrap();
         first.to_owned()
+    }
+
+    #[test]
+    fn outbox_debug_hides_the_signing_key() {
+        let mut out = Outbox::new(SECRET, &empty_headers());
+        out.push(Level::Info, "hi", "");
+        let shown = format!("{out:?}");
+        assert!(!shown.contains("116, 101, 115, 116"), "{shown}");
+        assert!(
+            shown.contains("[redacted]") && shown.contains("hi"),
+            "{shown}"
+        );
     }
 
     #[test]

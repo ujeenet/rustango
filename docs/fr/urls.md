@@ -129,11 +129,10 @@ params.insert("id", "42".to_string());
 let response = redirect_to_view("post-detail", &params)?;
 ```
 
-`resolve_url(spec, &params)` accepte les deux : si `spec` ressemble
-déjà à une URL (`/…`, `http://`, `https://`, `./`, `../`) elle est retournée
-telle quelle ; sinon elle est traitée comme un nom de route et résolue par
-reverse. Pratique pour un paramètre `?next=` ou un réglage pouvant contenir *soit*
-un chemin, *soit* un nom :
+`resolve_url(spec, &params)` accepte les deux : une URL du même site (un chemin
+`/…` qui n'est pas `//hôte` ni `/\hôte`, `./`, `../`) est retournée telle quelle ;
+sinon elle est traitée comme un nom de route et résolue par reverse. Pratique pour
+un paramètre `?next=` ou un réglage pouvant contenir *soit* un chemin, *soit* un nom :
 
 ```rust
 let url = resolve_url("post-detail", &params)?;  // name  → "/posts/42"
@@ -143,12 +142,11 @@ let url = resolve_url("/dashboard", &params)?;   // path  → "/dashboard" (as-i
 (Pour les redirections brutes vers une URL connue, `rustango::shortcuts::redirect(url)`
 retourne un simple `302`.)
 
-**`resolve_url` ne vérifie pas l'hôte.** `http://evil.example` revient tel quel.
-Avant de rediriger vers un `?next=` fourni par l'utilisateur, vérifiez-le avec
-`rustango::urls::url_has_allowed_host_and_scheme(url, &allowed_hosts, require_https)`.
-Il accepte un chemin relatif, ou une URL `http`/`https` dont l'hôte est dans la
-liste, et refuse `//host`, `\\host`, les caractères de contrôle et les autres
-schémas (`javascript:`, `data:`, …).
+**`resolve_url` ne retourne jamais une URL d'un autre site.** `http://evil.example`
+et `//evil.example` ne sont pas des noms de route et échouent avec `UnknownName`.
+Pour rediriger exprès vers une URL absolue, vérifiez-la avec
+`rustango::urls::url_has_allowed_host_and_scheme(url, &allowed_hosts, require_https)`
+et passez-la directement à `redirect`.
 
 ---
 
@@ -290,7 +288,8 @@ une fois et la réutiliser à travers les requêtes.
   réellement monté à ce motif. Enregistrez le nom là où vous montez la route pour
   qu'ils restent synchronisés.
 - **Les valeurs sont percent-encodées** par `reverse`, donc elles sont sûres à
-  déposer dans un header `Location` ou un `href`.
+  déposer dans un header `Location` ou un `href`. Un catch-all `{*rest}` prend la
+  clé `rest` et garde ses séparateurs `/`.
 - **Pas de convertisseurs regex/typés** dans les motifs (du type `<int:pk>`) ;
   les placeholders sont de simples `{name}` et les valeurs sont substituées telles
   quelles (après encodage). Voir [Motifs regex & chemins typés](#motifs-regex--chemins-typés)

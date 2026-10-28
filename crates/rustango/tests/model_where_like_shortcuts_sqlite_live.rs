@@ -58,12 +58,10 @@ async fn where_like_pool_matches_explicit_wildcards() {
     seed(&pool).await;
     let rows = Post::where_like("title", "Rust%", &pool).await.unwrap();
     let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
-    // SQLite's LIKE is case-insensitive by default — matches both
-    // 'Rust*' and 'rust*' rows.
-    assert_eq!(titles.len(), 3);
+    // Case-sensitive, as on PG: `rust for beginners` is left out.
+    assert_eq!(titles.len(), 2);
     assert!(titles.contains(&"Rust at scale"));
     assert!(titles.contains(&"Rust async runtimes"));
-    assert!(titles.contains(&"rust for beginners"));
 }
 
 #[tokio::test]
@@ -81,8 +79,8 @@ async fn where_starts_with_pool_auto_appends_percent() {
     let rows = Post::where_starts_with("title", "Rust", &pool)
         .await
         .unwrap();
-    // SQLite LIKE is case-insensitive → matches both Rust* + rust*.
-    assert_eq!(rows.len(), 3);
+    // Case-sensitive, as on PG: only the `Rust*` rows.
+    assert_eq!(rows.len(), 2);
 }
 
 #[tokio::test]

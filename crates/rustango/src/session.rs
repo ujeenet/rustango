@@ -520,6 +520,9 @@ pub(crate) struct PendingSecondFactor {
     /// Bound to the password hash, so a password change in between ends it.
     pub(crate) pwf: PasswordFingerprint,
     pub(crate) exp: i64,
+    /// The flow's encrypted rehash of the password, stored after the code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) upgrade: Option<String>,
 }
 
 #[cfg(all(feature = "totp", any(feature = "admin-sso", feature = "tenancy")))]
@@ -532,6 +535,7 @@ impl PendingSecondFactor {
             uid,
             pwf: PasswordFingerprint::of(secret, password_hash),
             exp: chrono::Utc::now().timestamp() + Self::TTL_SECS,
+            upgrade: None,
         }
     }
 

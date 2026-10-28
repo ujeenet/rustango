@@ -160,6 +160,9 @@ Der authentifizierte Router mountet: `POST {prefix}` (JSON-RPC), `GET {prefix}`
 Discovery-Dokumente. Er signiert Agenten-Tokens mit `RUSTANGO_SESSION_SECRET`.
 Fehlt der Wert oder ist er kürzer als 32 Bytes, warnt er und nutzt einen
 zufälligen Schlüssel pro Prozess; Tokens gelten dann nur bis zum Neustart.
+Jeder Prozess hält höchstens 8 offene SSE-Streams pro Agent und 256 pro Tenant;
+darüber antwortet `GET {prefix}` mit `429`. `RUSTANGO_MCP_SSE_PER_AGENT` /
+`RUSTANGO_MCP_SSE_PER_TENANT` ändern das (`0` heißt ohne Grenze).
 
 Der `initialize`-Handshake ist ein einfacher JSON-RPC-POST. Auf dem
 authentifizierten Mount braucht jeder POST ein Bearer-Token, auch `initialize`
@@ -174,7 +177,7 @@ und `ping`; ein Aufruf ohne Token erhält `401`.
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.61.8" },
+    "serverInfo": { "name": "rustango", "version": "0.61.9" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": { "listChanged": true },
                       "resources": { "listChanged": true, "subscribe": false },
                       "logging": {}, "completions": {} } } }

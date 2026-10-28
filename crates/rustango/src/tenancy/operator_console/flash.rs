@@ -26,7 +26,7 @@ type Pairs = Vec<(String, String)>;
 
 /// A message for the page a handler redirects to.
 #[derive(Clone, Copy, Debug)]
-pub(super) enum Flash<'a> {
+pub(in crate::tenancy) enum Flash<'a> {
     Error(&'a str),
     Notice(&'a str),
     Ok(&'a str),
@@ -51,10 +51,10 @@ struct Pending {
 
 /// The messages that passed the check, for pages that render them.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(super) struct Messages {
-    pub(super) error: Option<String>,
-    pub(super) notice: Option<String>,
-    pub(super) ok: Option<String>,
+pub(in crate::tenancy) struct Messages {
+    pub(in crate::tenancy) error: Option<String>,
+    pub(in crate::tenancy) notice: Option<String>,
+    pub(in crate::tenancy) ok: Option<String>,
 }
 
 /// Redirect to `location` (which may carry its own query) with `flash`.
@@ -68,6 +68,25 @@ pub(super) fn redirect(location: &str, flash: Flash<'_>) -> Response<Body> {
     let mut resp = Redirect::to(&target).into_response();
     resp.extensions_mut().insert(Pending { key, text });
     resp
+}
+
+/// [`redirect`] signed on the spot, for routers without [`layer`].
+pub(in crate::tenancy) fn signed_redirect(
+    secret: &SessionSecret,
+    location: &str,
+    flash: Flash<'_>,
+) -> Response<Body> {
+    let mut resp = redirect(location, flash);
+    sign_pending(secret, &mut resp);
+    resp
+}
+
+/// The messages in `query` signed for `path`; none when unsigned or stale.
+pub(in crate::tenancy) fn read(secret: &SessionSecret, path: &str, query: &str) -> Messages {
+    match verify(secret, path, query, now()) {
+        Verdict::Verified(m) => m,
+        Verdict::Untouched | Verdict::Stripped(_) => Messages::default(),
+    }
 }
 
 /// `next` without message keys, so a login bounce cannot carry one.
@@ -209,8 +228,14 @@ pub(super) async fn layer(
         }
     }
     let mut resp = next.run(req).await;
+    sign_pending(secret, &mut resp);
+    resp
+}
+
+/// Sign the message a [`redirect`] left on `resp`, if any.
+fn sign_pending(secret: &SessionSecret, resp: &mut Response<Body>) {
     let Some(pending) = resp.extensions_mut().remove::<Pending>() else {
-        return resp;
+        return;
     };
     let signed = resp
         .headers()
@@ -221,7 +246,6 @@ pub(super) async fn layer(
     if let Some(v) = signed {
         resp.headers_mut().insert(header::LOCATION, v);
     }
-    resp
 }
 
 #[cfg(test)]

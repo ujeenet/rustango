@@ -2357,9 +2357,9 @@ async fn enter(
         // client treats 401 as its cue to refresh, so answering 403
         // to an anonymous request silently logs the member out.
         PermOutcome::Unauthenticated => {
-            return Err(json_error(
-                StatusCode::UNAUTHORIZED,
-                "authentication required",
+            return Err(crate::bearer::challenge(
+                json_error(StatusCode::UNAUTHORIZED, "authentication required"),
+                crate::bearer::Sent::of(&parts.headers),
             ))
         }
         PermOutcome::Forbidden => {
@@ -3383,10 +3383,8 @@ async fn handle_create(
         .create
         .map(|_| ThrottleClient::new(&parts, &acq.scope));
     // The detail route is the collection path plus the pk, nest prefix included.
-    let collection = parts
-        .extensions
-        .get::<axum::extract::OriginalUri>()
-        .map_or_else(|| parts.uri.path(), |u| u.path())
+    let collection = crate::urls::original_uri(&parts.uri, &parts.extensions)
+        .path()
         .to_owned();
     // A JSON array body means a bulk create.
     let create_body = match extract_create_body(parts, body, Some(body_types(&state))).await {
