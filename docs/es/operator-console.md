@@ -16,6 +16,7 @@ La consola de operador es la interfaz web de la primera clase — aprovisionar t
 - [Nombres de host](#nombres-de-host)
 - [Hosts desconocidos](#hosts-desconocidos)
 - [Operadores](#operadores)
+- [Inicio de sesión en dos pasos](#inicio-de-sesión-en-dos-pasos)
 - [El registro de auditoría](#el-registro-de-auditoría)
 - [Ejecuciones de aprovisionamiento](#ejecuciones-de-aprovisionamiento)
 - [Servidores de bases de datos](#servidores-de-bases-de-datos)
@@ -73,6 +74,7 @@ La consola responde en el dominio **apex** (`RUSTANGO_APEX_DOMAIN`), no en un su
 | **Audit log** | Cada cambio hecho a través de la consola |
 | **Runs** | Ejecuciones de aprovisionamiento y migración, en directo |
 | **Database servers** | Servidores donde se crean las bases de los tenants, con su login de administración |
+| **Two-factor sign-in** | Su propia app de autenticación (feature `totp`) |
 
 ---
 
@@ -131,6 +133,18 @@ Dos cosas que la página no permite, por la misma razón:
 Una contraseña generada se muestra **una vez**, en el cuerpo de la respuesta — nunca mediante una redirección, que la pondría en la barra de direcciones, el historial, el referente y cada log de acceso por el camino.
 
 Desde la CLI: [`list-operators` / `set-operator-active`](manage.md#list-operators).
+
+---
+
+## Inicio de sesión en dos pasos
+
+Con la feature `totp`, un operador puede añadir una app de autenticación en **Two-factor sign-in** (`/account/totp`). La página muestra una clave de configuración y un enlace `otpauth://` hasta que un código la confirma. Desactivarla pide un código actual.
+
+Después, la contraseña sola solo abre el paso del código (`/login/totp`); ninguna página de la consola responde hasta que el código es correcto. Cada código sirve una vez, y los códigos erróneos cuentan contra los mismos límites y el mismo bloqueo que las contraseñas erróneas. La activación, la desactivación y cada código erróneo se escriben en el [registro de auditoría](#el-registro-de-auditoría) como `totp_enroll`, `totp_disable` y `totp_failed`, nunca con el código.
+
+Es opcional por operador. `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` lo hace obligatorio: un operador sin dispositivo configura uno en el paso del código antes de su primera sesión. Se lee al arrancar.
+
+Los secretos están en `rustango_operator_totp` en el registro, sellados con `RUSTANGO_SECRET_KEY`, que debe estar definido para activarlo. `migrate` crea la tabla, o la consola en el primer inicio de sesión. Si la tabla no se puede leer, el inicio de sesión se rechaza en vez de aceptarse solo con la contraseña. Aún no hay códigos de recuperación: un operador que pierde el dispositivo necesita una shell en el registro para borrar su fila.
 
 ---
 

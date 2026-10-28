@@ -151,38 +151,103 @@ async fn redeem(
     code: &str,
     confirm: bool,
 ) -> Result<bool, crate::sql::ExecError> {
-    let Some(step) = crate::totp::matched_step(secret, code, STEP_SECS, DIGITS, WINDOW) else {
+    redeem_in::<AdminTotp>(pool, user_id, &Stored::plain(secret), code, confirm).await
+}
+
+/// A TOTP device table: one row per account, keyed by its id. The admin's
+/// stores base32; the operator console's seals the secret.
+pub(crate) trait DeviceTable: crate::core::Model + Send + 'static {
+    /// The account-id column, the primary key.
+    const OWNER: &'static str;
+    /// The confirmed (or, unconfirmed, the enrolling) secret.
+    const SECRET: &'static str;
+    /// A re-enrollment's new secret, beside a confirmed one.
+    const PENDING: &'static str;
+    /// The stored text for `secret`.
+    fn seal(owner: i64, secret: &TotpSecret) -> Result<String, crate::sql::ExecError>;
+    /// `None` when `stored` does not decode for `owner`.
+    fn open(owner: i64, stored: &str) -> Option<TotpSecret>;
+    /// Bring an older table up to date, after a write failed on it.
+    fn upgrade(pool: &Pool) -> impl std::future::Future<Output = Result<(), sqlx::Error>> + Send;
+}
+
+impl DeviceTable for AdminTotp {
+    const OWNER: &'static str = "user_id";
+    const SECRET: &'static str = "secret_base32";
+    const PENDING: &'static str = "pending_secret_base32";
+    fn seal(_: i64, secret: &TotpSecret) -> Result<String, crate::sql::ExecError> {
+        Ok(secret.to_base32())
+    }
+    fn open(_: i64, stored: &str) -> Option<TotpSecret> {
+        TotpSecret::from_base32(stored)
+    }
+    fn upgrade(pool: &Pool) -> impl std::future::Future<Output = Result<(), sqlx::Error>> + Send {
+        add_new_columns(pool)
+    }
+}
+
+/// A secret as read from its row. Writes pin to the stored text, since a
+/// sealed value never seals to the same text twice.
+pub(crate) struct Stored {
+    pub(crate) secret: TotpSecret,
+    text: String,
+}
+
+impl Stored {
+    /// A base32 secret, whose stored text is its encoding.
+    fn plain(secret: &TotpSecret) -> Self {
+        Self {
+            secret: secret.clone(),
+            text: secret.to_base32(),
+        }
+    }
+
+    fn read<M: DeviceTable>(owner: i64, text: String) -> Option<Self> {
+        M::open(owner, &text).map(|secret| Self { secret, text })
+    }
+}
+
+/// [`redeem_code`] (`confirm = false`) or [`confirm_with_code`] on any device table.
+pub(crate) async fn redeem_in<M: DeviceTable>(
+    pool: &Pool,
+    owner: i64,
+    secret: &Stored,
+    code: &str,
+    confirm: bool,
+) -> Result<bool, crate::sql::ExecError> {
+    let Some(step) = crate::totp::matched_step(&secret.secret, code, STEP_SECS, DIGITS, WINDOW)
+    else {
         return Ok(false);
     };
     let step = i64::try_from(step).unwrap_or(i64::MAX);
-    let updated = match write_step(pool, user_id, secret, step, confirm).await {
+    let updated = match write_step::<M>(pool, owner, secret, step, confirm).await {
         Ok(n) => n,
         // A table from before the newer columns: add them and try again.
-        Err(first) => match add_new_columns(pool).await {
-            Ok(()) => write_step(pool, user_id, secret, step, confirm).await?,
+        Err(first) => match M::upgrade(pool).await {
+            Ok(()) => write_step::<M>(pool, owner, secret, step, confirm).await?,
             Err(_) => return Err(first),
         },
     };
     Ok(updated == 1)
 }
 
-async fn write_step(
+async fn write_step<M: DeviceTable>(
     pool: &Pool,
-    user_id: i64,
-    secret: &TotpSecret,
+    owner: i64,
+    secret: &Stored,
     step: i64,
     confirm: bool,
 ) -> Result<u64, crate::sql::ExecError> {
-    use crate::query::Q;
+    use crate::query::{QuerySet, Q};
     use crate::sql::UpdaterPool as _;
     if confirm {
         // A re-enroll: swap the pending secret in, in one write.
-        let promoted = AdminTotp::objects()
-            .filter("user_id", user_id)
-            .filter("pending_secret_base32", secret.to_base32())
+        let promoted = QuerySet::<M>::new()
+            .filter(M::OWNER, owner)
+            .filter(M::PENDING, secret.text.clone())
             .update()
-            .set("secret_base32", secret.to_base32())
-            .set("pending_secret_base32", None::<String>)
+            .set(M::SECRET, secret.text.clone())
+            .set(M::PENDING, None::<String>)
             .set("confirmed", true)
             .set("last_used_step", step)
             .execute_pool(pool)
@@ -193,9 +258,9 @@ async fn write_step(
     }
     // Pinned to the secret the code was checked against, so a
     // re-enrollment in between cannot be confirmed by the old one.
-    let q = AdminTotp::objects()
-        .filter("user_id", user_id)
-        .filter("secret_base32", secret.to_base32());
+    let q = QuerySet::<M>::new()
+        .filter(M::OWNER, owner)
+        .filter(M::SECRET, secret.text.clone());
     let q = if confirm {
         q.filter("confirmed", false)
     } else {
@@ -208,9 +273,119 @@ async fn write_step(
     let q = if confirm {
         q.set("confirmed", true)
     } else {
-        q.set("pending_secret_base32", None::<String>)
+        q.set(M::PENDING, None::<String>)
     };
     q.execute_pool(pool).await
+}
+
+/// The confirmed secret of `owner`, `None` without one. A read failure, or a
+/// confirmed row that will not decode, is an error: it still gates.
+pub(crate) async fn confirmed_in<M: DeviceTable>(
+    pool: &Pool,
+    owner: i64,
+) -> Result<Option<Stored>, crate::sql::ExecError> {
+    // Only the secret, so a table from before `last_used_step` still reads.
+    let secrets: Vec<String> = crate::query::QuerySet::<M>::new()
+        .filter(M::OWNER, owner)
+        .filter("confirmed", true)
+        .values_list_flat(M::SECRET)
+        .fetch(pool)
+        .await?;
+    secrets
+        .into_iter()
+        .next()
+        .map(|text| {
+            Stored::read::<M>(owner, text).ok_or_else(|| {
+                crate::sql::ExecError::Driver(crate::sql::sqlx::Error::Decode(
+                    format!("{}.{} does not decode", M::SCHEMA.table, M::SECRET).into(),
+                ))
+            })
+        })
+        .transpose()
+}
+
+/// The secret an enrollment in progress would confirm: a re-enroll's
+/// pending one, else an unconfirmed device's own.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn pending_in<M: DeviceTable>(
+    pool: &Pool,
+    owner: i64,
+) -> Result<Option<Stored>, crate::sql::ExecError> {
+    use crate::query::{QuerySet, Q};
+    let staged: Vec<String> = QuerySet::<M>::new()
+        .filter(M::OWNER, owner)
+        .filter("confirmed", true)
+        .where_(Q::is_not_null(M::PENDING))
+        .values_list_flat(M::PENDING)
+        .fetch(pool)
+        .await?;
+    let text = match staged.into_iter().next() {
+        Some(t) => Some(t),
+        None => QuerySet::<M>::new()
+            .filter(M::OWNER, owner)
+            .filter("confirmed", false)
+            .values_list_flat(M::SECRET)
+            .fetch(pool)
+            .await?
+            .into_iter()
+            .next(),
+    };
+    Ok(text.and_then(|t| Stored::read::<M>(owner, t)))
+}
+
+/// [`start_enrollment`] on any device table.
+pub(crate) async fn start_in<M: DeviceTable>(
+    pool: &Pool,
+    owner: i64,
+    secret: &TotpSecret,
+) -> Result<(), crate::sql::ExecError> {
+    use crate::core::SqlValue;
+    use crate::query::QuerySet;
+    use crate::sql::UpdaterPool as _;
+    let stored = M::seal(owner, secret)?;
+    let staged = QuerySet::<M>::new()
+        .filter(M::OWNER, owner)
+        .filter("confirmed", true)
+        .update()
+        .set(M::PENDING, stored.clone())
+        .execute_pool(pool)
+        .await?;
+    if staged == 1 {
+        return Ok(());
+    }
+    // No confirmed device: replace a pending one. Never deletes a
+    // confirmed row, so a race cannot drop the factor either.
+    let del = QuerySet::<M>::new()
+        .filter(M::OWNER, owner)
+        .filter("confirmed", false)
+        .compile_delete()?;
+    crate::sql::delete_pool(pool, &del).await?;
+    let insert = crate::core::InsertQuery::new(
+        M::SCHEMA,
+        vec![M::OWNER, M::SECRET, "confirmed", "created_at"],
+        vec![
+            SqlValue::I64(owner),
+            SqlValue::String(stored),
+            SqlValue::Bool(false),
+            SqlValue::DateTime(chrono::Utc::now()),
+        ],
+    );
+    crate::sql::insert_pool(pool, &insert).await
+}
+
+/// Drop the confirmed device whose secret is `secret`; `false` when it changed meanwhile.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn remove_in<M: DeviceTable>(
+    pool: &Pool,
+    owner: i64,
+    secret: &Stored,
+) -> Result<bool, crate::sql::ExecError> {
+    let del = crate::query::QuerySet::<M>::new()
+        .filter(M::OWNER, owner)
+        .filter(M::SECRET, secret.text.clone())
+        .filter("confirmed", true)
+        .compile_delete()?;
+    Ok(crate::sql::delete_pool(pool, &del).await? == 1)
 }
 
 /// Fetch the device row for `user_id`, if any.
@@ -253,24 +428,9 @@ pub async fn confirmed_secret_checked(
     pool: &Pool,
     user_id: i64,
 ) -> Result<Option<TotpSecret>, crate::sql::ExecError> {
-    // Only the secret, so a table from before `last_used_step` still reads.
-    let secrets: Vec<String> = AdminTotp::objects()
-        .filter("user_id", user_id)
-        .filter("confirmed", true)
-        .values_list_flat("secret_base32")
-        .fetch(pool)
-        .await?;
-    // A confirmed row that won't decode still gates: refuse, don't skip 2FA (#1875).
-    secrets
-        .first()
-        .map(|s| {
-            TotpSecret::from_base32(s).ok_or_else(|| {
-                crate::sql::ExecError::Driver(crate::sql::sqlx::Error::Decode(
-                    "rustango_admin_totp.secret_base32 is not valid base32".into(),
-                ))
-            })
-        })
-        .transpose()
+    Ok(confirmed_in::<AdminTotp>(pool, user_id)
+        .await?
+        .map(|s| s.secret))
 }
 
 /// What [`start_reenrollment`] did.
@@ -318,34 +478,7 @@ pub async fn start_enrollment(
     user_id: i64,
     secret: &TotpSecret,
 ) -> Result<(), crate::sql::ExecError> {
-    use crate::sql::UpdaterPool as _;
-    let staged = AdminTotp::objects()
-        .filter("user_id", user_id)
-        .filter("confirmed", true)
-        .update()
-        .set("pending_secret_base32", secret.to_base32())
-        .execute_pool(pool)
-        .await?;
-    if staged == 1 {
-        return Ok(());
-    }
-    // No confirmed device: replace a pending one. Never deletes a
-    // confirmed row, so a race cannot drop the factor either.
-    let del = AdminTotp::objects()
-        .filter("user_id", user_id)
-        .filter("confirmed", false)
-        .compile_delete()?;
-    crate::sql::delete_pool(pool, &del).await?;
-    let row = AdminTotp {
-        user_id,
-        secret_base32: secret.to_base32(),
-        confirmed: false,
-        created_at: chrono::Utc::now(),
-        last_used_step: None,
-        pending_secret_base32: None,
-    };
-    row.insert_pool(pool).await?;
-    Ok(())
+    start_in::<AdminTotp>(pool, user_id, secret).await
 }
 
 /// Confirm the user's enrollment without a code, promoting a pending

@@ -306,44 +306,19 @@ fn clear_cookie(resp: &mut Response, name: &str) {
 #[cfg(feature = "totp")]
 mod second_factor {
     use super::*;
-    use crate::session::PasswordFingerprint;
-    use base64::Engine as _;
+    use crate::session::PendingSecondFactor as Pending;
 
     const PENDING_COOKIE: &str = "rustango_admin_sso_totp";
     /// Domain tag: a pending cookie is never a valid MAC of a session.
     const TAG: &[u8] = b"rustango-admin-sso-totp-v1.";
-    const TTL_SECS: i64 = 300;
-
-    /// Who finished SSO and still owes a code. Bound to the password hash,
-    /// so a password change in between ends it.
-    #[derive(serde::Serialize, serde::Deserialize)]
-    struct Pending {
-        uid: i64,
-        pwf: PasswordFingerprint,
-        exp: i64,
-    }
-
-    fn mac(secret: &session::AdminSessionSecret, body: &str) -> [u8; 32] {
-        crate::session::sign(secret, &[TAG, body.as_bytes()].concat())
-    }
+    const TTL_SECS: i64 = Pending::TTL_SECS;
 
     fn seal(secret: &session::AdminSessionSecret, p: &Pending) -> String {
-        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let body = b64.encode(serde_json::to_vec(p).unwrap_or_default());
-        let sig = b64.encode(mac(secret, &body));
-        format!("{body}.{sig}")
+        p.seal(secret, TAG)
     }
 
     fn open(secret: &session::AdminSessionSecret, value: &str) -> Option<Pending> {
-        use subtle::ConstantTimeEq as _;
-        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let (body, sig) = value.split_once('.')?;
-        let sig = b64.decode(sig).ok()?;
-        if mac(secret, body).ct_eq(&sig[..]).unwrap_u8() == 0 {
-            return None;
-        }
-        let p: Pending = serde_json::from_slice(&b64.decode(body).ok()?).ok()?;
-        (chrono::Utc::now().timestamp() < p.exp).then_some(p)
+        Pending::open(secret, TAG, value)
     }
 
     /// Ask for the code: the TOTP-only login form plus the pending cookie.
@@ -354,11 +329,11 @@ mod second_factor {
         secret: &session::AdminSessionSecret,
         user: &AdminUser,
     ) -> Response {
-        let pending = Pending {
-            uid: user.id.get().copied().unwrap_or_default(),
-            pwf: PasswordFingerprint::of(secret, &user.password_hash),
-            exp: chrono::Utc::now().timestamp() + TTL_SECS,
-        };
+        let pending = Pending::new(
+            secret,
+            user.id.get().copied().unwrap_or_default(),
+            &user.password_hash,
+        );
         let cookie = format!(
             "{PENDING_COOKIE}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={TTL_SECS}{s}",
             seal(secret, &pending),

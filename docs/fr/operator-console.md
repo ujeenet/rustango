@@ -16,6 +16,7 @@ La console opérateur est l'interface web de la première sorte — provisionner
 - [Noms d'hôte](#noms-dhôte)
 - [Hôtes inconnus](#hôtes-inconnus)
 - [Opérateurs](#opérateurs)
+- [Connexion à deux facteurs](#connexion-à-deux-facteurs)
 - [Le journal d'audit](#le-journal-daudit)
 - [Exécutions de provisioning](#exécutions-de-provisioning)
 - [Serveurs de bases de données](#serveurs-de-bases-de-données)
@@ -74,6 +75,7 @@ La console répond sur le domaine **apex** (`RUSTANGO_APEX_DOMAIN`), pas sur un 
 | **Audit log** | Chaque changement effectué via la console |
 | **Runs** | Exécutions de provisioning et de migration, diffusées en direct |
 | **Database servers** | Serveurs où les bases des tenants sont créées, avec leur login d'administration |
+| **Two-factor sign-in** | Votre application d'authentification (feature `totp`) |
 
 ---
 
@@ -132,6 +134,18 @@ Deux choses que la page refuse, pour la même raison :
 Un mot de passe généré s'affiche **une fois**, dans le corps de la réponse — jamais via une redirection, qui le mettrait dans la barre d'adresse, l'historique, le référent et chaque journal d'accès intermédiaire.
 
 Depuis la CLI : [`list-operators` / `set-operator-active`](manage.md#list-operators).
+
+---
+
+## Connexion à deux facteurs
+
+Avec la feature `totp`, un opérateur peut ajouter une application d'authentification sous **Two-factor sign-in** (`/account/totp`). La page affiche une clé de configuration et un lien `otpauth://` jusqu'à ce qu'un code la confirme. La désactiver demande un code actuel.
+
+Ensuite, le mot de passe seul n'ouvre que l'étape du code (`/login/totp`) ; aucune page de la console ne répond tant que le code n'est pas bon. Chaque code ne sert qu'une fois, et les codes faux comptent dans les mêmes limites et le même verrou que les mots de passe faux. L'activation, la désactivation et chaque code faux sont écrits dans le [journal d'audit](#le-journal-daudit) sous `totp_enroll`, `totp_disable` et `totp_failed`, jamais avec le code.
+
+C'est facultatif par opérateur. `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` le rend obligatoire : un opérateur sans appareil en configure un à l'étape du code avant sa première session. Lu au démarrage.
+
+Les secrets sont dans `rustango_operator_totp` dans le registre, scellés sous `RUSTANGO_SECRET_KEY`, qui doit être défini pour s'inscrire. `migrate` crée la table, sinon la console le fait à la première connexion. Si la table est illisible, la connexion est refusée plutôt qu'acceptée sur le seul mot de passe. Il n'y a pas encore de codes de secours : un opérateur qui perd son appareil a besoin d'un shell sur le registre pour supprimer sa ligne.
 
 ---
 

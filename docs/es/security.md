@@ -514,6 +514,8 @@ Funciona con Google Authenticator, Authy, 1Password, Bitwarden y otras aplicacio
 
 `verify` acepta el mismo código otra vez hasta que caduca. Para códigos de un solo uso, llame a `matched_step`, guarde el paso que devuelve y acepte un código solo si su paso es posterior al guardado. El inicio de sesión integrado del admin lo hace así.
 
+La consola de operadores tiene el mismo segundo factor, opcional por operador u obligatorio para todos; vea [Inicio de sesión en dos pasos](operator-console.md#inicio-de-sesión-en-dos-pasos).
+
 **Códigos de recuperación** (códigos de respaldo de un solo uso para cuando un usuario pierde su teléfono) todavía no se incluyen. El patrón común es almacenar de 8 a 10 códigos hasheados por usuario y consumir uno cada vez que se usa.
 
 ---
