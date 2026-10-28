@@ -325,6 +325,38 @@ pub async fn delete_override(pool: &Pool, locale: &str, key: &str) -> Result<u64
     .await
 }
 
+/// Translators the admin translations editor refreshes after each save.
+static LIVE_TRANSLATORS: std::sync::Mutex<Vec<std::sync::Weak<Translator>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Let the admin translations editor refresh `translator` after each save.
+/// Only this process is refreshed: other replicas still need their own
+/// [`refresh_overrides_pool`] (on a timer or a signal).
+pub fn register_live_translator(translator: &std::sync::Arc<Translator>) {
+    let mut live = LIVE_TRANSLATORS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    live.retain(|w| w.strong_count() > 0);
+    live.push(std::sync::Arc::downgrade(translator));
+}
+
+/// [`refresh_overrides_pool`] for every [`register_live_translator`] one.
+///
+/// # Errors
+/// The first failed reload.
+pub async fn refresh_live_translators(pool: &Pool) -> Result<(), ExecError> {
+    let live: Vec<std::sync::Arc<Translator>> = LIVE_TRANSLATORS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .filter_map(std::sync::Weak::upgrade)
+        .collect();
+    for t in live {
+        refresh_overrides_pool(&t, pool).await?;
+    }
+    Ok(())
+}
+
 /// Reload `translator`'s override layer from the DB so subsequent
 /// `translate(...)` calls reflect persisted edits — call after seeding,
 /// on boot, and after each admin save. Returns the row count loaded.
