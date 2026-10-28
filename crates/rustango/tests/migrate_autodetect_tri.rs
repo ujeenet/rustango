@@ -4303,6 +4303,74 @@ async fn empty_migration_keeps_its_scope(pool: &Pool) {
     chain.undo(pool, &next.name).await.expect("round trip");
 }
 
+/// `add-data-op` chains onto its own scope, as `--empty` does: a registry
+/// file last in the dir used to become its parent and lend its snapshot.
+async fn data_op_keeps_its_scope(pool: &Pool) {
+    use rustango::core::ModelScope;
+    use rustango::migrate::make::make_migrations_scoped;
+    use rustango::migrate::MigrationScope;
+    let (t, org) = ("mad_ds_post", "mad_ds_org");
+    let chain = Chain::new(pool, "ds", &[t, org]).await;
+    let post = |cols: &[&str]| {
+        let mut f = vec![id()];
+        f.extend(
+            cols.iter()
+                .map(|c| col(c, "string", json!({"max_length": 20}))),
+        );
+        json!({"tables": [table(t, f)]})
+    };
+    let scoped = |v: Value, m: ModelScope, s: MigrationScope| {
+        make_migrations_scoped(chain.dir.path(), &snap(v), m, s, None)
+            .expect("diff")
+            .expect("a file")
+            .name
+    };
+    let first = scoped(post(&["a"]), ModelScope::Tenant, MigrationScope::Tenant);
+    let reg = scoped(
+        json!({"tables": [table(org, vec![id()])]}),
+        ModelScope::Registry,
+        MigrationScope::Registry,
+    );
+    let run = |args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let dir = chain.dir.path().to_owned();
+        async move {
+            rustango::migrate::manage::run_with_writer(pool, &dir, args, &mut Vec::new()).await
+        }
+    };
+    let sql = format!("UPDATE {t} SET a = a");
+    run(&["add-data-op", "--sql", &sql, "--name", "touch"])
+        .await
+        .expect("add-data-op");
+    let data = chain.head();
+    assert_eq!(data.scope, MigrationScope::Tenant);
+    assert_eq!(data.prev, Some(first), "the tenant head");
+    run(&["add-data-op", "--sql", "SELECT 1", "--scope", "registry"])
+        .await
+        .expect("registry add-data-op");
+    let on_reg = chain.head();
+    assert_eq!(on_reg.scope, MigrationScope::Registry);
+    assert_eq!(on_reg.prev, Some(reg), "the registry head");
+    chain.migrate(pool).await.expect("all scopes");
+    let next = scoped(
+        post(&["a", "b"]),
+        ModelScope::Tenant,
+        MigrationScope::Tenant,
+    );
+    let next = rustango::migrate::file::load(&chain.dir.path().join(format!("{next}.json")))
+        .expect("load");
+    assert_eq!(next.prev, Some(data.name), "after the data op");
+    assert_eq!(
+        next.forward,
+        vec![Operation::Schema(SchemaChange::AddColumn {
+            table: t.into(),
+            column: "b".into(),
+        })],
+        "the tenant table is not created again"
+    );
+    chain.migrate(pool).await.expect("add b");
+}
+
 fn junction(through: &str, post: &str, tag: &str) -> Value {
     json!({"through": through, "src_table": post, "src_col": "post_id",
            "dst_table": tag, "dst_col": "tag_id"})
@@ -4340,13 +4408,14 @@ async fn seeded_junction(pool: &Pool, chain: &Chain, post: &str, tag: &str, thro
     .unwrap();
 }
 
-/// A renamed `through` is a `RenameTable`: the junction keeps its rows.
-async fn m2m_through_rename_keeps_rows(pool: &Pool) {
+/// Dropping one M2M and adding another between the same models is a drop
+/// and a create: the old relation's rows never become the new one's.
+async fn m2m_with_the_same_ends_is_not_a_rename(pool: &Pool) {
     let (post, tag, old, new) = (
         "mad_tr_post",
         "mad_tr_tag",
-        "mad_tr_post_tags",
-        "mad_tr_links",
+        "mad_tr_post_featured",
+        "mad_tr_post_pinned",
     );
     let chain = Chain::new(pool, "tr", &[old, new, post, tag]).await;
     seeded_junction(pool, &chain, post, tag, old).await;
@@ -4357,17 +4426,28 @@ async fn m2m_through_rename_keeps_rows(pool: &Pool) {
                    "m2m_tables": [junction(new, post, tag)]}),
         )
         .await
-        .expect("the rename applies");
+        .expect("drop and create apply");
     assert_eq!(
         chain.head().forward,
-        vec![Operation::Schema(SchemaChange::RenameTable {
-            old_name: old.into(),
-            new_name: new.into(),
-        })]
+        vec![
+            Operation::Schema(SchemaChange::DropM2MTable {
+                through: old.into()
+            }),
+            Operation::Schema(SchemaChange::CreateM2MTable {
+                through: new.into(),
+                src_table: post.into(),
+                src_col: "post_id".into(),
+                dst_table: tag.into(),
+                dst_col: "tag_id".into(),
+            }),
+        ]
     );
-    assert_eq!(junction_rows(pool, new).await.unwrap(), [(7,)]);
+    assert_eq!(junction_rows(pool, new).await.unwrap(), [], "no rows moved");
     chain.undo(pool, &name).await.expect("unapply");
-    assert_eq!(junction_rows(pool, old).await.unwrap(), [(7,)], "and back");
+    assert!(
+        junction_rows(pool, new).await.is_err(),
+        "the new junction is gone"
+    );
 }
 
 /// A hand-written junction `RenameTable` reaches the snapshot: the next diff is empty.
@@ -4536,7 +4616,8 @@ tri_dialect_test!(
         created_tables_unapply_child_first,
         undo_after_an_empty_rename,
         empty_migration_keeps_its_scope,
-        m2m_through_rename_keeps_rows,
+        data_op_keeps_its_scope,
+        m2m_with_the_same_ends_is_not_a_rename,
         m2m_through_rename_by_hand,
     ]
 );

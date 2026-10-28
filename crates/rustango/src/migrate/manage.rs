@@ -268,7 +268,7 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     )?;
     writeln!(
         w,
-        "  add-data-op --sql <SQL> [--reverse-sql <SQL>] [--name <name>] [--to <migration>]"
+        "  add-data-op --sql <SQL> [--reverse-sql <SQL>] [--name <name>] [--to <migration> | --scope <s>]"
     )?;
     writeln!(
         w,
@@ -1682,6 +1682,17 @@ pub fn make_empty_in_scope(
     name: &str,
     scope: super::MigrationScope,
 ) -> Result<Migration, MigrateError> {
+    write_scaffold(dir, name, scope, Vec::new())
+}
+
+/// A file holding `forward`, chained onto `scope`'s last file with its
+/// effective snapshot, so a later diff in that scope starts from it.
+fn write_scaffold(
+    dir: &Path,
+    name: &str,
+    scope: super::MigrationScope,
+    forward: Vec<Operation>,
+) -> Result<Migration, MigrateError> {
     let prior = file::list_dir(dir)?;
     let chain: Vec<&Migration> = prior.iter().filter(|m| m.scope == scope).collect();
     let head = chain.last().copied();
@@ -1705,7 +1716,7 @@ pub fn make_empty_in_scope(
         replaces: Vec::new(),
         merges: Vec::new(),
         snapshot: prev_snapshot,
-        forward: vec![],
+        forward,
     };
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
@@ -1737,38 +1748,33 @@ pub fn make_data_migration(
     sql: &str,
     reverse_sql: Option<&str>,
 ) -> Result<Migration, MigrateError> {
-    let prior = file::list_dir(dir)?;
-    let prev_snapshot = prior
-        .last()
-        .map_or_else(|| SchemaSnapshot::default(), |m| m.snapshot.clone());
-    let prev_name = prior.last().map(|m| m.name.clone());
-    let next_index = prior
-        .last()
-        .and_then(|m| file::extract_index(&m.name))
-        .map_or(1, |n| n + 1);
+    make_data_migration_in_scope(
+        dir,
+        name,
+        sql,
+        reverse_sql,
+        super::MigrationScope::default(),
+    )
+}
 
-    let full_name = format!("{next_index:04}_{name}");
+/// [`make_data_migration`] for `scope`: chains onto that scope's last file,
+/// as [`make_empty_in_scope`] does.
+///
+/// # Errors
+/// As [`make_data_migration`].
+pub fn make_data_migration_in_scope(
+    dir: &Path,
+    name: &str,
+    sql: &str,
+    reverse_sql: Option<&str>,
+    scope: super::MigrationScope,
+) -> Result<Migration, MigrateError> {
     let op = Operation::Data(DataOp {
         sql: sql.to_owned(),
         reverse_sql: reverse_sql.map(str::to_owned),
         reversible: reverse_sql.is_some(),
     });
-    let mig = Migration {
-        name: full_name.clone(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        prev: prev_name,
-        atomic: true,
-        scope: super::MigrationScope::default(),
-        replaces: Vec::new(),
-        merges: Vec::new(),
-        snapshot: prev_snapshot,
-        forward: vec![op],
-    };
-    if !dir.exists() {
-        std::fs::create_dir_all(dir)?;
-    }
-    file::write(&file_path(dir, &mig.name), &mig)?;
-    Ok(mig)
+    write_scaffold(dir, name, scope, vec![op])
 }
 
 /// Append a data operation to an existing migration file.
@@ -1811,9 +1817,26 @@ fn add_data_op_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(
     let mut reverse_sql: Option<String> = None;
     let mut name: Option<String> = None;
     let mut to: Option<String> = None;
+    let mut scope: Option<super::MigrationScope> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--scope" => {
+                let raw = iter.next().ok_or_else(|| {
+                    MigrateError::Validation("--scope requires \"registry\" or \"tenant\"".into())
+                })?;
+                scope = match crate::core::ModelScope::from_str(raw) {
+                    Some(crate::core::ModelScope::Registry) => {
+                        Some(super::MigrationScope::Registry)
+                    }
+                    Some(crate::core::ModelScope::Tenant) => Some(super::MigrationScope::Tenant),
+                    None => {
+                        return Err(MigrateError::Validation(format!(
+                            "--scope must be \"registry\" or \"tenant\", got {raw:?}"
+                        )))
+                    }
+                };
+            }
             "--sql" => {
                 sql =
                     Some(iter.next().cloned().ok_or_else(|| {
@@ -1839,7 +1862,7 @@ fn add_data_op_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(
             "--help" | "-h" => {
                 writeln!(
                     w,
-                    "add-data-op --sql <SQL> [--reverse-sql <SQL>] [--name <name>] [--to <migration>]"
+                    "add-data-op --sql <SQL> [--reverse-sql <SQL>] [--name <name>] [--to <migration> | --scope <s>]"
                 )?;
                 return Ok(());
             }
@@ -1848,7 +1871,7 @@ fn add_data_op_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(
             }
             other => {
                 return Err(MigrateError::Validation(format!(
-                    "unexpected argument: `{other}` — use --sql, --reverse-sql, --name, --to"
+                    "unexpected argument: `{other}` — use --sql, --reverse-sql, --name, --to, --scope"
                 )));
             }
         }
@@ -1857,11 +1880,22 @@ fn add_data_op_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(
     let sql = sql.ok_or_else(|| MigrateError::Validation("--sql is required".into()))?;
 
     if let Some(migration_name) = to {
+        if scope.is_some() {
+            return Err(MigrateError::Validation(
+                "--to appends to that file; it does not combine with --scope".into(),
+            ));
+        }
         append_data_op(dir, &migration_name, &sql, reverse_sql.as_deref())?;
         writeln!(w, "appended data op to {migration_name}.json")?;
     } else {
         let name = name.unwrap_or_else(|| "data_op".to_owned());
-        let mig = make_data_migration(dir, &name, &sql, reverse_sql.as_deref())?;
+        let mig = make_data_migration_in_scope(
+            dir,
+            &name,
+            &sql,
+            reverse_sql.as_deref(),
+            scope.unwrap_or_default(),
+        )?;
         let rev_note = if reverse_sql.is_some() {
             " (reversible)"
         } else {

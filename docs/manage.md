@@ -83,7 +83,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | `showmigrations` / `status` | List migrations and their applied state |
 | `sqlmigrate <name>` | Print the SQL a migration would run, without running it |
 | `forget-pending <name>` | Delete an un-applied migration JSON |
-| `add-data-op --sql <SQL> [--reverse-sql <SQL>]` | Append a hand-written data operation |
+| `add-data-op --sql <SQL> [--reverse-sql <SQL>] [--scope <s>]` | Append a hand-written data operation |
 | `inspectdb [--schema <s>] [--table <t>]` | Read a live schema and emit `#[derive(Model)]` source |
 
 ### Data
