@@ -329,12 +329,17 @@ pub(crate) fn load_or_create_key_file(
     what: &str,
     var: &str,
 ) -> std::io::Result<Vec<u8>> {
-    if let Ok(bytes) = std::fs::read(path) {
-        if bytes.len() >= 32 {
+    match std::fs::read(path) {
+        Ok(bytes) if bytes.len() >= 32 => {
             restrict_session_secret_perms(path);
             tracing::info!(path = %path.display(), "loaded persisted {what} from disk");
             return Ok(bytes);
         }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // An existing key we cannot read must never be replaced: it may
+        // seal data that a new key could not open.
+        Err(e) => return Err(e),
     }
     let mut buf = vec![0u8; 32];
     OsRng.fill_bytes(&mut buf);
@@ -388,8 +393,8 @@ fn publish_first(tmp: &std::path::Path, path: &std::path::Path) -> std::io::Resu
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // A stale short file (the loader skipped it) is replaced.
-            match std::fs::read(path) {
-                Ok(b) if b.len() >= 32 => Ok(false),
+            match std::fs::read(path)? {
+                b if b.len() >= 32 => Ok(false),
                 _ => std::fs::rename(tmp, path).map(|()| true),
             }
         }
@@ -676,6 +681,24 @@ pub async fn deactivate<T: crate::core::Model + Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A key file that exists but cannot be read is an error, never replaced.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_key_file_is_kept() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key");
+        std::fs::write(&path, [9u8; 32]).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            return; // running as root: permissions cannot make it unreadable
+        }
+        let got = load_or_create_key_file(&path, "test key", "TEST_KEY");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(got.is_err(), "{got:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), [9u8; 32]);
+    }
 
     /// The fingerprint is domain-tagged, not a bare MAC of the hash.
     #[test]
