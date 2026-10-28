@@ -1359,56 +1359,68 @@ construit directement le `Builder` du serveur, sans passer par `Cli`.
 
 ## Sous-commandes personnalisées
 
-Vous pouvez ajouter vos propres commandes et les exécuter aux côtés des
-verbes intégrés. L'astuce consiste à
-inspecter vous-même les arguments et à traiter votre commande avant de
-passer le reste à `Cli::run`. Deux façons de le faire :
+Une crate peut ajouter ses propres verbes, l'application aussi. Ils
+apparaissent dans `--help` sous la crate qui les a enregistrés et
+s'exécutent comme les verbes intégrés.
 
-**En ligne dans `src/main.rs`** (pas de binaire supplémentaire) :
+**Depuis une crate** — `register_command!` enregistre le verbe à l'édition
+de liens ; l'application hôte ne modifie pas `main` :
 
 ```rust
-#[rustango::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = dotenvy::dotenv();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if matches!(args.first().map(String::as_str), Some("import-csv")) {
-        let url = std::env::var("DATABASE_URL")?;
-        let pool = rustango::sql::Pool::connect_postgres(&url).await?;
-        return my_csv_importer::run(&pool, &args[1..]).await;
-    }
-    rustango::manage::Cli::new().api(urls::api()).run().await
-}
+use std::io::Write as _;
+use rustango::manage::CommandContext;
+
+// In any crate the binary links, e.g. a CMS library.
+rustango::register_command!(
+    "reset-link",
+    "Print a password-reset link for a user",
+    |mut ctx: CommandContext, args: Vec<String>| async move {
+        let user = args.first().ok_or("usage: reset-link --tenant <slug> <user>")?;
+        let pool = ctx.tenant_pool().ok_or("pass --tenant <slug>")?.clone();
+        // ... look the user up on `pool` with the ORM ...
+        writeln!(ctx.stdout(), "link for {user}")?;
+        Ok(())
+    },
+);
 ```
 
-**Via `--with-manage-bin`** (`src/bin/manage.rs` séparé) :
+**Depuis l'application** — la méthode de builder `Cli::command` :
+
+```rust
+rustango::manage::Cli::new()
+    .tenancy()
+    .command("import-csv", "Import a CSV file", |ctx, args| async move {
+        my_csv_importer::run(ctx.pool(), &args).await?;
+        Ok(())
+    })
+    .run()
+    .await
+```
+
+Le handler reçoit un `CommandContext` et les arguments après le verbe :
+
+- `ctx.pool()` — la base de l'application ; dans un projet multi-tenant, le registre.
+- `ctx.tenant_pool()` / `ctx.tenant()` — avec `Cli::tenancy()`,
+  `--tenant <slug>` est retiré des arguments et ouvre le pool de ce tenant
+  (mode schéma ou base, tout backend). `ctx.tenant_by_slug(slug)` en ouvre
+  un autre.
+- `ctx.settings()` — les réglages passés à `Cli::with_settings*`.
+- `ctx.stdout()` — la sortie.
 
 ```bash
-cargo run -- startapp app --with-manage-bin
+cargo run -- reset-link --tenant acme alice
 ```
 
-Puis dans `src/bin/manage.rs` :
+Un nom qui entre en conflit avec un verbe intégré, ou enregistré deux
+fois, fait échouer `Cli::run` au démarrage avec les deux noms dans l'erreur.
 
-```rust
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = dotenvy::dotenv();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let url = std::env::var("DATABASE_URL")?;
-    let pool = rustango::sql::Pool::connect_postgres(&url).await?;
-
-    match args.first().map(String::as_str) {
-        Some("import-csv") => my_csv_importer::run(&pool, &args[1..]).await,
-        _ => rustango::migrate::manage::run(&pool, "./migrations".as_ref(), args)
-            .await
-            .map_err(Into::into),
-    }
-}
-```
-
-Exécutez vos propres commandes exactement comme les commandes
-intégrées : `cargo run -- import-csv path/to/file.csv` (ou
-`cargo run --bin manage -- import-csv …` en utilisant
-`--with-manage-bin`).
+**Connexion à la base.** Tous les verbes, le serveur et les commandes
+personnalisées lisent la base depuis `DATABASE_URL`, ou depuis `DB_DRIVER`,
+`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD` (ou `DB_PASSWORD_FILE`, un
+fichier qui le contient), `DB_NAME` et `DB_PARAMS`. Pour SQLite, mettez
+`DB_DRIVER=sqlite` et le chemin du fichier dans `DB_NAME`. Si les deux
+styles sont définis, `DATABASE_URL` l'emporte et un avertissement le
+signale ; à partir de 0.62.0, les variables `DB_*` l'emporteront.
 
 ---
 

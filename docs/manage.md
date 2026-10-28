@@ -1457,54 +1457,66 @@ builds the server `Builder` directly, without going through `Cli`.
 
 ## Custom subcommands
 
-You can add your own management commands. The trick is to inspect the
-arguments yourself and handle your command before passing the rest to
-`Cli::run`. Two ways to do it:
+A crate can add its own verbs, and so can the app. They are listed in
+`--help` under the crate that registered them, and run like built-in ones.
 
-**Inline in `src/main.rs`** (no extra binary):
+**From a crate** — `register_command!` registers the verb at link time, so
+the host app does not change `main`:
 
 ```rust
-#[rustango::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = dotenvy::dotenv();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if matches!(args.first().map(String::as_str), Some("import-csv")) {
-        let url = std::env::var("DATABASE_URL")?;
-        let pool = rustango::sql::Pool::connect_postgres(&url).await?;
-        return my_csv_importer::run(&pool, &args[1..]).await;
-    }
-    rustango::manage::Cli::new().api(urls::api()).run().await
-}
+use std::io::Write as _;
+use rustango::manage::CommandContext;
+
+// In any crate the binary links, e.g. a CMS library.
+rustango::register_command!(
+    "reset-link",
+    "Print a password-reset link for a user",
+    |mut ctx: CommandContext, args: Vec<String>| async move {
+        let user = args.first().ok_or("usage: reset-link --tenant <slug> <user>")?;
+        let pool = ctx.tenant_pool().ok_or("pass --tenant <slug>")?.clone();
+        // ... look the user up on `pool` with the ORM ...
+        writeln!(ctx.stdout(), "link for {user}")?;
+        Ok(())
+    },
+);
 ```
 
-**Via `--with-manage-bin`** (separate `src/bin/manage.rs`):
+**From the app** — the `Cli::command` builder method:
+
+```rust
+rustango::manage::Cli::new()
+    .tenancy()
+    .command("import-csv", "Import a CSV file", |ctx, args| async move {
+        my_csv_importer::run(ctx.pool(), &args).await?;
+        Ok(())
+    })
+    .run()
+    .await
+```
+
+The handler gets a `CommandContext` and the arguments after the verb:
+
+- `ctx.pool()` — the app's database; in a tenancy project, the registry.
+- `ctx.tenant_pool()` / `ctx.tenant()` — with `Cli::tenancy()`,
+  `--tenant <slug>` is taken out of the arguments and opens that tenant's
+  pool (schema or database mode, any backend). `ctx.tenant_by_slug(slug)`
+  opens any other one.
+- `ctx.settings()` — the settings given to `Cli::with_settings*`.
+- `ctx.stdout()` — where output goes.
 
 ```bash
-cargo run -- startapp app --with-manage-bin
+cargo run -- reset-link --tenant acme alice
 ```
 
-Then in `src/bin/manage.rs`:
+A name that clashes with a built-in verb, or one registered twice, makes
+`Cli::run` fail at startup with both names in the error.
 
-```rust
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = dotenvy::dotenv();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let url = std::env::var("DATABASE_URL")?;
-    let pool = rustango::sql::Pool::connect_postgres(&url).await?;
-
-    match args.first().map(String::as_str) {
-        Some("import-csv") => my_csv_importer::run(&pool, &args[1..]).await,
-        _ => rustango::migrate::manage::run(&pool, "./migrations".as_ref(), args)
-            .await
-            .map_err(Into::into),
-    }
-}
-```
-
-Run your own commands just like the built-in ones:
-`cargo run -- import-csv path/to/file.csv` (or
-`cargo run --bin manage -- import-csv …` when using `--with-manage-bin`).
+**Database connection.** Every verb, the server and custom commands read
+the database from `DATABASE_URL`, or from `DB_DRIVER`, `DB_HOST`,
+`DB_PORT`, `DB_USER`, `DB_PASSWORD` (or `DB_PASSWORD_FILE`, a file holding
+it), `DB_NAME` and `DB_PARAMS`. For SQLite set `DB_DRIVER=sqlite` and
+`DB_NAME` to the file path. When both styles are set, `DATABASE_URL` wins
+and a warning says so; from 0.62.0 the `DB_*` vars will win.
 
 ---
 

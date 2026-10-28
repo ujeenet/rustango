@@ -4,6 +4,18 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — manage commands and DB_* connection vars
+
+- `register_command!` lets a crate add a `manage` verb, and `Cli::command` lets the app; `--help` lists them by crate, and a clash with a built-in verb fails at startup.
+- `CommandContext` gives a command the app or registry pool, the `--tenant <slug>` tenant's pool (schema or database mode), the settings and stdout. `Cli::run_with_args` runs the CLI on given arguments.
+- `manage`, `migrate`, `dbshell`, `db:*` and the server read the database through `env::database_url_from_env`, so `DB_HOST`, `DB_USER`, `DB_NAME` and friends work everywhere, not only `DATABASE_URL`.
+- `DB_PASSWORD_FILE` reads the password from a file; `DB_DRIVER=sqlite` takes `DB_NAME` as the file path.
+- With both `DATABASE_URL` and `DB_*` set, `DATABASE_URL` still wins and one warning (password redacted) says so; `check --deploy` lists it too.
+
+### Fixed — member SSO redirect scheme
+
+- Member SSO's `redirect_uri` uses `http` only on loopback hosts; `localhost.example.com` gets `https`.
+
 ### Added — webhooks, jobs, MCP and page cache
 
 - `WebhookSubscription::max_attempts` and `retry_backoff` set a subscription's retry window; the default stays 8 runs from 1s.
