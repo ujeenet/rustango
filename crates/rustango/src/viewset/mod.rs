@@ -3383,10 +3383,8 @@ async fn handle_create(
         .create
         .map(|_| ThrottleClient::new(&parts, &acq.scope));
     // The detail route is the collection path plus the pk, nest prefix included.
-    let collection = parts
-        .extensions
-        .get::<axum::extract::OriginalUri>()
-        .map_or_else(|| parts.uri.path(), |u| u.path())
+    let collection = crate::urls::original_uri(&parts.uri, &parts.extensions)
+        .path()
         .to_owned();
     // A JSON array body means a bulk create.
     let create_body = match extract_create_body(parts, body, Some(body_types(&state))).await {

@@ -933,7 +933,10 @@ async fn handle_list_action(
     }
 
     // Dispatch: user-registered actions first, then built-ins.
-    let dispatch_path = parts.uri.path().to_owned();
+    // Back to the list as the browser addressed it, nest prefix included.
+    let dispatch_path = crate::urls::original_uri(&parts.uri, &parts.extensions)
+        .path()
+        .to_owned();
     let result: Result<(), String> = if let Some(custom) = state
         .vs
         .actions
@@ -3782,7 +3785,9 @@ mod tenant {
             );
         }
 
-        let dispatch_path = parts.uri.path().to_owned();
+        let dispatch_path = crate::urls::original_uri(&parts.uri, &parts.extensions)
+            .path()
+            .to_owned();
         let pool = t.pool().clone();
         let result: Result<(), String> = if let Some(custom) = state
             .vs

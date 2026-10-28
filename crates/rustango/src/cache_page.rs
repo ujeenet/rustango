@@ -770,10 +770,7 @@ fn request_page(req: &Request<Body>) -> (&str, &axum::http::Uri) {
         })
         .unwrap_or("");
     // A nested router strips its prefix from `uri`; key on the full path.
-    let uri = req
-        .extensions()
-        .get::<axum::extract::OriginalUri>()
-        .map_or(req.uri(), |o| &o.0);
+    let uri = crate::urls::original_uri(req.uri(), req.extensions());
     (host, uri)
 }
 

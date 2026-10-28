@@ -105,10 +105,15 @@ async fn handle(cfg: Arc<TrailingSlashLayer>, req: Request<Body>, next: Next) ->
     if path == "/" {
         return next.run(req).await;
     }
-    let Some(canonical) = canonical_path(path, cfg.style) else {
+    if canonical_path(path, cfg.style).is_none() {
+        return next.run(req).await;
+    }
+    // The redirect is for the client: keep the nest prefix it sent.
+    let sent = crate::urls::original_uri(req.uri(), req.extensions());
+    let Some(canonical) = canonical_path(sent.path(), cfg.style) else {
         return next.run(req).await;
     };
-    let location = with_query(&canonical, req.uri().query());
+    let location = with_query(&canonical, sent.query());
     redirect(cfg.status, &location)
 }
 
@@ -170,6 +175,23 @@ mod tests {
         Router::new()
             .route("/foo", get(|| async { "ok" }))
             .trailing_slash(TrailingSlashLayer::new(SlashStyle::Strip))
+    }
+
+    /// Under `nest`, `Location` keeps the prefix the client used.
+    #[tokio::test]
+    async fn a_nested_redirect_keeps_the_prefix() {
+        let app = Router::new().nest("/api", strip_app());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/foo/?page=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(resp.headers()[header::LOCATION], "/api/foo?page=2");
     }
 
     #[tokio::test]

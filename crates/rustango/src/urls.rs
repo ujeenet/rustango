@@ -354,6 +354,18 @@ pub(crate) fn normalize_host(authority: &str) -> Option<String> {
     Some(host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase())
 }
 
+/// The URI the client sent: `Router::nest` strips its prefix from
+/// `uri`, `OriginalUri` keeps it.
+#[cfg(feature = "_axum")]
+pub(crate) fn original_uri<'a>(
+    uri: &'a axum::http::Uri,
+    extensions: &'a axum::http::Extensions,
+) -> &'a axum::http::Uri {
+    extensions
+        .get::<axum::extract::OriginalUri>()
+        .map_or(uri, |o| &o.0)
+}
+
 /// The request's host as sent: `Host`, or the HTTP/2 `:authority` when
 /// there is none. A `Host` that is not UTF-8 is `None`, never the URI's.
 #[cfg(feature = "_http_layers")]
