@@ -4987,8 +4987,9 @@ fn inherent_impl_tokens(
                 >,
             {
                 use #root::sql::FetcherPool as _;
-                let pk_col = match Self::primary_key_column() {
-                    ::core::option::Option::Some(c) => c,
+                // The field name: `filter` / `order_by` take fields, not columns.
+                let pk_col = match <Self as #root::core::Model>::SCHEMA.primary_key() {
+                    ::core::option::Option::Some(f) => f.name,
                     ::core::option::Option::None => {
                         return ::core::result::Result::Ok(());
                     }
@@ -5020,13 +5021,8 @@ fn inherent_impl_tokens(
             /// instead of OFFSET. O(N) total scan vs OFFSET's O(N²)
             /// — the right choice for multi-million-row sweeps.
             ///
-            /// Requires the primary key to be a signed integer type
-            /// (`i64` / `i32`); the keyset comparison rides on
-            /// `__rustango_pk_value()` lowering through
-            /// `SqlValue::I64` / `SqlValue::I32`. Skipped on
-            /// non-integer PKs (UUID, String) — those should use
-            /// the OFFSET-shaped [`Self::chunk`] or a hand-rolled
-            /// keyset loop.
+            /// The keyset compares the primary key in its own type,
+            /// so any orderable PK works (`i32`, `i64`, UUID, string).
             ///
             /// Callback errors abort iteration; the error bubbles up
             /// unchanged. Empty table → callback invoked zero times.
@@ -5042,50 +5038,41 @@ fn inherent_impl_tokens(
                 >,
             {
                 use #root::sql::FetcherPool as _;
-                let pk_col = match Self::primary_key_column() {
-                    ::core::option::Option::Some(c) => c,
+                // The field name: `filter` / `order_by` take fields, not columns.
+                let pk_col = match <Self as #root::core::Model>::SCHEMA.primary_key() {
+                    ::core::option::Option::Some(f) => f.name,
                     ::core::option::Option::None => {
                         return ::core::result::Result::Ok(());
                     }
                 };
-                // Track the largest PK seen so the next batch picks
-                // up from there. `i64::MIN` as the sentinel — the
-                // very first iteration's `> MIN` matches every row,
-                // so the loop entry is uniform with subsequent
-                // iterations.
-                let mut last_seen: i64 = i64::MIN;
+                // The largest PK seen, in the PK's own type; none before
+                // the first batch.
+                let key = ::std::format!("{}__gt", pk_col);
+                let mut last_seen: ::core::option::Option<#root::core::SqlValue> =
+                    ::core::option::Option::None;
                 loop {
-                    let key = ::std::format!("{}__gt", pk_col);
-                    let rows: ::std::vec::Vec<Self> =
-                        #root::query::QuerySet::<Self>::default()
-                            .filter(key.as_str(), last_seen)
-                            .order_by(&[(pk_col, false)])
-                            .limit(n)
-                            .fetch(pool)
-                            .await?;
-                    if rows.is_empty() {
-                        return ::core::result::Result::Ok(());
+                    let mut qs = #root::query::QuerySet::<Self>::default();
+                    if let ::core::option::Option::Some(v) = last_seen.take() {
+                        qs = qs.filter(key.as_str(), v);
                     }
+                    let rows: ::std::vec::Vec<Self> = qs
+                        .order_by(&[(pk_col, false)])
+                        .limit(n)
+                        .fetch(pool)
+                        .await?;
                     let len = rows.len() as i64;
                     // Capture the last row's PK BEFORE moving rows
                     // into the callback.
-                    let max_pk = match rows
-                        .last()
-                        .map(|r| r.__rustango_pk_value())
-                    {
-                        ::core::option::Option::Some(
-                            #root::core::SqlValue::I64(v),
-                        ) => v,
-                        ::core::option::Option::Some(
-                            #root::core::SqlValue::I32(v),
-                        ) => i64::from(v),
-                        _ => return ::core::result::Result::Ok(()),
+                    let ::core::option::Option::Some(max_pk) =
+                        rows.last().map(|r| r.__rustango_pk_value())
+                    else {
+                        return ::core::result::Result::Ok(());
                     };
                     cb(rows).await?;
                     if len < n {
                         return ::core::result::Result::Ok(());
                     }
-                    last_seen = max_pk;
+                    last_seen = ::core::option::Option::Some(max_pk);
                 }
             }
 
@@ -5095,8 +5082,7 @@ fn inherent_impl_tokens(
             /// `batch` size, calling `cb` once per row.
             ///
             /// Inherits the keyset-paginated scan of
-            /// [`Self::chunk_by_id`] (O(N) total, integer PK only —
-            /// non-integer PKs are silently a no-op).
+            /// [`Self::chunk_by_id`] (O(N) total).
             ///
             /// ```ignore
             /// Post::each(500, &pool, |p| async move {
@@ -5119,37 +5105,31 @@ fn inherent_impl_tokens(
                 >,
             {
                 use #root::sql::FetcherPool as _;
-                let pk_col = match Self::primary_key_column() {
-                    ::core::option::Option::Some(c) => c,
+                // The field name: `filter` / `order_by` take fields, not columns.
+                let pk_col = match <Self as #root::core::Model>::SCHEMA.primary_key() {
+                    ::core::option::Option::Some(f) => f.name,
                     ::core::option::Option::None => {
                         return ::core::result::Result::Ok(());
                     }
                 };
-                let mut last_seen: i64 = i64::MIN;
+                let key = ::std::format!("{}__gt", pk_col);
+                let mut last_seen: ::core::option::Option<#root::core::SqlValue> =
+                    ::core::option::Option::None;
                 loop {
-                    let key = ::std::format!("{}__gt", pk_col);
-                    let rows: ::std::vec::Vec<Self> =
-                        #root::query::QuerySet::<Self>::default()
-                            .filter(key.as_str(), last_seen)
-                            .order_by(&[(pk_col, false)])
-                            .limit(batch)
-                            .fetch(pool)
-                            .await?;
-                    if rows.is_empty() {
-                        return ::core::result::Result::Ok(());
+                    let mut qs = #root::query::QuerySet::<Self>::default();
+                    if let ::core::option::Option::Some(v) = last_seen.take() {
+                        qs = qs.filter(key.as_str(), v);
                     }
+                    let rows: ::std::vec::Vec<Self> = qs
+                        .order_by(&[(pk_col, false)])
+                        .limit(batch)
+                        .fetch(pool)
+                        .await?;
                     let len = rows.len() as i64;
-                    let max_pk = match rows
-                        .last()
-                        .map(|r| r.__rustango_pk_value())
-                    {
-                        ::core::option::Option::Some(
-                            #root::core::SqlValue::I64(v),
-                        ) => v,
-                        ::core::option::Option::Some(
-                            #root::core::SqlValue::I32(v),
-                        ) => i64::from(v),
-                        _ => return ::core::result::Result::Ok(()),
+                    let ::core::option::Option::Some(max_pk) =
+                        rows.last().map(|r| r.__rustango_pk_value())
+                    else {
+                        return ::core::result::Result::Ok(());
                     };
                     for row in rows {
                         cb(row).await?;
@@ -5157,7 +5137,7 @@ fn inherent_impl_tokens(
                     if len < batch {
                         return ::core::result::Result::Ok(());
                     }
-                    last_seen = max_pk;
+                    last_seen = ::core::option::Option::Some(max_pk);
                 }
             }
 
@@ -5215,14 +5195,19 @@ fn inherent_impl_tokens(
                     .ok_or_else(|| {
                         #root::sql::ExecError::Sql(#root::sql::SqlError::MissingPrimaryKey)
                     })?;
-                let _query = #root::query::QuerySet::<Self>::default()
-                    .filter_op(
-                        _pk.name,
-                        #root::core::Op::In,
-                        #root::core::SqlValue::List(_values),
-                    )
-                    .compile_delete()?;
-                #bulk_delete_run
+                // One statement per `IN` list the dialect can bind.
+                let mut _deleted: u64 = 0;
+                for _keys in #root::sql::__rustango_in_batches::<Self>(pool, _values)? {
+                    let _query = #root::query::QuerySet::<Self>::default()
+                        .filter_op(
+                            _pk.name,
+                            #root::core::Op::In,
+                            #root::core::SqlValue::List(_keys),
+                        )
+                        .compile_delete()?;
+                    _deleted += #bulk_delete_run?;
+                }
+                ::core::result::Result::Ok(_deleted)
             }
 
             /// Fetch every row where `<col> = <val>`. Eloquent
@@ -5288,10 +5273,16 @@ fn inherent_impl_tokens(
                     return ::core::result::Result::Ok(::std::vec::Vec::new());
                 }
                 let _key = ::std::format!("{}__in", col);
-                #root::query::QuerySet::<Self>::default()
-                    .filter(&_key, #root::core::SqlValue::List(_values))
-                    .fetch(pool)
-                    .await
+                let mut _rows = ::std::vec::Vec::new();
+                for _keys in #root::sql::__rustango_in_batches::<Self>(pool, _values)? {
+                    _rows.extend(
+                        #root::query::QuerySet::<Self>::default()
+                            .filter(&_key, #root::core::SqlValue::List(_keys))
+                            .fetch(pool)
+                            .await?,
+                    );
+                }
+                ::core::result::Result::Ok(_rows)
             }
 
             /// Fetch every row where `<col> NOT IN (vals)`. Eloquent
@@ -6381,10 +6372,16 @@ fn inherent_impl_tokens(
                     return ::core::result::Result::Ok(::std::vec::Vec::new());
                 }
                 let _key = ::std::format!("{}__in", ::core::stringify!(#pk_ident));
-                #root::query::QuerySet::<Self>::default()
-                    .filter(&_key, #root::core::SqlValue::List(_values))
-                    .fetch(pool)
-                    .await
+                let mut _rows = ::std::vec::Vec::new();
+                for _keys in #root::sql::__rustango_in_batches::<Self>(pool, _values)? {
+                    _rows.extend(
+                        #root::query::QuerySet::<Self>::default()
+                            .filter(&_key, #root::core::SqlValue::List(_keys))
+                            .fetch(pool)
+                            .await?,
+                    );
+                }
+                ::core::result::Result::Ok(_rows)
             }
 
             /// Look up the row whose primary key equals `pk`. Returns

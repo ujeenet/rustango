@@ -122,17 +122,50 @@ where
     F: FnMut(Vec<SqlValue>) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
 {
-    let room = bind_room(pool.dialect(), base)?;
-    // One `= ANY($n)` bind holds the whole list where arrays bind.
-    if room > 0 && crate::sql::writers::in_list_binds(pool.dialect(), &keys) <= room {
-        return fetch(keys).await;
-    }
-    let size = in_chunk_size(base.model.table, keys.len(), room, sliced)?;
     let mut out = Vec::new();
-    for chunk in keys.chunks(size) {
-        out.extend(fetch(chunk.to_vec()).await?);
+    for batch in in_batches(pool.dialect(), base, sliced, keys)? {
+        out.extend(fetch(batch).await?);
     }
     Ok(out)
+}
+
+/// Split `keys` into the `IN` lists `base` has bind room for. Split keys
+/// are deduplicated, so no row matches in two batches.
+fn in_batches(
+    dialect: &dyn Dialect,
+    base: &SelectQuery,
+    sliced: bool,
+    keys: Vec<SqlValue>,
+) -> Result<Vec<Vec<SqlValue>>, ExecError> {
+    let room = bind_room(dialect, base)?;
+    // One `= ANY($n)` bind holds the whole list where arrays bind.
+    if room > 0 && crate::sql::writers::in_list_binds(dialect, &keys) <= room {
+        return Ok(vec![keys]);
+    }
+    let mut seen = std::collections::HashSet::new();
+    let keys: Vec<SqlValue> = keys
+        .into_iter()
+        .filter(|k| seen.insert(format!("{k:?}")))
+        .collect();
+    if room > 0 && crate::sql::writers::in_list_binds(dialect, &keys) <= room {
+        return Ok(vec![keys]);
+    }
+    let size = in_chunk_size(base.model.table, keys.len(), room, sliced)?;
+    Ok(keys.chunks(size).map(<[SqlValue]>::to_vec).collect())
+}
+
+/// `keys` as the `IN` lists one statement over `T` can bind, for the
+/// generated `find_many` / `where_in` / `destroy` shortcuts.
+///
+/// # Errors
+/// [`ExecError::InListUnsplittable`] when `T`'s scopes fill the bind cap.
+#[doc(hidden)]
+pub fn __rustango_in_batches<T: Model>(
+    pool: &Pool,
+    keys: Vec<SqlValue>,
+) -> Result<Vec<Vec<SqlValue>>, ExecError> {
+    let base = QuerySet::<T>::default().compile()?;
+    in_batches(pool.dialect(), &base, false, keys)
 }
 
 /// Binds left for an `IN` list beside the ones `base` already carries.
@@ -2756,35 +2789,49 @@ where
     /// Fetch the last row by the current ordering, or `None` when
     /// nothing matches. It flips every sort direction and takes the
     /// first row, so no `OFFSET COUNT(*) - 1` is needed. With no
-    /// `order_by`, it sorts by primary key DESC.
+    /// `order_by`, it sorts by primary key DESC. On a sliced queryset
+    /// (`limit` / `offset`) it reads the slice and returns its last row.
     ///
     /// # Errors
     /// As [`FetcherPool::fetch`].
     pub async fn last(self, pool: &Pool) -> Result<Option<T>, ExecError> {
+        // Flipping would move the window to the other end of the table.
+        if self.is_sliced() {
+            let qs = ensure_pk_ordering(self, /*reverse=*/ false);
+            return Ok(qs.fetch(pool).await?.pop());
+        }
         let qs = ensure_pk_ordering(self, /*reverse=*/ true);
         let rows = qs.limit(1).fetch(pool).await?;
         Ok(rows.into_iter().next())
     }
 
-    /// Fetch the smallest row by `field`, or `None` when nothing
-    /// matches. It replaces any `order_by` already set.
+    /// Fetch the row with the smallest non-NULL `field`, or `None` when
+    /// nothing matches. It replaces any `order_by` already set.
     ///
     /// # Errors
     /// As [`FetcherPool::fetch`].
-    pub async fn earliest(mut self, field: &str, pool: &Pool) -> Result<Option<T>, ExecError> {
-        self = self.replace_order_by(&[(field, false)]);
-        let rows = self.limit(1).fetch(pool).await?;
-        Ok(rows.into_iter().next())
+    pub async fn earliest(self, field: &str, pool: &Pool) -> Result<Option<T>, ExecError> {
+        self.end_by(field, false, pool).await
     }
 
-    /// Fetch the largest row by `field`, or `None` when nothing
-    /// matches. It replaces any `order_by` already set.
+    /// Fetch the row with the largest non-NULL `field`, or `None` when
+    /// nothing matches. It replaces any `order_by` already set.
     ///
     /// # Errors
     /// As [`FetcherPool::fetch`].
-    pub async fn latest(mut self, field: &str, pool: &Pool) -> Result<Option<T>, ExecError> {
-        self = self.replace_order_by(&[(field, true)]);
-        let rows = self.limit(1).fetch(pool).await?;
+    pub async fn latest(self, field: &str, pool: &Pool) -> Result<Option<T>, ExecError> {
+        self.end_by(field, true, pool).await
+    }
+
+    /// One end of `field`. NULLs are skipped, as each backend sorts them
+    /// to a different end.
+    async fn end_by(self, field: &str, desc: bool, pool: &Pool) -> Result<Option<T>, ExecError> {
+        let rows = self
+            .filter(&format!("{field}__isnull"), false)
+            .replace_order_by(&[(field, desc)])
+            .limit(1)
+            .fetch(pool)
+            .await?;
         Ok(rows.into_iter().next())
     }
 

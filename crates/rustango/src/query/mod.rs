@@ -2448,7 +2448,7 @@ impl<T: Model> UpdateBuilder<T> {
         self.qs.refuse_unwritable_shape()?;
         let model: &'static ModelSchema = T::SCHEMA;
 
-        let assignments = self
+        let mut assignments = self
             .set
             .into_iter()
             .map(|p| match p {
@@ -2457,6 +2457,11 @@ impl<T: Model> UpdateBuilder<T> {
                 PendingAssignment::Resolved(assignment) => Ok(assignment),
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // Last write wins: Postgres refuses two assignments to one column.
+        let mut seen = std::collections::HashSet::new();
+        assignments.reverse();
+        assignments.retain(|a| seen.insert(a.column));
+        assignments.reverse();
 
         let where_clause = resolve_pending(model, self.qs.pending)?;
         // `.none().update().set(...)` affects nothing, for the same
