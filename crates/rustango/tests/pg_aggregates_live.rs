@@ -167,3 +167,78 @@ async fn jsonb_agg_returns_json_array_per_author() {
 
     cleanup(&pool).await;
 }
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "pgal_score")]
+#[allow(dead_code)]
+pub struct Score {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 50)]
+    pub author: String,
+    pub n32: i32,
+    pub n64: i64,
+}
+
+/// `array_agg` of an INTEGER and a BIGINT column decodes as JSON arrays
+/// of numbers (int[] and bigint[] cells), not NULL.
+#[tokio::test]
+async fn array_agg_decodes_int_and_bigint_array_cells() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    sqlx::query(r#"DROP TABLE IF EXISTS "pgal_score" CASCADE"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"CREATE TABLE "pgal_score" (
+            "id" BIGSERIAL PRIMARY KEY,
+            "author" VARCHAR(50) NOT NULL,
+            "n32" INTEGER NOT NULL,
+            "n64" BIGINT NOT NULL
+        )"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Past i32 on the BIGINT side, so a narrowing decode would fail.
+    for (n32, n64) in [(1_i32, 5_000_000_000_i64), (2, 7)] {
+        Score {
+            id: Auto::Unset,
+            author: "alice".into(),
+            n32,
+            n64,
+        }
+        .insert_pool(&rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap();
+    }
+
+    let mut q = AggregateQuery::new(
+        <Score as rustango::core::Model>::SCHEMA,
+        vec![
+            ("n32s".into(), AggregateExpr::array_agg("n32")),
+            ("n64s".into(), AggregateExpr::array_agg("n64")),
+        ],
+    );
+    q.group_by = vec!["author"];
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let sorted = |alias: &str| match rows[0].get(alias) {
+        Some(SqlValue::Json(serde_json::Value::Array(a))) => {
+            let mut v: Vec<i64> = a.iter().map(|n| n.as_i64().expect("number")).collect();
+            v.sort_unstable();
+            v
+        }
+        other => panic!("{alias}: expected a JSON array, got {other:?}"),
+    };
+    assert_eq!(sorted("n32s"), vec![1, 2]);
+    assert_eq!(sorted("n64s"), vec![7, 5_000_000_000]);
+
+    sqlx::query(r#"DROP TABLE IF EXISTS "pgal_score" CASCADE"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+}

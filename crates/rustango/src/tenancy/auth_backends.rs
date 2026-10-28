@@ -634,12 +634,14 @@ fn raw_secret_api_key_mac(key: &crate::session::SessionSecret, secret: &str) -> 
 
 fn tagged_mac(scheme: &str, key: &crate::session::SessionSecret, secret: &str) -> String {
     let msg = [API_KEY_MAC_TAG, secret.as_bytes()].concat();
-    format!("{scheme}{}", to_hex(&crate::session::sign(key, &msg)))
+    format!(
+        "{scheme}{}",
+        crate::hex::hex_encode(&crate::session::sign(key, &msg))
+    )
 }
 
 fn mac_eq(stored: &str, mac: &str) -> bool {
-    use subtle::ConstantTimeEq as _;
-    stored.len() == mac.len() && bool::from(stored.as_bytes().ct_eq(mac.as_bytes()))
+    crate::crypto::constant_time_compare(stored.as_bytes(), mac.as_bytes())
 }
 
 /// Swap a verified argon2 hash for the MAC. A failure only costs one more
@@ -693,10 +695,10 @@ pub(crate) async fn create_api_key_signed(
     // process.
     let mut prefix_bytes = [0u8; 4];
     OsRng.fill_bytes(&mut prefix_bytes);
-    let prefix = to_hex(&prefix_bytes);
+    let prefix = crate::hex::hex_encode(&prefix_bytes);
     let mut secret_bytes = [0u8; 16];
     OsRng.fill_bytes(&mut secret_bytes);
-    let secret = to_hex(&secret_bytes);
+    let secret = crate::hex::hex_encode(&secret_bytes);
 
     let hash = api_key_mac(mac_key, &secret);
 
@@ -1027,10 +1029,6 @@ impl AuthBackend for JwtBackend {
 }
 
 // ------------------------------------------------------------------ helpers
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
 
 fn extract_bearer(parts: &Parts) -> Result<Option<&str>, AuthError> {
     let Some(value) = parts.headers.get(axum::http::header::AUTHORIZATION) else {

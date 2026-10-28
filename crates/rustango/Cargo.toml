@@ -305,7 +305,7 @@ storage-s3 = ["storage", "dep:reqwest", "dep:http-body", "dep:hmac", "dep:sha2"]
 # Azure Blob Storage backend (`rustango::storage::azure::AzureBlobStorage`).
 # Shared Key for server calls, service SAS for presigned URLs; hand-rolled
 # over reqwest like `storage-s3`. No Azure SDK dependency.
-storage-azure = ["storage", "dep:reqwest", "dep:http-body", "dep:hmac", "dep:sha2", "dep:base64"]
+storage-azure = ["storage", "_signing", "dep:reqwest", "dep:http-body"]
 
 # OpenAPI 3.1 spec builder + Swagger UI router (`rustango::openapi`).
 # Pure-Rust types you assemble into a spec, serialized to JSON via serde.

@@ -520,9 +520,9 @@ pub mod jsonapi;
 #[cfg(any(
     feature = "_signing",
     feature = "storage-s3",
-    feature = "storage-azure",
     feature = "csrf",
     feature = "totp",
+    feature = "tenancy",
 ))]
 pub(crate) mod crypto;
 

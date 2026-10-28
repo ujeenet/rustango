@@ -24,6 +24,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Shared providers can be edited in place (`/sso-shared/{id}/edit`): the id and slug stay, a blank secret keeps the saved one; audited as `sso_shared_update`.
 - A refused add or edit re-renders the form with the typed values and the error (status 400), never the secret; the page no longer says secrets are `env://` references.
 
+### Added — unresolved-tenant router and ViewSet spec gaps
+
+- `server::Builder::unresolved_tenant(router)` / `Cli::unresolved_tenant` serve a router where no tenant resolves (unknown host, apex path the console does not serve), with `Extension<TenantRegistry>` and its `has_tenants()`; unset, routing is unchanged.
+- The ViewSet OpenAPI documents bulk create (JSON array in, array out with `null` for rows outside your scope), 400 for a malformed pk on retrieve and DELETE, 413 on writes, and 401/403/429 where the action has codenames or a throttle.
+
+### Internal — crypto and quoting helpers
+
+- `storage-azure` enables `_signing`; the `to_hex`/`mac_eq` copies use `crate::hex` and `crypto::constant_time_compare`; the private identifier quoters use `quote_with`.
+- Test: a PG `array_agg` of INTEGER and BIGINT columns decodes as number arrays.
+
 ## [0.61.7] — 2026-10-27
 
 ### Fixed — admin, REST and i18n

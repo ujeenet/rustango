@@ -90,7 +90,10 @@ fn new_token() -> (String, String) {
     OsRng.fill_bytes(&mut prefix_bytes);
     let mut secret_bytes: [u8; 16] = [0; 16];
     OsRng.fill_bytes(&mut secret_bytes);
-    (to_hex(&prefix_bytes), to_hex(&secret_bytes))
+    (
+        crate::hex::hex_encode(&prefix_bytes),
+        crate::hex::hex_encode(&secret_bytes),
+    )
 }
 
 /// Hash a secret with argon2id via [`crate::passwords::hash`]. The
@@ -138,10 +141,6 @@ pub fn split_token(token: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((prefix, secret))
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

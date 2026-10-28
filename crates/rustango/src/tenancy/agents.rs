@@ -125,18 +125,14 @@ async fn generate_credential() -> Result<(String, String, String), AgentError> {
 
     let mut prefix_bytes = [0u8; 4];
     OsRng.fill_bytes(&mut prefix_bytes);
-    let prefix = to_hex(&prefix_bytes);
+    let prefix = crate::hex::hex_encode(&prefix_bytes);
     let mut secret_bytes = [0u8; 16];
     OsRng.fill_bytes(&mut secret_bytes);
-    let secret = to_hex(&secret_bytes);
+    let secret = crate::hex::hex_encode(&secret_bytes);
     let hash = super::password::hash_async(&secret)
         .await
         .map_err(|e| AgentError::Secret(e.to_string()))?;
     Ok((format!("{prefix}.{secret}"), prefix, hash))
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Create a new agent with a freshly generated credential. The returned
@@ -889,7 +885,7 @@ async fn unique_key_name(pool: &Pool, user_id: i64) -> Result<String, AgentError
     for _ in 0..6 {
         let mut b = [0u8; 5];
         OsRng.fill_bytes(&mut b);
-        let name = format!("uk_{user_id}_{}", to_hex(&b));
+        let name = format!("uk_{user_id}_{}", crate::hex::hex_encode(&b));
         let taken: Vec<Agent> = Agent::objects()
             .filter("name", name.clone())
             .limit(1)
