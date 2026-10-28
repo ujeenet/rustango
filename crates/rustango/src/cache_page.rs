@@ -326,8 +326,9 @@ impl CachePageLayer {
                 );
             }
             let counter = generation_key(&self.key_prefix, &p.path, &p.host, self.page_tenant(p));
-            // No TTL: a counter that expired would bring older entries back.
-            let now = self.cache.incr(&counter, 1, None).await?;
+            // A long TTL, not `None`: a backend may give `None` its short
+            // default, and a counter that expired would bring older entries back.
+            let now = self.cache.incr(&counter, 1, Some(GENERATION_TTL)).await?;
             let before = u64::try_from(now.saturating_sub(1)).unwrap_or(0);
             keys.push(self.key_for(p, before));
         }
@@ -801,6 +802,9 @@ fn compute_cache_key(
         generation,
     )
 }
+
+/// How long a generation counter lives: ten years, so it outlives any page.
+const GENERATION_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 365 * 24 * 3600);
 
 /// The key of a path's generation counter, which every page key of the
 /// path carries. `#` never starts a page key's method part.

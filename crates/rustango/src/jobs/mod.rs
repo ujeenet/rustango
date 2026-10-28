@@ -360,7 +360,11 @@ impl HandlerRegistry {
                         }
                     }
                 };
-                let delay = job.retry_delay(failed_attempt);
+                // A panicking override falls back to the type's backoff, not a dead worker.
+                let delay = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    job.retry_delay(failed_attempt)
+                }))
+                .unwrap_or_else(|_| T::retry_backoff(failed_attempt));
                 let (result, asked) = RETRY_AFTER
                     .scope(std::cell::Cell::new(None), async move {
                         // A panic is a failed run, not a dead worker (#1843).
@@ -417,7 +421,9 @@ pub(crate) async fn deliver_dead_letter(cb: DeadLetterFn, dl: JobDeadLetter) {
 
 /// [`Job::max_attempts`] as the queues read it: 0 would never run (#2333).
 pub(crate) fn max_attempts<T: Job>(job: &T) -> u32 {
-    job.max_attempts().max(1)
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.max_attempts()))
+        .unwrap_or(T::MAX_ATTEMPTS)
+        .max(1)
 }
 
 /// `base`, doubled for each earlier failure and capped at `base · 2^10`.
