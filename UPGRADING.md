@@ -152,7 +152,7 @@ untouched.
 
 ### Model attributes, check and MCP
 
-`default = "…"` is raw SQL: a bare word such as `"draft"` and a non-number on a numeric field (`"abc"`, `"true"`, `""`) now fail to compile; write `"'draft'"`. `primary_key = false` and the like are refused as no-ops. `makemigrations` now refuses an `fk` / `o2o` to a table or column no model registers. `manage check` warns on unmade or unapplied migrations; in tenancy it counts registry migrations only. MCP tool results that are not objects lose `structuredContent` and keep the text block. The translations editor reloads only translators passed to `i18n::db::register_live_translator`.
+`default = "…"` is raw SQL: a bare word such as `"draft"` and a non-number on a numeric field (`"abc"`, `"true"`, `""`) now fail to compile; write `"'draft'"`. `primary_key = false` and the like are refused as no-ops. `makemigrations` now refuses an `fk` / `o2o` that names a model instead of its table, or a column its registered table lacks; a table no model registers only logs a warning. `manage check` warns on unmade or unapplied migrations; in tenancy it counts registry migrations only. MCP tool results that are not objects lose `structuredContent` and keep the text block. The translations editor reloads only translators passed to `i18n::db::register_live_translator`.
 
 ### Single-database admin and boot migrate
 
@@ -163,18 +163,23 @@ Bare-admin audit rows now carry `user:<id>` instead of `system`. Single-database
 - `ViewSet::for_model`, `filter_fields`, `search_fields`, `ordering_fields`, `ordering` and `related_filter` panic on a name the model lacks; `#[derive(ViewSet)]` hits it at `router()`. Fix the typo the message names.
 - Cursor pagination with a `#[derive(Serializer)]` that does not render the cursor field or the primary key panics at mount, where it used to 500 per request.
 - `require_auth` / `require_perm` bodies are JSON (`{"error","message","status"}`) instead of plain text, and a database error during the credential lookup is a `503`, not a `401`.
-- `FormView` answers invalid input with `422` (was `200`); a bool checkbox and a `blank` string field have `required: false` in `form.fields`.
+- `FormView` answers invalid input with `422` (was `200`); a bool checkbox and a `blank` string field have `required: false` in `form.fields`, as does a defaulted field on a create form.
+- DetailView and TemplateView now set the CSRF cookie on a first GET, so a CDN that skips responses with `Set-Cookie` no longer caches those pages.
+- `CorsLayer::permissive()` now exposes `Retry-After`, `Idempotent-Replayed`, `ETag`, `Location` and `Link`.
+- `SecuritySettings` has three new fields (`cors_allowed_headers`, `cors_expose_headers`, `cors_allow_credentials`), so a struct literal needs `..Default::default()`.
+- A ViewSet and `permission_required(_or_403)` return `503` when the permission read fails (was `403`).
 
 ### Admin, auth and run-server
 
 - The bare admin's `static_url` is now under its mount: the favicon is `<admin_prefix>/__static__/icon.png`. Sessions are no longer waived for `/__static__` paths.
 - A right Basic-auth admin or API-key credential no longer resets the per-IP and global login counters; only failures count, as before. Without a client IP (no `ConnectInfo`, no trusted proxy) a Basic-auth success still reserves a login slot per request.
 - `require_perm` returns `503` when the permission read fails (was `403`).
+- `default = "current_user"`, `"session_user"` and `"user"` still fail to compile, now with a message that names Postgres as the only backend that takes them.
 - `check --deploy` on a single-database Cli no longer warns about `RUSTANGO_APEX_DOMAIN`.
 
 ### Migrations, links, i18n, admin and REST
 
-- `migrate <target>` forward now applies pending framework system migrations and the bootstrap tables first, as plain `migrate` does, and fires `pre_migrate` / `post_migrate`.
+- `migrate <target>` forward now applies pending framework system migrations and the bootstrap tables first, as plain `migrate` does, and fires `pre_migrate` / `post_migrate`. Its output is the plain `migrate` one (`applied …` / `nothing to migrate`), not `touched …` / `already at …`; a backward target keeps the old lines. An unknown target now fails before anything runs.
 - `forget-pending` refuses a migration another file builds on; forget the newest first.
 - Data-op SQL runs unprepared, so it can hold several statements on every backend.
 - `signed_url::sign` / `verify` ignore a `#fragment` and `sign` keeps it after the query; a link signed over a fragment before this no longer verifies.

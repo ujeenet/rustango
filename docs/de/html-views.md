@@ -299,9 +299,12 @@ wobei SQL-`NULL` als `null` gerendert wird. Verwende `.context_object_name("post
 neben `object_list` / `object` einen freundlicheren Alias hinzuzufügen.
 
 Jeder Eintrag in `form.fields` trägt `name`, `column`, `ty`, `required`, `max_length` und
-`value`. Eine Checkbox und ein `blank`-String sind nie `required`. `form.errors` ist nach Feldnamen indiziert und enthält eine Meldung pro Feld, keine
+`value`. `form.errors` ist nach Feldnamen indiziert und enthält eine Meldung pro Feld, keine
 Liste. Jeder View stempelt zusätzlich `csrf_token` und `csrf_input` ein, und jeder
 View-Router weist einen POST ohne passendes Token ab.
+
+Eine Checkbox und ein `blank`-String sind nie `required`, ebenso wenig ein Feld mit
+`default` in einem Anlegeformular: leer gesendet, nimmt es den Spalten-Default.
 
 `CreateView` stempelt kein `object` ein, daher ist `{{ object.title }}` in einem
 Erstellformular undefiniert statt leer — verwende `{{ field.value }}` aus `form.fields`, das
