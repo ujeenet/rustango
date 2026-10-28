@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Data ops, uploads, views and Debug output
+
+`add-data-op` without `--to` now chains onto the last tenant file and its snapshot; pass `--scope registry` for a registry one. Uploads named like `.html` or `.svg` are now refused when the allow-list is empty, as `x.html` is. A CreateView `success_url` placeholder is read back from the saved row; when it cannot be filled (a NULL value), the redirect goes to the path before the first placeholder instead of a 500. A JSON string sent for a Json field is stored as a string on the serializer path and in `ModelFormFor::from_json` (`"42"` is no longer a number). A `blank` String field with `choices` or `validators` now accepts `""`. The admin change-password page, and an `OnAuthSuccess` hook error (502), no longer show the error text unless `RUSTANGO_DISCLOSE_ERRORS` is on. `{:?}` of `Operator`, `User`, `AdminUser`, `Agent`, `ApiKey`, `DatabaseUrlBuilder` and `Cast<EncryptedString>` prints `[redacted]` for the secret; `CastValue` gains `const SECRET: bool = false`.
+
 ### Default bind is loopback off prod and staging
 
 With neither `RUSTANGO_BIND` nor `[server] bind` set, `Cli` and the tenancy `ServerConfig` now bind `127.0.0.1:8080` unless `RUSTANGO_ENV` is `prod` or `staging`. A container on another tier must set `RUSTANGO_BIND=0.0.0.0:8080`.
@@ -160,7 +164,7 @@ With `with_health()`, `/health` and `/ready` no longer get the Host check or the
 
 ### Refusals instead of silent data loss
 
-`update()`/`delete()` on a queryset with `join`/`join_sub`/`join_lateral` now return `QueryError::JoinDml`; narrow the write with `where_in_subquery` instead. `migrate --squash` refuses while models have unmigrated changes: run `makemigrations` first. In a tenancy dir `makemigrations --empty` now chains onto the last tenant file; pass `--scope registry` for a registry one. A changed M2M `through` name is now written as a `RenameTable`, not a drop and create. `Model::bulk_insert_on` still sends one statement; past the bind cap use the pool `bulk_insert`, which now chunks.
+`update()`/`delete()` on a queryset with `join`/`join_sub`/`join_lateral` now return `QueryError::JoinDml`; narrow the write with `where_in_subquery` instead. `migrate --squash` refuses while models have unmigrated changes: run `makemigrations` first. In a tenancy dir `makemigrations --empty` now chains onto the last tenant file; pass `--scope registry` for a registry one. A renamed M2M `through` is still a drop and create (its rows are not kept, and `makemigrations` warns), since swapping one M2M for another between the same models looks the same; write a junction rename by hand as a `RenameTable` in a `makemigrations --empty` file. `Model::bulk_insert_on` still sends one statement; past the bind cap use the pool `bulk_insert`, which now chunks.
 
 ### Error pages keep the framework's own HTML pages
 
@@ -168,7 +172,7 @@ With `[errors] enabled = true`, an HTML 4xx/5xx from the admin, tenant admin, op
 
 ### run-server flags and the dev secret key
 
-`run-server --bind/--apex` now apply, and an unknown flag after the server verb fails instead of being ignored. With `RUSTANGO_SECRET_KEY` unset on the dev or test tier, rustango saves a key in `./var/.rustango_secret.key` and seals with it; set the var before sealing anything you keep, since values sealed with the dev key need that file to open.
+`run-server --bind/--apex` now apply, and an unknown flag after the server verb fails instead of being ignored. With `RUSTANGO_SECRET_KEY` unset on the dev or test tier, every binary (server, worker, `manage`, tests) seals and opens with a key saved in `var/.rustango_secret.key`, found from the working directory up to the Cargo workspace root and created in that root. Once you set `RUSTANGO_SECRET_KEY`, values the file sealed open only with `export RUSTANGO_SECRET_KEY_PREVIOUS="$(base64 < var/.rustango_secret.key | tr -d "\n")"`; then run `reseal-tenant-secrets --apply`.
 
 ### Operator console: optional TOTP
 
