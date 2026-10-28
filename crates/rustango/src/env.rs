@@ -195,6 +195,15 @@ pub(crate) fn is_prod_tier(raw: &str) -> bool {
     canonical_tier(raw) == "prod"
 }
 
+/// Listener address when neither `RUSTANGO_BIND` nor `[server] bind` is set:
+/// all interfaces on prod and staging, like their scaffolded tiers; loopback elsewhere.
+pub(crate) fn default_bind(tier: &str) -> &'static str {
+    match canonical_tier(tier).as_str() {
+        "prod" | "staging" => "0.0.0.0:8080",
+        _ => "127.0.0.1:8080",
+    }
+}
+
 // ------------------------------------------------------------------ Startup validation
 
 /// One declared environment-variable requirement.
@@ -724,6 +733,17 @@ mod tests {
         let _g = env_lock().lock().unwrap();
         std::env::remove_var(name);
         f();
+    }
+
+    /// With no bind configured, only the deployed tiers listen on every interface.
+    #[test]
+    fn fallback_bind_is_loopback_off_the_deployed_tiers() {
+        for tier in ["", "dev", "test", "qa"] {
+            assert_eq!(default_bind(tier), "127.0.0.1:8080", "tier {tier:?}");
+        }
+        for tier in ["prod", "PRODUCTION", "staging"] {
+            assert_eq!(default_bind(tier), "0.0.0.0:8080", "tier {tier:?}");
+        }
     }
 
     #[test]

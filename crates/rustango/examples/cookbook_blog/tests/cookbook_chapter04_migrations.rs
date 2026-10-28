@@ -29,7 +29,7 @@ fn embedded_migrations_const_is_loaded() {
     assert!(
         cookbook_blog::EMBEDDED
             .iter()
-            .any(|(name, _)| *name == "0002_cookbook_tables"),
+            .any(|(name, _)| *name == "0001_auto"),
         "embedded names: {:?}",
         cookbook_blog::EMBEDDED
             .iter()

@@ -276,7 +276,7 @@ ce préfixe du chemin du ViewSet :
 ### Étape 7 — Le lancer et exercer chaque endpoint
 
 ```bash
-cargo run            # listening on http://0.0.0.0:8080
+cargo run            # listening on http://127.0.0.1:8080
 ```
 
 **Créer** (`POST`). Le sérialiseur valide d'abord, puis n'écrit que les

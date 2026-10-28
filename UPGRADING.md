@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Default bind is loopback off prod and staging
+
+With neither `RUSTANGO_BIND` nor `[server] bind` set, `Cli` and the tenancy `ServerConfig` now bind `127.0.0.1:8080` unless `RUSTANGO_ENV` is `prod` or `staging`. A container on another tier must set `RUSTANGO_BIND=0.0.0.0:8080`.
+
 ### Probes, HTTP/2 hosts, short JWT keys, tenant CLI exit code
 
 With `with_health()`, `/health` and `/ready` no longer get the Host check or the HTTPS redirect. HTTP/2 requests now pass `allowed_hosts` by `:authority` instead of getting 400. `jwt::decode*` returns `JwtError::Decode` for a key under 32 bytes. `create-tenant` now exits non-zero when tenant migrations fail; rerun it with `--resume`. A blank `DATABASE_URL=` now falls through to the `DB_*` vars. A repeated `vary_on` header changes the page-cache key, so those pages miss once.

@@ -14,7 +14,7 @@ the framework's `User` for tenant storage and adds two typed columns
   bootstrap migration whose `CREATE TABLE rustango_users` carries the
   extras.
 - Reading the extras via the ORM — see
-  [`src/api.rs`](src/api.rs) for the `GET /api/users/:username`
+  [`src/api.rs`](src/api.rs) for the `GET /users/{username}`
   handler. It answers 401 without a tenant session cookie.
 - Schema-validation invariants — the test in
   [`tests/bootstrap_migration.rs`](tests/bootstrap_migration.rs)

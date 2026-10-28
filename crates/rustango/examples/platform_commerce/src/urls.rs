@@ -36,10 +36,11 @@ pub fn api(
         .nest(
             "/__admin",
             rustango::admin::Builder::new(pool)
-                .with_session_auth(
-                    rustango::session::SessionSecret::try_from_env()
-                        .expect("RUSTANGO_SESSION_SECRET is base64 of 32+ bytes"),
-                )
+                // Prod refuses to start without RUSTANGO_SESSION_SECRET; dev keeps a key in ./var/.
+                .with_session_auth(rustango::session::load_session_secret_for_tier(
+                    &rustango::session::tier_from_env(),
+                    std::path::Path::new("./var/.rustango_session.key"),
+                ))
                 .build(),
         )
         .route("/", get(views::index))

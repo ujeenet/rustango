@@ -55,7 +55,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            bind: "0.0.0.0:8080".into(),
+            bind: crate::env::default_bind(&crate::env::tier_from_env()).into(),
             apex_domain: "localhost".into(),
             operator_show_only: vec!["rustango_orgs".into(), "rustango_operators".into()],
         }

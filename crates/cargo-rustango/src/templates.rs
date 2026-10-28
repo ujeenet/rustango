@@ -390,8 +390,14 @@ volumes:
 ///
 /// This is `Dockerfile.dev`. The plain `Dockerfile` is
 /// [`dockerfile_prod`] — see its docs for why a project needs both.
+///
+/// `RUSTUP_TOOLCHAIN` names the image's own toolchain: the bind-mounted
+/// `rust-toolchain.toml` says `stable`, which the image lacks, so rustup
+/// would download it again on every container run.
 pub fn dockerfile_dev() -> &'static str {
     "FROM rust:1\n\
+     # The image's own toolchain, not rust-toolchain.toml's `stable`.\n\
+     ENV RUSTUP_TOOLCHAIN=$RUST_VERSION\n\
      \n\
      WORKDIR /app\n\
      \n\
@@ -412,8 +418,9 @@ pub fn dockerfile_dev() -> &'static str {
 /// stages must agree on libc, hence `bookworm` on both — a
 /// `bookworm`-built binary will not start on `bullseye`.
 ///
-/// `--locked` is deliberate. A deploy image is exactly where an
-/// unnoticed dependency bump should fail the build rather than ship.
+/// `--locked` is deliberate once `Cargo.lock` exists: a deploy image is
+/// exactly where an unnoticed dependency bump should fail the build rather
+/// than ship. A fresh project has no lock yet, so the first build resolves.
 pub fn dockerfile_prod(name: &str) -> String {
     format!(
         r#"# The deployable image. `Dockerfile.dev` is the hot-reload one
@@ -426,6 +433,8 @@ pub fn dockerfile_prod(name: &str) -> String {
 #   docker build --build-arg FEATURES=sqlite --build-arg NO_DEFAULT=1 .
 
 FROM rust:1-bookworm AS builder
+# The image's own toolchain, not rust-toolchain.toml's `stable`.
+ENV RUSTUP_TOOLCHAIN=$RUST_VERSION
 ARG FEATURES=""
 ARG NO_DEFAULT=""
 WORKDIR /src
@@ -433,7 +442,8 @@ COPY . .
 # Incremental compilation only grows the cache in a one-shot image build.
 ENV CARGO_INCREMENTAL=0
 RUN set -eux; \
-    flags="--release --locked"; \
+    flags="--release"; \
+    if [ -f Cargo.lock ]; then flags="$flags --locked"; fi; \
     if [ -n "$NO_DEFAULT" ]; then flags="$flags --no-default-features"; fi; \
     if [ -n "$FEATURES" ]; then flags="$flags --features $FEATURES"; fi; \
     cargo build $flags; \
@@ -488,6 +498,9 @@ target/
 .env.*
 !.env.example
 
+# Runtime state: generated session keys and the MCP agent secret.
+var/
+
 # Local databases — a SQLite file here would be baked into the image.
 *.db
 *.db-wal
@@ -511,37 +524,26 @@ pub fn readme(name: &str, template: Template, backend: Backend) -> String {
         Template::Tenant => "tenant (multi-tenancy + operator console)",
     };
     let backend_label = backend.feature();
+    let host_block = host_steps(template, backend);
     let (up_line, host_path) = match backend.service() {
         Some(svc) => (
             format!("docker compose up -d                 # boots {svc} + rust + cargo-watch"),
-            format!(
-                r#"### B. Cargo on the host (Docker just for {svc})
-
-```sh
-cp .env.example .env                 # then change `{svc}` -> `localhost` in DATABASE_URL
-docker compose up -d {svc}        # only the DB
-cargo run -- makemigrations          # generate the framework's (and your) tables
-cargo run -- migrate                 # apply pending migrations
-cargo run                            # boot the HTTP server
-cargo run -- --help                  # full verb list (makemigrations, startapp, etc.)
-```"#
-            ),
+            format!("### B. Cargo on the host (Docker just for {svc})\n\n```sh\n{host_block}```"),
         ),
         None => (
             "docker compose up -d                 # boots rust + cargo-watch".to_owned(),
-            r#"### B. Cargo on the host (no Docker at all)
-
-SQLite is a file next to the project, so nothing else has to be running.
-
-```sh
-cp .env.example .env
-cargo run -- makemigrations          # generate the framework's (and your) tables
-cargo run -- migrate                 # creates the database file and applies migrations
-cargo run                            # boot the HTTP server
-cargo run -- --help                  # full verb list (makemigrations, startapp, etc.)
-```"#
-                .to_owned(),
+            format!(
+                "### B. Cargo on the host (no Docker at all)\n\n\
+                 SQLite is a file next to the project, so nothing else has to be running.\n\n\
+                 ```sh\n{host_block}```"
+            ),
         ),
+    };
+    let docker_admin = match template {
+        Template::Fullstack => {
+            format!("docker compose run --rm rust cargo run -- {CREATE_ADMIN}\n")
+        }
+        _ => String::new(),
     };
     let tenant_note = match template {
         Template::Tenant => tenant_dev_note(backend),
@@ -562,7 +564,7 @@ cp .env.example .env
 {up_line}
 docker compose run --rm rust cargo run -- makemigrations
 docker compose run --rm rust cargo run -- migrate
-# server lives at http://localhost:8080 — edits to src/ trigger rebuild
+{docker_admin}# server lives at http://localhost:8080 — edits to src/ trigger rebuild
 ```
 
 The `rust` service runs `cargo watch -x run` against the bind-mounted
@@ -582,6 +584,7 @@ flows through the same binary via `rustango::manage::Cli` — see
 ```text
 src/
   main.rs         — Cli::new().api(urls::api()).run() boots both server + verbs
+  lib.rs          — the app's modules; main.rs and src/bin/* reach them by crate name
   models.rs       — every #[derive(Model)] lives here
   views.rs        — request handlers
   urls.rs         — pub fn api() -> Router aggregator
@@ -595,6 +598,58 @@ it immediately. See <https://github.com/ujeenet/rustango> for the full
 feature list.
 "#
     )
+}
+
+/// The first-admin verb: the bare admin lets only superusers in.
+const CREATE_ADMIN: &str = "create-admin <username> --superuser";
+
+/// Getting a fresh project running with cargo on the host: the README's
+/// path B and the scaffolder's "next:" list, so the two cannot drift.
+fn host_steps(template: Template, backend: Backend) -> String {
+    let mut steps: Vec<(String, String)> = Vec::new();
+    let mut step = |cmd: &str, note: &str| steps.push((cmd.to_owned(), note.to_owned()));
+    match backend.service() {
+        Some(svc) => {
+            step(
+                "cp .env.example .env",
+                &format!("then change `{svc}` -> `localhost` in DATABASE_URL"),
+            );
+            step(
+                &format!("docker compose up -d --no-deps {svc}"),
+                "only the database: the rust service holds 8080",
+            );
+        }
+        None => step("cp .env.example .env", ""),
+    }
+    step(
+        "cargo run -- makemigrations",
+        "generate the framework's (and your) tables",
+    );
+    step(
+        "cargo run -- migrate",
+        match backend {
+            Backend::Sqlite => "creates the database file and applies migrations",
+            _ => "apply pending migrations",
+        },
+    );
+    if template == Template::Fullstack {
+        step(&format!("cargo run -- {CREATE_ADMIN}"), "the admin login");
+    }
+    step("cargo run", "boot the HTTP server");
+    step("cargo run -- --help", "full verb list");
+    let width = steps.iter().map(|(cmd, _)| cmd.len()).max().unwrap_or(0);
+    steps
+        .into_iter()
+        .map(|(cmd, note)| match note.as_str() {
+            "" => format!("{cmd}\n"),
+            note => format!("{cmd:<width$}  # {note}\n"),
+        })
+        .collect()
+}
+
+/// What `cargo rustango new` prints after writing the project.
+pub fn next_steps(name: &str, template: Template, backend: Backend) -> String {
+    format!("cd {name}\n{}", host_steps(template, backend))
 }
 
 /// How to save the compose database as a server in the console.
@@ -766,8 +821,8 @@ const MAIN_RS_FULLSTACK: &str = "//! Project entrypoint — `Cli::run()` is the 
 //! that handles `cargo run` (runserver) AND `cargo run -- migrate` /
 //! `makemigrations` / `startapp` / etc. from one binary. No
 //! `src/bin/manage.rs` needed. The auto-admin is at `/admin` (or
-//! `[admin] url_prefix`), behind a login: `cargo run -- create-admin
-//! <username>` makes the account.
+//! `[admin] url_prefix`), behind a superuser login; make the account with
+//! `cargo run -- create-admin <username> --superuser`.
 //!
 //! Logging is auto-configured by `#[rustango::main]` —
 //! `tracing_subscriber::fmt` with env-filter, default
@@ -1028,8 +1083,8 @@ pub fn admin_prefix(settings: &Settings) -> String {
         .to_owned()
 }
 
-/// The auto-admin, behind a login. Create the first account with
-/// `cargo run -- create-admin <username>`.
+/// The auto-admin, behind a superuser login. Create the first account with
+/// `cargo run -- create-admin <username> --superuser`.
 ///
 /// The signing key comes from `RUSTANGO_SESSION_SECRET`, else (off the
 /// prod tier) from `./var/`, so a restart keeps you signed in.

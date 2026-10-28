@@ -217,8 +217,9 @@ pub struct Cli {
 }
 
 impl Cli {
-    /// Default builder — empty router, no seed, binds `0.0.0.0:8080`,
-    /// migrations live in `./migrations`, single-tenant.
+    /// Default builder — empty router, no seed, binds `RUSTANGO_BIND`, else
+    /// `127.0.0.1:8080` (`0.0.0.0:8080` on prod and staging), migrations live
+    /// in `./migrations`, single-tenant.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -226,7 +227,8 @@ impl Cli {
             seed: None,
             on_shutdown: None,
             nested: Vec::new(),
-            bind: std::env::var("RUSTANGO_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
+            bind: std::env::var("RUSTANGO_BIND")
+                .unwrap_or_else(|_| crate::env::default_bind(&crate::env::tier_from_env()).into()),
             #[cfg(feature = "tenancy")]
             apex: None,
             migrations_dir: PathBuf::from("./migrations"),
@@ -408,8 +410,8 @@ impl Cli {
         self
     }
 
-    /// Override the bind address. Defaults to `RUSTANGO_BIND` env or
-    /// `0.0.0.0:8080`.
+    /// Override the bind address. Defaults to `RUSTANGO_BIND` env, else
+    /// loopback off the prod and staging tiers.
     #[must_use]
     pub fn bind(mut self, addr: impl Into<String>) -> Self {
         self.bind = addr.into();
@@ -729,7 +731,7 @@ impl Cli {
         //   1. an explicit `.bind(...)` call AFTER this one
         //   2. `RUSTANGO_BIND` env var
         //   3. `Settings.server.bind` (this branch)
-        //   4. hardcoded `0.0.0.0:8080` (Cli::new fallback)
+        //   4. the tier's fallback (Cli::new: loopback off prod/staging)
         //
         // Env wins over TOML so deploy-time emergency overrides
         // don't require a config push + restart.
@@ -2483,6 +2485,16 @@ mod tests {
             .run_with_args(args(&["run-server", "--help"]))
             .await
             .expect("help");
+    }
+
+    /// A project that loads no settings (the api template) still binds
+    /// loopback in dev.
+    #[test]
+    fn unconfigured_dev_binds_loopback() {
+        if std::env::var("RUSTANGO_BIND").is_ok() || std::env::var("RUSTANGO_ENV").is_ok() {
+            return;
+        }
+        assert_eq!(Cli::new().bind, "127.0.0.1:8080");
     }
 
     /// `Cli::with_settings` honors `Settings.server.bind` when

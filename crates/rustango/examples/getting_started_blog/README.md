@@ -25,10 +25,11 @@ It's an in-repo example, so it depends on the framework by path
 
 ```bash
 # A Postgres to talk to (matches docker-compose.yml):
-docker compose up -d postgres
+docker compose up -d --no-deps postgres
 export DATABASE_URL=postgres://rustango:rustango@localhost:5432/getting_started_blog_dev
 
 cargo run -- migrate     # create the framework + model tables
+cargo run -- create-admin alice --superuser  # the admin login
 cargo run                # serve on http://localhost:8080  (admin at /admin)
 cargo test               # run the integration tests (needs DATABASE_URL)
 ```

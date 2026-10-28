@@ -207,7 +207,7 @@ Also startet `cargo run` den Server, und `cargo run -- <verb>` führt Migratione
 Wie sich die Vorlagen innerhalb von `main.rs` / `urls.rs` unterscheiden:
 
 - **api** — kein Admin; `urls::api()` aggregiert schlicht deine eigenen Routen.
-- **fullstack** — dieselbe `urls.rs`, plus `admin_prefix(&settings)` und ein `admin_router(pool, &settings)`-Helfer, den `main.rs` mit `Cli::nest_with(urls::admin_prefix(&settings), …)` einhängt, gebaut aus dem Pool des Servers. Das Präfix ist `[admin] url_prefix` (oder `[routes] admin_url`), sonst `/admin`. `main.rs` lädt die Einstellungen einmal und gibt sie mit `with_loaded_settings` an die `Cli` weiter. Er nimmt `rustango::sql::Pool` entgegen, benennt also keinen Treiber, und liegt hinter einem Login: Lege das Konto mit `cargo run -- create-admin <username>` an (siehe [Erste Schritte, Schritt 11](getting-started.md#schritt-11-den-auto-admin-einschalten)).
+- **fullstack** — dieselbe `urls.rs`, plus `admin_prefix(&settings)` und ein `admin_router(pool, &settings)`-Helfer, den `main.rs` mit `Cli::nest_with(urls::admin_prefix(&settings), …)` einhängt, gebaut aus dem Pool des Servers. Das Präfix ist `[admin] url_prefix` (oder `[routes] admin_url`), sonst `/admin`. `main.rs` lädt die Einstellungen einmal und gibt sie mit `with_loaded_settings` an die `Cli` weiter. Er nimmt `rustango::sql::Pool` entgegen, benennt also keinen Treiber, und liegt hinter einem Login: Lege das Konto mit `cargo run -- create-admin <username> --superuser` an (siehe [Erste Schritte, Schritt 11](getting-started.md#schritt-11-den-auto-admin-einschalten)).
 - **tenant** — `main.rs` ergänzt `.tenancy()`, bedient die Operator-Konsole auf der Apex-Domain und jeden Tenant unter seiner eigenen Subdomain, sowie `.with_tenant_provisioning("migrations")` für die Konsolenseiten **New tenant** und **Database servers** (lösche es, um sie abzuschalten; das Speichern eines Servers braucht `RUSTANGO_SECRET_KEY`). Die eigenen Tabellen des Frameworks werden beim ersten `cargo run -- migrate` aus den kompilierten Modellen in einen **`system/migrations/`**-Ordner generiert — kein handgeliefertes Bootstrap-JSON, sodass das allererste migrate ohne zusätzliche Einrichtung funktioniert.
 
 ### Geschichtete Konfiguration
@@ -233,11 +233,13 @@ Nicht jeden Schlüssel liest das Framework. `Cli::with_settings` warnt beim Star
 
 ```sh
 cd <name>
-cp .env.example .env
-docker compose up -d        # start Postgres
-cargo run -- migrate        # apply migrations
-cargo run                   # serve
-cargo run -- --help         # see every manage verb
+cp .env.example .env                     # then change `postgres` -> `localhost` in DATABASE_URL
+docker compose up -d --no-deps postgres  # only the database: the rust service holds 8080
+cargo run -- makemigrations              # generate the framework's (and your) tables
+cargo run -- migrate                     # apply them
+cargo run -- create-admin <username> --superuser  # fullstack: the admin login
+cargo run                                # serve
+cargo run -- --help                      # see every manage verb
 ```
 
 ---

@@ -22,7 +22,7 @@ fn layout_matches_scaffolder_shape() {
         // `system/migrations/` folder (generated from the compiled
         // models). The app's own migrations dir carries only user
         // migrations.
-        "migrations/0002_cookbook_tables.json",
+        "migrations/0001_auto.json",
         "system/migrations",
         "COOKBOOK.md",
         "README.md",

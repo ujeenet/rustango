@@ -1,4 +1,17 @@
 /target
 /.env
-*.log
+/.env.*
+!/.env.example
+
+# Runtime state. The server writes generated session signing keys here
+# when RUSTANGO_SESSION_SECRET is unset — never commit them.
 /var/
+
+# Local databases (sqlite backend, test fixtures).
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*-migrate.lock*
+
+*.log
