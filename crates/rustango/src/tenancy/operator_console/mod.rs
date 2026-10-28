@@ -74,6 +74,8 @@ mod operators;
 mod provisioning;
 #[cfg(feature = "admin-sso")]
 mod sso_shared;
+#[cfg(feature = "totp")]
+mod totp;
 
 use crate::core::Column as _;
 // `ConsoleState.registry` is `crate::sql::Pool`, the backend-erasing enum,
@@ -156,6 +158,9 @@ struct ConsoleState {
     /// the shared providers page. Default `/login`.
     #[cfg_attr(not(feature = "admin-sso"), allow(dead_code))]
     tenant_login_url: String,
+    /// Operator second-factor settings, read from env at boot.
+    #[cfg(feature = "totp")]
+    totp: Arc<totp::Gate>,
 }
 
 /// The bundled logo, served by the console itself.
@@ -753,6 +758,11 @@ fn router_unlogged(
             "op_db_server_edit.html",
             include_str!("../templates/op_db_server_edit.html"),
         ),
+        (
+            "op_login_totp.html",
+            include_str!("../templates/op_login_totp.html"),
+        ),
+        ("op_totp.html", include_str!("../templates/op_totp.html")),
     ])
     .expect("operator-console templates parse");
     let edit_enabled = pools.is_some();
@@ -769,6 +779,8 @@ fn router_unlogged(
         tenant_session_secret: tenant_session_secret.map(Arc::new),
         tenant_handoff_url,
         tenant_login_url,
+        #[cfg(feature = "totp")]
+        totp: Arc::new(totp::Gate::from_env()),
     };
 
     // Public routes (login + static asset + brand asset) skip the
@@ -777,6 +789,9 @@ fn router_unlogged(
     let public = Router::new()
         .route("/login", get(login_form).post(login_submit))
         .route("/logout", post(logout));
+    // The code step after the password; only the pending cookie reaches it.
+    #[cfg(feature = "totp")]
+    let public = public.route("/login/totp", get(totp::code_form).post(totp::code_submit));
     // Cacheable GET-only assets stay outside the CSRF layers, so no
     // shared cache stores a `Set-Cookie` with them.
     let mut assets = Router::new()
@@ -807,6 +822,18 @@ fn router_unlogged(
             "/change-password",
             get(change_password_form).post(change_password_submit),
         );
+    #[cfg(feature = "totp")]
+    {
+        private = private
+            .route(
+                "/account/totp",
+                get(totp::account_form).post(totp::account_confirm),
+            )
+            .route(
+                "/account/totp/disable",
+                get(totp_post_only_redirect).post(totp::account_disable),
+            );
+    }
     // Registry-wide shared SSO providers (admin-sso): every operator sees
     // the list; changing it needs an editable console.
     #[cfg(feature = "admin-sso")]
@@ -1147,6 +1174,7 @@ fn inject_op_brand(ctx: &mut Context, brand: &OpBrand) {
     // Show the "Shared SSO" nav entry only when the admin-sso feature is
     // compiled in (its routes exist only then).
     ctx.insert("sso_console", &cfg!(feature = "admin-sso"));
+    ctx.insert("totp_console", &cfg!(feature = "totp"));
     // Templates prefix every console link with it.
     let prefix = mount::MountPrefix::current();
     ctx.insert("console_prefix", prefix.as_str());
@@ -1231,6 +1259,11 @@ async fn org_post_only_redirect(
 /// rather than slug and land back on the one list page.
 async fn op_post_only_redirect() -> Redirect {
     Redirect::to("/operators")
+}
+
+#[cfg(feature = "totp")]
+async fn totp_post_only_redirect() -> Redirect {
+    Redirect::to("/account/totp")
 }
 
 async fn orgs_post_only_redirect() -> Redirect {
@@ -1381,8 +1414,7 @@ async fn login_submit(
 ) -> Response<Body> {
     use crate::login_throttle::{LoginRefused, LoginScope};
     use crate::signals::auth::{
-        meta_from_parts, send_user_logged_in, send_user_login_failed, AuthFailureReason,
-        UserLoggedInContext, UserLoginFailedContext,
+        meta_from_parts, send_user_login_failed, AuthFailureReason, UserLoginFailedContext,
     };
     let meta = meta_from_parts(&extensions, &headers, Some("/login"));
     let next = sanitize_next(form.next.as_deref());
@@ -1408,9 +1440,8 @@ async fn login_submit(
         }
     }
 
-    let principal = match auth::check_operator_password(found, &form.password).await {
-        // No second factor on the console.
-        Ok(Some(op)) => op.complete(&state.registry).await,
+    let verified = match auth::check_operator_password(found, &form.password).await {
+        Ok(Some(op)) => op,
         Ok(None) => {
             attempt.failed().await;
             send_user_login_failed(UserLoginFailedContext {
@@ -1431,15 +1462,47 @@ async fn login_submit(
             return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
         }
     };
-    let oid = principal.id.get().copied().unwrap_or_default();
+    // An enrolled operator, or any under a required policy, owes a code:
+    // the password alone sets only the short-lived pending cookie.
+    #[cfg(feature = "totp")]
+    match totp::owed(&state, &verified).await {
+        Ok(totp::Owed::Nothing) => {}
+        Ok(_) => {
+            attempt.prompted().await;
+            return totp::challenge(&state, &verified, &next);
+        }
+        // Fail closed: an unreadable device is not "no second factor".
+        Err(e) => {
+            tracing::error!(target: "rustango::tenancy::operator_console", error = %e, "cannot read the operator's TOTP device; refusing the sign-in");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "login temporarily unavailable",
+            )
+                .into_response();
+        }
+    }
+    let principal = verified.complete(&state.registry).await;
     attempt.succeeded().await;
+    start_session(&state, &principal, &next, meta).await
+}
+
+/// Sign `op` in: the session cookie, a redirect to `next` and the signal.
+/// Only a sign-in with every factor passed reaches this.
+async fn start_session(
+    state: &ConsoleState,
+    op: &auth::Operator,
+    next: &str,
+    meta: crate::signals::auth::AuthRequestMeta,
+) -> Response<Body> {
+    use crate::signals::auth::{send_user_logged_in, UserLoggedInContext};
+    let oid = op.id.get().copied().unwrap_or_default();
     let mut payload = SessionPayload::new(
         oid,
         SESSION_IDLE_SECS,
-        session::PasswordFingerprint::of(&state.session_secret, &principal.password_hash),
+        session::PasswordFingerprint::of(&state.session_secret, &op.password_hash),
     );
-    payload.iat = crate::session::issued_at(principal.sessions_revoked_at);
-    let mut resp = Redirect::to(&next).into_response();
+    payload.iat = crate::session::issued_at(op.sessions_revoked_at);
+    let mut resp = Redirect::to(next).into_response();
     resp.headers_mut().append(
         header::SET_COOKIE,
         session_cookie(&state.session_secret, &payload),
@@ -1447,7 +1510,7 @@ async fn login_submit(
     send_user_logged_in(UserLoggedInContext {
         source: "operator",
         user_id: oid,
-        username: form.username.clone(),
+        username: op.username.clone(),
         // Operator principals are uniformly "superuser-equivalent" at
         // the framework boundary — they're the people minting tenant
         // sessions. There's no separate flag on the Operator row.

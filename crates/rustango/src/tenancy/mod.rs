@@ -94,6 +94,9 @@ pub mod migrate_run;
 /// Purges and password rotations, reported step by step and recorded.
 pub mod operation;
 pub mod operator_console;
+/// Operator TOTP devices, the console's optional second factor.
+#[cfg(feature = "totp")]
+pub mod operator_totp;
 pub mod operators;
 mod org;
 pub mod org_edit;
@@ -201,6 +204,8 @@ pub use migrate::{
 };
 #[cfg(feature = "postgres")]
 pub use migrate::{migrate_tenants, migrate_tenants_with_progress};
+#[cfg(feature = "totp")]
+pub use operator_totp::OperatorTotp;
 /// Fingerprint of `rustango_orgs`, used by the base-host cache to notice
 /// writes made by another process. Public so a deployment can poll it
 /// itself (e.g. to drive a custom cache) and so tests can assert on it.

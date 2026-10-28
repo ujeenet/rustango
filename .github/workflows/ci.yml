@@ -1357,6 +1357,7 @@ jobs:
             --test admin_totp_2fa_sqlite_live \
             --test admin_totp_2fa_e2e \
             --test admin_totp_replay_tri \
+            --test operator_console_totp_tri \
             --test orm_aggregation \
             --test orm_subquery \
             --test orm_window \
@@ -1688,6 +1689,7 @@ jobs:
           binary(=system_chain_order_tri) |
           binary(=agent_grants_unique_tri) |
           binary(=admin_totp_replay_tri) |
+          binary(=operator_console_totp_tri) |
           binary(=tenant_admin_tables_tri) |
           binary(=password_reset_links_tri) |
           binary(=admin_authz_edges_tri) |

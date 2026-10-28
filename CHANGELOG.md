@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — operator console two-factor sign-in
+
+- Operators can turn on TOTP at `/account/totp` (setup key and `otpauth` link, confirmed with a code) and turn it off with a current code (needs `totp`).
+- An enrolled operator's password opens only the `/login/totp` code step: codes are single use, throttled like passwords, and no console page answers before the code.
+- `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` requires it for every operator, with enrollment at sign-in; off by default.
+- Secrets are sealed in the registry's new `rustango_operator_totp` table (made by `migrate` or the first sign-in); enroll, disable and failed codes are audited.
+- The admin TOTP store and the SSO code step now share one store and one pending-cookie type with the console.
+
 ### Added — manage commands and DB_* connection vars
 
 - `register_command!` lets a crate add a `manage` verb, and `Cli::command` lets the app; `--help` lists them by crate, and a clash with a built-in verb fails at startup.

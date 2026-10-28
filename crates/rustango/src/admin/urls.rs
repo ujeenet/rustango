@@ -1049,6 +1049,10 @@ fn is_never_served(table: &str) -> bool {
     if table == <super::totp_store::AdminTotp as crate::core::Model>::SCHEMA.table {
         return true;
     }
+    #[cfg(all(feature = "tenancy", feature = "totp"))]
+    if table == <crate::tenancy::OperatorTotp as crate::core::Model>::SCHEMA.table {
+        return true;
+    }
     #[cfg(feature = "passkey")]
     if table == <crate::passkey::WebauthnCredential as crate::core::Model>::SCHEMA.table {
         return true;

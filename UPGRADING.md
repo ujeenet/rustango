@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Operator console: optional TOTP
+
+Nothing changes until an operator enrolls or `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` is set. The console creates `rustango_operator_totp` in the registry on its first sign-in (or `migrate` does); if that table cannot be read, operator sign-in is refused. Enrolling needs `RUSTANGO_SECRET_KEY`; `reseal-tenant-secrets` does not reseal these secrets yet, so keep `RUSTANGO_SECRET_KEY_PREVIOUS` set while enrolled operators re-enroll after a key rotation.
+
 ### Database URL from DB_* vars; 0.62.0 flips the precedence
 
 `manage`, `migrate` and the server now also connect from `DB_DRIVER` / `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` (or `DB_PASSWORD_FILE`) / `DB_NAME` / `DB_PARAMS` when `DATABASE_URL` is unset. If you set both, `DATABASE_URL` still wins and a startup warning names it; **from 0.62.0 the `DB_*` vars win**, so keep one style. Setting both `DB_PASSWORD` and `DB_PASSWORD_FILE` is an error. "No database" errors now name both styles.

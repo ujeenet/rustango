@@ -1093,6 +1093,10 @@ fn shared_bootstrap() -> Vec<Bootstrap> {
     fn totp(pool: &Pool) -> EnsureFuture<'_> {
         Box::pin(crate::admin::totp_store::ensure_table(pool))
     }
+    #[cfg(all(feature = "tenancy", feature = "totp"))]
+    fn operator_totp(pool: &Pool) -> EnsureFuture<'_> {
+        Box::pin(crate::tenancy::operator_totp::ensure_table(pool))
+    }
     vec![
         // Writes to `audit(track = ...)` models record from the first migrate.
         Bootstrap {
@@ -1108,6 +1112,18 @@ fn shared_bootstrap() -> Vec<Bootstrap> {
             ensure: totp,
             ddl: |d| {
                 super::ensure::idempotent_ddl(&crate::admin::totp_store::bootstrap_snapshot(), d)
+            },
+        },
+        // The console's sign-in reads it, and fails closed on a read error.
+        #[cfg(all(feature = "tenancy", feature = "totp"))]
+        Bootstrap {
+            table: crate::tenancy::OperatorTotp::SCHEMA.table,
+            ensure: operator_totp,
+            ddl: |d| {
+                super::ensure::idempotent_ddl(
+                    &crate::tenancy::operator_totp::bootstrap_snapshot(),
+                    d,
+                )
             },
         },
         // The admin lists translations wherever they live.

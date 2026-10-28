@@ -499,6 +499,55 @@ impl PasswordFingerprint {
     }
 }
 
+/// Who passed the first factor and still owes a TOTP code. Signed under a
+/// per-flow tag ending in `.`, so it never verifies as a session cookie.
+#[cfg(all(feature = "totp", any(feature = "admin-sso", feature = "tenancy")))]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct PendingSecondFactor {
+    pub(crate) uid: i64,
+    /// Bound to the password hash, so a password change in between ends it.
+    pub(crate) pwf: PasswordFingerprint,
+    pub(crate) exp: i64,
+}
+
+#[cfg(all(feature = "totp", any(feature = "admin-sso", feature = "tenancy")))]
+impl PendingSecondFactor {
+    /// How long the code step stays open.
+    pub(crate) const TTL_SECS: i64 = 300;
+
+    pub(crate) fn new(secret: &SessionSecret, uid: i64, password_hash: &str) -> Self {
+        Self {
+            uid,
+            pwf: PasswordFingerprint::of(secret, password_hash),
+            exp: chrono::Utc::now().timestamp() + Self::TTL_SECS,
+        }
+    }
+
+    fn mac(secret: &SessionSecret, tag: &[u8], body: &str) -> [u8; 32] {
+        sign(secret, &[tag, body.as_bytes()].concat())
+    }
+
+    pub(crate) fn seal(&self, secret: &SessionSecret, tag: &[u8]) -> String {
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let body = b64.encode(serde_json::to_vec(self).unwrap_or_default());
+        let sig = b64.encode(Self::mac(secret, tag, &body));
+        format!("{body}.{sig}")
+    }
+
+    /// The pending state behind `value`, if signed under `tag` and not expired.
+    pub(crate) fn open(secret: &SessionSecret, tag: &[u8], value: &str) -> Option<Self> {
+        use subtle::ConstantTimeEq as _;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let (body, sig) = value.split_once('.')?;
+        let sig = b64.decode(sig).ok()?;
+        if Self::mac(secret, tag, body).ct_eq(&sig[..]).unwrap_u8() == 0 {
+            return None;
+        }
+        let p: Self = serde_json::from_slice(&b64.decode(body).ok()?).ok()?;
+        (chrono::Utc::now().timestamp() < p.exp).then_some(p)
+    }
+}
+
 /// Column every session principal (tenant user, operator, admin user)
 /// stamps on logout; sessions issued at or before it are refused (#1855).
 #[cfg(any(feature = "admin", feature = "tenancy"))]

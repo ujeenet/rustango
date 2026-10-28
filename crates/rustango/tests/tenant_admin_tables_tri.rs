@@ -132,7 +132,11 @@ async fn assert_listed_tables_exist(router: &axum::Router, what: &str) -> Vec<St
 /// Registry tables stay out of a tenant admin, also where a schema-mode
 /// `search_path` would reach the registry's copy.
 fn assert_no_registry_tables(listed: &[String]) {
-    for t in ["rustango_translations", "rustango_admin_totp"] {
+    for t in [
+        "rustango_translations",
+        "rustango_admin_totp",
+        "rustango_operator_totp",
+    ] {
         assert!(!listed.iter().any(|l| l == t), "tenant admin lists {t}");
     }
 }
@@ -320,7 +324,7 @@ async fn bootstrap_previews_create_their_tables(backend: Backend) {
     #[allow(unused_mut)]
     let mut tables = vec!["rustango_audit_log", "rustango_translations"];
     #[cfg(feature = "totp")]
-    tables.push("rustango_admin_totp");
+    tables.extend(["rustango_admin_totp", "rustango_operator_totp"]);
     #[cfg(feature = "passkey")]
     tables.push("rustango_webauthn_credentials");
     for t in &tables {

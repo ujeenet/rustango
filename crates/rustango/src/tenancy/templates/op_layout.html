@@ -96,6 +96,7 @@ document.addEventListener('change',function(e){var s=e.target;if(s.matches&&s.ma
         {% if sso_console %}<a href="{{ console_prefix | default(value='') }}/sso-shared" class="{% if section == 'sso' %}active{% endif %}">Shared SSO</a>{% endif %}
         <a href="{{ console_prefix | default(value='') }}/audit" class="{% if section == 'audit' %}active{% endif %}">Audit log</a>
         <a href="{{ console_prefix | default(value='') }}/change-password" class="{% if section == 'change_password' %}active{% endif %}">Change password</a>
+        {% if totp_console %}<a href="{{ console_prefix | default(value='') }}/account/totp" class="{% if section == 'totp' %}active{% endif %}">Two-factor sign-in</a>{% endif %}
       </nav>
       <div class="who">Signed in as <strong>{{ operator_username }}</strong></div>
       <form class="logout" method="post" action="{{ console_prefix | default(value='') }}/logout">
