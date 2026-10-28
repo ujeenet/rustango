@@ -288,6 +288,18 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
+    /// UPDATE/DELETE carry no set operation or join; dropping one widens the write.
+    fn refuse_unwritable_shape(&self) -> Result<(), QueryError> {
+        let model = T::SCHEMA.name;
+        if !self.compound.is_empty() {
+            return Err(QueryError::SetOperationDml { model });
+        }
+        if !self.ad_hoc_joins.is_empty() || !self.subquery_joins.is_empty() {
+            return Err(QueryError::JoinDml { model });
+        }
+        Ok(())
+    }
+
     /// A queryset that matches zero rows. Handy as a
     /// safe base for conditional filters, such as
     /// `if !user.has_perm { qs = qs.none() }`.
@@ -2206,13 +2218,15 @@ impl<T: Model> QuerySet<T> {
     ///
     /// # Errors
     /// As [`QuerySet::compile`], plus [`QueryError::BoundedDmlUnsupported`]
-    /// when a limit or offset cannot be bounded and
-    /// [`QueryError::SetOperationDml`] on a set operation.
+    /// when a limit or offset cannot be bounded,
+    /// [`QueryError::SetOperationDml`] on a set operation and
+    /// [`QueryError::JoinDml`] on a `join`/`join_sub`/`join_lateral`.
     pub fn compile_delete(mut self) -> Result<DeleteQuery, QueryError> {
         // Fold global scopes into the WHERE, so a bulk delete honours
         // the same filters as a fetch. A `published_only` scope means
         // a wholesale delete still cannot reach unpublished rows.
         self.apply_global_scopes();
+        self.refuse_unwritable_shape()?;
         let model: &'static ModelSchema = T::SCHEMA;
         let where_clause = resolve_pending(model, self.pending)?;
         // `.none().delete()` must delete nothing. An `IS NULL` test on
@@ -2222,14 +2236,8 @@ impl<T: Model> QuerySet<T> {
         } else {
             where_clause
         };
-        let where_clause = bound_dml_where(
-            model,
-            where_clause,
-            self.order_by,
-            self.limit,
-            self.offset,
-            !self.compound.is_empty(),
-        )?;
+        let where_clause =
+            bound_dml_where(model, where_clause, self.order_by, self.limit, self.offset)?;
         Ok(DeleteQuery {
             model,
             where_clause,
@@ -2430,12 +2438,14 @@ impl<T: Model> UpdateBuilder<T> {
     /// unknown field, [`QueryError::TypeMismatch`] if any bound value's
     /// type doesn't match the field's declared type, and
     /// [`QueryError::BoundedDmlUnsupported`] if the queryset's limit or
-    /// offset cannot be bounded by primary key, or
-    /// [`QueryError::SetOperationDml`] on a set operation.
+    /// offset cannot be bounded by primary key,
+    /// [`QueryError::SetOperationDml`] on a set operation, or
+    /// [`QueryError::JoinDml`] on a `join`/`join_sub`/`join_lateral`.
     pub fn compile(mut self) -> Result<UpdateQuery, QueryError> {
         // As on the SELECT and DELETE paths: an `.update().set(...)`
         // must not escape the model's global scopes.
         self.qs.apply_global_scopes();
+        self.qs.refuse_unwritable_shape()?;
         let model: &'static ModelSchema = T::SCHEMA;
 
         let assignments = self
@@ -2462,7 +2472,6 @@ impl<T: Model> UpdateBuilder<T> {
             self.qs.order_by,
             self.qs.limit,
             self.qs.offset,
-            !self.qs.compound.is_empty(),
         )?;
 
         Ok(UpdateQuery {
@@ -3103,7 +3112,6 @@ fn never_match_clause(
 }
 
 /// Bound an UPDATE/DELETE: `<where> AND pk IN (SELECT pk … ORDER BY …, pk LIMIT … OFFSET …)`.
-/// A set operation is refused with or without a bound.
 /// The outer `<where>` stays so a row changed by a concurrent writer is not claimed.
 /// Without a limit or offset the order cannot change the row set, so it is left out.
 fn bound_dml_where(
@@ -3112,13 +3120,8 @@ fn bound_dml_where(
     order_by: Vec<PendingOrderItem>,
     limit: Option<i64>,
     offset: Option<i64>,
-    has_compound: bool,
 ) -> Result<WhereExpr, QueryError> {
     use crate::core::BoundedDmlReason as Why;
-    // UPDATE/DELETE has no set operation; dropping it widens the write.
-    if has_compound {
-        return Err(QueryError::SetOperationDml { model: model.name });
-    }
     if limit.is_none() && offset.is_none() {
         return Ok(where_clause);
     }

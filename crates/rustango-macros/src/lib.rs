@@ -3302,16 +3302,31 @@ fn inherent_impl_tokens(
     } else {
         quote!(self.delete_on(pool).await)
     };
-    let pool_to_bulk_insert_on = if audited_fields.is_some() {
+    // Past the bind cap one statement per chunk, all in one transaction.
+    let bulk_columns = fields.bulk_columns_all.len();
+    let one_statement = if audited_fields.is_some() {
+        quote!()
+    } else {
         quote! {
+            if rows.len() <= _per {
+                return Self::bulk_insert_on(rows, pool).await;
+            }
+        }
+    };
+    let pool_to_bulk_insert_on = |chunks: TokenStream2| {
+        quote! {
+            let _per = #root::sql::__macro_internals::bulk_insert_rows_per_statement(#bulk_columns);
+            #one_statement
             let mut _tx = pool.begin().await?;
-            Self::bulk_insert_on(rows, &mut *_tx).await?;
+            for _chunk in rows.#chunks(_per) {
+                Self::bulk_insert_on(_chunk, &mut *_tx).await?;
+            }
             _tx.commit().await?;
             ::core::result::Result::Ok(())
         }
-    } else {
-        quote!(Self::bulk_insert_on(rows, pool).await)
     };
+    let pool_to_bulk_insert_mut = pool_to_bulk_insert_on(quote!(chunks_mut));
+    let pool_to_bulk_insert_on = pool_to_bulk_insert_on(quote!(chunks));
     // Pre-existing bug surfaced by batch 22's first audited Auto<T>
     // PK test model: `upsert(&PgPool)` body called `self.upsert_on(pool)`
     // directly, but `upsert_on` for audited models takes
@@ -7612,7 +7627,8 @@ fn inherent_impl_tokens(
             .or(fields.first_auto_ident.as_ref())
             .expect("has_auto implies first_auto_ident is Some");
         quote! {
-            /// Bulk-insert `rows` in a single round-trip. Every row's
+            /// Bulk-insert `rows`: one statement, or one per chunk in a
+            /// transaction past the bind cap. Every row's
             /// `Auto<T>` PK fields must uniformly be `Auto::Unset`
             /// (sequence fills them in) or uniformly `Auto::Set(_)`
             /// (caller-supplied values). Mixed Set/Unset is rejected
@@ -7630,7 +7646,7 @@ fn inherent_impl_tokens(
                 rows: &mut [Self],
                 pool: &#root::sql::sqlx::PgPool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #pool_to_bulk_insert_on
+                #pool_to_bulk_insert_mut
             }
 
             /// Like [`Self::bulk_insert`] but accepts any sqlx executor.
@@ -7697,7 +7713,8 @@ fn inherent_impl_tokens(
         let cols_all = &fields.bulk_columns_all;
         let pushes_all = &fields.bulk_pushes_all;
         quote! {
-            /// Bulk-insert `rows` in a single round-trip. Every row's
+            /// Bulk-insert `rows`: one statement, or one per chunk in a
+            /// transaction past the bind cap. Every row's
             /// fields are written verbatim — there are no `Auto<T>`
             /// fields on this model.
             ///

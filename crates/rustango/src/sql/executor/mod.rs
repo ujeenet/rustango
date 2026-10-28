@@ -337,7 +337,8 @@ pub use page::Page;
 mod pg_on;
 #[cfg(feature = "postgres")]
 pub use pg_on::{
-    bulk_insert_on, delete_on, insert_on, insert_returning_on, select_rows_on, update_on,
+    bulk_insert_on, bulk_insert_rows_per_statement, delete_on, insert_on, insert_returning_on,
+    select_rows_on, update_on,
 };
 
 mod row_to_json;
@@ -2950,10 +2951,18 @@ where
             "QuerySet::iterator: chunk_size must be > 0; got {chunk_size}"
         );
         let query = self.compile()?;
+        // Chunks page within the queryset's own window.
+        let (limit, offset) = if query.compound.is_empty() {
+            (query.limit, query.offset)
+        } else {
+            (query.compound_limit, query.compound_offset)
+        };
+        let offset = offset.unwrap_or(0).max(0);
         Ok(ChunkedIter {
             query,
             chunk_size,
-            offset: 0,
+            offset,
+            end: limit.map(|n| offset.saturating_add(n.max(0))),
             exhausted: false,
             buffer: std::collections::VecDeque::new(),
             seen: 0,

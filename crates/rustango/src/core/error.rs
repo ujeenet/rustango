@@ -120,8 +120,8 @@ pub enum QueryError {
     /// `.join(...)` plus `col_filter`.
     #[error(
         "relation-spanning lookup `{key}` is only supported in \
-         filter()/exclude()/order_by() on a SELECT; for update/delete/\
-         aggregate add the join explicitly via `.join(...)`"
+         filter()/exclude()/order_by() on a SELECT; for an aggregate add \
+         the join via `.join(...)`, for update/delete use `where_in_subquery`"
     )]
     RelationSpanUnsupportedHere { key: String },
 
@@ -137,6 +137,14 @@ pub enum QueryError {
     /// the statement cannot carry the set operation, so it is refused (#2452).
     #[error("`{model}`: update()/delete() refused: the queryset has a set operation")]
     SetOperationDml { model: &'static str },
+
+    /// `update()`/`delete()` after `join`/`join_sub`/`join_lateral`: the
+    /// statement cannot carry the join, so it is refused, not widened.
+    #[error(
+        "`{model}`: update()/delete() refused: the queryset has a join; \
+         narrow it with `where_in_subquery` instead"
+    )]
+    JoinDml { model: &'static str },
 
     /// The value does not fit the lookup: `__in` without a list,
     /// `__isnull` without a bool, `__between` without exactly two

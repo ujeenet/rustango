@@ -368,6 +368,131 @@ async fn pg_bulk_insert_reads_back_a_default_uuid_key() {
     assert_eq!(rows[0].id.get().copied(), Some(want));
 }
 
+/// Seven columns: 10 000 rows bind 70 000 values, past PG's 65 535.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_wide")]
+#[rustango(app = "orm_dialect_tri")]
+pub struct Wide {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub a: i64,
+    pub b: i64,
+    pub c: i64,
+    pub d: i64,
+    pub e: i64,
+    pub f: i64,
+}
+
+/// As [`Wide`], with no `Auto` key.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_wide_fixed")]
+#[rustango(app = "orm_dialect_tri")]
+pub struct WideFixed {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub a: i64,
+    pub b: i64,
+    pub c: i64,
+    pub d: i64,
+    pub e: i64,
+    pub f: i64,
+}
+
+/// The PG `bulk_insert` chunks past the bind cap and reads keys back in order.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn pg_bulk_insert_chunks_past_the_bind_cap() {
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    fresh_table::<Wide>(&pool).await;
+    fresh_table::<WideFixed>(&pool).await;
+    let pg = pool.as_postgres().expect("pg");
+    let mut rows: Vec<Wide> = (0..10_000_i64)
+        .map(|n| Wide {
+            id: Auto::default(),
+            a: n,
+            b: n,
+            c: n,
+            d: n,
+            e: n,
+            f: n,
+        })
+        .collect();
+    Wide::bulk_insert(&mut rows, pg)
+        .await
+        .expect("chunked bulk");
+    let ids: Vec<i64> = rows
+        .iter()
+        .map(|r| *r.id.get().expect("read back"))
+        .collect();
+    assert!(ids.windows(2).all(|w| w[0] < w[1]), "keys in input order");
+    let stored: Vec<Wide> = Wide::objects()
+        .order_by(&[("id", false)])
+        .fetch(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 10_000);
+    assert_eq!(stored.last().map(|r| r.a), Some(9_999));
+    let fixed: Vec<WideFixed> = (0..10_000_i64)
+        .map(|n| WideFixed {
+            id: n,
+            a: n,
+            b: n,
+            c: n,
+            d: n,
+            e: n,
+            f: n,
+        })
+        .collect();
+    WideFixed::bulk_insert(&fixed, pg)
+        .await
+        .expect("chunked bulk");
+    assert_eq!(WideFixed::objects().count(&pool).await.unwrap(), 10_000);
+}
+
+/// Every row `qs.iterator(2)` yields.
+async fn drain(pool: &Pool, qs: rustango::query::QuerySet<Post>) -> Vec<String> {
+    let mut it = qs.iterator(2).expect("compile");
+    let mut out = Vec::new();
+    while let Some(p) = it.next_row(pool).await.expect("chunk") {
+        out.push(p.slug);
+    }
+    out
+}
+
+/// `iterator` pages inside the queryset's own limit/offset, and a set
+/// operation's chunk window lands on the merged result.
+async fn iterator_keeps_the_queryset_window(pool: &Pool) {
+    for n in 0..10 {
+        post(&format!("p{n:02}"), None)
+            .insert_pool(pool)
+            .await
+            .expect("seed");
+    }
+    let by_id = || Post::objects().order_by(&[("id", false)]);
+    assert_eq!(
+        drain(pool, by_id().limit(5).offset(2)).await,
+        ["p02", "p03", "p04", "p05", "p06"]
+    );
+    let union = || {
+        Post::objects()
+            .filter("slug__lt", "p03")
+            .union(Post::objects().filter("slug__gt", "p06"))
+            .order_by(&[("slug", false)])
+    };
+    assert_eq!(
+        drain(pool, union()).await,
+        ["p00", "p01", "p02", "p07", "p08", "p09"]
+    );
+    assert_eq!(
+        drain(pool, union().limit(3).offset(1)).await,
+        ["p01", "p02", "p07"]
+    );
+}
+
 /// An empty `And` is TRUE wherever it nests.
 async fn nested_empty_and_is_true(pool: &Pool) {
     seed(pool, &[("a", "apple"), ("b", "banana")]).await;
@@ -1244,6 +1369,7 @@ async fn decimal_compares_with_expressions(pool: &Pool) {
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        iterator_keeps_the_queryset_window,
         upsert_never_updates_a_row_of_another_unique_key,
         string_agg_is_not_capped,
         now_and_casts_keep_fractional_seconds,
