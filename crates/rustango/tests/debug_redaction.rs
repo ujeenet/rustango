@@ -3,7 +3,7 @@
 
 const SECRET: &str = "Hunter2-Debug-Leak-q7Zx";
 
-fn assert_hidden(what: &str, debug: String) {
+fn assert_hidden(what: &str, debug: &str) {
     assert!(!debug.contains(SECRET), "{what} leaks: {debug}");
     assert!(debug.contains("[redacted]"), "{what}: {debug}");
 }
@@ -13,7 +13,7 @@ fn database_url_builder_hides_the_password() {
     let b = rustango::env::DatabaseUrlBuilder::new(rustango::env::DbDriver::Postgres)
         .host("db")
         .password(SECRET);
-    assert_hidden("DatabaseUrlBuilder", format!("{b:?}"));
+    assert_hidden("DatabaseUrlBuilder", &format!("{b:?}"));
 }
 
 #[cfg(feature = "casts")]
@@ -21,7 +21,7 @@ fn database_url_builder_hides_the_password() {
 fn an_encrypted_cast_hides_its_plaintext() {
     use rustango::casts::{Cast, EncryptedString};
     let c: Cast<EncryptedString> = Cast::new(SECRET.to_owned());
-    assert_hidden("Cast<EncryptedString>", format!("{c:?}"));
+    assert_hidden("Cast<EncryptedString>", &format!("{c:?}"));
 }
 
 #[cfg(feature = "admin")]
@@ -39,7 +39,7 @@ fn admin_user_hides_its_hash() {
         sessions_revoked_at: None,
     };
     let debug = format!("{u:?}");
-    assert_hidden("AdminUser", debug.clone());
+    assert_hidden("AdminUser", &debug);
     assert!(debug.contains("alice"), "{debug}");
 }
 
@@ -55,5 +55,5 @@ fn operator_hides_its_hash() {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    assert_hidden("Operator", format!("{op:?}"));
+    assert_hidden("Operator", &format!("{op:?}"));
 }

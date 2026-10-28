@@ -1685,7 +1685,7 @@ fn field_type_label(ty: crate::core::FieldType) -> &'static str {
 /// Substitute the `{pk}` placeholder in a `success_url` with a
 /// known PK string. Used by `UpdateView` / `DeleteView` where the
 /// PK is already in scope from the URL path — no row read
-/// required. The CreateView equivalent is [`fill_success_url`],
+/// required. The `CreateView` equivalent is [`fill_success_url`],
 /// which reads the saved row.
 ///
 /// No-op when the placeholder isn't present.
@@ -1698,7 +1698,7 @@ fn substitute_pk(template: &str, pk: &str) -> String {
 }
 
 /// `template` filled from the saved row: `{pk}` and the PK as written (not
-/// MySQL's `LAST_INSERT_ID()` for a client-set one, #1894), every other
+/// `MySQL`'s `LAST_INSERT_ID()` for a client-set one), every other
 /// field read back by PK, so each type decodes as its backend stores it.
 async fn fill_success_url(
     pool: &Pool,
@@ -1783,7 +1783,7 @@ fn parse_success_url_placeholders(template: &str) -> Vec<&str> {
     out
 }
 
-/// The field each `{name}` of a CreateView `success_url` reads, `{pk}`
+/// The field each `{name}` of a `CreateView` `success_url` reads, `{pk}`
 /// resolved. Checked before the INSERT, so a bad template never follows a
 /// committed write.
 fn success_url_fields<'t>(
