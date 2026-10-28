@@ -11,6 +11,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     ports:
+      # Loopback only: the password above is public.
       - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rustango -d platform_commerce_dev"]
@@ -42,9 +43,12 @@ services:
     environment:
       CARGO_TARGET_DIR: /app/target
       CARGO_INCREMENTAL: "1"
+      # All interfaces inside the container, so the port mapping reaches it.
+      RUSTANGO_BIND: 0.0.0.0:8080
     command: bash -c "cargo watch -x run"
     ports:
-      - "8080:8080"
+      # Loopback only: a dev server is not for the network.
+      - "127.0.0.1:8080:8080"
 
 volumes:
   postgres-data:

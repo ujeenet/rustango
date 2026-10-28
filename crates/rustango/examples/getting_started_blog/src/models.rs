@@ -4,16 +4,15 @@
 //! macro populates the `inventory` registry that
 //! `rustango::admin::router(pool)` walks.
 
-use rustango::sql::Auto;
-use rustango::Model;
+// The derive plus the ORM traits, so `Item::objects().count(&pool)` resolves.
+use rustango::prelude::*;
 
+// `#[derive(Model)]` registers this struct at *runtime* through `inventory`,
+// which rustc cannot see — so fields only the framework reads look dead to it.
+// Delete this line once your own code reads them.
+#[allow(dead_code)]
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "item", display = "name")]
-// Schema columns exist for the table definition and the admin; this
-// tutorial's own code never reads them back, which is what `dead_code`
-// measures. Allowed rather than removed — dropping them would gut the
-// example the docs walk through.
-#[allow(dead_code)]
 pub struct Item {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
