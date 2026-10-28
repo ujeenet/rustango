@@ -297,3 +297,67 @@ async fn another_bound_tenant_is_refused() {
         StatusCode::FORBIDDEN
     );
 }
+
+async fn call_full(
+    app: &Router,
+    host: &str,
+    basic: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let mut req = Request::builder().uri("/whoami").header(HOST, host);
+    if let Some(b) = basic {
+        req = req.header(header::AUTHORIZATION, format!("Basic {}", b64(b)));
+    }
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let json = serde_json::from_slice(&body).unwrap_or_else(|_| {
+        panic!(
+            "{status}: body is not JSON: {}",
+            String::from_utf8_lossy(&body)
+        )
+    });
+    (status, json)
+}
+
+/// A failing lookup is a server error, not a 401 carrying the driver text.
+#[tokio::test]
+async fn a_database_error_is_a_503_without_driver_text() {
+    let (app, template) = build_app("dberr");
+    // The tenant database exists but has no users table, so the lookup fails.
+    let _gamma = rustango::sql::Pool::connect(&template.replace("{slug}", "gamma"))
+        .await
+        .expect("tenant db");
+    let (status, body) = call_full(&app, "gamma.localhost", Some("ann:s3cret")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"], "service_unavailable");
+    let text = body.to_string();
+    assert!(
+        !text.contains("rustango_users") && !text.contains("no such table"),
+        "{text}"
+    );
+}
+
+/// The 401 and 403 from the auth layer use the API error JSON shape.
+#[tokio::test]
+async fn auth_layer_refusals_are_json() {
+    let (app, template) = build_app("json");
+    let _alpha = tenant_db(
+        &template.replace("{slug}", "alpha"),
+        Some(("ann", "s3cret")),
+    )
+    .await;
+    let (status, body) = call_full(&app, "alpha.localhost", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "unauthorized");
+
+    let bound = app.layer(axum::Extension(rustango::tenancy::TenantSlug(
+        "beta".into(),
+    )));
+    let (status, body) = call_full(&bound, "alpha.localhost", Some("ann:s3cret")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "forbidden");
+}

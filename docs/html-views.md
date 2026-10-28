@@ -304,7 +304,7 @@ SQL `NULL` rendered as `null`. Use `.context_object_name("posts" / "post")` to
 add a friendlier alias alongside `object_list` / `object`.
 
 Each entry in `form.fields` carries `name`, `column`, `ty`, `required`,
-`max_length` and `value`. `form.errors` is keyed by field name and holds one
+`max_length` and `value`. A checkbox and a `blank` string are never `required`. `form.errors` is keyed by field name and holds one
 message per field, not a list. Every view also stamps `csrf_token` and
 `csrf_input`, and every view router rejects a POST without a matching token.
 
@@ -342,7 +342,8 @@ It answers `302 Found`; `.permanent()` makes it `301`.
 **FormView** — a form with no model. `FormView::<ContactForm>::for_form(handler)`
 renders a `#[derive(Form)]` form on GET (template `form.html` by default). On POST
 it validates and calls your async handler; `Ok(())` redirects with `303`, and
-`Err(msg)` re-renders the form. Its context is `errors` (a list per field) and
+`Err(msg)` re-renders the form. Invalid input re-renders it with a `422`. Its
+context is `errors` (a list per field; form-wide errors under `__all__`) and
 `values`. Like every view here, `.success_url` defaults to `/`.
 
 ---

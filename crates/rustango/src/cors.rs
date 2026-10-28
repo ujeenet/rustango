@@ -45,6 +45,26 @@ use axum::http::{Method, Request, Response, StatusCode};
 use axum::middleware::Next;
 use axum::Router;
 
+/// Request headers the framework reads: bodies, auth, HMAC, idempotency, preconditions.
+#[cfg(feature = "config")]
+const FRAMEWORK_REQUEST_HEADERS: [&str; 6] = [
+    "Content-Type",
+    "Authorization",
+    "X-Date",
+    "Idempotency-Key",
+    "If-Match",
+    "If-None-Match",
+];
+
+/// Response headers the framework sets that a browser client needs to read.
+const FRAMEWORK_RESPONSE_HEADERS: [&str; 5] = [
+    "Retry-After",
+    "Idempotent-Replayed",
+    "ETag",
+    "Location",
+    "Link",
+];
+
 /// Origin matching policy.
 #[derive(Clone, Debug)]
 pub enum AllowOrigin {
@@ -105,7 +125,7 @@ impl CorsLayer {
                 "QUERY".into(),
             ],
             allow_headers: vec!["*".into()],
-            expose_headers: Vec::new(),
+            expose_headers: FRAMEWORK_RESPONSE_HEADERS.map(Into::into).to_vec(),
             allow_credentials: false,
             max_age: Some(Duration::from_secs(3600)),
         }
@@ -176,7 +196,8 @@ impl CorsLayer {
                 .allow_methods([
                     "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "QUERY",
                 ])
-                .allow_headers(["Content-Type", "Authorization"])
+                .allow_headers(FRAMEWORK_REQUEST_HEADERS)
+                .expose_headers(FRAMEWORK_RESPONSE_HEADERS)
                 .max_age(Duration::from_secs(3600)),
         )
     }
@@ -602,5 +623,36 @@ mod tests {
         assert!(layer
             .resolve_origin(Some("https://other.example.com"))
             .is_none());
+    }
+
+    /// A browser client can send the idempotency and HMAC headers, and
+    /// read the headers the framework answers with.
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_covers_the_framework_headers() {
+        for origin in ["https://app.example.com", "*"] {
+            let mut s = crate::config::SecuritySettings::default();
+            s.cors_allowed_origins = vec![origin.into()];
+            let layer = CorsLayer::from_settings(&s).expect("Some");
+            let mut resp = Response::new(Body::empty());
+            attach_cors_headers(&layer, Some("https://app.example.com"), None, &mut resp);
+            let header = |name| {
+                resp.headers()
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+            };
+            let exposed = header(ACCESS_CONTROL_EXPOSE_HEADERS);
+            for h in ["retry-after", "idempotent-replayed", "etag", "location"] {
+                assert!(exposed.contains(h), "{origin}: {h} not exposed: {exposed}");
+            }
+            if origin != "*" {
+                let allowed = header(ACCESS_CONTROL_ALLOW_HEADERS);
+                for h in ["idempotency-key", "if-match", "x-date", "authorization"] {
+                    assert!(allowed.contains(h), "{h} not allowed: {allowed}");
+                }
+            }
+        }
     }
 }

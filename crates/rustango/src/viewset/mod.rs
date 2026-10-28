@@ -330,6 +330,9 @@ trait SerializerBridge: Send + Sync {
 
     /// The model fields the serializer renders; the `?ordering=` fallback.
     fn readable_model_fields(&self) -> &'static [&'static str];
+
+    /// The JSON keys of [`Self::readable_model_fields`], in order.
+    fn readable_field_names(&self) -> &'static [&'static str];
 }
 
 /// Zero-sized carrier that pins a concrete serializer type `S`, so
@@ -405,6 +408,10 @@ where
 
     fn readable_model_fields(&self) -> &'static [&'static str] {
         S::readable_source_fields()
+    }
+
+    fn readable_field_names(&self) -> &'static [&'static str] {
+        S::readable_fields()
     }
 }
 
@@ -742,9 +749,15 @@ impl ViewSet {
     /// #[viewset(model = Note)] // no `fields`
     /// pub struct NoteViewSet;
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// If a name in `fields` is not a field of the model. The same holds
+    /// for `filter_fields`, `search_fields`, `ordering_fields`, `ordering`
+    /// and `related_filter`.
     #[must_use]
     pub fn for_model(schema: &'static ModelSchema, fields: &[&str]) -> Self {
-        Self {
+        let vs = Self {
             schema,
             fields: fields.iter().map(|&s| s.to_owned()).collect(),
             filter_fields: Vec::new(),
@@ -765,7 +778,9 @@ impl ViewSet {
             max_bulk_create: 1000,
             admin_add_hooks: false,
             related_filters: Vec::new(),
-        }
+        };
+        vs.assert_known_names("fields", fields.iter().copied(), false);
+        vs
     }
 
     /// Render list / retrieve / create responses through `S`, a
@@ -866,6 +881,30 @@ impl ViewSet {
         }
     }
 
+    /// Refuse a name the model lacks: a typo would silently drop a field
+    /// or a filter. `columns` also accepts column names (`ordering`).
+    fn assert_known_names<'a>(
+        &self,
+        method: &str,
+        names: impl IntoIterator<Item = &'a str>,
+        columns: bool,
+    ) {
+        let schema = self.schema;
+        let unknown: Vec<&str> = names
+            .into_iter()
+            .filter(|n| {
+                schema.field(n).is_none() && !(columns && schema.field_by_column(n).is_some())
+            })
+            .collect();
+        if !unknown.is_empty() {
+            let known: Vec<&str> = schema.fields.iter().map(|f| f.name).collect();
+            panic!(
+                "ViewSet {method}: `{}` has no field {unknown:?}. Fields on this model: {known:?}",
+                schema.table
+            );
+        }
+    }
+
     /// The field list must include the cursor column and the primary key.
     ///
     /// The `next` token is built from the *rendered* row, so a
@@ -941,12 +980,14 @@ impl ViewSet {
 
     /// Fields that can be filtered via query params (`?field=value`).
     pub fn filter_fields(mut self, fields: &[&str]) -> Self {
+        self.assert_known_names("filter_fields", fields.iter().copied(), false);
         self.filter_fields = fields.iter().map(|&s| s.to_owned()).collect();
         self
     }
 
     /// Fields searched by the `?search=` query param.
     pub fn search_fields(mut self, fields: &[&str]) -> Self {
+        self.assert_known_names("search_fields", fields.iter().copied(), false);
         self.search_fields = fields.iter().map(|&s| s.to_owned()).collect();
         self
     }
@@ -957,6 +998,7 @@ impl ViewSet {
     /// response renders; none when it renders none (#1996). An empty
     /// slice makes nothing sortable.
     pub fn ordering_fields(mut self, fields: &[&str]) -> Self {
+        self.assert_known_names("ordering_fields", fields.iter().copied(), false);
         self.ordering_fields = Some(fields.iter().map(|&s| s.to_owned()).collect());
         self
     }
@@ -1014,6 +1056,7 @@ impl ViewSet {
     /// The target's global scopes always apply. Another row is a `422`.
     #[must_use]
     pub fn related_filter(mut self, field: &str, backend: impl ViewSetFilter) -> Self {
+        self.assert_known_names("related_filter", [field], false);
         self.related_filters
             .push((field.to_owned(), std::sync::Arc::new(backend)));
         self
@@ -1022,6 +1065,7 @@ impl ViewSet {
     /// Default ordering for list responses. `(field, true)` = descending.
     /// Unset, the model's `default_order` applies; the PK always breaks ties.
     pub fn ordering(mut self, ordering: &[(&str, bool)]) -> Self {
+        self.assert_known_names("ordering", ordering.iter().map(|&(f, _)| f), true);
         self.default_ordering = ordering.iter().map(|&(f, d)| (f.to_owned(), d)).collect();
         self
     }
@@ -1194,6 +1238,7 @@ impl ViewSet {
     }
 
     fn router_with_source(self, prefix: &str, pool_source: PoolSource) -> Router {
+        self.assert_cursor_is_rendered();
         let open = self.open_write_actions();
         if !open.is_empty() {
             tracing::warn!(
@@ -1510,6 +1555,40 @@ impl ViewSet {
             fields.retain(|f| readable.contains(&f.name));
         }
         fields
+    }
+
+    /// The JSON key a rendered row carries `model_field` under. `None`
+    /// when a derived serializer does not render it.
+    fn rendered_key<'a>(&self, model_field: &'a str) -> Option<&'a str> {
+        let Some(bridge) = &self.serializer else {
+            return Some(model_field);
+        };
+        let models = bridge.readable_model_fields();
+        if models.is_empty() {
+            // A hand-written serializer lists nothing; trust the model name.
+            return Some(model_field);
+        }
+        models
+            .iter()
+            .zip(bridge.readable_field_names())
+            .find(|(m, _)| **m == model_field)
+            .map(|(_, key)| *key)
+    }
+
+    /// A serializer must render the cursor column and the primary key.
+    fn assert_cursor_is_rendered(&self) {
+        let PaginationStyle::Cursor { field, .. } = self.pagination else {
+            return;
+        };
+        let pk = self.schema.primary_key().map(|f| f.name);
+        for name in std::iter::once(field).chain(pk) {
+            assert!(
+                self.rendered_key(name).is_some(),
+                "cursor_pagination(\"{field}\"): the serializer does not render `{}.{name}`, \
+                 so no `next` token can be built. Add it to the serializer.",
+                self.schema.table
+            );
+        }
     }
 
     /// The names `?ordering=` accepts: `ordering_fields`, else the
@@ -3157,7 +3236,11 @@ async fn handle_list_cursor(
         // value-only token would start skipping tied rows again — so
         // report it, like a missing cursor column.
         let pk_part = match tiebreak {
-            Some(pk) => match cursor_value_of(last, pk.name) {
+            Some(pk) => match state
+                .vs
+                .rendered_key(pk.name)
+                .and_then(|k| cursor_value_of(last, k))
+            {
                 Some(v) => Some(v),
                 None => {
                     return json_error(
@@ -3175,9 +3258,13 @@ async fn handle_list_cursor(
             },
             None => None,
         };
-        match cursor_value_of(last, cursor_schema.name) {
+        let key = state
+            .vs
+            .rendered_key(cursor_schema.name)
+            .unwrap_or(cursor_schema.name);
+        match cursor_value_of(last, key) {
             Some(v) => Some(encode_cursor(&v, pk_part.as_deref())),
-            None if last.get(cursor_schema.name).is_some_and(Value::is_null) => {
+            None if last.get(key).is_some_and(Value::is_null) => {
                 return json_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &format!(
@@ -5342,6 +5429,78 @@ mod default_order_tests {
         )));
         let sql = crate::sql::Sqlite.compile_select(&q).unwrap().sql;
         assert!(sql.ends_with(r#"ORDER BY "title" DESC, "id""#), "{sql}");
+    }
+}
+
+/// A typo in a name list panics when the ViewSet is built, not silently dropped.
+#[cfg(test)]
+mod unknown_name_tests {
+    use super::*;
+    use crate::core::{FieldSchema, FieldType};
+
+    static FIELDS: &[FieldSchema] = &[
+        FieldSchema {
+            primary_key: true,
+            ..FieldSchema::new("id", "id", FieldType::I64)
+        },
+        FieldSchema::new("title", "title_col", FieldType::String),
+    ];
+
+    fn vs() -> ViewSet {
+        let mut schema = ModelSchema::new("vs_names", "vs_names");
+        schema.fields = FIELDS;
+        ViewSet::for_model(Box::leak(Box::new(schema)), &["id", "title"])
+    }
+
+    /// The control: known names, and a column name in `ordering`.
+    #[test]
+    fn known_names_build() {
+        let _ = vs()
+            .filter_fields(&["title"])
+            .search_fields(&["title"])
+            .ordering_fields(&["id"])
+            .ordering(&[("title_col", true)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "ViewSet fields: `vs_names` has no field [\"titel\"]")]
+    fn an_unknown_field_panics() {
+        let mut schema = ModelSchema::new("vs_names", "vs_names");
+        schema.fields = FIELDS;
+        let _ = ViewSet::for_model(Box::leak(Box::new(schema)), &["id", "titel"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "ViewSet filter_fields: `vs_names` has no field [\"statsu\"]")]
+    fn an_unknown_filter_field_panics() {
+        let _ = vs().filter_fields(&["statsu"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "ViewSet search_fields")]
+    fn an_unknown_search_field_panics() {
+        let _ = vs().search_fields(&["body"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "ViewSet ordering_fields")]
+    fn an_unknown_ordering_field_panics() {
+        let _ = vs().ordering_fields(&["created"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "ViewSet ordering")]
+    fn an_unknown_default_ordering_panics() {
+        let _ = vs().ordering(&[("created", true)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "ViewSet related_filter")]
+    fn an_unknown_related_filter_panics() {
+        let _ = vs().related_filter(
+            "author",
+            |_: &HashMap<String, String>, _: &'static ModelSchema| Vec::new(),
+        );
     }
 }
 

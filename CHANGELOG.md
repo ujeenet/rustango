@@ -13,6 +13,20 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The bare admin can turn TOTP off with a current code (`/account/totp/disable`); enrolling, turning off and failed codes write audit rows.
 - Bare-admin change-password refuses the current password and no longer overwrites a change made during the check.
 
+### Fixed — REST API and template views
+
+- A ViewSet panics when built with a name its model lacks in `fields`, `filter_fields`, `search_fields`, `ordering_fields`, `ordering` or `related_filter`, instead of dropping it.
+- `require_auth` answers a failed credential lookup with a JSON `503` and no driver text; its 401/403 bodies use the API error JSON shape.
+- The OpenAPI docs declare framework API keys as `Authorization: Bearer`, not `X-API-Key`.
+- ViewSet OpenAPI lists the DELETE `409`; ViewSet and `Serializer` schemas carry `enum`, `maxLength`, `minimum` and `maximum`.
+- Cursor pagination reads the cursor under a serializer's renamed key; a serializer that drops it panics at mount.
+- `CorsLayer::from_settings` allows `Idempotency-Key`, `If-Match`, `If-None-Match` and `X-Date`, and exposes `Retry-After`, `Idempotent-Replayed`, `ETag`, `Location` and `Link` (also on `permissive()`).
+- `LinkHeaderBuilder` merges a base URL's query instead of adding a second `?`.
+- UpdateView re-renders a refused form with `object` and `pk`, and prefills inputs in the shape they accept.
+- DetailView and TemplateView stamp `csrf_token` / `csrf_input`; tenant ListView stamps `page_marks`.
+- FormView keeps form-wide errors under `__all__` and answers an invalid form with `422`.
+- Create/UpdateView mark neither a bool checkbox nor a `blank` string `required`, and accept an empty `blank` string.
+
 ## [0.61.9] — 2026-10-28
 
 ### Fixed — ORM and migrations

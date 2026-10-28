@@ -154,6 +154,13 @@ untouched.
 
 Bare-admin audit rows now carry `user:<id>` instead of `system`. Single-database `migrate` and `runserver` now fire `pre_migrate` / `post_migrate` with `tenant = None`; a receiver that assumed a tenant run must check. `runserver` gives up after 300 s waiting for another run's migrate lock; raise `[server] migrate_lock_timeout_secs`, or set `[server] migrate_on_boot = false` and run `migrate` as a deploy step. `ServerSettings` has two new fields, so a struct literal needs `..Default::default()`. `set-admin-active`, `reset-admin-totp` and `reset-operator-totp` are now built-in verbs, so a command registered under one of those names is refused. The bare change-password form refuses the current password as the new one.
 
+### REST API and template views
+
+- `ViewSet::for_model`, `filter_fields`, `search_fields`, `ordering_fields`, `ordering` and `related_filter` panic on a name the model lacks; `#[derive(ViewSet)]` hits it at `router()`. Fix the typo the message names.
+- Cursor pagination with a `#[derive(Serializer)]` that does not render the cursor field or the primary key panics at mount, where it used to 500 per request.
+- `require_auth` / `require_perm` bodies are JSON (`{"error","message","status"}`) instead of plain text, and a database error during the credential lookup is a `503`, not a `401`.
+- `FormView` answers invalid input with `422` (was `200`); a bool checkbox and a `blank` string field have `required: false` in `form.fields`.
+
 ---
 
 ## 0.61.9

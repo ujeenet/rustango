@@ -65,6 +65,9 @@ pub mod csrf;
 /// HTTP request payload keyed `<prefix>-<N>-<field>`.
 pub mod formset;
 
+#[cfg(any(feature = "admin", feature = "template_views"))]
+pub(crate) mod input_value;
+
 /// Reusable declarative field-constraint validators (`max_length` /
 /// `min_length` / `min` / `max` / `choices`), shared by the serializer
 /// write path. Messages match the admin `DynamicForm`.
@@ -1411,7 +1414,7 @@ impl DynamicForm {
 }
 
 /// A Bool form value: ticked, unticked, or `None` for anything else.
-fn checkbox(raw: &str) -> Option<bool> {
+pub(crate) fn checkbox(raw: &str) -> Option<bool> {
     match raw.to_ascii_lowercase().as_str() {
         "true" | "1" | "on" | "yes" => Some(true),
         "" | "false" | "0" | "off" | "no" => Some(false),

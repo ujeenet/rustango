@@ -688,6 +688,46 @@ mod declarative_validators {
         assert!(DvScoreSer { score: -0.5 }.validate().is_err());
         assert!(DvScoreSer { score: 99.5 }.validate().is_ok());
     }
+
+    #[derive(rustango::Model, Clone)]
+    #[rustango(table = "dv_post")]
+    pub struct DvPost {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 16, choices = "draft:Draft, live:Live")]
+        pub status: String,
+        #[rustango(max_length = 16, choices = "a, b")]
+        pub tag: Option<String>,
+    }
+
+    #[derive(Serializer, serde::Deserialize, Default)]
+    #[serializer(model = DvPost)]
+    struct DvPostSer {
+        pub status: String,
+        pub tag: Option<String>,
+    }
+
+    /// The schema shows the limits `validate()` enforces.
+    #[cfg(feature = "openapi")]
+    #[test]
+    fn the_openapi_schema_carries_the_limits() {
+        use rustango::openapi::OpenApiSchema as _;
+        let v = serde_json::to_value(DvWidgetSer::openapi_schema()).unwrap();
+        assert_eq!(v["properties"]["code"]["maxLength"], 5, "{v}");
+        assert_eq!(v["properties"]["level"]["minimum"], 0.0, "{v}");
+        assert_eq!(v["properties"]["level"]["maximum"], 10.0, "{v}");
+        let v = serde_json::to_value(DvPostSer::openapi_schema()).unwrap();
+        assert_eq!(
+            v["properties"]["status"]["enum"],
+            serde_json::json!(["draft", "live"]),
+            "{v}"
+        );
+        assert_eq!(
+            v["properties"]["tag"]["enum"],
+            serde_json::json!(["a", "b", null]),
+            "{v}"
+        );
+    }
 }
 
 // ------------------------------------------------------------------ Raw idents (#1937)
