@@ -53,7 +53,7 @@ pub use make::{
     make_migrations, make_migrations_for_app, make_migrations_from, make_migrations_system,
 };
 #[cfg(feature = "postgres")]
-pub use manage::{append_data_op, make_data_migration};
+pub use manage::{append_data_op, make_data_migration, make_data_migration_in_scope};
 pub use progress::{MigrationEvent, MigrationObserver, Outcome};
 pub use rebuild::TableRebuild;
 pub use runner::migrate_dry_run_pool_with_ledger;

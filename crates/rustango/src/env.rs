@@ -378,7 +378,7 @@ impl DbDriver {
 ///     .build();
 /// assert_eq!(url, "postgres://svc:p%40ss%2Fword@db.internal:5432/app");
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DatabaseUrlBuilder {
     driver: DbDriver,
     host: Option<String>,
@@ -388,6 +388,8 @@ pub struct DatabaseUrlBuilder {
     database: Option<String>,
     params: Option<String>,
 }
+
+redacted_debug!(DatabaseUrlBuilder { driver, host, port, user, database, params; password });
 
 impl DatabaseUrlBuilder {
     #[must_use]

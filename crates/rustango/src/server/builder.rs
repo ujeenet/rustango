@@ -795,7 +795,6 @@ impl<DB: Database> Builder<DB> {
         // Audit M2 — prod tier requires a valid RUSTANGO_SESSION_SECRET
         // and fails closed; dev/staging keep the disk-persisted keys.
         let tier = crate::session::tier_from_env();
-        crate::aead::use_dev_key_file_for_env();
         let session_secret_for_tenant = crate::session::load_session_secret_for_tier(
             &tier,
             std::path::Path::new(crate::session::TENANT_SESSION_KEY_PATH),

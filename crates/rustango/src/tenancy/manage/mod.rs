@@ -1107,11 +1107,12 @@ fn secret_key_audit(
         KeyStatus::Short => out.warnings.push(
             "RUSTANGO_SECRET_KEY is shorter than 32 bytes — sealed secrets use a weak key".into(),
         ),
-        KeyStatus::DevFile => out.warnings.push(format!(
-            "RUSTANGO_SECRET_KEY is unset — sealed secrets use the dev key file `{}`, which a \
-             redeploy loses; set the env var (`openssl rand -base64 48`) and back it up",
-            crate::aead::DEV_KEY_PATH
-        )),
+        KeyStatus::DevFile => out.warnings.push(
+            "RUSTANGO_SECRET_KEY is unset — sealed secrets use the dev key file \
+             `var/.rustango_secret.key`, which a redeploy loses; set the env var \
+             (`openssl rand -base64 48`) and back it up"
+                .into(),
+        ),
         KeyStatus::Ok => out
             .info
             .push("RUSTANGO_SECRET_KEY is set for sealed secrets".into()),

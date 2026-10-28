@@ -4,6 +4,18 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — migrations, dev key, uploads, views and leaks
+
+- `makemigrations` no longer turns one M2M swapped for another between the same models into a junction rename that moves the old rows to the new relation; it drops and creates, and warns.
+- `add-data-op` chains onto its own scope's last file and snapshot, and takes `--scope`.
+- With no `RUSTANGO_SECRET_KEY` on dev and test, every binary (workers, own bins, tests) uses the saved dev key, found from the working directory up to the workspace root.
+- Uploads: a dotfile like `.html` or `.svg` counts as that extension, so the script-type block applies.
+- CreateView reads `success_url` placeholders from the saved row on every backend, and never answers 500 after the row is saved.
+- A JSON string for a Json field stays a string on the serializer ViewSet path and in `ModelFormFor::from_json`.
+- A `blank` String field with `choices` or `validators` accepts `""`.
+- `Debug` hides password and key hashes, decrypted SSO client secrets and the `DatabaseUrlBuilder` password.
+- The admin change-password page and the OAuth2 hook 502 log the error and show a generic message.
+
 ### Fixed — new projects: scaffolder, examples, getting started
 
 - With no `RUSTANGO_BIND` or `[server] bind`, `Cli` binds `127.0.0.1:8080` off the prod and staging tiers, so an api project no longer listens on every interface in dev.
@@ -36,7 +48,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `update()`/`delete()` after `join`, `join_sub` or `join_lateral` are refused with `QueryError::JoinDml`; the join was dropped and the write hit every row.
 - Undoing a migration drops the tables it created child first, so MySQL no longer stops half way on a foreign key.
 - `makemigrations --empty` chains onto its own scope's last file (`--scope` picks it) and copies its renamed shape.
-- A renamed M2M `through` becomes a `RenameTable` that keeps the rows, and a hand-written junction `RenameTable` reaches the snapshot.
+- A hand-written junction `RenameTable` reaches the snapshot.
 - Undo reads the parent's snapshot with its hand-written renames, as `makemigrations` does.
 - `migrate --squash` is refused while the models hold changes no migration has yet.
 - The derive's PG `bulk_insert` splits rows past the bind cap into chunks inside one transaction.

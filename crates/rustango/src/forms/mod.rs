@@ -1656,9 +1656,8 @@ impl<T: crate::core::Model> ModelFormFor<T> {
     /// A missing key or `null` is absent; `null` on a NOT NULL Bool is an error. Strings pass through
     /// directly; numbers/bools/Arrays/objects get JSON-stringified
     /// then parsed by `parse_form_value` via the field's declared
-    /// type — so an i64 field accepts both `42` and `"42"`, and a
-    /// JSON field accepts an inline object that gets re-stringified
-    /// and re-parsed.
+    /// type — so an i64 field accepts both `42` and `"42"`. A JSON
+    /// field stores the value as sent: `"42"` stays a string.
     ///
     /// # Errors
     /// As [`Self::parse`], plus `FormErrors` with a non-field error
@@ -1697,6 +1696,10 @@ impl<T: crate::core::Model> ModelFormFor<T> {
             //             bools, arrays, objects)
             match v {
                 serde_json::Value::Null => {}
+                // A Json field stores the value itself: `"dark"` stays a string.
+                other if field.ty == crate::core::FieldType::Json => {
+                    payload.insert(k.clone(), other.to_string());
+                }
                 serde_json::Value::String(s) => {
                     payload.insert(k.clone(), s.clone());
                 }

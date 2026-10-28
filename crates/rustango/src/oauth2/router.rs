@@ -106,9 +106,9 @@ impl AuthSuccess {
     }
 }
 
-/// Application-side error from the [`OnAuthSuccess`] hook. Whatever is
-/// `Display`-able will be returned in the `502 Bad Gateway` body —
-/// keep it user-safe.
+/// Application-side error from the [`OnAuthSuccess`] hook. It is logged and
+/// the `502 Bad Gateway` body is generic, unless `RUSTANGO_DISCLOSE_ERRORS`
+/// is on: a `?` on a database error would otherwise show the driver text.
 #[derive(Debug)]
 pub struct AuthError(pub String);
 
@@ -295,8 +295,16 @@ async fn finish(state: &RouterState, login: AuthSuccess) -> Response {
             );
             resp
         }
-        Err(AuthError(msg)) => (StatusCode::BAD_GATEWAY, msg).into_response(),
+        Err(AuthError(msg)) => hook_error(&msg).into_response(),
     }
+}
+
+/// The 502 for a failed hook: logged, and its text withheld from the client.
+fn hook_error(msg: &str) -> (StatusCode, String) {
+    (
+        StatusCode::BAD_GATEWAY,
+        crate::error::server_error_body("oauth2::on_success", &msg),
+    )
 }
 
 #[cfg(test)]
@@ -364,6 +372,18 @@ mod tests {
                 .any(|c| c.starts_with(&format!("{FLOW_COOKIE}=;"))),
             "{cookies:?}"
         );
+    }
+
+    /// A hook's `?` on a driver error does not reach the browser.
+    #[test]
+    fn a_hook_error_is_logged_not_sent() {
+        let _g = crate::error::test_env::lock();
+        crate::error::test_env::with(crate::error::DISCLOSE_ENV, None, || {
+            let err = AuthError::from("duplicate key violates rustango_users_email_key");
+            let (status, body) = hook_error(&err.0);
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert!(!body.contains("rustango_users"), "{body}");
+        });
     }
 
     #[tokio::test]

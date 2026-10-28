@@ -906,12 +906,6 @@ impl Cli {
         args: Vec<String>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.command_set = command::CommandSet::build(&self.commands)?;
-        // Dev and test only; read on first use, so most verbs never touch the file.
-        #[cfg(all(
-            feature = "_aead",
-            any(feature = "admin", feature = "tenancy", feature = "csrf")
-        ))]
-        crate::aead::use_dev_key_file_for_env();
         let verb = args.first().map_or("", String::as_str);
         // A management verb's stdout is its output (`dumpdata > fx.json`),
         // so its logs go to stderr, also through `#[rustango::main]`'s subscriber.

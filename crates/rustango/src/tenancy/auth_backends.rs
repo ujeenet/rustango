@@ -363,7 +363,7 @@ impl AuthBackend for ModelBackend {
 ///     .fetch(&pool)
 ///     .await?;
 /// ```
-#[derive(crate::Model, Debug, Clone)]
+#[derive(crate::Model, Clone)]
 #[rustango(
     table = "rustango_api_keys",
     admin(
@@ -405,6 +405,8 @@ pub struct ApiKey {
     #[rustango(auto_now_add)]
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
+
+redacted_debug!(ApiKey { id, user_id, key_prefix, label, expires_at, created_at; key_hash });
 
 // A key is minted by `create-api-key`, which shows the secret once; an admin
 // form could only store a row nobody can use (#1763).

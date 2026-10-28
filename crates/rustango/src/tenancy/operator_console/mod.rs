@@ -1659,7 +1659,7 @@ async fn change_password_form(
     render(&state, "op_change_password.html", &ctx)
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 struct OpChangePasswordForm {
     current_password: String,
     new_password: String,

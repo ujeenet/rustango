@@ -304,7 +304,6 @@ where
     // Audit M2 — on the prod tier (RUSTANGO_ENV) this requires a valid
     // RUSTANGO_SESSION_SECRET and panics otherwise (fail closed); dev /
     // staging keep the disk-persisted key for restart-stable local runs.
-    crate::aead::use_dev_key_file_for_env();
     let session_secret = crate::session::load_session_secret_for_tier(
         &crate::session::tier_from_env(),
         std::path::Path::new("./var/.rustango_session.key"),

@@ -577,3 +577,53 @@ async fn json_body_is_decoded_by_field_type() {
     let (status, v) = send(&app, form).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
 }
+
+#[derive(Serializer, serde::Deserialize, Default)]
+#[serializer(model = Item)]
+struct ItemSettingsSerializer {
+    pub title: String,
+    pub settings: serde_json::Value,
+}
+
+/// A JSON string sent for a Json field is stored as a string, not re-parsed
+/// as JSON text, with or without a serializer; null on NOT NULL is refused.
+#[tokio::test]
+async fn a_json_field_stores_the_value_as_sent() {
+    let sq = item_pool().await;
+    let with_serializer = ViewSet::for_model(Item::SCHEMA, ITEM_FIELDS)
+        .serializer::<ItemSettingsSerializer>()
+        .router_pool("/items", Pool::Sqlite(sq.clone()));
+    for app in [items(&sq), with_serializer] {
+        for (sent, stored) in [(r#""dark""#, r#""dark""#), (r#""42""#, r#""42""#)] {
+            let body = format!(r#"{{"title":"t","settings":{sent}}}"#);
+            let (status, v) = send(&app, req(Method::POST, "/items", &body, None)).await;
+            assert_eq!(status, StatusCode::CREATED, "{body}: {v}");
+            // The serializer renders no `id`: read the newest row.
+            let raw: String =
+                sqlx::query_scalar("SELECT settings FROM vs_wf_item ORDER BY id DESC LIMIT 1")
+                    .fetch_one(&sq)
+                    .await
+                    .expect("read");
+            assert_eq!(raw, stored, "{body}");
+        }
+        let body = r#"{"title":"t","settings":null}"#;
+        let (status, v) = send(&app, req(Method::POST, "/items", body, None)).await;
+        assert!(
+            status.is_client_error(),
+            "null stored on NOT NULL: {status} {v}"
+        );
+    }
+    let form = rustango::forms::ModelFormFor::<Item>::from_json(
+        &serde_json::json!({"title": "t", "status": "draft", "settings": "dark"}),
+    )
+    .expect("parses");
+    let at = form
+        .columns()
+        .iter()
+        .position(|c| *c == "settings")
+        .expect("settings");
+    assert_eq!(
+        form.values()[at],
+        rustango::core::SqlValue::Json(Value::String("dark".into()))
+    );
+}

@@ -31,6 +31,13 @@ pub struct Post {
     /// A choices field with no `:` separators — value reused as label.
     #[rustango(max_length = 8, choices = "yes, no, maybe")]
     pub vote: String,
+
+    /// `blank`: "" passes the choices and the named validators.
+    #[rustango(max_length = 8, blank, choices = "a:A, b:B")]
+    pub grade: String,
+
+    #[rustango(max_length = 254, blank, validators = "email")]
+    pub email: String,
 }
 
 fn field<'a>(name: &str) -> &'a FieldSchema {
@@ -104,4 +111,17 @@ fn validate_value_still_checks_max_length_on_choices_field() {
         QueryError::InvalidChoice { .. } => {} // either order is fine
         other => panic!("unexpected error variant: {other:?}"),
     }
+}
+
+#[test]
+fn a_blank_field_accepts_the_empty_string() {
+    let empty = SqlValue::String(String::new());
+    validate_value("Post", field("grade"), &empty).expect("blank choices");
+    validate_value("Post", field("email"), &empty).expect("blank validators");
+    assert!(validate_value("Post", field("grade"), &SqlValue::String("z".into())).is_err());
+    assert!(validate_value("Post", field("email"), &SqlValue::String("x".into())).is_err());
+    assert!(
+        validate_value("Post", field("status"), &empty).is_err(),
+        "not blank"
+    );
 }

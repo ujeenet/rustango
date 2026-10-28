@@ -166,6 +166,22 @@ compile_error!(
 // ourselves inside this crate.
 extern crate self as rustango;
 
+/// `Debug` that prints `shown` fields and `[redacted]` for `secret` ones, so
+/// a `{:?}`, `dbg!` or panic message never carries a hash or password.
+#[allow(unused_macros)]
+macro_rules! redacted_debug {
+    ($ty:ident { $($shown:ident),* $(,)? ; $($secret:ident),* $(,)? }) => {
+        impl ::std::fmt::Debug for $ty {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                f.debug_struct(stringify!($ty))
+                    $(.field(stringify!($shown), &self.$shown))*
+                    $(.field(stringify!($secret), &format_args!("[redacted]")))*
+                    .finish_non_exhaustive()
+            }
+        }
+    };
+}
+
 // ---------------------------------------------------------------- per-backend macro support
 //
 // `#[derive(Model)]` always emits a call to `__impl_my_from_row!`. The two

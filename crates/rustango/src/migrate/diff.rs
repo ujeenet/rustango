@@ -375,21 +375,13 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
         }
     }
     // Dropped or edited M2M junctions, before the tables they reference.
-    let mut renamed_junctions: Vec<&str> = Vec::new();
+    // A gone junction is never matched to a new one by its ends: two M2M
+    // fields between the same models share them, so a guess moves rows
+    // to the wrong relation. A `through` rename is written by hand.
     for mt in &prev.m2m_tables {
         let now = current.m2m_table(&mt.through);
         if let Some(renames) = now.filter(|c| *c != mt).and_then(|c| m2m_renames(mt, c)) {
             changes.extend(renames);
-        } else if let Some(new) = now
-            .is_none()
-            .then(|| renamed_junction(prev, current, mt))
-            .flatten()
-        {
-            changes.push(SchemaChange::RenameTable {
-                old_name: mt.through.clone(),
-                new_name: new.to_owned(),
-            });
-            renamed_junctions.push(new);
         } else if now != Some(mt) {
             changes.push(SchemaChange::DropM2MTable {
                 through: mt.through.clone(),
@@ -471,9 +463,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     }
     // New M2M junction tables.
     for mt in &current.m2m_tables {
-        if prev.m2m_table(&mt.through).is_none()
-            && !renamed_junctions.contains(&mt.through.as_str())
-        {
+        if prev.m2m_table(&mt.through).is_none() {
             changes.push(create_m2m(mt));
         }
     }
@@ -494,8 +484,9 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     changes
 }
 
-/// Warnings for the dropped NOT NULL columns with no default in `changes`:
-/// their re-add on downgrade is refused once the table has rows.
+/// Warnings for the dropped NOT NULL columns with no default in `changes`
+/// (their re-add on downgrade is refused once the table has rows), and for
+/// a junction dropped beside a new one with its ends (its rows are lost).
 pub(crate) fn irreversible_drops(prev: &SchemaSnapshot, changes: &[SchemaChange]) -> Vec<String> {
     changes
         .iter()
@@ -511,9 +502,46 @@ pub(crate) fn irreversible_drops(prev: &SchemaSnapshot, changes: &[SchemaChange]
                          to keep it reversible"
                     )
                 }),
+            SchemaChange::DropM2MTable { through } => {
+                let gone = prev.m2m_table(through)?;
+                let key = junction_ends(
+                    &gone.src_table,
+                    &gone.src_col,
+                    &gone.dst_table,
+                    &gone.dst_col,
+                );
+                changes.iter().find_map(|c| match c {
+                    SchemaChange::CreateM2MTable {
+                        through: new,
+                        src_table,
+                        src_col,
+                        dst_table,
+                        dst_col,
+                    } if junction_ends(src_table, src_col, dst_table, dst_col) == key => {
+                        Some(format!(
+                            "dropping junction `{through}` and creating `{new}` over the same \
+                             columns: its rows are not moved; if `{new}` is `{through}` renamed, \
+                             write that `RenameTable` by hand in a `makemigrations --empty` file"
+                        ))
+                    }
+                    _ => None,
+                })
+            }
             _ => None,
         })
         .collect()
+}
+
+/// A junction's `(table, column)` ends, in either declared order.
+fn junction_ends<'a>(
+    st: &'a str,
+    sc: &'a str,
+    dt: &'a str,
+    dc: &'a str,
+) -> [(&'a str, &'a str); 2] {
+    let mut e = [(st, sc), (dt, dc)];
+    e.sort_unstable();
+    e
 }
 
 pub(super) fn create_index(idx: &super::snapshot::IndexSnapshot) -> SchemaChange {
@@ -586,35 +614,6 @@ fn m2m_renames(
         [(a, b), (c, d)] => vec![rename(a, b), rename(c, d)],
         _ => Vec::new(),
     })
-}
-
-/// The one new junction with `old`'s ends when `old` is the one gone with
-/// them: its `through` was renamed, so the rows are kept.
-fn renamed_junction<'a>(
-    prev: &SchemaSnapshot,
-    current: &'a SchemaSnapshot,
-    old: &super::snapshot::M2MTableSnapshot,
-) -> Option<&'a str> {
-    let ends = |m: &super::snapshot::M2MTableSnapshot| {
-        let mut e = [
-            (m.src_table.clone(), m.src_col.clone()),
-            (m.dst_table.clone(), m.dst_col.clone()),
-        ];
-        e.sort_unstable();
-        e
-    };
-    let key = ends(old);
-    let mut came = current
-        .m2m_tables
-        .iter()
-        .filter(|m| prev.m2m_table(&m.through).is_none() && ends(m) == key);
-    let new = came.next().filter(|_| came.next().is_none())?;
-    let gone = prev
-        .m2m_tables
-        .iter()
-        .filter(|m| current.m2m_table(&m.through).is_none() && ends(m) == key)
-        .count();
-    (gone == 1).then_some(new.through.as_str())
 }
 
 fn is_self_ref(m: &super::snapshot::M2MTableSnapshot) -> bool {
@@ -2792,6 +2791,39 @@ mod sql_type_tests {
         let warned = irreversible_drops(&snap, &[drop("x"), drop("y")]);
         assert_eq!(warned.len(), 1, "{warned:?}");
         assert!(warned[0].contains("`t.x`"), "{}", warned[0]);
+    }
+
+    /// Swapping one M2M for another with the same ends drops the rows: say so.
+    #[test]
+    fn a_junction_swapped_for_one_with_its_ends_warns() {
+        let m2m = |through: &str| super::super::snapshot::M2MTableSnapshot {
+            through: through.into(),
+            src_table: "post".into(),
+            src_col: "post_id".into(),
+            dst_table: "tag".into(),
+            dst_col: "tag_id".into(),
+        };
+        let prev = SchemaSnapshot {
+            m2m_tables: vec![m2m("post_featured")],
+            ..Default::default()
+        };
+        let current = SchemaSnapshot {
+            m2m_tables: vec![m2m("post_pinned")],
+            ..Default::default()
+        };
+        let changes = detect_changes(&prev, &current);
+        assert_eq!(
+            changes,
+            vec![
+                SchemaChange::DropM2MTable {
+                    through: "post_featured".into()
+                },
+                create_m2m(&m2m("post_pinned")),
+            ]
+        );
+        let warned = irreversible_drops(&prev, &changes);
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].contains("`post_featured`"), "{}", warned[0]);
     }
 
     #[test]
