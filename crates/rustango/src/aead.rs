@@ -64,25 +64,28 @@ fn resolve_key(env: Option<String>, dev: impl FnOnce() -> Option<String>) -> Opt
     env.filter(|k| !k.trim().is_empty()).or_else(dev)
 }
 
-/// Where the dev and test tiers keep a generated key, beside the session key.
+/// Where the dev and test tiers keep a generated key, under the project root.
 #[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
-#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
-pub(crate) const DEV_KEY_PATH: &str = "./var/.rustango_secret.key";
+const DEV_KEY_FILE: &str = "var/.rustango_secret.key";
 
-/// The dev key file, once [`use_dev_key_file`] allowed it; read on first use.
+/// The dev key, read (or generated) once per process.
 #[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
-static DEV_KEY: std::sync::OnceLock<DevKey> = std::sync::OnceLock::new();
+static DEV_KEY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
-#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
-struct DevKey {
-    path: std::path::PathBuf,
-    key: std::sync::OnceLock<Option<String>>,
-}
-
+/// On the dev and test tiers an unset key falls back to the saved one, so
+/// every binary of the project (server, worker, `manage`, tests) agrees.
+/// Any other tier keeps requiring the env var.
 #[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
 fn dev_key() -> Option<String> {
-    let dev = DEV_KEY.get()?;
-    dev.key.get_or_init(|| load_dev_key(&dev.path)).clone()
+    if !dev_key_tier(&crate::env::tier_from_env()) {
+        return None;
+    }
+    DEV_KEY
+        .get_or_init(|| {
+            let cwd = std::env::current_dir().ok()?;
+            load_dev_key(&dev_key_path(&cwd))
+        })
+        .clone()
 }
 
 #[cfg(not(any(feature = "admin", feature = "tenancy", feature = "csrf")))]
@@ -90,29 +93,24 @@ fn dev_key() -> Option<String> {
     None
 }
 
-/// Boot: on the dev and test tiers an unset key falls back to a generated
-/// one saved at `path`. Any other tier keeps requiring the env var.
+/// The first saved [`DEV_KEY_FILE`] from `cwd` up to the Cargo workspace root
+/// (the nearest dir with `Cargo.lock`), else a new one there, else in `cwd`.
 #[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
-#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
-pub(crate) fn use_dev_key_file(tier: &str, path: &std::path::Path) -> bool {
-    if !dev_key_tier(tier) {
-        return false;
-    }
-    let _ = DEV_KEY.set(DevKey {
-        path: path.to_owned(),
-        key: std::sync::OnceLock::new(),
-    });
-    true
-}
-
-/// [`use_dev_key_file`] for `RUSTANGO_ENV` and [`DEV_KEY_PATH`]; every boot path calls it.
-#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
-#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
-pub(crate) fn use_dev_key_file_for_env() -> bool {
-    use_dev_key_file(
-        &crate::env::tier_from_env(),
-        std::path::Path::new(DEV_KEY_PATH),
-    )
+fn dev_key_path(cwd: &std::path::Path) -> std::path::PathBuf {
+    let root = cwd.ancestors().find(|d| d.join("Cargo.lock").is_file());
+    let searched: Vec<&std::path::Path> = match root {
+        Some(root) => cwd
+            .ancestors()
+            .take_while(|d| *d != root)
+            .chain([root])
+            .collect(),
+        None => vec![cwd],
+    };
+    searched
+        .iter()
+        .map(|d| d.join(DEV_KEY_FILE))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| root.unwrap_or(cwd).join(DEV_KEY_FILE))
 }
 
 /// Only these tiers may seal with a key nobody set; staging and prod may not.
@@ -308,6 +306,29 @@ mod tests {
             b"pw"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every dir of a workspace finds one key: a saved one on the way up, else the root's.
+    #[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+    #[test]
+    fn the_dev_key_path_does_not_depend_on_the_cwd() {
+        let root = std::env::temp_dir().join(format!("rustango_aead_path_{}", std::process::id()));
+        let sub = root.join("crates/app/src");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(root.join("Cargo.lock"), "").unwrap();
+        let at_root = root.join(DEV_KEY_FILE);
+        assert_eq!(dev_key_path(&sub), at_root);
+        assert_eq!(dev_key_path(&root), at_root);
+        let crate_key = root.join("crates/app").join(DEV_KEY_FILE);
+        std::fs::create_dir_all(crate_key.parent().unwrap()).unwrap();
+        std::fs::write(&crate_key, [0u8; 32]).unwrap();
+        assert_eq!(dev_key_path(&sub), crate_key, "a saved key wins");
+        assert_eq!(
+            dev_key_path(&root.join("crates")),
+            at_root,
+            "never looks down"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     const KEY: Option<&str> = Some("aead-unit-test-key");

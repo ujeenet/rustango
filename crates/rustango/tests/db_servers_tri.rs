@@ -294,6 +294,8 @@ async fn without_a_key_a_password_is_refused(pool: &Pool) {
     if env.backend() == BackendKind::Sqlite {
         return;
     }
+    // Off dev/test, so the saved dev key does not stand in.
+    std::env::set_var("RUSTANGO_ENV", "staging");
     std::env::remove_var("RUSTANGO_SECRET_KEY");
     let err = db_server::add(&env.registry, &env.spec("nokey"), Some(&pw(SECRET)))
         .await
@@ -314,6 +316,7 @@ async fn without_a_key_a_password_is_refused(pool: &Pool) {
         .await
         .expect_err("blank key");
     with_key();
+    std::env::remove_var("RUSTANGO_ENV");
     assert!(matches!(err, DbServerError::Seal(_)), "{err:?}");
 }
 
@@ -984,6 +987,8 @@ async fn the_console_warns_without_a_good_key(pool: &Pool) {
         .await
         .unwrap();
     let c = Console::boot(&env, true).await;
+    // Off dev/test, so the saved dev key does not stand in for a missing one.
+    std::env::set_var("RUSTANGO_ENV", "staging");
     const SHORT: &str = "short-key-q7Zx";
     for (key, warned) in [
         (None, true),
@@ -1010,6 +1015,7 @@ async fn the_console_warns_without_a_good_key(pool: &Pool) {
         }
     }
     with_key();
+    std::env::remove_var("RUSTANGO_ENV");
 }
 
 tri_dialect_test! {

@@ -413,9 +413,12 @@ async fn without_a_key_the_page_says_how_to_set_it(pool: &Pool) {
     let app = app(pool, false);
     let op = operator(pool).await;
     let session = password_session(&app, &op).await;
+    // Off dev/test, so the saved dev key does not stand in.
+    std::env::set_var("RUSTANGO_ENV", "staging");
     std::env::remove_var("RUSTANGO_SECRET_KEY");
     let page = html(send(&app, "GET", "/account/totp", &session, String::new()).await).await;
     std::env::set_var("RUSTANGO_SECRET_KEY", KEY);
+    std::env::remove_var("RUSTANGO_ENV");
     assert!(page.contains("openssl rand -base64 48"), "{page}");
     assert!(
         !page.contains("Set it up"),
