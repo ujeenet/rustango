@@ -173,7 +173,12 @@ Eine Flut eindeutiger Schlüssel kann den Prozess so nicht unbegrenzt wachsen
 lassen, bedeutet aber auch: **ein Eintrag kann vor Ablauf seines TTL
 verschwinden**, wenn er beim Erreichen des Budgets der am längsten unbenutzte
 ist. Die Verdrängung entfernt zuerst bereits abgelaufene Einträge, dann die am
-längsten unbenutzten, bis beide Budgets eingehalten sind.
+längsten unbenutzten, bis beide Budgets um 10 % unterschritten sind. Mit
+`set_forever` geschriebene Einträge (Feature-Flags) liegen außerhalb der Budgets
+und werden nie verdrängt, solange sie in ihren eigenen Grenzen bleiben — 16 MiB
+oder 10 000 Einträge (`.with_max_pinned_bytes(..)` / `.with_max_pinned_entries(..)`).
+Darüber werden neue `set_forever`-Einträge als normale, verdrängbare Einträge
+gespeichert, und einmal wird eine Warnung geloggt.
 
 Behandle einen Cache-Read also auch innerhalb des TTL als „kann fehlen". Das gilt
 für jedes Cache-Backend, hier hat es aber eine Ursache, über die du nachdenken
@@ -273,10 +278,11 @@ Key ist ein eigener Roundtrip.
 steckt hinter `DistributedLock`. `Cache::add` ist bei allen dreien atomar — `RedisCache`
 (`SET NX`), `InMemoryCache` (das seine Sperre über das Read-Modify-Write hält)
 und `DatabaseCache`, das das Test-and-Set unter Zeilensperren ausführt, sodass
-ein Wettlauf genau einen Gewinner hat. `Cache::incr` ist bei den ersten beiden
-atomar, fällt bei `DatabaseCache` aber auf den nicht-atomaren Standard zurück.
-Ein `DistributedLock` ist also auf allen dreien sicher; ein Zähler, der über
-Replikate hinweg exakt sein muss, will Redis.
+ein Wettlauf genau einen Gewinner hat. `Cache::incr` ist ebenfalls auf allen
+dreien atomar: `DatabaseCache` erledigt es in einem Upsert. `FileCache` macht
+beides unter einer Sperre pro Eintrag, die nur auf einem Host gilt. Ein
+`DistributedLock` oder ein exakter Zähler funktioniert über Replikate hinweg also
+mit Redis oder der Datenbank.
 
 Zwei Dinge, die man wissen sollte:
 
@@ -310,6 +316,10 @@ in einem beliebigen `BoxedCache`; `.timeout(dur)` legt fest, wie lange (Standard
 - Eine Antwort mit `Set-Cookie` oder `Cache-Control: private`, `no-cache` oder
   `no-store` wird nie gecacht.
 - `.vary_on([...])` nimmt Request-Header in den Key auf.
+- `.key_prefix(..)` gibt jedem Layer einen eigenen Schlüsselraum (Standard
+  `rustango.cache_page`). `.cache_query(true)` cacht auch `QUERY`-Anfragen, mit
+  einem Digest des Bodys (bis 1 MiB) im Key. `.tenant_agnostic(true)` cacht ohne
+  aufgelösten Mandanten, nur für eine Seite, die für jeden Mandanten gleich ist.
 
 Um eine Seite nach einem Schreibvorgang zu verwerfen, rufe
 `layer.invalidate(&[PageKey::new(path, host)]).await?` auf einem Klon des Layers
@@ -325,11 +335,17 @@ Unter Tenancy hängst du den Layer innerhalb des Tenancy-Layers ein; siehe
 
 ## Referenz
 
-**`Cache`-Trait:** `get` · `set(key, value, ttl)` · `delete` · `exists` ·
+**`Cache`-Trait:** `get` · `set(key, value, ttl)` · `set_forever` · `delete` ·
+`exists` / `has_key` · `clear` · `delete_prefix` · `incr` / `decr` · `add`
+(setzen, falls fehlend) · `touch` (neuer TTL) · `get_bytes` / `set_bytes` ·
 `get_many` / `set_many` / `delete_many` · `get_or(key, default)`.
 
 **Freie Helfer:** `get_or_set(cache, key, factory, ttl)` ·
-`get_json` / `set_json` · `from_settings(&CacheSettings)`.
+`get_json` / `set_json` · `from_settings(&CacheSettings)` ·
+`from_settings_async(&CacheSettings)`.
+
+**Aufräumen:** `DatabaseCache::purge_expired()` und
+`FileCache::purge_expired()` löschen abgelaufene Einträge; rufe sie zeitgesteuert auf.
 
 **Was auf dem Cache aufbaut:** serverseitige [Sessions](auth-sessions.md),
 verteiltes [Rate Limiting](middleware.md) (`CacheRateLimitLayer`),

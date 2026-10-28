@@ -83,7 +83,12 @@ impl Job for WelcomeEmail {
 
 Überschreibe `const MAX_ATTEMPTS: u32 = 3;` auf dem Impl, um die Obergrenze für
 **Gesamtversuche** zu ändern — nicht für Retries. Der Standard 5 bedeutet einen
-ersten Lauf plus vier Retries; `MAX_ATTEMPTS = 3` ergibt zwei Retries.
+ersten Lauf plus vier Retries; `MAX_ATTEMPTS = 3` ergibt zwei Retries. `0` zählt
+als `1`: der Job läuft einmal.
+
+Braucht ein Handler Zustand, den das Payload nicht tragen kann, etwa einen
+Mailer, registriere ihn mit `queue.register_with::<T, _, _>(|job| async move { … })`.
+Diese Closure läuft anstelle von `Job::run`. Beide eingebauten Queues können das.
 
 ---
 
@@ -105,6 +110,15 @@ queue.start().await;
 
 queue.shutdown().await;   // on shutdown: drain in-flight jobs, then stop
 ```
+
+`shutdown()` gibt laufenden Jobs eine Schonfrist (`shutdown_grace`, Standard 5s),
+bricht sie dann ab und stellt sie zurück in die Queue. Wartende Jobs und
+geparkte Retries bleiben in der Queue, und ein erneutes `start()` nimmt sie auf.
+
+Jobs sind **at-least-once**. Kein Stoppsignal erreicht einen laufenden Job, und
+ein abgebrochener Job läuft wieder von vorn (die DB-Queue gibt ihre Zeile frei,
+auch wenn der Job gerade fertig war). Der Abbruch verbraucht einen Versuch.
+Mache jeden Job idempotent.
 
 Behalte den `Arc<InMemoryJobQueue>` in deinem App-State, damit Handler ihn
 erreichen können.
@@ -301,7 +315,9 @@ Um die Wartezeit für jeden Job eines Typs zu ändern, überschreibe
 Wartezeit aus dem Payload zu setzen, überschreibe `fn max_attempts(&self) -> u32`
 oder `fn retry_delay(&self, failed_attempt: u32) -> Duration`; standardmäßig
 liefern sie `MAX_ATTEMPTS` und `retry_backoff`. Die Obergrenze wird beim
-Dispatch gelesen.
+Dispatch gelesen. `jobs::exponential_backoff(base, failed_attempt)` ist die
+Standardkurve mit eigener Basis: `base`, pro Fehlschlag verdoppelt, gedeckelt bei
+`base · 1024`.
 
 ---
 
@@ -341,7 +357,8 @@ feuert, mit intaktem `name` und `error` des Jobs.
 Deployments — mehrere Worker, mehrere Replicas, Jobs, die einen Absturz
 überstehen müssen — verwende **`DatabaseJobQueue`** (derselbe Typ wie
 `PgJobQueue`). Jobs leben in einer `rustango_jobs`-Tabelle; Worker nehmen sie
-mit einem transaktionsbegrenzten `UPDATE … RETURNING` auf, es ist also über
+innerhalb einer Transaktion auf (`FOR UPDATE SKIP LOCKED` auf PostgreSQL und
+MySQL, ein einzelnes `UPDATE … RETURNING` auf SQLite), es ist also über
 Prozesse hinweg sicher. Sie ist **tri-dialektisch** (PostgreSQL, MySQL, SQLite).
 Die `Job`-Definitionen aus Schritt 1 bleiben unverändert.
 
@@ -379,6 +396,17 @@ Schwelle freizugeben, damit ein anderer Worker den Job wieder aufnimmt:
 // e.g. from a scheduled task every few minutes:
 let reclaimed = DatabaseJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(300)).await?;
 ```
+
+Oder die Queue erledigt es: `.reclaim_stuck_after(Duration::from_secs(300))` am
+Builder fegt den eigenen Pool der Queue beim `start` und danach alle
+`min(Schwelle, 60s)`. Standardmäßig aus; die Schwelle wird auf mindestens drei
+Heartbeats angehoben.
+
+Ein laufender Job erneuert seine Sperre alle `heartbeat_interval` (Standard 10 s),
+halte die Schwelle also deutlich darüber. Jede Aufnahme verbraucht einen Versuch,
+ein Job, der seinen Worker abstürzen lässt, landet also im Dead-Letter, sobald
+`MAX_ATTEMPTS` Läufe verbraucht sind. Ein Job, der paniert, ist ein
+`Retryable`-Fehlschlag; der Worker läuft weiter.
 
 Sowohl der Dispatch-and-Run-Fluss als auch `reclaim_stuck_jobs_pool` werden per
 Dogfooding gegen SQLite in `jobs_sqlite_live.rs` erprobt.
@@ -452,7 +480,8 @@ betrieblichen Gründen eine gemeinsame Queue brauchst, löse den Tenant-Pool als
 **Bekannte Grenzen.** Das Framework übernimmt den Fan-out nicht für dich: es
 gibt keinen Worker-Supervisor pro Tenant, kein `Job::run(&ctx)` mit
 angehängtem Tenant und keinen Tenant-bewussten `reclaim_stuck_jobs_pool`-Sweep
-— du iterierst selbst über die Tenants, wie oben. Tenants, die nach dem Boot
+— du iterierst selbst über die Tenants, wie oben (`.reclaim_stuck_after(..)` an
+der Queue jedes Tenants fegt den Pool dieses Tenants). Tenants, die nach dem Boot
 provisioniert werden, bekommen bis zum Prozess-Neustart keine Worker.
 Das ist eine bekannte Lücke.
 
@@ -548,9 +577,12 @@ nichts geloggt. Das ist eine bekannte Lücke.
 | `Queue(String)` | interner Queue-Fehler (Serialisierung/Registrierung) |
 
 **`JobQueue`-Methoden:** `register::<T>()` · `dispatch(&payload)` · `start()` ·
-`shutdown()` · `pending_count()`. `DatabaseJobQueue` ergänzt
-`ensure_table_pool`, `with_workers_pool`, `poll_interval` und
-`reclaim_stuck_jobs_pool`.
+`register_with::<T, _, _>(handler)` · `shutdown()` · `pending_count()` (Jobs, die
+auf Aufnahme warten). Beide Queues haben `on_dead_letter` und `shutdown_grace`.
+`DatabaseJobQueue` ergänzt `ensure_table_pool`, `with_workers_pool`, `new_pool`,
+`poll_interval`, `heartbeat_interval`, `queue_name`, `reclaim_stuck_after` und
+`reclaim_stuck_jobs_pool`. `jobs::inmemory_from_settings(&settings.jobs)` baut eine
+`InMemoryJobQueue` mit `[jobs] concurrency` Workern (Standard 4).
 
 ---
 

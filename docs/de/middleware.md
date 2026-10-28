@@ -151,13 +151,16 @@ Methode zu erhalten.
 | Maximale Body-Größe | `BodyLimitLayer` | `.body_limit(..)` |
 | Wartungsmodus (503) | `MaintenanceLayer` | `.maintenance(..)` |
 | Idempotenz-Schlüssel | `IdempotencyLayer` | `.idempotency(..)` |
-| HTTP-Methoden einschränken | `MethodRestrictLayer` | `.require_get()` / `.require_post()` / `.require_safe()` |
+| HTTP-Methoden einschränken | `MethodRestrictLayer` | `.require_get()` / `.require_post()` / `.require_safe()` / `.require_methods([..])` |
+| Method-Override (`_method`-Feld / `X-HTTP-Method-Override`) | `MethodOverrideLayer` | `.layer(..)` |
+| Eigene Fehlerseiten | `ErrorPagesLayer` | `.error_pages(..)` |
 | **Observability** | | |
 | Request-ID (`X-Request-Id`) | `RequestIdLayer` | `.request_id(..)` |
 | [Access-Log](logging.md#das-access-log) (PII-redigiert) | `AccessLogLayer` | `.access_log(..)` |
 | `tracing`-Spans | `TracingLayer` | `.layer(..)` |
 | `Server-Timing`-Header | `ServerTimingLayer` | `.server_timing(..)` |
 | Echte Client-IP (hinter Proxys) | `RealIpLayer` | `.real_ip(..)` |
+| Request-Signale (`request_started` / `request_finished`) | `RequestSignalsLayer` | `.layer(..)` |
 | **Inhalt & Response** | | |
 | gzip/br-Kompression | `CompressionLayer` | `.compression(..)` |
 | ETag / bedingtes GET | `EtagLayer` | `.etag(..)` |
@@ -168,7 +171,7 @@ Methode zu erhalten.
 | Aktive Zeitzone | *(mit `from_fn` komponieren)* | siehe [unten](#zeitzonen-bewusste-middleware) |
 | **Entwicklung** | | |
 | Live-Reload | `LiveReloadLayer` | `.livereload(..)` |
-| Debug-Panel | `DebugPanelLayer` | `.debug_panel(..)` |
+| Debug-Panel | `DebugPanelLayer` | `.debug_panel()` / `.debug_panel_with(..)` |
 
 Unter `tenancy` gehört `CachePageLayer` in die Tenancy-Schicht: auf einen
 Router, den du dem Server-Builder übergibst. Er nimmt den aufgelösten Tenant in
@@ -346,6 +349,10 @@ Drei Presets decken die häufigen Fälle ab:
 | `relaxed()` | einbettbare Seiten | 1 Jahr | `SAMEORIGIN` |
 | `dev()` | lokale Entwicklung | *(weggelassen)* | — |
 
+`empty()` sendet keine Header. `from_preset("strict" | "relaxed" | "dev" | "none")`
+wählt nach Namen; ein unbekannter Name ergibt `strict()`, ein Tippfehler entfernt
+also nie die Header.
+
 Verwende lokal `dev()` — HSTS würde deinen Browser sonst ein Jahr lang auf
 `localhost` an HTTPS binden. Baue eine CSP flüssig mit `CspBuilder`
 (`.default_src(..)`, `.script_src(..)`, …, `.build()`), und rolle sie sicher mit
@@ -371,7 +378,8 @@ let app = Router::new()
     .layer(csrf::layer());
 ```
 
-Eine sichere Methode (GET/HEAD/OPTIONS) prägt ein `rustango_csrf`-Cookie. Eine
+Eine sichere Methode (GET/HEAD/OPTIONS/TRACE, und `QUERY`, solange
+`require_csrf_on_query` nicht gesetzt ist) prägt ein `rustango_csrf`-Cookie. Eine
 unsichere Methode (POST/PUT/PATCH/DELETE) muss den Wert dieses Cookies
 zurückgeben, entweder im `X-CSRF-Token`-Header oder im `_csrf`-Formularfeld; eine
 Abweichung ergibt `403 Forbidden`:
@@ -392,9 +400,12 @@ jedes Formular. Das `| safe` ist Pflicht: Tera escapt `.html` automatisch, ohne
 es trägt das Formular kein `_csrf`-Feld und jedes POST endet in 403. Das
 Login-Formular des Admins macht genau das — siehe
 `crates/rustango/src/admin/templates/login.html`. Überschreibe die Cookie-/Header-Namen oder das `Secure`-Flag mit
-`csrf::with_config(CsrfConfig)`; die Prüfung des
-Origin-Headers läuft immer und akzeptiert den eigenen Host der Anfrage; eine SPA
-auf einem anderen Origin fügst du mit `.with_trusted_origins([...])` hinzu. Für Append-only-Collector-
+`csrf::with_config(CsrfConfig)`. Das schlichte `csrf::layer()` nimmt das
+`Secure`-Flag aus der Session-Policy; mit `with_config` gilt `CsrfConfig::secure`
+(Standard `true`; `.allow_insecure_for_dev()` schaltet es für HTTP-Entwicklung ab).
+Die Prüfung des Origin-Headers läuft immer und akzeptiert den eigenen Host der
+Anfrage; eine SPA auf einem anderen Origin fügst du mit `.trust_origin(..)` oder
+`.with_trusted_origins([...])` hinzu. Für Append-only-Collector-
 Endpoints, die über `navigator.sendBeacon` (z. B. Analytics) angesprochen werden
 und keinen Token-Header senden können, überspringt
 `CsrfConfig::exempt_prefix("/path")` die Durchsetzung für ein schmales

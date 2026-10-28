@@ -82,6 +82,11 @@ impl Job for WelcomeEmail {
 Sobrescribe `const MAX_ATTEMPTS: u32 = 3;` en la impl para cambiar el tope de
 **intentos totales** — no de reintentos. El valor por defecto de 5 es una
 ejecución inicial más cuatro reintentos; `MAX_ATTEMPTS = 3` da dos reintentos.
+`0` cuenta como `1`: el trabajo se ejecuta una vez.
+
+Un handler que necesita estado que el payload no puede llevar, como un mailer,
+se registra con `queue.register_with::<T, _, _>(|job| async move { … })`. Esa
+closure se ejecuta en lugar de `Job::run`. Ambas colas incluidas lo admiten.
 
 ---
 
@@ -309,6 +314,8 @@ Para cambiar la espera de todos los trabajos de un tipo, sobrescribe
 sobrescribe `fn max_attempts(&self) -> u32` o
 `fn retry_delay(&self, failed_attempt: u32) -> Duration`; por defecto devuelven
 `MAX_ATTEMPTS` y `retry_backoff`. El límite se lee al despachar.
+`jobs::exponential_backoff(base, failed_attempt)` es la curva por defecto con tu
+propia base: `base`, doblada por cada fallo, con tope en `base · 1024`.
 
 ---
 
@@ -346,8 +353,9 @@ El test confirma que el callback se dispara exactamente una vez para un trabajo
 `InMemoryJobQueue` es de un solo proceso y olvida al reiniciar. Para despliegues
 reales — múltiples workers, múltiples réplicas, trabajos que deben sobrevivir a
 una caída — usa **`DatabaseJobQueue`** (el mismo tipo que `PgJobQueue`). Los
-trabajos viven en una tabla `rustango_jobs`; los workers los recogen con un
-`UPDATE … RETURNING` acotado por transacción, así que es seguro entre procesos.
+trabajos viven en una tabla `rustango_jobs`; los workers reservan una fila dentro
+de una transacción (`FOR UPDATE SKIP LOCKED` en PostgreSQL y MySQL, un solo
+`UPDATE … RETURNING` en SQLite), así que es seguro entre procesos.
 Es **tri-dialecto** (PostgreSQL, MySQL, SQLite). Las definiciones `Job` del paso
 1 no cambian.
 
@@ -385,6 +393,11 @@ antiguos que un umbral, de modo que otro worker retome el trabajo:
 // e.g. from a scheduled task every few minutes:
 let reclaimed = DatabaseJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(300)).await?;
 ```
+
+O deja que lo haga la cola: `.reclaim_stuck_after(Duration::from_secs(300))` en el
+builder barre el pool de la cola al hacer `start` y luego cada
+`min(umbral, 60s)`. Está apagado por defecto, y el umbral se eleva al menos a tres
+heartbeats.
 
 Un trabajo en curso renueva su bloqueo cada `heartbeat_interval` (10 s por
 defecto), así que mantén el umbral muy por encima. Cada recogida gasta un intento,
@@ -463,7 +476,8 @@ compartida por razones operativas, resuelve el pool del tenant como lo
 **Límites conocidos.** El framework no hace el fan-out por ti: no hay
 supervisor de workers por tenant, ni `Job::run(&ctx)` con el tenant adjunto, ni
 un barrido `reclaim_stuck_jobs_pool` consciente del tenant — iteras sobre los
-tenants tú mismo, como arriba. Los tenants provisionados después del arranque
+tenants tú mismo, como arriba (`.reclaim_stuck_after(..)` en la cola de cada
+tenant barre el pool de ese tenant). Los tenants provisionados después del arranque
 no obtienen workers hasta que el proceso se reinicia. Es una carencia conocida.
 
 **Contexto ambiental: solo fuente de auditoría y zona horaria.**
@@ -556,9 +570,13 @@ rechazado es el resultado esperado, así que no se registra nada. Es una carenci
 | `Queue(String)` | error interno de la cola (serialización/registro) |
 
 **Métodos de `JobQueue`:** `register::<T>()` · `dispatch(&payload)` · `start()` ·
-`shutdown()` · `pending_count()`. Ambas colas tienen `shutdown_grace`. `DatabaseJobQueue` añade
-`ensure_table_pool`, `with_workers_pool`, `poll_interval` y
-`reclaim_stuck_jobs_pool`.
+`register_with::<T, _, _>(handler)` · `shutdown()` · `pending_count()` (trabajos
+esperando a ser recogidos). Ambas colas tienen `on_dead_letter` y
+`shutdown_grace`. `DatabaseJobQueue` añade `ensure_table_pool`,
+`with_workers_pool`, `new_pool`, `poll_interval`, `heartbeat_interval`,
+`queue_name`, `reclaim_stuck_after` y `reclaim_stuck_jobs_pool`.
+`jobs::inmemory_from_settings(&settings.jobs)` construye una `InMemoryJobQueue`
+con `[jobs] concurrency` workers (4 por defecto).
 
 ---
 

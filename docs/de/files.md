@@ -104,14 +104,17 @@ gepuffert zu werden.
 use rustango::uploads::{save_uploads, UploadConfig};
 use axum::extract::Multipart;
 
-async fn upload(mp: Multipart) -> Result<impl IntoResponse, UploadError> {
+async fn upload(mp: Multipart) -> Result<Json<Vec<String>>, (StatusCode, String)> {
     let cfg = UploadConfig::new("avatars/")          // key prefix
         .max_bytes(2 * 1024 * 1024)                  // reject files over 2 MiB
         .allowed_extensions(&["png", "jpg", "jpeg", "webp"])
         .randomize_filename(true);                   // avoid collisions
 
-    let saved = save_uploads(mp, &cfg, &storage).await?;   // Vec<SavedUpload>
-    Ok(Json(saved))
+    // UploadError is not a response: map it yourself.
+    let saved = save_uploads(mp, &cfg, &storage)     // Vec<SavedUpload>
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(saved.into_iter().map(|s| s.key).collect()))
 }
 ```
 
@@ -120,6 +123,14 @@ Die Schutzvorkehrungen werden erzwungen (und verifiziert): `allowed_extensions` 
 sobald die Größe überschritten wird. Die In-File-`uploads`-Tests treiben echte Multipart-Bodies an
 und behaupten, dass Dateien im Speicher landen, überdimensionierte Dateien abgelehnt und
 nicht erlaubte Erweiterungen verweigert werden.
+
+Standardwerte: `max_bytes` 10 MiB, `max_files` 20, `randomize_filename` an (ein
+UUID-Präfix im Key). Ohne `allowed_extensions` wird jede Erweiterung akzeptiert,
+außer denen, die ein Browser als Skript ausführt (`html`, `svg`, `xml`, `js`, … —
+`uploads::ACTIVE_EXTENSIONS`). Der erste Fehler stoppt die Schleife und löscht die
+schon gespeicherten Dateien; eine abgelehnte Anfrage hinterlässt also nichts. Jedes
+`SavedUpload` trägt `key`, `original_filename`, `content_type` (wie vom Client
+behauptet — nicht vertrauen) und `size_bytes`.
 
 ```rust
 let cfg = UploadConfig::new("avatars/").allowed_extensions(&["PNG", "Jpg"]);
@@ -157,9 +168,12 @@ identisch — nur der Konstruktor ändert sich:
 ```rust
 use rustango::storage::s3::S3Storage;   // needs the `storage-s3` feature
 
-let storage: BoxedStorage = Arc::new(
-    S3Storage::new(/* bucket, region, endpoint, credentials */)
-);
+use rustango::storage::s3::{S3Config, S3Credentials};
+
+let cfg = S3Config::new("my-bucket", "us-east-1")
+    .with_endpoint("https://<account>.r2.cloudflarestorage.com"); // R2 / B2 / MinIO; omit for AWS
+let creds = S3Credentials::new(access_key_id, secret_access_key);
+let storage: BoxedStorage = Arc::new(S3Storage::new(cfg, creds));
 // save / load / delete / url — exactly the same calls as LocalStorage
 ```
 
@@ -249,6 +263,7 @@ erlauben, die du annimmst.
 | `LocalStorage` | Temp-Datei im Zielverzeichnis, fsync, dann rename; `create_only` verlinkt, ersetzt also nie eine Datei |
 | `S3Storage` | ein PUT bis 5 GiB; darüber ein Multipart-Upload mit bis zu 10.000 Teilen (5 TiB), ein Teil gleichzeitig unterwegs. Über https wird der Body als `UNSIGNED-PAYLOAD` gesendet; über reines http (lokales MinIO, SeaweedFS) wird jeder 64-KiB-Chunk signiert. `create_only` sendet `If-None-Match: *` (bei Multipart beim Complete), was AWS, MinIO und SeaweedFS beachten |
 | `AzureBlobStorage` | ein Put Blob bis 5000 MiB; darüber Put Block für jeden Teil, dann ein Put Block List. `create_only` sendet `If-None-Match: *` (auf der Liste) |
+| `InMemoryStorage` | sammelt den Body im Speicher; `create_only` wird unter seiner Sperre geprüft |
 | andere | der Trait-Default: sammelt den Body im Speicher, dann `save`; lehnt `create_only` ab |
 
 Ein fehlgeschlagener oder abgebrochener Multipart-Upload wird abgebrochen, und
@@ -369,7 +384,7 @@ Für Dateien auf der lokalen Platte statt in einem Bucket erledigt das der
 Static-Handler bereits, ganz ohne Media-Zeile:
 
 ```rust
-Cli::new(pool).with_uploads("/uploads", "./var/uploads")
+Cli::new().with_uploads("/uploads", "./var/uploads")
 ```
 
 **Wenn du gerade einen `AllowAll`-Authorizer schreiben wolltest, damit eine

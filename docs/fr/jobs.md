@@ -83,7 +83,12 @@ impl Job for WelcomeEmail {
 Surchargez `const MAX_ATTEMPTS: u32 = 3;` sur l'impl pour changer le plafond de
 **tentatives totales** — pas de nouvelles tentatives. La valeur par défaut de 5
 correspond à une exécution initiale plus quatre reprises ; `MAX_ATTEMPTS = 3`
-donne deux reprises.
+donne deux reprises. `0` compte comme `1` : la tâche s'exécute une fois.
+
+Un handler qui a besoin d'un état que le payload ne peut pas porter, comme un
+mailer, s'enregistre avec `queue.register_with::<T, _, _>(|job| async move { … })`.
+Cette closure s'exécute à la place de `Job::run`. Les deux files intégrées le
+prennent en charge.
 
 ---
 
@@ -314,6 +319,8 @@ Pour changer l'attente de toutes les tâches d'un type, surchargez
 l'attente depuis le payload, surchargez `fn max_attempts(&self) -> u32` ou
 `fn retry_delay(&self, failed_attempt: u32) -> Duration` ; par défaut ils
 renvoient `MAX_ATTEMPTS` et `retry_backoff`. Le plafond est lu au dispatch.
+`jobs::exponential_backoff(base, failed_attempt)` est la courbe par défaut avec
+votre propre base : `base`, doublée à chaque échec, plafonnée à `base · 1024`.
 
 ---
 
@@ -354,8 +361,9 @@ Le test confirme que le callback se déclenche exactement une fois pour une tâc
 vrais déploiements — plusieurs workers, plusieurs réplicas, des tâches qui
 doivent survivre à un crash — utilisez **`DatabaseJobQueue`** (le même type que
 `PgJobQueue`). Les tâches vivent dans une table `rustango_jobs` ; les workers
-les prennent en charge avec un `UPDATE … RETURNING` borné par une transaction,
-donc c'est sûr entre processus. Elle est **tri-dialecte** (PostgreSQL, MySQL,
+réservent une ligne dans une transaction (`FOR UPDATE SKIP LOCKED` sur PostgreSQL
+et MySQL, un seul `UPDATE … RETURNING` sur SQLite), donc c'est sûr entre
+processus. Elle est **tri-dialecte** (PostgreSQL, MySQL,
 SQLite). Les définitions `Job` de l'étape 1 sont inchangées.
 
 ```rust
@@ -392,6 +400,11 @@ plus anciens qu'un seuil afin qu'un autre worker reprenne la tâche :
 // e.g. from a scheduled task every few minutes:
 let reclaimed = DatabaseJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(300)).await?;
 ```
+
+Ou laissez la file le faire : `.reclaim_stuck_after(Duration::from_secs(300))` sur
+le builder balaie le pool de la file au `start`, puis toutes les
+`min(seuil, 60s)`. C'est désactivé par défaut, et le seuil est relevé à au moins
+trois heartbeats.
 
 Une tâche en cours rafraîchit son verrou toutes les `heartbeat_interval` (10 s
 par défaut) : gardez donc le seuil bien au-dessus. Chaque prise en charge
@@ -471,7 +484,8 @@ ensuite.
 **Limites connues.** Le framework ne fait pas le fan-out pour vous : pas de
 superviseur de workers par tenant, pas de `Job::run(&ctx)` avec le tenant
 attaché, et pas de balayage `reclaim_stuck_jobs_pool` conscient du tenant —
-vous itérez vous-même sur les tenants, comme ci-dessus. Les tenants
+vous itérez vous-même sur les tenants, comme ci-dessus (`.reclaim_stuck_after(..)`
+sur la file de chaque tenant balaie le pool de ce tenant). Les tenants
 provisionnés après le démarrage n'ont aucun worker jusqu'au redémarrage du
 processus. C'est une lacune connue.
 
@@ -566,9 +580,13 @@ acquire refusé est le résultat attendu, donc rien n'est journalisé. C'est une
 | `Queue(String)` | erreur de file interne (sérialisation/enregistrement) |
 
 **Méthodes de `JobQueue` :** `register::<T>()` · `dispatch(&payload)` · `start()` ·
-`shutdown()` · `pending_count()`. Les deux files ont `shutdown_grace`. `DatabaseJobQueue` ajoute
-`ensure_table_pool`, `with_workers_pool`, `poll_interval`, et
-`reclaim_stuck_jobs_pool`.
+`register_with::<T, _, _>(handler)` · `shutdown()` · `pending_count()` (tâches en
+attente de prise en charge). Les deux files ont `on_dead_letter` et
+`shutdown_grace`. `DatabaseJobQueue` ajoute `ensure_table_pool`,
+`with_workers_pool`, `new_pool`, `poll_interval`, `heartbeat_interval`,
+`queue_name`, `reclaim_stuck_after` et `reclaim_stuck_jobs_pool`.
+`jobs::inmemory_from_settings(&settings.jobs)` construit une `InMemoryJobQueue`
+avec `[jobs] concurrency` workers (4 par défaut).
 
 ---
 

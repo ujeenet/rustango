@@ -43,8 +43,9 @@ probiert die Middleware sie **der Reihe nach** durch:
   Benutzer zurück);
 - ein Backend, das ihn nicht erkennt, gibt „keiner" zurück, und das nächste wird
   probiert;
-- wenn ein Backend hart fehlschlägt (z. B. ein inaktives Konto bei einem
-  *gültigen* Token), stoppt die Kette mit diesem Fehler;
+- wenn ein Backend hart fehlschlägt, stoppt die Kette mit diesem Fehler: ein
+  inaktives Konto mit *gültigem* Credential ist `403`, eine Sperre `429` (oder
+  `503`, wenn das Passwort-Hashing ausgelastet ist), ein ungültiges Token `401`;
 - wenn keines passt, erhält die Anfrage `401` (mit `require_auth`) oder fährt
   anonym fort (mit `optional_auth`).
 
@@ -70,6 +71,9 @@ let backends: Vec<Arc<dyn AuthBackend>> = vec![
 
 `ApiKeyBackend` und `JwtBackend` lesen beide `Bearer` und unterscheiden anhand der
 Form (das erste Punkt-Segment eines API-Schlüssels ist genau 8 Zeichen lang).
+Ein `Bearer`-Wert in JWT-Form, der die Prüfung nicht besteht, ist ein hartes
+`401` und geht nicht an das nächste Backend. `ModelBackend` zählt falsche
+Passwörter pro Mandant, IP und Benutzername; wiederholtes Raten bekommt `429`.
 Konstruieren Sie `JwtBackend` mit einem Geheimnis von **mindestens 32 Byte**
 (`JwtBackend::new(secret)` panikt andernfalls):
 
@@ -257,7 +261,8 @@ async fn who(remote_user: &str) -> Result<Option<Principal>, AuthError> {
 ```
 
 Dieselbe Semantik „erster Erfolg gewinnt / erster Fehler stoppt" wie die
-HTTP-Kette. Zum Absichern echter Routen verwenden Sie die `tenancy`-Middleware
+HTTP-Kette. `chain.get_user(id)` läuft die Kette genauso ab, um einen Principal
+neu zu laden, etwa einen aus einer Session. Zum Absichern echter Routen verwenden Sie die `tenancy`-Middleware
 oben.
 
 ---

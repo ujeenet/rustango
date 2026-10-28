@@ -161,7 +161,10 @@ cannot grow the process without limit, but it does mean **an entry can vanish
 before its TTL expires** if it is the least recently used when the budget is
 reached. Eviction drops already-expired entries first, then the least-recently
 used, until both are 10% under budget. Entries written with `set_forever`
-(feature flags) are outside the budgets and never evicted.
+(feature flags) are outside the budgets and never evicted while they stay within
+their own caps — 16 MiB or 10 000 entries (`.with_max_pinned_bytes(..)` /
+`.with_max_pinned_entries(..)`). Past those, new `set_forever` entries are stored
+as ordinary, evictable entries and a warning is logged once.
 
 So treat a cache read as "may be absent" even inside the TTL. That is true of
 every cache backend, but here it has a cause you can reason about and tune:
@@ -258,9 +261,10 @@ and per-account lockout; `Cache::add` (set-if-absent) backs `DistributedLock`.
 `Cache::add` is atomic on all three — `RedisCache` (`SET NX`), `InMemoryCache`
 (which holds its lock across the read-modify-write) and `DatabaseCache`, which
 does the test-and-set under row locks so a race resolves to exactly one winner.
-`Cache::incr` is atomic on the first two but falls back to the non-atomic
-default on `DatabaseCache`. So a `DistributedLock` is safe on any of the three;
-a counter that must be exact across replicas wants Redis.
+`Cache::incr` is atomic on all three too: `DatabaseCache` does it in one upsert.
+`FileCache` does both under a per-entry lock, which holds only on one host.
+So a `DistributedLock` or an exact counter works across replicas on Redis or
+the database.
 
 Two things worth knowing:
 
@@ -293,6 +297,10 @@ by default:
 - A response with `Set-Cookie`, or `Cache-Control: private`, `no-cache` or
   `no-store`, is never cached.
 - `.vary_on([...])` puts request headers in the key.
+- `.key_prefix(..)` gives each layer its own keyspace (default
+  `rustango.cache_page`). `.cache_query(true)` also caches `QUERY` requests,
+  keyed on a digest of the body (up to 1 MiB). `.tenant_agnostic(true)` caches
+  without a resolved tenant, only for a page that is the same for every tenant.
 
 To drop a page after a write, call
 `layer.invalidate(&[PageKey::new(path, host)]).await?` on a clone of the layer
@@ -308,11 +316,17 @@ Under tenancy, mount the layer inside the tenancy layer; see
 
 ## Reference
 
-**`Cache` trait:** `get` · `set(key, value, ttl)` · `delete` · `exists` ·
+**`Cache` trait:** `get` · `set(key, value, ttl)` · `set_forever` · `delete` ·
+`exists` / `has_key` · `clear` · `delete_prefix` · `incr` / `decr` · `add`
+(set-if-absent) · `touch` (new TTL) · `get_bytes` / `set_bytes` ·
 `get_many` / `set_many` / `delete_many` · `get_or(key, default)`.
 
 **Free helpers:** `get_or_set(cache, key, factory, ttl)` ·
-`get_json` / `set_json` · `from_settings(&CacheSettings)`.
+`get_json` / `set_json` · `from_settings(&CacheSettings)` ·
+`from_settings_async(&CacheSettings)`.
+
+**Housekeeping:** `DatabaseCache::purge_expired()` and
+`FileCache::purge_expired()` delete expired entries; call them on a schedule.
 
 **What's built on the cache:** server-side [sessions](auth-sessions.md),
 distributed [rate limiting](middleware.md) (`CacheRateLimitLayer`), idempotency

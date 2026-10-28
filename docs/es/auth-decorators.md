@@ -11,8 +11,9 @@ tu página de inicio de sesión (flujo de navegador) o respondidas con 401/403
 > **Fuente:** `rustango::auth_decorators` (`login_required`, `login_required_or_401`,
 > `user_passes_test`, `superuser_required`, `active_required`,
 > `permission_required` + las variantes `_or_403`; `safe_next`, `extract_next`) —
-> detrás de la característica `tenancy` (las barreras leen el extractor
-> `SessionUser`).
+> las barreras están detrás de la característica `tenancy` (leen el extractor
+> `SessionUser`). `safe_next`, `extract_next`, `extract_next_named` y
+> `redirect_to_login` solo necesitan axum.
 >
 > **Versión ejecutable:** el comportamiento de restricción está cubierto por el
 > [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_decorators.rs)
@@ -88,7 +89,7 @@ let api = Router::new().route("/api/me", get(me)).layer(login_required_or_401())
 | `superuser_required(url)` | `superuser_required_or_403()` | `is_superuser && active` |
 | `user_passes_test(url, pred)` | `user_passes_test_or_403(pred)` | predicado sobre la fila `User` |
 | `permission_required(url, codename)` † | `permission_required_or_403(codename)` | posee el codename de permiso |
-† `permission_required` es la única barrera de esta columna que no siempre redirige. Un visitante **anónimo** recibe el 302 a `login_url`; quien sí ha iniciado sesión pero carece del codename recibe un **403** pelado, sin redirección ni cuerpo (`auth_decorators.rs:560`). Las otras cuatro redirigen en todos los casos de fallo.
+† `permission_required` es la única barrera de esta columna que no siempre redirige. Un visitante **anónimo** recibe el 302 a `login_url`; quien sí ha iniciado sesión pero carece del codename recibe un **403** pelado, sin redirección ni cuerpo. Las otras cuatro redirigen en todos los casos de fallo.
 
 Todas son capas tower — `.layer(...)`-las sobre un router o subrouter.
 
@@ -158,7 +159,8 @@ async fn login_post(Query(q): Query<HashMap<String, String>>, /* … */) -> Resp
 
 `safe_next` solo acepta rutas del mismo origen, relativas a la raíz — rechaza las
 URL absolutas, las `//host` relativas al esquema, las variantes con barra
-invertida y sus formas codificadas en porcentaje:
+invertida, sus formas codificadas en porcentaje, los caracteres de control y los
+valores vacíos:
 
 ```rust
 assert_eq!(safe_next("/dashboard"),            Some("/dashboard".to_owned()));
@@ -186,6 +188,9 @@ assert_eq!(safe_next("%2F%2Fevil.example/x"),   None);   // decodes to //evil
 - El `?next=` de la redirección siempre está codificado en porcentaje, de modo
   que CRLF / división de respuestas no puede filtrarse en la cabecera
   `Location`.
+- ¿Escribes tu propia barrera? `redirect_to_login(login_url, "next", original)`
+  construye el mismo 302, y `extract_next_named(&q, field)` lee un campo distinto
+  de `next`.
 
 
 ---
