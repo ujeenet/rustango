@@ -375,10 +375,21 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
         }
     }
     // Dropped or edited M2M junctions, before the tables they reference.
+    let mut renamed_junctions: Vec<&str> = Vec::new();
     for mt in &prev.m2m_tables {
         let now = current.m2m_table(&mt.through);
         if let Some(renames) = now.filter(|c| *c != mt).and_then(|c| m2m_renames(mt, c)) {
             changes.extend(renames);
+        } else if let Some(new) = now
+            .is_none()
+            .then(|| renamed_junction(prev, current, mt))
+            .flatten()
+        {
+            changes.push(SchemaChange::RenameTable {
+                old_name: mt.through.clone(),
+                new_name: new.to_owned(),
+            });
+            renamed_junctions.push(new);
         } else if now != Some(mt) {
             changes.push(SchemaChange::DropM2MTable {
                 through: mt.through.clone(),
@@ -460,7 +471,9 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     }
     // New M2M junction tables.
     for mt in &current.m2m_tables {
-        if prev.m2m_table(&mt.through).is_none() {
+        if prev.m2m_table(&mt.through).is_none()
+            && !renamed_junctions.contains(&mt.through.as_str())
+        {
             changes.push(create_m2m(mt));
         }
     }
@@ -575,6 +588,35 @@ fn m2m_renames(
     })
 }
 
+/// The one new junction with `old`'s ends when `old` is the one gone with
+/// them: its `through` was renamed, so the rows are kept.
+fn renamed_junction<'a>(
+    prev: &SchemaSnapshot,
+    current: &'a SchemaSnapshot,
+    old: &super::snapshot::M2MTableSnapshot,
+) -> Option<&'a str> {
+    let ends = |m: &super::snapshot::M2MTableSnapshot| {
+        let mut e = [
+            (m.src_table.clone(), m.src_col.clone()),
+            (m.dst_table.clone(), m.dst_col.clone()),
+        ];
+        e.sort_unstable();
+        e
+    };
+    let key = ends(old);
+    let mut came = current
+        .m2m_tables
+        .iter()
+        .filter(|m| prev.m2m_table(&m.through).is_none() && ends(m) == key);
+    let new = came.next().filter(|_| came.next().is_none())?;
+    let gone = prev
+        .m2m_tables
+        .iter()
+        .filter(|m| current.m2m_table(&m.through).is_none() && ends(m) == key)
+        .count();
+    (gone == 1).then_some(new.through.as_str())
+}
+
 fn is_self_ref(m: &super::snapshot::M2MTableSnapshot) -> bool {
     m.src_table == m.dst_table
 }
@@ -617,7 +659,7 @@ pub(super) fn add_composite_fk(
 
 /// Tables in `prev` but not `current`, each before any it references.
 /// A cycle falls back to name order.
-fn dropped_tables_child_first<'a>(
+pub(super) fn dropped_tables_child_first<'a>(
     prev: &'a SchemaSnapshot,
     current: &SchemaSnapshot,
 ) -> Vec<&'a str> {

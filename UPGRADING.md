@@ -154,6 +154,10 @@ untouched.
 
 With `with_health()`, `/health` and `/ready` no longer get the Host check or the HTTPS redirect. HTTP/2 requests now pass `allowed_hosts` by `:authority` instead of getting 400. `jwt::decode*` returns `JwtError::Decode` for a key under 32 bytes. `create-tenant` now exits non-zero when tenant migrations fail; rerun it with `--resume`. A blank `DATABASE_URL=` now falls through to the `DB_*` vars. A repeated `vary_on` header changes the page-cache key, so those pages miss once.
 
+### Refusals instead of silent data loss
+
+`update()`/`delete()` on a queryset with `join`/`join_sub`/`join_lateral` now return `QueryError::JoinDml`; narrow the write with `where_in_subquery` instead. `migrate --squash` refuses while models have unmigrated changes: run `makemigrations` first. In a tenancy dir `makemigrations --empty` now chains onto the last tenant file; pass `--scope registry` for a registry one. A changed M2M `through` name is now written as a `RenameTable`, not a drop and create. `Model::bulk_insert_on` still sends one statement; past the bind cap use the pool `bulk_insert`, which now chunks.
+
 ### Error pages keep the framework's own HTML pages
 
 With `[errors] enabled = true`, an HTML 4xx/5xx from the admin, tenant admin, operator console or generic views now passes through as rendered. A plain-text or JSON error from them is still dressed. On the admin add form, a blank NOT NULL non-text field with a column default now takes that default instead of failing.

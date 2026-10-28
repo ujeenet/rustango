@@ -14,7 +14,7 @@
 
 use super::diff::SchemaChange;
 use super::error::MigrateError;
-use super::file::{DataOp, Operation};
+use super::file::{DataOp, Migration, Operation};
 use super::snapshot::SchemaSnapshot;
 
 /// Compute the rollback form of a forward operation list.
@@ -43,6 +43,38 @@ pub fn invert(
         }
     }
     out.extend(last);
+    Ok(out)
+}
+
+/// [`invert`] for a whole file. The tables it created drop child first:
+/// their FKs are in `mig`'s own snapshot, not in `prev`.
+pub(crate) fn invert_migration(
+    mig: &Migration,
+    prev: &SchemaSnapshot,
+) -> Result<Vec<Operation>, MigrateError> {
+    let mut out = invert(&mig.forward, prev)?;
+    let created = super::diff::dropped_tables_child_first(&mig.snapshot, prev);
+    let dropped = |op: &Operation| match op {
+        Operation::Schema(SchemaChange::DropTable(t)) if created.contains(&t.as_str()) => {
+            Some(t.clone())
+        }
+        _ => None,
+    };
+    let (slots, names): (Vec<usize>, Vec<String>) = out
+        .iter()
+        .enumerate()
+        .filter_map(|(i, op)| dropped(op).map(|t| (i, t)))
+        .unzip();
+    let ordered: Vec<&str> = created
+        .iter()
+        .copied()
+        .filter(|c| names.iter().any(|n| n == c))
+        .collect();
+    if ordered.len() == slots.len() {
+        for (i, t) in slots.into_iter().zip(ordered) {
+            out[i] = Operation::Schema(SchemaChange::DropTable(t.to_owned()));
+        }
+    }
     Ok(out)
 }
 

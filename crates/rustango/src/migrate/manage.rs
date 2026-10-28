@@ -549,7 +549,7 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
                     "makemigrations [name]                  diff registry, write next file in <dir>\n\
                      makemigrations --app <app> [name]      diff one app, write to <project_root>/<app>/migrations/\n\
                      makemigrations --scope <s> [name]      <s> = registry|tenant; one file with that MigrationScope\n\
-                     makemigrations --empty <name>          empty scaffold for data ops\n\
+                     makemigrations --empty <name>          empty scaffold for data ops (--scope picks the chain)\n\
                      makemigrations --merge                 reconcile a divergent chain (two leaves\n\
                                                             on the same parent) by writing an empty\n\
                                                             NNNN_merge.json — issue #346\n\
@@ -591,7 +591,11 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
                 "makemigrations --empty requires a name".into(),
             ));
         };
-        let mig = make_empty(dir, &n)?;
+        let scope = match scope_override {
+            Some(crate::core::ModelScope::Registry) => super::MigrationScope::Registry,
+            Some(crate::core::ModelScope::Tenant) | None => super::MigrationScope::Tenant,
+        };
+        let mig = make_empty_in_scope(dir, &n, scope)?;
         writeln!(
             w,
             "wrote {} (empty scaffold — fill in `forward` with data ops)",
@@ -1231,6 +1235,16 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
         }
     }
 
+    // The squash is built from the models; on a database that ran the old
+    // files it is only recorded, so a change no file holds would never run.
+    if super::make::models_ahead_of(&all, has_registry_models())? {
+        return Err(MigrateError::Validation(
+            "migrate --squash: refused — the models have changes no migration holds yet. \
+             Run `makemigrations` first, then squash."
+                .into(),
+        ));
+    }
+
     writeln!(
         w,
         "squashing {} pending migration(s) into a fresh diff:",
@@ -1655,18 +1669,27 @@ pub(crate) async fn forget_pending_cmd_with<W: Write>(
 /// # Errors
 /// As [`super::file::list_dir`] / [`super::file::write`].
 pub fn make_empty(dir: &Path, name: &str) -> Result<Migration, MigrateError> {
+    make_empty_in_scope(dir, name, super::MigrationScope::default())
+}
+
+/// [`make_empty`] for `scope`: chains onto that scope's last file and copies
+/// its snapshot, renames included, so the next diff starts from it.
+///
+/// # Errors
+/// As [`make_empty`].
+pub fn make_empty_in_scope(
+    dir: &Path,
+    name: &str,
+    scope: super::MigrationScope,
+) -> Result<Migration, MigrateError> {
     let prior = file::list_dir(dir)?;
-    let prev_snapshot = prior.last().map_or_else(
-        || SchemaSnapshot {
-            tables: vec![],
-            m2m_tables: vec![],
-            indexes: vec![],
-            checks: vec![],
-            excludes: vec![],
-        },
-        |m| m.snapshot.clone(),
-    );
-    let prev_name = prior.last().map(|m| m.name.clone());
+    let chain: Vec<&Migration> = prior.iter().filter(|m| m.scope == scope).collect();
+    let head = chain.last().copied();
+    let prev_snapshot = head.map_or_else(SchemaSnapshot::default, |m| {
+        super::make::effective_snapshot(&chain, m)
+    });
+    let prev_name = head.map(|m| m.name.clone());
+    // Numbered across the whole dir, so the two scopes never share a name.
     let next_index = prior
         .last()
         .and_then(|m| file::extract_index(&m.name))
@@ -1678,7 +1701,7 @@ pub fn make_empty(dir: &Path, name: &str) -> Result<Migration, MigrateError> {
         created_at: chrono::Utc::now().to_rfc3339(),
         prev: prev_name,
         atomic: true,
-        scope: super::MigrationScope::default(),
+        scope,
         replaces: Vec::new(),
         merges: Vec::new(),
         snapshot: prev_snapshot,

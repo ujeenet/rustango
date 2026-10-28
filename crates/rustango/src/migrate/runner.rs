@@ -24,7 +24,7 @@ use crate::sql::sqlx::Row;
 use crate::sql::sqlx::PgPool;
 
 use super::file::{self, Migration, Operation};
-use super::invert::invert;
+use super::invert::invert_migration;
 use super::progress::{emit, MigrationEvent, MigrationObserver, Outcome};
 use super::snapshot::SchemaSnapshot;
 use super::{ddl, MigrateError};
@@ -953,9 +953,11 @@ fn prev_snapshot(
     let Some(prev_name) = &mig.prev else {
         return Ok(SchemaSnapshot::default());
     };
+    // With the parent's hand-written renames, as makemigrations reads it.
+    let chain: Vec<&Migration> = all.iter().collect();
     all.iter()
         .find(|m| &m.name == prev_name)
-        .map(|m| m.snapshot.clone())
+        .map(|m| super::make::effective_snapshot(&chain, m))
         .ok_or_else(|| {
             MigrateError::Validation(format!(
                 "migration `{}` declares prev=`{prev_name}` but that file is missing in {}",
@@ -1663,7 +1665,7 @@ async fn unapply_locked(
 
     let prev_snapshot = prev_snapshot(&all, &target, dir)?;
 
-    let inverted = invert(&target.forward, &prev_snapshot)?;
+    let inverted = invert_migration(&target, &prev_snapshot)?;
     let applied = applied_set_for(pool, ledger).await?;
     let after = super::make::rollback_snapshot(&all, &applied, &target, prev_snapshot);
 
@@ -5263,7 +5265,7 @@ async fn unapply_locked_pool(
 
     let prev_snapshot = prev_snapshot(&all, &target, dir)?;
 
-    let inverted = invert(&target.forward, &prev_snapshot)?;
+    let inverted = invert_migration(&target, &prev_snapshot)?;
     let applied = applied_set_pool_with_ledger(pool, ledger).await?;
     let after = super::make::rollback_snapshot(&all, &applied, &target, prev_snapshot);
 

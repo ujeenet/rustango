@@ -43,6 +43,8 @@ pub struct ChunkedIter<T> {
     /// number of rows actually returned (not by `chunk_size`) so a
     /// short final chunk doesn't skip ahead.
     pub(super) offset: i64,
+    /// The queryset's own `limit` as an end offset: no chunk reads past it.
+    pub(super) end: Option<i64>,
     /// `true` once a fetched chunk came back smaller than
     /// `chunk_size`. Further `next_chunk` / `next_row` calls skip the
     /// DB and return `Ok(None)`.
@@ -136,16 +138,29 @@ where
         }
         // Clone so the per-chunk LIMIT/OFFSET tweaks don't mutate the
         // original (the iterator may be re-used across many chunks).
+        let size = self.end.map_or(self.chunk_size, |end| {
+            self.chunk_size.min(end - self.offset)
+        });
+        if size <= 0 {
+            self.exhausted = true;
+            return Ok(None);
+        }
         let mut q = self.query.clone();
-        q.limit = Some(self.chunk_size);
-        q.offset = Some(self.offset);
+        // A set operation's window is on the merged result, not its head.
+        let (limit, offset) = if q.compound.is_empty() {
+            (&mut q.limit, &mut q.offset)
+        } else {
+            (&mut q.compound_limit, &mut q.compound_offset)
+        };
+        *limit = Some(size);
+        *offset = Some(self.offset);
         let rows = select_rows_pool_with_related::<T>(pool, &q).await?;
         let n = rows.len() as i64;
         if rows.is_empty() {
             self.exhausted = true;
             return Ok(None);
         }
-        if n < self.chunk_size {
+        if n < size {
             self.exhausted = true;
         }
         self.offset += n;
