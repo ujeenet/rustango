@@ -939,7 +939,7 @@ fn form_panel_rows(
             "delete_input_html": delete_input_html,
         }));
     }
-    // Typed rows whose row is gone: shown, never posted again.
+    // Typed rows not in the fetched window: shown, never posted again.
     if let Some(p) = &posted {
         let shown: HashSet<String> = rows.iter().map(|r| row_pk_text(r, pk_field)).collect();
         for (slot, pk) in &p.existing {
@@ -948,8 +948,11 @@ fn form_panel_rows(
             }
             rendered_rows.push(serde_json::json!({
                 "pk": pk,
+                // Not proof of a delete: the list is capped, and a PK
+                // may be posted in another spelling.
                 "error": format!(
-                    "Row {pk} was deleted after this page loaded; its changes were not saved."
+                    "Row {pk} is not in this list (deleted, or past the rows shown here); \
+                     its changes were not saved."
                 ),
                 "cells": [],
                 "hidden_pk": "",
@@ -2410,6 +2413,25 @@ mod tests {
         let html = render_prefixed_input(&cfg, &f, "s3cret", ("c", 0, WriteKind::Update));
         assert!(!html.contains("s3cret"), "{html}");
         assert!(html.contains("<em>set</em>"), "{html}");
+    }
+
+    /// A posted row outside the capped window may still exist: the
+    /// message does not call it deleted.
+    #[test]
+    fn a_posted_row_outside_the_window_is_not_called_deleted() {
+        let form: HashMap<String, String> = [
+            ("c-TOTAL_FORMS", "1"),
+            ("c-INITIAL_FORMS", "1"),
+            ("c-0-id", "1002"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+        let cfg = crate::core::AdminConfig::DEFAULT;
+        let (_, rows) = form_panel_rows(&cfg, &[], None, "c", &[], 0, Some(&form));
+        let error = rows[0]["error"].as_str().expect("an error row");
+        assert!(error.contains("1002"), "{error}");
+        assert!(!error.contains("was deleted"), "{error}");
     }
 
     #[test]

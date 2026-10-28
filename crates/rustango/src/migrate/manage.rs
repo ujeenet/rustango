@@ -678,38 +678,26 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
     // get theirs. Each scope is a no-op when nothing in that scope
     // changed; the user sees one or two "wrote ..." lines.
     if has_registry_models() {
-        let mut wrote_any = false;
         // Framework ("system app") migrations first — the framework's own
         // `rustango_*` tables are generated into `<project_root>/system/
         // migrations/` (registry + tenant scope), replacing the
         // hand-written bootstrap/ensure DDL. Silent when the framework
         // schema is unchanged (the common case for app developers).
+        // Every file is planned first: a refused scope writes none.
+        let run = super::make::make_migrations_tenancy(dir, name.as_deref(), drops)?;
         let project_root = dir.parent().unwrap_or(dir);
-        for scope in [
-            crate::core::ModelScope::Registry,
-            crate::core::ModelScope::Tenant,
-        ] {
-            if let Some(m) =
-                crate::migrate::make::make_migrations_system(project_root, scope, name.as_deref())?
-            {
-                writeln!(
-                    w,
-                    "wrote {} (system/{} scope)",
-                    file_path(&project_root.join("system").join("migrations"), &m.name).display(),
-                    scope.as_str(),
-                )?;
-                for op in &m.forward {
-                    writeln!(w, "    + {}", describe_op(op))?;
-                }
-                wrote_any = true;
+        for (scope, m) in &run.system {
+            writeln!(
+                w,
+                "wrote {} (system/{} scope)",
+                file_path(&project_root.join("system").join("migrations"), &m.name).display(),
+                scope.as_str(),
+            )?;
+            for op in &m.forward {
+                writeln!(w, "    + {}", describe_op(op))?;
             }
         }
-        for scope in [
-            crate::core::ModelScope::Registry,
-            crate::core::ModelScope::Tenant,
-        ] {
-            let mig =
-                super::make::make_migrations_for_scope_with(dir, scope, name.as_deref(), drops)?;
+        for (scope, mig) in &run.app {
             match mig {
                 Some(m) => {
                     writeln!(
@@ -721,13 +709,9 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
                     for op in &m.forward {
                         writeln!(w, "    + {}", describe_op(op))?;
                     }
-                    wrote_any = true;
                 }
                 None => writeln!(w, "no changes for {} scope", scope.as_str(),)?,
             }
-        }
-        if !wrote_any {
-            // Fall through silently — both scope-clean messages already printed.
         }
         return Ok(());
     }
@@ -4306,6 +4290,26 @@ fn json_tagged(v: &serde_json::Value) -> Option<&serde_json::Value> {
         .and_then(|m| m.get(JSON_TAG))
 }
 
+/// [`json_to_sql_value`] for a dumpdata fixture: a JSON column reads the
+/// [`JSON_TAG`] wrapper, and a bare `null` on a NOT NULL one is JSON `null`.
+/// Seed fixtures keep the plain reading.
+fn loaddata_value(
+    v: &serde_json::Value,
+    field: &crate::core::FieldSchema,
+) -> Result<crate::core::SqlValue, String> {
+    use crate::core::{FieldType, SqlValue};
+    if matches!(field.ty, FieldType::Json) {
+        if let Some(inner) = json_tagged(v) {
+            return Ok(SqlValue::Json(inner.clone()));
+        }
+        // Older dumps wrote JSON `null` untagged, as SQL NULL.
+        if v.is_null() && !field.nullable {
+            return Ok(SqlValue::Json(serde_json::Value::Null));
+        }
+    }
+    json_to_sql_value(v, field)
+}
+
 /// Rows per dumpdata page.
 const DUMP_PAGE: i64 = 500;
 
@@ -4774,7 +4778,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
             let Some(raw) = fields_obj.get(f.name) else {
                 continue;
             };
-            match json_to_sql_value(raw, f) {
+            match loaddata_value(raw, f) {
                 Ok(v) => {
                     columns.push(f.column);
                     values.push(v);
@@ -5087,8 +5091,7 @@ pub(crate) fn json_to_sql_value(
     field: &crate::core::FieldSchema,
 ) -> Result<crate::core::SqlValue, String> {
     use crate::core::{FieldType, SqlValue};
-    // A JSON field reads `null` below: a NOT NULL one can only mean JSON `null`.
-    if v.is_null() && !matches!(field.ty, FieldType::Json) {
+    if v.is_null() {
         return Ok(SqlValue::Null);
     }
     match field.ty {
@@ -5162,12 +5165,7 @@ pub(crate) fn json_to_sql_value(
                 .map(SqlValue::Uuid)
                 .map_err(|e| format!("Uuid parse: {e}"))
         }
-        // Older dumps wrote JSON `null` untagged, as SQL NULL.
-        FieldType::Json => Ok(match json_tagged(v) {
-            Some(inner) => SqlValue::Json(inner.clone()),
-            None if v.is_null() && field.nullable => SqlValue::Null,
-            None => SqlValue::Json(v.clone()),
-        }),
+        FieldType::Json => Ok(SqlValue::Json(v.clone())),
         FieldType::Decimal => {
             let s = v
                 .as_str()
@@ -7486,6 +7484,35 @@ mod gen_tests {
                 assert_eq!(String::from_utf8(buf).unwrap(), format!("{whole}\n"));
             }
         }
+    }
+
+    /// Only `loaddata` reads the dumpdata tag; a seed fixture's literal
+    /// `{"$json": 1}` and a `null` stay as written.
+    #[test]
+    fn only_loaddata_reads_the_json_tag() {
+        use crate::core::{FieldType, SqlValue};
+        use serde_json::{json, Value};
+        let mut f = field("j", FieldType::Json);
+        f.nullable = false;
+        let tagged = json!({"$json": 1});
+        assert!(
+            matches!(json_to_sql_value(&tagged, &f), Ok(SqlValue::Json(ref v)) if *v == tagged),
+            "a seed fixture keeps the literal object"
+        );
+        assert!(matches!(
+            json_to_sql_value(&Value::Null, &f),
+            Ok(SqlValue::Null)
+        ));
+        assert!(matches!(loaddata_value(&tagged, &f), Ok(SqlValue::Json(ref v)) if *v == json!(1)));
+        assert!(matches!(
+            loaddata_value(&Value::Null, &f),
+            Ok(SqlValue::Json(Value::Null))
+        ));
+        f.nullable = true;
+        assert!(matches!(
+            loaddata_value(&Value::Null, &f),
+            Ok(SqlValue::Null)
+        ));
     }
 
     #[test]

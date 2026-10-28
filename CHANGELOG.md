@@ -7,11 +7,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — ORM set operations and writes
 
 - `a.union(b).intersection(c)` and `a.difference(b).intersection(c)` read left to right on PG and MySQL too, as on SQLite.
-- A union ordered by a column the `values_*` projection leaves out works on every backend.
+- A `union_all` ordered by a column the `values_*` projection leaves out works on every backend; `union`, `intersection`, `difference` or a `distinct()` branch ordered that way is refused with `SqlError::SetOpOrderOutsideProjection` instead of deduplicating on the wrong columns.
 - SQLite runs a union of `select_related` branches with an outer `order_by`.
 - `bulk_upsert_pool` with a key repeated in one batch keeps the last row on every backend; PG used to fail.
 - `dates()` / `datetimes()` skip NULL values instead of failing the decode.
-- M2M `add` no longer links twice when the through model has no unique `(src, dst)` key.
+- M2M `add` no longer links twice when the through model has no unique `(src, dst)` key, and fires `Add` only when a row went in; with no registered source model it warns that concurrent adds are not serialized.
 
 ### Fixed — model attributes, migrations and MCP
 
@@ -71,7 +71,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `forget-pending` refuses a migration that a later one names in `prev` or `merges`, and names those files.
 - A data op with several SQL statements runs on PG and MySQL too; data-op SQL is sent unprepared.
 - Password-reset, email-verification and magic links join a `base_url` query with `&` and keep a `#fragment` last; signed URLs leave the fragment out of the signature.
-- The i18n seed and the translations editor skip, with a warning, a key longer than the 200-char column instead of failing every row.
+- The i18n seed and the translations editor skip, with a warning, a key longer than the 200-char column instead of failing every row; `docs/logging.md` lists the `rustango::i18n` target.
 - `LocaleMiddleware` matches the language cookie like `Accept-Language`, so `fr-CA` falls back to `fr`.
 - Admin list facets on a field named `page`, `q`, `year`, `month`, `day`, `count`, `trashed` or `facet_show_all` link `?<field>__exact=` and filter.
 - A ViewSet's create/update body cap follows a `BodyLimitLayer`, raised or lowered; without one it stays 4 MiB.
@@ -95,6 +95,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — migrations, secrets and auth
 
 - `makemigrations` refuses a column dropped beside a new column of the same type on one table (a likely rename that would delete the data), and names the `--empty` + `RenameColumn` route; `--drop-and-add` writes the drop + add on purpose. Every `DropColumn` now warns that its data goes.
+- `make_migrations_with`, `make_migrations_for_scope_with`, `make_migrations_for_app_with` and `make_migrations_scoped_with` are public and take a `DropAndAdd`.
+- Tenancy `makemigrations` plans the system, registry and tenant files before writing any, so a refused scope leaves no half-written run.
 - `reseal-tenant-secrets` re-seals operator TOTP secrets, so a key rotation no longer locks enrolled operators out of the console.
 - Tenancy `ModelBackend` Basic auth takes the same per-request slot before the cached-credential check, so a parallel burst cannot pass the account lock.
 - `jwt::decode` reads a fractional `exp` / `nbf` as a NumericDate instead of ignoring it, and refuses a non-numeric one.
@@ -104,8 +106,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — wrong data: cache counters, dumps, admin inlines
 
 - `Cache::incr` on `DatabaseCache` (PG, MySQL) no longer resets a 19-digit counter to `by`; every backend errors on i64 overflow, and `RedisCache` returns the exact value past 2^53.
-- `dumpdata` → `loaddata` keeps every f64 bit and tells JSON `null` from SQL NULL; a NOT NULL JSON column holding `null` reloads.
-- The admin re-shows a refused edit's inline rows by PK; a row deleted meanwhile shows as an error instead of moving its values onto another row.
+- `dumpdata` → `loaddata` keeps every f64 bit and tells JSON `null` from SQL NULL; a NOT NULL JSON column holding `null` reloads. Seed fixtures (`rustango::fixtures`) load JSON values as written, `{"$json": …}` included.
+- The admin re-shows a refused edit's inline rows by PK; a posted row not in the shown list (deleted, or past the row cap) shows as an error instead of moving its values onto another row.
 
 ## [0.61.9] — 2026-10-28
 

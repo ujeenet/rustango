@@ -199,6 +199,11 @@ formulaire n'affiche que ces champs et toute autre clé envoyée (par exemple
 valeur ; seul un `bool` passe à `false`, car une case décochée n'envoie rien. Avec
 CreateView, un champ listé absent qui a un défaut de colonne reçoit ce défaut.
 
+**Chaque champ listé est une saisie de l'utilisateur.** Ici le navigateur envoie
+`author_id`, donc n'importe qui peut publier au nom d'un autre. CreateView ne sait
+pas encore fixer un champ côté serveur : pour un champ que le serveur décide
+(l'auteur connecté), écrivez votre propre handler.
+
 Le template de formulaire (`posts_form.html`) est partagé avec UpdateView. `is_update`
 distingue les deux, et **`form`** porte à la fois les champs et les éventuels messages de
 validation :

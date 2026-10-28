@@ -183,7 +183,7 @@ mod scenarios {
     pub async fn check_ordered_union_values_other_column(pool: &Pool) {
         let names: Vec<String> = Item::objects()
             .filter("grp", "a")
-            .union(Item::objects().filter("grp", "b"))
+            .union_all(Item::objects().filter("grp", "b"))
             .order_by(&[("rnk", true)])
             .limit(4)
             .values_list_flat("name")
@@ -191,6 +191,44 @@ mod scenarios {
             .await
             .expect("ordered union, other column");
         assert_eq!(names, vec!["b2", "b1", "a3", "a2"]);
+    }
+
+    /// A set op that removes duplicates, ordered outside its projection, is
+    /// refused: a wider row would change what counts as a duplicate.
+    pub async fn check_deduping_set_op_ordered_outside_is_refused(pool: &Pool) {
+        let refused = |r: Result<Vec<String>, rustango::sql::ExecError>| {
+            assert!(
+                matches!(
+                    r,
+                    Err(rustango::sql::ExecError::Sql(
+                        rustango::sql::SqlError::SetOpOrderOutsideProjection { column: "rnk" }
+                    ))
+                ),
+                "{r:?}"
+            );
+        };
+        let head = || Item::objects().filter("grp", "a");
+        let other = || Item::objects().filter("grp", "b");
+        for op in [SetOp::Union, SetOp::Intersection, SetOp::Difference] {
+            let branch = other().compile().expect("branch");
+            refused(
+                head()
+                    .with_compound(op, branch)
+                    .order_by(&[("rnk", true)])
+                    .values_list_flat("name")
+                    .fetch::<String>(pool)
+                    .await,
+            );
+        }
+        refused(
+            head()
+                .distinct()
+                .union_all(other())
+                .order_by(&[("rnk", true)])
+                .values_list_flat("name")
+                .fetch::<String>(pool)
+                .await,
+        );
     }
 
     /// `with_compound` — the fallible pre-compiled-branch form.
@@ -271,6 +309,7 @@ mod pg_live {
     pg_case!(check_with_compound_precompiled_branch);
     pg_case!(check_set_ops_chain_left_to_right);
     pg_case!(check_ordered_union_values_other_column);
+    pg_case!(check_deduping_set_op_ordered_outside_is_refused);
 }
 
 // --------------------------------------------------------------- SQLite
@@ -318,6 +357,7 @@ mod sqlite_live {
     sqlite_case!(check_with_compound_precompiled_branch);
     sqlite_case!(check_set_ops_chain_left_to_right);
     sqlite_case!(check_ordered_union_values_other_column);
+    sqlite_case!(check_deduping_set_op_ordered_outside_is_refused);
 }
 
 // ---------------------------------------------------------------- MySQL
@@ -381,4 +421,5 @@ mod mysql_live {
     mysql_case!(check_with_compound_precompiled_branch);
     mysql_case!(check_set_ops_chain_left_to_right);
     mysql_case!(check_ordered_union_values_other_column);
+    mysql_case!(check_deduping_set_op_ordered_outside_is_refused);
 }

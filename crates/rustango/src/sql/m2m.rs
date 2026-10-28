@@ -102,8 +102,16 @@ impl M2MManager {
             vec![src.clone(), dst.clone()],
         );
         let link = vec![eq(self.src_col, src.clone()), eq(self.dst_col, dst.clone())];
+        let locks = self.source_locks(&src);
+        if locks.is_empty() {
+            tracing::warn!(
+                through = self.through,
+                src_col = self.src_col,
+                "M2M add: no registered source model, so concurrent adds are not serialized"
+            );
+        }
         // A skipped duplicate changed nothing, so it fires no signal (#2221).
-        if !insert_link(self.source_locks(&src), link, &query, pool).await? {
+        if !insert_link(locks, link, &query, pool).await? {
             return Ok(());
         }
         // #410 — fire m2m_changed after successful junction-row write.
@@ -388,17 +396,14 @@ fn source_lock(source: &'static ModelSchema, pk: &SqlValue) -> Option<SelectQuer
 }
 
 /// Insert `query` unless a junction row matches `link`, under `locks`: a
-/// through model need not have a unique `(src, dst)` key. `true` when it inserted.
+/// through model need not have a unique `(src, dst)` key. `true` only when
+/// a row went in; a unique key the check missed skips it.
 async fn insert_link(
     locks: Vec<SelectQuery>,
     link: Vec<Filter>,
     query: &InsertQuery,
     pool: &Pool,
 ) -> Result<bool, ExecError> {
-    let query = InsertQuery {
-        on_conflict: Some(crate::core::ConflictClause::DoNothing),
-        ..query.clone()
-    };
     query.validate()?;
     // SQLite has no row lock: take its write lock at BEGIN instead.
     let mut tx = crate::sql::write_transaction(pool).await?;
@@ -410,9 +415,9 @@ async fn insert_link(
     if super::executor::count_rows_on(&mut tx, &CountQuery::from_select(present)).await? > 0 {
         return Ok(false);
     }
-    super::executor::insert_tx(&mut tx, &query).await?;
+    let inserted = super::executor::insert_or_ignore_tx(&mut tx, query).await?;
     tx.commit().await.map_err(ExecError::Driver)?;
-    Ok(true)
+    Ok(inserted)
 }
 
 /// Delete the rows `owner` matches and insert `rows` in one transaction, so

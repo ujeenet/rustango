@@ -131,10 +131,12 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::error` | La causa de un 5xx, que el cuerpo de la respuesta omite |
 | `rustango::errors` | Una plantilla de página de error que no se renderizó, o un directorio de plantillas que no cargó |
 | `rustango::forms` | Valores de `DynamicForm` aceptados hoy pero rechazados en una versión futura |
+| `rustango::auth` | Comprobaciones de permisos que fallaron por un error de base de datos |
 | `rustango::auth_flows` | Enlaces de autenticación de un solo uso rechazados por el caché |
 | `rustango::aead` | Una clave secreta anterior vacía, o una clave de desarrollo que no se puede guardar |
 | `rustango::hmac_auth` | Configuración de la autenticación HMAC de peticiones |
 | `rustango::humanize` | Filtros de humanize |
+| `rustango::i18n` | Claves de traducción que no se guardan en la base de datos, recargas del catálogo fallidas |
 | `rustango::jobs` | Colas de trabajos en segundo plano |
 | `rustango::logging` | Avisos del propio subsistema |
 | `rustango::manage` | Verbos de `manage` |
