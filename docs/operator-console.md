@@ -80,6 +80,7 @@ The console answers on the **apex** domain (`RUSTANGO_APEX_DOMAIN`), not on a te
 | **Audit log** | Every change made through the console |
 | **Runs** | Provisioning and migration runs, streamed live |
 | **Database servers** | Servers tenant databases are created on, with their admin login |
+| **Change password** | Your own password |
 | **Two-factor sign-in** | Your own authenticator app (`totp` feature) |
 | **Shared SSO** | Sign-in providers offered to every tenant, with the callback URL to register (`admin-sso` feature; see [SSO](sso.md)) |
 
@@ -221,7 +222,7 @@ fails, the run rolls back like any other step.
 
 The admin sets their own password through a set-password link. The link
 works once, expires in 72 hours, and opens only this tenant's
-change-password page. With `Builder::first_admin_mailer(mailer, from)` it is
+change-password page. With `Builder::first_admin_mailer(mailer, from)` (`email` feature) it is
 mailed to the admin. Without a mailer, the run page shows it to you **once**,
 right after you submit; copy it and give it to the admin. It is never stored,
 audited or logged; the audit log records the user's creation only.
@@ -399,7 +400,7 @@ levels and add wiring, so they are not a fourth and fifth rung:
 | `router_with_impersonation` | edit | brand storage, the tenant session secret and a handoff URL, so an operator can enter a tenant |
 | `router_full` | whatever you pass | all of the above as `Option`s — `None` simply does not mount those routes |
 
-`Server::Builder::serve` mounts impersonation for you; a custom mount
+`rustango::server::Builder::serve` mounts impersonation for you; a custom mount
 point opts in by using `router_with_impersonation` in place of
 `router_with_pools`. Reach for `router_full` when you need a
 combination the shorthands do not name — it exists so that a new

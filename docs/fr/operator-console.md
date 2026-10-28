@@ -80,6 +80,7 @@ La console répond sur le domaine **apex** (`RUSTANGO_APEX_DOMAIN`), pas sur un 
 | **Audit log** | Chaque changement effectué via la console |
 | **Runs** | Exécutions de provisioning et de migration, diffusées en direct |
 | **Database servers** | Serveurs où les bases des tenants sont créées, avec leur login d'administration |
+| **Change password** | Votre propre mot de passe |
 | **Two-factor sign-in** | Votre application d'authentification (feature `totp`) |
 | **Shared SSO** | Fournisseurs de connexion proposés à chaque tenant, avec l'URL de callback à enregistrer (feature `admin-sso` ; voir [SSO](sso.md)) |
 
@@ -226,7 +227,7 @@ revient en arrière comme pour toute autre étape.
 L'administrateur choisit son propre mot de passe via un lien de définition de
 mot de passe. Le lien ne sert qu'une fois, expire au bout de 72 heures et
 n'ouvre que la page de changement de mot de passe de ce tenant. Avec
-`Builder::first_admin_mailer(mailer, from)`, il est envoyé par e-mail à
+`Builder::first_admin_mailer(mailer, from)` (feature `email`), il est envoyé par e-mail à
 l'administrateur. Sans mailer, la page de l'exécution vous l'affiche **une
 fois**, juste après la soumission ; copiez-le et transmettez-le à
 l'administrateur. Il n'est jamais stocké, audité ni journalisé ; le journal
@@ -409,7 +410,7 @@ quatrième et un cinquième échelon.
 | `router_with_impersonation` | édition | le stockage de marque, le secret de session du tenant et une URL de reprise, pour qu'un opérateur puisse entrer dans un tenant |
 | `router_full` | celui que vous passez | tout ce qui précède en `Option` — `None` ne monte simplement pas ces routes |
 
-`Server::Builder::serve` monte l'impersonation pour vous ; un point de
+`rustango::server::Builder::serve` monte l'impersonation pour vous ; un point de
 montage personnalisé y souscrit en utilisant `router_with_impersonation`
 à la place de `router_with_pools`. Recourez à `router_full` quand vous
 avez besoin d'une combinaison que les raccourcis ne nomment pas — il

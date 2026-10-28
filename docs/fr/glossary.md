@@ -60,6 +60,7 @@ requêtes comme les réponses sont généralement en JSON.
 | `201` | Created — votre nouvelle chose a été enregistrée |
 | `204` | Done — rien à renvoyer (p. ex. après une suppression) |
 | `400` | Bad request — vous avez envoyé quelque chose d'invalide (le corps dit quoi) |
+| `422` | Non traitable — les données n'ont pas passé la validation (le corps nomme le champ) |
 | `401` / `403` | Non connecté / non autorisé |
 | `404` | Not found (introuvable) |
 | `429` | Too many requests — ralentissez |
@@ -75,7 +76,7 @@ utilisée pour filtrer, rechercher, trier ou paginer les résultats — p. ex.
 
 **Pagination** — découper une longue liste de résultats en pages pour qu'une réponse ne soit pas
 énorme. L'**enveloppe** est l'emballage autour de la page qui vous indique aussi les
-totaux — p. ex. `{"count": 137, "page": 2, "results": [ … ]}`. Voir
+totaux — p. ex. `{"count": 137, "page": 2, "page_size": 20, "last_page": 7, "results": [ … ]}`. Voir
 [Pagination](viewsets.md#pagination).
 
 **`curl`** — un outil en ligne de commande pour envoyer des requêtes d'API à la main. Les
@@ -110,8 +111,8 @@ d'un ViewSet : transforme un modèle en **pages** HTML — une page de liste, un
 page de détail, et des formulaires de création/édition/suppression — rendues via des templates Tera,
 au lieu de JSON. La *vue HTML*. Voir [Vues HTML](html-views.md).
 
-**Template (gabarit)** — un fichier avec des espaces réservés (Rustango utilise [Tera](https://keats.github.io/tera/),
-très semblable à Jinja) que le serveur remplit de données pour produire
+**Template (gabarit)** — un fichier avec des espaces réservés (Rustango utilise [Tera](https://keats.github.io/tera/))
+que le serveur remplit de données pour produire
 une page HTML. `{{ post.title }}` insère une valeur ; `{% for … %}` fait une boucle.
 
 **Router / montage (mount)** — le router associe les URL entrantes au code qui les

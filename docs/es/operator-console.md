@@ -80,6 +80,7 @@ La consola responde en el dominio **apex** (`RUSTANGO_APEX_DOMAIN`), no en un su
 | **Audit log** | Cada cambio hecho a través de la consola |
 | **Runs** | Ejecuciones de aprovisionamiento y migración, en directo |
 | **Database servers** | Servidores donde se crean las bases de los tenants, con su login de administración |
+| **Change password** | Su propia contraseña |
 | **Two-factor sign-in** | Su propia app de autenticación (feature `totp`) |
 | **Shared SSO** | Proveedores de inicio de sesión ofrecidos a todos los tenants, con la URL de callback que hay que registrar (feature `admin-sso`; ver [SSO](sso.md)) |
 
@@ -228,7 +229,7 @@ cualquier otro paso.
 El administrador fija su propia contraseña con un enlace de establecimiento de
 contraseña. El enlace funciona una vez, caduca en 72 horas y solo abre la
 página de cambio de contraseña de este tenant. Con
-`Builder::first_admin_mailer(mailer, from)` se envía por correo al
+`Builder::first_admin_mailer(mailer, from)` (feature `email`) se envía por correo al
 administrador. Sin mailer, la página de la ejecución te lo muestra **una
 vez**, justo después de enviar; cópialo y dáselo al administrador. Nunca se
 guarda, audita ni registra en logs; el registro de auditoría solo anota la
@@ -415,7 +416,7 @@ peldaño:
 | `router_with_impersonation` | edición | almacenamiento de marca, el secreto de sesión del tenant y una URL de traspaso, para que un operador pueda entrar en un tenant |
 | `router_full` | el que le pases | todo lo anterior como `Option` — `None` simplemente no monta esas rutas |
 
-`Server::Builder::serve` monta la suplantación por ti; un punto de
+`rustango::server::Builder::serve` monta la suplantación por ti; un punto de
 montaje propio se acoge a ella usando `router_with_impersonation` en
 lugar de `router_with_pools`. Recurre a `router_full` cuando necesites
 una combinación que los atajos no nombran — existe para que un

@@ -92,13 +92,20 @@ feature). The trait surface:
 | `to_value` | `fn(&self) -> serde_json::Value` | Serialise to JSON (skips `write_only`). Overridable. |
 | `many` | `fn(&[Self::Model]) -> Vec<Self>` | Batch `from_model`. Overridable. |
 | `many_to_value` | `fn(&[Self::Model]) -> serde_json::Value` | Batch → JSON array. Overridable. |
+| `readable_source_fields` | `fn() -> &'static [&'static str]` | The **model columns** the output copies straight from the model (`source`-resolved; not `write_only`, `skip`, computed or relation fields). `?ordering=` on a ViewSet falls back to these. Generated. |
 | `writable_fields` | `fn() -> &'static [&'static str]` | Serializer field names accepted on write (excludes `read_only`, `skip`, `method`, `nested`, `many`, `slug`). |
 | `writable_source_fields` | `fn() -> &'static [&'static str]` | The **model columns** of the writable fields (`source`-resolved). The ViewSet write path persists only these. Generated. |
 | `from_writable_json` | `fn(&Value) -> Result<Self, FormErrors>` | Build an instance from a request body using only the writable fields (the rest default); per-field parse errors → `FormErrors`. Generated. |
-| `validate` | `fn(&self) -> Result<(), FormErrors>` | Runs declared per-field + cross-field validators. No-op when none are declared; overridable. |
+| `validate_patch` | `fn(&Self::Model, &Value) -> Result<(), FormErrors>` | Validate a partial update: field rules run only on the keys the body sends; the cross-field hook runs on the stored row with those keys laid over it. Generated. |
+| `validate` | `fn(&self) -> Result<(), FormErrors>` | Runs the declarative constraints, then per-field, then cross-field validators. No-op when there is nothing to check. Generated when there is. |
+
+"Overridable" applies to a hand-written `impl ModelSerializer`. The derive
+writes its own impl block, so on a derived serializer these methods are fixed;
+an inherent method with the same name only changes direct calls, not what a
+ViewSet runs.
 
 There is deliberately **no** `create` / `update` / `save` on the trait — writes
-go through the ORM (`model.save(&pool)`). When a serializer is wired into a
+go through the ORM (`model.save_pool(&pool)`). When a serializer is wired into a
 [ViewSet](viewsets.md), the create/update path uses `from_writable_json()` +
 `validate()` + `writable_source_fields()` to validate and filter the request
 before saving.
@@ -139,7 +146,7 @@ hand after `from_model` (e.g. a list of tag ids you fetch separately).
 > **`write_only` does not transform the value.** A `write_only` field is
 > accepted on write and persisted **verbatim** — the serializer never hashes or
 > encrypts it. For a password, hash it yourself (see [Passwords](auth-passwords.md))
-> before `save()`; `read_only` fields, conversely, are silently ignored on write
+> before `save_pool()`; `read_only` fields, conversely, are silently ignored on write
 > rather than rejected.
 
 ---
@@ -186,7 +193,9 @@ pub struct CommentSerializer {
 }
 ```
 
-The FK must already be loaded (via `select_related` / an eager fetch). If it
+The FK must already be loaded (via `select_related` / an eager fetch). A
+nullable `Option<ForeignKey<T>>` goes into an `Option<Child>` field and a NULL
+renders as `null`. If it
 **wasn't** loaded, the field falls back to `Default::default()` rather than
 panicking — production degrades gracefully on a missing prefetch. In tests, use
 `#[serializer(nested(strict))]` to turn that fallback into a panic so a dropped
@@ -220,7 +229,8 @@ pub struct PostWithTags {
 }
 
 // usage
-let tags = post.tags_m2m().all(&pool).await?;
+let tag_ids = post.tags_m2m().all(&pool).await?;   // ids, not rows
+let tags = Tag::find_many(tag_ids, &pool).await?;
 let mut s = PostWithTags::from_model(&post);
 s.set_tags(&tags);                       // generated setter, named set_<field>
 let json = s.to_value();
@@ -245,7 +255,8 @@ pub struct PostSerializer {
 ```
 
 Like nested, it reads from a loaded FK and falls back to the default when
-unloaded; it's display-only (not writable).
+unloaded; a NULL `Option<ForeignKey<T>>` renders `null` in an `Option` field.
+It's display-only (not writable).
 
 ---
 
@@ -300,14 +311,22 @@ impl PostSerializer {
 The derive generates a `validate(&self)` that runs each per-field validator and
 collects failures into a `FormErrors` keyed by field name.
 
-**Cross-field** — declare a struct-level hook and the validators merge. Either
-add `#[serializer(validate = "cross_validate")]` on the struct (returning
-`Result<(), FormErrors>`), or simply implement `validate(&self)` yourself when
-there are no per-field validators to generate it:
+**Cross-field** — add `#[serializer(validate = "cross_validate")]` on the
+struct and write `fn cross_validate(&self) -> Result<(), FormErrors>`. It runs
+last, and its errors merge with the field errors. Use this hook, not a
+hand-written inherent `fn validate(&self)`: a ViewSet calls the trait's
+`validate`, so it never sees an inherent one.
 
 ```rust
+#[derive(Serializer, serde::Deserialize, Default)]
+#[serializer(model = Post, validate = "cross_validate")]
+pub struct PostSerializer {
+    pub title: String,
+    pub body: String,
+}
+
 impl PostSerializer {
-    pub fn validate(&self) -> Result<(), rustango::forms::FormErrors> {
+    fn cross_validate(&self) -> Result<(), rustango::forms::FormErrors> {
         let mut errors = rustango::forms::FormErrors::default();
         if self.title.is_empty() {
             errors.add("title", "title cannot be empty");          // field error
@@ -327,16 +346,22 @@ impl PostSerializer {
 constraints above (`max_length` / `min_length` / `min` / `max` / inherited
 `choices`), custom rules are plain functions — there's no `email`/regex magic,
 which keeps custom validation explicit and testable. Outside a ViewSet the
-framework doesn't auto-render `FormErrors` to an HTTP body; map it to your 400
-response (the field/non-field split lines up with the error JSON a ViewSet
-returns).
+framework doesn't render the field map for you. `?` into a `RustangoError`
+answers `422`, but with the errors as one text message. For the
+`{field: [msgs]}` shape a ViewSet returns, build the `422` body yourself from
+`.fields()` and `.non_field()`.
+
+On a partial update (`PATCH`) a ViewSet calls `validate_patch` instead: field
+rules run only on the keys the body sends, and the cross-field hook sees the
+stored row with those keys laid over it.
 
 ---
 
 ## Unique-together validation
 
 To check before saving that a candidate row won't collide on a multi-column
-unique index, call `check_unique_together_pool`:
+unique index, call `check_unique_together_pool` (it takes a `rustango::sql::Pool`,
+so it works on every backend):
 
 ```rust
 use std::collections::HashMap;
@@ -355,6 +380,9 @@ It walks the model's declared multi-column unique indexes and returns
 `Err(FormErrors)` with a non-field error per collision
 (`"The fields a, b must be unique together."`). Single-column `unique` is left
 to the insert's conflict handling; partial (`unique_when`) indexes are skipped.
+A constraint with a column missing from `values`, or set to `SqlValue::Null`,
+is skipped too, since a NULL never collides. A failed query returns `Err`
+rather than "no collision".
 
 ---
 
@@ -376,7 +404,7 @@ let out = hyperlinked_to_value(base, "/api/posts/{pk}", "id", &fk_templates);
 // → { "url": "/api/posts/42", "author_id_url": "/api/users/7", "id": 42, ... }
 ```
 
-`hyperlink_url(template, &pk)` does a one-off `{pk}` substitution;
+`hyperlink_url(template, &pk)` replaces every `{pk}`, encoded as one path segment;
 `hyperlinked_to_value` adds a top-level `url` plus a `<fk>_url` per template
 (null FK → null URL). The original id/`<fk>_id` keys are kept (remove them after
 if you want them gone).
@@ -436,7 +464,7 @@ let body = PostSerializer::from_model(&post).to_value();   // shaped JSON
 
 Outside a ViewSet, the serializer derives `serde::Deserialize`, so you can parse
 a request body into it, run `.validate()`, and — on success — map the data onto
-a model and `save(&pool)`. `from_writable_json()` builds an instance from only
+a model and `save_pool(&pool)`. `from_writable_json()` builds an instance from only
 the writable keys (read-only / computed fields default), and `writable_fields()`
 / `writable_source_fields()` tell you which keys are accepted — the same
 machinery the ViewSet uses internally.
@@ -486,7 +514,10 @@ pub struct PostSerializer {
 }
 ```
 
-Then register the module (`mod post_serializer;`) alongside your others.
+The file goes to `src/post_serializer.rs`; `--model` defaults to `Post`, and an
+existing file is never overwritten. Then register the module: `pub mod
+post_serializer;` in `src/lib.rs` (or `mod post_serializer;` in `src/main.rs`
+when the project has no `lib.rs`). The command prints the line to add.
 
 ---
 
@@ -495,11 +526,12 @@ Then register the module (`mod post_serializer;`) alongside your others.
 A few sharp edges and escape hatches worth knowing:
 
 - **Conditional fields.** There's no runtime field selection (fields are fixed
-  at compile time). For "include only when present", use `Option<T>` plus
-  `#[serde(skip_serializing_if = "Option::is_none")]` on the field — the custom
-  `Serialize` impl honours serde attributes.
-- **Custom output shape.** Override `to_value(&self)` on your struct for a fully
-  bespoke JSON object when the attributes aren't enough.
+  at compile time). An `Option<T>` field always renders, as `null` when empty.
+  The derive's own `Serialize` ignores `#[serde(...)]` field attributes such as
+  `skip_serializing_if` or `rename`; rename with `source` instead.
+- **Custom output shape.** For a fully bespoke JSON object, post-process the
+  `to_value()` result, or write `impl ModelSerializer` by hand (with your own
+  `serde::Serialize`) instead of deriving it.
 - **Writable nested objects** aren't supported — `nested` / `many` / `slug`
   fields are output-only. Accept writes as scalar ids and resolve them yourself.
 - **Built-in validators are length/range/choice only** — `max_length` /
@@ -507,7 +539,7 @@ A few sharp edges and escape hatches worth knowing:
   rules (`email`, regex, …) are functions you write (see
   [Validation](#validation)).
 - **One per-field validator per field.** For multiple rules on a field, combine
-  them in that field's function, or add a cross-field `validate(&self)`.
+  them in that field's function, or add a container `validate = "fn"` hook.
 - **The serializer doesn't persist.** Map → validate → hand the data to the ORM;
   there's no `serializer.save()`.
 

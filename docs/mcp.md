@@ -156,9 +156,12 @@ SQLite or MySQL tenancy use `secure_tenant_router_from_settings_for::<sqlx::Sqli
 The authed router mounts: `POST {prefix}` (JSON-RPC), `GET {prefix}` (SSE
 notifications), `POST {prefix}/token` (credential → JWT), `POST {prefix}/oauth/token`
 (OAuth 2.1), and the two `.well-known/*` discovery documents. It signs agent
-tokens with `RUSTANGO_SESSION_SECRET`.
+tokens with `RUSTANGO_SESSION_SECRET`. If that is unset or shorter than 32 bytes,
+it logs a warning and uses a random per-process key, so tokens die on restart.
 
-The `initialize` handshake is a plain JSON-RPC POST and works on any mount:
+The `initialize` handshake is a plain JSON-RPC POST. On the authed mount every
+POST needs a Bearer token, `initialize` and `ping` included; an unauthed call
+gets `401`.
 
 ```json
 // → POST /mcp
@@ -170,7 +173,9 @@ The `initialize` handshake is a plain JSON-RPC POST and works on any mount:
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
     "serverInfo": { "name": "rustango", "version": "0.61.7" },
-    "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
+    "capabilities": { "tools": { "listChanged": true }, "prompts": { "listChanged": true },
+                      "resources": { "listChanged": true, "subscribe": false },
+                      "logging": {}, "completions": {} } } }
 ```
 
 To give agents server-wide guidance, call
@@ -218,8 +223,10 @@ claude mcp add --transport http my-app https://acme.example/mcp \
 On the raw-key path the server verifies the secret (argon2, with a short
 process-local cache so the hash isn't recomputed per request), re-checks
 liveness, and resolves grants **on every request** — a user-owned key always
-reflects its owner's live RBAC, and revocation applies immediately instead of
-waiting out a JWT's TTL. Set `[mcp] rate_limit_per_minute` in production to
+reflects its owner's live RBAC. The JWT path does the same: each request
+re-checks that the agent (and its owner) is active and its secret not rotated,
+and reads grants from the rows, not the claims. So revocation applies at once on
+both paths. Set `[mcp] rate_limit_per_minute` in production to
 bound verification work. The effect, verified end to end:
 
 ```rust
@@ -236,7 +243,9 @@ assert_eq!(out["structuredContent"]["sum"], 5);
 ```
 
 Tokens are tenant-pinned: a token minted for `acme` is rejected against any other
-tenant (cross-tenant replay → 401). Revoke an agent and its JTI is blacklisted.
+tenant (cross-tenant replay → 401). Rotating the secret or deactivating the agent
+refuses its tokens on the next request; a JTI revoked through the
+`JwtLifecycle` is refused too.
 
 ### User-owned keys (permission-driven capabilities)
 
@@ -274,7 +283,7 @@ flattened into the JWT's `skills`/`tools` claims. So `tools/list`,
 with no change to those handlers. The owning user rides in the token's `uid`
 claim; a tool handler reads it as `ctx.agent.user_id` to scope work to that
 member. Revoke fresh capabilities by changing the user's permissions (they
-re-resolve on the next token); revoke the key itself with
+re-resolve on the next request); revoke the key itself with
 `revoke_user_key_pool(&pool, user_id, agent_id)`. List a member's keys with
 `list_user_keys_pool(&pool, user_id)`.
 
@@ -286,7 +295,7 @@ a scoped key (`skills = &["coach", …]`) is limited to those, and gets nothing
 once its last pinned skill is revoked. Resolution always
 re-intersects scope with the *current* entitlement — so a key can never exceed
 the owner's permissions, and losing a permission narrows every key on the next
-mint. Scoping to a skill the owner isn't entitled to is refused at creation.
+request. Scoping to a skill the owner isn't entitled to is refused at creation.
 
 Standalone agents are unaffected — a machine agent (`user_id = None`) still
 uses only its explicit `grant_skill_pool` grants.
@@ -331,9 +340,9 @@ created key #7 for user `alice` in tenant `acme` (label `Alice's phone`, scope f
 $ cargo run -- create-user-key acme alice --label "coach bot" --skill coach
 ```
 
-Alice's key now resolves the `coach` skill's tools at every token-issue because
+Alice's key now resolves the `coach` skill's tools on every request because
 she holds `mcp.coach`. Change her permissions and the capabilities re-resolve on
-her next token; revoke the key itself with `revoke-user-key`. The same key id is
+her next request; revoke the key itself with `revoke-user-key`. The same key id is
 distinguishable from machine agents in the tenant admin (the `Agent` list shows
 `user_id`).
 
@@ -350,7 +359,7 @@ stream (`GET {prefix}`) for server→client notifications. Methods:
 
 | Method | Auth | Purpose |
 |---|---|---|
-| `initialize` · `ping` | no | handshake + liveness |
+| `initialize` · `ping` | on the authed mount | handshake + liveness |
 | `tools/list` · `tools/call` | yes | discover + invoke tools (granted only) |
 | `prompts/list` · `prompts/get` | yes | skill-derived prompts |
 | `resources/list` · `resources/read` · `resources/templates/list` | yes | static + skill resources |
@@ -364,6 +373,10 @@ JSON-RPC `error` with codes like `-32002` (`TOOL_NOT_FOUND`), `-32003`
 (`TOOL_FORBIDDEN`), `-32602` (`INVALID_PARAMS`). Long tools report progress and
 honor cancellation via the `McpContext`.
 
+Each `tools/call` writes an audit-log entry with the tool name and its arguments.
+Values under sensitive keys (`password`, `token`, `secret`, …) are redacted.
+An audit failure only logs a warning; the call still runs.
+
 ---
 
 ## Settings
@@ -372,12 +385,13 @@ The `[mcp]` section (read by `secure_tenant_router_from_settings`):
 
 ```toml
 [mcp]
-prefix                = "/mcp"   # URL prefix the router mounts under
+prefix                = "/mcp"   # not applied by the router: pass
+                                 # settings.mcp.prefix() to .nest() yourself
 token_ttl_secs        = 900      # agent access-token lifetime (15 min)
 enable_sse            = true     # serve the GET {prefix} SSE stream
 allowed_origins       = []       # CORS allow-list (empty = same-origin only)
 rate_limit_per_minute = 0        # per-IP cap (0/unset = unlimited)
-max_tools_listed      = 0        # tools/list page size (0/unset = unlimited)
+max_tools_listed      = 0        # page size of every */list (0/unset = unlimited)
 max_body_bytes        = 1048576  # JSON-RPC body cap — raise for tools that
                                  # accept inline payloads (base64 uploads)
 ```

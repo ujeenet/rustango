@@ -120,7 +120,7 @@ impl rustango::openapi::OpenApiSchema for Money {
 ## Rutas desde ViewSets
 
 `ViewSet::openapi_paths(prefix, schema_ref)` devuelve los pares `(path, PathItem)` para
-las cinco rutas CRUD estándar — list, create, retrieve, update, partial update,
+las seis operaciones CRUD estándar — list, create, retrieve, update, partial update,
 delete — conectadas para referenciar un esquema de componente registrado:
 
 ```rust
@@ -160,8 +160,10 @@ DELETE), y se mantiene sincronizado con la configuración del ViewSet:
   `?ordering=` aparece en todos los ViewSets excepto en los de paginación por cursor,
   que siempre ordenan por la columna del cursor. Los campos binarios son
   `format: hex`, tal como el servidor los lee y escribe.
-- **Parámetro de ruta** → `{pk}` tipado a partir de la clave primaria del modelo.
-- **`operationId`** → `list_post`, `create_post`, … (en snake-case por acción).
+- **Parámetro de ruta** → `{pk}` tipado a partir de la clave primaria del modelo;
+  `.pk_param(name)` lo renombra.
+- **`operationId`** → `list_post`, `create_post`, `retrieve_post`, `update_post`,
+  `partial_update_post`, `destroy_post` (acción + nombre del esquema en snake-case).
 
 > El ViewSet en sí está documentado en la [guía de ViewSets](viewsets.md).
 
@@ -184,7 +186,9 @@ let app = axum::Router::new()
 ```
 
 Las páginas del visor son diminutas cáscaras HTML que cargan Swagger UI / Redoc desde
-un CDN (`unpkg` / `jsdelivr`) — no se empaqueta ningún JS en **Rustango**. Para un
+un CDN (`unpkg` / `jsdelivr`), cada uno fijado a una versión exacta con un hash
+Subresource Integrity — no se empaqueta ningún JS en **Rustango**. Cargan la spec
+junto a ellas, así que el router puede anidarse bajo cualquier prefijo. Para un
 despliegue aislado (air-gapped), escribe `spec.to_json()` en un archivo al arrancar y
 auto-hospeda los assets del visor desde tu propio directorio estático.
 
@@ -218,7 +222,10 @@ let json = spec.to_json();   // pretty-printed OpenAPI 3.1
 ```
 
 `OpenApiSpec` también acepta `.contact(...)`, `.license(...)`, `.add_tag(...)` y
-múltiples entradas `.server(...)`.
+múltiples entradas `.server(...)`. `Operation` añade `.description`,
+`.parameter`, `.request_body(RequestBody::json(..) / ::form(..))` y
+`.deprecated()`; `Parameter` tiene los constructores `path` / `query` / `header`;
+`Response` añade `.header(name, schema)`.
 
 ---
 

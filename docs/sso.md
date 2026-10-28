@@ -16,8 +16,8 @@ only when the provider has **`allow_email_link`** on (default off), and
 never when the account is a superuser or staff (tenant: holds any
 permission; bare admin: every account). Those accounts are linked by an
 admin, who adds the `SsoLink` row in the admin; the refusal log line names
-the subject. (The member flow, below, auto-provisions by default; see
-below to turn it off.)
+the subject. (The member flow, below, can also create an account for an
+unknown email; that is off by default.)
 
 > **Source:** the admin-independent core `rustango::sso` (`SsoProvider`,
 > `build_provider`, `verified_email`, `ResolvedSso`, `SsoError`), the link
@@ -123,7 +123,8 @@ discovered at login — no per-provider endpoint wiring.
 - **Operator console** (multi-tenancy): an operator defines a
   **`SharedSsoProvider`** once and it's offered to **every** tenant
   (a company-wide Google, say). Managed from the console's *Shared SSO*
-  panel, where *Allow email linking* toggles `allow_email_link` in place
+  panel (`/sso-shared`, `admin-sso` feature; every operator can list,
+  changes need an editable console), where *Allow email linking* toggles `allow_email_link` in place
   (the id and its links stay). The flag applies to **every** tenant.
   *Edit* (`/sso-shared/{id}/edit`) changes a provider in place (same id
   and slug; a blank secret keeps the saved one), and each row shows the
@@ -137,9 +138,10 @@ override a shared provider for itself.
 
 The callback URL is derived per request from the host + slug
 (`https://<host><login>/sso/<slug>/callback`), so register that with the
-IdP. A user is linked by opt-in email linking (non-privileged tenant
+IdP. The scheme is `https` unless a trusted proxy sends
+`X-Forwarded-Proto`. A user is linked by opt-in email linking (non-privileged tenant
 users), or by a superuser adding an `SsoLink` row: `provider_source`
-(`tenant`, `shared` or `admin`), `provider_id` (the provider row id),
+(`tenant`, `shared`, `admin`, or `app` for a native sign-in), `provider_id` (the provider row id),
 `issuer` (`kind`, or `kind|issuer_url` without a trailing slash),
 `subject` and `user_id`. The admin computes
 `key_sha256`. The refusal log line (`sso refused`) carries `provider_id`,
@@ -149,9 +151,19 @@ without it nobody can add links.
 
 A link created more than 5 minutes before the account it points at (an id
 reused after a restore, say) logs a warning and still signs in.
+A link whose user no longer exists is deleted at the next sign-in.
 `rustango::sso::link::set_stale_links(StaleLinks::Drop)` deletes such a link
 instead. Use it only when account `created_at` values are never imported or
 backfilled.
+
+With the `totp` feature, a bare-admin user with a confirmed TOTP device
+must still enter a code after SSO. The admin shows the code form and
+keeps the pending sign-in in a signed cookie for 5 minutes; the form
+posts to `<login>/sso-totp`. The tenant admin has no TOTP step.
+
+`manage check --deploy` warns about an enabled provider that would refuse
+every existing user: no `SsoLink` rows, and email linking off or only
+privileged users. In the bare admin that means any provider with no links.
 
 ## Member (end-user) SSO
 
@@ -163,7 +175,7 @@ admin. It reuses the exact same `rustango::sso` core and the tenant's own
 `SsoProvider` rows — only the session it mints differs, which is why it
 lives behind the `sso` feature (not `admin-sso`) and needs no auto-admin.
 
-Mount `member_sso_router` into a `tenancy::server::Builder` stack (it
+Mount `member_sso_router` into a `rustango::server::Builder` stack (it
 reads the resolved `Arc<TenantContext>` the builder injects):
 
 ```rust
@@ -187,10 +199,13 @@ It mounts two per-slug routes off `login_base`:
 - `GET {login_base}/sso/{slug}/callback` — complete it, find-or-provision
   the member, mint the session cookie.
 
+A path-prefix tenant gets the same two routes under its prefix.
+
 Differences from the admin flow:
 
 - **Callback scheme.** The member `redirect_uri` takes its scheme from a
-  trusted proxy's `X-Forwarded-Proto`, else `http` on a loopback host
+  trusted proxy's `X-Forwarded-Proto` (and its host from
+  `X-Forwarded-Host`), else `http` on a loopback host
   (`localhost`, `*.localhost`, a loopback IP) and `https` everywhere else,
   so `localhost.example.com` gets `https`.
 - **Auto-provisioning.** With `auto_provision = true` (opt-in; the default is `false`), a
@@ -199,9 +214,11 @@ Differences from the admin flow:
   but unusable random password hash (SSO users can't password-login) —
   and links it. An email that matches an existing account follows the
   `allow_email_link` rule above. Set it to `false` to refuse unknown
-  emails. A native sign-in calls `find_or_provision_member` directly; its
-  `MemberSignIn` result tells `NotLinked` (an account has the email but
-  may not be linked by it) apart from `NoAccount`.
+  emails. A native sign-in (an app that verified its own ID token) calls
+  `find_or_provision_member` directly, with `ProviderKey::app(issuer)` as
+  the key. Its `MemberSignIn` result is `Member(id)`, `NotLinked` (an
+  account has the email but may not be linked by it), `NoAccount`,
+  `Inactive`, `Unverified` or `Refused`.
 - **Its own session cookie.** The member cookie
   (`rustango_member_session`) is **domain-separated** from the tenant /
   admin session cookies: the signed message carries a per-domain tag and
@@ -210,6 +227,10 @@ Differences from the admin flow:
   `RUSTANGO_SESSION_SECRET`. It is slug-bound (a cookie minted for `acme`
   never authenticates on `globex`) and invalidated by a password rotation
   (parity with the admin session).
+- **Logout.** `member_auth::logout(&pool, &user)` ends the member's
+  sessions on every device and returns the `Set-Cookie` value that clears
+  the cookie. On a path-prefix tenant use `logout_at`, which clears the
+  cookie on the prefix path.
 
 Read the current member in a handler with the **`CurrentMember`**
 extractor — the member analogue of `SessionUser`. It's infallible
@@ -239,9 +260,15 @@ variable. It's decrypted in memory only at login, to authenticate to the
 IdP's token endpoint. So a leaked DB dump never exposes the secret, and
 each tenant keeps its own secret with no per-provider env var.
 
-> Set `RUSTANGO_SECRET_KEY` in the deployment (any length; it's SHA-256'd
-> to a 32-byte key). Without it, saving or using a provider fails fast —
-> the same posture as a missing database URL.
+> Set `RUSTANGO_SECRET_KEY` in the deployment. It is SHA-256'd to a
+> 32-byte key; use at least 32 random characters (with tenant
+> provisioning mounted, `check --deploy` warns about a shorter key). Without it, saving or using a provider fails
+> fast — the same posture as a missing database URL.
+
+To rotate the key, set the new value in `RUSTANGO_SECRET_KEY` and the old
+one in `RUSTANGO_SECRET_KEY_PREVIOUS`. Reads fall back to the old key. In
+a multi-tenant deployment, `manage reseal-tenant-secrets --apply` then
+re-seals the shared and tenant SSO secrets with the new key.
 
 ## Providers (presets)
 

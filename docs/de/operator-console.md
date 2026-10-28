@@ -80,6 +80,7 @@ Die Konsole antwortet auf der **Apex**-Domain (`RUSTANGO_APEX_DOMAIN`), nicht au
 | **Audit log** | Jede Änderung, die über diese Konsole lief |
 | **Runs** | Provisioning- und Migrationsläufe, live gestreamt |
 | **Database servers** | Server, auf denen Tenant-Datenbanken angelegt werden, mit ihrem Admin-Login |
+| **Change password** | Das eigene Passwort |
 | **Two-factor sign-in** | Die eigene Authenticator-App (Feature `totp`) |
 | **Shared SSO** | Anmelde-Provider, die jedem Tenant angeboten werden, mit der zu registrierenden Callback-URL (Feature `admin-sso`; siehe [SSO](sso.md)) |
 
@@ -226,7 +227,7 @@ jedem anderen Schritt.
 Der Admin setzt sein Passwort selbst über einen Set-Password-Link. Der Link
 funktioniert einmal, läuft nach 72 Stunden ab und öffnet nur die
 Passwort-ändern-Seite dieses Tenants. Mit
-`Builder::first_admin_mailer(mailer, from)` wird er dem Admin gemailt. Ohne
+`Builder::first_admin_mailer(mailer, from)` (Feature `email`) wird er dem Admin gemailt. Ohne
 Mailer zeigt die Lauf-Seite ihn dir **einmal**, direkt nach dem Absenden;
 kopiere ihn und gib ihn dem Admin. Er wird nie gespeichert, auditiert oder
 geloggt; das Audit-Log hält nur das Anlegen des Benutzers fest.
@@ -412,7 +413,7 @@ Sprosse:
 | `router_with_impersonation` | bearbeitend | Brand-Storage, das Tenant-Session-Secret und eine Handoff-URL, damit ein Operator einen Tenant betreten kann |
 | `router_full` | was immer du übergibst | all das als `Option` — `None` hängt die jeweiligen Routen schlicht nicht ein |
 
-`Server::Builder::serve` hängt Impersonation für dich ein; ein eigener
+`rustango::server::Builder::serve` hängt Impersonation für dich ein; ein eigener
 Mount-Punkt entscheidet sich dafür, indem er `router_with_impersonation`
 statt `router_with_pools` verwendet. Greif zu `router_full`, wenn du eine
 Kombination brauchst, die die Kurzformen nicht benennen — es existiert,

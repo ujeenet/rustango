@@ -121,7 +121,7 @@ impl rustango::openapi::OpenApiSchema for Money {
 ## Chemins depuis les ViewSets
 
 `ViewSet::openapi_paths(prefix, schema_ref)` retourne les paires
-`(path, PathItem)` pour les cinq routes CRUD standard — list, create, retrieve,
+`(path, PathItem)` pour les six opérations CRUD standard — list, create, retrieve,
 update, partial update, delete — câblées pour référencer un schéma de composant
 enregistré :
 
@@ -158,8 +158,10 @@ PATCH, DELETE), et il reste synchronisé avec la configuration du ViewSet :
   `max_page_size`. `?ordering=` est listé sur chaque ViewSet sauf ceux paginés
   par curseur, qui trient toujours par la colonne du curseur. Les champs
   binaires sont en `format: hex`, comme le serveur les lit et les écrit.
-- **Paramètre de chemin** → `{pk}` typé d'après la clé primaire du modèle.
-- **`operationId`** → `list_post`, `create_post`, … (en snake_case par action).
+- **Paramètre de chemin** → `{pk}` typé d'après la clé primaire du modèle ;
+  `.pk_param(name)` le renomme.
+- **`operationId`** → `list_post`, `create_post`, `retrieve_post`, `update_post`,
+  `partial_update_post`, `destroy_post` (action + nom du schéma en snake_case).
 
 > Le ViewSet lui-même est documenté dans le [guide des ViewSets](viewsets.md).
 
@@ -182,8 +184,10 @@ let app = axum::Router::new()
 ```
 
 Les pages du visualiseur sont de minuscules coquilles HTML qui chargent Swagger
-UI / Redoc depuis un CDN (`unpkg` / `jsdelivr`) — aucun JS n'est empaqueté dans
-**Rustango**. Pour un déploiement isolé du réseau, écrire `spec.to_json()` dans un
+UI / Redoc depuis un CDN (`unpkg` / `jsdelivr`), chacun figé sur une version
+exacte avec un hash Subresource Integrity — aucun JS n'est empaqueté dans
+**Rustango**. Elles chargent la spec à côté d'elles, donc le routeur peut être
+imbriqué sous n'importe quel préfixe. Pour un déploiement isolé du réseau, écrire `spec.to_json()` dans un
 fichier au démarrage et héberger soi-même les assets du visualiseur depuis votre
 propre répertoire statique.
 
@@ -217,7 +221,10 @@ let json = spec.to_json();   // pretty-printed OpenAPI 3.1
 ```
 
 `OpenApiSpec` accepte aussi `.contact(...)`, `.license(...)`, `.add_tag(...)`, et
-plusieurs entrées `.server(...)`.
+plusieurs entrées `.server(...)`. `Operation` ajoute `.description`,
+`.parameter`, `.request_body(RequestBody::json(..) / ::form(..))` et
+`.deprecated()` ; `Parameter` a les constructeurs `path` / `query` / `header` ;
+`Response` ajoute `.header(name, schema)`.
 
 ---
 

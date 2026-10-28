@@ -121,7 +121,7 @@ impl rustango::openapi::OpenApiSchema for Money {
 ## Pfade aus ViewSets
 
 `ViewSet::openapi_paths(prefix, schema_ref)` gibt die `(path, PathItem)`-Paare
-für die fünf standardmäßigen CRUD-Routen zurück — list, create, retrieve,
+für die sechs standardmäßigen CRUD-Operationen zurück — list, create, retrieve,
 update, partial update, delete — verdrahtet, um auf ein registriertes
 Component-Schema zu verweisen:
 
@@ -159,8 +159,10 @@ PATCH, DELETE), und es bleibt mit der Konfiguration des ViewSet synchron:
   `?ordering=` wird bei jedem ViewSet aufgeführt außer bei cursor-paginierten,
   die immer nach der Cursor-Spalte sortieren. Binärfelder sind `format: hex`, so
   wie der Server sie liest und schreibt.
-- **Pfadparameter** → `{pk}`, typisiert aus dem Primärschlüssel des Modells.
-- **`operationId`** → `list_post`, `create_post`, … (pro Aktion in snake_case).
+- **Pfadparameter** → `{pk}`, typisiert aus dem Primärschlüssel des Modells;
+  `.pk_param(name)` benennt ihn um.
+- **`operationId`** → `list_post`, `create_post`, `retrieve_post`, `update_post`,
+  `partial_update_post`, `destroy_post` (Aktion + Schemaname in snake_case).
 
 > Das ViewSet selbst wird im [ViewSets-Leitfaden](viewsets.md) dokumentiert.
 
@@ -183,7 +185,10 @@ let app = axum::Router::new()
 ```
 
 Die Viewer-Seiten sind winzige HTML-Hüllen, die Swagger UI / Redoc von einem CDN
-laden (`unpkg` / `jsdelivr`) — es wird kein JS in **Rustango** gebündelt. Für
+laden (`unpkg` / `jsdelivr`), jeweils auf eine exakte Version mit
+Subresource-Integrity-Hash festgelegt — es wird kein JS in **Rustango** gebündelt.
+Sie laden die Spec relativ zu sich selbst, also kann der Router unter jedem Präfix
+liegen. Für
 ein Air-Gapped-Deployment schreibe `spec.to_json()` beim Start in eine Datei und
 hoste die Viewer-Assets aus deinem eigenen Static-Verzeichnis selbst.
 
@@ -217,7 +222,10 @@ let json = spec.to_json();   // pretty-printed OpenAPI 3.1
 ```
 
 `OpenApiSpec` nimmt außerdem `.contact(...)`, `.license(...)`, `.add_tag(...)`
-und mehrere `.server(...)`-Einträge entgegen.
+und mehrere `.server(...)`-Einträge entgegen. `Operation` bietet `.description`,
+`.parameter`, `.request_body(RequestBody::json(..) / ::form(..))` und
+`.deprecated()`; `Parameter` hat die Konstruktoren `path` / `query` / `header`;
+`Response` bietet `.header(name, schema)`.
 
 ---
 

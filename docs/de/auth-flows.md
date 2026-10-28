@@ -96,8 +96,9 @@ let user_id = confirm_password_reset_pool(
 ).await?;
 ```
 
-> **Mandantenfähige Apps müssen `&t`** (den `Tenant`) an die Bestätigung übergeben,
-> damit Pool und Scope aus einem Wert stammen. `LinkTarget::audience(&pool, "app")`
+> **Mandantenfähige Apps müssen `&t`** (den `Tenant` oder einen `TenantScope`) an die
+> Bestätigung übergeben, damit Pool und Scope aus einem Wert stammen. Ein Link für einen
+> anderen Scope scheitert mit `Err(WrongScope)`. `LinkTarget::audience(&pool, "app")`
 > und `LinkScope::audience("app")` sind für Apps mit einer einzigen Benutzerdatenbank.
 
 > **Verwende diese Form für `rustango_users`.** Framework-Sitzungen tragen einen
@@ -126,11 +127,16 @@ Registrierung abgelehntes Passwort lässt sich also nicht per Zurücksetzen setz
 
 ### Den Link einmalig machen
 
-Die obigen Helfer prüfen nur Signatur und Ablauf, **der Link bleibt also seine gesamte TTL lang
+`confirm_password_reset_pool` schreibt nur, solange `password_changed_at` älter als der Link ist,
+und setzt die Spalte neu. Jede Passwortänderung, auch dieser Reset, beendet also alle älteren
+Links: eine Wiederholung bekommt `Err(Expired)`.
+
+Die `_into`-Form hat keine solche Spalte, **ihr Link bleibt also seine gesamte TTL lang
 nutzbar** — auch nachdem das Passwort geändert wurde. Eine Kopie der E-Mail in einem geteilten
 Postfach, eine Weiterleitung oder ein Support-Ticket mit der eingefügten Mail ist bis zum Ablauf
 des Tokens eine funktionierende Kontoübernahme — zu einem Zeitpunkt, an dem der legitime Nutzer
-fertig ist und keinen Verdacht hat.
+fertig ist und keinen Verdacht hat. Zwei gleichzeitige Klicks können zudem beide die Zeitprüfung
+bestehen.
 
 Übergeben Sie einen Cache, und das Token wird bei der ersten Verwendung verbraucht:
 
@@ -219,7 +225,8 @@ Anwendung liefert den Rest:
 
 - Ein **Secret** (ein stabiler App-Schlüssel; per Konvention 32 Byte).
 - Ein **Mailer** zum Versenden der Links — `rustango::email` liefert `ConsoleMailer`,
-  `SmtpMailer` und `InMemoryMailer` (praktisch in Tests).
+  `FileMailer`, `NullMailer`, `InMemoryMailer` (praktisch in Tests) und, mit dem Feature
+  `email-smtp`, `SmtpMailer`.
 - Eine **Benutzertabelle** mit den Spalten, die jeder Ablauf braucht (E-Mail für die
   Verifizierungs-/Magic-Link-Suche; eine Passwort-Hash-Spalte für die Zurücksetzung; eine Spalte
   „verifiziert“, die Ihnen gehört).

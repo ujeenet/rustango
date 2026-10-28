@@ -78,7 +78,12 @@ impl Job for WelcomeEmail {
 
 Override `const MAX_ATTEMPTS: u32 = 3;` on the impl to change the ceiling on
 **total attempts** — not retries. The default of 5 is one initial run plus four
-retries; `MAX_ATTEMPTS = 3` gives two retries.
+retries; `MAX_ATTEMPTS = 3` gives two retries. `0` counts as `1`: the job runs
+once.
+
+A handler that needs state the payload cannot carry, such as a mailer, can be
+registered with `queue.register_with::<T, _, _>(|job| async move { … })`. That
+closure runs in place of `Job::run`. Both built-in queues support it.
 
 ---
 
@@ -296,6 +301,8 @@ To change the wait for every job of a type, override
 the payload, override `fn max_attempts(&self) -> u32` or
 `fn retry_delay(&self, failed_attempt: u32) -> Duration`; by default they
 return `MAX_ATTEMPTS` and `retry_backoff`. The cap is read at dispatch.
+`jobs::exponential_backoff(base, failed_attempt)` is the default curve with your
+own base: `base`, doubled per failure, capped at `base · 1024`.
 
 ---
 
@@ -333,8 +340,9 @@ job's `name` and `error` intact.
 `InMemoryJobQueue` is single-process and forgets on restart. For real
 deployments — multiple workers, multiple replicas, jobs that must survive a
 crash — use **`DatabaseJobQueue`** (the same type as `PgJobQueue`). Jobs live in
-a `rustango_jobs` table; workers pick them up with a transaction-bounded
-`UPDATE … RETURNING`, so it's safe across processes. It's **tri-dialect**
+a `rustango_jobs` table; workers claim a row inside a transaction
+(`FOR UPDATE SKIP LOCKED` on PostgreSQL and MySQL, a single
+`UPDATE … RETURNING` on SQLite), so it's safe across processes. It's **tri-dialect**
 (PostgreSQL, MySQL, SQLite). The `Job` definitions from Step 1 are unchanged.
 
 ```rust
@@ -370,6 +378,11 @@ picks the job back up:
 // e.g. from a scheduled task every few minutes:
 let reclaimed = DatabaseJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(300)).await?;
 ```
+
+Or let the queue do it: `.reclaim_stuck_after(Duration::from_secs(300))` on the
+builder sweeps the queue's own pool at `start` and then every
+`min(threshold, 60s)`. It is off by default, and the threshold is raised to at
+least three heartbeats.
 
 A running job refreshes its lock every `heartbeat_interval` (10 s by default), so
 keep the threshold well above it. Each pickup spends an attempt, so a job that
@@ -446,7 +459,8 @@ afterwards.
 **Known limits.** The framework does not do the fan-out for you: there is no
 per-tenant worker supervisor, no `Job::run(&ctx)` with the tenant attached,
 and no tenant-aware `reclaim_stuck_jobs_pool` sweep — you loop over tenants
-yourself, as above. New tenants provisioned after boot get no workers until
+yourself, as above (`.reclaim_stuck_after(..)` on each tenant's queue sweeps that
+tenant's pool). New tenants provisioned after boot get no workers until
 the process restarts. This is a known gap.
 
 **Ambient context: audit source and timezone only.** `InMemoryJobQueue`
@@ -538,9 +552,13 @@ the expected outcome, so nothing is logged. This is a known gap.
 | `Queue(String)` | internal queue error (serialization/registration) |
 
 **`JobQueue` methods:** `register::<T>()` · `dispatch(&payload)` · `start()` ·
-`shutdown()` · `pending_count()`. Both queues have `shutdown_grace`. The `DatabaseJobQueue` adds
-`ensure_table_pool`, `with_workers_pool`, `poll_interval`, and
-`reclaim_stuck_jobs_pool`.
+`register_with::<T, _, _>(handler)` · `shutdown()` · `pending_count()` (jobs
+waiting to be picked up). Both queues have `on_dead_letter` and
+`shutdown_grace`. The `DatabaseJobQueue` adds `ensure_table_pool`,
+`with_workers_pool`, `new_pool`, `poll_interval`, `heartbeat_interval`,
+`queue_name`, `reclaim_stuck_after` and `reclaim_stuck_jobs_pool`.
+`jobs::inmemory_from_settings(&settings.jobs)` builds an `InMemoryJobQueue` with
+`[jobs] concurrency` workers (default 4).
 
 ---
 

@@ -95,13 +95,20 @@ que respeta `write_only`, y una impl de `OpenApiSchema` bajo la característica
 | `to_value` | `fn(&self) -> serde_json::Value` | Serializa a JSON (omite `write_only`). Sobrescribible. |
 | `many` | `fn(&[Self::Model]) -> Vec<Self>` | `from_model` por lotes. Sobrescribible. |
 | `many_to_value` | `fn(&[Self::Model]) -> serde_json::Value` | Lote → array JSON. Sobrescribible. |
+| `readable_source_fields` | `fn() -> &'static [&'static str]` | Las **columnas del modelo** que la salida copia directamente del modelo (resueltas por `source`; sin `write_only`, `skip`, campos calculados ni relaciones). `?ordering=` de un ViewSet recurre a estas. Generado. |
 | `writable_fields` | `fn() -> &'static [&'static str]` | Nombres de campo del serializador aceptados en escritura (excluye `read_only`, `skip`, `method`, `nested`, `many`, `slug`). |
 | `writable_source_fields` | `fn() -> &'static [&'static str]` | Las **columnas del modelo** de los campos escribibles (resueltas por `source`). La ruta de escritura del ViewSet persiste solo estas. Generado. |
 | `from_writable_json` | `fn(&Value) -> Result<Self, FormErrors>` | Construye una instancia a partir del cuerpo de una petición usando solo los campos escribibles (el resto toma su valor por defecto); los errores de parseo por campo → `FormErrors`. Generado. |
-| `validate` | `fn(&self) -> Result<(), FormErrors>` | Ejecuta los validadores declarados por campo + entre campos. No hace nada cuando no se declara ninguno; sobrescribible. |
+| `validate_patch` | `fn(&Self::Model, &Value) -> Result<(), FormErrors>` | Valida una actualización parcial: las reglas de campo solo corren sobre las claves que envía el cuerpo; el enganche entre campos ve la fila guardada con esas claves encima. Generado. |
+| `validate` | `fn(&self) -> Result<(), FormErrors>` | Ejecuta las restricciones declarativas, luego los validadores por campo, luego el de entre campos. No hace nada cuando no hay nada que comprobar. Generado cuando lo hay. |
+
+"Sobrescribible" vale para un `impl ModelSerializer` escrito a mano. El derive
+escribe su propio bloque impl, así que en un serializador derivado estos métodos
+son fijos; un método inherente con el mismo nombre solo cambia las llamadas
+directas, no lo que ejecuta un ViewSet.
 
 Deliberadamente **no** hay `create` / `update` / `save` en el trait — las
-escrituras pasan por el ORM (`model.save(&pool)`). Cuando un serializador se conecta
+escrituras pasan por el ORM (`model.save_pool(&pool)`). Cuando un serializador se conecta
 a un [ViewSet](viewsets.md), la ruta de create/update usa `from_writable_json()` +
 `validate()` + `writable_source_fields()` para validar y filtrar la petición antes
 de guardar.
@@ -144,7 +151,7 @@ separado).
 > **`write_only` no transforma el valor.** Un campo `write_only` se acepta en
 > escritura y se persiste **tal cual** — el serializador nunca lo hashea ni lo cifra.
 > Para una contraseña, hashéala tú mismo (consulta [Contraseñas](auth-passwords.md))
-> antes de `save()`; los campos `read_only`, en cambio, se ignoran silenciosamente en
+> antes de `save_pool()`; los campos `read_only`, en cambio, se ignoran silenciosamente en
 > escritura en lugar de rechazarse.
 
 ---
@@ -190,7 +197,9 @@ pub struct CommentSerializer {
 }
 ```
 
-La FK ya debe estar cargada (vía `select_related` / una obtención eager). Si **no**
+La FK ya debe estar cargada (vía `select_related` / una obtención eager). Una
+`Option<ForeignKey<T>>` nullable va a un campo `Option<Child>`, y un NULL se
+muestra como `null`. Si **no**
 fue cargada, el campo recurre a `Default::default()` en lugar de entrar en pánico —
 en producción se degrada con elegancia ante un prefetch faltante. En pruebas, usa
 `#[serializer(nested(strict))]` para convertir ese fallback en un pánico, de modo que
@@ -225,7 +234,8 @@ pub struct PostWithTags {
 }
 
 // usage
-let tags = post.tags_m2m().all(&pool).await?;
+let tag_ids = post.tags_m2m().all(&pool).await?;   // ids, not rows
+let tags = Tag::find_many(tag_ids, &pool).await?;
 let mut s = PostWithTags::from_model(&post);
 s.set_tags(&tags);                       // generated setter, named set_<field>
 let json = s.to_value();
@@ -250,7 +260,8 @@ pub struct PostSerializer {
 ```
 
 Como nested, lee de una FK cargada y recurre al valor por defecto cuando no está
-cargada; es solo para visualización (no escribible).
+cargada; una `Option<ForeignKey<T>>` NULL se muestra como `null` en un campo
+`Option`. Es solo para visualización (no escribible).
 
 ---
 
@@ -305,14 +316,22 @@ impl PostSerializer {
 El derive genera un `validate(&self)` que ejecuta cada validador por campo y recoge
 los fallos en un `FormErrors` indexado por nombre de campo.
 
-**Entre campos** — declara un enganche a nivel de struct y los validadores se
-fusionan. O bien añade `#[serializer(validate = "cross_validate")]` en la struct
-(devolviendo `Result<(), FormErrors>`), o simplemente implementa `validate(&self)` tú
-mismo cuando no hay validadores por campo que lo generen:
+**Entre campos** — añade `#[serializer(validate = "cross_validate")]` en la
+struct y escribe `fn cross_validate(&self) -> Result<(), FormErrors>`. Corre al
+final, y sus errores se fusionan con los de los campos. Usa este enganche, no un
+`fn validate(&self)` inherente escrito a mano: un ViewSet llama al `validate` del
+trait y nunca ve uno inherente.
 
 ```rust
+#[derive(Serializer, serde::Deserialize, Default)]
+#[serializer(model = Post, validate = "cross_validate")]
+pub struct PostSerializer {
+    pub title: String,
+    pub body: String,
+}
+
 impl PostSerializer {
-    pub fn validate(&self) -> Result<(), rustango::forms::FormErrors> {
+    fn cross_validate(&self) -> Result<(), rustango::forms::FormErrors> {
         let mut errors = rustango::forms::FormErrors::default();
         if self.title.is_empty() {
             errors.add("title", "title cannot be empty");          // field error
@@ -332,9 +351,14 @@ impl PostSerializer {
 restricciones declarativas de arriba (`max_length` / `min_length` / `min` / `max` /
 `choices` heredados), las reglas personalizadas son funciones simples — no hay magia
 de `email`/regex, lo que mantiene la validación personalizada explícita y verificable.
-Fuera de un ViewSet, el framework no renderiza automáticamente `FormErrors` a un
-cuerpo HTTP; mapéalo a tu respuesta 400 (la separación campo/no-campo coincide con el
-JSON de errores que emite un ViewSet).
+Fuera de un ViewSet, el framework no renderiza el mapa de campos por ti. `?` hacia
+un `RustangoError` responde `422`, pero con los errores como un solo mensaje de
+texto. Para la forma `{field: [msgs]}` de un ViewSet, construye el cuerpo `422` tú
+mismo a partir de `.fields()` y `.non_field()`.
+
+En una actualización parcial (`PATCH`), un ViewSet llama a `validate_patch` en su
+lugar: las reglas de campo solo corren sobre las claves que envía el cuerpo, y el
+enganche entre campos ve la fila guardada con esas claves encima.
 
 ---
 
@@ -342,7 +366,8 @@ JSON de errores que emite un ViewSet).
 
 Para comprobar antes de guardar que una fila candidata no colisionará en un
 índice único multicolumna, llama a
-`check_unique_together_pool` antes de guardar:
+`check_unique_together_pool` antes de guardar (recibe un `rustango::sql::Pool`,
+así que funciona en todos los backends):
 
 ```rust
 use std::collections::HashMap;
@@ -361,13 +386,15 @@ Recorre los índices únicos multicolumna declarados del modelo y devuelve
 `Err(FormErrors)` con un error no de campo por colisión
 (`"The fields a, b must be unique together."`). El `unique` de una sola columna se
 deja al manejo de conflictos del insert; los índices parciales (`unique_when`) se
-omiten.
+omiten. Una restricción con una columna ausente de `values`, o puesta a
+`SqlValue::Null`, también se omite, porque un NULL nunca colisiona. Una consulta
+fallida devuelve `Err` en lugar de "sin colisión".
 
 ---
 
 ## Salida con hipervínculos
 
-Para una forma al estilo `HyperlinkedModelSerializer` (URLs de recursos en lugar de
+Para una forma con hipervínculos (URLs de recursos en lugar de
 ids desnudos), dos helpers post-procesan el JSON:
 
 ```rust
@@ -383,7 +410,7 @@ let out = hyperlinked_to_value(base, "/api/posts/{pk}", "id", &fk_templates);
 // → { "url": "/api/posts/42", "author_id_url": "/api/users/7", "id": 42, ... }
 ```
 
-`hyperlink_url(template, &pk)` hace una sustitución puntual de `{pk}`;
+`hyperlink_url(template, &pk)` sustituye cada `{pk}`, codificado como un segmento de ruta;
 `hyperlinked_to_value` añade una `url` de nivel superior más un `<fk>_url` por
 plantilla (FK null → URL null). Las claves originales id/`<fk>_id` se conservan
 (elimínalas después si quieres que desaparezcan).
@@ -443,7 +470,7 @@ let body = PostSerializer::from_model(&post).to_value();   // shaped JSON
 
 Fuera de un ViewSet, el serializador deriva `serde::Deserialize`, así que puedes
 parsear el cuerpo de una petición dentro de él, ejecutar `.validate()` y — en caso de
-éxito — mapear los datos sobre un modelo y `save(&pool)`. `from_writable_json()`
+éxito — mapear los datos sobre un modelo y `save_pool(&pool)`. `from_writable_json()`
 construye una instancia solo a partir de las claves escribibles (los campos de solo
 lectura / calculados toman su valor por defecto), y `writable_fields()` /
 `writable_source_fields()` te dicen qué claves se aceptan — la misma maquinaria que el
@@ -496,7 +523,10 @@ pub struct PostSerializer {
 }
 ```
 
-Luego registra el módulo (`mod post_serializer;`) junto a los demás.
+El archivo va a `src/post_serializer.rs`; `--model` vale `Post` por defecto, y
+un archivo existente nunca se sobrescribe. Luego registra el módulo: `pub mod
+post_serializer;` en `src/lib.rs` (o `mod post_serializer;` en `src/main.rs`
+cuando el proyecto no tiene `lib.rs`). El comando imprime la línea a añadir.
 
 ---
 
@@ -505,12 +535,13 @@ Luego registra el módulo (`mod post_serializer;`) junto a los demás.
 Unos cuantos filos afilados y escotillas de escape que conviene conocer:
 
 - **Campos condicionales.** No hay selección de campos en tiempo de ejecución (los
-  campos están fijados en tiempo de compilación). Para "incluir solo cuando esté
-  presente", usa `Option<T>` más
-  `#[serde(skip_serializing_if = "Option::is_none")]` en el campo — la impl de
-  `Serialize` personalizada respeta los atributos de serde.
-- **Forma de salida personalizada.** Sobrescribe `to_value(&self)` en tu struct para
-  un objeto JSON totalmente a medida cuando los atributos no basten.
+  campos están fijados en tiempo de compilación). Un campo `Option<T>` siempre se
+  muestra, como `null` cuando está vacío. La impl `Serialize` propia del derive
+  ignora los atributos de campo `#[serde(...)]` como `skip_serializing_if` o
+  `rename`; renombra con `source`.
+- **Forma de salida personalizada.** Para un objeto JSON totalmente a medida,
+  post-procesa el resultado de `to_value()`, o escribe `impl ModelSerializer` a
+  mano (con tu propio `serde::Serialize`) en lugar de derivarlo.
 - **Los objetos anidados escribibles** no están soportados — los campos `nested` /
   `many` / `slug` son solo de salida. Acepta las escrituras como ids escalares y
   resuélvelas tú mismo.
@@ -519,7 +550,7 @@ Unos cuantos filos afilados y escotillas de escape que conviene conocer:
   (`email`, regex, …) son funciones que escribes tú (consulta
   [Validación](#validación)).
 - **Un validador por campo por cada campo.** Para varias reglas en un campo,
-  combínalas en la función de ese campo, o añade un `validate(&self)` entre campos.
+  combínalas en la función de ese campo, o añade un enganche `validate = "fn"` en la struct.
 - **El serializador no persiste.** Mapea → valida → entrega los datos al ORM; no hay
   `serializer.save()`.
 

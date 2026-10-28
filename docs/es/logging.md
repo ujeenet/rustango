@@ -172,6 +172,10 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::tenancy::sweep` | Barridos de retención |
 | `rustango::viewset` | ViewSets montados con escrituras abiertas |
 
+Los cambios en la consola van también a
+`rustango::tenancy::operator_console::action`, un evento por cambio;
+`RUST_LOG=rustango::tenancy::operator_console::action=info` muestra solo esos.
+
 Esos son los targets que el framework nombra explícitamente. Los eventos que no
 nombran ninguno heredan su ruta de módulo, lo que da la misma forma:
 `rustango::access_log` y `rustango::tracing_layer` se alcanzan igual que las
@@ -226,7 +230,15 @@ rustango::logging::setup_for_env();
 Dos ajustes de presentación merecen la pena: `.with_line_numbers()` añade la
 posición en el código (útil en desarrollo, ruidoso en producción), y
 `.without_targets()` oculta la columna de target — hazlo solo si has renunciado
-a filtrar por ella.
+a filtrar por ella. `.with_thread_ids()` añade el id del hilo, y
+`.with_color(Color::Never)` fija el color en código. Bajo
+`#[rustango::main]` el color sigue siempre la regla `auto`, porque la macro
+instala primero.
+
+Un verbo de gestión (`dumpdata`, `migrate`, …) envía los registros de terminal
+a stderr, para que su stdout quede limpio:
+`cargo run -- dumpdata > fixtures.json` funciona. El servidor sigue
+registrando en stdout.
 
 > Cada valor de formato llega a su propio formateador. `compact` se aceptaba y
 > luego se renderizaba como el valor por defecto — ya está corregido.
@@ -360,7 +372,7 @@ let app = router.access_log(AccessLogLayer::default());
 ```
 
 ```text
-INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12 client.address=192.0.2.1 tenant=acme
+INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12.4 client.address=192.0.2.1 tenant=acme
 ```
 
 El nivel tiene significado, así que las alertas pueden basarse en él:
@@ -385,10 +397,15 @@ AccessLogLayer::default()
 páselo a `.real_ip(layer)`; una capa en el router de la API llega tarde.
 
 Los parámetros de consulta que llevan credenciales se enmascaran con
-`[redacted]` antes de escribir la línea — `password`, `passwd`, `token`,
-`secret`, `api_key`, `apikey`, `access_token`, `refresh_token`, `signature`,
-`auth`. Amplía con `.redact_additional("session_id")`, o sustituye la lista
-entera con `.redact(vec![...])`. Esto cubre **solo las cadenas de consulta**;
+`[redacted]` antes de escribir la línea. Una clave se enmascara cuando
+contiene una palabra secreta, comparada palabra a palabra, así que `api_key`,
+`reset_token` y `X-Api-Key` cuentan. Las palabras incluyen `password`, `pass`,
+`pwd`, `token`, `jwt`, `secret`, `key`, `signature`, `auth`, `credential`,
+`cookie`, `session`, `otp`, más los nombres OAuth `code`, `state` y
+`assertion`. Amplía con `.redact_additional("ref")`, o sustituye la lista
+entera con `.redact(vec![...])`; `token`, `signature` y `code` siguen
+enmascarados en todo caso. El `url.query` del span de la petición se
+enmascara igual. Esto cubre **solo las cadenas de consulta**;
 para el resto, ver
 [security.md](security.md#mantener-los-secretos-fuera-de-tus-registros).
 

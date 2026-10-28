@@ -173,7 +173,10 @@ la menos usada recientemente cuando se alcanza el presupuesto. El desalojo
 elimina primero las entradas ya expiradas y después las menos usadas
 recientemente, hasta quedar un 10 % por debajo de ambos presupuestos. Las
 entradas escritas con `set_forever` (feature flags) quedan fuera de los
-presupuestos y nunca se desalojan.
+presupuestos y nunca se desalojan mientras sigan dentro de sus propios topes —
+16 MiB o 10 000 entradas (`.with_max_pinned_bytes(..)` /
+`.with_max_pinned_entries(..)`). Por encima, las nuevas entradas `set_forever` se
+guardan como entradas normales, desalojables, y se registra un aviso una vez.
 
 Así que trata una lectura de caché como «puede estar ausente» incluso dentro del
 TTL. Eso vale para cualquier backend de caché, pero aquí tiene una causa
@@ -273,9 +276,10 @@ de ida y vuelta.
 `RedisCache` (`SET NX`), `InMemoryCache` (que mantiene su cerrojo durante el
 read-modify-write) y `DatabaseCache`, que hace el test-and-set bajo cerrojos de
 fila, de modo que una carrera se resuelve con exactamente un ganador.
-`Cache::incr` es atómico en los dos primeros pero recae en el valor no atómico
-por defecto con `DatabaseCache`. Un `DistributedLock` es seguro en los tres; un
-contador o bloqueo deba ser exacto entre réplicas.
+`Cache::incr` también es atómico en los tres: `DatabaseCache` lo hace en un solo
+upsert. `FileCache` hace ambos bajo un cerrojo por entrada, válido solo en un
+host. Así que un `DistributedLock` o un contador exacto entre réplicas funciona
+con Redis o con la base de datos.
 
 Dos cosas que conviene saber:
 
@@ -309,6 +313,10 @@ seguro por defecto:
 - Una respuesta con `Set-Cookie`, o con `Cache-Control: private`, `no-cache` o
   `no-store`, nunca se guarda.
 - `.vary_on([...])` incluye cabeceras de la petición en la clave.
+- `.key_prefix(..)` da a cada capa su propio espacio de claves (por defecto
+  `rustango.cache_page`). `.cache_query(true)` cachea también peticiones `QUERY`,
+  con un resumen del cuerpo (hasta 1 MiB) en la clave. `.tenant_agnostic(true)`
+  cachea sin tenant resuelto, solo para una página igual para todos los tenants.
 
 Para descartar una página tras una escritura, llama a
 `layer.invalidate(&[PageKey::new(path, host)]).await?` sobre un clon de la capa
@@ -324,11 +332,17 @@ Con tenancy, monta la capa dentro de la capa de tenancy; consulta
 
 ## Referencia
 
-**Trait `Cache`:** `get` · `set(key, value, ttl)` · `delete` · `exists` ·
+**Trait `Cache`:** `get` · `set(key, value, ttl)` · `set_forever` · `delete` ·
+`exists` / `has_key` · `clear` · `delete_prefix` · `incr` / `decr` ·
+`add` (si no existe) · `touch` (nuevo TTL) · `get_bytes` / `set_bytes` ·
 `get_many` / `set_many` / `delete_many` · `get_or(key, default)`.
 
 **Helpers libres:** `get_or_set(cache, key, factory, ttl)` ·
-`get_json` / `set_json` · `from_settings(&CacheSettings)`.
+`get_json` / `set_json` · `from_settings(&CacheSettings)` ·
+`from_settings_async(&CacheSettings)`.
+
+**Mantenimiento:** `DatabaseCache::purge_expired()` y
+`FileCache::purge_expired()` borran las entradas caducadas; llámalos periódicamente.
 
 **Qué está construido sobre la caché:** las [sesiones](auth-sessions.md) del lado
 del servidor, la [limitación de tasa](middleware.md) distribuida

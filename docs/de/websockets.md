@@ -165,13 +165,15 @@ ws.onmessage = (e) => { const t = JSON.parse(e.data); console.log('tick', t.valu
 
 | Stellschraube | Standard | Wirkung |
 |---|---|---|
-| `.keepalive(Duration)` | 30 s | Intervall des Leerlauf-`Ping` — niedriger erkennt tote Verbindungen früher |
+| `.keepalive(Duration)` | 30 s | `Ping`-Intervall, mit oder ohne Verkehr; ein Peer, der nach einem Ping ein ganzes Intervall schweigt, wird geschlossen |
 | `.on_message(fn(&str) -> Option<String>)` | keine | verarbeitet Client→Server-Text; gib `Some(reply)` zurück, um ein Echo **nur an diesen Client** zu senden (rufe `hub.broadcast(..)` für das Auffächern auf) |
 | `.max_message_bytes(n)` | 1 MiB | schließt die Verbindung, wenn eine Client-Nachricht dies überschreitet |
 
 **Langsame Konsumenten** werden nicht stillschweigend verworfen: einem hinterherhinkenden Client
-wird mitgeteilt, dass er `n` Nachrichten verpasst hat (`Lagged(n)`), sodass er neu synchronisieren
-oder weitermachen kann.
+wird mitgeteilt, dass er `n` Nachrichten verpasst hat, sodass er neu synchronisieren
+oder weitermachen kann: er erhält den Text-Frame `{"_lagged": n}`. Binäre Frames des
+Clients werden verworfen. Für eine ganze `WsConfig` auf einmal nutzen Sie
+`WsHub::with_config(bus, config)`; `hub.receiver_count()` zählt offene Sockets.
 
 ## Von anderswo senden
 
@@ -213,10 +215,12 @@ Abonnent, und ein Client, der weiter als `capacity` zurückfällt, erhält ein
 
 ```toml
 # Cargo.toml — both are in Rustango's default set; list them if you slim features.
-rustango = { version = "*", features = ["sse", "websocket"] }
+rustango = { version = "0.61", features = ["sse", "websocket"] }
 ```
 
-- **`sse`** — der `EventBus`-Broadcast-Bus (zieht `tokio` nach). Ausreichend für SSE, da
-  das SSE-Drahtformat aus axums eigenem `response::sse` stammt.
+- **`sse`** — der `EventBus`-Broadcast-Bus (keine zusätzlichen Abhängigkeiten).
+  Ausreichend für SSE, da das SSE-Drahtformat aus axums eigenem `response::sse`
+  stammt. Nicht zu verwechseln mit `rustango::events::EventBus`, einem stets
+  vorhandenen typisierten Bus für Domain-Events mit async Handlern.
 - **`websocket`** — das `WsHub` / `ws_handler`-Gerüst; impliziert `admin` (axum)
   + `sse` + `axum/ws`.

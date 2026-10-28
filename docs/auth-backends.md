@@ -43,8 +43,9 @@ middleware tries them **in order**:
 
 - the **first** backend that recognises the credential wins (returns the user);
 - a backend that doesn't recognise it returns "none" and the next is tried;
-- if a backend hard-errors (e.g. an inactive account on a *valid* token) the
-  chain stops with that error;
+- if a backend hard-errors the chain stops with that error: an inactive account
+  on a *valid* credential is `403`, a lockout is `429` (or `503` when password
+  hashing is busy), a bad token is `401`;
 - if none match, the request is `401` (with `require_auth`) or proceeds
   anonymously (with `optional_auth`).
 
@@ -69,7 +70,10 @@ let backends: Vec<Arc<dyn AuthBackend>> = vec![
 | `JwtBackend` | `Authorization: Bearer <jwt>` | a signed HS256 token (see [JWT](auth-jwt.md)) |
 
 `ApiKeyBackend` and `JwtBackend` both read `Bearer` and disambiguate by shape (an
-API key's first dot-segment is exactly 8 chars). Construct `JwtBackend` with a
+API key's first dot-segment is exactly 8 chars). A `Bearer` value that has the
+JWT shape but fails verification is a hard `401`, not a pass to the next
+backend. `ModelBackend` counts failed passwords per tenant, IP and username,
+so repeated guesses get `429`. Construct `JwtBackend` with a
 secret of **at least 32 bytes** (`JwtBackend::new(secret)` panics otherwise):
 
 ```rust
@@ -249,7 +253,9 @@ async fn who(remote_user: &str) -> Result<Option<Principal>, AuthError> {
 }
 ```
 
-Same "first success wins / first error stops" semantics as the HTTP chain. For
+Same "first success wins / first error stops" semantics as the HTTP chain.
+`chain.get_user(id)` walks the chain the same way to reload a principal, for
+example one held in a session. For
 gating real routes, use the `tenancy` middleware above.
 
 ---

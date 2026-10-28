@@ -177,7 +177,11 @@ mais cela signifie aussi qu'**une entrée peut disparaître avant l'expiration d
 son TTL** si elle est la moins récemment utilisée au moment où le budget est
 atteint. L'éviction supprime d'abord les entrées déjà expirées, puis les moins
 récemment utilisées, jusqu'à passer 10 % sous les deux budgets. Les entrées
-écrites avec `set_forever` (feature flags) sont hors budget et jamais évincées.
+écrites avec `set_forever` (feature flags) sont hors budget et jamais évincées
+tant qu'elles restent dans leurs propres plafonds — 16 Mio ou 10 000 entrées
+(`.with_max_pinned_bytes(..)` / `.with_max_pinned_entries(..)`). Au-delà, les
+nouvelles entrées `set_forever` sont stockées comme des entrées ordinaires,
+évinçables, et un avertissement est journalisé une fois.
 
 Traitez donc une lecture de cache comme « peut être absente » même à l'intérieur
 du TTL. C'est vrai de tout backend de cache, mais ici la cause est
@@ -277,10 +281,10 @@ coûte un aller-retour.
 `RedisCache` (`SET NX`), `InMemoryCache` (qui garde son verrou pendant le
 read-modify-write) et `DatabaseCache`, qui effectue le test-and-set sous des
 verrous de ligne, de sorte qu'une course se résout en exactement un gagnant.
-`Cache::incr` est atomique sur les deux premiers mais retombe sur le
-comportement non atomique par défaut avec `DatabaseCache` — un `DistributedLock`
-est donc sûr sur les trois, mais
-passez à Redis lorsqu'un compteur ou un verrou doit être exact entre réplicas.
+`Cache::incr` est atomique sur les trois aussi : `DatabaseCache` le fait en un
+seul upsert. `FileCache` fait les deux sous un verrou par entrée, valable sur un
+seul hôte. Un `DistributedLock` ou un compteur exact entre réplicas fonctionne
+donc avec Redis ou la base de données.
 
 Deux choses à savoir :
 
@@ -313,6 +317,11 @@ par défaut). Il est sûr par défaut :
 - Une réponse avec `Set-Cookie`, ou `Cache-Control: private`, `no-cache` ou
   `no-store`, n'est jamais mise en cache.
 - `.vary_on([...])` met des en-têtes de requête dans la clé.
+- `.key_prefix(..)` donne à chaque couche son propre espace de clés (par défaut
+  `rustango.cache_page`). `.cache_query(true)` met aussi en cache les requêtes
+  `QUERY`, avec un condensé du corps (jusqu'à 1 Mio) dans la clé.
+  `.tenant_agnostic(true)` met en cache sans locataire résolu, seulement pour une
+  page identique pour tous les locataires.
 
 Pour retirer une page après une écriture, appelez
 `layer.invalidate(&[PageKey::new(path, host)]).await?` sur un clone de la
@@ -328,11 +337,17 @@ En multi-tenancy, montez la couche à l'intérieur de la couche tenancy ; voir
 
 ## Référence
 
-**Trait `Cache` :** `get` · `set(key, value, ttl)` · `delete` · `exists` ·
+**Trait `Cache` :** `get` · `set(key, value, ttl)` · `set_forever` · `delete` ·
+`exists` / `has_key` · `clear` · `delete_prefix` · `incr` / `decr` ·
+`add` (si absent) · `touch` (nouveau TTL) · `get_bytes` / `set_bytes` ·
 `get_many` / `set_many` / `delete_many` · `get_or(key, default)`.
 
 **Helpers libres :** `get_or_set(cache, key, factory, ttl)` ·
-`get_json` / `set_json` · `from_settings(&CacheSettings)`.
+`get_json` / `set_json` · `from_settings(&CacheSettings)` ·
+`from_settings_async(&CacheSettings)`.
+
+**Entretien :** `DatabaseCache::purge_expired()` et
+`FileCache::purge_expired()` suppriment les entrées expirées ; appelez-les à intervalle régulier.
 
 **Ce qui est bâti sur le cache :** les [sessions](auth-sessions.md) côté
 serveur, la [limitation de débit](middleware.md) distribuée

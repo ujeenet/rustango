@@ -96,8 +96,9 @@ let user_id = confirm_password_reset_pool(
 ).await?;
 ```
 
-> **Las apps multi-tenant deben pasar `&t`** (el `Tenant`) a la confirmación, para
-> que el pool y el ámbito salgan del mismo valor. `LinkTarget::audience(&pool, "app")` y
+> **Las apps multi-tenant deben pasar `&t`** (el `Tenant`, o un `TenantScope`) a la
+> confirmación, para que el pool y el ámbito salgan del mismo valor. Un enlace emitido
+> para otro ámbito falla con `Err(WrongScope)`. `LinkTarget::audience(&pool, "app")` y
 > `LinkScope::audience("app")` son para apps con una sola base de datos de usuarios.
 
 > **Usa esta forma para `rustango_users`.** Las sesiones del framework llevan una
@@ -126,11 +127,16 @@ rechazada en el registro no puede establecerse restableciéndola.
 
 ### Haz que el enlace sea de un solo uso
 
-Los asistentes anteriores solo verifican firma y caducidad, así que **el enlace sigue siendo
+`confirm_password_reset_pool` solo escribe mientras `password_changed_at` sea anterior al enlace,
+y actualiza esa columna. Así que cualquier cambio de contraseña, este incluido, invalida todos
+los enlaces anteriores: una repetición recibe `Err(Expired)`.
+
+La forma `_into` no tiene esa columna, así que **su enlace sigue siendo
 utilizable durante todo su TTL** — incluso después de cambiar la contraseña. Una copia del correo
 en un buzón compartido, un mensaje reenviado o un ticket de soporte con el correo pegado es una
 toma de control de la cuenta en funcionamiento hasta que el token caduque, en un momento en que el
-usuario legítimo ya ha terminado y no tiene motivo para sospechar.
+usuario legítimo ya ha terminado y no tiene motivo para sospechar. Dos clics simultáneos también
+pueden pasar ambos la comprobación de fecha.
 
 Pasa una caché y el token se consume en el primer uso:
 
@@ -219,7 +225,8 @@ aporta el resto:
 
 - Un **secreto** (una clave de aplicación estable; 32 bytes por convención).
 - Un **mailer** para enviar los enlaces — `rustango::email` incluye `ConsoleMailer`,
-  `SmtpMailer` e `InMemoryMailer` (útil en pruebas).
+  `FileMailer`, `NullMailer`, `InMemoryMailer` (útil en pruebas) y, con la feature
+  `email-smtp`, `SmtpMailer`.
 - Una **tabla de usuarios** con las columnas que cada flujo necesita (correo para la búsqueda de
   verificación/enlace mágico; una columna de hash de contraseña para el restablecimiento; una
   columna «verificado» que es tuya).

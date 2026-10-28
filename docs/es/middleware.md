@@ -151,13 +151,16 @@ obtener el método.
 | Tamaño máximo de cuerpo | `BodyLimitLayer` | `.body_limit(..)` |
 | Modo mantenimiento (503) | `MaintenanceLayer` | `.maintenance(..)` |
 | Claves de idempotencia | `IdempotencyLayer` | `.idempotency(..)` |
-| Restringir métodos HTTP | `MethodRestrictLayer` | `.require_get()` / `.require_post()` / `.require_safe()` |
+| Restringir métodos HTTP | `MethodRestrictLayer` | `.require_get()` / `.require_post()` / `.require_safe()` / `.require_methods([..])` |
+| Sobrescritura de método (campo `_method` / `X-HTTP-Method-Override`) | `MethodOverrideLayer` | `.layer(..)` |
+| Páginas de error propias | `ErrorPagesLayer` | `.error_pages(..)` |
 | **Observabilidad** | | |
 | Id de petición (`X-Request-Id`) | `RequestIdLayer` | `.request_id(..)` |
 | [Log de acceso](logging.md#el-log-de-acceso) (PII redactada) | `AccessLogLayer` | `.access_log(..)` |
 | Spans de `tracing` | `TracingLayer` | `.layer(..)` |
 | Cabecera `Server-Timing` | `ServerTimingLayer` | `.server_timing(..)` |
 | IP real del cliente (tras proxies) | `RealIpLayer` | `.real_ip(..)` |
+| Señales de petición (`request_started` / `request_finished`) | `RequestSignalsLayer` | `.layer(..)` |
 | **Contenido y respuesta** | | |
 | Compresión gzip/br | `CompressionLayer` | `.compression(..)` |
 | ETag / GET condicional | `EtagLayer` | `.etag(..)` |
@@ -168,7 +171,7 @@ obtener el método.
 | Zona horaria activa | *(componer con `from_fn`)* | ver [más abajo](#middleware-consciente-de-la-zona-horaria) |
 | **Desarrollo** | | |
 | Recarga en vivo | `LiveReloadLayer` | `.livereload(..)` |
-| Panel de depuración | `DebugPanelLayer` | `.debug_panel(..)` |
+| Panel de depuración | `DebugPanelLayer` | `.debug_panel()` / `.debug_panel_with(..)` |
 
 Con `tenancy`, monta `CachePageLayer` dentro de la capa de tenancy: en un
 router que pasas al builder del servidor. Mete el tenant resuelto en la clave;
@@ -343,6 +346,10 @@ Tres presets cubren los casos comunes:
 | `relaxed()` | páginas embebibles | 1 año | `SAMEORIGIN` |
 | `dev()` | dev local | *(omitido)* | — |
 
+`empty()` no envía cabeceras. `from_preset("strict" | "relaxed" | "dev" | "none")`
+elige por nombre; un nombre desconocido da `strict()`, así que una errata nunca
+quita las cabeceras.
+
 Usa `dev()` en local — de lo contrario HSTS fijaría tu navegador a HTTPS durante
 un año en `localhost`. Construye una CSP de forma fluida con `CspBuilder`
 (`.default_src(..)`, `.script_src(..)`, …, `.build()`), y despliégala de forma
@@ -367,7 +374,8 @@ let app = Router::new()
     .layer(csrf::layer());
 ```
 
-Un método seguro (GET/HEAD/OPTIONS) emite una cookie `rustango_csrf`. Un método
+Un método seguro (GET/HEAD/OPTIONS/TRACE, y `QUERY` salvo que se active
+`require_csrf_on_query`) emite una cookie `rustango_csrf`. Un método
 no seguro (POST/PUT/PATCH/DELETE) debe devolver el valor de esa cookie, ya sea en
 la cabecera `X-CSRF-Token` o en el campo de formulario `_csrf`; una discrepancia
 es `403 Forbidden`:
@@ -388,9 +396,12 @@ formulario. El `| safe` es obligatorio: Tera autoescapa `.html`, y sin él el
 formulario no lleva campo `_csrf` y cada POST devuelve 403. El propio formulario
 de login del admin hace exactamente esto — mira
 `crates/rustango/src/admin/templates/login.html`. Sobrescribe los nombres de cookie/cabecera o el flag `Secure` con
-`csrf::with_config(CsrfConfig)`; la comprobación de la
-cabecera Origin siempre se ejecuta y acepta el propio Host de la petición; una SPA
-servida desde otro origen se añade con `.with_trusted_origins([...])`. Para endpoints colectores
+`csrf::with_config(CsrfConfig)`. El simple `csrf::layer()` toma el flag `Secure`
+de la política de sesión; con `with_config` vale `CsrfConfig::secure` (por defecto
+`true`; `.allow_insecure_for_dev()` lo apaga para dev en HTTP). La comprobación de
+la cabecera Origin siempre se ejecuta y acepta el propio Host de la petición; una
+SPA servida desde otro origen se añade con `.trust_origin(..)` o
+`.with_trusted_origins([...])`. Para endpoints colectores
 append-only alcanzados vía `navigator.sendBeacon` (p. ej. analítica) que no
 pueden enviar una cabecera de token, `CsrfConfig::exempt_prefix("/path")` omite la
 aplicación para un prefijo de ruta estrecho. El auto-admin habilita CSRF en cada

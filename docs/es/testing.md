@@ -15,9 +15,11 @@ sin salir del proceso.
 > [glosario](glossary.md).
 
 > **Fuente:** `rustango::test_client` (`TestClient`, `TestResponse`) — necesita
-> la feature `admin`, porque envuelve un `axum::Router`. `rustango::test_assertions`
-> (`assert_status_2xx`, `assert_redirects`, `assert_cookie_set`, …) y
-> `rustango::test_db` (`with_rollback`) no dependen de ninguna feature.
+> la feature `admin`, porque envuelve un `axum::Router`. `rustango::test_db`
+> (`with_rollback`) no depende de ninguna feature. `rustango::test_assertions`
+> siempre se compila, pero sus helpers de respuesta (`assert_status_2xx`,
+> `assert_redirects`, `assert_cookie_set`, …) necesitan una feature HTTP como
+> `admin` o `manage`.
 >
 > **Versión ejecutable:** los fragmentos de abajo *son* una prueba que pasa —
 > [`testing_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/testing_doc.rs)
@@ -52,8 +54,21 @@ let res = client.get("/ping").send().await;   // routed in-process
 assert_eq!(res.status, 200);
 ```
 
-`TestClient` tiene `get` / `post` / `put` / `patch` / `delete` / `head`, cada uno
-devolviendo un constructor que finalizas con `.send().await`.
+`TestClient` tiene `get` / `post` / `put` / `patch` / `delete` / `head` /
+`query`, más `request(method, path)`, cada uno devolviendo un constructor que
+finalizas con `.send().await`.
+
+El cliente se comporta como un navegador en `http://testserver`:
+
+- **Un cookie jar.** `Set-Cookie` se guarda y se reenvía en peticiones
+  posteriores a rutas que coinciden. Léelo con `cookie(name)` o `cookies()`,
+  siémbralo con `set_cookie`, vacíalo con `clear_cookies`.
+- **`Host: testserver`**, y un `Origin` del mismo origen en métodos no seguros,
+  salvo que la petición fije los suyos.
+- **Dirección del par `127.0.0.1`.** Cámbiala por petición con
+  `.remote_addr(addr)`.
+- **El CSRF se aplica.** Envía el token con `.with_csrf()` (la cabecera
+  `X-CSRF-Token`) o un campo de formulario `_csrf`; `csrf_token()` lo lee.
 
 ---
 
@@ -96,8 +111,25 @@ let res = client
 assert_eq!(res.status, 201);
 ```
 
-Usa `.body(...)` para cuerpos sin procesar (que no sean JSON), y una ruta
-inexistente devuelve un `404` real — verificado en la prueba de respaldo.
+Usa `.form(&[("k", "v")])` para un cuerpo de formulario, `.body(...)` para
+bytes sin procesar, y una ruta inexistente devuelve un `404` real — verificado
+en la prueba de respaldo.
+
+`.send_following_redirects(max_hops)` sigue hasta ese número de redirecciones
+como un navegador y devuelve la respuesta final con la cadena
+`(status, location)`. `client.get_following_redirects(path, max_hops)` es el
+atajo para `GET`.
+
+### Iniciar sesión
+
+- `client.login(path, &[("username", "ada"), ("password", "…")])` inicia sesión
+  por el formulario: carga `path` para obtener un token CSRF si el jar no tiene
+  uno y luego envía los campos. La cookie de sesión queda en el jar.
+- `client.logout(Some(path))` envía un POST a la ruta de cierre de sesión;
+  `logout(None)` solo vacía el jar.
+- Con `tenancy`, `force_login_tenant_user(&secret, slug, &user, ttl_secs)` y
+  `force_login_operator(&secret, &operator, ttl_secs)` ponen una cookie de
+  sesión en el jar sin el formulario. La fila debe estar guardada.
 
 ---
 
@@ -161,6 +193,23 @@ fallan con `NestedAtomic`. El closure devuelve `Result<T, ExecError>`, y
 Para SQLite, las pruebas `*_sqlite_live.rs` repartidas por este repositorio usan en
 su lugar una base de datos en memoria por prueba — también totalmente aislada, con
 cero configuración externa.
+
+El código que debe confirmar de verdad (señales, hooks `on_commit`) no corre
+bajo un rollback. Usa `with_truncate_after(&pool, &["posts"], || async move { … })`:
+el cuerpo confirma y después se vacían las tablas indicadas, aunque el cuerpo
+entre en pánico. Ejecuta esas pruebas de una en una tras un
+`tokio::sync::Mutex` compartido. `truncate_tables(&pool, &[…])` es solo el
+vaciado.
+
+### Más helpers
+
+| Módulo | Qué te da |
+|---|---|
+| `test_server::LiveServer` (`admin`) | Un socket real: `LiveServer::spawn(router)`, luego `url(path)` |
+| `test_factory` | `Sequence` (un contador que construye valores) y el trait `Factory` con `build_batch(n)` |
+| `test_data` | `setup_test_data!` / `setup_test_data_async!`: un fixture construido una vez por proceso |
+| `test_settings` (`config`) | `with_overridden(settings, future)`: `Settings::load` devuelve `settings` dentro del future |
+| `test_filter` | `tags!("slow")` al inicio de una prueba; `RUSTANGO_TEST_TAGS` / `RUSTANGO_TEST_EXCLUDE_TAGS` eligen qué corre |
 
 ---
 

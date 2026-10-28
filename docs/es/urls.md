@@ -107,6 +107,11 @@ Para guardar el resultado en una variable, usa el `{% set %}` de Tera:
 Un argumento `null` (normalmente una variable de template no definida) falla
 ruidosamente en lugar de producir en silencio una URL rota.
 
+Para query strings, `rustango::urls::register_querystring_filter(&mut tera)` añade
+un filtro `querystring`. Toma la query actual y reemplaza claves:
+`{{ qs | querystring(page=2) }}`. Un valor `null` quita una clave, y un resultado
+vacío es la cadena vacía, sin `?` colgando.
+
 ---
 
 ## Redirigir por nombre
@@ -137,6 +142,13 @@ let url = resolve_url("/dashboard", &params)?;   // path  → "/dashboard" (as-i
 
 (Para redirecciones crudas a una URL conocida, `rustango::shortcuts::redirect(url)`
 devuelve un simple `302`.)
+
+**`resolve_url` no comprueba el host.** `http://evil.example` vuelve sin cambios.
+Antes de redirigir a un `?next=` que envía el usuario, compruébalo con
+`rustango::urls::url_has_allowed_host_and_scheme(url, &allowed_hosts, require_https)`.
+Acepta una ruta relativa, o una URL `http`/`https` cuyo host está en la lista, y
+rechaza `//host`, `\\host`, los caracteres de control y otros esquemas
+(`javascript:`, `data:`, …).
 
 ---
 

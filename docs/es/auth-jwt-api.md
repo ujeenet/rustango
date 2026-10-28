@@ -51,7 +51,13 @@ que todo proyecto reescribe de otro modo:
 | GET | `/api/auth/me` | `Authorization: Bearer <access>` | `{user_id, username, is_superuser}` |
 
 Login verifica la contraseña con [argon2id](auth-passwords.md), luego emite un
-par. Las rutas, los TTL y la clave de firma son configurables mediante `Config`.
+par. Una contraseña incorrecta, un usuario desconocido y una cuenta inactiva
+reciben el mismo `401 invalid credentials`, así el endpoint no revela cuentas.
+Los logins comparten los límites de tasa y el bloqueo de cuenta del login del
+admin del tenant: por encima del límite la respuesta es `429`, y `503` cuando
+el hash de contraseñas está saturado. `/me` responde `403` para una cuenta
+inactiva. Las rutas, los TTL y la clave de firma son configurables mediante
+`Config`.
 
 ## El cableado
 
@@ -78,10 +84,36 @@ un logout hecho en el router, y el token sigue funcionando hasta que expira. Un
 y los rechazan en cuanto el usuario cierra sesión en cualquier sitio o cambia la contraseña.
 
 `Config::default()` firma con `RUSTANGO_SESSION_SECRET` (la misma clave que la
-cookie de sesión del admin) y usa TTL de 15 min de acceso / 7 días de refresco.
-Sobrescribe `prefix`, `access_ttl_secs`, `refresh_ttl_secs`, o `session_secret`
-según necesites. Los endpoints se ejecutan bajo el contexto del tenant, así que
-móntalos en una aplicación tenancy.
+cookie de sesión del admin, decodificada de base64) y usa TTL de 15 min de
+acceso / 7 días de refresco. `JwtAuth::new` hace panic cuando la clave tiene
+menos de 32 bytes, así un servidor mal configurado no arranca. Los campos de
+`Config`:
+
+| Campo | Por defecto | Significado |
+|---|---|---|
+| `prefix` | `/api/auth` | prefijo de URL de los cuatro endpoints |
+| `access_ttl_secs` | `900` | vida del token de acceso |
+| `refresh_ttl_secs` | 7 días | vida del token de refresco |
+| `refresh_absolute_ttl_secs` | 30 días | lo máximo que dura un login entre refrescos; debe ser > 0 |
+| `refresh_reuse_grace_secs` | `10` | ventana de reintento tras una rotación; `0` trata toda reutilización como robo |
+| `session_secret` | `None` | clave de firma explícita en lugar de `RUSTANGO_SESSION_SECRET` |
+| `jti_store` | `None` | almacén de revocación; `None` es el de memoria |
+| `extra_claims` | `None` | hook que añade claims a ambos tokens en el login y en cada refresco |
+
+`extra_claims` recibe un `ClaimsContext` (`user_id`, `username`,
+`is_superuser`, `tenant_slug`). Devolver un nombre reservado (`sub`, `exp`,
+`jti`, `typ`, `kind`) hace fallar el login con `500`; `tenant`, `pwf`, `sat` y
+`fam` son del router. Con la característica `config`,
+`Config::with_jwt_settings(&settings.auth.jwt)` lee `access_ttl_secs` y
+`refresh_ttl_secs` de `[auth.jwt]`; las claves `issuer` y `audience` de ahí aún
+no tienen efecto.
+
+Los endpoints se ejecutan bajo el contexto del tenant, así que móntalos en una
+aplicación tenancy. Para un tipo de base de datos de tenant distinto del de por
+defecto, usa `router_for::<DB>()` y `require_bearer_for::<DB>`.
+`auth.lifecycle()` da el `JwtLifecycle` de debajo, y
+`auth.verify_for_tenant(bearer, &tenant)` hace las mismas comprobaciones que
+`require_bearer` y devuelve el id del usuario.
 
 ```sh
 # Login → access + refresh
@@ -116,6 +148,13 @@ match jwt.verify_access(&access).await {
     None => { /* 401: inválido, caducado, revocado, o tipo incorrecto */ }
 }
 ```
+
+`JwtLifecycle::new` recibe la clave como `Vec<u8>` y hace panic cuando tiene
+menos de 32 bytes. Los TTL son por defecto 15 min / 7 días; cámbialos con
+`.with_access_ttl(secs)` y `.with_refresh_ttl(secs)`.
+`issue_access_with(user_id, custom)` emite un token de acceso suelto, sin mitad
+de refresco, y `blacklist_size()` informa aproximadamente cuántos JTI están
+revocados (`0` para un almacén que no sabe contar).
 
 Los tokens de acceso y de refresco **no son intercambiables** — `verify_access`
 rechaza un token de refresco y viceversa, de modo que un token de acceso de corta
@@ -161,7 +200,9 @@ memoria olvida al reiniciar).
 
 Cada token lleva un `jti` único. `revoke` lo añade a una lista negra para que las
 llamadas `verify_*` posteriores fallen hasta que el token hubiera expirado de
-todos modos — esto es lo que llama `POST /api/auth/logout`:
+todos modos — esto es lo que llama `POST /api/auth/logout`. Solo comprueba la
+firma, así que también acepta un token caducado, y devuelve `false` para un
+token que no puede verificar:
 
 ```rust
 let pair = jwt.issue_pair(1);
@@ -238,7 +279,10 @@ impl JtiStore for PgJtiStore {
 exactamente una debe obtener `true` — una única escritura condicional
 (`INSERT … ON CONFLICT DO NOTHING`, Redis `SET NX`), nunca una lectura seguida de
 una escritura. De lo contrario se pierde la garantía de un solo uso de los tokens
-de refresco.
+de refresco. Otros dos métodos tienen valor por defecto: `approx_size` (`None`,
+lo usa `blacklist_size`) y `is_process_local` (`false`; devuelve `true` solo en
+un almacén que no comparte revocaciones, lo que hace que `JwtAuth::new` registre
+un aviso).
 
 Como la verificación consulta el almacén, `verify_access`, `verify_refresh`,
 `refresh`, `revoke` y los helpers de token de MCP / tenant

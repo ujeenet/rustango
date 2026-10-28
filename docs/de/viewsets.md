@@ -590,11 +590,11 @@ Felder, die Antworten zeigen und Bodies schreiben dürfen. Jede weitere Methode 
 | `read_only()` | Nur GET. |
 | `allow_anonymous()` | Schreibzugriffe ohne Codenamen sind gewollt; überspringt die Mount-Warnung. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Codename-Gates pro Aktion (letzteres bei Mandantenfähigkeit). |
-| `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Keyset-Paginierung (überspringt `COUNT(*)`). |
+| `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Keyset-Paginierung (überspringt `COUNT(*)`). Jede total geordnete NOT-NULL-Spalte: Integer, Timestamp, Datum, UUID oder String. |
 | `limit_offset_pagination()` | `?limit=&offset=`-Fensterung. |
 | `pagination(PaginationStyle::…)` | Den Stil explizit setzen. |
 | `filter_backend(closure)` | Eigene `WHERE`-Prädikate über `filter_fields` hinaus hinzufügen. |
-| `throttle(…)` / `throttle_all(max, secs)` | Rate-Limits pro Aktion mit festem Zeitfenster. |
+| `throttle(…)` / `throttle_all(max, secs)` | Rate-Limits pro Aktion mit festem Zeitfenster; `QUERY` verbraucht das Budget der Liste. |
 | `admin_add_hooks()` | Führt beim Create die `"add"`-Objekt-Berechtigungs-Hooks des Admins aus, auf dem Request und auf jeder geschriebenen Zeile; eine Ablehnung ist ein `403`. Standardmäßig aus. |
 | `router(prefix, pgpool)` | Einbinden (nur Postgres, statischer `PgPool`; Feature `postgres`). |
 | `router_pool(prefix, pool)` | Tri-dialektfähig einbinden (PG / SQLite / MySQL). |

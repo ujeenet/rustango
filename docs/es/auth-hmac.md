@@ -16,7 +16,8 @@ como una única capa tower.
 
 > **Fuente:** `rustango::hmac_auth` (`HmacAuthLayer`, `KeyResolver`,
 > `KeyTenantResolver`, `RequestToSign`, `sign_now`, `sign_request`) — detrás de la feature `hmac-auth` (activa por defecto; la
-> protección contra replay además necesita `cache`).
+> protección contra replay además necesita `cache`, y `bind_tenants` /
+> `KeyTenantResolver` necesitan `tenancy`).
 >
 > **Versión ejecutable:** cada fragmento está copiado de
 > [`auth_hmac_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_hmac_doc.rs)
@@ -71,7 +72,9 @@ Como la query se **ordena** en ambos extremos, `?b=2&a=1` y `?a=1&b=2` producen
 la misma firma. Como el cuerpo se hashea dentro de la cadena, cambiar un solo
 byte la invalida.
 
-El host es la cabecera `Host` sin su puerto. Sin fijarlo, la capa confía en el
+El host es la cabecera `Host` (o la autoridad HTTP/2) sin su puerto, en
+minúsculas. Una solicitud cuyo `Host` y autoridad nombran hosts distintos es un
+`401`. Sin fijarlo, la capa confía en el
 `Host` de la propia solicitud: una solicitud reenviada a otro servicio que comparte
 la clave, con un `Host` que aún nombra al primero, pasa. Si varios servicios
 comparten una clave, fije cada uno con `.host("api.example.com")` o póngalo detrás
@@ -115,8 +118,10 @@ firma con una clave desconocida y será un `401`:
 > **Sin extractor de identidad.** La capa verifica la firma pero **no** inyecta
 > qué `keyId` firmó en la solicitud — no hay un extractor `HmacUser`. Si un
 > handler necesita la identidad del llamante, envuelve la capa o transpórtala tú
-> mismo. Los rechazos son respuestas `401`/`413` planas, no un error tipado
-> sobre el que hagas match.
+> mismo. Los rechazos son respuestas de error JSON, no un error tipado sobre el
+> que hagas match: `401` para una firma, fecha o clave incorrecta o ausente,
+> `413` para un cuerpo por encima del límite y, con `bind_tenants`, `403` para el
+> tenant equivocado (`503` cuando falla la búsqueda del tenant).
 
 ---
 
@@ -152,8 +157,10 @@ La cabecera de tenant y el puerto no se firman por defecto, y la capa no conoce
 ningún tenant. En una app que resuelve tenants:
 
 - `.bind_tenants(tenant_of)` asigna a cada id de clave el slug del tenant por el
-  que puede actuar. La capa resuelve el tenant de la solicitud con el contexto de
-  tenant montado y responde `403` cuando no coincide, o cuando no hay ninguno.
+  que puede actuar (un `KeyTenantResolver`; `None` significa que la clave puede
+  actuar para cualquier tenant). La capa resuelve el tenant de la solicitud con
+  el contexto de tenant montado y responde `403` cuando no coincide, o cuando no
+  hay ninguno. Esto se ejecuta después de comprobar la firma.
 - `.signed_headers(["x-org"])` añade cabeceras a la cadena firmada, y
   `.sign_port()` añade el puerto de `Host`. Cada una añade una línea
   `name:value`, ordenadas por nombre. El cliente firma la misma lista con
@@ -168,7 +175,8 @@ La marca temporal `X-Date` acota el replay: una solicitud cuya fecha esté fuera
 de `tolerance_secs` (por defecto ±300 s) se rechaza, de modo que una solicitud
 capturada solo es reutilizable dentro de esa ventana corta. Para cerrarla por
 completo, adjunta un **almacén de nonce** (cualquier `cache::Cache`) y cada firma
-podrá gastarse una sola vez dentro de la ventana:
+podrá gastarse una sola vez. Una firma verificada se guarda el doble de
+`tolerance_secs`, y una repetición recibe un `401`:
 
 ```rust
 use rustango::cache::InMemoryCache;
@@ -180,9 +188,11 @@ let layer = HmacAuthLayer::new(resolver)
 
 En producción usa un almacén **compartido** (Redis) para que la protección se
 mantenga a través de las réplicas — una caché en proceso solo protege una
-instancia. La comprobación de replay falla en modo abierto (fail-open) ante un
-error de caché (disponibilidad por encima del estrecho riesgo dentro de la
-ventana).
+instancia. Un `NullCache` no guarda nada, así que la capa registra un aviso de
+que la protección contra replay está apagada. La comprobación de replay falla
+en modo abierto (fail-open) ante un error de caché (disponibilidad por encima
+del estrecho riesgo dentro de la ventana) y registra un aviso para esa
+solicitud.
 
 ---
 

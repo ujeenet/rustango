@@ -160,6 +160,16 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 | `run-server` / `runserver` | Startet den Multi-Tenant-Server |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup und interaktive Einstiegspunkte |
 
+**Erster Admin.** `create-tenant <slug> … --admin-email <e> [--admin-username <u>]`
+legt nach den Migrationen einen Superuser an, bevor der Tenant live geht;
+schlägt das fehl, wird der Lauf zurückgerollt. Der Admin bekommt kein Passwort.
+Das Verb gibt einmal einen Link zum Setzen des Passworts aus: Er funktioniert
+einmal, läuft nach 72 Stunden ab und gilt nur für diesen Tenant. Gib ihn dem
+Admin. Er ist mit dem Tenant-Session-Schlüssel des Servers signiert
+(`RUSTANGO_SESSION_SECRET` oder die Dev-Schlüsseldatei), also starte die CLI mit
+demselben Schlüssel wie den Server. `set-password-link <slug> <username>` gibt
+einen neuen aus.
+
 ### Audit **T**
 
 | Verb | Was es tut |
@@ -984,7 +994,7 @@ cargo run -- create-tenant gamma --mode database --server main
 | `--schema-name <s>` | Überschreibt den generierten Schemanamen im Schema-Modus |
 | `--port <n>` | Port, unter dem der Tenant erreichbar ist, fürs Routing |
 | `--path-prefix <s>` | Pfad-Präfix, unter dem der Tenant erreichbar ist, fürs Routing |
-| `--admin-email <e>` / `--admin-username <u>` | Legt den ersten Superuser des Tenants an |
+| `--admin-email <e>` / `--admin-username <u>` | Legt den ersten Superuser des Tenants an (siehe **Erster Admin** oben) |
 
 Jeder Modus prüft seine Rechte, bevor etwas entsteht, und wenn eines fehlt,
 nennt er es und gibt die Anweisungen aus, die es beheben: Der Schemamodus braucht
