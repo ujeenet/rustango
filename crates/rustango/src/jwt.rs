@@ -176,11 +176,7 @@ impl Claims {
 /// any key length, but a short key can be guessed, and then anyone
 /// can forge a token. So this refuses to sign with one.
 pub fn encode(claims: &Claims, secret: &[u8]) -> Result<String, JwtError> {
-    if secret.len() < 32 {
-        return Err(JwtError::Decode(
-            "HMAC secret must be >= 32 bytes (a shorter key is guessable / forgeable)".into(),
-        ));
-    }
+    check_key_len(secret)?;
     let header = json!({"alg": "HS256", "typ": "JWT"});
     let header_b = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("header serialize"));
     let payload_b = URL_SAFE_NO_PAD.encode(claims.to_json());
@@ -206,7 +202,7 @@ pub fn encode(claims: &Claims, secret: &[u8]) -> Result<String, JwtError> {
 /// [`decode_at`] with an adjusted `now`.
 ///
 /// # Errors
-/// See [`JwtError`].
+/// See [`JwtError`]. A `secret` under 32 bytes is refused as in [`encode`].
 pub fn decode(token: &str, secret: &[u8]) -> Result<Claims, JwtError> {
     decode_at(token, secret, now_secs())
 }
@@ -250,6 +246,8 @@ fn decode_inner(
     now: u64,
     require_exp: bool,
 ) -> Result<Claims, JwtError> {
+    // A verifier with a short or empty key accepts tokens anyone can sign.
+    check_key_len(secret)?;
     let mut it = token.split('.');
     let header_b = it.next().ok_or(JwtError::Malformed)?;
     let payload_b = it.next().ok_or(JwtError::Malformed)?;
@@ -323,6 +321,16 @@ pub fn decode_unverified(token: &str) -> Result<Claims, JwtError> {
     Claims::from_json(&payload_bytes)
 }
 
+/// The one key-length rule, for signing and verifying alike.
+fn check_key_len(secret: &[u8]) -> Result<(), JwtError> {
+    if secret.len() < 32 {
+        return Err(JwtError::Decode(
+            "HMAC secret must be >= 32 bytes (a shorter key is guessable / forgeable)".into(),
+        ));
+    }
+    Ok(())
+}
+
 // HMAC-SHA256 lives in `crate::crypto`, shared by every caller.
 use crate::crypto::hmac_sha256;
 
@@ -380,8 +388,37 @@ mod tests {
     fn wrong_secret_fails_signature_check() {
         let c = Claims::new("x");
         let t = encode(&c, SECRET).unwrap();
-        let err = decode(&t, b"wrong-secret-bytes").unwrap_err();
+        let err = decode(&t, b"wrong-secret-bytes-but-long-enough").unwrap_err();
         assert!(matches!(err, JwtError::BadSignature));
+    }
+
+    /// A token signed with a short key, as anyone could make one.
+    fn forged(secret: &[u8]) -> String {
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(br#"{"sub":"admin","exp":99999999999}"#);
+        let input = format!("{header}.{payload}");
+        let sig = URL_SAFE_NO_PAD.encode(hmac_sha256(secret, input.as_bytes()));
+        format!("{input}.{sig}")
+    }
+
+    /// A verifier whose key read as empty must not accept a token
+    /// signed with that empty key.
+    #[test]
+    fn decode_refuses_short_keys_like_encode() {
+        for key in [&b""[..], b"only-31-bytes-not-enough-yikes!"] {
+            let t = forged(key);
+            assert!(
+                matches!(decode(&t, key), Err(JwtError::Decode(_))),
+                "{key:?}"
+            );
+            assert!(matches!(decode_at(&t, key, 0), Err(JwtError::Decode(_))));
+            assert!(matches!(
+                decode_allowing_no_exp(&t, key),
+                Err(JwtError::Decode(_))
+            ));
+        }
+        let key = b"exactly-thirty-two-bytes-of-key!";
+        assert!(decode(&forged(key), key).is_ok());
     }
 
     #[test]
@@ -446,7 +483,7 @@ mod tests {
 
         // Opting out of `exp` does not opt out of the signature.
         assert!(matches!(
-            decode_allowing_no_exp(&t, b"wrong-secret-bytes"),
+            decode_allowing_no_exp(&t, b"wrong-secret-bytes-but-long-enough"),
             Err(JwtError::BadSignature)
         ));
         // …nor of `nbf`.
