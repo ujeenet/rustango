@@ -578,11 +578,22 @@ fn substitute(
         // Drop a type annotation like `{int:id}`, so a pattern
         // copied from a router works as written.
         let key = placeholder.split(':').next_back().unwrap_or(&placeholder);
+        // `{*rest}` is a catch-all: keyed `rest` (or the old `*rest`), its `/` kept.
+        let (key, wildcard) = match key.strip_prefix('*') {
+            Some(bare) if !params.contains_key(key) => (bare, true),
+            _ => (key, key.starts_with('*')),
+        };
         let value = params.get(key).ok_or_else(|| ReverseError::MissingParam {
             name: name.to_owned(),
             param: key.to_owned(),
         })?;
-        out.push_str(&crate::url_codec::url_encode(value));
+        if wildcard {
+            let segments: Vec<String> =
+                value.split('/').map(crate::url_codec::url_encode).collect();
+            out.push_str(&segments.join("/"));
+        } else {
+            out.push_str(&crate::url_codec::url_encode(value));
+        }
         used.insert(key.to_owned());
     }
     // Reject extra params so a typo does not pass unnoticed.
@@ -638,6 +649,18 @@ mod tests {
         let p = params(&[("id", "hello world")]);
         let url = reverse("__test_post_detail", &p).unwrap();
         assert_eq!(url, "/posts/hello%20world");
+    }
+
+    crate::register_url!("__test_wildcard", "/files/{*rest}");
+
+    /// A `{*rest}` catch-all takes `rest` and keeps its `/` separators.
+    #[test]
+    fn reverse_fills_a_wildcard_by_its_bare_name() {
+        let p = params(&[("rest", "a b/c.txt")]);
+        assert_eq!(
+            reverse("__test_wildcard", &p).unwrap(),
+            "/files/a%20b/c.txt"
+        );
     }
 
     #[test]

@@ -128,9 +128,9 @@ params.insert("id", "42".to_string());
 let response = redirect_to_view("post-detail", &params)?;
 ```
 
-`resolve_url(spec, &params)` nimmt beides entgegen: Wenn `spec` bereits wie
-eine URL aussieht (`/…`, `http://`, `https://`, `./`, `../`), wird es unverändert
-zurückgegeben; sonst wird es als Routenname behandelt und per Reverse aufgelöst.
+`resolve_url(spec, &params)` nimmt beides entgegen: Eine URL derselben Site
+(ein `/…`-Pfad, der nicht `//host` oder `/\host` ist, `./`, `../`) wird unverändert
+zurückgegeben; alles andere wird als Routenname behandelt und per Reverse aufgelöst.
 Praktisch für einen `?next=`-Parameter oder eine Einstellung, die *entweder* einen
 Pfad *oder* einen Namen halten kann:
 
@@ -142,12 +142,11 @@ let url = resolve_url("/dashboard", &params)?;   // path  → "/dashboard" (as-i
 (Für rohe Redirects zu einer bekannten URL gibt `rustango::shortcuts::redirect(url)`
 ein schlichtes `302` zurück.)
 
-**`resolve_url` prüft den Host nicht.** `http://evil.example` kommt unverändert
-zurück. Prüfen Sie ein vom Nutzer geliefertes `?next=` vor dem Redirect mit
-`rustango::urls::url_has_allowed_host_and_scheme(url, &allowed_hosts, require_https)`.
-Es akzeptiert einen relativen Pfad oder eine `http`/`https`-URL, deren Host in der
-Liste steht, und lehnt `//host`, `\\host`, Steuerzeichen und andere Schemata
-(`javascript:`, `data:`, …) ab.
+**`resolve_url` gibt nie eine fremde URL zurück.** `http://evil.example` und
+`//evil.example` sind keine Routennamen und scheitern mit `UnknownName`. Für einen
+gewollten Redirect auf eine absolute URL prüfen Sie sie mit
+`rustango::urls::url_has_allowed_host_and_scheme(url, &allowed_hosts, require_https)`
+und geben sie direkt an `redirect`.
 
 ---
 
@@ -291,7 +290,8 @@ kompilieren und über Anfragen hinweg wiederverwenden kann.
   diesem Muster gemountet ist. Registrieren Sie den Namen dort, wo Sie die Route
   mounten, damit sie synchron bleiben.
 - **Werte werden prozentkodiert** von `reverse`, sodass sie sicher in einen
-  `Location`-Header oder ein `href` fallengelassen werden können.
+  `Location`-Header oder ein `href` fallengelassen werden können. Ein `{*rest}`-Catch-all
+  nimmt den Schlüssel `rest` und behält seine `/`-Trenner.
 - **Keine Regex-/typisierten Konverter** in Mustern (etwa `<int:pk>`);
   Platzhalter sind schlichte `{name}`, und Werte werden unverändert eingesetzt
   (nach der Kodierung). Siehe [Regex & typisierte Pfadmuster](#regex--typisierte-pfadmuster)
