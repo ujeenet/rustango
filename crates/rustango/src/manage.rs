@@ -1724,9 +1724,9 @@ impl Cli {
         let outer = None;
         // Not `mount_observability` — see the dispatch path above. The
         // builder applies these to the outermost router.
-        let apex = self
-            .apex
-            .take()
+        let apex_flag = self.apex.take();
+        let apex = apex_flag
+            .clone()
             .unwrap_or_else(crate::tenancy::server::apex_domain);
         let registry_url =
             crate::env::database_url_from_env().map_err(|e| -> Box<dyn std::error::Error> {
@@ -1745,6 +1745,9 @@ impl Cli {
             apex,
         )
         .api(api);
+        if let Some(apex) = apex_flag {
+            builder = builder.with_apex(apex);
+        }
         builder = self.tenancy_builder(builder, outer);
         if self.health_endpoints {
             builder = builder.with_health();
