@@ -131,7 +131,7 @@ let layer = CorsLayer::new()
 let layer = CorsLayer::permissive();              // any origin, common methods
 ```
 
-`CorsLayer::new()` allows no origin until you add some. `CorsLayer::from_settings(&settings.security)` reads `[security] cors_allowed_origins`: an empty list gives `None` (mount nothing), `"*"` gives `permissive()`, and named origins give an allowlist with the common methods (QUERY included) and the `Content-Type` and `Authorization` headers.
+`CorsLayer::new()` allows no origin until you add some. `CorsLayer::from_settings(&settings.security)` reads `[security] cors_allowed_origins`: an empty list gives `None` (mount nothing), `"*"` gives `permissive()`, and named origins give an allowlist with the common methods (QUERY included) and the `Content-Type`, `Authorization`, `X-Date`, `Idempotency-Key`, `If-Match`, `If-None-Match` request headers. Both expose `Retry-After`, `Idempotent-Replayed`, `ETag`, `Location`, `Link` to scripts.
 
 **Security note:** with credentials you MUST list explicit origins. `allow_credentials(true)` combined with `allow_any_origin()` does not give you credentialed wildcard CORS — there is no such thing, and asking for it gets you neither half.
 

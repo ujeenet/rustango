@@ -234,6 +234,12 @@ pub trait ModelSerializer: serde::Serialize + Sized {
         &[]
     }
 
+    /// The JSON keys of [`Self::readable_source_fields`], in the same
+    /// order; they differ where `source` or a serde rename applies.
+    fn readable_fields() -> &'static [&'static str] {
+        Self::readable_source_fields()
+    }
+
     /// Parse a JSON request body for validation. Writable fields are
     /// read by their serializer name; read-only and computed fields
     /// get their default. A type error lands in

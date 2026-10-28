@@ -13758,6 +13758,11 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
         None => quote!(::core::option::Option::None),
     };
+    #[cfg(feature = "openapi")]
+    let opt_u64 = |v: Option<u64>| match v {
+        Some(n) => quote!(::core::option::Option::Some(#n)),
+        None => quote!(::core::option::Option::None),
+    };
     let opt_i64 = |v: Option<i64>| match v {
         Some(n) => quote!(::core::option::Option::Some(#n)),
         None => quote!(::core::option::Option::None),
@@ -14009,7 +14014,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // `readable_source_fields`: model columns the JSON output copies
     // straight from the model, so `?ordering=` cannot sort on a column
     // the API never shows (#1845).
-    let readable_source_lits: Vec<String> = fields_info
+    let readable: Vec<&FieldInfo> = fields_info
         .iter()
         .filter(|fi| {
             !fi.attrs.write_only
@@ -14020,6 +14025,9 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 && fi.attrs.many.is_none()
                 && fi.attrs.slug.is_none()
         })
+        .collect();
+    let readable_source_lits: Vec<String> = readable
+        .iter()
         .map(|fi| {
             fi.attrs
                 .source
@@ -14027,6 +14035,8 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 .unwrap_or_else(|| ident_name(&fi.ident))
         })
         .collect();
+    // Their JSON keys, so the ViewSet finds a renamed cursor column.
+    let readable_lits: Vec<String> = readable.iter().map(|fi| fi.ser_name.clone()).collect();
 
     // `from_writable_json`: build a partial instance for input
     // validation. Writable fields are parsed from the JSON body (keyed
@@ -14117,10 +14127,31 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 } else {
                     quote! {}
                 };
+                // The bounds `validate()` enforces on a written field.
+                let limits_call = is_writable(fi).then(|| {
+                    let mname = fi
+                        .attrs
+                        .source
+                        .clone()
+                        .unwrap_or_else(|| ident_name(&fi.ident));
+                    let (a, b, c, d) = (
+                        opt_u64(fi.attrs.max_length),
+                        opt_u64(fi.attrs.min_length),
+                        opt_i64(fi.attrs.min),
+                        opt_i64(fi.attrs.max),
+                    );
+                    quote! {
+                        .field_limits(
+                            <#model_path as #root::core::Model>::SCHEMA.field(#mname),
+                            #a, #b, #c, #d,
+                        )
+                    }
+                });
                 quote! {
                     .property(
                         #name_lit,
                         <#ty as #root::openapi::OpenApiSchema>::openapi_schema()
+                            #limits_call
                             #nullable_call,
                     )
                 }
@@ -14166,6 +14197,10 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
             fn readable_source_fields() -> &'static [&'static str] {
                 &[ #( #readable_source_lits ),* ]
+            }
+
+            fn readable_fields() -> &'static [&'static str] {
+                &[ #( #readable_lits ),* ]
             }
 
             fn from_writable_json(

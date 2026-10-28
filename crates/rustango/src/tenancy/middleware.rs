@@ -36,6 +36,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 
+use crate::api_errors::ApiError;
 use crate::extractors::MountedTenantContext;
 use crate::sql::Pool;
 
@@ -133,32 +134,26 @@ pub(crate) async fn request_pool(
 async fn tenant_pool(parts: &Parts, ext: &axum::http::Extensions) -> Result<(Org, Pool), Response> {
     let org = match request_org(parts, ext).await {
         Some(Ok(Some(org))) => org,
-        Some(Ok(None)) => return Err((StatusCode::NOT_FOUND, "unknown tenant").into_response()),
+        Some(Ok(None)) => return Err(ApiError::not_found("unknown tenant").into_response()),
         Some(Err(e)) => {
             tracing::error!(error = %e, "require_auth: tenant resolution failed");
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "tenant resolution failed",
-            )
-                .into_response());
+            return Err(ApiError::internal("tenant resolution failed").into_response());
         }
         None => {
             tracing::error!(
                 "require_auth ran without a tenant context in request extensions — \
                  mount the tenancy layer (server::Builder::tenant_pools) ahead of it"
             );
-            return Err(
-                (StatusCode::INTERNAL_SERVER_ERROR, "tenant context missing").into_response(),
-            );
+            return Err(ApiError::internal("tenant context missing").into_response());
         }
     };
     match request_pool(ext, &org).await {
         Some(Ok(pool)) => Ok((org, pool)),
         Some(Err(e)) => {
             tracing::error!(error = %e, slug = %org.slug, "require_auth: tenant pool failed");
-            Err((StatusCode::INTERNAL_SERVER_ERROR, "tenant pool unavailable").into_response())
+            Err(ApiError::internal("tenant pool unavailable").into_response())
         }
-        None => Err((StatusCode::INTERNAL_SERVER_ERROR, "tenant context missing").into_response()),
+        None => Err(ApiError::internal("tenant context missing").into_response()),
     }
 }
 
@@ -208,7 +203,7 @@ async fn auth_middleware(
         .get::<super::TenantSlug>()
         .is_some_and(|s| s.0 != org.slug)
     {
-        return (StatusCode::FORBIDDEN, "tenant mismatch").into_response();
+        return ApiError::forbidden("tenant mismatch").into_response();
     }
     // Scope the Basic and API-key limits to this tenant and client.
     dummy_parts
@@ -232,15 +227,22 @@ async fn auth_middleware(
             }
             Ok(None) => {}
             Err(AuthError::Inactive) => {
-                error_response = Some((StatusCode::FORBIDDEN, "account inactive").into_response());
+                error_response = Some(ApiError::forbidden("account inactive").into_response());
                 break;
             }
             Err(AuthError::Refused(refused)) => {
                 error_response = Some(refused.into_response());
                 break;
             }
-            Err(e) => {
-                error_response = Some((StatusCode::UNAUTHORIZED, e.to_string()).into_response());
+            // A failed lookup is an outage, not a bad credential: a 401
+            // would make clients drop a valid token.
+            Err(e @ (AuthError::Database(_) | AuthError::Exec(_))) => {
+                let status = StatusCode::SERVICE_UNAVAILABLE;
+                error_response = Some(ApiError::logged(status, "require_auth", e).into_response());
+                break;
+            }
+            Err(e @ AuthError::InvalidToken) => {
+                error_response = Some(ApiError::unauthorized(e.to_string()).into_response());
                 break;
             }
         }
@@ -258,7 +260,7 @@ async fn auth_middleware(
             next.run(req).await
         }
         None if state.required => crate::bearer::challenge(
-            (StatusCode::UNAUTHORIZED, "authentication required").into_response(),
+            ApiError::unauthorized("authentication required").into_response(),
             sent,
         ),
         None => next.run(req).await,
@@ -273,7 +275,7 @@ async fn perm_middleware(
     let user = req.extensions().get::<AuthenticatedUser>().cloned();
     let Some(user) = user else {
         return crate::bearer::challenge(
-            (StatusCode::UNAUTHORIZED, "authentication required").into_response(),
+            ApiError::unauthorized("authentication required").into_response(),
             crate::bearer::Sent::of(req.headers()),
         );
     };
@@ -290,10 +292,7 @@ async fn perm_middleware(
         .await
         .unwrap_or(false);
     if !ok {
-        return (
-            StatusCode::FORBIDDEN,
-            format!("permission required: {}", state.codename),
-        )
+        return ApiError::forbidden(format!("permission required: {}", state.codename))
             .into_response();
     }
     next.run(req).await

@@ -197,3 +197,59 @@ async fn cursor_pagination_descending_walks_back_from_highest_id() {
     assert_eq!(results[0]["id"], 1);
     assert!(body["next"].is_null());
 }
+
+/// Publishes the primary key as `key`.
+#[derive(rustango::Serializer, serde::Deserialize, Default)]
+#[serializer(model = Post)]
+struct KeyedPost {
+    #[serializer(source = "id", read_only)]
+    pub key: Auto<i64>,
+    pub title: String,
+}
+
+/// The `next` token reads the cursor under the serializer's key.
+#[tokio::test]
+async fn cursor_pagination_follows_a_renamed_cursor_field() {
+    let (seeder, pool) = make_router_and_pool(5).await;
+    seed(&seeder, 7).await;
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title"])
+        .page_size(5)
+        .cursor_pagination("id")
+        .serializer::<KeyedPost>()
+        .router_pool("/posts", pool);
+    let resp = app.clone().oneshot(get("/posts")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let page = body_json(resp).await;
+    assert_eq!(page["results"][0]["key"], 1, "{page}");
+    let next = page["next"].as_str().expect("next token").to_owned();
+    let resp = app
+        .oneshot(get(&format!("/posts?cursor={next}")))
+        .await
+        .unwrap();
+    let page = body_json(resp).await;
+    let keys: Vec<i64> = page["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["key"].as_i64().unwrap())
+        .collect();
+    assert_eq!(keys, [6, 7], "{page}");
+}
+
+/// Only renders the title.
+#[derive(rustango::Serializer, serde::Deserialize, Default)]
+#[serializer(model = Post)]
+struct TitleOnly {
+    pub title: String,
+}
+
+/// A serializer that drops the cursor column fails at mount, not per request.
+#[tokio::test]
+#[should_panic(expected = "the serializer does not render `vs_cursor_post.id`")]
+async fn a_serializer_without_the_cursor_field_panics_at_mount() {
+    let (_, pool) = make_router_and_pool(5).await;
+    let _ = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title"])
+        .cursor_pagination("id")
+        .serializer::<TitleOnly>()
+        .router_pool("/posts", pool);
+}
