@@ -746,7 +746,7 @@ async fn normalise_datetimes_quietly(pool: &crate::sql::Pool, scope: &str) {
             scope = %scope,
             rows = fixed.rows,
             columns = ?fixed.columns,
-            "normalised SQLite datetime values written before 0.57.11 (#1464)",
+            "normalised SQLite datetime values written before 0.57.11",
         ),
         Ok(_) => {}
         Err(e) => tracing::warn!(
@@ -754,7 +754,7 @@ async fn normalise_datetimes_quietly(pool: &crate::sql::Pool, scope: &str) {
             scope = %scope,
             error = %e,
             "SQLite datetime normalisation failed; timestamps written before \
-             0.57.11 may not compare correctly until it succeeds (#1464)",
+             0.57.11 may not compare correctly until it succeeds",
         ),
     }
 }

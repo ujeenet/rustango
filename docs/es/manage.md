@@ -158,7 +158,7 @@ alcanzan mediante `Cli::tenancy()`.
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Enrutado por host |
 | `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Servidores de bases de datos guardados |
 | `test-tenant-connection` | Verifica que la base de un tenant es alcanzable |
-| `reseal-tenant-secrets [--apply]` | Vuelve a sellar las URL de tenant y las contraseñas de servidor guardadas con la `RUSTANGO_SECRET_KEY` actual; sin `--apply` es una prueba en seco |
+| `reseal-tenant-secrets [--apply]` | Vuelve a sellar las URL de tenant, las contraseñas de servidor y los secretos TOTP de operador y SSO guardados con la `RUSTANGO_SECRET_KEY` actual; sin `--apply` es una prueba en seco |
 | `prewarm-pools` | Abre los pools de tenants antes de la primera petición |
 | `run-server` / `runserver` | Ejecuta el servidor multi-tenant |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Puntos de entrada de configuración e interactivos |
@@ -219,6 +219,12 @@ cargo run -- makemigrations rename_status_to_state   # custom suffix
 
 **NO detectados automáticamente** (renombrar vs. eliminar+añadir es ambiguo):
 - `RenameTable`, `RenameColumn` — usa `--empty` y edita el JSON.
+
+Una columna eliminada junto a una columna nueva del mismo tipo en una tabla
+parece un campo renombrado, y eliminar+añadir borraría sus datos.
+`makemigrations` lo rechaza y nombra las columnas; escribe el `RenameColumn`
+como abajo, o pasa `--drop-and-add` para eliminar y añadir a propósito. Cada
+otro `DropColumn` avisa de que sus datos se pierden.
 
 ### `makemigrations --app <app>`
 
@@ -1204,7 +1210,7 @@ consola entre tenants. Los operadores viven en el registry compartido, no dentro
 de un tenant concreto.
 
 ```bash
-cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-operator admin --generate     # mostrar una aleatoria en su lugar
 ```
 
@@ -1609,8 +1615,9 @@ cargo rustango new myapp --template tenant
 cd myapp
 cp .env.example .env             # edit DATABASE_URL + RUSTANGO_APEX_DOMAIN
 docker compose up -d
+cargo run -- makemigrations                               # files for your models
 cargo run -- migrate                                      # registry + tenants
-cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
 cargo run -- create-user acme alice --password tenantpw --superuser

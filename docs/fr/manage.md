@@ -160,7 +160,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Routage par hôte |
 | `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Serveurs de bases de données enregistrés |
 | `test-tenant-connection` | Vérifie que la base d'un tenant est joignable |
-| `reseal-tenant-secrets [--apply]` | Rescelle les URL de tenant et les mots de passe de serveur stockés avec la `RUSTANGO_SECRET_KEY` actuelle ; sans `--apply`, une simulation |
+| `reseal-tenant-secrets [--apply]` | Rescelle les URL de tenant, les mots de passe de serveur, les secrets TOTP des opérateurs et les secrets SSO stockés avec la `RUSTANGO_SECRET_KEY` actuelle ; sans `--apply`, une simulation |
 | `prewarm-pools` | Ouvre les pools de tenants avant la première requête |
 | `run-server` / `runserver` | Lance le serveur multi-tenant |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Points d'entrée de configuration et interactifs |
@@ -223,6 +223,12 @@ cargo run -- makemigrations rename_status_to_state   # custom suffix
 - `RenameTable`, `RenameColumn` — utilisez `--empty` et modifiez le JSON. Une
   exception : un `src_col` / `dst_col` M2M modifié avec le même `through` est
   écrit comme `RenameColumn`, pour que la table de jonction garde ses lignes.
+
+Une colonne supprimée à côté d'une nouvelle colonne du même type dans une table
+ressemble à un champ renommé, et suppression+ajout effacerait ses données.
+`makemigrations` le refuse et nomme les colonnes ; écrivez le `RenameColumn`
+comme ci-dessous, ou passez `--drop-and-add` pour supprimer et ajouter
+volontairement. Tout autre `DropColumn` avertit que ses données disparaissent.
 
 ### `makemigrations --app <app>`
 
@@ -1252,7 +1258,7 @@ tenant depuis une console inter-tenant. Les opérateurs vivent dans le
 registry partagé, pas dans un tenant en particulier.
 
 ```bash
-cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-operator admin --generate     # en afficher un aléatoire à la place
 ```
 
@@ -1672,8 +1678,9 @@ cargo rustango new myapp --template tenant
 cd myapp
 cp .env.example .env             # edit DATABASE_URL + RUSTANGO_APEX_DOMAIN
 docker compose up -d
+cargo run -- makemigrations                               # files for your models
 cargo run -- migrate                                      # registry + tenants
-cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
 cargo run -- create-user acme alice --password tenantpw --superuser

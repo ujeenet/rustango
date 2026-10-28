@@ -157,7 +157,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host routing |
 | `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Saved database servers |
 | `test-tenant-connection` | Verify a tenant's database is reachable |
-| `reseal-tenant-secrets [--apply]` | Re-seal stored tenant URLs and server passwords with the current `RUSTANGO_SECRET_KEY`; a dry run without `--apply` |
+| `reseal-tenant-secrets [--apply]` | Re-seal stored tenant URLs, server passwords, operator TOTP and SSO secrets with the current `RUSTANGO_SECRET_KEY`; a dry run without `--apply` |
 | `prewarm-pools` | Open tenant pools ahead of first request |
 | `run-server` / `runserver` | Run the multi-tenant server |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup and interactive entry points |
@@ -217,6 +217,12 @@ cargo run -- makemigrations rename_status_to_state   # custom suffix
 - `RenameTable`, `RenameColumn` — use `--empty` and edit the JSON. One
   exception: a changed M2M `src_col` / `dst_col` with the same `through` is
   written as `RenameColumn`, so the junction keeps its rows.
+
+A column dropped beside a new column of the same type on one table looks like
+a renamed field, and a drop + add would delete its data. `makemigrations`
+refuses it and names the columns; write the `RenameColumn` as below, or pass
+`--drop-and-add` to drop and add on purpose. Every other `DropColumn` prints a
+warning that its data goes.
 
 ### `makemigrations --app <app>`
 
@@ -1185,7 +1191,7 @@ cross-tenant console. Operators live in the shared registry, not inside
 any one tenant.
 
 ```bash
-cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-operator admin --generate     # print a random one instead
 ```
 
@@ -1586,8 +1592,9 @@ cargo rustango new myapp --template tenant
 cd myapp
 cp .env.example .env             # edit DATABASE_URL + RUSTANGO_APEX_DOMAIN
 docker compose up -d
+cargo run -- makemigrations                               # files for your models
 cargo run -- migrate                                      # registry + tenants
-cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
 cargo run -- create-user acme alice --password tenantpw --superuser

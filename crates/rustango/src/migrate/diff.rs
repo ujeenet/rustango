@@ -484,24 +484,24 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     changes
 }
 
-/// Warnings for the dropped NOT NULL columns with no default in `changes`
-/// (their re-add on downgrade is refused once the table has rows), and for
-/// a junction dropped beside a new one with its ends (its rows are lost).
+/// Warnings for every dropped column in `changes` (its data is deleted; a
+/// NOT NULL one with no default also cannot be unapplied once the table
+/// has rows), and for a junction dropped beside a new one with its ends.
 pub(crate) fn irreversible_drops(prev: &SchemaSnapshot, changes: &[SchemaChange]) -> Vec<String> {
     changes
         .iter()
         .filter_map(|c| match c {
-            SchemaChange::DropColumn { table, column } => prev
-                .table(table)
-                .and_then(|t| t.field(column))
-                .filter(|f| !f.nullable && f.default.is_none())
-                .map(|_| {
-                    format!(
-                        "dropping NOT NULL `{table}.{column}` with no default: this migration \
-                         cannot be unapplied once the table has rows; add a `default` first \
-                         to keep it reversible"
-                    )
-                }),
+            SchemaChange::DropColumn { table, column } => {
+                let f = prev.table(table).and_then(|t| t.field(column))?;
+                let mut w = format!("dropping `{table}.{column}` deletes the data in it");
+                if !f.nullable && f.default.is_none() {
+                    w.push_str(
+                        "; it is NOT NULL with no default, so this migration cannot be \
+                         unapplied once the table has rows (add a `default` first)",
+                    );
+                }
+                Some(w)
+            }
             SchemaChange::DropM2MTable { through } => {
                 let gone = prev.m2m_table(through)?;
                 let key = junction_ends(
@@ -530,6 +530,42 @@ pub(crate) fn irreversible_drops(prev: &SchemaSnapshot, changes: &[SchemaChange]
             _ => None,
         })
         .collect()
+}
+
+/// `(table, dropped, added)` for each column `changes` drops beside a new
+/// column of the same type on the same table: likely a renamed field,
+/// which a drop + add would empty. Never guessed into a `RenameColumn`.
+pub(crate) fn suspected_renames(
+    prev: &SchemaSnapshot,
+    current: &SchemaSnapshot,
+    changes: &[SchemaChange],
+) -> Vec<(String, String, String)> {
+    let ty = |snap: &SchemaSnapshot, table: &str, column: &str| {
+        snap.table(table)
+            .and_then(|t| t.field(column))
+            .map(|f| f.ty.clone())
+    };
+    let mut out = Vec::new();
+    for c in changes {
+        let SchemaChange::DropColumn { table, column } = c else {
+            continue;
+        };
+        let Some(dropped) = ty(prev, table, column) else {
+            continue;
+        };
+        for a in changes {
+            if let SchemaChange::AddColumn {
+                table: t,
+                column: added,
+            } = a
+            {
+                if t == table && ty(current, t, added).as_ref() == Some(&dropped) {
+                    out.push((table.clone(), column.clone(), added.clone()));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// A junction's `(table, column)` ends, in either declared order.
@@ -1374,15 +1410,15 @@ fn render_changes_split_inner(
                 if !f.nullable && f.default.is_none() && f.generated_as.is_none() && !empty_tables {
                     return Err(format!(
                         "AddColumn `{table}.{column}` is NOT NULL with no `default` — \
-                         Postgres can't backfill existing rows. Pick one:\n  \
+                         the database can't backfill existing rows. Pick one:\n  \
                          (1) Make the field `Option<…>` — column becomes nullable and existing \
                          rows get NULL.\n  \
                          (2) Set `#[rustango(default = \"…\")]` so existing rows get the \
                          default backfill.\n  \
                          (3) (dev iteration / fresh table only) Delete the pending migration \
                          JSON that emitted this `AddColumn`, then re-run `makemigrations` so \
-                         `{column}` lands in the original `CreateTable` for `{table}` — \
-                         see #84 in the backlog for the full `migrate --squash` proposal.\n  \
+                         `{column}` lands in the original `CreateTable` for `{table}`, or \
+                         run `migrate --squash`.\n  \
                          Note: option (3) requires the column to NOT exist in the database \
                          yet (i.e. the `CreateTable` migration hasn't been applied, OR you're \
                          willing to drop and recreate the table). Option (1) or (2) is the \
@@ -2789,9 +2825,9 @@ mod sql_type_tests {
         );
     }
 
-    /// makemigrations warns about a drop whose downgrade is refused.
+    /// Every drop warns that its data goes; one whose downgrade is refused says so too.
     #[test]
-    fn dropping_a_not_null_column_without_default_warns() {
+    fn dropping_any_column_warns_about_its_data() {
         let nullable = FieldSnapshot {
             column: "y".into(),
             nullable: true,
@@ -2811,8 +2847,63 @@ mod sql_type_tests {
             column: column.into(),
         };
         let warned = irreversible_drops(&snap, &[drop("x"), drop("y")]);
-        assert_eq!(warned.len(), 1, "{warned:?}");
-        assert!(warned[0].contains("`t.x`"), "{}", warned[0]);
+        assert_eq!(warned.len(), 2, "{warned:?}");
+        assert!(
+            warned[0].contains("`t.x` deletes the data") && warned[0].contains("NOT NULL"),
+            "{}",
+            warned[0]
+        );
+        assert!(
+            warned[1].contains("`t.y` deletes the data") && !warned[1].contains("NOT NULL"),
+            "{}",
+            warned[1]
+        );
+    }
+
+    /// A drop beside a same-type add on one table is a suspected rename;
+    /// another type, or another table, is not.
+    #[test]
+    fn a_drop_beside_a_same_type_add_is_a_suspected_rename() {
+        let field = |column: &str, ty: &str| FieldSnapshot {
+            name: column.into(),
+            column: column.into(),
+            nullable: true,
+            ..fs(ty, false)
+        };
+        let table = |name: &str, fields: Vec<FieldSnapshot>| TableSnapshot {
+            name: name.into(),
+            model: name.into(),
+            fields,
+            composite_fks: Vec::new(),
+        };
+        let prev = SchemaSnapshot {
+            tables: vec![
+                table(
+                    "posts",
+                    vec![field("subtitle", "string"), field("n", "i32")],
+                ),
+                table("tags", vec![field("label", "string")]),
+            ],
+            ..Default::default()
+        };
+        let current = SchemaSnapshot {
+            tables: vec![
+                table(
+                    "posts",
+                    vec![field("tagline", "string"), field("flag", "bool")],
+                ),
+                table(
+                    "tags",
+                    vec![field("label", "string"), field("note", "string")],
+                ),
+            ],
+            ..Default::default()
+        };
+        let changes = detect_changes(&prev, &current);
+        assert_eq!(
+            suspected_renames(&prev, &current, &changes),
+            vec![("posts".into(), "subtitle".into(), "tagline".into())]
+        );
     }
 
     /// Swapping one M2M for another with the same ends drops the rows: say so.

@@ -159,7 +159,7 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host-Routing |
 | `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Gespeicherte Datenbankserver |
 | `test-tenant-connection` | Prüft, ob die Datenbank eines Tenants erreichbar ist |
-| `reseal-tenant-secrets [--apply]` | Versiegelt gespeicherte Tenant-URLs und Server-Passwörter neu mit dem aktuellen `RUSTANGO_SECRET_KEY`; ohne `--apply` ein Probelauf |
+| `reseal-tenant-secrets [--apply]` | Versiegelt gespeicherte Tenant-URLs, Server-Passwörter, Operator-TOTP- und SSO-Secrets neu mit dem aktuellen `RUSTANGO_SECRET_KEY`; ohne `--apply` ein Probelauf |
 | `prewarm-pools` | Öffnet Tenant-Pools vor dem ersten Request |
 | `run-server` / `runserver` | Startet den Multi-Tenant-Server |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup und interaktive Einstiegspunkte |
@@ -220,6 +220,13 @@ cargo run -- makemigrations rename_status_to_state   # custom suffix
 
 **NICHT automatisch erkannt** (Umbenennen vs. Löschen+Hinzufügen ist mehrdeutig):
 - `RenameTable`, `RenameColumn` — verwenden Sie `--empty` und bearbeiten Sie das JSON.
+
+Eine gelöschte Spalte neben einer neuen Spalte desselben Typs in einer Tabelle
+sieht nach einem umbenannten Feld aus, und Löschen+Hinzufügen würde ihre Daten
+löschen. `makemigrations` verweigert das und nennt die Spalten; schreiben Sie
+das `RenameColumn` wie unten, oder übergeben Sie `--drop-and-add`, um bewusst
+zu löschen und hinzuzufügen. Jedes andere `DropColumn` warnt, dass seine Daten
+verloren gehen.
 
 ### `makemigrations --app <app>`
 
@@ -1211,7 +1218,7 @@ tenant-übergreifenden Konsole aus verwalten kann. Operatoren leben in der
 gemeinsamen Registry, nicht innerhalb eines einzelnen Tenants.
 
 ```bash
-cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-operator admin --generate     # stattdessen ein zufälliges ausgeben
 ```
 
@@ -1628,8 +1635,9 @@ cargo rustango new myapp --template tenant
 cd myapp
 cp .env.example .env             # edit DATABASE_URL + RUSTANGO_APEX_DOMAIN
 docker compose up -d
+cargo run -- makemigrations                               # files for your models
 cargo run -- migrate                                      # registry + tenants
-cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
 cargo run -- create-user acme alice --password tenantpw --superuser
