@@ -210,7 +210,7 @@ Registra el módulo — añade `pub mod post_serializer;` a `src/blog/mod.rs`.
 Nota que solo escribimos un validador (`title_min_3`); los campos también
 **heredan las restricciones del modelo** automáticamente — a `title` se le
 verifica la longitud contra el `max_length = 200` del modelo, y una columna con
-`choices`/`min`/`max` también se verificaría, todo devolviendo `400`s amigables
+`choices`/`min`/`max` también se verificaría, todo devolviendo `422`s amigables
 en la escritura. Añade los atributos de serializador `max_length` / `min_length` /
 `min` / `max` para sobrescribir el límite de un campo. (Consulta la
 [guía de serializadores](serializers.md#validación) para la historia completa de
@@ -243,7 +243,9 @@ use rustango::ViewSet;
 pub struct PostViewSet;
 ```
 
-Añade `pub mod post_view_set;` a `src/blog/mod.rs`.
+El generador escribe `src/post_view_set.rs` (empieza como `read_only`, y su
+línea `use` asume `crate::models::Post`). Muévelo a `src/blog/post_view_set.rs`
+como se muestra y añade `pub mod post_view_set;` a `src/blog/mod.rs`.
 
 > `fields` es obligatorio: es la lista blanca de escritura, así que un body no
 > puede fijar otra columna (por ejemplo `author_id`). Un serializador la restringe
@@ -266,8 +268,13 @@ pub fn api(pool: Pool) -> Router {
 }
 ```
 
-`make:api_routes blog` genera exactamente este agregador si prefieres
-generarlo. Conecta `blog::urls::api(pool)` en tu `urls.rs` de nivel superior.
+`make:api_routes blog` genera la misma forma en `src/blog/api_routes.rs` si
+prefieres generarlo. El `urls::api()` de nivel superior no tiene pool, así que
+monta este router desde `src/main.rs`, donde el `Cli` te da el pool del
+servidor. Un nest en la raíz se rechaza, así que anídalo bajo un prefijo y quita
+ese prefijo de la ruta del ViewSet:
+`.nest_with("/api", |pool| myapp::blog::urls::api(pool))` con
+`PostViewSet::router("/posts", pool)` dentro.
 
 ### Paso 7 — Ejecutarlo y probar cada endpoint
 
@@ -299,15 +306,16 @@ La respuesta tiene la forma del **serializador**: `body` regresó como `content`
 apareció el `summary` calculado, y `published_at` (de solo lectura, establecido
 por el servidor) está presente.
 
-**La validación rechaza la entrada inválida** con un `400` —
-arreglos de mensajes indexados por campo:
+**La validación rechaza la entrada inválida** con un `422` —
+arreglos de mensajes indexados por campo bajo `details`:
 
 ```bash
 curl -i -X POST localhost:8080/api/posts \
   -H 'content-type: application/json' \
   -d '{"title":"hi","content":"x","author_id":1}'
-# HTTP/1.1 400 Bad Request
-# {"title":["title must be at least 3 characters"]}
+# HTTP/1.1 422 Unprocessable Entity
+# {"error":"validation_failed","message":"invalid input","status":422,
+#  "details":{"title":["title must be at least 3 characters"]}}
 ```
 
 **Los campos de solo lectura / calculados que un cliente envía se ignoran** — no
@@ -381,8 +389,8 @@ async fn rejects_short_title() {
     let res = client.post("/api/posts")
         .json(&json!({"title":"hi","content":"x","author_id":1}))
         .send().await;
-    assert_eq!(res.status, 400);
-    assert!(res.json_value()["title"].is_array());   // field-keyed error shape
+    assert_eq!(res.status, 422);
+    assert!(res.json_value()["details"]["title"].is_array());   // field-keyed error shape
 }
 
 #[tokio::test]
@@ -439,8 +447,8 @@ En `create` y `update`, cuando hay un serializador registrado:
 1. **Se ejecuta la validación.** El `validate()` del serializador — cada
    `#[serializer(validate = "fn")]` por campo más el `validate` cruzado a nivel
    de contenedor — corre contra el cuerpo JSON. Ante un fallo, la petición se
-   rechaza con `400 Bad Request` con la forma de error indexada por campo: un objeto JSON
-   indexado por nombre de campo con arreglos de mensajes, p. ej.
+   rechaza con `422 Unprocessable Entity` (`validation_failed`) con la forma de error
+   indexada por campo en `details`: un objeto JSON indexado por nombre de campo con arreglos de mensajes, p. ej.
    `{"title":["title must be at least 3 characters"]}`.
 2. **Filtrado de campos escribibles.** Solo se persisten los campos escribibles
    del serializador; los campos `read_only` y `method`/calculados que un cliente
@@ -566,7 +574,8 @@ eliminar", monta el ViewSet y sobrescribe la única ruta con tu propio handler
 | `ordering` | `"-published_at, id"` | ninguno | Orden por defecto (`-` = DESC). |
 | `page_size` | `20` | 20 | Filas por página (el `?page_size=` del cliente se limita a 100). |
 | `read_only` | *(flag)* | apagado | Expone solo GET (list + retrieve). |
-| `permissions(...)` | `permissions(create = "post.add")` | ninguno | Codenames de permiso por acción. |
+| `allow_anonymous` | *(flag)* | apagado | Indica que las acciones de escritura sin codenames deben ser abiertas; silencia el aviso al montar. |
+| `permissions(...)` | `permissions(create = "posts.add")` | ninguno | Codenames de permiso por acción. |
 
 ---
 
@@ -584,8 +593,11 @@ que las respuestas muestran y los bodies pueden escribir. Cada otro método devu
 | `ordering_fields(&["…"])` | Lista blanca de qué campos puede usar `?ordering=`. |
 | `page_size(n)` | Tamaño de página por defecto (≤ 100). |
 | `max_page_size(n)` | Sube o baja el propio tope del cliente (100 por defecto). |
-| `pk_param(name)` | Renombra el parámetro de ruta de las rutas de detalle. |
+| `pk_param(name)` | Renombra el parámetro de ruta de las rutas de detalle (`pk_param_name()` lo lee). |
+| `openapi_query(bool)` | Describe la ruta `QUERY` en el documento OpenAPI generado (necesita herramientas de OpenAPI 3.2). Apagado por defecto; la ruta se monta igualmente. |
+| `related_filter(fk_field, backend)` | Limita qué filas destino puede nombrar una FK del cuerpo; cualquier otra es un `422`. |
 | `read_only()` | Solo GET. |
+| `allow_anonymous()` | Las escrituras sin codenames son intencionadas; omite el aviso al montar. |
 | `max_bulk_create(n)` | Máximo de filas que puede llevar una creación masiva (1000 por defecto). |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Compuertas de codename por acción (la última sobre tenencia). |
 | `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Paginación por keyset (omite `COUNT(*)`). Cualquier columna NOT NULL de orden total: entero, timestamp, fecha, uuid o cadena. |
@@ -594,7 +606,7 @@ que las respuestas muestran y los bodies pueden escribir. Cada otro método devu
 | `filter_backend(closure)` | Añade predicados `WHERE` personalizados más allá de `filter_fields`. |
 | `throttle(…)` / `throttle_all(max, secs)` | Límites de tasa de ventana fija por acción; `QUERY` gasta el presupuesto de list. |
 | `admin_add_hooks()` | Ejecuta los hooks de permiso por objeto `"add"` del admin al crear, sobre la petición y sobre cada fila escrita; un rechazo es un `403`. Desactivado por defecto. |
-| `router(prefix, pgpool)` | Monta (Postgres, pool estático). |
+| `router(prefix, pgpool)` | Monta (solo Postgres, `PgPool` estático; característica `postgres`). |
 | `router_pool(prefix, pool)` | Monta tri-dialecto (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenencia)* monta con resolución de inquilino por petición. |
 
@@ -673,22 +685,22 @@ petición. `?cursor=<token>&page_size=20`:
 { "count": 137, "limit": 20, "offset": 40, "results": [ … ] }
 ```
 
-`page_size` / `limit` se limitan a 100.
+`page_size` / `limit` se limitan a `max_page_size` (100 por defecto).
 
 ---
 
 ## Validación
 
 Con un **serializador conectado**, la ruta de create/update ejecuta los
-validadores del serializador y devuelve `400`s indexados por campo — la forma
+validadores del serializador y devuelve `422`s indexados por campo — la forma
 recomendada de validar (ver [el matrimonio](#el-matrimonio-con-el-serializador-entrada--salida)
 y la [guía de serializadores](serializers.md#validación)). Se ejecutan tres capas:
 
 - **Restricciones declarativas** — `max_length` / `min_length` / `min` / `max`, y
   por defecto el campo **hereda del modelo** `max_length` / `min` / `max` /
   `choices`. Así, una columna `#[rustango(max_length = 200)]` se verifica en
-  longitud en la API sin configuración extra, convirtiendo los `500`s que serían por restricción de BD en `400`s
-  amigables como `{"title":["Ensure this value has at most 200 characters."]}`.
+  longitud en la API sin configuración extra, convirtiendo los `500`s que serían por restricción de BD en `422`s
+  amigables con `details` como `{"title":["Ensure this value has at most 200 characters."]}`.
 - **Por campo** `validate = "fn"` y un hook `validate` **cruzado** — tus reglas
   personalizadas (formatos, entre campos, lógica de negocio).
 
@@ -744,11 +756,11 @@ use rustango::viewset::{ViewSet, ViewSetPerms};
 
 ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .permissions(ViewSetPerms {
-        list:     vec!["post.view".into()],
-        retrieve: vec!["post.view".into()],
-        create:   vec!["post.add".into()],
-        update:   vec!["post.change".into()],
-        destroy:  vec!["post.delete".into()],
+        list:     vec!["posts.view".into()],
+        retrieve: vec!["posts.view".into()],
+        create:   vec!["posts.add".into()],
+        update:   vec!["posts.change".into()],
+        destroy:  vec!["posts.delete".into()],
     })
     .router_pool("/api/posts", pool);
 ```
@@ -756,7 +768,8 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
 Una lista de acción vacía = sin verificación. La aplicación lee un usuario
 autenticado de la petición (la integración de autenticación de `tenancy`); los
 superusuarios la eluden, un usuario ausente se deniega. `.permissions_for_model::<Post>()`
-autocompleta los codenames estándar `post.view`/`add`/`change`/`delete`.
+autocompleta los codenames estándar `<table>.view` / `.add` / `.change` /
+`.delete` (`posts.view`, … para la tabla `posts`).
 
 Un ViewSet aún no ejecuta los hooks de permiso por objeto `change`, `delete` o `view`
 del admin. Si su modelo tiene alguno, montarlo registra un aviso; la 0.62.0 los

@@ -704,7 +704,7 @@ Branchez le serializer dans le ViewSet avec l'attribut `serializer` — les rép
 pub struct PostViewSet;
 ```
 
-Ceci fonctionne à l'identique sur PostgreSQL, MySQL et SQLite. Les redéfinitions `method` / `read_only` / `source` / `write_only` s'appliquent toutes à la réponse, et **les corps de requête sont eux aussi validés via le serializer** : `create` / `update` exécutent sa `validate()` (par champ et inter-champs), renvoyant un `400` avec une carte d'erreurs par champ (`{field: [messages]}`) en cas d'échec, et les champs en lecture seule / calculés qu'un client tenterait de poster sont ignorés. (Remarque : les champs de serializer `nested` / `many` nécessitent que les lignes liées soient chargées via `select_related` ; sinon ils s'affichent avec leur valeur par défaut.) Voir le [guide des ViewSets](viewsets.md) pour le comportement complet en entrée et en sortie.
+Ceci fonctionne à l'identique sur PostgreSQL, MySQL et SQLite. Les redéfinitions `method` / `read_only` / `source` / `write_only` s'appliquent toutes à la réponse, et **les corps de requête sont eux aussi validés via le serializer** : `create` / `update` exécutent sa `validate()` (par champ et inter-champs), renvoyant un `422` (`validation_failed`) avec une liste de messages par champ dans `details` (`{field: [messages]}`) en cas d'échec, et les champs en lecture seule / calculés qu'un client tenterait de poster sont ignorés. (Remarque : les champs de serializer `nested` / `many` nécessitent que les lignes liées soient chargées via `select_related` ; sinon ils s'affichent avec leur valeur par défaut.) Voir le [guide des ViewSets](viewsets.md) pour le comportement complet en entrée et en sortie.
 
 ---
 

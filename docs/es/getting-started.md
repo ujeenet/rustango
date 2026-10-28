@@ -700,7 +700,7 @@ Conecta el serializer al ViewSet con el atributo `serializer` — las respuestas
 pub struct PostViewSet;
 ```
 
-Esto funciona de forma idéntica en PostgreSQL, MySQL y SQLite. Los overrides `method` / `read_only` / `source` / `write_only` se aplican todos a la respuesta, y **los cuerpos de las peticiones también se validan a través del serializer**: `create` / `update` ejecutan su `validate()` (por campo y entre campos), devolviendo un `400` con un mapa de errores por campo (`{field: [messages]}`) en caso de fallo, y los campos de solo lectura / calculados que un cliente envíe se ignoran. (Nota: los campos de serializer `nested` / `many` necesitan que las filas relacionadas se carguen mediante `select_related`; de lo contrario se renderizan como su valor por defecto.) Consulta la [guía de ViewSets](viewsets.md) para el comportamiento completo de entrada + salida.
+Esto funciona de forma idéntica en PostgreSQL, MySQL y SQLite. Los overrides `method` / `read_only` / `source` / `write_only` se aplican todos a la respuesta, y **los cuerpos de las peticiones también se validan a través del serializer**: `create` / `update` ejecutan su `validate()` (por campo y entre campos), devolviendo un `422` (`validation_failed`) con una lista de mensajes por campo en `details` (`{field: [messages]}`) en caso de fallo, y los campos de solo lectura / calculados que un cliente envíe se ignoran. (Nota: los campos de serializer `nested` / `many` necesitan que las filas relacionadas se carguen mediante `select_related`; de lo contrario se renderizan como su valor por defecto.) Consulta la [guía de ViewSets](viewsets.md) para el comportamiento completo de entrada + salida.
 
 ---
 

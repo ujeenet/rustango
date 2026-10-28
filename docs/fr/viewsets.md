@@ -209,7 +209,7 @@ Enregistrez le module — ajoutez `pub mod post_serializer;` à `src/blog/mod.rs
 Notez que nous n'avons écrit qu'un seul validateur (`title_min_3`) ; les champs **héritent aussi
 automatiquement des contraintes du modèle** — `title` voit sa longueur vérifiée contre le
 `max_length = 200` du modèle, et une colonne `choices`/`min`/`max` serait vérifiée
-également, renvoyant toutes des `400` conviviales à l'écriture. Ajoutez les attributs de sérialiseur `max_length` / `min_length` /
+également, renvoyant toutes des `422` conviviales à l'écriture. Ajoutez les attributs de sérialiseur `max_length` / `min_length` /
 `min` / `max` pour surcharger la borne d'un champ. (Voir le
 [guide des sérialiseurs](serializers.md#validation) pour l'histoire complète de la validation.)
 
@@ -239,7 +239,10 @@ use rustango::ViewSet;
 pub struct PostViewSet;
 ```
 
-Ajoutez `pub mod post_view_set;` à `src/blog/mod.rs`.
+Le générateur écrit `src/post_view_set.rs` (il démarre en `read_only`, et sa
+ligne `use` suppose `crate::models::Post`). Déplacez-le vers
+`src/blog/post_view_set.rs` comme montré et ajoutez `pub mod post_view_set;` à
+`src/blog/mod.rs`.
 
 > `fields` est obligatoire : c'est la liste blanche d'écriture, donc un body ne
 > peut fixer aucune autre colonne (par exemple `author_id`). Un sérialiseur la
@@ -262,8 +265,13 @@ pub fn api(pool: Pool) -> Router {
 }
 ```
 
-`make:api_routes blog` échafaude exactement cet agrégateur si vous préférez le
-générer. Branchez `blog::urls::api(pool)` dans votre `urls.rs` de niveau supérieur.
+`make:api_routes blog` échafaude la même forme dans `src/blog/api_routes.rs` si
+vous préférez le générer. Le `urls::api()` de niveau supérieur n'a pas de pool,
+donc montez ce routeur depuis `src/main.rs`, où la `Cli` vous donne le pool du
+serveur. Un nest à la racine est refusé : imbriquez-le sous un préfixe et retirez
+ce préfixe du chemin du ViewSet :
+`.nest_with("/api", |pool| myapp::blog::urls::api(pool))` avec
+`PostViewSet::router("/posts", pool)` à l'intérieur.
 
 ### Étape 7 — Le lancer et exercer chaque endpoint
 
@@ -295,15 +303,16 @@ La réponse est la forme du **sérialiseur** : `body` est revenu sous `content`,
 `summary` calculé est apparu, et `published_at` (en lecture seule, défini par le serveur) est
 présent.
 
-**La validation rejette les entrées invalides** avec une `400` —
-des tableaux de messages indexés par champ :
+**La validation rejette les entrées invalides** avec une `422` —
+des tableaux de messages indexés par champ, sous `details` :
 
 ```bash
 curl -i -X POST localhost:8080/api/posts \
   -H 'content-type: application/json' \
   -d '{"title":"hi","content":"x","author_id":1}'
-# HTTP/1.1 400 Bad Request
-# {"title":["title must be at least 3 characters"]}
+# HTTP/1.1 422 Unprocessable Entity
+# {"error":"validation_failed","message":"invalid input","status":422,
+#  "details":{"title":["title must be at least 3 characters"]}}
 ```
 
 **Les champs en lecture seule / calculés qu'un client poste sont ignorés** — il ne peut pas injecter
@@ -376,8 +385,8 @@ async fn rejects_short_title() {
     let res = client.post("/api/posts")
         .json(&json!({"title":"hi","content":"x","author_id":1}))
         .send().await;
-    assert_eq!(res.status, 400);
-    assert!(res.json_value()["title"].is_array());   // field-keyed error shape
+    assert_eq!(res.status, 422);
+    assert!(res.json_value()["details"]["title"].is_array());   // field-keyed error shape
 }
 
 #[tokio::test]
@@ -432,8 +441,8 @@ Sur `create` et `update`, lorsqu'un sérialiseur est enregistré :
 1. **La validation s'exécute.** Le `validate()` du sérialiseur — chaque
    `#[serializer(validate = "fn")]` par champ plus le `validate` transversal au niveau
    du conteneur — s'exécute contre le corps JSON. En cas d'échec, la requête est rejetée
-   `400 Bad Request` avec la forme d'erreur indexée par champ : un objet JSON indexé par nom de champ
-   avec des tableaux de messages, p. ex. `{"title":["title must be at least 3 characters"]}`.
+   `422 Unprocessable Entity` (`validation_failed`) avec la forme d'erreur indexée par champ
+   dans `details` : un objet JSON indexé par nom de champ avec des tableaux de messages, p. ex. `{"title":["title must be at least 3 characters"]}`.
 2. **Filtrage des champs modifiables.** Seuls les champs modifiables du sérialiseur sont
    persistés ; les champs `read_only` et `method`/calculés qu'un client poste sont
    **ignorés** (non écrits), et les renommages `source` sont résolus vers la colonne du
@@ -559,7 +568,8 @@ montez le ViewSet et surchargez la route unique avec votre propre handler (voir
 | `ordering` | `"-published_at, id"` | aucun | Tri par défaut (`-` = DESC). |
 | `page_size` | `20` | 20 | Lignes par page (le `?page_size=` du client est plafonné à 100). |
 | `read_only` | *(drapeau)* | désactivé | N'exposer que GET (list + retrieve). |
-| `permissions(...)` | `permissions(create = "post.add")` | aucun | Codenames de permission par action. |
+| `allow_anonymous` | *(drapeau)* | désactivé | Indique que les actions d'écriture sans codename sont voulues ouvertes ; fait taire l'avertissement au montage. |
+| `permissions(...)` | `permissions(create = "posts.add")` | aucun | Codenames de permission par action. |
 
 ---
 
@@ -578,8 +588,11 @@ que les réponses affichent et que les bodies peuvent écrire. Chaque autre mét
 | `page_size(n)` | Taille de page par défaut (≤ 100). |
 | `max_page_size(n)` | Relève ou abaisse le plafond client lui-même (100 par défaut). |
 | `max_bulk_create(n)` | Nombre maximal de lignes qu'une création groupée peut porter (1000 par défaut). |
-| `pk_param(name)` | Renomme le paramètre de chemin des routes de détail. |
+| `pk_param(name)` | Renomme le paramètre de chemin des routes de détail (`pk_param_name()` le relit). |
+| `openapi_query(bool)` | Décrit la route `QUERY` dans le document OpenAPI généré (demande un outillage OpenAPI 3.2). Désactivé par défaut ; la route est montée dans tous les cas. |
+| `related_filter(fk_field, backend)` | Limite les lignes cibles qu'une FK du corps peut nommer ; toute autre donne un `422`. |
 | `read_only()` | GET uniquement. |
+| `allow_anonymous()` | Les écritures sans codename sont voulues ; évite l'avertissement au montage. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Barrières de codename par action (cette dernière sur la multi-location). |
 | `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Pagination par keyset (saute `COUNT(*)`). Toute colonne NOT NULL totalement ordonnée : entier, horodatage, date, uuid ou chaîne. |
 | `limit_offset_pagination()` | Fenêtrage `?limit=&offset=`. |
@@ -587,7 +600,7 @@ que les réponses affichent et que les bodies peuvent écrire. Chaque autre mét
 | `filter_backend(closure)` | Ajouter des prédicats `WHERE` personnalisés au-delà de `filter_fields`. |
 | `throttle(…)` / `throttle_all(max, secs)` | Limites de débit à fenêtre fixe par action ; `QUERY` consomme le budget de la liste. |
 | `admin_add_hooks()` | Exécute les hooks de permission objet `"add"` de l'admin à la création, sur la requête et sur chaque ligne écrite ; un refus donne un `403`. Désactivé par défaut. |
-| `router(prefix, pgpool)` | Monter (Postgres, pool statique). |
+| `router(prefix, pgpool)` | Monter (Postgres uniquement, `PgPool` statique ; feature `postgres`). |
 | `router_pool(prefix, pool)` | Monter en tri-dialecte (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(multi-location)* monter avec résolution du locataire par requête. |
 
@@ -664,14 +677,14 @@ construction plutôt que d'échouer à chaque requête.
 { "count": 137, "limit": 20, "offset": 40, "results": [ … ] }
 ```
 
-`page_size` / `limit` sont bornés à 100.
+`page_size` / `limit` sont bornés à `max_page_size` (100 par défaut).
 
 ---
 
 ## Validation
 
 Avec un **sérialiseur branché**, le chemin create/update exécute les
-validateurs du sérialiseur et renvoie des `400` indexées par champ — la manière recommandée de valider (voir
+validateurs du sérialiseur et renvoie des `422` indexées par champ — la manière recommandée de valider (voir
 [le mariage](#le-mariage-du-sérialiseur--entrée--sortie) et le
 [guide des sérialiseurs](serializers.md#validation)). Trois couches s'exécutent :
 
@@ -679,7 +692,7 @@ validateurs du sérialiseur et renvoie des `400` indexées par champ — la mani
   par défaut le champ **hérite des** `max_length` / `min` / `max` /
   `choices` **du modèle**. Ainsi une colonne `#[rustango(max_length = 200)]` voit sa longueur vérifiée sur
   l'API sans configuration supplémentaire, transformant des
-  `500` de contrainte-BDD potentielles en `400` conviviales comme
+  `500` de contrainte-BDD potentielles en `422` conviviales avec `details` comme
   `{"title":["Ensure this value has at most 200 characters."]}`.
 - **Par champ** `validate = "fn"` et un hook `validate` **transversal** — vos
   règles personnalisées (formats, inter-champs, logique métier).
@@ -734,11 +747,11 @@ use rustango::viewset::{ViewSet, ViewSetPerms};
 
 ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .permissions(ViewSetPerms {
-        list:     vec!["post.view".into()],
-        retrieve: vec!["post.view".into()],
-        create:   vec!["post.add".into()],
-        update:   vec!["post.change".into()],
-        destroy:  vec!["post.delete".into()],
+        list:     vec!["posts.view".into()],
+        retrieve: vec!["posts.view".into()],
+        create:   vec!["posts.add".into()],
+        update:   vec!["posts.change".into()],
+        destroy:  vec!["posts.delete".into()],
     })
     .router_pool("/api/posts", pool);
 ```
@@ -746,7 +759,8 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
 Une liste d'action vide = pas de vérification. L'application lit un utilisateur authentifié depuis
 la requête (l'intégration d'auth `tenancy`) ; les superusers contournent, un utilisateur manquant
 est refusé. `.permissions_for_model::<Post>()` remplit automatiquement les codenames standard
-`post.view`/`add`/`change`/`delete`.
+`<table>.view` / `.add` / `.change` / `.delete` (`posts.view`, … pour la table
+`posts`).
 
 Un ViewSet n'exécute pas encore les hooks de permission objet `change`,
 `delete` ou `view` de l'admin. Quand son modèle en a, le monter journalise un

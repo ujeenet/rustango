@@ -700,7 +700,7 @@ Verdrahte den Serializer mit dem ViewSet über das `serializer`-Attribut — Lis
 pub struct PostViewSet;
 ```
 
-Das funktioniert identisch auf PostgreSQL, MySQL und SQLite. `method`- / `read_only`- / `source`- / `write_only`-Overrides gelten alle für die Antwort, und **Request-Bodies werden ebenfalls durch den Serializer validiert**: `create` / `update` führen sein `validate()` aus (pro Feld und feldübergreifend) und geben bei Fehlschlag einen `400` mit feldbasierter Fehlerkarte zurück (`{field: [messages]}`), und read-only- / berechnete Felder, die ein Client postet, werden ignoriert. (Hinweis: `nested`- / `many`-Serializer-Felder brauchen die zugehörigen Zeilen, geladen via `select_related`; andernfalls werden sie als ihr Default gerendert.) Siehe den [ViewSets-Leitfaden](viewsets.md) für das vollständige Eingabe- und Ausgabeverhalten.
+Das funktioniert identisch auf PostgreSQL, MySQL und SQLite. `method`- / `read_only`- / `source`- / `write_only`-Overrides gelten alle für die Antwort, und **Request-Bodies werden ebenfalls durch den Serializer validiert**: `create` / `update` führen sein `validate()` aus (pro Feld und feldübergreifend) und geben bei Fehlschlag einen `422` (`validation_failed`) mit einer Liste von Meldungen pro Feld in `details` zurück (`{field: [messages]}`), und read-only- / berechnete Felder, die ein Client postet, werden ignoriert. (Hinweis: `nested`- / `many`-Serializer-Felder brauchen die zugehörigen Zeilen, geladen via `select_related`; andernfalls werden sie als ihr Default gerendert.) Siehe den [ViewSets-Leitfaden](viewsets.md) für das vollständige Eingabe- und Ausgabeverhalten.
 
 ---
 

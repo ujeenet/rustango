@@ -536,6 +536,11 @@ Admin ignoriert es.
 
 ### Der Tenant-Admin
 
+In einem Tenancy-Projekt läuft der Admin jedes Tenants auf dessen Host unter
+`/admin` (`RouteConfig::admin_url`; der `Builder`-Standard `/__admin` gilt hier
+nicht). Alte `/__admin`-Links erreichen ihn weiterhin, außer
+`RouteConfig::legacy()` macht `/__admin` zum Hauptpfad.
+
 Der Tenant-Admin liest weder `[admin]` noch `[brand]`. Er nimmt seine Marke aus
 der `Org`-Zeile des Tenants: Der Name ist `brand_name`, sonst der Anzeigename
 des Tenants; das Logo ist das auf der Bearbeitungsseite der Konsole hochgeladene,
@@ -554,6 +559,7 @@ anders angegeben):
 |---|---|
 | `new(pool)` | Aus einem beliebigen Pool konstruieren (PostgreSQL / MySQL / SQLite). Standardwerte: Präfix `/__admin`, Dev-Cookies. |
 | `from_settings(pool, &settings)` | Aus geparster Konfiguration konstruieren (`config`-Feature). |
+| `settings_prefix(&settings)` | Assoziierte Funktion, kein Builder-Schritt: das Mount-Präfix, das die Einstellungen verlangen (`[admin] url_prefix`, sonst `[routes] admin_url`), oder `None`. |
 | `title(s)` / `subtitle(s)` | Kopf- / Unterüberschrift der Seitenleiste. |
 | `admin_prefix(p)` | URL-Präfix — **muss dem Einhängepfad entsprechen**. Standard `/__admin`. |
 | `audit_url(u)` | Pfad der Aktivitäts-/Prüfpfad-Ansicht. Standard `/__audit`. |
@@ -563,6 +569,7 @@ anders angegeben):
 | `read_only([tables])` | Diese Tabellen rendern, aber Erstellen/Bearbeiten/Löschen verbieten. |
 | `read_only_all()` | Markiert **jede** Tabelle als schreibgeschützt. |
 | `skip_count_for([tables])` | Überspringt `COUNT(*)` auf riesigen Tabellen (Pager zeigt "Page N"). |
+| `view_hook_scan_cap(rows)` | Wie viele Zeilen die Liste durch `view`-Hooks prüft, bevor sie den Rest zurückhält. Standard 10 000. |
 | `with_user_perms([codenames])` | Sperrt Tabellen auf `{table}.view/add/change/delete`. |
 | `register_action(table, name, handler)` | Registriert einen Massenaktions-Handler. |
 | `register_action_with_perm(table, name, perm, handler)` | Ebenso, aber gegen `ActionPerm::Delete` statt `change` geprüft. |
@@ -572,6 +579,7 @@ anders angegeben):
 | `secure_cookies(bool)` | Setzt das `Secure`-Flag (HTTPS-only) auf dem Session-Cookie. |
 | `theme_mode(m)` | `"light"` / `"dark"` / `"auto"`. |
 | `brand_logo_url(url)` | Logo über dem Titel. |
+| `brand_favicon_url(url)` | Favicon-URL; ohne Wert bleibt das mitgelieferte Icon. |
 | `brand_name(s)` / `brand_tagline(s)` | Mandantenspezifische Marken-Überschreibungen. |
 | `tenant_brand_css(css)` | Mandantenspezifischer CSS-Variablen-Block. |
 | `impersonated_by(operator_id)` | Rendert ein Impersonations-Banner (Operator-Konsole). |

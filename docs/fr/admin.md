@@ -572,6 +572,11 @@ opérateur ; cet admin l'ignore.
 
 ### L'admin du tenant
 
+Dans un projet tenancy, l'admin de chaque tenant est servi sur l'hôte de ce
+tenant, à `/admin` (`RouteConfig::admin_url` ; la valeur par défaut `/__admin`
+du `Builder` seul ne s'applique pas). Les anciens liens `/__admin` y mènent
+toujours, sauf si `RouteConfig::legacy()` fait de `/__admin` le chemin principal.
+
 L'admin du tenant ne lit ni `[admin]` ni `[brand]`. Il prend son identité
 visuelle dans la ligne `Org` du tenant : le nom est `brand_name`, sinon le nom
 affiché du tenant ; le logo est celui envoyé sur la page d'édition de la
@@ -590,6 +595,7 @@ sauf indication contraire) :
 |---|---|
 | `new(pool)` | Construit à partir de n'importe quel pool (PostgreSQL / MySQL / SQLite). Par défaut : préfixe `/__admin`, cookies de développement. |
 | `from_settings(pool, &settings)` | Construit à partir d'une configuration analysée (feature `config`). |
+| `settings_prefix(&settings)` | Fonction associée, pas une étape du builder : le préfixe de montage demandé par les réglages (`[admin] url_prefix`, sinon `[routes] admin_url`), ou `None`. |
 | `title(s)` / `subtitle(s)` | En-tête / sous-en-tête de la barre latérale. |
 | `admin_prefix(p)` | Préfixe d'URL — **doit correspondre au chemin de nesting**. Par défaut `/__admin`. |
 | `audit_url(u)` | Chemin de la vue activité/audit. Par défaut `/__audit`. |
@@ -599,6 +605,7 @@ sauf indication contraire) :
 | `read_only([tables])` | Affiche ces tables mais interdit la création/édition/suppression. |
 | `read_only_all()` | Marque **toutes** les tables en lecture seule. |
 | `skip_count_for([tables])` | Évite `COUNT(*)` sur les tables volumineuses (le pagineur affiche « Page N »). |
+| `view_hook_scan_cap(rows)` | Nombre de lignes que la liste parcourt via les hooks `view` avant de retenir le reste. Par défaut 10 000. |
 | `with_user_perms([codenames])` | Conditionne les tables sur `{table}.view/add/change/delete`. |
 | `register_action(table, name, handler)` | Enregistre un gestionnaire d'action groupée. |
 | `register_action_with_perm(table, name, perm, handler)` | Idem, vérifié contre `ActionPerm::Delete` au lieu de `change`. |
@@ -608,6 +615,7 @@ sauf indication contraire) :
 | `secure_cookies(bool)` | Définit le drapeau `Secure` (HTTPS uniquement) sur le cookie de session. `new` suit `[security].secure_cookies`, sinon sécurisé au niveau prod. |
 | `theme_mode(m)` | `"light"` / `"dark"` / `"auto"`. |
 | `brand_logo_url(url)` | Logo au-dessus du titre. |
+| `brand_favicon_url(url)` | URL du favicon ; sans valeur, l'icône fournie reste. |
 | `brand_name(s)` / `brand_tagline(s)` | Surcharges de marque par tenant. |
 | `tenant_brand_css(css)` | Bloc CSS de variables par tenant. |
 | `impersonated_by(operator_id)` | Affiche une bannière d'emprunt d'identité (console opérateur). |
