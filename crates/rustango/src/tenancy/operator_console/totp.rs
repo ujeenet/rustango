@@ -94,33 +94,40 @@ pub(super) async fn owed(
     state: &ConsoleState,
     op: &auth::Operator,
 ) -> Result<Owed, crate::sql::ExecError> {
-    state.totp.ensure(&state.registry).await;
-    let device = match operator_totp::confirmed(&state.registry, oid(op)).await {
-        Ok(device) => device,
-        // A table that does not exist holds no device, so an optional policy
-        // signs in on the password; any other read error fails closed.
-        Err(e) if state.totp.policy == Policy::Optional && table_is_missing(state).await => {
-            tracing::warn!(target: LOG, error = %e, "rustango_operator_totp is missing; run `migrate`");
-            None
-        }
-        Err(e) => return Err(e),
-    };
-    Ok(match device {
-        Some(device) => Owed::Code(device),
-        None if state.totp.policy == Policy::Required => Owed::Enrollment,
-        None => Owed::Nothing,
-    })
+    state.totp.owed(&state.registry, oid(op)).await
+}
+
+impl Gate {
+    async fn owed(
+        &self,
+        registry: &crate::sql::Pool,
+        operator_id: i64,
+    ) -> Result<Owed, crate::sql::ExecError> {
+        self.ensure(registry).await;
+        let device = match operator_totp::confirmed(registry, operator_id).await {
+            Ok(device) => device,
+            // A table that does not exist holds no device, so an optional policy
+            // signs in on the password; any other read error fails closed.
+            Err(e) if self.policy == Policy::Optional && table_is_missing(registry).await => {
+                tracing::warn!(target: LOG, error = %e, "rustango_operator_totp is missing; run `migrate`");
+                None
+            }
+            Err(e) => return Err(e),
+        };
+        Ok(match device {
+            Some(device) => Owed::Code(device),
+            None if self.policy == Policy::Required => Owed::Enrollment,
+            None => Owed::Nothing,
+        })
+    }
 }
 
 /// `rustango_operator_totp` provably absent; a failed probe is not "absent".
-async fn table_is_missing(state: &ConsoleState) -> bool {
+async fn table_is_missing(registry: &crate::sql::Pool) -> bool {
     use crate::core::Model as _;
     matches!(
-        crate::migrate::try_table_exists_here(
-            &state.registry,
-            operator_totp::OperatorTotp::SCHEMA.table,
-        )
-        .await,
+        crate::migrate::try_table_exists_here(registry, operator_totp::OperatorTotp::SCHEMA.table)
+            .await,
         Ok(false)
     )
 }
@@ -560,4 +567,61 @@ pub(super) async fn account_disable(
         None,
         Some("Two-factor sign-in is off."),
     )
+}
+
+#[cfg(all(test, feature = "testkit"))]
+mod missing_table_tests {
+    use super::*;
+    use crate::sql::Pool;
+
+    /// A gate whose table step already ran, so the scenario's table state stands.
+    fn gate(policy: Policy) -> Gate {
+        Gate {
+            policy,
+            ensured: tokio::sync::OnceCell::new_with(Some(())),
+        }
+    }
+
+    async fn no_table(pool: &Pool) {
+        crate::testkit::matrix::drop_table(pool, "rustango_operator_totp").await;
+    }
+
+    async fn optional_policy_without_the_table_signs_in_on_the_password(pool: &Pool) {
+        let owed = gate(Policy::Optional).owed(pool, 1).await;
+        assert!(matches!(owed, Ok(Owed::Nothing)), "{:?}", owed.err());
+    }
+
+    async fn required_policy_without_the_table_is_refused(pool: &Pool) {
+        assert!(gate(Policy::Required).owed(pool, 1).await.is_err());
+    }
+
+    /// The table exists but the device row does not decode: refused.
+    async fn an_unreadable_table_is_refused(pool: &Pool) {
+        use crate::sql::UpdaterPool as _;
+        crate::aead::set_test_key();
+        operator_totp::ensure_table(pool).await.unwrap();
+        operator_totp::start(pool, 1, &TotpSecret::generate())
+            .await
+            .unwrap();
+        operator_totp::OperatorTotp::objects()
+            .filter("operator_id", 1_i64)
+            .update()
+            .set("secret", "not-sealed".to_owned())
+            .set("confirmed", true)
+            .execute_pool(pool)
+            .await
+            .unwrap();
+        let owed = gate(Policy::Optional).owed(pool, 1).await;
+        crate::testkit::matrix::drop_table(pool, "rustango_operator_totp").await;
+        assert!(owed.is_err(), "an unreadable device read as no device");
+    }
+
+    crate::tri_dialect_test!(
+        setup: no_table,
+        scenarios: [
+            optional_policy_without_the_table_signs_in_on_the_password,
+            required_policy_without_the_table_is_refused,
+            an_unreadable_table_is_refused,
+        ],
+    );
 }

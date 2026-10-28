@@ -20,8 +20,7 @@ use axum::{
 };
 
 use crate::admin::sso::{
-    build_provider, open_flow, seal_flow, FlowPurpose, FlowScope, ProviderButton, SsoError,
-    SSO_FLOW_COOKIE,
+    open_flow, seal_flow, FlowPurpose, FlowScope, ProviderButton, SsoError, SSO_FLOW_COOKIE,
 };
 use crate::admin::sso_provider::SsoProvider;
 use crate::query::QuerySet;
@@ -29,6 +28,7 @@ use crate::signals::auth::{
     meta_from_parts, send_user_logged_in, AuthFailureReason, UserLoggedInContext,
 };
 use crate::sql::Pool;
+use crate::sso::build_provider_for;
 use crate::sso::link::{signal_refused, LinkSource, ProviderKey};
 use crate::sso::provider::{load_rows, resolve_row, ResolvedProvider};
 
@@ -242,7 +242,7 @@ pub(super) async fn tenant_sso_begin(
     let Some(redirect_uri) = derive_redirect(parts, routes, slug) else {
         return login_error(routes, "config");
     };
-    let (cfg, _key) = match resolve_by_slug(tenant_pool, registry_pool, slug, redirect_uri).await {
+    let (cfg, key) = match resolve_by_slug(tenant_pool, registry_pool, slug, redirect_uri).await {
         Ok(Some(c)) => c,
         Ok(None) => return login_error(routes, "disabled"),
         Err(e) => {
@@ -250,7 +250,7 @@ pub(super) async fn tenant_sso_begin(
             return login_error(routes, "config");
         }
     };
-    let provider = match build_provider(&cfg.sso).await {
+    let provider = match build_provider_for(&cfg.sso, key.source()).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(target: "rustango::tenancy::sso", "begin build: {e}");
@@ -314,7 +314,7 @@ pub(super) async fn tenant_sso_callback(
             return login_error(routes, "config");
         }
     };
-    let provider = match build_provider(&cfg.sso).await {
+    let provider = match build_provider_for(&cfg.sso, key.source()).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(target: "rustango::tenancy::sso", "callback build: {e}");

@@ -160,7 +160,9 @@ pub fn derive_form(input: TokenStream) -> TokenStream {
 ///   no attr is given, override it when given (`min_length` is serializer-only)
 ///
 /// The macro also emits a custom `impl serde::Serialize` — do **not** also `#[derive(Serialize)]`.
-#[proc_macro_derive(Serializer, attributes(serializer))]
+/// It honours `#[serde(rename, rename_all, skip, skip_serializing, skip_serializing_if,
+/// skip_deserializing)]`; other `serde` keys are ignored.
+#[proc_macro_derive(Serializer, attributes(serializer, serde))]
 pub fn derive_serializer(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand_serializer(&input)
@@ -13319,6 +13321,165 @@ fn parse_serializer_container_attrs(input: &DeriveInput) -> syn::Result<Serializ
     })
 }
 
+/// The `#[serde(...)]` keys the Serializer derive honours. Its own
+/// `Serialize` impl would otherwise drop them silently.
+#[derive(Default)]
+struct SerdeWireAttrs {
+    rename_ser: Option<String>,
+    rename_de: Option<String>,
+    skip_ser: bool,
+    skip_de: bool,
+    skip_ser_if: Option<syn::ExprPath>,
+}
+
+/// A serde `rename_all` rule, applied to a `snake_case` field name.
+#[derive(Clone, Copy)]
+enum SerdeRenameRule {
+    Lower,
+    Upper,
+    Pascal,
+    Camel,
+    ScreamingSnake,
+    Kebab,
+    ScreamingKebab,
+}
+
+impl SerdeRenameRule {
+    fn parse(s: &LitStr) -> syn::Result<Self> {
+        Ok(match s.value().as_str() {
+            "lowercase" | "snake_case" => Self::Lower,
+            "UPPERCASE" => Self::Upper,
+            "PascalCase" => Self::Pascal,
+            "camelCase" => Self::Camel,
+            "SCREAMING_SNAKE_CASE" => Self::ScreamingSnake,
+            "kebab-case" => Self::Kebab,
+            "SCREAMING-KEBAB-CASE" => Self::ScreamingKebab,
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    s,
+                    "unknown serde `rename_all` rule",
+                ))
+            }
+        })
+    }
+
+    /// Same output as serde's own field renaming.
+    fn apply(self, field: &str) -> String {
+        match self {
+            Self::Lower => field.to_owned(),
+            Self::Upper | Self::ScreamingSnake => field.to_ascii_uppercase(),
+            Self::Pascal | Self::Camel => {
+                let mut out = String::new();
+                let mut cap = matches!(self, Self::Pascal);
+                for ch in field.chars() {
+                    if ch == '_' {
+                        cap = !out.is_empty() || matches!(self, Self::Pascal);
+                    } else if cap {
+                        out.push(ch.to_ascii_uppercase());
+                        cap = false;
+                    } else {
+                        out.push(ch);
+                    }
+                }
+                out
+            }
+            Self::Kebab => field.replace('_', "-"),
+            Self::ScreamingKebab => field.to_ascii_uppercase().replace('_', "-"),
+        }
+    }
+}
+
+/// Consume the value of a `serde` key the derive does not act on.
+fn skip_serde_meta_value(meta: &syn::meta::ParseNestedMeta) -> syn::Result<()> {
+    if meta.input.peek(syn::Token![=]) {
+        let _: syn::Expr = meta.value()?.parse()?;
+    } else if meta.input.peek(syn::token::Paren) {
+        let _: proc_macro2::Group = meta.input.parse()?;
+    }
+    Ok(())
+}
+
+/// `rename = "x"` or `rename(serialize = "a", deserialize = "b")`.
+fn parse_serde_rename(
+    meta: &syn::meta::ParseNestedMeta,
+    mut set: impl FnMut(bool, LitStr) -> syn::Result<()>,
+) -> syn::Result<()> {
+    if meta.input.peek(syn::Token![=]) {
+        let s: LitStr = meta.value()?.parse()?;
+        set(true, s.clone())?;
+        return set(false, s);
+    }
+    meta.parse_nested_meta(|inner| {
+        let is_ser = inner.path.is_ident("serialize");
+        if !is_ser && !inner.path.is_ident("deserialize") {
+            return Err(inner.error("expected `serialize` or `deserialize`"));
+        }
+        set(is_ser, inner.value()?.parse()?)
+    })
+}
+
+/// Container `rename_all` rules: (serialize, deserialize).
+fn parse_serde_container_rules(
+    input: &DeriveInput,
+) -> syn::Result<(Option<SerdeRenameRule>, Option<SerdeRenameRule>)> {
+    let (mut ser, mut de) = (None, None);
+    for attr in input.attrs.iter().filter(|a| a.path().is_ident("serde")) {
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename_all") {
+                return parse_serde_rename(&meta, |is_ser, s| {
+                    let rule = Some(SerdeRenameRule::parse(&s)?);
+                    if is_ser {
+                        ser = rule;
+                    } else {
+                        de = rule;
+                    }
+                    Ok(())
+                });
+            }
+            skip_serde_meta_value(&meta)
+        })?;
+    }
+    Ok((ser, de))
+}
+
+fn parse_serde_field_attrs(field: &syn::Field) -> syn::Result<SerdeWireAttrs> {
+    let mut out = SerdeWireAttrs::default();
+    for attr in field.attrs.iter().filter(|a| a.path().is_ident("serde")) {
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename") {
+                return parse_serde_rename(&meta, |is_ser, s| {
+                    if is_ser {
+                        out.rename_ser = Some(s.value());
+                    } else {
+                        out.rename_de = Some(s.value());
+                    }
+                    Ok(())
+                });
+            }
+            if meta.path.is_ident("skip") {
+                out.skip_ser = true;
+                out.skip_de = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("skip_serializing") {
+                out.skip_ser = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("skip_deserializing") {
+                out.skip_de = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("skip_serializing_if") {
+                let s: LitStr = meta.value()?.parse()?;
+                out.skip_ser_if = Some(s.parse()?);
+                return Ok(());
+            }
+            skip_serde_meta_value(&meta)
+        })?;
+    }
+    Ok(out)
+}
+
 fn parse_serializer_field_attrs(field: &syn::Field) -> syn::Result<SerializerFieldAttrs> {
     let mut out = SerializerFieldAttrs::default();
     for attr in &field.attrs {
@@ -13459,15 +13620,30 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         ident: syn::Ident,
         ty: syn::Type,
         attrs: SerializerFieldAttrs,
+        serde: SerdeWireAttrs,
+        /// JSON key in the output / in a request body.
+        ser_name: String,
+        de_name: String,
     }
+    let (ser_rule, de_rule) = parse_serde_container_rules(input)?;
     let mut fields_info: Vec<FieldInfo> = Vec::new();
     for field in &named.named {
         let ident = field.ident.clone().expect("named field has ident");
         let attrs = parse_serializer_field_attrs(field)?;
+        let serde = parse_serde_field_attrs(field)?;
+        let name = ident_name(&ident);
+        let wire = |rename: &Option<String>, rule: Option<SerdeRenameRule>| {
+            rename
+                .clone()
+                .unwrap_or_else(|| rule.map_or_else(|| name.clone(), |r| r.apply(&name)))
+        };
         fields_info.push(FieldInfo {
+            ser_name: wire(&serde.rename_ser, ser_rule),
+            de_name: wire(&serde.rename_de, de_rule),
             ident,
             ty: field.ty.clone(),
             attrs,
+            serde,
         });
     }
 
@@ -13561,6 +13737,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let is_writable = |fi: &&FieldInfo| {
         !fi.attrs.read_only
             && !fi.attrs.skip
+            && !fi.serde.skip_de
             && fi.attrs.method.is_none()
             && !fi.attrs.nested
             && fi.attrs.many.is_none()
@@ -13590,7 +13767,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         .filter(is_writable)
         .map(|fi| {
             let ident = &fi.ident;
-            let fname = ident_name(ident);
+            let fname = &fi.de_name;
             let mname = fi
                 .attrs
                 .source
@@ -13638,7 +13815,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         .iter()
         .filter_map(|fi| {
             let ident = &fi.ident;
-            let name_lit = ident_name(ident);
+            let name_lit = &fi.de_name;
             let method = fi.attrs.validate.as_ref()?;
             let method_ident = syn::Ident::new(method, ident.span());
             Some(quote! {
@@ -13763,16 +13940,35 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     };
 
-    // Generate custom Serialize: skip write_only fields
+    // Generate custom Serialize: skip write_only and serde-skipped fields
     let output_fields: Vec<_> = fields_info
         .iter()
-        .filter(|fi| !fi.attrs.write_only)
+        .filter(|fi| !fi.attrs.write_only && !fi.serde.skip_ser)
         .collect();
-    let output_field_count = output_fields.len();
+    // `skip_serializing_if` fields count only when rendered.
+    let output_field_count = output_fields.iter().map(|fi| {
+        let ident = &fi.ident;
+        if let Some(pred) = &fi.serde.skip_ser_if {
+            quote! { + if #pred(&self.#ident) { 0 } else { 1 } }
+        } else {
+            quote! { + 1 }
+        }
+    });
+    let output_field_count = quote! { 0usize #( #output_field_count )* };
     let serialize_fields = output_fields.iter().map(|fi| {
         let ident = &fi.ident;
-        let name_lit = ident_name(ident);
-        quote! { __state.serialize_field(#name_lit, &self.#ident)?; }
+        let name_lit = &fi.ser_name;
+        if let Some(pred) = &fi.serde.skip_ser_if {
+            quote! {
+                if #pred(&self.#ident) {
+                    __state.skip_field(#name_lit)?;
+                } else {
+                    __state.serialize_field(#name_lit, &self.#ident)?;
+                }
+            }
+        } else {
+            quote! { __state.serialize_field(#name_lit, &self.#ident)?; }
+        }
     });
 
     // writable_fields: normal + write_only.
@@ -13792,7 +13988,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let writable_lits: Vec<_> = fields_info
         .iter()
         .filter(is_writable)
-        .map(|fi| ident_name(&fi.ident))
+        .map(|fi| fi.de_name.clone())
         .collect();
 
     // `writable_source_fields`: the MODEL field names of writable
@@ -13817,6 +14013,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         .iter()
         .filter(|fi| {
             !fi.attrs.write_only
+                && !fi.serde.skip_ser
                 && !fi.attrs.skip
                 && fi.attrs.method.is_none()
                 && !fi.attrs.nested
@@ -13841,7 +14038,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         .iter()
         .map(|fi| {
             let ident = &fi.ident;
-            let fname = ident_name(ident);
+            let fname = &fi.de_name;
             let ty = &fi.ty;
             if is_writable(&fi) {
                 quote! {
@@ -13871,7 +14068,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         .filter(is_writable)
         .map(|fi| {
             let ident = &fi.ident;
-            let fname = ident_name(ident);
+            let fname = &fi.de_name;
             let ty = &fi.ty;
             quote! {
                 if let ::core::option::Option::Some(__v) = __obj.and_then(|__o| __o.get(#fname)) {
@@ -13913,8 +14110,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #[cfg(feature = "openapi")]
         {
             let property_calls = output_fields.iter().map(|fi| {
-                let ident = &fi.ident;
-                let name_lit = ident_name(ident);
+                let name_lit = &fi.ser_name;
                 let ty = &fi.ty;
                 let nullable_call = if is_option(ty) {
                     quote! { .nullable() }
@@ -13931,8 +14127,8 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             });
             let required_lits: Vec<_> = output_fields
                 .iter()
-                .filter(|fi| !is_option(&fi.ty))
-                .map(|fi| ident_name(&fi.ident))
+                .filter(|fi| !is_option(&fi.ty) && fi.serde.skip_ser_if.is_none())
+                .map(|fi| fi.ser_name.clone())
                 .collect();
             quote! {
                 impl #root::openapi::OpenApiSchema for #struct_name {

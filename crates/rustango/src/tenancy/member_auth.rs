@@ -66,7 +66,9 @@ use crate::sso::link::{
     ProviderKey,
 };
 use crate::sso::provider::resolve_by_slug;
-use crate::sso::{build_provider, open_flow, seal_flow, FlowPurpose, FlowScope, NormalizedUser};
+use crate::sso::{
+    build_provider_for, open_flow, seal_flow, FlowPurpose, FlowScope, NormalizedUser,
+};
 use crate::tenancy::DefaultTenantDb;
 use crate::tenancy::User;
 
@@ -615,7 +617,7 @@ async fn sso_begin_in(
         }
     };
 
-    let provider = match build_provider(&resolved.sso).await {
+    let provider = match build_provider_for(&resolved.sso, LinkSource::Tenant).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, slug, "build_provider failed");
@@ -698,7 +700,7 @@ async fn sso_callback_in(
         Ok(Some(r)) => r,
         _ => return clear_flow(sso_error("That sign-in method is not available.", &mount)),
     };
-    let provider = match build_provider(&resolved.sso).await {
+    let provider = match build_provider_for(&resolved.sso, LinkSource::Tenant).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "build_provider failed on callback");

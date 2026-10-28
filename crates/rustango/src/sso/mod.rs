@@ -153,6 +153,21 @@ pub async fn build_provider(cfg: &ResolvedSso) -> Result<OAuth2Provider, SsoErro
     build_provider_with(cfg, &TargetPolicy::from_env()).await
 }
 
+/// [`build_provider`] for a row from `source`. A tenant admin owns its
+/// rows, so they get public addresses only (plus the tenant allowlist),
+/// never the operator's allowlist.
+#[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+pub(crate) async fn build_provider_for(
+    cfg: &ResolvedSso,
+    source: LinkSource,
+) -> Result<OAuth2Provider, SsoError> {
+    let policy = match source {
+        LinkSource::Tenant => TargetPolicy::tenant_from_env(),
+        LinkSource::Shared | LinkSource::Admin | LinkSource::App => TargetPolicy::from_env(),
+    };
+    build_provider_with(cfg, &policy).await
+}
+
 async fn build_provider_with(
     cfg: &ResolvedSso,
     policy: &TargetPolicy,
@@ -182,7 +197,7 @@ async fn build_provider_with(
         Some(s) if !s.is_empty() => provider.with_scopes(s.iter().cloned()),
         _ => provider,
     };
-    Ok(provider)
+    Ok(provider.with_egress(policy.clone()))
 }
 
 /// How long discovered endpoints are reused before the next login refetches them.
@@ -573,6 +588,36 @@ mod tests {
             r.unwrap();
         }
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// A tenant-owned row never reaches the operator's allowlisted hosts;
+    /// a shared one does. Discovery and the token exchange both.
+    #[tokio::test]
+    async fn tenant_rows_ignore_the_operator_allowlist() {
+        let _g = crate::outbound::ENV_LOCK.lock().await;
+        let (base, hits) = issuer(0).await;
+        std::env::set_var(crate::outbound::ALLOW_ENV, "127.0.0.1");
+        let tenant = build_provider_for(&oidc(&base, "t"), LinkSource::Tenant).await;
+        let shared = build_provider_for(&oidc(&base, "s"), LinkSource::Shared).await;
+        let mut preset = build_provider_for(&cfg("google"), LinkSource::Tenant)
+            .await
+            .unwrap();
+        preset.token_url = format!("{base}/token");
+        let (_, flow) = preset.begin();
+        let state = flow.state.clone();
+        let done = preset.complete(&flow, "code", &state).await;
+        std::env::remove_var(crate::outbound::ALLOW_ENV);
+        // Only the tenant allowlist opens a private host to a tenant row.
+        std::env::set_var(crate::outbound::TENANT_ALLOW_ENV, "127.0.0.1");
+        let opted = build_provider_for(&oidc(&base, "o"), LinkSource::Tenant).await;
+        std::env::remove_var(crate::outbound::TENANT_ALLOW_ENV);
+        assert!(tenant.is_err(), "tenant row reached an allowlisted host");
+        assert!(shared.is_ok(), "{:?}", shared.err());
+        assert!(opted.is_ok(), "{:?}", opted.err());
+        // The same policy as the shared row's, so its discovery is reused.
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let err = done.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(err.contains("blocked"), "token POST not refused: {err}");
     }
 
     #[tokio::test]

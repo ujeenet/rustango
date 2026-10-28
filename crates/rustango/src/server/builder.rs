@@ -28,6 +28,8 @@ pub type ApiRouter = Router<()>;
 /// tenant-admin shape by constructing via [`Builder::from_pool`].
 pub struct Builder<DB: Database = DefaultTenantDb> {
     apex: String,
+    /// The apex `run-server --apex` gave; console-created tenants default under it.
+    apex_flag: Option<String>,
     registry_url: String,
     pools: Arc<TenantPools<DB>>,
     registry: sqlx::Pool<DB>,
@@ -168,6 +170,7 @@ impl<DB: Database> Builder<DB> {
         let pools = Arc::new(TenantPools::<DB>::new(registry.clone()));
         Self {
             apex: apex.into(),
+            apex_flag: None,
             registry_url: registry_url.into(),
             pools,
             registry,
@@ -965,6 +968,7 @@ impl<DB: Database> Builder<DB> {
                 dir,
             )
             .with_first_admin_handover(handover)
+            .with_default_apex(self.apex_flag.clone())
             .erased()
         });
         let operator_admin = operator_console::router_full_unlogged(
@@ -1197,6 +1201,7 @@ impl<DB: Database> Builder<DB> {
     /// `run-server --apex`, which beats the apex `from_env` read.
     #[cfg(feature = "manage")]
     pub(crate) fn with_apex(mut self, apex: String) -> Self {
+        self.apex_flag = Some(apex.clone());
         self.apex = apex;
         self
     }

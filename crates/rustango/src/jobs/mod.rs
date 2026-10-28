@@ -895,6 +895,57 @@ mod tests {
         assert_eq!(RUNS.load(Ordering::SeqCst), 3);
     }
 
+    /// Panicking `retry_delay` / `max_attempts` overrides fall back to the
+    /// type's backoff and `MAX_ATTEMPTS`; the worker keeps running.
+    #[tokio::test]
+    async fn panicking_retry_hooks_fall_back_and_the_worker_survives() {
+        static RUNS: AtomicUsize = AtomicUsize::new(0);
+        #[derive(Serialize, Deserialize)]
+        struct Hooked;
+        #[async_trait::async_trait]
+        impl Job for Hooked {
+            const NAME: &'static str = "test:panicking_hooks";
+            const MAX_ATTEMPTS: u32 = 3;
+            fn retry_backoff(_: u32) -> Duration {
+                Duration::from_millis(7)
+            }
+            fn retry_delay(&self, _: u32) -> Duration {
+                panic!("retry_delay hook")
+            }
+            fn max_attempts(&self) -> u32 {
+                panic!("max_attempts hook")
+            }
+            async fn run(&self) -> Result<(), JobError> {
+                RUNS.fetch_add(1, Ordering::SeqCst);
+                Err(JobError::Retryable("again".into()))
+            }
+        }
+        assert_eq!(max_attempts(&Hooked), 3);
+        let mut reg = HandlerRegistry::default();
+        reg.register::<Hooked>();
+        let handler = reg.lookup(Hooked::NAME).unwrap().handler;
+        let ran = handler(serde_json::Value::Null, 0).await;
+        assert_eq!(ran.retry_in, Duration::from_millis(7));
+        RUNS.store(0, Ordering::SeqCst);
+
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<Hooked>().await;
+        q.register::<Increment>().await;
+        q.start().await;
+        q.dispatch(&Hooked).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let before = COUNTER.load(Ordering::SeqCst);
+        q.dispatch(&Increment).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        q.shutdown().await;
+        assert_eq!(
+            RUNS.load(Ordering::SeqCst),
+            3,
+            "retried on the type's backoff"
+        );
+        assert!(COUNTER.load(Ordering::SeqCst) > before, "the worker died");
+    }
+
     #[derive(Serialize, Deserialize, Debug)]
     struct Increment;
 

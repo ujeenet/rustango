@@ -26,14 +26,23 @@ pub(crate) enum KeyStatus {
     /// Set, but below [`MIN_KEY_LEN`].
     Short,
     Ok,
+    /// Unset, so sealing uses the generated dev key file, which a redeploy loses.
+    DevFile,
+}
+
+/// Reads the env var and whether the dev key file is armed; never creates the file.
+#[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+pub(crate) fn key_status() -> KeyStatus {
+    status_of(std::env::var(KEY_VAR).ok(), dev_key_armed())
 }
 
 #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
-pub(crate) fn key_status() -> KeyStatus {
-    match env_key() {
-        None => KeyStatus::Missing,
+fn status_of(env: Option<String>, dev_armed: bool) -> KeyStatus {
+    match env.filter(|k| !k.trim().is_empty()) {
         Some(k) if k.len() < MIN_KEY_LEN => KeyStatus::Short,
         Some(_) => KeyStatus::Ok,
+        None if dev_armed => KeyStatus::DevFile,
+        None => KeyStatus::Missing,
     }
 }
 
@@ -88,6 +97,16 @@ fn dev_key() -> Option<String> {
 #[cfg(not(any(feature = "admin", feature = "tenancy", feature = "csrf")))]
 fn dev_key() -> Option<String> {
     None
+}
+
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+fn dev_key_armed() -> bool {
+    DEV_KEY.get().is_some()
+}
+
+#[cfg(not(any(feature = "admin", feature = "tenancy", feature = "csrf")))]
+fn dev_key_armed() -> bool {
+    false
 }
 
 /// Boot: on the dev and test tiers an unset key falls back to a generated
@@ -307,6 +326,26 @@ mod tests {
             decrypt_with(load_dev_key(&path).as_deref(), &sealed, b"").unwrap(),
             b"pw"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The status names the dev key file and reading it creates nothing.
+    #[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+    #[test]
+    fn key_status_reports_the_dev_file_without_creating_it() {
+        let long = "k".repeat(MIN_KEY_LEN);
+        assert_eq!(status_of(Some(long.clone()), true), KeyStatus::Ok);
+        assert_eq!(status_of(Some("short".into()), true), KeyStatus::Short);
+        assert_eq!(status_of(Some(" ".into()), true), KeyStatus::DevFile);
+        assert_eq!(status_of(None, true), KeyStatus::DevFile);
+        assert_eq!(status_of(None, false), KeyStatus::Missing);
+        let dir = std::env::temp_dir().join(format!("rustango_aead_status_{}", std::process::id()));
+        let path = dir.join("var/.rustango_secret.key");
+        std::env::remove_var(KEY_VAR);
+        if use_dev_key_file("dev", &path) && DEV_KEY.get().is_some_and(|d| d.path == path) {
+            assert_eq!(key_status(), KeyStatus::DevFile);
+            assert!(!path.exists(), "key_status created the dev key file");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
