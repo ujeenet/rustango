@@ -139,8 +139,17 @@ mysql = ["rustango/mysql"]
 
 // ---------------- .env.example ----------------
 
-pub fn env_example(name: &str, backend: Backend) -> String {
+pub fn env_example(name: &str, template: Template, backend: Backend) -> String {
     let url = backend.compose_url(name);
+    // Only a tenancy project has an operator console and tenant secrets.
+    let (apex, reseal) = if template == Template::Tenant {
+        (
+            "\n# Apex domain the operator console is served on.\nRUSTANGO_APEX_DOMAIN=localhost\n",
+            "\n# Rotation: old key here, new one above, then\n# `cargo run -- reseal-tenant-secrets --apply`.",
+        )
+    } else {
+        ("", "\n# Rotation: old key here, new one above.")
+    };
     // SQLite is a file in the bind mount, so there is no host to swap.
     let host_note = match backend.service() {
         Some(svc) => format!(
@@ -159,10 +168,7 @@ DATABASE_URL={url}
 # Bind address. Unset, the tier's `[server] bind` applies (127.0.0.1 in
 # dev); docker-compose.yml sets 0.0.0.0 for the container only.
 # RUSTANGO_BIND=127.0.0.1:8080
-
-# Apex domain the operator console is served on.
-RUSTANGO_APEX_DOMAIN=localhost
-
+{apex}
 # Session signing key — base64 of at least 32 bytes. Outside prod a bad
 # value only warns at boot and the key saved in ./var/ is used instead;
 # on prod the server refuses to start. Leave it commented in development;
@@ -176,9 +182,7 @@ RUSTANGO_APEX_DOMAIN=localhost
 # values cannot be read. Unset on the dev and test tiers, a key is
 # generated and saved in ./var/; staging and prod must set it.
 #   RUSTANGO_SECRET_KEY=$(openssl rand -base64 48)
-# RUSTANGO_SECRET_KEY=
-# Rotation: old key here, new one above, then in a tenancy project
-# `cargo run -- reseal-tenant-secrets --apply`.
+# RUSTANGO_SECRET_KEY={reseal}
 # RUSTANGO_SECRET_KEY_PREVIOUS=
 
 # Log filter, standard RUST_LOG syntax. Default is `info,sqlx=warn`.

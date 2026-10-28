@@ -463,7 +463,7 @@ where
             dir,
             &args[1..],
             writer,
-            tenancy_deploy_findings(pools, facts),
+            Some(tenancy_deploy_findings(pools, facts)),
         )
         .await
         .map_err(TenancyError::Migrate),

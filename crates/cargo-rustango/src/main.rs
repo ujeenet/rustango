@@ -714,7 +714,11 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
             args.rustango_path.as_deref(),
         ),
     )?;
-    write(root, ".env.example", &templates::env_example(name, backend))?;
+    write(
+        root,
+        ".env.example",
+        &templates::env_example(name, template, backend),
+    )?;
     write(root, ".gitignore", templates::GITIGNORE)?;
     write(root, "rust-toolchain.toml", templates::RUST_TOOLCHAIN)?;
     write(
@@ -931,9 +935,12 @@ mod tests {
                 }
             }
             let tuned = PROD_TUNED.contains(&name.as_str());
-            let rendered = |backend| {
+            let rendered = |(backend, template)| {
                 let mut files = vec![
-                    (".env.example", templates::env_example(&name, backend)),
+                    (
+                        ".env.example",
+                        templates::env_example(&name, template, backend),
+                    ),
                     (
                         "config/default.toml",
                         templates::config_default_toml(&name, backend),
@@ -964,8 +971,8 @@ mod tests {
                 }
                 files
             };
-            let mismatches = |backend| -> Vec<&str> {
-                rendered(backend)
+            let mismatches = |pick| -> Vec<&str> {
+                rendered(pick)
                     .into_iter()
                     .filter(|(file, want)| {
                         std::fs::read_to_string(root.join(file)).ok().as_ref() != Some(want)
@@ -973,8 +980,16 @@ mod tests {
                     .map(|(file, _)| file)
                     .collect()
             };
+            // Only a tenancy example gets the tenant `.env.example`.
+            let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
+            let template = if manifest.contains("tenancy") {
+                Template::Tenant
+            } else {
+                Template::Api
+            };
             let closest = [Backend::Postgres, Backend::Sqlite, Backend::Mysql]
                 .into_iter()
+                .map(|b| (b, template))
                 .map(mismatches)
                 .min_by_key(Vec::len)
                 .unwrap();
@@ -1532,7 +1547,7 @@ mod tests {
     /// the ./var key and the project looks configured when it is not (#1359).
     #[test]
     fn the_env_template_ships_no_live_session_secret() {
-        let env = templates::env_example("app", Backend::Postgres);
+        let env = templates::env_example("app", Template::Tenant, Backend::Postgres);
         for line in env.lines() {
             let t = line.trim();
             assert!(
@@ -1547,6 +1562,17 @@ mod tests {
         );
     }
 
+    /// Only a tenant project's `.env.example` names the apex and the reseal command.
+    #[test]
+    fn only_the_tenant_env_template_carries_tenancy_vars() {
+        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
+            let env = templates::env_example("app", template, Backend::Postgres);
+            let tenant = template == Template::Tenant;
+            assert_eq!(env.contains("RUSTANGO_APEX_DOMAIN"), tenant, "{env}");
+            assert_eq!(env.contains("reseal-tenant-secrets"), tenant, "{env}");
+        }
+    }
+
     /// The flags shape more than `Cargo.toml`: a project generated for one
     /// backend must not tell the user to connect to another.
     #[test]
@@ -1557,7 +1583,7 @@ mod tests {
             (Backend::Mysql, "mysql://"),
             (Backend::Sqlite, "sqlite://"),
         ] {
-            let env = templates::env_example(name, backend);
+            let env = templates::env_example(name, Template::DEFAULT, backend);
             assert!(env.contains(needle), "{backend:?} .env.example: {env}");
             let dev = templates::config_dev_settings_toml(name, backend);
             assert!(dev.contains(needle), "{backend:?} dev tier: {dev}");
@@ -1584,7 +1610,7 @@ mod tests {
     /// host edit `postgres` -> `localhost`.
     #[test]
     fn env_example_defaults_to_docker_friendly_values() {
-        let body = templates::env_example("myapp", Backend::Postgres);
+        let body = templates::env_example("myapp", Template::DEFAULT, Backend::Postgres);
         assert!(
             body.contains("@postgres:5432/"),
             "DATABASE_URL host must default to `postgres` (compose service name), \
@@ -1598,7 +1624,7 @@ mod tests {
     #[test]
     fn only_the_container_binds_all_interfaces() {
         for backend in [Backend::Postgres, Backend::Mysql, Backend::Sqlite] {
-            let env = templates::env_example("myapp", backend);
+            let env = templates::env_example("myapp", Template::DEFAULT, backend);
             assert!(
                 !env.lines().any(|l| l.starts_with("RUSTANGO_BIND=")),
                 "{env}"

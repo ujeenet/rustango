@@ -2185,17 +2185,17 @@ async fn check_cmd<W: Write>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
-    check_cmd_with(pool, dir, args, w, async { DeployAuditFindings::default() }).await
+    check_cmd_with(pool, dir, args, w, None::<std::future::Ready<_>>).await
 }
 
-/// [`check_cmd`] plus `extra` deploy findings gathered elsewhere (the tenancy
-/// dispatcher's per-tenant ones), awaited only under `--deploy`.
+/// [`check_cmd`] for the tenancy dispatcher: `tenancy` carries its per-tenant
+/// deploy findings, awaited only under `--deploy`, and turns on the apex row.
 pub(crate) async fn check_cmd_with<W: Write>(
     pool: &Pool,
     dir: &Path,
     args: &[String],
     w: &mut W,
-    extra: impl std::future::Future<Output = DeployAuditFindings>,
+    tenancy: Option<impl std::future::Future<Output = DeployAuditFindings>>,
 ) -> Result<(), MigrateError> {
     // `--deplyo` once ran the plain check and reported all clear.
     if let Some(other) = args.iter().find(|a| *a != "--deploy") {
@@ -2249,7 +2249,7 @@ pub(crate) async fn check_cmd_with<W: Write>(
     // Deploy checks
     if deploy {
         let mut audit = DeployAuditFindings::default();
-        run_deploy_audit(&deploy_audit_env(), &mut audit);
+        run_deploy_audit(&deploy_audit_env(tenancy.is_some()), &mut audit);
         // Settings audit (#87 slice 4) — flags dev-defaults left in
         // prod (e.g. `headers_preset = "dev"` in `prod_settings.toml`).
         // Gated by the `config` feature; no-op without it.
@@ -2261,10 +2261,12 @@ pub(crate) async fn check_cmd_with<W: Write>(
         time_zone_audit(pool, &mut audit).await;
         #[cfg(feature = "admin-sso")]
         sso_link_audit(pool, &mut audit).await;
-        let extra = extra.await;
-        audit.info.extend(extra.info);
-        audit.warnings.extend(extra.warnings);
-        audit.errors.extend(extra.errors);
+        if let Some(extra) = tenancy {
+            let extra = extra.await;
+            audit.info.extend(extra.info);
+            audit.warnings.extend(extra.warnings);
+            audit.errors.extend(extra.errors);
+        }
         // `required_db_vendor` + `required_db_features`
         // audit — every model declaring `required_db_vendor = "postgres"`
         // or `required_db_features = "json_path, listen_notify"` gets
@@ -6221,22 +6223,38 @@ pub(crate) struct DeployAuditEnv {
     pub database_url: Option<String>,
     /// `DATABASE_URL` and `DB_*` both set: the resolver's warning.
     pub database_style_conflict: Option<String>,
-    pub apex_domain: Option<String>,
+    pub apex_domain: ApexDomain,
     pub bind: Option<String>,
     /// An admin was built without session auth (#1627).
     pub ungated_admin: bool,
 }
 
-fn deploy_audit_env() -> DeployAuditEnv {
+/// The apex the deploy audit checks; only a tenancy Cli has one.
+#[derive(Default, Clone)]
+pub(crate) enum ApexDomain {
+    #[default]
+    SingleTenant,
+    /// `RUSTANGO_APEX_DOMAIN` (or settings) as configured, if at all.
+    Tenancy(Option<String>),
+}
+
+fn deploy_audit_env(tenancy: bool) -> DeployAuditEnv {
     DeployAuditEnv {
         rustango_env: std::env::var("RUSTANGO_ENV").ok(),
         session_secret: std::env::var("RUSTANGO_SESSION_SECRET").ok(),
         database_url: crate::env::database_url_from_env().ok(),
         database_style_conflict: crate::env::database_style_conflict(),
         #[cfg(feature = "tenancy")]
-        apex_domain: crate::tenancy::server::configured_apex_domain(),
+        apex_domain: if tenancy {
+            ApexDomain::Tenancy(crate::tenancy::server::configured_apex_domain())
+        } else {
+            ApexDomain::SingleTenant
+        },
         #[cfg(not(feature = "tenancy"))]
-        apex_domain: std::env::var("RUSTANGO_APEX_DOMAIN").ok(),
+        apex_domain: {
+            let _ = tenancy;
+            ApexDomain::SingleTenant
+        },
         bind: std::env::var("RUSTANGO_BIND").ok(),
         #[cfg(feature = "admin")]
         ungated_admin: crate::admin::ungated_admin_built(),
@@ -6269,6 +6287,10 @@ pub struct DeployAuditFindings {
 /// the operator-console + tenant-admin cookies AND the JWT
 /// payloads issued by `auth_routes::JwtAuth` (#81). Same key
 /// covers both surfaces.
+const APEX_UNSET: &str = "RUSTANGO_APEX_DOMAIN is unset / `localhost` — tenancy projects need \
+    the public-facing apex (e.g. `app.example.com`) so subdomain resolution + cookie scoping \
+    work in production.";
+
 pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindings) {
     if env.ungated_admin {
         out.warnings.push(
@@ -6365,20 +6387,12 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
         out.warnings.push(conflict.clone());
     }
 
-    // RUSTANGO_APEX_DOMAIN — required for tenancy projects, but
-    // single-tenant projects don't need it. Surface as info, not
-    // warning, when unset (`localhost` is the framework default
-    // and works for non-tenancy deployments).
-    match env.apex_domain.as_deref() {
-        None | Some("localhost") => {
-            out.warnings.push(
-                "RUSTANGO_APEX_DOMAIN is unset / `localhost` — tenancy projects need this set to \
-                 the public-facing apex (e.g. `app.example.com`) so subdomain resolution + \
-                 cookie scoping work in production. Single-tenant projects can ignore."
-                    .into(),
-            );
-        }
-        Some(_) => out
+    // A single-database deploy needs no apex.
+    match &env.apex_domain {
+        ApexDomain::SingleTenant => {}
+        ApexDomain::Tenancy(None) => out.warnings.push(APEX_UNSET.into()),
+        ApexDomain::Tenancy(Some(d)) if d == "localhost" => out.warnings.push(APEX_UNSET.into()),
+        ApexDomain::Tenancy(Some(_)) => out
             .info
             .push("RUSTANGO_APEX_DOMAIN set to a non-localhost value".into()),
     }
@@ -8655,7 +8669,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             session_secret: Some("a".repeat(48)),
             database_url: Some("postgres://app:s3cr3t@db.example.com/app_prod".into()),
             database_style_conflict: None,
-            apex_domain: Some("app.example.com".into()),
+            apex_domain: ApexDomain::Tenancy(Some("app.example.com".into())),
             bind: Some("0.0.0.0:8080".into()),
             ungated_admin: false,
         }
@@ -8705,11 +8719,11 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             .with_session_auth(secret)
             .build();
         // The public `tenant_mode` hides models; it gates nothing.
-        let gated_clear = !deploy_audit_env().ungated_admin;
+        let gated_clear = !deploy_audit_env(false).ungated_admin;
         let _open = crate::admin::Builder::new(pool.clone())
             .tenant_mode()
             .build();
-        let flagged = deploy_audit_env().ungated_admin;
+        let flagged = deploy_audit_env(false).ungated_admin;
         crate::admin::reset_ungated_admin_built();
         assert!(gated_clear, "a gated admin set the ungated flag");
         assert!(
@@ -8931,10 +8945,22 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         );
     }
 
+    /// A single-database deploy has no apex to set.
+    #[test]
+    fn deploy_audit_single_tenant_skips_the_apex() {
+        let env = DeployAuditEnv {
+            apex_domain: ApexDomain::SingleTenant,
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert!(!r.info.iter().any(|i| i.contains("RUSTANGO_APEX_DOMAIN")));
+    }
+
     #[test]
     fn deploy_audit_localhost_apex_warns_for_tenancy() {
         let env = DeployAuditEnv {
-            apex_domain: Some("localhost".into()),
+            apex_domain: ApexDomain::Tenancy(Some("localhost".into())),
             ..good_prod_env()
         };
         let r = run(&env);
