@@ -15,7 +15,6 @@ gedacht, während du vorankommst.
 - [Daten und die Datenbank](#daten-und-die-datenbank)
 - [Mandantenfähigkeit (multi-tenancy)](#mandantenfähigkeit-multi-tenancy) — nur wenn du mehrere Kunden aus einem Deployment bedienst
 - [Ein paar Rust-Wörter](#ein-paar-rust-wörter) — damit die Codeblöcke nicht angsteinflößend sind
-- [Frameworks, mit denen wir vergleichen](#frameworks-mit-denen-wir-vergleichen)
 
 ---
 
@@ -225,13 +224,3 @@ Datenbank berührt, ist `async`.
 werfen. Ein `Result` ist „Erfolg *oder* ein Fehler"; ein `Option` ist „ein Wert *oder*
 nichts". Das `?`, das du nach manchen Aufrufen siehst, bedeutet „falls dies fehlgeschlagen ist, halte an und
 gib den Fehler zurück".
-
----
-
-## Frameworks, mit denen wir vergleichen
-
-Diese Dokumentation sagt gelegentlich „wie X", um Leser zu unterstützen, die aus anderen
-Ökosystemen kommen. Die Vergleiche sind ein Bonus — du brauchst sie nie, um einem Leitfaden zu folgen.
-
-**Laravel / Rails** — populäre PHP- und Ruby-Webframeworks, aus demselben
-Grund „wenn du dies verwendet hast, wird sich das vertraut anfühlen" erwähnt.

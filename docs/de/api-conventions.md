@@ -293,7 +293,7 @@ rustango = { version = "0.61", default-features = false, features = ["postgres",
 
 ## Makros vs Laufzeit
 
-Ein *Makro* ist Code, der zur Kompilierzeit Code generiert (`#[derive(Model)]` und Verwandte) — ungefähr das, was ein Rails-Generator tut, außer dass es bei jedem Build läuft und der Compiler das Ergebnis prüft. Die Aufteilung unten entscheidet, was von einem Makro versus schlichtem Laufzeitcode erledigt wird.
+Ein *Makro* ist Code, der zur Kompilierzeit Code generiert (`#[derive(Model)]` und Verwandte). Es läuft bei jedem Build, und der Compiler prüft das Ergebnis. Die Aufteilung unten entscheidet, was von einem Makro versus schlichtem Laufzeitcode erledigt wird.
 
 | Anliegen | Makro oder Laufzeit? |
 |---|---|

@@ -12,9 +12,7 @@ que se lo pidan. **Rustango** te ofrece ambos transportes de push sobre una sola
   cliente también envía (chat, edición colaborativa, presencia).
 
 Ambos se difunden a través del mismo **bus de difusión** en proceso ([`EventBus`]), de modo que
-«envía esto a cada cliente conectado» es una sola llamada independientemente del transporte. En
-otros ecosistemas quizá lo conozcas como Echo/Reverb, o como
-`ws` + `EventSource` — las mismas ideas, un solo bus detrás de ellas.
+«envía esto a cada cliente conectado» es una sola llamada independientemente del transporte.
 
 > **Fuente:** `rustango::sse` (`EventBus`) — tras la característica **`sse`**; y
 > `rustango::ws` (`WsHub`, `WsConfig`, `ws_handler`) — tras la

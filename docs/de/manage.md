@@ -1,7 +1,6 @@
 # `manage`-CLI-Referenz
 
-Dies ist **Rustango**s Kommandozeilenwerkzeug, vergleichbar mit Laravels
-`artisan` oder Rails' `rails`-Befehl. In einem via `cargo rustango new`
+Dies ist **Rustango**s Kommandozeilenwerkzeug. In einem via `cargo rustango new`
 generierten Projekt führt ein einziges Binary jeden Befehl aus („Verb"):
 
 ```bash
@@ -288,8 +287,7 @@ cargo run -- makemigrations --merge
 
 ### `migrate`
 
-Wendet alle ausstehenden Migrationen der Reihe nach auf die Datenbank an — das
-Gegenstück zu Laravels `php artisan migrate`. Dies ist der Befehl, den
+Wendet alle ausstehenden Migrationen der Reihe nach auf die Datenbank an. Dies ist der Befehl, den
 Sie nach `makemigrations` ausführen, um Ihr Schema tatsächlich zu ändern.
 
 ```bash
@@ -391,8 +389,7 @@ Per-Tenant-Aufgabe.
 
 ### `downgrade [N]`
 
-Rollt die letzten N angewendeten Migrationen zurück (Standard 1) — Laravels
-`migrate:rollback`. Jede Migration muss reversibel sein: Schemaänderungen
+Rollt die letzten N angewendeten Migrationen zurück (Standard 1). Jede Migration muss reversibel sein: Schemaänderungen
 kehren sich automatisch um, aber Datenoperationen brauchen ein definiertes
 `reverse_sql`, sonst scheitert der Rollback.
 
@@ -465,8 +462,7 @@ markiert — jeder Versuch, ihn zurückzurollen, scheitert sofort.
 
 ### `cargo rustango new <name>` *(separates Binary)*
 
-Erstellt ein brandneues **Rustango**-Projekt — wie `laravel new` oder
-`rails new`. Dies ist ein separates Werkzeug, installieren Sie es also
+Erstellt ein brandneues **Rustango**-Projekt. Dies ist ein separates Werkzeug, installieren Sie es also
 zuerst mit `cargo install cargo-rustango`. Wählen Sie aus drei Vorlagen:
 
 ```bash
@@ -541,8 +537,7 @@ Modul kompiliert.
 
 ## Dateigeneratoren (`make:*`)
 
-Diese erstellen Startdateien für gängige Bausteine — sehr ähnlich zu Laravels
-`make:*`-Befehlen (`make:controller`, `make:model`, …). Jeder Generator
+Diese erstellen Startdateien für gängige Bausteine. Jeder Generator
 schreibt nach `src/<snake_name>.rs` (oder `tests/<snake_name>.rs` für
 `make:test`) und:
 
@@ -661,8 +656,7 @@ cargo run -- make:worker JobsWorker
 
 ### `make:notification <Name>`
 
-Generiert eine Notification-Struktur, die eine E-Mail aufbaut — wie Laravels
-`make:notification`.
+Generiert eine Notification-Struktur, die eine E-Mail aufbaut.
 
 ```bash
 cargo run -- make:notification WelcomeEmail
@@ -707,8 +701,8 @@ cargo run -- db:info
 
 ### `db:dump [--out <path>] [--data-only|--schema-only] [--no-owner]`
 
-Sichert Ihre Datenbank, indem `pg_dump` gegen `DATABASE_URL` ausgeführt wird —
-wie `php artisan db:dump`. Standardmäßig geht das SQL nach stdout (damit Sie es
+Sichert Ihre Datenbank, indem `pg_dump` gegen `DATABASE_URL` ausgeführt wird.
+Standardmäßig geht das SQL nach stdout (damit Sie es
 pipen können); übergeben Sie `--out <path>` (`-o`), um stattdessen eine Datei
 zu schreiben. `--data-only` und `--schema-only` bilden direkt auf die Flags von
 `pg_dump` ab, und `--no-owner` lässt die OWNER-Zeilen weg. Sie brauchen

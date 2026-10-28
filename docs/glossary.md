@@ -15,7 +15,6 @@ up as you go.
 - [Data and the database](#data-and-the-database)
 - [Multi-tenancy](#multi-tenancy) — only if you serve several customers from one deployment
 - [A few Rust words](#a-few-rust-words) — so the code blocks aren't scary
-- [Frameworks we compare to](#frameworks-we-compare-to)
 
 ---
 
@@ -230,13 +229,3 @@ database is `async`.
 exceptions. A `Result` is "success *or* an error"; an `Option` is "a value *or*
 nothing". The `?` you see after some calls means "if this failed, stop and
 return the error".
-
----
-
-## Frameworks we compare to
-
-These docs occasionally say "like X" to help readers coming from other
-ecosystems. The comparisons are a bonus — you never need them to follow a guide.
-
-**Laravel / Rails** — popular PHP and Ruby web frameworks, mentioned for the
-"if you've used this, this will feel familiar" reason.

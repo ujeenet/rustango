@@ -2,8 +2,8 @@
 
 A model is a Rust struct that maps to a database table. Add `#[derive(Model)]`,
 annotate the fields, and **Rustango** generates the schema, a type-safe query
-entry point, and `save`/`find`/`delete` methods — an Eloquent-style model layer
-with the compiler checking your columns. This is the **declaration** reference:
+entry point, and `save`/`find`/`delete` methods, with the compiler checking your
+columns. This is the **declaration** reference:
 every field type, every primary-key option, and every `#[rustango(...)]`
 attribute. For *querying* models once they're declared, see the
 [ORM cookbook](orm.md).

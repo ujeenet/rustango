@@ -5,8 +5,7 @@ votre handler ne la voie et après qu'il a produit une réponse. C'est là que
 vivent les préoccupations transversales : journalisation, limitation de débit,
 en-têtes de sécurité, CSRF, résolution de la locale et du fuseau horaire.
 **Rustango** fournit un catalogue riche de middlewares prêts à l'emploi et rend
-l'écriture des vôtres possible en quelques lignes. Dans Express, c'est
-`app.use()` ; dans Laravel, c'est le kernel HTTP — la même idée, rattachée à
+l'écriture des vôtres possible en quelques lignes. Chacun est une couche rattachée à
 votre routeur.
 
 [![Middleware in Rustango: a request flows down through a stack of tower layers (request-id, locale, security headers, CSRF) into the handler and back up through the response side of each layer](../img/middleware.png)](../img/middleware.png)

@@ -5,8 +5,7 @@ Handler sieht und nachdem er eine Response erzeugt hat. Hier leben die
 Querschnittsthemen: Logging, Rate Limiting, Security-Header, CSRF, Auflösung von
 Locale und Zeitzone. **Rustango** liefert einen umfangreichen Katalog
 gebrauchsfertiger Middleware und macht das Schreiben eigener zu einer Sache
-weniger Zeilen. Aus Express kennst du das als `app.use()`, aus Laravel als den
-HTTP-Kernel — dieselbe Idee, an deinen Router angehängt.
+weniger Zeilen. Jede ist eine Schicht, die an deinen Router angehängt wird.
 
 [![Middleware in Rustango: a request flows down through a stack of tower layers (request-id, locale, security headers, CSRF) into the handler and back up through the response side of each layer](../img/middleware.png)](../img/middleware.png)
 

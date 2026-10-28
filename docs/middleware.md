@@ -4,8 +4,7 @@ Middleware is code that runs **around** every request — before your handler
 sees it and after it produces a response. It's where cross-cutting concerns
 live: logging, rate limiting, security headers, CSRF, locale and timezone
 resolution. **Rustango** ships a deep catalog of ready-made middleware and
-makes writing your own a few lines. If you come from Express, this is
-`app.use()`; from Laravel, it's the HTTP kernel — same idea, attached to your
+makes writing your own a few lines. Each one is a layer attached to your
 router.
 
 [![Middleware in Rustango: a request flows down through a stack of tower layers (request-id, locale, security headers, CSRF) into the handler and back up through the response side of each layer](img/middleware.png)](img/middleware.png)

@@ -797,7 +797,7 @@ others get just `{"<pk>": …}` (one per bulk row). A single create also sends a
 
 An FK a body sets must name a row the target's global scopes show; an update
 may resend the value the row already holds. To narrow it
-further, as DRF's related queryset does, add a backend for that field; it runs
+further, add a backend for that field; it runs
 against the target model, and any other row is a 422:
 
 ```rust

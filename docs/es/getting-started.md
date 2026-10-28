@@ -166,7 +166,7 @@ PostgreSQL y SQLite. `utf8mb4_0900_as_cs` compara como ellos. Evita una collatio
 
 ## Paso 1: Instalar el generador de andamiaje
 
-El generador de andamiaje crea esqueletos de proyectos y apps por ti, como `rails new`.
+El generador de andamiaje crea esqueletos de proyectos y apps por ti.
 
 ```bash
 cargo install cargo-rustango
@@ -184,7 +184,7 @@ La versión del propio generador de andamiaje es la que fija tu proyecto, así q
 
 ## Paso 2: Crear el proyecto
 
-Esto genera el andamiaje de un proyecto nuevo, el equivalente en **Rustango** de `rails new` o `composer create-project`.
+Esto genera el andamiaje de un proyecto nuevo, con estructura, ajustes y migraciones listos.
 
 ```bash
 cd ~/projects                                 # wherever you keep code
@@ -296,7 +296,7 @@ psql "$DATABASE_URL" -c "SELECT version();"   # should print Postgres version
 
 ## Paso 5: Ejecutar las migraciones integradas
 
-Las migraciones crean las tablas de tu base de datos, la misma idea que `php artisan migrate` o `rails db:migrate`. Ejecútalas una vez para preparar las propias tablas del framework:
+Las migraciones crean las tablas de tu base de datos. Ejecútalas una vez para preparar las propias tablas del framework:
 
 ```bash
 cargo run -- migrate
@@ -607,7 +607,7 @@ Registra el nuevo módulo añadiendo `mod post_view_set;` junto a las otras decl
 
 ### 12b. Montar las rutas
 
-Conecta las rutas del ViewSet al router de la app (la versión de **Rustango** de un archivo `urls.py` o `routes/api.php`). El router del ViewSet necesita el pool de la base de datos, así que constrúyelo en `src/main.rs`, donde vive el pool, y fusiónalo en el agregador `urls::api()`:
+Conecta las rutas del ViewSet al router de la app (el archivo que lista tus rutas de API). El router del ViewSet necesita el pool de la base de datos, así que constrúyelo en `src/main.rs`, donde vive el pool, y fusiónalo en el agregador `urls::api()`:
 
 ```rust
 let api = urls::api()

@@ -1,7 +1,6 @@
 # Referencia de la CLI `manage`
 
-Esta es la herramienta de línea de comandos de **Rustango**, comparable al
-`artisan` de Laravel o al comando `rails` de Rails. En un proyecto
+Esta es la herramienta de línea de comandos de **Rustango**. En un proyecto
 generado mediante `cargo rustango new`, un único binario ejecuta cada comando
 («verbo»):
 
@@ -294,8 +293,7 @@ cargo run -- makemigrations --merge
 
 ### `migrate`
 
-Aplica todas las migraciones pendientes a la base de datos, en orden — el
-equivalente del `php artisan migrate` de Laravel. Este es el comando
+Aplica todas las migraciones pendientes a la base de datos, en orden. Este es el comando
 que ejecutas después de `makemigrations` para cambiar realmente tu esquema.
 
 ```bash
@@ -394,8 +392,7 @@ del framework viven por tenant, así que repararlas es un trabajo por tenant.
 
 ### `downgrade [N]`
 
-Revierte las últimas N migraciones aplicadas (por defecto 1) — el
-`migrate:rollback` de Laravel. Cada migración debe ser reversible: los cambios
+Revierte las últimas N migraciones aplicadas (por defecto 1). Cada migración debe ser reversible: los cambios
 de esquema se revierten automáticamente, pero las operaciones de datos necesitan
 un `reverse_sql` definido o el rollback falla.
 
@@ -468,8 +465,7 @@ intento de revertirlo falla de inmediato.
 
 ### `cargo rustango new <name>` *(binario aparte)*
 
-Crea un proyecto **Rustango** completamente nuevo — como `laravel new` o
-`rails new`. Esta es una herramienta aparte, así que instálala
+Crea un proyecto **Rustango** completamente nuevo. Esta es una herramienta aparte, así que instálala
 primero con `cargo install cargo-rustango`. Elige entre tres plantillas:
 
 ```bash
@@ -543,9 +539,7 @@ módulo.
 
 ## Generadores de archivos (`make:*`)
 
-Estos crean archivos de inicio para bloques de construcción comunes — muy
-parecido a los comandos `make:*` de Laravel (`make:controller`, `make:model`,
-…). Cada generador escribe en `src/<snake_name>.rs` (o `tests/<snake_name>.rs`
+Estos crean archivos de inicio para bloques de construcción comunes. Cada generador escribe en `src/<snake_name>.rs` (o `tests/<snake_name>.rs`
 para `make:test`) y:
 
 - Comprueba que el nombre es válido (PascalCase, letras/dígitos/guion bajo) —
@@ -662,8 +656,7 @@ cargo run -- make:worker JobsWorker
 
 ### `make:notification <Name>`
 
-Genera una estructura de notificación que construye un correo electrónico — como
-el `make:notification` de Laravel.
+Genera una estructura de notificación que construye un correo electrónico.
 
 ```bash
 cargo run -- make:notification WelcomeEmail
@@ -708,8 +701,8 @@ cargo run -- db:info
 
 ### `db:dump [--out <path>] [--data-only|--schema-only] [--no-owner]`
 
-Respalda tu base de datos ejecutando `pg_dump` contra `DATABASE_URL` — como
-`php artisan db:dump`. Por defecto el SQL va a stdout (para que puedas
+Respalda tu base de datos ejecutando `pg_dump` contra `DATABASE_URL`.
+Por defecto el SQL va a stdout (para que puedas
 canalizarlo); pasa `--out <path>` (`-o`) para escribir un archivo en su lugar.
 `--data-only` y `--schema-only` se corresponden directamente con los flags de
 `pg_dump`, y `--no-owner` omite las líneas OWNER. Necesitas `pg_dump` instalado

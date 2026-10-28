@@ -157,7 +157,7 @@ about both.
 
 ## Step 1: Install the scaffolder
 
-The scaffolder generates project and app skeletons for you, like `rails new`.
+The scaffolder generates project and app skeletons for you.
 
 ```bash
 cargo install cargo-rustango
@@ -175,7 +175,7 @@ The scaffolder's own version is the one your project pins, so installing the new
 
 ## Step 2: Create the project
 
-This scaffolds a fresh project, the **Rustango** equivalent of `rails new` or `composer create-project`.
+This scaffolds a fresh project with a working layout, settings and migrations.
 
 ```bash
 cd ~/projects                                 # wherever you keep code
@@ -286,7 +286,7 @@ psql "$DATABASE_URL" -c "SELECT version();"   # should print Postgres version
 
 ## Step 5: Run the built-in migrations
 
-Migrations create your database tables, same idea as `php artisan migrate` or `rails db:migrate`. Run them once to set up the framework's own tables:
+Migrations create your database tables. Run them once to set up the framework's own tables:
 
 ```bash
 cargo run -- migrate
@@ -597,7 +597,7 @@ Register the new module by adding `mod post_view_set;` alongside the other `mod`
 
 ### 12b. Mount the routes
 
-Attach the ViewSet's routes to the app's router (the **Rustango** version of a `urls.py` or a `routes/api.php` file). The ViewSet router needs the database pool, so build it in `src/main.rs` where the pool lives and merge it into the `urls::api()` aggregator:
+Attach the ViewSet's routes to the app's router (the file that lists your API routes). The ViewSet router needs the database pool, so build it in `src/main.rs` where the pool lives and merge it into the `urls::api()` aggregator:
 
 ```rust
 let api = urls::api()

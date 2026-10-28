@@ -532,7 +532,7 @@ La consola de operadores tiene el mismo segundo factor, opcional por operador u 
 
 ## Enviar URLs firmadas (enlaces mágicos)
 
-Una URL firmada lleva una firma a prueba de manipulaciones, de modo que puedes confiar en ella sin una sesión — perfecta para inicios de sesión con enlace mágico, restablecimientos de contraseña y enlaces de descarga de tiempo limitado. Firmas una URL con `sign` (opcionalmente con una caducidad) y la verificas con `verify` cuando el usuario hace clic. (Laravel las llama "rutas firmadas".)
+Una URL firmada lleva una firma a prueba de manipulaciones, de modo que puedes confiar en ella sin una sesión — perfecta para inicios de sesión con enlace mágico, restablecimientos de contraseña y enlaces de descarga de tiempo limitado. Firmas una URL con `sign` (opcionalmente con una caducidad) y la verificas con `verify` cuando el usuario hace clic.
 
 ```rust
 use rustango::signed_url::{sign, verify, SignedUrlError};

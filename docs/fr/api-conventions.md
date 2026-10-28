@@ -300,7 +300,7 @@ rustango = { version = "0.61", default-features = false, features = ["postgres",
 
 ## Macros vs runtime
 
-Une *macro* est du code qui génère du code à la compilation (`#[derive(Model)]` et consorts) — à peu près ce que fait un générateur Rails, sauf qu'elle s'exécute à chaque build et que le compilateur vérifie le résultat. La répartition ci-dessous décide de ce qui est fait par une macro versus du simple code au runtime.
+Une *macro* est du code qui génère du code à la compilation (`#[derive(Model)]` et consorts). Elle s'exécute à chaque build, et le compilateur vérifie le résultat. La répartition ci-dessous décide de ce qui est fait par une macro versus du simple code au runtime.
 
 | Préoccupation | Macro ou runtime ? |
 |---|---|

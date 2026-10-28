@@ -12,9 +12,7 @@ itself, a chat. The server needs to *push* to the browser without being asked.
   client also sends (chat, collaborative editing, presence).
 
 Both fan out through the same in-process **broadcast bus** ([`EventBus`]), so
-"send this to every connected client" is one call regardless of transport. If
-you come from Laravel this is Echo/Reverb; from Node, `ws` + `EventSource` —
-same ideas, one bus behind them.
+"send this to every connected client" is one call regardless of transport.
 
 > **Source:** `rustango::sse` (`EventBus`) — behind the **`sse`** feature; and
 > `rustango::ws` (`WsHub`, `WsConfig`, `ws_handler`) — behind the

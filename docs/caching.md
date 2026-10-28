@@ -4,8 +4,7 @@ Caching stores the result of expensive work — a heavy query, a rendered
 fragment, a third-party API call — so the next request gets it instantly instead
 of recomputing. **Rustango** gives you one `Cache` trait with swappable backends
 (in-memory, Redis, database), a compute-on-miss helper (`get_or_set`), and typed
-JSON helpers. Swap the backend without touching a single call site — like
-Laravel's `Cache` facade.
+JSON helpers. Swap the backend without touching a single call site.
 
 [![Caching in Rustango: get_or_set checks the cache, runs the factory only on a miss, stores the result with a TTL, and serves hits instantly; the same Cache trait backs InMemory, Redis, and DB](img/caching.png)](img/caching.png)
 

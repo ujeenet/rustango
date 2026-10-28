@@ -530,7 +530,7 @@ Die Operator-Konsole hat denselben zweiten Faktor, freiwillig pro Operator oder 
 
 ## Signierte URLs versenden (Magic Links)
 
-Eine signierte URL trägt eine manipulationssichere Signatur, sodass du ihr ohne Session vertrauen kannst — perfekt für Magic-Link-Logins, Passwort-Resets und zeitlich begrenzte Download-Links. Du `sign`st eine URL (optional mit einem Ablaufdatum) und `verify`st sie, wenn der Benutzer klickt. (Laravel nennt diese „signed routes".)
+Eine signierte URL trägt eine manipulationssichere Signatur, sodass du ihr ohne Session vertrauen kannst — perfekt für Magic-Link-Logins, Passwort-Resets und zeitlich begrenzte Download-Links. Du `sign`st eine URL (optional mit einem Ablaufdatum) und `verify`st sie, wenn der Benutzer klickt.
 
 ```rust
 use rustango::signed_url::{sign, verify, SignedUrlError};

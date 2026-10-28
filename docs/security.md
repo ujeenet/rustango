@@ -1,6 +1,6 @@
 # Security guide
 
-This guide covers every security feature **Rustango** ships and how to combine them. If you come from Laravel or Rails, most of these will feel familiar — the names differ, but the ideas are the same. Each feature below is usually one line of setup. When you're ready to ship, run `manage check --deploy` for an automated audit.
+This guide covers every security feature **Rustango** ships and how to combine them. Each feature below is usually one line of setup. When you're ready to ship, run `manage check --deploy` for an automated audit.
 
 [![The hardened middleware stack wired in one chain: request IDs, access logging, rate limiting, CORS, and security headers](img/security.png)](img/security.png)
 
@@ -535,7 +535,7 @@ The operator console has the same second factor, optional per operator or requir
 
 ## Sending signed URLs (magic links)
 
-A signed URL carries a tamper-proof signature, so you can trust it without a session — perfect for magic-link logins, password resets, and time-limited download links. You `sign` a URL (optionally with an expiry) and `verify` it when the user clicks. (Laravel calls these "signed routes.")
+A signed URL carries a tamper-proof signature, so you can trust it without a session — perfect for magic-link logins, password resets, and time-limited download links. You `sign` a URL (optionally with an expiry) and `verify` it when the user clicks.
 
 ```rust
 use rustango::signed_url::{sign, verify, SignedUrlError};

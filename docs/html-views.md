@@ -7,8 +7,8 @@ clients, an HTML view emits a rendered page for a browser. Both are built from
 the same `#[derive(Model)]`, and you can serve a model *both* ways at once.
 
 There are five ready-made views — `ListView`, `DetailView`, `CreateView`,
-`UpdateView`, `DeleteView` — the page-serving equivalent of Laravel's resource
-controllers returning Blade views. They render through [Tera](https://keats.github.io/tera/)
+`UpdateView`, `DeleteView` — one per page of a model's create/read/update/delete
+flow. They render through [Tera](https://keats.github.io/tera/)
 templates.
 
 [![HTML views in Rustango: one model feeds ListView, DetailView and CreateView/UpdateView/DeleteView, each rendering a Tera template into a server-rendered page](img/html-views.png)](img/html-views.png)

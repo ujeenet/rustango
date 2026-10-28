@@ -1,6 +1,6 @@
 # ORM cookbook
 
-Patterns for the **Rustango** ORM beyond the basics. If you come from Laravel Eloquent or Rails ActiveRecord, the shapes here will feel familiar. Most examples assume you already have a `Post` model from `Getting Started`.
+Patterns for the **Rustango** ORM beyond the basics. Most examples assume you already have a `Post` model from `Getting Started`.
 
 [![Type-checked ORM queries: chained filters, ordering, limits, and aggregation — all without raw SQL](img/orm.png)](img/orm.png)
 
@@ -1577,7 +1577,7 @@ Backends differ in two places:
 
 ## Soft delete
 
-Mark a row as deleted by setting a timestamp instead of removing it — like Laravel's `SoftDeletes`. Mark the timestamp column with the `#[rustango(soft_delete)]` attribute (a derive annotation that tells the macro how to treat the field):
+Mark a row as deleted by setting a timestamp instead of removing it. Mark the timestamp column with the `#[rustango(soft_delete)]` attribute (a derive annotation that tells the macro how to treat the field):
 
 ```rust
 #[derive(Model)]

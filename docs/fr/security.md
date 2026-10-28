@@ -530,7 +530,7 @@ La console opérateur a le même second facteur, facultatif par opérateur ou ob
 
 ## Envoyer des URL signées (liens magiques)
 
-Une URL signée porte une signature infalsifiable, de sorte que vous pouvez lui faire confiance sans session — parfait pour les connexions par lien magique, les réinitialisations de mot de passe et les liens de téléchargement à durée limitée. Vous `sign` une URL (optionnellement avec une expiration) et la `verify` quand l'utilisateur clique. (Laravel les appelle des « signed routes ».)
+Une URL signée porte une signature infalsifiable, de sorte que vous pouvez lui faire confiance sans session — parfait pour les connexions par lien magique, les réinitialisations de mot de passe et les liens de téléchargement à durée limitée. Vous `sign` une URL (optionnellement avec une expiration) et la `verify` quand l'utilisateur clique.
 
 ```rust
 use rustango::signed_url::{sign, verify, SignedUrlError};
