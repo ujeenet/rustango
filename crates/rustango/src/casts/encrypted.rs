@@ -17,6 +17,7 @@ pub enum EncryptedString {}
 
 impl CastValue for EncryptedString {
     type Value = String;
+    const SECRET: bool = true;
 
     fn to_db(value: &String) -> String {
         // Infallible by contract; a missing key is a deploy-time

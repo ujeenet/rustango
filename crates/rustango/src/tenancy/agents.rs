@@ -19,7 +19,7 @@ use crate::sql::{Auto, ExecError, Pool};
 /// A tenant-scoped MCP agent. Authenticates with a `prefix.secret`
 /// credential; the secret half is argon2id-hashed in `secret_hash` and
 /// never stored or returned in the clear.
-#[derive(crate::Model, Debug, Clone)]
+#[derive(crate::Model, Clone)]
 #[rustango(
     table = "rustango_agents",
     display = "name",
@@ -65,6 +65,8 @@ pub struct Agent {
     #[rustango(default = "'{}'")]
     pub data: serde_json::Value,
 }
+
+redacted_debug!(Agent { id, name, secret_prefix, active, created_at, secret_rotated_at, user_id, data; secret_hash });
 
 impl Agent {
     /// Whether this user key was minted with pinned skills. A scoped key
