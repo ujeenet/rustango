@@ -195,10 +195,13 @@ myblog/
 ├── .env.example                # template for DATABASE_URL etc.
 ├── .gitignore
 ├── docker-compose.yml          # Postgres in a container
+├── Dockerfile                  # release image; Dockerfile.dev is the dev one
 ├── README.md                   # project-specific
 ├── config/                     # tiered settings (default + dev/staging/prod)
 ├── migrations/                 # empty — `cargo run -- makemigrations` populates
+├── system/migrations/          # the framework's own tables
 └── src/
+    ├── lib.rs                  # the app as a library: `pub mod models; …`
     ├── main.rs                 # entry point: `Cli::new().api(urls::api()).run()`
     ├── models.rs               # every #[derive(Model)] lives here
     ├── views.rs                # axum request handlers
@@ -206,6 +209,8 @@ myblog/
 ```
 
 There is a single binary: `cargo run` boots the HTTP server, and every management verb (`migrate`, `makemigrations`, `startapp`, `check`, …) flows through the same binary via `cargo run -- <verb>`. There's no separate `manage` binary.
+
+The app's modules live in the library target (`src/lib.rs`), and `src/main.rs` reaches them by crate name (`use myblog::urls;`). That is what lets tests in `tests/` and extra binaries in `src/bin/` use your models.
 
 `Cargo.toml` is the dependency manifest (like `composer.json` or a `Gemfile`). Open it and confirm `rustango` is listed under `[dependencies]`.
 
@@ -256,7 +261,7 @@ For production set a real one — 32 bytes of base64, from your secret manager o
 openssl rand -base64 32     # paste output as RUSTANGO_SESSION_SECRET value
 ```
 
-A value that is not 32 bytes of base64 cannot be used. The server says so on boot and falls back to the generated key rather than failing, so watch for that warning if you set one and sessions behave as though you had not.
+A value that is not 32 bytes of base64 cannot be used. Off the prod tier the server says so on boot and falls back to the generated key, so watch for that warning if you set one and sessions behave as though you had not. With `RUSTANGO_ENV=prod` a missing or invalid secret stops the server from starting.
 
 ---
 
@@ -300,7 +305,7 @@ Check the migration state:
 cargo run -- showmigrations
 ```
 
-On a fresh project this prints `(no migrations in ./migrations)`. Once you create a model and run `makemigrations` (Step 9), each applied migration shows an `[X]` here.
+On a fresh project this prints `(no migrations in ./migrations)`, then the framework's own chain under `System migrations in ./system/migrations:`. Once you create a model and run `makemigrations` (Step 9), each applied migration shows an `[X]` here.
 
 ---
 
@@ -315,8 +320,10 @@ cargo run
 You'll see:
 
 ```
-listening on http://0.0.0.0:8080
+server listening on http://0.0.0.0:8080
 ```
+
+`cargo run` also applies pending migrations before it starts listening.
 
 Open <http://localhost:8080> in your browser. The scaffold ships a simple root handler (`views::index`) that greets you with **Hello from Rustango!** and a link to the admin — that confirms **Rustango** is running. (Projects that don't define their own `/` route get a built-in welcome page instead, via `Cli::with_welcome()`.)
 
@@ -343,7 +350,7 @@ src/blog/
 └── tests.rs               # in-process router + inventory smoke tests
 ```
 
-`startapp` wires the new module in for you: it declares `mod blog;` in `src/main.rs` and inserts a `.merge(crate::blog::urls::api())` line into the `api()` aggregator in `src/urls.rs`, so the blog's routes compose into the app automatically. No manual module registration needed.
+`startapp` wires the new module in for you: it declares `pub mod blog;` in `src/lib.rs` (or `mod blog;` in `src/main.rs` on an older binary-only project) and inserts a `.merge(crate::blog::urls::api())` line into the `api()` aggregator in `src/urls.rs`, so the blog's routes compose into the app automatically. No manual module registration needed.
 
 ---
 
@@ -438,15 +445,10 @@ psql "$DATABASE_URL" -c "\d posts"
 
 Let's read and write rows from code. The ORM lets you work with database rows as Rust structs instead of raw SQL.
 
-Temporarily edit `src/main.rs` to run a quick create-and-read test before booting the server. Replace the `Cli` body with an ad-hoc ORM smoke test (keep the scaffolder's `#[rustango::main]` and the `mod` declarations at the top of the file):
+Temporarily edit `src/main.rs` to run a quick create-and-read test before booting the server. Replace the `Cli` body with an ad-hoc ORM smoke test (keep the scaffolder's `#[rustango::main]`). The models live in the library, so `main.rs` names them by crate:
 
 ```rust
-mod blog;
-mod models;
-mod urls;
-mod views;
-
-use crate::blog::models::Post;
+use myblog::blog::models::Post;
 use rustango::sql::{FetcherPool, Pool};
 use rustango::{Auto, Model};
 
@@ -501,21 +503,21 @@ You should see your new post id and the rows read back. Restore `src/main.rs` to
 
 **Rustango** ships a generated admin UI for your models — browse, search and edit rows with no code of your own. The fullstack scaffold already wires it: a helper in `src/urls.rs` turns a pool into an admin router, and `src/main.rs` nests it under `/admin`.
 
-The helper puts the admin behind a login. The `admin_prefix` must match the path it is nested under (`/admin`) so the admin's own links and form actions resolve:
+The helper puts the admin behind a login. It reads its options from the loaded settings, and `admin_prefix` must match the path it is nested under so the admin's own links and form actions resolve. `admin_prefix(settings)` returns `[admin] url_prefix` (or `[routes] admin_url`), else `/admin`:
 
 ```rust
 use rustango::admin;
+use rustango::config::Settings;
 use rustango::session::{load_session_secret_for_tier, tier_from_env};
 use rustango::sql::Pool;
 
-pub fn admin_router(pool: Pool) -> Router {
+pub fn admin_router(pool: Pool, settings: &Settings) -> Router {
     let secret = load_session_secret_for_tier(
         &tier_from_env(),
         std::path::Path::new("./var/.rustango_session.key"),
     );
-    admin::Builder::new(pool)
-        .title("Myblog Admin")
-        .admin_prefix("/admin") // must match the `.nest_with("/admin", …)` below
+    admin::Builder::from_settings(pool, settings)
+        .admin_prefix(admin_prefix(settings)) // the path main.rs nests it at
         .with_session_auth(secret)
         .build()
 }
@@ -525,21 +527,24 @@ pub fn admin_router(pool: Pool) -> Router {
 
 `Builder::new` takes any backend's pool, so this helper names no driver and works on all three.
 
-`src/main.rs` hands the helper to the `Cli`, which builds the admin from the pool it serves with, so verbs like `makemigrations` still run without a database. Keep the `mod blog;` line from Step 7 — that's what registers your `Post` model with the admin:
+`src/main.rs` hands the helper to the `Cli`, which builds the admin from the pool it serves with, so verbs like `makemigrations` still run without a database. Keep the `pub mod blog;` line from Step 7 in `src/lib.rs` — that's what registers your `Post` model with the admin. The scaffolded `main.rs` looks like this (trimmed):
 
 ```rust
-mod blog;
-mod models;
-mod urls;
-mod views;
+use myblog::urls;
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
+    let loaded = rustango::config::Settings::load_from_env();
+    let settings = loaded.as_ref().cloned().unwrap_or_default();
+    let admin_settings = settings.clone();
     rustango::manage::Cli::new()
         .api(urls::api())
-        .nest_with("/admin", urls::admin_router)
+        .nest_with(urls::admin_prefix(&settings), move |pool| {
+            urls::admin_router(pool, &admin_settings)
+        })
         .with_health() // /health + /ready endpoints
+        .with_loaded_settings(loaded)
         .run()
         .await
 }
@@ -593,25 +598,28 @@ use crate::blog::models::Post;
 pub struct PostViewSet;
 ```
 
-Register the new module by adding `mod post_view_set;` alongside the other `mod` declarations at the top of `src/main.rs`.
+Register the new module by adding `pub mod post_view_set;` to `src/lib.rs` (`make:viewset` prints this line for you).
+
+The generated file starts with `read_only`. Leave it out, as above, and the ViewSet also serves create, update and delete. Write actions with no `permissions(...)` codenames log a warning when the router mounts; add `allow_anonymous` to say that is intended.
 
 ### 12b. Mount the routes
 
-Attach the ViewSet's routes to the app's router (the file that lists your API routes). The ViewSet router needs the database pool, so build it in `src/main.rs` where the pool lives and merge it into the `urls::api()` aggregator:
+Attach the ViewSet's routes to the app. The ViewSet router needs the database pool, and `urls::api()` has none, so add one more `nest_with` to the `Cli` chain in `src/main.rs`. It gets the server's pool, like the admin:
 
 ```rust
-let api = urls::api()
-    .nest("/admin", urls::admin_router(pool.clone()))
-    .merge(crate::post_view_set::PostViewSet::router("/api/posts", pool));
-
 rustango::manage::Cli::new()
-    .api(api)
+    .api(urls::api())
+    .nest_with(urls::admin_prefix(&settings), move |pool| {
+        urls::admin_router(pool, &admin_settings)
+    })
+    .nest_with("/api", |pool| myblog::post_view_set::PostViewSet::router("/posts", pool))
     .with_health()
+    .with_loaded_settings(loaded)
     .run()
     .await
 ```
 
-(`urls::api()` is the aggregator the scaffolder generated; `manage startapp` merges any sub-app's routes into it the same way.)
+The ViewSet now answers at `/api/posts` and `/api/posts/{id}`.
 
 ### 12c. Try the endpoints
 
@@ -667,7 +675,7 @@ pub struct PostSerializer {
 
 Once a serializer is attached, **its fields are the whole write surface**: anything a client posts that is not listed here is dropped before the `INSERT`. That is why `author_id` appears. It is `NOT NULL` with no default on the model, so leaving it out makes every create fail on the not-null constraint. `status` can stay out because the model gives it `default = "'draft'"`.
 
-Each serializer field's type mirrors the matching model field, so `id` and `published_at` keep their `Auto<…>` wrapper from the model (an `Auto<i64>` still serializes to a plain JSON integer). Then register the module by adding `mod post_serializer;` alongside the other `mod` declarations in `src/main.rs`.
+Each serializer field's type mirrors the matching model field, so `id` and `published_at` keep their `Auto<…>` wrapper from the model (an `Auto<i64>` still serializes to a plain JSON integer). Then register the module by adding `pub mod post_serializer;` to `src/lib.rs`.
 
 Wire the serializer into the ViewSet with the `serializer` attribute — list, retrieve, and create responses are then rendered through it. `fields` stays required: a body can write only fields both it and the serializer list:
 
@@ -682,7 +690,7 @@ Wire the serializer into the ViewSet with the `serializer` attribute — list, r
 pub struct PostViewSet;
 ```
 
-This works identically on PostgreSQL, MySQL, and SQLite. `method` / `read_only` / `source` / `write_only` overrides all apply to the response, and **request bodies are validated through the serializer too**: `create` / `update` run its `validate()` (per-field and cross-field), returning a `400` with one list of messages per field (`{field: [messages]}`) on failure, and read-only / computed fields a client posts are ignored. (Note: `nested` / `many` serializer fields need the related rows loaded via `select_related`; otherwise they render as their default.) See the [ViewSets guide](viewsets.md) for the full input + output behavior.
+This works identically on PostgreSQL, MySQL, and SQLite. `method` / `read_only` / `source` / `write_only` overrides all apply to the response, and **request bodies are validated through the serializer too**: `create` / `update` run its `validate()` (per-field and cross-field), returning a `422` (`validation_failed`) with one list of messages per field in `details` (`{field: [messages]}`) on failure, and read-only / computed fields a client posts are ignored. (Note: `nested` / `many` serializer fields need the related rows loaded via `select_related`; otherwise they render as their default.) See the [ViewSets guide](viewsets.md) for the full input + output behavior.
 
 ---
 
@@ -734,7 +742,7 @@ let roles: Vec<String> = claims.get("roles").unwrap_or_default();
 
 ## Step 15: Add security middleware
 
-Middleware wraps every request to add cross-cutting behavior. This one goes in `src/main.rs`: it replaces the `let api = ...` line from Step 11, so the router is fully assembled before it reaches the `Cli`. Here you stack request IDs, access logging, rate limiting, CORS, and security headers in one chain. Each `.method(...)` adds one layer. See the [Middleware guide](middleware.md) for the full layer catalog and ordering rules.
+Middleware wraps every request to add cross-cutting behavior. This one goes in `src/main.rs`: it replaces the `/api` `nest_with` line from Step 12b, so the layers wrap every route under `/api`. Here you stack request IDs, access logging, rate limiting, CORS, and security headers in one chain. Each `.method(...)` adds one layer. See the [Middleware guide](middleware.md) for the full layer catalog and ordering rules.
 
 ```rust
 use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt, CspBuilder};
@@ -742,13 +750,9 @@ use rustango::cors::{CorsLayer, CorsRouterExt};
 use rustango::rate_limit::{RateLimitLayer, RateLimitRouterExt};
 use rustango::access_log::{AccessLogLayer, AccessLogRouterExt};
 use rustango::request_id::{RequestIdLayer, RequestIdRouterExt};
-use rustango::health::health_router;
 use std::time::Duration;
 
-let app = urls::api()
-    .nest("/admin", urls::admin_router(pool.clone()))
-    .merge(crate::post_view_set::PostViewSet::router("/api/posts", pool.clone()))
-    .merge(health_router(pool.clone()))                        // /health, /ready
+.nest_with("/api", |pool| myblog::post_view_set::PostViewSet::router("/posts", pool)
     .request_id(RequestIdLayer::default())
     .access_log(AccessLogLayer::default())                      // PII-redacted
     .rate_limit(RateLimitLayer::per_ip(60, Duration::from_secs(60)))
@@ -758,10 +762,10 @@ let app = urls::api()
     .security_headers(
         SecurityHeadersLayer::strict()
             .csp(CspBuilder::strict_starter().build()),
-    );
+    ))
 ```
 
-Hand the finished `app` to the `Cli` exactly as before — `rustango::manage::Cli::new().api(app).with_welcome().run().await` — and every request now flows through the full middleware stack.
+The rest of the `Cli` chain stays as it was. Every `/api` request now flows through the full middleware stack. `.with_welcome()` does nothing here: the scaffold already routes `/`, so the welcome page is skipped with a warning.
 
 ---
 
@@ -829,7 +833,7 @@ Three things in that snippet are easy to get wrong, and each produces a differen
 
 `Pool` is the multi-backend pool, and `router` takes any backend's pool, so this file compiles unchanged on PostgreSQL, MySQL and SQLite.
 
-> **Heads-up:** integration tests in `tests/` can only `use myblog::…` if the crate exposes a library target. A fresh scaffold is binary-only (`src/main.rs`, no `src/lib.rs`), so add a one-line `src/lib.rs` that re-exports the modules you want to test — `pub mod models; pub mod post_view_set; pub mod urls;` — and keep the matching `mod …;` lines in `src/main.rs`. (If you'd rather not add a lib target, build the router fully inline in the test instead, the way `make:test` scaffolds its `app()`.)
+> **Heads-up:** integration tests in `tests/` can only `use myblog::…` for modules declared `pub mod` in `src/lib.rs`. A fresh scaffold has that library target; make sure `pub mod post_view_set;` is there (Step 12a). A project from an older `cargo-rustango` may be binary-only: add a `src/lib.rs` with the `pub mod …;` lines you need, or build the router inline in the test, the way `make:test` scaffolds its `app()`.
 
 Run the tests:
 
@@ -847,21 +851,21 @@ Before you deploy, run the built-in checker. It flags common misconfigurations, 
 cargo run -- check --deploy
 ```
 
-In your local dev environment you'll see something like:
+`--deploy` treats a missing `RUSTANGO_SESSION_SECRET` as an error, so set one first (Step 3), even locally. In your local dev environment you'll then see something like:
 
 ```
 running rustango system check (deploy mode)...
   [info]    6 models registered via inventory
   [info]    database reachable
   [info]    1 migration(s) on disk
-  [info]    RUSTANGO_SESSION_SECRET length OK
+  [info]    RUSTANGO_SESSION_SECRET decodes to a valid ≥32-byte key
   [info]    config tier resolved to `dev`
   [warning] RUSTANGO_ENV is unset — set to `prod` so config loaders pick the right tier
-  [warning] DATABASE_URL points at localhost / 127.0.0.1 — verify this is intended in production
-  [warning] RUSTANGO_APEX_DOMAIN is unset / `localhost` — set it for tenancy projects
+  [warning] DATABASE_URL points at localhost / 127.0.0.1 — verify this is intended in production (…)
+  [warning] RUSTANGO_APEX_DOMAIN is unset / `localhost` — tenancy projects need this set to (…)
 ```
 
-(The exact model/migration counts depend on your project.) Those three warnings are the expected dev-environment ones. In a production setup — `RUSTANGO_ENV=prod`, a managed-database `DATABASE_URL`, an apex domain set — they clear and you'll see `all checks passed`. Fix any remaining warnings or errors before pushing to production.
+(The exact model/migration counts and extra notes depend on your project and features.) Those three warnings are the expected dev-environment ones. In a production setup — `RUSTANGO_ENV=prod`, a managed-database `DATABASE_URL`, an apex domain set — they clear and you'll see `all checks passed`. Fix any remaining warnings or errors before pushing to production.
 
 ---
 
@@ -893,7 +897,9 @@ Make sure your reverse proxy:
 - Forwards `X-Forwarded-For`, and the app mounts `RealIpLayer::trust_proxies([...])` naming that proxy (`Cli::with_trusted_proxies([...])?` or `server::Builder::real_ip`), for accurate IPs in `AccessLogLayer` and the throttles (see [security.md](security.md))
 - Passes the original `Host` header unchanged: tenant routing, apex detection and `AllowedHostsLayer` read only `Host`
 - Forwards `X-Forwarded-Proto` (and `X-Forwarded-Host`, which only sets the SSO redirect URL behind a trusted proxy)
-- Uses `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())` so `ConnectInfo` is populated for rate limiting + IP filtering
+
+
+`Cli::run()` already fills `ConnectInfo` for rate limiting and IP filtering. If you serve the router yourself, use `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())`.
 
 ---
 

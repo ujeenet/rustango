@@ -264,7 +264,7 @@ nicht geladen; es dient nur der Anzeige (nicht schreibbar).
 ## Validierung
 
 Drei Schichten, die alle als `rustango::forms::FormErrors` erscheinen (und bei
-einem ViewSet-Schreibvorgang als `400` mit feldbasierter Fehlerkarte). Sie laufen in dieser
+einem ViewSet-Schreibvorgang als `422` mit den feldbasierten Meldungen in `details`). Sie laufen in dieser
 Reihenfolge: deklarative Constraints, dann Validatoren pro Feld, dann der
 feldübergreifende Hook.
 
@@ -274,7 +274,7 @@ weglässt, **erbt ein Feld die** `max_length` / `min` / `max` / `choices` **des
 Modells**. So wird eine `#[rustango(max_length = 200)]`-Spalte längengeprüft ganz
 ohne Serializer-Attribut. Sie werden bei
 jedem schreibbaren Feld geprüft und verwandeln potenzielle
-Datenbank-Constraint-`500`s in freundliche `400`s:
+Datenbank-Constraint-`500`s in freundliche `422`s:
 
 ```rust
 #[serializer(model = Widget)]
@@ -434,7 +434,7 @@ pub struct PostViewSet;
   über `from_model`, sodass `source` / `method` / `read_only` / `write_only`
   das JSON formen.
 - **Eingabe** — `create` / `update` führen das `validate()` des Serializers aus
-  (ein Fehlschlag ist ein `400` mit feldbasierter Fehlerkarte, `{field: [msgs]}`), und nur
+  (ein Fehlschlag ist ein `422` mit `details` = `{field: [msgs]}`), und nur
   schreibbare Felder werden geschrieben — `read_only`-/berechnete Felder, die
   ein Client postet, werden ignoriert, `source`-aufgelöst auf die Modellspalte.
 

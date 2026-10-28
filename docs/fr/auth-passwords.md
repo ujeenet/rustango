@@ -9,8 +9,9 @@ jamais le texte en clair.
 
 [![Les mots de passe dans Rustango : hash() produit une chaîne PHC argon2id salée, verify() vérifie une tentative par rapport à celle-ci, et verify_dummy() égalise le temps de connexion](../img/auth-passwords.png)](../img/auth-passwords.png)
 
-> **Source :** `rustango::passwords` (`hash`, `verify`, `verify_dummy`,
-> `strength_score`, `StrengthIssue`) — derrière la fonctionnalité `passwords`
+> **Source :** `rustango::passwords` (`hash`, `verify`, `verify_dummy`, leurs
+> formes `_async`, `Argon2Params`, `needs_rehash`, `strength_score`,
+> `StrengthIssue`) — derrière la fonctionnalité `passwords`
 > (activée par défaut). Pour les utilitaires de mot de passe utilisateur
 > intégrés à la tenancy, voir `rustango::tenancy::password`.
 >
@@ -30,7 +31,8 @@ jamais le texte en clair.
 - [Démarrage rapide](#démarrage-rapide) · [Pourquoi argon2id](#pourquoi-argon2id)
 - [Hachage à l'inscription](#hachage-à-linscription) · [Vérification à la connexion](#vérification-à-la-connexion)
 - [Connexions à temps constant](#connexions-à-temps-constant-énumération-de-comptes) · [Contrôles de robustesse](#contrôles-de-robustesse)
-- [Où vit le hash](#où-vit-le-hash) · [Remarques et limites](#remarques-et-limites)
+- [Où vit le hash](#où-vit-le-hash) · [Code asynchrone](#code-asynchrone) · [Coût et re-hachage](#coût-et-re-hachage)
+- [Remarques et limites](#remarques-et-limites)
 
 ---
 
@@ -202,15 +204,49 @@ Une fois l'utilisateur authentifié, passez le relais à une
 
 ---
 
+## Code asynchrone
+
+`hash`, `verify` et `verify_dummy` sont bloquants : un appel argon2 occupe un
+worker du runtime pendant tout le hachage. Dans un handler, appelez plutôt
+`hash_async`, `verify_async` et `verify_dummy_async`. Ils tournent sur le pool
+bloquant, au plus un job par CPU à la fois.
+
+Un job attend jusqu'à `hash_wait()` une place libre (5 s par défaut,
+`DEFAULT_HASH_WAIT`), puis échoue avec `PasswordError::Busy`. Répondez par un
+503, le même pour un utilisateur connu et un inconnu. Réglez l'attente avec
+`[auth] hash_wait_ms` ou `configure_hash_wait(duration)` au démarrage.
+
+---
+
+## Coût et re-hachage
+
+Les nouveaux hachages utilisent `argon2_params()`, par défaut
+`Argon2Params::DEFAULT` (m=19456 KiB, t=2, p=1). Augmentez-le avec
+`[auth] argon2_memory_kib`, `argon2_iterations` et `argon2_parallelism`, ou
+appelez `configure_argon2(Argon2Params::new(m, t, p)?)` au démarrage ; une valeur
+fixée dans le code l'emporte sur les réglages. `Argon2Params::new` refuse une
+combinaison qu'argon2 rejette.
+
+Les anciens hachages se vérifient toujours, car leur coût vit dans la chaîne
+PHC. `needs_rehash(&stored)` vaut `true` quand un hachage est plus faible que le
+coût actuel (ou n'est pas argon2id v19). Après une connexion réussie :
+
+- `rehash_async(attempt, &stored)` renvoie un nouveau hachage quand il est dû, sinon `None`.
+- `upgrade_stored_hash(&pool, Model::SCHEMA, id, attempt, &stored)` l'enregistre
+  aussi dans la colonne `password_hash` de la ligne, mais seulement si cette
+  colonne contient encore `stored`, et renvoie le hachage désormais en vigueur.
+
+---
+
 ## Remarques et limites
 
 - **Ne jamais** stocker, journaliser ni comparer avec `==` le texte en clair.
   `hash` → stocker ; `verify` → vérifier. C'est tout le contrat.
-- **Les paramètres de coût sont les valeurs par défaut de l'OWASP**, intégrées.
-  Ils constituent un plancher raisonnable ; les augmenter plus tard est sûr — les
-  anciens hachages se vérifient toujours (leurs paramètres vivent dans la chaîne
-  PHC), et vous pouvez re-hacher à la prochaine connexion réussie pour les mettre
-  à niveau.
+- **Les paramètres de coût valent par défaut le plancher de l'OWASP.** Les
+  augmenter plus tard est sûr — les anciens hachages se vérifient toujours (leurs
+  paramètres vivent dans la chaîne PHC), et
+  [`upgrade_stored_hash`](#coût-et-re-hachage) re-hache à la prochaine connexion
+  réussie.
 - `strength_score` est une heuristique, pas un moteur de politique — elle ne
   détectera pas `Summer2024!`. Superposez une recherche par liste de fuites pour
   une vraie application de la robustesse.

@@ -148,9 +148,9 @@ Verwende sie nur in PostgreSQL-Deployments:
 
 ## Primärschlüssel
 
-Jedes Modell braucht einen Primärschlüssel. Markiere ein Feld mit
-`#[rustango(primary_key)]`; wenn du keines markierst, sucht das Schema nach einer Spalte
-namens `id`.
+Markiere ein Feld mit `#[rustango(primary_key)]`. Ein Modell ohne Primärschlüssel
+kompiliert trotzdem und lässt sich abfragen, aber das Derive lässt jede PK-basierte
+Zeilenmethode weg (`save_pool`, `find`, `delete_pool`, `refresh_from_db`, …).
 
 Der **Standard und häufigste** PK ist eine auto-inkrementierende 64-Bit-Ganzzahl,
 deklariert als `Auto<i64>`:
@@ -172,7 +172,9 @@ g.save_pool(&pool).await?;                              // DB assigns the id
 let new_id = g.id.get().copied().unwrap();             // now populated
 ```
 
-Unterstützte innere `Auto<T>`-Typen sind `i32`, `i64` und `Uuid`.
+Unterstützte innere `Auto<T>`-Typen sind `i32`, `i64`, `Uuid` und
+`DateTime<Utc>` (die Datenbank füllt es mit der aktuellen Zeit, wie beim
+`auto_now_add`-Feld oben).
 
 ### Benutzerdefinierte Primärschlüssel
 
@@ -462,7 +464,7 @@ spezifischer.
 | `on_delete` | `"cascade"` / `"restrict"` / `"set_null"` / `"set_default"` / `"no_action"` | `ON DELETE`-Aktion des FK |
 | `o2o` | `"table"` | Eins-zu-eins-FK auf diese Tabelle |
 | `generated_as` | `"expr"` | DB-berechnete (generierte) Spalte |
-| `citext` | Flag | case-insensitiver Text (PostgreSQL CITEXT) |
+| `citext` | Flag | case-insensitiver Text: `CITEXT` auf PostgreSQL, `TEXT COLLATE NOCASE` auf SQLite, eine case-insensitive Collation auf MySQL |
 | `vector(dims = N)` | `N` | pgvector-Dimension |
 | `geometry(srid = N)` | `N` | PostGIS-Raumbezugs-ID |
 | `db_comment` | `"…"` | Spalten-COMMENT |

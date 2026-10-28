@@ -93,7 +93,6 @@ let qs = Post::objects().where_raw(WhereExpr::Or(vec![
 
 // XOR. Matches rows where an odd number
 // of operands evaluate to true (binary case = "exactly one is true").
-// Issue #27.
 let either_but_not_both = Post::objects()
     .where_(Post::status.eq("draft").xor(Post::author_id.eq(42)))
     .fetch(&pool).await?;
@@ -394,8 +393,6 @@ tx.commit().await?;
 - **Ganzes-Ergebnis `.fetch_on(&mut *tx)`** — ein einziger Roundtrip, volles `Vec<T>` im Speicher. In Ordnung, wenn das Ergebnis passt.
 - **Handgerolltes LIMIT/OFFSET innerhalb der Transaktion** — dieselbe Form wie das Snapshot-Isolation-Snippet oben; Chunks bleiben gestreamt, aber du bist außerhalb der `ChunkedIter`-API.
 
-Ein zukünftiges `iterator_on(&mut *tx, chunk_size)`-Gegenstück (Issue-Nachfolge) würde diese Lücke schließen. Nicht im Umfang von Issue #23.
-
 **`chunk_size` muss > 0 sein.** Null oder negative Werte panicken. Wähle einen Wert, der zu deinem Zeilengrößen-Budget passt (`2000` ist ein guter Ausgangspunkt für schmale Zeilen, niedriger für breite TEXT/JSONB-Spalten).
 
 ### Bestimmte Spalten auswählen
@@ -443,7 +440,7 @@ let ids: Vec<i64> = Post::objects()
 
 **Tri-dialektisch: identische Projektions-Emission über PG / MySQL / SQLite** (nur das Identifier-Quoting unterscheidet sich). Für `.values_list_flat::<U>(...)` muss `U` sqlx' `Decode + Type` auf jedem Backend implementieren, das die Binary anvisiert — gängige Auswahlen (`i64`, `i32`, `String`, `bool`, `f64`) funktionieren universell.
 
-**Warum das bestehende `.values()` nicht auf reine Projektion umstellen?** `QuerySet::values(cols)` befördert bereits zum [`AggregateBuilder`] für den GROUP-BY-Auto-Inferenzpfad (Issue #75). Ein Umbenennen würde ~20 bestehende Aufrufstellen brechen. Die neuen `.values_dict()` / `.values_list()` / `.values_list_flat()`-Ketten-Methoden stehen daneben und lassen den Aggregatpfad unangetastet. Der vorbestehende `QueryError::ValuesRequiresAggregate`-Fehler feuert weiterhin für `.values(cols).compile()` ohne ein nachfolgendes `.annotate(...)` — seine Meldung verweist Aufrufer jetzt auf die neuen Reine-Projektion-Methoden.
+**Warum das bestehende `.values()` nicht auf reine Projektion umstellen?** `QuerySet::values(cols)` befördert bereits zum [`AggregateBuilder`] für den GROUP-BY-Auto-Inferenzpfad. Ein Umbenennen würde ~20 bestehende Aufrufstellen brechen. Die neuen `.values_dict()` / `.values_list()` / `.values_list_flat()`-Ketten-Methoden stehen daneben und lassen den Aggregatpfad unangetastet. Der vorbestehende `QueryError::ValuesRequiresAggregate`-Fehler feuert weiterhin für `.values(cols).compile()` ohne ein nachfolgendes `.annotate(...)` — seine Meldung verweist Aufrufer jetzt auf die neuen Reine-Projektion-Methoden.
 
 ### Spalten einschließen oder ausschließen
 
@@ -891,7 +888,7 @@ let total_views = Post::objects().sum::<i64>("view_count", &pool).await?;
 let avg_views = Post::objects().avg::<f64>("view_count", &pool).await?;
 let max_views = Post::objects().max::<i64>("view_count", &pool).await?;
 
-// Annotate + GROUP BY (issue #75 — auto-inferred grouping)
+// Annotate + GROUP BY (auto-inferred grouping)
 use rustango::core::aggregates::{count_all, sum};
 
 // "Posts per author" — `.values()` lists the GROUP BY columns.
@@ -1108,7 +1105,7 @@ last_value("score")
 
 `first_value` hat diese Falle nicht — der Start des Default-Frames stimmt mit dem Partitionsstart überein, sodass die intuitive Antwort herausfällt.
 
-**Annotate und GROUP BY (Issue #75 ist ausgeliefert):**
+**Annotate und GROUP BY:**
 
 Ein **reines Fenster**-`annotate()` auf `.aggregate()` erzeugt inzwischen gar kein `GROUP BY` mehr — Fenster sind pro Zeile, es muss also nichts gruppiert werden. Zeilenspalten *neben* einem Fenster zu projizieren läuft weiterhin über den Aggregat-Builder; deshalb listen die Beispiele unten jede Zeilenspalte in `.group_by(...)` und ergänzen `annotate("_a", max("id").into())` als No-op, um die Zeilenidentität stabil zu halten. Diese Form funktioniert weiterhin. Beachte: `.values(cols).annotate(window)` funktioniert **nicht** — ein Fenster aggregiert nicht und liefert `ValuesRequiresAggregate`.
 
@@ -1174,11 +1171,11 @@ HAVING COUNT(*) > $2
 
 **Der Aggregatausdruck wird in HAVING gehoben, nicht der SELECT-Alias.** PG verbietet Aliase in HAVING strikt (nur der Ausdruck löst auf); MySQL + SQLite sind nachsichtiger. Der Writer emittiert die gehobene Form uniform über alle drei, sodass dieselbe Abfrage überall funktioniert.
 
-**Die Kettenreihenfolge ist in v1 wichtig.** Rufe `.annotate(alias, ...)` VOR dem entsprechenden `.filter(alias, ...)` auf. Ist die Reihenfolge umgekehrt, schlägt `filter()` eine leere Annotationsregistrierung nach und leitet auf `WHERE` — und der `resolve_pending`-Validator liefert `UnknownField` bei `compile()`, weil der Alias keine echte Model-Spalte ist. Eine v0.50-Nachfolge könnte diese Auflösung auf die Query-Konstruktionszeit verschieben und die Reihenfolge damit egal machen.
+**Die Kettenreihenfolge ist wichtig.** Rufe `.annotate(alias, ...)` VOR dem entsprechenden `.filter(alias, ...)` auf. Ist die Reihenfolge umgekehrt, schlägt `filter()` eine leere Annotationsregistrierung nach und leitet auf `WHERE` — und der `resolve_pending`-Validator liefert `UnknownField` bei `compile()`, weil der Alias keine echte Model-Spalte ist.
 
 **Validator-Lücke (entspricht der bestehenden Aggregat-Haltung)**: alias-geroutete HAVING-Prädikate überspringen den Model-Schema-Spaltendurchlauf. Falsch geschriebene Aliase tauchen bei der Datenbank auf, nicht bei `compile()`. Gleiche Lücke wie `Sum("typo_col")` — vorbestehend und orthogonal.
 
-**Unterstützte Ops auf alias-geroutetem `.filter()`** (Issue #87): die Binärvergleichs-Menge (`Op::Eq` / `Ne` / `Lt` / `Lte` / `Gt` / `Gte`) **plus** die SQL-92-Standard-Prädikate, die gegen einen Aggregat-LHS uniform über jedes Backend komponieren — `Op::In` / `NotIn`, `Between`, `IsNull`, `Like` / `NotLike`, `ILike` / `NotILike`. Jedes emittiert die vorhersehbare Form:
+**Unterstützte Ops auf alias-geroutetem `.filter()`:** die Binärvergleichs-Menge (`Op::Eq` / `Ne` / `Lt` / `Lte` / `Gt` / `Gte`) **plus** die SQL-92-Standard-Prädikate, die gegen einen Aggregat-LHS uniform über jedes Backend komponieren — `Op::In` / `NotIn`, `Between`, `IsNull`, `Like` / `NotLike`, `ILike` / `NotILike`. Jedes emittiert die vorhersehbare Form:
 
 ```rust
 use rustango::core::{Op, SqlValue};
@@ -1369,7 +1366,7 @@ b.status = "from-B".into();
 b.save_partial(&["status"], &pool).await?;
 ```
 
-**Feldnamen sind Struct-Felder auf Rust-Seite**, keine SQL-Spalten — `["author_id"]` (nicht `["author"]` für ein FK-typisiertes Feld). Unbekannte Feldnamen geben `ExecError::Query(QueryError::UnknownField)` zurück. Eine leere Liste ist eine No-op (gibt `Ok(())` zurück und loggt ein `tracing::warn!`) — es gibt schlicht nichts zu schreiben. Auditierte Models (`#[rustango(audit(...))]`) verengen den Audit-Log-Snapshot auf dieselbe Spaltenmenge — das Log spiegelt genau das wider, was geschrieben wurde.
+**Feldnamen sind Struct-Felder auf Rust-Seite**, keine SQL-Spalten — `["author_id"]` (nicht `["author"]` für ein FK-typisiertes Feld). Unbekannte Feldnamen geben `ExecError::Query(QueryError::UnknownField)` zurück. Eine leere Liste ist eine No-op (gibt `Ok(0)` (betroffene Zeilen) zurück und loggt ein `tracing::warn!`) — es gibt schlicht nichts zu schreiben. Auditierte Models (`#[rustango(audit(...))]`) verengen den Audit-Log-Snapshot auf dieselbe Spaltenmenge — das Log spiegelt genau das wider, was geschrieben wurde.
 
 **Auto-PK-Hinweis.** `save_partial` ist nur UPDATE; es auf einem `Auto::Unset`-PK aufzurufen ist ein Benutzerfehler (verwende dafür `insert_pool` / `save_pool`). Anders als `save_pool`, das automatisch `Unset → insert_pool` dispatcht, nimmt diese Methode an, dass du bereits eingefügt hast.
 
@@ -1403,10 +1400,10 @@ Senkt intern zu `save_partial` ab — gleiche Audit-Verengung, gleiche `Auto::Un
 
 
 > **Fallstrick — Massenoperationen überspringen Per-Zeile-Hooks.** `bulk_insert`, Queryset
-> `.update().execute()` und `.delete()` laufen als mengenbasiertes SQL: sie feuern **keine**
-> Signale, schreiben nicht den Audit-Trail, routen nicht durch Soft-Delete und führen
-> keine Per-Zeile-Validierung aus. Verwende sie für Geschwindigkeit; wechsle zu Per-Zeile-`save()` / `delete()`,
-> wenn du diese Seiteneffekte brauchst.
+> `.update().execute_pool()` und Mengen-Deletes (`delete_where`, `destroy`) laufen als mengenbasiertes SQL: sie feuern **keine**
+> Signale, routen nicht durch Soft-Delete und führen
+> keine Per-Zeile-Validierung aus. Verwende sie für Geschwindigkeit; wechsle zu Per-Zeile-`save_pool()` /
+> `delete_pool()`, wenn du diese Seiteneffekte brauchst.
 
 Füge viele Zeilen in einem Statement ein, aktualisiere oder lösche sie, statt eine Anweisung pro Zeile abzusetzen. Der `as _`-Import bringt die Methoden eines Traits in Scope, ohne den Trait direkt zu benennen.
 
@@ -1528,6 +1525,8 @@ post.tags_m2m().clear(&pool).await?;
 let has = post.tags_m2m().contains(42, &pool).await?;
 ```
 
+`all` liefert `i64`-IDs; für `String`- oder `Uuid`-Schlüssel verwende `all_as::<K>(&pool)`.
+
 Die Verknüpfungstabelle (`post_tags`) wird von `make_migrations` automatisch erstellt mit zusammengesetztem PK + zwei FKs `ON DELETE CASCADE`. Derzeit hat die Verknüpfungstabelle nur die zwei FK-Spalten — für zusätzliche Spalten (added_by, order, created_at) definierst du ein separates Model und traversierst manuell, bis "custom through model" landet.
 
 ---
@@ -1625,25 +1624,27 @@ use rustango::audit::{with_source, AuditSource};
 with_source(
     AuditSource::User { id: user_id.to_string() },
     async {
-        post.save_on(&pool).await
+        post.save_pool(&pool).await
     },
 ).await?;
 ```
 
-Das Per-Zeile-Verlaufspanel des Admins liest aus dieser Tabelle; der modellübergreifende Feed ist unter `/__audit`.
+Das Per-Zeile-Verlaufspanel des Admins liest aus dieser Tabelle; der modellübergreifende Feed ist unter `<admin prefix>/__audit` (`Builder::audit_url` ändert das; der Tenant-Admin nutzt `RouteConfig::audit_url`, Standard `/audit`).
 
 Auditierte Zeilen, die ein FK `on_delete = "cascade"` entfernt, bekommen einen `delete`-Eintrag, gelesen vor dem Löschen in dessen Transaktion. Zeilen, die `set_null` / `set_default` ändern, und Kindtabellen, die `Model::truncate` auf PostgreSQL mit `CASCADE` leert, werden nicht auditiert. Das läuft auf Pool- und Transaktionspfaden (`delete_pool`, `PoolTx`, `PoolConn`), 500 gelöschte Zeilen auf einmal: Die kaskadierten Zeilen jedes Blocks werden mit `FOR UPDATE` gelesen und mit ihren Einträgen im Speicher gehalten, bis der Block gelöscht ist. Ein roher sqlx-Executor (`Model::delete(&PgPool)`, `delete_on`) führt ein schlichtes DELETE aus und loggt stattdessen einmalig eine Warnung. Ein `DEFERRABLE INITIALLY DEFERRED`-FK kaskadiert erst beim Commit, seine Zeilen bekommen also keine Einträge.
 
 Bereinigung:
 
 ```rust
-rustango::audit::cleanup_older_than(&pool, 90).await?;       // delete > 90 days
-rustango::audit::cleanup_keep_last_n(&pool, 50).await?;      // keep most recent 50/row
+rustango::audit::cleanup_older_than_pool(&pool, 90).await?;  // delete > 90 days
+rustango::audit::cleanup_keep_last_n_pool(&pool, 50).await?; // keep most recent 50/row
 
 // CLI
 manage audit-cleanup --days 90
 manage audit-cleanup --keep-last 50 --tenant acme
 ```
+
+Die `_pool`-Helfer nehmen `&Pool` und laufen auf allen drei Backends; die bloßen `cleanup_older_than` / `cleanup_keep_last_n` nehmen einen `&PgPool` und existieren nur mit `postgres`. Das `audit-cleanup`-Verb braucht das `tenancy`-Feature. Es kürzt das Log der Registry und das jedes aktiven Tenants; `--tenant <slug>` oder `--registry` grenzt es ein, und ein `N` von 0 oder weniger braucht `--yes`.
 
 ---
 
@@ -1686,7 +1687,7 @@ let count = rows.first().map(|r| r.0).unwrap_or(0);
 
 ## Lazy-FK-Laden
 
-Ein Foreign Key hält anfangs nur die verwandte ID (`Unloaded`), und du holst die volle verwandte Zeile erst, wenn du danach fragst (Lazy Loading). `match` auf den `ForeignKey`, um beide Zustände zu behandeln, oder rufe `.get(&pool)` auf, um ihn bei Bedarf zu laden. Für einen ganzen Batch verwende `select_related` (oben), um sie in einer Abfrage vorzuladen und den Per-Zeile-Fetch zu überspringen.
+Ein Foreign Key hält anfangs nur die verwandte ID (`Unloaded`), und du holst die volle verwandte Zeile erst, wenn du danach fragst (Lazy Loading). `match` auf den `ForeignKey`, um beide Zustände zu behandeln, oder rufe `.get_pool(&pool)` auf, um ihn bei Bedarf zu laden. Für einen ganzen Batch verwende `select_related` (oben), um sie in einer Abfrage vorzuladen und den Per-Zeile-Fetch zu überspringen.
 
 ```rust
 let mut post = Post::objects().find_or_fail(1, &pool).await?;
@@ -1699,8 +1700,10 @@ match &post.author {
 }
 
 // Force-load
-let author = post.author.get(&pool).await?;          // fetches if Unloaded
+let author = post.author.get_pool(&pool).await?;     // fetches if Unloaded
 ```
+
+`get_pool` nimmt den Multi-Backend-`&Pool`. `get(&PgPool)` ist die reine Postgres-Form, und `get_on(executor)` nimmt eine Verbindung oder Transaktion.
 
 Verwende `select_related("author")` auf dem Queryset, um einen Batch vorzuladen.
 
@@ -1754,7 +1757,7 @@ Post::objects().where_(Post::author_id.eq(42));
 
 > **LIKE-Metazeichen werden escaped.** `__contains` / `__startswith` / `__endswith` (und ihre `i`-Varianten) behandeln den Wert als **wörtlichen** Teilstring — ein `%` oder `_` darin passt auf sich selbst, nicht als Platzhalter. Das Framework escaped sie und gibt `ESCAPE '!'` aus, auf allen drei Dialekten wirksam. Für ein rohes Muster mit eigenen `%` / `_` nutze `__like` / `__ilike`, die den Wert wörtlich binden.
 
-**Fehler tauchen bei `.compile()` auf, nicht zur `.filter()`-Aufrufzeit** — Wertform-Diskrepanzen (z. B. `__in` mit einem Skalar, `__isnull` mit einem Nicht-Bool, `__between` mit falscher Stelligkeit) und unbekannte Suffixe (`status__nope`) geben `QueryError::UnknownLookup` / `QueryError::InvalidLookupValue` von `.compile()` zurück, sodass die fluente Kette typsauber bleibt. Verkettete Traversierungen (`author__name__icontains`) werden in v0.39 **nicht** unterstützt — der Splitter nimmt das Suffix nach dem ersten `__`, sodass der ganze Schwanz `name__icontains` als unbekanntes Suffix behandelt wird.
+**Fehler tauchen bei `.compile()` auf, nicht zur `.filter()`-Aufrufzeit** — Wertform-Diskrepanzen (z. B. `__in` mit einem Skalar, `__isnull` mit einem Nicht-Bool, `__between` mit falscher Stelligkeit) und unbekannte Suffixe (`status__nope`) geben `QueryError::UnknownLookup` / `QueryError::InvalidLookupValue` von `.compile()` zurück, sodass die fluente Kette typsauber bleibt. Relationsübergreifende Schlüssel (`author__name__icontains`) funktionieren auf dem SELECT-Pfad: `compile()` fügt die JOINs der FK-Kette für dich hinzu. Update-, Delete- und Aggregat-Pfade unterstützen sie nicht und geben einen Fehler zurück.
 
 Jeder Filteraufruf wird per AND mit allen vorhergehenden verknüpft; mische String-Form, `filter_op` und `where_` frei auf demselben Queryset.
 
@@ -1867,11 +1870,11 @@ Eine schnelle Checkliste, um Abfragen schnell zu halten, während die Daten wach
 
 - **Verwende immer Indizes für `WHERE`- und `ORDER BY`-Spalten.** Deklariere über `#[rustango(index)]`, damit sie in den Migrationen sind.
 - **`select_related` für FK-Anzeige in Listen** — eliminiert N+1 in Admin-/Listenansichten.
-- **`page` statt `fetch().drain()`** — lade niemals ganze Tabellen.
+- **`.limit()` / `fetch_paginated_on` statt alles zu laden** — lade niemals ganze Tabellen.
 - **Cursor-Paginierung für riesige Tabellen** — überspringt `COUNT(*)` pro Seite.
-- **`bulk_insert_on` für Batches** — ein einziger Roundtrip statt N.
+- **`bulk_insert_on` (Postgres) oder `bulk_upsert_pool` für Batches** — ein einziger Roundtrip statt N.
 - **`upsert_on` für idempotente Importe** — `ON CONFLICT` ist schneller als SELECT-dann-INSERT.
-- **`transaction` für zusammenhängende Schreibvorgänge** — reduziert Commit-Overhead und wahrt Konsistenz.
+- **`transaction_pool` / `atomic` für zusammenhängende Schreibvorgänge** — reduziert Commit-Overhead und wahrt Konsistenz.
 - **Cache heiße Reads** mit `cache::get_or_set` — invalidiere im `connect_post_save<T>(...)`-Signalhandler.
 
 ---

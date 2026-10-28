@@ -145,8 +145,9 @@ des déploiements PostgreSQL :
 
 ## Clés primaires
 
-Chaque modèle a besoin d'une clé primaire. Marquez un champ `#[rustango(primary_key)]` ; si
-vous n'en marquez aucun, le schéma recherche une colonne nommée `id`.
+Marquez un champ `#[rustango(primary_key)]`. Un modèle sans clé primaire compile
+quand même et peut être interrogé, mais le derive omet toutes les méthodes de ligne
+basées sur la PK (`save_pool`, `find`, `delete_pool`, `refresh_from_db`, …).
 
 La PK **par défaut et la plus courante** est un entier 64 bits auto-incrémenté,
 déclaré comme `Auto<i64>` :
@@ -167,7 +168,9 @@ g.save_pool(&pool).await?;                              // DB assigns the id
 let new_id = g.id.get().copied().unwrap();             // now populated
 ```
 
-Les types internes de `Auto<T>` pris en charge sont `i32`, `i64` et `Uuid`.
+Les types internes de `Auto<T>` pris en charge sont `i32`, `i64`, `Uuid` et
+`DateTime<Utc>` (la base de données le remplit avec l'heure courante, comme pour le
+champ `auto_now_add` ci-dessus).
 
 ### Clés primaires personnalisées
 
@@ -455,7 +458,7 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `on_delete` | `"cascade"` / `"restrict"` / `"set_null"` / `"set_default"` / `"no_action"` | action `ON DELETE` de la FK |
 | `o2o` | `"table"` | FK un-à-un vers cette table |
 | `generated_as` | `"expr"` | colonne calculée (générée) par la base de données |
-| `citext` | indicateur | texte insensible à la casse (CITEXT PostgreSQL) |
+| `citext` | indicateur | texte insensible à la casse : `CITEXT` sur PostgreSQL, `TEXT COLLATE NOCASE` sur SQLite, une collation insensible à la casse sur MySQL |
 | `vector(dims = N)` | `N` | dimension pgvector |
 | `geometry(srid = N)` | `N` | identifiant de référence spatiale PostGIS |
 | `db_comment` | `"…"` | COMMENT de colonne |

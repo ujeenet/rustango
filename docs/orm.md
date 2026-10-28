@@ -93,7 +93,6 @@ let qs = Post::objects().where_raw(WhereExpr::Or(vec![
 
 // XOR — matches rows where an odd number of operands evaluate to
 // true (binary case = "exactly one is true").
-// Issue #27.
 let either_but_not_both = Post::objects()
     .where_(Post::status.eq("draft").xor(Post::author_id.eq(42)))
     .fetch(&pool).await?;
@@ -394,8 +393,6 @@ tx.commit().await?;
 - **Whole-result `.fetch_on(&mut *tx)`** — single round trip, full `Vec<T>` in memory. Fine when the result fits.
 - **Hand-rolled LIMIT/OFFSET inside the tx** — same shape as the snapshot-isolation snippet above; chunks stay streamed but you're outside the `ChunkedIter` API.
 
-A future `iterator_on(&mut *tx, chunk_size)` companion (issue follow-up) would close this gap. Not in scope for issue #23.
-
 **`chunk_size` must be > 0.** Zero or negative values panic. Pick a value that fits your row-size budget (`2000` is a good start; reasonable for narrow rows, lower for wide TEXT/JSONB columns).
 
 ### Selecting specific columns
@@ -443,7 +440,7 @@ let ids: Vec<i64> = Post::objects()
 
 **Tri-dialect: identical projection emission across PG / MySQL / SQLite** (only the identifier quoting differs). For `.values_list_flat::<U>(...)`, `U` must implement sqlx's `Decode + Type` on every backend the binary targets — common picks (`i64`, `i32`, `String`, `bool`, `f64`) work universally.
 
-**Why not change the existing `.values()` to do pure projection?** `QuerySet::values(cols)` already promotes to [`AggregateBuilder`] for the GROUP BY auto-inference path (issue #75). Renaming would break ~20 existing call sites. The new `.values_dict()` / `.values_list()` / `.values_list_flat()` chain methods sit alongside, leaving the aggregate path untouched. The pre-existing `QueryError::ValuesRequiresAggregate` error still fires for `.values(cols).compile()` without a subsequent `.annotate(...)` — its message now points callers at the new pure-projection methods.
+**Why not change the existing `.values()` to do pure projection?** `QuerySet::values(cols)` already promotes to [`AggregateBuilder`] for the GROUP BY auto-inference path. Renaming would break ~20 existing call sites. The new `.values_dict()` / `.values_list()` / `.values_list_flat()` chain methods sit alongside, leaving the aggregate path untouched. The pre-existing `QueryError::ValuesRequiresAggregate` error still fires for `.values(cols).compile()` without a subsequent `.annotate(...)` — its message now points callers at the new pure-projection methods.
 
 ### Including or excluding columns
 
@@ -891,7 +888,7 @@ let total_views = Post::objects().sum::<i64>("view_count", &pool).await?;
 let avg_views = Post::objects().avg::<f64>("view_count", &pool).await?;
 let max_views = Post::objects().max::<i64>("view_count", &pool).await?;
 
-// Annotate + GROUP BY (issue #75 — the GROUP BY is inferred)
+// Annotate + GROUP BY (the GROUP BY is inferred)
 use rustango::core::aggregates::{count_all, sum};
 
 // "Posts per author" — `.values()` lists the GROUP BY columns.
@@ -1108,7 +1105,7 @@ last_value("score")
 
 `first_value` doesn't have this trap — the default frame's start matches the partition start, so the intuitive answer falls out.
 
-**Annotate and GROUP BY (issue #75 has shipped):**
+**Annotate and GROUP BY:**
 
 A **window-only** `annotate()` on `.aggregate()` now emits no `GROUP BY` at all — windows are per-row, so nothing needs grouping. Projecting row columns *alongside* a window still goes through the aggregate builder, which is why the examples below list each row column in `.group_by(...)` and add `annotate("_a", max("id").into())` as a no-op to keep the row identity stable. That shape still works. Note that `.values(cols).annotate(window)` does **not** — a window does not aggregate, so it returns `ValuesRequiresAggregate`.
 
@@ -1174,11 +1171,11 @@ HAVING COUNT(*) > $2
 
 **The aggregate expression is lifted into HAVING, not the SELECT alias.** PG strictly disallows aliases in HAVING (only the expression resolves); MySQL + SQLite are more lenient. The writer emits the lifted form uniformly across all three so the same query works everywhere.
 
-**Chain ordering matters in v1.** Call `.annotate(alias, ...)` BEFORE the corresponding `.filter(alias, ...)`. If the order is reversed, `filter()` looks up an empty annotation registry and routes to `WHERE` — and the `resolve_pending` validator surfaces `UnknownField` at `compile()` because the alias isn't a real model column. A v0.50 follow-up may resolve the alias later, so the order stops mattering.
+**Chain ordering matters.** Call `.annotate(alias, ...)` BEFORE the corresponding `.filter(alias, ...)`. If the order is reversed, `filter()` looks up an empty annotation registry and routes to `WHERE` — and the `resolve_pending` validator surfaces `UnknownField` at `compile()` because the alias isn't a real model column.
 
 **Validator gap (matches existing aggregate posture)**: alias-routed HAVING predicates skip the model-schema column walk. Typo'd aliases surface at the database, not at `compile()`. Same gap as `Sum("typo_col")` — pre-existing and orthogonal.
 
-**Supported ops on alias-routed `.filter()`** (issue #87): the binary-comparison set (`Op::Eq` / `Ne` / `Lt` / `Lte` / `Gt` / `Gte`) **plus** the SQL-92 standard predicates that compose against an aggregate LHS uniformly across every backend — `Op::In` / `NotIn`, `Between`, `IsNull`, `Like` / `NotLike`, `ILike` / `NotILike`. Each emits the predictable shape:
+**Supported ops on alias-routed `.filter()`:** the binary-comparison set (`Op::Eq` / `Ne` / `Lt` / `Lte` / `Gt` / `Gte`) **plus** the SQL-92 standard predicates that compose against an aggregate LHS uniformly across every backend — `Op::In` / `NotIn`, `Between`, `IsNull`, `Like` / `NotLike`, `ILike` / `NotILike`. Each emits the predictable shape:
 
 ```rust
 use rustango::core::{Op, SqlValue};
@@ -1369,7 +1366,7 @@ b.status = "from-B".into();
 b.save_partial(&["status"], &pool).await?;
 ```
 
-**Field names are Rust-side struct fields**, not SQL columns — `["author_id"]` (not `["author"]` for an FK-typed field). Unknown field names return `ExecError::Query(QueryError::UnknownField)`. An empty list is a no-op: it returns `Ok(())` and logs a `tracing::warn!`. Audited models (`#[rustango(audit(...))]`) narrow the audit-log snapshot to the same column set — the log reflects exactly what was written.
+**Field names are Rust-side struct fields**, not SQL columns — `["author_id"]` (not `["author"]` for an FK-typed field). Unknown field names return `ExecError::Query(QueryError::UnknownField)`. An empty list is a no-op: it returns `Ok(0)` (rows affected) and logs a `tracing::warn!`. Audited models (`#[rustango(audit(...))]`) narrow the audit-log snapshot to the same column set — the log reflects exactly what was written.
 
 **Auto-PK note.** `save_partial` is UPDATE-only; calling it on an `Auto::Unset` PK is a user error (use `insert_pool` / `save_pool` for that case). Unlike `save_pool` which auto-dispatches `Unset → insert_pool`, this method assumes you've already inserted.
 
@@ -1402,10 +1399,10 @@ Internally lowers to `save_partial` — same audit narrowing, same `Auto::Unset`
 
 
 > **Pitfall — bulk ops skip per-row hooks.** `bulk_insert`, queryset
-> `.update().execute()`, and `.delete()` run as set-based SQL: they do **not**
-> fire signals, write the audit trail, route through soft-delete, or run
-> per-row validation. Use them for speed; drop to per-row `save()` / `delete()`
-> when you need those side effects.
+> `.update().execute_pool()`, and set deletes (`delete_where`, `destroy`) run as
+> set-based SQL: they do **not** fire signals, route through soft-delete, or run
+> per-row validation. Use them for speed; drop to per-row `save_pool()` /
+> `delete_pool()` when you need those side effects.
 
 Insert, update, or delete many rows in one statement instead of one per row. The `as _` import brings a trait's methods into scope without naming the trait directly.
 
@@ -1526,6 +1523,8 @@ post.tags_m2m().clear(&pool).await?;
 let has = post.tags_m2m().contains(42, &pool).await?;
 ```
 
+`all` returns `i64` ids; for `String` or `Uuid` keys use `all_as::<K>(&pool)`.
+
 Junction table (`post_tags`) is auto-created by `make_migrations` with composite PK + two FKs `ON DELETE CASCADE`. Currently the junction has only the two FK columns — for extra columns (added_by, order, created_at) you'll define a separate Model and traverse manually until "custom through model" ships.
 
 ---
@@ -1625,25 +1624,27 @@ use rustango::audit::{with_source, AuditSource};
 with_source(
     AuditSource::User { id: user_id.to_string() },
     async {
-        post.save_on(&pool).await
+        post.save_pool(&pool).await
     },
 ).await?;
 ```
 
-The admin's per-row history panel reads from this table; the cross-model feed is at `/__audit`.
+The admin's per-row history panel reads from this table; the cross-model feed is at `<admin prefix>/__audit` (`Builder::audit_url` changes it; the tenant admin uses `RouteConfig::audit_url`, default `/audit`).
 
 Audited rows an FK `on_delete = "cascade"` removes get a `delete` entry, read before the delete in its transaction. Rows changed by `set_null` / `set_default`, and child tables PostgreSQL's `Model::truncate` empties with `CASCADE`, are not audited. It runs on pool and transaction paths (`delete_pool`, `PoolTx`, `PoolConn`), 500 deleted rows at a time: each chunk's cascaded rows are read with `FOR UPDATE` and held in memory with their entries until the chunk is deleted. A raw sqlx executor (`Model::delete(&PgPool)`, `delete_on`) runs one plain DELETE and logs a one-time warning instead. A `DEFERRABLE INITIALLY DEFERRED` FK cascades only at commit, so its rows get no entries.
 
 Cleanup:
 
 ```rust
-rustango::audit::cleanup_older_than(&pool, 90).await?;       // delete > 90 days
-rustango::audit::cleanup_keep_last_n(&pool, 50).await?;      // keep most recent 50/row
+rustango::audit::cleanup_older_than_pool(&pool, 90).await?;  // delete > 90 days
+rustango::audit::cleanup_keep_last_n_pool(&pool, 50).await?; // keep most recent 50/row
 
 // CLI
 manage audit-cleanup --days 90
 manage audit-cleanup --keep-last 50 --tenant acme
 ```
+
+The `_pool` helpers take `&Pool` and run on all three backends; the bare `cleanup_older_than` / `cleanup_keep_last_n` take a `&PgPool` and exist only with `postgres`. The `audit-cleanup` verb needs the `tenancy` feature. It trims the registry's log and every active tenant's; `--tenant <slug>` or `--registry` narrows it, and an `N` of 0 or less needs `--yes`.
 
 ---
 
@@ -1686,7 +1687,7 @@ let count = rows.first().map(|r| r.0).unwrap_or(0);
 
 ## Lazy FK loading
 
-A foreign key starts out holding just the related id (`Unloaded`), and you fetch the full related row only when you ask for it. `match` on the `ForeignKey` to handle both states, or call `.get(&pool)` to load it on demand. For a whole batch, use `select_related` (above) to preload them in one query and skip the per-row fetch.
+A foreign key starts out holding just the related id (`Unloaded`), and you fetch the full related row only when you ask for it. `match` on the `ForeignKey` to handle both states, or call `.get_pool(&pool)` to load it on demand. For a whole batch, use `select_related` (above) to preload them in one query and skip the per-row fetch.
 
 ```rust
 let mut post = Post::objects().find_or_fail(1, &pool).await?;
@@ -1699,8 +1700,10 @@ match &post.author {
 }
 
 // Force-load
-let author = post.author.get(&pool).await?;          // fetches if Unloaded
+let author = post.author.get_pool(&pool).await?;     // fetches if Unloaded
 ```
+
+`get_pool` takes the multi-backend `&Pool`. `get(&PgPool)` is the Postgres-only form, and `get_on(executor)` takes a connection or transaction.
 
 Use `select_related("author")` on the queryset to pre-load a batch.
 
@@ -1754,7 +1757,7 @@ Post::objects().where_(Post::author_id.eq(42));
 
 > **LIKE metacharacters are escaped.** `__contains` / `__startswith` / `__endswith` (and their `i` variants) treat the value as a **literal** substring — a `%` or `_` in it matches itself, not as a wildcard. The framework escapes them and emits `ESCAPE '!'`, honored on all three dialects. For a raw pattern where you place your own `%` / `_`, use `__like` / `__ilike`, which bind the value verbatim.
 
-**Errors surface at `.compile()`, not at `.filter()` call time** — value-shape mismatches (e.g. `__in` with a scalar, `__isnull` with a non-bool, `__between` with the wrong arity) and unknown suffixes (`status__nope`) return `QueryError::UnknownLookup` / `QueryError::InvalidLookupValue` from `.compile()` so the fluent chain stays type-clean. Chained traversals (`author__name__icontains`) are **not** supported in v0.39 — the splitter takes the suffix after the first `__`, so the whole tail `name__icontains` is treated as an unknown suffix.
+**Errors surface at `.compile()`, not at `.filter()` call time** — value-shape mismatches (e.g. `__in` with a scalar, `__isnull` with a non-bool, `__between` with the wrong arity) and unknown suffixes (`status__nope`) return `QueryError::UnknownLookup` / `QueryError::InvalidLookupValue` from `.compile()` so the fluent chain stays type-clean. Relation-spanning keys (`author__name__icontains`) work on the SELECT path: `compile()` adds the FK-chain JOINs for you. Update, delete and aggregate paths do not support them and return an error.
 
 Each filter call AND-joins to any preceding ones; mix string lookups, `filter_op`, and `where_` freely on the same queryset.
 
@@ -1865,11 +1868,11 @@ A quick checklist for keeping queries fast as the data grows:
 
 - **Always use indexes for `WHERE` and `ORDER BY` columns.** Declare via `#[rustango(index)]` so they're in migrations.
 - **`select_related` for FK display in lists** — eliminates N+1 in admin/list views.
-- **`page` instead of `fetch().drain()`** — never load entire tables.
+- **`.limit()` / `fetch_paginated_on` instead of loading everything** — never load entire tables.
 - **Cursor pagination for huge tables** — skips `COUNT(*)` per page.
-- **`bulk_insert_on` for batches** — single round trip vs N.
+- **`bulk_insert_on` (Postgres) or `bulk_upsert_pool` for batches** — single round trip vs N.
 - **`upsert_on` for idempotent imports** — `ON CONFLICT` is faster than SELECT-then-INSERT.
-- **`transaction` for related writes** — reduces commit overhead and keeps consistency.
+- **`transaction_pool` / `atomic` for related writes** — reduces commit overhead and keeps consistency.
 - **Cache hot reads** with `cache::get_or_set` — invalidate on `connect_post_save<T>(...)` signal handler.
 
 ---

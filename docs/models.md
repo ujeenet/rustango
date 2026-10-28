@@ -145,8 +145,9 @@ PostgreSQL deployments:
 
 ## Primary keys
 
-Every model needs a primary key. Mark one field `#[rustango(primary_key)]`; if
-you mark none, the schema looks for a column named `id`.
+Mark one field `#[rustango(primary_key)]`. A model with no primary key still
+compiles and can be queried, but the derive skips every PK-based row method
+(`save_pool`, `find`, `delete_pool`, `refresh_from_db`, …).
 
 The **default and most common** PK is an auto-incrementing 64-bit integer,
 declared as `Auto<i64>`:
@@ -167,7 +168,9 @@ g.save_pool(&pool).await?;                              // DB assigns the id
 let new_id = g.id.get().copied().unwrap();             // now populated
 ```
 
-Supported `Auto<T>` inner types are `i32`, `i64`, and `Uuid`.
+Supported `Auto<T>` inner types are `i32`, `i64`, `Uuid`, and
+`DateTime<Utc>` (the database fills it with the current time, as on the
+`auto_now_add` field above).
 
 ### Custom primary keys
 
@@ -454,7 +457,7 @@ above; this is the complete list, including advanced/PostgreSQL-specific ones.
 | `on_delete` | `"cascade"` / `"restrict"` / `"set_null"` / `"set_default"` / `"no_action"` | FK `ON DELETE` action |
 | `o2o` | `"table"` | one-to-one FK to that table |
 | `generated_as` | `"expr"` | DB-computed (generated) column |
-| `citext` | flag | case-insensitive text (PostgreSQL CITEXT) |
+| `citext` | flag | case-insensitive text: `CITEXT` on PostgreSQL, `TEXT COLLATE NOCASE` on SQLite, a case-insensitive collation on MySQL |
 | `vector(dims = N)` | `N` | pgvector dimension |
 | `geometry(srid = N)` | `N` | PostGIS spatial reference id |
 | `db_comment` | `"…"` | column COMMENT |

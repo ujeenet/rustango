@@ -252,7 +252,7 @@ unloaded; it's display-only (not writable).
 ## Validation
 
 Three layers, all surfacing as `rustango::forms::FormErrors` (and, on a ViewSet
-write, a field-keyed `400`). They run in this order: declarative constraints,
+write, a `422` with the field-keyed messages in `details`). They run in this order: declarative constraints,
 then per-field validators, then the cross-field hook.
 
 **Declarative constraints (auto-inherited).** `max_length`, `min_length`, `min`,
@@ -260,7 +260,7 @@ and `max` are field attributes — and when you omit them a field
 **inherits the model's** `max_length` / `min` / `max` / `choices`. So a
 `#[rustango(max_length = 200)]` column is length-checked with no serializer
 attribute at all. They're checked on every writable field, turning would-be
-database-constraint `500`s into friendly `400`s:
+database-constraint `500`s into friendly `422`s:
 
 ```rust
 #[serializer(model = Widget)]
@@ -413,7 +413,7 @@ pub struct PostViewSet;
   through `from_model`, so `source` / `method` / `read_only` / `write_only`
   shape the JSON.
 - **Input** — `create` / `update` run the serializer's `validate()` (a failure
-  is a field-keyed `400`, `{field: [msgs]}`), and only writable fields are
+  is a `422` with `details` = `{field: [msgs]}`), and only writable fields are
   written — `read_only` / computed fields a client posts are ignored,
   `source`-resolved to the model column.
 

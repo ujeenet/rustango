@@ -257,7 +257,7 @@ cargada; es solo para visualización (no escribible).
 ## Validación
 
 Tres capas, todas aflorando como `rustango::forms::FormErrors` (y, en una escritura
-de ViewSet, un `400` con un mapa de errores por campo). Se ejecutan en este orden: restricciones
+de ViewSet, un `422` con los mensajes por campo en `details`). Se ejecutan en este orden: restricciones
 declarativas, luego validadores por campo, luego el enganche entre campos.
 
 **Restricciones declarativas (heredadas automáticamente del modelo).**
@@ -265,7 +265,7 @@ declarativas, luego validadores por campo, luego el enganche entre campos.
 omites un campo **hereda del modelo** su `max_length` / `min` / `max` / `choices`.
 Así que una columna `#[rustango(max_length = 200)]` recibe la comprobación de
 longitud sin ningún atributo de serializador en absoluto. Se comprueban en cada campo escribible, convirtiendo los
-`500` de restricción de base de datos que habría en `400` amables:
+`500` de restricción de base de datos que habría en `422` amables:
 
 ```rust
 #[serializer(model = Widget)]
@@ -420,7 +420,7 @@ pub struct PostViewSet;
   renderizan a través de `from_model`, así que `source` / `method` / `read_only` /
   `write_only` dan forma al JSON.
 - **Entrada** — `create` / `update` ejecutan el `validate()` del serializador (un
-  fallo es un `400` con un mapa de errores por campo, `{field: [msgs]}`), y solo se escriben los
+  fallo es un `422` con `details` = `{field: [msgs]}`), y solo se escriben los
   campos escribibles — los campos `read_only` / calculados que un cliente envíe se
   ignoran, resueltos por `source` a la columna del modelo.
 

@@ -653,9 +653,9 @@ impl Cli {
     ///     .run().await
     /// ```
     ///
-    /// Mounted via `Router::merge`, which means a `/` route inside
-    /// `urls::api()` would collide and panic. Drop the call once your
-    /// own root handler is wired.
+    /// Mounted via `Router::merge`. When `urls::api()` already routes
+    /// `GET /`, the welcome page is skipped with a warning. Drop the
+    /// call once your own root handler is wired.
     #[must_use]
     pub fn with_welcome(mut self) -> Self {
         self.welcome_page = true;

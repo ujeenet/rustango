@@ -160,8 +160,10 @@ Chaque template écrit un projet Cargo autonome :
   .env.example          # copy to .env (DATABASE_URL, RUSTANGO_SESSION_SECRET, …)
   .gitignore
   rust-toolchain.toml   # selects the `stable` toolchain + rustfmt/clippy/rust-analyzer
-  docker-compose.yml    # a Postgres service to develop against
-  Dockerfile            # production image
+  docker-compose.yml    # the database service (none for sqlite) + a cargo-watch dev container
+  Dockerfile            # production image (multi-stage, release, non-root)
+  Dockerfile.dev        # the dev image docker-compose.yml builds
+  .dockerignore
   README.md
   config/
     default.toml        # settings shared across every environment
@@ -169,7 +171,9 @@ Chaque template écrit un projet Cargo autonome :
     staging_settings.toml
     prod_settings.toml
   migrations/           # JSON migration files (committed to git)
+  system/migrations/    # the framework's own tables, generated on first migrate (commit them)
   src/
+    lib.rs              # the app as a library: `pub mod models; pub mod urls; pub mod views;`
     main.rs             # the single binary — HTTP server + every manage verb
     models.rs           # your #[derive(Model)] structs
     views.rs            # request handlers ("views")
@@ -178,19 +182,17 @@ Chaque template écrit un projet Cargo autonome :
 
 ### Un seul binaire pour tout
 
-`src/main.rs` est le seul point d'entrée. Il démarre le serveur HTTP **et** dispatche chaque verbe `manage` — il n'y a pas de script manage séparé ni de `src/bin/manage.rs` :
+`src/main.rs` est le seul point d'entrée. Il démarre le serveur HTTP **et** dispatche chaque verbe `manage` — il n'y a pas de script manage séparé ni de `src/bin/manage.rs`. Les modules vivent dans la cible bibliothèque (`src/lib.rs`), donc `main.rs` les atteint par le nom du crate, tout comme un binaire worker sous `src/bin/`. Le `main.rs` du template api, abrégé :
 
 ```rust
-mod models;
-mod urls;
-mod views;
+use myapp::urls;
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     rustango::manage::Cli::new()
         .api(urls::api())
-        .with_health()   // /health + /ready endpoints (fullstack & tenant)
+        .with_health()   // /health + /ready endpoints (every template)
         .run()
         .await
 }
@@ -201,7 +203,7 @@ Ainsi, `cargo run` démarre le serveur, et `cargo run -- <verb>` exécute les mi
 En quoi les templates diffèrent à l'intérieur de `main.rs` / `urls.rs` :
 
 - **api** — pas d'admin ; `urls::api()` se contente d'agréger vos propres routes.
-- **fullstack** — le même `urls.rs`, plus un assistant `admin_router(pool)` que `main.rs` monte avec `Cli::nest_with("/admin", …)`, construit à partir du pool du serveur. Il prend un `rustango::sql::Pool`, donc ne nomme aucun pilote, et se trouve derrière une connexion : créez le compte avec `cargo run -- create-admin <username>` (voir [Prise en main, étape 11](getting-started.md#étape-11--activer-ladministration-automatique)).
+- **fullstack** — le même `urls.rs`, plus `admin_prefix(&settings)` et un assistant `admin_router(pool, &settings)` que `main.rs` monte avec `Cli::nest_with(urls::admin_prefix(&settings), …)`, construit à partir du pool du serveur. Le préfixe est `[admin] url_prefix` (ou `[routes] admin_url`), sinon `/admin`. `main.rs` charge les réglages une fois et les passe à la `Cli` avec `with_loaded_settings`. Il prend un `rustango::sql::Pool`, donc ne nomme aucun pilote, et se trouve derrière une connexion : créez le compte avec `cargo run -- create-admin <username>` (voir [Prise en main, étape 11](getting-started.md#étape-11--activer-ladministration-automatique)).
 - **tenant** — `main.rs` ajoute `.tenancy()`, servant la console opérateur sur le domaine apex et chaque tenant sous son propre sous-domaine, et `.with_tenant_provisioning("migrations")` pour les pages **New tenant** et **Database servers** de la console (supprimez-le pour les désactiver ; enregistrer un serveur demande `RUSTANGO_SECRET_KEY`). Les propres tables du framework sont générées dans un dossier **`system/migrations/`** à partir des modèles compilés lors du premier `cargo run -- migrate` — aucun JSON de bootstrap livré à la main, donc le tout premier migrate fonctionne sans configuration supplémentaire.
 
 ### Configuration en couches
@@ -244,12 +246,12 @@ Il échafaude un module autonome regroupant des modèles, des vues et des routes
 cargo run -- startapp blog
 ```
 
-Cela écrit `src/blog/` contenant `mod.rs`, `models.rs` (un modèle de départ nommé d'après l'app mise au singulier — `blog` → `Blog`), `views.rs`, `urls.rs`, et `tests.rs`, puis déclare le module dans `src/main.rs` et fusionne ses routes dans `urls::api()`.
+Cela écrit `src/blog/` contenant `mod.rs`, `models.rs` (un modèle de départ nommé d'après l'app mise au singulier — `blog` → `Blog`), `views.rs`, `urls.rs`, et `tests.rs`, puis déclare le module dans `src/lib.rs` (`pub mod blog;` ; `mod blog;` dans `src/main.rs` pour un projet sans `lib.rs`) et fusionne ses routes dans `urls::api()`.
 
 Options :
 
 - **`--into <dir>`** — échafaude sous un répertoire de base autre que `src/` (par exemple un membre de workspace).
-- **`--with-manage-bin`** — génère aussi un `bin/manage.rs` (pour les architectures qui préfèrent un binaire manage séparé).
+- **`--with-manage-bin`** — génère aussi un `src/bin/manage.rs` (pour les architectures qui préfèrent un binaire manage séparé).
 
 ---
 
@@ -264,6 +266,8 @@ Au sein d'un projet, les verbes `make:*` échafaudent un fichier à la fois. La 
 | `make:api_routes <app>` | Un agrégateur de routes API pour une app |
 | `make:form <Name>` | Un formulaire HTML avec validation |
 | `make:job <Name>` | Un gestionnaire de job en arrière-plan |
+| `make:scheduled <Name>` | Une tâche à intervalle fixe pour `scheduler::Scheduler` |
+| `make:worker <Name>` | Un binaire worker sous `src/bin/` qui vide la file de jobs |
 | `make:notification <Name>` | Une notification multi-canal |
 | `make:middleware <Name>` | Un squelette de middleware |
 | `make:test <Name>` | Un module de test utilisant le client de test in-process |

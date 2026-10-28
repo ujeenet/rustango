@@ -209,7 +209,7 @@ Registriere das Modul — füge `pub mod post_serializer;` zu `src/blog/mod.rs` 
 Beachte, dass wir nur einen Validator geschrieben haben (`title_min_3`); die Felder **erben** zudem
 automatisch **die Constraints des Models** — `title` wird gegen die Längenvorgabe des Models
 `max_length = 200` geprüft, und eine `choices`/`min`/`max`-Spalte würde ebenfalls geprüft,
-wobei alle beim Schreiben freundliche `400`er zurückgeben. Füge `max_length` / `min_length` /
+wobei alle beim Schreiben freundliche `422`er zurückgeben. Füge `max_length` / `min_length` /
 `min` / `max` als Serializer-Attribute hinzu, um die Grenze eines Feldes zu überschreiben. (Siehe die
 [Serializer-Anleitung](serializers.md#validierung) für die vollständige Validierungsgeschichte.)
 
@@ -239,7 +239,10 @@ use rustango::ViewSet;
 pub struct PostViewSet;
 ```
 
-Füge `pub mod post_view_set;` zu `src/blog/mod.rs` hinzu.
+Der Generator schreibt `src/post_view_set.rs` (er startet `read_only`, und seine
+`use`-Zeile setzt `crate::models::Post` voraus). Verschiebe die Datei wie gezeigt
+nach `src/blog/post_view_set.rs` und füge `pub mod post_view_set;` zu
+`src/blog/mod.rs` hinzu.
 
 > `fields` ist Pflicht: Es ist die Schreib-Allowlist, ein Body kann also keine
 > andere Spalte setzen (etwa `author_id`). Ein Serializer schränkt sie weiter ein;
@@ -262,8 +265,13 @@ pub fn api(pool: Pool) -> Router {
 }
 ```
 
-`make:api_routes blog` gerüstet genau diesen Aggregator, falls du ihn lieber
-generieren möchtest. Binde `blog::urls::api(pool)` in deine oberste `urls.rs` ein.
+`make:api_routes blog` erzeugt dieselbe Form als `src/blog/api_routes.rs`, falls
+du ihn lieber generieren möchtest. Die oberste `urls::api()` hat keinen Pool, also
+hänge diesen Router in `src/main.rs` ein, wo die `Cli` dir den Pool des Servers
+gibt. Ein Root-Nest wird abgelehnt, also hänge ihn unter einem Präfix ein und
+lass dieses Präfix im ViewSet-Pfad weg:
+`.nest_with("/api", |pool| myapp::blog::urls::api(pool))` mit
+`PostViewSet::router("/posts", pool)` darin.
 
 ### Schritt 7 — Ausführen und jeden Endpunkt durchprobieren
 
@@ -295,15 +303,16 @@ Die Antwort hat die Form des **Serializers**: `body` kam als `content` zurück, 
 berechnete `summary` erschien, und `published_at` (schreibgeschützt, servergesetzt) ist
 vorhanden.
 
-**Die Validierung lehnt ungültige Eingaben** mit einem `400` ab — feldbasierte Arrays von
-Meldungen:
+**Die Validierung lehnt ungültige Eingaben** mit einem `422` ab — feldbasierte Arrays von
+Meldungen unter `details`:
 
 ```bash
 curl -i -X POST localhost:8080/api/posts \
   -H 'content-type: application/json' \
   -d '{"title":"hi","content":"x","author_id":1}'
-# HTTP/1.1 400 Bad Request
-# {"title":["title must be at least 3 characters"]}
+# HTTP/1.1 422 Unprocessable Entity
+# {"error":"validation_failed","message":"invalid input","status":422,
+#  "details":{"title":["title must be at least 3 characters"]}}
 ```
 
 **Schreibgeschützte / berechnete Felder, die ein Client postet, werden ignoriert** — sie können weder
@@ -374,8 +383,8 @@ async fn rejects_short_title() {
     let res = client.post("/api/posts")
         .json(&json!({"title":"hi","content":"x","author_id":1}))
         .send().await;
-    assert_eq!(res.status, 400);
-    assert!(res.json_value()["title"].is_array());   // field-keyed error shape
+    assert_eq!(res.status, 422);
+    assert!(res.json_value()["details"]["title"].is_array());   // field-keyed error shape
 }
 
 #[tokio::test]
@@ -430,8 +439,8 @@ Bei `create` und `update`, wenn ein Serializer registriert ist:
 1. **Die Validierung läuft.** Das `validate()` des Serializers — jedes einzelne
    `#[serializer(validate = "fn")]` pro Feld plus das feldübergreifende `validate` auf Container-
    Ebene — läuft gegen den JSON-Body. Bei Fehlschlag wird die Anfrage abgelehnt
-   mit `400 Bad Request` in der feldgeschlüsselten Fehlerform: ein JSON-Objekt mit dem Feldnamen als Schlüssel
-   und Arrays von Meldungen, z. B. `{"title":["title must be at least 3 characters"]}`.
+   mit `422 Unprocessable Entity` (`validation_failed`) und der feldgeschlüsselten Fehlerform
+   in `details`: ein JSON-Objekt mit dem Feldnamen als Schlüssel und Arrays von Meldungen, z. B. `{"title":["title must be at least 3 characters"]}`.
 2. **Filterung schreibbarer Felder.** Nur die schreibbaren Felder des Serializers werden
    gespeichert; `read_only`- und `method`-/berechnete Felder, die ein Client postet, werden
    **ignoriert** (nicht geschrieben), und `source`-Umbenennungen werden auf die Model-
@@ -555,7 +564,8 @@ binde das ViewSet ein und überschreibe die eine Route mit deinem eigenen Handle
 | `ordering` | `"-published_at, id"` | keiner | Standardsortierung (`-` = DESC). |
 | `page_size` | `20` | 20 | Zeilen pro Seite (Client-`?page_size=` gedeckelt bei 100). |
 | `read_only` | *(Flag)* | aus | Nur GET (list + retrieve) exponieren. |
-| `permissions(...)` | `permissions(create = "post.add")` | keiner | Berechtigungs-Codenamen pro Aktion. |
+| `allow_anonymous` | *(Flag)* | aus | Erklärt, dass Schreibaktionen ohne Codenamen offen sein sollen; unterdrückt die Mount-Warnung. |
+| `permissions(...)` | `permissions(create = "posts.add")` | keiner | Berechtigungs-Codenamen pro Aktion. |
 
 ---
 
@@ -574,8 +584,11 @@ Felder, die Antworten zeigen und Bodies schreiben dürfen. Jede weitere Methode 
 | `page_size(n)` | Standard-Seitengröße (≤ 100). |
 | `max_page_size(n)` | Hebt oder senkt das Client-Limit selbst (Default 100). |
 | `max_bulk_create(n)` | Höchstzahl an Zeilen, die ein Bulk-Create tragen darf (Default 1000). |
-| `pk_param(name)` | Benennt den Pfadparameter der Detail-Routen um. |
+| `pk_param(name)` | Benennt den Pfadparameter der Detail-Routen um (`pk_param_name()` liest ihn zurück). |
+| `openapi_query(bool)` | Beschreibt die `QUERY`-Route im erzeugten OpenAPI-Dokument (braucht OpenAPI-3.2-Tooling). Standardmäßig aus; die Route wird in jedem Fall eingehängt. |
+| `related_filter(fk_field, backend)` | Begrenzt, welche Zielzeilen ein FK im Body nennen darf; jede andere ist ein `422`. |
 | `read_only()` | Nur GET. |
+| `allow_anonymous()` | Schreibzugriffe ohne Codenamen sind gewollt; überspringt die Mount-Warnung. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Codename-Gates pro Aktion (letzteres bei Mandantenfähigkeit). |
 | `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Keyset-Paginierung (überspringt `COUNT(*)`). |
 | `limit_offset_pagination()` | `?limit=&offset=`-Fensterung. |
@@ -583,7 +596,7 @@ Felder, die Antworten zeigen und Bodies schreiben dürfen. Jede weitere Methode 
 | `filter_backend(closure)` | Eigene `WHERE`-Prädikate über `filter_fields` hinaus hinzufügen. |
 | `throttle(…)` / `throttle_all(max, secs)` | Rate-Limits pro Aktion mit festem Zeitfenster. |
 | `admin_add_hooks()` | Führt beim Create die `"add"`-Objekt-Berechtigungs-Hooks des Admins aus, auf dem Request und auf jeder geschriebenen Zeile; eine Ablehnung ist ein `403`. Standardmäßig aus. |
-| `router(prefix, pgpool)` | Einbinden (Postgres, statischer Pool). |
+| `router(prefix, pgpool)` | Einbinden (nur Postgres, statischer `PgPool`; Feature `postgres`). |
 | `router_pool(prefix, pool)` | Tri-dialektfähig einbinden (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(Mandantenfähigkeit)* mit Mandantenauflösung pro Anfrage einbinden. |
 
@@ -645,14 +658,14 @@ für sehr große Tabellen. `?cursor=<token>&page_size=20`:
 { "count": 137, "limit": 20, "offset": 40, "results": [ … ] }
 ```
 
-`page_size` / `limit` werden auf 100 begrenzt.
+`page_size` / `limit` werden auf `max_page_size` begrenzt (Default 100).
 
 ---
 
 ## Validierung
 
 Mit einem **verdrahteten Serializer** führt der Create-/Update-Pfad die Validatoren des Serializers
-aus und gibt feldgeschlüsselte `400`er zurück — der empfohlene Weg zu validieren (siehe
+aus und gibt feldgeschlüsselte `422`er zurück — der empfohlene Weg zu validieren (siehe
 [die Ehe](#die-serializer-ehe-eingabe--ausgabe) und die
 [Serializer-Anleitung](serializers.md#validierung)). Drei Schichten laufen:
 
@@ -660,7 +673,7 @@ aus und gibt feldgeschlüsselte `400`er zurück — der empfohlene Weg zu validi
   standardmäßig **erbt** das Feld das `max_length` / `min` / `max` /
   `choices` **des Models**. So wird eine `#[rustango(max_length = 200)]`-Spalte an der
   API längengeprüft, ohne zusätzliche Konfiguration, wodurch
-  potenzielle `500`er aus DB-Constraints in freundliche `400`er verwandelt werden wie
+  potenzielle `500`er aus DB-Constraints in freundliche `422`er mit `details` verwandelt werden wie
   `{"title":["Ensure this value has at most 200 characters."]}`.
 - **Pro-Feld-** `validate = "fn"` und ein **feldübergreifender** `validate`-Hook — deine
   eigenen Regeln (Formate, feldübergreifend, Geschäftslogik).
@@ -714,11 +727,11 @@ use rustango::viewset::{ViewSet, ViewSetPerms};
 
 ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .permissions(ViewSetPerms {
-        list:     vec!["post.view".into()],
-        retrieve: vec!["post.view".into()],
-        create:   vec!["post.add".into()],
-        update:   vec!["post.change".into()],
-        destroy:  vec!["post.delete".into()],
+        list:     vec!["posts.view".into()],
+        retrieve: vec!["posts.view".into()],
+        create:   vec!["posts.add".into()],
+        update:   vec!["posts.change".into()],
+        destroy:  vec!["posts.delete".into()],
     })
     .router_pool("/api/posts", pool);
 ```
@@ -726,7 +739,8 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
 Eine leere Aktionsliste = keine Prüfung. Die Durchsetzung liest einen authentifizierten Benutzer aus
 der Anfrage (die `tenancy`-Auth-Integration); Superuser umgehen sie, ein fehlender Benutzer
 wird abgelehnt. `.permissions_for_model::<Post>()` füllt automatisch die Standard-
-Codenamen `post.view`/`add`/`change`/`delete`.
+Codenamen `<table>.view` / `.add` / `.change` / `.delete` (`posts.view`, … für die
+Tabelle `posts`).
 
 Ein ViewSet führt die Objekt-Berechtigungs-Hooks `change`, `delete` und `view`
 des Admins noch nicht aus. Hat sein Modell welche, loggt das Einhängen eine

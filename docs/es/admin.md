@@ -538,6 +538,12 @@ comparten host, así que una ruta funciona. Una URL completa a un CDN también.
 
 ### El admin de inquilino
 
+En un proyecto con tenancy, el admin de cada inquilino se sirve en el host de
+ese inquilino, en `/admin` (`RouteConfig::admin_url`; el valor por defecto
+`/__admin` del `Builder` solo no aplica). Los enlaces antiguos a `/__admin`
+siguen llegando a él, salvo que `RouteConfig::legacy()` haga de `/__admin` la
+ruta principal.
+
 El admin de inquilino no lee `[admin]` ni `[brand]`. Toma su marca de la fila
 `Org` del tenant: el nombre es `brand_name`, o si no el nombre visible del
 tenant; el logo es el subido en la página de edición de la consola, o si no el
@@ -556,6 +562,7 @@ indique lo contrario):
 |---|---|
 | `new(pool)` | Construir a partir de cualquier pool (PostgreSQL / MySQL / SQLite). Valores por defecto: prefijo `/__admin`, cookies de desarrollo. |
 | `from_settings(pool, &settings)` | Construir a partir de configuración parseada (característica `config`). |
+| `settings_prefix(&settings)` | Función asociada, no un paso del builder: el prefijo de montaje que piden los ajustes (`[admin] url_prefix`, si no `[routes] admin_url`), o `None`. |
 | `title(s)` / `subtitle(s)` | Cabecera / subcabecera de la barra lateral. |
 | `admin_prefix(p)` | Prefijo de URL — **debe coincidir con la ruta de anidamiento**. Por defecto `/__admin`. |
 | `audit_url(u)` | Ruta de la vista de actividad/auditoría. Por defecto `/__audit`. |
@@ -565,6 +572,7 @@ indique lo contrario):
 | `read_only([tables])` | Renderiza esas tablas pero prohíbe crear/editar/eliminar. |
 | `read_only_all()` | Marca **cada** tabla como de solo lectura. |
 | `skip_count_for([tables])` | Omite `COUNT(*)` en tablas enormes (el paginador muestra "Page N"). |
+| `view_hook_scan_cap(rows)` | Cuántas filas recorre la lista con los hooks `view` antes de retener el resto. Por defecto 10 000. |
 | `with_user_perms([codenames])` | Condiciona tablas a `{table}.view/add/change/delete`. |
 | `register_action(table, name, handler)` | Registra un manejador de acción masiva. |
 | `register_action_with_perm(table, name, perm, handler)` | Igual, comprobado contra `ActionPerm::Delete` en lugar de `change`. |
@@ -574,6 +582,7 @@ indique lo contrario):
 | `secure_cookies(bool)` | Establece el flag `Secure` (solo HTTPS) en la cookie de sesión. `new` sigue a `[security].secure_cookies`, o si no es segura en el nivel prod. |
 | `theme_mode(m)` | `"light"` / `"dark"` / `"auto"`. |
 | `brand_logo_url(url)` | Logo sobre el título. |
+| `brand_favicon_url(url)` | URL del favicon; sin valor se mantiene el icono incluido. |
 | `brand_name(s)` / `brand_tagline(s)` | Sobrescrituras de marca por inquilino. |
 | `tenant_brand_css(css)` | Bloque de variables CSS por inquilino. |
 | `impersonated_by(operator_id)` | Renderiza un banner de suplantación (consola de operador). |
