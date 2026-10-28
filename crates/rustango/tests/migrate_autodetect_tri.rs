@@ -42,6 +42,22 @@ pub struct SdChild {
     pub parent_id: i64,
 }
 
+#[derive(rustango::Model)]
+#[rustango(table = "mad_px_post", app = "mad_px")]
+#[allow(dead_code)]
+pub struct PxPost {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+#[derive(rustango::Model)]
+#[rustango(table = "mad_px_post", app = "mad_px", proxy)]
+#[allow(dead_code)]
+pub struct PxPublishedPost {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
 fn id() -> Value {
     json!({"name": "id", "column": "id", "ty": "i64", "nullable": false,
            "primary_key": true, "auto": true})
@@ -4527,6 +4543,101 @@ async fn squash_refuses_models_ahead_of_the_files() {
     }
 }
 
+/// A proxy shares its model's table: one CREATE TABLE, not two.
+async fn proxy_model_creates_no_table(pool: &Pool) {
+    let chain = Chain::new(pool, "px", &["mad_px_post"]).await;
+    let current = SchemaSnapshot::from_registry_for_app("mad_px");
+    assert_eq!(
+        current
+            .tables
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>(),
+        ["mad_px_post"]
+    );
+    make_migrations_from(chain.dir.path(), &current, None)
+        .expect("makemigrations")
+        .expect("a migration");
+    chain.migrate(pool).await.expect("one CREATE TABLE");
+}
+
+/// A composite FK to columns with no unique key is refused when the
+/// migration is made, not when PG applies it.
+async fn composite_fk_needs_a_unique_target(pool: &Pool) {
+    let (parent, child) = ("mad_cu_parent", "mad_cu_child");
+    let chain = Chain::new(pool, "cu", &[child, parent]).await;
+    let ab = || vec![id(), col("a", "i64", json!({})), col("b", "i64", json!({}))];
+    let mut kid = table(child, ab());
+    kid["composite_fks"] =
+        json!([{"name": "mad_cu_fk", "to": parent, "from": ["a", "b"], "on": ["a", "b"]}]);
+    let err = chain
+        .step(pool, json!({"tables": [table(parent, ab()), kid.clone()]}))
+        .await
+        .expect_err("no unique key on (a, b)");
+    assert!(err.contains("unique_together"), "{err}");
+    // MySQL needs the key in the FK's column order.
+    let uq = |cols: [&str; 2]| json!([{"name": "mad_cu_ab_uq", "table": parent, "columns": cols, "unique": true}]);
+    let err = chain
+        .step(
+            pool,
+            json!({"tables": [table(parent, ab()), kid.clone()], "indexes": uq(["b", "a"])}),
+        )
+        .await
+        .expect_err("a unique key in another order");
+    assert!(err.contains("unique_together"), "{err}");
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(parent, ab()), kid], "indexes": uq(["a", "b"])}),
+        )
+        .await
+        .expect("a unique key in the FK's order");
+}
+
+/// A generated column added later is generated, also on a filled table
+/// and on SQLite, which cannot ADD one.
+async fn generated_column_adds_to_a_filled_table(pool: &Pool) {
+    let t = "mad_gen";
+    let chain = Chain::new(pool, "gen", &[t]).await;
+    let base = || {
+        let not_null = json!({"nullable": false});
+        vec![
+            id(),
+            col("price", "i64", not_null.clone()),
+            col("qty", "i64", not_null),
+        ]
+    };
+    chain
+        .step(pool, json!({"tables": [table(t, base())]}))
+        .await
+        .expect("create");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (1, 3, 4)",
+        &[t, "id", "price", "qty"],
+    )
+    .await
+    .expect("a row");
+    let mut fields = base();
+    fields.push(col(
+        "total",
+        "i64",
+        json!({"nullable": false, "generated_as": "price * qty"}),
+    ));
+    chain
+        .step(pool, json!({"tables": [table(t, fields)]}))
+        .await
+        .expect("a NOT NULL generated column on a filled table");
+    exec(pool, "UPDATE {} SET {} = 5 WHERE {} = 1", &[t, "qty", "id"])
+        .await
+        .expect("update");
+    let sql = q(pool, "SELECT {} FROM {}", &["total", t]);
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got[0].0, 15, "computed from the row, not a plain column");
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
@@ -4619,5 +4730,8 @@ tri_dialect_test!(
         data_op_keeps_its_scope,
         m2m_with_the_same_ends_is_not_a_rename,
         m2m_through_rename_by_hand,
+        proxy_model_creates_no_table,
+        composite_fk_needs_a_unique_target,
+        generated_column_adds_to_a_filled_table,
     ]
 );

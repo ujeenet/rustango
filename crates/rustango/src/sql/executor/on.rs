@@ -166,6 +166,28 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
     where
         'c: 'e;
 
+    /// `page`, then `count` when the page is empty, for a page past the
+    /// last row. `None` where the executor cannot run a second statement.
+    #[doc(hidden)]
+    fn fetch_rows_or_count<'e, U, F>(
+        self,
+        page: crate::sql::CompiledStatement,
+        count: Option<crate::sql::CompiledStatement>,
+        decode: F,
+    ) -> BoxFuture<'e, Result<(Vec<U>, Option<i64>), ExecError>>
+    where
+        'c: 'e,
+        U: Send + 'e,
+        F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
+        Self: 'e,
+    {
+        let _ = count;
+        Box::pin(async move {
+            let rows = super::run_on(self, &page.sql, page.params, decode).await?;
+            Ok((rows, None))
+        })
+    }
+
     /// Whether [`Self::run_delete_plan`] can run several statements.
     #[doc(hidden)]
     fn runs_plans(&self) -> bool {
@@ -297,11 +319,42 @@ where
     Box::pin(async move { Ok(done.await?.rows_affected()) })
 }
 
+/// [`SqlExecutor::fetch_rows_or_count`] for an executor `$again` can reuse.
+macro_rules! fetch_rows_or_count {
+    ($me:ident => $again:expr) => {
+        fn fetch_rows_or_count<'e, U, F>(
+            self,
+            page: crate::sql::CompiledStatement,
+            count: Option<crate::sql::CompiledStatement>,
+            decode: F,
+        ) -> BoxFuture<'e, Result<(Vec<U>, Option<i64>), ExecError>>
+        where
+            'c: 'e,
+            U: Send + 'e,
+            F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
+            Self: 'e,
+        {
+            #[allow(unused_mut)]
+            let mut $me = self;
+            Box::pin(async move {
+                let rows = super::run_on($again, &page.sql, page.params, decode).await?;
+                let total = match count.filter(|_| rows.is_empty()) {
+                    Some(c) => Some(super::count_stmt_on($again, c).await?),
+                    None => None,
+                };
+                Ok((rows, total))
+            })
+        }
+    };
+}
+
 impl<'c> sealed::Sealed<'c> for &'c Pool {}
 impl<'c> SqlExecutor<'c> for &'c Pool {
     fn dialect(&self) -> &'static dyn Dialect {
         Pool::dialect(self)
     }
+
+    fetch_rows_or_count!(me => me);
 
     fn fetch_rows<'e, 'q: 'e, U, F>(
         self,
@@ -359,6 +412,8 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
     fn dialect(&self) -> &'static dyn Dialect {
         PoolConn::dialect(self)
     }
+
+    fetch_rows_or_count!(me => &mut *me);
 
     fn fetch_rows<'e, 'q: 'e, U, F>(
         self,
@@ -421,6 +476,8 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
     fn dialect(&self) -> &'static dyn Dialect {
         PoolTx::dialect(self)
     }
+
+    fetch_rows_or_count!(me => &mut *me);
 
     fn guard(&self) -> Result<Guard, ExecError> {
         atomic::gate(self).map(Guard)
@@ -522,6 +579,8 @@ macro_rules! database_conn_executor {
             fn dialect(&self) -> &'static dyn Dialect {
                 $dialect
             }
+
+            fetch_rows_or_count!(me => &mut *me);
 
             fn fetch_rows<'e, 'q: 'e, U, F>(
                 self,

@@ -25,7 +25,7 @@ fn select(where_clause: WhereExpr) -> SelectQuery {
     SelectQuery::new(User::SCHEMA).where_clause(where_clause)
 }
 
-// ---------- Binary XOR — canonical (a AND NOT b) OR (NOT a AND b) form ----------
+// ---------- Binary XOR — the CASE tally, a NULL operand counting as false ----------
 
 #[test]
 fn binary_xor_emits_canonical_form_on_pg() {
@@ -36,13 +36,13 @@ fn binary_xor_emits_canonical_form_on_pg() {
     let stmt = Postgres.compile_select(&q).unwrap();
     assert!(
         stmt.sql.contains(
-            r#"("name" = $1 AND NOT ("active" = $2)) OR (NOT ("name" = $3) AND "active" = $4)"#
+            r#"((CASE WHEN "name" = $1 THEN 1 ELSE 0 END) + (CASE WHEN "active" = $2 THEN 1 ELSE 0 END)) % 2 = 1"#
         ),
         "PG: canonical binary XOR rewrite: {}",
         stmt.sql
     );
-    // Each operand binds once per occurrence in the rewrite (4 params total).
-    assert_eq!(stmt.params.len(), 4);
+    // Each operand is written, and bound, once.
+    assert_eq!(stmt.params.len(), 2);
 }
 
 #[test]
@@ -54,7 +54,7 @@ fn binary_xor_emits_canonical_form_on_mysql() {
     let stmt = MySql.compile_select(&q).unwrap();
     assert!(
         stmt.sql
-            .contains("(`name` = ? AND NOT (`active` = ?)) OR (NOT (`name` = ?) AND `active` = ?)"),
+            .contains("((CASE WHEN `name` = ? THEN 1 ELSE 0 END) + (CASE WHEN `active` = ? THEN 1 ELSE 0 END)) % 2 = 1"),
         "MySQL: canonical binary XOR rewrite (backticks): {}",
         stmt.sql
     );
@@ -69,7 +69,7 @@ fn binary_xor_emits_canonical_form_on_sqlite() {
     let stmt = Sqlite.compile_select(&q).unwrap();
     assert!(
         stmt.sql.contains(
-            r#"("name" = ? AND NOT ("active" = ?)) OR (NOT ("name" = ?) AND "active" = ?)"#
+            r#"((CASE WHEN "name" = ? THEN 1 ELSE 0 END) + (CASE WHEN "active" = ? THEN 1 ELSE 0 END)) % 2 = 1"#
         ),
         "SQLite: canonical binary XOR rewrite: {}",
         stmt.sql
@@ -159,7 +159,7 @@ fn xor_inside_and_parenthesizes_correctly() {
     // appears as a member of an AND, then the AND adds the age check.
     assert!(stmt.sql.contains(") AND "));
     assert!(
-        stmt.sql.contains(r#""age" > $5"#),
+        stmt.sql.contains(r#""age" > $3"#),
         "age check follows XOR: {}",
         stmt.sql
     );
@@ -178,7 +178,7 @@ fn xor_inside_or_parenthesizes_correctly() {
     ]);
     let stmt = Postgres.compile_select(&select(where_clause)).unwrap();
     assert!(stmt.sql.contains(") OR "));
-    assert!(stmt.sql.contains(r#""age" > $5"#));
+    assert!(stmt.sql.contains(r#""age" > $3"#));
 }
 
 // ---------- TypedExpr::xor() builder API ----------
@@ -192,7 +192,7 @@ fn typed_expr_xor_method_produces_xor_node() {
     let stmt = Postgres.compile_select(&q).unwrap();
     assert!(
         stmt.sql.contains(
-            r#"("name" = $1 AND NOT ("active" = $2)) OR (NOT ("name" = $3) AND "active" = $4)"#
+            r#"((CASE WHEN "name" = $1 THEN 1 ELSE 0 END) + (CASE WHEN "active" = $2 THEN 1 ELSE 0 END)) % 2 = 1"#
         ),
         "TypedExpr::xor() → canonical binary XOR rewrite: {}",
         stmt.sql

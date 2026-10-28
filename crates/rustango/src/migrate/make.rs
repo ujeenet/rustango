@@ -184,6 +184,7 @@ fn plan_scoped(
         )));
     }
 
+    refuse_unkeyed_composite_fks(&prev_snapshot, current)?;
     warn_untracked_table_comments(current);
     let changes = detect_changes(&prev_snapshot, current);
     if changes.is_empty() {
@@ -211,6 +212,22 @@ fn plan_scoped(
         snapshot: current.clone(),
         forward: changes.into_iter().map(Operation::Schema).collect(),
     }))
+}
+
+/// A composite FK must point at a primary or unique key; catch it here,
+/// not when PG refuses the written migration.
+fn refuse_unkeyed_composite_fks(
+    prev: &SchemaSnapshot,
+    current: &SchemaSnapshot,
+) -> Result<(), MigrateError> {
+    let bad = current.unkeyed_composite_fks(prev);
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(MigrateError::Validation(format!(
+        "composite foreign keys need a unique target:\n  - {}",
+        bad.join("\n  - ")
+    )))
 }
 
 /// Snapshots do not carry `db_table_comment` yet, so file migrations
@@ -505,6 +522,7 @@ fn plan_from(
         )));
     }
 
+    refuse_unkeyed_composite_fks(&prev_snapshot, current)?;
     warn_untracked_table_comments(current);
     let changes = detect_changes(&prev_snapshot, current);
     if changes.is_empty() {

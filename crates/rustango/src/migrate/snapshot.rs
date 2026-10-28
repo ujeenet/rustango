@@ -34,8 +34,7 @@ pub fn scope_owns_system_tables(scope: crate::core::ModelScope) -> bool {
 pub(crate) fn in_system_chain(schema: &ModelSchema, scope: crate::core::ModelScope) -> bool {
     (schema.scope == scope || SHARED_SYSTEM_TABLES.contains(&schema.table))
         && schema.table.starts_with("rustango_")
-        && !schema.is_view
-        && schema.managed
+        && schema.owns_table()
 }
 
 /// A snapshot of every registered model, ordered by table name.
@@ -246,6 +245,59 @@ pub struct RelationSnapshot {
     pub on_delete: Option<String>,
 }
 
+/// Keep one model per table, or the migration emits two `CREATE TABLE`s.
+fn one_owner_per_table<'a>(entries: impl Iterator<Item = &'a ModelEntry>) -> Vec<&'a ModelEntry> {
+    // A custom user model declares
+    // `rustango_users` while the built-in `User` derive is always
+    // present, so both reach the inventory. Dedupe by table and
+    // let the downstream model win: naming a framework table is a
+    // deliberate override.
+    let mut by_table: std::collections::BTreeMap<&'static str, &'a ModelEntry> =
+        std::collections::BTreeMap::new();
+    for e in entries {
+        match by_table.entry(e.schema.table) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(e);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                let held = *slot.get();
+                match (held.is_framework(), e.is_framework()) {
+                    // Downstream model overrides the framework's own.
+                    (true, false) => {
+                        tracing::warn!(
+                            target: "rustango::migrate",
+                            table = %e.schema.table,
+                            model = %e.module_path,
+                            "a project model is overriding a framework table — its \
+                             schema will be used instead of rustango's. If this was \
+                             not intended, the table name is a typo."
+                        );
+                        slot.insert(e);
+                    }
+                    // Two downstream models on one table is
+                    // ambiguous. Pick by module path, not
+                    // inventory order, so the migration is the
+                    // same on every build, and warn about it.
+                    (false, false) => {
+                        tracing::warn!(
+                            target: "rustango::migrate",
+                            table = %e.schema.table,
+                            candidates = %format!("{}, {}", held.module_path, e.module_path),
+                            "two models declare the same table — using the \
+                             lexicographically first module path; remove one or mark it `proxy`"
+                        );
+                        if e.module_path < held.module_path {
+                            slot.insert(e);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    by_table.into_values().collect()
+}
+
 impl SchemaSnapshot {
     /// Capture every model registered in the binary's `inventory`.
     ///
@@ -254,26 +306,7 @@ impl SchemaSnapshot {
     /// `DROP TABLE` for one.
     #[must_use]
     pub fn from_registry() -> Self {
-        let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
-            .into_iter()
-            .filter(|e| !e.schema.is_view && e.schema.managed)
-            .collect();
-        let mut tables: Vec<TableSnapshot> = entries
-            .iter()
-            .map(|e| TableSnapshot::from_schema(e.schema))
-            .collect();
-        tables.sort_by(|a, b| a.name.cmp(&b.name));
-        let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
-        let indexes = collect_indexes(entries.iter().map(|e| e.schema));
-        let checks = collect_checks(entries.iter().map(|e| e.schema));
-        let excludes = collect_excludes(entries.iter().map(|e| e.schema));
-        Self {
-            tables,
-            m2m_tables,
-            indexes,
-            checks,
-            excludes,
-        }
+        Self::from_user_entries(inventory::iter::<ModelEntry>.into_iter())
     }
 
     /// Capture only the models whose
@@ -288,26 +321,11 @@ impl SchemaSnapshot {
     /// fail.
     #[must_use]
     pub fn from_registry_for_scope(scope: crate::core::ModelScope) -> Self {
-        let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
-            .into_iter()
-            .filter(|e| e.schema.scope == scope && !e.schema.is_view && e.schema.managed)
-            .collect();
-        let mut tables: Vec<TableSnapshot> = entries
-            .iter()
-            .map(|e| TableSnapshot::from_schema(e.schema))
-            .collect();
-        tables.sort_by(|a, b| a.name.cmp(&b.name));
-        let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
-        let indexes = collect_indexes(entries.iter().map(|e| e.schema));
-        let checks = collect_checks(entries.iter().map(|e| e.schema));
-        let excludes = collect_excludes(entries.iter().map(|e| e.schema));
-        Self {
-            tables,
-            m2m_tables,
-            indexes,
-            checks,
-            excludes,
-        }
+        Self::from_user_entries(
+            inventory::iter::<ModelEntry>
+                .into_iter()
+                .filter(|e| e.schema.scope == scope),
+        )
     }
 
     /// Capture only **framework** models, those with a `rustango_`
@@ -324,56 +342,7 @@ impl SchemaSnapshot {
         let matching = inventory::iter::<ModelEntry>
             .into_iter()
             .filter(|e| in_system_chain(e.schema, scope));
-        // Only one model may own a table, or the migration emits two
-        // `CREATE TABLE`s for it. A custom user model declares
-        // `rustango_users` while the built-in `User` derive is always
-        // present, so both reach the inventory. Dedupe by table and
-        // let the downstream model win: naming a framework table is a
-        // deliberate override.
-        let mut by_table: std::collections::BTreeMap<&'static str, &ModelEntry> =
-            std::collections::BTreeMap::new();
-        for e in matching {
-            match by_table.entry(e.schema.table) {
-                std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert(e);
-                }
-                std::collections::btree_map::Entry::Occupied(mut slot) => {
-                    let held = *slot.get();
-                    match (held.is_framework(), e.is_framework()) {
-                        // Downstream model overrides the framework's own.
-                        (true, false) => {
-                            tracing::warn!(
-                                target: "rustango::migrate",
-                                table = %e.schema.table,
-                                model = %e.module_path,
-                                "a project model is overriding a framework table — its \
-                                 schema will be used instead of rustango's. If this was \
-                                 not intended, the table name is a typo."
-                            );
-                            slot.insert(e);
-                        }
-                        // Two downstream models on one table is
-                        // ambiguous. Pick by module path, not
-                        // inventory order, so the migration is the
-                        // same on every build, and warn about it.
-                        (false, false) => {
-                            tracing::warn!(
-                                target: "rustango::migrate",
-                                table = %e.schema.table,
-                                candidates = %format!("{}, {}", held.module_path, e.module_path),
-                                "two models declare the same table — using the \
-                                 lexicographically first module path; remove one"
-                            );
-                            if e.module_path < held.module_path {
-                                slot.insert(e);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        let entries: Vec<&ModelEntry> = by_table.into_values().collect();
+        let entries = one_owner_per_table(matching);
         let mut tables: Vec<TableSnapshot> = entries
             .iter()
             .map(|e| TableSnapshot::from_schema(e.schema))
@@ -458,28 +427,18 @@ impl SchemaSnapshot {
     /// project's top-level `migrations/` folder.
     #[must_use]
     pub fn from_registry_for_app(app: &str) -> Self {
-        let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
-            .into_iter()
-            .filter(|e| {
-                e.resolved_app_label() == Some(app) && !e.schema.is_view && e.schema.managed
-            })
-            .collect();
-        let mut tables: Vec<TableSnapshot> = entries
-            .iter()
-            .map(|e| TableSnapshot::from_schema(e.schema))
-            .collect();
-        tables.sort_by(|a, b| a.name.cmp(&b.name));
-        let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
-        let indexes = collect_indexes(entries.iter().map(|e| e.schema));
-        let checks = collect_checks(entries.iter().map(|e| e.schema));
-        let excludes = collect_excludes(entries.iter().map(|e| e.schema));
-        Self {
-            tables,
-            m2m_tables,
-            indexes,
-            checks,
-            excludes,
-        }
+        Self::from_user_entries(
+            inventory::iter::<ModelEntry>
+                .into_iter()
+                .filter(|e| e.resolved_app_label() == Some(app)),
+        )
+    }
+
+    /// Snapshot the table-owning entries: views, unmanaged models and
+    /// proxies are dropped, and one model is kept per table.
+    fn from_user_entries<'a>(entries: impl Iterator<Item = &'a ModelEntry>) -> Self {
+        let owners = one_owner_per_table(entries.filter(|e| e.schema.owns_table()));
+        Self::build_from(owners.into_iter().map(|e| e.schema))
     }
 
     /// Capture an explicit list of model schemas instead of the whole
@@ -490,7 +449,7 @@ impl SchemaSnapshot {
     /// [`Self::from_registry`].
     #[must_use]
     pub fn from_models(models: &[&ModelSchema]) -> Self {
-        Self::build_from(models.iter().copied().filter(|s| !s.is_view && s.managed))
+        Self::build_from(models.iter().copied().filter(|s| s.owns_table()))
     }
 
     /// Like [`Self::from_models`], but keeps `managed = false`
@@ -524,6 +483,61 @@ impl SchemaSnapshot {
             checks,
             excludes,
         }
+    }
+
+    /// New composite FKs whose target columns are neither the target's
+    /// primary key nor a full unique key in that order: PG and MySQL
+    /// refuse them at `migrate`, SQLite at the first write. Targets outside this snapshot are
+    /// not checked.
+    pub(crate) fn unkeyed_composite_fks(&self, prev: &Self) -> Vec<String> {
+        let mut out = Vec::new();
+        for t in &self.tables {
+            for fk in &t.composite_fks {
+                let unchanged = prev
+                    .table(&t.name)
+                    .is_some_and(|p| p.composite_fks.contains(fk));
+                if unchanged {
+                    continue;
+                }
+                let Some(target) = self.table(&fk.to) else {
+                    continue;
+                };
+                if !self.is_unique_key(target, &fk.on) {
+                    out.push(format!(
+                        "`{}.{}`: ({}) on `{}` is not its primary key or a unique key; \
+                         add `unique_together = \"{}\"` to the target model",
+                        t.name,
+                        fk.name,
+                        fk.on.join(", "),
+                        fk.to,
+                        fk.on.join(", "),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether `columns`, in order, are `table`'s primary key, a unique
+    /// column, or a full unique index: MySQL wants the key's own order.
+    fn is_unique_key(&self, table: &TableSnapshot, columns: &[String]) -> bool {
+        let pk: Vec<&String> = table
+            .fields
+            .iter()
+            .filter(|f| f.primary_key)
+            .map(|f| &f.column)
+            .collect();
+        if pk.iter().copied().eq(columns.iter()) {
+            return true;
+        }
+        if let [one] = columns {
+            if table.fields.iter().any(|f| f.unique && f.column == *one) {
+                return true;
+            }
+        }
+        self.indexes.iter().any(|i| {
+            i.table == table.name && i.unique && i.where_clause.is_none() && i.columns == columns
+        })
     }
 
     /// Look up an M2M table snapshot by junction table name.
@@ -1145,7 +1159,7 @@ pub(crate) fn check_registry_junctions() -> Result<(), super::MigrateError> {
     let managed = || {
         inventory::iter::<ModelEntry>
             .into_iter()
-            .filter(|e| !e.schema.is_view && e.schema.managed)
+            .filter(|e| e.schema.owns_table())
     };
     let out: Vec<M2MTableSnapshot> = managed().flat_map(|e| m2m_snapshots(e.schema)).collect();
     if let Some(e) = junction_conflict(&out) {

@@ -1065,22 +1065,24 @@ fn write_select_body_qualified(
 }
 
 /// PG and MySQL want a DISTINCT query's ORDER BY terms in the select
-/// list. Each relation term no join projects is added last, so value
-/// rows can drop it (see `values_width`).
+/// list. Each missing term is added last, so value rows can drop it
+/// (see `values_width`).
 fn write_distinct_order_helpers(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
     for (i, expr) in distinct_order_helpers(query) {
         b.sql.push_str(", ");
-        write_expr(b, expr, None)?;
+        write_expr(b, &expr, None)?;
         b.sql.push_str(" AS ");
         b.write_ident(&format!("__rustango_order{i}"));
     }
     Ok(())
 }
 
-/// The relation ORDER BY terms no join projects, with their position.
+/// The ORDER BY terms the select list lacks — a relation column no join
+/// projects, or a base column outside a `values()` projection — with
+/// their position.
 fn distinct_order_helpers(
     query: &SelectQuery,
-) -> impl Iterator<Item = (usize, &crate::core::Expr)> + '_ {
+) -> impl Iterator<Item = (usize, crate::core::Expr)> + '_ {
     use crate::core::{Expr, OrderItem};
     query
         .order_by
@@ -1095,7 +1097,14 @@ fn distinct_order_helpers(
                     .joins
                     .iter()
                     .any(|j| j.alias == *alias && j.project.contains(column));
-                (!projected).then_some((i, expr))
+                (!projected).then(|| (i, expr.clone()))
+            }
+            OrderItem::Column { column, .. } => {
+                let projected = query
+                    .projection
+                    .as_ref()
+                    .is_none_or(|cols| cols.contains(column));
+                (!projected).then_some((i, Expr::Column(column)))
             }
             _ => None,
         })
@@ -2580,7 +2589,8 @@ fn write_window_expr(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(),
             if i > 0 {
                 b.sql.push_str(", ");
             }
-            b.write_ident(col);
+            // Qualified like the window's args, or a join makes it ambiguous.
+            b.write_scope_col(col);
         }
         first_clause = false;
     }
@@ -2593,7 +2603,7 @@ fn write_window_expr(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(),
             if i > 0 {
                 b.sql.push_str(", ");
             }
-            b.write_ident(o.column);
+            b.write_scope_col(o.column);
             if o.desc {
                 b.sql.push_str(" DESC");
             }
@@ -2720,22 +2730,27 @@ fn write_function(
                     got: 0,
                 });
             }
-            if b.d.name() == "sqlite" {
-                // A `||` chain, in parens to keep precedence clear.
-                b.sql.push('(');
-                let mut first = true;
-                for a in args {
-                    if !first {
-                        b.sql.push_str(" || ");
-                    }
-                    first = false;
-                    write_expr(b, a, None)?;
-                }
-                b.sql.push(')');
-                Ok(())
-            } else {
-                write_call(b, "CONCAT", args)
+            if b.d.name() == "mysql" {
+                return write_call(b, "CONCAT", args);
             }
+            // A `||` chain, in parens to keep precedence clear. PG's
+            // CONCAT skips NULLs; `||` returns NULL, as MySQL's CONCAT.
+            let pg = b.d.name() == "postgres";
+            b.sql.push('(');
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 {
+                    b.sql.push_str(" || ");
+                }
+                if pg {
+                    b.sql.push_str("CAST(");
+                }
+                write_expr(b, a, None)?;
+                if pg {
+                    b.sql.push_str(" AS TEXT)");
+                }
+            }
+            b.sql.push(')');
+            Ok(())
         }
 
         // -------- SUBSTR: PG uses `FROM…FOR…`, MySQL/SQLite use commas --------
@@ -2782,7 +2797,26 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            write_call(b, "ROUND", args)
+            // PG has only `round(numeric, int)`: a float goes through
+            // NUMERIC and back, so the row still decodes as a float.
+            let float = match expr_type(b, &args[0]) {
+                Some(crate::core::FieldType::F64) => Some("DOUBLE PRECISION"),
+                Some(crate::core::FieldType::F32) => Some("REAL"),
+                _ => None,
+            };
+            match float {
+                Some(ty) if args.len() == 2 && b.d.name() == "postgres" => {
+                    b.sql.push_str("CAST(ROUND(CAST(");
+                    write_expr(b, &args[0], None)?;
+                    b.sql.push_str(" AS NUMERIC), CAST(");
+                    write_expr(b, &args[1], None)?;
+                    b.sql.push_str(" AS INTEGER)) AS ");
+                    b.sql.push_str(ty);
+                    b.sql.push(')');
+                    Ok(())
+                }
+                _ => write_call(b, "ROUND", args),
+            }
         }
 
         // -------- comparison / NULL --------
@@ -3251,32 +3285,44 @@ fn write_pad(
     if b.d.name() != "sqlite" {
         return write_call(b, name, args);
     }
-    // SQLite has no LPAD or RPAD, so build one:
-    //   LPad: substr(replace(printf('%.*c', len, ' '), ' ', fill) || s, -len)
-    //   RPad: substr(s || replace(printf('%.*c', len, ' '), ' ', fill), 1, len)
-    //
-    // `printf('%.*c', n, ' ')` makes `n` spaces, which `replace`
-    // turns into the fill character. The outer `substr` clips to
-    // `len` when the input is already that long: LPAD keeps the
-    // right side, RPAD the left.
-    b.sql.push_str("substr(");
-    if matches!(kind, F::LPad) {
+    // SQLite has no LPAD or RPAD, so build one from `len` copies of
+    // the fill, `replace(printf('%.*c', len, ' '), ' ', fill)`:
+    //   LPad: CASE WHEN length(s) >= len THEN substr(s, 1, len)
+    //         ELSE substr(<copies>, 1, len - length(s)) || s END
+    //   RPad: substr(s || <copies>, 1, len)
+    // Both cut a too-long input on the right, as PG and MySQL do.
+    let copies = |b: &mut Sql<'_>| -> Result<(), SqlError> {
         b.sql.push_str("replace(printf('%.*c', ");
         write_expr(b, &args[1], None)?;
         b.sql.push_str(", ' '), ' ', ");
         write_expr(b, &args[2], None)?;
-        b.sql.push_str(") || ");
-        write_expr(b, &args[0], None)?;
-        b.sql.push_str(", -");
-        write_expr(b, &args[1], None)?;
         b.sql.push(')');
-    } else {
+        Ok(())
+    };
+    if matches!(kind, F::LPad) {
+        b.sql.push_str("CASE WHEN length(");
         write_expr(b, &args[0], None)?;
-        b.sql.push_str(" || replace(printf('%.*c', ");
+        b.sql.push_str(") >= ");
         write_expr(b, &args[1], None)?;
-        b.sql.push_str(", ' '), ' ', ");
-        write_expr(b, &args[2], None)?;
-        b.sql.push_str("), 1, ");
+        b.sql.push_str(" THEN substr(");
+        write_expr(b, &args[0], None)?;
+        b.sql.push_str(", 1, ");
+        write_expr(b, &args[1], None)?;
+        b.sql.push_str(") ELSE substr(");
+        copies(b)?;
+        b.sql.push_str(", 1, ");
+        write_expr(b, &args[1], None)?;
+        b.sql.push_str(" - length(");
+        write_expr(b, &args[0], None)?;
+        b.sql.push_str(")) || ");
+        write_expr(b, &args[0], None)?;
+        b.sql.push_str(" END");
+    } else {
+        b.sql.push_str("substr(");
+        write_expr(b, &args[0], None)?;
+        b.sql.push_str(" || ");
+        copies(b)?;
+        b.sql.push_str(", 1, ");
         write_expr(b, &args[1], None)?;
         b.sql.push(')');
     }
@@ -4286,6 +4332,61 @@ pub(super) fn write_where_with_search(
     Ok(())
 }
 
+/// Case-sensitive `<col> [NOT] LIKE <value>`. SQLite's LIKE folds ASCII
+/// case, so there the pattern runs as the same GLOB.
+fn write_like(
+    b: &mut Sql<'_>,
+    col: &str,
+    ty: Option<crate::core::FieldType>,
+    value: SqlValue,
+    negated: bool,
+    escaped: bool,
+) {
+    if b.d.name() == "sqlite" {
+        if let SqlValue::String(pattern) = &value {
+            let p = b.bind(SqlValue::String(like_to_glob(pattern, escaped)));
+            b.sql.push_str(&b.d.like_operand(col, ty));
+            b.sql
+                .push_str(if negated { " NOT GLOB " } else { " GLOB " });
+            b.sql.push_str(&p);
+            return;
+        }
+    }
+    let p = b.bind(value);
+    b.d.write_like_typed(&mut b.sql, col, ty, &p, negated);
+    if escaped {
+        b.sql.push_str(LIKE_ESCAPE_CLAUSE);
+    }
+}
+
+/// A LIKE pattern as GLOB: `%` → `*`, `_` → `?`, and GLOB's own `*?[`
+/// as literals. `escaped` reads the `!` escape of [`LIKE_ESCAPE_CLAUSE`].
+fn like_to_glob(pattern: &str, escaped: bool) -> String {
+    let literal = |out: &mut String, c: char| match c {
+        '*' | '?' | '[' => {
+            out.push('[');
+            out.push(c);
+            out.push(']');
+        }
+        c => out.push(c),
+    };
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '!' if escaped => {
+                if let Some(next) = chars.next() {
+                    literal(&mut out, next);
+                }
+            }
+            '%' => out.push('*'),
+            '_' => out.push('?'),
+            c => literal(&mut out, c),
+        }
+    }
+    out
+}
+
 pub(super) fn write_where_expr(
     b: &mut Sql<'_>,
     expr: &WhereExpr,
@@ -4539,12 +4640,17 @@ fn write_expr_compare(
         let lhs_start = b.sql.len();
         write_expr(b, lhs, None)?;
         let lhs_str = b.sql.split_off(lhs_start);
+        let ty = expr_type(b, lhs);
+        let (negated, escaped) = (matches!(op, Op::NotLike), matches!(op, Op::LikeEscaped));
+        if let Expr::Literal(v) = rhs {
+            write_like(b, &lhs_str, ty, v.clone(), negated, escaped);
+            return Ok(());
+        }
         let p_start = b.sql.len();
         write_expr(b, rhs, None)?;
         let p = b.sql.split_off(p_start);
-        let ty = expr_type(b, lhs);
-        b.d.write_like_typed(&mut b.sql, &lhs_str, ty, &p, matches!(op, Op::NotLike));
-        if matches!(op, Op::LikeEscaped) {
+        b.d.write_like_typed(&mut b.sql, &lhs_str, ty, &p, negated);
+        if escaped {
             b.sql.push_str(LIKE_ESCAPE_CLAUSE);
         }
         return Ok(());
@@ -4764,14 +4870,8 @@ fn write_child(
 /// * 0 children: [`SqlError::EmptyXorBranch`]. A predicate that can
 ///   never be true is almost always a mistake.
 /// * 1 child: the child itself.
-/// * 2 children: `((a) AND NOT (b)) OR (NOT (a) AND (b))`.
-///   **Each operand is written twice, so the database evaluates it
-///   twice.** That is fine for a plain comparison, but a volatile
-///   expression such as `RANDOM()` or `NOW()` can give a different
-///   answer each time. To get one evaluation, build the three-element
-///   `Xor([a, b, FALSE])` and take the branch below.
-/// * 3 or more: `((CASE WHEN q1 THEN 1 ELSE 0 END) + … ) % 2 = 1`.
-///   Every child is evaluated exactly once.
+/// * 2 or more: `((CASE WHEN q1 THEN 1 ELSE 0 END) + … ) % 2 = 1`.
+///   Every child is evaluated once, and a NULL child counts as false.
 fn write_xor(
     b: &mut Sql<'_>,
     items: &[WhereExpr],
@@ -4780,19 +4880,6 @@ fn write_xor(
     match items.len() {
         0 => Err(SqlError::EmptyXorBranch),
         1 => write_where_expr(b, &items[0], model),
-        2 => {
-            // (a AND NOT (b)) OR (NOT (a) AND b)
-            b.sql.push('(');
-            write_child(b, &items[0], model)?;
-            b.sql.push_str(" AND NOT (");
-            write_where_expr(b, &items[1], model)?;
-            b.sql.push_str(")) OR (NOT (");
-            write_where_expr(b, &items[0], model)?;
-            b.sql.push_str(") AND ");
-            write_child(b, &items[1], model)?;
-            b.sql.push(')');
-            Ok(())
-        }
         _ => {
             // `write_child` so a composite child is parenthesized
             // before the `THEN 1`.
@@ -4842,20 +4929,17 @@ fn write_filter(
         // character. `!` is the portable escape; MySQL eats a backslash
         // as a string escape before LIKE ever sees it.
         Op::Like | Op::NotLike | Op::LikeEscaped => {
-            let p = b.bind(filter.value.clone());
             let ty = model
                 .and_then(|m| m.field_by_column(filter.column))
                 .map(|f| f.ty);
-            b.d.write_like_typed(
-                &mut b.sql,
+            write_like(
+                b,
                 &qualified_col,
                 ty,
-                &p,
+                filter.value.clone(),
                 matches!(filter.op, Op::NotLike),
+                matches!(filter.op, Op::LikeEscaped),
             );
-            if matches!(filter.op, Op::LikeEscaped) {
-                b.sql.push_str(LIKE_ESCAPE_CLAUSE);
-            }
         }
         // `ILikeEscaped` is `ILike` with an ESCAPE clause added.
         Op::ILike | Op::NotILike | Op::ILikeEscaped => {
@@ -5394,9 +5478,16 @@ pub(crate) fn compile_date_buckets(
     let mut b = Sql::new(d);
     b.sql.push_str("SELECT DISTINCT ");
     let col = d.quote_ident(column);
+    // PG buckets a TIMESTAMPTZ in the session zone; the others store UTC.
+    let pg_utc = d.name() == "postgres"
+        && select.model.field_by_column(column).map(|f| f.ty)
+            == Some(crate::core::FieldType::DateTime);
     b.sql.push_str(&match bucket {
+        DateBucket::Date(kind) if pg_utc => {
+            date_trunc_sql(kind, d.name(), &format!("({col} AT TIME ZONE 'UTC')"))
+        }
         DateBucket::Date(kind) => date_trunc_sql(kind, d.name(), &col),
-        DateBucket::DateTime(kind) => datetime_trunc_sql(kind, d.name(), &col),
+        DateBucket::DateTime(kind) => datetime_trunc_sql(kind, d.name(), &col, pg_utc),
     });
     b.sql.push_str(" AS ");
     b.write_ident("rs_bucket");
@@ -5430,6 +5521,7 @@ fn datetime_trunc_sql(
     kind: crate::query::DateTimeKind,
     dialect_name: &str,
     col_quoted: &str,
+    pg_utc: bool,
 ) -> String {
     use crate::query::DateTimeKind as K;
     if dialect_name == "postgres" {
@@ -5441,7 +5533,8 @@ fn datetime_trunc_sql(
             K::Minute => "minute",
             K::Second => "second",
         };
-        return format!("DATE_TRUNC('{unit}', {col_quoted})");
+        let zone = if pg_utc { ", 'UTC'" } else { "" };
+        return format!("DATE_TRUNC('{unit}', {col_quoted}{zone})");
     }
     // MySQL spells minutes `%i` and seconds `%s`; SQLite `%M` / `%S`.
     let (min, sec) = if dialect_name == "mysql" {

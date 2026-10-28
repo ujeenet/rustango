@@ -99,9 +99,8 @@ let either_but_not_both = Post::objects()
     .where_(Post::status.eq("draft").xor(Post::author_id.eq(42)))
     .fetch(&pool).await?;
 // Tri-dialect emission: native logical XOR exists on MySQL but not PG
-// or SQLite, so the writer emits a portable rewrite uniformly —
-// `(a AND NOT b) OR (NOT a AND b)` for the binary form, or a
-// CASE-WHEN-1/0 tally `% 2 = 1` for N-ary chains.
+// or SQLite, so the writer emits a portable CASE-WHEN-1/0 tally
+// `% 2 = 1`; a NULL operand counts as false.
 ```
 
 ### Filtros de comparación
@@ -501,8 +500,8 @@ User::objects()
 | Dialecto | Sensible a mayúsculas | Insensible a mayúsculas | Notas |
 |---|---|---|---|
 | PostgreSQL | `<col> ~ ?` / `<col> !~ ?` | `<col> ~* ?` / `<col> !~* ?` | Operadores POSIX nativos |
-| MySQL | `` `col` REGEXP ? `` / `` `col` NOT REGEXP ? `` | `LOWER(`col`) REGEXP LOWER(?)` (negado envuelve en `NOT`) | Fallback con LOWER() para `i*` |
-| SQLite | `"col" REGEXP ?` / `"col" NOT REGEXP ?` | `LOWER("col") REGEXP LOWER(?)` (negado envuelve en `NOT`) | Necesita la función de usuario `regexp` cargada en la conexión |
+| MySQL | `` `col` REGEXP CONCAT('(?-i)', ?) `` / `NOT REGEXP` | `` `col` REGEXP CONCAT('(?i)', ?) `` / `NOT REGEXP` | Flag inline (ICU/PCRE), sea cual sea la collation |
+| SQLite | `"col" REGEXP ?` / `"col" NOT REGEXP ?` | `"col" REGEXP ('(?i)' \|\| ?)` / `NOT REGEXP` | Necesita la función de usuario `regexp` cargada en la conexión |
 
 **SQLite requiere una función de usuario `regexp` registrada** — no está incorporada. sqlx-sqlite 0.8 **no** registra una por defecto. Dos caminos para habilitarla:
 
@@ -1745,7 +1744,7 @@ Post::objects().where_(Post::author_id.eq(42));
 | *(ninguno)* / `__exact` | `=` | escalar | la clave simple es exact-eq |
 | `__ne` | `<>` | escalar | |
 | `__gt` / `__gte` / `__lt` / `__lte` | `>` `>=` `<` `<=` | escalar | |
-| `__contains` | `LIKE` | string | envuelve el valor como `%v%` |
+| `__contains` | `LIKE` | string | envuelve el valor como `%v%`; sensible a mayúsculas en todos (MySQL `COLLATE utf8mb4_bin`, SQLite `GLOB`) |
 | `__icontains` | `ILIKE` | string | envuelve el valor como `%v%`; emulado en MySQL vía `LOWER()` |
 | `__startswith` | `LIKE` | string | envuelve como `v%` |
 | `__istartswith` | `ILIKE` | string | envuelve como `v%` |
@@ -1755,7 +1754,7 @@ Post::objects().where_(Post::author_id.eq(42));
 | `__in` | `IN (…)` | `SqlValue::List` | rechaza valores que no son listas |
 | `__isnull` | `IS NULL` / `IS NOT NULL` | `bool` | `true` → IS NULL, `false` → IS NOT NULL |
 | `__between` / `__range` | `BETWEEN … AND …` | `SqlValue::List` de 2 elementos | inclusivo en ambos extremos |
-| `__regex` / `__iregex` | PG `~` / `~*`, MySQL/SQLite `REGEXP` | string | insensible a mayúsculas emulado en MySQL/SQLite vía envoltura `LOWER()`; SQLite necesita una función de usuario `regexp` |
+| `__regex` / `__iregex` | PG `~` / `~*`, MySQL/SQLite `REGEXP` | string | flag de mayúsculas inline `(?i)` / `(?-i)` en MySQL/SQLite; SQLite necesita una función de usuario `regexp` |
 
 > **Los metacaracteres de LIKE se escapan.** `__contains` / `__startswith` / `__endswith` (y sus variantes `i`) tratan el valor como una subcadena **literal** — un `%` o `_` en él coincide consigo mismo, no como comodín. El framework los escapa y emite `ESCAPE '!'`, respetado en los tres dialectos. Para un patrón crudo donde tú colocas tus `%` / `_`, usa `__like` / `__ilike`, que vinculan el valor literalmente.
 

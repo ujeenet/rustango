@@ -872,9 +872,8 @@ pub struct ModelSchema {
     /// `makemigrations` then skips `CreateTable` for this entry,
     /// because the other struct owns the table.
     ///
-    /// The migration writer and admin still treat every model as
-    /// table-owning, so this is mostly metadata. For the same shape
-    /// today, use the [`crate::inheritance`] extension-trait pattern.
+    /// The admin still treats every model as table-owning. For the
+    /// same shape, use the [`crate::inheritance`] extension-trait pattern.
     pub proxy: bool,
     /// `get_latest_by`: the field
     /// `QuerySet::latest_default()` and `earliest_default()` sort on
@@ -977,6 +976,13 @@ impl ModelSchema {
 }
 
 impl ModelSchema {
+    /// `true` when migrations create and alter this model's table:
+    /// not a view, not `managed = false`, not a proxy of another model.
+    #[must_use]
+    pub const fn owns_table(&self) -> bool {
+        !self.is_view && self.managed && !self.proxy
+    }
+
     /// A table-backed, tenant-scoped, `managed` model with no fields
     /// and every option off or empty. Set the rest by assigning
     /// fields; nested slices go in their own `const`, because a
