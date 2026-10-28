@@ -4,6 +4,22 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — ORM and migrations
+
+- `makemigrations` skips `#[rustango(proxy)]` models and keeps one model per table, so a proxy no longer gets a second `CREATE TABLE`.
+- `makemigrations` refuses a composite FK whose target columns are not a primary or unique key, instead of writing a migration PG rejects.
+- A generated field added to an existing model is added as `GENERATED ALWAYS AS (…) STORED` (SQLite by a table rebuild), also NOT NULL on a filled table.
+- `migrate --fake` stamps only a migration of the scope it targets, and `--system` / `--all-tenants` without `--fake` are refused.
+- `values()` + `distinct()` ordered by a column outside the projection works on PG and MySQL.
+- `fetch_paginated*` reports the real total for a page past the last row.
+- PG `dates()` / `datetimes()` bucket a timestamp in UTC, as MySQL and SQLite do.
+- Window `PARTITION BY` / `ORDER BY` columns are qualified beside a join.
+- `__contains`, `__startswith`, `__endswith` and `like` match case on MySQL and SQLite too, as documented.
+- `__iregex` no longer lowercases the pattern (`\D` stayed `\d`), and `__regex` is case-sensitive on MySQL.
+- `concat()` with a NULL operand is NULL on PG too; `round_to()` works on float columns on PG; SQLite `lpad()` matches PG and MySQL.
+- XOR counts a NULL operand as false with two operands, as with three.
+- Audited `save`, `insert` and `delete` on SQLite take the write lock at `BEGIN`, so a cascading delete no longer fails with "database is locked".
+
 ## [0.61.8] — 2026-10-28
 
 ### Fixed — migrations, dev key, uploads, views and leaks

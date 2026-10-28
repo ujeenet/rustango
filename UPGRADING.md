@@ -148,6 +148,16 @@ untouched.
 
 ---
 
+## Unreleased
+
+### ORM results that change
+
+`__contains` / `__startswith` / `__endswith` / `like` are now case-sensitive on MySQL (`COLLATE utf8mb4_bin`) and SQLite (`GLOB`), as on PG; use the `i` lookups to ignore case. `__regex` on MySQL is now case-sensitive. `concat()` on PG now returns NULL when an operand is NULL. A two-operand XOR keeps a row whose other operand is NULL (NULL counts as false). A DISTINCT `values()` ordered by an unprojected column is now distinct over that column too. PG `dates()` / `datetimes()` ignore the session time zone.
+
+### Migrations
+
+`makemigrations` drops proxy models from the snapshot and refuses a new composite FK to columns with no primary or unique key in the same column order; add `unique_together` on the target. `migrate --fake <name>` refuses a tenant migration without `--all-tenants`, and a registry one with it; `migrate --system` or `--all-tenants` without `--fake` is an error.
+
 ## 0.61.8
 
 ### Data ops, uploads, views and Debug output
