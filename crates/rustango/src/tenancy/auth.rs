@@ -268,6 +268,20 @@ impl<T> std::ops::Deref for PasswordVerified<T> {
     }
 }
 
+impl<T> PasswordVerified<T> {
+    /// The stronger hash `complete` would store, to carry across a code step.
+    #[cfg(feature = "totp")]
+    pub(crate) fn upgrade(&self) -> Option<&str> {
+        self.upgrade.as_deref()
+    }
+
+    /// Resume after a second factor, with the upgrade carried across it.
+    #[cfg(feature = "totp")]
+    pub(crate) fn resume(row: T, upgrade: Option<String>) -> Self {
+        Self { row, upgrade }
+    }
+}
+
 impl PasswordVerified<User> {
     /// The user, its weak hash upgraded. Call after the second factor.
     #[must_use]

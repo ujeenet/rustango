@@ -110,3 +110,31 @@ async fn metadata_urls_track_the_nest_prefix() {
         "https://app.example/api/mcp/oauth/token"
     );
 }
+
+/// Both token endpoints answer `no-store`, refusals included (RFC 6749 §5.1).
+#[tokio::test]
+async fn token_replies_are_never_stored() {
+    let app = rustango::mcp::tenant_router_authed(Arc::new(JwtLifecycle::new(
+        b"oauth-test-secret-thirty-two-bytes-min!!".to_vec(),
+    )));
+    for (path, ctype, body) in [
+        ("/token", "application/json", r#"{"name":"a","secret":"b"}"#),
+        (
+            "/oauth/token",
+            "application/x-www-form-urlencoded",
+            "grant_type=client_credentials",
+        ),
+    ] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("host", "app.example")
+            .header("content-type", ctype)
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert!(!resp.status().is_success(), "{path}: no tenant");
+        assert_eq!(resp.headers()["cache-control"], "no-store", "{path}");
+        assert_eq!(resp.headers()["pragma"], "no-cache", "{path}");
+    }
+}

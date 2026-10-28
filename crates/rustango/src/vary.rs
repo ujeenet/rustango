@@ -40,7 +40,14 @@ pub(crate) fn add_vary(headers: &mut HeaderMap, token: &str) {
 
 /// Make `Cache-Control` `private`: any `public` is dropped, freshness
 /// directives such as `max-age` are kept.
-#[cfg(any(feature = "cache-page", feature = "template_views"))]
+#[cfg_attr(
+    not(any(
+        feature = "tenancy",
+        feature = "template_views",
+        feature = "cache-page"
+    )),
+    allow(dead_code)
+)]
 pub(crate) fn mark_private(headers: &mut HeaderMap) {
     use axum::http::header::CACHE_CONTROL;
     // Every line, so a `no-store` on a second one survives the rewrite.
@@ -60,6 +67,40 @@ pub(crate) fn mark_private(headers: &mut HeaderMap) {
     }
 }
 
+/// [`mark_private`] plus `no-store`, for pages that carry secrets.
+#[cfg_attr(
+    not(any(feature = "tenancy", feature = "template_views")),
+    allow(dead_code)
+)]
+pub(crate) fn mark_no_store(headers: &mut HeaderMap) {
+    use axum::http::header::CACHE_CONTROL;
+    mark_private(headers);
+    let current = headers
+        .get(CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("private");
+    if current
+        .split(',')
+        .any(|d| d.trim().eq_ignore_ascii_case("no-store"))
+    {
+        return;
+    }
+    if let Ok(v) = HeaderValue::from_str(&format!("{current}, no-store")) {
+        headers.insert(CACHE_CONTROL, v);
+    }
+}
+
+/// A reply that carries or refuses a credential: `no-store` and
+/// `Pragma: no-cache` (RFC 6749 §5.1). For `middleware::map_response`.
+#[cfg(any(feature = "tenancy", feature = "mcp"))]
+pub(crate) async fn token_reply(mut resp: axum::response::Response) -> axum::response::Response {
+    use axum::http::header::{CACHE_CONTROL, PRAGMA};
+    let h = resp.headers_mut();
+    h.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    h.insert(PRAGMA, HeaderValue::from_static("no-cache"));
+    resp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,7 +117,6 @@ mod tests {
     }
 
     /// Every `Cache-Control` line is kept; only `public` goes.
-    #[cfg(any(feature = "cache-page", feature = "template_views"))]
     #[test]
     fn mark_private_keeps_directives_from_every_line() {
         use axum::http::header::CACHE_CONTROL;

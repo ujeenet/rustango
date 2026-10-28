@@ -129,8 +129,8 @@ params.insert("id", "42".to_string());
 let response = redirect_to_view("post-detail", &params)?;
 ```
 
-`resolve_url(spec, &params)` acepta ambas cosas: si `spec` ya parece una
-URL (`/…`, `http://`, `https://`, `./`, `../`) se devuelve sin cambios; en caso
+`resolve_url(spec, &params)` acepta ambas cosas: una URL del mismo sitio (una ruta
+`/…` que no sea `//host` ni `/\host`, `./`, `../`) se devuelve sin cambios; en caso
 contrario se trata como un nombre de ruta y se resuelve por reverse. Útil para un
 parámetro `?next=` o un ajuste que pueda contener *o bien* una ruta *o bien* un
 nombre:
@@ -143,12 +143,11 @@ let url = resolve_url("/dashboard", &params)?;   // path  → "/dashboard" (as-i
 (Para redirecciones crudas a una URL conocida, `rustango::shortcuts::redirect(url)`
 devuelve un simple `302`.)
 
-**`resolve_url` no comprueba el host.** `http://evil.example` vuelve sin cambios.
-Antes de redirigir a un `?next=` que envía el usuario, compruébalo con
-`rustango::urls::url_has_allowed_host_and_scheme(url, &allowed_hosts, require_https)`.
-Acepta una ruta relativa, o una URL `http`/`https` cuyo host está en la lista, y
-rechaza `//host`, `\\host`, los caracteres de control y otros esquemas
-(`javascript:`, `data:`, …).
+**`resolve_url` nunca devuelve una URL de otro sitio.** `http://evil.example` y
+`//evil.example` no son nombres de ruta y fallan con `UnknownName`. Para redirigir a
+propósito a una URL absoluta, compruébala con
+`rustango::urls::url_has_allowed_host_and_scheme(url, &allowed_hosts, require_https)`
+y pásala directamente a `redirect`.
 
 ---
 
@@ -290,7 +289,8 @@ para los lookups `__regex`), así que un extractor validador puede compilar una
   ese patrón. Registra el nombre junto a donde montas la ruta para que se mantengan
   sincronizados.
 - **Los valores se percent-encodan** con `reverse`, así que son seguros para
-  colocar en un header `Location` o un `href`.
+  colocar en un header `Location` o un `href`. Un catch-all `{*rest}` toma la clave
+  `rest` y conserva sus separadores `/`.
 - **Sin convertidores regex/tipados** en los patrones (del tipo `<int:pk>`);
   los placeholders son simples `{name}` y los valores se sustituyen tal cual
   (después de codificar). Consulta [Patrones regex y de ruta tipados](#patrones-regex-y-de-ruta-tipados)

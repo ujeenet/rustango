@@ -92,14 +92,15 @@ fn trim_variants() {
     assert!(pg.compile_update(&q3).unwrap().sql.contains("RTRIM("));
 }
 
-// ---------- Concat: PG/MySQL CONCAT vs SQLite || ----------
+// ---------- Concat: MySQL CONCAT vs PG/SQLite || (NULL in, NULL out) ----------
 
 #[test]
-fn pg_concat_emits_native_call() {
+fn pg_concat_emits_text_pipes() {
     let q = update_set_expr(concat([F("name").into(), " ".into(), F("name").into()]));
     let stmt = Postgres.compile_update(&q).unwrap();
     assert!(
-        stmt.sql.contains(r#"= CONCAT("name", $1, "name")"#),
+        stmt.sql
+            .contains(r#"= (CAST("name" AS TEXT) || CAST($1 AS TEXT) || CAST("name" AS TEXT))"#),
         "got: {}",
         stmt.sql
     );
@@ -340,7 +341,8 @@ fn functions_compose_with_arithmetic() {
     let q = update_set_expr(inner);
     let stmt = Postgres.compile_update(&q).unwrap();
     assert!(
-        stmt.sql.contains(r#"= UPPER(CONCAT("name", $1, "name"))"#),
+        stmt.sql
+            .contains(r#"= UPPER((CAST("name" AS TEXT) || CAST($1 AS TEXT) ||"#),
         "got: {}",
         stmt.sql
     );

@@ -1592,3 +1592,55 @@ async fn a_short_default_ttl_does_not_resurrect_purged_pages() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(fetch().await, "v1", "the purged v0 page came back");
 }
+
+/// `query_keys`: only the named params key the page, in any order; the
+/// rest cannot mint new entries. `ignore_query` keys on the path alone.
+#[tokio::test]
+async fn query_keys_bound_the_entries_a_query_can_create() {
+    static RUNS: AtomicU32 = AtomicU32::new(0);
+    let page = |layer: CachePageLayer| {
+        Router::new()
+            .route(
+                "/page",
+                get(|| async { format!("run-{}", RUNS.fetch_add(1, Ordering::SeqCst)) }),
+            )
+            .layer(layer.tenant_agnostic(true))
+    };
+    let status = |app: Router, uri: &'static str| async move {
+        let r = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        r.headers()["x-cache-status"].to_str().unwrap().to_owned()
+    };
+
+    let named = page(CachePageLayer::new(Arc::new(InMemoryCache::new())).query_keys(["q", "page"]));
+    assert_eq!(status(named.clone(), "/page?q=a&page=2").await, "MISS");
+    assert_eq!(
+        status(named.clone(), "/page?page=2&q=a").await,
+        "HIT",
+        "order"
+    );
+    assert_eq!(
+        status(named.clone(), "/page?page=2&q=a&x=junk").await,
+        "HIT",
+        "unnamed"
+    );
+    assert_eq!(
+        status(named.clone(), "/page?q=b&page=2").await,
+        "MISS",
+        "named"
+    );
+
+    let ignored = page(CachePageLayer::new(Arc::new(InMemoryCache::new())).ignore_query());
+    assert_eq!(status(ignored.clone(), "/page?x=1").await, "MISS");
+    assert_eq!(status(ignored.clone(), "/page?x=2").await, "HIT");
+
+    let raw = page(CachePageLayer::new(Arc::new(InMemoryCache::new())));
+    assert_eq!(status(raw.clone(), "/page?x=1").await, "MISS");
+    assert_eq!(
+        status(raw, "/page?x=2").await,
+        "MISS",
+        "default keys the raw query"
+    );
+}

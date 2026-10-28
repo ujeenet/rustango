@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use rustango::audit::{self, AuditEntry, AuditLog};
-use rustango::core::Column as _;
+use rustango::core::{Column as _, Model as _};
 use rustango::sql::{Auto, CounterPool as _, FetcherPool as _, Pool};
 use rustango::{tri_dialect_test, Model};
 
@@ -43,12 +43,47 @@ pub struct Stamp {
     pub created_at: Auto<DateTime<Utc>>,
 }
 
+/// An audited parent whose delete cascades to an audited child, so the
+/// delete reads both before it writes.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "audit_cascade_shelf",
+    app = "audit1675",
+    audit(track = "label")
+)]
+#[allow(dead_code)]
+pub struct Shelf {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 32)]
+    pub label: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "audit_cascade_book",
+    app = "audit1675",
+    audit(track = "title")
+)]
+#[allow(dead_code)]
+pub struct Book {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(on_delete = "cascade")]
+    pub shelf: rustango::sql::ForeignKey<Shelf>,
+    #[rustango(max_length = 32)]
+    pub title: String,
+}
+
 const TABLE: &str = "audit1675_note";
 
 /// Fresh table, and no audit rows left for it by an earlier run.
 async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Note>(pool).await;
     rustango::testkit::matrix::fresh_table::<Stamp>(pool).await;
+    rustango::testkit::matrix::drop_table(pool, Book::SCHEMA.table).await;
+    rustango::testkit::matrix::fresh_table::<Shelf>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Book>(pool).await;
     audit::ensure_table_pool(pool).await.expect("audit table");
     AuditLog::delete_where("entity_table", TABLE, pool)
         .await
@@ -208,22 +243,31 @@ async fn second_soft_delete_keeps_the_first_stamp(pool: &Pool) {
 /// Waits until `n` before-image reads of `audit1675_note` wait on a row lock.
 /// SQLite has no lock view: it waits until the savers hold a connection.
 async fn wait_until_blocked(pool: &Pool, n: i64) {
+    wait_until_blocked_on(pool, TABLE, n).await;
+}
+
+/// [`wait_until_blocked`] for the locked reads of `table`.
+async fn wait_until_blocked_on(pool: &Pool, table: &str, n: i64) {
+    // SQLite counts busy connections; only the server probes name the table.
+    let _ = table;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let blocked: i64 = match pool.dialect().name() {
             #[cfg(feature = "postgres")]
             "postgres" => rustango::sql::sqlx::query_scalar(
                 "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' \
-                 AND query LIKE '%audit1675_note%' AND query LIKE '%FOR UPDATE%'",
+                 AND query LIKE $1 AND query LIKE '%FOR UPDATE%'",
             )
+            .bind(format!("%{table}%"))
             .fetch_one(pool.as_postgres().unwrap())
             .await
             .unwrap(),
             #[cfg(feature = "mysql")]
             "mysql" => rustango::sql::sqlx::query_scalar(
                 "SELECT COUNT(*) FROM information_schema.PROCESSLIST \
-                 WHERE ID <> CONNECTION_ID() AND INFO LIKE '%audit1675_note%FOR UPDATE%'",
+                 WHERE ID <> CONNECTION_ID() AND INFO LIKE ?",
             )
+            .bind(format!("%{table}%FOR UPDATE%"))
             .fetch_one(pool.as_mysql().unwrap())
             .await
             .unwrap(),
@@ -710,6 +754,57 @@ async fn scheduled_task_audits_as_its_registration(pool: &Pool) {
     }
 }
 
+/// An audited delete that cascades reads before it writes. Behind an open
+/// writer it waits, and on SQLite takes the lock at BEGIN: a deferred read
+/// snapshot fails its write at once ("database is locked").
+async fn cascading_delete_waits_for_a_concurrent_writer(pool: &Pool) {
+    #[cfg(feature = "sqlite")]
+    let file;
+    #[cfg(feature = "sqlite")]
+    let pool = if pool.dialect().name() == "sqlite" {
+        file = rustango::testkit::matrix::sqlite_file_pool().await;
+        setup(&file).await;
+        &file
+    } else {
+        pool
+    };
+    let mut shelf = Shelf {
+        id: 1,
+        label: "a".into(),
+    };
+    shelf.insert_pool(pool).await.expect("shelf");
+    Book {
+        id: 1,
+        shelf: rustango::sql::ForeignKey::unloaded(1),
+        title: "b".into(),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("book");
+    let update = Shelf::objects()
+        .where_(Shelf::id.eq(1))
+        .update()
+        .set("label", "held")
+        .compile()
+        .unwrap();
+    let mut writer = rustango::sql::transaction_pool(pool).await.unwrap();
+    rustango::sql::update_tx(&mut writer, &update)
+        .await
+        .unwrap();
+    let deleter = {
+        let pool = pool.clone();
+        tokio::spawn(async move { shelf.delete_pool(&pool).await })
+    };
+    wait_until_blocked_on(pool, Shelf::SCHEMA.table, 1).await;
+    writer.commit().await.unwrap();
+    let gone = deleter
+        .await
+        .unwrap()
+        .expect("delete once the writer commits");
+    assert_eq!(gone, 1);
+    assert_eq!(Book::objects().count(pool).await.unwrap(), 0, "cascaded");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -722,6 +817,7 @@ tri_dialect_test! {
         failed_pre_read_fails_the_save,
         second_soft_delete_keeps_the_first_stamp,
         save_waits_for_a_concurrent_writer,
+        cascading_delete_waits_for_a_concurrent_writer,
         pg_macro_saves_queue_behind_each_other,
         pg_macro_save_skips_noop_and_fails_on_pre_read,
         pg_macro_save_retries_after_failed_commit,

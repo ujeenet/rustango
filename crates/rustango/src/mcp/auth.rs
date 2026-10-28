@@ -686,12 +686,7 @@ pub(crate) fn raw_key_cache_test_lock() -> &'static tokio::sync::Mutex<()> {
 // across processes.
 
 pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(header::AUTHORIZATION)?
-        .to_str()
-        .ok()?
-        .strip_prefix("Bearer ")
-        .map(str::trim)
+    crate::bearer::token(headers)
 }
 
 /// The request's origin, `scheme://host`, read from the headers. It

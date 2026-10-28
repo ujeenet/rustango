@@ -257,7 +257,7 @@ pub(crate) fn encrypt_with(
     Ok(base64::engine::general_purpose::STANDARD.encode(framed))
 }
 
-#[cfg(test)]
+#[cfg_attr(not(all(feature = "tenancy", feature = "totp")), allow(dead_code))]
 pub(crate) fn decrypt_with(
     secret: Option<&str>,
     stored: &str,

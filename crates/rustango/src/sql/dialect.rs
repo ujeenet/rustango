@@ -758,9 +758,8 @@ pub trait Dialect: Send + Sync {
     /// POSIX regex match, for the `__regex` and `__iregex` lookups.
     ///
     /// The default is Postgres' `~`, `!~`, `~*` and `!~*`. MySQL and
-    /// SQLite use `REGEXP` and `NOT REGEXP`; neither has a
-    /// case-insensitive form, so both wrap the column and the
-    /// placeholder in `LOWER(…)` for those variants.
+    /// SQLite use `REGEXP` and `NOT REGEXP` with an inline `(?i)` /
+    /// `(?-i)` flag in the pattern.
     fn write_regex(
         &self,
         sql: &mut String,

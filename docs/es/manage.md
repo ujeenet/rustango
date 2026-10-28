@@ -762,7 +762,7 @@ Imprime la versión del framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.8
+rustango 0.61.9
 ```
 
 ### `about`
@@ -774,7 +774,7 @@ Incluye esto en los tickets de soporte cuando algo va mal.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.8
+  version:        0.61.9
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local

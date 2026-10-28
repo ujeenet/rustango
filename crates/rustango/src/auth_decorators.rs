@@ -193,11 +193,7 @@ where
         }
     }
     // Anonymous, or the predicate said no: redirect to login.
-    let original = parts
-        .uri
-        .path_and_query()
-        .map(|p| p.as_str().to_owned())
-        .unwrap_or_else(|| "/".to_owned());
+    let original = next_target(&parts);
     redirect_to_login(&cfg.login_url, &cfg.redirect_field, &original)
 }
 
@@ -475,11 +471,7 @@ async fn handle_permission_required(
         .unwrap_or(crate::extractors::SessionUser(None));
     let Some(u) = user.0.as_ref() else {
         // Anonymous: redirect to login with ?next=.
-        let original = parts
-            .uri
-            .path_and_query()
-            .map(|p| p.as_str().to_owned())
-            .unwrap_or_else(|| "/".to_owned());
+        let original = next_target(&parts);
         return redirect_to_login(&cfg.login_url, &cfg.redirect_field, &original);
     };
     let uid = match u.id.get().copied() {
@@ -599,12 +591,16 @@ async fn handle_login_required(
         return next.run(req).await;
     }
     // Anonymous: build the 302 target from the original URL.
-    let original = parts
-        .uri
-        .path_and_query()
-        .map(|p| p.as_str().to_owned())
-        .unwrap_or_else(|| "/".to_owned());
+    let original = next_target(&parts);
     redirect_to_login(&cfg.login_url, &cfg.redirect_field, &original)
+}
+
+/// The `?next=` target: the path and query as sent, nest prefix included.
+#[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+fn next_target(parts: &axum::http::request::Parts) -> String {
+    crate::urls::original_uri(&parts.uri, &parts.extensions)
+        .path_and_query()
+        .map_or_else(|| "/".to_owned(), |p| p.as_str().to_owned())
 }
 
 /// Build the 302 to `login_url` with the URL-encoded `original` path
@@ -913,6 +909,35 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap();
         assert_eq!(loc, "/login?next=%2Fprofile");
+    }
+
+    /// Under `nest`, `next=` is the path the browser asked for.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn a_nested_gate_keeps_the_prefix_in_next() {
+        use axum::body::Body;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt as _;
+
+        let inner = Router::new()
+            .route("/orders", get(|| async { "secret" }))
+            .layer(login_required("/login"));
+        let res = Router::new()
+            .nest("/app", inner)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/app/orders?page=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FOUND);
+        assert_eq!(
+            res.headers()[header::LOCATION],
+            "/login?next=%2Fapp%2Forders%3Fpage%3D2"
+        );
     }
 
     #[cfg(feature = "tenancy")]

@@ -63,7 +63,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
-use axum::extract::{OriginalUri, Request};
+use axum::extract::Request;
 use axum::http::header::{CONTENT_LENGTH, HOST, SET_COOKIE};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
@@ -525,10 +525,7 @@ fn cache_key(scope: &str, parts: &Parts, tenant: Option<&str>, key: &str) -> Str
     }
     h.field(parts.method.as_str().as_bytes());
     // A nested router strips its prefix from `uri`; key on the full path.
-    let uri = parts
-        .extensions
-        .get::<OriginalUri>()
-        .map_or(&parts.uri, |o| &o.0);
+    let uri = crate::urls::original_uri(&parts.uri, &parts.extensions);
     h.opt(uri.path_and_query().map(|pq| pq.as_str().as_bytes()));
     h.field(key.as_bytes());
     format!("idem:{}", hex(&h.0.finalize()))

@@ -333,6 +333,9 @@ async fn handle(cfg: &ErrorPagesLayer, req: Request<Body>, next: Next) -> Respon
         None => ("text/plain; charset=utf-8", message),
     };
     set_body_headers(&mut parts.headers, content_type);
+    // The page may name the user and carry a CSRF token.
+    crate::vary::mark_no_store(&mut parts.headers);
+    crate::vary::add_vary(&mut parts.headers, "Cookie");
     Response::from_parts(parts, Body::from(body))
 }
 
@@ -623,6 +626,22 @@ mod tests {
 
         let json = call(app, get_req("/json", "text/html", false)).await;
         assert_eq!(json.body, r#"{"error":"x"}"#);
+    }
+
+    /// A dressed page can carry the user and a CSRF token: no shared cache keeps it.
+    #[tokio::test]
+    async fn a_dressed_page_is_private_and_varies_on_cookie() {
+        let app = app(ErrorPagesLayer::new());
+        for (accept, htmx) in [("text/html", false), ("*/*", true)] {
+            let got = call(app.clone(), get_req("/nowhere", accept, htmx)).await;
+            let cc = got.headers[header::CACHE_CONTROL].to_str().unwrap();
+            assert!(cc.contains("private") && cc.contains("no-store"), "{cc}");
+            let vary = got.headers[header::VARY]
+                .to_str()
+                .unwrap()
+                .to_ascii_lowercase();
+            assert!(vary.contains("cookie"), "{vary}");
+        }
     }
 
     /// A framework router's HTML error page is kept; its plain-text one is dressed.

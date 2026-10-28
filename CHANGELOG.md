@@ -4,6 +4,39 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.9] — 2026-10-28
+
+### Fixed — ORM and migrations
+
+- `makemigrations` skips `#[rustango(proxy)]` models and keeps one model per table, so a proxy no longer gets a second `CREATE TABLE`.
+- `makemigrations` refuses a composite FK whose target columns are not a primary or unique key, instead of writing a migration PG rejects.
+- A generated field added to an existing model is added as `GENERATED ALWAYS AS (…) STORED` (SQLite by a table rebuild), also NOT NULL on a filled table.
+- `migrate --fake` stamps only a migration of the scope it targets, and `--system` / `--all-tenants` without `--fake` are refused.
+- `values()` + `distinct()` ordered by a column outside the projection works on PG and MySQL.
+- `fetch_paginated*` reports the real total for a page past the last row.
+- PG `dates()` / `datetimes()` bucket a timestamp in UTC, as MySQL and SQLite do.
+- Window `PARTITION BY` / `ORDER BY` columns are qualified beside a join.
+- `__contains`, `__startswith`, `__endswith` and `like` match case on MySQL and SQLite too, as documented.
+- `__iregex` no longer lowercases the pattern (`\D` stayed `\d`), and `__regex` is case-sensitive on MySQL.
+- `concat()` with a NULL operand is NULL on PG too; `round_to()` works on float columns on PG; SQLite `lpad()` matches PG and MySQL.
+- XOR counts a NULL operand as false with two operands, as with three.
+- Audited `save`, `insert` and `delete` on SQLite take the write lock at `BEGIN`, so a cascading delete no longer fails with "database is locked".
+
+### Fixed — auth and HTTP security
+
+- Operator TOTP sign-in upgrades a weak password hash once the code passes; the new hash rides the pending cookie encrypted.
+- Tenant admin login and change-password pages show only messages they signed.
+- `messages::Outbox` `Debug` hides the signing key.
+- `JwtBackend::issue_for_user` tokens stamp `iat` past a logout-all; `issue` documents that it cannot.
+- Admin, console and error pages send `Cache-Control: private` and `Vary: Cookie` (console and error pages `no-store`); tenant JWT routes and MCP token endpoints send `no-store`.
+- Member SSO failure pages answer a matching error status with `no-store`.
+- Bearer 401s carry `WWW-Authenticate`; the `Bearer` scheme is matched case-insensitively.
+- `login_required` `?next=`, trailing-slash redirects and ListView bulk-action redirects keep the `nest` prefix.
+- `urls::reverse` fills `{*rest}` catch-alls; `resolve_url` returns only same-site URLs.
+- MCP SSE streams are capped per agent and per tenant (429 past the cap).
+- `CachePageLayer::query_keys` / `ignore_query` bound the entries a query string can create.
+- `EtagLayer` only handles GET and HEAD.
+
 ## [0.61.8] — 2026-10-28
 
 ### Fixed — migrations, dev key, uploads, views and leaks
