@@ -760,7 +760,7 @@ pub async fn render_form_for_parent(
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
 ) -> Result<Vec<InlineFormPanel>, ExecError> {
-    render_form_for_parent_in(pool, parent_model, parent_pk, None).await
+    render_form_for_parent_in(pool, parent_model, parent_pk, None, None).await
 }
 
 /// [`render_form_for_parent`] limited to child rows the request's queryset hooks allow.
@@ -769,6 +769,7 @@ pub(crate) async fn render_form_for_parent_in(
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
     parts: Option<&Parts>,
+    submitted: Option<&HashMap<String, String>>,
 ) -> Result<Vec<InlineFormPanel>, ExecError> {
     let registrations = for_parent_table(parent_model.table);
     if registrations.is_empty() {
@@ -819,82 +820,22 @@ pub(crate) async fn render_form_for_parent_in(
 
         let prefix = child_model.table.to_owned();
         let initial_forms = rows.len();
-        let total_forms = initial_forms + extra;
         let child_cfg = admin_config_or_default(child_model);
+        let (total_forms, rendered_rows) = form_panel_rows(
+            &child_cfg,
+            &display_fields,
+            pk_field,
+            &prefix,
+            &rows,
+            extra,
+            submitted,
+        );
 
         let mut field_labels: Vec<String> =
             display_fields.iter().map(|f| f.name.to_owned()).collect();
         // Append a Delete column only when there's something to delete.
         if initial_forms > 0 {
             field_labels.push("Delete".to_owned());
-        }
-
-        let mut rendered_rows: Vec<serde_json::Value> = Vec::with_capacity(total_forms);
-        for (idx, row) in rows.iter().enumerate() {
-            let pk_text = row_pk_text(row, pk_field);
-            let cells: Vec<serde_json::Value> = display_fields
-                .iter()
-                .map(|f| {
-                    // Route through the same formatter the main change form
-                    // uses (#datetime-local fix) so DateTime/Json/Array values
-                    // are normalised to what each `<input>` accepts — a bare
-                    // `value_as_form_string` clone left e.g. a `DateTime`'s
-                    // `+00:00` offset in place, which `datetime-local` rejects.
-                    let raw_str = crate::admin::render::render_value_for_input_json(row, f);
-                    let input_html = render_prefixed_input(
-                        &child_cfg,
-                        f,
-                        &raw_str,
-                        (&prefix, idx, WriteKind::Update),
-                    );
-                    serde_json::json!({
-                        "label": f.display_label(),
-                        "input_html": input_html,
-                    })
-                })
-                .collect();
-            // Hidden PK input keeps the row identifiable through the
-            // round-trip even if the operator changes nothing else.
-            let pk_field_name = pk_field.map(|p| p.name).unwrap_or("id");
-            let hidden_pk = format!(
-                r#"<input type="hidden" name="{p}-{i}-{n}" value="{v}">"#,
-                p = html_escape(&prefix),
-                i = idx,
-                n = html_escape(pk_field_name),
-                v = html_escape(&pk_text),
-            );
-            let delete_input_html = format!(
-                r#"<input type="checkbox" name="{p}-{i}-DELETE" value="on">"#,
-                p = html_escape(&prefix),
-                i = idx,
-            );
-            rendered_rows.push(serde_json::json!({
-                "pk": pk_text,
-                "cells": cells,
-                "hidden_pk": hidden_pk,
-                "delete_input_html": delete_input_html,
-            }));
-        }
-        // Extra blank rows for adding new children. No hidden PK (the
-        // POST handler treats absence as "INSERT") and no DELETE box.
-        for idx in initial_forms..total_forms {
-            let cells: Vec<serde_json::Value> = display_fields
-                .iter()
-                .map(|f| {
-                    let input_html =
-                        render_prefixed_input(&child_cfg, f, "", (&prefix, idx, WriteKind::Insert));
-                    serde_json::json!({
-                        "label": f.display_label(),
-                        "input_html": input_html,
-                    })
-                })
-                .collect();
-            rendered_rows.push(serde_json::json!({
-                "pk": "",
-                "cells": cells,
-                "hidden_pk": "",
-                "delete_input_html": "",
-            }));
         }
 
         let label = if inline.label.is_empty() {
@@ -920,6 +861,104 @@ pub(crate) async fn render_form_for_parent_in(
         });
     }
     Ok(panels)
+}
+
+/// Rendered rows of one editable panel and its TOTAL_FORMS. With a
+/// refused POST in `submitted`, the rows show what was typed, not the stored values.
+fn form_panel_rows(
+    child_cfg: &crate::core::AdminConfig,
+    display_fields: &[&'static FieldSchema],
+    pk_field: Option<&'static FieldSchema>,
+    prefix: &str,
+    rows: &[serde_json::Value],
+    extra: usize,
+    submitted: Option<&HashMap<String, String>>,
+) -> (usize, Vec<serde_json::Value>) {
+    let initial_forms = rows.len();
+    // Only a POST that carried this panel's formset replaces its values.
+    let submitted = submitted.filter(|form| form.contains_key(&format!("{prefix}-TOTAL_FORMS")));
+    let total_forms = submitted
+        .and_then(|form| crate::forms::formset::total_forms(form, prefix).ok())
+        .map_or(initial_forms + extra, |n| {
+            n.clamp(initial_forms, crate::forms::formset::MAX_FORMS)
+        });
+    let typed = |idx: usize, f: &FieldSchema, kind: WriteKind| -> Option<String> {
+        let form = submitted.filter(|_| f.accepts_input(kind))?;
+        // An unchecked box is not sent: missing means blank.
+        Some(
+            form.get(&format!("{prefix}-{idx}-{}", f.name))
+                .cloned()
+                .unwrap_or_default(),
+        )
+    };
+    let pk_field_name = pk_field.map_or("id", |p| p.name);
+    let mut rendered_rows: Vec<serde_json::Value> = Vec::with_capacity(total_forms);
+    for (idx, row) in rows.iter().enumerate() {
+        let pk_text = row_pk_text(row, pk_field);
+        let cells: Vec<serde_json::Value> = display_fields
+            .iter()
+            .map(|f| {
+                // Route through the same formatter the main change form
+                // uses, so DateTime/Json/Array values are normalised to
+                // what each `<input>` accepts.
+                let raw_str = typed(idx, f, WriteKind::Update)
+                    .unwrap_or_else(|| crate::admin::render::render_value_for_input_json(row, f));
+                let input_html =
+                    render_prefixed_input(child_cfg, f, &raw_str, (prefix, idx, WriteKind::Update));
+                serde_json::json!({
+                    "label": f.display_label(),
+                    "input_html": input_html,
+                })
+            })
+            .collect();
+        // Hidden PK input keeps the row identifiable through the
+        // round-trip even if the operator changes nothing else.
+        let hidden_pk = format!(
+            r#"<input type="hidden" name="{p}-{i}-{n}" value="{v}">"#,
+            p = html_escape(prefix),
+            i = idx,
+            n = html_escape(pk_field_name),
+            v = html_escape(&pk_text),
+        );
+        let deleting = submitted
+            .and_then(|form| form.get(&format!("{prefix}-{idx}-DELETE")))
+            .is_some_and(|v| !v.is_empty());
+        let delete_input_html = format!(
+            r#"<input type="checkbox" name="{p}-{i}-DELETE" value="on"{c}>"#,
+            p = html_escape(prefix),
+            i = idx,
+            c = if deleting { " checked" } else { "" },
+        );
+        rendered_rows.push(serde_json::json!({
+            "pk": pk_text,
+            "cells": cells,
+            "hidden_pk": hidden_pk,
+            "delete_input_html": delete_input_html,
+        }));
+    }
+    // Blank rows for adding new children. No hidden PK (the POST
+    // handler treats absence as "INSERT") and no DELETE box.
+    for idx in initial_forms..total_forms {
+        let cells: Vec<serde_json::Value> = display_fields
+            .iter()
+            .map(|f| {
+                let raw_str = typed(idx, f, WriteKind::Insert).unwrap_or_default();
+                let input_html =
+                    render_prefixed_input(child_cfg, f, &raw_str, (prefix, idx, WriteKind::Insert));
+                serde_json::json!({
+                    "label": f.display_label(),
+                    "input_html": input_html,
+                })
+            })
+            .collect();
+        rendered_rows.push(serde_json::json!({
+            "pk": "",
+            "cells": cells,
+            "hidden_pk": "",
+            "delete_input_html": "",
+        }));
+    }
+    (total_forms, rendered_rows)
 }
 
 /// Wrap `super::render::render_input` so the generated `name=` /
@@ -2052,7 +2091,7 @@ pub async fn render_form_generic_for_parent(
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
 ) -> Result<Vec<InlineFormPanel>, ExecError> {
-    render_form_generic_for_parent_in(pool, parent_model, parent_pk, None).await
+    render_form_generic_for_parent_in(pool, parent_model, parent_pk, None, None).await
 }
 
 /// [`render_form_generic_for_parent`] limited to child rows the request's queryset hooks allow.
@@ -2061,6 +2100,7 @@ pub(crate) async fn render_form_generic_for_parent_in(
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
     parts: Option<&Parts>,
+    submitted: Option<&HashMap<String, String>>,
 ) -> Result<Vec<InlineFormPanel>, ExecError> {
     let registrations = generic_for_parent_table(parent_model.table);
     if registrations.is_empty() {
@@ -2139,77 +2179,22 @@ pub(crate) async fn render_form_generic_for_parent_in(
 
         let prefix = child_model.table.to_owned();
         let initial_forms = rows.len();
-        let total_forms = initial_forms + extra;
         let child_cfg = admin_config_or_default(child_model);
+        let (total_forms, rendered_rows) = form_panel_rows(
+            &child_cfg,
+            &display_fields,
+            pk_field,
+            &prefix,
+            &rows,
+            extra,
+            submitted,
+        );
 
         let mut field_labels: Vec<String> =
             display_fields.iter().map(|f| f.name.to_owned()).collect();
+        // Append a Delete column only when there's something to delete.
         if initial_forms > 0 {
             field_labels.push("Delete".to_owned());
-        }
-
-        let mut rendered_rows: Vec<serde_json::Value> = Vec::with_capacity(total_forms);
-        for (idx, row) in rows.iter().enumerate() {
-            let pk_text = row_pk_text(row, pk_field);
-            let cells: Vec<serde_json::Value> = display_fields
-                .iter()
-                .map(|f| {
-                    // Route through the same formatter the main change form
-                    // uses (#datetime-local fix) so DateTime/Json/Array values
-                    // are normalised to what each `<input>` accepts — a bare
-                    // `value_as_form_string` clone left e.g. a `DateTime`'s
-                    // `+00:00` offset in place, which `datetime-local` rejects.
-                    let raw_str = crate::admin::render::render_value_for_input_json(row, f);
-                    let input_html = render_prefixed_input(
-                        &child_cfg,
-                        f,
-                        &raw_str,
-                        (&prefix, idx, WriteKind::Update),
-                    );
-                    serde_json::json!({
-                        "label": f.display_label(),
-                        "input_html": input_html,
-                    })
-                })
-                .collect();
-            let pk_field_name = pk_field.map(|p| p.name).unwrap_or("id");
-            let hidden_pk = format!(
-                r#"<input type="hidden" name="{p}-{i}-{n}" value="{v}">"#,
-                p = html_escape(&prefix),
-                i = idx,
-                n = html_escape(pk_field_name),
-                v = html_escape(&pk_text),
-            );
-            let delete_input_html = format!(
-                r#"<input type="checkbox" name="{p}-{i}-DELETE" value="on">"#,
-                p = html_escape(&prefix),
-                i = idx,
-            );
-            rendered_rows.push(serde_json::json!({
-                "pk": pk_text,
-                "cells": cells,
-                "hidden_pk": hidden_pk,
-                "delete_input_html": delete_input_html,
-            }));
-        }
-        for idx in initial_forms..total_forms {
-            let cells: Vec<serde_json::Value> = display_fields
-                .iter()
-                .map(|f| {
-                    let input_html =
-                        render_prefixed_input(&child_cfg, f, "", (&prefix, idx, WriteKind::Insert));
-                    serde_json::json!({
-                        "label": f.display_label(),
-                        "input_html": input_html,
-                    })
-                })
-                .collect();
-            rendered_rows.push(serde_json::json!({
-                "pk": "",
-                "cells": cells,
-                "hidden_pk": "",
-                "delete_input_html": "",
-            }));
         }
 
         let label = if inline.label.is_empty() {

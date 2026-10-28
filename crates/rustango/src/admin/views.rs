@@ -18,8 +18,8 @@ use super::forms;
 use super::helpers::{
     admin_config_or_default, build_fk_joins, chrome_context, fk_display_targets,
     fk_map_from_joined_rows_json, is_secret_field, lookup_model, parse_pk, primary_key_or_internal,
-    render_cell_json, render_form, render_secret_cell, resolve_model, resolve_model_and_pk,
-    search_columns, url_filterable, FormLayout, ListQuery,
+    render_cell_json, render_secret_cell, resolve_model, resolve_model_and_pk, search_columns,
+    url_filterable, FormLayout, ListQuery,
 };
 use super::object_permissions::AdminWrite;
 use super::queryset_hooks::RowScope;
@@ -2103,6 +2103,26 @@ async fn preload_gfk_cts(
         .unwrap_or_default()
 }
 
+/// The create form again after a refused save, with the ContentType picker.
+async fn create_form_again(
+    state: &AppState,
+    model: &'static crate::core::ModelSchema,
+    form: &HashMap<String, String>,
+    msg: &str,
+) -> Response {
+    let gfk_cts = preload_gfk_cts(state, model).await;
+    Html(super::helpers::render_form_with_inlines_and_picker(
+        state,
+        model,
+        Some(form),
+        false,
+        Some(msg),
+        Vec::new(),
+        &gfk_cts,
+    ))
+    .into_response()
+}
+
 pub(crate) async fn create_submit(
     parts: axum::http::request::Parts,
     Path(table): Path<String>,
@@ -2124,6 +2144,10 @@ pub(crate) async fn create_submit(
     }
 
     let pk_field = primary_key_or_internal(model)?;
+    // A refused save shows the form again with what was typed.
+    let (state_ref, form_ref) = (&state, &form);
+    let refused =
+        |msg: String| async move { create_form_again(state_ref, model, form_ref, &msg).await };
     // `readonly_fields` are display-only, so they are not form input.
     // An auto PK never is; a `default_uuid_v7` one is stamped (#1725).
     let admin_cfg = admin_config_or_default(model);
@@ -2143,15 +2167,13 @@ pub(crate) async fn create_submit(
         Ok(v) => v,
         Err(e) => {
             // Re-render the form with the error instead of a 4xx.
-            let html = render_form(&state, model, Some(&form), false, Some(&e.to_string()));
-            return Ok(Html(html).into_response());
+            return Ok(refused(e.to_string()).await);
         }
     };
     stamp_readonly_timestamps(model, &admin_cfg, &mut collected);
     super::object_permissions::default_locked_flags(model, &locked.superuser_only, &mut collected);
     if let Err(e) = super::derived_fields::apply(model.table, &mut collected, None).await {
-        let html = render_form(&state, model, Some(&form), false, Some(e.as_str()));
-        return Ok(Html(html).into_response());
+        return Ok(refused(e.as_str().to_owned()).await);
     }
     // A tenant's host, path prefix and port, claimed as the console does.
     #[cfg(feature = "tenancy")]
@@ -2159,8 +2181,7 @@ pub(crate) async fn create_submit(
     {
         Ok(c) => c,
         Err(e) => {
-            let html = render_form(&state, model, Some(&form), false, Some(e.as_str()));
-            return Ok(Html(html).into_response());
+            return Ok(refused(e.as_str().to_owned()).await);
         }
     };
     let audit_form = super::audit::audit_form(model, &admin_cfg, &form, &collected);
@@ -2189,14 +2210,13 @@ pub(crate) async fn create_submit(
     .await;
     // An `audit(...)` model's entry commits with the INSERT, as on edit (#2101).
     let emit = crate::audit::DiffEmit::for_model(model);
-    let refused = |msg: String| Html(render_form(&state, model, Some(&form), false, Some(&msg)));
     // MySQL breaks two claims of one free value with a deadlock: retry once.
     #[cfg(feature = "tenancy")]
     let mut retry = claims.retries();
     let (mut tx, pk, deferred) = loop {
         let mut tx = match crate::audit::PoolBoundTx::begin_write(&state.pool).await {
             Ok(tx) => tx,
-            Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
+            Err(e) => return Ok(refused(write_error(model, &e)).await),
         };
         let written = crate::audit::insert_one_with_entry_tx(
             &mut tx,
@@ -2222,7 +2242,7 @@ pub(crate) async fn create_submit(
                 if std::mem::take(&mut retry) && e.is_deadlock() {
                     continue;
                 }
-                return Ok(refused(write_error(model, &e)).into_response());
+                return Ok(refused(write_error(model, &e)).await);
             }
         };
         #[cfg(feature = "tenancy")]
@@ -2231,7 +2251,7 @@ pub(crate) async fn create_submit(
             if std::mem::take(&mut retry) && e.is_deadlock() {
                 continue;
             }
-            return Ok(refused(claim_refusal(model, e)).into_response());
+            return Ok(refused(claim_refusal(model, e)).await);
         }
         break (tx, pk, deferred);
     };
@@ -2255,11 +2275,11 @@ pub(crate) async fn create_submit(
         }
         Err(e) => {
             rollback_quietly(tx, model.table).await;
-            return Ok(refused(write_error(model, &e)).into_response());
+            return Ok(refused(write_error(model, &e)).await);
         }
     }
     if let Err(e) = tx.commit().await {
-        return Ok(refused(write_error(model, &e.into())).into_response());
+        return Ok(refused(write_error(model, &e.into())).await);
     }
     if let Some(entry) = deferred {
         super::audit::emit_best_effort(&state, &entry).await;
@@ -2485,31 +2505,7 @@ pub(crate) async fn edit_form(
             render::render_value_for_input_json(&row, f),
         );
     }
-    // Editable inline panels under the parent form. Generic ones
-    // come after the regular ones, in registration order.
-    // Best-effort: a child-table fetch failure drops the inlines to
-    // empty instead of breaking the edit page.
-    let mut inline_panels = super::inlines::render_form_for_parent_in(
-        &state.pool,
-        model,
-        pk_value.clone(),
-        Some(&parts),
-    )
-    .await
-    .unwrap_or_default();
-    let generic_panels = super::inlines::render_form_generic_for_parent_in(
-        &state.pool,
-        model,
-        pk_value,
-        Some(&parts),
-    )
-    .await
-    .unwrap_or_default();
-    inline_panels.extend(generic_panels);
-    // Only children this user may edit get a FormSet.
-    inline_panels.retain(|p| {
-        lookup_model(&state, &p.child_table).is_some() && !state.is_read_only(&p.child_table)
-    });
+    let inline_panels = edit_inline_panels(&state, &parts, model, pk_value, None).await;
     // Same preload as `create_form`, so the edit form also gets the
     // ContentType `<select>`.
     let gfk_cts = preload_gfk_cts(&state, model).await;
@@ -2523,6 +2519,71 @@ pub(crate) async fn edit_form(
         &gfk_cts,
     ))
     .into_response())
+}
+
+/// Editable inline panels under the parent form, generic ones last.
+/// `submitted` re-shows a refused POST's rows. Best-effort: a child-table
+/// fetch failure drops the inlines instead of breaking the edit page.
+async fn edit_inline_panels(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    model: &'static crate::core::ModelSchema,
+    pk_value: SqlValue,
+    submitted: Option<&HashMap<String, String>>,
+) -> Vec<super::inlines::InlineFormPanel> {
+    let mut inline_panels = super::inlines::render_form_for_parent_in(
+        &state.pool,
+        model,
+        pk_value.clone(),
+        Some(parts),
+        submitted,
+    )
+    .await
+    .unwrap_or_default();
+    let generic_panels = super::inlines::render_form_generic_for_parent_in(
+        &state.pool,
+        model,
+        pk_value,
+        Some(parts),
+        submitted,
+    )
+    .await
+    .unwrap_or_default();
+    inline_panels.extend(generic_panels);
+    // Only children this user may edit get a FormSet.
+    inline_panels.retain(|p| {
+        lookup_model(state, &p.child_table).is_some() && !state.is_read_only(&p.child_table)
+    });
+    inline_panels
+}
+
+/// The edit form again after a refused save: what was typed, inline
+/// rows included, with the error and the ContentType picker.
+async fn edit_form_again(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    model: &'static crate::core::ModelSchema,
+    (pk_value, pk_raw): (&SqlValue, &str),
+    form: &HashMap<String, String>,
+    msg: &str,
+) -> Response {
+    let inline_panels = edit_inline_panels(state, parts, model, pk_value.clone(), Some(form)).await;
+    let gfk_cts = preload_gfk_cts(state, model).await;
+    // The form action is built from the PK, which a crafted POST may omit.
+    let mut prefill = form.clone();
+    if let Some(pk) = model.primary_key() {
+        prefill.insert(pk.name.to_owned(), pk_raw.to_owned());
+    }
+    Html(super::helpers::render_form_with_inlines_and_picker(
+        state,
+        model,
+        Some(&prefill),
+        true,
+        Some(msg),
+        inline_panels,
+        &gfk_cts,
+    ))
+    .into_response()
 }
 
 pub(crate) async fn update_submit(
@@ -2539,6 +2600,20 @@ pub(crate) async fn update_submit(
     }
     let pk_field = primary_key_or_internal(model)?;
     let pk_value = parse_pk(&state, model, pk_field, &pk_raw).await?;
+    // A refused save shows the form again with what was typed.
+    let again_pk = (pk_value.clone(), pk_raw.clone());
+    let (state_ref, parts_ref, form_ref, again_pk_ref) = (&state, &parts, &form, &again_pk);
+    let refused = |msg: String| async move {
+        edit_form_again(
+            state_ref,
+            parts_ref,
+            model,
+            (&again_pk_ref.0, &again_pk_ref.1),
+            form_ref,
+            &msg,
+        )
+        .await
+    };
 
     // `has_change_permission(request, obj)`. Fetch the row first so
     // the hook sees the state before the update. A select error is
@@ -2587,22 +2662,19 @@ pub(crate) async fn update_submit(
     let mut collected = match forms::collect_values(model, &form, &skip) {
         Ok(v) => v,
         Err(e) => {
-            let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));
-            return Ok(Html(html).into_response());
+            return Ok(refused(e.to_string()).await);
         }
     };
     keep_unchanged(model, &form, pre_update_row.as_ref(), &mut collected);
     if deactivates_self(&parts, model, pre_update_row.as_ref(), &collected) {
         let msg = "You cannot deactivate yourself: your next request would be refused. \
                    Ask another admin to do it.";
-        let html = render_form(&state, model, Some(&form), true, Some(msg));
-        return Ok(Html(html).into_response());
+        return Ok(refused(msg.to_owned()).await);
     }
     if let Err(e) =
         super::derived_fields::apply(model.table, &mut collected, pre_update_row.as_ref()).await
     {
-        let html = render_form(&state, model, Some(&form), true, Some(e.as_str()));
-        return Ok(Html(html).into_response());
+        return Ok(refused(e.as_str().to_owned()).await);
     }
     #[cfg(feature = "tenancy")]
     let claims = match crate::tenancy::org_host::AdminClaims::of(
@@ -2612,8 +2684,7 @@ pub(crate) async fn update_submit(
     ) {
         Ok(c) => c,
         Err(e) => {
-            let html = render_form(&state, model, Some(&form), true, Some(e.as_str()));
-            return Ok(Html(html).into_response());
+            return Ok(refused(e.as_str().to_owned()).await);
         }
     };
     let audit_form = super::audit::audit_form(model, &admin_cfg, &form, &collected);
@@ -2631,12 +2702,10 @@ pub(crate) async fn update_submit(
         Ok(plan) => plan,
         Err(super::inlines::InlinePlanError::Admin(e)) => return Err(e),
         Err(super::inlines::InlinePlanError::Rejected(msg)) => {
-            let html = render_form(&state, model, Some(&form), true, Some(&msg));
-            return Ok(Html(html).into_response());
+            return Ok(refused(msg).await);
         }
         Err(super::inlines::InlinePlanError::BadFormset(e)) => {
-            let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));
-            return Ok(Html(html).into_response());
+            return Ok(refused(e.to_string()).await);
         }
     };
 
@@ -2668,7 +2737,6 @@ pub(crate) async fn update_submit(
     let emit = crate::audit::DiffEmit::for_model(model);
     // Parent and inline writes share one transaction: a refused inline
     // row rolls the parent back too (#2339).
-    let refused = |msg: String| Html(render_form(&state, model, Some(&form), true, Some(&msg)));
     // An extra host is checked after its UPDATE: retried once, as on create.
     #[cfg(feature = "tenancy")]
     let mut retry = claims.retries();
@@ -2679,12 +2747,12 @@ pub(crate) async fn update_submit(
         #[cfg(feature = "tenancy")]
         let mut tx = match claims.begin(&state.pool, &pk_value).await {
             Ok(tx) => crate::audit::PoolBoundTx::opened_on(&state.pool, tx),
-            Err(e) => return Ok(refused(claim_refusal(model, e)).into_response()),
+            Err(e) => return Ok(refused(claim_refusal(model, e)).await),
         };
         #[cfg(not(feature = "tenancy"))]
         let mut tx = match crate::audit::PoolBoundTx::begin_write(&state.pool).await {
             Ok(tx) => tx,
-            Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
+            Err(e) => return Ok(refused(write_error(model, &e)).await),
         };
         #[cfg(feature = "tenancy")]
         let operators = match crate::tenancy::operators::AdminOperatorWrite::lock(
@@ -2724,7 +2792,7 @@ pub(crate) async fn update_submit(
                 if std::mem::take(&mut retry) && e.is_deadlock() {
                     continue;
                 }
-                return Ok(refused(write_error(model, &e)).into_response());
+                return Ok(refused(write_error(model, &e)).await);
             }
         };
         #[cfg(feature = "tenancy")]
@@ -2733,7 +2801,7 @@ pub(crate) async fn update_submit(
             if std::mem::take(&mut retry) && e.is_deadlock() {
                 continue;
             }
-            return Ok(refused(claim_refusal(model, e)).into_response());
+            return Ok(refused(claim_refusal(model, e)).await);
         }
         #[cfg(feature = "tenancy")]
         match operators.check(&mut tx).await {
@@ -2747,7 +2815,7 @@ pub(crate) async fn update_submit(
             }
             Err(e) => {
                 rollback_quietly(tx, model.table).await;
-                return Ok(refused(e.to_string()).into_response());
+                return Ok(refused(e.to_string()).await);
             }
         }
         break (tx, deferred);
@@ -2763,7 +2831,7 @@ pub(crate) async fn update_submit(
         }
         Err(e) => {
             rollback_quietly(tx, model.table).await;
-            return Ok(refused(write_error(model, &e)).into_response());
+            return Ok(refused(write_error(model, &e)).await);
         }
     }
     let child_rows = match super::inlines::apply_plan_tx(&mut tx, &parts, inline_plan).await {
@@ -2783,11 +2851,11 @@ pub(crate) async fn update_submit(
                     })
                 }
             };
-            return Ok(refused(format!("Nothing was saved: {why}")).into_response());
+            return Ok(refused(format!("Nothing was saved: {why}")).await);
         }
     };
     if let Err(e) = tx.commit().await {
-        return Ok(refused(write_error(model, &e.into())).into_response());
+        return Ok(refused(write_error(model, &e.into())).await);
     }
     if let Some(entry) = deferred {
         super::audit::emit_best_effort(&state, &entry).await;
