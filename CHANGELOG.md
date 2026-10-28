@@ -4,6 +4,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — model attributes, migrations and MCP
+
+- `#[rustango(default = "…")]` refuses a bare word (read as a column on PG/MySQL) and a non-number on a numeric field at compile time.
+- `primary_key`, `unique`, `index`, `soft_delete`, `auto_now(_add)`, `auto_uuid` and `default_uuid_v7` accept `= true`; an unknown attribute names the key, suggests the nearest one and lists the valid ones.
+- `makemigrations` refuses an `fk` / `o2o` whose table or `on` column is not registered, and says when the value is a model name.
+- `manage check` reports model changes with no migration and migrations not yet applied.
+- The translations editor reloads translators registered with `i18n::db::register_live_translator` after a save, and its 500s no longer carry driver text.
+- MCP `tools/call` sends `structuredContent` only for an object result; `resources/list` gives each skill resource a `name` and lists a URI once.
+- `server::Builder::brand_storage` / `Cli::brand_storage` store tenant logos and favicons on a shared disk.
+
 ### Fixed — single-database admin and CLI
 
 - Bare-admin writes record the signed-in user as the audit source, not `system`.
