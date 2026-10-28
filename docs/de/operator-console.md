@@ -374,7 +374,10 @@ Jeder Tenant hat seine eigene Marke in seiner `Org`-Zeile, gesetzt unter
 `theme_mode`. Das Formular **Branding assets** auf derselben Seite lädt ein
 Logo (PNG, JPEG oder WebP) und ein Favicon (PNG oder ICO) hoch, je bis 1 MB
 (`RUSTANGO_BRAND_MAX_BYTES`). Die Dateien liegen unter
-`RUSTANGO_BRAND_STORAGE_DIR`, Standard `./var/brand`.
+`RUSTANGO_BRAND_STORAGE_DIR`, Standard `./var/brand`. Dieses Verzeichnis ist
+lokal je Pod und geht beim Redeploy verloren; bei mehreren Replikas eine
+gemeinsame Disk mit `Cli::brand_storage` oder `server::Builder::brand_storage`
+übergeben (etwa eine `StorageRegistry`-Disk).
 
 Der Tenant-Admin und seine Anmeldeseite nutzen diese Werte; `[brand]` erreicht
 sie nicht. Ohne `brand_name` wird der Anzeigename des Tenants gezeigt, ohne

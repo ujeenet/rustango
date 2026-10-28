@@ -217,6 +217,9 @@ pub struct Cli {
     /// `None` = `ChainSecretsResolver::standard()`. Set via [`Cli::with_secrets`].
     #[cfg(feature = "tenancy")]
     secrets: Option<std::sync::Arc<dyn crate::tenancy::SecretsResolver>>,
+    /// See [`Cli::brand_storage`].
+    #[cfg(feature = "tenancy")]
+    brand_storage: Option<crate::storage::BoxedStorage>,
     /// Set via [`Cli::require_sealed_secrets`].
     #[cfg(feature = "tenancy")]
     require_sealed_secrets: bool,
@@ -293,6 +296,8 @@ impl Cli {
             tenant_pools: None,
             #[cfg(feature = "tenancy")]
             secrets: None,
+            #[cfg(feature = "tenancy")]
+            brand_storage: None,
             #[cfg(feature = "tenancy")]
             require_sealed_secrets: false,
             #[cfg(feature = "_http_layers")]
@@ -532,6 +537,15 @@ impl Cli {
     #[must_use]
     pub fn with_tenant_pools(mut self, config: crate::tenancy::TenantPoolsConfig) -> Self {
         self.tenant_pools = Some(config);
+        self
+    }
+
+    /// Store tenant logos and favicons in `storage` instead of the per-pod
+    /// local dir; see [`crate::server::Builder::brand_storage`].
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn brand_storage(mut self, storage: crate::storage::BoxedStorage) -> Self {
+        self.brand_storage = Some(storage);
         self
     }
 
@@ -1424,6 +1438,9 @@ impl Cli {
         }
         if let Some(r) = &self.unresolved_tenant {
             builder = builder.unresolved_tenant(r.clone());
+        }
+        if let Some(s) = &self.brand_storage {
+            builder = builder.brand_storage(s.clone());
         }
         if let Some(layer) = &self.real_ip {
             builder = builder.real_ip(layer.clone());

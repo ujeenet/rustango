@@ -118,6 +118,8 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     header_resolver: Option<HeaderResolver>,
     /// Serves requests that resolve no tenant; `None` routes them as before.
     unresolved: Option<ApiRouter>,
+    /// Tenant logos and favicons; `None` is the per-pod local default.
+    brand_storage: Option<crate::storage::BoxedStorage>,
     /// Wraps both Host branches, inside the security headers.
     #[cfg(feature = "template_views")]
     error_pages: Option<crate::errors::ErrorPagesLayer>,
@@ -203,6 +205,7 @@ impl<DB: Database> Builder<DB> {
             real_ip: None,
             header_resolver: None,
             unresolved: None,
+            brand_storage: None,
             #[cfg(feature = "template_views")]
             error_pages: None,
             _phantom: PhantomData,
@@ -355,6 +358,16 @@ impl<DB: Database> Builder<DB> {
     #[must_use]
     pub fn span_redact(mut self, params: Vec<String>) -> Self {
         self.span_redact = Some(params);
+        self
+    }
+
+    /// Store tenant logos and favicons in `storage`, for the operator console
+    /// and the tenant admin. The default is a local dir on each pod, so
+    /// several replicas or a redeploy lose them: pass a shared disk, e.g.
+    /// `StorageRegistry::disk("s3")`.
+    #[must_use]
+    pub fn brand_storage(mut self, storage: crate::storage::BoxedStorage) -> Self {
+        self.brand_storage = Some(storage);
         self
     }
 
@@ -817,6 +830,10 @@ impl<DB: Database> Builder<DB> {
         )
         .routes(self.routes.clone())
         .link_apex(link_apex.clone());
+        let brand_storage = self
+            .brand_storage
+            .unwrap_or_else(crate::tenancy::branding::default_brand_storage);
+        tenant_admin_builder = tenant_admin_builder.brand_storage(brand_storage.clone());
         if !self.show_only.is_empty() {
             tenant_admin_builder = tenant_admin_builder.show_only(self.show_only.clone());
         }
@@ -929,7 +946,6 @@ impl<DB: Database> Builder<DB> {
         // `<sub>.<apex><handoff_url>?token=<...>`, and the tenant
         // admin redeems the token + sets a host-scoped cookie. No
         // cookie is set on the operator-console origin.
-        let brand_storage_for_op = crate::tenancy::branding::default_brand_storage();
         // #1322 — only when the deployment asked for it. See
         // `with_tenant_provisioning` for why creating tenants is not
         // on by default.
@@ -975,7 +991,7 @@ impl<DB: Database> Builder<DB> {
             Some(self.pools.clone().into_invalidator()),
             provisioner,
             operator_secret,
-            brand_storage_for_op,
+            brand_storage,
             Some(session_secret_for_tenant.clone()),
             // Handoff URL on the tenant admin where the token
             // gets redeemed (#88). RouteConfig holds the canonical

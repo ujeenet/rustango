@@ -372,7 +372,10 @@ Chaque tenant a sa propre identité sur sa ligne `Org`, définie dans
 `theme_mode`. Le formulaire **Branding assets** de la même page envoie un logo
 (PNG, JPEG ou WebP) et un favicon (PNG ou ICO), jusqu'à 1 Mo chacun
 (`RUSTANGO_BRAND_MAX_BYTES`). Les fichiers sont stockés sous
-`RUSTANGO_BRAND_STORAGE_DIR`, par défaut `./var/brand`.
+`RUSTANGO_BRAND_STORAGE_DIR`, par défaut `./var/brand`. Ce dossier est local
+à chaque pod et perdu au redéploiement ; avec plusieurs réplicas, passez un
+disque partagé via `Cli::brand_storage` ou `server::Builder::brand_storage`
+(par exemple un disque `StorageRegistry`).
 
 L'admin du tenant et sa page de connexion les utilisent ; `[brand]` ne les
 atteint pas. Sans `brand_name`, le nom affiché du tenant est utilisé, et sans
