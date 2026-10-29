@@ -2220,6 +2220,7 @@ pub(crate) async fn create_submit(
         table: model.table,
         pk: typed_pk,
         change: false,
+        tenant: state.config.tenant.clone(),
     })
     .await;
     // An `audit(...)` model's entry commits with the INSERT, as on edit (#2101).
@@ -2305,6 +2306,7 @@ pub(crate) async fn create_submit(
         table: model.table,
         pk: pk_value.clone(),
         change: false,
+        tenant: state.config.tenant.clone(),
     })
     .await;
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_value, &form);
@@ -2738,11 +2740,12 @@ pub(crate) async fn update_submit(
         table: model.table,
         pk: pk_raw.clone(),
         change: true,
+        tenant: state.config.tenant.clone(),
     })
     .await;
     // One signal per inline row too, as for bulk actions.
     for row in inline_plan.planned_rows() {
-        row.send(true).await;
+        row.send(true, &state).await;
     }
     // "Before" is the locked row, "after" the form. The per-request
     // `with_source(User { id })` gives a "who changed what" trail. An
@@ -2848,8 +2851,8 @@ pub(crate) async fn update_submit(
             return Ok(refused(write_error(model, &e)).await);
         }
     }
-    let child_rows = match super::inlines::apply_plan_tx(&mut tx, &parts, inline_plan).await {
-        Ok((_, rows)) => rows,
+    let applied = match super::inlines::apply_plan_tx(&mut tx, &parts, inline_plan).await {
+        Ok(applied) => applied,
         Err(e) => {
             use super::inlines::InlineApplyError as E;
             rollback_quietly(tx, model.table).await;
@@ -2874,16 +2877,18 @@ pub(crate) async fn update_submit(
     if let Some(entry) = deferred {
         super::audit::emit_best_effort(&state, &entry).await;
     }
+    super::audit::emit_many_best_effort(&state, &applied.audit, "inline").await;
     // The `post_save` hook fires after the commit and the audit
     // emit. `change = true` marks this as an edit, not a create.
     crate::signals::admin::send_admin_post_save(crate::signals::admin::AdminSaveContext {
         table: model.table,
         pk: pk_raw.clone(),
         change: true,
+        tenant: state.config.tenant.clone(),
     })
     .await;
-    for row in child_rows {
-        row.send(false).await;
+    for row in applied.signals {
+        row.send(false, &state).await;
     }
 
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_raw, &form);
@@ -2998,6 +3003,7 @@ pub(crate) async fn delete_submit(
     crate::signals::admin::send_admin_pre_delete(crate::signals::admin::AdminDeleteContext {
         table: model.table,
         pk: pk_raw.clone(),
+        tenant: state.config.tenant.clone(),
     })
     .await;
     let list_url = format!("{}/{}", state.config.admin_prefix, model.table);
@@ -3060,6 +3066,7 @@ pub(crate) async fn delete_submit(
     crate::signals::admin::send_admin_post_delete(crate::signals::admin::AdminDeleteContext {
         table: model.table,
         pk: pk_raw.clone(),
+        tenant: state.config.tenant.clone(),
     })
     .await;
     Ok(Redirect::to(&list_url).into_response())
@@ -3267,7 +3274,7 @@ pub(crate) async fn action_submit(
         .iter()
         .map(|row| render::read_value_as_string_json(row, pk_field).unwrap_or_default())
         .collect();
-    send_row_signals(model.table, &row_pks, is_delete, true).await;
+    send_row_signals(&state, model.table, &row_pks, is_delete, true).await;
 
     // One snapshot per row. For `delete_selected` it is what was deleted;
     // other actions tag the action name, so the panel shows who ran what.
@@ -3308,7 +3315,7 @@ pub(crate) async fn action_submit(
                     }
                 }
             }
-            send_row_signals(model.table, &row_pks, is_delete, false).await;
+            send_row_signals(&state, model.table, &row_pks, is_delete, false).await;
             return back();
         }
         BulkWrite::Delete => match model.soft_delete_column {
@@ -3367,7 +3374,7 @@ pub(crate) async fn action_submit(
     if emit == crate::audit::DiffEmit::Deferred {
         super::audit::emit_many_best_effort(&state, &entries, &action).await;
     }
-    send_row_signals(model.table, &row_pks, is_delete, false).await;
+    send_row_signals(&state, model.table, &row_pks, is_delete, false).await;
 
     back()
 }
@@ -3434,28 +3441,33 @@ impl BulkWrite {
 }
 
 /// One admin pre/post signal per row of a bulk action, in row order (#1928).
-async fn send_row_signals(table: &'static str, pks: &[String], is_delete: bool, pre: bool) {
+async fn send_row_signals(
+    state: &AppState,
+    table: &'static str,
+    pks: &[String],
+    is_delete: bool,
+    pre: bool,
+) {
     use crate::signals::admin::{self as sig, AdminDeleteContext, AdminSaveContext};
+    let tenant = || state.config.tenant.clone();
     for pk in pks {
         let pk = pk.clone();
         match (is_delete, pre) {
-            (true, true) => sig::send_admin_pre_delete(AdminDeleteContext { table, pk }).await,
-            (true, false) => sig::send_admin_post_delete(AdminDeleteContext { table, pk }).await,
+            (true, true) => {
+                let ctx = AdminDeleteContext::new(table, pk).with_tenant(tenant());
+                sig::send_admin_pre_delete(ctx).await;
+            }
+            (true, false) => {
+                let ctx = AdminDeleteContext::new(table, pk).with_tenant(tenant());
+                sig::send_admin_post_delete(ctx).await;
+            }
             (false, true) => {
-                sig::send_admin_pre_save(AdminSaveContext {
-                    table,
-                    pk,
-                    change: true,
-                })
-                .await;
+                let ctx = AdminSaveContext::new(table, pk, true).with_tenant(tenant());
+                sig::send_admin_pre_save(ctx).await;
             }
             (false, false) => {
-                sig::send_admin_post_save(AdminSaveContext {
-                    table,
-                    pk,
-                    change: true,
-                })
-                .await;
+                let ctx = AdminSaveContext::new(table, pk, true).with_tenant(tenant());
+                sig::send_admin_post_save(ctx).await;
             }
         }
     }

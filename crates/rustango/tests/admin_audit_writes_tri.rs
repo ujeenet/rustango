@@ -126,6 +126,26 @@ rustango::register_admin_inline!(
     max_num = Some(1),
 );
 
+/// No `audit(...)`: its inline writes are audited best-effort, as on its own page.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aaw_item")]
+#[allow(dead_code)]
+pub struct Item {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "aaw_order", on = "id")]
+    pub order_id: i64,
+    pub qty: i32,
+}
+
+rustango::register_admin_inline!(
+    parent = "aaw_order",
+    child = "aaw_item",
+    fk = "order_id",
+    fields = &["qty"],
+    extra = 1,
+);
+
 rustango::register_admin_inline!(
     parent = "aaw_order",
     child = "aaw_tag",
@@ -139,7 +159,9 @@ async fn setup(pool: &Pool) {
     drop_table(pool, "aaw_line").await;
     drop_table(pool, "aaw_tag").await;
     drop_table(pool, "aaw_step").await;
+    drop_table(pool, "aaw_item").await;
     fresh_table::<Order>(pool).await;
+    fresh_table::<Item>(pool).await;
     fresh_table::<Line>(pool).await;
     fresh_table::<Tag>(pool).await;
     fresh_table::<Step>(pool).await;
@@ -157,6 +179,7 @@ async fn setup(pool: &Pool) {
         "aaw_memo",
         "aaw_step",
         "aaw_card",
+        "aaw_item",
     ] {
         AuditLog::delete_where("entity_table", t, pool)
             .await
@@ -276,6 +299,78 @@ async fn inline_child_writes_are_audited(pool: &Pool) {
     assert_eq!(tags.len(), 1, "{tags:?}");
     assert_eq!((tags[0].0.as_str(), tags[0].1.as_str()), ("create", "t1"));
     assert_eq!(tags[0].2["order_id"], o, "{:?}", tags[0].2);
+}
+
+/// A child without `audit(...)` gets the same history inline as on its own page.
+async fn inline_writes_of_an_unaudited_child_are_logged(pool: &Pool) {
+    let o = seed_order(pool).await;
+    let mut ids = Vec::new();
+    for qty in [1, 2] {
+        let mut item = Item {
+            id: Auto::default(),
+            order_id: o,
+            qty,
+        };
+        item.insert_pool(pool).await.expect("insert item");
+        ids.push(item.id.get().expect("pk").to_string());
+    }
+    AuditLog::delete_where("entity_table", "aaw_item", pool)
+        .await
+        .expect("clear seed audit rows");
+    let (i1, i2) = (&ids[0], &ids[1]);
+    let form = format!(
+        "name=o&aaw_item-TOTAL_FORMS=3&aaw_item-INITIAL_FORMS=2\
+         &aaw_item-0-id={i1}&aaw_item-0-qty=5\
+         &aaw_item-1-id={i2}&aaw_item-1-qty=2&aaw_item-1-DELETE=on\
+         &aaw_item-2-qty=3"
+    );
+    let (status, body) = post(pool, &format!("/aaw_order/{o}"), &form).await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    let new = Item::objects()
+        .filter("qty", 3)
+        .fetch(pool)
+        .await
+        .expect("fetch items")
+        .first()
+        .map(|i| i.id.get().expect("pk").to_string())
+        .expect("inserted item");
+    let rows = audit_rows(pool, "aaw_item").await;
+    let ops: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|(op, pk, _)| (op.as_str(), pk.as_str()))
+        .collect();
+    assert_eq!(
+        ops,
+        [
+            ("create", new.as_str()),
+            ("delete", i2.as_str()),
+            ("update", i1.as_str())
+        ]
+    );
+    assert_eq!(rows[2].2["qty"]["after"], 5, "{:?}", rows[2].2);
+
+    // Best-effort: a failed audit write keeps the save.
+    let _ = break_audit(pool).await;
+    if pool.backend_name() == "sqlite" {
+        let form = format!(
+            "name=o&aaw_item-TOTAL_FORMS=1&aaw_item-INITIAL_FORMS=1\
+             &aaw_item-0-id={i1}&aaw_item-0-qty=9"
+        );
+        let (status, body) = post(pool, &format!("/aaw_order/{o}"), &form).await;
+        assert!(status.is_redirection(), "{status}: {body}");
+        let qty: Vec<i32> = Item::objects()
+            .filter("qty", 9)
+            .fetch(pool)
+            .await
+            .expect("fetch items")
+            .iter()
+            .map(|i| i.qty)
+            .collect();
+        assert_eq!(qty, [9], "the save was rolled back");
+        rustango::audit::ensure_table_pool(pool)
+            .await
+            .expect("audit table");
+    }
 }
 
 /// An inline DELETE or UPDATE whose audit row cannot be written saves
@@ -600,6 +695,7 @@ tri_dialect_test! {
     setup: setup,
     scenarios: [
         inline_child_writes_are_audited,
+        inline_writes_of_an_unaudited_child_are_logged,
         inline_child_audit_failure_saves_nothing,
         inline_delete_and_update_audit_failure_save_nothing,
         deletes_and_bulk_actions_are_audited,

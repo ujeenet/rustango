@@ -145,6 +145,7 @@ impl Cache for RedisCache {
     }
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
+        super::check_text(value)?;
         self.set_bytes(key, value.as_bytes(), ttl).await
     }
 
@@ -169,6 +170,7 @@ impl Cache for RedisCache {
     }
 
     async fn set_forever(&self, key: &str, value: &str) -> Result<(), CacheError> {
+        super::check_text(value)?;
         let mut conn = self.conn.clone();
         conn.set::<_, _, ()>(key, value)
             .await
@@ -180,6 +182,7 @@ impl Cache for RedisCache {
     /// is what makes `DistributedLock` safe across replicas. Returns
     /// `true` when this call created the key.
     async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        super::check_text(value)?;
         let mut conn = self.conn.clone();
         let mut cmd = redis::cmd("SET");
         cmd.arg(key).arg(value).arg("NX");
@@ -310,8 +313,21 @@ impl Cache for RedisCache {
         //
         // The result is read back with `GET`: a Lua number is a double,
         // which rounds counters past 2^53.
+        //
+        // `INCRBY` reads exactly the `i64` text `counter_value` does; any
+        // other value counts as 0, so the counter restarts at `by`.
         let script = redis::Script::new(
-            r"redis.call('INCRBY', KEYS[1], ARGV[1])
+            r"local r = redis.pcall('INCRBY', KEYS[1], ARGV[1])
+              if type(r) == 'table' and r.err then
+                if not string.find(r.err, 'not an integer', 1, true) then
+                  return r
+                end
+                local left = redis.call('PTTL', KEYS[1])
+                redis.call('SET', KEYS[1], ARGV[1])
+                if left > 0 then
+                  redis.call('PEXPIRE', KEYS[1], left)
+                end
+              end
               if tonumber(ARGV[2]) > 0 and redis.call('PTTL', KEYS[1]) < 0 then
                 redis.call('PEXPIRE', KEYS[1], ARGV[2])
               end
@@ -323,7 +339,12 @@ impl Cache for RedisCache {
             .arg(self.effective_ttl_ms(ttl).unwrap_or(0))
             .invoke_async(&mut conn)
             .await
-            .map_err(|e| CacheError::Connection(e.to_string()))?;
+            .map_err(|e| {
+                if e.to_string().contains("would overflow") {
+                    return super::incr_overflow();
+                }
+                CacheError::Connection(e.to_string())
+            })?;
         value
             .parse()
             .map_err(|_| CacheError::Connection(format!("incr: non-integer result {value:?}")))

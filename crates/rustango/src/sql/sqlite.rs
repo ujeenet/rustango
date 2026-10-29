@@ -794,6 +794,7 @@ mod tests {
         case_insensitive: false,
         fk_on_delete: None,
         validators: &[],
+        cast: None,
     }];
     static MODEL: ModelSchema = ModelSchema {
         name: "demo",

@@ -350,7 +350,14 @@ pub(super) async fn tenant_sso_callback(
                 "sso refused: {e}"
             );
             if let Some(reason) = e.failure_reason() {
-                signal_refused(SIGNAL_SOURCE, &normalized, reason, meta()).await;
+                signal_refused(
+                    SIGNAL_SOURCE,
+                    &normalized,
+                    reason,
+                    meta(),
+                    Some(org.slug.clone()),
+                )
+                .await;
             }
             return login_error(routes, "nouser");
         }
@@ -364,6 +371,7 @@ pub(super) async fn tenant_sso_callback(
             &normalized,
             AuthFailureReason::Inactive,
             meta(),
+            Some(org.slug.clone()),
         )
         .await;
         return login_error(routes, "inactive");
@@ -398,6 +406,7 @@ pub(super) async fn tenant_sso_callback(
         username: user.username.clone(),
         is_superuser: user.is_superuser,
         request: meta(),
+        tenant: Some(org.slug.clone()),
     })
     .await;
     resp

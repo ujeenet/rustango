@@ -36,6 +36,14 @@ fn cast_field_maps_to_text_column() {
     assert_eq!(Sqlite.column_type(field("ssn").ty, None), "TEXT");
 }
 
+/// The schema records the cast, so tools such as the reseal verb can find it.
+#[test]
+fn the_schema_records_which_cast_a_field_uses() {
+    use rustango::core::FieldCast;
+    assert_eq!(field("ssn").cast, Some(FieldCast::Sealed));
+    assert_eq!(field("name").cast, None);
+}
+
 #[test]
 fn cast_wraps_and_derefs_logical_value() {
     let c: Cast<EncryptedString> = Cast::new("hi".to_owned());

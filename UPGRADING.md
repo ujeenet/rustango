@@ -180,6 +180,26 @@ A tenant or operator password change now ends only the other sessions; the respo
 - `startapp` (plain and tenancy) now ends with `next: cargo run -- makemigrations && cargo run -- migrate`. It no longer prints the `mod <app>;` step it already did, the `init-tenancy` step or the `--with-bootstrap-migration` advice; with no `lib.rs`/`main.rs` the `pub mod` line is a `! manual:` step.
 - `make:viewset --tenant` output authenticates with HTTP Basic (`ModelBackend`) only; a signed-in browser session gets 401. Add `ApiKeyBackend` or a `JwtBackend` for token clients.
 
+### Signals name the tenant
+
+`UserLoggedInContext`, `UserLoggedOutContext`, `UserLoginFailedContext`, `AdminSaveContext` and `AdminDeleteContext` have a new `tenant: Option<String>` (the tenant's slug; `None` outside a tenant) and are now `#[non_exhaustive]`. Code that builds one with a struct literal uses `::new(...)`, then `.with_tenant(...)` if needed.
+
+### Sealed casts and reseal
+
+`FieldSchema` has a new `cast: Option<FieldCast>` field; the derive fills it, and `FieldSchema::new` sets `None`. `reseal-tenant-secrets` now also re-seals every model's `Cast<EncryptedString>` columns, on the registry and in each tenant, and reports them as `cast <owner>/<table>.<column> <pk>`. It opens tenants for this only when a tenant model has such a column.
+
+### Admin inline history
+
+An inline add, edit or delete of a child without `audit(...)` now writes an audit row, after the commit and best-effort, as the child's own page does.
+
+### SSO link index
+
+`SsoLink` has a new index on `(provider_source, provider_id, subject)`. Run `makemigrations`, then `migrate`, to add it to `rustango_sso_links`.
+
+### Cache counters and NUL values
+
+`Cache::incr` counts a stored value only in the exact form `incr` writes. `"007"` and `"+7"` were read as 7 by the memory, file, PG and MySQL backends and now count as 0, as on SQLite. `RedisCache::incr` on a non-integer value now restarts the counter at `by` instead of returning an error. `set`, `add` and `set_forever` with a NUL character now fail with `CacheError::Serialization` on every backend; use `set_bytes`.
+
 ---
 
 ## 0.61.10

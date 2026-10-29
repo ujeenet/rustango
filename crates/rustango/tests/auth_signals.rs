@@ -43,17 +43,14 @@ async fn user_logged_in_fires_with_full_context() {
         }
     });
 
-    send_user_logged_in(UserLoggedInContext {
-        source: "admin",
-        user_id: 42,
-        username: "alice".into(),
-        is_superuser: true,
-        request: AuthRequestMeta {
-            ip_address: Some("1.2.3.4".into()),
-            user_agent: Some("curl/8".into()),
-            path: Some("/login".into()),
-        },
-    })
+    let request = AuthRequestMeta {
+        ip_address: Some("1.2.3.4".into()),
+        user_agent: Some("curl/8".into()),
+        path: Some("/login".into()),
+    };
+    send_user_logged_in(UserLoggedInContext::new(
+        "admin", 42, "alice", true, request,
+    ))
     .await;
 
     let got = captured.lock().await.clone().expect("receiver fired");
@@ -86,13 +83,13 @@ async fn user_login_failed_carries_failure_reason() {
         AuthFailureReason::Inactive,
         AuthFailureReason::Locked,
     ] {
-        send_user_login_failed(UserLoginFailedContext {
-            source: "tenant_admin",
-            attempted_username: Some("eve".into()),
+        let ctx = UserLoginFailedContext::new(
+            "tenant_admin",
+            Some("eve".into()),
             reason,
-            request: AuthRequestMeta::default(),
-        })
-        .await;
+            AuthRequestMeta::default(),
+        );
+        send_user_login_failed(ctx.with_tenant(Some("acme".into()))).await;
     }
 
     let got = captured.lock().await;
@@ -103,6 +100,7 @@ async fn user_login_failed_carries_failure_reason() {
     assert!(got
         .iter()
         .all(|c| c.attempted_username.as_deref() == Some("eve")));
+    assert!(got.iter().all(|c| c.tenant.as_deref() == Some("acme")));
 }
 
 #[tokio::test]
@@ -120,20 +118,20 @@ async fn user_logged_out_supports_optional_user_id() {
     });
 
     // Authenticated logout
-    send_user_logged_out(UserLoggedOutContext {
-        source: "operator",
-        user_id: Some(7),
-        username: Some("op".into()),
-        request: AuthRequestMeta::default(),
-    })
+    send_user_logged_out(UserLoggedOutContext::new(
+        "operator",
+        Some(7),
+        Some("op".into()),
+        AuthRequestMeta::default(),
+    ))
     .await;
     // Stale-cookie logout — receivers tolerate both Nones
-    send_user_logged_out(UserLoggedOutContext {
-        source: "operator",
-        user_id: None,
-        username: None,
-        request: AuthRequestMeta::default(),
-    })
+    send_user_logged_out(UserLoggedOutContext::new(
+        "operator",
+        None,
+        None,
+        AuthRequestMeta::default(),
+    ))
     .await;
 
     let got = captured.lock().await;
@@ -157,13 +155,13 @@ async fn receivers_run_in_registration_order() {
             }
         });
     }
-    send_user_logged_in(UserLoggedInContext {
-        source: "admin",
-        user_id: 1,
-        username: "u".into(),
-        is_superuser: false,
-        request: AuthRequestMeta::default(),
-    })
+    send_user_logged_in(UserLoggedInContext::new(
+        "admin",
+        1,
+        "u",
+        false,
+        AuthRequestMeta::default(),
+    ))
     .await;
     assert_eq!(&*log.lock().await, &[1, 2, 3]);
 }
@@ -189,13 +187,13 @@ async fn disconnect_removes_only_the_named_receiver() {
     assert!(disconnect_user_logged_in(ids[1]));
     assert_eq!(receiver_count(), 2);
 
-    send_user_logged_in(UserLoggedInContext {
-        source: "admin",
-        user_id: 1,
-        username: "u".into(),
-        is_superuser: false,
-        request: AuthRequestMeta::default(),
-    })
+    send_user_logged_in(UserLoggedInContext::new(
+        "admin",
+        1,
+        "u",
+        false,
+        AuthRequestMeta::default(),
+    ))
     .await;
 
     assert_eq!(*counter.lock().await, 2);

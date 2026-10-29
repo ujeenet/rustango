@@ -283,6 +283,7 @@ async fn login_submit(
             attempted_username: Some(form.username.clone()),
             reason: AuthFailureReason::InvalidCredentials,
             request: meta.clone(),
+            tenant: state.config.tenant.clone(),
         })
         .await;
         return login_response(&state, &extensions, &headers, Some("Invalid credentials.")).await;
@@ -320,6 +321,7 @@ async fn login_submit(
             attempted_username: Some(form.username.clone()),
             reason: AuthFailureReason::Inactive,
             request: meta.clone(),
+            tenant: state.config.tenant.clone(),
         })
         .await;
         // Do **not** reveal that the account exists but is disabled.
@@ -335,6 +337,7 @@ async fn login_submit(
             attempted_username: Some(form.username.clone()),
             reason: AuthFailureReason::InvalidCredentials,
             request: meta.clone(),
+            tenant: state.config.tenant.clone(),
         })
         .await;
         return login_response(&state, &extensions, &headers, Some("Invalid credentials.")).await;
@@ -364,6 +367,7 @@ async fn login_submit(
                     attempted_username: Some(form.username.clone()),
                     reason: AuthFailureReason::InvalidCredentials,
                     request: meta.clone(),
+                    tenant: state.config.tenant.clone(),
                 })
                 .await;
                 return login_response(&state, &extensions, &headers, Some("Invalid credentials."))
@@ -393,6 +397,7 @@ async fn login_submit(
                     attempted_username: Some(form.username.clone()),
                     reason: AuthFailureReason::InvalidCredentials,
                     request: meta.clone(),
+                    tenant: state.config.tenant.clone(),
                 })
                 .await;
                 return login_response(
@@ -451,6 +456,7 @@ async fn login_submit(
         username: form.username.clone(),
         is_superuser,
         request: meta,
+        tenant: state.config.tenant.clone(),
     })
     .await;
     resp
@@ -1057,6 +1063,7 @@ async fn logout_submit(
         user_id,
         username,
         request: meta,
+        tenant: state.config.tenant.clone(),
     })
     .await;
     resp

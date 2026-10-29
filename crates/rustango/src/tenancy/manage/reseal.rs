@@ -150,7 +150,7 @@ where
                             Ok(sealed) => {
                                 let cell = SealedCell {
                                     model: <OperatorTotp as crate::core::Model>::SCHEMA,
-                                    pk: ("operator_id", id),
+                                    pk: ("operator_id", SqlValue::I64(id)),
                                     column,
                                     stored: stored.to_owned(),
                                 };
@@ -245,6 +245,76 @@ where
             }
         }
     }
+    // Every other model's sealed `Cast` columns: registry models on the
+    // registry, tenant models in each tenant.
+    #[cfg(feature = "casts")]
+    {
+        use crate::core::ModelScope;
+        let mut targets = vec![(
+            "registry".to_owned(),
+            registry.clone(),
+            sealed_cast_columns(ModelScope::Registry),
+        )];
+        let tenant_columns = sealed_cast_columns(ModelScope::Tenant);
+        // No such column: no tenant needs opening.
+        if !tenant_columns.is_empty() {
+            let mut orgs: Vec<Org> = Org::objects().fetch(&registry).await?;
+            orgs.sort_by(|a, b| a.slug.cmp(&b.slug));
+            for org in orgs {
+                match pools.scoped_pool_dyn(&org).await {
+                    Ok(pool) => targets.push((org.slug, pool, tenant_columns.clone())),
+                    Err(_) => {
+                        failed += 1;
+                        writeln!(w, "  cast {}: cannot reach the tenant", org.slug)?;
+                    }
+                }
+            }
+        }
+        for (owner, pool, columns) in targets {
+            for (model, pk, column) in columns {
+                let table = model.table;
+                let cells = match SealedCell::list(model, pk, column, &pool).await {
+                    Ok(c) => c,
+                    // A tenant made before the table existed has nothing to reseal.
+                    Err(e) if missing_table(&e) => continue,
+                    Err(e) => {
+                        failed += 1;
+                        writeln!(w, "  cast {owner}/{table}.{column}: cannot open: {e}")?;
+                        continue;
+                    }
+                };
+                for cell in cells {
+                    let what = format!(
+                        "cast {owner}/{table}.{column} {}",
+                        cell.pk.1.to_display_string()
+                    );
+                    // Already under the current key: nothing to do, so a re-run is a no-op.
+                    if cell.opens_under_current_key() {
+                        continue;
+                    }
+                    todo += 1;
+                    if !apply {
+                        writeln!(w, "  {what}: would re-seal")?;
+                        continue;
+                    }
+                    match cell.reseal(&pool).await {
+                        Ok(true) => {
+                            done += 1;
+                            writeln!(w, "  {what}: re-sealed")?;
+                        }
+                        Ok(false) => {
+                            skipped += 1;
+                            writeln!(w, "  {what}: skipped, changed meanwhile")?;
+                        }
+                        Err(e) => {
+                            failed += 1;
+                            writeln!(w, "  {what}: failed: {e}")?;
+                        }
+                    }
+                }
+            }
+        }
+    }
     if apply {
         writeln!(
             w,
@@ -264,8 +334,52 @@ where
     Ok(())
 }
 
+/// Every `Cast` column sealed under the framework key, of `scope`'s models,
+/// as `(model, primary key, column)`. The SSO provider tables have their
+/// own pass above.
+#[cfg(feature = "casts")]
+fn sealed_cast_columns(
+    scope: crate::core::ModelScope,
+) -> Vec<(
+    &'static crate::core::ModelSchema,
+    &'static crate::core::FieldSchema,
+    &'static str,
+)> {
+    use crate::core::{FieldCast, ModelEntry};
+    let own_pass: &[&str] = &[
+        #[cfg(feature = "sso")]
+        <crate::sso::SsoProvider as crate::core::Model>::SCHEMA.table,
+        #[cfg(feature = "admin-sso")]
+        <crate::tenancy::sso::SharedSsoProvider as crate::core::Model>::SCHEMA.table,
+    ];
+    let mut out: Vec<_> = Vec::new();
+    for entry in inventory::iter::<ModelEntry> {
+        let model = entry.schema;
+        if model.scope != scope
+            || model.is_view
+            || model.proxy
+            || own_pass.contains(&model.table)
+            || out
+                .iter()
+                .any(|(m, _, _): &(&crate::core::ModelSchema, _, _)| m.table == model.table)
+        {
+            continue;
+        }
+        let Some(pk) = model.primary_key() else {
+            continue;
+        };
+        for f in model.fields {
+            if f.cast == Some(FieldCast::Sealed) {
+                out.push((model, pk, f.column));
+            }
+        }
+    }
+    out.sort_by_key(|(m, _, c)| (m.table, *c));
+    out
+}
+
 /// A driver error for a table that is not there, on any backend.
-#[cfg(any(feature = "sso", feature = "totp"))]
+#[cfg(any(feature = "sso", feature = "totp", feature = "casts"))]
 fn missing_table(e: &str) -> bool {
     e.contains("does not exist") || e.contains("no such table") || e.contains("doesn't exist")
 }
@@ -286,16 +400,58 @@ fn totp_cells(row: &[SqlValue]) -> Option<(i64, Vec<(&'static str, &str)>)> {
     Some((*id, cells))
 }
 
-/// One sealed value as stored, keyed by an integer primary key.
-#[cfg(any(feature = "sso", feature = "totp"))]
+/// One sealed value as stored, keyed by its primary key.
+#[cfg(any(feature = "sso", feature = "totp", feature = "casts"))]
 struct SealedCell {
     model: &'static crate::core::ModelSchema,
-    pk: (&'static str, i64),
+    pk: (&'static str, SqlValue),
     column: &'static str,
     stored: String,
 }
 
-#[cfg(any(feature = "sso", feature = "totp"))]
+#[cfg(feature = "casts")]
+impl SealedCell {
+    /// The non-null `column` cells of `model`, raw.
+    async fn list(
+        model: &'static crate::core::ModelSchema,
+        pk: &'static crate::core::FieldSchema,
+        column: &'static str,
+        pool: &crate::sql::Pool,
+    ) -> Result<Vec<Self>, String> {
+        let query = crate::core::SelectQuery::new(model).projection(vec![pk.column, column]);
+        let rows = crate::sql::fetch_values_list_on(pool, &query)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| match <[SqlValue; 2]>::try_from(row) {
+                Ok([key, SqlValue::String(stored)]) => Some(Self {
+                    model,
+                    pk: (pk.column, key),
+                    column,
+                    stored,
+                }),
+                _ => None,
+            })
+            .collect())
+    }
+
+    fn opens_under_current_key(&self) -> bool {
+        crate::aead::decrypt_with(crate::aead::env_key().as_deref(), &self.stored, b"").is_ok()
+    }
+
+    /// Open with either key, seal under the current one, and write it only
+    /// while the stored value is the one read. `Ok(false)`: it changed meanwhile.
+    async fn reseal(&self, pool: &crate::sql::Pool) -> Result<bool, String> {
+        let plain =
+            crate::aead::decrypt(&self.stored, b"").map_err(|e| format!("cannot open: {e:?}"))?;
+        let sealed =
+            crate::aead::encrypt(&plain, b"").map_err(|e| format!("cannot seal: {e:?}"))?;
+        self.write(pool, sealed).await
+    }
+}
+
+#[cfg(any(feature = "sso", feature = "totp", feature = "casts"))]
 impl SealedCell {
     /// Write `sealed` only while the cell still holds what was read.
     /// `Ok(false)`: it changed meanwhile.
@@ -311,7 +467,7 @@ impl SealedCell {
                 Filter {
                     column: self.pk.0,
                     op: Op::Eq,
-                    value: SqlValue::I64(self.pk.1),
+                    value: self.pk.1.clone(),
                 },
                 Filter {
                     column: self.column,
@@ -372,7 +528,7 @@ impl SsoSecret {
             crate::aead::encrypt(&plain, b"").map_err(|e| format!("cannot seal: {e:?}"))?;
         let cell = SealedCell {
             model: self.model,
-            pk: ("id", self.id),
+            pk: ("id", SqlValue::I64(self.id)),
             column: "client_secret",
             stored: self.stored.clone(),
         };

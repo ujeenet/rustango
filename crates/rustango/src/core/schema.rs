@@ -156,6 +156,19 @@ pub struct FieldSchema {
     /// `validate_filepath`. An unknown name errors at runtime with
     /// [`crate::core::QueryError::UnknownValidator`].
     pub validators: &'static [&'static str],
+    /// The cast of a `Cast<C>` field; `None` for any other field.
+    pub cast: Option<FieldCast>,
+}
+
+/// How a `Cast<C>` field stores its value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FieldCast {
+    /// Sealed under `RUSTANGO_SECRET_KEY`, as `EncryptedString` does, so
+    /// `reseal-tenant-secrets` re-seals it after a key rotation.
+    Sealed,
+    /// Any other cast.
+    Other,
 }
 
 /// Each keyed `String` shape is refused without `max_length` (#2575):
@@ -294,6 +307,7 @@ impl FieldSchema {
             case_insensitive: false,
             fk_on_delete: None,
             validators: &[],
+            cast: None,
         }
     }
 
@@ -1874,6 +1888,7 @@ pub struct FieldSchemaParts {
     pub case_insensitive: bool,
     pub fk_on_delete: Option<OnDeleteAction>,
     pub validators: &'static [&'static str],
+    pub cast: Option<FieldCast>,
 }
 
 impl FieldSchema {
@@ -1905,6 +1920,7 @@ impl FieldSchema {
             case_insensitive,
             fk_on_delete,
             validators,
+            cast,
         } = parts;
         Self {
             name,
@@ -1930,6 +1946,7 @@ impl FieldSchema {
             case_insensitive,
             fk_on_delete,
             validators,
+            cast,
         }
     }
 }

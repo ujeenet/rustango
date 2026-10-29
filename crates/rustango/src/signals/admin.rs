@@ -45,6 +45,7 @@ pub struct ReceiverId(u64);
 
 /// What an `admin_pre_save` or `admin_post_save` receiver gets.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AdminSaveContext {
     /// Table name of the model being saved.
     pub table: &'static str,
@@ -54,13 +55,59 @@ pub struct AdminSaveContext {
     pub pk: String,
     /// `true` for an edit, `false` for a create.
     pub change: bool,
+    /// The tenant's slug; `None` for an admin outside a tenant. Keys
+    /// are only unique within it.
+    pub tenant: Option<String>,
+}
+
+impl AdminSaveContext {
+    /// A context with no tenant; see [`Self::with_tenant`].
+    #[must_use]
+    pub fn new(table: &'static str, pk: impl Into<String>, change: bool) -> Self {
+        Self {
+            table,
+            pk: pk.into(),
+            change,
+            tenant: None,
+        }
+    }
+
+    /// Set the tenant's slug.
+    #[must_use]
+    pub fn with_tenant(mut self, tenant: Option<String>) -> Self {
+        self.tenant = tenant;
+        self
+    }
 }
 
 /// What an `admin_pre_delete` or `admin_post_delete` receiver gets.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AdminDeleteContext {
     pub table: &'static str,
     pub pk: String,
+    /// The tenant's slug; `None` for an admin outside a tenant. Keys
+    /// are only unique within it.
+    pub tenant: Option<String>,
+}
+
+impl AdminDeleteContext {
+    /// A context with no tenant; see [`Self::with_tenant`].
+    #[must_use]
+    pub fn new(table: &'static str, pk: impl Into<String>) -> Self {
+        Self {
+            table,
+            pk: pk.into(),
+            tenant: None,
+        }
+    }
+
+    /// Set the tenant's slug.
+    #[must_use]
+    pub fn with_tenant(mut self, tenant: Option<String>) -> Self {
+        self.tenant = tenant;
+        self
+    }
 }
 
 // ---------------------------------------------------------------- Storage

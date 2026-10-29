@@ -1279,6 +1279,7 @@ mod composite_fk_snapshot_tests {
             case_insensitive: false,
             fk_on_delete: None,
             validators: &[],
+            cast: None,
         }];
         static COMPS: [CompositeFkRelation; 1] = [CompositeFkRelation {
             name: "target",
@@ -1364,6 +1365,7 @@ mod composite_fk_snapshot_tests {
             case_insensitive: false,
             fk_on_delete: None,
             validators: &[],
+            cast: None,
         }];
         static MANAGED: ModelSchema = ModelSchema {
             name: "Managed",
@@ -1470,6 +1472,7 @@ mod composite_fk_snapshot_tests {
             case_insensitive: false,
             fk_on_delete: None,
             validators: &[],
+            cast: None,
         }];
         static MS: ModelSchema = ModelSchema {
             name: "Plain",
@@ -1619,6 +1622,7 @@ mod generated_as_and_db_comment_capture {
                 case_insensitive: false,
                 fk_on_delete: None,
                 validators: &[],
+                cast: None,
             },
             FieldSchema {
                 name: "total",
@@ -1644,6 +1648,7 @@ mod generated_as_and_db_comment_capture {
                 case_insensitive: false,
                 fk_on_delete: None,
                 validators: &[],
+                cast: None,
             },
             FieldSchema {
                 name: "label",
@@ -1669,6 +1674,7 @@ mod generated_as_and_db_comment_capture {
                 case_insensitive: false,
                 fk_on_delete: None,
                 validators: &[],
+                cast: None,
             },
         ];
         static MS: ModelSchema = ModelSchema {

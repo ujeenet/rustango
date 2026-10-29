@@ -4,7 +4,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-**Breaking:** `CsrfConfig` has a new public field; `check_builtin_form_password` needs the `passwords` feature and reports `password_too_weak`; roles made by `get_or_create_role` / `get_or_create_role_pool` skip save hooks and signals. See UPGRADING.
+**Breaking:** `CsrfConfig` has a new public field; `check_builtin_form_password` needs the `passwords` feature and reports `password_too_weak`; roles made by `get_or_create_role` / `get_or_create_role_pool` skip save hooks and signals; the auth and admin signal contexts are `#[non_exhaustive]` with a new `tenant` field; `FieldSchema` has a new `cast` field. See UPGRADING.
 
 ### Fixed
 
@@ -24,6 +24,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `make:viewset --tenant` mounts `require_auth(ModelBackend)`, so tenant users reach it with HTTP Basic (a browser session still gets 401); `make:api_routes`, `make:form`, `make:worker` and `make:scheduled` output and hints compile without warnings; `startapp` no longer asks for the `mod` line it added.
 - `Cli::with_csrf*()` exempts the MCP endpoints (`{prefix}`, `{prefix}/token`, `{prefix}/oauth/token`), so MCP clients are not refused with 403; the rest of the prefix keeps CSRF, and a `/` prefix exempts nothing. New `CsrfConfig::exempt_paths` / `exempt_path` for exact-path exemptions. Boot logs a warning naming the exempt paths, as they apply even without a mounted MCP router.
 - Admin Home links and breadcrumbs point at `<prefix>`, not `<prefix>/`, which a nested admin answers with 404; tenancy help texts name `/login`, not `/__login`.
+- Admin inline add, edit and delete of a child without `audit(...)` now leave the same history as the child's own page, written best-effort after the commit.
+- `reseal-tenant-secrets` re-seals every model's `Cast<EncryptedString>` columns too, on the registry and in each tenant, so the previous key can go after a rotation; a value already under the current key is left alone. `FieldSchema::cast` records which cast a field uses.
+- SSO sign-in finds a link by subject through a new `(provider_source, provider_id, subject)` index on `rustango_sso_links` instead of reading every link of the provider.
+- The auth signals (`user_logged_in`, `user_logged_out`, `user_login_failed`) and the admin save and delete signals carry the tenant's slug (`tenant`), so a receiver can tell user ids and keys of different tenants apart.
+- The cache backends agree on `incr`: only the exact `i64` text counts as a number (`"+7"`, `"007"`, `" 5"` count as 0, as `"abc"` does), Redis restarts such a counter at `by` instead of failing, and every backend refuses a text value with a NUL character.
 
 ## [0.61.10] — 2026-10-29
 
