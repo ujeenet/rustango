@@ -13,6 +13,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `reseal-tenant-secrets` counts an operator TOTP row of an unexpected shape as failed instead of skipping it.
 - CORS: credentials with `"*"` origins are refused with a logged error; with credentials a `"*"` entry in `cors_allowed_headers` / `cors_expose_headers` is dropped.
 
+### Fixed — auth review, round three
+
+- A TOTP reset ends the sessions before it drops the device, so a retry after a failed write still ends them.
+- A Basic or API-key credential whose account-lock slot the lockout cache could not count takes the full login reservation, per-IP and global slots included.
+- A known client's right Basic credential costs six cache calls, down from about twelve.
+
 ### Fixed — ORM set operations and writes
 
 - `a.union(b).intersection(c)` and `a.difference(b).intersection(c)` read left to right on PG and MySQL too, as on SQLite.

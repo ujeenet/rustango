@@ -147,7 +147,10 @@ where
     let id = op.id.get().copied().unwrap_or_default();
     operator_totp::ensure_table(&registry).await?;
     if operator_totp::reset(&registry, &op).await? == 0 {
-        writeln!(w, "`{username}` has no two-factor device")?;
+        writeln!(
+            w,
+            "`{username}` has no two-factor device; their sessions are ended"
+        )?;
         return Ok(());
     }
     crate::audit::ensure_table_pool(&registry).await?;

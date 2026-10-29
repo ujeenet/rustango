@@ -1281,7 +1281,7 @@ mod tests {
     }
 
     /// Parallel wrong keys through a slow shared cache spend the per-IP
-    /// limit, so the right key sent last in the burst is refused.
+    /// limit, and once it is spent the right key is refused.
     #[tokio::test]
     async fn a_parallel_burst_of_api_key_guesses_is_bounded_by_the_ip_limit() {
         let slow = std::sync::Arc::new(
@@ -1340,15 +1340,29 @@ mod tests {
             }
         }
         assert!(misses <= 3, "{misses} wrong keys were checked");
+        // In flight, the right one may pass before the limit is spent.
+        match right.await.unwrap() {
+            Ok(Some(_)) | Err(AuthError::Refused(_)) => {}
+            other => panic!("the right key got {:?}", other.map(|u| u.map(|u| u.id))),
+        }
+        // Spend what is left, even past a window edge.
+        let mut more = 0;
+        while matches!(call(format!("{prefix}.late")).await.unwrap(), Ok(None)) {
+            more += 1;
+            assert!(more <= 3, "{more} more wrong keys were checked");
+        }
         assert!(
-            matches!(right.await.unwrap(), Err(AuthError::Refused(_))),
+            matches!(
+                call(token.clone()).await.unwrap(),
+                Err(AuthError::Refused(_))
+            ),
             "the right key passed a spent per-IP limit"
         );
     }
 
     /// Parallel Basic guesses through a slow shared cache, from a client
     /// that signed in moments ago: the account lock still bounds the burst,
-    /// so the right password sent last is refused, verified cache or not.
+    /// and once it locks the right password is refused, verified cache or not.
     #[tokio::test]
     async fn a_parallel_burst_of_basic_user_guesses_is_bounded_by_the_lock() {
         use base64::Engine as _;
@@ -1407,8 +1421,24 @@ mod tests {
         }
         let max = crate::account_lockout::DEFAULT_MAX_ATTEMPTS as usize;
         assert!(misses <= max, "{misses} wrong passwords were checked");
+        // In flight, the right one may pass before the lock; it clears nothing.
+        match right.await.unwrap() {
+            Ok(Some(_)) | Err(AuthError::Refused(_)) => {}
+            other => panic!(
+                "the right password got {:?}",
+                other.map(|u| u.map(|u| u.id))
+            ),
+        }
+        let mut more = 0;
+        while matches!(call("late".into()).await.unwrap(), Ok(None)) {
+            more += 1;
+            assert!(misses + more <= max, "the failures were cleared");
+        }
         assert!(
-            matches!(right.await.unwrap(), Err(AuthError::Refused(_))),
+            matches!(
+                call("s3cret-basic".into()).await.unwrap(),
+                Err(AuthError::Refused(_))
+            ),
             "the right password passed a locked account"
         );
     }
