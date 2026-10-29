@@ -339,8 +339,8 @@ fn validate(mig: &Migration) -> Result<(), MigrateError> {
             // waits on the tx's locks, forever on PostgreSQL (#1626).
             Operation::Callback(c) if mig.atomic => {
                 return Err(MigrateError::Validation(format!(
-                    "{}: forward[{}]: callback `{}` needs `\"atomic\": false` \
-                     (#1626); safe to add to an already-applied file",
+                    "{}: forward[{}]: callback `{}` needs `\"atomic\": false`; \
+                     safe to add to an already-applied file",
                     mig.name, i, c.name,
                 )));
             }

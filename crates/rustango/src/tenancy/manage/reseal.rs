@@ -133,26 +133,26 @@ where
             }
             Ok(rows) => {
                 for row in rows {
-                    let [SqlValue::I64(id), secret, pending] = row.as_slice() else {
+                    let Some((id, cells)) = totp_cells(&row) else {
+                        todo += 1;
+                        failed += 1;
+                        writeln!(w, "  operator totp: failed: a row of an unexpected shape")?;
                         continue;
                     };
-                    for (column, value) in [("secret", secret), ("pending_secret", pending)] {
-                        let SqlValue::String(stored) = value else {
-                            continue;
-                        };
+                    for (column, stored) in cells {
                         todo += 1;
                         let what = format!("operator totp {id}/{column}");
                         if !apply {
                             writeln!(w, "  {what}: would re-seal")?;
                             continue;
                         }
-                        let outcome = match operator_totp::reseal(*id, stored) {
+                        let outcome = match operator_totp::reseal(id, stored) {
                             Ok(sealed) => {
                                 let cell = SealedCell {
                                     model: <OperatorTotp as crate::core::Model>::SCHEMA,
-                                    pk: ("operator_id", *id),
+                                    pk: ("operator_id", id),
                                     column,
-                                    stored: stored.clone(),
+                                    stored: stored.to_owned(),
                                 };
                                 cell.write(&registry, sealed).await
                             }
@@ -270,6 +270,22 @@ fn missing_table(e: &str) -> bool {
     e.contains("does not exist") || e.contains("no such table") || e.contains("doesn't exist")
 }
 
+/// The operator id and sealed cells of one operator TOTP row; `None` for a
+/// row of another shape, which must count as failed, not pass unseen.
+#[cfg(feature = "totp")]
+fn totp_cells(row: &[SqlValue]) -> Option<(i64, Vec<(&'static str, &str)>)> {
+    let [SqlValue::I64(id), SqlValue::String(secret), pending] = row else {
+        return None;
+    };
+    let mut cells = vec![("secret", secret.as_str())];
+    match pending {
+        SqlValue::String(p) => cells.push(("pending_secret", p.as_str())),
+        SqlValue::Null => {}
+        _ => return None,
+    }
+    Some((*id, cells))
+}
+
 /// One sealed value as stored, keyed by an integer primary key.
 #[cfg(any(feature = "sso", feature = "totp"))]
 struct SealedCell {
@@ -361,5 +377,27 @@ impl SsoSecret {
             stored: self.stored.clone(),
         };
         cell.write(pool, sealed).await
+    }
+}
+
+#[cfg(all(test, feature = "totp"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_odd_totp_row_is_refused() {
+        let s = |v: &str| SqlValue::String(v.into());
+        let ok = [SqlValue::I64(1), s("a"), SqlValue::Null];
+        assert_eq!(totp_cells(&ok), Some((1, vec![("secret", "a")])));
+        let both = [SqlValue::I64(1), s("a"), s("b")];
+        assert_eq!(totp_cells(&both).map(|(_, c)| c.len()), Some(2));
+        for odd in [
+            vec![SqlValue::I64(1), s("a")],
+            vec![s("1"), s("a"), SqlValue::Null],
+            vec![SqlValue::I64(1), SqlValue::Null, SqlValue::Null],
+            vec![SqlValue::I64(1), s("a"), SqlValue::I64(2)],
+        ] {
+            assert_eq!(totp_cells(&odd), None, "{odd:?}");
+        }
     }
 }

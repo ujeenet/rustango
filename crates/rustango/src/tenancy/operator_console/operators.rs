@@ -412,7 +412,7 @@ pub(super) async fn operator_reset_totp(
     Extension(op): Extension<auth::Operator>,
     Path(id): Path<i64>,
 ) -> Response<Body> {
-    use crate::tenancy::operator_totp::{self, OperatorTotp};
+    use crate::tenancy::operator_totp;
     if id == id_of(&op) {
         return back_err(
             &state,
@@ -429,14 +429,14 @@ pub(super) async fn operator_reset_totp(
     if let Err(e) = operator_totp::ensure_table(&state.registry).await {
         return back_err(&state, &op, &withheld(&op, "Could not reset", &e)).await;
     }
-    match crate::admin::totp_store::reset_in::<OperatorTotp>(&state.registry, id).await {
+    match operator_totp::reset(&state.registry, &target).await {
         Ok(0) => return back_ok(&format!("`{}` has no two-factor device", target.username)),
         Ok(_) => {}
         Err(e) => return back_err(&state, &op, &withheld(&op, "Could not reset", &e)).await,
     }
     audit(&state, &op, id, "operator_totp_reset", &target.username).await;
     back_ok(&format!(
-        "removed the two-factor device of `{}`",
+        "removed the two-factor device of `{}` — they are now signed out everywhere",
         target.username
     ))
 }

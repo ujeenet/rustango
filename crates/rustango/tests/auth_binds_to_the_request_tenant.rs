@@ -437,9 +437,8 @@ async fn a_viewset_permission_read_error_is_a_503() {
     );
 }
 
-/// `permission_required(_or_403)` answer a permission read error with 503.
-/// They read `Tenant<DefaultTenantDb>`, a Postgres one when that feature is on.
-#[cfg(not(feature = "postgres"))]
+/// `permission_required(_or_403)` answer a permission read error with 503,
+/// on a SQLite tenant in a build with `postgres` too.
 #[tokio::test]
 async fn a_decorator_permission_read_error_is_a_503() {
     use rustango::tenancy::tenant_console::{

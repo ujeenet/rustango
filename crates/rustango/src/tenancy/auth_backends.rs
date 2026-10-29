@@ -111,7 +111,7 @@ fn tenant_slug(parts: &Parts) -> Result<&str, AuthError> {
     }
 }
 
-/// How long a verified Basic credential skips argon2 (#2617).
+/// How long a verified Basic credential skips argon2.
 const BASIC_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 /// Entries one tenant's Basic cache holds before it evicts; a busy tenant
 /// only evicts its own entries.
@@ -258,7 +258,7 @@ impl AuthBackend for ModelBackend {
         let user = users.into_iter().next();
 
         // A credential verified moments ago against this same stored hash
-        // skips argon2: it is not a guess (#2617).
+        // skips argon2: it is not a guess.
         let cache_key = user
             .as_ref()
             .map(|u| basic_cache_key(slug, &username, &password, &u.password_hash));
@@ -370,7 +370,7 @@ pub struct ApiKey {
     /// ever issued (#1647).
     #[rustango(max_length = 8, index)]
     pub key_prefix: String,
-    /// `hmac-sha256v2$<hex>` under a sub-key of the server secret (#2617);
+    /// `hmac-sha256v2$<hex>` under a sub-key of the server secret;
     /// `hmac-sha256$` (the secret itself) still verifies; argon2id rows are
     /// rewritten on first use.
     /// Never returned to callers.
@@ -495,7 +495,7 @@ impl AuthBackend for ApiKeyBackend {
             None => match raw_hit() {
                 Some(k) => Some(k),
                 None if legacy.is_empty() => None,
-                // Pre-#2617 argon2 rows: verify once, then store the MAC.
+                // Older argon2 rows: verify once, then store the MAC.
                 // A guess at hash cost is reserved like a login.
                 None => {
                     attempt.reserve().await.map_err(AuthError::Refused)?;
@@ -1160,7 +1160,7 @@ mod tests {
         assert_eq!(revocation_warnings(&backend, &token).await, 1);
     }
 
-    /// #2617 — the Basic cache key changes with the stored hash and the
+    /// The Basic cache key changes with the stored hash and the
     /// tenant, so a password change or another tenant never hits.
     #[test]
     fn basic_cache_key_binds_hash_and_tenant() {

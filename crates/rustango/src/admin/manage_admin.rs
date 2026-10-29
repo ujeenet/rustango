@@ -347,14 +347,18 @@ pub async fn reset_admin_totp_cmd<W: Write + Send>(
     let username = parsed.required(0, USAGE)?;
     let user = admin_named(pool, "reset-admin-totp", &username).await?;
     super::totp_store::ensure_table(pool).await?;
-    if reset_in::<AdminTotp>(pool, admin_id(&user)?).await? == 0 {
+    let id = admin_id(&user)?;
+    if reset_in::<AdminTotp>(pool, id).await? == 0 {
         writeln!(w, "`{username}` has no two-factor device")?;
         return Ok(());
     }
+    // A session opened with the lost device must not outlive it.
+    crate::session::revoke_sessions::<AdminUser>(pool, id, user.sessions_revoked_at, 0).await?;
     audit_account(pool, &user, "totp_reset").await?;
     writeln!(
         w,
-        "two-factor device removed for `{username}`; they sign in with the password alone"
+        "two-factor device removed for `{username}`; their sessions are ended and they sign in \
+         with the password alone"
     )?;
     Ok(())
 }

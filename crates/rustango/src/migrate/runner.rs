@@ -931,10 +931,10 @@ fn unregistered(name: &str) -> MigrateError {
 }
 
 /// The atomic runners' callback arm. `file::parse` already refuses this
-/// shape; running it would hang on the tx's own locks (#1626).
+/// shape; running it would hang on the tx's own locks.
 fn callback_in_atomic(mig: &str, op: &crate::migrate::file::CallbackOp) -> MigrateError {
     MigrateError::Validation(format!(
-        "{mig}: callback `{}` needs `\"atomic\": false` (#1626)",
+        "{mig}: callback `{}` needs `\"atomic\": false`",
         op.name,
     ))
 }

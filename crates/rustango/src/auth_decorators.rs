@@ -393,8 +393,8 @@ pub fn active_required_or_403() -> impl tower::Layer<
 ///     .layer(permission_required("/login", ACCESS_ADMIN_CODENAME));
 /// ```
 ///
-/// **Tenant resolution**: the gate extracts [`crate::extractors::Tenant`]
-/// for the pool that `has_perm_pool` queries. Routes using this
+/// **Tenant resolution**: the gate extracts [`crate::extractors::TenantScope`]
+/// for the pool that `has_perm_pool` queries, on any backend. Routes using this
 /// middleware MUST be mounted under the tenant context. A route
 /// without one gets a 500, never an allow.
 ///
@@ -485,24 +485,10 @@ async fn handle_permission_required(
                 .expect("500 + empty body is always valid");
         }
     };
-    // The perm engine needs the tenant pool. If the tenant cannot be
-    // resolved we cannot tell whether the user is authorised, so fail
-    // closed with 500.
-    let tenant =
-        match crate::extractors::Tenant::<crate::tenancy::DefaultTenantDb>::from_request_parts(
-            &mut parts,
-            &(),
-        )
-        .await
-        {
-            Ok(t) => t,
-            Err(_) => {
-                return Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Body::empty())
-                    .expect("500 + empty body is always valid");
-            }
-        };
+    let tenant = match tenant_scope(&mut parts).await {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
     let has = match crate::tenancy::permissions::has_perm_pool(uid, codename, tenant.pool()).await {
         Ok(has) => has,
         Err(e) => return perm_read_failed(&e),
@@ -515,6 +501,23 @@ async fn handle_permission_required(
         .status(StatusCode::FORBIDDEN)
         .body(Body::empty())
         .expect("403 + empty body is always valid")
+}
+
+/// The tenant pool the perm engine reads, on any backend. An unresolved
+/// tenant cannot be authorised, so it fails closed with 500.
+#[cfg(feature = "tenancy")]
+async fn tenant_scope(
+    parts: &mut axum::http::request::Parts,
+) -> Result<crate::extractors::TenantScope, Response> {
+    use axum::extract::FromRequestParts as _;
+    crate::extractors::TenantScope::from_request_parts(parts, &())
+        .await
+        .map_err(|_| {
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::empty())
+                .expect("500 + empty body is always valid")
+        })
 }
 
 /// A failed permission read is an outage, not a missing permission:
@@ -557,21 +560,10 @@ async fn handle_permission_required_or_403(
                 .expect("500 + empty body is always valid");
         }
     };
-    let tenant =
-        match crate::extractors::Tenant::<crate::tenancy::DefaultTenantDb>::from_request_parts(
-            &mut parts,
-            &(),
-        )
-        .await
-        {
-            Ok(t) => t,
-            Err(_) => {
-                return Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Body::empty())
-                    .expect("500 + empty body is always valid");
-            }
-        };
+    let tenant = match tenant_scope(&mut parts).await {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
     let has = match crate::tenancy::permissions::has_perm_pool(uid, codename, tenant.pool()).await {
         Ok(has) => has,
         Err(e) => return perm_read_failed(&e),

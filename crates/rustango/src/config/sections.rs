@@ -791,7 +791,7 @@ pub struct SecuritySettings {
     /// Response headers CORS exposes to scripts on top of the framework's list.
     pub cors_expose_headers: Vec<String>,
     /// `true` sends `Access-Control-Allow-Credentials`. Default `false`;
-    /// pair it with named origins, not `"*"`.
+    /// refused, with a logged error, next to `"*"` origins.
     pub cors_allow_credentials: Option<bool>,
     /// Allowed Host headers, enforced by
     /// [`crate::host_validation::AllowedHostsLayer`]. An entry is a
