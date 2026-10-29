@@ -130,7 +130,7 @@ pub async fn create_tables_in_schema(
         // later references untouched — safe for the FK-less in-schema
         // tables the suite creates.
         let sql = bare.replacen(&quoted, &qualified_target, 1);
-        crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
+        crate::migrate::ensure::run_statements(pool, &[sql]).await?;
     }
     emit_indexes(pool, models, Some(schema)).await
 }
@@ -165,13 +165,15 @@ async fn emit_tables(pool: &Pool, models: &[&'static ModelSchema]) -> Result<(),
     for model in models {
         ddl::check_on_delete(dialect, model).map_err(MigrateError::Validation)?;
     }
+    // Suites boot in parallel: PG's `IF NOT EXISTS` loses races on catalog rows.
     if let Some(sql) = ddl::ci_text_extension_sql(dialect, models) {
-        crate::sql::raw_execute_pool(pool, sql, ::std::vec::Vec::new()).await?;
+        crate::migrate::ensure::run_statements(pool, &[sql.to_owned()]).await?;
     }
-    for model in models {
-        let sql = ddl::create_table_if_not_exists_sql_with_dialect(dialect, model);
-        crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
-    }
+    let tables: Vec<String> = models
+        .iter()
+        .map(|model| ddl::create_table_if_not_exists_sql_with_dialect(dialect, model))
+        .collect();
+    crate::migrate::ensure::run_statements(pool, &tables).await?;
     for model in models {
         // A re-run finds the FK already there, quietly on PG.
         let constraints = ddl::create_constraints_sql_with_dialect(dialect, model);
