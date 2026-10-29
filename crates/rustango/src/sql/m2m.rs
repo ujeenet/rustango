@@ -88,8 +88,10 @@ impl M2MManager {
         .await
     }
 
-    /// Add `dst_id` to the junction table. No-op if already present, with
-    /// or without a unique `(src, dst)` key; a duplicate fires no signal.
+    /// Add `dst_id` to the junction table. No-op if already present; a
+    /// duplicate fires no signal. One insert-or-ignore when the junction has
+    /// a unique `(src, dst)` key; a keyless through model checks then inserts,
+    /// so two concurrent adds of one link on PG/MySQL can both insert.
     ///
     /// # Errors
     /// Driver failures, or a key outside the through model's field bounds.
@@ -102,16 +104,8 @@ impl M2MManager {
             vec![src.clone(), dst.clone()],
         );
         let link = vec![eq(self.src_col, src.clone()), eq(self.dst_col, dst.clone())];
-        let locks = self.source_locks(&src);
-        if locks.is_empty() {
-            tracing::warn!(
-                through = self.through,
-                src_col = self.src_col,
-                "M2M add: no registered source model, so concurrent adds are not serialized"
-            );
-        }
         // A skipped duplicate changed nothing, so it fires no signal (#2221).
-        if !insert_link(locks, link, &query, pool).await? {
+        if !insert_link(self.link_key(), link, &query, pool).await? {
             return Ok(());
         }
         // #410 — fire m2m_changed after successful junction-row write.
@@ -268,6 +262,40 @@ impl M2MManager {
     fn junction(&self) -> &'static ModelSchema {
         junction(self.through, &[self.src_col, self.dst_col])
     }
+
+    /// Whether the junction itself rejects a duplicate `(src, dst)` link.
+    fn link_key(&self) -> LinkKey {
+        let auto = inventory::iter::<crate::core::ModelEntry>
+            .into_iter()
+            .flat_map(|e| e.schema.m2m.iter())
+            .any(|r| r.auto_create && r.through == self.through);
+        let ends = [self.src_col, self.dst_col];
+        let keyed = |s: &ModelSchema| {
+            s.fields
+                .iter()
+                .any(|f| (f.primary_key || f.unique) && ends.contains(&f.column))
+                || s.indexes.iter().any(|i| {
+                    i.unique
+                        && i.where_clause.is_none()
+                        && i.columns.iter().all(|c| ends.contains(c))
+                })
+        };
+        let registered = crate::core::ModelEntry::for_table(self.through).map(|e| e.schema);
+        if auto || registered.is_some_and(keyed) {
+            LinkKey::Unique
+        } else {
+            LinkKey::Unkeyed
+        }
+    }
+}
+
+/// How `add` keeps a link from being stored twice.
+#[derive(Clone, Copy)]
+enum LinkKey {
+    /// A unique key over `(src, dst)` or a subset: insert-or-ignore alone.
+    Unique,
+    /// No such key: check for the link, then insert.
+    Unkeyed,
 }
 
 /// The junction as a schema the emitters compile against (#2136): the
@@ -395,26 +423,26 @@ fn source_lock(source: &'static ModelSchema, pk: &SqlValue) -> Option<SelectQuer
     Some(q)
 }
 
-/// Insert `query` unless a junction row matches `link`, under `locks`: a
-/// through model need not have a unique `(src, dst)` key. `true` only when
-/// a row went in; a unique key the check missed skips it.
+/// Insert `query` unless the link is present. `true` only when a row went
+/// in. No source lock: a caller holding that row in its own transaction
+/// would wait on itself.
 async fn insert_link(
-    locks: Vec<SelectQuery>,
+    key: LinkKey,
     link: Vec<Filter>,
     query: &InsertQuery,
     pool: &Pool,
 ) -> Result<bool, ExecError> {
-    query.validate()?;
-    // SQLite has no row lock: take its write lock at BEGIN instead.
-    let mut tx = crate::sql::write_transaction(pool).await?;
-    for lock in locks {
-        let stmt = pool.dialect().compile_select(&lock)?;
-        super::executor::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+    if let LinkKey::Unique = key {
+        return super::executor::insert_or_ignore(pool, query).await;
     }
+    query.validate()?;
+    // SQLite serializes the check and insert at BEGIN; PG/MySQL can race.
+    let mut tx = crate::sql::write_transaction(pool).await?;
     let present = SelectQuery::new(query.model).where_clause(WhereExpr::and_predicates(link));
     if super::executor::count_rows_on(&mut tx, &CountQuery::from_select(present)).await? > 0 {
         return Ok(false);
     }
+    // A unique key the check did not cover may still skip the row.
     let inserted = super::executor::insert_or_ignore_tx(&mut tx, query).await?;
     tx.commit().await.map_err(ExecError::Driver)?;
     Ok(inserted)

@@ -4963,10 +4963,17 @@ pub async fn migrate_to_pool_with_ledger(
     target: &str,
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
-    with_migrate_lock_held(pool, |held| {
+    let moved = with_migrate_lock_held(pool, |held| {
         migrate_to_locked(held, pool, dir, target, ledger)
     })
-    .await
+    .await?;
+    Ok(moved.unapplied.into_iter().chain(moved.applied).collect())
+}
+
+/// What [`migrate_to_locked`] did, in order: rolled back, then applied.
+pub(crate) struct Moved {
+    pub(crate) unapplied: Vec<Migration>,
+    pub(crate) applied: Vec<Migration>,
 }
 
 /// `Err` unless `target` is one of `all`, the files in `dir`.
@@ -4991,30 +4998,37 @@ pub(crate) async fn migrate_to_locked(
     dir: &Path,
     target: &str,
     ledger: &str,
-) -> Result<Vec<Migration>, MigrateError> {
+) -> Result<Moved, MigrateError> {
     let all = file::list_dir(dir)?;
     let applied = ledger_names(held, pool, ledger).await?;
 
     if target == "zero" {
-        return unapply_all_in_order_pool(pool, dir, &all, &applied, ledger).await;
+        let unapplied = unapply_all_in_order_pool(pool, dir, &all, &applied, ledger).await?;
+        return Ok(Moved {
+            unapplied,
+            applied: Vec::new(),
+        });
     }
 
     target_on_disk(&all, dir, target)?;
 
     let mut applied = applied;
-    let mut touched = Vec::new();
+    let mut moved = Moved {
+        unapplied: Vec::new(),
+        applied: Vec::new(),
+    };
     for mig in backward_from(&all, &applied, target) {
         unapply_locked_pool(pool, dir, &mig.name, ledger).await?;
         applied.remove(&mig.name);
-        touched.push(mig);
+        moved.unapplied.push(mig);
     }
     let mut done = applied.clone();
     for mig in forward_to(&all, &applied, target) {
         reconcile_and_apply(pool, &all, &done, &mig, &applied, ledger, false).await?;
         done.insert(mig.name.clone());
-        touched.push(mig);
+        moved.applied.push(mig);
     }
-    Ok(touched)
+    Ok(moved)
 }
 
 /// Step back `steps` applied migrations against either backend.

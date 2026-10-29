@@ -319,33 +319,44 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     )?;
     writeln!(w, "      action and exits (no DB write).\n")?;
     writeln!(w, "  prune [--model <name>] [--except <name>] [--pretend]")?;
-    writeln!(
-        w,
-        "      Bulk-delete stale rows from every Prunable model (issue #822)."
-    )?;
+    writeln!(w, "      Bulk-delete stale rows from every Prunable model.")?;
     writeln!(
         w,
         "      --pretend counts matches without deleting; --model / --except"
     )?;
     writeln!(w, "      narrow the scope (repeatable).\n")?;
-    writeln!(
-        w,
-        "  reset-password <username> | change-password <username>"
-    )?;
-    writeln!(
-        w,
-        "      Set an admin user's password; change-password checks the old one.\n"
-    )?;
-    writeln!(w, "  set-admin-active <username> --on|--off")?;
-    writeln!(
-        w,
-        "      Turn an admin user off (ends their sessions) or back on.\n"
-    )?;
-    writeln!(w, "  reset-admin-totp <username>")?;
-    writeln!(
-        w,
-        "      Remove an admin user's two-factor device (lost phone).\n"
-    )?;
+    #[cfg(feature = "admin")]
+    {
+        writeln!(
+            w,
+            "  create-admin <username> [--password-stdin | --generate] [--superuser]"
+        )?;
+        writeln!(
+            w,
+            "      Create an admin user; prompts for the password by default.\n"
+        )?;
+        writeln!(
+            w,
+            "  reset-password <username> | change-password <username>"
+        )?;
+        writeln!(
+            w,
+            "      Set an admin user's password; change-password checks the old one.\n"
+        )?;
+        writeln!(w, "  set-admin-active <username> --on|--off")?;
+        writeln!(
+            w,
+            "      Turn an admin user off (ends their sessions) or back on.\n"
+        )?;
+    }
+    #[cfg(all(feature = "admin", feature = "totp"))]
+    {
+        writeln!(w, "  reset-admin-totp <username>")?;
+        writeln!(
+            w,
+            "      Remove an admin user's two-factor device (lost phone).\n"
+        )?;
+    }
     writeln!(w, "  audit-cleanup --days <N> | --keep-last <N> [--yes]")?;
     writeln!(
         w,
@@ -850,14 +861,35 @@ async fn migrate<W: Write>(
         }
         // A forward target needs the framework tables its migrations may FK.
         if target != "zero" && !target_is_applied(pool, target).await? {
-            return migrate_with_framework(
+            // Files after the target are rolled back first: only the rest
+            // count as applied, in the output and in `post_migrate`.
+            let unapplied = std::sync::Mutex::new(Vec::new());
+            let slot = &unapplied;
+            let mut out = Vec::new();
+            let run = migrate_with_framework(
                 pool,
                 dir,
-                w,
+                &mut out,
                 runner::Signals::Fire { tenant: None },
-                |held| runner::migrate_to_locked(held, pool, dir, target, runner::LEDGER_TABLE),
+                |held| async move {
+                    let moved =
+                        runner::migrate_to_locked(held, pool, dir, target, runner::LEDGER_TABLE)
+                            .await?;
+                    *slot
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = moved.unapplied;
+                    Ok(moved.applied)
+                },
             )
             .await;
+            let unapplied = unapplied
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for m in unapplied {
+                writeln!(w, "  unapplied {}", m.name)?;
+            }
+            w.write_all(&out)?;
+            return run;
         }
         let touched = runner::migrate_to_pool(pool, dir, target).await?;
         if touched.is_empty() {
@@ -6411,6 +6443,10 @@ pub struct DeployAuditFindings {
     pub errors: Vec<String>,
 }
 
+const APEX_UNSET: &str = "RUSTANGO_APEX_DOMAIN is unset / `localhost` — tenancy projects need \
+    the public-facing apex (e.g. `app.example.com`) so subdomain resolution + cookie scoping \
+    work in production.";
+
 /// Run the `manage check --deploy` audit checks against `env`.
 /// Pure function so callers can test it with arbitrary env
 /// snapshots without poking actual process env vars.
@@ -6421,10 +6457,6 @@ pub struct DeployAuditFindings {
 /// the operator-console + tenant-admin cookies AND the JWT
 /// payloads issued by `auth_routes::JwtAuth` (#81). Same key
 /// covers both surfaces.
-const APEX_UNSET: &str = "RUSTANGO_APEX_DOMAIN is unset / `localhost` — tenancy projects need \
-    the public-facing apex (e.g. `app.example.com`) so subdomain resolution + cookie scoping \
-    work in production.";
-
 pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindings) {
     if env.ungated_admin {
         out.warnings.push(

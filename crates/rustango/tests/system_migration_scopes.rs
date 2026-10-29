@@ -151,8 +151,5 @@ fn every_make_migrations_entry_point_takes_drop_and_add() {
     make("tagline", DropAndAdd::Allow)
         .unwrap()
         .expect("the drop + add, on purpose");
-    // The other entry points compile with the same argument.
-    let _ = rustango::migrate::make_migrations_with;
-    let _ = rustango::migrate::make_migrations_for_scope_with;
-    let _ = rustango::migrate::make_migrations_for_app_with;
+    // The registry-reading entry points: `migrate_drop_and_add_cli.rs`.
 }

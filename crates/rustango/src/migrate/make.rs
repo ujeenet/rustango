@@ -61,8 +61,7 @@ pub fn make_migrations_with(
     name_override: Option<&str>,
     drops: DropAndAdd,
 ) -> Result<Option<Migration>, MigrateError> {
-    super::snapshot::check_registry_junctions()?;
-    super::snapshot::check_relation_targets()?;
+    check_models()?;
     let current = SchemaSnapshot::from_registry();
     make_migrations_from_with(dir, &current, name_override, drops)
 }
@@ -101,8 +100,7 @@ pub fn make_migrations_for_scope_with(
     name_override: Option<&str>,
     drops: DropAndAdd,
 ) -> Result<Option<Migration>, MigrateError> {
-    super::snapshot::check_registry_junctions()?;
-    super::snapshot::check_relation_targets()?;
+    check_models()?;
     let current = SchemaSnapshot::from_registry_for_scope(scope);
     let migration_scope = migration_scope(scope);
     make_migrations_scoped_with(dir, &current, scope, migration_scope, name_override, drops)
@@ -141,8 +139,7 @@ pub fn make_migrations_for_app_with(
     if !app_dir.exists() {
         std::fs::create_dir_all(&app_dir)?;
     }
-    super::snapshot::check_registry_junctions()?;
-    super::snapshot::check_relation_targets()?;
+    check_models()?;
     let current = SchemaSnapshot::from_registry_for_app(app);
     make_migrations_from_with(&app_dir, &current, name_override, drops)
 }
@@ -209,8 +206,7 @@ pub(crate) fn planned_migrations(
     dir: &Path,
     tenancy: bool,
 ) -> Result<Vec<Migration>, MigrateError> {
-    super::snapshot::check_registry_junctions()?;
-    super::snapshot::check_relation_targets()?;
+    check_models()?;
     let prior = file::list_dir(dir)?;
     if !tenancy {
         return Ok(plan_from(
@@ -287,8 +283,7 @@ pub(crate) fn make_migrations_tenancy(
     name_override: Option<&str>,
     drops: DropAndAdd,
 ) -> Result<TenancyRun, MigrateError> {
-    super::snapshot::check_registry_junctions()?;
-    super::snapshot::check_relation_targets()?;
+    check_models()?;
     make_tenancy_from(dir, &registry_scopes(), name_override, drops)
 }
 
@@ -806,7 +801,7 @@ fn plan_from(
 /// As [`make_migrations`].
 pub(crate) fn models_ahead_of(prior: &[Migration], scoped: bool) -> Result<bool, MigrateError> {
     use crate::core::ModelScope;
-    super::snapshot::check_registry_junctions()?;
+    check_models()?;
     if !scoped {
         let current = SchemaSnapshot::from_registry();
         return Ok(plan_from(prior, &current, None, DropAndAdd::Allow)?.is_some());
@@ -821,6 +816,13 @@ pub(crate) fn models_ahead_of(prior: &[Migration], scoped: bool) -> Result<bool,
         }
     }
     Ok(false)
+}
+
+/// The registry checks every `makemigrations` runs: `--squash` runs them
+/// before it deletes the files it regenerates.
+fn check_models() -> Result<(), MigrateError> {
+    super::snapshot::check_registry_junctions()?;
+    super::snapshot::check_relation_targets()
 }
 
 /// Names reachable from the last in-scope migration through every

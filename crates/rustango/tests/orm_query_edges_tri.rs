@@ -65,6 +65,15 @@ pub struct Bucket {
     pub id: i64,
 }
 
+/// Holds a bucket: deleting it is refused.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "oqe_bucket_ref", app = "oqe")]
+pub struct BucketRef {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub bucket: ForeignKey<Bucket>,
+}
+
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "oqe_day", app = "oqe")]
 pub struct Day {
@@ -191,7 +200,13 @@ pub struct Renamed {
 
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
-    for t in [City::SCHEMA, Top::SCHEMA, Mid::SCHEMA, Pet::SCHEMA] {
+    for t in [
+        City::SCHEMA,
+        Top::SCHEMA,
+        Mid::SCHEMA,
+        Pet::SCHEMA,
+        BucketRef::SCHEMA,
+    ] {
         drop_table(pool, t.table).await;
     }
     fresh_table::<Country>(pool).await;
@@ -200,6 +215,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Mid>(pool).await;
     fresh_table::<Top>(pool).await;
     fresh_table::<Bucket>(pool).await;
+    fresh_table::<BucketRef>(pool).await;
     fresh_table::<Owner>(pool).await;
     fresh_table::<Pet>(pool).await;
     fresh_table::<Note>(pool).await;
@@ -1008,6 +1024,32 @@ async fn key_list_shortcuts_past_the_bind_cap(pool: &Pool) {
     assert_eq!(ids(Bucket::objects().fetch(pool).await.expect("left")), [2]);
 }
 
+/// `destroy` past the bind cap is all or none: a refused last batch keeps
+/// the rows the first batch matched.
+async fn destroy_past_the_bind_cap_is_all_or_none(pool: &Pool) {
+    for id in [1, 70_000] {
+        Bucket { id }.insert_pool(pool).await.expect("bucket");
+    }
+    BucketRef {
+        id: 1,
+        bucket: ForeignKey::Unloaded(70_000),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("ref");
+    Bucket::destroy(1..=70_000_i64, pool)
+        .await
+        .expect_err("the referenced bucket");
+    let left: Vec<i64> = Bucket::objects()
+        .fetch(pool)
+        .await
+        .expect("left")
+        .iter()
+        .map(|b| b.id)
+        .collect();
+    assert_eq!(left.len(), 2, "{left:?}");
+}
+
 /// `latest` / `earliest` skip NULLs on every backend.
 async fn latest_and_earliest_skip_nulls(pool: &Pool) {
     let nothing: Option<Item> = Item::objects().latest("middle", pool).await.expect("empty");
@@ -1100,6 +1142,7 @@ tri_dialect_test! {
         update_set_twice_keeps_the_last,
         chunk_shortcuts_on_small_and_renamed_keys,
         key_list_shortcuts_past_the_bind_cap,
+        destroy_past_the_bind_cap_is_all_or_none,
         latest_and_earliest_skip_nulls,
         last_of_a_slice,
     ],

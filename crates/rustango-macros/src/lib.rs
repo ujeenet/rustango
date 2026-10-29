@@ -4355,9 +4355,14 @@ fn inherent_impl_tokens(
 
     // Bulk writers on audited models write one audit row per affected
     // row, in the write's transaction (#1747).
-    let (bulk_delete_run, bulk_update_run, truncate_run) = if audited_fields.is_some() {
+    let (bulk_delete_run, destroy_run, bulk_update_run, truncate_run) = if audited_fields.is_some()
+    {
         (
             quote!(#root::audit::delete_many_with_audit::<Self>(pool, &_query, |_r: &Self| {
+                _r.__rustango_audit_entry(#root::audit::AuditOp::Delete)
+            })
+            .await),
+            quote!(#root::audit::delete_each_with_audit::<Self>(pool, &_queries, |_r: &Self| {
                 _r.__rustango_audit_entry(#root::audit::AuditOp::Delete)
             })
             .await),
@@ -4374,6 +4379,7 @@ fn inherent_impl_tokens(
     } else {
         (
             quote!(#root::sql::delete_pool(pool, &_query).await),
+            quote!(#root::sql::__rustango_delete_all_or_none(pool, _queries).await),
             quote!(#root::sql::update_pool(pool, &_query).await),
             quote!(#root::sql::truncate(pool, <Self as #root::core::Model>::SCHEMA).await),
         )
@@ -5170,7 +5176,8 @@ fn inherent_impl_tokens(
             /// Returns the affected row count.
             ///
             /// Eloquent `Model::destroy([1, 2, 3])` parity.
-            /// Empty `pks` is a no-op (returns 0).
+            /// Empty `pks` is a no-op (returns 0). All or none: past
+            /// the bind cap the batches share one transaction.
             ///
             /// Accepts any iterable whose elements are
             /// `Into<SqlValue>` — `Vec<i64>`, `&[i64]`,
@@ -5195,19 +5202,20 @@ fn inherent_impl_tokens(
                     .ok_or_else(|| {
                         #root::sql::ExecError::Sql(#root::sql::SqlError::MissingPrimaryKey)
                     })?;
-                // One statement per `IN` list the dialect can bind.
-                let mut _deleted: u64 = 0;
+                // One statement per `IN` list the dialect can bind, all or none.
+                let mut _queries = ::std::vec::Vec::new();
                 for _keys in #root::sql::__rustango_in_batches::<Self>(pool, _values)? {
-                    let _query = #root::query::QuerySet::<Self>::default()
-                        .filter_op(
-                            _pk.name,
-                            #root::core::Op::In,
-                            #root::core::SqlValue::List(_keys),
-                        )
-                        .compile_delete()?;
-                    _deleted += #bulk_delete_run?;
+                    _queries.push(
+                        #root::query::QuerySet::<Self>::default()
+                            .filter_op(
+                                _pk.name,
+                                #root::core::Op::In,
+                                #root::core::SqlValue::List(_keys),
+                            )
+                            .compile_delete()?,
+                    );
                 }
-                ::core::result::Result::Ok(_deleted)
+                #destroy_run
             }
 
             /// Fetch every row where `<col> = <val>`. Eloquent

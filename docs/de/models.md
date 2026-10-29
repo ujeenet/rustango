@@ -128,6 +128,7 @@ pub struct Gadget {
 > `DECIMAL(65,28)` (jeder `rust_decimal`-Wert passt);
 > SQLite verwendet `NUMERIC`-Affinität und behält etwa 15 signifikante Stellen: ein
 > längerer Wert (`12345678901234567.89`) wird beim Schreiben ohne Fehler gerundet.
+> Auch Nullen am Ende gehen verloren: `12.50` wird als `12.5` gelesen, `100.00` als `100`.
 > Für breitere Werte PostgreSQL oder MySQL nutzen. Verwende `rust_decimal::Decimal` für Geld,
 > niemals `f64`.
 

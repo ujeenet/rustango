@@ -974,6 +974,21 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// Whether a limit or offset is set, on the query or its head branch.
+    /// An `offset` with no limit and no set-op slice: the window is the tail.
+    pub(crate) fn is_offset_only(&self) -> bool {
+        self.offset.is_some()
+            && self.limit.is_none()
+            && self.head_limit.is_none()
+            && self.head_offset.is_none()
+    }
+
+    /// This queryset with its own `offset` dropped.
+    #[must_use]
+    pub(crate) fn without_offset(mut self) -> Self {
+        self.offset = None;
+        self
+    }
+
     pub(crate) fn is_sliced(&self) -> bool {
         self.limit.is_some()
             || self.offset.is_some()

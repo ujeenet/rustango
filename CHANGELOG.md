@@ -26,7 +26,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - SQLite runs a union of `select_related` branches with an outer `order_by`.
 - `bulk_upsert_pool` with a key repeated in one batch keeps the last row on every backend; PG used to fail.
 - `dates()` / `datetimes()` skip NULL values instead of failing the decode.
-- M2M `add` no longer links twice when the through model has no unique `(src, dst)` key, and fires `Add` only when a row went in; with no registered source model it warns that concurrent adds are not serialized.
+- M2M `add` no longer links twice when the through model has no unique `(src, dst)` key, and fires `Add` only when a row went in. On a junction with that key it stays one insert-or-ignore with no lock, so it does not wait on a caller's open transaction.
 
 ### Fixed — model attributes, migrations and MCP
 
@@ -105,17 +105,20 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `chunk`, `chunk_by_id` and `each` work on an `i32` primary key and on one with a renamed column.
 - `find_many`, `find_many_or_fail`, `where_in` and `destroy` split a key list past the dialect's bind cap, counting `1_i32` and `1_i64` as one key.
 - `latest` / `earliest` skip NULLs, so every backend returns the same row.
-- `last()` on a sliced queryset returns the last row of the slice.
+- `last()` on a sliced queryset returns the last row of the slice; with only an `offset` it reads two rows, not the whole tail.
+- `destroy` past the bind cap runs its batches in one transaction: all keys go, or none.
 
 ### Fixed — migrations, secrets and auth
 
 - `makemigrations` refuses a column dropped beside a new column of the same type on one table (a likely rename that would delete the data), and names the `--empty` + `RenameColumn` route; `--drop-and-add` writes the drop + add on purpose. Every `DropColumn` now warns that its data goes.
-- `make_migrations_with`, `make_migrations_for_scope_with`, `make_migrations_for_app_with` and `make_migrations_scoped_with` are public and take a `DropAndAdd`.
+- `make_migrations_with`, `make_migrations_for_scope_with`, `make_migrations_for_app_with`, `make_migrations_scoped_with` and `make_migrations_from_with` are public and take a `DropAndAdd`.
 - Tenancy `makemigrations` plans the system, registry and tenant files before writing any, so a refused scope leaves no half-written run.
 - `reseal-tenant-secrets` re-seals operator TOTP secrets, so a key rotation no longer locks enrolled operators out of the console.
 - Tenancy `ModelBackend` Basic auth takes the same per-request slot before the cached-credential check, so a parallel burst cannot pass the account lock.
 - `jwt::decode` reads a fractional `exp` / `nbf` as a NumericDate instead of ignoring it, and refuses a non-numeric one.
-- CLI errors no longer start with `invalid migration:`; `migrate <target>` prints `applied` / `unapplied` per file; migrate messages drop stale version and issue references.
+- CLI errors no longer start with `invalid migration:`; `migrate <target>` prints `applied` / `unapplied` per file, also when it rolls back files after a pending target, and `post_migrate` lists only the applied ones; migrate messages, `manage help` and the PG-only column decode errors drop stale version and issue references.
+- `migrate --squash` runs the `makemigrations` relation checks before it deletes the pending files.
+- `manage help` lists `create-admin`, and lists the admin and TOTP verbs only in builds that have them.
 - The admin's missing-table page names `makemigrations`; the tenancy quickstart, operator TOTP recovery and the CreateView example in the docs work as written.
 
 ### Fixed — wrong data: cache counters, dumps, admin inlines

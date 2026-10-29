@@ -125,7 +125,8 @@ pub struct Gadget {
 > **Précision décimale.** Le `NUMERIC` de PostgreSQL est à précision arbitraire ; MySQL utilise
 > `DECIMAL(65,28)` (toute valeur `rust_decimal` y tient) ; SQLite
 > utilise l'affinité `NUMERIC`, qui garde environ 15 chiffres significatifs : une valeur
-> plus longue (`12345678901234567.89`) est arrondie à l'écriture, sans erreur. Pour des
+> plus longue (`12345678901234567.89`) est arrondie à l'écriture, sans erreur. Les zéros
+> finaux sont aussi perdus : `12.50` est relu comme `12.5`, `100.00` comme `100`. Pour des
 > valeurs plus larges, utilisez PostgreSQL ou MySQL. Utilisez `rust_decimal::Decimal` pour l'argent, jamais `f64`.
 
 ### Types spécifiques à PostgreSQL

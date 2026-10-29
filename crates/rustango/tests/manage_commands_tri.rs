@@ -326,6 +326,15 @@ async fn migrate_target_names_each_direction(backend: &Pool) {
     let out = manage_out(&env.registry, &dir, &["migrate", "0002_b"]).await;
     assert_eq!(out.trim(), "applied 0002_b", "{out}");
 
+    // A merged branch: an unapplied target sorts before an applied file.
+    let mut side = rustango::migrate::file::load(&dir.join("0002_b.json")).unwrap();
+    side.name = "0001_z".into();
+    side.prev = Some("0001_a".into());
+    rustango::migrate::file::write(&dir.join("0001_z.json"), &side).unwrap();
+    let out = manage_out(&env.registry, &dir, &["migrate", "0001_z"]).await;
+    let lines: Vec<&str> = out.lines().map(str::trim).collect();
+    assert_eq!(lines, ["unapplied 0002_b", "applied 0001_z"], "{out}");
+
     let err = |argv: &'static [&'static str]| {
         let (pool, dir) = (env.registry.clone(), dir.clone());
         async move {
