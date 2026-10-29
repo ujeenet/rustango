@@ -861,14 +861,21 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "  showmigrations       List which migrations are applied / pending."
     )?;
-    writeln!(w, "  downgrade [N] [--tenant <slug> | --all-tenants]")?;
     writeln!(
         w,
-        "                       Roll back the last N migrations (default 1): registry-scoped,"
+        "  downgrade [N | <target>] [--tenant <slug> | --all-tenants [--yes]]"
     )?;
     writeln!(
         w,
-        "                       or tenant-scoped in one tenant / every active tenant."
+        "                       Roll back the last N migrations (default 1), or those after"
+    )?;
+    writeln!(
+        w,
+        "                       <target>: registry-scoped, or tenant-scoped in one tenant /"
+    )?;
+    writeln!(
+        w,
+        "                       every active tenant. --all-tenants prints the plan; --yes runs it."
     )?;
     writeln!(w)?;
     writeln!(w, "ROLES & PERMISSIONS:")?;

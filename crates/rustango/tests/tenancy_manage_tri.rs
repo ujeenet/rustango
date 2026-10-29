@@ -425,7 +425,7 @@ async fn downgrade_rolls_back_tenant_migrations(pool: &Pool) {
     assert!(!env.applied(&orgs[0]).await.contains(mine));
     assert!(env.applied(&orgs[1]).await.contains(mine), "only {slug}");
 
-    env.run(&dir, &["downgrade", "--all-tenants"])
+    env.run(&dir, &["downgrade", "--all-tenants", "--yes"])
         .await
         .expect("all tenants");
     assert!(!env.applied(&orgs[1]).await.contains(mine));
@@ -435,6 +435,54 @@ async fn downgrade_rolls_back_tenant_migrations(pool: &Pool) {
         .await
         .expect_err("a tenant target");
     assert!(err.to_string().contains("downgrade [N] --tenant"), "{err}");
+}
+
+/// Tenants at different versions: `--all-tenants` shows each plan, runs
+/// it only with `--yes`, and a target keeps what it names.
+async fn downgrade_all_tenants_plans_to_a_target(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("migrations");
+    migration(&dir, "0001_tenant", "SELECT 1");
+    let mut orgs = Vec::new();
+    for tag in ["dpa", "dpb"] {
+        let mut org = env.own_tenant(tag).await;
+        org.save_pool(&env.registry).await.expect("insert org");
+        env.migrate(&org, &dir).await;
+        orgs.push(org);
+    }
+    // Only the first tenant moves on to 0002.
+    migration(&dir, "0002_tenant", "SELECT 1");
+    env.migrate(&orgs[0], &dir).await;
+    let both = ["0001_tenant", "0002_tenant"];
+
+    let out = env
+        .run_out(&dir, &["downgrade", "0001_tenant", "--all-tenants"])
+        .await
+        .expect("plan");
+    assert!(
+        out.contains(&format!("{}: would roll back 0002_tenant", orgs[0].slug)),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("{}: nothing to downgrade", orgs[1].slug)),
+        "{out}"
+    );
+    assert!(out.contains("--yes"), "{out}");
+    let applied = env.applied(&orgs[0]).await;
+    assert!(both.iter().all(|m| applied.contains(*m)), "a plan ran");
+
+    env.run(
+        &dir,
+        &["downgrade", "0001_tenant", "--all-tenants", "--yes"],
+    )
+    .await
+    .expect("run");
+    let first = env.applied(&orgs[0]).await;
+    assert!(first.contains("0001_tenant") && !first.contains("0002_tenant"));
+    assert!(
+        env.applied(&orgs[1]).await.contains("0001_tenant"),
+        "target kept"
+    );
 }
 
 /// Migrate-signal receivers are process-global.
@@ -1322,6 +1370,7 @@ tri_dialect_test! {
         create_tenant_migrates_only_the_new_tenant,
         forget_pending_refuses_a_tenant_applied_migration,
         downgrade_rolls_back_tenant_migrations,
+        downgrade_all_tenants_plans_to_a_target,
         forget_pending_refuses_an_unreadable_tenant,
         tenant_migrate_sends_migrate_signals,
         an_existing_schema_is_not_adopted,
