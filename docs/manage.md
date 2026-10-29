@@ -79,7 +79,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 |---|---|
 | `makemigrations [name]` / `--empty <name>` | Generate a migration from the model diff |
 | `migrate [target]` / `--dry-run` / `--squash` | Apply pending migrations |
-| `downgrade [N]` | Roll back the last N migrations |
+| `downgrade [N \| <target>]` | Roll back the last N migrations, or those after `<target>` (tenant scope) |
 | `showmigrations` / `status` | List migrations and their applied state |
 | `sqlmigrate <name>` | Print the SQL a migration would run, without running it |
 | `forget-pending <name>` | Delete an un-applied migration JSON no later file builds on |
@@ -111,7 +111,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | Verb | What it does |
 |---|---|
 | `createcachetable` / `create-cache-table` `[--table <name>]` | Create the cache table (and the session table when sessions go to the DB) |
-| `clear-cache [--table <name>]` / `clearsessions` | Empty it; returns the number of rows deleted |
+| `clear-cache [--table <name>]` / `clearsessions` | Empty it; returns the number of rows deleted. With no table yet, reports that nothing needs clearing |
 | `sendtestemail --to <addr>` | Send a fixed test email through the configured backend |
 
 ### Introspection
@@ -399,7 +399,7 @@ every active tenant, reporting each one and continuing past failures —
 the framework's tables live per tenant, so repairing them is a per-tenant
 job.
 
-### `downgrade [N]`
+### `downgrade [N | <target>]`
 
 Rolls back the last N applied migrations (default 1). Each migration must be reversible: schema changes
 reverse automatically, but data operations need a `reverse_sql` defined
@@ -408,6 +408,23 @@ or the rollback fails.
 ```bash
 cargo run -- downgrade                  # one step
 cargo run -- downgrade 3                # three steps
+```
+
+In a tenancy project `downgrade` rolls back registry-scoped migrations.
+Tenant-scoped ones live in each tenant's ledger:
+
+```bash
+cargo run -- downgrade --tenant acme    # one tenant
+cargo run -- downgrade 2 --all-tenants  # every active tenant, two steps each
+```
+
+Tenants can sit at different versions. `--all-tenants` prints each
+tenant's plan and changes nothing; add `--yes` to run it. Name a
+migration instead of N to roll back everything applied after it:
+
+```bash
+cargo run -- downgrade 0001_initial --all-tenants        # the plan
+cargo run -- downgrade 0001_initial --all-tenants --yes  # run it
 ```
 
 ### `showmigrations` / `status`
@@ -656,6 +673,9 @@ Generates a fixed-interval task for `scheduler::Scheduler` — the shape
 cargo run -- make:scheduled NightlySweep
 ```
 
+Start it from a worker binary (`make:worker`): `main.rs` has no pool, and
+code before `Cli::run()` would run for every CLI verb.
+
 ### `make:worker <Name>`
 
 Generates a standalone worker binary for `src/bin/` — a process that
@@ -762,7 +782,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.10
+rustango 0.61.11
 ```
 
 ### `about`
@@ -774,7 +794,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.10
+  version:        0.61.11
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -1236,11 +1256,12 @@ does not go red.
 Creates a user inside one tenant. The account exists only in that
 tenant. Instead of `--password` you can pass `--password-stdin` or
 `--generate` (prints a random one); omit all three on a terminal and it
-prompts. `--skip-validation` skips the password rules. There is no
-`--staff` flag.
+prompts. The password must pass the same rules as the web forms: at
+least 12 characters, a digit or a symbol, not a well-known weak password.
+`--skip-validation` skips them. There is no `--staff` flag.
 
 ```bash
-cargo run -- create-user acme alice --password hunter2 --superuser
+cargo run -- create-user acme alice --password Hunter2-alice-pw --superuser
 ```
 
 `--superuser` sets `is_superuser = true` for that user inside the
@@ -1597,7 +1618,7 @@ cargo run -- migrate                                      # registry + tenants
 cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
-cargo run -- create-user acme alice --password tenantpw --superuser
+cargo run -- create-user acme alice --password Tenant-pw-2026 --superuser
 cargo run                        # serve at :8080
 ```
 
@@ -1628,7 +1649,7 @@ cargo run -- migrate
 #    the new tenant arrives at the same schema state as existing ones.
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
-cargo run -- create-user acme alice --password tenantpw --superuser
+cargo run -- create-user acme alice --password Tenant-pw-2026 --superuser
 ```
 
 Why this is safe:

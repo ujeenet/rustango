@@ -45,7 +45,7 @@ const SESSION_SECRET: &str = "cookbook-chapter6b-test-32bytes-please!!!!";
 const DB_NAME: &str = "cookbook_ch6b_dev";
 const TENANT: &str = "acme";
 const USERNAME: &str = "alice";
-const PASSWORD: &str = "tenantpw";
+const PASSWORD: &str = "tenant-pw-Correct-7";
 
 fn url() -> Option<String> {
     std::env::var("DATABASE_URL").ok()

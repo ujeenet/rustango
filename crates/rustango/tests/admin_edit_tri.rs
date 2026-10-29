@@ -1000,6 +1000,35 @@ async fn bare_admin_serves_the_favicon_it_links(pool: &Pool) {
     assert_eq!(res.status(), StatusCode::OK, "gated favicon");
 }
 
+/// Under a nested prefix, Home and the first breadcrumb open the index:
+/// axum's `nest` serves `/admin`, and `/admin/` is 404.
+async fn home_links_open_the_nested_index(pool: &Pool) {
+    let admin = rustango::admin::Builder::new(pool.clone())
+        .admin_prefix("/admin")
+        .build();
+    let app = axum::Router::new().nest("/admin", admin);
+    let get = |uri: String| {
+        let app = app.clone();
+        async move {
+            let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+            let res = app.oneshot(req).await.unwrap();
+            let status = res.status();
+            let bytes = res.into_body().collect().await.unwrap().to_bytes();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+    for page in ["/admin/aed_doc", "/admin/aed_doc/new"] {
+        let (status, html) = get(page.into()).await;
+        assert_eq!(status, StatusCode::OK, "{page}: {html}");
+        let html = html.replace("&#x2F;", "/");
+        assert!(!html.contains(r#"href="/admin/""#), "{page} links /admin/");
+        let homes = html.matches(r#"href="/admin""#).count();
+        assert!(homes >= 2, "{page}: sidebar and breadcrumb, got {homes}");
+    }
+    let (status, html) = get("/admin".into()).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -1019,6 +1048,7 @@ tri_dialect_test! {
         refused_edit_keeps_the_typed_inline_rows,
         refused_edit_keys_typed_rows_by_pk,
         bare_admin_serves_the_favicon_it_links,
+        home_links_open_the_nested_index,
     ],
 }
 

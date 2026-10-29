@@ -207,7 +207,8 @@ fn extension_may_skip(ci: bool, missing: Option<&str>, name: &str) -> bool {
 #[cfg(feature = "postgres")]
 pub async fn pg_extension(pool: &Pool, name: &str) -> bool {
     let sql = format!("CREATE EXTENSION IF NOT EXISTS {name}");
-    let Err(e) = crate::sql::raw_execute_pool(pool, &sql, Vec::new()).await else {
+    // Parallel suites race on PG's catalog row; the loser's error means "exists".
+    let Err(e) = crate::migrate::ensure::run_statements(pool, &[sql]).await else {
         return true;
     };
     let ci = std::env::var_os("CI").is_some();

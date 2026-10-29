@@ -1337,6 +1337,7 @@ jobs:
             --test orm_core_counts_tri \
             --test pool_conn_tri \
             --test manage_data_verbs_tri \
+            --test boot_races_tri \
             --test test_db_tri \
             --test orm_dialect_tri \
             --test bulk_update_api_sqlite_live \
@@ -1748,6 +1749,7 @@ jobs:
           binary(=update_validation_tri) |
           binary(=uuid_v7_pk_writes_tri) |
           binary(=manage_data_verbs_tri) |
+          binary(=boot_races_tri) |
           binary(=test_db_tri) |
           binary(=migrate_ddl_tri) |
           binary(=migrate_autodetect_tri) |

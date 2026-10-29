@@ -80,7 +80,7 @@ La console répond sur le domaine **apex** (`RUSTANGO_APEX_DOMAIN`), pas sur un 
 | **Audit log** | Chaque changement effectué via la console |
 | **Runs** | Exécutions de provisioning et de migration, diffusées en direct |
 | **Database servers** | Serveurs où les bases des tenants sont créées, avec leur login d'administration |
-| **Change password** | Votre propre mot de passe |
+| **Change password** | Votre propre mot de passe ; vos autres sessions se terminent, celle-ci reste connectée |
 | **Two-factor sign-in** | Votre application d'authentification (feature `totp`) |
 | **Shared SSO** | Fournisseurs de connexion proposés à chaque tenant, avec l'URL de callback à enregistrer (feature `admin-sso` ; voir [SSO](sso.md)) |
 

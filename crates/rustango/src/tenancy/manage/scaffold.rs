@@ -148,39 +148,7 @@ fn write_report<W: Write>(
     }
     if !report.written.is_empty() {
         writeln!(w, "next:")?;
-        writeln!(
-            w,
-            "  add `mod {app_name};` to {base_label}/main.rs (or {base_label}/lib.rs)"
-        )?;
-        writeln!(
-            w,
-            "  so the derive macros' `inventory` registrations are pulled in."
-        )?;
-        if bootstrap.is_some() {
-            writeln!(w)?;
-            writeln!(
-                w,
-                "  bootstrap migrations are already in {base_label}/{app_name}/migrations/ —"
-            )?;
-            writeln!(
-                w,
-                "  point `Builder::migrate(...)` at that directory and `cargo run` is enough."
-            )?;
-        } else {
-            writeln!(w)?;
-            writeln!(
-                w,
-                "  for tenancy: `cargo run -- init-tenancy && cargo run -- migrate` to"
-            )?;
-            writeln!(
-                w,
-                "  materialize the registry + tenant bootstrap migrations."
-            )?;
-            writeln!(
-                w,
-                "  (or pass `--with-bootstrap-migration` next time to bundle them in.)"
-            )?;
-        }
+        writeln!(w, "  {}", crate::migrate::scaffold::STARTAPP_NEXT)?;
     }
     Ok(())
 }
@@ -227,6 +195,22 @@ mod tests {
                 "a bin can't name the library as crate:\n{bin}"
             );
         }
+    }
+
+    /// No `mod` line for a patched entry, and no no-op `init-tenancy` step.
+    #[test]
+    fn report_hints_only_the_steps_left_to_do() {
+        let report = crate::migrate::scaffold::StartAppReport {
+            written: vec!["src/shop/mod.rs".into()],
+            patched: vec!["src/lib.rs".into()],
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        super::write_report(&mut out, "shop", "src", &report, None).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains("add `mod"), "{out}");
+        assert!(!out.contains("init-tenancy"), "{out}");
+        assert!(out.contains("makemigrations"), "{out}");
     }
 
     /// Like the single-tenant bin: `Cli` resolves the URL and the verbs.

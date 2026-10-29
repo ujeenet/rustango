@@ -945,7 +945,9 @@ let api = urls::api()
 ```
 
 `make:api_routes <app>` generates a per-app `api()` that gathers these
-`.merge(...)` lines; wire it into your top-level `urls.rs`.
+`.merge(...)` lines. It takes the pool, so mount it from `main.rs` with
+`.nest_with("/api", |pool| myapp::<app>::api_routes::api(pool))`; the
+`--tenant` one takes none and merges into `urls.rs`.
 
 ---
 

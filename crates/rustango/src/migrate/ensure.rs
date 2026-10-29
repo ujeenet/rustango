@@ -72,17 +72,30 @@ pub(crate) fn is_already_exists(e: &crate::sql::ExecError, dialect: &str, stmt: 
         return false;
     };
     match dialect {
-        "postgres" => crate::sql::is_pg_dup_object_error(err),
+        // 42710 on CREATE TABLE is a type of that name: the table is not there.
+        "postgres" => crate::sql::is_pg_dup_object_error(err) && !is_type_clash(err, stmt),
         #[cfg(feature = "mysql")]
         "mysql" => err
             .as_database_error()
             .and_then(|db| db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>())
             .is_some_and(|my| is_mysql_duplicate(my.number(), my.message(), stmt)),
+        // A duplicate column only means "there" for ADD COLUMN; in CREATE TABLE it is a bad DDL.
         _ => {
             let msg = format!("{e}").to_lowercase();
-            msg.contains("already exists") || msg.contains("duplicate")
+            msg.contains("already exists")
+                || (is_add_column(stmt) && msg.contains("duplicate column"))
         }
     }
+}
+
+fn is_create_table(stmt: &str) -> bool {
+    stmt.starts_with("CREATE TABLE ")
+}
+
+/// PG 42710 on a CREATE TABLE: a type holds the name, a racer's or a user's.
+fn is_type_clash(err: &sqlx::Error, stmt: &str) -> bool {
+    is_create_table(stmt)
+        && err.as_database_error().and_then(|d| d.code()).as_deref() == Some("42710")
 }
 
 /// `CREATE TABLE x` -> `CREATE TABLE IF NOT EXISTS x`, on Postgres only.
@@ -511,7 +524,14 @@ pub(crate) async fn run_statements(pool: &Pool, stmts: &[String]) -> Result<(), 
     let dialect = pool.dialect().name();
     for stmt in stmts {
         let stmt = idempotent(stmt, dialect);
-        if let Err(e) = crate::sql::raw_execute_pool(pool, &stmt, Vec::new()).await {
+        let mut res = crate::sql::raw_execute_pool(pool, &stmt, Vec::new()).await;
+        // A racer's committed row type also says 42710; once in, the retry sees its table.
+        if dialect == "postgres"
+            && matches!(&res, Err(crate::sql::ExecError::Driver(e)) if is_type_clash(e, &stmt))
+        {
+            res = crate::sql::raw_execute_pool(pool, &stmt, Vec::new()).await;
+        }
+        if let Err(e) = res {
             if is_already_exists(&e, dialect, &stmt) {
                 continue;
             }
@@ -527,6 +547,45 @@ pub(crate) async fn run_statements(pool: &Pool, stmts: &[String]) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::{idempotent, is_mysql_duplicate};
+
+    /// A CREATE TABLE that failed for another reason is not "already there".
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_duplicate_column_in_create_table_is_an_error() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let bad = ["CREATE TABLE t (a INTEGER, a INTEGER)".to_owned()];
+        assert!(super::run_statements(&pool, &bad).await.is_err());
+        let add = [
+            "CREATE TABLE u (a INTEGER)".to_owned(),
+            "ALTER TABLE u ADD COLUMN a INTEGER".to_owned(),
+        ];
+        super::run_statements(&pool, &add)
+            .await
+            .expect("an existing column is there");
+    }
+
+    /// A table named like an existing PG type fails with 42710; it is not there.
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn a_table_named_like_a_type_is_an_error_on_postgres() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        if !url.starts_with("postgres") {
+            return;
+        }
+        let pool = crate::sql::Pool::connect(&url).await.expect("postgres");
+        let run = |sql: &'static str| crate::sql::raw_execute_pool(&pool, sql, Vec::new());
+        run("DROP TABLE IF EXISTS ensure_type_clash").await.unwrap();
+        run("DROP TYPE IF EXISTS ensure_type_clash").await.unwrap();
+        run("CREATE TYPE ensure_type_clash AS ENUM ('a')")
+            .await
+            .unwrap();
+        let create = ["CREATE TABLE ensure_type_clash (id INTEGER)".to_owned()];
+        let res = super::run_statements(&pool, &create).await;
+        run("DROP TYPE ensure_type_clash").await.unwrap();
+        assert!(res.is_err(), "the table was never created");
+    }
 
     /// Only the refused non-constant DEFAULT is retried, not any error.
     #[cfg(feature = "sqlite")]

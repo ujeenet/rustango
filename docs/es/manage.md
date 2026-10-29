@@ -80,7 +80,7 @@ alcanzan mediante `Cli::tenancy()`.
 |---|---|
 | `makemigrations [name]` / `--empty <name>` | Genera una migración a partir del diff de modelos |
 | `migrate [target]` / `--dry-run` / `--squash` | Aplica las migraciones pendientes |
-| `downgrade [N]` | Revierte las últimas N migraciones |
+| `downgrade [N \| <target>]` | Revierte las últimas N migraciones, o las posteriores a `<target>` (ámbito tenant) |
 | `showmigrations` / `status` | Lista las migraciones y su estado de aplicación |
 | `sqlmigrate <name>` | Imprime el SQL que ejecutaría una migración, sin ejecutarlo |
 | `forget-pending <name>` | Borra un JSON de migración no aplicada del que no depende ninguna posterior |
@@ -112,7 +112,7 @@ alcanzan mediante `Cli::tenancy()`.
 | Verbo | Qué hace |
 |---|---|
 | `createcachetable` / `create-cache-table` `[--table <name>]` | Crea la tabla de caché (y la de sesiones cuando las sesiones van a la BD) |
-| `clear-cache [--table <name>]` / `clearsessions` | La vacía; devuelve el número de filas borradas |
+| `clear-cache [--table <name>]` / `clearsessions` | La vacía; devuelve el número de filas borradas. Sin tabla, avisa de que no hay nada que vaciar |
 | `sendtestemail --to <addr>` | Envía un correo de prueba fijo por el backend configurado |
 
 ### Introspección
@@ -402,7 +402,7 @@ de la de tu proyecto. `--all-tenants` extiende la marca a través de cada tenant
 activo, informando de cada uno y continuando más allá de los fallos — las tablas
 del framework viven por tenant, así que repararlas es un trabajo por tenant.
 
-### `downgrade [N]`
+### `downgrade [N | <target>]`
 
 Revierte las últimas N migraciones aplicadas (por defecto 1). Cada migración debe ser reversible: los cambios
 de esquema se revierten automáticamente, pero las operaciones de datos necesitan
@@ -411,6 +411,24 @@ un `reverse_sql` definido o el rollback falla.
 ```bash
 cargo run -- downgrade                  # one step
 cargo run -- downgrade 3                # three steps
+```
+
+En un proyecto multi-tenant, `downgrade` revierte las migraciones del registro.
+Las migraciones de tenant están en el registro de cada tenant:
+
+```bash
+cargo run -- downgrade --tenant acme    # un tenant
+cargo run -- downgrade 2 --all-tenants  # cada tenant activo, dos pasos cada uno
+```
+
+Los tenants pueden estar en versiones distintas. `--all-tenants`
+muestra el plan de cada tenant sin cambiar nada; añada `--yes` para
+ejecutarlo. Nombre una migración en lugar de N para revertir todo lo
+aplicado después de ella:
+
+```bash
+cargo run -- downgrade 0001_initial --all-tenants        # el plan
+cargo run -- downgrade 0001_initial --all-tenants --yes  # ejecutarlo
 ```
 
 ### `showmigrations` / `status`
@@ -664,6 +682,9 @@ Genera una tarea de intervalo fijo para `scheduler::Scheduler` — la forma que
 cargo run -- make:scheduled NightlySweep
 ```
 
+Arráncala desde un binario worker (`make:worker`): `main.rs` no tiene pool, y
+el código antes de `Cli::run()` se ejecutaría con cada verbo de la CLI.
+
 ### `make:worker <Name>`
 
 Genera un binario de worker independiente para `src/bin/` — un proceso que vacía
@@ -772,7 +793,7 @@ Imprime la versión del framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.10
+rustango 0.61.11
 ```
 
 ### `about`
@@ -784,7 +805,7 @@ Incluye esto en los tickets de soporte cuando algo va mal.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.10
+  version:        0.61.11
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -1255,11 +1276,13 @@ se ponga en rojo.
 Crea un usuario dentro de un tenant — con `--superuser`, también un
 administrador, pero siempre limitado a un solo tenant. En lugar de `--password`
 puedes pasar `--password-stdin` o `--generate` (imprime una aleatoria); omite
-los tres en un terminal y te la pide. `--skip-validation` se salta las reglas
-de contraseña. No hay flag `--staff`.
+los tres en un terminal y te la pide. La contraseña debe cumplir las mismas
+reglas que los formularios web: al menos 12 caracteres, un dígito o un
+símbolo, y no ser una contraseña débil conocida. `--skip-validation` se las
+salta. No hay flag `--staff`.
 
 ```bash
-cargo run -- create-user acme alice --password hunter2 --superuser
+cargo run -- create-user acme alice --password Hunter2-alice-pw --superuser
 ```
 
 `--superuser` establece `is_superuser = true` para ese usuario dentro del
@@ -1620,7 +1643,7 @@ cargo run -- migrate                                      # registry + tenants
 cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
-cargo run -- create-user acme alice --password tenantpw --superuser
+cargo run -- create-user acme alice --password Tenant-pw-2026 --superuser
 cargo run                        # serve at :8080
 ```
 
@@ -1651,7 +1674,7 @@ cargo run -- migrate
 #    the new tenant arrives at the same schema state as existing ones.
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
-cargo run -- create-user acme alice --password tenantpw --superuser
+cargo run -- create-user acme alice --password Tenant-pw-2026 --superuser
 ```
 
 Por qué esto es seguro:

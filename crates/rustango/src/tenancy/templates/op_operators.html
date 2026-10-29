@@ -98,9 +98,9 @@ reach every tenant, so this list is the console's access control.</p>
           {{ csrf_input | default(value='') | safe }}
           <strong>Reset <code>{{ op.username }}</code>:</strong>
           <input type="password" name="password" placeholder="new password"
-                 minlength="8" autocomplete="new-password">
+                 minlength="{{ password_min_length }}" autocomplete="new-password">
           <input type="password" name="confirm_password" placeholder="confirm"
-                 minlength="8" autocomplete="new-password">
+                 minlength="{{ password_min_length }}" autocomplete="new-password">
           <button type="submit" class="btn btn-secondary">Set</button>
           <button type="submit" name="generate" value="on" class="btn btn-secondary">Generate one</button>
           <span class="field-helper">Signs <code>{{ op.username }}</code> out everywhere.</span>
@@ -141,8 +141,8 @@ reach every tenant, so this list is the console's access control.</p>
         <th><label for="password">password</label></th>
         <td>
           <input type="password" id="password" name="password"
-                 minlength="8" autocomplete="new-password"
-                 placeholder="at least 8 characters">
+                 minlength="{{ password_min_length }}" autocomplete="new-password"
+                 placeholder="12+ characters, a digit or symbol">
           <div class="field-helper">Leave blank to have one generated
           instead — it is then shown once, here, and never again.</div>
         </td>
@@ -151,7 +151,7 @@ reach every tenant, so this list is the console's access control.</p>
         <th><label for="confirm_password">confirm</label></th>
         <td>
           <input type="password" id="confirm_password" name="confirm_password"
-                 minlength="8" autocomplete="new-password">
+                 minlength="{{ password_min_length }}" autocomplete="new-password">
         </td>
       </tr>
     </table>

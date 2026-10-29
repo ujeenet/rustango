@@ -518,7 +518,7 @@ pub enum StrengthIssue {
 pub fn strength_score(password: &str) -> Vec<StrengthIssue> {
     let mut issues = Vec::new();
 
-    if password.chars().count() < 12 {
+    if password.chars().count() < crate::password_validators::BUILTIN_FORM_MIN_LENGTH {
         issues.push(StrengthIssue::TooShort);
     }
 

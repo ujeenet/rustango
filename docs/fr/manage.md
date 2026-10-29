@@ -82,7 +82,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 |---|---|
 | `makemigrations [name]` / `--empty <name>` | Génère une migration à partir du diff des modèles |
 | `migrate [target]` / `--dry-run` / `--squash` | Applique les migrations en attente |
-| `downgrade [N]` | Annule les N dernières migrations |
+| `downgrade [N \| <target>]` | Annule les N dernières migrations, ou celles après `<target>` (portée tenant) |
 | `showmigrations` / `status` | Liste les migrations et leur état d'application |
 | `sqlmigrate <name>` | Affiche le SQL qu'une migration exécuterait, sans l'exécuter |
 | `forget-pending <name>` | Supprime un JSON de migration non appliquée dont aucune migration suivante ne dépend |
@@ -114,7 +114,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 | Verbe | Ce qu'il fait |
 |---|---|
 | `createcachetable` / `create-cache-table` `[--table <name>]` | Crée la table de cache (et la table de sessions quand les sessions vont en base) |
-| `clear-cache [--table <name>]` / `clearsessions` | La vide ; renvoie le nombre de lignes supprimées |
+| `clear-cache [--table <name>]` / `clearsessions` | La vide ; renvoie le nombre de lignes supprimées. Sans table, indique qu'il n'y a rien à vider |
 | `sendtestemail --to <addr>` | Envoie un courriel de test fixe via le backend configuré |
 
 ### Introspection
@@ -421,7 +421,7 @@ idempotent.
 rapportant chacun et en continuant malgré les échecs — les tables du
 framework vivent par tenant, donc les réparer est une tâche par tenant.
 
-### `downgrade [N]`
+### `downgrade [N | <target>]`
 
 Annule les N dernières migrations appliquées (par défaut 1). Chaque migration doit être réversible :
 les changements de schéma s'annulent automatiquement, mais les
@@ -431,6 +431,24 @@ l'annulation échoue.
 ```bash
 cargo run -- downgrade                  # one step
 cargo run -- downgrade 3                # three steps
+```
+
+Dans un projet multi-tenant, `downgrade` annule les migrations du registre.
+Les migrations de tenant sont dans le registre de chaque tenant :
+
+```bash
+cargo run -- downgrade --tenant acme    # un tenant
+cargo run -- downgrade 2 --all-tenants  # chaque tenant actif, deux étapes chacun
+```
+
+Les tenants peuvent être à des versions différentes. `--all-tenants`
+affiche le plan de chaque tenant sans rien changer ; ajoutez `--yes`
+pour l'exécuter. Nommez une migration au lieu de N pour annuler tout
+ce qui a été appliqué après elle :
+
+```bash
+cargo run -- downgrade 0001_initial --all-tenants        # le plan
+cargo run -- downgrade 0001_initial --all-tenants --yes  # l'exécuter
 ```
 
 ### `showmigrations` / `status`
@@ -688,6 +706,9 @@ Génère une tâche à intervalle fixe pour `scheduler::Scheduler` — la forme 
 cargo run -- make:scheduled NightlySweep
 ```
 
+Démarrez-la depuis un binaire worker (`make:worker`) : `main.rs` n'a pas de
+pool, et du code avant `Cli::run()` tournerait pour chaque verbe de la CLI.
+
 ### `make:worker <Name>`
 
 Génère un binaire de worker autonome pour `src/bin/` — un processus qui vide la
@@ -800,7 +821,7 @@ Affiche la version du framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.10
+rustango 0.61.11
 ```
 
 ### `about`
@@ -813,7 +834,7 @@ support en cas de problème.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.10
+  version:        0.61.11
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -1304,11 +1325,12 @@ Crée un utilisateur au sein d'un tenant — avec `--superuser`, un
 administrateur, mais toujours limité à un seul tenant. Au lieu de
 `--password`, vous pouvez passer `--password-stdin` ou `--generate` (affiche un
 mot de passe aléatoire) ; omettez les trois dans un terminal et la commande le
-demande. `--skip-validation` ignore les règles de mot de passe. Il n'y a pas
-de flag `--staff`.
+demande. Le mot de passe doit suivre les mêmes règles que les formulaires
+web : au moins 12 caractères, un chiffre ou un symbole, pas un mot de passe
+faible connu. `--skip-validation` les ignore. Il n'y a pas de flag `--staff`.
 
 ```bash
-cargo run -- create-user acme alice --password hunter2 --superuser
+cargo run -- create-user acme alice --password Hunter2-alice-pw --superuser
 ```
 
 `--superuser` règle `is_superuser = true` pour cet utilisateur au sein
@@ -1683,7 +1705,7 @@ cargo run -- migrate                                      # registry + tenants
 cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
-cargo run -- create-user acme alice --password tenantpw --superuser
+cargo run -- create-user acme alice --password Tenant-pw-2026 --superuser
 cargo run                        # serve at :8080
 ```
 
@@ -1714,7 +1736,7 @@ cargo run -- migrate
 #    the new tenant arrives at the same schema state as existing ones.
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
-cargo run -- create-user acme alice --password tenantpw --superuser
+cargo run -- create-user acme alice --password Tenant-pw-2026 --superuser
 ```
 
 Pourquoi c'est sûr :

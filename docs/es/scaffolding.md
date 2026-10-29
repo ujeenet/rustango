@@ -135,7 +135,6 @@ Una plantilla enciende un conjunto razonable; `--features` añade las opciones q
 
 | Funcionalidad | Qué añade |
 |---|---|
-| `tenancy` | Multi-tenancy: registry de tenants, bases por tenant, consola de operador |
 | `csrf` | Middleware de protección CSRF para POST de formularios |
 | `sso` / `admin-sso` | Inicio de sesión único OIDC, para usuarios de la app / para el sitio de admin |
 | `passkey` | Autenticación WebAuthn / passkey |
@@ -147,7 +146,7 @@ Una plantilla enciende un conjunto razonable; `--features` añade las opciones q
 | `http2` | Servir HTTP/2 sin cifrar (h2c) junto a HTTP/1 |
 | `testkit` / `test_utils` | Constructores de esquema, factorías y constructores solo para tests |
 
-`cargo rustango new --help` imprime esta lista. Los backends **no** son válidos aquí — usa `--backend`. Nombrar uno como funcionalidad se rechaza, porque fijaría el backend del framework mientras la funcionalidad propia del proyecto quedaría apagada, y `#[derive(Model)]` alinea lo que emite con las funcionalidades del proyecto.
+`--features tenancy` solo elige `--template tenant`; con otra plantilla se rechaza, porque solo el `main.rs` de la plantilla tenant sirve la multi-tenancy. `cargo rustango new --help` imprime esta lista. Los backends **no** son válidos aquí — usa `--backend`. Nombrar uno como funcionalidad se rechaza, porque fijaría el backend del framework mientras la funcionalidad propia del proyecto quedaría apagada, y `#[derive(Model)]` alinea lo que emite con las funcionalidades del proyecto.
 
 ### Un nombre más corto: `rgo`
 

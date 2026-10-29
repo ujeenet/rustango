@@ -160,7 +160,8 @@ impl DatabaseCache {
                  )"
             ),
         };
-        raw_execute_pool(&self.pool, &sql, vec![])
+        // PG's `IF NOT EXISTS` is not atomic: a racing boot loses on a catalog row.
+        crate::migrate::ensure::run_statements(&self.pool, std::slice::from_ref(&sql))
             .await
             .map_err(|e| CacheError::Connection(format!("ensure_table: {e}")))?;
         // `purge_expired` scans by `expires`; existing tables get it too.

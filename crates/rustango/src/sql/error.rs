@@ -581,6 +581,8 @@ pub fn is_pg_dup_object_error(e: &crate::sql::sqlx::Error) -> bool {
 /// * `pg_namespace_nspname_index` — the schema row, for a racing
 ///   `CREATE SCHEMA IF NOT EXISTS`. Tenant provisioning in schema mode
 ///   issues one per tenant.
+/// * `pg_extension_name_index` — the extension row, for a racing
+///   `CREATE EXTENSION IF NOT EXISTS`.
 ///
 /// Everything else under `23505` stays an error: a bare unique violation
 /// is ordinary application data, and swallowing those would hide real
@@ -599,6 +601,7 @@ pub(crate) fn pg_dup_object_decision(code: Option<&str>, message: &str) -> bool 
             "pg_class_relname_nsp_index",
             "pg_type_typname_nsp_index",
             "pg_namespace_nspname_index",
+            "pg_extension_name_index",
         ]
         .iter()
         .any(|idx| message.contains(idx)),
@@ -637,6 +640,11 @@ mod pg_dup_object_tests {
             Some("23505"),
             "duplicate key value violates unique constraint \
              \"pg_namespace_nspname_index\""
+        ));
+        assert!(decide(
+            Some("23505"),
+            "duplicate key value violates unique constraint \
+             \"pg_extension_name_index\""
         ));
     }
 

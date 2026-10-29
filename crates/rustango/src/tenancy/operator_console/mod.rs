@@ -1245,8 +1245,9 @@ async fn require_session(
             }
             req.extensions_mut().insert(op);
             let mut resp = next.run(req).await;
-            // Activity slides the idle deadline.
-            if let Some(renewed) = payload.renewed() {
+            // Activity slides the idle deadline, unless the handler set
+            // its own cookie (a password change): the last one wins.
+            if let Some(renewed) = payload.renewed().filter(|_| !sets_session_cookie(&resp)) {
                 resp.headers_mut().append(
                     header::SET_COOKIE,
                     session_cookie(&state.session_secret, &renewed),
@@ -1511,17 +1512,9 @@ async fn start_session(
 ) -> Response<Body> {
     use crate::signals::auth::{send_user_logged_in, UserLoggedInContext};
     let oid = op.id.get().copied().unwrap_or_default();
-    let mut payload = SessionPayload::new(
-        oid,
-        SESSION_IDLE_SECS,
-        session::PasswordFingerprint::of(&state.session_secret, &op.password_hash),
-    );
-    payload.iat = crate::session::issued_at(op.sessions_revoked_at);
     let mut resp = Redirect::to(next).into_response();
-    resp.headers_mut().append(
-        header::SET_COOKIE,
-        session_cookie(&state.session_secret, &payload),
-    );
+    resp.headers_mut()
+        .append(header::SET_COOKIE, new_session_cookie(state, op));
     send_user_logged_in(UserLoggedInContext {
         source: "operator",
         user_id: oid,
@@ -1588,6 +1581,17 @@ async fn logout(
     resp
 }
 
+/// A new session cookie for `op`, bound to its current hash.
+fn new_session_cookie(state: &ConsoleState, op: &auth::Operator) -> HeaderValue {
+    let mut payload = SessionPayload::new(
+        op.id.get().copied().unwrap_or_default(),
+        SESSION_IDLE_SECS,
+        session::PasswordFingerprint::of(&state.session_secret, &op.password_hash),
+    );
+    payload.iat = crate::session::issued_at(op.sessions_revoked_at);
+    session_cookie(&state.session_secret, &payload)
+}
+
 /// The `Set-Cookie` for `payload`; the browser drops it at the idle deadline.
 fn session_cookie(secret: &SessionSecret, payload: &SessionPayload) -> HeaderValue {
     let left = payload.exp - chrono::Utc::now().timestamp();
@@ -1601,6 +1605,18 @@ fn session_cookie(secret: &SessionSecret, payload: &SessionPayload) -> HeaderVal
         .max_age(CookieDuration::seconds(left.max(0)))
         .build();
     HeaderValue::from_str(&cookie.to_string()).expect("cookie is ascii")
+}
+
+/// Whether `resp` already carries a console session `Set-Cookie`.
+fn sets_session_cookie(resp: &Response<Body>) -> bool {
+    resp.headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|v| {
+            v.split_once('=')
+                .is_some_and(|(name, _)| name.trim() == COOKIE_NAME)
+        })
 }
 
 /// The signed-in, active operator: the check every console request and
@@ -1668,6 +1684,10 @@ async fn change_password_form(
     inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("section", "change_password");
     ctx.insert("operator_username", &op.username);
+    ctx.insert(
+        "password_min_length",
+        &crate::password_validators::BUILTIN_FORM_MIN_LENGTH,
+    );
     ctx.insert("error", &messages.error);
     ctx.insert("success", &messages.ok);
     render(&state, "op_change_password.html", &ctx)
@@ -1682,11 +1702,8 @@ struct OpChangePasswordForm {
 }
 
 /// `POST /change-password`: check the current password, hash the new
-/// one, save it and bump `password_changed_at`.
-///
-/// `require_session` rejects cookies minted under the old password,
-/// so this request is the last one the current cookie can serve; the
-/// next click goes to login.
+/// one, save it and bump `password_changed_at`. Other sessions end; this
+/// one gets a cookie bound to the new hash.
 async fn change_password_submit(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
@@ -1718,7 +1735,7 @@ async fn change_password_submit(
 
     // `op` from the extension is a snapshot taken in `require_session`;
     // verify against the live hash.
-    let op_row: auth::Operator = match auth::Operator::objects()
+    let mut op_row: auth::Operator = match auth::Operator::objects()
         .where_(auth::Operator::id.eq(op_id))
         .fetch(&state.registry)
         .await
@@ -1795,7 +1812,11 @@ async fn change_password_submit(
         serde_json::Map::new(),
     )
     .await;
-    redir(flash::Flash::Ok("Password updated"))
+    op_row.password_hash = new_hash;
+    let mut resp = redir(flash::Flash::Ok("Password updated"));
+    resp.headers_mut()
+        .append(header::SET_COOKIE, new_session_cookie(&state, &op_row));
+    resp
 }
 
 async fn welcome(

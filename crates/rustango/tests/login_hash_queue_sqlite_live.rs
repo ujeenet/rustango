@@ -122,7 +122,7 @@ async fn a_full_queue_answers_busy_for_known_and_unknown_users() {
                 .header(header::COOKIE, format!("rustango_csrf={CSRF}; {session}"))
                 .header("x-csrf-token", CSRF)
                 .body(Body::from(format!(
-                    "_csrf={CSRF}&current_password=right-pass&new_password=new-pass-99&new_password_confirm=new-pass-99"
+                    "_csrf={CSRF}&current_password=right-pass&new_password=new-pass-9999&new_password_confirm=new-pass-9999"
                 )))
                 .unwrap(),
         )

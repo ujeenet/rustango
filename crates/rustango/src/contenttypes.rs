@@ -1095,8 +1095,10 @@ pub async fn ensure_seeded(pool: &crate::sql::Pool) -> Result<usize, ExecError> 
             model_name: name,
             table: table.to_owned(),
         };
-        row.insert_pool(pool).await?;
-        inserted += 1;
+        // Another process seeding at the same time may have won the row.
+        if row.insert_or_ignore(pool).await? {
+            inserted += 1;
+        }
     }
     Ok(inserted)
 }

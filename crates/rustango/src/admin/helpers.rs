@@ -79,6 +79,15 @@ pub(crate) fn current_csrf_input() -> String {
     csrf_input_for(&super::session::current_csrf_token().unwrap_or_default())
 }
 
+/// The admin index URL. A nested router's `/` answers `<prefix>`, not
+/// `<prefix>/`, so the link carries no trailing slash; `/` at the root.
+pub(crate) fn admin_home(prefix: &str) -> &str {
+    match prefix.trim_end_matches('/') {
+        "" => "/",
+        home => home,
+    }
+}
+
 /// As [`chrome_context`] but takes an explicit `Option<&AdminSession>`.
 /// Used by tests and any path that has the session in hand directly
 /// (without going through the task-local). #253 slice B.
@@ -127,6 +136,7 @@ pub(crate) fn chrome_context_with_session(
         // under. Templates use `{{ admin_prefix }}{{ audit_url }}` etc.
         // so hrefs resolve correctly regardless of mount path.
         "admin_prefix": &state.config.admin_prefix,
+        "admin_home": admin_home(&state.config.admin_prefix),
         // v0.30.19 — URL prefix for embedded static assets
         // (logo + favicon). Templates use {{ static_url }}/icon.png
         // for favicons.
@@ -1026,6 +1036,15 @@ impl FormLayout {
 
 #[cfg(test)]
 mod tests {
+    /// Home is the prefix itself, and `/` for an admin mounted at the root.
+    #[test]
+    fn admin_home_has_no_trailing_slash() {
+        assert_eq!(super::admin_home(""), "/");
+        assert_eq!(super::admin_home("/"), "/");
+        assert_eq!(super::admin_home("/admin"), "/admin");
+        assert_eq!(super::admin_home("/admin/"), "/admin");
+    }
+
     use super::*;
     use crate::core::FieldType;
 

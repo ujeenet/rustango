@@ -487,6 +487,8 @@ where
         .await
         .map_err(TenancyError::Migrate),
         "showmigrations" | "status" => migrations::showmigrations_cmd(pools, dir, writer).await,
+        // Tenant-scoped migrations live in the tenant ledgers, not the registry's.
+        "downgrade" => migrations::downgrade_cmd(pools, dir, &args[1..], writer).await,
         "seed-permissions" => roles::seed_permissions_cmd(pools, &args[1..], writer).await,
         "startapp" => scaffold::startapp_cmd(&args[1..], writer),
         // Plain `migrate` is scope-aware here — registry-scoped
@@ -499,7 +501,7 @@ where
         "migrate" => {
             migrations::migrate_all_cmd(pools, registry_url, dir, &args[1..], writer).await
         }
-        // Everything else (makemigrations, sqlmigrate, downgrade,
+        // Everything else (makemigrations, sqlmigrate,
         // …) is registry-scoped and delegates to the standard
         // single-tenant runner.
         // v0.38 — `manage::run_with_writer` now accepts `&crate::sql::Pool`
@@ -727,7 +729,8 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
-        "                       Tenant-scoped user; signs into <slug>.<apex>/__login."
+        "                       Tenant-scoped user; signs into <slug>.<apex>{}.",
+        crate::tenancy::RouteConfig::default().login_url
     )?;
     writeln!(w, "  create-superuser <slug> <username> [--password <p>]")?;
     writeln!(
@@ -861,7 +864,19 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
-        "  downgrade            Roll back the most recent migration."
+        "  downgrade [N | <target>] [--tenant <slug> | --all-tenants [--yes]]"
+    )?;
+    writeln!(
+        w,
+        "                       Roll back the last N migrations (default 1), or those after"
+    )?;
+    writeln!(
+        w,
+        "                       <target>: registry-scoped, or tenant-scoped in one tenant /"
+    )?;
+    writeln!(
+        w,
+        "                       every active tenant. --all-tenants prints the plan; --yes runs it."
     )?;
     writeln!(w)?;
     writeln!(w, "ROLES & PERMISSIONS:")?;
