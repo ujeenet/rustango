@@ -152,13 +152,11 @@ fn admin_hash_password<'a>(
 ) -> crate::admin::derived_fields::DeriveFuture<'a> {
     use crate::core::SqlValue;
     Box::pin(async move {
-        let Some(plain) = crate::admin::derived_fields::take_secret(values, "password_hash") else {
+        let Some(plain) =
+            crate::admin::derived_fields::take_new_password(values, before, "password_hash")?
+        else {
             return Ok(());
         };
-        // A model on this table without the password widget echoes the hash.
-        if before.and_then(|r| r.get("password_hash")?.as_str()) == Some(plain.as_str()) {
-            return Ok(());
-        }
         let hash = password::hash_async(&plain)
             .await
             .map_err(|e| e.to_string())?;

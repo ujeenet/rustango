@@ -49,6 +49,9 @@ impl McpState {
     }
 }
 
+/// The mount prefix when `[mcp] prefix` is unset.
+pub(crate) const DEFAULT_PREFIX: &str = "/mcp";
+
 /// Where agents trade a credential for a token, below the mount prefix.
 const TOKEN_PATH: &str = "/token";
 /// The OAuth 2.1 `client_credentials` endpoint, below the mount prefix.

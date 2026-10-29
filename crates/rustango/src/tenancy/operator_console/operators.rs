@@ -187,6 +187,10 @@ async fn page(
     ctx.insert("operators", &view);
     ctx.insert("manage_enabled", &state.pools.is_some());
     ctx.insert("totp_reset", &cfg!(feature = "totp"));
+    ctx.insert(
+        "password_min_length",
+        &crate::password_validators::BUILTIN_FORM_MIN_LENGTH,
+    );
     paged.inject(&mut ctx, "/operators", "");
     ctx.insert("error", &error);
     ctx.insert("notice", &notice);

@@ -192,10 +192,11 @@ async fn change_password_authenticated_get_renders_form() {
         html.contains("name=\"new_password\""),
         "new_password input missing"
     );
-    assert!(
-        html.contains(r#"minlength="12""#) && !html.contains(r#"minlength="8""#),
-        "the form hints the old length rule"
-    );
+    let inputs = new_password_inputs(&html);
+    assert_eq!(inputs.len(), 2, "{html}");
+    for tag in inputs {
+        assert!(tag.contains(&min_length_attr()), "{tag}");
+    }
 
     rmig::drop_all(&pool).await.unwrap();
 }
@@ -507,4 +508,21 @@ async fn session_minted_before_password_rotation_is_rejected() {
     );
 
     rmig::drop_all(&pool).await.unwrap();
+}
+
+/// Every `<input>` tag in `html` that takes a new password.
+fn new_password_inputs(html: &str) -> Vec<&str> {
+    html.split("<input")
+        .skip(1)
+        .map(|t| &t[..t.find('>').unwrap_or(t.len())])
+        .filter(|t| t.contains(r#"autocomplete="new-password""#))
+        .collect()
+}
+
+/// The `minlength` every new-password field must carry.
+fn min_length_attr() -> String {
+    format!(
+        r#"minlength="{}""#,
+        rustango::password_validators::BUILTIN_FORM_MIN_LENGTH
+    )
 }

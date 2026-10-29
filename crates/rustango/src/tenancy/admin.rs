@@ -1634,6 +1634,10 @@ fn password_page_ctx(
     ctx.insert("login_url", &routes.login_url);
     ctx.insert("static_url", &routes.static_url);
     ctx.insert(
+        "password_min_length",
+        &crate::password_validators::BUILTIN_FORM_MIN_LENGTH,
+    );
+    ctx.insert(
         "csp_nonce",
         &crate::csp_nonce::current().unwrap_or_default(),
     );

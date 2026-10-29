@@ -427,6 +427,60 @@ async fn a_request_slides_the_idle_deadline() {
     assert_eq!(renewed.iat, near.iat, "sign-in time is kept");
 }
 
+/// A password change on a session due for renewal keeps the new
+/// cookie; a renewal built from the old hash must not land after it.
+#[tokio::test]
+async fn a_password_change_on_a_renewable_session_stays_signed_in() {
+    use rustango::tenancy::session::{encode, PasswordFingerprint, SessionPayload};
+    let b = boot().await;
+    let me = b.find(&b.me).await.unwrap();
+    let near = SessionPayload::new(
+        b.my_id,
+        60,
+        PasswordFingerprint::of(&b.secret, &me.password_hash),
+    );
+    let cookie = format!("rustango_op_session={}", encode(&b.secret, &near));
+    let resp = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/change-password")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "current_password=letmein-please&new_password=fresh-passphrase-42\
+                     &confirm_password=fresh-passphrase-42",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_redirection(), "{}", resp.status());
+    // The browser keeps the last `Set-Cookie` for a name.
+    let kept = resp
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter(|v| v.starts_with("rustango_op_session="))
+        .last()
+        .expect("a session cookie")
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    assert_ne!(
+        b.find(&b.me).await.unwrap().password_hash,
+        me.password_hash,
+        "the password changed"
+    );
+    assert_eq!(b.status_with(&kept).await, StatusCode::OK, "signed out");
+}
+
 /// The other lock: with one operator left, deactivating them would
 /// leave a console nobody can sign in to and no console path back.
 ///

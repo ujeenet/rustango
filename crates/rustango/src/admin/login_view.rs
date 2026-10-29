@@ -645,6 +645,7 @@ fn render_change_password_form(
         "action": format!("{admin_prefix}/account/password"),
         "success": success,
         "error": error,
+        "password_min_length": crate::password_validators::BUILTIN_FORM_MIN_LENGTH,
     });
     super::templates::render_with_chrome(
         "change_password.html",

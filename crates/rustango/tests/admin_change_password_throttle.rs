@@ -115,10 +115,16 @@ async fn new_password_length_counts_characters_not_bytes() {
         html.contains("at least 12"),
         "short password accepted: {html}"
     );
-    assert!(
-        html.contains(r#"minlength="12""#) && html.contains("At least 12 characters"),
-        "the form hints the old length rule: {html}"
+    let inputs = new_password_inputs(&html);
+    assert_eq!(inputs.len(), 2, "{html}");
+    for tag in inputs {
+        assert!(tag.contains(&min_length_attr()), "{tag}");
+    }
+    let hint = format!(
+        "At least {} characters",
+        rustango::password_validators::BUILTIN_FORM_MIN_LENGTH
     );
+    assert!(html.contains(&hint), "{html}");
 }
 
 /// A failed password write shows a generic message, not the driver error.
@@ -145,4 +151,21 @@ async fn a_failed_update_hides_the_driver_error() {
     .unwrap();
     assert!(!html.contains("internal_constraint_q7Zx"), "{html}");
     assert!(html.contains("Could not save"), "{html}");
+}
+
+/// Every `<input>` tag in `html` that takes a new password.
+fn new_password_inputs(html: &str) -> Vec<&str> {
+    html.split("<input")
+        .skip(1)
+        .map(|t| &t[..t.find('>').unwrap_or(t.len())])
+        .filter(|t| t.contains(r#"autocomplete="new-password""#))
+        .collect()
+}
+
+/// The `minlength` every new-password field must carry.
+fn min_length_attr() -> String {
+    format!(
+        r#"minlength="{}""#,
+        rustango::password_validators::BUILTIN_FORM_MIN_LENGTH
+    )
 }
