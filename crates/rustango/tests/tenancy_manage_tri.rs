@@ -1313,10 +1313,11 @@ async fn reseal_seals_a_plain_password_url(pool: &Pool) {
     assert_eq!(opened, url);
 }
 
-/// A tenant model with a sealed cast, for `reseal-tenant-secrets`.
+/// A tenant model with a sealed cast, for `reseal-tenant-secrets`. Unmanaged:
+/// only that scenario makes the table, and the dump verbs skip it elsewhere.
 #[cfg(feature = "casts")]
 #[derive(rustango::Model, Debug, Clone)]
-#[rustango(table = "rmt_patient")]
+#[rustango(table = "rmt_patient", managed = false)]
 pub struct Patient {
     #[rustango(primary_key)]
     pub id: rustango::sql::Auto<i64>,
@@ -1326,7 +1327,7 @@ pub struct Patient {
 /// A registry model with a sealed cast.
 #[cfg(feature = "casts")]
 #[derive(rustango::Model, Debug, Clone)]
-#[rustango(table = "rmt_vault", scope = "registry")]
+#[rustango(table = "rmt_vault", scope = "registry", managed = false)]
 pub struct Vault {
     #[rustango(primary_key, max_length = 16)]
     pub name: String,
