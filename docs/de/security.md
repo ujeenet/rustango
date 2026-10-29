@@ -131,7 +131,7 @@ let layer = CorsLayer::new()
 let layer = CorsLayer::permissive();              // any origin, common methods
 ```
 
-`CorsLayer::new()` erlaubt keinen Origin, bis du welche hinzufügst. `CorsLayer::from_settings(&settings.security)` liest `[security] cors_allowed_origins`: eine leere Liste ergibt `None` (nichts mounten), `"*"` ergibt `permissive()`, und benannte Origins ergeben eine Allowlist mit den üblichen Methoden (inklusive QUERY) und den Headern `Content-Type` und `Authorization`.
+`CorsLayer::new()` erlaubt keinen Origin, bis du welche hinzufügst. `CorsLayer::from_settings(&settings.security)` liest `[security] cors_allowed_origins`: eine leere Liste ergibt `None` (nichts mounten), `"*"` ergibt `permissive()`, und benannte Origins ergeben eine Allowlist mit den üblichen Methoden (inklusive QUERY) und den Request-Headern `Content-Type`, `Authorization`, `X-Date`, `Idempotency-Key`, `If-Match`, `If-None-Match`. Beide geben `Retry-After`, `Idempotent-Replayed`, `ETag`, `Location`, `Link` für Skripte frei. `cors_allowed_headers` und `cors_expose_headers` ergänzen diese Listen, und `cors_allow_credentials = true` sendet `Access-Control-Allow-Credentials` mit benannten Origins; mit `"*"` wird es mit einem geloggten Fehler abgelehnt, und ein `"*"`-Header-Eintrag entfällt.
 
 **Sicherheitshinweis:** Mit Credentials MUSST du explizite Origins auflisten. `allow_credentials(true)` zusammen mit `allow_any_origin()` ergibt kein „credentialed Wildcard-CORS" — das gibt es nicht, und wer es verlangt, bekommt keine der beiden Hälften.
 
@@ -362,7 +362,7 @@ let app = Router::new()
     .require_auth(backends);       // outer: resolves the user first
 ```
 
-Die Middleware probiert jedes Backend der Reihe nach. Das erste, das erfolgreich ist, gewinnt; das erste, das einen harten Fehler zurückgibt, stoppt die Kette. `require_perm` antwortet `401` ohne Benutzer und `403` ohne den Codename. `optional_auth(backends)` löst den Benutzer genauso auf, lässt anonyme Anfragen aber durch. Alle drei brauchen den Tenancy-Layer außen herum; ohne `TenantContext` scheitern sie sicher mit `500`.
+Die Middleware probiert jedes Backend der Reihe nach. Das erste, das erfolgreich ist, gewinnt; das erste, das einen harten Fehler zurückgibt, stoppt die Kette. `require_perm` antwortet `401` ohne Benutzer, `403` ohne den Codename und `503`, wenn das Lesen der Berechtigung scheitert. `optional_auth(backends)` löst den Benutzer genauso auf, lässt anonyme Anfragen aber durch. Alle drei brauchen den Tenancy-Layer außen herum; ohne `TenantContext` scheitern sie sicher mit `500`.
 
 ### Ein eigenes Backend schreiben
 
@@ -534,7 +534,7 @@ Funktioniert mit Google Authenticator, Authy, 1Password, Bitwarden und anderen S
 
 `verify` akzeptiert denselben Code erneut, bis er abläuft. Für Einmal-Codes rufen Sie stattdessen `matched_step` auf, speichern den zurückgegebenen Schritt und akzeptieren einen Code nur, wenn sein Schritt später ist als der gespeicherte. Der eingebaute Admin-Login macht das so.
 
-Mit dem Feature `totp` hat auch der Bare-Admin eine Zwei-Faktor-Anmeldung. Jeder Benutzer registriert sich unter `<admin>/account/totp`, und ein bestätigtes Gerät wird bei jedem Login abgefragt, SSO eingeschlossen.
+Mit dem Feature `totp` hat auch der Bare-Admin eine Zwei-Faktor-Anmeldung. Jeder Benutzer registriert sich unter `<admin>/account/totp`, und ein bestätigtes Gerät wird bei jedem Login abgefragt, SSO eingeschlossen. Zum Abschalten ist ein aktueller Code nötig; bei verlorenem Gerät `manage reset-admin-totp <username>` ausführen (`reset-operator-totp` für einen Operator). Registrieren, Abschalten und falsche Codes schreiben Audit-Zeilen.
 
 Die Operator-Konsole hat denselben zweiten Faktor, freiwillig pro Operator oder Pflicht für alle; siehe [Zwei-Faktor-Anmeldung](operator-console.md#zwei-faktor-anmeldung).
 

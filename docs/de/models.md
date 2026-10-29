@@ -126,7 +126,10 @@ pub struct Gadget {
 
 > **Dezimalpräzision.** PostgreSQL `NUMERIC` ist beliebig genau; MySQL verwendet
 > `DECIMAL(65,28)` (jeder `rust_decimal`-Wert passt);
-> SQLite verwendet `NUMERIC`-Affinität. Verwende `rust_decimal::Decimal` für Geld,
+> SQLite verwendet `NUMERIC`-Affinität und behält etwa 15 signifikante Stellen: ein
+> längerer Wert (`12345678901234567.89`) wird beim Schreiben ohne Fehler gerundet.
+> Auch Nullen am Ende gehen verloren: `12.50` wird als `12.5` gelesen, `100.00` als `100`.
+> Für breitere Werte PostgreSQL oder MySQL nutzen. Verwende `rust_decimal::Decimal` für Geld,
 > niemals `f64`.
 
 ### Nur-PostgreSQL-Typen
@@ -286,7 +289,7 @@ mit `select_related` (ebenfalls im ORM-Leitfaden).
 |---|---|---|
 | `primary_key` | `#[rustango(primary_key)]` | markiert den PK |
 | `max_length = N` | `#[rustango(max_length = 200)]` | `VARCHAR(N)` + Längenprüfung beim Schreiben |
-| `default = "…"` | `#[rustango(default = "'draft'")]` | DB-Spaltenstandard (SQL-Literal) |
+| `default = "…"` | `#[rustango(default = "'draft'")]` | DB-Spaltenstandard (rohes SQL: Text in Anführungszeichen wie `'draft'`; ein nacktes Wort oder eine Nicht-Zahl auf einem Zahlenfeld ist ein Compile-Fehler) |
 | `unique` | `#[rustango(unique)]` | Unique-Constraint auf der Spalte |
 | `choices = "…"` | `#[rustango(choices = "draft:Draft, published:Published")]` | aufgezählte Werte (`value:Label`); Admin-`<select>` + Validierung |
 | `auto_now_add` | `#[rustango(auto_now_add)]` | beim **Einfügen** auf jetzt setzen (auf einem `Auto<DateTime<Utc>>`) |

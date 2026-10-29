@@ -241,6 +241,17 @@ pub struct Counter {
     pub hits: i64,
 }
 
+/// Floats and JSON `null` must come back exactly through a dump.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "mdv_measure", app = "mdv")]
+pub struct Measure {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub score: f64,
+    pub meta: serde_json::Value,
+    pub extra: Option<serde_json::Value>,
+}
+
 /// A fixture key that is absent takes the column default, pk included.
 async fn loaddata_leaves_missing_keys_to_the_column_default(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Counter>(pool).await;
@@ -837,6 +848,80 @@ async fn dump_and_load_round_trip(pool: &Pool) {
         .expect("an insert after loaddata reused a loaded id");
 }
 
+type MeasureRow = (i64, u64, serde_json::Value, Option<serde_json::Value>);
+
+async fn measures(pool: &Pool) -> Vec<MeasureRow> {
+    let mut rows: Vec<MeasureRow> = Measure::objects()
+        .fetch(pool)
+        .await
+        .expect("fetch")
+        .into_iter()
+        .map(|m| (*m.id.get().expect("pk"), m.score.to_bits(), m.meta, m.extra))
+        .collect();
+    rows.sort_by_key(|r| r.0);
+    rows
+}
+
+/// dump -> flush -> load gives back every f64 bit and keeps JSON `null`
+/// apart from SQL NULL; an old dump's `null` still loads.
+async fn dump_and_load_keeps_floats_and_json_null(pool: &Pool) {
+    use serde_json::json;
+    rustango::testkit::matrix::fresh_table::<Measure>(pool).await;
+    let seed = [
+        (123_456_789.123_456_79, json!(null), Some(json!(null))),
+        (0.1 + 0.2, json!({"$json": 1}), None),
+        (-1.0e-300, json!([1, null]), Some(json!({"$json": null}))),
+        (2.0_f64.powi(60) + 1.0e3, json!("s"), Some(json!(7))),
+    ];
+    for (score, meta, extra) in seed {
+        let mut m = Measure {
+            id: Auto::default(),
+            score,
+            meta,
+            extra,
+        };
+        m.insert_pool(pool).await.expect("measure");
+    }
+    let before = measures(pool).await;
+    assert_eq!(before[0].2, json!(null), "seed stored SQL NULL");
+    assert_eq!(before[0].3, Some(json!(null)), "seed stored SQL NULL");
+
+    let dumped = manage(pool, &["dumpdata", "--model", "mdv.Measure"])
+        .await
+        .expect("dumpdata");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fixture = dir.path().join("measure.json");
+    std::fs::write(&fixture, &dumped).unwrap();
+    manage(pool, &["flush", "--yes", "--model", "mdv.Measure"])
+        .await
+        .expect("flush");
+    let out = manage(
+        pool,
+        &["loaddata", fixture.to_str().unwrap(), "--fail-fast"],
+    )
+    .await;
+    assert!(out.is_ok(), "loaddata: {out:?}\n{dumped}");
+    assert_eq!(
+        measures(pool).await,
+        before,
+        "the reload changed the rows\n{dumped}"
+    );
+
+    // A dump from before JSON null was tagged: plain `null` everywhere.
+    rustango::testkit::matrix::fresh_table::<Measure>(pool).await;
+    let old = json!([{"model": "mdv.Measure", "pk": 1,
+        "fields": {"score": 1.5, "meta": null, "extra": null}}]);
+    std::fs::write(&fixture, old.to_string()).unwrap();
+    let out = manage(
+        pool,
+        &["loaddata", fixture.to_str().unwrap(), "--fail-fast"],
+    )
+    .await;
+    assert!(out.is_ok(), "old dump: {out:?}");
+    let rows = measures(pool).await;
+    assert_eq!((&rows[0].2, &rows[0].3), (&json!(null), &None));
+}
+
 /// A column dumpdata would write as `null` is refused, not silently lost.
 async fn dumpdata_refuses_columns_it_cannot_read(pool: &Pool) {
     let err = manage(pool, &["dumpdata", "--model", "cli1911.Tagged"])
@@ -888,5 +973,6 @@ tri_dialect_test! {
         dump_and_load_keeps_text_pk_m2m_links,
         a_bad_m2m_link_skips_only_its_row,
         loaddata_leaves_missing_keys_to_the_column_default,
+        dump_and_load_keeps_floats_and_json_null,
     ],
 }

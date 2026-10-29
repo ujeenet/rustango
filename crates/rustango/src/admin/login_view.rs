@@ -23,7 +23,7 @@ use super::session::{self, AdminSession, AdminSessionSecret, SESSION_COOKIE};
 use super::templates::render_template;
 use super::urls::AppState;
 use super::user::AdminUser;
-use crate::core::{Filter, Model, Op, SelectQuery, SqlValue, WhereExpr};
+use crate::core::{Model, SelectQuery, SqlValue};
 
 /// Unauthenticated routes: `/login` and `/logout`. Merged into the
 /// admin router before the auth middleware, so the login form itself
@@ -50,12 +50,14 @@ pub(crate) fn protected_router(state: AppState) -> Router {
     // Self-service TOTP enrollment, behind the session gate. Only
     // mounted when the `totp` feature is on.
     #[cfg(feature = "totp")]
-    let router = router.route(
-        "/account/totp",
-        get(totp_enroll_form)
-            .post(totp_enroll_submit)
-            .layer(axum::middleware::map_response(no_store)),
-    );
+    let router = router
+        .route(
+            "/account/totp",
+            get(totp_enroll_form)
+                .post(totp_enroll_submit)
+                .layer(axum::middleware::map_response(no_store)),
+        )
+        .route("/account/totp/disable", post(totp_disable_submit));
     router.with_state(state)
 }
 
@@ -383,6 +385,8 @@ async fn login_submit(
                     attempt.prompted().await;
                 } else {
                     attempt.failed().await;
+                    let source = crate::audit::AuditSource::User { id: id.to_string() };
+                    totp_audit_as(&state, id, source, "totp_failed").await;
                 }
                 send_user_login_failed(UserLoginFailedContext {
                     source: "admin",
@@ -484,6 +488,14 @@ async fn change_password_submit(
         ))
         .into_response();
     }
+    if form.new_password == form.current_password {
+        return Html(render_change_password_form(
+            &state,
+            None,
+            Some("New password must differ from the current password."),
+        ))
+        .into_response();
+    }
     if let Err(e) = crate::password_validators::check_builtin_form_password(&form.new_password) {
         return Html(render_change_password_form(&state, None, Some(&e.message))).into_response();
     }
@@ -552,30 +564,35 @@ async fn change_password_submit(
         }
     };
 
-    // Schema-driven UPDATE, so the bare admin compiles without
-    // tenancy's typed query helpers.
-    use crate::core::{Assignment, Expr, UpdateQuery};
-    let q = UpdateQuery {
-        model: AdminUser::SCHEMA,
-        set: vec![Assignment {
-            column: "password_hash",
-            value: Expr::Literal(SqlValue::String(new_hash.clone())),
-        }],
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::Eq,
-            value: SqlValue::I64(session.user_id),
-        }),
-    };
-    if let Err(e) = crate::sql::update_pool(&state.pool, &q).await {
-        // The driver error names tables and constraints: log it only.
-        tracing::warn!(target: "rustango::admin", error = %e, "change-password update");
-        return Html(render_change_password_form(
-            &state,
-            None,
-            Some("Could not save — please try again."),
-        ))
-        .into_response();
+    // Only over the hash just verified: a reset or another change that
+    // landed during the verify is not overwritten.
+    let q = crate::passwords::rehash_update(
+        AdminUser::SCHEMA,
+        session.user_id,
+        stored_hash,
+        &new_hash,
+        None,
+    );
+    match crate::sql::update_pool(&state.pool, &q).await {
+        Ok(1) => {}
+        Ok(_) => {
+            return Html(render_change_password_form(
+                &state,
+                None,
+                Some("Your password changed meanwhile; please try again."),
+            ))
+            .into_response()
+        }
+        Err(e) => {
+            // The driver error names tables and constraints: log it only.
+            tracing::warn!(target: "rustango::admin", error = %e, "change-password update");
+            return Html(render_change_password_form(
+                &state,
+                None,
+                Some("Could not save — please try again."),
+            ))
+            .into_response();
+        }
     }
 
     // This request's cookie holds the OLD password fingerprint, so the
@@ -664,7 +681,6 @@ fn render_totp_enroll(
         "action": format!("{admin_prefix}/account/totp"),
         "admin_title": state.config.title.as_deref().unwrap_or("Rustango Admin"),
         "admin_prefix": admin_prefix,
-        "static_url": &state.config.static_url,
         "already_enabled": already_enabled,
         "secret_base32": secret_base32,
         "otpauth_url": otpauth_url,
@@ -832,6 +848,9 @@ async fn totp_enroll_submit(
         super::totp_store::confirm_with_code(&state.pool, session.user_id, &secret, code).await
     };
     settle_code(attempt, confirmed.as_ref().ok().copied(), code).await;
+    if matches!(confirmed, Ok(false)) && !code.is_empty() {
+        totp_audit(&state, &session, "totp_failed").await;
+    }
     if matches!(confirmed, Ok(false)) {
         // Never echo a re-enroll's key: that would hand it to any session.
         let (key, otpauth) = if reenroll {
@@ -861,6 +880,7 @@ async fn totp_enroll_submit(
         ))
         .into_response();
     }
+    totp_audit(&state, &session, "totp_enroll").await;
     Html(render_totp_enroll(
         &state,
         true,
@@ -870,6 +890,107 @@ async fn totp_enroll_submit(
         Some("Two-factor authentication is now enabled."),
     ))
     .into_response()
+}
+
+/// An audit row for a TOTP change on the signed-in user's own entry.
+#[cfg(feature = "totp")]
+async fn totp_audit(state: &AppState, session: &AdminSession, action: &str) {
+    totp_audit_as(state, session.user_id, session.actor(), action).await;
+}
+
+/// [`totp_audit`] before a session exists: the login's code step.
+#[cfg(feature = "totp")]
+async fn totp_audit_as(
+    state: &AppState,
+    user_id: i64,
+    source: crate::audit::AuditSource,
+    action: &str,
+) {
+    let entry = crate::audit::PendingEntry {
+        entity_table: AdminUser::SCHEMA.table,
+        entity_pk: user_id.to_string(),
+        operation: crate::audit::AuditOp::Action,
+        source,
+        changes: serde_json::json!({ "action": action }),
+    };
+    if let Err(e) = crate::audit::emit_one_pool(&state.pool, &entry).await {
+        tracing::warn!(target: "rustango::admin", error = %e, action, "totp audit entry");
+    }
+}
+
+/// `POST /account/totp/disable`: a current code turns the device off.
+#[cfg(feature = "totp")]
+async fn totp_disable_submit(
+    State(state): State<AppState>,
+    ip: crate::login_throttle::ClientIp,
+    Form(form): Form<TotpEnrollInput>,
+) -> Response {
+    use super::totp_store::{confirmed_in, redeem_in, remove_in, AdminTotp};
+    let Some(session) = super::session::current() else {
+        return (StatusCode::UNAUTHORIZED, "session required").into_response();
+    };
+    let attempt = match crate::login_throttle::shared()
+        .begin(
+            &crate::login_throttle::LoginScope::Admin,
+            &ip,
+            &session.username,
+        )
+        .await
+    {
+        Ok(a) => a,
+        Err(refused) => return refused.into_response(),
+    };
+    let code = form.totp_code.as_deref().unwrap_or("").trim();
+    let page = |error: Option<&str>, success: Option<&str>, on: bool| {
+        Html(render_totp_enroll(&state, on, "", "", error, success)).into_response()
+    };
+    let device = match confirmed_in::<AdminTotp>(&state.pool, session.user_id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            settle_code(attempt, None, code).await;
+            return page(Some("Two-factor authentication is not on."), None, false);
+        }
+        Err(e) => {
+            settle_code(attempt, None, code).await;
+            tracing::warn!(target: "rustango::admin", error = %e, "totp disable lookup");
+            return page(
+                Some("Could not read your device — please try again."),
+                None,
+                true,
+            );
+        }
+    };
+    let ok = !code.is_empty()
+        && redeem_in::<AdminTotp>(&state.pool, session.user_id, &device, code, false)
+            .await
+            .unwrap_or(false);
+    settle_code(attempt, Some(ok), code).await;
+    if !ok {
+        if !code.is_empty() {
+            totp_audit(&state, &session, "totp_failed").await;
+        }
+        return page(
+            Some("Enter a current code from your authenticator to turn it off."),
+            None,
+            true,
+        );
+    }
+    match remove_in::<AdminTotp>(&state.pool, session.user_id, &device).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return page(
+                Some("Your device changed meanwhile. Please try again."),
+                None,
+                true,
+            )
+        }
+        Err(e) => {
+            tracing::warn!(target: "rustango::admin", error = %e, "totp disable");
+            return page(Some("Could not save — please try again."), None, true);
+        }
+    }
+    totp_audit(&state, &session, "totp_disable").await;
+    page(None, Some("Two-factor authentication is off."), false)
 }
 
 // ============================================================ Logout (POST)
@@ -958,8 +1079,8 @@ pub(crate) struct SessionGate {
     pub(crate) pool: crate::sql::Pool,
 }
 
-/// Require a valid session cookie on every admin request. `/login` and
-/// the embedded static assets under `/__static__/` pass through.
+/// Require a valid session cookie on every admin request but `/login`.
+/// The favicon is served outside this gate.
 ///
 /// A valid session is inserted as `Extension<AdminSession>` so handlers
 /// can read the current user. With `gate.require_superuser` set (the
@@ -970,7 +1091,7 @@ pub(crate) async fn require_session(
     next: Next,
 ) -> Response {
     let path = request.uri().path();
-    if path == gate.login_path || path == "/login" || path.starts_with("/__static__") {
+    if path == gate.login_path || path == "/login" {
         return next.run(request).await;
     }
 
@@ -1000,12 +1121,13 @@ pub(crate) async fn require_session(
             return forbidden_page(&session, &gate.logout_path);
         }
         request.extensions_mut().insert(session.clone());
+        // Audited writes record the signed-in user, not `system`.
+        let source = session.actor();
         // Scope the task-local so `chrome_context`, deep in the render
         // stack, can read the session without every handler passing it
         // down as an argument.
-        return super::session::CURRENT_SESSION
-            .scope(session, next.run(request))
-            .await;
+        let run = super::session::CURRENT_SESSION.scope(session, next.run(request));
+        return crate::audit::with_source(source, run).await;
     }
 
     // No valid session: bounce to the login form with a 303 See Other,
@@ -1154,6 +1276,15 @@ mod tests {
             pool,
             config: Arc::new(config),
         }
+    }
+
+    /// The TOTP page links no stylesheet: none is served.
+    #[cfg(feature = "totp")]
+    #[tokio::test]
+    async fn totp_page_links_no_missing_stylesheet() {
+        let html = render_totp_enroll(&test_state(), false, "S", "otpauth://x", None, None);
+        assert!(html.contains("Two-factor"), "{html}");
+        assert!(!html.contains(r#"rel="stylesheet""#), "{html}");
     }
 
     #[tokio::test]

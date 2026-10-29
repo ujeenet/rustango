@@ -54,6 +54,11 @@ async fn welcome_page(
 }
 
 async fn welcome_icon() -> Response {
+    icon_png_response()
+}
+
+/// The bundled square favicon, cached for a day. The admins serve it too.
+pub(crate) fn icon_png_response() -> Response {
     Response::builder()
         .status(axum::http::StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/png")

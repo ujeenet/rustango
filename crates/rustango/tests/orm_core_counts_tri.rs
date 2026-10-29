@@ -908,8 +908,7 @@ tri_dialect_test! {
 }
 
 /// Decimal `SUM` is not cast, so PG NUMERIC and MySQL DECIMAL stay exact.
-/// A `Decimal` model does not build with the `sqlite` feature (SQLite has
-/// no decimal type; a NUMERIC `SUM` there reads back as `f64` / `i64`).
+/// SQLite's NUMERIC keeps about 15 digits, so these exact checks skip it.
 #[cfg(not(feature = "sqlite"))]
 mod decimal {
     use super::*;

@@ -144,7 +144,7 @@ pub async fn normalise_sqlite_datetimes(pool: &Pool) -> Result<Normalised, Migra
         tracing::info!(
             rows = out.rows,
             columns = ?out.columns,
-            "normalised SQLite datetime columns onto the RFC3339 shape (#1464); \
+            "normalised SQLite datetime columns onto the RFC3339 shape; \
              values written by the old CURRENT_TIMESTAMP default did not compare \
              or sort against timestamps bound from Rust"
         );

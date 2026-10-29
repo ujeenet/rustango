@@ -124,7 +124,10 @@ pub struct Gadget {
 
 > **Decimal precision.** PostgreSQL `NUMERIC` is arbitrary-precision; MySQL uses
 > `DECIMAL(65,28)` (every `rust_decimal` value fits); SQLite
-> uses `NUMERIC` affinity, which keeps about 15 significant digits. Use `rust_decimal::Decimal` for money, never `f64`.
+> uses `NUMERIC` affinity, which keeps about 15 significant digits: a longer value
+> (`12345678901234567.89`) is rounded on write, with no error. It also drops trailing
+> zeros: `12.50` reads back as `12.5`, `100.00` as `100`. Use PostgreSQL or MySQL
+> for wider values. Use `rust_decimal::Decimal` for money, never `f64`.
 
 ### PostgreSQL-only types
 
@@ -281,7 +284,7 @@ different type, name it: `ForeignKey<User, String>`. One-to-one uses
 |---|---|---|
 | `primary_key` | `#[rustango(primary_key)]` | marks the PK |
 | `max_length = N` | `#[rustango(max_length = 200)]` | `VARCHAR(N)` + write-time length check |
-| `default = "…"` | `#[rustango(default = "'draft'")]` | DB column default (SQL literal) |
+| `default = "…"` | `#[rustango(default = "'draft'")]` | DB column default (raw SQL: quote text as `'draft'`; a bare word or a non-number on a numeric field is a compile error) |
 | `unique` | `#[rustango(unique)]` | unique constraint on the column |
 | `choices = "…"` | `#[rustango(choices = "draft:Draft, published:Published")]` | enumerated values (`value:Label`); admin `<select>` + validation |
 | `auto_now_add` | `#[rustango(auto_now_add)]` | set to now on **insert** (on an `Auto<DateTime<Utc>>`) |

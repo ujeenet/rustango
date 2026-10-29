@@ -232,10 +232,7 @@ impl sqlx::Type<sqlx::MySql> for Vector {
 #[cfg(feature = "mysql")]
 impl sqlx::Decode<'_, sqlx::MySql> for Vector {
     fn decode(_value: sqlx::mysql::MySqlValueRef<'_>) -> Result<Self, sqlx::error::BoxDynError> {
-        Err(
-            "`Vector` columns are PostgreSQL/pgvector-only; cannot decode on MySQL (issue #824)"
-                .into(),
-        )
+        Err("`Vector` columns are PostgreSQL/pgvector-only; cannot decode on MySQL".into())
     }
 }
 
@@ -249,10 +246,7 @@ impl sqlx::Type<sqlx::Sqlite> for Vector {
 #[cfg(feature = "sqlite")]
 impl sqlx::Decode<'_, sqlx::Sqlite> for Vector {
     fn decode(_value: sqlx::sqlite::SqliteValueRef<'_>) -> Result<Self, sqlx::error::BoxDynError> {
-        Err(
-            "`Vector` columns are PostgreSQL/pgvector-only; cannot decode on SQLite (issue #824)"
-                .into(),
-        )
+        Err("`Vector` columns are PostgreSQL/pgvector-only; cannot decode on SQLite".into())
     }
 }
 

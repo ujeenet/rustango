@@ -156,6 +156,7 @@ app create-user t01 soakadmin --password "${SOAK_TENANT_ADMIN_PASSWORD:-soak-adm
 #   t03  SSO: a plain user, a staff user, a superuser, a spare
 #   t04  login lock and limits      t05  password change (#1338)
 #   t06  JWT                        t07  tenant admin CSRF (#1713)
+#   t01  `noperms`: signs in to the REST API but holds no codenames
 # Superusers first: a tenant's first user is promoted to superuser
 # whatever the flags say, and sso-user must stay a plain user.
 for pair in "t03 sso-super" "t05 pwchange" "t07 csrfadmin"; do
@@ -163,10 +164,31 @@ for pair in "t03 sso-super" "t05 pwchange" "t07 csrfadmin"; do
     app create-user "$slug" "$user" --password "soak-${user}-pw" --superuser 2>/dev/null \
         || log "user $user on $slug already exists"
 done
-for pair in "t03 sso-user" "t03 sso-staff" "t03 sso-other" "t04 lockprobe" "t06 jwtuser"; do
+for pair in "t03 sso-user" "t03 sso-staff" "t03 sso-other" "t04 lockprobe" "t06 jwtuser" \
+    "t01 noperms"; do
     slug=${pair%% *}; user=${pair#* }
     app create-user "$slug" "$user" --password "soak-${user}-pw" 2>/dev/null \
         || log "user $user on $slug already exists"
+done
+
+# The REST API takes a Bearer token and each model's codenames. `soakapi`
+# is the driver's API user on every tenant, granted them all; where it is
+# a tenant's first user it is also a superuser. Grants run on every run,
+# so one that failed is retried; a create that failed for any reason but
+# "exists" then fails the grant.
+API_TABLES="commerce_product commerce_order commerce_order_line commerce_customer \
+commerce_inventory commerce_promotion commerce_gift_card"
+i=1
+while [ "$i" -le "$TENANTS" ]; do
+    slug=$(printf 't%02d' "$i")
+    app create-user "$slug" soakapi --password "soak-soakapi-pw" >/dev/null 2>&1 \
+        || log "API user on $slug already exists"
+    for table in $API_TABLES; do
+        for action in view add change delete; do
+            app grant-perm "$slug" soakapi "$table.$action" >/dev/null
+        done
+    done
+    i=$((i + 1))
 done
 
 # The two custom hostnames. `add-host` is what writes

@@ -105,6 +105,13 @@ reach every tenant, so this list is the console's access control.</p>
           <button type="submit" name="generate" value="on" class="btn btn-secondary">Generate one</button>
           <span class="field-helper">Signs <code>{{ op.username }}</code> out everywhere.</span>
         </form>
+        {% if totp_reset %}
+        <form method="post" action="{{ console_prefix }}/operators/{{ op.id }}/reset-totp" class="inline-reset">
+          {{ csrf_input | default(value='') | safe }}
+          <button type="submit" class="btn btn-secondary"
+                  data-confirm="Remove the two-factor device of {{ op.username }}? They must enroll a new one.">Remove two-factor device</button>
+        </form>
+        {% endif %}
       </td>
     </tr>
     {% endif %}

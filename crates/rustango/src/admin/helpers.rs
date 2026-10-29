@@ -686,30 +686,6 @@ pub(crate) fn render_cell_json(
     render::render_value_json(row, field)
 }
 
-/// Render a create or edit form via the `form.html` template. Pre-fill
-/// values come from `prefill` (keyed by Rust field name); pass `None` for
-/// an empty create form. `pk_locked` makes the PK input read-only (edit
-/// mode). `error_msg`, when present, is shown above the form.
-///
-/// `state` is needed so the sidebar context can be attached.
-pub(crate) fn render_form(
-    state: &AppState,
-    model: &'static ModelSchema,
-    prefill: Option<&HashMap<String, String>>,
-    pk_locked: bool,
-    error_msg: Option<&str>,
-) -> String {
-    render_form_with_inlines_and_pickers(
-        state,
-        model,
-        prefill,
-        pk_locked,
-        error_msg,
-        Vec::new(),
-        &[],
-    )
-}
-
 /// A new form preselects the model default; only a nullable bool can
 /// show "false" apart from blank (NULL).
 fn new_form_bool_value(f: &FieldSchema) -> &'static str {
@@ -720,8 +696,11 @@ fn new_form_bool_value(f: &FieldSchema) -> &'static str {
     }
 }
 
+/// Render a create or edit form via `form.html`. `prefill` is keyed by
+/// field name; `pk_locked` is edit mode; `inline_panels` are the editable
+/// inlines (empty on create); `gfk_picker_cts` feed the ContentType picker.
 #[allow(clippy::too_many_arguments)]
-fn render_form_with_inlines_and_pickers(
+pub(crate) fn render_form_with_inlines_and_picker(
     state: &AppState,
     model: &'static ModelSchema,
     prefill: Option<&HashMap<String, String>>,
@@ -1043,32 +1022,6 @@ impl FormLayout {
             .map(|f| f.name)
             .collect()
     }
-}
-
-/// As [`render_form`] but threads a list of `InlineFormPanel` and a
-/// pre-loaded `ContentType` list into the form context. The first
-/// drives inline panel rendering (#50, slice 2); the second drives
-/// the `generic_fk` `<select>` picker (#244). Used by `edit_form` and
-/// `create_form` — pass an empty `inline_panels` from create-form,
-/// which does not render inlines.
-pub(crate) fn render_form_with_inlines_and_picker(
-    state: &AppState,
-    model: &'static ModelSchema,
-    prefill: Option<&HashMap<String, String>>,
-    pk_locked: bool,
-    error_msg: Option<&str>,
-    inline_panels: Vec<super::inlines::InlineFormPanel>,
-    gfk_picker_cts: &[crate::contenttypes::ContentType],
-) -> String {
-    render_form_with_inlines_and_pickers(
-        state,
-        model,
-        prefill,
-        pk_locked,
-        error_msg,
-        inline_panels,
-        gfk_picker_cts,
-    )
 }
 
 #[cfg(test)]

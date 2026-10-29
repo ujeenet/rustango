@@ -39,7 +39,6 @@ use tower::ServiceExt as _;
 use super::error::TenancyError;
 use super::operator_console;
 use super::pools::TenantPools;
-use super::resolver::ChainResolver;
 use crate::sql::sqlx::Database;
 use crate::tenancy::admin::TenantAdminBuilder;
 
@@ -309,41 +308,7 @@ where
         std::path::Path::new("./var/.rustango_session.key"),
     );
 
-    // --- Operator console at the apex ---
-    // v0.38 — `registry_pool()` (unified Pool enum) instead of the
-    // PG-only `registry()` accessor so the operator console runs on
-    // whichever backend `TenantPools<DB>` was built with.
-    let operator_console = operator_console::router(pools.registry_pool(), session_secret.clone());
-
-    // --- Tenant admin at subdomains (with per-tenant auth) ---
-    let resolver = ChainResolver::standard(config.apex_domain.clone());
-    let tenant_admin = TenantAdminBuilder::<DB>::new(pools.clone(), registry_url, resolver)
-        .with_session(session_secret)
-        .build();
-
-    // --- Host-based dispatch (matches multitenant_demo's design) ---
-    let apex = config.apex_domain.clone();
-    let app = axum::Router::new().fallback_service(tower::service_fn({
-        let operator = operator_console.clone();
-        let tenants = tenant_admin.clone();
-        move |req: Request<Body>| {
-            let mut operator = operator.clone();
-            let mut tenants = tenants.clone();
-            let apex = apex.clone();
-            async move {
-                let on_apex = super::resolver::host_is_apex(req.headers(), req.uri(), &apex);
-                let response: Response<Body> = if on_apex {
-                    operator.as_service().oneshot(req).await
-                } else {
-                    tenants.as_service().oneshot(req).await
-                }
-                .map_err(|e| -> std::convert::Infallible {
-                    panic!("axum router service is Infallible: {e}")
-                })?;
-                Ok::<_, std::convert::Infallible>(response)
-            }
-        }
-    }));
+    let app = app(pools, registry_url, &config.apex_domain, session_secret);
 
     // --- Listener + banner ---
     let listener = crate::shutdown::bind_announced(&config.bind, Some(&config.apex_domain)).await?;
@@ -378,6 +343,71 @@ where
     Ok(())
 }
 
+/// The operator console on the apex and the tenant admin, dispatched as
+/// `server::Builder` does: a path-prefix tenant is reached at `<apex>/<prefix>`.
+pub(crate) fn app<DB: Database>(
+    pools: Arc<TenantPools<DB>>,
+    registry_url: String,
+    apex: &str,
+    session_secret: crate::session::SessionSecret,
+) -> axum::Router
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let registry = pools.registry_pool();
+    // Links (end-impersonation, first admin, tenant links) use this apex.
+    let link_apex = LinkApex::new(apex);
+    let tenant_admin =
+        TenantAdminBuilder::<DB>::new(pools, registry_url, crate::server::apex_resolver(apex))
+            .link_apex(link_apex.clone())
+            .with_session(session_secret.clone())
+            .build();
+    // The console's routes win on the apex: only a path it does not serve
+    // reaches a path-prefix tenant.
+    let operator_console = operator_console::router(registry.clone(), session_secret)
+        .layer(axum::Extension(link_apex))
+        .fallback_service(tower::service_fn({
+            let tenants = tenant_admin.clone();
+            move |req: Request<Body>| {
+                let mut tenants = tenants.clone();
+                async move {
+                    let prefixed = req.extensions().get::<crate::server::Resolution>()
+                        == Some(&crate::server::Resolution::PrefixTenant);
+                    if prefixed {
+                        tenants.as_service().oneshot(req).await
+                    } else {
+                        Ok(axum::response::IntoResponse::into_response(
+                            axum::http::StatusCode::NOT_FOUND,
+                        ))
+                    }
+                }
+            }
+        }));
+
+    let apex = apex.to_owned();
+    let resolver = Arc::new(crate::server::apex_resolver(&apex));
+    axum::Router::new().fallback_service(tower::service_fn(move |req: Request<Body>| {
+        let mut operator = operator_console.clone();
+        let mut tenants = tenant_admin.clone();
+        let (apex, resolver, registry) = (apex.clone(), resolver.clone(), registry.clone());
+        async move {
+            let response: Response<Body> =
+                if super::resolver::host_is_apex(req.headers(), req.uri(), &apex) {
+                    let (mut req, resolution) =
+                        crate::server::resolve(req, &resolver, &registry).await;
+                    req.extensions_mut().insert(resolution);
+                    operator.as_service().oneshot(req).await
+                } else {
+                    tenants.as_service().oneshot(req).await
+                }
+                .map_err(|e| -> std::convert::Infallible {
+                    panic!("axum router service is Infallible: {e}")
+                })?;
+            Ok::<_, std::convert::Infallible>(response)
+        }
+    }))
+}
+
 /// Print a loud warning if no operators exist — the operator UI
 /// would be unreachable in that state. Returns `Ok(true)` when at
 /// least one is present.
@@ -405,6 +435,73 @@ async fn no_operators_warn<W: Write + Send>(
         Ok(false)
     } else {
         Ok(true)
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod app_tests {
+    use super::*;
+    use crate::sql::Auto;
+
+    /// A path-prefix tenant is reached at `<apex>/<prefix>`, not the console.
+    #[tokio::test]
+    async fn a_path_prefix_tenant_is_served_on_the_apex() {
+        let tmp = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let registry = sqlx::SqlitePool::connect(&url).await.unwrap();
+        let pools = Arc::new(TenantPools::<sqlx::Sqlite>::new(registry));
+        let migrations = tmp.path().join("migrations");
+        std::fs::create_dir_all(&migrations).unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        crate::tenancy::manage::run_with_writer(
+            pools.as_ref(),
+            &url,
+            &migrations,
+            vec!["migrate-registry".to_owned()],
+            &mut buf,
+        )
+        .await
+        .expect("migrate-registry");
+        let tenant_url = format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display());
+        let mut org = super::super::Org {
+            id: Auto::default(),
+            slug: "pfx-acme".into(),
+            display_name: "Acme".into(),
+            storage_mode: "database".into(),
+            backend_kind: "sqlite".into(),
+            database_url: Some(tenant_url),
+            schema_name: None,
+            host_pattern: None,
+            port: None,
+            path_prefix: Some("/acme".into()),
+            active: true,
+            created_at: chrono::Utc::now(),
+            brand_name: None,
+            brand_tagline: None,
+            logo_path: None,
+            favicon_path: None,
+            primary_color: None,
+            theme_mode: None,
+        };
+        org.insert_pool(&pools.registry_pool()).await.unwrap();
+        let secret = crate::session::SessionSecret::from_bytes(vec![9; 32]);
+        let app = app(pools, url, "apex.test", secret);
+        let req = Request::builder()
+            .uri("/acme/admin")
+            .header("host", "apex.test")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let location = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            resp.status().is_redirection() && location.starts_with("/acme/"),
+            "{} -> {location:?}",
+            resp.status()
+        );
     }
 }
 

@@ -289,7 +289,8 @@ impl ViewSet {
                 .operation_id(format!("destroy_{}", snake(tag)))
                 .tag(tag)
                 .response("204", Response::new("deleted"))
-                .response("404", Response::new("not found"));
+                .response("404", Response::new("not found"))
+                .response("409", Response::new("still referenced by other rows"));
             if self.pk_can_be_malformed() {
                 destroy_op = destroy_op.response("400", malformed_pk());
             }
@@ -341,7 +342,7 @@ impl ViewSet {
                 continue;
             }
             let key = self.body_key(f.name);
-            let prop = field_type_to_schema(f.ty);
+            let prop = field_to_schema(f);
             s = s.property(key, if f.nullable { prop.nullable() } else { prop });
             let defaulted = body == Body::Create && absent_takes_default(f, Encoding::Json);
             if body != Body::Patch && absent_is_missing(f) && !defaulted {
@@ -432,7 +433,7 @@ impl ViewSet {
             let field_schema = self
                 .schema
                 .field(f)
-                .map_or_else(Schema::string, |fs| field_type_to_schema(fs.ty));
+                .map_or_else(Schema::string, field_to_schema);
             out.push(
                 Parameter::query(f.clone(), field_schema).description(format!(
                     "Exact filter. Lookups: `{f}__iexact`, `__gt`, `__gte`, `__lt`, \
@@ -474,6 +475,11 @@ impl ViewSet {
                 .required(["count", "limit", "offset", "results"]),
         }
     }
+}
+
+/// The type schema plus the limits a write enforces (422 otherwise).
+fn field_to_schema(f: &crate::core::FieldSchema) -> Schema {
+    field_type_to_schema(f.ty).field_limits(Some(f), None, None, None, None)
 }
 
 fn field_type_to_schema(t: FieldType) -> Schema {
@@ -977,8 +983,9 @@ mod tests {
             let v = serde_json::to_value(op.as_ref().unwrap()).unwrap();
             assert!(v["responses"]["409"].is_object(), "{name}: {v}");
         }
+        // DELETE refuses a row other rows still point at.
         let v = serde_json::to_value(item.delete.as_ref().unwrap()).unwrap();
-        assert!(v["responses"]["409"].is_null(), "DELETE");
+        assert!(v["responses"]["409"].is_object(), "DELETE: {v}");
     }
 
     /// #2207: PUT/PATCH answer 400 and 204, and create a bare 201, as the handlers do.
@@ -1049,6 +1056,60 @@ mod tests {
         let body = body_schema(item.patch.as_ref());
         assert!(body["properties"]["title"].is_object());
         assert!(body["properties"].get("deleted_at").is_none(), "{body}");
+    }
+
+    /// Choices, max_length and min/max reach the body and filter schemas.
+    #[test]
+    fn write_and_filter_schemas_carry_field_limits() {
+        static FIELDS: [FieldSchema; 3] = [
+            FieldSchema {
+                name: "status",
+                column: "status",
+                nullable: true,
+                max_length: Some(16),
+                choices: Some(&[("draft", "Draft"), ("live", "Live")]),
+                ..title_const()
+            },
+            FieldSchema {
+                name: "rank",
+                column: "rank",
+                ty: FieldType::I32,
+                min: Some(1),
+                max: Some(5),
+                ..title_const()
+            },
+            title_const(),
+        ];
+        static MS: std::sync::OnceLock<ModelSchema> = std::sync::OnceLock::new();
+        let ms = MS.get_or_init(|| ModelSchema {
+            fields: &FIELDS,
+            ..schema().clone()
+        });
+        let paths = ViewSet::for_model(ms, &["status", "rank"])
+            .filter_fields(&["status"])
+            .openapi_paths("/p", "P");
+        let coll = &paths.iter().find(|(p, _)| p == "/p").unwrap().1;
+        let body = body_schema(coll.post.as_ref());
+        let status = &body["properties"]["status"];
+        assert_eq!(
+            status["enum"],
+            serde_json::json!(["draft", "live", null]),
+            "{body}"
+        );
+        assert_eq!(status["maxLength"], 16, "{body}");
+        assert_eq!(body["properties"]["rank"]["minimum"], 1.0, "{body}");
+        assert_eq!(body["properties"]["rank"]["maximum"], 5.0, "{body}");
+        let list = list_op_of(coll);
+        let p = param(&list, "status").expect("status param");
+        assert_eq!(
+            p["schema"]["enum"],
+            serde_json::json!(["draft", "live"]),
+            "{p}"
+        );
+    }
+
+    fn list_op_of(item: &crate::openapi::PathItem) -> serde_json::Value {
+        serde_json::to_value(item.get.as_ref().unwrap()).unwrap()
     }
 
     const fn title_const() -> FieldSchema {

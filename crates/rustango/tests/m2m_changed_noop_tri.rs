@@ -29,6 +29,23 @@ const JUNCTION: &ModelSchema = &{
     s
 };
 
+/// A junction whose only unique key is `post_id`: one tag per post.
+const ONE_TAG: &ModelSchema = &{
+    const FIELDS: &[FieldSchema] = &[
+        FieldSchema::new("post_id", "post_id", FieldType::I64),
+        FieldSchema::new("tag_id", "tag_id", FieldType::I64),
+    ];
+    const INDEXES: &[IndexSchema] = &[{
+        let mut i = IndexSchema::new("m2m_noop_one_tag_post", &["post_id"]);
+        i.unique = true;
+        i
+    }];
+    let mut s = ModelSchema::new("OneTag", "m2m_noop_one_tag");
+    s.fields = FIELDS;
+    s.indexes = INDEXES;
+    s
+};
+
 /// A registered through model with `INT` keys, not the junction's usual `BIGINT`.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "m2m_noop_post_tag_i32", app = "m2mnoop")]
@@ -38,6 +55,33 @@ pub struct PostTagI32 {
     pub id: Auto<i64>,
     pub post_id: i32,
     pub tag_id: i32,
+}
+
+/// A source whose auto junction has a unique `(post_id, tag_id)` key.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "m2m_lock_post",
+    app = "m2mnoop",
+    m2m(
+        name = "tags",
+        to = "m2m_lock_tag",
+        through = "m2m_lock_post_tags",
+        src = "post_id",
+        dst = "tag_id"
+    )
+)]
+pub struct LockPost {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub n: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "m2m_lock_tag", app = "m2mnoop")]
+pub struct LockTag {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub n: i64,
 }
 
 /// The owner of the generic junctions below.
@@ -86,7 +130,10 @@ const GENERIC_UUID: &ModelSchema = generic_junction!("m2m_noop_gen_uuid", FieldT
 
 async fn setup(pool: &Pool) {
     let tables = [
+        LockPost::SCHEMA,
+        LockTag::SCHEMA,
         JUNCTION,
+        ONE_TAG,
         PostTagI32::SCHEMA,
         Doc::SCHEMA,
         GENERIC_INT,
@@ -94,12 +141,16 @@ async fn setup(pool: &Pool) {
         GENERIC_STR,
         GENERIC_UUID,
     ];
+    rustango::testkit::matrix::drop_table(pool, "m2m_lock_post_tags").await;
     for t in tables {
         rustango::testkit::matrix::drop_table(pool, t.table).await;
     }
     rustango::testkit::create_tables(pool, &tables)
         .await
         .expect("tables");
+    rustango::testkit::create_junctions(pool, &[LockPost::SCHEMA, LockTag::SCHEMA])
+        .await
+        .expect("junction");
     // Another suite may have left this table with a different shape.
     let ct = rustango::contenttypes::ContentType::SCHEMA.table;
     rustango::testkit::matrix::drop_table(pool, ct).await;
@@ -137,6 +188,93 @@ async fn set_on_an_i32_through_model(pool: &Pool) {
     p.set(&[5_i64, 6], pool).await.expect("set");
     p.set(&[6_i64, 5], pool).await.expect("same set");
     assert_eq!(actions(&fired), [M2mAction::Set]);
+}
+
+/// `add` skips a present link even when the through model has no unique key.
+async fn add_twice_on_a_keyless_through_model(pool: &Pool) {
+    let (_signals, fired) = record().await;
+    let p = M2MManager {
+        src_pk: SqlValue::I64(1),
+        through: PostTagI32::SCHEMA.table,
+        src_col: "post_id",
+        dst_col: "tag_id",
+    };
+    p.add(5_i64, pool).await.expect("add");
+    p.add(5_i64, pool).await.expect("duplicate add");
+    assert_eq!(actions(&fired), [M2mAction::Add]);
+    assert_eq!(p.all_as::<i32>(pool).await.expect("all"), [5]);
+}
+
+/// A unique key the link check does not cover skips the insert: no `Add`.
+async fn add_skipped_by_another_unique_key(pool: &Pool) {
+    let (_signals, fired) = record().await;
+    let p = M2MManager {
+        src_pk: SqlValue::I64(1),
+        through: ONE_TAG.table,
+        src_col: "post_id",
+        dst_col: "tag_id",
+    };
+    p.add(5_i64, pool).await.expect("add");
+    p.add(6_i64, pool)
+        .await
+        .expect("add the unique post_id skips");
+    assert_eq!(actions(&fired), [M2mAction::Add]);
+    assert_eq!(p.all_as::<i64>(pool).await.expect("all"), [5]);
+}
+
+/// `add` on a keyed junction is one statement and takes no source lock, so
+/// it does not wait on a caller's transaction that updated the source.
+async fn add_inside_atomic_that_updated_the_source(pool: &Pool) {
+    let _signals = signals_lock().await;
+    LockPost {
+        id: Auto::Set(1),
+        n: 0,
+    }
+    .insert_pool(pool)
+    .await
+    .expect("post");
+    for id in [7, 8] {
+        LockTag {
+            id: Auto::Set(id),
+            n: 0,
+        }
+        .insert_pool(pool)
+        .await
+        .expect("tag");
+    }
+    let tags = || M2MManager {
+        src_pk: SqlValue::I64(1),
+        through: "m2m_lock_post_tags",
+        src_col: "post_id",
+        dst_col: "tag_id",
+    };
+    let statements = rustango::test_assertions::QueryCounter::scope(async {
+        tags().add(7_i64, pool).await.expect("add");
+        rustango::test_assertions::QueryCounter::current()
+    })
+    .await;
+    assert_eq!(statements, 1, "add on a keyed junction is one insert");
+    // MySQL's FK check and SQLite's write lock wait on any second
+    // connection, so only PG can show the self-lock.
+    if pool.dialect().name() != "postgres" {
+        return;
+    }
+    let (p, late) = (pool.clone(), tags());
+    rustango::atomic!(pool, |tx| {
+        LockPost::objects()
+            .filter("id", 1_i64)
+            .update()
+            .set("n", 1_i64)
+            .execute_on(&mut *tx.lock().await?)
+            .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), late.add(8_i64, &p))
+            .await
+            .expect("add waited on the caller's row")?;
+        Ok(())
+    })
+    .await
+    .expect("atomic");
+    assert_eq!(tags().all(pool).await.expect("all"), vec![7, 8]);
 }
 
 async fn generic_noop_set_and_clear_fire_nothing(pool: &Pool) {
@@ -254,6 +392,9 @@ tri_dialect_test! {
         noop_changes_fire_nothing,
         noop_set_and_clear_fire_nothing,
         set_on_an_i32_through_model,
+        add_twice_on_a_keyless_through_model,
+        add_skipped_by_another_unique_key,
+        add_inside_atomic_that_updated_the_source,
         generic_noop_set_and_clear_fire_nothing,
         generic_set_with_string_keys,
         generic_set_on_an_int_column,

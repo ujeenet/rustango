@@ -563,7 +563,7 @@ anders angegeben):
 | `title(s)` / `subtitle(s)` | Kopf- / Unterüberschrift der Seitenleiste. |
 | `admin_prefix(p)` | URL-Präfix — **muss dem Einhängepfad entsprechen**. Standard `/__admin`. |
 | `audit_url(u)` | Pfad der Aktivitäts-/Prüfpfad-Ansicht. Standard `/__audit`. |
-| `static_url(u)` | Präfix für eingebettete Assets (Favicon, Logo). Standard `/__static__`. |
+| `static_url(u)` | Präfix für eingebettete Assets (Favicon, Logo). Standard `/__static__`. Der einfache Admin liefert ein Pfad-Präfix unter seinem Mount aus. |
 | `change_password_url(u)` | Pfad der Selbstbedienungs-Passwortänderungsseite (fügt den Seitenleisten-Link hinzu). |
 | `show_only([tables])` | Whitelist, welche Tabellen erscheinen; andere liefern 404 und sind verborgen. |
 | `read_only([tables])` | Diese Tabellen rendern, aber Erstellen/Bearbeiten/Löschen verbieten. |
@@ -609,6 +609,7 @@ Alle Pfade sind relativ zu `admin_prefix`:
 | `/__audit` (oder `audit_url`) | GET | Aktivitäts-Feed + Aufräumen. |
 | `/login`, `/logout` | GET/POST | Session-Auth (wenn aktiviert). |
 | `/account/password`, `/account/totp` | GET/POST | Selbstbedienungs-Passwortänderung / TOTP-Registrierung. |
+| `/account/totp/disable` | POST | TOTP mit einem aktuellen Code abschalten. |
 
 Mit `register_admin_view!` registrierte benutzerdefinierte Routen binden unter
 `/<table>/<suffix>` ein.

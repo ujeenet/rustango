@@ -566,7 +566,7 @@ indique lo contrario):
 | `title(s)` / `subtitle(s)` | Cabecera / subcabecera de la barra lateral. |
 | `admin_prefix(p)` | Prefijo de URL — **debe coincidir con la ruta de anidamiento**. Por defecto `/__admin`. |
 | `audit_url(u)` | Ruta de la vista de actividad/auditoría. Por defecto `/__audit`. |
-| `static_url(u)` | Prefijo para los assets incrustados (favicon, logo). Por defecto `/__static__`. |
+| `static_url(u)` | Prefijo para los assets incrustados (favicon, logo). Por defecto `/__static__`. El admin simple sirve un prefijo de ruta bajo su montaje. |
 | `change_password_url(u)` | Ruta de la página de autoservicio de cambio de contraseña (añade el enlace en la barra lateral). |
 | `show_only([tables])` | Lista blanca de qué tablas aparecen; las demás devuelven 404 y quedan ocultas. |
 | `read_only([tables])` | Renderiza esas tablas pero prohíbe crear/editar/eliminar. |
@@ -612,6 +612,7 @@ Todas las rutas son relativas a `admin_prefix`:
 | `/__audit` (o `audit_url`) | GET | Feed de actividad + limpieza. |
 | `/login`, `/logout` | GET/POST | Auth de sesión (cuando está activada). |
 | `/account/password`, `/account/totp` | GET/POST | Autoservicio de cambio de contraseña / inscripción TOTP. |
+| `/account/totp/disable` | POST | Desactivar el TOTP con un código actual. |
 
 Las rutas personalizadas registradas con `register_admin_view!` se montan en
 `/<table>/<suffix>`.

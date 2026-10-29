@@ -46,7 +46,6 @@ use crate::sql::Pool;
 
 use super::error::MigrateError;
 use super::file::{self, DataOp, Migration, Operation};
-use super::make::{make_migrations, make_migrations_for_app};
 use super::runner;
 use super::snapshot::SchemaSnapshot;
 
@@ -156,9 +155,18 @@ pub async fn run_with_writer<W: Write + Send>(
         // to the unknown-subcommand error.
         #[cfg(feature = "admin")]
         "create-admin" => crate::admin::create_admin_cmd(pool, &args[1..], writer).await,
+        #[cfg(feature = "admin")]
+        "reset-password" => crate::admin::reset_password_cmd(pool, &args[1..], writer).await,
+        #[cfg(feature = "admin")]
+        "change-password" => crate::admin::change_password_cmd(pool, &args[1..], writer).await,
+        #[cfg(feature = "admin")]
+        "set-admin-active" => crate::admin::set_admin_active_cmd(pool, &args[1..], writer).await,
+        #[cfg(all(feature = "admin", feature = "totp"))]
+        "reset-admin-totp" => crate::admin::reset_admin_totp_cmd(pool, &args[1..], writer).await,
         "flush" => flush_cmd(pool, &args[1..], FlushScope::All, writer).await,
         // #822 — bulk pruning of stale rows from `Prunable` models.
         "prune" => prune_cmd(pool, &args[1..], writer).await,
+        "audit-cleanup" => audit_cleanup_cmd(pool, &args[1..], writer).await,
         // Purges expired entries from a DatabaseCache-backed
         // table. Works for any
         // table written by `cache::DatabaseCache`, including the
@@ -311,15 +319,53 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     )?;
     writeln!(w, "      action and exits (no DB write).\n")?;
     writeln!(w, "  prune [--model <name>] [--except <name>] [--pretend]")?;
-    writeln!(
-        w,
-        "      Bulk-delete stale rows from every Prunable model (issue #822)."
-    )?;
+    writeln!(w, "      Bulk-delete stale rows from every Prunable model.")?;
     writeln!(
         w,
         "      --pretend counts matches without deleting; --model / --except"
     )?;
     writeln!(w, "      narrow the scope (repeatable).\n")?;
+    #[cfg(feature = "admin")]
+    {
+        writeln!(
+            w,
+            "  create-admin <username> [--password-stdin | --generate] [--superuser]"
+        )?;
+        writeln!(
+            w,
+            "      Create an admin user; prompts for the password by default.\n"
+        )?;
+        writeln!(
+            w,
+            "  reset-password <username> | change-password <username>"
+        )?;
+        writeln!(
+            w,
+            "      Set an admin user's password; change-password checks the old one.\n"
+        )?;
+        writeln!(w, "  set-admin-active <username> --on|--off")?;
+        writeln!(
+            w,
+            "      Turn an admin user off (ends their sessions) or back on.\n"
+        )?;
+    }
+    #[cfg(all(feature = "admin", feature = "totp"))]
+    {
+        writeln!(w, "  reset-admin-totp <username>")?;
+        writeln!(
+            w,
+            "      Remove an admin user's two-factor device (lost phone).\n"
+        )?;
+    }
+    writeln!(w, "  audit-cleanup --days <N> | --keep-last <N> [--yes]")?;
+    writeln!(
+        w,
+        "      Trim the audit log: entries older than N days, or all but the"
+    )?;
+    writeln!(
+        w,
+        "      N newest per row. N <= 0 deletes everything and needs --yes.\n"
+    )?;
     writeln!(w, "  clear-cache [--table <name>]")?;
     writeln!(w, "      (alias: clearsessions)")?;
     writeln!(
@@ -519,6 +565,7 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
 fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let mut empty = false;
     let mut merge = false;
+    let mut drops = super::make::DropAndAdd::Refuse;
     let mut name: Option<String> = None;
     let mut app: Option<String> = None;
     let mut scope_override: Option<crate::core::ModelScope> = None;
@@ -527,6 +574,7 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
         match arg.as_str() {
             "--empty" => empty = true,
             "--merge" => merge = true,
+            "--drop-and-add" => drops = super::make::DropAndAdd::Allow,
             "--app" => {
                 app = Some(iter.next().cloned().ok_or_else(|| {
                     MigrateError::Validation("--app requires an app name".into())
@@ -552,7 +600,10 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
                      makemigrations --empty <name>          empty scaffold for data ops (--scope picks the chain)\n\
                      makemigrations --merge                 reconcile a divergent chain (two leaves\n\
                                                             on the same parent) by writing an empty\n\
-                                                            NNNN_merge.json — issue #346\n\
+                                                            NNNN_merge.json\n\
+                     makemigrations --drop-and-add          write a dropped column beside a new one of\n\
+                                                            the same type as drop + add (deletes its data);\n\
+                                                            refused by default as a likely rename\n\
                      \n\
                      In tenancy projects (any registered model with scope = \"registry\"),\n\
                      a flagless makemigrations splits the diff into TWO files — one for\n\
@@ -611,7 +662,7 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
     // wiring (which passes the flat `migrations/` dir) keeps working.
     if let Some(app_name) = app {
         let project_root = dir.parent().unwrap_or(dir);
-        match make_migrations_for_app(project_root, &app_name, name.as_deref())? {
+        match super::make::make_migrations_for_app_with(project_root, &app_name, name.as_deref(), drops)? {
             Some(mig) => {
                 let app_dir = project_root.join(&app_name).join("migrations");
                 writeln!(w, "wrote {}", file_path(&app_dir, &mig.name).display())?;
@@ -629,7 +680,7 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
 
     // Explicit scope flag — emit exactly one file in that scope.
     if let Some(scope) = scope_override {
-        return write_scoped_migration(dir, scope, name.as_deref(), w);
+        return write_scoped_migration(dir, scope, name.as_deref(), drops, w);
     }
 
     // Auto-detect: if any registered model is `scope = "registry"`,
@@ -638,37 +689,26 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
     // get theirs. Each scope is a no-op when nothing in that scope
     // changed; the user sees one or two "wrote ..." lines.
     if has_registry_models() {
-        let mut wrote_any = false;
         // Framework ("system app") migrations first — the framework's own
         // `rustango_*` tables are generated into `<project_root>/system/
         // migrations/` (registry + tenant scope), replacing the
         // hand-written bootstrap/ensure DDL. Silent when the framework
         // schema is unchanged (the common case for app developers).
+        // Every file is planned first: a refused scope writes none.
+        let run = super::make::make_migrations_tenancy(dir, name.as_deref(), drops)?;
         let project_root = dir.parent().unwrap_or(dir);
-        for scope in [
-            crate::core::ModelScope::Registry,
-            crate::core::ModelScope::Tenant,
-        ] {
-            if let Some(m) =
-                crate::migrate::make::make_migrations_system(project_root, scope, name.as_deref())?
-            {
-                writeln!(
-                    w,
-                    "wrote {} (system/{} scope)",
-                    file_path(&project_root.join("system").join("migrations"), &m.name).display(),
-                    scope.as_str(),
-                )?;
-                for op in &m.forward {
-                    writeln!(w, "    + {}", describe_op(op))?;
-                }
-                wrote_any = true;
+        for (scope, m) in &run.system {
+            writeln!(
+                w,
+                "wrote {} (system/{} scope)",
+                file_path(&project_root.join("system").join("migrations"), &m.name).display(),
+                scope.as_str(),
+            )?;
+            for op in &m.forward {
+                writeln!(w, "    + {}", describe_op(op))?;
             }
         }
-        for scope in [
-            crate::core::ModelScope::Registry,
-            crate::core::ModelScope::Tenant,
-        ] {
-            let mig = crate::migrate::make::make_migrations_for_scope(dir, scope, name.as_deref())?;
+        for (scope, mig) in &run.app {
             match mig {
                 Some(m) => {
                     writeln!(
@@ -680,20 +720,16 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
                     for op in &m.forward {
                         writeln!(w, "    + {}", describe_op(op))?;
                     }
-                    wrote_any = true;
                 }
                 None => writeln!(w, "no changes for {} scope", scope.as_str(),)?,
             }
-        }
-        if !wrote_any {
-            // Fall through silently — both scope-clean messages already printed.
         }
         return Ok(());
     }
 
     // Single-tenant (no registry-scoped models): one migration covering
     // every registered model — the v0.24.x behavior.
-    match make_migrations(dir, name.as_deref())? {
+    match super::make::make_migrations_with(dir, name.as_deref(), drops)? {
         Some(mig) => {
             writeln!(w, "wrote {}", file_path(dir, &mig.name).display())?;
             for op in &mig.forward {
@@ -717,9 +753,10 @@ fn write_scoped_migration<W: Write>(
     dir: &Path,
     scope: crate::core::ModelScope,
     name: Option<&str>,
+    drops: super::make::DropAndAdd,
     w: &mut W,
 ) -> Result<(), MigrateError> {
-    match crate::migrate::make::make_migrations_for_scope(dir, scope, name)? {
+    match super::make::make_migrations_for_scope_with(dir, scope, name, drops)? {
         Some(mig) => {
             writeln!(
                 w,
@@ -811,28 +848,83 @@ async fn migrate<W: Write>(
     if dry_run {
         if positional.is_some() {
             return Err(MigrateError::Validation(
-                "`migrate <target> --dry-run` is not supported in v0.4 — use plain `--dry-run` to preview pending forward migrations".into(),
+                "`migrate <target> --dry-run` is not supported — use plain `--dry-run` to preview pending forward migrations".into(),
             ));
         }
         return migrate_dry_run_cmd(pool, dir, &SystemView::tenant(dir), w).await;
     }
 
     if let Some(target) = positional {
+        if target != "zero" {
+            // A typo must fail before the system chain touches the database.
+            runner::target_on_disk(&super::file::list_dir(dir)?, dir, target)?;
+        }
+        // A forward target needs the framework tables its migrations may FK.
+        if target != "zero" && !target_is_applied(pool, target).await? {
+            // Files after the target are rolled back first: only the rest
+            // count as applied, in the output and in `post_migrate`.
+            let unapplied = std::sync::Mutex::new(Vec::new());
+            let slot = &unapplied;
+            let mut out = Vec::new();
+            let run = migrate_with_framework(
+                pool,
+                dir,
+                &mut out,
+                runner::Signals::Fire { tenant: None },
+                |held| async move {
+                    let moved =
+                        runner::migrate_to_locked(held, pool, dir, target, runner::LEDGER_TABLE)
+                            .await?;
+                    *slot
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = moved.unapplied;
+                    Ok(moved.applied)
+                },
+            )
+            .await;
+            let unapplied = unapplied
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for m in unapplied {
+                writeln!(w, "  unapplied {}", m.name)?;
+            }
+            w.write_all(&out)?;
+            return run;
+        }
         let touched = runner::migrate_to_pool(pool, dir, target).await?;
         if touched.is_empty() {
             writeln!(w, "already at {target}")?;
         } else {
+            // One list holds both directions: the ledger says which each went.
+            let applied = runner::applied_set_pool(pool).await?;
             for m in &touched {
-                writeln!(w, "  touched {}", m.name)?;
+                let verb = if applied.contains(&m.name) {
+                    "applied"
+                } else {
+                    "unapplied"
+                };
+                writeln!(w, "  {verb} {}", m.name)?;
             }
         }
         return Ok(());
     }
 
-    migrate_with_framework(pool, dir, w, runner::Signals::Skip, |held| {
-        runner::migrate_pool_locked(held, pool, dir, None)
-    })
+    migrate_with_framework(
+        pool,
+        dir,
+        w,
+        runner::Signals::Fire { tenant: None },
+        |held| runner::migrate_pool_locked(held, pool, dir, None),
+    )
     .await
+}
+
+async fn target_is_applied(pool: &Pool, target: &str) -> Result<bool, MigrateError> {
+    let applied = runner::with_migrate_lock_held(pool, |held| {
+        runner::ledger_names(held, pool, runner::LEDGER_TABLE)
+    })
+    .await?;
+    Ok(applied.contains(target))
 }
 
 /// The framework chain `migrate` runs beside the project's, read from disk
@@ -1040,7 +1132,7 @@ where
             writeln!(
                 w,
                 "  normalised {} SQLite datetime value(s) in {} — these were written by \
-                 the pre-0.57.11 default and did not compare against a bound timestamp (#1464)",
+                 the pre-0.57.11 default and did not compare against a bound timestamp",
                 fixed.rows,
                 fixed.columns.join(", "),
             )?;
@@ -1270,7 +1362,8 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
     // registry vs tenant in tenancy projects, single file otherwise.
     // Pass through to the existing entry point so any future flags
     // gain consistent behavior automatically.
-    makemigrations(dir, &[], w)?;
+    // The pending files already hold any drop + add; refusing here would lose them.
+    makemigrations(dir, &["--drop-and-add".to_owned()], w)?;
 
     stamp_replaces(dir, &before, &removed, w)
 }
@@ -1645,6 +1738,22 @@ pub(crate) async fn forget_pending_cmd_with<W: Write>(
             "forget-pending: migration `{}` is already applied on tenant `{slug}`. \
              Unapply it there first.",
             migration.name,
+        )));
+    }
+
+    // Only a leaf: a later file naming it in `prev`/`merges` breaks the chain.
+    let dependants: Vec<&str> = all
+        .iter()
+        .filter(|m| {
+            m.prev.as_deref() == Some(migration.name.as_str()) || m.merges.contains(&migration.name)
+        })
+        .map(|m| m.name.as_str())
+        .collect();
+    if !dependants.is_empty() {
+        return Err(MigrateError::Validation(format!(
+            "forget-pending: `{}` is built on by {}; forget those first",
+            migration.name,
+            dependants.join(", "),
         )));
     }
 
@@ -2138,6 +2247,49 @@ async fn sso_link_audit(pool: &Pool, audit: &mut DeployAuditFindings) {
     }
 }
 
+/// Model changes no file holds yet, and files `pool`'s ledger has not applied.
+async fn pending_migration_audit(
+    pool: &Pool,
+    dir: &Path,
+    prior: &[super::Migration],
+    scope: Option<super::MigrationScope>,
+    warnings: &mut Vec<String>,
+    errors: &mut Vec<String>,
+) {
+    match super::make::planned_migrations(dir, has_registry_models()) {
+        Ok(planned) if !planned.is_empty() => {
+            let ops: Vec<String> = planned
+                .iter()
+                .flat_map(|m| m.forward.iter().map(describe_op))
+                .collect();
+            warnings.push(format!(
+                "models have changes no migration holds — run `manage makemigrations`:\n            {}",
+                ops.join("\n            ")
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => errors.push(format!("makemigrations would fail: {e}")),
+    }
+    match runner::applied_or_empty(pool, runner::LEDGER_TABLE).await {
+        Ok(applied) => {
+            let pending: Vec<&str> = runner::migration_states(prior, &applied)
+                .filter(|(m, s)| {
+                    *s == runner::MigrationState::Pending && scope.is_none_or(|sc| m.scope == sc)
+                })
+                .map(|(m, _)| m.name.as_str())
+                .collect();
+            if !pending.is_empty() {
+                warnings.push(format!(
+                    "{} migration(s) not applied — run `manage migrate`: {}",
+                    pending.len(),
+                    pending.join(", ")
+                ));
+            }
+        }
+        Err(e) => errors.push(format!("cannot read the migration ledger: {e}")),
+    }
+}
+
 /// `manage check [--deploy]` — run system audits.
 async fn check_cmd<W: Write>(
     pool: &Pool,
@@ -2145,17 +2297,19 @@ async fn check_cmd<W: Write>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
-    check_cmd_with(pool, dir, args, w, async { DeployAuditFindings::default() }).await
+    check_cmd_with(pool, dir, None, args, w, None::<std::future::Ready<_>>).await
 }
 
-/// [`check_cmd`] plus `extra` deploy findings gathered elsewhere (the tenancy
-/// dispatcher's per-tenant ones), awaited only under `--deploy`.
+/// [`check_cmd`] for the tenancy dispatcher: `tenancy` carries its per-tenant
+/// deploy findings, awaited only under `--deploy`, and turns on the apex row.
+/// `scope` limits the unapplied count to the files `pool`'s ledger records.
 pub(crate) async fn check_cmd_with<W: Write>(
     pool: &Pool,
     dir: &Path,
+    scope: Option<super::MigrationScope>,
     args: &[String],
     w: &mut W,
-    extra: impl std::future::Future<Output = DeployAuditFindings>,
+    tenancy: Option<impl std::future::Future<Output = DeployAuditFindings>>,
 ) -> Result<(), MigrateError> {
     // `--deplyo` once ran the plain check and reported all clear.
     if let Some(other) = args.iter().find(|a| *a != "--deploy") {
@@ -2203,13 +2357,14 @@ pub(crate) async fn check_cmd_with<W: Write>(
             );
         } else {
             info.push(format!("{} migration(s) on disk", prior.len()));
+            pending_migration_audit(pool, dir, &prior, scope, &mut warnings, &mut errors).await;
         }
     }
 
     // Deploy checks
     if deploy {
         let mut audit = DeployAuditFindings::default();
-        run_deploy_audit(&deploy_audit_env(), &mut audit);
+        run_deploy_audit(&deploy_audit_env(tenancy.is_some()), &mut audit);
         // Settings audit (#87 slice 4) — flags dev-defaults left in
         // prod (e.g. `headers_preset = "dev"` in `prod_settings.toml`).
         // Gated by the `config` feature; no-op without it.
@@ -2221,10 +2376,12 @@ pub(crate) async fn check_cmd_with<W: Write>(
         time_zone_audit(pool, &mut audit).await;
         #[cfg(feature = "admin-sso")]
         sso_link_audit(pool, &mut audit).await;
-        let extra = extra.await;
-        audit.info.extend(extra.info);
-        audit.warnings.extend(extra.warnings);
-        audit.errors.extend(extra.errors);
+        if let Some(extra) = tenancy {
+            let extra = extra.await;
+            audit.info.extend(extra.info);
+            audit.warnings.extend(extra.warnings);
+            audit.errors.extend(extra.errors);
+        }
         // `required_db_vendor` + `required_db_features`
         // audit — every model declaring `required_db_vendor = "postgres"`
         // or `required_db_features = "json_path, listen_notify"` gets
@@ -2508,6 +2665,15 @@ fn pascal_to_snake(s: &str) -> String {
     out
 }
 
+/// Write a generated source file. A project that renamed the dependency
+/// (`rgo = { package = "rustango", .. }`) gets its name in the code.
+fn write_source(path: &std::path::Path, body: &str) -> std::io::Result<()> {
+    match super::scaffold::renamed_dep(std::path::Path::new(".")) {
+        Some(to) => std::fs::write(path, super::scaffold::rename_dep(body, &to)),
+        None => std::fs::write(path, body),
+    }
+}
+
 fn write_generated<W: Write>(
     w: &mut W,
     file_name: &str,
@@ -2523,7 +2689,7 @@ fn write_generated<W: Write>(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, contents)?;
+    write_source(&path, &contents)?;
     writeln!(w, "wrote {}", path.display())?;
     // Lead with whichever entry the project actually has. A scaffolded
     // project keeps its modules in the library so that binaries under
@@ -3046,7 +3212,7 @@ fn make_api_routes_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
     } else {
         api_routes_template_pool(app, &crate_root)
     };
-    std::fs::write(&path, body)?;
+    write_source(&path, &body)?;
     writeln!(w, "wrote {}", path.display())?;
     writeln!(
         w,
@@ -3418,7 +3584,7 @@ fn write_generated_bin<W: Write>(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, contents)?;
+    write_source(&path, &contents)?;
     writeln!(w, "wrote {}", path.display())?;
     // No `[[bin]]` stanza needed: cargo picks up `src/bin/*.rs` on its own.
     writeln!(w, "  run it with `cargo run --bin {bin_name}`")?;
@@ -3538,7 +3704,7 @@ async fn {snake}() {{
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, body)?;
+    write_source(&path, &body)?;
     writeln!(w, "wrote {}", path.display())?;
     Ok(())
 }
@@ -4076,7 +4242,7 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
                     });
                 }
             }
-            let rows = crate::sql::select_rows_as_json(pool, &query, &fields)
+            let rows = crate::sql::select_rows_as_json_with(pool, &query, &fields, fixture_json)
                 .await
                 .map_err(|e| {
                     MigrateError::Validation(format!(
@@ -4133,6 +4299,47 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
         }
     }
     out.finish()
+}
+
+/// Tags a JSON column value in a fixture, so a JSON `null` stays apart
+/// from SQL NULL (plain `null`).
+const JSON_TAG: &str = "$json";
+
+/// A JSON column value as dumpdata writes it: `null`, and any value that
+/// looks like a tag, go inside one.
+fn fixture_json(v: serde_json::Value) -> serde_json::Value {
+    if v.is_null() || json_tagged(&v).is_some() {
+        serde_json::json!({ JSON_TAG: v })
+    } else {
+        v
+    }
+}
+
+/// The value inside a [`JSON_TAG`] wrapper.
+fn json_tagged(v: &serde_json::Value) -> Option<&serde_json::Value> {
+    v.as_object()
+        .filter(|m| m.len() == 1)
+        .and_then(|m| m.get(JSON_TAG))
+}
+
+/// [`json_to_sql_value`] for a dumpdata fixture: a JSON column reads the
+/// [`JSON_TAG`] wrapper, and a bare `null` on a NOT NULL one is JSON `null`.
+/// Seed fixtures keep the plain reading.
+fn loaddata_value(
+    v: &serde_json::Value,
+    field: &crate::core::FieldSchema,
+) -> Result<crate::core::SqlValue, String> {
+    use crate::core::{FieldType, SqlValue};
+    if matches!(field.ty, FieldType::Json) {
+        if let Some(inner) = json_tagged(v) {
+            return Ok(SqlValue::Json(inner.clone()));
+        }
+        // Older dumps wrote JSON `null` untagged, as SQL NULL.
+        if v.is_null() && !field.nullable {
+            return Ok(SqlValue::Json(serde_json::Value::Null));
+        }
+    }
+    json_to_sql_value(v, field)
 }
 
 /// Rows per dumpdata page.
@@ -4471,8 +4678,8 @@ fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
 /// - boolean → `SqlValue::Bool`
 /// - string → parsed per `FieldType` (Decimal / Date / DateTime /
 ///   Time / Uuid / Binary [hex] / String)
-/// - null → `SqlValue::Null`
-/// - object / array → `SqlValue::Json`
+/// - null → `SqlValue::Null`; on a NOT NULL JSON field, JSON `null`
+/// - object / array → `SqlValue::Json`; `{"$json": v}` → `v`
 /// `loaddata` into every model, or only those of `scope`.
 pub(crate) async fn loaddata_cmd<W: Write>(
     pool: &Pool,
@@ -4603,7 +4810,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
             let Some(raw) = fields_obj.get(f.name) else {
                 continue;
             };
-            match json_to_sql_value(raw, f) {
+            match loaddata_value(raw, f) {
                 Ok(v) => {
                     columns.push(f.column);
                     values.push(v);
@@ -5805,6 +6012,45 @@ fn parse_prune_args(args: &[String]) -> Result<PruneArgs, MigrateError> {
     Ok(out)
 }
 
+/// `manage audit-cleanup --days <N> | --keep-last <N> [--yes]`: audit-log
+/// retention on the one database, the rule the tenancy verb uses.
+async fn audit_cleanup_cmd<W: Write>(
+    pool: &Pool,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    const USAGE: &str = "audit-cleanup --days <N> | --keep-last <N> [--yes]";
+    let (mut days, mut keep_last, mut yes) = (None, None, false);
+    let mut iter = args.iter();
+    let number = |flag: &str, v: Option<&String>| -> Result<i64, MigrateError> {
+        let raw = v.ok_or_else(|| MigrateError::Validation(format!("{flag} requires a value")))?;
+        raw.parse::<i64>().map_err(|_| {
+            MigrateError::Validation(format!("{flag} expects an integer, got `{raw}`"))
+        })
+    };
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--days" => days = Some(number("--days", iter.next())?),
+            "--keep-last" => keep_last = Some(number("--keep-last", iter.next())?),
+            "--yes" => yes = true,
+            "--help" | "-h" => {
+                writeln!(w, "{USAGE}")?;
+                return Ok(());
+            }
+            other => {
+                return Err(MigrateError::Validation(format!(
+                    "audit-cleanup: unexpected argument `{other}` — usage: {USAGE}"
+                )))
+            }
+        }
+    }
+    let rule = crate::audit::Retention::from_flags(days, keep_last, yes)
+        .map_err(MigrateError::Validation)?;
+    let deleted = rule.prune(pool).await?;
+    writeln!(w, "audit-cleanup done: deleted={deleted}")?;
+    Ok(())
+}
+
 /// `manage prune [--model <name>] [--except <name>] [--pretend]` —
 /// bulk-delete rows from every model implementing
 /// [`crate::prunable::Prunable`] + registered via
@@ -6142,22 +6388,39 @@ pub(crate) struct DeployAuditEnv {
     pub database_url: Option<String>,
     /// `DATABASE_URL` and `DB_*` both set: the resolver's warning.
     pub database_style_conflict: Option<String>,
-    pub apex_domain: Option<String>,
+    pub apex_domain: ApexDomain,
     pub bind: Option<String>,
     /// An admin was built without session auth (#1627).
     pub ungated_admin: bool,
 }
 
-fn deploy_audit_env() -> DeployAuditEnv {
+/// The apex the deploy audit checks; only a tenancy Cli has one.
+#[derive(Default, Clone)]
+pub(crate) enum ApexDomain {
+    #[default]
+    SingleTenant,
+    /// `RUSTANGO_APEX_DOMAIN` (or settings) as configured, if at all.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    Tenancy(Option<String>),
+}
+
+fn deploy_audit_env(tenancy: bool) -> DeployAuditEnv {
     DeployAuditEnv {
         rustango_env: std::env::var("RUSTANGO_ENV").ok(),
         session_secret: std::env::var("RUSTANGO_SESSION_SECRET").ok(),
         database_url: crate::env::database_url_from_env().ok(),
         database_style_conflict: crate::env::database_style_conflict(),
         #[cfg(feature = "tenancy")]
-        apex_domain: crate::tenancy::server::configured_apex_domain(),
+        apex_domain: if tenancy {
+            ApexDomain::Tenancy(crate::tenancy::server::configured_apex_domain())
+        } else {
+            ApexDomain::SingleTenant
+        },
         #[cfg(not(feature = "tenancy"))]
-        apex_domain: std::env::var("RUSTANGO_APEX_DOMAIN").ok(),
+        apex_domain: {
+            let _ = tenancy;
+            ApexDomain::SingleTenant
+        },
         bind: std::env::var("RUSTANGO_BIND").ok(),
         #[cfg(feature = "admin")]
         ungated_admin: crate::admin::ungated_admin_built(),
@@ -6179,6 +6442,10 @@ pub struct DeployAuditFindings {
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
 }
+
+const APEX_UNSET: &str = "RUSTANGO_APEX_DOMAIN is unset / `localhost` — tenancy projects need \
+    the public-facing apex (e.g. `app.example.com`) so subdomain resolution + cookie scoping \
+    work in production.";
 
 /// Run the `manage check --deploy` audit checks against `env`.
 /// Pure function so callers can test it with arbitrary env
@@ -6286,20 +6553,12 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
         out.warnings.push(conflict.clone());
     }
 
-    // RUSTANGO_APEX_DOMAIN — required for tenancy projects, but
-    // single-tenant projects don't need it. Surface as info, not
-    // warning, when unset (`localhost` is the framework default
-    // and works for non-tenancy deployments).
-    match env.apex_domain.as_deref() {
-        None | Some("localhost") => {
-            out.warnings.push(
-                "RUSTANGO_APEX_DOMAIN is unset / `localhost` — tenancy projects need this set to \
-                 the public-facing apex (e.g. `app.example.com`) so subdomain resolution + \
-                 cookie scoping work in production. Single-tenant projects can ignore."
-                    .into(),
-            );
-        }
-        Some(_) => out
+    // A single-database deploy needs no apex.
+    match &env.apex_domain {
+        ApexDomain::SingleTenant => {}
+        ApexDomain::Tenancy(None) => out.warnings.push(APEX_UNSET.into()),
+        ApexDomain::Tenancy(Some(d)) if d == "localhost" => out.warnings.push(APEX_UNSET.into()),
+        ApexDomain::Tenancy(Some(_)) => out
             .info
             .push("RUSTANGO_APEX_DOMAIN set to a non-localhost value".into()),
     }
@@ -7027,6 +7286,35 @@ mod gen_tests {
         assert!(err.to_string().contains("`admin`"), "{err}");
     }
 
+    /// In a project that renamed the dependency to `rgo`, `make:*` writes `rgo::`.
+    #[test]
+    fn make_verbs_follow_a_renamed_dependency() {
+        let _guard = cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"short\"\n\n[dependencies]\n\
+             rgo = { package = \"rustango\", version = \"0.61\" }\n",
+        )
+        .unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let run = make_cmd(
+            "make:job",
+            &["SendMail".to_owned()],
+            &mut Vec::new(),
+            |_| true,
+        );
+        let body = std::fs::read_to_string("src/send_mail.rs");
+        let _ = std::env::set_current_dir(&prev);
+        run.unwrap();
+        let body = body.unwrap();
+        assert!(
+            body.contains("rgo::") && !body.contains("rustango::"),
+            "{body}"
+        );
+    }
+
     /// The pool viewset needs `admin`; the tenant one only `tenancy`.
     #[test]
     fn make_viewset_needs_the_feature_of_its_template() {
@@ -7228,6 +7516,35 @@ mod gen_tests {
                 assert_eq!(String::from_utf8(buf).unwrap(), format!("{whole}\n"));
             }
         }
+    }
+
+    /// Only `loaddata` reads the dumpdata tag; a seed fixture's literal
+    /// `{"$json": 1}` and a `null` stay as written.
+    #[test]
+    fn only_loaddata_reads_the_json_tag() {
+        use crate::core::{FieldType, SqlValue};
+        use serde_json::{json, Value};
+        let mut f = field("j", FieldType::Json);
+        f.nullable = false;
+        let tagged = json!({"$json": 1});
+        assert!(
+            matches!(json_to_sql_value(&tagged, &f), Ok(SqlValue::Json(ref v)) if *v == tagged),
+            "a seed fixture keeps the literal object"
+        );
+        assert!(matches!(
+            json_to_sql_value(&Value::Null, &f),
+            Ok(SqlValue::Null)
+        ));
+        assert!(matches!(loaddata_value(&tagged, &f), Ok(SqlValue::Json(ref v)) if *v == json!(1)));
+        assert!(matches!(
+            loaddata_value(&Value::Null, &f),
+            Ok(SqlValue::Json(Value::Null))
+        ));
+        f.nullable = true;
+        assert!(matches!(
+            loaddata_value(&Value::Null, &f),
+            Ok(SqlValue::Null)
+        ));
     }
 
     #[test]
@@ -8576,7 +8893,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             session_secret: Some("a".repeat(48)),
             database_url: Some("postgres://app:s3cr3t@db.example.com/app_prod".into()),
             database_style_conflict: None,
-            apex_domain: Some("app.example.com".into()),
+            apex_domain: ApexDomain::Tenancy(Some("app.example.com".into())),
             bind: Some("0.0.0.0:8080".into()),
             ungated_admin: false,
         }
@@ -8626,11 +8943,11 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             .with_session_auth(secret)
             .build();
         // The public `tenant_mode` hides models; it gates nothing.
-        let gated_clear = !deploy_audit_env().ungated_admin;
+        let gated_clear = !deploy_audit_env(false).ungated_admin;
         let _open = crate::admin::Builder::new(pool.clone())
             .tenant_mode()
             .build();
-        let flagged = deploy_audit_env().ungated_admin;
+        let flagged = deploy_audit_env(false).ungated_admin;
         crate::admin::reset_ungated_admin_built();
         assert!(gated_clear, "a gated admin set the ungated flag");
         assert!(
@@ -8852,10 +9169,22 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         );
     }
 
+    /// A single-database deploy has no apex to set.
+    #[test]
+    fn deploy_audit_single_tenant_skips_the_apex() {
+        let env = DeployAuditEnv {
+            apex_domain: ApexDomain::SingleTenant,
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert!(!r.info.iter().any(|i| i.contains("RUSTANGO_APEX_DOMAIN")));
+    }
+
     #[test]
     fn deploy_audit_localhost_apex_warns_for_tenancy() {
         let env = DeployAuditEnv {
-            apex_domain: Some("localhost".into()),
+            apex_domain: ApexDomain::Tenancy(Some("localhost".into())),
             ..good_prod_env()
         };
         let r = run(&env);

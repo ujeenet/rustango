@@ -242,7 +242,7 @@ mod flat_sealed {
 
 /// A type the flat `values_list` / `pluck` / `value` decode can return.
 /// Sealed; `Option<T>` reads NULL as `None`, a bare `T` errors on NULL.
-/// `u8`–`u64` need a build without `postgres`, `Decimal` one without `sqlite`.
+/// `u8`–`u64` need a build without `postgres`.
 pub trait FlatScalar: flat_sealed::Sealed + Send + Unpin + Sized {
     #[doc(hidden)]
     type Cell: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin;
@@ -301,9 +301,26 @@ flat_scalar!(
     chrono::NaiveDate,
     chrono::NaiveTime,
 );
-// sqlx-sqlite has no `Decimal` decode, so only builds without SQLite get it.
-#[cfg(not(feature = "sqlite"))]
-flat_scalar!(rust_decimal::Decimal);
+impl flat_sealed::Sealed for rust_decimal::Decimal {}
+impl flat_sealed::Sealed for Option<rust_decimal::Decimal> {}
+impl FlatScalar for rust_decimal::Decimal {
+    type Cell = DecimalCell;
+    fn from_cell(cell: DecimalCell) -> Self {
+        cell.0
+    }
+    fn from_null(column: &str) -> Result<Self, sqlx::Error> {
+        Err(unexpected_null(column))
+    }
+}
+impl FlatScalar for Option<rust_decimal::Decimal> {
+    type Cell = DecimalCell;
+    fn from_cell(cell: DecimalCell) -> Self {
+        Some(cell.0)
+    }
+    fn from_null(_: &str) -> Result<Self, sqlx::Error> {
+        Ok(None)
+    }
+}
 // sqlx-postgres has no unsigned decode (MySQL reads them from UNSIGNED columns).
 #[cfg(not(feature = "postgres"))]
 flat_scalar!(u8, u16, u32, u64);
@@ -362,6 +379,68 @@ impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for UuidCell {
             _ => uuid::Uuid::from_slice(bytes)?,
         };
         Ok(Self(u))
+    }
+}
+
+/// The one place a `Decimal` cell is decoded. sqlx-sqlite has no `Decimal`,
+/// and a SQLite `NUMERIC` cell holds INTEGER, REAL or TEXT.
+#[doc(hidden)]
+pub struct DecimalCell(rust_decimal::Decimal);
+
+#[cfg(feature = "postgres")]
+impl sqlx::Type<sqlx::Postgres> for DecimalCell {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <rust_decimal::Decimal as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <rust_decimal::Decimal as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+#[cfg(feature = "postgres")]
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for DecimalCell {
+    fn decode(v: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        <rust_decimal::Decimal as sqlx::Decode<sqlx::Postgres>>::decode(v).map(Self)
+    }
+}
+#[cfg(feature = "mysql")]
+impl sqlx::Type<sqlx::MySql> for DecimalCell {
+    fn type_info() -> sqlx::mysql::MySqlTypeInfo {
+        <rust_decimal::Decimal as sqlx::Type<sqlx::MySql>>::type_info()
+    }
+    fn compatible(ty: &sqlx::mysql::MySqlTypeInfo) -> bool {
+        <rust_decimal::Decimal as sqlx::Type<sqlx::MySql>>::compatible(ty)
+    }
+}
+#[cfg(feature = "mysql")]
+impl<'r> sqlx::Decode<'r, sqlx::MySql> for DecimalCell {
+    fn decode(v: sqlx::mysql::MySqlValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        <rust_decimal::Decimal as sqlx::Decode<sqlx::MySql>>::decode(v).map(Self)
+    }
+}
+#[cfg(feature = "sqlite")]
+impl sqlx::Type<sqlx::Sqlite> for DecimalCell {
+    fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+        <f64 as sqlx::Type<sqlx::Sqlite>>::type_info()
+    }
+    fn compatible(_: &sqlx::sqlite::SqliteTypeInfo) -> bool {
+        true
+    }
+}
+#[cfg(feature = "sqlite")]
+impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for DecimalCell {
+    fn decode(v: sqlx::sqlite::SqliteValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        use rust_decimal::Decimal;
+        use sqlx::{TypeInfo as _, ValueRef as _};
+        let d = match v.type_info().name() {
+            "INTEGER" => Decimal::from(<i64 as sqlx::Decode<sqlx::Sqlite>>::decode(v)?),
+            "REAL" => Decimal::try_from(<f64 as sqlx::Decode<sqlx::Sqlite>>::decode(v)?)?,
+            _ => {
+                let s = <&str as sqlx::Decode<sqlx::Sqlite>>::decode(v)?.trim();
+                s.parse::<Decimal>()
+                    .or_else(|_| Decimal::from_scientific(s))?
+            }
+        };
+        Ok(Self(d))
     }
 }
 
@@ -436,7 +515,6 @@ mod flat_scalar_tests {
     }
 
     /// `pluck::<Decimal>` compiled before `FlatScalar`; keep it that way.
-    #[cfg(not(feature = "sqlite"))]
     #[test]
     fn decimal_is_a_flat_scalar() {
         is_flat::<rust_decimal::Decimal>();
@@ -496,6 +574,26 @@ pub fn try_get_flat_my<U: FlatScalar>(
 #[allow(clippy::missing_errors_doc)]
 pub fn try_get_flat_my<U>(row: &crate::sql::MyReturningRow, _name: &str) -> Result<U, sqlx::Error> {
     match *row {}
+}
+
+/// Decode the named column of any backend's row through [`FlatScalar`], for
+/// macro-emitted code (a `Decimal` field, which sqlx-sqlite cannot decode).
+///
+/// # Errors
+/// The driver's decode error, or NULL for a bare `U`.
+#[doc(hidden)]
+pub fn try_get_flat<R, U>(row: &R, name: &str) -> Result<U, sqlx::Error>
+where
+    R: sqlx::Row,
+    for<'n> &'n str: sqlx::ColumnIndex<R>,
+    U: FlatScalar,
+    U::Cell: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
+    use sqlx::ValueRef as _;
+    if row.try_get_raw(name)?.is_null() {
+        return U::from_null(name);
+    }
+    row.try_get::<U::Cell, _>(name).map(U::from_cell)
 }
 
 /// SQLite twin of [`try_get_flat_my`]: a UUID a column default wrote is TEXT.

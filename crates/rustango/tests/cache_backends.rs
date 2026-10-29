@@ -552,3 +552,29 @@ async fn inmemory_add_is_atomic_under_contention() {
     }
     assert_eq!(winners, 1, "exactly one add() may win; got {winners}");
 }
+
+/// An i64 overflow is an error on the in-process backends too, not a
+/// saturation; the counter keeps its value.
+#[tokio::test]
+async fn memory_and_file_incr_overflow_is_an_error() {
+    let dir = std::env::temp_dir().join(format!("rustango-incr-ovf-{}", std::process::id()));
+    let caches: [Box<dyn Cache>; 2] = [
+        Box::new(InMemoryCache::new()),
+        Box::new(rustango::cache::FileCache::new(&dir)),
+    ];
+    for cache in caches {
+        cache
+            .set("max", &(i64::MAX - 1).to_string(), None)
+            .await
+            .unwrap();
+        assert_eq!(cache.incr("max", 1, None).await.unwrap(), i64::MAX);
+        let err = cache.incr("max", 1, None).await.unwrap_err();
+        assert!(err.to_string().contains("out of range"), "{err}");
+        let max = i64::MAX.to_string();
+        assert_eq!(cache.get("max").await.unwrap(), Some(max));
+
+        cache.set("min", &i64::MIN.to_string(), None).await.unwrap();
+        assert!(cache.decr("min", 1, None).await.is_err(), "min - 1");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

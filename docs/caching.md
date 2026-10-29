@@ -264,7 +264,8 @@ does the test-and-set under row locks so a race resolves to exactly one winner.
 `Cache::incr` is atomic on all three too: `DatabaseCache` does it in one upsert.
 `FileCache` does both under a per-entry lock, which holds only on one host.
 So a `DistributedLock` or an exact counter works across replicas on Redis or
-the database.
+the database. Every backend counts over the full `i64` range; an overflow is
+an error and leaves the counter as it was.
 
 Two things worth knowing:
 

@@ -4,7 +4,6 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ title }} · {{ admin_title }}</title>
-  <link rel="stylesheet" href="{{ static_url }}/admin.css">
   <style nonce="{{ csp_nonce }}">
     .totp-wrap { max-width: 32rem; margin: 3rem auto; padding: 0 1rem; }
     .totp-secret { font-family: monospace; font-size: 1.1rem; letter-spacing: .1em;
@@ -34,6 +33,16 @@
                  pattern="[0-9]*" maxlength="8" placeholder="123456" required>
         </label>
         <button type="submit" name="reset" value="1">Re-enroll</button>
+      </form>
+      <p>To turn two-factor off, enter a current code.</p>
+      <form method="post" action="{{ action }}/disable">
+        {{ csrf_input | safe }}
+        <label>
+          Current code
+          <input type="text" name="totp_code" inputmode="numeric" autocomplete="one-time-code"
+                 pattern="[0-9]*" maxlength="8" placeholder="123456" required>
+        </label>
+        <button type="submit">Turn off</button>
       </form>
     {% else %}
       {% if secret_base32 %}

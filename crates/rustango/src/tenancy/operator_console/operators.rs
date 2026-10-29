@@ -186,6 +186,7 @@ async fn page(
     ctx.insert("operator_username", &op.username);
     ctx.insert("operators", &view);
     ctx.insert("manage_enabled", &state.pools.is_some());
+    ctx.insert("totp_reset", &cfg!(feature = "totp"));
     paged.inject(&mut ctx, "/operators", "");
     ctx.insert("error", &error);
     ctx.insert("notice", &notice);
@@ -399,6 +400,50 @@ pub(super) async fn operator_reset_password(
             target.username
         ))
     }
+}
+
+// --------------------------------------------------------- reset TOTP
+
+/// Drop another operator's authenticator, for a lost device. Your own
+/// goes through `/account/totp`, which asks for a current code.
+#[cfg(feature = "totp")]
+pub(super) async fn operator_reset_totp(
+    State(state): State<ConsoleState>,
+    Extension(op): Extension<auth::Operator>,
+    Path(id): Path<i64>,
+) -> Response<Body> {
+    use crate::tenancy::operator_totp;
+    if id == id_of(&op) {
+        return back_err(
+            &state,
+            &op,
+            "Use /account/totp for your own device; it asks for a current code.",
+        )
+        .await;
+    }
+    let target = match one_operator(&state, &op, id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return back_err(&state, &op, "No such operator.").await,
+        Err(e) => return back_err(&state, &op, &e).await,
+    };
+    if let Err(e) = operator_totp::ensure_table(&state.registry).await {
+        return back_err(&state, &op, &withheld(&op, "Could not reset", &e)).await;
+    }
+    match operator_totp::reset(&state.registry, &target).await {
+        Ok(0) => {
+            return back_ok(&format!(
+                "`{}` has no two-factor device; they are now signed out everywhere",
+                target.username
+            ))
+        }
+        Ok(_) => {}
+        Err(e) => return back_err(&state, &op, &withheld(&op, "Could not reset", &e)).await,
+    }
+    audit(&state, &op, id, "operator_totp_reset", &target.username).await;
+    back_ok(&format!(
+        "removed the two-factor device of `{}` — they are now signed out everywhere",
+        target.username
+    ))
 }
 
 // ------------------------------------------------------------- helpers

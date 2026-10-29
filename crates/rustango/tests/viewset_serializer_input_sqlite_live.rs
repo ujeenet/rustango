@@ -906,7 +906,10 @@ fn spec_request_bodies_follow_the_serializer_write_set() {
     let post = spec_body(item(), "/x", "post");
     assert_eq!(
         post["properties"],
-        serde_json::json!({"name": {"type": "string"}, "slug": {"type": "string"}}),
+        serde_json::json!({
+            "name": {"type": "string", "maxLength": 120},
+            "slug": {"type": "string", "maxLength": 120},
+        }),
         "no id, no read_only field: {post}"
     );
     assert_eq!(post["required"], serde_json::json!(["name", "slug"]));

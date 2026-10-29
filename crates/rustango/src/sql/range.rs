@@ -241,7 +241,7 @@ impl<'r, T> sqlx::Decode<'r, sqlx::MySql> for Range<T> {
     fn decode(
         _value: <sqlx::MySql as sqlx::Database>::ValueRef<'r>,
     ) -> Result<Self, sqlx::error::BoxDynError> {
-        Err("`Range<T>` columns are PostgreSQL-only; cannot decode on MySQL (issue #343)".into())
+        Err("`Range<T>` columns are PostgreSQL-only; cannot decode on MySQL".into())
     }
 }
 
@@ -257,7 +257,7 @@ impl<'r, T> sqlx::Decode<'r, sqlx::Sqlite> for Range<T> {
     fn decode(
         _value: <sqlx::Sqlite as sqlx::Database>::ValueRef<'r>,
     ) -> Result<Self, sqlx::error::BoxDynError> {
-        Err("`Range<T>` columns are PostgreSQL-only; cannot decode on SQLite (issue #343)".into())
+        Err("`Range<T>` columns are PostgreSQL-only; cannot decode on SQLite".into())
     }
 }
 

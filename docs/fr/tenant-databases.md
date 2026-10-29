@@ -246,7 +246,8 @@ Pour changer la clé :
    L'ancienne clé ouvre encore ce qu'elle a scellé.
 2. `cargo run -- reseal-tenant-secrets` liste ce qui changerait.
 3. `cargo run -- reseal-tenant-secrets --apply` rescelle les URL de tenant, les
-   mots de passe des serveurs et les secrets client SSO avec la nouvelle clé.
+   mots de passe des serveurs, les secrets TOTP des opérateurs et les secrets
+   client SSO avec la nouvelle clé.
 4. Retirez `RUSTANGO_SECRET_KEY_PREVIOUS` et redémarrez.
 
 Les valeurs scellées sous une clé vide, avant que les clés vides ne soient

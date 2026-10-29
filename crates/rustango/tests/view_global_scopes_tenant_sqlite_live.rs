@@ -157,10 +157,16 @@ async fn app(name: &str) -> (Router, Pool, Vec<i64>, Vec<i64>) {
     t.add_raw_templates(vec![
         (
             "list.html",
-            "rows={{ object_list | length }} total={{ total }}",
+            "rows={{ object_list | length }} total={{ total }} marks={{ page_marks | length }}",
         ),
-        ("detail.html", "tag={{ object.tag }}"),
-        ("form.html", "form {{ cp_tenant }}"),
+        (
+            "detail.html",
+            "tag={{ object.tag }}{% if csrf_token %} csrf{% endif %}",
+        ),
+        (
+            "form.html",
+            "form {{ cp_tenant }}{% if is_update %} pk={{ pk }} tag={{ object.tag }}{% endif %}",
+        ),
         ("confirm.html", "confirm {{ cp_tenant }}"),
         ("bulk.html", "objects={{ objects | length }}"),
     ])
@@ -272,7 +278,7 @@ async fn tenant_list_hides_scoped_rows() {
     let (app, _, _, _) = app("list").await;
     let (status, body) = send(&app, Method::GET, "/notes", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body, "rows=2 total=2");
+    assert_eq!(body, "rows=2 total=2 marks=1");
 }
 
 #[tokio::test]
@@ -392,7 +398,7 @@ async fn tenant_views_soft_delete_and_hide_deleted_rows() {
     );
 
     let (_, body) = send(&app, Method::GET, "/memos", None).await;
-    assert_eq!(body, "rows=1 total=1", "list");
+    assert_eq!(body, "rows=1 total=1 marks=1", "list");
     let gone = pks[0];
     for uri in [format!("/memos/{gone}"), format!("/memos/{gone}/edit")] {
         let (status, _) = send(&app, Method::GET, &uri, None).await;
@@ -418,7 +424,10 @@ async fn tenant_views_merge_context_processors() {
     let (app, _, shown, _) = app("procs").await;
     let s = shown[0];
     let (status, body) = send(&app, Method::GET, &format!("/notes/{s}/edit"), None).await;
-    assert_eq!((status, body.as_str()), (StatusCode::OK, "form proc"));
+    assert_eq!(
+        (status, body.as_str()),
+        (StatusCode::OK, &*format!("form proc pk={s} tag=a"))
+    );
     let (status, body) = send(&app, Method::GET, &format!("/notes/{s}/delete"), None).await;
     assert_eq!((status, body.as_str()), (StatusCode::OK, "confirm proc"));
     let (status, body) = send(
@@ -430,6 +439,17 @@ async fn tenant_views_merge_context_processors() {
     .await;
     assert_eq!(
         (status, body.as_str()),
-        (StatusCode::UNPROCESSABLE_ENTITY, "form proc")
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &*format!("form proc pk={s} tag=a")
+        )
     );
+}
+
+/// The tenant detail page carries the CSRF token for a delete button.
+#[tokio::test]
+async fn tenant_detail_stamps_the_csrf_token() {
+    let (app, _, shown, _) = app("csrf").await;
+    let (status, body) = send(&app, Method::GET, &format!("/notes/{}", shown[0]), None).await;
+    assert_eq!((status, body.as_str()), (StatusCode::OK, "tag=a csrf"));
 }

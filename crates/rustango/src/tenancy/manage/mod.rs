@@ -191,10 +191,12 @@ where
 }
 
 /// What `Cli` knows about the deployment that a verb cannot see.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct CliFacts {
     /// `with_tenant_provisioning` was called.
     pub(crate) provisioning: bool,
+    /// `Cli::brand_storage`, for the verbs that delete brand files.
+    pub(crate) brand_storage: Option<crate::storage::BoxedStorage>,
 }
 
 /// [`run_with_writer_and_init`] with the `Cli`'s [`CliFacts`].
@@ -272,7 +274,9 @@ where
         }
         "test-tenant-connection" => tenants::test_tenant_connection(&args[1..], writer).await,
         "drop-tenant" => tenants::drop_tenant(pools, &args[1..], writer).await,
-        "purge-tenant" => tenants::purge_tenant(pools, &args[1..], writer).await,
+        "purge-tenant" => {
+            tenants::purge_tenant(pools, &args[1..], writer, facts.brand_storage.clone()).await
+        }
         "rotate-tenant-password" => {
             tenants::rotate_tenant_password(pools, &args[1..], writer).await
         }
@@ -338,6 +342,8 @@ where
         // #1344 — seeing who exists, and turning one off, were console-only.
         "list-operators" => operators::list_operators(pools, &args[1..], writer).await,
         "set-operator-active" => operators::set_operator_active(pools, &args[1..], writer).await,
+        #[cfg(feature = "totp")]
+        "reset-operator-totp" => operators::reset_operator_totp(pools, &args[1..], writer).await,
         // #1344 — the console renders all three; nothing printed them, so an
         // incident question needed a browser or a SQL client.
         "list-runs" => inspect::list_runs(pools, &args[1..], writer).await,
@@ -459,9 +465,10 @@ where
         "check" => rustango::migrate::manage::check_cmd_with(
             &pools.registry_pool(),
             dir,
+            Some(rustango::migrate::MigrationScope::Registry),
             &args[1..],
             writer,
-            tenancy_deploy_findings(pools, facts),
+            Some(tenancy_deploy_findings(pools, facts)),
         )
         .await
         .map_err(TenancyError::Migrate),
@@ -709,6 +716,11 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         "                       deactivate the last active one — that would lock"
     )?;
     writeln!(w, "                       everyone out of the console.")?;
+    writeln!(w, "  reset-operator-totp <username>")?;
+    writeln!(
+        w,
+        "                       Remove an operator's two-factor device (lost phone)."
+    )?;
     writeln!(
         w,
         "  create-user <slug> <username> [--password <p> | --generate] [--superuser]"

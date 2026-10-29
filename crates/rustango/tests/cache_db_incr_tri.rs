@@ -90,6 +90,39 @@ async fn incr_overflow_is_an_error(pool: &Pool) {
     let _ = cache.drop_table().await;
 }
 
+/// 19-digit counters keep counting; the i64 edges are an error, not a reset.
+async fn incr_covers_the_full_i64_range(pool: &Pool) {
+    let cache = fresh(pool, "rustango_cache_incr_i64").await;
+    cache.set("n", "999999999999999999", None).await.unwrap();
+    assert_eq!(cache.incr("n", 1, None).await.unwrap(), 10i64.pow(18));
+    assert_eq!(cache.incr("n", 1, None).await.unwrap(), 10i64.pow(18) + 1);
+
+    cache
+        .set("max", &(i64::MAX - 1).to_string(), None)
+        .await
+        .unwrap();
+    assert_eq!(cache.incr("max", 1, None).await.unwrap(), i64::MAX);
+    let err = cache.incr("max", 1, None).await.unwrap_err();
+    assert!(err.to_string().contains("out of range"), "{err}");
+    let max = i64::MAX.to_string();
+    assert_eq!(cache.get("max").await.unwrap(), Some(max));
+
+    cache
+        .set("min", &(i64::MIN + 1).to_string(), None)
+        .await
+        .unwrap();
+    assert_eq!(cache.decr("min", 1, None).await.unwrap(), i64::MIN);
+    let err = cache.decr("min", 1, None).await.unwrap_err();
+    assert!(err.to_string().contains("out of range"), "{err}");
+    let min = i64::MIN.to_string();
+    assert_eq!(cache.get("min").await.unwrap(), Some(min));
+
+    // Past i64: not an integer, so it counts as 0.
+    cache.set("big", "9223372036854775808", None).await.unwrap();
+    assert_eq!(cache.incr("big", 2, None).await.unwrap(), 2);
+    let _ = cache.drop_table().await;
+}
+
 /// `purge_expired` deletes in bounded batches, keeps live rows, and
 /// `ensure_table` adds the `expires` index it scans by (#1906).
 async fn purge_is_batched_and_indexed(pool: &Pool) {
@@ -218,6 +251,7 @@ tri_dialect_test! {
         parallel_incr_loses_nothing,
         incr_ttl_and_reset,
         incr_overflow_is_an_error,
+        incr_covers_the_full_i64_range,
         purge_is_batched_and_indexed,
         index_failure_is_not_fatal,
         long_table_names_get_distinct_indexes,

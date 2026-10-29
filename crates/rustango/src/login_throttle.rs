@@ -221,6 +221,9 @@ struct Buckets {
     /// Username and IP pairs that signed in; see [`KNOWN_CLIENT_TTL`].
     known: BoxedCache,
     in_flight: InFlight,
+    /// A test's own lockout in place of the shared one.
+    #[cfg(test)]
+    lockout: Option<&'static crate::account_lockout::Lockout>,
 }
 
 /// How often a waiting attempt re-checks a limit held elsewhere.
@@ -292,6 +295,14 @@ enum Blocked {
 }
 
 impl Buckets {
+    fn lockout(&self) -> &'static crate::account_lockout::Lockout {
+        #[cfg(test)]
+        if let Some(l) = self.lockout {
+            return l;
+        }
+        crate::account_lockout::shared()
+    }
+
     /// Wait for an attempt in flight at the full gate to settle; refuse
     /// when none is, and answer busy past `deadline`.
     async fn wait(
@@ -432,6 +443,8 @@ impl LoginThrottle {
                 crate::cache::InMemoryCache::new().with_max_entries(KNOWN_CLIENT_MEMORY_CAP),
             ),
             in_flight: InFlight::default(),
+            #[cfg(test)]
+            lockout: None,
         }))
     }
 
@@ -462,6 +475,8 @@ impl LoginThrottle {
             },
             known: cache,
             in_flight: InFlight::default(),
+            #[cfg(test)]
+            lockout: None,
         }))
     }
 
@@ -511,8 +526,19 @@ impl LoginThrottle {
         ip: &ClientIp,
         username: &str,
     ) -> Result<LoginAttempt, LoginRefused> {
-        self.warn_once_on_weak_store();
         let deadline = tokio::time::Instant::now() + crate::passwords::hash_wait();
+        self.begin_until(scope, ip, username, deadline).await
+    }
+
+    /// [`Self::begin`], giving up at `deadline`.
+    async fn begin_until(
+        &self,
+        scope: &LoginScope,
+        ip: &ClientIp,
+        username: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<LoginAttempt, LoginRefused> {
+        self.warn_once_on_weak_store();
         loop {
             match self.try_begin(scope, ip, username).await {
                 Ok(held) => return Ok(LoginAttempt(Some(held))),
@@ -594,7 +620,7 @@ impl LoginThrottle {
     ) -> Result<(), LoginRefused> {
         let scope_key = scope.key();
         if scope.locks_accounts() {
-            let lockout = crate::account_lockout::shared();
+            let lockout = self.0.lockout();
             if lockout.is_locked(&account_key(&scope_key, username)).await {
                 return Err(LoginRefused::Throttled {
                     retry_after_secs: lockout.lock_duration().as_secs().max(1),
@@ -616,6 +642,85 @@ impl LoginThrottle {
             return Ok(());
         }
         spent(&global_gate(&scope_key), global)
+    }
+
+    /// Admit a credential sent on every request (HTTP Basic, an API key)
+    /// before it is compared. A known client at a clean account takes one
+    /// slot on the counter that bounds guesses (the account's, else the
+    /// per-IP or global one), shared by every replica on the cache and
+    /// given back by a right credential; else it is reserved like a login.
+    ///
+    /// # Errors
+    /// As [`Self::begin`].
+    pub(crate) async fn begin_per_request(
+        &self,
+        scope: &LoginScope,
+        ip: &ClientIp,
+        username: &str,
+    ) -> Result<PerRequestAttempt, LoginRefused> {
+        let deadline = tokio::time::Instant::now() + crate::passwords::hash_wait();
+        let held = match self.take_quiet(scope, ip, username).await {
+            Some(slot) => PerRequestHeld::Quiet(slot),
+            // Not quiet, or not counted: the login path counts, waits or refuses.
+            None => {
+                PerRequestHeld::Reserved(self.begin_until(scope, ip, username, deadline).await?)
+            }
+        };
+        Ok(PerRequestAttempt {
+            throttle: Self(Arc::clone(&self.0)),
+            scope: scope.clone(),
+            ip: ip.clone(),
+            username: username.to_owned(),
+            deadline,
+            held,
+        })
+    }
+
+    /// One atomic slot on the counter that bounds guesses here, when
+    /// admitting a right credential would change nothing: a known client,
+    /// room in the limits, and no lock or other attempt on the account.
+    /// `None` otherwise, or when the slot could not be counted.
+    async fn take_quiet(
+        &self,
+        scope: &LoginScope,
+        ip: &ClientIp,
+        username: &str,
+    ) -> Option<QuietSlot> {
+        let b = &self.0;
+        let scope_key = scope.key();
+        let ip_bucket = ip.0.as_deref().map(|ip| scope.ip_bucket(ip));
+        if scope.locks_accounts() {
+            if !b.is_known(scope, ip, username).await {
+                return None;
+            }
+        } else if b.global.peek(&scope_key).await.is_err() {
+            return None;
+        }
+        if let Some(bucket) = &ip_bucket {
+            b.ip.peek(bucket).await.ok()?;
+        }
+        let mut gates = Gates {
+            buckets: Arc::clone(b),
+            held: Vec::with_capacity(1),
+        };
+        let counted = if scope.locks_accounts() {
+            let key = account_key(&scope_key, username);
+            let slot = b.lockout().reserve_sole(&key).await?;
+            gates.enter(key.clone());
+            Counted::Account(key, slot)
+        } else if let Some(bucket) = ip_bucket {
+            let spent = b.ip.take(&bucket).await.ok()?;
+            gates.enter(ip_gate(&bucket));
+            Counted::Ip(bucket, spent)
+        } else {
+            let spent = b.global.take(&scope_key).await.ok()?;
+            gates.enter(global_gate(&scope_key));
+            Counted::Global(scope_key, spent)
+        };
+        Some(QuietSlot {
+            counted: Some(counted),
+            gates,
+        })
     }
 
     /// Run a signed-in user's current-password check through the gate, so a
@@ -728,7 +833,7 @@ impl LoginAttempt {
     /// already counted it; this keeps the tokens and may lock the account.
     pub async fn failed(mut self) {
         let mut held = self.held();
-        let lockout = crate::account_lockout::shared();
+        let lockout = held.buckets.lockout();
         for (key, slot) in held.locks.drain(..) {
             lockout.reserved_failed(&key, slot).await;
         }
@@ -737,19 +842,7 @@ impl LoginAttempt {
     /// Clear the username's failures, remember it as known from this IP,
     /// and give back the limit tokens.
     pub async fn succeeded(mut self) {
-        let mut held = self.held();
-        let lockout = crate::account_lockout::shared();
-        for (key, slot) in std::mem::take(&mut held.locks) {
-            if let Some(ip) = &held.ip {
-                // Written once per pair: an existing marker is left alone.
-                let (cache, known) = (&held.buckets.known, known_key(&key, ip));
-                if !matches!(cache.get(&known).await, Ok(Some(_))) {
-                    let _ = cache.set(&known, "1", Some(KNOWN_CLIENT_TTL)).await;
-                }
-            }
-            lockout.reserved_succeeded(&key, slot).await;
-        }
-        held.give_back().await;
+        self.held().right(true).await;
     }
 
     /// The password was right and the form now asks for a second
@@ -759,10 +852,152 @@ impl LoginAttempt {
     }
 }
 
+/// A per-request credential admitted by [`LoginThrottle::begin_per_request`].
+/// Dropped unsettled, it gives back what it holds.
+#[must_use = "settle the compare, or a miss is never counted"]
+pub(crate) struct PerRequestAttempt {
+    throttle: LoginThrottle,
+    scope: LoginScope,
+    ip: ClientIp,
+    username: String,
+    /// The one `hash_wait` this request gets, however often it waits.
+    deadline: tokio::time::Instant,
+    held: PerRequestHeld,
+}
+
+enum PerRequestHeld {
+    Quiet(QuietSlot),
+    Reserved(LoginAttempt),
+}
+
+/// The one counter a quiet credential took a slot on.
+enum Counted {
+    Account(String, ReservedSlot),
+    Ip(String, Spent),
+    Global(String, Spent),
+}
+
+/// A quiet credential's slot. Dropped unreported, it is given back.
+struct QuietSlot {
+    counted: Option<Counted>,
+    /// Left after the counter, so waiters see the refund.
+    gates: Gates,
+}
+
+impl Counted {
+    /// The compare proved nothing, or was right: give the slot back. Failures
+    /// counted meanwhile stay.
+    async fn refund(self, buckets: &Buckets) {
+        match self {
+            Self::Account(key, slot) => buckets.lockout().release(&key, slot).await,
+            Self::Ip(key, spent) => buckets.ip.give_back(&key, spent).await,
+            Self::Global(key, spent) => buckets.global.give_back(&key, spent).await,
+        }
+    }
+}
+
+impl QuietSlot {
+    /// Give the slot back and wait for it. The refund runs on its own task,
+    /// so a request cancelled half-way still finishes it.
+    async fn give_back(&mut self) {
+        if let Some(refund) = self.spawn_give_back() {
+            let _ = refund.await;
+        }
+    }
+
+    /// `None` when already given back or with no runtime to run on.
+    fn spawn_give_back(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        let counted = self.counted.take()?;
+        let buckets = Arc::clone(&self.gates.buckets);
+        let gates = std::mem::replace(
+            &mut self.gates,
+            Gates {
+                buckets: Arc::clone(&buckets),
+                held: Vec::new(),
+            },
+        );
+        let rt = tokio::runtime::Handle::try_current().ok()?;
+        Some(rt.spawn(async move {
+            counted.refund(&buckets).await;
+            drop(gates);
+        }))
+    }
+}
+
+impl Drop for QuietSlot {
+    fn drop(&mut self) {
+        let _ = self.spawn_give_back();
+    }
+}
+
+impl PerRequestAttempt {
+    /// Reserve like a login now, before a check at hash cost.
+    ///
+    /// # Errors
+    /// As [`LoginThrottle::begin`].
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    pub(crate) async fn reserve(&mut self) -> Result<(), LoginRefused> {
+        if let PerRequestHeld::Quiet(slot) = &mut self.held {
+            // Given back first, so the reservation is not refused by itself.
+            slot.give_back().await;
+            let attempt = self
+                .throttle
+                .begin_until(&self.scope, &self.ip, &self.username, self.deadline)
+                .await?;
+            self.held = PerRequestHeld::Reserved(attempt);
+        }
+        Ok(())
+    }
+
+    /// [`Self::reserve`], then [`LoginAttempt::resolve`] with the stored username.
+    ///
+    /// # Errors
+    /// As [`Self::reserve`] and [`LoginAttempt::resolve`].
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    pub(crate) async fn resolve(&mut self, stored_username: &str) -> Result<(), LoginRefused> {
+        self.reserve().await?;
+        match &mut self.held {
+            PerRequestHeld::Reserved(attempt) => attempt.resolve(stored_username).await,
+            PerRequestHeld::Quiet(_) => Ok(()),
+        }
+    }
+
+    /// Report the compare. A right one gives its slots back and leaves the
+    /// account's failures; a quiet miss keeps its slot, counted, and counts
+    /// against the other limits too.
+    pub(crate) async fn settle(self, right: bool) {
+        match self.held {
+            PerRequestHeld::Quiet(mut slot) if right => slot.give_back().await,
+            PerRequestHeld::Quiet(mut slot) => {
+                let Some(counted) = slot.counted.take() else {
+                    return;
+                };
+                let b = &self.throttle.0;
+                let scope_key = self.scope.key();
+                match counted {
+                    Counted::Account(key, lock) => {
+                        b.lockout().reserved_failed(&key, lock).await;
+                        if let Some(ip) = self.ip.0.as_deref() {
+                            let _ = b.ip.take(&self.scope.ip_bucket(ip)).await;
+                        }
+                        let _ = b.global.take(&scope_key).await;
+                    }
+                    Counted::Ip(..) => {
+                        let _ = b.global.take(&scope_key).await;
+                    }
+                    Counted::Global(..) => {}
+                }
+            }
+            PerRequestHeld::Reserved(mut attempt) if right => attempt.held().right(false).await,
+            PerRequestHeld::Reserved(attempt) => attempt.failed().await,
+        }
+    }
+}
+
 impl Held {
     /// Count the attempt against the account before the password check.
     async fn reserve_lock(&mut self, key: String) -> Result<(), Blocked> {
-        let lockout = crate::account_lockout::shared();
+        let lockout = self.buckets.lockout();
         crate::account_lockout::warn_once_on_weak_store(lockout);
         match lockout.reserve(&key).await {
             Reservation::Counted(slot) => {
@@ -780,9 +1015,31 @@ impl Held {
         }
     }
 
+    /// A right credential: remember the client, give back the tokens. Only
+    /// a sign-in clears failures; a per-request credential is sent so often
+    /// it would wipe a guesser's misses on the same name.
+    async fn right(mut self, clears_failures: bool) {
+        let lockout = self.buckets.lockout();
+        for (key, slot) in std::mem::take(&mut self.locks) {
+            if let Some(ip) = &self.ip {
+                // Written once per pair: an existing marker is left alone.
+                let (cache, known) = (&self.buckets.known, known_key(&key, ip));
+                if !matches!(cache.get(&known).await, Ok(Some(_))) {
+                    let _ = cache.set(&known, "1", Some(KNOWN_CLIENT_TTL)).await;
+                }
+            }
+            if clears_failures {
+                lockout.reserved_succeeded(&key, slot).await;
+            } else {
+                lockout.release(&key, slot).await;
+            }
+        }
+        self.give_back().await;
+    }
+
     /// Give back everything `begin` reserved.
     async fn release(mut self) {
-        let lockout = crate::account_lockout::shared();
+        let lockout = self.buckets.lockout();
         for (key, slot) in self.locks.drain(..) {
             lockout.release(&key, slot).await;
         }
@@ -875,6 +1132,90 @@ pub fn configure_shared(throttle: LoginThrottle) -> bool {
 #[cfg(all(feature = "config", feature = "manage"))]
 pub(crate) fn configure_from_settings(throttle: LoginThrottle) -> bool {
     SHARED.set_from_settings(throttle)
+}
+
+/// A test cache that counts the gate's writes.
+#[cfg(test)]
+pub(crate) mod counting {
+    /// Counts the login gate's cache writes.
+    #[derive(Default)]
+    pub(crate) struct CountingWrites {
+        inner: crate::cache::InMemoryCache,
+        writes: std::sync::atomic::AtomicUsize,
+        read_delay: std::time::Duration,
+    }
+
+    impl CountingWrites {
+        /// Every read waits `delay`, like a remote cache.
+        pub(crate) fn with_read_delay(delay: std::time::Duration) -> Self {
+            Self {
+                read_delay: delay,
+                ..Self::default()
+            }
+        }
+
+        async fn read(&self) {
+            if !self.read_delay.is_zero() {
+                tokio::time::sleep(self.read_delay).await;
+            }
+        }
+
+        fn wrote(&self) {
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Writes so far.
+        pub(crate) fn writes(&self) -> usize {
+            self.writes.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for CountingWrites {
+        async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            self.read().await;
+            self.inner.get(k).await
+        }
+        async fn set(
+            &self,
+            k: &str,
+            v: &str,
+            ttl: Option<std::time::Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            self.wrote();
+            self.inner.set(k, v, ttl).await
+        }
+        async fn delete(&self, k: &str) -> Result<(), crate::cache::CacheError> {
+            self.wrote();
+            self.inner.delete(k).await
+        }
+        async fn exists(&self, k: &str) -> Result<bool, crate::cache::CacheError> {
+            self.read().await;
+            self.inner.exists(k).await
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.inner.clear().await
+        }
+        async fn incr(
+            &self,
+            k: &str,
+            by: i64,
+            ttl: Option<std::time::Duration>,
+        ) -> Result<i64, crate::cache::CacheError> {
+            self.wrote();
+            self.inner.incr(k, by, ttl).await
+        }
+        async fn decr(
+            &self,
+            k: &str,
+            by: i64,
+            ttl: Option<std::time::Duration>,
+        ) -> Result<i64, crate::cache::CacheError> {
+            self.wrote();
+            self.inner.decr(k, by, ttl).await
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1502,5 +1843,319 @@ mod tests {
         let r = LoginRefused::Busy.into_response();
         assert_eq!(r.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert!(r.headers().contains_key(axum::http::header::RETRY_AFTER));
+    }
+
+    /// Two replicas on one shared cache, as a load balancer spreads them.
+    fn replicas(limits: LoginLimits) -> [Arc<LoginThrottle>; 2] {
+        let cache: BoxedCache = Arc::new(crate::cache::InMemoryCache::new());
+        [
+            Arc::new(LoginThrottle::with_cache(limits, cache.clone())),
+            Arc::new(LoginThrottle::with_cache(limits, cache)),
+        ]
+    }
+
+    /// Per-request guesses spread over `replicas`, each compared for 30 ms
+    /// then reported wrong; how many were compared, refused or not after.
+    async fn per_request_burst(
+        replicas: &[Arc<LoginThrottle>; 2],
+        s: &LoginScope,
+        ip: &ClientIp,
+        user: &str,
+        n: usize,
+    ) -> usize {
+        let compared = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let runs: Vec<_> = (0..n)
+            .map(|i| {
+                let (t, s, ip, user) = (
+                    Arc::clone(&replicas[i % 2]),
+                    s.clone(),
+                    ip.clone(),
+                    user.to_owned(),
+                );
+                let compared = Arc::clone(&compared);
+                tokio::spawn(async move {
+                    let Ok(a) = t.begin_per_request(&s, &ip, &user).await else {
+                        return;
+                    };
+                    compared.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    a.settle(false).await;
+                })
+            })
+            .collect();
+        for r in runs {
+            r.await.unwrap();
+        }
+        compared.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A known client's Basic guesses over two replicas: the account lock
+    /// bounds every compare, including ones answered 429 after it.
+    #[tokio::test]
+    async fn per_request_guesses_over_replicas_are_bounded_by_the_lock() {
+        let r = replicas(LoginLimits::default());
+        let (s, client) = (
+            LoginScope::TenantBasic("t-repl-lock".into()),
+            ip("10.9.70.1"),
+        );
+        let a = r[0].begin(&s, &client, "bob").await.unwrap();
+        a.succeeded().await;
+        let compared = per_request_burst(&r, &s, &client, "bob", 30).await;
+        let max = crate::account_lockout::shared().attempt_limit() as usize;
+        assert!(compared <= max, "{compared} guesses were compared");
+    }
+
+    /// API-key guesses over two replicas: the per-IP limit bounds every compare.
+    #[tokio::test]
+    async fn per_request_keys_over_replicas_are_bounded_by_the_ip_limit() {
+        let r = replicas(LoginLimits {
+            ip_limit: 3,
+            ..LoginLimits::default()
+        });
+        let s = LoginScope::TenantApiKey("t-repl-ip".into());
+        let compared = per_request_burst(&r, &s, &ip("10.9.70.2"), "", 30).await;
+        assert!(compared <= 3, "{compared} keys were compared");
+    }
+
+    /// A wrong guess counted after a quiet right one was admitted stays
+    /// counted: a client polling Basic must not wipe a guesser's misses.
+    #[tokio::test]
+    async fn a_right_per_request_credential_keeps_a_failure_counted_meanwhile() {
+        let t = LoginThrottle::new(LoginLimits::default());
+        let (s, client) = (
+            LoginScope::TenantBasic("t-quiet-keep".into()),
+            ip("10.9.70.3"),
+        );
+        let a = t.begin(&s, &client, "carol").await.unwrap();
+        a.succeeded().await;
+        let right = t.begin_per_request(&s, &client, "carol").await.unwrap();
+        let wrong = t.begin(&s, &client, "carol").await.unwrap();
+        wrong.failed().await;
+        right.settle(true).await;
+        let key = account_key(&s.key(), "carol");
+        assert_eq!(
+            crate::account_lockout::shared().attempt_count(&key).await,
+            1
+        );
+    }
+
+    /// With a failure already counted the credential is reserved like a
+    /// login; a right one still leaves the failure.
+    #[tokio::test]
+    async fn a_right_per_request_credential_keeps_an_earlier_failure() {
+        let t = LoginThrottle::new(LoginLimits::default());
+        let (s, client) = (
+            LoginScope::TenantBasic("t-reserved-keep".into()),
+            ip("10.9.70.5"),
+        );
+        t.begin(&s, &client, "erin").await.unwrap().failed().await;
+        for _ in 0..3 {
+            let right = t.begin_per_request(&s, &client, "erin").await.unwrap();
+            right.settle(true).await;
+        }
+        let key = account_key(&s.key(), "erin");
+        assert_eq!(
+            crate::account_lockout::shared().attempt_count(&key).await,
+            1
+        );
+    }
+
+    /// A request cancelled while its right credential's slot is refunded
+    /// still gives the slot back.
+    #[tokio::test]
+    async fn a_cancelled_refund_still_gives_the_slot_back() {
+        let cache: BoxedCache = Arc::new(counting::CountingWrites::with_read_delay(
+            Duration::from_millis(100),
+        ));
+        let t = on_cache(
+            &cache,
+            LoginLimits {
+                ip_limit: 1,
+                ..LoginLimits::default()
+            },
+        );
+        let (s, client) = (LoginScope::TenantApiKey("t-cancel".into()), ip("10.9.70.6"));
+        let a = t.begin_per_request(&s, &client, "").await.unwrap();
+        assert!(matches!(a.held, PerRequestHeld::Quiet(_)));
+        let _ = tokio::time::timeout(Duration::from_millis(30), a.settle(true)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let bucket = s.ip_bucket("10.9.70.6");
+        assert!(t.0.ip.peek(&bucket).await.is_ok(), "the slot leaked");
+    }
+
+    /// Counts every call; with `fail`, every call errors.
+    #[derive(Default)]
+    struct CountingCalls {
+        inner: crate::cache::InMemoryCache,
+        calls: std::sync::atomic::AtomicUsize,
+        fail: bool,
+    }
+
+    impl CountingCalls {
+        fn call(&self) -> Result<(), crate::cache::CacheError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                return Err(crate::cache::CacheError::Connection("down".into()));
+            }
+            Ok(())
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for CountingCalls {
+        async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            self.call()?;
+            self.inner.get(k).await
+        }
+        async fn set(
+            &self,
+            k: &str,
+            v: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            self.call()?;
+            self.inner.set(k, v, ttl).await
+        }
+        async fn add(
+            &self,
+            k: &str,
+            v: &str,
+            ttl: Option<Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            self.call()?;
+            self.inner.add(k, v, ttl).await
+        }
+        async fn delete(&self, k: &str) -> Result<(), crate::cache::CacheError> {
+            self.call()?;
+            self.inner.delete(k).await
+        }
+        async fn exists(&self, k: &str) -> Result<bool, crate::cache::CacheError> {
+            self.call()?;
+            self.inner.exists(k).await
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.inner.clear().await
+        }
+        async fn incr(
+            &self,
+            k: &str,
+            by: i64,
+            ttl: Option<Duration>,
+        ) -> Result<i64, crate::cache::CacheError> {
+            self.call()?;
+            self.inner.incr(k, by, ttl).await
+        }
+        async fn decr(
+            &self,
+            k: &str,
+            by: i64,
+            ttl: Option<Duration>,
+        ) -> Result<i64, crate::cache::CacheError> {
+            self.call()?;
+            self.inner.decr(k, by, ttl).await
+        }
+    }
+
+    /// `t` counting account locks in `cache` instead of the shared lockout.
+    fn with_lockout(mut t: LoginThrottle, cache: Arc<CountingCalls>) -> LoginThrottle {
+        let lockout = crate::account_lockout::Lockout::new(cache);
+        Arc::get_mut(&mut t.0).expect("unshared").lockout = Some(Box::leak(Box::new(lockout)));
+        t
+    }
+
+    /// A lockout store that errors counts nothing, so a known client's
+    /// credential takes the full reservation, per-IP slot included.
+    #[tokio::test]
+    async fn an_uncounted_lock_slot_is_not_quiet() {
+        let down = Arc::new(CountingCalls {
+            fail: true,
+            ..CountingCalls::default()
+        });
+        let t = with_lockout(
+            LoginThrottle::new(LoginLimits {
+                ip_limit: 1,
+                ..LoginLimits::default()
+            }),
+            down,
+        );
+        let (s, client) = (
+            LoginScope::TenantBasic("t-lock-down".into()),
+            ip("10.9.70.7"),
+        );
+        t.begin(&s, &client, "fay").await.unwrap().succeeded().await;
+        let a = t.begin_per_request(&s, &client, "fay").await.unwrap();
+        assert!(matches!(a.held, PerRequestHeld::Reserved(_)));
+        let bucket = s.ip_bucket("10.9.70.7");
+        assert!(t.0.ip.peek(&bucket).await.is_err(), "no per-IP slot taken");
+        a.settle(true).await;
+    }
+
+    /// A known client's right credential: few cache calls, and the slot
+    /// comes back.
+    #[tokio::test]
+    async fn a_right_per_request_credential_costs_six_cache_calls() {
+        let calls = Arc::new(CountingCalls::default());
+        let cache: BoxedCache = calls.clone();
+        let t = with_lockout(on_cache(&cache, LoginLimits::default()), calls.clone());
+        let (s, client) = (LoginScope::TenantBasic("t-six".into()), ip("10.9.70.8"));
+        t.begin(&s, &client, "gil").await.unwrap().succeeded().await;
+        let before = calls.calls();
+        let a = t.begin_per_request(&s, &client, "gil").await.unwrap();
+        assert!(matches!(a.held, PerRequestHeld::Quiet(_)));
+        a.settle(true).await;
+        let spent = calls.calls() - before;
+        assert!(spent <= 6, "{spent} cache calls");
+        let key = account_key(&s.key(), "gil");
+        assert_eq!(t.0.lockout().attempt_count(&key).await, 0);
+    }
+
+    /// A per-request credential waits at most one `hash_wait` before a 503.
+    #[tokio::test]
+    async fn a_per_request_credential_waits_one_deadline() {
+        let t = Arc::new(LoginThrottle::new(LoginLimits::default()));
+        let (s, client) = (
+            LoginScope::TenantBasic("t-one-wait".into()),
+            ip("10.9.70.4"),
+        );
+        let a = t.begin(&s, &client, "dan").await.unwrap();
+        a.succeeded().await;
+        let max = crate::account_lockout::shared().attempt_limit() as usize;
+        let mut held = Vec::new();
+        for _ in 0..max {
+            held.push(t.begin_per_request(&s, &client, "dan").await.unwrap());
+        }
+        let wait = crate::passwords::hash_wait();
+        let started = tokio::time::Instant::now();
+        let late = {
+            let (t, s, client) = (Arc::clone(&t), s.clone(), client.clone());
+            tokio::spawn(async move { t.begin_per_request(&s, &client, "dan").await.is_ok() })
+        };
+        // Plain attempts fill the lock while the late one waits.
+        tokio::time::sleep(wait / 2).await;
+        let mut plain = Vec::new();
+        for _ in 0..max {
+            let (t, s, client) = (Arc::clone(&t), s.clone(), client.clone());
+            plain.push(tokio::spawn(async move {
+                let a = t.begin(&s, &client, "dan").await;
+                tokio::time::sleep(wait * 3).await;
+                drop(a);
+            }));
+        }
+        tokio::time::sleep(wait * 2 / 5).await;
+        drop(held.pop());
+        let _ = late.await.unwrap();
+        let took = started.elapsed();
+        assert!(
+            took < wait * 3 / 2,
+            "waited {took:?} for a {wait:?} deadline"
+        );
+        drop(held);
+        for p in plain {
+            p.abort();
+        }
     }
 }

@@ -307,20 +307,26 @@ impl Cache for RedisCache {
         // works from 2.6, so this also runs on ElastiCache and other
         // Redis-compatible servers. After the INCRBY the key always
         // exists, so a `PTTL` below 0 means no expiry is set.
+        //
+        // The result is read back with `GET`: a Lua number is a double,
+        // which rounds counters past 2^53.
         let script = redis::Script::new(
-            r"local n = redis.call('INCRBY', KEYS[1], ARGV[1])
+            r"redis.call('INCRBY', KEYS[1], ARGV[1])
               if tonumber(ARGV[2]) > 0 and redis.call('PTTL', KEYS[1]) < 0 then
                 redis.call('PEXPIRE', KEYS[1], ARGV[2])
               end
-              return n",
+              return redis.call('GET', KEYS[1])",
         );
-        script
+        let value: String = script
             .key(key)
             .arg(by)
             .arg(self.effective_ttl_ms(ttl).unwrap_or(0))
             .invoke_async(&mut conn)
             .await
-            .map_err(|e| CacheError::Connection(e.to_string()))
+            .map_err(|e| CacheError::Connection(e.to_string()))?;
+        value
+            .parse()
+            .map_err(|_| CacheError::Connection(format!("incr: non-integer result {value:?}")))
     }
 }
 

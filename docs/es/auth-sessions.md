@@ -24,10 +24,13 @@ petición.
 > **¿Algún término aquí es nuevo para ti?** *sesión*, *id opaco*, *cookie*,
 > *caché* — consulta el [glosario](glossary.md).
 
-> Compañero de inmersión profunda de la [guía de seguridad](security.md).
-> Restringir rutas tras una sesión iniciada se trata en [Decoradores de
-> autenticación](auth-decorators.md); para tokens de API sin estado en su lugar,
-> consulta [JWT](auth-jwt.md).
+> Compañero de inmersión profunda de la [guía de seguridad](security.md). Los
+> [Decoradores de autenticación](auth-decorators.md) **no** leen estas sesiones:
+> leen la cookie de login de tenancy. Para restringir rutas con una sesión de
+> `SessionStore`, escribe un middleware pequeño que cargue la sesión y llame a
+> `redirect_to_login` — consulta
+> [Aplicaciones de una sola base de datos](auth-decorators.md#aplicaciones-de-una-sola-base-de-datos).
+> Para tokens de API sin estado en su lugar, consulta [JWT](auth-jwt.md).
 
 ---
 

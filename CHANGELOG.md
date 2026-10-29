@@ -4,6 +4,131 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.10] — 2026-10-29
+
+### Fixed — auth review, round two
+
+- A right Basic or API-key credential no longer clears the account's failed logins; only a sign-in does, so polling clients cannot wipe a guesser's misses.
+- A request cancelled while its credential's slot is given back still gives it back.
+- Resetting a TOTP device (operator console, `reset-operator-totp`, `reset-admin-totp`) ends that account's sessions.
+- `permission_required` / `permission_required_or_403` read the tenant pool on any backend, so SQLite and MySQL tenants no longer get a 500 in a build with `postgres`.
+- `reseal-tenant-secrets` counts an operator TOTP row of an unexpected shape as failed instead of skipping it.
+- CORS: credentials with `"*"` origins are refused with a logged error; with credentials a `"*"` entry in `cors_allowed_headers` / `cors_expose_headers` is dropped.
+
+### Fixed — auth review, round three
+
+- A TOTP reset ends the sessions before it drops the device, so a retry after a failed write still ends them.
+- A Basic or API-key credential whose account-lock slot the lockout cache could not count takes the full login reservation, per-IP and global slots included.
+- A known client's right Basic credential costs six cache calls, down from about twelve.
+
+### Fixed — ORM set operations and writes
+
+- `a.union(b).intersection(c)` and `a.difference(b).intersection(c)` read left to right on PG and MySQL too, as on SQLite.
+- A `union_all` ordered by a column the `values_*` projection leaves out works on every backend; `union`, `intersection`, `difference` or a `distinct()` branch ordered that way is refused with `SqlError::SetOpOrderOutsideProjection` instead of deduplicating on the wrong columns.
+- SQLite runs a union of `select_related` branches with an outer `order_by`.
+- `bulk_upsert_pool` with a key repeated in one batch keeps the last row on every backend; PG used to fail.
+- `dates()` / `datetimes()` skip NULL values instead of failing the decode.
+- M2M `add` no longer links twice when the through model has no unique `(src, dst)` key, and fires `Add` only when a row went in. On a junction with that key it stays one insert-or-ignore with no lock, so it does not wait on a caller's open transaction.
+
+### Fixed — model attributes, migrations and MCP
+
+- `#[rustango(default = "…")]` refuses a bare word (read as a column on PG/MySQL) and a non-number on a numeric field at compile time.
+- `primary_key`, `unique`, `index`, `soft_delete`, `auto_now(_add)`, `auto_uuid` and `default_uuid_v7` accept `= true`; an unknown attribute names the key, suggests the nearest one and lists the valid ones.
+- `makemigrations` refuses an `fk` / `o2o` that names a model instead of its table, or a column its registered table lacks; a table no model registers only warns.
+- `manage check` reports model changes with no migration and migrations not yet applied.
+- The translations editor reloads translators registered with `i18n::db::register_live_translator` after a save, and its 500s no longer carry driver text.
+- MCP `tools/call` sends `structuredContent` only for an object result; `resources/list` gives each skill resource a `name` and lists a URI once.
+- `server::Builder::brand_storage` / `Cli::brand_storage` store tenant logos and favicons on a shared disk; `purge-tenant` deletes them there.
+- A bare-word `default = "current_user"` (or `session_user`, `user`) is refused with a message that says it works on Postgres only.
+
+### Fixed — single-database admin and CLI
+
+- Bare-admin writes record the signed-in user as the audit source, not `system`.
+- Single-database `migrate` and the `runserver` auto-migrate fire `pre_migrate` / `post_migrate` on every backend.
+- `runserver` auto-migrate can be turned off (`[server] migrate_on_boot = false`, `Cli::migrate_on_boot(false)`) and waits at most `[server] migrate_lock_timeout_secs` (300) for the lock.
+- New single-database verbs: `audit-cleanup`, `reset-password`, `change-password`, `set-admin-active`, `reset-admin-totp`; tenancy gains `reset-operator-totp`. The TOTP resets are audited.
+- The bare admin can turn TOTP off with a current code (`/account/totp/disable`); enrolling, turning off and failed codes (at login and enrollment too) write audit rows.
+- The operator console can remove another operator's two-factor device (`/operators/{id}/reset-totp`), audited.
+- Bare-admin change-password refuses the current password and no longer overwrites a change made during the check.
+
+### Fixed — REST API and template views
+
+- A ViewSet panics when built with a name its model lacks in `fields`, `filter_fields`, `search_fields`, `ordering_fields`, `ordering` or `related_filter`, instead of dropping it.
+- `require_auth` answers a failed credential lookup with a JSON `503` and no driver text; its 401/403 bodies use the API error JSON shape.
+- The OpenAPI docs declare framework API keys as `Authorization: Bearer`, not `X-API-Key`.
+- ViewSet OpenAPI lists the DELETE `409`; ViewSet and `Serializer` schemas carry `enum`, `maxLength`, `minimum` and `maximum`.
+- Cursor pagination reads the cursor under a serializer's renamed key; a serializer that drops it panics at mount.
+- `[security] cors_allowed_headers`, `cors_expose_headers` and `cors_allow_credentials` feed `CorsLayer::from_settings`, on top of the framework's lists.
+- A ViewSet and `permission_required(_or_403)` answer a permission read error with a logged `503`, not a `403`.
+- `CorsLayer::from_settings` allows `Idempotency-Key`, `If-Match`, `If-None-Match` and `X-Date`, and exposes `Retry-After`, `Idempotent-Replayed`, `ETag`, `Location` and `Link` (also on `permissive()`).
+- `LinkHeaderBuilder` merges a base URL's query instead of adding a second `?`.
+- UpdateView re-renders a refused form with `object` and `pk`, and prefills inputs in the shape they accept.
+- DetailView and TemplateView stamp `csrf_token` / `csrf_input`; tenant ListView stamps `page_marks`.
+- FormView keeps form-wide errors under `__all__` and answers an invalid form with `422`.
+- Create/UpdateView mark neither a bool checkbox nor a `blank` string `required`, and accept an empty `blank` string; on create a defaulted field is optional and takes its column default when sent empty.
+
+### Fixed — admin, auth and run-server
+
+- An admin edit refused on error shows the typed inline rows again, with the ContentType picker on edit and create.
+- The bare admin serves the favicon its pages link (`<admin_prefix><static_url>/icon.png`); the TOTP page drops a link to a missing stylesheet.
+- `check --deploy` checks `RUSTANGO_APEX_DOMAIN` only on a tenancy Cli; api and fullstack projects get no tenancy lines in `.env.example`.
+- The Basic-auth admin gate and API-key auth take a slot on the shared account-lock or per-IP counter before the compare and count only failures, so a parallel burst cannot pass the lock or limit, even across replicas; a right credential gives its slot back and leaves nothing behind.
+- `require_perm` answers a permission read error with a logged JSON `503`, not a `403`.
+- `run-server` reaches path-prefix tenants at `<apex>/<prefix>` and builds tenant links with `--apex`.
+- SQLite/MySQL tenancy `runserver` opens the registry with the framework pool setup (tuning, WAL, file created) and honours `shutdown_timeout_secs`.
+
+### Added — `rgo` short name
+
+- `#[derive(Model)]` reads `#[rgo(...)]` like `#[rustango(...)]`; both names on one item or field is a compile error.
+- `cargo rgo` runs the `cargo rustango` scaffolder, and `cargo rustango new --alias rgo` writes `rgo = { package = "rustango", … }` with `rgo::` paths and `#[rgo(...)]` in the generated code.
+
+### Fixed — migrations, auth, i18n, admin and REST
+
+- `manage migrate <target>` applies the framework's system chain first, so a project migration with an FK to a framework table runs on a fresh database; an unknown target fails before anything runs.
+- `forget-pending` refuses a migration that a later one names in `prev` or `merges`, and names those files.
+- A data op with several SQL statements runs on PG and MySQL too; data-op SQL is sent unprepared.
+- Password-reset, email-verification and magic links join a `base_url` query with `&` and keep a `#fragment` last; signed URLs leave the fragment out of the signature.
+- The i18n seed and the translations editor skip, with a warning, a key longer than the 200-char column instead of failing every row; `docs/logging.md` lists the `rustango::i18n` target.
+- `LocaleMiddleware` matches the language cookie like `Accept-Language`, so `fr-CA` falls back to `fr`.
+- Admin list facets on a field named `page`, `q`, `year`, `month`, `day`, `count`, `trashed` or `facet_show_all` link `?<field>__exact=` and filter.
+- A ViewSet's create/update body cap follows a `BodyLimitLayer`, raised or lowered; without one it stays 4 MiB.
+- `derive(Model)` with a `Decimal` field builds with the `sqlite` feature; SQLite reads it from its NUMERIC cell (a `SUM` there is still `f64`).
+- `manage startapp` and `make:*` write `rgo::` paths and `#[rgo(...)]` in a project whose Cargo.toml renames the dependency to `rgo`, also through `rgo = { workspace = true }`.
+- Attribute hints quote `#[rgo(...)]` when the model uses that name.
+
+### Changed — SaaS soak example
+
+- `platform_commerce_saas` ViewSets need a Bearer token and the model's codenames; the soak signs in with a per-tenant API user. `/shop` stays anonymous, and the single-database twin keeps open ViewSets until it has API sign-in.
+- `platform_commerce_saas` `POST /api/v1/orders/{id}/confirm`, `/api/v1/payments` and `/api/v1/refunds` need a Bearer token and the order change codename.
+
+### Fixed — ORM shortcuts
+
+- `update().set()` on one field twice keeps the last value on every backend; Postgres refused it.
+- `chunk`, `chunk_by_id` and `each` work on an `i32` primary key and on one with a renamed column.
+- `find_many`, `find_many_or_fail`, `where_in` and `destroy` split a key list past the dialect's bind cap, counting `1_i32` and `1_i64` as one key.
+- `latest` / `earliest` skip NULLs, so every backend returns the same row.
+- `last()` on a sliced queryset returns the last row of the slice; with only an `offset` it reads two rows, not the whole tail.
+- `destroy` past the bind cap runs its batches in one transaction: all keys go, or none.
+
+### Fixed — migrations, secrets and auth
+
+- `makemigrations` refuses a column dropped beside a new column of the same type on one table (a likely rename that would delete the data), and names the `--empty` + `RenameColumn` route; `--drop-and-add` writes the drop + add on purpose. Every `DropColumn` now warns that its data goes.
+- `make_migrations_with`, `make_migrations_for_scope_with`, `make_migrations_for_app_with`, `make_migrations_scoped_with` and `make_migrations_from_with` are public and take a `DropAndAdd`.
+- Tenancy `makemigrations` plans the system, registry and tenant files before writing any, so a refused scope leaves no half-written run.
+- `reseal-tenant-secrets` re-seals operator TOTP secrets, so a key rotation no longer locks enrolled operators out of the console.
+- Tenancy `ModelBackend` Basic auth takes the same per-request slot before the cached-credential check, so a parallel burst cannot pass the account lock.
+- `jwt::decode` reads a fractional `exp` / `nbf` as a NumericDate instead of ignoring it, and refuses a non-numeric one.
+- CLI errors no longer start with `invalid migration:`; `migrate <target>` prints `applied` / `unapplied` per file, also when it rolls back files after a pending target, and `post_migrate` lists only the applied ones; migrate messages, `manage help` and the PG-only column decode errors drop stale version and issue references.
+- `migrate --squash` runs the `makemigrations` relation checks before it deletes the pending files.
+- `manage help` lists `create-admin`, and lists the admin and TOTP verbs only in builds that have them.
+- The admin's missing-table page names `makemigrations`; the tenancy quickstart, operator TOTP recovery and the CreateView example in the docs work as written.
+
+### Fixed — wrong data: cache counters, dumps, admin inlines
+
+- `Cache::incr` on `DatabaseCache` (PG, MySQL) no longer resets a 19-digit counter to `by`; every backend errors on i64 overflow, and `RedisCache` returns the exact value past 2^53.
+- `dumpdata` → `loaddata` keeps every f64 bit and tells JSON `null` from SQL NULL; a NOT NULL JSON column holding `null` reloads. Seed fixtures (`rustango::fixtures`) load JSON values as written, `{"$json": …}` included.
+- The admin re-shows a refused edit's inline rows by PK; a posted row not in the shown list (deleted, or past the row cap) shows as an error instead of moving its values onto another row.
+
 ## [0.61.9] — 2026-10-28
 
 ### Fixed — ORM and migrations

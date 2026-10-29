@@ -641,6 +641,12 @@ pub struct ServerSettings {
     /// are closed. `None` means 20. Keep it under the orchestrator's
     /// grace period (30 s on Kubernetes).
     pub shutdown_timeout_secs: Option<u64>,
+    /// Single-database `runserver` applies migrations before it binds.
+    /// `None` means on. Set `false` when a deploy step runs `migrate`.
+    pub migrate_on_boot: Option<bool>,
+    /// Seconds a booting server waits for another run's migrate lock
+    /// before it exits. `None` means 300.
+    pub migrate_lock_timeout_secs: Option<u64>,
 }
 
 impl ServerSettings {
@@ -780,6 +786,13 @@ pub struct SecuritySettings {
     /// allows everything, though browsers reject it with
     /// credentials.
     pub cors_allowed_origins: Vec<String>,
+    /// Request headers CORS allows on top of the framework's list.
+    pub cors_allowed_headers: Vec<String>,
+    /// Response headers CORS exposes to scripts on top of the framework's list.
+    pub cors_expose_headers: Vec<String>,
+    /// `true` sends `Access-Control-Allow-Credentials`. Default `false`;
+    /// refused, with a logged error, next to `"*"` origins.
+    pub cors_allow_credentials: Option<bool>,
     /// Allowed Host headers, enforced by
     /// [`crate::host_validation::AllowedHostsLayer`]. An entry is a
     /// hostname, a `.example.com` wildcard, or `*`. Empty turns the

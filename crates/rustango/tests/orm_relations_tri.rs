@@ -1014,6 +1014,32 @@ async fn sliced_in_bulk_past_the_bind_cap_is_refused(pool: &Pool) {
     }
 }
 
+/// A union of `select_related` branches takes an outer ORDER BY.
+async fn ordered_union_of_select_related(pool: &Pool) {
+    seed_rows(pool, 1..3).await;
+    for (id, row) in [(2, 1), (4, 2), (6, 1)] {
+        Child {
+            id,
+            row: ForeignKey::unloaded(row),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("child");
+    }
+    let kid = |id: i64| Child::objects().select_related("row").filter("id", id);
+    let kids: Vec<Child> = kid(2)
+        .union(kid(4))
+        .order_by(&[("id", true)])
+        .fetch(pool)
+        .await
+        .expect("ordered union of select_related");
+    let got: Vec<(i64, Option<i64>)> = kids
+        .iter()
+        .map(|c| (c.id, c.row.value().map(|r| r.n)))
+        .collect();
+    assert_eq!(got, [(4, Some(2)), (2, Some(1))]);
+}
+
 /// 33k parents: past SQLite's budget, which is the smallest.
 async fn prefetch_past_the_bind_cap(pool: &Pool) {
     seed_rows(pool, 0..ROWS).await;
@@ -1660,6 +1686,7 @@ tri_dialect_test! {
         in_bulk_beside_carried_binds,
         carried_binds_alone_over_the_cap_are_refused,
         prefetch_past_the_bind_cap,
+        ordered_union_of_select_related,
         prefetch_fills_every_copy_of_a_parent,
         prefetch_soft_past_the_bind_cap,
         prefetch_matches_an_fk_on_a_unique_column,

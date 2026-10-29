@@ -384,3 +384,35 @@ async fn enabled_parses_a_closed_set_case_insensitively() {
         .expect_err("not a yes/no value");
     assert!(err.contains("maybe"), "{err}");
 }
+
+/// `purge-tenant` through a `Cli` deletes the brand files in `Cli::brand_storage`.
+#[cfg(feature = "manage")]
+#[tokio::test]
+async fn purge_deletes_brand_files_from_the_cli_store() {
+    use rustango::storage::{BoxedStorage, InMemoryStorage};
+    let b = boot().await;
+    let slug = b.tenant("brandco").await;
+    let store: BoxedStorage = Arc::new(InMemoryStorage::new());
+    store.save("brandco/logo.png", b"png").await.unwrap();
+    // The only test here that reads the env.
+    std::env::set_var("DATABASE_URL", &b.url);
+    let ran = rustango::manage::Cli::new()
+        .tenancy()
+        .migrations_dir(b.migrations.path())
+        .brand_storage(store.clone())
+        .run_with_args(
+            [
+                "purge-tenant",
+                &slug,
+                "--confirm",
+                &slug,
+                "--purge-database",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+        )
+        .await;
+    std::env::remove_var("DATABASE_URL");
+    ran.expect("purge");
+    assert!(!store.exists("brandco/logo.png").await.unwrap());
+}

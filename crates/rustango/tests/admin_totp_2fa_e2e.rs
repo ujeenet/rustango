@@ -626,3 +626,53 @@ async fn fresh_install_login_works_without_the_enroll_page() {
         .await
         .is_ok());
 }
+
+/// `totp_failed` audit rows for `user_id`.
+async fn failed_rows(pool: &Pool, user_id: i64) -> usize {
+    rustango::audit::AuditLog::objects()
+        .filter("entity_pk", user_id.to_string())
+        .fetch(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.changes["action"] == "totp_failed")
+        .count()
+}
+
+/// A wrong code at login and at enrollment writes a `totp_failed` row.
+#[tokio::test]
+async fn wrong_codes_at_login_and_enroll_are_audited() {
+    let (pool, _alice) = seed().await;
+    rustango::audit::ensure_table_pool(&pool).await.unwrap();
+    let (id, _secret) = enrolled_user(&pool, "frank1715").await;
+    let app = router(pool.clone());
+    let csrf = fetch_csrf(&app).await;
+    let (_s, sess) = login(&app, &csrf, "frank1715", "correct horse", "000000").await;
+    assert!(!sess);
+    assert_eq!(failed_rows(&pool, id).await, 1, "login");
+
+    let mut gina = AdminUser::new_with_password("gina1715", "correct horse", true).unwrap();
+    gina.insert_pool(&pool).await.unwrap();
+    let gina_id = *gina.id.get().unwrap();
+    let session = session_cookie(&app, &csrf, "gina1715", "").await;
+    let cookies = format!("rustango_csrf={csrf}; {session}");
+    totp_page(&app, &cookies, None).await;
+    let device = totp_store::device(&pool, gina_id).await.expect("pending");
+    let secret = TotpSecret::from_base32(&device.secret_base32).unwrap();
+    let now = unix_now();
+    let wrong = (0..1_000_000u32)
+        .map(|n| format!("{n:06}"))
+        .find(|c| {
+            ![now - 30, now, now + 30]
+                .iter()
+                .any(|t| *c == rustango::totp::generate_at(&secret, *t, 30, 6))
+        })
+        .unwrap();
+    totp_page(
+        &app,
+        &cookies,
+        Some(format!("_csrf={csrf}&totp_code={wrong}")),
+    )
+    .await;
+    assert_eq!(failed_rows(&pool, gina_id).await, 1, "enroll");
+}

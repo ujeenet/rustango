@@ -83,7 +83,7 @@ alcanzan mediante `Cli::tenancy()`.
 | `downgrade [N]` | Revierte las últimas N migraciones |
 | `showmigrations` / `status` | Lista las migraciones y su estado de aplicación |
 | `sqlmigrate <name>` | Imprime el SQL que ejecutaría una migración, sin ejecutarlo |
-| `forget-pending <name>` | Borra un JSON de migración no aplicada |
+| `forget-pending <name>` | Borra un JSON de migración no aplicada del que no depende ninguna posterior |
 | `add-data-op --sql <SQL> [--reverse-sql <SQL>]` | Añade una operación de datos escrita a mano |
 | `inspectdb [--schema <s>] [--table <t>]` | Lee un esquema existente y emite código `#[derive(Model)]` |
 
@@ -91,7 +91,7 @@ alcanzan mediante `Cli::tenancy()`.
 
 | Verbo | Qué hace |
 |---|---|
-| `dumpdata` | Exporta filas como fixtures JSON |
+| `dumpdata` | Exporta filas como fixtures JSON. Los flotantes conservan cada bit; una columna JSON con el `null` de JSON se escribe `{"$json": null}`, aparte del NULL de SQL (`null`) |
 | `loaddata <fixture.json> [--fail-fast]` | Vuelve a cargar fixtures JSON. Una carga fallida o parcial no se revierte |
 | `flush [--yes] [--app <label>] [--model <name>]` | Vacía todas las tablas de modelos; las banderas limitan el conjunto. Se omiten los modelos no gestionados y las vistas. Postgres usa `TRUNCATE … RESTART IDENTITY` y falla si una tabla fuera del filtro referencia un objetivo (un enlace `ON DELETE CASCADE` desde ella la vacía igualmente en MySQL / SQLite); MySQL / SQLite borran las filas en una transacción, hijos primero, y conservan los contadores de id. Un proyecto con tenancy necesita `--tenant <slug>` y solo vacía ese tenant |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Borrado masivo en streaming; `--pretend` informa sin borrar |
@@ -121,8 +121,11 @@ alcanzan mediante `Cli::tenancy()`.
 |---|---|
 | `showmodels [--format plain\|json] [--app <label>]` | Cada modelo registrado, ordenado para una salida determinista |
 | `showurls [--format plain\|json]` | Cada ruta con nombre, ordenada |
-| `check [--deploy]` | Comprobaciones de salud; `--deploy` añade las auditorías de producción |
+| `check [--deploy]` | Comprobaciones de salud, cambios de modelos sin migración y migraciones sin aplicar; `--deploy` añade las auditorías de producción |
 | `create-admin` | Crea una fila `AdminUser` para proyectos que usan `admin::Builder::with_session_auth`. **No** está condicionado a `tenancy` — recibe un `&Pool` simple y escribe `rustango_admin_users`, creando la tabla si falta. La única forma de conseguir un primer login de admin en un proyecto sin tenancy |
+| `reset-password <username>` / `change-password <username>` | Fija la contraseña de un usuario admin (una sola base); `change-password` comprueba antes la actual. Mismas opciones de contraseña que `create-admin` |
+| `set-admin-active <username> --on\|--off` | Desactiva un usuario admin (sus sesiones terminan) o lo reactiva |
+| `reset-admin-totp <username>` | Quita el dispositivo de dos factores de un usuario admin tras perder el teléfono. Auditado con origen `cli` |
 | `about` / `version` / `--version` | Información de build y versión |
 | `docs` | Abre la documentación |
 
@@ -136,6 +139,7 @@ alcanzan mediante `Cli::tenancy()`.
 | `set-password-link <slug> <username>` | Imprime un enlace de un solo uso para que el usuario fije su propia contraseña |
 | `reset-operator-password` / `change-operator-password` | Recuperación de contraseña de operador; `change-operator-password` lee la contraseña actual igual que `change-password` |
 | `set-operator-active` | Activa o desactiva un operador |
+| `reset-operator-totp <username>` | Quita el dispositivo de dos factores de un operador tras perder el teléfono. Auditado en el registry con origen `cli` |
 | `create-role` / `assign-role` / `revoke-role` / `list-roles` | Roles |
 | `grant-perm` / `revoke-perm` | Permisos por codename |
 | `seed-permissions [--slug <s>]` | Siembra las filas de permisos por defecto |
@@ -154,7 +158,7 @@ alcanzan mediante `Cli::tenancy()`.
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Enrutado por host |
 | `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Servidores de bases de datos guardados |
 | `test-tenant-connection` | Verifica que la base de un tenant es alcanzable |
-| `reseal-tenant-secrets [--apply]` | Vuelve a sellar las URL de tenant y las contraseñas de servidor guardadas con la `RUSTANGO_SECRET_KEY` actual; sin `--apply` es una prueba en seco |
+| `reseal-tenant-secrets [--apply]` | Vuelve a sellar las URL de tenant, las contraseñas de servidor y los secretos TOTP de operador y SSO guardados con la `RUSTANGO_SECRET_KEY` actual; sin `--apply` es una prueba en seco |
 | `prewarm-pools` | Abre los pools de tenants antes de la primera petición |
 | `run-server` / `runserver` | Ejecuta el servidor multi-tenant |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Puntos de entrada de configuración e interactivos |
@@ -215,6 +219,12 @@ cargo run -- makemigrations rename_status_to_state   # custom suffix
 
 **NO detectados automáticamente** (renombrar vs. eliminar+añadir es ambiguo):
 - `RenameTable`, `RenameColumn` — usa `--empty` y edita el JSON.
+
+Una columna eliminada junto a una columna nueva del mismo tipo en una tabla
+parece un campo renombrado, y eliminar+añadir borraría sus datos.
+`makemigrations` lo rechaza y nombra las columnas; escribe el `RenameColumn`
+como abajo, o pasa `--drop-and-add` para eliminar y añadir a propósito. Cada
+otro `DropColumn` avisa de que sus datos se pierden.
 
 ### `makemigrations --app <app>`
 
@@ -762,7 +772,7 @@ Imprime la versión del framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.9
+rustango 0.61.10
 ```
 
 ### `about`
@@ -774,7 +784,7 @@ Incluye esto en los tickets de soporte cuando algo va mal.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.9
+  version:        0.61.10
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -953,6 +963,16 @@ resto. SSE y long-poll nunca terminan solos. Las ejecuciones de aprovisionamient
 y migración que un proceso detenido dejó en `running` más de una hora se marcan
 como fallidas en el siguiente arranque, y un reintento del webhook con el mismo
 `event_id` se ejecuta de nuevo.
+
+Un `runserver` de una sola base aplica las migraciones pendientes antes de
+escuchar y dispara `pre_migrate` / `post_migrate` como `migrate`. Espera hasta
+`[server] migrate_lock_timeout_secs` (300 por defecto) el bloqueo de otra
+ejecución y luego termina. Desactívelo con `[server] migrate_on_boot = false`
+(`RUSTANGO__SERVER__MIGRATE_ON_BOOT=false`) o `Cli::migrate_on_boot(false)`.
+En un despliegue gradual con varias réplicas, desactívelo y ejecute `migrate` una
+vez como job previo al despliegue, para que ningún pod migre mientras los
+antiguos siguen sirviendo. El servidor tenancy nunca migra al arrancar; ejecute
+`migrate` usted mismo.
 
 ### `create-tenant <slug> [options]`
 
@@ -1190,7 +1210,7 @@ consola entre tenants. Los operadores viven en el registry compartido, no dentro
 de un tenant concreto.
 
 ```bash
-cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-operator admin --generate     # mostrar una aleatoria en su lugar
 ```
 
@@ -1332,6 +1352,9 @@ En el log del registry es donde la consola de operador anota lo que han hecho
 los operadores, así que crece con el uso de la consola. Nombrar un tenant
 (`--tenant`) pide ese tenant y deja el registry en paz. Un tenant roto se
 informa y se cuenta en lugar de terminar el barrido.
+
+Un proyecto de una sola base tiene el mismo verbo con `--days`, `--keep-last` y
+`--yes`; recorta el único log de auditoría.
 
 ### Ver qué ha pasado
 
@@ -1592,8 +1615,9 @@ cargo rustango new myapp --template tenant
 cd myapp
 cp .env.example .env             # edit DATABASE_URL + RUSTANGO_APEX_DOMAIN
 docker compose up -d
+cargo run -- makemigrations                               # files for your models
 cargo run -- migrate                                      # registry + tenants
-cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
 cargo run -- create-user acme alice --password tenantpw --superuser

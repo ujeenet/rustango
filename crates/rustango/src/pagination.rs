@@ -163,15 +163,11 @@ impl LinkHeaderBuilder {
             } else {
                 ("page", rel.as_str())
             };
-            let mut url = self.base_url.clone();
-            let mut query = self.extra_query.clone();
+            // The base query merges with the kept params; `page`/`cursor` are ours.
+            let mut query = query_params(&self.base_url, &["page", "cursor"]);
+            query.extend(self.extra_query.clone());
             query.insert(param_key.to_owned(), value.clone());
-            url.push('?');
-            let qs: Vec<String> = query
-                .iter()
-                .map(|(k, v)| format!("{}={}", url_encode(k), url_encode(v)))
-                .collect();
-            url.push_str(&qs.join("&"));
+            let url = join_url(strip_query(&self.base_url), &query);
             entries.push(format!("<{url}>; rel=\"{rel_str}\""));
         }
         entries.join(", ")
@@ -306,6 +302,11 @@ fn cursor_url(base: &str, cursor: Option<&str>, page_size: usize) -> String {
 }
 
 fn base_params(base: &str) -> BTreeMap<String, String> {
+    query_params(base, &["page", "page_size", "cursor"])
+}
+
+/// `base`'s query, decoded, without the `dropped` keys.
+fn query_params(base: &str, dropped: &[&str]) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     if let Some(qs) = base.split('?').nth(1) {
         for pair in qs.split('&') {
@@ -318,8 +319,7 @@ fn base_params(base: &str) -> BTreeMap<String, String> {
                 crate::url_codec::url_decode(k),
                 crate::url_codec::url_decode(v),
             );
-            // Drop the params overridden below.
-            if !matches!(k.as_str(), "page" | "page_size" | "cursor") {
+            if !dropped.contains(&k.as_str()) {
                 out.insert(k, v);
             }
         }
@@ -403,6 +403,19 @@ mod tests {
             })
             .build();
         assert_eq!(h, "");
+    }
+
+    /// A base URL with a query keeps it, with one `?` and no stale page.
+    #[test]
+    fn a_base_query_merges_into_each_link() {
+        let h = LinkHeaderBuilder::new("/api/posts?status=draft&page=7")
+            .keep_param("search", "rust")
+            .rel("next", 2)
+            .build();
+        assert_eq!(
+            h,
+            r#"</api/posts?page=2&search=rust&status=draft>; rel="next""#
+        );
     }
 
     #[test]

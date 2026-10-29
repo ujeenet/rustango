@@ -107,3 +107,65 @@ pub(super) fn total_statement(
     d.compile_count(&crate::core::CountQuery::from_select(all))
         .map(Some)
 }
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use crate::core::{
+        CompoundBranch, FieldSchema, FieldType, ModelSchema, NullsOrder, OrderItem, SelectQuery,
+        SetOp,
+    };
+
+    const ITEM: &ModelSchema = &{
+        const FIELDS: &[FieldSchema] = &[
+            FieldSchema::new("id", "id", FieldType::I64),
+            FieldSchema::new("name", "name", FieldType::String),
+            FieldSchema::new("rnk", "rnk", FieldType::I64),
+        ];
+        let mut s = ModelSchema::new("PageItem", "page_item");
+        s.fields = FIELDS;
+        s
+    };
+
+    /// `name` values of two branches joined by `op`, paged by `rnk`.
+    fn paged(op: SetOp) -> SelectQuery {
+        let mut q = SelectQuery::new(ITEM);
+        q.projection = Some(vec!["name"]);
+        q.compound = vec![CompoundBranch {
+            op,
+            query: Box::new(q.clone()),
+        }];
+        q.compound_order_by = vec![OrderItem::Column {
+            column: "rnk",
+            desc: false,
+            nulls: NullsOrder::Default,
+        }];
+        q.compound_limit = Some(2);
+        q
+    }
+
+    /// A paged set op ordered outside its projection counts its total over
+    /// the projected columns, and refuses one that removes duplicates.
+    #[test]
+    fn paged_set_op_ordered_outside_the_projection() {
+        let d = &crate::sql::Sqlite;
+        let sql = super::paginated_statement(d, &paged(SetOp::UnionAll))
+            .expect("UNION ALL")
+            .sql;
+        assert!(
+            sql.starts_with(r#"SELECT "name", COUNT(*) OVER () AS "__rustango_total""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#") AS "__rustango_set" ORDER BY "rnk""#),
+            "{sql}"
+        );
+        let err = super::paginated_statement(d, &paged(SetOp::Union)).expect_err("UNION");
+        assert!(
+            matches!(
+                err,
+                crate::sql::SqlError::SetOpOrderOutsideProjection { column: "rnk" }
+            ),
+            "{err:?}"
+        );
+    }
+}

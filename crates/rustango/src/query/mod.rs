@@ -974,6 +974,21 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// Whether a limit or offset is set, on the query or its head branch.
+    /// An `offset` with no limit and no set-op slice: the window is the tail.
+    pub(crate) fn is_offset_only(&self) -> bool {
+        self.offset.is_some()
+            && self.limit.is_none()
+            && self.head_limit.is_none()
+            && self.head_offset.is_none()
+    }
+
+    /// This queryset with its own `offset` dropped.
+    #[must_use]
+    pub(crate) fn without_offset(mut self) -> Self {
+        self.offset = None;
+        self
+    }
+
     pub(crate) fn is_sliced(&self) -> bool {
         self.limit.is_some()
             || self.offset.is_some()
@@ -2448,7 +2463,7 @@ impl<T: Model> UpdateBuilder<T> {
         self.qs.refuse_unwritable_shape()?;
         let model: &'static ModelSchema = T::SCHEMA;
 
-        let assignments = self
+        let mut assignments = self
             .set
             .into_iter()
             .map(|p| match p {
@@ -2457,6 +2472,11 @@ impl<T: Model> UpdateBuilder<T> {
                 PendingAssignment::Resolved(assignment) => Ok(assignment),
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // Last write wins: Postgres refuses two assignments to one column.
+        let mut seen = std::collections::HashSet::new();
+        assignments.reverse();
+        assignments.retain(|a| seen.insert(a.column));
+        assignments.reverse();
 
         let where_clause = resolve_pending(model, self.qs.pending)?;
         // `.none().update().set(...)` affects nothing, for the same

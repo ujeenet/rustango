@@ -17,9 +17,9 @@ pub enum MigrateError {
     Io(#[from] std::io::Error),
     #[error("migration file JSON: {0}")]
     Json(#[from] serde_json::Error),
-    /// Internal-consistency failure on a migration file (e.g. a
-    /// `DataOp` flagged `reversible: true` with no `reverse_sql`).
-    #[error("invalid migration: {0}")]
+    /// A refused request: bad CLI usage, a failed check, or a broken
+    /// migration file. The message names which, so it has no prefix.
+    #[error("{0}")]
     Validation(String),
     /// From the executor, for example when [`apply_all_pool`] or
     /// [`drop_all_pool`] run SQL through `raw_execute_pool`.

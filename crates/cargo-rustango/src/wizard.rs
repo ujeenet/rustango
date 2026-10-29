@@ -7,7 +7,7 @@
 
 use std::io::{self, IsTerminal, Write};
 
-use crate::{Backend, NewArgs, NewFlags, Template, OPTIONAL_FEATURES};
+use super::{Backend, NewArgs, NewFlags, Template, OPTIONAL_FEATURES};
 
 const TEMPLATES: &[(&str, Template, &str)] = &[
     (
@@ -100,6 +100,7 @@ fn ask(given: NewFlags, name_was_given: bool, prompt: &mut Prompt<'_>) -> Result
         backend,
         features,
         rustango_path: given.rustango_path,
+        dep: given.dep,
     };
 
     println!();
@@ -129,6 +130,9 @@ fn equivalent_command(args: &NewArgs) -> String {
     if let Some(path) = &args.rustango_path {
         cmd.push_str(&format!(" --rustango-path {}", shell_quote(path)));
     }
+    if args.dep != super::DepName::Rustango {
+        cmd.push_str(&format!(" --alias {}", args.dep.ident()));
+    }
     cmd
 }
 
@@ -152,7 +156,7 @@ fn ask_name(prompt: &mut Prompt<'_>) -> Result<String, String> {
             println!("  a name is required");
             continue;
         }
-        match crate::validate_name(name) {
+        match super::validate_name(name) {
             Ok(()) => return Ok(name.to_owned()),
             Err(e) => println!("  {e}"),
         }
@@ -302,6 +306,7 @@ mod tests {
                 backend,
                 features: features.clone(),
                 rustango_path: None,
+                dep: super::super::DepName::Rustango,
             };
             let cmd = equivalent_command(&args);
             // Re-parse it exactly as a user retyping the line would.
@@ -310,7 +315,7 @@ mod tests {
                 .skip(3) // `cargo rustango new`
                 .map(str::to_owned)
                 .collect();
-            let back = crate::parse_new_args(&argv, false)
+            let back = super::super::parse_new_args(&argv, false)
                 .unwrap_or_else(|e| panic!("`{cmd}` does not parse: {e}"));
             assert_eq!(back.name, "probe", "{cmd}");
             assert_eq!(back.template, template, "{cmd}");
@@ -327,7 +332,7 @@ mod tests {
             .iter()
             .map(|s| (*s).to_owned())
             .collect();
-        let flags = crate::parse_new_flags(&argv, true).expect("parse");
+        let flags = super::super::parse_new_flags(&argv, true).expect("parse");
         let mut asked = Vec::new();
         let mut enter = |label: &str| {
             asked.push(label.to_owned());
@@ -343,7 +348,7 @@ mod tests {
     /// Absent flags are still asked, and Enter takes the documented default.
     #[test]
     fn missing_template_and_backend_are_asked_with_defaults() {
-        let flags = crate::parse_new_flags(&["shop".to_owned()], true).expect("parse");
+        let flags = super::super::parse_new_flags(&["shop".to_owned()], true).expect("parse");
         let mut asked = 0;
         let mut enter = |_: &str| {
             asked += 1;
@@ -371,7 +376,7 @@ mod tests {
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
-        let flags = crate::parse_new_flags(&argv, true).expect("parse");
+        let flags = super::super::parse_new_flags(&argv, true).expect("parse");
         let sso = OPTIONAL_FEATURES
             .iter()
             .filter(|(n, _)| !Template::Api.base_features().contains(n))
@@ -394,10 +399,11 @@ mod tests {
             backend: Backend::Sqlite,
             features: vec![],
             rustango_path: Some("../rustango/crates/rustango".to_owned()),
+            dep: super::super::DepName::Rustango,
         };
         let cmd = equivalent_command(&args);
         let argv: Vec<String> = cmd.split_whitespace().skip(3).map(str::to_owned).collect();
-        let back = crate::parse_new_args(&argv, false).expect("parses");
+        let back = super::super::parse_new_args(&argv, false).expect("parses");
         assert_eq!(back.rustango_path, args.rustango_path, "{cmd}");
 
         args.rustango_path = Some("my dir/it's".to_owned());

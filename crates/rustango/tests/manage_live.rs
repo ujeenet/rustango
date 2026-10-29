@@ -659,7 +659,7 @@ async fn purge_tenant_schema_mode_drops_schema_and_org_row() {
     for f in ["logo.png", "favicon.ico"] {
         assert!(!brand_dir.join(f).exists(), "{f} survived the purge");
     }
-    assert!(out.contains("custom brand store"), "{out}");
+    assert!(out.contains("removed brand files under"), "{out}");
 
     // Schema gone (CASCADE took the marker table with it).
     let exists: bool = sqlx::query_as::<_, (bool,)>(

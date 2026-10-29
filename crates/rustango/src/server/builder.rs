@@ -118,6 +118,8 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     header_resolver: Option<HeaderResolver>,
     /// Serves requests that resolve no tenant; `None` routes them as before.
     unresolved: Option<ApiRouter>,
+    /// Tenant logos and favicons; `None` is the per-pod local default.
+    brand_storage: Option<crate::storage::BoxedStorage>,
     /// Wraps both Host branches, inside the security headers.
     #[cfg(feature = "template_views")]
     error_pages: Option<crate::errors::ErrorPagesLayer>,
@@ -148,7 +150,8 @@ impl Builder<sqlx::Postgres> {
         let apex = crate::tenancy::server::apex_domain();
         let registry_url = crate::env::database_url_from_env()
             .unwrap_or_else(|_| "postgres://rustango:rustango@localhost:5432/rustango_test".into());
-        let registry = crate::sql::Pool::connect_postgres(&registry_url).await?;
+        use crate::tenancy::RegistryConnect as _;
+        let registry = sqlx::Postgres::connect_registry(&registry_url).await?;
         Ok(Self::from_pool(registry, registry_url, apex))
     }
 }
@@ -203,6 +206,7 @@ impl<DB: Database> Builder<DB> {
             real_ip: None,
             header_resolver: None,
             unresolved: None,
+            brand_storage: None,
             #[cfg(feature = "template_views")]
             error_pages: None,
             _phantom: PhantomData,
@@ -355,6 +359,16 @@ impl<DB: Database> Builder<DB> {
     #[must_use]
     pub fn span_redact(mut self, params: Vec<String>) -> Self {
         self.span_redact = Some(params);
+        self
+    }
+
+    /// Store tenant logos and favicons in `storage`, for the operator console
+    /// and the tenant admin. The default is a local dir on each pod, so
+    /// several replicas or a redeploy lose them: pass a shared disk, e.g.
+    /// `StorageRegistry::disk("s3")`.
+    #[must_use]
+    pub fn brand_storage(mut self, storage: crate::storage::BoxedStorage) -> Self {
+        self.brand_storage = Some(storage);
         self
     }
 
@@ -817,6 +831,10 @@ impl<DB: Database> Builder<DB> {
         )
         .routes(self.routes.clone())
         .link_apex(link_apex.clone());
+        let brand_storage = self
+            .brand_storage
+            .unwrap_or_else(crate::tenancy::branding::default_brand_storage);
+        tenant_admin_builder = tenant_admin_builder.brand_storage(brand_storage.clone());
         if !self.show_only.is_empty() {
             tenant_admin_builder = tenant_admin_builder.show_only(self.show_only.clone());
         }
@@ -929,7 +947,6 @@ impl<DB: Database> Builder<DB> {
         // `<sub>.<apex><handoff_url>?token=<...>`, and the tenant
         // admin redeems the token + sets a host-scoped cookie. No
         // cookie is set on the operator-console origin.
-        let brand_storage_for_op = crate::tenancy::branding::default_brand_storage();
         // #1322 — only when the deployment asked for it. See
         // `with_tenant_provisioning` for why creating tenants is not
         // on by default.
@@ -975,7 +992,7 @@ impl<DB: Database> Builder<DB> {
             Some(self.pools.clone().into_invalidator()),
             provisioner,
             operator_secret,
-            brand_storage_for_op,
+            brand_storage,
             Some(session_secret_for_tenant.clone()),
             // Handoff URL on the tenant admin where the token
             // gets redeemed (#88). RouteConfig holds the canonical
@@ -1170,9 +1187,7 @@ impl<DB: Database> Builder<DB> {
     /// The standard chain, path-prefix tenants on the apex, plus the
     /// opt-in header fallback.
     pub(crate) fn resolver(&self) -> ChainResolver {
-        let chain = ChainResolver::standard(self.apex.clone()).push(
-            crate::tenancy::ApexPathPrefixResolver::new(self.apex.clone()),
-        );
+        let chain = apex_resolver(&self.apex);
         match &self.header_resolver {
             Some(h) => chain.push(h.clone()),
             None => chain,
@@ -1223,9 +1238,15 @@ impl<DB: Database> Builder<DB> {
     }
 }
 
+/// The standard chain plus path-prefix tenants on the apex; `run-server` uses it too.
+pub(crate) fn apex_resolver(apex: &str) -> ChainResolver {
+    ChainResolver::standard(apex.to_owned())
+        .push(crate::tenancy::ApexPathPrefixResolver::new(apex.to_owned()))
+}
+
 /// Where a request's tenant lookup landed; the console's fallback reads it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Resolution {
+pub(crate) enum Resolution {
     /// Under the path prefix of the tenant it resolves to.
     PrefixTenant,
     /// A tenant, not under its prefix.
@@ -1260,7 +1281,7 @@ fn warn_shadowed(shadowed: &std::sync::Mutex<std::collections::HashSet<String>>,
 
 /// Resolve `req`'s tenant, on the apex or on the tenant's host, and
 /// whether it is under that tenant's path prefix.
-async fn resolve(
+pub(crate) async fn resolve(
     req: axum::http::Request<axum::body::Body>,
     resolver: &ChainResolver,
     registry: &crate::sql::Pool,

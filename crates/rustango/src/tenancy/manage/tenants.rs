@@ -547,6 +547,7 @@ pub(super) async fn purge_tenant<W: Write + Send, DB: Database>(
     pools: &TenantPools<DB>,
     args: &[String],
     w: &mut W,
+    brand_storage: Option<crate::storage::BoxedStorage>,
 ) -> Result<(), TenancyError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
@@ -683,14 +684,18 @@ where
     if report.row_deleted {
         writeln!(w, "  removed Org row")?;
     }
-    // The CLI sees only the default local store, not one the app injected.
-    let root = super::super::branding::brand_storage_root();
-    let brand = super::super::branding::default_brand_storage();
+    // `Cli::brand_storage` when the app set one, else the local default.
+    let custom = brand_storage.is_some();
+    let brand = brand_storage.unwrap_or_else(super::super::branding::default_brand_storage);
     match super::super::branding::delete_brand_assets(&slug, &brand).await {
+        Ok(()) if custom => writeln!(
+            w,
+            "  removed brand files under `{slug}/` in the brand store"
+        )?,
         Ok(()) => writeln!(
             w,
-            "  removed brand files under `{}`; with a custom brand store, delete `{slug}/` there",
-            root.display()
+            "  removed brand files under `{}`",
+            super::super::branding::brand_storage_root().display()
         )?,
         Err(e) => writeln!(w, "  brand files left in place: {e}")?,
     }
