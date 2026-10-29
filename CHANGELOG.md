@@ -9,7 +9,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `DatabaseCache::ensure_table`, `AppBuilder::bootstrap` and the testkit table helpers no longer fail on Postgres when two processes create the same table at once.
 - `contenttypes::ensure_seeded` and `get_or_create_role` / `get_or_create_role_pool` succeed for every concurrent caller; the PG `get_or_create_role` no longer returns `RowNotFound` to the loser.
 - `loaddata` reloads tables that reference each other: a nullable link in the cycle is inserted as NULL and set after every row is in.
-- Tenancy: `downgrade --tenant <slug>` / `downgrade --all-tenants` roll back tenant-scoped migrations; plain `downgrade` now names them instead of only saying "nothing to downgrade".
+- Tenancy: `downgrade --tenant <slug>` / `downgrade --all-tenants` roll back tenant-scoped migrations; plain `downgrade` now names them instead of only saying "nothing to downgrade". `--all-tenants` prints each tenant's plan and runs it with `--yes`; a migration name rolls back to it.
+- `loaddata` defers a link only when the fixture's rows really form a cycle, relinks rows that have no `pk` through the inserted one, and sets the links of rows already in after a `--fail-fast` stop.
+- Idempotent DDL (`bootstrap`, testkit, ensure helpers) reports a SQLite duplicate column in `CREATE TABLE` and a PG table/type name clash instead of treating them as "already there".
 
 ## [0.61.10] — 2026-10-29
 

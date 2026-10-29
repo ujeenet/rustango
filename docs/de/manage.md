@@ -429,6 +429,15 @@ cargo run -- downgrade --tenant acme    # ein Tenant
 cargo run -- downgrade 2 --all-tenants  # jeder aktive Tenant, je zwei Schritte
 ```
 
+Tenants können auf unterschiedlichen Versionen stehen. `--all-tenants`
+zeigt den Plan jedes Tenants und ändert nichts; `--yes` führt ihn aus.
+Statt N eine Migration nennen, um alles danach Angewandte zurückzurollen:
+
+```bash
+cargo run -- downgrade 0001_initial --all-tenants        # der Plan
+cargo run -- downgrade 0001_initial --all-tenants --yes  # ausführen
+```
+
 ### `showmigrations` / `status`
 
 Listet jede Migration und ob sie angewendet wurde. `[X]` bedeutet angewendet,
