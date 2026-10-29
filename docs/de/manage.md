@@ -421,6 +421,14 @@ cargo run -- downgrade                  # one step
 cargo run -- downgrade 3                # three steps
 ```
 
+In einem Tenancy-Projekt rollt `downgrade` registry-weite Migrationen zurück.
+Tenant-Migrationen stehen im Ledger jedes Tenants:
+
+```bash
+cargo run -- downgrade --tenant acme    # ein Tenant
+cargo run -- downgrade 2 --all-tenants  # jeder aktive Tenant, je zwei Schritte
+```
+
 ### `showmigrations` / `status`
 
 Listet jede Migration und ob sie angewendet wurde. `[X]` bedeutet angewendet,
