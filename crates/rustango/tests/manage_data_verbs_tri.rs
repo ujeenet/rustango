@@ -2,7 +2,7 @@
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
-use rustango::core::Model as _;
+use rustango::core::{Model as _, ModelSchema};
 use rustango::sql::{
     raw_execute_pool, Array, Auto, CounterPool as _, FetcherPool as _, ForeignKey, Pool,
 };
@@ -246,6 +246,25 @@ pub struct CycMember {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     pub org: ForeignKey<CycOrg, i64>,
+}
+
+// Linked both ways, but the fixture's right rows never point back.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "mdv_ck_left", app = "mdv")]
+pub struct CkLeft {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "mdv_ck_right", on = "id")]
+    pub right_id: Option<i64>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "mdv_ck_right", app = "mdv")]
+pub struct CkRight {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "mdv_ck_left", on = "id")]
+    pub left_id: Option<i64>,
 }
 
 #[derive(Model, Debug, Clone)]
@@ -580,28 +599,52 @@ async fn flush_breaks_a_nullable_cycle(pool: &Pool) {
     assert_eq!(left, [0, 0], "rows left behind");
 }
 
-/// Tables that reference each other reload when one link is nullable.
-async fn loaddata_breaks_a_nullable_cycle(pool: &Pool) {
+/// Drop two tables that reference each other, then create them empty.
+async fn fresh_pair(pool: &Pool, a: &'static ModelSchema, b: &'static ModelSchema) {
     use rustango::testkit::matrix::drop_table;
+    // PG and MySQL drop the pair together; SQLite takes one table at a time.
+    let q = |t| pool.dialect().quote_ident(t);
+    let both = format!("DROP TABLE IF EXISTS {}, {}", q(a.table), q(b.table));
+    let _ = raw_execute_pool(pool, &both, vec![]).await;
+    drop_table(pool, b.table).await;
+    drop_table(pool, a.table).await;
+    rustango::testkit::create_tables(pool, &[a, b])
+        .await
+        .expect("cycle tables");
+}
+
+async fn fresh_cycle(pool: &Pool) {
     if let Ok(rows) = CycOrg::objects().fetch(pool).await {
         for mut o in rows {
             o.owner_id = None;
             let _ = o.save_pool(pool).await;
         }
     }
-    // PG and MySQL drop the pair together; SQLite takes one table at a time.
-    let q = |t| pool.dialect().quote_ident(t);
-    let both = format!(
-        "DROP TABLE IF EXISTS {}, {}",
-        q(CycOrg::SCHEMA.table),
-        q(CycMember::SCHEMA.table)
-    );
-    let _ = raw_execute_pool(pool, &both, vec![]).await;
-    drop_table(pool, CycMember::SCHEMA.table).await;
-    drop_table(pool, CycOrg::SCHEMA.table).await;
-    rustango::testkit::create_tables(pool, &[CycOrg::SCHEMA, CycMember::SCHEMA])
+    fresh_pair(pool, CycOrg::SCHEMA, CycMember::SCHEMA).await;
+}
+
+/// `(org id, owner id)` per org, sorted.
+async fn org_owners(pool: &Pool) -> Vec<(i64, Option<i64>)> {
+    let mut orgs: Vec<(i64, Option<i64>)> = CycOrg::objects()
+        .fetch(pool)
         .await
-        .expect("cycle tables");
+        .expect("orgs")
+        .into_iter()
+        .map(|o| (o.id.get().copied().unwrap(), o.owner_id))
+        .collect();
+    orgs.sort_unstable();
+    orgs
+}
+
+fn write_fixture(dir: &tempfile::TempDir, rows: &serde_json::Value) -> String {
+    let path = dir.path().join("fixture.json");
+    std::fs::write(&path, rows.to_string()).unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
+/// Tables that reference each other reload when one link is nullable.
+async fn loaddata_breaks_a_nullable_cycle(pool: &Pool) {
+    fresh_cycle(pool).await;
     let mut owners = Vec::new();
     for _ in 0..2 {
         let mut org = CycOrg {
@@ -638,8 +681,7 @@ async fn loaddata_breaks_a_nullable_cycle(pool: &Pool) {
     // Members first: neither order loads without breaking the cycle.
     rows.sort_by_key(|e| e["model"] != "mdv.CycMember");
     let dir = tempfile::tempdir().expect("tempdir");
-    let fixture = dir.path().join("cycle.json");
-    std::fs::write(&fixture, serde_json::to_string(&rows).unwrap()).unwrap();
+    let fixture = write_fixture(&dir, &serde_json::json!(rows));
 
     let flush = [
         "flush",
@@ -650,18 +692,67 @@ async fn loaddata_breaks_a_nullable_cycle(pool: &Pool) {
         "mdv.CycMember",
     ];
     manage(pool, &flush).await.expect("flush");
-    let out = manage(pool, &["loaddata", fixture.to_str().unwrap()]).await;
+    let out = manage(pool, &["loaddata", &fixture]).await;
     assert!(out.is_ok(), "loaddata: {out:?}");
-    let mut orgs: Vec<(i64, Option<i64>)> = CycOrg::objects()
-        .fetch(pool)
-        .await
-        .expect("orgs")
-        .into_iter()
-        .map(|o| (o.id.get().copied().unwrap(), o.owner_id))
-        .collect();
-    orgs.sort_unstable();
-    assert_eq!(orgs, owners, "owner links restored");
+    assert_eq!(org_owners(pool).await, owners, "owner links restored");
     assert_eq!(CycMember::objects().count(pool).await.expect("members"), 2);
+}
+
+/// A cycle row without a `pk` is relinked through the pk the insert returned.
+async fn loaddata_relinks_cycle_rows_without_a_pk(pool: &Pool) {
+    fresh_cycle(pool).await;
+    let rows = serde_json::json!([
+        {"model": "mdv.CycMember", "pk": 1, "fields": {"org": 1}},
+        {"model": "mdv.CycMember", "pk": 2, "fields": {"org": 2}},
+        {"model": "mdv.CycOrg", "fields": {"owner_id": 1}},
+        {"model": "mdv.CycOrg", "fields": {"owner_id": 2}},
+    ]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = manage(pool, &["loaddata", &write_fixture(&dir, &rows)]).await;
+    assert!(out.is_ok(), "loaddata: {out:?}");
+    assert_eq!(org_owners(pool).await, [(1, Some(1)), (2, Some(2))]);
+}
+
+/// `--fail-fast` still sets the links of the rows that went in.
+async fn loaddata_fail_fast_relinks_the_rows_in(pool: &Pool) {
+    fresh_cycle(pool).await;
+    let rows = serde_json::json!([
+        {"model": "mdv.CycOrg", "pk": 1, "fields": {"owner_id": 1}},
+        {"model": "mdv.CycMember", "pk": 1, "fields": {"org": 1}},
+        {"model": "mdv.CycMember", "pk": 2, "fields": {"org": 99}},
+    ]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_fixture(&dir, &rows);
+    let out = manage(pool, &["loaddata", &path, "--fail-fast"]).await;
+    assert!(out.is_err(), "the bad member must fail: {out:?}");
+    assert_eq!(org_owners(pool).await, [(1, Some(1))], "link left unset");
+}
+
+/// A fixture that loads in order keeps its links inline: a rule that the
+/// link is set on insert (a CHECK, a trigger) must not see a NULL.
+async fn loaddata_keeps_an_orderable_fixture_inline(pool: &Pool) {
+    fresh_pair(pool, CkLeft::SCHEMA, CkRight::SCHEMA).await;
+    let table = pool.dialect().quote_ident(CkLeft::SCHEMA.table);
+    let col = pool.dialect().quote_ident("right_id");
+    let rule = match pool.dialect().name() {
+        "sqlite" => format!(
+            "CREATE TRIGGER mdv_ck_left_set BEFORE INSERT ON {table} \
+             WHEN NEW.{col} IS NULL BEGIN SELECT RAISE(ABORT, 'right_id required'); END"
+        ),
+        _ => {
+            format!("ALTER TABLE {table} ADD CONSTRAINT mdv_ck_left_set CHECK ({col} IS NOT NULL)")
+        }
+    };
+    raw_execute_pool(pool, &rule, vec![]).await.expect("rule");
+    let rows = serde_json::json!([
+        {"model": "mdv.CkLeft", "pk": 1, "fields": {"right_id": 1}},
+        {"model": "mdv.CkRight", "pk": 1, "fields": {"left_id": null}},
+    ]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = manage(pool, &["loaddata", &write_fixture(&dir, &rows)]).await;
+    assert!(out.is_ok(), "loaddata: {out:?}");
+    let left: Vec<CkLeft> = CkLeft::objects().fetch(pool).await.expect("left");
+    assert_eq!(left[0].right_id, Some(1));
 }
 
 /// Empty post and tag tables, joined by the junction migrations build.
@@ -1077,5 +1168,8 @@ tri_dialect_test! {
         loaddata_leaves_missing_keys_to_the_column_default,
         dump_and_load_keeps_floats_and_json_null,
         loaddata_breaks_a_nullable_cycle,
+        loaddata_relinks_cycle_rows_without_a_pk,
+        loaddata_fail_fast_relinks_the_rows_in,
+        loaddata_keeps_an_orderable_fixture_inline,
     ],
 }
