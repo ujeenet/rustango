@@ -2256,8 +2256,16 @@ const TENANTS_NAMED: usize = 10;
 /// The project's migration dirs, labelled for messages: `dir`, plus each
 /// `<app>/migrations/` beside it when `apps` (tenancy applies those too).
 fn check_dirs(dir: &Path, apps: bool) -> Vec<(String, std::path::PathBuf)> {
+    // A bare `migrations` has the parent `""`, which `read_dir` refuses.
     let root = dir
         .parent()
+        .map(|p| {
+            if p.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                p
+            }
+        })
         .filter(|_| apps && dir.file_name().is_some_and(|n| n == "migrations"));
     let Some(root) = root else {
         return if dir.exists() {
@@ -2299,18 +2307,27 @@ fn pending_names(
         .collect()
 }
 
+/// The ledgers `check` compares the files with.
+enum Ledgers<L> {
+    /// One database: every file against its ledger.
+    Single,
+    /// Registry-scoped files against the registry; tenant-scoped ones against
+    /// each tenant's, unless `--no-tenants` left `tenants` out.
+    Tenancy { tenants: Option<L> },
+}
+
 /// Model changes no file holds yet, and files the registry's or a tenant's
 /// ledger has not applied.
 async fn pending_migration_audit<L>(
     pool: &Pool,
     dir: &Path,
     files: &[(String, Vec<super::Migration>)],
-    ledgers: Option<L>,
-    warnings: &mut Vec<String>,
-    errors: &mut Vec<String>,
+    ledgers: Ledgers<L>,
+    findings: (&mut Vec<String>, &mut Vec<String>, &mut Vec<String>),
 ) where
     L: std::future::Future<Output = Result<TenantApplied, String>>,
 {
+    let (info, warnings, errors) = findings;
     match super::make::planned_migrations(dir, has_registry_models()) {
         Ok(planned) if !planned.is_empty() => {
             let ops: Vec<String> = planned
@@ -2326,7 +2343,10 @@ async fn pending_migration_audit<L>(
         Err(e) => errors.push(format!("makemigrations would fail: {e}")),
     }
     // In tenancy the registry ledger records registry-scoped files only.
-    let scope = ledgers.is_some().then_some(super::MigrationScope::Registry);
+    let (scope, tenants) = match ledgers {
+        Ledgers::Single => (None, None),
+        Ledgers::Tenancy { tenants } => (Some(super::MigrationScope::Registry), Some(tenants)),
+    };
     match runner::applied_or_empty(pool, runner::LEDGER_TABLE).await {
         Ok(applied) => {
             let pending = pending_names(files, &applied, scope);
@@ -2344,7 +2364,11 @@ async fn pending_migration_audit<L>(
         .iter()
         .flat_map(|(_, m)| m)
         .any(|m| m.scope == super::MigrationScope::Tenant);
-    let Some(ledgers) = ledgers.filter(|_| tenant_files) else {
+    let Some(tenants) = tenants.filter(|_| tenant_files) else {
+        return;
+    };
+    let Some(ledgers) = tenants else {
+        info.push("tenant ledgers not read (--no-tenants)".into());
         return;
     };
     match ledgers.await {
@@ -2434,14 +2458,27 @@ where
     L: std::future::Future<Output = Result<TenantApplied, String>>,
 {
     // `--deplyo` once ran the plain check and reported all clear.
-    if let Some(other) = args.iter().find(|a| *a != "--deploy") {
+    let flags: &[&str] = if tenancy.is_some() {
+        &["--deploy", "--no-tenants"]
+    } else {
+        &["--deploy"]
+    };
+    if let Some(other) = args.iter().find(|a| !flags.contains(&a.as_str())) {
+        let usage = flags.iter().map(|f| format!(" [{f}]")).collect::<String>();
         return Err(MigrateError::Validation(format!(
-            "check: unknown argument `{other}` (usage: check [--deploy])"
+            "check: unknown argument `{other}` (usage: check{usage})"
         )));
     }
+    // Every active tenant's ledger is read; a slow tenant costs at most a few seconds.
+    let read_tenants = !args.iter().any(|a| a == "--no-tenants");
     let (deploy_findings, ledgers) = match tenancy {
-        Some(t) => (Some(t.deploy), Some(t.ledgers)),
-        None => (None, None),
+        Some(t) => (
+            Some(t.deploy),
+            Ledgers::Tenancy {
+                tenants: read_tenants.then_some(t.ledgers),
+            },
+        ),
+        None => (None, Ledgers::Single),
     };
     let deploy = args.iter().any(|a| a == "--deploy");
     let mut errors: Vec<String> = Vec::new();
@@ -2475,7 +2512,7 @@ where
     }
 
     // Pending migrations
-    let dirs = check_dirs(dir, ledgers.is_some());
+    let dirs = check_dirs(dir, matches!(ledgers, Ledgers::Tenancy { .. }));
     if !dirs.is_empty() {
         let mut files = Vec::with_capacity(dirs.len());
         for (app, d) in dirs {
@@ -2488,7 +2525,8 @@ where
             );
         } else {
             info.push(format!("{count} migration(s) on disk"));
-            pending_migration_audit(pool, dir, &files, ledgers, &mut warnings, &mut errors).await;
+            let findings = (&mut info, &mut warnings, &mut errors);
+            pending_migration_audit(pool, dir, &files, ledgers, findings).await;
         }
     }
 
@@ -8667,6 +8705,23 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
     /// Missing Cargo.toml (running outside a project) → false.
     /// Scaffolder must not crash; auto-detect just falls back to
     /// the safer single-tenant default.
+    /// A relative `migrations` still finds the app folders beside it.
+    #[test]
+    fn check_dirs_scans_apps_beside_a_bare_migrations_dir() {
+        let _guard = cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("migrations")).unwrap();
+        std::fs::create_dir_all(dir.path().join("blog/migrations")).unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let labels: Vec<String> = check_dirs(Path::new("migrations"), true)
+            .into_iter()
+            .map(|(app, _)| app)
+            .collect();
+        let _ = std::env::set_current_dir(&prev);
+        assert_eq!(labels, ["", "blog/"]);
+    }
+
     #[test]
     fn project_uses_tenancy_false_when_cargo_toml_missing() {
         let _guard = cwd_lock().lock().unwrap_or_else(|p| p.into_inner());

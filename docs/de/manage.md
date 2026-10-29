@@ -835,7 +835,7 @@ Sie `--deploy` für die strengeren Produktionsreife-Prüfungen hinzu.
 - ≥ 1 Modell via `inventory` registriert
 - DB erreichbar (`SELECT 1`)
 - Modelle registriert, aber **keine** Migrationen auf der Platte (es vergleicht keine Zahlen — ein vorhandenes `migrations/`-Verzeichnis wird unabhängig von der Anzahl als Info gemeldet)
-- Migrationen, die das Ledger noch nicht angewendet hat. Im Tenancy-Projekt: Registry-Dateien gegen die Registry, Tenant-Dateien gegen das Ledger jedes aktiven Tenants (die zurückliegenden Tenants werden genannt, zehn vollständig), `<app>/migrations/`-Ordner eingeschlossen
+- Migrationen, die das Ledger noch nicht angewendet hat. Im Tenancy-Projekt: Registry-Dateien gegen die Registry, Tenant-Dateien gegen das Ledger jedes aktiven Tenants (die zurückliegenden Tenants werden genannt, zehn vollständig), `<app>/migrations/`-Ordner eingeschlossen. Acht Tenants werden gleichzeitig gelesen, jeder höchstens 5 s; ein langsamerer gilt als nicht lesbar. `check --no-tenants` überspringt die Tenant-Ledger
 
 **Mit `--deploy`:**
 - `RUSTANGO_ENV` ist `prod` oder `production`

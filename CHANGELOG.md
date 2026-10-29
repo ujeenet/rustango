@@ -20,6 +20,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `reseal-tenant-secrets` opens one tenant at a time and pages each sealed column by primary key; a model without a single-column primary key is reported and fails the run instead of being skipped silently, and a value neither key opens is reported as left alone instead of failing every run.
 - `DatabaseCache::incr` on MySQL counts `"5\n"` as 0, as the other backends do, instead of reading it as 5.
 - The cache backends agree on `incr`: only the exact `i64` text counts as a number (`"+7"`, `"007"`, `" 5"` count as 0, as `"abc"` does), Redis restarts such a counter at `by` instead of failing, and every backend refuses a text value with a NUL character.
+- Tenancy `run-server` signs tenant sessions and links with `./var/.rustango_tenant_session.key` and the operator console with `./var/.rustango_operator_session.key`, as `server::Builder` and the CLI do, so a link `create-tenant --admin-email` prints works there.
+- Tenancy `check` reads eight tenant ledgers at once, each for at most 5 s; `check --no-tenants` skips them. App folders are found beside a relative `migrations` dir too.
+- The apex's shadowed-prefix warning is retried after a failed lookup instead of never showing.
 
 ## [0.61.11] — 2026-10-29
 

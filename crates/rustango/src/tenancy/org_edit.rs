@@ -242,7 +242,7 @@ pub(crate) async fn apply_values_if(
             {
                 return Err(TenancyError::Validation(format!(
                     "tenant `{slug}` is in schema mode, which reads no database URL; \
-                     move it with `migrate-tenant-storage {slug} --to database`"
+                     move it to database mode first"
                 )));
             }
             ("database_url", SqlValue::String(new)) => {

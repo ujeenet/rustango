@@ -825,7 +825,7 @@ producción.
 - ≥ 1 modelo registrado vía `inventory`
 - BD accesible (`SELECT 1`)
 - Modelos registrados pero **ninguna** migración en disco (no compara recuentos — un directorio `migrations/` existente se reporta como info, sea cual sea el número)
-- Migraciones que el ledger aún no aplicó. En un proyecto tenancy: los archivos del registro contra el registro, los de tenant contra el ledger de cada tenant activo (se nombran los tenants atrasados, diez completos), carpetas `<app>/migrations/` incluidas
+- Migraciones que el ledger aún no aplicó. En un proyecto tenancy: los archivos del registro contra el registro, los de tenant contra el ledger de cada tenant activo (se nombran los tenants atrasados, diez completos), carpetas `<app>/migrations/` incluidas. Se leen ocho tenants a la vez, cada uno 5 s como máximo; uno más lento se informa como ilegible. `check --no-tenants` omite los ledgers de los tenants
 
 **Con `--deploy`:**
 - `RUSTANGO_ENV` es `prod` o `production`

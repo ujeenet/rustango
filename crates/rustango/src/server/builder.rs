@@ -808,15 +808,8 @@ impl<DB: Database> Builder<DB> {
         // tenant cookie and an operator cookie can't be confused.
         // Audit M2 — prod tier requires a valid RUSTANGO_SESSION_SECRET
         // and fails closed; dev/staging keep the disk-persisted keys.
-        let tier = crate::session::tier_from_env();
-        let session_secret_for_tenant = crate::session::load_session_secret_for_tier(
-            &tier,
-            std::path::Path::new(crate::session::TENANT_SESSION_KEY_PATH),
-        );
-        let operator_secret = crate::session::load_session_secret_for_tier(
-            &tier,
-            std::path::Path::new("./var/.rustango_operator_session.key"),
-        );
+        let keys = crate::tenancy::session::ServerKeys::load();
+        let (session_secret_for_tenant, operator_secret) = (keys.tenant, keys.operator);
         let ctx = Arc::new(TenantContext {
             pools: self.pools.clone(),
             resolver: self.resolver(),
@@ -1263,7 +1256,7 @@ pub(crate) enum Resolution {
 struct ConsoleUnmatched;
 
 /// Warn if a tenant's path prefix is a console route's first segment. Looked up
-/// once per segment: the console's segments are few and fixed, never client-chosen.
+/// until answered once per segment: the console's segments are few and fixed.
 async fn warn_if_shadowed(
     checked: &std::sync::Mutex<std::collections::HashSet<String>>,
     path: &str,
@@ -1272,21 +1265,29 @@ async fn warn_if_shadowed(
     use crate::tenancy::OrgResolver as _;
     let first = path.trim_start_matches('/').split('/').next().unwrap_or("");
     let prefix = format!("/{first}");
-    let new = checked
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(prefix.clone());
-    if !new {
+    let lock = || {
+        checked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    if lock().contains(&prefix) {
         return;
     }
     let Ok(probe) = axum::http::Request::builder().uri(prefix.as_str()).body(()) else {
         return;
     };
     let (parts, ()) = probe.into_parts();
-    let tenant = crate::tenancy::PathPrefixResolver
+    // Only an answer marks it checked: after a failed lookup the next request retries.
+    let Ok(tenant) = crate::tenancy::PathPrefixResolver
         .resolve(&parts, registry)
-        .await;
-    if matches!(tenant, Ok(Some(_))) {
+        .await
+    else {
+        return;
+    };
+    if !lock().insert(prefix.clone()) {
+        return;
+    }
+    if tenant.is_some() {
         tracing::warn!(
             target: "rustango::server",
             prefix = %prefix,
@@ -1675,6 +1676,25 @@ pub(crate) mod resolver_tests {
         );
         let _ = get(&app, "localhost", "/no-such-tenant").await;
         assert!(prefix_looked_up(&registry, "/no-such-tenant"));
+    }
+
+    /// A failed lookup leaves the segment unchecked, so a later request retries.
+    #[tokio::test]
+    async fn a_failed_shadow_lookup_is_retried() {
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            tmp.path().join("empty.db").display()
+        );
+        // No `rustango_orgs` table: every lookup fails.
+        let registry = crate::sql::Pool::connect(&url).await.unwrap();
+        let checked = std::sync::Mutex::new(std::collections::HashSet::new());
+        warn_if_shadowed(&checked, "/login", &registry).await;
+        assert!(checked.lock().unwrap().is_empty());
+        let (_tmp, sq, _) = hosted_registry(false).await;
+        warn_if_shadowed(&checked, "/login", &crate::sql::Pool::Sqlite(sq)).await;
+        assert!(checked.lock().unwrap().contains("/login"));
     }
 
     /// #1856 — without `.header_resolver()` a client `X-Org` picks no tenant.
