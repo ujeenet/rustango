@@ -90,7 +90,7 @@ pub struct ProvisionRequest {
     /// Defaults to the slug.
     pub display_name: Option<String>,
     /// Defaults to `<slug>.<RUSTANGO_APEX_DOMAIN>` when that env var is
-    /// set, and to nothing when it is not.
+    /// set and no `path_prefix` is given, and to nothing otherwise.
     pub host_pattern: Option<String>,
     pub port: Option<i32>,
     pub path_prefix: Option<String>,
@@ -1284,7 +1284,7 @@ fn validate_fields(request: &ProvisionRequest) -> Result<ProvisionRequest, Strin
         validate_schema_name(&schema)?;
     }
     if let Some(prefix) = &request.path_prefix {
-        validate_path_prefix(prefix)?;
+        validate_new_path_prefix(prefix)?;
     }
     if let Some(port) = request.port {
         validate_port(port)?;
@@ -1296,11 +1296,19 @@ fn validate_fields(request: &ProvisionRequest) -> Result<ProvisionRequest, Strin
     let mut out = request.clone();
     // The `<slug>.<APEX>` default is filled in here so it is validated too.
     let pattern = request.host_pattern.clone().or_else(|| {
-        crate::tenancy::server::configured_apex_domain()
-            .map(|apex| format!("{}.{apex}", request.slug))
+        default_host_pattern(request, crate::tenancy::server::configured_apex_domain())
     });
     out.host_pattern = pattern.as_deref().map(validate_host_pattern).transpose()?;
     Ok(out)
+}
+
+/// The host a tenant created without one answers to: `<slug>.<apex>`.
+/// A path-prefix tenant lives on the apex itself, so it gets none.
+fn default_host_pattern(request: &ProvisionRequest, apex: Option<String>) -> Option<String> {
+    if request.path_prefix.is_some() {
+        return None;
+    }
+    apex.map(|apex| format!("{}.{apex}", request.slug))
 }
 
 /// The schema a schema-mode tenant is created in.
@@ -1453,6 +1461,22 @@ pub(crate) fn validate_path_prefix(prefix: &str) -> Result<(), String> {
             "path prefix `{prefix}` contains `{}` — a path segment that needs escaping would \
              not match the decoded path",
             bad as char
+        ));
+    }
+    Ok(())
+}
+
+/// A prefix a tenant may be given: legal, and not a segment the apex
+/// serves first (operator console, health probes), which would hide it.
+pub(crate) fn validate_new_path_prefix(prefix: &str) -> Result<(), String> {
+    validate_path_prefix(prefix)?;
+    let console = super::operator_console::CONSOLE_SEGMENTS
+        .iter()
+        .any(|seg| prefix.strip_prefix('/') == Some(seg));
+    if console || crate::health::PROBE_PATHS.contains(&prefix) {
+        return Err(format!(
+            "path prefix `{prefix}` is an operator console route on the apex, which would \
+             hide the tenant — choose another"
         ));
     }
     Ok(())
@@ -3005,9 +3029,12 @@ impl<DB: Database> Provisioner<DB> {
         &self,
         request: &'r ProvisionRequest,
     ) -> std::borrow::Cow<'r, ProvisionRequest> {
-        match (&self.apex, &request.host_pattern) {
-            (Some(apex), None) => std::borrow::Cow::Owned(ProvisionRequest {
-                host_pattern: Some(format!("{}.{apex}", request.slug)),
+        match (
+            &request.host_pattern,
+            default_host_pattern(request, self.apex.clone()),
+        ) {
+            (None, Some(host)) => std::borrow::Cow::Owned(ProvisionRequest {
+                host_pattern: Some(host),
                 ..request.clone()
             }),
             _ => std::borrow::Cow::Borrowed(request),
@@ -3377,6 +3404,32 @@ mod validation_tests {
             out.expect("legal").host_pattern.as_deref(),
             Some("acme.apex.test")
         );
+    }
+
+    /// A path-prefix tenant lives on the apex, so it gets no default host.
+    #[test]
+    fn a_path_prefix_tenant_gets_no_default_host() {
+        let mut req = ProvisionRequest::database("acme", "postgres://h/tenant");
+        assert_eq!(
+            default_host_pattern(&req, Some("apex.test".into())).as_deref(),
+            Some("acme.apex.test")
+        );
+        req.path_prefix = Some("/acme".into());
+        assert_eq!(default_host_pattern(&req, Some("apex.test".into())), None);
+    }
+
+    /// A prefix the console serves on the apex is refused, naming the clash.
+    #[test]
+    fn a_prefix_shadowed_by_a_console_route_is_refused() {
+        for clash in ["/orgs", "/login", "/__static__", "/db-servers"] {
+            let mut req = ProvisionRequest::database("acme", "postgres://h/tenant");
+            req.path_prefix = Some(clash.into());
+            let err = validate_fields(&req).expect_err(clash);
+            assert!(err.contains(clash) && err.contains("console"), "{err}");
+        }
+        let mut req = ProvisionRequest::database("acme", "postgres://h/tenant");
+        req.path_prefix = Some("/t1".into());
+        validate_fields(&req).expect("an ordinary prefix");
     }
 
     #[test]
@@ -3928,7 +3981,9 @@ mod apex_tests {
         };
         let mut own = tenant("own");
         own.host_pattern = Some("own.example.com".into());
-        for req in [tenant("acme"), own] {
+        let mut pre = tenant("pre");
+        pre.path_prefix = Some("/pre".into());
+        for req in [tenant("acme"), own, pre] {
             p.provision(&req, None, None).await.unwrap();
         }
         std::env::remove_var("RUSTANGO_APEX_DOMAIN");
@@ -3942,7 +3997,8 @@ mod apex_tests {
             hosts,
             [
                 Some("acme.shop.test".to_owned()),
-                Some("own.example.com".to_owned())
+                Some("own.example.com".to_owned()),
+                None
             ]
         );
     }

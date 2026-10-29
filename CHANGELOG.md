@@ -7,6 +7,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed
 
 - Tenant admin login on a path-prefix tenant lands on the tenant's root (`/t1/`) by default, and a `next` outside its prefix falls back there instead of leaving for the apex or another tenant. Under `RouteConfig::legacy()` a `next` at the login page no longer loops back to it.
+- A tenant created with a path prefix and no host gets no `<slug>.<apex>` host, so its set-password and console links point at `<apex>/<prefix>/…`.
+- A tenant path prefix that the apex serves first (an operator console route, `/health`, `/ready`) is refused on create and edit, naming the clash, instead of only warned about at request time.
 
 ## [0.61.12] — 2026-10-29
 
