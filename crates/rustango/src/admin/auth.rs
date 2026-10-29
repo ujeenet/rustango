@@ -126,8 +126,8 @@ mod tests {
     }
 
     /// Parallel guesses through a slow shared cache, from a client that
-    /// signed in before: the account lock still bounds the burst, so the
-    /// right password sent last is refused.
+    /// signed in before: the account lock still bounds the burst, and once
+    /// it locks the right password is refused.
     #[tokio::test]
     async fn a_parallel_burst_of_basic_guesses_is_bounded_by_the_lock() {
         let slow = std::sync::Arc::new(
@@ -171,7 +171,26 @@ mod tests {
         }
         let max = crate::account_lockout::DEFAULT_MAX_ATTEMPTS as usize;
         assert!(misses <= max, "{misses} wrong guesses were checked");
-        assert_eq!(right.await.unwrap(), StatusCode::TOO_MANY_REQUESTS);
+        // In flight, the right one may pass before the lock; it clears nothing.
+        let status = right.await.unwrap();
+        assert!(
+            [
+                StatusCode::OK,
+                StatusCode::TOO_MANY_REQUESTS,
+                StatusCode::SERVICE_UNAVAILABLE
+            ]
+            .contains(&status),
+            "{status}"
+        );
+        let mut more = 0;
+        while call_from(&app, "burst-admin:late").await == StatusCode::UNAUTHORIZED {
+            more += 1;
+            assert!(misses + more <= max, "the failures were cleared");
+        }
+        assert_eq!(
+            call_from(&app, "burst-admin:s3cret").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
     }
 
     /// A right Basic header is sent on every request: a repeat writes
