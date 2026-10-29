@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.12] — 2026-10-29
+
 **Breaking:** the auth and admin signal contexts are `#[non_exhaustive]` with a new `tenant` field (build them with `::new(...)`); the doc-hidden `FieldSchemaParts` has a new `cast` field. See UPGRADING.
 
 ### Fixed
