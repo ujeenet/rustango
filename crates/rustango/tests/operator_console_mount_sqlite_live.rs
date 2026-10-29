@@ -255,6 +255,9 @@ async fn every_page_links_under_the_prefix() {
         format!("/orgs/{slug}/hosts"),
     ] {
         let html = page(&b, &cookie, &path).await;
+        if html.contains("new-password") && html.contains(r#"minlength="8""#) {
+            bad.push(format!("{path}: hints the old 8-character rule"));
+        }
         // Scripts build their fetch URLs from this.
         if !html.contains(r#"<meta name="console-prefix" content="/ops">"#) {
             bad.push(format!("{path}: no console-prefix meta"));

@@ -192,6 +192,10 @@ async fn change_password_authenticated_get_renders_form() {
         html.contains("name=\"new_password\""),
         "new_password input missing"
     );
+    assert!(
+        html.contains(r#"minlength="12""#) && !html.contains(r#"minlength="8""#),
+        "the form hints the old length rule"
+    );
 
     rmig::drop_all(&pool).await.unwrap();
 }

@@ -172,7 +172,9 @@ pub async fn run_with_writer<W: Write + Send>(
         // table written by `cache::DatabaseCache`, including the
         // sessions-backend table.
         #[cfg(feature = "cache")]
-        "clear-cache" | "clearsessions" => clear_cache_cmd(pool, &args[1..], writer).await,
+        verb @ ("clear-cache" | "clearsessions") => {
+            clear_cache_cmd(pool, verb, &args[1..], writer).await
+        }
         // Idempotent `CREATE TABLE IF NOT EXISTS` for DatabaseCache.
         #[cfg(feature = "cache")]
         "createcachetable" | "create-cache-table" => {
@@ -6281,6 +6283,7 @@ fn parse_clear_cache_args(args: &[String]) -> Result<ClearCacheArgs, MigrateErro
 #[cfg(feature = "cache")]
 async fn clear_cache_cmd<W: Write>(
     pool: &Pool,
+    verb: &str,
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
@@ -6295,10 +6298,11 @@ async fn clear_cache_cmd<W: Write>(
         return Ok(());
     }
     let table = parsed.table.unwrap_or_else(|| "rustango_cache".to_owned());
-    // No table, nothing cached: `migrate` does not create it.
-    let exists = super::runner::try_table_exists_here(pool, &table)
+    // No table, nothing cached: `migrate` does not create it. Resolved like
+    // the purge's own query, through the search path.
+    let exists = super::runner::try_table_resolves(pool, &table)
         .await
-        .map_err(|e| MigrateError::Validation(format!("clear-cache: {e}")))?;
+        .map_err(|e| MigrateError::Validation(format!("{verb}: {e}")))?;
     if !exists {
         writeln!(
             w,
@@ -6310,8 +6314,8 @@ async fn clear_cache_cmd<W: Write>(
     let rows = cache
         .purge_expired()
         .await
-        .map_err(|e| MigrateError::Validation(format!("clear-cache: {e}")))?;
-    writeln!(w, "clear-cache: purged {rows} expired row(s) from {table}")?;
+        .map_err(|e| MigrateError::Validation(format!("{verb}: {e}")))?;
+    writeln!(w, "{verb}: purged {rows} expired row(s) from {table}")?;
     Ok(())
 }
 

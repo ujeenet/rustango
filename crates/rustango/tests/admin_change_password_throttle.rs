@@ -115,6 +115,10 @@ async fn new_password_length_counts_characters_not_bytes() {
         html.contains("at least 12"),
         "short password accepted: {html}"
     );
+    assert!(
+        html.contains(r#"minlength="12""#) && html.contains("At least 12 characters"),
+        "the form hints the old length rule: {html}"
+    );
 }
 
 /// A failed password write shows a generic message, not the driver error.
