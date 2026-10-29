@@ -148,6 +148,14 @@ untouched.
 
 ---
 
+## Unreleased
+
+### Tenancy
+
+- A path-prefix tenant's login only redirects inside its own prefix: a `next` of `/`, another tenant's prefix, or a path with `..` segments goes to the tenant root (`/t1/`) instead.
+
+---
+
 ## 0.61.12
 
 ### Tenancy
