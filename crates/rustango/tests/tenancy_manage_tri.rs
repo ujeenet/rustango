@@ -1411,7 +1411,13 @@ async fn reseal_covers_sealed_casts(pool: &Pool) {
         "{dry}"
     );
     assert!(dry.contains("undecryptable, left alone"), "{dry}");
-    assert!(dry.contains("602 to change, 1 left alone"), "{dry}");
+    // A MySQL tenant's sealed URL is counted too, so count the rows' lines.
+    let planned = dry
+        .lines()
+        .filter(|l| l.contains("rmt_patient.ssn") && l.ends_with(": would re-seal"))
+        .count();
+    assert_eq!(planned, 601, "every page: {dry}");
+    assert!(dry.contains(", 1 left alone"), "{dry}");
     let out = env
         .run_out(&dir, &["reseal-tenant-secrets", "--apply"])
         .await
@@ -1439,8 +1445,11 @@ async fn reseal_covers_sealed_casts(pool: &Pool) {
         .run_out(&dir, &["reseal-tenant-secrets", "--apply"])
         .await
         .expect("re-run");
+    // The tenant URL pass re-seals a MySQL URL every run; casts are left alone.
     assert!(
-        !again.contains("re-sealed") && again.contains("0 done"),
+        !again
+            .lines()
+            .any(|l| l.contains("cast ") && l.ends_with("re-sealed")),
         "a re-run re-sealed again: {again}"
     );
     with_secret_key();
