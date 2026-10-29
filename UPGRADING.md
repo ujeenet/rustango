@@ -162,9 +162,9 @@ untouched.
 - Flags a verb used to ignore are now errors: `--schema-name` with database mode (`create-tenant`, `migrate-tenant-storage --to database`), `--database-url` with `migrate-tenant-storage --to schema`, `edit-tenant --database-url` on a schema-mode tenant, and any argument to `list-tenants`.
 - The operator console's tenant edit form also refuses a database URL on a schema-mode tenant.
 
-### Signals name the tenant
+### Signals name the tenant (breaking)
 
-`UserLoggedInContext`, `UserLoggedOutContext`, `UserLoginFailedContext`, `AdminSaveContext` and `AdminDeleteContext` have a new `tenant: Option<String>` (the tenant's slug; `None` outside a tenant) and are now `#[non_exhaustive]`. Code that builds one with a struct literal uses `::new(...)`, then `.with_tenant(...)` if needed.
+`UserLoggedInContext`, `UserLoggedOutContext`, `UserLoginFailedContext`, `AdminSaveContext` and `AdminDeleteContext` have a new `tenant: Option<String>` (the tenant's slug; `None` outside a tenant) and are now `#[non_exhaustive]`. Code that builds one with a struct literal uses `::new(...)`, then `.with_tenant(...)` if needed. An exhaustive pattern on one, such as `let AdminSaveContext { table, pk, change } = ctx`, breaks too: add `..`.
 
 ### Sealed casts and reseal
 
@@ -176,7 +176,7 @@ untouched.
 
 ### Admin inline history
 
-An inline add, edit or delete of a child without `audit(...)` now writes an audit row, after the commit and best-effort, as the child's own page does.
+An inline add, edit or delete of a child without `audit(...)` now writes an audit row, after the commit and best-effort, as the child's own page does. `admin::InlineApplyOutcome` is deprecated: no API returns it.
 
 ### SSO link index
 

@@ -559,50 +559,144 @@ async fn an_edit_writes_only_rendered_fields() {
     assert_eq!(got.note.as_deref(), Some("keep"), "outside fieldsets");
 }
 
-/// A tenant admin's save and delete signals name the tenant.
+/// Serializes the tests that connect global admin signal receivers.
+static SIGNALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Every admin pre/post save and delete signal while `run` runs, as
+/// `"{kind}:{table}:{tenant:?}"`. Another tenant's signals are skipped.
+async fn admin_signals<F: std::future::Future<Output = ()>>(
+    slug: &str,
+    run: impl FnOnce() -> F,
+) -> Vec<String> {
+    use rustango::signals::admin as sig;
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let push = |kind: &'static str| {
+        let (seen, slug) = (seen.clone(), slug.to_owned());
+        move |table: &str, tenant: Option<String>| {
+            if tenant.as_deref().is_none_or(|t| t == slug) {
+                let line = format!("{kind}:{table}:{tenant:?}");
+                seen.lock().unwrap().push(line);
+            }
+        }
+    };
+    let (p1, p2, p3, p4) = (
+        push("pre_save"),
+        push("post_save"),
+        push("pre_delete"),
+        push("post_delete"),
+    );
+    let ids = (
+        sig::connect_admin_pre_save(move |c: sig::AdminSaveContext| {
+            p1(c.table, c.tenant);
+            async {}
+        }),
+        sig::connect_admin_post_save(move |c: sig::AdminSaveContext| {
+            p2(c.table, c.tenant);
+            async {}
+        }),
+        sig::connect_admin_pre_delete(move |c: sig::AdminDeleteContext| {
+            p3(c.table, c.tenant);
+            async {}
+        }),
+        sig::connect_admin_post_delete(move |c: sig::AdminDeleteContext| {
+            p4(c.table, c.tenant);
+            async {}
+        }),
+    );
+    run().await;
+    sig::disconnect_admin_pre_save(ids.0);
+    sig::disconnect_admin_post_save(ids.1);
+    sig::disconnect_admin_pre_delete(ids.2);
+    sig::disconnect_admin_post_delete(ids.3);
+    let seen = seen.lock().unwrap().clone();
+    seen
+}
+
+/// A tenant admin's create, edit and delete signals name the tenant.
 #[tokio::test]
 async fn admin_signals_name_the_tenant() {
-    use rustango::signals::admin as sig;
+    let _g = SIGNALS.lock().await;
     let env = boot().await;
     let cookie = env.login(true, &[]).await;
-    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
-    let (s1, s2) = (seen.clone(), seen.clone());
-    let save = sig::connect_admin_post_save(move |c: sig::AdminSaveContext| {
-        if c.table == "sec_form" {
-            s1.lock().unwrap().push(format!("save:{:?}", c.tenant));
-        }
-        async {}
-    });
-    let delete = sig::connect_admin_post_delete(move |c: sig::AdminDeleteContext| {
-        if c.table == "sec_form" {
-            s2.lock().unwrap().push(format!("delete:{:?}", c.tenant));
-        }
-        async {}
-    });
-    let mut row = SecForm {
+    let seen = admin_signals(&env.slug, || async {
+        let (status, body) = env.post("/__admin/sec_form", &cookie, "title=c").await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "create: {body}");
+        let pk = sec_forms(&env).await[0].id.get().copied().unwrap();
+        let (status, body) = env
+            .post(&format!("/__admin/sec_form/{pk}"), &cookie, "title=new")
+            .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "edit: {body}");
+        let (status, body) = env
+            .post(&format!("/__admin/sec_form/{pk}/delete"), &cookie, "")
+            .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "delete: {body}");
+    })
+    .await;
+    let t = Some(env.slug.clone());
+    let want: Vec<String> = [
+        "pre_save",
+        "post_save",
+        "pre_save",
+        "post_save",
+        "pre_delete",
+        "post_delete",
+    ]
+    .iter()
+    .map(|k| format!("{k}:sec_form:{t:?}"))
+    .collect();
+    assert_eq!(seen, want);
+}
+
+/// A tenant admin's bulk action and inline child signals name the tenant.
+#[tokio::test]
+async fn admin_row_signals_name_the_tenant() {
+    let _g = SIGNALS.lock().await;
+    let env = boot().await;
+    let (cookie, uid) = env.login_as(true, &[]).await;
+    let owned = env.owned("o", uid).await;
+    let mut parent = SecParent {
         id: rustango::Auto::default(),
-        title: "old".into(),
-        owner_id: 5,
-        is_verified: true,
-        note: None,
+        title: "p".into(),
     };
-    row.insert_pool(&env.tenant).await.expect("seed sec_form");
-    let pk = row.id.get().copied().unwrap();
-    let (status, body) = env
-        .post(&format!("/__admin/sec_form/{pk}"), &cookie, "title=new")
-        .await;
-    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
-    let (status, body) = env
-        .post(&format!("/__admin/sec_form/{pk}/delete"), &cookie, "")
-        .await;
-    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
-    sig::disconnect_admin_post_save(save);
-    sig::disconnect_admin_post_delete(delete);
-    let want = Some(env.slug.clone());
-    assert_eq!(
-        *seen.lock().unwrap(),
-        [format!("save:{want:?}"), format!("delete:{want:?}")]
-    );
+    parent.insert_pool(&env.tenant).await.expect("seed parent");
+    let pid = parent.id.get().copied().unwrap();
+    let mut kid = SecKid {
+        id: rustango::Auto::default(),
+        parent_id: pid,
+        title: "k".into(),
+        owner_id: uid,
+    };
+    kid.insert_pool(&env.tenant).await.expect("seed kid");
+    let kid = kid.id.get().copied().unwrap();
+    let seen = admin_signals(&env.slug, || async {
+        let form = format!("action=delete_selected&_selected={owned}");
+        let (status, body) = env
+            .post("/__admin/sec_owned/__action", &cookie, &form)
+            .await;
+        assert!(status.is_redirection(), "action: {status}: {body}");
+        let form = format!(
+            "title=p&sec_kid-TOTAL_FORMS=1&sec_kid-INITIAL_FORMS=1\
+             &sec_kid-0-id={kid}&sec_kid-0-title=new"
+        );
+        let (status, body) = env
+            .post(&format!("/__admin/sec_parent/{pid}"), &cookie, &form)
+            .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "inline: {body}");
+    })
+    .await;
+    let t = Some(env.slug.clone());
+    let want: Vec<String> = [
+        "pre_delete:sec_owned",
+        "post_delete:sec_owned",
+        "pre_save:sec_parent",
+        "pre_save:sec_kid",
+        "post_save:sec_parent",
+        "post_save:sec_kid",
+    ]
+    .iter()
+    .map(|k| format!("{k}:{t:?}"))
+    .collect();
+    assert_eq!(seen, want);
 }
 
 /// #1860: a create POST cannot set fields the form hides.

@@ -8702,9 +8702,6 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         );
     }
 
-    /// Missing Cargo.toml (running outside a project) → false.
-    /// Scaffolder must not crash; auto-detect just falls back to
-    /// the safer single-tenant default.
     /// A relative `migrations` still finds the app folders beside it.
     #[test]
     fn check_dirs_scans_apps_beside_a_bare_migrations_dir() {
@@ -8722,6 +8719,9 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         assert_eq!(labels, ["", "blog/"]);
     }
 
+    /// Missing Cargo.toml (running outside a project) → false.
+    /// Scaffolder must not crash; auto-detect just falls back to
+    /// the safer single-tenant default.
     #[test]
     fn project_uses_tenancy_false_when_cargo_toml_missing() {
         let _guard = cwd_lock().lock().unwrap_or_else(|p| p.into_inner());

@@ -1087,6 +1087,7 @@ fn render_prefixed_input(
 // ============================================================ POST processing (slice 2)
 
 /// Row counts from applying the inline FormSets of one parent edit POST.
+#[deprecated(since = "0.61.12", note = "no API returns it any more")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct InlineApplyOutcome {
     /// Existing rows successfully updated.
@@ -1095,9 +1096,9 @@ pub struct InlineApplyOutcome {
     pub deleted: usize,
     /// New rows successfully inserted (extra/empty slots with content).
     pub inserted: usize,
-    /// Always 0: a row that fails to parse or write now refuses the
-    /// whole POST and rolls the edit back (#2339).
-    #[deprecated(since = "0.60.4", note = "always 0 since #2339; removed in 0.61.0")]
+    /// Always 0: a row that fails to parse or write refuses the whole
+    /// POST and rolls the edit back.
+    #[deprecated(since = "0.60.4", note = "always 0")]
     pub failed: usize,
 }
 
@@ -1924,7 +1925,7 @@ pub(crate) enum InlineApplyError {
 }
 
 /// Run a checked plan in the parent's `tx`; the caller rolls back on error.
-/// An `audit(...)` child's entries go in `tx` too, one batch per inline (#2389).
+/// Audit entries go in `tx` for an `audit(...)` child, else to the caller for after the commit.
 pub(crate) async fn apply_plan_tx(
     tx: &mut crate::audit::PoolBoundTx<'_>,
     parts: &Parts,

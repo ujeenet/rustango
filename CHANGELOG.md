@@ -4,24 +4,21 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-**Breaking:** the auth and admin signal contexts are `#[non_exhaustive]` with a new `tenant` field (build them with `::new(...)`); `FieldSchema` has a new `cast` field. See UPGRADING.
+**Breaking:** the auth and admin signal contexts are `#[non_exhaustive]` with a new `tenant` field (build them with `::new(...)`); the doc-hidden `FieldSchemaParts` has a new `cast` field. See UPGRADING.
 
 ### Fixed
 
-- Tenancy `check` names the active tenants whose ledger lacks a tenant-scoped migration (ten in full, then a count), and scans `<app>/migrations/` folders too.
+- Tenancy `check` names the active tenants whose ledger lacks a tenant-scoped migration (ten in full, then a count), reading eight ledgers at once, each for at most 5 s; `check --no-tenants` skips them. It scans `<app>/migrations/` folders too, also beside a relative `migrations` dir.
 - Tenancy `create-tenant --admin-email` and `set-password-link` work before the first server run: off the prod tier they write `./var/.rustango_tenant_session.key` as the server does.
 - Tenancy: `create-tenant --mode database … --schema-name`, `migrate-tenant-storage --to database … --schema-name`, `--to schema … --database-url`, `edit-tenant <schema-mode tenant> --database-url` and `list-tenants <args>` are refused instead of ignoring the flag.
 - `Org.path_prefix` is indexed, and the apex looks a tenant up only for paths the operator console does not serve (run-server and `server::Builder`).
 - Getting started, Step 9: the sample `makemigrations` output lists only the app tables; the framework tables go to `system/migrations/`.
 - Admin inline add, edit and delete of a child without `audit(...)` now leave the same history as the child's own page, written best-effort after the commit.
-- `reseal-tenant-secrets` re-seals every model's `Cast<EncryptedString>` columns too, on the registry and in each tenant, so the previous key can go after a rotation; a value already under the current key is left alone. `FieldSchema::cast` records which cast a field uses.
+- `reseal-tenant-secrets` re-seals every model's `Cast<EncryptedString>` columns too, on the registry and in each tenant, so the previous key can go after a rotation. It opens one tenant at a time and pages each column by primary key; a value already under the current key is left alone, one neither key opens is reported as left alone, and a model without a single-column primary key is reported and fails the run. `FieldSchema::cast` records which cast a field uses.
 - SSO sign-in finds a link by subject through a new `(provider_source, provider_id, subject)` index on `rustango_sso_links` instead of reading every link of the provider.
 - The auth signals (`user_logged_in`, `user_logged_out`, `user_login_failed`) and the admin save and delete signals carry the tenant's slug (`tenant`), so a receiver can tell user ids and keys of different tenants apart.
-- `reseal-tenant-secrets` opens one tenant at a time and pages each sealed column by primary key; a model without a single-column primary key is reported and fails the run instead of being skipped silently, and a value neither key opens is reported as left alone instead of failing every run.
-- `DatabaseCache::incr` on MySQL counts `"5\n"` as 0, as the other backends do, instead of reading it as 5.
-- The cache backends agree on `incr`: only the exact `i64` text counts as a number (`"+7"`, `"007"`, `" 5"` count as 0, as `"abc"` does), Redis restarts such a counter at `by` instead of failing, and every backend refuses a text value with a NUL character.
+- The cache backends agree on `incr`: only the exact `i64` text counts as a number (`"+7"`, `"007"`, `" 5"`, `"5\n"` count as 0, as `"abc"` does), Redis restarts such a counter at `by` instead of failing, and every backend refuses a text value with a NUL character.
 - Tenancy `run-server` signs tenant sessions and links with `./var/.rustango_tenant_session.key` and the operator console with `./var/.rustango_operator_session.key`, as `server::Builder` and the CLI do, so a link `create-tenant --admin-email` prints works there.
-- Tenancy `check` reads eight tenant ledgers at once, each for at most 5 s; `check --no-tenants` skips them. App folders are found beside a relative `migrations` dir too.
 - The apex's shadowed-prefix warning is retried after a failed lookup instead of never showing.
 
 ## [0.61.11] — 2026-10-29

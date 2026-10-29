@@ -350,28 +350,27 @@ async fn inline_writes_of_an_unaudited_child_are_logged(pool: &Pool) {
     );
     assert_eq!(rows[2].2["qty"]["after"], 5, "{:?}", rows[2].2);
 
-    // Best-effort: a failed audit write keeps the save.
-    let _ = break_audit(pool).await;
-    if pool.backend_name() == "sqlite" {
-        let form = format!(
-            "name=o&aaw_item-TOTAL_FORMS=1&aaw_item-INITIAL_FORMS=1\
-             &aaw_item-0-id={i1}&aaw_item-0-qty=9"
-        );
-        let (status, body) = post(pool, &format!("/aaw_order/{o}"), &form).await;
-        assert!(status.is_redirection(), "{status}: {body}");
-        let qty: Vec<i32> = Item::objects()
-            .filter("qty", 9)
-            .fetch(pool)
-            .await
-            .expect("fetch items")
-            .iter()
-            .map(|i| i.qty)
-            .collect();
-        assert_eq!(qty, [9], "the save was rolled back");
-        rustango::audit::ensure_table_pool(pool)
-            .await
-            .expect("audit table");
-    }
+    // Best-effort: a failed audit write keeps the save. On PG a failed write
+    // inside the transaction would abort it, so the save would be lost.
+    rustango::testkit::matrix::drop_table(pool, "rustango_audit_log").await;
+    let form = format!(
+        "name=o&aaw_item-TOTAL_FORMS=1&aaw_item-INITIAL_FORMS=1\
+         &aaw_item-0-id={i1}&aaw_item-0-qty=9"
+    );
+    let (status, body) = post(pool, &format!("/aaw_order/{o}"), &form).await;
+    rustango::audit::ensure_table_pool(pool)
+        .await
+        .expect("audit table");
+    assert!(status.is_redirection(), "{status}: {body}");
+    let qty: Vec<i32> = Item::objects()
+        .filter("qty", 9)
+        .fetch(pool)
+        .await
+        .expect("fetch items")
+        .iter()
+        .map(|i| i.qty)
+        .collect();
+    assert_eq!(qty, [9], "the save was rolled back");
 }
 
 /// A refused inline save (past `max_num`) rolls back and leaves no history,
