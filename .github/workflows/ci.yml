@@ -1392,6 +1392,7 @@ jobs:
             --test viewset_sqlite_live \
             --test viewset_natural_pk_tri \
             --test viewset_write_allowlist_tri \
+            --test viewset_json_values_tri \
             --test viewset_filters_tri \
             --test viewset_serializer_patch_tri \
             --test inserted_pk_readback_tri \
@@ -1708,6 +1709,7 @@ jobs:
           binary(=testkit_matrix_forms_tri) |
           binary(=viewset_natural_pk_tri) |
           binary(=viewset_write_allowlist_tri) |
+          binary(=viewset_json_values_tri) |
           binary(=viewset_filters_tri) |
           binary(=viewset_serializer_patch_tri) |
           binary(=unique_together_validator_tri) |

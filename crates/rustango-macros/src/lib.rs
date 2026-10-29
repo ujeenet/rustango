@@ -12994,6 +12994,17 @@ fn render_form_field_parse(
         let __raw: ::core::option::Option<&::std::string::String> = #data_param.get(#name_lit);
     };
 
+    let root = rustango_root();
+    // Strict, as ModelForm: an unknown spelling is an error, not `true`.
+    let checkbox = quote! {
+        match #root::forms::checkbox(__s) {
+            ::core::option::Option::Some(__b) => __b,
+            ::core::option::Option::None => {
+                #errs.add(#name_lit, "Enter true or false.");
+                false
+            }
+        }
+    };
     let parsed_value = match kind {
         // `Option<bool>`: absent or blank is `None`, as for the other types.
         FormFieldKind::Bool if nullable => quote! {
@@ -13002,19 +13013,13 @@ fn render_form_field_parse(
                 ::core::option::Option::Some(__s) if __s.is_empty() => {
                     ::core::option::Option::None
                 }
-                ::core::option::Option::Some(__s) => ::core::option::Option::Some(!matches!(
-                    __s.to_ascii_lowercase().as_str(),
-                    "false" | "0" | "off" | "no"
-                )),
+                ::core::option::Option::Some(__s) => ::core::option::Option::Some(#checkbox),
             };
         },
         FormFieldKind::Bool => quote! {
             let __v: bool = match __raw {
                 ::core::option::Option::None => false,
-                ::core::option::Option::Some(__s) => !matches!(
-                    __s.to_ascii_lowercase().as_str(),
-                    "" | "false" | "0" | "off" | "no"
-                ),
+                ::core::option::Option::Some(__s) => #checkbox,
             };
         },
         FormFieldKind::String => {

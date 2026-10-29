@@ -148,6 +148,17 @@ untouched.
 
 ---
 
+## Unreleased
+
+### Forms and ViewSets
+
+- A JSON `""` on a nullable `String` field is now stored as `""`, not NULL (ViewSet bodies, `ModelFormFor::from_json`). Send `null` for NULL.
+- `derive(Form)` `bool` fields refuse unknown spellings such as `y` or `2`; they used to read as `true`.
+- NaN and infinity on float fields are a field error in ModelForm, admin and ViewSet writes.
+- `validate_decimal` with both bounds refuses values a `NUMERIC(p,s)` column cannot hold (new code `max_whole_digits`) and accepts trailing fraction zeros.
+
+---
+
 ## 0.61.12
 
 ### Tenancy

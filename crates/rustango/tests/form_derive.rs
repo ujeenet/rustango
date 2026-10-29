@@ -141,6 +141,31 @@ fn checkbox_falsy_aliases_recognized() {
 }
 
 #[derive(Form, Debug, PartialEq)]
+pub struct FlagForm {
+    pub on: bool,
+    pub maybe: Option<bool>,
+}
+
+/// Only the documented spellings read as a bool; anything else is an error.
+#[test]
+fn unknown_bool_spellings_are_refused() {
+    for bad in ["nope", "2", "fals", "y"] {
+        let errors = FlagForm::parse(&payload(&[("on", bad)])).unwrap_err();
+        assert!(!errors.get("on").is_empty(), "on accepted `{bad}`");
+        let errors = FlagForm::parse(&payload(&[("maybe", bad)])).unwrap_err();
+        assert!(!errors.get("maybe").is_empty(), "maybe accepted `{bad}`");
+    }
+    for (raw, want) in [("TRUE", true), ("1", true), ("on", true), ("yes", true)] {
+        let ok = FlagForm::parse(&payload(&[("on", raw), ("maybe", raw)])).unwrap();
+        assert_eq!((ok.on, ok.maybe), (want, Some(want)), "`{raw}`");
+    }
+    let ok = FlagForm::parse(&payload(&[("on", ""), ("maybe", "")])).unwrap();
+    assert_eq!((ok.on, ok.maybe), (false, None));
+    let ok = FlagForm::parse(&payload(&[("maybe", "no")])).unwrap();
+    assert_eq!((ok.on, ok.maybe), (false, Some(false)));
+}
+
+#[derive(Form, Debug, PartialEq)]
 pub struct RatioForm {
     #[form(min = 0, max = 1)]
     pub ratio: f64,

@@ -2401,6 +2401,8 @@ fn prefill_is_lossy(f: &FieldSchema, shown: &str) -> bool {
         | T::Geometry(_) => true,
         // `{}` and JSON null both show empty.
         T::Json => shown.is_empty(),
+        // So do a nullable `""` and NULL; the form reads both back as NULL.
+        T::String if f.nullable && shown.is_empty() => true,
         _ => f
             .choices
             .is_some_and(|c| !shown.is_empty() && !c.iter().any(|(v, _)| *v == shown)),

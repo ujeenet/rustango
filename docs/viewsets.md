@@ -695,6 +695,9 @@ Independently of a serializer, the write path always enforces the **schema**:
   value is a `400` naming the field.
 - **Required / NOT NULL** — a missing non-nullable field (or empty string for a
   non-nullable `String`) is a `400`; nullable fields accept empty → `NULL`.
+  In a JSON body only `null` is `NULL`: `""` on a nullable `String` stays `""`.
+- **Numbers** — NaN and infinity are a `400`; a decimal sent as a JSON number
+  keeps all its digits.
 - **Database constraints** — a duplicate key is a `409` (`conflict`); foreign
   keys and check constraints surface as a `400` on INSERT/UPDATE.
 

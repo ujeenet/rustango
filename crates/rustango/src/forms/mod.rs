@@ -322,6 +322,16 @@ pub(crate) fn default_form_value(field: &FieldSchema) -> Option<String> {
 /// # Errors
 /// As [`parse_pk_string`], plus [`FormError::Missing`].
 pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlValue, FormError> {
+    parse_body_value(field, raw, Encoding::Form)
+}
+
+/// [`parse_form_value`] for a body of `encoding`. JSON spells NULL as
+/// `null`, so there an empty string on a String field stays `""`.
+pub(crate) fn parse_body_value(
+    field: &FieldSchema,
+    raw: Option<&str>,
+    encoding: Encoding,
+) -> Result<SqlValue, FormError> {
     let Some(raw) = raw else {
         if absent_is_missing(field) {
             return Err(FormError::Missing {
@@ -334,7 +344,10 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
             SqlValue::Bool(false)
         });
     };
-    if field.nullable && raw.is_empty() {
+    if field.nullable
+        && raw.is_empty()
+        && !(encoding == Encoding::Json && field.ty == FieldType::String)
+    {
         return Ok(SqlValue::Null);
     }
     // An empty NOT NULL String is missing unless the field is `blank`.
@@ -366,14 +379,17 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
             .parse::<i64>()
             .map(SqlValue::I64)
             .map_err(|e| make_parse_err("i64", &e)),
-        FieldType::F32 => raw
-            .parse::<f32>()
-            .map(SqlValue::F32)
-            .map_err(|e| make_parse_err("f32", &e)),
-        FieldType::F64 => raw
-            .parse::<f64>()
-            .map(SqlValue::F64)
-            .map_err(|e| make_parse_err("f64", &e)),
+        // NaN and inf pass every bound, and no backend stores them as sent.
+        FieldType::F32 => match raw.parse::<f32>() {
+            Ok(n) if n.is_finite() => Ok(SqlValue::F32(n)),
+            Ok(_) => Err(make_parse_err("f32", &"not a finite number")),
+            Err(e) => Err(make_parse_err("f32", &e)),
+        },
+        FieldType::F64 => match raw.parse::<f64>() {
+            Ok(n) if n.is_finite() => Ok(SqlValue::F64(n)),
+            Ok(_) => Err(make_parse_err("f64", &"not a finite number")),
+            Err(e) => Err(make_parse_err("f64", &e)),
+        },
         FieldType::String => Ok(SqlValue::String(raw.to_owned())),
         FieldType::Uuid => uuid::Uuid::parse_str(raw)
             .map(SqlValue::Uuid)
@@ -404,11 +420,17 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
                     })
             }
         }
-        // Decimal accepts standard `123.45` / `-0.001` / `1e3` forms via
-        // `rust_decimal::Decimal::from_str_exact`; reject anything else
-        // rather than silently truncate.
+        // `123.45` / `-0.001`, or `1e3` as a JSON number may spell it;
+        // anything else is refused rather than truncated.
         FieldType::Decimal => raw
             .parse::<rust_decimal::Decimal>()
+            .or_else(|e| {
+                if raw.contains(['e', 'E']) {
+                    rust_decimal::Decimal::from_scientific(raw)
+                } else {
+                    Err(e)
+                }
+            })
             .map(SqlValue::Decimal)
             .map_err(|e| make_parse_err("Decimal", &e)),
         // Binary form input is uncommon; accept lowercase hex (no
@@ -509,6 +531,17 @@ pub fn collect_values(
     form: &HashMap<String, String>,
     skip: &[&str],
 ) -> Result<Vec<(&'static str, SqlValue)>, FormError> {
+    collect_values_with(model, skip, |field| {
+        parse_form_value(field, form.get(field.name).map(String::as_str))
+    })
+}
+
+/// [`collect_values`] with each field's value from `read`.
+pub(crate) fn collect_values_with(
+    model: &'static ModelSchema,
+    skip: &[&str],
+    mut read: impl FnMut(&FieldSchema) -> Result<SqlValue, FormError>,
+) -> Result<Vec<(&'static str, SqlValue)>, FormError> {
     let mut out = Vec::new();
     for field in model.scalar_fields() {
         // Server-assigned columns (`Auto<T>` PK with BIGSERIAL,
@@ -525,9 +558,7 @@ pub fn collect_values(
         if field.auto || field.generated_as.is_some() || skip.contains(&field.name) {
             continue;
         }
-        let raw = form.get(field.name).map(String::as_str);
-        let value = parse_form_value(field, raw)?;
-        out.push((field.column, value));
+        out.push((field.column, read(field)?));
     }
     Ok(out)
 }
@@ -557,7 +588,18 @@ pub fn collect_insert_values(
     form: &HashMap<String, String>,
     skip: &[&str],
 ) -> Result<Vec<(&'static str, SqlValue)>, FormError> {
-    let mut out = collect_values(model, form, skip)?;
+    collect_insert_values_with(model, skip, |field| {
+        parse_form_value(field, form.get(field.name).map(String::as_str))
+    })
+}
+
+/// [`collect_insert_values`] with each field's value from `read`.
+pub(crate) fn collect_insert_values_with(
+    model: &'static ModelSchema,
+    skip: &[&str],
+    read: impl FnMut(&FieldSchema) -> Result<SqlValue, FormError>,
+) -> Result<Vec<(&'static str, SqlValue)>, FormError> {
+    let mut out = collect_values_with(model, skip, read)?;
     let now = chrono::Utc::now();
     for field in model.scalar_fields() {
         // `skip` drops form input; a server-filled value is stamped even when skipped.
@@ -1413,8 +1455,26 @@ impl DynamicForm {
     }
 }
 
+/// A JSON object's top-level members as sent.
+pub(crate) type RawMembers<'a> = HashMap<String, &'a serde_json::value::RawValue>;
+
+/// The text a JSON number is parsed from. A Decimal takes it as sent:
+/// serde_json has already rounded it through an f64.
+pub(crate) fn json_number_text(
+    field: &FieldSchema,
+    n: &serde_json::Number,
+    raw: Option<&serde_json::value::RawValue>,
+) -> String {
+    match raw {
+        Some(raw) if field.ty == FieldType::Decimal => raw.get().to_owned(),
+        _ => n.to_string(),
+    }
+}
+
 /// A Bool form value: ticked, unticked, or `None` for anything else.
-pub(crate) fn checkbox(raw: &str) -> Option<bool> {
+/// Public for `derive(Form)`'s generated code.
+#[doc(hidden)]
+pub fn checkbox(raw: &str) -> Option<bool> {
     match raw.to_ascii_lowercase().as_str() {
         "true" | "1" | "on" | "yes" => Some(true),
         "" | "false" | "0" | "off" | "no" => Some(false),
@@ -1662,10 +1722,38 @@ impl<T: crate::core::Model> ModelFormFor<T> {
     /// type — so an i64 field accepts both `42` and `"42"`. A JSON
     /// field stores the value as sent: `"42"` stays a string.
     ///
+    /// A number sent to a Decimal field has already been read as an f64
+    /// here; [`Self::from_json_slice`] keeps its digits.
+    ///
     /// # Errors
     /// As [`Self::parse`], plus `FormErrors` with a non-field error
     /// when `value` isn't a JSON object at the top level.
     pub fn from_json(value: &serde_json::Value) -> Result<Self, FormErrors> {
+        Self::from_json_with(value, None)
+    }
+
+    /// [`Self::from_json`] from the body bytes, so a number sent to a
+    /// Decimal field keeps every digit an f64 would round.
+    ///
+    /// # Errors
+    /// As [`Self::from_json`], plus a non-field error for invalid JSON.
+    pub fn from_json_slice(body: &[u8]) -> Result<Self, FormErrors> {
+        let value: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
+            let mut errors = FormErrors::default();
+            errors.add_non_field(format!("invalid JSON body: {e}"));
+            errors
+        })?;
+        let raw = value
+            .is_object()
+            .then(|| serde_json::from_slice::<RawMembers<'_>>(body).ok())
+            .flatten();
+        Self::from_json_with(&value, raw.as_ref())
+    }
+
+    fn from_json_with(
+        value: &serde_json::Value,
+        raw: Option<&RawMembers<'_>>,
+    ) -> Result<Self, FormErrors> {
         let obj = match value.as_object() {
             Some(o) => o,
             None => {
@@ -1706,12 +1794,18 @@ impl<T: crate::core::Model> ModelFormFor<T> {
                 serde_json::Value::String(s) => {
                     payload.insert(k.clone(), s.clone());
                 }
+                serde_json::Value::Number(n) => {
+                    payload.insert(
+                        k.clone(),
+                        json_number_text(field, n, raw.and_then(|r| r.get(k)).copied()),
+                    );
+                }
                 other => {
                     payload.insert(k.clone(), other.to_string());
                 }
             }
         }
-        match Self::parse(&payload) {
+        match Self::parse_with(&payload, Encoding::Json) {
             Ok(form) if rejected.is_empty() => Ok(form),
             Ok(_) => Err(rejected),
             Err(mut errors) => {
@@ -1735,6 +1829,13 @@ impl<T: crate::core::Model> ModelFormFor<T> {
     /// parse, bound-violation). Multi-error: every issue is reported
     /// together so callers can render a complete error summary.
     pub fn parse(payload: &HashMap<String, String>) -> Result<Self, FormErrors> {
+        Self::parse_with(payload, Encoding::Form)
+    }
+
+    fn parse_with(
+        payload: &HashMap<String, String>,
+        encoding: Encoding,
+    ) -> Result<Self, FormErrors> {
         let mut errors = FormErrors::default();
         let mut columns = Vec::new();
         let mut values = Vec::new();
@@ -1744,7 +1845,7 @@ impl<T: crate::core::Model> ModelFormFor<T> {
                 continue;
             }
             let raw = payload.get(field.name).map(String::as_str);
-            match parse_form_value(field, raw) {
+            match parse_body_value(field, raw, encoding) {
                 Ok(value) => {
                     if let Err(bound_err) =
                         crate::core::validate_value(T::SCHEMA.table, field, &value)
@@ -2027,6 +2128,81 @@ mod model_form_tests {
             .position(|c| *c == "body")
             .and_then(|i| mf.values().get(i));
         assert!(matches!(body_value, Some(crate::core::SqlValue::Null)));
+    }
+
+    /// JSON spells NULL `null`, so an empty string stays a string.
+    #[test]
+    fn from_json_keeps_an_empty_string_apart_from_null() {
+        let mf = ModelFormFor::<Post>::from_json(&serde_json::json!({ "title": "t", "body": "" }))
+            .expect("valid");
+        assert_eq!(mf.values()[1], SqlValue::String(String::new()));
+        let mf =
+            ModelFormFor::<Post>::from_json(&serde_json::json!({ "title": "t", "body": null }))
+                .expect("valid");
+        assert_eq!(mf.values()[1], SqlValue::Null);
+    }
+
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "mf_priced")]
+    #[allow(dead_code)]
+    pub struct Priced {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        pub amount: Option<rust_decimal::Decimal>,
+        pub ratio: Option<f64>,
+        pub weight: Option<f32>,
+    }
+
+    /// A JSON number on a Decimal field keeps the digits it was sent with.
+    #[test]
+    fn from_json_slice_keeps_decimal_digits() {
+        for (body, want) in [
+            (
+                r#"{"amount": 1.234567890123456789}"#,
+                "1.234567890123456789",
+            ),
+            (
+                r#"{"amount": 12345678901234567.89}"#,
+                "12345678901234567.89",
+            ),
+            (r#"{"amount": 10.50}"#, "10.50"),
+            (r#"{"amount": 1e3}"#, "1000"),
+        ] {
+            let mf = ModelFormFor::<Priced>::from_json_slice(body.as_bytes()).expect(body);
+            let SqlValue::Decimal(got) = &mf.values()[0] else {
+                panic!("{body}: {:?}", mf.values());
+            };
+            // `to_string` also compares the scale: `10.50` is not `10.5`.
+            assert_eq!(got.to_string(), want, "{body}");
+        }
+        let err = ModelFormFor::<Priced>::from_json_slice(b"[1]").expect_err("array root");
+        assert!(!err.non_field().is_empty());
+    }
+
+    /// NaN and inf pass every bound; no backend stores them as sent.
+    #[test]
+    fn non_finite_floats_are_refused() {
+        let schema = <Priced as crate::core::Model>::SCHEMA;
+        let (ratio, weight) = (
+            schema.field("ratio").unwrap(),
+            schema.field("weight").unwrap(),
+        );
+        for bad in ["NaN", "inf", "-infinity", "1e400"] {
+            assert!(parse_form_value(ratio, Some(bad)).is_err(), "f64 `{bad}`");
+            assert!(parse_form_value(weight, Some(bad)).is_err(), "f32 `{bad}`");
+        }
+        assert!(
+            parse_form_value(weight, Some("1e40")).is_err(),
+            "f32 overflow"
+        );
+        assert_eq!(
+            parse_form_value(ratio, Some("2.5")).unwrap(),
+            SqlValue::F64(2.5)
+        );
+        assert_eq!(
+            parse_form_value(weight, Some("2.5")).unwrap(),
+            SqlValue::F32(2.5)
+        );
     }
 
     /// JSON null on a NOT NULL field is an error, not an unticked box.
