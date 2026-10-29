@@ -63,6 +63,36 @@ pub(crate) fn tenant_secret_from_env() -> Result<SessionSecret, super::TenancyEr
     }
 }
 
+/// The keys a tenancy server signs with: one per console, each from the env
+/// var or, off prod, its dev key file. The CLI reads the same tenant file.
+pub(crate) struct ServerKeys {
+    pub(crate) tenant: SessionSecret,
+    pub(crate) operator: SessionSecret,
+}
+
+impl ServerKeys {
+    /// Panics on the prod tier without a valid `RUSTANGO_SESSION_SECRET`.
+    pub(crate) fn load() -> Self {
+        let tier = crate::session::tier_from_env();
+        Self::from_files(|p| crate::session::load_session_secret_for_tier(&tier, p))
+    }
+
+    /// Each key from its dev file path, through `load`.
+    fn from_files(load: impl Fn(&std::path::Path) -> SessionSecret) -> Self {
+        use crate::session::{OPERATOR_SESSION_KEY_PATH, TENANT_SESSION_KEY_PATH};
+        Self {
+            tenant: load(std::path::Path::new(TENANT_SESSION_KEY_PATH)),
+            operator: load(std::path::Path::new(OPERATOR_SESSION_KEY_PATH)),
+        }
+    }
+
+    /// Off prod, under `root`, with the env value passed in.
+    #[cfg(test)]
+    fn dev_at(env: Option<&str>, root: &std::path::Path) -> Self {
+        Self::from_files(|p| SessionSecret::from_raw_or_disk(env, &root.join(p)))
+    }
+}
+
 /// Where [`existing_tenant_secret`] found the key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeySource {
@@ -138,7 +168,12 @@ fn existing_tenant_secret_at(
             "RUSTANGO_SESSION_SECRET",
         )
         .map(|bytes| (SessionSecret::from_bytes(bytes), KeySource::DevFile))
-        .map_err(|e| missing(format!("make {} writable ({e})", dev_file.display()))),
+        .map_err(|e| {
+            missing(format!(
+                "fix the dev key file: cannot read or write {} ({e})",
+                dev_file.display()
+            ))
+        }),
     }
 }
 
@@ -269,7 +304,8 @@ mod tests {
             existing_tenant_secret_at(None, false, &path, DevKeyFile::LoadOrCreate).unwrap();
         assert_eq!(source, KeySource::DevFile);
         assert_eq!(std::fs::read(&path).unwrap(), first.key());
-        let server = crate::session::load_session_secret_for_tier("dev", &path);
+        // The env value is passed in: the caller's own secret must not decide this.
+        let server = SessionSecret::from_raw_or_disk(None, &path);
         assert_eq!(
             server.key(),
             first.key(),
@@ -278,6 +314,35 @@ mod tests {
         let (again, _) =
             existing_tenant_secret_at(None, false, &path, DevKeyFile::LoadOrCreate).unwrap();
         assert_eq!(again.key(), first.key());
+    }
+
+    /// A set-password link the CLI signs with the tenant key verifies under
+    /// the key a tenancy server (run-server or `server::Builder`) loads.
+    #[test]
+    fn a_cli_link_verifies_under_the_servers_tenant_key() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join(crate::session::TENANT_SESSION_KEY_PATH);
+        let (cli, _) =
+            existing_tenant_secret_at(None, false, &file, DevKeyFile::LoadOrCreate).unwrap();
+        let server = ServerKeys::dev_at(None, root.path());
+        let scope = crate::auth_flows::LinkScope::from(&crate::testkit::org());
+        let link = crate::auth_flows::PasswordReset::issue(
+            &scope,
+            "/change-password",
+            42,
+            &super::super::first_admin::link_key(&cli),
+            std::time::Duration::from_secs(60),
+        );
+        let key = super::super::first_admin::link_key(&server.tenant);
+        assert_eq!(
+            crate::auth_flows::PasswordReset::verify(&scope, &link, &key),
+            Ok(42)
+        );
+        assert_ne!(
+            server.operator.key(),
+            server.tenant.key(),
+            "one key per console"
+        );
     }
 
     /// Off prod an unusable env secret falls back to the dev file, as the server does.

@@ -1351,8 +1351,14 @@ async fn reseal_leaves_a_sealed_url_without_a_password(pool: &Pool) {
 
 /// `check` output, whatever it returns.
 async fn check_out(env: &Env, dir: &Path) -> String {
+    check_out_with(env, dir, &[]).await
+}
+
+/// `check <extra>` output, whatever it returns.
+async fn check_out_with(env: &Env, dir: &Path, extra: &[&str]) -> String {
     let mut out = Vec::new();
-    let args = vec!["check".to_owned()];
+    let mut args = vec!["check".to_owned()];
+    args.extend(extra.iter().map(|a| (*a).to_owned()));
     let _ = typed!(env.registry, p => rustango::tenancy::manage::run_with_writer(&p, &env.url, dir, args, &mut out).await);
     String::from_utf8_lossy(&out).into_owned()
 }
@@ -1383,6 +1389,44 @@ async fn check_names_tenants_behind_on_tenant_migrations(pool: &Pool) {
         "{out}"
     );
     assert!(!out.contains(&format!("{}: ", ahead.slug)), "{out}");
+
+    let out = check_out_with(&env, &dir, &["--no-tenants"]).await;
+    assert!(
+        out.contains("tenant ledgers not read (--no-tenants)"),
+        "{out}"
+    );
+    assert!(!out.contains("behind on tenant migrations"), "{out}");
+}
+
+/// A tenant whose database never answers costs `check` seconds, not the
+/// pool's acquire timeout, and is named as unreadable.
+async fn check_bounds_an_unreachable_tenant(pool: &Pool) {
+    let env = Env::new(pool).await;
+    // TEST-NET-1 drops packets, so a connect hangs rather than failing.
+    let url = match env.backend() {
+        BackendKind::Postgres => "postgres://u:pw@192.0.2.1:5432/x",
+        BackendKind::MySql => "mysql://u:pw@192.0.2.1:3306/x",
+        BackendKind::Sqlite => return,
+    };
+    let mut org = Org {
+        slug: "blackhole".into(),
+        display_name: "blackhole".into(),
+        backend_kind: env.backend().as_str().into(),
+        database_url: Some(url.into()),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&env.registry).await.expect("insert org");
+    let dir = env.dir("proj/migrations");
+    migration(&dir, "0001_tenant", "SELECT 1");
+    let started = std::time::Instant::now();
+    let out = check_out(&env, &dir).await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(out.contains("could not read 1 tenant ledger(s)"), "{out}");
+    assert!(out.contains("blackhole: "), "{out}");
 }
 
 /// Flags a verb would ignore are refused, and nothing is written.
@@ -1489,6 +1533,7 @@ tri_dialect_test! {
         the_registry_under_an_alias_is_flagged,
         check_deploy_names_a_role_named_schema,
         check_names_tenants_behind_on_tenant_migrations,
+        check_bounds_an_unreachable_tenant,
         ignored_tenancy_flags_are_refused,
         org_path_prefix_is_indexed,
     ],

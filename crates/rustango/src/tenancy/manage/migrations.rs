@@ -237,6 +237,12 @@ where
     read.map(|()| out)
 }
 
+/// Tenant ledgers `check` reads at once.
+const CHECK_CONCURRENCY: usize = 8;
+/// A tenant whose ledger takes longer is reported as unreadable, so an
+/// unreachable database costs this, not the pool's acquire timeout.
+const CHECK_TENANT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Every active tenant's project ledger, or why it could not be read: what
 /// `check` compares the tenant-scoped files with. One bad tenant spoils no other.
 pub(super) async fn active_tenant_ledgers<DB: Database>(
@@ -248,17 +254,29 @@ where
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
     use crate::tenancy::org::Org;
+    use futures_util::StreamExt as _;
     let orgs: Vec<Org> = Org::objects()
         .where_(Org::active.eq(true))
-        .order_by(&[("slug", false)])
         .fetch(&pools.registry_pool())
         .await
         .map_err(|e| e.to_string())?;
-    let mut out = Vec::with_capacity(orgs.len());
-    for org in orgs {
-        let read = org_ledgers(pools, &org, [rustango::migrate::LEDGER_TABLE]).await;
-        out.push((org.slug, read.map(|[applied]| applied)));
-    }
+    let mut out: rustango::migrate::manage::TenantApplied = futures_util::stream::iter(orgs)
+        .map(|org| async move {
+            let read = org_ledgers(pools, &org, [rustango::migrate::LEDGER_TABLE]);
+            let read = tokio::time::timeout(CHECK_TENANT_TIMEOUT, read)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(format!(
+                        "timed out after {}s",
+                        CHECK_TENANT_TIMEOUT.as_secs()
+                    ))
+                });
+            (org.slug, read.map(|[applied]| applied))
+        })
+        .buffer_unordered(CHECK_CONCURRENCY)
+        .collect()
+        .await;
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
 }
 

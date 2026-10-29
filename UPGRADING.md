@@ -153,12 +153,14 @@ untouched.
 ### Tenancy
 
 - `rustango_orgs.path_prefix` gets an index. In a tenancy project run `cargo run -- makemigrations` to write the system migration, commit `system/migrations/`, then `migrate`.
-- Tenancy `check` reports tenants behind on tenant-scoped migrations and reads every active tenant's ledger to do so; an unreachable tenant is a warning.
+- Tenancy `check` reports tenants behind on tenant-scoped migrations and reads every active tenant's ledger to do so (eight at once, 5 s each); an unreachable tenant is a warning. `check --no-tenants` skips them.
+- Off the prod tier, `run-server` now uses the same key files as `server::Builder`: `./var/.rustango_tenant_session.key` and `./var/.rustango_operator_session.key` instead of `./var/.rustango_session.key`. Dev sessions signed by `run-server` end once; with `RUSTANGO_SESSION_SECRET` set nothing changes.
 
 ### Tenancy CLI
 
 - Off the prod tier, `create-tenant --admin-email` and `set-password-link` create `./var/.rustango_tenant_session.key` when it is missing, as the server does on first boot. `create-api-key` still only loads it.
 - Flags a verb used to ignore are now errors: `--schema-name` with database mode (`create-tenant`, `migrate-tenant-storage --to database`), `--database-url` with `migrate-tenant-storage --to schema`, `edit-tenant --database-url` on a schema-mode tenant, and any argument to `list-tenants`.
+- The operator console's tenant edit form also refuses a database URL on a schema-mode tenant.
 
 ## 0.61.11
 

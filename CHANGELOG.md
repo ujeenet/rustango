@@ -11,6 +11,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Tenancy: `create-tenant --mode database … --schema-name`, `migrate-tenant-storage --to database … --schema-name`, `--to schema … --database-url`, `edit-tenant <schema-mode tenant> --database-url` and `list-tenants <args>` are refused instead of ignoring the flag.
 - `Org.path_prefix` is indexed, and the apex looks a tenant up only for paths the operator console does not serve (run-server and `server::Builder`).
 - Getting started, Step 9: the sample `makemigrations` output lists only the app tables; the framework tables go to `system/migrations/`.
+- Tenancy `run-server` signs tenant sessions and links with `./var/.rustango_tenant_session.key` and the operator console with `./var/.rustango_operator_session.key`, as `server::Builder` and the CLI do, so a link `create-tenant --admin-email` prints works there.
+- Tenancy `check` reads eight tenant ledgers at once, each for at most 5 s; `check --no-tenants` skips them. App folders are found beside a relative `migrations` dir too.
+- The apex's shadowed-prefix warning is retried after a failed lookup instead of never showing.
 
 ## [0.61.11] — 2026-10-29
 

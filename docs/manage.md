@@ -813,7 +813,7 @@ production-readiness checks.
 - ≥ 1 model registered via `inventory`
 - DB reachable (`SELECT 1`)
 - Models registered but **no** migrations on disk (it does not compare counts — an existing `migrations/` directory is reported as info, whatever the number)
-- Migrations the ledger has not applied. In a tenancy project: registry-scoped files against the registry, tenant-scoped ones against each active tenant's ledger (the tenants behind are named, ten in full), `<app>/migrations/` folders included
+- Migrations the ledger has not applied. In a tenancy project: registry-scoped files against the registry, tenant-scoped ones against each active tenant's ledger (the tenants behind are named, ten in full), `<app>/migrations/` folders included. Eight tenants are read at once, each for at most 5 s; a slower one is reported as unreadable. `check --no-tenants` skips the tenant ledgers
 
 **With `--deploy`:**
 - `RUSTANGO_ENV` is `prod` or `production`
