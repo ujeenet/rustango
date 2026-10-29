@@ -543,6 +543,30 @@ where
         .await
         .map_err(TenancyError::Migrate);
     }
+    // Forward: the tenancy runner, with the project's registry-scope system
+    // chain. The single-database path would build one from the copy.
+    let dry_run = args.iter().any(|a| a == "--dry-run");
+    if let Some(target) = target.filter(|t| *t != "zero" && !dry_run) {
+        let registry = pools.registry_pool();
+        let applied =
+            rustango::migrate::applied_or_empty(&registry, rustango::migrate::LEDGER_TABLE).await?;
+        if !applied.contains(target.as_str()) {
+            let moved =
+                tenant_migrate::migrate_registry_to(&pools.registry_pool(), dir, target).await?;
+            if let Some(moved) = moved {
+                for m in &moved.unapplied {
+                    writeln!(w, "  unapplied {}", m.name)?;
+                }
+                for m in &moved.system {
+                    writeln!(w, "  applied {} (system)", m.name)?;
+                }
+                for m in &moved.applied {
+                    writeln!(w, "  applied {}", m.name)?;
+                }
+                return Ok(());
+            }
+        }
+    }
     // The folder holding the target: the project's own, or an app's.
     let mut source = dir.to_path_buf();
     if let Some(target) = target {

@@ -1756,6 +1756,14 @@ async fn migrate_leaves_a_read_only_app_folder_alone(pool: &Pool) {
     for d in [&app, &blog] {
         std::fs::set_permissions(d, read_only.clone()).unwrap();
     }
+    // As root 0555 blocks nothing, and the test would prove nothing.
+    if std::fs::write(blog.join("probe"), b"").is_ok() {
+        for d in [&blog, &app] {
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        eprintln!("SKIPPED migrate_leaves_a_read_only_app_folder_alone: 0555 does not stop this user writing");
+        return;
+    }
     let res = env.run_out(&dir, &["migrate"]).await;
     for d in [&blog, &app] {
         std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1792,6 +1800,122 @@ async fn dry_run_and_target_see_app_folders(pool: &Pool) {
         .expect("registry ledger");
     assert!(registry.contains("0002_blog_registry"), "{out}");
     assert!(!env.tmp.path().join("proj/blog/system").exists());
+}
+
+/// The names `ledger` records on `pool`.
+async fn ledger(pool: &Pool, ledger: &str) -> std::collections::HashSet<String> {
+    rustango::migrate::applied_set_pool_with_ledger(pool, ledger)
+        .await
+        .expect("ledger")
+}
+
+/// The names of `scope` steps in the project's system chain.
+fn system_steps(root: &Path, scope: rustango::migrate::MigrationScope) -> Vec<String> {
+    rustango::migrate::file::list_dir(&root.join("system/migrations"))
+        .expect("system chain")
+        .into_iter()
+        .filter(|m| m.scope == scope)
+        .map(|m| m.name)
+        .collect()
+}
+
+const SYSTEM_LEDGER: &str = "__rustango_system_migrations__";
+
+/// `migrate <target>` on the registry runs the project's registry-scope
+/// system chain, from its root: no tenant-scope step lands in the
+/// registry, and no app folder gets a chain of its own.
+async fn migrate_target_runs_the_projects_registry_chain(pool: &Pool) {
+    use rustango::migrate::MigrationScope::{Registry, Tenant};
+    let env = Env::new(pool).await;
+    let dir = env.dir("proj/migrations");
+    let app = env.dir("proj/blog/migrations");
+    scoped_migration(&dir, "0001_registry", "SELECT 1", Registry);
+    migration(&dir, "0002_tenant", "SELECT 1");
+    scoped_migration(&app, "0003_blog_registry", "SELECT 1", Registry);
+    // No system ledger yet on a fresh registry.
+    let before = rustango::migrate::applied_set_pool_with_ledger(&env.registry, SYSTEM_LEDGER)
+        .await
+        .unwrap_or_default();
+
+    for target in ["0001_registry", "0003_blog_registry"] {
+        let out = env
+            .run_out(&dir, &["migrate", target])
+            .await
+            .expect("target");
+        let applied = rustango::migrate::applied_set_pool(&env.registry)
+            .await
+            .expect("registry ledger");
+        assert!(applied.contains(target), "{out}");
+    }
+    let root = env.tmp.path().join("proj");
+    let registry_steps = system_steps(&root, Registry);
+    let tenant_steps = system_steps(&root, Tenant);
+    let after = ledger(&env.registry, SYSTEM_LEDGER).await;
+    let added: Vec<&String> = after.difference(&before).collect();
+    assert!(
+        added.iter().all(|n| registry_steps.contains(n)),
+        "not the project's registry steps: {added:?}"
+    );
+    assert!(
+        !added.iter().any(|n| tenant_steps.contains(n)),
+        "tenant-scope steps on the registry: {added:?}"
+    );
+    assert!(!root.join("blog/system").exists());
+}
+
+/// One run applies the system chain once per database, however many app
+/// folders the project has.
+async fn the_system_chain_runs_once_per_database(pool: &Pool) {
+    use rustango::migrate::MigrationScope::Tenant;
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("proj/migrations");
+    migration(&dir, "0001_tenant", "SELECT 1");
+    migration(&env.dir("proj/blog/migrations"), "0002_blog", "SELECT 1");
+    migration(&env.dir("proj/shop/migrations"), "0003_shop", "SELECT 1");
+    let mut org = env.own_tenant("once").await;
+    org.save_pool(&env.registry).await.expect("insert org");
+
+    let out = env.run_out(&dir, &["migrate"]).await.expect("migrate");
+    let started = format!("] {}\n", org.slug);
+    assert_eq!(out.matches(&started).count(), 1, "{out}");
+    let steps = system_steps(&env.tmp.path().join("proj"), Tenant);
+    let ran = out.matches("applied system/").count();
+    assert_eq!(ran, steps.len(), "{out}");
+    let applied = env.applied(&org).await;
+    for m in ["0001_tenant", "0002_blog", "0003_shop"] {
+        assert!(applied.contains(m), "{out}");
+    }
+}
+
+/// A folder that fails is named, with what ran before it, and the lock is
+/// released: once fixed, the next run finishes.
+async fn a_failing_app_folder_is_named(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("proj/migrations");
+    let app = env.dir("proj/blog/migrations");
+    migration(&dir, "0001_tenant", "SELECT 1");
+    migration(&app, "0002_blog", BROKEN);
+    let mut org = env.own_tenant("fail").await;
+    org.save_pool(&env.registry).await.expect("insert org");
+
+    let (res, out) = env.run_both(&dir, &["migrate"]).await;
+    assert!(res.is_err(), "{out}");
+    let line = out
+        .lines()
+        .find(|l| l.contains(&format!("✗ {}:", org.slug)))
+        .unwrap_or_else(|| panic!("no failure line: {out}"));
+    assert!(line.contains("blog/migrations"), "{line}");
+    assert!(line.contains("applied before it: 0001_tenant"), "{line}");
+    assert!(
+        line.contains("the system chain applied before it"),
+        "{line}"
+    );
+
+    migration(&app, "0002_blog", "SELECT 1");
+    env.run(&dir, &["migrate"])
+        .await
+        .expect("the lock was released");
+    assert!(env.applied(&org).await.contains("0002_blog"));
 }
 
 /// `check` lists the registry's pending framework steps from the system ledger.
@@ -1970,6 +2094,9 @@ tri_dialect_test! {
         migrate_applies_app_folders,
         migrate_leaves_a_read_only_app_folder_alone,
         dry_run_and_target_see_app_folders,
+        migrate_target_runs_the_projects_registry_chain,
+        the_system_chain_runs_once_per_database,
+        a_failing_app_folder_is_named,
         check_names_pending_registry_system_steps,
         ignored_tenancy_flags_are_refused,
         org_path_prefix_is_indexed,

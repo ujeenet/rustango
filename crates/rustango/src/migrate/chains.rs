@@ -86,7 +86,18 @@ where
         };
         // Boxed: inline, these futures overflow the stack of deep `manage` callers.
         let first = Box::pin(run.system_pass(&tables.pending)).await?;
-        let project = Box::pin(project(held)).await?;
+        let project = match Box::pin(project(held)).await {
+            Ok(applied) => applied,
+            Err(e) if first.applied.is_empty() => return Err(e),
+            // The report would say nothing ran; the system steps did.
+            Err(e) => {
+                let names: Vec<&str> = first.applied.iter().map(|m| m.name.as_str()).collect();
+                return Err(MigrateError::Validation(format!(
+                    "{e}; the system chain applied before it: {}",
+                    names.join(", ")
+                )));
+            }
+        };
         let second = Box::pin(run.system_pass(&BTreeSet::new())).await?;
         if let Some(table) = second.waiting {
             return Err(MigrateError::Validation(format!(
